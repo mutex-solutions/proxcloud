@@ -24,9 +24,9 @@ class CommentTests(unittest.TestCase):
         self.root = Path(self.temp.name)
 
     def fixture(self, target="filesystem", vulns=(), source=SHA, age=0):
-        artifact = "template-images" if target.startswith("template/") else target
+        artifact = "base-images" if target.startswith("base/") else ("template-images" if target.startswith("template/") else target)
         base = self.root / f"security-{artifact}-{SHA}"
-        folder = base / "templates" / target.split("/")[1] if artifact == "template-images" else base
+        folder = base / ("bases" if artifact == "base-images" else "templates") / target.split("/")[1] if artifact in ("base-images", "template-images") else base
         folder.mkdir(parents=True, exist_ok=True)
         (base / "source-sha.txt").write_text(source + "\n")
         stamp = (NOW - timedelta(hours=age)).isoformat()
@@ -52,11 +52,12 @@ class CommentTests(unittest.TestCase):
         self.assertIn("INVALID evidence", self.render())
 
     def test_all_outputs_and_nested_template_paths(self):
-        for name in (*R.PRODUCTS, *("template/" + n for n in R.TEMPLATES)):
+        for name in (*R.PRODUCTS, *("template/" + n for n in R.TEMPLATES), *("base/" + n for n in R.BASES)):
             self.fixture(name)
         body = self.render()
-        self.assertIn("Coverage: 18/18", body)
+        self.assertIn("Coverage: 31/31", body)
         self.assertIn("| template/gemini | 0 | 0", body)
+        self.assertIn("| base/external-python | 0 | 0", body)
         self.assertNotIn("all-clear for the whole supply chain.\n0", body)
 
     def test_dedup_and_critical_first_deterministic(self):

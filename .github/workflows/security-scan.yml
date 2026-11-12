@@ -3,8 +3,9 @@ name: security-scan
 # Inventory and gate the exact PR head (not GitHub's synthetic merge commit).
 # Builds are disposable, local-only hosted-runner images: no login, push, PVE,
 # VM build, deployment, secrets, or persistent/self-hosted runner access.
-# Covers lockfiles, six product finals and eleven non-GPU template outputs.
-# Builder-stage bases, external Python image and GPU image remain unscanned.
+# Covers lockfiles, six product finals, eleven non-GPU template outputs and
+# thirteen deduplicated upstream bases (registry blobs only, no base execution).
+# GPU/CUDA remains SOURCE_ONLY/HOLD; raw bases are not final package evidence.
 on:
   pull_request:
     branches: [main]
@@ -258,10 +259,77 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
+  base-images:
+    name: base-images
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Record source and test fixed base registry scanner
+        run: |
+          set -euo pipefail
+          mkdir -p result tools
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          printf 'TRIVY_CACHE_DIR=%s/security-scan-cache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf '%s\n' "$SOURCE_SHA" > result/source-sha.txt
+          printf '%s\n' "$TRIVY_SHA256" > result/trivy-sha256.txt
+          python3 -m unittest discover -s .github/scripts/tests -p test_base_scan.py -v
+
+      - name: Set up Buildx for registry manifest inspection only
+        uses: docker/setup-buildx-action@v4
+        with:
+          driver: docker
+
+      - name: Download and verify official Trivy release before extracting binary
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --retry 3 \
+            --proto '=https' --proto-redir '=https' \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+            --output tools/trivy.tar.gz
+          test "$(stat -c %s tools/trivy.tar.gz)" = 52714130
+          printf '%s  %s\n' "$TRIVY_SHA256" tools/trivy.tar.gz | sha256sum --check --strict
+          tar xzf tools/trivy.tar.gz -C tools trivy
+          tools/trivy --version > result/trivy-version.txt
+
+      - name: Download fresh vulnerability database
+        run: |
+          set -euo pipefail
+          tools/trivy image --config '' --ignorefile '' --disable-telemetry \
+            --skip-version-check --download-db-only
+          cp "$TRIVY_CACHE_DIR/db/metadata.json" result/db-metadata.json
+          python3 .github/scripts/check_scan_report.py --db-metadata result/db-metadata.json
+
+      - name: Resolve and scan thirteen upstream linux amd64 bases without execution
+        run: |
+          set -euo pipefail
+          # Fixed source allowlist; immutable platform refs, no pull/run/build/login/push.
+          # Raw base HIGH/CRITICAL (even unfixed) block; no final-image attribution.
+          python3 .github/scripts/scan_base_images.py
+
+      - name: Preserve base reports and provenance even on failure
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: security-base-images-${{ github.event.pull_request.head.sha || github.sha }}
+          path: result/
+          if-no-files-found: error
+          retention-days: 3
+
   security-gate:
     name: security-gate
     if: always()
-    needs: [scan, template-images]
+    needs: [scan, template-images, base-images]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -269,18 +337,19 @@ jobs:
         env:
           SCAN_RESULT: ${{ needs.scan.result }}
           TEMPLATE_RESULT: ${{ needs.template-images.result }}
+          BASE_RESULT: ${{ needs.base-images.result }}
         run: |
           set -euo pipefail
-          if [ "$SCAN_RESULT" != success ] || [ "$TEMPLATE_RESULT" != success ]; then
+          if [ "$SCAN_RESULT" != success ] || [ "$TEMPLATE_RESULT" != success ] || [ "$BASE_RESULT" != success ]; then
             echo 'Security gate blocked: a scan failed, was cancelled, or was skipped.'
             exit 1
           fi
-          echo 'Filesystem, six product finals and eleven non-GPU template scans passed.'
+          echo 'Filesystem, six product finals, eleven non-GPU templates and thirteen upstream base scans passed.'
 
   render-comment:
     name: security-summary
     if: always() && github.event_name == 'pull_request'
-    needs: [scan, template-images, security-gate]
+    needs: [scan, template-images, base-images, security-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -300,13 +369,13 @@ jobs:
           script: |
             const sha = context.payload.pull_request.head.sha;
             if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error('Invalid source SHA');
-            const targets = ['filesystem', 'api', 'web-client', 'web-admin', 'sandbox-proxy', 'sandbox-runtime', 'sandbox-import', 'template-images'];
+            const targets = ['filesystem', 'api', 'web-client', 'web-admin', 'sandbox-proxy', 'sandbox-runtime', 'sandbox-import', 'template-images', 'base-images'];
             const expected = new Set(targets.map(n => `security-${n}-${sha}`));
             const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
               ...context.repo, run_id: context.runId, per_page: 100
             });
             const selected = artifacts.filter(a => expected.has(a.name) && !a.expired);
-            if (selected.length > 8 || new Set(selected.map(a => a.name)).size !== selected.length) throw new Error('Duplicate report artifacts');
+            if (selected.length > 9 || new Set(selected.map(a => a.name)).size !== selected.length) throw new Error('Duplicate report artifacts');
             if (selected.some(a => a.size_in_bytes > 128 * 1024 * 1024) || selected.reduce((n, a) => n + a.size_in_bytes, 0) > 512 * 1024 * 1024) throw new Error('Report archive byte budget');
             core.setOutput('ids', selected.map(a => String(a.id)).join(','));
             core.setOutput('count', String(selected.length));
@@ -321,6 +390,7 @@ jobs:
         env:
           SCAN_RESULT: ${{ needs.scan.result }}
           TEMPLATE_RESULT: ${{ needs.template-images.result }}
+          BASE_RESULT: ${{ needs.base-images.result }}
           GATE_RESULT: ${{ needs.security-gate.result }}
         run: |
           set -euo pipefail
@@ -331,7 +401,7 @@ jobs:
             --reports-dir scan-reports --source-sha "$SOURCE_SHA" \
             --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
             --scan-result "$SCAN_RESULT" --template-result "$TEMPLATE_RESULT" \
-            --gate-result "$GATE_RESULT" --output "$RUNNER_TEMP/security-comment.md"
+            --gate-result "$GATE_RESULT" --base-result "$BASE_RESULT" --output "$RUNNER_TEMP/security-comment.md"
           python3 - <<'PYCODE'
           from pathlib import Path
           import os, secrets
@@ -345,7 +415,7 @@ jobs:
   comment:
     name: security-comment
     if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-    needs: [scan, template-images, security-gate, render-comment]
+    needs: [scan, template-images, base-images, security-gate, render-comment]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -358,6 +428,7 @@ jobs:
         env:
           SCAN_RESULT: ${{ needs.scan.result }}
           TEMPLATE_RESULT: ${{ needs.template-images.result }}
+          BASE_RESULT: ${{ needs.base-images.result }}
           GATE_RESULT: ${{ needs.security-gate.result }}
           REPORT_BODY: ${{ needs.render-comment.outputs.body }}
         with:
@@ -376,8 +447,9 @@ jobs:
             const scan = process.env.SCAN_RESULT;
             const gate = process.env.GATE_RESULT;
             const templates = process.env.TEMPLATE_RESULT;
-            if (!states.has(scan) || !states.has(templates) || !states.has(gate)) throw new Error('Unknown scan/template/gate state');
-            const names = ['filesystem', 'api', 'web-client', 'web-admin', 'sandbox-proxy', 'sandbox-runtime', 'sandbox-import', 'template-images'];
+            const bases = process.env.BASE_RESULT;
+            if (!states.has(scan) || !states.has(templates) || !states.has(bases) || !states.has(gate)) throw new Error('Unknown scan/template/base/gate state');
+            const names = ['filesystem', 'api', 'web-client', 'web-admin', 'sandbox-proxy', 'sandbox-runtime', 'sandbox-import', 'template-images', 'base-images'];
             const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
               owner, repo, run_id: context.runId, per_page: 100
             });
@@ -387,10 +459,10 @@ jobs:
             const status = gate === 'success' ? 'PASS' : 'BLOCKED / INCOMPLETE';
             const fallback = [marker, `## Security scan: ${status}`, '',
               `Source commit: \`${sha}\``,
-              `Scan matrix result: **${scan}**; template-images result: **${templates}**; required gate: **${gate}**.`, '',
+              `Scan matrix result: **${scan}**; template-images result: **${templates}**; base-images result: **${bases}**; required gate: **${gate}**.`,  '',
               'Policy: any HIGH or CRITICAL vulnerability (including unfixed) fails the gate. Scanner errors, stale DB, malformed or missing reports also fail.', '',
               `[Open this run and its report artifacts](${url})`, '', coverage, '',
-              'Coverage: source lockfiles, six product final images and eleven locally built non-GPU template outputs. Builder-stage bases, the external Python image and the GPU image remain unscanned pending separate registry/blob scans.',
+              'Coverage jobs: source lockfiles, six product final images, eleven locally built non-GPU template outputs and thirteen upstream bases (including builder/donor/external Python inputs), registry blobs only. Raw base findings are not final installed-package evidence. GPU/CUDA remains SOURCE_ONLY/HOLD. When detailed rendering is unavailable, base details remain in the base-images artifact.',
               'Counts, package versions and advisory details are in the JSON reports. This comment reports overall job status; it does not invent counts or claim zero vulnerabilities outside that coverage.'
             ].join('\n');
             const decorated = process.env.REPORT_BODY || '';

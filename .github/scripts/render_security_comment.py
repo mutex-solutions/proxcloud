@@ -20,6 +20,7 @@ from check_scan_report import validate_db, validate_report
 
 PRODUCTS = ("filesystem", "api", "web-client", "web-admin", "sandbox-proxy", "sandbox-runtime", "sandbox-import")
 TEMPLATES = ("base", "mcp-gateway", "code-interpreter", "node", "browser", "desktop", "codex", "opencode", "claude", "amp", "gemini")
+BASES = ("go-builder", "web-builder", "web-runtime", "alpine-runtime-donor", "proxy-distroless", "import-distroless", "template-e2b-base", "template-cpu-python", "template-node", "template-desktop-ubuntu", "template-playwright-python", "mcp-node-donor", "external-python")
 STATES = ("success", "failure", "cancelled", "skipped")
 LIMIT = 55000
 
@@ -85,7 +86,7 @@ class Evidence:
                 raise ValueError("evidence size/type invalid")
             self.files += int(document)
             self.total += info.st_size
-            if self.files > 30 or self.total > 256 * 1024 * 1024:
+            if self.files > 48 or self.total > 512 * 1024 * 1024:
                 raise ValueError("evidence budget exceeded")
             raw = handle.read(ceiling + 1)
         if len(raw) > ceiling:
@@ -104,15 +105,17 @@ class Evidence:
         return json.loads(self.read(relative, True), object_pairs_hook=unique)
 
 
-def render(reports_dir, source_sha, run_url, scan_result, template_result, gate_result, now=None):
+def render(reports_dir, source_sha, run_url, scan_result, template_result, gate_result, now=None, base_result="skipped"):
     if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
         raise ValueError("invalid source SHA")
     if not re.fullmatch(r"https://github\.com/[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+/actions/runs/[0-9]+", run_url) or any(p in (".", "..") for p in urlsplit(run_url).path.split("/")):
         raise ValueError("invalid GitHub run URL")
-    if any(s not in STATES for s in (scan_result, template_result, gate_result)):
+    if any(s not in STATES for s in (scan_result, template_result, gate_result, base_result)):
         raise ValueError("invalid job result")
     evidence, rows, findings = Evidence(reports_dir), [], {}
-    targets = [(n, n, "") for n in PRODUCTS] + [("template/" + n, "template-images", "templates/" + n + "/") for n in TEMPLATES]
+    targets = ([(n, n, "") for n in PRODUCTS]
+               + [("template/" + n, "template-images", "templates/" + n + "/") for n in TEMPLATES]
+               + [("base/" + n, "base-images", "bases/" + n + "/") for n in BASES])
     for target, artifact, nested in targets:
         base = f"security-{artifact}-{source_sha}/"
         try:
@@ -151,11 +154,11 @@ def render(reports_dir, source_sha, run_url, scan_result, template_result, gate_
     repo_url = run_url.split("/actions/runs/")[0]
     status = "✅ Required gate accepted" if gate_result == "success" else "⛔ BLOCKED / INCOMPLETE"
     lines = ["<!-- proxcloud-security-scan-v1 -->", "## 🛡️ Security scan · " + status, "",
-             f"**🔴 Critical: {critical} · 🟠 High: {len(findings) - critical} · Coverage: {valid}/18 outputs**", "",
+             f"**🔴 Critical: {critical} · 🟠 High: {len(findings) - critical} · Coverage: {valid}/31 targets**", "",
              f"Source: [`{source_sha[:12]}`]({repo_url}/commit/{source_sha}) · [Workflow run & full JSON reports]({run_url})",
-             f"Jobs: scan **{scan_result}** · templates **{template_result}** · required gate **{gate_result}**", "",
+             f"Jobs: scan **{scan_result}** · templates **{template_result}** · upstream bases **{base_result}** · required gate **{gate_result}**", "",
              "**Policy:** every HIGH/CRITICAL package finding blocks, including unfixed findings; no ignores. Missing/invalid reports, stale DB and scanner failures block the required gate.",
-             "Counts are deduplicated package findings (advisory + package + installed version per output), not unique CVEs or repeated binary occurrences. Totals cover only valid evidence below; N/A never means zero.", "",
+             "Counts are deduplicated package findings (advisory + package + installed version per target), not unique CVEs or repeated binary occurrences. The same dependency inherited by multiple targets is counted in each target. Totals cover only valid evidence below; N/A never means zero.", "",
              "| Source / target | 🔴 Critical | 🟠 High | Fix available / no fix | Evidence status |", "|---|---:|---:|---:|---|", *rows, "",
              "Evidence parsing is not gate validation: no per-report scanner exit status is inferred, and no scope/engine/DB-policy completeness is asserted by this comment. The required security-gate result above is authoritative.", "",
              "### Package findings (Critical first)"]
@@ -172,7 +175,7 @@ def render(reports_dir, source_sha, run_url, scan_result, template_result, gate_
     if shown > 80:
         lines += ["", "</details>"]
     lines += ["", f"Showing {shown}/{len(ordered)} package findings; {len(ordered) - shown} omitted. Full JSON reports remain available from the workflow run.", "",
-              "Coverage: source lockfiles + six product final images + eleven non-GPU template outputs. Excludes builder-stage bases, the external Python image and GPU images. This is not an all-clear for the whole supply chain."]
+              "Coverage: source lockfiles + six product final images + eleven non-GPU template outputs + thirteen upstream/builder/donor/external-Python registry targets. Raw base findings are not automatically shipped-final vulnerabilities; keep their role/target separate. GPU/CUDA image remains deferred, and this is not an all-clear for the whole supply chain."]
     return "\n".join(lines) + "\n"
 
 
@@ -180,7 +183,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("reports-dir", "source-sha", "run-url", "output"):
         parser.add_argument("--" + name, required=True)
-    for name in ("scan-result", "template-result", "gate-result"):
+    for name in ("scan-result", "template-result", "gate-result", "base-result"):
         parser.add_argument("--" + name, required=True, choices=STATES)
     args = vars(parser.parse_args(argv))
     output = args.pop("output")
