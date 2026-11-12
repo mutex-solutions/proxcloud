@@ -25,6 +25,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/rbac"
 	"github.com/mutex-solutions/proxcloud/internal/platform/sso"
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
+	"github.com/mutex-solutions/proxcloud/internal/templateupdates"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 	"github.com/mutex-solutions/proxcloud/pkg/textcrypt"
 )
@@ -100,6 +101,12 @@ type Handler struct {
 	durableStore         *durablejobs.Store
 	durableHistory       *durablejobs.History
 	durableValidate      func(*durablejobs.Job) error
+	// templateUpdates is the GHCR template update service (SetTemplateUpdates; nil → 503).
+	templateUpdates *templateupdates.Service
+	// githubOptions overrides the GitHub endpoints for the integration token check (tests only).
+	githubOptions templateupdates.Options
+	// githubCountFn overrides the GitHub integration count (tests only; nil = the repository).
+	githubCountFn func(ctx context.Context) (int64, error)
 }
 
 // SetHmacEncryptor wires the data-at-rest key for hmac key secrets.
@@ -184,6 +191,8 @@ func (h *Handler) Routes(r chi.Router) {
 		r.Get("/mail-outbox", h.mailOutboxOverview)
 		r.Get("/mail-outbox/{id}", h.mailOutboxStatus)
 		r.Get("/durable-jobs", h.durableStatus)
+		// GHCR template updates (templateupdates.go): discovery + VM import jobs.
+		h.routeTemplateUpdates(r)
 		r.Post("/durable-jobs/{id}/replay", h.durableReplay)
 		r.Get("/flavor-categories", h.flavorCategories)
 		r.Get("/flavor-categories/{id}", h.rawByID("admin:flavor_category:manage", "flavorCategory", "id",

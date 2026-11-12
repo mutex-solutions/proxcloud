@@ -10,7 +10,10 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/mutex-solutions/proxcloud/internal/durablejobs"
+	"github.com/mutex-solutions/proxcloud/internal/templateupdates"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
@@ -38,12 +41,40 @@ func (h *Handler) durableStatus(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, stats)
 }
 func (h *Handler) durableReplay(w http.ResponseWriter, r *http.Request) {
-	if !h.require(w, r, "admin:bill:manage") {
+	if h.durableStore == nil {
+		if h.require(w, r, "admin:bill:manage") {
+			httpx.Err(w, 503, 503, "Durable jobs are not configured")
+		}
 		return
 	}
-	if h.durableStore == nil {
-		httpx.Err(w, 503, 503, "Durable jobs are not configured")
+	// The permission follows the job's kind: a template update (Proxmox effects) needs
+	// admin:service:manage, not the billing key. Only a definite "no such job" falls back to the
+	// billing key; a lookup error fails closed so a billing admin can never replay an external job.
+	perm := "admin:bill:manage"
+	external, err := h.adminRequiresServiceManage(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		if h.require(w, r, "admin:bill:manage") {
+			httpx.Err(w, 503, 503, "Durable job replay failed")
+		}
 		return
+	}
+	if external {
+		perm = templateUpdatesManagePerm
+	}
+	if !h.require(w, r, perm) {
+		return
+	}
+	// A failed/finished template update is a no-op on replay: refuse clearly instead.
+	if external && h.templateUpdates != nil {
+		rec, err := h.templateUpdates.Receipts.Load(r.Context(), chi.URLParam(r, "id"))
+		if err != nil {
+			httpx.Err(w, 503, 503, "Durable job replay failed")
+			return
+		}
+		if err := templateupdates.ReplayableReceipt(rec); err != nil {
+			httpx.Err(w, 409, 409, err.Error())
+			return
+		}
 	}
 	var req struct {
 		Reason string `json:"reason"`
@@ -60,7 +91,7 @@ func (h *Handler) durableReplay(w http.ResponseWriter, r *http.Request) {
 	if actor == "" {
 		actor = rc.SigV4KeyID
 	}
-	err := h.durableStore.Replay(r.Context(), chi.URLParam(r, "id"), actor, req.Reason, h.durableValidate)
+	err = h.durableStore.Replay(r.Context(), chi.URLParam(r, "id"), actor, req.Reason, h.durableValidate)
 	if errors.Is(err, durablejobs.ErrReplay) {
 		httpx.Err(w, 409, 409, "Only a dead, validated known job can be replayed; provide an 8..500 character reason")
 		return
@@ -70,4 +101,25 @@ func (h *Handler) durableReplay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.OK(w, map[string]any{"id": chi.URLParam(r, "id"), "state": "pending"})
+}
+
+// adminRequiresServiceManage reports whether replaying job id needs admin:service:manage (an
+// external-effect kind such as a template update) instead of the billing key. A missing job
+// (or a malformed id, which Replay refuses anyway) is (false, nil); any other lookup error is
+// returned so the caller fails closed.
+func (h *Handler) adminRequiresServiceManage(ctx context.Context, id string) (bool, error) {
+	if h.durableStore == nil {
+		return false, nil
+	}
+	if _, err := uuid.Parse(id); err != nil {
+		return false, nil
+	}
+	j, err := h.durableStore.Get(ctx, id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return j != nil && durablejobs.External(j.Kind), nil
 }

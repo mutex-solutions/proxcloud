@@ -1,0 +1,37 @@
+{
+  "arch": "amd64",
+  "build_version": "20261112010203",
+  "clean_export_receipt": {
+    "checks": {
+      "cleaned_copy_only": true,
+      "no_backing_file": true,
+      "no_build_credentials_or_lab_network": true,
+      "offline_sanitization": true,
+      "qemu_img_check": true,
+      "zero_free_space": true
+    },
+    "disk_bytes": 1027,
+    "disk_sha256": "3e9458b625f97b2d897063b255a63bfb2abfa23a3caa4a0c0e7211d3e27db6d4",
+    "kind": "CleanExportReceipt",
+    "request_sha256": "8b4712b37bc7b44679ca2b6eb15189f78b86967a3c8f92f77e55165c7f42ea7b",
+    "run_ref": "https://github.com/mutex-solutions/proxcloud/actions/runs/123",
+    "source_commit": "cccccccccccccccccccccccccccccccccccccccc",
+    "source_identity": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "virtual_size_bytes": 21474836480
+  },
+  "disk": {
+    "bytes": 1027,
+    "filename": "disk.qcow2",
+    "format": "qcow2",
+    "sha256": "3e9458b625f97b2d897063b255a63bfb2abfa23a3caa4a0c0e7211d3e27db6d4",
+    "virtual_size_bytes": 21474836480
+  },
+  "image_tag": "ubuntu-2604-k8s-1.35.10-20261112010203-cccccccccccc",
+  "kind": "vm-template",
+  "kubernetes_version": "1.35.10",
+  "os": "ubuntu-2604",
+  "schema_version": 1,
+  "source_commit": "cccccccccccccccccccccccccccccccccccccccc",
+  "upstream_checksum": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "variant": "kubernetes"
+}

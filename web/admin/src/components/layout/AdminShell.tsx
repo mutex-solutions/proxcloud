@@ -2,7 +2,7 @@ import { NavLink, Outlet, useLocation } from "react-router-dom"
 import {
   Banknote, Blocks, BookOpen, Building2, Check, CheckSquare, Cloud, CreditCard, FileClock, FileText,
   FolderKanban, Gauge, KeyRound, LayoutDashboard, LogOut, Mail, Menu as MenuIcon,
-  Monitor, Moon, Percent, PiggyBank, Receipt, Search as SearchIcon, Server, Settings2, Shield, Sun, Tag, Users, Wallet,
+  Monitor, Moon, PackageCheck, Percent, PiggyBank, Receipt, Search as SearchIcon, Server, Settings2, Shield, Sun, Tag, Users, Wallet,
 } from "lucide-react"
 import { useEffect, useState } from "react"
 import { useAdminMe, useAuth } from "@/lib/auth"
@@ -67,6 +67,7 @@ const groups: Group[] = [
       { to: "/system/catalog", label: "Instances", icon: Blocks, permission: "admin:flavor_category:manage" },
       { to: "/system/pve-flavors", label: "Flavors (Proxmox)", icon: Blocks, permission: "admin:service:read" },
       { to: "/system/cloud-providers", label: "Cloud providers", icon: Cloud, permission: "admin:service:read" },
+      { to: "/system/template-updates", label: "Template updates", icon: PackageCheck, permission: "admin:service:read" },
       { to: "/system/savings-plans", label: "Savings plans", icon: PiggyBank, permission: "admin:savings_plan:read" },
       { to: "/system/promotions", label: "Promotion codes", icon: Gauge, permission: "admin:promotional_credit:manage" },
       { to: "/system/integrations", label: "Integrations", icon: Settings2, permission: "admin:integration:read" },

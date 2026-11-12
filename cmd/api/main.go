@@ -72,6 +72,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
 	"github.com/mutex-solutions/proxcloud/internal/registrypins"
 	"github.com/mutex-solutions/proxcloud/internal/server"
+	"github.com/mutex-solutions/proxcloud/internal/templateupdates"
 	"github.com/mutex-solutions/proxcloud/pkg/auth"
 	"github.com/mutex-solutions/proxcloud/pkg/certfile"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
@@ -902,7 +903,73 @@ func run() error {
 	workerDone := make(chan struct{})
 	go func() { defer close(workerDone); _ = worker.Run(workerCtx) }()
 	defer func() { stopWorker(); <-workerDone }()
-	adminH.SetDurableJobs(jobStore, jobHistory, chargefanout.Validate)
+	adminH.SetDurableJobs(jobStore, jobHistory, func(j *durablejobs.Job) error {
+		if j.Kind == durablejobs.TemplateUpdateVM {
+			_, err := templateupdates.DecodeVMPayload(j.Payload)
+			return err
+		}
+		return chargefanout.Validate(j)
+	})
+	// GHCR template updates (docs/template-updates.md): discovery always; the VM import runner only
+	// when PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true. Every GitHub call uses the GitHub
+	// integration's token (decrypted per call, never logged).
+	tuRepo := admin.NewRepo(pg)
+	tuSvc := &templateupdates.Service{
+		Token: func(ctx context.Context) (string, string, error) {
+			return tuRepo.GitHubToken(ctx, func(v any) any { return enc.DecryptObject(v) })
+		},
+		Jobs: jobStore, DB: pg, Receipts: templateupdates.PGReceipts{DB: pg}, VMEnabled: cfg.Jobs.TemplateUpdatesVM,
+	}
+	// Create the receipt table up front: EnqueueVM reads it inside its transaction (no auto-create there).
+	if err := tuSvc.Receipts.Ensure(ctx); err != nil {
+		return fmt.Errorf("template update store: %w", err)
+	}
+	adminH.SetTemplateUpdates(tuSvc)
+	if cfg.Jobs.TemplateUpdatesVM {
+		tuReceipts := templateupdates.PGReceipts{DB: pg}
+		tuRunner := &templateupdates.Runner{
+			Store: jobStore, Receipts: tuReceipts, Lease: cfg.Jobs.LeaseDuration, Log: log,
+			// One upload per (provider, node, import storage) across API replicas: a session advisory
+			// lock held for the whole upload. (Customer image import's pve.Service.HolderLock stays
+			// unwired in cmd/api — pre-existing; see docs/template-updates.md.)
+			UploadLock: func(ctx context.Context, key string) (func(), bool, error) {
+				return pg.TryAdvisoryLock(ctx, key)
+			},
+			Dead: tuReceipts.DeadUncleaned, ClaimDead: jobStore.ClaimDead,
+			// Cleanup needs PVE only: it must work even when the GitHub integration is gone.
+			BuildCleanup: func(ctx context.Context, p templateupdates.VMPayload) (*templateupdates.Executor, error) {
+				es, err := esSvc.Get(ctx, p.ServiceID)
+				if err != nil || es == nil || !es.IsProxmox() {
+					return nil, &templateupdates.Permanent{Code: "provider_missing", Message: "the target Proxmox provider no longer exists"}
+				}
+				ps, err := pveWithHolderLock(es)
+				if err != nil {
+					return nil, err
+				}
+				return &templateupdates.Executor{PVE: ps.C, Receipts: tuReceipts, HeadroomPct: es.PVEStorageHeadroomPct()}, nil
+			},
+			Build: func(ctx context.Context, p templateupdates.VMPayload) (*templateupdates.Executor, error) {
+				es, err := esSvc.Get(ctx, p.ServiceID)
+				if err != nil || es == nil || !es.IsProxmox() {
+					return nil, &templateupdates.Permanent{Code: "provider_missing", Message: "the target Proxmox provider no longer exists"}
+				}
+				ps, err := pveWithHolderLock(es)
+				if err != nil {
+					return nil, err
+				}
+				gh, err := tuSvc.Client(ctx)
+				if err != nil {
+					return nil, err
+				}
+				return &templateupdates.Executor{PVE: ps.C, Blobs: gh, Receipts: templateupdates.PGReceipts{DB: pg}, HeadroomPct: es.PVEStorageHeadroomPct(), UploadLock: ps.LockImportUpload}, nil
+			},
+		}
+		tuCtx, stopTU := context.WithCancel(ctx)
+		tuDone := make(chan struct{})
+		go func() { defer close(tuDone); tuRunner.Run(tuCtx) }()
+		defer func() { stopTU(); <-tuDone }()
+		log.Warn("template updates: VM import runner ENABLED")
+	}
 	if cfg.Jobs.SchedulerEnabled {
 		log.Warn("scheduled jobs ENABLED (charge cron + cloud metrics) — bills will be charged on a timer")
 		sched.Start()

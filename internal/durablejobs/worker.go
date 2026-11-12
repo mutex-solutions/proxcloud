@@ -37,7 +37,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 	kinds := make([]string, 0, len(w.Handlers))
 	for kind, handler := range w.Handlers {
-		if !known(kind) || handler == nil {
+		if !known(kind) || External(kind) || handler == nil {
 			return errors.New("invalid handler registration")
 		}
 		kinds = append(kinds, kind)

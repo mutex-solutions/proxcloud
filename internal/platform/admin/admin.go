@@ -287,6 +287,9 @@ var ThirdPartyCatalog = []ThirdPartyStats{
 	{"Stripe", []string{"Invoice", "Payment"}, false},
 	{"BankTransfer", []string{"Payment"}, false},
 	{"SMTP", []string{"Mail"}, false},
+	// GitHub holds the personal access token (classic, read:packages) every GitHub/GHCR call of
+	// the template updates uses (docs/template-updates.md). Write-only secret: {"token": "ghp_…"}.
+	{"GitHub", []string{"Packages"}, false},
 }
 
 // DefaultPlatformBranding reads the default platformConfiguration's branding (name/logo/faviconUrl)
