@@ -25,17 +25,23 @@ release a fix before any public disclosure.
 
 ## Supported versions
 
-ProxCloud is pre-release and under active development. There is currently no
-published tagged release or supported historical release line. Fixes land on
-`main`; evaluate a reviewed commit with successful checks, not an assumed
-`latest` image tag. The planned `v0.4.0` chart/BOM entry is not evidence that an
-artifact has been published.
+ProxCloud is under active development. `v0.4.0` is the first stable release line;
+its tag publishes the app images and chart. Fixes land on `main` first. There is no
+support SLA, and live installer and split/managed-service acceptance have not been
+performed for this release. Evaluate the exact tagged commit or a reviewed commit
+with successful checks, not an assumed `latest` image tag, and verify that the
+published artifacts are pullable before relying on them.
 
 | Version / source | Status |
 |------------------|--------|
+| `v0.4.0` | Current stable release; report issues against it; fixes land on `main` for a later release; no SLA |
 | Current `main` | Development fixes; no stable support/SLA promise |
-| Planned `v0.4.0` | Unpublished; release preparation and artifact-install acceptance pending |
+| `v0.4.0-rc.1` | Superseded prerelease; upgrade to `v0.4.0` |
 | Older / untagged downstream builds | No stated backport support; report the exact commit |
+
+Unfixed HIGH/CRITICAL findings in shipped images are tracked by the security-scan
+gate until **2026-12-12**, after which they block again; the GPU/CUDA template is
+not scanned.
 
 See [release readiness](docs/release-readiness.md) for validation limits.
 

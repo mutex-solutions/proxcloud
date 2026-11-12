@@ -1,11 +1,12 @@
 # Quick start
 
-**Release prerequisite:** broker-free deployment targets planned **v0.4.0**, not
-the older Rabbit-dependent API. Until it is explicitly published, use the source
-installer's default `images.build: true` or build/load known compatible images for
-Helm; the planned image/chart pin is not a published-release claim. Public `dev-<sha>`
-container images are development artifacts, not a versioned chart or an accepted
-clean install from a release.
+**Release prerequisite:** broker-free deployment targets the stable **v0.4.0**
+release, not the older Rabbit-dependent API. Its tag publishes the images and app
+chart; until you have verified them pullable, use the source installer's default
+`images.build: true` or build/load known compatible images for Helm. The image/chart
+pin alone is not proof of publication. Public `dev-<sha>` container images are
+development artifacts, not a versioned chart. Live installer and split-mode
+acceptance have not been performed for this release.
 
 **Validation boundary (2026-11-10):** Debian 13 and Ubuntu 24.04 OS template build,
 smoke and build-network cleanup passed on a PVE 9.2 development host using static
@@ -584,7 +585,7 @@ Versions are pinned in `installer/playbooks/group_vars/all/versions.yml`; every 
 | Network create answers 403, or Test connection lists missing `SDN.*` privileges, after an ACL was added by hand | A role on a child path (for example `/sdn/zones`) replaces what the parent grants that user or token | Grant `ProxCloudPlatform` on that same path too, then read the effective rights: `pveum user token permissions proxcloud@pve platform --path /sdn/zones` |
 | Stage 05 fails adding `nas-*`, or a node cannot mount it | The TrueNAS NFS share does not allow the PVE nodes, or squashes root | Allow the nodes' management subnet on each export in `nas.exports` and map root to root (PVE writes as root). Tenant shares are separate: [NAT and exports](cloud-integration.md#truenas-file-shares) |
 | Stage 55 stops on `sandbox.network.snat is required` or on the exit node | The sandbox needs its own egress address, placed on exactly one exit node over root SSH | Set `sandbox.network.snat` (or `node`), give the zone one exit node, put it in the inventory group `pve` |
-| Sandbox stages cannot pull `proxcloud-sandbox-proxy` or `proxcloud-sandbox-runtime` on an `images.build` site | Stage 35 builds only API/web/admin; sandbox stages default to the BOM release tag, which is still unpublished. Public development images exist, but that does not create the planned release tags | Pin `sandbox.proxy.image` and `sandbox.runtime_image` to exact compatible images/digests your nodes can pull; do not assume the unpublished BOM tag exists |
+| Sandbox stages cannot pull `proxcloud-sandbox-proxy` or `proxcloud-sandbox-runtime` on an `images.build` site | Stage 35 builds only API/web/admin; sandbox stages default to the BOM release tag (`v0.4.0`), which exists only after its tag's image workflow succeeds. Public development images do not create release tags | Pin `sandbox.proxy.image` and `sandbox.runtime_image` to exact compatible images/digests your nodes can pull; verify the BOM tag is pullable before relying on it |
 | Template build fails downloading the vendor image | No store with `import` content | Add `import` to a store's content, or set `templates.import_storage` |
 
 Still stuck: review the failed stage and migration gates before a verbose re-run, `make install INVENTORY=inventory/mysite ARGS=-v` (this can reconcile resources, not just read them),

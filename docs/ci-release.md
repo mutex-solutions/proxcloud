@@ -1,18 +1,20 @@
 # CI, template builds and release operations
 
 This page describes the checked-in workflows, not a guarantee that a release has
-already been published. As of **2026-11-11**, GHCR has public development images;
-ProxCloud has no versioned GitHub Release/tag or published OCI chart. The owner has
-authorized first app/chart release CI for `v0.4.0-rc.1`, installation from its
-released artifacts and later controlled PVE template canaries. This source change
-does none of those operations. Read [release readiness](release-readiness.md)
-before publication or evaluation.
+already been published. As of **2026-11-12**, GHCR has public development images
+and the `v0.4.0-rc.1` prerelease (tag 2026-11-11, images and app chart
+`0.4.0-rc.1`). The owner decided to release `v0.4.0` as the first stable release;
+pushing its tag runs the app image/chart publication and GitHub Release creation.
+This source change does none of those operations, and installation from released
+artifacts and later controlled PVE template canaries remain separate steps. Read
+[release readiness](release-readiness.md) before publication or evaluation.
 
 ## Workflow map
 
 | Workflow | Triggers | Effect / runner |
 |---|---|---|
 | `test.yml` | PRs targeting `main`; pushes to `main` | Hosted Go unit/integration tests, both SPA build/smoke tests, installer syntax/tests, credential-free Packer validation and offline image-pipeline tests, naming gates. Not triggered by release tags. |
+| `security-scan.yml` | PRs targeting `main`; pushes to `main` | Exact-head Trivy 0.76.2 scans of lockfiles, six local product images, eleven non-GPU template outputs, thirteen raw upstream bases (report-only) and a nondefault controlled-base prototype; required `security-gate` job and a PR summary comment. Nothing is pushed. Not triggered by release tags. |
 | `docker.yml` | PRs to `main`, `main` pushes, `v*` tags, manual dispatch | PRs build five images without pushing. Image-relevant `main` pushes publish `dev-<7-char-sha>`; docs/chart-only changes can skip. Tags publish exact image tags; manual dispatch pushes `dev-<sha>` or `dev-<suffix>`. Hosted runner. |
 | `helm.yml` | Chart-path PRs to `main`; app or managed-chart tags | PR lint/render only. App `v*` publishes `proxcloud`; `database-cluster-v*` and `proxmox-kamaji-cluster-v*` publish their independent charts. Hosted runner; no publication on ordinary merge. |
 | `sandbox-templates.yml` | Selected source pushes/PRs, schedule, manual dispatch | PR read-only build; trusted runs push built-in images, then `main` opens a digest-pin PR. Not cluster deployment. Hosted runner. |
@@ -38,10 +40,10 @@ actually published version/digest; source `main` image tags use `dev-<short-sha>
 No image is produced for some documentation/chart-only commits.
 
 The configured destination for app Helm publication is
-`oci://ghcr.io/mutex-solutions/charts`; no app chart has been published there yet.
+`oci://ghcr.io/mutex-solutions/charts` (it holds the `0.4.0-rc.1` prerelease chart).
 On an app release tag, the workflow sets chart version to the tag without `v` and
-appVersion to the full tag, matching the image tags. The prepared contract is app
-chart `0.4.0-rc.1`, appVersion/image tag and installer BOM `v0.4.0-rc.1`.
+appVersion to the full tag, matching the image tags. The release contract is app
+chart `0.4.0`, appVersion/image tag and installer BOM `v0.4.0`.
 Keep `images.build: true` until the exact chart and images are published and
 verified; use `false` explicitly for released-artifact evaluation after that.
 The installer's broker-free floor compares the SemVer **base** against `0.4.0`:
@@ -120,8 +122,9 @@ all-OS scheduled run when only one canary was approved.
 
 The workflows currently **do not** provide a single atomic release gate:
 
-- Docker publication and `test.yml` are independent. Tag pushes do not run the
-  test workflow. Choose an exact commit whose tests completed successfully.
+- Docker publication, `test.yml` and `security-scan.yml` are independent. Tag
+  pushes run neither tests nor scans. Choose an exact commit whose tests and
+  security gate completed successfully.
 - GitHub Release creation waits for all five image builds, but not for the
   separate Helm publication workflow. Verify both before telling users to install.
 - The Release job validates the tag from the environment with the stdlib
@@ -134,10 +137,11 @@ The workflows currently **do not** provide a single atomic release gate:
 - No workflow automatically installs/upgrades a production site. Publication is
   not deployment, acceptance, backup verification or rollback readiness.
 
-Owner authorization permits the first preview publication, but does not replace
-exact-commit checks or evidence. A `v*` tag triggers the app Docker and Helm
-workflows, not either PVE template workflow. Keep later template canaries on their
-separately reviewed branch/run path; do not change credentials, secrets or runner
-routing as part of the app release. Routine docs updates must not create tags.
-For the first preview, use the checklist in
-[release readiness](release-readiness.md#minimum-gate-before-a-first-previewrc).
+The owner's stable `v0.4.0` decision does not replace exact-commit checks or
+evidence, and it does not claim live installer or split/managed-service acceptance.
+A `v*` tag triggers the app Docker and Helm workflows, not either PVE template
+workflow, the sandbox template build or VM image publication. Keep later template
+canaries on their separately reviewed branch/run path; do not change credentials,
+secrets or runner routing as part of the app release. Routine docs updates must
+not create tags. Use the checklist in
+[release readiness](release-readiness.md#minimum-gate-for-a-release).

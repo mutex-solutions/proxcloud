@@ -14,15 +14,16 @@ The stages are designed for convergent re-runs, but `make install` is **not** a 
 
 **Back up `inventory/mysite/generated/`.** It holds the encryption key, database passwords and Proxmox token secrets. The encryption key cannot be recovered, and without it the stored provider secrets are lost. The directory is gitignored.
 
-The broker-free chart/API are planned as **v0.4.0, unpublished until separately
-approved**. Use `images.build: true` (default) from a checkout containing the new
-core, or pin a published compatible release once available. `images.build: false`
-with an older Rabbit-dependent release is refused before stage 40 writes secrets;
-the planned pin is not a claim that images/packages already exist. No Git tag or
-release publication is performed by the installer. Public development container
-images do not establish a public chart/release pin or a clean `images.build: false`
-install. That artifact-based install still needs separate acceptance before a
-release is advertised as installable.
+The BOM pins the broker-free chart/API at the first stable release **v0.4.0**;
+its tag publishes the images and app chart. Use `images.build: true` (default) from
+a checkout containing the new core, or set `images.build: false` once you have
+verified the `v0.4.0` chart and images are pullable from your site.
+`images.build: false` with an older Rabbit-dependent release is refused before
+stage 40 writes secrets; the pin itself is not proof that images/packages exist.
+No Git tag or release publication is performed by the installer. Public development
+container images do not establish a public chart/release pin. A clean
+`images.build: false` install from the released artifacts, and live installer
+acceptance, have not been performed for this release.
 
 **Current evidence (2026-11-10):** Debian 13 and Ubuntu 24.04 OS-template canaries
 completed build, smoke and build-network cleanup on a development PVE 9.2 host.
@@ -334,7 +335,7 @@ that reads its own images and the built-in ones only ([managed-sandbox.md §6](m
 The registry sync invokes `sandbox-proxy registry-users`, so its image must contain that subcommand; an
 older incompatible image stops with "unknown subcommand". The Docker workflow now builds five images, including
 `proxcloud-sandbox-proxy` and `proxcloud-sandbox-runtime`, and development tags are public. **Stage 35 still builds
-only API/web/admin**, and the BOM selects the first preview `v0.4.0-rc.1`; this source pin does not prove publication. On a source-build site,
+only API/web/admin**, and the BOM selects the stable release `v0.4.0`; this source pin does not prove its sandbox images were published or are pullable. On a source-build site,
 explicitly pin `sandbox.proxy.image` and `sandbox.runtime_image` to compatible, pullable development tags or digests;
 do not assume `<images.registry>/…:<release>` exists. A complete split/sandbox installation from coordinated public
 release artifacts has not been accepted yet.

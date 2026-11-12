@@ -38,10 +38,13 @@ capabilities to AI agents.
 - **API** (Go) — one backend serving three surfaces: the customer API, the SigV4-signed operator API, and an MCP endpoint.
 
 > [!WARNING]
-> **Development / preview status.** No versioned ProxCloud release is published yet.
-> The installer targets **Proxmox VE 9.2 or newer** and requires its documented
-> firewall/storage prerequisites; this is a minimum, not a tested compatibility
-> promise for every later PVE version. Debian and Ubuntu OS template pipelines have
+> **Release status.** `v0.4.0` is the first stable ProxCloud release; its tag publishes
+> the images and app chart (`v0.4.0-rc.1` was a prerelease). Stable is not full
+> acceptance: live installer and split/managed-service acceptance have not been
+> performed, the scheduler is off by default, and production mail delivery and
+> saved sandbox lifecycle remain held. The installer targets **Proxmox VE 9.2 or
+> newer** and requires its documented firewall/storage prerequisites; this is a
+> minimum, not a tested compatibility promise for every later PVE version. Debian and Ubuntu OS template pipelines have
 > passed controlled build/smoke runs; the Kubernetes static ISO path still needs a
 > real installer/reboot canary. See [current support and release readiness](docs/release-readiness.md).
 
@@ -112,10 +115,11 @@ before upgrading; mail durability is a separate follow-up.
 
 ## 🚀 Quickstart
 
-Broker-free defaults target the **v0.4.0-rc.1** API/chart preview. Publication is
-authorized, but until its image and chart artifacts are verified pullable, build
-from a checkout containing the PostgreSQL job engine (installer `images.build: true`) or pin known compatible new images;
-do not use the older Rabbit-dependent API with these defaults.
+Broker-free defaults target the stable **v0.4.0** API/chart release. Its tag publishes
+the images and chart; until you have verified them pullable, build from a checkout
+containing the PostgreSQL job engine (installer `images.build: true`, the default) or
+pin known compatible new images; do not use the older Rabbit-dependent API with these
+defaults.
 
 **[`docs/quickstart.md`](docs/quickstart.md)** takes you from "what do I want" to a running
 install: the components each path deploys, the inventory keys to fill, the one command, the
@@ -221,9 +225,9 @@ without pushing. A `v*` tag publishes exact image tags and the app Helm chart in
 separate workflows. The managed Kubernetes and database charts have independent
 release tags; merging to `main` does **not** publish an OCI chart or deploy a site.
 
-No versioned release/chart has been published yet. See [build and release
-operations](docs/ci-release.md) for current triggers, prerelease limitations,
-required permissions and release verification.
+`v0.4.0-rc.1` was published as a prerelease; `v0.4.0` is the first stable app
+release. See [build and release operations](docs/ci-release.md) for current
+triggers, release limitations, required permissions and release verification.
 
 </details>
 
