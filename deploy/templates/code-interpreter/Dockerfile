@@ -37,6 +37,9 @@ COPY --from=upstream template/jupyter-healthcheck.sh template/start-up.sh templa
 COPY --from=upstream template/ipython_kernel_config.py .ipython/profile_default/
 COPY --from=upstream template/startup_scripts .ipython/profile_default/startup
 RUN chmod +x .jupyter/jupyter-healthcheck.sh .jupyter/start-up.sh
+# Exercise the installed kernels (including Node 24), not just package metadata.
+COPY code-interpreter/smoke-kernels.py /tmp/proxcloud-smoke-kernels.py
+RUN timeout --kill-after=5s 85s python /tmp/proxcloud-smoke-kernels.py && rm /tmp/proxcloud-smoke-kernels.py
 COPY common/setup-user.sh /usr/local/sbin/proxcloud-setup-user
 RUN proxcloud-setup-user
 WORKDIR /home/user
