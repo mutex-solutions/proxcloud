@@ -395,7 +395,12 @@ func (s *Service) EnqueueVM(ctx context.Context, req VMRequest, actor string) (*
 			return err
 		}
 		for _, r := range prior {
-			// A receipt counts as finished-failed only when its step says failed OR its durable job is
+			// A template already made (the final write landed) blocks a re-import whatever its job
+			// state: a job that died after its final write must not yield a duplicate template.
+			if r.Step == StepTemplated || r.Step == StepSucceeded {
+				return ErrDuplicate
+			}
+			// Otherwise a receipt is finished-failed when its step says failed OR its durable job is
 			// dead (e.g. it died on a lease expiry before writing the failure). Everything else blocks.
 			if r.Step == StepFailed {
 				continue
@@ -428,6 +433,23 @@ func (s *Service) EnqueueVM(ctx context.Context, req VMRequest, actor string) (*
 		return nil, err
 	}
 	return rec, nil
+}
+
+// ReplayableReceipt decides whether a dead template-update job may be replayed: only one whose
+// receipt is still mid-flight (it died before finishing) resumes usefully. A failed or finished job
+// is a no-op on replay; the retry path is a new import from the Template updates page.
+func ReplayableReceipt(r *Receipt) error {
+	switch {
+	case r == nil:
+		return errors.New("the template update receipt is missing")
+	case r.Step == StepFailed:
+		return errors.New("this template update failed; start a new import from Template updates instead of replaying")
+	case r.Step == StepTemplated || r.Step == StepSucceeded:
+		return errors.New("this template update already produced its template")
+	case r.Cleaned:
+		return errors.New("this template update's leftovers were already cleaned up; start a new import")
+	}
+	return nil
 }
 
 // JobState reads the durable job state of a receipt ("" when the row is gone, e.g. pruned).

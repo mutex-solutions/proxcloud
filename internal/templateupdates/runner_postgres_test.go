@@ -362,3 +362,129 @@ func TestPGRunnerCleansDeadJob(t *testing.T) {
 		t.Fatal("cleaned job processed again")
 	}
 }
+
+// NEW BLOCKER regression (PostgreSQL): with the provider gone transiently, repeated RunOnce calls
+// report no work (did=false, so Run sleeps) and claim the dead job ONCE within the throttle window;
+// with the provider gone for good, the receipt is marked cleaned (warning) and never claimed again.
+func TestPGCleanupDeadThrottled(t *testing.T) {
+	db, jobs := pgFixture(t)
+	ctx := context.Background()
+	_, _, _, _, p := setup(t)
+	rec := PGReceipts{DB: db}
+	id := enqueue(t, db, jobs, p)
+	if _, err := db.Pool.Exec(ctx, `UPDATE durable_job SET state='dead',finished_at=clock_timestamp(),last_error='pve_import_refused' WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	claims := 0
+	r := &Runner{Store: jobs, Receipts: rec, Lease: 10 * time.Second, Dead: rec.DeadUncleaned,
+		ClaimDead: func(ctx context.Context, id string, ttl time.Duration) (*durablejobs.Job, error) {
+			j, err := jobs.ClaimDead(ctx, id, ttl)
+			if j != nil {
+				claims++
+			}
+			return j, err
+		},
+		Build: func(context.Context, VMPayload) (*Executor, error) {
+			t.Fatal("cleanup must use BuildCleanup")
+			return nil, nil
+		},
+		BuildCleanup: func(context.Context, VMPayload) (*Executor, error) { return nil, errors.New("provider unreachable") }}
+	for i := 0; i < 5; i++ {
+		did, err := r.RunOnce(ctx)
+		if did || err != nil {
+			t.Fatalf("round %d: did=%v err=%v (hot loop)", i, did, err)
+		}
+	}
+	j, _ := jobs.Get(ctx, id)
+	if claims != 1 || j.State != "dead" || j.LastError != "cleanup_pending" {
+		t.Fatalf("claims=%d job=%+v", claims, j)
+	}
+	// After the throttle window it is retried once; now the provider is gone for good.
+	if _, err := db.Pool.Exec(ctx, `UPDATE durable_job SET finished_at=clock_timestamp()-interval '11 minutes' WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	r.BuildCleanup = func(context.Context, VMPayload) (*Executor, error) {
+		return nil, &Permanent{Code: "provider_missing", Message: "the target Proxmox provider no longer exists"}
+	}
+	if did, err := r.RunOnce(ctx); !did || err != nil {
+		t.Fatalf("permanent: did=%v err=%v", did, err)
+	}
+	got, _ := rec.Load(ctx, id)
+	j, _ = jobs.Get(ctx, id)
+	if !got.Cleaned || len(got.Warnings) == 0 || !strings.Contains(got.Warnings[0], "provider_missing") || j.LastError != "cleaned_up" {
+		t.Fatalf("receipt %+v job %+v", got, j)
+	}
+	if _, err := db.Pool.Exec(ctx, `UPDATE durable_job SET finished_at=clock_timestamp()-interval '1 hour' WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if did, _ := r.RunOnce(ctx); did {
+			t.Fatal("a cleaned job was claimed again")
+		}
+	}
+	if claims != 2 {
+		t.Fatalf("claims=%d", claims)
+	}
+}
+
+// The cleanup acquisition renews its lease like a run does (a slow cleanup outlives one lease).
+func TestPGCleanupDeadRenewsLease(t *testing.T) {
+	db, jobs := pgFixture(t)
+	ctx := context.Background()
+	x, pv, _, _, p := setup(t)
+	rec := PGReceipts{DB: db}
+	x.Receipts = rec
+	id := enqueue(t, db, jobs, p)
+	pv.vms[9201] = &fakeVM{node: "pve1", cfg: pve.VMConfig{"pool": "pc-templates", "tags": "proxcloud;" + OwnerTag(id)}}
+	r0, _ := rec.Load(ctx, id)
+	r0.Step, r0.VMID = StepCreating, 9201
+	_ = rec.Save(ctx, r0)
+	if _, err := db.Pool.Exec(ctx, `UPDATE durable_job SET state='dead',finished_at=clock_timestamp(),last_error='lease_expired' WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	// Deleting the VM takes 3 leases' worth of time.
+	slow := &slowPVE{fakePVE: pv, delay: 900 * time.Millisecond}
+	x.PVE = slow
+	r := &Runner{Store: jobs, Receipts: rec, Lease: 300 * time.Millisecond, Dead: rec.DeadUncleaned, ClaimDead: jobs.ClaimDead,
+		BuildCleanup: func(context.Context, VMPayload) (*Executor, error) { return x, nil }}
+	if did, err := r.RunOnce(ctx); !did || err != nil {
+		t.Fatalf("did=%v err=%v", did, err)
+	}
+	got, _ := rec.Load(ctx, id)
+	if !got.Cleaned {
+		t.Fatalf("a slow cleanup lost its lease: %+v", got)
+	}
+	if _, ok := pv.vms[9201]; ok {
+		t.Fatal("not cleaned")
+	}
+}
+
+type slowPVE struct {
+	*fakePVE
+	delay time.Duration
+}
+
+func (s *slowPVE) DeleteVM(ctx context.Context, node string, vmid int) (pve.UPID, error) {
+	time.Sleep(s.delay)
+	return s.fakePVE.DeleteVM(ctx, node, vmid)
+}
+
+// Item b (PostgreSQL): a job that died after its final write (receipt Templated) blocks a re-import.
+func TestPGEnqueueBlockedByTemplatedDeadJob(t *testing.T) {
+	db, jobs := pgFixture(t)
+	ctx := context.Background()
+	s, req := pgService(t, db, jobs)
+	first, err := s.EnqueueVM(ctx, req, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, _ := s.Receipts.Load(ctx, first.ID)
+	r.Step = StepTemplated
+	_ = s.Receipts.Save(ctx, r)
+	if _, err := db.Pool.Exec(ctx, `UPDATE durable_job SET state='dead',finished_at=clock_timestamp(),last_error='lease_expired' WHERE id=$1`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EnqueueVM(ctx, req, "admin"); !errors.Is(err, ErrDuplicate) {
+		t.Fatalf("a templated dead job did not block a re-import: %v", err)
+	}
+}

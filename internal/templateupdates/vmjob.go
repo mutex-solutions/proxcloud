@@ -64,9 +64,11 @@ func (p VMPayload) Key() string {
 	return "tu-vm-" + hex.EncodeToString(sum[:])
 }
 
-// UploadLockKey serializes uploads per provider node import storage (a pg advisory lock in the runner).
+// UploadLockKey serializes template-update uploads per PROVIDER (a pg advisory lock in the runner).
+// The upload spools on the API node pveproxy answers on (one per provider at a time), whatever the
+// target node or import storage, so a finer key would not protect that disk.
 func (p VMPayload) UploadLockKey() string {
-	return "templateupdate-upload:" + p.ServiceID + "/" + p.Node + "/" + p.ImportStorage
+	return "templateupdate-upload:" + p.ServiceID
 }
 
 // Validate checks every field against the contract; a decoded payload that fails is permanent.
@@ -688,7 +690,7 @@ func (x *Executor) dropOwnFiles(ctx context.Context, f Fence, jobID string, p VM
 		}
 		vol := strings.TrimPrefix(it.VolID, p.ImportStorage+":")
 		if x.guard(ctx, f) != nil {
-			return append(warns, "stopped: the job's lease was lost")
+			return append(warns, stoppedWarn)
 		}
 		if err := x.PVE.DeleteStorageVolume(ctx, p.Node, p.ImportStorage, vol); err != nil {
 			warns = append(warns, "the uploaded file "+it.VolID+" stays on the import store (needs Datastore.Allocate there)")
@@ -718,12 +720,24 @@ func (x *Executor) sweepOrphans(ctx context.Context, f Fence, jobID string, p VM
 		}
 		row := m
 		if err := x.destroyOwned(ctx, f, jobID, p, row.VMID); errors.Is(err, ErrStopped) {
-			return append(warns, "stopped: the job's lease was lost")
+			return append(warns, stoppedWarn)
 		} else if err != nil {
 			warns = append(warns, fmt.Sprintf("orphan VM %d of this job could not be removed", row.VMID))
 		}
 	}
 	return warns
+}
+
+// stoppedWarn is the Cleanup warning that means the fence was lost mid-cleanup.
+const stoppedWarn = "stopped: the job's lease was lost"
+
+func stopped(warns []string) bool {
+	for _, w := range warns {
+		if w == stoppedWarn {
+			return true
+		}
+	}
+	return false
 }
 
 func hasTagValue(tags, want string) bool {
@@ -746,7 +760,7 @@ func (x *Executor) Cleanup(ctx context.Context, f Fence, jobID string, p VMPaylo
 	var warns []string
 	if r != nil && r.VMID > 0 {
 		if err := x.destroyOwned(ctx, f, jobID, p, r.VMID); errors.Is(err, ErrStopped) {
-			return append(warns, "stopped: the job's lease was lost")
+			return append(warns, stoppedWarn)
 		} else if err != nil {
 			warns = append(warns, fmt.Sprintf("VM %d of this job could not be removed", r.VMID))
 		}

@@ -197,7 +197,7 @@ func TestRunnerUploadLockBusyRetries(t *testing.T) {
 	if _, err := r.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if jobs.permanent || jobs.failCode != "retryable" || gotKey != "templateupdate-upload:svc-pve/pve1/nas-import" {
+	if jobs.permanent || jobs.failCode != "retryable" || gotKey != "templateupdate-upload:svc-pve" {
 		t.Fatalf("jobs %+v key %q", jobs, gotKey)
 	}
 	for _, c := range pv.calls {
@@ -244,5 +244,62 @@ func TestRunnerCleansUpDeadJobs(t *testing.T) {
 	got, _ := rec.Load(context.Background(), testJob)
 	if !got.Cleaned || got.Step != StepFailed || jobs.failCode != "cleaned_up" || !jobs.permanent {
 		t.Fatalf("receipt %+v jobs %+v", got, jobs)
+	}
+}
+
+// NEW BLOCKER regression (unit): a dead job whose cleanup cannot run (provider unreachable, or gone
+// for good) never makes RunOnce report work done, so Run sleeps instead of spinning.
+func TestCleanupDeadNoHotLoop(t *testing.T) {
+	for name, buildErr := range map[string]error{
+		"transient": errors.New("provider unreachable"),
+		"permanent": &Permanent{Code: "provider_missing", Message: "gone"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, jobs, _, rec := runnerFixture(t)
+			jobs.claimed = true
+			claims := 0
+			r.Dead = func(context.Context) ([]string, error) {
+				if got, _ := rec.Load(context.Background(), testJob); got != nil && got.Cleaned {
+					return nil, nil
+				}
+				return []string{testJob}, nil
+			}
+			r.ClaimDead = func(context.Context, string, time.Duration) (*durablejobs.Job, error) {
+				claims++
+				j := *jobs.job
+				j.Epoch = int64(10 + claims)
+				return &j, nil
+			}
+			r.BuildCleanup = func(context.Context, VMPayload) (*Executor, error) { return nil, buildErr }
+			did, err := r.RunOnce(context.Background())
+			got, _ := rec.Load(context.Background(), testJob)
+			switch name {
+			case "transient":
+				if did || err != nil || jobs.failCode != "cleanup_pending" || got.Cleaned {
+					t.Fatalf("did=%v err=%v code=%q cleaned=%v", did, err, jobs.failCode, got.Cleaned)
+				}
+			case "permanent":
+				if !did || got == nil || !got.Cleaned || got.Step != StepFailed || len(got.Warnings) == 0 || jobs.failCode != "cleaned_up" {
+					t.Fatalf("did=%v receipt=%+v code=%q", did, got, jobs.failCode)
+				}
+				// Marked cleaned: never claimed again.
+				if did2, _ := r.RunOnce(context.Background()); did2 || claims != 1 {
+					t.Fatalf("claimed again: did=%v claims=%d", did2, claims)
+				}
+			}
+		})
+	}
+}
+
+// Item b: a receipt that already produced its template blocks a re-import whatever its job state.
+// Item f: replay of a failed/finished/cleaned template update is refused; a mid-flight one is not.
+func TestReplayableReceipt(t *testing.T) {
+	for _, r := range []*Receipt{nil, {Step: StepFailed}, {Step: StepTemplated}, {Step: StepSucceeded}, {Step: StepCreating, Cleaned: true}} {
+		if ReplayableReceipt(r) == nil {
+			t.Errorf("%+v replayable", r)
+		}
+	}
+	if ReplayableReceipt(&Receipt{Step: StepUploading}) != nil {
+		t.Error("a mid-flight job must be replayable")
 	}
 }

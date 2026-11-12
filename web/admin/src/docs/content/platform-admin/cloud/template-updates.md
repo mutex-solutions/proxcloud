@@ -49,7 +49,9 @@ published digest), then imported as a **new** template VM in pool `pc-templates`
 longer needed. A Kubernetes node image never appears in the OS catalog: put the new template's VMID into
 the Kubernetes provider's version map.
 
-If an import fails, only what that import created is removed, and the job shows why.
+If an import fails, only what that import created is removed, and the job shows why. To try again, start a
+new import from this page: a failed import cannot be replayed from the durable jobs view (only one that
+stopped mid-way, e.g. on an API restart, resumes on replay).
 
 ## Sandbox images
 

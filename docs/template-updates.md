@@ -114,7 +114,8 @@ source commit; `confirmDigest` must repeat the digest.
 
 Enqueue re-lists the package and re-verifies the artifact **server side** (the client's tag/size are
 never trusted), then in ONE transaction under an advisory lock on the payload identity: refuses a
-duplicate (a receipt for the same provider/node/digest whose step is not `failed` **and** whose durable
+duplicate (a receipt for the same provider/node/digest that already produced its template —
+`templated`/`succeeded`, whatever its job state — or whose step is not `failed` **and** whose durable
 job is not `dead`), enqueues the durable job (`templateupdate.vm/v1`, key = `tu-vm-` + SHA-256 of
 service/node/digest, so it never exceeds the 256-byte key limit; a retry after a failure gets a
 `-<n>` suffix) and creates the receipt — refusing (409) if a receipt for that job id already exists
@@ -202,19 +203,34 @@ succeeded | failed`.
 - **Dead jobs are cleaned up**: a job can die without running its cleanup (e.g. its last attempt's
   lease expired). When idle, the runner re-acquires one dead, uncleaned job with
   `durablejobs.ClaimDead` — a fenced acquisition (new owner, higher epoch) pinned at
-  `attempts = max_attempts`, so it can never become a normal run — runs the same ownership-checked
-  `Cleanup`, marks the receipt `cleaned` (`failed`/`job_dead` unless it had finished) and returns the
-  job to dead (`cleaned_up`). A provider that cannot be reached leaves it for the next pass.
+  `attempts = max_attempts`, so it can never become a normal run — renews its lease like a run,
+  runs the same ownership-checked `Cleanup` (built from the provider alone: cleanup does not need the
+  GitHub integration), marks the receipt `cleaned` (`failed`/`job_dead` unless it had finished) and
+  returns the job to dead (`cleaned_up`). A terminal failure that completed its own cleanup marks the
+  receipt `cleaned` directly.
+  - **No hot loop**: a cleanup that cannot run now (provider unreachable) returns the job to dead as
+    `cleanup_pending`, and the pass skips it for **10 minutes**; the runner treats that as "no work"
+    and sleeps. A provider that is gone for good (`provider_missing`) marks the receipt `cleaned` with a
+    warning to remove any leftover by hand, logged once, and is never retried.
 - **Replay** through `POST /admin/durable-jobs/{id}/replay` (payload re-validated) requires
-  `admin:service:manage` for template-update jobs (the billing key `admin:bill:manage` for billing jobs).
-- **Upload serialization**: the runner holds a PostgreSQL session advisory lock per
-  (provider, node, import storage) for the whole upload, across API replicas; a busy lock retries later.
+  `admin:service:manage` for template-update jobs (the billing key `admin:bill:manage` for billing
+  jobs). Only a job that died **mid-flight** (receipt not failed, not finished, not cleaned) can be
+  replayed — it resumes from its last receipt. A failed, finished or cleaned template update answers
+  **409**: the retry path is a new import from the Template updates page (enqueue allows it, since the
+  earlier receipt is failed/dead).
+- **Upload serialization**: the runner holds a PostgreSQL session advisory lock **per provider**
+  (`templateupdate-upload:<service>`) for the whole upload, across API replicas; a busy lock retries
+  later. The key is per provider, not per node/storage: the upload spools to `/var/tmp` of the API node
+  pveproxy answers on — one per provider at a time — whatever the target node or import storage.
 
 **Proxmox rights** (the portal token, as for customer image import): `Datastore.AllocateTemplate` on
 the import storage (upload), `Sys.Audit` on `/nodes` (upload room check), `VM.Allocate`/`VM.Config.*`
 on `/pool/pc-templates` (already granted by `ProxCloudPlatform` on `/pool`) and `Datastore.AllocateSpace`
 on the disk storage. Deleting the uploaded file needs `Datastore.Allocate` on the import store; without
 it the template is still created and the receipt carries a warning.
+
+The receipt table (`templateUpdate`) is created at API startup: enqueue reads it inside its
+transaction, where a missing table cannot be auto-created.
 
 ### Enabling
 
@@ -280,8 +296,7 @@ Proposed follow-up (needs owner approval as a separate change):
   published artifact lacks them, discovery refuses it (fail closed) — check one real manifest.
 - The GitHub packages API returns versions newest first; discovery reads at most 2000 versions per
   package.
-- Template-update uploads are serialized per (provider, node, import storage) by the runner's
-  PostgreSQL advisory lock. Customer image import's provider-wide upload lock
+- Template-update uploads are serialized per provider by the runner's PostgreSQL advisory lock. Customer image import's provider-wide upload lock
   (`pve-image-upload-<service>`) is nil-safe and `pve.Service.HolderLock` is **not wired in `cmd/api`
   (pre-existing)**, so a customer import and a template update can still spool to the API node's disk
   at the same time; the room check runs before each. Wiring `HolderLock` fixes that for both.

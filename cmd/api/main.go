@@ -920,6 +920,10 @@ func run() error {
 		},
 		Jobs: jobStore, DB: pg, Receipts: templateupdates.PGReceipts{DB: pg}, VMEnabled: cfg.Jobs.TemplateUpdatesVM,
 	}
+	// Create the receipt table up front: EnqueueVM reads it inside its transaction (no auto-create there).
+	if err := tuSvc.Receipts.Ensure(ctx); err != nil {
+		return fmt.Errorf("template update store: %w", err)
+	}
 	adminH.SetTemplateUpdates(tuSvc)
 	if cfg.Jobs.TemplateUpdatesVM {
 		tuReceipts := templateupdates.PGReceipts{DB: pg}
@@ -932,6 +936,18 @@ func run() error {
 				return pg.TryAdvisoryLock(ctx, key)
 			},
 			Dead: tuReceipts.DeadUncleaned, ClaimDead: jobStore.ClaimDead,
+			// Cleanup needs PVE only: it must work even when the GitHub integration is gone.
+			BuildCleanup: func(ctx context.Context, p templateupdates.VMPayload) (*templateupdates.Executor, error) {
+				es, err := esSvc.Get(ctx, p.ServiceID)
+				if err != nil || es == nil || !es.IsProxmox() {
+					return nil, &templateupdates.Permanent{Code: "provider_missing", Message: "the target Proxmox provider no longer exists"}
+				}
+				ps, err := pveWithHolderLock(es)
+				if err != nil {
+					return nil, err
+				}
+				return &templateupdates.Executor{PVE: ps.C, Receipts: tuReceipts, HeadroomPct: es.PVEStorageHeadroomPct()}, nil
+			},
 			Build: func(ctx context.Context, p templateupdates.VMPayload) (*templateupdates.Executor, error) {
 				es, err := esSvc.Get(ctx, p.ServiceID)
 				if err != nil || es == nil || !es.IsProxmox() {
