@@ -78,6 +78,39 @@ vmid_of() { # template name on node -> one vmid, empty when absent; reads fail c
   jq -r --arg n "$1" --arg node "$2" '[.data[] | select(.name==$n and .node==$node and .template==1) | .vmid] | if length>1 then error("ambiguous template name") elif length==0 then "" else .[0] end' <<<"$rows"
 }
 
+wait_built_template() { # Only this successful build may wait for the cluster cache.
+  local baseline="$1" id cfg members status deadline=$((SECONDS + 120))
+  [ "$built" = 1 ] && [ -n "$RUN_DIR" ] && [ "$SEED_UPLOADED" = 0 ] || return 1
+  while (( SECONDS < deadline )); do
+    # Retry absence (including the old packer name/template flag), never read errors
+    # or ambiguity. Pre-build/static lookups remain immediate and fail closed.
+    id="$(vmid_of "$name" "$first")" || return 1
+    if [ -n "$id" ]; then
+      [[ "$id" =~ ^[1-9][0-9]*$ ]] || return 1
+      jq -e --argjson id "$id" 'index($id)==null' <<<"$baseline" >/dev/null || {
+        echo 'Build discovery refuses a preexisting VMID; publication refused' >&2; return 1;
+      }
+      members="$(pve "$api/pools/$TEMPLATE_POOL")" || return 1
+      jq -e --argjson id "$id" --arg node "$first" '.data.members | type=="array" and ([.[] | select(.vmid==$id and .node==$node and .type=="qemu")] | length==1)' <<<"$members" >/dev/null || {
+        echo 'Build template pool verification failed; publication refused' >&2; return 1;
+      }
+      cfg="$(pve "$api/nodes/$first/qemu/$id/config")" || return 1
+      jq -e --arg n "$name" '.data | type=="object" and .name==$n and .template==1' <<<"$cfg" >/dev/null || {
+        echo 'Build template identity verification failed; publication refused' >&2; return 1;
+      }
+      status="$(pve "$api/nodes/$first/qemu/$id/status/current")" || return 1
+      jq -e '.data | type=="object" and .status=="stopped"' <<<"$status" >/dev/null || {
+        echo 'Build template is not stopped; publication refused' >&2; return 1;
+      }
+      printf '%s\n' "$id"
+      return 0
+    fi
+    sleep 3
+  done
+  echo 'Build template discovery timed out after 120s; publication refused' >&2
+  return 1
+}
+
 clean_build_network() { # node vmid: CAPMOX creates net0 from the tenant's NetworkDevices spec.
   local cfg
   cfg="$(pve "$api/nodes/$1/qemu/$2/config")"
@@ -93,6 +126,7 @@ clean_build_network() { # node vmid: CAPMOX creates net0 from the tenant's Netwo
 }
 
 RUN_DIR=""
+built=0
 SEED_VOLUME=""
 SEED_UPLOADED=0
 DHCP_STARTED=0
@@ -212,6 +246,11 @@ if [ -z "$existing" ]; then
   vars="$RUN_DIR/vars.json"
   # Proxmox plugin represents an untagged adapter with an empty string, not tag=0.
   vlan_tag=""; if (( PVE_BUILD_VLAN )); then vlan_tag="$PVE_BUILD_VLAN"; fi
+  # The workflows serialize writers. Still exclude every VMID already visible on
+  # the build node, regardless of name/pool, before this make may create a VM.
+  baseline_rows="$(pve "$api/cluster/resources?type=vm")"
+  jq -e '.data | type=="array" and all(.[]; type=="object" and (.node|type=="string") and (.vmid|type=="number"))' <<<"$baseline_rows" >/dev/null
+  baseline_ids="$(jq -c --arg node "$first" '[.data[] | select(.node==$node) | .vmid]' <<<"$baseline_rows")"
   echo 'Starting image-builder; detailed output is retained only in private per-run state'
   if ! PROXMOX_URL="$api" PROXMOX_USERNAME="$PVE_TOKEN_ID" PROXMOX_TOKEN="$PVE_TOKEN_SECRET" PROXMOX_NODE="$first" \
     PROXMOX_ISO_POOL="$PVE_ISO_STORAGE" PROXMOX_BRIDGE="$PVE_BRIDGE" PROXMOX_VLAN="$vlan_tag" PROXMOX_STORAGE_POOL="$PVE_TEMPLATE_STORAGE" \
@@ -227,16 +266,25 @@ if [ -z "$existing" ]; then
   # Sensitive local media must be detached and the exact uploaded seed deleted
   # before *any* clone or pc-k8s publication. Packer success alone is insufficient.
   remove_seed || { echo 'Sensitive build seed cleanup incomplete; publication refused' >&2; exit 1; }
+  built=1
 fi
 
-src="$(vmid_of "$name" "$first")"
+if [ "$built" = 1 ]; then
+  src="$(wait_built_template "$baseline_ids")"
+else
+  src="$(vmid_of "$name" "$first")"
+fi
 [ -n "$src" ] || { echo "no template $name on $first" >&2; exit 1; }
 # image-builder has finished its in-guest tests on the tagged build network. Clean
 # the source BEFORE cloning/publication, and also heal older per-node copies.
 clean_build_network "$first" "$src"
 images=""
 for node in $PVE_NODES; do
-  id="$(vmid_of "$name" "$node")"
+  if [ "$node" = "$first" ]; then
+    id="$src" # Keep the source identity just verified, not a second cache lookup.
+  else
+    id="$(vmid_of "$name" "$node")"
+  fi
   if [ -z "$id" ]; then
     id="$(pve "$api/cluster/nextid" | jq -r .data)"
     upid="$(pve -X POST "$api/nodes/$first/qemu/$src/clone" -d "newid=$id" -d "name=$name" -d "target=$node" \
