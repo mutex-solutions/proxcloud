@@ -58,13 +58,23 @@ class OpenSSHBackportSourceTests(unittest.TestCase):
         self.assertIn('response.read(size + 1)', self.script)
         self.assertIn('response.geturl() != url', self.script)
         self.assertIn('len(data) != size or hashlib.sha256(data).hexdigest() != expected', self.script)
-        verify = 'dscverify --keyring /usr/share/keyrings/debian-keyring.gpg '
+        verify = 'apt-get source --download-only --only-source "openssh=$SOURCE_VERSION"'
         extract = 'dpkg-source -x openssh_10.0p1-7+deb13u4.dsc openssh-source'
         self.assertIn(verify, self.commands)
         self.assertLess(self.commands.index(verify), self.commands.index(extract))
         self.assertIn('Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg', self.script)
         self.assertIn('Suites: trixie trixie-updates', self.script)
         self.assertIn('Suites: trixie-security', self.script)
+        self.assertIn('apt-get update --error-on=any', self.commands)
+        self.assertIn('apt-cache\', \'showsrc\', \'--only-source\', \'openssh', self.script)
+        self.assertIn("entries.get(filename) != identity", self.script)
+        self.assertIn("exact pinned source missing from authenticated indexes", self.script)
+        self.assertIn("debian-signed-repository-source-hash-chain", self.script)
+        self.assertIn("NOT_VERIFIED_missing_public_key", self.script)
+        self.assertIn('Acquire::Check-Valid-Until "true";', self.script)
+        self.assertIn('Acquire::Check-Date "true";', self.script)
+        self.assertLess(self.commands.index('apt-get update --error-on=any'), self.commands.index(verify))
+        self.assertLess(self.commands.index('APT-downloaded source differs'), self.commands.index(extract))
         for bypass in ('--allow-unauthenticated', '--allow-insecure-repositories',
                        'trusted=yes', '--no-check', '|| true', 'nocheck', 'DEB_BUILD_OPTIONS='):
             self.assertNotIn(bypass, self.commands)
