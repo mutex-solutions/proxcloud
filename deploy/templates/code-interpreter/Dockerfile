@@ -12,10 +12,12 @@ ENV PIP_DEFAULT_TIMEOUT=100 \
     DEBIAN_FRONTEND=noninteractive
 USER root
 WORKDIR /root
+# Node 22 remains maintained LTS and matches zeromq 5's C++17 binding.
+# Its old exact NAN pin also needs the scoped override in kernel-package.json.
 RUN apt-get update && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends \
       build-essential curl git util-linux jq sudo fonts-noto-cjk ca-certificates gnupg \
- && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+ && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && npm install -g npm@11.21.2 \
  && rm -rf /var/lib/apt/lists/* \
@@ -25,7 +27,9 @@ COPY --from=upstream template/charts charts
 COPY --from=upstream template/requirements.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt \
  && ipython kernel install --name python3 --user
-RUN npm install -g --unsafe-perm git+https://github.com/e2b-dev/ijavascript.git#79cb7d56dcfe0df9ff55eff0ca4dc920a6dcc361 \
+COPY code-interpreter/kernel-package.json /opt/proxcloud-kernel/package.json
+ENV PATH="/opt/proxcloud-kernel/node_modules/.bin:${PATH}"
+RUN npm install --prefix /opt/proxcloud-kernel --omit=dev --no-audit --no-fund \
  && ijsinstall --install=global \
  && pip install --no-cache-dir bash_kernel && python -m bash_kernel.install
 COPY --from=upstream template/server .server
@@ -37,7 +41,7 @@ COPY --from=upstream template/jupyter-healthcheck.sh template/start-up.sh templa
 COPY --from=upstream template/ipython_kernel_config.py .ipython/profile_default/
 COPY --from=upstream template/startup_scripts .ipython/profile_default/startup
 RUN chmod +x .jupyter/jupyter-healthcheck.sh .jupyter/start-up.sh
-# Exercise the installed kernels (including Node 24), not just package metadata.
+# Exercise all installed kernels (including Node 22), not just package metadata.
 COPY code-interpreter/smoke-kernels.py /tmp/proxcloud-smoke-kernels.py
 RUN timeout --kill-after=5s 85s python /tmp/proxcloud-smoke-kernels.py && rm /tmp/proxcloud-smoke-kernels.py
 COPY common/setup-user.sh /usr/local/sbin/proxcloud-setup-user
