@@ -41,6 +41,8 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
 
 ## Subsystems
 
+- [Template updates](template-updates.md) — admin discovery of newer GHCR VM/sandbox templates,
+  the GitHub integration, and the fenced VM import job.
 - [Public VM artifacts](public-vm-artifacts.md) — portable QCOW2 contract and
   digest/checksum verification, distinct from site-local Proxmox templates.
   [Offline sanitization](public-vm-sanitization.md) defines copy-only policy and

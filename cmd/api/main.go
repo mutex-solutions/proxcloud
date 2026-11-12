@@ -937,7 +937,7 @@ func run() error {
 				if err != nil {
 					return nil, err
 				}
-				return &templateupdates.Executor{PVE: ps.C, Blobs: gh, Receipts: templateupdates.PGReceipts{DB: pg}, HeadroomPct: es.PVEStorageHeadroomPct()}, nil
+				return &templateupdates.Executor{PVE: ps.C, Blobs: gh, Receipts: templateupdates.PGReceipts{DB: pg}, HeadroomPct: es.PVEStorageHeadroomPct(), UploadLock: ps.LockImportUpload}, nil
 			},
 		}
 		tuCtx, stopTU := context.WithCancel(ctx)

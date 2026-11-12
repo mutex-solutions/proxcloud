@@ -90,6 +90,18 @@ const SCHEMAS: Record<string, VendorSchema> = {
     ],
     secret: [{ key: "password", label: "Password", type: "password" }],
   },
+  GitHub: {
+    config: [],
+    secret: [{ key: "token", label: "Personal access token (classic)", type: "password", placeholder: "ghp_…" }],
+    help: (
+      <>
+        Used for every GitHub Packages (ghcr.io) call of <b>System → Template updates</b>, so listing is never
+        rate-limited as anonymous. GitHub Packages accepts only a <b>classic</b> token with the{" "}
+        <code>read:packages</code> scope. The token is checked with GitHub when you save, stored encrypted and never
+        shown again.
+      </>
+    ),
+  },
   BankTransfer: {
     config: [
       { key: "minDeposit", label: "Minimum deposit", type: "number" },
@@ -104,6 +116,7 @@ const CATS = [
   { label: "Payment", key: "Payment" },
   { label: "Invoice", key: "Invoice" },
   { label: "Mail", key: "Mail" },
+  { label: "Packages", key: "Packages" },
 ] as const
 
 type EditTarget = { vendor: string; installed: Integration | null }

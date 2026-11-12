@@ -224,6 +224,8 @@ type Executor struct {
 	HeadroomPct float64
 	// TaskWait bounds a PVE upload/import task (default pve.ImportTimeout).
 	TaskWait time.Duration
+	// UploadLock serializes uploads per provider with customer image imports (nil = none).
+	UploadLock func(ctx context.Context) (func(), error)
 }
 
 // checkpoint persists r through the fence. Any error (lease lost included) stops the executor.
@@ -339,6 +341,13 @@ func (x *Executor) uploadPresent(ctx context.Context, jobID string, p VMPayload,
 func (x *Executor) upload(ctx context.Context, jobID string, p VMPayload, r *Receipt, f Fence) error {
 	// A StepUploading receipt is only an intent: its outcome is unknown, so the bytes are uploaded
 	// again under this epoch's own name (the earlier file, if any, is swept as this job's own).
+	if x.UploadLock != nil {
+		release, err := x.UploadLock(ctx)
+		if err != nil {
+			return err // busy: retried later
+		}
+		defer release()
+	}
 	space, err := x.PVE.UploadSpace(ctx)
 	if err != nil {
 		if pve.IsForbidden(err) {

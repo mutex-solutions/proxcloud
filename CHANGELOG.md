@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add **System → Template updates** to the admin portal: a GitHub integration holding a
+  classic personal access token (`read:packages`, validated with GitHub before it is saved,
+  encrypted and write-only) that every GitHub Packages call uses — no anonymous listing; the
+  newest published VM artifact per OS/variant/Kubernetes line and the newest sandbox image per
+  template, content-checked against the OCI and `manifest.json`/`SHA256SUMS` contract before
+  being offered, next to what each provider has installed or pinned. A VM artifact can be
+  imported by digest as a new Proxmox template (never modifying or deleting existing ones) via a
+  fenced, resumable durable job, verified by a streaming SHA-256, Proxmox's own sha256 check and
+  the layer digest; the executor is off until `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true`.
+  Sandbox image mirroring from the portal is not yet enabled; the page gives the `images.yaml`
+  pin and the follow-up design is in `docs/template-updates.md`.
+
 ## [0.4.0] - 2026-11-12
 
 First stable ProxCloud release, superseding the `v0.4.0-rc.1` prerelease. It is
@@ -130,6 +144,7 @@ be pulled before installing with `images.build: false`.
   This release does not include runtime acceptance of the Kubernetes image (real
   inventory, sanitize, postscan, cold boot, anonymous pull). Its publication is a
   separate, manually dispatched step that the `v0.4.0` tag does not perform.
+
 - Define portable native VM-disk QCOW2 artifacts for public GHCR distribution,
   with strict versioned manifests, checksums, unsigned exporter facts and explicit
   sanitization/pull/import/boot gates. Add a copy-only offline sanitizer and a
