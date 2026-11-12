@@ -35,7 +35,7 @@ class ControlledBaseSourceTests(unittest.TestCase):
         self.assertNotIn("smoke-controlled.py", default)
 
     def test_explicit_core_packages_and_no_database_erasure(self):
-        for package in ("bash", "ca-certificates", "sudo", "git", "gh", "build-essential",
+        for package in ("bash", "ca-certificates", "sudo", "git", "build-essential",
                         "curl", "wget", "pkg-config", "libstdc++6", "openssh-client",
                         "passwd", "util-linux", "patch", "xz-utils", "unzip", "zip", "tar",
                         "bzip2", "libsqlite3-dev", "libssl-dev", "zlib1g-dev"):
@@ -47,6 +47,18 @@ class ControlledBaseSourceTests(unittest.TestCase):
         self.assertNotIn("--ignore", self.docker)
         self.assertIn("NOT feature-equivalent", self.docker)
         self.assertIn("Owner approved splitting inherited image/codec", self.docker)
+
+    def test_gh_is_patched_upstream_not_a_shadowed_distro_package(self):
+        apt = re.search(r"apt-get install -y --no-install-recommends(.*?)&& rm", self.docker, re.S).group(1)
+        self.assertNotIn("gh", apt.replace("\\\n", " ").split())
+        self.assertIn("COPY base/install-gh.sh /usr/local/sbin/proxcloud-install-gh", self.docker)
+        self.assertIn("RUN /bin/sh /usr/local/sbin/proxcloud-install-gh", self.docker)
+        installer = (ROOT / "deploy/templates/base/install-gh.sh").read_text()
+        self.assertIn("4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d", installer)
+        self.assertLess(installer.index("sha256sum --check --strict -"), installer.index("tar -xOzf"))
+        self.assertIn("[ ! -e /usr/bin/gh ]", installer)
+        self.assertIn("install -m 0755", installer)
+        self.assertIn('startswith("gh version 2.103.3 ")', self.smoke)
 
     def test_selective_donor_and_bootstrap_links_precede_npm(self):
         copies = re.findall(r"^COPY --from=node-toolchain (.+)$", self.docker, re.M)

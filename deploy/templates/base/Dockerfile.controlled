@@ -20,11 +20,15 @@ USER root
 RUN test "$(dpkg --print-architecture)" = amd64 \
  && apt-get update && apt-get upgrade -y \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      bash ca-certificates sudo git gh build-essential curl wget pkg-config \
+      bash ca-certificates sudo git build-essential curl wget pkg-config \
       libstdc++6 openssh-client passwd util-linux patch xz-utils unzip zip tar bzip2 \
        tzdata fonts-dejavu-core \
       libsqlite3-dev libssl-dev zlib1g-dev \
  && rm -rf /var/lib/apt/lists/*
+# Debian gh 2.46.0-3 has no distro fix for CVE-2026-48501; preserve the tool
+# via the vendor's patched upstream binary (>=2.93.0), not metadata suppression.
+COPY base/install-gh.sh /usr/local/sbin/proxcloud-install-gh
+RUN /bin/sh /usr/local/sbin/proxcloud-install-gh
 # Retain official /usr/local Python 3.11 and its UTF-8 locale configuration.
 RUN /usr/local/bin/python3 -m pip install --no-cache-dir --only-binary=:all: --no-deps --upgrade \
       pip==26.3 setuptools==84.2.1 wheel==0.48.0 packaging==26.3
