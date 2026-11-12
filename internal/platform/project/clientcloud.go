@@ -354,7 +354,9 @@ func (h *Handler) instanceMetadataOptions(w http.ResponseWriter, r *http.Request
 // BillingResource(s) against the project's price plans.
 
 // projectInit handles POST /{id}/init: entry into a project bootstraps it onto its attached
-// services (idempotent) → OK (empty).
+// services (idempotent) → OK (empty). A project the open leaves as it is answers 409 with
+// errors.details {status, reason[, billingProfileStatus]} (errNotOpened), never the 200 of a
+// working project (#216).
 func (h *Handler) projectInit(w http.ResponseWriter, r *http.Request) {
 	u, ok := h.principal(w, r)
 	if !ok {
@@ -369,19 +371,32 @@ func (h *Handler) projectInit(w http.ResponseWriter, r *http.Request) {
 	// holds any more (no operator's disable, and billing allows it: an admin API project, or one moved to a paying profile)
 	// comes up the same way, so a suspended profile or an operator is what keeps a project down, never a member's click. Any
 	// other status stays as it is.
-	lift := false
-	if p.IsDisabled() && !p.DisabledByOperator {
-		if lift, err = h.svc.BillingAllowsEnabled(r.Context(), p); err != nil {
+	switch {
+	case p.IsEnabled():
+	case p.IsDisabled() && p.DisabledByOperator:
+		h.fail(w, errNotOpened(p, ReasonDisabledByOperator, ""))
+		return
+	case p.IsDisabled():
+		reason, profileStatus, err := h.svc.BillingHold(r.Context(), p)
+		if err != nil {
 			h.fail(w, err)
 			return
 		}
-	}
-	if !p.IsEnabled() && !lift {
-		httpx.Empty(w)
+		if reason != "" {
+			h.fail(w, errNotOpened(p, reason, profileStatus))
+			return
+		}
+	default:
+		h.fail(w, errNotOpened(p, notOpenedReason(p.Status), ""))
 		return
 	}
 	if err := h.enableAndBootstrap(r.Context(), p); err != nil {
 		h.fail(w, err)
+		return
+	}
+	// 200 only for a project that is up: an enable that did not happen (no provider wiring) is not a success either.
+	if !p.IsEnabled() {
+		h.fail(w, errNotOpened(p, ReasonNotEnabled, ""))
 		return
 	}
 	httpx.Empty(w)

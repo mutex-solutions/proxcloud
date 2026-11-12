@@ -1,6 +1,6 @@
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useParams } from "react-router-dom"
-import { apiFetch, apiFetchEnvelope, type CloudScope } from "./api"
+import { ApiError, apiFetch, apiFetchEnvelope, type CloudScope } from "./api"
 import type {
   BillingSummary, CloudResource, CostInfo, GpuCapacityUsage, Location, Project, ProjectQuotaUsage,
   ProjectService,
@@ -262,21 +262,61 @@ export function useCursorList<T = unknown>(
   return { ...q, rows }
 }
 
-// Ensures the project is bootstrapped (project pool) — fire-and-forget on entry. A new project
-// gets its services attached by this very call, and the pages asked for its locations in
-// parallel and got none ("No region" until a reload): ask again once it is done.
+// Why POST /project/{id}/init left a project down (internal/platform/project/status.go Reason*).
+export type ProjectInitReason =
+  | "disabled_by_operator"
+  | "billing_profile_inactive"
+  | "billing_profile_suspended"
+  | "billing_profile_missing"
+  | "scheduled_for_deletion"
+  | "deletion_in_progress"
+  | "deleted"
+  | "not_enabled"
+
+export type ProjectInitResult =
+  | { ok: true }
+  | { ok: false; status: string; reason: ProjectInitReason; billingProfileStatus?: string; message: string }
+
+// The 409 /init answers for a project it could not bring up: errors.details {status, reason[, billingProfileStatus]}.
+export function projectInitRefusal(e: unknown): Extract<ProjectInitResult, { ok: false }> | undefined {
+  if (!(e instanceof ApiError) || e.status !== 409) return undefined
+  const d = e.details as { status?: unknown; reason?: unknown; billingProfileStatus?: unknown } | undefined
+  if (!d || typeof d.reason !== "string" || typeof d.status !== "string") return undefined
+  return {
+    ok: false,
+    status: d.status,
+    reason: d.reason as ProjectInitReason,
+    billingProfileStatus: typeof d.billingProfileStatus === "string" ? d.billingProfileStatus : undefined,
+    message: e.message,
+  }
+}
+
+// Ensures the project is bootstrapped (project pool) on entry. A new project gets its services
+// attached by this very call, and the pages asked for its locations in parallel and got none
+// ("No region" until a reload): ask again once it is done. A project the call could not bring up
+// (billing profile not active or suspended, an operator's disable, a deletion) resolves to
+// { ok: false, reason } so the shell can say why instead of carrying on as if it worked; it is
+// asked again when the window regains focus (e.g. after adding billing details in another tab).
 export function useProjectInit(pid: string) {
   const qc = useQueryClient()
-  return useQuery({
+  return useQuery<ProjectInitResult>({
     queryKey: ["project-init", pid],
     queryFn: async () => {
-      await apiFetchEnvelope(`/project/${pid}/init`, { method: "POST" })
+      try {
+        await apiFetchEnvelope(`/project/${pid}/init`, { method: "POST" })
+      } catch (e) {
+        const refusal = projectInitRefusal(e)
+        if (!refusal) throw e
+        return refusal
+      }
       void qc.invalidateQueries({ queryKey: ["locations", pid] })
       void qc.invalidateQueries({ queryKey: ["ui-menu", pid] })
-      return true
+      void qc.invalidateQueries({ queryKey: ["projects"] })
+      return { ok: true }
     },
     enabled: !!pid,
-    staleTime: Infinity,
+    staleTime: (q) => (q.state.data?.ok === false ? 0 : Infinity),
+    refetchOnWindowFocus: (q) => q.state.data?.ok === false,
     retry: 1,
   })
 }

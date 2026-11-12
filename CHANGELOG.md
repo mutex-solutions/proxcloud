@@ -35,6 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actions, deletes and the reads `quota-usage`, `gpu-capacity`, `public-networks` and the S3
   key routes. Requests naming no service keep the Proxmox default. Existing projects still
   need an operator to attach a provider registered after they were created.
+- `POST /api/v1/project/{id}/init` no longer answers `200 {}` when it leaves the project down.
+  It answers `409` with `errors.details` `{status, reason[, billingProfileStatus]}`, reason one
+  of `billing_profile_inactive`, `billing_profile_suspended`, `billing_profile_missing`,
+  `disabled_by_operator`, `scheduled_for_deletion`, `deletion_in_progress`, `deleted`,
+  `not_enabled` (#216). Success is unchanged. The client console shows the reason above the
+  project's pages, with a link to Billing where that is the fix. The error envelope may now
+  carry an optional `details` object.
 
 ## [0.4.0] - 2026-11-12
 

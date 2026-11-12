@@ -1,4 +1,5 @@
 // Projects, organizations, invites, menu/features, search, user bootstrap.
+import { ApiError } from "@/lib/api"
 import { on } from "../router"
 import { db } from "../db"
 import { features, ORG_ID, PID, organizations, uiMenu } from "../fixtures/platform"
@@ -26,7 +27,15 @@ on("POST /project", ({ opts }) => {
   db.projects.push(project)
   return { data: project }
 })
-on("POST /project/:pid/init", () => ({ data: {} }))
+// "?project-inactive" previews the 409 an open answers for a project it cannot bring up (#216).
+on("POST /project/:pid/init", () => {
+  if (pageFlag("project-inactive")) {
+    throw new ApiError(409, 409,
+      "This project is not active yet: its billing profile is not active (NEW). Add your billing details or a payment method under Billing to activate it.",
+      { status: "DISABLED", reason: "billing_profile_inactive", billingProfileStatus: "NEW" })
+  }
+  return { data: {} }
+})
 on("POST /project/:pid/rename", ({ params, opts }) => {
   const p = db.projects.find((x) => x.id === params.pid)
   if (p) p.name = (opts.body as { name?: string })?.name ?? p.name

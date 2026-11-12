@@ -16,12 +16,22 @@ type HTTPError struct {
 	Status int
 	Code   int
 	Msg    string
+	// Details is optional machine-readable context for a client to act on (written as errors.details);
+	// nil leaves the envelope as it always was.
+	Details any
 }
 
 func (e *HTTPError) Error() string { return e.Msg }
 
 func NewError(status, code int, msg string) *HTTPError {
 	return &HTTPError{Status: status, Code: code, Msg: msg}
+}
+
+// WithDetails returns a copy of the error that carries details (see HTTPError.Details).
+func (e *HTTPError) WithDetails(details any) *HTTPError {
+	c := *e
+	c.Details = details
+	return &c
 }
 
 // BadRequest/NotFound/Forbidden are HttpError factories (code == status).
@@ -47,7 +57,7 @@ func WriteError(w http.ResponseWriter, err error) bool {
 	}
 	var he *HTTPError
 	if errors.As(err, &he) {
-		Err(w, he.Status, he.Code, he.Msg)
+		write(w, he.Status, Response[any]{Errors: &APIError{Code: he.Code, Message: he.Msg, Details: he.Details}})
 		return true
 	}
 	slog.Error("internal error", "err", err, "reqid", w.Header().Get(RequestIDHeader))
@@ -65,10 +75,12 @@ type Response[T any] struct {
 	Paging       *Paging   `json:"paging,omitempty"`
 }
 
-// APIError is the per-error shape: a numeric code + an i18n message key.
+// APIError is the per-error shape: a numeric code + an i18n message key, and optionally details a
+// client can act on (omitted when there are none).
 type APIError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+	Details any    `json:"details,omitempty"`
 }
 
 // Paging is the CustomHttpResponse.Paging shape. Pointers so offset/total=0

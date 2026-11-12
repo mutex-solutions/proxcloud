@@ -89,6 +89,25 @@ attached to it until an operator attaches it (admin project page → Cloud
 services → Attach provider). Without a named service the call goes to the
 project's Proxmox service, else its first attached one.
 
+Opening a project: `POST /api/v1/project/{id}/init` provisions an ENABLED
+project on its services, and enables a DISABLED one nothing holds any more.
+It answers `200 {}` only when the project is up. A project it leaves as it is
+answers `409` with the reason in `errors.details`:
+
+```json
+{"errors": {"code": 409, "message": "This project is not active yet: …",
+  "details": {"status": "DISABLED", "reason": "billing_profile_inactive", "billingProfileStatus": "NEW"}}}
+```
+
+| `reason` | Cause |
+|----------|-------|
+| `billing_profile_inactive` | The paying billing profile (the project's own, else the organization's) is not ACTIVE yet (NEW: billing details or a payment method missing). `billingProfileStatus` gives its status. |
+| `billing_profile_suspended` | The paying billing profile is SUSPENDED (unpaid balance). |
+| `billing_profile_missing` | No paying billing profile can be found. |
+| `disabled_by_operator` | An operator disabled the project; only an operator enables it. |
+| `scheduled_for_deletion` / `deletion_in_progress` / `deleted` | The project is on its way out. |
+| `not_enabled` | Any other case where the project is not ENABLED. |
+
 ## Admin API — `/admin-api/v1`
 
 A machine-to-machine surface (`internal/platform/adminapi`). Authenticated with an
@@ -163,8 +182,12 @@ in the admin console.
 | `401` | Not authenticated — missing/invalid token (empty body, `WWW-Authenticate: Bearer`). |
 | `403` | Authenticated but not authorized — e.g. wrong realm at the Admin API gate, or an MCP principal whose realm has no toolset. |
 | `404` | Resource not found. |
-| `409` | Conflict — e.g. creating a resource that already exists. |
+| `409` | Conflict — e.g. creating a resource that already exists, or a project `/init` cannot bring up. |
 | `501` | The endpoint exists but the capability is **not enabled / not configured in this deployment** — the code path drives a subsystem (cloud orchestration, an external provider) that this deployment has not wired up. It is a deliberate "not implemented here" response, not a runtime error. |
+
+The customer API error envelope is `{"errors": {"code", "message"}}`; an error a
+client can act on may also carry `errors.details` (an object, e.g. the project
+`/init` 409 above). Clients must ignore details they do not know.
 
 Unmatched routes and disallowed methods on the customer API still return the
 `CustomHttpResponse` error envelope via `NotFoundHandler` / `MethodNotAllowedHandler`.

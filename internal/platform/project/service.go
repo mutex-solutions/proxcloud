@@ -233,19 +233,42 @@ func (s *Service) Rename(ctx context.Context, sub, id, name string) (*Project, e
 // BillingAllowsEnabled reports whether nothing on the billing side holds the project DISABLED: billing is not configured, or the
 // profile that pays for it (its own, else the organization's) is ACTIVE.
 func (s *Service) BillingAllowsEnabled(ctx context.Context, p *Project) (bool, error) {
+	reason, _, err := s.BillingHold(ctx, p)
+	return err == nil && reason == "", err
+}
+
+// BillingHold says what on the billing side holds a DISABLED project down: "" when nothing does (billing is not configured,
+// or the profile that pays for it, its own else the organization's, is ACTIVE), else ReasonBillingProfileSuspended,
+// ReasonBillingProfileInactive (NEW, or any other status that is not ACTIVE) or ReasonBillingProfileMissing (no profile to
+// read). profileStatus is the paying profile's status when there is one.
+func (s *Service) BillingHold(ctx context.Context, p *Project) (reason, profileStatus string, err error) {
 	_, _, configured, err := s.billing.Configuration(ctx)
 	if err != nil || !configured {
-		return !configured, err
+		return "", "", err
 	}
 	bpID := p.BillingProfileID
 	if bpID == "" {
 		o, err := s.orgRepo.FindByID(ctx, p.OrganizationID)
-		if err != nil || o == nil {
-			return false, err
+		if err != nil {
+			return "", "", err
+		}
+		if o == nil {
+			return ReasonBillingProfileMissing, "", nil
 		}
 		bpID = o.BillingProfileID
 	}
-	return s.billing.IsActive(ctx, bpID)
+	bp, err := s.billing.FindByID(ctx, bpID)
+	switch {
+	case err != nil:
+		return "", "", err
+	case bp == nil:
+		return ReasonBillingProfileMissing, "", nil
+	case bp.Status == billing.StatusActive:
+		return "", bp.Status, nil
+	case bp.Status == billing.StatusSuspended:
+		return ReasonBillingProfileSuspended, bp.Status, nil
+	}
+	return ReasonBillingProfileInactive, bp.Status, nil
 }
 
 // ScheduleDeletion marks the project for deferred deletion. The cloud-side

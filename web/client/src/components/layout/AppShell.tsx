@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/sidebar"
 import { cn } from "@/lib/utils"
 import SearchModal from "@/components/search-modal"
+import { ProjectStatusNotice } from "./ProjectStatusNotice"
 
 type Item = {
   to: string
@@ -193,7 +194,9 @@ export function AppShell() {
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
   }, [])
-  useProjectInit(pid)
+  // A project /init could not bring up (billing not active, suspended, operator's disable, deletion) gets a notice saying
+  // why, instead of the pages carrying on as if it worked (#216).
+  const { data: init } = useProjectInit(pid)
 
   const email = auth.user?.profile.email
   const initial = (email ?? "?").slice(0, 1).toUpperCase()
@@ -337,6 +340,7 @@ export function AppShell() {
         <SearchModal pid={pid} open={searchOpen} onOpenChange={setSearchOpen} />
         <main className="flex-1 px-4 py-6 md:px-6">
           <div className="mx-auto w-full max-w-6xl">
+            <ProjectStatusNotice pid={pid} init={init} />
             <Outlet />
           </div>
         </main>
