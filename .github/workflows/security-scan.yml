@@ -66,8 +66,6 @@ jobs:
       run:
         shell: bash
     env:
-      # Fresh per-leg database; no cache restore and no runner context at workflow scope.
-      TRIVY_CACHE_DIR: ${{ runner.temp }}/security-scan-cache
       IMAGE_NAME: ${{ matrix.image }}
       DOCKERFILE: ${{ matrix.dockerfile }}
       BUILD_CONTEXT: ${{ matrix.context }}
@@ -84,6 +82,8 @@ jobs:
           set -euo pipefail
           mkdir -p result tools
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          # Expand the runner variable in the shell, not workflow expression context.
+          printf 'TRIVY_CACHE_DIR=%s/security-scan-cache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
           printf '%s\n' "$SOURCE_SHA" > result/source-sha.txt
           printf '%s\n' "$TRIVY_SHA256" > result/trivy-sha256.txt
           python3 -m unittest discover -s .github/scripts/tests -p test_scan_report.py -v
