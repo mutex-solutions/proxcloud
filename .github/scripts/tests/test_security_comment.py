@@ -55,7 +55,7 @@ class CommentTests(unittest.TestCase):
         for name in (*R.PRODUCTS, *("template/" + n for n in R.TEMPLATES), *("base/" + n for n in R.BASES)):
             self.fixture(name)
         body = self.render()
-        self.assertIn("Coverage: 31/31", body)
+        self.assertIn("Coverage: 32/32", body)
         self.assertIn("| template/gemini | 0 | 0", body)
         self.assertIn("| base/external-python | 0 | 0", body)
         self.assertNotIn("all-clear for the whole supply chain.\n0", body)

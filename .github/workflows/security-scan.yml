@@ -64,6 +64,11 @@ jobs:
             dockerfile: deploy/sandbox-import.Dockerfile
             context: .
             app: ''
+          # Evaluation only: never selected by build.sh/base or published.
+          - image: controlled-base-prototype
+            dockerfile: deploy/templates/base/Dockerfile.controlled
+            context: deploy/templates
+            app: ''
     defaults:
       run:
         shell: bash
@@ -344,7 +349,7 @@ jobs:
             echo 'Security gate blocked: a scan failed, was cancelled, or was skipped.'
             exit 1
           fi
-          echo 'Filesystem, six product finals, eleven non-GPU templates and thirteen upstream base scans passed.'
+          echo 'Filesystem, six product finals, controlled nondefault prototype, eleven non-GPU templates and thirteen upstream base scans passed.'
 
   render-comment:
     name: security-summary
@@ -369,13 +374,13 @@ jobs:
           script: |
             const sha = context.payload.pull_request.head.sha;
             if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error('Invalid source SHA');
-            const targets = ['filesystem', 'api', 'web-client', 'web-admin', 'sandbox-proxy', 'sandbox-runtime', 'sandbox-import', 'template-images', 'base-images'];
+            const targets = ['filesystem', 'api', 'web-client', 'web-admin', 'sandbox-proxy', 'sandbox-runtime', 'sandbox-import', 'controlled-base-prototype', 'template-images', 'base-images'];
             const expected = new Set(targets.map(n => `security-${n}-${sha}`));
             const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
               ...context.repo, run_id: context.runId, per_page: 100
             });
             const selected = artifacts.filter(a => expected.has(a.name) && !a.expired);
-            if (selected.length > 9 || new Set(selected.map(a => a.name)).size !== selected.length) throw new Error('Duplicate report artifacts');
+            if (selected.length > 10 || new Set(selected.map(a => a.name)).size !== selected.length) throw new Error('Duplicate report artifacts');
             if (selected.some(a => a.size_in_bytes > 128 * 1024 * 1024) || selected.reduce((n, a) => n + a.size_in_bytes, 0) > 512 * 1024 * 1024) throw new Error('Report archive byte budget');
             core.setOutput('ids', selected.map(a => String(a.id)).join(','));
             core.setOutput('count', String(selected.length));
@@ -449,7 +454,7 @@ jobs:
             const templates = process.env.TEMPLATE_RESULT;
             const bases = process.env.BASE_RESULT;
             if (!states.has(scan) || !states.has(templates) || !states.has(bases) || !states.has(gate)) throw new Error('Unknown scan/template/base/gate state');
-            const names = ['filesystem', 'api', 'web-client', 'web-admin', 'sandbox-proxy', 'sandbox-runtime', 'sandbox-import', 'template-images', 'base-images'];
+            const names = ['filesystem', 'api', 'web-client', 'web-admin', 'sandbox-proxy', 'sandbox-runtime', 'sandbox-import', 'controlled-base-prototype', 'template-images', 'base-images'];
             const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
               owner, repo, run_id: context.runId, per_page: 100
             });
@@ -462,7 +467,7 @@ jobs:
               `Scan matrix result: **${scan}**; template-images result: **${templates}**; base-images result: **${bases}**; required gate: **${gate}**.`,  '',
               'Policy: any HIGH or CRITICAL vulnerability (including unfixed) fails the gate. Scanner errors, stale DB, malformed or missing reports also fail.', '',
               `[Open this run and its report artifacts](${url})`, '', coverage, '',
-              'Coverage jobs: source lockfiles, six product final images, eleven locally built non-GPU template outputs and thirteen upstream bases (including builder/donor/external Python inputs), registry blobs only. Raw base findings are not final installed-package evidence. GPU/CUDA remains SOURCE_ONLY/HOLD. When detailed rendering is unavailable, base details remain in the base-images artifact.',
+              'Coverage jobs: source lockfiles, six product final images, one explicitly nondefault controlled-base prototype, eleven locally built non-GPU template outputs and thirteen upstream bases (including builder/donor/external Python inputs), registry blobs only. Raw base findings are not final installed-package evidence. GPU/CUDA remains SOURCE_ONLY/HOLD. When detailed rendering is unavailable, base details remain in the base-images artifact.',
               'Counts, package versions and advisory details are in the JSON reports. This comment reports overall job status; it does not invent counts or claim zero vulnerabilities outside that coverage.'
             ].join('\n');
             const decorated = process.env.REPORT_BODY || '';
