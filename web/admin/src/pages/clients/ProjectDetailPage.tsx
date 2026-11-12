@@ -377,11 +377,12 @@ export default function ProjectDetailPage() {
     onError: (e: Error) => toast.error(e.message),
   })
 
-  // GET /admin/project/{id}/external-service/{esid} (projectmut.go projectAddExternalService):
+  // POST /admin/project/{id}/external-service/{esid} (projectmut.go projectAddExternalService):
   // bootstraps the project onto that provider — a PVE pool for proxmox, an RGW user + stored S3
   // credential for ceph-s3, a namespace for kamaji/dbaas. Idempotent, so a re-attach is safe.
+  // State-changing, so POST only (a GET answers 405).
   const attachService = useMutation({
-    mutationFn: (esID: string) => apiFetch(`${projectPath}/external-service/${esID}`),
+    mutationFn: (esID: string) => apiFetch(`${projectPath}/external-service/${esID}`, { method: "POST" }),
     onSuccess: () => {
       toast.success("Cloud provider attached")
       setAttachOpen(false)

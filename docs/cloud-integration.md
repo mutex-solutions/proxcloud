@@ -511,7 +511,9 @@ never get Proxmox credentials, and access is enforced by platform RBAC.
 Projects provision onto every non-disabled provider the first time they are
 entered (`enableAndBootstrap`). Projects that predate a provider are attached
 from the admin project page (Cloud services → Attach provider, which calls
-`GET /admin/project/{id}/external-service/{esid}`).
+`POST /admin/project/{id}/external-service/{esid}`; a `GET` answers 405). The
+attach is idempotent: a service the project already carries is not provisioned
+again and gets no second binding.
 
 Teardown (`project/teardown.go`) destroys the pool's VMs and the pool, the
 project's vnets and EVPN zone, its security groups, releases public IPs and

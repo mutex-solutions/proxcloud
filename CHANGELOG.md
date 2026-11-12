@@ -21,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Sandbox image mirroring from the portal is not yet enabled; the page gives the `images.yaml`
   pin and the follow-up design is in `docs/template-updates.md`.
 
+### Fixed
+
+- The admin attach of a cloud provider to a project is now
+  `POST /api/v1/admin/project/{id}/external-service/{externalServiceId}`; a `GET`, which
+  provisioned the project on the provider, now answers 405 and changes nothing (#214). The
+  attach stays idempotent: re-attaching a service the project already carries makes no
+  provider call and adds no second binding. Scripts calling the old `GET` must switch to `POST`.
+
 ## [0.4.0] - 2026-11-12
 
 First stable ProxCloud release, superseding the `v0.4.0-rc.1` prerelease. It is
