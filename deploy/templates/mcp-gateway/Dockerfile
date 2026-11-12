@@ -37,7 +37,7 @@ RUN npm install -g --prefix /opt/mcp/npm \
       server-perplexity-ask@0.1.3 \
  && npm cache clean --force
 ENV UV_TOOL_DIR=/opt/mcp/uv UV_TOOL_BIN_DIR=/opt/mcp/bin UV_PYTHON_INSTALL_DIR=/opt/mcp/python
-RUN python3 -m pip install --no-cache-dir --break-system-packages uv==0.13.0 \
+RUN python3 -m pip install --no-cache-dir --break-system-packages uv==0.13.4 \
  && for p in mcp-server-fetch==2026.11.4 mcp-server-time==2026.11.4 mcp-server-git==2026.11.4 \
              duckduckgo-mcp-server==0.7.0 wikipedia-mcp==2.0.1 markitdown-mcp==0.0.1a8; do \
       uv tool install --no-cache "$p" || exit 1; done

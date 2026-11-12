@@ -1,0 +1,243 @@
+name: security-scan
+
+# Inventory and gate the exact PR head (not GitHub's synthetic merge commit).
+# Builds are disposable, local-only hosted-runner images: no login, push, PVE,
+# VM/template build, deployment, secrets, or persistent/self-hosted runner access.
+# Covers lockfiles and six product final images, NOT template/builder base images.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-scan-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  TRIVY_VERSION: '0.76.2'
+  TRIVY_SHA256: bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf
+  TRIVY_NO_PROGRESS: 'true'
+  TRIVY_DISABLE_VEX_NOTICE: 'true'
+
+jobs:
+  scan:
+    name: scan-${{ matrix.image }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - image: filesystem
+            dockerfile: ''
+            context: .
+            app: ''
+          - image: api
+            dockerfile: deploy/Dockerfile
+            context: .
+            app: ''
+          - image: web-client
+            dockerfile: web/Dockerfile
+            context: web
+            app: client
+          - image: web-admin
+            dockerfile: web/Dockerfile
+            context: web
+            app: admin
+          - image: sandbox-proxy
+            dockerfile: deploy/sandbox-proxy.Dockerfile
+            context: .
+            app: ''
+          - image: sandbox-runtime
+            dockerfile: deploy/sandbox-runtime.Dockerfile
+            context: .
+            app: ''
+          - image: sandbox-import
+            dockerfile: deploy/sandbox-import.Dockerfile
+            context: .
+            app: ''
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Fresh per-leg database; no cache restore and no runner context at workflow scope.
+      TRIVY_CACHE_DIR: ${{ runner.temp }}/security-scan-cache
+      IMAGE_NAME: ${{ matrix.image }}
+      DOCKERFILE: ${{ matrix.dockerfile }}
+      BUILD_CONTEXT: ${{ matrix.context }}
+      APP: ${{ matrix.app }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Record source and test report gate
+        run: |
+          set -euo pipefail
+          mkdir -p result tools
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          printf '%s\n' "$SOURCE_SHA" > result/source-sha.txt
+          printf '%s\n' "$TRIVY_SHA256" > result/trivy-sha256.txt
+          python3 -m unittest discover -s .github/scripts/tests -p test_scan_report.py -v
+
+      - name: Download and verify official Trivy release before extracting binary
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --retry 3 \
+            --proto '=https' --proto-redir '=https' \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+            --output tools/trivy.tar.gz
+          test "$(stat -c %s tools/trivy.tar.gz)" = 52714130
+          printf '%s  %s\n' "$TRIVY_SHA256" tools/trivy.tar.gz | sha256sum --check --strict
+          tar xzf tools/trivy.tar.gz -C tools trivy
+          tools/trivy --version > result/trivy-version.txt
+
+      - name: Download fresh vulnerability database
+        run: |
+          set -euo pipefail
+          tools/trivy image --config '' --ignorefile '' --disable-telemetry \
+            --skip-version-check --download-db-only
+          cp "$TRIVY_CACHE_DIR/db/metadata.json" result/db-metadata.json
+          python3 .github/scripts/check_scan_report.py --db-metadata result/db-metadata.json
+
+      - name: Scan source lockfiles including development dependencies
+        if: matrix.image == 'filesystem'
+        run: |
+          set -euo pipefail
+          tools/trivy fs --config '' --ignorefile '' --disable-telemetry \
+            --skip-version-check --ignore-unfixed=false --scanners vuln --include-dev-deps \
+            --skip-dirs .git,.claude,tools,result --skip-db-update \
+            --severity HIGH,CRITICAL --exit-code 0 --format json \
+            --output result/scan.json .
+
+      - name: Build exact recipe output locally without publishing
+        if: matrix.image != 'filesystem'
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -n "$APP" ]; then args+=(--build-arg "APP=$APP"); fi
+          docker build --pull --platform linux/amd64 --load \
+            --file "$DOCKERFILE" --tag "security-scan:${SOURCE_SHA}" \
+            "${args[@]}" "$BUILD_CONTEXT" 2>&1 | tee result/build.log
+          docker image inspect "security-scan:${SOURCE_SHA}" \
+            --format '{{.Id}}' > result/image-id.txt
+
+      - name: Scan actual local image including unfixed vulnerabilities
+        if: matrix.image != 'filesystem'
+        run: |
+          set -euo pipefail
+          tools/trivy image --config '' --ignorefile '' --disable-telemetry \
+            --skip-version-check --ignore-unfixed=false --exit-on-eol 1 \
+            --image-src docker --platform linux/amd64 \
+            --scanners vuln --skip-db-update --severity HIGH,CRITICAL \
+            --exit-code 0 --format json --output result/scan.json \
+            "security-scan:${SOURCE_SHA}"
+
+      - name: Fail closed on malformed reports, stale DB, or any HIGH/CRITICAL
+        run: |
+          set -euo pipefail
+          args=()
+          if [ "$IMAGE_NAME" != filesystem ]; then
+            args+=(--expected-image-id "$(<result/image-id.txt)")
+          fi
+          python3 .github/scripts/check_scan_report.py \
+            --db-metadata result/db-metadata.json "${args[@]}" result/scan.json
+
+      - name: Preserve reports and provenance even when scan or gate fails
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: security-${{ matrix.image }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: result/
+          if-no-files-found: error
+          retention-days: 3
+
+  security-gate:
+    name: security-gate
+    if: always()
+    needs: scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every scan leg to succeed
+        env:
+          SCAN_RESULT: ${{ needs.scan.result }}
+        run: |
+          set -euo pipefail
+          if [ "$SCAN_RESULT" != success ]; then
+            echo 'Security gate blocked: a scan failed, was cancelled, or was skipped.'
+            exit 1
+          fi
+          echo 'All filesystem and six final-image scans passed.'
+
+  comment:
+    name: security-comment
+    if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    needs: [scan, security-gate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      pull-requests: write
+    # No checkout or execution of PR files in this write-token job. Reports remain
+    # downloadable data; this initial summary does not parse artifact archives.
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          SCAN_RESULT: ${{ needs.scan.result }}
+          GATE_RESULT: ${{ needs.security-gate.result }}
+        with:
+          script: |
+            const marker = '<!-- proxcloud-security-scan-v1 -->';
+            const { owner, repo } = context.repo;
+            const number = context.payload.pull_request.number;
+            const sha = context.payload.pull_request.head.sha;
+            if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error('Invalid source SHA');
+            const pr = await github.rest.pulls.get({ owner, repo, pull_number: number });
+            if (pr.data.state !== 'open' || pr.data.head.sha !== sha) {
+              core.info('Not commenting: PR closed or this run belongs to an older head.');
+              return;
+            }
+            const states = new Set(['success', 'failure', 'cancelled', 'skipped']);
+            const scan = process.env.SCAN_RESULT;
+            const gate = process.env.GATE_RESULT;
+            if (!states.has(scan) || !states.has(gate)) throw new Error('Unknown scan/gate state');
+            const names = ['filesystem', 'api', 'web-client', 'web-admin', 'sandbox-proxy', 'sandbox-runtime', 'sandbox-import'];
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
+              owner, repo, run_id: context.runId, per_page: 100
+            });
+            const present = new Set(artifacts.filter(a => !a.expired).map(a => a.name));
+            const coverage = names.map(n => `- ${n}: ${present.has(`security-${n}-${sha}`) ? 'report artifact present' : '**report artifact missing**'}`).join('\n');
+            const url = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const status = gate === 'success' ? 'PASS' : 'BLOCKED / INCOMPLETE';
+            const body = [marker, `## Security scan: ${status}`, '',
+              `Source commit: \`${sha}\``,
+              `Scan matrix result: **${scan}**; required gate: **${gate}**.`, '',
+              'Policy: any HIGH or CRITICAL vulnerability (including unfixed) fails the gate. Scanner errors, stale DB, malformed or missing reports also fail.', '',
+              `[Open this run and its report artifacts](${url})`, '', coverage, '',
+              'Coverage: source lockfiles and six product final images only. Sandbox template images and builder-stage bases are not covered by this matrix yet.',
+              'Counts, package versions and advisory details are in the JSON reports. This comment reports overall job status; it does not invent counts or claim zero vulnerabilities outside that coverage.'
+            ].join('\n');
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: number, per_page: 100
+            });
+            const matches = comments.filter(c => c.user?.login === 'github-actions[bot]' && c.user?.type === 'Bot' && c.body?.startsWith(marker));
+            matches.sort((a, b) => b.id - a.id);
+            const current = await github.rest.pulls.get({ owner, repo, pull_number: number });
+            if (current.data.state !== 'open' || current.data.head.sha !== sha) {
+              core.info('Not writing: PR head changed while summary was prepared.');
+              return;
+            }
+            if (matches.length) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: matches[0].id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number: number, body });
+            }
