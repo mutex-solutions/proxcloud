@@ -149,8 +149,11 @@ acceptance is not an off-site backup or synchronous-replication durability promi
 
 ## Reproducible tests (only disposable local PostgreSQL)
 
+Use a local Go toolchain that satisfies the `go.mod` minimum (1.26.0 or newer;
+CI uses exactly 1.27.4). `GOTOOLCHAIN=local` makes an older toolchain fail
+instead of silently downloading another one.
+
 ```sh
-export PATH=/home/mishuhashi/.local/share/mise/installs/go/1.25.14/bin:$PATH
 export GOTOOLCHAIN=local
 export GOCACHE="$R/.claude/go-build"
 go test ./internal/durablejobs ./internal/pgdoc ./internal/platform/billingjob ./internal/platform/chargefanout ./internal/platform/pricing ./internal/config ./cmd/api

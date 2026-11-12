@@ -6,8 +6,14 @@ Getting a ProxCloud backend and its SPAs running on your machine.
 
 - **Docker** (with Compose) — the easiest way to run the whole stack, and
   required for the integration suite (testcontainers).
-- **Go 1.25+** — the backend (`go.mod` pins `go 1.25`; module
-  `github.com/mutex-solutions/proxcloud`).
+- **Go 1.26.0 minimum; Go 1.27.4 build/test target** — the backend's
+  [root module](../go.mod) intentionally declares `go 1.26.0` for the updated
+  dependency graph (`golang.org/x/crypto v0.58.0` requires Go 1.26.0). CI and
+  release builders select exact **Go 1.27.4**, the latest supported stable release
+  at selection time. This is a source policy, not a claim of executed tests:
+  fresh compiler, unit/integration, six-root-binary and separate external envd
+  gates remain pending. See the [Go build baseline](supported-go-build-baseline.md)
+  for scope and required evidence.
 - **Node 24 / npm** — use the frontend CI toolchain for the two Vite + React 19
   SPAs (`web/client`, `web/admin`), with `npm ci` and each committed lockfile.
   Do not assume an arbitrary Node 20 installation satisfies the current Vite engines.

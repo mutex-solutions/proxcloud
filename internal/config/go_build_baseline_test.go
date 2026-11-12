@@ -1,6 +1,7 @@
 package config
 
 import (
+	"go/version"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -10,7 +11,33 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const supportedGoBuildVersion = "1.26.11"
+const (
+	supportedGoBuildVersion  = "1.27.4"
+	supportedGoModuleMinimum = "1.26.0"
+)
+
+// TestSupportedGoVersionPolicy keeps the selected stable compiler and the
+// dependency-driven module minimum explicit, valid, and intentionally distinct.
+func TestSupportedGoVersionPolicy(t *testing.T) {
+	if supportedGoBuildVersion != "1.27.4" {
+		t.Errorf("build compiler = %q; want selected stable release 1.27.4", supportedGoBuildVersion)
+	}
+	if supportedGoModuleMinimum != "1.26.0" {
+		t.Errorf("module minimum = %q; want dependency-driven minimum 1.26.0", supportedGoModuleMinimum)
+	}
+
+	compiler := "go" + supportedGoBuildVersion
+	minimum := "go" + supportedGoModuleMinimum
+	if !version.IsValid(compiler) || !version.IsValid(minimum) {
+		t.Fatalf("invalid Go version policy: compiler %q, minimum %q", compiler, minimum)
+	}
+	if version.Compare(minimum, compiler) > 0 {
+		t.Errorf("module minimum %s exceeds build compiler %s", minimum, compiler)
+	}
+	if minimum == compiler {
+		t.Error("module minimum must remain separate from the exact build compiler patch")
+	}
+}
 
 // TestSupportedGoBuildBaseline checks source declarations only. It does not build
 // any binary, inspect artifact provenance, or cover the external envd module.
@@ -102,8 +129,8 @@ func TestSupportedGoBuildBaseline(t *testing.T) {
 	t.Run("module minimum is separate", func(t *testing.T) {
 		source := goBuildBaselineRead(t, root, "go.mod")
 		minimum := regexp.MustCompile(`(?m)^go[\t ]+([^\r\n]+)`).FindAllStringSubmatch(source, -1)
-		if len(minimum) != 1 || strings.TrimSpace(minimum[0][1]) != "1.25.0" {
-			t.Fatal("keep root module minimum go 1.25.0 separate from the build compiler pin")
+		if len(minimum) != 1 || strings.TrimSpace(minimum[0][1]) != supportedGoModuleMinimum {
+			t.Fatalf("keep root module minimum go %s separate from the build compiler pin", supportedGoModuleMinimum)
 		}
 	})
 }

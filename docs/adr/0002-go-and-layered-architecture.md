@@ -24,7 +24,8 @@ HTTP route straight down to the database.
 
 ## Decision
 
-Implement the backend in **Go** (currently Go 1.25, see `go.mod`) as one binary,
+Implement the backend in **Go** (the language minimum is declared in `go.mod`; the
+exact build compiler is in the [supported Go build baseline](../supported-go-build-baseline.md)) as one binary,
 `cmd/api`, that serves both the application router (`:8080`) and a management
 router (`:8081`).
 

@@ -33,7 +33,9 @@ integration`), so they are excluded from `go test ./...` and only run when you
 ask for them:
 
 ```sh
-go test -tags=integration ./test/integration/... ./cmd/api/...  # matches hosted CI
+# Hosted CI runs both of these:
+go test -tags=integration ./test/integration/... ./cmd/api/...
+go test -tags=integration ./internal/platform/project -run '^TestBuildArchiveSurvivesCleanupAndRestart$'
 # make test-integration runs the test/integration package subset
 ```
 

@@ -7,7 +7,9 @@ By participating you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md)
 
 ## Prerequisites
 
-- **Go 1.25+** — the backend.
+- **Go 1.26.0 or newer** for the backend (the `go.mod` minimum). CI and the image
+  builders use exactly Go 1.27.4; see the
+  [supported Go build baseline](docs/supported-go-build-baseline.md).
 - **Node.js 24** and npm — matches hosted frontend CI for both React consoles.
   The locked Vite toolchain requires at least Node 20.19 or 22.12 on those older
   release lines; arbitrary Node 20.x is not enough.

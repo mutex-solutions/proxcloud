@@ -3,7 +3,7 @@
 # image ships `psql` (postgresql-client) so the config-as-code seed (deploy/seed)
 # can run from this pod against PROXCLOUD_DB_URL, alongside the Go binary.
 
-FROM golang:1.26.11-bookworm AS build
+FROM golang:1.27.4-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

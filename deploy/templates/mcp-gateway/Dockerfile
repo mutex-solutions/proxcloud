@@ -6,7 +6,7 @@
 # config, which never reaches the portal's database or logs.
 ARG BASE
 
-FROM docker.io/library/golang:1.26.11-bookworm AS gateway
+FROM docker.io/library/golang:1.27.4-bookworm AS gateway
 WORKDIR /src
 COPY --from=src go.mod go.sum ./
 RUN go mod download
