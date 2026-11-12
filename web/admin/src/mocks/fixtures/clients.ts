@@ -301,6 +301,9 @@ export const costInfoByBp: Record<string, Doc> = {
     currentMonthCosts: 342.18,
     lastMonthCosts: 918.02,
     forecastedMonthEndCosts: 964.4,
+    forecastApproximate: false,
+    forecastApproximateReasons: [],
+    forecastUnratedTypes: [],
     billingProfileCostInfo: {
       currentMonthCostsByType: { SERVER: 296.4, VOLUME: 31.18, OBJECT_STORAGE: 14.6 },
       lastMonthCostsByType: { SERVER: 802.1, VOLUME: 84.52, OBJECT_STORAGE: 31.4 },
@@ -328,6 +331,10 @@ export const costInfoByBp: Record<string, Doc> = {
     currentMonthCosts: 96.75,
     lastMonthCosts: 402.33,
     forecastedMonthEndCosts: 272.8,
+    // Bucket size is a usage total: held at its month-to-date value → approximate.
+    forecastApproximate: true,
+    forecastApproximateReasons: ["usage"],
+    forecastUnratedTypes: [],
     billingProfileCostInfo: {
       currentMonthCostsByType: { OBJECT_STORAGE: 96.75 },
       lastMonthCostsByType: { SERVER: 344.1, OBJECT_STORAGE: 58.23 },
@@ -345,6 +352,9 @@ export const costInfoByBp: Record<string, Doc> = {
     currentMonthCosts: 0,
     lastMonthCosts: 0,
     forecastedMonthEndCosts: 0,
+    forecastApproximate: false,
+    forecastApproximateReasons: [],
+    forecastUnratedTypes: [],
     billingProfileCostInfo: { currentMonthCostsByType: {}, lastMonthCostsByType: {}, topResourcePrices: [] },
   },
 }

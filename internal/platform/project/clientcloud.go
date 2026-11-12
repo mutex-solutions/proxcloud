@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/shopspring/decimal"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/dbaas"
@@ -23,14 +24,14 @@ import (
 func jsonNum(s string) json.Number { return json.Number(s) }
 
 // emptyCostInfo is the zero CostInfo envelope (every field present) used when a project or its
-// billing profile has no bills yet — mirrors billing.CostInfoMap's shape.
-func emptyCostInfo(zero json.Number) map[string]any {
-	return map[string]any{
-		"lastMonthCosts": zero, "currentMonthCosts": zero,
-		"currentMonthCostsByType": map[string]any{}, "forecastedMonthEndCostsByType": map[string]any{},
-		"lastMonthCostsByType": map[string]any{}, "forecastedMonthEndCosts": zero, "topResourcePrices": []any{},
-	}
+// billing profile has no bills yet — billing.CostInfoMap's shape.
+func emptyCostInfo() map[string]any {
+	return billing.CostInfoMap(decimal.Zero, decimal.Zero, map[string]any{}, map[string]any{}, []any{})
 }
+
+// SetForecaster wires the month-end forecast (the charge job's resolution and rating, read-only).
+// nil keeps the forecast at the current cost, flagged approximate.
+func (h *Handler) SetForecaster(f billing.Forecaster) { h.forecaster = f }
 
 // initUI returns {id, menu, kycRequests}. The menu = base
 // provider items (admin Custom Menu) + the cloud service items derived from every non-disabled
@@ -256,9 +257,12 @@ func (h *Handler) projectCostInfo(w http.ResponseWriter, r *http.Request) {
 	//     projectId), so only this project's cost + top resources show.
 	//   - billingProfileCostInfo = the org (billing-profile) aggregate across every project.
 	// Balance/credits/due stay org-level — funds are pooled at the billing profile, not per project.
-	projCostInfo, bpCostInfo := emptyCostInfo(zero), emptyCostInfo(zero)
+	projCostInfo, bpCostInfo := emptyCostInfo(), emptyCostInfo()
 	if bpID != "" {
 		if bills, err := h.billing.BillsByBillingProfile(r.Context(), bpID); err == nil {
+			// Month-end forecast: current cost + what the charge job still adds this month for what
+			// runs now (billing/forecast.go). Same projection for the profile and this project.
+			fc := billing.MonthEndForecast(r.Context(), h.forecaster, bpID, bills, now)
 			// resource-id → createdAt (this project's cache) so each topResourcePrices entry carries
 			// the resource's real creation time. Absent = the resource is gone: the console shows
 			// it as deleted and does not link to it.
@@ -272,19 +276,26 @@ func (h *Handler) projectCostInfo(w http.ResponseWriter, r *http.Request) {
 			}
 			createdFn := func(id string) *time.Time { return created[id] }
 			bpCostInfo = billing.CostInfoMap(billing.BillCostBreakdown(bills, now, createdFn))
+			billing.ApplyForecast(bpCostInfo, fc, "")
 			if ci, ok := billing.ProjectCostInfoMap(bills, now, createdFn)[p.ID].(map[string]any); ok {
 				projCostInfo = ci
 			}
+			billing.ApplyForecast(projCostInfo, fc, p.ID)
 		}
 	}
 	// The FE dashboard reads the per-project cost from `projects[projectId]` (Top-Cost-Generators +
-	// the "from the current project" lines); billingProfileCostInfo is the org aggregate.
+	// the "from the current project" lines); billingProfileCostInfo is the org aggregate. The
+	// top-level cost fields repeat this project's.
 	httpx.OK(w, map[string]any{
 		"projects":               map[string]any{p.ID: projCostInfo},
 		"billingProfileCostInfo": bpCostInfo,
 		"balance":                balance, "dueAmount": due, "accountCredit": credit, "promotionalCredits": promo,
 		"currentMonthCosts": projCostInfo["currentMonthCosts"], "lastMonthCosts": projCostInfo["lastMonthCosts"],
-		"proratedMonthEndCosts": projCostInfo["currentMonthCosts"], "forecastedMonthEndCosts": projCostInfo["currentMonthCosts"],
+		"proratedMonthEndCosts":      projCostInfo["forecastedMonthEndCosts"],
+		"forecastedMonthEndCosts":    projCostInfo["forecastedMonthEndCosts"],
+		"forecastApproximate":        projCostInfo["forecastApproximate"],
+		"forecastApproximateReasons": projCostInfo["forecastApproximateReasons"],
+		"forecastUnratedTypes":       projCostInfo["forecastUnratedTypes"],
 	})
 }
 

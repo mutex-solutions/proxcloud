@@ -350,7 +350,13 @@ function DashboardTab({ bpId, currency }: { bpId: string; currency?: string }) {
         <Stat label="Due amount" amount={cost.dueAmount} currency={currency} />
         <Stat label="Current month" amount={cost.currentMonthCosts} currency={currency} />
         <Stat label="Last month" amount={cost.lastMonthCosts} currency={currency} />
-        <Stat label="Forecasted month end" amount={cost.forecastedMonthEndCosts} currency={currency} />
+        {/* An estimate (current + running resources × time left in the UTC billing month); the API
+            flags it approximate when part of it is held at its current cost. */}
+        <Stat
+          label={cost.forecastApproximate ? "Est. month end (approximate)" : "Est. month end"}
+          amount={cost.forecastedMonthEndCosts}
+          currency={currency}
+        />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
@@ -404,7 +410,7 @@ function DashboardTab({ bpId, currency }: { bpId: string; currency?: string }) {
                   <TableHead>Type</TableHead>
                   <TableHead>Created</TableHead>
                   <TableHead className="text-right">Current cost</TableHead>
-                  <TableHead className="text-right">Forecast</TableHead>
+                  <TableHead className="text-right">Est. month end</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>

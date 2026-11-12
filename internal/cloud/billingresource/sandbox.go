@@ -81,6 +81,26 @@ func (p *SandboxProvider) GetBillingInformation(_ context.Context, _ billingapi.
 	}}, nil
 }
 
+// SandboxPlannedEnd is where a RUNNING sandbox's charge will stop on its own: its shutdownTime, on the
+// same minute rounding the charge applies when it ends. nil when it has none (it runs until stopped)
+// or is not running. The month-end forecast uses it so a sandbox with a timeout is not projected to
+// run until the end of the month.
+func SandboxPlannedEnd(cr *cloud.CloudResource) *time.Time {
+	if cr == nil || str(cr.Data["status"]) != "RUNNING" {
+		return nil
+	}
+	running, err := time.Parse(time.RFC3339, str(cr.Data["runningSince"]))
+	if err != nil {
+		return nil
+	}
+	sd := str(cr.Data["shutdownTime"])
+	if _, err := time.Parse(time.RFC3339, sd); err != nil {
+		return nil
+	}
+	end := billedEnd(running, sd)
+	return &end
+}
+
 // billedEnd is the minute runningSince falls in plus the runtime rounded up to whole minutes, at least one.
 func billedEnd(running time.Time, endedAt string) time.Time {
 	end, err := time.Parse(time.RFC3339, endedAt)

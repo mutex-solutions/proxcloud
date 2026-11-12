@@ -18,7 +18,7 @@ import {
   useBillingSummary, useCostInfo, useFeatures, useLocations, useProject, useProjectGpuCapacity,
   useProjectId, useProjectQuota, useUIMenu,
 } from "@/lib/hooks"
-import { fmtMoney, timeAgo } from "@/lib/format"
+import { fmtMoney, forecastExplanation, forecastLabel, timeAgo } from "@/lib/format"
 import type { CostInfo } from "@/lib/types"
 import { isObjectProvider } from "@/lib/types"
 
@@ -238,16 +238,21 @@ export function DashboardPage() {
             label="This month"
             numericValue={projectCost?.currentMonthCosts ?? 0}
             format={{ style: "currency", currency }}
-            hint={`Forecast ${fmtMoney(projectCost?.forecastedMonthEndCosts, currency)}`}
+            hint={forecastLabel(projectCost, currency)}
+            hintTitle={forecastExplanation(projectCost)}
             icon={CalendarClock}
             trend={
-              projectCost?.forecastedMonthEndCosts && projectCost?.lastMonthCosts
+              // The trend compares the month-end estimate; with no projection at all it would just
+              // be this month so far against a full month, so it is left out.
+              projectCost?.forecastedMonthEndCosts &&
+              projectCost?.lastMonthCosts &&
+              !projectCost.forecastApproximateReasons?.includes("unavailable")
                 ? {
                     direction:
                       Number(projectCost.forecastedMonthEndCosts) >= Number(projectCost.lastMonthCosts)
                         ? "up"
                         : "down",
-                    label: "vs last month",
+                    label: "est. vs last month",
                     // Rising spend is a caution signal, not a win.
                     tone:
                       Number(projectCost.forecastedMonthEndCosts) >= Number(projectCost.lastMonthCosts)

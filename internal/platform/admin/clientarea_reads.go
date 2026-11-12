@@ -173,8 +173,8 @@ func (h *Handler) billAdminList(w http.ResponseWriter, r *http.Request) {
 
 // billingProfileAdminList returns every billing profile for the admin table: the profile doc +
 // the 6 computed financials (balance/accountCredit/promotionalCredit via the balance layer;
-// currentMonth/lastMonth/forecastedMonthEnd default 0 — usage metering is not available without live
-// cloud metrics, and the per-field usage rollups are not wired in). Sorted _id DESC.
+// currentMonth/lastMonth from the bills; forecastedMonthEnd = currentMonth, flagged
+// forecastApproximate — the projection is per profile, in its cost info). Sorted _id DESC.
 func (h *Handler) billingProfileAdminList(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:billing_profile:read") {
 		return
@@ -206,8 +206,10 @@ func (h *Handler) billingProfileAdminList(w http.ResponseWriter, r *http.Request
 			if v, err := bal.CurrentBalance(r.Context(), id, now); err == nil {
 				balance = json.Number(v.String())
 			}
-			// This Month / Prev. Month / Forecast — the profile's bill-item net per month (same bill
-			// summation as the client cost-info dashboard; forecast = current, prorate deferred).
+			// This Month / Prev. Month — the profile's bill-item net per month (same bill summation as
+			// the client cost-info dashboard). forecastedMonthEnd stays the current cost here: the
+			// projection resolves and rates every billable resource of the profile, too heavy for
+			// every row of a list. forecastApproximate says so; the profile's cost info projects it.
 			if bills, err := h.billing.BillsByBillingProfile(r.Context(), id); err == nil {
 				cur, lst := billing.MonthlyBillCosts(bills, now)
 				currentMonth = json.Number(cur.String())
@@ -221,6 +223,7 @@ func (h *Handler) billingProfileAdminList(w http.ResponseWriter, r *http.Request
 		sd["currentMonth"] = currentMonth
 		sd["lastMonth"] = lastMonth
 		sd["forecastedMonthEnd"] = forecast
+		sd["forecastApproximate"] = true
 		out = append(out, sd)
 	}
 	emitAdminList(w, pg, out, total)

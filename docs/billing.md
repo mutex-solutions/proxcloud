@@ -278,6 +278,38 @@ Each cadence tick **accumulates** onto a per-resource `BillItem`:
 
 The result is a bill whose items track a running, capped, cadence-accurate cost.
 
+### Month-end forecast
+
+The cost-info reads (`GET /project/{id}/cost-info`, `GET /bill/{bp}/cost-info`,
+`GET /admin/billing-profile/{id}/cost-info`) report `forecastedMonthEndCosts` =
+`currentMonthCosts` + what the charge job will still add before the month closes for the
+resources it bills right now (`billing/forecast.go`). It is an estimate, and it reuses the charge
+job instead of pricing anything itself: `billingjob.Service.ForecastInput` resolves the profile's
+billable resources exactly as a pass does (an `ACTIVE` profile, its `ENABLED` projects, the provider
+registry with its eligibility rules, the price-plan rules `ChargeRules` selects) and rates each one
+with the same `Engine`, read-only. `pricing.ProjectedAccrual` then follows the bill-item accrual
+from each item's watermark to the month end: the per-unit `round16` amount × the units left, stopping
+at the time-unit limit and the item cap.
+
+- **The month is the billing cycle**: UTC calendar months, the same for every profile (there is no
+  per-profile time zone). The units left are `ceil((month end − watermark) / unit)`: right after the
+  hourly pass, the whole hours left; between passes it includes the hour in progress. A `month` rule
+  adds its amount once if it has not been charged this month (normally it has, up front).
+- **Only what keeps accruing** is projected: an ineligible resource (a server in `BUILD`/`ERROR`) and a
+  deleted one add nothing more; an ended or timed sandbox stops at its end. A suspended profile or a
+  disabled project projects nothing: forecast = current.
+- `forecastedMonthEndCostsByType` is `currentMonthCostsByType` plus the projection per category, so
+  the categories add up to the total; each `topResourcePrices` entry's `forecastedCost` is its own.
+- **Not modeled**: tax, savings-contract discounts and price-adjustment rules (the current cost is the
+  sum of bill-item nets, without them, so the forecast is too); future price or resource changes.
+
+`forecastApproximate` is true, with `forecastApproximateReasons`, when part of it is held at its
+current cost instead of projected: `unrated` (the rules fail on a resource; its types are in
+`forecastUnratedTypes`), `usage` (a usage total such as traffic, an `OVERWRITE_TOTAL` rule, stays at
+its month-to-date value), `stale` (a provider's metering is stale), `unavailable` (no projection
+could be made: the forecast is the current cost). The admin profile list keeps
+`forecastedMonthEnd` = current, flagged approximate: projecting every row of a list is too costly.
+
 ### Metering staleness
 
 The state sampler stamps `meterState.lastOkAt` per Proxmox provider. While the cluster does

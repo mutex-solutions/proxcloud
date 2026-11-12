@@ -372,6 +372,9 @@ on("GET /admin/billing-profile/:id/cost-info", ({ params }) => ({
     currentMonthCosts: 0,
     lastMonthCosts: 0,
     forecastedMonthEndCosts: 0,
+    forecastApproximate: false,
+    forecastApproximateReasons: [],
+    forecastUnratedTypes: [],
     billingProfileCostInfo: { currentMonthCostsByType: {}, lastMonthCostsByType: {}, topResourcePrices: [] },
   },
 }))

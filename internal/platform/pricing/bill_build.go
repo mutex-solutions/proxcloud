@@ -270,6 +270,69 @@ func updateAppliedPricePlanRule(result PricePlanRuleResult, applied *BillItemApp
 	}
 }
 
+// ProjectedAccrual is what `units` more charge passes of timeUnit would add to a bill item, given the
+// resource's rating results for that time unit (the month-end forecast; nothing is written). item is
+// the resource's bill item, nil when it has none yet; net is that item's net as the projection
+// stands (item.NetAmount plus what earlier time units already projected onto it). It follows
+// updateBillItems:
+//   - per unit it adds Σ round16(amount), the per-unit accrual createAppliedPricePlanRule and
+//     updateAppliedPricePlanRule multiply by the units;
+//   - the units stop at the time-unit limit (limit − units already charged this month), so a month
+//     rule charged once is never projected again;
+//   - the item stops at its cap (getTotalCap): nothing is added once its net reaches it.
+//
+// An OVERWRITE_TOTAL result on a minute or hour rule adds nothing: its amount is a month-to-date
+// usage total that replaces the previous one, and how the usage grows is unknown. usageHeld reports
+// that such a total was held at its current value, so the caller can call the forecast approximate.
+// On a month rule the single charge stores the amount as is, so it counts like any other.
+func ProjectedAccrual(bc BillingContext, timeUnit string, results []PricePlanRuleResult, item *BillItem, net decimal.Decimal, units int64) (add decimal.Decimal, usageHeld bool) {
+	if units <= 0 {
+		return decimal.Zero, false
+	}
+	perUnit := decimal.Zero
+	for i := range results {
+		overwrite := applyOverwriteTotal(results[i].PricePlanRule) && timeUnit != TimeUnitMonth
+		for _, a := range results[i].Amounts {
+			if overwrite {
+				usageHeld = usageHeld || !a.NetAmount.IsZero()
+				continue
+			}
+			perUnit = perUnit.Add(round16(a.NetAmount))
+		}
+	}
+	if perUnit.IsZero() {
+		return decimal.Zero, usageHeld
+	}
+	var used int64
+	if item != nil && item.TimeUnits != nil {
+		var counter *int64
+		switch timeUnit {
+		case TimeUnitMinute:
+			counter = item.TimeUnits.Minute
+		case TimeUnitHour:
+			counter = item.TimeUnits.Hour
+		case TimeUnitMonth:
+			counter = item.TimeUnits.Month
+		}
+		if counter != nil {
+			used = *counter
+		}
+	}
+	units = min64(units, int64(bc.timeUnitLimit(timeUnit))-used)
+	if units <= 0 {
+		return decimal.Zero, usageHeld
+	}
+	totalCap := getTotalCap(bc, timeUnit, results)
+	if !(totalCap.Cmp(net) > 0) {
+		return decimal.Zero, usageHeld
+	}
+	add = perUnit.Mul(decimal.NewFromInt(units))
+	if room := totalCap.Sub(net); add.Cmp(room) > 0 {
+		add = room
+	}
+	return add, usageHeld
+}
+
 // applyOverwriteTotal reports whether the rule overwrites the total (null applyMethod → false).
 func applyOverwriteTotal(rule PricePlanRule) bool { return rule.ApplyMethod == ApplyOverwriteTotal }
 

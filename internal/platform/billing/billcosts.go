@@ -27,9 +27,10 @@ const (
 // MonthlyBillCosts sums a profile's bill-item net amounts into the current-month and previous-month
 // buckets, keyed by each bill's billing-cycle start month (currentMonth/
 // lastMonth — the same per-month bill-net aggregation the client cost-info dashboard uses). The
-// forecast is left equal to current by the caller (the live prorated re-rate is deferred).
+// month-end forecast is built on top of it (forecast.go).
 func MonthlyBillCosts(bills []pricing.Bill, now time.Time) (current, last decimal.Decimal) {
 	current, last = decimal.Zero, decimal.Zero
+	now = now.UTC() // billing months are UTC (the cycle starts compared below are UTC)
 	curYear, curMonth, _ := now.Date()
 	lastT := now.AddDate(0, -1, 0)
 	lastYear, lastMonth, _ := lastT.Date()
@@ -61,8 +62,7 @@ type CreatedAtLookup func(resourceID string) *time.Time
 // cost fields): the current/previous-month net, the
 // cost-by-category maps (currentMonthCostsByType / lastMonthCostsByType — the admin costs-comparison
 // chart reads both), and the per-item topResourcePrices list (each entry mirrors a CloudResource so
-// the FE name/created helpers resolve). Forecast is left equal to current by the caller (prorate
-// deferred).
+// the FE name/created helpers resolve). The forecast fields are filled in by ApplyForecast.
 func BillCostBreakdown(bills []pricing.Bill, now time.Time, createdAt CreatedAtLookup) (current, last decimal.Decimal, byType, lastByType map[string]any, top []any) {
 	current, last = decimal.Zero, decimal.Zero
 	byCat := map[string]decimal.Decimal{}
@@ -72,6 +72,7 @@ func BillCostBreakdown(bills []pricing.Bill, now time.Time, createdAt CreatedAtL
 	// duplicate row, and the list is sorted by total cost so "top" actually means top spenders.
 	agg := map[string]*topEntry{}
 	order := []string{}
+	now = now.UTC() // billing months are UTC (the cycle starts compared below are UTC)
 	curYear, curMonth, _ := now.Date()
 	lastMonthTime := now.AddDate(0, -1, 0)
 	lastYear, lastMonth, _ := lastMonthTime.Date()
@@ -162,15 +163,23 @@ func canonicalResourceID(resourceType, resourceID string) string {
 
 // CostInfoMap renders a breakdown (current/last + by-type maps + topResourcePrices) into the CostInfo
 // envelope every field present (all fields non-null) shared by the profile-level and the
-// per-project cost info. Forecast = current (live prorate deferred).
+// per-project cost info. Until ApplyForecast projects it, the forecast is the current cost and says
+// so: forecastApproximate true, reason "unavailable".
 func CostInfoMap(cur, last decimal.Decimal, byType, lastByType map[string]any, top []any) map[string]any {
+	forecastByType := make(map[string]any, len(byType))
+	for k, v := range byType {
+		forecastByType[k] = v
+	}
 	return map[string]any{
 		"lastMonthCosts":                json.Number(last.String()),
 		"currentMonthCosts":             json.Number(cur.String()),
 		"currentMonthCostsByType":       byType,
-		"forecastedMonthEndCostsByType": byType,
+		"forecastedMonthEndCostsByType": forecastByType,
 		"lastMonthCostsByType":          lastByType,
 		"forecastedMonthEndCosts":       json.Number(cur.String()),
+		"forecastApproximate":           true,
+		"forecastApproximateReasons":    []string{ForecastUnavailable},
+		"forecastUnratedTypes":          []string{},
 		"topResourcePrices":             top,
 	}
 }

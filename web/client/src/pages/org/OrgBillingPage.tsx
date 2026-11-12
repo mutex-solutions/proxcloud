@@ -24,7 +24,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { apiFetch } from "@/lib/api"
 import { useBillingSummary, useOrgCostInfo, useProjectId, useProjects } from "@/lib/hooks"
 import type { BillingContact, BillingSummary, CostInfo, CreditCard, Gateway } from "@/lib/types"
-import { fmtMoney, fmtMoneyTight } from "@/lib/format"
+import { fmtMoney, fmtMoneyTight, forecastExplanation, forecastLabel } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import { gatewayLabel } from "@/pages/billing/NewCardDepositDialog"
 
@@ -202,13 +202,15 @@ export default function OrgBillingPage() {
           label={proj === "__all__" ? "All projects" : projName(proj)}
           numericValue={scopeTotal}
           format={{ style: "currency", currency }}
-          hint={month === "current" ? "This month" : "Last month"}
+          hint={month === "current" ? `This month · ${forecastLabel(scope, currency)}` : "Last month"}
+          hintTitle={month === "current" ? forecastExplanation(scope) : undefined}
         />
         <StatCard
           label="Org this month"
           numericValue={orgThis}
           format={{ style: "currency", currency }}
-          hint={`${projectIds.length} project${projectIds.length === 1 ? "" : "s"} billed`}
+          hint={`${projectIds.length} project${projectIds.length === 1 ? "" : "s"} · ${forecastLabel(data?.billingProfileCostInfo, currency)}`}
+          hintTitle={forecastExplanation(data?.billingProfileCostInfo)}
         />
         <StatCard
           label="Org last month"

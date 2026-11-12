@@ -18,6 +18,10 @@ export const billingSummary: BillingSummary = {
 export const costInfo: CostInfo = {
   currentMonthCosts: 342.18,
   forecastedMonthEndCosts: 941.0,
+  forecastedMonthEndCostsByType: { SERVER: 628.1, VOLUME: 134.48, DATABASE_CLUSTER: 89.38, IMAGE: 34.04, BUCKET: 55.0 },
+  forecastApproximate: true,
+  forecastApproximateReasons: ["usage"],
+  forecastUnratedTypes: [],
   lastMonthCosts: 887.55,
   currentMonthCostsByType: { SERVER: 228.4, VOLUME: 48.9, DATABASE_CLUSTER: 32.5, IMAGE: 12.38, BUCKET: 20.0 },
   lastMonthCostsByType: { SERVER: 610.2, VOLUME: 130.1, DATABASE_CLUSTER: 90.25, IMAGE: 32.0, BUCKET: 25.0 },
@@ -26,9 +30,9 @@ export const costInfo: CostInfo = {
   accountCredit: 50,
   promotionalCredits: 25,
   topResourcePrices: [
-    { currentCost: 96.2, price: 96.2, resource: { id: "res-server-004", type: "SERVER", name: "gpu-trainer", createdAt: "2026-06-12T09:30:00Z" } },
-    { currentCost: 66.1, price: 66.1, resource: { id: "res-server-001", type: "SERVER", name: "web-01", createdAt: "2026-06-12T09:30:00Z" } },
-    { currentCost: 32.5, price: 32.5, resource: { id: "res-database-cluster-001", type: "DATABASE_CLUSTER", name: "orders-db", createdAt: "2026-06-12T09:30:00Z" } },
+    { currentCost: 96.2, forecastedCost: 264.55, price: 96.2, resource: { id: "res-server-004", type: "SERVER", name: "gpu-trainer", createdAt: "2026-06-12T09:30:00Z" } },
+    { currentCost: 66.1, forecastedCost: 181.78, price: 66.1, resource: { id: "res-server-001", type: "SERVER", name: "web-01", createdAt: "2026-06-12T09:30:00Z" } },
+    { currentCost: 32.5, forecastedCost: 89.38, price: 32.5, resource: { id: "res-database-cluster-001", type: "DATABASE_CLUSTER", name: "orders-db", createdAt: "2026-06-12T09:30:00Z" } },
   ],
 }
 
@@ -36,7 +40,10 @@ export const orgCostInfo = {
   billingProfileCostInfo: costInfo,
   projects: {
     [PID]: costInfo,
-    "prj-staging": { ...costInfo, currentMonthCosts: 58.3, forecastedMonthEndCosts: 160.0, lastMonthCosts: 149.9 },
+    "prj-staging": {
+      ...costInfo, currentMonthCosts: 58.3, forecastedMonthEndCosts: 160.0, lastMonthCosts: 149.9,
+      forecastApproximate: false, forecastApproximateReasons: [],
+    },
   },
   currency: "USD",
 }

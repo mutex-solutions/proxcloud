@@ -179,12 +179,14 @@ func (h *Handler) billingProfileCostInfo(w http.ResponseWriter, r *http.Request)
 	zero := json.Number("0")
 	// Per-month bill-net costs + by-category + topResourcePrices — the SAME rollup the client
 	// cost-info dashboard uses (the admin overview reuses it). The
-	// CREATED column reads resource.createdAt → look it up from the cloud cache. Forecast = current
-	// (prorate deferred).
+	// CREATED column reads resource.createdAt → look it up from the cloud cache. The month-end
+	// forecast is the client's too (billing/forecast.go).
 	cur, last := zero, zero
 	costInfo := billing.CostInfoMap(decimal.Zero, decimal.Zero, map[string]any{}, map[string]any{}, []any{})
 	projects := map[string]any{}
+	var fc *billing.Forecast
 	if bills, err := h.billing.BillsByBillingProfile(r.Context(), id); err == nil {
+		fc = billing.MonthEndForecast(r.Context(), h.forecaster, id, bills, now)
 		createdAtLookup := func(rid string) *time.Time {
 			if cr, _ := h.cloud.FindByID(r.Context(), rid); cr != nil {
 				return cr.CreatedAt
@@ -201,17 +203,22 @@ func (h *Handler) billingProfileCostInfo(w http.ResponseWriter, r *http.Request)
 		// (a CostInfo per project of the profile) — grouped by bill-item projectId.
 		projects = billing.ProjectCostInfoMap(bills, now, createdAtLookup)
 	}
+	billing.ApplyForecast(costInfo, fc, "")
+	billing.ApplyForecastToProjects(projects, fc)
 	httpx.OK(w, pgdoc.M{
-		"projects":                projects,
-		"billingProfileCostInfo":  costInfo,
-		"balance":                 json.Number(balance.String()),
-		"dueAmount":               json.Number(dueAmt.String()),
-		"accountCredit":           json.Number(credit.String()),
-		"promotionalCredits":      json.Number(promo.String()),
-		"currentMonthCosts":       cur,
-		"lastMonthCosts":          last,
-		"proratedMonthEndCosts":   cur,
-		"forecastedMonthEndCosts": cur,
+		"projects":                   projects,
+		"billingProfileCostInfo":     costInfo,
+		"balance":                    json.Number(balance.String()),
+		"dueAmount":                  json.Number(dueAmt.String()),
+		"accountCredit":              json.Number(credit.String()),
+		"promotionalCredits":         json.Number(promo.String()),
+		"currentMonthCosts":          cur,
+		"lastMonthCosts":             last,
+		"proratedMonthEndCosts":      costInfo["forecastedMonthEndCosts"],
+		"forecastedMonthEndCosts":    costInfo["forecastedMonthEndCosts"],
+		"forecastApproximate":        costInfo["forecastApproximate"],
+		"forecastApproximateReasons": costInfo["forecastApproximateReasons"],
+		"forecastUnratedTypes":       costInfo["forecastUnratedTypes"],
 	})
 }
 

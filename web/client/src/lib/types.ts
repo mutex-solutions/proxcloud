@@ -198,7 +198,19 @@ export type Location = {
 
 export type CostInfo = {
   currentMonthCosts?: number
+  lastMonthCosts?: number
+  /**
+   * Estimate: this month's cost so far + what the resources running now will still accrue until the
+   * end of the billing month (UTC), at their current price-plan rates.
+   */
   forecastedMonthEndCosts?: number
+  forecastedMonthEndCostsByType?: Record<string, number>
+  /** True when part of the forecast could not be projected and is held at its current cost. */
+  forecastApproximate?: boolean
+  /** Why it is approximate: "unrated" | "usage" | "stale" | "unavailable". */
+  forecastApproximateReasons?: string[]
+  /** Billing resource types the price plans could not rate (held at their current cost). */
+  forecastUnratedTypes?: string[]
   currentMonthCostsByType?: Record<string, number>
   dueAmount?: number
   balance?: number
@@ -207,6 +219,8 @@ export type CostInfo = {
   topResourcePrices?: Array<{
     // Backend emits currentCost; price is a legacy alias some callers still read.
     currentCost?: number
+    /** Estimated month-end cost of this resource (currentCost + what it still accrues). */
+    forecastedCost?: number
     price?: number
     resource?: { id?: string; type?: string; name?: string; createdAt?: string; data?: Record<string, any> }
   }>

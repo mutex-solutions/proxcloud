@@ -38,7 +38,13 @@ type BillingHandler struct {
 	uiBaseURL    string                       // redirect target for the payment confirm callbacks
 	users        *user.Repo
 	orders       *order.Repo // create-order route
+	// forecaster projects the cost-info month-end forecast (SetForecaster; nil = forecast stays the
+	// current cost, flagged approximate).
+	forecaster billing.Forecaster
 }
+
+// SetForecaster wires the month-end forecast (the charge job's resolution and rating, read-only).
+func (h *BillingHandler) SetForecaster(f billing.Forecaster) { h.forecaster = f }
 
 func NewBillingHandler(svc *Service, policy *Policy, billingRepo *billing.Repo, pricingRepo *pricing.Repo, pay *billing.PayService, addFunds *payment.AddFundsService, registerCard *payment.RegisterCardService, collect *payment.CollectService, uiBaseURL string, users *user.Repo, orders *order.Repo) *BillingHandler {
 	return &BillingHandler{svc: svc, policy: policy, billing: billingRepo, pricing: pricingRepo, pay: pay, addFunds: addFunds, registerCard: registerCard, collect: collect, uiBaseURL: uiBaseURL, users: users, orders: orders}
@@ -205,9 +211,14 @@ func (h *BillingHandler) orgCostInfo(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
+	fc := billing.MonthEndForecast(r.Context(), h.forecaster, bp.ID, bills, now)
+	bpCostInfo := billing.CostInfoMap(billing.BillCostBreakdown(bills, now, nil))
+	billing.ApplyForecast(bpCostInfo, fc, "")
+	projects := billing.ProjectCostInfoMap(bills, now, nil)
+	billing.ApplyForecastToProjects(projects, fc)
 	httpx.OK(w, map[string]any{
-		"billingProfileCostInfo": billing.CostInfoMap(billing.BillCostBreakdown(bills, now, nil)),
-		"projects":               billing.ProjectCostInfoMap(bills, now, nil),
+		"billingProfileCostInfo": bpCostInfo,
+		"projects":               projects,
 		"currency":               bp.Currency,
 	})
 }
