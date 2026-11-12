@@ -93,8 +93,8 @@ func dnsConfig(es *externalservice.ExternalService) (*powerdns.Service, []string
 }
 
 func (h *Handler) dnsProvider(ctx context.Context, p *Project, serviceID string) (*externalservice.ExternalService, error) {
-	// Do not reuse resolveServiceID: its fallback on foreign/unattached input is
-	// convenient for old cloud routes but unsafe for a provider-scoped proof.
+	// Do not reuse resolveServiceID: it defaults to the compute provider when no
+	// service is named, while a provider-scoped proof must always name one.
 	if serviceID == "" || !p.HasService(serviceID) {
 		return nil, httpx.NotFound("DNS service not found on this project")
 	}

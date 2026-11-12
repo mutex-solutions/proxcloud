@@ -512,23 +512,29 @@ func TestAFailedWalkIsCaughtByTheNextPass(t *testing.T) {
 func TestWhatLiftsADisable(t *testing.T) {
 	f := newSuspendedFixture(t)
 	ctx := context.Background()
+	// An open that leaves the project down answers 409 with the reason (#216); one that brings it up, 200.
 	cases := []struct {
-		name string
-		doc  pgdoc.M
-		want string
+		name   string
+		doc    pgdoc.M
+		want   string
+		reason string // "" = 200
 	}{
-		{"unprovisioned under an ACTIVE profile (admin API project)", pgdoc.M{"status": project.StatusDisabled, "services": []any{}}, project.StatusEnabled},
-		{"provisioned under an ACTIVE profile, moved back from NEW", pgdoc.M{"status": project.StatusDisabled, "billingProfileId": "bp-active"}, project.StatusEnabled},
-		{"under a NEW profile", pgdoc.M{"status": project.StatusDisabled, "billingProfileId": "bp-new-o1", "services": []any{}}, project.StatusDisabled},
-		{"under a SUSPENDED profile", pgdoc.M{"status": project.StatusDisabled, "organizationId": "o3", "services": []any{}}, project.StatusDisabled},
-		{"disabled by an operator", pgdoc.M{"status": project.StatusDisabled, "disabledByOperator": true, "services": []any{}}, project.StatusDisabled},
-		{"being deleted", pgdoc.M{"status": project.StatusDeleteInProgress, "services": []any{}}, project.StatusDeleteInProgress},
+		{"unprovisioned under an ACTIVE profile (admin API project)", pgdoc.M{"status": project.StatusDisabled, "services": []any{}}, project.StatusEnabled, ""},
+		{"provisioned under an ACTIVE profile, moved back from NEW", pgdoc.M{"status": project.StatusDisabled, "billingProfileId": "bp-active"}, project.StatusEnabled, ""},
+		{"under a NEW profile", pgdoc.M{"status": project.StatusDisabled, "billingProfileId": "bp-new-o1", "services": []any{}}, project.StatusDisabled, project.ReasonBillingProfileInactive},
+		{"under a SUSPENDED profile", pgdoc.M{"status": project.StatusDisabled, "organizationId": "o3", "services": []any{}}, project.StatusDisabled, project.ReasonBillingProfileSuspended},
+		{"disabled by an operator", pgdoc.M{"status": project.StatusDisabled, "disabledByOperator": true, "services": []any{}}, project.StatusDisabled, project.ReasonDisabledByOperator},
+		{"being deleted", pgdoc.M{"status": project.StatusDeleteInProgress, "services": []any{}}, project.StatusDeleteInProgress, project.ReasonDeletionInProgress},
 	}
 	for _, c := range cases {
 		t.Run("open: "+c.name, func(t *testing.T) {
 			f.seed(t, c.doc)
-			if code, body := f.do(http.MethodPost, "/project/p1/init", ""); code != 200 {
+			code, body := f.do(http.MethodPost, "/project/p1/init", "")
+			if c.reason == "" && code != 200 {
 				t.Fatalf("%d %s", code, body)
+			}
+			if c.reason != "" && (code != http.StatusConflict || !strings.Contains(body, `"reason":"`+c.reason+`"`) || !strings.Contains(body, `"status":"`+c.want+`"`)) {
+				t.Fatalf("%d %s, want 409 reason %s", code, body, c.reason)
 			}
 			if got := f.stored(t).Status; got != c.want {
 				t.Fatalf("%s, want %s", got, c.want)

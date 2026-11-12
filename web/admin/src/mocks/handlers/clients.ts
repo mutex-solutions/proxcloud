@@ -216,7 +216,7 @@ on("PUT /admin/project/:id/public-networks", ({ params, opts }) => {
   return { data: project }
 })
 
-on("GET /admin/project/:id/external-service/:esId", ({ params }) => {
+on("POST /admin/project/:id/external-service/:esId", ({ params }) => {
   const project = db.projects.find((p) => p.id === params.id) ?? notFound("Project")
   const svc = db.services.find((s) => s.id === params.esId) ?? notFound("Cloud provider")
   const services = (project.services ??= []) as Doc[]

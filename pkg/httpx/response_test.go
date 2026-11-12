@@ -45,3 +45,20 @@ func TestWriteError(t *testing.T) {
 		t.Fatalf("log %q lacks the request id or the error", l)
 	}
 }
+
+// An error with details carries them as errors.details; one without keeps the envelope it always had, and WithDetails
+// leaves the shared error it copies untouched.
+func TestWriteErrorDetails(t *testing.T) {
+	base := NewError(409, 409, "Project is DISABLED")
+	rec := httptest.NewRecorder()
+	WriteError(rec, fmt.Errorf("wrapped: %w", base.WithDetails(map[string]string{"status": "DISABLED", "reason": "billing_profile_inactive"})))
+	want := `{"errors":{"code":409,"message":"Project is DISABLED","details":{"reason":"billing_profile_inactive","status":"DISABLED"}}}`
+	if got := strings.TrimSpace(rec.Body.String()); rec.Code != 409 || got != want {
+		t.Fatalf("with details: %d %s", rec.Code, got)
+	}
+	rec = httptest.NewRecorder()
+	WriteError(rec, base)
+	if got := strings.TrimSpace(rec.Body.String()); got != `{"errors":{"code":409,"message":"Project is DISABLED"}}` || base.Details != nil {
+		t.Fatalf("without details: %s (shared error details %v)", got, base.Details)
+	}
+}

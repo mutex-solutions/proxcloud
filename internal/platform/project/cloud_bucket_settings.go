@@ -337,16 +337,32 @@ type s3KeyDTO struct {
 // It must NOT go through resolveServiceID: that helper deliberately prefers a Proxmox service for the
 // unheadered case (ceph serves object-store only), so on the normal side-by-side setup it would hand back
 // the Proxmox service and these endpoints would 400 "not an S3 service". Instead: honour an explicit
-// x-service-id ONLY when it names a ceph service the project is attached to, otherwise pick the project's
-// ceph-s3 service.
+// x-service-id when it names a ceph service the project is attached to, otherwise pick the project's
+// ceph-s3 service. An x-service-id the project is not attached to is refused (#215): with two object
+// stores, falling back would hand out the keys of the other one.
 func (h *Handler) cephServiceOfProject(ctx context.Context, w http.ResponseWriter, p *Project, r *http.Request) (*client.Client, string, bool) {
 	isCeph := func(id string) bool {
 		es, err := h.esSvc.Get(ctx, id)
 		return err == nil && es != nil && es.IsObjectStore()
 	}
 	svcID := ""
-	if hd := r.Header.Get("x-service-id"); hd != "" && p.HasService(hd) && isCeph(hd) {
-		svcID = hd
+	explicit := ""
+	// Same explicit-choice rule as resolveServiceID: the header, else `?serviceId=`; an id the
+	// project is not attached to is refused before any client is built.
+	for _, id := range []string{r.Header.Get("x-service-id"), r.URL.Query().Get("serviceId")} {
+		if id == "" {
+			continue
+		}
+		if !p.HasService(id) {
+			h.fail(w, errNotAttached(id))
+			return nil, "", false
+		}
+		if explicit == "" {
+			explicit = id
+		}
+	}
+	if explicit != "" && isCeph(explicit) {
+		svcID = explicit
 	}
 	if svcID == "" {
 		for _, id := range p.ServiceIDs() {

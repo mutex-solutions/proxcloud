@@ -89,8 +89,9 @@ func TestMemberCannotLiftSuspension(t *testing.T) {
 		{"attach while scheduled", http.MethodPost, "/project/p1/billing/bp-active", project.StatusScheduledForDeletion, 400, project.StatusScheduledForDeletion},
 		{"attach mid teardown", http.MethodPost, "/project/p1/billing/bp-active", project.StatusDeleteInProgress, 400, project.StatusDeleteInProgress},
 		{"attach on DELETED", http.MethodPost, "/project/p1/billing/bp-active", project.StatusDeleted, 400, project.StatusDeleted},
-		{"open DISABLED", http.MethodPost, "/project/p1/init", project.StatusDisabled, 200, project.StatusDisabled},
-		{"open mid teardown", http.MethodPost, "/project/p1/init", project.StatusDeleteInProgress, 200, project.StatusDeleteInProgress},
+		// An open that cannot bring the project up says so (#216): 409, and the status stays.
+		{"open DISABLED", http.MethodPost, "/project/p1/init", project.StatusDisabled, 409, project.StatusDisabled},
+		{"open mid teardown", http.MethodPost, "/project/p1/init", project.StatusDeleteInProgress, 409, project.StatusDeleteInProgress},
 		{"schedule mid teardown", http.MethodDelete, "/project/p1", project.StatusDeleteInProgress, 400, project.StatusDeleteInProgress},
 		{"schedule on DELETED", http.MethodDelete, "/project/p1", project.StatusDeleted, 400, project.StatusDeleted},
 		{"delete now on DELETED", http.MethodDelete, "/project/p1/now", project.StatusDeleted, 400, project.StatusDeleted},

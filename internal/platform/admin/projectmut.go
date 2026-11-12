@@ -31,7 +31,7 @@ import (
 //   - POST   /project                                  (create; optional bootstrap provision)
 //   - POST   /project/{id}/sync                         (syncjob.SyncOne — whole-project / scoped)
 //   - POST   /project/{id}/{status}  (ENABLED|DISABLED) (PVE suspend/resume + status flip; resume async + sync)
-//   - GET    /project/{id}/external-service/{esid}      (bootstrap onto the explicit service)
+//   - POST   /project/{id}/external-service/{esid}      (bootstrap onto the explicit service; GET → 405)
 //   - GET    /project/{id}/resources/counts            (cache aggregation — already live)
 //
 //   - DELETE /project/{id}      (schedule deletion → CanDelete pre-check → flip SCHEDULED_FOR_DELETION)
@@ -63,7 +63,9 @@ func (h *Handler) routeProjectMut(r chi.Router) {
 	r.Get("/project/{id}/members", h.projectMembers)
 	r.Get("/project/{id}/resources/counts", h.projectResourceCounts)
 	r.Get("/project/{id}/gpu-usage", h.projectGPUUsage)
-	r.Get("/project/{id}/external-service/{externalServiceId}", h.projectAddExternalService)
+	// Attaching provisions the project on the provider (pool, RGW user, namespace…): a state change, so POST only. A GET
+	// (prefetch, crawler, link preview, retry of a safe method) gets chi's 405 and changes nothing.
+	r.Post("/project/{id}/external-service/{externalServiceId}", h.projectAddExternalService)
 	r.Post("/project/{id}/sync", h.projectSync)
 	r.Put("/project/{id}", h.projectUpdate)
 	r.Put("/project/{id}/quota", h.projectSetQuota)
@@ -352,10 +354,13 @@ func (h *Handler) externalServiceOr404(w http.ResponseWriter, r *http.Request, e
 	return es, true
 }
 
-// projectAddExternalService attaches an external service to a project (GET /{id}/external-service/{esid}):
+// projectAddExternalService attaches an external service to a project (POST /{id}/external-service/{esid}):
 // resolve the project (mutation 404) + external service (the 400/404 envelope), then bootstrap with
 // the explicit service — create-or-reuse the provider tenant and attach the ProjectExternalService
 // entry. Bootstrap failure = the wrapped 500 "Cannot sync the project with the infrastructure. ".
+// Idempotent: re-attaching a service the project already carries makes no provider call (every
+// BootstrapXOnto returns early on p.HasService) and appends no second binding, so a retried POST
+// answers 200 with the project unchanged.
 func (h *Handler) projectAddExternalService(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, projectUpdatePerm) {
 		return

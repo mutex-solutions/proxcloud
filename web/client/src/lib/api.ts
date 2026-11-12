@@ -6,7 +6,8 @@ import { config } from "./config"
 export type Paging = { limit: number; offset: number; total: number }
 export type Envelope<T> = {
   data?: T
-  errors?: { code: number; message: string }
+  // details: optional machine-readable context some errors carry (e.g. the /init 409's {status, reason}).
+  errors?: { code: number; message: string; details?: unknown }
   paging?: Paging
   redirectUrl?: string
 }
@@ -14,10 +15,12 @@ export type Envelope<T> = {
 export class ApiError extends Error {
   status: number
   code: number
-  constructor(status: number, code: number, message: string) {
+  details?: unknown
+  constructor(status: number, code: number, message: string, details?: unknown) {
     super(message)
     this.status = status
     this.code = code
+    this.details = details
   }
 }
 
@@ -99,7 +102,7 @@ export async function apiFetchEnvelope<T = unknown>(path: string, opts: ReqOpts 
   }
   if (env.errors) {
     if (resp.status === 403 && env.errors.message?.startsWith("sso_")) ssoRefusalHandler(env.errors.message)
-    throw new ApiError(resp.status, env.errors.code, env.errors.message)
+    throw new ApiError(resp.status, env.errors.code, env.errors.message, env.errors.details)
   }
   if (!resp.ok) throw new ApiError(resp.status, resp.status, resp.statusText)
   // raw (non-enveloped) JSON endpoints: treat the whole payload as data

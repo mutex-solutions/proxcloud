@@ -21,6 +21,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Sandbox image mirroring from the portal is not yet enabled; the page gives the `images.yaml`
   pin and the follow-up design is in `docs/template-updates.md`.
 
+### Fixed
+
+- The admin attach of a cloud provider to a project is now
+  `POST /api/v1/admin/project/{id}/external-service/{externalServiceId}`; a `GET`, which
+  provisioned the project on the provider, now answers 405 and changes nothing (#214). The
+  attach stays idempotent: re-attaching a service the project already carries makes no
+  provider call and adds no second binding. Scripts calling the old `GET` must switch to `POST`.
+- A project cloud call that names a service (`x-service-id` or `?serviceId=`) the project is
+  not attached to is now refused with `400 Project is not attached to service <id>` before any
+  provider is called, instead of silently running on the project's Proxmox service (#215: a
+  BUCKET create for a newly registered S3 store failed on Proxmox). This covers creates,
+  actions, deletes and the reads `quota-usage`, `gpu-capacity`, `public-networks` and the S3
+  key routes. Requests naming no service keep the Proxmox default. Existing projects still
+  need an operator to attach a provider registered after they were created.
+- `POST /api/v1/project/{id}/init` no longer answers `200 {}` when it leaves the project down.
+  It answers `409` with `errors.details` `{status, reason[, billingProfileStatus]}`, reason one
+  of `billing_profile_inactive`, `billing_profile_suspended`, `billing_profile_missing`,
+  `disabled_by_operator`, `scheduled_for_deletion`, `deletion_in_progress`, `deleted`,
+  `not_enabled` (#216). Success is unchanged. The client console shows the reason above the
+  project's pages, with a link to Billing where that is the fix. The error envelope may now
+  carry an optional `details` object.
+- `POST /api/v1/project/{id}/cloud` with `{"type":"VOLUME"}` now answers the created volume —
+  its cache row with `id`, `externalId` (the PVE volid) and `data.volume` (`name`, `size`,
+  `status`, …) — instead of an empty `result` (on a server) or `{"result":{"node":…}}`
+  (standalone), so the caller can use the volume at once (#218). If the new row cannot be read
+  back yet the answer is the volume as the create knows it, without an `id`.
+
 ## [0.4.0] - 2026-11-12
 
 First stable ProxCloud release, superseding the `v0.4.0-rc.1` prerelease. It is

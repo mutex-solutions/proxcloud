@@ -70,7 +70,13 @@ func (h *Handler) quotaUsage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	svcID := h.resolveServiceID(r, proj)
+	// An explicit service the project is not attached to is refused (#215), not answered with the
+	// default provider's quota.
+	svcID, err := h.resolveServiceID(r, proj)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
 	// The limits the gate enforces: a Proxmox project without its own quota falls
 	// back to the provider default (pveQuotaLimits).
 	limits := proj.Quota

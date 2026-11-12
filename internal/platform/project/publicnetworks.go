@@ -27,7 +27,13 @@ func (h *Handler) publicNetworks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := []map[string]any{}
-	svcID := h.resolveServiceID(r, proj)
+	// An explicit service the project is not attached to is refused (#215), not answered with the
+	// default provider's networks.
+	svcID, err := h.resolveServiceID(r, proj)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
 	if es, eerr := h.esSvc.Get(r.Context(), svcID); eerr == nil && es != nil && es.IsProxmox() {
 		for _, pn := range es.PVENetworkConfig().PublicNetworks {
 			if publicNetworkAllowed(proj, pn.ID) {
