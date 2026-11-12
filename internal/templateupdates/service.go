@@ -34,14 +34,14 @@ type ProviderView struct {
 
 // Service is the admin-facing façade.
 type Service struct {
-	Token      TokenSource
-	Options    Options // registry/API overrides (tests); zero in production
-	Jobs       *durablejobs.Store
-	DB         *pgdoc.DB
-	Receipts   PGReceipts
-	VMEnabled  bool // PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED: the executor runs only when set
-	mu         sync.Mutex
-	cache      *discoveryCache
+	Token       TokenSource
+	Options     Options // registry/API overrides (tests); zero in production
+	Jobs        *durablejobs.Store
+	DB          *pgdoc.DB
+	Receipts    PGReceipts
+	VMEnabled   bool // PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED: the executor runs only when set
+	mu          sync.Mutex
+	cache       *discoveryCache
 	newRegistry func(token string) (Registry, error)
 }
 
@@ -137,10 +137,10 @@ func ValidateToken(ctx context.Context, token string, o Options) (*User, error) 
 
 // Discovery is the page payload.
 type Discovery struct {
-	VM        []VMLine     `json:"vm"`
-	Sandbox   []SandboxRow `json:"sandbox"`
-	CheckedAt time.Time    `json:"checkedAt"`
-	RateLimit *RateLimit   `json:"rateLimit,omitempty"`
+	VM        []VMLine         `json:"vm"`
+	Sandbox   []SandboxRow     `json:"sandbox"`
+	CheckedAt time.Time        `json:"checkedAt"`
+	RateLimit *RateLimit       `json:"rateLimit,omitempty"`
 	Providers []ProviderStatus `json:"providers"`
 }
 

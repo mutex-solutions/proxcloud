@@ -616,7 +616,10 @@ func TestPayloadValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	bad := []func(*VMPayload){
-		func(q *VMPayload) { q.Tag = "debian-13-os-20261111000000-bbbbbbbbbbbb"; q.BuildVersion = "20261112000000" },
+		func(q *VMPayload) {
+			q.Tag = "debian-13-os-20261111000000-bbbbbbbbbbbb"
+			q.BuildVersion = "20261112000000"
+		},
 		func(q *VMPayload) { q.Package = "proxcloud-vm-debian-12" },
 		func(q *VMPayload) { q.DiskBytes = MaxDiskBytes },
 		func(q *VMPayload) { q.Node = "pve1/../x" },

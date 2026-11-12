@@ -66,19 +66,27 @@ func mutate(t *testing.T, raw []byte, fn func(m map[string]any)) []byte {
 func TestParseVMManifestRefuses(t *testing.T) {
 	raw, _, _ := golden(t, "os")
 	cases := map[string]func(m map[string]any){
-		"unknown key":         func(m map[string]any) { m["extra"] = 1 },
-		"schema 2":            func(m map[string]any) { m["schema_version"] = 2 },
-		"tag mismatch":        func(m map[string]any) { m["image_tag"] = "debian-13-os-20261111000000-bbbbbbbbbbbb" },
-		"variant k8s on os":   func(m map[string]any) { m["kubernetes_version"] = "1.35.10" },
-		"bad os":              func(m map[string]any) { m["os"] = "centos-9" },
-		"disk too big":        func(m map[string]any) { m["disk"].(map[string]any)["bytes"] = MaxDiskBytes },
-		"virtual too small":   func(m map[string]any) { m["disk"].(map[string]any)["virtual_size_bytes"] = 1 << 30 },
-		"float bytes":         func(m map[string]any) { m["disk"].(map[string]any)["bytes"] = 1024.5 },
-		"receipt check false": func(m map[string]any) { m["clean_export_receipt"].(map[string]any)["checks"].(map[string]any)["zero_free_space"] = false },
-		"receipt hash":        func(m map[string]any) { m["clean_export_receipt"].(map[string]any)["request_sha256"] = strings.Repeat("0", 64) },
-		"run ref":             func(m map[string]any) { m["clean_export_receipt"].(map[string]any)["run_ref"] = "https://github.com/evil/x/actions/runs/1" },
-		"provenance host":     func(m map[string]any) { m["provenance"] = map[string]any{"upstream_url": "https://evil.example/x.qcow2"} },
-		"disk filename":       func(m map[string]any) { m["disk"].(map[string]any)["filename"] = "../disk.qcow2" },
+		"unknown key":       func(m map[string]any) { m["extra"] = 1 },
+		"schema 2":          func(m map[string]any) { m["schema_version"] = 2 },
+		"tag mismatch":      func(m map[string]any) { m["image_tag"] = "debian-13-os-20261111000000-bbbbbbbbbbbb" },
+		"variant k8s on os": func(m map[string]any) { m["kubernetes_version"] = "1.35.10" },
+		"bad os":            func(m map[string]any) { m["os"] = "centos-9" },
+		"disk too big":      func(m map[string]any) { m["disk"].(map[string]any)["bytes"] = MaxDiskBytes },
+		"virtual too small": func(m map[string]any) { m["disk"].(map[string]any)["virtual_size_bytes"] = 1 << 30 },
+		"float bytes":       func(m map[string]any) { m["disk"].(map[string]any)["bytes"] = 1024.5 },
+		"receipt check false": func(m map[string]any) {
+			m["clean_export_receipt"].(map[string]any)["checks"].(map[string]any)["zero_free_space"] = false
+		},
+		"receipt hash": func(m map[string]any) {
+			m["clean_export_receipt"].(map[string]any)["request_sha256"] = strings.Repeat("0", 64)
+		},
+		"run ref": func(m map[string]any) {
+			m["clean_export_receipt"].(map[string]any)["run_ref"] = "https://github.com/evil/x/actions/runs/1"
+		},
+		"provenance host": func(m map[string]any) {
+			m["provenance"] = map[string]any{"upstream_url": "https://evil.example/x.qcow2"}
+		},
+		"disk filename": func(m map[string]any) { m["disk"].(map[string]any)["filename"] = "../disk.qcow2" },
 	}
 	for name, fn := range cases {
 		if _, err := ParseVMManifest(mutate(t, raw, fn)); err == nil {
@@ -134,9 +142,12 @@ func TestCheckVMArtifactManifest(t *testing.T) {
 		"index":               func(m *Manifest) { m.MediaType = MediaOCIIndex },
 		"extra layer":         func(m *Manifest) { m.Layers = append(m.Layers, layer("x", "text/plain", []byte("x"))) },
 		"wrong media":         func(m *Manifest) { m.Layers[0].MediaType = "application/octet-stream" },
-		"dup title":           func(m *Manifest) { m.Layers[2].Annotations[annotationTitle] = "manifest.json"; m.Layers[2].MediaType = MediaVMManifest },
-		"bad digest":          func(m *Manifest) { m.Layers[1].Digest = "sha512:abc" },
-		"huge disk":           func(m *Manifest) { m.Layers[0].Size = MaxDiskBytes },
+		"dup title": func(m *Manifest) {
+			m.Layers[2].Annotations[annotationTitle] = "manifest.json"
+			m.Layers[2].MediaType = MediaVMManifest
+		},
+		"bad digest": func(m *Manifest) { m.Layers[1].Digest = "sha512:abc" },
+		"huge disk":  func(m *Manifest) { m.Layers[0].Size = MaxDiskBytes },
 	}
 	for name, fn := range bad {
 		m := artifactManifest(raw, sums, disk, false)
@@ -163,8 +174,8 @@ func TestNewestPerLine(t *testing.T) {
 		// newer build but created earlier: build_version wins
 		pv(dg('3'), "2026-10-01T00:00:00Z", "ubuntu-2604-k8s-1.35.10-20261110000000-cccccccccccc"),
 		pv(dg('4'), "2026-11-11T00:00:00Z", "ubuntu-2604-k8s-1.36.1-20261111000000-dddddddddddd"),
-		pv(dg('5'), "2026-11-12T00:00:00Z", "latest", "ubuntu-2604-os-20261112000000-eeeeeeeeeeee"), // wrong package line
-		pv("sha512:zz", "2026-11-12T00:00:00Z", "ubuntu-2604-k8s-1.35.10-20261201000000-ffffffffffff"),   // bad digest
+		pv(dg('5'), "2026-11-12T00:00:00Z", "latest", "ubuntu-2604-os-20261112000000-eeeeeeeeeeee"),    // wrong package line
+		pv("sha512:zz", "2026-11-12T00:00:00Z", "ubuntu-2604-k8s-1.35.10-20261201000000-ffffffffffff"), // bad digest
 		pv(dg('6'), "2026-11-12T00:00:00Z", "ubuntu-2604-k8s-1.35.10-20261399000000-ffffffffffff"),     // impossible date
 	}
 	got := NewestPerLine("proxcloud-vm-ubuntu-2604-k8s", versions, 2)
@@ -216,7 +227,7 @@ func TestNewestSandbox(t *testing.T) {
 func TestSandboxNameOfImage(t *testing.T) {
 	for ref, want := range map[string]string{
 		"ghcr.io/mutex-solutions/sandbox-base:20261111-e93725b@" + dg('1'): "base",
-		"198.51.100.226/library/sandbox-code-interpreter-gpu@" + dg('2'):  "code-interpreter-gpu",
+		"198.51.100.226/library/sandbox-code-interpreter-gpu@" + dg('2'):   "code-interpreter-gpu",
 		"10.0.0.1:5000/library/sandbox-node:x":                             "node",
 	} {
 		if n, _, ok := SandboxNameOfImage(ref); !ok || n != want {
