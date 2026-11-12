@@ -32,7 +32,7 @@ def fixture():
                       "kind": "root", "passwd_marker": "x", "shadow_marker": "*"},
                      {"name": "builder", "uid": 1000, "home": "/home/builder", "shell": "/bin/bash",
                       "kind": "native_login", "passwd_marker": "x", "shadow_marker": "!"}],
-        "firstboot": {"network_backend": "netplan-systemd-networkd", "cloud_default_user": "builder",
+        "firstboot": {"network_backend": "netplan-systemd-networkd", "cloud_default_user": "ubuntu",
                       "cloud_base_config_reviewed": True},
         "k8s": {"version": "1.35.10", "kubelet_enabled": True, "kubelet_active": False,
                 "runtime_version": "2.1.0", "cluster": dict.fromkeys(CLUSTER, 0),
@@ -42,6 +42,12 @@ def fixture():
         "cloud_dropins": [],
         "hygiene": {"unsafe_apt_repo_urls": 0, "registry_config_credentials": 0,
                     "unclassified_credentials": 0},
+        # Real-image class: builder in 6 supplementary groups; snapd registered (serial, key-id,
+        # serial assertions, one device key), no session macaroon and no store users.
+        "identity": {"builder_supplementary_groups": 6, "builder_primary_group_own": True,
+                     "snapd": {"state": True, "device_serial": True, "device_key_id": True,
+                               "session_macaroon": False, "users": 0, "serial_assertions": 4,
+                               "device_keys": 1}},
     }
 
 
@@ -61,6 +67,16 @@ class CopyPolicyTests(unittest.TestCase):
         self.assertEqual(CopyPlan().status, "NEEDS_INSPECTION")
         self.assertNotIn("/etc/cloud/cloud.cfg.d/*", plan.wipe)
         self.assertNotIn("/etc/kubernetes", plan.wipe)
+        self.assertNotIn("/etc/kubernetes/manifests", plan.wipe)  # Placeholder is retained, not wiped.
+        # Snapd device key: exact entries-only COPY wipe; credential.secret is never a wipe target.
+        self.assertIn("/var/lib/snapd/device/private-keys-v1/*", plan.wipe)
+        self.assertIn("/var/lib/snapd/assertions/asserts-v0/serial", plan.wipe)
+        self.assertEqual(sorted(p for p in plan.wipe if "snapd" in p),  # Never seed/snaps/state.json/assertions.
+                         ["/var/lib/snapd/assertions/asserts-v0/serial", "/var/lib/snapd/device/private-keys-v1/*"])
+        self.assertFalse([p for p in plan.wipe if "credential" in p])
+        self.assertFalse([p for p in plan.wipe if "group" in p or "sudoers" in p])  # Rewritten, never wiped.
+        self.assertTrue(any("supplementary group" in r for r in plan.reset))
+        self.assertTrue(any("unregistered" in r and "serial" in r for r in plan.reset))
         self.assertIn("/etc/containerd", plan.retain)
         self.assertIn("kubelet units and enabled=True/active=False", plan.retain)
 
@@ -150,7 +166,9 @@ class CopyPolicyTests(unittest.TestCase):
             del f[section][key]
             self.refuses(f)
         for section, key, wrong in (("firstboot", "network_backend", "NetworkManager"),
-                                   ("firstboot", "cloud_default_user", "ubuntu"),
+                                   ("firstboot", "cloud_default_user", "builder"),
+                                   ("firstboot", "cloud_default_user", "root"),
+                                   ("firstboot", "cloud_default_user", "Ubuntu"),
                                    ("firstboot", "cloud_base_config_reviewed", 1),
                                    ("layout", "partition_count", 2),
                                    ("layout", "partition_count", True),
@@ -209,6 +227,70 @@ class CopyPolicyTests(unittest.TestCase):
             self.refuses(f)
         f = fixture()
         del f["layout"]["swap_entries"]
+        self.refuses(f)
+
+    def test_upstream_ubuntu_default_user_and_locked_builder(self):
+        # Owner decision: cloud-init's upstream default user `ubuntu`, created at first boot.
+        self.assertEqual(validate_inventory(fixture()).status, "COPY_POLICY_ONLY_NEEDS_REVIEW")
+        f = fixture()
+        f["firstboot"]["cloud_default_user"] = "builder"  # builder is never the cloud default user.
+        self.refuses(f)
+        for account in ({"name": "ubuntu", "uid": 1001, "home": "/home/ubuntu", "shell": "/bin/bash",
+                         "kind": "native_login", "passwd_marker": "x", "shadow_marker": "!"},
+                        {"name": "ubuntu", "uid": 999, "home": "/nonexistent", "shell": "/usr/sbin/nologin",
+                         "kind": "system", "passwd_marker": "x", "shadow_marker": "!*"}):
+            f = fixture()
+            f["accounts"].append(account)  # A pre-existing ubuntu account refuses, whatever its shape.
+            self.refuses(f)
+        for marker in ("$6$synthetic", "!$6$synthetic", "", "UNKNOWN"):
+            f = fixture()
+            f["accounts"][1]["shadow_marker"] = marker  # builder must stay locked, unrecoverably.
+            self.refuses(f)
+        f = fixture()
+        del f["accounts"][1]  # builder remains the exact retained native_login account.
+        self.refuses(f)
+
+    def test_identity_facts_reset_plan_and_store_credentials_refuse(self):
+        for groups in (0, 6, 20000):  # Recorded only: the copy drops builder from all of them.
+            f = fixture()
+            f["identity"]["builder_supplementary_groups"] = groups
+            validate_inventory(f)
+        f = fixture()
+        f["identity"]["snapd"] = {"state": False, "device_serial": False, "device_key_id": False,
+                                  "session_macaroon": False, "users": 0, "serial_assertions": 0,
+                                  "device_keys": 0}
+        validate_inventory(f)  # Unseeded/absent snapd is fine.
+        for key, value in (("session_macaroon", True), ("users", 1), ("users", 3)):
+            f = fixture()
+            f["identity"]["snapd"][key] = value  # Store user credentials: refuse, never wipe.
+            self.refuses(f)
+        for section, key, value in (("identity", "builder_supplementary_groups", True),
+                                    ("identity", "builder_supplementary_groups", -1),
+                                    ("identity", "builder_supplementary_groups", None),
+                                    # Primary gid not builder's own unshared group (e.g. gid 27 = sudo).
+                                    ("identity", "builder_primary_group_own", False),
+                                    ("identity", "builder_primary_group_own", 1),
+                                    ("identity", "builder_primary_group_own", None)):
+            f = fixture()
+            f[section][key] = value
+            self.refuses(f)
+        for key, value in (("state", 1), ("device_serial", "yes"), ("session_macaroon", 0),
+                           ("users", False), ("serial_assertions", -1), ("device_keys", 20001)):
+            f = fixture()
+            f["identity"]["snapd"][key] = value
+            self.refuses(f)
+        f = fixture()
+        f["identity"]["snapd"].update(state=False)  # Serial/key-id claimed without a state file: incoherent.
+        self.refuses(f)
+        for missing in ("builder_supplementary_groups", "builder_primary_group_own", "snapd"):
+            f = fixture()
+            del f["identity"][missing]
+            self.refuses(f)
+        f = fixture()
+        del f["identity"]["snapd"]["users"]
+        self.refuses(f)
+        f = fixture()
+        f["identity"]["snapd"]["serial"] = "never-a-value"  # Presence/count only; no extra keys.
         self.refuses(f)
 
     def test_readme_only_by_exact_reviewed_row(self):
