@@ -346,14 +346,23 @@ func (h *Handler) cephServiceOfProject(ctx context.Context, w http.ResponseWrite
 		return err == nil && es != nil && es.IsObjectStore()
 	}
 	svcID := ""
-	if hd := r.Header.Get("x-service-id"); hd != "" {
-		if !p.HasService(hd) {
-			h.fail(w, errNotAttached(hd))
+	explicit := ""
+	// Same explicit-choice rule as resolveServiceID: the header, else `?serviceId=`; an id the
+	// project is not attached to is refused before any client is built.
+	for _, id := range []string{r.Header.Get("x-service-id"), r.URL.Query().Get("serviceId")} {
+		if id == "" {
+			continue
+		}
+		if !p.HasService(id) {
+			h.fail(w, errNotAttached(id))
 			return nil, "", false
 		}
-		if isCeph(hd) {
-			svcID = hd
+		if explicit == "" {
+			explicit = id
 		}
+	}
+	if explicit != "" && isCeph(explicit) {
+		svcID = explicit
 	}
 	if svcID == "" {
 		for _, id := range p.ServiceIDs() {

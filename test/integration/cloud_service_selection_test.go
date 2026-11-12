@@ -110,6 +110,10 @@ func TestCloudServiceSelection(t *testing.T) {
 			{http.MethodGet, "/project/p1/gpu-capacity?serviceId=s3-new", "", ""},
 			{http.MethodGet, "/project/p1/public-networks", "s3-new", ""},
 			{http.MethodGet, "/project/p1/s3-credentials", "s3-new", ""},
+			// The S3-key routes pick their store themselves; the query form is refused the same way.
+			{http.MethodGet, "/project/p1/s3-keys", "s3-new", ""},
+			{http.MethodGet, "/project/p1/s3-keys?serviceId=s3-new", "", ""},
+			{http.MethodPost, "/project/p1/s3-keys?serviceId=s3-new", "", `{"name":"ci-key"}`},
 		}
 		for _, c := range cases {
 			code, body := do(c.method, c.path, c.header, c.body)
