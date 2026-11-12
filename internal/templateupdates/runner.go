@@ -81,6 +81,9 @@ func (r *Runner) Run(ctx context.Context) {
 
 // RunOnce claims and runs at most one job; did reports whether a job was claimed.
 func (r *Runner) RunOnce(ctx context.Context) (did bool, err error) {
+	if r.Log == nil {
+		r.Log = slog.Default()
+	}
 	if r.Lease < 10*time.Second {
 		r.Lease = time.Minute
 	}
@@ -217,7 +220,7 @@ func (r *Runner) terminal(parent context.Context, j *durablejobs.Job, fence *job
 		return
 	}
 	if x != nil && rec != nil {
-		if warns := x.Cleanup(ctx, j.ID, p, rec); len(warns) > 0 {
+		if warns := x.Cleanup(ctx, fence, j.ID, p, rec); len(warns) > 0 {
 			_ = fence.Checkpoint(ctx, func(tc context.Context) error {
 				rec.Warnings = append(rec.Warnings, warns...)
 				return r.Receipts.Save(tc, rec)

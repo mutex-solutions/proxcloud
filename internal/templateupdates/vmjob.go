@@ -303,8 +303,8 @@ func (x *Executor) Run(ctx context.Context, jobID string, p VMPayload, f Fence) 
 	// 4. Best-effort, fenced: drop this job's import files and any orphan VM a superseded
 	// acquisition of this job left half-created (never the template itself).
 	if x.guard(ctx, f) == nil {
-		warns := x.sweepOrphans(context.WithoutCancel(ctx), jobID, p, r.VMID)
-		warns = append(warns, x.dropOwnFiles(context.WithoutCancel(ctx), jobID, p, r, "")...)
+		warns := x.sweepOrphans(ctx, f, jobID, p, r.VMID)
+		warns = append(warns, x.dropOwnFiles(ctx, f, jobID, p, r, "")...)
 		if len(warns) > 0 {
 			_ = x.checkpoint(ctx, f, r, r.Step, func(n *Receipt) { n.Warnings = append(n.Warnings, warns...) })
 		}
@@ -436,10 +436,7 @@ func (x *Executor) createAndImport(ctx context.Context, jobID string, p VMPayloa
 			return x.checkpoint(ctx, f, r, StepImported, nil)
 		case exists && own:
 			// A half-created VM of ours (import-from never landed): remove it and start over.
-			if err := x.guard(ctx, f); err != nil {
-				return err
-			}
-			if err := x.destroyOwned(ctx, jobID, p, r.VMID); err != nil {
+			if err := x.destroyOwned(ctx, f, jobID, p, r.VMID); err != nil {
 				return err
 			}
 		case exists:
@@ -449,6 +446,15 @@ func (x *Executor) createAndImport(ctx context.Context, jobID string, p VMPayloa
 	upload := p.ImportStorage + ":import/" + r.UploadFile
 	if !x.ownFile(jobID, upload, p) {
 		return permanent("receipt_mismatch", "the receipt's upload is not this job's file")
+	}
+	if ok, err := x.uploadPresent(ctx, jobID, p, r.UploadFile); err != nil {
+		return err
+	} else if !ok {
+		// The verified file is gone (removed by an operator): upload again on the next attempt.
+		if err := x.checkpoint(ctx, f, r, StepQueued, func(n *Receipt) { n.UploadFile = "" }); err != nil {
+			return err
+		}
+		return errors.New("the verified upload is no longer in the import store; it will be uploaded again")
 	}
 	var vmid int
 	for attempt := 0; ; attempt++ {
@@ -551,14 +557,18 @@ func isTemplate(cfg pve.VMConfig) bool {
 	return s == "1" || s == "true"
 }
 
-// destroyOwned deletes vmid only after re-reading it carries this job's ownership tag.
-func (x *Executor) destroyOwned(ctx context.Context, jobID string, p VMPayload, vmid int) error {
+// destroyOwned deletes vmid only after re-reading it carries this job's ownership tag, and only
+// right after a successful fence check.
+func (x *Executor) destroyOwned(ctx context.Context, f Fence, jobID string, p VMPayload, vmid int) error {
 	exists, own, _, err := x.owned(ctx, jobID, p, vmid)
 	if err != nil || !exists {
 		return err
 	}
 	if !own {
 		return nil
+	}
+	if err := x.guard(ctx, f); err != nil {
+		return err
 	}
 	up, err := x.PVE.DeleteVM(ctx, p.Node, vmid)
 	if err == nil {
@@ -569,7 +579,7 @@ func (x *Executor) destroyOwned(ctx context.Context, jobID string, p VMPayload, 
 
 // dropOwnFiles deletes this job's import files (all epochs) except keep. Best-effort: a missing
 // Datastore.Allocate right leaves the file and a receipt warning.
-func (x *Executor) dropOwnFiles(ctx context.Context, jobID string, p VMPayload, r *Receipt, keep string) []string {
+func (x *Executor) dropOwnFiles(ctx context.Context, f Fence, jobID string, p VMPayload, r *Receipt, keep string) []string {
 	items, err := x.PVE.StorageContents(ctx, p.Node, p.ImportStorage, "import", 0)
 	if err != nil {
 		return []string{"could not list the import store to remove this job's upload"}
@@ -580,6 +590,9 @@ func (x *Executor) dropOwnFiles(ctx context.Context, jobID string, p VMPayload, 
 			continue
 		}
 		vol := strings.TrimPrefix(it.VolID, p.ImportStorage+":")
+		if x.guard(ctx, f) != nil {
+			return append(warns, "stopped: the job's lease was lost")
+		}
 		if err := x.PVE.DeleteStorageVolume(ctx, p.Node, p.ImportStorage, vol); err != nil {
 			warns = append(warns, "the uploaded file "+it.VolID+" stays on the import store (needs Datastore.Allocate there)")
 		}
@@ -589,7 +602,7 @@ func (x *Executor) dropOwnFiles(ctx context.Context, jobID string, p VMPayload, 
 
 // sweepOrphans deletes VMs on the job's node that carry this job's ownership tag, are not
 // templates and are not keep (a create a superseded acquisition finished after losing its lease).
-func (x *Executor) sweepOrphans(ctx context.Context, jobID string, p VMPayload, keep int) []string {
+func (x *Executor) sweepOrphans(ctx context.Context, f Fence, jobID string, p VMPayload, keep int) []string {
 	rows, err := x.PVE.ClusterResources(ctx, "vm")
 	if err != nil {
 		return []string{"could not list VMs to check for this job's orphans"}
@@ -599,7 +612,9 @@ func (x *Executor) sweepOrphans(ctx context.Context, jobID string, p VMPayload, 
 		if row.Type != "qemu" || row.Node != p.Node || row.VMID == keep || row.Template == 1 || !hasTagValue(row.Tags, OwnerTag(jobID)) {
 			continue
 		}
-		if err := x.destroyOwned(ctx, jobID, p, row.VMID); err != nil {
+		if err := x.destroyOwned(ctx, f, jobID, p, row.VMID); errors.Is(err, ErrStopped) {
+			return append(warns, "stopped: the job's lease was lost")
+		} else if err != nil {
 			warns = append(warns, fmt.Sprintf("orphan VM %d of this job could not be removed", row.VMID))
 		}
 	}
@@ -617,15 +632,18 @@ func hasTagValue(tags, want string) bool {
 
 // Cleanup runs after a terminal failure: it removes only resources this job created — a VM still
 // carrying its ownership tag (never a published template) and its own import files.
-func (x *Executor) Cleanup(ctx context.Context, jobID string, p VMPayload, r *Receipt) []string {
+// Each delete is preceded by a successful fence check: a lost lease stops cleanup immediately.
+func (x *Executor) Cleanup(ctx context.Context, f Fence, jobID string, p VMPayload, r *Receipt) []string {
 	var warns []string
 	if r != nil && r.VMID > 0 {
-		if err := x.destroyOwned(ctx, jobID, p, r.VMID); err != nil {
+		if err := x.destroyOwned(ctx, f, jobID, p, r.VMID); errors.Is(err, ErrStopped) {
+			return append(warns, "stopped: the job's lease was lost")
+		} else if err != nil {
 			warns = append(warns, fmt.Sprintf("VM %d of this job could not be removed", r.VMID))
 		}
 	}
-	warns = append(warns, x.sweepOrphans(ctx, jobID, p, 0)...)
-	return append(warns, x.dropOwnFiles(ctx, jobID, p, r, "")...)
+	warns = append(warns, x.sweepOrphans(ctx, f, jobID, p, 0)...)
+	return append(warns, x.dropOwnFiles(ctx, f, jobID, p, r, "")...)
 }
 
 // NewJobID is a fresh job id (exported for the admin enqueue path).

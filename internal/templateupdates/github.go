@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -137,6 +138,15 @@ func NewClient(token string, o Options) (*Client, error) {
 	c.http = &cp
 	return c, nil
 }
+
+// String, GoString, Format and LogValue redact the client: formatting it (%v, %+v, %#v, slog)
+// never prints the token.
+func (c *Client) String() string   { return "templateupdates.Client{token:[REDACTED]}" }
+func (c *Client) GoString() string { return c.String() }
+func (c *Client) Format(f fmt.State, _ rune) {
+	_, _ = io.WriteString(f, c.String())
+}
+func (c *Client) LogValue() slog.Value { return slog.StringValue(c.String()) }
 
 // LastRateLimit returns the most recent REST rate-limit window (nil when unknown).
 func (c *Client) LastRateLimit() *RateLimit {

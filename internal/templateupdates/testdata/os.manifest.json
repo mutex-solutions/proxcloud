@@ -1,0 +1,39 @@
+{
+  "arch": "amd64",
+  "build_version": "20261111000000",
+  "clean_export_receipt": {
+    "checks": {
+      "cleaned_copy_only": true,
+      "no_backing_file": true,
+      "no_build_credentials_or_lab_network": true,
+      "offline_sanitization": true,
+      "qemu_img_check": true,
+      "zero_free_space": true
+    },
+    "disk_bytes": 1024,
+    "disk_sha256": "3f94d55c5015eebb42212740d78cc847bf22f7be162074c4cf2a050412eada19",
+    "kind": "CleanExportReceipt",
+    "request_sha256": "aa4936c77b248ba86ed37d92d27a7285e1afb3f45d00b20b5caf3d6fc7d1c383",
+    "run_ref": "https://github.com/mutex-solutions/proxcloud/actions/runs/123",
+    "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "source_identity": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "virtual_size_bytes": 21474836480
+  },
+  "disk": {
+    "bytes": 1024,
+    "filename": "disk.qcow2",
+    "format": "qcow2",
+    "sha256": "3f94d55c5015eebb42212740d78cc847bf22f7be162074c4cf2a050412eada19",
+    "virtual_size_bytes": 21474836480
+  },
+  "image_tag": "debian-13-os-20261111000000-aaaaaaaaaaaa",
+  "kind": "vm-template",
+  "os": "debian-13",
+  "provenance": {
+    "upstream_url": "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
+  },
+  "schema_version": 1,
+  "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "upstream_checksum": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "variant": "os"
+}
