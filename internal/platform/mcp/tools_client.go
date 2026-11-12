@@ -192,7 +192,7 @@ var clientComputeTools = []toolDef{
 	},
 	{
 		name:   "create_volume",
-		desc:   "Create a volume (data disk). With data.serverId it is created on that server; without it, a standalone detached volume is created, which a server can attach later.",
+		desc:   "Create a volume (data disk). With data.serverId it is created on that server; without it, a standalone detached volume is created, which a server can attach later. Returns the created volume (its resource id, externalId, and data.volume with name, size, status).",
 		method: "POST",
 		path:   "/api/v1/project/{id}/cloud",
 		params: []param{

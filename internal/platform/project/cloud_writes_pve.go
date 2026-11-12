@@ -20,7 +20,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -1282,9 +1284,15 @@ func (h *Handler) pveCreateVolume(w http.ResponseWriter, r *http.Request, u *use
 			return
 		}
 		h.pveSyncVolumes(ctx, es, proj)
-		h.pveNameVolume(ctx, es, proj, name, func(cr *cloud.CloudResource, _ map[string]any) bool { return volID != "" && cr.ExternalID == volID })
-		h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_CREATE", "", &cloud.CloudResource{Type: cloud.TypeVolume, ProjectID: proj.ID})
-		httpx.OK(w, map[string]any{"result": map[string]any{"node": node}})
+		created := h.pveCreatedVolume(ctx, es, proj, name, func(cr *cloud.CloudResource, _ map[string]any) bool { return volID != "" && cr.ExternalID == volID })
+		if created == nil {
+			created = h.pveVolumeFallback(es, proj, volID, map[string]any{
+				"name": firstNonEmpty(name, detachedVolumeName(volID)), "size": sizeGiB, "status": "available",
+				"volume_type": slug, "availability_zone": node, "storage": storage,
+			})
+		}
+		h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_CREATE", "", created)
+		httpx.OK(w, *created)
 		return
 	}
 	vm, verr := ps.ResolveVM(ctx, proj.ID, serverExt)
@@ -1309,11 +1317,35 @@ func (h *Handler) pveCreateVolume(w http.ResponseWriter, r *http.Request, u *use
 	// The volid is named server-side; the volume sync provider picks the new disk
 	// up as its own VOLUME row. Reconcile it now so the FE sees it immediately.
 	h.pveSyncVolumes(ctx, es, proj)
-	h.pveNameVolume(ctx, es, proj, name, func(_ *cloud.CloudResource, vol map[string]any) bool {
+	created := h.pveCreatedVolume(ctx, es, proj, name, func(_ *cloud.CloudResource, vol map[string]any) bool {
 		return intAny(vol["vmid"]) == vm.VMID && strAny(vol["slot"]) == slot
 	})
-	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_CREATE", "", &cloud.CloudResource{Type: cloud.TypeVolume, ProjectID: proj.ID})
-	httpx.OK(w, map[string]any{"result": map[string]any{}})
+	if created == nil {
+		created = h.pveVolumeFallback(es, proj, "", map[string]any{
+			"name": firstNonEmpty(name, vm.Name+"-"+slot), "size": sizeGiB, "status": "in-use",
+			"volume_type": slug, "availability_zone": vm.Node, "storage": storage, "vmid": vm.VMID, "slot": slot,
+			"attachments": []any{map[string]any{"server_id": strconv.Itoa(vm.VMID), "device": slot}},
+		})
+	}
+	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_CREATE", "", created)
+	httpx.OK(w, *created)
+}
+
+// pveVolumeFallback is the answer to a volume create whose row could not be read back yet (/cluster/resources lags a
+// new holder by seconds): what the create itself knows, in the row's shape. It has no id; the next list or sync has
+// the row. externalID is "" when PVE named the disk and it was not read back.
+func (h *Handler) pveVolumeFallback(es *externalservice.ExternalService, proj *Project, externalID string, vol map[string]any) *cloud.CloudResource {
+	now := time.Now().UTC()
+	return &cloud.CloudResource{
+		ServiceID: es.ID, ProjectID: proj.ID, Region: h.pveRegion(proj, es), Type: cloud.TypeVolume, ExternalID: externalID,
+		Data: map[string]any{"volume": vol}, CreatedAt: &now, UpdatedAt: &now,
+	}
+}
+
+// detachedVolumeName is the name the volume sync derives for a disk on a holder: its file name, not its path on the store.
+func detachedVolumeName(volID string) string {
+	name := path.Base(volID[strings.IndexByte(volID, ':')+1:])
+	return strings.TrimSuffix(name, path.Ext(name))
 }
 
 // pveVolumeName reads the name a tenant gives a new volume; "" leaves the derived one (server name and slot).
@@ -1325,14 +1357,14 @@ func pveVolumeName(data map[string]any) (string, *httpx.HTTPError) {
 	return name, nil
 }
 
-// pveNameVolume puts name on the new volume's row (is picks it). PVE has no name for a disk, so it is the row's
-// (pve.VolumeLabel), and syncs keep it. A holder made for the volume can be missing from /cluster/resources for a
-// few seconds, and its disk's row with it, so the row is looked for again after a sync.
-func (h *Handler) pveNameVolume(ctx context.Context, es *externalservice.ExternalService, proj *Project, name string, is func(cr *cloud.CloudResource, vol map[string]any) bool) {
-	if name == "" {
-		return
-	}
+// pveCreatedVolume reads back the new volume's row (is picks it), the answer to its create (#218: the create answered no
+// volume, so a client had to list them to find its id), and puts name on it when the tenant gave one. PVE has no name for a
+// disk, so it is the row's (pve.VolumeLabel), and syncs keep it. A holder made for the volume can be missing from
+// /cluster/resources for a few seconds, and its disk's row with it, so the row is looked for again after a sync. nil = no
+// row yet (or no read worked); a row whose name could not be written is returned without it.
+func (h *Handler) pveCreatedVolume(ctx context.Context, es *externalservice.ExternalService, proj *Project, name string, is func(cr *cloud.CloudResource, vol map[string]any) bool) *cloud.CloudResource {
 	var err error
+	var found *cloud.CloudResource
 	for attempt := 0; attempt < 6; attempt++ {
 		if attempt > 0 {
 			time.Sleep(2 * time.Second)
@@ -1348,16 +1380,31 @@ func (h *Handler) pveNameVolume(ctx context.Context, es *externalservice.Externa
 			if vol == nil || !is(&rows[i], vol) {
 				continue
 			}
-			vol[pve.VolumeLabel], vol["name"] = name, name
-			now := time.Now().UTC()
-			rows[i].UpdatedAt = &now
-			if _, err = h.cloud.Insert(ctx, &rows[i]); err == nil {
-				return
+			if name == "" {
+				return &rows[i]
 			}
+			// The named copy is written; rows[i] stays as stored, the answer should the write fail.
+			named := rows[i]
+			named.Data = maps.Clone(rows[i].Data)
+			nv := maps.Clone(vol)
+			nv[pve.VolumeLabel], nv["name"] = name, name
+			named.Data["volume"] = nv
+			now := time.Now().UTC()
+			named.UpdatedAt = &now
+			var saved *cloud.CloudResource
+			if saved, err = h.cloud.Insert(ctx, &named); err == nil {
+				return saved
+			}
+			found = &rows[i]
 			break
 		}
 	}
-	slog.Error("volume create: keep the name", "project", proj.ID, "name", name, "err", err)
+	if found != nil {
+		slog.Error("volume create: keep the name", "project", proj.ID, "name", name, "err", err)
+		return found
+	}
+	slog.Error("volume create: read back the new volume", "project", proj.ID, "err", err)
+	return nil
 }
 
 // pveSyncVolumes runs one inline VOLUME reconcile (best-effort, post-mutation).

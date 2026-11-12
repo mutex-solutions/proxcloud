@@ -42,6 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `not_enabled` (#216). Success is unchanged. The client console shows the reason above the
   project's pages, with a link to Billing where that is the fix. The error envelope may now
   carry an optional `details` object.
+- `POST /api/v1/project/{id}/cloud` with `{"type":"VOLUME"}` now answers the created volume —
+  its cache row with `id`, `externalId` (the PVE volid) and `data.volume` (`name`, `size`,
+  `status`, …) — instead of an empty `result` (on a server) or `{"result":{"node":…}}`
+  (standalone), so the caller can use the volume at once (#218). If the new row cannot be read
+  back yet the answer is the volume as the create knows it, without an `id`.
 
 ## [0.4.0] - 2026-11-12
 
