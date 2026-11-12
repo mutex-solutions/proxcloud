@@ -17,6 +17,10 @@ import (
 const (
 	Billing  = "billing.charge/v1"
 	Selftest = "selftest/v1"
+	// TemplateUpdateVM imports a published VM artifact as a new Proxmox template
+	// (internal/templateupdates). It is an EXTERNAL-effect kind: never registered on the DB-only
+	// Worker; its runner fences every step with Checkpoint and resumes from the last receipt.
+	TemplateUpdateVM = "templateupdate.vm/v1"
 )
 
 var (
@@ -53,7 +57,73 @@ func scan(row pgx.Row) (*Job, error) {
 	err := row.Scan(&j.ID, &j.Kind, &j.Key, &j.Payload, &j.State, &j.Attempts, &j.MaxAttempts, &j.Epoch, &j.Owner, &j.LeaseUntil, &j.NextAt, &j.CreatedAt, &j.FinishedAt, &j.LastError)
 	return j, err
 }
-func known(kind string) bool { return kind == Billing || kind == Selftest }
+func known(kind string) bool { return kind == Billing || kind == Selftest || External(kind) }
+
+// External reports a kind whose handler performs external I/O. Such kinds are claimed only by a
+// dedicated runner that renews its lease and commits each step through Checkpoint; the DB-only
+// Worker refuses to register them.
+func External(kind string) bool { return kind == TemplateUpdateVM }
+
+// Checkpoint commits fn (DB-only writes: a step receipt) only while j's acquisition still owns an
+// unexpired lease, exactly like Complete but without acknowledging the job. A runner calls it
+// BEFORE starting an external effect (intent) and after it (result); ErrLeaseLost means another
+// acquisition may own the job, so the caller must perform no further external step.
+func (s *Store) Checkpoint(ctx context.Context, j *Job, fn func(context.Context) error) error {
+	return s.db.WithTx(ctx, func(tc context.Context) error {
+		tx, err := s.locked(tc, j)
+		if err != nil {
+			return err
+		}
+		if fn != nil {
+			if err = fn(tc); err != nil {
+				return err
+			}
+		}
+		// Re-check under the row lock at commit time: a lease that expired while fn ran rolls back.
+		var valid bool
+		if err = tx.QueryRow(tc, `SELECT EXISTS(SELECT 1 FROM durable_job WHERE id=$1 AND state='running' AND owner=$2 AND epoch=$3 AND lease_until>clock_timestamp())`, j.ID, j.Owner, j.Epoch).Scan(&valid); err != nil {
+			return err
+		}
+		if !valid {
+			return ErrLeaseLost
+		}
+		return nil
+	})
+}
+
+// Fail ends an external-kind acquisition with a FIXED classification code (never a provider
+// error string): permanent → dead now; otherwise pending again after delay (bounded by attempts).
+func (s *Store) Fail(ctx context.Context, j *Job, delay time.Duration, permanent bool, code string) error {
+	if delay < 0 || delay > time.Hour || !failCodeRE(code) {
+		return errors.New("invalid failure")
+	}
+	return s.db.WithTx(ctx, func(tc context.Context) error {
+		tx, err := s.locked(tc, j)
+		if err != nil {
+			return err
+		}
+		tag, err := tx.Exec(tc, `UPDATE durable_job SET state=CASE WHEN attempts>=max_attempts OR $5 THEN 'dead' ELSE 'pending' END,
+		 finished_at=CASE WHEN attempts>=max_attempts OR $5 THEN clock_timestamp() ELSE NULL END,
+		 next_at=clock_timestamp()+$4*interval '1 microsecond',owner=NULL,lease_until=NULL,last_error=$6
+		 WHERE id=$1 AND state='running' AND owner=$2 AND epoch=$3 AND lease_until>clock_timestamp()`, j.ID, j.Owner, j.Epoch, delay.Microseconds(), permanent, code)
+		if err == nil && tag.RowsAffected() != 1 {
+			return ErrLeaseLost
+		}
+		return err
+	})
+}
+
+func failCodeRE(code string) bool {
+	if code == "" || len(code) > 64 {
+		return false
+	}
+	for _, c := range code {
+		if !(c >= 'a' && c <= 'z' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
 
 // Ensure runs before workers start, serialized across API replicas. There is no
 // read pool on Store; every transition and transaction uses the supplied primary.

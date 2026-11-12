@@ -11,6 +11,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/payment"
+	"github.com/mutex-solutions/proxcloud/internal/templateupdates"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
@@ -85,6 +86,13 @@ func (h *Handler) integrationCreate(w http.ResponseWriter, r *http.Request) {
 	if description == "" {
 		description = fmt.Sprintf("%s Integration", req.ThirdParty)
 	}
+	// GitHub: the PAT is validated live (GET /user + read:packages scope) before it is stored.
+	if req.ThirdParty == templateupdates.ThirdPartyGitHub {
+		if err := h.githubIntegrationCheck(r.Context(), req.Secret, true); err != nil {
+			httpx.WriteError(w, err)
+			return
+		}
+	}
 	doc := integrationDoc(name, description, req.ThirdParty, req.Config, req.Secret, req.Metadata)
 	// Encrypt the secret's textual leaves before it reaches the datastore (symmetric with the
 	// consumers' decrypt: mail SMTPFromStore + billing GetGateway). Mirrors externalServiceCreate.
@@ -122,6 +130,16 @@ func (h *Handler) integrationUpdate(w http.ResponseWriter, r *http.Request) {
 	if existing == nil {
 		httpx.WriteError(w, httpx.NotFound(fmt.Sprintf("ThirdParty Integration with id %s not found", id)))
 		return
+	}
+	if req.ThirdParty == templateupdates.ThirdPartyGitHub || existing["thirdParty"] == templateupdates.ThirdPartyGitHub {
+		if req.ThirdParty != templateupdates.ThirdPartyGitHub || existing["thirdParty"] != templateupdates.ThirdPartyGitHub {
+			httpx.WriteError(w, httpx.BadRequest("A GitHub integration cannot change its type"))
+			return
+		}
+		if err := h.githubIntegrationCheck(r.Context(), req.Secret, false); err != nil {
+			httpx.WriteError(w, err)
+			return
+		}
 	}
 	before := maps.Clone(existing)
 	// Overwrite the mutable fields (drop first so an omitted optional becomes null, nulls omitted).
