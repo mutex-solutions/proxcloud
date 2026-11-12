@@ -113,6 +113,89 @@ class CommentTests(unittest.TestCase):
         self.assertEqual(R.advisory_url("https://pkg.go.dev/vuln/GO-2026-123"), "https://pkg.go.dev/vuln/GO-2026-123")
         self.assertRaises(ValueError, R.render, self.root, SHA, "https://evil.invalid/run", "success", "success", "success")
 
+    def vex_fixture(self, target="template/base"):
+        """pip 26.3 vendored-SBOM setuptools component, as in real template reports."""
+        folder, data = self.fixture(target)
+        data["Results"].append({"Target": "Python", "Class": "lang-pkgs", "Type": "python-pkg", "Packages": [
+            {"Name": "pip", "Version": "26.3", "Identifier": {"UID": "b6dc6f46963a9078"}, "AnalyzedBy": "python-pkg",
+             "FilePath": "usr/local/lib/python3.11/site-packages/pip-26.3.dist-info/METADATA"},
+            {"Name": "setuptools", "Version": "70.3.0", "Identifier": {"UID": "171ad461d2f40666"}, "AnalyzedBy": "sbom"}],
+            "Vulnerabilities": [{"VulnerabilityID": "CVE-2025-47273", "PkgName": "setuptools", "InstalledVersion": "70.3.0",
+                                 "PkgIdentifier": {"UID": "171ad461d2f40666"}, "FixedVersion": "78.1.1", "Severity": "HIGH",
+                                 "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2025-47273"}]})
+        (folder / "scan.json").write_text(json.dumps(data))
+        return folder, data
+
+    def test_policy_sentence_describes_owner_policy(self):
+        body = self.render()
+        self.assertNotIn("including unfixed findings", body)
+        for text in ("block on any HIGH/CRITICAL with a fixed version", "tracked", "until 2026-12-12 (UTC)",
+                     "raw upstream/builder/donor bases are report-only", "missing, stale or incomplete base scan does",
+                     "Exactly one owner-approved VEX: CVE-2025-47273", "expires 2026-12-31",
+                     "No other ignore", "Missing/invalid reports, stale DB and scanner failures block"):
+            self.assertIn(text, body)
+        late = R.render(self.root, SHA, URL, "failure", "failure", "failure", now=datetime(2027, 1, 1, tzinfo=timezone.utc))
+        self.assertIn("re-review deadline has passed", late)
+        self.assertIn("expired on 2026-12-31 and is no longer applied", late)
+
+    def test_unfixed_tracked_before_deadline_and_blocking_after(self):
+        unfixed = dict(self.vuln("CVE-2026-2001", "CRITICAL"), FixedVersion="")
+        self.fixture(vulns=[unfixed, self.vuln()])
+        body = self.render()
+        self.assertIn("| filesystem | 1 | 1 | 1 / 1 | 0 | 🔴 Blocking findings |", body)
+        self.assertIn("⛔ Blocking: 1 · ⏳ Tracked (no fix): 1", body)
+        self.assertIn("| filesystem | CRITICAL | ⏳ tracked, no fix (until 2026-12-12) |", body)
+        self.assertLess(body.index("[CVE-2026-1001]"), body.index("[CVE-2026-2001]"))  # blocking first
+        self.fixture(vulns=[unfixed])
+        self.assertIn("| filesystem | 1 | 0 | 0 / 1 | 0 | 🟡 Tracked (no fix) only |", self.render())
+        later = datetime(2026, 12, 12, tzinfo=timezone.utc)
+        self.fixture(vulns=[unfixed])  # Same evidence; DB refreshed on the review date.
+        stamp = later.isoformat()
+        (self.root / f"security-filesystem-{SHA}" / "db-metadata.json").write_text(json.dumps({"Version": 2, "UpdatedAt": stamp, "DownloadedAt": stamp}))
+        body = R.render(self.root, SHA, URL, "failure", "failure", "failure", now=later)
+        self.assertIn("| filesystem | 1 | 0 | 0 / 1 | 0 | 🔴 Blocking findings |", body)
+        self.assertIn("| filesystem | CRITICAL | ⛔ blocks |", body)
+
+    def test_owner_vex_is_listed_and_counted_never_hidden(self):
+        self.vex_fixture()
+        body = self.render()
+        self.assertIn("| template/base | 0 | 1 | 1 / 0 | 1 | ✅ Owner-approved VEX only |", body)
+        self.assertIn("✅ Owner-approved VEX (expires 2026-12-31): 1", body)
+        section = body.index("### ✅ Owner-approved VEX matches (expires 2026-12-31; listed, not blocking)")
+        row = body.index("| template/base | HIGH | <code>setuptools</code> | [CVE-2025-47273](https://avd.aquasec.com/nvd/cve-2025-47273) | <code>70.3.0</code> | <code>78.1.1</code> |")
+        self.assertLess(section, row)
+        self.assertLess(row, body.index("### Package findings"))
+        self.assertIn("1 owner-approved VEX matches listed separately above", body)
+
+    def test_vex_section_survives_large_finding_tables(self):
+        self.fixture(vulns=[self.vuln(f"CVE-2026-{1000 + i}") for i in range(200)])
+        for name in R.TEMPLATES:
+            self.vex_fixture("template/" + name)
+        body = self.render()
+        self.assertIn("Showing 150/200", body)
+        self.assertEqual(body.count("| <code>setuptools</code> | [CVE-2025-47273]"), 11)
+        self.assertIn("✅ Owner-approved VEX (expires 2026-12-31): 11", body)
+        self.assertLessEqual(len(body), 55000)
+
+    def test_vex_lookalike_without_sbom_evidence_blocks(self):
+        folder, data = self.vex_fixture()
+        data["Results"][1]["Packages"][1]["FilePath"] = "usr/lib/python3/dist-packages/setuptools-70.3.0.dist-info/METADATA"
+        (folder / "scan.json").write_text(json.dumps(data))
+        body = self.render()
+        self.assertIn("| template/base | 0 | 1 | 1 / 0 | 0 | 🔴 Blocking findings |", body)
+        self.assertIn("No finding matched the owner-approved VEX.", body)
+        self.assertIn("| template/base | HIGH | ⛔ blocks (fix available) | <code>setuptools</code> |", body)
+
+    def test_raw_base_findings_are_report_only(self):
+        unfixed = dict(self.vuln("CVE-2026-3001", "CRITICAL"), FixedVersion="")
+        folder, data = self.fixture("base/go-builder", vulns=[self.vuln(), unfixed])
+        data["Metadata"]["OS"]["Eosl"] = True
+        (folder / "scan.json").write_text(json.dumps(data))
+        body = self.render()
+        self.assertIn("| base/go-builder | 1 | 1 | 1 / 1 | 0 | 📄 Report-only findings; OS EOL (report-only) |", body)
+        self.assertIn("⛔ Blocking: 0 · ⏳ Tracked (no fix): 0 · 📄 Raw-base report-only: 2", body)
+        self.assertIn("| base/go-builder | HIGH | 📄 report-only (raw base) |", body)
+
     def test_row_and_comment_limits(self):
         self.fixture(vulns=[self.vuln(f"CVE-2026-{1000 + i}") for i in range(200)])
         body = self.render()

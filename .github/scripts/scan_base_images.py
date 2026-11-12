@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """Fixed PR209 upstream-base registry/blob scans, never image execution/build/push.
 
-Hosted CI only. Exit 0: all 13 clean; 1: HIGH/CRITICAL or EOL; 2: incomplete.
+Hosted CI only. Owner decision (raw-base-gate-scope): these 13 raw upstream/
+builder/donor bases are REPORT-ONLY. Every one must still be completely scanned
+with a fresh DB and valid evidence; their HIGH/CRITICAL findings and EOL never
+fail this job. Exit 0: all 13 completely scanned (findings, if any, reported);
+2: any scan missing, stale, invalid or incomplete. Exit 1 is never returned.
+Per-target status.txt: 0 nothing the final-image gate would block, 1 valid
+evidence with report-only findings/EOL, 2 incomplete.
 Raw upstream findings are not proof of packages shipped by an upgraded final image.
 GPU/CUDA and old published template pins are deliberately outside this allowlist.
 """
@@ -56,6 +62,22 @@ def unique_object(pairs):
             raise ValueError("duplicate JSON key")
         result[key] = value
     return result
+
+
+GATE_SUMMARY = re.compile(r"Blocking HIGH/CRITICAL: [0-9]+; tracked without fix .*; image OS EOL: (?:True|False)")
+
+
+def gate_summary_complete(path):
+    """True only if the gate printed its final summary as the last line (it finished validation)."""
+    try:
+        with Path(path).open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - 65536))
+            tail = handle.read().decode("utf-8", "replace").rstrip("\n").splitlines()
+    except OSError:
+        return False
+    return bool(tail) and GATE_SUMMARY.fullmatch(tail[-1]) is not None
 
 
 def run_command(argv, deadline, timeout, **kwargs):
@@ -158,7 +180,13 @@ def scan_image(root, target_spec, sha, deadline):
                 "--db-metadata", str(root / "result/db-metadata.json"),
                 "--expected-image-id", provenance["config_digest"], str(target / "scan.json"),
             ], deadline, 30, stdout=log, stderr=subprocess.STDOUT)
+        # Gate exit 1 (findings/EOL) is still recorded per target, as report-only;
+        # gate exit 2 or an unexplained scanner error remains incomplete evidence.
+        # Report-only makes exit 1 non-failing, so accept it only when the gate
+        # actually completed validation and printed its final summary line.
         status = gated.returncode if gated.returncode in (0, 1) else 2
+        if status in (0, 1) and not gate_summary_complete(target / "gate.txt"):
+            status = 2
         if scanned.returncode and not (scanned.returncode == 1 and status == 1):
             status = 2
     except (OSError, ValueError, TypeError, TimeoutError, subprocess.TimeoutExpired) as exc:
@@ -166,7 +194,7 @@ def scan_image(root, target_spec, sha, deadline):
             log.write("Incomplete scan: " + json.dumps(str(exc)) + "\n")
     (target / "source.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
     (target / "status.txt").write_text(str(status) + "\n", encoding="utf-8")
-    print(f"Base {name}: status {status}", flush=True)
+    print(f"Base {name}: status {status}" + (" (report-only findings/EOL)" if status == 1 else ""), flush=True)
     return status
 
 
@@ -185,9 +213,12 @@ def main():
         except (OSError, ValueError) as exc:
             errors.append({"targetid": spec[0], "error": str(exc)})
     missing = sorted({spec[0] for spec in TARGETS} - statuses.keys())
-    final = 2 if errors or missing or 2 in statuses.values() else (1 if 1 in statuses.values() else 0)
+    # Report-only: findings/EOL (status 1) never fail; incomplete evidence does.
+    final = 2 if errors or missing or 2 in statuses.values() else 0
     summary = {"status": final, "source_sha": sha, "targets": statuses,
                "missing": missing, "errors": errors, "deferred": ["gpu-pytorch-cuda"],
+               "report_only_findings": sorted(n for n, s in statuses.items() if s == 1),
+               "policy": "report-only: raw base findings/EOL never fail; missing, stale, invalid or incomplete scans fail",
                "attribution": "Raw upstream bases, not proof of final installed package versions."}
     (root / "result/base-status.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(summary, sort_keys=True), flush=True)

@@ -99,7 +99,10 @@ class BaseTests(unittest.TestCase):
             with patch.object(SCAN, "run_command", return_value=subprocess.CompletedProcess([], rc, stdout)), self.assertRaises(ValueError):
                 SCAN.inspect_json("fixture", ["--raw"], 999999999)
 
-    def scan_fixture(self, scan_rc=0, gate_rc=0, timeout=False):
+    SUMMARY = ("Blocking HIGH/CRITICAL: 1; tracked without fix (non-blocking until 2026-12-12): 0; "
+               "owner-approved VEX CVE-2025-47273 (expires 2026-12-31): 0; image OS EOL: False\n")
+
+    def scan_fixture(self, scan_rc=0, gate_rc=0, timeout=False, gate_output=SUMMARY):
         calls = []
         resolved = {"ref": SCAN.TARGETS[0][1], "config_digest": CONFIG,
                     "immutable_ref": "docker.io/library/golang@" + CHILD}
@@ -107,7 +110,10 @@ class BaseTests(unittest.TestCase):
             calls.append((argv, limit))
             if timeout:
                 raise subprocess.TimeoutExpired(argv, limit)
-            return subprocess.CompletedProcess(argv, gate_rc if argv[0] == SCAN.sys.executable else scan_rc)
+            if argv[0] == SCAN.sys.executable:
+                kwargs["stdout"].write(gate_output)
+                return subprocess.CompletedProcess(argv, gate_rc)
+            return subprocess.CompletedProcess(argv, scan_rc)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             with patch.object(SCAN, "resolve_image", return_value=resolved), patch.object(SCAN, "run_command", side_effect=fake_run):
@@ -133,17 +139,60 @@ class BaseTests(unittest.TestCase):
                 self.assertIn(CONFIG, calls[1][0])
         self.assertEqual(self.scan_fixture(timeout=True)[0], 2)
 
+    def test_gate_exit_without_completed_summary_is_incomplete_not_report_only(self):
+        # A crashed gate (e.g. traceback, exit 1) must never become a report-only success.
+        for gate_rc in (0, 1):
+            for output in ("", "Traceback (most recent call last):\nRecursionError: maximum recursion depth\n",
+                           self.SUMMARY + "trailing noise\n", "Blocking HIGH/CRITICAL: x; image OS EOL: maybe\n"):
+                with self.subTest(gate_rc=gate_rc, output=output[:30]):
+                    self.assertEqual(self.scan_fixture(0, gate_rc, gate_output=output)[0], 2)
+        crashed, _ = self.scan_fixture(0, 1, gate_output="Traceback\n")
+        final, _ = self.run_main([0] * 12 + [crashed])
+        self.assertEqual(final, 2)
+
     def test_source_allowlist_cannot_be_overridden(self):
         with self.assertRaises(ValueError):
             SCAN.scan_image(Path("unused"), ("../escape", "bad", "", ()), SHA, 999999999)
 
-    def test_main_collects_all_thirteen_even_after_failures(self):
-        with tempfile.TemporaryDirectory() as directory, patch.object(SCAN.Path, "cwd", return_value=Path(directory)), patch.dict(SCAN.os.environ, SOURCE_SHA=SHA), patch.object(SCAN, "scan_image", side_effect=[2, 1] + [0] * 11) as scan:
-            self.assertEqual(SCAN.main(), 2)
+    def run_main(self, side_effect):
+        with tempfile.TemporaryDirectory() as directory, patch.object(SCAN.Path, "cwd", return_value=Path(directory)), patch.dict(SCAN.os.environ, SOURCE_SHA=SHA), patch.object(SCAN, "scan_image", side_effect=side_effect) as scan:
+            final = SCAN.main()
             self.assertEqual(scan.call_count, 13)
             summary = json.loads((Path(directory) / "result/base-status.json").read_text())
-            self.assertEqual(len(summary["targets"]), 13)
-            self.assertEqual(summary["missing"], [])
+        self.assertEqual(summary["status"], final)
+        return final, summary
+
+    def test_main_collects_all_thirteen_even_after_failures(self):
+        final, summary = self.run_main([2, 1] + [0] * 11)
+        self.assertEqual(final, 2)
+        self.assertEqual(len(summary["targets"]), 13)
+        self.assertEqual(summary["missing"], [])
+        self.assertEqual(summary["report_only_findings"], ["web-builder"])
+
+    def test_report_only_findings_and_eol_exit_zero(self):
+        for statuses in ([1] * 13, [1] + [0] * 12, [0] * 13):
+            with self.subTest(statuses=statuses):
+                final, summary = self.run_main(statuses)
+                self.assertEqual(final, 0)
+                self.assertEqual(summary["targets"], {spec[0]: s for spec, s in zip(SCAN.TARGETS, statuses)})
+                self.assertEqual(len(summary["report_only_findings"]), statuses.count(1))
+                self.assertIn("report-only", summary["policy"])
+
+    def test_incomplete_or_missing_base_scan_still_fails(self):
+        final, summary = self.run_main([1] * 12 + [2])
+        self.assertEqual(final, 2)
+        final, summary = self.run_main([1] * 12 + [OSError("disk full")])
+        self.assertEqual(final, 2)
+        self.assertEqual(summary["missing"], ["external-python"])
+        self.assertEqual(summary["errors"][0]["targetid"], "external-python")
+
+    def test_gate_findings_recorded_per_target_but_job_report_only(self):
+        # Gate exit 1 (findings/EOL) keeps per-target status/evidence; main exits 0.
+        status, _ = self.scan_fixture(scan_rc=1, gate_rc=1)
+        self.assertEqual(status, 1)
+        final, summary = self.run_main([status] * 13)
+        self.assertEqual(final, 0)
+        self.assertEqual(len(summary["report_only_findings"]), 13)
 
     def test_wall_budget_and_source_sha_fail_closed(self):
         with patch.object(SCAN.time, "monotonic", return_value=100), patch.object(SCAN.subprocess, "run") as run:

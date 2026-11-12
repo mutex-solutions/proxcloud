@@ -180,7 +180,9 @@ jobs:
             --exit-code 0 --format json --output result/scan.json \
             "security-scan:${SOURCE_SHA}"
 
-      - name: Fail closed on malformed reports, stale DB, or any HIGH/CRITICAL
+      # Owner policy: fixed HIGH/CRITICAL and EOL block; unfixed are tracked until
+      # UNFIXED_REVIEW_BY in check_scan_report.py; one owner-approved, expiring VEX.
+      - name: Fail closed on malformed reports, stale DB, EOL, or fixable HIGH/CRITICAL
         run: |
           set -euo pipefail
           args=()
@@ -319,7 +321,8 @@ jobs:
         run: |
           set -euo pipefail
           # Fixed source allowlist; immutable platform refs, no pull/run/build/login/push.
-          # Raw base HIGH/CRITICAL (even unfixed) block; no final-image attribution.
+          # Raw base findings/EOL are report-only (owner decision); incomplete,
+          # stale or invalid base scans still fail. No final-image attribution.
           python3 .github/scripts/scan_base_images.py
 
       - name: Preserve base reports and provenance even on failure
@@ -349,7 +352,7 @@ jobs:
             echo 'Security gate blocked: a scan failed, was cancelled, or was skipped.'
             exit 1
           fi
-          echo 'Filesystem, six product finals, controlled nondefault prototype, eleven non-GPU templates and thirteen upstream base scans passed.'
+          echo 'Filesystem, six product finals, controlled nondefault prototype and eleven non-GPU templates have no fixable HIGH/CRITICAL (except the one owner-approved, expiring VEX) or EOL (unfixed are tracked until the re-review date); thirteen upstream base scans completed (report-only).'
 
   render-comment:
     name: security-summary
@@ -465,7 +468,7 @@ jobs:
             const fallback = [marker, `## Security scan: ${status}`, '',
               `Source commit: \`${sha}\``,
               `Scan matrix result: **${scan}**; template-images result: **${templates}**; base-images result: **${bases}**; required gate: **${gate}**.`,  '',
-              'Policy: any HIGH or CRITICAL vulnerability (including unfixed) fails the gate. Scanner errors, stale DB, malformed or missing reports also fail.', '',
+              'Policy: on final shipped targets any HIGH or CRITICAL with a fixed version, or an EOL OS, fails the gate; unfixed HIGH/CRITICAL are tracked until the re-review date, then block again. Raw upstream bases are report-only. One owner-approved, expiring VEX (CVE-2025-47273 in the pip 26.3 vendored SBOM) is listed in the reports. Scanner errors, stale DB, malformed or missing reports also fail.', '',
               `[Open this run and its report artifacts](${url})`, '', coverage, '',
               'Coverage jobs: source lockfiles, six product final images, one explicitly nondefault controlled-base prototype, eleven locally built non-GPU template outputs and thirteen upstream bases (including builder/donor/external Python inputs), registry blobs only. Raw base findings are not final installed-package evidence. GPU/CUDA remains SOURCE_ONLY/HOLD. When detailed rendering is unavailable, base details remain in the base-images artifact.',
               'Counts, package versions and advisory details are in the JSON reports. This comment reports overall job status; it does not invent counts or claim zero vulnerabilities outside that coverage.'
