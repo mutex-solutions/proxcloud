@@ -38,7 +38,7 @@ import {
 import { gpuCapacityViolations, serverQuotaViolations } from "@/lib/quota"
 import type { CloudResource, Location } from "@/lib/types"
 import { isPrivateNetwork, networkName } from "../network/NetworksPage"
-import { serverName, serverStatus, serverIPs } from "../servers/ServersPage"
+import { serverName, serverStatus, serverIPs } from "../servers/serverFields"
 
 type Cluster = Record<string, any>
 type NodeGroupRow = {

@@ -41,7 +41,8 @@ import { fmtDateTime, timeAgo } from "@/lib/format"
 import { useCloudFeatures, useCloudList, useCloudResource, useCloudScope, useProjectId } from "@/lib/hooks"
 import type { CloudResource } from "@/lib/types"
 import { ServerProtection } from "./ServerProtection"
-import { ServerDeleteVolumes, serverFlavor, serverIPs, serverName, serverStatus } from "./ServersPage"
+import { ServerDeleteVolumes } from "./ServersPage"
+import { serverFlavor, serverIPs, serverName, serverStatus } from "./serverFields"
 
 const ACTION_LABELS: Record<string, string> = {
   START: "Start", STOP: "Stop", SOFTREBOOT: "Reboot", RESIZE: "Resize", RENAME: "Rename", REBUILD: "Rebuild",
