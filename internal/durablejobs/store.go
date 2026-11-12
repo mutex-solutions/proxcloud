@@ -91,6 +91,27 @@ func (s *Store) Checkpoint(ctx context.Context, j *Job, fn func(context.Context)
 	})
 }
 
+// ClaimDead re-acquires ONE dead external-kind job for its cleanup only: a new owner, a higher
+// epoch and a lease, so cleanup is fenced exactly like a run. attempts is pinned to max_attempts,
+// so the acquisition can never become a normal run again: a crash mid-cleanup expires it straight
+// back to dead ("lease_expired"), and only an operator Replay (attempts reset) re-runs the job.
+// Returns nil when the job is not dead (any more) or not an external kind.
+func (s *Store) ClaimDead(ctx context.Context, id string, ttl time.Duration) (*Job, error) {
+	if ttl <= 0 {
+		return nil, errors.New("positive lease required")
+	}
+	if _, err := uuid.Parse(id); err != nil {
+		return nil, ErrReplay
+	}
+	j, err := scan(s.db.Pool.QueryRow(ctx, `UPDATE durable_job SET state='running',attempts=max_attempts,epoch=epoch+1,owner=$2,
+	 lease_until=clock_timestamp()+$3*interval '1 microsecond',finished_at=NULL
+	 WHERE id=$1 AND state='dead' AND kind=ANY($4) RETURNING `+columns, id, uuid.NewString(), ttl.Microseconds(), []string{TemplateUpdateVM}))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	return j, err
+}
+
 // Fail ends an external-kind acquisition with a FIXED classification code (never a provider
 // error string): permanent → dead now; otherwise pending again after delay (bounded by attempts).
 func (s *Store) Fail(ctx context.Context, j *Job, delay time.Duration, permanent bool, code string) error {

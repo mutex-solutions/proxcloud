@@ -51,6 +51,15 @@ type Runner struct {
 	Log      *slog.Logger
 	// Timeout bounds one acquisition's work (default 2h); must exceed one upload+import.
 	Timeout time.Duration
+	// UploadLock, when set, serializes uploads per (service, node, import storage) across API
+	// replicas (cmd/api: a PostgreSQL session advisory lock). It is handed to every executor; a busy
+	// lock makes the attempt retry later.
+	UploadLock func(ctx context.Context, key string) (release func(), acquired bool, err error)
+	// Dead lists dead template-update jobs whose receipt has not been cleaned up yet; with
+	// ClaimDead it lets the runner clean up after jobs that died without running their cleanup
+	// (e.g. the last attempt's lease expired). Optional.
+	Dead      func(ctx context.Context) ([]string, error)
+	ClaimDead func(ctx context.Context, id string, ttl time.Duration) (*durablejobs.Job, error)
 }
 
 // Run polls until ctx ends.
@@ -88,8 +97,11 @@ func (r *Runner) RunOnce(ctx context.Context) (did bool, err error) {
 		r.Lease = time.Minute
 	}
 	j, err := r.Store.ClaimKinds(ctx, r.Lease, []string{durablejobs.TemplateUpdateVM})
-	if err != nil || j == nil {
+	if err != nil {
 		return false, err
+	}
+	if j == nil {
+		return r.cleanupDead(ctx)
 	}
 	r.perform(ctx, j)
 	return true, nil
@@ -138,6 +150,18 @@ func (r *Runner) perform(parent context.Context, j *durablejobs.Job) {
 		return
 	}
 	x, err := r.Build(work, p)
+	if err == nil && r.UploadLock != nil {
+		x.UploadLock = func(ctx context.Context) (func(), error) {
+			release, ok, err := r.UploadLock(ctx, p.UploadLockKey())
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				return nil, errors.New("another upload to this import storage is running; retrying later")
+			}
+			return release, nil
+		}
+	}
 	if err != nil {
 		var perm *Permanent
 		if errors.As(err, &perm) {
@@ -233,6 +257,63 @@ func (r *Runner) terminal(parent context.Context, j *durablejobs.Job, fence *job
 	r.Log.Warn("template update failed", "job", j.ID, "code", perm.Code)
 }
 
+// cleanupDead re-acquires one dead job whose receipt is not marked cleaned and runs Cleanup under
+// that fenced acquisition: a job can die without its cleanup having run (its last attempt's lease
+// expired). Cleanup only touches VMs in pc-templates that still carry the job's ownership tag and
+// this job's import files; a finished template is never touched.
+func (r *Runner) cleanupDead(ctx context.Context) (bool, error) {
+	if r.Dead == nil || r.ClaimDead == nil {
+		return false, nil
+	}
+	ids, err := r.Dead(ctx)
+	if err != nil || len(ids) == 0 {
+		return false, err
+	}
+	j, err := r.ClaimDead(ctx, ids[0], r.Lease)
+	if err != nil || j == nil {
+		return false, err
+	}
+	fence := &jobFence{store: r.Store, job: j, lost: func() bool { return false }}
+	work, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	finish := func(warns []string) {
+		_ = fence.Checkpoint(work, func(tc context.Context) error {
+			rec, err := r.Receipts.Load(tc, j.ID)
+			if err != nil || rec == nil {
+				return err
+			}
+			if rec.Step != StepSucceeded && rec.Step != StepTemplated {
+				rec.Step = StepFailed
+				if rec.Code == "" {
+					rec.Code, rec.Message = "job_dead", "the job ended without completing; its leftovers were cleaned up"
+				}
+			}
+			rec.Cleaned, rec.Warnings, rec.UpdatedAt = true, append(rec.Warnings, warns...), time.Now().UTC()
+			return r.Receipts.Save(tc, rec)
+		})
+		_ = r.Store.Fail(context.WithoutCancel(work), j, 0, true, "cleaned_up")
+	}
+	p, err := DecodeVMPayload(j.Payload)
+	if err != nil {
+		finish(nil)
+		return true, nil
+	}
+	rec, err := r.Receipts.Load(work, j.ID)
+	if err != nil {
+		_ = r.Store.Fail(context.WithoutCancel(work), j, 0, true, "cleanup_failed")
+		return true, err
+	}
+	x, err := r.Build(work, p)
+	if err != nil {
+		// Provider or integration unavailable: keep it dead and uncleaned; the next pass retries.
+		_ = r.Store.Fail(context.WithoutCancel(work), j, 0, true, "cleanup_pending")
+		return true, nil
+	}
+	finish(x.Cleanup(work, fence, j.ID, p, rec))
+	r.Log.Warn("template update: cleaned up after a dead job", "job", j.ID)
+	return true, nil
+}
+
 // ── receipts on pgdoc ─────────────────────────────────────────────────────────────────────────
 
 // ReceiptCollection holds one receipt per job (id = durable job id).
@@ -260,6 +341,44 @@ func (s PGReceipts) Recent(ctx context.Context, limit int64) ([]Receipt, error) 
 	out := []Receipt{}
 	err := s.DB.C(ReceiptCollection).Find(ctx, nil, &out, pgdoc.Sort(pgdoc.DescK("createdAt", pgdoc.KTime)), pgdoc.Limit(limit))
 	return out, err
+}
+
+// DeadUncleaned lists ids of DEAD template-update jobs whose receipt is not marked cleaned and
+// whose last error is not already "cleaned_up" (oldest first).
+func (s PGReceipts) DeadUncleaned(ctx context.Context) ([]string, error) {
+	if err := s.DB.C(ReceiptCollection).Ensure(ctx); err != nil {
+		return nil, err
+	}
+	rows, err := s.DB.Pool.Query(ctx, `SELECT j.id::text FROM durable_job j JOIN "templateUpdate" t ON t.id=j.id::text
+	 WHERE j.kind=$1 AND j.state='dead' AND j.last_error NOT IN ('cleaned_up') AND coalesce((t.doc->>'cleaned')::boolean,false)=false
+	 ORDER BY j.finished_at NULLS FIRST LIMIT 20`, durablejobs.TemplateUpdateVM)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// Uncleaned lists receipt ids that are not marked cleaned (candidates for the dead-job pass; the
+// caller intersects with dead jobs).
+func (s PGReceipts) Uncleaned(ctx context.Context, limit int64) ([]string, error) {
+	var out []Receipt
+	if err := s.DB.C(ReceiptCollection).Find(ctx, pgdoc.M{"cleaned": pgdoc.M{"$ne": true}}, &out, pgdoc.Limit(limit)); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(out))
+	for _, r := range out {
+		ids = append(ids, r.ID)
+	}
+	return ids, nil
 }
 
 // ByKey lists receipts of the same service/node/digest (dedup on enqueue).

@@ -396,9 +396,18 @@ function VMUpdateDialog({ line, onClose, onQueued }: { line: VMLine; onClose: ()
             <p className="text-xs text-destructive">This node has no active storage with import content: enable it on a storage first.</p>
           )}
           {line.variant === "os" ? (
+            <div className="space-y-1">
             <div className="flex items-center gap-2">
               <Switch id="tu-publish" checked={publish} onCheckedChange={setPublish} />
               <Label htmlFor="tu-publish">Publish to the OS catalog right away (otherwise it is staged for review)</Label>
+            </div>
+            {publish && (
+              <p className="text-xs text-amber-600">
+                An import is not boot-tested before it is published (the pipeline build is). A published import also counts
+                as a catalog version for <code>images/build.py --keep</code> pruning on that node. Staging it and booting a clone first
+                is the safer default.
+              </p>
+            )}
             </div>
           ) : (
             <p className="text-xs text-muted-foreground">

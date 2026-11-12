@@ -15,6 +15,8 @@ package templateupdates
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -54,8 +56,18 @@ var (
 	serviceRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
 )
 
-// Key is the durable job identity: the same artifact onto the same provider node is one job.
-func (p VMPayload) Key() string { return p.ServiceID + "/" + p.Node + "/" + p.Digest }
+// Key is the durable job identity: the same artifact onto the same provider node is one job. It is
+// a SHA-256 of service/node/digest, so it never exceeds the 256-byte durable job key limit whatever
+// the service id length.
+func (p VMPayload) Key() string {
+	sum := sha256.Sum256([]byte(p.ServiceID + "\x00" + p.Node + "\x00" + p.Digest))
+	return "tu-vm-" + hex.EncodeToString(sum[:])
+}
+
+// UploadLockKey serializes uploads per provider node import storage (a pg advisory lock in the runner).
+func (p VMPayload) UploadLockKey() string {
+	return "templateupdate-upload:" + p.ServiceID + "/" + p.Node + "/" + p.ImportStorage
+}
 
 // Validate checks every field against the contract; a decoded payload that fails is permanent.
 func (p VMPayload) Validate() error {
@@ -122,6 +134,8 @@ type Receipt struct {
 	Code        string    `json:"code,omitempty"`
 	Message     string    `json:"message,omitempty"`
 	Warnings    []string  `json:"warnings,omitempty"`
+	// Cleaned marks a dead job whose leftovers the runner already removed.
+	Cleaned bool `json:"cleaned,omitempty"`
 }
 
 // Fence commits receipt writes only while the job acquisition still owns its lease
@@ -152,6 +166,7 @@ type PVE interface {
 	GetVMConfig(ctx context.Context, node string, vmid int) (pve.VMConfig, error)
 	ToTemplate(ctx context.Context, node string, vmid int) (pve.UPID, error)
 	DeleteVM(ctx context.Context, node string, vmid int) (pve.UPID, error)
+	GetPool(ctx context.Context, poolID string) (*pve.PoolInfo, error)
 }
 
 // BlobSource opens a blob by digest (the GHCR client, built from the integration's token at run
@@ -200,8 +215,12 @@ func TemplateName(p VMPayload) string {
 // + pc-v-<yyyymmddhhmm>) only when Publish was confirmed; otherwise it is staged for review. A
 // Kubernetes node image is never a catalog entry: an operator references its VMID in the kamaji
 // provider's version map.
-func TemplateTags(p VMPayload, jobID string) string {
-	tags := []string{pve.TagManaged, OwnerTag(jobID), "pc-src-" + strings.TrimPrefix(p.Digest, "sha256:")[:12]}
+//
+// The final tags deliberately DROP the job's ownership tag: PVE clones copy tags (CAPMOX keeps
+// them), so a clone of the finished template must never look like something this job may destroy.
+// Destructive ownership proof ends when the template is finished.
+func TemplateTags(p VMPayload) string {
+	tags := []string{pve.TagManaged, "pc-src-" + strings.TrimPrefix(p.Digest, "sha256:")[:12]}
 	if p.Variant == "kubernetes" {
 		tags = append(tags, "pc-tu-k8s", "pc-k8sver-"+strings.ReplaceAll(p.KubernetesVersion, ".", "-"))
 	} else {
@@ -399,8 +418,12 @@ func (x *Executor) upload(ctx context.Context, jobID string, p VMPayload, r *Rec
 	return x.checkpoint(ctx, f, r, StepUploaded, nil)
 }
 
-// owned reports whether vmid on node is a VM this job created: its tags carry the job's ownership
-// tag and it is not a published template.
+// owned reports whether vmid on node is a VM this job created and may still mutate or destroy:
+//   - it is a member of pool pc-templates on this node (read from /pools/pc-templates, not the
+//     possibly-lagging cluster resources). A clone in a tenant/CAPMOX pool is never ours, even if it
+//     copied our tags;
+//   - its tags carry the job's ownership tag (only an UNFINISHED build has it: TemplateTags drops it);
+//   - it is not a published template.
 func (x *Executor) owned(ctx context.Context, jobID string, p VMPayload, vmid int) (exists, own bool, cfg pve.VMConfig, err error) {
 	cfg, err = x.PVE.GetVMConfig(ctx, p.Node, vmid)
 	if pve.IsNotFound(err) {
@@ -409,13 +432,59 @@ func (x *Executor) owned(ctx context.Context, jobID string, p VMPayload, vmid in
 	if err != nil {
 		return false, false, nil, err
 	}
+	inPool, err := x.inTemplatePool(ctx, p.Node, vmid)
+	if err != nil {
+		return true, false, cfg, err
+	}
 	tags := strings.Split(cfg.Str("tags"), ";")
 	mine, published := false, false
 	for _, t := range tags {
 		mine = mine || t == OwnerTag(jobID)
 		published = published || t == pve.TagTemplatePub
 	}
-	return true, mine && !published, cfg, nil
+	return true, inPool && mine && !published, cfg, nil
+}
+
+// inTemplatePool reads pool pc-templates' members directly.
+func (x *Executor) inTemplatePool(ctx context.Context, node string, vmid int) (bool, error) {
+	pool, err := x.PVE.GetPool(ctx, pve.TemplatePool)
+	if err != nil || pool == nil {
+		return false, err
+	}
+	for _, m := range pool.Members {
+		if m.Type == "qemu" && m.VMID == vmid && m.Node == node {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// finished reports a VM already carrying exactly this job's final name and tags (a final config
+// write that landed although its task wait failed). It is not "owned" any more by design.
+func finished(cfg pve.VMConfig, p VMPayload) bool {
+	return isTemplate(cfg) && cfg.Str("name") == TemplateName(p) && sameTags(cfg.Str("tags"), TemplateTags(p))
+}
+
+func sameTags(a, b string) bool {
+	set := func(s string) map[string]bool {
+		m := map[string]bool{}
+		for _, t := range strings.Split(s, ";") {
+			if t = strings.TrimSpace(t); t != "" {
+				m[t] = true
+			}
+		}
+		return m
+	}
+	x, y := set(a), set(b)
+	if len(x) != len(y) {
+		return false
+	}
+	for t := range x {
+		if !y[t] {
+			return false
+		}
+	}
+	return true
 }
 
 func (x *Executor) nextTemplateID(ctx context.Context, avoid int) (int, error) {
@@ -441,6 +510,8 @@ func (x *Executor) createAndImport(ctx context.Context, jobID string, p VMPayloa
 			return err
 		}
 		switch {
+		case exists && finished(cfg, p):
+			return x.checkpoint(ctx, f, r, StepTemplated, nil)
 		case exists && own && cfg.Str("scsi0") != "":
 			return x.checkpoint(ctx, f, r, StepImported, nil)
 		case exists && own:
@@ -512,10 +583,22 @@ func (x *Executor) createAndImport(ctx context.Context, jobID string, p VMPayloa
 		"scsi0": fmt.Sprintf("%s:0,discard=on,import-from=%s", p.DiskStorage, upload),
 		"ide2":  p.DiskStorage + ":cloudinit",
 	})
-	if err == nil {
-		err = x.PVE.WaitTask(ctx, up)
-	}
 	if err != nil {
+		var ae *pve.APIError
+		if errors.As(err, &ae) && ae.Status == 400 {
+			return permanent("pve_import_refused", "Proxmox refused the import parameters (disk storage or import file)")
+		}
+		return err // transport/5xx: the VM is ours and empty or importing; the next attempt re-reads it
+	}
+	// Only a task that positively FINISHED with a non-OK exit status is a refusal of the bytes.
+	if !x.PVE.TaskStopped(ctx, up, x.TaskWait) {
+		return errors.New("the import task did not finish in time")
+	}
+	st, err := x.PVE.TaskStatus(context.WithoutCancel(ctx), up)
+	if err != nil {
+		return err
+	}
+	if st.ExitStatus != "OK" {
 		return permanent("pve_import_refused", "Proxmox could not import the disk (invalid qcow2, or the disk storage refused it)")
 	}
 	return x.checkpoint(ctx, f, r, StepImported, nil)
@@ -525,6 +608,10 @@ func (x *Executor) finish(ctx context.Context, jobID string, p VMPayload, r *Rec
 	exists, own, cfg, err := x.owned(ctx, jobID, p, r.VMID)
 	if err != nil {
 		return err
+	}
+	if exists && finished(cfg, p) {
+		// The final write landed in an earlier attempt (its task wait failed): done.
+		return x.checkpoint(ctx, f, r, StepTemplated, nil)
 	}
 	if !exists || !own {
 		return permanent("ownership_lost", "the imported VM is gone or no longer this job's")
@@ -541,7 +628,7 @@ func (x *Executor) finish(ctx context.Context, jobID string, p VMPayload, r *Rec
 			return err
 		}
 	}
-	tags := TemplateTags(p, jobID)
+	tags := TemplateTags(p)
 	if err := x.checkpoint(ctx, f, r, StepImported, func(n *Receipt) { n.TemplateTag = tags }); err != nil {
 		return err
 	}
@@ -556,6 +643,7 @@ func (x *Executor) finish(ctx context.Context, jobID string, p VMPayload, r *Rec
 		err = x.PVE.WaitTask(ctx, up)
 	}
 	if err != nil {
+		// Maybe it landed anyway: a retry sees finished() and completes.
 		return err
 	}
 	return x.checkpoint(ctx, f, r, StepTemplated, nil)
@@ -609,18 +697,26 @@ func (x *Executor) dropOwnFiles(ctx context.Context, f Fence, jobID string, p VM
 	return warns
 }
 
-// sweepOrphans deletes VMs on the job's node that carry this job's ownership tag, are not
-// templates and are not keep (a create a superseded acquisition finished after losing its lease).
+// sweepOrphans deletes VMs this job left half-created (a create a superseded acquisition finished
+// after losing its lease): candidates are ONLY members of pool pc-templates on the job's node, other
+// than keep, that are not templates; destroyOwned then re-reads each and requires the ownership tag,
+// pool membership and no pc-public. A VM outside pc-templates (a tenant or CAPMOX clone that copied
+// tags) is never even considered.
 func (x *Executor) sweepOrphans(ctx context.Context, f Fence, jobID string, p VMPayload, keep int) []string {
-	rows, err := x.PVE.ClusterResources(ctx, "vm")
-	if err != nil {
-		return []string{"could not list VMs to check for this job's orphans"}
+	pool, err := x.PVE.GetPool(ctx, pve.TemplatePool)
+	if err != nil || pool == nil {
+		return []string{"could not read pool pc-templates to check for this job's orphans"}
 	}
 	var warns []string
-	for _, row := range rows {
-		if row.Type != "qemu" || row.Node != p.Node || row.VMID == keep || row.Template == 1 || !hasTagValue(row.Tags, OwnerTag(jobID)) {
+	for _, m := range pool.Members {
+		if m.Type != "qemu" || m.Node != p.Node || m.VMID == keep {
 			continue
 		}
+		cfg, err := x.PVE.GetVMConfig(ctx, p.Node, m.VMID)
+		if err != nil || isTemplate(cfg) || !hasTagValue(cfg.Str("tags"), OwnerTag(jobID)) {
+			continue
+		}
+		row := m
 		if err := x.destroyOwned(ctx, f, jobID, p, row.VMID); errors.Is(err, ErrStopped) {
 			return append(warns, "stopped: the job's lease was lost")
 		} else if err != nil {
@@ -643,6 +739,10 @@ func hasTagValue(tags, want string) bool {
 // carrying its ownership tag (never a published template) and its own import files.
 // Each delete is preceded by a successful fence check: a lost lease stops cleanup immediately.
 func (x *Executor) Cleanup(ctx context.Context, f Fence, jobID string, p VMPayload, r *Receipt) []string {
+	if r != nil && (r.Step == StepTemplated || r.Step == StepSucceeded) {
+		// Finished: the template is the result, not a leftover. Only import files are dropped.
+		return x.dropOwnFiles(ctx, f, jobID, p, r, "")
+	}
 	var warns []string
 	if r != nil && r.VMID > 0 {
 		if err := x.destroyOwned(ctx, f, jobID, p, r.VMID); errors.Is(err, ErrStopped) {

@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/durablejobs"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 )
@@ -178,13 +179,186 @@ func TestPGRunnerResumesAfterLeaseLoss(t *testing.T) {
 	if j.State != "succeeded" || got.Step != StepSucceeded || j.Epoch < 2 {
 		t.Fatalf("job %+v receipt %+v", j, got)
 	}
-	own := 0
+	// Exactly one finished template, and no unfinished VM of this job left behind (the empty VM
+	// the lost acquisition created was re-read as ours and replaced).
+	finishedN, leftovers := 0, 0
 	for _, vm := range pv.vms {
+		if vm.cfg.Str("name") == TemplateName(p) && vm.template {
+			finishedN++
+		}
 		if strings.Contains(vm.cfg.Str("tags"), OwnerTag(id)) {
-			own++
+			leftovers++
 		}
 	}
-	if own != 1 || pv.mutations <= mutationsAtLoss {
-		t.Fatalf("own VMs %d, calls %v", own, pv.calls)
+	if finishedN != 1 || leftovers != 0 || pv.mutations <= mutationsAtLoss {
+		t.Fatalf("finished %d leftovers %d, calls %v", finishedN, leftovers, pv.calls)
+	}
+}
+
+// pgService builds a Service whose registry is a fake serving the golden "os" artifact.
+func pgService(t *testing.T, db *pgdoc.DB, jobs *durablejobs.Store) (*Service, VMRequest) {
+	t.Helper()
+	raw, sums, disk := golden(t, "os")
+	reg := &fakeRegistry{}
+	reg.add("proxcloud-vm-debian-13", dg('1'), "2026-11-11T01:00:00Z", "debian-13-os-20261111000000-aaaaaaaaaaaa", artifactManifest(raw, sums, disk, false), raw, sums)
+	s := &Service{Token: func(context.Context) (string, string, error) { return "ghp_x", "i", nil }, Jobs: jobs, DB: db,
+		Receipts: PGReceipts{DB: db}, VMEnabled: true, newRegistry: func(string) (Registry, error) { return reg, nil }}
+	req := VMRequest{Package: "proxcloud-vm-debian-13", Digest: dg('1'), ConfirmDigest: dg('1'), ServiceID: strings.Repeat("svc", 40),
+		Node: "pve1", ImportStorage: "nas-import", DiskStorage: "local-zfs"}
+	return s, req
+}
+
+// Items 5, 6, 10: enqueue with a 120-char service id (hashed key), duplicates refused, concurrent
+// enqueues produce exactly one job, and a DEAD job (receipt never marked failed) does not block a
+// new attempt.
+func TestPGEnqueueDedupAndDead(t *testing.T) {
+	db, jobs := pgFixture(t)
+	ctx := context.Background()
+	s, req := pgService(t, db, jobs)
+	if err := db.C(ReceiptCollection).Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Concurrent enqueues of the same artifact/node: exactly one wins.
+	type res struct {
+		r   *Receipt
+		err error
+	}
+	out := make(chan res, 6)
+	for i := 0; i < 6; i++ {
+		go func() { r, err := s.EnqueueVM(ctx, req, "admin"); out <- res{r, err} }()
+	}
+	won := 0
+	var first *Receipt
+	for i := 0; i < 6; i++ {
+		x := <-out
+		if x.err == nil {
+			won++
+			first = x.r
+		} else if !errors.Is(x.err, ErrDuplicate) {
+			t.Fatalf("unexpected error: %v", x.err)
+		}
+	}
+	if won != 1 {
+		t.Fatalf("%d concurrent enqueues won", won)
+	}
+	// The job dies (lease expired on its last attempt) without the receipt being marked failed.
+	if _, err := db.Pool.Exec(ctx, `UPDATE durable_job SET state='dead',finished_at=clock_timestamp(),last_error='lease_expired' WHERE id=$1`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := (PGReceipts{DB: db}).Load(ctx, first.ID); r.Step != StepQueued {
+		t.Fatalf("receipt %+v", r)
+	}
+	second, err := s.EnqueueVM(ctx, req, "admin")
+	if err != nil || second.ID == first.ID {
+		t.Fatalf("a dead job blocked a new attempt: %v", err)
+	}
+	if _, err := s.EnqueueVM(ctx, req, "admin"); !errors.Is(err, ErrDuplicate) {
+		t.Fatalf("live second job not deduplicated: %v", err)
+	}
+	// The dead one is listed for cleanup; the pending one is not.
+	ids, err := PGReceipts{DB: db}.DeadUncleaned(ctx)
+	if err != nil || len(ids) != 1 || ids[0] != first.ID {
+		t.Fatalf("dead uncleaned %v %v", ids, err)
+	}
+}
+
+// ClaimDead re-acquires a dead job fenced (new owner/epoch), never as a normal run, and a crash
+// mid-cleanup expires it straight back to dead; Replay still works afterwards.
+func TestPGClaimDeadIsFencedAndNeverRuns(t *testing.T) {
+	db, jobs := pgFixture(t)
+	ctx := context.Background()
+	_, _, _, _, p := setup(t)
+	id := enqueue(t, db, jobs, p)
+	if _, err := db.Pool.Exec(ctx, `UPDATE durable_job SET state='dead',attempts=1,finished_at=clock_timestamp(),last_error='lease_expired' WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	j, err := jobs.ClaimDead(ctx, id, 200*time.Millisecond)
+	if err != nil || j == nil || j.State != "running" || j.Attempts != j.MaxAttempts {
+		t.Fatalf("claim dead: %+v %v", j, err)
+	}
+	if again, _ := jobs.ClaimDead(ctx, id, time.Minute); again != nil {
+		t.Fatal("a running cleanup was claimed twice")
+	}
+	if err := jobs.Checkpoint(ctx, j, nil); err != nil {
+		t.Fatalf("fenced checkpoint: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond) // the cleanup "crashes": its lease expires
+	if n, err := jobs.ClaimKinds(ctx, time.Minute, []string{durablejobs.TemplateUpdateVM}); err != nil || n != nil {
+		t.Fatalf("an expired cleanup acquisition became a normal run: %+v %v", n, err)
+	}
+	got, _ := jobs.Get(ctx, id)
+	if got.State != "dead" || got.LastError != "lease_expired" {
+		t.Fatalf("after crash: %+v", got)
+	}
+	if err := jobs.Checkpoint(ctx, j, nil); !errors.Is(err, durablejobs.ErrLeaseLost) {
+		t.Fatalf("stale cleanup acquisition still fenced in: %v", err)
+	}
+	if err := jobs.Replay(ctx, id, "admin", "operator retry after cleanup", func(*durablejobs.Job) error { return nil }); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+}
+
+// Item 9: the upload lock is exclusive across sessions and released by its release func.
+func TestPGUploadAdvisoryLock(t *testing.T) {
+	db, _ := pgFixture(t)
+	ctx := context.Background()
+	rel, ok, err := db.TryAdvisoryLock(ctx, "templateupdate-upload:s/n/st")
+	if err != nil || !ok {
+		t.Fatalf("first: %v %v", ok, err)
+	}
+	if _, ok2, err := db.TryAdvisoryLock(ctx, "templateupdate-upload:s/n/st"); err != nil || ok2 {
+		t.Fatalf("second acquired the held lock: %v %v", ok2, err)
+	}
+	if rel3, ok3, _ := db.TryAdvisoryLock(ctx, "templateupdate-upload:s/n/other"); !ok3 {
+		t.Fatal("another storage's lock was blocked")
+	} else {
+		rel3()
+	}
+	rel()
+	rel() // idempotent
+	rel4, ok4, err := db.TryAdvisoryLock(ctx, "templateupdate-upload:s/n/st")
+	if err != nil || !ok4 {
+		t.Fatalf("after release: %v %v", ok4, err)
+	}
+	rel4()
+}
+
+// The runner's dead-job pass on PostgreSQL: cleans the leftovers of a dead job and marks it.
+func TestPGRunnerCleansDeadJob(t *testing.T) {
+	db, jobs := pgFixture(t)
+	ctx := context.Background()
+	x, pv, _, _, p := setup(t)
+	x.Receipts = PGReceipts{DB: db}
+	id := enqueue(t, db, jobs, p)
+	pv.vms[9201] = &fakeVM{node: "pve1", cfg: pve.VMConfig{"pool": "pc-templates", "tags": "proxcloud;" + OwnerTag(id)}}
+	pv.vms[9202] = &fakeVM{node: "pve1", cfg: pve.VMConfig{"pool": "pc-tenant", "tags": "proxcloud;" + OwnerTag(id)}} // a clone
+	rec := PGReceipts{DB: db}
+	r0, _ := rec.Load(ctx, id)
+	r0.Step, r0.VMID = StepCreating, 9201
+	_ = rec.Save(ctx, r0)
+	if _, err := db.Pool.Exec(ctx, `UPDATE durable_job SET state='dead',finished_at=clock_timestamp(),last_error='lease_expired' WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	r := &Runner{Store: jobs, Receipts: rec, Lease: 10 * time.Second, Dead: rec.DeadUncleaned, ClaimDead: jobs.ClaimDead,
+		Build: func(context.Context, VMPayload) (*Executor, error) { return x, nil }}
+	if did, err := r.RunOnce(ctx); !did || err != nil {
+		t.Fatalf("cleanup pass: %v %v", did, err)
+	}
+	if _, ok := pv.vms[9201]; ok {
+		t.Fatal("dead job's unfinished VM survived")
+	}
+	if _, ok := pv.vms[9202]; !ok {
+		t.Fatal("a clone outside pc-templates was destroyed")
+	}
+	got, _ := rec.Load(ctx, id)
+	j, _ := jobs.Get(ctx, id)
+	if !got.Cleaned || got.Step != StepFailed || j.State != "dead" || j.LastError != "cleaned_up" {
+		t.Fatalf("receipt %+v job %+v", got, j)
+	}
+	if ids, _ := rec.DeadUncleaned(ctx); len(ids) != 0 {
+		t.Fatalf("still listed: %v", ids)
+	}
+	if did, _ := r.RunOnce(ctx); did {
+		t.Fatal("cleaned job processed again")
 	}
 }

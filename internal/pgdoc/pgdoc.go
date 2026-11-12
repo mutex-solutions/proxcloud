@@ -207,6 +207,46 @@ func (d *DB) WithAdvisoryLock(ctx context.Context, key string, try bool, fn func
 	return true, fn()
 }
 
+// TryAdvisoryLock takes a session-level advisory lock on key on a dedicated connection of the lock
+// pool and returns its release (idempotent). acquired=false (no error) when another session holds
+// it. The lock also ends if the process dies (its connection closes). For holders that span long
+// external work, where WithAdvisoryLock's callback shape does not fit.
+func (d *DB) TryAdvisoryLock(ctx context.Context, key string) (release func(), acquired bool, err error) {
+	d.lockMu.Lock()
+	if d.lockPool == nil {
+		cfg := d.Pool.Config()
+		cfg.MinConns = 0
+		cfg.MaxConns = 8
+		lp, e := pgxpool.NewWithConfig(ctx, cfg)
+		if e != nil {
+			d.lockMu.Unlock()
+			return nil, false, e
+		}
+		d.lockPool = lp
+	}
+	lp := d.lockPool
+	d.lockMu.Unlock()
+	c, err := lp.Acquire(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := c.QueryRow(ctx, "SELECT pg_try_advisory_lock(hashtext($1))", key).Scan(&acquired); err != nil || !acquired {
+		c.Release()
+		return nil, false, err
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if _, e := c.Exec(cleanup, "SELECT pg_advisory_unlock(hashtext($1))", key); e != nil {
+				_ = c.Conn().Close(cleanup)
+			}
+			c.Release()
+		})
+	}, true, nil
+}
+
 func (d *DB) q(ctx context.Context) querier {
 	if _, ok := ctx.Value(txKey{}).(pgx.Tx); ok {
 		tx, err := d.Tx(ctx)

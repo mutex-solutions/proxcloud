@@ -43,6 +43,10 @@ type fakePVE struct {
 	createHook   func() // runs inside CreateVM
 	uploadHook   func()
 	failDeleteVM bool
+	// finalWaitFails makes the WaitTask of the final name/tags write fail although it landed.
+	finalWaitFails bool
+	// importTransportErr makes the import-from SetVMConfig fail before PVE answered.
+	importTransportErr bool
 }
 
 func newFakePVE() *fakePVE {
@@ -104,6 +108,9 @@ func (f *fakePVE) TaskStatus(_ context.Context, up pve.UPID) (*pve.TaskStatus, e
 	if strings.HasPrefix(string(up), "UPID:upload:") && f.uploadFail != "" {
 		return &pve.TaskStatus{Status: "stopped", ExitStatus: f.uploadFail}, nil
 	}
+	if string(up) == "UPID:import-fail" {
+		return &pve.TaskStatus{Status: "stopped", ExitStatus: "import failed: invalid qcow2"}, nil
+	}
 	return &pve.TaskStatus{Status: "stopped", ExitStatus: "OK"}, nil
 }
 
@@ -113,6 +120,9 @@ func (f *fakePVE) WaitTask(_ context.Context, up pve.UPID) error {
 	f.mu.Unlock()
 	if string(up) == "UPID:import-fail" {
 		return errors.New("pve: task failed: import")
+	}
+	if string(up) == "UPID:final" {
+		return errors.New("pve: wait UPID:final: connection reset")
 	}
 	return nil
 }
@@ -183,11 +193,17 @@ func (f *fakePVE) SetVMConfig(_ context.Context, node string, vmid int, params m
 	if !ok {
 		return "", &pve.APIError{Status: 500, Message: "Configuration file does not exist"}
 	}
+	if _, imp := params["scsi0"]; imp && f.importTransportErr {
+		return "", errors.New("pve: POST /nodes/pve1/qemu/config: connection reset")
+	}
 	if _, imp := params["scsi0"]; imp && f.importFail {
 		return "UPID:import-fail", nil
 	}
 	for k, v := range params {
 		vm.cfg[k] = v
+	}
+	if _, final := params["description"]; final && f.finalWaitFails {
+		return "UPID:final", nil
 	}
 	return "UPID:config", nil
 }
@@ -216,6 +232,19 @@ func (f *fakePVE) ToTemplate(_ context.Context, node string, vmid int) (pve.UPID
 	f.call(fmt.Sprintf("template %d", vmid), true)
 	f.vms[vmid].template = true
 	return "UPID:template", nil
+}
+
+func (f *fakePVE) GetPool(_ context.Context, poolID string) (*pve.PoolInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.read()
+	out := &pve.PoolInfo{PoolID: poolID}
+	for id, vm := range f.vms {
+		if vm.cfg.Str("pool") == poolID {
+			out.Members = append(out.Members, pve.PoolMember{ID: fmt.Sprintf("qemu/%d", id), Type: "qemu", VMID: id, Node: vm.node})
+		}
+	}
+	return out, nil
 }
 
 func (f *fakePVE) DeleteVM(_ context.Context, node string, vmid int) (pve.UPID, error) {
@@ -333,10 +362,13 @@ func TestExecutorHappyPathCreatesNewTemplate(t *testing.T) {
 		t.Fatalf("new template: %+v", vm)
 	}
 	tags := vm.cfg.Str("tags")
-	for _, want := range []string{"pc-public", "pc-img-debian-13", "pc-v-202611110000", OwnerTag(testJob), "pc-src-999999999999"} {
+	for _, want := range []string{"pc-public", "pc-img-debian-13", "pc-v-202611110000", "pc-src-999999999999"} {
 		if !strings.Contains(tags, want) {
 			t.Errorf("tag %s missing in %s", want, tags)
 		}
+	}
+	if strings.Contains(tags, OwnerTag(testJob)) || strings.Contains(tags, "pc-tu-"+"0b7c") {
+		t.Errorf("the finished template still carries the destructive ownership tag: %s", tags)
 	}
 	if !strings.Contains(vm.cfg.Str("scsi0"), "import-from=nas-import:import/"+OwnerTag(testJob)+"-e1-") {
 		t.Fatalf("import-from: %s", vm.cfg.Str("scsi0"))
@@ -379,7 +411,7 @@ func TestExecutorK8sTagsNeverPublish(t *testing.T) {
 	if err := p.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	tags := TemplateTags(p, testJob)
+	tags := TemplateTags(p)
 	if strings.Contains(tags, "pc-public") || strings.Contains(tags, "pc-img-") || !strings.Contains(tags, "pc-k8sver-1-35-10") {
 		t.Fatalf("k8s tags: %s", tags)
 	}
@@ -505,7 +537,7 @@ func TestExecutorResumesFromReceipt(t *testing.T) {
 	}
 	templates := 0
 	for _, vm := range pv.vms {
-		if strings.Contains(vm.cfg.Str("tags"), OwnerTag(testJob)) {
+		if strings.Contains(vm.cfg.Str("tags"), OwnerTag(testJob)) || vm.cfg.Str("name") == TemplateName(p) {
 			templates++
 		}
 	}
@@ -571,6 +603,102 @@ func TestExecutorReuploadsVanishedFile(t *testing.T) {
 	}
 	if err := x.Run(context.Background(), testJob, p, &testFence{epoch: 3, budget: -1}); err != nil || blobs.opens != 1 {
 		t.Fatalf("second run %v opens %d", err, blobs.opens)
+	}
+}
+
+// BLOCKER regression: PVE clones copy tags. A VM carrying this job's ownership tag OUTSIDE pool
+// pc-templates (a CAPMOX worker or tenant clone) is never touched — not by the orphan sweep after a
+// success, not by failure cleanup, not by a replay.
+func TestClonesWithJobTagAreNeverTouched(t *testing.T) {
+	x, pv, _, rec, p := setup(t)
+	// A half-finished (unpublished, not yet template) build of this job got cloned by someone.
+	for _, id := range []int{7001, 7002} {
+		pv.vms[id] = &fakeVM{node: "pve1", cfg: pve.VMConfig{"name": "k8s-worker", "pool": "pc-tenant1", "tags": "proxcloud;" + OwnerTag(testJob) + ";pc-k8s-abc"}}
+	}
+	pv.vms[7003] = &fakeVM{node: "pve1", cfg: pve.VMConfig{"name": "no-pool", "tags": OwnerTag(testJob)}}
+	if err := x.Run(context.Background(), testJob, p, &testFence{epoch: 1, budget: -1}); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := rec.Load(context.Background(), testJob)
+	x.Cleanup(context.Background(), &testFence{epoch: 1, budget: -1}, testJob, p, r) // e.g. a replayed cleanup
+	pv.importFail = true
+	r.Step, r.VMID = StepCreating, 7001 // a corrupted/replayed receipt pointing at a clone
+	_ = rec.Save(context.Background(), r)
+	_ = x.Run(context.Background(), testJob, p, &testFence{epoch: 2, budget: -1})
+	x.Cleanup(context.Background(), &testFence{epoch: 2, budget: -1}, testJob, p, r)
+	for _, id := range []int{7001, 7002, 7003} {
+		if _, ok := pv.vms[id]; !ok {
+			t.Fatalf("clone %d outside pc-templates was destroyed: %v", id, pv.calls)
+		}
+		for _, c := range pv.calls {
+			if c == fmt.Sprintf("destroy %d", id) || c == fmt.Sprintf("config %d", id) {
+				t.Fatalf("clone %d mutated: %v", id, pv.calls)
+			}
+		}
+	}
+}
+
+// The finished template is not destroyable by its own job any more (no ownership tag), and a
+// cleanup of a finished receipt only drops import files.
+func TestFinishedTemplateSurvivesCleanup(t *testing.T) {
+	x, pv, _, rec, p := setup(t)
+	p.Publish = false // staged: no pc-public, the case the old ownership check missed
+	rec.m[testJob] = Receipt{ID: testJob, Payload: p, Step: StepQueued}
+	if err := x.Run(context.Background(), testJob, p, &testFence{epoch: 1, budget: -1}); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := rec.Load(context.Background(), testJob)
+	for _, step := range []Step{StepTemplated, StepImported, StepFailed} {
+		r.Step = step
+		x.Cleanup(context.Background(), &testFence{epoch: 2, budget: -1}, testJob, p, r)
+		if _, ok := pv.vms[r.VMID]; !ok {
+			t.Fatalf("finished template destroyed by a cleanup at step %s", step)
+		}
+	}
+}
+
+// Item 3: the final name/tags write landed but its task wait failed → the retry completes.
+func TestFinishIsIdempotentWhenFinalWriteLanded(t *testing.T) {
+	x, pv, _, rec, p := setup(t)
+	pv.finalWaitFails = true
+	if err := x.Run(context.Background(), testJob, p, &testFence{epoch: 1, budget: -1}); err == nil {
+		t.Fatal("the failed wait was not reported")
+	} else if errors.As(err, new(*Permanent)) {
+		t.Fatalf("must be retryable, got %v", err)
+	}
+	pv.finalWaitFails = false
+	if err := x.Run(context.Background(), testJob, p, &testFence{epoch: 2, budget: -1}); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	r, _ := rec.Load(context.Background(), testJob)
+	if r.Step != StepTemplated || !pv.vms[r.VMID].template {
+		t.Fatalf("receipt %+v", r)
+	}
+	// Same for a published one (pc-public made the old ownership check fail).
+	x2, pv2, _, rec2, p2 := setup(t)
+	pv2.finalWaitFails = true
+	_ = x2.Run(context.Background(), testJob, p2, &testFence{epoch: 1, budget: -1})
+	pv2.finalWaitFails = false
+	if err := x2.Run(context.Background(), testJob, p2, &testFence{epoch: 2, budget: -1}); err != nil {
+		t.Fatalf("published retry: %v", err)
+	}
+	if r2, _ := rec2.Load(context.Background(), testJob); r2.Step != StepTemplated {
+		t.Fatalf("published receipt %+v", r2)
+	}
+}
+
+// Item 4: an import call that failed before PVE answered is retryable; only a task that finished
+// with a non-OK exit status is a permanent refusal.
+func TestImportTransportErrorIsRetryable(t *testing.T) {
+	x, pv, _, _, p := setup(t)
+	pv.importTransportErr = true
+	err := x.Run(context.Background(), testJob, p, &testFence{epoch: 1, budget: -1})
+	if err == nil || errors.As(err, new(*Permanent)) {
+		t.Fatalf("want retryable, got %v", err)
+	}
+	pv.importTransportErr = false
+	if err := x.Run(context.Background(), testJob, p, &testFence{epoch: 2, budget: -1}); err != nil {
+		t.Fatalf("retry: %v", err)
 	}
 }
 

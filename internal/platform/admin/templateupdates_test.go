@@ -91,7 +91,8 @@ func TestGitHubIntegrationValidatedBeforeSave(t *testing.T) {
 		fmt.Fprint(w, `{"login":"octo"}`)
 	}))
 	defer gh.Close()
-	h := &Handler{adminIssuer: "operator-realm", githubOptions: templateupdates.Options{APIBase: gh.URL}}
+	h := &Handler{adminIssuer: "operator-realm", githubOptions: templateupdates.Options{APIBase: gh.URL},
+		githubCountFn: func(context.Context) (int64, error) { return 0, nil }}
 	r := tuRouter(h)
 	op := &httpx.RequestContext{SigV4KeyID: "pk"}
 	for name, body := range map[string]string{
@@ -107,5 +108,46 @@ func TestGitHubIntegrationValidatedBeforeSave(t *testing.T) {
 		if strings.Contains(w.Body.String(), pat) {
 			t.Errorf("%s: token echoed", name)
 		}
+	}
+	// Item 8: a second GitHub integration is refused (before any GitHub call).
+	h.githubCountFn = func(context.Context) (int64, error) { return 1, nil }
+	if w := tuDo(r, "POST", "/admin/integrations", `{"thirdParty":"GitHub","secret":{"token":"`+pat+`"}}`, op); w.Code != http.StatusConflict {
+		t.Errorf("second integration: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// Item 7: on update a present token must be a non-empty string; an absent one keeps the stored PAT.
+func TestGitHubTokenUpdateRules(t *testing.T) {
+	h := &Handler{}
+	ctx := context.Background()
+	for name, secret := range map[string]any{
+		"empty":      map[string]any{"token": ""},
+		"blank":      map[string]any{"token": "   "},
+		"number":     map[string]any{"token": 42},
+		"null":       map[string]any{"token": nil},
+		"not object": "ghp_x",
+	} {
+		if err := h.githubIntegrationCheck(ctx, secret, false); err == nil {
+			t.Errorf("%s: accepted on update", name)
+		}
+	}
+	for name, secret := range map[string]any{"absent secret": nil, "absent token": map[string]any{}} {
+		if err := h.githubIntegrationCheck(ctx, secret, false); err != nil {
+			t.Errorf("%s: %v (must keep the stored token)", name, err)
+		}
+		if err := h.githubIntegrationCheck(ctx, secret, true); err == nil {
+			t.Errorf("%s: accepted on create", name)
+		}
+	}
+}
+
+// Item 5: replaying a template-update job needs admin:service:manage. Checked through the
+// permission chooser with a BILLING_ADMIN-like grant set.
+func TestTemplateUpdateReplayPermission(t *testing.T) {
+	if !rbac.Matches(rolePermissions("BILLING_ADMIN"), "admin:bill:manage") {
+		t.Skip("BILLING_ADMIN no longer manages bills")
+	}
+	if rbac.Matches(rolePermissions("BILLING_ADMIN"), templateUpdatesManagePerm) {
+		t.Fatal("BILLING_ADMIN must not replay template update jobs")
 	}
 }

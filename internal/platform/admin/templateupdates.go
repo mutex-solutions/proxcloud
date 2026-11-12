@@ -327,20 +327,17 @@ func (h *Handler) templateUpdatesSandbox(w http.ResponseWriter, r *http.Request)
 // ── GitHub integration (thirdPartyIntegration type "GitHub") ─────────────────────────────────
 
 // githubIntegrationCheck validates a GitHub integration body before it is stored. On update an
-// absent token keeps the stored one (write-only secret). Returns the error to answer with.
+// ABSENT secret or token key keeps the stored token (write-only secret); a token key that is present
+// must be a non-empty string, so an empty or non-string value can never wipe the stored PAT.
+// Returns the error to answer with.
 func (h *Handler) githubIntegrationCheck(ctx context.Context, secret any, requireToken bool) error {
+	if err := githubSecretShape(secret, requireToken); err != nil {
+		return err
+	}
 	m, _ := secret.(map[string]any)
 	tok, _ := m["token"].(string)
-	for k := range m {
-		if k != "token" {
-			return httpx.BadRequest("A GitHub integration's secret holds only token")
-		}
-	}
 	if tok == "" {
-		if requireToken {
-			return httpx.BadRequest("A GitHub integration needs a personal access token (classic) with read:packages")
-		}
-		return nil
+		return nil // absent on update: keep the stored token
 	}
 	if _, err := templateupdates.ValidateToken(ctx, tok, h.githubOptions); err != nil {
 		var rl *templateupdates.RateLimitError
@@ -352,7 +349,48 @@ func (h *Handler) githubIntegrationCheck(ctx context.Context, secret any, requir
 	return nil
 }
 
-// GitHubToken reads the decrypted PAT of the newest GitHub integration ("" when none).
+// githubCount counts GitHub integrations (overridable in tests).
+func (h *Handler) githubCount(ctx context.Context) (int64, error) {
+	if h.githubCountFn != nil {
+		return h.githubCountFn(ctx)
+	}
+	return h.repo.GitHubIntegrationCount(ctx)
+}
+
+// githubSecretShape checks the secret's shape without I/O.
+func githubSecretShape(secret any, requireToken bool) error {
+	if secret == nil {
+		if requireToken {
+			return httpx.BadRequest("A GitHub integration needs a personal access token (classic) with read:packages")
+		}
+		return nil
+	}
+	m, ok := secret.(map[string]any)
+	if !ok {
+		return httpx.BadRequest("A GitHub integration's secret must be an object holding token")
+	}
+	for k := range m {
+		if k != "token" {
+			return httpx.BadRequest("A GitHub integration's secret holds only token")
+		}
+	}
+	raw, present := m["token"]
+	if !present {
+		if requireToken {
+			return httpx.BadRequest("A GitHub integration needs a personal access token (classic) with read:packages")
+		}
+		return nil
+	}
+	tok, isString := raw.(string)
+	if !isString || strings.TrimSpace(tok) == "" {
+		return httpx.BadRequest("The GitHub token must be a non-empty string")
+	}
+	return nil
+}
+
+// GitHubToken reads the decrypted PAT of THE GitHub integration ("" when none). Creation refuses a
+// second one; should several exist anyway (created before that check), the oldest by createdAt wins,
+// deterministically, and the page reports the conflict.
 func (r *Repo) GitHubToken(ctx context.Context, decrypt func(any) any) (string, string, error) {
 	var docs []pgdoc.M
 	if err := r.c(integrationCollection).Find(ctx, pgdoc.M{"thirdParty": templateupdates.ThirdPartyGitHub}, &docs); err != nil {
@@ -361,8 +399,15 @@ func (r *Repo) GitHubToken(ctx context.Context, decrypt func(any) any) (string, 
 	if len(docs) == 0 {
 		return "", "", nil
 	}
-	sort.Slice(docs, func(i, j int) bool { return integrationDocID(docs[i]) < integrationDocID(docs[j]) })
-	d := docs[len(docs)-1]
+	sort.SliceStable(docs, func(i, j int) bool {
+		ci, _ := docs[i]["createdAt"].(string)
+		cj, _ := docs[j]["createdAt"].(string)
+		if ci != cj {
+			return ci < cj
+		}
+		return integrationDocID(docs[i]) < integrationDocID(docs[j])
+	})
+	d := docs[0]
 	sec := d["secret"]
 	if decrypt != nil {
 		sec = decrypt(sec)
@@ -370,6 +415,11 @@ func (r *Repo) GitHubToken(ctx context.Context, decrypt func(any) any) (string, 
 	m, _ := sec.(map[string]any)
 	tok, _ := m["token"].(string)
 	return tok, integrationDocID(d), nil
+}
+
+// GitHubIntegrationCount counts GitHub integrations (creation allows only one).
+func (r *Repo) GitHubIntegrationCount(ctx context.Context) (int64, error) {
+	return r.c(integrationCollection).Count(ctx, pgdoc.M{"thirdParty": templateupdates.ThirdPartyGitHub})
 }
 
 func integrationDocID(d pgdoc.M) string {

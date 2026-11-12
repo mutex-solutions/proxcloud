@@ -381,27 +381,45 @@ func (s *Service) EnqueueVM(ctx context.Context, req VMRequest, actor string) (*
 	if err := p.Validate(); err != nil {
 		return nil, err
 	}
-	prior, err := s.Receipts.ByKey(ctx, p.ServiceID, p.Node, p.Digest)
-	if err != nil {
-		return nil, err
-	}
-	for _, r := range prior {
-		if r.Step != StepFailed {
-			return nil, ErrDuplicate
-		}
-	}
 	raw, _ := json.Marshal(p)
 	now := time.Now().UTC()
 	rec := &Receipt{Kind: "vm", Payload: p, RequestedBy: actor, CreatedAt: now, UpdatedAt: now, Step: StepQueued}
-	// A failed earlier attempt of the same key keeps its own job row; a retry gets a new key suffix.
-	key := p.Key()
-	if len(prior) > 0 {
-		key += fmt.Sprintf("#%d", len(prior))
-	}
+	// Everything below runs in ONE transaction under an advisory lock on the payload identity, so
+	// two concurrent enqueues of the same artifact/node cannot both pass the duplicate check.
 	err = s.DB.WithTx(ctx, func(tc context.Context) error {
+		if err := s.DB.LockXact(tc, "templateupdate-enqueue:"+p.Key()); err != nil {
+			return err
+		}
+		prior, err := s.Receipts.ByKey(tc, p.ServiceID, p.Node, p.Digest)
+		if err != nil {
+			return err
+		}
+		for _, r := range prior {
+			// A receipt counts as finished-failed only when its step says failed OR its durable job is
+			// dead (e.g. it died on a lease expiry before writing the failure). Everything else blocks.
+			if r.Step == StepFailed {
+				continue
+			}
+			if state, err := s.JobState(tc, r.ID); err == nil && state == "dead" {
+				continue
+			}
+			return ErrDuplicate
+		}
+		// A failed earlier attempt keeps its own job row; a retry gets a distinct key.
+		key := p.Key()
+		if len(prior) > 0 {
+			key = fmt.Sprintf("%s-%d", key, len(prior))
+		}
 		id, err := s.Jobs.EnqueueTx(tc, durablejobs.TemplateUpdateVM, key, raw, 3)
 		if err != nil {
 			return err
+		}
+		// Never overwrite an existing receipt (an identical key enqueued concurrently returns the
+		// same job id): that would reset a running job's progress to "queued".
+		if existing, err := s.Receipts.Load(tc, id); err != nil {
+			return err
+		} else if existing != nil {
+			return ErrDuplicate
 		}
 		rec.ID = id
 		return s.Receipts.Save(tc, rec)
@@ -410,6 +428,18 @@ func (s *Service) EnqueueVM(ctx context.Context, req VMRequest, actor string) (*
 		return nil, err
 	}
 	return rec, nil
+}
+
+// JobState reads the durable job state of a receipt ("" when the row is gone, e.g. pruned).
+func (s *Service) JobState(ctx context.Context, id string) (string, error) {
+	if s.Jobs == nil {
+		return "", nil
+	}
+	j, err := s.Jobs.Get(ctx, id)
+	if err != nil {
+		return "", nil
+	}
+	return j.State, nil
 }
 
 // History returns the newest receipts.

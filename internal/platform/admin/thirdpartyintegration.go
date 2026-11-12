@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -86,14 +87,28 @@ func (h *Handler) integrationCreate(w http.ResponseWriter, r *http.Request) {
 	if description == "" {
 		description = fmt.Sprintf("%s Integration", req.ThirdParty)
 	}
-	// GitHub: the PAT is validated live (GET /user + read:packages scope) before it is stored.
+	// GitHub: at most one, and the PAT is validated live (GET /user + read:packages) before storing.
 	if req.ThirdParty == templateupdates.ThirdPartyGitHub {
+		// Shape first (no I/O), then the singleton rule, then the live GitHub check.
+		if err := githubSecretShape(req.Secret, true); err != nil {
+			httpx.WriteError(w, err)
+			return
+		}
+		if n, err := h.githubCount(r.Context()); httpx.WriteError(w, err) {
+			return
+		} else if n > 0 {
+			httpx.WriteError(w, httpx.NewError(http.StatusConflict, http.StatusConflict, "A GitHub integration already exists: edit it to replace the token"))
+			return
+		}
 		if err := h.githubIntegrationCheck(r.Context(), req.Secret, true); err != nil {
 			httpx.WriteError(w, err)
 			return
 		}
 	}
 	doc := integrationDoc(name, description, req.ThirdParty, req.Config, req.Secret, req.Metadata)
+	if req.ThirdParty == templateupdates.ThirdPartyGitHub {
+		doc["createdAt"] = time.Now().UTC().Format(time.RFC3339Nano) // deterministic "first" GitHub integration
+	}
 	// Encrypt the secret's textual leaves before it reaches the datastore (symmetric with the
 	// consumers' decrypt: mail SMTPFromStore + billing GetGateway). Mirrors externalServiceCreate.
 	if sec, ok := doc["secret"]; ok && h.esSvc != nil {

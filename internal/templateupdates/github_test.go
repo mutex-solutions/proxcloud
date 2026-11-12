@@ -226,3 +226,84 @@ func TestStringerHidesToken(t *testing.T) {
 		t.Fatalf("client formatting leaks the token: %s", s)
 	}
 }
+
+// trickleRegistry serves one blob whose body arrives in chunks spaced by gap. Auth is anonymous
+// (no challenge) so only the streaming behaviour is under test.
+func trickleRegistry(t *testing.T, chunks int, gap time.Duration, stallAfter int) (*httptest.Server, []byte) {
+	t.Helper()
+	data := bytes.Repeat([]byte("z"), chunks*64)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprint(len(data)))
+		w.WriteHeader(200)
+		fl := w.(http.Flusher)
+		for i := 0; i < chunks; i++ {
+			if stallAfter > 0 && i == stallAfter {
+				select { // stop sending, keep the connection open
+				case <-r.Context().Done():
+				case <-time.After(10 * time.Second):
+				}
+				return
+			}
+			_, _ = w.Write(data[i*64 : (i+1)*64])
+			fl.Flush()
+			time.Sleep(gap)
+		}
+	}))
+	return srv, data
+}
+
+// BLOCKER regression: a blob body that keeps arriving for longer than the per-request timeout
+// must stream to the end (the old client's Client.Timeout killed it).
+func TestOpenBlobTricklesPastRequestTimeout(t *testing.T) {
+	srv, data := trickleRegistry(t, 12, 50*time.Millisecond, 0) // ~600ms total
+	defer srv.Close()
+	c, _ := NewClient(testPAT, Options{Registry: strings.TrimPrefix(srv.URL, "http://"), RegistryScheme: "http",
+		RequestTimeout: 150 * time.Millisecond, BlobIdleTimeout: 300 * time.Millisecond})
+	rc, err := c.OpenBlob(context.Background(), "proxcloud-vm-debian-13", dg('1'))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	start := time.Now()
+	got, err := io.ReadAll(rc)
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("read %d bytes, err %v", len(got), err)
+	}
+	if time.Since(start) < 3*150*time.Millisecond {
+		t.Fatalf("the body did not outlast the request timeout (%v): the test proves nothing", time.Since(start))
+	}
+}
+
+// A stream that stops delivering bytes is aborted by the idle guard, not left hanging.
+func TestOpenBlobStallIsAborted(t *testing.T) {
+	srv, _ := trickleRegistry(t, 12, 10*time.Millisecond, 3)
+	defer srv.Close()
+	c, _ := NewClient(testPAT, Options{Registry: strings.TrimPrefix(srv.URL, "http://"), RegistryScheme: "http",
+		RequestTimeout: time.Second, BlobIdleTimeout: 200 * time.Millisecond})
+	rc, err := c.OpenBlob(context.Background(), "proxcloud-vm-debian-13", dg('1'))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	start := time.Now()
+	_, err = io.ReadAll(rc)
+	if !errors.Is(err, ErrBlobStalled) || time.Since(start) > 3*time.Second {
+		t.Fatalf("want ErrBlobStalled quickly, got %v after %v", err, time.Since(start))
+	}
+}
+
+// Small calls stay bounded by the request timeout (a hanging API must not hang discovery).
+func TestRESTCallsStayBounded(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+	}))
+	defer srv.Close()
+	c, _ := NewClient(testPAT, Options{APIBase: srv.URL, RequestTimeout: 150 * time.Millisecond})
+	start := time.Now()
+	if _, err := c.ListVersions(context.Background(), "proxcloud-vm-debian-13"); err == nil || time.Since(start) > 2*time.Second {
+		t.Fatalf("hanging API: err %v after %v", err, time.Since(start))
+	}
+}

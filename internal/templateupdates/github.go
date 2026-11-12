@@ -83,7 +83,14 @@ type Client struct {
 	apiBase  string
 	registry string // host[:port]; https unless registryScheme says otherwise (tests)
 	scheme   string
-	http     *http.Client
+	// http serves the small API/manifest/token/small-blob reads, each bounded by requestTimeout.
+	http *http.Client
+	// blob streams large blobs (a VM disk is up to 8 GiB): NO Client.Timeout (that would also bound
+	// the body read); bounded by the caller's ctx, the transport's ResponseHeaderTimeout and a
+	// stall guard (blobIdle without a single byte aborts the transfer).
+	blob           *http.Client
+	requestTimeout time.Duration
+	blobIdle       time.Duration
 	// last is the newest X-RateLimit-* the REST API returned (nil before any call).
 	last *RateLimit
 	// regTokens caches registry bearer tokens per repository (pull scope).
@@ -93,8 +100,17 @@ type Client struct {
 // Options overrides the endpoints and transport (tests). Production uses the defaults.
 type Options struct {
 	APIBase, Registry, RegistryScheme string
-	HTTP                              *http.Client
+	// HTTP supplies the transport (its Timeout is ignored: timeouts are set per client below).
+	HTTP *http.Client
+	// RequestTimeout bounds one API/manifest/token call (default 30s); BlobIdleTimeout aborts a
+	// blob stream that delivers no byte for that long (default 2m).
+	RequestTimeout, BlobIdleTimeout time.Duration
 }
+
+const (
+	defaultRequestTimeout = 30 * time.Second
+	defaultBlobIdle       = 2 * time.Minute
+)
 
 // NewClient builds a client for token. An empty token is ErrNoToken: callers never get an
 // anonymous client.
@@ -106,7 +122,8 @@ func NewClient(token string, o Options) (*Client, error) {
 	if strings.ContainsAny(token, " \t\r\n") || len(token) > 512 {
 		return nil, errors.New("github token is malformed")
 	}
-	c := &Client{token: token, apiBase: DefaultAPIBase, registry: DefaultRegistry, scheme: "https", http: o.HTTP}
+	c := &Client{token: token, apiBase: DefaultAPIBase, registry: DefaultRegistry, scheme: "https",
+		requestTimeout: o.RequestTimeout, blobIdle: o.BlobIdleTimeout}
 	if o.APIBase != "" {
 		c.apiBase = strings.TrimRight(o.APIBase, "/")
 	}
@@ -116,14 +133,29 @@ func NewClient(token string, o Options) (*Client, error) {
 	if o.RegistryScheme != "" {
 		c.scheme = o.RegistryScheme
 	}
-	if c.http == nil {
-		c.http = &http.Client{Timeout: 30 * time.Second}
+	if c.requestTimeout <= 0 {
+		c.requestTimeout = defaultRequestTimeout
+	}
+	if c.blobIdle <= 0 {
+		c.blobIdle = defaultBlobIdle
+	}
+	var rt http.RoundTripper
+	if o.HTTP != nil && o.HTTP.Transport != nil {
+		rt = o.HTTP.Transport
+	}
+	if t, ok := rt.(*http.Transport); ok || rt == nil {
+		if t == nil {
+			t = http.DefaultTransport.(*http.Transport)
+		}
+		t = t.Clone()
+		if t.ResponseHeaderTimeout == 0 {
+			t.ResponseHeaderTimeout = c.requestTimeout
+		}
+		rt = t
 	}
 	// Never forward the Authorization header across a redirect to another host (blob storage):
 	// net/http drops it on a cross-domain hop already; this also refuses non-https redirects.
-	base := c.http
-	cp := *base
-	cp.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+	redirect := func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 5 {
 			return errors.New("too many redirects")
 		}
@@ -135,7 +167,8 @@ func NewClient(token string, o Options) (*Client, error) {
 		}
 		return nil
 	}
-	c.http = &cp
+	c.http = &http.Client{Transport: rt, Timeout: c.requestTimeout, CheckRedirect: redirect}
+	c.blob = &http.Client{Transport: rt, CheckRedirect: redirect}
 	return c, nil
 }
 
@@ -216,6 +249,8 @@ func classify(res *http.Response, body []byte) error {
 }
 
 func (c *Client) restGet(ctx context.Context, path string, q url.Values, out any) (http.Header, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.requestTimeout)
+	defer cancel()
 	u := c.apiBase + path
 	if len(q) > 0 {
 		u += "?" + q.Encode()

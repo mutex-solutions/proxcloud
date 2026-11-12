@@ -105,6 +105,8 @@ type Handler struct {
 	templateUpdates *templateupdates.Service
 	// githubOptions overrides the GitHub endpoints for the integration token check (tests only).
 	githubOptions templateupdates.Options
+	// githubCountFn overrides the GitHub integration count (tests only; nil = the repository).
+	githubCountFn func(ctx context.Context) (int64, error)
 }
 
 // SetHmacEncryptor wires the data-at-rest key for hmac key secrets.

@@ -37,8 +37,10 @@ until then the button is disabled. You need the *Manage external services* permi
 1. Choose **Import…** on a row.
 2. Pick the Proxmox provider, the node, a storage with **import** content (where the download is
    placed) and the storage the template disk goes to. Only storages that are active on that node are offered.
-3. For an OS template, choose whether to publish it to the catalog right away. Otherwise it is created
-   *staged* (tag `pc-tu-staged`): check it, then add the `pc-public` tag in Proxmox to publish it.
+3. For an OS template, choose whether to publish it to the catalog right away (off by default). Otherwise
+   it is created *staged* (tag `pc-tu-staged`): boot a clone of it to check it, then add the `pc-public`
+   tag in Proxmox to publish it. An import is not boot-tested before publishing, unlike a pipeline build,
+   and a published import counts as a version when the pipeline prunes old templates on that node.
 4. Paste the exact digest shown in the dialog to confirm, then **Import as new template**.
 
 The download is checked three times (its SHA-256 while streaming, by Proxmox on upload, and against the

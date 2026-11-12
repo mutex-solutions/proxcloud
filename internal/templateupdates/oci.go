@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // OCI media types (OCI image-spec v1.0/v1.1 and the Docker v2 equivalents GHCR serves).
@@ -60,6 +61,8 @@ func repoForPackage(pkg string) (string, error) {
 // registryToken exchanges the PAT for a pull-scoped registry bearer token (distribution token
 // auth). The realm must be on the registry's own host: the PAT is never sent elsewhere.
 func (c *Client) registryToken(ctx context.Context, challenge string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.requestTimeout)
+	defer cancel()
 	params := parseChallenge(challenge)
 	realm := params["realm"]
 	ru, err := url.Parse(realm)
@@ -146,8 +149,9 @@ func splitParams(s string) []string {
 }
 
 // registryDo performs a registry GET with token auth: an unauthenticated try, then (on a 401
-// Bearer challenge) the PAT-backed token exchange. Registry tokens are cached per scope.
-func (c *Client) registryDo(ctx context.Context, path, accept string) (*http.Response, error) {
+// Bearer challenge) the PAT-backed token exchange. Registry tokens are cached per scope. hc is
+// c.http (bounded calls) or c.blob (streams).
+func (c *Client) registryDo(ctx context.Context, hc *http.Client, path, accept string) (*http.Response, error) {
 	u := c.scheme + "://" + c.registry + path
 	send := func(tok string) (*http.Response, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
@@ -161,7 +165,7 @@ func (c *Client) registryDo(ctx context.Context, path, accept string) (*http.Res
 		if tok != "" {
 			req.Header.Set("Authorization", "Bearer "+tok)
 		}
-		res, err := c.http.Do(req)
+		res, err := hc.Do(req)
 		if err != nil {
 			return nil, scrub(err)
 		}
@@ -213,8 +217,10 @@ func (c *Client) GetManifest(ctx context.Context, pkg, digest string) (*Manifest
 	if !digestRE.MatchString(digest) {
 		return nil, nil, errors.New("ghcr: digest must be sha256:<64 lowercase hex>")
 	}
+	ctx, cancel := context.WithTimeout(ctx, c.requestTimeout)
+	defer cancel()
 	accept := strings.Join([]string{MediaOCIManifest, MediaOCIIndex, MediaDockerManifest, MediaDockerList}, ", ")
-	res, err := c.registryDo(ctx, "/v2/"+repo+"/manifests/"+digest, accept)
+	res, err := c.registryDo(ctx, c.http, "/v2/"+repo+"/manifests/"+digest, accept)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -248,6 +254,8 @@ func (c *Client) FetchBlob(ctx context.Context, pkg string, d Descriptor, limit 
 	if d.Size <= 0 || d.Size > limit {
 		return nil, fmt.Errorf("ghcr: blob size %d outside 1..%d", d.Size, limit)
 	}
+	ctx, cancel := context.WithTimeout(ctx, c.requestTimeout)
+	defer cancel()
 	rc, err := c.OpenBlob(ctx, pkg, d.Digest)
 	if err != nil {
 		return nil, err
@@ -261,8 +269,13 @@ func (c *Client) FetchBlob(ctx context.Context, pkg string, d Descriptor, limit 
 	return body, nil
 }
 
+// ErrBlobStalled is returned when a blob stream delivers no byte for the idle timeout.
+var ErrBlobStalled = errors.New("ghcr: blob transfer stalled")
+
 // OpenBlob streams a blob by digest. GHCR redirects to a short-lived signed storage URL; the
-// Authorization header is never forwarded there (see NewClient's CheckRedirect).
+// Authorization header is never forwarded there (see NewClient's CheckRedirect). The stream has no
+// total deadline (an 8 GiB disk can take long); it is bounded by ctx, the transport's response
+// header timeout, and the stall guard: no byte for blobIdle aborts it with ErrBlobStalled.
 func (c *Client) OpenBlob(ctx context.Context, pkg, digest string) (io.ReadCloser, error) {
 	repo, err := repoForPackage(pkg)
 	if err != nil {
@@ -271,16 +284,52 @@ func (c *Client) OpenBlob(ctx context.Context, pkg, digest string) (io.ReadClose
 	if !digestRE.MatchString(digest) {
 		return nil, errors.New("ghcr: invalid blob digest")
 	}
-	res, err := c.registryDo(ctx, "/v2/"+repo+"/blobs/"+digest, "")
+	sctx, cancel := context.WithCancelCause(ctx)
+	timer := time.AfterFunc(c.blobIdle, func() { cancel(ErrBlobStalled) })
+	res, err := c.registryDo(sctx, c.blob, "/v2/"+repo+"/blobs/"+digest, "")
 	if err != nil {
+		timer.Stop()
+		cancel(nil)
+		if errors.Is(context.Cause(sctx), ErrBlobStalled) {
+			return nil, ErrBlobStalled
+		}
 		return nil, err
 	}
 	if res.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(res.Body, 64<<10))
 		res.Body.Close()
+		timer.Stop()
+		cancel(nil)
 		return nil, classify(res, body)
 	}
-	return res.Body, nil
+	return &stallReader{rc: res.Body, ctx: sctx, cancel: cancel, timer: timer, idle: c.blobIdle}, nil
+}
+
+// stallReader re-arms the idle timer on every byte received; the timer cancels the request.
+type stallReader struct {
+	rc     io.ReadCloser
+	ctx    context.Context
+	cancel context.CancelCauseFunc
+	timer  *time.Timer
+	idle   time.Duration
+}
+
+func (s *stallReader) Read(p []byte) (int, error) {
+	n, err := s.rc.Read(p)
+	if n > 0 {
+		s.timer.Reset(s.idle)
+	}
+	if err != nil && err != io.EOF && errors.Is(context.Cause(s.ctx), ErrBlobStalled) {
+		return n, ErrBlobStalled
+	}
+	return n, err
+}
+
+func (s *stallReader) Close() error {
+	s.timer.Stop()
+	err := s.rc.Close()
+	s.cancel(nil)
+	return err
 }
 
 // VerifyingReader hashes everything read and fails the final Read (io.EOF position) unless the

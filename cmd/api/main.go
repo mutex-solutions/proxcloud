@@ -922,8 +922,16 @@ func run() error {
 	}
 	adminH.SetTemplateUpdates(tuSvc)
 	if cfg.Jobs.TemplateUpdatesVM {
+		tuReceipts := templateupdates.PGReceipts{DB: pg}
 		tuRunner := &templateupdates.Runner{
-			Store: jobStore, Receipts: templateupdates.PGReceipts{DB: pg}, Lease: cfg.Jobs.LeaseDuration, Log: log,
+			Store: jobStore, Receipts: tuReceipts, Lease: cfg.Jobs.LeaseDuration, Log: log,
+			// One upload per (provider, node, import storage) across API replicas: a session advisory
+			// lock held for the whole upload. (Customer image import's pve.Service.HolderLock stays
+			// unwired in cmd/api — pre-existing; see docs/template-updates.md.)
+			UploadLock: func(ctx context.Context, key string) (func(), bool, error) {
+				return pg.TryAdvisoryLock(ctx, key)
+			},
+			Dead: tuReceipts.DeadUncleaned, ClaimDead: jobStore.ClaimDead,
 			Build: func(ctx context.Context, p templateupdates.VMPayload) (*templateupdates.Executor, error) {
 				es, err := esSvc.Get(ctx, p.ServiceID)
 				if err != nil || es == nil || !es.IsProxmox() {

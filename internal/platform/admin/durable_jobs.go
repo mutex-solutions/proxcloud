@@ -38,11 +38,19 @@ func (h *Handler) durableStatus(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, stats)
 }
 func (h *Handler) durableReplay(w http.ResponseWriter, r *http.Request) {
-	if !h.require(w, r, "admin:bill:manage") {
+	if h.durableStore == nil {
+		if h.require(w, r, "admin:bill:manage") {
+			httpx.Err(w, 503, 503, "Durable jobs are not configured")
+		}
 		return
 	}
-	if h.durableStore == nil {
-		httpx.Err(w, 503, 503, "Durable jobs are not configured")
+	// The permission follows the job's kind: a template update (Proxmox effects) needs
+	// admin:service:manage, not the billing key. Unknown/missing ids fall back to the billing key.
+	perm := "admin:bill:manage"
+	if j, err := h.durableStore.Get(r.Context(), chi.URLParam(r, "id")); err == nil && j != nil && durablejobs.External(j.Kind) {
+		perm = templateUpdatesManagePerm
+	}
+	if !h.require(w, r, perm) {
 		return
 	}
 	var req struct {
