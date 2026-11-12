@@ -319,6 +319,8 @@ rows, archived rows, metering, rules), on the primary. The request path goes thr
 concurrent requests share one resolution (singleflight), and a resolution is bounded to 3 s,
 detached from the caller's cancellation. A profile with more than 2000 billable resources is not
 resolved. A timeout, the cap, an error or a panic all give `unavailable`, never a failed read.
+A timeout or the cap is remembered for the same 60 s, so such a profile costs one bounded
+resolution per minute rather than one per request; other errors are retried on the next request.
 Only the resolution is cached: bills are read fresh and the projection uses the request's time.
 
 ### Metering staleness

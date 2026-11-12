@@ -110,7 +110,8 @@ func TestCachedForecaster_ConcurrentCallersResolveOnce(t *testing.T) {
 	}
 }
 
-// A resolution past the timeout falls back to "unavailable" (current cost), and is not cached.
+// A resolution past the timeout falls back to "unavailable" (current cost), and the timeout is
+// remembered for the TTL so a profile that never fits the bound is not re-resolved per request.
 func TestCachedForecaster_TimeoutFallsBack(t *testing.T) {
 	clock := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
 	inner := &countingForecaster{fn: func(ctx context.Context) (ForecastInput, error) {
@@ -129,9 +130,49 @@ func TestCachedForecaster_TimeoutFallsBack(t *testing.T) {
 		t.Fatalf("timeout did not bound the resolution")
 	}
 	assertUnavailable(t, f)
+	assertUnavailable(t, MonthEndForecast(context.Background(), c, "bp", nil, clock))
+	if n := inner.calls.Load(); n != 1 {
+		t.Fatalf("a timed-out profile was re-resolved within the TTL: %d resolutions", n)
+	}
+	clock = clock.Add(forecastCacheTTL)
 	MonthEndForecast(context.Background(), c, "bp", nil, clock)
 	if n := inner.calls.Load(); n != 2 {
-		t.Fatalf("a failed resolution was cached: %d resolutions", n)
+		t.Fatalf("a remembered timeout outlived the TTL: %d resolutions", n)
+	}
+}
+
+// Other errors (e.g. a transient database error) are not remembered: the next request retries.
+func TestCachedForecaster_TransientErrorNotCached(t *testing.T) {
+	clock := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	inner := &countingForecaster{fn: func(context.Context) (ForecastInput, error) {
+		return ForecastInput{}, errors.New("connection reset")
+	}}
+	c := cachedAt(inner, &clock)
+	assertUnavailable(t, MonthEndForecast(context.Background(), c, "bp", nil, clock))
+	assertUnavailable(t, MonthEndForecast(context.Background(), c, "bp", nil, clock))
+	if n := inner.calls.Load(); n != 2 {
+		t.Fatalf("a transient error was cached: %d resolutions", n)
+	}
+}
+
+// Expired entries are swept on every store, so memory follows the active set.
+func TestCachedForecaster_ExpiredEntriesSwept(t *testing.T) {
+	clock := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	c := cachedAt(&countingForecaster{}, &clock)
+	for _, p := range []string{"a", "b", "c"} {
+		if _, err := c.ForecastInput(context.Background(), p, clock); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clock = clock.Add(forecastCacheTTL)
+	if _, err := c.ForecastInput(context.Background(), "d", clock); err != nil {
+		t.Fatal(err)
+	}
+	c.mu.Lock()
+	n := len(c.cache)
+	c.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("expired entries kept: %d entries, want 1", n)
 	}
 }
 
@@ -153,7 +194,12 @@ func TestCachedForecaster_CapFallsBack(t *testing.T) {
 	inner := &countingForecaster{fn: func(context.Context) (ForecastInput, error) {
 		return ForecastInput{}, ErrForecastTooLarge
 	}}
-	assertUnavailable(t, MonthEndForecast(context.Background(), cachedAt(inner, &clock), "bp", nil, clock))
+	c := cachedAt(inner, &clock)
+	assertUnavailable(t, MonthEndForecast(context.Background(), c, "bp", nil, clock))
+	assertUnavailable(t, MonthEndForecast(context.Background(), c, "bp", nil, clock))
+	if n := inner.calls.Load(); n != 1 {
+		t.Fatalf("an over-cap profile was re-resolved within the TTL: %d resolutions", n)
+	}
 }
 
 // A panicking resolver never turns a cost-info read into a 500: with or without the cache wrapper,

@@ -227,7 +227,8 @@ const forecastCacheMax = 1024
 // for forecastCacheTTL per (profile, UTC billing month), concurrent callers share one resolution
 // (singleflight), and a resolution is bounded by forecastResolveTimeout. Only the resolution is
 // cached: ProjectMonthEnd still runs per request on fresh bills and the request's own clock, so
-// the projection moves with time between refreshes. Errors are not cached.
+// the projection moves with time between refreshes. "Too large" and timeouts are remembered for the
+// TTL (they would repeat); other errors are not cached.
 type CachedForecaster struct {
 	inner Forecaster
 	// external marks every forecast approximate (ForecastExternalBilling).
@@ -248,6 +249,7 @@ type forecastKey struct {
 
 type forecastEntry struct {
 	in      ForecastInput
+	err     error // a remembered "too large" or timeout, so a hopeless profile is not re-resolved per request
 	expires time.Time
 }
 
@@ -263,21 +265,27 @@ func NewCachedForecaster(inner Forecaster, external bool) *CachedForecaster {
 func (c *CachedForecaster) ForecastInput(ctx context.Context, profileID string, now time.Time) (ForecastInput, error) {
 	month, _ := billingMonth(now)
 	key := forecastKey{profileID, month}
-	if in, ok := c.get(key); ok {
-		return in, nil
+	if in, err, ok := c.get(key); ok {
+		return in, err
 	}
 	v, err, _ := c.sf.Do(profileID+"|"+month.Format(time.RFC3339), func() (any, error) {
-		if in, ok := c.get(key); ok { // filled while this caller waited for the flight
-			return in, nil
+		if in, err, ok := c.get(key); ok { // filled while this caller waited for the flight
+			return in, err
 		}
 		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.timeout)
 		defer cancel()
 		in, err := c.resolve(rctx, profileID, now)
 		if err != nil {
+			// Remember only the outcomes that would repeat on the next request (the profile is
+			// over the cap, or resolving it does not fit the time bound), so such a profile costs
+			// one bounded resolution per TTL instead of one per request. Other errors stay uncached.
+			if errors.Is(err, ErrForecastTooLarge) || errors.Is(err, context.DeadlineExceeded) {
+				c.put(key, ForecastInput{}, err)
+			}
 			return ForecastInput{}, err
 		}
 		in.ExternalBilling = in.ExternalBilling || c.external
-		c.put(key, in)
+		c.put(key, in, nil)
 		return in, nil
 	})
 	if err != nil {
@@ -301,31 +309,31 @@ func (c *CachedForecaster) resolve(ctx context.Context, profileID string, now ti
 	return in, err
 }
 
-func (c *CachedForecaster) get(key forecastKey) (ForecastInput, bool) {
+func (c *CachedForecaster) get(key forecastKey) (ForecastInput, error, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.cache[key]
 	if !ok || !c.now().Before(e.expires) {
-		return ForecastInput{}, false
+		return ForecastInput{}, nil, false
 	}
-	return e.in, true
+	return e.in, e.err, true
 }
 
-func (c *CachedForecaster) put(key forecastKey, in ForecastInput) {
+// put stores an entry, sweeping expired ones first so memory follows the active set (at most
+// forecastCacheMax entries to scan); when still full the new entry is simply not stored.
+func (c *CachedForecaster) put(key forecastKey, in ForecastInput, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.now()
-	if len(c.cache) >= forecastCacheMax {
-		for k, e := range c.cache {
-			if !now.Before(e.expires) {
-				delete(c.cache, k)
-			}
-		}
-		if len(c.cache) >= forecastCacheMax {
-			return
+	for k, e := range c.cache {
+		if !now.Before(e.expires) {
+			delete(c.cache, k)
 		}
 	}
-	c.cache[key] = forecastEntry{in: in, expires: now.Add(c.ttl)}
+	if len(c.cache) >= forecastCacheMax {
+		return
+	}
+	c.cache[key] = forecastEntry{in: in, err: err, expires: now.Add(c.ttl)}
 }
 
 // ProjectMonthEnd projects each resource and time unit from its watermark to the end of the current
