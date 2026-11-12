@@ -47,10 +47,17 @@ BAD = re.compile(rb"10\.200\.|(?:BEGIN [A-Z0-9 ]*PRIVATE KEY)|(?:ssh-(?:rsa|ed25
 K8S_OS = ("ubuntu-2604",)
 # Exact retained, LOCKED local account. The cloud default user is upstream `ubuntu` (review key
 # cloud_default_user == "ubuntu"): cloud-init creates it at first boot, so it must not pre-exist.
+# The copy drops builder from EVERY supplementary group (group members, gshadow admins+members).
 K8S_USER = "builder"
 K8S_REVIEW_KEYS = {"kubernetes_version", "source_raw_sha256", "source_hash_verified", "source_stopped", "bios",
                    "kubelet_active", "runtime_version", "retained_package_policy_reviewed", "package_policy_sha256",
-                   "network_backend", "cloud_default_user", "cloud_base_config_reviewed", "reviewed_dropins"}
+                   "network_backend", "cloud_default_user", "cloud_base_config_reviewed", "reviewed_dropins",
+                   "sudoers_sha256", "sudoers_readme_sha256"}
+# (table, member-list field indexes): group members; gshadow administrators and members.
+K8S_GROUP_TABLES = (("/etc/group", (3,)), ("/etc/gshadow", (2, 3)))
+# sudo policy is bound to parent-reviewed bytes: /etc/sudoers by sha256 and, after cleanup, /etc/sudoers.d
+# containing EXACTLY the README with its reviewed sha256. Any other drop-in, rule or include refuses.
+SUDOERS, SUDOERS_D = "/etc/sudoers", "/etc/sudoers.d"
 K8S_PACKAGES = ("kubeadm", "kubelet", "kubectl")
 K8S_DEB_RELEASE = "1.1"  # k8s-build-config.py pins kubernetes_deb_version = <version>-1.1.
 # image-builder apt-holds kubeadm/kubelet/kubectl ("hold ok installed"); any other dpkg Status refuses.
@@ -69,9 +76,17 @@ K8S_SWAP_UNITS = ("/etc/systemd/system/*.swap",)
 K8S_REGISTRY_FILES = ("/var/lib/kubelet/config.json", "/var/lib/kubelet/.dockercfg", "/.docker/config.json",
                       "/.dockercfg", "/root/.docker/config.json")
 K8S_SECRET_PATHS = ("/var/lib/systemd/credential.secret",)
-# snapd's per-machine device key (generated at image seeding): policy COPY-ONLY wipe of its entries, NOT a
-# refusal; the directory must be a real directory with glob-visible entries and be empty after cleanup.
+# snapd device identity (registered at image seeding) is RESET to unregistered, copy-only: device key files
+# (regular, single-link, non-dot), the serial assertion subtree and state.json data.auth.device
+# serial/key-id/session-macaroon. brand/model and everything else are kept; snapd re-registers at first boot.
+# Store user credentials (users, session macaroon) or any irregular shape refuse instead.
 K8S_SNAPD_KEYS = "/var/lib/snapd/device/private-keys-v1"
+K8S_SNAPD_SERIAL = "/var/lib/snapd/assertions/asserts-v0/serial"
+K8S_SNAPD_STATE = "/var/lib/snapd/state.json"
+K8S_SNAPD_STATE_MAX = 32 << 20
+K8S_SNAPD_DROP = ("serial", "key-id", "session-macaroon")
+K8S_SNAPD_AUTH = ("device", "last-id", "users")  # Observed data.auth keys; any other key refuses.
+K8S_SNAPD_DEVICE = ("brand", "model") + K8S_SNAPD_DROP  # Allowed data.auth.device keys.
 K8S_PROXY_FILES = ("/etc/apt/apt.conf.d", "/etc/apt/apt.conf", "/etc/environment",
                    "/etc/systemd/system/containerd.service.d")
 K8S_KUBELET_STATE = "/var/lib/kubelet"  # Scanned except pki/ and pods/ (cluster counts cover those).
@@ -213,12 +228,13 @@ def layout(g, selected):
     return mounts, user
 
 
-def mount_all(g, mounts):
+def mount_all(g, mounts, options=""):
+    require(options in ("", "ro"))  # variant=kubernetes inventories read-only before any policy decision.
     for path in sorted(mounts, key=lambda p: (p.count("/"), len(p))):
         if path != "/":
             safe(g, path)
             require(not g.is_symlink(path) and g.is_dir(path, followsymlinks=False))
-        g.mount_options("", mounts[path], path)
+        g.mount_options(options, mounts[path], path)
 
 
 def lock_table(g, path, fields):
@@ -358,8 +374,8 @@ def load_review(raw):
     require(type(raw) is bytes and 0 < len(raw) <= 65536)
     review = json.loads(raw.decode("ascii"), object_pairs_hook=unique)
     require(type(review) is dict and set(review) == K8S_REVIEW_KEYS)
-    require(type(review["source_raw_sha256"]) is str and
-            re.fullmatch(r"[0-9a-f]{64}", review["source_raw_sha256"], re.ASCII) is not None)
+    for key in ("source_raw_sha256", "sudoers_sha256", "sudoers_readme_sha256"):
+        require(type(review[key]) is str and re.fullmatch(r"[0-9a-f]{64}", review[key], re.ASCII) is not None)
     rows = review["reviewed_dropins"]
     require(type(rows) is list and all(type(row) is list and len(row) == 3 for row in rows))
     review["reviewed_dropins"] = tuple(tuple(row) for row in rows)
@@ -526,7 +542,7 @@ def k8s_cluster(g):
 
 def k8s_inventory(g, selected, review, parent):
     mounts, os_facts, layout_facts = k8s_layout(g, selected, review)
-    mount_all(g, mounts)
+    mount_all(g, mounts, "ro")  # Read-only until the policy accepted; sanitize_k8s remounts rw after.
     layout_facts["unsafe_links"] = sum(g.is_symlink(path) for path in K8S_LINKS if g.exists(path) or g.is_symlink(path))
     require(layout_facts["unsafe_links"] == 0)  # Before any further guest path is read.
     fstab = read(g, "/etc/fstab")
@@ -544,6 +560,10 @@ def k8s_inventory(g, selected, review, parent):
     # (a passwd row is the policy's refusal). useradd would refuse an existing group of the same name.
     require(not exists(g, "/home/ubuntu") and
             not any(row.split(b":")[0] == b"ubuntu" for row in read(g, "/etc/group").splitlines()))
+    for path, indexes in K8S_GROUP_TABLES:  # Dry run: the copy-only rewrite must be possible BEFORE any write.
+        k8s_group_strip(read(g, path), indexes)
+    k8s_sudo(g, review, after=False)
+    snapd, _, _ = k8s_snapd(g)
     dropins = []
     if exists(g, DROPINS.rstrip("/")):
         for name in g.ls(DROPINS.rstrip("/")):
@@ -562,6 +582,13 @@ def k8s_inventory(g, selected, review, parent):
                not p.startswith((K8S_KUBELET_STATE + "/pki/", K8S_KUBELET_STATE + "/pods/"))]
     facts = {
         "parent": parent, "os": os_facts, "layout": layout_facts, "accounts": k8s_accounts(g),
+        # Recorded (counts/presence only); the policy plans the copy-only identity reset from them.
+        "identity": {"builder_supplementary_groups": k8s_builder_groups(g),
+                     "snapd": {"state": snapd["snapd_state"], "device_serial": snapd["snapd_device_serial"],
+                               "device_key_id": snapd["snapd_device_key_id"],
+                               "session_macaroon": snapd["snapd_session_macaroon"], "users": snapd["snapd_users"],
+                               "serial_assertions": snapd["snapd_serial_assertions"],
+                               "device_keys": snapd["snapd_device_keys"]}},
         "firstboot": {"network_backend": backend if backend == review["network_backend"] else "UNKNOWN",
                       "cloud_default_user": review["cloud_default_user"],
                       "cloud_base_config_reviewed": review["cloud_base_config_reviewed"]},
@@ -590,15 +617,145 @@ def k8s_inventory(g, selected, review, parent):
 def k8s_snapd_unwipeable(g):
     """snapd device-key entries the policy's `<dir>/*` COPY-ONLY wipe would NOT cleanly remove.
 
-    Regular non-symlink, non-dot files are wiped (not counted). A non-directory/symlinked key dir,
-    dot entries (not glob-matched) and links/dirs/specials still count as unclassified credentials."""
+    Regular, single-link (nlink == 1: no surviving hardlink copy), non-symlink, non-dot files are wiped
+    (not counted). A non-directory/symlinked key dir, dot entries (not glob-matched), hardlinked files
+    and links/dirs/specials still count as unclassified credentials."""
     if not exists(g, K8S_SNAPD_KEYS):
         return 0
     if g.is_symlink(K8S_SNAPD_KEYS) or not g.is_dir(K8S_SNAPD_KEYS, followsymlinks=False):
         return 1
     path = K8S_SNAPD_KEYS + "/"
     return sum(name.startswith(".") or g.is_symlink(safe(g, path + name)) or
-               not g.is_file(path + name, followsymlinks=False) for name in g.ls(K8S_SNAPD_KEYS))
+               not g.is_file(path + name, followsymlinks=False) or g.lstatns(path + name)["st_nlink"] != 1
+               for name in g.ls(K8S_SNAPD_KEYS))
+
+
+def k8s_snapd_keys(g):
+    """Count of wipeable device-key files (identity fact); irregular entries are counted separately."""
+    if not exists(g, K8S_SNAPD_KEYS) or g.is_symlink(K8S_SNAPD_KEYS) or not g.is_dir(K8S_SNAPD_KEYS, followsymlinks=False):
+        return 0
+    return len(g.ls(K8S_SNAPD_KEYS)) - k8s_snapd_unwipeable(g)
+
+
+def k8s_json(data):
+    """Bounded strict JSON: UTF-8, no duplicate keys, no NaN/Infinity, and every number literal must
+    re-encode to exactly the same text (so a rewrite never changes a number's representation)."""
+    def unique(pairs):
+        require(len(dict(pairs)) == len(pairs))
+        return dict(pairs)
+
+    def number(kind):
+        def parse(text):
+            value = kind(text)
+            require(json.dumps(value) == text)
+            return value
+        return parse
+
+    def constant(_):
+        require(False)
+    require(type(data) is bytes and len(data) <= K8S_SNAPD_STATE_MAX)
+    try:
+        return json.loads(data.decode("utf-8"), object_pairs_hook=unique, parse_constant=constant,
+                          parse_int=number(int), parse_float=number(float))
+    except Exception:  # Never surface parser messages (they quote guest bytes).
+        require(False)
+
+
+def k8s_snapd(g):
+    """snapd registered-identity PRESENCE/count facts, plus the exact state.json bytes after the reset.
+
+    Returns (facts, original_bytes, reset_bytes); bytes are None without state.json. The reset drops ONLY
+    data.auth.device serial/key-id/session-macaroon, keeps key order and every other value, and is
+    computed here, BEFORE any write, so parse/encode failures refuse early. Unknown auth/device keys
+    (e.g. a local macaroon-key), non-list users or an irregular serial-assertion subtree refuse."""
+    facts = {"snapd_state": False, "snapd_device_serial": False, "snapd_device_key_id": False,
+             "snapd_session_macaroon": False, "snapd_users": 0, "snapd_serial_assertions": 0,
+             "snapd_device_keys": k8s_snapd_keys(g)}
+    original = reset = None
+    if exists(g, K8S_SNAPD_STATE):
+        original = read(g, K8S_SNAPD_STATE, K8S_SNAPD_STATE_MAX)
+        state = k8s_json(original)
+        require(type(state) is dict and type(state.get("data", {})) is dict)
+        auth = state.get("data", {}).get("auth")
+        require(auth is None or (type(auth) is dict and set(auth) <= set(K8S_SNAPD_AUTH)))
+        auth = auth or {}
+        users, device = auth.get("users"), auth.get("device")
+        require(users is None or type(users) is list)
+        require(device is None or (type(device) is dict and set(device) <= set(K8S_SNAPD_DEVICE)))
+        device = device or {}
+        facts.update(snapd_state=True, snapd_device_serial="serial" in device, snapd_device_key_id="key-id" in device,
+                     snapd_session_macaroon="session-macaroon" in device, snapd_users=len(users or []))
+        if any(key in device for key in K8S_SNAPD_DROP):
+            for key in K8S_SNAPD_DROP:
+                device.pop(key, None)  # Mutates the parsed tree in place: key order of the rest is kept.
+            try:
+                reset = json.dumps(state, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+            except Exception:  # e.g. a lone surrogate escape: refuse before any write.
+                require(False)
+            # Self-check: the rewrite parses back to exactly the original tree minus the dropped keys.
+            require(k8s_json(reset) == state)
+        else:
+            reset = original  # Nothing to drop: the bytes are left untouched.
+    if exists(g, K8S_SNAPD_SERIAL):
+        require(not g.is_symlink(K8S_SNAPD_SERIAL) and g.is_dir(K8S_SNAPD_SERIAL, followsymlinks=False))
+        entries = g.find(K8S_SNAPD_SERIAL)
+        require(len(entries) <= 20000)
+        for entry in entries:  # rm -rf never follows links, but a link/hardlink would leave a copy elsewhere.
+            path = safe(g, K8S_SNAPD_SERIAL + "/" + entry)
+            require(not g.is_symlink(path) and (g.is_dir(path, followsymlinks=False) or (
+                g.is_file(path, followsymlinks=False) and g.lstatns(path)["st_nlink"] == 1)))
+        facts["snapd_serial_assertions"] = len(entries)
+    return facts, original, reset
+
+
+def k8s_group_strip(data, indexes, user=K8S_USER.encode()):
+    """Drop exactly `user` from the member-list fields; every other byte is kept (rows, order, other members,
+    builder's own primary group row, trailing newline or not)."""
+    rows = data.split(b"\n")
+    trailing = rows[-1] == b""
+    rows = rows[:-1] if trailing else rows
+    require(rows)
+    out = []
+    for row in rows:
+        cols = row.split(b":")
+        require(len(cols) == 4 and cols[0] != b"")
+        for index in indexes:
+            if cols[index]:
+                cols[index] = b",".join(member for member in cols[index].split(b",") if member != user)
+        out.append(b":".join(cols))
+    return b"\n".join(out) + (b"\n" if trailing else b"")
+
+
+def k8s_builder_groups(g):
+    """Distinct groups listing builder as a member (group/gshadow) or administrator (gshadow)."""
+    found = set()
+    for path, indexes in K8S_GROUP_TABLES:
+        for row in read(g, path).splitlines():
+            cols = row.split(b":")
+            require(len(cols) == 4)
+            if any(K8S_USER.encode() in cols[index].split(b",") for index in indexes):
+                found.add(cols[0])
+    return len(found)
+
+
+def k8s_sudo(g, review, after):
+    """sudo policy bound to reviewed bytes (replaces a word-grep as the guard).
+
+    /etc/sudoers must hash to sudoers_sha256 and /etc/sudoers.d must be a real directory holding
+    README (sudoers_readme_sha256). Before cleanup any other entry must be a regular, non-dot build
+    drop-in that cleanup removes (name or content names builder/packer); after cleanup the directory
+    is EXACTLY {README}. A NOPASSWD %sudo/#uid rule or @include drop-in therefore refuses."""
+    require(hashlib.sha256(read(g, SUDOERS)).hexdigest() == review["sudoers_sha256"])
+    require(exists(g, SUDOERS_D) and not g.is_symlink(SUDOERS_D) and g.is_dir(SUDOERS_D, followsymlinks=False))
+    names = g.ls(SUDOERS_D)
+    require(README in names and (not after or names == [README]))
+    for name in names:
+        data = read(g, SUDOERS_D + "/" + name, 65536)  # Regular, non-symlink, bounded.
+        if name == README:
+            require(hashlib.sha256(data).hexdigest() == review["sudoers_readme_sha256"])
+        else:
+            require(not name.startswith(".") and ("builder" in name or "packer" in name or
+                                                  re.search(rb"\b(?:builder|packer)\b", data) is not None))
 
 
 def k8s_state(g):
@@ -622,6 +779,10 @@ def sanitize_k8s(g, selected, review, parent):
     patterns = (tuple(p for p in REMOVE if p != DROPINS + "*") + plan.wipe + tuple(tokens) +
                 tuple(DROPINS + name for name, action in sorted(decided.items()) if action == "remove_build"))
     before = k8s_state(g)
+    _, state_before, state_reset = k8s_snapd(g)  # Exact rewrite bytes, computed while still read-only.
+    g.sync()
+    g.umount_all()
+    mount_all(g, mounts)  # Read-write ONLY now that the policy accepted the read-only inventory.
 
     def check():
         verify(g, K8S_USER, patterns, SCAN + K8S_SCAN)
@@ -629,12 +790,23 @@ def sanitize_k8s(g, selected, review, parent):
         for name, digest in preserved.items():
             require(hashlib.sha256(read(g, DROPINS + name)).hexdigest() == digest)
         require(k8s_state(g) == before)
-        # snapd regenerates its device key on first boot: the copied key directory must be EMPTY.
+        # Locked builder: in no supplementary group/gshadow admin list; sudo policy is exactly the reviewed
+        # stock sudoers plus the reviewed README (no other drop-in, rule or include survives).
+        require(k8s_builder_groups(g) == 0)
+        k8s_sudo(g, review, after=True)
+        # snapd is unregistered: no device key, no serial assertion, no serial/key-id/session in state.json.
+        snapd, _, _ = k8s_snapd(g)
         require(not exists(g, K8S_SNAPD_KEYS) or (not g.is_symlink(K8S_SNAPD_KEYS) and g.ls(K8S_SNAPD_KEYS) == []))
-        # Locked builder: no sudo grant survives anywhere (a symlinked sudoers.d entry refuses in read()).
-        for path in ["/etc/sudoers"] + g.glob_expand("/etc/sudoers.d/*"):
-            require(not re.search(rb"\b(?:builder|packer)\b", read(g, path)))
+        require(not exists(g, K8S_SNAPD_SERIAL) and snapd["snapd_serial_assertions"] == 0)
+        require(not (snapd["snapd_device_serial"] or snapd["snapd_device_key_id"] or snapd["snapd_session_macaroon"]))
     cleanup(g, K8S_USER, patterns)
+    # Copy-only identity reset AFTER validate_inventory. The strip runs on current bytes (cleanup's lock_table
+    # has replaced gshadow password fields); the inventory already dry-ran it on the same row format.
+    for path, indexes in K8S_GROUP_TABLES:
+        write(g, path, k8s_group_strip(read(g, path), indexes))
+    if state_before is not None and state_reset != state_before:
+        require(read(g, K8S_SNAPD_STATE, K8S_SNAPD_STATE_MAX) == state_before)  # Unchanged since the inventory.
+        write(g, K8S_SNAPD_STATE, state_reset)
     check()
     reset_and_zero(g, mounts, check)
 

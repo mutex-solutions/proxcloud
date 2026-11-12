@@ -42,6 +42,12 @@ def fixture():
         "cloud_dropins": [],
         "hygiene": {"unsafe_apt_repo_urls": 0, "registry_config_credentials": 0,
                     "unclassified_credentials": 0},
+        # Real-image class: builder in 6 supplementary groups; snapd registered (serial, key-id,
+        # serial assertions, one device key), no session macaroon and no store users.
+        "identity": {"builder_supplementary_groups": 6,
+                     "snapd": {"state": True, "device_serial": True, "device_key_id": True,
+                               "session_macaroon": False, "users": 0, "serial_assertions": 4,
+                               "device_keys": 1}},
     }
 
 
@@ -64,8 +70,13 @@ class CopyPolicyTests(unittest.TestCase):
         self.assertNotIn("/etc/kubernetes/manifests", plan.wipe)  # Placeholder is retained, not wiped.
         # Snapd device key: exact entries-only COPY wipe; credential.secret is never a wipe target.
         self.assertIn("/var/lib/snapd/device/private-keys-v1/*", plan.wipe)
-        self.assertFalse([p for p in plan.wipe if "snapd" in p and p != "/var/lib/snapd/device/private-keys-v1/*"])
+        self.assertIn("/var/lib/snapd/assertions/asserts-v0/serial", plan.wipe)
+        self.assertEqual(sorted(p for p in plan.wipe if "snapd" in p),  # Never seed/snaps/state.json/assertions.
+                         ["/var/lib/snapd/assertions/asserts-v0/serial", "/var/lib/snapd/device/private-keys-v1/*"])
         self.assertFalse([p for p in plan.wipe if "credential" in p])
+        self.assertFalse([p for p in plan.wipe if "group" in p or "sudoers" in p])  # Rewritten, never wiped.
+        self.assertTrue(any("supplementary group" in r for r in plan.reset))
+        self.assertTrue(any("unregistered" in r and "serial" in r for r in plan.reset))
         self.assertIn("/etc/containerd", plan.retain)
         self.assertIn("kubelet units and enabled=True/active=False", plan.retain)
 
@@ -237,6 +248,45 @@ class CopyPolicyTests(unittest.TestCase):
             self.refuses(f)
         f = fixture()
         del f["accounts"][1]  # builder remains the exact retained native_login account.
+        self.refuses(f)
+
+    def test_identity_facts_reset_plan_and_store_credentials_refuse(self):
+        for groups in (0, 6, 20000):  # Recorded only: the copy drops builder from all of them.
+            f = fixture()
+            f["identity"]["builder_supplementary_groups"] = groups
+            validate_inventory(f)
+        f = fixture()
+        f["identity"]["snapd"] = {"state": False, "device_serial": False, "device_key_id": False,
+                                  "session_macaroon": False, "users": 0, "serial_assertions": 0,
+                                  "device_keys": 0}
+        validate_inventory(f)  # Unseeded/absent snapd is fine.
+        for key, value in (("session_macaroon", True), ("users", 1), ("users", 3)):
+            f = fixture()
+            f["identity"]["snapd"][key] = value  # Store user credentials: refuse, never wipe.
+            self.refuses(f)
+        for section, key, value in (("identity", "builder_supplementary_groups", True),
+                                    ("identity", "builder_supplementary_groups", -1),
+                                    ("identity", "builder_supplementary_groups", None)):
+            f = fixture()
+            f[section][key] = value
+            self.refuses(f)
+        for key, value in (("state", 1), ("device_serial", "yes"), ("session_macaroon", 0),
+                           ("users", False), ("serial_assertions", -1), ("device_keys", 20001)):
+            f = fixture()
+            f["identity"]["snapd"][key] = value
+            self.refuses(f)
+        f = fixture()
+        f["identity"]["snapd"].update(state=False)  # Serial/key-id claimed without a state file: incoherent.
+        self.refuses(f)
+        for missing in ("builder_supplementary_groups", "snapd"):
+            f = fixture()
+            del f["identity"][missing]
+            self.refuses(f)
+        f = fixture()
+        del f["identity"]["snapd"]["users"]
+        self.refuses(f)
+        f = fixture()
+        f["identity"]["snapd"]["serial"] = "never-a-value"  # Presence/count only; no extra keys.
         self.refuses(f)
 
     def test_readme_only_by_exact_reviewed_row(self):

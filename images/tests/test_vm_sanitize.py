@@ -258,6 +258,22 @@ PRESERVE_NAME = "05_logging.cfg"  # Name class of the real package-owned (cloud-
 PRESERVE = b"## synthetic packaged vendor drop-in, NOT the real file bytes\n_log: []\n"
 REMOVE_BUILD = b"network: {config: disabled}\n"
 UUID = "0f1e2d3c-4b5a-4978-8a6b-5c4d3e2f1a0b"  # Synthetic, canonical lowercase.
+# Synthetic stand-ins shaped like stock Ubuntu sudo policy (NOT the real bytes; the real hashes come from review).
+SUDOERS = (b"Defaults\tenv_reset\nDefaults\tuse_pty\nroot\tALL=(ALL:ALL) ALL\n%admin ALL=(ALL) ALL\n"
+           b"%sudo\tALL=(ALL:ALL) ALL\n@includedir /etc/sudoers.d\n")
+SUDOERS_README = b"#\n# Files in this directory are parsed by sudo (synthetic notice).\n#\n"
+# Real class: builder in adm,cdrom,dip,lxd,plugdev,sudo (group AND gshadow), own primary group `builder`.
+GROUP = (b"root:x:0:\nadm:x:4:syslog,builder\ncdrom:x:24:builder\nsudo:x:27:builder\nstaff:x:50:builder2\n"
+         b"lxd:x:101:builder\nbuilder:x:1000:\n")
+GSHADOW = (b"root:*::\nadm:*::syslog,builder\ncdrom:*::builder\nsudo:*::builder\nstaff:*:builder:builder2\n"
+           b"lxd:!::builder\nbuilder:!::\n")
+SNAPD_STATE = (b'{"data":{"auth":{"device":{"brand":"canonical","model":"generic-classic","serial":"synthetic-serial",'
+               b'"key-id":"synthetic-key-id"},"last-id":0,"users":[]},"seeded":true,"patch-level":6},'
+               b'"changes":{},"tasks":{},"last-change-id":0,"last-task-id":0,"last-lane-id":0}')
+SNAPD_RESET = (b'{"data":{"auth":{"device":{"brand":"canonical","model":"generic-classic"},"last-id":0,"users":[]},'
+               b'"seeded":true,"patch-level":6},"changes":{},"tasks":{},"last-change-id":0,"last-task-id":0,'
+               b'"last-lane-id":0}')
+SERIAL = "/var/lib/snapd/assertions/asserts-v0/serial"
 
 
 class FakeK8sGuestFS(FakeGuestFS):
@@ -267,6 +283,7 @@ class FakeK8sGuestFS(FakeGuestFS):
         for path in [p for p in self.nodes if p == "/home/ubuntu" or p.startswith("/home/ubuntu/")]:
             del self.nodes[path]
         self.uuids = {UUID: "/dev/sda1"}  # Filesystem uuid -> device, as findfs_uuid resolves it.
+        self.readonly, self.nlinks = False, {}
         self.mounts = {"/": "/dev/sda1"}
         self.filesystems = {"/dev/sda1": "ext4"}
         self.features = {"/dev/sda1": "has_journal extents"}
@@ -291,10 +308,48 @@ class FakeK8sGuestFS(FakeGuestFS):
         self.put("/etc/cloud/cloud.cfg.d/" + PRESERVE_NAME, PRESERVE)
         self.put("/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg", REMOVE_BUILD)
         self.put("/home/builder/.ssh/authorized_keys", b"ssh-ed25519 AAAA synthetic\n")
+        self.put("/etc/sudoers", SUDOERS)
+        self.put("/etc/sudoers.d/README", SUDOERS_README)  # 90-cloud (builder NOPASSWD) stays: cleanup removes it.
+        self.put("/etc/group", GROUP)
+        self.put("/etc/gshadow", GSHADOW)
+        # Registered snapd identity from image seeding (real class): key, serial assertions, state.json device.
+        self.put(s.K8S_SNAPD_KEYS + "/synthetic-device-key-id", b"synthetic device key bytes\n")
+        self.put(SERIAL + "/generic/generic-classic/synthetic-serial/active", b"type: serial\n")
+        self.put(s.K8S_SNAPD_STATE, SNAPD_STATE)
+        self.put("/var/lib/snapd/seed/seed.yaml", b"snaps: []\n")
         self.calls.clear()
     def part_get_parttype(self, device): return self.parttype
     def part_list(self, device): return self.partitions
     def readlink(self, path): return self.nodes[path][1]
+    def lstatns(self, path):
+        assert path in self.nodes
+        return {"st_nlink": self.nlinks.get(path, 1)}
+    # Read-only mount: any guest mutation while mounted "ro" is a test failure.
+    def mount_options(self, options, device, path):
+        self.readonly = options == "ro"
+        self.calls.append(("mount_ro", device, path) if self.readonly else ("mount", device, path))
+        self.mounted.add(device)
+    def umount_all(self):
+        self.readonly = False
+        super().umount_all()
+    def mkdir_p(self, path):
+        assert not getattr(self, "readonly", False)
+        super().mkdir_p(path)
+    def write(self, path, data):
+        assert not self.readonly
+        super().write(path, data)
+    def rm(self, path):
+        assert not self.readonly
+        super().rm(path)
+    def rm_rf(self, path):
+        assert not self.readonly
+        super().rm_rf(path)
+    def chown(self, uid, gid, path):
+        assert not self.readonly
+        super().chown(uid, gid, path)
+    def ln_s(self, target, path):
+        assert not self.readonly
+        super().ln_s(target, path)
     def findfs_uuid(self, uuid):
         self.calls.append(("findfs_uuid", uuid))
         if uuid not in self.uuids:
@@ -315,6 +370,8 @@ def k8s_review(**changes):
                   kubelet_active=False, runtime_version="2.1.0", retained_package_policy_reviewed=True,
                   package_policy_sha256="c" * 64, network_backend="netplan-systemd-networkd",
                   cloud_default_user="ubuntu", cloud_base_config_reviewed=True,
+                  sudoers_sha256=hashlib.sha256(SUDOERS).hexdigest(),
+                  sudoers_readme_sha256=hashlib.sha256(SUDOERS_README).hexdigest(),
                   reviewed_dropins=((PRESERVE_NAME, hashlib.sha256(PRESERVE).hexdigest(), "preserve_vendor"),
                                     ("99-disable-network-config.cfg", hashlib.sha256(REMOVE_BUILD).hexdigest(),
                                      "remove_build")))
@@ -337,6 +394,22 @@ class KubernetesSanitizeTests(unittest.TestCase):
         self.assertEqual(g.read_file("/etc/cloud/cloud.cfg.d/" + PRESERVE_NAME), PRESERVE)
         self.assertNotIn("/etc/sudoers.d/90-cloud", g.nodes)  # builder NOPASSWD drop-in removed.
         self.assertFalse([p for p in g.nodes if p == "/home/ubuntu" or p.startswith("/home/ubuntu/")])
+        # Identity reset: builder dropped from every supplementary group, everything else byte-identical.
+        self.assertEqual(g.read_file("/etc/group"), GROUP.replace(b",builder\n", b"\n").replace(b":builder\n", b":\n"))
+        self.assertEqual(g.read_file("/etc/gshadow"),
+                         b"root:!::\nadm:!::syslog\ncdrom:!::\nsudo:!::\nstaff:!::builder2\nlxd:!::\nbuilder:!::\n")
+        self.assertEqual(g.ls("/etc/sudoers.d"), ["README"])
+        self.assertEqual((g.read_file("/etc/sudoers"), g.read_file("/etc/sudoers.d/README")), (SUDOERS, SUDOERS_README))
+        self.assertEqual(g.ls(s.K8S_SNAPD_KEYS), [])
+        self.assertFalse([p for p in g.nodes if p == SERIAL or p.startswith(SERIAL + "/")])
+        self.assertEqual(g.read_file(s.K8S_SNAPD_STATE), SNAPD_RESET)
+        self.assertIn("/var/lib/snapd/seed/seed.yaml", g.nodes)
+        # Read-only inventory: the first mount is "ro"; the rw remount happens only after umount_all.
+        mounts = [c for c in g.calls if c[0] in ("mount", "mount_ro")]
+        self.assertEqual(mounts[0], ("mount_ro", "/dev/sda1", "/"))
+        first_rw = g.calls.index(("mount", "/dev/sda1", "/"))
+        self.assertEqual(g.calls[first_rw - 1], ("umount_all",))
+        self.assertFalse([c for c in g.calls[:first_rw] if c[0] in ("rm", "rm_rf", "chown")])
         for gone in ("/home/builder/.ssh", "/etc/kubernetes/bootstrap-token.txt", "/var/lib/cloud"):
             self.assertNotIn(gone, g.nodes)
         for kept in ("/etc/containerd/config.toml", "/var/lib/dpkg/status", "/etc/kubernetes/manifests", "/opt/cni/bin"):
@@ -444,6 +517,20 @@ class KubernetesSanitizeTests(unittest.TestCase):
                        lambda g: g.put("/etc/systemd/system/dev-sda2.swap", b"")):
             g = FakeK8sGuestFS(); change(g)
             self.policy_refuses(g)
+        # The swap row itself (not external_fstab, which only flags a non-/ mountpoint) is what refuses:
+        # `/swap.img none swap` has mountpoint `none`, so isolate the count on the inventory facts.
+        for extra, count in ((b"/swap.img none swap sw 0 0\n", 1), (b"#/swap.img none swap sw 0 0\n", 0),
+                             (b"/swap.img none swap sw 0 0\n/dev/sda2 none swap sw 0 0\n", 2)):
+            with self.subTest(extra=extra):
+                g = FakeK8sGuestFS(); g.put("/etc/fstab", g.read_file("/etc/fstab") + extra)
+                _, facts, _ = s.k8s_inventory(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+                self.assertEqual(facts["layout"]["swap_entries"], count)
+                facts["layout"]["external_fstab"] = False  # Even with that guard neutralised, a row refuses.
+                if count:
+                    with self.assertRaises(k8s_copy_policy.PolicyRefusal):
+                        k8s_copy_policy.validate_inventory(facts, k8s_review()["reviewed_dropins"])
+                else:
+                    k8s_copy_policy.validate_inventory(facts, k8s_review()["reviewed_dropins"])
         # Commented rows (image-builder late-command `s/^#?/#/`) and prose are inert, not entries.
         for extra in (b"#/swap.img\tnone\tswap\tsw\t0\t0\n", b"  # /swapfile none swap sw 0 0\n",
                       b"##/swap.img none swap sw 0 0\n", b"# no swapping here\n"):
@@ -497,17 +584,145 @@ class KubernetesSanitizeTests(unittest.TestCase):
         self.assertEqual(g.ls(keys), [])  # snapd regenerates on first boot.
         self.assertIn("/var/lib/snapd/device/serial-placeholder", g.nodes)
         # Not cleanly wipeable by the exact `<dir>/*` row: still an unclassified credential -> refuse.
+        def drop_keys(g):
+            for path in [p for p in g.nodes if p.startswith(keys + "/")]:
+                del g.nodes[path]
         for change in (lambda g: g.put(keys + "/.hidden-key", b"synthetic"),  # Dot entry: not glob-matched.
-                       lambda g: (g.mkdir_p(keys), g.nodes.__setitem__(keys + "/link", ("link", "/etc/shadow"))),
+                       lambda g: g.nodes.__setitem__(keys + "/link", ("link", "/etc/shadow")),
                        lambda g: g.put(keys + "/subdir/key", b"synthetic"),
-                       lambda g: (g.mkdir_p("/var/lib/snapd/device"),
-                                  g.nodes.__setitem__(keys, ("link", "/srv/keys"))),
-                       lambda g: g.put(keys, b"not a directory")):
+                       # A hardlinked key (nlink 2) would survive the unlink under another name.
+                       lambda g: g.nlinks.__setitem__(keys + "/synthetic-device-key-id", 2),
+                       lambda g: (drop_keys(g), g.nodes.__setitem__(keys, ("link", "/srv/keys"))),
+                       lambda g: (drop_keys(g), g.put(keys, b"not a directory"))):
             g = FakeK8sGuestFS(); change(g)
             self.policy_refuses(g)
+        g = FakeK8sGuestFS()
+        _, facts, _ = s.k8s_inventory(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        self.assertEqual(facts["identity"]["snapd"]["device_keys"], 1)
+        self.assertEqual(facts["hygiene"]["unclassified_credentials"], 0)
+        g = FakeK8sGuestFS(); g.nlinks[keys + "/synthetic-device-key-id"] = 2
+        _, facts, _ = s.k8s_inventory(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        self.assertEqual((facts["identity"]["snapd"]["device_keys"], facts["hygiene"]["unclassified_credentials"]), (0, 1))
         # credential.secret stays a refusal even next to a wipeable snapd key.
         g = FakeK8sGuestFS(); g.put(keys + "/k", b"synthetic"); g.put("/var/lib/systemd/credential.secret", b"x")
         self.policy_refuses(g)
+
+    def test_builder_dropped_from_every_supplementary_group_copy_only(self):
+        g = FakeK8sGuestFS()
+        _, facts, _ = s.k8s_inventory(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        self.assertEqual(facts["identity"]["builder_supplementary_groups"], 5)  # adm,cdrom,sudo,staff(admin),lxd.
+        self.assertEqual(g.read_file("/etc/group"), GROUP)  # Inventory never writes.
+        # Pure strip: exact member only, other members/rows/order kept; "builder2" is not "builder".
+        self.assertEqual(s.k8s_group_strip(b"a:x:1:builder,x,builder2\nb:x:2:\nbuilder:x:1000:\n", (3,)),
+                         b"a:x:1:x,builder2\nb:x:2:\nbuilder:x:1000:\n")
+        self.assertEqual(s.k8s_group_strip(b"a:!:builder,y:builder\n", (2, 3)), b"a:!:y:\n")
+        self.assertEqual(s.k8s_group_strip(b"a:x:1:builder", (3,)), b"a:x:1:")  # No trailing newline kept as is.
+        for bad in (b"", b"\n", b"a:x:1\n", b"a:x:1:b:c\n", b":x:1:builder\n"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                s.k8s_group_strip(bad, (3,))
+        for table, bad in (("/etc/group", GROUP + b"broken-row\n"), ("/etc/gshadow", GSHADOW + b"x:y\n")):
+            g = FakeK8sGuestFS(); g.put(table, bad)
+            self.refuses(g)  # Malformed table: refused before any write (inventory dry-runs the strip).
+        g = FakeK8sGuestFS()
+        s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        self.assertIn(b"builder:x:1000:\n", g.read_file("/etc/group"))  # Own primary group kept.
+        self.assertIn(b"builder:x:1000:1000::/home/builder:/bin/bash", g.read_file("/etc/passwd"))
+        self.assertEqual(s.k8s_builder_groups(g), 0)
+        # A rewrite that silently leaves builder in sudo must not pass the final check.
+        g = FakeK8sGuestFS()
+        with patch.object(s, "k8s_group_strip", side_effect=lambda data, indexes, user=b"builder": data):
+            with self.assertRaises(ValueError): s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        self.assertIn(b"sudo:x:27:builder", g.read_file("/etc/group"))
+        self.assertFalse([c for c in g.calls if c[0] == "zero"])  # Refused before zeroing/export.
+
+    def test_sudo_policy_bound_to_reviewed_hashes(self):
+        g = FakeK8sGuestFS()
+        s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))  # Build NOPASSWD drop-in removed -> {README}.
+        self.assertEqual(g.ls("/etc/sudoers.d"), ["README"])
+        # Unreviewed sudo policy refuses before any write (no word-grep loophole).
+        for change in (lambda g: g.put("/etc/sudoers", SUDOERS + b"%sudo ALL=(ALL) NOPASSWD:ALL\n"),
+                       lambda g: g.put("/etc/sudoers", SUDOERS + b"#1000 ALL=(ALL) NOPASSWD:ALL\n"),
+                       lambda g: g.put("/etc/sudoers", SUDOERS + b"@include /etc/sudoers.local\n"),
+                       lambda g: g.put("/etc/sudoers.d/10-wheel", b"%sudo ALL=(ALL) NOPASSWD:ALL\n"),
+                       lambda g: g.put("/etc/sudoers.d/10-uid", b"#1000 ALL=(ALL) NOPASSWD:ALL\n"),
+                       lambda g: g.put("/etc/sudoers.d/10-inc", b"@include /etc/sudoers.local\n"),
+                       lambda g: g.put("/etc/sudoers.d/.hidden-builder", b"builder ALL=(ALL) ALL\n"),
+                       lambda g: g.put("/etc/sudoers.d/README", SUDOERS_README + b"%sudo ALL=(ALL) NOPASSWD:ALL\n"),
+                       lambda g: g.nodes.pop("/etc/sudoers.d/README"),
+                       lambda g: g.nodes.__setitem__("/etc/sudoers.d/90-cloud", ("link", "/etc/sudoers.local")),
+                       lambda g: (g.rm_rf("/etc/sudoers.d"), g.nodes.__setitem__("/etc/sudoers.d", ("link", "/srv")))):
+            g = FakeK8sGuestFS(); change(g); g.calls.clear()
+            self.refuses(g)
+        for key in ("sudoers_sha256", "sudoers_readme_sha256"):
+            self.refuses(FakeK8sGuestFS(), k8s_review(**{key: "0" * 64}))
+        # Final re-check: a drop-in that appears during cleanup (after the inventory) refuses before zeroing.
+        g = FakeK8sGuestFS()
+        real_cleanup = s.cleanup
+        def sneaky(g, user, patterns):
+            real_cleanup(g, user, patterns)
+            g.put("/etc/sudoers.d/99-late", b"%sudo ALL=(ALL) NOPASSWD:ALL\n")
+        with patch.object(s, "cleanup", side_effect=sneaky):
+            with self.assertRaises(ValueError): s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        self.assertFalse([c for c in g.calls if c[0] == "zero"])
+        g = FakeK8sGuestFS()
+        def tamper(g, user, patterns):
+            real_cleanup(g, user, patterns)
+            g.put("/etc/sudoers", SUDOERS + b"builder ALL=(ALL) ALL\n")
+        with patch.object(s, "cleanup", side_effect=tamper):
+            with self.assertRaises(ValueError): s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        self.assertFalse([c for c in g.calls if c[0] == "zero"])
+
+    def test_snapd_identity_reset_to_unregistered(self):
+        g = FakeK8sGuestFS()
+        _, facts, _ = s.k8s_inventory(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        self.assertEqual(facts["identity"]["snapd"], {"state": True, "device_serial": True, "device_key_id": True,
+                                                      "session_macaroon": False, "users": 0,
+                                                      "serial_assertions": 4, "device_keys": 1})
+        self.assertNotIn(b"synthetic-serial", json.dumps(facts).encode())  # Presence/counts only, never values.
+        g = FakeK8sGuestFS()
+        s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        self.assertEqual(g.read_file(s.K8S_SNAPD_STATE), SNAPD_RESET)  # Compact, key order kept, brand/model kept.
+        self.assertEqual(list(json.loads(SNAPD_RESET)), list(json.loads(SNAPD_STATE)))
+        self.assertFalse([p for p in g.nodes if p.startswith(SERIAL)])
+        self.assertTrue(g.is_dir("/var/lib/snapd/assertions/asserts-v0"))
+        # Store user credentials refuse (policy), never wiped.
+        for old, new in ((b'"key-id":"synthetic-key-id"}', b'"key-id":"synthetic-key-id","session-macaroon":"m"}'),
+                         (b'"users":[]', b'"users":[{"id":1}]')):
+            g = FakeK8sGuestFS(); g.put(s.K8S_SNAPD_STATE, SNAPD_STATE.replace(old, new))
+            self.policy_refuses(g)
+        # Strict parse: invalid, duplicate keys, NaN, unknown auth/device keys, non-canonical numbers, size bound.
+        for bad in (b"{", b"[]", SNAPD_STATE.replace(b'"brand":"canonical"', b'"brand":"a","brand":"b"'),
+                    SNAPD_STATE.replace(b'"patch-level":6', b'"patch-level":NaN'),
+                    SNAPD_STATE.replace(b'"last-id":0', b'"last-id":0,"macaroon-key":"x"'),
+                    SNAPD_STATE.replace(b'"brand":"canonical"', b'"brand":"canonical","extra":1'),
+                    SNAPD_STATE.replace(b'"patch-level":6', b'"patch-level":6.0e0'),
+                    SNAPD_STATE.replace(b'"users":[]', b'"users":{}'), b"\xff\xfe",
+                    SNAPD_STATE + b" " * (s.K8S_SNAPD_STATE_MAX)):
+            with self.subTest(bad=bad[:40]):
+                g = FakeK8sGuestFS(); g.put(s.K8S_SNAPD_STATE, bad)
+                self.assertEqual(self.refuses(g), "sanitization refused")
+        # Irregular serial-assertion subtree refuses: symlink, hardlinked leaf, non-directory.
+        for change in (lambda g: g.nodes.__setitem__(SERIAL + "/generic/link", ("link", "/etc/shadow")),
+                       lambda g: g.nlinks.__setitem__(SERIAL + "/generic/generic-classic/synthetic-serial/active", 2),
+                       lambda g: (g.rm_rf(SERIAL), g.put(SERIAL, b"not a dir"))):
+            g = FakeK8sGuestFS(); change(g); g.calls.clear()
+            self.refuses(g)
+        # Unseeded image (no state.json, no serial subtree, no keys) is accepted untouched.
+        g = FakeK8sGuestFS()
+        for path in [p for p in g.nodes if p.startswith("/var/lib/snapd/")]:
+            del g.nodes[path]
+        s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        self.assertNotIn(s.K8S_SNAPD_STATE, g.nodes)
+        # state.json without registration keys is left byte-identical (no gratuitous rewrite).
+        g = FakeK8sGuestFS(); g.put(s.K8S_SNAPD_STATE, b'{"data": {"auth": {"device": {"brand": "b"}}}}')
+        s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        self.assertEqual(g.read_file(s.K8S_SNAPD_STATE), b'{"data": {"auth": {"device": {"brand": "b"}}}}')
+        # A reset that does not land (state still registered) refuses before zeroing.
+        g = FakeK8sGuestFS()
+        real_write = g.write
+        g.write = lambda path, data: real_write(path, SNAPD_STATE if path == s.K8S_SNAPD_STATE else data)
+        with self.assertRaises(ValueError): s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        self.assertFalse([c for c in g.calls if c[0] == "zero"])
 
     def test_snapd_key_dir_must_be_empty_after_cleanup(self):
         g = FakeK8sGuestFS()
@@ -567,14 +782,15 @@ class KubernetesSanitizeTests(unittest.TestCase):
                        {"/": "/dev/disk/by-uuid/" + UUID, "/boot": "/dev/sda2"}):
             g = FakeK8sGuestFS(); g.mounts = mounts; g.filesystems["/dev/sda2"] = "ext4"
             self.refuses(g)
-            self.assertFalse([c for c in g.calls if c[0] == "mount"])
+            self.assertFalse([c for c in g.calls if c[0] in ("mount", "mount_ro")])
 
     def test_curtin_by_uuid_root_resolved_exactly_then_mounted_by_device(self):
         g = FakeK8sGuestFS(); g.mounts = {"/": "/dev/disk/by-uuid/" + UUID}  # curtin fstab spec, unresolved.
         s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
-        mounts = [c for c in g.calls if c[0] == "mount"]
+        mounts = [c for c in g.calls if c[0] in ("mount", "mount_ro")]
         self.assertTrue(mounts)
-        self.assertEqual(set(mounts), {("mount", "/dev/sda1", "/")})  # Every (re)mount uses the device.
+        # Every (re)mount, read-only inventory and read-write copy alike, uses the resolved device.
+        self.assertEqual(set(mounts), {("mount_ro", "/dev/sda1", "/"), ("mount", "/dev/sda1", "/")})
         self.assertEqual([c for c in g.calls if c[0] == "findfs_uuid"], [("findfs_uuid", UUID)])
         self.assertEqual([c for c in g.calls if c[0] in ("journal", "zero")],
                          [("journal", "/dev/sda1", False), ("zero", "/"), ("journal", "/dev/sda1", True)])
@@ -591,7 +807,10 @@ class KubernetesSanitizeTests(unittest.TestCase):
                 if uuids is not None:
                     g.uuids = uuids
                 self.assertEqual(self.refuses(g), "sanitization refused")
-                self.assertFalse([c for c in g.calls if c[0] == "mount"])
+                self.assertFalse([c for c in g.calls if c[0] in ("mount", "mount_ro")])
+                # Only the exact canonical form ever reaches findfs_uuid; every other spec refuses first.
+                resolved = [c for c in g.calls if c[0] == "findfs_uuid"]
+                self.assertEqual(resolved, [("findfs_uuid", UUID)] if uuids is not None else [])
 
     def test_held_or_installed_k8s_packages_only(self):
         held = lambda g, name: g.put("/var/lib/dpkg/status", g.read_file("/var/lib/dpkg/status").replace(  # noqa: E731
