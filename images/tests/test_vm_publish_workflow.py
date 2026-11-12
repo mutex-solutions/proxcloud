@@ -135,6 +135,48 @@ class StagingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             stage.publication_plan(str(destination), self.selected)
 
+    def kubernetes_payload(self, version="1.35.10"):
+        request = dict(kind="vm-template", os="ubuntu-2604", arch="amd64", variant="kubernetes",
+                       kubernetes_version=version, source_commit="a" * 40, upstream_checksum="b" * 64,
+                       build_version="20261111000000")
+        receipt = dict(self.manifest["clean_export_receipt"], request_sha256=contract.sha(contract.encode(request)))
+        manifest = dict(request, schema_version=1, image_tag=contract.image_tag(request), clean_export_receipt=receipt,
+                        disk=self.manifest["disk"])
+        raw = contract.encode(manifest)
+        return {"disk.qcow2": self.disk, "manifest.json": raw, "SHA256SUMS": contract.sums(manifest, raw)}, raw
+
+    def test_kubernetes_selector_publishes_only_to_k8s_package(self):
+        payload, raw = self.kubernetes_payload()
+        name = "vm-k8s-export-ubuntu-2604-20261111000000-aaaaaaaaaaaa"
+        selected = stage.inputs("123", name, contract.sha(raw), contract.sha(self.disk), "d" * 40, stage.REPOSITORY)
+        self.assertEqual((selected["os"], selected["variant"]), ("ubuntu-2604", "kubernetes"))
+        destination = self.root / "k8s"
+        stage.extract(str(self.archive(payload)), str(destination))
+        plan = stage.publication_plan(str(destination), selected)
+        self.assertEqual(plan["reference"], "ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2604-k8s:"
+                                            "ubuntu-2604-k8s-1.35.10-20261111000000-aaaaaaaaaaaa")
+        self.assertFalse(plan["publish_eligible"] or plan["execute"] or any(plan["release_gates"].values()))
+        # A native-OS name never admits a K8s manifest (and vice versa).
+        native = stage.inputs("123", self.name, contract.sha(raw), contract.sha(self.disk), "d" * 40, stage.REPOSITORY)
+        with self.assertRaises(ValueError): stage.publication_plan(str(destination), native)
+        destination = self.root / "os"
+        stage.extract(str(self.archive()), str(destination))
+        with self.assertRaises(ValueError):
+            stage.publication_plan(str(destination), dict(self.selected, variant="kubernetes"))
+        for bad in ("vm-k8s-export-ubuntu-2404-20261111000000-aaaaaaaaaaaa",
+                    "vm-k8s-export-debian-13-20261111000000-aaaaaaaaaaaa",
+                    "vm-k8s-export-ubuntu-2604-20260230000000-aaaaaaaaaaaa", name + "\n"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                stage.inputs("123", bad, contract.sha(raw), contract.sha(self.disk), "d" * 40, stage.REPOSITORY)
+
+    def test_kubernetes_other_version_refused(self):
+        payload, raw = self.kubernetes_payload("1.35.11")
+        name = "vm-k8s-export-ubuntu-2604-20261111000000-aaaaaaaaaaaa"
+        selected = stage.inputs("123", name, contract.sha(raw), contract.sha(self.disk), "d" * 40, stage.REPOSITORY)
+        destination = self.root / "k8s-other"
+        stage.extract(str(self.archive(payload)), str(destination))
+        with self.assertRaises(ValueError): stage.publication_plan(str(destination), selected)
+
     def test_archive_extra_paths_and_existing_destination_refused_before_writes(self):
         for name in ("../escape", "/absolute", "nested/disk.qcow2", "request.json", "disk.qcow2/", "disk.qcow2\\suffix"):
             payload = dict(self.payload, **{name: b"hostile"})
@@ -199,6 +241,27 @@ class StagingTests(unittest.TestCase):
                               (404, {"errors": [{"code": "NAME_UNKNOWN"}, {"code": "DENIED"}]})):
             with self.subTest(status=status, value=value), self.assertRaises(ValueError):
                 stage.absent_tag(status, contract.encode(value))
+
+
+class WorkflowNameRegexTests(unittest.TestCase):
+    """Pre-checkout inline regexes must accept exactly what NAME/K8S_NAME accept."""
+    def test_inline_regexes_match_helper_selectors(self):
+        import re
+        samples = ["vm-export-%s-20261111000000-aaaaaaaaaaaa" % os_name
+                   for os_name in ("ubuntu-2404", "ubuntu-2604", "debian-12", "debian-13", "debian-14")]
+        samples += ["vm-k8s-export-%s-20261111000000-aaaaaaaaaaaa" % os_name
+                    for os_name in ("ubuntu-2604", "ubuntu-2404", "debian-13")]
+        samples += ["vm-export-ubuntu-2604-k8s-20261111000000-aaaaaaaaaaaa", "vm-k8s-export-ubuntu-2604-2026111100000-aaaaaaaaaaaa",
+                    "vm-k8s-export-ubuntu-2604-20261111000000-AAAAAAAAAAAA", "x-vm-export-ubuntu-2604-20261111000000-aaaaaaaaaaaa"]
+        for workflow in ("vm-artifact-stage.yml", "vm-artifacts.yml"):
+            text = (IMAGES.parent / ".github/workflows" / workflow).read_text()
+            found = re.findall(r"re\.fullmatch\(r'(\(\?:vm-export-[^']+)'", text)
+            self.assertEqual(len(found), 1, workflow)
+            for sample in samples:
+                helper = any(re.fullmatch(p, sample, flags=re.ASCII) for p in (stage.NAME, stage.K8S_NAME))
+                with self.subTest(workflow=workflow, sample=sample):
+                    self.assertEqual(re.fullmatch(found[0], sample, flags=re.ASCII) is not None, helper)
+            self.assertIn("strptime(found[1], '%Y%m%d%H%M%S')", text)  # Timestamp group index.
 
 
 class WorkflowSourceTests(unittest.TestCase):

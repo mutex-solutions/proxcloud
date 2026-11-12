@@ -84,6 +84,49 @@ class LocalStageTests(unittest.TestCase):
                 finally:
                     directory.chmod(prior)
 
+    def kubernetes_source(self, version="1.35.10"):
+        name = "vm-k8s-export-ubuntu-2604-20261111000000-aaaaaaaaaaaa"
+        source = self.staging / name; source.mkdir(mode=0o700)
+        disk = self.payload["disk.qcow2"]
+        request = dict(kind="vm-template", os="ubuntu-2604", arch="amd64", variant="kubernetes",
+                       kubernetes_version=version, source_commit="a" * 40, upstream_checksum="b" * 64,
+                       build_version="20261111000000")
+        receipt = dict(a.decode(self.payload["manifest.json"])["clean_export_receipt"],
+                       request_sha256=a.sha(a.encode(request)))
+        manifest = dict(request, schema_version=1, image_tag=a.image_tag(request), clean_export_receipt=receipt,
+                        disk=dict(filename="disk.qcow2", format="qcow2", sha256=a.sha(disk),
+                                  bytes=len(disk), virtual_size_bytes=20 << 30))
+        raw = a.encode(manifest)
+        for member, data in {"disk.qcow2": disk, "manifest.json": raw, "SHA256SUMS": a.sums(manifest, raw)}.items():
+            (source / member).write_bytes(data); (source / member).chmod(0o600)
+        return name, [a.sha(raw), a.sha(disk)]
+
+    def test_kubernetes_name_stages_only_matching_k8s_manifest(self):
+        name, pins = self.kubernetes_source()
+        stage.stage(name, *pins)
+        self.assertEqual(a.decode((self.target / "manifest.json").read_bytes())["variant"], "kubernetes")
+        (self.target / "disk.qcow2").unlink(); (self.target / "manifest.json").unlink()
+        (self.target / "SHA256SUMS").unlink(); self.target.rmdir()
+        # A K8s manifest under a native name, a native manifest under a K8s name, and any other
+        # Kubernetes version are all refused before the exclusive destination is created.
+        native_dir = self.staging / name.replace("vm-k8s-export-", "vm-export-")
+        self.source.rename(self.staging / "native-aside")
+        self.source = self.staging / "native-aside"
+        (self.staging / name).rename(native_dir)
+        with self.assertRaises(ValueError): stage.stage(native_dir.name, *pins)
+        native_dir.rename(self.staging / "k8s-aside")
+        os_as_k8s = self.staging / name
+        self.source.rename(os_as_k8s)
+        with self.assertRaises(ValueError): stage.stage(os_as_k8s.name, *self.pins)
+        self.assertFalse(self.target.exists())
+        for bad in (name.replace("ubuntu-2604", "ubuntu-2404"), name.replace("ubuntu-2604", "debian-13")):
+            with self.subTest(bad=bad), self.assertRaises(ValueError): stage.stage(bad, *pins)
+
+    def test_kubernetes_other_version_refused(self):
+        name, pins = self.kubernetes_source("1.35.11")
+        with self.assertRaises(ValueError): stage.stage(name, *pins)
+        self.assertFalse(self.target.exists())
+
     def test_hardlinks_symlink_parents_files_and_total_bound_refused(self):
         os.link(self.source / "disk.qcow2", self.root / "hardlink")
         with self.assertRaises(ValueError): stage.stage(self.name, *self.pins)

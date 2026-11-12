@@ -10,7 +10,7 @@ on:
         type: string
         required: true
       artifact_name:
-        description: Exact vm-export-<os>-<YYYYMMDDHHMMSS UTC>-<12 lowercase source hex> name
+        description: Exact vm-export-<os>-… or vm-k8s-export-ubuntu-2604-<YYYYMMDDHHMMSS UTC>-<12 lowercase source hex> name
         type: string
         required: true
       expected_manifest_sha256:
@@ -57,11 +57,11 @@ jobs:
           valid &= match(r'[1-9][0-9]{0,19}', os.environ['STAGING_RUN_ID'])
           valid &= match(r'[0-9a-f]{40}', os.environ['PUBLISHER_SHA'])
           valid &= all(match(r'[0-9a-f]{64}', os.environ[key]) for key in ('EXPECTED_MANIFEST_SHA256', 'EXPECTED_DISK_SHA256'))
-          found = re.fullmatch(r'vm-export-(ubuntu-2404|ubuntu-2604|debian-12|debian-13)-([0-9]{14})-([0-9a-f]{12})', os.environ['ARTIFACT_NAME'], flags=re.ASCII)
+          found = re.fullmatch(r'(?:vm-export-(?:ubuntu-2404|ubuntu-2604|debian-12|debian-13)|vm-k8s-export-ubuntu-2604)-([0-9]{14})-([0-9a-f]{12})', os.environ['ARTIFACT_NAME'], flags=re.ASCII)
           try:
               valid &= found is not None
               if found:
-                  datetime.datetime.strptime(found[2], '%Y%m%d%H%M%S')
+                  datetime.datetime.strptime(found[1], '%Y%m%d%H%M%S')
           except ValueError:
               valid = False
           if not valid:

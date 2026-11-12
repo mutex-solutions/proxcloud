@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline native-OS sanitizer. Run ONLY in the separately reviewed offline capsule."""
+"""Offline native-OS/Kubernetes sanitizer. Run ONLY in the separately reviewed offline capsule."""
 import argparse
 import hashlib
 import json
@@ -10,6 +10,10 @@ import subprocess
 import sys
 
 SOURCE = "/input/source.qcow2"
+# variant=kubernetes ONLY: the template's RAW root disk. EFI vars and cloud-init media are
+# never inputs. The parent-reviewed facts/drop-in decisions file is small trusted data.
+RAW_SOURCE = "/input/source.raw"
+K8S_REVIEW = "/input/k8s-review.json"
 WORK = "/scratch/work/disk.qcow2"
 OUTPUT = "/scratch/export/disk.qcow2"
 FACTS = "/scratch/export/clean-export-facts.json"
@@ -39,6 +43,60 @@ SCAN = ("/etc/cloud", "/etc/netplan", "/etc/network", "/etc/systemd/network",
         "/etc/NetworkManager", "/etc/ssh", "/etc/sudoers", "/etc/sudoers.d",
         "/boot/grub/grub.cfg", "/etc/default/grub")
 BAD = re.compile(rb"10\.200\.|(?:BEGIN [A-Z0-9 ]*PRIVATE KEY)|(?:ssh-(?:rsa|ed25519) |ecdsa-sha2-)|(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}")
+# --- variant=kubernetes only (Ubuntu 26.04 accepted template; see k8s_copy_policy) ---
+K8S_OS = ("ubuntu-2604",)
+K8S_USER = "builder"  # Exact policy-accepted cloud default account; there is no ubuntu account.
+K8S_REVIEW_KEYS = {"kubernetes_version", "source_raw_sha256", "source_hash_verified", "source_stopped", "bios",
+                   "kubelet_active", "runtime_version", "retained_package_policy_reviewed", "package_policy_sha256",
+                   "network_backend", "cloud_default_user", "cloud_base_config_reviewed", "reviewed_dropins"}
+K8S_PACKAGES = ("kubeadm", "kubelet", "kubectl")
+K8S_DEB_RELEASE = "1.1"  # k8s-build-config.py pins kubernetes_deb_version = <version>-1.1.
+KUBELET_WANTS = "/etc/systemd/system/multi-user.target.wants/kubelet.service"  # Preserved, never toggled.
+KUBELET_UNITS = ("/usr/lib/systemd/system/kubelet.service", "/lib/systemd/system/kubelet.service")
+KUBELET_MASK = "/etc/systemd/system/kubelet.service"  # Any symlink here (mask/redirect) refuses.
+DROPINS = "/etc/cloud/cloud.cfg.d/"
+README = "README"  # cloud-init's shipped notice: only via an exact reviewed (README, sha, action) row.
+# Pre-policy refusals (counted, never wiped): the parent must learn the real state.
+K8S_SWAP_FILES = ("/swap.img", "/swapfile")
+K8S_SWAP_UNITS = ("/etc/systemd/system/*.swap",)
+K8S_REGISTRY_FILES = ("/var/lib/kubelet/config.json", "/var/lib/kubelet/.dockercfg", "/.docker/config.json",
+                      "/.dockercfg", "/root/.docker/config.json")
+K8S_SECRET_PATHS = ("/var/lib/systemd/credential.secret", "/var/lib/snapd/device/private-keys-v1")
+K8S_PROXY_FILES = ("/etc/apt/apt.conf.d", "/etc/apt/apt.conf", "/etc/environment",
+                   "/etc/systemd/system/containerd.service.d")
+K8S_KUBELET_STATE = "/var/lib/kubelet"  # Scanned except pki/ and pods/ (cluster counts cover those).
+# http_proxy=, Acquire::http::Proxy, nested `Acquire { http { Proxy "..." } }`, systemd Environment=, lab.
+K8S_PROXY = re.compile(rb"(?i)_proxy\s*=|::proxy\b|\bproxy\s+\"|10\.200\.")
+K8S_LAB = re.compile(rb"10\.200\.")
+# Any fstab swap entry, commented or not (upstream late-commands only comment it out).
+K8S_FSTAB_SWAP = re.compile(rb"(?m)^[ \t#]*\S+[ \t]+\S+[ \t]+swap(?=[ \t]|$)")
+# (guest path, depth): entries (incl. symlinks/dotfiles) are COUNTED, never followed or deleted.
+# Any existing cluster/workload state refuses; it is not a wipe recommendation.
+K8S_CLUSTER = {
+    "kubernetes_pki": (("/etc/kubernetes/pki", 1),),
+    "admin_conf": (("/etc/kubernetes/admin.conf", 1), ("/etc/kubernetes/super-admin.conf", 1),
+                   ("/etc/kubernetes/controller-manager.conf", 1), ("/etc/kubernetes/scheduler.conf", 1)),
+    "bootstrap_kubelet_conf": (("/etc/kubernetes/bootstrap-kubelet.conf", 1),),
+    "kubelet_conf": (("/etc/kubernetes/kubelet.conf", 1),),
+    "kubelet_pki": (("/var/lib/kubelet/pki", 1),),
+    "etcd_db": (("/var/lib/etcd/member", 1),),
+    "etcd_other": (("/var/lib/etcd", 1),),
+    "static_manifests": (("/etc/kubernetes/manifests", 1),),
+    "workloads": (("/var/lib/kubelet/pods", 1), ("/var/lib/containerd/io.containerd.runtime.v2.task", 2),
+                  ("/var/lib/cni/networks", 1), ("/var/lib/cni/results", 1),
+                  ("/var/log/pods", 1), ("/var/log/containers", 1)),
+}
+K8S_LINKS = ("/etc", "/etc/kubernetes", "/etc/containerd", "/etc/cloud", "/etc/cloud/cloud.cfg.d", "/home",
+             "/home/" + K8S_USER, "/root", "/var/lib/kubelet", "/var/lib/etcd", "/var/lib/containerd",
+             "/etc/passwd", "/etc/shadow", "/etc/fstab")
+K8S_SCAN = ("/etc/kubernetes", "/etc/containerd", "/etc/crictl.yaml", "/etc/cni/net.d", "/etc/default/kubelet",
+            "/etc/systemd/system/kubelet.service.d", "/etc/apt/sources.list", "/etc/apt/sources.list.d")
+K8S_APT = re.compile(rb"://[^/\s]*@|10\.200\.")
+# Includes containerd hosts.toml [host.*.header] authorization/bearer/basic credentials.
+K8S_REGISTRY = re.compile(rb"(?i)\b(?:auth|password|identitytoken|registrytoken|authorization)\b[\"']?\s*[=:]"
+                          rb"|\b(?:bearer|basic)\s+[A-Za-z0-9+/._~-]+=*[\"']")
+K8S_CREDENTIAL = re.compile(rb"(?i)PRIVATE KEY-----|client-key-data|\btoken\s*[=:]")
+NOLOGIN = ("/usr/sbin/nologin", "/sbin/nologin", "/bin/false")
 
 
 def require(ok):
@@ -53,24 +111,34 @@ def command(*args):
     return result.stdout
 
 
+def inspect(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            require("backing" not in key and "data-file" not in key)
+            require("encrypt" not in key or (key == "encrypted" and item is False))
+            require("snapshot" not in key or (key == "snapshots" and item == []))
+            require(key != "corrupt" or item is False)
+            inspect(item)
+    elif isinstance(value, list):
+        for item in value:
+            inspect(item)
+
+
 def image_info(path):
     info = json.loads(command("info", "--output=json", "-f", "qcow2", path))
     require(type(info) is dict and info.get("format") == "qcow2")
     require(type(info.get("virtual-size")) is int and info["virtual-size"] == VIRTUAL_BYTES)
-
-    def inspect(value):
-        if isinstance(value, dict):
-            for key, item in value.items():
-                require("backing" not in key and "data-file" not in key)
-                require("encrypt" not in key or (key == "encrypted" and item is False))
-                require("snapshot" not in key or (key == "snapshots" and item == []))
-                require(key != "corrupt" or item is False)
-                inspect(item)
-        elif isinstance(value, list):
-            for item in value:
-                inspect(item)
     inspect(info)  # Before qemu-img check/convert; never follow a backing or external file.
     command("check", "-f", "qcow2", path)
+    return info
+
+
+def raw_info(path):
+    """variant=kubernetes RAW root only, inside the capsule. qemu-img cannot check raw."""
+    info = json.loads(command("info", "--output=json", "-f", "raw", path))
+    require(type(info) is dict and info.get("format") == "raw")
+    require(type(info.get("virtual-size")) is int and info["virtual-size"] == VIRTUAL_BYTES)
+    inspect(info)  # Before conversion; an explicit -f raw never probes guest bytes as a format.
     return info
 
 
@@ -96,10 +164,10 @@ def remove(g, path):
             g.rm_rf(path)
 
 
-def read(g, path):
+def read(g, path, limit=1 << 20):
     safe(g, path)
     require(not g.is_symlink(path) and g.is_file(path, followsymlinks=False))
-    require(g.filesize(path) <= 1 << 20)
+    require(g.filesize(path) <= limit)
     return g.read_file(path)
 
 
@@ -152,7 +220,7 @@ def lock_table(g, path, fields):
     write(g, path, ("\n".join(result) + "\n").encode())
 
 
-def cleanup(g, user):
+def cleanup(g, user, remove_patterns=REMOVE):
     passwd = read(g, "/etc/passwd").decode("utf-8").splitlines()
     users = [row.split(":") for row in passwd]
     require(all(len(row) == 7 and row[1] in ("x", "!", "*", "!!")
@@ -165,7 +233,7 @@ def cleanup(g, user):
     homes = {row[5] for row in users if row[5] == "/root" or row[5].startswith("/home/")}
     # Unexpected non-system login homes are not widened into arbitrary deletion paths.
     require(all(row[5] in homes or int(row[2]) < 1000 or row[6].endswith(("/nologin", "/false")) for row in users))
-    for path in REMOVE:
+    for path in remove_patterns:
         for found in g.glob_expand(path):
             remove(g, found)
     # Retain home directories/ownership and native cloud account; discard ALL personal state.
@@ -206,14 +274,14 @@ def cleanup(g, user):
             require(not re.search(rb"(?:cloud-init=disabled|\bip=|\bds=)", read(g, path)))
 
 
-def verify(g, homes_user):
+def verify(g, homes_user, remove_patterns=REMOVE, scan=SCAN):
     require(read(g, "/etc/machine-id") == b"" and read(g, "/etc/hostname") == b"localhost\n")
     for path in ("/etc/shadow", "/etc/gshadow"):
         require(all(row.split(b":")[1] == b"!" for row in read(g, path).splitlines()))
-    for pattern in REMOVE:
+    for pattern in remove_patterns:
         if pattern not in RECREATE:
             require(not g.glob_expand(pattern))
-    for base in SCAN:
+    for base in scan:
         if not exists(g, base):
             continue
         paths = [base] if g.is_file(base, followsymlinks=False) else [base + "/" + p for p in g.find(base)]
@@ -242,6 +310,10 @@ def sanitize(g, selected):
     mount_all(g, mounts)
     cleanup(g, user)
     verify(g, user)
+    reset_and_zero(g, mounts, lambda: verify(g, user))
+
+
+def reset_and_zero(g, mounts, final_check):
     g.sync()
     g.umount_all()
     ext4 = [dev for path, dev in mounts.items() if path != "/boot/efi"]
@@ -255,24 +327,286 @@ def sanitize(g, selected):
     for device in ext4:
         journal(g, device, True)
     mount_all(g, mounts)
-    verify(g, user)
+    final_check()
     g.sync()
     g.umount_all()
 
 
+# ---------------------------------------------------------------------------------------
+# variant=kubernetes: accepted Ubuntu 26.04 / Kubernetes 1.35.10 node template, RAW root.
+# Every fact feeds k8s_copy_policy.validate_inventory, which refuses unknown/mismatched
+# facts. Nothing here toggles kubelet enablement or rewrites the policy's facts.
+# ---------------------------------------------------------------------------------------
+def load_review(raw):
+    """Parent-reviewed small JSON (never guest data). Exact keys, duplicate keys refused."""
+    def unique(pairs):
+        require(len(dict(pairs)) == len(pairs))
+        return dict(pairs)
+    require(type(raw) is bytes and 0 < len(raw) <= 65536)
+    review = json.loads(raw.decode("ascii"), object_pairs_hook=unique)
+    require(type(review) is dict and set(review) == K8S_REVIEW_KEYS)
+    require(type(review["source_raw_sha256"]) is str and
+            re.fullmatch(r"[0-9a-f]{64}", review["source_raw_sha256"], re.ASCII) is not None)
+    rows = review["reviewed_dropins"]
+    require(type(rows) is list and all(type(row) is list and len(row) == 3 for row in rows))
+    review["reviewed_dropins"] = tuple(tuple(row) for row in rows)
+    return review
+
+
+def open_private(path, limit):
+    """O_NOFOLLOW open + fstat: one regular single-link file; returns (file, stat)."""
+    handle = os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb")
+    info = os.fstat(handle.fileno())
+    if not (stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and 0 < info.st_size <= limit):
+        handle.close()
+        require(False)
+    return handle, info
+
+
+def raw_digest(path, expected_size):
+    """Stream-hash the exact raw root INSIDE the capsule; bounded, stable-file checked."""
+    handle, before = open_private(path, expected_size)
+    with handle:
+        require(before.st_size == expected_size)
+        size, digest = 0, hashlib.sha256()
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            size += len(block)
+            require(size <= expected_size)
+            digest.update(block)
+        after = os.fstat(handle.fileno())
+    require(size == expected_size and identity(before) == identity(after))
+    return digest.hexdigest(), identity(before)
+
+
+def identity(info):
+    """File identity bound to a hash: later path reopens must still name exactly these bytes."""
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def k8s_layout(g, selected, review):
+    """Facts for policy.layout; the policy (not this probe) decides acceptability."""
+    require(selected in K8S_OS and g.list_devices() == ["/dev/sda"] and not g.lvs())
+    roots = g.inspect_os()
+    require(len(roots) == 1 and g.inspect_get_type(roots[0]) == "linux")
+    root = roots[0]
+    mounts = g.inspect_get_mountpoints(root)
+    filesystems = g.list_filesystems()
+    parts = g.part_list("/dev/sda")
+    # Root-only before ANY mount: no /boot, ESP or extra mountpoint is ever mounted here.
+    require(sorted(mounts) == ["/"] and mounts["/"] == root and root in filesystems)
+    os_facts = {"distro": g.inspect_get_distro(root), "major": g.inspect_get_major_version(root),
+                "minor": g.inspect_get_minor_version(root)}
+    facts = {"bios": review["bios"], "partition_table": g.part_get_parttype("/dev/sda"),
+             "partition_count": len(parts),
+             "root_partition_number": int(root[8:]) if re.fullmatch(r"/dev/sda[1-9][0-9]?", root) else 0,
+             "root_fs": filesystems[root], "root_count": len(roots), "mountpoints": sorted(mounts),
+             "esp_count": sum(kind == "vfat" for kind in filesystems.values()),
+             "extra_filesystems": sum(dev != root for dev in filesystems), "external_fstab": None,
+             "unsafe_links": 0}
+    return mounts, os_facts, facts
+
+
+def k8s_count(g, path, depth):
+    """Count entries without following links; any existing link/leaf counts as state."""
+    if not exists(g, path):
+        return 0
+    if g.is_symlink(path) or not g.is_dir(path, followsymlinks=False):
+        return 1
+    names = g.ls(path)
+    if depth <= 1:
+        return len(names)
+    return sum(k8s_count(g, path + "/" + name, depth - 1) for name in names)
+
+
+def k8s_files(g, bases, limit=20000):
+    found = []
+    for base in bases:
+        if not exists(g, base):
+            continue
+        paths = [base] if not g.is_dir(base, followsymlinks=False) else [base + "/" + p for p in g.find(base)]
+        found += [p for p in paths if not g.is_symlink(safe(g, p)) and g.is_file(p, followsymlinks=False)]
+        require(len(found) <= limit)
+    return found
+
+
+def k8s_marker(value, allowed):
+    return value if value in allowed else "UNKNOWN"  # Never forward hash bytes to the policy.
+
+
+def k8s_accounts(g):
+    shadow = {row.split(b":")[0]: row.split(b":") for row in read(g, "/etc/shadow").splitlines()}
+    accounts = []
+    for row in read(g, "/etc/passwd").decode("utf-8").splitlines():
+        cols = row.split(":")
+        require(len(cols) == 7 and cols[2].isdigit())
+        name, uid, home, shell = cols[0], int(cols[2]), cols[5], cols[6]
+        kind = ("root" if name == "root" else "native_login" if name == K8S_USER
+                else "system" if shell in NOLOGIN or (name, uid, home, shell) == ("sync", 4, "/bin", "/bin/sync")
+                else "UNKNOWN")
+        entry = shadow.get(name.encode(), [b"", b"UNKNOWN"])
+        require(len(entry) == 9)
+        accounts.append({"name": name, "uid": uid, "home": home, "shell": shell, "kind": kind,
+                         "passwd_marker": k8s_marker(cols[1], ("x", "!", "*", "!!")),
+                         "shadow_marker": k8s_marker(entry[1].decode("ascii", "replace"), ("!", "!!", "*", "!*"))})
+    return accounts
+
+
+def k8s_packages(g):
+    """Normalize ONLY the exact pinned deb revision; anything else stays raw and refuses."""
+    found = {}
+    for stanza in read(g, "/var/lib/dpkg/status", 64 << 20).split(b"\n\n"):
+        fields = dict(line.split(b": ", 1) for line in stanza.splitlines() if b": " in line and not line[:1].isspace())
+        name = fields.get(b"Package", b"").decode("ascii", "replace")
+        if name in K8S_PACKAGES:
+            require(name not in found and b"install ok installed" == fields.get(b"Status"))
+            version = fields.get(b"Version", b"").decode("ascii", "replace")
+            found[name] = version[:-len("-" + K8S_DEB_RELEASE)] if version.endswith("-" + K8S_DEB_RELEASE) else "UNKNOWN"
+    return found
+
+
+def kubelet_enabled(g):
+    """Observed only: wants-link to a present kubelet unit; masked/redirected/absent is False."""
+    if exists(g, KUBELET_MASK) and g.is_symlink(KUBELET_MASK):
+        return False  # /etc/systemd/system/kubelet.service -> /dev/null (masked) or a redirect.
+    if not g.is_symlink(KUBELET_WANTS):
+        return False
+    target = g.readlink(KUBELET_WANTS)
+    return (target != "/dev/null" and target.rsplit("/", 1)[-1] == "kubelet.service" and
+            any(exists(g, unit) and not g.is_symlink(unit) for unit in KUBELET_UNITS))
+
+
+def k8s_inventory(g, selected, review, parent):
+    mounts, os_facts, layout_facts = k8s_layout(g, selected, review)
+    mount_all(g, mounts)
+    layout_facts["unsafe_links"] = sum(g.is_symlink(path) for path in K8S_LINKS if g.exists(path) or g.is_symlink(path))
+    require(layout_facts["unsafe_links"] == 0)  # Before any further guest path is read.
+    fstab = read(g, "/etc/fstab")
+    rows = [line.split() for line in fstab.splitlines() if line.strip() and not line.lstrip().startswith(b"#")]
+    layout_facts["external_fstab"] = any(len(row) < 2 or row[1] != b"/" for row in rows)
+    # Swap is refused, never wiped, so the parent learns the real state of the template.
+    layout_facts["swap_entries"] = (sum(exists(g, path) for path in K8S_SWAP_FILES) +
+                                    len(K8S_FSTAB_SWAP.findall(fstab)) +
+                                    sum(len(g.glob_expand(unit)) for unit in K8S_SWAP_UNITS))
+    backend = ("netplan-systemd-networkd" if g.exists("/usr/sbin/netplan") and
+               g.exists("/usr/lib/systemd/system/systemd-networkd.service") and
+               not g.exists("/usr/sbin/NetworkManager") else "UNKNOWN")
+    dropins = []
+    if exists(g, DROPINS.rstrip("/")):
+        for name in g.ls(DROPINS.rstrip("/")):
+            path = DROPINS + name
+            regular = not g.is_symlink(safe(g, path)) and g.is_file(path, followsymlinks=False)
+            digest = hashlib.sha256(read(g, path)).hexdigest() if regular else "0" * 64
+            dropins.append({"name": name, "sha256": digest, "regular_no_symlinks": regular})
+    tokens = sorted(set(g.glob_expand("/etc/kubernetes/*token*") + g.glob_expand("/var/lib/kubelet/*token*")))
+    apt = k8s_files(g, ("/etc/apt/sources.list", "/etc/apt/sources.list.d"))
+    proxies = k8s_files(g, K8S_PROXY_FILES)
+    containerd = k8s_files(g, ("/etc/containerd",))
+    # Curated token leaves are removal targets; every other scanned file must be clean.
+    scanned = [p for p in k8s_files(g, K8S_SCAN) if p not in tokens]
+    kubelet = [p for p in k8s_files(g, (K8S_KUBELET_STATE,)) if p not in tokens and
+               not p.startswith((K8S_KUBELET_STATE + "/pki/", K8S_KUBELET_STATE + "/pods/"))]
+    facts = {
+        "parent": parent, "os": os_facts, "layout": layout_facts, "accounts": k8s_accounts(g),
+        "firstboot": {"network_backend": backend if backend == review["network_backend"] else "UNKNOWN",
+                      "cloud_default_user": review["cloud_default_user"],
+                      "cloud_base_config_reviewed": review["cloud_base_config_reviewed"]},
+        "k8s": {"version": review["kubernetes_version"],
+                "kubelet_enabled": kubelet_enabled(g),  # Observed, preserved, never toggled.
+                "kubelet_active": review["kubelet_active"], "runtime_version": review["runtime_version"],
+                "cluster": {key: sum(k8s_count(g, path, depth) for path, depth in paths)
+                            for key, paths in K8S_CLUSTER.items()},
+                "bootstrap_token_files": len(tokens), "kubernetes_packages": k8s_packages(g),
+                "retained_package_policy_reviewed": review["retained_package_policy_reviewed"],
+                "package_policy_sha256": review["package_policy_sha256"]},
+        "cloud_dropins": dropins,
+        "hygiene": {
+            "unsafe_apt_repo_urls": (sum(bool(K8S_APT.search(read(g, p))) for p in apt) +
+                                     sum(bool(K8S_PROXY.search(read(g, p))) for p in proxies)),
+            "registry_config_credentials": (sum(bool(K8S_REGISTRY.search(read(g, p))) for p in containerd) +
+                                            sum(exists(g, p) for p in K8S_REGISTRY_FILES)),
+            "unclassified_credentials": (sum(bool(K8S_CREDENTIAL.search(read(g, p))) for p in scanned) +
+                                         sum(bool(K8S_CREDENTIAL.search(data) or K8S_LAB.search(data))
+                                             for data in (read(g, p) for p in kubelet)) +
+                                         sum(k8s_count(g, p, 1) for p in K8S_SECRET_PATHS))},
+    }
+    return mounts, facts, tokens
+
+
+def k8s_state(g):
+    """Retained K8s surface re-observed after cleanup: enablement/packages/cluster must not drift."""
+    return (kubelet_enabled(g), k8s_packages(g),
+            {key: sum(k8s_count(g, path, depth) for path, depth in paths) for key, paths in K8S_CLUSTER.items()})
+
+
+def sanitize_k8s(g, selected, review, parent):
+    import k8s_copy_policy as k8s  # Lazy: the native-OS path keeps its exact dependency set.
+    # source_raw_sha256 is verified in-capsule by main(); source_stopped stays a parent attestation.
+    require(type(parent) is dict and all(review[key] is True and parent.get(key) is True
+                                         for key in ("source_hash_verified", "source_stopped")))
+    mounts, facts, tokens = k8s_inventory(g, selected, review, parent)
+    plan = k8s.validate_inventory(facts, review["reviewed_dropins"])  # Refusal before ANY write.
+    require(plan.copy_only and not plan.public_eligible)
+    for path in tokens:  # Curated reviewed prejoin leaves only; never directories/cluster state.
+        require(not g.is_symlink(safe(g, path)) and g.is_file(path, followsymlinks=False))
+    decided = {name: action for name, _, action in plan.reviewed_dropins}
+    preserved = {name: digest for name, digest, action in plan.reviewed_dropins if action == "preserve_vendor"}
+    # Replace (not extend) the blanket cloud.cfg.d wipe with explicit reviewed decisions.
+    patterns = (tuple(p for p in REMOVE if p != DROPINS + "*") + plan.wipe + tuple(tokens) +
+                tuple(DROPINS + name for name, action in sorted(decided.items()) if action == "remove_build"))
+    before = k8s_state(g)
+
+    def check():
+        verify(g, K8S_USER, patterns, SCAN + K8S_SCAN)
+        require(sorted(g.ls(DROPINS.rstrip("/"))) == sorted(preserved))
+        for name, digest in preserved.items():
+            require(hashlib.sha256(read(g, DROPINS + name)).hexdigest() == digest)
+        require(k8s_state(g) == before)
+    cleanup(g, K8S_USER, patterns)
+    check()
+    reset_and_zero(g, mounts, check)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--os", required=True, choices=tuple(OS))
+    selector = parser.add_mutually_exclusive_group(required=True)
+    selector.add_argument("--os", choices=tuple(OS))
+    selector.add_argument("--k8s-os", choices=K8S_OS)  # variant=kubernetes; RAW root input only.
     args = parser.parse_args(argv)
+    kubernetes = args.k8s_os is not None
+    selected = args.k8s_os if kubernetes else args.os
     try:
         require(os.getuid() == os.geteuid() == 1000)
         os.umask(0o077)
-        source = os.lstat(SOURCE)
-        require(stat.S_ISREG(source.st_mode) and source.st_nlink == 1 and 0 < source.st_size <= 24 << 30)
-        os.mkdir("/scratch/work", 0o700)
-        os.mkdir("/scratch/export", 0o700)
-        image_info(SOURCE)
-        command("convert", "-f", "qcow2", "-O", "qcow2", "-o", "compat=1.1,lazy_refcounts=off", SOURCE, WORK)
+        if kubernetes:
+            handle, _ = open_private(K8S_REVIEW, 65536)  # O_NOFOLLOW + fstat; parent-reviewed data.
+            with handle:
+                review = load_review(handle.read(65537))
+            require(review["kubernetes_version"] == "1.35.10")
+            # Exactly the 20 GiB raw root; EFI vars and cloud-init media are never inputs.
+            # The digest is computed HERE, streamed and bounded, and must equal the parent's
+            # independently recorded source hash; a mismatch refuses before any parser runs.
+            digest, hashed = raw_digest(RAW_SOURCE, VIRTUAL_BYTES)
+            require(digest == review["source_raw_sha256"])
+            os.mkdir("/scratch/work", 0o700)
+            os.mkdir("/scratch/export", 0o700)
+            info = raw_info(RAW_SOURCE)
+            # Confined conversion to a standalone QCOW2 work copy; the raw input stays read-only.
+            command("convert", "-f", "raw", "-O", "qcow2", "-o", "compat=1.1,lazy_refcounts=off", RAW_SOURCE, WORK)
+            image_info(WORK)
+            raw_after = os.lstat(RAW_SOURCE)
+            # The path qemu-img reopened must still be the exact hashed file (no swap or rewrite).
+            require(stat.S_ISREG(raw_after.st_mode) and identity(raw_after) == hashed)
+            parent = {"format": "raw", "virtual_bytes": info["virtual-size"], "raw_bytes": raw_after.st_size,
+                      # In-capsule hash matched; the stopped-source fact remains parent-attested.
+                      "source_hash_verified": review["source_hash_verified"] is True,
+                      "source_stopped": review["source_stopped"]}
+        else:
+            source = os.lstat(SOURCE)
+            require(stat.S_ISREG(source.st_mode) and source.st_nlink == 1 and 0 < source.st_size <= 24 << 30)
+            os.mkdir("/scratch/work", 0o700)
+            os.mkdir("/scratch/export", 0o700)
+            image_info(SOURCE)
+            command("convert", "-f", "qcow2", "-O", "qcow2", "-o", "compat=1.1,lazy_refcounts=off", SOURCE, WORK)
         os.environ.clear()
         os.environ.update(ENV)
         import guestfs  # Trusted capsule binding only; pure tests never need this dependency.
@@ -283,7 +617,10 @@ def main(argv=None):
             g.set_network(False)
             g.add_drive_opts(WORK, format="qcow2", readonly=0, discard="enable")
             g.launch()
-            sanitize(g, args.os)
+            if kubernetes:
+                sanitize_k8s(g, selected, review, parent)
+            else:
+                sanitize(g, selected)
             g.shutdown()
         finally:
             g.close()
@@ -295,7 +632,8 @@ def main(argv=None):
                 size += len(block)
                 require(size < MAX_BYTES)
                 digest.update(block)
-        facts = dict(kind="OfflineSanitizationFacts", os=args.os, variant="os", disk_sha256=digest.hexdigest(),
+        extra = dict(variant="kubernetes", kubernetes_version="1.35.10") if kubernetes else dict(variant="os")
+        facts = dict(kind="OfflineSanitizationFacts", os=selected, **extra, disk_sha256=digest.hexdigest(),
                      disk_bytes=size, virtual_size_bytes=VIRTUAL_BYTES, checks={key: True for key in
                      ("cleaned_copy_only", "no_backing_file", "qemu_img_check", "offline_sanitization",
                       "zero_free_space", "no_build_credentials_or_lab_network")})
