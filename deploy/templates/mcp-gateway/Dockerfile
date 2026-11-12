@@ -23,19 +23,55 @@ COPY --from=node /usr/local/bin/node /opt/mcp/node/bin/node
 # Package servers (cmd/mcp-gateway/gencatalog.py, PACKAGES), pinned. npm ones under /opt/mcp/npm (installed with the
 # base's npm, which skips fsevents; run with /opt/mcp/node), Python ones as uv tools with their entry points in
 # /opt/mcp/bin; the gateway puts all three first on its servers' PATH.
-RUN npm install -g --prefix /opt/mcp/npm \
-      @modelcontextprotocol/server-filesystem@2.2.0 \
-      @modelcontextprotocol/server-memory@2.1.0 \
-      @modelcontextprotocol/server-sequential-thinking@2.1.1 \
-      @wonderwhy-er/desktop-commander@0.3.1 \
-      @notionhq/notion-mcp-server@2.6.1 \
-      @brave/brave-search-mcp-server@2.1.4 \
-      exa-mcp-server@3.4.3 \
-      firecrawl-mcp@3.38.0 \
-      tavily-mcp@0.2.22 \
-      mongodb-mcp-server@3.2.2 \
-      server-perplexity-ask@0.1.3 \
- && npm cache clean --force
+# The npm servers are a private npm project rooted at /opt/mcp/npm/lib, not `npm install -g`: only a project root can
+# apply "overrides", which lift the transitive @modelcontextprotocol/sdk (exact 1.26.0/1.30.0 pins in tavily-mcp,
+# brave and exa's mcp-handler peer) and basic-ftp (mongodb-mcp-server -> ... -> get-uri ^5) to fixed releases.
+# --install-strategy=shallow is the layout `-g` uses: each server at lib/node_modules/<name> with its own dependency
+# tree, and only the servers' own bins in lib/node_modules/.bin, which /opt/mcp/npm/bin links to (the gateway's PATH).
+RUN <<'EOF'
+set -eu
+mkdir -p /opt/mcp/npm/lib
+cat > /opt/mcp/npm/lib/package.json <<'JSON'
+{
+  "name": "proxcloud-mcp-servers",
+  "private": true,
+  "dependencies": {
+    "@modelcontextprotocol/server-filesystem": "2.2.0",
+    "@modelcontextprotocol/server-memory": "2.1.0",
+    "@modelcontextprotocol/server-sequential-thinking": "2.1.1",
+    "@wonderwhy-er/desktop-commander": "0.3.1",
+    "@notionhq/notion-mcp-server": "2.6.1",
+    "@brave/brave-search-mcp-server": "2.1.4",
+    "exa-mcp-server": "3.4.3",
+    "firecrawl-mcp": "3.38.0",
+    "tavily-mcp": "0.2.22",
+    "mongodb-mcp-server": "3.2.2",
+    "server-perplexity-ask": "0.1.3"
+  },
+  "overrides": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "basic-ftp": "6.2.6"
+  }
+}
+JSON
+npm install --prefix /opt/mcp/npm/lib --install-strategy=shallow --omit=dev --no-audit --no-fund
+npm cache clean --force
+ln -s lib/node_modules/.bin /opt/mcp/npm/bin
+# Fail unless every installed copy has the overridden version (and each package is present at all).
+find /opt/mcp/npm/lib/node_modules -path '*/node_modules/@modelcontextprotocol/sdk/package.json' \
+  -o -path '*/node_modules/basic-ftp/package.json' | /opt/mcp/node/bin/node -e '
+const fs = require("fs");
+const want = { "@modelcontextprotocol/sdk": "1.32.2", "basic-ftp": "6.2.6" };
+const seen = {};
+for (const f of fs.readFileSync(0, "utf8").split("\n").filter(Boolean)) {
+  const p = JSON.parse(fs.readFileSync(f, "utf8"));
+  if (p.version !== want[p.name]) { console.error(`${f}: ${p.name}@${p.version}, want ${want[p.name]}`); process.exit(1); }
+  seen[p.name] = (seen[p.name] || 0) + 1;
+}
+for (const n of Object.keys(want)) if (!seen[n]) { console.error(`no ${n} under /opt/mcp/npm/lib`); process.exit(1); }
+console.log(JSON.stringify(seen));
+'
+EOF
 ENV UV_TOOL_DIR=/opt/mcp/uv UV_TOOL_BIN_DIR=/opt/mcp/bin UV_PYTHON_INSTALL_DIR=/opt/mcp/python
 RUN python3 -m pip install --no-cache-dir --break-system-packages uv==0.13.4 \
  && for p in mcp-server-fetch==2026.11.4 mcp-server-time==2026.11.4 mcp-server-git==2026.11.4 \
