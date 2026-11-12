@@ -44,7 +44,7 @@ def fixture():
                     "unclassified_credentials": 0},
         # Real-image class: builder in 6 supplementary groups; snapd registered (serial, key-id,
         # serial assertions, one device key), no session macaroon and no store users.
-        "identity": {"builder_supplementary_groups": 6,
+        "identity": {"builder_supplementary_groups": 6, "builder_primary_group_own": True,
                      "snapd": {"state": True, "device_serial": True, "device_key_id": True,
                                "session_macaroon": False, "users": 0, "serial_assertions": 4,
                                "device_keys": 1}},
@@ -266,7 +266,11 @@ class CopyPolicyTests(unittest.TestCase):
             self.refuses(f)
         for section, key, value in (("identity", "builder_supplementary_groups", True),
                                     ("identity", "builder_supplementary_groups", -1),
-                                    ("identity", "builder_supplementary_groups", None)):
+                                    ("identity", "builder_supplementary_groups", None),
+                                    # Primary gid not builder's own unshared group (e.g. gid 27 = sudo).
+                                    ("identity", "builder_primary_group_own", False),
+                                    ("identity", "builder_primary_group_own", 1),
+                                    ("identity", "builder_primary_group_own", None)):
             f = fixture()
             f[section][key] = value
             self.refuses(f)
@@ -278,7 +282,7 @@ class CopyPolicyTests(unittest.TestCase):
         f = fixture()
         f["identity"]["snapd"].update(state=False)  # Serial/key-id claimed without a state file: incoherent.
         self.refuses(f)
-        for missing in ("builder_supplementary_groups", "snapd"):
+        for missing in ("builder_supplementary_groups", "builder_primary_group_own", "snapd"):
             f = fixture()
             del f["identity"][missing]
             self.refuses(f)

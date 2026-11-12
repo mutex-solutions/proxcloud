@@ -635,6 +635,87 @@ class KubernetesSanitizeTests(unittest.TestCase):
         self.assertIn(b"sudo:x:27:builder", g.read_file("/etc/group"))
         self.assertFalse([c for c in g.calls if c[0] == "zero"])  # Refused before zeroing/export.
 
+    def test_builder_primary_gid_must_be_own_unshared_group(self):
+        g = FakeK8sGuestFS()
+        _, facts, _ = s.k8s_inventory(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        self.assertIs(facts["identity"]["builder_primary_group_own"], True)
+        for change in (lambda g: g.put("/etc/passwd", g.read_file("/etc/passwd").replace(  # Primary gid 27 = sudo.
+                           b"builder:x:1000:1000:", b"builder:x:1000:27:")),
+                       lambda g: g.put("/etc/group", g.read_file("/etc/group") + b"shared:x:1000:\n"),  # Shared gid.
+                       lambda g: g.put("/etc/group", g.read_file("/etc/group").replace(  # Own row missing.
+                           b"builder:x:1000:\n", b"")),
+                       lambda g: g.put("/etc/group", g.read_file("/etc/group").replace(  # Own row renamed.
+                           b"builder:x:1000:\n", b"build:x:1000:\n")),
+                       lambda g: g.put("/etc/group", g.read_file("/etc/group") + b"builder:x:1001:\n"),  # Two rows.
+                       lambda g: g.put("/etc/passwd", g.read_file("/etc/passwd").replace(  # Non-numeric gid.
+                           b"builder:x:1000:1000:", b"builder:x:1000:+1000:"))):
+            g = FakeK8sGuestFS(); change(g)
+            self.policy_refuses(g)
+        g = FakeK8sGuestFS(); g.put("/etc/group", g.read_file("/etc/group").replace(b"lxd:x:101:", b"lxd:x:abc:"))
+        self.refuses(g)  # Malformed gid in /etc/group refuses before the policy.
+        # gid compares numerically: a zero-padded duplicate of builder's gid is still a shared gid.
+        g = FakeK8sGuestFS(); g.put("/etc/group", g.read_file("/etc/group") + b"pad:x:01000:\n")
+        self.policy_refuses(g)
+        # Re-verified after cleanup: a primary-gid change that appears late refuses before zeroing.
+        real_cleanup = s.cleanup
+        def late(g, user, patterns):
+            real_cleanup(g, user, patterns)
+            g.put("/etc/passwd", g.read_file("/etc/passwd").replace(b"builder:x:1000:1000:", b"builder:x:1000:27:"))
+        g = FakeK8sGuestFS()
+        with patch.object(s, "cleanup", side_effect=late):
+            with self.assertRaises(ValueError): s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        self.assertFalse([c for c in g.calls if c[0] == "zero"])
+
+    def test_group_member_lists_must_be_strict_tokens(self):
+        # nss_files would still treat these as membership (or they hide a member from an exact-token strip).
+        for field in (b"syslog, builder", b"builder ", b",builder", b"builder\r", b"a,,b", b"builder,",
+                      b" builder", b"Builder", b"builder\t", b"syslog,builder ,x", b"b\xc3\xa9"):
+            with self.subTest(field=field):
+                for table, row in (("/etc/group", b"sudo:x:27:" + field), ("/etc/gshadow", b"sudo:!::" + field),
+                                   ("/etc/gshadow", b"sudo:!:" + field + b":")):
+                    with self.assertRaises(ValueError):
+                        s.k8s_group_strip(row + b"\n", dict(s.K8S_GROUP_TABLES)[table])
+                    g = FakeK8sGuestFS()
+                    g.put(table, g.read_file(table).replace(b"sudo:x:27:builder\n" if table == "/etc/group"
+                                                            else b"sudo:*::builder\n", row + b"\n"))
+                    self.assertEqual(self.refuses(g), "sanitization refused")
+        for field in (b"builder", b"a,builder,b", b"user$", b"x_y.z-1", b"_svc"):
+            self.assertEqual(s.k8s_members(field), field.split(b","))
+        self.assertEqual(s.k8s_members(b""), [])
+
+    def test_sudo_rs_sudo_conf_and_userdb_guards(self):
+        # sudo-rs (Ubuntu 26.04's active sudo) prefers /etc/sudoers-rs: any entry refuses.
+        for change in (lambda g: g.put(s.SUDOERS_RS, SUDOERS),  # Even identical content is unreviewed.
+                       lambda g: g.nodes.__setitem__(s.SUDOERS_RS, ("link", "/etc/sudoers")),
+                       lambda g: g.mkdir_p(s.SUDOERS_RS),
+                       # classic sudo.conf: any active directive refuses; comments are fine.
+                       lambda g: g.put(s.SUDO_CONF, b"# comment\nPlugin sudoers_policy sudoers.so sudoers_file=/x\n"),
+                       lambda g: g.put(s.SUDO_CONF, b"  Set disable_coredump false\n"),
+                       lambda g: g.nodes.__setitem__(s.SUDO_CONF, ("link", "/tmp/sudo.conf")),
+                       # systemd userdb records/memberships outside the rewritten group tables.
+                       lambda g: g.put("/etc/userdb/builder:sudo.membership", b""),
+                       lambda g: g.put("/etc/userdb/builder.user", b"{}"),
+                       lambda g: g.put("/usr/lib/userdb/x.group", b"{}"),
+                       lambda g: g.put("/etc/userdb", b"not a dir")):
+            g = FakeK8sGuestFS(); change(g); g.calls.clear()
+            self.assertEqual(self.refuses(g), "sanitization refused")
+        g = FakeK8sGuestFS()
+        g.put(s.SUDO_CONF, b"#\n# Sample /etc/sudo.conf (comment-only, as observed)\n#Plugin sudoers_policy x\n\n  #x\n")
+        g.mkdir_p("/etc/userdb")  # Empty userdb dir is accepted.
+        s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        self.assertIn(s.SUDO_CONF, g.nodes)
+        # Re-verified in check(): a late /etc/sudoers-rs or userdb membership refuses before zeroing.
+        real_cleanup = s.cleanup
+        for late in (lambda g: g.put(s.SUDOERS_RS, SUDOERS), lambda g: g.put("/etc/userdb/builder:sudo.membership", b""),
+                     lambda g: g.put(s.SUDO_CONF, b"Path askpass /x\n")):
+            g = FakeK8sGuestFS()
+            def sneaky(g, user, patterns, late=late):
+                real_cleanup(g, user, patterns)
+                late(g)
+            with patch.object(s, "cleanup", side_effect=sneaky):
+                with self.assertRaises(ValueError): s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+            self.assertFalse([c for c in g.calls if c[0] == "zero"])
+
     def test_sudo_policy_bound_to_reviewed_hashes(self):
         g = FakeK8sGuestFS()
         s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))  # Build NOPASSWD drop-in removed -> {README}.
@@ -722,6 +803,40 @@ class KubernetesSanitizeTests(unittest.TestCase):
         real_write = g.write
         g.write = lambda path, data: real_write(path, SNAPD_STATE if path == s.K8S_SNAPD_STATE else data)
         with self.assertRaises(ValueError): s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        self.assertFalse([c for c in g.calls if c[0] == "zero"])
+
+    def test_snapd_state_changed_since_inventory_or_unencodable_refuses(self):
+        # state.json changed between the read-only inventory and the rewrite: never overwrite unseen bytes.
+        real_cleanup = s.cleanup
+        def drift(g, user, patterns):
+            real_cleanup(g, user, patterns)
+            g.put(s.K8S_SNAPD_STATE, SNAPD_STATE.replace(b'"patch-level":6', b'"patch-level":7'))
+        g = FakeK8sGuestFS()
+        with patch.object(s, "cleanup", side_effect=drift):
+            with self.assertRaises(ValueError): s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        self.assertIn(b'"patch-level":7', g.read_file(s.K8S_SNAPD_STATE))  # Not overwritten.
+        self.assertFalse([c for c in g.calls if c[0] == "zero"])
+        # A lone surrogate escape parses but cannot be re-encoded as UTF-8: refused BEFORE any write.
+        g = FakeK8sGuestFS()
+        g.put(s.K8S_SNAPD_STATE, SNAPD_STATE.replace(b'"generic-classic"', b'"generic-\\ud800"'))
+        self.assertEqual(self.refuses(g), "sanitization refused")
+        # Surrogate PAIRS (valid UTF-16 escapes) are fine and survive as the same characters.
+        g = FakeK8sGuestFS()
+        g.put(s.K8S_SNAPD_STATE, SNAPD_STATE.replace(b'"generic-classic"', b'"g-\\ud83d\\ude00"'))
+        s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        self.assertEqual(json.loads(g.read_file(s.K8S_SNAPD_STATE))["data"]["auth"]["device"]["model"], "g-\U0001F600")
+        # check() itself re-verifies there is still no store user: the reset write lands a user (nothing else
+        # differs: serial/key-id are gone), so ONLY the final users == 0 check can refuse it.
+        g = FakeK8sGuestFS()
+        real_write = g.write
+        g.write = lambda path, data: real_write(path, SNAPD_RESET.replace(b'"users":[]', b'"users":[{"id":1}]')
+                                                if path == s.K8S_SNAPD_STATE else data)
+        with patch.object(s, "k8s_snapd", wraps=s.k8s_snapd) as probe:
+            with self.assertRaises(ValueError) as caught:
+                s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        self.assertEqual(str(caught.exception), "sanitization refused")
+        self.assertEqual(probe.call_count, 3)  # Inventory, rewrite preparation, then check() refuses.
+        self.assertIn(b'"users":[{"id":1}]', g.read_file(s.K8S_SNAPD_STATE))
         self.assertFalse([c for c in g.calls if c[0] == "zero"])
 
     def test_snapd_key_dir_must_be_empty_after_cleanup(self):

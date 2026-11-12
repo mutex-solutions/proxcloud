@@ -114,7 +114,9 @@ def validate_inventory(facts, reviewed_dropins=()):
     device-key files that the `private-keys-v1/*` COPY_WIPE removes; systemd
     credential.secret, and any other/irregular entry there, still counts and refuses.
     identity records builder's supplementary-group count (any count: the copy drops
-    builder from all of them) and snapd registration PRESENCE/counts only. Store
+    builder from all of them), whether builder's passwd gid is its own unshared
+    `builder` group (must be True; never rewritten) and snapd registration
+    PRESENCE/counts only. Store
     user credentials (session macaroon or any snapd user) refuse; otherwise the plan
     resets snapd to unregistered.
     bootstrap_token_files is only a bounded count of reviewed prejoin token files;
@@ -192,8 +194,11 @@ def validate_inventory(facts, reviewed_dropins=()):
     # whatever its kind/shell (a nologin uid<1000 'system' ubuntu row is not acceptable either).
     _need(DEFAULT_USER not in seen and b["cloud_base_config_reviewed"] is True)
     ident = facts["identity"]
-    _keys(ident, ("builder_supplementary_groups", "snapd"))
+    _keys(ident, ("builder_supplementary_groups", "builder_primary_group_own", "snapd"))
     _count(ident["builder_supplementary_groups"])  # Recorded; any count is removed by the copy.
+    # The primary gid is NOT rewritten: it must already be builder's own, unshared group (sudo %group
+    # rules and group-owned sockets also match a primary gid, e.g. gid 27 = sudo).
+    _need(ident["builder_primary_group_own"] is True)
     sn = ident["snapd"]
     _keys(sn, ("state", "device_serial", "device_key_id", "session_macaroon", "users",
                "serial_assertions", "device_keys"))

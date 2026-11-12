@@ -55,9 +55,17 @@ K8S_REVIEW_KEYS = {"kubernetes_version", "source_raw_sha256", "source_hash_verif
                    "sudoers_sha256", "sudoers_readme_sha256"}
 # (table, member-list field indexes): group members; gshadow administrators and members.
 K8S_GROUP_TABLES = (("/etc/group", (3,)), ("/etc/gshadow", (2, 3)))
+# Every non-empty member list must be strict comma-separated names: glibc nss_files tolerates e.g. a blank
+# after a comma, so "syslog, builder" would still grant membership while an exact-token strip missed it.
+K8S_MEMBERS = re.compile(rb"[a-z_][a-z0-9_.-]*\$?(?:,[a-z_][a-z0-9_.-]*\$?)*")
 # sudo policy is bound to parent-reviewed bytes: /etc/sudoers by sha256 and, after cleanup, /etc/sudoers.d
 # containing EXACTLY the README with its reviewed sha256. Any other drop-in, rule or include refuses.
+# Ubuntu 26.04's ACTIVE sudo is sudo-rs (alternatives); it reads /etc/sudoers-rs if present, else /etc/sudoers.
+# So /etc/sudoers-rs must be absent, /etc/sudo.conf (classic sudo plugins/sudoers_file) comment-only, and no
+# systemd userdb drop-in may add records/memberships (nss-systemd) outside the rewritten group tables.
 SUDOERS, SUDOERS_D = "/etc/sudoers", "/etc/sudoers.d"
+SUDOERS_RS, SUDO_CONF = "/etc/sudoers-rs", "/etc/sudo.conf"
+K8S_USERDB = ("/etc/userdb", "/run/userdb", "/run/host/userdb", "/usr/local/lib/userdb", "/usr/lib/userdb")
 K8S_PACKAGES = ("kubeadm", "kubelet", "kubectl")
 K8S_DEB_RELEASE = "1.1"  # k8s-build-config.py pins kubernetes_deb_version = <version>-1.1.
 # image-builder apt-holds kubeadm/kubelet/kubectl ("hold ok installed"); any other dpkg Status refuses.
@@ -584,6 +592,7 @@ def k8s_inventory(g, selected, review, parent):
         "parent": parent, "os": os_facts, "layout": layout_facts, "accounts": k8s_accounts(g),
         # Recorded (counts/presence only); the policy plans the copy-only identity reset from them.
         "identity": {"builder_supplementary_groups": k8s_builder_groups(g),
+                     "builder_primary_group_own": k8s_builder_primary_group_own(g),
                      "snapd": {"state": snapd["snapd_state"], "device_serial": snapd["snapd_device_serial"],
                                "device_key_id": snapd["snapd_device_key_id"],
                                "session_macaroon": snapd["snapd_session_macaroon"], "users": snapd["snapd_users"],
@@ -708,34 +717,58 @@ def k8s_snapd(g):
     return facts, original, reset
 
 
-def k8s_group_strip(data, indexes, user=K8S_USER.encode()):
-    """Drop exactly `user` from the member-list fields; every other byte is kept (rows, order, other members,
-    builder's own primary group row, trailing newline or not)."""
+def k8s_group_rows(data):
+    """(rows as 4 columns, trailing newline?) of /etc/group or /etc/gshadow, split on LF exactly as nss_files."""
     rows = data.split(b"\n")
     trailing = rows[-1] == b""
     rows = rows[:-1] if trailing else rows
     require(rows)
-    out = []
-    for row in rows:
-        cols = row.split(b":")
-        require(len(cols) == 4 and cols[0] != b"")
+    cols = [row.split(b":") for row in rows]
+    require(all(len(c) == 4 and c[0] != b"" for c in cols))
+    return cols, trailing
+
+
+def k8s_members(field):
+    """Strict member list (K8S_MEMBERS) or empty; anything else (blanks, CR, empty items) refuses."""
+    require(field == b"" or K8S_MEMBERS.fullmatch(field) is not None)
+    return field.split(b",") if field else []
+
+
+def k8s_group_strip(data, indexes, user=K8S_USER.encode()):
+    """Drop exactly `user` from the member-list fields; every other byte is kept (rows, order, other members,
+    builder's own primary group row, trailing newline or not). Every member field is validated first."""
+    rows, trailing = k8s_group_rows(data)
+    for cols in rows:
         for index in indexes:
-            if cols[index]:
-                cols[index] = b",".join(member for member in cols[index].split(b",") if member != user)
-        out.append(b":".join(cols))
-    return b"\n".join(out) + (b"\n" if trailing else b"")
+            cols[index] = b",".join(member for member in k8s_members(cols[index]) if member != user)
+    return b"\n".join(b":".join(cols) for cols in rows) + (b"\n" if trailing else b"")
 
 
 def k8s_builder_groups(g):
     """Distinct groups listing builder as a member (group/gshadow) or administrator (gshadow)."""
     found = set()
     for path, indexes in K8S_GROUP_TABLES:
-        for row in read(g, path).splitlines():
-            cols = row.split(b":")
-            require(len(cols) == 4)
-            if any(K8S_USER.encode() in cols[index].split(b",") for index in indexes):
+        for cols in k8s_group_rows(read(g, path))[0]:
+            if any(K8S_USER.encode() in k8s_members(cols[index]) for index in indexes):
                 found.add(cols[0])
     return len(found)
+
+
+def k8s_builder_primary_group_own(g):
+    """builder's passwd gid names exactly ONE /etc/group row, named `builder` (the only `builder` row).
+
+    sudo %group rules and group-owned sockets (lxd) also match a PRIMARY gid, so builder must not have
+    gid 27 (sudo) or share its own gid with another group. Gids compare numerically (strict digits)."""
+    user = K8S_USER.encode()
+    entries = [row.split(b":") for row in read(g, "/etc/passwd").splitlines()]
+    require(all(len(cols) == 7 for cols in entries))
+    gids = [cols[3] for cols in entries if cols[0] == user]
+    if len(gids) != 1 or re.fullmatch(rb"[0-9]{1,10}", gids[0]) is None:
+        return False
+    rows = k8s_group_rows(read(g, "/etc/group"))[0]
+    require(all(re.fullmatch(rb"[0-9]{1,10}", cols[2]) is not None for cols in rows))
+    owners = [cols[0] for cols in rows if int(cols[2]) == int(gids[0])]
+    return owners == [user] and sum(cols[0] == user for cols in rows) == 1
 
 
 def k8s_sudo(g, review, after):
@@ -744,7 +777,16 @@ def k8s_sudo(g, review, after):
     /etc/sudoers must hash to sudoers_sha256 and /etc/sudoers.d must be a real directory holding
     README (sudoers_readme_sha256). Before cleanup any other entry must be a regular, non-dot build
     drop-in that cleanup removes (name or content names builder/packer); after cleanup the directory
-    is EXACTLY {README}. A NOPASSWD %sudo/#uid rule or @include drop-in therefore refuses."""
+    is EXACTLY {README}. A NOPASSWD %sudo/#uid rule or @include drop-in therefore refuses.
+    sudo-rs would prefer /etc/sudoers-rs: any entry there (file, link, dir) refuses. /etc/sudo.conf may
+    exist but must have no active (non-comment) line. userdb drop-in dirs must be absent or empty."""
+    require(not exists(g, SUDOERS_RS))
+    if exists(g, SUDO_CONF):
+        require(not any(line.strip() and not line.strip().startswith(b"#")
+                        for line in read(g, SUDO_CONF, 65536).splitlines()))
+    for base in K8S_USERDB:
+        if exists(g, base):
+            require(not g.is_symlink(base) and g.is_dir(base, followsymlinks=False) and g.ls(base) == [])
     require(hashlib.sha256(read(g, SUDOERS)).hexdigest() == review["sudoers_sha256"])
     require(exists(g, SUDOERS_D) and not g.is_symlink(SUDOERS_D) and g.is_dir(SUDOERS_D, followsymlinks=False))
     names = g.ls(SUDOERS_D)
@@ -792,13 +834,15 @@ def sanitize_k8s(g, selected, review, parent):
         require(k8s_state(g) == before)
         # Locked builder: in no supplementary group/gshadow admin list; sudo policy is exactly the reviewed
         # stock sudoers plus the reviewed README (no other drop-in, rule or include survives).
-        require(k8s_builder_groups(g) == 0)
-        k8s_sudo(g, review, after=True)
-        # snapd is unregistered: no device key, no serial assertion, no serial/key-id/session in state.json.
+        require(k8s_builder_groups(g) == 0 and k8s_builder_primary_group_own(g) is True)
+        k8s_sudo(g, review, after=True)  # Includes the sudoers-rs / sudo.conf / userdb guards.
+        # snapd is unregistered: no device key, no serial assertion, no serial/key-id/session in state.json,
+        # and still no store user.
         snapd, _, _ = k8s_snapd(g)
         require(not exists(g, K8S_SNAPD_KEYS) or (not g.is_symlink(K8S_SNAPD_KEYS) and g.ls(K8S_SNAPD_KEYS) == []))
         require(not exists(g, K8S_SNAPD_SERIAL) and snapd["snapd_serial_assertions"] == 0)
         require(not (snapd["snapd_device_serial"] or snapd["snapd_device_key_id"] or snapd["snapd_session_macaroon"]))
+        require(snapd["snapd_users"] == 0)
     cleanup(g, K8S_USER, patterns)
     # Copy-only identity reset AFTER validate_inventory. The strip runs on current bytes (cleanup's lock_table
     # has replaced gshadow password fields); the inventory already dry-ran it on the same row format.
