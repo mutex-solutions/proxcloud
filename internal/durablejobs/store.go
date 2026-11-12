@@ -105,7 +105,7 @@ func (s *Store) ClaimDead(ctx context.Context, id string, ttl time.Duration) (*J
 	}
 	j, err := scan(s.db.Pool.QueryRow(ctx, `UPDATE durable_job SET state='running',attempts=max_attempts,epoch=epoch+1,owner=$2,
 	 lease_until=clock_timestamp()+$3*interval '1 microsecond',finished_at=NULL
-	 WHERE id=$1 AND state='dead' AND kind=ANY($4) RETURNING `+columns, id, uuid.NewString(), ttl.Microseconds(), []string{TemplateUpdateVM}))
+	 WHERE id=$1 AND state='dead' AND kind=ANY($4) AND last_error IS DISTINCT FROM 'cleaned_up' RETURNING `+columns, id, uuid.NewString(), ttl.Microseconds(), []string{TemplateUpdateVM}))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

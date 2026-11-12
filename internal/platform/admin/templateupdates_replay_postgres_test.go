@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -95,7 +96,26 @@ func TestPGTemplateUpdateReplay(t *testing.T) {
 		t.Fatalf("not re-queued: %+v", j)
 	}
 	// Permission: a billing-only operator cannot replay a template update.
-	if !h.adminRequiresServiceManage(ctx, failed) {
-		t.Fatal("template update replay does not require admin:service:manage")
+	if ext, err := h.adminRequiresServiceManage(ctx, failed); err != nil || !ext {
+		t.Fatalf("template update replay does not require admin:service:manage: %v %v", ext, err)
+	}
+	// A missing or malformed id is not an error (billing key applies; Replay then refuses).
+	for _, id := range []string{"00000000-0000-4000-8000-000000000000", "not-a-uuid"} {
+		if ext, err := h.adminRequiresServiceManage(ctx, id); err != nil || ext {
+			t.Fatalf("missing/malformed id %q: %v %v", id, ext, err)
+		}
+	}
+	// A lookup failure fails closed instead of falling back to the billing key.
+	cancelled, stop := context.WithCancel(ctx)
+	stop()
+	if _, err := h.adminRequiresServiceManage(cancelled, failed); err == nil {
+		t.Fatal("lookup error must be returned so replay fails closed")
+	}
+	// ClaimDead never re-acquires a job whose cleanup already finished.
+	if _, err := db.Pool.Exec(ctx, `UPDATE durable_job SET last_error='cleaned_up' WHERE id=$1`, failed); err != nil {
+		t.Fatal(err)
+	}
+	if j, err := jobs.ClaimDead(ctx, failed, time.Minute); err != nil || j != nil {
+		t.Fatalf("cleaned_up job re-claimed: %+v %v", j, err)
 	}
 }
