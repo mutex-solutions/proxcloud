@@ -14,6 +14,16 @@ export function fmtMoney(v: number | string | undefined, currency = "USD"): stri
 }
 
 // Bytes in the largest 1024-step unit that keeps a whole digit: 512 B, 3.4 KB, 1.2 GB.
+export function fmtBytes(n: number): string {
+  const units = ["B", "KB", "MB", "GB", "TB"]
+  let i = 0
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024
+    i++
+  }
+  return `${i === 0 ? n : n.toFixed(1).replace(/\.0$/, "")} ${units[i]}`
+}
+
 // Month-end forecast label: always an estimate (current cost + what the resources running now still
 // accrue at their current rates); "approximate" when the API held part of it at its current cost
 // (a type it could not rate, a usage total, stale metering, or no projection at all).
@@ -40,18 +50,9 @@ export function forecastExplanation(
     } else if (r === "usage") why.push("usage such as traffic is held at its month-to-date total")
     else if (r === "stale") why.push("a provider's metering is stale")
     else if (r === "unavailable") why.push("no projection is available, so it shows the current cost")
+    else if (r === "external_billing") why.push("bills are rated by an external billing service")
   }
   return why.length ? `${base} Approximate: ${why.join("; ")}.` : base
-}
-
-export function fmtBytes(n: number): string {
-  const units = ["B", "KB", "MB", "GB", "TB"]
-  let i = 0
-  while (n >= 1024 && i < units.length - 1) {
-    n /= 1024
-    i++
-  }
-  return `${i === 0 ? n : n.toFixed(1).replace(/\.0$/, "")} ${units[i]}`
 }
 
 // Money without noise: drops the ".00" tail on whole amounts (tier chips,

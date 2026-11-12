@@ -306,9 +306,20 @@ at the time-unit limit and the item cap.
 `forecastApproximate` is true, with `forecastApproximateReasons`, when part of it is held at its
 current cost instead of projected: `unrated` (the rules fail on a resource; its types are in
 `forecastUnratedTypes`), `usage` (a usage total such as traffic, an `OVERWRITE_TOTAL` rule, stays at
-its month-to-date value), `stale` (a provider's metering is stale), `unavailable` (no projection
-could be made: the forecast is the current cost). The admin profile list keeps
-`forecastedMonthEnd` = current, flagged approximate: projecting every row of a list is too costly.
+its month-to-date value), `stale` (a provider's metering is stale; its resources are not billed
+meanwhile and stay at their current cost), `unavailable` (no projection could be made: the
+forecast is the current cost), `external_billing` (`PROXCLOUD_BILLING_PROVIDER=external`: the
+projection uses this repository's price plans, which the external service may not follow). The
+admin profile list keeps `forecastedMonthEnd` = current, flagged approximate: projecting every row
+of a list is too costly.
+
+**Cost of a read.** The resolution runs a charge pass's reads for the profile (projects, cloud
+rows, archived rows, metering, rules), on the primary. The request path goes through
+`billing.CachedForecaster`: the resolved input is cached 60 s per (profile, UTC billing month),
+concurrent requests share one resolution (singleflight), and a resolution is bounded to 3 s,
+detached from the caller's cancellation. A profile with more than 2000 billable resources is not
+resolved. A timeout, the cap, an error or a panic all give `unavailable`, never a failed read.
+Only the resolution is cached: bills are read fresh and the projection uses the request's time.
 
 ### Metering staleness
 

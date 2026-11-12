@@ -5,6 +5,8 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -111,6 +113,21 @@ func TestMonthEndForecastFollowsTheCharge(t *testing.T) {
 		t.Fatalf("forecast wrote: current %s → %s, bills %d", cur, c2, len(after))
 	}
 
+	// Strictly read-only: an ACTIVE profile with no currency (which FindByID backfills) stays blank.
+	if _, err := db.C("billingProfile").SetByID(ctx, profileID, pgdoc.M{}, []string{"currency"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := driver.ForecastInput(ctx, profileID, now); err != nil {
+		t.Fatal(err)
+	}
+	var raw pgdoc.M
+	if found, err := db.C("billingProfile").Get(ctx, profileID, &raw); err != nil || !found {
+		t.Fatalf("reload profile: %v", err)
+	}
+	if c, ok := raw["currency"]; ok && c != "" {
+		t.Fatalf("the forecast wrote the profile's currency: %v", c)
+	}
+
 	// A suspended profile accrues nothing more: forecast == current.
 	if _, err := db.C("billingProfile").SetByID(ctx, profileID, pgdoc.M{"status": billing.StatusSuspended}, nil); err != nil {
 		t.Fatal(err)
@@ -118,5 +135,18 @@ func TestMonthEndForecastFollowsTheCharge(t *testing.T) {
 	f = billing.MonthEndForecast(ctx, driver, profileID, bills, now)
 	if !f.Projected.IsZero() {
 		t.Fatalf("suspended profile projected %s", f.Projected)
+	}
+
+	// Past the resource cap the resolution refuses rather than run unbounded.
+	if _, err := db.C("billingProfile").SetByID(ctx, profileID, pgdoc.M{"status": billing.StatusActive, "currency": "USD"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < billing.ForecastMaxResources; i++ {
+		if _, err := cloudRepo.Insert(ctx, server(fmt.Sprintf("bulk-%d", i), "ACTIVE")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := driver.ForecastInput(ctx, profileID, now); !errors.Is(err, billing.ErrForecastTooLarge) {
+		t.Fatalf("over the cap: err = %v, want ErrForecastTooLarge", err)
 	}
 }

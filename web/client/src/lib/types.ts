@@ -207,7 +207,7 @@ export type CostInfo = {
   forecastedMonthEndCostsByType?: Record<string, number>
   /** True when part of the forecast could not be projected and is held at its current cost. */
   forecastApproximate?: boolean
-  /** Why it is approximate: "unrated" | "usage" | "stale" | "unavailable". */
+  /** Why it is approximate: "unrated" | "usage" | "stale" | "unavailable" | "external_billing". */
   forecastApproximateReasons?: string[]
   /** Billing resource types the price plans could not rate (held at their current cost). */
   forecastUnratedTypes?: string[]

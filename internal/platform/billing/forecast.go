@@ -3,10 +3,15 @@ package billing
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/shopspring/decimal"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/mutex-solutions/proxcloud/internal/platform/pricing"
 )
@@ -46,12 +51,25 @@ const (
 	ForecastUnrated = "unrated"
 	// ForecastUsage: a usage total (traffic) is held at its month-to-date value.
 	ForecastUsage = "usage"
-	// ForecastStale: a provider's metering is stale; the charge job writes that time off until it
-	// recovers, so its resources are projected as if it does.
+	// ForecastStale: a provider's metering is stale; the charge job bills none of its resources and
+	// writes that time off until it recovers, so they are held at their current cost (not projected).
 	ForecastStale = "stale"
-	// ForecastUnavailable: no projection could be made; the forecast is the current cost.
+	// ForecastUnavailable: no projection could be made (resolution failed, timed out, too many
+	// resources, or panicked); the forecast is the current cost.
 	ForecastUnavailable = "unavailable"
+	// ForecastExternalBilling: an external billing service rates the bills
+	// (PROXCLOUD_BILLING_PROVIDER=external); the projection uses this repository's price plans and
+	// engine, which that service may not follow.
+	ForecastExternalBilling = "external_billing"
 )
+
+// ForecastMaxResources caps how many billable resources one forecast resolves; a profile above it
+// gets no projection ("unavailable") rather than an unbounded cost-info request.
+const ForecastMaxResources = 2000
+
+// ErrForecastTooLarge is returned by a Forecaster when the profile has more than
+// ForecastMaxResources billable resources.
+var ErrForecastTooLarge = errors.New("forecast: too many billable resources")
 
 // Forecaster resolves and rates a profile's billable resources the way the charge job does.
 // billingjob.Service implements it.
@@ -91,6 +109,8 @@ type ForecastInput struct {
 	Unrated   []ForecastUnratedResource
 	// Stale is set when a provider the profile uses has stale metering.
 	Stale bool
+	// ExternalBilling is set when an external billing service rates the bills.
+	ExternalBilling bool
 }
 
 // Forecast is a projected month end: the projection (what is still to be added, on top of the
@@ -164,19 +184,148 @@ func (f *Forecast) UnratedTypes(projectID string) []string {
 }
 
 // MonthEndForecast resolves and projects a profile's month end. A nil forecaster gives nil (no
-// projection: the cost info then reports the current cost, approximate). A resolution error keeps
-// every current cost and marks the forecast unavailable.
-func MonthEndForecast(ctx context.Context, fc Forecaster, profileID string, bills []pricing.Bill, now time.Time) *Forecast {
+// projection: the cost info then reports the current cost, approximate). A resolution error
+// (including a timeout or the resource cap) or a panic keeps every current cost and marks the
+// forecast unavailable: a cost-info read never fails because of its forecast.
+func MonthEndForecast(ctx context.Context, fc Forecaster, profileID string, bills []pricing.Bill, now time.Time) (f *Forecast) {
 	if fc == nil || profileID == "" {
 		return nil
 	}
+	unavailable := func() *Forecast {
+		u := newForecast()
+		mark(u.reasons, "", ForecastUnavailable)
+		return u
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("month-end forecast panicked", "billingProfile", profileID, "panic", r)
+			f = unavailable()
+		}
+	}()
 	in, err := fc.ForecastInput(ctx, profileID, now)
 	if err != nil {
-		f := newForecast()
-		mark(f.reasons, "", ForecastUnavailable)
-		return f
+		if !errors.Is(err, ErrForecastTooLarge) {
+			slog.Warn("month-end forecast unavailable", "billingProfile", profileID, "err", err)
+		}
+		return unavailable()
 	}
 	return ProjectMonthEnd(bills, in, now)
+}
+
+// forecastCacheTTL is how long a resolved forecast input is reused for a profile.
+const forecastCacheTTL = 60 * time.Second
+
+// forecastResolveTimeout bounds one resolution, detached from the request so a canceled caller
+// does not fail the resolution every concurrent caller is waiting on.
+const forecastResolveTimeout = 3 * time.Second
+
+// forecastCacheMax bounds the cache; past it, expired entries are swept and, if still full, the
+// new entry is simply not stored.
+const forecastCacheMax = 1024
+
+// CachedForecaster wraps a Forecaster for the request path: a profile's resolved input is cached
+// for forecastCacheTTL per (profile, UTC billing month), concurrent callers share one resolution
+// (singleflight), and a resolution is bounded by forecastResolveTimeout. Only the resolution is
+// cached: ProjectMonthEnd still runs per request on fresh bills and the request's own clock, so
+// the projection moves with time between refreshes. Errors are not cached.
+type CachedForecaster struct {
+	inner Forecaster
+	// external marks every forecast approximate (ForecastExternalBilling).
+	external bool
+	now      func() time.Time
+	ttl      time.Duration
+	timeout  time.Duration
+
+	mu    sync.Mutex
+	cache map[forecastKey]forecastEntry
+	sf    singleflight.Group
+}
+
+type forecastKey struct {
+	profileID string
+	month     time.Time
+}
+
+type forecastEntry struct {
+	in      ForecastInput
+	expires time.Time
+}
+
+// NewCachedForecaster wraps inner. external = an external billing service rates the bills.
+func NewCachedForecaster(inner Forecaster, external bool) *CachedForecaster {
+	return &CachedForecaster{
+		inner: inner, external: external, now: func() time.Time { return time.Now().UTC() },
+		ttl: forecastCacheTTL, timeout: forecastResolveTimeout, cache: map[forecastKey]forecastEntry{},
+	}
+}
+
+// ForecastInput returns the cached input for (profile, the billing month of `now`) or resolves it.
+func (c *CachedForecaster) ForecastInput(ctx context.Context, profileID string, now time.Time) (ForecastInput, error) {
+	month, _ := billingMonth(now)
+	key := forecastKey{profileID, month}
+	if in, ok := c.get(key); ok {
+		return in, nil
+	}
+	v, err, _ := c.sf.Do(profileID+"|"+month.Format(time.RFC3339), func() (any, error) {
+		if in, ok := c.get(key); ok { // filled while this caller waited for the flight
+			return in, nil
+		}
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.timeout)
+		defer cancel()
+		in, err := c.resolve(rctx, profileID, now)
+		if err != nil {
+			return ForecastInput{}, err
+		}
+		in.ExternalBilling = in.ExternalBilling || c.external
+		c.put(key, in)
+		return in, nil
+	})
+	if err != nil {
+		return ForecastInput{}, err
+	}
+	return v.(ForecastInput), nil
+}
+
+// resolve runs the inner resolution, turning a panic into an error so singleflight's waiters get
+// an answer and the caller falls back to "unavailable".
+func (c *CachedForecaster) resolve(ctx context.Context, profileID string, now time.Time) (in ForecastInput, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("forecast resolution panicked: %v", r)
+		}
+	}()
+	in, err = c.inner.ForecastInput(ctx, profileID, now)
+	if err == nil && ctx.Err() != nil {
+		err = ctx.Err() // finished past the deadline: do not cache a possibly partial input
+	}
+	return in, err
+}
+
+func (c *CachedForecaster) get(key forecastKey) (ForecastInput, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.cache[key]
+	if !ok || !c.now().Before(e.expires) {
+		return ForecastInput{}, false
+	}
+	return e.in, true
+}
+
+func (c *CachedForecaster) put(key forecastKey, in ForecastInput) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.now()
+	if len(c.cache) >= forecastCacheMax {
+		for k, e := range c.cache {
+			if !now.Before(e.expires) {
+				delete(c.cache, k)
+			}
+		}
+		if len(c.cache) >= forecastCacheMax {
+			return
+		}
+	}
+	c.cache[key] = forecastEntry{in: in, expires: now.Add(c.ttl)}
 }
 
 // ProjectMonthEnd projects each resource and time unit from its watermark to the end of the current
@@ -233,6 +382,9 @@ func ProjectMonthEnd(bills []pricing.Bill, in ForecastInput, now time.Time) *For
 	}
 	if in.Stale {
 		mark(f.reasons, "", ForecastStale)
+	}
+	if in.ExternalBilling {
+		mark(f.reasons, "", ForecastExternalBilling)
 	}
 	return f
 }

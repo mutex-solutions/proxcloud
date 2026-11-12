@@ -24,7 +24,9 @@ var forecastTimeUnits = []string{pricing.TimeUnitMinute, pricing.TimeUnitHour, p
 //     service and time unit, at `now`.
 //
 // A resource the charge does not bill now (NotEligibleForBilling) is left out; one the rules fail to
-// rate is reported unrated (the charge would fail on it too). Nothing is written.
+// rate is reported unrated (the charge would fail on it too). Nothing is written. More than
+// billing.ForecastMaxResources billable resources → billing.ErrForecastTooLarge. The request path
+// wraps this in billing.CachedForecaster (cache, singleflight, timeout).
 func (s *Service) ForecastInput(ctx context.Context, profileID string, now time.Time) (billing.ForecastInput, error) {
 	in := billing.ForecastInput{}
 	now = now.UTC()
@@ -32,7 +34,8 @@ func (s *Service) ForecastInput(ctx context.Context, profileID string, now time.
 	if err != nil || !enabled {
 		return in, err
 	}
-	profile, err := s.d.Billing.FindByID(ctx, profileID)
+	// Read-only load: FindByID may backfill a blank currency, and a GET must not write.
+	profile, err := s.d.Billing.FindByIDReadOnly(ctx, profileID)
 	if err != nil || profile == nil || profile.Status != billing.StatusActive {
 		return in, err
 	}
@@ -49,7 +52,11 @@ func (s *Service) ForecastInput(ctx context.Context, profileID string, now time.
 	cycleStart, _ := monthBounds(now)
 	planIDs, includePublic := pricePlanConfig(profile)
 	eng := s.d.Engine.At(now)
+	seen := 0
 	for i := range externalServices {
+		if err := ctx.Err(); err != nil {
+			return in, err
+		}
 		es := &externalServices[i]
 		// The hour pass's resolution: the live rows plus those archived this month (a minute or hour
 		// rule still bills their last interval; a month rule skips them, as its pass does, because
@@ -60,6 +67,9 @@ func (s *Service) ForecastInput(ctx context.Context, profileID string, now time.
 		}
 		if len(resources) == 0 {
 			continue
+		}
+		if seen += len(resources); seen > billing.ForecastMaxResources {
+			return billing.ForecastInput{}, billing.ErrForecastTooLarge
 		}
 		rules := map[string][]pricing.PricePlanRule{}
 		for _, tu := range forecastTimeUnits {

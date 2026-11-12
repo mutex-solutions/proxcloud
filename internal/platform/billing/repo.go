@@ -548,6 +548,17 @@ func (r *Repo) FindByID(ctx context.Context, id string) (*BillingProfile, error)
 	return &one[0], nil
 }
 
+// FindByIDReadOnly is FindByID without the currency backfill write: a strictly read-only load for
+// paths that must never write (the month-end forecast on a cost-info GET).
+func (r *Repo) FindByIDReadOnly(ctx context.Context, id string) (*BillingProfile, error) {
+	var bp BillingProfile
+	found, err := r.profiles.Get(ctx, id, &bp)
+	if err != nil || !found {
+		return nil, err
+	}
+	return &bp, nil
+}
+
 // FindByStatus returns every billing profile in the given status —
 // the charge cron loads the ACTIVE profiles.
 func (r *Repo) FindByStatus(ctx context.Context, status string) ([]BillingProfile, error) {
