@@ -96,7 +96,7 @@ var clientCoreTools = []toolDef{
 	},
 	{
 		name:   "get_project_cost",
-		desc:   "Get the project's cost overview: current/last month costs, cost by resource type, top cost generators, balance, due amount and credits.",
+		desc:   "Get the project's cost overview: current/last month costs, cost by resource type, top cost generators, balance, due amount and credits, plus an estimated month-end cost (forecastedMonthEndCosts; forecastApproximate says when part of it is held at its current cost).",
 		method: "GET",
 		path:   "/api/v1/project/{id}/cost-info",
 		params: []param{projectID},

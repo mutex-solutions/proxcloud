@@ -86,6 +86,9 @@ type Handler struct {
 	// pveFlavors is the Proxmox flavor catalog (nil in tests → the surface 503s).
 	pveFlavors *pveflavor.Repo
 	pay        *billing.PayService // bill record-payment (nil → 501)
+	// forecaster projects the profile cost-info month-end forecast (SetForecaster; nil = the
+	// forecast stays the current cost, flagged approximate).
+	forecaster billing.Forecaster
 	// dbaasFor builds the Managed-Database service for a dbaas provider (nil in tests → the
 	// database chart-pin endpoints answer 501).
 	dbaasFor func(es *externalservice.ExternalService) (*dbaas.Service, error)
@@ -116,6 +119,10 @@ func (h *Handler) SetHmacEncryptor(enc *textcrypt.Encryptor) { h.hmacEnc = enc }
 // SetPayService wires the bill PayService (record-payment; carries the bill_is_paid mail +
 // suspension auto-resume hooks set in cmd/api). nil → the endpoint answers 501.
 func (h *Handler) SetPayService(p *billing.PayService) { h.pay = p }
+
+// SetForecaster wires the month-end forecast of the profile cost info (the charge job's resolution
+// and rating, read-only).
+func (h *Handler) SetForecaster(f billing.Forecaster) { h.forecaster = f }
 
 // SetProxmox wires the pve service factory for the cloud-admin live reads.
 func (h *Handler) SetProxmox(f func(es *externalservice.ExternalService) (*pve.Service, error)) {

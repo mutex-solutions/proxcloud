@@ -45,6 +45,9 @@ type Handler struct {
 	// rate a BillingResource against the project's price plans.
 	pricing *pricing.Repo
 	engine  *pricing.Engine
+	// forecaster projects the cost-info month-end forecast (SetForecaster; nil = forecast stays the
+	// current cost, flagged approximate).
+	forecaster billing.Forecaster
 	// metadata reads the admin-configured instanceMetadataOption collection for the create-form
 	// metadata panel.
 	metadata *InstanceMetadataReader

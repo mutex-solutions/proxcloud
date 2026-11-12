@@ -622,6 +622,14 @@ func run() error {
 			cloud.TypeSandboxSnapshot:   billingresource.NewSandboxSnapshotProvider(),
 		},
 	})
+	// Month-end cost forecast on the cost-info reads: the charge job's own resolution and rating,
+	// read-only (billing/forecast.go), cached 60 s per profile with one resolution in flight and a
+	// 3 s bound, so a cost-info request is not a charge pass. Resolution is local under both
+	// billing providers; under the external one the rating may differ, so it is flagged approximate.
+	forecaster := billing.NewCachedForecaster(chargeJob, cfg.Billing.Provider == billingprovider.External)
+	projectH.SetForecaster(forecaster)
+	billingH.SetForecaster(forecaster)
+	adminH.SetForecaster(forecaster)
 	// Client for the standalone billing service. nil when PROXCLOUD_BILLING_URL is unset, which is
 	// fine: every call on it reports ErrNotConfigured, and Validate() already refuses to boot with
 	// remote charging enabled but no URL.

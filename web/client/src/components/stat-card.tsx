@@ -24,6 +24,8 @@ interface StatCardProps {
    * though the arrow points up. Defaults to up=positive / down=negative. */
   trend?: { direction: "up" | "down"; label: string; tone?: "positive" | "negative" | "neutral" }
   hint?: string
+  /** Longer explanation of the hint, shown on hover/focus (native title). */
+  hintTitle?: string
   sparkline?: number[]
   className?: string
 }
@@ -36,6 +38,7 @@ export function StatCard({
   icon: Icon,
   trend,
   hint,
+  hintTitle,
   sparkline,
   className,
 }: StatCardProps) {
@@ -79,7 +82,11 @@ export function StatCard({
               </span>
             )}
             {trend && hint && <span aria-hidden className="text-muted-foreground/60">·</span>}
-            {hint && <span className="text-muted-foreground">{hint}</span>}
+            {hint && (
+              <span className="text-muted-foreground" title={hintTitle}>
+                {hint}
+              </span>
+            )}
           </div>
         )}
       </div>
