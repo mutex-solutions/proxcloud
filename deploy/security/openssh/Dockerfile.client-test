@@ -27,7 +27,7 @@ COPY client-package/openssh-client.deb /tmp/openssh-client.deb
 RUN test "$(dpkg-deb -f /tmp/openssh-client.deb Package)" = openssh-client \
     && test "$(dpkg-deb -f /tmp/openssh-client.deb Version)" = '1:10.0p1-7+deb13u4+proxcloud1' \
     && test "$(dpkg-deb -f /tmp/openssh-client.deb Architecture)" = amd64 \
-    && dpkg -i /tmp/openssh-client.deb \
+    && PATH=/usr/sbin:/usr/bin:/sbin:/bin dpkg -i /tmp/openssh-client.deb \
     && test "$(dpkg-query -W -f='${Version}' openssh-client)" = '1:10.0p1-7+deb13u4+proxcloud1'
 COPY test-client.py /opt/openssh-client-test.py
 USER 1000:1000

@@ -16,6 +16,8 @@ class ControlledBaseSourceTests(unittest.TestCase):
     def setUpClass(cls):
         cls.docker = (ROOT / "deploy/templates/base/Dockerfile.controlled").read_text()
         cls.smoke = (ROOT / "deploy/templates/base/smoke-controlled.py").read_text()
+        cls.gh_source = (ROOT / "deploy/security/gh/Dockerfile").read_text()
+        cls.runtime = cls.docker.split("FROM docker.io/library/python:", 1)[1]
         cls.tree = ast.parse(cls.smoke)
         cls.constants = {node.targets[0].id: ast.literal_eval(node.value)
                          for node in cls.tree.body if isinstance(node, ast.Assign)
@@ -43,7 +45,7 @@ class ControlledBaseSourceTests(unittest.TestCase):
         self.assertIn("apt-get update && apt-get upgrade -y", self.docker)
         self.assertIn("--no-install-recommends", self.docker)
         self.assertEqual(re.findall(r"rm -rf ([^\n]+)", self.docker), ["/var/lib/apt/lists/*"])
-        self.assertNotIn("apk ", self.docker)
+        self.assertNotIn("apk ", self.runtime)
         self.assertNotIn("--ignore", self.docker)
         self.assertIn("NOT feature-equivalent", self.docker)
         self.assertIn("Owner approved splitting inherited image/codec", self.docker)
@@ -51,14 +53,37 @@ class ControlledBaseSourceTests(unittest.TestCase):
     def test_gh_is_patched_upstream_not_a_shadowed_distro_package(self):
         apt = re.search(r"apt-get install -y --no-install-recommends(.*?)&& rm", self.docker, re.S).group(1)
         self.assertNotIn("gh", apt.replace("\\\n", " ").split())
-        self.assertIn("COPY base/install-gh.sh /usr/local/sbin/proxcloud-install-gh", self.docker)
-        self.assertIn("RUN /bin/sh /usr/local/sbin/proxcloud-install-gh", self.docker)
-        installer = (ROOT / "deploy/templates/base/install-gh.sh").read_text()
-        self.assertIn("4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d", installer)
-        self.assertLess(installer.index("sha256sum --check --strict -"), installer.index("tar -xOzf"))
-        self.assertIn("[ ! -e /usr/bin/gh ]", installer)
-        self.assertIn("install -m 0755", installer)
-        self.assertIn('startswith("gh version 2.103.3 ")', self.smoke)
+        self.assertNotIn("COPY base/install-gh.sh", self.docker)
+        self.assertNotIn("proxcloud-install-gh", self.docker)
+        self.assertEqual(re.findall(r"^COPY --from=gh-builder (.+)$", self.runtime, re.M),
+                         ["/out/gh /usr/local/bin/gh",
+                          "/out/LICENSE /usr/local/share/doc/gh/LICENSE"])
+        self.assertIn('.split()[:3] == ["gh", "version", "2.103.3+proxcloud1"]', self.smoke)
+        self.assertIn("CVE-2026-48501 vendor fix", self.runtime)
+        self.assertIn("integrated runtime scan still required", self.runtime)
+
+    def test_gh_builder_reuses_reviewed_source_stage_without_drift(self):
+        source_stage = self.gh_source.split("FROM golang:", 1)[1].split("# Export only:", 1)[0].strip()
+        controlled_stage = self.docker.split("FROM golang:", 1)[1].split(
+            "FROM docker.io/library/python:", 1)[0].strip()
+        self.assertEqual(controlled_stage, source_stage.replace(" AS builder\n", " AS gh-builder\n", 1))
+        self.assertEqual(re.findall(r"^FROM (.+)$", self.docker, re.M)[1],
+                         "golang:1.27.4-alpine AS gh-builder")
+        self.assertTrue(re.findall(r"^FROM (.+)$", self.docker, re.M)[0].endswith(" AS node-toolchain"))
+        for gate in ("GOTOOLCHAIN=local", "CGO_ENABLED=0",
+                     "git clone --no-checkout https://github.com/cli/cli.git cli",
+                     "git checkout --detach 63837fb778d6a39f02be0ce76ff89f2bc8d74bdc",
+                     'test "$(git rev-parse HEAD)" = 63837fb778d6a39f02be0ce76ff89f2bc8d74bdc',
+                     "db11ba3547fe6420c763b5fb208bb5e41a44598895f94481be01ea967fc421e2 go.mod",
+                     "sha256sum -c -", "= v0.60.0;", "= v0.62.0;",
+                     "go mod edit -require=golang.org/x/net@v0.62.0", "go mod tidy;",
+                     "go mod verify > /out/module-verification.txt",
+                     "go test -mod=readonly ./internal/build ./internal/ghrepo golang.org/x/net/html",
+                     "go build -mod=readonly -trimpath -buildvcs=false",
+                     "build.Version=2.103.3+proxcloud1", "go version -m /out/gh",
+                     '$2 == "golang.org/x/net" && $3 == "v0.62.0"',
+                     "cp LICENSE /out/LICENSE", "SOURCE_BUILD_NOTICE.txt > SHA256SUMS"):
+            self.assertIn(gate, controlled_stage)
 
     def test_selective_donor_and_bootstrap_links_precede_npm(self):
         copies = re.findall(r"^COPY --from=node-toolchain (.+)$", self.docker, re.M)

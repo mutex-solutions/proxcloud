@@ -72,7 +72,7 @@ def main():
     js = 'for(const m of ["fs","http","crypto"]) require(m); console.log(JSON.stringify({ok:true,node:process.version}));'
     assert json.loads(run(["node", "-e", js])) == {"ok": True, "node": "v22.23.5"}
     assert run(["git", "--version"]).startswith("git version ")
-    assert run(["gh", "--version"]).splitlines()[0].startswith("gh version 2.103.3 ")
+    assert run(["gh", "--version"]).splitlines()[0].split()[:3] == ["gh", "version", "2.103.3+proxcloud1"]
     run(["ssh", "-V"])
     user = pwd.getpwnam("user")
     assert user.pw_uid == 1000 and user.pw_dir == "/home/user" and user.pw_shell == "/bin/bash"

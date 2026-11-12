@@ -45,7 +45,7 @@ class SSHClientRegressionSourceTests(unittest.TestCase):
         self.assertIn('&& /usr/sbin/useradd ', self.instructions)
         self.assertIn('useradd --uid 1000 --create-home --shell /bin/sh --password NP testclient',
                       self.instructions)
-        self.assertIn('dpkg -i /tmp/openssh-client.deb', self.instructions)
+        self.assertIn('PATH=/usr/sbin:/usr/bin:/sbin:/bin dpkg -i /tmp/openssh-client.deb', self.instructions)
         self.assertIn('dpkg-deb -f /tmp/openssh-client.deb Package', self.instructions)
         self.assertIn('dpkg-deb -f /tmp/openssh-client.deb Architecture', self.instructions)
         self.assertEqual(self.instructions.count("'" + VERSION + "'"), 2)

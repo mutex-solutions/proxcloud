@@ -47,6 +47,22 @@ apt-get install -y --no-install-recommends \
     autoconf gettext flex dejagnu expect tcl libcmocka-dev liblmdb-dev \
     libldap2-dev libsasl2-dev libkeyutils-dev
 mkdir /build /staging /out
+# BuildKit discards failed-layer files: expose bounded fixed diagnostics in its
+# retained outer log without suppressing the original failure or skipping tests.
+report_failure() {
+    status=$?
+    trap - EXIT
+    if [ "$status" -ne 0 ]; then
+        for log in /out/configure.log /out/build.log /out/check.log /out/install.log; do
+            if [ -f "$log" ]; then
+                printf '\n--- failed stage diagnostic: %s ---\n' "$log" >&2
+                tail -c 24576 "$log" >&2
+            fi
+        done
+    fi
+    exit "$status"
+}
+trap report_failure EXIT
 cd /build
 # Official HTTPS listing and release independently read 2026-11-12. These are
 # observed content hashes, NOT vendor-published checksum/signature verification.
