@@ -18,7 +18,7 @@ import time
 # Source-owned allowlist, transcribed from the PR209 remaining-base inventory.
 # Never load refs, target paths or commands from a downloaded/user-supplied JSON.
 TARGETS = (
-    ("go-builder", "docker.io/library/golang:1.27.4-bookworm", "builder", ("deploy/Dockerfile:6", "deploy/sandbox-proxy.Dockerfile:5", "deploy/sandbox-import.Dockerfile:4", "deploy/sandbox-runtime.Dockerfile:6,14", "deploy/templates/mcp-gateway/Dockerfile:9")),
+    ("go-builder", "docker.io/library/golang:1.27.4-alpine", "builder", ("deploy/Dockerfile:6", "deploy/sandbox-proxy.Dockerfile:5", "deploy/sandbox-import.Dockerfile:4", "deploy/sandbox-runtime.Dockerfile:6,14", "deploy/templates/mcp-gateway/Dockerfile:9")),
     ("web-builder", "docker.io/library/node:24.22.2-alpine", "builder", ("web/Dockerfile:2; APP=client|admin",)),
     ("web-runtime", "docker.io/library/nginx:1.30.6-alpine", "upstream runtime", ("web/Dockerfile:10; APP=client|admin",)),
     ("alpine-runtime-donor", "docker.io/library/alpine:3.24.4", "upstream runtime/donor", ("deploy/Dockerfile:19", "deploy/sandbox-runtime.Dockerfile:26")),
@@ -29,7 +29,7 @@ TARGETS = (
     ("template-node", "docker.io/library/node@sha256:6b9d4ea31e614e29f364bf75758458731eb1e105b80c99667438dd6b3fe262e0", "upstream runtime", ("deploy/templates/node/Dockerfile:2",)),
     ("template-desktop-ubuntu", "docker.io/library/ubuntu@sha256:8a2321a92b438238f93b4346fff61bc4259c99fdd4d9b52ee86f153fee0c344f", "upstream runtime", ("deploy/templates/desktop/Dockerfile:5",)),
     ("template-playwright-python", "mcr.microsoft.com/playwright/python@sha256:7d030ac0638b279ecc72493f8b6706fecef80a893679a23b02f912905c4915c0", "upstream runtime", ("deploy/templates/browser/Dockerfile:4",)),
-    ("mcp-node-donor", "docker.io/library/node:22-bookworm-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8e0a1418f033e13d96d", "binary donor (not shipped donor OS)", ("deploy/templates/mcp-gateway/Dockerfile:18,22; /usr/local/bin/node",)),
+    ("mcp-node-donor", "docker.io/library/node:22-bookworm-slim@sha256:47725aca53d3295ec2d3be8f62726599b3033cc262edc2c7e429909b3ac599fc", "binary/npm donor (not shipped donor OS)", ("deploy/templates/base/Dockerfile node-toolchain; canonical node/npm", "deploy/templates/mcp-gateway/Dockerfile node; /opt/mcp/node/bin/node")),
     ("external-python", "docker.io/library/python:3.12-slim@sha256:05a994d2344eb364cc186910f4fc8786a38215f39f00d0acc25bff33a08f4177", "external runtime (not PR rebuild)", ("deploy/templates/images.yaml:9",)),
 )
 BUDGET = 5100

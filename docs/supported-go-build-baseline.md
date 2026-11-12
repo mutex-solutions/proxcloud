@@ -10,13 +10,20 @@ series rather than retaining 1.26.11. Support follows the
 [Go release policy](https://go.dev/doc/devel/release#policy); this selection does
 not authorize automatically moving to a later release candidate or compiler.
 
-This source-only change pins all six Go builder stages in five Dockerfiles to
-`1.27.4-bookworm`, preserving existing registry prefixes. The
+This compiler policy pins all six Go builder stages in five Dockerfiles to
+`1.27.4-alpine`, preserving existing registry prefixes. The
 [test workflow](../.github/workflows/test.yml) selects exact `go-version: '1.27.4'`.
 These are exact version tags, **not digest pins**: registry tag existence, image
 platforms, digests and OS package contents still require separate verification.
 No unverified digest is introduced. The pins select a validation target; they do
 not establish that the target has passed compatibility tests or produced images.
+
+All seven Go output files are built with `CGO_ENABLED=0`, so the builder OS is
+not copied into their runtime images. The Alpine builder minimizes inherited
+OS tooling and preserves the exact Go compiler version; the external envd stage
+installs Git and CA certificates explicitly for its pinned clone. All six stage
+assertions stay enabled. Actual Alpine builds, static payloads and fresh base/final
+image scans must pass; this is not a waiver for builder vulnerabilities.
 
 The [root module](../go.mod) intentionally raises its minimum to **`go 1.26.0`**.
 The updated dependency graph selects **`golang.org/x/crypto v0.58.0`**, which
@@ -39,12 +46,12 @@ rolled out; none of those results is implied here.
 
 | Dockerfile / stage | Selected builder | Output / source |
 |---|---|---|
-| [API](../deploy/Dockerfile), `build` | `golang:1.27.4-bookworm` | `proxcloud-api` / `./cmd/api` |
-| [Sandbox proxy](../deploy/sandbox-proxy.Dockerfile), `build` | `golang:1.27.4-bookworm` | `sandbox-proxy` / `./cmd/sandbox-proxy` |
-| [Sandbox importer](../deploy/sandbox-import.Dockerfile), `build` | `golang:1.27.4-bookworm` | `sandbox-import` / `./cmd/sandbox-import` |
-| [Sandbox runtime](../deploy/sandbox-runtime.Dockerfile), `init` | `golang:1.27.4-bookworm` | `sandbox-init` **and** `sandbox-netguard` / their root-module command packages |
-| [MCP gateway](../deploy/templates/mcp-gateway/Dockerfile), `gateway` | `docker.io/library/golang:1.27.4-bookworm` | `mcp-gateway` / `./cmd/mcp-gateway` |
-| [Sandbox runtime](../deploy/sandbox-runtime.Dockerfile), `envd` | `golang:1.27.4-bookworm` | External `envd` / pinned upstream `packages/envd` |
+| [API](../deploy/Dockerfile), `build` | `golang:1.27.4-alpine` | `proxcloud-api` / `./cmd/api` |
+| [Sandbox proxy](../deploy/sandbox-proxy.Dockerfile), `build` | `golang:1.27.4-alpine` | `sandbox-proxy` / `./cmd/sandbox-proxy` |
+| [Sandbox importer](../deploy/sandbox-import.Dockerfile), `build` | `golang:1.27.4-alpine` | `sandbox-import` / `./cmd/sandbox-import` |
+| [Sandbox runtime](../deploy/sandbox-runtime.Dockerfile), `init` | `golang:1.27.4-alpine` | `sandbox-init` **and** `sandbox-netguard` / their root-module command packages |
+| [MCP gateway](../deploy/templates/mcp-gateway/Dockerfile), `gateway` | `docker.io/library/golang:1.27.4-alpine` | `mcp-gateway` / `./cmd/mcp-gateway` |
+| [Sandbox runtime](../deploy/sandbox-runtime.Dockerfile), `envd` | `golang:1.27.4-alpine` | External `envd` / pinned upstream `packages/envd` |
 
 There are **six root-module binaries** (API, proxy, importer, init, netguard and MCP
 gateway), plus **external envd**, for **seven outputs**. Stages, Dockerfiles and
@@ -98,10 +105,9 @@ must not be reported as seven-output Go coverage.
 
 ## Validation gates and evidence limits
 
-**No command, build, test, download, installation, publication or deployment was
-performed while making this source-only change.** The static tests are updated,
-not reported as executed. Parent-owned validation must record its actual results
-separately; source inspection and selected pins are not a tested-support claim.
+This document records source policy only. Actual validation results are recorded
+separately and are not claimed here; source inspection and selected pins are not
+a tested-support or deployment claim.
 
 Before reporting compiler validation complete:
 

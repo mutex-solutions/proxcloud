@@ -47,7 +47,7 @@ class APIRuntimeContractTests(unittest.TestCase):
 
     def test_static_go_builder_and_source_boundary_are_unchanged(self):
         self.assertEqual(self.build, [
-            ("FROM", "golang:1.27.4-bookworm AS build"),
+            ("FROM", "golang:1.27.4-alpine AS build"),
             ("WORKDIR", "/src"),
             ("COPY", "go.mod go.sum ./"),
             ("RUN", "go mod download"),

@@ -2,7 +2,7 @@
 # proxcloud-sandbox-proxy: routes https://<port>-<sandboxID>.<domain> to sandbox pods (sandbox cluster, sandbox-system),
 # and its cert-sync mode copies the wildcard certificate from the services cluster (docs/managed-sandbox.md §4).
 
-FROM golang:1.27.4-bookworm AS build
+FROM golang:1.27.4-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

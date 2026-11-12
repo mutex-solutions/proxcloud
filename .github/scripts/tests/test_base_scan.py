@@ -36,7 +36,7 @@ class BaseTests(unittest.TestCase):
         self.assertEqual(len({x[0] for x in SCAN.TARGETS}), 13)
         self.assertEqual(len({x[1] for x in SCAN.TARGETS}), 13)
         refs = dict((x[0], x[1]) for x in SCAN.TARGETS)
-        self.assertEqual(refs["go-builder"], "docker.io/library/golang:1.27.4-bookworm")
+        self.assertEqual(refs["go-builder"], "docker.io/library/golang:1.27.4-alpine")
         self.assertEqual(refs["external-python"], "docker.io/library/python:3.12-slim@sha256:05a994d2344eb364cc186910f4fc8786a38215f39f00d0acc25bff33a08f4177")
         self.assertEqual(sum("@sha256:" in x for x in refs.values()), 7)
         for name, ref, role, scopes in SCAN.TARGETS:

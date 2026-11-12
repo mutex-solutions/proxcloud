@@ -3,7 +3,7 @@
 # bash and PostgreSQL 18's `psql` CLI so the config-as-code seed (deploy/seed)
 # can run from this pod against PROXCLOUD_DB_URL, alongside the static Go binary.
 
-FROM golang:1.27.4-bookworm AS build
+FROM golang:1.27.4-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

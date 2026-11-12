@@ -43,7 +43,7 @@ func TestSupportedGoVersionPolicy(t *testing.T) {
 // any binary, inspect artifact provenance, or cover the external envd module.
 func TestSupportedGoBuildBaseline(t *testing.T) {
 	root := goBuildBaselineRoot(t)
-	image := "golang:" + supportedGoBuildVersion + "-bookworm"
+	image := "golang:" + supportedGoBuildVersion + "-alpine"
 	builders := []struct {
 		path   string
 		stages map[string]string

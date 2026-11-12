@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Trusted no-build OCI importer. Operator must pin the resulting digest in
 # sandbox-system/sandbox-import-worker; this file does not enable or publish it.
-FROM golang:1.27.4-bookworm AS build
+FROM golang:1.27.4-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

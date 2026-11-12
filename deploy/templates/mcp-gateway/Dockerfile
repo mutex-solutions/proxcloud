@@ -6,16 +6,16 @@
 # config, which never reaches the portal's database or logs.
 ARG BASE
 
-FROM docker.io/library/golang:1.27.4-bookworm AS gateway
+FROM docker.io/library/golang:1.27.4-alpine AS gateway
 WORKDIR /src
 COPY --from=src go.mod go.sum ./
 RUN go mod download
 COPY --from=src cmd/mcp-gateway ./cmd/mcp-gateway
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/mcp-gateway ./cmd/mcp-gateway
 
-# The servers' own Node: the base image's Node 20.9 cannot run brave, firecrawl and mongodb (import attributes,
-# process.loadEnvFile). Same Debian release as the base; the sandbox user's node stays the base's.
-FROM docker.io/library/node:22-bookworm-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8e0a1418f033e13d96d AS node
+# The servers' own Node uses the same maintained Node 22 donor as the base.
+# Keep its separate path so MCP server process requirements remain explicit.
+FROM docker.io/library/node:22-bookworm-slim@sha256:47725aca53d3295ec2d3be8f62726599b3033cc262edc2c7e429909b3ac599fc AS node
 
 FROM ${BASE}
 USER root
