@@ -43,7 +43,7 @@ SOURCES
 apt-get update
 apt-get install -y --no-install-recommends \
     ca-certificates debian-archive-keyring python3 gnupg gpgv \
-    gcc make pkg-config libc6-dev binutils libssl-dev bison byacc \
+    gcc g++ make pkg-config libc6-dev binutils libssl-dev bison byacc \
     autoconf gettext flex dejagnu expect tcl libcmocka-dev liblmdb-dev \
     libldap2-dev libsasl2-dev libkeyutils-dev
 mkdir /build /staging /out

@@ -53,7 +53,7 @@ class Krb5SourceTests(unittest.TestCase):
 
     def test_signed_apt_full_tests_and_no_failure_waiver(self):
         self.assertIn('Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg', self.script)
-        for package in ('gcc', 'make', 'pkg-config', 'libssl-dev', 'bison', 'byacc',
+        for package in ('gcc', 'g++', 'make', 'pkg-config', 'libssl-dev', 'bison', 'byacc',
                         'autoconf', 'gettext', 'flex', 'libcmocka-dev', 'liblmdb-dev'):
             self.assertIn(package, self.script)
         self.assertIn('make check > /out/check.log 2>&1', self.script)
