@@ -41,6 +41,7 @@ type BulkRun = {
   requestedBy: string
   status: string
   planned: boolean
+  itemsPruned?: boolean
   cancelRequested?: boolean
   cancelledBy?: string
   code?: string
@@ -68,6 +69,7 @@ const CODE_TEXT: Record<string, string> = {
   timeout: "The provider did not answer in time",
   provider_missing: "The provider was deleted",
   provider_disabled: "The provider was disabled",
+  provider_unsupported: "This API cannot attach projects to this provider",
   attempts_exhausted: "Interrupted too many times",
   cancelled: "Cancelled before it was attached",
   lease_expired: "The job stopped responding",
@@ -109,7 +111,9 @@ function scopeText(s: Scope): string {
 export function ProviderProjectsTab({ id, provider }: { id: string; provider: CloudProvider }) {
   const qc = useQueryClient()
   const { data: me } = useAdminMe()
+  // Starting or retrying attaches the provider to projects: it needs the provider key and the project update key.
   const canManage = hasPermission(me?.permissions, "admin:service:manage")
+  const canStart = canManage && hasPermission(me?.permissions, "admin:project:update")
   const base = `/admin/service/${id}/bulk-attach`
   const runs = useQuery({
     queryKey: ["bulk-attach", id],
@@ -192,12 +196,12 @@ export function ProviderProjectsTab({ id, provider }: { id: string; provider: Cl
           <div className="grid gap-1.5">
             <CardTitle className="text-eyebrow">Attach to existing projects</CardTitle>
             <CardDescription>
-              Attaches this provider to projects that already exist, in the background. Projects already attached are
-              skipped, and so are projects scheduled for deletion or being deleted. Suspended (disabled) projects are
-              attached and stay suspended.
+              Attaches this provider to projects that already exist, in the background (at most 5000 per run). Projects
+              already attached are skipped, and so are projects scheduled for deletion or being deleted. Suspended
+              (disabled) projects are attached and stay suspended.
             </CardDescription>
           </div>
-          {canManage ? (
+          {canStart ? (
             <Button onClick={() => setDialog(true)} disabled={!!active || disabled}>
               Attach to existing projects
             </Button>
@@ -220,6 +224,7 @@ export function ProviderProjectsTab({ id, provider }: { id: string; provider: Cl
               serviceId={id}
               run={current}
               canManage={canManage}
+              canStart={canStart}
               onCancel={() => cancel.mutate(current.id)}
               cancelling={cancel.isPending}
               onRetry={() => retry.mutate(current.id)}
@@ -283,11 +288,12 @@ export function ProviderProjectsTab({ id, provider }: { id: string; provider: Cl
 }
 
 function RunCard({
-  serviceId, run, canManage, onCancel, cancelling, onRetry, retrying,
+  serviceId, run, canManage, canStart, onCancel, cancelling, onRetry, retrying,
 }: {
   serviceId: string
   run: BulkRun
   canManage: boolean
+  canStart: boolean
   onCancel: () => void
   cancelling: boolean
   onRetry: () => void
@@ -297,7 +303,8 @@ function RunCard({
   const done = c.attached + c.skipped + c.failed + c.cancelled
   const pct = c.total > 0 ? Math.round((done * 100) / c.total) : TERMINAL.has(run.status) ? 100 : 0
   const finished = TERMINAL.has(run.status)
-  const failedProjects = c.failed > 0 || (run.status === "failed" && (c.pending > 0 || c.running > 0))
+  // A run that died (or ended on its provider) can leave projects not done: retrying covers those too.
+  const failedProjects = c.failed > 0 || (run.status === "failed" && (c.pending > 0 || c.running > 0 || !run.planned))
   return (
     <div className="space-y-3 rounded-lg border p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -314,7 +321,7 @@ function RunCard({
               Cancel
             </Button>
           ) : null}
-          {canManage && finished && failedProjects ? (
+          {canStart && finished && failedProjects && !run.itemsPruned ? (
             <Button size="sm" onClick={onRetry} disabled={retrying}>
               Retry failed projects
             </Button>
@@ -329,7 +336,9 @@ function RunCard({
           <div className="h-full bg-primary transition-all" style={{ width: `${pct}%` }} />
         </div>
         <p className="mt-1 text-xs text-muted-foreground">
-          {run.planned || finished ? `${done} of ${c.total} projects processed` : "Listing the projects in scope…"}
+          {run.planned || finished
+            ? `${done} of ${c.total} projects processed`
+            : `Listing the projects in scope… ${c.total} so far, ${done} processed`}
         </p>
       </div>
       <div className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-5">
@@ -339,7 +348,13 @@ function RunCard({
         <Stat label="Left" value={c.pending + c.running} />
         <Stat label="Cancelled" value={c.cancelled} />
       </div>
-      {c.failed > 0 ? <FailedList serviceId={serviceId} runId={run.id} live={!finished} /> : null}
+      {run.itemsPruned ? (
+        <p className="text-xs text-muted-foreground">
+          This run finished more than 30 days ago: its per-project results were removed, the counts are kept.
+        </p>
+      ) : c.failed > 0 ? (
+        <FailedList serviceId={serviceId} runId={run.id} live={!finished} />
+      ) : null}
     </div>
   )
 }

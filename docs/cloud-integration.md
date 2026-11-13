@@ -516,7 +516,19 @@ provider, which calls `POST /admin/project/{id}/external-service/{esid}`; a
 idempotent: a service the project already carries is not provisioned again and
 gets no second binding. It refuses a project scheduled for deletion, being torn
 down or deleted (`400`); a DISABLED project (billing hold or operator) is
-attached and keeps its status.
+attached and keeps its status. One attach runs for at most 2 minutes, past the
+request (it may create things on the provider).
+
+Bindings are written one way only: `Repo.AppendBinding` appends the binding in
+one statement, and only when no binding of that service is there yet. A save
+of the rest of the project (rename, member change, activation) does not write
+`services` or `provisionFailures`, so it cannot drop a binding added meanwhile.
+The operator attaches and the provisioning part of `enableAndBootstrap` run
+under a per-project PostgreSQL advisory lock (`project-attach:<id>`), on a
+fresh read. The binding write checks, on the lock's own session, that the lock
+is still held, and refuses to write otherwise. An open of an already
+bootstrapped project takes the lock only when a recorded provisioning failure
+is due for its retry.
 
 #### Attach policy for new projects
 
@@ -531,9 +543,12 @@ default (#215).
 
 Set it on the provider's **Projects** tab, or with
 `PUT /api/v1/admin/service/{id}/attach-policy` `{"attachToNewProjects": false}`
-(`admin:service:manage`). That PUT sets only this key; every other config key
-is kept. The connection save (`PUT /admin/service/{id}`) and the create also
-accept the key and refuse anything but `true`/`false`.
+(`admin:service:manage`). That PUT is a single-key write in the database
+(`jsonb_set` of `config.attachToNewProjects`), not a read-modify-replace of the
+provider. A connection save landing at the same time is not reverted, and the
+connection and go-live checks (object store, sandbox) do not apply to it. The
+connection save (`PUT /admin/service/{id}`) and the create also accept the key
+and refuse anything but `true`/`false`.
 
 #### Attaching a provider to existing projects
 
@@ -547,16 +562,20 @@ counts, the failed projects with their reason, *Cancel* and
 | Method | Path (`/api/v1/admin/service/{id}/…`) | Permission |
 |---|---|---|
 | GET | `bulk-attach` (runs, newest first, and the active one) | `admin:service:read` |
-| GET | `bulk-attach/candidates?kind=projects\|organizations&search=` | `admin:service:read` |
-| POST | `bulk-attach/preview` `{scope}` | `admin:service:read` |
-| POST | `bulk-attach` `{scope, concurrency}` | `admin:service:manage` |
+| GET | `bulk-attach/candidates?kind=projects\|organizations&search=` | `admin:service:read` + `admin:project:read` |
+| POST | `bulk-attach/preview` `{scope}` | `admin:service:read` + `admin:project:read` |
+| POST | `bulk-attach` `{scope, concurrency}` | `admin:service:manage` + `admin:project:update` |
 | GET | `bulk-attach/{runId}`, `bulk-attach/{runId}/items?state=failed` | `admin:service:read` |
 | POST | `bulk-attach/{runId}/cancel` | `admin:service:manage` |
-| POST | `bulk-attach/{runId}/retry` `[{concurrency}]` | `admin:service:manage` |
+| POST | `bulk-attach/{runId}/retry` `[{concurrency}]` | `admin:service:manage` + `admin:project:update` |
 
 `scope` is `{"mode":"all"}`, `{"mode":"organizations","organizationIds":[…]}`
 or `{"mode":"projects","projectIds":[…]}` (at most 2000 ids; unknown ids are a
 `400`). `concurrency` is 1–4, default 2. A DISABLED provider is refused (`409`).
+So is a provider this API cannot attach projects to: an unknown kind, or one
+whose client is not wired (`400`). One run attaches at most 5000 projects,
+counted at the start without those already attached. A larger scope is refused
+(`400`); split it by organizations or picked projects.
 
 How it runs (`internal/providerattach`):
 
@@ -567,13 +586,22 @@ How it runs (`internal/providerattach`):
   and refuses (`409`) while an earlier run's job is pending or running. The job
   key is `<provider>#<sequence>`. Runs for different providers are independent.
 - A runner in every API replica claims the job (the `durable_job` lease,
-  renewed while it works). It first lists the scoped projects into per-project
-  items (`providerAttachItem`) once. Projects already attached are recorded
-  `skipped/already_attached` and projects on their way out
-  `skipped/deleting`. It then attaches the pending items with the run's
-  concurrency, each through `project.Handler.AttachByOperator`, the same path
-  as the per-project POST. That path runs under a per-project advisory lock, on
-  a fresh read, with no provider call when the project is already attached.
+  renewed while it works). It plans the scoped projects in batches of 500, in
+  id order. Each batch is one fenced transaction that advances a cursor on the
+  run, so planning of any size resumes where it stopped. Projects already
+  attached get no item, only a count on the run (`planSkipped`, shown as
+  skipped/already attached). Projects on their way out or gone get an item
+  `skipped/deleting` or `skipped/not_found`. The rest are pending items
+  (`providerAttachItem`).
+- It attaches the pending items with the run's concurrency, each through
+  `project.Handler.AttachByOperator`, the same path as the per-project POST.
+  That path runs under the per-project lock, on a fresh read, with no provider
+  call when the project is already attached. The provider is re-read for every
+  project, so a credential rotation applies to the next project. A provider
+  deleted, disabled or no longer attachable mid-run ends the run (`failed`):
+  every project not done yet fails `provider_missing`, `provider_disabled` or
+  `provider_unsupported`, and *Retry failed projects* picks them up once the
+  provider is back.
 - **Fenced and resumable.** Taking an item (`running`, attempt+1) and
   recording its result are each committed with `durablejobs.Store.Checkpoint`.
   An acquisition that lost its lease writes nothing more. The next acquisition
@@ -584,18 +612,24 @@ How it runs (`internal/providerattach`):
   bulk attach job is not replayed from the durable-jobs replay endpoint (`409`).
 - **Fixed codes only.** An item ends `attached`, `skipped` (`already_attached`,
   `deleting`, `not_found`), `failed` (`provider_error`, `timeout`,
-  `provider_missing`, `provider_disabled`, `attempts_exhausted`) or
-  `cancelled`. The provider's error text is never stored or returned: it is
+  `provider_missing`, `provider_disabled`, `provider_unsupported`,
+  `attempts_exhausted`) or `cancelled`. The provider's error text is never stored or returned: it is
   logged with the project id only, and the project's own provision failure is
   not touched.
 - **Cancel** stops taking new items. Items in flight finish, the rest become
-  `cancelled`, and nothing is detached. **Retry failed projects** starts a new
-  run over the failed items of a finished run.
+  `cancelled`, and nothing is detached. A cancel that arrives once every
+  project is done changes nothing: the run stays completed. **Retry failed
+  projects** starts a new run over the failed items of a finished run.
+- **Retention.** The per-project items of a run finished more than 30 days ago
+  are removed by the runner's idle pass. The run keeps its counts and is marked
+  `itemsPruned`; it can no longer be retried (start a new run instead).
 - **Before the first bootstrap.** A project that was never opened (for example
-  one waiting on billing) is attached too. Its binding is marked
-  `attachedBy: "bulk"` and does not count as the first bootstrap. When the
-  project is first opened it still gets every provider whose policy is on, and
-  the mark is dropped.
+  one waiting on billing) is attached too, by the bulk attach or the
+  per-project POST. Its binding is marked `attachedBy: "operator"` in the same
+  statement that appends it, so no failure can leave an unmarked binding. A
+  marked binding does not count as the first bootstrap. When the project is
+  first opened it still gets every provider whose policy is on, and the marks
+  are dropped, also when there is no such provider.
 - **Audit.** Start, cancel and retry each write an admin audit event
   `BULK_ATTACH` on the provider (`EXTERNAL_SERVICE`). It carries the actor, the
   run and job ids, the scope (mode, ids, up to 50 listed, and their count), the
