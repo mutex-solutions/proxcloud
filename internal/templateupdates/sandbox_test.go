@@ -415,6 +415,39 @@ func TestSandboxMirrorSourceSecretNeverHoldsThePAT(t *testing.T) {
 	}
 }
 
+// A worker that fails (e.g. its short-lived anonymous token expired during a slow copy) is a retryable failure with the
+// fixed mirror_worker_failed code, never permanent; the next acquisition mints a FRESH token for its new pod.
+func TestSandboxMirrorWorkerFailureIsRetryableWithFreshToken(t *testing.T) {
+	p := sbxPayload()
+	r, jobs, cl, _, mem := sbxFixture(t, p)
+	cl.finish = "Failed"
+	minted := 0
+	b := r.Build
+	r.Build = func(ctx context.Context, q SandboxPayload) (*SandboxExecutor, error) {
+		x, err := b(ctx, q)
+		x.SourceToken = func(context.Context, string) (string, error) {
+			minted++
+			return realGHCRToken + strings.Repeat("A", minted), nil
+		}
+		return x, err
+	}
+	_, _ = r.RunOnce(context.Background())
+	rec := mem.recs[sbxJob]
+	if jobs.permanent || jobs.failCode != "retryable" || rec.Step == SbxFailed || len(cl.pods) != 0 {
+		t.Fatalf("failed worker: permanent=%v code=%q step=%s pods=%v", jobs.permanent, jobs.failCode, rec.Step, cl.pods)
+	}
+	if len(rec.Warnings) == 0 || !strings.HasPrefix(rec.Warnings[0], "mirror_worker_failed") {
+		t.Fatalf("fixed code not recorded: %v", rec.Warnings)
+	}
+	// The next attempt (new epoch) mints a new token and its pod succeeds.
+	cl.finish = ""
+	jobs.claimed, jobs.job.Epoch, jobs.job.Attempts = false, 2, 2
+	_, _ = r.RunOnce(context.Background())
+	if minted != 2 || len(cl.started) != 2 || cl.started[0].SourceToken == cl.started[1].SourceToken || mem.recs[sbxJob].Step != SbxSucceeded {
+		t.Fatalf("retry: minted=%d started=%d step=%s", minted, len(cl.started), mem.recs[sbxJob].Step)
+	}
+}
+
 // Losing the lease at any fence check stops the executor before its next cluster effect.
 func TestSandboxMirrorFencedAtEveryStep(t *testing.T) {
 	p := sbxPayload()

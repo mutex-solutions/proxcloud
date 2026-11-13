@@ -50,6 +50,12 @@ var ErrRegistryNotFound = errors.New("registry: manifest not found")
 // ErrRegistryRefused is a registry refusal of the mirror account (401/403).
 var ErrRegistryRefused = errors.New("registry: the mirror account was refused")
 
+// ErrMirrorWorkerFailed (fixed code mirror_worker_failed) is a worker pod that ended Failed — e.g. its short-lived
+// anonymous GHCR token expired during a slow copy. Retryable: the next attempt mints a fresh token for a new pod.
+var ErrMirrorWorkerFailed = errors.New("mirror_worker_failed: the mirror worker failed; the next attempt uses a fresh source token")
+
+const mirrorWorkerFailedWarn = "mirror_worker_failed: a mirror worker failed (an expired source token or a transient error); retried with a fresh anonymous GHCR token"
+
 // SandboxExecutor runs one acquisition.
 type SandboxExecutor struct {
 	Cluster  SandboxCluster
@@ -290,8 +296,16 @@ func (x *SandboxExecutor) settlePod(ctx context.Context, f Fence, p SandboxPaylo
 		x.dropPod(ctx, f, r, pod)
 		return true, nil
 	case "Failed":
+		// Retryable, never permanent: the anonymous source token cannot be refreshed inside the worker, so a copy that
+		// outlives it (or any transient failure) fails the pod; the next attempt mints a fresh token for a new pod.
 		x.dropPod(ctx, f, r, pod)
-		return true, errors.New("the mirror worker failed")
+		if err := x.checkpoint(ctx, f, r, r.Step, func(_ context.Context, n *SandboxReceipt) error {
+			n.Warnings = appendOnce(n.Warnings, mirrorWorkerFailedWarn)
+			return nil
+		}); err != nil {
+			return true, err
+		}
+		return true, ErrMirrorWorkerFailed
 	}
 	return false, nil
 }

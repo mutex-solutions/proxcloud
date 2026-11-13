@@ -523,6 +523,11 @@ an advisory lock on `<registry>/library/sandbox-<name>` refuses while another jo
    1..3600 s — otherwise the job fails permanently with `ghcr_token_unscoped` (the message never carries the
    token or the PAT). **Private packages are not supported by the mirror**: a package GHCR does not serve
    anonymously (401/403/404 from `/token` or the read) fails permanently with `ghcr_package_not_public`.
+   The token cannot be refreshed inside the worker: a copy that outlives it (or any other worker failure)
+   ends the pod `Failed`, which is **retryable** — the receipt records the fixed warning code
+   `mirror_worker_failed`, the job is retried with backoff, and the next attempt mints a fresh anonymous
+   token for its new pod (until `attempts_exhausted`). The worker's transport only lets through a `/token`
+   request with exactly `scope=repository:mutex-solutions/sandbox-<name>:pull` and `service=ghcr.io`.
    The worker refuses a username/password for the source — and the mirror account (the registry only). They are garbage-collected
    with the pod; the job deletes the pod (UID precondition) as soon as the result is read, and every pod of
    the job on finish/cleanup. A failed delete is recorded in the receipt. A pod that stays Pending more than
