@@ -224,8 +224,17 @@ class PrepullPolicyTests(unittest.TestCase):
             self.assertIn("c.%s == o.%s" % (field, field), exprs)
         for field in ["selector", "updateStrategy", "template.metadata"]:
             self.assertIn("object.spec.%s == oldObject.spec.%s" % (field, field), exprs)
-        for field in ["labels", "annotations", "ownerReferences"]:
+        for field in ["labels", "ownerReferences", "finalizers"]:
             self.assertIn("object.metadata.%s == oldObject.metadata.%s" % (field, field), exprs)
+        # annotations: all compared but the API server's template-generation bookkeeping
+        self.assertIn('k == "deprecated.daemonset.template.generation"', exprs)
+        self.assertIn("variables.oldAnnotations[k] == variables.annotations[k]", exprs)
+        # Lightweight syntax check of every CEL expression: balanced brackets and quotes.
+        for v in vap["spec"]["validations"] + vap["spec"]["variables"] + vap["spec"]["matchConditions"]:
+            e = v["expression"]
+            for o, c in ("()", "[]", "{}"):
+                self.assertEqual(e.count(o), e.count(c), e)
+            self.assertEqual(e.count('"') % 2, 0, e)
         self.assertIn('object.metadata.name in ["template-prepull", "template-prepull-gpu"]', exprs)
         self.assertIn('request.operation == "UPDATE"', exprs)
         # The policy text is shared with the Go policy test (internal/cloud/sandbox/prepull_policy_test.go).

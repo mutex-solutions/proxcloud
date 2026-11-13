@@ -54,7 +54,7 @@ spec:
 {%- macro same(a, b, fields) -%}
 {%- for f in fields %}(has({{ a }}.{{ f }}) == has({{ b }}.{{ f }}) && (!has({{ a }}.{{ f }}) || {{ a }}.{{ f }} == {{ b }}.{{ f }})){{ ' && ' if not loop.last }}{% endfor -%}
 {%- endmacro -%}
-{%- set meta_fields = ['labels', 'annotations', 'ownerReferences', 'finalizers'] -%}
+{%- set meta_fields = ['labels', 'ownerReferences', 'finalizers'] -%}
 {%- set ds_fields = ['selector', 'updateStrategy', 'minReadySeconds', 'revisionHistoryLimit', 'template.metadata'] -%}
 {%- set pod_fields = ['activeDeadlineSeconds', 'affinity', 'automountServiceAccountToken', 'containers', 'dnsConfig',
     'dnsPolicy', 'enableServiceLinks', 'ephemeralContainers', 'hostAliases', 'hostIPC', 'hostNetwork', 'hostPID',
@@ -108,13 +108,22 @@ spec:
       expression: "has(oldObject.spec.template.spec.initContainers) ? oldObject.spec.template.spec.initContainers : []"
     - name: newInit
       expression: "has(object.spec.template.spec.initContainers) ? object.spec.template.spec.initContainers : []"
+    - name: annotations
+      expression: "has(object.metadata.annotations) ? object.metadata.annotations : {}"
+    - name: oldAnnotations
+      expression: "has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}"
   validations:
     - expression: >-
         request.operation == "UPDATE" && request.namespace == "{{ ns }}" &&
         object.metadata.name in ["template-prepull", "template-prepull-gpu"]
       message: the portal may only update the template-prepull DaemonSets
+    # deprecated.daemonset.template.generation is the API server's own bookkeeping: its DaemonSet strategy bumps it
+    # on every pod template change, before admission. Every other annotation stays.
     - expression: >-
-        {{ same('object.metadata', 'oldObject.metadata', meta_fields) }}
+        {{ same('object.metadata', 'oldObject.metadata', meta_fields) }} &&
+        variables.annotations.all(k, k == "deprecated.daemonset.template.generation" ||
+          (k in variables.oldAnnotations && variables.oldAnnotations[k] == variables.annotations[k])) &&
+        variables.oldAnnotations.all(k, k == "deprecated.daemonset.template.generation" || k in variables.annotations)
       message: the portal may not change a prepull DaemonSet's metadata
     - expression: >-
         {{ same('object.spec', 'oldObject.spec', ds_fields) }}
