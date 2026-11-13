@@ -161,6 +161,44 @@ class BuildTests(unittest.TestCase):
             self.run_build(pve)
         self.assertFalse(any(e[0] == "POST" and (e[2].get("delete") == "net0" or "pc-public" in e[2].get("tags", "")) for e in pve.events))
 
+    def test_prune_never_takes_a_portal_import_or_the_only_version(self):
+        def row(vmid, version, imported=False, public=True):
+            tags = ["proxcloud", "pc-img-debian-13", "pc-v-" + version] + (["pc-public"] if public else [])
+            if imported:
+                tags += ["pc-tu-import", "pc-src-aaaaaaaaaaaa"]
+            return {"vmid": vmid, "template": 1, "node": "test-node", "pool": build.POOL, "tags": ";".join(tags)}
+        vms = [row(9201, "202601010000"), row(9202, "202602010000", imported=True), row(9203, "202603010000"),
+               row(9204, "202604010000"), row(9205, "202605010000", imported=True, public=False)]
+        # An import still counts as an existing version for --if-missing ...
+        self.assertIn(("202602010000", 9202), build.versions_of(vms, "debian-13", "test-node"))
+        # ... but is never a prune candidate and takes no --keep slot.
+        self.assertEqual(build.prune_candidates(vms, "debian-13", "test-node", 2), [9201])
+        self.assertEqual(build.prune_candidates(vms, "debian-13", "test-node", 1), [9201, 9203])
+        # keep <= 0 never prunes the newest (here: only) published version.
+        only = [row(9301, "202601010000")]
+        for keep in (0, -1, -5):
+            self.assertEqual(build.prune_candidates(only, "debian-13", "test-node", keep), [])
+        self.assertEqual(build.prune_candidates(vms, "debian-13", "test-node", -1), [9201, 9203])
+
+    def test_build_prune_leaves_imports(self):
+        pve = FakePVE()
+        pve.rows[9300] = {"node": "test-node", "pool": build.POOL, "template": 1, "name": "pc-ghcr-debian-13-os-20260101000000",
+                          "tags": "proxcloud;pc-public;pc-img-debian-13;pc-v-202601010000;pc-tu-import;pc-src-aaaaaaaaaaaa"}
+        pve.rows[9301] = {"node": "test-node", "pool": build.POOL, "template": 1, "name": "pc-debian-13-202601020000",
+                          "tags": "proxcloud;pc-public;pc-img-debian-13;pc-v-202601020000"}
+        a = arguments()
+        a.keep = 1
+        def packer_stub(args, base, vmid, name, version):
+            pve.rows[vmid] = dict(pve.rows[base], name=name, tags="pc-building", template=1)
+        response = contextlib.closing(io.BytesIO(json.dumps({"data": {"ip": "192.0.2.40"}}).encode()))
+        with patch.object(build, "ensure_cloud_image", return_value="import-store:import/source.qcow2"), \
+             patch.object(build, "packer", side_effect=packer_stub), \
+             patch.object(build.urllib.request, "urlopen", return_value=response), \
+             contextlib.redirect_stdout(io.StringIO()):
+            build.cmd_build(pve, a, build.IMAGES[a.os])
+        self.assertIn(9300, pve.rows, "a portal import was pruned")
+        self.assertNotIn(9301, pve.rows, "the older pipeline version beyond --keep was not pruned")
+
     def test_vlan_argument_and_packer_propagation(self):
         for value in ("0", "1", "4094"):
             self.assertEqual(build.vlan_arg(value), int(value))

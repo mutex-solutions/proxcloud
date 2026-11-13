@@ -939,6 +939,10 @@ func run() error {
 			_, err := providerattach.DecodePayload(j.Payload)
 			return err
 		}
+		if j.Kind == durablejobs.TemplateUpdateSmoke {
+			_, err := templateupdates.DecodeSmokePayload(j.Payload)
+			return err
+		}
 		return chargefanout.Validate(j)
 	})
 	// Bulk attach of a provider to existing projects (docs/cloud-integration.md): the admin surface enqueues, this runner
@@ -972,10 +976,14 @@ func run() error {
 		Token: func(ctx context.Context) (string, string, error) {
 			return tuRepo.GitHubToken(ctx, func(v any) any { return enc.DecryptObject(v) })
 		},
-		Jobs: jobStore, DB: pg, Receipts: templateupdates.PGReceipts{DB: pg}, VMEnabled: cfg.Jobs.TemplateUpdatesVM,
+		Jobs: jobStore, DB: pg, Receipts: templateupdates.PGReceipts{DB: pg}, Smokes: templateupdates.PGSmokes{DB: pg}, VMEnabled: cfg.Jobs.TemplateUpdatesVM,
 	}
-	// Create the receipt table up front: EnqueueVM reads it inside its transaction (no auto-create there).
+	// Create the receipt, smoke and blocklist tables up front: enqueue reads them inside its
+	// transaction (no auto-create there).
 	if err := tuSvc.Receipts.Ensure(ctx); err != nil {
+		return fmt.Errorf("template update store: %w", err)
+	}
+	if err := tuSvc.Smokes.Ensure(ctx); err != nil {
 		return fmt.Errorf("template update store: %w", err)
 	}
 	adminH.SetTemplateUpdates(tuSvc)
@@ -1017,12 +1025,44 @@ func run() error {
 				}
 				return &templateupdates.Executor{PVE: ps.C, Blobs: gh, Receipts: templateupdates.PGReceipts{DB: pg}, HeadroomPct: es.PVEStorageHeadroomPct(), UploadLock: ps.LockImportUpload}, nil
 			},
+			// Smoke tests (docs/template-updates.md, Lifecycle): PVE only, one per provider at a time.
+			Smokes: tuSvc.Smokes, DeadSmoke: tuSvc.Smokes.DeadUncleaned,
+			SmokeLock: func(ctx context.Context, key string) (func(), bool, error) {
+				return pg.TryAdvisoryLock(ctx, key)
+			},
+			BuildSmoke: func(ctx context.Context, p templateupdates.SmokePayload) (*templateupdates.SmokeExecutor, error) {
+				es, err := esSvc.Get(ctx, p.ServiceID)
+				if err != nil || es == nil || !es.IsProxmox() {
+					return nil, &templateupdates.Permanent{Code: templateupdates.SmokeProviderMissing, Message: "the target Proxmox provider no longer exists"}
+				}
+				ps, err := pveWithHolderLock(es)
+				if err != nil {
+					return nil, err
+				}
+				return &templateupdates.SmokeExecutor{PVE: ps.C, Receipts: tuSvc.Smokes, Blocked: func(ctx context.Context, d string) (bool, error) {
+					b, err := tuSvc.Receipts.Blocked(ctx, d)
+					return b != nil, err
+				}}, nil
+			},
+			// Every finished import gets its automatic smoke test.
+			OnImported: func(ctx context.Context, id string) {
+				err := tuSvc.AutoSmoke(ctx, id, func(ctx context.Context, serviceID string) (templateupdates.SmokeNetwork, error) {
+					es, err := esSvc.Get(ctx, serviceID)
+					if err != nil || es == nil {
+						return templateupdates.SmokeNetwork{}, err
+					}
+					return admin.SmokeNetworkOf(es), nil
+				})
+				if err != nil {
+					log.Warn("template update: automatic smoke test not queued", "job", id, "err", err)
+				}
+			},
 		}
 		tuCtx, stopTU := context.WithCancel(ctx)
 		tuDone := make(chan struct{})
 		go func() { defer close(tuDone); tuRunner.Run(tuCtx) }()
 		defer func() { stopTU(); <-tuDone }()
-		log.Warn("template updates: VM import runner ENABLED")
+		log.Warn("template updates: VM import + smoke test runner ENABLED")
 	}
 	if cfg.Jobs.SchedulerEnabled {
 		log.Warn("scheduled jobs ENABLED (charge cron + cloud metrics) — bills will be charged on a timer")

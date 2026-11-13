@@ -217,17 +217,32 @@ def cmd_base(pve, a, img):
     print(create_base(pve, a, img, name))
 
 
-def versions_of(vms, os_slug, node):
+# The portal's Template updates import marker (docs/template-updates.md): such a template's lifecycle
+# (smoke test, publish, withdraw) belongs to the portal, so build.py never prunes it.
+IMPORT_MARKER = "pc-tu-import"
+
+
+def versions_of(vms, os_slug, node, prunable=False):
     """(version, vmid) of this image's published templates on node, oldest first. A template without a
-    pc-v-* tag was placed by hand: it is not ours to prune, so it is not listed."""
+    pc-v-* tag was placed by hand: it is not ours to prune, so it is not listed. With prunable, a
+    portal import (IMPORT_MARKER) is left out too: it still counts as a version (--if-missing), but
+    is never pruned and does not take a --keep slot."""
     out = []
     for v in vms:
         tags = str(v.get("tags", "")).split(";")
         if v.get("template") == 1 and v.get("node") == node and v.get("pool") == POOL and {"pc-public", "pc-img-" + os_slug} <= set(tags):
+            if prunable and IMPORT_MARKER in tags:
+                continue
             ver = [t[len("pc-v-"):] for t in tags if t.startswith("pc-v-")]
             if ver:
                 out.append((ver[0], v["vmid"]))
     return sorted(out)
+
+
+def prune_candidates(vms, os_slug, node, keep):
+    """The published versions a build may destroy: never a portal import, and never the newest
+    version (keep is at least 1, so the only published version always stays)."""
+    return [vm for _, vm in versions_of(vms, os_slug, node, prunable=True)[:-max(keep, 1)]]
 
 
 def packer(a, base_vmid, vmid, name, version):
@@ -333,7 +348,7 @@ def cmd_build(pve, a, img):
         tags="proxcloud;pc-public;pc-img-%s;pc-v-%s" % (a.os, version),
     ))
     # Safe: customer VMs are full clones, nothing references an old template.
-    pruned = [vm for _, vm in versions_of(pve.vms(), a.os, a.node)[:-a.keep]]
+    pruned = prune_candidates(pve.vms(), a.os, a.node, a.keep)
     for vm in pruned:
         pve.destroy(a.node, vm)
     print(json.dumps({"os": a.os, "node": a.node, "built": True, "vmid": vmid, "version": version, "pruned": pruned}))
