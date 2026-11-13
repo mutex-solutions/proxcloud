@@ -185,10 +185,15 @@ succeeded | failed`.
   redone under a fresh, epoch-specific file name, so a superseded runner still uploading can never
   collide; `creating` with a VMID re-reads that VM: ours and imported → continue, ours and empty →
   delete and recreate, someone else's → never touched, pick another VMID.
-- **Ownership**: the job tags its *unfinished* VM `pc-tu-<16 hex of job id>` at create time and names
-  its files `pc-tu-<…>-e<epoch>-<digest prefix>.qcow2`. A VM is the job's to mutate or destroy only if
-  **all** hold: it is a member of pool `pc-templates` on the job's node (read from
-  `/pools/pc-templates`), it carries that tag, and it is not `pc-public`. The orphan sweep only
+- **Ownership**: the job creates its VM named `pc-tu-build-<16 hex of job id>` **without tags**, then
+  tags it `pc-tu-<16 hex of job id>` with the import write, and names its files
+  `pc-tu-<…>-e<epoch>-<digest prefix>.qcow2`. A create carries no tags because PVE 9 checks a create's
+  tags with `VM.Config.Options` on `/vms/<id>` without the pool, and the token's rights reach a VM only
+  through its pool (no ACL on `/vms`): verified on PVE 9.2.21, where a tagged create fails 403. A VM is
+  the job's to mutate or destroy only if **all** hold: it is a member of pool `pc-templates` on the
+  job's node (read from `/pools/pc-templates`), it carries that tag (or, in the window between the
+  create and the import write, has no tag at all and exactly that build name), and it is not
+  `pc-public`. The orphan sweep only
   considers `pc-templates` members. **The finished template does not keep the ownership tag**: PVE
   clones copy tags (CAPMOX keeps them), so neither a clone (always outside `pc-templates`) nor the
   finished template can ever look destroyable; cleanup of a finished receipt only drops import files.

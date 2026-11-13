@@ -7,7 +7,9 @@ package templateupdates
 //
 // Invariants:
 //   - never modify or delete an existing template: the only VM this job ever mutates or destroys
-//     is one whose tags carry this job's ownership tag (pc-tu-<job>) and that is not published;
+//     is one in pc-templates that carries this job's mark (its ownership tag pc-tu-<job>, or, between
+//     the untagged create and the import write, exactly its build name and no tag; carriesOwnership)
+//     and that is not published;
 //   - the only import file it ever deletes is one whose name carries this job's prefix;
 //   - bytes are verified three times: the tee SHA-256 + byte count while streaming (bounded by the
 //     manifest's disk.bytes), PVE's own checksum (sha256 = manifest disk.sha256) on upload, and the
@@ -200,6 +202,11 @@ const templateVMIDStart = 9200
 func OwnerTag(jobID string) string {
 	return "pc-tu-" + strings.ReplaceAll(jobID, "-", "")[:16]
 }
+
+// buildName is the name a job gives the VM it creates, before the VM carries any tag. Together with membership of
+// pc-templates and the absence of every tag, it proves ownership in the window between the create and the import
+// write that stamps OwnerTag.
+func buildName(jobID string) string { return "pc-tu-build-" + OwnerTag(jobID)[6:] }
 
 // uploadName is the job's import file for one acquisition epoch: a fresh name per epoch, so a
 // superseded runner still uploading can never collide with the current one.
@@ -458,13 +465,16 @@ func (x *Executor) owned(ctx context.Context, jobID string, p VMPayload, vmid in
 	if err != nil {
 		return true, false, cfg, err
 	}
-	tags := strings.Split(cfg.Str("tags"), ";")
-	mine, published := false, false
-	for _, t := range tags {
-		mine = mine || t == OwnerTag(jobID)
-		published = published || t == pve.TagTemplatePub
-	}
-	return true, inPool && mine && !published, cfg, nil
+	return true, inPool && carriesOwnership(cfg, jobID) && !hasTagValue(cfg.Str("tags"), pve.TagTemplatePub), cfg, nil
+}
+
+// carriesOwnership reports the job's mark on a VM: its ownership tag, or, in the window between the untagged create
+// and the import write that stamps the tag (PVE 9 checks a create's tags on /vms/<id> without the pool, which the
+// token reaches only through pc-templates), exactly this job's build name and no tag at all. Pool membership and
+// pc-public are checked by the callers.
+func carriesOwnership(cfg pve.VMConfig, jobID string) bool {
+	return hasTagValue(cfg.Str("tags"), OwnerTag(jobID)) ||
+		(strings.TrimSpace(cfg.Str("tags")) == "" && cfg.Str("name") == buildName(jobID))
 }
 
 // inTemplatePool reads pool pc-templates' members directly.
@@ -571,8 +581,11 @@ func (x *Executor) createAndImport(ctx context.Context, jobID string, p VMPayloa
 		if err := x.guard(ctx, f); err != nil {
 			return err
 		}
+		// No tags here: PVE 9 checks a create's tags on /vms/<id> without the pool, and the token's rights reach a VM
+		// only through its pool (docs/proxmox-permissions.md, no ACL on /vms). The ownership tag goes on with the import
+		// write below, once the VM is a member of pc-templates.
 		up, err := x.PVE.CreateVM(ctx, p.Node, map[string]string{
-			"vmid": strconv.Itoa(id), "pool": pve.TemplatePool, "name": "pc-tu-build-" + OwnerTag(jobID)[6:], "tags": pve.TagManaged + ";" + OwnerTag(jobID),
+			"vmid": strconv.Itoa(id), "pool": pve.TemplatePool, "name": buildName(jobID),
 		})
 		if err == nil {
 			err = x.PVE.WaitTask(ctx, up)
@@ -603,6 +616,7 @@ func (x *Executor) createAndImport(ctx context.Context, jobID string, p VMPayloa
 	up, err := x.PVE.SetVMConfig(ctx, p.Node, vmid, map[string]string{
 		"ostype": "l26", "cores": "2", "memory": "2048", "cpu": "host", "agent": "1",
 		"scsihw": "virtio-scsi-single", "serial0": "socket", "vga": "serial0", "boot": "order=scsi0",
+		"tags":  pve.TagManaged + ";" + OwnerTag(jobID),
 		"scsi0": fmt.Sprintf("%s:0,discard=on,import-from=%s", p.DiskStorage, upload),
 		"ide2":  p.DiskStorage + ":cloudinit",
 	})
@@ -722,8 +736,8 @@ func (x *Executor) dropOwnFiles(ctx context.Context, f Fence, jobID string, p VM
 
 // sweepOrphans deletes VMs this job left half-created (a create a superseded acquisition finished
 // after losing its lease): candidates are ONLY members of pool pc-templates on the job's node, other
-// than keep, that are not templates; destroyOwned then re-reads each and requires the ownership tag,
-// pool membership and no pc-public. A VM outside pc-templates (a tenant or CAPMOX clone that copied
+// than keep, that are not templates and carry the job's mark (carriesOwnership: its tag, or untagged with its build
+// name); destroyOwned then re-reads each and requires that mark, pool membership and no pc-public. A VM outside pc-templates (a tenant or CAPMOX clone that copied
 // tags) is never even considered.
 func (x *Executor) sweepOrphans(ctx context.Context, f Fence, jobID string, p VMPayload, keep int) []string {
 	pool, err := x.PVE.GetPool(ctx, pve.TemplatePool)
@@ -736,7 +750,7 @@ func (x *Executor) sweepOrphans(ctx context.Context, f Fence, jobID string, p VM
 			continue
 		}
 		cfg, err := x.PVE.GetVMConfig(ctx, p.Node, m.VMID)
-		if err != nil || isTemplate(cfg) || !hasTagValue(cfg.Str("tags"), OwnerTag(jobID)) {
+		if err != nil || isTemplate(cfg) || !carriesOwnership(cfg, jobID) {
 			continue
 		}
 		row := m
