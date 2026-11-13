@@ -1,9 +1,9 @@
 package project
 
 // bootstrap.go holds the cloud-bootstrap slice: when a project is enabled it is provisioned onto
-// every non-disabled CLOUD external service — a PVE pool (proxmox), an RGW user (ceph-s3), a
-// management/DB-cluster namespace (kamaji/dbaas) — and each binding is recorded as a
-// ProjectExternalService on the project.
+// every non-disabled CLOUD external service whose attach policy is on (config.attachToNewProjects,
+// default on) — a PVE pool (proxmox), an RGW user (ceph-s3), a management/DB-cluster namespace
+// (kamaji/dbaas) — and each binding is recorded as a ProjectExternalService on the project.
 
 import (
 	"context"
@@ -49,7 +49,7 @@ func (h *Handler) ProvisionByOperator(ctx context.Context, p *Project) error {
 }
 
 // enableAndBootstrap flips a DISABLED project to ENABLED (never an operator's disable) and provisions it onto the non-disabled
-// CLOUD services. The caller knows billing allows it. The enable is its own conditional write, made before any provider call:
+// CLOUD services whose attach policy is on. The caller knows billing allows it. The enable is its own conditional write, made before any provider call:
 // the saves after those calls hold a read that may be minutes old, and a status change landing during them must stand.
 // One provider failing leaves the others provisioned: the failure goes on the project, for a retry, and on the provider's row,
 // for the operator. It is an error only when the project ends up on no provider at all.
@@ -80,7 +80,10 @@ func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 	}
 	var cephES, kamajiES, dbaasES, pveES, truenasES, dnsES, sandboxES []*externalservice.ExternalService
 	for i := range services {
-		if services[i].IsDisabled() {
+		// A provider whose attach policy is off is not provisioned automatically (config.attachToNewProjects): like a
+		// disabled one it is left out here, so a failure recorded while it was on is not retried either. The operator
+		// attaches it per project or in bulk (internal/providerattach).
+		if services[i].IsDisabled() || !services[i].AttachToNewProjects() {
 			continue
 		}
 		switch {

@@ -31,6 +31,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -66,6 +67,8 @@ func (h *Handler) routeExternalServiceMut(r chi.Router) {
 	r.Put("/service/{id}/quota", h.externalServiceUpdateQuota)
 	r.Put("/service/{id}/features", h.externalServiceUpdateFeatures)
 	r.Put("/service/{id}/configuration", h.externalServiceUpdateConfiguration)
+	// config.attachToNewProjects only (the rest of config is kept as stored).
+	r.Put("/service/{id}/attach-policy", h.externalServiceUpdateAttachPolicy)
 	// usage-metrics source (prometheus | none) + prometheus connection config; the
 	// POST probes the configured prometheus endpoint live (metricstest.go).
 	r.Put("/service/{id}/metrics-config", h.externalServiceUpdateMetricsConfig)
@@ -138,6 +141,10 @@ func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) 
 	}
 	if cfg, _ := doc["config"].(map[string]any); kamajiRemovedKeysErr(cfg) != nil {
 		httpx.WriteError(w, kamajiRemovedKeysErr(cfg))
+		return
+	}
+	if cfg, _ := doc["config"].(map[string]any); externalservice.ValidateAttachPolicy(cfg) != nil {
+		httpx.WriteError(w, httpx.BadRequest(externalservice.ValidateAttachPolicy(cfg).Error()))
 		return
 	}
 	// Stable string _id (String-id convention — same shape as the seeded provider docs;
@@ -283,6 +290,10 @@ func (h *Handler) applyServiceConnectionBody(req *http.Request, doc pgdoc.M) *ht
 		}
 	}
 	if c, ok := body["config"].(map[string]any); ok {
+		// Checked before the merge: a bad value must leave the stored doc as it was.
+		if err := externalservice.ValidateAttachPolicy(c); err != nil {
+			return httpx.BadRequest(err.Error())
+		}
 		cfg := ensureConfig(doc)
 		for k, v := range c {
 			cfg[k] = v
@@ -432,6 +443,31 @@ func (h *Handler) externalServiceUpdateConfiguration(w http.ResponseWriter, r *h
 		doc["status"] = body["status"]
 		return nil
 	})
+}
+
+// externalServiceUpdateAttachPolicy handles PUT /{id}/attach-policy: {"attachToNewProjects": true|false} sets
+// config.attachToNewProjects and nothing else (every other config key is kept as stored). A missing or non-boolean
+// value is a 400 and stores nothing.
+func (h *Handler) externalServiceUpdateAttachPolicy(w http.ResponseWriter, r *http.Request) {
+	h.serviceFieldSet(w, r, applyAttachPolicy)
+}
+
+func applyAttachPolicy(req *http.Request, doc pgdoc.M) *httpx.HTTPError {
+	var body map[string]any
+	if err := json.NewDecoder(io.LimitReader(req.Body, 4<<10)).Decode(&body); err != nil {
+		return httpx.BadRequest("Invalid request body")
+	}
+	for k := range body {
+		if k != externalservice.AttachPolicyKey {
+			return httpx.BadRequest("Only " + externalservice.AttachPolicyKey + " can be set here")
+		}
+	}
+	v, ok := body[externalservice.AttachPolicyKey].(bool)
+	if !ok {
+		return httpx.BadRequest(externalservice.AttachPolicyKey + " must be true or false")
+	}
+	ensureConfig(doc)[externalservice.AttachPolicyKey] = v
+	return nil
 }
 
 // externalServiceUpdateMetricsConfig handles PUT /{id}/metrics-config:
