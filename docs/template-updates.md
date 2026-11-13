@@ -481,8 +481,13 @@ Publish/withdraw need `VM.Config.Options` (tags) only.
 - **Catalog pruning by `images/build.py`**: see §4 — imports (`pc-tu-import`) are never pruned and
   the only published version is never pruned; imports count for `--if-missing`. A template imported
   *and published* by the pre-lifecycle version carries no import marker: `build.py` may prune it like
-  a pipeline template until it is withdrawn (which adds the marker) — re-publish is not possible for
-  those (no smoke record), so treat them as pipeline versions.
+  a pipeline template until it is withdrawn (which adds the marker) or published again through the
+  lifecycle (Run smoke works on such an import — its name and `pc-src-` tag prove it — and Publish then
+  adds the marker).
+- **Last-version guard scope**: the guard counts published versions of the line on the whole provider,
+  not per node. On a site with local (non-shared) template storage, withdrawing a node's only copy
+  while another node still has one is allowed; new VMs scheduled to that node then cannot be cloned
+  there until a version is published on it.
 - **Smoke test — needs lab verification (PVE 9.2), nothing of it ran against a real cluster**:
   - the guest agent endpoints: `agent/get-osinfo` / `agent/get-fsinfo` answer shapes
     (`version-id`, `total-bytes` present on the shipped qemu-guest-agent), `agent/exec` + `exec-status`
