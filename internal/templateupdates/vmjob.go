@@ -458,6 +458,14 @@ func (x *Executor) owned(ctx context.Context, jobID string, p VMPayload, vmid in
 	if pve.IsNotFound(err) {
 		return false, false, nil, nil
 	}
+	if pve.IsForbidden(err) {
+		// The token reaches a VM only through its pool, so PVE answers 403, not 404, for a VMID that no longer exists
+		// (or never was in pc-templates). Out of the pool it is not ours either way: out of view, never touched.
+		if inPool, perr := x.inTemplatePool(ctx, p.Node, vmid); perr != nil || inPool {
+			return false, false, nil, err
+		}
+		return false, false, nil, nil
+	}
 	if err != nil {
 		return false, false, nil, err
 	}

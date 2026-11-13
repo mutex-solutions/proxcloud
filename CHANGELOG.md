@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A VM template smoke test that passed ended `dead` in `cleaning` on PVE 9**: the provider token reaches a VM
+  only through its pool, so after the smoke job destroyed its test VM, PVE answered the follow-up config read with
+  `403 Permission check failed (/vms/<id>, VM.Audit)` instead of "does not exist", and the job retried the
+  already-done cleanup until its attempts ran out (the result, PASS, was kept; the dead-job pass would have
+  retried every 10 minutes). The import and smoke jobs now treat a 403 for a VMID that is not a member of
+  `pc-templates` as out of view: gone, or never theirs, and never touched. A 403 for a member is still an error.
+  Found on the first real import + smoke run (PVE 9.2.21).
+
 ## [0.5.1] - 2026-11-14
 
 Patch release on top of `v0.5.0`, with no breaking change. It fixes the VM template import, which

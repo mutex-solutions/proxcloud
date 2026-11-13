@@ -222,8 +222,10 @@ func (f *fakePVE) GetVMConfig(_ context.Context, node string, vmid int) (pve.VMC
 	defer f.mu.Unlock()
 	f.read()
 	vm, ok := f.vms[vmid]
-	if !ok || vm.node != node {
-		return nil, &pve.APIError{Status: 500, Message: "Configuration file 'nodes/x/qemu-server/1.conf' does not exist"}
+	// The provider token reaches a VM only through pool pc-templates (no ACL on /vms): PVE 9.2 answers 403, not 404,
+	// for a VMID that does not exist or lies outside that pool (verified on PVE 9.2.21).
+	if !ok || vm.node != node || vm.cfg.Str("pool") != pve.TemplatePool {
+		return nil, &pve.APIError{Status: 403, Message: fmt.Sprintf("Permission check failed (/vms/%d, VM.Audit)", vmid)}
 	}
 	out := pve.VMConfig{}
 	for k, v := range vm.cfg {
@@ -816,8 +818,9 @@ func TestOwnershipWindowBeforeTheImportWrite(t *testing.T) {
 	}
 	want := map[int]bool{9201: true, 9202: false, 9203: false, 9204: false, 9205: false, 9206: false, 9207: true}
 	for id, w := range want {
+		// A VM outside pc-templates is out of the token's view (403): not ours, never touched.
 		exists, own, _, err := x.owned(context.Background(), testJob, p, id)
-		if err != nil || !exists || own != w {
+		if err != nil || own != w || (w && !exists) {
 			t.Errorf("VM %d: exists=%v own=%v err=%v, want own=%v", id, exists, own, err, w)
 		}
 	}

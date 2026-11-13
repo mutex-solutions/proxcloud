@@ -94,8 +94,10 @@ func (f *smokePVE) GetVMConfig(_ context.Context, node string, vmid int) (pve.VM
 	defer f.mu.Unlock()
 	f.read()
 	vm, ok := f.vms[vmid]
-	if !ok || vm.node != node {
-		return nil, &pve.APIError{Status: 500, Message: "Configuration file 'nodes/x/qemu-server/1.conf' does not exist"}
+	// The provider token reaches a VM only through pool pc-templates (no ACL on /vms): PVE 9.2 answers 403, not 404,
+	// for a VMID that does not exist or lies outside that pool (verified on PVE 9.2.21).
+	if !ok || vm.node != node || vm.cfg.Str("pool") != pve.TemplatePool {
+		return nil, &pve.APIError{Status: 403, Message: fmt.Sprintf("Permission check failed (/vms/%d, VM.Audit)", vmid)}
 	}
 	out := pve.VMConfig{"digest": "d"}
 	for k, v := range vm.cfg {

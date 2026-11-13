@@ -913,20 +913,36 @@ func (x *SmokeExecutor) owned(ctx context.Context, jobID string, p SmokePayload,
 	if pve.IsNotFound(err) {
 		return false, false, nil, nil
 	}
+	if pve.IsForbidden(err) {
+		// The token reaches a VM only through its pool, so PVE answers 403, not 404, for a VMID that no longer exists
+		// (verified on PVE 9.2.21: the destroyed test VM). Out of pc-templates it is not ours either way: out of view.
+		if inPool, perr := x.inTemplatePool(ctx, p.Node, vmid); perr != nil || inPool {
+			return false, false, nil, err
+		}
+		return false, false, nil, nil
+	}
 	if err != nil {
 		return false, false, nil, err
 	}
-	pool, err := x.PVE.GetPool(ctx, pve.TemplatePool)
+	inPool, err := x.inTemplatePool(ctx, p.Node, vmid)
 	if err != nil {
 		return true, false, cfg, err
 	}
-	inPool := false
-	if pool != nil {
-		for _, m := range pool.Members {
-			inPool = inPool || m.Type == "qemu" && m.VMID == vmid && m.Node == p.Node
+	return true, inPool && !isTemplate(cfg) && smokeMine(cfg, jobID), cfg, nil
+}
+
+// inTemplatePool reads pool pc-templates' members directly.
+func (x *SmokeExecutor) inTemplatePool(ctx context.Context, node string, vmid int) (bool, error) {
+	pool, err := x.PVE.GetPool(ctx, pve.TemplatePool)
+	if err != nil || pool == nil {
+		return false, err
+	}
+	for _, m := range pool.Members {
+		if m.Type == "qemu" && m.VMID == vmid && m.Node == node {
+			return true, nil
 		}
 	}
-	return true, inPool && !isTemplate(cfg) && smokeMine(cfg, jobID), cfg, nil
+	return false, nil
 }
 
 // smokeMine is the name + tag half of the ownership proof.
