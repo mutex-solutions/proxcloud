@@ -8,7 +8,7 @@ production delivery; see [mail safety limits](mail-outbox-safety-limits.md).
 External billing's HTTP calls and failure behavior are unchanged.
 
 The first stable broker-free release was **v0.4.0** (after the `v0.4.0-rc.1`
-prerelease); the current stable release is **v0.5.1**. Each tag publishes the images
+prerelease); the current stable release is **v0.5.2**. Each tag publishes the images
 and chart, but verify them rather than inferring publication from a source pin. An
 upgrade from a broker-era release goes through this runbook whichever broker-free
 release (`v0.4.0` or later) is the target. Use a core-containing source build

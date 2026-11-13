@@ -1,10 +1,10 @@
 # Current support boundaries and first-release readiness
 
-Status snapshot: **2026-11-14**, preparing the stable patch release `v0.5.1` on top of `v0.5.0`
-(tag 2026-11-13). This is an evidence summary, not a release announcement or a production SLA.
+Status snapshot: **2026-11-14**, preparing the stable patch release `v0.5.2` on top of `v0.5.1`
+(tag 2026-11-14). This is an evidence summary, not a release announcement or a production SLA.
 `v0.4.0-rc.1` (tag 2026-11-11) was published as a non-latest prerelease, `v0.4.0` (tag 2026-11-12)
-as the first stable release and `v0.5.0` (tag 2026-11-13) as the second. Pushing the `v0.5.1` tag
-publishes the stable images, app chart and GitHub Release. `v0.5.1` has no breaking change against
+as the first stable release, `v0.5.0` (tag 2026-11-13) as the second and the patch `v0.5.1` (tag 2026-11-14). Pushing the `v0.5.2` tag
+publishes the stable images, app chart and GitHub Release. `v0.5.1` and `v0.5.2` have no breaking change against
 `v0.5.0`; `v0.5.0` contains breaking API changes against `v0.4.0`; see the [changelog](../CHANGELOG.md). This source change publishes
 nothing and performs no live acceptance. Check GitHub's Releases/Actions pages before choosing a deployment
 commit.
@@ -12,9 +12,9 @@ commit.
 ## What is available now
 
 - Source on `main`, public development container images on GHCR, the
-  `v0.4.0-rc.1` prerelease and the stable releases `v0.4.0` and `v0.5.0` (images and app
-  charts `0.4.0-rc.1`, `0.4.0` and `0.5.0`). The app chart `0.5.1`, appVersion and installer
-  BOM `v0.5.1` name the current stable release; its tag publishes those artifacts.
+  `v0.4.0-rc.1` prerelease and the stable releases `v0.4.0`, `v0.5.0` and `v0.5.1` (images and app
+  charts `0.4.0-rc.1`, `0.4.0`, `0.5.0` and `0.5.1`). The app chart `0.5.2`, appVersion and installer
+  BOM `v0.5.2` name the current stable release; its tag publishes those artifacts.
   Verify they are pullable before using `images.build: false`; a source pin is not proof that a registry artifact exists.
 - The installer defaults to `images.build: true`, building the API and two
   consoles plus app chart from the checkout. A source/local-registry installation
@@ -82,7 +82,7 @@ registration belongs in public documentation or release artifacts.
 The owner decided on 2026-11-12 to release `v0.4.0` as stable, and on 2026-11-13
 that the next release is the stable `v0.5.0`, each with a narrowly scoped core and
 explicitly held features; neither need claim every managed service. Those decisions
-are not evidence of publication or installation. The patch release `v0.5.1` (2026-11-14) follows the
+are not evidence of publication or installation. The patch releases `v0.5.1` and `v0.5.2` (2026-11-14) follow the
 same gate. For every release:
 
 1. Review the exact release commit for the release and its supported core surface
@@ -102,8 +102,8 @@ same gate. For every release:
    completion or a deployment. Keep the default `images.build: true` meanwhile.
 5. After publication, install the exact released chart/images with
    `images.build: false` on a clean evaluation site (not performed for `v0.4.0`,
-   and not yet performed for `v0.5.0` or `v0.5.1` when this was prepared; a portal-only Docker Compose
-   site is running `v0.5.0` on a homelab, which is not this acceptance). The installer
+   and not yet performed for `v0.5.0`, `v0.5.1` or `v0.5.2` when this was prepared; a portal-only Docker Compose
+   site is running `v0.5.1` on a homelab, which is not this acceptance). The installer
    accepts valid SemVer with **base version >= 0.4.0**, including prereleases; this local guard
    does not prove publication or a stable release. Check login/client/admin,
    provider connection, one basic server create/delete, configuration/secrets and
