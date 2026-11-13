@@ -29,8 +29,11 @@ type SandboxRunner struct {
 	ClaimDead func(ctx context.Context, id string, ttl time.Duration) (*durablejobs.Job, error)
 	// OnFinish receives every job's final receipt (succeeded or failed): the system audit row (cmd/api).
 	OnFinish func(rec SandboxReceipt)
-	// CleanupOnly: never claim a job to run (the feature flag is off); only the dead-job cleanup pass and the orphan
-	// sweep run, so worker pods and their credential Secrets never outlive a job because the flag was turned off.
+	// CleanupOnly: the feature flag is off, so no job ever runs and no mirror starts. A job the runner can claim (queued,
+	// or running with an EXPIRED lease: its runner is gone) is ended as feature_disabled through the terminal path, so
+	// its Cleanup still runs and it stops blocking its image (retire). A running job with a live lease (another replica,
+	// flag on) is never claimed. The dead-job pass and the orphan sweep run as usual, so worker pods and their
+	// credential Secrets never outlive a job because the flag was turned off.
 	CleanupOnly bool
 	// Orphans, when set, deletes worker pods (and with them their Secrets) that belong to no live job; called at most
 	// every OrphanEvery (default 10 minutes). It returns how many pods it deleted.
@@ -74,9 +77,8 @@ func (r *SandboxRunner) RunOnce(ctx context.Context) (bool, error) {
 		r.Lease = time.Minute
 	}
 	r.sweepOrphans(ctx)
-	if r.CleanupOnly {
-		return r.cleanupDead(ctx)
-	}
+	// Also with the flag off: ClaimKinds is what expires a running job's lease (on the last attempt straight to dead),
+	// and it only ever hands out a queued job or one whose lease expired, never one another replica holds.
 	j, err := r.Store.ClaimKinds(ctx, r.Lease, []string{durablejobs.TemplateUpdateSandbox})
 	if err != nil {
 		return false, err
@@ -84,8 +86,52 @@ func (r *SandboxRunner) RunOnce(ctx context.Context) (bool, error) {
 	if j == nil {
 		return r.cleanupDead(ctx)
 	}
+	if r.CleanupOnly {
+		r.retire(ctx, j)
+		return true, nil
+	}
 	r.perform(ctx, j)
 	return true, nil
+}
+
+// retire ends a job claimed while the flag is off (CleanupOnly) WITHOUT running it: no mirror starts. It is
+// dead-lettered as feature_disabled through terminal, so its Cleanup runs under this fenced, heartbeat-renewed
+// acquisition (worker pods and their Secrets deleted, a pin whose prepull switch never landed restored). A job whose
+// switch already landed (pinned) is acknowledged as succeeded instead, never rolled back; a failure an earlier
+// acquisition already recorded keeps its code.
+func (r *SandboxRunner) retire(parent context.Context, j *durablejobs.Job) {
+	work, cancel := context.WithTimeout(parent, 10*time.Minute)
+	defer cancel()
+	isLost, stopHB := heartbeat(r.Store, r.Lease, work, cancel, j)
+	defer stopHB()
+	fence := &jobFence{store: r.Store, job: j, lost: isLost}
+	p, err := DecodeSandboxPayload(j.Payload)
+	if err != nil {
+		r.terminal(parent, j, fence, nil, SandboxPayload{}, &Permanent{Code: "invalid_payload", Message: "the job payload failed validation"})
+		return
+	}
+	rec, err := r.Receipts.Load(work, j.ID)
+	if err != nil {
+		r.retry(parent, j, fence, "retryable")
+		return
+	}
+	perm := &Permanent{Code: "feature_disabled", Message: "sandbox template updates are turned off (PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED); the job was ended without running"}
+	var x *SandboxExecutor
+	if rec != nil {
+		switch {
+		case rec.Step == SbxPinned || rec.Step == SbxSucceeded:
+			r.succeed(parent, j, p, isLost)
+			return
+		case rec.Step == SbxFailed && rec.Code != "":
+			perm = &Permanent{Code: rec.Code, Message: rec.Message}
+		}
+		// Unreachable provider: no Cleanup now; the receipt stays uncleaned, so the dead-job pass retries it (or records
+		// why it cannot).
+		if b, err := r.Build(work, p); err == nil {
+			x = b
+		}
+	}
+	r.terminal(parent, j, fence, x, p, perm)
 }
 
 func (r *SandboxRunner) sweepOrphans(ctx context.Context) {
@@ -139,27 +185,7 @@ func (r *SandboxRunner) perform(parent context.Context, j *durablejobs.Job) {
 	err = x.Run(work, j.ID, p, fence)
 	switch {
 	case err == nil:
-		cctx, ccancel := context.WithTimeout(context.WithoutCancel(parent), 15*time.Second)
-		defer ccancel()
-		if isLost() {
-			return
-		}
-		e := r.Store.Complete(cctx, j, func(tc context.Context) error {
-			rec, err := r.Receipts.Load(tc, j.ID)
-			if err != nil || rec == nil {
-				return errors.New("receipt missing")
-			}
-			rec.Step, rec.Epoch, rec.UpdatedAt, rec.Code = SbxSucceeded, j.Epoch, time.Now().UTC(), ""
-			rec.Message = "The prepull DaemonSets run the new digest; templates switch once every Ready node has pulled it"
-			if p.Action == SandboxRollback {
-				rec.Message = "The prepull DaemonSets run the previous digest again; templates switch back once every Ready node has it"
-			}
-			return r.Receipts.Save(tc, rec)
-		})
-		if e != nil && !errors.Is(e, durablejobs.ErrLeaseLost) {
-			r.Log.Warn("sandbox template update: complete failed", "job", j.ID)
-		}
-		r.finished(cctx, j.ID)
+		r.succeed(parent, j, p, isLost)
 	case errors.Is(err, ErrStopped) || isLost():
 		r.Log.Warn("sandbox template update: lease lost; stopped", "job", j.ID, "epoch", j.Epoch)
 	default:
@@ -174,6 +200,32 @@ func (r *SandboxRunner) perform(parent context.Context, j *durablejobs.Job) {
 		}
 		r.retry(parent, j, fence, "retryable")
 	}
+}
+
+// succeed acknowledges an acquisition whose prepull switch landed (receipt pinned): the receipt becomes succeeded in
+// the job's fenced Complete.
+func (r *SandboxRunner) succeed(parent context.Context, j *durablejobs.Job, p SandboxPayload, isLost func() bool) {
+	cctx, ccancel := context.WithTimeout(context.WithoutCancel(parent), 15*time.Second)
+	defer ccancel()
+	if isLost() {
+		return
+	}
+	e := r.Store.Complete(cctx, j, func(tc context.Context) error {
+		rec, err := r.Receipts.Load(tc, j.ID)
+		if err != nil || rec == nil {
+			return errors.New("receipt missing")
+		}
+		rec.Step, rec.Epoch, rec.UpdatedAt, rec.Code = SbxSucceeded, j.Epoch, time.Now().UTC(), ""
+		rec.Message = "The prepull DaemonSets run the new digest; templates switch once every Ready node has pulled it"
+		if p.Action == SandboxRollback {
+			rec.Message = "The prepull DaemonSets run the previous digest again; templates switch back once every Ready node has it"
+		}
+		return r.Receipts.Save(tc, rec)
+	})
+	if e != nil && !errors.Is(e, durablejobs.ErrLeaseLost) {
+		r.Log.Warn("sandbox template update: complete failed", "job", j.ID)
+	}
+	r.finished(cctx, j.ID)
 }
 
 func (r *SandboxRunner) retry(parent context.Context, j *durablejobs.Job, fence *jobFence, code string) {
