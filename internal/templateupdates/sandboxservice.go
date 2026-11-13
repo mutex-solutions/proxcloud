@@ -167,18 +167,15 @@ func (s *Service) enqueueSandbox(ctx context.Context, p SandboxPayload, actor st
 		if err != nil {
 			return err
 		}
+		// One job per image at a time (dedup per template): every earlier job of the image must be settled.
+		if err := sandboxImageBusy(tc, prior, s.JobState); err != nil {
+			return err
+		}
 		same := 0
 		for _, r := range prior {
 			if r.Payload.Key() == p.Key() {
 				same++
 			}
-			if SandboxTerminal(&r) {
-				continue
-			}
-			if state, err := s.JobState(tc, r.ID); err == nil && state == "dead" {
-				continue
-			}
-			return ErrSandboxBusy // one job per image at a time (dedup per template)
 		}
 		if err := check(tc); err != nil {
 			return err
@@ -203,6 +200,29 @@ func (s *Service) enqueueSandbox(ctx context.Context, p SandboxPayload, actor st
 		return nil, err
 	}
 	return rec, nil
+}
+
+// sandboxImageBusy answers ErrSandboxBusy while an earlier job of the image may still change the cluster or its pin
+// record. A receipt is settled only when its step is succeeded or its cleanup ran (cleaned), or when its durable job
+// is dead or succeeded. A failed step alone is not: terminal() records it BEFORE it runs the job's Cleanup (worker
+// pods, a partial prepull switch, the pin restore) with the job row still running, and an enqueue or a pin delete
+// let through meanwhile would overlap that cleanup (whose MirrorJob guard then refuses to restore the old pin). A
+// job state that cannot be read ("") counts as busy.
+func sandboxImageBusy(ctx context.Context, prior []SandboxReceipt, jobState func(ctx context.Context, id string) (string, error)) error {
+	for i := range prior {
+		r := &prior[i]
+		if r.Step == SbxSucceeded || r.Cleaned {
+			continue
+		}
+		state, err := jobState(ctx, r.ID)
+		if err != nil {
+			return err
+		}
+		if state != "dead" && state != "succeeded" {
+			return ErrSandboxBusy
+		}
+	}
+	return nil
 }
 
 // splitPinnedRef splits <repo>:<tag>@<digest>.
@@ -279,8 +299,9 @@ func (s PGSandbox) JobLiveByShort(ctx context.Context, short string) (bool, erro
 var ErrSandboxPinNotFound = errors.New("no sandbox pin record with that id")
 
 // DeleteSandboxPin removes one sandboxBuiltinPin record so deploy/templates/images.yaml wins again on the next
-// make upgrade. Nothing on the cluster changes. Refused (busy) while a job for that image is live, under the same
-// advisory lock as enqueue. Returns the record removed.
+// make upgrade. Nothing on the cluster changes. Refused (busy) while a job for that image is not settled (a failed
+// job may still be running its cleanup: sandboxImageBusy), under the same advisory lock as enqueue. Returns the
+// record removed.
 func (s *Service) DeleteSandboxPin(ctx context.Context, id string) (*SandboxPin, error) {
 	var removed *SandboxPin
 	err := s.DB.WithTx(ctx, func(tc context.Context) error {
@@ -298,14 +319,8 @@ func (s *Service) DeleteSandboxPin(ctx context.Context, id string) (*SandboxPin,
 		if err != nil {
 			return err
 		}
-		for _, r := range prior {
-			if SandboxTerminal(&r) {
-				continue
-			}
-			if state, err := s.JobState(tc, r.ID); err == nil && state == "dead" {
-				continue
-			}
-			return ErrSandboxBusy
+		if err := sandboxImageBusy(tc, prior, s.JobState); err != nil {
+			return err
 		}
 		removed = pin
 		return s.Sandbox.DeletePin(tc, id)

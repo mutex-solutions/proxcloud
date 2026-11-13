@@ -44,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runner is gone (expired lease), ends `failed` `feature_disabled` without running further: its worker pods
   and their Secrets are deleted and a pin whose prepull switch never landed is restored, so it no
   longer blocks its image or the pin delete; a job another replica (flag on) holds is not touched.
+  A failed job keeps its image busy (a new update or a pin delete answers 409) until its cleanup
+  has run; that cleanup (the job's worker pods, a partial prepull switch, the pin) needs only the
+  provider's cluster, so it also runs when the provider lost its mirror account or moved its
+  template registry.
 - Add a per-provider **attach policy** for new projects: `config.attachToNewProjects`
   (default `true` when absent, so every existing provider keeps attaching new projects). With
   it off, a new project's first bootstrap skips that provider. Set it on the provider's new
