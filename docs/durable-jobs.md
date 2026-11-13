@@ -77,13 +77,18 @@ commit makes both durable. The first phase proves this primitive, not mail wirin
 
 ## External-effect kinds
 
-Two kinds do external I/O and are never registered on the DB-only `Worker`. Each
-has its own runner that renews its lease and commits every step through
-`Store.Checkpoint`: `templateupdate.vm/v1` (docs/template-updates.md) and
-`providerattach.run/v1`, the bulk attach of a provider to existing projects
-(docs/cloud-integration.md "Attaching a provider to existing projects"). Replay
-of either needs `admin:service:manage`. A dead bulk attach is not replayed
-(`409`); its run's *Retry failed projects* starts a new run instead.
+Four kinds do external I/O and are never registered on the DB-only `Worker`. Each
+is claimed by a dedicated runner that renews its lease and commits every step through
+`Store.Checkpoint`: `templateupdate.vm/v1` and `templateupdate.smoke/v1` (one runner,
+docs/template-updates.md §3 and §4), `templateupdate.sandbox/v1` (its own runner,
+docs/template-updates.md §5) and `providerattach.run/v1`, the bulk attach of a provider
+to existing projects (docs/cloud-integration.md "Attaching a provider to existing
+projects"). Replay of any of them needs `admin:service:manage`. A dead bulk attach is
+not replayed (`409`); its run's *Retry failed projects* starts a new run instead. A smoke
+test is never replayed (`409`): a new one is started from Template updates. A template
+import or sandbox mirror is replayed only when its receipt shows it died mid-flight.
+`Store.ClaimDead` re-acquires dead jobs for cleanup only for the kinds with a dead-job
+pass (`ClaimDeadKinds`: import, smoke, sandbox — not the bulk attach).
 
 ## Status, selftest and replay
 

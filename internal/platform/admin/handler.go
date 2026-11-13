@@ -107,6 +107,8 @@ type Handler struct {
 	durableValidate      func(*durablejobs.Job) error
 	// templateUpdates is the GHCR template update service (SetTemplateUpdates; nil → 503).
 	templateUpdates *templateupdates.Service
+	// sandboxClusterFor reads a sandbox provider's prepull DaemonSets (templateupdates_sandbox.go).
+	sandboxClusterFor func(es *externalservice.ExternalService) (SandboxCluster, error)
 	// providerAttach is the bulk attach of a provider to existing projects (SetProviderAttach; nil → 503); canAttach
 	// refuses a provider this API cannot attach projects to (nil = no check).
 	providerAttach *providerattach.Service

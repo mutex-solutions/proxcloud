@@ -88,6 +88,18 @@ func (h *Handler) durableReplay(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// A sandbox mirror/rollback is decided by its own receipt: only one that died mid-flight resumes usefully.
+	if kind == durablejobs.TemplateUpdateSandbox && h.templateUpdates != nil {
+		sbx, err := h.templateUpdates.Sandbox.Load(r.Context(), chi.URLParam(r, "id"))
+		if err != nil {
+			httpx.Err(w, 503, 503, "Durable job replay failed")
+			return
+		}
+		if err := templateupdates.ReplayableSandboxReceipt(sbx); err != nil {
+			httpx.Err(w, 409, 409, err.Error())
+			return
+		}
+	}
 	var req struct {
 		Reason string `json:"reason"`
 	}

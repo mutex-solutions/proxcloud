@@ -310,12 +310,54 @@
             {{ {'kubeconfig': lookup('ansible.builtin.file', pc_gen ~ '/sandbox-portal.kubeconfig')}
                | combine({'registryGcUser': 'gc',
                           'registryGcPassword': lookup('ansible.builtin.file', pc_gen ~ '/sandbox-registry-gc') | trim,
+                          'registryMirror': lookup('ansible.builtin.file', pc_gen ~ '/sandbox-registry-mirror') | trim,
                           'buildStorageAccessKey': (pc_sbx_builds.bucket ~ '-svc') if pc.object_store.mode != 'external' else pc.object_store.access_key,
                           'buildStorageSecretKey': (lookup('ansible.builtin.file', pc_gen ~ '/sandbox-builds-s3-secret') | trim)
                                                    if pc.object_store.mode != 'external' else pc.object_store.secret_key}
                          if pc_sbx_builds else {}) }}
       register: pc_sbx_provider
       no_log: true
+    # The registry's mirror account (stage 55: read and create on library/sandbox-* only) for the portal's sandbox
+    # mirror (docs/template-updates.md §5), on a provider registered before it existed (a new one gets it above). The secret is write-only
+    # (never returned), so a marker in generated/ records the password last handed over: a re-run writes nothing
+    # unless it changed. A provider whose release gates do not hold right now refuses the write (409): reported, and
+    # retried on the next run.
+    - name: Hand the registry mirror account to the sandbox provider
+      when:
+        - pc_sandbox_on and pc_sandbox_registry_on
+        - (pc_gen ~ '/sandbox-registry-mirror') is file
+        - pc_sbx_row.id | default('')
+        - lookup('ansible.builtin.file', pc_gen ~ '/sandbox-registry-mirror.handed', errors='ignore') | default('', true) | trim
+          != pc_sbx_mirror_mark
+      vars:
+        # the existing sandbox row (by kind, as above); a provider registered on this run already got the secret
+        pc_sbx_row: >-
+          {{ pc_services.json.data | default([]) | selectattr('config', 'mapping') | selectattr('config.provider', 'defined')
+             | selectattr('config.provider', 'eq', 'sandbox') | list | first | default({}) }}
+        pc_sbx_mirror_mark: "{{ (pc_sbx_row.id | default('') ~ ':' ~ (lookup('ansible.builtin.file', pc_gen ~ '/sandbox-registry-mirror', errors='ignore') | default('', true) | trim)) | hash('sha256') }}"
+      block:
+        - name: Write secret.registryMirror
+          proxcloud_api:
+            access_key: "{{ api_key.id }}"
+            secret_key: "{{ api_key.secretKey }}"
+            url: "{{ pc_svc_api }}/admin/service/{{ pc_sbx_row.id }}"
+            method: PUT
+            body:
+              secret: {registryMirror: "{{ lookup('ansible.builtin.file', pc_gen ~ '/sandbox-registry-mirror') | trim }}"}
+            ok_status: [200, 409]
+          register: pc_sbx_mirror_put
+          no_log: true
+        - name: Remember what was handed over
+          when: pc_sbx_mirror_put.status == 200
+          ansible.builtin.copy: {dest: "{{ pc_gen }}/sandbox-registry-mirror.handed", content: "{{ pc_sbx_mirror_mark }}\n", mode: "0600"}
+          delegate_to: localhost
+          become: false
+        - name: Say that the mirror account is not handed over yet
+          when: pc_sbx_mirror_put.status != 200
+          ansible.builtin.debug:
+            msg: >-
+              The sandbox provider refused secret.registryMirror ({{ pc_sbx_mirror_put.json.errors.message | default('409') }}):
+              sandbox template updates stay unavailable until it is stored. Run make upgrade again once its release gates hold.
     - name: Say how the sandbox provider goes live
       when: pc_sbx_provider is changed
       ansible.builtin.debug:

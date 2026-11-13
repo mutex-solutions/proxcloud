@@ -28,6 +28,9 @@ const (
 	// TemplateUpdateSmoke boots a throwaway clone of an imported (staged) template and checks it
 	// (internal/templateupdates/smoke.go). External-effect kind, same runner and fencing.
 	TemplateUpdateSmoke = "templateupdate.smoke/v1"
+	// TemplateUpdateSandbox mirrors a built-in sandbox template image into the sandbox registry and points the
+	// prepull DaemonSets at it, or rolls that back (internal/templateupdates, sandbox*.go). External-effect kind.
+	TemplateUpdateSandbox = "templateupdate.sandbox/v1"
 )
 
 var (
@@ -70,12 +73,14 @@ func known(kind string) bool { return kind == Billing || kind == Selftest || Ext
 // dedicated runner that renews its lease and commits each step through Checkpoint; the DB-only
 // Worker refuses to register them.
 func External(kind string) bool {
-	return kind == TemplateUpdateVM || kind == ProviderAttach || kind == TemplateUpdateSmoke
+	return kind == TemplateUpdateVM || kind == ProviderAttach || kind == TemplateUpdateSmoke || kind == TemplateUpdateSandbox
 }
 
 // ClaimDeadKinds are the kinds ClaimDead re-acquires for a cleanup: the template update runner's
-// (its dead-job pass cleans their Proxmox leftovers).
-var ClaimDeadKinds = []string{TemplateUpdateVM, TemplateUpdateSmoke}
+// (its dead-job pass cleans their Proxmox leftovers) and the sandbox mirror runner's (its dead-job
+// pass deletes the job's worker pods and restores a pin the DaemonSets never ran). A dead bulk
+// attach (ProviderAttach) is deliberately not one: it has no cleanup pass.
+var ClaimDeadKinds = []string{TemplateUpdateVM, TemplateUpdateSmoke, TemplateUpdateSandbox}
 
 // Checkpoint commits fn (DB-only writes: a step receipt) only while j's acquisition still owns an
 // unexpired lease, exactly like Complete but without acknowledging the job. A runner calls it
@@ -365,8 +370,16 @@ func (s *Store) Retry(ctx context.Context, j *Job, delay time.Duration, permanen
 		return err
 	})
 }
+
+// Get reads one job. Inside the caller's WithTx it reads on that transaction: a second pool connection taken
+// while the transaction holds one (and maybe an advisory lock others queue on) deadlocks once the pool is
+// exhausted by concurrent callers.
 func (s *Store) Get(ctx context.Context, id string) (*Job, error) {
-	return scan(s.db.Pool.QueryRow(ctx, `SELECT `+columns+` FROM durable_job WHERE id=$1`, id))
+	const q = `SELECT ` + columns + ` FROM durable_job WHERE id=$1`
+	if tx, err := s.db.Tx(ctx); err == nil {
+		return scan(tx.QueryRow(ctx, q, id))
+	}
+	return scan(s.db.Pool.QueryRow(ctx, q, id))
 }
 
 // Replay never edits a payload or accepts a function/command name. Authorization

@@ -223,20 +223,24 @@ func (r *Runner) perform(parent context.Context, j *durablejobs.Job) {
 // heartbeat renews j's lease every third of it until work ends; a refused renewal (lease lost)
 // cancels work. isLost reports that; stop cancels work and waits for the goroutine.
 func (r *Runner) heartbeat(work context.Context, cancel context.CancelFunc, j *durablejobs.Job) (isLost func() bool, stop func()) {
+	return heartbeat(r.Store, r.Lease, work, cancel, j)
+}
+
+func heartbeat(store JobStore, lease time.Duration, work context.Context, cancel context.CancelFunc, j *durablejobs.Job) (isLost func() bool, stop func()) {
 	var mu sync.Mutex
 	lost := false
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		t := time.NewTicker(r.Lease / 3)
+		t := time.NewTicker(lease / 3)
 		defer t.Stop()
 		for {
 			select {
 			case <-work.Done():
 				return
 			case <-t.C:
-				rc, rcancel := context.WithTimeout(work, r.Lease/3)
-				err := r.Store.Renew(rc, j, r.Lease)
+				rc, rcancel := context.WithTimeout(work, lease/3)
+				err := store.Renew(rc, j, lease)
 				rcancel()
 				if errors.Is(err, durablejobs.ErrLeaseLost) {
 					mu.Lock()

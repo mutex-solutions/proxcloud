@@ -142,6 +142,10 @@ type Config struct {
 	// (secret.registryGcUser / registryGcPassword: artifact list/read/delete only).
 	RegistryPrune string
 	RegistryGC    RegistryCredential
+	// RegistryMirror is the registry's narrow "mirror" account (secret.registryMirror, write-only): read and create on
+	// library/sandbox-* only. The sandbox mirror job (docs/template-updates.md §5) pushes with it and verifies the
+	// mirrored digest with it.
+	RegistryMirror RegistryCredential
 	// RegistryCA is the PEM CA the template registry's certificate chains to (config.sandbox.registryCa; empty: the
 	// system roots). The portal's pruning reaches the registry with it.
 	RegistryCA string

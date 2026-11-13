@@ -74,7 +74,7 @@ func TestRegistryProjects(t *testing.T) {
 func TestZotAccess(t *testing.T) {
 	ac := ZotAccess([]string{"a1"})
 	repos := ac["repositories"].(map[string]any)
-	if _, ok := repos["t/a1/**"]; !ok || len(repos) != 3 {
+	if _, ok := repos["t/a1/**"]; !ok || len(repos) != 4 {
 		t.Fatalf("repositories %v", repos)
 	}
 	lib, _ := json.Marshal(repos["library/**"])
@@ -104,6 +104,41 @@ func TestZotAccess(t *testing.T) {
 	own, _ := json.Marshal(repos["t/a1/**"])
 	if !strings.Contains(string(own), `"pull-a1"`) || !strings.Contains(string(own), `"gc"`) {
 		t.Fatalf("t/a1/** = %s", own)
+	}
+	// The mirror account: read+create on library/sandbox-* and nowhere else; the pull group keeps reading there.
+	var sb struct {
+		Policies []struct {
+			Users   []string `json:"users"`
+			Groups  []string `json:"groups"`
+			Actions []string `json:"actions"`
+		} `json:"policies"`
+		DefaultPolicy []string `json:"defaultPolicy"`
+	}
+	b, _ := json.Marshal(repos[MirrorRepoPattern])
+	_ = json.Unmarshal(b, &sb)
+	mirrorActions, pullReads := "", false
+	for _, pol := range sb.Policies {
+		if strings.Join(pol.Users, ",") == RegistryMirrorUser {
+			mirrorActions = strings.Join(pol.Actions, ",")
+		}
+		pullReads = pullReads || (strings.Join(pol.Groups, ",") == "pull" && strings.Join(pol.Actions, ",") == "read")
+	}
+	if mirrorActions != "read,create" || !pullReads || len(sb.DefaultPolicy) != 0 {
+		t.Fatalf("library/sandbox-* = %s", b)
+	}
+	for repo, v := range repos {
+		if repo == MirrorRepoPattern {
+			continue
+		}
+		if b, _ := json.Marshal(v); strings.Contains(string(b), `"`+RegistryMirrorUser+`"`) {
+			t.Errorf("%s names the mirror account: %s", repo, b)
+		}
+	}
+	if b, _ := json.Marshal(ac["groups"]); strings.Contains(string(b), `"`+RegistryMirrorUser+`"`) {
+		t.Errorf("the mirror account must not be in the pull group (library/proxcloud-* would open): %s", b)
+	}
+	if b, _ := json.Marshal(ac["adminPolicy"]); strings.Contains(string(b), `"`+RegistryMirrorUser+`"`) {
+		t.Errorf("the mirror account must not be an admin: %s", b)
 	}
 	pull, _ := json.Marshal(ac["groups"])
 	if !strings.Contains(string(pull), `"pull-a1"`) || !strings.Contains(string(pull), `"build-a1"`) || !strings.Contains(string(pull), `"pull-nodes"`) {
@@ -169,6 +204,13 @@ func TestRegistryUsersPass(t *testing.T) {
 	}
 	if !strings.Contains(string(api.secrets["sandbox-system/sandbox-registry-nodes"]), `"pull-nodes"`) {
 		t.Fatalf("nodes secret %s", api.secrets["sandbox-system/sandbox-registry-nodes"])
+	}
+	// The mirror worker's kubelet pull credential in sbx-build: the read-only nodes account, written blind.
+	if !strings.Contains(string(api.secrets["sbx-build/sandbox-registry-nodes"]), `"pull-nodes"`) || api.gets["sbx-build/sandbox-registry-nodes"] {
+		t.Fatalf("sbx-build nodes secret %s (read: %v)", api.secrets["sbx-build/sandbox-registry-nodes"], api.gets["sbx-build/sandbox-registry-nodes"])
+	}
+	if strings.Contains(ht, "mirror:") {
+		t.Fatal("no mirror password configured, yet a mirror account was written")
 	}
 
 	// Same projects: no file change, no Secret write.
@@ -264,5 +306,36 @@ func TestReviewRestartWithListErrorKeepsProjectUsers(t *testing.T) {
 	fresh := mk(t.TempDir())
 	if _, err := fresh.Pass(context.Background()); err == nil || !fresh.Ready() {
 		t.Errorf("new pod, failed list: err=%v ready=%v, want an error and ready", err, fresh.Ready())
+	}
+}
+
+// The mirror account exists only when its password is mounted, and then with its own password.
+func TestRegistryUsersMirrorAccount(t *testing.T) {
+	api := &fakeRegistryAPI{secrets: map[string][]byte{}}
+	r := newUsers(t, api)
+	r.Static["mirror"] = "mirror-pw"
+	if _, err := r.Pass(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ht := readCfg(t, r.Dir); !htpasswdOK(ht, "mirror", "mirror-pw") || htpasswdOK(ht, "mirror", "gcp") {
+		t.Fatalf("htpasswd %s", ht)
+	}
+	dir := t.TempDir()
+	for _, f := range []string{"admin", "gc", "pull-nodes", "key"} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("0123456789abcdef-"+f+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	static, _, err := ReadRegistryUsersDir(dir)
+	if err != nil || static["mirror"] != "" {
+		t.Fatalf("no mirror file: %v %v", static, err)
+	}
+	_ = os.WriteFile(filepath.Join(dir, "mirror"), []byte("m-pw\n"), 0o600)
+	if static, _, err = ReadRegistryUsersDir(dir); err != nil || static["mirror"] != "m-pw" {
+		t.Fatalf("mirror file: %v %v", static, err)
+	}
+	_ = os.WriteFile(filepath.Join(dir, "mirror"), []byte("  \n"), 0o600)
+	if _, _, err = ReadRegistryUsersDir(dir); err == nil {
+		t.Fatal("an empty mirror password must be refused")
 	}
 }

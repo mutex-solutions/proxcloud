@@ -938,9 +938,11 @@ func run() error {
 		case durablejobs.ProviderAttach:
 			_, err := providerattach.DecodePayload(j.Payload)
 			return err
-		}
-		if j.Kind == durablejobs.TemplateUpdateSmoke {
+		case durablejobs.TemplateUpdateSmoke:
 			_, err := templateupdates.DecodeSmokePayload(j.Payload)
+			return err
+		case durablejobs.TemplateUpdateSandbox:
+			_, err := templateupdates.DecodeSandboxPayload(j.Payload)
 			return err
 		}
 		return chargefanout.Validate(j)
@@ -977,16 +979,111 @@ func run() error {
 			return tuRepo.GitHubToken(ctx, func(v any) any { return enc.DecryptObject(v) })
 		},
 		Jobs: jobStore, DB: pg, Receipts: templateupdates.PGReceipts{DB: pg}, Smokes: templateupdates.PGSmokes{DB: pg}, VMEnabled: cfg.Jobs.TemplateUpdatesVM,
+		SandboxEnabled: cfg.Jobs.TemplateUpdatesSandbox, Sandbox: templateupdates.PGSandbox{DB: pg},
 	}
-	// Create the receipt, smoke and blocklist tables up front: enqueue reads them inside its
-	// transaction (no auto-create there).
+	// Create the receipt, smoke, blocklist and sandbox receipt tables up front: the enqueues read them
+	// inside their transaction (no auto-create there).
 	if err := tuSvc.Receipts.Ensure(ctx); err != nil {
 		return fmt.Errorf("template update store: %w", err)
 	}
 	if err := tuSvc.Smokes.Ensure(ctx); err != nil {
 		return fmt.Errorf("template update store: %w", err)
 	}
+	if err := tuSvc.Sandbox.Ensure(ctx); err != nil {
+		return fmt.Errorf("template update sandbox store: %w", err)
+	}
 	adminH.SetTemplateUpdates(tuSvc)
+	adminH.SetSandboxCluster(func(es *externalservice.ExternalService) (admin.SandboxCluster, error) { return sandboxServiceFor(es) })
+	// The sandbox mirror runner always runs: with PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED off (CleanupOnly) it runs
+	// no job — a queued one, or one whose lease expired, ends as feature_disabled with its cleanup; a live-leased one is
+	// never touched — and still cleans up dead jobs and deletes orphan worker pods (and their pod-owned credential
+	// Secrets), so turning the flag off never strands a pod holding a registry token or the mirror password.
+	{
+		sbxStore := templateupdates.PGSandbox{DB: pg}
+		sbxRunner := &templateupdates.SandboxRunner{
+			Store: jobStore, Receipts: sbxStore, Lease: cfg.Jobs.LeaseDuration, Log: log,
+			Dead: sbxStore.DeadUncleaned, ClaimDead: jobStore.ClaimDead,
+			CleanupOnly: !cfg.Jobs.TemplateUpdatesSandbox,
+			Orphans: func(ctx context.Context) (int, error) {
+				services, err := esSvc.ListByType(ctx, externalservice.TypeCloud)
+				if err != nil {
+					return 0, err
+				}
+				total := 0
+				for i := range services {
+					es := &services[i]
+					if !es.IsSandbox() {
+						continue
+					}
+					ss, err := sandboxServiceFor(es)
+					if err != nil {
+						continue
+					}
+					n, err := templateupdates.SweepMirrorOrphans(ctx, ss, sbxStore.JobLiveByShort)
+					total += n
+					if err != nil {
+						log.Warn("sandbox template update: orphan sweep", "service", es.ID, "err", err)
+					}
+				}
+				return total, nil
+			},
+			// Cleanup (a terminal failure, the dead-job pass) needs the provider's cluster only: the job's worker pods and
+			// their Secrets are deleted, a partial prepull switch undone and the pin restored even when the mirror
+			// account, the template registry or the GitHub integration went away since the job started.
+			BuildCleanup: sandboxCleanupBuilder(esSvc.Get, sbxStore),
+			Build: func(ctx context.Context, p templateupdates.SandboxPayload) (*templateupdates.SandboxExecutor, error) {
+				es, err := esSvc.Get(ctx, p.ServiceID)
+				if err != nil || es == nil || !es.IsSandbox() {
+					return nil, &templateupdates.Permanent{Code: "provider_missing", Message: "the target sandbox provider no longer exists"}
+				}
+				sc := es.SandboxConfig()
+				if sc.RegistryHost() != p.Registry {
+					return nil, &templateupdates.Permanent{Code: "registry_changed", Message: "the sandbox provider's template registry is no longer the job's"}
+				}
+				if sc.RegistryMirror.Password == "" {
+					return nil, &templateupdates.Permanent{Code: "mirror_unavailable", Message: "the sandbox provider has no registry mirror account (secret.registryMirror)"}
+				}
+				ss, err := sandboxServiceFor(es)
+				if err != nil {
+					return nil, err
+				}
+				return &templateupdates.SandboxExecutor{Cluster: ss, Receipts: sbxStore, Pins: sbxStore,
+					Registry: templateupdates.NewRegistryReader(p.Registry, sc.RegistryCA, sc.RegistryMirror.User, sc.RegistryMirror.Password, ""),
+					// An ANONYMOUS GHCR token pull-scoped to this one public package (minted without the PAT, which is
+					// used for discovery only and never leaves the portal), checked by CheckPullToken; only that token
+					// reaches the worker's pod-owned Secret.
+					SourceToken: func(ctx context.Context, pkg string) (string, error) {
+						gh, err := tuSvc.Client(ctx)
+						if err != nil {
+							return "", err
+						}
+						return gh.PullToken(ctx, pkg)
+					}}, nil
+			},
+			// One SYSTEM audit row per finished job (who asked is on the receipt and the enqueue's admin audit row).
+			OnFinish: func(rec templateupdates.SandboxReceipt) {
+				ev := audit.SystemEvent()
+				ev.Action = audit.ActionUpdate
+				ev.ResourceType = "EXTERNAL_SERVICE"
+				ev.ResourceID = rec.Payload.ServiceID
+				ev.ResourceDisplayName = "template-update " + rec.Payload.Action + " sandbox-" + rec.Payload.Name
+				ev.Outcome = audit.OutcomeSuccess
+				if rec.Step != templateupdates.SbxSucceeded {
+					ev.Outcome = audit.OutcomeFailure
+				}
+				ev.Changes = []audit.PropertyChange{{Field: "prepull.sandbox-" + rec.Payload.Name, NewValue: rec.Payload.Ref()},
+					{Field: "templateUpdate.job", NewValue: rec.ID}, {Field: "templateUpdate.code", NewValue: rec.Code}}
+				auditSvc.LogAsync(ev)
+			},
+		}
+		sbxCtx, stopSbx := context.WithCancel(ctx)
+		sbxDone := make(chan struct{})
+		go func() { defer close(sbxDone); sbxRunner.Run(sbxCtx) }()
+		defer func() { stopSbx(); <-sbxDone }()
+		if cfg.Jobs.TemplateUpdatesSandbox {
+			log.Warn("template updates: sandbox mirror runner ENABLED")
+		}
+	}
 	if cfg.Jobs.TemplateUpdatesVM {
 		tuReceipts := templateupdates.PGReceipts{DB: pg}
 		tuRunner := &templateupdates.Runner{
@@ -1516,6 +1613,31 @@ func registerJobs(sched *scheduler.Scheduler, billingProvider string, chargeDisp
 // the sync job).
 func sandboxServiceFor(es *externalservice.ExternalService) (*sandbox.Service, error) {
 	return sandbox.New(es.SandboxConfig(), es.ID)
+}
+
+// sandboxCleanupBuilder is the sandbox mirror runner's BuildCleanup (docs/template-updates.md §5.2): the job's
+// provider's cluster (its kubeconfig only, sandbox.NewClusterOnly) and the receipt/pin store; no mirror account,
+// registry reader or GitHub token. Build refuses a provider that lost its mirror account or moved its template
+// registry as permanent, but the cleanup of such a job must still run. Only a provider that no longer exists (or is
+// no longer a sandbox provider) is permanent; a store error or an unusable kubeconfig is retried by the dead-job pass.
+func sandboxCleanupBuilder(get func(ctx context.Context, id string) (*externalservice.ExternalService, error), store interface {
+	templateupdates.SandboxReceipts
+	templateupdates.SandboxPins
+}) templateupdates.SandboxExecutorFactory {
+	return func(ctx context.Context, p templateupdates.SandboxPayload) (*templateupdates.SandboxExecutor, error) {
+		es, err := get(ctx, p.ServiceID)
+		switch {
+		case errors.Is(err, externalservice.ErrNotFound), err == nil && (es == nil || !es.IsSandbox()):
+			return nil, &templateupdates.Permanent{Code: "provider_missing", Message: "the target sandbox provider no longer exists"}
+		case err != nil:
+			return nil, err
+		}
+		ss, err := sandbox.NewClusterOnly(es.SandboxConfig(), es.ID)
+		if err != nil {
+			return nil, err
+		}
+		return &templateupdates.SandboxExecutor{Cluster: ss, Receipts: store, Pins: store}, nil
+	}
 }
 
 // projectTeardownDeleter adapts the project teardown (PVE VMs, networks, security groups and

@@ -113,6 +113,9 @@ type Config struct {
 		// admins may enqueue imports of published GHCR VM artifacts as new Proxmox templates and
 		// a fenced runner executes them. OFF by default until lab-verified.
 		TemplateUpdatesVM bool
+		// TemplateUpdatesSandbox turns on the built-in sandbox image mirror (docs/template-updates.md §5): the
+		// fenced runner AND the mirror/rollback endpoints. OFF by default until verified on a real cluster.
+		TemplateUpdatesSandbox bool
 	}
 	// Billing selects which engine charges bills, and — when that is an external service — how to
 	// reach it.
@@ -250,6 +253,7 @@ func Load() (*Config, error) {
 	c.Jobs.DebugTriggers = boolEnv("PROXCLOUD_JOBS_DEBUG_TRIGGERS") || k.Bool("proxcloud.jobs.debug-triggers")
 	c.Jobs.RabbitFanout = boolEnv("PROXCLOUD_JOBS_RABBIT_FANOUT") || k.Bool("proxcloud.jobs.rabbit-fanout")
 	c.Jobs.TemplateUpdatesVM = boolEnv("PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED") || k.Bool("proxcloud.template-updates.vm-enabled")
+	c.Jobs.TemplateUpdatesSandbox = boolEnv("PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED") || k.Bool("proxcloud.template-updates.sandbox-enabled")
 	c.Jobs.WorkerConcurrency = 2
 	if raw := os.Getenv("PROXCLOUD_JOBS_WORKER_CONCURRENCY"); raw != "" {
 		value, err := strconv.Atoi(raw)

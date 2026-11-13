@@ -18,8 +18,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   imported by digest as a new Proxmox template (never modifying or deleting existing ones) via a
   fenced, resumable durable job, verified by a streaming SHA-256, Proxmox's own sha256 check and
   the layer digest; the executor is off until `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true`.
-  Sandbox image mirroring from the portal is not yet enabled; the page gives the `images.yaml`
-  pin and the follow-up design is in `docs/template-updates.md`.
+- Sandbox template images can be updated from **Template updates** (`docs/template-updates.md` §5,
+  off until `PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED=true`): **Update** mirrors the offered
+  `ghcr.io/mutex-solutions/sandbox-<name>@<digest>` (re-verified) into the sandbox registry as
+  `library/sandbox-<name>:<tag>` with the same digest — a fenced, resumable durable job running the
+  trusted `sandbox-import` worker in a new copy mode with pod-owned credentials, the destination digest
+  checked by the portal — then points the prepull DaemonSets at it; the existing adoption job switches
+  templates once every Ready node has pulled it. **Rollback** points the prepull back at the previous
+  pin. Same-digest updates are refused, one job per image at a time, audited
+  (`admin:service:manage`). Installer: stage 55 creates a Zot `mirror` account (read/create on
+  `library/sandbox-*` only), a ValidatingAdmissionPolicy limiting the portal to init-container image
+  changes to mirrored digest refs of the same repository and, only once a dry-run probe shows that
+  policy enforced, a Role (get/patch on the two prepull DaemonSets); stage 60 hands the account over as the write-only `secret.registryMirror`. Each switch is
+  recorded as a `sandboxBuiltinPin`; `make upgrade` reads the pins through the admin API and renders
+  the newer of `images.yaml` and the pin, printing the line to commit, and stops (instead of rolling
+  back) when it cannot read them; `DELETE /api/v1/admin/template-updates/sandbox/pins/{id}` lets
+  `images.yaml` win again. The worker gets only an anonymous short-lived GHCR token pull-scoped to the one public package, checked never to be or contain the GitHub PAT (used for discovery only; private packages are refused, `ghcr_package_not_public`). The admission policy compares fields by name, so stage
+  55 first checks the sandbox cluster's OpenAPI schemas and stops the upgrade on any field the policy
+  does not cover; prepull init containers now run non-root with a read-only root and no capabilities.
+  **Upgrade note**: the first `make upgrade` with this change restarts the sandbox registry (Zot) pod
+  once, because its users Secret gains the `mirror` account; pulls fail for the restart's few seconds.
+  Residual risk: the `mirror` account may create a new `library/sandbox-<name>` repository (it cannot
+  overwrite or delete an image). With the flag turned off, a sandbox job that is queued, or whose
+  runner is gone (expired lease), ends `failed` `feature_disabled` (or keeps a failure code already
+  recorded; one already pinned is acknowledged as succeeded; one whose lease expired on its last attempt
+  ends `job_dead` through the dead-job pass) without running further: its worker pods
+  and their Secrets are deleted and a pin whose prepull switch never landed is restored, so it no
+  longer blocks its image or the pin delete; a job another replica (flag on) holds is not touched.
+  A failed job keeps its image busy (a new update or a pin delete answers 409) until its cleanup
+  has run; that cleanup (the job's worker pods, a partial prepull switch, the pin) needs only the
+  provider's cluster, so it also runs when the provider lost its mirror account or moved its
+  template registry.
 - Add a per-provider **attach policy** for new projects: `config.attachToNewProjects`
   (default `true` when absent, so every existing provider keeps attaching new projects). With
   it off, a new project's first bootstrap skips that provider. Set it on the provider's new
