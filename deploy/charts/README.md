@@ -38,7 +38,7 @@ own cadence). All three go to `oci://ghcr.io/mutex-solutions/charts`.
 | `database-cluster` | `database-cluster-vX.Y.Z` | `Chart.yaml` — the tag must match or the job fails |
 | `proxmox-kamaji-cluster` | `proxmox-kamaji-cluster-vX.Y.Z` | `Chart.yaml` — the tag must match or the job fails |
 
-The app chart/BOM selects the stable release `v0.5.0` (after the first stable
+The app chart/BOM selects the stable release `v0.5.1` (after the first stable
 `v0.4.0`); its tag publishes the app chart and images. Local
 rendering and a source pin are not proof that pull URLs exist. Use the
 source-build path until the required release images and chart are verified
