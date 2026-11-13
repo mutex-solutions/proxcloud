@@ -47,7 +47,8 @@ type VMPayload struct {
 	Node              string `json:"node"`
 	ImportStorage     string `json:"importStorage"`
 	DiskStorage       string `json:"diskStorage"`
-	Publish           bool   `json:"publish"`
+	// Publish is ignored: imports always land staged (kept so older payloads still decode).
+	Publish bool `json:"publish"`
 }
 
 var (
@@ -138,6 +139,8 @@ type Receipt struct {
 	Warnings    []string  `json:"warnings,omitempty"`
 	// Cleaned marks a dead job whose leftovers the runner already removed.
 	Cleaned bool `json:"cleaned,omitempty"`
+	// Smoke is the latest smoke test of the template this import produced (mirrored by PGSmokes).
+	Smoke *SmokeSummary `json:"smoke,omitempty"`
 }
 
 // Fence commits receipt writes only while the job acquisition still owns its lease
@@ -213,24 +216,40 @@ func TemplateName(p VMPayload) string {
 	return fmt.Sprintf("pc-ghcr-%s-%s-%s", p.OS, v, p.BuildVersion)
 }
 
-// TemplateTags are the final tags. A native OS template joins the catalog (pc-public + pc-img-<os>
-// + pc-v-<yyyymmddhhmm>) only when Publish was confirmed; otherwise it is staged for review. A
-// Kubernetes node image is never a catalog entry: an operator references its VMID in the kamaji
-// provider's version map.
+// TemplateTags are the final tags of an import. Every import lands STAGED (docs/template-updates.md,
+// lifecycle): the import marker pc-tu-import, the source digest and pc-tu-staged — and NO catalog
+// tag (no pc-public, pc-img-, pc-v-), so neither the tenant catalog, images/build.py nor an
+// installer template selector (which match pc-img-<os> + pc-v-) can ever pick a staged import. A
+// Kubernetes node image also carries pc-tu-k8s + pc-k8sver-<x-y-z> (its identity, not a catalog
+// tag). Publish (lifecycle.go) adds the catalog tags after a passing smoke test.
 //
 // The final tags deliberately DROP the job's ownership tag: PVE clones copy tags (CAPMOX keeps
 // them), so a clone of the finished template must never look like something this job may destroy.
 // Destructive ownership proof ends when the template is finished.
+//
+// VMPayload.Publish is kept only so payloads written before the lifecycle change still decode; it
+// is ignored (such a job also lands staged).
 func TemplateTags(p VMPayload) string {
-	tags := []string{pve.TagManaged, "pc-src-" + strings.TrimPrefix(p.Digest, "sha256:")[:12]}
+	tags := []string{pve.TagManaged, TagSource + strings.TrimPrefix(p.Digest, "sha256:")[:12], TagImport}
 	if p.Variant == "kubernetes" {
-		tags = append(tags, "pc-tu-k8s", "pc-k8sver-"+strings.ReplaceAll(p.KubernetesVersion, ".", "-"))
+		tags = append(tags, TagK8sImport, TagK8sVersion+strings.ReplaceAll(p.KubernetesVersion, ".", "-"))
+	}
+	return strings.Join(append(tags, TagStaged), ";")
+}
+
+// legacyTemplateTags are the final tags an import written before the lifecycle change set (no
+// import marker, publish-at-import). finished() accepts them so a job that landed its final write
+// on the old version and resumes on the new one completes instead of failing.
+func legacyTemplateTags(p VMPayload) string {
+	tags := []string{pve.TagManaged, TagSource + strings.TrimPrefix(p.Digest, "sha256:")[:12]}
+	if p.Variant == "kubernetes" {
+		tags = append(tags, TagK8sImport, TagK8sVersion+strings.ReplaceAll(p.KubernetesVersion, ".", "-"))
 	} else {
 		tags = append(tags, pve.TagTemplateImage+p.OS, pve.TagTemplateVersion+p.BuildVersion[:12])
 		if p.Publish {
 			tags = append(tags, pve.TagTemplatePub)
 		} else {
-			tags = append(tags, "pc-tu-staged")
+			tags = append(tags, TagStaged)
 		}
 	}
 	return strings.Join(tags, ";")
@@ -464,7 +483,8 @@ func (x *Executor) inTemplatePool(ctx context.Context, node string, vmid int) (b
 // finished reports a VM already carrying exactly this job's final name and tags (a final config
 // write that landed although its task wait failed). It is not "owned" any more by design.
 func finished(cfg pve.VMConfig, p VMPayload) bool {
-	return isTemplate(cfg) && cfg.Str("name") == TemplateName(p) && sameTags(cfg.Str("tags"), TemplateTags(p))
+	return isTemplate(cfg) && cfg.Str("name") == TemplateName(p) &&
+		(sameTags(cfg.Str("tags"), TemplateTags(p)) || sameTags(cfg.Str("tags"), legacyTemplateTags(p)))
 }
 
 func sameTags(a, b string) bool {

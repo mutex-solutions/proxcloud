@@ -85,6 +85,9 @@ type VMLine struct {
 	// Installed is what this site has for the line, per provider (filled by the caller).
 	Installed       []InstalledVM `json:"installed"`
 	UpdateAvailable bool          `json:"updateAvailable"`
+	// LatestWithdrawn is set when the newest artifact's digest was withdrawn (blocklisted): the
+	// page shows it as withdrawn and import refuses it.
+	LatestWithdrawn *BlockedDigest `json:"latestWithdrawn,omitempty"`
 }
 
 // SkippedTag is a published tag not offered, with a short reason.
@@ -103,6 +106,7 @@ type InstalledVM struct {
 	Version      string `json:"version"`                // pc-v- tag value (yyyymmddhhmm), or k8s build
 	SourceDigest string `json:"sourceDigest,omitempty"` // pc-src- tag of a template this feature imported
 	Published    bool   `json:"published"`
+	Withdrawn    bool   `json:"withdrawn,omitempty"` // pc-tu-withdrawn
 }
 
 // DiscoverVM lists every VM package and returns one row per line with the newest valid artifact.

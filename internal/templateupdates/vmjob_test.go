@@ -361,11 +361,14 @@ func TestExecutorHappyPathCreatesNewTemplate(t *testing.T) {
 	if !vm.template || vm.cfg.Str("name") != "pc-ghcr-debian-13-os-20261111000000" || vm.cfg.Str("pool") != pve.TemplatePool {
 		t.Fatalf("new template: %+v", vm)
 	}
+	// Every import lands STAGED (lifecycle): import marker + source + staged, no catalog tag at all,
+	// even though this payload still says publish=true (an old payload; the field is ignored).
 	tags := vm.cfg.Str("tags")
-	for _, want := range []string{"pc-public", "pc-img-debian-13", "pc-v-202611110000", "pc-src-999999999999"} {
-		if !strings.Contains(tags, want) {
-			t.Errorf("tag %s missing in %s", want, tags)
-		}
+	if !sameTags(tags, "proxcloud;pc-src-999999999999;pc-tu-import;pc-tu-staged") {
+		t.Fatalf("staged import tags: %s", tags)
+	}
+	if rows := pve.DiscoverTemplates([]pve.ClusterResource{{Type: "qemu", VMID: 9201, Node: "pve1", Template: 1, Pool: pve.TemplatePool, Tags: tags}}); len(rows) != 0 {
+		t.Fatalf("a staged import entered the catalog: %+v", rows)
 	}
 	if strings.Contains(tags, OwnerTag(testJob)) || strings.Contains(tags, "pc-tu-"+"0b7c") {
 		t.Errorf("the finished template still carries the destructive ownership tag: %s", tags)
@@ -397,8 +400,25 @@ func TestExecutorStagedWithoutPublish(t *testing.T) {
 	if err := x.Run(context.Background(), testJob, p, &testFence{epoch: 1, budget: -1}); err != nil {
 		t.Fatal(err)
 	}
-	if tags := pv.vms[9201].cfg.Str("tags"); strings.Contains(tags, "pc-public") || !strings.Contains(tags, "pc-tu-staged") {
+	if tags := pv.vms[9201].cfg.Str("tags"); strings.Contains(tags, "pc-public") || strings.Contains(tags, "pc-img-") || !strings.Contains(tags, "pc-tu-staged") {
 		t.Fatalf("staged tags: %s", tags)
+	}
+}
+
+// A job that landed its final write on the pre-lifecycle version (publish-at-import tags) and
+// resumes on this one completes instead of failing as "ownership lost".
+func TestFinishAcceptsLegacyFinalTags(t *testing.T) {
+	x, pv, _, rec, p := setup(t)
+	pv.finalWaitFails = true
+	_ = x.Run(context.Background(), testJob, p, &testFence{epoch: 1, budget: -1})
+	r, _ := rec.Load(context.Background(), testJob)
+	pv.vms[r.VMID].cfg["tags"] = legacyTemplateTags(p)
+	pv.finalWaitFails = false
+	if err := x.Run(context.Background(), testJob, p, &testFence{epoch: 2, budget: -1}); err != nil {
+		t.Fatalf("resume over legacy tags: %v", err)
+	}
+	if r, _ = rec.Load(context.Background(), testJob); r.Step != StepTemplated {
+		t.Fatalf("receipt %+v", r)
 	}
 }
 
@@ -412,7 +432,7 @@ func TestExecutorK8sTagsNeverPublish(t *testing.T) {
 		t.Fatal(err)
 	}
 	tags := TemplateTags(p)
-	if strings.Contains(tags, "pc-public") || strings.Contains(tags, "pc-img-") || !strings.Contains(tags, "pc-k8sver-1-35-10") {
+	if strings.Contains(tags, "pc-public") || strings.Contains(tags, "pc-img-") || !strings.Contains(tags, "pc-k8sver-1-35-10") || !strings.Contains(tags, TagStaged) {
 		t.Fatalf("k8s tags: %s", tags)
 	}
 	if TemplateName(p) != "pc-ghcr-ubuntu-2604-k8s-1-35-10-20261112010203" {

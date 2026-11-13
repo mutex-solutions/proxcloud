@@ -23,6 +23,7 @@ type fakeJobs struct {
 	completed bool
 	failCode  string
 	permanent bool
+	deferred  bool
 	renewals  int
 }
 
@@ -63,8 +64,10 @@ func (s *fakeJobs) Complete(ctx context.Context, _ *durablejobs.Job, fn func(con
 	if s.lost() {
 		return durablejobs.ErrLeaseLost
 	}
-	if err := fn(ctx); err != nil {
-		return err
+	if fn != nil {
+		if err := fn(ctx); err != nil {
+			return err
+		}
 	}
 	s.mu.Lock()
 	s.completed = true
@@ -78,6 +81,16 @@ func (s *fakeJobs) Fail(_ context.Context, _ *durablejobs.Job, _ time.Duration, 
 	}
 	s.mu.Lock()
 	s.failCode, s.permanent = code, permanent
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *fakeJobs) Defer(_ context.Context, _ *durablejobs.Job, _ time.Duration, code string) error {
+	if s.lost() {
+		return durablejobs.ErrLeaseLost
+	}
+	s.mu.Lock()
+	s.failCode, s.permanent, s.deferred = code, false, true
 	s.mu.Unlock()
 	return nil
 }

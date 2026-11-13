@@ -6,7 +6,13 @@ package admin
 //	GET  /admin/template-updates             discovery (?refresh=1)     (admin:service:read)
 //	GET  /admin/template-updates/history     job receipts               (admin:service:read)
 //	GET  /admin/template-updates/placement/{serviceId}  node/storage choices (admin:service:read)
-//	POST /admin/template-updates/vm          enqueue a VM template import (admin:service:manage)
+//	POST /admin/template-updates/vm          enqueue a VM template import (admin:service:manage);
+//	                                         it always lands staged (publish=true → 400)
+//	GET  /admin/template-updates/templates   imported templates with their lifecycle state (admin:service:read)
+//	GET  /admin/template-updates/blocklist   withdrawn digests (admin:service:read)
+//	POST /admin/template-updates/templates/{id}/smoke     run the smoke test (admin:service:manage)
+//	POST /admin/template-updates/templates/{id}/publish   publish after a PASS smoke (admin:service:manage)
+//	POST /admin/template-updates/templates/{id}/withdraw  withdraw + blocklist the digest (admin:service:manage)
 //	POST /admin/template-updates/sandbox     sandbox pin switch — not yet enabled (501)
 //
 // The GitHub PAT lives in a thirdPartyIntegration of type "GitHub" (secret.token, encrypted at
@@ -46,6 +52,11 @@ func (h *Handler) routeTemplateUpdates(r chi.Router) {
 	r.Get("/template-updates/placement/{serviceId}", h.templateUpdatesPlacement)
 	r.Post("/template-updates/vm", h.templateUpdatesVM)
 	r.Post("/template-updates/sandbox", h.templateUpdatesSandbox)
+	r.Get("/template-updates/templates", h.templateUpdatesTemplates)
+	r.Get("/template-updates/blocklist", h.templateUpdatesBlocklist)
+	r.Post("/template-updates/templates/{id}/smoke", h.templateUpdatesSmoke)
+	r.Post("/template-updates/templates/{id}/publish", h.templateUpdatesPublish)
+	r.Post("/template-updates/templates/{id}/withdraw", h.templateUpdatesWithdraw)
 }
 
 func (h *Handler) templateUpdatesReady(w http.ResponseWriter) bool {
@@ -61,7 +72,15 @@ func (h *Handler) templateUpdatesReady(w http.ResponseWriter) bool {
 func templateUpdatesErr(w http.ResponseWriter, err error) {
 	var rl *templateupdates.RateLimitError
 	var he *templateupdates.HTTPError
+	var le *templateupdates.LifecycleError
 	switch {
+	case errors.As(err, &le):
+		e := httpx.NewError(le.Status, le.Status, le.Message)
+		details := map[string]any{"code": le.Code}
+		for k, v := range le.Details {
+			details[k] = v
+		}
+		httpx.WriteError(w, e.WithDetails(details))
 	case errors.Is(err, templateupdates.ErrNotConfigured), errors.Is(err, templateupdates.ErrNoToken):
 		httpx.Err(w, http.StatusConflict, http.StatusConflict, templateupdates.ErrNotConfigured.Error())
 	case errors.As(err, &rl):
@@ -266,6 +285,12 @@ func (h *Handler) templateUpdatesVM(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrictBody(w, r, &req) {
 		return
 	}
+	if req.Publish {
+		// Backward-compatible parsing: the field is still accepted, but publishing at import was
+		// removed (staged → smoke → Publish). Refused before any provider or GitHub call.
+		templateUpdatesErr(w, templateupdates.ErrPublishAtImport)
+		return
+	}
 	es, ok := h.loadServiceOr(w, r, req.ServiceID)
 	if !ok {
 		return
@@ -294,7 +319,7 @@ func (h *Handler) templateUpdatesVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	audit.RecordSnapshots(r.Context(), nil, map[string]any{"package": rec.Payload.Package, "tag": rec.Payload.Tag, "digest": rec.Payload.Digest,
-		"serviceId": rec.Payload.ServiceID, "node": rec.Payload.Node, "importStorage": rec.Payload.ImportStorage, "diskStorage": rec.Payload.DiskStorage, "publish": rec.Payload.Publish})
+		"serviceId": rec.Payload.ServiceID, "node": rec.Payload.Node, "importStorage": rec.Payload.ImportStorage, "diskStorage": rec.Payload.DiskStorage, "lifecycle": "staged"})
 	httpx.OK(w, rec)
 }
 

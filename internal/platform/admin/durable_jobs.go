@@ -71,6 +71,11 @@ func (h *Handler) durableReplay(w http.ResponseWriter, r *http.Request) {
 		httpx.Err(w, 409, 409, "A bulk attach is not replayed: use Retry failed projects on the provider's Projects tab")
 		return
 	}
+	// A smoke test is never replayed: its result is per run (a new one is queued from the page).
+	if kind == durablejobs.TemplateUpdateSmoke {
+		httpx.Err(w, 409, 409, "A smoke test is not replayed: run a new smoke test from Template updates")
+		return
+	}
 	// A failed/finished template update is a no-op on replay: refuse clearly instead.
 	if kind == durablejobs.TemplateUpdateVM && h.templateUpdates != nil {
 		rec, err := h.templateUpdates.Receipts.Load(r.Context(), chi.URLParam(r, "id"))
