@@ -55,6 +55,10 @@ type discoveryCache struct {
 	names   string
 }
 
+// SetRegistryFactory replaces the GitHub/GHCR client with another Registry built from the token (integration tests
+// with a fake registry). Production never calls it.
+func (s *Service) SetRegistryFactory(f func(token string) (Registry, error)) { s.newRegistry = f }
+
 // ErrNotConfigured surfaces as "configure the GitHub integration" (HTTP 409).
 var ErrNotConfigured = errors.New("configure the GitHub integration (a classic personal access token with read:packages) first")
 
