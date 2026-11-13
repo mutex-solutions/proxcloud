@@ -7,7 +7,9 @@ package templateupdates
 //
 // Invariants:
 //   - never modify or delete an existing template: the only VM this job ever mutates or destroys
-//     is one whose tags carry this job's ownership tag (pc-tu-<job>) and that is not published;
+//     is one in pc-templates that carries this job's mark (its ownership tag pc-tu-<job>, or, between
+//     the untagged create and the import write, exactly its build name and no tag; carriesOwnership)
+//     and that is not published;
 //   - the only import file it ever deletes is one whose name carries this job's prefix;
 //   - bytes are verified three times: the tee SHA-256 + byte count while streaming (bounded by the
 //     manifest's disk.bytes), PVE's own checksum (sha256 = manifest disk.sha256) on upload, and the

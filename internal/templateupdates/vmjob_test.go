@@ -124,6 +124,9 @@ func (f *fakePVE) WaitTask(_ context.Context, up pve.UPID) error {
 	if string(up) == "UPID:final" {
 		return errors.New("pve: wait UPID:final: connection reset")
 	}
+	if id, ok := strings.CutPrefix(string(up), "UPID:create-forbidden:"); ok {
+		return errors.New("pve: task failed: unable to create VM " + id + " - 403 Permission check failed (/vms/" + id + ", VM.Config.Options)")
+	}
 	return nil
 }
 
@@ -175,9 +178,10 @@ func (f *fakePVE) CreateVM(_ context.Context, node string, params map[string]str
 	id, _ := strconv.Atoi(params["vmid"])
 	f.call("create "+params["vmid"], true)
 	// PVE 9.2 checks a create's tags with VM.Config.Options on /vms/<id> without the pool; the provider token only has
-	// rights through pc-templates, so the create task fails (verified on PVE 9.2.21).
+	// rights through pc-templates, so the create TASK fails and no VM exists (verified on PVE 9.2.21): the API call
+	// itself answers with a UPID, and the 403 comes from the task.
 	if _, ok := params["tags"]; ok {
-		return "", &pve.APIError{Status: 403, Message: "Permission check failed (/vms/" + params["vmid"] + ", VM.Config.Options)"}
+		return pve.UPID("UPID:create-forbidden:" + params["vmid"]), nil
 	}
 	if _, ok := f.vms[id]; ok {
 		return "", errors.New("VM " + params["vmid"] + " already exists")
