@@ -27,9 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   templates once every Ready node has pulled it. **Rollback** points the prepull back at the previous
   pin. Same-digest updates are refused, one job per image at a time, audited
   (`admin:service:manage`). Installer: stage 55 creates a Zot `mirror` account (read/create on
-  `library/sandbox-*` only), a Role (get/patch on the two prepull DaemonSets) and a
-  ValidatingAdmissionPolicy limiting the portal to init-container image changes to mirrored digest
-  refs; stage 60 hands the account over as the write-only `secret.registryMirror`. Each switch is
+  `library/sandbox-*` only), a ValidatingAdmissionPolicy limiting the portal to init-container image
+  changes to mirrored digest refs of the same repository and, only once a dry-run probe shows that
+  policy enforced, a Role (get/patch on the two prepull DaemonSets); stage 60 hands the account over as the write-only `secret.registryMirror`. Each switch is
   recorded as a `sandboxBuiltinPin`; `make upgrade` reads the pins through the admin API and renders
   the newer of `images.yaml` and the pin, printing the line to commit, and stops (instead of rolling
   back) when it cannot read them; `DELETE /api/v1/admin/template-updates/sandbox/pins/{id}` lets

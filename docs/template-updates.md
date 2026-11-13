@@ -594,7 +594,25 @@ Stage 55 renders, next to the DaemonSets (`templates/sandbox-prepull.yml.j2`):
   (`<registry>/library/sandbox-<name>[:<YYYYMMDD>-<sha7>]@sha256:<64 hex>`), or one new `p<N>` equal to an
   existing one but for name and image (same grammar) that carries the hardened `securityContext`
   (`runAsNonRoot`, `runAsUser: 65532`, no privilege escalation, read-only root, `drop: [ALL]`). Every
-  prepull init container is rendered with that `securityContext` (they only run `sh -c true`).
+  prepull init container is rendered with that `securityContext` (they only run `sh -c true`). "The same
+  repository" is the whole repository name: `sandbox-base` never moves to `sandbox-base-evil` (or to a
+  prefix of an over-long name).
+
+**Order: the policy before the grant.** Stage 55 applies the template in two parts. First everything but the
+portal's patch right (the ConfigMap, the DaemonSet, the import-worker Role and binding, the policy and its
+binding); then it probes the policy with a server-side dry run of a forbidden change (a label) as the
+portal's identity, impersonating `system:masters` as well so RBAC cannot be what refuses it (on a first
+install the grant does not exist yet). Only once the policy refuses the probe (bounded: 30 tries, 2 s apart)
+does it apply `Role`/`RoleBinding proxcloud-template-prepull`. A policy that does not take effect in time
+deletes the RoleBinding (revoking an earlier grant too) and stops the stage; the mirror cannot move images
+until `make upgrade` passes. So the portal never holds the patch right without the policy in force.
+
+**Residual risk, not new with the mirror:** `deploy/sandbox-cluster/warming-rbac.yaml` (optional image
+warming, operator-applied, off by default) grants the same ServiceAccount `create`/`patch`/`delete` on pods
+and `create`/`patch` on Secrets in `sandbox-system`. Where an operator applied it, that identity can already
+run a pod of its choosing there, which is a wider right than the prepull patch the policy narrows; the policy
+does not fence those writes, and the mirror adds nothing to them. Leave image warming off unless its own
+review says otherwise.
 
 **Kubernetes CEL cannot iterate over the fields of a typed object, so the policy compares fields BY NAME
 — and is fail-OPEN for a field it does not name**: a field the cluster has and the lists lack would be
@@ -604,8 +622,10 @@ that runs **before** the policy is applied: it reads `/openapi/v3/api/v1` and `/
 from the sandbox cluster and stops the upgrade if `PodSpec`, `Container`, `DaemonSetSpec` or
 `PodTemplateSpec` has any property the policy does not compare (beyond the deliberate `initContainers`,
 container `name`/`image`, `template`, `spec`). A listed field the cluster lacks is harmless (`has()` is
-false on both sides). After a Kubernetes upgrade of the sandbox cluster, run `make upgrade`: a new field
-fails the check until it is added to the lists.
+false on both sides). **The check runs only at stage 55**: after upgrading the sandbox cluster's Kubernetes
+outside `make upgrade` (by hand, or by the distribution's own upgrade), run stage 55 again (`make upgrade`)
+right away. Until then a field the new version added is not compared, so the portal could change it; the
+check then fails until the field is added to the lists.
 
 The job's patch (`SetPrepullImage`): every init container of either DaemonSet that pulls
 `<registry>/library/sandbox-<name>` gets the new ref; if none does, one `p<N>` (the installer's naming)
@@ -614,7 +634,9 @@ shaped like the first one is appended to `template-prepull`. A JSON merge patch 
 
 **Admission policy test cases**, evaluated offline by the API server's own CEL admission libraries
 (`k8s.io/apiserver` v0.35, `test/policy`, its own Go module so the API does not depend on it) against the
-rendered policy — run by `installer/tests/test_sandbox_mirror.py` (`make test`) and CI:
+rendered policy, at the API server's own per-binding runtime cost budget (`RuntimeCELCostBudget`, 1e7), and
+failing on any evaluation error (so a deny never hides a broken expression) — run by
+`installer/tests/test_sandbox_mirror.py` (`make test`) and CI:
 allow an image change of `p1` to a mirrored digest ref of its own repository (with or without the tag); allow
 adding a hardened `p<N>` shaped like the others; allow the template-generation annotation to move; deny a
 tag-only ref, a ref under `t/`, `library/proxcloud-*`, another registry or `ghcr.io`; deny another
@@ -623,7 +645,15 @@ repository in an existing container (also re-pointing `python`); deny changing `
 adding one without the hardened `securityContext` or not named `p<N>`; deny changing `containers`,
 `volumes`, `serviceAccountName`, `hostNetwork`, `hostnameOverride`, `tolerations`, `nodeSelector`,
 `imagePullSecrets`, a label, an annotation, the selector or the pod template labels; deny another DaemonSet
-or namespace, CREATE and DELETE; a DaemonSet write by any other identity is not matched. Removing one
+or namespace, CREATE and DELETE; deny a repository name that extends or prefixes the old one (also an
+over-long old name), another sandbox repository in place, look-alike registries (a longer address, a
+subdomain, a port), 63/65-hex, upper-case or trailing-junk digests and a free-form tag; deny renaming `p1`,
+a toleration's key, the pod `securityContext`, a nested init-container `securityContext` change, an added
+`p2` with a `seccompProfile`, with `privileged: false` spelled out, with a tag-only ref, from another
+registry or with another command; deny a pod template annotation, finalizers, ownerReferences,
+`updateStrategy.type` and an extra annotation beside the template-generation one; allow swapping the init
+containers' order (each only pulls its image and exits); a DaemonSet write by any other identity is not
+matched. Removing one
 compared field from the rendered policy makes its case fail (checked while writing the test).
 
 ### 5.4 Switch and rollback

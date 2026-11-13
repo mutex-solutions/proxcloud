@@ -27,6 +27,7 @@ import (
 	"k8s.io/apiserver/pkg/admission/plugin/cel"
 	"k8s.io/apiserver/pkg/admission/plugin/policy/validating"
 	"k8s.io/apiserver/pkg/admission/plugin/webhook/matchconditions"
+	celconfig "k8s.io/apiserver/pkg/apis/cel"
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/cel/environment"
 	"k8s.io/utils/ptr"
@@ -160,8 +161,16 @@ func decide(t *testing.T, v validating.Validator, op admission.Operation, ns, us
 	if err != nil {
 		t.Fatal(err)
 	}
-	res := v.Validate(context.Background(), gvr, va, nil, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}, 1_000_000_000, nil)
+	// The API server's own per-binding runtime budget: a policy that only fits a larger one would fail (and, being
+	// failurePolicy Fail, deny everything) on a real cluster.
+	res := v.Validate(context.Background(), gvr, va, nil, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}},
+		celconfig.RuntimeCELCostBudget, nil)
 	for _, d := range res.Decisions {
+		// A deny must come from a validation that evaluated to false, never from an evaluation error (a missing
+		// field, a type error, the cost budget): an error would also deny and hide a broken expression.
+		if d.Evaluation == validating.EvalError {
+			t.Errorf("evaluation error: %s", d.Message)
+		}
 		if d.Action != validating.ActionAdmit {
 			return false, d.Message
 		}
@@ -283,6 +292,100 @@ func TestPrepullPolicyCases(t *testing.T) {
 			func(d *appsv1.DaemonSet) { d.Spec.Selector.MatchLabels["x"] = "y" }, false},
 		{"change the pod template labels", admission.Update, "sandbox-system", portal,
 			func(d *appsv1.DaemonSet) { d.Spec.Template.Labels["x"] = "y" }, false},
+		// The same repository is the whole repository name: a longer name that starts with it is another repository.
+		{"a repository whose name extends the old one", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			d.Spec.Template.Spec.InitContainers[1].Image = reg + "/library/sandbox-base-evil:20261112-9d00563@" + d2
+		}, false},
+		{"a repository whose name extends the old one, no tag", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			d.Spec.Template.Spec.InitContainers[1].Image = reg + "/library/sandbox-base-evil@" + d2
+		}, false},
+		{"a repository whose name is a prefix of the old one", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			d.Spec.Template.Spec.InitContainers[1].Image = reg + "/library/sandbox-bas@" + d2
+		}, false},
+		{"another sandbox repository in an existing container", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			d.Spec.Template.Spec.InitContainers[1].Image = reg + "/library/sandbox-node@" + d2
+		}, false},
+		{"a registry address that extends ours", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			d.Spec.Template.Spec.InitContainers[1].Image = reg + "6/library/sandbox-base@" + d2
+		}, false},
+		{"a registry host under ours", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			d.Spec.Template.Spec.InitContainers[1].Image = reg + ".evil.example/library/sandbox-base@" + d2
+		}, false},
+		{"a registry with a port", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			d.Spec.Template.Spec.InitContainers[1].Image = reg + ":5000/library/sandbox-base@" + d2
+		}, false},
+		{"a 63-hex digest", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			d.Spec.Template.Spec.InitContainers[1].Image = reg + "/library/sandbox-base@sha256:" + strings.Repeat("2", 63)
+		}, false},
+		{"a 65-hex digest", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			d.Spec.Template.Spec.InitContainers[1].Image = reg + "/library/sandbox-base@sha256:" + strings.Repeat("2", 65)
+		}, false},
+		{"a digest with trailing junk", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			d.Spec.Template.Spec.InitContainers[1].Image = reg + "/library/sandbox-base@" + d2 + "x"
+		}, false},
+		{"an upper-case digest", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			d.Spec.Template.Spec.InitContainers[1].Image = reg + "/library/sandbox-base@sha256:" + strings.Repeat("A", 64)
+		}, false},
+		{"a free-form tag before the digest", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			d.Spec.Template.Spec.InitContainers[1].Image = reg + "/library/sandbox-base:latest@" + d2
+		}, false},
+		{"rename p1 to p9", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			d.Spec.Template.Spec.InitContainers[1].Name = "p9"
+		}, false},
+		{"rename p1 to p9 with a new image", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			d.Spec.Template.Spec.InitContainers[1].Name = "p9"
+			d.Spec.Template.Spec.InitContainers[1].Image = newRef
+		}, false},
+		{"change a toleration's key", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			d.Spec.Template.Spec.Tolerations[0].Key = "x"
+		}, false},
+		{"set the pod securityContext", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			d.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{RunAsUser: ptr.To(int64(0))}
+		}, false},
+		{"change a nested field of the init container's securityContext with a new image", admission.Update, "sandbox-system", portal,
+			func(d *appsv1.DaemonSet) {
+				d.Spec.Template.Spec.InitContainers[1].Image = newRef
+				d.Spec.Template.Spec.InitContainers[1].SecurityContext.Capabilities.Drop = []corev1.Capability{"NET_RAW"}
+			}, false},
+		{"add a p2 with a seccompProfile", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			c := initC("p2", reg+"/library/sandbox-node:20261112-9d00563@"+d2)
+			c.SecurityContext.SeccompProfile = &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined}
+			d.Spec.Template.Spec.InitContainers = append(d.Spec.Template.Spec.InitContainers, c)
+		}, false},
+		{"add a p2 with privileged: false spelled out", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			c := initC("p2", reg+"/library/sandbox-node:20261112-9d00563@"+d2)
+			c.SecurityContext.Privileged = ptr.To(false)
+			d.Spec.Template.Spec.InitContainers = append(d.Spec.Template.Spec.InitContainers, c)
+		}, false},
+		{"add a p2 with a tag-only ref", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			d.Spec.Template.Spec.InitContainers = append(d.Spec.Template.Spec.InitContainers, initC("p2", reg+"/library/sandbox-node:20261112-9d00563"))
+		}, false},
+		{"add a p2 from another registry", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			d.Spec.Template.Spec.InitContainers = append(d.Spec.Template.Spec.InitContainers, initC("p2", "ghcr.io/mutex-solutions/sandbox-node@"+d2))
+		}, false},
+		{"add a p2 with another command", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			c := initC("p2", reg+"/library/sandbox-node@"+d2)
+			c.Command = []string{"sh", "-c", "evil"}
+			d.Spec.Template.Spec.InitContainers = append(d.Spec.Template.Spec.InitContainers, c)
+		}, false},
+		{"add a pod template annotation", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			d.Spec.Template.Annotations = map[string]string{"x": "y"}
+		}, false},
+		{"add a finalizer", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) { d.Finalizers = []string{"x/y"} }, false},
+		{"add an ownerReference", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			d.OwnerReferences = []metav1.OwnerReference{{APIVersion: "v1", Kind: "Namespace", Name: "x", UID: "u"}}
+		}, false},
+		{"change the updateStrategy type", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			d.Spec.UpdateStrategy.Type = appsv1.OnDeleteDaemonSetStrategyType
+		}, false},
+		{"change the template-generation annotation and another one", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			d.Annotations = map[string]string{"deprecated.daemonset.template.generation": "9", "x": "y"}
+		}, false},
+		// Reordering the init containers changes nothing a node does (each only pulls its image and exits): allowed.
+		{"swap the init containers' order", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) {
+			ic := d.Spec.Template.Spec.InitContainers
+			ic[0], ic[1] = ic[1], ic[0]
+		}, true},
 		{"another DaemonSet", admission.Update, "sandbox-system", portal, func(d *appsv1.DaemonSet) { d.Name = "node-setup" }, false},
 		{"another namespace", admission.Update, "kube-system", portal, func(*appsv1.DaemonSet) {}, false},
 	}
@@ -297,6 +400,15 @@ func TestPrepullPolicyCases(t *testing.T) {
 		if admit != c.admit {
 			t.Errorf("%s: admit=%v (%s), want %v", c.name, admit, msg, c.admit)
 		}
+	}
+	// An existing container whose repository name is longer than a new ref may carry (63) cannot be moved to the
+	// 63-character prefix of that name: the comparison takes each repository name whole.
+	long := prepull()
+	long.Spec.Template.Spec.InitContainers[1].Image = reg + "/library/sandbox-" + strings.Repeat("a", 64) + "@" + d1
+	moved := prepull()
+	moved.Spec.Template.Spec.InitContainers[1].Image = reg + "/library/sandbox-" + strings.Repeat("a", 63) + "@" + d2
+	if admit, _ := decide(t, v, admission.Update, "sandbox-system", portal, long, moved); admit {
+		t.Error("a move to a prefix of an over-long repository name was admitted")
 	}
 	// CREATE and DELETE by the portal identity are denied.
 	if admit, _ := decide(t, v, admission.Create, "sandbox-system", portal, nil, prepull()); admit {

@@ -93,6 +93,15 @@
           deploy/templates/images.yaml alone could roll back an image the portal mirrored. Restore {{ key_file }} from the
           site backup and run make upgrade again. Only if you know no sandbox image was mirrored from the portal (Template
           updates), run it with -e pc_sandbox_portal_pins_unavailable_ok=true.
+    # The override above skips the pin read without a word otherwise: say so as loudly as the rescue below does.
+    - name: Say that the pins were not read without the admin key, on request
+      when: pc_sbx_handed.stat.exists and not pc_sbx_key.stat.exists and (pc_sandbox_portal_pins_unavailable_ok | default(false) | bool)
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: the portal's sandbox image pins were NOT read (pc_sandbox_portal_pins_unavailable_ok): the portal was
+          given the sandbox mirror account ({{ pc_gen }}/sandbox-registry-mirror.handed) but the installer's admin key
+          {{ key_file }} is missing. deploy/templates/images.yaml is rendered as is and may roll back an image the portal
+          mirrored (a portal pin).
     - name: Read the portal's sandbox image pins
       when: pc_sbx_key.stat.exists
       block:
@@ -138,7 +147,9 @@
           ansible.builtin.set_fact: {pc_sbx_portal_pins: {}}
         - name: Say that the pins were skipped on request
           ansible.builtin.debug:
-            msg: the portal's sandbox image pins were NOT read (pc_sandbox_portal_pins_unavailable_ok); images.yaml is rendered as is
+            msg: >-
+              WARNING: the portal's sandbox image pins were NOT read (pc_sandbox_portal_pins_unavailable_ok);
+              deploy/templates/images.yaml is rendered as is and may roll back an image the portal mirrored (a portal pin).
     - name: Merge the pins with images.yaml
       ansible.builtin.set_fact:
         pc_sbx_pins_merged: >-
@@ -290,9 +301,10 @@
       environment: {KUBECONFIG: "{{ pc_sbx_kubeconfig }}"}
       register: pc_sbx_builds_ns
       changed_when: pc_sbx_builds_ns.stdout_lines | reject('search', ' unchanged$') | list | length > 0
-    # The prepull admission policy compares every DaemonSet, pod and container field by name (CEL cannot iterate over
-    # a typed object): a field this cluster has and the lists lack would be writable by the portal. Compare the lists
-    # with the cluster's own schemas before the policy is (re)applied; stop on any gap rather than leave one open.
+    # The prepull admission policy compares every DaemonSet metadata, spec, pod and container field by name (CEL cannot
+    # iterate over a typed object): a field this cluster has and the lists lack would be writable by the portal. Compare
+    # the lists with the cluster's own schemas before the policy is (re)applied; stop on any gap rather than leave one
+    # open. Each group-version document carries every schema it references, ObjectMeta included.
     - name: Read the cluster's schemas the prepull policy must cover
       ansible.builtin.command: kubectl get --raw {{ item }}
       environment: {KUBECONFIG: "{{ pc_sbx_kubeconfig }}"}
@@ -310,8 +322,13 @@
           (installer/playbooks/group_vars/all/prepull-policy.yml) — or, for a field that must stay writable, to its
           uncompared list with a reason — and run make upgrade again.
         quiet: true
+    # The portal's patch right on the prepull DaemonSets (Role and RoleBinding proxcloud-template-prepull) exists only
+    # behind the admission policy that narrows it to image moves (docs/template-updates.md §5.3). So everything else,
+    # the policy included, goes first; the grant follows once a probe shows the API server enforcing the policy. A
+    # policy that does not take effect in time revokes the grant and stops the stage.
     - name: Apply the prepull and the registry's address on the sandbox cluster
       vars:
+        pc_prepull_part: base
         pc_sbx_images: "{{ images }}"
         pc_sbx_reg_ca: "{{ pc_sbx_reg_ca_b64.stdout | b64decode }}"
       ansible.builtin.command:
@@ -320,6 +337,49 @@
       environment: {KUBECONFIG: "{{ pc_sbx_kubeconfig }}"}
       register: pc_sbx_prepull
       changed_when: pc_sbx_prepull.stdout_lines | reject('search', ' unchanged$') | list | length > 0
+    - name: Grant the portal the prepull patch right behind the admission policy
+      environment: {KUBECONFIG: "{{ pc_sbx_kubeconfig }}"}
+      block:
+        # A server-side dry run of a change the policy forbids (a label), as the portal's identity: impersonating
+        # system:masters as well gets it past RBAC (the grant does not exist yet on a first install), so only the
+        # policy can refuse it. Nothing is written.
+        - name: Wait until the API server enforces the prepull admission policy
+          ansible.builtin.command: >-
+            kubectl -n {{ pc_sbx_reg_system_ns }} patch daemonset template-prepull --type=merge --dry-run=server
+            --as=system:serviceaccount:proxcloud-system:proxcloud --as-group=system:masters
+            -p '{"metadata":{"labels":{"proxcloud-policy-probe":"1"}}}'
+          register: pc_sbx_policy_probe
+          changed_when: false
+          failed_when: false
+          until: pc_sbx_policy_probe.rc != 0 and 'proxcloud-template-prepull-images-only' in pc_sbx_policy_probe.stderr
+          retries: 30
+          delay: 2
+        - name: Check that the admission policy refused the probe
+          ansible.builtin.assert:
+            that: pc_sbx_policy_probe.rc != 0 and 'proxcloud-template-prepull-images-only' in pc_sbx_policy_probe.stderr
+            quiet: true
+        - name: Grant the portal get and patch on the prepull DaemonSets
+          ansible.builtin.command:
+            cmd: kubectl apply -f -
+            stdin: "{{ lookup('ansible.builtin.template', 'templates/sandbox-prepull.yml.j2') }}"
+          vars:
+            pc_prepull_part: grant
+            pc_sbx_images: "{{ images }}"
+            pc_sbx_reg_ca: "{{ pc_sbx_reg_ca_b64.stdout | b64decode }}"
+          register: pc_sbx_prepull_grant
+          changed_when: pc_sbx_prepull_grant.stdout_lines | reject('search', ' unchanged$') | list | length > 0
+      rescue:
+        - name: Revoke the portal's prepull patch right
+          ansible.builtin.command: kubectl -n {{ pc_sbx_reg_system_ns }} delete rolebinding proxcloud-template-prepull --ignore-not-found
+          changed_when: true
+        - name: Stop when the admission policy is not enforced
+          ansible.builtin.fail:
+            msg: >-
+              The sandbox cluster's API server did not enforce the prepull admission policy
+              (proxcloud-template-prepull-images-only) within a minute, so the portal was not given patch rights on the
+              template-prepull DaemonSets (and any earlier grant was revoked); the sandbox mirror cannot move images
+              until then. Probe answer: {{ (pc_sbx_policy_probe | default({})).stderr | default('none') }}.
+              Check that ValidatingAdmissionPolicy is served (Kubernetes 1.30 or newer) and run make upgrade again.
     - name: Record the registry for stages 56 and 60
       delegate_to: localhost
       become: false
