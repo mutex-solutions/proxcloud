@@ -116,8 +116,9 @@ type MirrorRequest struct {
 	Epoch       int64
 	Source      string // ghcr.io/mutex-solutions/sandbox-<name>@sha256:<digest>
 	Destination string // <registry>/library/sandbox-<name>:<tag>
-	// SourceToken is a short-lived GHCR registry bearer token with pull scope on the source package only (minted by
-	// the portal from the GitHub integration's PAT); it goes only into the pod-owned source Secret. Never the PAT.
+	// SourceToken is a short-lived, anonymous GHCR registry bearer token with pull scope on the (public) source
+	// package only, minted by the portal and checked never to be or contain the GitHub PAT; it goes only into the
+	// pod-owned source Secret.
 	SourceToken string
 }
 
@@ -197,7 +198,8 @@ func mirrorPodOf(pod map[string]any) *MirrorPod {
 }
 
 // StartMirror creates the worker pod, reads back its UID, then writes the two credential Secrets owned by that UID.
-// Returns the UID. The PAT exists only in the source Secret's data (deleted with the pod by the garbage collector).
+// Returns the UID. The source token exists only in the source Secret's data (deleted with the pod by the garbage
+// collector); the GitHub PAT never reaches the cluster.
 func (s *Service) StartMirror(ctx context.Context, req MirrorRequest) (string, error) {
 	policy, err := s.MirrorPolicy()
 	if err != nil {

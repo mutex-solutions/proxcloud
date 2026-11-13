@@ -37,10 +37,12 @@ Code: [`internal/templateupdates`](../internal/templateupdates), admin routes in
   reports its scopes in `X-OAuth-Scopes`; the save is refused when that header is absent (fine-grained /
   app token) or does not contain `read:packages` (or `write:`/`delete:packages`, which imply it). A
   rate-limited check answers 429 with the reset time.
-- **Every GitHub and GHCR call uses it**: REST calls send `Authorization: Bearer <PAT>`; registry calls
+- **Discovery uses it**: REST calls send `Authorization: Bearer <PAT>`; the VM image registry calls
   exchange it (HTTP Basic, only to the realm on the registry's own host) for a pull-scoped registry
-  token. There is **no anonymous fallback**: without the integration the page shows *Configure the
-  GitHub integration* and the API answers 409.
+  token. Without the integration the page shows *Configure the GitHub integration* and the API answers
+  409. The one exception is the **sandbox mirror's worker token** (§5.2): the sandbox packages are
+  public, so the worker gets an anonymous pull token, checked never to be or contain the PAT; the PAT
+  never reaches the sandbox cluster.
 - The token never enters a job payload, receipt, audit event, error or log line. The client type
   redacts itself under `%v`/`%+v`/`%#v`/slog, transport errors are stripped of URLs, and the
   `Authorization` header is dropped on any cross-host redirect (GHCR blob → signed storage URL).
@@ -500,9 +502,10 @@ re-verifies the digest server side (a published `<YYYYMMDD>-<sha7>` tag whose ma
 prepull DaemonSets already run that digest (**same-digest refusal**, 409), and in one transaction under
 an advisory lock on `<registry>/library/sandbox-<name>` refuses while another job for that image is not
 settled (**dedup per image**, 409) before it enqueues the job and its receipt. A job is settled when its
-receipt is `succeeded` or cleaned up, or its durable job is `dead` or `succeeded`: a receipt already
-`failed` whose job is still running (the failure is recorded before the job's cleanup runs) keeps the
-image busy, so nothing overlaps that cleanup. Receipt steps (collection `templateUpdateSandbox`):
+receipt is `succeeded` or cleaned up, or its durable job `succeeded`: a receipt already `failed` whose job
+is still running (the failure is recorded before the job's cleanup runs) keeps the image busy, and so
+does a `dead` job whose receipt is not cleaned up yet (its cleanup is still to come from the dead-job pass,
+which always ends by marking it cleaned or recording why it cannot be), so nothing overlaps that cleanup. Receipt steps (collection `templateUpdateSandbox`):
 
 `queued → mirroring (intent: pod name) → mirrored → verified → prepull (intent: pin + previous images) → pinned → succeeded | failed`
 
@@ -536,10 +539,13 @@ image busy, so nothing overlaps that cleanup. Receipt steps (collection `templat
    5 minutes is replaced; a pod whose Secrets were not confirmed written is never waited for. The runner
    runs even with the flag off, but then never runs a job (no worker, no prepull patch): a job it can
    claim — queued (a retry once it is due), or running with an **expired** lease (its runner is gone) —
-   ends `failed` `feature_disabled` with its cleanup (its worker pods and their Secrets deleted, the pin
+   ends `failed` `feature_disabled` (or with the failure code an earlier attempt already recorded) with its
+   cleanup (its worker pods and their Secrets deleted, the pin
    of a prepull switch that never landed restored), so it no longer blocks its image or
    `DELETE …/pins/{id}`; one whose switch already landed (`pinned`) is acknowledged as succeeded. A
-   running job whose lease is still valid (another replica with the flag on) is never touched. It also
+   running job whose lease is still valid (another replica with the flag on) is never touched. A running
+   job whose lease expired on its **last** attempt goes straight to `dead` (the durable store's own rule)
+   and is cleaned up by the dead-job pass instead (`job_dead`). It also
    cleans up dead jobs and deletes mirror pods of jobs that are not pending/running (an **orphan sweep**,
    every 10 minutes, every sandbox provider), so no pod with a credential outlives its job. The worker
    copies the source's own manifest bytes
@@ -619,9 +625,12 @@ review says otherwise.
 writable by the portal. The lists live in one place, `pc_prepull_policy_fields`
 (`installer/playbooks/group_vars/all/prepull-policy.yml`), used by the template and by a stage-55 check
 that runs **before** the policy is applied: it reads `/openapi/v3/api/v1` and `/openapi/v3/apis/apps/v1`
-from the sandbox cluster and stops the upgrade if `PodSpec`, `Container`, `DaemonSetSpec` or
-`PodTemplateSpec` has any property the policy does not compare (beyond the deliberate `initContainers`,
-container `name`/`image`, `template`, `spec`). A listed field the cluster lacks is harmless (`has()` is
+from the sandbox cluster and stops the upgrade if `ObjectMeta`, `PodSpec`, `Container`, `DaemonSetSpec` or
+`PodTemplateSpec` has any property the policy does not compare, or one of them is not served. The
+deliberately uncompared properties are listed under `uncompared` in the same file, each with its reason:
+`initContainers`, container `name`/`image`, `template`, `spec`, and the ObjectMeta fields a rule of its own
+checks (`annotations`) or the API server owns (`name`, `namespace`, `uid`, `resourceVersion`, `generation`,
+`managedFields`, the timestamps, …). A listed field the cluster lacks is harmless (`has()` is
 false on both sides). **The check runs only at stage 55**: after upgrading the sandbox cluster's Kubernetes
 outside `make upgrade` (by hand, or by the distribution's own upgrade), run stage 55 again (`make upgrade`)
 right away. Until then a field the new version added is not compared, so the portal could change it; the

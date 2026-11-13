@@ -330,7 +330,16 @@ class PrepullPolicyTests(unittest.TestCase):
         # A policy that never takes effect revokes the grant and stops the stage.
         revoke, stop = blk["rescue"]
         self.assertIn("delete rolebinding proxcloud-template-prepull", revoke["ansible.builtin.command"])
-        self.assertIn("ansible.builtin.fail", stop)
+        # The message names what failed: the grant's own apply, or the policy not taking effect.
+        for failed_task, failed_result, want, unwanted in (
+                ({"name": grant["name"]}, {"stderr": "etcdserver: request timed out"}, "etcdserver: request timed out", "did not enforce"),
+                ({"name": probe["name"]}, {"msg": "Retries exhausted"}, "did not enforce", "applying the portal's patch right")):
+            v = {"ansible_failed_task": failed_task, "ansible_failed_result": failed_result,
+                 "pc_sbx_policy_probe": {"stderr": "forbidden"}}
+            v.update({k: Templar(loader=DataLoader(), variables=v).template(e) for k, e in stop["vars"].items()})
+            msg = Templar(loader=DataLoader(), variables=v).template(stop["ansible.builtin.fail"]["msg"])
+            self.assertIn(want, msg)
+            self.assertNotIn(unwanted, msg)
 
     def test_policy_covers_every_kubernetes_135_field(self):
         # The reviewer's gap (hostnameOverride, workloadRef, restartPolicyRules) is closed, and nothing else is open.

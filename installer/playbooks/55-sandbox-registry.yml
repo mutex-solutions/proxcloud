@@ -372,14 +372,21 @@
         - name: Revoke the portal's prepull patch right
           ansible.builtin.command: kubectl -n {{ pc_sbx_reg_system_ns }} delete rolebinding proxcloud-template-prepull --ignore-not-found
           changed_when: true
-        - name: Stop when the admission policy is not enforced
+        # Which step failed decides the message: the probe (policy not in force) or the grant's own apply.
+        - name: Stop without the prepull patch right
+          vars:
+            granting: "{{ (ansible_failed_task | default({})).name | default('') == 'Grant the portal get and patch on the prepull DaemonSets' }}"
+            failed: "{{ ansible_failed_result | default({}) }}"
           ansible.builtin.fail:
             msg: >-
-              The sandbox cluster's API server did not enforce the prepull admission policy
+              {% if granting | bool %}The sandbox cluster enforces the prepull admission policy, but applying the
+              portal's patch right on the template-prepull DaemonSets failed: {{ failed.stderr | default(failed.msg | default('no detail')) }}.
+              The grant was revoked, so the sandbox mirror cannot move images until make upgrade passes; run it again.
+              {%- else %}The sandbox cluster's API server did not enforce the prepull admission policy
               (proxcloud-template-prepull-images-only) within a minute, so the portal was not given patch rights on the
               template-prepull DaemonSets (and any earlier grant was revoked); the sandbox mirror cannot move images
               until then. Probe answer: {{ (pc_sbx_policy_probe | default({})).stderr | default('none') }}.
-              Check that ValidatingAdmissionPolicy is served (Kubernetes 1.30 or newer) and run make upgrade again.
+              Check that ValidatingAdmissionPolicy is served (Kubernetes 1.30 or newer) and run make upgrade again.{% endif %}
     - name: Record the registry for stages 56 and 60
       delegate_to: localhost
       become: false
