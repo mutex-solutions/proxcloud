@@ -83,6 +83,31 @@ type Receipt = {
 }
 type History = { items: Receipt[]; jobs: Record<string, { state: string; attempts: number; maxAttempts: number; lastError?: string }> }
 type Placement = { configuredImportStorage: string; nodes: { node: string; importStorages: string[]; diskStorages: string[] }[] }
+type SandboxPin = { id: string; template: string; registry: string; tag: string; digest: string; ref: string; action: string; previous?: string; serviceId: string; actor: string; at: string; mirrorJob: string }
+type SandboxReceipt = {
+  id: string
+  payload: { action: "mirror" | "rollback"; serviceId: string; name: string; registry: string; tag: string; digest: string }
+  requestedBy: string
+  createdAt: string
+  updatedAt: string
+  step: string
+  code?: string
+  message?: string
+  warnings?: string[]
+}
+type SandboxImageState = {
+  serviceId: string
+  serviceName: string
+  name: string
+  prepull: string[]
+  pin?: SandboxPin
+  pulled: number
+  total: number
+  templates: { template: string; image: string; switched: boolean }[]
+  imagesYaml?: string
+  error?: string
+}
+type SandboxState = { enabled: boolean; items: SandboxReceipt[]; jobs: History["jobs"]; pins: SandboxPin[]; states: SandboxImageState[] }
 type Provider = { id: string; name: string; config?: { provider?: string }; status?: string }
 
 const BASE = "/admin/template-updates"
@@ -120,6 +145,19 @@ export default function TemplateUpdatesPage() {
   })
 
   const [target, setTarget] = useState<VMLine | null>(null)
+  const sbxEnabled = !!status.data?.sandboxMirrorEnabled
+  const sbx = useQuery({
+    queryKey: ["tu-sandbox"],
+    queryFn: () => apiFetch<SandboxState>(`${BASE}/sandbox/state`),
+    enabled: !!configured,
+    refetchInterval: (q) =>
+      q.state.data?.items?.some((r) => !["succeeded", "failed"].includes(r.step)) ||
+      q.state.data?.states?.some((s) => s.total > 0 && (s.pulled < s.total || s.templates.some((t) => !t.switched)))
+        ? 5000
+        : false,
+  })
+  const [sbxTarget, setSbxTarget] = useState<{ row: SandboxRow; serviceId: string } | null>(null)
+  const [sbxRollback, setSbxRollback] = useState<SandboxImageState | null>(null)
 
   return (
     <>
@@ -158,7 +196,8 @@ export default function TemplateUpdatesPage() {
             <VMTab rows={disc.data?.vm} loading={disc.isLoading} canManage={canManage} enabled={!!status.data?.vmUpdatesEnabled} onUpdate={setTarget} />
           </TabsContent>
           <TabsContent value="sandbox">
-            <SandboxTab rows={disc.data?.sandbox} loading={disc.isLoading} />
+            <SandboxTab rows={disc.data?.sandbox} loading={disc.isLoading} state={sbx.data} enabled={sbxEnabled} canManage={canManage}
+              onUpdate={(row, serviceId) => setSbxTarget({ row, serviceId })} onRollback={setSbxRollback} />
           </TabsContent>
           <TabsContent value="history">
             <HistoryTab data={history.data} loading={history.isLoading} />
@@ -171,6 +210,14 @@ export default function TemplateUpdatesPage() {
         </Tabs>
       )}
 
+      {sbxTarget && (
+        <SandboxUpdateDialog row={sbxTarget.row} serviceId={sbxTarget.serviceId} onClose={() => setSbxTarget(null)}
+          onQueued={() => { setSbxTarget(null); void qc.invalidateQueries({ queryKey: ["tu-sandbox"] }) }} />
+      )}
+      {sbxRollback && (
+        <SandboxRollbackDialog state={sbxRollback} onClose={() => setSbxRollback(null)}
+          onQueued={() => { setSbxRollback(null); void qc.invalidateQueries({ queryKey: ["tu-sandbox"] }) }} />
+      )}
       {target && (
         <VMUpdateDialog
           line={target}
@@ -221,6 +268,11 @@ function GitHubCard({ status, loading }: { status?: Status; loading: boolean }) 
         {status && !status.vmUpdatesEnabled && (
           <p className="text-xs text-muted-foreground">
             VM template imports are not enabled on this site (PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED); discovery still works.
+          </p>
+        )}
+        {status && !status.sandboxMirrorEnabled && (
+          <p className="text-xs text-muted-foreground">
+            Sandbox image updates from the portal are not enabled on this site (PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED); use images.yaml and make upgrade.
           </p>
         )}
       </CardContent>
@@ -430,19 +482,56 @@ function VMUpdateDialog({ line, onClose, onQueued }: { line: VMLine; onClose: ()
   )
 }
 
-function SandboxTab({ rows, loading }: { rows?: SandboxRow[]; loading: boolean }) {
+const SBX_STEP: Record<string, string> = {
+  queued: "Queued", mirroring: "Mirroring", mirrored: "Verifying digest", verified: "Verifying digest",
+  prepull: "Updating prepull", pinned: "Prepull updated", succeeded: "Prepull updated", failed: "Failed",
+}
+
+// sandboxPhase is the one-line progress of a built-in image on a provider: the job's step while it runs, then
+// "waiting for prepull on N/M nodes" until every Ready node pulled the pinned digest, then "switched" once the adoption
+// job moved the templates.
+function sandboxPhase(st: SandboxImageState | undefined, job: SandboxReceipt | undefined): { label: string; tone: "default" | "secondary" | "destructive" | "outline" } {
+  if (job && !["succeeded", "failed"].includes(job.step)) return { label: SBX_STEP[job.step] ?? job.step, tone: "outline" }
+  if (job?.step === "failed") return { label: `Failed: ${job.code ?? "error"}`, tone: "destructive" }
+  if (!st?.pin) return { label: "", tone: "outline" }
+  if (st.error) return { label: st.error, tone: "destructive" }
+  if (st.total > 0 && st.pulled < st.total) return { label: `Waiting for prepull on ${st.pulled}/${st.total} nodes`, tone: "outline" }
+  if (st.templates.length > 0 && st.templates.some((t) => !t.switched)) return { label: `Prepulled on ${st.pulled}/${st.total} nodes, switching templates`, tone: "outline" }
+  return { label: "Switched", tone: "secondary" }
+}
+
+function SandboxTab({ rows, loading, state, enabled, canManage, onUpdate, onRollback }: {
+  rows?: SandboxRow[]; loading: boolean; state?: SandboxState; enabled: boolean; canManage: boolean
+  onUpdate: (r: SandboxRow, serviceId: string) => void; onRollback: (s: SandboxImageState) => void
+}) {
+  const latestJob = (name: string, serviceId: string) =>
+    state?.items.filter((r) => r.payload.name === name && r.payload.serviceId === serviceId).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
+  const stateOf = (name: string, serviceId: string) => state?.states.find((s) => s.name === name && s.serviceId === serviceId)
   return (
     <Card>
       <CardContent className="space-y-4 pt-6">
-        <Alert>
-          <AlertTitle>Sandbox image updates are not enabled from the portal yet</AlertTitle>
-          <AlertDescription>
-            The portal has no account that may write the sandbox registry's <code>library/</code> images or change the
-            prepull DaemonSet. To roll out a newer image: put its pin line into <code>deploy/templates/images.yaml</code>{" "}
-            and run <code>make upgrade</code> — stage 55 copies it into the sandbox registry and pre-pulls it on every node,
-            then the adoption job switches templates once every node has it (the previous pin stays until then).
-          </AlertDescription>
-        </Alert>
+        {enabled ? (
+          <Alert>
+            <AlertTitle>Updates are mirrored, pre-pulled, then switched</AlertTitle>
+            <AlertDescription>
+              <b>Update</b> copies the published image by digest into the sandbox registry (<code>library/</code>, same digest,
+              verified), points the prepull DaemonSets at it, and the adoption job switches each template once every Ready node
+              has pulled it — the previous image stays until then and is never deleted. <b>Rollback</b> points the prepull back at
+              the previous pin. Commit the shown <code>images.yaml</code> line so the repository matches; <code>make upgrade</code>{" "}
+              reads these pins and never renders an older image.
+            </AlertDescription>
+          </Alert>
+        ) : (
+          <Alert>
+            <AlertTitle>Sandbox image updates from the portal are not enabled on this site</AlertTitle>
+            <AlertDescription>
+              To roll out a newer image: put its pin line into <code>deploy/templates/images.yaml</code>{" "}
+              and run <code>make upgrade</code> — stage 55 copies it into the sandbox registry and pre-pulls it on every node,
+              then the adoption job switches templates once every node has it (the previous pin stays until then). The operator
+              can turn on portal updates with <code>PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED=true</code>.
+            </AlertDescription>
+          </Alert>
+        )}
         <Table>
           <TableHeader>
             <TableRow>
@@ -458,36 +547,188 @@ function SandboxTab({ rows, loading }: { rows?: SandboxRow[]; loading: boolean }
             ) : !rows?.length ? (
               <TableRow><TableCell colSpan={4} className="text-center text-muted-foreground">No sandbox images found.</TableCell></TableRow>
             ) : (
-              rows.map((r) => (
-                <TableRow key={r.name}>
-                  <TableCell className="font-mono text-xs">sandbox-{r.name}</TableCell>
-                  <TableCell>
-                    {r.latest ? (
-                      <>
-                        <div className="font-mono text-xs">{r.latest.tag} @{short(r.latest.digest)}</div>
-                        <div className="text-xs text-muted-foreground">{timeAgo(r.latest.createdAt)}</div>
-                        <Button size="sm" variant="link" className="h-auto p-0 text-xs" onClick={() => {
-                          void navigator.clipboard?.writeText(`  ${r.name}: ${r.latest!.reference}`)
-                          toast.success("images.yaml pin line copied")
-                        }}>Copy images.yaml pin</Button>
-                      </>
-                    ) : (
-                      <span className="text-muted-foreground">not published</span>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-xs">
-                    {r.pinned.length === 0 ? <span className="text-muted-foreground">not used by a sandbox provider</span> : r.pinned.map((p) => (
-                      <div key={`${p.serviceId}/${p.template}`} title={p.image}>{p.serviceName} · {p.template} · @{short(p.digest) || "tag only"}</div>
-                    ))}
-                  </TableCell>
-                  <TableCell>{r.updateAvailable ? <Badge>Update available</Badge> : r.latest && r.pinned.length ? <Badge variant="secondary">Up to date</Badge> : null}</TableCell>
-                </TableRow>
-              ))
+              rows.map((r) => {
+                const providers = Array.from(new Map(r.pinned.map((p) => [p.serviceId, p.serviceName])).entries())
+                return (
+                  <TableRow key={r.name}>
+                    <TableCell className="font-mono text-xs">sandbox-{r.name}</TableCell>
+                    <TableCell>
+                      {r.latest ? (
+                        <>
+                          <div className="font-mono text-xs">{r.latest.tag} @{short(r.latest.digest)}</div>
+                          <div className="text-xs text-muted-foreground">{timeAgo(r.latest.createdAt)}</div>
+                          <Button size="sm" variant="link" className="h-auto p-0 text-xs" onClick={() => {
+                            void navigator.clipboard?.writeText(`  ${r.name}: ${r.latest!.reference}`)
+                            toast.success("images.yaml pin line copied")
+                          }}>Copy images.yaml pin</Button>
+                        </>
+                      ) : (
+                        <span className="text-muted-foreground">not published</span>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-xs">
+                      {r.pinned.length === 0 ? <span className="text-muted-foreground">not used by a sandbox provider</span> : r.pinned.map((p) => (
+                        <div key={`${p.serviceId}/${p.template}`} title={p.image}>{p.serviceName} · {p.template} · @{short(p.digest) || "tag only"}</div>
+                      ))}
+                    </TableCell>
+                    <TableCell className="space-y-2">
+                      {r.updateAvailable ? <Badge>Update available</Badge> : r.latest && r.pinned.length ? <Badge variant="secondary">Up to date</Badge> : null}
+                      {providers.map(([serviceId, serviceName]) => {
+                        const st = stateOf(r.name, serviceId)
+                        const job = latestJob(r.name, serviceId)
+                        const phase = sandboxPhase(st, job)
+                        const busy = !!job && !["succeeded", "failed"].includes(job.step)
+                        return (
+                          <div key={serviceId} className="space-y-1 text-xs">
+                            {providers.length > 1 && <div className="text-muted-foreground">{serviceName}</div>}
+                            {phase.label && <Badge variant={phase.tone}>{phase.label}</Badge>}
+                            {st?.imagesYaml && (
+                              <Button size="sm" variant="link" className="h-auto p-0 text-xs" title={st.imagesYaml} onClick={() => {
+                                void navigator.clipboard?.writeText(st.imagesYaml!)
+                                toast.success("images.yaml line of the portal's pin copied: commit it")
+                              }}>Copy the images.yaml line to commit</Button>
+                            )}
+                            <div className="flex gap-2">
+                              {r.latest && (
+                                <Button size="sm" variant={r.updateAvailable ? "default" : "outline"} disabled={!enabled || !canManage || busy}
+                                  title={!enabled ? "Not enabled on this site" : !canManage ? "Needs admin:service:manage" : busy ? "An update of this image is running" : undefined}
+                                  onClick={() => onUpdate(r, serviceId)}>Update…</Button>
+                              )}
+                              {st?.pin?.previous && (
+                                <Button size="sm" variant="outline" disabled={!enabled || !canManage || busy}
+                                  title={!enabled ? "Not enabled on this site" : !canManage ? "Needs admin:service:manage" : undefined}
+                                  onClick={() => onRollback(st)}>Rollback…</Button>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </TableCell>
+                  </TableRow>
+                )
+              })
             )}
           </TableBody>
         </Table>
+        {!!state?.items.length && (
+          <div className="space-y-1">
+            <div className="text-sm font-medium">Sandbox update jobs</div>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Requested</TableHead>
+                  <TableHead>Image</TableHead>
+                  <TableHead>Progress</TableHead>
+                  <TableHead>Result</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {state.items.map((j) => {
+                  const dj = state.jobs[j.id]
+                  return (
+                    <TableRow key={j.id}>
+                      <TableCell className="text-xs">{fmtDateTime(j.createdAt)}<div className="text-muted-foreground">{j.requestedBy}</div></TableCell>
+                      <TableCell className="font-mono text-xs">{j.payload.action} sandbox-{j.payload.name}:{j.payload.tag} @{short(j.payload.digest)}</TableCell>
+                      <TableCell>
+                        <Badge variant={j.step === "failed" ? "destructive" : j.step === "succeeded" ? "secondary" : "outline"}>{SBX_STEP[j.step] ?? j.step}</Badge>
+                        {dj && dj.state !== "succeeded" && <div className="text-xs text-muted-foreground">job {dj.state}, attempt {dj.attempts}/{dj.maxAttempts}</div>}
+                      </TableCell>
+                      <TableCell className="text-xs">
+                        {j.code ? <code>{j.code}</code> : null} {j.message}
+                        {j.warnings?.map((w) => <div key={w} className="text-amber-600">{w}</div>)}
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
+              </TableBody>
+            </Table>
+          </div>
+        )}
       </CardContent>
     </Card>
+  )
+}
+
+function SandboxUpdateDialog({ row, serviceId, onClose, onQueued }: { row: SandboxRow; serviceId: string; onClose: () => void; onQueued: () => void }) {
+  const latest = row.latest!
+  const [confirm, setConfirm] = useState("")
+  const submit = useMutation({
+    mutationFn: () => apiFetch(`${BASE}/sandbox`, { method: "POST", body: { serviceId, name: row.name, digest: latest.digest, confirmDigest: confirm.trim() } }),
+    onSuccess: () => { toast.success("Mirror queued"); onQueued() },
+    onError: (e) => toast.error(e instanceof ApiError || e instanceof Error ? e.message : String(e)),
+  })
+  const pinned = row.pinned.filter((p) => p.serviceId === serviceId)
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Update sandbox-{row.name} to {latest.tag}</DialogTitle>
+          <DialogDescription>
+            The API re-verifies the digest on GitHub Packages, copies the image by digest into the sandbox registry (the same
+            digest, checked after the copy), then points the prepull DaemonSets at it. Templates switch once every Ready node has
+            pulled it; until then sandboxes keep starting from the current image.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3 text-sm">
+          <dl className="grid grid-cols-[8rem_1fr] gap-x-3 gap-y-1">
+            <dt className="text-muted-foreground">Source</dt><dd className="font-mono text-xs break-all">ghcr.io/mutex-solutions/{latest.package}@{latest.digest}</dd>
+            <dt className="text-muted-foreground">Tag</dt><dd className="font-mono text-xs">{latest.tag}</dd>
+            <dt className="text-muted-foreground">Runs now</dt>
+            <dd className="font-mono text-xs break-all">{pinned.length ? pinned.map((p) => <div key={p.template}>{p.template}: {p.image}</div>) : "—"}</dd>
+          </dl>
+          <div className="space-y-1">
+            <Label htmlFor="sbx-confirm">Type or paste the exact digest to confirm</Label>
+            <Input id="sbx-confirm" className="font-mono text-xs" placeholder={latest.digest} value={confirm} onChange={(e) => setConfirm(e.target.value)} />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button disabled={confirm.trim() !== latest.digest || submit.isPending} onClick={() => submit.mutate()}>
+            {submit.isPending ? "Queuing…" : "Mirror and pre-pull"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function SandboxRollbackDialog({ state, onClose, onQueued }: { state: SandboxImageState; onClose: () => void; onQueued: () => void }) {
+  const previous = state.pin?.previous ?? ""
+  const digest = previous.includes("@") ? previous.slice(previous.indexOf("@") + 1) : ""
+  const [confirm, setConfirm] = useState("")
+  const submit = useMutation({
+    mutationFn: () => apiFetch(`${BASE}/sandbox/rollback`, { method: "POST", body: { serviceId: state.serviceId, name: state.name, confirmDigest: confirm.trim() } }),
+    onSuccess: () => { toast.success("Rollback queued"); onQueued() },
+    onError: (e) => toast.error(e instanceof ApiError || e instanceof Error ? e.message : String(e)),
+  })
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Roll back sandbox-{state.name}</DialogTitle>
+          <DialogDescription>
+            Points the prepull DaemonSets back at the previous image (still in the sandbox registry: images are never deleted).
+            Templates switch back once every Ready node has it.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3 text-sm">
+          <dl className="grid grid-cols-[8rem_1fr] gap-x-3 gap-y-1">
+            <dt className="text-muted-foreground">Now</dt><dd className="font-mono text-xs break-all">{state.pin?.ref}</dd>
+            <dt className="text-muted-foreground">Back to</dt><dd className="font-mono text-xs break-all">{previous}</dd>
+          </dl>
+          <div className="space-y-1">
+            <Label htmlFor="sbx-rb-confirm">Type or paste the digest to roll back to</Label>
+            <Input id="sbx-rb-confirm" className="font-mono text-xs" placeholder={digest} value={confirm} onChange={(e) => setConfirm(e.target.value)} />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button variant="destructive" disabled={!digest || confirm.trim() !== digest || submit.isPending} onClick={() => submit.mutate()}>
+            {submit.isPending ? "Queuing…" : "Roll back"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
