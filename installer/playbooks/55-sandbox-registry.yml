@@ -93,6 +93,15 @@
           deploy/templates/images.yaml alone could roll back an image the portal mirrored. Restore {{ key_file }} from the
           site backup and run make upgrade again. Only if you know no sandbox image was mirrored from the portal (Template
           updates), run it with -e pc_sandbox_portal_pins_unavailable_ok=true.
+    # The override above skips the pin read without a word otherwise: say so as loudly as the rescue below does.
+    - name: Say that the pins were not read without the admin key, on request
+      when: pc_sbx_handed.stat.exists and not pc_sbx_key.stat.exists and (pc_sandbox_portal_pins_unavailable_ok | default(false) | bool)
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: the portal's sandbox image pins were NOT read (pc_sandbox_portal_pins_unavailable_ok): the portal was
+          given the sandbox mirror account ({{ pc_gen }}/sandbox-registry-mirror.handed) but the installer's admin key
+          {{ key_file }} is missing. deploy/templates/images.yaml is rendered as is and may roll back an image the portal
+          mirrored (a portal pin).
     - name: Read the portal's sandbox image pins
       when: pc_sbx_key.stat.exists
       block:
@@ -138,7 +147,9 @@
           ansible.builtin.set_fact: {pc_sbx_portal_pins: {}}
         - name: Say that the pins were skipped on request
           ansible.builtin.debug:
-            msg: the portal's sandbox image pins were NOT read (pc_sandbox_portal_pins_unavailable_ok); images.yaml is rendered as is
+            msg: >-
+              WARNING: the portal's sandbox image pins were NOT read (pc_sandbox_portal_pins_unavailable_ok);
+              deploy/templates/images.yaml is rendered as is and may roll back an image the portal mirrored (a portal pin).
     - name: Merge the pins with images.yaml
       ansible.builtin.set_fact:
         pc_sbx_pins_merged: >-

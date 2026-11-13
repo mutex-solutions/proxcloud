@@ -218,6 +218,26 @@ class PinMergeTests(unittest.TestCase):
             self.assertEqual(t.template("{{ " + stop["when"] + " }}"), want, (handed, key, override))
         names = [x.get("name") for x in STAGE55[1]["tasks"]]
         self.assertLess(names.index("Stop when the portal may hold pins this run cannot read"), names.index("Merge the pins with images.yaml"))
+        # The override does not skip the read silently: a loud warning, exactly when the stop above was overridden.
+        warn = task(STAGE55[1], "Say that the pins were not read without the admin key, on request")
+        msg = warn["ansible.builtin.debug"]["msg"]
+        for want in ("WARNING", "were NOT read", "pc_sandbox_portal_pins_unavailable_ok", "{{ key_file }}",
+                     "may roll back", "portal pin"):
+            self.assertIn(want, msg)
+        for handed, key, override, want in ((True, False, True, True), (True, False, False, False), (True, True, True, False),
+                                            (False, False, True, False), (False, True, True, False)):
+            t = Templar(loader=DataLoader(), variables={"pc_sbx_handed": {"stat": {"exists": handed}},
+                                                        "pc_sbx_key": {"stat": {"exists": key}},
+                                                        "pc_sandbox_portal_pins_unavailable_ok": override})
+            self.assertEqual(t.template("{{ " + warn["when"] + " }}"), want, (handed, key, override))
+        self.assertLess(names.index("Stop when the portal may hold pins this run cannot read"),
+                        names.index("Say that the pins were not read without the admin key, on request"))
+        self.assertLess(names.index("Say that the pins were not read without the admin key, on request"),
+                        names.index("Merge the pins with images.yaml"))
+        # The rescue's override says it as loudly.
+        skipped = task(STAGE55[1], "Say that the pins were skipped on request")["ansible.builtin.debug"]["msg"]
+        self.assertIn("WARNING", skipped)
+        self.assertIn("may roll back", skipped)
         # The error texts point at the pin delete endpoint.
         rescue = task(STAGE55[1], "Read the portal's sandbox image pins")["rescue"][0]["ansible.builtin.fail"]["msg"]
         self.assertIn("DELETE", rescue)
