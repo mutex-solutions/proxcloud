@@ -316,6 +316,9 @@ class KubernetesTests(unittest.TestCase):
                 seed = capi / ('packer/proxmox/linux/ubuntu/http/' + release + '/user-data.tmpl')
                 seed.parent.mkdir(parents=True)
                 seed.write_text((fixtures / 'ubuntu-bios-user-data.tmpl').read_text())
+            kubeadm = capi / 'ansible/roles/kubernetes/templates/etc/kubeadm.yml'
+            kubeadm.parent.mkdir(parents=True)
+            kubeadm.write_text((fixtures / 'kubeadm.yml').read_text())
             # No real git process/network: a stub presents a pristine reviewed cache.
             (work / 'image-builder/.git').mkdir()
             # Fixed object bytes are separate from the mutable cached working tree.

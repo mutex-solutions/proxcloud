@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Kubernetes 1.37 node templates did not build**: the pinned image-builder `v0.1.55` renders its kubeadm
+  config with `kubeadm.k8s.io/v1beta3`, which kubeadm 1.37 refuses ("old API spec"), so
+  `kubeadm config images pull` failed the build. The build now applies upstream's own fix (image-builder
+  `db2e0f41`, after `v0.1.55`) to the exported pinned tree: `v1beta4`, read by kubeadm since 1.31, for every
+  selectable version. The pinned file's hash is checked first; any other content refuses the build.
+  Found on the first 1.37.2 lab build.
+
 ## [0.5.2] - 2026-11-14
 
 Patch release on top of `v0.5.1`, with no breaking change. It fixes VM template smoke-test and import
