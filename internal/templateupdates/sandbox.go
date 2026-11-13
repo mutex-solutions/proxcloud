@@ -140,11 +140,16 @@ type SandboxReceipt struct {
 	HadPin    bool        `json:"hadPin,omitempty"`
 	// PinRecorded: this job wrote the pin record (the prepull intent); Cleanup restores PinBefore when the
 	// DaemonSet patch never landed.
-	PinRecorded bool     `json:"pinRecorded,omitempty"`
-	Code        string   `json:"code,omitempty"`
-	Message     string   `json:"message,omitempty"`
-	Warnings    []string `json:"warnings,omitempty"`
-	Cleaned     bool     `json:"cleaned,omitempty"`
+	PinRecorded bool `json:"pinRecorded,omitempty"`
+	// PodReady: the worker pod of Pod and both its credential Secrets were written (StartMirror returned). A pod of
+	// this job without it may lack its Secrets: it is replaced, never waited for.
+	PodReady bool `json:"podReady,omitempty"`
+	// Landed lists the prepull init containers already on the new ref when a patch failed part-way ("ds/container").
+	Landed   []string `json:"landed,omitempty"`
+	Code     string   `json:"code,omitempty"`
+	Message  string   `json:"message,omitempty"`
+	Warnings []string `json:"warnings,omitempty"`
+	Cleaned  bool     `json:"cleaned,omitempty"`
 }
 
 // SandboxPin is a sandboxBuiltinPin document: the digest the prepull DaemonSets were last pointed at from the portal

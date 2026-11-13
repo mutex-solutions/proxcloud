@@ -33,12 +33,13 @@ import (
 )
 
 const (
-	tuReg     = "192.0.2.226"
-	tuPAT     = "ghp_INTEGRATION_PAT_never_persisted_0000"
-	tuMirror  = "MIRROR-PASSWORD-never-returned"
-	tuTag     = "20261112-9d00563"
-	tuOldTag  = "20261101-aaaaaaa"
-	tuService = "sbx-1"
+	tuReg      = "192.0.2.226"
+	tuPAT      = "ghp_INTEGRATION_PAT_never_persisted_0000"
+	tuRegToken = "ghcr-INTEGRATION-pull-token"
+	tuMirror   = "MIRROR-PASSWORD-never-returned"
+	tuTag      = "20261112-9d00563"
+	tuOldTag   = "20261101-aaaaaaa"
+	tuService  = "sbx-1"
 )
 
 var (
@@ -86,7 +87,7 @@ func (c *tuCluster) StartMirror(_ context.Context, req sandbox.MirrorRequest) (s
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.starts++
-	c.tokens = append(c.tokens, req.GitHubToken)
+	c.tokens = append(c.tokens, req.SourceToken)
 	name := sandbox.MirrorPodName(req.JobShort, req.Epoch)
 	c.pods[name] = &sandbox.MirrorPod{Name: name, UID: "uid-" + name, Phase: "Running", Source: req.Source, Dest: req.Destination}
 	return "uid-" + name, nil
@@ -152,6 +153,17 @@ func (c *tuCluster) SetPrepullImage(_ context.Context, ref string) ([]sandbox.Pr
 	prev := c.prepull
 	c.prepull = ref
 	return []sandbox.PrepullImage{{DaemonSet: "template-prepull", Container: "p1", Image: prev}}, prev != ref, nil
+}
+func (c *tuCluster) RestorePrepullImages(_ context.Context, current string, restore []sandbox.PrepullImage) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, r := range restore {
+		if c.prepull == current && r.DaemonSet == "template-prepull" && r.Container == "p1" {
+			c.prepull = r.Image
+			return 1, nil
+		}
+	}
+	return 0, nil
 }
 func (c *tuCluster) Resolve(_ context.Context, repo, ref string) (string, error) {
 	c.mu.Lock()
@@ -230,7 +242,12 @@ func (f *tuFixture) runner(lease time.Duration) *templateupdates.SandboxRunner {
 		Build: func(context.Context, templateupdates.SandboxPayload) (*templateupdates.SandboxExecutor, error) {
 			return &templateupdates.SandboxExecutor{Cluster: f.cluster, Registry: f.cluster, Receipts: f.store, Pins: f.store,
 				Poll: 10 * time.Millisecond, PodWait: 5 * time.Second,
-				Token: func(ctx context.Context) (string, error) { tok, _, err := f.svc.Token(ctx); return tok, err }}, nil
+				SourceToken: func(ctx context.Context, pkg string) (string, error) {
+					if tok, _, err := f.svc.Token(ctx); err != nil || tok != tuPAT || pkg != "sandbox-base" {
+						return "", errors.New("unexpected token request")
+					}
+					return tuRegToken, nil
+				}}, nil
 		}}
 }
 
@@ -337,8 +354,8 @@ func TestSandboxMirrorEndToEnd(t *testing.T) {
 	if code != http.StatusOK || !strings.Contains(body, tuNew) || !strings.Contains(body, `"mirrorJob":"`+rec.ID+`"`) {
 		t.Fatalf("pins: %d %s", code, body)
 	}
-	// The PAT reached the worker request and nothing else: not the job row, receipts, pins or audit.
-	if len(f.cluster.tokens) != 1 || f.cluster.tokens[0] != tuPAT {
+	// Only the short-lived pull token reached the worker request (never the PAT); neither is persisted.
+	if len(f.cluster.tokens) != 1 || f.cluster.tokens[0] != tuRegToken {
 		t.Fatalf("worker tokens %v", f.cluster.tokens)
 	}
 	assertNoSecretPersisted(t, f.db)
@@ -385,7 +402,7 @@ func TestSandboxMirrorResumeAfterLostLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _ = f.cluster.StartMirror(ctx, sandbox.MirrorRequest{JobShort: strings.ReplaceAll(j1.ID, "-", "")[:16], Epoch: j1.Epoch,
-		Source: "ghcr.io/mutex-solutions/sandbox-base@" + tuNew, Destination: tuReg + "/library/sandbox-base:" + tuTag, GitHubToken: tuPAT})
+		Source: "ghcr.io/mutex-solutions/sandbox-base@" + tuNew, Destination: tuReg + "/library/sandbox-base:" + tuTag, SourceToken: tuRegToken})
 	time.Sleep(400 * time.Millisecond)
 	// Acquisition 2 (the runner) resumes: it adopts the existing worker's result, no second start.
 	if did, err := f.runner(30 * time.Second).RunOnce(ctx); !did || err != nil {
@@ -464,7 +481,7 @@ func assertNoSecretPersisted(t *testing.T, db *pgdoc.DB) {
 		if err := db.Pool.QueryRow(ctx, q).Scan(&all); err != nil && !strings.Contains(err.Error(), "does not exist") {
 			t.Fatalf("%s: %v", q, err)
 		}
-		if strings.Contains(all, tuPAT) || strings.Contains(all, tuMirror) {
+		if strings.Contains(all, tuPAT) || strings.Contains(all, tuMirror) || strings.Contains(all, tuRegToken) {
 			t.Fatalf("a secret was persisted (%s)", q)
 		}
 	}

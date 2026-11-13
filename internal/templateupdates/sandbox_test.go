@@ -17,9 +17,10 @@ import (
 )
 
 const (
-	sbxJob = "0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0"
-	sbxReg = "192.0.2.226"
-	sbxPAT = "ghp_never_persist_this_token_0000000000"
+	sbxJob      = "0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0"
+	sbxReg      = "192.0.2.226"
+	sbxPAT      = "ghp_never_persist_this_token_0000000000"
+	sbxRegToken = "ghcr-short-lived-pull-token-0000"
 )
 
 var (
@@ -33,16 +34,18 @@ func sbxPayload() SandboxPayload {
 
 // fakeCluster is an in-memory sandbox cluster: worker pods advance through phases, DaemonSets hold images.
 type fakeCluster struct {
-	mu       sync.Mutex
-	pods     map[string]*sandbox.MirrorPod
-	started  []sandbox.MirrorRequest
-	deleted  []string
-	prepull  map[string]string // "ds/container" → image
-	finish   string            // phase a started pod reaches on its first read: Succeeded (default) | Failed | Running
-	badRes   bool
-	patches  int
-	onStart  func()
-	patchErr error
+	mu        sync.Mutex
+	pods      map[string]*sandbox.MirrorPod
+	started   []sandbox.MirrorRequest
+	deleted   []string
+	prepull   map[string]string // "ds/container" → image
+	finish    string            // phase a started pod reaches on its first read: Succeeded (default) | Failed | Running | Pending
+	badRes    bool
+	patches   int
+	onStart   func()
+	patchErr  error
+	partial   bool // SetPrepullImage lands on template-prepull, then fails on the GPU DaemonSet
+	deleteErr error
 }
 
 func newFakeCluster() *fakeCluster {
@@ -67,7 +70,7 @@ func (c *fakeCluster) GetMirrorPod(_ context.Context, _, name string) (*sandbox.
 	if p == nil {
 		return nil, nil
 	}
-	if p.Phase == "Pending" {
+	if p.Phase == "Pending" && c.finish != "Pending" {
 		p.Phase = c.finish
 		if p.Phase == "" {
 			p.Phase = "Succeeded"
@@ -86,6 +89,9 @@ func (c *fakeCluster) MirrorResult(_ context.Context, p *sandbox.MirrorPod) (*sa
 func (c *fakeCluster) DeleteMirrorPod(_ context.Context, name, uid string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.deleteErr != nil {
+		return c.deleteErr
+	}
 	if p := c.pods[name]; p != nil && p.UID == uid {
 		delete(c.pods, name)
 		c.deleted = append(c.deleted, name)
@@ -120,6 +126,15 @@ func (c *fakeCluster) SetPrepullImage(_ context.Context, ref string) ([]sandbox.
 		return nil, false, c.patchErr
 	}
 	repo := ref[:strings.LastIndex(ref[:strings.Index(ref, "@")], ":")]
+	if c.partial {
+		for k, img := range c.prepull {
+			if strings.HasPrefix(k, "template-prepull/") && strings.HasPrefix(img, repo+":") {
+				c.prepull[k] = ref
+			}
+		}
+		c.patches++
+		return nil, true, errors.New("409 on template-prepull-gpu")
+	}
 	hit := false
 	for k, img := range c.prepull {
 		if strings.HasPrefix(img, repo+":") {
@@ -131,6 +146,20 @@ func (c *fakeCluster) SetPrepullImage(_ context.Context, ref string) ([]sandbox.
 	}
 	c.patches++
 	return nil, true, nil
+}
+
+func (c *fakeCluster) RestorePrepullImages(_ context.Context, current string, restore []sandbox.PrepullImage) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, r := range restore {
+		k := r.DaemonSet + "/" + r.Container
+		if c.prepull[k] == current && r.Image != current {
+			c.prepull[k] = r.Image
+			n++
+		}
+	}
+	return n, nil
 }
 
 type fakeReg struct {
@@ -232,7 +261,12 @@ func sbxFixture(t *testing.T, p SandboxPayload) (*SandboxRunner, *sbxJobs, *fake
 	r := &SandboxRunner{Store: jobs, Receipts: mem, Lease: 30 * time.Second,
 		Build: func(context.Context, SandboxPayload) (*SandboxExecutor, error) {
 			return &SandboxExecutor{Cluster: cl, Registry: reg, Receipts: mem, Pins: mem, Poll: time.Millisecond, PodWait: time.Second,
-				Token: func(context.Context) (string, error) { return sbxPAT, nil }}, nil
+				SourceToken: func(_ context.Context, pkg string) (string, error) {
+					if pkg != "sandbox-base" {
+						return "", errors.New("wrong package")
+					}
+					return sbxRegToken, nil
+				}}, nil
 		}}
 	return r, jobs, cl, reg, mem
 }
@@ -268,10 +302,10 @@ func TestSandboxMirrorHappyPath(t *testing.T) {
 	if len(finished) != 1 || finished[0].Step != SbxSucceeded {
 		t.Fatalf("OnFinish %+v", finished)
 	}
-	// The PAT reaches only the worker request: never a receipt, pin, payload or the job row.
+	// Only the short-lived pull token reaches the worker request; neither it nor the PAT is persisted.
 	all, _ := json.Marshal([]any{mem.recs, mem.pins, string(jobs.job.Payload)})
-	if strings.Contains(string(all), sbxPAT) || cl.started[0].GitHubToken != sbxPAT {
-		t.Fatal("the GitHub token was persisted (or never handed to the worker)")
+	if strings.Contains(string(all), sbxPAT) || strings.Contains(string(all), sbxRegToken) || cl.started[0].SourceToken != sbxRegToken {
+		t.Fatal("a token was persisted, or the worker did not get the pull token")
 	}
 }
 
@@ -475,5 +509,124 @@ func TestRegistryReaderResolvesByBytes(t *testing.T) {
 	}
 	if strings.Contains(rr.String(), "pw") {
 		t.Fatal("the reader prints its password")
+	}
+}
+
+// One DaemonSet patched, the other refused: the landed containers are recorded and retried; a job that ends this way
+// rolls the landed one back and restores the pin, so the DaemonSets never stay on different digests.
+func TestSandboxPartialPrepullIsRolledBack(t *testing.T) {
+	p := sbxPayload()
+	r, jobs, cl, _, mem := sbxFixture(t, p)
+	old := sbxReg + "/library/sandbox-base:20261101-aaaaaaa@" + sbxOld
+	cl.prepull["template-prepull-gpu/p0"] = old
+	cl.partial = true
+	_, _ = r.RunOnce(context.Background())
+	rec := mem.recs[sbxJob]
+	if rec.Step != SbxPrepull || len(rec.Landed) != 1 || rec.Landed[0] != "template-prepull/p1" || jobs.failCode != "retryable" {
+		t.Fatalf("first attempt: step=%s landed=%v code=%s", rec.Step, rec.Landed, jobs.failCode)
+	}
+	// Last attempt, still refused: terminal; the landed container goes back, the pin is restored (none before).
+	r, jobs, cl2, _, _ := sbxFixture(t, p)
+	cl2.prepull, cl2.partial = cl.prepull, true
+	r.Receipts, jobs.job.Attempts = mem, 3
+	r.Build = func(context.Context, SandboxPayload) (*SandboxExecutor, error) {
+		return &SandboxExecutor{Cluster: cl2, Registry: &fakeReg{}, Receipts: mem, Pins: mem, Poll: time.Millisecond, PodWait: time.Second,
+			SourceToken: func(context.Context, string) (string, error) { return sbxRegToken, nil }}, nil
+	}
+	_, _ = r.RunOnce(context.Background())
+	if got := mem.recs[sbxJob]; got.Step != SbxFailed || !got.Cleaned {
+		t.Fatalf("terminal: %+v", got)
+	}
+	if cl2.prepull["template-prepull/p1"] != old || cl2.prepull["template-prepull-gpu/p0"] != old {
+		t.Fatalf("mixed prepull state left: %v", cl2.prepull)
+	}
+	if _, ok := mem.pins[p.Repo()]; ok {
+		t.Fatal("the pin of a switch that was rolled back stayed")
+	}
+}
+
+// A worker pod that stays Pending is replaced after the bound, not waited out; a resumed pod whose Secrets were
+// never confirmed (PodReady false) is replaced at once; a failed pod delete lands in the receipt.
+func TestSandboxPendingPodAndWarnings(t *testing.T) {
+	p := sbxPayload()
+	r, jobs, cl, _, mem := sbxFixture(t, p)
+	cl.finish = "Pending"
+	b := r.Build
+	r.Build = func(ctx context.Context, q SandboxPayload) (*SandboxExecutor, error) {
+		x, err := b(ctx, q)
+		x.PendingLimit = 20 * time.Millisecond
+		return x, err
+	}
+	_, _ = r.RunOnce(context.Background())
+	if jobs.failCode != "retryable" || len(cl.pods) != 0 || len(cl.started) != 1 {
+		t.Fatalf("pending pod: code=%s pods=%v started=%d", jobs.failCode, cl.pods, len(cl.started))
+	}
+
+	r, jobs, cl, _, mem = sbxFixture(t, p)
+	name := sandbox.MirrorPodName(jobShort(sbxJob), 1)
+	cl.pods[name] = &sandbox.MirrorPod{Name: name, UID: "u1", Phase: "Running", Source: p.Source(), Dest: p.Destination()}
+	rec := mem.recs[sbxJob]
+	rec.Step, rec.Pod, rec.PodReady = SbxMirroring, name, false
+	mem.recs[sbxJob] = rec
+	jobs.job.Epoch = 2
+	_, _ = r.RunOnce(context.Background())
+	if len(cl.started) != 1 || cl.started[0].Epoch != 2 || mem.recs[sbxJob].Step != SbxSucceeded {
+		t.Fatalf("unconfirmed pod not replaced: started=%+v step=%s", cl.started, mem.recs[sbxJob].Step)
+	}
+	for _, d := range cl.deleted {
+		if d == name {
+			goto deleted
+		}
+	}
+	t.Fatal("the unconfirmed pod was not deleted")
+deleted:
+
+	r, _, cl, _, mem = sbxFixture(t, p)
+	cl.deleteErr = errors.New("api down")
+	_, _ = r.RunOnce(context.Background())
+	got := mem.recs[sbxJob]
+	found := false
+	for _, w := range got.Warnings {
+		found = found || strings.Contains(w, "could not be deleted")
+	}
+	if got.Step != SbxSucceeded || !found {
+		t.Fatalf("delete failure not recorded: step=%s warnings=%v", got.Step, got.Warnings)
+	}
+}
+
+type orphanCluster struct {
+	pods    []sandbox.MirrorPod
+	deleted []string
+}
+
+func (o *orphanCluster) ListAllMirrorPods(context.Context) ([]sandbox.MirrorPod, error) {
+	return o.pods, nil
+}
+func (o *orphanCluster) DeleteMirrorPod(_ context.Context, name, _ string) error {
+	o.deleted = append(o.deleted, name)
+	return nil
+}
+
+func TestSweepMirrorOrphans(t *testing.T) {
+	oc := &orphanCluster{pods: []sandbox.MirrorPod{{Name: "tu-mirror-aaaaaaaaaaaaaaaa-e1", JobShort: "aaaaaaaaaaaaaaaa"},
+		{Name: "tu-mirror-bbbbbbbbbbbbbbbb-e2", JobShort: "bbbbbbbbbbbbbbbb"}}}
+	n, err := SweepMirrorOrphans(context.Background(), oc, func(_ context.Context, short string) (bool, error) { return short == "aaaaaaaaaaaaaaaa", nil })
+	if err != nil || n != 1 || len(oc.deleted) != 1 || oc.deleted[0] != "tu-mirror-bbbbbbbbbbbbbbbb-e2" {
+		t.Fatalf("swept %d %v %v", n, oc.deleted, err)
+	}
+}
+
+// With the flag off the runner never claims a job, but the dead-job cleanup and the orphan sweep still run.
+func TestSandboxRunnerCleanupOnly(t *testing.T) {
+	p := sbxPayload()
+	r, jobs, _, _, _ := sbxFixture(t, p)
+	r.CleanupOnly = true
+	swept := 0
+	r.Orphans = func(context.Context) (int, error) { swept++; return 0, nil }
+	if did, err := r.RunOnce(context.Background()); did || err != nil {
+		t.Fatalf("cleanup-only run claimed work: %v %v", did, err)
+	}
+	if jobs.claimed || swept != 1 {
+		t.Fatalf("claimed=%v swept=%d", jobs.claimed, swept)
 	}
 }

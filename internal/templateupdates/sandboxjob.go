@@ -35,6 +35,7 @@ type SandboxCluster interface {
 	ListMirrorPods(ctx context.Context, jobShort string) ([]sandbox.MirrorPod, error)
 	PrepullImages(ctx context.Context, repo string) ([]sandbox.PrepullImage, error)
 	SetPrepullImage(ctx context.Context, ref string) ([]sandbox.PrepullImage, bool, error)
+	RestorePrepullImages(ctx context.Context, current string, restore []sandbox.PrepullImage) (int, error)
 }
 
 // DigestResolver reads a manifest from the sandbox registry with the mirror account (read-only use) and returns the
@@ -55,10 +56,12 @@ type SandboxExecutor struct {
 	Registry DigestResolver
 	Receipts SandboxReceipts
 	Pins     SandboxPins
-	// Token returns the GitHub integration's PAT at run time (mirror only; never stored).
-	Token func(ctx context.Context) (string, error)
-	// Poll / PodWait bound the wait for the worker pod (defaults 5s / sandbox.MirrorTimeout+5m).
-	Poll, PodWait time.Duration
+	// SourceToken mints, at run time, a short-lived GHCR registry token with pull scope on the one source package
+	// from the GitHub integration's PAT (mirror only). The PAT never leaves the portal; the token is never stored.
+	SourceToken func(ctx context.Context, pkg string) (string, error)
+	// Poll / PodWait bound the wait for the worker pod (defaults 5s / sandbox.MirrorTimeout+5m); PendingLimit how
+	// long it may stay Pending before it is replaced (default sandbox.MirrorPendingLimit).
+	Poll, PodWait, PendingLimit time.Duration
 }
 
 func (x *SandboxExecutor) checkpoint(ctx context.Context, f Fence, r *SandboxReceipt, step Step, mut func(context.Context, *SandboxReceipt) error) error {
@@ -160,8 +163,9 @@ func (x *SandboxExecutor) sweepPods(ctx context.Context, f Fence, jobID string) 
 func (x *SandboxExecutor) mirror(ctx context.Context, jobID string, p SandboxPayload, r *SandboxReceipt, f Fence) error {
 	short := jobShort(jobID)
 	name := ""
-	// An earlier acquisition's pod: a result it already has is used; one still running is waited for (adopted, read
-	// only); a failed one is removed and the copy redone under this epoch's own pod.
+	// An earlier acquisition's pod: a result it already has is used; one still running whose Secrets were written
+	// (PodReady) is waited for; a failed one, or one whose Secrets may be missing, is removed and the copy redone
+	// under this epoch's own pod.
 	if r.Step == SbxMirroring && r.Pod != "" {
 		pod, err := x.Cluster.GetMirrorPod(ctx, short, r.Pod)
 		if err != nil {
@@ -175,41 +179,71 @@ func (x *SandboxExecutor) mirror(ctx context.Context, jobID string, p SandboxPay
 			if errors.Is(err, ErrStopped) || isPermanent(err) {
 				return err
 			}
-			if !done {
+			switch {
+			case !done && r.PodReady:
 				name = pod.Name
+			case !done:
+				x.dropPod(ctx, f, r, pod) // its credential Secrets may never have been written
 			}
 		}
 	}
 	if name == "" {
-		tok, err := x.Token(ctx)
+		tok, err := x.SourceToken(ctx, SandboxPackage(p.Name))
 		if err != nil || strings.TrimSpace(tok) == "" {
-			if errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrNoToken) || err == nil {
+			var he *HTTPError
+			switch {
+			case errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrNoToken) || err == nil:
 				return permanent("github_not_configured", "the GitHub integration has no token")
+			case errors.As(err, &he) && (he.Status == 401 || he.Status == 403):
+				return permanent("github_refused", "GHCR refused the GitHub integration's token for this package")
 			}
-			return errors.New("the GitHub integration could not be read")
+			return errors.New("a GHCR registry token could not be obtained")
 		}
 		name = sandbox.MirrorPodName(short, f.Epoch())
-		if err := x.checkpoint(ctx, f, r, SbxMirroring, func(_ context.Context, n *SandboxReceipt) error { n.Pod = name; return nil }); err != nil {
+		if err := x.checkpoint(ctx, f, r, SbxMirroring, func(_ context.Context, n *SandboxReceipt) error {
+			n.Pod, n.PodReady = name, false
+			return nil
+		}); err != nil {
 			return err
 		}
 		if err := x.guard(ctx, f); err != nil {
 			return err
 		}
-		_, err = x.Cluster.StartMirror(ctx, sandbox.MirrorRequest{JobShort: short, Epoch: f.Epoch(), Source: p.Source(), Destination: p.Destination(), GitHubToken: tok})
+		_, err = x.Cluster.StartMirror(ctx, sandbox.MirrorRequest{JobShort: short, Epoch: f.Epoch(), Source: p.Source(), Destination: p.Destination(), SourceToken: tok})
 		if errors.Is(err, sandbox.ErrMirrorUnavailable) {
 			return permanent("mirror_unavailable", "the mirror prerequisites are missing (worker image, template registry or the registry mirror account)")
 		}
 		if err != nil {
+			// The pod may exist without its Secrets: remove it now rather than leave it pending.
+			if pod, gerr := x.Cluster.GetMirrorPod(ctx, short, name); gerr == nil && pod != nil {
+				x.dropPod(ctx, f, r, pod)
+			}
 			return errors.New("the mirror worker could not be started")
+		}
+		if err := x.checkpoint(ctx, f, r, SbxMirroring, func(_ context.Context, n *SandboxReceipt) error { n.PodReady = true; return nil }); err != nil {
+			return err
 		}
 	}
 	deadline := time.Now().Add(x.PodWait)
+	pendingSince := time.Time{}
 	for {
 		pod, err := x.Cluster.GetMirrorPod(ctx, short, name)
 		if err == nil && pod != nil {
 			done, err := x.settlePod(ctx, f, p, r, pod)
 			if done || err != nil {
 				return err
+			}
+			// A pod that never leaves Pending (image pull, scheduling, missing Secrets) is replaced, not waited out.
+			if pod.Phase == "Pending" || pod.Phase == "" {
+				if pendingSince.IsZero() {
+					pendingSince = time.Now()
+				}
+				if time.Since(pendingSince) > x.pendingLimit() {
+					x.dropPod(ctx, f, r, pod)
+					return errors.New("the mirror worker stayed pending; it was removed and will be started again")
+				}
+			} else {
+				pendingSince = time.Time{}
 			}
 		}
 		if time.Now().After(deadline) {
@@ -221,6 +255,13 @@ func (x *SandboxExecutor) mirror(ctx context.Context, jobID string, p SandboxPay
 		case <-time.After(x.Poll):
 		}
 	}
+}
+
+func (x *SandboxExecutor) pendingLimit() time.Duration {
+	if x.PendingLimit > 0 {
+		return x.PendingLimit
+	}
+	return sandbox.MirrorPendingLimit
 }
 
 // settlePod handles a worker pod in a terminal phase: Succeeded with a valid result → mirrored (and the pod, with
@@ -247,13 +288,18 @@ func (x *SandboxExecutor) settlePod(ctx context.Context, f Fence, p SandboxPaylo
 	return false, nil
 }
 
-// dropPod deletes one observed worker (UID precondition) right after a fence check; its Secrets go with it.
+// dropPod deletes one observed worker (UID precondition) right after a fence check; its Secrets go with it. A
+// failed delete is recorded in the receipt (fenced): the job's sweep and the orphan sweep retry it.
 func (x *SandboxExecutor) dropPod(ctx context.Context, f Fence, r *SandboxReceipt, pod *sandbox.MirrorPod) {
 	if x.guard(ctx, f) != nil {
 		return
 	}
 	if err := x.Cluster.DeleteMirrorPod(ctx, pod.Name, pod.UID); err != nil {
-		r.Warnings = append(r.Warnings, "the mirror worker pod "+pod.Name+" could not be deleted yet")
+		w := "the mirror worker pod " + pod.Name + " could not be deleted yet"
+		_ = x.checkpoint(ctx, f, r, r.Step, func(_ context.Context, n *SandboxReceipt) error {
+			n.Warnings = append(n.Warnings, w)
+			return nil
+		})
 	}
 }
 
@@ -280,7 +326,10 @@ func (x *SandboxExecutor) verify(ctx context.Context, p SandboxPayload, r *Sandb
 	return x.checkpoint(ctx, f, r, SbxVerified, func(_ context.Context, n *SandboxReceipt) error { n.VerifiedDigest = got; return nil })
 }
 
-// prepull records the pin and the images it replaces (one fenced transaction), then patches the DaemonSets.
+// prepull records the pin and the images it replaces (one fenced transaction), then patches the DaemonSets. Each
+// DaemonSet is its own guarded patch: when one lands and the other fails, the landed containers are recorded and the
+// attempt retries (the patch is idempotent: what already runs the ref is left as is); a job that ends without both
+// landed rolls the landed ones back (Cleanup), so the two DaemonSets never stay on different digests.
 func (x *SandboxExecutor) prepull(ctx context.Context, jobID string, p SandboxPayload, r *SandboxReceipt, f Fence) error {
 	if r.Step == SbxVerified {
 		cur, err := x.Cluster.PrepullImages(ctx, p.Repo())
@@ -315,43 +364,84 @@ func (x *SandboxExecutor) prepull(ctx context.Context, jobID string, p SandboxPa
 		return err
 	}
 	if _, _, err := x.Cluster.SetPrepullImage(ctx, p.Ref()); err != nil {
+		// Record what landed (one DaemonSet may already run the ref) for the retry and for Cleanup's rollback.
+		if cur, cerr := x.Cluster.PrepullImages(ctx, p.Repo()); cerr == nil {
+			var landed []string
+			for _, c := range cur {
+				if c.Image == p.Ref() {
+					landed = append(landed, c.DaemonSet+"/"+c.Container)
+				}
+			}
+			if len(landed) > 0 {
+				_ = x.checkpoint(ctx, f, r, SbxPrepull, func(_ context.Context, n *SandboxReceipt) error {
+					n.Landed = landed
+					n.Warnings = appendOnce(n.Warnings, "the prepull switch landed on "+strings.Join(landed, ", ")+" only; retrying the rest")
+					return nil
+				})
+			}
+		}
 		return errors.New("the prepull DaemonSet could not be patched (retrying)")
 	}
-	return x.checkpoint(ctx, f, r, SbxPinned, nil)
+	return x.checkpoint(ctx, f, r, SbxPinned, func(_ context.Context, n *SandboxReceipt) error { n.Landed = nil; return nil })
+}
+
+func appendOnce(list []string, s string) []string {
+	for _, x := range list {
+		if x == s {
+			return list
+		}
+	}
+	return append(list, s)
 }
 
 // Cleanup runs after a terminal failure (or for a dead job): it deletes this job's worker pods (their credential
-// Secrets go with them) and, when the prepull patch never landed, restores the pin record this job replaced. Each
-// effect is preceded by a fence check.
+// Secrets go with them); when the prepull switch did not complete, it points every prepull init container still on
+// this job's ref back at the image recorded before (so the DaemonSets never stay mixed) and restores the pin record
+// this job replaced. Each effect is preceded by a fence check.
 func (x *SandboxExecutor) Cleanup(ctx context.Context, f Fence, jobID string, p SandboxPayload, r *SandboxReceipt) []string {
 	warns := x.sweepPods(ctx, f, jobID)
 	if stopped(warns) {
 		return warns
 	}
-	if r != nil && r.PinRecorded && r.Step != SbxPinned && r.Step != SbxSucceeded {
-		cur, err := x.Cluster.PrepullImages(ctx, p.Repo())
-		if err != nil {
-			return append(warns, "could not read the prepull DaemonSets to settle the pin record")
+	if r == nil || !r.PinRecorded || r.Step == SbxPinned || r.Step == SbxSucceeded {
+		return warns
+	}
+	if len(r.Previous) > 0 {
+		restore := make([]sandbox.PrepullImage, 0, len(r.Previous))
+		for _, pr := range r.Previous {
+			restore = append(restore, sandbox.PrepullImage{DaemonSet: pr.DaemonSet, Container: pr.Container, Image: pr.Image})
 		}
-		landed := false
-		for _, c := range cur {
-			landed = landed || c.Image == p.Ref()
+		if x.guard(ctx, f) != nil {
+			return append(warns, stoppedWarn)
 		}
-		if !landed {
-			err := f.Checkpoint(ctx, func(tc context.Context) error {
-				pin, err := x.Pins.GetPin(tc, p.Repo())
-				if err != nil || pin == nil || pin.MirrorJob != jobID {
-					return err // another job's pin since: leave it
-				}
-				if r.HadPin && r.PinBefore != nil {
-					return x.Pins.SavePin(tc, r.PinBefore)
-				}
-				return x.Pins.DeletePin(tc, p.Repo())
-			})
-			if err != nil {
-				return append(warns, stoppedWarn)
-			}
+		if n, err := x.Cluster.RestorePrepullImages(ctx, p.Ref(), restore); err != nil {
+			return append(warns, "the partial prepull switch could not be rolled back; re-run the update or roll back from the page")
+		} else if n > 0 {
+			warns = append(warns, fmt.Sprintf("rolled %d prepull init container(s) back to their previous image", n))
 		}
+	}
+	cur, err := x.Cluster.PrepullImages(ctx, p.Repo())
+	if err != nil {
+		return append(warns, "could not read the prepull DaemonSets to settle the pin record")
+	}
+	for _, c := range cur {
+		if c.Image == p.Ref() {
+			// Still on the new ref (an added p<N>, or the restore did not reach it): the pin stays true to the cluster.
+			return append(warns, "a prepull init container still runs this job's image; the pin record is kept")
+		}
+	}
+	err = f.Checkpoint(ctx, func(tc context.Context) error {
+		pin, err := x.Pins.GetPin(tc, p.Repo())
+		if err != nil || pin == nil || pin.MirrorJob != jobID {
+			return err // another job's pin since: leave it
+		}
+		if r.HadPin && r.PinBefore != nil {
+			return x.Pins.SavePin(tc, r.PinBefore)
+		}
+		return x.Pins.DeletePin(tc, p.Repo())
+	})
+	if err != nil {
+		return append(warns, stoppedWarn)
 	}
 	return warns
 }

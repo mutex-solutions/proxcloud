@@ -3,8 +3,9 @@ package sandbox
 // mirror.go — the sandbox cluster's side of the built-in template mirror (docs/template-updates.md §4):
 //
 //   - the trusted sandbox-import worker in copy mode, one pod per job acquisition in sbx-build, with its two
-//     credentials (the GitHub integration's PAT for ghcr.io, the registry's mirror account) as Secrets OWNED by that
-//     pod (ownerReference = the pod's observed UID): the Secrets go with the pod, never outlive it;
+//     credentials (a short-lived GHCR registry token pull-scoped to the one source package — never the GitHub PAT —
+//     and the registry's mirror account) as Secrets OWNED by that pod (ownerReference = the pod's observed UID): the
+//     Secrets go with the pod, never outlive it;
 //   - the prepull DaemonSets (template-prepull, template-prepull-gpu): the job replaces the one init container that
 //     pulls <registry>/library/sandbox-<name> with the new digest ref, or adds one; a resourceVersion-guarded merge
 //     patch. The portal's identity holds get/patch on exactly those two names, and an admission policy rendered by
@@ -39,6 +40,9 @@ const (
 	PrepullGPUDaemonSet = "template-prepull-gpu"
 	// MirrorTimeout bounds one worker pod (activeDeadlineSeconds).
 	MirrorTimeout = 30 * time.Minute
+	// MirrorPendingLimit bounds how long a worker pod may stay Pending (image pull, scheduling, or credential Secrets
+	// that were never written) before the job deletes it and starts a fresh one.
+	MirrorPendingLimit = 5 * time.Minute
 )
 
 // ErrMirrorUnavailable is a missing prerequisite (worker image, registry, mirror account): permanent until an
@@ -91,8 +95,9 @@ type MirrorRequest struct {
 	Epoch       int64
 	Source      string // ghcr.io/mutex-solutions/sandbox-<name>@sha256:<digest>
 	Destination string // <registry>/library/sandbox-<name>:<tag>
-	// GitHubToken is the PAT, used only to build the pod-owned source Secret; never stored or logged.
-	GitHubToken string
+	// SourceToken is a short-lived GHCR registry bearer token with pull scope on the source package only (minted by
+	// the portal from the GitHub integration's PAT); it goes only into the pod-owned source Secret. Never the PAT.
+	SourceToken string
 }
 
 func mirrorSecretName(pod, which string) string { return pod + "-" + which }
@@ -140,6 +145,8 @@ func MirrorObjects(cfg Config, worker string, policy sandboximport.MirrorPolicy,
 type MirrorPod struct {
 	Name, UID, Phase string
 	Source, Dest     string
+	JobShort         string
+	Created          string // metadata.creationTimestamp (RFC3339)
 }
 
 func (s *Service) ownsMirror(pod map[string]any, jobShort string) bool {
@@ -159,8 +166,13 @@ func (s *Service) GetMirrorPod(ctx context.Context, jobShort, name string) (*Mir
 	if !s.ownsMirror(pod, jobShort) {
 		return nil, nil
 	}
-	return &MirrorPod{Name: name, UID: digStr(pod, "metadata", "uid"), Phase: digStr(pod, "status", "phase"),
-		Source: digStr(pod, "metadata", "annotations", AnnotationImportSource), Dest: digStr(pod, "metadata", "annotations", AnnotationImportDestination)}, nil
+	return mirrorPodOf(pod), nil
+}
+
+func mirrorPodOf(pod map[string]any) *MirrorPod {
+	return &MirrorPod{Name: digStr(pod, "metadata", "name"), UID: digStr(pod, "metadata", "uid"), Phase: digStr(pod, "status", "phase"),
+		Source: digStr(pod, "metadata", "annotations", AnnotationImportSource), Dest: digStr(pod, "metadata", "annotations", AnnotationImportDestination),
+		JobShort: digStr(pod, "metadata", "labels", LabelMirrorJob), Created: digStr(pod, "metadata", "creationTimestamp")}
 }
 
 // StartMirror creates the worker pod, reads back its UID, then writes the two credential Secrets owned by that UID.
@@ -170,8 +182,8 @@ func (s *Service) StartMirror(ctx context.Context, req MirrorRequest) (string, e
 	if err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(req.GitHubToken) == "" || strings.ContainsAny(req.GitHubToken, " \t\r\n") || len(req.GitHubToken) > 512 {
-		return "", fmt.Errorf("%w: the GitHub integration has no usable token", ErrMirrorUnavailable)
+	if strings.TrimSpace(req.SourceToken) == "" || strings.ContainsAny(req.SourceToken, " \t\r\n") || len(req.SourceToken) > 8192 {
+		return "", errors.New("sandbox: no usable GHCR registry token for the mirror source")
 	}
 	worker, err := s.MirrorWorker(ctx)
 	if err != nil {
@@ -191,12 +203,15 @@ func (s *Service) StartMirror(ctx context.Context, req MirrorRequest) (string, e
 	}
 	owner := []any{map[string]any{"apiVersion": "v1", "kind": "Pod", "name": name, "uid": live.UID}}
 	labels := map[string]any{LabelManagedBy: ManagedByValue, LabelService: s.serviceID, LabelMirror: "true", LabelMirrorJob: req.JobShort}
-	for _, sec := range []struct{ which, host, user, password string }{
-		{"source", sandboximport.MirrorSourceHost, "proxcloud", req.GitHubToken},
-		{"push", policy.Registry, s.cfg.RegistryMirror.User, s.cfg.RegistryMirror.Password},
+	for _, sec := range []struct {
+		which, host string
+		auth        map[string]any
+	}{
+		{"source", sandboximport.MirrorSourceHost, map[string]any{"registrytoken": req.SourceToken}},
+		{"push", policy.Registry, map[string]any{"username": s.cfg.RegistryMirror.User, "password": s.cfg.RegistryMirror.Password,
+			"auth": base64.StdEncoding.EncodeToString([]byte(s.cfg.RegistryMirror.User + ":" + s.cfg.RegistryMirror.Password))}},
 	} {
-		doc, _ := json.Marshal(map[string]any{"auths": map[string]any{sec.host: map[string]any{
-			"username": sec.user, "password": sec.password, "auth": base64.StdEncoding.EncodeToString([]byte(sec.user + ":" + sec.password))}}})
+		doc, _ := json.Marshal(map[string]any{"auths": map[string]any{sec.host: sec.auth}})
 		err = s.api.ApplyCore(ctx, "secrets", map[string]any{"apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/dockerconfigjson",
 			"metadata": map[string]any{"name": mirrorSecretName(name, sec.which), "namespace": BuildNamespace, "labels": labels, "ownerReferences": owner},
 			"data":     map[string]any{".dockerconfigjson": base64.StdEncoding.EncodeToString(doc)}})
@@ -246,8 +261,25 @@ func (s *Service) ListMirrorPods(ctx context.Context, jobShort string) ([]Mirror
 		if !s.ownsMirror(p, jobShort) {
 			continue
 		}
-		out = append(out, MirrorPod{Name: digStr(p, "metadata", "name"), UID: digStr(p, "metadata", "uid"), Phase: digStr(p, "status", "phase"),
-			Source: digStr(p, "metadata", "annotations", AnnotationImportSource), Dest: digStr(p, "metadata", "annotations", AnnotationImportDestination)})
+		out = append(out, *mirrorPodOf(p))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// ListAllMirrorPods lists every mirror worker pod of this provider (any job): the orphan sweep.
+func (s *Service) ListAllMirrorPods(ctx context.Context) ([]MirrorPod, error) {
+	pods, err := s.api.ListPods(ctx, BuildNamespace, LabelMirror+"=true,"+LabelService+"="+s.serviceID)
+	if err != nil {
+		return nil, err
+	}
+	var out []MirrorPod
+	for _, p := range pods {
+		short := digStr(p, "metadata", "labels", LabelMirrorJob)
+		if !s.ownsMirror(p, short) || !mirrorPodRE.MatchString(digStr(p, "metadata", "name")) {
+			continue
+		}
+		out = append(out, *mirrorPodOf(p))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
@@ -392,6 +424,59 @@ func (s *Service) SetPrepullImage(ctx context.Context, ref string) (previous []P
 		return nil, false, err
 	}
 	return nil, true, nil
+}
+
+// RestorePrepullImages points named init containers back at their recorded images, but only a container that still
+// runs `current` (what a failed job put there): a partial prepull switch is undone instead of leaving the two
+// DaemonSets on different digests. Each DaemonSet is one resourceVersion-guarded patch.
+func (s *Service) RestorePrepullImages(ctx context.Context, current string, restore []PrepullImage) (int, error) {
+	api, ok := s.api.(DaemonSetAPI)
+	if !ok {
+		return 0, errors.New("sandbox: the cluster client cannot patch DaemonSets")
+	}
+	byDS := map[string]map[string]string{}
+	for _, r := range restore {
+		if r.DaemonSet != PrepullDaemonSet && r.DaemonSet != PrepullGPUDaemonSet {
+			continue
+		}
+		if byDS[r.DaemonSet] == nil {
+			byDS[r.DaemonSet] = map[string]string{}
+		}
+		byDS[r.DaemonSet][r.Container] = r.Image
+	}
+	n := 0
+	for _, dsName := range []string{PrepullDaemonSet, PrepullGPUDaemonSet} {
+		want := byDS[dsName]
+		if len(want) == 0 {
+			continue
+		}
+		obj, err := api.GetDaemonSet(ctx, PrepullNamespace, dsName)
+		if err != nil {
+			return n, err
+		}
+		if obj == nil {
+			continue
+		}
+		cs := initContainers(obj)
+		list, changed := make([]any, 0, len(cs)), false
+		for _, c := range cs {
+			cp := map[string]any{}
+			for k, v := range c {
+				cp[k] = v
+			}
+			if img, ok := want[str(c["name"])]; ok && str(c["image"]) == current && img != current {
+				cp["image"], changed = img, true
+				n++
+			}
+			list = append(list, cp)
+		}
+		if changed {
+			if err := s.patchInit(ctx, api, obj, dsName, list); err != nil {
+				return n, err
+			}
+		}
+	}
+	return n, nil
 }
 
 func (s *Service) patchInit(ctx context.Context, api DaemonSetAPI, obj map[string]any, name string, list []any) error {

@@ -110,6 +110,18 @@ func (c *Client) registryToken(ctx context.Context, challenge string) (string, e
 	return tok.Token, nil
 }
 
+// PullToken exchanges the PAT for a short-lived registry bearer token with pull scope on ONE package
+// (repository:<Owner>/<pkg>:pull), for a worker that must read that package without ever holding the PAT
+// (the sandbox mirror). The realm is GHCR's own token endpoint, reached only on the registry's host.
+func (c *Client) PullToken(ctx context.Context, pkg string) (string, error) {
+	repo, err := repoForPackage(pkg)
+	if err != nil {
+		return "", err
+	}
+	realm := c.scheme + "://" + c.registry + "/token"
+	return c.registryToken(ctx, `Bearer realm="`+realm+`",service="`+c.registry+`",scope="repository:`+repo+`:pull"`)
+}
+
 // parseChallenge parses `Bearer realm="…",service="…",scope="…"`.
 func parseChallenge(h string) map[string]string {
 	out := map[string]string{}

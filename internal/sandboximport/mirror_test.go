@@ -104,15 +104,19 @@ func TestMirrorSourceGuard(t *testing.T) {
 // Copies through the real OCI library against two in-memory registries (ghcr.io and the sandbox registry), with the
 // production guards in front; only the test transport rewrites hosts after the guards authorized the request.
 func TestRunMirrorPreservesDigestAndScopesCredentials(t *testing.T) {
-	type seen struct{ host, user string }
+	type seen struct{ host, user, bearer string }
 	var mu sync.Mutex
 	var calls []seen
 	ghcr, zot := registry.New(), registry.New()
 	srv := func(h http.Handler, host string) *httptest.Server {
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			u, _, _ := r.BasicAuth()
+			b := ""
+			if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+				b = h
+			}
 			mu.Lock()
-			calls = append(calls, seen{host, u})
+			calls = append(calls, seen{host, u, b})
 			mu.Unlock()
 			h.ServeHTTP(w, r)
 		}))
@@ -145,7 +149,7 @@ func TestRunMirrorPreservesDigestAndScopesCredentials(t *testing.T) {
 	d, _ := img.Digest()
 	source := "ghcr.io/mutex-solutions/sandbox-base@" + d.String()
 	dest := "192.0.2.226/library/sandbox-base:20261112-9d00563"
-	pat := authn.AuthConfig{Username: "proxcloud", Password: "ghp_pat"}
+	pat := authn.AuthConfig{RegistryToken: "ghcr-short-lived-token"}
 	push := authn.AuthConfig{Username: "mirror", Password: "mirror-pw"}
 	res, err := runMirror(context.Background(), mirrorPolicy, source, dest, pat, push, base)
 	if err != nil {
@@ -155,9 +159,22 @@ func TestRunMirrorPreservesDigestAndScopesCredentials(t *testing.T) {
 		t.Fatalf("result %+v: %v", res, err)
 	}
 	for _, c := range calls {
-		if (c.host == "ghcr.io" && c.user != "" && c.user != "proxcloud") || (c.host == "zot" && c.user != "" && c.user != "mirror") {
+		if (c.host == "ghcr.io" && c.user != "") || (c.host == "zot" && c.user != "" && c.user != "mirror") {
 			t.Fatalf("a credential crossed registries: %+v", c)
 		}
+		if c.host == "ghcr.io" && c.bearer != "" && c.bearer != "Bearer ghcr-short-lived-token" {
+			t.Fatalf("ghcr.io saw another credential: %+v", c)
+		}
+		if c.host == "zot" && strings.Contains(c.bearer, "ghcr-short-lived-token") {
+			t.Fatalf("the GHCR token reached the sandbox registry: %+v", c)
+		}
+	}
+	sawToken := false
+	for _, c := range calls {
+		sawToken = sawToken || c.bearer == "Bearer ghcr-short-lived-token"
+	}
+	if !sawToken {
+		t.Fatal("the GHCR registry token was never presented")
 	}
 	// The destination holds the very same manifest digest.
 	dt, _ := name.NewTag(dest)
@@ -183,6 +200,9 @@ func TestRunMirrorPreservesDigestAndScopesCredentials(t *testing.T) {
 	}
 	if _, err := RunMirror(context.Background(), mirrorPolicy, source, dest, pat, authn.AuthConfig{}); err == nil {
 		t.Fatal("anonymous destination accepted")
+	}
+	if _, err := RunMirror(context.Background(), mirrorPolicy, source, dest, authn.AuthConfig{Username: "proxcloud", Password: "ghp_pat"}, push); err == nil {
+		t.Fatal("a username/password (the PAT) was accepted for the source")
 	}
 	bad := *res
 	bad.DestinationDigest = "sha256:" + strings.Repeat("b", 64)
@@ -211,4 +231,25 @@ func mirrorTestImage(t *testing.T, content string) v1.Image {
 		t.Fatal(err)
 	}
 	return img
+}
+
+// The worker accepts only a ghcr.io registry token for the source: never the PAT as a password, never another host.
+func TestMirrorSourceCredential(t *testing.T) {
+	if a, err := MirrorSourceCredential([]byte(`{"auths":{"ghcr.io":{"registrytoken":"tok"}}}`)); err != nil || a.RegistryToken != "tok" || a.Username != "" {
+		t.Fatalf("token: %+v %v", a, err)
+	}
+	for _, bad := range []string{
+		`{"auths":{"ghcr.io":{"username":"proxcloud","password":"ghp_x"}}}`,
+		`{"auths":{"ghcr.io":{"auth":"cHJveGNsb3VkOmdocF94"}}}`,
+		`{"auths":{"ghcr.io":{"registrytoken":"tok","password":"ghp_x"}}}`,
+		`{"auths":{"ghcr.io":{"identitytoken":"x"}}}`,
+		`{"auths":{"docker.io":{"registrytoken":"tok"}}}`,
+		`{"auths":{"ghcr.io":{"registrytoken":"tok"},"docker.io":{"registrytoken":"tok"}}}`,
+		`{"auths":{"ghcr.io":{"registrytoken":"a b"}}}`,
+		`{}`, `not json`,
+	} {
+		if _, err := MirrorSourceCredential([]byte(bad)); err == nil {
+			t.Errorf("accepted %s", bad)
+		}
+	}
 }

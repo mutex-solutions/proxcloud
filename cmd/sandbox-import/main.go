@@ -31,7 +31,8 @@ func sourceCredential(path, host string) (authn.AuthConfig, error) {
 
 // mirror is the copy mode for a built-in sandbox template image (docs/template-updates.md §4): argv is
 // "mirror <ghcr source@digest> <registry>/library/sandbox-<name>:<tag> <policy>"; the source credential is the
-// pod-owned GitHub pull Secret at /source, the destination the Zot mirror account at /push.
+// pod-owned Secret at /source (a short-lived GHCR registry token, never the PAT), the destination the Zot mirror
+// account at /push.
 func mirror() error {
 	source, dest := os.Args[2], os.Args[3]
 	policy, err := sandboximport.ParseMirrorPolicy(os.Args[4])
@@ -41,7 +42,11 @@ func mirror() error {
 	if _, _, err = policy.Check(source, dest); err != nil {
 		return err
 	}
-	src, err := credential("/source/config.json", sandboximport.MirrorSourceHost)
+	raw, err := os.ReadFile("/source/config.json")
+	if err != nil {
+		return errors.New("required source registry token is unavailable")
+	}
+	src, err := sandboximport.MirrorSourceCredential(raw)
 	if err != nil {
 		return err
 	}

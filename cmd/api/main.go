@@ -942,11 +942,38 @@ func run() error {
 	}
 	adminH.SetTemplateUpdates(tuSvc)
 	adminH.SetSandboxCluster(func(es *externalservice.ExternalService) (admin.SandboxCluster, error) { return sandboxServiceFor(es) })
-	if cfg.Jobs.TemplateUpdatesSandbox {
+	// The sandbox mirror runner always runs: with PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED off it claims no job
+	// (CleanupOnly) but still cleans up dead jobs and deletes orphan worker pods (and their pod-owned credential
+	// Secrets), so turning the flag off never strands a pod holding a registry token or the mirror password.
+	{
 		sbxStore := templateupdates.PGSandbox{DB: pg}
 		sbxRunner := &templateupdates.SandboxRunner{
 			Store: jobStore, Receipts: sbxStore, Lease: cfg.Jobs.LeaseDuration, Log: log,
 			Dead: sbxStore.DeadUncleaned, ClaimDead: jobStore.ClaimDead,
+			CleanupOnly: !cfg.Jobs.TemplateUpdatesSandbox,
+			Orphans: func(ctx context.Context) (int, error) {
+				services, err := esSvc.ListByType(ctx, externalservice.TypeCloud)
+				if err != nil {
+					return 0, err
+				}
+				total := 0
+				for i := range services {
+					es := &services[i]
+					if !es.IsSandbox() {
+						continue
+					}
+					ss, err := sandboxServiceFor(es)
+					if err != nil {
+						continue
+					}
+					n, err := templateupdates.SweepMirrorOrphans(ctx, ss, sbxStore.JobLiveByShort)
+					total += n
+					if err != nil {
+						log.Warn("sandbox template update: orphan sweep", "service", es.ID, "err", err)
+					}
+				}
+				return total, nil
+			},
 			Build: func(ctx context.Context, p templateupdates.SandboxPayload) (*templateupdates.SandboxExecutor, error) {
 				es, err := esSvc.Get(ctx, p.ServiceID)
 				if err != nil || es == nil || !es.IsSandbox() {
@@ -965,12 +992,14 @@ func run() error {
 				}
 				return &templateupdates.SandboxExecutor{Cluster: ss, Receipts: sbxStore, Pins: sbxStore,
 					Registry: templateupdates.NewRegistryReader(p.Registry, sc.RegistryCA, sc.RegistryMirror.User, sc.RegistryMirror.Password, ""),
-					Token: func(ctx context.Context) (string, error) {
-						tok, _, err := tuSvc.Token(ctx)
-						if err == nil && tok == "" {
-							err = templateupdates.ErrNotConfigured
+					// The PAT is exchanged here for a GHCR token pull-scoped to this one package; only that token reaches
+					// the worker's pod-owned Secret.
+					SourceToken: func(ctx context.Context, pkg string) (string, error) {
+						gh, err := tuSvc.Client(ctx)
+						if err != nil {
+							return "", err
 						}
-						return tok, err
+						return gh.PullToken(ctx, pkg)
 					}}, nil
 			},
 			// One SYSTEM audit row per finished job (who asked is on the receipt and the enqueue's admin audit row).
@@ -993,7 +1022,9 @@ func run() error {
 		sbxDone := make(chan struct{})
 		go func() { defer close(sbxDone); sbxRunner.Run(sbxCtx) }()
 		defer func() { stopSbx(); <-sbxDone }()
-		log.Warn("template updates: sandbox mirror runner ENABLED")
+		if cfg.Jobs.TemplateUpdatesSandbox {
+			log.Warn("template updates: sandbox mirror runner ENABLED")
+		}
 	}
 	if cfg.Jobs.TemplateUpdatesVM {
 		tuReceipts := templateupdates.PGReceipts{DB: pg}

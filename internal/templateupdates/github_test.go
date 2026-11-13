@@ -307,3 +307,32 @@ func TestRESTCallsStayBounded(t *testing.T) {
 		t.Fatalf("hanging API: err %v after %v", err, time.Since(start))
 	}
 }
+
+// PullToken: the PAT is sent only to the registry's own /token endpoint (HTTP Basic), with pull scope on exactly the one
+// package; what comes back is the short-lived bearer token the mirror worker gets instead of the PAT.
+func TestPullTokenIsPackageScoped(t *testing.T) {
+	var gotScope, gotService, gotUser, gotPass string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/token" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+			w.WriteHeader(404)
+			return
+		}
+		gotScope, gotService = r.URL.Query().Get("scope"), r.URL.Query().Get("service")
+		gotUser, gotPass, _ = r.BasicAuth()
+		_, _ = w.Write([]byte(`{"token":"short-lived"}`))
+	}))
+	defer srv.Close()
+	host := strings.TrimPrefix(srv.URL, "http://")
+	c, _ := NewClient(testPAT, Options{Registry: host, RegistryScheme: "http"})
+	tok, err := c.PullToken(context.Background(), "sandbox-base")
+	if err != nil || tok != "short-lived" {
+		t.Fatalf("token %q %v", tok, err)
+	}
+	if gotScope != "repository:mutex-solutions/sandbox-base:pull" || gotService != host || gotPass != testPAT || gotUser == "" {
+		t.Fatalf("scope=%q service=%q user=%q", gotScope, gotService, gotUser)
+	}
+	if _, err := c.PullToken(context.Background(), "../evil"); err == nil {
+		t.Fatal("an invalid package was accepted")
+	}
+}

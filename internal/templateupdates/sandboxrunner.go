@@ -29,6 +29,14 @@ type SandboxRunner struct {
 	ClaimDead func(ctx context.Context, id string, ttl time.Duration) (*durablejobs.Job, error)
 	// OnFinish receives every job's final receipt (succeeded or failed): the system audit row (cmd/api).
 	OnFinish func(rec SandboxReceipt)
+	// CleanupOnly: never claim a job to run (the feature flag is off); only the dead-job cleanup pass and the orphan
+	// sweep run, so worker pods and their credential Secrets never outlive a job because the flag was turned off.
+	CleanupOnly bool
+	// Orphans, when set, deletes worker pods (and with them their Secrets) that belong to no live job; called at most
+	// every OrphanEvery (default 10 minutes). It returns how many pods it deleted.
+	Orphans     func(ctx context.Context) (int, error)
+	OrphanEvery time.Duration
+	lastOrphans time.Time
 }
 
 // Run polls until ctx ends.
@@ -65,6 +73,10 @@ func (r *SandboxRunner) RunOnce(ctx context.Context) (bool, error) {
 	if r.Lease <= 0 {
 		r.Lease = time.Minute
 	}
+	r.sweepOrphans(ctx)
+	if r.CleanupOnly {
+		return r.cleanupDead(ctx)
+	}
 	j, err := r.Store.ClaimKinds(ctx, r.Lease, []string{durablejobs.TemplateUpdateSandbox})
 	if err != nil {
 		return false, err
@@ -74,6 +86,25 @@ func (r *SandboxRunner) RunOnce(ctx context.Context) (bool, error) {
 	}
 	r.perform(ctx, j)
 	return true, nil
+}
+
+func (r *SandboxRunner) sweepOrphans(ctx context.Context) {
+	if r.Orphans == nil {
+		return
+	}
+	every := r.OrphanEvery
+	if every <= 0 {
+		every = 10 * time.Minute
+	}
+	if !r.lastOrphans.IsZero() && time.Since(r.lastOrphans) < every {
+		return
+	}
+	r.lastOrphans = time.Now()
+	if n, err := r.Orphans(ctx); err != nil {
+		r.Log.Warn("sandbox template update: orphan worker sweep failed", "err", err)
+	} else if n > 0 {
+		r.Log.Warn("sandbox template update: deleted orphan mirror worker pods", "count", n)
+	}
 }
 
 func (r *SandboxRunner) perform(parent context.Context, j *durablejobs.Job) {

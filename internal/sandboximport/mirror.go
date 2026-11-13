@@ -232,12 +232,31 @@ func (g mirrorSourceGuard) check(resp *http.Response, err error) (*http.Response
 	return resp, nil
 }
 
-// RunMirror copies source to destination with the given credentials (source: the GitHub PAT for ghcr.io;
+// MirrorSourceCredential reads the source credential of copy mode: a dockerconfigjson for ghcr.io holding ONLY a
+// short-lived registry bearer token ("registrytoken": pull scope of the one source repository, minted by the portal
+// from the GitHub integration's PAT). A username/password, identity token or any other host is refused: the PAT itself
+// never reaches the worker.
+func MirrorSourceCredential(data []byte) (authn.AuthConfig, error) {
+	var d struct {
+		Auths map[string]authn.AuthConfig `json:"auths"`
+	}
+	if len(data) > 64<<10 || json.Unmarshal(data, &d) != nil || len(d.Auths) != 1 {
+		return authn.AuthConfig{}, errors.New("invalid mirror source credential configuration")
+	}
+	a, ok := d.Auths[MirrorSourceHost]
+	if !ok || a.RegistryToken == "" || len(a.RegistryToken) > 8192 || strings.ContainsAny(a.RegistryToken, " \t\r\n") ||
+		a.Username != "" || a.Password != "" || a.Auth != "" || a.IdentityToken != "" {
+		return authn.AuthConfig{}, errors.New("the mirror source credential must be a ghcr.io registry token only")
+	}
+	return authn.AuthConfig{RegistryToken: a.RegistryToken}, nil
+}
+
+// RunMirror copies source to destination with the given credentials (source: a short-lived GHCR registry token;
 // push: the Zot mirror account) and verifies the destination resolves to the pinned digest.
 func RunMirror(ctx context.Context, policy MirrorPolicy, source, destination string, sourceAuth, pushAuth authn.AuthConfig) (*MirrorResult, error) {
-	if sourceAuth.Username == "" || sourceAuth.Password == "" || pushAuth.Username == "" || pushAuth.Password == "" ||
-		sourceAuth.IdentityToken != "" || sourceAuth.RegistryToken != "" || pushAuth.IdentityToken != "" || pushAuth.RegistryToken != "" {
-		return nil, errors.New("mirror requires explicit source and destination username/password credentials")
+	if sourceAuth.RegistryToken == "" || sourceAuth.Username != "" || sourceAuth.Password != "" || sourceAuth.IdentityToken != "" ||
+		pushAuth.Username == "" || pushAuth.Password == "" || pushAuth.IdentityToken != "" || pushAuth.RegistryToken != "" {
+		return nil, errors.New("mirror requires a source registry token and destination username/password credentials")
 	}
 	base := http.DefaultTransport.(*http.Transport).Clone()
 	base.Proxy = nil
@@ -262,7 +281,7 @@ func runMirror(ctx context.Context, policy MirrorPolicy, source, destination str
 	image, err := remote.Image(ref, remote.WithContext(ctx), remote.WithTransport(srcT),
 		remote.WithAuthFromKeychain(Credentials{srcRepo: sourceAuth}), remote.WithPlatform(v1.Platform{OS: "linux", Architecture: "amd64"}))
 	if err != nil {
-		return nil, errors.New("source manifest could not be read with the GitHub integration's token")
+		return nil, errors.New("source manifest could not be read with the GHCR registry token (expired or not pull-scoped?)")
 	}
 	raw, err := image.RawManifest()
 	if err != nil || len(raw) > 2<<20 {

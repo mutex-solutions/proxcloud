@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 	"github.com/mutex-solutions/proxcloud/internal/durablejobs"
 	"github.com/mutex-solutions/proxcloud/internal/sandboximport"
 )
@@ -230,4 +231,46 @@ func (s *Service) SandboxPinList(ctx context.Context, registry string) ([]Sandbo
 // ImagesYAMLLine is the deploy/templates/images.yaml line to commit for a pin (the source ref, same digest).
 func ImagesYAMLLine(name, tag, digest string) string {
 	return "  " + name + ": " + DefaultRegistry + "/" + Owner + "/" + SandboxPackage(name) + ":" + tag + "@" + digest
+}
+
+// OrphanCluster is what the orphan sweep needs from one sandbox provider's cluster.
+type OrphanCluster interface {
+	ListAllMirrorPods(ctx context.Context) ([]sandbox.MirrorPod, error)
+	DeleteMirrorPod(ctx context.Context, name, uid string) error
+}
+
+// SweepMirrorOrphans deletes the mirror worker pods of one provider (and, by ownerReference, their credential
+// Secrets) whose job is not live: no durable job row for the pod's job label, or a job that is dead or succeeded.
+// A pod of a pending/running job is never touched. jobLive maps the 16-hex job label to "is that job live".
+func SweepMirrorOrphans(ctx context.Context, cl OrphanCluster, jobLive func(ctx context.Context, short string) (bool, error)) (int, error) {
+	pods, err := cl.ListAllMirrorPods(ctx)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, p := range pods {
+		live, err := jobLive(ctx, p.JobShort)
+		if err != nil {
+			return n, err
+		}
+		if live {
+			continue
+		}
+		if err := cl.DeleteMirrorPod(ctx, p.Name, p.UID); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
+
+// JobLiveByShort reports whether a sandbox job whose id starts with the 16-hex label is pending or running.
+func (s PGSandbox) JobLiveByShort(ctx context.Context, short string) (bool, error) {
+	if len(short) != 16 || strings.Trim(short, "0123456789abcdef") != "" {
+		return false, nil
+	}
+	var live bool
+	err := s.DB.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM durable_job WHERE kind=$1 AND state IN ('pending','running')
+	 AND replace(id::text,'-','') LIKE $2)`, durablejobs.TemplateUpdateSandbox, short+"%").Scan(&live)
+	return live, err
 }

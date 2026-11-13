@@ -79,7 +79,7 @@ func mirrorFixture() (*Service, *dsFake) {
 func TestMirrorWorkerPodAndPodOwnedSecrets(t *testing.T) {
 	s, f := mirrorFixture()
 	req := MirrorRequest{JobShort: "0123456789abcdef", Epoch: 2, Source: "ghcr.io/mutex-solutions/sandbox-base@" + dNew,
-		Destination: mirrorReg + "/library/sandbox-base:20261112-9d00563", GitHubToken: "ghp_secret_pat"}
+		Destination: mirrorReg + "/library/sandbox-base:20261112-9d00563", SourceToken: "ghcr-registry-token"}
 	uid, err := s.StartMirror(context.Background(), req)
 	if err != nil || uid == "" {
 		t.Fatalf("start: %q %v", uid, err)
@@ -89,7 +89,7 @@ func TestMirrorWorkerPodAndPodOwnedSecrets(t *testing.T) {
 		t.Fatal("no worker pod")
 	}
 	pj, _ := json.Marshal(pod)
-	if strings.Contains(string(pj), "ghp_secret_pat") || strings.Contains(string(pj), "mirror-pw") {
+	if strings.Contains(string(pj), "ghcr-registry-token") || strings.Contains(string(pj), "mirror-pw") {
 		t.Fatal("a credential is in the pod spec")
 	}
 	c := dig(pod, "spec", "containers").([]any)[0].(map[string]any)
@@ -114,8 +114,14 @@ func TestMirrorWorkerPodAndPodOwnedSecrets(t *testing.T) {
 		}
 		var dc map[string]map[string]map[string]string
 		_ = json.Unmarshal(raw, &dc)
-		if len(dc["auths"]) != 1 || dc["auths"][host]["password"] == "" {
+		if len(dc["auths"]) != 1 {
 			t.Fatalf("%s secret holds %v", which, dc)
+		}
+		if which == "source" && (dc["auths"][host]["registrytoken"] != "ghcr-registry-token" || len(dc["auths"][host]) != 1) {
+			t.Fatalf("the source secret must hold the registry token only: %v", dc)
+		}
+		if which == "push" && dc["auths"][host]["password"] != "mirror-pw" {
+			t.Fatalf("push secret %v", dc)
 		}
 	}
 	// Prerequisites fail closed.
@@ -137,10 +143,10 @@ func TestMirrorWorkerPodAndPodOwnedSecrets(t *testing.T) {
 	}
 	s, _ = mirrorFixture()
 	for _, bad := range []MirrorRequest{
-		{JobShort: req.JobShort, Epoch: 1, Source: req.Source, Destination: mirrorReg + "/library/proxcloud-api:20261112-9d00563", GitHubToken: "x"},
-		{JobShort: req.JobShort, Epoch: 1, Source: "ghcr.io/other/sandbox-base@" + dNew, Destination: req.Destination, GitHubToken: "x"},
-		{JobShort: "NOTHEX", Epoch: 1, Source: req.Source, Destination: req.Destination, GitHubToken: "x"},
-		{JobShort: req.JobShort, Epoch: 1, Source: req.Source, Destination: req.Destination, GitHubToken: ""},
+		{JobShort: req.JobShort, Epoch: 1, Source: req.Source, Destination: mirrorReg + "/library/proxcloud-api:20261112-9d00563", SourceToken: "x"},
+		{JobShort: req.JobShort, Epoch: 1, Source: "ghcr.io/other/sandbox-base@" + dNew, Destination: req.Destination, SourceToken: "x"},
+		{JobShort: "NOTHEX", Epoch: 1, Source: req.Source, Destination: req.Destination, SourceToken: "x"},
+		{JobShort: req.JobShort, Epoch: 1, Source: req.Source, Destination: req.Destination, SourceToken: ""},
 	} {
 		if _, err := s.StartMirror(context.Background(), bad); err == nil {
 			t.Errorf("accepted %+v", bad)
