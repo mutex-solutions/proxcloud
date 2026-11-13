@@ -134,9 +134,12 @@ spec:
     - name: ref
       expression: >-
         r'^{{ pc.sandbox.registry.address | regex_escape }}/library/sandbox-[a-z0-9][a-z0-9-]{0,62}(:[0-9]{8}-[0-9a-f]{7})?@sha256:[0-9a-f]{64}$'
+    # The repository part of a ref, whole: the class stops only at the ':' or '@' after the name (RE2 has no
+    # lookahead), so a name that merely starts with another (sandbox-base / sandbox-base-evil) never compares equal,
+    # whatever the length of the old one.
     - name: repo
       expression: >-
-        r'^{{ pc.sandbox.registry.address | regex_escape }}/library/sandbox-[a-z0-9][a-z0-9-]{0,62}'
+        r'^{{ pc.sandbox.registry.address | regex_escape }}/library/sandbox-[a-z0-9][a-z0-9-]*'
     - name: oldInit
       expression: "has(oldObject.spec.template.spec.initContainers) ? oldObject.spec.template.spec.initContainers : []"
     - name: newInit
