@@ -259,6 +259,12 @@ class PrepullPolicyTests(unittest.TestCase):
         self.assertEqual(rb["subjects"], [{"kind": "ServiceAccount", "name": "proxcloud", "namespace": "proxcloud-system"}])
         rbac = (INSTALLER.parent / "deploy/sandbox-cluster/rbac.yaml").read_text()
         self.assertIn("name: proxcloud\n  namespace: proxcloud-system", rbac)
+        # The trusted worker's image Secret: get on that one name only, same subject.
+        worker = docs[("Role", "proxcloud-import-worker")]
+        self.assertEqual(worker["rules"], [{"apiGroups": [""], "resources": ["secrets"], "resourceNames": ["sandbox-import-worker"], "verbs": ["get"]}])
+        self.assertEqual(docs[("RoleBinding", "proxcloud-import-worker")]["subjects"], rb["subjects"])
+        roles = [d for (k, _), d in docs.items() if k in ("Role", "ClusterRole")]
+        self.assertEqual(len(roles), 2, "no other Role may be rendered next to the prepull")
 
     def test_policy_covers_every_kubernetes_135_field(self):
         # The reviewer's gap (hostnameOverride, workloadRef, restartPolicyRules) is closed, and nothing else is open.
