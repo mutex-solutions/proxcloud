@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-14
+
+Patch release on top of `v0.5.0`, with no breaking change. It fixes the VM template import, which
+failed on PVE 9 with the documented least-privilege token (found on the first real import, a homelab
+running PVE 9.2.21), and lets the image publication bridge accept Kubernetes node templates 1.36.6 and
+1.37.2 next to 1.35.10. Everything `v0.5.0` says is **not** verified still holds: both template-update
+flags default **off**; the VM import and its smoke test are still not accepted on PVE 9.2 (the fix was
+reproduced and verified against one real PVE 9.2.21 cluster, the full import + smoke run follows the
+release); the sandbox mirror is not lab-verified; and live installer (P6) and split/managed-service
+(P7) acceptance were not performed. The security gate policy is unchanged.
+
 ### Changed
 
 - **Public VM artifacts: Kubernetes node templates 1.36.6 and 1.37.2** are accepted for publication next to

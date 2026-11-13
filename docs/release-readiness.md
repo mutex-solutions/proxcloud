@@ -1,21 +1,20 @@
 # Current support boundaries and first-release readiness
 
-Status snapshot: **2026-11-13**, preparing the stable `v0.5.0` release (owner
-decision 2026-11-13: the next release is `v0.5.0`, not `0.4.1`). This is an
-evidence summary, not a release announcement or a production SLA. `v0.4.0-rc.1`
-(tag 2026-11-11) was published as a non-latest prerelease and `v0.4.0` (tag
-2026-11-12) as the first stable release. Pushing the `v0.5.0` tag publishes the
-stable images, app chart and GitHub Release. `v0.5.0` contains breaking API
-changes; see the [changelog](../CHANGELOG.md). This source change publishes
+Status snapshot: **2026-11-14**, preparing the stable patch release `v0.5.1` on top of `v0.5.0`
+(tag 2026-11-13). This is an evidence summary, not a release announcement or a production SLA.
+`v0.4.0-rc.1` (tag 2026-11-11) was published as a non-latest prerelease, `v0.4.0` (tag 2026-11-12)
+as the first stable release and `v0.5.0` (tag 2026-11-13) as the second. Pushing the `v0.5.1` tag
+publishes the stable images, app chart and GitHub Release. `v0.5.1` has no breaking change against
+`v0.5.0`; `v0.5.0` contains breaking API changes against `v0.4.0`; see the [changelog](../CHANGELOG.md). This source change publishes
 nothing and performs no live acceptance. Check GitHub's Releases/Actions pages before choosing a deployment
 commit.
 
 ## What is available now
 
 - Source on `main`, public development container images on GHCR, the
-  `v0.4.0-rc.1` prerelease and the first stable release `v0.4.0` (images and app
-  charts `0.4.0-rc.1` and `0.4.0`). The app chart `0.5.0`, appVersion and installer
-  BOM `v0.5.0` name the current stable release; its tag publishes those artifacts.
+  `v0.4.0-rc.1` prerelease and the stable releases `v0.4.0` and `v0.5.0` (images and app
+  charts `0.4.0-rc.1`, `0.4.0` and `0.5.0`). The app chart `0.5.1`, appVersion and installer
+  BOM `v0.5.1` name the current stable release; its tag publishes those artifacts.
   Verify they are pullable before using `images.build: false`; a source pin is not proof that a registry artifact exists.
 - The installer defaults to `images.build: true`, building the API and two
   consoles plus app chart from the checkout. A source/local-registry installation
@@ -83,10 +82,10 @@ registration belongs in public documentation or release artifacts.
 The owner decided on 2026-11-12 to release `v0.4.0` as stable, and on 2026-11-13
 that the next release is the stable `v0.5.0`, each with a narrowly scoped core and
 explicitly held features; neither need claim every managed service. Those decisions
-are not evidence of publication or installation. For `v0.5.0` (and any later
-release):
+are not evidence of publication or installation. The patch release `v0.5.1` (2026-11-14) follows the
+same gate. For every release:
 
-1. Review the exact release commit for `v0.5.0` and its supported core surface
+1. Review the exact release commit for the release and its supported core surface
    and explicit experimental/held features. The version is not published until
    its tag's workflows succeed.
 2. Verify app/chart/installer BOM alignment with that exact version. Keep managed
@@ -103,12 +102,13 @@ release):
    completion or a deployment. Keep the default `images.build: true` meanwhile.
 5. After publication, install the exact released chart/images with
    `images.build: false` on a clean evaluation site (not performed for `v0.4.0`,
-   and not yet performed for `v0.5.0` when this was prepared). The installer
+   and not yet performed for `v0.5.0` or `v0.5.1` when this was prepared; a portal-only Docker Compose
+   site is running `v0.5.0` on a homelab, which is not this acceptance). The installer
    accepts valid SemVer with **base version >= 0.4.0**, including prereleases; this local guard
    does not prove publication or a stable release. Check login/client/admin,
    provider connection, one basic server create/delete, configuration/secrets and
    the explicit scheduler choice. A source-build installation is not this acceptance.
-6. Record rollback/backup/migration limits. `v0.5.0` is stable by owner decision,
+6. Record rollback/backup/migration limits. `v0.5.x` is stable by owner decision,
    **not** by acceptance: neither this preparation nor a green build clears full
    live installer (P6) or split/managed-service (P7) acceptance, which the owner
    deferred. Intentional safety holds stay in place.
