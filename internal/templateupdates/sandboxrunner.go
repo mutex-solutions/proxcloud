@@ -231,7 +231,25 @@ func (r *SandboxRunner) finished(ctx context.Context, id string) {
 	}
 }
 
-// cleanupDead re-acquires one dead, uncleaned sandbox job and runs Cleanup under that fenced acquisition.
+// releaseForeign hands a dead job of another kind (a miswired Dead list) straight back to dead WITHOUT cleaned_up and
+// with its own failure code, so its own runner's dead-job pass still cleans it up.
+func (r *SandboxRunner) releaseForeign(ctx context.Context, j *durablejobs.Job) {
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	code := j.LastError
+	if code == "" || code == "cleaned_up" {
+		code = "cleanup_pending"
+	}
+	err := r.Store.Fail(fctx, j, 0, true, code)
+	if err != nil && code != "cleanup_pending" && !errors.Is(err, durablejobs.ErrLeaseLost) {
+		err = r.Store.Fail(fctx, j, 0, true, "cleanup_pending") // its code was not a fixed one
+	}
+	r.Log.Error("sandbox template update: the dead-job pass was handed a job of another kind; released it untouched",
+		"job", j.ID, "kind", j.Kind, "released", err == nil)
+}
+
+// cleanupDead re-acquires one dead, uncleaned sandbox job and runs Cleanup under that fenced acquisition. A job of
+// another kind is released at once (releaseForeign): never cleaned up here, never marked cleaned_up.
 func (r *SandboxRunner) cleanupDead(ctx context.Context) (bool, error) {
 	if r.Dead == nil || r.ClaimDead == nil {
 		return false, nil
@@ -243,6 +261,10 @@ func (r *SandboxRunner) cleanupDead(ctx context.Context) (bool, error) {
 	j, err := r.ClaimDead(ctx, ids[0], r.Lease)
 	if err != nil || j == nil {
 		return false, err
+	}
+	if j.Kind != durablejobs.TemplateUpdateSandbox {
+		r.releaseForeign(ctx, j)
+		return false, nil
 	}
 	work, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()

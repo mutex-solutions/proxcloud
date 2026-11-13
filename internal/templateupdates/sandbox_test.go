@@ -630,3 +630,39 @@ func TestSandboxRunnerCleanupOnly(t *testing.T) {
 		t.Fatalf("claimed=%v swept=%d", jobs.claimed, swept)
 	}
 }
+
+// N1: the dead-job pass re-acquires by id, so a miswired Dead list could hand it a VM/smoke job. Such a job is released
+// back to dead with its own code (never cleaned_up), so its own runner still cleans it up; nothing of it is touched.
+func TestSandboxCleanupDeadRefusesForeignKind(t *testing.T) {
+	for _, tc := range []struct{ kind, lastError, want string }{
+		{durablejobs.TemplateUpdateVM, "attempts_exhausted", "attempts_exhausted"},
+		{durablejobs.TemplateUpdateSmoke, "lease_expired", "lease_expired"},
+		{durablejobs.TemplateUpdateVM, "", "cleanup_pending"},
+		{durablejobs.TemplateUpdateVM, "cleaned_up", "cleanup_pending"},
+	} {
+		p := sbxPayload()
+		r, jobs, cl, _, mem := sbxFixture(t, p)
+		cl.pods["tu-mirror-x-e1"] = &sandbox.MirrorPod{Name: "tu-mirror-x-e1", UID: "uid-x"}
+		foreign := durablejobs.Job{ID: testJob, Kind: tc.kind, Payload: []byte(`{"version":1}`), Attempts: 3, MaxAttempts: 3,
+			Epoch: 4, State: "running", LastError: tc.lastError}
+		builds := 0
+		b := r.Build
+		r.Build = func(ctx context.Context, q SandboxPayload) (*SandboxExecutor, error) { builds++; return b(ctx, q) }
+		r.Dead = func(context.Context) ([]string, error) { return []string{testJob}, nil }
+		r.ClaimDead = func(context.Context, string, time.Duration) (*durablejobs.Job, error) { j := foreign; return &j, nil }
+		jobs.claimed = true // no sandbox job to run: straight to the dead-job pass
+		did, err := r.RunOnce(context.Background())
+		if did || err != nil {
+			t.Fatalf("%s: did=%v err=%v", tc.kind, did, err)
+		}
+		if jobs.failCode != tc.want || !jobs.permanent || jobs.failCode == "cleaned_up" {
+			t.Fatalf("%s %q: released with %q permanent=%v", tc.kind, tc.lastError, jobs.failCode, jobs.permanent)
+		}
+		if builds != 0 || len(cl.deleted) != 0 || len(cl.pods) != 1 {
+			t.Fatalf("%s: a foreign job's cleanup ran: builds=%d deleted=%v", tc.kind, builds, cl.deleted)
+		}
+		if _, ok := mem.recs[testJob]; ok {
+			t.Fatalf("%s: a sandbox receipt was written for a foreign job", tc.kind)
+		}
+	}
+}
