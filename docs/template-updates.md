@@ -511,10 +511,19 @@ an advisory lock on `<registry>/library/sandbox-<name>` refuses while another jo
    (`tu-mirror-<16 hex>-e<epoch>`, no service-account token, read-only root, its image pulled with the
    read-only `sandbox-registry-nodes` account the sync now also writes into `sbx-build`). Its two
    credentials are dockerconfigjson Secrets written **after** the pod, with an `ownerReference` to the
-   pod's observed UID: a **short-lived GHCR registry token** pull-scoped to the one `sandbox-<name>`
-   package — the portal exchanges the GitHub PAT for it (`GET https://ghcr.io/token?scope=repository:
-   mutex-solutions/sandbox-<name>:pull`); **the PAT never leaves the portal** and the worker refuses a
-   username/password for the source — and the mirror account (the registry only). They are garbage-collected
+   pod's observed UID: an **anonymous short-lived GHCR registry token** pull-scoped to the one
+   `sandbox-<name>` package — the mirror pulls the **public** `sandbox-*` packages anonymously: the portal
+   requests a per-repository pull token **without any `Authorization` header**
+   (`GET https://ghcr.io/token?scope=repository:mutex-solutions/sandbox-<name>:pull&service=ghcr.io`) and
+   confirms it reads that package. **The PAT is used only for discovery (GitHub REST listing) and never leaves
+   the portal**: it is never sent to GHCR for this token, and there is no fallback to it. Before the token is
+   written anywhere it is checked: non-empty, ≤ 8 KiB, printable ASCII without whitespace, not a GitHub token
+   (`ghp_`, `github_pat_`, …), not equal to / containing the PAT or its base64 form, no base64 decoding of it
+   (any alphabet, also after a `v1:`-style prefix) containing the PAT, and an `expires_in`, if present, in
+   1..3600 s — otherwise the job fails permanently with `ghcr_token_unscoped` (the message never carries the
+   token or the PAT). **Private packages are not supported by the mirror**: a package GHCR does not serve
+   anonymously (401/403/404 from `/token` or the read) fails permanently with `ghcr_package_not_public`.
+   The worker refuses a username/password for the source — and the mirror account (the registry only). They are garbage-collected
    with the pod; the job deletes the pod (UID precondition) as soon as the result is read, and every pod of
    the job on finish/cleanup. A failed delete is recorded in the receipt. A pod that stays Pending more than
    5 minutes is replaced; a pod whose Secrets were not confirmed written is never waited for. The runner
@@ -536,7 +545,7 @@ an advisory lock on `<registry>/library/sandbox-<name>` refuses while another jo
    different digests.
 
 Failure codes (`[a-z_]`, never a provider string): `invalid_payload`, `receipt_mismatch`,
-`github_not_configured`, `github_refused`, `mirror_unavailable` (no worker image, no template registry or no mirror
+`github_not_configured`, `ghcr_package_not_public`, `ghcr_token_unscoped`, `mirror_unavailable` (no worker image, no template registry or no mirror
 account), `mirror_result_invalid`, `digest_mismatch`, `registry_refused`, `rollback_target_missing`,
 `ownership_lost`, `provider_missing`, `registry_changed`, `executor_unavailable`, `attempts_exhausted`,
 `job_dead`. **Resume**: a new acquisition continues from the last committed step; a worker that already
@@ -544,8 +553,9 @@ succeeded is reused (no second copy), one still running is waited for, a failed 
 copy redone under the new epoch's pod. A lost lease stops the executor before its next cluster effect.
 **Cleanup** (terminal failure or the dead-job pass): delete the job's worker pods; if the pin was
 recorded but the DaemonSet never ran the new ref, restore the pin record this job replaced. **Secrets**:
-the PAT exists only in the job's memory and the pod-owned Secret — never in the payload, receipt, pin,
-audit row or log; the mirror password only in the provider's encrypted secret and the pod-owned Secret.
+the PAT never reaches the sandbox cluster (nor the payload, receipt, pin, audit row or log); the anonymous
+pull token exists only in the job's memory and the pod-owned Secret; the mirror password only in the
+provider's encrypted secret and the pod-owned Secret.
 
 ### 5.3 Prepull RBAC and admission policy
 

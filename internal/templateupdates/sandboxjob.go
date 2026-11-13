@@ -56,8 +56,9 @@ type SandboxExecutor struct {
 	Registry DigestResolver
 	Receipts SandboxReceipts
 	Pins     SandboxPins
-	// SourceToken mints, at run time, a short-lived GHCR registry token with pull scope on the one source package
-	// from the GitHub integration's PAT (mirror only). The PAT never leaves the portal; the token is never stored.
+	// SourceToken mints, at run time, an ANONYMOUS short-lived GHCR registry token with pull scope on the one public
+	// source package (Client.PullToken; mirror only). The PAT is used for discovery only and never takes part in it nor
+	// leaves the portal; the token is checked (CheckPullToken) before it is written to the worker Secret, never stored.
 	SourceToken func(ctx context.Context, pkg string) (string, error)
 	// Poll / PodWait bound the wait for the worker pod (defaults 5s / sandbox.MirrorTimeout+5m); PendingLimit how
 	// long it may stay Pending before it is replaced (default sandbox.MirrorPendingLimit).
@@ -189,13 +190,20 @@ func (x *SandboxExecutor) mirror(ctx context.Context, jobID string, p SandboxPay
 	}
 	if name == "" {
 		tok, err := x.SourceToken(ctx, SandboxPackage(p.Name))
-		if err != nil || strings.TrimSpace(tok) == "" {
-			var he *HTTPError
+		if err == nil {
+			// Defense in depth (the minting side checks it against the PAT): never write a GitHub token, an empty or
+			// malformed value into the worker Secret.
+			err = CheckPullToken(tok, "")
+		}
+		if err != nil {
+			var pe *Permanent
 			switch {
-			case errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrNoToken) || err == nil:
+			case errors.As(err, &pe) && (pe.Code == CodeTokenUnscoped || pe.Code == CodePackageNotPublic):
+				return permanent(pe.Code, pe.Message)
+			case errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrNoToken):
 				return permanent("github_not_configured", "the GitHub integration has no token")
-			case errors.As(err, &he) && (he.Status == 401 || he.Status == 403):
-				return permanent("github_refused", "GHCR refused the GitHub integration's token for this package")
+			case isPermanent(err):
+				return permanent(CodeTokenUnscoped, "the GHCR source token was refused")
 			}
 			return errors.New("a GHCR registry token could not be obtained")
 		}
