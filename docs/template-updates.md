@@ -545,9 +545,9 @@ Failure codes (`[a-z_]`, never a provider string): `invalid_payload`, `receipt_m
 `github_not_configured`, `github_refused`, `mirror_unavailable` (no worker image, no template registry or no mirror
 account), `mirror_result_invalid`, `digest_mismatch`, `registry_refused`, `rollback_target_missing`,
 `ownership_lost`, `provider_missing`, `registry_changed`, `executor_unavailable`, `attempts_exhausted`,
-`job_dead`, `feature_disabled` (ended because the flag was off). **Resume**: a new acquisition continues from the last committed step; a worker that already
-succeeded is reused (no second copy), one still running is waited for, a failed one is deleted and the
-copy redone under the new epoch's pod. A lost lease stops the executor before its next cluster effect.
+`job_dead`, `feature_disabled` (ended because the flag was off). **Resume**: a new acquisition
+continues from the last committed step; a worker that already succeeded is reused (no second copy), one
+still running is waited for, a failed one is deleted and the copy redone under the new epoch's pod. A lost lease stops the executor before its next cluster effect.
 **Cleanup** (terminal failure or the dead-job pass): delete the job's worker pods; if the pin was
 recorded but the DaemonSet never ran the new ref, restore the pin record this job replaced. **Secrets**:
 the PAT exists only in the job's memory and the pod-owned Secret — never in the payload, receipt, pin,

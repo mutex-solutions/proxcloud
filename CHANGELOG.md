@@ -41,7 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   once, because its users Secret gains the `mirror` account; pulls fail for the restart's few seconds.
   Residual risk: the `mirror` account may create a new `library/sandbox-<name>` repository (it cannot
   overwrite or delete an image). With the flag turned off, a sandbox job that is queued, or whose
-  runner is gone (expired lease), ends `failed` `feature_disabled` without running: its worker pods
+  runner is gone (expired lease), ends `failed` `feature_disabled` without running further: its worker pods
   and their Secrets are deleted and a pin whose prepull switch never landed is restored, so it no
   longer blocks its image or the pin delete; a job another replica (flag on) holds is not touched.
 - Add a per-provider **attach policy** for new projects: `config.attachToNewProjects`
