@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -40,7 +41,9 @@ type smokePVE struct {
 	noFSSize         bool             // guest-get-fsinfo without sizes, df fails too
 	execForbidden    bool             // guest-exec is refused (403)
 	cloneRunning     bool             // the clone task has not ended (PVE adds the clone to its pool only when it ends)
-	cloneEndsNow     int              // the in-flight clone of this VMID ends at the next CloneRunning read
+	cloneEndsNow     int              // the in-flight clone of this VMID ends at the next TaskRunning read
+	taskErr          error            // TaskRunning fails with it
+	taskReads        []string         // TaskRunning reads, "node/vmid/type"
 	poolErr          error            // GetPool fails with it
 	poolMembersExtra []pve.PoolMember // listed as members of every pool read (a member the token still cannot read)
 	cloneFails       bool             // the clone task fails
@@ -221,12 +224,19 @@ func (f *smokePVE) GetVMStatus(_ context.Context, node string, vmid int) (*pve.V
 	return &pve.VMStatus{Status: "stopped"}, nil
 }
 
-// CloneRunning: a clone marked in flight (cloneRunning) is running; cloneEndsNow ends it on this read (the clone task
-// stops and its VM joins the pool), as PVE can between owned()'s two reads.
-func (f *smokePVE) CloneRunning(_ context.Context, node string, srcVMID int) (bool, error) {
+// TaskRunning: a clone marked in flight (cloneRunning) is running; cloneEndsNow ends it on this read (the clone task
+// stops and its VM joins the pool), as PVE can between owned()'s two reads. Only qmclone tasks exist here.
+func (f *smokePVE) TaskRunning(_ context.Context, node string, vmid int, typ string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.read()
+	f.taskReads = append(f.taskReads, fmt.Sprintf("%s/%d/%s", node, vmid, typ))
+	if f.taskErr != nil {
+		return false, f.taskErr
+	}
+	if typ != "qmclone" {
+		return false, nil
+	}
 	if f.cloneEndsNow != 0 {
 		f.vms[f.cloneEndsNow].cfg["pool"] = pve.TemplatePool
 		f.cloneEndsNow, f.cloneRunning = 0, false
@@ -1069,6 +1079,10 @@ func TestSmokeCleanupWaitsForItsRunningClone(t *testing.T) {
 	if _, ok := pv.vms[9301]; !ok {
 		t.Fatal("the in-flight clone was touched")
 	}
+	// The clone is logged under its source on the clone's node.
+	if want := fmt.Sprintf("%s/%d/qmclone", p.Node, p.TemplateVMID); !slices.Contains(pv.taskReads, want) {
+		t.Fatalf("task reads %v, want %s", pv.taskReads, want)
+	}
 	// The clone ends and joins the pool: the next pass removes it.
 	pv.cloneRunning = false
 	pv.vms[9301].cfg["pool"] = pve.TemplatePool
@@ -1096,9 +1110,18 @@ func TestSmokeOwnedKeepsRealRefusals(t *testing.T) {
 	if _, _, _, err := x.owned(context.Background(), smokeJob, p, 9301); !pve.IsForbidden(err) {
 		t.Fatalf("a pool member answering 403 was not an error: %v", err)
 	}
+	// Listed on another node: VMIDs are cluster-wide, still a member.
+	pv.poolMembersExtra = []pve.PoolMember{{Type: "qemu", VMID: 9301, Node: "pve2"}}
+	if _, _, _, err := x.owned(context.Background(), smokeJob, p, 9301); !pve.IsForbidden(err) {
+		t.Fatalf("a member on another node answering 403 was not an error: %v", err)
+	}
 	pv.poolMembersExtra, pv.poolErr = nil, errors.New("pool read failed")
 	if _, _, _, err := x.owned(context.Background(), smokeJob, p, 9301); err == nil {
 		t.Fatal("a 403 with an unreadable pool was taken for gone")
+	}
+	pv.poolErr, pv.taskErr = nil, errors.New("task list unreadable")
+	if _, _, _, err := x.owned(context.Background(), smokeJob, p, 9301); err == nil {
+		t.Fatal("a 403 with an unreadable task list was taken for gone")
 	}
 }
 

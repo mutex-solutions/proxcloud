@@ -139,30 +139,25 @@ func (c *Client) NodeTasks(ctx context.Context, node string, since int64, limit 
 	return out, nil
 }
 
-// CloneRunning reports a clone task of the source VM srcVMID running on node. PVE logs a clone under its source, and
-// a clone adds its new VM to the target pool only when it ends, so a token whose rights reach VMs through pools cannot
-// see the clone itself until then. The token's own tasks need no Sys.Audit to see.
-func (c *Client) CloneRunning(ctx context.Context, node string, srcVMID int) (bool, error) {
-	form := formVals{"source": "active", "vmid": itoa(srcVMID), "typefilter": "qmclone"}.values()
+// TaskRunning reports a task of type typ (e.g. qmclone, qmcreate, qmrestore) running on node under vmid: the VM the
+// task is logged under, which for a clone is its source. The token's own tasks need no Sys.Audit to see. An unreadable
+// task list is an error, never "not running".
+//
+// PVE adds a created, cloned or restored VM to its pool only at the end of the task, so a token whose rights reach VMs
+// through pools cannot see the VM itself until then: a caller that reads a 403 as "gone" must ask this first.
+func (c *Client) TaskRunning(ctx context.Context, node string, vmid int, typ string) (bool, error) {
+	form := formVals{"source": "active", "vmid": itoa(vmid), "typefilter": typ}.values()
 	var out []NodeTask
 	if err := c.get(ctx, "/nodes/"+url.PathEscape(node)+"/tasks", form, &out); err != nil {
 		return false, err
 	}
 	if out == nil {
-		return false, fmt.Errorf("pve: active clone task list is unavailable")
+		return false, fmt.Errorf("pve: active %s task list is unavailable", typ)
 	}
 	return slices.ContainsFunc(out, func(t NodeTask) bool { return t.EndTime == 0 }), nil
 }
 
-// RestoreRunning reports a restore task running on a VM. A restore is the token's own task, so it needs no Sys.Audit to see.
+// RestoreRunning reports a restore task running on a VM.
 func (c *Client) RestoreRunning(ctx context.Context, node string, vmid int) (bool, error) {
-	form := formVals{"source": "active", "vmid": itoa(vmid), "typefilter": "qmrestore"}.values()
-	var out []NodeTask
-	if err := c.get(ctx, "/nodes/"+url.PathEscape(node)+"/tasks", form, &out); err != nil {
-		return false, err
-	}
-	if out == nil {
-		return false, fmt.Errorf("pve: active restore task list is unavailable")
-	}
-	return slices.ContainsFunc(out, func(t NodeTask) bool { return t.EndTime == 0 }), nil
+	return c.TaskRunning(ctx, node, vmid, "qmrestore")
 }

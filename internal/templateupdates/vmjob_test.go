@@ -49,6 +49,8 @@ type fakePVE struct {
 	importTransportErr bool
 	poolErr            error            // GetPool fails with it
 	poolMembersExtra   []pve.PoolMember // listed as members of every pool read (a member the token still cannot read)
+	createRunning      map[int]bool     // a create task of this VMID has not ended (PVE adds the VM to its pool only then)
+	taskErr            error            // TaskRunning fails with it
 }
 
 func newFakePVE() *fakePVE {
@@ -245,6 +247,16 @@ func (f *fakePVE) ToTemplate(_ context.Context, node string, vmid int) (pve.UPID
 	f.call(fmt.Sprintf("template %d", vmid), true)
 	f.vms[vmid].template = true
 	return "UPID:template", nil
+}
+
+func (f *fakePVE) TaskRunning(_ context.Context, node string, vmid int, typ string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.read()
+	if f.taskErr != nil {
+		return false, f.taskErr
+	}
+	return typ == "qmcreate" && f.createRunning[vmid], nil
 }
 
 func (f *fakePVE) GetPool(_ context.Context, poolID string) (*pve.PoolInfo, error) {
@@ -899,5 +911,32 @@ func TestOwnedKeepsRealRefusals(t *testing.T) {
 	pv.poolErr = nil
 	if exists, own, _, err := x.owned(context.Background(), testJob, p, 9399); err != nil || exists || own {
 		t.Fatalf("a gone VMID: exists=%v own=%v err=%v", exists, own, err)
+	}
+	// Listed on another node: VMIDs are cluster-wide, still a member.
+	pv.poolMembersExtra = []pve.PoolMember{{Type: "qemu", VMID: 9301, Node: "pve2"}}
+	if _, _, _, err := x.owned(context.Background(), testJob, p, 9301); !pve.IsForbidden(err) {
+		t.Fatalf("a member on another node answering 403 was not an error: %v", err)
+	}
+	pv.poolMembersExtra, pv.taskErr = nil, errors.New("task list unreadable")
+	if _, _, _, err := x.owned(context.Background(), testJob, p, 9399); err == nil {
+		t.Fatal("a 403 with an unreadable task list was taken for gone")
+	}
+}
+
+// PVE adds a created VM to its pool only when the create task ends, so a job resuming while its own create still runs
+// sees a 403 outside pc-templates. It must not take the VMID for gone and create a second VM: it retries, and once the
+// create has ended and the VM joined the pool it removes it and starts over.
+func TestOwnedWaitsForItsRunningCreate(t *testing.T) {
+	x, pv, _, _, p := setup(t)
+	pv.vms[9301] = &fakeVM{node: "pve1", cfg: pve.VMConfig{"name": buildName(testJob), "lock": "create"}}
+	pv.createRunning = map[int]bool{9301: true}
+	if _, _, _, err := x.owned(context.Background(), testJob, p, 9301); err == nil {
+		t.Fatal("a VM whose create is running was taken for gone")
+	}
+	delete(pv.createRunning, 9301)
+	pv.vms[9301].cfg["pool"] = pve.TemplatePool
+	delete(pv.vms[9301].cfg, "lock")
+	if exists, own, _, err := x.owned(context.Background(), testJob, p, 9301); err != nil || !exists || !own {
+		t.Fatalf("the created VM: exists=%v own=%v err=%v", exists, own, err)
 	}
 }

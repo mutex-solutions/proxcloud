@@ -180,7 +180,7 @@ func TestDeleteServerBackupInterlockUnreadableCurrentState(t *testing.T) {
 				if endpoint == "config" && (fault == "null" || fault == "missing-data") {
 					wantConflict(t, err, "current configuration")
 				}
-				if endpoint == "tasks" && (fault == "null" || fault == "missing-data") && err.Error() != "pve: active restore task list is unavailable" {
+				if endpoint == "tasks" && (fault == "null" || fault == "missing-data") && err.Error() != "pve: active qmrestore task list is unavailable" {
 					t.Fatalf("unexpected unavailable task-list error: %v", err)
 				}
 			})
@@ -337,8 +337,8 @@ func TestRestoreRunningRequiresReadableTaskList(t *testing.T) {
 	}
 }
 
-// CloneRunning reads the token's active qmclone tasks of a source VM; an unreadable task list is an error, never "no clone".
-func TestCloneRunningRequiresReadableTaskList(t *testing.T) {
+// TaskRunning reads the token's active tasks of one type under a VMID; an unreadable task list is an error, never "not running".
+func TestTaskRunningRequiresReadableTaskList(t *testing.T) {
 	for _, tc := range []struct {
 		name, raw string
 		running   bool
@@ -362,7 +362,7 @@ func TestCloneRunningRequiresReadableTaskList(t *testing.T) {
 				fmt.Fprint(w, tc.raw)
 				return true
 			}
-			running, err := b.s.C.CloneRunning(context.Background(), "pve1", 101)
+			running, err := b.s.C.TaskRunning(context.Background(), "pve1", 101, "qmclone")
 			if running != tc.running || (err != nil) != tc.wantErr {
 				t.Fatalf("running=%v err=%v, want running=%v error=%v", running, err, tc.running, tc.wantErr)
 			}
