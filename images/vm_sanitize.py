@@ -9,6 +9,10 @@ import stat
 import subprocess
 import sys
 
+# Kubernetes node template versions accepted here: an explicit allowlist, kept equal to vm_publish_stage.K8S_VERSIONS
+# and the other module of this pair by images/tests/test_k8s_versions.py.
+K8S_VERSIONS = ("1.35.10", "1.36.6", "1.37.2")
+
 SOURCE = "/input/source.qcow2"
 # variant=kubernetes ONLY: the template's RAW root disk. EFI vars and cloud-init media are
 # never inputs. The parent-reviewed facts/drop-in decisions file is small trusted data.
@@ -370,7 +374,7 @@ def reset_and_zero(g, mounts, final_check):
 
 
 # ---------------------------------------------------------------------------------------
-# variant=kubernetes: accepted Ubuntu 26.04 / Kubernetes 1.35.10 node template, RAW root.
+# variant=kubernetes: accepted Ubuntu 26.04 node template of a version in K8S_VERSIONS, RAW root.
 # Every fact feeds k8s_copy_policy.validate_inventory, which refuses unknown/mismatched
 # facts. Nothing here toggles kubelet enablement or rewrites the policy's facts.
 # ---------------------------------------------------------------------------------------
@@ -870,7 +874,7 @@ def main(argv=None):
             handle, _ = open_private(K8S_REVIEW, 65536)  # O_NOFOLLOW + fstat; parent-reviewed data.
             with handle:
                 review = load_review(handle.read(65537))
-            require(review["kubernetes_version"] == "1.35.10")
+            require(review["kubernetes_version"] in K8S_VERSIONS)
             # Exactly the 20 GiB raw root; EFI vars and cloud-init media are never inputs.
             # The digest is computed HERE, streamed and bounded, and must equal the parent's
             # independently recorded source hash; a mismatch refuses before any parser runs.
@@ -921,7 +925,7 @@ def main(argv=None):
                 size += len(block)
                 require(size < MAX_BYTES)
                 digest.update(block)
-        extra = dict(variant="kubernetes", kubernetes_version="1.35.10") if kubernetes else dict(variant="os")
+        extra = dict(variant="kubernetes", kubernetes_version=review["kubernetes_version"]) if kubernetes else dict(variant="os")
         facts = dict(kind="OfflineSanitizationFacts", os=selected, **extra, disk_sha256=digest.hexdigest(),
                      disk_bytes=size, virtual_size_bytes=VIRTUAL_BYTES, checks={key: True for key in
                      ("cleaned_copy_only", "no_backing_file", "qemu_img_check", "offline_sanitization",

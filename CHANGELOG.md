@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Public VM artifacts: Kubernetes node templates 1.36.6 and 1.37.2** are accepted for publication next to
+  1.35.10 (Ubuntu 26.04 only), so clusters can be tested on an upgrade path 1.35 → 1.36 → 1.37. The publisher,
+  the offline sanitizer and the copy policy share one explicit allowlist (`K8S_VERSIONS`), kept equal by a test;
+  the copy policy now requires `kubeadm`, `kubelet` and `kubectl` at exactly the reviewed version. Any other
+  version is still refused. Each new version still needs its own build, inventory and runtime acceptance.
+
 ### Fixed
 
 - **VM template import failed on PVE 9 with the least-privilege token**: the import created its VM with

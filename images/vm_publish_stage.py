@@ -22,9 +22,11 @@ MAX_PAYLOAD_BYTES = sum(MEMBERS.values())
 MAX_ARCHIVE_BYTES = MAX_PAYLOAD_BYTES + 1024 ** 2
 MAX_METADATA_BYTES = 1024 ** 2
 NAME = r"vm-export-(ubuntu-2404|ubuntu-2604|debian-12|debian-13)-([0-9]{14})-([0-9a-f]{12})"
-# Separate, narrower selector for the single accepted Kubernetes node template line.
+# Separate, narrower selector for the accepted Kubernetes node template lines (Ubuntu 26.04 only).
 K8S_NAME = r"vm-k8s-export-(ubuntu-2604)-([0-9]{14})-([0-9a-f]{12})"
-K8S_VERSION = "1.35.10"
+# The Kubernetes versions accepted for publication: an explicit allowlist, kept equal to the sanitizer's
+# (vm_sanitize.K8S_VERSIONS) and the copy policy's (k8s_copy_policy.K8S_VERSIONS) by a test.
+K8S_VERSIONS = ("1.35.10", "1.36.6", "1.37.2")
 
 
 def selector(name):
@@ -42,7 +44,7 @@ def manifest_matches(manifest, os_name, build_version, source_prefix, variant):
     require(manifest["variant"] == variant and manifest["os"] == os_name)
     require(manifest["build_version"] == build_version)
     require(manifest["source_commit"].startswith(source_prefix))
-    require(variant == "os" or manifest.get("kubernetes_version") == K8S_VERSION)
+    require(variant == "os" or manifest.get("kubernetes_version") in K8S_VERSIONS)
 
 
 def require(ok):
@@ -179,7 +181,7 @@ def publication_plan(staging_dir, selected):
     finally:
         os.close(fd)
     # Variant comes from the artifact-name selector; a native name never admits a K8s manifest
-    # (or vice versa), and K8s is pinned to the single accepted 1.35.10 template line.
+    # (or vice versa), and K8s is limited to the accepted versions (K8S_VERSIONS).
     manifest_matches(manifest, selected["os"], selected["build_version"], selected["source_prefix"],
                      selected.get("variant", "os"))
     plan = contract.plan(manifest)  # Keep this local helper's acceptance gates false.
