@@ -2,15 +2,17 @@
 
 **Admin → System → Template updates** shows the newest VM templates and sandbox images published on
 GitHub Packages (`ghcr.io/mutex-solutions`), compares them with what this site runs, and — for VM
-templates — imports a chosen artifact as a **new** Proxmox template. Scope chosen by the owner
-(2026-11-12): *the admin sees the latest available version and clicks update*. Nothing updates on its
-own.
+templates — imports a chosen artifact as a **new**, staged Proxmox template, smoke-tests it, and lets
+the admin publish it (or withdraw a bad version). Scope chosen by the owner (2026-11-12): *the admin
+sees the latest available version and clicks update*; lifecycle approved 2026-11-13 (§4). Nothing
+updates on its own: a smoke test runs by itself, publishing never does.
 
 | Part | State |
 |---|---|
 | GitHub integration (PAT, validated on save) | done |
 | Discovery: newest VM artifact per line, newest sandbox image per template, installed/pinned state | done |
-| VM import job (download by digest → verify → new template) | done, **off by default** (`PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true`) until lab-verified |
+| VM import job (download by digest → verify → new **staged** template) | done, **off by default** (`PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true`) until lab-verified |
+| Lifecycle: smoke test → Publish → Withdraw + digest blocklist (§4) | done, behind the same flag, **not lab-verified** |
 | Sandbox mirror → prepull → pin switch from the portal | **not yet enabled** — seam + follow-up design below |
 
 Code: [`internal/templateupdates`](../internal/templateupdates), admin routes in
@@ -102,8 +104,14 @@ middleware with package/tag/digest/target). Body:
 
 ```json
 {"package":"proxcloud-vm-debian-13","digest":"sha256:…","confirmDigest":"sha256:…",
- "serviceId":"…","node":"pve1","importStorage":"nas-import","diskStorage":"local-zfs","publish":false}
+ "serviceId":"…","node":"pve1","importStorage":"nas-import","diskStorage":"local-zfs"}
 ```
+
+Every import lands **staged** (§4). The former `"publish"` field is still parsed for backward
+compatibility: absent or `false` is ignored, **`true` is refused with HTTP 400**
+(`errors.details.code = "publish_at_import_removed"`) before any provider or GitHub call — a client
+that asked for publish-at-import gets a clear error instead of a silently staged template. A digest
+on the blocklist (§4) is refused with 409 (`digest_withdrawn`).
 
 **Inputs that the code cannot know are explicit and fail closed**: the provider, node, import
 storage and template disk storage are chosen by the admin from
@@ -191,13 +199,14 @@ succeeded | failed`.
 - **Result**: a new template in pool `pc-templates`, the pipeline's hardware shape
   (`images/build.py`, `pve.ImportImage`; no NIC, cloud-init drive on the disk storage), named
   `pc-ghcr-<os>-<os|k8s-x-y-z>-<build>` (never `pc-<os>-…`, which `build.py` would treat as its own
-  failed build) and tagged `proxcloud;pc-src-<12hex>` (no job ownership tag) plus:
-  - native OS: `pc-img-<os>;pc-v-<yyyymmddhhmm>` and `pc-public` **only if "publish" was chosen**,
-    otherwise `pc-tu-staged` (review it, then add `pc-public`); a published one joins the catalog
-    through the existing discovery (`pve.DiscoverTemplates`);
-  - Kubernetes: `pc-tu-k8s;pc-k8sver-<x-y-z>`; never a catalog entry — reference its VMID in the
-    kamaji provider's version map.
-  The description records the artifact reference, tag and disk sha256.
+  failed build) and tagged **staged**: `proxcloud;pc-src-<12hex>;pc-tu-import;pc-tu-staged`
+  (+ `pc-tu-k8s;pc-k8sver-<x-y-z>` for a Kubernetes node image). No job ownership tag and **no catalog
+  tag** (`pc-public`, `pc-img-`, `pc-v-`): neither the tenant catalog, `images/build.py` nor an
+  installer template selector (stages 45/56 pick by `pc-img-<os>` + `pc-v-`) can pick a staged import.
+  The description records the artifact reference, tag and disk sha256. A job that landed its final
+  write on the pre-lifecycle version (publish-at-import tags) is accepted as finished when it resumes.
+- **Automatic smoke test**: when the job succeeds the runner queues the template's smoke test (§4).
+  Without a smoke network on the provider the import records `smoke_network_unset` instead.
 - Retries: 3 attempts with backoff; permanent failures (`digest_mismatch`, `pve_checksum_refused`,
   `pve_import_refused`, `pve_forbidden`, `ownership_lost`, `invalid_payload`, …) dead-letter at once.
 - **Dead jobs are cleaned up**: a job can die without running its cleanup (e.g. its last attempt's
@@ -235,10 +244,171 @@ transaction, where a missing table cannot be auto-created.
 ### Enabling
 
 `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true` (or `proxcloud.template-updates.vm-enabled`) starts the
-runner and allows enqueueing. Off: discovery still works and the import button is disabled. Before
-turning it on, run one import per OS on the lab (PVE 9.2) and boot a clone: see *Open items*.
+runner (imports **and** smoke tests) and allows enqueueing, smoke, publish and withdraw. Off:
+discovery, the template states and the blocklist are still readable; every PVE-mutating action
+answers 409 `vm_updates_disabled` and the buttons are disabled. Before turning it on, run one import
++ smoke test per OS on the lab (PVE 9.2): see *Open items*.
 
-## 4. Sandbox templates — not yet enabled (follow-up design)
+## 4. Lifecycle: staged → smoke test → publish → withdraw
+
+Owner decision (2026-11-13): **Staged (hidden) → automatic smoke test → admin Publish (only after a
+smoke PASS) → the newest published version is the default for new VMs; older versions are kept;
+Withdraw removes a bad version from the catalog (the previous published one takes over) and
+blocklists its digest so it can never be published again; running VMs are unaffected. No canary.**
+
+Code: [`lifecycle.go`](../internal/templateupdates/lifecycle.go) (publish, withdraw, blocklist),
+[`smoke.go`](../internal/templateupdates/smoke.go) + [`smoke_runner.go`](../internal/templateupdates/smoke_runner.go)
+(the smoke job), [`state.go`](../internal/templateupdates/state.go) (states for the page), admin routes in
+[`templatelifecycle.go`](../internal/platform/admin/templatelifecycle.go).
+
+| State on the page | Meaning |
+|---|---|
+| Staged | imported, `pc-tu-staged`, invisible to tenants, no smoke result yet |
+| Smoke running | a smoke job is queued or running for exactly this template VMID + digest |
+| Smoke failed (code) | the latest smoke of this template ended FAIL; publish refused |
+| Ready to publish | the latest smoke of this template passed |
+| Published (default) | published, and the newest published version of its line on its node (what new VMs get) |
+| Published (older) | published, a newer published version exists (kept; serves as fallback) |
+| Withdrawn | digest blocklisted, `pc-tu-withdrawn`, out of every catalog; the template VM is kept |
+
+`GET /admin/template-updates/templates` (`admin:service:read`) lists the newest 200 imports with their
+state, latest smoke, withdrawal and allowed actions; `GET /admin/template-updates/blocklist` the
+withdrawn digests.
+
+### Smoke test (`templateupdate.smoke/v1`)
+
+`POST /admin/template-updates/templates/{importId}/smoke` (`admin:service:manage`), and automatically
+after every successful import. A durable **external** job on the same fenced runner as imports
+(lease renewal, `Checkpoint` before every PVE mutation, `Fail` with fixed codes, `ClaimDead` dead-job
+pass); a smoke already queued/running for the template is returned instead of a second one. Payload =
+exactly one template (service, node, template VMID, digest) plus the smoke network frozen at enqueue.
+
+**Smoke network** (required): `config.templateSmoke` on the Proxmox provider, e.g.
+`{"bridge":"vmbr0","vlan":29,"ip":"192.0.2.50/24","gateway":"192.0.2.1","nameserver":"192.0.2.53"}`
+(`ip` empty = DHCP; `vlan` 0/absent = untagged). Unset → the smoke cannot run: 409
+`smoke_network_unset` ("set config.templateSmoke …"), recorded on the import for the automatic run.
+Validated (bridge name, VLAN range, gateway inside the CIDR) at enqueue and in the payload. Smoke tests
+are serialized **per provider** (a static smoke IP is one VM at a time): a PostgreSQL session advisory
+lock `templateupdate-smoke:<service>`; a busy lock defers the job (`durablejobs.Store.Defer`: back to
+pending in 1 minute **without** spending an attempt).
+
+Steps (each PVE mutation right after a successful fence check; the template itself is only read):
+
+1. Re-prove the template: member of `pc-templates` on the node (read from `/pools`), a template, named
+   `TemplateName(payload)`, tagged `pc-src-<digest prefix>`; else FAIL `template_mismatch`. A
+   withdrawn digest is FAIL `digest_withdrawn`.
+2. **Clone** (full, VMID recorded in the receipt *before* the call, lowest free id ≥ 9200) into pool
+   **`pc-templates`** on the template's node and disk storage, named `pc-tu-smoke-<16 hex of job id>`.
+   Never a tenant pool.
+3. **Configure** (one write): tags `proxcloud;pc-tu-smoke;pc-tu-smoke-<job>` (replacing the
+   template's copied tags), `net0` on the smoke bridge/VLAN, `ipconfig0`, an **ephemeral ed25519
+   SSH key** generated in memory for this attempt (only its SHA-256 fingerprint is recorded; the
+   private key is never stored, logged or sent anywhere — nothing ever logs in with it), no password
+   (`cipassword` deleted), `agent=1`.
+4. **Grow** `scsi0` by +8 GiB, then **start**.
+5. Guest agent **ping**, then **`guest-get-osinfo`** within 5 minutes; the reported `ID`/`VERSION_ID`
+   must match the artifact (`debian-13` → `debian`/`13`, `ubuntu-2604` → `ubuntu`/`26.04`).
+6. **cloud-init done**: `guest-exec` of `/usr/bin/cloud-init status --format json` (output bounded to
+   64 KiB, plain `cloud-init status` as fallback for older cloud-init), polled for up to 10 minutes:
+   `done` passes (`degraded done` passes with a warning), `error`/`disabled` fail.
+7. **Root disk grew**: the `/` filesystem size from `guest-get-fsinfo` (fallback `df -B1` through the
+   agent) must exceed the template's whole disk size — only cloud-init's growpart can make it so.
+8. Kubernetes node image only: `containerd` and `kubelet` present and `kubelet --version` =
+   `Kubernetes v<artifact version>` (no join, no kubeadm).
+9. Record **PASS**/**FAIL** with a fixed reason code, `startedAt`/`finishedAt`, the observed values
+   (OS name, cloud-init status, root fs bytes, kubelet version) — then **stop and destroy** the test
+   VM, and only then mark the receipt `finished` (`cleanedAt`).
+
+FAIL codes: `template_mismatch`, `digest_withdrawn`, `clone_failed`, `configure_failed`,
+`resize_failed`, `start_failed`, `agent_timeout`, `osinfo_failed`, `osinfo_mismatch`,
+`cloudinit_timeout`, `cloudinit_failed`, `cloudinit_unreadable`, `disk_not_grown`,
+`disk_unverifiable`, `k8s_components_missing`, `k8s_version_mismatch`; terminal infrastructure codes
+`guest_exec_forbidden`, `pve_forbidden`, `ownership_lost`, `attempts_exhausted`, `executor_unavailable`,
+`provider_missing`, `invalid_payload`, `job_dead`. A check FAIL is a *finished* smoke (the job
+succeeds; the result is FAIL); transport errors are retried (3 attempts) and then recorded as FAIL.
+
+**Ownership and cleanup.** The only VM a smoke job mutates or destroys is its own test VM: a member
+of `pc-templates` on the job's node, **not a template**, carrying the job's owner tag — or, in the
+window between the clone and its config write (when it still carries the template's copied tags),
+the job's exact name. Every stop/destroy re-reads that proof first; a VM outside `pc-templates` (a
+tenant or CAPMOX copy) is never considered. Cleanup is always attempted: right after the result is
+recorded, at the end of an attempt that hit a retryable error, by a new acquisition (which never
+trusts an earlier attempt's test VM: the key died with that process), after a terminal failure, and by
+the runner's dead-job pass (`DeadUncleaned` on `templateUpdateSmoke`, fenced `ClaimDead`, receipt
+gets FAIL `job_dead`, 10-minute throttle when the provider is unreachable). Smoke jobs are never
+replayed (409): start a new one. Bounds: clone/config/power task 30 minutes, boot 5 minutes, cloud-init
+10 minutes, one guest command 60 seconds, a whole acquisition 1 hour. Nothing runs on the API host.
+
+### Publish
+
+`POST /admin/template-updates/templates/{importId}/publish` `{"confirmDigest":"sha256:…"}`
+(`admin:service:manage`, audited). Under a per-digest advisory lock: refused unless the **latest
+smoke of exactly that template VMID + digest** on that provider node is **PASS** (`smoke_missing`,
+`smoke_running`, `smoke_not_passed`; a PASS of another copy of the same digest does not count) and the
+digest is not blocklisted (`digest_withdrawn`). It re-proves the template (as in smoke step 1) and
+writes, with the config digest just read (a concurrent config change makes PVE refuse instead of
+overwriting), then reads the tags back:
+
+- native OS: `proxcloud;pc-public;pc-img-<os>;pc-v-<yyyymmddhhmm>` (leading, as the pipeline writes
+  them, so installer selectors that sort by the tag string order versions correctly) +
+  `pc-src-…;pc-tu-import`; `pc-tu-staged` removed. `pve.DiscoverTemplates` then serves the newest
+  `pc-v-` per node — the new version becomes the default for new VMs, older ones stay.
+- Kubernetes node image: `pc-tu-k8s-public` + `pc-v-<…>` — **never** `pc-public`/`pc-img-` (a node
+  image is not a tenant OS catalog entry; lead decision 2026-11-13). The page shows the exact
+  `config.cluster.versions` line (`"1.35.10": "pve1=9210,pve2=9211"`, newest published per node) to
+  put on the kamaji provider; the portal does not edit that map (the provider update path replaces
+  `config` keys wholesale, so a single-key edit could not be made non-destructive).
+
+Idempotent: an already published template answers `unchanged: true` and writes nothing.
+
+### Withdraw
+
+`POST /admin/template-updates/templates/{importId}/withdraw`
+`{"reason":"…","confirmDigest":"sha256:…","force":false,"confirmLast":""}` (`admin:service:manage`,
+audited with the reason). A reason of 8–500 characters is required. Then, under the per-digest lock:
+
+1. **Last-version guard**: if a copy of this artifact is published and no *other* published template
+   serves the line on the provider (any published `pc-img-<os>` for an OS; any published import or
+   pipeline `pc-k8s-<ver>` template for a Kubernetes version), it is refused with 409
+   `last_published_version` unless `force: true` **and** `confirmLast` = the line's slug
+   (`debian-13`, `ubuntu-2604-k8s-1.35.10`). The dialog shows the consequence: no new VM of that OS
+   can be created until another version is published.
+2. The digest goes on the **blocklist** (`templateUpdateBlocklist`, id = digest: package, tag,
+   reason, actor, time, provider, node, VMID, import id). The first withdrawal is kept; repeating it
+   changes nothing.
+3. **Every copy** of the artifact on the provider (finished imports of that digest, any node) gets
+   `pc-tu-withdrawn` (+ `pc-tu-import`), and loses `pc-public`, `pc-tu-k8s-public`, `pc-tu-staged` and
+   `pc-img-<os>` (so no installer selector picks it either). The template VMs are **kept** for
+   forensics, never deleted.
+
+`pve.DiscoverTemplates` skips any template carrying `pc-tu-withdrawn`, even if someone puts
+`pc-public` back by hand, and falls back to the previous published version (newest `pc-v-` wins).
+If a copy's tag change does not land, the digest is still blocklisted and the answer says
+`complete: false` with the copies in `warnings`; repeating the withdraw finishes it. Running VMs are
+full clones and are never touched.
+
+**Blocklisted digests** are shown as *withdrawn* in discovery (the newest artifact row) and refused
+by import (409), smoke (409, and FAIL `digest_withdrawn` if already queued) and publish (409).
+
+### Audit
+
+Smoke, publish and withdraw are audited by the admin audit middleware (resource type
+`TEMPLATE_UPDATES`, the actor from the token) with a snapshot: action, import id, digest, line slug,
+provider, changed VMIDs, the smoke job publish relied on, and the withdraw reason / force / remaining
+published VMIDs. Refused requests are not audited as successes.
+
+### Interaction with `images/build.py` pruning
+
+`build.py build --keep K` prunes the oldest published versions of an OS on a node. It now never
+prunes (a) a template carrying the import marker `pc-tu-import` — the portal owns its lifecycle — and
+(b) the newest published version (`--keep` below 1 is treated as 1, so the only published version always
+stays). Imports still count as versions for `--if-missing` (stage 20 skips building when an imported
+version is published there) and take no `--keep` slot (pipeline versions keep K slots of their own).
+Staged and withdrawn imports carry no `pc-public`/`pc-img-` at all, so `build.py` never even lists them.
+A pipeline build publishes `pc-public` as before, so it can become the default over an older import
+(newest `pc-v-` wins) — expected.
+
+## 5. Sandbox templates — not yet enabled (follow-up design)
 
 `POST /admin/template-updates/sandbox` answers **501** with the manual path. Why: built-in images live
 in the sandbox registry's `library/` namespace, writable only by the installer's Zot `admin` account
@@ -278,15 +448,23 @@ Proposed follow-up (needs owner approval as a separate change):
    `make upgrade` (which renders the DaemonSet from `images.yaml`) does not silently roll it back; the
    installer must read it, or the page must keep showing the `images.yaml` line to commit.
 
-## 5. Permissions
+## 6. Permissions
 
 | Action | Permission | Built-in roles |
 |---|---|---|
-| See the page, discovery, placement, history | `admin:service:read` | SUPER_ADMIN, ADMIN, SUPPORT |
-| Start a VM import | `admin:service:manage` | SUPER_ADMIN, ADMIN |
+| See the page, discovery, placement, history, template states, blocklist | `admin:service:read` | SUPER_ADMIN, ADMIN, SUPPORT |
+| Start a VM import, run a smoke test, publish, withdraw | `admin:service:manage` | SUPER_ADMIN, ADMIN |
 | Save the GitHub integration | `admin:integration:manage` | SUPER_ADMIN, ADMIN |
 
-## 6. Open items
+Proxmox rights of the portal token for the smoke test, on `/pool/pc-templates` (already in
+`ProxCloudPlatform` on `/pool`): `VM.Clone`, `VM.Allocate`, `VM.Config.Network`/`Cloudinit`/`Disk`/
+`Options`, `VM.PowerMgmt`, `VM.GuestAgent.Audit` (ping, osinfo, fsinfo) and
+**`VM.GuestAgent.Unrestricted`** (guest-exec: `cloud-init status`, `df`, `kubelet --version`; without it
+the smoke ends FAIL `guest_exec_forbidden`); `Datastore.AllocateSpace` on the template disk storage;
+`SDN.Use` on the smoke bridge's zone (`/sdn/zones/localnetwork/<bridge>` for a plain bridge on PVE 8+).
+Publish/withdraw need `VM.Config.Options` (tags) only.
+
+## 7. Open items
 
 - **Not lab-verified**: no PVE, GitHub token or registry was used while building this. Before enabling:
   run an import against the PVE 9.2 lab (confirm the upload API accepts a ~1–8 GiB `content=import`
@@ -300,14 +478,24 @@ Proposed follow-up (needs owner approval as a separate change):
   (`pve-image-upload-<service>`) is nil-safe and `pve.Service.HolderLock` is **not wired in `cmd/api`
   (pre-existing)**, so a customer import and a template update can still spool to the API node's disk
   at the same time; the room check runs before each. Wiring `HolderLock` fixes that for both.
-- **Catalog pruning by `images/build.py`**: a native template imported *and published* here
-  (`pc-public;pc-img-<os>;pc-v-<…>` in `pc-templates` on node N) counts as a version for
-  `build.py build --keep K` on node N (`versions_of`): the next pipeline build of that OS on that node
-  prunes the oldest published versions beyond K, which can include this import (or this import can
-  make an older pipeline template the one pruned). `--if-missing` (installer stage 20) also sees it as
-  "a version exists" and skips building. A *staged* import (no `pc-public`) and every Kubernetes import
-  are not counted and never pruned by `build.py`. Customer VMs are full clones, so pruning a template
-  never affects servers.
-- **No smoke boot**: unlike `build.py` (which boots a clone and waits for the guest agent before
-  publishing), an import is NOT booted before it is tagged. Publishing is therefore opt-in and the
-  dialog defaults to *staged*: boot a clone of the staged template, then add `pc-public`.
+- **Catalog pruning by `images/build.py`**: see §4 — imports (`pc-tu-import`) are never pruned and
+  the only published version is never pruned; imports count for `--if-missing`. A template imported
+  *and published* by the pre-lifecycle version carries no import marker: `build.py` may prune it like
+  a pipeline template until it is withdrawn (which adds the marker) — re-publish is not possible for
+  those (no smoke record), so treat them as pipeline versions.
+- **Smoke test — needs lab verification (PVE 9.2), nothing of it ran against a real cluster**:
+  - the guest agent endpoints: `agent/get-osinfo` / `agent/get-fsinfo` answer shapes
+    (`version-id`, `total-bytes` present on the shipped qemu-guest-agent), `agent/exec` + `exec-status`
+    with `cloud-init status --format json` on each OS (Debian 12 ships cloud-init 22.4 — the plain
+    `status:` fallback covers it; check the real output);
+  - that the artifact's templates have qemu-guest-agent enabled at boot and growpart in cloud-init,
+    so a +8 GiB grow shows up as a larger `/` (an image whose root is not the last partition, or LVM,
+    would FAIL `disk_not_grown`);
+  - the timeouts (boot 5 min, cloud-init 10 min) on nested/slow nodes;
+  - `sshkeys` encoding and that `ipconfig0` static/DHCP on the smoke bridge+VLAN work; SDN.Use for
+    the bridge; the full clone of a large template within the 30-minute task bound;
+  - the Kubernetes node image: `kubelet --version` output exactly `Kubernetes v<x.y.z>` and
+    `containerd` on `PATH` of the image-builder image.
+- Concurrent pipeline builds: `build.py` names its test VM `smoke-…` and never touches
+  `pc-tu-smoke-…` VMs; a smoke test never touches pipeline VMs. Both use the lowest free VMID ≥ 9200 —
+  a race is retried on "already exists".

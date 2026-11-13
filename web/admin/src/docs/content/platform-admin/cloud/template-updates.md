@@ -37,19 +37,38 @@ until then the button is disabled. You need the *Manage external services* permi
 1. Choose **Import…** on a row.
 2. Pick the Proxmox provider, the node, a storage with **import** content (where the download is
    placed) and the storage the template disk goes to. Only storages that are active on that node are offered.
-3. For an OS template, choose whether to publish it to the catalog right away (off by default). Otherwise
-   it is created *staged* (tag `pc-tu-staged`): boot a clone of it to check it, then add the `pc-public`
-   tag in Proxmox to publish it. An import is not boot-tested before publishing, unlike a pipeline build,
-   and a published import counts as a version when the pipeline prunes old templates on that node.
+3. The import always lands **staged**: tenants do not see it until you publish it (see below).
 4. Paste the exact digest shown in the dialog to confirm, then **Import as new template**.
 
 The download is checked three times (its SHA-256 while streaming, by Proxmox on upload, and against the
 published digest), then imported as a **new** template VM in pool `pc-templates`, named
 `pc-ghcr-<os>-…`. Existing templates are never changed or removed: remove old ones yourself when no
-longer needed. A Kubernetes node image never appears in the OS catalog: put the new template's VMID into
-the Kubernetes provider's version map.
+longer needed.
 
-If an import fails, only what that import created is removed, and the job shows why. To try again, start a
+## Smoke test, publish, withdraw
+
+The **Imported templates** tab shows each imported template's state: *Staged*, *Smoke running*,
+*Smoke failed* (with the reason), *Ready to publish*, *Published (default)*, *Published (older)* or
+*Withdrawn*.
+
+- **Smoke test** — starts by itself when an import finishes, or with **Run smoke**. It boots a
+  throwaway copy of the template in pool `pc-templates` on the provider's smoke network, with fresh
+  cloud-init (a one-time SSH key nobody keeps, no password), waits for the guest agent, checks that
+  cloud-init finished and the disk grew (and, for a Kubernetes node image, that kubelet and containerd
+  are there), then deletes the copy. The provider needs a smoke network: set `config.templateSmoke`
+  (for example `{"bridge":"vmbr0","vlan":29,"ip":"192.0.2.50/24","gateway":"192.0.2.1"}`, or just a
+  bridge for DHCP) on the Proxmox provider. Without it the smoke test cannot run and the row says so.
+- **Publish** — only after the template's latest smoke test passed. Confirm the digest. An OS template
+  then joins the catalog, and the newest published version is what new servers get; older versions stay.
+  A Kubernetes node image never appears in the OS catalog: publishing marks it ready and the row shows
+  the exact version-map line to put on the Kubernetes provider.
+- **Withdraw** — for a bad version: give a reason and confirm the digest. It leaves the catalog at once
+  (the previous published version takes over), its template is kept for inspection, and its digest is
+  blocked: it can never be imported or published again. If it is the only published version of that OS,
+  you must tick *Withdraw anyway* and type the OS name, because no new server of that OS can then be
+  created until another version is published. Running servers are never affected.
+
+If an import or a smoke test fails, only what it created is removed, and the job shows why. To try again, start a
 new import from this page: a failed import cannot be replayed from the durable jobs view (only one that
 stopped mid-way, e.g. on an API restart, resumes on replay).
 

@@ -488,3 +488,37 @@ func TestPGEnqueueBlockedByTemplatedDeadJob(t *testing.T) {
 		t.Fatalf("a templated dead job did not block a re-import: %v", err)
 	}
 }
+
+// Defer (busy smoke lock): the job returns to pending without spending an attempt, a stale
+// acquisition cannot defer, and a deferred smoke job is claimable again later.
+func TestPGDeferKeepsAttempts(t *testing.T) {
+	db, jobs := pgFixture(t)
+	ctx := context.Background()
+	raw, _ := json.Marshal(smokePayloadFor("os"))
+	id, err := jobs.Enqueue(ctx, durablejobs.TemplateUpdateSmoke, smokePayloadFor("os").Key(0), raw, SmokeMaxAttempts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := jobs.ClaimKinds(ctx, time.Minute, []string{durablejobs.TemplateUpdateSmoke})
+	if err != nil || j == nil || j.Attempts != 1 {
+		t.Fatalf("claim: %+v %v", j, err)
+	}
+	if err := jobs.Defer(ctx, j, 0, "smoke_lock_busy"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := jobs.Get(ctx, id)
+	if got.State != "pending" || got.Attempts != 0 || got.LastError != "smoke_lock_busy" {
+		t.Fatalf("after defer: %+v", got)
+	}
+	if err := jobs.Defer(ctx, j, 0, "smoke_lock_busy"); !errors.Is(err, durablejobs.ErrLeaseLost) {
+		t.Fatalf("stale defer: %v", err)
+	}
+	if err := jobs.Defer(ctx, j, 0, "Not A Code"); err == nil {
+		t.Fatal("free-form code accepted")
+	}
+	j2, err := jobs.ClaimKinds(ctx, time.Minute, []string{durablejobs.TemplateUpdateSmoke})
+	if err != nil || j2 == nil || j2.Attempts != 1 || j2.Epoch <= j.Epoch {
+		t.Fatalf("re-claim: %+v %v", j2, err)
+	}
+	_ = db
+}

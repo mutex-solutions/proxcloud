@@ -243,6 +243,13 @@ func (s *Service) States(ctx context.Context, rows map[string]ProviderRows) ([]T
 			}
 		}
 		smokeRunning := rec.Smoke != nil && rec.Smoke.JobID != "" && rec.Smoke.Result == "" && rec.Smoke.Step != SmokeFinished
+		if smokeRunning {
+			// A smoke job that died before recording a result is not running (the dead-job pass
+			// records FAIL job_dead once it removed the test VM; a new smoke may start meanwhile).
+			if state, _ := s.JobState(ctx, rec.Smoke.JobID); state == "dead" {
+				smokeRunning = false
+			}
+		}
 		switch {
 		case withdrawn:
 			st.State = StateWithdrawn

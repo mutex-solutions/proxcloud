@@ -648,7 +648,17 @@ cloudInit:
 		if err == nil {
 			st, perr := parseCloudInitStatus(out)
 			if perr != nil {
-				return checks, failed(SmokeCloudInitBadOut, "`cloud-init status --format json` answered something unreadable")
+				// cloud-init before --format (e.g. 22.x): the plain `cloud-init status` line.
+				if err := x.guard(ctx, f); err != nil {
+					return checks, err
+				}
+				_, plain, _, perr2 := x.PVE.GuestRun(ctx, p.Node, r.VMID, x.ExecTimeout, "/usr/bin/cloud-init", "status")
+				if perr2 == nil {
+					st, perr = parsePlainCloudInitStatus(plain)
+				}
+			}
+			if perr != nil {
+				return checks, failed(SmokeCloudInitBadOut, "`cloud-init status` answered something unreadable")
 			}
 			checks.CloudInitStatus = clip(st, 32)
 			switch st {
@@ -749,6 +759,21 @@ func parseCloudInitStatus(out string) (string, error) {
 		return v.ExtendedStatus, nil
 	}
 	return v.Status, nil
+}
+
+// parsePlainCloudInitStatus reads the plain `cloud-init status` output ("status: done").
+func parsePlainCloudInitStatus(out string) (string, error) {
+	if len(out) > 64<<10 {
+		return "", errors.New("cloud-init status output too large")
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "status:"); ok {
+			if v = strings.TrimSpace(v); v != "" {
+				return v, nil
+			}
+		}
+	}
+	return "", errors.New("unreadable cloud-init status")
 }
 
 func firstLine(s string) string {

@@ -701,6 +701,41 @@ func TestSmokePayloadValidation(t *testing.T) {
 	}
 }
 
+// cloud-init without --format (22.x): the plain status line is used instead.
+func TestSmokeCloudInitPlainFallback(t *testing.T) {
+	x, pv, rec, p := smokeSetup(t, "os")
+	x.PVE = &oldCloudInit{smokePVE: pv}
+	if err := x.Run(context.Background(), smokeJob, p, &testFence{epoch: 1, budget: -1}); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := rec.LoadSmoke(context.Background(), smokeJob); r.Result != SmokePass || r.Checks.CloudInitStatus != "done" {
+		t.Fatalf("receipt %+v", r)
+	}
+	for in, want := range map[string]string{"\nstatus: done\n": "done", "status: running": "running", "status: error\n": "error"} {
+		if got, err := parsePlainCloudInitStatus(in); err != nil || got != want {
+			t.Errorf("%q → %q %v", in, got, err)
+		}
+	}
+	if _, err := parsePlainCloudInitStatus("usage: cloud-init"); err == nil {
+		t.Error("garbage accepted")
+	}
+}
+
+type oldCloudInit struct{ *smokePVE }
+
+func (o *oldCloudInit) GuestRun(ctx context.Context, node string, vmid int, d time.Duration, args ...string) (int, string, string, error) {
+	if args[0] == "/usr/bin/cloud-init" {
+		o.smokePVE.mu.Lock()
+		o.smokePVE.mut(fmt.Sprintf("exec %d %s", vmid, args[0]))
+		o.smokePVE.mu.Unlock()
+		if len(args) > 2 {
+			return 2, "", "usage: cloud-init status [-h] [-l] [-w]\ncloud-init status: error: unrecognized arguments: --format json", nil
+		}
+		return 0, "status: done\n", "", nil
+	}
+	return o.smokePVE.GuestRun(ctx, node, vmid, d, args...)
+}
+
 func TestParseCloudInitStatus(t *testing.T) {
 	for in, want := range map[string]string{
 		`{"status":"done"}`: "done", `{"status":"running","extended_status":"running"}`: "running",
