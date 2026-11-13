@@ -412,6 +412,69 @@ def sandbox_templates(templates, pins, host=""):
     return out
 
 
+_SANDBOX_TAG = r"^([0-9]{8})-[0-9a-f]{7}$"
+_PIN_SOURCE = "ghcr.io/mutex-solutions/sandbox-%s:%s@%s"
+
+
+def sandbox_portal_pins(pins, portal, host):
+    """Merge deploy/templates/images.yaml (pins: name -> ref) with the portal's sandboxBuiltinPin records (portal: the
+    list GET /admin/template-updates/sandbox/pins returns) for the sandbox registry host, so a make upgrade never renders
+    an image older than the one the portal pinned (docs/template-updates.md §4). Per built-in image (matched on the
+    registry repository <host>/library/sandbox-<name>, the same mapping as sandbox_images):
+
+      no record, or the same digest                 -> images.yaml
+      the record replaced exactly images.yaml's      -> the record (a newer mirror, or a deliberate rollback)
+      otherwise the newer <YYYYMMDD> tag date wins; a record for an image images.yaml lacks is added
+
+    Two different digests that cannot be ordered (same date, or a tag outside <YYYYMMDD>-<sha7>) raise ValueError: the
+    upgrade stops rather than guess. Returns {"pins": merged name -> ref, "notes": [...], "commit": [images.yaml lines]}."""
+    import re
+
+    out = dict(pins or {})
+    notes, commit = [], []
+    by_repo = {}
+    for name, ref in out.items():
+        repo, tag, digest = _split_ref(ref)
+        by_repo["%s/library/%s" % (host, repo.rsplit("/", 1)[-1])] = (name, tag, digest)
+    for p in sorted(portal or [], key=lambda x: str(x.get("id", ""))):
+        if not isinstance(p, dict) or p.get("registry") != host:
+            continue
+        name, tag, digest = str(p.get("template", "")), str(p.get("tag", "")), str(p.get("digest", ""))
+        repo = "%s/library/sandbox-%s" % (host, name)
+        if (p.get("id") != repo or not re.match(r"^[a-z0-9][a-z0-9-]{0,62}$", name) or not re.match(_SANDBOX_TAG, tag)
+                or not re.match(r"^sha256:[0-9a-f]{64}$", digest)):
+            raise ValueError("the portal's sandbox pin record %r is malformed; fix or delete it before upgrading" % p.get("id"))
+        source = _PIN_SOURCE % (name, tag, digest)
+        line = "  %s: %s" % (name, source)
+        if repo not in by_repo:
+            key = "sandbox-" + name if ("sandbox-" + name) not in out and name in out else name
+            out[key] = source
+            notes.append("sandbox-%s: images.yaml has no entry; the portal's pin %s:%s is kept" % (name, tag, digest))
+            commit.append(line)
+            continue
+        key, ytag, ydigest = by_repo[repo]
+        if ydigest == digest:
+            continue
+        _, _, prev_digest = _split_ref(p.get("previous", ""))
+        if prev_digest and prev_digest == ydigest:
+            winner = "pin"
+        else:
+            ym, pm = re.match(_SANDBOX_TAG, ytag or ""), re.match(_SANDBOX_TAG, tag)
+            if not ym or ym.group(1) == pm.group(1):
+                raise ValueError(
+                    "sandbox-%s: deploy/templates/images.yaml pins %s and the portal pinned %s:%s (%s); which is newer "
+                    "cannot be told. Commit the image you want in images.yaml (the portal's line is: %s) and run make "
+                    "upgrade again" % (name, ydigest, tag, digest, p.get("action", "mirror"), line.strip()))
+            winner = "pin" if pm.group(1) > ym.group(1) else "yaml"
+        if winner == "pin":
+            out[key] = source
+            notes.append("sandbox-%s: keeping the portal's %s %s:%s over images.yaml's %s" % (name, p.get("action", "pin"), tag, digest, ydigest))
+            commit.append("  %s: %s" % (key, source))
+        else:
+            notes.append("sandbox-%s: images.yaml's %s is newer than the portal's pin %s:%s" % (name, ytag, tag, digest))
+    return {"pins": out, "notes": notes, "commit": commit}
+
+
 def sandbox_registry_problem(sb, services_metallb, object_store_mode):
     """Why the sandbox registry (stage 55, Zot on the services cluster) cannot be built from these settings, or ""."""
     import ipaddress
@@ -438,6 +501,7 @@ class FilterModule:
         return {
             "pc_sandbox_images": sandbox_images,
             "pc_sandbox_templates": sandbox_templates,
+            "pc_sandbox_portal_pins": sandbox_portal_pins,
             "pc_sandbox_registry_problem": sandbox_registry_problem,
             "pc_classify_storages": classify_storages,
             "pc_default_profile": default_profile,

@@ -32,4 +32,4 @@ remove-node: deps     ; $(PLAYBOOK) playbooks/71-remove-node.yml -e pc_node=$(NO
 mgmt-scale: deps      ; $(PLAYBOOK) playbooks/00-preflight.yml playbooks/25-mgmt-vms.yml playbooks/30-mgmt-cluster.yml $(ARGS)
 rustfs-upgrade: deps  ; $(PLAYBOOK) playbooks/46-rustfs-upgrade.yml $(if $(VERSION),-e pc_rustfs_version=$(VERSION)) $(ARGS)
 rustfs-rollback: deps ; $(PLAYBOOK) playbooks/46-rustfs-upgrade.yml -e pc_rustfs_rollback=true $(ARGS)
-test: deps            ; $(VENV)/bin/python tests/test_filters.py && $(VENV)/bin/python tests/test_icmp_guard.py && $(VENV)/bin/python tests/test_postgresql_catalog.py
+test: deps            ; $(VENV)/bin/python tests/test_filters.py && $(VENV)/bin/python tests/test_icmp_guard.py && $(VENV)/bin/python tests/test_postgresql_catalog.py && $(VENV)/bin/python tests/test_sandbox_mirror.py

@@ -44,3 +44,101 @@ spec:
         - name: pause
           image: "{{ pc_ver.pause_image }}"
           resources: {requests: {cpu: 1m, memory: 4Mi}, limits: {cpu: 10m, memory: 16Mi}}
+{# The portal's sandbox mirror (docs/template-updates.md §4): its identity on this cluster (the sandbox provider's
+    kubeconfig: ServiceAccount proxcloud in proxcloud-system, deploy/sandbox-cluster/rbac.yaml) may get and patch the two
+    prepull DaemonSets by name and nothing else in this namespace. The admission policy lets such a write change the
+    init containers' images alone, and only to <registry>/library/sandbox-<name>[:<YYYYMMDD>-<sha7>]@sha256:<64 hex>.
+    Kubernetes CEL cannot iterate over the fields of a typed object, so every other field is compared by name (the
+    lists below); a field the cluster's schema lacks makes the policy fail to compile, which denies (failurePolicy
+    Fail): closed, never open. -#}
+{%- macro same(a, b, fields) -%}
+{%- for f in fields %}(has({{ a }}.{{ f }}) == has({{ b }}.{{ f }}) && (!has({{ a }}.{{ f }}) || {{ a }}.{{ f }} == {{ b }}.{{ f }})){{ ' && ' if not loop.last }}{% endfor -%}
+{%- endmacro -%}
+{%- set meta_fields = ['labels', 'annotations', 'ownerReferences', 'finalizers'] -%}
+{%- set ds_fields = ['selector', 'updateStrategy', 'minReadySeconds', 'revisionHistoryLimit', 'template.metadata'] -%}
+{%- set pod_fields = ['activeDeadlineSeconds', 'affinity', 'automountServiceAccountToken', 'containers', 'dnsConfig',
+    'dnsPolicy', 'enableServiceLinks', 'ephemeralContainers', 'hostAliases', 'hostIPC', 'hostNetwork', 'hostPID',
+    'hostUsers', 'hostname', 'imagePullSecrets', 'nodeName', 'nodeSelector', 'os', 'overhead', 'preemptionPolicy',
+    'priority', 'priorityClassName', 'readinessGates', 'resourceClaims', 'resources', 'restartPolicy', 'runtimeClassName',
+    'schedulerName', 'schedulingGates', 'securityContext', 'serviceAccount', 'serviceAccountName', 'setHostnameAsFQDN',
+    'shareProcessNamespace', 'subdomain', 'terminationGracePeriodSeconds', 'tolerations', 'topologySpreadConstraints',
+    'volumes'] -%}
+{%- set ctr_fields = ['args', 'command', 'env', 'envFrom', 'imagePullPolicy', 'lifecycle', 'livenessProbe', 'ports',
+    'readinessProbe', 'resizePolicy', 'resources', 'restartPolicy', 'securityContext', 'startupProbe', 'stdin',
+    'stdinOnce', 'terminationMessagePath', 'terminationMessagePolicy', 'tty', 'volumeDevices', 'volumeMounts',
+    'workingDir'] %}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: proxcloud-template-prepull, namespace: "{{ ns }}"}
+rules:
+  - apiGroups: [apps]
+    resources: [daemonsets]
+    resourceNames: [template-prepull, template-prepull-gpu]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: proxcloud-template-prepull, namespace: "{{ ns }}"}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: proxcloud-template-prepull}
+subjects: [{kind: ServiceAccount, name: proxcloud, namespace: proxcloud-system}]
+---
+# In initContainers no container goes away and at most one is added; each one is unchanged, or differs only in its
+# image (a mirrored digest ref), or is the one new p<N> equal to an existing one but for name and image (a mirrored
+# digest ref). Everything else of the DaemonSet stays as this stage rendered it.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: proxcloud-template-prepull-images-only}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [apps]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE, DELETE]
+        resources: [daemonsets]
+  matchConditions:
+    - name: portal-sandbox-identity
+      expression: request.userInfo.username == "system:serviceaccount:proxcloud-system:proxcloud"
+  variables:
+    - name: ref
+      expression: >-
+        r'^{{ pc.sandbox.registry.address | regex_escape }}/library/sandbox-[a-z0-9][a-z0-9-]{0,62}(:[0-9]{8}-[0-9a-f]{7})?@sha256:[0-9a-f]{64}$'
+    - name: oldInit
+      expression: "has(oldObject.spec.template.spec.initContainers) ? oldObject.spec.template.spec.initContainers : []"
+    - name: newInit
+      expression: "has(object.spec.template.spec.initContainers) ? object.spec.template.spec.initContainers : []"
+  validations:
+    - expression: >-
+        request.operation == "UPDATE" && request.namespace == "{{ ns }}" &&
+        object.metadata.name in ["template-prepull", "template-prepull-gpu"]
+      message: the portal may only update the template-prepull DaemonSets
+    - expression: >-
+        {{ same('object.metadata', 'oldObject.metadata', meta_fields) }}
+      message: the portal may not change a prepull DaemonSet's metadata
+    - expression: >-
+        {{ same('object.spec', 'oldObject.spec', ds_fields) }}
+      message: the portal may not change a prepull DaemonSet's spec, only its init containers' images
+    - expression: >-
+        {{ same('object.spec.template.spec', 'oldObject.spec.template.spec', pod_fields) }}
+      message: the portal may not change the prepull pod template, only its init containers' images
+    - expression: >-
+        variables.oldInit.all(o, variables.newInit.exists(c, c.name == o.name)) &&
+        variables.newInit.size() <= variables.oldInit.size() + 1
+      message: the portal may not remove a prepull init container, and adds at most one
+    - expression: >-
+        variables.newInit.all(c,
+          variables.oldInit.exists(o, o.name == c.name && o == c) ||
+          (c.image.matches(variables.ref) && variables.oldInit.exists(o, o.name == c.name && {{ same('c', 'o', ctr_fields) }})) ||
+          (c.image.matches(variables.ref) && c.name.matches(r'^p[0-9]{1,4}$') && !variables.oldInit.exists(o, o.name == c.name) &&
+            variables.oldInit.exists(o, {{ same('c', 'o', ctr_fields) }})))
+      message: >-
+        the portal may only point a prepull init container (or one new p<N> shaped like the others) at a mirrored
+        {{ pc.sandbox.registry.address }}/library/sandbox-<name>[:<YYYYMMDD>-<sha7>]@sha256:<digest>
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: proxcloud-template-prepull-images-only}
+spec:
+  policyName: proxcloud-template-prepull-images-only
+  validationActions: [Deny]
