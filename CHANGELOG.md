@@ -20,6 +20,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the layer digest; the executor is off until `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true`.
   Sandbox image mirroring from the portal is not yet enabled; the page gives the `images.yaml`
   pin and the follow-up design is in `docs/template-updates.md`.
+- Add a per-provider **attach policy** for new projects: `config.attachToNewProjects`
+  (default `true` when absent, so every existing provider keeps attaching new projects). With
+  it off, a new project's first bootstrap skips that provider. Set it on the provider's new
+  **Projects** tab or with `PUT /api/v1/admin/service/{id}/attach-policy`, which changes only
+  that key. A non-boolean value is refused there and on the provider create/connection save.
+- Add **Attach to existing projects** (follow-up of #215): from a provider's Projects tab,
+  attach it to all projects, the projects of picked organizations, or picked projects. It runs
+  as a fenced, resumable PostgreSQL durable job (`providerattach.run/v1`), at most one per
+  provider, with 1–4 projects at a time, and goes through the same path as the per-project
+  attach. Already attached projects are skipped with no provider call; projects being deleted
+  are skipped; suspended projects are attached and stay suspended. Results per project use
+  fixed codes only. The tab shows progress, the failed projects and their reason, and offers
+  cancel and retry-failed. Start, cancel and retry are audited (`BULK_ATTACH`, with actor,
+  provider, scope and counts) and need `admin:service:manage`; reading needs
+  `admin:service:read`. API: `/api/v1/admin/service/{id}/bulk-attach…`
+  (`docs/cloud-integration.md`).
 
 ### Fixed
 
@@ -34,7 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   BUCKET create for a newly registered S3 store failed on Proxmox). This covers creates,
   actions, deletes and the reads `quota-usage`, `gpu-capacity`, `public-networks` and the S3
   key routes. Requests naming no service keep the Proxmox default. Existing projects still
-  need an operator to attach a provider registered after they were created.
+  need an operator to attach a provider registered after they were created (per project, or
+  with the bulk attach above).
+- The per-project admin attach now refuses a project scheduled for deletion, being torn down
+  or deleted with `400` instead of provisioning it. Attaches of one project, including two bulk
+  runs for different providers and a concurrent first bootstrap, are serialized so none of
+  them loses another's binding.
 - `POST /api/v1/project/{id}/init` no longer answers `200 {}` when it leaves the project down.
   It answers `409` with `errors.details` `{status, reason[, billingProfileStatus]}`, reason one
   of `billing_profile_inactive`, `billing_profile_suspended`, `billing_profile_missing`,
