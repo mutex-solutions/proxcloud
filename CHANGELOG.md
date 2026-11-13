@@ -15,8 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already-done cleanup until its attempts ran out (the result, PASS, was kept; the dead-job pass would have
   retried every 10 minutes). The import and smoke jobs now treat a 403 for a VMID that is not (or no longer) a
   member of `pc-templates` as out of view: gone, or never theirs, and never touched. A 403 for a member, or with a
-  pool that cannot be read, is still an error, and so is the smoke job's own clone while its clone task runs (PVE
-  adds a clone to its pool only when the clone ends; the clone task is now recorded on the receipt).
+  pool that cannot be read, is still an error, and so is a VMID while a clone of the template runs (PVE adds a
+  clone to its pool only when the clone ends, so the smoke job's own clone is invisible until then; the clone task
+  is checked before the pool, so a clone that ends in between is already a member).
   Found on the first real import + smoke run (PVE 9.2.21).
 
 ## [0.5.1] - 2026-11-14

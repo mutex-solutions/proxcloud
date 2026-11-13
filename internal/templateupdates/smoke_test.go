@@ -40,6 +40,7 @@ type smokePVE struct {
 	noFSSize         bool             // guest-get-fsinfo without sizes, df fails too
 	execForbidden    bool             // guest-exec is refused (403)
 	cloneRunning     bool             // the clone task has not ended (PVE adds the clone to its pool only when it ends)
+	cloneEndsNow     int              // the in-flight clone of this VMID ends at the next CloneRunning read
 	poolErr          error            // GetPool fails with it
 	poolMembersExtra []pve.PoolMember // listed as members of every pool read (a member the token still cannot read)
 	cloneFails       bool             // the clone task fails
@@ -220,12 +221,18 @@ func (f *smokePVE) GetVMStatus(_ context.Context, node string, vmid int) (*pve.V
 	return &pve.VMStatus{Status: "stopped"}, nil
 }
 
-// TaskStopped: a clone marked in flight (cloneRunning) has not stopped; every other task has.
-func (f *smokePVE) TaskStopped(_ context.Context, up pve.UPID, _ time.Duration) bool {
+// CloneRunning: a clone marked in flight (cloneRunning) is running; cloneEndsNow ends it on this read (the clone task
+// stops and its VM joins the pool), as PVE can between owned()'s two reads.
+func (f *smokePVE) CloneRunning(_ context.Context, node string, srcVMID int) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.read()
-	return !(f.cloneRunning && strings.HasPrefix(string(up), "UPID:clone"))
+	if f.cloneEndsNow != 0 {
+		f.vms[f.cloneEndsNow].cfg["pool"] = pve.TemplatePool
+		f.cloneEndsNow, f.cloneRunning = 0, false
+		return false, nil
+	}
+	return f.cloneRunning, nil
 }
 
 func (f *smokePVE) WaitTask(_ context.Context, up pve.UPID) error {
@@ -1054,7 +1061,7 @@ func TestSmokeCleanupWaitsForItsRunningClone(t *testing.T) {
 	tags := TemplateTags(p.importPayload())
 	pv.vms[9301] = &smokeVM{node: "pve1", cfg: pve.VMConfig{"name": SmokeVMName(smokeJob), "tags": tags, "lock": "clone"}}
 	pv.cloneRunning = true
-	r := &SmokeReceipt{ID: smokeJob, Payload: p, Step: SmokeCloning, VMID: 9301, CloneUPID: "UPID:clone"}
+	r := &SmokeReceipt{ID: smokeJob, Payload: p, Step: SmokeCloning, VMID: 9301}
 	rec.m[smokeJob] = *r
 	if warns := x.Cleanup(context.Background(), &testFence{epoch: 3, budget: -1}, smokeJob, p, r); len(warns) == 0 {
 		t.Fatal("a running clone of this job was taken for gone")
@@ -1073,7 +1080,7 @@ func TestSmokeCleanupWaitsForItsRunningClone(t *testing.T) {
 		t.Fatal("the finished clone of this job survived")
 	}
 	// Without a running clone, an invisible VMID is gone: no warning, nothing touched.
-	r2 := &SmokeReceipt{ID: smokeJob, Payload: p, Step: SmokeCloning, VMID: 9399, CloneUPID: "UPID:clone"}
+	r2 := &SmokeReceipt{ID: smokeJob, Payload: p, Step: SmokeCloning, VMID: 9399}
 	if warns := x.Cleanup(context.Background(), &testFence{epoch: 5, budget: -1}, smokeJob, p, r2); len(warns) != 0 {
 		t.Fatalf("a gone VMID warned: %v", warns)
 	}
@@ -1092,5 +1099,25 @@ func TestSmokeOwnedKeepsRealRefusals(t *testing.T) {
 	pv.poolMembersExtra, pv.poolErr = nil, errors.New("pool read failed")
 	if _, _, _, err := x.owned(context.Background(), smokeJob, p, 9301); err == nil {
 		t.Fatal("a 403 with an unreadable pool was taken for gone")
+	}
+}
+
+// The clone can end between owned()'s two reads (clone task, then pool): the VM has then joined the pool, so the first
+// pass keeps the 403 and retries instead of calling it gone; the next pass removes it.
+func TestSmokeCloneEndingBetweenTheChecksIsNotGone(t *testing.T) {
+	x, pv, rec, p := smokeSetup(t, "os")
+	tags := TemplateTags(p.importPayload())
+	pv.vms[9301] = &smokeVM{node: "pve1", cfg: pve.VMConfig{"name": SmokeVMName(smokeJob), "tags": tags}}
+	pv.cloneRunning, pv.cloneEndsNow = true, 9301
+	r := &SmokeReceipt{ID: smokeJob, Payload: p, Step: SmokeCloning, VMID: 9301}
+	rec.m[smokeJob] = *r
+	if warns := x.Cleanup(context.Background(), &testFence{epoch: 3, budget: -1}, smokeJob, p, r); len(warns) == 0 {
+		t.Fatal("a clone that ended between the checks was taken for gone")
+	}
+	if warns := x.Cleanup(context.Background(), &testFence{epoch: 4, budget: -1}, smokeJob, p, r); len(warns) != 0 {
+		t.Fatalf("warnings %v", warns)
+	}
+	if _, ok := pv.vms[9301]; ok {
+		t.Fatal("the clone of this job survived")
 	}
 }

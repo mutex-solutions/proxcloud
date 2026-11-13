@@ -139,6 +139,21 @@ func (c *Client) NodeTasks(ctx context.Context, node string, since int64, limit 
 	return out, nil
 }
 
+// CloneRunning reports a clone task of the source VM srcVMID running on node. PVE logs a clone under its source, and
+// a clone adds its new VM to the target pool only when it ends, so a token whose rights reach VMs through pools cannot
+// see the clone itself until then. The token's own tasks need no Sys.Audit to see.
+func (c *Client) CloneRunning(ctx context.Context, node string, srcVMID int) (bool, error) {
+	form := formVals{"source": "active", "vmid": itoa(srcVMID), "typefilter": "qmclone"}.values()
+	var out []NodeTask
+	if err := c.get(ctx, "/nodes/"+url.PathEscape(node)+"/tasks", form, &out); err != nil {
+		return false, err
+	}
+	if out == nil {
+		return false, fmt.Errorf("pve: active clone task list is unavailable")
+	}
+	return slices.ContainsFunc(out, func(t NodeTask) bool { return t.EndTime == 0 }), nil
+}
+
 // RestoreRunning reports a restore task running on a VM. A restore is the token's own task, so it needs no Sys.Audit to see.
 func (c *Client) RestoreRunning(ctx context.Context, node string, vmid int) (bool, error) {
 	form := formVals{"source": "active", "vmid": itoa(vmid), "typefilter": "qmrestore"}.values()
