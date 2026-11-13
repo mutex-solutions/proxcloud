@@ -602,6 +602,17 @@ func (c *Client) SetNodeTaints(ctx context.Context, name, resourceVersion string
 	return err
 }
 
+// GetDaemonSet returns an apps/v1 DaemonSet, or nil when absent.
+func (c *Client) GetDaemonSet(ctx context.Context, ns, name string) (map[string]any, error) {
+	return c.get(ctx, fmt.Sprintf("/apis/apps/v1/namespaces/%s/daemonsets", ns), url.PathEscape(name))
+}
+
+// PatchDaemonSet applies a JSON merge patch to a DaemonSet. A patch that names metadata.resourceVersion is refused
+// with 409 when the object changed since it was read (optimistic concurrency); a merge patch replaces lists whole.
+func (c *Client) PatchDaemonSet(ctx context.Context, ns, name string, patch map[string]any) (map[string]any, error) {
+	return c.do(ctx, http.MethodPatch, fmt.Sprintf("/apis/apps/v1/namespaces/%s/daemonsets/%s", ns, url.PathEscape(name)), nil, patch, "application/merge-patch+json")
+}
+
 // Server is the API server URL of the kubeconfig.
 func (c *Client) Server() string { return c.rc.server }
 

@@ -90,6 +90,13 @@ func (e *ExternalService) SandboxRegion() string {
 	return ""
 }
 
+func mirrorCredential(password string) sandbox.RegistryCredential {
+	if password == "" {
+		return sandbox.RegistryCredential{}
+	}
+	return sandbox.RegistryCredential{User: sandbox.RegistryMirrorUser, Password: password}
+}
+
 // SandboxConfig assembles sandbox.Config: the decrypted kubeconfig (secret.kubeconfig) plus the
 // config.sandbox block.
 func (e *ExternalService) SandboxConfig() sandbox.Config {
@@ -163,6 +170,8 @@ func (e *ExternalService) SandboxConfig() sandbox.Config {
 		RegistryGC: sandbox.RegistryCredential{
 			User: str(e.secretMap()["registryGcUser"]), Password: str(e.secretMap()["registryGcPassword"]),
 		},
+		// secret.registryMirror: the password of the registry's fixed "mirror" account (installer stage 60).
+		RegistryMirror: mirrorCredential(str(e.secretMap()["registryMirror"])),
 		Limits: sandbox.Limits{
 			MaxCPU:                intOf(limits["maxCpu"]),
 			MaxMemoryGiB:          intOf(limits["maxMemoryGiB"]),
