@@ -106,7 +106,7 @@ type TemplateState = {
   requestedBy: string
   publishedOnLine: number
   versionsMapLine?: string
-  actions: { smoke: boolean; publish: boolean; withdraw: boolean; lastPublished: boolean }
+  actions: { smoke: boolean; publish: boolean; withdraw: boolean; lastPublished: boolean; lastOnProviders?: string[]; nodesLosingLast?: string[] }
   warnings?: string[]
 }
 type SmokeReceipt = {
@@ -621,6 +621,7 @@ const STATE: Record<string, { label: string; variant: "default" | "secondary" | 
   published_default: { label: "Published (default)", variant: "default" },
   published_older: { label: "Published (older)", variant: "secondary" },
   withdrawn: { label: "Withdrawn", variant: "destructive" },
+  withdraw_incomplete: { label: "Withdraw incomplete", variant: "destructive" },
   template_missing: { label: "Template missing", variant: "destructive" },
   unknown: { label: "Unknown (cluster unreadable)", variant: "outline" },
 }
@@ -636,7 +637,8 @@ function ImportedTab({ data, loading, canManage, onAction }: {
         <p className="text-xs text-muted-foreground">
           Lifecycle: <b>Staged</b> (hidden) → automatic <b>smoke test</b> → <b>Publish</b> (only after the smoke test passed) → the newest
           published version is the default for new servers; older versions stay. <b>Withdraw</b> takes a bad version out of the catalog (the
-          previous published one takes over), keeps the template for inspection and blocks its digest for good. Running servers are never affected.
+          previous published one takes over) on every provider that has a copy, keeps the templates for inspection and blocks its digest for good.
+          <b>Withdraw incomplete</b> means a copy could not be changed yet (provider unreachable): withdraw it again to finish. Running servers are never affected.
         </p>
         <Table>
           <TableHeader>
@@ -664,7 +666,7 @@ function ImportedTab({ data, loading, canManage, onAction }: {
                       <div className="font-mono text-xs text-muted-foreground" title={t.digest}>@{short(t.digest)}</div>
                     </TableCell>
                     <TableCell className="text-xs">
-                      {t.node}{t.vmid ? ` · VM ${t.vmid}` : ""}
+                      <span className="font-mono">{t.serviceId}</span> · {t.node}{t.vmid ? ` · VM ${t.vmid}` : ""}
                       <div className="text-muted-foreground">imported {timeAgo(t.importedAt)} by {t.requestedBy}</div>
                     </TableCell>
                     <TableCell>
@@ -704,7 +706,7 @@ function ImportedTab({ data, loading, canManage, onAction }: {
                     <TableCell className="space-x-1 whitespace-nowrap text-right">
                       <Button size="sm" variant="outline" disabled={!canManage || !t.actions.smoke} title={why} onClick={() => onAction("smoke", t)}>Run smoke</Button>
                       <Button size="sm" disabled={!canManage || !t.actions.publish} title={why ?? (!t.actions.publish ? "Publish needs a passing smoke test of this template" : undefined)} onClick={() => onAction("publish", t)}>Publish</Button>
-                      <Button size="sm" variant="destructive" disabled={!canManage || !t.actions.withdraw} title={why} onClick={() => onAction("withdraw", t)}>Withdraw…</Button>
+                      <Button size="sm" variant="destructive" disabled={!canManage || !t.actions.withdraw} title={why} onClick={() => onAction("withdraw", t)}>{t.state === "withdraw_incomplete" ? "Finish withdraw…" : "Withdraw…"}</Button>
                     </TableCell>
                   </TableRow>
                 )
@@ -717,23 +719,37 @@ function ImportedTab({ data, loading, canManage, onAction }: {
   )
 }
 
+type ProviderOutcome = { serviceId: string; status: string; changed: number[]; remaining: number[]; nodesLosingLast?: string[]; versionsMapLine?: string; warnings?: string[] }
+type LifecycleResult = { complete?: boolean; warnings?: string[]; providers?: ProviderOutcome[]; unchanged?: boolean }
+
 function LifecycleDialog({ kind, t, onClose, onDone }: { kind: "smoke" | "publish" | "withdraw"; t: TemplateState; onClose: () => void; onDone: () => void }) {
   const [confirm, setConfirm] = useState("")
   const [reason, setReason] = useState("")
   const [force, setForce] = useState(false)
   const [confirmLast, setConfirmLast] = useState("")
+  const [confirmNodeLoss, setConfirmNodeLoss] = useState(false)
+  const [result, setResult] = useState<LifecycleResult | null>(null)
   const last = kind === "withdraw" && t.actions.lastPublished
+  const nodeLoss = kind === "withdraw" ? t.actions.nodesLosingLast ?? [] : []
   const run = useMutation({
     mutationFn: () => {
       const path = `${BASE}/templates/${encodeURIComponent(t.id)}/${kind}`
-      if (kind === "smoke") return apiFetch(path, { method: "POST" })
-      if (kind === "publish") return apiFetch(path, { method: "POST", body: { confirmDigest: confirm.trim() } })
-      return apiFetch(path, { method: "POST", body: { reason: reason.trim(), confirmDigest: confirm.trim(), force: last && force, confirmLast: last && force ? confirmLast.trim() : "" } })
+      if (kind === "smoke") return apiFetch<LifecycleResult>(path, { method: "POST" })
+      if (kind === "publish") return apiFetch<LifecycleResult>(path, { method: "POST", body: { confirmDigest: confirm.trim() } })
+      return apiFetch<LifecycleResult>(path, {
+        method: "POST",
+        body: { reason: reason.trim(), confirmDigest: confirm.trim(), force: last && force, confirmLast: last && force ? confirmLast.trim() : "", confirmNodeLoss: nodeLoss.length > 0 && confirmNodeLoss },
+      })
     },
-    onSuccess: (res: unknown) => {
-      const r = res as { complete?: boolean; warnings?: string[] } | undefined
-      if (r && r.complete === false) toast.warning(`Withdrawn with warnings: ${r.warnings?.join("; ")}`)
-      else toast.success(kind === "smoke" ? "Smoke test queued" : kind === "publish" ? "Published" : "Withdrawn")
+    onSuccess: (r) => {
+      if (kind === "withdraw") {
+        if (r && r.complete === false) toast.warning("Withdrawn where possible — some copies are not withdrawn yet; withdraw again to finish")
+        else toast.success("Withdrawn")
+        // Keep the dialog open to show the per-provider outcome (and the Kubernetes version-map line).
+        setResult(r ?? {})
+        return
+      }
+      toast.success(kind === "smoke" ? "Smoke test queued" : "Published")
       onDone()
     },
     onError: (e) => toast.error(e instanceof ApiError || e instanceof Error ? e.message : String(e)),
@@ -741,7 +757,49 @@ function LifecycleDialog({ kind, t, onClose, onDone }: { kind: "smoke" | "publis
   const digestOK = kind === "smoke" || confirm.trim() === t.digest
   const reasonOK = kind !== "withdraw" || (reason.trim().length >= 8 && reason.trim().length <= 500)
   const lastOK = !last || (force && confirmLast.trim() === t.slug)
-  const title = kind === "smoke" ? "Run the smoke test" : kind === "publish" ? "Publish" : "Withdraw"
+  const nodeLossOK = nodeLoss.length === 0 || confirmNodeLoss
+  const title = kind === "smoke" ? "Run the smoke test" : kind === "publish" ? "Publish" : t.state === "withdraw_incomplete" ? "Finish the withdraw" : "Withdraw"
+  if (result) {
+    return (
+      <Dialog open onOpenChange={(o) => !o && onDone()}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>{result.complete === false ? "Withdraw incomplete" : "Withdrawn"}: {t.tag}</DialogTitle>
+            <DialogDescription>
+              {result.complete === false
+                ? "The digest is blocked everywhere, but some copies could not be changed yet. Withdraw again (from the row marked Withdraw incomplete) once their provider is reachable."
+                : "Every copy of this artifact left the catalog. The templates are kept for inspection."}
+            </DialogDescription>
+          </DialogHeader>
+          <Table>
+            <TableHeader>
+              <TableRow><TableHead>Provider</TableHead><TableHead>Result</TableHead><TableHead>Details</TableHead></TableRow>
+            </TableHeader>
+            <TableBody>
+              {(result.providers ?? []).map((p) => (
+                <TableRow key={p.serviceId}>
+                  <TableCell className="font-mono text-xs">{p.serviceId}</TableCell>
+                  <TableCell><Badge variant={p.status === "withdrawn" ? "secondary" : "destructive"}>{p.status}</Badge></TableCell>
+                  <TableCell className="text-xs">
+                    {p.changed.length > 0 && <div>changed VM {p.changed.join(", ")}</div>}
+                    {p.remaining.length > 0 ? <div>still published on the line: VM {p.remaining.join(", ")}</div> : <div className="text-amber-600">no published version of {t.slug} left</div>}
+                    {p.versionsMapLine && (
+                      <Button size="sm" variant="link" className="h-auto p-0 font-mono text-xs" onClick={() => {
+                        void navigator.clipboard?.writeText(p.versionsMapLine!)
+                        toast.success("Version-map line copied")
+                      }}>{p.versionsMapLine}</Button>
+                    )}
+                    {p.warnings?.map((w) => <div key={w} className="text-amber-600">{w}</div>)}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+          <DialogFooter><Button onClick={onDone}>Close</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
+    )
+  }
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-2xl">
@@ -752,13 +810,14 @@ function LifecycleDialog({ kind, t, onClose, onDone }: { kind: "smoke" | "publis
             {kind === "publish" && (t.variant === "kubernetes"
               ? "Marks this Kubernetes node image as published (pc-tu-k8s-public). It never joins the OS catalog: use the version-map line on the provider."
               : `Adds pc-public: the newest published ${t.slug} version on ${t.node} becomes the default for new servers. Older versions stay. Running servers are not affected.`)}
-            {kind === "withdraw" && `Removes this version from the catalog (the previous published ${t.slug} version takes over), keeps the template VM for inspection, and blocks its digest so it can never be imported or published again. Running servers are not affected.`}
+            {kind === "withdraw" && `Removes this artifact from the catalog on every provider that has a copy (the previous published ${t.slug} version takes over), keeps the template VMs for inspection, and blocks its digest so it can never be imported or published again. Running servers are not affected.`}
+            {kind === "withdraw" && t.variant === "kubernetes" && " The Kubernetes provider's version map names template VMIDs explicitly: the result gives the line to put there instead."}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3 text-sm">
           <dl className="grid grid-cols-[8rem_1fr] gap-x-3 gap-y-1">
             <dt className="text-muted-foreground">Digest</dt><dd className="break-all font-mono text-xs">{t.digest}</dd>
-            <dt className="text-muted-foreground">Template</dt><dd>{t.node}{t.vmid ? ` · VM ${t.vmid}` : ""}</dd>
+            <dt className="text-muted-foreground">Template</dt><dd>{t.serviceId} · {t.node}{t.vmid ? ` · VM ${t.vmid}` : ""}</dd>
           </dl>
           {kind === "withdraw" && (
             <div className="space-y-1">
@@ -768,9 +827,9 @@ function LifecycleDialog({ kind, t, onClose, onDone }: { kind: "smoke" | "publis
           )}
           {last && (
             <Alert variant="destructive">
-              <AlertTitle>This is the only published version of {t.slug} on this provider</AlertTitle>
+              <AlertTitle>This is the only published version of {t.slug} on {t.actions.lastOnProviders?.join(", ") || "this provider"}</AlertTitle>
               <AlertDescription className="space-y-2">
-                <p>After withdrawing it, no new server{t.variant === "kubernetes" ? " or Kubernetes worker" : ""} of {t.slug} can be created until another version is published.</p>
+                <p>After withdrawing it, no new server{t.variant === "kubernetes" ? " or Kubernetes worker" : ""} of {t.slug} can be created there until another version is published.</p>
                 <div className="flex items-center gap-2">
                   <Checkbox id="tu-force" checked={force} onCheckedChange={(v) => setForce(v === true)} />
                   <Label htmlFor="tu-force">Withdraw anyway</Label>
@@ -778,6 +837,18 @@ function LifecycleDialog({ kind, t, onClose, onDone }: { kind: "smoke" | "publis
                 {force && (
                   <Input className="font-mono text-xs" placeholder={`type ${t.slug} to confirm`} value={confirmLast} onChange={(e) => setConfirmLast(e.target.value)} />
                 )}
+              </AlertDescription>
+            </Alert>
+          )}
+          {nodeLoss.length > 0 && (
+            <Alert variant="destructive">
+              <AlertTitle>Nodes losing their last copy of {t.slug}</AlertTitle>
+              <AlertDescription className="space-y-2">
+                <p>{nodeLoss.join(", ")} keep no published {t.slug} version: a new server placed on {nodeLoss.length === 1 ? "that node" : "those nodes"} cannot be created from it until another version is published there.</p>
+                <div className="flex items-center gap-2">
+                  <Checkbox id="tu-nodeloss" checked={confirmNodeLoss} onCheckedChange={(v) => setConfirmNodeLoss(v === true)} />
+                  <Label htmlFor="tu-nodeloss">I understand</Label>
+                </div>
               </AlertDescription>
             </Alert>
           )}
@@ -790,7 +861,7 @@ function LifecycleDialog({ kind, t, onClose, onDone }: { kind: "smoke" | "publis
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button variant={kind === "withdraw" ? "destructive" : "default"} disabled={!digestOK || !reasonOK || !lastOK || run.isPending} onClick={() => run.mutate()}>
+          <Button variant={kind === "withdraw" ? "destructive" : "default"} disabled={!digestOK || !reasonOK || !lastOK || !nodeLossOK || run.isPending} onClick={() => run.mutate()}>
             {run.isPending ? "Working…" : title}
           </Button>
         </DialogFooter>

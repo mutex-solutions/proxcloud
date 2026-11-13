@@ -62,11 +62,16 @@ The **Imported templates** tab shows each imported template's state: *Staged*, *
   then joins the catalog, and the newest published version is what new servers get; older versions stay.
   A Kubernetes node image never appears in the OS catalog: publishing marks it ready and the row shows
   the exact version-map line to put on the Kubernetes provider.
-- **Withdraw** — for a bad version: give a reason and confirm the digest. It leaves the catalog at once
-  (the previous published version takes over), its template is kept for inspection, and its digest is
-  blocked: it can never be imported or published again. If it is the only published version of that OS,
-  you must tick *Withdraw anyway* and type the OS name, because no new server of that OS can then be
-  created until another version is published. Running servers are never affected.
+- **Withdraw** — for a bad version: give a reason and confirm the digest. It leaves the catalog at once on
+  every provider that has a copy (the previous published version takes over), its templates are kept for
+  inspection, and its digest is blocked: it can never be imported or published again. If it is the only
+  published version of that OS on a provider, you must tick *Withdraw anyway* and type the OS name, because
+  no new server of that OS can then be created there until another version is published; if a node keeps
+  no copy, you confirm that too. If a provider cannot be reached, its copy shows **Withdraw incomplete**:
+  use **Finish withdraw** once it is back. For a Kubernetes node image the result gives the version-map
+  line to put on the Kubernetes provider (it names images by VMID). Running servers are never affected.
+- If the template is changed in Proxmox after its smoke test passed, run the smoke test again before
+  publishing.
 
 If an import or a smoke test fails, only what it created is removed, and the job shows why. To try again, start a
 new import from this page: a failed import cannot be replayed from the durable jobs view (only one that

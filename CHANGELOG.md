@@ -48,7 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of exactly that template and digest) makes the newest version the default for new VMs and keeps older
   ones; **Withdraw** (reason required) takes a bad version out of the catalog — falling back to the
   previous one — keeps its template, and blocklists its digest for import, smoke and publish. Withdrawing
-  the last published version of an OS needs an explicit forced confirmation. All actions need
+  the last published version of an OS needs an explicit forced confirmation. A withdraw covers every
+  provider holding a copy of the digest; a copy that could not be changed yet (provider unreachable)
+  shows *Withdraw incomplete* and the same action finishes it. A publish requires the template to be
+  unchanged since its passing smoke test. All actions need
   `admin:service:manage`, are audited, and stay behind `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED`. The
   admin page gains an *Imported templates* tab with the state of each template and its actions.
 
@@ -58,8 +61,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `publish` field is still accepted, but `true` is refused with `400`
   (`errors.details.code = publish_at_import_removed`); absent/`false` is ignored. Imports are tagged
   `pc-tu-import;pc-tu-staged` without any catalog tag until published.
-- `images/build.py build` never prunes a template carrying the portal's import marker `pc-tu-import`,
-  nor the newest published version of an OS on a node (`--keep` below 1 counts as 1).
+- `images/build.py build` never prunes a template the portal imported (marker `pc-tu-import`, or a
+  `pc-src-` tag from an earlier import), nor the newest published version of an OS on a node.
+- **Breaking (CLI/installer)**: `images/build.py --keep` must be 1–999. `--keep 0`, which used to prune
+  nothing, is now refused with a clear message; the installer's preflight checks
+  `proxcloud.templates.keep` the same way (default 2, unchanged).
 - `pve.DiscoverTemplates` skips templates tagged `pc-tu-withdrawn`, even when `pc-public` is present.
 
 ### Fixed

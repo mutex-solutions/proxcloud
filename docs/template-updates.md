@@ -269,7 +269,8 @@ Code: [`lifecycle.go`](../internal/templateupdates/lifecycle.go) (publish, withd
 | Ready to publish | the latest smoke of this template passed |
 | Published (default) | published, and the newest published version of its line on its node (what new VMs get) |
 | Published (older) | published, a newer published version exists (kept; serves as fallback) |
-| Withdrawn | digest blocklisted, `pc-tu-withdrawn`, out of every catalog; the template VM is kept |
+| Withdrawn | digest blocklisted **and this copy** tagged `pc-tu-withdrawn`: out of every catalog; the template VM is kept |
+| Withdraw incomplete | digest blocklisted but **this copy** is not tagged withdrawn yet (its provider was unreachable or the tag write failed); Withdraw stays enabled and finishes it |
 
 `GET /admin/template-updates/templates` (`admin:service:read`) lists the newest 200 imports with their
 state, latest smoke, withdrawal and allowed actions; `GET /admin/template-updates/blocklist` the
@@ -287,7 +288,13 @@ exactly one template (service, node, template VMID, digest) plus the smoke netwo
 `{"bridge":"vmbr0","vlan":29,"ip":"192.0.2.50/24","gateway":"192.0.2.1","nameserver":"192.0.2.53"}`
 (`ip` empty = DHCP; `vlan` 0/absent = untagged). Unset → the smoke cannot run: 409
 `smoke_network_unset` ("set config.templateSmoke …"), recorded on the import for the automatic run.
-Validated (bridge name, VLAN range, gateway inside the CIDR) at enqueue and in the payload. Smoke tests
+Validated at enqueue and in the payload: bridge/vnet name, VLAN 0–4094, **IPv4 only** for a static
+address (a host address in a /8–/30, gateway another address inside it; an IPv6-only smoke network is
+not supported), nameserver a plain address without a zone. At enqueue an **untagged** smoke network
+on a bridge that carries the node's management address or default gateway is refused (409
+`smoke_network_management_bridge`, the same check as public networks): the test VM would sit on the
+hypervisor's L2. A VLAN-tagged network on such a bridge is allowed (its own segment, as the image
+pipeline builds). Smoke tests
 are serialized **per provider** (a static smoke IP is one VM at a time): a PostgreSQL session advisory
 lock `templateupdate-smoke:<service>`; a busy lock defers the job (`durablejobs.Store.Defer`: back to
 pending in 1 minute **without** spending an attempt).
@@ -296,7 +303,8 @@ Steps (each PVE mutation right after a successful fence check; the template itse
 
 1. Re-prove the template: member of `pc-templates` on the node (read from `/pools`), a template, named
    `TemplateName(payload)`, tagged `pc-src-<digest prefix>`; else FAIL `template_mismatch`. A
-   withdrawn digest is FAIL `digest_withdrawn`.
+   withdrawn digest is FAIL `digest_withdrawn`. The template's **config digest** is recorded in the
+   receipt with the clone's VMID: a PASS vouches for exactly that configuration.
 2. **Clone** (full, VMID recorded in the receipt *before* the call, lowest free id ≥ 9200) into pool
    **`pc-templates`** on the template's node and disk storage, named `pc-tu-smoke-<16 hex of job id>`.
    Never a tenant pool.
@@ -304,7 +312,7 @@ Steps (each PVE mutation right after a successful fence check; the template itse
    template's copied tags), `net0` on the smoke bridge/VLAN, `ipconfig0`, an **ephemeral ed25519
    SSH key** generated in memory for this attempt (only its SHA-256 fingerprint is recorded; the
    private key is never stored, logged or sent anywhere — nothing ever logs in with it), no password
-   (`cipassword` deleted), `agent=1`.
+   (`cipassword` deleted) and no custom cloud-init snippets (`cicustom` deleted), `agent=1`.
 4. **Grow** `scsi0` by +8 GiB, then **start**.
 5. Guest agent **ping**, then **`guest-get-osinfo`** within 5 minutes; the reported `ID`/`VERSION_ID`
    must match the artifact (`debian-13` → `debian`/`13`, `ubuntu-2604` → `ubuntu`/`26.04`).
@@ -328,9 +336,12 @@ FAIL codes: `template_mismatch`, `digest_withdrawn`, `clone_failed`, `configure_
 succeeds; the result is FAIL); transport errors are retried (3 attempts) and then recorded as FAIL.
 
 **Ownership and cleanup.** The only VM a smoke job mutates or destroys is its own test VM: a member
-of `pc-templates` on the job's node, **not a template**, carrying the job's owner tag — or, in the
-window between the clone and its config write (when it still carries the template's copied tags),
-the job's exact name. Every stop/destroy re-reads that proof first; a VM outside `pc-templates` (a
+of `pc-templates` on the job's node, **not a template**, named **exactly** `pc-tu-smoke-<job>`, and
+carrying the job's owner tag — or, only in the window between the clone and its config write, no
+`pc-tu-smoke*` tag at all (it still carries the template's copied tags). A manual clone of a test VM
+(another name, copied owner tag) or a VM configured by another smoke job is never touched. A test VM
+that cannot be removed keeps the smoke receipt *uncleaned* (warning recorded): the attempt is retried,
+then the dead-job pass retries every 10 minutes until it is gone. Every stop/destroy re-reads that proof first; a VM outside `pc-templates` (a
 tenant or CAPMOX copy) is never considered. Cleanup is always attempted: right after the result is
 recorded, at the end of an attempt that hit a retryable error, by a new acquisition (which never
 trusts an earlier attempt's test VM: the key died with that process), after a terminal failure, and by
@@ -344,8 +355,10 @@ replayed (409): start a new one. Bounds: clone/config/power task 30 minutes, boo
 `POST /admin/template-updates/templates/{importId}/publish` `{"confirmDigest":"sha256:…"}`
 (`admin:service:manage`, audited). Under a per-digest advisory lock: refused unless the **latest
 smoke of exactly that template VMID + digest** on that provider node is **PASS** (`smoke_missing`,
-`smoke_running`, `smoke_not_passed`; a PASS of another copy of the same digest does not count) and the
-digest is not blocklisted (`digest_withdrawn`). It re-proves the template (as in smoke step 1) and
+`smoke_running`, `smoke_not_passed`; a PASS of another copy of the same digest does not count), the
+digest is not blocklisted (`digest_withdrawn`), and the template's **config digest is still the one the
+smoke test recorded** — any change of the template's configuration after the smoke (disk, cloud-init,
+hardware, tags) refuses with 409 `template_changed_since_smoke`: run the smoke again. It re-proves the template (as in smoke step 1) and
 writes, with the config digest just read (a concurrent config change makes PVE refuse instead of
 overwriting), then reads the tags back:
 
@@ -354,7 +367,8 @@ overwriting), then reads the tags back:
   `pc-src-…;pc-tu-import`; `pc-tu-staged` removed. `pve.DiscoverTemplates` then serves the newest
   `pc-v-` per node — the new version becomes the default for new VMs, older ones stay.
 - Kubernetes node image: `pc-tu-k8s-public` + `pc-v-<…>` — **never** `pc-public`/`pc-img-` (a node
-  image is not a tenant OS catalog entry; lead decision 2026-11-13). The page shows the exact
+  image is not a tenant OS catalog entry; lead decision 2026-11-13); any `pc-public`/`pc-img-*` put on
+  it by hand is removed by the publish. The page shows the exact
   `config.cluster.versions` line (`"1.35.10": "pve1=9210,pve2=9211"`, newest published per node) to
   put on the kamaji provider; the portal does not edit that map (the provider update path replaces
   `config` keys wholesale, so a single-key edit could not be made non-destructive).
@@ -364,22 +378,46 @@ Idempotent: an already published template answers `unchanged: true` and writes n
 ### Withdraw
 
 `POST /admin/template-updates/templates/{importId}/withdraw`
-`{"reason":"…","confirmDigest":"sha256:…","force":false,"confirmLast":""}` (`admin:service:manage`,
-audited with the reason). A reason of 8–500 characters is required. Then, under the per-digest lock:
+`{"reason":"…","confirmDigest":"sha256:…","force":false,"confirmLast":"","confirmNodeLoss":false}`
+(`admin:service:manage`, audited with the reason and the per-provider outcome). A reason of 8–500
+characters is required. A withdraw is about the **artifact digest**, so it covers **every Proxmox
+provider** that holds a finished import of it (any import receipt of that digest, whichever row the
+action was started from). Under the per-digest lock:
 
-1. **Last-version guard**: if a copy of this artifact is published and no *other* published template
-   serves the line on the provider (any published `pc-img-<os>` for an OS; any published import or
-   pipeline `pc-k8s-<ver>` template for a Kubernetes version), it is refused with 409
-   `last_published_version` unless `force: true` **and** `confirmLast` = the line's slug
-   (`debian-13`, `ubuntu-2604-k8s-1.35.10`). The dialog shows the consequence: no new VM of that OS
-   can be created until another version is published.
+1. Every such provider's cluster is read and planned (copies of the artifact, other published versions
+   of the line). **Guards, all evaluated before anything changes:**
+   - **last version per provider**: a provider left without any published version of the line (any
+     published `pc-img-<os>` for an OS; any published import or pipeline `pc-k8s-<ver>` template for a
+     Kubernetes version) → 409 `last_published_version` naming the providers, unless `force: true`
+     **and** `confirmLast` = the line's slug (`debian-13`, `ubuntu-2604-k8s-1.35.10`);
+   - **nodes losing their last copy**: a node left without a published version of the line while the
+     provider keeps one elsewhere (node-local template storage: VMs there clone only from that node's
+     copy) → 409 `nodes_losing_last_copy` listing `<provider>/<node>`, unless `confirmNodeLoss: true`.
+   The page shows both consequences in the dialog and requires the confirmations.
 2. The digest goes on the **blocklist** (`templateUpdateBlocklist`, id = digest: package, tag,
    reason, actor, time, provider, node, VMID, import id). The first withdrawal is kept; repeating it
-   changes nothing.
-3. **Every copy** of the artifact on the provider (finished imports of that digest, any node) gets
+   changes nothing there.
+3. On each provider, **every copy** of the artifact (finished imports of that digest, any node) gets
    `pc-tu-withdrawn` (+ `pc-tu-import`), and loses `pc-public`, `pc-tu-k8s-public`, `pc-tu-staged` and
    `pc-img-<os>` (so no installer selector picks it either). The template VMs are **kept** for
    forensics, never deleted.
+4. The result lists each provider: `withdrawn` (every copy there tagged), `incomplete` (a tag write
+   failed, or a copy's node is down), `unreachable` (the provider or its cluster could not be read —
+   **nothing** was changed there) or `provider_missing` (the provider was deleted). `complete` is false
+   if any provider is `incomplete`/`unreachable`.
+
+**Withdraw incomplete.** The page decides *Withdrawn* from each copy's own `pc-tu-withdrawn` tag, not
+from the blocklist alone: a copy whose digest is blocklisted but which is not tagged yet shows
+**Withdraw incomplete** (it may still be published there), with **Finish withdraw** enabled. That
+action is the same Withdraw (the reason given then is not recorded again — the first one stands) and
+finishes every provider that is reachable now; a blocklisted digest is never published, smoke-tested
+or imported again meanwhile.
+
+**Kubernetes node images.** The kamaji provider's `config.cluster.versions` names template VMIDs
+explicitly, so withdrawing does **not** stop new workers from cloning a withdrawn image. The result
+carries, per provider, a warning and the replacement line (`"1.35.10": "pve1=9210"` — the newest
+other published image of that version per node), or a warning that none is left (remove the version
+from the map or publish another image first). The portal does not edit the map itself.
 
 `pve.DiscoverTemplates` skips any template carrying `pc-tu-withdrawn`, even if someone puts
 `pc-public` back by hand, and falls back to the previous published version (newest `pc-v-` wins).
@@ -400,9 +438,11 @@ published VMIDs. Refused requests are not audited as successes.
 ### Interaction with `images/build.py` pruning
 
 `build.py build --keep K` prunes the oldest published versions of an OS on a node. It now never
-prunes (a) a template carrying the import marker `pc-tu-import` — the portal owns its lifecycle — and
-(b) the newest published version (`--keep` below 1 is treated as 1, so the only published version always
-stays). Imports still count as versions for `--if-missing` (stage 20 skips building when an imported
+prunes (a) a template carrying the import marker `pc-tu-import` **or any `pc-src-` tag** (an import made
+before the marker existed) — the portal owns its lifecycle — and (b) the newest published version:
+`--keep` must be 1–999 (refused by the CLI otherwise; the installer's preflight checks
+`proxcloud.templates.keep` the same way, default 2). Before this change `--keep 0` pruned nothing (a
+Python `[:-0]` slice); it is now refused rather than silently meaning "keep everything". Imports still count as versions for `--if-missing` (stage 20 skips building when an imported
 version is published there) and take no `--keep` slot (pipeline versions keep K slots of their own).
 Staged and withdrawn imports carry no `pc-public`/`pc-img-` at all, so `build.py` never even lists them.
 A pipeline build publishes `pc-public` as before, so it can become the default over an older import
@@ -462,7 +502,11 @@ Proxmox rights of the portal token for the smoke test, on `/pool/pc-templates` (
 **`VM.GuestAgent.Unrestricted`** (guest-exec: `cloud-init status`, `df`, `kubelet --version`; without it
 the smoke ends FAIL `guest_exec_forbidden`); `Datastore.AllocateSpace` on the template disk storage;
 `SDN.Use` on the smoke bridge's zone (`/sdn/zones/localnetwork/<bridge>` for a plain bridge on PVE 8+).
-Publish/withdraw need `VM.Config.Options` (tags) only.
+Publish/withdraw need `VM.Config.Options` (tags) only. An existing site whose `ProxCloudPlatform` role
+predates `VM.GuestAgent.Unrestricted` adds it as described in
+[proxmox-permissions.md](proxmox-permissions.md#proxcloudplatform) (`pveum role modify ProxCloudPlatform
+--append 1 --privs "VM.GuestAgent.Unrestricted …"`); the smoke network's bridge needs `SDN.Use` as for
+any NIC ([proxmox-permissions.md](proxmox-permissions.md#pveum-commands)).
 
 ## 7. Open items
 
@@ -478,16 +522,15 @@ Publish/withdraw need `VM.Config.Options` (tags) only.
   (`pve-image-upload-<service>`) is nil-safe and `pve.Service.HolderLock` is **not wired in `cmd/api`
   (pre-existing)**, so a customer import and a template update can still spool to the API node's disk
   at the same time; the room check runs before each. Wiring `HolderLock` fixes that for both.
-- **Catalog pruning by `images/build.py`**: see §4 — imports (`pc-tu-import`) are never pruned and
-  the only published version is never pruned; imports count for `--if-missing`. A template imported
-  *and published* by the pre-lifecycle version carries no import marker: `build.py` may prune it like
-  a pipeline template until it is withdrawn (which adds the marker) or published again through the
-  lifecycle (Run smoke works on such an import — its name and `pc-src-` tag prove it — and Publish then
-  adds the marker).
-- **Last-version guard scope**: the guard counts published versions of the line on the whole provider,
-  not per node. On a site with local (non-shared) template storage, withdrawing a node's only copy
-  while another node still has one is allowed; new VMs scheduled to that node then cannot be cloned
-  there until a version is published on it.
+- **Catalog pruning by `images/build.py`**: see §4 — imports (`pc-tu-import` or any `pc-src-` tag) are
+  never pruned and the only published version is never pruned; imports count for `--if-missing`. A
+  template imported *and published* by the pre-lifecycle version is protected by its `pc-src-` tag; it
+  can be smoke-tested and published through the lifecycle (its name and `pc-src-` tag prove it), which
+  adds the marker.
+- **Withdraw across providers is not atomic**: the blocklist entry is written first, then each provider's
+  copies are retagged; a provider that is down keeps its copy published until the withdraw is repeated
+  (the page shows *Withdraw incomplete*). A provider **deleted** from the portal while it still holds a
+  published copy cannot be reached at all (`provider_missing`): retag that copy by hand.
 - **Smoke test — needs lab verification (PVE 9.2), nothing of it ran against a real cluster**:
   - the guest agent endpoints: `agent/get-osinfo` / `agent/get-fsinfo` answer shapes
     (`version-id`, `total-bytes` present on the shipped qemu-guest-agent), `agent/exec` + `exec-status`
