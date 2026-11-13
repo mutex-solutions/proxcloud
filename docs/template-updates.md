@@ -2,16 +2,17 @@
 
 **Admin → System → Template updates** shows the newest VM templates and sandbox images published on
 GitHub Packages (`ghcr.io/mutex-solutions`), compares them with what this site runs, and — for VM
-templates — imports a chosen artifact as a **new** Proxmox template. Scope chosen by the owner
-(2026-11-12): *the admin sees the latest available version and clicks update*. Nothing updates on its
-own.
+templates — imports a chosen artifact as a **new** Proxmox template; for sandbox images — mirrors the
+chosen digest into the sandbox registry and pre-pulls it before templates switch. Scope chosen by the
+owner (2026-11-12): *the admin sees the latest available version and clicks update*. Nothing updates
+on its own.
 
 | Part | State |
 |---|---|
 | GitHub integration (PAT, validated on save) | done |
 | Discovery: newest VM artifact per line, newest sandbox image per template, installed/pinned state | done |
 | VM import job (download by digest → verify → new template) | done, **off by default** (`PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true`) until lab-verified |
-| Sandbox mirror → prepull → pin switch from the portal | **not yet enabled** — seam + follow-up design below |
+| Sandbox mirror → prepull → pin switch from the portal (+ rollback) | done, **off by default** (`PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED=true`) until cluster-verified (§4) |
 
 Code: [`internal/templateupdates`](../internal/templateupdates), admin routes in
 [`internal/platform/admin/templateupdates.go`](../internal/platform/admin/templateupdates.go), page
@@ -238,45 +239,156 @@ transaction, where a missing table cannot be auto-created.
 runner and allows enqueueing. Off: discovery still works and the import button is disabled. Before
 turning it on, run one import per OS on the lab (PVE 9.2) and boot a clone: see *Open items*.
 
-## 4. Sandbox templates — not yet enabled (follow-up design)
+## 4. Sandbox templates — mirror, prepull, switch
 
-`POST /admin/template-updates/sandbox` answers **501** with the manual path. Why: built-in images live
-in the sandbox registry's `library/` namespace, writable only by the installer's Zot `admin` account
-(kept in `generated/`, never given to the portal), and the prepull DaemonSet is applied by stage 55;
-the portal holds no RBAC on it. `internal/registrypins` fences **project** template repositories
-(`t/<project>/<template>`); its refs cannot express `library/` and its locks are project rows, so it
-cannot be reused as-is for built-ins.
+Approved by the owner (2026-11-13, automatic). Code: [`internal/templateupdates/sandbox*.go`](../internal/templateupdates),
+[`internal/cloud/sandbox/mirror.go`](../internal/cloud/sandbox/mirror.go),
+[`internal/sandboximport/mirror.go`](../internal/sandboximport/mirror.go), admin routes in
+[`templateupdates_sandbox.go`](../internal/platform/admin/templateupdates_sandbox.go), installer stages 55/60.
 
-Today's path (unchanged, shown on the page): put the pin line into `deploy/templates/images.yaml`,
-`make upgrade` → stage 55 copies it with the same digest and bumps the prepull → the portal's
-`sandboxTemplateAdopt` job switches each template once every prepull pod on a Ready node has pulled it
-(`SetTemplateImage` CAS; the previous pin stays until then, and stays if the prepull never completes).
+| Route | Permission | Flag off |
+|---|---|---|
+| `POST /admin/template-updates/sandbox` `{serviceId, name, digest, confirmDigest}` | `admin:service:manage` | 501 |
+| `POST /admin/template-updates/sandbox/rollback` `{serviceId, name, confirmDigest}` | `admin:service:manage` | 501 |
+| `GET /admin/template-updates/sandbox/state` (jobs, pins, prepull/adoption progress) | `admin:service:read` | answers |
+| `GET /admin/template-updates/sandbox/pins[?registry=host]` (installer stage 55) | `admin:service:read` | answers |
 
-Proposed follow-up (needs owner approval as a separate change):
+### 4.1 Registry account `mirror`
 
-1. **Narrow Zot account** `mirror` created by stage 55 next to `gc`: read/create on
-   `library/sandbox-*` only (no delete, no `t/**`, no `library/proxcloud-*`), password generated into
-   `generated/` and handed to the portal by stage 60 as `secret.registryMirror` on the sandbox
-   provider. Zot's most-specific-pattern rule needs the explicit `library/sandbox-*` entry.
-2. **Mirror** = a durable job (external kind, same runner/fence pattern) running the existing
-   trusted `sandbox-import` worker pod pattern (`ImportObjects`, fixed argv, digest-pinned worker,
-   pod-UID evidence) in copy mode with destination `<registry>/library/sandbox-<name>:<tag>` and
-   `--preserve-digests` semantics: source `ghcr.io/mutex-solutions/sandbox-<name>@<digest>` with the
-   GitHub integration's token as a short-lived pull secret owned by the pod. Success requires the
-   destination to resolve to the **same digest**.
-3. **Prepull**: a `Role` in `sandbox-system` allowing `get`/`patch` on `daemonsets` with
-   `resourceNames: [template-prepull, template-prepull-gpu]` only, bound to the portal's sandbox
-   identity, plus a ValidatingAdmissionPolicy limiting that identity's patches to the init-container
-   image list, and only to digest refs under `<registry>/library/sandbox-*`. The job adds/replaces the
-   one init container of that image.
-4. **Switch** = no new code: the existing adoption job moves templates only after every prepull pod
-   on a Ready node runs the new digest. **Rollback** = the previous pin is untouched until adoption;
-   reverting is re-patching the DaemonSet back (adoption follows) — the old image stays in `library/`
-   because nothing deletes it (Zot GC only removes unreferenced blobs, and the old tag still references
-   it).
-5. **Pin record**: the mirrored digest is also written to a `sandboxBuiltinPin` document so a later
-   `make upgrade` (which renders the DaemonSet from `images.yaml`) does not silently roll it back; the
-   installer must read it, or the page must keep showing the `images.yaml` line to commit.
+Stage 55 generates `generated/sandbox-registry-mirror` next to `gc` and puts it in the registry's users
+Secret; the account sync (`sandbox-proxy registry-users`) creates the Zot user only when that password is
+mounted. Its rights, in `http.accessControl`:
+
+| Pattern | Rights |
+|---|---|
+| `library/sandbox-*` (explicit, the most specific match) | group `pull`: read; user `mirror`: **read, create** |
+| `library/**` | group `pull`: read (no `mirror`) |
+| `t/**`, `t/<project>/**` | no `mirror` |
+
+No `update` (an existing tag never moves), no `delete`, nothing under `t/**` or `library/proxcloud-*`;
+`mirror` is not in the pull group nor an admin. Stage 60 hands the password to the sandbox provider as
+`secret.registryMirror` (encrypted, write-only like every provider secret: no read, list or audit returns
+it). Idempotent: a provider registered after the change gets it with its other secrets; an existing one
+gets one `PUT` whose hash (provider id + password, never the password) is kept in
+`generated/sandbox-registry-mirror.handed`, so a re-run writes nothing unless the password changed. A
+provider whose release gates do not hold refuses the write (409): reported, retried on the next run.
+
+### 4.2 The mirror job
+
+`templateupdate.sandbox/v1`, an external durable kind with its own fenced runner (the same
+lease/heartbeat/`Checkpoint`/`Fail` contract as the VM import, §3). Enqueue re-lists the package and
+re-verifies the digest server side (a published `<YYYYMMDD>-<sha7>` tag whose manifest is a linux/amd64
+**image manifest** — an index digest cannot be copied byte for byte and is refused), refuses when the
+prepull DaemonSets already run that digest (**same-digest refusal**, 409), and in one transaction under
+an advisory lock on `<registry>/library/sandbox-<name>` refuses while another job for that image is live
+(**dedup per image**, 409) before it enqueues the job and its receipt. Receipt steps (collection
+`templateUpdateSandbox`):
+
+`queued → mirroring (intent: pod name) → mirrored → verified → prepull (intent: pin + previous images) → pinned → succeeded | failed`
+
+1. **Copy**: the trusted `sandbox-import` worker in copy mode — fixed argv
+   `mirror ghcr.io/mutex-solutions/sandbox-<name>@<digest> <registry>/library/sandbox-<name>:<tag> <policy>`,
+   the operator-pinned digest image of `sandbox-system/sandbox-import-worker`, a pod in `sbx-build`
+   (`tu-mirror-<16 hex>-e<epoch>`, no service-account token, read-only root, its image pulled with the
+   read-only `sandbox-registry-nodes` account the sync now also writes into `sbx-build`). Its two
+   credentials are dockerconfigjson Secrets written **after** the pod, with an `ownerReference` to the
+   pod's observed UID: the GitHub PAT (`ghcr.io` only) and the mirror account (the registry only). They
+   are garbage-collected with the pod; the job deletes the pod (UID precondition) as soon as the result
+   is read, and every pod of the job on finish/cleanup. The worker copies the source's own manifest bytes
+   (same digest) through transports fenced to `ghcr.io` (pull scope of that one repository; the blob
+   redirect to `pkg-containers.githubusercontent.com` without credentials) and to the one destination
+   repository; an existing destination tag is accepted only at the same digest (a re-run), never moved.
+   Its single stdout line must prove `destinationDigest == sourceDigest` for exactly its pair.
+2. **Verify**: the portal itself reads the destination manifest by tag with the mirror account (read)
+   and its CA, and requires the sha256 of the bytes to be the payload digest (`digest_mismatch`,
+   permanent, otherwise).
+3. **Prepull**: in one fenced transaction the pin record (`sandboxBuiltinPin`, below) and the images
+   being replaced are recorded; then the DaemonSets are patched (§4.3).
+
+Failure codes (`[a-z_]`, never a provider string): `invalid_payload`, `receipt_mismatch`,
+`github_not_configured`, `mirror_unavailable` (no worker image, no template registry or no mirror
+account), `mirror_result_invalid`, `digest_mismatch`, `registry_refused`, `rollback_target_missing`,
+`ownership_lost`, `provider_missing`, `registry_changed`, `executor_unavailable`, `attempts_exhausted`,
+`job_dead`. **Resume**: a new acquisition continues from the last committed step; a worker that already
+succeeded is reused (no second copy), one still running is waited for, a failed one is deleted and the
+copy redone under the new epoch's pod. A lost lease stops the executor before its next cluster effect.
+**Cleanup** (terminal failure or the dead-job pass): delete the job's worker pods; if the pin was
+recorded but the DaemonSet never ran the new ref, restore the pin record this job replaced. **Secrets**:
+the PAT exists only in the job's memory and the pod-owned Secret — never in the payload, receipt, pin,
+audit row or log; the mirror password only in the provider's encrypted secret and the pod-owned Secret.
+
+### 4.3 Prepull RBAC and admission policy
+
+Stage 55 renders, next to the DaemonSets (`templates/sandbox-prepull.yml.j2`):
+
+- `Role proxcloud-template-prepull` in `sandbox-system`: `get`, `patch` on `apps/daemonsets` with
+  `resourceNames: [template-prepull, template-prepull-gpu]`, bound to the portal's sandbox identity —
+  ServiceAccount `proxcloud` in `proxcloud-system` (`deploy/sandbox-cluster/rbac.yaml`; its token is the
+  sandbox provider's `secret.kubeconfig`, stage 55 `sandbox-portal.kubeconfig`).
+- `ValidatingAdmissionPolicy proxcloud-template-prepull-images-only` + binding (`Deny`, `failurePolicy:
+  Fail`), matching that identity's DaemonSet CREATE/UPDATE/DELETE: only an UPDATE of those two names in
+  `sandbox-system`; metadata (labels, owners, finalizers, annotations but the API server's
+  `deprecated.daemonset.template.generation`), the DaemonSet spec, the pod template metadata and every pod
+  spec field but `initContainers` unchanged; no init container removed, at most one added; each init
+  container unchanged, or changed in `image` alone to
+  `<registry>/library/sandbox-<name>[:<YYYYMMDD>-<sha7>]@sha256:<64 hex>`, or one new `p<N>` equal to an
+  existing one but for name and image (same grammar). Kubernetes CEL cannot iterate the fields of a typed
+  object, so the policy compares a fixed field list; a field the cluster's schema lacks makes the policy
+  fail to compile, which denies (closed).
+
+The job's patch (`SetPrepullImage`): every init container of either DaemonSet that pulls
+`<registry>/library/sandbox-<name>` gets the new ref; if none does, one `p<N>` (the installer's naming)
+shaped like the first one is appended to `template-prepull`. A JSON merge patch carrying the
+`resourceVersion` it read (409 if the DaemonSet moved), nothing else.
+
+**Admission policy test cases** (verified by text in `installer/tests/test_sandbox_mirror.py` and
+`internal/cloud/sandbox/prepull_policy_test.go`; the behaviour needs a real API server — open item):
+allow image change of `p1` to a mirrored digest ref; allow adding `p<N>` shaped like `p0`; deny a tag-only
+ref, a ref under `t/`, `library/proxcloud-*`, another registry or `ghcr.io`; deny changing `command`, `env`,
+`resources`, `volumeMounts`, `securityContext`; deny removing an init container or adding two; deny
+changing `containers`, `volumes`, `serviceAccountName`, `hostNetwork`, `tolerations`, `nodeSelector`,
+`imagePullSecrets`, labels or the selector; deny another DaemonSet or namespace, CREATE and DELETE; a
+DaemonSet write by any other identity is not matched.
+
+### 4.4 Switch and rollback
+
+No new switch code: the existing `sandboxTemplateAdopt` job moves each template (`SetTemplateImage` CAS)
+once every prepull pod on a Ready node has pulled the new digest (`imageAdoption: on` on the provider;
+`dry-run` only logs). The page shows *Mirroring → Verifying digest → Updating prepull → Waiting for
+prepull on N/M nodes → Switched* (`GET …/sandbox/state`). **Rollback** enqueues the same job kind with
+action `rollback` to the pin's `previous` ref (`<registry>/library/sandbox-<name>:<tag>@<digest>`): it
+re-verifies that digest is still in the registry (nothing deletes it: Zot GC removes only unreferenced
+blobs and the old tag still references them), records the pin and re-patches the DaemonSets; adoption
+follows. A `previous` that is not such a ref (e.g. the first pin of an image the installer pinned without
+a `<YYYYMMDD>-<sha7>` tag) is refused: roll back through `images.yaml` and `make upgrade`.
+
+### 4.5 Pin record and `make upgrade`
+
+`sandboxBuiltinPin` (id `<registry>/library/sandbox-<name>`): `{template, registry, tag, digest, ref,
+action, previous, serviceId, actor, at, mirrorJob}`. Stage 55 reads the records **through the portal API**
+(`GET /admin/template-updates/sandbox/pins?registry=<host>`, read-only, secret-free, with the installer's
+admin API key `generated/admin-api-key.json` that stage 60 already uses) — chosen over a database read,
+which would need the database password and a path into the mgmt cluster's PostgreSQL. It then renders the
+copy list and the prepull from the **newer** of `images.yaml` and the pin per image: same digest → no
+change; a pin whose `previous` is exactly `images.yaml`'s digest wins (a newer mirror, or a deliberate
+rollback); otherwise the later `<YYYYMMDD>` tag date wins; two digests that cannot be ordered stop the
+upgrade with the line to commit. It prints the `images.yaml` lines to commit; the page shows the same line
+per pin. **Fail closed**: with an admin key present and no answer from the API (or a refusal), the upgrade
+stops with a clear message instead of rendering `images.yaml` alone; `-e
+pc_sandbox_portal_pins_unavailable_ok=true` overrides it only when the operator knows no image was
+mirrored from the portal. No admin key = first install: nothing to read.
+
+### 4.6 Enabling
+
+1. `make upgrade` (stages 55 and 60): the mirror account, its hand-over, the Role and the policy.
+2. Check: `kubectl -n sandbox-system auth can-i patch daemonset/template-prepull
+   --as=system:serviceaccount:proxcloud-system:proxcloud` → yes; `… patch daemonset/node-setup` → no; the
+   policy is admitted (`kubectl get validatingadmissionpolicy proxcloud-template-prepull-images-only`).
+3. `sandbox-system/sandbox-import-worker` holds the digest-pinned worker built from this release
+   (`deploy/sandbox-import.Dockerfile`; copy mode is new: an older worker image refuses `mirror` argv).
+4. The provider has `imageAdoption: on` and the GitHub integration is configured.
+5. `PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED=true` (or `proxcloud.template-updates.sandbox-enabled`) on
+   the API: starts the runner and allows the two POSTs. Off, they answer 501 and nothing runs.
 
 ## 5. Permissions
 
@@ -284,9 +396,22 @@ Proposed follow-up (needs owner approval as a separate change):
 |---|---|---|
 | See the page, discovery, placement, history | `admin:service:read` | SUPER_ADMIN, ADMIN, SUPPORT |
 | Start a VM import | `admin:service:manage` | SUPER_ADMIN, ADMIN |
+| Start a sandbox mirror or rollback | `admin:service:manage` | SUPER_ADMIN, ADMIN |
+| Sandbox state, pin list (installer stage 55) | `admin:service:read` | SUPER_ADMIN, ADMIN, SUPPORT |
 | Save the GitHub integration | `admin:integration:manage` | SUPER_ADMIN, ADMIN |
 
 ## 6. Open items
+
+- **Sandbox mirror not cluster-verified**: no sandbox cluster, Zot, GHCR or PAT was used. Verify on the
+  lab: the Zot rule set (`mirror` creates `library/sandbox-x:tag`, cannot push an existing tag, cannot
+  delete, cannot touch `t/**` or `library/proxcloud-*`; the pull group still reads `library/sandbox-*`);
+  that a GHCR blob redirect host is `pkg-containers.githubusercontent.com` (otherwise the worker's guard
+  refuses the copy, fail closed); the admission policy compiles on the cluster's Kubernetes version and
+  the cases in §4.3 behave as listed; the DaemonSet merge patch with `resourceVersion` passes the policy
+  (the API server's own `deprecated.daemonset.template.generation` bump included); garbage collection of
+  the pod-owned Secrets; the worker's `activeDeadlineSeconds` against a large image (the 30-minute
+  budget, and the `ResponseHeaderTimeout` on GHCR blobs); an index-only published digest is refused at
+  enqueue (the sandbox-templates workflow builds single-platform images today).
 
 - **Not lab-verified**: no PVE, GitHub token or registry was used while building this. Before enabling:
   run an import against the PVE 9.2 lab (confirm the upload API accepts a ~1–8 GiB `content=import`

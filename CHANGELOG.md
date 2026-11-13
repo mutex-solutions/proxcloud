@@ -18,8 +18,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   imported by digest as a new Proxmox template (never modifying or deleting existing ones) via a
   fenced, resumable durable job, verified by a streaming SHA-256, Proxmox's own sha256 check and
   the layer digest; the executor is off until `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true`.
-  Sandbox image mirroring from the portal is not yet enabled; the page gives the `images.yaml`
-  pin and the follow-up design is in `docs/template-updates.md`.
+- Sandbox template images can be updated from **Template updates** (`docs/template-updates.md` §4,
+  off until `PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED=true`): **Update** mirrors the offered
+  `ghcr.io/mutex-solutions/sandbox-<name>@<digest>` (re-verified) into the sandbox registry as
+  `library/sandbox-<name>:<tag>` with the same digest — a fenced, resumable durable job running the
+  trusted `sandbox-import` worker in a new copy mode with pod-owned credentials, the destination digest
+  checked by the portal — then points the prepull DaemonSets at it; the existing adoption job switches
+  templates once every Ready node has pulled it. **Rollback** points the prepull back at the previous
+  pin. Same-digest updates are refused, one job per image at a time, audited
+  (`admin:service:manage`). Installer: stage 55 creates a Zot `mirror` account (read/create on
+  `library/sandbox-*` only), a Role (get/patch on the two prepull DaemonSets) and a
+  ValidatingAdmissionPolicy limiting the portal to init-container image changes to mirrored digest
+  refs; stage 60 hands the account over as the write-only `secret.registryMirror`. Each switch is
+  recorded as a `sandboxBuiltinPin`; `make upgrade` reads the pins through the admin API and renders
+  the newer of `images.yaml` and the pin, printing the line to commit, and stops (instead of rolling
+  back) when it cannot read them.
 
 ### Fixed
 

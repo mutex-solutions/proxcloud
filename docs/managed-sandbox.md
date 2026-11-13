@@ -1122,7 +1122,7 @@ sandbox node containerd ──TLS (registry CA), project account──┘   prep
 | Account | Reads | Writes | Where it lives |
 |---|---|---|---|
 | `pull-<project>` | `library/**`, `t/<project>/**` | nothing | Secret `sandbox-template-pull` in `sb-<project>` |
-| `pull-nodes` | `library/**` | nothing | Secret `sandbox-registry-nodes` in `sandbox-system` (prepull, sandbox-proxy) |
+| `pull-nodes` | `library/**` | nothing | Secret `sandbox-registry-nodes` in `sandbox-system` (prepull, sandbox-proxy) and `sbx-build` (the mirror worker's image) |
 | `push` (SB6a; replaced by `build-<project>` and `gc` in SB6b, section 7.2) | `t/**` | `t/**` | services cluster only |
 | `admin` | everything | everything (the installer's copies into `library/`) | services cluster and `generated/` |
 
@@ -1152,7 +1152,7 @@ source on a site without a registry), and sets `templateRegistry: <address>/t` a
 (`sandbox.registry.adoption`, default `on`).
 
 A new pin reaches the templates in two steps: `make upgrade` runs the registry stage, which copies the new digest and
-bumps the prepull; then the portal's `sandboxTemplateAdopt` job (every 5 minutes) moves each template whose image is
+bumps the prepull (or the portal's sandbox mirror does it, [template-updates.md §4](template-updates.md)); then the portal's `sandboxTemplateAdopt` job (every 5 minutes) moves each template whose image is
 digest-pinned in the same repository to the digest the prepull pods run, once every prepull pod on a Ready node has
 pulled it, and records an audit event. The write lands only while the template still holds the image it read
 (`SetTemplateImage`), so an operator's edit in between wins. Rollback: revert the pin and upgrade again.
@@ -1286,6 +1286,7 @@ Section 6.2's table, as SB6b leaves it:
 | `build-<project>` | `library/**`, `t/<project>/**` | `t/<project>/**` | `registry-build-<project>` in `sbx-build` |
 | `pull-nodes` | `library/**` | nothing | `sandbox-registry-nodes` in `sandbox-system` |
 | `gc` | `t/**` | deletes in `t/**` | the sandbox provider's `secret.registryGcUser/Password` (portal only) |
+| `mirror` | `library/sandbox-*` | creates in `library/sandbox-*` (no update, no delete) | the sandbox provider's `secret.registryMirror` (portal's sandbox mirror, [template-updates.md §4](template-updates.md)) |
 | `admin` | everything | everything | services cluster and `generated/` |
 
 The shared `push` account of SB6a is gone: a build pushes with its own project's account, which cannot write
