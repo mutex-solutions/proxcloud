@@ -21,13 +21,17 @@ const (
 	// (internal/templateupdates). It is an EXTERNAL-effect kind: never registered on the DB-only
 	// Worker; its runner fences every step with Checkpoint and resumes from the last receipt.
 	TemplateUpdateVM = "templateupdate.vm/v1"
+	// ProviderAttach attaches one cloud provider to a scoped set of existing projects
+	// (internal/providerattach). EXTERNAL-effect kind: each project's provisioning is fenced by Checkpoint (intent before,
+	// result after) and a new acquisition resumes from the per-project results.
+	ProviderAttach = "providerattach.run/v1"
+	// TemplateUpdateSmoke boots a throwaway clone of an imported (staged) template and checks it
+	// (internal/templateupdates/smoke.go). External-effect kind, same runner and fencing.
+	TemplateUpdateSmoke = "templateupdate.smoke/v1"
 	// TemplateUpdateSandbox mirrors a built-in sandbox template image into the sandbox registry and points the
 	// prepull DaemonSets at it, or rolls that back (internal/templateupdates, sandbox*.go). External-effect kind.
 	TemplateUpdateSandbox = "templateupdate.sandbox/v1"
 )
-
-// externalKinds are the kinds claimed only by dedicated, fenced runners.
-var externalKinds = []string{TemplateUpdateVM, TemplateUpdateSandbox}
 
 var (
 	ErrLeaseLost = errors.New("durable job lease lost")
@@ -68,7 +72,15 @@ func known(kind string) bool { return kind == Billing || kind == Selftest || Ext
 // External reports a kind whose handler performs external I/O. Such kinds are claimed only by a
 // dedicated runner that renews its lease and commits each step through Checkpoint; the DB-only
 // Worker refuses to register them.
-func External(kind string) bool { return kind == TemplateUpdateVM || kind == TemplateUpdateSandbox }
+func External(kind string) bool {
+	return kind == TemplateUpdateVM || kind == ProviderAttach || kind == TemplateUpdateSmoke || kind == TemplateUpdateSandbox
+}
+
+// ClaimDeadKinds are the kinds ClaimDead re-acquires for a cleanup: the template update runner's
+// (its dead-job pass cleans their Proxmox leftovers) and the sandbox mirror runner's (its dead-job
+// pass deletes the job's worker pods and restores a pin the DaemonSets never ran). A dead bulk
+// attach (ProviderAttach) is deliberately not one: it has no cleanup pass.
+var ClaimDeadKinds = []string{TemplateUpdateVM, TemplateUpdateSmoke, TemplateUpdateSandbox}
 
 // Checkpoint commits fn (DB-only writes: a step receipt) only while j's acquisition still owns an
 // unexpired lease, exactly like Complete but without acknowledging the job. A runner calls it
@@ -111,7 +123,7 @@ func (s *Store) ClaimDead(ctx context.Context, id string, ttl time.Duration) (*J
 	}
 	j, err := scan(s.db.Pool.QueryRow(ctx, `UPDATE durable_job SET state='running',attempts=max_attempts,epoch=epoch+1,owner=$2,
 	 lease_until=clock_timestamp()+$3*interval '1 microsecond',finished_at=NULL
-	 WHERE id=$1 AND state='dead' AND kind=ANY($4) AND last_error IS DISTINCT FROM 'cleaned_up' RETURNING `+columns, id, uuid.NewString(), ttl.Microseconds(), externalKinds))
+	 WHERE id=$1 AND state='dead' AND kind=ANY($4) AND last_error IS DISTINCT FROM 'cleaned_up' RETURNING `+columns, id, uuid.NewString(), ttl.Microseconds(), ClaimDeadKinds))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -133,6 +145,28 @@ func (s *Store) Fail(ctx context.Context, j *Job, delay time.Duration, permanent
 		 finished_at=CASE WHEN attempts>=max_attempts OR $5 THEN clock_timestamp() ELSE NULL END,
 		 next_at=clock_timestamp()+$4*interval '1 microsecond',owner=NULL,lease_until=NULL,last_error=$6
 		 WHERE id=$1 AND state='running' AND owner=$2 AND epoch=$3 AND lease_until>clock_timestamp()`, j.ID, j.Owner, j.Epoch, delay.Microseconds(), permanent, code)
+		if err == nil && tag.RowsAffected() != 1 {
+			return ErrLeaseLost
+		}
+		return err
+	})
+}
+
+// Defer returns an external-kind acquisition to pending after delay WITHOUT spending an attempt:
+// the job could not start because a resource lock it needs is busy (e.g. one smoke test per
+// provider), which is no failure of the job. Fenced like Fail; code is a fixed classification.
+func (s *Store) Defer(ctx context.Context, j *Job, delay time.Duration, code string) error {
+	if delay < 0 || delay > time.Hour || !failCodeRE(code) || !External(j.Kind) {
+		return errors.New("invalid deferral")
+	}
+	return s.db.WithTx(ctx, func(tc context.Context) error {
+		tx, err := s.locked(tc, j)
+		if err != nil {
+			return err
+		}
+		tag, err := tx.Exec(tc, `UPDATE durable_job SET state='pending',attempts=greatest(attempts-1,0),finished_at=NULL,
+		 next_at=clock_timestamp()+$4*interval '1 microsecond',owner=NULL,lease_until=NULL,last_error=$5
+		 WHERE id=$1 AND state='running' AND owner=$2 AND epoch=$3 AND lease_until>clock_timestamp()`, j.ID, j.Owner, j.Epoch, delay.Microseconds(), code)
 		if err == nil && tag.RowsAffected() != 1 {
 			return ErrLeaseLost
 		}

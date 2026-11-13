@@ -360,7 +360,9 @@ func (h *Handler) externalServiceOr404(w http.ResponseWriter, r *http.Request, e
 // entry. Bootstrap failure = the wrapped 500 "Cannot sync the project with the infrastructure. ".
 // Idempotent: re-attaching a service the project already carries makes no provider call (every
 // BootstrapXOnto returns early on p.HasService) and appends no second binding, so a retried POST
-// answers 200 with the project unchanged.
+// answers 200 with the project unchanged. A project scheduled for deletion, being torn down or deleted
+// is refused (400). DISABLED projects (billing hold or operator) are attached like ENABLED ones; their
+// status is left as it is. The bulk attach (providerattach.go) runs this same path per project.
 func (h *Handler) projectAddExternalService(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, projectUpdatePerm) {
 		return
@@ -374,12 +376,30 @@ func (h *Handler) projectAddExternalService(w http.ResponseWriter, r *http.Reque
 	if _, ok := h.externalServiceOr404(w, r, esID); !ok {
 		return
 	}
-	if h.projectCloud == nil || h.projectCloud.Bootstrap == nil {
+	if h.projectCloud == nil || (h.projectCloud.Bootstrap == nil && h.projectCloud.Attach == nil) {
 		httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented,
 			"attaching a cloud provider to a project not implemented"))
 		return
 	}
-	if err := h.projectCloud.Bootstrap(r.Context(), id, esID); err != nil {
+	var err error
+	if h.projectCloud.Attach != nil {
+		// The shared operator attach (the bulk attach runs the same): a fresh read under the project's attach lock, no
+		// provider call when already attached, and a project on its way out is refused (400) instead of provisioned.
+		var outcome string
+		outcome, err = h.projectCloud.Attach(r.Context(), id, esID)
+		switch {
+		case err != nil:
+		case outcome == project.AttachDeleting:
+			httpx.WriteError(w, project.ErrAttachDeleting)
+			return
+		case outcome == project.AttachNotFound:
+			httpx.WriteError(w, projectIDNotFound(id))
+			return
+		}
+	} else {
+		err = h.projectCloud.Bootstrap(r.Context(), id, esID)
+	}
+	if err != nil {
 		// Bootstrap failure → 500 "Cannot sync the project with the infrastructure. ".
 		httpx.WriteError(w, httpx.NewError(http.StatusInternalServerError, http.StatusInternalServerError,
 			"Cannot sync the project with the infrastructure. "))

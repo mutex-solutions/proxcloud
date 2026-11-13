@@ -1,7 +1,7 @@
 package sandboximport
 
 // mirror.go — the trusted worker's copy mode for the BUILT-IN sandbox template images
-// (docs/template-updates.md §4). It copies exactly one published image
+// (docs/template-updates.md §5). It copies exactly one published image
 //
 //	ghcr.io/mutex-solutions/sandbox-<name>@sha256:<digest>
 //

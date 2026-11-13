@@ -86,10 +86,12 @@ func TestBadProviderDoesNotBlockTheOthers(t *testing.T) {
 		t.Fatalf("retried inside the window: %q", services(load()))
 	}
 
-	// Past it, the provider now works: attached, and both records gone.
-	p = load()
-	p.ProvisionFailures["bad"] = project.ProvisionFailure{Message: "old", At: time.Now().Add(-time.Hour)}
-	if err := h.EnableAndBootstrap(ctx, p); err != nil {
+	// Past it, the provider now works: attached, and both records gone. (The bootstrap works from the failures as stored,
+	// so the stored one is backdated.)
+	if err := repo.SetProvisionFailures(ctx, "p1", map[string]project.ProvisionFailure{"bad": {Message: "old", At: time.Now().Add(-time.Hour)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.EnableAndBootstrap(ctx, load()); err != nil {
 		t.Fatal(err)
 	}
 	p = load()
@@ -151,8 +153,11 @@ func TestBadProviderDoesNotBlockTheOthers(t *testing.T) {
 			"_id": "dns", "name": "dns", "type": externalservice.TypeCloud, "status": externalservice.StatusPublic,
 			"config": pgdoc.M{"provider": "powerdns", "apiUrl": "http://127.0.0.1:1", "region": "r1"},
 		})
+		// Recorded long enough ago that it is due: the next open looks at it and drops it.
+		if err := repo.SetProvisionFailures(ctx, "p1", map[string]project.ProvisionFailure{"gone": {Message: "x", At: time.Now().Add(-time.Hour)}}); err != nil {
+			t.Fatal(err)
+		}
 		q, _ := repo.FindByID(ctx, "p1")
-		q.ProvisionFailures = map[string]project.ProvisionFailure{"gone": {Message: "x", At: time.Now()}}
 		if err := h.EnableAndBootstrap(ctx, q); err != nil {
 			t.Fatal(err)
 		}

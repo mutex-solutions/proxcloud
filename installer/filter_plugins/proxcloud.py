@@ -422,7 +422,7 @@ _PREPULL_SCHEMAS = {
 
 
 def prepull_policy_gaps(openapi_docs, fields):
-    """The fields the prepull admission policy would leave writable on this cluster (docs/template-updates.md §4.3).
+    """The fields the prepull admission policy would leave writable on this cluster (docs/template-updates.md §5.3).
     openapi_docs: the cluster's /openapi/v3/api/v1 and /openapi/v3/apis/apps/v1 documents (parsed JSON); fields:
     pc_prepull_policy_fields. Every property of PodSpec, Container, DaemonSetSpec and PodTemplateSpec must be compared
     by the policy or be one of its deliberately uncompared fields. Returns sorted "<Schema>.<property>" strings; [] when
@@ -449,7 +449,7 @@ _PIN_SOURCE = "ghcr.io/mutex-solutions/sandbox-%s:%s@%s"
 def sandbox_portal_pins(pins, portal, host):
     """Merge deploy/templates/images.yaml (pins: name -> ref) with the portal's sandboxBuiltinPin records (portal: the
     list GET /admin/template-updates/sandbox/pins returns) for the sandbox registry host, so a make upgrade never renders
-    an image older than the one the portal pinned (docs/template-updates.md §4). Per built-in image (matched on the
+    an image older than the one the portal pinned (docs/template-updates.md §5). Per built-in image (matched on the
     registry repository <host>/library/sandbox-<name>, the same mapping as sandbox_images):
 
       no record, or the same digest                 -> images.yaml

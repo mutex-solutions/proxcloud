@@ -39,6 +39,7 @@ type Service struct {
 	Jobs      *durablejobs.Store
 	DB        *pgdoc.DB
 	Receipts  PGReceipts
+	Smokes    PGSmokes
 	VMEnabled bool // PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED: the executor runs only when set
 	// SandboxEnabled is PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED: the sandbox mirror runner and its endpoints.
 	SandboxEnabled bool
@@ -196,6 +197,13 @@ func (s *Service) Discover(ctx context.Context, providers []ProviderView, sandbo
 		out.Providers = append(out.Providers, ProviderStatus{ID: p.ID, Name: p.Name, Error: p.Error})
 	}
 	MergeInstalled(out, providers)
+	if s.Receipts.DB != nil {
+		blocked, err := s.Receipts.BlockedSet(ctx)
+		if err != nil {
+			return nil, err
+		}
+		MarkWithdrawn(out, blocked)
+	}
 	return out, nil
 }
 
@@ -303,7 +311,7 @@ func installedFor(row *VMLine, t pve.ClusterResource) (InstalledVM, bool) {
 		}
 		return ""
 	}
-	inst := InstalledVM{Node: t.Node, VMID: t.VMID, SourceDigest: val("pc-src-"), Published: has(pve.TagTemplatePub)}
+	inst := InstalledVM{Node: t.Node, VMID: t.VMID, SourceDigest: val("pc-src-"), Published: has(pve.TagTemplatePub) || has(TagK8sPublished), Withdrawn: has(pve.TagTemplateWithdrawn)}
 	if row.Variant == "kubernetes" {
 		// Pipeline-built (images/k8s-node-template.sh): pc-k8s;pc-k8s-<ver dashes>;pc-k8s-os-<os>.
 		// Imported by this feature: pc-tu-k8s;pc-k8sver-<ver dashes> (+ name pc-ghcr-<os>-…).
@@ -316,6 +324,14 @@ func installedFor(row *VMLine, t pve.ClusterResource) (InstalledVM, bool) {
 			return inst, true
 		}
 		return InstalledVM{}, false
+	}
+	if has(TagImport) && strings.HasPrefix(t.Name, "pc-ghcr-"+row.OS+"-os-") {
+		// Imported by this feature (staged and withdrawn ones carry no pc-img-): the build is in the name.
+		inst.Version = val(pve.TagTemplateVersion)
+		if b := strings.TrimPrefix(t.Name, "pc-ghcr-"+row.OS+"-os-"); inst.Version == "" && len(b) >= 12 {
+			inst.Version = b[:12]
+		}
+		return inst, true
 	}
 	if val(pve.TagTemplateImage) != row.OS {
 		return InstalledVM{}, false
@@ -334,7 +350,10 @@ type VMRequest struct {
 	Node          string `json:"node"`
 	ImportStorage string `json:"importStorage"`
 	DiskStorage   string `json:"diskStorage"`
-	Publish       bool   `json:"publish"`
+	// Publish is accepted for backward-compatible parsing only: false (or absent) is ignored and
+	// true is refused with ErrPublishAtImport (HTTP 400). Imports always land staged; publishing
+	// is a separate action after a passing smoke test.
+	Publish bool `json:"publish"`
 	// ConfirmDigest must repeat Digest: the dialog shows the exact digest and the admin confirms it.
 	ConfirmDigest string `json:"confirmDigest"`
 }
@@ -354,8 +373,16 @@ func (s *Service) EnqueueVM(ctx context.Context, req VMRequest, actor string) (*
 	if !s.VMEnabled {
 		return nil, errors.New("VM template updates are not enabled on this site (PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED)")
 	}
+	if req.Publish {
+		return nil, ErrPublishAtImport
+	}
 	if req.ConfirmDigest != req.Digest || !digestRE.MatchString(req.Digest) {
 		return nil, errors.New("confirm the exact digest to import")
+	}
+	if b, err := s.Receipts.Blocked(ctx, req.Digest); err != nil {
+		return nil, err
+	} else if b != nil {
+		return nil, ErrBlocklisted
 	}
 	reg, _, err := s.registry(ctx)
 	if err != nil {
@@ -383,8 +410,7 @@ func (s *Service) EnqueueVM(ctx context.Context, req VMRequest, actor string) (*
 	}
 	p := VMPayload{Version: 1, Package: v.Package, Tag: v.Tag, Digest: v.Digest, DiskDigest: v.DiskDigest, DiskBytes: v.DiskBytes,
 		VirtualSizeBytes: v.Manifest.Disk.VirtualSizeBytes, OS: v.Manifest.OS, Variant: v.Manifest.Variant, KubernetesVersion: v.Manifest.KubernetesVersion,
-		BuildVersion: v.Manifest.BuildVersion, ServiceID: req.ServiceID, Node: req.Node, ImportStorage: req.ImportStorage, DiskStorage: req.DiskStorage,
-		Publish: req.Publish && v.Manifest.Variant == "os"}
+		BuildVersion: v.Manifest.BuildVersion, ServiceID: req.ServiceID, Node: req.Node, ImportStorage: req.ImportStorage, DiskStorage: req.DiskStorage}
 	if err := p.Validate(); err != nil {
 		return nil, err
 	}

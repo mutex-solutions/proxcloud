@@ -2,7 +2,10 @@ package project
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
@@ -104,21 +107,116 @@ func (r *Repo) ApplyBillingSuspension(ctx context.Context, id, billingProfileID 
 	return nil, ErrStatusWriteLost
 }
 
+// saveFields is what Save writes. Not the bindings (services) nor the provisioning failures: bindings only grow through
+// AppendBinding (an atomic append) and failures are written by the bootstrap under the project's attach lock
+// (SetProvisionFailures), so a save from a read taken before an attach (a member change, a rename, an activation)
+// cannot drop a binding or a failure recorded meanwhile.
 func saveFields(p *Project) pgdoc.M {
 	now := time.Now().UTC()
 	p.UpdatedAt = &now
 	return pgdoc.M{
-		"name":              p.Name,
-		"data":              p.Data,
-		"owner":             p.Owner,
-		"memberships":       p.Memberships,
-		"organizationId":    p.OrganizationID,
-		"billingProfileId":  p.BillingProfileID,
-		"customInfo":        p.CustomInfo,
-		"services":          p.Services,
-		"provisionFailures": p.ProvisionFailures,
-		"updatedAt":         now,
+		"name":             p.Name,
+		"data":             p.Data,
+		"owner":            p.Owner,
+		"memberships":      p.Memberships,
+		"organizationId":   p.OrganizationID,
+		"billingProfileId": p.BillingProfileID,
+		"customInfo":       p.CustomInfo,
+		"updatedAt":        now,
 	}
+}
+
+// SetProvisionFailures writes the project's provisioning failures alone (the bootstrap, under the attach lock).
+func (r *Repo) SetProvisionFailures(ctx context.Context, projectID string, failures map[string]ProvisionFailure) error {
+	if len(failures) == 0 {
+		_, err := r.col.SetByID(ctx, projectID, nil, []string{"provisionFailures"})
+		return err
+	}
+	_, err := r.col.SetByID(ctx, projectID, pgdoc.M{"provisionFailures": failures}, nil)
+	return err
+}
+
+// ErrAttachLost refuses a binding write whose attach lock is no longer held (its lock session ended, or it does not
+// hold the lock any more): another writer may own the project's bindings now.
+var ErrAttachLost = errors.New("project attach: the attach lock was lost")
+
+// LockedExec runs a binding write on the session that holds the project's attach lock, the ownership check inside the
+// statement itself: the write happens on that session only while it still holds the lock (no check-then-write gap),
+// and a session that is gone fails it. nil = no lock (the pool).
+type LockedExec struct {
+	Session pgdoc.LockSession
+	Key     string
+}
+
+// held asks the lock's session whether it still holds the lock (false on any error: a dead session holds nothing).
+func (lx *LockedExec) held() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var ok bool
+	return lx.Session.QueryRow(ctx, `SELECT `+lockHeldSQL("$1::text"), lx.Key).Scan(&ok) == nil && ok
+}
+
+// lockHeldSQL is true while the statement's own session holds the advisory lock on hashtext($key). pg_advisory_lock
+// (bigint) shows in pg_locks as classid = high 32 bits, objid = low 32 bits, objsubid = 1.
+func lockHeldSQL(keyArg string) string {
+	return `EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND pid=pg_backend_pid() AND granted
+	  AND classid=((hashtext(` + keyArg + `)::bigint >> 32) & 4294967295)::oid AND objid=(hashtext(` + keyArg + `)::bigint & 4294967295)::oid AND objsubid=1)`
+}
+
+// execLocked runs one write statement holding the placeholder {{LOCK}}. With lx it runs on the lock's session with the
+// ownership check (lockHeldSQL) in place of the placeholder, the key appended as the last argument: no gap between the
+// check and the write, which are one statement on the lock's own session. A refusal or a session that is gone is
+// ErrAttachLost. Without lx it runs on the pool with the check left out. Returns rows affected.
+func (r *Repo) execLocked(ctx context.Context, lx *LockedExec, sql string, args ...any) (rows int64, err error) {
+	if lx == nil {
+		tag, err := r.col.DB().Pool.Exec(ctx, strings.ReplaceAll(sql, "{{LOCK}}", "TRUE"), args...)
+		return tag.RowsAffected(), err
+	}
+	keyArg := "$" + strconv.Itoa(len(args)+1)
+	tag, err := lx.Session.Exec(ctx, strings.ReplaceAll(sql, "{{LOCK}}", lockHeldSQL(keyArg+"::text")), append(args, lx.Key)...)
+	if err != nil {
+		if ctx.Err() != nil || !lx.held() {
+			return 0, errors.Join(ErrAttachLost, err) // the session, and with it the lock, is gone (or unusable)
+		}
+		return 0, err
+	}
+	// Nothing written: not held (refused by the statement's own check) or nothing to write. Tell which.
+	if tag.RowsAffected() == 0 && !lx.held() {
+		return 0, ErrAttachLost
+	}
+	return tag.RowsAffected(), nil
+}
+
+// AppendBinding appends binding to the project's services in ONE statement, only when no binding of the same serviceId
+// is there yet. False = already bound (nothing written). With lx, the statement runs on the attach lock's session and
+// writes only while that session holds the lock; otherwise ErrAttachLost and nothing is written.
+func (r *Repo) AppendBinding(ctx context.Context, projectID string, binding map[string]any, lx *LockedExec) (bool, error) {
+	serviceID, _ := binding["serviceId"].(string)
+	if serviceID == "" {
+		return false, errors.New("project binding: serviceId required")
+	}
+	b, err := json.Marshal(binding)
+	if err != nil {
+		return false, err
+	}
+	probe, _ := json.Marshal([]map[string]string{{"serviceId": serviceID}})
+	now, _ := json.Marshal(time.Now().UTC())
+	n, err := r.execLocked(ctx, lx, `UPDATE "project" SET doc = jsonb_set(doc,
+	    '{services}', COALESCE(CASE WHEN jsonb_typeof(doc->'services')='array' THEN doc->'services' END,'[]'::jsonb) || jsonb_build_array($2::jsonb), true)
+	    || jsonb_build_object('updatedAt',$4::jsonb)
+	  WHERE id=$1 AND NOT (COALESCE(CASE WHEN jsonb_typeof(doc->'services')='array' THEN doc->'services' END,'[]'::jsonb) @> $3::jsonb)
+	    AND {{LOCK}}`, projectID, string(b), string(probe), string(now))
+	return n == 1, err
+}
+
+// ClearBulkMarks drops the operator attach marks (attachedBy) from every binding of the project, in one statement that
+// keeps whatever bindings are stored at that moment. False = nothing to clear. lx as in AppendBinding.
+func (r *Repo) ClearBulkMarks(ctx context.Context, projectID string, lx *LockedExec) (bool, error) {
+	n, err := r.execLocked(ctx, lx, `UPDATE "project" SET doc = jsonb_set(doc,'{services}',
+	    (SELECT COALESCE(jsonb_agg(e - 'attachedBy' ORDER BY i),'[]'::jsonb) FROM jsonb_array_elements(doc->'services') WITH ORDINALITY AS t(e,i)), false)
+	  WHERE id=$1 AND jsonb_typeof(doc->'services')='array' AND EXISTS (SELECT 1 FROM jsonb_array_elements(doc->'services') e WHERE e ? 'attachedBy')
+	    AND {{LOCK}}`, projectID)
+	return n == 1, err
 }
 
 func (r *Repo) FindByID(ctx context.Context, id string) (*Project, error) {

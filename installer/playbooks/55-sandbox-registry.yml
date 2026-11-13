@@ -44,7 +44,7 @@
       admin: "{{ lookup('ansible.builtin.password', pc_gen ~ '/sandbox-registry-admin ' ~ pc_alnum) }}"
       # the portal's pruning of unreferenced template images (read and delete on t/** only); stage 60 hands it over
       gc: "{{ lookup('ansible.builtin.password', pc_gen ~ '/sandbox-registry-gc ' ~ pc_alnum) }}"
-      # the portal's sandbox mirror (read and create on library/sandbox-* only, docs/template-updates.md §4); stage 60
+      # the portal's sandbox mirror (read and create on library/sandbox-* only, docs/template-updates.md §5); stage 60
       # hands it over as the sandbox provider's secret.registryMirror
       mirror: "{{ lookup('ansible.builtin.password', pc_gen ~ '/sandbox-registry-mirror ' ~ pc_alnum) }}"
       pull-nodes: "{{ lookup('ansible.builtin.password', pc_gen ~ '/sandbox-registry-pull-nodes ' ~ pc_alnum) }}"
@@ -70,7 +70,7 @@
       ansible.builtin.meta: end_play
       when: not pc_sbx_kc.stat.exists
     # The portal may have mirrored a newer built-in image and pointed the prepull at it (Template updates, docs/
-    # template-updates.md §4). Rendering images.yaml alone would silently roll that back, so the pins are read first,
+    # template-updates.md §5). Rendering images.yaml alone would silently roll that back, so the pins are read first,
     # with the installer's admin API key (stage 60 mints it) from the read-only, secret-free pin list: no database
     # credential, and the same identity stage 60 already uses. No key and no mirror account ever handed over = a
     # first install: the portal has never run a mirror. Anything else that does not yield the pin list stops here.

@@ -30,13 +30,16 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/client"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metrics"
@@ -66,6 +69,8 @@ func (h *Handler) routeExternalServiceMut(r chi.Router) {
 	r.Put("/service/{id}/quota", h.externalServiceUpdateQuota)
 	r.Put("/service/{id}/features", h.externalServiceUpdateFeatures)
 	r.Put("/service/{id}/configuration", h.externalServiceUpdateConfiguration)
+	// config.attachToNewProjects only (the rest of config is kept as stored).
+	r.Put("/service/{id}/attach-policy", h.externalServiceUpdateAttachPolicy)
 	// usage-metrics source (prometheus | none) + prometheus connection config; the
 	// POST probes the configured prometheus endpoint live (metricstest.go).
 	r.Put("/service/{id}/metrics-config", h.externalServiceUpdateMetricsConfig)
@@ -138,6 +143,10 @@ func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) 
 	}
 	if cfg, _ := doc["config"].(map[string]any); kamajiRemovedKeysErr(cfg) != nil {
 		httpx.WriteError(w, kamajiRemovedKeysErr(cfg))
+		return
+	}
+	if cfg, _ := doc["config"].(map[string]any); externalservice.ValidateAttachPolicy(cfg) != nil {
+		httpx.WriteError(w, httpx.BadRequest(externalservice.ValidateAttachPolicy(cfg).Error()))
 		return
 	}
 	// Stable string _id (String-id convention — same shape as the seeded provider docs;
@@ -283,6 +292,10 @@ func (h *Handler) applyServiceConnectionBody(req *http.Request, doc pgdoc.M) *ht
 		}
 	}
 	if c, ok := body["config"].(map[string]any); ok {
+		// Checked before the merge: a bad value must leave the stored doc as it was.
+		if err := externalservice.ValidateAttachPolicy(c); err != nil {
+			return httpx.BadRequest(err.Error())
+		}
 		cfg := ensureConfig(doc)
 		for k, v := range c {
 			cfg[k] = v
@@ -432,6 +445,75 @@ func (h *Handler) externalServiceUpdateConfiguration(w http.ResponseWriter, r *h
 		doc["status"] = body["status"]
 		return nil
 	})
+}
+
+// externalServiceUpdateAttachPolicy handles PUT /{id}/attach-policy: {"attachToNewProjects": true|false} sets
+// config.attachToNewProjects and nothing else, as a single-key write in the database (no read-modify-replace of the
+// doc: a connection save landing at the same time is neither reverted nor reverts this). It is not a connection or
+// status change, so the object-store and sandbox go-live checks do not apply. A missing or non-boolean value is a 400
+// and stores nothing.
+func (h *Handler) externalServiceUpdateAttachPolicy(w http.ResponseWriter, r *http.Request) {
+	if !h.require(w, r, externalServiceManagePerm) {
+		return
+	}
+	v, herr := decodeAttachPolicy(r)
+	if herr != nil {
+		httpx.WriteError(w, herr)
+		return
+	}
+	id := chi.URLParam(r, "id")
+	ok, err := h.repo.SetAttachPolicy(r.Context(), id, v)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	if !ok {
+		httpx.WriteError(w, serviceNotFoundErr(id))
+		return
+	}
+	doc, err := h.repo.FindDoc(r.Context(), externalServiceCollection, id)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	if doc == nil {
+		httpx.WriteError(w, serviceNotFoundErr(id))
+		return
+	}
+	shapeExternalService(doc)
+	httpx.OK(w, doc)
+}
+
+// decodeAttachPolicy reads {"attachToNewProjects": bool} and nothing else.
+func decodeAttachPolicy(req *http.Request) (bool, *httpx.HTTPError) {
+	var body map[string]any
+	if err := json.NewDecoder(io.LimitReader(req.Body, 4<<10)).Decode(&body); err != nil {
+		return false, httpx.BadRequest("Invalid request body")
+	}
+	for k := range body {
+		if k != externalservice.AttachPolicyKey {
+			return false, httpx.BadRequest("Only " + externalservice.AttachPolicyKey + " can be set here")
+		}
+	}
+	v, ok := body[externalservice.AttachPolicyKey].(bool)
+	if !ok {
+		return false, httpx.BadRequest(externalservice.AttachPolicyKey + " must be true or false")
+	}
+	return v, nil
+}
+
+// SetAttachPolicy writes config.attachToNewProjects alone (jsonb_set on the stored doc; a doc without a config object
+// gets one). False when there is no such provider.
+func (r *Repo) SetAttachPolicy(ctx context.Context, id string, on bool) (bool, error) {
+	tag, err := r.db.Pool.Exec(ctx, `UPDATE "externalService" SET doc=jsonb_set(
+	   CASE WHEN jsonb_typeof(doc->'config')='object' THEN doc ELSE jsonb_set(doc,'{config}','{}'::jsonb,true) END,
+	   '{config,`+externalservice.AttachPolicyKey+`}',to_jsonb($2::boolean),true) WHERE id=$1`, id, on)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
+			return false, nil
+		}
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // externalServiceUpdateMetricsConfig handles PUT /{id}/metrics-config:

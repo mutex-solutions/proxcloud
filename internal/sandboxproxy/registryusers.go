@@ -9,7 +9,7 @@ package sandboxproxy
 //	pull-nodes       reads library/**                                       Secret sandbox-registry-nodes in the system namespace
 //	gc               reads and deletes t/** (the portal's pruning of unreferenced template images)
 //	mirror           reads and creates library/sandbox-* only — no update (an existing tag never moves), no delete,
-//	                 nothing under t/** or library/proxcloud-* (the portal's sandbox mirror job, docs/template-updates.md §4)
+//	                 nothing under t/** or library/proxcloud-* (the portal's sandbox mirror job, docs/template-updates.md §5)
 //	admin            everything (the installer's mirror of the built-in images)
 //
 // A project's password is derived from a key (HMAC), so nothing is stored per project: a restart writes the same

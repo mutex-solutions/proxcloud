@@ -40,6 +40,9 @@ func TestTemplateUpdatesPermissionGates(t *testing.T) {
 		{"GET", "/admin/template-updates"}, {"GET", "/admin/template-updates/status"}, {"GET", "/admin/template-updates/history"},
 		{"GET", "/admin/template-updates/placement/svc"}, {"POST", "/admin/template-updates/vm"}, {"POST", "/admin/template-updates/sandbox"},
 		{"POST", "/admin/template-updates/sandbox/rollback"}, {"GET", "/admin/template-updates/sandbox/state"}, {"GET", "/admin/template-updates/sandbox/pins"},
+		{"GET", "/admin/template-updates/templates"}, {"GET", "/admin/template-updates/blocklist"},
+		{"POST", "/admin/template-updates/templates/x/smoke"}, {"POST", "/admin/template-updates/templates/x/publish"},
+		{"POST", "/admin/template-updates/templates/x/withdraw"},
 	}
 	for _, rt := range routes {
 		if w := tuDo(r, rt.method, rt.path, "{}", tenant); w.Code != http.StatusForbidden {
@@ -107,6 +110,20 @@ func TestSandboxUpdatesNeedManage(t *testing.T) {
 	}
 	if w := tuDo(r, "POST", "/admin/template-updates/sandbox", `{"serviceId":"s","name":"base","token":"x"}`, op); w.Code != http.StatusBadRequest {
 		t.Fatalf("unknown body field: %d", w.Code)
+	}
+}
+
+// publish=true at import is refused with 400 before any provider or GitHub call (backward-compatible
+// parsing: the field still decodes; false/absent is ignored).
+func TestTemplateUpdatesPublishAtImportRefused(t *testing.T) {
+	h := &Handler{adminIssuer: "operator-realm"}
+	h.SetTemplateUpdates(&templateupdates.Service{Token: func(context.Context) (string, string, error) {
+		t.Fatal("GitHub token read for a refused request")
+		return "", "", nil
+	}})
+	w := tuDo(tuRouter(h), "POST", "/admin/template-updates/vm", `{"package":"proxcloud-vm-debian-13","digest":"sha256:x","confirmDigest":"sha256:x","serviceId":"s","node":"n","importStorage":"i","diskStorage":"d","publish":true}`, &httpx.RequestContext{SigV4KeyID: "pk"})
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "publish_at_import_removed") {
+		t.Fatalf("publish at import: %d %s", w.Code, w.Body.String())
 	}
 }
 

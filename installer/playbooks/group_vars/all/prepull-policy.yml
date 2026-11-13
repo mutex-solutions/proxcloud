@@ -1,5 +1,5 @@
 # The fields the prepull admission policy compares between the old and the new DaemonSet when the portal patches it
-# (templates/sandbox-prepull.yml.j2, docs/template-updates.md §4.3). Kubernetes CEL cannot iterate over the fields of a
+# (templates/sandbox-prepull.yml.j2, docs/template-updates.md §5.3). Kubernetes CEL cannot iterate over the fields of a
 # typed object, so every field the portal must NOT change is named here. A field the cluster has and these lists lack
 # would be writable by the portal: stage 55 compares them with the cluster's own OpenAPI schemas before it applies the
 # policy and stops the upgrade on any gap (pc_prepull_policy_gaps). The only fields deliberately not compared are listed

@@ -1,6 +1,6 @@
 package sandbox
 
-// mirror.go — the sandbox cluster's side of the built-in template mirror (docs/template-updates.md §4):
+// mirror.go — the sandbox cluster's side of the built-in template mirror (docs/template-updates.md §5):
 //
 //   - the trusted sandbox-import worker in copy mode, one pod per job acquisition in sbx-build, with its two
 //     credentials (a short-lived GHCR registry token pull-scoped to the one source package — never the GitHub PAT —

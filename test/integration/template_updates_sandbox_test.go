@@ -2,7 +2,7 @@
 
 package integration
 
-// The built-in sandbox image mirror end to end on PostgreSQL (docs/template-updates.md §4): the admin endpoints (flag,
+// The built-in sandbox image mirror end to end on PostgreSQL (docs/template-updates.md §5): the admin endpoints (flag,
 // permission, confirm, same-digest refusal, dedup per image, audit), the durable job through the real store (fenced
 // runner, receipts, sandboxBuiltinPin, resume after a lost lease, rollback), with a fake GHCR, a fake sandbox cluster
 // and a fake sandbox registry. The GitHub token must never be persisted anywhere.

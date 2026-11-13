@@ -1,6 +1,6 @@
 package templateupdates
 
-// sandbox.go — the built-in sandbox template mirror (docs/template-updates.md §4): payload, receipts and the
+// sandbox.go — the built-in sandbox template mirror (docs/template-updates.md §5): payload, receipts and the
 // sandboxBuiltinPin record. The executor is sandboxjob.go, the runner sandboxrunner.go.
 //
 // A "mirror" job copies ghcr.io/mutex-solutions/sandbox-<name>@<digest> into the sandbox registry as

@@ -6,8 +6,15 @@ package admin
 //	GET  /admin/template-updates             discovery (?refresh=1)     (admin:service:read)
 //	GET  /admin/template-updates/history     job receipts               (admin:service:read)
 //	GET  /admin/template-updates/placement/{serviceId}  node/storage choices (admin:service:read)
-//	POST /admin/template-updates/vm          enqueue a VM template import (admin:service:manage)
-//	POST /admin/template-updates/sandbox     sandbox mirror + prepull switch (templateupdates_sandbox.go)
+//	POST /admin/template-updates/vm          enqueue a VM template import (admin:service:manage);
+//	                                         it always lands staged (publish=true → 400)
+//	GET  /admin/template-updates/templates   imported templates with their lifecycle state (admin:service:read)
+//	GET  /admin/template-updates/blocklist   withdrawn digests (admin:service:read)
+//	POST /admin/template-updates/templates/{id}/smoke     run the smoke test (admin:service:manage)
+//	POST /admin/template-updates/templates/{id}/publish   publish after a PASS smoke (admin:service:manage)
+//	POST /admin/template-updates/templates/{id}/withdraw  withdraw + blocklist the digest (admin:service:manage)
+//	POST /admin/template-updates/sandbox     sandbox mirror + prepull switch, rollback, state, pins
+//	                                         (templateupdates_sandbox.go)
 //
 // The GitHub PAT lives in a thirdPartyIntegration of type "GitHub" (secret.token, encrypted at
 // rest, never returned); it is validated with GET /user before it is saved.
@@ -51,6 +58,11 @@ func (h *Handler) routeTemplateUpdates(r chi.Router) {
 	r.Get("/template-updates/sandbox/pins", h.templateUpdatesSandboxPins)
 	// The id contains slashes (<registry>/library/sandbox-<name>): a wildcard, URL-escaped by the caller.
 	r.Delete("/template-updates/sandbox/pins/*", h.templateUpdatesSandboxPinDelete)
+	r.Get("/template-updates/templates", h.templateUpdatesTemplates)
+	r.Get("/template-updates/blocklist", h.templateUpdatesBlocklist)
+	r.Post("/template-updates/templates/{id}/smoke", h.templateUpdatesSmoke)
+	r.Post("/template-updates/templates/{id}/publish", h.templateUpdatesPublish)
+	r.Post("/template-updates/templates/{id}/withdraw", h.templateUpdatesWithdraw)
 }
 
 func (h *Handler) templateUpdatesReady(w http.ResponseWriter) bool {
@@ -66,7 +78,15 @@ func (h *Handler) templateUpdatesReady(w http.ResponseWriter) bool {
 func templateUpdatesErr(w http.ResponseWriter, err error) {
 	var rl *templateupdates.RateLimitError
 	var he *templateupdates.HTTPError
+	var le *templateupdates.LifecycleError
 	switch {
+	case errors.As(err, &le):
+		e := httpx.NewError(le.Status, le.Status, le.Message)
+		details := map[string]any{"code": le.Code}
+		for k, v := range le.Details {
+			details[k] = v
+		}
+		httpx.WriteError(w, e.WithDetails(details))
 	case errors.Is(err, templateupdates.ErrNotConfigured), errors.Is(err, templateupdates.ErrNoToken):
 		httpx.Err(w, http.StatusConflict, http.StatusConflict, templateupdates.ErrNotConfigured.Error())
 	case errors.As(err, &rl):
@@ -248,7 +268,11 @@ func (h *Handler) placementOptions(ctx context.Context, es *externalservice.Exte
 }
 
 func decodeStrictBody(w http.ResponseWriter, r *http.Request, out any) bool {
-	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10))
+	return decodeStrictLimited(w, r, out, 8<<10)
+}
+
+func decodeStrictLimited(w http.ResponseWriter, r *http.Request, out any, limit int64) bool {
+	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	d.DisallowUnknownFields()
 	if err := d.Decode(out); err != nil || d.Decode(new(any)) != io.EOF {
 		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
@@ -265,6 +289,12 @@ func (h *Handler) templateUpdatesVM(w http.ResponseWriter, r *http.Request) {
 	}
 	var req templateupdates.VMRequest
 	if !decodeStrictBody(w, r, &req) {
+		return
+	}
+	if req.Publish {
+		// Backward-compatible parsing: the field is still accepted, but publishing at import was
+		// removed (staged → smoke → Publish). Refused before any provider or GitHub call.
+		templateUpdatesErr(w, templateupdates.ErrPublishAtImport)
 		return
 	}
 	es, ok := h.loadServiceOr(w, r, req.ServiceID)
@@ -295,7 +325,7 @@ func (h *Handler) templateUpdatesVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	audit.RecordSnapshots(r.Context(), nil, map[string]any{"package": rec.Payload.Package, "tag": rec.Payload.Tag, "digest": rec.Payload.Digest,
-		"serviceId": rec.Payload.ServiceID, "node": rec.Payload.Node, "importStorage": rec.Payload.ImportStorage, "diskStorage": rec.Payload.DiskStorage, "publish": rec.Payload.Publish})
+		"serviceId": rec.Payload.ServiceID, "node": rec.Payload.Node, "importStorage": rec.Payload.ImportStorage, "diskStorage": rec.Payload.DiskStorage, "lifecycle": "staged"})
 	httpx.OK(w, rec)
 }
 

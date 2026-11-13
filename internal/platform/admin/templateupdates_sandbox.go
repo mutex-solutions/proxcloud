@@ -1,6 +1,6 @@
 package admin
 
-// templateupdates_sandbox.go — the built-in sandbox image mirror (docs/template-updates.md §4):
+// templateupdates_sandbox.go — the built-in sandbox image mirror (docs/template-updates.md §5):
 //
 //	POST /admin/template-updates/sandbox            mirror a published image + prepull switch (admin:service:manage)
 //	POST /admin/template-updates/sandbox/rollback   re-point the prepull at the previous pin   (admin:service:manage)
@@ -262,7 +262,7 @@ func (h *Handler) templateUpdatesSandboxState(w http.ResponseWriter, r *http.Req
 
 // templateUpdatesSandboxPins lists the sandboxBuiltinPin records, optionally of one registry (?registry=host[:port]).
 // Read-only (admin:service:read), no secret: installer stage 55 reads it with its admin API key so a make upgrade
-// renders the prepull with the newer of images.yaml and the recorded pin (docs/template-updates.md §4).
+// renders the prepull with the newer of images.yaml and the recorded pin (docs/template-updates.md §5).
 func (h *Handler) templateUpdatesSandboxPins(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, templateUpdatesReadPerm) || !h.templateUpdatesReady(w) {
 		return

@@ -51,43 +51,52 @@ func (h *Handler) durableReplay(w http.ResponseWriter, r *http.Request) {
 	// admin:service:manage, not the billing key. Only a definite "no such job" falls back to the
 	// billing key; a lookup error fails closed so a billing admin can never replay an external job.
 	perm := "admin:bill:manage"
-	external, err := h.adminRequiresServiceManage(r.Context(), chi.URLParam(r, "id"))
+	kind, err := h.durableJobKind(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		if h.require(w, r, "admin:bill:manage") {
 			httpx.Err(w, 503, 503, "Durable job replay failed")
 		}
 		return
 	}
+	external := durablejobs.External(kind)
 	if external {
 		perm = templateUpdatesManagePerm
 	}
 	if !h.require(w, r, perm) {
 		return
 	}
+	// A dead bulk attach is not replayed: its "Retry failed projects" starts a new run over what it did not finish, and
+	// one-run-per-provider is enforced there (a replay next to a newer run would make two).
+	if kind == durablejobs.ProviderAttach {
+		httpx.Err(w, 409, 409, "A bulk attach is not replayed: use Retry failed projects on the provider's Projects tab")
+		return
+	}
+	// A smoke test is never replayed: its result is per run (a new one is queued from the page).
+	if kind == durablejobs.TemplateUpdateSmoke {
+		httpx.Err(w, 409, 409, "A smoke test is not replayed: run a new smoke test from Template updates")
+		return
+	}
 	// A failed/finished template update is a no-op on replay: refuse clearly instead.
-	if external && h.templateUpdates != nil {
-		id := chi.URLParam(r, "id")
-		var rerr error
-		if j, err := h.durableStore.Get(r.Context(), id); err != nil {
+	if kind == durablejobs.TemplateUpdateVM && h.templateUpdates != nil {
+		rec, err := h.templateUpdates.Receipts.Load(r.Context(), chi.URLParam(r, "id"))
+		if err != nil {
 			httpx.Err(w, 503, 503, "Durable job replay failed")
 			return
-		} else if j.Kind == durablejobs.TemplateUpdateSandbox {
-			sbx, err := h.templateUpdates.Sandbox.Load(r.Context(), id)
-			if err != nil {
-				httpx.Err(w, 503, 503, "Durable job replay failed")
-				return
-			}
-			rerr = templateupdates.ReplayableSandboxReceipt(sbx)
-		} else {
-			rec, err := h.templateUpdates.Receipts.Load(r.Context(), id)
-			if err != nil {
-				httpx.Err(w, 503, 503, "Durable job replay failed")
-				return
-			}
-			rerr = templateupdates.ReplayableReceipt(rec)
 		}
-		if rerr != nil {
-			httpx.Err(w, 409, 409, rerr.Error())
+		if err := templateupdates.ReplayableReceipt(rec); err != nil {
+			httpx.Err(w, 409, 409, err.Error())
+			return
+		}
+	}
+	// A sandbox mirror/rollback is decided by its own receipt: only one that died mid-flight resumes usefully.
+	if kind == durablejobs.TemplateUpdateSandbox && h.templateUpdates != nil {
+		sbx, err := h.templateUpdates.Sandbox.Load(r.Context(), chi.URLParam(r, "id"))
+		if err != nil {
+			httpx.Err(w, 503, 503, "Durable job replay failed")
+			return
+		}
+		if err := templateupdates.ReplayableSandboxReceipt(sbx); err != nil {
+			httpx.Err(w, 409, 409, err.Error())
 			return
 		}
 	}
@@ -123,18 +132,24 @@ func (h *Handler) durableReplay(w http.ResponseWriter, r *http.Request) {
 // (or a malformed id, which Replay refuses anyway) is (false, nil); any other lookup error is
 // returned so the caller fails closed.
 func (h *Handler) adminRequiresServiceManage(ctx context.Context, id string) (bool, error) {
+	kind, err := h.durableJobKind(ctx, id)
+	return durablejobs.External(kind), err
+}
+
+// durableJobKind is the kind of job id ("" when there is no such job or the id is malformed).
+func (h *Handler) durableJobKind(ctx context.Context, id string) (string, error) {
 	if h.durableStore == nil {
-		return false, nil
+		return "", nil
 	}
 	if _, err := uuid.Parse(id); err != nil {
-		return false, nil
+		return "", nil
 	}
 	j, err := h.durableStore.Get(ctx, id)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
+		return "", nil
 	}
-	if err != nil {
-		return false, err
+	if err != nil || j == nil {
+		return "", err
 	}
-	return j != nil && durablejobs.External(j.Kind), nil
+	return j.Kind, nil
 }

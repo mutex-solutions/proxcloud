@@ -113,7 +113,7 @@ type Config struct {
 		// admins may enqueue imports of published GHCR VM artifacts as new Proxmox templates and
 		// a fenced runner executes them. OFF by default until lab-verified.
 		TemplateUpdatesVM bool
-		// TemplateUpdatesSandbox turns on the built-in sandbox image mirror (docs/template-updates.md §4): the
+		// TemplateUpdatesSandbox turns on the built-in sandbox image mirror (docs/template-updates.md §5): the
 		// fenced runner AND the mirror/rollback endpoints. OFF by default until verified on a real cluster.
 		TemplateUpdatesSandbox bool
 	}

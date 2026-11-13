@@ -45,7 +45,7 @@ spec:
         - name: pause
           image: "{{ pc_ver.pause_image }}"
           resources: {requests: {cpu: 1m, memory: 4Mi}, limits: {cpu: 10m, memory: 16Mi}}
-{# The portal's sandbox mirror (docs/template-updates.md §4.3): its identity on this cluster (the sandbox provider's
+{# The portal's sandbox mirror (docs/template-updates.md §5.3): its identity on this cluster (the sandbox provider's
     kubeconfig: ServiceAccount proxcloud in proxcloud-system, deploy/sandbox-cluster/rbac.yaml) may get and patch the two
     prepull DaemonSets by name and nothing else in this namespace. The admission policy lets such a write change the
     init containers' images alone, each within its own repository, and only to

@@ -27,6 +27,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { apiFetch } from "@/lib/api"
 import { useAdminGet } from "@/lib/hooks"
 import { parseSNATSources, SNAT_SOURCES_HELP, type CloudProvider } from "./CloudProvidersPage"
+import { ProviderProjectsTab } from "./ProviderProjectsTab"
 import {
   KamajiProviderForm,
   kamajiConfigBlocks,
@@ -1278,6 +1279,7 @@ const TAB_DEFS = [
   { v: "quota", label: "Quota" },
   { v: "gpu", label: "GPU" },
   { v: "metrics", label: "Metrics" },
+  { v: "projects", label: "Projects" },
   { v: "advanced", label: "Advanced" },
 ]
 
@@ -1287,8 +1289,9 @@ const PROXMOX_TAB_KEYS = new Set(TAB_DEFS.map((t) => t.v))
 
 // ceph-s3, kamaji and dbaas serve one service each (object store / managed Kubernetes / managed
 // databases) — quota, features, GPUs and metrics have nothing to configure there, so they get the
-// trimmed set (connection = endpoint/kubeconfig/chart pin, services = the toggle, configuration).
-const BASE_TAB_KEYS = new Set(["connection", "services", "configuration"])
+// trimmed set (connection = endpoint/kubeconfig/chart pin, services = the toggle, configuration). Every provider
+// gets Projects (attach policy for new projects + bulk attach to existing ones).
+const BASE_TAB_KEYS = new Set(["connection", "services", "configuration", "projects"])
 
 const crumbs = (label: string) => (
   <Breadcrumb>
@@ -1377,6 +1380,9 @@ export default function CloudProviderDetailPage() {
         </TabsContent>
         <TabsContent value="metrics" className="mt-4">
           <MetricsTab id={id} provider={p} />
+        </TabsContent>
+        <TabsContent value="projects" className="mt-4">
+          <ProviderProjectsTab id={id} provider={p} />
         </TabsContent>
         <TabsContent value="advanced" className="mt-4">
           <AdvancedTab id={id} />

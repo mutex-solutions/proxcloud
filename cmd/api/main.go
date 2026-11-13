@@ -70,6 +70,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/sse"
 	"github.com/mutex-solutions/proxcloud/internal/platform/sso"
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
+	"github.com/mutex-solutions/proxcloud/internal/providerattach"
 	"github.com/mutex-solutions/proxcloud/internal/registrypins"
 	"github.com/mutex-solutions/proxcloud/internal/server"
 	"github.com/mutex-solutions/proxcloud/internal/templateupdates"
@@ -779,6 +780,24 @@ func run() error {
 			}
 			return err
 		},
+		// The per-project attach POST: the same operator attach the bulk attach runs per project, bounded like one bulk
+		// attempt and past the request's own life (it may create things on the provider).
+		Attach: func(ctx context.Context, projectID, esID string) (string, error) {
+			es, err := esSvc.Get(ctx, esID)
+			if err != nil {
+				return "", err
+			}
+			if es == nil {
+				return "", fmt.Errorf("external service %s not found", esID)
+			}
+			attempt, cancel := context.WithTimeout(context.WithoutCancel(ctx), project.AttachTimeout)
+			defer cancel()
+			outcome, err := projectH.AttachByOperator(attempt, projectID, es)
+			if err != nil {
+				log.Error("admin project attach", "project", projectID, "es", esID, "err", err)
+			}
+			return outcome, err
+		},
 		// Light pre-check before scheduling a project for deletion: the project must resolve (a
 		// deeper "no locked resources" gate could go here later).
 		CanDelete: func(ctx context.Context, projectID string) error {
@@ -916,12 +935,41 @@ func run() error {
 		case durablejobs.TemplateUpdateVM:
 			_, err := templateupdates.DecodeVMPayload(j.Payload)
 			return err
+		case durablejobs.ProviderAttach:
+			_, err := providerattach.DecodePayload(j.Payload)
+			return err
+		case durablejobs.TemplateUpdateSmoke:
+			_, err := templateupdates.DecodeSmokePayload(j.Payload)
+			return err
 		case durablejobs.TemplateUpdateSandbox:
 			_, err := templateupdates.DecodeSandboxPayload(j.Payload)
 			return err
 		}
 		return chargefanout.Validate(j)
 	})
+	// Bulk attach of a provider to existing projects (docs/cloud-integration.md): the admin surface enqueues, this runner
+	// attaches each project through the per-project attach path, fenced and resumable.
+	paSvc := providerattach.New(pg, jobStore)
+	if err := paSvc.Repo.Ensure(ctx); err != nil {
+		return fmt.Errorf("provider attach store: %w", err)
+	}
+	adminH.SetProviderAttach(paSvc, projectH.CanAttach)
+	paRunner := &providerattach.Runner{
+		Store: jobStore, Repo: paSvc.Repo, Lease: cfg.Jobs.LeaseDuration, Log: log,
+		Provider: func(ctx context.Context, id string) (*externalservice.ExternalService, error) {
+			es, err := esSvc.Get(ctx, id)
+			if errors.Is(err, externalservice.ErrNotFound) {
+				return nil, nil // gone: the run ends provider_missing
+			}
+			return es, err
+		},
+		Attach:    projectH.AttachByOperator,
+		CanAttach: projectH.CanAttach,
+	}
+	paCtx, stopPA := context.WithCancel(ctx)
+	paDone := make(chan struct{})
+	go func() { defer close(paDone); paRunner.Run(paCtx) }()
+	defer func() { stopPA(); <-paDone }()
 	// GHCR template updates (docs/template-updates.md): discovery always; the VM import runner only
 	// when PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true. Every GitHub call uses the GitHub
 	// integration's token (decrypted per call, never logged).
@@ -930,11 +978,15 @@ func run() error {
 		Token: func(ctx context.Context) (string, string, error) {
 			return tuRepo.GitHubToken(ctx, func(v any) any { return enc.DecryptObject(v) })
 		},
-		Jobs: jobStore, DB: pg, Receipts: templateupdates.PGReceipts{DB: pg}, VMEnabled: cfg.Jobs.TemplateUpdatesVM,
+		Jobs: jobStore, DB: pg, Receipts: templateupdates.PGReceipts{DB: pg}, Smokes: templateupdates.PGSmokes{DB: pg}, VMEnabled: cfg.Jobs.TemplateUpdatesVM,
 		SandboxEnabled: cfg.Jobs.TemplateUpdatesSandbox, Sandbox: templateupdates.PGSandbox{DB: pg},
 	}
-	// Create the receipt tables up front: the enqueues read them inside their transaction (no auto-create there).
+	// Create the receipt, smoke, blocklist and sandbox receipt tables up front: the enqueues read them
+	// inside their transaction (no auto-create there).
 	if err := tuSvc.Receipts.Ensure(ctx); err != nil {
+		return fmt.Errorf("template update store: %w", err)
+	}
+	if err := tuSvc.Smokes.Ensure(ctx); err != nil {
 		return fmt.Errorf("template update store: %w", err)
 	}
 	if err := tuSvc.Sandbox.Ensure(ctx); err != nil {
@@ -1064,12 +1116,49 @@ func run() error {
 				}
 				return &templateupdates.Executor{PVE: ps.C, Blobs: gh, Receipts: templateupdates.PGReceipts{DB: pg}, HeadroomPct: es.PVEStorageHeadroomPct(), UploadLock: ps.LockImportUpload}, nil
 			},
+			// Smoke tests (docs/template-updates.md, Lifecycle): PVE only, one per provider at a time.
+			Smokes: tuSvc.Smokes, DeadSmoke: tuSvc.Smokes.DeadUncleaned,
+			SmokeLock: func(ctx context.Context, key string) (func(), bool, error) {
+				return pg.TryAdvisoryLock(ctx, key)
+			},
+			BuildSmoke: func(ctx context.Context, p templateupdates.SmokePayload) (*templateupdates.SmokeExecutor, error) {
+				es, err := esSvc.Get(ctx, p.ServiceID)
+				if err != nil || es == nil || !es.IsProxmox() {
+					return nil, &templateupdates.Permanent{Code: templateupdates.SmokeProviderMissing, Message: "the target Proxmox provider no longer exists"}
+				}
+				ps, err := pveWithHolderLock(es)
+				if err != nil {
+					return nil, err
+				}
+				return &templateupdates.SmokeExecutor{PVE: ps.C, Receipts: tuSvc.Smokes, Blocked: func(ctx context.Context, d string) (bool, error) {
+					b, err := tuSvc.Receipts.Blocked(ctx, d)
+					return b != nil, err
+				}}, nil
+			},
+			// Every finished import gets its automatic smoke test.
+			OnImported: func(ctx context.Context, id string) {
+				err := tuSvc.AutoSmoke(ctx, id, func(ctx context.Context, serviceID, node string) (templateupdates.SmokeNetwork, error) {
+					es, err := esSvc.Get(ctx, serviceID)
+					if err != nil || es == nil || !es.IsProxmox() {
+						return templateupdates.SmokeNetwork{}, &templateupdates.LifecycleError{Status: 409, Code: "provider_missing", Message: "The import's Proxmox provider no longer exists"}
+					}
+					ps, err := pveWithHolderLock(es)
+					if err != nil {
+						return templateupdates.SmokeNetwork{}, err
+					}
+					net := admin.SmokeNetworkOf(es)
+					return net, templateupdates.CheckSmokeNetwork(ctx, ps.C, node, net)
+				})
+				if err != nil {
+					log.Warn("template update: automatic smoke test not queued", "job", id, "err", err)
+				}
+			},
 		}
 		tuCtx, stopTU := context.WithCancel(ctx)
 		tuDone := make(chan struct{})
 		go func() { defer close(tuDone); tuRunner.Run(tuCtx) }()
 		defer func() { stopTU(); <-tuDone }()
-		log.Warn("template updates: VM import runner ENABLED")
+		log.Warn("template updates: VM import + smoke test runner ENABLED")
 	}
 	if cfg.Jobs.SchedulerEnabled {
 		log.Warn("scheduled jobs ENABLED (charge cron + cloud metrics) — bills will be charged on a timer")

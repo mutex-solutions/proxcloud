@@ -74,6 +74,31 @@ func (e *ExternalService) secretMap() map[string]any {
 func (e *ExternalService) Provider() string { return str(e.Config["provider"]) }
 func (e *ExternalService) Shared() bool     { return boolean(e.Config["shared"]) }
 
+// AttachPolicyKey is the config key of the attach policy (AttachToNewProjects).
+const AttachPolicyKey = "attachToNewProjects"
+
+// AttachToNewProjects is config.attachToNewProjects: whether a project's first bootstrap provisions it onto this
+// provider automatically. Absent means true, which is how every provider behaved before the setting existed. Off, a new
+// project is not attached; an operator attaches it per project or with the bulk attach. It says nothing about projects
+// already attached, and nothing about request routing.
+func (e *ExternalService) AttachToNewProjects() bool {
+	b, ok := e.Config[AttachPolicyKey].(bool)
+	return !ok || b
+}
+
+// ValidateAttachPolicy refuses a config whose attachToNewProjects is set to anything but true or false. Absent (or
+// null, which the caller drops) keeps the default.
+func ValidateAttachPolicy(cfg map[string]any) error {
+	v, ok := cfg[AttachPolicyKey]
+	if !ok || v == nil {
+		return nil
+	}
+	if _, isBool := v.(bool); !isBool {
+		return fmt.Errorf("config.%s must be true or false", AttachPolicyKey)
+	}
+	return nil
+}
+
 // IsCephS3 reports whether this is a Ceph RGW (S3) object-store provider (config.provider == "ceph-s3").
 // Object-store is the only service it serves, driven by the S3 + Admin Ops endpoints below.
 func (e *ExternalService) IsCephS3() bool { return e.Provider() == "ceph-s3" }

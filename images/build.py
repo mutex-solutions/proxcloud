@@ -217,17 +217,41 @@ def cmd_base(pve, a, img):
     print(create_base(pve, a, img, name))
 
 
-def versions_of(vms, os_slug, node):
+# The portal's Template updates import marker (docs/template-updates.md): such a template's lifecycle
+# (smoke test, publish, withdraw) belongs to the portal, so build.py never prunes it. A template with a
+# pc-src-<digest> tag was imported by the portal before the marker existed: never pruned either.
+IMPORT_MARKER = "pc-tu-import"
+IMPORT_SOURCE_PREFIX = "pc-src-"
+
+
+def portal_import(tags):
+    """A template the portal's Template updates imported (marker, or a pre-marker pc-src- tag)."""
+    return IMPORT_MARKER in tags or any(t.startswith(IMPORT_SOURCE_PREFIX) for t in tags)
+
+
+def versions_of(vms, os_slug, node, prunable=False):
     """(version, vmid) of this image's published templates on node, oldest first. A template without a
-    pc-v-* tag was placed by hand: it is not ours to prune, so it is not listed."""
+    pc-v-* tag was placed by hand: it is not ours to prune, so it is not listed. With prunable, a
+    portal import (portal_import) is left out too: it still counts as a version (--if-missing), but
+    is never pruned and does not take a --keep slot."""
     out = []
     for v in vms:
         tags = str(v.get("tags", "")).split(";")
         if v.get("template") == 1 and v.get("node") == node and v.get("pool") == POOL and {"pc-public", "pc-img-" + os_slug} <= set(tags):
+            if prunable and portal_import(tags):
+                continue
             ver = [t[len("pc-v-"):] for t in tags if t.startswith("pc-v-")]
             if ver:
                 out.append((ver[0], v["vmid"]))
     return sorted(out)
+
+
+def prune_candidates(vms, os_slug, node, keep):
+    """The published pipeline versions beyond the newest keep (keep >= 1, enforced by the CLI): never a
+    portal import, never the newest version."""
+    if keep < 1:
+        raise SystemExit("--keep must be at least 1")
+    return [vm for _, vm in versions_of(vms, os_slug, node, prunable=True)[:-keep]]
 
 
 def packer(a, base_vmid, vmid, name, version):
@@ -333,10 +357,17 @@ def cmd_build(pve, a, img):
         tags="proxcloud;pc-public;pc-img-%s;pc-v-%s" % (a.os, version),
     ))
     # Safe: customer VMs are full clones, nothing references an old template.
-    pruned = [vm for _, vm in versions_of(pve.vms(), a.os, a.node)[:-a.keep]]
+    pruned = prune_candidates(pve.vms(), a.os, a.node, a.keep)
     for vm in pruned:
         pve.destroy(a.node, vm)
     print(json.dumps({"os": a.os, "node": a.node, "built": True, "vmid": vmid, "version": version, "pruned": pruned}))
+
+
+def keep_arg(value):
+    """--keep: versions kept per OS and node, at least 1 (the newest published version is never pruned)."""
+    if not re.fullmatch(r"[1-9][0-9]{0,2}", value):
+        raise argparse.ArgumentTypeError("--keep must be a whole number from 1 to 999 (the newest published version always stays)")
+    return int(value)
 
 
 def vlan_arg(value):
@@ -358,7 +389,7 @@ def main():
     p.add_argument("--build-ip", help="free CIDR on the bridge for the build and smoke VMs")
     p.add_argument("--build-gateway")
     p.add_argument("--nameserver")
-    p.add_argument("--keep", type=int, default=2, help="versions kept per OS and node")
+    p.add_argument("--keep", type=keep_arg, default=2, help="versions kept per OS and node (at least 1)")
     p.add_argument("--if-missing", action="store_true", help="do nothing when a version exists on this node")
     a = p.parse_args()
     if a.command == "build" and not (a.build_ip and a.build_gateway):

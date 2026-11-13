@@ -29,7 +29,7 @@ func sourceCredential(path, host string) (authn.AuthConfig, error) {
 	return sandboximport.SourceCredential(b, host)
 }
 
-// mirror is the copy mode for a built-in sandbox template image (docs/template-updates.md §4): argv is
+// mirror is the copy mode for a built-in sandbox template image (docs/template-updates.md §5): argv is
 // "mirror <ghcr source@digest> <registry>/library/sandbox-<name>:<tag> <policy>"; the source credential is the
 // pod-owned Secret at /source (a short-lived GHCR registry token, never the PAT), the destination the Zot mirror
 // account at /push.

@@ -163,6 +163,19 @@ func (d *DB) LockXact(ctx context.Context, key string) error {
 // transaction. Long capture operations must commit their progress independently.
 // A nonblocking loser returns acquired=false and never calls fn.
 func (d *DB) WithAdvisoryLock(ctx context.Context, key string, try bool, fn func() error) (acquired bool, err error) {
+	return d.WithAdvisoryLockSession(ctx, key, try, func(LockSession) error { return fn() })
+}
+
+// LockSession is the database session that holds an advisory lock. A statement run through it runs on that session, so
+// it fails once the session, and with it the lock, is gone: a write made through it is made only while the lock is held.
+// It is the caller's alone until fn returns (not safe for concurrent use).
+type LockSession interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// WithAdvisoryLockSession is WithAdvisoryLock handing fn the lock's session (LockSession).
+func (d *DB) WithAdvisoryLockSession(ctx context.Context, key string, try bool, fn func(LockSession) error) (acquired bool, err error) {
 	// Long exec/capture holders and blocked lock waiters must not consume the
 	// primary pool: callbacks need that pool for independent progress transactions.
 	d.lockMu.Lock()
@@ -204,7 +217,7 @@ func (d *DB) WithAdvisoryLock(ctx context.Context, key string, try bool, fn func
 			_ = c.Conn().Close(cleanup)
 		}
 	}()
-	return true, fn()
+	return true, fn(c)
 }
 
 // TryAdvisoryLock takes a session-level advisory lock on key on a dedicated connection of the lock

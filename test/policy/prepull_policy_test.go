@@ -1,5 +1,5 @@
 // Package policy runs the sandbox prepull ValidatingAdmissionPolicy (rendered by installer stage 55,
-// docs/template-updates.md §4.3) through the Kubernetes API server's own CEL admission libraries — compile, match
+// docs/template-updates.md §5.3) through the Kubernetes API server's own CEL admission libraries — compile, match
 // conditions, variables, validations — without a cluster. The policy is read from POLICY_YAML (the rendered
 // sandbox-prepull manifest stream; installer/tests/test_sandbox_mirror.py renders it and runs this test).
 //

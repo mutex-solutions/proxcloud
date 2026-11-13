@@ -318,7 +318,7 @@
       register: pc_sbx_provider
       no_log: true
     # The registry's mirror account (stage 55: read and create on library/sandbox-* only) for the portal's sandbox
-    # mirror (docs/template-updates.md §4), on a provider registered before it existed (a new one gets it above). The secret is write-only
+    # mirror (docs/template-updates.md §5), on a provider registered before it existed (a new one gets it above). The secret is write-only
     # (never returned), so a marker in generated/ records the password last handed over: a re-run writes nothing
     # unless it changed. A provider whose release gates do not hold right now refuses the write (409): reported, and
     # retried on the next run.

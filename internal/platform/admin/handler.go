@@ -25,6 +25,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/rbac"
 	"github.com/mutex-solutions/proxcloud/internal/platform/sso"
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
+	"github.com/mutex-solutions/proxcloud/internal/providerattach"
 	"github.com/mutex-solutions/proxcloud/internal/templateupdates"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 	"github.com/mutex-solutions/proxcloud/pkg/textcrypt"
@@ -108,6 +109,10 @@ type Handler struct {
 	templateUpdates *templateupdates.Service
 	// sandboxClusterFor reads a sandbox provider's prepull DaemonSets (templateupdates_sandbox.go).
 	sandboxClusterFor func(es *externalservice.ExternalService) (SandboxCluster, error)
+	// providerAttach is the bulk attach of a provider to existing projects (SetProviderAttach; nil → 503); canAttach
+	// refuses a provider this API cannot attach projects to (nil = no check).
+	providerAttach *providerattach.Service
+	canAttach      func(*externalservice.ExternalService) error
 	// githubOptions overrides the GitHub endpoints for the integration token check (tests only).
 	githubOptions templateupdates.Options
 	// githubCountFn overrides the GitHub integration count (tests only; nil = the repository).
@@ -162,6 +167,10 @@ type ProjectCloudOps struct {
 	// Bootstrap provisions a project onto an external service — create-or-reuse the provider-side
 	// tenant (PVE pool, ceph user, …) + attach the ProjectExternalService entry.
 	Bootstrap func(ctx context.Context, projectID, esID string) error
+	// Attach is the operator attach of one provider to one project (project.Handler.AttachByOperator): the outcome
+	// (project.Attach*) or the provisioning error. When set, the per-project attach POST uses it (refusing a project on
+	// its way out); nil → Bootstrap, as before.
+	Attach func(ctx context.Context, projectID, esID string) (string, error)
 	// CanDelete is the live pre-check gating a project-deletion schedule (project resolves / tenant
 	// reachable). nil → the endpoint stays 501.
 	CanDelete func(ctx context.Context, projectID string) error
@@ -400,6 +409,7 @@ func (h *Handler) Routes(r chi.Router) {
 		h.routeProjectMut(r)
 		h.routeProjectManager(r)
 		h.routeExternalServiceMut(r)
+		h.routeProviderAttach(r)
 	})
 }
 

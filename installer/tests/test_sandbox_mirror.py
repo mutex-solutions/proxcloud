@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline tests of the sandbox mirror's installer side (docs/template-updates.md §4): the Zot mirror account (stage 55),
+"""Offline tests of the sandbox mirror's installer side (docs/template-updates.md §5): the Zot mirror account (stage 55),
 its hand-over to the portal (stage 60), the portal pin read with its fail-closed path and the merge with images.yaml
 (stage 55), and the prepull RBAC + admission policy rendered next to the DaemonSet. No cluster, registry or API.
 

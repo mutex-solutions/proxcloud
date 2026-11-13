@@ -90,6 +90,114 @@ on("POST /admin/service/:id/metrics-test", () => ({
   data: { ok: true, trafficSeries: 42, monthStartSeries: 39, warnings: [] },
 }))
 
+// ─── Attach policy + bulk attach to existing projects ─────────────────────────
+// The mock runs a whole bulk attach synchronously on start (no progress phase).
+
+on("PUT /admin/service/:id/attach-policy", ({ params, opts }) => {
+  const svc = db.services.find((s) => s.id === params.id) ?? notFound("Cloud provider")
+  const v = (opts.body as Doc | undefined)?.attachToNewProjects
+  if (typeof v !== "boolean") throw new ApiError(400, 400, "attachToNewProjects must be true or false")
+  ;(svc.config ??= {}).attachToNewProjects = v
+  return { data: svc }
+})
+
+type MockRun = Doc & { items: Doc[] }
+const bulkRuns: Record<string, MockRun[]> = {}
+const runView = (r: MockRun) => {
+  const { items: _items, ...rest } = r
+  return rest
+}
+const deleting = new Set(["SCHEDULED_FOR_DELETION", "DELETE_IN_PROGRESS", "DELETED"])
+const scopedProjects = (scope: Doc): Doc[] => {
+  if (scope.mode === "organizations") return db.projects.filter((p) => (scope.organizationIds ?? []).includes(p.organizationId ?? p.organization?.id))
+  if (scope.mode === "projects") return db.projects.filter((p) => (scope.projectIds ?? []).includes(p.id))
+  return db.projects
+}
+const attachedTo = (p: Doc, svcId: string) => ((p.services ?? []) as Doc[]).some((s) => s.serviceId === svcId)
+
+on("GET /admin/service/:id/bulk-attach", ({ params }) => {
+  const svc = db.services.find((s) => s.id === params.id) ?? notFound("Cloud provider")
+  const runs = (bulkRuns[params.id] ?? []).map(runView)
+  return { data: { runs, active: null, attachToNewProjects: svc.config?.attachToNewProjects !== false } }
+})
+
+on("GET /admin/service/:id/bulk-attach/candidates", ({ params, query }) => {
+  const q = (query.get("search") ?? "").toLowerCase()
+  const match = (d: Doc) => !q || String(d.name ?? "").toLowerCase().includes(q) || d.id === q
+  if (query.get("kind") === "organizations") {
+    return {
+      data: db.organizations.filter(match).slice(0, 50).map((o) => ({
+        id: o.id, name: o.name, projects: db.projects.filter((p) => (p.organizationId ?? p.organization?.id) === o.id).length,
+      })),
+    }
+  }
+  return {
+    data: db.projects.filter(match).slice(0, 50).map((p) => ({
+      id: p.id, name: p.name, organizationId: p.organizationId ?? p.organization?.id, organizationName: p.organization?.name,
+      status: p.status, attached: attachedTo(p, params.id),
+    })),
+  }
+})
+
+on("POST /admin/service/:id/bulk-attach/preview", ({ params, opts }) => {
+  const list = scopedProjects(((opts.body as Doc)?.scope ?? {}) as Doc)
+  const already = list.filter((p) => attachedTo(p, params.id)).length
+  const del = list.filter((p) => !attachedTo(p, params.id) && deleting.has(p.status)).length
+  return { data: { inScope: list.length, alreadyAttached: already, deleting: del, toAttach: list.length - already - del } }
+})
+
+const runBulk = (svcId: string, scope: Doc, concurrency: number, projects: Doc[]): MockRun => {
+  const svc = db.services.find((s) => s.id === svcId) ?? notFound("Cloud provider")
+  const items = projects.map((p) => {
+    let state = "attached"
+    let code = "attached"
+    if (attachedTo(p, svcId)) [state, code] = ["skipped", "already_attached"]
+    else if (deleting.has(p.status)) [state, code] = ["skipped", "deleting"]
+    else ((p.services ??= []) as Doc[]).push({ serviceId: svcId, provider: svc.config?.provider, region: svc.config?.region })
+    return { id: `${p.id}`, projectId: p.id, projectName: p.name, organizationId: p.organizationId, state, code, attempts: 1, updatedAt: new Date().toISOString() }
+  })
+  const n = (s: string) => items.filter((i) => i.state === s).length
+  const byCode: Record<string, number> = {}
+  for (const i of items) if (i.state !== "attached") byCode[i.code] = (byCode[i.code] ?? 0) + 1
+  const now = new Date().toISOString()
+  const run: MockRun = {
+    id: db.nextId("run"), serviceId: svcId, scope, concurrency, requestedBy: db.adminMe.sub ?? "admin", status: "succeeded", planned: true,
+    counts: { total: items.length, pending: 0, running: 0, attached: n("attached"), skipped: n("skipped"), failed: 0, cancelled: 0, byCode },
+    createdAt: now, startedAt: now, finishedAt: now, jobState: "succeeded", items,
+  }
+  ;(bulkRuns[svcId] ??= []).unshift(run)
+  return run
+}
+
+on("POST /admin/service/:id/bulk-attach", ({ params, opts }) => {
+  const body = (opts.body ?? {}) as Doc
+  const scope = (body.scope ?? { mode: "all" }) as Doc
+  return { data: runView(runBulk(params.id, scope, body.concurrency || 2, scopedProjects(scope))) }
+})
+
+on("GET /admin/service/:id/bulk-attach/:runId", ({ params }) => {
+  const run = (bulkRuns[params.id] ?? []).find((r) => r.id === params.runId) ?? notFound("Bulk attach run")
+  return { data: runView(run) }
+})
+
+on("GET /admin/service/:id/bulk-attach/:runId/items", ({ params, query }) => {
+  const run = (bulkRuns[params.id] ?? []).find((r) => r.id === params.runId) ?? notFound("Bulk attach run")
+  const state = query.get("state")
+  const items = state ? run.items.filter((i) => i.state === state) : run.items
+  return { data: { items, total: items.length, limit: 100, offset: 0 } }
+})
+
+on("POST /admin/service/:id/bulk-attach/:runId/cancel", () => {
+  throw new ApiError(409, 409, "this bulk attach has already finished")
+})
+
+on("POST /admin/service/:id/bulk-attach/:runId/retry", ({ params }) => {
+  const run = (bulkRuns[params.id] ?? []).find((r) => r.id === params.runId) ?? notFound("Bulk attach run")
+  const failed = run.items.filter((i) => i.state === "failed").map((i) => i.projectId)
+  if (failed.length === 0) throw new ApiError(409, 409, "this bulk attach has no failed projects to retry")
+  return { data: runView(runBulk(params.id, { mode: "retry", sourceRunId: run.id }, run.concurrency, db.projects.filter((p) => failed.includes(p.id)))) }
+})
+
 // ─── Catalog: flavor categories ───────────────────────────────────────────────
 
 on("GET /admin/flavor-categories", () => ({ data: db.flavorCategories }))
