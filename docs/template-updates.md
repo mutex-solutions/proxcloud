@@ -498,9 +498,11 @@ lease/heartbeat/`Checkpoint`/`Fail` contract as the VM import, §3). Enqueue re-
 re-verifies the digest server side (a published `<YYYYMMDD>-<sha7>` tag whose manifest is a linux/amd64
 **image manifest** — an index digest cannot be copied byte for byte and is refused), refuses when the
 prepull DaemonSets already run that digest (**same-digest refusal**, 409), and in one transaction under
-an advisory lock on `<registry>/library/sandbox-<name>` refuses while another job for that image is live
-(**dedup per image**, 409) before it enqueues the job and its receipt. Receipt steps (collection
-`templateUpdateSandbox`):
+an advisory lock on `<registry>/library/sandbox-<name>` refuses while another job for that image is not
+settled (**dedup per image**, 409) before it enqueues the job and its receipt. A job is settled when its
+receipt is `succeeded` or cleaned up, or its durable job is `dead` or `succeeded`: a receipt already
+`failed` whose job is still running (the failure is recorded before the job's cleanup runs) keeps the
+image busy, so nothing overlaps that cleanup. Receipt steps (collection `templateUpdateSandbox`):
 
 `queued → mirroring (intent: pod name) → mirrored → verified → prepull (intent: pin + previous images) → pinned → succeeded | failed`
 
@@ -543,7 +545,12 @@ account), `mirror_result_invalid`, `digest_mismatch`, `registry_refused`, `rollb
 succeeded is reused (no second copy), one still running is waited for, a failed one is deleted and the
 copy redone under the new epoch's pod. A lost lease stops the executor before its next cluster effect.
 **Cleanup** (terminal failure or the dead-job pass): delete the job's worker pods; if the pin was
-recorded but the DaemonSet never ran the new ref, restore the pin record this job replaced. **Secrets**:
+recorded but the DaemonSet never ran the new ref, restore the pin record this job replaced. Cleanup
+needs only the provider's cluster (its `secret.kubeconfig`): it gets its own executor, without the mirror
+account, the registry reader or the GitHub token, so a job that failed because the provider lost its
+mirror account (`mirror_unavailable`) or moved its template registry (`registry_changed`) is still
+cleaned up. Only a provider that no longer exists marks the cleanup impossible (a receipt warning); an
+unusable kubeconfig is retried by the dead-job pass every 10 minutes. **Secrets**:
 the PAT exists only in the job's memory and the pod-owned Secret — never in the payload, receipt, pin,
 audit row or log; the mirror password only in the provider's encrypted secret and the pod-owned Secret.
 
@@ -622,7 +629,8 @@ change; a pin whose `previous` is exactly `images.yaml`'s digest wins (a newer m
 rollback); otherwise the later `<YYYYMMDD>` tag date wins; two digests that cannot be ordered stop the
 upgrade with the line to commit. It prints the `images.yaml` lines to commit; the page shows the same line
 per pin. To let `images.yaml` win for an image on purpose, delete its pin (`DELETE …/sandbox/pins/{id}`,
-`admin:service:manage`, audited, refused while a job for the image is live; the cluster is not touched).
+`admin:service:manage`, audited, refused (409) while a job for the image is not settled, the same rule
+as the dedup in §5.2; the cluster is not touched).
 **Fail closed**: the upgrade stops with a clear message instead of rendering `images.yaml` alone when the
 admin key is present and the API does not answer, refuses, or answers anything but `{data: {pins: [...]}}`
 (an older API, a proxy page); and when `generated/sandbox-registry-mirror.handed` exists (the portal got
