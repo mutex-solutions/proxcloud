@@ -301,9 +301,10 @@
       environment: {KUBECONFIG: "{{ pc_sbx_kubeconfig }}"}
       register: pc_sbx_builds_ns
       changed_when: pc_sbx_builds_ns.stdout_lines | reject('search', ' unchanged$') | list | length > 0
-    # The prepull admission policy compares every DaemonSet, pod and container field by name (CEL cannot iterate over
-    # a typed object): a field this cluster has and the lists lack would be writable by the portal. Compare the lists
-    # with the cluster's own schemas before the policy is (re)applied; stop on any gap rather than leave one open.
+    # The prepull admission policy compares every DaemonSet metadata, spec, pod and container field by name (CEL cannot
+    # iterate over a typed object): a field this cluster has and the lists lack would be writable by the portal. Compare
+    # the lists with the cluster's own schemas before the policy is (re)applied; stop on any gap rather than leave one
+    # open. Each group-version document carries every schema it references, ObjectMeta included.
     - name: Read the cluster's schemas the prepull policy must cover
       ansible.builtin.command: kubectl get --raw {{ item }}
       environment: {KUBECONFIG: "{{ pc_sbx_kubeconfig }}"}

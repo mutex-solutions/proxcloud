@@ -418,15 +418,26 @@ _PREPULL_SCHEMAS = {
     "io.k8s.api.core.v1.Container": "container",
     "io.k8s.api.apps.v1.DaemonSetSpec": "daemonset",
     "io.k8s.api.core.v1.PodTemplateSpec": "template",
+    # the DaemonSet's own metadata (the pod template's is compared whole); every /openapi/v3 group-version document
+    # carries the schemas it references, so it is in both the core and the apps one
+    "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta": "metadata",
 }
+
+
+def _field_names(v):
+    """A policy field list: a YAML list of names, or a mapping name -> reason (the uncompared entries)."""
+    if isinstance(v, dict):
+        return set(v)
+    return set(v or [])
 
 
 def prepull_policy_gaps(openapi_docs, fields):
     """The fields the prepull admission policy would leave writable on this cluster (docs/template-updates.md §5.3).
     openapi_docs: the cluster's /openapi/v3/api/v1 and /openapi/v3/apis/apps/v1 documents (parsed JSON); fields:
-    pc_prepull_policy_fields. Every property of PodSpec, Container, DaemonSetSpec and PodTemplateSpec must be compared
-    by the policy or be one of its deliberately uncompared fields. Returns sorted "<Schema>.<property>" strings; [] when
-    covered. A schema missing from the documents is itself a gap (the check cannot prove anything then)."""
+    pc_prepull_policy_fields. Every property of ObjectMeta, PodSpec, Container, DaemonSetSpec and PodTemplateSpec must
+    be compared by the policy or be one of its deliberately uncompared fields. Returns "<Schema>.<property>" strings,
+    sorted by schema then property; [] when covered. A schema missing from the documents is itself a gap (the check
+    cannot prove anything then)."""
     schemas = {}
     for doc in openapi_docs or []:
         if isinstance(doc, dict):
@@ -437,7 +448,7 @@ def prepull_policy_gaps(openapi_docs, fields):
         if not isinstance(s, dict) or not isinstance(s.get("properties"), dict):
             gaps.append("%s (schema not served)" % schema)
             continue
-        covered = set(fields.get(key) or []) | set((fields.get("uncompared") or {}).get(schema) or [])
+        covered = _field_names(fields.get(key)) | _field_names((fields.get("uncompared") or {}).get(schema))
         gaps += ["%s.%s" % (schema.rsplit(".", 1)[1], p) for p in sorted(set(s["properties"]) - covered)]
     return gaps
 

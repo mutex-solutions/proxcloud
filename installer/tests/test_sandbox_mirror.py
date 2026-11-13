@@ -48,12 +48,17 @@ K8S135 = {
         "imagePullPolicy", "securityContext", "stdin", "stdinOnce", "tty"],
     "io.k8s.api.apps.v1.DaemonSetSpec": ["selector", "template", "updateStrategy", "minReadySeconds", "revisionHistoryLimit"],
     "io.k8s.api.core.v1.PodTemplateSpec": ["metadata", "spec"],
+    "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta": ["name", "generateName", "namespace", "selfLink", "uid",
+        "resourceVersion", "generation", "creationTimestamp", "deletionTimestamp", "deletionGracePeriodSeconds", "labels",
+        "annotations", "ownerReferences", "finalizers", "managedFields"],
 }
+META = "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"
 
 
 def openapi(schemas):
-    core = {k: {"type": "object", "properties": {p: {} for p in v}} for k, v in schemas.items() if ".core." in k}
-    apps = {k: {"type": "object", "properties": {p: {} for p in v}} for k, v in schemas.items() if ".apps." in k}
+    # Like the API server: each group-version document carries the schemas it references, so ObjectMeta is in both.
+    core = {k: {"type": "object", "properties": {p: {} for p in v}} for k, v in schemas.items() if ".core." in k or ".meta." in k}
+    apps = {k: {"type": "object", "properties": {p: {} for p in v}} for k, v in schemas.items() if ".apps." in k or ".meta." in k}
     return [{"openapi": "3.0.0", "components": {"schemas": core}}, {"openapi": "3.0.0", "components": {"schemas": apps}}]
 REG = "192.0.2.226"
 D1, D2, D3 = "sha256:" + "1" * 64, "sha256:" + "2" * 64, "sha256:" + "3" * 64
@@ -300,6 +305,42 @@ class PrepullPolicyTests(unittest.TestCase):
                          ["io.k8s.api.apps.v1.DaemonSetSpec (schema not served)"])
         self.assertTrue(f.prepull_policy_gaps([], POLICY["pc_prepull_policy_fields"]))
 
+    def test_gap_check_covers_object_meta(self):
+        fields = POLICY["pc_prepull_policy_fields"]
+        # A field a newer ObjectMeta adds stops the upgrade, like a PodSpec one.
+        newer = copy.deepcopy(K8S135)
+        newer[META].append("futureMetaField")
+        self.assertEqual(f.prepull_policy_gaps(openapi(newer), fields), ["ObjectMeta.futureMetaField"])
+        # So does a cluster that does not serve the ObjectMeta schema.
+        no_meta = {k: v for k, v in K8S135.items() if k != META}
+        self.assertEqual(f.prepull_policy_gaps(openapi(no_meta), fields), [META + " (schema not served)"])
+        # Every ObjectMeta field is compared or listed as uncompared with a reason, never both.
+        unc = fields["uncompared"][META]
+        self.assertEqual(set(fields["metadata"]) | set(unc), set(K8S135[META]))
+        self.assertFalse(set(fields["metadata"]) & set(unc))
+        for schema, entries in fields["uncompared"].items():
+            self.assertIsInstance(entries, dict, schema)
+            for name, why in entries.items():
+                self.assertTrue(isinstance(why, str) and len(why) > 20, "%s.%s needs a reason" % (schema, name))
+        for name in ("managedFields", "resourceVersion", "generation", "uid", "creationTimestamp", "selfLink", "deletionTimestamp",
+                     "deletionGracePeriodSeconds", "generateName", "name", "namespace", "annotations"):
+            self.assertIn(name, unc)
+        # The lists say what the rendered policy does: it reads exactly these DaemonSet metadata fields, compares the
+        # metadata list field by field, and the uncompared annotations and name have rules of their own.
+        vap = PrepullPolicyTests().render()[("ValidatingAdmissionPolicy", "proxcloud-template-prepull-images-only")]
+        text = "\n".join(v["expression"] for v in vap["spec"]["validations"] + vap["spec"]["variables"])
+        self.assertEqual(set(re.findall(r"\bobject\.metadata\.([A-Za-z]+)", text)), set(fields["metadata"]) | {"annotations", "name"})
+        for name in fields["metadata"]:
+            self.assertIn("object.metadata.%s == oldObject.metadata.%s" % (name, name), text)
+        self.assertIn('object.metadata.name in ["template-prepull", "template-prepull-gpu"]', text)
+        self.assertIn("variables.oldAnnotations[k] == variables.annotations[k]", text)
+        # The pod template's metadata is compared whole, so its ObjectMeta needs no list of its own.
+        self.assertIn("object.spec.template.metadata == oldObject.spec.template.metadata", text)
+        # The fixture serves ObjectMeta like the API server: in the core and in the apps document.
+        core, apps = openapi(K8S135)
+        self.assertIn(META, core["components"]["schemas"])
+        self.assertIn(META, apps["components"]["schemas"])
+
     def test_stage55_checks_the_schemas_before_applying_the_policy(self):
         play = STAGE55[1]
         names = [t.get("name") for t in play["tasks"]]
@@ -313,7 +354,9 @@ class PrepullPolicyTests(unittest.TestCase):
         # The check renders against real stdout and fails on a gap.
         newer = copy.deepcopy(K8S135)
         newer["io.k8s.api.core.v1.PodSpec"].append("futurePodField")
-        for schemas, want in ((K8S135, []), (newer, ["PodSpec.futurePodField"])):
+        meta = copy.deepcopy(K8S135)
+        meta[META].append("futureMetaField")
+        for schemas, want in ((K8S135, []), (newer, ["PodSpec.futurePodField"]), (meta, ["ObjectMeta.futureMetaField"])):
             results = [{"stdout": json.dumps(d)} for d in openapi(schemas)]
             t = Templar(loader=DataLoader(), variables={"pc_sbx_openapi": {"results": results}, **POLICY})
             self.assertEqual(t.template(assertion["vars"]["gaps"]), want)
