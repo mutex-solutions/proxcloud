@@ -7,6 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-13
+
+Second stable ProxCloud release, after `v0.4.0` (owner decision 2026-11-13: this is
+`v0.5.0`, not `0.4.1`). It adds portal template updates from GitHub Packages with a
+GitHub classic PAT integration and a staged → smoke test → publish/withdraw
+lifecycle, a per-provider attach policy and bulk attach of a provider to existing
+projects, a real month-end cost forecast, and Kubernetes node-image sanitizer fixes
+for the real template. It has **breaking API and CLI changes**, listed first below;
+review them before upgrading scripts, clients or installer inventories.
+
+What is **not** verified: `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED` defaults **off**,
+and the VM import and its smoke test have **not been lab-verified on PVE 9.2**; the
+GitHub classic PAT integration has **not been verified against the real GitHub
+packages**. Sandbox image mirroring from the portal is not part of this release:
+sandbox template updates remain the manual `deploy/templates/images.yaml` pin path.
+As for `v0.4.0`, "stable" does not mean full acceptance: live installer (P6) and
+split/managed-service (P7) acceptance were **not** performed, the job scheduler and
+debug triggers stay off by default, and production mail delivery and the
+managed-sandbox saved lifecycle remain held. The security gate policy is unchanged
+from `v0.4.0`: HIGH/CRITICAL findings without an upstream fix are tracked, not
+blocking, until 2026-12-12, and the single VEX expires on 2026-12-31. Upgrading a broker-era installation still needs the `v0.4.0`
+drain/reconcile and retention runbook. The `v0.5.0` tag publishes the images and app
+chart `0.5.0`; verify that they can be pulled before installing with
+`images.build: false`. The managed charts are unchanged (`database-cluster` `0.5.1`,
+`proxmox-kamaji-cluster` `0.1.10`).
+
+### Breaking changes
+
+- **Attaching a provider to a project is `POST` (#214).** The admin attach is
+  `POST /api/v1/admin/project/{id}/external-service/{externalServiceId}`. `GET` and
+  `HEAD` on that path answer `405` and change nothing; the old `GET` provisioned the
+  project on the provider. The attach stays idempotent: re-attaching a service the
+  project already carries makes no provider call and adds no second binding. Scripts
+  calling the old `GET` must switch to `POST`.
+- **A named service the project is not attached to is refused (#215).** A project
+  cloud call that names a service (`x-service-id` or `?serviceId=`) the project is not
+  attached to now answers `400 Project is not attached to service <id>` (`…to the
+  requested service` when the id is not a plain service id) before any provider is
+  called, instead of silently running on the project's Proxmox service (a BUCKET
+  create for a newly registered S3 store failed on Proxmox). This covers creates,
+  actions, deletes and the reads `quota-usage`, `gpu-capacity`, `public-networks` and
+  the S3 key routes. Requests naming no service keep the Proxmox default (else the
+  project's first attached service). Existing projects still need an operator to
+  attach a provider registered after they were created (per project, or with the bulk
+  attach below).
+- **`POST /api/v1/project/{id}/init` can answer `409` (#216).** It no longer answers
+  `200 {}` when it leaves the project down. It answers `409` with `errors.details`
+  `{status, reason[, billingProfileStatus]}`, reason one of
+  `billing_profile_inactive`, `billing_profile_suspended`, `billing_profile_missing`,
+  `disabled_by_operator`, `scheduled_for_deletion`, `deletion_in_progress`, `deleted`,
+  `not_enabled`; `billingProfileStatus` is present when a paying billing profile
+  exists. Success is unchanged. The customer API error envelope may now carry an
+  optional `details` object; clients must ignore details they do not know. The client
+  console shows the reason above the project's pages, with a link to Billing where
+  that is the fix.
+- **VOLUME create answers the created volume (#218, shipped in #220).**
+  `POST /api/v1/project/{id}/cloud` with `{"type":"VOLUME"}` answers the volume's cache
+  row: `id`, `externalId` (the PVE volid) and `data.volume` (`name`, `size`,
+  `status`, …), so the caller can use the volume at once. It used to answer an empty
+  `result` (create on a server) or `{"result":{"node":…}}` (standalone create); the
+  standalone create **no longer returns `result.node`** (the node is in
+  `data.volume.availability_zone`). If the new row cannot be read back yet, the answer
+  is the volume as the create knows it, without an `id`.
+- **Publishing at import is removed (#223).** `POST /api/v1/admin/template-updates/vm`
+  with `"publish": true` is refused with `400` (`errors.details.code =
+  publish_at_import_removed`) before any provider or GitHub call; an absent or `false`
+  `publish` is ignored. Every import lands **staged**, tagged
+  `pc-tu-import;pc-tu-staged` without any catalog tag, until it passes its smoke test
+  and is published.
+- **`images/build.py --keep` must be 1–999 (#223).** `--keep 0`, which used to prune
+  nothing, is now refused with a clear message; the installer's preflight checks
+  `proxcloud.templates.keep` the same way (default 2, unchanged).
+- **The per-project admin attach refuses projects being deleted (#222).** A project
+  scheduled for deletion, being torn down or deleted gets
+  `400 Project is being deleted. Cannot attach a provider` instead of being
+  provisioned.
+
 ### Added
 
 - Add **System → Template updates** to the admin portal: a GitHub integration holding a
@@ -54,39 +131,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged since its passing smoke test. All actions need
   `admin:service:manage`, are audited, and stay behind `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED`. The
   admin page gains an *Imported templates* tab with the state of each template and its actions.
+- The first public Kubernetes node VM image,
+  `ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2604-k8s` (tag
+  `ubuntu-2604-k8s-1.35.10-20261112032843-8a2a737b331b`), was published on 2026-11-12
+  through the manually dispatched VM artifact publisher. It is a separate QCOW2 artifact for
+  reviewed hypervisor import: it is not part of the app chart, the installer BOM or the
+  `v0.5.0` tag. No kubeadm join or NodeReady is claimed for it; node acceptance stays
+  the runtime checks in `docs/public-vm-sanitization.md`.
 
 ### Changed
 
-- **Breaking (API)**: `POST /api/v1/admin/template-updates/vm` no longer publishes at import. The
-  `publish` field is still accepted, but `true` is refused with `400`
-  (`errors.details.code = publish_at_import_removed`); absent/`false` is ignored. Imports are tagged
-  `pc-tu-import;pc-tu-staged` without any catalog tag until published.
 - `images/build.py build` never prunes a template the portal imported (marker `pc-tu-import`, or a
   `pc-src-` tag from an earlier import), nor the newest published version of an OS on a node.
-- **Breaking (CLI/installer)**: `images/build.py --keep` must be 1–999. `--keep 0`, which used to prune
-  nothing, is now refused with a clear message; the installer's preflight checks
-  `proxcloud.templates.keep` the same way (default 2, unchanged).
 - `pve.DiscoverTemplates` skips templates tagged `pc-tu-withdrawn`, even when `pc-public` is present.
 
 ### Fixed
 
-- The admin attach of a cloud provider to a project is now
-  `POST /api/v1/admin/project/{id}/external-service/{externalServiceId}`; a `GET`, which
-  provisioned the project on the provider, now answers 405 and changes nothing (#214). The
-  attach stays idempotent: re-attaching a service the project already carries makes no
-  provider call and adds no second binding. Scripts calling the old `GET` must switch to `POST`.
-- A project cloud call that names a service (`x-service-id` or `?serviceId=`) the project is
-  not attached to is now refused with `400 Project is not attached to service <id>` before any
-  provider is called, instead of silently running on the project's Proxmox service (#215: a
-  BUCKET create for a newly registered S3 store failed on Proxmox). This covers creates,
-  actions, deletes and the reads `quota-usage`, `gpu-capacity`, `public-networks` and the S3
-  key routes. Requests naming no service keep the Proxmox default. Existing projects still
-  need an operator to attach a provider registered after they were created (per project, or
-  with the bulk attach above).
-- The per-project admin attach now refuses a project scheduled for deletion, being torn down
-  or deleted with `400` instead of provisioning it, and runs for at most 2 minutes. A
-  project's bindings are now only appended atomically: a project save (rename, member
-  change, activation) no longer rewrites `services` or `provisionFailures` from a stale read,
+- The per-project admin attach runs for at most 2 minutes (its refusal of a project
+  being deleted is listed under Breaking changes). A project's bindings are now only
+  appended atomically: a project save (rename, member change, activation) no longer
+  rewrites `services` or `provisionFailures` from a stale read,
   so it cannot drop a provider binding added meanwhile. Operator attaches and the first
   bootstrap of one project are serialized under a per-project lock; the binding write runs
   on the lock's own session with the ownership check in the same statement, so a writer
@@ -94,18 +158,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default quota on the project: as before, a project without its own quota follows the
   provider default live. An operator attach of a project never opened marks its binding in the same write, so
   the project's first open still provisions every provider whose policy is on.
-- `POST /api/v1/project/{id}/init` no longer answers `200 {}` when it leaves the project down.
-  It answers `409` with `errors.details` `{status, reason[, billingProfileStatus]}`, reason one
-  of `billing_profile_inactive`, `billing_profile_suspended`, `billing_profile_missing`,
-  `disabled_by_operator`, `scheduled_for_deletion`, `deletion_in_progress`, `deleted`,
-  `not_enabled` (#216). Success is unchanged. The client console shows the reason above the
-  project's pages, with a link to Billing where that is the fix. The error envelope may now
-  carry an optional `details` object.
-- `POST /api/v1/project/{id}/cloud` with `{"type":"VOLUME"}` now answers the created volume —
-  its cache row with `id`, `externalId` (the PVE volid) and `data.volume` (`name`, `size`,
-  `status`, …) — instead of an empty `result` (on a server) or `{"result":{"node":…}}`
-  (standalone), so the caller can use the volume at once (#218). If the new row cannot be read
-  back yet the answer is the volume as the create knows it, without an `id`.
+- The month-end forecast is now a real projection instead of always equal to the
+  current month's cost (#217). `forecastedMonthEndCosts` in `GET /project/{id}/cost-info`,
+  `GET /bill/{bp}/cost-info` and `GET /admin/billing-profile/{id}/cost-info` is the
+  current cost plus what the charge job will still add before the UTC month end for the
+  resources it bills now, rated read-only with the same engine and rules. Tax,
+  savings-contract discounts, price-adjustment rules and future price or resource
+  changes are not modeled. `forecastApproximate`, `forecastApproximateReasons`
+  (`unrated`, `usage`, `stale`, `unavailable`, `external_billing`) and
+  `forecastUnratedTypes` say when part of it is held at its current cost. A resolution
+  is cached 60 s per profile and month and bounded to 3 s; a timeout, error or a profile
+  with more than 2000 billable resources gives `unavailable` (forecast = current), never
+  a failed read. The admin profile list keeps forecast = current, flagged approximate.
+  The consoles label the figure as an estimate and explain why it is approximate
+  (`docs/billing.md`).
+- The client console's server field helpers moved out of the Servers page module, so
+  the page hot-reloads with React Fast Refresh during development (#218).
+- Kubernetes node-image sanitizer (`--k8s-os ubuntu-2604`) fixes for the real Ubuntu
+  26.04 / Kubernetes 1.35.10 template, which the previous code refused (fail closed) on
+  a read-only inventory (#219):
+  - only the exact canonical `/dev/disk/by-uuid/<uuid>` root fstab spec is resolved,
+    and it must be the inspected root; dpkg `hold ok installed` is accepted for the
+    pinned Kubernetes packages; only active swap rows count; only an empty
+    `.kubelet-keep` placeholder is ignored in the static manifests;
+  - machine identity is reset in the copy (owner decisions): `builder` leaves every
+    supplementary group and must own an unshared primary group, the sudo policy is
+    bound to reviewed hashes (any `/etc/sudoers-rs`, active `/etc/sudo.conf` line or
+    userdb record refuses), snapd is reset to unregistered (a session macaroon or a
+    store user refuses), and the cloud-init default user is the upstream `ubuntu`;
+  - the inventory mounts the root read-only, and the root is remounted read-write only
+    after the policy accepts.
+
+  The template apt-holds `cloud-init`, `openssh-server`, `qemu-guest-agent`, `snapd`
+  and `kubernetes-cni` besides the Kubernetes packages; consumers must
+  `apt-mark unhold` them to receive security updates. Runtime acceptance (cold boot,
+  two-clone snapd re-registration) is not claimed by this source change.
 
 ## [0.4.0] - 2026-11-12
 

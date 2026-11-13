@@ -38,8 +38,8 @@ own cadence). All three go to `oci://ghcr.io/mutex-solutions/charts`.
 | `database-cluster` | `database-cluster-vX.Y.Z` | `Chart.yaml` — the tag must match or the job fails |
 | `proxmox-kamaji-cluster` | `proxmox-kamaji-cluster-vX.Y.Z` | `Chart.yaml` — the tag must match or the job fails |
 
-The app chart/BOM selects the first stable release `v0.4.0` (after the
-`v0.4.0-rc.1` prerelease); its tag publishes the app chart and images. Local
+The app chart/BOM selects the stable release `v0.5.0` (after the first stable
+`v0.4.0`); its tag publishes the app chart and images. Local
 rendering and a source pin are not proof that pull URLs exist. Use the
 source-build path until the required release images and chart are verified
 pullable; see [release readiness](../../docs/release-readiness.md).
@@ -47,7 +47,7 @@ pullable; see [release readiness](../../docs/release-readiness.md).
 For `database-cluster` and `proxmox-kamaji-cluster`, bump `version:` in `Chart.yaml`
 in the PR that changes the chart, merge, then have a maintainer deliberately cut
 the matching tag. The current source versions are database `0.5.1` and Kubernetes
-`0.1.10`; they are independent of the app's `0.4.0`. Publishing is idempotent — an
+`0.1.10`; they are independent of the app's `0.5.0`. Publishing is idempotent — an
 already-published version is skipped, so a reused version does not update an old
 artifact. These are release operations, not commands to run during normal setup.
 See [CI/release operations](../../docs/ci-release.md) for full verification.
