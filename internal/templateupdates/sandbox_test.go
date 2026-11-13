@@ -180,9 +180,10 @@ func (r *fakeReg) Resolve(_ context.Context, repo, ref string) (string, error) {
 }
 
 type memSandbox struct {
-	mu   sync.Mutex
-	recs map[string]SandboxReceipt
-	pins map[string]SandboxPin
+	mu     sync.Mutex
+	recs   map[string]SandboxReceipt
+	pins   map[string]SandboxPin
+	pinErr error // GetPin fails with it (a pin document that does not decode, a store outage)
 }
 
 func newMemSandbox() *memSandbox {
@@ -206,6 +207,9 @@ func (m *memSandbox) Save(_ context.Context, r *SandboxReceipt) error {
 func (m *memSandbox) GetPin(_ context.Context, id string) (*SandboxPin, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.pinErr != nil {
+		return nil, m.pinErr
+	}
 	p, ok := m.pins[id]
 	if !ok {
 		return nil, nil

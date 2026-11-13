@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
+	"github.com/mutex-solutions/proxcloud/internal/durablejobs"
 	"github.com/mutex-solutions/proxcloud/internal/sandboximport"
 )
 
@@ -462,8 +463,11 @@ func (x *SandboxExecutor) Cleanup(ctx context.Context, f Fence, jobID string, p 
 		}
 		return x.Pins.DeletePin(tc, p.Repo())
 	})
-	if err != nil {
+	if errors.Is(err, durablejobs.ErrLeaseLost) {
 		return append(warns, stoppedWarn)
+	}
+	if err != nil {
+		return append(warns, pendingWarn)
 	}
 	return warns
 }

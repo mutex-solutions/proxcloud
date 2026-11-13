@@ -504,8 +504,10 @@ an advisory lock on `<registry>/library/sandbox-<name>` refuses while another jo
 settled (**dedup per image**, 409) before it enqueues the job and its receipt. A job is settled when its
 receipt is `succeeded` or cleaned up, or its durable job `succeeded`: a receipt already `failed` whose job
 is still running (the failure is recorded before the job's cleanup runs) keeps the image busy, and so
-does a `dead` job whose receipt is not cleaned up yet (its cleanup is still to come from the dead-job pass,
-which always ends by marking it cleaned or recording why it cannot be), so nothing overlaps that cleanup. Receipt steps (collection `templateUpdateSandbox`):
+does a `dead` job whose receipt is not cleaned up yet (its cleanup is still to come from the dead-job pass),
+so nothing overlaps that cleanup. The pass ends by marking the receipt cleaned (with the reason when cleanup is
+impossible, e.g. the provider is gone); while the provider's cluster cannot be reached or a store write fails
+it retries every 10 minutes and says so on the receipt (*cleanup waiting: …*), and the 409 names that job. Receipt steps (collection `templateUpdateSandbox`):
 
 `queued → mirroring (intent: pod name) → mirrored → verified → prepull (intent: pin + previous images) → pinned → succeeded | failed`
 

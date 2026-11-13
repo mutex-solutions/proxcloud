@@ -116,6 +116,13 @@ func TestSandboxCleanupWithoutTheMirrorAccount(t *testing.T) {
 		if mem.recs[sbxJob].Cleaned || jobs.failCode != "cleanup_pending" || len(cl.deleted) != 0 {
 			t.Fatalf("receipt %+v job %s", mem.recs[sbxJob], jobs.failCode)
 		}
+		// The receipt says why its cleanup (and so its image) is waiting, once however often the pass retries.
+		if _, err := r.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if n := countPrefix(mem.recs[sbxJob].Warnings, "cleanup waiting: the provider's sandbox cluster cannot be reached"); n != 1 {
+			t.Fatalf("waiting reason recorded %d times: %v", n, mem.recs[sbxJob].Warnings)
+		}
 		// The terminal path leaves such a job uncleaned: the dead-job pass retries it.
 		r, jobs, _, mem = leftover(t)
 		r.BuildCleanup = func(context.Context, SandboxPayload) (*SandboxExecutor, error) {
@@ -128,4 +135,51 @@ func TestSandboxCleanupWithoutTheMirrorAccount(t *testing.T) {
 			t.Fatalf("receipt %+v job %s", got, jobs.failCode)
 		}
 	})
+	// A store error while settling the pin is not a lost lease: the cleanup is not done (the receipt stays
+	// uncleaned, its image busy) and it goes to the cleanup_pending throttle instead of looping once per lease.
+	t.Run("pin store error", func(t *testing.T) {
+		r, jobs, cl, mem := leftover(t)
+		claimDead(r, jobs)
+		pinNow := mem.pins[p.Repo()]
+		mem.pinErr = errors.New("the pin document does not decode")
+		for range 2 {
+			if did, err := r.RunOnce(context.Background()); did || err != nil {
+				t.Fatalf("cleanup pass: %v %v", did, err)
+			}
+		}
+		got := mem.recs[sbxJob]
+		if got.Cleaned || jobs.failCode != "cleanup_pending" || !jobs.permanent || countPrefix(got.Warnings, pendingWarn) != 1 {
+			t.Fatalf("receipt %+v job %s", got, jobs.failCode)
+		}
+		if len(cl.pods) != 0 || cl.prepull["template-prepull/p1"] != old || mem.pins[p.Repo()] != pinNow {
+			t.Fatalf("pods %v prepull %v pin %+v", cl.pods, cl.prepull, mem.pins[p.Repo()])
+		}
+		// Once the store answers, the next pass finishes the job.
+		mem.pinErr = nil
+		if did, err := r.RunOnce(context.Background()); !did || err != nil {
+			t.Fatalf("cleanup pass: %v %v", did, err)
+		}
+		if got := mem.recs[sbxJob]; !got.Cleaned || mem.pins[p.Repo()] != before || jobs.failCode != "cleaned_up" {
+			t.Fatalf("receipt %+v pin %+v job %s", got, mem.pins[p.Repo()], jobs.failCode)
+		}
+		// The terminal path leaves it uncleaned for the dead-job pass the same way.
+		r, jobs, _, mem = leftover(t)
+		mem.pinErr = errors.New("store down")
+		if did, err := r.RunOnce(context.Background()); !did || err != nil {
+			t.Fatalf("run: %v %v", did, err)
+		}
+		if got := mem.recs[sbxJob]; got.Cleaned || countPrefix(got.Warnings, pendingWarn) != 1 || jobs.failCode != "mirror_unavailable" {
+			t.Fatalf("receipt %+v job %s", got, jobs.failCode)
+		}
+	})
+}
+
+func countPrefix(list []string, prefix string) int {
+	n := 0
+	for _, s := range list {
+		if strings.HasPrefix(s, prefix) {
+			n++
+		}
+	}
+	return n
 }

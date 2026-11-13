@@ -3,6 +3,7 @@ package templateupdates
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -59,8 +60,8 @@ func TestSandboxImageBusyNeedsASettledJob(t *testing.T) {
 		t.Fatalf("mixed: %v", err)
 	}
 	states["b"] = "dead"
-	if err := sandboxImageBusy(ctx, prior, lookup); !errors.Is(err, ErrSandboxBusy) {
-		t.Fatalf("a dead, uncleaned job let the image go: %v", err)
+	if err := sandboxImageBusy(ctx, prior, lookup); !errors.Is(err, ErrSandboxBusy) || !strings.Contains(err.Error(), "job b, is still waiting for its cleanup") {
+		t.Fatalf("a dead, uncleaned job let the image go (or did not say why): %v", err)
 	}
 	prior[2].Cleaned = true
 	if err := sandboxImageBusy(ctx, prior, lookup); err != nil {

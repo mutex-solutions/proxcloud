@@ -208,7 +208,8 @@ func (s *Service) enqueueSandbox(ctx context.Context, p SandboxPayload, actor st
 // partial prepull switch, the pin restore) with the job row still running, and an enqueue or a pin delete let
 // through meanwhile would overlap that cleanup (whose MirrorJob guard then refuses to restore the old pin). Nor is
 // a dead job: while its receipt is not cleaned its Cleanup is still to come from the dead-job pass (which always ends
-// by marking it cleaned, or why it cannot be), and that Cleanup's RestorePrepullImages would undo a newer job's
+// by marking it cleaned, or retries every 10 minutes while the provider's cluster or the store is unusable, saying
+// why on the receipt), and that Cleanup's RestorePrepullImages would undo a newer job's
 // switch of the same image. A job state that cannot be read ("") counts as busy.
 func sandboxImageBusy(ctx context.Context, prior []SandboxReceipt, jobState func(ctx context.Context, id string) (string, error)) error {
 	for i := range prior {
@@ -219,6 +220,9 @@ func sandboxImageBusy(ctx context.Context, prior []SandboxReceipt, jobState func
 		state, err := jobState(ctx, r.ID)
 		if err != nil {
 			return err
+		}
+		if state == "dead" {
+			return fmt.Errorf("%w (an earlier failed update, job %s, is still waiting for its cleanup; its receipt says why)", ErrSandboxBusy, r.ID)
 		}
 		if state != "succeeded" {
 			return ErrSandboxBusy

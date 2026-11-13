@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/durablejobs"
@@ -274,7 +275,8 @@ func (r *SandboxRunner) terminal(parent context.Context, j *durablejobs.Job, fen
 		warns := x.Cleanup(ctx, fence, j.ID, p, rec)
 		if !stopped(warns) {
 			_ = fence.Checkpoint(ctx, func(tc context.Context) error {
-				rec.Warnings, rec.Cleaned = append(rec.Warnings, warns...), true
+				// A pending cleanup stays uncleaned: the dead-job pass retries it.
+				rec.Warnings, rec.Cleaned = append(rec.Warnings, warns...), !pending(warns)
 				return r.Receipts.Save(tc, rec)
 			})
 		}
@@ -374,18 +376,43 @@ func (r *SandboxRunner) cleanupDead(ctx context.Context) (bool, error) {
 	if build == nil {
 		build = r.Build
 	}
+	// waiting records once on the receipt why the cleanup is still to come (the image stays busy meanwhile), then
+	// hands the job back to the cleanup_pending throttle.
+	waiting := func(whys ...string) (bool, error) {
+		_ = fence.Checkpoint(work, func(tc context.Context) error {
+			got, err := r.Receipts.Load(tc, j.ID)
+			if err != nil || got == nil {
+				return err
+			}
+			n := len(got.Warnings)
+			for _, w := range whys {
+				if !slices.Contains(got.Warnings, w) {
+					got.Warnings = append(got.Warnings, w)
+				}
+			}
+			if len(got.Warnings) == n {
+				return nil
+			}
+			got.UpdatedAt = time.Now().UTC()
+			return r.Receipts.Save(tc, got)
+		})
+		_ = r.Store.Fail(context.WithoutCancel(work), j, 0, true, "cleanup_pending")
+		return false, nil
+	}
 	x, err := build(work, p)
 	if err != nil {
 		var perm *Permanent
 		if errors.As(err, &perm) {
 			return finish([]string{"cleanup impossible (" + perm.Code + "): remove any tu-mirror-* pod in sbx-build by hand"}), nil
 		}
-		_ = r.Store.Fail(context.WithoutCancel(work), j, 0, true, "cleanup_pending")
-		return false, nil
+		return waiting("cleanup waiting: the provider's sandbox cluster cannot be reached (check its secret.kubeconfig, or delete the provider); retried every 10 minutes")
 	}
 	warns := x.Cleanup(work, fence, j.ID, p, rec)
 	if stopped(warns) || isLost() {
 		return false, nil
+	}
+	if pending(warns) {
+		return waiting(warns...)
 	}
 	if !finish(warns) {
 		return false, nil
