@@ -4,6 +4,12 @@
     once every Ready node runs this pod with it (image adoption, docs/managed-sandbox.md §6). Vars: pc_sbx_images
     (pc_sandbox_images), pc_sbx_reg_ca, pc_sbx_reg_system_ns. -#}
 {%- set ns = pc_sbx_reg_system_ns | default('sandbox-system') -%}
+{#- Stage 55 applies this in two parts (docs/template-updates.md §5.3): `base` (everything but the portal's patch right:
+    the ConfigMap, the DaemonSet, the import-worker read and the admission policy) first, then, once a probe shows the
+    API server enforcing the policy, `grant` (the Role and RoleBinding that let the portal patch the DaemonSets). Unset
+    renders both, for the tests. -#}
+{%- set part = pc_prepull_part | default('all') -%}
+{%- if part in ['all', 'base'] %}
 apiVersion: v1
 kind: ConfigMap
 metadata: {name: sandbox-registry, namespace: "{{ ns }}"}
@@ -45,6 +51,7 @@ spec:
         - name: pause
           image: "{{ pc_ver.pause_image }}"
           resources: {requests: {cpu: 1m, memory: 4Mi}, limits: {cpu: 10m, memory: 16Mi}}
+{% endif -%}
 {# The portal's sandbox mirror (docs/template-updates.md §5.3): its identity on this cluster (the sandbox provider's
     kubeconfig: ServiceAccount proxcloud in proxcloud-system, deploy/sandbox-cluster/rbac.yaml) may get and patch the two
     prepull DaemonSets by name and nothing else in this namespace. The admission policy lets such a write change the
@@ -69,6 +76,7 @@ has({{ x }}.securityContext) && has({{ x }}.securityContext.runAsNonRoot) && {{ 
 {%- endmacro -%}
 {%- set pf = pc_prepull_policy_fields -%}
 {%- set ds_fields = pf.daemonset + (pf.template | map('regex_replace', '^', 'template.') | list) %}
+{% if part in ['all', 'grant'] %}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -84,6 +92,8 @@ kind: RoleBinding
 metadata: {name: proxcloud-template-prepull, namespace: "{{ ns }}"}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: proxcloud-template-prepull}
 subjects: [{kind: ServiceAccount, name: proxcloud, namespace: proxcloud-system}]
+{% endif %}
+{% if part in ['all', 'base'] %}
 ---
 # The trusted sandbox-import worker's image ref (an operator-owned Secret holding no credential): the portal reads it to
 # start digest imports and the sandbox mirror's copy worker. This one Secret, get only.
@@ -177,3 +187,4 @@ metadata: {name: proxcloud-template-prepull-images-only}
 spec:
   policyName: proxcloud-template-prepull-images-only
   validationActions: [Deny]
+{% endif %}

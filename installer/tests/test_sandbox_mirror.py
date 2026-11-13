@@ -263,13 +263,15 @@ class PinMergeTests(unittest.TestCase):
 
 
 class PrepullPolicyTests(unittest.TestCase):
-    def render(self):
+    def render(self, part=None):
         pc = copy.deepcopy(DEFAULTS)
         pc["sandbox"]["registry"]["address"] = REG
         imgs = f.sandbox_images({"base": "ghcr.io/mutex-solutions/sandbox-base:20261101-aaaaaaa@" + D1}, REG)
-        t = Templar(loader=DataLoader(), variables={"pc": pc, "pc_sbx_images": imgs, "pc_sbx_reg_ca": "CA",
-                                                    "pc_ver": {"pause_image": "pause"}, "pc_sbx_reg_system_ns": "sandbox-system",
-                                                    **POLICY})
+        v = {"pc": pc, "pc_sbx_images": imgs, "pc_sbx_reg_ca": "CA", "pc_ver": {"pause_image": "pause"},
+             "pc_sbx_reg_system_ns": "sandbox-system", **POLICY}
+        if part:
+            v["pc_prepull_part"] = part
+        t = Templar(loader=DataLoader(), variables=v)
         text = t.template((INSTALLER / "playbooks/templates/sandbox-prepull.yml.j2").read_text())
         return {(d["kind"], d["metadata"]["name"]): d for d in yaml.safe_load_all(text)}
 
@@ -290,6 +292,45 @@ class PrepullPolicyTests(unittest.TestCase):
         self.assertEqual(docs[("RoleBinding", "proxcloud-import-worker")]["subjects"], rb["subjects"])
         roles = [d for (k, _), d in docs.items() if k in ("Role", "ClusterRole")]
         self.assertEqual(len(roles), 2, "no other Role may be rendered next to the prepull")
+
+    def test_the_grant_is_rendered_apart_from_everything_else(self):
+        grant = {("Role", "proxcloud-template-prepull"), ("RoleBinding", "proxcloud-template-prepull")}
+        base, granted, whole = set(self.render("base")), set(self.render("grant")), set(self.render())
+        self.assertEqual(granted, grant)
+        self.assertEqual(base, whole - grant)
+        self.assertIn(("ValidatingAdmissionPolicy", "proxcloud-template-prepull-images-only"), base)
+        self.assertIn(("ValidatingAdmissionPolicyBinding", "proxcloud-template-prepull-images-only"), base)
+        self.assertIn(("DaemonSet", "template-prepull"), base)
+
+    def test_stage55_grants_the_patch_right_only_behind_an_enforced_policy(self):
+        play = STAGE55[1]
+        names = [t.get("name") for t in play["tasks"]]
+        apply_base = task(play, "Apply the prepull and the registry's address on the sandbox cluster")
+        self.assertEqual(apply_base["vars"]["pc_prepull_part"], "base")
+        blk = task(play, "Grant the portal the prepull patch right behind the admission policy")
+        self.assertLess(names.index(apply_base["name"]), names.index(blk["name"]))
+        steps = [t["name"] for t in blk["block"]]
+        self.assertEqual(steps, ["Wait until the API server enforces the prepull admission policy",
+                                 "Check that the admission policy refused the probe",
+                                 "Grant the portal get and patch on the prepull DaemonSets"])
+        probe, check, grant = blk["block"]
+        cmd = probe["ansible.builtin.command"]
+        for want in ("--dry-run=server", "--as=system:serviceaccount:proxcloud-system:proxcloud", "--as-group=system:masters",
+                     "patch daemonset template-prepull"):
+            self.assertIn(want, cmd)
+        self.assertIn("proxcloud-template-prepull-images-only", probe["until"])
+        self.assertEqual(probe["until"], check["ansible.builtin.assert"]["that"])
+        self.assertLessEqual(probe["retries"] * probe["delay"], 120, "the wait is bounded")
+        self.assertEqual(grant["vars"]["pc_prepull_part"], "grant")
+        # Every other apply of this template renders the base part only: no other task can grant early.
+        for t in play["tasks"]:
+            for sub in [t] + t.get("block", []) + t.get("rescue", []):
+                if "sandbox-prepull.yml.j2" in json.dumps(sub.get("ansible.builtin.command", "")):
+                    self.assertIn(sub.get("vars", {}).get("pc_prepull_part"), ("base", "grant"), sub["name"])
+        # A policy that never takes effect revokes the grant and stops the stage.
+        revoke, stop = blk["rescue"]
+        self.assertIn("delete rolebinding proxcloud-template-prepull", revoke["ansible.builtin.command"])
+        self.assertIn("ansible.builtin.fail", stop)
 
     def test_policy_covers_every_kubernetes_135_field(self):
         # The reviewer's gap (hostnameOverride, workloadRef, restartPolicyRules) is closed, and nothing else is open.
