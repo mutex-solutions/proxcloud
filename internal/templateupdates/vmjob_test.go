@@ -174,6 +174,11 @@ func (f *fakePVE) CreateVM(_ context.Context, node string, params map[string]str
 	defer f.mu.Unlock()
 	id, _ := strconv.Atoi(params["vmid"])
 	f.call("create "+params["vmid"], true)
+	// PVE 9.2 checks a create's tags with VM.Config.Options on /vms/<id> without the pool; the provider token only has
+	// rights through pc-templates, so the create task fails (verified on PVE 9.2.21).
+	if _, ok := params["tags"]; ok {
+		return "", &pve.APIError{Status: 403, Message: "Permission check failed (/vms/" + params["vmid"] + ", VM.Config.Options)"}
+	}
 	if _, ok := f.vms[id]; ok {
 		return "", errors.New("VM " + params["vmid"] + " already exists")
 	}
@@ -784,5 +789,83 @@ func TestPayloadValidation(t *testing.T) {
 	raw := []byte(`{"version":1,"package":"proxcloud-vm-debian-13","extra":1}`)
 	if _, err := DecodeVMPayload(raw); err == nil {
 		t.Fatal("unknown field accepted")
+	}
+}
+
+// PVE 9.2: a create's tags are checked on /vms/<id> without the pool (the fake refuses them as PVE does), so the job
+// creates the VM untagged and stamps its ownership tag with the import write. Between the two, the VM is ours only
+// by exactly this job's build name, membership of pc-templates and the absence of every tag.
+func TestOwnershipWindowBeforeTheImportWrite(t *testing.T) {
+	x, pv, _, _, p := setup(t)
+	other := "11111111-2222-3333-4444-555555555555"
+	tpl := pve.TemplatePool
+	for id, cfg := range map[int]pve.VMConfig{
+		9201: {"name": buildName(testJob), "pool": tpl},
+		9202: {"name": buildName(testJob), "pool": "pc-tenant1"},
+		9203: {"name": buildName(other), "pool": tpl},
+		9204: {"name": buildName(testJob), "pool": tpl, "tags": "proxcloud"},
+		9205: {"name": buildName(testJob), "pool": tpl, "tags": OwnerTag(testJob) + ";" + pve.TagTemplatePub},
+		9206: {"name": "pc-tu-build-x", "pool": tpl},
+		9207: {"name": "anything", "pool": tpl, "tags": pve.TagManaged + ";" + OwnerTag(testJob)},
+	} {
+		pv.vms[id] = &fakeVM{node: "pve1", cfg: cfg}
+	}
+	want := map[int]bool{9201: true, 9202: false, 9203: false, 9204: false, 9205: false, 9206: false, 9207: true}
+	for id, w := range want {
+		exists, own, _, err := x.owned(context.Background(), testJob, p, id)
+		if err != nil || !exists || own != w {
+			t.Errorf("VM %d: exists=%v own=%v err=%v, want own=%v", id, exists, own, err, w)
+		}
+	}
+}
+
+// A job that died between the untagged create and the import write finds its own empty VM by name, removes it and
+// starts over; an untagged VM with another job's build name is never touched.
+func TestExecutorRemovesItsUntaggedHalfCreatedVM(t *testing.T) {
+	x, pv, _, rec, p := setup(t)
+	name := uploadName(testJob, 1, p.DiskDigest)
+	pv.files["nas-import:import/"+name] = p.DiskBytes
+	other := "11111111-2222-3333-4444-555555555555"
+	pv.vms[9201] = &fakeVM{node: "pve1", cfg: pve.VMConfig{"name": buildName(testJob), "pool": pve.TemplatePool}}
+	pv.vms[9202] = &fakeVM{node: "pve1", cfg: pve.VMConfig{"name": buildName(other), "pool": pve.TemplatePool}}
+	rec.m[testJob] = Receipt{ID: testJob, Payload: p, Step: StepCreating, UploadFile: name, VMID: 9201}
+	if err := x.Run(context.Background(), testJob, p, &testFence{epoch: 2, budget: -1}); err != nil {
+		t.Fatal(err)
+	}
+	destroyed := false
+	for _, c := range pv.calls {
+		destroyed = destroyed || c == "destroy 9201"
+		if strings.HasSuffix(c, " 9202") {
+			t.Fatalf("another job's VM touched: %v", pv.calls)
+		}
+	}
+	if !destroyed {
+		t.Fatalf("the half-created VM was not removed: %v", pv.calls)
+	}
+	r, _ := rec.Load(context.Background(), testJob)
+	if r.Step != StepTemplated || pv.vms[r.VMID] == nil || !pv.vms[r.VMID].template {
+		t.Fatalf("receipt %+v", r)
+	}
+	if pv.vms[9202].cfg.Str("name") != buildName(other) {
+		t.Fatal("another job's VM changed")
+	}
+}
+
+// A superseded acquisition whose untagged create landed after it lost its lease leaves an empty VM with only this
+// job's build name: the orphan sweep removes it like a tagged one, and never an untagged VM of another job.
+func TestSweepRemovesUntaggedOrphanOfThisJobOnly(t *testing.T) {
+	x, pv, _, _, p := setup(t)
+	other := "11111111-2222-3333-4444-555555555555"
+	pv.vms[9201] = &fakeVM{node: "pve1", cfg: pve.VMConfig{"name": buildName(testJob), "pool": pve.TemplatePool}}
+	pv.vms[9202] = &fakeVM{node: "pve1", cfg: pve.VMConfig{"name": buildName(other), "pool": pve.TemplatePool}}
+	pv.vms[9203] = &fakeVM{node: "pve1", cfg: pve.VMConfig{"name": buildName(testJob), "pool": "pc-tenant1"}}
+	if warns := x.sweepOrphans(context.Background(), &testFence{epoch: 1, budget: -1}, testJob, p, 0); len(warns) != 0 {
+		t.Fatalf("warnings: %v", warns)
+	}
+	if pv.vms[9201] != nil {
+		t.Fatal("this job's untagged orphan was left in pc-templates")
+	}
+	if pv.vms[9202] == nil || pv.vms[9203] == nil || pv.vms[9200] == nil {
+		t.Fatalf("a VM that is not this job's was removed: %v", pv.calls)
 	}
 }
