@@ -64,8 +64,10 @@ func (s *fakeJobs) Complete(ctx context.Context, _ *durablejobs.Job, fn func(con
 	if s.lost() {
 		return durablejobs.ErrLeaseLost
 	}
-	if err := fn(ctx); err != nil {
-		return err
+	if fn != nil {
+		if err := fn(ctx); err != nil {
+			return err
+		}
 	}
 	s.mu.Lock()
 	s.completed = true
