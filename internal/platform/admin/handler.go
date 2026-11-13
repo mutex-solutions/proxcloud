@@ -107,8 +107,10 @@ type Handler struct {
 	durableValidate      func(*durablejobs.Job) error
 	// templateUpdates is the GHCR template update service (SetTemplateUpdates; nil → 503).
 	templateUpdates *templateupdates.Service
-	// providerAttach is the bulk attach of a provider to existing projects (SetProviderAttach; nil → 503).
+	// providerAttach is the bulk attach of a provider to existing projects (SetProviderAttach; nil → 503); canAttach
+	// refuses a provider this API cannot attach projects to (nil = no check).
 	providerAttach *providerattach.Service
+	canAttach      func(*externalservice.ExternalService) error
 	// githubOptions overrides the GitHub endpoints for the integration token check (tests only).
 	githubOptions templateupdates.Options
 	// githubCountFn overrides the GitHub integration count (tests only; nil = the repository).

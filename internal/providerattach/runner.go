@@ -28,8 +28,8 @@ const (
 	OutcomeDeleting        = "deleting"
 )
 
-// AttachFunc attaches one project to the provider through the per-project attach path (project.Handler.AttachByOperator
-// with bulk=true): the outcome, or the provisioning error (never stored, only classified).
+// AttachFunc attaches one project to the provider through the per-project attach path (project.Handler.AttachByOperator):
+// the outcome, or the provisioning error (never stored, only classified).
 type AttachFunc func(ctx context.Context, projectID string, es *externalservice.ExternalService) (string, error)
 
 // ProviderFunc loads the provider (decrypted); nil when it no longer exists.
@@ -41,9 +41,11 @@ type Runner struct {
 	Repo     Repo
 	Provider ProviderFunc
 	Attach   AttachFunc
-	Lease    time.Duration
-	Poll     time.Duration
-	Log      *slog.Logger
+	// CanAttach refuses a provider this API cannot attach projects to (project.Handler.CanAttach; nil = no check).
+	CanAttach func(*externalservice.ExternalService) error
+	Lease     time.Duration
+	Poll      time.Duration
+	Log       *slog.Logger
 	// AttemptTimeout bounds one project's provisioning (default 2 minutes).
 	AttemptTimeout time.Duration
 }
@@ -84,15 +86,36 @@ func (r *Runner) defaults() {
 	}
 }
 
-// RunOnce claims and runs at most one job; did reports whether one was claimed.
+// RunOnce claims and runs at most one job; did reports whether one was claimed. With nothing to claim it prunes the
+// items of runs finished more than ItemRetention ago (a few runs per pass).
 func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 	r.defaults()
 	j, err := r.Store.ClaimKinds(ctx, r.Lease, []string{durablejobs.ProviderAttach})
-	if err != nil || j == nil {
+	if err != nil {
 		return false, err
+	}
+	if j == nil {
+		return false, r.prune(ctx)
 	}
 	r.perform(ctx, j)
 	return true, nil
+}
+
+// prune removes the items of runs finished more than ItemRetention ago; the runs keep their frozen counts.
+func (r *Runner) prune(ctx context.Context) error {
+	runs, err := r.Repo.FinishedRunsToPrune(ctx, time.Now().UTC().Add(-ItemRetention), 5)
+	if err != nil {
+		return err
+	}
+	for i := range runs {
+		if !Terminal(runs[i].Status) {
+			continue
+		}
+		if err := r.Repo.PruneItems(ctx, runs[i].ID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // errStop ends an acquisition without acknowledging it: the lease was lost (another acquisition owns the job) or the
@@ -152,7 +175,8 @@ func (r *Runner) fail(parent context.Context, j *durablejobs.Job, isLost func() 
 	}
 }
 
-// execute plans the run once, then attaches its pending items with bounded concurrency, then finishes it.
+// execute plans the run (in batches, resumable), then attaches its pending items with bounded concurrency, then
+// finishes it.
 func (r *Runner) execute(ctx context.Context, a *acquisition, p Payload) error {
 	run, err := r.Repo.LoadRun(ctx, p.RunID)
 	if err != nil {
@@ -164,21 +188,14 @@ func (r *Runner) execute(ctx context.Context, a *acquisition, p Payload) error {
 	if Terminal(run.Status) {
 		return r.complete(ctx, a, run, run.Status, run.Code)
 	}
-	es, err := r.Provider(ctx, p.ServiceID)
-	if err != nil {
+	if es, stop, err := r.provider(ctx, a, run); err != nil || stop || es == nil {
 		return err
-	}
-	switch {
-	case es == nil:
-		return r.abort(ctx, a, run, CodeProviderMissing)
-	case es.IsDisabled():
-		return r.abort(ctx, a, run, CodeProviderDisabled)
 	}
 	if err := r.start(ctx, a, run); err != nil {
 		return err
 	}
-	if !run.Planned {
-		if err := r.plan(ctx, a, run, p.ServiceID); err != nil {
+	for !run.Planned {
+		if err := r.planBatch(ctx, a, run, p.ServiceID); err != nil {
 			return err
 		}
 	}
@@ -187,25 +204,62 @@ func (r *Runner) execute(ctx context.Context, a *acquisition, p Payload) error {
 	if err := r.requeueRunning(ctx, a, run.ID); err != nil {
 		return err
 	}
-	if err := r.workers(ctx, a, run, es); err != nil {
-		return err
+	for {
+		ended, err := r.workers(ctx, a, run)
+		if err != nil {
+			return err
+		}
+		if !ended {
+			break
+		}
+		// The provider was deleted, disabled or became unattachable mid-run: end the run on it (abort), unless it is
+		// usable again by now, then carry on.
+		if _, stop, err := r.provider(ctx, a, run); err != nil || stop {
+			return err
+		}
 	}
 	fresh, err := r.Repo.LoadRun(ctx, run.ID)
 	if err != nil {
 		return err
 	}
-	if fresh != nil && fresh.CancelRequested {
-		return r.cancelRest(ctx, a, fresh)
-	}
 	counts, err := r.Repo.Counts(ctx, run.ID)
 	if err != nil {
 		return err
+	}
+	// A cancel that arrived once every project was done changes nothing: the run completed.
+	if fresh != nil && fresh.CancelRequested && counts.Pending > 0 {
+		return r.cancelRest(ctx, a, fresh)
 	}
 	status := RunSucceeded
 	if counts.Failed > 0 {
 		status = RunCompletedWithFailures
 	}
 	return r.complete(ctx, a, fresh, status, "")
+}
+
+// provider loads the run's provider; a provider gone, disabled or no longer attachable ends the run (stop=true).
+func (r *Runner) provider(ctx context.Context, a *acquisition, run *Run) (es *externalservice.ExternalService, stop bool, err error) {
+	es, err = r.Provider(ctx, run.ServiceID)
+	if err != nil {
+		return nil, false, err
+	}
+	if code := r.unusable(es); code != "" {
+		return nil, true, r.abort(ctx, a, run, code)
+	}
+	return es, false, nil
+}
+
+// unusable is the code that stops a run on this provider ("" = usable).
+func (r *Runner) unusable(es *externalservice.ExternalService) string {
+	switch {
+	case es == nil:
+		return CodeProviderMissing
+	case es.IsDisabled():
+		return CodeProviderDisabled
+	case r.CanAttach != nil && r.CanAttach(es) != nil:
+		return CodeProviderUnsupport
+	}
+	return ""
 }
 
 // start marks the run running (fenced).
@@ -228,92 +282,98 @@ func (r *Runner) start(ctx context.Context, a *acquisition, run *Run) error {
 	})
 }
 
-// plan lists the scoped projects into items, once, in the same fenced transaction that marks the run planned. Projects
-// already attached and projects on their way out are recorded as skipped right away; the rest are pending.
-func (r *Runner) plan(ctx context.Context, a *acquisition, run *Run, serviceID string) error {
+// planBatch lists the next PlanBatch scoped projects (in id order, after Run.PlanCursor) and records them in one fenced
+// transaction with the advanced cursor: a run of any size is planned in short steps and a new acquisition resumes at
+// the cursor. A project already attached gets no item, only a count (Run.PlanSkipped); one on its way out or gone is an
+// item skipped with its code; the rest are pending.
+func (r *Runner) planBatch(ctx context.Context, a *acquisition, run *Run, serviceID string) error {
+	ids, err := r.scopeIDs(ctx, run, PlanBatch)
+	if err != nil {
+		return err
+	}
+	projects, err := r.Repo.ProjectsByID(ctx, ids)
+	if err != nil {
+		return err
+	}
 	var items []Item
+	skipped := map[string]int64{}
 	now := time.Now().UTC()
-	add := func(p ProjectRef, missing bool) {
-		it := Item{ID: ItemID(run.ID, p.ID), RunID: run.ID, ProjectID: p.ID, ProjectName: p.Name, OrganizationID: p.OrganizationID,
+	for _, id := range ids {
+		p, found := projects[id]
+		if found && p.HasService(serviceID) {
+			skipped[CodeAlreadyAttached]++
+			continue
+		}
+		it := Item{ID: ItemID(run.ID, id), RunID: run.ID, ProjectID: id, ProjectName: p.Name, OrganizationID: p.OrganizationID,
 			State: ItemPending, UpdatedAt: now}
 		switch {
-		case missing:
+		case !found:
 			it.State, it.Code = ItemSkipped, CodeNotFound
-		case p.HasService(serviceID):
-			it.State, it.Code = ItemSkipped, CodeAlreadyAttached
 		case p.Deleting():
 			it.State, it.Code = ItemSkipped, CodeDeleting
 		}
 		items = append(items, it)
 	}
-	switch run.Scope.Mode {
-	case ScopeRetry:
-		src, err := r.Repo.LoadRun(ctx, run.Scope.SourceRunID)
-		if err != nil {
-			return err
-		}
-		states := []string{ItemFailed}
-		if src != nil && src.Status != RunSucceeded && src.Status != RunCompletedWithFailures && src.Status != RunCancelled {
-			states = append(states, ItemPending, ItemRunning) // the source run died before finishing them
-		}
-		var ids []string
-		if src != nil {
-			prev, err := r.Repo.ItemsInState(ctx, src.ID, states...)
-			if err != nil {
-				return err
-			}
-			for _, it := range prev {
-				ids = append(ids, it.ProjectID)
-			}
-		}
-		projects, err := r.Repo.ProjectsByID(ctx, ids)
-		if err != nil {
-			return err
-		}
-		for _, id := range ids {
-			p, ok := projects[id]
-			if !ok {
-				p = ProjectRef{ID: id}
-			}
-			add(p, !ok)
-		}
-	case ScopeProjects:
-		projects, err := r.Repo.ProjectsByID(ctx, run.Scope.ProjectIDs)
-		if err != nil {
-			return err
-		}
-		for _, id := range run.Scope.ProjectIDs {
-			p, ok := projects[id]
-			if !ok {
-				p = ProjectRef{ID: id}
-			}
-			add(p, !ok)
-		}
-	default:
-		projects, err := r.Repo.ScopedProjects(ctx, run.Scope)
-		if err != nil {
-			return err
-		}
-		for _, p := range projects {
-			add(p, false)
-		}
+	done := len(ids) < PlanBatch
+	cursor := run.PlanCursor
+	if len(ids) > 0 {
+		cursor = ids[len(ids)-1]
 	}
 	return a.checkpoint(ctx, func(tc context.Context) error {
 		cur, err := r.Repo.LoadRunForUpdate(tc, run.ID)
 		if err != nil || cur == nil {
 			return err
 		}
-		if cur.Planned {
-			*run = *cur
+		if cur.Planned || cur.PlanCursor != run.PlanCursor {
+			*run = *cur // another acquisition planned this batch
 			return nil
 		}
 		if err := r.Repo.InsertItems(tc, items); err != nil {
 			return err
 		}
-		cur.Planned = true
+		for code, n := range skipped {
+			if cur.PlanSkipped == nil {
+				cur.PlanSkipped = map[string]int64{}
+			}
+			cur.PlanSkipped[code] += n
+		}
+		cur.PlanCursor, cur.Planned = cursor, done
 		*run = *cur
 		return r.Repo.SaveRun(tc, cur)
 	})
+}
+
+// scopeIDs is the next batch of project ids of the run's scope after its cursor (sorted).
+func (r *Runner) scopeIDs(ctx context.Context, run *Run, limit int) ([]string, error) {
+	after := run.PlanCursor
+	pick := func(all []string) []string {
+		var out []string
+		for _, id := range all { // all is sorted
+			if id > after {
+				out = append(out, id)
+				if len(out) == limit {
+					break
+				}
+			}
+		}
+		return out
+	}
+	switch run.Scope.Mode {
+	case ScopeProjects:
+		return pick(run.Scope.ProjectIDs), nil
+	case ScopeRetry:
+		src, err := r.Repo.LoadRun(ctx, run.Scope.SourceRunID)
+		if err != nil || src == nil {
+			return nil, err
+		}
+		states := []string{ItemFailed}
+		if !Terminal(src.Status) {
+			states = append(states, ItemPending, ItemRunning) // the source run died before finishing them
+		}
+		return r.Repo.ItemProjectIDs(ctx, src.ID, states, after, limit)
+	default:
+		return r.Repo.ScopedProjectIDs(ctx, run.Scope, after, limit)
+	}
 }
 
 // requeueRunning puts back the items an earlier acquisition left running.
@@ -338,9 +398,9 @@ func (r *Runner) requeueRunning(ctx context.Context, a *acquisition, runID strin
 	})
 }
 
-// workers attaches the pending items with run.Concurrency goroutines. A worker stops on a cancel request, a lost lease
-// or a database error (the first error wins).
-func (r *Runner) workers(ctx context.Context, a *acquisition, run *Run, es *externalservice.ExternalService) error {
+// workers attaches the pending items with run.Concurrency goroutines. A worker stops on a cancel request, a lost lease,
+// a provider that became unusable (ended=true: the caller decides) or a database error (the first error wins).
+func (r *Runner) workers(ctx context.Context, a *acquisition, run *Run) (ended bool, err error) {
 	n := min(max(run.Concurrency, MinConcurrency), MaxConcurrency)
 	var (
 		mu       sync.Mutex
@@ -357,12 +417,22 @@ func (r *Runner) workers(ctx context.Context, a *acquisition, run *Run, es *exte
 		mu.Unlock()
 		cancel()
 	}
+	end := func() {
+		mu.Lock()
+		ended = true
+		mu.Unlock()
+		cancel()
+	}
 	for range n {
 		wg.Go(func() {
 			for stop.Err() == nil {
-				more, err := r.one(stop, a, run.ID, es)
+				more, code, err := r.one(stop, a, run.ID)
 				if err != nil {
 					setErr(err)
+					return
+				}
+				if code != "" {
+					end()
 					return
 				}
 				if !more {
@@ -373,17 +443,19 @@ func (r *Runner) workers(ctx context.Context, a *acquisition, run *Run, es *exte
 	}
 	wg.Wait()
 	if firstErr != nil {
-		return firstErr
+		return false, firstErr
 	}
 	if a.lost() || ctx.Err() != nil {
-		return errStop
+		return false, errStop
 	}
-	return nil
+	return ended, nil
 }
 
-// one takes the next pending item (fenced: running, attempts+1, this epoch), attaches it, and records the result
-// (fenced). more=false when nothing is left or a cancel was requested.
-func (r *Runner) one(ctx context.Context, a *acquisition, runID string, es *externalservice.ExternalService) (more bool, err error) {
+// one takes the next pending item (fenced: running, attempts+1, this epoch), re-reads the provider (a disable or a
+// credential rotation mid-run applies to the next project), attaches it, and records the result (fenced).
+// more=false when nothing is left or a cancel was requested; code is set when the provider became unusable (the item
+// goes back to pending).
+func (r *Runner) one(ctx context.Context, a *acquisition, runID string) (more bool, code string, err error) {
 	var it *Item
 	cancelled := false
 	err = a.checkpoint(ctx, func(tc context.Context) error {
@@ -407,7 +479,26 @@ func (r *Runner) one(ctx context.Context, a *acquisition, runID string, es *exte
 		return nil
 	})
 	if err != nil || cancelled || it == nil {
-		return false, err
+		return false, "", err
+	}
+	// The item is taken: finish it even when the other workers are stopping (their stop must not read as an error here).
+	read, done := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer done()
+	run, err := r.Repo.LoadRun(read, runID)
+	if err != nil || run == nil {
+		return false, "", err
+	}
+	es, err := r.Provider(read, run.ServiceID)
+	if err != nil {
+		return false, "", err
+	}
+	if code := r.unusable(es); code != "" {
+		// Not this project's fault: put it back; abort marks every unfinished item with the code.
+		err = a.checkpoint(ctx, func(tc context.Context) error {
+			it.State, it.Attempts = ItemPending, it.Attempts-1
+			return r.Repo.SaveItem(tc, it)
+		})
+		return false, code, err
 	}
 	attemptCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.AttemptTimeout)
 	outcome, aerr := r.Attach(attemptCtx, it.ProjectID, es)
@@ -422,7 +513,7 @@ func (r *Runner) one(ctx context.Context, a *acquisition, runID string, es *exte
 		it.State, it.Code = state, code
 		return r.Repo.SaveItem(tc, it)
 	})
-	return err == nil, err
+	return err == nil, "", err
 }
 
 // classify maps an attach outcome or error to the item's state and fixed code.
@@ -491,7 +582,7 @@ func (r *Runner) complete(ctx context.Context, a *acquisition, run *Run, status,
 				return err
 			}
 			now := time.Now().UTC()
-			cur.Status, cur.Code, cur.Counts, cur.FinishedAt = status, code, counts, &now
+			cur.Status, cur.Code, cur.Counts, cur.FinishedAt = status, code, cur.WithPlanSkipped(counts), &now
 		}
 		return r.Repo.SaveRun(tc, cur)
 	})

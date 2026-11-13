@@ -10,42 +10,26 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 )
 
-// PUT /service/{id}/attach-policy sets config.attachToNewProjects and nothing else: the services map, the quota and every
-// other config key stay as stored (several provider saves replace a whole map, this one must not).
-func TestApplyAttachPolicyKeepsOtherConfig(t *testing.T) {
-	stored := func() pgdoc.M {
-		return pgdoc.M{"name": "pve", "config": pgdoc.M{
-			"provider":     "proxmox",
-			"services":     pgdoc.M{"compute": pgdoc.M{"r1": true}},
-			"provisioning": pgdoc.M{"quota": pgdoc.M{"servers": 5}},
-		}}
-	}
-	put := func(doc pgdoc.M, body string) error {
-		if herr := applyAttachPolicy(httptest.NewRequest(http.MethodPut, "/service/s/attach-policy", strings.NewReader(body)), doc); herr != nil {
-			return herr
+// PUT /service/{id}/attach-policy takes {"attachToNewProjects": bool} and nothing else. (The write itself is a
+// single-key jsonb_set — tested against PostgreSQL in test/integration/provider_attach_test.go.)
+func TestDecodeAttachPolicy(t *testing.T) {
+	decode := func(body string) (bool, error) {
+		v, herr := decodeAttachPolicy(httptest.NewRequest(http.MethodPut, "/service/s/attach-policy", strings.NewReader(body)))
+		if herr != nil {
+			return v, herr
 		}
-		return nil
+		return v, nil
 	}
-	doc := stored()
-	if err := put(doc, `{"attachToNewProjects":false}`); err != nil {
-		t.Fatal(err)
+	if v, err := decode(`{"attachToNewProjects":false}`); err != nil || v {
+		t.Fatalf("false: %v %v", v, err)
 	}
-	cfg := doc["config"].(pgdoc.M)
-	if cfg[externalservice.AttachPolicyKey] != false || cfg["provider"] != "proxmox" ||
-		cfg["services"].(pgdoc.M)["compute"].(pgdoc.M)["r1"] != true || cfg["provisioning"].(pgdoc.M)["quota"].(pgdoc.M)["servers"] != 5 {
-		t.Fatalf("config after the policy save: %#v", cfg)
-	}
-	if err := put(doc, `{"attachToNewProjects":true}`); err != nil || doc["config"].(pgdoc.M)[externalservice.AttachPolicyKey] != true {
-		t.Fatalf("turning it back on: %v %#v", err, doc["config"])
+	if v, err := decode(`{"attachToNewProjects":true}`); err != nil || !v {
+		t.Fatalf("true: %v %v", v, err)
 	}
 	for _, bad := range []string{`{}`, `{"attachToNewProjects":"false"}`, `{"attachToNewProjects":0}`, `{"attachToNewProjects":null}`,
 		`{"attachToNewProjects":true,"services":{}}`, `not json`} {
-		doc := stored()
-		if err := put(doc, bad); err == nil {
+		if _, err := decode(bad); err == nil {
 			t.Fatalf("%s accepted", bad)
-		}
-		if _, set := doc["config"].(pgdoc.M)[externalservice.AttachPolicyKey]; set {
-			t.Fatalf("%s wrote the policy", bad)
 		}
 	}
 }

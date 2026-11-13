@@ -248,15 +248,73 @@ func projectFilter(s Scope) pgdoc.M {
 	return nil
 }
 
-// ScopedProjects lists the projects a scope selects (not ScopeRetry), in id order.
-func (r Repo) ScopedProjects(ctx context.Context, s Scope) ([]ProjectRef, error) {
+// ScopedProjectIDs lists up to limit ids of the projects a scope selects (not ScopeRetry) after the id after, in id order.
+func (r Repo) ScopedProjectIDs(ctx context.Context, s Scope, after string, limit int) ([]string, error) {
 	f := projectFilter(s)
 	if f == nil {
 		return nil, fmt.Errorf("providerattach: no project filter for scope %q", s.Mode)
 	}
-	out := []ProjectRef{}
-	err := r.DB.C("project").Find(ctx, f, &out, pgdoc.Sort(pgdoc.Asc("_id")))
+	if after != "" {
+		f = pgdoc.M{"$and": []pgdoc.M{f, {"_id": pgdoc.M{"$gt": after}}}}
+	}
+	var list []struct {
+		ID string `json:"id"`
+	}
+	if err := r.DB.C("project").Find(ctx, f, &list, pgdoc.Sort(pgdoc.Asc("_id")), pgdoc.Limit(int64(limit))); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(list))
+	for _, p := range list {
+		out = append(out, p.ID)
+	}
+	return out, nil
+}
+
+// ItemProjectIDs lists up to limit project ids of a run's items in the states, after the project id after, in order.
+func (r Repo) ItemProjectIDs(ctx context.Context, runID string, states []string, after string, limit int) ([]string, error) {
+	rows, err := r.q(ctx).Query(ctx, `SELECT doc->>'projectId' FROM "`+ItemCollection+`" WHERE doc->>'runId'=$1 AND doc->>'state'=ANY($2)
+	  AND doc->>'projectId' > $3 ORDER BY doc->>'projectId' LIMIT $4`, runID, states, after, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// CountScope counts the projects a scope selects now (not ScopeRetry).
+func (r Repo) CountScope(ctx context.Context, s Scope) (int64, error) {
+	f := projectFilter(s)
+	if f == nil {
+		return 0, fmt.Errorf("providerattach: no project filter for scope %q", s.Mode)
+	}
+	return r.DB.C("project").Count(ctx, f)
+}
+
+// FinishedRunsToPrune lists runs finished before cutoff whose items are still stored (oldest first).
+func (r Repo) FinishedRunsToPrune(ctx context.Context, cutoff time.Time, limit int64) ([]Run, error) {
+	out := []Run{}
+	err := r.runs().Find(ctx, pgdoc.M{"finishedAt": pgdoc.M{"$lt": cutoff}, "itemsPruned": pgdoc.M{"$ne": true}}, &out,
+		pgdoc.Sort(pgdoc.AscK("finishedAt", pgdoc.KTime)), pgdoc.Limit(limit))
 	return out, err
+}
+
+// PruneItems deletes a finished run's items and marks it pruned (its counts are frozen on the run).
+func (r Repo) PruneItems(ctx context.Context, runID string) error {
+	return r.DB.WithTx(ctx, func(tc context.Context) error {
+		if _, err := r.items().DeleteMany(tc, pgdoc.M{"runId": runID}); err != nil {
+			return err
+		}
+		_, err := r.runs().SetByID(tc, runID, pgdoc.M{"itemsPruned": true}, nil)
+		return err
+	})
 }
 
 // ProjectsByID reads the given projects (missing ones are absent from the map).

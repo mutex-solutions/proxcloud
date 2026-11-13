@@ -30,6 +30,7 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -38,6 +39,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/client"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metrics"
@@ -446,28 +448,72 @@ func (h *Handler) externalServiceUpdateConfiguration(w http.ResponseWriter, r *h
 }
 
 // externalServiceUpdateAttachPolicy handles PUT /{id}/attach-policy: {"attachToNewProjects": true|false} sets
-// config.attachToNewProjects and nothing else (every other config key is kept as stored). A missing or non-boolean
-// value is a 400 and stores nothing.
+// config.attachToNewProjects and nothing else, as a single-key write in the database (no read-modify-replace of the
+// doc: a connection save landing at the same time is neither reverted nor reverts this). It is not a connection or
+// status change, so the object-store and sandbox go-live checks do not apply. A missing or non-boolean value is a 400
+// and stores nothing.
 func (h *Handler) externalServiceUpdateAttachPolicy(w http.ResponseWriter, r *http.Request) {
-	h.serviceFieldSet(w, r, applyAttachPolicy)
+	if !h.require(w, r, externalServiceManagePerm) {
+		return
+	}
+	v, herr := decodeAttachPolicy(r)
+	if herr != nil {
+		httpx.WriteError(w, herr)
+		return
+	}
+	id := chi.URLParam(r, "id")
+	ok, err := h.repo.SetAttachPolicy(r.Context(), id, v)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	if !ok {
+		httpx.WriteError(w, serviceNotFoundErr(id))
+		return
+	}
+	doc, err := h.repo.FindDoc(r.Context(), externalServiceCollection, id)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	if doc == nil {
+		httpx.WriteError(w, serviceNotFoundErr(id))
+		return
+	}
+	shapeExternalService(doc)
+	httpx.OK(w, doc)
 }
 
-func applyAttachPolicy(req *http.Request, doc pgdoc.M) *httpx.HTTPError {
+// decodeAttachPolicy reads {"attachToNewProjects": bool} and nothing else.
+func decodeAttachPolicy(req *http.Request) (bool, *httpx.HTTPError) {
 	var body map[string]any
 	if err := json.NewDecoder(io.LimitReader(req.Body, 4<<10)).Decode(&body); err != nil {
-		return httpx.BadRequest("Invalid request body")
+		return false, httpx.BadRequest("Invalid request body")
 	}
 	for k := range body {
 		if k != externalservice.AttachPolicyKey {
-			return httpx.BadRequest("Only " + externalservice.AttachPolicyKey + " can be set here")
+			return false, httpx.BadRequest("Only " + externalservice.AttachPolicyKey + " can be set here")
 		}
 	}
 	v, ok := body[externalservice.AttachPolicyKey].(bool)
 	if !ok {
-		return httpx.BadRequest(externalservice.AttachPolicyKey + " must be true or false")
+		return false, httpx.BadRequest(externalservice.AttachPolicyKey + " must be true or false")
 	}
-	ensureConfig(doc)[externalservice.AttachPolicyKey] = v
-	return nil
+	return v, nil
+}
+
+// SetAttachPolicy writes config.attachToNewProjects alone (jsonb_set on the stored doc; a doc without a config object
+// gets one). False when there is no such provider.
+func (r *Repo) SetAttachPolicy(ctx context.Context, id string, on bool) (bool, error) {
+	tag, err := r.db.Pool.Exec(ctx, `UPDATE "externalService" SET doc=jsonb_set(
+	   CASE WHEN jsonb_typeof(doc->'config')='object' THEN doc ELSE jsonb_set(doc,'{config}','{}'::jsonb,true) END,
+	   '{config,`+externalservice.AttachPolicyKey+`}',to_jsonb($2::boolean),true) WHERE id=$1`, id, on)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
+			return false, nil
+		}
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // externalServiceUpdateMetricsConfig handles PUT /{id}/metrics-config:

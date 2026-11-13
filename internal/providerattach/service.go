@@ -36,6 +36,7 @@ var (
 	ErrNotDone   = errors.New("this bulk attach is still running; retry its failed projects once it has finished")
 	ErrBadScope  = errors.New("invalid scope")
 	ErrDisabled  = errors.New("the provider is DISABLED: enable it before attaching projects to it")
+	ErrPruned    = errors.New("this bulk attach is older than 30 days and its per-project results were removed; start a new one")
 	ErrBadParams = errors.New("invalid request")
 )
 
@@ -224,7 +225,7 @@ func (s *Service) view(ctx context.Context, run *Run) (*View, error) {
 		if err != nil {
 			return nil, err
 		}
-		v.Counts = c
+		v.Counts = run.WithPlanSkipped(c)
 	}
 	if run.JobID != "" && s.Jobs != nil {
 		if j, err := s.Jobs.Get(ctx, run.JobID); err == nil {
@@ -306,20 +307,23 @@ func (s *Service) Retry(ctx context.Context, serviceID, serviceName, runID, acto
 	if !Terminal(v.Status) {
 		return nil, ErrNotDone
 	}
+	if v.ItemsPruned {
+		return nil, ErrPruned
+	}
 	states := []string{ItemFailed}
 	if v.Status == RunFailed {
 		states = append(states, ItemPending, ItemRunning)
 	}
-	items, err := s.Repo.ItemsInState(ctx, runID, states...)
+	ids, err := s.Repo.ItemProjectIDs(ctx, runID, states, "", 1)
 	if err != nil {
 		return nil, err
 	}
-	if len(items) == 0 && !(v.Status == RunFailed && !v.Planned) {
-		return nil, ErrNoFailed
-	}
 	scope := Scope{Mode: ScopeRetry, SourceRunID: runID}
 	if v.Status == RunFailed && !v.Planned {
-		scope = v.Scope // it died before listing its projects: run its scope again
+		// It died before listing every project: run its whole scope again (already attached ones are skipped).
+		scope = v.Scope
+	} else if len(ids) == 0 {
+		return nil, ErrNoFailed
 	}
 	if concurrency == 0 {
 		concurrency = v.Concurrency

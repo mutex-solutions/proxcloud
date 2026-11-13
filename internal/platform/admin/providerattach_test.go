@@ -44,6 +44,29 @@ func TestBulkAttachRouteGates(t *testing.T) {
 	}
 }
 
+// Start and retry need both admin:service:manage and admin:project:update; the picker and the preview need
+// admin:service:read and admin:project:read. A grant that holds only one of the two keys is refused.
+func TestBulkAttachNeedsBothKeys(t *testing.T) {
+	gate := func(granted []string, perms ...string) bool { return missingPerm(granted, perms) == "" }
+	serviceOnly := []string{"admin:service:*"}
+	projectOnly := []string{"admin:project:*"}
+	both := []string{"admin:service:*", "admin:project:*"}
+	for _, perms := range [][]string{{bulkAttachManagePerm, projectUpdatePerm}, {bulkAttachReadPerm, projectReadPerm}} {
+		if gate(serviceOnly, perms...) || gate(projectOnly, perms...) || !gate(both, perms...) {
+			t.Fatalf("%v: one key must not be enough", perms)
+		}
+	}
+	// The built-in roles: ADMIN holds both; SUPPORT and VIEWER read both, start nothing.
+	if !gate(rolePermissions("ADMIN"), bulkAttachManagePerm, projectUpdatePerm) {
+		t.Fatal("ADMIN must start a bulk attach")
+	}
+	for _, role := range []string{"SUPPORT", "VIEWER"} {
+		if gate(rolePermissions(role), bulkAttachManagePerm, projectUpdatePerm) || !gate(rolePermissions(role), bulkAttachReadPerm, projectReadPerm) {
+			t.Fatalf("%s reads but does not start", role)
+		}
+	}
+}
+
 // The preview changes nothing, so the audit middleware does not log it; start/cancel/retry are logged.
 func TestBulkAttachPreviewNotAudited(t *testing.T) {
 	if !auditSkip("/api/v1/admin/service/s/bulk-attach/preview") {

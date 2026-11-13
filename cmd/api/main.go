@@ -780,7 +780,8 @@ func run() error {
 			}
 			return err
 		},
-		// The per-project attach POST: the same operator attach the bulk attach runs per project.
+		// The per-project attach POST: the same operator attach the bulk attach runs per project, bounded like one bulk
+		// attempt and past the request's own life (it may create things on the provider).
 		Attach: func(ctx context.Context, projectID, esID string) (string, error) {
 			es, err := esSvc.Get(ctx, esID)
 			if err != nil {
@@ -789,7 +790,9 @@ func run() error {
 			if es == nil {
 				return "", fmt.Errorf("external service %s not found", esID)
 			}
-			outcome, err := projectH.AttachByOperator(ctx, projectID, es, false)
+			attempt, cancel := context.WithTimeout(context.WithoutCancel(ctx), project.AttachTimeout)
+			defer cancel()
+			outcome, err := projectH.AttachByOperator(attempt, projectID, es)
 			if err != nil {
 				log.Error("admin project attach", "project", projectID, "es", esID, "err", err)
 			}
@@ -944,7 +947,7 @@ func run() error {
 	if err := paSvc.Repo.Ensure(ctx); err != nil {
 		return fmt.Errorf("provider attach store: %w", err)
 	}
-	adminH.SetProviderAttach(paSvc)
+	adminH.SetProviderAttach(paSvc, projectH.CanAttach)
 	paRunner := &providerattach.Runner{
 		Store: jobStore, Repo: paSvc.Repo, Lease: cfg.Jobs.LeaseDuration, Log: log,
 		Provider: func(ctx context.Context, id string) (*externalservice.ExternalService, error) {
@@ -954,9 +957,8 @@ func run() error {
 			}
 			return es, err
 		},
-		Attach: func(ctx context.Context, projectID string, es *externalservice.ExternalService) (string, error) {
-			return projectH.AttachByOperator(ctx, projectID, es, true)
-		},
+		Attach:    projectH.AttachByOperator,
+		CanAttach: projectH.CanAttach,
 	}
 	paCtx, stopPA := context.WithCancel(ctx)
 	paDone := make(chan struct{})

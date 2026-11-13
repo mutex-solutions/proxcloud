@@ -115,18 +115,18 @@ func newAttachRig(t *testing.T) *attachRig {
 			return es, err
 		},
 		Attach: func(ctx context.Context, projectID string, es *externalservice.ExternalService) (string, error) {
-			return rig.projectH.AttachByOperator(ctx, projectID, es, true)
+			return rig.projectH.AttachByOperator(ctx, projectID, es)
 		},
 	}
 	rig.auditRepo = audit.NewRepo(db)
 	rig.adminH = admin.NewHandler(admin.NewRepo(db), nil, nil, nil, nil, nil, nil, nil, audit.NewService(rig.auditRepo, slog.Default()), rig.esSvc, "r1", attachIss, attachCid)
-	rig.adminH.SetProviderAttach(rig.svc)
+	rig.adminH.SetProviderAttach(rig.svc, rig.projectH.CanAttach)
 	rig.adminH.SetProjectCloudOps(&admin.ProjectCloudOps{Attach: func(ctx context.Context, projectID, esID string) (string, error) {
 		es, err := rig.esSvc.Get(ctx, esID)
 		if err != nil {
 			return "", err
 		}
-		return rig.projectH.AttachByOperator(ctx, projectID, es, false)
+		return rig.projectH.AttachByOperator(ctx, projectID, es)
 	}})
 	rig.router = chi.NewRouter()
 	rig.router.MethodNotAllowed(httpx.MethodNotAllowedHandler())
@@ -543,8 +543,10 @@ func TestBulkAttachCancelAndOneActivePerProvider(t *testing.T) {
 	_ = ctx
 }
 
-// TestBulkAttachPermissions: reading needs admin:service:read; starting, cancelling and retrying need
-// admin:service:manage (a SUPPORT operator, who may read, cannot start one), and a tenant gets nothing.
+// TestBulkAttachPermissions: reading needs admin:service:read (+ admin:project:read for the picker and the preview);
+// starting and retrying need admin:service:manage AND admin:project:update, cancelling admin:service:manage (a SUPPORT
+// operator, who may read, cannot start one), and a tenant gets nothing. The two-key requirement itself is unit-tested
+// (internal/platform/admin/providerattach_test.go): no built-in role holds one key without the other.
 func TestBulkAttachPermissions(t *testing.T) {
 	rig := newAttachRig(t)
 	ctx := context.Background()
@@ -552,7 +554,7 @@ func TestBulkAttachPermissions(t *testing.T) {
 	rig.project(t, "p1", "o1", project.StatusEnabled, "dns")
 	// LOCAL_IDP posture: the role comes from the adminPermission doc of the sub.
 	local := admin.NewHandler(admin.NewRepo(rig.db), nil, nil, nil, nil, nil, nil, nil, nil, rig.esSvc, "r1", "", "")
-	local.SetProviderAttach(rig.svc)
+	local.SetProviderAttach(rig.svc, nil)
 	router := chi.NewRouter()
 	local.Routes(router)
 	mustInsert(t, rig.db, "adminPermission", pgdoc.M{"_id": "support-sub", "role": "SUPPORT"})

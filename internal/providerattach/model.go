@@ -74,6 +74,13 @@ const (
 	MaxItemAttempts = 3
 	// JobAttempts is the durable job's max_attempts: a lost lease or a crash costs one, and the next acquisition resumes.
 	JobAttempts = 5
+	// MaxRunProjects caps the projects one run may attach (counted at the start, not counting those already attached).
+	MaxRunProjects = 5000
+	// PlanBatch is how many projects one planning step lists and records (one fenced transaction each): planning a run
+	// of any size is a series of short transactions, resumed from Run.PlanCursor.
+	PlanBatch = 500
+	// ItemRetention is how long the per-project items of a finished run are kept; the run keeps its frozen counts.
+	ItemRetention = 30 * 24 * time.Hour
 )
 
 // Scope selects the projects of a run.
@@ -102,15 +109,21 @@ func Terminal(state string) bool {
 
 // Run is one bulk attach (collection providerAttachRun; id = the run id, also in the job payload).
 type Run struct {
-	ID              string     `json:"id"`
-	ServiceID       string     `json:"serviceId"`
-	ServiceName     string     `json:"serviceName,omitempty"`
-	JobID           string     `json:"jobId,omitempty"`
-	Scope           Scope      `json:"scope"`
-	Concurrency     int        `json:"concurrency"`
-	RequestedBy     string     `json:"requestedBy"`
-	Status          string     `json:"status"`
-	Planned         bool       `json:"planned"`
+	ID          string `json:"id"`
+	ServiceID   string `json:"serviceId"`
+	ServiceName string `json:"serviceName,omitempty"`
+	JobID       string `json:"jobId,omitempty"`
+	Scope       Scope  `json:"scope"`
+	Concurrency int    `json:"concurrency"`
+	RequestedBy string `json:"requestedBy"`
+	Status      string `json:"status"`
+	Planned     bool   `json:"planned"`
+	// PlanCursor is the last project id planned (planning goes in id order, PlanBatch at a time).
+	PlanCursor string `json:"planCursor,omitempty"`
+	// PlanSkipped counts the projects the plan found already attached: they get no item row, only this count.
+	PlanSkipped map[string]int64 `json:"planSkipped,omitempty"`
+	// ItemsPruned: the per-project items were removed ItemRetention after the run finished (the counts stay).
+	ItemsPruned     bool       `json:"itemsPruned,omitempty"`
 	CancelRequested bool       `json:"cancelRequested,omitempty"`
 	CancelledBy     string     `json:"cancelledBy,omitempty"`
 	Code            string     `json:"code,omitempty"` // why a whole run ended early (provider_missing, provider_disabled)
@@ -141,6 +154,7 @@ const (
 	CodeTimeout           = "timeout"
 	CodeProviderMissing   = "provider_missing"
 	CodeProviderDisabled  = "provider_disabled"
+	CodeProviderUnsupport = "provider_unsupported"
 	CodeAttemptsExhausted = "attempts_exhausted"
 	CodeCancelled         = "cancelled"
 )
@@ -161,6 +175,19 @@ type Item struct {
 
 // ItemID is the item id of a project in a run.
 func ItemID(runID, projectID string) string { return runID + ":" + projectID }
+
+// WithPlanSkipped adds the projects the plan skipped without an item row to counts from the items.
+func (r *Run) WithPlanSkipped(c Counts) Counts {
+	for code, n := range r.PlanSkipped {
+		if c.ByCode == nil {
+			c.ByCode = map[string]int64{}
+		}
+		c.Total += n
+		c.Skipped += n
+		c.ByCode[code] += n
+	}
+	return c
+}
 
 // Counts are the items per state, plus the skipped ones per code.
 type Counts struct {

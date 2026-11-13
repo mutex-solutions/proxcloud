@@ -70,13 +70,14 @@ func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 	// provider-side setup was done at first bootstrap. Skip ALL the live calls — they are idempotent
 	// setup, not per-entry work, and re-running them on every project-open is both wasteful and a
 	// failure surface (a provider config change must not 500 an already-working project).
-	// A binding the bulk attach added before the first bootstrap does not count (Project.bootstrapped).
-	if p.bootstrapped() && len(p.ProvisionFailures) == 0 {
+	// A binding an operator attach added before the first bootstrap does not count (Project.bootstrapped).
+	// The lock is taken only when there is something to do: a first bootstrap, or a recorded failure due for its retry.
+	if p.bootstrapped() && !retryDue(p) {
 		return nil
 	}
-	// The provisioning writes the whole services list: under the project's attach lock, on the bindings as stored now, so an
-	// operator attach (per project or bulk) or a concurrent open landing meanwhile is neither lost nor done twice.
-	return h.withAttachLock(ctx, p.ID, func() error {
+	// Under the project's attach lock, on the bindings and failures as stored now, so an operator attach (per project or
+	// bulk) or a concurrent open landing meanwhile is neither lost nor done twice.
+	return h.withAttachLock(ctx, p.ID, func(guard func(context.Context) error) error {
 		if h.hasRepo() {
 			fresh, err := h.svc.repo.FindByID(ctx, p.ID)
 			if err != nil {
@@ -87,22 +88,24 @@ func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 				if fresh.Deleting() {
 					return nil
 				}
-				p.Services = fresh.Services
-				for id, f := range fresh.ProvisionFailures {
-					if _, ok := p.ProvisionFailures[id]; !ok {
-						if p.ProvisionFailures == nil {
-							p.ProvisionFailures = map[string]ProvisionFailure{}
-						}
-						p.ProvisionFailures[id] = f
-					}
-				}
+				p.Services, p.ProvisionFailures, p.Quota = fresh.Services, fresh.ProvisionFailures, fresh.Quota
 			}
 		}
-		if p.bootstrapped() && len(p.ProvisionFailures) == 0 {
+		if p.bootstrapped() && !retryDue(p) {
 			return nil
 		}
-		return h.provisionAll(ctx, p)
+		return h.provisionAll(withBindIntent(ctx, bindIntent{guard: guard}), p)
 	})
+}
+
+// retryDue reports a recorded provisioning failure whose retry is due.
+func retryDue(p *Project) bool {
+	for _, f := range p.ProvisionFailures {
+		if time.Since(f.At) >= provisionRetryAfter {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Handler) hasRepo() bool {
@@ -142,7 +145,9 @@ func (h *Handler) provisionAll(ctx context.Context, p *Project) error {
 		}
 	}
 	if len(cephES) == 0 && len(kamajiES) == 0 && len(dbaasES) == 0 && len(pveES) == 0 && len(truenasES) == 0 && len(dnsES) == 0 && len(sandboxES) == 0 {
-		return nil // no cloud provider configured → nothing to provision
+		// No provider to provision onto (none configured, or none with the policy on): this still is the first
+		// bootstrap, so marked operator bindings become ordinary ones.
+		return h.clearMarks(context.WithoutCancel(ctx), p)
 	}
 	changed := false
 	// A failure on a provider that has since gone or been disabled is nothing to retry.
@@ -172,14 +177,14 @@ func (h *Handler) provisionAll(ctx context.Context, p *Project) error {
 			changed = true
 		}
 	}
-	// The first bootstrap ran: bindings the bulk attach added before it are now ordinary ones.
-	if clearBulkMarks(p) {
-		changed = true
-	}
 	if changed {
-		if err := h.svc.Save(context.WithoutCancel(ctx), p); err != nil {
+		if err := h.setFailures(context.WithoutCancel(ctx), p); err != nil {
 			return err
 		}
+	}
+	// The first bootstrap ran: bindings an operator attach added before it are now ordinary ones.
+	if err := h.clearMarks(context.WithoutCancel(ctx), p); err != nil {
+		return err
 	}
 	if len(p.ServiceIDs()) > 0 {
 		return nil
@@ -192,6 +197,14 @@ func (h *Handler) provisionAll(ctx context.Context, p *Project) error {
 		return fmt.Errorf("project is on no provider, retrying later: %s", f.Message)
 	}
 	return nil
+}
+
+// setFailures writes the project's provisioning failures (alone: never the bindings).
+func (h *Handler) setFailures(ctx context.Context, p *Project) error {
+	if !h.hasRepo() {
+		return nil
+	}
+	return h.svc.repo.SetProvisionFailures(ctx, p.ID, p.ProvisionFailures)
 }
 
 // provisionOn makes one bounded attempt, past the request's own life: it may have created things on the provider.
@@ -222,10 +235,10 @@ func (h *Handler) provisionOn(ctx context.Context, p *Project, es *externalservi
 // pool (the tenancy boundary — every project VM lives in it, every list/mutation filters by it)
 // and its default security group, seed the provider default quota, and append the binding {serviceId, provider:"proxmox", region, pool}. The pool id is persisted
 // on the binding (RGWUIDFor precedent) so teardown never re-derives it.
-// Idempotent: a project already attached to this service is saved as-is.
+// Idempotent: a project already attached to this service is left as it is (no provider call, no write).
 func (h *Handler) BootstrapProxmoxOnto(ctx context.Context, p *Project, es *externalservice.ExternalService) error {
 	if p.HasService(es.ID) {
-		return h.svc.Save(ctx, p)
+		return nil // already bound: nothing to write
 	}
 	if h.pveFor == nil {
 		return fmt.Errorf("bootstrap proxmox: proxmox service not configured")
@@ -250,19 +263,20 @@ func (h *Handler) BootstrapProxmoxOnto(ctx context.Context, p *Project, es *exte
 			q = map[string]any{}
 		}
 		maps.Copy(q, p.Quota)
-		p.Quota = q
+		if err := h.seedQuota(ctx, p, q); err != nil {
+			return fmt.Errorf("bootstrap proxmox: seed quota: %w", err)
+		}
 	}
 	region := es.PVERegion()
 	if region == "" {
 		region = h.defaultRegion
 	}
-	p.Services = append(p.Services, map[string]any{
+	if err := h.appendBinding(ctx, p, map[string]any{
 		"serviceId": es.ID,
 		"provider":  "proxmox",
 		"region":    region,
 		"pool":      pool,
-	})
-	if err := h.svc.Save(ctx, p); err != nil {
+	}); err != nil {
 		return err
 	}
 	// Show the default group right away, not after the next sync cycle.
@@ -274,10 +288,10 @@ func (h *Handler) BootstrapProxmoxOnto(ctx context.Context, p *Project, es *exte
 // project's namespace on the DB cluster (labelled for the sync/AppProject scoping) and append
 // the binding {serviceId, provider:"dbaas", region}. No credential store — connection info is
 // fetched on demand from operator secrets, never persisted (kamaji kubeconfig discipline).
-// Idempotent: a project already attached to this service is saved as-is.
+// Idempotent: a project already attached to this service is left as it is (no provider call, no write).
 func (h *Handler) BootstrapDbaasOnto(ctx context.Context, p *Project, es *externalservice.ExternalService) error {
 	if p.HasService(es.ID) {
-		return h.svc.Save(ctx, p)
+		return nil // already bound: nothing to write
 	}
 	if h.dbaasFor == nil {
 		return fmt.Errorf("bootstrap dbaas: managed-database service not configured")
@@ -293,12 +307,11 @@ func (h *Handler) BootstrapDbaasOnto(ctx context.Context, p *Project, es *extern
 	if region == "" {
 		region = h.defaultRegion
 	}
-	p.Services = append(p.Services, map[string]any{
+	return h.appendBinding(ctx, p, map[string]any{
 		"serviceId": es.ID,
 		"provider":  "dbaas",
 		"region":    region,
 	})
-	return h.svc.Save(ctx, p)
 }
 
 // BootstrapSandboxOnto attaches the project to a sandbox service: ensure sb-<projectId> on the sandbox cluster (the
@@ -306,7 +319,7 @@ func (h *Handler) BootstrapDbaasOnto(ctx context.Context, p *Project, es *extern
 // the binding {serviceId, provider:"sandbox", region}. Idempotent.
 func (h *Handler) BootstrapSandboxOnto(ctx context.Context, p *Project, es *externalservice.ExternalService) error {
 	if p.HasService(es.ID) {
-		return h.svc.Save(ctx, p)
+		return nil // already bound: nothing to write
 	}
 	if h.sandboxFor == nil {
 		return fmt.Errorf("bootstrap sandbox: sandbox service not configured")
@@ -323,18 +336,17 @@ func (h *Handler) BootstrapSandboxOnto(ctx context.Context, p *Project, es *exte
 	if region == "" {
 		region = h.defaultRegion
 	}
-	p.Services = append(p.Services, map[string]any{"serviceId": es.ID, "provider": "sandbox", "region": region})
-	return h.svc.Save(ctx, p)
+	return h.appendBinding(ctx, p, map[string]any{"serviceId": es.ID, "provider": "sandbox", "region": region})
 }
 
 // BootstrapKamajiOnto provisions the project onto a kamaji Managed-Kubernetes service: ensure the
 // project's namespace on the management cluster (labelled for the sync/AppProject scoping) and
 // append the binding {serviceId, provider:"kamaji", region}. No credential store — the cluster
 // admin kubeconfig is fetched on demand from the Kamaji secret, never persisted (plan D5).
-// Idempotent: a project already attached to this service is saved as-is.
+// Idempotent: a project already attached to this service is left as it is (no provider call, no write).
 func (h *Handler) BootstrapKamajiOnto(ctx context.Context, p *Project, es *externalservice.ExternalService) error {
 	if p.HasService(es.ID) {
-		return h.svc.Save(ctx, p)
+		return nil // already bound: nothing to write
 	}
 	if h.kamajiFor == nil {
 		return fmt.Errorf("bootstrap kamaji: managed-k8s service not configured")
@@ -350,12 +362,11 @@ func (h *Handler) BootstrapKamajiOnto(ctx context.Context, p *Project, es *exter
 	if region == "" {
 		region = h.defaultRegion
 	}
-	p.Services = append(p.Services, map[string]any{
+	return h.appendBinding(ctx, p, map[string]any{
 		"serviceId": es.ID,
 		"provider":  "kamaji",
 		"region":    region,
 	})
-	return h.svc.Save(ctx, p)
 }
 
 // BootstrapCephOnto provisions the project onto a ceph-s3 object-store service (the RGW user is
@@ -365,7 +376,7 @@ func (h *Handler) BootstrapKamajiOnto(ctx context.Context, p *Project, es *exter
 // already attached to this service is saved as-is; ensureUser reuses an existing RGW user's keys.
 func (h *Handler) BootstrapCephOnto(ctx context.Context, p *Project, es *externalservice.ExternalService) error {
 	if p.HasService(es.ID) {
-		return h.svc.Save(ctx, p)
+		return nil // already bound: nothing to write
 	}
 	if h.cephCreds == nil {
 		return fmt.Errorf("bootstrap ceph: credential store not configured")
@@ -390,13 +401,12 @@ func (h *Handler) BootstrapCephOnto(ctx context.Context, p *Project, es *externa
 	}); err != nil {
 		return fmt.Errorf("bootstrap ceph: store credential: %w", err)
 	}
-	p.Services = append(p.Services, map[string]any{
+	return h.appendBinding(ctx, p, map[string]any{
 		"serviceId": es.ID,
 		"provider":  es.Provider(),
 		"region":    region,
 		"rgwUid":    uid,
 	})
-	return h.svc.Save(ctx, p)
 }
 
 // bootstrapTrueNASOnto appends the binding {serviceId, provider:"truenas", region}. Idempotent.
@@ -406,10 +416,10 @@ func (h *Handler) bootstrapTrueNASOnto(ctx context.Context, p *Project, es *exte
 
 // bootstrapBindingOnto attaches a provider that needs nothing created for a project up front.
 func (h *Handler) bootstrapBindingOnto(ctx context.Context, p *Project, es *externalservice.ExternalService, provider string) error {
-	if !p.HasService(es.ID) {
-		p.Services = append(p.Services, map[string]any{"serviceId": es.ID, "provider": provider, "region": es.CephRegion()})
+	if p.HasService(es.ID) {
+		return nil
 	}
-	return h.svc.Save(ctx, p)
+	return h.appendBinding(ctx, p, map[string]any{"serviceId": es.ID, "provider": provider, "region": es.CephRegion()})
 }
 
 // BootstrapOnto provisions the project onto the GIVEN cloud service — the explicit-service leg of

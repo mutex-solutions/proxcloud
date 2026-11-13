@@ -2,6 +2,7 @@ package project
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -104,21 +105,127 @@ func (r *Repo) ApplyBillingSuspension(ctx context.Context, id, billingProfileID 
 	return nil, ErrStatusWriteLost
 }
 
+// saveFields is what Save writes. Not the bindings (services) nor the provisioning failures: bindings only grow through
+// AppendBinding (an atomic append) and failures are written by the bootstrap under the project's attach lock
+// (SetProvisionFailures), so a save from a read taken before an attach (a member change, a rename, an activation)
+// cannot drop a binding or a failure recorded meanwhile.
 func saveFields(p *Project) pgdoc.M {
 	now := time.Now().UTC()
 	p.UpdatedAt = &now
 	return pgdoc.M{
-		"name":              p.Name,
-		"data":              p.Data,
-		"owner":             p.Owner,
-		"memberships":       p.Memberships,
-		"organizationId":    p.OrganizationID,
-		"billingProfileId":  p.BillingProfileID,
-		"customInfo":        p.CustomInfo,
-		"services":          p.Services,
-		"provisionFailures": p.ProvisionFailures,
-		"updatedAt":         now,
+		"name":             p.Name,
+		"data":             p.Data,
+		"owner":            p.Owner,
+		"memberships":      p.Memberships,
+		"organizationId":   p.OrganizationID,
+		"billingProfileId": p.BillingProfileID,
+		"customInfo":       p.CustomInfo,
+		"updatedAt":        now,
 	}
+}
+
+// SetProvisionFailures writes the project's provisioning failures alone (the bootstrap, under the attach lock).
+func (r *Repo) SetProvisionFailures(ctx context.Context, projectID string, failures map[string]ProvisionFailure) error {
+	if len(failures) == 0 {
+		_, err := r.col.SetByID(ctx, projectID, nil, []string{"provisionFailures"})
+		return err
+	}
+	_, err := r.col.SetByID(ctx, projectID, pgdoc.M{"provisionFailures": failures}, nil)
+	return err
+}
+
+// ErrAttachLost refuses a binding write whose attach lock is no longer held (its lock session ended): another writer may
+// own the project's bindings now.
+var ErrAttachLost = errors.New("project attach: the attach lock was lost")
+
+// AppendBinding appends binding to the project's services in ONE statement, only when no binding of the same serviceId
+// is there yet. False = already bound (nothing written). guard, when set, is run first in the same transaction and
+// refuses the write (ErrAttachLost) when the caller's attach lock is gone.
+func (r *Repo) AppendBinding(ctx context.Context, projectID string, binding map[string]any, guard func(context.Context) error) (bool, error) {
+	serviceID, _ := binding["serviceId"].(string)
+	if serviceID == "" {
+		return false, errors.New("project binding: serviceId required")
+	}
+	b, err := json.Marshal(binding)
+	if err != nil {
+		return false, err
+	}
+	probe, _ := json.Marshal([]map[string]string{{"serviceId": serviceID}})
+	appended := false
+	db := r.col.DB()
+	err = db.WithTx(ctx, func(tc context.Context) error {
+		if guard != nil {
+			if err := guard(tc); err != nil {
+				return err
+			}
+		}
+		tx, err := db.Tx(tc)
+		if err != nil {
+			return err
+		}
+		now, _ := json.Marshal(time.Now().UTC())
+		tag, err := tx.Exec(tc, `UPDATE "project" SET doc = jsonb_set(doc,
+		    '{services}', COALESCE(CASE WHEN jsonb_typeof(doc->'services')='array' THEN doc->'services' END,'[]'::jsonb) || jsonb_build_array($2::jsonb), true)
+		    || jsonb_build_object('updatedAt',$4::jsonb)
+		  WHERE id=$1 AND NOT (COALESCE(CASE WHEN jsonb_typeof(doc->'services')='array' THEN doc->'services' END,'[]'::jsonb) @> $3::jsonb)`,
+			projectID, string(b), string(probe), string(now))
+		if err != nil {
+			return err
+		}
+		appended = tag.RowsAffected() == 1
+		return nil
+	})
+	return appended, err
+}
+
+// SeedQuota sets quota to seed only while the stored quota still equals was (nil = absent), in one statement. False =
+// it changed meanwhile and was left alone. guard as in AppendBinding.
+func (r *Repo) SeedQuota(ctx context.Context, projectID string, was, seed map[string]any, guard func(context.Context) error) (bool, error) {
+	s, err := json.Marshal(seed)
+	if err != nil {
+		return false, err
+	}
+	var w any
+	if was != nil {
+		b, err := json.Marshal(was)
+		if err != nil {
+			return false, err
+		}
+		w = string(b)
+	}
+	ok := false
+	db := r.col.DB()
+	err = db.WithTx(ctx, func(tc context.Context) error {
+		if guard != nil {
+			if err := guard(tc); err != nil {
+				return err
+			}
+		}
+		tx, err := db.Tx(tc)
+		if err != nil {
+			return err
+		}
+		tag, err := tx.Exec(tc, `UPDATE "project" SET doc=jsonb_set(doc,'{quota}',$2::jsonb,true)
+		  WHERE id=$1 AND (doc->'quota' IS NOT DISTINCT FROM $3::jsonb OR ($3::jsonb IS NULL AND doc->'quota'='null'::jsonb))`, projectID, string(s), w)
+		if err != nil {
+			return err
+		}
+		ok = tag.RowsAffected() == 1
+		return nil
+	})
+	return ok, err
+}
+
+// ClearBulkMarks drops the bulk attach marks (attachedBy) from every binding of the project, in one statement that keeps
+// whatever bindings are stored at that moment. False = nothing to clear.
+func (r *Repo) ClearBulkMarks(ctx context.Context, projectID string) (bool, error) {
+	tag, err := r.col.DB().Pool.Exec(ctx, `UPDATE "project" SET doc = jsonb_set(doc,'{services}',
+	    (SELECT COALESCE(jsonb_agg(e - 'attachedBy' ORDER BY i),'[]'::jsonb) FROM jsonb_array_elements(doc->'services') WITH ORDINALITY AS t(e,i)), false)
+	  WHERE id=$1 AND jsonb_typeof(doc->'services')='array' AND EXISTS (SELECT 1 FROM jsonb_array_elements(doc->'services') e WHERE e ? 'attachedBy')`, projectID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 func (r *Repo) FindByID(ctx context.Context, id string) (*Project, error) {

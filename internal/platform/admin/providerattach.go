@@ -4,20 +4,23 @@ package admin
 // provider to existing projects"). The request only records a run and enqueues one durable job; the
 // providerattach.Runner attaches the projects (the per-project attach path, bounded concurrency, fenced, resumable).
 //
-//	GET  /admin/service/{id}/bulk-attach                    runs (newest first) + the active one   (admin:service:read)
-//	GET  /admin/service/{id}/bulk-attach/candidates         projects|organizations for the picker  (admin:service:read)
-//	POST /admin/service/{id}/bulk-attach/preview            counts a scope would give now          (admin:service:read)
-//	POST /admin/service/{id}/bulk-attach                    start {scope, concurrency}             (admin:service:manage)
-//	GET  /admin/service/{id}/bulk-attach/{runId}            one run with live counts               (admin:service:read)
-//	GET  /admin/service/{id}/bulk-attach/{runId}/items      its projects (?state=failed …)         (admin:service:read)
-//	POST /admin/service/{id}/bulk-attach/{runId}/cancel     stop it                                (admin:service:manage)
-//	POST /admin/service/{id}/bulk-attach/{runId}/retry      new run over its failed projects       (admin:service:manage)
+//	GET  /admin/service/{id}/bulk-attach                    runs (newest first) + the active one   (service:read)
+//	GET  /admin/service/{id}/bulk-attach/candidates         projects|organizations for the picker  (service:read + project:read)
+//	POST /admin/service/{id}/bulk-attach/preview            counts a scope would give now          (service:read + project:read)
+//	POST /admin/service/{id}/bulk-attach                    start {scope, concurrency}             (service:manage + project:update)
+//	GET  /admin/service/{id}/bulk-attach/{runId}            one run with live counts               (service:read)
+//	GET  /admin/service/{id}/bulk-attach/{runId}/items      its projects (?state=failed …)         (service:read)
+//	POST /admin/service/{id}/bulk-attach/{runId}/cancel     stop it                                (service:manage)
+//	POST /admin/service/{id}/bulk-attach/{runId}/retry      new run over its failed projects       (service:manage + project:update)
 //
+// Starting and retrying change projects (they attach a provider to each), so they need the project update key the
+// per-project attach needs as well as the provider key; picking projects needs reading them.//
 // Each POST that changes something writes an admin audit event naming the actor, the provider, the scope and the counts.
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -26,6 +29,7 @@ import (
 
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
+	"github.com/mutex-solutions/proxcloud/internal/platform/rbac"
 	"github.com/mutex-solutions/proxcloud/internal/providerattach"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
@@ -35,8 +39,11 @@ const (
 	bulkAttachManagePerm = "admin:service:manage"
 )
 
-// SetProviderAttach wires the bulk attach service (cmd/api). nil → the surface answers 503.
-func (h *Handler) SetProviderAttach(s *providerattach.Service) { h.providerAttach = s }
+// SetProviderAttach wires the bulk attach service (cmd/api) and the check of whether a provider can be attached to
+// projects (project.Handler.CanAttach; nil = no check). nil service → the surface answers 503.
+func (h *Handler) SetProviderAttach(s *providerattach.Service, canAttach func(*externalservice.ExternalService) error) {
+	h.providerAttach, h.canAttach = s, canAttach
+}
 
 func (h *Handler) routeProviderAttach(r chi.Router) {
 	r.Get("/service/{id}/bulk-attach", h.bulkAttachList)
@@ -49,9 +56,14 @@ func (h *Handler) routeProviderAttach(r chi.Router) {
 	r.Post("/service/{id}/bulk-attach/{runId}/retry", h.bulkAttachRetry)
 }
 
-// bulkAttachGate checks the permission, then that the service is wired; false = the answer went out.
-func (h *Handler) bulkAttachGate(w http.ResponseWriter, r *http.Request, perm string) bool {
-	if !h.require(w, r, perm) {
+// bulkAttachGate checks every permission, then that the service is wired; false = the answer went out.
+func (h *Handler) bulkAttachGate(w http.ResponseWriter, r *http.Request, perms ...string) bool {
+	_, granted, ok := h.adminContext(r)
+	if missing := missingPerm(granted, perms); !ok || missing != "" {
+		if missing == "" {
+			missing = perms[0]
+		}
+		httpx.WriteError(w, httpx.Forbidden("You do not have the required permission: "+missing))
 		return false
 	}
 	if h.providerAttach == nil {
@@ -59,6 +71,16 @@ func (h *Handler) bulkAttachGate(w http.ResponseWriter, r *http.Request, perm st
 		return false
 	}
 	return true
+}
+
+// missingPerm is the first of perms the grant does not cover ("" = all covered).
+func missingPerm(granted, perms []string) string {
+	for _, p := range perms {
+		if !rbac.Matches(granted, p) {
+			return p
+		}
+	}
+	return ""
 }
 
 // bulkAttachProvider loads the provider of the path (404 when absent) as a CLOUD provider.
@@ -74,6 +96,19 @@ func (h *Handler) bulkAttachProvider(w http.ResponseWriter, r *http.Request) (*e
 	return es, true
 }
 
+// bulkAttachAttachable refuses (400) a provider this API cannot attach projects to (an unknown kind, or one whose client
+// is not wired), before anything is queued: every item would fail otherwise.
+func (h *Handler) bulkAttachAttachable(w http.ResponseWriter, es *externalservice.ExternalService) bool {
+	if h.canAttach == nil {
+		return true
+	}
+	if err := h.canAttach(es); err != nil {
+		httpx.WriteError(w, httpx.BadRequest("This provider cannot be attached to projects: "+err.Error()))
+		return false
+	}
+	return true
+}
+
 func bulkAttachErr(w http.ResponseWriter, err error) {
 	var se *providerattach.ScopeError
 	switch {
@@ -82,7 +117,8 @@ func bulkAttachErr(w http.ResponseWriter, err error) {
 	case errors.Is(err, providerattach.ErrNotFound):
 		httpx.WriteError(w, httpx.NotFound(err.Error()))
 	case errors.Is(err, providerattach.ErrActive), errors.Is(err, providerattach.ErrFinished),
-		errors.Is(err, providerattach.ErrNoFailed), errors.Is(err, providerattach.ErrNotDone), errors.Is(err, providerattach.ErrDisabled):
+		errors.Is(err, providerattach.ErrNoFailed), errors.Is(err, providerattach.ErrNotDone), errors.Is(err, providerattach.ErrDisabled),
+		errors.Is(err, providerattach.ErrPruned):
 		httpx.Err(w, http.StatusConflict, http.StatusConflict, err.Error())
 	case errors.Is(err, providerattach.ErrBadParams):
 		httpx.WriteError(w, httpx.BadRequest("Invalid request"))
@@ -161,7 +197,7 @@ func (h *Handler) bulkAttachItems(w http.ResponseWriter, r *http.Request) {
 
 // bulkAttachCandidates lists what the scope picker offers: ?kind=projects|organizations&search=…
 func (h *Handler) bulkAttachCandidates(w http.ResponseWriter, r *http.Request) {
-	if !h.bulkAttachGate(w, r, bulkAttachReadPerm) {
+	if !h.bulkAttachGate(w, r, bulkAttachReadPerm, projectReadPerm) {
 		return
 	}
 	es, ok := h.bulkAttachProvider(w, r)
@@ -242,7 +278,7 @@ func (h *Handler) bulkAttachScope(w http.ResponseWriter, r *http.Request) (*bulk
 }
 
 func (h *Handler) bulkAttachPreview(w http.ResponseWriter, r *http.Request) {
-	if !h.bulkAttachGate(w, r, bulkAttachReadPerm) {
+	if !h.bulkAttachGate(w, r, bulkAttachReadPerm, projectReadPerm) {
 		return
 	}
 	es, ok := h.bulkAttachProvider(w, r)
@@ -261,7 +297,7 @@ func (h *Handler) bulkAttachPreview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) bulkAttachStart(w http.ResponseWriter, r *http.Request) {
-	if !h.bulkAttachGate(w, r, bulkAttachManagePerm) {
+	if !h.bulkAttachGate(w, r, bulkAttachManagePerm, projectUpdatePerm) {
 		return
 	}
 	es, ok := h.bulkAttachProvider(w, r)
@@ -272,12 +308,22 @@ func (h *Handler) bulkAttachStart(w http.ResponseWriter, r *http.Request) {
 		bulkAttachErr(w, providerattach.ErrDisabled)
 		return
 	}
+	if !h.bulkAttachAttachable(w, es) {
+		return
+	}
 	req, ok := h.bulkAttachScope(w, r)
 	if !ok {
 		return
 	}
 	preview, err := h.providerAttach.Repo.Preview(r.Context(), req.Scope, es.ID)
 	if httpx.WriteError(w, err) {
+		return
+	}
+	// One run attaches at most MaxRunProjects projects (the ones not attached yet): a larger scope is split by the
+	// operator (organizations, picked projects), so a run stays a bounded, reviewable unit of work.
+	if preview.ToAttach > providerattach.MaxRunProjects {
+		httpx.WriteError(w, httpx.BadRequest(fmt.Sprintf("This scope would attach %d projects; one run attaches at most %d. "+
+			"Pick organizations or projects to split it.", preview.ToAttach, providerattach.MaxRunProjects)))
 		return
 	}
 	run, err := h.providerAttach.Start(r.Context(), providerattach.StartRequest{ServiceID: es.ID, ServiceName: es.Name, Scope: req.Scope,
@@ -305,7 +351,7 @@ func (h *Handler) bulkAttachCancel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) bulkAttachRetry(w http.ResponseWriter, r *http.Request) {
-	if !h.bulkAttachGate(w, r, bulkAttachManagePerm) {
+	if !h.bulkAttachGate(w, r, bulkAttachManagePerm, projectUpdatePerm) {
 		return
 	}
 	es, ok := h.bulkAttachProvider(w, r)
@@ -314,6 +360,9 @@ func (h *Handler) bulkAttachRetry(w http.ResponseWriter, r *http.Request) {
 	}
 	if es.IsDisabled() {
 		bulkAttachErr(w, providerattach.ErrDisabled)
+		return
+	}
+	if !h.bulkAttachAttachable(w, es) {
 		return
 	}
 	var req struct {
