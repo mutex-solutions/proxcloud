@@ -937,6 +937,24 @@ func TestTemplateWithdrawTwoProvidersPartialThenRetry(t *testing.T) {
 	if w.Code != 200 || !strings.Contains(w.Body.String(), `"unreachable"`) || !strings.Contains(w.Body.String(), `"complete":false`) {
 		t.Fatalf("withdraw with an unreachable provider: %d %s", w.Code, w.Body)
 	}
+	// A provider removed from the portal is provider_missing, not "unreachable": nothing can ever be
+	// changed there, so the withdraw completes without it (and the row's Withdraw is not left on forever).
+	f.pv2.mu.Lock()
+	f.pv2.down = false
+	f.pv2.mu.Unlock()
+	p5 := tlPayload("debian-13", "20261117000000", "1")
+	p6 := p5
+	p6.ServiceID = "svc-pve2"
+	id5 := f.addImport(t, p5, 9340)
+	f.addImportOn(t, f.pv2, p6, 9350)
+	if _, err := f.db.C("externalService").DeleteOne(ctx, pgdoc.M{"_id": "svc-pve2"}); err != nil {
+		t.Fatal(err)
+	}
+	w = f.do("admin-sub", "POST", "/admin/template-updates/templates/"+id5+"/withdraw", map[string]any{"reason": "deleted provider case", "confirmDigest": p5.Digest})
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"provider_missing"`) || strings.Contains(w.Body.String(), `"unreachable"`) ||
+		!strings.Contains(w.Body.String(), `"complete":true`) {
+		t.Fatalf("withdraw with a deleted provider: %d %s", w.Code, w.Body)
+	}
 }
 
 // The last-version guard is evaluated on every provider: withdrawing from provider 1 is refused when

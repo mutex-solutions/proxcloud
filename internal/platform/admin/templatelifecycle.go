@@ -44,6 +44,28 @@ func (h *Handler) actor(r *http.Request) string {
 	return rc.SigV4KeyID
 }
 
+// withdrawResolve gives Withdraw the Proxmox access of every provider holding a copy of the artifact
+// (a disabled provider still is: a withdrawn digest must not stay published anywhere). A provider that
+// no longer exists — removed from the portal, or no longer Proxmox — is provider_missing, never
+// "unreachable": nothing can ever be changed there, so the withdraw must be able to complete without it.
+func (h *Handler) withdrawResolve(ctx context.Context, serviceID string) (templateupdates.LifecyclePVE, error) {
+	if h.esSvc == nil || h.pveFor == nil {
+		return nil, errors.New("Proxmox access is not wired")
+	}
+	es, err := h.esSvc.Get(ctx, serviceID)
+	if errors.Is(err, externalservice.ErrNotFound) || (err == nil && (es == nil || !es.IsProxmox())) {
+		return nil, &templateupdates.LifecycleError{Status: http.StatusConflict, Code: "provider_missing", Message: "The provider no longer exists"}
+	}
+	if err != nil {
+		return nil, err
+	}
+	ps, err := h.pveFor(es)
+	if err != nil {
+		return nil, err
+	}
+	return ps.C, nil
+}
+
 // lifecyclePVE resolves the provider of an import (enabled Proxmox only).
 func (h *Handler) lifecyclePVE(ctx context.Context, serviceID string) (*externalservice.ExternalService, *pve.Service, error) {
 	if h.esSvc == nil || h.pveFor == nil {
@@ -230,26 +252,7 @@ func (h *Handler) templateUpdatesWithdraw(w http.ResponseWriter, r *http.Request
 		templateUpdatesErr(w, err)
 		return
 	}
-	// Every provider holding a copy of the artifact is resolved (a disabled provider still is: a
-	// withdrawn digest must not stay published anywhere).
-	resolve := func(ctx context.Context, serviceID string) (templateupdates.LifecyclePVE, error) {
-		if h.esSvc == nil || h.pveFor == nil {
-			return nil, errors.New("Proxmox access is not wired")
-		}
-		es, err := h.esSvc.Get(ctx, serviceID)
-		if err != nil {
-			return nil, err
-		}
-		if es == nil || !es.IsProxmox() {
-			return nil, &templateupdates.LifecycleError{Status: http.StatusConflict, Code: "provider_missing", Message: "The provider no longer exists"}
-		}
-		ps, err := h.pveFor(es)
-		if err != nil {
-			return nil, err
-		}
-		return ps.C, nil
-	}
-	res, err := h.templateUpdates.Withdraw(r.Context(), resolve, id, req, h.actor(r))
+	res, err := h.templateUpdates.Withdraw(r.Context(), h.withdrawResolve, id, req, h.actor(r))
 	if err != nil {
 		templateUpdatesErr(w, err)
 		return
