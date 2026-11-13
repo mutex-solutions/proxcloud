@@ -47,6 +47,8 @@ type fakePVE struct {
 	finalWaitFails bool
 	// importTransportErr makes the import-from SetVMConfig fail before PVE answered.
 	importTransportErr bool
+	poolErr            error            // GetPool fails with it
+	poolMembersExtra   []pve.PoolMember // listed as members of every pool read (a member the token still cannot read)
 }
 
 func newFakePVE() *fakePVE {
@@ -249,12 +251,16 @@ func (f *fakePVE) GetPool(_ context.Context, poolID string) (*pve.PoolInfo, erro
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.read()
+	if f.poolErr != nil {
+		return nil, f.poolErr
+	}
 	out := &pve.PoolInfo{PoolID: poolID}
 	for id, vm := range f.vms {
 		if vm.cfg.Str("pool") == poolID {
 			out.Members = append(out.Members, pve.PoolMember{ID: fmt.Sprintf("qemu/%d", id), Type: "qemu", VMID: id, Node: vm.node})
 		}
 	}
+	out.Members = append(out.Members, f.poolMembersExtra...)
 	return out, nil
 }
 
@@ -874,5 +880,24 @@ func TestSweepRemovesUntaggedOrphanOfThisJobOnly(t *testing.T) {
 	}
 	if pv.vms[9202] == nil || pv.vms[9203] == nil || pv.vms[9200] == nil {
 		t.Fatalf("a VM that is not this job's was removed: %v", pv.calls)
+	}
+}
+
+// A VM listed in pc-templates that still answers 403, or a pool that cannot be read, is a real refusal: owned() keeps
+// the error (fail closed) instead of calling the VM gone.
+func TestOwnedKeepsRealRefusals(t *testing.T) {
+	x, pv, _, _, p := setup(t)
+	pv.vms[9301] = &fakeVM{node: "pve1", cfg: pve.VMConfig{"name": buildName(testJob), "pool": "elsewhere"}}
+	pv.poolMembersExtra = []pve.PoolMember{{Type: "qemu", VMID: 9301, Node: "pve1"}}
+	if _, _, _, err := x.owned(context.Background(), testJob, p, 9301); !pve.IsForbidden(err) {
+		t.Fatalf("a pool member answering 403 was not an error: %v", err)
+	}
+	pv.poolMembersExtra, pv.poolErr = nil, errors.New("pool read failed")
+	if _, _, _, err := x.owned(context.Background(), testJob, p, 9301); err == nil {
+		t.Fatal("a 403 with an unreadable pool was taken for gone")
+	}
+	pv.poolErr = nil
+	if exists, own, _, err := x.owned(context.Background(), testJob, p, 9399); err != nil || exists || own {
+		t.Fatalf("a gone VMID: exists=%v own=%v err=%v", exists, own, err)
 	}
 }

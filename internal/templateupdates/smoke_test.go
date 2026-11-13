@@ -32,21 +32,24 @@ type smokePVE struct {
 	ops       int
 	mutAt     []int
 	// knobs
-	agentNever      bool   // the guest agent never answers
-	osID, osVersion string // guest-get-osinfo (defaults from the clone's source)
-	ciStatus        string // cloud-init status ("done" default)
-	ciBadJSON       bool
-	noGrow          bool // growpart did not run: the root fs keeps the template size
-	noFSSize        bool // guest-get-fsinfo without sizes, df fails too
-	execForbidden   bool // guest-exec is refused (403)
-	cloneFails      bool // the clone task fails
-	cloneTransport  bool // the clone call fails before PVE answered (retryable)
-	startFails      bool
-	kubelet         string // "" = missing; else `kubelet --version` output
-	deleteFails     bool
-	stopHook        func()
-	cloneHook       func(id int)
-	baseDiskBytes   int64
+	agentNever       bool   // the guest agent never answers
+	osID, osVersion  string // guest-get-osinfo (defaults from the clone's source)
+	ciStatus         string // cloud-init status ("done" default)
+	ciBadJSON        bool
+	noGrow           bool             // growpart did not run: the root fs keeps the template size
+	noFSSize         bool             // guest-get-fsinfo without sizes, df fails too
+	execForbidden    bool             // guest-exec is refused (403)
+	cloneRunning     bool             // the clone task has not ended (PVE adds the clone to its pool only when it ends)
+	poolErr          error            // GetPool fails with it
+	poolMembersExtra []pve.PoolMember // listed as members of every pool read (a member the token still cannot read)
+	cloneFails       bool             // the clone task fails
+	cloneTransport   bool             // the clone call fails before PVE answered (retryable)
+	startFails       bool
+	kubelet          string // "" = missing; else `kubelet --version` output
+	deleteFails      bool
+	stopHook         func()
+	cloneHook        func(id int)
+	baseDiskBytes    int64
 }
 
 func newSmokePVE() *smokePVE {
@@ -80,12 +83,16 @@ func (f *smokePVE) GetPool(_ context.Context, poolID string) (*pve.PoolInfo, err
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.read()
+	if f.poolErr != nil {
+		return nil, f.poolErr
+	}
 	out := &pve.PoolInfo{PoolID: poolID}
 	for id, vm := range f.vms {
 		if vm.cfg.Str("pool") == poolID {
 			out.Members = append(out.Members, pve.PoolMember{Type: "qemu", VMID: id, Node: vm.node})
 		}
 	}
+	out.Members = append(out.Members, f.poolMembersExtra...)
 	return out, nil
 }
 
@@ -211,6 +218,14 @@ func (f *smokePVE) GetVMStatus(_ context.Context, node string, vmid int) (*pve.V
 		return &pve.VMStatus{Status: "running"}, nil
 	}
 	return &pve.VMStatus{Status: "stopped"}, nil
+}
+
+// TaskStopped: a clone marked in flight (cloneRunning) has not stopped; every other task has.
+func (f *smokePVE) TaskStopped(_ context.Context, up pve.UPID, _ time.Duration) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.read()
+	return !(f.cloneRunning && strings.HasPrefix(string(up), "UPID:clone"))
 }
 
 func (f *smokePVE) WaitTask(_ context.Context, up pve.UPID) error {
@@ -1028,5 +1043,54 @@ func TestCheckSmokeNetworkManagementBridge(t *testing.T) {
 	}
 	if err := CheckSmokeNetwork(context.Background(), fakeBridges{err: errors.New("x")}, "pve1", SmokeNetwork{Bridge: "vmbr9"}); !errors.As(err, &le) || le.Code != "smoke_network_unverified" {
 		t.Fatalf("unreadable: %v", err)
+	}
+}
+
+// PVE adds a cloned VM to its pool only when the clone ends, so while its clone task runs the job's own test VM is
+// invisible to the token (403, outside pc-templates). Cleanup must not take it for gone and mark the receipt cleaned:
+// it waits for the clone task, and once the clone has joined the pool it removes the VM.
+func TestSmokeCleanupWaitsForItsRunningClone(t *testing.T) {
+	x, pv, rec, p := smokeSetup(t, "os")
+	tags := TemplateTags(p.importPayload())
+	pv.vms[9301] = &smokeVM{node: "pve1", cfg: pve.VMConfig{"name": SmokeVMName(smokeJob), "tags": tags, "lock": "clone"}}
+	pv.cloneRunning = true
+	r := &SmokeReceipt{ID: smokeJob, Payload: p, Step: SmokeCloning, VMID: 9301, CloneUPID: "UPID:clone"}
+	rec.m[smokeJob] = *r
+	if warns := x.Cleanup(context.Background(), &testFence{epoch: 3, budget: -1}, smokeJob, p, r); len(warns) == 0 {
+		t.Fatal("a running clone of this job was taken for gone")
+	}
+	if _, ok := pv.vms[9301]; !ok {
+		t.Fatal("the in-flight clone was touched")
+	}
+	// The clone ends and joins the pool: the next pass removes it.
+	pv.cloneRunning = false
+	pv.vms[9301].cfg["pool"] = pve.TemplatePool
+	delete(pv.vms[9301].cfg, "lock")
+	if warns := x.Cleanup(context.Background(), &testFence{epoch: 4, budget: -1}, smokeJob, p, r); len(warns) != 0 {
+		t.Fatalf("warnings %v", warns)
+	}
+	if _, ok := pv.vms[9301]; ok {
+		t.Fatal("the finished clone of this job survived")
+	}
+	// Without a running clone, an invisible VMID is gone: no warning, nothing touched.
+	r2 := &SmokeReceipt{ID: smokeJob, Payload: p, Step: SmokeCloning, VMID: 9399, CloneUPID: "UPID:clone"}
+	if warns := x.Cleanup(context.Background(), &testFence{epoch: 5, budget: -1}, smokeJob, p, r2); len(warns) != 0 {
+		t.Fatalf("a gone VMID warned: %v", warns)
+	}
+	protectedIntact(t, pv)
+}
+
+// A VM in pc-templates that still answers 403, or a pool that cannot be read, is a real refusal: owned() keeps the
+// error (fail closed) instead of calling the VM gone.
+func TestSmokeOwnedKeepsRealRefusals(t *testing.T) {
+	x, pv, _, p := smokeSetup(t, "os")
+	pv.vms[9301] = &smokeVM{node: "pve1", cfg: pve.VMConfig{"name": SmokeVMName(smokeJob), "pool": "elsewhere"}}
+	pv.poolMembersExtra = []pve.PoolMember{{Type: "qemu", VMID: 9301, Node: "pve1"}}
+	if _, _, _, err := x.owned(context.Background(), smokeJob, p, 9301); !pve.IsForbidden(err) {
+		t.Fatalf("a pool member answering 403 was not an error: %v", err)
+	}
+	pv.poolMembersExtra, pv.poolErr = nil, errors.New("pool read failed")
+	if _, _, _, err := x.owned(context.Background(), smokeJob, p, 9301); err == nil {
+		t.Fatal("a 403 with an unreadable pool was taken for gone")
 	}
 }

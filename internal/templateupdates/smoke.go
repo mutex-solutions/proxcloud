@@ -283,6 +283,9 @@ type SmokeReceipt struct {
 	Step        SmokeStep    `json:"step"`
 	Epoch       int64        `json:"epoch"`
 	VMID        int          `json:"vmid,omitempty"` // the test VM
+	// CloneUPID is the clone task of VMID, recorded as soon as the clone call returns: PVE adds a cloned VM to its pool
+	// only when the clone finishes, so until then the token cannot see its own test VM (403, outside pc-templates).
+	CloneUPID pve.UPID `json:"cloneUpid,omitempty"`
 	// KeyFingerprint is the SHA-256 fingerprint of the ephemeral SSH key the test VM got (the key
 	// itself lived only in memory).
 	KeyFingerprint string `json:"keyFingerprint,omitempty"`
@@ -343,6 +346,7 @@ type SmokePVE interface {
 	DeleteVM(ctx context.Context, node string, vmid int) (pve.UPID, error)
 	GetVMStatus(ctx context.Context, node string, vmid int) (*pve.VMStatus, error)
 	WaitTask(ctx context.Context, upid pve.UPID) error
+	TaskStopped(ctx context.Context, upid pve.UPID, wait time.Duration) bool
 	AgentPing(ctx context.Context, node string, vmid int) error
 	AgentOSInfo(ctx context.Context, node string, vmid int) (*pve.AgentOSInfo, error)
 	AgentFSInfo(ctx context.Context, node string, vmid int) ([]pve.AgentFS, error)
@@ -360,7 +364,12 @@ type SmokeExecutor struct {
 	// GrowGiB is how much the test VM's root disk is grown (default 8 GiB).
 	GrowGiB int
 	now     func() time.Time
+	// cloneUPID is this job's last recorded clone task (SmokeReceipt.CloneUPID), loaded with the receipt.
+	cloneUPID pve.UPID
 }
+
+// cloneSettleWait bounds how long owned waits for a clone task's status before calling the clone still running.
+const cloneSettleWait = 5 * time.Second
 
 func (x *SmokeExecutor) defaults() {
 	if x.TaskWait <= 0 {
@@ -435,6 +444,7 @@ func (x *SmokeExecutor) Run(ctx context.Context, jobID string, p SmokePayload, f
 	if r == nil || r.Payload != p {
 		return permanent("receipt_mismatch", "the smoke receipt is missing or belongs to another payload")
 	}
+	x.cloneUPID = r.CloneUPID
 	if r.Step == SmokeFinished {
 		return nil
 	}
@@ -569,6 +579,12 @@ func (x *SmokeExecutor) test(ctx context.Context, f Fence, jobID string, p Smoke
 			return checks, err
 		}
 		up, err := x.PVE.CloneVM(ctx, p.Node, p.TemplateVMID, pve.CloneOpts{NewID: id, Name: SmokeVMName(jobID), Pool: pve.TemplatePool, Storage: p.DiskStorage, Full: true})
+		if err == nil {
+			// Recorded before the wait: a later acquisition must not take the in-flight clone, invisible until it
+			// joins the pool, for gone (owned).
+			x.cloneUPID = up
+			err = x.checkpoint(ctx, f, r, SmokeCloning, func(n *SmokeReceipt) { n.CloneUPID = up })
+		}
 		if err == nil {
 			err = x.wait(ctx, up)
 		}
@@ -915,9 +931,15 @@ func (x *SmokeExecutor) owned(ctx context.Context, jobID string, p SmokePayload,
 	}
 	if pve.IsForbidden(err) {
 		// The token reaches a VM only through its pool, so PVE answers 403, not 404, for a VMID that no longer exists
-		// (verified on PVE 9.2.21: the destroyed test VM). Out of pc-templates it is not ours either way: out of view.
+		// (verified on PVE 9.2.21: the destroyed test VM). Out of pc-templates it is not ours: out of view. Except a
+		// clone of ours still running: PVE adds it to the pool only when the clone ends.
 		if inPool, perr := x.inTemplatePool(ctx, p.Node, vmid); perr != nil || inPool {
 			return false, false, nil, err
+		}
+		// ponytail: a crash between the clone call and its UPID checkpoint leaves no UPID to wait for; the sweep of a
+		// later pass of this job still removes the clone once it joins the pool, a terminal job does not.
+		if x.cloneUPID != "" && !x.PVE.TaskStopped(ctx, x.cloneUPID, cloneSettleWait) {
+			return false, false, nil, errors.New("the test VM is not visible yet: its clone task is still running; retrying later")
 		}
 		return false, false, nil, nil
 	}
@@ -1038,6 +1060,9 @@ func (x *SmokeExecutor) sweep(ctx context.Context, f Fence, jobID string, p Smok
 // the template or any VM that is not this job's.
 func (x *SmokeExecutor) Cleanup(ctx context.Context, f Fence, jobID string, p SmokePayload, r *SmokeReceipt) []string {
 	x.defaults()
+	if r != nil {
+		x.cloneUPID = r.CloneUPID
+	}
 	var warns []string
 	if r != nil && r.VMID > 0 {
 		if err := x.destroyOwned(ctx, f, jobID, p, r.VMID); errors.Is(err, ErrStopped) {
