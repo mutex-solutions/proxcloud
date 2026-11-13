@@ -2,7 +2,7 @@
 
 ProxCloud publishes its VM templates (Ubuntu, Debian and the Kubernetes node image) and its sandbox
 images on GitHub Packages. **System > Template updates** shows the newest published version of each,
-next to what your site runs, and lets you import a newer VM template.
+next to what your site runs, lets you import a newer VM template, and update a sandbox image.
 
 ## Connect GitHub first
 
@@ -22,9 +22,10 @@ token keeps the current one.
   version), the newest published version with its digest and size, and the templates each Proxmox
   provider already has. **Update available** means at least one provider has nothing that new.
   Versions that fail the published-artifact checks are never offered; the row says how many were refused.
-- **Sandbox templates** — the newest image of each built-in sandbox template and the digest each
-  sandbox provider's templates use.
-- **Jobs** — every import you started, its progress and result.
+- **Imported templates** — every VM template imported here, with its lifecycle state and actions (see below).
+- **Sandbox templates** — the newest image of each built-in sandbox template, the digest each
+  sandbox provider's templates use, and the sandbox update jobs.
+- **Jobs** — every import you started and every smoke test, their progress and result.
 
 Results are cached for two minutes; **Check now** asks GitHub again. The remaining GitHub API quota
 is shown at the bottom.
@@ -79,6 +80,21 @@ stopped mid-way, e.g. on an API restart, resumes on replay).
 
 ## Sandbox images
 
-Updating sandbox images from the portal is not available yet. Use **Copy images.yaml pin**, put the line
-into `deploy/templates/images.yaml` and run `make upgrade`: the installer copies the image into the
-sandbox registry and pre-pulls it on every node, and the templates switch to it once every node has it.
+Sandbox image updates from the portal must be enabled for your site by the operator
+(`PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED=true`); you need the *Manage external services* permission.
+
+- **Update…** copies the newest published image, by digest, into the sandbox registry (the same digest,
+  checked after the copy) and points the pre-pull on every node at it. Paste the exact digest to confirm.
+  Templates switch to it once every Ready node has pulled it; until then sandboxes keep starting from the
+  current image, which is never deleted. The row shows the progress: *Mirroring*, *Verifying digest*,
+  *Updating prepull*, *Waiting for prepull on N/M nodes*, then *Switched*.
+- **Rollback…** points the pre-pull back at the previous image; templates switch back once every Ready
+  node has it.
+- Each update is recorded as a pin that `make upgrade` reads, so an upgrade never puts an older image
+  back. Use **Copy the images.yaml line to commit** so the repository matches. **Delete pin** forgets
+  the portal's pin: the next `make upgrade` uses `deploy/templates/images.yaml` for that image again
+  (nothing on the cluster changes).
+
+When portal updates are off, use **Copy images.yaml pin**, put the line into
+`deploy/templates/images.yaml` and run `make upgrade`: the installer copies the image into the sandbox
+registry and pre-pulls it on every node, and the templates switch to it once every node has it.

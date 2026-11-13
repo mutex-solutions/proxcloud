@@ -228,7 +228,8 @@ succeeded | failed`.
   jobs). Only a job that died **mid-flight** (receipt not failed, not finished, not cleaned) can be
   replayed — it resumes from its last receipt. A failed, finished or cleaned template update answers
   **409**: the retry path is a new import from the Template updates page (enqueue allows it, since the
-  earlier receipt is failed/dead).
+  earlier receipt is failed/dead). A smoke test is never replayed (409, §4); a sandbox mirror or
+  rollback is judged by its own receipt the same way (§5).
 - **Upload serialization**: the runner holds a PostgreSQL session advisory lock **per provider**
   (`templateupdate-upload:<service>`) for the whole upload, across API replicas; a busy lock retries
   later. The key is per provider, not per node/storage: the upload spools to `/var/tmp` of the API node
@@ -240,8 +241,9 @@ on `/pool/pc-templates` (already granted by `ProxCloudPlatform` on `/pool`) and 
 on the disk storage. Deleting the uploaded file needs `Datastore.Allocate` on the import store; without
 it the template is still created and the receipt carries a warning.
 
-The receipt table (`templateUpdate`) is created at API startup: enqueue reads it inside its
-transaction, where a missing table cannot be auto-created.
+The receipt table (`templateUpdate`) is created at API startup, with the smoke/blocklist tables (§4)
+and the sandbox receipt table (§5): the enqueues read them inside their transaction, where a missing
+table cannot be auto-created.
 
 ### Enabling
 
