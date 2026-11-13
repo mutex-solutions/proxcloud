@@ -115,7 +115,7 @@ func (r *SandboxRunner) retire(parent context.Context, j *durablejobs.Job) {
 		r.retry(parent, j, fence, "retryable")
 		return
 	}
-	perm := &Permanent{Code: "feature_disabled", Message: "sandbox template updates are turned off (PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED); the job was ended without running"}
+	perm := &Permanent{Code: "feature_disabled", Message: "sandbox template updates are turned off (PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED); the job was ended before it finished"}
 	var x *SandboxExecutor
 	if rec != nil {
 		switch {

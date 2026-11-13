@@ -519,13 +519,14 @@ an advisory lock on `<registry>/library/sandbox-<name>` refuses while another jo
    the job on finish/cleanup. A failed delete is recorded in the receipt. A pod that stays Pending more than
    5 minutes is replaced; a pod whose Secrets were not confirmed written is never waited for. The runner
    runs even with the flag off, but then never runs a job (no worker, no prepull patch): a job it can
-   claim — queued, or running with an **expired** lease (its runner is gone) — ends `failed`
-   `feature_disabled` with its cleanup (its worker pods and their Secrets deleted, the pin of a prepull
-   switch that never landed restored), so it no longer blocks its image or `DELETE …/pins/{id}`; one whose
-   switch already landed (`pinned`) is acknowledged as succeeded. A running job whose lease is still valid
-   (another replica with the flag on) is never touched. It also cleans up dead jobs and deletes mirror pods
-   of jobs that are not pending/running (an **orphan sweep**, every 10 minutes, every sandbox provider), so
-   no pod with a credential outlives its job. The worker copies the source's own manifest bytes
+   claim — queued (a retry once it is due), or running with an **expired** lease (its runner is gone) —
+   ends `failed` `feature_disabled` with its cleanup (its worker pods and their Secrets deleted, the pin
+   of a prepull switch that never landed restored), so it no longer blocks its image or
+   `DELETE …/pins/{id}`; one whose switch already landed (`pinned`) is acknowledged as succeeded. A
+   running job whose lease is still valid (another replica with the flag on) is never touched. It also
+   cleans up dead jobs and deletes mirror pods of jobs that are not pending/running (an **orphan sweep**,
+   every 10 minutes, every sandbox provider), so no pod with a credential outlives its job. The worker
+   copies the source's own manifest bytes
    (same digest) through transports fenced to `ghcr.io` (pull scope of that one repository; the blob
    redirect to `pkg-containers.githubusercontent.com` without credentials) and to the one destination
    repository; an existing destination tag is accepted only at the same digest (a re-run), never moved.
@@ -649,7 +650,8 @@ hand-over = first install: nothing to read.
    --as=system:serviceaccount:proxcloud-system:proxcloud` → yes, `… get secret/sandbox-registry-nodes` → no.
 4. The provider has `imageAdoption: on` and the GitHub integration is configured.
 5. `PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED=true` (or `proxcloud.template-updates.sandbox-enabled`) on
-   the API: starts the runner and allows the two POSTs. Off, they answer 501 and nothing runs.
+   the API: starts the runner and allows the two POSTs. Off, they answer 501 and nothing runs. Set it the
+   same on every API replica: one with it off ends the queued sandbox jobs it claims (`feature_disabled`).
 
 ## 6. Permissions
 

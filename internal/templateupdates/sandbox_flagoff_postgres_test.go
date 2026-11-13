@@ -99,11 +99,20 @@ func TestPGSandboxFlagOffEndsInFlightJobs(t *testing.T) {
 		return false
 	}
 
-	// 1. A queued mirror job (never claimed): ended, its receipt cleaned; nothing starts.
+	// 1. A queued mirror job (e.g. waiting for its retry, an earlier attempt's worker pod still there): ended, its pod
+	// deleted (the fake records pod deletes; the credential Secrets are pod-owned and go with it), its receipt cleaned;
+	// nothing starts. Before, its pin could not be deleted (busy); afterwards it can.
 	base := sbxPayload()
 	idQueued := sbxEnqueuePG(t, db, jobs, store, base, base.Key())
+	podQueued := leftPod(idQueued, base, 1)
+	if err := store.SavePin(ctx, &SandboxPin{ID: base.Repo(), Template: "base", Registry: sbxReg, Digest: sbxOld}); err != nil {
+		t.Fatal(err)
+	}
 	if !live(idQueued) {
 		t.Fatal("a queued job is not live")
+	}
+	if _, err := svc.DeleteSandboxPin(ctx, base.Repo()); !errors.Is(err, ErrSandboxBusy) {
+		t.Fatalf("delete pin while the job is queued: %v", err)
 	}
 	if did, err := runner().RunOnce(ctx); !did || err != nil {
 		t.Fatalf("queued: did=%v err=%v", did, err)
@@ -113,8 +122,14 @@ func TestPGSandboxFlagOffEndsInFlightJobs(t *testing.T) {
 	if j.State != "dead" || j.LastError != "feature_disabled" || rec.Step != SbxFailed || rec.Code != "feature_disabled" || !rec.Cleaned {
 		t.Fatalf("queued job %+v receipt %+v", j, rec)
 	}
+	if !deleted(podQueued) {
+		t.Fatalf("the queued job's worker pod (and its Secrets) survived: deleted=%v", cl.deleted)
+	}
 	if live(idQueued) {
 		t.Fatal("the ended job is still live")
+	}
+	if _, err := svc.DeleteSandboxPin(ctx, base.Repo()); err != nil {
+		t.Fatalf("delete pin after the job ended: %v", err)
 	}
 
 	// 2. A running job whose lease EXPIRED (its runner is gone) mid-mirror, after it recorded the pin: its leftover
