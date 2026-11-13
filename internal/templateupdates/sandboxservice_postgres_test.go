@@ -98,3 +98,37 @@ func TestPGSandboxBusyUntilTheJobIsSettled(t *testing.T) {
 		t.Fatalf("the new job did not dedup: %v", err)
 	}
 }
+
+// The dedup check reads the earlier jobs' states inside the enqueue transaction (which holds a pool connection and
+// the image's advisory lock). It must read on that transaction: with a second connection, concurrent enqueues
+// exhausted a small pool (CI: one connection per CPU) and deadlocked. Here every connection but one is held, so
+// only an enqueue that reuses its own transaction's connection can finish.
+func TestPGSandboxDedupReadsOnTheEnqueueTransaction(t *testing.T) {
+	db, jobs := pgFixture(t)
+	ctx := context.Background()
+	store := PGSandbox{DB: db}
+	if err := store.Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	s := &Service{Jobs: jobs, DB: db, Sandbox: store, SandboxEnabled: true}
+	p := sbxPayload()
+	noCheck := func(context.Context) error { return nil }
+	if _, err := s.enqueueSandbox(ctx, p, "admin", noCheck); err != nil {
+		t.Fatal(err)
+	}
+	for range db.Pool.Config().MaxConns - 1 {
+		c, err := db.Pool.Acquire(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Release()
+	}
+	// A read waiting for a second connection only ends with the context (and then fails closed as busy): the answer
+	// must come at once, not at the deadline.
+	tctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	start := time.Now()
+	if _, err := s.enqueueSandbox(tctx, p, "admin", noCheck); !errors.Is(err, ErrSandboxBusy) || time.Since(start) > 3*time.Second {
+		t.Fatalf("the dedup check did not answer on the enqueue's own connection: %v after %s", err, time.Since(start))
+	}
+}

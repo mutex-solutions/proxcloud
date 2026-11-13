@@ -370,8 +370,16 @@ func (s *Store) Retry(ctx context.Context, j *Job, delay time.Duration, permanen
 		return err
 	})
 }
+
+// Get reads one job. Inside the caller's WithTx it reads on that transaction: a second pool connection taken
+// while the transaction holds one (and maybe an advisory lock others queue on) deadlocks once the pool is
+// exhausted by concurrent callers.
 func (s *Store) Get(ctx context.Context, id string) (*Job, error) {
-	return scan(s.db.Pool.QueryRow(ctx, `SELECT `+columns+` FROM durable_job WHERE id=$1`, id))
+	const q = `SELECT ` + columns + ` FROM durable_job WHERE id=$1`
+	if tx, err := s.db.Tx(ctx); err == nil {
+		return scan(tx.QueryRow(ctx, q, id))
+	}
+	return scan(s.db.Pool.QueryRow(ctx, q, id))
 }
 
 // Replay never edits a payload or accepts a function/command name. Authorization
