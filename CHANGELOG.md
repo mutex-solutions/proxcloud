@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the copy policy now requires `kubeadm`, `kubelet` and `kubectl` at exactly the reviewed version. Any other
   version is still refused. Each new version still needs its own build, inventory and runtime acceptance.
 
+### Fixed
+
+- **VM template import failed on PVE 9 with the least-privilege token**: the import created its VM with
+  its ownership tag in the create call, and PVE 9 checks a create's tags with `VM.Config.Options` on
+  `/vms/<id>` without the pool, which the provider token never holds (its rights reach a VM only through
+  `pc-templates`). The create task failed `403 Permission check failed (/vms/<id>, VM.Config.Options)` and
+  the job retried until it gave up. The VM is now created untagged and tagged by the import write; until
+  then it is the job's only by its exact build name, membership of `pc-templates` and the absence of every
+  tag, and the orphan sweep recognises such a VM too. Found on the first real import (PVE 9.2.21).
+
 ## [0.5.0] - 2026-11-13
 
 Second stable ProxCloud release, after `v0.4.0` (owner decision 2026-11-13: this is
