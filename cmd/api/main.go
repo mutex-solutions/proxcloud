@@ -70,6 +70,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/sse"
 	"github.com/mutex-solutions/proxcloud/internal/platform/sso"
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
+	"github.com/mutex-solutions/proxcloud/internal/providerattach"
 	"github.com/mutex-solutions/proxcloud/internal/registrypins"
 	"github.com/mutex-solutions/proxcloud/internal/server"
 	"github.com/mutex-solutions/proxcloud/internal/templateupdates"
@@ -779,6 +780,24 @@ func run() error {
 			}
 			return err
 		},
+		// The per-project attach POST: the same operator attach the bulk attach runs per project, bounded like one bulk
+		// attempt and past the request's own life (it may create things on the provider).
+		Attach: func(ctx context.Context, projectID, esID string) (string, error) {
+			es, err := esSvc.Get(ctx, esID)
+			if err != nil {
+				return "", err
+			}
+			if es == nil {
+				return "", fmt.Errorf("external service %s not found", esID)
+			}
+			attempt, cancel := context.WithTimeout(context.WithoutCancel(ctx), project.AttachTimeout)
+			defer cancel()
+			outcome, err := projectH.AttachByOperator(attempt, projectID, es)
+			if err != nil {
+				log.Error("admin project attach", "project", projectID, "es", esID, "err", err)
+			}
+			return outcome, err
+		},
 		// Light pre-check before scheduling a project for deletion: the project must resolve (a
 		// deeper "no locked resources" gate could go here later).
 		CanDelete: func(ctx context.Context, projectID string) error {
@@ -912,12 +931,39 @@ func run() error {
 	go func() { defer close(workerDone); _ = worker.Run(workerCtx) }()
 	defer func() { stopWorker(); <-workerDone }()
 	adminH.SetDurableJobs(jobStore, jobHistory, func(j *durablejobs.Job) error {
-		if j.Kind == durablejobs.TemplateUpdateVM {
+		switch j.Kind {
+		case durablejobs.TemplateUpdateVM:
 			_, err := templateupdates.DecodeVMPayload(j.Payload)
+			return err
+		case durablejobs.ProviderAttach:
+			_, err := providerattach.DecodePayload(j.Payload)
 			return err
 		}
 		return chargefanout.Validate(j)
 	})
+	// Bulk attach of a provider to existing projects (docs/cloud-integration.md): the admin surface enqueues, this runner
+	// attaches each project through the per-project attach path, fenced and resumable.
+	paSvc := providerattach.New(pg, jobStore)
+	if err := paSvc.Repo.Ensure(ctx); err != nil {
+		return fmt.Errorf("provider attach store: %w", err)
+	}
+	adminH.SetProviderAttach(paSvc, projectH.CanAttach)
+	paRunner := &providerattach.Runner{
+		Store: jobStore, Repo: paSvc.Repo, Lease: cfg.Jobs.LeaseDuration, Log: log,
+		Provider: func(ctx context.Context, id string) (*externalservice.ExternalService, error) {
+			es, err := esSvc.Get(ctx, id)
+			if errors.Is(err, externalservice.ErrNotFound) {
+				return nil, nil // gone: the run ends provider_missing
+			}
+			return es, err
+		},
+		Attach:    projectH.AttachByOperator,
+		CanAttach: projectH.CanAttach,
+	}
+	paCtx, stopPA := context.WithCancel(ctx)
+	paDone := make(chan struct{})
+	go func() { defer close(paDone); paRunner.Run(paCtx) }()
+	defer func() { stopPA(); <-paDone }()
 	// GHCR template updates (docs/template-updates.md): discovery always; the VM import runner only
 	// when PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true. Every GitHub call uses the GitHub
 	// integration's token (decrypted per call, never logged).

@@ -64,10 +64,11 @@ func isMutation(m string) bool {
 	return m == http.MethodPost || m == http.MethodPut || m == http.MethodDelete
 }
 
-// auditSkip drops read-via-POST admin endpoints (the Proxmox and object store connection tests — no
-// state change → not an auditable mutation).
+// auditSkip drops read-via-POST admin endpoints (the Proxmox and object store connection tests, the bulk attach
+// preview — no state change → not an auditable mutation).
 func auditSkip(path string) bool {
-	return strings.HasSuffix(path, "/service/proxmox/auth") || strings.HasSuffix(path, "/object-store/test")
+	return strings.HasSuffix(path, "/service/proxmox/auth") || strings.HasSuffix(path, "/object-store/test") ||
+		strings.HasSuffix(path, "/bulk-attach/preview")
 }
 
 func methodToAction(m string) string {

@@ -205,7 +205,7 @@ Typed accessors used by the rest of the code:
 | `PVETemplates()`, `PVEImageCatalog()` | `templates` | OS templates servers are cloned from: discovered from cluster tags ([images/README.md](../images/README.md)); an entry with `vmid` + `node` pins one, any other entry overlays `name`, `osDistro`, `minDiskGb` |
 | `PVEGPUAliases()` / `PVEGPUMappingsFor(alias)` | `gpus` | PCI mapping ids per GPU alias |
 | `PVEOvercommitCPU()` | `overcommit.cpu` (default 4) | scheduler CPU overcommit |
-| `PVEDefaultQuota()` | `provisioning.quota` | quota seeded onto a new project |
+| `PVEDefaultQuota()` | `provisioning.quota` | quota of every project without its own (applied live) |
 | `MetricsSource()` | `metrics.source` | `pve` (the Proxmox default), `prometheus` or `none` |
 | `ServiceEnabledInRegion(slug, region)` | `services[slug][region]` | per-service toggle (below) |
 
@@ -501,19 +501,146 @@ project to a Proxmox provider:
 
 1. ensure the project pool;
 2. ensure the project's default security group;
-3. seed the provider's default quota onto a project that has none;
-4. append the binding `{serviceId, provider: "proxmox", region, pool}` to
+3. append the binding `{serviceId, provider: "proxmox", region, pool}` to
    `project.services`. The pool id is persisted so teardown never re-derives it.
+
+No quota is copied onto the project. A project without its own Proxmox quota
+(set on its admin Quota tab) is held to the provider's default quota
+(`config.provisioning.quota`) as it is at each check, so changing the default
+applies to every such project at once.
 
 It is idempotent. There is no per-project identity on the cluster: customers
 never get Proxmox credentials, and access is enforced by platform RBAC.
 
-Projects provision onto every non-disabled provider the first time they are
-entered (`enableAndBootstrap`). Projects that predate a provider are attached
-from the admin project page (Cloud services → Attach provider, which calls
-`POST /admin/project/{id}/external-service/{esid}`; a `GET` answers 405). The
-attach is idempotent: a service the project already carries is not provisioned
-again and gets no second binding.
+Projects provision onto every non-disabled provider whose attach policy is on
+the first time they are entered (`enableAndBootstrap`). Projects that predate a
+provider are attached from the admin project page (Cloud services → Attach
+provider, which calls `POST /admin/project/{id}/external-service/{esid}`; a
+`GET` answers 405), or many at once with the bulk attach below. The attach is
+idempotent: a service the project already carries is not provisioned again and
+gets no second binding. It refuses a project scheduled for deletion, being torn
+down or deleted (`400`); a DISABLED project (billing hold or operator) is
+attached and keeps its status. One attach runs for at most 2 minutes, past the
+request (it may create things on the provider).
+
+Bindings are written one way only: `Repo.AppendBinding` appends the binding in
+one statement, and only when no binding of that service is there yet. A save
+of the rest of the project (rename, member change, activation) does not write
+`services` or `provisionFailures`, so it cannot drop a binding added meanwhile.
+The operator attaches and the provisioning part of `enableAndBootstrap` run
+under a per-project PostgreSQL advisory lock (`project-attach:<id>`), on a
+fresh read. The binding append and the removal of the attach marks run on the
+lock's own session, with the "lock still held" check inside the same statement.
+There is no gap between the check and the write, and a session that lost the
+lock or is gone writes nothing (`ErrAttachLost`). An open of an already
+bootstrapped project takes the lock only when a recorded provisioning failure
+is due for its retry.
+
+#### Attach policy for new projects
+
+`config.attachToNewProjects` (boolean, default `true` when absent) decides
+whether a project's first bootstrap provisions onto the provider. Every provider
+stored before the setting existed keeps attaching new projects. With it `false`
+a new project is not attached to that provider; an operator attaches it per
+project or in bulk. The setting changes nothing for projects already attached
+and nothing about request routing: a request naming a service the project is
+not attached to is still refused, and a request naming none still uses the
+default (#215).
+
+Set it on the provider's **Projects** tab, or with
+`PUT /api/v1/admin/service/{id}/attach-policy` `{"attachToNewProjects": false}`
+(`admin:service:manage`). That PUT is a single-key write in the database
+(`jsonb_set` of `config.attachToNewProjects`), not a read-modify-replace of the
+provider. A connection save landing at the same time is not reverted, and the
+connection and go-live checks (object store, sandbox) do not apply to it. The
+connection save (`PUT /admin/service/{id}`) and the create also accept the key
+and refuse anything but `true`/`false`.
+
+#### Attaching a provider to existing projects
+
+The provider's **Projects** tab → *Attach to existing projects* attaches the
+provider to all projects, to the projects of picked organizations, or to picked
+projects (searchable picker). The page previews how many projects are in scope,
+already attached, being deleted and left to attach. It then shows progress with
+counts, the failed projects with their reason, *Cancel* and
+*Retry failed projects*.
+
+| Method | Path (`/api/v1/admin/service/{id}/…`) | Permission |
+|---|---|---|
+| GET | `bulk-attach` (runs, newest first, and the active one) | `admin:service:read` |
+| GET | `bulk-attach/candidates?kind=projects\|organizations&search=` | `admin:service:read` + `admin:project:read` |
+| POST | `bulk-attach/preview` `{scope}` | `admin:service:read` + `admin:project:read` |
+| POST | `bulk-attach` `{scope, concurrency}` | `admin:service:manage` + `admin:project:update` |
+| GET | `bulk-attach/{runId}`, `bulk-attach/{runId}/items?state=failed` | `admin:service:read` |
+| POST | `bulk-attach/{runId}/cancel` | `admin:service:manage` |
+| POST | `bulk-attach/{runId}/retry` `[{concurrency}]` | `admin:service:manage` + `admin:project:update` |
+
+`scope` is `{"mode":"all"}`, `{"mode":"organizations","organizationIds":[…]}`
+or `{"mode":"projects","projectIds":[…]}` (at most 2000 ids; unknown ids are a
+`400`). `concurrency` is 1–4, default 2. A DISABLED provider is refused (`409`).
+So is a provider this API cannot attach projects to: an unknown kind, or one
+whose client is not wired (`400`). One run attaches at most 5000 projects,
+counted at the start without those already attached. A larger scope is refused
+(`400`); split it by organizations or picked projects.
+
+How it runs (`internal/providerattach`):
+
+- The request only records a run (`providerAttachRun`) and enqueues one durable
+  job of kind `providerattach.run/v1` in the same transaction. Hundreds or
+  thousands of projects never run inside the HTTP request.
+- **One run per provider.** The start holds an advisory lock on the provider
+  and refuses (`409`) while an earlier run's job is pending or running. The job
+  key is `<provider>#<sequence>`. Runs for different providers are independent.
+- A runner in every API replica claims the job (the `durable_job` lease,
+  renewed while it works). It plans the scoped projects in batches of 500, in
+  id order. Each batch is one fenced transaction that advances a cursor on the
+  run, so planning of any size resumes where it stopped. Projects already
+  attached get no item, only a count on the run (`planSkipped`, shown as
+  skipped/already attached). Projects on their way out or gone get an item
+  `skipped/deleting` or `skipped/not_found`. The rest are pending items
+  (`providerAttachItem`).
+- It attaches the pending items with the run's concurrency, each through
+  `project.Handler.AttachByOperator`, the same path as the per-project POST.
+  That path runs under the per-project lock, on a fresh read, with no provider
+  call when the project is already attached. The provider is re-read for every
+  project, so a credential rotation applies to the next project. A provider
+  deleted, disabled or no longer attachable mid-run ends the run (`failed`):
+  every project not done yet fails `provider_missing`, `provider_disabled` or
+  `provider_unsupported`, and *Retry failed projects* picks them up once the
+  provider is back.
+- **Fenced and resumable.** Taking an item (`running`, attempt+1) and
+  recording its result are each committed with `durablejobs.Store.Checkpoint`.
+  An acquisition that lost its lease writes nothing more. The next acquisition
+  resumes from the items: an item left `running` is attached again, which is a
+  no-op where the first attempt had landed. An item interrupted three times
+  fails `attempts_exhausted`. A job interrupted five times dies; its run shows
+  `failed` and *Retry failed projects* picks up what it did not finish. A dead
+  bulk attach job is not replayed from the durable-jobs replay endpoint (`409`).
+- **Fixed codes only.** An item ends `attached`, `skipped` (`already_attached`,
+  `deleting`, `not_found`), `failed` (`provider_error`, `timeout`,
+  `provider_missing`, `provider_disabled`, `provider_unsupported`,
+  `attempts_exhausted`) or `cancelled`. The provider's error text is never stored or returned: it is
+  logged with the project id only, and the project's own provision failure is
+  not touched.
+- **Cancel** stops taking new items. Items in flight finish, the rest become
+  `cancelled`, and nothing is detached. A cancel that arrives once every
+  project is done changes nothing: the run stays completed. **Retry failed
+  projects** starts a new run over the failed items of a finished run.
+- **Retention.** The per-project items of a run finished more than 30 days ago
+  are removed by the runner's idle pass. The run keeps its counts and is marked
+  `itemsPruned`; it can no longer be retried (start a new run instead).
+- **Before the first bootstrap.** A project that was never opened (for example
+  one waiting on billing) is attached too, by the bulk attach or the
+  per-project POST. Its binding is marked `attachedBy: "operator"` in the same
+  statement that appends it, so no failure can leave an unmarked binding. A
+  marked binding does not count as the first bootstrap. When the project is
+  first opened it still gets every provider whose policy is on, and the marks
+  are dropped, also when there is no such provider.
+- **Audit.** Start, cancel and retry each write an admin audit event
+  `BULK_ATTACH` on the provider (`EXTERNAL_SERVICE`). It carries the actor, the
+  run and job ids, the scope (mode, ids, up to 50 listed, and their count), the
+  concurrency and the counts (preview counts for a start, the run's counts for
+  a cancel or retry). The generic admin mutation event is written as well.
 
 Teardown (`project/teardown.go`) destroys the pool's VMs and the pool, the
 project's vnets and EVPN zone, its security groups, releases public IPs and

@@ -65,7 +65,7 @@ package externalservice
 //	    "gpus": {},                            // Phase 6 — {mappingId: {"alias": "nvidia-4090"}}
 //	    "overcommit": {"cpu": 4},              // scheduler capacity multiplier
 //	    "metrics": {"source": "none"},         // until prometheus-pve-exporter is wired
-//	    "provisioning": {"quota": {            // default project quota (PVEDefaultQuota), seeded at bootstrap
+//	    "provisioning": {"quota": {            // default project quota (PVEDefaultQuota), applied live to projects without their own
 //	      "servers": 10, "vcpus": 20, "ramMb": 51200, "diskGb": 500,
 //	      "networks": 5, "floatingIps": 2, "gpu": {"*": 0}}}
 //	  },

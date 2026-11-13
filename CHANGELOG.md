@@ -20,6 +20,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the layer digest; the executor is off until `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true`.
   Sandbox image mirroring from the portal is not yet enabled; the page gives the `images.yaml`
   pin and the follow-up design is in `docs/template-updates.md`.
+- Add a per-provider **attach policy** for new projects: `config.attachToNewProjects`
+  (default `true` when absent, so every existing provider keeps attaching new projects). With
+  it off, a new project's first bootstrap skips that provider. Set it on the provider's new
+  **Projects** tab or with `PUT /api/v1/admin/service/{id}/attach-policy`, a single-key write
+  that changes nothing else and does not race the connection save. A non-boolean value is
+  refused there and on the provider create/connection save.
+- Add **Attach to existing projects** (follow-up of #215): from a provider's Projects tab,
+  attach it to all projects, the projects of picked organizations, or picked projects. It runs
+  as a fenced, resumable PostgreSQL durable job (`providerattach.run/v1`), at most one per
+  provider, with 1–4 projects at a time and at most 5000 projects to attach per run (planned
+  in resumable batches), and goes through the same path as the per-project attach. Already
+  attached projects are skipped with no provider call; projects being deleted are skipped;
+  suspended projects are attached and stay suspended. The provider is re-read per project: one
+  disabled or deleted mid-run ends the run and the rest can be retried. Results per project use
+  fixed codes only and are kept 30 days. The tab shows progress, the failed projects and their
+  reason, and offers cancel and retry-failed. Start, cancel and retry are audited
+  (`BULK_ATTACH`, with actor, provider, scope and counts). Start and retry need
+  `admin:service:manage` and `admin:project:update`, cancel `admin:service:manage`; reading
+  needs `admin:service:read` (and `admin:project:read` for the project picker and preview).
+  API: `/api/v1/admin/service/{id}/bulk-attach…` (`docs/cloud-integration.md`).
 
 ### Fixed
 
@@ -34,7 +54,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   BUCKET create for a newly registered S3 store failed on Proxmox). This covers creates,
   actions, deletes and the reads `quota-usage`, `gpu-capacity`, `public-networks` and the S3
   key routes. Requests naming no service keep the Proxmox default. Existing projects still
-  need an operator to attach a provider registered after they were created.
+  need an operator to attach a provider registered after they were created (per project, or
+  with the bulk attach above).
+- The per-project admin attach now refuses a project scheduled for deletion, being torn down
+  or deleted with `400` instead of provisioning it, and runs for at most 2 minutes. A
+  project's bindings are now only appended atomically: a project save (rename, member
+  change, activation) no longer rewrites `services` or `provisionFailures` from a stale read,
+  so it cannot drop a provider binding added meanwhile. Operator attaches and the first
+  bootstrap of one project are serialized under a per-project lock; the binding write runs
+  on the lock's own session with the ownership check in the same statement, so a writer
+  that lost the lock writes nothing. Attaching never stores a copy of a Proxmox provider's
+  default quota on the project: as before, a project without its own quota follows the
+  provider default live. An operator attach of a project never opened marks its binding in the same write, so
+  the project's first open still provisions every provider whose policy is on.
 - `POST /api/v1/project/{id}/init` no longer answers `200 {}` when it leaves the project down.
   It answers `409` with `errors.details` `{status, reason[, billingProfileStatus]}`, reason one
   of `billing_profile_inactive`, `billing_profile_suspended`, `billing_profile_missing`,

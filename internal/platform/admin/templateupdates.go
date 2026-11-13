@@ -243,7 +243,11 @@ func (h *Handler) placementOptions(ctx context.Context, es *externalservice.Exte
 }
 
 func decodeStrictBody(w http.ResponseWriter, r *http.Request, out any) bool {
-	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10))
+	return decodeStrictLimited(w, r, out, 8<<10)
+}
+
+func decodeStrictLimited(w http.ResponseWriter, r *http.Request, out any, limit int64) bool {
+	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	d.DisallowUnknownFields()
 	if err := d.Decode(out); err != nil || d.Decode(new(any)) != io.EOF {
 		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))

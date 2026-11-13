@@ -114,6 +114,8 @@ type Handler struct {
 	sbNotifier sandboxNotifier
 	// dnsOwnership holds short-lived, nonexclusive TXT proofs for new zones only.
 	dnsOwnership *pgdoc.Store
+	// afterBind runs right after a binding is stored (SetAfterBindForTest; nil outside tests).
+	afterBind func(ctx context.Context, projectID string) error
 }
 
 // SetSandbox wires the sandbox service factory (enables sandbox provisioning and the SANDBOX

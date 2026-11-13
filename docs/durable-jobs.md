@@ -75,6 +75,16 @@ pgdoc SQL boundary (including reads and advisory locks), not silently redirected
 or downgraded to another pool. Rollback gives no job and no business mutation;
 commit makes both durable. The first phase proves this primitive, not mail wiring.
 
+## External-effect kinds
+
+Two kinds do external I/O and are never registered on the DB-only `Worker`. Each
+has its own runner that renews its lease and commits every step through
+`Store.Checkpoint`: `templateupdate.vm/v1` (docs/template-updates.md) and
+`providerattach.run/v1`, the bulk attach of a provider to existing projects
+(docs/cloud-integration.md "Attaching a provider to existing projects"). Replay
+of either needs `admin:service:manage`. A dead bulk attach is not replayed
+(`409`); its run's *Retry failed projects* starts a new run instead.
+
 ## Status, selftest and replay
 
 - `GET /api/v1/admin/durable-jobs`: `admin:bill:read`; primary authorization first,

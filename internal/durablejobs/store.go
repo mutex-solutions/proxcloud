@@ -21,6 +21,10 @@ const (
 	// (internal/templateupdates). It is an EXTERNAL-effect kind: never registered on the DB-only
 	// Worker; its runner fences every step with Checkpoint and resumes from the last receipt.
 	TemplateUpdateVM = "templateupdate.vm/v1"
+	// ProviderAttach attaches one cloud provider to a scoped set of existing projects
+	// (internal/providerattach). EXTERNAL-effect kind: each project's provisioning is fenced by Checkpoint (intent before,
+	// result after) and a new acquisition resumes from the per-project results.
+	ProviderAttach = "providerattach.run/v1"
 )
 
 var (
@@ -62,7 +66,7 @@ func known(kind string) bool { return kind == Billing || kind == Selftest || Ext
 // External reports a kind whose handler performs external I/O. Such kinds are claimed only by a
 // dedicated runner that renews its lease and commits each step through Checkpoint; the DB-only
 // Worker refuses to register them.
-func External(kind string) bool { return kind == TemplateUpdateVM }
+func External(kind string) bool { return kind == TemplateUpdateVM || kind == ProviderAttach }
 
 // Checkpoint commits fn (DB-only writes: a step receipt) only while j's acquisition still owns an
 // unexpired lease, exactly like Complete but without acknowledging the job. A runner calls it
