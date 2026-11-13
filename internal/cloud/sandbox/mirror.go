@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 	"github.com/mutex-solutions/proxcloud/internal/sandboximport"
 )
 
@@ -61,6 +62,26 @@ func MirrorPodName(jobShort string, epoch int64) string {
 func (c Config) RegistryHost() string {
 	host, _, _ := strings.Cut(strings.TrimRight(c.TemplateRegistry, "/"), "/")
 	return host
+}
+
+// ErrNoClusterAccess is a provider whose cluster cannot be reached at all: no kubeconfig, or one that does not parse.
+var ErrNoClusterAccess = errors.New("sandbox: the provider has no usable cluster kubeconfig (secret.kubeconfig)")
+
+// NewClusterOnly builds a Service from the provider's kubeconfig alone, without the provider document checks New runs
+// (templates, limits, policies). It is for the template mirror's cleanup (this job's worker pods and, with them, their
+// pod-owned Secrets; a partial prepull switch), which must run whatever else the provider lost since the job started:
+// its mirror account, its template registry. Anything that creates sandboxes, builds or mirrors uses New.
+func NewClusterOnly(cfg Config, serviceID string) (*Service, error) {
+	if strings.TrimSpace(cfg.Kubeconfig) == "" || serviceID == "" {
+		return nil, ErrNoClusterAccess
+	}
+	kc, err := kamajik8s.New(cfg.Kubeconfig)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrNoClusterAccess, err)
+	}
+	s := NewWithAPI(kc, cfg, serviceID)
+	s.requireBuildPins, s.requireRuntimeCreatePins = true, true
+	return s, nil
 }
 
 // MirrorPolicy is the worker's operator-derived argument.

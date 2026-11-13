@@ -27,6 +27,12 @@ type SandboxRunner struct {
 	// Dead / ClaimDead: the dead-job cleanup pass (optional), like the VM runner.
 	Dead      func(ctx context.Context) ([]string, error)
 	ClaimDead func(ctx context.Context, id string, ttl time.Duration) (*durablejobs.Job, error)
+	// BuildCleanup builds the executor of the cleanup paths (a terminal failure whose run executor could not be
+	// built, the dead-job pass): the provider's cluster and the receipt/pin store only — no mirror account, registry
+	// reader or GitHub token, so a job whose run prerequisites went away still gets its worker pods deleted, a partial
+	// prepull switch undone and its pin restored. Permanent only when the provider is gone or unreachable for good.
+	// Only Cleanup is called on it. nil = Build.
+	BuildCleanup SandboxExecutorFactory
 	// OnFinish receives every job's final receipt (succeeded or failed): the system audit row (cmd/api).
 	OnFinish func(rec SandboxReceipt)
 	// CleanupOnly: never claim a job to run (the feature flag is off); only the dead-job cleanup pass and the orphan
@@ -205,6 +211,13 @@ func (r *SandboxRunner) terminal(parent context.Context, j *durablejobs.Job, fen
 	if err != nil {
 		return
 	}
+	if x == nil && rec != nil && r.BuildCleanup != nil && p.Validate() == nil {
+		// The run's executor could not be built (e.g. the mirror account is gone): cleanup needs the cluster only.
+		// Not buildable now either: the dead-job pass retries.
+		if cx, err := r.BuildCleanup(ctx, p); err == nil && cx != nil {
+			x = cx
+		}
+	}
 	if x != nil && rec != nil {
 		warns := x.Cleanup(ctx, fence, j.ID, p, rec)
 		if !stopped(warns) {
@@ -283,7 +296,11 @@ func (r *SandboxRunner) cleanupDead(ctx context.Context) (bool, error) {
 		_ = r.Store.Fail(context.WithoutCancel(work), j, 0, true, "cleanup_pending")
 		return false, nil
 	}
-	x, err := r.Build(work, p)
+	build := r.BuildCleanup
+	if build == nil {
+		build = r.Build
+	}
+	x, err := build(work, p)
 	if err != nil {
 		var perm *Permanent
 		if errors.As(err, &perm) {

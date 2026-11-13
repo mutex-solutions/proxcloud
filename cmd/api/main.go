@@ -1026,6 +1026,10 @@ func run() error {
 				}
 				return total, nil
 			},
+			// Cleanup (a terminal failure, the dead-job pass) needs the provider's cluster only: the job's worker pods and
+			// their Secrets are deleted, a partial prepull switch undone and the pin restored even when the mirror
+			// account, the template registry or the GitHub integration went away since the job started.
+			BuildCleanup: sandboxCleanupBuilder(esSvc.Get, sbxStore),
 			Build: func(ctx context.Context, p templateupdates.SandboxPayload) (*templateupdates.SandboxExecutor, error) {
 				es, err := esSvc.Get(ctx, p.ServiceID)
 				if err != nil || es == nil || !es.IsSandbox() {
@@ -1607,6 +1611,31 @@ func registerJobs(sched *scheduler.Scheduler, billingProvider string, chargeDisp
 // the sync job).
 func sandboxServiceFor(es *externalservice.ExternalService) (*sandbox.Service, error) {
 	return sandbox.New(es.SandboxConfig(), es.ID)
+}
+
+// sandboxCleanupBuilder is the sandbox mirror runner's BuildCleanup (docs/template-updates.md §5.2): the job's
+// provider's cluster (its kubeconfig only, sandbox.NewClusterOnly) and the receipt/pin store; no mirror account,
+// registry reader or GitHub token. Build refuses a provider that lost its mirror account or moved its template
+// registry as permanent, but the cleanup of such a job must still run. Only a provider that no longer exists (or is
+// no longer a sandbox provider) is permanent; a store error or an unusable kubeconfig is retried by the dead-job pass.
+func sandboxCleanupBuilder(get func(ctx context.Context, id string) (*externalservice.ExternalService, error), store interface {
+	templateupdates.SandboxReceipts
+	templateupdates.SandboxPins
+}) templateupdates.SandboxExecutorFactory {
+	return func(ctx context.Context, p templateupdates.SandboxPayload) (*templateupdates.SandboxExecutor, error) {
+		es, err := get(ctx, p.ServiceID)
+		switch {
+		case errors.Is(err, externalservice.ErrNotFound), err == nil && (es == nil || !es.IsSandbox()):
+			return nil, &templateupdates.Permanent{Code: "provider_missing", Message: "the target sandbox provider no longer exists"}
+		case err != nil:
+			return nil, err
+		}
+		ss, err := sandbox.NewClusterOnly(es.SandboxConfig(), es.ID)
+		if err != nil {
+			return nil, err
+		}
+		return &templateupdates.SandboxExecutor{Cluster: ss, Receipts: store, Pins: store}, nil
+	}
 }
 
 // projectTeardownDeleter adapts the project teardown (PVE VMs, networks, security groups and
