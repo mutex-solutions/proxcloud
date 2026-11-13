@@ -343,6 +343,7 @@ type SmokePVE interface {
 	DeleteVM(ctx context.Context, node string, vmid int) (pve.UPID, error)
 	GetVMStatus(ctx context.Context, node string, vmid int) (*pve.VMStatus, error)
 	WaitTask(ctx context.Context, upid pve.UPID) error
+	TaskRunning(ctx context.Context, node string, vmid int, typ string) (bool, error)
 	AgentPing(ctx context.Context, node string, vmid int) error
 	AgentOSInfo(ctx context.Context, node string, vmid int) (*pve.AgentOSInfo, error)
 	AgentFSInfo(ctx context.Context, node string, vmid int) ([]pve.AgentFS, error)
@@ -913,20 +914,43 @@ func (x *SmokeExecutor) owned(ctx context.Context, jobID string, p SmokePayload,
 	if pve.IsNotFound(err) {
 		return false, false, nil, nil
 	}
+	if pve.IsForbidden(err) {
+		// The token reaches a VM only through its pool, so PVE answers 403, not 404, for a VMID that no longer exists
+		// (verified on PVE 9.2.21: the destroyed test VM). Out of pc-templates it is not ours: out of view. Except a
+		// clone of ours still running: PVE adds a clone to its pool only when the clone ends, logged under the source.
+		// Clone first, pool second: a clone that ends in between is then already a member, and the 403 stands.
+		// A member on any node counts: VMIDs are cluster-wide. A clone not yet started (a superseded acquisition between
+		// its guard and its clone call) is not visible here; the orphan sweep after cleanup removes it.
+		if running, rerr := x.PVE.TaskRunning(ctx, p.Node, p.TemplateVMID, "qmclone"); rerr != nil || running {
+			return false, false, nil, errors.New("the test VM may still be cloning (a clone of the template is running, or the task list is unreadable); retrying later")
+		}
+		if inPool, perr := x.inTemplatePool(ctx, "", vmid); perr != nil || inPool {
+			return false, false, nil, err
+		}
+		return false, false, nil, nil
+	}
 	if err != nil {
 		return false, false, nil, err
 	}
-	pool, err := x.PVE.GetPool(ctx, pve.TemplatePool)
+	inPool, err := x.inTemplatePool(ctx, p.Node, vmid)
 	if err != nil {
 		return true, false, cfg, err
 	}
-	inPool := false
-	if pool != nil {
-		for _, m := range pool.Members {
-			inPool = inPool || m.Type == "qemu" && m.VMID == vmid && m.Node == p.Node
+	return true, inPool && !isTemplate(cfg) && smokeMine(cfg, jobID), cfg, nil
+}
+
+// inTemplatePool reads pool pc-templates' members directly; node "" matches a member on any node.
+func (x *SmokeExecutor) inTemplatePool(ctx context.Context, node string, vmid int) (bool, error) {
+	pool, err := x.PVE.GetPool(ctx, pve.TemplatePool)
+	if err != nil || pool == nil {
+		return false, err
+	}
+	for _, m := range pool.Members {
+		if m.Type == "qemu" && m.VMID == vmid && (node == "" || m.Node == node) {
+			return true, nil
 		}
 	}
-	return true, inPool && !isTemplate(cfg) && smokeMine(cfg, jobID), cfg, nil
+	return false, nil
 }
 
 // smokeMine is the name + tag half of the ownership proof.

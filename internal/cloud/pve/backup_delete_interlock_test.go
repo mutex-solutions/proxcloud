@@ -180,7 +180,7 @@ func TestDeleteServerBackupInterlockUnreadableCurrentState(t *testing.T) {
 				if endpoint == "config" && (fault == "null" || fault == "missing-data") {
 					wantConflict(t, err, "current configuration")
 				}
-				if endpoint == "tasks" && (fault == "null" || fault == "missing-data") && err.Error() != "pve: active restore task list is unavailable" {
+				if endpoint == "tasks" && (fault == "null" || fault == "missing-data") && err.Error() != "pve: active qmrestore task list is unavailable" {
 					t.Fatalf("unexpected unavailable task-list error: %v", err)
 				}
 			})
@@ -332,6 +332,42 @@ func TestRestoreRunningRequiresReadableTaskList(t *testing.T) {
 			}
 			if p.count("GET", backupDeleteTasksPath) != 1 || len(p.requests()) != 1 || len(p.mutations()) != 0 {
 				t.Fatalf("nonvacuous helper request count: %v", p.requests())
+			}
+		})
+	}
+}
+
+// TaskRunning reads the token's active tasks of one type under a VMID; an unreadable task list is an error, never "not running".
+func TestTaskRunningRequiresReadableTaskList(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw string
+		running   bool
+		wantErr   bool
+	}{
+		{"empty-list", `{"data":[]}`, false, false},
+		{"active", `{"data":[{"endtime":0}]}`, true, false},
+		{"ended", `{"data":[{"endtime":1700000000}]}`, false, false},
+		{"null", `{"data":null}`, false, true},
+		{"malformed-json", `{"data":`, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, p := newBackupDeleteWire(t)
+			b.requestHook = func(w http.ResponseWriter, r *http.Request) bool {
+				if r.URL.Path != backupDeleteTasksPath {
+					return false
+				}
+				if got := r.URL.Query(); got.Get("source") != "active" || got.Get("vmid") != "101" || got.Get("typefilter") != "qmclone" {
+					t.Errorf("task filters changed: %v", got)
+				}
+				fmt.Fprint(w, tc.raw)
+				return true
+			}
+			running, err := b.s.C.TaskRunning(context.Background(), "pve1", 101, "qmclone")
+			if running != tc.running || (err != nil) != tc.wantErr {
+				t.Fatalf("running=%v err=%v, want running=%v error=%v", running, err, tc.running, tc.wantErr)
+			}
+			if len(p.mutations()) != 0 {
+				t.Fatalf("a read mutated: %v", p.requests())
 			}
 		})
 	}

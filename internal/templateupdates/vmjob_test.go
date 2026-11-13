@@ -47,6 +47,10 @@ type fakePVE struct {
 	finalWaitFails bool
 	// importTransportErr makes the import-from SetVMConfig fail before PVE answered.
 	importTransportErr bool
+	poolErr            error            // GetPool fails with it
+	poolMembersExtra   []pve.PoolMember // listed as members of every pool read (a member the token still cannot read)
+	createRunning      map[int]bool     // a create task of this VMID has not ended (PVE adds the VM to its pool only then)
+	taskErr            error            // TaskRunning fails with it
 }
 
 func newFakePVE() *fakePVE {
@@ -222,8 +226,10 @@ func (f *fakePVE) GetVMConfig(_ context.Context, node string, vmid int) (pve.VMC
 	defer f.mu.Unlock()
 	f.read()
 	vm, ok := f.vms[vmid]
-	if !ok || vm.node != node {
-		return nil, &pve.APIError{Status: 500, Message: "Configuration file 'nodes/x/qemu-server/1.conf' does not exist"}
+	// The provider token reaches a VM only through pool pc-templates (no ACL on /vms): PVE 9.2 answers 403, not 404,
+	// for a VMID that does not exist or lies outside that pool (verified on PVE 9.2.21).
+	if !ok || vm.node != node || vm.cfg.Str("pool") != pve.TemplatePool {
+		return nil, &pve.APIError{Status: 403, Message: fmt.Sprintf("Permission check failed (/vms/%d, VM.Audit)", vmid)}
 	}
 	out := pve.VMConfig{}
 	for k, v := range vm.cfg {
@@ -243,16 +249,30 @@ func (f *fakePVE) ToTemplate(_ context.Context, node string, vmid int) (pve.UPID
 	return "UPID:template", nil
 }
 
+func (f *fakePVE) TaskRunning(_ context.Context, node string, vmid int, typ string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.read()
+	if f.taskErr != nil {
+		return false, f.taskErr
+	}
+	return typ == "qmcreate" && f.createRunning[vmid], nil
+}
+
 func (f *fakePVE) GetPool(_ context.Context, poolID string) (*pve.PoolInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.read()
+	if f.poolErr != nil {
+		return nil, f.poolErr
+	}
 	out := &pve.PoolInfo{PoolID: poolID}
 	for id, vm := range f.vms {
 		if vm.cfg.Str("pool") == poolID {
 			out.Members = append(out.Members, pve.PoolMember{ID: fmt.Sprintf("qemu/%d", id), Type: "qemu", VMID: id, Node: vm.node})
 		}
 	}
+	out.Members = append(out.Members, f.poolMembersExtra...)
 	return out, nil
 }
 
@@ -816,8 +836,9 @@ func TestOwnershipWindowBeforeTheImportWrite(t *testing.T) {
 	}
 	want := map[int]bool{9201: true, 9202: false, 9203: false, 9204: false, 9205: false, 9206: false, 9207: true}
 	for id, w := range want {
+		// A VM outside pc-templates is out of the token's view (403): not ours, never touched.
 		exists, own, _, err := x.owned(context.Background(), testJob, p, id)
-		if err != nil || !exists || own != w {
+		if err != nil || own != w || (w && !exists) {
 			t.Errorf("VM %d: exists=%v own=%v err=%v, want own=%v", id, exists, own, err, w)
 		}
 	}
@@ -871,5 +892,51 @@ func TestSweepRemovesUntaggedOrphanOfThisJobOnly(t *testing.T) {
 	}
 	if pv.vms[9202] == nil || pv.vms[9203] == nil || pv.vms[9200] == nil {
 		t.Fatalf("a VM that is not this job's was removed: %v", pv.calls)
+	}
+}
+
+// A VM listed in pc-templates that still answers 403, or a pool that cannot be read, is a real refusal: owned() keeps
+// the error (fail closed) instead of calling the VM gone.
+func TestOwnedKeepsRealRefusals(t *testing.T) {
+	x, pv, _, _, p := setup(t)
+	pv.vms[9301] = &fakeVM{node: "pve1", cfg: pve.VMConfig{"name": buildName(testJob), "pool": "elsewhere"}}
+	pv.poolMembersExtra = []pve.PoolMember{{Type: "qemu", VMID: 9301, Node: "pve1"}}
+	if _, _, _, err := x.owned(context.Background(), testJob, p, 9301); !pve.IsForbidden(err) {
+		t.Fatalf("a pool member answering 403 was not an error: %v", err)
+	}
+	pv.poolMembersExtra, pv.poolErr = nil, errors.New("pool read failed")
+	if _, _, _, err := x.owned(context.Background(), testJob, p, 9301); err == nil {
+		t.Fatal("a 403 with an unreadable pool was taken for gone")
+	}
+	pv.poolErr = nil
+	if exists, own, _, err := x.owned(context.Background(), testJob, p, 9399); err != nil || exists || own {
+		t.Fatalf("a gone VMID: exists=%v own=%v err=%v", exists, own, err)
+	}
+	// Listed on another node: VMIDs are cluster-wide, still a member.
+	pv.poolMembersExtra = []pve.PoolMember{{Type: "qemu", VMID: 9301, Node: "pve2"}}
+	if _, _, _, err := x.owned(context.Background(), testJob, p, 9301); !pve.IsForbidden(err) {
+		t.Fatalf("a member on another node answering 403 was not an error: %v", err)
+	}
+	pv.poolMembersExtra, pv.taskErr = nil, errors.New("task list unreadable")
+	if _, _, _, err := x.owned(context.Background(), testJob, p, 9399); err == nil {
+		t.Fatal("a 403 with an unreadable task list was taken for gone")
+	}
+}
+
+// PVE adds a created VM to its pool only when the create task ends, so a job resuming while its own create still runs
+// sees a 403 outside pc-templates. It must not take the VMID for gone and create a second VM: it retries, and once the
+// create has ended and the VM joined the pool it removes it and starts over.
+func TestOwnedWaitsForItsRunningCreate(t *testing.T) {
+	x, pv, _, _, p := setup(t)
+	pv.vms[9301] = &fakeVM{node: "pve1", cfg: pve.VMConfig{"name": buildName(testJob), "lock": "create"}}
+	pv.createRunning = map[int]bool{9301: true}
+	if _, _, _, err := x.owned(context.Background(), testJob, p, 9301); err == nil {
+		t.Fatal("a VM whose create is running was taken for gone")
+	}
+	delete(pv.createRunning, 9301)
+	pv.vms[9301].cfg["pool"] = pve.TemplatePool
+	delete(pv.vms[9301].cfg, "lock")
+	if exists, own, _, err := x.owned(context.Background(), testJob, p, 9301); err != nil || !exists || !own {
+		t.Fatalf("the created VM: exists=%v own=%v err=%v", exists, own, err)
 	}
 }

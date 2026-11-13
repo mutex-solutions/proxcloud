@@ -164,6 +164,7 @@ type PVE interface {
 	UploadSpace(ctx context.Context) (pve.StorageNodeState, error)
 	UploadImportFile(ctx context.Context, node, storage, filename string, src io.Reader, size int64, checksum, algorithm string) (pve.UPID, error)
 	TaskStopped(ctx context.Context, upid pve.UPID, wait time.Duration) bool
+	TaskRunning(ctx context.Context, node string, vmid int, typ string) (bool, error)
 	TaskStatus(ctx context.Context, upid pve.UPID) (*pve.TaskStatus, error)
 	WaitTask(ctx context.Context, upid pve.UPID) error
 	StorageContents(ctx context.Context, node, storage, content string, vmid int) ([]pve.StorageContent, error)
@@ -458,6 +459,20 @@ func (x *Executor) owned(ctx context.Context, jobID string, p VMPayload, vmid in
 	if pve.IsNotFound(err) {
 		return false, false, nil, nil
 	}
+	if pve.IsForbidden(err) {
+		// The token reaches a VM only through its pool, so PVE answers 403, not 404, for a VMID that no longer exists
+		// (or never was in pc-templates). Out of the pool it is not ours either way: out of view, never touched. Except
+		// our create still running: PVE adds a created VM to its pool only when the create task ends (logged under the
+		// new VMID). Create task first, pool second: a create that ends in between is then already a member. A member
+		// on any node counts: VMIDs are cluster-wide.
+		if running, rerr := x.PVE.TaskRunning(ctx, p.Node, vmid, "qmcreate"); rerr != nil || running {
+			return false, false, nil, errors.New("the VM may still be being created (its create task is running, or the task list is unreadable); retrying later")
+		}
+		if inPool, perr := x.inTemplatePool(ctx, "", vmid); perr != nil || inPool {
+			return false, false, nil, err
+		}
+		return false, false, nil, nil
+	}
 	if err != nil {
 		return false, false, nil, err
 	}
@@ -477,14 +492,14 @@ func carriesOwnership(cfg pve.VMConfig, jobID string) bool {
 		(strings.TrimSpace(cfg.Str("tags")) == "" && cfg.Str("name") == buildName(jobID))
 }
 
-// inTemplatePool reads pool pc-templates' members directly.
+// inTemplatePool reads pool pc-templates' members directly; node "" matches a member on any node.
 func (x *Executor) inTemplatePool(ctx context.Context, node string, vmid int) (bool, error) {
 	pool, err := x.PVE.GetPool(ctx, pve.TemplatePool)
 	if err != nil || pool == nil {
 		return false, err
 	}
 	for _, m := range pool.Members {
-		if m.Type == "qemu" && m.VMID == vmid && m.Node == node {
+		if m.Type == "qemu" && m.VMID == vmid && (node == "" || m.Node == node) {
 			return true, nil
 		}
 	}
