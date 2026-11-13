@@ -42,7 +42,7 @@ func (h *Handler) withAttachLock(ctx context.Context, projectID string, fn func(
 }
 
 // AttachByOperator is the operator's attach of one provider to one project: the per-project admin POST
-// (/admin/project/{id}/external-service/{esid}), the admin create-with-provider and the bulk attach all run it. Under the
+// (/admin/project/{id}/external-service/{esid}) and the bulk attach (internal/providerattach) both run it. Under the
 // project's attach lock it reads the project afresh, then:
 //
 //   - a project that does not exist is AttachNotFound, one scheduled for deletion, being torn down or deleted is
