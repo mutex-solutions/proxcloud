@@ -34,15 +34,18 @@ type ProviderView struct {
 
 // Service is the admin-facing façade.
 type Service struct {
-	Token       TokenSource
-	Options     Options // registry/API overrides (tests); zero in production
-	Jobs        *durablejobs.Store
-	DB          *pgdoc.DB
-	Receipts    PGReceipts
-	VMEnabled   bool // PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED: the executor runs only when set
-	mu          sync.Mutex
-	cache       *discoveryCache
-	newRegistry func(token string) (Registry, error)
+	Token     TokenSource
+	Options   Options // registry/API overrides (tests); zero in production
+	Jobs      *durablejobs.Store
+	DB        *pgdoc.DB
+	Receipts  PGReceipts
+	VMEnabled bool // PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED: the executor runs only when set
+	// SandboxEnabled is PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED: the sandbox mirror runner and its endpoints.
+	SandboxEnabled bool
+	Sandbox        PGSandbox
+	mu             sync.Mutex
+	cache          *discoveryCache
+	newRegistry    func(token string) (Registry, error)
 }
 
 type discoveryCache struct {
@@ -100,7 +103,7 @@ type Status struct {
 
 // GetStatus validates the stored token live (one GET /user).
 func (s *Service) GetStatus(ctx context.Context) Status {
-	st := Status{VMEnabled: s.VMEnabled}
+	st := Status{VMEnabled: s.VMEnabled, SandboxMirror: s.SandboxEnabled}
 	tok, id, err := s.Token(ctx)
 	st.IntegrationID = id
 	if err != nil {

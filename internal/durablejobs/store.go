@@ -21,7 +21,13 @@ const (
 	// (internal/templateupdates). It is an EXTERNAL-effect kind: never registered on the DB-only
 	// Worker; its runner fences every step with Checkpoint and resumes from the last receipt.
 	TemplateUpdateVM = "templateupdate.vm/v1"
+	// TemplateUpdateSandbox mirrors a built-in sandbox template image into the sandbox registry and points the
+	// prepull DaemonSets at it, or rolls that back (internal/templateupdates, sandbox*.go). External-effect kind.
+	TemplateUpdateSandbox = "templateupdate.sandbox/v1"
 )
+
+// externalKinds are the kinds claimed only by dedicated, fenced runners.
+var externalKinds = []string{TemplateUpdateVM, TemplateUpdateSandbox}
 
 var (
 	ErrLeaseLost = errors.New("durable job lease lost")
@@ -62,7 +68,7 @@ func known(kind string) bool { return kind == Billing || kind == Selftest || Ext
 // External reports a kind whose handler performs external I/O. Such kinds are claimed only by a
 // dedicated runner that renews its lease and commits each step through Checkpoint; the DB-only
 // Worker refuses to register them.
-func External(kind string) bool { return kind == TemplateUpdateVM }
+func External(kind string) bool { return kind == TemplateUpdateVM || kind == TemplateUpdateSandbox }
 
 // Checkpoint commits fn (DB-only writes: a step receipt) only while j's acquisition still owns an
 // unexpired lease, exactly like Complete but without acknowledging the job. A runner calls it
@@ -105,7 +111,7 @@ func (s *Store) ClaimDead(ctx context.Context, id string, ttl time.Duration) (*J
 	}
 	j, err := scan(s.db.Pool.QueryRow(ctx, `UPDATE durable_job SET state='running',attempts=max_attempts,epoch=epoch+1,owner=$2,
 	 lease_until=clock_timestamp()+$3*interval '1 microsecond',finished_at=NULL
-	 WHERE id=$1 AND state='dead' AND kind=ANY($4) AND last_error IS DISTINCT FROM 'cleaned_up' RETURNING `+columns, id, uuid.NewString(), ttl.Microseconds(), []string{TemplateUpdateVM}))
+	 WHERE id=$1 AND state='dead' AND kind=ANY($4) AND last_error IS DISTINCT FROM 'cleaned_up' RETURNING `+columns, id, uuid.NewString(), ttl.Microseconds(), externalKinds))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
