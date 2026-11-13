@@ -8,6 +8,8 @@ package sandboxproxy
 //	                 library/** or another project)                         Secret registry-build-<project> in sbx-build
 //	pull-nodes       reads library/**                                       Secret sandbox-registry-nodes in the system namespace
 //	gc               reads and deletes t/** (the portal's pruning of unreferenced template images)
+//	mirror           reads and creates library/sandbox-* only — no update (an existing tag never moves), no delete,
+//	                 nothing under t/** or library/proxcloud-* (the portal's sandbox mirror job, docs/template-updates.md §4)
 //	admin            everything (the installer's mirror of the built-in images)
 //
 // A project's password is derived from a key (HMAC), so nothing is stored per project: a restart writes the same
@@ -38,6 +40,7 @@ import (
 const (
 	RegistryAdminUser  = "admin"
 	RegistryGCUser     = "gc"
+	RegistryMirrorUser = "mirror"
 	RegistryNodesUser  = "pull-nodes"
 	RegistryNodeSecret = "sandbox-registry-nodes"
 )
@@ -54,7 +57,7 @@ type RegistryUsers struct {
 	Base     map[string]any    // Zot's config without http.auth and http.accessControl (storage, TLS, log)
 	Host     string            // the registry as the nodes pull from it: host[:port]
 	Key      []byte            // derives pull-<project> passwords
-	Static   map[string]string // admin, gc, pull-nodes -> password
+	Static   map[string]string // admin, gc, pull-nodes and (optional) mirror -> password
 	Dir      string            // config.json and htpasswd, read by Zot
 	SystemNS string            // where the nodes' Secret goes (sandbox-system)
 	// ServiceID, when set, counts only the namespaces of that sandbox provider (proxcloud.io/service): a cluster
@@ -103,15 +106,23 @@ func RegistryProjects(namespaces []map[string]any) []string {
 	return slices.Compact(out)
 }
 
+// MirrorRepoPattern is the only repository pattern the mirror account may write: the built-in sandbox template images.
+const MirrorRepoPattern = "library/sandbox-*"
+
 // ZotAccess is http.accessControl for these projects. Zot applies the most specific matching pattern, so a project's
-// pattern repeats the gc user's rights.
+// pattern repeats the gc user's rights, and the explicit library/sandbox-* entry repeats the pull group's read next to
+// the mirror account's read+create (without it the mirror account would get nothing, and with it alone the pull group
+// would lose library/sandbox-*). The mirror account has no "update": a tag that exists never moves, and no "delete".
 func ZotAccess(projects []string) map[string]any {
 	rw := []any{"read", "create", "update"}
 	gc := map[string]any{"users": []any{RegistryGCUser}, "actions": []any{"read", "delete"}}
+	pullRead := map[string]any{"groups": []any{"pull"}, "actions": []any{"read"}}
 	pull := []any{RegistryNodesUser}
 	repos := map[string]any{
-		"library/**": map[string]any{"policies": []any{map[string]any{"groups": []any{"pull"}, "actions": []any{"read"}}}, "defaultPolicy": []any{}},
-		"t/**":       map[string]any{"policies": []any{gc}, "defaultPolicy": []any{}},
+		"library/**": map[string]any{"policies": []any{pullRead}, "defaultPolicy": []any{}},
+		MirrorRepoPattern: map[string]any{"policies": []any{pullRead,
+			map[string]any{"users": []any{RegistryMirrorUser}, "actions": []any{"read", "create"}}}, "defaultPolicy": []any{}},
+		"t/**": map[string]any{"policies": []any{gc}, "defaultPolicy": []any{}},
 	}
 	for _, p := range projects {
 		// The build account reads the built-in images too: a build from a built-in template starts from one.
@@ -161,6 +172,12 @@ func (r *RegistryUsers) Pass(ctx context.Context) (changed bool, err error) {
 	}
 	var errs []error
 	if err := r.ensureSecret(ctx, r.SystemNS, RegistryNodeSecret, RegistryNodesUser, nil); err != nil {
+		errs = append(errs, err)
+	}
+	// The same read-only library/** account in sbx-build: the kubelet's pull credential for the portal's trusted
+	// sandbox-import worker when it mirrors a built-in image (no project account applies there). Applied blind, like
+	// the build Secrets (this identity cannot read Secrets in sbx-build).
+	if err := r.applySecret(ctx, sandbox.BuildNamespace, RegistryNodeSecret, RegistryNodesUser, map[string]any{sandbox.LabelManagedBy: ManagedByRegistry}); err != nil {
 		errs = append(errs, err)
 	}
 	for _, p := range projects {
@@ -235,6 +252,9 @@ func (r *RegistryUsers) htpasswd(users []string) ([]byte, error) {
 
 func (r *RegistryUsers) write(projects []string) error {
 	users := []string{RegistryAdminUser, RegistryGCUser, RegistryNodesUser}
+	if r.Static[RegistryMirrorUser] != "" {
+		users = append(users, RegistryMirrorUser)
+	}
 	for _, p := range projects {
 		users = append(users, "pull-"+p, "build-"+p)
 	}
@@ -298,7 +318,8 @@ func (r *RegistryUsers) ensureSecret(ctx context.Context, ns, name, user string,
 	return nil
 }
 
-// ReadRegistryUsersDir reads the static passwords and the key from files named after them (a mounted Secret).
+// ReadRegistryUsersDir reads the static passwords and the key from files named after them (a mounted Secret). The
+// mirror account is optional (a registry installed before it existed has no such file): absent, it is not created.
 func ReadRegistryUsersDir(dir string) (static map[string]string, key []byte, err error) {
 	static = map[string]string{}
 	for _, u := range []string{RegistryAdminUser, RegistryGCUser, RegistryNodesUser} {
@@ -309,6 +330,13 @@ func ReadRegistryUsersDir(dir string) (static map[string]string, key []byte, err
 		if static[u] = strings.TrimSpace(string(b)); static[u] == "" {
 			return nil, nil, fmt.Errorf("%s/%s is empty", dir, u)
 		}
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, RegistryMirrorUser)); err == nil {
+		if static[RegistryMirrorUser] = strings.TrimSpace(string(b)); static[RegistryMirrorUser] == "" {
+			return nil, nil, fmt.Errorf("%s/%s is empty", dir, RegistryMirrorUser)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, nil, err
 	}
 	key, err = os.ReadFile(filepath.Join(dir, "key"))
 	if err == nil && len(bytes.TrimSpace(key)) < 16 {

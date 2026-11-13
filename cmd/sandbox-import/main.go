@@ -29,9 +29,41 @@ func sourceCredential(path, host string) (authn.AuthConfig, error) {
 	return sandboximport.SourceCredential(b, host)
 }
 
+// mirror is the copy mode for a built-in sandbox template image (docs/template-updates.md §4): argv is
+// "mirror <ghcr source@digest> <registry>/library/sandbox-<name>:<tag> <policy>"; the source credential is the
+// pod-owned GitHub pull Secret at /source, the destination the Zot mirror account at /push.
+func mirror() error {
+	source, dest := os.Args[2], os.Args[3]
+	policy, err := sandboximport.ParseMirrorPolicy(os.Args[4])
+	if err != nil {
+		return err
+	}
+	if _, _, err = policy.Check(source, dest); err != nil {
+		return err
+	}
+	src, err := credential("/source/config.json", sandboximport.MirrorSourceHost)
+	if err != nil {
+		return err
+	}
+	push, err := credential("/push/config.json", policy.Registry)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 29*time.Minute)
+	defer cancel()
+	result, err := sandboximport.RunMirror(ctx, policy, source, dest, src, push)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(os.Stdout).Encode(result)
+}
+
 func run() error {
 	if len(os.Args) != 5 {
 		return errors.New("expected project, immutable source, destination and operator policy")
+	}
+	if os.Args[1] == sandboximport.MirrorMode {
+		return mirror()
 	}
 	project, source, dest := os.Args[1], os.Args[2], os.Args[3]
 	policy, err := sandboximport.ParsePolicy(os.Args[4])
