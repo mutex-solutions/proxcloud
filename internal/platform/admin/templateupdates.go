@@ -7,7 +7,7 @@ package admin
 //	GET  /admin/template-updates/history     job receipts               (admin:service:read)
 //	GET  /admin/template-updates/placement/{serviceId}  node/storage choices (admin:service:read)
 //	POST /admin/template-updates/vm          enqueue a VM template import (admin:service:manage)
-//	POST /admin/template-updates/sandbox     sandbox pin switch — not yet enabled (501)
+//	POST /admin/template-updates/sandbox     sandbox mirror + prepull switch (templateupdates_sandbox.go)
 //
 // The GitHub PAT lives in a thirdPartyIntegration of type "GitHub" (secret.token, encrypted at
 // rest, never returned); it is validated with GET /user before it is saved.
@@ -46,6 +46,9 @@ func (h *Handler) routeTemplateUpdates(r chi.Router) {
 	r.Get("/template-updates/placement/{serviceId}", h.templateUpdatesPlacement)
 	r.Post("/template-updates/vm", h.templateUpdatesVM)
 	r.Post("/template-updates/sandbox", h.templateUpdatesSandbox)
+	r.Post("/template-updates/sandbox/rollback", h.templateUpdatesSandboxRollback)
+	r.Get("/template-updates/sandbox/state", h.templateUpdatesSandboxState)
+	r.Get("/template-updates/sandbox/pins", h.templateUpdatesSandboxPins)
 }
 
 func (h *Handler) templateUpdatesReady(w http.ResponseWriter) bool {
@@ -310,18 +313,6 @@ func placementAllowed(opts []PlacementOption, node, importStorage, diskStorage s
 		return in(o.ImportStorages, importStorage) && in(o.DiskStorages, diskStorage)
 	}
 	return false
-}
-
-// templateUpdatesSandbox is the seam of the sandbox mirror + pin switch: not yet enabled. The
-// portal holds no credential that may write the sandbox registry's library/ namespace and no RBAC
-// on the prepull DaemonSet; the follow-up design is in docs/template-updates.md. Until then the
-// page shows the exact images.yaml pin and the installer path (make upgrade → adoption job).
-func (h *Handler) templateUpdatesSandbox(w http.ResponseWriter, r *http.Request) {
-	if !h.require(w, r, templateUpdatesManagePerm) {
-		return
-	}
-	httpx.Err(w, http.StatusNotImplemented, http.StatusNotImplemented,
-		"Sandbox template updates are not enabled yet: pin the digest in deploy/templates/images.yaml and run make upgrade (docs/template-updates.md)")
 }
 
 // ── GitHub integration (thirdPartyIntegration type "GitHub") ─────────────────────────────────

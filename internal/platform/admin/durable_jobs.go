@@ -66,13 +66,28 @@ func (h *Handler) durableReplay(w http.ResponseWriter, r *http.Request) {
 	}
 	// A failed/finished template update is a no-op on replay: refuse clearly instead.
 	if external && h.templateUpdates != nil {
-		rec, err := h.templateUpdates.Receipts.Load(r.Context(), chi.URLParam(r, "id"))
-		if err != nil {
+		id := chi.URLParam(r, "id")
+		var rerr error
+		if j, err := h.durableStore.Get(r.Context(), id); err != nil {
 			httpx.Err(w, 503, 503, "Durable job replay failed")
 			return
+		} else if j.Kind == durablejobs.TemplateUpdateSandbox {
+			sbx, err := h.templateUpdates.Sandbox.Load(r.Context(), id)
+			if err != nil {
+				httpx.Err(w, 503, 503, "Durable job replay failed")
+				return
+			}
+			rerr = templateupdates.ReplayableSandboxReceipt(sbx)
+		} else {
+			rec, err := h.templateUpdates.Receipts.Load(r.Context(), id)
+			if err != nil {
+				httpx.Err(w, 503, 503, "Durable job replay failed")
+				return
+			}
+			rerr = templateupdates.ReplayableReceipt(rec)
 		}
-		if err := templateupdates.ReplayableReceipt(rec); err != nil {
-			httpx.Err(w, 409, 409, err.Error())
+		if rerr != nil {
+			httpx.Err(w, 409, 409, rerr.Error())
 			return
 		}
 	}

@@ -912,8 +912,12 @@ func run() error {
 	go func() { defer close(workerDone); _ = worker.Run(workerCtx) }()
 	defer func() { stopWorker(); <-workerDone }()
 	adminH.SetDurableJobs(jobStore, jobHistory, func(j *durablejobs.Job) error {
-		if j.Kind == durablejobs.TemplateUpdateVM {
+		switch j.Kind {
+		case durablejobs.TemplateUpdateVM:
 			_, err := templateupdates.DecodeVMPayload(j.Payload)
+			return err
+		case durablejobs.TemplateUpdateSandbox:
+			_, err := templateupdates.DecodeSandboxPayload(j.Payload)
 			return err
 		}
 		return chargefanout.Validate(j)
@@ -927,12 +931,70 @@ func run() error {
 			return tuRepo.GitHubToken(ctx, func(v any) any { return enc.DecryptObject(v) })
 		},
 		Jobs: jobStore, DB: pg, Receipts: templateupdates.PGReceipts{DB: pg}, VMEnabled: cfg.Jobs.TemplateUpdatesVM,
+		SandboxEnabled: cfg.Jobs.TemplateUpdatesSandbox, Sandbox: templateupdates.PGSandbox{DB: pg},
 	}
-	// Create the receipt table up front: EnqueueVM reads it inside its transaction (no auto-create there).
+	// Create the receipt tables up front: the enqueues read them inside their transaction (no auto-create there).
 	if err := tuSvc.Receipts.Ensure(ctx); err != nil {
 		return fmt.Errorf("template update store: %w", err)
 	}
+	if err := tuSvc.Sandbox.Ensure(ctx); err != nil {
+		return fmt.Errorf("template update sandbox store: %w", err)
+	}
 	adminH.SetTemplateUpdates(tuSvc)
+	adminH.SetSandboxCluster(func(es *externalservice.ExternalService) (admin.SandboxCluster, error) { return sandboxServiceFor(es) })
+	if cfg.Jobs.TemplateUpdatesSandbox {
+		sbxStore := templateupdates.PGSandbox{DB: pg}
+		sbxRunner := &templateupdates.SandboxRunner{
+			Store: jobStore, Receipts: sbxStore, Lease: cfg.Jobs.LeaseDuration, Log: log,
+			Dead: sbxStore.DeadUncleaned, ClaimDead: jobStore.ClaimDead,
+			Build: func(ctx context.Context, p templateupdates.SandboxPayload) (*templateupdates.SandboxExecutor, error) {
+				es, err := esSvc.Get(ctx, p.ServiceID)
+				if err != nil || es == nil || !es.IsSandbox() {
+					return nil, &templateupdates.Permanent{Code: "provider_missing", Message: "the target sandbox provider no longer exists"}
+				}
+				sc := es.SandboxConfig()
+				if sc.RegistryHost() != p.Registry {
+					return nil, &templateupdates.Permanent{Code: "registry_changed", Message: "the sandbox provider's template registry is no longer the job's"}
+				}
+				if sc.RegistryMirror.Password == "" {
+					return nil, &templateupdates.Permanent{Code: "mirror_unavailable", Message: "the sandbox provider has no registry mirror account (secret.registryMirror)"}
+				}
+				ss, err := sandboxServiceFor(es)
+				if err != nil {
+					return nil, err
+				}
+				return &templateupdates.SandboxExecutor{Cluster: ss, Receipts: sbxStore, Pins: sbxStore,
+					Registry: templateupdates.NewRegistryReader(p.Registry, sc.RegistryCA, sc.RegistryMirror.User, sc.RegistryMirror.Password, ""),
+					Token: func(ctx context.Context) (string, error) {
+						tok, _, err := tuSvc.Token(ctx)
+						if err == nil && tok == "" {
+							err = templateupdates.ErrNotConfigured
+						}
+						return tok, err
+					}}, nil
+			},
+			// One SYSTEM audit row per finished job (who asked is on the receipt and the enqueue's admin audit row).
+			OnFinish: func(rec templateupdates.SandboxReceipt) {
+				ev := audit.SystemEvent()
+				ev.Action = audit.ActionUpdate
+				ev.ResourceType = "EXTERNAL_SERVICE"
+				ev.ResourceID = rec.Payload.ServiceID
+				ev.ResourceDisplayName = "template-update " + rec.Payload.Action + " sandbox-" + rec.Payload.Name
+				ev.Outcome = audit.OutcomeSuccess
+				if rec.Step != templateupdates.SbxSucceeded {
+					ev.Outcome = audit.OutcomeFailure
+				}
+				ev.Changes = []audit.PropertyChange{{Field: "prepull.sandbox-" + rec.Payload.Name, NewValue: rec.Payload.Ref()},
+					{Field: "templateUpdate.job", NewValue: rec.ID}, {Field: "templateUpdate.code", NewValue: rec.Code}}
+				auditSvc.LogAsync(ev)
+			},
+		}
+		sbxCtx, stopSbx := context.WithCancel(ctx)
+		sbxDone := make(chan struct{})
+		go func() { defer close(sbxDone); sbxRunner.Run(sbxCtx) }()
+		defer func() { stopSbx(); <-sbxDone }()
+		log.Warn("template updates: sandbox mirror runner ENABLED")
+	}
 	if cfg.Jobs.TemplateUpdatesVM {
 		tuReceipts := templateupdates.PGReceipts{DB: pg}
 		tuRunner := &templateupdates.Runner{
