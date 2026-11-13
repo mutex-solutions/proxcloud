@@ -756,7 +756,11 @@ func stopped(warns []string) bool { return slices.Contains(warns, stoppedWarn) }
 
 // pendingWarn is the sandbox Cleanup warning that means a store write failed (not the lease): the cleanup is not
 // done and the dead-job pass retries it on its cleanup_pending throttle instead of at once on every lease.
-const pendingWarn = "cleanup waiting: the pin record could not be settled (a store error); retried every 10 minutes"
+const pendingWarn = cleanupWaiting + " the pin record could not be settled (a store error); retried every 10 minutes (if it persists, check the database, or delete the provider)"
+
+// cleanupWaiting starts every receipt warning that says a sandbox cleanup is still to come; the dead-job pass drops
+// them once the cleanup is done.
+const cleanupWaiting = "cleanup waiting:"
 
 func pending(warns []string) bool { return slices.Contains(warns, pendingWarn) }
 

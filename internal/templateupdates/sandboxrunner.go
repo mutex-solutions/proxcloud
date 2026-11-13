@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/durablejobs"
@@ -354,7 +355,12 @@ func (r *SandboxRunner) cleanupDead(ctx context.Context) (bool, error) {
 					rec.Code, rec.Message = "job_dead", "the job ended without completing; its worker pods were cleaned up"
 				}
 			}
-			rec.Cleaned, rec.Warnings, rec.UpdatedAt = true, append(rec.Warnings, warns...), time.Now().UTC()
+			// Done now: a "cleanup waiting" reason recorded on an earlier pass no longer holds.
+			kept := slices.DeleteFunc(rec.Warnings, func(w string) bool { return strings.HasPrefix(w, cleanupWaiting) })
+			for _, w := range warns {
+				kept = appendOnce(kept, w)
+			}
+			rec.Cleaned, rec.Warnings, rec.UpdatedAt = true, kept, time.Now().UTC()
 			return r.Receipts.Save(tc, rec)
 		})
 		if err != nil {
@@ -386,9 +392,7 @@ func (r *SandboxRunner) cleanupDead(ctx context.Context) (bool, error) {
 			}
 			n := len(got.Warnings)
 			for _, w := range whys {
-				if !slices.Contains(got.Warnings, w) {
-					got.Warnings = append(got.Warnings, w)
-				}
+				got.Warnings = appendOnce(got.Warnings, w)
 			}
 			if len(got.Warnings) == n {
 				return nil
@@ -405,7 +409,7 @@ func (r *SandboxRunner) cleanupDead(ctx context.Context) (bool, error) {
 		if errors.As(err, &perm) {
 			return finish([]string{"cleanup impossible (" + perm.Code + "): remove any tu-mirror-* pod in sbx-build by hand"}), nil
 		}
-		return waiting("cleanup waiting: the provider's sandbox cluster cannot be reached (check its secret.kubeconfig, or delete the provider); retried every 10 minutes")
+		return waiting(cleanupWaiting + " the provider's sandbox cluster cannot be reached (check its secret.kubeconfig, or delete the provider); retried every 10 minutes")
 	}
 	warns := x.Cleanup(work, fence, j.ID, p, rec)
 	if stopped(warns) || isLost() {

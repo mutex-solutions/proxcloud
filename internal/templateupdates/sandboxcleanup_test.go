@@ -159,8 +159,9 @@ func TestSandboxCleanupWithoutTheMirrorAccount(t *testing.T) {
 		if did, err := r.RunOnce(context.Background()); !did || err != nil {
 			t.Fatalf("cleanup pass: %v %v", did, err)
 		}
-		if got := mem.recs[sbxJob]; !got.Cleaned || mem.pins[p.Repo()] != before || jobs.failCode != "cleaned_up" {
-			t.Fatalf("receipt %+v pin %+v job %s", got, mem.pins[p.Repo()], jobs.failCode)
+		if got := mem.recs[sbxJob]; !got.Cleaned || mem.pins[p.Repo()] != before || jobs.failCode != "cleaned_up" ||
+			countPrefix(got.Warnings, cleanupWaiting) != 0 {
+			t.Fatalf("receipt %+v pin %+v job %s (a done cleanup still says it is waiting)", got, mem.pins[p.Repo()], jobs.failCode)
 		}
 		// The terminal path leaves it uncleaned for the dead-job pass the same way.
 		r, jobs, _, mem = leftover(t)
