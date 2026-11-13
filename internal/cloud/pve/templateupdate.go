@@ -14,3 +14,7 @@ func (c *Client) UploadSpace(ctx context.Context) (StorageNodeState, error) {
 func (s *Service) LockImportUpload(ctx context.Context) (func(), error) {
 	return s.lockImportUpload(ctx)
 }
+
+// DiskSizeBytes reads the size= of one disk config value ("local-zfs:vm-1-disk-0,size=20G") in bytes
+// (exported for the template update smoke test).
+func DiskSizeBytes(raw string) (int64, bool) { return diskSizeBytes(raw) }

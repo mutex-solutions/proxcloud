@@ -18,6 +18,7 @@ type JobStore interface {
 	Checkpoint(ctx context.Context, j *durablejobs.Job, fn func(context.Context) error) error
 	Complete(ctx context.Context, j *durablejobs.Job, fn func(context.Context) error) error
 	Fail(ctx context.Context, j *durablejobs.Job, delay time.Duration, permanent bool, code string) error
+	Defer(ctx context.Context, j *durablejobs.Job, delay time.Duration, code string) error
 }
 
 // jobFence binds a Checkpoint to one acquisition.
@@ -63,7 +64,24 @@ type Runner struct {
 	// BuildCleanup builds an executor for cleanup only (PVE access, no GitHub client): cleanup must
 	// not depend on the GitHub integration. nil = Build.
 	BuildCleanup ExecutorFactory
+
+	// ── smoke tests (smoke.go; nil BuildSmoke = smoke jobs are not claimed) ──
+	Smokes     SmokeStore
+	BuildSmoke SmokeExecutorFactory
+	// SmokeLock serializes smoke tests per provider across replicas (one test VM at a time on a
+	// provider's smoke network). A busy lock defers the job without spending an attempt.
+	SmokeLock func(ctx context.Context, key string) (release func(), acquired bool, err error)
+	// DeadSmoke lists dead smoke jobs whose test VM may be left (cleaned like dead imports).
+	DeadSmoke func(ctx context.Context) ([]string, error)
+	// SmokeTimeout bounds one smoke acquisition (default 1h).
+	SmokeTimeout time.Duration
+	// OnImported runs after an import job succeeded (cmd/api: enqueue its automatic smoke test).
+	// Best effort, outside the job's transaction: a failure never fails the import.
+	OnImported func(ctx context.Context, importID string)
 }
+
+// SmokeExecutorFactory builds a smoke executor for a payload at run time (PVE access only).
+type SmokeExecutorFactory func(ctx context.Context, p SmokePayload) (*SmokeExecutor, error)
 
 // Run polls until ctx ends.
 func (r *Runner) Run(ctx context.Context) {
@@ -99,12 +117,24 @@ func (r *Runner) RunOnce(ctx context.Context) (did bool, err error) {
 	if r.Lease <= 0 {
 		r.Lease = time.Minute
 	}
-	j, err := r.Store.ClaimKinds(ctx, r.Lease, []string{durablejobs.TemplateUpdateVM})
+	kinds := []string{durablejobs.TemplateUpdateVM}
+	if r.BuildSmoke != nil && r.Smokes != nil {
+		kinds = append(kinds, durablejobs.TemplateUpdateSmoke)
+	}
+	j, err := r.Store.ClaimKinds(ctx, r.Lease, kinds)
 	if err != nil {
 		return false, err
 	}
 	if j == nil {
-		return r.cleanupDead(ctx)
+		did, err := r.cleanupDead(ctx)
+		if did || err != nil || r.BuildSmoke == nil || r.Smokes == nil {
+			return did, err
+		}
+		return r.cleanupDeadSmoke(ctx)
+	}
+	if j.Kind == durablejobs.TemplateUpdateSmoke {
+		r.performSmoke(ctx, j)
+		return true, nil
 	}
 	r.perform(ctx, j)
 	return true, nil
@@ -170,6 +200,9 @@ func (r *Runner) perform(parent context.Context, j *durablejobs.Job) {
 		})
 		if e != nil && !errors.Is(e, durablejobs.ErrLeaseLost) {
 			r.Log.Warn("template update: complete failed", "job", j.ID)
+		}
+		if e == nil && r.OnImported != nil {
+			r.OnImported(cctx, j.ID)
 		}
 	case errors.Is(err, ErrStopped) || isLost():
 		r.Log.Warn("template update: lease lost; stopped", "job", j.ID, "epoch", j.Epoch)

@@ -68,3 +68,48 @@ func (c *Client) GuestRun(ctx context.Context, node string, vmid int, timeout ti
 func (c *Client) GuestWriteFile(ctx context.Context, node string, vmid int, path, content string) error {
 	return c.post(ctx, qemuPath(node, vmid)+"/agent/file-write", url.Values{"file": {path}, "content": {content}}, nil)
 }
+
+// AgentPing asks the guest agent to answer (POST .../agent/ping): an error until the agent runs.
+func (c *Client) AgentPing(ctx context.Context, node string, vmid int) error {
+	return c.post(ctx, qemuPath(node, vmid)+"/agent/ping", nil, nil)
+}
+
+// AgentOSInfo is the guest agent's guest-get-osinfo answer (os-release fields).
+type AgentOSInfo struct {
+	ID            string `json:"id"`
+	VersionID     string `json:"version-id"`
+	Name          string `json:"name"`
+	PrettyName    string `json:"pretty-name"`
+	KernelRelease string `json:"kernel-release"`
+}
+
+// AgentOSInfo reads guest-get-osinfo (GET .../agent/get-osinfo).
+func (c *Client) AgentOSInfo(ctx context.Context, node string, vmid int) (*AgentOSInfo, error) {
+	var out struct {
+		Result AgentOSInfo `json:"result"`
+	}
+	if err := c.get(ctx, qemuPath(node, vmid)+"/agent/get-osinfo", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out.Result, nil
+}
+
+// AgentFS is one mounted filesystem of guest-get-fsinfo. TotalBytes is nil when the agent is too old to report it.
+type AgentFS struct {
+	Name       string `json:"name"`
+	Mountpoint string `json:"mountpoint"`
+	Type       string `json:"type"`
+	TotalBytes *int64 `json:"total-bytes"`
+	UsedBytes  *int64 `json:"used-bytes"`
+}
+
+// AgentFSInfo reads guest-get-fsinfo (GET .../agent/get-fsinfo).
+func (c *Client) AgentFSInfo(ctx context.Context, node string, vmid int) ([]AgentFS, error) {
+	var out struct {
+		Result []AgentFS `json:"result"`
+	}
+	if err := c.get(ctx, qemuPath(node, vmid)+"/agent/get-fsinfo", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Result, nil
+}
