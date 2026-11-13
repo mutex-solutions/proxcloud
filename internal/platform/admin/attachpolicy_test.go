@@ -15,8 +15,8 @@ import (
 func TestApplyAttachPolicyKeepsOtherConfig(t *testing.T) {
 	stored := func() pgdoc.M {
 		return pgdoc.M{"name": "pve", "config": pgdoc.M{
-			"provider": "proxmox",
-			"services": pgdoc.M{"compute": pgdoc.M{"r1": true}},
+			"provider":     "proxmox",
+			"services":     pgdoc.M{"compute": pgdoc.M{"r1": true}},
 			"provisioning": pgdoc.M{"quota": pgdoc.M{"servers": 5}},
 		}}
 	}

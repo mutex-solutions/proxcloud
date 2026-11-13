@@ -37,7 +37,7 @@ const provisionRecordTimeout = 5 * time.Second
 // operator's disable. A DISABLED project already provisioned has nothing to provision and may hold paused VMs, so it stays:
 // enabling that is the operator's enable, which resumes them.
 func (h *Handler) ProvisionByOperator(ctx context.Context, p *Project) error {
-	if p.IsDisabled() && p.HasServices() {
+	if p.IsDisabled() && p.bootstrapped() {
 		return nil
 	}
 	if p.IsDisabled() {
@@ -70,10 +70,48 @@ func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 	// provider-side setup was done at first bootstrap. Skip ALL the live calls — they are idempotent
 	// setup, not per-entry work, and re-running them on every project-open is both wasteful and a
 	// failure surface (a provider config change must not 500 an already-working project).
-	attached := len(p.ServiceIDs()) > 0
-	if attached && len(p.ProvisionFailures) == 0 {
+	// A binding the bulk attach added before the first bootstrap does not count (Project.bootstrapped).
+	if p.bootstrapped() && len(p.ProvisionFailures) == 0 {
 		return nil
 	}
+	// The provisioning writes the whole services list: under the project's attach lock, on the bindings as stored now, so an
+	// operator attach (per project or bulk) or a concurrent open landing meanwhile is neither lost nor done twice.
+	return h.withAttachLock(ctx, p.ID, func() error {
+		if h.hasRepo() {
+			fresh, err := h.svc.repo.FindByID(ctx, p.ID)
+			if err != nil {
+				return err
+			}
+			if fresh != nil {
+				// A deletion that landed meanwhile stands, and nothing new is created for a project on its way out.
+				if fresh.Deleting() {
+					return nil
+				}
+				p.Services = fresh.Services
+				for id, f := range fresh.ProvisionFailures {
+					if _, ok := p.ProvisionFailures[id]; !ok {
+						if p.ProvisionFailures == nil {
+							p.ProvisionFailures = map[string]ProvisionFailure{}
+						}
+						p.ProvisionFailures[id] = f
+					}
+				}
+			}
+		}
+		if p.bootstrapped() && len(p.ProvisionFailures) == 0 {
+			return nil
+		}
+		return h.provisionAll(ctx, p)
+	})
+}
+
+func (h *Handler) hasRepo() bool {
+	return h.svc != nil && h.svc.repo != nil && h.svc.repo.col != nil && h.svc.repo.col.DB() != nil
+}
+
+// provisionAll is the provisioning part of enableAndBootstrap, run under the project's attach lock.
+func (h *Handler) provisionAll(ctx context.Context, p *Project) error {
+	attached := p.bootstrapped()
 	services, err := h.esSvc.ListByType(ctx, externalservice.TypeCloud)
 	if err != nil {
 		return err
@@ -133,6 +171,10 @@ func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 			delete(p.ProvisionFailures, id)
 			changed = true
 		}
+	}
+	// The first bootstrap ran: bindings the bulk attach added before it are now ordinary ones.
+	if clearBulkMarks(p) {
+		changed = true
 	}
 	if changed {
 		if err := h.svc.Save(context.WithoutCancel(ctx), p); err != nil {

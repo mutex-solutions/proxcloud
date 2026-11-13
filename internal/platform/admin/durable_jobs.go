@@ -51,21 +51,28 @@ func (h *Handler) durableReplay(w http.ResponseWriter, r *http.Request) {
 	// admin:service:manage, not the billing key. Only a definite "no such job" falls back to the
 	// billing key; a lookup error fails closed so a billing admin can never replay an external job.
 	perm := "admin:bill:manage"
-	external, err := h.adminRequiresServiceManage(r.Context(), chi.URLParam(r, "id"))
+	kind, err := h.durableJobKind(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		if h.require(w, r, "admin:bill:manage") {
 			httpx.Err(w, 503, 503, "Durable job replay failed")
 		}
 		return
 	}
+	external := durablejobs.External(kind)
 	if external {
 		perm = templateUpdatesManagePerm
 	}
 	if !h.require(w, r, perm) {
 		return
 	}
+	// A dead bulk attach is not replayed: its "Retry failed projects" starts a new run over what it did not finish, and
+	// one-run-per-provider is enforced there (a replay next to a newer run would make two).
+	if kind == durablejobs.ProviderAttach {
+		httpx.Err(w, 409, 409, "A bulk attach is not replayed: use Retry failed projects on the provider's Projects tab")
+		return
+	}
 	// A failed/finished template update is a no-op on replay: refuse clearly instead.
-	if external && h.templateUpdates != nil {
+	if kind == durablejobs.TemplateUpdateVM && h.templateUpdates != nil {
 		rec, err := h.templateUpdates.Receipts.Load(r.Context(), chi.URLParam(r, "id"))
 		if err != nil {
 			httpx.Err(w, 503, 503, "Durable job replay failed")
@@ -108,18 +115,24 @@ func (h *Handler) durableReplay(w http.ResponseWriter, r *http.Request) {
 // (or a malformed id, which Replay refuses anyway) is (false, nil); any other lookup error is
 // returned so the caller fails closed.
 func (h *Handler) adminRequiresServiceManage(ctx context.Context, id string) (bool, error) {
+	kind, err := h.durableJobKind(ctx, id)
+	return durablejobs.External(kind), err
+}
+
+// durableJobKind is the kind of job id ("" when there is no such job or the id is malformed).
+func (h *Handler) durableJobKind(ctx context.Context, id string) (string, error) {
 	if h.durableStore == nil {
-		return false, nil
+		return "", nil
 	}
 	if _, err := uuid.Parse(id); err != nil {
-		return false, nil
+		return "", nil
 	}
 	j, err := h.durableStore.Get(ctx, id)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
+		return "", nil
 	}
-	if err != nil {
-		return false, err
+	if err != nil || j == nil {
+		return "", err
 	}
-	return j != nil && durablejobs.External(j.Kind), nil
+	return j.Kind, nil
 }
