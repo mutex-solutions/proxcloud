@@ -79,9 +79,39 @@ func TestPGTemplateUpdateReplay(t *testing.T) {
 	}
 	failed, midflight := mk("k-failed", templateupdates.StepFailed), mk("k-mid", templateupdates.StepUploading)
 
+	// Sandbox mirror jobs replay by their own receipt.
+	sbx := templateupdates.PGSandbox{DB: db}
+	if err := sbx.Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	sp := templateupdates.SandboxPayload{Version: 1, Action: templateupdates.SandboxMirror, ServiceID: "sbx", Name: "base", Registry: "192.0.2.226",
+		Tag: "20261112-9d00563", Digest: "sha256:" + strings.Repeat("7", 64)}
+	sraw, _ := json.Marshal(sp)
+	mkSbx := func(key string, step templateupdates.Step) string {
+		id, err := jobs.Enqueue(ctx, durablejobs.TemplateUpdateSandbox, key, sraw, 3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := sbx.Save(ctx, &templateupdates.SandboxReceipt{ID: id, Kind: "sandbox", Payload: sp, Step: step}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Pool.Exec(ctx, `UPDATE durable_job SET state='dead',finished_at=clock_timestamp(),last_error='x' WHERE id=$1`, id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	sbxFailed, sbxMid := mkSbx("s-failed", templateupdates.SbxFailed), mkSbx("s-mid", templateupdates.SbxMirroring)
+
 	h := &Handler{adminIssuer: "operator-realm"}
-	h.SetDurableJobs(jobs, nil, func(j *durablejobs.Job) error { _, err := templateupdates.DecodeVMPayload(j.Payload); return err })
-	h.SetTemplateUpdates(&templateupdates.Service{Receipts: rec, Jobs: jobs, DB: db})
+	h.SetDurableJobs(jobs, nil, func(j *durablejobs.Job) error {
+		if j.Kind == durablejobs.TemplateUpdateSandbox {
+			_, err := templateupdates.DecodeSandboxPayload(j.Payload)
+			return err
+		}
+		_, err := templateupdates.DecodeVMPayload(j.Payload)
+		return err
+	})
+	h.SetTemplateUpdates(&templateupdates.Service{Receipts: rec, Jobs: jobs, DB: db, Sandbox: sbx})
 	r := chi.NewRouter()
 	r.Post("/admin/durable-jobs/{id}/replay", h.durableReplay)
 	body := `{"reason":"retry after a fix"}`
@@ -94,6 +124,15 @@ func TestPGTemplateUpdateReplay(t *testing.T) {
 	}
 	if j, _ := jobs.Get(ctx, midflight); j.State != "pending" {
 		t.Fatalf("not re-queued: %+v", j)
+	}
+	if w := tuDo(r, "POST", "/admin/durable-jobs/"+sbxFailed+"/replay", body, op); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "start a new one") {
+		t.Fatalf("failed sandbox replay: %d %s", w.Code, w.Body.String())
+	}
+	if w := tuDo(r, "POST", "/admin/durable-jobs/"+sbxMid+"/replay", body, op); w.Code != http.StatusOK {
+		t.Fatalf("mid-flight sandbox replay: %d %s", w.Code, w.Body.String())
+	}
+	if ext, err := h.adminRequiresServiceManage(ctx, sbxFailed); err != nil || !ext {
+		t.Fatalf("sandbox replay does not require admin:service:manage: %v %v", ext, err)
 	}
 	// Permission: a billing-only operator cannot replay a template update.
 	if ext, err := h.adminRequiresServiceManage(ctx, failed); err != nil || !ext {

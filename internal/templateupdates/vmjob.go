@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -751,14 +752,17 @@ func (x *Executor) sweepOrphans(ctx context.Context, f Fence, jobID string, p VM
 // stoppedWarn is the Cleanup warning that means the fence was lost mid-cleanup.
 const stoppedWarn = "stopped: the job's lease was lost"
 
-func stopped(warns []string) bool {
-	for _, w := range warns {
-		if w == stoppedWarn {
-			return true
-		}
-	}
-	return false
-}
+func stopped(warns []string) bool { return slices.Contains(warns, stoppedWarn) }
+
+// pendingWarn is the sandbox Cleanup warning that means a store write failed (not the lease): the cleanup is not
+// done and the dead-job pass retries it on its cleanup_pending throttle instead of at once on every lease.
+const pendingWarn = cleanupWaiting + " the pin record could not be settled (a store error); retried every 10 minutes (if it persists, check the database, or delete the provider)"
+
+// cleanupWaiting starts every receipt warning that says a sandbox cleanup is still to come; the dead-job pass drops
+// them once the cleanup is done.
+const cleanupWaiting = "cleanup waiting:"
+
+func pending(warns []string) bool { return slices.Contains(warns, pendingWarn) }
 
 func hasTagValue(tags, want string) bool {
 	for _, t := range strings.Split(tags, ";") {

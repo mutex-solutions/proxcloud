@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -108,6 +109,201 @@ func (c *Client) registryToken(ctx context.Context, challenge string) (string, e
 		return "", errors.New("ghcr: empty registry token")
 	}
 	return tok.Token, nil
+}
+
+// Fixed refusal codes of PullToken (Permanent errors; their messages never carry a token or the PAT).
+const (
+	// CodeTokenUnscoped: GHCR answered with something that is not a short-lived scoped registry token.
+	CodeTokenUnscoped = "ghcr_token_unscoped"
+	// CodePackageNotPublic: the package cannot be read anonymously (the sandbox mirror supports public packages only).
+	CodePackageNotPublic = "ghcr_package_not_public"
+	// maxPullTokenBytes bounds the token written into the worker's Secret; maxPullTokenTTL bounds expires_in.
+	maxPullTokenBytes = 8 << 10
+	maxPullTokenTTL   = 3600
+)
+
+// PullToken returns an ANONYMOUS short-lived GHCR registry token with pull scope on exactly ONE public sandbox package
+// (scope repository:<Owner>/sandbox-<name>:pull, service ghcr.io), for the sandbox mirror worker. The request carries
+// NO Authorization header: the PAT (used for discovery only) never takes part in minting it, and there is no fallback
+// to the PAT for a package that is not public (Permanent CodePackageNotPublic). Before it is returned the token is
+// checked (CheckPullToken against the PAT) and its pull access is confirmed with one anonymous-token tags read; a
+// token that is, contains or decodes to the PAT (or any GitHub token), or that claims a lifetime over an hour, is
+// refused (Permanent CodeTokenUnscoped). Redirects are not followed.
+func (c *Client) PullToken(ctx context.Context, pkg string) (string, error) {
+	repo, err := repoForPackage(pkg)
+	if err != nil || !strings.HasPrefix(pkg, "sandbox-") {
+		return "", errors.New("ghcr: invalid sandbox package name")
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.requestTimeout)
+	defer cancel()
+	hc := &http.Client{Transport: c.http.Transport, Timeout: c.requestTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	q := url.Values{"scope": {"repository:" + repo + ":pull"}, "service": {DefaultRegistry}}
+	get := func(u, bearer string) (*http.Response, []byte, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		req.Header.Set("User-Agent", "proxcloud-template-updates")
+		if bearer != "" {
+			req.Header.Set("Authorization", "Bearer "+bearer)
+		}
+		res, err := hc.Do(req)
+		if err != nil {
+			return nil, nil, scrub(err)
+		}
+		defer res.Body.Close()
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 64<<10))
+		return res, body, nil
+	}
+	notPublic := func(status int) bool {
+		return status == http.StatusUnauthorized || status == http.StatusForbidden || status == http.StatusNotFound
+	}
+	res, body, err := get(c.scheme+"://"+c.registry+"/token?"+q.Encode(), "")
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case notPublic(res.StatusCode):
+		return "", permanent(CodePackageNotPublic, "GHCR does not serve "+repo+" anonymously; the sandbox mirror supports public sandbox packages only")
+	case res.StatusCode != http.StatusOK:
+		return "", classify(res, nil)
+	}
+	var tr struct {
+		Token       string      `json:"token"`
+		AccessToken string      `json:"access_token"`
+		ExpiresIn   json.Number `json:"expires_in"`
+	}
+	if json.Unmarshal(body, &tr) != nil {
+		return "", permanent(CodeTokenUnscoped, "GHCR answered the anonymous token request with a malformed response")
+	}
+	tok := tr.Token
+	if tok == "" {
+		tok = tr.AccessToken
+	}
+	if err := CheckPullToken(tok, c.token); err != nil {
+		return "", err
+	}
+	if tr.AccessToken != "" && tr.AccessToken != tok {
+		if err := CheckPullToken(tr.AccessToken, c.token); err != nil {
+			return "", err // GHCR handed out something PAT-derived next to it: the whole answer is distrusted
+		}
+	}
+	if tr.ExpiresIn != "" {
+		if ttl, err := strconv.ParseFloat(tr.ExpiresIn.String(), 64); err != nil || !(ttl > 0 && ttl <= maxPullTokenTTL) {
+			return "", permanent(CodeTokenUnscoped, "GHCR's anonymous registry token does not expire within an hour")
+		}
+	}
+	// The anonymous token must read the package (a public package answers 200; a private one 401/403/404).
+	res, _, err = get(c.scheme+"://"+c.registry+"/v2/"+repo+"/tags/list?n=1", tok)
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case notPublic(res.StatusCode):
+		return "", permanent(CodePackageNotPublic, "GHCR refuses an anonymous read of "+repo+"; the sandbox mirror supports public sandbox packages only")
+	case res.StatusCode != http.StatusOK:
+		return "", classify(res, nil)
+	}
+	return tok, nil
+}
+
+// githubTokenPrefixes are GitHub credential prefixes (classic/fine-grained PAT, OAuth, user/server-to-server, refresh).
+var githubTokenPrefixes = []string{"ghp_", "github_pat_", "gho_", "ghu_", "ghs_", "ghr_"}
+
+// CheckPullToken refuses (Permanent CodeTokenUnscoped) anything that must not be written into a worker Secret as a
+// GHCR registry token: empty, longer than 8 KiB, not printable ASCII without whitespace, a GitHub token (by prefix),
+// or — when pat is non-empty — the PAT itself, a token containing it, containing its base64 form (any alphabet,
+// padding or alignment), or one whose base64 decoding (std/raw/url/raw-url, also after a leading "<word>:" prefix such
+// as "v1:", nested up to three levels) contains the PAT or starts with a GitHub token prefix. The error never includes
+// the token or the PAT.
+func CheckPullToken(tok, pat string) error {
+	refuse := permanent(CodeTokenUnscoped, "GHCR did not answer with a short-lived scoped registry token; it was not used")
+	if tok == "" || len(tok) > maxPullTokenBytes {
+		return refuse
+	}
+	for i := 0; i < len(tok); i++ {
+		if tok[i] <= ' ' || tok[i] > '~' {
+			return refuse
+		}
+	}
+	var needles []string
+	if pat != "" {
+		needles = append(needles, pat)
+		needles = append(needles, base64Needles(pat)...)
+	}
+	bad := func(s string) bool {
+		for _, p := range githubTokenPrefixes {
+			if strings.HasPrefix(s, p) {
+				return true
+			}
+		}
+		for _, n := range needles {
+			if strings.Contains(s, n) {
+				return true
+			}
+		}
+		return false
+	}
+	seen := map[string]bool{}
+	level := []string{tok}
+	for depth := 0; depth < 4 && len(level) > 0; depth++ {
+		var next []string
+		for _, s := range level {
+			if seen[s] {
+				continue
+			}
+			seen[s] = true
+			if bad(s) {
+				return refuse
+			}
+			if depth == 3 {
+				continue
+			}
+			cands := []string{s}
+			if w, rest, ok := strings.Cut(s, ":"); ok && w != "" && isWord(w) {
+				cands = append(cands, rest)
+				if bad(rest) {
+					return refuse
+				}
+			}
+			for _, cs := range cands {
+				for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+					if b, err := enc.DecodeString(cs); err == nil && len(b) > 0 {
+						next = append(next, string(b))
+					}
+				}
+			}
+		}
+		level = next
+	}
+	return nil
+}
+
+func isWord(s string) bool {
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '.') {
+			return false
+		}
+	}
+	return true
+}
+
+// base64Needles are the substrings every base64 encoding (standard or URL alphabet, any padding) of a text containing
+// pat must contain, for each of the three byte alignments pat can start at.
+func base64Needles(pat string) []string {
+	var out []string
+	for shift := 0; shift < 3; shift++ {
+		enc := base64.StdEncoding.EncodeToString(append(make([]byte, shift), pat...))
+		start := (shift*8 + 5) / 6 // the first character made only of pat bits
+		end := len(enc) - 4        // drop the final quantum (padding / bits shared with what follows)
+		if end-start < 8 {
+			continue
+		}
+		n := enc[start:end]
+		out = append(out, n, strings.NewReplacer("+", "-", "/", "_").Replace(n))
+	}
+	return out
 }
 
 // parseChallenge parses `Bearer realm="…",service="…",scope="…"`.

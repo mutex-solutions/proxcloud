@@ -28,6 +28,11 @@ jobs:
         env:
           CI: "1"
         run: go test ./...
+      - name: Sandbox prepull admission policy (CEL, k8s.io/apiserver, its own module)
+        run: |
+          python3 -m venv /tmp/iv && /tmp/iv/bin/pip install -q -r installer/requirements.txt
+          /tmp/iv/bin/python installer/tests/render_prepull_policy.py /tmp/prepull-policy.yaml
+          cd test/policy && POLICY_YAML=/tmp/prepull-policy.yaml go test ./...
       - name: Integration tests (testcontainers PostgreSQL)
         run: |
           go test -tags=integration ./test/integration/... ./cmd/api/...

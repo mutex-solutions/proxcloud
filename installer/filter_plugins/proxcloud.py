@@ -412,6 +412,117 @@ def sandbox_templates(templates, pins, host=""):
     return out
 
 
+_PREPULL_SCHEMAS = {
+    # schema name -> the policy list that must cover its properties
+    "io.k8s.api.core.v1.PodSpec": "pod",
+    "io.k8s.api.core.v1.Container": "container",
+    "io.k8s.api.apps.v1.DaemonSetSpec": "daemonset",
+    "io.k8s.api.core.v1.PodTemplateSpec": "template",
+    # the DaemonSet's own metadata (the pod template's is compared whole); every /openapi/v3 group-version document
+    # carries the schemas it references, so it is in both the core and the apps one
+    "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta": "metadata",
+}
+
+
+def _field_names(v):
+    """A policy field list: a YAML list of names, or a mapping name -> reason (the uncompared entries)."""
+    if isinstance(v, dict):
+        return set(v)
+    return set(v or [])
+
+
+def prepull_policy_gaps(openapi_docs, fields):
+    """The fields the prepull admission policy would leave writable on this cluster (docs/template-updates.md §5.3).
+    openapi_docs: the cluster's /openapi/v3/api/v1 and /openapi/v3/apis/apps/v1 documents (parsed JSON); fields:
+    pc_prepull_policy_fields. Every property of ObjectMeta, PodSpec, Container, DaemonSetSpec and PodTemplateSpec must
+    be compared by the policy or be one of its deliberately uncompared fields. Returns "<Schema>.<property>" strings,
+    sorted by schema then property; [] when covered. A schema missing from the documents is itself a gap (the check
+    cannot prove anything then)."""
+    schemas = {}
+    for doc in openapi_docs or []:
+        if isinstance(doc, dict):
+            schemas.update(((doc.get("components") or {}).get("schemas")) or {})
+    gaps = []
+    for schema, key in sorted(_PREPULL_SCHEMAS.items()):
+        s = schemas.get(schema)
+        if not isinstance(s, dict) or not isinstance(s.get("properties"), dict):
+            gaps.append("%s (schema not served)" % schema)
+            continue
+        covered = _field_names(fields.get(key)) | _field_names((fields.get("uncompared") or {}).get(schema))
+        gaps += ["%s.%s" % (schema.rsplit(".", 1)[1], p) for p in sorted(set(s["properties"]) - covered)]
+    return gaps
+
+
+_SANDBOX_TAG = r"^([0-9]{8})-[0-9a-f]{7}$"
+_PIN_SOURCE = "ghcr.io/mutex-solutions/sandbox-%s:%s@%s"
+
+
+def sandbox_portal_pins(pins, portal, host):
+    """Merge deploy/templates/images.yaml (pins: name -> ref) with the portal's sandboxBuiltinPin records (portal: the
+    list GET /admin/template-updates/sandbox/pins returns) for the sandbox registry host, so a make upgrade never renders
+    an image older than the one the portal pinned (docs/template-updates.md §5). Per built-in image (matched on the
+    registry repository <host>/library/sandbox-<name>, the same mapping as sandbox_images):
+
+      no record, or the same digest                 -> images.yaml
+      the record replaced exactly images.yaml's      -> the record (a newer mirror, or a deliberate rollback)
+      otherwise the newer <YYYYMMDD> tag date wins; a record for an image images.yaml lacks is added
+
+    Two different digests that cannot be ordered (same date, or a tag outside <YYYYMMDD>-<sha7>) raise ValueError: the
+    upgrade stops rather than guess. Returns {"pins": merged name -> ref, "notes": [...], "commit": [images.yaml lines]}."""
+    import re
+
+    out = dict(pins or {})
+    notes, commit = [], []
+    by_repo = {}
+    for name, ref in out.items():
+        repo, tag, digest = _split_ref(ref)
+        by_repo["%s/library/%s" % (host, repo.rsplit("/", 1)[-1])] = (name, tag, digest)
+    if not isinstance(portal or [], list):
+        raise ValueError("the portal's sandbox pins are not a list")
+    for p in sorted(portal or [], key=lambda x: str(x.get("id", "")) if isinstance(x, dict) else ""):
+        if not isinstance(p, dict):
+            raise ValueError("the portal's sandbox pins hold a non-object entry")
+        if p.get("registry") != host:
+            continue
+        name, tag, digest = str(p.get("template", "")), str(p.get("tag", "")), str(p.get("digest", ""))
+        repo = "%s/library/sandbox-%s" % (host, name)
+        if (p.get("id") != repo or not re.match(r"^[a-z0-9][a-z0-9-]{0,62}$", name) or not re.match(_SANDBOX_TAG, tag)
+                or not re.match(r"^sha256:[0-9a-f]{64}$", digest)):
+            raise ValueError("the portal's sandbox pin record %r is malformed; delete it (DELETE /api/v1/admin/template-updates/"
+                             "sandbox/pins/<id>) before upgrading" % p.get("id"))
+        source = _PIN_SOURCE % (name, tag, digest)
+        line = "  %s: %s" % (name, source)
+        if repo not in by_repo:
+            key = "sandbox-" + name if ("sandbox-" + name) not in out and name in out else name
+            out[key] = source
+            notes.append("sandbox-%s: images.yaml has no entry; the portal's pin %s:%s is kept" % (name, tag, digest))
+            commit.append(line)
+            continue
+        key, ytag, ydigest = by_repo[repo]
+        if ydigest == digest:
+            continue
+        _, _, prev_digest = _split_ref(p.get("previous", ""))
+        if prev_digest and prev_digest == ydigest:
+            winner = "pin"
+        else:
+            ym, pm = re.match(_SANDBOX_TAG, ytag or ""), re.match(_SANDBOX_TAG, tag)
+            if not ym or ym.group(1) == pm.group(1):
+                raise ValueError(
+                    "sandbox-%s: deploy/templates/images.yaml pins %s and the portal pinned %s:%s (%s); which is newer "
+                    "cannot be told. Commit the portal's line (%s) to images.yaml, or delete the portal's pin to let "
+                    "images.yaml win (Template updates, or DELETE /api/v1/admin/template-updates/sandbox/pins/%s), and run "
+                    "make upgrade again" % (name, ydigest, tag, digest, p.get("action", "mirror"), line.strip(),
+                                            repo.replace("/", "%2F")))
+            winner = "pin" if pm.group(1) > ym.group(1) else "yaml"
+        if winner == "pin":
+            out[key] = source
+            notes.append("sandbox-%s: keeping the portal's %s %s:%s over images.yaml's %s" % (name, p.get("action", "pin"), tag, digest, ydigest))
+            commit.append("  %s: %s" % (key, source))
+        else:
+            notes.append("sandbox-%s: images.yaml's %s is newer than the portal's pin %s:%s" % (name, ytag, tag, digest))
+    return {"pins": out, "notes": notes, "commit": commit}
+
+
 def sandbox_registry_problem(sb, services_metallb, object_store_mode):
     """Why the sandbox registry (stage 55, Zot on the services cluster) cannot be built from these settings, or ""."""
     import ipaddress
@@ -438,6 +549,8 @@ class FilterModule:
         return {
             "pc_sandbox_images": sandbox_images,
             "pc_sandbox_templates": sandbox_templates,
+            "pc_sandbox_portal_pins": sandbox_portal_pins,
+            "pc_prepull_policy_gaps": prepull_policy_gaps,
             "pc_sandbox_registry_problem": sandbox_registry_problem,
             "pc_classify_storages": classify_storages,
             "pc_default_profile": default_profile,

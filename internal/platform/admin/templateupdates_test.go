@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/rbac"
 	"github.com/mutex-solutions/proxcloud/internal/templateupdates"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
@@ -37,6 +39,7 @@ func TestTemplateUpdatesPermissionGates(t *testing.T) {
 	routes := []struct{ method, path string }{
 		{"GET", "/admin/template-updates"}, {"GET", "/admin/template-updates/status"}, {"GET", "/admin/template-updates/history"},
 		{"GET", "/admin/template-updates/placement/svc"}, {"POST", "/admin/template-updates/vm"}, {"POST", "/admin/template-updates/sandbox"},
+		{"POST", "/admin/template-updates/sandbox/rollback"}, {"GET", "/admin/template-updates/sandbox/state"}, {"GET", "/admin/template-updates/sandbox/pins"},
 		{"GET", "/admin/template-updates/templates"}, {"GET", "/admin/template-updates/blocklist"},
 		{"POST", "/admin/template-updates/templates/x/smoke"}, {"POST", "/admin/template-updates/templates/x/publish"},
 		{"POST", "/admin/template-updates/templates/x/withdraw"},
@@ -46,13 +49,67 @@ func TestTemplateUpdatesPermissionGates(t *testing.T) {
 			t.Errorf("%s %s as tenant: %d", rt.method, rt.path, w.Code)
 		}
 	}
-	// An operator credential passes the gate; the unwired service answers 503, the sandbox seam 501.
+	// An operator credential passes the gate; the unwired service answers 503, the sandbox mirror (flag off) 501.
 	op := &httpx.RequestContext{SigV4KeyID: "pk-test"}
 	if w := tuDo(r, "GET", "/admin/template-updates", "", op); w.Code != http.StatusServiceUnavailable {
 		t.Errorf("unwired discovery: %d", w.Code)
 	}
-	if w := tuDo(r, "POST", "/admin/template-updates/sandbox", "{}", op); w.Code != http.StatusNotImplemented || !strings.Contains(w.Body.String(), "images.yaml") {
-		t.Errorf("sandbox seam: %d %s", w.Code, w.Body.String())
+	for _, path := range []string{"/admin/template-updates/sandbox", "/admin/template-updates/sandbox/rollback"} {
+		if w := tuDo(r, "POST", path, "{}", op); w.Code != http.StatusNotImplemented || !strings.Contains(w.Body.String(), "images.yaml") {
+			t.Errorf("%s with the flag off: %d %s", path, w.Code, w.Body.String())
+		}
+	}
+}
+
+// PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED off (the default): mirror and rollback answer 501 even with the service
+// wired, before any GitHub, registry or cluster call; the read-only pin list stays available.
+func TestSandboxUpdatesFlagOffByDefault(t *testing.T) {
+	h := &Handler{adminIssuer: "operator-realm"}
+	called := false
+	h.SetTemplateUpdates(&templateupdates.Service{Token: func(context.Context) (string, string, error) { called = true; return "ghp_x", "i", nil }})
+	h.SetSandboxCluster(func(*externalservice.ExternalService) (SandboxCluster, error) {
+		called = true
+		return nil, errors.New("no")
+	})
+	r := tuRouter(h)
+	op := &httpx.RequestContext{SigV4KeyID: "pk"}
+	body := `{"serviceId":"s","name":"base","digest":"sha256:` + strings.Repeat("a", 64) + `","confirmDigest":"sha256:` + strings.Repeat("a", 64) + `"}`
+	if w := tuDo(r, "POST", "/admin/template-updates/sandbox", body, op); w.Code != http.StatusNotImplemented {
+		t.Fatalf("mirror with the flag off: %d %s", w.Code, w.Body.String())
+	}
+	if w := tuDo(r, "POST", "/admin/template-updates/sandbox/rollback", `{"serviceId":"s","name":"base","confirmDigest":"x"}`, op); w.Code != http.StatusNotImplemented {
+		t.Fatalf("rollback with the flag off: %d", w.Code)
+	}
+	if called {
+		t.Fatal("a disabled endpoint reached GitHub or the cluster")
+	}
+	st := h.templateUpdates.GetStatus(context.Background())
+	if st.SandboxMirror {
+		t.Fatal("status reports the sandbox mirror enabled")
+	}
+}
+
+// Mirroring needs admin:service:manage: SUPPORT (read-only) gets 403 even with the feature on.
+func TestSandboxUpdatesNeedManage(t *testing.T) {
+	h := &Handler{adminIssuer: "operator-realm"}
+	h.SetTemplateUpdates(&templateupdates.Service{SandboxEnabled: true})
+	r := tuRouter(h)
+	tenant := &httpx.RequestContext{Sub: "tenant", Issuer: "tenant-realm"}
+	for _, path := range []string{"/admin/template-updates/sandbox", "/admin/template-updates/sandbox/rollback"} {
+		if w := tuDo(r, "POST", path, "{}", tenant); w.Code != http.StatusForbidden {
+			t.Errorf("%s as tenant: %d", path, w.Code)
+		}
+	}
+	if !rbac.Matches(rolePermissions("SUPPORT"), templateUpdatesReadPerm) || rbac.Matches(rolePermissions("SUPPORT"), templateUpdatesManagePerm) {
+		t.Fatal("SUPPORT must see the sandbox state but not start a mirror or rollback")
+	}
+	// An unconfirmed digest is refused before any provider lookup.
+	op := &httpx.RequestContext{SigV4KeyID: "pk"}
+	if w := tuDo(r, "POST", "/admin/template-updates/sandbox", `{"serviceId":"s","name":"base","digest":"sha256:`+strings.Repeat("a", 64)+`","confirmDigest":""}`, op); w.Code != http.StatusBadRequest {
+		t.Fatalf("unconfirmed digest: %d %s", w.Code, w.Body.String())
+	}
+	if w := tuDo(r, "POST", "/admin/template-updates/sandbox", `{"serviceId":"s","name":"base","token":"x"}`, op); w.Code != http.StatusBadRequest {
+		t.Fatalf("unknown body field: %d", w.Code)
 	}
 }
 

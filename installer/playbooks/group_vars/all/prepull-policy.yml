@@ -1,0 +1,55 @@
+# The fields the prepull admission policy compares between the old and the new DaemonSet when the portal patches it
+# (templates/sandbox-prepull.yml.j2, docs/template-updates.md §5.3). Kubernetes CEL cannot iterate over the fields of a
+# typed object, so every field the portal must NOT change is named here. A field the cluster has and these lists lack
+# would be writable by the portal: stage 55 compares them with the cluster's own OpenAPI schemas (ObjectMeta,
+# DaemonSetSpec, PodTemplateSpec, PodSpec, Container) before it applies the policy and stops the upgrade on any gap
+# (pc_prepull_policy_gaps). Every property of those schemas that the lists do not name is under `uncompared`, each with
+# why: a rule of its own checks it, or the API server owns it.
+pc_prepull_policy_fields:
+  # The DaemonSet's own ObjectMeta. Its annotations have a rule of their own; the pod template's metadata is compared
+  # whole (template: [metadata]).
+  metadata: [labels, ownerReferences, finalizers]
+  daemonset: [selector, updateStrategy, minReadySeconds, revisionHistoryLimit]
+  template: [metadata]
+  pod: [activeDeadlineSeconds, affinity, automountServiceAccountToken, containers, dnsConfig, dnsPolicy, enableServiceLinks,
+        ephemeralContainers, hostAliases, hostIPC, hostNetwork, hostPID, hostUsers, hostname, hostnameOverride,
+        imagePullSecrets, nodeName, nodeSelector, os, overhead, preemptionPolicy, priority, priorityClassName,
+        readinessGates, resourceClaims, resources, restartPolicy, runtimeClassName, schedulerName, schedulingGates,
+        securityContext, serviceAccount, serviceAccountName, setHostnameAsFQDN, shareProcessNamespace, subdomain,
+        terminationGracePeriodSeconds, tolerations, topologySpreadConstraints, volumes, workloadRef]
+  container: [args, command, env, envFrom, imagePullPolicy, lifecycle, livenessProbe, ports, readinessProbe, resizePolicy,
+              resources, restartPolicy, restartPolicyRules, securityContext, startupProbe, stdin, stdinOnce,
+              terminationMessagePath, terminationMessagePolicy, tty, volumeDevices, volumeMounts, workingDir]
+  # schema -> {field: why it is not in the lists above}; the stage-55 check counts these as covered
+  uncompared:
+    io.k8s.api.core.v1.PodSpec:
+      initContainers: checked container by container (only an image may move, at most one hardened p<N> is added)
+    io.k8s.api.core.v1.Container:
+      name: identifies the container; none may go and a new one must be p<N>
+      image: the one field the portal may change, to a mirrored digest ref in the same repository
+    io.k8s.api.apps.v1.DaemonSetSpec:
+      template: compared through the template list (its metadata, whole) and the pod list (its spec)
+    io.k8s.api.core.v1.PodTemplateSpec:
+      spec: compared through the pod list
+    io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta:
+      annotations: a rule of its own, every key but deprecated.daemonset.template.generation (the API server bumps it)
+      name: immutable on update; the first rule admits template-prepull and template-prepull-gpu only
+      namespace: immutable on update; the first rule admits the sandbox-system namespace only
+      generateName: used only to name an object created without a name; inert on an existing DaemonSet
+      selfLink: deprecated and never stored (the API server clears it on every write)
+      uid: immutable on update; the API server keeps the stored one
+      resourceVersion: the optimistic-concurrency token; storage replaces it on every write
+      generation: set by the API server before admission (kept, bumped on a spec change); a client's value is dropped
+      creationTimestamp: immutable on update; the API server keeps the stored one
+      deletionTimestamp: set only by a DELETE (the policy denies the portal's); an update cannot set or change it
+      deletionGracePeriodSeconds: set only together with deletionTimestamp; an update cannot change it
+      managedFields: server-side-apply ownership bookkeeping (the API server updates it on every write); runs nothing
+
+# Every prepull init container only pulls its image and runs `sh -c true`: no root, no privilege, nothing writable. An
+# init container the portal adds must carry exactly this (the admission policy checks it).
+pc_prepull_init_security:
+  runAsNonRoot: true
+  runAsUser: 65532
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: {drop: [ALL]}

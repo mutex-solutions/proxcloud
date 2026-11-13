@@ -12,7 +12,9 @@
 # demand (the same trade-off as deploy/dbaas-cluster/rbac.yaml). It includes pods/exec, so this token
 # can run commands in ANY pod of this cluster. Accepted because the cluster is single-purpose: keep
 # only platform components without credentials to other systems on it (node-setup, agent-sandbox).
-# No secrets: the token cannot read any Secret.
+# No secrets through this ClusterRole: the token cannot read any Secret cluster-wide. Installer stage 55 adds two
+# narrow Roles in sandbox-system (templates/sandbox-prepull.yml.j2): get on the one Secret sandbox-import-worker (the
+# trusted worker's image ref, no credential) and get/patch on the two prepull DaemonSets (template updates).
 ---
 apiVersion: v1
 kind: Namespace
