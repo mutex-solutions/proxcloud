@@ -1,0 +1,35 @@
+# The fields the prepull admission policy compares between the old and the new DaemonSet when the portal patches it
+# (templates/sandbox-prepull.yml.j2, docs/template-updates.md §4.3). Kubernetes CEL cannot iterate over the fields of a
+# typed object, so every field the portal must NOT change is named here. A field the cluster has and these lists lack
+# would be writable by the portal: stage 55 compares them with the cluster's own OpenAPI schemas before it applies the
+# policy and stops the upgrade on any gap (pc_prepull_policy_gaps). The only fields deliberately not compared are listed
+# under `uncompared`: initContainers (checked per container), a container's name and image (the patch may change the
+# image; the name identifies the container), the DaemonSet's template and the pod template's spec (compared through
+# their own lists).
+pc_prepull_policy_fields:
+  metadata: [labels, ownerReferences, finalizers]
+  daemonset: [selector, updateStrategy, minReadySeconds, revisionHistoryLimit]
+  template: [metadata]
+  pod: [activeDeadlineSeconds, affinity, automountServiceAccountToken, containers, dnsConfig, dnsPolicy, enableServiceLinks,
+        ephemeralContainers, hostAliases, hostIPC, hostNetwork, hostPID, hostUsers, hostname, hostnameOverride,
+        imagePullSecrets, nodeName, nodeSelector, os, overhead, preemptionPolicy, priority, priorityClassName,
+        readinessGates, resourceClaims, resources, restartPolicy, runtimeClassName, schedulerName, schedulingGates,
+        securityContext, serviceAccount, serviceAccountName, setHostnameAsFQDN, shareProcessNamespace, subdomain,
+        terminationGracePeriodSeconds, tolerations, topologySpreadConstraints, volumes, workloadRef]
+  container: [args, command, env, envFrom, imagePullPolicy, lifecycle, livenessProbe, ports, readinessProbe, resizePolicy,
+              resources, restartPolicy, restartPolicyRules, securityContext, startupProbe, stdin, stdinOnce,
+              terminationMessagePath, terminationMessagePolicy, tty, volumeDevices, volumeMounts, workingDir]
+  uncompared:
+    io.k8s.api.core.v1.PodSpec: [initContainers]
+    io.k8s.api.core.v1.Container: [name, image]
+    io.k8s.api.apps.v1.DaemonSetSpec: [template]
+    io.k8s.api.core.v1.PodTemplateSpec: [spec]
+
+# Every prepull init container only pulls its image and runs `sh -c true`: no root, no privilege, nothing writable. An
+# init container the portal adds must carry exactly this (the admission policy checks it).
+pc_prepull_init_security:
+  runAsNonRoot: true
+  runAsUser: 65532
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: {drop: [ALL]}

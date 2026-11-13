@@ -260,6 +260,26 @@
       environment: {KUBECONFIG: "{{ pc_sbx_kubeconfig }}"}
       register: pc_sbx_builds_ns
       changed_when: pc_sbx_builds_ns.stdout_lines | reject('search', ' unchanged$') | list | length > 0
+    # The prepull admission policy compares every DaemonSet, pod and container field by name (CEL cannot iterate over
+    # a typed object): a field this cluster has and the lists lack would be writable by the portal. Compare the lists
+    # with the cluster's own schemas before the policy is (re)applied; stop on any gap rather than leave one open.
+    - name: Read the cluster's schemas the prepull policy must cover
+      ansible.builtin.command: kubectl get --raw {{ item }}
+      environment: {KUBECONFIG: "{{ pc_sbx_kubeconfig }}"}
+      loop: [/openapi/v3/api/v1, /openapi/v3/apis/apps/v1]
+      register: pc_sbx_openapi
+      changed_when: false
+    - name: Check that the prepull policy compares every field
+      vars:
+        gaps: "{{ pc_sbx_openapi.results | map(attribute='stdout') | map('from_json') | list | pc_prepull_policy_gaps(pc_prepull_policy_fields) }}"
+      ansible.builtin.assert:
+        that: gaps | length == 0
+        fail_msg: >-
+          The sandbox cluster's API has fields the prepull admission policy does not compare: {{ gaps | join(', ') }}.
+          The portal could change them on the template-prepull DaemonSets. Add them to pc_prepull_policy_fields
+          (installer/playbooks/group_vars/all/prepull-policy.yml) — or, for a field that must stay writable, to its
+          uncompared list with a reason — and run make upgrade again.
+        quiet: true
     - name: Apply the prepull and the registry's address on the sandbox cluster
       vars:
         pc_sbx_images: "{{ images }}"

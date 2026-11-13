@@ -412,6 +412,36 @@ def sandbox_templates(templates, pins, host=""):
     return out
 
 
+_PREPULL_SCHEMAS = {
+    # schema name -> the policy list that must cover its properties
+    "io.k8s.api.core.v1.PodSpec": "pod",
+    "io.k8s.api.core.v1.Container": "container",
+    "io.k8s.api.apps.v1.DaemonSetSpec": "daemonset",
+    "io.k8s.api.core.v1.PodTemplateSpec": "template",
+}
+
+
+def prepull_policy_gaps(openapi_docs, fields):
+    """The fields the prepull admission policy would leave writable on this cluster (docs/template-updates.md §4.3).
+    openapi_docs: the cluster's /openapi/v3/api/v1 and /openapi/v3/apis/apps/v1 documents (parsed JSON); fields:
+    pc_prepull_policy_fields. Every property of PodSpec, Container, DaemonSetSpec and PodTemplateSpec must be compared
+    by the policy or be one of its deliberately uncompared fields. Returns sorted "<Schema>.<property>" strings; [] when
+    covered. A schema missing from the documents is itself a gap (the check cannot prove anything then)."""
+    schemas = {}
+    for doc in openapi_docs or []:
+        if isinstance(doc, dict):
+            schemas.update(((doc.get("components") or {}).get("schemas")) or {})
+    gaps = []
+    for schema, key in sorted(_PREPULL_SCHEMAS.items()):
+        s = schemas.get(schema)
+        if not isinstance(s, dict) or not isinstance(s.get("properties"), dict):
+            gaps.append("%s (schema not served)" % schema)
+            continue
+        covered = set(fields.get(key) or []) | set((fields.get("uncompared") or {}).get(schema) or [])
+        gaps += ["%s.%s" % (schema.rsplit(".", 1)[1], p) for p in sorted(set(s["properties"]) - covered)]
+    return gaps
+
+
 _SANDBOX_TAG = r"^([0-9]{8})-[0-9a-f]{7}$"
 _PIN_SOURCE = "ghcr.io/mutex-solutions/sandbox-%s:%s@%s"
 
@@ -502,6 +532,7 @@ class FilterModule:
             "pc_sandbox_images": sandbox_images,
             "pc_sandbox_templates": sandbox_templates,
             "pc_sandbox_portal_pins": sandbox_portal_pins,
+            "pc_prepull_policy_gaps": prepull_policy_gaps,
             "pc_sandbox_registry_problem": sandbox_registry_problem,
             "pc_classify_storages": classify_storages,
             "pc_default_profile": default_profile,

@@ -7,7 +7,10 @@ Run with the installer venv: python installer/tests/test_sandbox_mirror.py
 """
 import copy
 import json
+import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -28,6 +31,30 @@ filter_loader.add_directory(str(INSTALLER / "filter_plugins"))
 DEFAULTS = yaml.safe_load((INSTALLER / "playbooks/group_vars/all/defaults.yml").read_text())["pc_defaults"]
 STAGE55 = yaml.safe_load((INSTALLER / "playbooks/55-sandbox-registry.yml").read_text())
 STAGE60 = yaml.safe_load((INSTALLER / "playbooks/60-register.yml").read_text())
+POLICY = yaml.safe_load((INSTALLER / "playbooks/group_vars/all/prepull-policy.yml").read_text())
+# The properties of the schemas the prepull policy must cover, as Kubernetes 1.35 (k8s.io/api v0.35.10) serves them in
+# /openapi/v3 (the json names of the Go types; the installer's sandbox cluster runs k3s 1.35).
+K8S135 = {
+    "io.k8s.api.core.v1.PodSpec": ["volumes", "initContainers", "containers", "ephemeralContainers", "restartPolicy",
+        "terminationGracePeriodSeconds", "activeDeadlineSeconds", "dnsPolicy", "nodeSelector", "serviceAccountName",
+        "serviceAccount", "automountServiceAccountToken", "nodeName", "hostNetwork", "hostPID", "hostIPC",
+        "shareProcessNamespace", "securityContext", "imagePullSecrets", "hostname", "subdomain", "affinity", "schedulerName",
+        "tolerations", "hostAliases", "priorityClassName", "priority", "dnsConfig", "readinessGates", "runtimeClassName",
+        "enableServiceLinks", "preemptionPolicy", "overhead", "topologySpreadConstraints", "setHostnameAsFQDN", "os",
+        "hostUsers", "schedulingGates", "resourceClaims", "resources", "hostnameOverride", "workloadRef"],
+    "io.k8s.api.core.v1.Container": ["name", "image", "command", "args", "workingDir", "ports", "envFrom", "env", "resources",
+        "resizePolicy", "restartPolicy", "restartPolicyRules", "volumeMounts", "volumeDevices", "livenessProbe",
+        "readinessProbe", "startupProbe", "lifecycle", "terminationMessagePath", "terminationMessagePolicy",
+        "imagePullPolicy", "securityContext", "stdin", "stdinOnce", "tty"],
+    "io.k8s.api.apps.v1.DaemonSetSpec": ["selector", "template", "updateStrategy", "minReadySeconds", "revisionHistoryLimit"],
+    "io.k8s.api.core.v1.PodTemplateSpec": ["metadata", "spec"],
+}
+
+
+def openapi(schemas):
+    core = {k: {"type": "object", "properties": {p: {} for p in v}} for k, v in schemas.items() if ".core." in k}
+    apps = {k: {"type": "object", "properties": {p: {} for p in v}} for k, v in schemas.items() if ".apps." in k}
+    return [{"openapi": "3.0.0", "components": {"schemas": core}}, {"openapi": "3.0.0", "components": {"schemas": apps}}]
 REG = "192.0.2.226"
 D1, D2, D3 = "sha256:" + "1" * 64, "sha256:" + "2" * 64, "sha256:" + "3" * 64
 
@@ -174,7 +201,8 @@ class PrepullPolicyTests(unittest.TestCase):
         pc["sandbox"]["registry"]["address"] = REG
         imgs = f.sandbox_images({"base": "ghcr.io/mutex-solutions/sandbox-base:20261101-aaaaaaa@" + D1}, REG)
         t = Templar(loader=DataLoader(), variables={"pc": pc, "pc_sbx_images": imgs, "pc_sbx_reg_ca": "CA",
-                                                    "pc_ver": {"pause_image": "pause"}, "pc_sbx_reg_system_ns": "sandbox-system"})
+                                                    "pc_ver": {"pause_image": "pause"}, "pc_sbx_reg_system_ns": "sandbox-system",
+                                                    **POLICY})
         text = t.template((INSTALLER / "playbooks/templates/sandbox-prepull.yml.j2").read_text())
         return {(d["kind"], d["metadata"]["name"]): d for d in yaml.safe_load_all(text)}
 
@@ -189,6 +217,58 @@ class PrepullPolicyTests(unittest.TestCase):
         self.assertEqual(rb["subjects"], [{"kind": "ServiceAccount", "name": "proxcloud", "namespace": "proxcloud-system"}])
         rbac = (INSTALLER.parent / "deploy/sandbox-cluster/rbac.yaml").read_text()
         self.assertIn("name: proxcloud\n  namespace: proxcloud-system", rbac)
+
+    def test_policy_covers_every_kubernetes_135_field(self):
+        # The reviewer's gap (hostnameOverride, workloadRef, restartPolicyRules) is closed, and nothing else is open.
+        self.assertEqual(f.prepull_policy_gaps(openapi(K8S135), POLICY["pc_prepull_policy_fields"]), [])
+        # A field a newer cluster adds is reported, and so is a schema the cluster does not serve.
+        newer = copy.deepcopy(K8S135)
+        newer["io.k8s.api.core.v1.Container"].append("futureField")
+        newer["io.k8s.api.core.v1.PodSpec"].append("futurePodField")
+        self.assertEqual(f.prepull_policy_gaps(openapi(newer), POLICY["pc_prepull_policy_fields"]),
+                         ["Container.futureField", "PodSpec.futurePodField"])
+        partial = {k: v for k, v in K8S135.items() if ".apps." not in k}
+        self.assertEqual(f.prepull_policy_gaps(openapi(partial), POLICY["pc_prepull_policy_fields"]),
+                         ["io.k8s.api.apps.v1.DaemonSetSpec (schema not served)"])
+        self.assertTrue(f.prepull_policy_gaps([], POLICY["pc_prepull_policy_fields"]))
+
+    def test_stage55_checks_the_schemas_before_applying_the_policy(self):
+        play = STAGE55[1]
+        names = [t.get("name") for t in play["tasks"]]
+        check = names.index("Check that the prepull policy compares every field")
+        self.assertLess(names.index("Read the cluster's schemas the prepull policy must cover"), check)
+        self.assertLess(check, names.index("Apply the prepull and the registry's address on the sandbox cluster"))
+        read = task(play, "Read the cluster's schemas the prepull policy must cover")
+        self.assertEqual(read["loop"], ["/openapi/v3/api/v1", "/openapi/v3/apis/apps/v1"])
+        assertion = task(play, "Check that the prepull policy compares every field")
+        self.assertEqual(assertion["ansible.builtin.assert"]["that"], "gaps | length == 0")
+        # The check renders against real stdout and fails on a gap.
+        newer = copy.deepcopy(K8S135)
+        newer["io.k8s.api.core.v1.PodSpec"].append("futurePodField")
+        for schemas, want in ((K8S135, []), (newer, ["PodSpec.futurePodField"])):
+            results = [{"stdout": json.dumps(d)} for d in openapi(schemas)]
+            t = Templar(loader=DataLoader(), variables={"pc_sbx_openapi": {"results": results}, **POLICY})
+            self.assertEqual(t.template(assertion["vars"]["gaps"]), want)
+
+    def test_prepull_init_containers_are_hardened(self):
+        ds = self.render()[("DaemonSet", "template-prepull")]
+        for c in ds["spec"]["template"]["spec"]["initContainers"]:
+            self.assertEqual(c["securityContext"], {"runAsNonRoot": True, "runAsUser": 65532, "allowPrivilegeEscalation": False,
+                                                    "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}})
+            self.assertEqual(c["command"], ["sh", "-c", "true"])
+
+    def test_the_cel_policy_cases_run_offline(self):
+        # k8s.io/apiserver's own CEL admission libraries evaluate the rendered policy (test/policy, its own module).
+        go = shutil.which("go")
+        if not go:
+            self.skipTest("go is not installed")
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "policy.yaml"
+            subprocess.run([sys.executable, str(HERE / "render_prepull_policy.py"), str(out)], check=True)
+            r = subprocess.run([go, "test", "-count=1", "./..."], cwd=INSTALLER.parent / "test/policy",
+                               env=dict(os.environ, POLICY_YAML=str(out)), capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertNotIn("no test files", r.stdout)
 
     def test_policy_shape(self):
         docs = self.render()
@@ -217,6 +297,15 @@ class PrepullPolicyTests(unittest.TestCase):
     def test_policy_compares_every_pod_and_container_field(self):
         vap = self.render()[("ValidatingAdmissionPolicy", "proxcloud-template-prepull-images-only")]
         exprs = "\n".join(v["expression"] for v in vap["spec"]["validations"])
+        fields = POLICY["pc_prepull_policy_fields"]
+        for field in fields["pod"]:
+            self.assertIn("object.spec.template.spec.%s == oldObject.spec.template.spec.%s" % (field, field), exprs)
+        for field in fields["container"]:
+            self.assertIn("c.%s == o.%s" % (field, field), exprs)
+        # A replaced image stays in its repository; an added p<N> must be hardened.
+        self.assertIn("o.image.find(variables.repo) == c.image.find(variables.repo)", exprs)
+        self.assertIn("c.securityContext.runAsUser == 65532", exprs)
+        self.assertIn("c.securityContext.capabilities.drop == ['ALL']", exprs)
         for field in ["containers", "volumes", "imagePullSecrets", "tolerations", "nodeSelector", "hostNetwork", "securityContext",
                       "serviceAccountName", "automountServiceAccountToken", "runtimeClassName"]:
             self.assertIn("object.spec.template.spec.%s" % field, exprs)

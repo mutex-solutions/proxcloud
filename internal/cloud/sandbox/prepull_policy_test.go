@@ -8,10 +8,9 @@ import (
 )
 
 // The portal's DaemonSet writes are fenced by a ValidatingAdmissionPolicy rendered by installer stage 55
-// (installer/playbooks/templates/sandbox-prepull.yml.j2). There is no CEL runtime in this repository and no cluster in
-// CI, so this is a kubectl-free check of the policy TEXT against what SetPrepullImage sends: the names it patches, the
-// identity, and the image grammar. The behavioural cases (docs/template-updates.md §4, "Admission policy test cases")
-// need a real API server (kind/k3s): open item.
+// (installer/playbooks/templates/sandbox-prepull.yml.j2). Its behaviour is evaluated with k8s.io/apiserver's CEL
+// libraries in test/policy (its own module, run by installer/tests and CI); this checks the policy TEXT against what
+// SetPrepullImage sends: the names it patches, the identity, the image grammar and the field lists.
 func TestPrepullPolicyTextMatchesThePatch(t *testing.T) {
 	raw, err := os.ReadFile("../../../installer/playbooks/templates/sandbox-prepull.yml.j2")
 	if err != nil {
@@ -37,15 +36,24 @@ func TestPrepullPolicyTextMatchesThePatch(t *testing.T) {
 			t.Errorf("the prepull policy lacks %q", want)
 		}
 	}
-	// The pod/container field lists cover every field the portal's patch could smuggle a change into.
-	for _, f := range []string{"'containers'", "'volumes'", "'imagePullSecrets'", "'serviceAccountName'", "'hostNetwork'", "'securityContext'",
-		"'nodeSelector'", "'tolerations'", "'runtimeClassName'", "'automountServiceAccountToken'", "'command'", "'args'", "'env'", "'volumeMounts'"} {
-		if !strings.Contains(text, f) {
+	// The field lists live in group_vars (shared with the stage-55 schema check) and cover the fields the portal's
+	// patch could smuggle a change into, including the Kubernetes 1.35 additions.
+	fields, err := os.ReadFile("../../../installer/playbooks/group_vars/all/prepull-policy.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"containers", "volumes", "imagePullSecrets", "serviceAccountName", "hostNetwork", "securityContext",
+		"nodeSelector", "tolerations", "runtimeClassName", "automountServiceAccountToken", "command", "args", "env", "volumeMounts",
+		"hostnameOverride", "workloadRef", "restartPolicyRules"} {
+		if !regexp.MustCompile(`[\[ ,]` + f + `[,\]]`).Match(fields) {
 			t.Errorf("the policy does not compare %s", f)
 		}
 	}
+	if !strings.Contains(text, "pf.pod") || !strings.Contains(text, "pf.container") || !strings.Contains(text, "o.image.find(variables.repo) == c.image.find(variables.repo)") {
+		t.Error("the policy does not use the shared field lists or the same-repository rule")
+	}
 	// The image grammar the policy accepts (registry rendered in) is exactly what SetPrepullImage writes.
-	m := regexp.MustCompile(`r'\^\{\{ pc\.sandbox\.registry\.address \| regex_escape \}\}(/library/sandbox-[^']*)'`).FindStringSubmatch(text)
+	m := regexp.MustCompile(`r'\^\{\{ pc\.sandbox\.registry\.address \| regex_escape \}\}(/library/sandbox-[^']*@sha256[^']*)'`).FindStringSubmatch(text)
 	if m == nil {
 		t.Fatal("no ref regex in the policy")
 	}

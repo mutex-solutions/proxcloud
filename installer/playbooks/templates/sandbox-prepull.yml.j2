@@ -39,34 +39,36 @@ spec:
           image: "{{ i.target }}"
           command: ["sh", "-c", "true"]
           resources: {requests: {cpu: 10m, memory: 16Mi}, limits: {cpu: 100m, memory: 64Mi}}
+          securityContext: {{ pc_prepull_init_security | to_json }}
 {% endfor %}
       containers:
         - name: pause
           image: "{{ pc_ver.pause_image }}"
           resources: {requests: {cpu: 1m, memory: 4Mi}, limits: {cpu: 10m, memory: 16Mi}}
-{# The portal's sandbox mirror (docs/template-updates.md §4): its identity on this cluster (the sandbox provider's
+{# The portal's sandbox mirror (docs/template-updates.md §4.3): its identity on this cluster (the sandbox provider's
     kubeconfig: ServiceAccount proxcloud in proxcloud-system, deploy/sandbox-cluster/rbac.yaml) may get and patch the two
     prepull DaemonSets by name and nothing else in this namespace. The admission policy lets such a write change the
-    init containers' images alone, and only to <registry>/library/sandbox-<name>[:<YYYYMMDD>-<sha7>]@sha256:<64 hex>.
-    Kubernetes CEL cannot iterate over the fields of a typed object, so every other field is compared by name (the
-    lists below); a field the cluster's schema lacks makes the policy fail to compile, which denies (failurePolicy
-    Fail): closed, never open. -#}
+    init containers' images alone, each within its own repository, and only to
+    <registry>/library/sandbox-<name>[:<YYYYMMDD>-<sha7>]@sha256:<64 hex>.
+    Kubernetes CEL cannot iterate over the fields of a typed object, so every other field is compared by NAME
+    (pc_prepull_policy_fields, group_vars/all/prepull-policy.yml). A field the cluster has and the lists lack would be
+    silently writable (the policy is fail-OPEN for unlisted fields): stage 55 compares the lists with the cluster's own
+    OpenAPI schemas before it applies this and stops the upgrade on any gap. A listed field the cluster lacks is harmless
+    (has() is false on both sides). -#}
 {%- macro same(a, b, fields) -%}
 {%- for f in fields %}(has({{ a }}.{{ f }}) == has({{ b }}.{{ f }}) && (!has({{ a }}.{{ f }}) || {{ a }}.{{ f }} == {{ b }}.{{ f }})){{ ' && ' if not loop.last }}{% endfor -%}
 {%- endmacro -%}
-{%- set meta_fields = ['labels', 'ownerReferences', 'finalizers'] -%}
-{%- set ds_fields = ['selector', 'updateStrategy', 'minReadySeconds', 'revisionHistoryLimit', 'template.metadata'] -%}
-{%- set pod_fields = ['activeDeadlineSeconds', 'affinity', 'automountServiceAccountToken', 'containers', 'dnsConfig',
-    'dnsPolicy', 'enableServiceLinks', 'ephemeralContainers', 'hostAliases', 'hostIPC', 'hostNetwork', 'hostPID',
-    'hostUsers', 'hostname', 'imagePullSecrets', 'nodeName', 'nodeSelector', 'os', 'overhead', 'preemptionPolicy',
-    'priority', 'priorityClassName', 'readinessGates', 'resourceClaims', 'resources', 'restartPolicy', 'runtimeClassName',
-    'schedulerName', 'schedulingGates', 'securityContext', 'serviceAccount', 'serviceAccountName', 'setHostnameAsFQDN',
-    'shareProcessNamespace', 'subdomain', 'terminationGracePeriodSeconds', 'tolerations', 'topologySpreadConstraints',
-    'volumes'] -%}
-{%- set ctr_fields = ['args', 'command', 'env', 'envFrom', 'imagePullPolicy', 'lifecycle', 'livenessProbe', 'ports',
-    'readinessProbe', 'resizePolicy', 'resources', 'restartPolicy', 'securityContext', 'startupProbe', 'stdin',
-    'stdinOnce', 'terminationMessagePath', 'terminationMessagePolicy', 'tty', 'volumeDevices', 'volumeMounts',
-    'workingDir'] %}
+{%- macro hardened(x) -%}
+has({{ x }}.securityContext) && has({{ x }}.securityContext.runAsNonRoot) && {{ x }}.securityContext.runAsNonRoot == true &&
+          has({{ x }}.securityContext.runAsUser) && {{ x }}.securityContext.runAsUser == 65532 &&
+          has({{ x }}.securityContext.allowPrivilegeEscalation) && {{ x }}.securityContext.allowPrivilegeEscalation == false &&
+          has({{ x }}.securityContext.readOnlyRootFilesystem) && {{ x }}.securityContext.readOnlyRootFilesystem == true &&
+          has({{ x }}.securityContext.capabilities) && has({{ x }}.securityContext.capabilities.drop) &&
+          {{ x }}.securityContext.capabilities.drop == ['ALL'] && !has({{ x }}.securityContext.capabilities.add) &&
+          !has({{ x }}.securityContext.privileged)
+{%- endmacro -%}
+{%- set pf = pc_prepull_policy_fields -%}
+{%- set ds_fields = pf.daemonset + (pf.template | map('regex_replace', '^', 'template.') | list) %}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -83,9 +85,27 @@ metadata: {name: proxcloud-template-prepull, namespace: "{{ ns }}"}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: proxcloud-template-prepull}
 subjects: [{kind: ServiceAccount, name: proxcloud, namespace: proxcloud-system}]
 ---
+# The trusted sandbox-import worker's image ref (an operator-owned Secret holding no credential): the portal reads it to
+# start digest imports and the sandbox mirror's copy worker. This one Secret, get only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: proxcloud-import-worker, namespace: "{{ ns }}"}
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [sandbox-import-worker]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: proxcloud-import-worker, namespace: "{{ ns }}"}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: proxcloud-import-worker}
+subjects: [{kind: ServiceAccount, name: proxcloud, namespace: proxcloud-system}]
+---
 # In initContainers no container goes away and at most one is added; each one is unchanged, or differs only in its
-# image (a mirrored digest ref), or is the one new p<N> equal to an existing one but for name and image (a mirrored
-# digest ref). Everything else of the DaemonSet stays as this stage rendered it.
+# image (a mirrored digest ref in the SAME repository), or is the one new p<N> equal to an existing one but for name
+# and image (a mirrored digest ref) and carrying the hardened securityContext. Everything else of the DaemonSet stays as
+# this stage rendered it.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata: {name: proxcloud-template-prepull-images-only}
@@ -104,6 +124,9 @@ spec:
     - name: ref
       expression: >-
         r'^{{ pc.sandbox.registry.address | regex_escape }}/library/sandbox-[a-z0-9][a-z0-9-]{0,62}(:[0-9]{8}-[0-9a-f]{7})?@sha256:[0-9a-f]{64}$'
+    - name: repo
+      expression: >-
+        r'^{{ pc.sandbox.registry.address | regex_escape }}/library/sandbox-[a-z0-9][a-z0-9-]{0,62}'
     - name: oldInit
       expression: "has(oldObject.spec.template.spec.initContainers) ? oldObject.spec.template.spec.initContainers : []"
     - name: newInit
@@ -120,7 +143,7 @@ spec:
     # deprecated.daemonset.template.generation is the API server's own bookkeeping: its DaemonSet strategy bumps it
     # on every pod template change, before admission. Every other annotation stays.
     - expression: >-
-        {{ same('object.metadata', 'oldObject.metadata', meta_fields) }} &&
+        {{ same('object.metadata', 'oldObject.metadata', pf.metadata) }} &&
         variables.annotations.all(k, k == "deprecated.daemonset.template.generation" ||
           (k in variables.oldAnnotations && variables.oldAnnotations[k] == variables.annotations[k])) &&
         variables.oldAnnotations.all(k, k == "deprecated.daemonset.template.generation" || k in variables.annotations)
@@ -129,7 +152,7 @@ spec:
         {{ same('object.spec', 'oldObject.spec', ds_fields) }}
       message: the portal may not change a prepull DaemonSet's spec, only its init containers' images
     - expression: >-
-        {{ same('object.spec.template.spec', 'oldObject.spec.template.spec', pod_fields) }}
+        {{ same('object.spec.template.spec', 'oldObject.spec.template.spec', pf.pod) }}
       message: the portal may not change the prepull pod template, only its init containers' images
     - expression: >-
         variables.oldInit.all(o, variables.newInit.exists(c, c.name == o.name)) &&
@@ -138,11 +161,14 @@ spec:
     - expression: >-
         variables.newInit.all(c,
           variables.oldInit.exists(o, o.name == c.name && o == c) ||
-          (c.image.matches(variables.ref) && variables.oldInit.exists(o, o.name == c.name && {{ same('c', 'o', ctr_fields) }})) ||
+          (c.image.matches(variables.ref) && variables.oldInit.exists(o, o.name == c.name &&
+            o.image.find(variables.repo) == c.image.find(variables.repo) && {{ same('c', 'o', pf.container) }})) ||
           (c.image.matches(variables.ref) && c.name.matches(r'^p[0-9]{1,4}$') && !variables.oldInit.exists(o, o.name == c.name) &&
-            variables.oldInit.exists(o, {{ same('c', 'o', ctr_fields) }})))
+            {{ hardened('c') }} &&
+            variables.oldInit.exists(o, {{ same('c', 'o', pf.container) }})))
       message: >-
-        the portal may only point a prepull init container (or one new p<N> shaped like the others) at a mirrored
+        the portal may only point a prepull init container at a mirrored digest ref of its own repository (or add one new
+        hardened p<N> shaped like the others):
         {{ pc.sandbox.registry.address }}/library/sandbox-<name>[:<YYYYMMDD>-<sha7>]@sha256:<digest>
 ---
 apiVersion: admissionregistration.k8s.io/v1

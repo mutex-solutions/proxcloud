@@ -325,30 +325,48 @@ Stage 55 renders, next to the DaemonSets (`templates/sandbox-prepull.yml.j2`):
   `resourceNames: [template-prepull, template-prepull-gpu]`, bound to the portal's sandbox identity —
   ServiceAccount `proxcloud` in `proxcloud-system` (`deploy/sandbox-cluster/rbac.yaml`; its token is the
   sandbox provider's `secret.kubeconfig`, stage 55 `sandbox-portal.kubeconfig`).
+- `Role proxcloud-import-worker` in `sandbox-system`: `get` on the one Secret `sandbox-import-worker`
+  (the trusted worker's image ref, no credential), same subject.
 - `ValidatingAdmissionPolicy proxcloud-template-prepull-images-only` + binding (`Deny`, `failurePolicy:
   Fail`), matching that identity's DaemonSet CREATE/UPDATE/DELETE: only an UPDATE of those two names in
   `sandbox-system`; metadata (labels, owners, finalizers, annotations but the API server's
   `deprecated.daemonset.template.generation`), the DaemonSet spec, the pod template metadata and every pod
   spec field but `initContainers` unchanged; no init container removed, at most one added; each init
-  container unchanged, or changed in `image` alone to
-  `<registry>/library/sandbox-<name>[:<YYYYMMDD>-<sha7>]@sha256:<64 hex>`, or one new `p<N>` equal to an
-  existing one but for name and image (same grammar). Kubernetes CEL cannot iterate the fields of a typed
-  object, so the policy compares a fixed field list; a field the cluster's schema lacks makes the policy
-  fail to compile, which denies (closed).
+  container unchanged, or changed in `image` alone to a digest ref **of the same repository**
+  (`<registry>/library/sandbox-<name>[:<YYYYMMDD>-<sha7>]@sha256:<64 hex>`), or one new `p<N>` equal to an
+  existing one but for name and image (same grammar) that carries the hardened `securityContext`
+  (`runAsNonRoot`, `runAsUser: 65532`, no privilege escalation, read-only root, `drop: [ALL]`). Every
+  prepull init container is rendered with that `securityContext` (they only run `sh -c true`).
+
+**Kubernetes CEL cannot iterate over the fields of a typed object, so the policy compares fields BY NAME
+— and is fail-OPEN for a field it does not name**: a field the cluster has and the lists lack would be
+writable by the portal. The lists live in one place, `pc_prepull_policy_fields`
+(`installer/playbooks/group_vars/all/prepull-policy.yml`), used by the template and by a stage-55 check
+that runs **before** the policy is applied: it reads `/openapi/v3/api/v1` and `/openapi/v3/apis/apps/v1`
+from the sandbox cluster and stops the upgrade if `PodSpec`, `Container`, `DaemonSetSpec` or
+`PodTemplateSpec` has any property the policy does not compare (beyond the deliberate `initContainers`,
+container `name`/`image`, `template`, `spec`). A listed field the cluster lacks is harmless (`has()` is
+false on both sides). After a Kubernetes upgrade of the sandbox cluster, run `make upgrade`: a new field
+fails the check until it is added to the lists.
 
 The job's patch (`SetPrepullImage`): every init container of either DaemonSet that pulls
 `<registry>/library/sandbox-<name>` gets the new ref; if none does, one `p<N>` (the installer's naming)
 shaped like the first one is appended to `template-prepull`. A JSON merge patch carrying the
 `resourceVersion` it read (409 if the DaemonSet moved), nothing else.
 
-**Admission policy test cases** (verified by text in `installer/tests/test_sandbox_mirror.py` and
-`internal/cloud/sandbox/prepull_policy_test.go`; the behaviour needs a real API server — open item):
-allow image change of `p1` to a mirrored digest ref; allow adding `p<N>` shaped like `p0`; deny a tag-only
-ref, a ref under `t/`, `library/proxcloud-*`, another registry or `ghcr.io`; deny changing `command`, `env`,
-`resources`, `volumeMounts`, `securityContext`; deny removing an init container or adding two; deny
-changing `containers`, `volumes`, `serviceAccountName`, `hostNetwork`, `tolerations`, `nodeSelector`,
-`imagePullSecrets`, labels or the selector; deny another DaemonSet or namespace, CREATE and DELETE; a
-DaemonSet write by any other identity is not matched.
+**Admission policy test cases**, evaluated offline by the API server's own CEL admission libraries
+(`k8s.io/apiserver` v0.35, `test/policy`, its own Go module so the API does not depend on it) against the
+rendered policy — run by `installer/tests/test_sandbox_mirror.py` (`make test`) and CI:
+allow an image change of `p1` to a mirrored digest ref of its own repository (with or without the tag); allow
+adding a hardened `p<N>` shaped like the others; allow the template-generation annotation to move; deny a
+tag-only ref, a ref under `t/`, `library/proxcloud-*`, another registry or `ghcr.io`; deny another
+repository in an existing container (also re-pointing `python`); deny changing `command`, `env`,
+`securityContext`, `volumeMounts`, `restartPolicyRules`; deny removing an init container, adding two,
+adding one without the hardened `securityContext` or not named `p<N>`; deny changing `containers`,
+`volumes`, `serviceAccountName`, `hostNetwork`, `hostnameOverride`, `tolerations`, `nodeSelector`,
+`imagePullSecrets`, a label, an annotation, the selector or the pod template labels; deny another DaemonSet
+or namespace, CREATE and DELETE; a DaemonSet write by any other identity is not matched. Removing one
+compared field from the rendered policy makes its case fail (checked while writing the test).
 
 ### 4.4 Switch and rollback
 
