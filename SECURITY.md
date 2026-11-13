@@ -25,7 +25,7 @@ release a fix before any public disclosure.
 
 ## Supported versions
 
-ProxCloud is under active development. `v0.5.1` is the current stable release;
+ProxCloud is under active development. `v0.5.2` is the current stable release;
 its tag publishes the app images and chart. Fixes land on `main` first. There is no
 support SLA, and live installer and split/managed-service acceptance have not been
 performed for this release. Evaluate the exact tagged commit or a reviewed commit
@@ -34,11 +34,12 @@ published artifacts are pullable before relying on them.
 
 | Version / source | Status |
 |------------------|--------|
-| `v0.5.1` | Current stable release; report issues against it; fixes land on `main` for a later release; no SLA |
+| `v0.5.2` | Current stable release; report issues against it; fixes land on `main` for a later release; no SLA |
 | Current `main` | Development fixes; no stable support/SLA promise |
-| `v0.5.0` | Previous stable release; no stated backport support; upgrade to `v0.5.1` (a patch release) |
-| `v0.4.0` | Older stable release; no stated backport support; upgrade to `v0.5.1` (breaking API changes since `v0.4.0`, see the changelog) |
-| `v0.4.0-rc.1` | Superseded prerelease; upgrade to `v0.5.1` |
+| `v0.5.1` | Previous stable release; no stated backport support; upgrade to `v0.5.2` (a patch release) |
+| `v0.5.0` | Older stable release; no stated backport support; upgrade to `v0.5.2` (patch releases) |
+| `v0.4.0` | Older stable release; no stated backport support; upgrade to `v0.5.2` (breaking API changes since `v0.4.0`, see the changelog) |
+| `v0.4.0-rc.1` | Superseded prerelease; upgrade to `v0.5.2` |
 | Older / untagged downstream builds | No stated backport support; report the exact commit |
 
 Unfixed HIGH/CRITICAL findings in shipped images are tracked by the security-scan

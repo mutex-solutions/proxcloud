@@ -16,7 +16,7 @@ Three ways to install it:
 Docker Compose (`docker compose up` at the repo root) is the fourth option, for a
 single development machine.
 
-**Release status (2026-11-14):** the chart/BOM selects `v0.5.1`, the current stable
+**Release status (2026-11-14):** the chart/BOM selects `v0.5.2`, the current stable
 release (after the first stable `v0.4.0`; it has breaking API changes, see the
 changelog). Its tag publishes this chart version
 and the images; verify the actual public chart and image artifacts before
@@ -33,7 +33,7 @@ fresh cluster (kind, k3d, minikube or a real one) with no operators. Needs
 `helm` 3.8+, `kubectl` and a default StorageClass.
 
 **Images first.** The chart pulls `ghcr.io/mutex-solutions/proxcloud-{api,web,admin}`
-at the chart's `appVersion` (`v0.5.1`). **Verify the release's images are
+at the chart's `appVersion` (`v0.5.2`). **Verify the release's images are
 published and pullable before using these pull defaults.** Otherwise use images
 built from the checkout containing the PostgreSQL job engine, or explicitly pin a
 known compatible new image/tag/digest. Do not point the new chart at a v0.3.x API:

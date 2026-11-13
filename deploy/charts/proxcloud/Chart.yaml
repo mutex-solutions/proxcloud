@@ -5,11 +5,11 @@ description: >-
   Deploys the Go API, the customer console (ui), the operator console (admin),
   and PostgreSQL-backed durable jobs without a broker, with Keycloak optional.
 type: application
-version: 0.5.1
+version: 0.5.2
 # appVersion carries the v prefix — it doubles as the default image tag (see the docker workflow).
-# Stable broker-free patch release v0.5.1 (after v0.5.0); its tag publishes these images and this chart version.
+# Stable broker-free patch release v0.5.2 (after v0.5.1); its tag publishes these images and this chart version.
 # Verify they are pullable before relying on these defaults (images.build=false).
-appVersion: "v0.5.1"
+appVersion: "v0.5.2"
 kubeVersion: ">=1.25.0-0"
 keywords:
   - proxcloud

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-14
+
+Patch release on top of `v0.5.1`, with no breaking change. It fixes VM template smoke-test and import
+cleanup on PVE 9, where the least-privilege token gets 403 instead of 404 for a VM outside its pool
+(found on the first real import + smoke run, a homelab running PVE 9.2.21). Everything `v0.5.0` and
+`v0.5.1` say is **not** verified still holds.
+
 ### Fixed
 
 - **A VM template smoke test that passed ended `dead` in `cleaning` on PVE 9**: the provider token reaches a VM
