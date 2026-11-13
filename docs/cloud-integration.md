@@ -205,7 +205,7 @@ Typed accessors used by the rest of the code:
 | `PVETemplates()`, `PVEImageCatalog()` | `templates` | OS templates servers are cloned from: discovered from cluster tags ([images/README.md](../images/README.md)); an entry with `vmid` + `node` pins one, any other entry overlays `name`, `osDistro`, `minDiskGb` |
 | `PVEGPUAliases()` / `PVEGPUMappingsFor(alias)` | `gpus` | PCI mapping ids per GPU alias |
 | `PVEOvercommitCPU()` | `overcommit.cpu` (default 4) | scheduler CPU overcommit |
-| `PVEDefaultQuota()` | `provisioning.quota` | quota seeded onto a new project |
+| `PVEDefaultQuota()` | `provisioning.quota` | quota of every project without its own (applied live) |
 | `MetricsSource()` | `metrics.source` | `pve` (the Proxmox default), `prometheus` or `none` |
 | `ServiceEnabledInRegion(slug, region)` | `services[slug][region]` | per-service toggle (below) |
 
@@ -501,9 +501,13 @@ project to a Proxmox provider:
 
 1. ensure the project pool;
 2. ensure the project's default security group;
-3. seed the provider's default quota onto a project that has none;
-4. append the binding `{serviceId, provider: "proxmox", region, pool}` to
+3. append the binding `{serviceId, provider: "proxmox", region, pool}` to
    `project.services`. The pool id is persisted so teardown never re-derives it.
+
+No quota is copied onto the project. A project without its own Proxmox quota
+(set on its admin Quota tab) is held to the provider's default quota
+(`config.provisioning.quota`) as it is at each check, so changing the default
+applies to every such project at once.
 
 It is idempotent. There is no per-project identity on the cluster: customers
 never get Proxmox credentials, and access is enforced by platform RBAC.
@@ -525,8 +529,10 @@ of the rest of the project (rename, member change, activation) does not write
 `services` or `provisionFailures`, so it cannot drop a binding added meanwhile.
 The operator attaches and the provisioning part of `enableAndBootstrap` run
 under a per-project PostgreSQL advisory lock (`project-attach:<id>`), on a
-fresh read. The binding write checks, on the lock's own session, that the lock
-is still held, and refuses to write otherwise. An open of an already
+fresh read. The binding append and the removal of the attach marks run on the
+lock's own session, with the "lock still held" check inside the same statement.
+There is no gap between the check and the write, and a session that lost the
+lock or is gone writes nothing (`ErrAttachLost`). An open of an already
 bootstrapped project takes the lock only when a recorded provisioning failure
 is due for its retry.
 

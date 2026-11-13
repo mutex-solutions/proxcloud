@@ -4,10 +4,11 @@ package project
 // no quota machinery at all). Keys: externalservice.PVEQuotaKeys (servers, vcpus,
 // ramMb, diskGb, networks, floatingIps) + the shared "gpu" map.
 //
-// Which limits apply (pveQuotaLimits): the project's own quota when it has one, else
-// the provider default (config.provisioning.quota, also seeded onto the project at
-// bootstrap). Unlimited only when neither is set; inside a non-empty quota an absent
-// key is unlimited. A usage read that fails blocks the create (503) — never a silent
+// Which limits apply (pveQuotaLimits): the project's own quota when an admin set one, else
+// the provider default (config.provisioning.quota) as it is at the check — nothing is
+// copied onto the project at bootstrap, so a change of the default applies to every
+// project without its own quota at once. Unlimited only when neither is set; inside a
+// non-empty quota an absent key is unlimited. A usage read that fails blocks the create (503) — never a silent
 // pass.
 
 import (

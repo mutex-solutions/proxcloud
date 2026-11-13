@@ -41,13 +41,21 @@ const (
 // drop it either.
 func attachLockKey(projectID string) string { return "project-attach:" + projectID }
 
+// attachLock is a held attach lock: the session that holds it and its key. The binding writes made under it run ON that
+// session, with the ownership check in the same statement (Repo.AppendBinding / ClearBulkMarks): there is no gap
+// between "the lock is held" and the write, and a session that is gone fails the statement.
+type attachLock struct {
+	session pgdoc.LockSession
+	key     string
+}
+
 // bindIntent rides on the context of a provisioning made under the attach lock: what the binding append must carry
-// and check.
+// and where it runs.
 type bindIntent struct {
 	// mark: the binding is appended with attachedBy (an operator attach before the first bootstrap).
 	mark bool
-	// guard refuses the append when the attach lock is no longer held.
-	guard func(context.Context) error
+	// lock is the held attach lock; nil without a database (unit tests).
+	lock *attachLock
 }
 
 type bindIntentKey struct{}
@@ -62,32 +70,19 @@ func bindIntentOf(ctx context.Context) bindIntent {
 }
 
 // withAttachLock runs fn under the project's attach lock (a session advisory lock on the lock pool, so a provider call
-// made while holding it does not tie up a primary pool connection). fn gets a guard that fails when the lock's session
-// is gone: binding appends run it first and are refused (ErrAttachLost) instead of writing without the lock. Without a
-// database (unit tests) fn runs unlocked with no guard.
-func (h *Handler) withAttachLock(ctx context.Context, projectID string, fn func(guard func(context.Context) error) error) error {
+// made while holding it does not tie up a primary pool connection). fn gets the held lock: binding writes run on its
+// session and are refused (ErrAttachLost) when the lock is no longer held. Without a database (unit tests) fn runs
+// unlocked with a nil lock. The session is used by one writer at a time (the attach work under one lock is
+// sequential).
+func (h *Handler) withAttachLock(ctx context.Context, projectID string, fn func(lock *attachLock) error) error {
 	if !h.hasRepo() {
 		return fn(nil)
 	}
-	_, err := h.svc.repo.col.DB().WithAdvisoryLockSession(ctx, attachLockKey(projectID), false, func(s pgdoc.LockSession) error {
-		return fn(lockGuard(s, attachLockKey(projectID)))
+	key := attachLockKey(projectID)
+	_, err := h.svc.repo.col.DB().WithAdvisoryLockSession(ctx, key, false, func(s pgdoc.LockSession) error {
+		return fn(&attachLock{session: s, key: key})
 	})
 	return err
-}
-
-// lockGuard checks, on the lock's own session, that this session still holds the advisory lock. A dead session (lock
-// gone) errors; a live one that lost the lock answers false. Both refuse the write.
-func lockGuard(s pgdoc.LockSession, key string) func(context.Context) error {
-	return func(ctx context.Context) error {
-		var held bool
-		// pg_advisory_lock(bigint) shows in pg_locks as classid = high 32 bits, objid = low 32 bits, objsubid = 1.
-		err := s.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND pid=pg_backend_pid() AND granted
-		  AND classid=((hashtext($1)::bigint >> 32) & 4294967295)::oid AND objid=(hashtext($1)::bigint & 4294967295)::oid AND objsubid=1)`, key).Scan(&held)
-		if err != nil || !held {
-			return ErrAttachLost
-		}
-		return nil
-	}
 }
 
 // AttachByOperator is the operator's attach of one provider to one project: the per-project admin POST
@@ -109,7 +104,7 @@ func (h *Handler) AttachByOperator(ctx context.Context, projectID string, es *ex
 		return "", errors.New("attach: no provider")
 	}
 	outcome := ""
-	err := h.withAttachLock(ctx, projectID, func(guard func(context.Context) error) error {
+	err := h.withAttachLock(ctx, projectID, func(lock *attachLock) error {
 		p, err := h.svc.repo.FindByID(ctx, projectID)
 		if err != nil {
 			return err
@@ -125,7 +120,7 @@ func (h *Handler) AttachByOperator(ctx context.Context, projectID string, es *ex
 			outcome = AttachAlreadyAttached
 			return nil
 		}
-		bctx := withBindIntent(ctx, bindIntent{mark: !p.bootstrapped(), guard: guard})
+		bctx := withBindIntent(ctx, bindIntent{mark: !p.bootstrapped(), lock: lock})
 		if err := h.BootstrapOnto(bctx, p, es); err != nil {
 			return err
 		}
@@ -154,7 +149,7 @@ func (h *Handler) appendBinding(ctx context.Context, p *Project, binding map[str
 		}
 		return nil
 	}
-	if _, err := h.svc.repo.AppendBinding(ctx, p.ID, binding, bi.guard); err != nil {
+	if _, err := h.svc.repo.AppendBinding(ctx, p.ID, binding, bi.lock.lockedExec()); err != nil {
 		return fmt.Errorf("record the binding: %w", err)
 	}
 	if h.afterBind != nil {
@@ -168,24 +163,6 @@ func (h *Handler) appendBinding(ctx context.Context, p *Project, binding map[str
 	}
 	if fresh != nil {
 		p.Services = fresh.Services
-	}
-	return nil
-}
-
-// seedQuota writes the provider's default quota onto a project that has no Proxmox quota, as one statement that only
-// writes while the stored quota is still the one p was read with (an admin's quota set meanwhile stands). Under the
-// attach lock it is refused once the lock is lost.
-func (h *Handler) seedQuota(ctx context.Context, p *Project, q map[string]any) error {
-	if !h.hasRepo() {
-		p.Quota = q
-		return nil
-	}
-	ok, err := h.svc.repo.SeedQuota(ctx, p.ID, p.Quota, q, bindIntentOf(ctx).guard)
-	if err != nil {
-		return err
-	}
-	if ok {
-		p.Quota = q
 	}
 	return nil
 }
@@ -228,7 +205,7 @@ func (h *Handler) clearMarks(ctx context.Context, p *Project) error {
 		return nil
 	}
 	if h.hasRepo() {
-		if _, err := h.svc.repo.ClearBulkMarks(ctx, p.ID); err != nil {
+		if _, err := h.svc.repo.ClearBulkMarks(ctx, p.ID, bindIntentOf(ctx).lock.lockedExec()); err != nil {
 			return err
 		}
 	}
@@ -238,6 +215,15 @@ func (h *Handler) clearMarks(ctx context.Context, p *Project) error {
 		}
 	}
 	return nil
+}
+
+// lockedExec is how a binding write runs under this lock: on the lock's session, only while it holds the lock (nil lock:
+// unlocked, on the pool — unit tests and callers outside the lock).
+func (l *attachLock) lockedExec() *LockedExec {
+	if l == nil {
+		return nil
+	}
+	return &LockedExec{Session: l.session, Key: l.key}
 }
 
 // ErrAttachDeleting answers the per-project attach of a project on its way out.

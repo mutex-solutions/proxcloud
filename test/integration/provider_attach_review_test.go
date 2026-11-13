@@ -124,6 +124,52 @@ func TestBulkAttachMarkSurvivesFailureAfterBinding(t *testing.T) {
 	}
 }
 
+// N6: a Proxmox project bootstrapped or bulk-attached gets no stored copy of the provider's default quota (as on main:
+// the copy was never persisted), so the provider default applies live and a change of it applies at once.
+func TestProxmoxAttachStoresNoQuota(t *testing.T) {
+	rig := newAttachRig(t)
+	ctx := context.Background()
+	var stall atomic.Bool
+	url := stallPVE(t, &stall)
+	rig.projectH.SetProxmox(func(es *externalservice.ExternalService) (*pve.Service, error) {
+		return pve.NewService(es.PVEConfig(), es.ID, es.PVEPoolPrefix())
+	})
+	mustInsert(t, rig.db, "externalService", pveRow("pve", url, pgdoc.M{"provisioning": pgdoc.M{"quota": pgdoc.M{"diskGb": 10}}}))
+	rig.project(t, "opened", "o1", project.StatusEnabled)      // first bootstrap
+	rig.project(t, "bulk", "o1", project.StatusEnabled, "dns") // bulk attach of an existing project
+	rig.start(t, "pve", `{"scope":{"mode":"projects","projectIds":["bulk"]}}`)
+	rig.drain(t)
+	if err := rig.projectH.EnableAndBootstrap(ctx, rig.load(t, "opened")); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"opened", "bulk"} {
+		p := rig.load(t, id)
+		if !p.HasService("pve") {
+			t.Fatalf("%s not attached: %v", id, p.ServiceIDs())
+		}
+		if p.Quota != nil {
+			t.Fatalf("%s got a stored quota: %v", id, p.Quota)
+		}
+		var raw []byte
+		if err := rig.db.Pool.QueryRow(ctx, `SELECT doc->'quota' FROM "project" WHERE id=$1`, id).Scan(&raw); err != nil || raw != nil {
+			t.Fatalf("%s: stored quota %s %v", id, raw, err)
+		}
+	}
+	// The live default is what the gate enforces: 10 GiB refuses 20, raising the default to 50 lets it through.
+	csiUsed := func() (int, error) { return 0, nil }
+	if err := rig.projectH.CSIDiskQuota(ctx, "bulk", "pve", 20, csiUsed); err == nil {
+		t.Fatal("20 GiB passed a 10 GiB default")
+	}
+	if _, err := rig.db.C("externalService").SetByID(ctx, "pve", pgdoc.M{"config.provisioning.quota": pgdoc.M{"diskGb": 50}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"opened", "bulk"} {
+		if err := rig.projectH.CSIDiskQuota(ctx, id, "pve", 20, csiUsed); err != nil {
+			t.Fatalf("%s: the raised default was not applied: %v", id, err)
+		}
+	}
+}
+
 // N1: a first open with no policy-on provider at all still is the first bootstrap: it clears the operator marks, so a
 // later open does not provision again.
 func TestFirstOpenWithoutPolicyProvidersClearsMarks(t *testing.T) {
@@ -257,17 +303,68 @@ func TestAttachPolicyWriteIsSingleKey(t *testing.T) {
 	}
 }
 
-// A binding append whose attach lock is gone is refused (the lock guard), so a writer that lost the lock writes nothing.
+// A binding append runs on the attach lock's own session, the "lock still held" check inside the same statement: a
+// session that does not hold the lock, one that let it go, and one that is gone all write nothing (ErrAttachLost); the
+// session that holds it writes.
 func TestBindingAppendRefusedWithoutLock(t *testing.T) {
 	rig := newAttachRig(t)
 	ctx := context.Background()
 	rig.project(t, "p1", "o1", project.StatusEnabled)
-	lost := func(context.Context) error { return project.ErrAttachLost }
-	if _, err := rig.projects.AppendBinding(ctx, "p1", map[string]any{"serviceId": "x", "provider": "powerdns"}, lost); !errors.Is(err, project.ErrAttachLost) {
-		t.Fatalf("append without the lock: %v", err)
+	const key = "project-attach:p1"
+	bind := func(id string) map[string]any { return map[string]any{"serviceId": id, "provider": "powerdns"} }
+	// A session that holds the lock writes; once it lets the lock go, the same session writes nothing.
+	if _, err := rig.db.WithAdvisoryLockSession(ctx, key, false, func(s pgdoc.LockSession) error {
+		lx := &project.LockedExec{Session: s, Key: key}
+		if ok, err := rig.projects.AppendBinding(ctx, "p1", bind("held"), lx); err != nil || !ok {
+			return fmt.Errorf("append while held: %v %v", ok, err)
+		}
+		if ok, err := rig.projects.AppendBinding(ctx, "p1", bind("held"), lx); err != nil || ok {
+			return fmt.Errorf("second append while held: %v %v", ok, err) // already bound: no write, no error
+		}
+		if _, err := s.Exec(ctx, "SELECT pg_advisory_unlock(hashtext($1))", key); err != nil {
+			return err
+		}
+		if _, err := rig.projects.AppendBinding(ctx, "p1", bind("after-unlock"), lx); !errors.Is(err, project.ErrAttachLost) {
+			return fmt.Errorf("append after the unlock: %v", err)
+		}
+		if _, err := rig.projects.ClearBulkMarks(ctx, "p1", lx); !errors.Is(err, project.ErrAttachLost) {
+			return fmt.Errorf("mark clear after the unlock: %v", err)
+		}
+		if _, err := s.Exec(ctx, "SELECT pg_advisory_lock(hashtext($1))", key); err != nil { // so the release finds it
+			return err
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
-	if rig.load(t, "p1").HasService("x") {
-		t.Fatal("written without the lock")
+	// A session holding a different lock: refused.
+	if _, err := rig.db.WithAdvisoryLockSession(ctx, "project-attach:other", false, func(s pgdoc.LockSession) error {
+		if _, err := rig.projects.AppendBinding(ctx, "p1", bind("other-lock"), &project.LockedExec{Session: s, Key: key}); !errors.Is(err, project.ErrAttachLost) {
+			return fmt.Errorf("append under another lock: %v", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A session that is gone (its backend terminated): refused.
+	if _, err := rig.db.WithAdvisoryLockSession(ctx, key, false, func(s pgdoc.LockSession) error {
+		var pid int
+		if err := s.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&pid); err != nil {
+			return err
+		}
+		if _, err := rig.db.Pool.Exec(ctx, "SELECT pg_terminate_backend($1)", pid); err != nil {
+			return err
+		}
+		if _, err := rig.projects.AppendBinding(ctx, "p1", bind("dead-session"), &project.LockedExec{Session: s, Key: key}); !errors.Is(err, project.ErrAttachLost) {
+			return fmt.Errorf("append on a dead session: %v", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p := rig.load(t, "p1")
+	if !p.HasService("held") || bindings(p, "held") != 1 || p.HasService("after-unlock") || p.HasService("other-lock") || p.HasService("dead-session") {
+		t.Fatalf("bindings %v", p.ServiceIDs())
 	}
 	// The real guard, on the lock's session: held → the append goes through, exactly once.
 	for i := 0; i < 2; i++ {

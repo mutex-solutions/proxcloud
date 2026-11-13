@@ -61,8 +61,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   project's bindings are now only appended atomically: a project save (rename, member
   change, activation) no longer rewrites `services` or `provisionFailures` from a stale read,
   so it cannot drop a provider binding added meanwhile. Operator attaches and the first
-  bootstrap of one project are serialized under a per-project lock whose loss refuses the
-  write. An operator attach of a project never opened marks its binding in the same write, so
+  bootstrap of one project are serialized under a per-project lock; the binding write runs
+  on the lock's own session with the ownership check in the same statement, so a writer
+  that lost the lock writes nothing. Attaching never stores a copy of a Proxmox provider's
+  default quota on the project: as before, a project without its own quota follows the
+  provider default live. An operator attach of a project never opened marks its binding in the same write, so
   the project's first open still provisions every provider whose policy is on.
 - `POST /api/v1/project/{id}/init` no longer answers `200 {}` when it leaves the project down.
   It answers `409` with `errors.details` `{status, reason[, billingProfileStatus]}`, reason one

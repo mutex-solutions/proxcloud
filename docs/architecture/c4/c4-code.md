@@ -637,7 +637,7 @@ Invariants:
 | `Handler.pveQuotaUsage` | `cloud_quota_pve.go:103` | Sums the project's cache rows on the provider: servers, vCPUs, RAM, networks, volume GB |
 | `pveResizeDemand` | `internal/platform/project/cloud_writes_pve.go:591` | Resize demand = new flavor minus cached flavor for vCPUs, RAM and boot disk |
 | `Handler.enforcePVEGPUQuota` | `cloud_writes_pve.go:605` | GPU quota per model; a resize frees the replaced flavor's GPUs first |
-| `BootstrapProxmoxOnto` | `internal/platform/project/bootstrap.go:96` | Seeds the provider default quota onto a project that has none |
+| `BootstrapProxmoxOnto` | `internal/platform/project/bootstrap.go` | Pool, default security group, binding; writes no quota (`pveQuotaLimits` applies the provider default live to a project without its own) |
 
 Keys: `servers`, `vcpus`, `ramMb`, `diskGb`, `networks`, `floatingIps`, plus the
 `gpu` map. Sandbox keys (`sandboxes`, `sandboxVcpus`, `sandboxRamMb`, `sandboxGpus`) live on the same

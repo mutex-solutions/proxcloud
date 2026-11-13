@@ -12,7 +12,7 @@ Three objects together form a customer account:
 | Project | The workspace where cloud resources (servers, volumes, networks, and so on) live. |
 | Billing profile | The financial entity — it holds the balance, bills, and transactions, and links one or more users and projects. |
 
-Activation is a state change on the **billing profile**: it moves to `ACTIVE`. At that point ProxCloud provisions the account. It bootstraps each project onto the enabled Proxmox provider(s): it creates the project's resource pool and a default security group and seeds the provider's default quota. Then it issues any configured sign-up credits. Access to the project is governed by ProxCloud's own project membership and roles; no per-user account is created on the cluster. Until then the customer can sign in but has no usable cloud project.
+Activation is a state change on the **billing profile**: it moves to `ACTIVE`. At that point ProxCloud provisions the account. It bootstraps each project onto the enabled Proxmox provider(s): it creates the project's resource pool and a default security group; the provider's default quota applies to the project until it gets its own. Then it issues any configured sign-up credits. Access to the project is governed by ProxCloud's own project membership and roles; no per-user account is created on the cluster. Until then the customer can sign in but has no usable cloud project.
 
 ## Creating a user yourself
 
