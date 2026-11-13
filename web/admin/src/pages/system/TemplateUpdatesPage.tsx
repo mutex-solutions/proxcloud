@@ -17,9 +17,10 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Switch } from "@/components/ui/switch"
+import { Checkbox } from "@/components/ui/checkbox"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Textarea } from "@/components/ui/textarea"
 import { ApiError, apiFetch } from "@/lib/api"
 import { hasPermission, useAdminMe } from "@/lib/auth"
 import { fmtDateTime, timeAgo } from "@/lib/format"
@@ -47,7 +48,8 @@ type VerifiedVM = {
   manifestSha256: string
   manifest: { build_version: string; source_commit: string; disk: { virtual_size_bytes: number } }
 }
-type InstalledVM = { serviceId: string; serviceName: string; node: string; vmid: number; version: string; sourceDigest?: string; published: boolean }
+type InstalledVM = { serviceId: string; serviceName: string; node: string; vmid: number; version: string; sourceDigest?: string; published: boolean; withdrawn?: boolean }
+type Withdrawal = { id: string; package: string; tag: string; reason: string; actor: string; at: string; vmid?: number }
 type VMLine = {
   line: string
   package: string
@@ -58,6 +60,7 @@ type VMLine = {
   skipped?: Skipped[]
   installed: InstalledVM[]
   updateAvailable: boolean
+  latestWithdrawn?: Withdrawal
 }
 type SandboxCandidate = { name: string; package: string; tag: string; digest: string; createdAt: string; reference: string }
 type PinnedSandbox = { serviceId: string; serviceName: string; template: string; image: string; digest: string }
@@ -71,7 +74,7 @@ type Discovery = {
 }
 type Receipt = {
   id: string
-  payload: { package: string; tag: string; digest: string; serviceId: string; node: string; importStorage: string; diskStorage: string; publish: boolean }
+  payload: { package: string; tag: string; digest: string; serviceId: string; node: string; importStorage: string; diskStorage: string }
   requestedBy: string
   createdAt: string
   updatedAt: string
@@ -82,6 +85,48 @@ type Receipt = {
   warnings?: string[]
 }
 type History = { items: Receipt[]; jobs: Record<string, { state: string; attempts: number; maxAttempts: number; lastError?: string }> }
+type SmokeSummary = { jobId: string; step?: string; result?: "PASS" | "FAIL"; code?: string; message?: string; startedAt?: string; finishedAt?: string }
+type TemplateState = {
+  id: string
+  package: string
+  tag: string
+  digest: string
+  os: string
+  variant: "os" | "kubernetes"
+  kubernetesVersion?: string
+  buildVersion: string
+  slug: string
+  serviceId: string
+  node: string
+  vmid?: number
+  state: string
+  smoke?: SmokeSummary
+  withdrawal?: Withdrawal
+  importedAt: string
+  requestedBy: string
+  publishedOnLine: number
+  versionsMapLine?: string
+  actions: { smoke: boolean; publish: boolean; withdraw: boolean; lastPublished: boolean }
+  warnings?: string[]
+}
+type SmokeReceipt = {
+  id: string
+  payload: { tag: string; digest: string; node: string; templateVmid: number }
+  auto?: boolean
+  requestedBy: string
+  createdAt: string
+  step: string
+  vmid?: number
+  result?: string
+  code?: string
+  message?: string
+  startedAt?: string
+  finishedAt?: string
+  keyFingerprint?: string
+  checks?: { osPrettyName?: string; cloudInitStatus?: string; rootFsBytes?: number; templateDiskBytes?: number; kubelet?: string }
+  warnings?: string[]
+}
+type Templates = { items: TemplateState[]; smokes: SmokeReceipt[]; vmUpdatesEnabled: boolean }
 type Placement = { configuredImportStorage: string; nodes: { node: string; importStorages: string[]; diskStorages: string[] }[] }
 type Provider = { id: string; name: string; config?: { provider?: string }; status?: string }
 
@@ -119,7 +164,13 @@ export default function TemplateUpdatesPage() {
     refetchInterval: (q) => (q.state.data?.items?.some((r) => !["succeeded", "failed"].includes(r.step)) ? 5000 : false),
   })
 
+  const templates = useQuery({
+    queryKey: ["tu-templates"],
+    queryFn: () => apiFetch<Templates>(`${BASE}/templates`),
+    refetchInterval: (q) => (q.state.data?.items?.some((t) => t.state === "smoke_running" || t.state === "importing") ? 5000 : false),
+  })
   const [target, setTarget] = useState<VMLine | null>(null)
+  const [action, setAction] = useState<{ kind: "smoke" | "publish" | "withdraw"; t: TemplateState } | null>(null)
 
   return (
     <>
@@ -139,6 +190,7 @@ export default function TemplateUpdatesPage() {
         <Tabs value={tab} onValueChange={setTab} className="mt-4">
           <TabsList>
             <TabsTrigger value="vm">VM templates</TabsTrigger>
+            <TabsTrigger value="imported">Imported templates</TabsTrigger>
             <TabsTrigger value="sandbox">Sandbox templates</TabsTrigger>
             <TabsTrigger value="history">Jobs</TabsTrigger>
           </TabsList>
@@ -157,11 +209,15 @@ export default function TemplateUpdatesPage() {
           <TabsContent value="vm">
             <VMTab rows={disc.data?.vm} loading={disc.isLoading} canManage={canManage} enabled={!!status.data?.vmUpdatesEnabled} onUpdate={setTarget} />
           </TabsContent>
+          <TabsContent value="imported">
+            <ImportedTab data={templates.data} loading={templates.isLoading} canManage={canManage} onAction={(kind, t) => setAction({ kind, t })} />
+          </TabsContent>
           <TabsContent value="sandbox">
             <SandboxTab rows={disc.data?.sandbox} loading={disc.isLoading} />
           </TabsContent>
           <TabsContent value="history">
             <HistoryTab data={history.data} loading={history.isLoading} />
+            <SmokeHistory smokes={templates.data?.smokes} />
           </TabsContent>
           {disc.data && (
             <p className="mt-2 text-xs text-muted-foreground">
@@ -179,6 +235,20 @@ export default function TemplateUpdatesPage() {
             setTarget(null)
             setTab("history")
             void qc.invalidateQueries({ queryKey: ["tu-history"] })
+            void qc.invalidateQueries({ queryKey: ["tu-templates"] })
+          }}
+        />
+      )}
+
+      {action && (
+        <LifecycleDialog
+          kind={action.kind}
+          t={action.t}
+          onClose={() => setAction(null)}
+          onDone={() => {
+            setAction(null)
+            void qc.invalidateQueries({ queryKey: ["tu-templates"] })
+            void qc.invalidateQueries({ queryKey: ["tu-discovery"] })
           }}
         />
       )}
@@ -265,6 +335,11 @@ function VMTab({ rows, loading, canManage, enabled, onUpdate }: {
                     ) : (
                       <span className="text-muted-foreground">none valid</span>
                     )}
+                    {r.latestWithdrawn && (
+                      <div className="text-xs text-destructive" title={r.latestWithdrawn.reason}>
+                        Withdrawn {fmtDateTime(r.latestWithdrawn.at)}: {r.latestWithdrawn.reason}
+                      </div>
+                    )}
                     {!!r.skipped?.length && (
                       <div className="text-xs text-amber-600" title={r.skipped.map((s) => `${s.tag}: ${s.reason}`).join("\n")}>
                         {r.skipped.length} newer tag(s) refused by contract checks
@@ -278,18 +353,18 @@ function VMTab({ rows, loading, canManage, enabled, onUpdate }: {
                       r.installed.map((i) => (
                         <div key={`${i.serviceId}/${i.vmid}`}>
                           {i.serviceName} · {i.node} · VM {i.vmid} · {i.version || "unversioned"}
-                          {i.sourceDigest ? ` · @${i.sourceDigest}` : ""}{i.published ? "" : " (staged)"}
+                          {i.sourceDigest ? ` · @${i.sourceDigest}` : ""}{i.withdrawn ? " (withdrawn)" : i.published ? "" : " (staged)"}
                         </div>
                       ))
                     )}
                   </TableCell>
                   <TableCell>
-                    {r.updateAvailable ? <Badge>Update available</Badge> : r.latest ? <Badge variant="secondary">Up to date</Badge> : null}
+                    {r.latestWithdrawn ? <Badge variant="destructive">Withdrawn</Badge> : r.updateAvailable ? <Badge>Update available</Badge> : r.latest ? <Badge variant="secondary">Up to date</Badge> : null}
                   </TableCell>
                   <TableCell className="text-right">
                     {r.latest && (
-                      <Button size="sm" variant={r.updateAvailable ? "default" : "outline"} disabled={!canManage || !enabled}
-                        title={!enabled ? "Not enabled on this site" : !canManage ? "Needs admin:service:manage" : undefined}
+                      <Button size="sm" variant={r.updateAvailable ? "default" : "outline"} disabled={!canManage || !enabled || !!r.latestWithdrawn}
+                        title={r.latestWithdrawn ? "This digest was withdrawn and can never be imported again" : !enabled ? "Not enabled on this site" : !canManage ? "Needs admin:service:manage" : undefined}
                         onClick={() => onUpdate(r)}>
                         Import…
                       </Button>
@@ -301,7 +376,8 @@ function VMTab({ rows, loading, canManage, enabled, onUpdate }: {
           </TableBody>
         </Table>
         <p className="mt-3 text-xs text-muted-foreground">
-          An import always creates a <b>new</b> template VM in pool pc-templates; existing templates are never changed or deleted.
+          An import always creates a <b>new</b>, staged template VM in pool pc-templates; existing templates are never changed or deleted.
+          Smoke-test, publish and withdraw it under <i>Imported templates</i>.
         </p>
       </CardContent>
     </Card>
@@ -321,7 +397,6 @@ function VMUpdateDialog({ line, onClose, onQueued }: { line: VMLine; onClose: ()
   const [node, setNode] = useState("")
   const [importStorage, setImportStorage] = useState("")
   const [diskStorage, setDiskStorage] = useState("")
-  const [publish, setPublish] = useState(false)
   const [confirm, setConfirm] = useState("")
   const nodeOpt = placement.data?.nodes.find((n) => n.node === node)
 
@@ -329,7 +404,7 @@ function VMUpdateDialog({ line, onClose, onQueued }: { line: VMLine; onClose: ()
     mutationFn: () =>
       apiFetch(`${BASE}/vm`, {
         method: "POST",
-        body: { package: latest.package, digest: latest.digest, confirmDigest: confirm.trim(), serviceId, node, importStorage, diskStorage, publish: line.variant === "os" && publish },
+        body: { package: latest.package, digest: latest.digest, confirmDigest: confirm.trim(), serviceId, node, importStorage, diskStorage },
       }),
     onSuccess: () => {
       toast.success("Import queued")
@@ -395,25 +470,17 @@ function VMUpdateDialog({ line, onClose, onQueued }: { line: VMLine; onClose: ()
           {nodeOpt && nodeOpt.importStorages.length === 0 && (
             <p className="text-xs text-destructive">This node has no active storage with import content: enable it on a storage first.</p>
           )}
-          {line.variant === "os" ? (
-            <div className="space-y-1">
-            <div className="flex items-center gap-2">
-              <Switch id="tu-publish" checked={publish} onCheckedChange={setPublish} />
-              <Label htmlFor="tu-publish">Publish to the OS catalog right away (otherwise it is staged for review)</Label>
-            </div>
-            {publish && (
-              <p className="text-xs text-amber-600">
-                An import is not boot-tested before it is published (the pipeline build is). A published import also counts
-                as a catalog version for <code>images/build.py --keep</code> pruning on that node. Staging it and booting a clone first
-                is the safer default.
-              </p>
-            )}
-            </div>
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              A Kubernetes node image is never a catalog entry: reference the new template's VMID in the Kubernetes provider's version map.
-            </p>
-          )}
+          <Alert>
+            <AlertTitle>The import lands staged</AlertTitle>
+            <AlertDescription>
+              Tenants do not see it. A smoke test (boot a throwaway clone, guest agent, cloud-init, root disk growth
+              {line.variant === "kubernetes" ? ", kubelet + containerd" : ""}) starts automatically when the import finishes;
+              after it passes you can <b>Publish</b> it under <i>Imported templates</i>.
+              {line.variant === "kubernetes"
+                ? " A Kubernetes node image never joins the OS catalog: publishing marks it ready and shows the version-map line for the Kubernetes provider."
+                : " Once published, the newest version is the default for new servers; older versions stay."}
+            </AlertDescription>
+          </Alert>
           <div className="space-y-1">
             <Label htmlFor="tu-confirm">Type or paste the exact digest to confirm</Label>
             <Input id="tu-confirm" className="font-mono text-xs" placeholder={latest.digest} value={confirm} onChange={(e) => setConfirm(e.target.value)} />
@@ -535,6 +602,238 @@ function HistoryTab({ data, loading }: { data?: History; loading: boolean }) {
                 )
               })
             )}
+          </TableBody>
+        </Table>
+      </CardContent>
+    </Card>
+  )
+}
+
+// ── imported templates: lifecycle ─────────────────────────────────────────────────────────────
+
+const STATE: Record<string, { label: string; variant: "default" | "secondary" | "outline" | "destructive" }> = {
+  importing: { label: "Importing", variant: "outline" },
+  import_failed: { label: "Import failed", variant: "destructive" },
+  staged: { label: "Staged", variant: "outline" },
+  smoke_running: { label: "Smoke running", variant: "outline" },
+  smoke_failed: { label: "Smoke failed", variant: "destructive" },
+  ready_to_publish: { label: "Ready to publish", variant: "secondary" },
+  published_default: { label: "Published (default)", variant: "default" },
+  published_older: { label: "Published (older)", variant: "secondary" },
+  withdrawn: { label: "Withdrawn", variant: "destructive" },
+  template_missing: { label: "Template missing", variant: "destructive" },
+  unknown: { label: "Unknown (cluster unreadable)", variant: "outline" },
+}
+
+function ImportedTab({ data, loading, canManage, onAction }: {
+  data?: Templates; loading: boolean; canManage: boolean; onAction: (kind: "smoke" | "publish" | "withdraw", t: TemplateState) => void
+}) {
+  const enabled = !!data?.vmUpdatesEnabled
+  const why = !enabled ? "Not enabled on this site (PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED)" : !canManage ? "Needs admin:service:manage" : undefined
+  return (
+    <Card>
+      <CardContent className="space-y-3 pt-6">
+        <p className="text-xs text-muted-foreground">
+          Lifecycle: <b>Staged</b> (hidden) → automatic <b>smoke test</b> → <b>Publish</b> (only after the smoke test passed) → the newest
+          published version is the default for new servers; older versions stay. <b>Withdraw</b> takes a bad version out of the catalog (the
+          previous published one takes over), keeps the template for inspection and blocks its digest for good. Running servers are never affected.
+        </p>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Template</TableHead>
+              <TableHead>Where</TableHead>
+              <TableHead>State</TableHead>
+              <TableHead>Smoke test</TableHead>
+              <TableHead />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {loading ? (
+              <TableRow><TableCell colSpan={5} className="text-center text-muted-foreground">Loading…</TableCell></TableRow>
+            ) : !data?.items.length ? (
+              <TableRow><TableCell colSpan={5} className="text-center text-muted-foreground">No imported templates yet.</TableCell></TableRow>
+            ) : (
+              data.items.map((t) => {
+                const st = STATE[t.state] ?? { label: t.state, variant: "outline" as const }
+                return (
+                  <TableRow key={t.id}>
+                    <TableCell>
+                      <div className="font-medium">{t.slug}</div>
+                      <div className="font-mono text-xs">{t.tag}</div>
+                      <div className="font-mono text-xs text-muted-foreground" title={t.digest}>@{short(t.digest)}</div>
+                    </TableCell>
+                    <TableCell className="text-xs">
+                      {t.node}{t.vmid ? ` · VM ${t.vmid}` : ""}
+                      <div className="text-muted-foreground">imported {timeAgo(t.importedAt)} by {t.requestedBy}</div>
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant={st.variant}>{st.label}</Badge>
+                      {t.withdrawal && (
+                        <div className="mt-1 max-w-xs text-xs text-muted-foreground" title={t.withdrawal.reason}>
+                          {fmtDateTime(t.withdrawal.at)} by {t.withdrawal.actor}: {t.withdrawal.reason}
+                        </div>
+                      )}
+                      {t.versionsMapLine && (
+                        <div className="mt-1 text-xs">
+                          Kubernetes version map:{" "}
+                          <Button size="sm" variant="link" className="h-auto p-0 font-mono text-xs" onClick={() => {
+                            void navigator.clipboard?.writeText(t.versionsMapLine!)
+                            toast.success("Version-map line copied")
+                          }}>{t.versionsMapLine}</Button>
+                        </div>
+                      )}
+                      {t.warnings?.map((w) => <div key={w} className="text-xs text-amber-600">{w}</div>)}
+                    </TableCell>
+                    <TableCell className="text-xs">
+                      {!t.smoke ? (
+                        <span className="text-muted-foreground">not run</span>
+                      ) : !t.smoke.jobId ? (
+                        <span className="text-amber-600" title={t.smoke.message}>not started: {t.smoke.code}</span>
+                      ) : (
+                        <>
+                          <div>
+                            {t.smoke.result === "PASS" ? <Badge variant="secondary">PASS</Badge> : t.smoke.result === "FAIL" ? <Badge variant="destructive">FAIL</Badge> : <Badge variant="outline">{t.smoke.step ?? "queued"}</Badge>}
+                            {t.smoke.code ? <span className="ml-1 font-mono">{t.smoke.code}</span> : null}
+                          </div>
+                          {t.smoke.message && t.smoke.result === "FAIL" && <div className="max-w-xs text-muted-foreground">{t.smoke.message}</div>}
+                          {t.smoke.finishedAt && <div className="text-muted-foreground">{fmtDateTime(t.smoke.finishedAt)}</div>}
+                        </>
+                      )}
+                    </TableCell>
+                    <TableCell className="space-x-1 whitespace-nowrap text-right">
+                      <Button size="sm" variant="outline" disabled={!canManage || !t.actions.smoke} title={why} onClick={() => onAction("smoke", t)}>Run smoke</Button>
+                      <Button size="sm" disabled={!canManage || !t.actions.publish} title={why ?? (!t.actions.publish ? "Publish needs a passing smoke test of this template" : undefined)} onClick={() => onAction("publish", t)}>Publish</Button>
+                      <Button size="sm" variant="destructive" disabled={!canManage || !t.actions.withdraw} title={why} onClick={() => onAction("withdraw", t)}>Withdraw…</Button>
+                    </TableCell>
+                  </TableRow>
+                )
+              })
+            )}
+          </TableBody>
+        </Table>
+      </CardContent>
+    </Card>
+  )
+}
+
+function LifecycleDialog({ kind, t, onClose, onDone }: { kind: "smoke" | "publish" | "withdraw"; t: TemplateState; onClose: () => void; onDone: () => void }) {
+  const [confirm, setConfirm] = useState("")
+  const [reason, setReason] = useState("")
+  const [force, setForce] = useState(false)
+  const [confirmLast, setConfirmLast] = useState("")
+  const last = kind === "withdraw" && t.actions.lastPublished
+  const run = useMutation({
+    mutationFn: () => {
+      const path = `${BASE}/templates/${encodeURIComponent(t.id)}/${kind}`
+      if (kind === "smoke") return apiFetch(path, { method: "POST" })
+      if (kind === "publish") return apiFetch(path, { method: "POST", body: { confirmDigest: confirm.trim() } })
+      return apiFetch(path, { method: "POST", body: { reason: reason.trim(), confirmDigest: confirm.trim(), force: last && force, confirmLast: last && force ? confirmLast.trim() : "" } })
+    },
+    onSuccess: (res: unknown) => {
+      const r = res as { complete?: boolean; warnings?: string[] } | undefined
+      if (r && r.complete === false) toast.warning(`Withdrawn with warnings: ${r.warnings?.join("; ")}`)
+      else toast.success(kind === "smoke" ? "Smoke test queued" : kind === "publish" ? "Published" : "Withdrawn")
+      onDone()
+    },
+    onError: (e) => toast.error(e instanceof ApiError || e instanceof Error ? e.message : String(e)),
+  })
+  const digestOK = kind === "smoke" || confirm.trim() === t.digest
+  const reasonOK = kind !== "withdraw" || (reason.trim().length >= 8 && reason.trim().length <= 500)
+  const lastOK = !last || (force && confirmLast.trim() === t.slug)
+  const title = kind === "smoke" ? "Run the smoke test" : kind === "publish" ? "Publish" : "Withdraw"
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{title}: {t.tag}</DialogTitle>
+          <DialogDescription>
+            {kind === "smoke" && "Clones the template into a throwaway VM in pool pc-templates on the provider's smoke network, boots it with a fresh cloud-init (an ephemeral SSH key, no password), checks the guest agent, cloud-init and the root disk, then destroys the VM."}
+            {kind === "publish" && (t.variant === "kubernetes"
+              ? "Marks this Kubernetes node image as published (pc-tu-k8s-public). It never joins the OS catalog: use the version-map line on the provider."
+              : `Adds pc-public: the newest published ${t.slug} version on ${t.node} becomes the default for new servers. Older versions stay. Running servers are not affected.`)}
+            {kind === "withdraw" && `Removes this version from the catalog (the previous published ${t.slug} version takes over), keeps the template VM for inspection, and blocks its digest so it can never be imported or published again. Running servers are not affected.`}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3 text-sm">
+          <dl className="grid grid-cols-[8rem_1fr] gap-x-3 gap-y-1">
+            <dt className="text-muted-foreground">Digest</dt><dd className="break-all font-mono text-xs">{t.digest}</dd>
+            <dt className="text-muted-foreground">Template</dt><dd>{t.node}{t.vmid ? ` · VM ${t.vmid}` : ""}</dd>
+          </dl>
+          {kind === "withdraw" && (
+            <div className="space-y-1">
+              <Label htmlFor="tu-reason">Reason (required, recorded with the blocklist entry and in the audit log)</Label>
+              <Textarea id="tu-reason" value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. no network after first boot on our hardware" />
+            </div>
+          )}
+          {last && (
+            <Alert variant="destructive">
+              <AlertTitle>This is the only published version of {t.slug} on this provider</AlertTitle>
+              <AlertDescription className="space-y-2">
+                <p>After withdrawing it, no new server{t.variant === "kubernetes" ? " or Kubernetes worker" : ""} of {t.slug} can be created until another version is published.</p>
+                <div className="flex items-center gap-2">
+                  <Checkbox id="tu-force" checked={force} onCheckedChange={(v) => setForce(v === true)} />
+                  <Label htmlFor="tu-force">Withdraw anyway</Label>
+                </div>
+                {force && (
+                  <Input className="font-mono text-xs" placeholder={`type ${t.slug} to confirm`} value={confirmLast} onChange={(e) => setConfirmLast(e.target.value)} />
+                )}
+              </AlertDescription>
+            </Alert>
+          )}
+          {kind !== "smoke" && (
+            <div className="space-y-1">
+              <Label htmlFor="tu-lc-confirm">Type or paste the exact digest to confirm</Label>
+              <Input id="tu-lc-confirm" className="font-mono text-xs" placeholder={t.digest} value={confirm} onChange={(e) => setConfirm(e.target.value)} />
+            </div>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button variant={kind === "withdraw" ? "destructive" : "default"} disabled={!digestOK || !reasonOK || !lastOK || run.isPending} onClick={() => run.mutate()}>
+            {run.isPending ? "Working…" : title}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function SmokeHistory({ smokes }: { smokes?: SmokeReceipt[] }) {
+  if (!smokes?.length) return null
+  return (
+    <Card className="mt-4">
+      <CardHeader><CardTitle className="text-base">Smoke tests</CardTitle></CardHeader>
+      <CardContent>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Started</TableHead>
+              <TableHead>Template</TableHead>
+              <TableHead>Result</TableHead>
+              <TableHead>Checks</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {smokes.map((s) => (
+              <TableRow key={s.id}>
+                <TableCell className="text-xs">{fmtDateTime(s.createdAt)}<div className="text-muted-foreground">{s.auto ? "automatic" : s.requestedBy}</div></TableCell>
+                <TableCell className="text-xs"><div className="font-mono">{s.payload.tag}</div>{s.payload.node} · VM {s.payload.templateVmid}{s.vmid ? ` → test VM ${s.vmid}` : ""}</TableCell>
+                <TableCell className="text-xs">
+                  {s.result ? <Badge variant={s.result === "PASS" ? "secondary" : "destructive"}>{s.result}</Badge> : <Badge variant="outline">{s.step}</Badge>}
+                  {s.code && <span className="ml-1 font-mono">{s.code}</span>}
+                  {s.result === "FAIL" && s.message && <div className="text-muted-foreground">{s.message}</div>}
+                  {s.warnings?.map((w) => <div key={w} className="text-amber-600">{w}</div>)}
+                </TableCell>
+                <TableCell className="text-xs text-muted-foreground">
+                  {s.checks?.osPrettyName && <div>{s.checks.osPrettyName}</div>}
+                  {s.checks?.cloudInitStatus && <div>cloud-init {s.checks.cloudInitStatus}</div>}
+                  {!!s.checks?.rootFsBytes && <div>root fs {gib(s.checks.rootFsBytes)} (template disk {gib(s.checks.templateDiskBytes ?? 0)})</div>}
+                  {s.checks?.kubelet && <div>{s.checks.kubelet}</div>}
+                  {s.keyFingerprint && <div className="font-mono" title="ephemeral SSH key (never stored)">{s.keyFingerprint.slice(0, 20)}…</div>}
+                </TableCell>
+              </TableRow>
+            ))}
           </TableBody>
         </Table>
       </CardContent>
