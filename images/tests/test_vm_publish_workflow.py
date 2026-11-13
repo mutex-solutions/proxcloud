@@ -177,6 +177,26 @@ class StagingTests(unittest.TestCase):
         stage.extract(str(self.archive(payload)), str(destination))
         with self.assertRaises(ValueError): stage.publication_plan(str(destination), selected)
 
+    def test_kubernetes_accepted_versions_publish_to_their_own_tag(self):
+        name = "vm-k8s-export-ubuntu-2604-20261111000000-aaaaaaaaaaaa"
+        for version in ("1.36.6", "1.37.2"):
+            with self.subTest(version=version):
+                payload, raw = self.kubernetes_payload(version)
+                selected = stage.inputs("123", name, contract.sha(raw), contract.sha(self.disk), "d" * 40, stage.REPOSITORY)
+                destination = self.root / ("k8s-" + version)
+                stage.extract(str(self.archive(payload)), str(destination))
+                plan = stage.publication_plan(str(destination), selected)
+                self.assertEqual(plan["reference"], "ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2604-k8s:"
+                                                    "ubuntu-2604-k8s-" + version + "-20261111000000-aaaaaaaaaaaa")
+                self.assertFalse(plan["publish_eligible"] or plan["execute"] or any(plan["release_gates"].values()))
+        for version in ("1.36.5", "1.37.3", "1.38.0", "1.34.10"):
+            with self.subTest(refused=version):
+                payload, raw = self.kubernetes_payload(version)
+                selected = stage.inputs("123", name, contract.sha(raw), contract.sha(self.disk), "d" * 40, stage.REPOSITORY)
+                destination = self.root / ("k8s-refused-" + version)
+                stage.extract(str(self.archive(payload)), str(destination))
+                with self.assertRaises(ValueError): stage.publication_plan(str(destination), selected)
+
     def test_archive_extra_paths_and_existing_destination_refused_before_writes(self):
         for name in ("../escape", "/absolute", "nested/disk.qcow2", "request.json", "disk.qcow2/", "disk.qcow2\\suffix"):
             payload = dict(self.payload, **{name: b"hostile"})

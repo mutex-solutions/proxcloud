@@ -31,7 +31,7 @@ Before real image use, the operator must verify the exact pinned tool image supp
 
 ## Kubernetes variant (`--k8s-os ubuntu-2604`)
 
-Scope is exactly the Ubuntu 26.04 / Kubernetes **1.35.10** node template line (its own build canary passed; full template acceptance is a separate gate), exported to `ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2604-k8s` (first artifact published 2026-11-12; publication does not satisfy the runtime acceptance below). The decision logic lives in the pure [copy policy](<../images/k8s_copy_policy.py>); the sanitizer only gathers bounded facts and applies the policy's recommendations.
+Scope is exactly the Ubuntu 26.04 node template lines of the Kubernetes versions in `K8S_VERSIONS` (**1.35.10**, whose build canary passed, and **1.36.6** and **1.37.2**, added 2026-11-14 for upgrade testing; each version's build, inventory and runtime acceptance are their own gates, and the real-template facts below were recorded on 1.35.10), exported to `ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2604-k8s` (first artifact published 2026-11-12; publication does not satisfy the runtime acceptance below). The decision logic lives in the pure [copy policy](<../images/k8s_copy_policy.py>); the sanitizer only gathers bounded facts and applies the policy's recommendations.
 
 - **Root disk only.** Input is the template's RAW root disk at `/input/source.raw`, exactly 20 GiB, regular and single-link, plus a small parent-reviewed `/input/k8s-review.json` opened with `O_NOFOLLOW`/fstat. The template's EFI vars disk and cloud-init CD/seed media are **never** inputs or outputs; a cold boot must use fresh cloud-init and, if UEFI is ever required, newly generated EFI vars.
 - **Source binding.** The review must carry `source_raw_sha256`. The capsule stream-hashes the raw file (bounded, stable fstat before/after) and refuses on mismatch **before** any image parser runs. Explicit `-f raw` metadata checks precede a confined `-f raw -O qcow2` conversion into the scratch work copy; the work copy then gets the normal QCOW2 info/check. The stopped-source fact remains a parent attestation.
@@ -64,7 +64,7 @@ Scope is exactly the Ubuntu 26.04 / Kubernetes **1.35.10** node template line (i
   - **Not reset, by design:** the per-snap `snap-cookie` values that `state.json` keeps (and `/var/lib/snapd/cookie/` mirrors) stay **identical across clones**. They authenticate a snap's own `snapctl` calls to the local snapd over its socket; they are not device or store identity and grant nothing remotely. Regenerating them is snapd-internal, so they are left untouched. This is a known, accepted residue.
 - **Curated removals.** Generic personal/network/identity cleanup plus the policy's copy-only wipes: builder/root SSH state, host keys, cloud-init state and logs, installer logs, dbus machine-id, apt auth, docker configs, snapd device-key entries and serial assertions, and reviewed prejoin token leaves.
 - **Kubelet enablement is preserved, never toggled.** The upstream template is `enabled=true,state=stopped`. A masked, redirected or missing unit refuses. Enablement, packages and cluster counts must be identical before cleanup, after cleanup and after journal reset/zeroing.
-- **Facts.** Success facts add `variant: kubernetes` and `kubernetes_version: 1.35.10`.
+- **Facts.** Success facts add `variant: kubernetes` and the reviewed `kubernetes_version`; the policy requires `kubeadm`, `kubelet` and `kubectl` at exactly that version.
 
 ### Real-template facts behind the reviewed rules
 

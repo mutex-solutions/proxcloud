@@ -29,6 +29,10 @@ No return value satisfies vm_artifact checks or changes its kubernetes contract.
 from dataclasses import dataclass
 import re
 
+# Kubernetes node template versions accepted here: an explicit allowlist, kept equal to vm_publish_stage.K8S_VERSIONS
+# and the other module of this pair by images/tests/test_k8s_versions.py.
+K8S_VERSIONS = ("1.35.10", "1.36.6", "1.37.2")
+
 VIRTUAL_BYTES = 20 << 30
 REFUSAL = "k8s copy policy refused"
 # GUEST paths/patterns, descriptive only; never expand these on the host.
@@ -213,11 +217,11 @@ def validate_inventory(facts, reviewed_dropins=()):
     _keys(k, ("version", "kubelet_enabled", "kubelet_active", "cluster", "runtime_version",
               "bootstrap_token_files", "kubernetes_packages", "retained_package_policy_reviewed",
               "package_policy_sha256"))
-    _need(type(k["version"]) is str and k["version"] == "1.35.10")
+    _need(type(k["version"]) is str and k["version"] in K8S_VERSIONS)
     _need(k["kubelet_enabled"] is True and k["kubelet_active"] is False)
     _keys(k["kubernetes_packages"], ("kubeadm", "kubelet", "kubectl"))
     for version in k["kubernetes_packages"].values():
-        _need(type(version) is str and version == "1.35.10")
+        _need(type(version) is str and version == k["version"])
     _need(k["retained_package_policy_reviewed"] is True)
     _need(_text(k["package_policy_sha256"], r"[0-9a-f]{64}"))
     _need(_text(k["runtime_version"], r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}(?:[-+][A-Za-z0-9.-]{1,48})?"))
