@@ -61,8 +61,30 @@ func TestPGSandboxBusyUntilTheJobIsSettled(t *testing.T) {
 	if got, err := store.GetPin(ctx, p.Repo()); err != nil || got == nil {
 		t.Fatalf("the pin went away while busy: %v", err)
 	}
-	// Dead-lettered: both are allowed again.
+	// Dead-lettered but not cleaned up (its Cleanup could not run: the dead-job pass still owes it): still busy, or a
+	// newer job's switch of the image could be undone by that late Cleanup.
 	if err := jobs.Fail(ctx, j, 0, true, "digest_mismatch"); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := s.JobState(ctx, first.ID); st != "dead" {
+		t.Fatalf("job state %q", st)
+	}
+	if ids, err := store.DeadUncleaned(ctx); err != nil || len(ids) != 1 || ids[0] != first.ID {
+		t.Fatalf("the dead-job pass does not see the job: %v %v", ids, err)
+	}
+	if _, err := s.enqueueSandbox(ctx, p, "admin", noCheck); !errors.Is(err, ErrSandboxBusy) {
+		t.Fatalf("an enqueue went ahead of a dead job's pending cleanup: %v", err)
+	}
+	if _, err := s.DeleteSandboxPin(ctx, p.Repo()); !errors.Is(err, ErrSandboxBusy) {
+		t.Fatalf("a pin delete went ahead of a dead job's pending cleanup: %v", err)
+	}
+	// The dead-job pass cleaned it up: both are allowed again.
+	r, err := store.Load(ctx, first.ID)
+	if err != nil || r == nil {
+		t.Fatalf("receipt %v", err)
+	}
+	r.Cleaned = true
+	if err := store.Save(ctx, r); err != nil {
 		t.Fatal(err)
 	}
 	if removed, err := s.DeleteSandboxPin(ctx, p.Repo()); err != nil || removed == nil || removed.ID != p.Repo() {

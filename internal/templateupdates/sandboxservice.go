@@ -204,10 +204,12 @@ func (s *Service) enqueueSandbox(ctx context.Context, p SandboxPayload, actor st
 
 // sandboxImageBusy answers ErrSandboxBusy while an earlier job of the image may still change the cluster or its pin
 // record. A receipt is settled only when its step is succeeded or its cleanup ran (cleaned), or when its durable job
-// is dead or succeeded. A failed step alone is not: terminal() records it BEFORE it runs the job's Cleanup (worker
-// pods, a partial prepull switch, the pin restore) with the job row still running, and an enqueue or a pin delete
-// let through meanwhile would overlap that cleanup (whose MirrorJob guard then refuses to restore the old pin). A
-// job state that cannot be read ("") counts as busy.
+// succeeded. A failed step alone is not: terminal() records it BEFORE it runs the job's Cleanup (worker pods, a
+// partial prepull switch, the pin restore) with the job row still running, and an enqueue or a pin delete let
+// through meanwhile would overlap that cleanup (whose MirrorJob guard then refuses to restore the old pin). Nor is
+// a dead job: while its receipt is not cleaned its Cleanup is still to come from the dead-job pass (which always ends
+// by marking it cleaned, or why it cannot be), and that Cleanup's RestorePrepullImages would undo a newer job's
+// switch of the same image. A job state that cannot be read ("") counts as busy.
 func sandboxImageBusy(ctx context.Context, prior []SandboxReceipt, jobState func(ctx context.Context, id string) (string, error)) error {
 	for i := range prior {
 		r := &prior[i]
@@ -218,7 +220,7 @@ func sandboxImageBusy(ctx context.Context, prior []SandboxReceipt, jobState func
 		if err != nil {
 			return err
 		}
-		if state != "dead" && state != "succeeded" {
+		if state != "succeeded" {
 			return ErrSandboxBusy
 		}
 	}
