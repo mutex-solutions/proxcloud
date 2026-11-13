@@ -151,7 +151,7 @@ func (s *Store) Fail(ctx context.Context, j *Job, delay time.Duration, permanent
 // the job could not start because a resource lock it needs is busy (e.g. one smoke test per
 // provider), which is no failure of the job. Fenced like Fail; code is a fixed classification.
 func (s *Store) Defer(ctx context.Context, j *Job, delay time.Duration, code string) error {
-	if delay < 0 || delay > time.Hour || !failCodeRE(code) {
+	if delay < 0 || delay > time.Hour || !failCodeRE(code) || !External(j.Kind) {
 		return errors.New("invalid deferral")
 	}
 	return s.db.WithTx(ctx, func(tc context.Context) error {

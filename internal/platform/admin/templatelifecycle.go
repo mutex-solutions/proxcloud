@@ -9,6 +9,7 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -160,12 +161,22 @@ func (h *Handler) templateUpdatesSmoke(w http.ResponseWriter, r *http.Request) {
 		templateUpdatesErr(w, err)
 		return
 	}
-	es, _, err := h.lifecyclePVE(r.Context(), svc)
+	es, ps, err := h.lifecyclePVE(r.Context(), svc)
 	if err != nil {
 		templateUpdatesErr(w, err)
 		return
 	}
-	sm, err := h.templateUpdates.EnqueueSmoke(r.Context(), id, SmokeNetworkOf(es), h.actor(r), false)
+	rec, err := h.templateUpdates.Receipts.Load(r.Context(), id)
+	if err != nil {
+		templateUpdatesErr(w, err)
+		return
+	}
+	net := SmokeNetworkOf(es)
+	if err := templateupdates.CheckSmokeNetwork(r.Context(), ps.C, rec.Payload.Node, net); err != nil {
+		templateUpdatesErr(w, err)
+		return
+	}
+	sm, err := h.templateUpdates.EnqueueSmoke(r.Context(), id, net, h.actor(r), false)
 	if err != nil {
 		templateUpdatesErr(w, err)
 		return
@@ -215,23 +226,37 @@ func (h *Handler) templateUpdatesWithdraw(w http.ResponseWriter, r *http.Request
 		return
 	}
 	id := chi.URLParam(r, "id")
-	svc, err := h.importService(r.Context(), id)
-	if err != nil {
+	if _, err := h.importService(r.Context(), id); err != nil {
 		templateUpdatesErr(w, err)
 		return
 	}
-	_, ps, err := h.lifecyclePVE(r.Context(), svc)
-	if err != nil {
-		templateUpdatesErr(w, err)
-		return
+	// Every provider holding a copy of the artifact is resolved (a disabled provider still is: a
+	// withdrawn digest must not stay published anywhere).
+	resolve := func(ctx context.Context, serviceID string) (templateupdates.LifecyclePVE, error) {
+		if h.esSvc == nil || h.pveFor == nil {
+			return nil, errors.New("Proxmox access is not wired")
+		}
+		es, err := h.esSvc.Get(ctx, serviceID)
+		if err != nil {
+			return nil, err
+		}
+		if es == nil || !es.IsProxmox() {
+			return nil, &templateupdates.LifecycleError{Status: http.StatusConflict, Code: "provider_missing", Message: "The provider no longer exists"}
+		}
+		ps, err := h.pveFor(es)
+		if err != nil {
+			return nil, err
+		}
+		return ps.C, nil
 	}
-	res, err := h.templateUpdates.Withdraw(r.Context(), ps.C, id, req, h.actor(r))
+	res, err := h.templateUpdates.Withdraw(r.Context(), resolve, id, req, h.actor(r))
 	if err != nil {
 		templateUpdatesErr(w, err)
 		return
 	}
 	audit.RecordSnapshots(r.Context(), map[string]any{"withdrawn": false}, map[string]any{"withdrawn": true, "action": "withdraw", "importId": id,
 		"digest": res.Digest, "slug": res.Slug, "serviceId": res.ServiceID, "reason": strings.TrimSpace(req.Reason), "force": req.Force,
-		"changedVmids": res.Changed, "remainingPublished": res.Remaining, "complete": res.Complete})
+		"confirmNodeLoss": req.ConfirmNodeLoss, "changedVmids": res.Changed, "remainingPublished": res.Remaining, "complete": res.Complete,
+		"providers": res.Providers})
 	httpx.OK(w, res)
 }

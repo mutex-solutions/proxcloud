@@ -893,3 +893,138 @@ func TestRunnerOnImportedAfterSuccess(t *testing.T) {
 		t.Fatal("OnImported after a failed import")
 	}
 }
+
+// S3: the sweep and cleanup never take a manual clone of a test VM (another name, copied owner tag),
+// nor a same-named VM configured by another smoke job, nor anything outside pc-templates.
+func TestSmokeOwnershipNeedsExactNameAndTag(t *testing.T) {
+	x, pv, rec, p := smokeSetup(t, "os")
+	own := "proxcloud;pc-tu-smoke;" + SmokeOwnerTag(smokeJob)
+	pv.vms[9301] = &smokeVM{node: "pve1", running: true, cfg: pve.VMConfig{"name": SmokeVMName(smokeJob), "pool": pve.TemplatePool, "tags": own}}                                   // ours
+	pv.vms[9302] = &smokeVM{node: "pve1", running: true, cfg: pve.VMConfig{"name": "copy-of-smoke", "pool": pve.TemplatePool, "tags": own}}                                         // manual clone
+	pv.vms[9303] = &smokeVM{node: "pve1", cfg: pve.VMConfig{"name": SmokeVMName(smokeJob), "pool": pve.TemplatePool, "tags": "proxcloud;pc-tu-smoke;pc-tu-smoke-0000aaaa0000aaaa"}} // other job's tag
+	r := &SmokeReceipt{ID: smokeJob, Payload: p, Step: SmokeBooting, VMID: 9301}
+	rec.m[smokeJob] = *r
+	if warns := x.Cleanup(context.Background(), &testFence{epoch: 2, budget: -1}, smokeJob, p, r); len(warns) != 0 {
+		t.Fatalf("warnings %v", warns)
+	}
+	if _, ok := pv.vms[9301]; ok {
+		t.Fatal("own test VM survived")
+	}
+	for _, id := range []int{9302, 9303} {
+		if _, ok := pv.vms[id]; !ok {
+			t.Fatalf("VM %d (not this job's) was destroyed: %v", id, pv.calls)
+		}
+		for _, c := range pv.calls {
+			if strings.HasSuffix(c, fmt.Sprintf(" %d", id)) {
+				t.Fatalf("VM %d mutated: %v", id, pv.calls)
+			}
+		}
+	}
+	protectedIntact(t, pv)
+}
+
+// A leftover test VM that cannot be removed keeps the receipt uncleaned and the attempt retried.
+func TestSmokeLeftoverKeepsReceiptUncleaned(t *testing.T) {
+	x, pv, rec, p := smokeSetup(t, "os")
+	pv.deleteFails = true
+	err := x.Run(context.Background(), smokeJob, p, &testFence{epoch: 1, budget: -1})
+	if err == nil || errors.As(err, new(*Permanent)) {
+		t.Fatalf("want a retryable error, got %v", err)
+	}
+	r, _ := rec.LoadSmoke(context.Background(), smokeJob)
+	if r.Cleaned || r.Result != SmokePass || r.Step == SmokeFinished {
+		t.Fatalf("receipt %+v", r)
+	}
+	pv.deleteFails = false
+	if err := x.Run(context.Background(), smokeJob, p, &testFence{epoch: 2, budget: -1}); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ = rec.LoadSmoke(context.Background(), smokeJob); !r.Cleaned || r.Result != SmokePass || len(testVMsLeft(pv)) != 0 {
+		t.Fatalf("after retry %+v left %v", r, testVMsLeft(pv))
+	}
+}
+
+// S6: the PASS records the template's config digest at clone time.
+func TestSmokeRecordsTemplateConfigDigest(t *testing.T) {
+	x, _, rec, p := smokeSetup(t, "os")
+	if err := x.Run(context.Background(), smokeJob, p, &testFence{epoch: 1, budget: -1}); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := rec.LoadSmoke(context.Background(), smokeJob); r.TemplateConfigDigest != "d" {
+		t.Fatalf("template config digest %q", r.TemplateConfigDigest)
+	}
+}
+
+// S5: IPv4 only, no zones, gateway inside and distinct; cicustom removed from the test VM.
+func TestSmokeNetworkValidationS5(t *testing.T) {
+	for name, n := range map[string]SmokeNetwork{
+		"ipv6":           {Bridge: "vmbr0", IP: "2001:db8::5/64", Gateway: "2001:db8::1"},
+		"v4-mapped":      {Bridge: "vmbr0", IP: "::ffff:192.0.2.50/120", Gateway: "192.0.2.1"},
+		"network addr":   {Bridge: "vmbr0", IP: "192.0.2.0/24", Gateway: "192.0.2.1"},
+		"gw is ip":       {Bridge: "vmbr0", IP: "192.0.2.50/24", Gateway: "192.0.2.50"},
+		"gw zone":        {Bridge: "vmbr0", IP: "192.0.2.50/24", Gateway: "fe80::1%eth0"},
+		"ns zone":        {Bridge: "vmbr0", Nameserver: "fe80::1%vmbr0"},
+		"ns garbage":     {Bridge: "vmbr0", Nameserver: "dns.example"},
+		"/32":            {Bridge: "vmbr0", IP: "192.0.2.50/32", Gateway: "192.0.2.1"},
+		"vlan negative":  {Bridge: "vmbr0", VLAN: -1},
+		"bridge options": {Bridge: "vmbr0,tag=5"},
+	} {
+		if n.Validate() == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+	for name, n := range map[string]SmokeNetwork{
+		"dhcp":      {Bridge: "vmbr0"},
+		"static":    {Bridge: "vmbr0", VLAN: 29, IP: "192.0.2.50/24", Gateway: "192.0.2.1", Nameserver: "192.0.2.53"},
+		"ns ipv6":   {Bridge: "vmbr0", Nameserver: "2001:db8::53"},
+		"vnet name": {Bridge: "smokenet"},
+	} {
+		if err := n.Validate(); err != nil {
+			t.Errorf("%s refused: %v", name, err)
+		}
+	}
+	x, pv, _, p := smokeSetup(t, "os")
+	pv.vms[9300].cfg["cicustom"] = "user=local:snippets/x.yaml"
+	var seen pve.VMConfig
+	pv.stopHook = func() {
+		pv.mu.Lock()
+		defer pv.mu.Unlock()
+		for _, vm := range pv.vms {
+			if strings.Contains(vm.cfg.Str("tags"), "pc-tu-smoke;") {
+				seen = vm.cfg
+			}
+		}
+	}
+	if err := x.Run(context.Background(), smokeJob, p, &testFence{epoch: 1, budget: -1}); err != nil {
+		t.Fatal(err)
+	}
+	if seen == nil || seen.Str("cicustom") != "" {
+		t.Fatalf("cicustom kept on the test VM: %+v", seen)
+	}
+}
+
+type fakeBridges struct {
+	m   map[string]string
+	err error
+}
+
+func (f fakeBridges) ManagementBridges(context.Context, ...string) (map[string]string, error) {
+	return f.m, f.err
+}
+
+func TestCheckSmokeNetworkManagementBridge(t *testing.T) {
+	mgmt := fakeBridges{m: map[string]string{"vmbr0": "pve1"}}
+	var le *LifecycleError
+	if err := CheckSmokeNetwork(context.Background(), mgmt, "pve1", SmokeNetwork{Bridge: "vmbr0"}); !errors.As(err, &le) || le.Code != "smoke_network_management_bridge" {
+		t.Fatalf("untagged mgmt bridge: %v", err)
+	}
+	if err := CheckSmokeNetwork(context.Background(), mgmt, "pve1", SmokeNetwork{Bridge: "vmbr0", VLAN: 29}); err != nil {
+		t.Fatalf("tagged on mgmt bridge: %v", err)
+	}
+	if err := CheckSmokeNetwork(context.Background(), mgmt, "pve1", SmokeNetwork{Bridge: "vmbr9"}); err != nil {
+		t.Fatalf("dedicated bridge: %v", err)
+	}
+	if err := CheckSmokeNetwork(context.Background(), fakeBridges{err: errors.New("x")}, "pve1", SmokeNetwork{Bridge: "vmbr9"}); !errors.As(err, &le) || le.Code != "smoke_network_unverified" {
+		t.Fatalf("unreadable: %v", err)
+	}
+}

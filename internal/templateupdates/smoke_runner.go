@@ -122,8 +122,12 @@ func (r *Runner) terminalSmoke(parent context.Context, j *durablejobs.Job, fence
 		warns := x.Cleanup(ctx, fence, j.ID, p, rec)
 		if !stopped(warns) {
 			_ = fence.Checkpoint(ctx, func(tc context.Context) error {
-				now := time.Now().UTC()
-				rec.Warnings, rec.Cleaned, rec.Step, rec.CleanedAt = append(rec.Warnings, warns...), true, SmokeFinished, &now
+				rec.Warnings = mergeWarnings(rec.Warnings, warns)
+				if len(warns) == 0 {
+					// Every test VM is gone; otherwise the receipt stays uncleaned for the dead-job pass.
+					now := time.Now().UTC()
+					rec.Cleaned, rec.Step, rec.CleanedAt = true, SmokeFinished, &now
+				}
 				return r.Smokes.SaveSmoke(tc, rec)
 			})
 		}
@@ -197,6 +201,19 @@ func (r *Runner) cleanupDeadSmoke(ctx context.Context) (bool, error) {
 	warns := x.Cleanup(work, fence, j.ID, p, rec)
 	if stopped(warns) || isLost() {
 		return false, nil
+	}
+	if len(warns) > 0 {
+		// A test VM is still there: record the warning, keep the receipt uncleaned and retry after
+		// the throttle (the job goes back to dead as cleanup_pending).
+		_ = fence.Checkpoint(work, func(tc context.Context) error {
+			cur, err := r.Smokes.LoadSmoke(tc, j.ID)
+			if err != nil || cur == nil {
+				return err
+			}
+			cur.Warnings = mergeWarnings(cur.Warnings, warns)
+			return r.Smokes.SaveSmoke(tc, cur)
+		})
+		return later("cleanup_pending")
 	}
 	if !finish(warns) {
 		return false, nil

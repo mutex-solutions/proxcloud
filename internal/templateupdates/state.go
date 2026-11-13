@@ -88,13 +88,14 @@ func (s *Service) EnqueueSmoke(ctx context.Context, id string, net SmokeNetwork,
 var errSmokeActive = errors.New("a smoke test of this template is already queued or running")
 
 // AutoSmoke queues the automatic smoke test after an import finished (the runner's OnImported).
-// netFor reads the provider's smoke network; an unset one is recorded on the import instead.
-func (s *Service) AutoSmoke(ctx context.Context, id string, netFor func(ctx context.Context, serviceID string) (SmokeNetwork, error)) error {
+// netFor reads and checks (CheckSmokeNetwork) the provider's smoke network for the import's node; an
+// unset or refused one is recorded on the import instead.
+func (s *Service) AutoSmoke(ctx context.Context, id string, netFor func(ctx context.Context, serviceID, node string) (SmokeNetwork, error)) error {
 	rec, err := s.Receipts.Load(ctx, id)
 	if err != nil || rec == nil {
 		return err
 	}
-	net, err := netFor(ctx, rec.Payload.ServiceID)
+	net, err := netFor(ctx, rec.Payload.ServiceID, rec.Payload.Node)
 	if err == nil {
 		_, err = s.EnqueueSmoke(ctx, id, net, "system:auto-smoke", true)
 	}
@@ -117,15 +118,18 @@ func (s *Service) AutoSmoke(ctx context.Context, id string, netFor func(ctx cont
 
 // Lifecycle states of an imported template.
 const (
-	StateImporting          = "importing"
-	StateImportFailed       = "import_failed"
-	StateStaged             = "staged"
-	StateSmokeRunning       = "smoke_running"
-	StateSmokeFailed        = "smoke_failed"
-	StateReady              = "ready_to_publish"
-	StatePublishedDefault   = "published_default"
-	StatePublishedOlder     = "published_older"
-	StateWithdrawn          = "withdrawn"
+	StateImporting        = "importing"
+	StateImportFailed     = "import_failed"
+	StateStaged           = "staged"
+	StateSmokeRunning     = "smoke_running"
+	StateSmokeFailed      = "smoke_failed"
+	StateReady            = "ready_to_publish"
+	StatePublishedDefault = "published_default"
+	StatePublishedOlder   = "published_older"
+	StateWithdrawn        = "withdrawn"
+	// StateWithdrawIncomplete: the digest is blocklisted but this copy is not tagged withdrawn yet
+	// (its provider was unreachable or the tag write failed): repeating Withdraw finishes it.
+	StateWithdrawIncomplete = "withdraw_incomplete"
 	StateTemplateMissing    = "template_missing"
 	StateProviderUnreadable = "unknown"
 )
@@ -162,8 +166,13 @@ type TemplateActions struct {
 	Smoke    bool `json:"smoke"`
 	Publish  bool `json:"publish"`
 	Withdraw bool `json:"withdraw"`
-	// LastPublished: withdrawing it leaves the line without a published version (force needed).
-	LastPublished bool `json:"lastPublished"`
+	// LastPublished: withdrawing leaves some provider without a published version of the line
+	// (force + the slug needed); LastOnProviders names them.
+	LastPublished   bool     `json:"lastPublished"`
+	LastOnProviders []string `json:"lastOnProviders,omitempty"`
+	// NodesLosingLast ("<service>/<node>"): nodes left without a published version of the line
+	// (confirmNodeLoss needed).
+	NodesLosingLast []string `json:"nodesLosingLast,omitempty"`
 }
 
 // ProviderRows is what States needs per provider: its cluster's qemu rows (nil when unreadable).
@@ -210,30 +219,35 @@ func (s *Service) States(ctx context.Context, rows map[string]ProviderRows) ([]T
 		pr, ok := rows[p.ServiceID]
 		if !ok || pr.Rows == nil {
 			st.State = StateProviderUnreadable
-			if st.Withdrawal != nil {
-				st.State = StateWithdrawn
-			}
 			st.Warnings = append(st.Warnings, "the provider's cluster could not be read")
+			// A blocklisted digest whose copy here could not be checked: Withdraw may finish it.
+			st.Actions.Withdraw = st.Withdrawal != nil && s.VMEnabled
 			out = append(out, st)
 			continue
 		}
 		var row *pve.ClusterResource
 		for i := range pr.Rows {
-			if pr.Rows[i].VMID == rec.VMID && pr.Rows[i].Node == p.Node && copyOf(pr.Rows[i], p) {
-				row = &pr.Rows[i]
+			r := &pr.Rows[i]
+			if r.VMID == rec.VMID && r.Node == p.Node && (copyOf(*r, p) || r.NodeDown) {
+				row = r
 			}
 		}
 		if row == nil {
 			st.State = StateTemplateMissing
-			if st.Withdrawal != nil {
-				st.State = StateWithdrawn
-			}
+			out = append(out, st)
+			continue
+		}
+		if row.NodeDown {
+			st.State = StateProviderUnreadable
+			st.Warnings = append(st.Warnings, "the template's node is down")
+			st.Actions.Withdraw = st.Withdrawal != nil && s.VMEnabled
 			out = append(out, st)
 			continue
 		}
 		st.Tags = row.Tags
+		blocked := st.Withdrawal != nil
+		tagged := hasTagValue(row.Tags, pve.TagTemplateWithdrawn)
 		published := isPublished(row.Tags, p.Variant)
-		withdrawn := st.Withdrawal != nil || hasTagValue(row.Tags, pve.TagTemplateWithdrawn)
 		// Published versions of the line on the provider and which one is the default (newest
 		// pc-v- per node, the DiscoverTemplates rule; ties to the higher VMID).
 		def := lineDefault(pr.Rows, p, p.Node)
@@ -251,8 +265,15 @@ func (s *Service) States(ctx context.Context, rows map[string]ProviderRows) ([]T
 			}
 		}
 		switch {
-		case withdrawn:
+		case tagged && blocked:
 			st.State = StateWithdrawn
+		case blocked:
+			// The digest is withdrawn but THIS copy is not tagged yet (published or staged).
+			st.State = StateWithdrawIncomplete
+			st.Warnings = append(st.Warnings, "the digest is withdrawn but this copy is not: withdraw again to finish it")
+		case tagged:
+			st.State = StateWithdrawn
+			st.Warnings = append(st.Warnings, "tagged pc-tu-withdrawn but its digest is not on the blocklist: withdraw records it")
 		case published && def == rec.VMID:
 			st.State = StatePublishedDefault
 		case published:
@@ -266,21 +287,34 @@ func (s *Service) States(ctx context.Context, rows map[string]ProviderRows) ([]T
 		default:
 			st.State = StateStaged
 		}
+		done := tagged && blocked
 		st.Actions = TemplateActions{
-			Smoke:    !withdrawn && !smokeRunning && s.VMEnabled,
-			Publish:  !withdrawn && !published && rec.Smoke != nil && rec.Smoke.Result == SmokePass && s.VMEnabled,
-			Withdraw: !withdrawn && s.VMEnabled,
+			Smoke:    !blocked && !tagged && !smokeRunning && s.VMEnabled,
+			Publish:  !blocked && !tagged && !published && rec.Smoke != nil && rec.Smoke.Result == SmokePass && s.VMEnabled,
+			Withdraw: !done && s.VMEnabled,
 		}
-		if published && !withdrawn {
-			others := 0
-			for _, r := range pr.Rows {
-				if servesLine(r, p) && !copyOf(r, p) {
-					others++
+		if !done {
+			// The guards Withdraw evaluates, across every provider holding a copy of the artifact.
+			ids := make([]string, 0, len(rows))
+			for id := range rows {
+				ids = append(ids, id)
+			}
+			sort.Strings(ids)
+			for _, svc := range ids {
+				if rows[svc].Rows == nil {
+					continue
+				}
+				pl := planWithdraw(rows[svc].Rows, p)
+				if pl.lastOnProvider {
+					st.Actions.LastPublished = true
+					st.Actions.LastOnProviders = append(st.Actions.LastOnProviders, svc)
+				}
+				for _, n := range pl.nodesLosingLast {
+					st.Actions.NodesLosingLast = append(st.Actions.NodesLosingLast, svc+"/"+n)
 				}
 			}
-			st.Actions.LastPublished = others == 0
 		}
-		if p.Variant == "kubernetes" && published && !withdrawn {
+		if p.Variant == "kubernetes" && published && !tagged {
 			st.VersionsMap = fmt.Sprintf("%q: %q", p.KubernetesVersion, versionsMapValue(pr.Rows, p))
 		}
 		out = append(out, st)

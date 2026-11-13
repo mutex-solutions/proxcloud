@@ -49,7 +49,9 @@ type fakePVEAPI struct {
 	execs     map[int]map[string]any
 	nextPID   int
 	// knobs
-	ciStatus string
+	ciStatus      string
+	failTagWrites bool // a config write carrying tags answers 500 (unreachable/changed)
+	down          bool // the whole API answers 503 (cluster unreachable)
 }
 
 func newFakePVEAPI() *fakePVEAPI {
@@ -66,6 +68,10 @@ func (f *fakePVEAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	_ = r.ParseForm()
+	if f.down {
+		w.WriteHeader(503)
+		return
+	}
 	write := func(v any) { _ = json.NewEncoder(w).Encode(map[string]any{"data": v}) }
 	path := strings.TrimPrefix(r.URL.Path, "/api2/json")
 	switch {
@@ -93,6 +99,18 @@ func (f *fakePVEAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		write(map[string]any{"poolid": pool, "members": members})
+		return
+	case path == "/cluster/status":
+		write([]any{map[string]any{"type": "cluster", "quorate": 1}, map[string]any{"type": "node", "name": "pve1", "ip": "192.0.2.11"},
+			map[string]any{"type": "node", "name": "pve2", "ip": "192.0.2.12"}})
+		return
+	case strings.HasPrefix(path, "/nodes/") && strings.HasSuffix(path, "/network"):
+		ip := "192.0.2.11"
+		if strings.Contains(path, "/pve2/") {
+			ip = "192.0.2.12"
+		}
+		write([]any{map[string]any{"iface": "vmbr0", "address": ip, "cidr": ip + "/24", "gateway": "192.0.2.1"},
+			map[string]any{"iface": "vmbr9", "cidr": ""}})
 		return
 	case strings.Contains(path, "/tasks/") && strings.HasSuffix(path, "/status"):
 		write(map[string]any{"status": "stopped", "exitstatus": "OK"})
@@ -126,6 +144,11 @@ func (f *fakePVEAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		write(out)
 	case rest == "/config" && r.Method == http.MethodPost:
+		if f.failTagWrites && r.PostForm.Get("tags") != "" {
+			w.WriteHeader(500)
+			_, _ = w.Write([]byte(`{"data":null,"message":"got timeout"}`))
+			return
+		}
 		if d := r.PostForm.Get("digest"); d != "" && d != strconv.Itoa(vm.digest) {
 			w.WriteHeader(500)
 			_, _ = w.Write([]byte(`{"data":null,"message":"config digest mismatch"}`))
@@ -247,14 +270,16 @@ func (f *fakePVEAPI) smokeVMs() []int {
 // ── fixture ───────────────────────────────────────────────────────────────────────────────────
 
 type tlFixture struct {
-	db     *pgdoc.DB
-	jobs   *durablejobs.Store
-	svc    *templateupdates.Service
-	pv     *fakePVEAPI
-	client *pve.Client
-	router http.Handler
-	runner *templateupdates.Runner
-	audit  *audit.Service
+	pv2     *fakePVEAPI // provider svc-pve2 (second cluster)
+	db      *pgdoc.DB
+	jobs    *durablejobs.Store
+	svc     *templateupdates.Service
+	pv      *fakePVEAPI
+	client  *pve.Client
+	client2 *pve.Client
+	router  http.Handler
+	runner  *templateupdates.Runner
+	audit   *audit.Service
 }
 
 const tlIss, tlCid = "", ""
@@ -296,12 +321,26 @@ func newTLFixture(t *testing.T, vmEnabled bool) *tlFixture {
 			t.Fatal(err)
 		}
 	}
+	pv2 := newFakePVEAPI()
+	srv2 := httptest.NewServer(pv2)
+	t.Cleanup(srv2.Close)
+	c2, err := pve.New(pve.Config{APIURL: srv2.URL, TokenID: "proxcloud@pve!platform", Secret: "fixture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.C("externalService").InsertOne(ctx, pgdoc.M{"_id": "svc-pve2", "name": "Lab 2", "type": "CLOUD", "status": "PUBLIC",
+		"config": pgdoc.M{"provider": "proxmox", "apiUrl": srv2.URL, "region": "pve2", "templateSmoke": pgdoc.M{"bridge": "vmbr0", "vlan": 30}}}); err != nil {
+		t.Fatal(err)
+	}
 	esSvc := externalservice.NewService(externalservice.NewRepo(db), textcrypt.New("fixture"))
 	auditSvc := audit.NewService(audit.NewRepo(db), slog.Default())
 	svc := &templateupdates.Service{Token: func(context.Context) (string, string, error) { return "", "", nil }, Jobs: jobs, DB: db,
 		Receipts: rec, Smokes: smokes, VMEnabled: vmEnabled}
 	h := admin.NewHandler(admin.NewRepo(db), nil, nil, nil, nil, nil, nil, nil, auditSvc, esSvc, "", tlIss, tlCid)
-	h.SetProxmox(func(*externalservice.ExternalService) (*pve.Service, error) {
+	h.SetProxmox(func(es *externalservice.ExternalService) (*pve.Service, error) {
+		if es.ID == "svc-pve2" {
+			return &pve.Service{C: c2, ServiceID: "svc-pve2"}, nil
+		}
 		return &pve.Service{C: c, ServiceID: "svc-pve"}, nil
 	})
 	h.SetTemplateUpdates(svc)
@@ -322,21 +361,28 @@ func newTLFixture(t *testing.T, vmEnabled bool) *tlFixture {
 	pv.vms[9200] = &fakeVMRow{node: "pve1", template: true, cfg: map[string]string{"name": "pc-debian-13-202611010000", "pool": pve.TemplatePool,
 		"tags": "proxcloud;pc-public;pc-img-debian-13;pc-v-202611010000", "scsi0": "local-zfs:base-9200-disk-0,size=3G"}}
 	pv.vms[101] = &fakeVMRow{node: "pve1", running: true, cfg: map[string]string{"name": "tenant-vm", "pool": "pc-tenant1", "tags": "proxcloud"}}
-	return &tlFixture{db: db, jobs: jobs, svc: svc, pv: pv, client: c, router: r, runner: runner, audit: auditSvc}
+	pv2.vms[9200] = &fakeVMRow{node: "pve1", template: true, cfg: map[string]string{"name": "pc-debian-13-202611010000", "pool": pve.TemplatePool,
+		"tags": "proxcloud;pc-public;pc-img-debian-13;pc-v-202611010000", "scsi0": "local-zfs:base-9200-disk-0,size=3G"}}
+	return &tlFixture{db: db, jobs: jobs, svc: svc, pv: pv, pv2: pv2, client: c, client2: c2, router: r, runner: runner, audit: auditSvc}
 }
 
 // addImport records a finished (staged) import of p as template vmid, like the import job leaves it.
 func (f *tlFixture) addImport(t *testing.T, p templateupdates.VMPayload, vmid int) string {
+	t.Helper()
+	return f.addImportOn(t, f.pv, p, vmid)
+}
+
+func (f *tlFixture) addImportOn(t *testing.T, pv *fakePVEAPI, p templateupdates.VMPayload, vmid int) string {
 	t.Helper()
 	id := uuid.NewString()
 	if err := f.svc.Receipts.Save(context.Background(), &templateupdates.Receipt{ID: id, Kind: "vm", Payload: p, RequestedBy: "admin-sub",
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(), Step: templateupdates.StepSucceeded, VMID: vmid}); err != nil {
 		t.Fatal(err)
 	}
-	f.pv.mu.Lock()
-	f.pv.vms[vmid] = &fakeVMRow{node: "pve1", template: true, cfg: map[string]string{"name": templateupdates.TemplateName(p), "pool": pve.TemplatePool,
+	pv.mu.Lock()
+	pv.vms[vmid] = &fakeVMRow{node: p.Node, template: true, cfg: map[string]string{"name": templateupdates.TemplateName(p), "pool": pve.TemplatePool,
 		"tags": templateupdates.TemplateTags(p), "scsi0": fmt.Sprintf("local-zfs:base-%d-disk-0,discard=on,size=20G", vmid)}}
-	f.pv.mu.Unlock()
+	pv.mu.Unlock()
 	return id
 }
 
@@ -400,7 +446,12 @@ func (f *tlFixture) runSmoke(t *testing.T) {
 
 func (f *tlFixture) catalogDefault(t *testing.T, slug string) int {
 	t.Helper()
-	found, err := f.client.Templates(context.Background())
+	return catalogDefaultOn(t, f.client, slug)
+}
+
+func catalogDefaultOn(t *testing.T, c *pve.Client, slug string) int {
+	t.Helper()
+	found, err := c.Templates(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -616,11 +667,8 @@ func TestTemplateWithdrawLastVersionGuard(t *testing.T) {
 	if w := f.do("admin-sub", "POST", "/admin/template-updates/templates/"+id+"/publish", map[string]any{"confirmDigest": p.Digest}); w.Code != 409 || errCode(w) != "smoke_missing" {
 		t.Fatalf("publish on another VMID's PASS: %d %s", w.Code, w.Body)
 	}
-	// A recorded PASS for exactly this template + digest, then publish.
-	if err := f.svc.Smokes.SaveSmoke(ctx, &templateupdates.SmokeReceipt{ID: uuid.NewString(), ImportID: id, Payload: sp, CreatedAt: now, Step: templateupdates.SmokeFinished,
-		Result: templateupdates.SmokePass, FinishedAt: &now, Cleaned: true}); err != nil {
-		t.Fatal(err)
-	}
+	// A recorded PASS for exactly this template + digest (and its current config), then publish.
+	f.recordPass(t, id, p, 9400, f.pv)
 	base := "/admin/template-updates/templates/" + id
 	if w := f.do("admin-sub", "POST", base+"/publish", map[string]any{"confirmDigest": p.Digest}); w.Code != 200 {
 		t.Fatalf("publish: %d %s", w.Code, w.Body)
@@ -767,7 +815,7 @@ func TestTemplateAutoSmoke(t *testing.T) {
 	f := newTLFixture(t, true)
 	p := tlPayload("debian-13", "20261114000000", "3")
 	id := f.addImport(t, p, 9800)
-	err := f.svc.AutoSmoke(ctx, id, func(context.Context, string) (templateupdates.SmokeNetwork, error) {
+	err := f.svc.AutoSmoke(ctx, id, func(context.Context, string, string) (templateupdates.SmokeNetwork, error) {
 		return templateupdates.SmokeNetwork{}, nil
 	})
 	if err == nil {
@@ -777,7 +825,7 @@ func TestTemplateAutoSmoke(t *testing.T) {
 	if sm, _ := st["smoke"].(map[string]any); sm["code"] != "smoke_network_unset" || st["state"] != templateupdates.StateStaged {
 		t.Fatalf("state %v", st)
 	}
-	if err := f.svc.AutoSmoke(ctx, id, func(context.Context, string) (templateupdates.SmokeNetwork, error) {
+	if err := f.svc.AutoSmoke(ctx, id, func(context.Context, string, string) (templateupdates.SmokeNetwork, error) {
 		return templateupdates.SmokeNetwork{Bridge: "vmbr0"}, nil
 	}); err != nil {
 		t.Fatal(err)
@@ -791,5 +839,268 @@ func TestTemplateAutoSmoke(t *testing.T) {
 	}
 	if left := f.pv.smokeVMs(); len(left) != 0 {
 		t.Fatalf("smoke VM left: %v", left)
+	}
+}
+
+// B1: the same digest imported on two providers. Withdraw takes every copy on BOTH out of the
+// catalog; with one provider failing, the result is incomplete, that copy shows
+// "withdraw_incomplete" with Withdraw still enabled, and the page action finishes it.
+func TestTemplateWithdrawTwoProvidersPartialThenRetry(t *testing.T) {
+	ctx := context.Background()
+	f := newTLFixture(t, true)
+	p1 := tlPayload("debian-13", "20261115000000", "2")
+	p2 := p1
+	p2.ServiceID = "svc-pve2"
+	id1 := f.addImport(t, p1, 9300)
+	id2 := f.addImportOn(t, f.pv2, p2, 9310)
+	// Both published (a PASS each, recorded as the smoke job would leave it).
+	for _, c := range []struct {
+		id   string
+		p    templateupdates.VMPayload
+		vmid int
+		pv   *fakePVEAPI
+	}{{id1, p1, 9300, f.pv}, {id2, p2, 9310, f.pv2}} {
+		f.recordPass(t, c.id, c.p, c.vmid, c.pv)
+		if w := f.do("admin-sub", "POST", "/admin/template-updates/templates/"+c.id+"/publish", map[string]any{"confirmDigest": p1.Digest}); w.Code != 200 {
+			t.Fatalf("publish %s: %d %s", c.p.ServiceID, w.Code, w.Body)
+		}
+	}
+	if catalogDefaultOn(t, f.client, "debian-13") != 9300 || catalogDefaultOn(t, f.client2, "debian-13") != 9310 {
+		t.Fatal("not published on both providers")
+	}
+	// Provider 2's tag writes fail: the withdraw (started from provider 1's row) blocklists the digest,
+	// withdraws provider 1 and reports provider 2 incomplete.
+	f.pv2.mu.Lock()
+	f.pv2.failTagWrites = true
+	f.pv2.mu.Unlock()
+	body := map[string]any{"reason": "bad kernel on both clusters", "confirmDigest": p1.Digest}
+	w := f.do("admin-sub", "POST", "/admin/template-updates/templates/"+id1+"/withdraw", body)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"complete":false`) {
+		t.Fatalf("partial withdraw: %d %s", w.Code, w.Body)
+	}
+	var res struct {
+		Data templateupdates.LifecycleResult `json:"data"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &res)
+	statuses := map[string]string{}
+	for _, po := range res.Data.Providers {
+		statuses[po.ServiceID] = po.Status
+	}
+	if statuses["svc-pve"] != "withdrawn" || statuses["svc-pve2"] != "incomplete" {
+		t.Fatalf("per-provider outcome: %+v", res.Data.Providers)
+	}
+	if catalogDefaultOn(t, f.client, "debian-13") != 9200 {
+		t.Fatal("provider 1 still serves the withdrawn version")
+	}
+	if catalogDefaultOn(t, f.client2, "debian-13") != 9310 {
+		t.Fatal("test precondition: provider 2's write was meant to fail")
+	}
+	st1, st2 := f.state(t, id1), f.state(t, id2)
+	if st1["state"] != templateupdates.StateWithdrawn || st1["actions"].(map[string]any)["withdraw"] == true {
+		t.Fatalf("provider 1 row: %v", st1)
+	}
+	if st2["state"] != templateupdates.StateWithdrawIncomplete || st2["actions"].(map[string]any)["withdraw"] != true ||
+		st2["actions"].(map[string]any)["publish"] == true || st2["actions"].(map[string]any)["smoke"] == true {
+		t.Fatalf("provider 2 row: %v", st2)
+	}
+	// A blocklisted digest is never re-published, even on the provider whose copy is still public.
+	if w := f.do("admin-sub", "POST", "/admin/template-updates/templates/"+id2+"/publish", map[string]any{"confirmDigest": p1.Digest}); w.Code != 409 {
+		t.Fatalf("publish of a blocklisted digest: %d", w.Code)
+	}
+	// Retry from the page action on the incomplete row: it finishes provider 2.
+	f.pv2.mu.Lock()
+	f.pv2.failTagWrites = false
+	f.pv2.mu.Unlock()
+	w = f.do("admin-sub", "POST", "/admin/template-updates/templates/"+id2+"/withdraw", map[string]any{"reason": "finish the withdraw", "confirmDigest": p1.Digest})
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"complete":true`) {
+		t.Fatalf("retry: %d %s", w.Code, w.Body)
+	}
+	if catalogDefaultOn(t, f.client2, "debian-13") != 9200 {
+		t.Fatal("provider 2 still serves the withdrawn version after the retry")
+	}
+	if st := f.state(t, id2); st["state"] != templateupdates.StateWithdrawn || st["actions"].(map[string]any)["withdraw"] == true {
+		t.Fatalf("provider 2 row after retry: %v", st)
+	}
+	if b, _ := f.svc.Receipts.Blocked(ctx, p1.Digest); b == nil || b.Reason != "bad kernel on both clusters" {
+		t.Fatalf("blocklist entry: %+v", b)
+	}
+	// A provider whose cluster is unreachable: nothing changes there, the withdraw is incomplete.
+	p3 := tlPayload("debian-13", "20261116000000", "1")
+	p4 := p3
+	p4.ServiceID = "svc-pve2"
+	id3 := f.addImport(t, p3, 9320)
+	f.addImportOn(t, f.pv2, p4, 9330)
+	f.pv2.mu.Lock()
+	f.pv2.down = true
+	f.pv2.mu.Unlock()
+	w = f.do("admin-sub", "POST", "/admin/template-updates/templates/"+id3+"/withdraw", map[string]any{"reason": "unreachable provider case", "confirmDigest": p3.Digest})
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"unreachable"`) || !strings.Contains(w.Body.String(), `"complete":false`) {
+		t.Fatalf("withdraw with an unreachable provider: %d %s", w.Code, w.Body)
+	}
+}
+
+// The last-version guard is evaluated on every provider: withdrawing from provider 1 is refused when
+// provider 2 would lose its only published version, even though provider 1 keeps an older one.
+func TestTemplateWithdrawGuardAcrossProviders(t *testing.T) {
+	f := newTLFixture(t, true)
+	p1 := tlPayload("debian-12", "20261115000000", "b")
+	p2 := p1
+	p2.ServiceID = "svc-pve2"
+	id1 := f.addImport(t, p1, 9300)
+	id2 := f.addImportOn(t, f.pv2, p2, 9310)
+	f.pv.mu.Lock()
+	f.pv.vms[9201] = &fakeVMRow{node: "pve1", template: true, cfg: map[string]string{"name": "pc-debian-12-202611010000", "pool": pve.TemplatePool,
+		"tags": "proxcloud;pc-public;pc-img-debian-12;pc-v-202611010000", "scsi0": "x,size=3G"}}
+	f.pv.mu.Unlock()
+	f.recordPass(t, id1, p1, 9300, f.pv)
+	f.recordPass(t, id2, p2, 9310, f.pv2)
+	for _, id := range []string{id1, id2} {
+		if w := f.do("admin-sub", "POST", "/admin/template-updates/templates/"+id+"/publish", map[string]any{"confirmDigest": p1.Digest}); w.Code != 200 {
+			t.Fatalf("publish: %d %s", w.Code, w.Body)
+		}
+	}
+	if acts := f.state(t, id1)["actions"].(map[string]any); acts["lastPublished"] != true {
+		t.Fatalf("row of provider 1 does not show provider 2's last-version consequence: %v", acts)
+	}
+	body := map[string]any{"reason": "regression found in testing", "confirmDigest": p1.Digest}
+	if w := f.do("admin-sub", "POST", "/admin/template-updates/templates/"+id1+"/withdraw", body); w.Code != 409 || errCode(w) != "last_published_version" || !strings.Contains(w.Body.String(), "svc-pve2") {
+		t.Fatalf("guard across providers: %d %s", w.Code, w.Body)
+	}
+	body["force"], body["confirmLast"] = true, "debian-12"
+	if w := f.do("admin-sub", "POST", "/admin/template-updates/templates/"+id1+"/withdraw", body); w.Code != 200 {
+		t.Fatalf("forced: %d %s", w.Code, w.Body)
+	}
+	if catalogDefaultOn(t, f.client, "debian-12") != 9201 || catalogDefaultOn(t, f.client2, "debian-12") != 0 {
+		t.Fatal("catalogs after the forced withdraw")
+	}
+}
+
+// A node left without a published version of the line needs confirmNodeLoss.
+func TestTemplateWithdrawNodeLossConfirmation(t *testing.T) {
+	f := newTLFixture(t, true)
+	p := tlPayload("debian-13", "20261117000000", "c")
+	pB := p
+	pB.Node = "pve2"
+	id := f.addImport(t, p, 9300)
+	idB := f.addImport(t, pB, 9301) // the same artifact imported on node pve2 (no other version there)
+	f.recordPass(t, id, p, 9300, f.pv)
+	f.recordPass(t, idB, pB, 9301, f.pv)
+	for _, i := range []string{id, idB} {
+		if w := f.do("admin-sub", "POST", "/admin/template-updates/templates/"+i+"/publish", map[string]any{"confirmDigest": p.Digest}); w.Code != 200 {
+			t.Fatalf("publish: %d %s", w.Code, w.Body)
+		}
+	}
+	if acts := f.state(t, id)["actions"].(map[string]any); fmt.Sprint(acts["nodesLosingLast"]) != "[svc-pve/pve2]" {
+		t.Fatalf("actions: %v", acts)
+	}
+	body := map[string]any{"reason": "node loss confirmation", "confirmDigest": p.Digest}
+	if w := f.do("admin-sub", "POST", "/admin/template-updates/templates/"+id+"/withdraw", body); w.Code != 409 || errCode(w) != "nodes_losing_last_copy" {
+		t.Fatalf("node loss unconfirmed: %d %s", w.Code, w.Body)
+	}
+	body["confirmNodeLoss"] = true
+	if w := f.do("admin-sub", "POST", "/admin/template-updates/templates/"+id+"/withdraw", body); w.Code != 200 || !strings.Contains(w.Body.String(), `"complete":true`) {
+		t.Fatalf("confirmed: %d %s", w.Code, w.Body)
+	}
+	for _, vmid := range []int{9300, 9301} {
+		if tags := f.pv.tags(vmid); !strings.Contains(tags, "pc-tu-withdrawn") || strings.Contains(tags, "pc-public") {
+			t.Fatalf("VM %d: %s", vmid, tags)
+		}
+	}
+}
+
+// S6: any config change of the template after its smoke test invalidates the PASS.
+func TestTemplatePublishRequiresUnchangedTemplate(t *testing.T) {
+	f := newTLFixture(t, true)
+	p := tlPayload("debian-13", "20261118000000", "d")
+	id := f.addImport(t, p, 9300)
+	if w := f.do("admin-sub", "POST", "/admin/template-updates/templates/"+id+"/smoke", nil); w.Code != 200 {
+		t.Fatalf("smoke: %d %s", w.Code, w.Body)
+	}
+	f.runSmoke(t)
+	f.pv.mu.Lock()
+	f.pv.vms[9300].cfg["memory"] = "8192" // someone edits the template after its PASS
+	f.pv.vms[9300].digest++
+	f.pv.mu.Unlock()
+	if w := f.do("admin-sub", "POST", "/admin/template-updates/templates/"+id+"/publish", map[string]any{"confirmDigest": p.Digest}); w.Code != 409 || errCode(w) != "template_changed_since_smoke" {
+		t.Fatalf("publish after a change: %d %s", w.Code, w.Body)
+	}
+	if w := f.do("admin-sub", "POST", "/admin/template-updates/templates/"+id+"/smoke", nil); w.Code != 200 {
+		t.Fatalf("second smoke: %d %s", w.Code, w.Body)
+	}
+	f.runSmoke(t)
+	if w := f.do("admin-sub", "POST", "/admin/template-updates/templates/"+id+"/publish", map[string]any{"confirmDigest": p.Digest}); w.Code != 200 {
+		t.Fatalf("publish after a fresh PASS: %d %s", w.Code, w.Body)
+	}
+}
+
+// Smoke on an untagged management bridge is refused before anything is queued.
+func TestTemplateSmokeRefusesManagementBridge(t *testing.T) {
+	ctx := context.Background()
+	f := newTLFixture(t, true)
+	p := tlPayload("debian-13", "20261119000000", "e")
+	id := f.addImport(t, p, 9300)
+	if _, err := f.db.C("externalService").SetByID(ctx, "svc-pve", pgdoc.M{"config.templateSmoke": pgdoc.M{"bridge": "vmbr0"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if w := f.do("admin-sub", "POST", "/admin/template-updates/templates/"+id+"/smoke", nil); w.Code != 409 || errCode(w) != "smoke_network_management_bridge" {
+		t.Fatalf("management bridge: %d %s", w.Code, w.Body)
+	}
+	if all, _ := f.svc.Smokes.ForTemplate(ctx, "svc-pve", "pve1", 9300, p.Digest); len(all) != 0 {
+		t.Fatalf("a smoke was queued: %+v", all)
+	}
+}
+
+// recordPass stores a PASS for exactly that template as the smoke job would (with its config digest).
+func (f *tlFixture) recordPass(t *testing.T, importID string, p templateupdates.VMPayload, vmid int, pv *fakePVEAPI) {
+	t.Helper()
+	pv.mu.Lock()
+	digest := strconv.Itoa(pv.vms[vmid].digest)
+	pv.mu.Unlock()
+	now := time.Now().UTC()
+	sp := templateupdates.SmokePayload{Version: 1, ImportID: importID, Package: p.Package, Tag: p.Tag, Digest: p.Digest, OS: p.OS, Variant: p.Variant,
+		BuildVersion: p.BuildVersion, ServiceID: p.ServiceID, Node: p.Node, TemplateVMID: vmid, DiskStorage: p.DiskStorage, Network: templateupdates.SmokeNetwork{Bridge: "vmbr9"}}
+	if err := f.svc.Smokes.SaveSmoke(context.Background(), &templateupdates.SmokeReceipt{ID: uuid.NewString(), ImportID: importID, Payload: sp, CreatedAt: now,
+		Step: templateupdates.SmokeFinished, Result: templateupdates.SmokePass, FinishedAt: &now, Cleaned: true, TemplateConfigDigest: digest}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// S4: withdrawing a Kubernetes node image warns that the kamaji version map names VMIDs explicitly
+// and gives the replacement config.cluster.versions line (here: the pipeline template left).
+func TestTemplateWithdrawK8sGivesVersionsLine(t *testing.T) {
+	f := newTLFixture(t, true)
+	p := templateupdates.VMPayload{Version: 1, Package: "proxcloud-vm-ubuntu-2604-k8s", Tag: "ubuntu-2604-k8s-1.35.10-20261112010203-cccccccccccc",
+		Digest: "sha256:" + strings.Repeat("f", 64), DiskDigest: "sha256:" + strings.Repeat("e", 64), DiskBytes: 4096, VirtualSizeBytes: 20 << 30,
+		OS: "ubuntu-2604", Variant: "kubernetes", KubernetesVersion: "1.35.10", BuildVersion: "20261112010203", ServiceID: "svc-pve", Node: "pve1",
+		ImportStorage: "nas-import", DiskStorage: "local-zfs"}
+	id := f.addImport(t, p, 9500)
+	f.pv.mu.Lock()
+	f.pv.vms[9210] = &fakeVMRow{node: "pve1", template: true, cfg: map[string]string{"name": "ubuntu-2604-kube-v1.35.10", "pool": pve.TemplatePool,
+		"tags": "proxcloud;pc-k8s;pc-k8s-1-35-10;pc-k8s-os-ubuntu-2604", "scsi0": "x,size=20G"}}
+	f.pv.mu.Unlock()
+	f.recordPass(t, id, p, 9500, f.pv)
+	if w := f.do("admin-sub", "POST", "/admin/template-updates/templates/"+id+"/publish", map[string]any{"confirmDigest": p.Digest}); w.Code != 200 {
+		t.Fatalf("publish: %d %s", w.Code, w.Body)
+	}
+	if tags := f.pv.tags(9500); strings.Contains(tags, "pc-public") || !strings.Contains(tags, "pc-tu-k8s-public") {
+		t.Fatalf("k8s publish tags: %s", tags)
+	}
+	if catalogDefaultOn(t, f.client, "ubuntu-2604") != 0 {
+		t.Fatal("a node image entered the tenant catalog")
+	}
+	if st := f.state(t, id); st["versionsMapLine"] != `"1.35.10": "pve1=9500"` {
+		t.Fatalf("versions line while published: %v", st["versionsMapLine"])
+	}
+	w := f.do("admin-sub", "POST", "/admin/template-updates/templates/"+id+"/withdraw", map[string]any{"reason": "kubelet crash loop on boot", "confirmDigest": p.Digest})
+	if w.Code != 200 {
+		t.Fatalf("withdraw: %d %s", w.Code, w.Body)
+	}
+	var res struct {
+		Data templateupdates.LifecycleResult `json:"data"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &res)
+	if len(res.Data.Providers) != 1 || res.Data.Providers[0].VersionsMapLine != `"1.35.10": "pve1=9210"` ||
+		!strings.Contains(strings.Join(res.Data.Warnings, " "), "names template VMIDs explicitly") {
+		t.Fatalf("k8s withdraw result: %+v", res.Data)
 	}
 }

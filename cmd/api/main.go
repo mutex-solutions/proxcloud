@@ -1046,12 +1046,17 @@ func run() error {
 			},
 			// Every finished import gets its automatic smoke test.
 			OnImported: func(ctx context.Context, id string) {
-				err := tuSvc.AutoSmoke(ctx, id, func(ctx context.Context, serviceID string) (templateupdates.SmokeNetwork, error) {
+				err := tuSvc.AutoSmoke(ctx, id, func(ctx context.Context, serviceID, node string) (templateupdates.SmokeNetwork, error) {
 					es, err := esSvc.Get(ctx, serviceID)
-					if err != nil || es == nil {
+					if err != nil || es == nil || !es.IsProxmox() {
+						return templateupdates.SmokeNetwork{}, &templateupdates.LifecycleError{Status: 409, Code: "provider_missing", Message: "The import's Proxmox provider no longer exists"}
+					}
+					ps, err := pveWithHolderLock(es)
+					if err != nil {
 						return templateupdates.SmokeNetwork{}, err
 					}
-					return admin.SmokeNetworkOf(es), nil
+					net := admin.SmokeNetworkOf(es)
+					return net, templateupdates.CheckSmokeNetwork(ctx, ps.C, node, net)
 				})
 				if err != nil {
 					log.Warn("template update: automatic smoke test not queued", "job", id, "err", err)

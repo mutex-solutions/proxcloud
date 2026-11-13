@@ -55,7 +55,9 @@ const (
 	SmokeFail = "FAIL"
 )
 
-// Smoke failure codes (fixed; the message is a fixed text too, never a provider/guest string).
+// Smoke failure codes (fixed). The message is composed by this package from fixed text plus bounded,
+// clipped values it observed (OS id/version, cloud-init status, sizes, kubelet version) — never a
+// Proxmox error string or free guest output.
 const (
 	SmokeTemplateMismatch  = "template_mismatch"
 	SmokeDigestWithdrawn   = "digest_withdrawn"
@@ -96,7 +98,8 @@ var bridgeRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.-]{0,31}$`)
 var ErrSmokeNetworkUnset = &LifecycleError{Status: http.StatusConflict, Code: "smoke_network_unset",
 	Message: "The provider has no smoke-test network: set config.templateSmoke (bridge, optional vlan, ip/gateway or DHCP) on the Proxmox provider first"}
 
-// Validate checks the network; an unset bridge is ErrSmokeNetworkUnset.
+// Validate checks the network; an unset bridge is ErrSmokeNetworkUnset. IPv4 only (cloud-init gets
+// ipconfig0 ip=/gw=; an IPv6-only smoke network is not supported); addresses without zones.
 func (n SmokeNetwork) Validate() error {
 	if strings.TrimSpace(n.Bridge) == "" {
 		return ErrSmokeNetworkUnset
@@ -112,20 +115,50 @@ func (n SmokeNetwork) Validate() error {
 	}
 	if n.IP != "" {
 		pfx, err := netip.ParsePrefix(n.IP)
-		if err != nil || !pfx.Addr().Is4() && !pfx.Addr().Is6() {
-			return bad("ip must be an address in CIDR form, e.g. 192.0.2.50/24 (empty = DHCP)")
+		if err != nil || !pfx.Addr().Is4() || pfx.Addr() != pfx.Addr().Unmap() || pfx.Bits() < 8 || pfx.Bits() > 30 || pfx.Addr() == pfx.Masked().Addr() {
+			return bad("ip must be an IPv4 host address in CIDR form, /8 to /30, e.g. 192.0.2.50/24 (empty = DHCP; IPv6 is not supported)")
 		}
 		gw, err := netip.ParseAddr(n.Gateway)
-		if err != nil || !pfx.Masked().Contains(gw) {
-			return bad("gateway must be an address inside ip's network")
+		if err != nil || !gw.Is4() || gw.Zone() != "" || !pfx.Masked().Contains(gw) || gw == pfx.Addr() {
+			return bad("gateway must be another IPv4 address inside ip's network")
 		}
 	} else if n.Gateway != "" {
 		return bad("gateway needs ip (DHCP supplies its own)")
 	}
 	if n.Nameserver != "" {
-		if _, err := netip.ParseAddr(n.Nameserver); err != nil {
-			return bad("nameserver must be an address")
+		ns, err := netip.ParseAddr(n.Nameserver)
+		if err != nil || ns.Zone() != "" || !ns.Is4() && !ns.Is6() {
+			return bad("nameserver must be a plain IP address (no zone)")
 		}
+	}
+	return nil
+}
+
+// BridgeReader reads the bridges that carry a node's own address or default gateway
+// (*pve.Client.ManagementBridges).
+type BridgeReader interface {
+	ManagementBridges(ctx context.Context, nodes ...string) (map[string]string, error)
+}
+
+// CheckSmokeNetwork validates n for a smoke test on node and refuses an UNTAGGED smoke network on a
+// bridge that carries the node's management address or default gateway (as public networks are
+// refused, pveadmin.go): the test VM would sit on the hypervisor's L2. A VLAN-tagged network on such
+// a bridge is its own L2 segment and is allowed (the image pipeline builds the same way).
+func CheckSmokeNetwork(ctx context.Context, c BridgeReader, node string, n SmokeNetwork) error {
+	if err := n.Validate(); err != nil {
+		return err
+	}
+	if n.VLAN > 0 {
+		return nil
+	}
+	mgmt, err := c.ManagementBridges(ctx, node)
+	if err != nil {
+		return &LifecycleError{Status: http.StatusBadGateway, Code: "smoke_network_unverified",
+			Message: "The node's networks could not be read to check the smoke bridge; nothing was started — try again"}
+	}
+	if on, ok := mgmt[n.Bridge]; ok {
+		return &LifecycleError{Status: http.StatusConflict, Code: "smoke_network_management_bridge",
+			Message: fmt.Sprintf("config.templateSmoke: bridge %s carries node %s's management address; use a dedicated bridge or a VLAN tag (vlan) for the smoke network", n.Bridge, on)}
 	}
 	return nil
 }
@@ -252,16 +285,19 @@ type SmokeReceipt struct {
 	VMID        int          `json:"vmid,omitempty"` // the test VM
 	// KeyFingerprint is the SHA-256 fingerprint of the ephemeral SSH key the test VM got (the key
 	// itself lived only in memory).
-	KeyFingerprint string      `json:"keyFingerprint,omitempty"`
-	StartedAt      *time.Time  `json:"startedAt,omitempty"`
-	Result         string      `json:"result,omitempty"` // PASS | FAIL | "" (not decided)
-	Code           string      `json:"code,omitempty"`
-	Message        string      `json:"message,omitempty"`
-	FinishedAt     *time.Time  `json:"finishedAt,omitempty"` // when the result was recorded
-	CleanedAt      *time.Time  `json:"cleanedAt,omitempty"`  // when the test VM was confirmed gone
-	Checks         SmokeChecks `json:"checks"`
-	Warnings       []string    `json:"warnings,omitempty"`
-	Cleaned        bool        `json:"cleaned,omitempty"`
+	KeyFingerprint string `json:"keyFingerprint,omitempty"`
+	// TemplateConfigDigest is the template's PVE config digest when the clone was made: a PASS
+	// vouches for exactly that configuration, and Publish requires the template to still have it.
+	TemplateConfigDigest string      `json:"templateConfigDigest,omitempty"`
+	StartedAt            *time.Time  `json:"startedAt,omitempty"`
+	Result               string      `json:"result,omitempty"` // PASS | FAIL | "" (not decided)
+	Code                 string      `json:"code,omitempty"`
+	Message              string      `json:"message,omitempty"`
+	FinishedAt           *time.Time  `json:"finishedAt,omitempty"` // when the result was recorded
+	CleanedAt            *time.Time  `json:"cleanedAt,omitempty"`  // when the test VM was confirmed gone
+	Checks               SmokeChecks `json:"checks"`
+	Warnings             []string    `json:"warnings,omitempty"`
+	Cleaned              bool        `json:"cleaned,omitempty"`
 }
 
 // SmokeSummary is the latest smoke of an import, kept on the import receipt for the page.
@@ -461,7 +497,12 @@ func (x *SmokeExecutor) finishCleanup(ctx context.Context, f Fence, jobID string
 	if warns := x.sweep(ctx, f, jobID, p, r.VMID); stopped(warns) {
 		return ErrStopped
 	} else if len(warns) > 0 {
-		r.Warnings = append(r.Warnings, warns...)
+		// A leftover test VM could not be removed: the result stands, the receipt stays uncleaned and
+		// the attempt is retried (then the dead-job pass) until it is gone.
+		if err := x.checkpoint(ctx, f, r, SmokeCleaning, func(n *SmokeReceipt) { n.Warnings = mergeWarnings(n.Warnings, warns) }); err != nil {
+			return err
+		}
+		return errors.New("a leftover test VM of this smoke job could not be removed yet")
 	}
 	now := x.now()
 	return x.checkpoint(ctx, f, r, SmokeFinished, func(n *SmokeReceipt) { n.CleanedAt, n.Cleaned = &now, true })
@@ -499,6 +540,9 @@ func (x *SmokeExecutor) test(ctx context.Context, f Fence, jobID string, p Smoke
 	if err != nil {
 		return checks, err
 	}
+	if tcfg.Str("digest") == "" {
+		return checks, failed(SmokeTemplateMismatch, "the template's configuration digest could not be read")
+	}
 	base, ok := pve.DiskSizeBytes(tcfg.Str("scsi0"))
 	if !ok {
 		return checks, failed(SmokeTemplateMismatch, "the template has no readable scsi0 size")
@@ -516,7 +560,9 @@ func (x *SmokeExecutor) test(ctx context.Context, f Fence, jobID string, p Smoke
 		if err != nil {
 			return checks, err
 		}
-		if err := x.checkpoint(ctx, f, r, SmokeCloning, func(n *SmokeReceipt) { n.VMID, n.KeyFingerprint, n.StartedAt = id, fp, &started }); err != nil {
+		if err := x.checkpoint(ctx, f, r, SmokeCloning, func(n *SmokeReceipt) {
+			n.VMID, n.KeyFingerprint, n.StartedAt, n.TemplateConfigDigest = id, fp, &started, tcfg.Str("digest")
+		}); err != nil {
 			return checks, err
 		}
 		if err := x.guard(ctx, f); err != nil {
@@ -564,7 +610,9 @@ func (x *SmokeExecutor) test(ctx context.Context, f Fence, jobID string, p Smoke
 	if err := x.guard(ctx, f); err != nil {
 		return checks, err
 	}
-	up, err := x.PVE.SetVMConfig(ctx, p.Node, r.VMID, params, "cipassword")
+	// No password, and no custom cloud-init snippets the template may reference: the test VM gets
+	// exactly the generated cloud-init.
+	up, err := x.PVE.SetVMConfig(ctx, p.Node, r.VMID, params, "cipassword", "cicustom")
 	if err == nil {
 		err = x.wait(ctx, up)
 	}
@@ -743,6 +791,16 @@ func (x *SmokeExecutor) rootFSBytes(ctx context.Context, f Fence, p SmokePayload
 	return n, nil
 }
 
+// mergeWarnings appends warnings not already present (a retried cleanup must not repeat them).
+func mergeWarnings(have, add []string) []string {
+	for _, w := range add {
+		if !contains(have, w) {
+			have = append(have, w)
+		}
+	}
+	return have
+}
+
 // parseCloudInitStatus reads `cloud-init status --format json` ({"status": "..."}); output is bounded.
 func parseCloudInitStatus(out string) (string, error) {
 	if len(out) > 64<<10 {
@@ -846,8 +904,10 @@ func ephemeralKey() (pub, fingerprint string, err error) {
 }
 
 // owned reports whether vmid on the job's node is this job's test VM: a pool pc-templates member on
-// that node (read from /pools), not a template, carrying the owner tag — or, between the clone and
-// its first config write, this job's name.
+// that node (read from /pools), not a template, named exactly SmokeVMName(jobID), and either carrying
+// the job's owner tag or — only in the window between the clone and its first config write, while
+// it still carries the template's copied tags — no pc-tu-smoke tag at all. A manual clone of a test
+// VM (another name) or a test VM of another job (another owner tag) is never this job's.
 func (x *SmokeExecutor) owned(ctx context.Context, jobID string, p SmokePayload, vmid int) (exists, own bool, cfg pve.VMConfig, err error) {
 	cfg, err = x.PVE.GetVMConfig(ctx, p.Node, vmid)
 	if pve.IsNotFound(err) {
@@ -866,8 +926,24 @@ func (x *SmokeExecutor) owned(ctx context.Context, jobID string, p SmokePayload,
 			inPool = inPool || m.Type == "qemu" && m.VMID == vmid && m.Node == p.Node
 		}
 	}
-	mine := hasTagValue(cfg.Str("tags"), SmokeOwnerTag(jobID)) || cfg.Str("name") == SmokeVMName(jobID)
-	return true, inPool && !isTemplate(cfg) && mine, cfg, nil
+	return true, inPool && !isTemplate(cfg) && smokeMine(cfg, jobID), cfg, nil
+}
+
+// smokeMine is the name + tag half of the ownership proof.
+func smokeMine(cfg pve.VMConfig, jobID string) bool {
+	if cfg.Str("name") != SmokeVMName(jobID) {
+		return false
+	}
+	tags := cfg.Str("tags")
+	if hasTagValue(tags, SmokeOwnerTag(jobID)) {
+		return true
+	}
+	for _, t := range splitTags(tags) {
+		if strings.HasPrefix(t, "pc-tu-smoke") {
+			return false // configured by (or copied from) another smoke job
+		}
+	}
+	return true // the clone→config window: still the template's copied tags
 }
 
 // destroyOwned stops and destroys vmid only after re-reading that it is this job's test VM, each
@@ -930,7 +1006,7 @@ func (x *SmokeExecutor) sweep(ctx context.Context, f Fence, jobID string, p Smok
 			continue
 		}
 		cfg, err := x.PVE.GetVMConfig(ctx, p.Node, m.VMID)
-		if err != nil || isTemplate(cfg) || !(hasTagValue(cfg.Str("tags"), SmokeOwnerTag(jobID)) || cfg.Str("name") == SmokeVMName(jobID)) {
+		if err != nil || isTemplate(cfg) || !smokeMine(cfg, jobID) {
 			continue
 		}
 		if err := x.destroyOwned(ctx, f, jobID, p, m.VMID); errors.Is(err, ErrStopped) {

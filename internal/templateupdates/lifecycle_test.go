@@ -161,3 +161,37 @@ func TestInstalledForStagedImport(t *testing.T) {
 		t.Fatalf("withdrawn %+v %v", inst, ok)
 	}
 }
+
+// Hardening: a Kubernetes publish strips pc-public / pc-img-* put on by hand.
+func TestPublishedTagsK8sStripsCatalogTags(t *testing.T) {
+	p := k8sPayload()
+	got := publishedTags(TemplateTags(p)+";pc-public;pc-img-ubuntu-2604", p)
+	if strings.Contains(got, "pc-public") || strings.Contains(got, "pc-img-") {
+		t.Fatalf("k8s publish kept catalog tags: %s", got)
+	}
+}
+
+// planWithdraw: per-provider "last version" and per-node "losing the last copy".
+func TestPlanWithdraw(t *testing.T) {
+	p := osPayload()
+	pub := publishedTags(TemplateTags(p), p)
+	row := func(vmid int, node, tags, name string) pve.ClusterResource {
+		return pve.ClusterResource{Type: "qemu", VMID: vmid, Node: node, Template: 1, Pool: pve.TemplatePool, Tags: tags, Name: name}
+	}
+	older := "proxcloud;pc-public;pc-img-debian-13;pc-v-202611010000"
+	// Copies on pve1 and pve2; an older version only on pve1 → pve2 loses its last copy.
+	pl := planWithdraw([]pve.ClusterResource{row(1, "pve1", pub, TemplateName(p)), row(2, "pve2", pub, TemplateName(p)), row(3, "pve1", older, "pc-x")}, p)
+	if pl.lastOnProvider || len(pl.copies) != 2 || pl.publishedCopies != 2 || len(pl.nodesLosingLast) != 1 || pl.nodesLosingLast[0] != "pve2" {
+		t.Fatalf("plan %+v", pl)
+	}
+	// Only copies → last on the provider (node loss not reported separately).
+	pl = planWithdraw([]pve.ClusterResource{row(1, "pve1", pub, TemplateName(p))}, p)
+	if !pl.lastOnProvider || len(pl.nodesLosingLast) != 0 {
+		t.Fatalf("plan %+v", pl)
+	}
+	// Staged copy only: nothing published is lost.
+	pl = planWithdraw([]pve.ClusterResource{row(1, "pve1", TemplateTags(p), TemplateName(p))}, p)
+	if pl.lastOnProvider || pl.publishedCopies != 0 || len(pl.copies) != 1 {
+		t.Fatalf("plan %+v", pl)
+	}
+}

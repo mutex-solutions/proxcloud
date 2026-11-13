@@ -162,23 +162,41 @@ class BuildTests(unittest.TestCase):
         self.assertFalse(any(e[0] == "POST" and (e[2].get("delete") == "net0" or "pc-public" in e[2].get("tags", "")) for e in pve.events))
 
     def test_prune_never_takes_a_portal_import_or_the_only_version(self):
-        def row(vmid, version, imported=False, public=True):
+        def row(vmid, version, imported=False, public=True, legacy=False):
             tags = ["proxcloud", "pc-img-debian-13", "pc-v-" + version] + (["pc-public"] if public else [])
             if imported:
                 tags += ["pc-tu-import", "pc-src-aaaaaaaaaaaa"]
+            if legacy:
+                tags += ["pc-src-bbbbbbbbbbbb"]  # imported before the marker existed
             return {"vmid": vmid, "template": 1, "node": "test-node", "pool": build.POOL, "tags": ";".join(tags)}
         vms = [row(9201, "202601010000"), row(9202, "202602010000", imported=True), row(9203, "202603010000"),
-               row(9204, "202604010000"), row(9205, "202605010000", imported=True, public=False)]
+               row(9204, "202604010000"), row(9205, "202605010000", imported=True, public=False),
+               row(9206, "202601150000", legacy=True)]
         # An import still counts as an existing version for --if-missing ...
         self.assertIn(("202602010000", 9202), build.versions_of(vms, "debian-13", "test-node"))
-        # ... but is never a prune candidate and takes no --keep slot.
+        self.assertIn(("202601150000", 9206), build.versions_of(vms, "debian-13", "test-node"))
+        # ... but is never a prune candidate (marker or legacy pc-src-) and takes no --keep slot.
         self.assertEqual(build.prune_candidates(vms, "debian-13", "test-node", 2), [9201])
         self.assertEqual(build.prune_candidates(vms, "debian-13", "test-node", 1), [9201, 9203])
-        # keep <= 0 never prunes the newest (here: only) published version.
+        # The only published version is never pruned; keep < 1 is refused, never "prune everything".
         only = [row(9301, "202601010000")]
-        for keep in (0, -1, -5):
-            self.assertEqual(build.prune_candidates(only, "debian-13", "test-node", keep), [])
-        self.assertEqual(build.prune_candidates(vms, "debian-13", "test-node", -1), [9201, 9203])
+        self.assertEqual(build.prune_candidates(only, "debian-13", "test-node", 1), [])
+        for keep in (0, -1):
+            with self.assertRaises(SystemExit):
+                build.prune_candidates(vms, "debian-13", "test-node", keep)
+
+    def test_keep_argument_rejects_below_one(self):
+        for value in ("1", "2", "999"):
+            self.assertEqual(build.keep_arg(value), int(value))
+        for value in ("0", "-1", "", "01", "1000", "two", " 2"):
+            with self.subTest(value=value), self.assertRaises(argparse.ArgumentTypeError):
+                build.keep_arg(value)
+        with patch.object(build.sys, "argv", ["build.py", "build", "--os", "debian-13", "--node", "n", "--storage", "s", "--import-storage", "i",
+                                               "--build-ip", "192.0.2.40/24", "--build-gateway", "192.0.2.1", "--keep", "0"]), \
+             patch.object(build, "PVE") as api, contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                build.main()
+            api.assert_not_called()
 
     def test_build_prune_leaves_imports(self):
         pve = FakePVE()

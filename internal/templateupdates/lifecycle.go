@@ -145,13 +145,19 @@ func slugOf(p VMPayload) string {
 // pipeline template's (proxcloud;pc-public;pc-img-<os>;pc-v-<version>) so selectors that sort by the
 // tag string (installer stages 45/56) still order pipeline and imported versions by version.
 func publishedTags(tags string, p VMPayload) string {
-	var lead []string
+	var lead, drop []string
 	if p.Variant == "kubernetes" {
 		lead = []string{pve.TagManaged, TagK8sPublished, TagK8sImport, TagK8sVersion + strings.ReplaceAll(p.KubernetesVersion, ".", "-"), pve.TagTemplateVersion + p.BuildVersion[:12]}
+		// A node image is never a tenant catalog entry, whatever tags it was given by hand.
+		for _, t := range splitTags(tags) {
+			if t == pve.TagTemplatePub || strings.HasPrefix(t, pve.TagTemplateImage) {
+				drop = append(drop, t)
+			}
+		}
 	} else {
 		lead = []string{pve.TagManaged, pve.TagTemplatePub, pve.TagTemplateImage + p.OS, pve.TagTemplateVersion + p.BuildVersion[:12]}
 	}
-	rest := editTags(tags, append([]string{TagStaged}, lead...), nil)
+	rest := editTags(tags, append(append([]string{TagStaged}, drop...), lead...), nil)
 	return editTags(strings.Join(append(append([]string{}, lead...), splitTags(rest)...), ";"), nil, []string{TagSource + digestPrefix(p.Digest), TagImport})
 }
 
@@ -356,11 +362,87 @@ type LifecycleResult struct {
 	Changed   []int  `json:"changed"`             // VMIDs whose tags changed
 	Unchanged bool   `json:"unchanged,omitempty"` // idempotent repeat: nothing to do
 	Smoke     string `json:"smokeJob,omitempty"`  // the PASS smoke a publish relied on
-	Remaining []int  `json:"remaining,omitempty"` // withdraw: published VMIDs left on the line
-	// Complete is false when the digest was blocklisted but a copy's tag change did not land (see
-	// Warnings): repeating the withdraw finishes it.
+	Remaining []int  `json:"remaining,omitempty"` // withdraw: published VMIDs left on the line (all providers)
+	// Providers is the withdraw outcome per Proxmox provider holding a copy of the artifact.
+	Providers []ProviderOutcome `json:"providers,omitempty"`
+	// Complete is false when the digest was blocklisted but some copy is not withdrawn yet (see
+	// Providers/Warnings): the page shows "Withdraw incomplete" and repeating the withdraw finishes it.
 	Complete bool     `json:"complete"`
 	Warnings []string `json:"warnings,omitempty"`
+}
+
+// ProviderOutcome is one provider's part of a withdraw.
+type ProviderOutcome struct {
+	ServiceID string `json:"serviceId"`
+	// Status: withdrawn (every copy there carries pc-tu-withdrawn), incomplete (a copy's tag change did
+	// not land or its node is down), unreachable (the cluster could not be read: nothing changed
+	// there), provider_missing (the provider no longer exists: nothing can be changed there).
+	Status          string   `json:"status"`
+	Changed         []int    `json:"changed"`
+	Remaining       []int    `json:"remaining"` // published templates of the line left on this provider
+	NodesLosingLast []string `json:"nodesLosingLast,omitempty"`
+	// VersionsMapLine (Kubernetes node image) is the config.cluster.versions entry without the
+	// withdrawn copies: kamaji names template VMIDs explicitly and keeps cloning a withdrawn one.
+	VersionsMapLine string   `json:"versionsMapLine,omitempty"`
+	Warnings        []string `json:"warnings,omitempty"`
+}
+
+// PVEResolver gives the Proxmox access of a provider (a *LifecycleError provider_missing when it is
+// gone for good).
+type PVEResolver func(ctx context.Context, serviceID string) (LifecyclePVE, error)
+
+// withdrawPlan is what withdrawing p means on one provider's cluster.
+type withdrawPlan struct {
+	copies          []pve.ClusterResource // finished imports of p's artifact (any node)
+	publishedCopies int
+	remaining       []int    // published templates of the line that are not copies
+	nodesLosingLast []string // nodes whose only published version of the line is a copy (provider keeps others)
+	lastOnProvider  bool     // no published version of the line would be left on the provider
+}
+
+func planWithdraw(rows []pve.ClusterResource, p VMPayload) withdrawPlan {
+	var pl withdrawPlan
+	isCopy, pubNodes, otherNodes := map[int]bool{}, map[string]bool{}, map[string]bool{}
+	for _, r := range rows {
+		if copyOf(r, p) {
+			pl.copies = append(pl.copies, r)
+			isCopy[r.VMID] = true
+			if isPublished(r.Tags, p.Variant) {
+				pl.publishedCopies++
+				pubNodes[r.Node] = true
+			}
+		}
+	}
+	pl.remaining = []int{}
+	for _, r := range rows {
+		if !isCopy[r.VMID] && servesLine(r, p) {
+			pl.remaining = append(pl.remaining, r.VMID)
+			otherNodes[r.Node] = true
+		}
+	}
+	sort.Ints(pl.remaining)
+	sort.Slice(pl.copies, func(i, j int) bool { return pl.copies[i].VMID < pl.copies[j].VMID })
+	pl.lastOnProvider = pl.publishedCopies > 0 && len(pl.remaining) == 0
+	if !pl.lastOnProvider {
+		for n := range pubNodes {
+			if !otherNodes[n] {
+				pl.nodesLosingLast = append(pl.nodesLosingLast, n)
+			}
+		}
+		sort.Strings(pl.nodesLosingLast)
+	}
+	return pl
+}
+
+// withoutCopies is rows minus the copies of p (the cluster as it is once p is withdrawn).
+func withoutCopies(rows []pve.ClusterResource, p VMPayload) []pve.ClusterResource {
+	out := make([]pve.ClusterResource, 0, len(rows))
+	for _, r := range rows {
+		if !copyOf(r, p) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // importReceipt loads a finished import (the template a lifecycle action targets).
@@ -440,6 +522,11 @@ func (s *Service) Publish(ctx context.Context, pv LifecyclePVE, id, confirmDiges
 		out.Unchanged = true
 		return out, nil
 	}
+	// The PASS vouches for the template as it was when the smoke test started: any config change
+	// since (disk, cloud-init, hardware, tags) invalidates it.
+	if d := cfg.Str("digest"); d == "" || d != smoke.TemplateConfigDigest {
+		return nil, lcErr(http.StatusConflict, "template_changed_since_smoke", "The template's configuration changed after its smoke test; run the smoke test again before publishing")
+	}
 	if err := setTags(ctx, pv, p.Node, rec.VMID, cfg, want); err != nil {
 		return nil, err
 	}
@@ -448,19 +535,41 @@ func (s *Service) Publish(ctx context.Context, pv LifecyclePVE, id, confirmDiges
 }
 
 // WithdrawRequest is the admin's withdraw: a reason is required; withdrawing the last published
-// version of a line also needs Force and ConfirmLast = the line's slug.
+// version of a line on a provider also needs Force and ConfirmLast = the line's slug; leaving a node
+// without a published version of the line needs ConfirmNodeLoss.
 type WithdrawRequest struct {
-	Reason        string `json:"reason"`
-	ConfirmDigest string `json:"confirmDigest"`
-	Force         bool   `json:"force"`
-	ConfirmLast   string `json:"confirmLast"`
+	Reason          string `json:"reason"`
+	ConfirmDigest   string `json:"confirmDigest"`
+	Force           bool   `json:"force"`
+	ConfirmLast     string `json:"confirmLast"`
+	ConfirmNodeLoss bool   `json:"confirmNodeLoss"`
 }
 
-// Withdraw blocklists the template's artifact digest and takes every copy of it on the template's
-// provider out of its catalog (the templates are kept for forensics). The catalog then falls back
-// to the previous published version (pve.DiscoverTemplates: newest pc-v- wins). Refused when it
-// would leave the line with no published version, unless forced with the line's slug.
-func (s *Service) Withdraw(ctx context.Context, pv LifecyclePVE, id string, req WithdrawRequest, actor string) (*LifecycleResult, error) {
+// FinishedByDigest lists every import of a digest that produced its template (all providers).
+func (s PGReceipts) FinishedByDigest(ctx context.Context, digest string) ([]Receipt, error) {
+	var all []Receipt
+	if err := s.DB.C(ReceiptCollection).Find(ctx, pgdoc.M{"payload.digest": digest}, &all); err != nil {
+		return nil, err
+	}
+	out := []Receipt{}
+	for _, r := range all {
+		if (r.Step == StepSucceeded || r.Step == StepTemplated) && r.VMID > 0 {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// Withdraw blocklists the template's artifact digest and takes EVERY copy of it out of its catalog
+// on EVERY Proxmox provider that holds a finished import of it (the templates are kept for
+// forensics), so a blocklisted digest never stays published anywhere. The catalog then falls back to
+// the previous published version (pve.DiscoverTemplates: newest pc-v- wins).
+//
+// Guards, evaluated per provider before anything is changed: a provider left without any published
+// version of the line needs Force + ConfirmLast (the slug); a node left without one needs
+// ConfirmNodeLoss. A provider whose cluster cannot be read changes nothing and is reported
+// (Complete=false): the page shows "Withdraw incomplete" and the same action finishes it.
+func (s *Service) Withdraw(ctx context.Context, pvFor PVEResolver, id string, req WithdrawRequest, actor string) (*LifecycleResult, error) {
 	if !s.VMEnabled {
 		return nil, errVMDisabled
 	}
@@ -481,61 +590,140 @@ func (s *Service) Withdraw(ctx context.Context, pv LifecyclePVE, id string, req 
 		return nil, err
 	}
 	defer release()
-	rows, err := pv.ClusterResources(ctx, "vm")
+	recs, err := s.Receipts.FinishedByDigest(ctx, p.Digest)
 	if err != nil {
-		return nil, lcErr(http.StatusBadGateway, "cluster_unreadable", "The cluster could not be read; nothing was changed")
+		return nil, err
 	}
-	// Every finished copy of this artifact on the provider (other nodes included): leaving one
-	// published would keep the bad version as that node's default.
-	var copies []pve.ClusterResource
-	publishedCopies, remaining := 0, []int{}
-	isCopy := map[int]bool{}
-	for _, r := range rows {
-		if copyOf(r, p) {
-			copies = append(copies, r)
-			isCopy[r.VMID] = true
-			if isPublished(r.Tags, p.Variant) {
-				publishedCopies++
-			}
+	// Providers in a stable order: the import's own first, then the others by id.
+	bySvc := map[string][]Receipt{p.ServiceID: {*rec}}
+	svcs := []string{}
+	for _, r := range recs {
+		if r.ID == rec.ID {
+			continue
 		}
-	}
-	for _, r := range rows {
-		if !isCopy[r.VMID] && servesLine(r, p) {
-			remaining = append(remaining, r.VMID)
+		if _, ok := bySvc[r.Payload.ServiceID]; !ok {
+			svcs = append(svcs, r.Payload.ServiceID)
 		}
+		bySvc[r.Payload.ServiceID] = append(bySvc[r.Payload.ServiceID], r)
 	}
-	sort.Ints(remaining)
+	sort.Strings(svcs)
+	svcs = append([]string{p.ServiceID}, svcs...)
 	slug := slugOf(p)
-	if publishedCopies > 0 && len(remaining) == 0 && !(req.Force && req.ConfirmLast == slug) {
+	type provider struct {
+		out  *ProviderOutcome
+		pv   LifecyclePVE
+		rows []pve.ClusterResource
+		plan withdrawPlan
+	}
+	provs := make([]*provider, 0, len(svcs))
+	var lastOn, nodeLoss []string
+	for _, svc := range svcs {
+		pr := &provider{out: &ProviderOutcome{ServiceID: svc, Changed: []int{}, Remaining: []int{}}}
+		provs = append(provs, pr)
+		pv, err := pvFor(ctx, svc)
+		var le *LifecycleError
+		if errors.As(err, &le) && le.Code == "provider_missing" {
+			pr.out.Status = "provider_missing"
+			pr.out.Warnings = append(pr.out.Warnings, "the provider no longer exists: any copy left in its cluster cannot be changed from here")
+			continue
+		}
+		if err != nil {
+			pr.out.Status = "unreachable"
+			pr.out.Warnings = append(pr.out.Warnings, "the provider is not reachable: nothing was changed there yet; withdraw again once it is")
+			continue
+		}
+		rows, err := pv.ClusterResources(ctx, "vm")
+		if err != nil {
+			pr.out.Status = "unreachable"
+			pr.out.Warnings = append(pr.out.Warnings, "the cluster could not be read: nothing was changed there yet; withdraw again once it can")
+			continue
+		}
+		pr.pv, pr.rows, pr.plan = pv, rows, planWithdraw(rows, p)
+		pr.out.Remaining, pr.out.NodesLosingLast = pr.plan.remaining, pr.plan.nodesLosingLast
+		if pr.plan.lastOnProvider {
+			lastOn = append(lastOn, svc)
+		}
+		for _, n := range pr.plan.nodesLosingLast {
+			nodeLoss = append(nodeLoss, svc+"/"+n)
+		}
+	}
+	if len(lastOn) > 0 && !(req.Force && req.ConfirmLast == slug) {
 		return nil, &LifecycleError{Status: http.StatusConflict, Code: "last_published_version",
-			Message: fmt.Sprintf("This is the only published version of %s on this provider: after withdrawing it no new VM of it can be created until another version is published. To do it anyway, repeat with force and confirm %q", slug, slug),
-			Details: map[string]any{"slug": slug, "publishedCopies": publishedCopies}}
+			Message: fmt.Sprintf("This is the only published version of %s on provider(s) %s: after withdrawing it no new VM of it can be created there until another version is published. To do it anyway, repeat with force and confirm %q", slug, strings.Join(lastOn, ", "), slug),
+			Details: map[string]any{"slug": slug, "providers": lastOn}}
+	}
+	if len(nodeLoss) > 0 && !req.ConfirmNodeLoss {
+		return nil, &LifecycleError{Status: http.StatusConflict, Code: "nodes_losing_last_copy",
+			Message: fmt.Sprintf("Node(s) %s keep no published version of %s after this withdraw: new VMs placed there cannot be created from it until another version is published there. Confirm to continue", strings.Join(nodeLoss, ", "), slug),
+			Details: map[string]any{"slug": slug, "nodes": nodeLoss}}
 	}
 	if _, err := s.Receipts.Block(ctx, BlockedDigest{Digest: p.Digest, Package: p.Package, Tag: p.Tag, Reason: req.Reason, Actor: actor,
 		At: time.Now().UTC(), ServiceID: p.ServiceID, Node: p.Node, VMID: rec.VMID, ImportID: rec.ID}); err != nil {
 		return nil, err
 	}
-	out := &LifecycleResult{ID: id, Action: "withdraw", Digest: p.Digest, Slug: slug, ServiceID: p.ServiceID, Changed: []int{}, Remaining: remaining, Complete: true}
-	sort.Slice(copies, func(i, j int) bool { return copies[i].VMID < copies[j].VMID })
-	for _, c := range copies {
-		cfg, err := importTemplate(ctx, pv, p, c.Node, c.VMID)
-		if err != nil {
+	out := &LifecycleResult{ID: id, Action: "withdraw", Digest: p.Digest, Slug: slug, ServiceID: p.ServiceID, Changed: []int{}, Remaining: []int{}, Complete: true}
+	for _, pr := range provs {
+		if pr.pv == nil {
+			if pr.out.Status != "provider_missing" {
+				out.Complete = false
+			}
+			out.Providers = append(out.Providers, *pr.out)
+			continue
+		}
+		pr.out.Status = "withdrawn"
+		// A receipt's template on a node that is down cannot be read or changed now: it stays as it
+		// was (maybe published) until the node is back and the withdraw is repeated.
+		for _, r := range bySvc[pr.out.ServiceID] {
+			for _, row := range pr.rows {
+				if row.VMID == r.VMID && row.NodeDown {
+					pr.out.Status = "incomplete"
+					pr.out.Warnings = append(pr.out.Warnings, fmt.Sprintf("VM %d: node %s is down; withdraw again once it is back", r.VMID, row.Node))
+				}
+			}
+		}
+		for _, c := range pr.plan.copies {
+			cfg, err := importTemplate(ctx, pr.pv, p, c.Node, c.VMID)
+			if err != nil {
+				pr.out.Status = "incomplete"
+				pr.out.Warnings = append(pr.out.Warnings, fmt.Sprintf("VM %d on %s was not changed: %v", c.VMID, c.Node, err))
+				continue
+			}
+			want := withdrawnTags(cfg.Str("tags"))
+			if sameTags(cfg.Str("tags"), want) {
+				continue
+			}
+			if err := setTags(ctx, pr.pv, c.Node, c.VMID, cfg, want); err != nil {
+				pr.out.Status = "incomplete"
+				pr.out.Warnings = append(pr.out.Warnings, fmt.Sprintf("VM %d on %s: %v", c.VMID, c.Node, err))
+				continue
+			}
+			pr.out.Changed = append(pr.out.Changed, c.VMID)
+		}
+		if p.Variant == "kubernetes" {
+			after := withoutCopies(pr.rows, p)
+			v := versionsMapValue(after, p)
+			pr.out.VersionsMapLine = fmt.Sprintf("%q: %q", p.KubernetesVersion, v)
+			ids := []string{}
+			for _, c := range pr.plan.copies {
+				ids = append(ids, fmt.Sprintf("%s=%d", c.Node, c.VMID))
+			}
+			msg := fmt.Sprintf("Kubernetes %s: the Kubernetes provider's config.cluster.versions names template VMIDs explicitly, so withdrawing does not stop new workers from being cloned from %s; replace that entry with %s", p.KubernetesVersion, strings.Join(ids, ","), pr.out.VersionsMapLine)
+			if v == "" {
+				msg = fmt.Sprintf("Kubernetes %s: no other published node image of this version is left on this provider; the version map still names %s — remove that version or publish another image before new workers are created", p.KubernetesVersion, strings.Join(ids, ","))
+			}
+			pr.out.Warnings = append(pr.out.Warnings, msg)
+		}
+		if pr.out.Status != "withdrawn" {
 			out.Complete = false
-			out.Warnings = append(out.Warnings, fmt.Sprintf("VM %d on %s was not changed: %v", c.VMID, c.Node, err))
-			continue
 		}
-		want := withdrawnTags(cfg.Str("tags"))
-		if sameTags(cfg.Str("tags"), want) {
-			continue
+		out.Changed = append(out.Changed, pr.out.Changed...)
+		out.Remaining = append(out.Remaining, pr.out.Remaining...)
+		out.Providers = append(out.Providers, *pr.out)
+	}
+	for _, po := range out.Providers {
+		for _, w := range po.Warnings {
+			out.Warnings = append(out.Warnings, po.ServiceID+": "+w)
 		}
-		if err := setTags(ctx, pv, c.Node, c.VMID, cfg, want); err != nil {
-			// The digest IS blocklisted (it can never be published again); this copy's tag change
-			// did not land, so the result says so and repeating the withdraw finishes it.
-			out.Complete = false
-			out.Warnings = append(out.Warnings, fmt.Sprintf("VM %d on %s: %v", c.VMID, c.Node, err))
-			continue
-		}
-		out.Changed = append(out.Changed, c.VMID)
 	}
 	out.Unchanged = len(out.Changed) == 0 && out.Complete
 	return out, nil
