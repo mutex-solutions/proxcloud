@@ -616,17 +616,96 @@ func TestSweepMirrorOrphans(t *testing.T) {
 	}
 }
 
-// With the flag off the runner never claims a job, but the dead-job cleanup and the orphan sweep still run.
+// B1: with the flag off the runner never runs a job. One it can claim (queued, or its lease expired) is ended as
+// feature_disabled through the terminal path, so its cleanup runs (here: the leftover worker pod of an earlier
+// attempt) — no worker is started, the prepull is never patched. The orphan sweep keeps running.
 func TestSandboxRunnerCleanupOnly(t *testing.T) {
 	p := sbxPayload()
-	r, jobs, _, _, _ := sbxFixture(t, p)
+	r, jobs, cl, _, mem := sbxFixture(t, p)
 	r.CleanupOnly = true
 	swept := 0
 	r.Orphans = func(context.Context) (int, error) { swept++; return 0, nil }
-	if did, err := r.RunOnce(context.Background()); did || err != nil {
-		t.Fatalf("cleanup-only run claimed work: %v %v", did, err)
+	var finished []SandboxReceipt
+	r.OnFinish = func(rec SandboxReceipt) { finished = append(finished, rec) }
+	name := sandbox.MirrorPodName(jobShort(sbxJob), 1)
+	cl.pods[name] = &sandbox.MirrorPod{Name: name, UID: "u1", Phase: "Running", Source: p.Source(), Dest: p.Destination()}
+	rec := mem.recs[sbxJob]
+	rec.Step, rec.Pod, rec.PodReady = SbxMirroring, name, true
+	mem.recs[sbxJob] = rec
+	jobs.job.Epoch = 2
+	if did, err := r.RunOnce(context.Background()); !did || err != nil {
+		t.Fatalf("cleanup-only run: %v %v", did, err)
 	}
-	if jobs.claimed || swept != 1 {
-		t.Fatalf("claimed=%v swept=%d", jobs.claimed, swept)
+	if jobs.failCode != "feature_disabled" || !jobs.permanent || jobs.completed {
+		t.Fatalf("job ended with %q permanent=%v completed=%v", jobs.failCode, jobs.permanent, jobs.completed)
+	}
+	if got := mem.recs[sbxJob]; got.Step != SbxFailed || got.Code != "feature_disabled" || !got.Cleaned {
+		t.Fatalf("receipt %+v", got)
+	}
+	if len(cl.started) != 0 || cl.patches != 0 || len(cl.pods) != 0 || len(cl.deleted) != 1 {
+		t.Fatalf("started=%d patches=%d pods=%v deleted=%v", len(cl.started), cl.patches, cl.pods, cl.deleted)
+	}
+	if len(finished) != 1 || finished[0].Code != "feature_disabled" {
+		t.Fatalf("finished %+v", finished)
+	}
+	// Nothing left to claim: idle (the orphan sweep keeps its own interval).
+	if did, err := r.RunOnce(context.Background()); did || err != nil || swept != 1 {
+		t.Fatalf("second pass: did=%v err=%v swept=%d", did, err, swept)
+	}
+
+	// A job whose prepull switch already landed is acknowledged as succeeded, never rolled back.
+	r, jobs, cl, _, mem = sbxFixture(t, p)
+	r.CleanupOnly = true
+	rec = mem.recs[sbxJob]
+	rec.Step = SbxPinned
+	mem.recs[sbxJob] = rec
+	if did, _ := r.RunOnce(context.Background()); !did || !jobs.completed || mem.recs[sbxJob].Step != SbxSucceeded || cl.patches != 0 || len(cl.started) != 0 {
+		t.Fatalf("pinned: did=%v completed=%v step=%s", did, jobs.completed, mem.recs[sbxJob].Step)
+	}
+
+	// The provider is unreachable: the job still ends; its receipt stays uncleaned, so the dead-job pass retries.
+	r, jobs, _, _, mem = sbxFixture(t, p)
+	r.CleanupOnly = true
+	r.Build = func(context.Context, SandboxPayload) (*SandboxExecutor, error) {
+		return nil, errors.New("cluster unreachable")
+	}
+	if did, _ := r.RunOnce(context.Background()); !did || jobs.failCode != "feature_disabled" || mem.recs[sbxJob].Step != SbxFailed || mem.recs[sbxJob].Cleaned {
+		t.Fatalf("unreachable: did=%v code=%s receipt %+v", did, jobs.failCode, mem.recs[sbxJob])
+	}
+}
+
+// N1: the dead-job pass re-acquires by id, so a miswired Dead list could hand it a VM/smoke job. Such a job is released
+// back to dead with its own code (never cleaned_up), so its own runner still cleans it up; nothing of it is touched.
+func TestSandboxCleanupDeadRefusesForeignKind(t *testing.T) {
+	for _, tc := range []struct{ kind, lastError, want string }{
+		{durablejobs.TemplateUpdateVM, "attempts_exhausted", "attempts_exhausted"},
+		{durablejobs.TemplateUpdateSmoke, "lease_expired", "lease_expired"},
+		{durablejobs.TemplateUpdateVM, "", "cleanup_pending"},
+		{durablejobs.TemplateUpdateVM, "cleaned_up", "cleanup_pending"},
+	} {
+		p := sbxPayload()
+		r, jobs, cl, _, mem := sbxFixture(t, p)
+		cl.pods["tu-mirror-x-e1"] = &sandbox.MirrorPod{Name: "tu-mirror-x-e1", UID: "uid-x"}
+		foreign := durablejobs.Job{ID: testJob, Kind: tc.kind, Payload: []byte(`{"version":1}`), Attempts: 3, MaxAttempts: 3,
+			Epoch: 4, State: "running", LastError: tc.lastError}
+		builds := 0
+		b := r.Build
+		r.Build = func(ctx context.Context, q SandboxPayload) (*SandboxExecutor, error) { builds++; return b(ctx, q) }
+		r.Dead = func(context.Context) ([]string, error) { return []string{testJob}, nil }
+		r.ClaimDead = func(context.Context, string, time.Duration) (*durablejobs.Job, error) { j := foreign; return &j, nil }
+		jobs.claimed = true // no sandbox job to run: straight to the dead-job pass
+		did, err := r.RunOnce(context.Background())
+		if did || err != nil {
+			t.Fatalf("%s: did=%v err=%v", tc.kind, did, err)
+		}
+		if jobs.failCode != tc.want || !jobs.permanent || jobs.failCode == "cleaned_up" {
+			t.Fatalf("%s %q: released with %q permanent=%v", tc.kind, tc.lastError, jobs.failCode, jobs.permanent)
+		}
+		if builds != 0 || len(cl.deleted) != 0 || len(cl.pods) != 1 {
+			t.Fatalf("%s: a foreign job's cleanup ran: builds=%d deleted=%v", tc.kind, builds, cl.deleted)
+		}
+		if _, ok := mem.recs[testJob]; ok {
+			t.Fatalf("%s: a sandbox receipt was written for a foreign job", tc.kind)
+		}
 	}
 }

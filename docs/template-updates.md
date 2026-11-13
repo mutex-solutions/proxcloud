@@ -518,9 +518,15 @@ an advisory lock on `<registry>/library/sandbox-<name>` refuses while another jo
    with the pod; the job deletes the pod (UID precondition) as soon as the result is read, and every pod of
    the job on finish/cleanup. A failed delete is recorded in the receipt. A pod that stays Pending more than
    5 minutes is replaced; a pod whose Secrets were not confirmed written is never waited for. The runner
-   runs even with the flag off (it then claims no job): it cleans up dead jobs and deletes mirror pods of
-   jobs that are not pending/running (an **orphan sweep**, every 10 minutes, every sandbox provider), so no
-   pod with a credential outlives its job. The worker copies the source's own manifest bytes
+   runs even with the flag off, but then never runs a job (no worker, no prepull patch): a job it can
+   claim — queued (a retry once it is due), or running with an **expired** lease (its runner is gone) —
+   ends `failed` `feature_disabled` with its cleanup (its worker pods and their Secrets deleted, the pin
+   of a prepull switch that never landed restored), so it no longer blocks its image or
+   `DELETE …/pins/{id}`; one whose switch already landed (`pinned`) is acknowledged as succeeded. A
+   running job whose lease is still valid (another replica with the flag on) is never touched. It also
+   cleans up dead jobs and deletes mirror pods of jobs that are not pending/running (an **orphan sweep**,
+   every 10 minutes, every sandbox provider), so no pod with a credential outlives its job. The worker
+   copies the source's own manifest bytes
    (same digest) through transports fenced to `ghcr.io` (pull scope of that one repository; the blob
    redirect to `pkg-containers.githubusercontent.com` without credentials) and to the one destination
    repository; an existing destination tag is accepted only at the same digest (a re-run), never moved.
@@ -539,9 +545,9 @@ Failure codes (`[a-z_]`, never a provider string): `invalid_payload`, `receipt_m
 `github_not_configured`, `github_refused`, `mirror_unavailable` (no worker image, no template registry or no mirror
 account), `mirror_result_invalid`, `digest_mismatch`, `registry_refused`, `rollback_target_missing`,
 `ownership_lost`, `provider_missing`, `registry_changed`, `executor_unavailable`, `attempts_exhausted`,
-`job_dead`. **Resume**: a new acquisition continues from the last committed step; a worker that already
-succeeded is reused (no second copy), one still running is waited for, a failed one is deleted and the
-copy redone under the new epoch's pod. A lost lease stops the executor before its next cluster effect.
+`job_dead`, `feature_disabled` (ended because the flag was off). **Resume**: a new acquisition
+continues from the last committed step; a worker that already succeeded is reused (no second copy), one
+still running is waited for, a failed one is deleted and the copy redone under the new epoch's pod. A lost lease stops the executor before its next cluster effect.
 **Cleanup** (terminal failure or the dead-job pass): delete the job's worker pods; if the pin was
 recorded but the DaemonSet never ran the new ref, restore the pin record this job replaced. **Secrets**:
 the PAT exists only in the job's memory and the pod-owned Secret — never in the payload, receipt, pin,
@@ -644,7 +650,8 @@ hand-over = first install: nothing to read.
    --as=system:serviceaccount:proxcloud-system:proxcloud` → yes, `… get secret/sandbox-registry-nodes` → no.
 4. The provider has `imageAdoption: on` and the GitHub integration is configured.
 5. `PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED=true` (or `proxcloud.template-updates.sandbox-enabled`) on
-   the API: starts the runner and allows the two POSTs. Off, they answer 501 and nothing runs.
+   the API: starts the runner and allows the two POSTs. Off, they answer 501 and nothing runs. Set it the
+   same on every API replica: one with it off ends the queued sandbox jobs it claims (`feature_disabled`).
 
 ## 6. Permissions
 
