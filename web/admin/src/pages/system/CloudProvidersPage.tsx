@@ -73,6 +73,8 @@ export type CloudProvider = {
     region?: string
     uidPrefix?: string
     defaultQuotaGiB?: number
+    // false = new projects are not attached to this provider automatically (absent = attached).
+    attachToNewProjects?: boolean
   }
 }
 
