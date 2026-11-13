@@ -1,20 +1,22 @@
 # Current support boundaries and first-release readiness
 
-Status snapshot: **2026-11-12**, preparing the first stable `v0.4.0` release
-(owner decision 2026-11-12). This is an evidence summary, not a release
-announcement or a production SLA. `v0.4.0-rc.1` (tag 2026-11-11) was published as
-a non-latest prerelease. Pushing the `v0.4.0` tag publishes the stable images, app
-chart and GitHub Release. This source change publishes nothing and performs no live
-acceptance. Check GitHub's Releases/Actions pages before choosing a deployment
+Status snapshot: **2026-11-13**, preparing the stable `v0.5.0` release (owner
+decision 2026-11-13: the next release is `v0.5.0`, not `0.4.1`). This is an
+evidence summary, not a release announcement or a production SLA. `v0.4.0-rc.1`
+(tag 2026-11-11) was published as a non-latest prerelease and `v0.4.0` (tag
+2026-11-12) as the first stable release. Pushing the `v0.5.0` tag publishes the
+stable images, app chart and GitHub Release. `v0.5.0` contains breaking API
+changes; see the [changelog](../CHANGELOG.md). This source change publishes
+nothing and performs no live acceptance. Check GitHub's Releases/Actions pages before choosing a deployment
 commit.
 
 ## What is available now
 
-- Source on `main`, public development container images on GHCR and the
-  `v0.4.0-rc.1` prerelease (images and app chart `0.4.0-rc.1`). The app chart
-  `0.4.0`, appVersion and installer BOM `v0.4.0` name the first stable release;
-  its tag publishes those artifacts. Verify they are pullable before using
-  `images.build: false`; a source pin is not proof that a registry artifact exists.
+- Source on `main`, public development container images on GHCR, the
+  `v0.4.0-rc.1` prerelease and the first stable release `v0.4.0` (images and app
+  charts `0.4.0-rc.1` and `0.4.0`). The app chart `0.5.0`, appVersion and installer
+  BOM `v0.5.0` name the current stable release; its tag publishes those artifacts.
+  Verify they are pullable before using `images.build: false`; a source pin is not proof that a registry artifact exists.
 - The installer defaults to `images.build: true`, building the API and two
   consoles plus app chart from the checkout. A source/local-registry installation
   is a different path from pulling a released chart with `images.build: false`.
@@ -39,6 +41,8 @@ See [quickstart](quickstart.md), [installation](install.md),
 | Ubuntu 24.04 OS template | [Controlled build/smoke canary](https://github.com/mutex-solutions/proxcloud/actions/runs/42732526994) succeeded with the same cleanup checks. These templates are site-local PVE objects, not public downloadable VM disks. |
 | Kubernetes static node-template build | Code, synthetic failure/cleanup tests, NoCloud ISO tooling and generated Packer configuration were validated. **Real ISO boot, installed reboot, Goss and final seed cleanup have not been accepted on PVE yet.** Pick a Kubernetes version and run a controlled canary before advertising it as supported. |
 | Helm charts | App/Kubernetes lint and local render checks, plus database example renders, are not proof of OCI publication, anonymous pull or clean installation from released artifacts. |
+| Template updates (admin portal) | Discovery, GitHub classic PAT integration, VM import, smoke test, publish and withdraw have unit and integration tests only. The VM import and smoke test are **not lab-verified on PVE 9.2**, and the PAT integration has not been verified against the real GitHub packages. The VM executor is off unless `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true`. Sandbox image mirroring (GHCR → sandbox registry, prepull switch, rollback) has unit, PostgreSQL, integration and offline CEL admission-policy tests only; it is **not lab-verified** on a real sandbox cluster with Zot and GHCR, and runs only with `PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED=true`. It pulls public `sandbox-*` packages anonymously (private packages are refused). Residual risks: the narrow Zot `mirror` account may create a new `library/sandbox-<name>` repository (it cannot overwrite or delete an image), and the optional, operator-applied `warming-rbac.yaml` already gives the portal's sandbox identity wider pod/Secret rights in `sandbox-system` (not a regression; [§5.3](template-updates.md#53-prepull-rbac-and-admission-policy)). See [template updates](template-updates.md#7-open-items). |
+| Kubernetes node VM image | `ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2604-k8s` was published on 2026-11-12 as a separate, manually dispatched artifact; it is not part of the app chart or the release tag. Publication is not node acceptance: no kubeadm join or NodeReady is claimed, and the runtime checks in [the sanitization boundary](public-vm-sanitization.md#kubernetes-variant---k8s-os-ubuntu-2604) remain the acceptance gate. |
 | Managed services / split installer | Existing code and historical lab records are not blanket current-main fresh-install, upgrade or all-engine acceptance. Verify the selected service/operator/chart combination. |
 
 No environment-specific endpoint, token, node name, build address or runner
@@ -54,6 +58,12 @@ registration belongs in public documentation or release artifacts.
 - **Registry deletion is not generally enabled.** Dry-run/retained reference
   evidence is not authority to delete manifests. Follow the current
   [registry reference boundaries](durable-registry-pins.md).
+- **Portal template updates are off by default.** The VM import, smoke test,
+  publish and withdraw run only with `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true`;
+  sandbox image mirroring runs only with `PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED=true`
+  (set it the same on every API replica). Enable either only after the lab checks in
+  [template updates](template-updates.md#7-open-items). The first `make upgrade` of
+  `v0.5.0` restarts the sandbox registry (Zot) pod once.
 - **Cron/debug producers are off by default.** Primary PostgreSQL workers continue
   already-accepted jobs. Enabling scheduling is an explicit operator decision,
   especially for billing, resource sync and cloud mutations.
@@ -70,12 +80,13 @@ registration belongs in public documentation or release artifacts.
 
 ## Minimum gate for a release
 
-The owner decided on 2026-11-12 to release `v0.4.0` as stable, with a narrowly
-scoped core and explicitly held features; it need not claim every managed service.
-That decision is not evidence of publication or installation. For `v0.4.0` (and
-any later release):
+The owner decided on 2026-11-12 to release `v0.4.0` as stable, and on 2026-11-13
+that the next release is the stable `v0.5.0`, each with a narrowly scoped core and
+explicitly held features; neither need claim every managed service. Those decisions
+are not evidence of publication or installation. For `v0.5.0` (and any later
+release):
 
-1. Review the exact release commit for `v0.4.0` and its supported core surface
+1. Review the exact release commit for `v0.5.0` and its supported core surface
    and explicit experimental/held features. The version is not published until
    its tag's workflows succeed.
 2. Verify app/chart/installer BOM alignment with that exact version. Keep managed
@@ -91,13 +102,13 @@ any later release):
    image and Helm workflows are independent; image completion alone is not chart
    completion or a deployment. Keep the default `images.build: true` meanwhile.
 5. After publication, install the exact released chart/images with
-   `images.build: false` on a clean evaluation site (not yet performed for
-   `v0.4.0` when this was prepared). The installer accepts valid
-   SemVer with **base version >= 0.4.0**, including prereleases; this local guard
+   `images.build: false` on a clean evaluation site (not performed for `v0.4.0`,
+   and not yet performed for `v0.5.0` when this was prepared). The installer
+   accepts valid SemVer with **base version >= 0.4.0**, including prereleases; this local guard
    does not prove publication or a stable release. Check login/client/admin,
    provider connection, one basic server create/delete, configuration/secrets and
    the explicit scheduler choice. A source-build installation is not this acceptance.
-6. Record rollback/backup/migration limits. `v0.4.0` is stable by owner decision,
+6. Record rollback/backup/migration limits. `v0.5.0` is stable by owner decision,
    **not** by acceptance: neither this preparation nor a green build clears full
    live installer (P6) or split/managed-service (P7) acceptance, which the owner
    deferred. Intentional safety holds stay in place.

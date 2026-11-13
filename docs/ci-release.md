@@ -1,10 +1,12 @@
 # CI, template builds and release operations
 
 This page describes the checked-in workflows, not a guarantee that a release has
-already been published. As of **2026-11-12**, GHCR has public development images
-and the `v0.4.0-rc.1` prerelease (tag 2026-11-11, images and app chart
-`0.4.0-rc.1`). The owner decided to release `v0.4.0` as the first stable release;
-pushing its tag runs the app image/chart publication and GitHub Release creation.
+already been published. As of **2026-11-13**, GHCR has public development images,
+the `v0.4.0-rc.1` prerelease (tag 2026-11-11, images and app chart `0.4.0-rc.1`)
+and the first stable release `v0.4.0` (tag 2026-11-12, images and app chart
+`0.4.0`). The owner decided (2026-11-13) that the next release is the stable
+`v0.5.0`; pushing its tag runs the app image/chart publication and GitHub Release
+creation.
 This source change does none of those operations, and installation from released
 artifacts and later controlled PVE template canaries remain separate steps. Read
 [release readiness](release-readiness.md) before publication or evaluation.
@@ -40,10 +42,11 @@ actually published version/digest; source `main` image tags use `dev-<short-sha>
 No image is produced for some documentation/chart-only commits.
 
 The configured destination for app Helm publication is
-`oci://ghcr.io/mutex-solutions/charts` (it holds the `0.4.0-rc.1` prerelease chart).
+`oci://ghcr.io/mutex-solutions/charts` (it holds the `0.4.0-rc.1` prerelease and
+`0.4.0` stable charts).
 On an app release tag, the workflow sets chart version to the tag without `v` and
 appVersion to the full tag, matching the image tags. The release contract is app
-chart `0.4.0`, appVersion/image tag and installer BOM `v0.4.0`.
+chart `0.5.0`, appVersion/image tag and installer BOM `v0.5.0`.
 Keep `images.build: true` until the exact chart and images are published and
 verified; use `false` explicitly for released-artifact evaluation after that.
 The installer's broker-free floor compares the SemVer **base** against `0.4.0`:
@@ -137,7 +140,7 @@ The workflows currently **do not** provide a single atomic release gate:
 - No workflow automatically installs/upgrades a production site. Publication is
   not deployment, acceptance, backup verification or rollback readiness.
 
-The owner's stable `v0.4.0` decision does not replace exact-commit checks or
+The owner's stable `v0.5.0` decision does not replace exact-commit checks or
 evidence, and it does not claim live installer or split/managed-service acceptance.
 A `v*` tag triggers the app Docker and Helm workflows, not either PVE template
 workflow, the sandbox template build or VM image publication. Keep later template

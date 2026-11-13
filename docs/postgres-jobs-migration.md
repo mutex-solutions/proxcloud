@@ -7,9 +7,11 @@ bounded default-OFF outbox infrastructure and typed enqueue producers, not enabl
 production delivery; see [mail safety limits](mail-outbox-safety-limits.md).
 External billing's HTTP calls and failure behavior are unchanged.
 
-The first stable broker-free release is **v0.4.0** (after the `v0.4.0-rc.1`
-prerelease). Its tag publishes the images and chart, but verify them rather than
-inferring publication from a source pin. Use a core-containing source build
+The first stable broker-free release was **v0.4.0** (after the `v0.4.0-rc.1`
+prerelease); the current stable release is **v0.5.0**. Each tag publishes the images
+and chart, but verify them rather than inferring publication from a source pin. An
+upgrade from a broker-era release goes through this runbook whichever broker-free
+release (`v0.4.0` or later) is the target. Use a core-containing source build
 (`images.build: true`) or a known compatible new API image; do not deploy this
 chart against old v0.3.x binaries. Render/lint success does not prove that a
 package/image is published. Being stable does not change this runbook: existing
@@ -108,7 +110,7 @@ annotation is not sufficient. Use the same release/name/namespace and old secret
    (or equivalent transition chart) that keeps the exact old broker enabled and
    adds the keep annotation to its stored release manifest. Verify it with
    `helm get manifest`; do not rely on a new chart that changes the API to v0.4.0
-   before old work is reconciled/stopped. Keep old automation paused as above.
+   or later before old work is reconciled/stopped. Keep old automation paused as above.
 2. **Retain transition with the new API:** after section 1, upgrade to this chart with
    `jobsMigration.mode=retain`, the existing `rabbitmqCluster.enabled=true` and
    **the exact old cluster name/spec** (replicas, image, storage and resources).

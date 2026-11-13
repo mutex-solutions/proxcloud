@@ -38,11 +38,14 @@ capabilities to AI agents.
 - **API** (Go) — one backend serving three surfaces: the customer API, the SigV4-signed operator API, and an MCP endpoint.
 
 > [!WARNING]
-> **Release status.** `v0.4.0` is the first stable ProxCloud release; its tag publishes
-> the images and app chart (`v0.4.0-rc.1` was a prerelease). Stable is not full
+> **Release status.** `v0.5.0` is the current stable ProxCloud release; its tag publishes
+> the images and app chart (`v0.4.0` was the first stable release, `v0.4.0-rc.1` a
+> prerelease). `v0.5.0` has breaking API changes; read the
+> [changelog](CHANGELOG.md) before upgrading. Stable is not full
 > acceptance: live installer and split/managed-service acceptance have not been
-> performed, the scheduler is off by default, and production mail delivery and
-> saved sandbox lifecycle remain held. The installer targets **Proxmox VE 9.2 or
+> performed, the scheduler is off by default, production mail delivery and
+> saved sandbox lifecycle remain held, and portal template updates are off by default
+> and not lab-verified. The installer targets **Proxmox VE 9.2 or
 > newer** and requires its documented firewall/storage prerequisites; this is a
 > minimum, not a tested compatibility promise for every later PVE version. Debian and Ubuntu OS template pipelines have
 > passed controlled build/smoke runs; the Kubernetes static ISO path still needs a
@@ -115,7 +118,7 @@ before upgrading; mail durability is a separate follow-up.
 
 ## 🚀 Quickstart
 
-Broker-free defaults target the stable **v0.4.0** API/chart release. Its tag publishes
+Broker-free defaults target the stable **v0.5.0** API/chart release. Its tag publishes
 the images and chart; until you have verified them pullable, build from a checkout
 containing the PostgreSQL job engine (installer `images.build: true`, the default) or
 pin known compatible new images; do not use the older Rabbit-dependent API with these
@@ -225,9 +228,9 @@ without pushing. A `v*` tag publishes exact image tags and the app Helm chart in
 separate workflows. The managed Kubernetes and database charts have independent
 release tags; merging to `main` does **not** publish an OCI chart or deploy a site.
 
-`v0.4.0-rc.1` was published as a prerelease; `v0.4.0` is the first stable app
-release. See [build and release operations](docs/ci-release.md) for current
-triggers, release limitations, required permissions and release verification.
+`v0.4.0-rc.1` was published as a prerelease and `v0.4.0` as the first stable app
+release; `v0.5.0` is the current stable release. See [build and release
+operations](docs/ci-release.md) for current triggers, release limitations, required permissions and release verification.
 
 </details>
 
