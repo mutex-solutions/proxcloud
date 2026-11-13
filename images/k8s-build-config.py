@@ -209,6 +209,28 @@ def export_checkout(checkout, run):
         fail(message)
 
 
+# The pinned kubeadm config (images/capi/ansible/roles/kubernetes/templates/etc/kubeadm.yml at
+# IMAGE_BUILDER_COMMIT) uses kubeadm.k8s.io/v1beta3, which kubeadm 1.37 refuses ("old API spec"), so
+# `kubeadm config images pull` fails the build. Apply exactly upstream's fix (image-builder db2e0f41,
+# after v0.1.55): v1beta4, which kubeadm reads since 1.31, so every selectable version gets it.
+KUBEADM_CONFIG = "ansible/roles/kubernetes/templates/etc/kubeadm.yml"
+KUBEADM_CONFIG_SHA256 = "bca828242e66d8307a22962f03afa64700b02c61aa2d0319b926c57c5c33af07"
+
+
+def kubeadm_v1beta4(capi):
+    path = Path(capi) / KUBEADM_CONFIG
+    if path.is_symlink() or not path.is_file():
+        fail("Pinned kubeadm config is missing or unsafe")
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != KUBEADM_CONFIG_SHA256:
+        fail("Pinned kubeadm config contract changed")
+    text = data.decode("utf-8")
+    old, new = "apiVersion: kubeadm.k8s.io/v1beta3\n", "apiVersion: kubeadm.k8s.io/v1beta4\n"
+    if text.count(old) != 2:
+        fail("Pinned kubeadm config contract changed")
+    private_write(path, text.replace(old, new))
+
+
 def private_write(path, text):
     path = Path(path)
     if path.is_symlink():
@@ -242,6 +264,7 @@ def prepare(capi, run, env):
     userdata = userdata_template.read_text()
     if not userdata.startswith("#cloud-config\nautoinstall:\n") or "  network:" in userdata:
         fail("Pinned Ubuntu autoinstall seed contract changed")
+    kubeadm_v1beta4(capi)
     path = capi / "packer/proxmox/packer.json.tmpl"
     doc = json.loads(path.read_text())
     b = doc["builders"][0]

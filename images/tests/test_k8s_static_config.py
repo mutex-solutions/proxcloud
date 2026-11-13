@@ -36,6 +36,9 @@ def upstream(capi):
         seed = file.parent / ("linux/ubuntu/http/" + image["release"] + "/user-data.tmpl")
         seed.parent.mkdir(parents=True)
         shutil.copyfile(FIXTURES / "ubuntu-bios-user-data.tmpl", seed)
+    kubeadm = capi / config.KUBEADM_CONFIG
+    kubeadm.parent.mkdir(parents=True)
+    shutil.copyfile(FIXTURES / "kubeadm.yml", kubeadm)
     return file
 
 
@@ -131,6 +134,23 @@ class StaticPreparationTests(unittest.TestCase):
             self.assertEqual((run / "seed").stat().st_mode & 0o777, 0o700)
             self.assertEqual((capi / "packer/proxmox/packer.json").stat().st_mode & 0o777, 0o600)
             self.assertIn('version = "1.2.4"', (capi / "packer/proxmox/config.pkr.hcl").read_text())
+
+    def test_kubeadm_config_moves_to_v1beta4_and_refuses_drift(self):
+        # kubeadm 1.37 refuses kubeadm.k8s.io/v1beta3; the pinned config gets exactly upstream's v1beta4 change.
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp); capi = run / "image-builder/images/capi"; upstream(capi)
+            config.prepare(capi, run, environment())
+            text = (capi / config.KUBEADM_CONFIG).read_text()
+            self.assertEqual(text, (FIXTURES / "kubeadm.yml").read_text().replace("kubeadm.k8s.io/v1beta3", "kubeadm.k8s.io/v1beta4"))
+            self.assertEqual(text.count("apiVersion: kubeadm.k8s.io/v1beta4"), 2)
+            self.assertEqual((capi / config.KUBEADM_CONFIG).stat().st_mode & 0o777, 0o600)
+        for mutate in (lambda p: p.write_text(p.read_text() + "# drift\n"), lambda p: p.unlink(),
+                       lambda p: (p.unlink(), p.symlink_to(FIXTURES / "kubeadm.yml"))):
+            with tempfile.TemporaryDirectory() as tmp:
+                run = Path(tmp); capi = run / "image-builder/images/capi"; upstream(capi)
+                mutate(capi / config.KUBEADM_CONFIG)
+                with self.assertRaises(ValueError):
+                    config.prepare(capi, run, environment())
 
     def test_missing_and_malicious_inputs_fail_without_disclosing_values(self):
         cases = [{key: ""} for key in ("BUILD_IP", "BUILD_GATEWAY", "BUILD_NAMESERVER")]
