@@ -994,8 +994,9 @@ func run() error {
 	}
 	adminH.SetTemplateUpdates(tuSvc)
 	adminH.SetSandboxCluster(func(es *externalservice.ExternalService) (admin.SandboxCluster, error) { return sandboxServiceFor(es) })
-	// The sandbox mirror runner always runs: with PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED off it claims no job
-	// (CleanupOnly) but still cleans up dead jobs and deletes orphan worker pods (and their pod-owned credential
+	// The sandbox mirror runner always runs: with PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED off (CleanupOnly) it runs
+	// no job — a queued one, or one whose lease expired, ends as feature_disabled with its cleanup; a live-leased one is
+	// never touched — and still cleans up dead jobs and deletes orphan worker pods (and their pod-owned credential
 	// Secrets), so turning the flag off never strands a pod holding a registry token or the mirror password.
 	{
 		sbxStore := templateupdates.PGSandbox{DB: pg}
