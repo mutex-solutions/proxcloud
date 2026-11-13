@@ -14,7 +14,14 @@ type Service struct {
 	log  *slog.Logger
 }
 
-func NewService(repo *Repo, log *slog.Logger) *Service { return &Service{repo: repo, log: log} }
+// NewService builds the service; a nil log falls back to slog.Default() (a failed async write logs from its own
+// goroutine, possibly after the caller is gone, and must never panic).
+func NewService(repo *Repo, log *slog.Logger) *Service {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &Service{repo: repo, log: log}
+}
 
 // LogAsync persists the event in the background (fire-and-forget), never blocking
 // the request. Failures are logged, not surfaced.
