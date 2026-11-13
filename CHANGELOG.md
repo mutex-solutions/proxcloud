@@ -12,16 +12,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Second stable ProxCloud release, after `v0.4.0` (owner decision 2026-11-13: this is
 `v0.5.0`, not `0.4.1`). It adds portal template updates from GitHub Packages with a
 GitHub classic PAT integration and a staged → smoke test → publish/withdraw
-lifecycle, a per-provider attach policy and bulk attach of a provider to existing
-projects, a real month-end cost forecast, and Kubernetes node-image sanitizer fixes
-for the real template. It has **breaking API and CLI changes**, listed first below;
+lifecycle, sandbox template image updates mirrored from GHCR into the sandbox
+registry (off by default), a per-provider attach policy and bulk attach of a provider
+to existing projects, a real month-end cost forecast, and Kubernetes node-image
+sanitizer fixes for the real template. It has **breaking API and CLI changes**, listed first below;
 review them before upgrading scripts, clients or installer inventories.
 
 What is **not** verified: `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED` defaults **off**,
 and the VM import and its smoke test have **not been lab-verified on PVE 9.2**; the
 GitHub classic PAT integration has **not been verified against the real GitHub
-packages**. Sandbox image mirroring from the portal is not part of this release:
-sandbox template updates remain the manual `deploy/templates/images.yaml` pin path.
+packages**. Sandbox image mirroring from the portal is included but
+`PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED` defaults **off**, and it has **not been
+lab-verified** on a real sandbox cluster with Zot and GHCR (copy, digest check, prepull
+rollout, adoption, the stage-55 admission-policy probe). It pulls only the **public**
+`sandbox-*` packages, with an anonymous pull token; the GitHub PAT never reaches the
+sandbox cluster. With the flag off, sandbox template updates stay on the manual
+`deploy/templates/images.yaml` pin path. **Upgrade note**: the first `make upgrade`
+with this release restarts the sandbox registry (Zot) pod once (its users Secret gains
+the `mirror` account); pulls fail for the restart's few seconds.
 As for `v0.4.0`, "stable" does not mean full acceptance: live installer (P6) and
 split/managed-service (P7) acceptance were **not** performed, the job scheduler and
 debug triggers stay off by default, and production mail delivery and the

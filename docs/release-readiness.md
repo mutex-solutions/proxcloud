@@ -41,7 +41,7 @@ See [quickstart](quickstart.md), [installation](install.md),
 | Ubuntu 24.04 OS template | [Controlled build/smoke canary](https://github.com/mutex-solutions/proxcloud/actions/runs/42732526994) succeeded with the same cleanup checks. These templates are site-local PVE objects, not public downloadable VM disks. |
 | Kubernetes static node-template build | Code, synthetic failure/cleanup tests, NoCloud ISO tooling and generated Packer configuration were validated. **Real ISO boot, installed reboot, Goss and final seed cleanup have not been accepted on PVE yet.** Pick a Kubernetes version and run a controlled canary before advertising it as supported. |
 | Helm charts | App/Kubernetes lint and local render checks, plus database example renders, are not proof of OCI publication, anonymous pull or clean installation from released artifacts. |
-| Template updates (admin portal) | Discovery, GitHub classic PAT integration, VM import, smoke test, publish and withdraw have unit and integration tests only. The VM import and smoke test are **not lab-verified on PVE 9.2**, and the PAT integration has not been verified against the real GitHub packages. The VM executor is off unless `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true`. Sandbox image mirroring from the portal is not enabled. See [template updates](template-updates.md#7-open-items). |
+| Template updates (admin portal) | Discovery, GitHub classic PAT integration, VM import, smoke test, publish and withdraw have unit and integration tests only. The VM import and smoke test are **not lab-verified on PVE 9.2**, and the PAT integration has not been verified against the real GitHub packages. The VM executor is off unless `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true`. Sandbox image mirroring (GHCR → sandbox registry, prepull switch, rollback) has unit, PostgreSQL, integration and offline CEL admission-policy tests only; it is **not lab-verified** on a real sandbox cluster with Zot and GHCR, and runs only with `PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED=true`. It pulls public `sandbox-*` packages anonymously (private packages are refused). Residual risks: the narrow Zot `mirror` account may create a new `library/sandbox-<name>` repository (it cannot overwrite or delete an image), and the optional, operator-applied `warming-rbac.yaml` already gives the portal's sandbox identity wider pod/Secret rights in `sandbox-system` (not a regression; [§5.3](template-updates.md#53-prepull-rbac-and-admission-policy)). See [template updates](template-updates.md#7-open-items). |
 | Kubernetes node VM image | `ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2604-k8s` was published on 2026-11-12 as a separate, manually dispatched artifact; it is not part of the app chart or the release tag. Publication is not node acceptance: no kubeadm join or NodeReady is claimed, and the runtime checks in [the sanitization boundary](public-vm-sanitization.md#kubernetes-variant---k8s-os-ubuntu-2604) remain the acceptance gate. |
 | Managed services / split installer | Existing code and historical lab records are not blanket current-main fresh-install, upgrade or all-engine acceptance. Verify the selected service/operator/chart combination. |
 
@@ -60,7 +60,10 @@ registration belongs in public documentation or release artifacts.
   [registry reference boundaries](durable-registry-pins.md).
 - **Portal template updates are off by default.** The VM import, smoke test,
   publish and withdraw run only with `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true`;
-  enable it only after the lab checks in [template updates](template-updates.md#7-open-items).
+  sandbox image mirroring runs only with `PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED=true`
+  (set it the same on every API replica). Enable either only after the lab checks in
+  [template updates](template-updates.md#7-open-items). The first `make upgrade` of
+  `v0.5.0` restarts the sandbox registry (Zot) pod once.
 - **Cron/debug producers are off by default.** Primary PostgreSQL workers continue
   already-accepted jobs. Enabling scheduling is an explicit operator decision,
   especially for billing, resource sync and cloud mutations.
