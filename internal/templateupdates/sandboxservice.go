@@ -274,3 +274,41 @@ func (s PGSandbox) JobLiveByShort(ctx context.Context, short string) (bool, erro
 	 AND replace(id::text,'-','') LIKE $2)`, durablejobs.TemplateUpdateSandbox, short+"%").Scan(&live)
 	return live, err
 }
+
+// ErrSandboxPinNotFound is a pin id with no record.
+var ErrSandboxPinNotFound = errors.New("no sandbox pin record with that id")
+
+// DeleteSandboxPin removes one sandboxBuiltinPin record so deploy/templates/images.yaml wins again on the next
+// make upgrade. Nothing on the cluster changes. Refused (busy) while a job for that image is live, under the same
+// advisory lock as enqueue. Returns the record removed.
+func (s *Service) DeleteSandboxPin(ctx context.Context, id string) (*SandboxPin, error) {
+	var removed *SandboxPin
+	err := s.DB.WithTx(ctx, func(tc context.Context) error {
+		pin, err := s.Sandbox.GetPin(tc, id)
+		if err != nil {
+			return err
+		}
+		if pin == nil {
+			return ErrSandboxPinNotFound
+		}
+		if err := s.DB.LockXact(tc, "templateupdate-sandbox:"+pin.ID); err != nil {
+			return err
+		}
+		prior, err := s.Sandbox.ByRepo(tc, pin.Registry, pin.Template)
+		if err != nil {
+			return err
+		}
+		for _, r := range prior {
+			if SandboxTerminal(&r) {
+				continue
+			}
+			if state, err := s.JobState(tc, r.ID); err == nil && state == "dead" {
+				continue
+			}
+			return ErrSandboxBusy
+		}
+		removed = pin
+		return s.Sandbox.DeletePin(tc, id)
+	})
+	return removed, err
+}

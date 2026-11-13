@@ -183,10 +183,52 @@ class PinMergeTests(unittest.TestCase):
         self.assertLess(names.index("Merge the pins with images.yaml"), names.index("Copy the pinned images in"))
         self.assertLess(names.index("Merge the pins with images.yaml"), names.index("Apply the prepull and the registry's address on the sandbox cluster"))
 
+    def test_pins_answer_shape_is_checked(self):
+        check = task(STAGE55[1], "Check the pins answer")["ansible.builtin.assert"]["that"]
+        good = {"json": {"data": {"pins": [pin("base", "20261112-9d00563", D2)]}}}
+        empty = {"json": {"data": {"pins": []}}}
+        bad = [{"json": {"data": {"pins": None}}}, {"json": {"data": {"pins": "x"}}}, {"json": {"data": {"items": []}}},
+               {"json": {"data": []}}, {"json": "<html>proxy</html>"}, {"json": None}, {"json": {"data": {"pins": ["x"]}}},
+               {"json": {"data": {"pins": {"a": 1}}}}]
+
+        def ok(answer):
+            t = Templar(loader=DataLoader(), variables={"pc_sbx_portal_pins": answer})
+            try:
+                return all(t.template("{{ " + c + " }}") for c in check)
+            except Exception:
+                return False  # an expression error fails the assert too
+        self.assertTrue(ok(good))
+        self.assertTrue(ok(empty))
+        for b in bad:
+            self.assertFalse(ok(b), b)
+        # The filter refuses a non-list too (defence in depth).
+        with self.assertRaises(ValueError):
+            f.sandbox_portal_pins(self.YAML, {"pins": []}, REG)
+        with self.assertRaises(ValueError):
+            f.sandbox_portal_pins(self.YAML, ["x"], REG)
+
+    def test_handed_mirror_without_admin_key_stops(self):
+        stop = task(STAGE55[1], "Stop when the portal may hold pins this run cannot read")
+        self.assertIn("ansible.builtin.fail", stop)
+        for handed, key, override, want in ((True, False, False, True), (True, True, False, False), (False, False, False, False),
+                                            (True, False, True, False)):
+            t = Templar(loader=DataLoader(), variables={"pc_sbx_handed": {"stat": {"exists": handed}},
+                                                        "pc_sbx_key": {"stat": {"exists": key}},
+                                                        "pc_sandbox_portal_pins_unavailable_ok": override})
+            self.assertEqual(t.template("{{ " + stop["when"] + " }}"), want, (handed, key, override))
+        names = [x.get("name") for x in STAGE55[1]["tasks"]]
+        self.assertLess(names.index("Stop when the portal may hold pins this run cannot read"), names.index("Merge the pins with images.yaml"))
+        # The error texts point at the pin delete endpoint.
+        rescue = task(STAGE55[1], "Read the portal's sandbox image pins")["rescue"][0]["ansible.builtin.fail"]["msg"]
+        self.assertIn("DELETE", rescue)
+        self.assertIn("/api/v1/admin/template-updates/sandbox/pins/", rescue)
+        with self.assertRaisesRegex(ValueError, "DELETE /api/v1/admin/template-updates/sandbox/pins/"):
+            f.sandbox_portal_pins(self.YAML, [pin("base", "20261101-bbbbbbb", D2)], REG)
+
     def test_merge_task_renders(self):
         merge = task(STAGE55[1], "Merge the pins with images.yaml")["ansible.builtin.set_fact"]["pc_sbx_pins_merged"]
         ok = {"json": {"data": {"pins": [pin("base", "20261112-9d00563", D2)]}}, "failed": False, "changed": False}
-        for portal, want in ((ok, D2), (None, D1)):
+        for portal, want in ((ok, D2), (None, D1), ({}, D1)):
             v = {"pc_sandbox_pins": self.YAML, "host": REG}
             if portal is not None:
                 v["pc_sbx_portal_pins"] = portal

@@ -13,6 +13,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -498,4 +499,57 @@ func waitAudit(t *testing.T, db *pgdoc.DB, ok func([]pgdoc.M) bool) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatal("no audit event")
+}
+
+// DELETE /admin/template-updates/sandbox/pins/{id}: admin:service:manage, refused while a job for the image is live,
+// audited, and afterwards the installer's read no longer returns the pin (images.yaml wins again). Works with the flag
+// off too.
+func TestSandboxPinDelete(t *testing.T) {
+	ctx := context.Background()
+	f := newTUFixture(t, true)
+	if code, body := f.do(t, "POST", "/admin/template-updates/sandbox", mirrorBody(tuNew, tuNew), "admin-sub"); code != http.StatusOK {
+		t.Fatalf("mirror: %d %s", code, body)
+	}
+	id := url.PathEscape(tuReg + "/library/sandbox-base")
+	// No pin yet: 404.
+	if code, _ := f.do(t, "DELETE", "/admin/template-updates/sandbox/pins/"+id, "", "admin-sub"); code != http.StatusNotFound {
+		t.Fatalf("missing pin: %d", code)
+	}
+	if did, err := f.runner(30 * time.Second).RunOnce(ctx); !did || err != nil {
+		t.Fatalf("run: %v %v", did, err)
+	}
+	// A live rollback job for the image blocks the delete.
+	if code, body := f.do(t, "POST", "/admin/template-updates/sandbox/rollback",
+		`{"serviceId":"`+tuService+`","name":"base","confirmDigest":"`+tuOld+`"}`, "admin-sub"); code != http.StatusOK {
+		t.Fatalf("rollback: %d %s", code, body)
+	}
+	if code, body := f.do(t, "DELETE", "/admin/template-updates/sandbox/pins/"+id, "", "admin-sub"); code != http.StatusConflict {
+		t.Fatalf("delete while busy: %d %s", code, body)
+	}
+	if did, err := f.runner(30 * time.Second).RunOnce(ctx); !did || err != nil {
+		t.Fatalf("rollback run: %v %v", did, err)
+	}
+	if code, _ := f.do(t, "DELETE", "/admin/template-updates/sandbox/pins/"+id, "", "support-sub"); code != http.StatusForbidden {
+		t.Fatalf("SUPPORT deleted a pin: %d", code)
+	}
+	if code, _ := f.do(t, "DELETE", "/admin/template-updates/sandbox/pins/"+url.PathEscape("t/x/y"), "", "admin-sub"); code != http.StatusBadRequest {
+		t.Fatalf("malformed id: %d", code)
+	}
+	f.svc.SandboxEnabled = false // the delete stays available with the flag off
+	if code, body := f.do(t, "DELETE", "/admin/template-updates/sandbox/pins/"+id, "", "admin-sub"); code != http.StatusOK {
+		t.Fatalf("delete: %d %s", code, body)
+	}
+	if code, body := f.do(t, "GET", "/admin/template-updates/sandbox/pins?registry="+tuReg, "", "support-sub"); code != http.StatusOK || !strings.Contains(body, `"pins":[]`) {
+		t.Fatalf("pins after delete: %d %s", code, body)
+	}
+	waitAudit(t, f.db, func(evs []pgdoc.M) bool {
+		for _, e := range evs {
+			b, _ := json.Marshal(e)
+			if strings.Contains(string(b), `"DELETE"`) && strings.Contains(string(b), "sandbox-base") {
+				return true
+			}
+		}
+		return false
+	})
+	assertNoSecretPersisted(t, f.db)
 }

@@ -466,14 +466,19 @@ def sandbox_portal_pins(pins, portal, host):
     for name, ref in out.items():
         repo, tag, digest = _split_ref(ref)
         by_repo["%s/library/%s" % (host, repo.rsplit("/", 1)[-1])] = (name, tag, digest)
-    for p in sorted(portal or [], key=lambda x: str(x.get("id", ""))):
-        if not isinstance(p, dict) or p.get("registry") != host:
+    if not isinstance(portal or [], list):
+        raise ValueError("the portal's sandbox pins are not a list")
+    for p in sorted(portal or [], key=lambda x: str(x.get("id", "")) if isinstance(x, dict) else ""):
+        if not isinstance(p, dict):
+            raise ValueError("the portal's sandbox pins hold a non-object entry")
+        if p.get("registry") != host:
             continue
         name, tag, digest = str(p.get("template", "")), str(p.get("tag", "")), str(p.get("digest", ""))
         repo = "%s/library/sandbox-%s" % (host, name)
         if (p.get("id") != repo or not re.match(r"^[a-z0-9][a-z0-9-]{0,62}$", name) or not re.match(_SANDBOX_TAG, tag)
                 or not re.match(r"^sha256:[0-9a-f]{64}$", digest)):
-            raise ValueError("the portal's sandbox pin record %r is malformed; fix or delete it before upgrading" % p.get("id"))
+            raise ValueError("the portal's sandbox pin record %r is malformed; delete it (DELETE /api/v1/admin/template-updates/"
+                             "sandbox/pins/<id>) before upgrading" % p.get("id"))
         source = _PIN_SOURCE % (name, tag, digest)
         line = "  %s: %s" % (name, source)
         if repo not in by_repo:
@@ -493,8 +498,10 @@ def sandbox_portal_pins(pins, portal, host):
             if not ym or ym.group(1) == pm.group(1):
                 raise ValueError(
                     "sandbox-%s: deploy/templates/images.yaml pins %s and the portal pinned %s:%s (%s); which is newer "
-                    "cannot be told. Commit the image you want in images.yaml (the portal's line is: %s) and run make "
-                    "upgrade again" % (name, ydigest, tag, digest, p.get("action", "mirror"), line.strip()))
+                    "cannot be told. Commit the portal's line (%s) to images.yaml, or delete the portal's pin to let "
+                    "images.yaml win (Template updates, or DELETE /api/v1/admin/template-updates/sandbox/pins/%s), and run "
+                    "make upgrade again" % (name, ydigest, tag, digest, p.get("action", "mirror"), line.strip(),
+                                            repo.replace("/", "%2F")))
             winner = "pin" if pm.group(1) > ym.group(1) else "yaml"
         if winner == "pin":
             out[key] = source

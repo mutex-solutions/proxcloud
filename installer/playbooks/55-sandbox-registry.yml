@@ -72,13 +72,27 @@
     # The portal may have mirrored a newer built-in image and pointed the prepull at it (Template updates, docs/
     # template-updates.md §4). Rendering images.yaml alone would silently roll that back, so the pins are read first,
     # with the installer's admin API key (stage 60 mints it) from the read-only, secret-free pin list: no database
-    # credential, and the same identity stage 60 already uses. No key yet = first install: the portal has never run a
-    # mirror. A key and no answer stops here.
+    # credential, and the same identity stage 60 already uses. No key and no mirror account ever handed over = a
+    # first install: the portal has never run a mirror. Anything else that does not yield the pin list stops here.
     - name: Is there an admin key
       ansible.builtin.stat: {path: "{{ key_file }}"}
       delegate_to: localhost
       become: false
       register: pc_sbx_key
+    - name: Was the mirror account handed to the portal
+      ansible.builtin.stat: {path: "{{ pc_gen }}/sandbox-registry-mirror.handed"}
+      delegate_to: localhost
+      become: false
+      register: pc_sbx_handed
+    - name: Stop when the portal may hold pins this run cannot read
+      when: pc_sbx_handed.stat.exists and not pc_sbx_key.stat.exists and not (pc_sandbox_portal_pins_unavailable_ok | default(false) | bool)
+      ansible.builtin.fail:
+        msg: >-
+          The portal was given the sandbox mirror account ({{ pc_gen }}/sandbox-registry-mirror.handed) but the installer's
+          admin key {{ key_file }} is missing, so its sandbox image pins cannot be read; rendering
+          deploy/templates/images.yaml alone could roll back an image the portal mirrored. Restore {{ key_file }} from the
+          site backup and run make upgrade again. Only if you know no sandbox image was mirrored from the portal (Template
+          updates), run it with -e pc_sandbox_portal_pins_unavailable_ok=true.
     - name: Read the portal's sandbox image pins
       when: pc_sbx_key.stat.exists
       block:
@@ -96,24 +110,40 @@
           retries: 10
           delay: 10
           until: pc_sbx_portal_pins is succeeded or (pc_sbx_portal_pins.status | default(0)) in [400, 401, 403, 404]
+        # Only the documented answer counts: {data: {pins: [...]}}. An older API (no such route), a proxy page or any
+        # other shape is "could not read", never "no pins".
+        - name: Check the pins answer
+          ansible.builtin.assert:
+            that:
+              - pc_sbx_portal_pins.json is mapping
+              - pc_sbx_portal_pins.json.data is defined and pc_sbx_portal_pins.json.data is mapping
+              - pc_sbx_portal_pins.json.data.pins is defined
+              - pc_sbx_portal_pins.json.data.pins is sequence and pc_sbx_portal_pins.json.data.pins is not string
+              - pc_sbx_portal_pins.json.data.pins | map('type_debug') | reject('in', ['dict', 'AnsibleMapping']) | list | length == 0
+            fail_msg: "the pins endpoint answered something other than a data.pins list"
+            quiet: true
       rescue:
         - name: Stop instead of rolling a portal pin back
           when: not (pc_sandbox_portal_pins_unavailable_ok | default(false) | bool)
           ansible.builtin.fail:
             msg: >-
               The portal's sandbox image pins could not be read (GET /api/v1/admin/template-updates/sandbox/pins with
-              {{ key_file }}: {{ (pc_sbx_portal_pins | default({})).msg | default((pc_sbx_api_ip | default({})).stderr | default('no answer')) }}).
+              {{ key_file }}: {{ ansible_failed_result.msg | default((pc_sbx_api_ip | default({})).stderr | default('no answer')) }}).
               Rendering deploy/templates/images.yaml alone could roll back an image the portal mirrored, so the upgrade
-              stops here. Bring the portal's API back and run make upgrade again. Only if you know no sandbox image was
-              mirrored from the portal (Template updates), run it with -e pc_sandbox_portal_pins_unavailable_ok=true.
+              stops here. Bring the portal's API back and run make upgrade again. To let images.yaml win for an image on
+              purpose, delete its pin first (Template updates, or DELETE
+              /api/v1/admin/template-updates/sandbox/pins/<registry>%2Flibrary%2Fsandbox-<name>). Only if you know no
+              sandbox image was mirrored from the portal, run it with -e pc_sandbox_portal_pins_unavailable_ok=true.
+        - name: Forget the unread answer
+          ansible.builtin.set_fact: {pc_sbx_portal_pins: {}}
         - name: Say that the pins were skipped on request
           ansible.builtin.debug:
             msg: the portal's sandbox image pins were NOT read (pc_sandbox_portal_pins_unavailable_ok); images.yaml is rendered as is
     - name: Merge the pins with images.yaml
       ansible.builtin.set_fact:
         pc_sbx_pins_merged: >-
-          {{ pc_sandbox_pins | pc_sandbox_portal_pins((pc_sbx_portal_pins.json.data.pins | default([]))
-             if pc_sbx_portal_pins is defined and pc_sbx_portal_pins is succeeded and pc_sbx_portal_pins.json is defined else [], host) }}
+          {{ pc_sandbox_pins | pc_sandbox_portal_pins(pc_sbx_portal_pins.json.data.pins
+             if (pc_sbx_portal_pins | default({})).json.data.pins is defined else [], host) }}
     - name: Say which portal pins win over images.yaml
       when: pc_sbx_pins_merged.notes | length > 0
       ansible.builtin.debug:

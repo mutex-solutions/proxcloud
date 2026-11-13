@@ -252,6 +252,7 @@ Approved by the owner (2026-11-13, automatic). Code: [`internal/templateupdates/
 | `POST /admin/template-updates/sandbox/rollback` `{serviceId, name, confirmDigest}` | `admin:service:manage` | 501 |
 | `GET /admin/template-updates/sandbox/state` (jobs, pins, prepull/adoption progress) | `admin:service:read` | answers |
 | `GET /admin/template-updates/sandbox/pins[?registry=host]` (installer stage 55) | `admin:service:read` | answers |
+| `DELETE /admin/template-updates/sandbox/pins/{id}` (id URL-escaped; images.yaml wins again) | `admin:service:manage` | answers |
 
 ### 4.1 Registry account `mirror`
 
@@ -266,7 +267,11 @@ mounted. Its rights, in `http.accessControl`:
 | `t/**`, `t/<project>/**` | no `mirror` |
 
 No `update` (an existing tag never moves), no `delete`, nothing under `t/**` or `library/proxcloud-*`;
-`mirror` is not in the pull group nor an admin. Stage 60 hands the password to the sandbox provider as
+`mirror` is not in the pull group nor an admin. **Residual risk**: `create` on the pattern lets the account
+create a *new* repository `library/sandbox-<anything>` (Zot patterns cannot list names). Nothing pulls an
+unknown name — the prepull DaemonSets and templates name only what the portal and `images.yaml` pinned, and
+the admission policy keeps each init container in its own repository — but a leaked mirror password could
+add images there (it could not overwrite or delete one). Stage 60 hands the password to the sandbox provider as
 `secret.registryMirror` (encrypted, write-only like every provider secret: no read, list or audit returns
 it). Idempotent: a provider registered after the change gets it with its other secrets; an existing one
 gets one `PUT` whose hash (provider id + password, never the password) is kept in
@@ -288,13 +293,21 @@ an advisory lock on `<registry>/library/sandbox-<name>` refuses while another jo
 
 1. **Copy**: the trusted `sandbox-import` worker in copy mode — fixed argv
    `mirror ghcr.io/mutex-solutions/sandbox-<name>@<digest> <registry>/library/sandbox-<name>:<tag> <policy>`,
-   the operator-pinned digest image of `sandbox-system/sandbox-import-worker`, a pod in `sbx-build`
+   the operator-pinned digest image of `sandbox-system/sandbox-import-worker` (read through a Role that
+   allows `get` on that one Secret), a pod in `sbx-build`
    (`tu-mirror-<16 hex>-e<epoch>`, no service-account token, read-only root, its image pulled with the
    read-only `sandbox-registry-nodes` account the sync now also writes into `sbx-build`). Its two
    credentials are dockerconfigjson Secrets written **after** the pod, with an `ownerReference` to the
-   pod's observed UID: the GitHub PAT (`ghcr.io` only) and the mirror account (the registry only). They
-   are garbage-collected with the pod; the job deletes the pod (UID precondition) as soon as the result
-   is read, and every pod of the job on finish/cleanup. The worker copies the source's own manifest bytes
+   pod's observed UID: a **short-lived GHCR registry token** pull-scoped to the one `sandbox-<name>`
+   package — the portal exchanges the GitHub PAT for it (`GET https://ghcr.io/token?scope=repository:
+   mutex-solutions/sandbox-<name>:pull`); **the PAT never leaves the portal** and the worker refuses a
+   username/password for the source — and the mirror account (the registry only). They are garbage-collected
+   with the pod; the job deletes the pod (UID precondition) as soon as the result is read, and every pod of
+   the job on finish/cleanup. A failed delete is recorded in the receipt. A pod that stays Pending more than
+   5 minutes is replaced; a pod whose Secrets were not confirmed written is never waited for. The runner
+   runs even with the flag off (it then claims no job): it cleans up dead jobs and deletes mirror pods of
+   jobs that are not pending/running (an **orphan sweep**, every 10 minutes, every sandbox provider), so no
+   pod with a credential outlives its job. The worker copies the source's own manifest bytes
    (same digest) through transports fenced to `ghcr.io` (pull scope of that one repository; the blob
    redirect to `pkg-containers.githubusercontent.com` without credentials) and to the one destination
    repository; an existing destination tag is accepted only at the same digest (a re-run), never moved.
@@ -303,10 +316,14 @@ an advisory lock on `<registry>/library/sandbox-<name>` refuses while another jo
    and its CA, and requires the sha256 of the bytes to be the payload digest (`digest_mismatch`,
    permanent, otherwise).
 3. **Prepull**: in one fenced transaction the pin record (`sandboxBuiltinPin`, below) and the images
-   being replaced are recorded; then the DaemonSets are patched (§4.3).
+   being replaced are recorded; then the DaemonSets are patched (§4.3). Each DaemonSet is its own
+   guarded patch: if one lands and the other is refused, the landed containers are recorded and the
+   attempt retries; a job that ends that way puts the landed containers back on their recorded images
+   (only those still on its ref) before it restores the pin, so the two DaemonSets never stay on
+   different digests.
 
 Failure codes (`[a-z_]`, never a provider string): `invalid_payload`, `receipt_mismatch`,
-`github_not_configured`, `mirror_unavailable` (no worker image, no template registry or no mirror
+`github_not_configured`, `github_refused`, `mirror_unavailable` (no worker image, no template registry or no mirror
 account), `mirror_result_invalid`, `digest_mismatch`, `registry_refused`, `rollback_target_missing`,
 `ownership_lost`, `provider_missing`, `registry_changed`, `executor_unavailable`, `attempts_exhausted`,
 `job_dead`. **Resume**: a new acquisition continues from the last committed step; a worker that already
@@ -391,10 +408,14 @@ copy list and the prepull from the **newer** of `images.yaml` and the pin per im
 change; a pin whose `previous` is exactly `images.yaml`'s digest wins (a newer mirror, or a deliberate
 rollback); otherwise the later `<YYYYMMDD>` tag date wins; two digests that cannot be ordered stop the
 upgrade with the line to commit. It prints the `images.yaml` lines to commit; the page shows the same line
-per pin. **Fail closed**: with an admin key present and no answer from the API (or a refusal), the upgrade
-stops with a clear message instead of rendering `images.yaml` alone; `-e
-pc_sandbox_portal_pins_unavailable_ok=true` overrides it only when the operator knows no image was
-mirrored from the portal. No admin key = first install: nothing to read.
+per pin. To let `images.yaml` win for an image on purpose, delete its pin (`DELETE …/sandbox/pins/{id}`,
+`admin:service:manage`, audited, refused while a job for the image is live; the cluster is not touched).
+**Fail closed**: the upgrade stops with a clear message instead of rendering `images.yaml` alone when the
+admin key is present and the API does not answer, refuses, or answers anything but `{data: {pins: [...]}}`
+(an older API, a proxy page); and when `generated/sandbox-registry-mirror.handed` exists (the portal got
+the mirror account) but the admin key is missing. `-e pc_sandbox_portal_pins_unavailable_ok=true`
+overrides it only when the operator knows no image was mirrored from the portal. No admin key and no
+hand-over = first install: nothing to read.
 
 ### 4.6 Enabling
 
@@ -402,8 +423,12 @@ mirrored from the portal. No admin key = first install: nothing to read.
 2. Check: `kubectl -n sandbox-system auth can-i patch daemonset/template-prepull
    --as=system:serviceaccount:proxcloud-system:proxcloud` → yes; `… patch daemonset/node-setup` → no; the
    policy is admitted (`kubectl get validatingadmissionpolicy proxcloud-template-prepull-images-only`).
-3. `sandbox-system/sandbox-import-worker` holds the digest-pinned worker built from this release
-   (`deploy/sandbox-import.Dockerfile`; copy mode is new: an older worker image refuses `mirror` argv).
+3. `sandbox-system/sandbox-import-worker` (key `image`) holds the digest-pinned worker built from this
+   release (`deploy/sandbox-import.Dockerfile`, pushed to `<registry>/library/proxcloud-sandbox-import`;
+   copy mode and its registry-token source are new: an older worker refuses them). The installer grants the
+   portal `get` on that one Secret (Role `proxcloud-import-worker`) but does not build or write it; check
+   with `kubectl -n sandbox-system auth can-i get secret/sandbox-import-worker
+   --as=system:serviceaccount:proxcloud-system:proxcloud` → yes, `… get secret/sandbox-registry-nodes` → no.
 4. The provider has `imageAdoption: on` and the GitHub integration is configured.
 5. `PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED=true` (or `proxcloud.template-updates.sandbox-enabled`) on
    the API: starts the runner and allows the two POSTs. Off, they answer 501 and nothing runs.

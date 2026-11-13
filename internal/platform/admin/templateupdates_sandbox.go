@@ -6,16 +6,22 @@ package admin
 //	POST /admin/template-updates/sandbox/rollback   re-point the prepull at the previous pin   (admin:service:manage)
 //	GET  /admin/template-updates/sandbox/state      receipts, pins and prepull progress per provider (admin:service:read)
 //	GET  /admin/template-updates/sandbox/pins       sandboxBuiltinPin records (admin:service:read; installer stage 55)
+//	DELETE /admin/template-updates/sandbox/pins/{id} drop a pin so images.yaml wins again (admin:service:manage)
 //
-// Mirror and rollback answer 501 unless PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED is set. The pin list is read-only
-// and always available: installer stage 55 must be able to read it whether or not the feature is on.
+// Mirror and rollback answer 501 unless PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED is set. The pin list and the pin
+// delete are always available: installer stage 55 reads the pins whether or not the feature is on, and an operator
+// must be able to let images.yaml win again after turning it off.
 
 import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
+	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/go-chi/chi/v5"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
@@ -268,3 +274,34 @@ func (h *Handler) templateUpdatesSandboxPins(w http.ResponseWriter, r *http.Requ
 	}
 	httpx.OK(w, map[string]any{"pins": pins})
 }
+
+// templateUpdatesSandboxPinDelete drops one sandboxBuiltinPin record (id = <registry>/library/sandbox-<name>, URL-
+// escaped) so the next make upgrade renders deploy/templates/images.yaml for that image again. The cluster is not
+// touched. Refused (409) while a job for the image is queued or running.
+func (h *Handler) templateUpdatesSandboxPinDelete(w http.ResponseWriter, r *http.Request) {
+	if !h.require(w, r, templateUpdatesManagePerm) || !h.templateUpdatesReady(w) {
+		return
+	}
+	id, err := url.PathUnescape(chi.URLParam(r, "*"))
+	if err != nil || !sandboxPinIDRE.MatchString(id) {
+		httpx.WriteError(w, httpx.BadRequest("A pin id is <registry>/library/sandbox-<name>"))
+		return
+	}
+	pin, err := h.templateUpdates.DeleteSandboxPin(r.Context(), id)
+	switch {
+	case errors.Is(err, templateupdates.ErrSandboxPinNotFound):
+		httpx.Err(w, http.StatusNotFound, http.StatusNotFound, err.Error())
+		return
+	case errors.Is(err, templateupdates.ErrSandboxBusy):
+		httpx.Err(w, http.StatusConflict, http.StatusConflict, err.Error())
+		return
+	case err != nil:
+		httpx.Err(w, http.StatusServiceUnavailable, http.StatusServiceUnavailable, "The sandbox pin record could not be deleted")
+		return
+	}
+	audit.RecordSnapshots(r.Context(), map[string]any{"pin": pin.ID, "digest": pin.Digest, "ref": pin.Ref, "action": pin.Action, "mirrorJob": pin.MirrorJob},
+		map[string]any{"pin": pin.ID, "digest": "", "ref": "deploy/templates/images.yaml"})
+	httpx.OK(w, map[string]any{"id": pin.ID, "deleted": true})
+}
+
+var sandboxPinIDRE = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{0,252}(:[0-9]{1,5})?/library/sandbox-[a-z0-9][a-z0-9-]{0,62}$`)

@@ -504,6 +504,12 @@ function SandboxTab({ rows, loading, state, enabled, canManage, onUpdate, onRoll
   rows?: SandboxRow[]; loading: boolean; state?: SandboxState; enabled: boolean; canManage: boolean
   onUpdate: (r: SandboxRow, serviceId: string) => void; onRollback: (s: SandboxImageState) => void
 }) {
+  const qc = useQueryClient()
+  const dropPin = useMutation({
+    mutationFn: (id: string) => apiFetch(`${BASE}/sandbox/pins/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    onSuccess: () => { toast.success("Pin deleted: images.yaml wins again on the next make upgrade"); void qc.invalidateQueries({ queryKey: ["tu-sandbox"] }) },
+    onError: (e) => toast.error(e instanceof ApiError || e instanceof Error ? e.message : String(e)),
+  })
   const latestJob = (name: string, serviceId: string) =>
     state?.items.filter((r) => r.payload.name === name && r.payload.serviceId === serviceId).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
   const stateOf = (name: string, serviceId: string) => state?.states.find((s) => s.name === name && s.serviceId === serviceId)
@@ -598,6 +604,13 @@ function SandboxTab({ rows, loading, state, enabled, canManage, onUpdate, onRoll
                                 <Button size="sm" variant="outline" disabled={!enabled || !canManage || busy}
                                   title={!enabled ? "Not enabled on this site" : !canManage ? "Needs admin:service:manage" : undefined}
                                   onClick={() => onRollback(st)}>Rollback…</Button>
+                              )}
+                              {st?.pin && (
+                                <Button size="sm" variant="ghost" disabled={!canManage || busy || dropPin.isPending}
+                                  title="Forget the portal's pin: the next make upgrade renders deploy/templates/images.yaml for this image (nothing on the cluster changes)"
+                                  onClick={() => {
+                                    if (window.confirm(`Delete the portal's pin of sandbox-${st.name}? The next make upgrade renders images.yaml for it.`)) dropPin.mutate(st.pin!.id)
+                                  }}>Delete pin</Button>
                               )}
                             </div>
                           </div>

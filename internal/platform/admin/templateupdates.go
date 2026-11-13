@@ -49,6 +49,8 @@ func (h *Handler) routeTemplateUpdates(r chi.Router) {
 	r.Post("/template-updates/sandbox/rollback", h.templateUpdatesSandboxRollback)
 	r.Get("/template-updates/sandbox/state", h.templateUpdatesSandboxState)
 	r.Get("/template-updates/sandbox/pins", h.templateUpdatesSandboxPins)
+	// The id contains slashes (<registry>/library/sandbox-<name>): a wildcard, URL-escaped by the caller.
+	r.Delete("/template-updates/sandbox/pins/*", h.templateUpdatesSandboxPinDelete)
 }
 
 func (h *Handler) templateUpdatesReady(w http.ResponseWriter) bool {
