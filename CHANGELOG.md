@@ -33,8 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recorded as a `sandboxBuiltinPin`; `make upgrade` reads the pins through the admin API and renders
   the newer of `images.yaml` and the pin, printing the line to commit, and stops (instead of rolling
   back) when it cannot read them; `DELETE /api/v1/admin/template-updates/sandbox/pins/{id}` lets
-  `images.yaml` win again. The worker gets only a short-lived GHCR token pull-scoped to the one
-  package (the GitHub PAT stays in the portal). The admission policy compares fields by name, so stage
+  `images.yaml` win again. The worker gets only an anonymous short-lived GHCR token pull-scoped to the one public package, checked never to be or contain the GitHub PAT (used for discovery only; private packages are refused, `ghcr_package_not_public`). The admission policy compares fields by name, so stage
   55 first checks the sandbox cluster's OpenAPI schemas and stops the upgrade on any field the policy
   does not cover; prepull init containers now run non-root with a read-only root and no capabilities.
   **Upgrade note**: the first `make upgrade` with this change restarts the sandbox registry (Zot) pod

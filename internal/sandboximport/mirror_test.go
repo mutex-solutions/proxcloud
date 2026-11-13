@@ -77,9 +77,29 @@ func TestMirrorSourceGuard(t *testing.T) {
 	if _, err := g.RoundTrip(r); err == nil {
 		t.Error("allowed a write to the source")
 	}
+	// The token endpoint: exactly one pull scope of the source repository and service=ghcr.io, nothing else.
+	for _, qs := range []string{
+		"", "service=ghcr.io", "scope=repository:mutex-solutions/sandbox-base:pull",
+		"scope=repository:mutex-solutions/sandbox-base:pull&scope=repository:mutex-solutions/sandbox-base:pull&service=ghcr.io",
+		"scope=repository:mutex-solutions/sandbox-base:pull&service=ghcr.io&service=ghcr.io",
+		"scope=repository:mutex-solutions/sandbox-base:pull&service=docker.io",
+		"scope=repository:mutex-solutions/sandbox-base:pull,push&service=ghcr.io",
+		"scope=repository:mutex-solutions/sandbox-base:pull&service=ghcr.io&offline_token=true",
+		"scope=&service=ghcr.io",
+	} {
+		r, _ := http.NewRequest("GET", "https://ghcr.io/token?"+qs, nil)
+		if _, err := g.RoundTrip(r); err == nil {
+			t.Errorf("allowed /token?%s", qs)
+		}
+	}
 	if calls != 0 {
 		t.Fatalf("refused requests reached the network: %d", calls)
 	}
+	r, _ = http.NewRequest("GET", "https://ghcr.io/token?scope=repository:mutex-solutions/sandbox-base:pull&service=ghcr.io", nil)
+	if _, err := g.RoundTrip(r); err != nil || calls != 1 {
+		t.Fatalf("the exact token request was refused: %v", err)
+	}
+	calls = 0
 	// The blob storage host is reached without the credential.
 	var sawAuth string
 	g.Base = rt(func(r *http.Request) (*http.Response, error) {

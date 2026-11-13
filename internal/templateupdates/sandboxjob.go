@@ -50,14 +50,21 @@ var ErrRegistryNotFound = errors.New("registry: manifest not found")
 // ErrRegistryRefused is a registry refusal of the mirror account (401/403).
 var ErrRegistryRefused = errors.New("registry: the mirror account was refused")
 
+// ErrMirrorWorkerFailed (fixed code mirror_worker_failed) is a worker pod that ended Failed — e.g. its short-lived
+// anonymous GHCR token expired during a slow copy. Retryable: the next attempt mints a fresh token for a new pod.
+var ErrMirrorWorkerFailed = errors.New("mirror_worker_failed: the mirror worker failed; the next attempt uses a fresh source token")
+
+const mirrorWorkerFailedWarn = "mirror_worker_failed: a mirror worker failed (an expired source token or a transient error); retried with a fresh anonymous GHCR token"
+
 // SandboxExecutor runs one acquisition.
 type SandboxExecutor struct {
 	Cluster  SandboxCluster
 	Registry DigestResolver
 	Receipts SandboxReceipts
 	Pins     SandboxPins
-	// SourceToken mints, at run time, a short-lived GHCR registry token with pull scope on the one source package
-	// from the GitHub integration's PAT (mirror only). The PAT never leaves the portal; the token is never stored.
+	// SourceToken mints, at run time, an ANONYMOUS short-lived GHCR registry token with pull scope on the one public
+	// source package (Client.PullToken; mirror only). The PAT is used for discovery only and never takes part in it nor
+	// leaves the portal; the token is checked (CheckPullToken) before it is written to the worker Secret, never stored.
 	SourceToken func(ctx context.Context, pkg string) (string, error)
 	// Poll / PodWait bound the wait for the worker pod (defaults 5s / sandbox.MirrorTimeout+5m); PendingLimit how
 	// long it may stay Pending before it is replaced (default sandbox.MirrorPendingLimit).
@@ -189,13 +196,20 @@ func (x *SandboxExecutor) mirror(ctx context.Context, jobID string, p SandboxPay
 	}
 	if name == "" {
 		tok, err := x.SourceToken(ctx, SandboxPackage(p.Name))
-		if err != nil || strings.TrimSpace(tok) == "" {
-			var he *HTTPError
+		if err == nil {
+			// Defense in depth (the minting side checks it against the PAT): never write a GitHub token, an empty or
+			// malformed value into the worker Secret.
+			err = CheckPullToken(tok, "")
+		}
+		if err != nil {
+			var pe *Permanent
 			switch {
-			case errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrNoToken) || err == nil:
+			case errors.As(err, &pe) && (pe.Code == CodeTokenUnscoped || pe.Code == CodePackageNotPublic):
+				return permanent(pe.Code, pe.Message)
+			case errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrNoToken):
 				return permanent("github_not_configured", "the GitHub integration has no token")
-			case errors.As(err, &he) && (he.Status == 401 || he.Status == 403):
-				return permanent("github_refused", "GHCR refused the GitHub integration's token for this package")
+			case isPermanent(err):
+				return permanent(CodeTokenUnscoped, "the GHCR source token was refused")
 			}
 			return errors.New("a GHCR registry token could not be obtained")
 		}
@@ -282,8 +296,16 @@ func (x *SandboxExecutor) settlePod(ctx context.Context, f Fence, p SandboxPaylo
 		x.dropPod(ctx, f, r, pod)
 		return true, nil
 	case "Failed":
+		// Retryable, never permanent: the anonymous source token cannot be refreshed inside the worker, so a copy that
+		// outlives it (or any transient failure) fails the pod; the next attempt mints a fresh token for a new pod.
 		x.dropPod(ctx, f, r, pod)
-		return true, errors.New("the mirror worker failed")
+		if err := x.checkpoint(ctx, f, r, r.Step, func(_ context.Context, n *SandboxReceipt) error {
+			n.Warnings = appendOnce(n.Warnings, mirrorWorkerFailedWarn)
+			return nil
+		}); err != nil {
+			return true, err
+		}
+		return true, ErrMirrorWorkerFailed
 	}
 	return false, nil
 }

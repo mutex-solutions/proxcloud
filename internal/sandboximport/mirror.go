@@ -7,8 +7,8 @@ package sandboximport
 //
 // to the sandbox registry as <registry>/library/sandbox-<name>:<YYYYMMDD>-<sha7>, byte for byte (the same
 // manifest bytes, so the same digest), and proves the destination resolves to that digest. Inputs are fixed argv
-// (mode, source, destination, policy); the source credential is the GitHub integration's PAT in a pod-owned pull
-// Secret, the destination credential the narrow Zot "mirror" account (read/create on library/sandbox-* only).
+// (mode, source, destination, policy); the source credential is an anonymous short-lived GHCR registry token (pull
+// scope of the one public source repository; never the GitHub PAT) in a pod-owned pull Secret, the destination credential the narrow Zot "mirror" account (read/create on library/sandbox-* only).
 // Nothing is executed or unpacked; no other registry, repository, redirect or token realm is reachable.
 
 import (
@@ -176,21 +176,11 @@ func (g mirrorSourceGuard) RoundTrip(r *http.Request) (*http.Response, error) {
 	q := r.URL.Query()
 	switch {
 	case r.URL.Path == "/token":
-		for k, vs := range q {
-			switch k {
-			case "scope":
-				for _, sc := range vs {
-					if sc != "repository:"+g.Repo+":pull" {
-						return nil, errors.New("mirror token scope outside the source repository")
-					}
-				}
-			case "service":
-				if len(vs) != 1 || vs[0] != MirrorSourceHost {
-					return nil, errors.New("unexpected mirror token service")
-				}
-			default:
-				return nil, errors.New("unexpected mirror token parameter")
-			}
+		// Exactly scope=repository:<source repo>:pull and service=ghcr.io, each once, nothing else (a request without a
+		// scope would mint an unscoped token).
+		if len(q) != 2 || len(q["scope"]) != 1 || q.Get("scope") != "repository:"+g.Repo+":pull" ||
+			len(q["service"]) != 1 || q.Get("service") != MirrorSourceHost {
+			return nil, errors.New("mirror token request must carry exactly the source repository's pull scope and service ghcr.io")
 		}
 		return g.check(g.Base.RoundTrip(r))
 	case r.URL.Path == "/v2/" && len(q) == 0:
@@ -233,8 +223,8 @@ func (g mirrorSourceGuard) check(resp *http.Response, err error) (*http.Response
 }
 
 // MirrorSourceCredential reads the source credential of copy mode: a dockerconfigjson for ghcr.io holding ONLY a
-// short-lived registry bearer token ("registrytoken": pull scope of the one source repository, minted by the portal
-// from the GitHub integration's PAT). A username/password, identity token or any other host is refused: the PAT itself
+// short-lived registry bearer token ("registrytoken": pull scope of the one source repository, requested anonymously
+// by the portal — the GitHub PAT takes no part in it). A username/password, identity token or any other host is refused: the PAT itself
 // never reaches the worker.
 func MirrorSourceCredential(data []byte) (authn.AuthConfig, error) {
 	var d struct {

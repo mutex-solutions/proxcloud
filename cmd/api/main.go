@@ -1049,8 +1049,9 @@ func run() error {
 				}
 				return &templateupdates.SandboxExecutor{Cluster: ss, Receipts: sbxStore, Pins: sbxStore,
 					Registry: templateupdates.NewRegistryReader(p.Registry, sc.RegistryCA, sc.RegistryMirror.User, sc.RegistryMirror.Password, ""),
-					// The PAT is exchanged here for a GHCR token pull-scoped to this one package; only that token reaches
-					// the worker's pod-owned Secret.
+					// An ANONYMOUS GHCR token pull-scoped to this one public package (minted without the PAT, which is
+					// used for discovery only and never leaves the portal), checked by CheckPullToken; only that token
+					// reaches the worker's pod-owned Secret.
 					SourceToken: func(ctx context.Context, pkg string) (string, error) {
 						gh, err := tuSvc.Client(ctx)
 						if err != nil {

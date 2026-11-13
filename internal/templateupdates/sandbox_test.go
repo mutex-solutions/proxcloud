@@ -2,6 +2,7 @@ package templateupdates
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -334,6 +335,116 @@ func TestSandboxMirrorRefusesAnotherDigest(t *testing.T) {
 				t.Fatalf("leftover pods %v cleaned=%v", cl.pods, rec.Cleaned)
 			}
 		})
+	}
+}
+
+// End to end through the executor with the real PullToken against a fake GHCR: whatever GHCR answers, the worker request
+// (= the source Secret payload) never carries the PAT or anything derived from it; refusals are permanent with their
+// fixed code and start no worker at all; the anonymous token request never carries an Authorization header.
+func TestSandboxMirrorSourceSecretNeverHoldsThePAT(t *testing.T) {
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	for name, tc := range map[string]struct {
+		f    *fakeGHCR
+		code string // "" = accepted
+	}{
+		"real token":        {&fakeGHCR{tokenBody: `{"token":"` + realGHCRToken + `","expires_in":300}`}, ""},
+		"base64(PAT)":       {&fakeGHCR{tokenBody: `{"token":"` + b64(testPAT) + `"}`}, CodeTokenUnscoped},
+		"base64(user:PAT)":  {&fakeGHCR{tokenBody: `{"token":"` + b64("x:"+testPAT) + `"}`}, CodeTokenUnscoped},
+		"the PAT":           {&fakeGHCR{tokenBody: `{"token":"` + testPAT + `"}`}, CodeTokenUnscoped},
+		"ghp_":              {&fakeGHCR{tokenBody: `{"token":"ghp_anotherClassicTokenValue000000000000"}`}, CodeTokenUnscoped},
+		"expires_in 7200":   {&fakeGHCR{tokenBody: `{"token":"` + realGHCRToken + `","expires_in":7200}`}, CodeTokenUnscoped},
+		"private (401)":     {&fakeGHCR{tokenStatus: 401}, CodePackageNotPublic},
+		"private (403)":     {&fakeGHCR{tokenStatus: 403}, CodePackageNotPublic},
+		"manifest read 404": {&fakeGHCR{tokenBody: `{"token":"` + realGHCRToken + `"}`, tagStatus: 404}, CodePackageNotPublic},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := tc.f
+			gh := fakeGHCRClient(t, f)
+			p := sbxPayload()
+			r, jobs, cl, reg, mem := sbxFixture(t, p)
+			build := r.Build
+			r.Build = func(ctx context.Context, sp SandboxPayload) (*SandboxExecutor, error) {
+				x, err := build(ctx, sp)
+				if err == nil {
+					x.SourceToken = gh.PullToken
+				}
+				return x, err
+			}
+			_ = reg
+			_, _ = r.RunOnce(context.Background())
+			rec := mem.recs[sbxJob]
+			all, _ := json.Marshal([]any{cl.started, mem.recs, mem.pins, string(jobs.job.Payload), jobs.failCode})
+			for _, secret := range []string{testPAT, b64(testPAT)[:24], base64.RawURLEncoding.EncodeToString([]byte(testPAT))[:24]} {
+				if strings.Contains(string(all), secret) {
+					t.Fatal("the PAT (or its base64) reached the worker request, a receipt, a pin or the job")
+				}
+			}
+			for _, a := range f.auths {
+				if a != "" {
+					t.Fatalf("the token request carried Authorization %q", a)
+				}
+			}
+			if tc.code == "" {
+				if len(cl.started) != 1 || cl.started[0].SourceToken != realGHCRToken || rec.Step != SbxSucceeded {
+					t.Fatalf("accepted token: started=%d step=%s", len(cl.started), rec.Step)
+				}
+				return
+			}
+			if len(cl.started) != 0 {
+				t.Fatalf("a refused token started a worker (its Secret would be written): %+v", cl.started)
+			}
+			if !jobs.permanent || jobs.failCode != tc.code || rec.Step != SbxFailed || rec.Code != tc.code {
+				t.Fatalf("want permanent %s, got permanent=%v code=%q step=%s rec.code=%q", tc.code, jobs.permanent, jobs.failCode, rec.Step, rec.Code)
+			}
+		})
+	}
+	// Defense in depth at the call site: a SourceToken that hands back a GitHub token is refused before any worker.
+	p := sbxPayload()
+	r, jobs, cl, _, _ := sbxFixture(t, p)
+	build := r.Build
+	r.Build = func(ctx context.Context, sp SandboxPayload) (*SandboxExecutor, error) {
+		x, err := build(ctx, sp)
+		if err == nil {
+			x.SourceToken = func(context.Context, string) (string, error) { return sbxPAT, nil }
+		}
+		return x, err
+	}
+	_, _ = r.RunOnce(context.Background())
+	if len(cl.started) != 0 || jobs.failCode != CodeTokenUnscoped {
+		t.Fatalf("a PAT from SourceToken: started=%d code=%q", len(cl.started), jobs.failCode)
+	}
+}
+
+// A worker that fails (e.g. its short-lived anonymous token expired during a slow copy) is a retryable failure with the
+// fixed mirror_worker_failed code, never permanent; the next acquisition mints a FRESH token for its new pod.
+func TestSandboxMirrorWorkerFailureIsRetryableWithFreshToken(t *testing.T) {
+	p := sbxPayload()
+	r, jobs, cl, _, mem := sbxFixture(t, p)
+	cl.finish = "Failed"
+	minted := 0
+	b := r.Build
+	r.Build = func(ctx context.Context, q SandboxPayload) (*SandboxExecutor, error) {
+		x, err := b(ctx, q)
+		x.SourceToken = func(context.Context, string) (string, error) {
+			minted++
+			return realGHCRToken + strings.Repeat("A", minted), nil
+		}
+		return x, err
+	}
+	_, _ = r.RunOnce(context.Background())
+	rec := mem.recs[sbxJob]
+	if jobs.permanent || jobs.failCode != "retryable" || rec.Step == SbxFailed || len(cl.pods) != 0 {
+		t.Fatalf("failed worker: permanent=%v code=%q step=%s pods=%v", jobs.permanent, jobs.failCode, rec.Step, cl.pods)
+	}
+	if len(rec.Warnings) == 0 || !strings.HasPrefix(rec.Warnings[0], "mirror_worker_failed") {
+		t.Fatalf("fixed code not recorded: %v", rec.Warnings)
+	}
+	// The next attempt (new epoch) mints a new token and its pod succeeds.
+	cl.finish = ""
+	jobs.claimed, jobs.job.Epoch, jobs.job.Attempts = false, 2, 2
+	_, _ = r.RunOnce(context.Background())
+	if minted != 2 || len(cl.started) != 2 || cl.started[0].SourceToken == cl.started[1].SourceToken || mem.recs[sbxJob].Step != SbxSucceeded {
+		t.Fatalf("retry: minted=%d started=%d step=%s", minted, len(cl.started), mem.recs[sbxJob].Step)
 	}
 }
 
