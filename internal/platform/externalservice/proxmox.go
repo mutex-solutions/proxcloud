@@ -228,9 +228,9 @@ func (e *ExternalService) PVEImageCatalog(found []pve.DiscoveredTemplate) []PVET
 		t := PVETemplate{Slug: d.Slug, Name: d.Slug, OSDistro: distro, VMID: d.VMID, Node: d.Node, Copies: map[string]int{}}
 		for node, c := range d.Copies {
 			t.Copies[node] = c.VMID
-			if node == d.Node {
-				t.MinDiskGb = c.DiskGb
-			}
+			// The clone node is chosen after this minimum was checked and counted against the quota, and
+			// a clone is never smaller than the copy it is made from: only the largest copy holds everywhere.
+			t.MinDiskGb = max(t.MinDiskGb, c.DiskGb)
 		}
 		if o, ok := overlay[d.Slug].(map[string]any); ok {
 			if v := str(o["name"]); v != "" {
