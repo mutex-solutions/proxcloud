@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The smaller template disks are confirmed by one lab build each** (`docs/template-build-disk.md`): a
+  native `ubuntu-2604` template at 5 GiB and a Kubernetes 1.37.2 node template at 8 GiB were built on
+  the lab and exported through the export workflow; both images are listed in
+  `docs/vm-artifact-publishing.md`. The native 5 GiB size is close to its limit on Ubuntu 26.04: the
+  root filesystem is 3.7 GiB and the build left less than 1 GiB free before its cleanup. Not done: the
+  other native OS slugs at 5 GiB, a portal import of either image, a node group joining a cluster.
+
 ## [0.6.0] - 2026-11-14
 
 A feature release on top of `v0.5.2`, with no breaking API change.
