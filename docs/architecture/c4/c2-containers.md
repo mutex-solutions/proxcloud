@@ -229,6 +229,7 @@ flowchart LR
   test["test.yml<br/>go test, rebrand gate"]:::impl
   docker["docker.yml<br/>api, web, admin,<br/>sandbox-proxy, sandbox-runtime images"]:::impl
   sbxt["sandbox-templates.yml<br/>built-in template images"]:::impl
+  vmtools["vm-export-tools.yml<br/>VM export tool image"]:::impl
   helm["helm.yml<br/>lint, OCI chart publish"]:::impl
   ghcr["ghcr.io<br/>images and OCI charts"]:::impl
   chart["Chart proxcloud<br/>api, SPAs, gateway, Keycloak, CNPG"]:::impl
@@ -245,6 +246,7 @@ flowchart LR
 
   docker --> ghcr
   sbxt --> ghcr
+  vmtools -->|"smoke, scan, one tag per commit"| ghcr
   helm --> ghcr
   chart --> helm
   dbchart --> helm
@@ -267,6 +269,12 @@ images on a single Docker host behind Traefik, with Keycloak and PostgreSQL next
 It carries the portal only: no management cluster, no ArgoCD and no managed services.
 Its Keycloak realm files are generated from the chart's realm templates and a test keeps
 them equal.
+
+`vm-export-tools.yml` builds the image the VM export containers run from
+(`images/vm_export/tools/Containerfile`) and pushes it to GHCR under one tag it never replaces,
+after a smoke test and the Trivy gate. The export pipeline starts containers only from
+the image ID pinned in `images/vm_export/capsule.py`; publishing an image changes nothing
+until a reviewed change moves that pin.
 
 Both SPA images normalize only nginx's public document root to 0755 directories
 and 0644 files; the entrypoint also sets generated `config.js` to 0644 so nginx

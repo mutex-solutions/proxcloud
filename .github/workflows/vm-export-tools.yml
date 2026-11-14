@@ -1,0 +1,294 @@
+name: vm-export-tools
+
+# Builds the VM export tool image (images/vm_export/tools/Containerfile: qemu-img, python3-guestfs and the
+# libguestfs appliance inputs) that images/vm_export/capsule.py runs by pinned ID, and publishes it to
+# ghcr.io/mutex-solutions/proxcloud-vm-export-tools.
+#   pull request      -> build, smoke and scan with a read-only token: no login, nothing is pushed
+#   push to main      -> the same, then push under one tag this workflow never replaces and record the digest
+#   manual run (main) -> as a push to main; a commit publishes once (replacing a tag is refused)
+# Hosted runner only: no PVE access, no VM disk, no secret other than the built-in token.
+on:
+  push:
+    branches: [main]
+    paths: ["images/vm_export/tools/**", ".github/workflows/vm-export-tools.yml"]
+  pull_request:
+    branches: [main]
+    paths: ["images/vm_export/tools/**", ".github/workflows/vm-export-tools.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vm-export-tools-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  LOCAL_IMAGE: vm-export-tools:${{ github.event.pull_request.head.sha || github.sha }}
+  PACKAGE: ghcr.io/mutex-solutions/proxcloud-vm-export-tools
+  # The Trivy release and gate of security-scan.yml (a test keeps the pins equal).
+  TRIVY_VERSION: '0.76.2'
+  TRIVY_SHA256: bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf
+  TRIVY_NO_PROGRESS: 'true'
+  TRIVY_DISABLE_VEX_NOTICE: 'true'
+
+jobs:
+  # Pull requests (whose code is not reviewed yet) build with a read-only token: nothing is pushed.
+  check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Build the tool image locally without publishing
+        run: |
+          set -euo pipefail
+          mkdir -p result tools
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          printf 'TRIVY_CACHE_DIR=%s/vm-export-tools-trivy\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          docker build --pull --platform linux/amd64 --provenance=false --load \
+            --file images/vm_export/tools/Containerfile --build-arg "REVISION=$SOURCE_SHA" \
+            --tag "$LOCAL_IMAGE" images/vm_export/tools 2>&1 | tee result/build.log
+          docker image inspect "$LOCAL_IMAGE" --format '{{.Id}}' > result/image-id.txt
+          docker run --rm --pull=never --network=none --entrypoint /usr/bin/dpkg-query \
+            "$LOCAL_IMAGE" --show > result/packages.txt
+          # The installed package set is the reviewed one: a replayed older archive index, or a moved
+          # snapshot without a regenerated lock file, stops here.
+          diff -u images/vm_export/tools/packages.lock result/packages.txt
+
+      - name: Smoke as an arbitrary uid without network
+        run: images/vm_export/tools/smoke.sh "$LOCAL_IMAGE"
+
+      - name: Download and verify official Trivy release before extracting binary
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --retry 3 \
+            --proto '=https' --proto-redir '=https' \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+            --output tools/trivy.tar.gz
+          test "$(stat -c %s tools/trivy.tar.gz)" = 52714130
+          printf '%s  %s\n' "$TRIVY_SHA256" tools/trivy.tar.gz | sha256sum --check --strict
+          tar xzf tools/trivy.tar.gz -C tools trivy
+          tools/trivy --version > result/trivy-version.txt
+
+      - name: Download fresh vulnerability database
+        run: |
+          set -euo pipefail
+          tools/trivy image --config '' --ignorefile '' --disable-telemetry \
+            --skip-version-check --download-db-only
+          cp "$TRIVY_CACHE_DIR/db/metadata.json" result/db-metadata.json
+          python3 .github/scripts/check_scan_report.py --db-metadata result/db-metadata.json
+
+      - name: Scan actual local image including unfixed vulnerabilities
+        run: |
+          set -euo pipefail
+          tools/trivy image --config '' --ignorefile '' --disable-telemetry \
+            --skip-version-check --ignore-unfixed=false --exit-on-eol 1 \
+            --image-src docker --platform linux/amd64 \
+            --scanners vuln --skip-db-update --severity HIGH,CRITICAL \
+            --exit-code 0 --format json --output result/scan.json \
+            "$LOCAL_IMAGE"
+
+      # The owner policy of security-scan.yml, unchanged: no ignore list, no exception for this image.
+      - name: Fail closed on malformed reports, stale DB, EOL, or fixable HIGH/CRITICAL
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/check_scan_report.py \
+            --db-metadata result/db-metadata.json \
+            --expected-image-id "$(<result/image-id.txt)" result/scan.json
+
+      - name: Preserve reports and provenance even when scan or gate fails
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: vm-export-tools-reports-${{ github.event.pull_request.head.sha || github.sha }}
+          path: result/
+          if-no-files-found: error
+          retention-days: 3
+
+  # Trusted runs only. The steps up to the gate are the ones of `check` (a test keeps them equal); the
+  # registry login comes after them, so the build, the smoke and the scan never see a registry credential.
+  publish:
+    if: github.event_name != 'pull_request' && github.repository == 'mutex-solutions/proxcloud' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Build the tool image locally without publishing
+        run: |
+          set -euo pipefail
+          mkdir -p result tools
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          printf 'TRIVY_CACHE_DIR=%s/vm-export-tools-trivy\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          docker build --pull --platform linux/amd64 --provenance=false --load \
+            --file images/vm_export/tools/Containerfile --build-arg "REVISION=$SOURCE_SHA" \
+            --tag "$LOCAL_IMAGE" images/vm_export/tools 2>&1 | tee result/build.log
+          docker image inspect "$LOCAL_IMAGE" --format '{{.Id}}' > result/image-id.txt
+          docker run --rm --pull=never --network=none --entrypoint /usr/bin/dpkg-query \
+            "$LOCAL_IMAGE" --show > result/packages.txt
+          # The installed package set is the reviewed one: a replayed older archive index, or a moved
+          # snapshot without a regenerated lock file, stops here.
+          diff -u images/vm_export/tools/packages.lock result/packages.txt
+
+      - name: Smoke as an arbitrary uid without network
+        run: images/vm_export/tools/smoke.sh "$LOCAL_IMAGE"
+
+      - name: Download and verify official Trivy release before extracting binary
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --retry 3 \
+            --proto '=https' --proto-redir '=https' \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+            --output tools/trivy.tar.gz
+          test "$(stat -c %s tools/trivy.tar.gz)" = 52714130
+          printf '%s  %s\n' "$TRIVY_SHA256" tools/trivy.tar.gz | sha256sum --check --strict
+          tar xzf tools/trivy.tar.gz -C tools trivy
+          tools/trivy --version > result/trivy-version.txt
+
+      - name: Download fresh vulnerability database
+        run: |
+          set -euo pipefail
+          tools/trivy image --config '' --ignorefile '' --disable-telemetry \
+            --skip-version-check --download-db-only
+          cp "$TRIVY_CACHE_DIR/db/metadata.json" result/db-metadata.json
+          python3 .github/scripts/check_scan_report.py --db-metadata result/db-metadata.json
+
+      - name: Scan actual local image including unfixed vulnerabilities
+        run: |
+          set -euo pipefail
+          tools/trivy image --config '' --ignorefile '' --disable-telemetry \
+            --skip-version-check --ignore-unfixed=false --exit-on-eol 1 \
+            --image-src docker --platform linux/amd64 \
+            --scanners vuln --skip-db-update --severity HIGH,CRITICAL \
+            --exit-code 0 --format json --output result/scan.json \
+            "$LOCAL_IMAGE"
+
+      # The owner policy of security-scan.yml, unchanged: no ignore list, no exception for this image.
+      - name: Fail closed on malformed reports, stale DB, EOL, or fixable HIGH/CRITICAL
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/check_scan_report.py \
+            --db-metadata result/db-metadata.json \
+            --expected-image-id "$(<result/image-id.txt)" result/scan.json
+
+      - name: Preserve reports and provenance even when scan or gate fails
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: vm-export-tools-reports-${{ github.event.pull_request.head.sha || github.sha }}
+          path: result/
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Authenticate for this publication only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Refuse tag replacement, push the checked image and record its digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # One tag per commit: the Containerfile content hash plus the commit. Never latest, never a
+          # moving tag, never replaced by this workflow (the registry itself would allow it).
+          tag="$(sha256sum images/vm_export/tools/Containerfile | cut -c1-16)-$SOURCE_SHA"
+          [[ "$tag" =~ ^[0-9a-f]{16}-[0-9a-f]{40}$ ]]
+          python3 - "$tag" <<'PY'
+          import base64, json, os, sys, urllib.error, urllib.parse, urllib.request
+          from pathlib import Path
+          sys.path.insert(0, str(Path(os.environ['GITHUB_WORKSPACE']) / 'images'))
+          import vm_publish_stage as stage
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):
+                  raise ValueError('Unexpected registry redirect')
+          client = urllib.request.build_opener(NoRedirect())
+          def request(url, headers):
+              try:
+                  response = client.open(urllib.request.Request(url, headers=headers), timeout=60)
+              except urllib.error.HTTPError as error:
+                  response = error
+              with response:
+                  body = response.read(65537)
+                  stage.require(len(body) <= 65536)
+                  return response.status, body
+          package = os.environ['PACKAGE'].removeprefix('ghcr.io/')
+          tag = sys.argv[1]
+          basic = base64.b64encode((os.environ['GITHUB_ACTOR'] + ':' + os.environ['GH_TOKEN']).encode()).decode()
+          query = urllib.parse.urlencode({'service': 'ghcr.io', 'scope': 'repository:' + package + ':pull,push'})
+          status, raw = request('https://ghcr.io/token?' + query, {'Authorization': 'Basic ' + basic})
+          stage.require(status == 200)
+          token = json.loads(raw)['token']
+          stage.require(type(token) is str and 0 < len(token) <= 16384 and '\n' not in token and '\r' not in token)
+          status, raw = request('https://ghcr.io/v2/' + package + '/manifests/' + tag, {
+              'Authorization': 'Bearer ' + token,
+              'Accept': 'application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, '
+                        'application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json'})
+          stage.absent_tag(status, raw)  # Existing tag, 401/403, timeout and other failures all stop.
+          PY
+          docker tag "$LOCAL_IMAGE" "$PACKAGE:$tag"
+          docker push "$PACKAGE:$tag"
+          reference="$(docker image inspect "$PACKAGE:$tag" --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+            | grep -x "$PACKAGE@sha256:[0-9a-f]\{64\}")"
+          # Read back from the registry: one single-platform manifest whose config is the image that
+          # passed the smoke and the scan (the local ID is the config digest, or the manifest digest
+          # when Docker uses the containerd image store).
+          # The tag exists from here on and this commit can never publish again, so a transient
+          # registry error is retried before the run gives up without a digest record.
+          for attempt in 1 2 3 4 5; do
+            if docker manifest inspect "$reference" > "$RUNNER_TEMP/manifest.json"; then break; fi
+            [[ "$attempt" -lt 5 ]]
+            sleep "$((attempt * 10))"
+          done
+          config="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["config"]["digest"])' "$RUNNER_TEMP/manifest.json")"
+          [[ "$config" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image_id="$(<result/image-id.txt)"
+          test "$image_id" = "$config" || test "$image_id" = "${reference#*@}"
+          mkdir digest
+          printf '{"reference": "%s", "tag": "%s", "config_digest": "%s", "image_id": "%s", "source_sha": "%s"}\n' \
+            "$reference" "$tag" "$config" "$image_id" "$SOURCE_SHA" > digest/vm-export-tools-image.json
+          {
+            echo '## VM export tool image published; NOT yet used by the export pipeline'
+            echo
+            echo "Reference: \`$reference\`"
+            echo
+            echo "Tag: \`$tag\` (never replaced by this workflow; pin the reference above, not the tag)"
+            echo
+            echo "Image config digest: \`$config\`"
+            echo
+            echo "Image ID on this runner's Docker (the smoked and scanned image): \`$image_id\`"
+            echo
+            echo 'Pending: a reviewed change pins this image in images/vm_export/capsule.py. No latest tag, no deployment.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the digest record
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: vm-export-tools-digest-${{ github.sha }}
+          path: digest/vm-export-tools-image.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Remove registry login
+        if: always()
+        run: docker logout ghcr.io
