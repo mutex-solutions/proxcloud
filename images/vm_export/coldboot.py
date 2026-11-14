@@ -42,7 +42,9 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
+import socket
 import ssl
 import stat
 import subprocess
@@ -230,6 +232,27 @@ def address_in_use(configs, addresses):
                for config in configs.values() for key, value in config.items()
                if re.fullmatch(r"(?:ipconfig|net)[0-9]+", key)
                for part in str(value).split(",") if part.startswith(("ip=", "ip6=")))
+
+
+def address_answers(ip):
+    """Whether a host already holds a test address: it answers a ping, or accepts or refuses tcp/22. The token
+    sees only the guests of its pool, and other machines share the VLAN (seen on the lab: a foreign host on a
+    reserved address). A probe that cannot finish counts as an answer."""
+    ping = shutil.which("ping")
+    if ping:
+        try:
+            if subprocess.run([ping, "-n", "-c", "2", "-W", "1", ip], stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15).returncode == 0:
+                return True
+        except subprocess.TimeoutExpired:
+            return True
+    try:
+        socket.create_connection((ip, 22), timeout=3).close()
+        return True
+    except ConnectionRefusedError:
+        return True
+    except OSError:
+        return False
 
 
 def api_node_room(api, size):
@@ -651,6 +674,7 @@ def run(api, cfg, sdir):
         result.update(disk_sha256=sha, disk_bytes=size, run=cfg["run"], import_volume=import_file(cfg), step="preflight")
         before, configs = protected(api)
         need(not address_in_use(configs, cfg["addresses"]), "test_address_in_use")
+        need(not any(address_answers(a.split("/")[0]) for a in cfg["addresses"]), "test_address_answers")
         volumes = volids(api, cfg)
         need(volid(cfg) not in volumes, "import_volume_exists")
         free = free_vmids(api, cfg)
