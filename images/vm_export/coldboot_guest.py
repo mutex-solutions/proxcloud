@@ -112,7 +112,9 @@ def main(argv):
         "snapd_no_change_errors": snap_errors == 0,
         "no_active_swap": not pathlib.Path("/proc/swaps").read_text().splitlines()[1:],
         "disk_30g": disk.get("size") == 30 << 30,
-        "root_grown": root.f_blocks * root.f_frsize >= 28 << 30,
+        # Of the 30G disk: a Kubernetes node image has one partition. A native image also has /boot and the ESP,
+        # and its root filesystem measured just under 28 GiB on the first accepted ubuntu-2604 image.
+        "root_grown": root.f_blocks * root.f_frsize >= (26 if variant == "os" else 28) << 30,
     }
     if variant == "os":
         parts = [row for d in disks for row in d.get("children", []) if "/" in (row.get("mountpoints") or [])]

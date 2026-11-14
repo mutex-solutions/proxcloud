@@ -825,7 +825,14 @@ def main(argv=None):
             f.write((json.dumps(result, indent=2, sort_keys=True) + "\n").encode("ascii"))
         os.replace(tmp, out)
         ok = result["accepted"] if a.command == "run" else result["clean"]
-        print(json.dumps({"kind": result["kind"], "ok": ok, "reason": result["reason"]}, sort_keys=True))
+        verdict = {"kind": result["kind"], "ok": ok, "reason": result["reason"]}
+        if a.command == "run":
+            # Names of the guest checks that did not hold, per clone: a fixed vocabulary, no guest text.
+            names = set(coldboot_guest.COMMON + coldboot_guest.OS_ONLY + coldboot_guest.K8S)
+            verdict["failed_checks"] = {
+                str(row.get("suffix")): sorted(k for k, v in row.get("checks", {}).items() if v is not True and k in names)
+                for row in result.get("clones", []) if isinstance(row, dict) and row.get("suffix") in SUFFIXES}
+        print(json.dumps(verdict, sort_keys=True))
         return 0 if ok else 1
     except (Refused, OSError, KeyError) as exc:
         print("coldboot refused: " + reason_of(exc), file=sys.stderr)

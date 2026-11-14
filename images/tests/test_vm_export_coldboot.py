@@ -655,6 +655,24 @@ class FailureCleanupTests(ColdBootCase):
                 self.assert_clean(result)
                 self.assertTrue(result["protected_set"]["unchanged"])
 
+    def test_failed_guest_checks_are_named_in_the_verdict_line(self):
+        # The job log must say WHICH check failed: the result file is removed with the work directory.
+        row = self.host.row("kubernetes", "192.0.2.51")
+        self.host.rows["192.0.2.51"] = {"checks": dict(row["checks"], root_grown=False, k8s_binaries_exact=False),
+                                        "snapd_changes_error_lines": 0}
+        argv = ["run", "--sanitize-run", str(self.root / "sanitize-run.json"), "--variant", "kubernetes", "--os", "ubuntu-2604",
+                "--kubernetes-version", "1.37.2", "--node", NODE, "--storage", STORAGE, "--vlan", "242", "--gateway", "192.0.2.1",
+                "--test-address", ADDRESSES[0], "--test-address", ADDRESSES[1], "--nameserver", "1.1.1.1",
+                "--state-dir", str(self.sdir)]
+        env = {"PVE_URL": "https://pve.invalid:8006", "PVE_TOKEN_ID": TOKEN, "PVE_TOKEN_SECRET": "not-a-secret"}
+        out = io.StringIO()
+        with patch.dict(os.environ, env), patch.object(coldboot, "Client", lambda pve: self.pve), contextlib.redirect_stdout(out):
+            self.assertEqual(coldboot.main(argv), 1)
+        # Names of the fixed vocabulary only (a row with any other key is refused before, as guest_output_refused).
+        self.assertEqual(json.loads(out.getvalue()), {
+            "kind": "ColdBootAcceptance", "ok": False, "reason": "guest_checks_failed",
+            "failed_checks": {"a": [], "b": ["k8s_binaries_exact", "root_grown"]}})
+
     def test_identical_or_unproven_identities_are_refused(self):
         identity = ("machine_id_sha256", "host_key_sha256", "snapd_serial_sha256", "snapd_device_key_sha256")
         self.assertEqual(coldboot.IDENTITY, identity)
@@ -1382,7 +1400,8 @@ class GuardUnitTests(ColdBootCase):
         out = io.StringIO()
         with patch.dict(os.environ, env), patch.object(coldboot, "Client", lambda pve: self.pve), contextlib.redirect_stdout(out):
             self.assertEqual(coldboot.main(argv), 0)
-            self.assertEqual(json.loads(out.getvalue()), {"kind": "ColdBootAcceptance", "ok": True, "reason": None})
+            self.assertEqual(json.loads(out.getvalue()), {"kind": "ColdBootAcceptance", "ok": True, "reason": None,
+                                                          "failed_checks": {"a": [], "b": []}})
             result = self.sdir / coldboot.RESULT
             self.assertEqual((json.loads(result.read_text())["accepted"], stat_mode(result)), (True, 0o600))
             calls = len(self.pve.calls)
@@ -1721,6 +1740,16 @@ class GuestScriptTests(unittest.TestCase):
         guest = FakeGuest()
         guest.changes += "2 Error today today Refresh snap\n3 Error today today Install\n"
         self.assertEqual(guest.record()["snapd_changes_error_lines"], 2)
+
+    def test_root_growth_floor_follows_the_image_layout(self):
+        # 30G disk: a node image is one partition; a native image also has /boot and the ESP, so its root
+        # filesystem is smaller (just under 28 GiB on the first accepted ubuntu-2604 image).
+        for variant, gib, grown in (("os", 27, True), ("os", 26, True), ("os", 25, False),
+                                    ("kubernetes", 28, True), ("kubernetes", 27, False)):
+            with self.subTest(variant=variant, gib=gib):
+                guest = FakeGuest(variant)
+                guest.root_blocks = gib << 18  # 4096-byte blocks.
+                self.assertIs(guest.record()["checks"]["root_grown"], grown)
 
     def test_guest_script_is_standalone_stdlib_and_names_every_check(self):
         source = Path(coldboot_guest.__file__).read_text()
