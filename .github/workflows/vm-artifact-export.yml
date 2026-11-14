@@ -1,0 +1,319 @@
+name: vm-artifact-export
+
+# ONE manual run takes a lab template to a published, attested and publicly verified VM image.
+#   export   self-hosted, inside the lab: template guard + read-only copy -> inventory -> review -> sanitize ->
+#            postscan -> cold boot -> bundle (images/vm_export/pipeline.py). Uploads the three-file bundle and
+#            one public evidence record. No registry credential, no packages permission.
+#   publish  hosted: the reusable publisher vm-artifacts.yml. Accepts only this run's successful export job.
+#   attest   hosted: GitHub build-provenance attestations for the pushed OCI digest (then verified with the
+#            command the run prints) and for the sha256 of the evidence record.
+#   verify   hosted, NO registry credential: anonymous ORAS pull of the digest, file verification, summary.
+#
+# NEVER add pull_request, pull_request_target, push or any fork-reachable trigger here: the export job runs
+# on a machine inside the Proxmox network, holding the image token. This file cannot protect that machine
+# from OTHER workflows: see "Trust model" in docs/vm-artifact-publishing.md for what the owner must set.
+# NEVER add a workflow-level `env:` either: it would hand its values to every step and every job.
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: "os = native OS template; kubernetes = Kubernetes node template"
+        type: choice
+        options: [os, kubernetes]
+        required: true
+      os:
+        description: "OS of the template (kubernetes: ubuntu-2604 only)"
+        type: choice
+        options: [ubuntu-2404, ubuntu-2604]
+        required: true
+      kubernetes_version:
+        description: "Required for kubernetes; keep none for os"
+        type: choice
+        options: [none, "1.35.10", "1.36.6", "1.37.2"]
+        required: false
+        default: none
+      template_vmid:
+        description: "VMID of the stopped template in pool pc-templates (digits)"
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  export:
+    if: github.repository == 'mutex-solutions/proxcloud' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, proxcloud-vm-artifact-export]
+    # The owner limits this environment to the branch main and keeps the lab secrets in it, so a workflow on
+    # another branch cannot read them. Until they are moved, the repository secrets of the same names are used.
+    environment: vm-artifact-export
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    # The group of vm-templates.yml and k8s-node-templates.yml: one lab network, one token, one job at a time.
+    concurrency:
+      group: vm-templates
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+        working-directory: images
+    outputs:
+      artifact_name: ${{ steps.bundle.outputs.artifact_name }}
+      manifest_sha256: ${{ steps.bundle.outputs.manifest_sha256 }}
+      disk_sha256: ${{ steps.bundle.outputs.disk_sha256 }}
+      evidence_sha256: ${{ steps.evidence.outputs.evidence_sha256 }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: mutex-solutions/proxcloud
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require full source checkout
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          git -C "$GITHUB_WORKSPACE" sparse-checkout disable
+          test "$(git -C "$GITHUB_WORKSPACE" config --bool --get core.sparseCheckout)" = false
+          test "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" = "$GITHUB_SHA"
+          test -f "$GITHUB_WORKSPACE/images/vm_export/pipeline.py" && test -f "$GITHUB_WORKSPACE/images/vm_sanitize.py"
+
+      # Each stage refuses unless exactly the earlier ones completed (images/vm_export/pipeline.py).
+      - name: Validate the dispatch inputs before any secret or API use
+        env:
+          EXPORT_VARIANT: ${{ inputs.variant }}
+          EXPORT_OS: ${{ inputs.os }}
+          EXPORT_KUBERNETES_VERSION: ${{ inputs.kubernetes_version }}
+          EXPORT_TEMPLATE_VMID: ${{ inputs.template_vmid }}
+        run: exec python3 -m vm_export.pipeline plan
+      - name: Validate the runner configuration without any API call
+        env:
+          PVE_URL: ${{ secrets.PVE_URL }}
+          PVE_TOKEN_ID: ${{ secrets.PVE_TOKEN_ID }}
+          PVE_TOKEN_SECRET: ${{ secrets.PVE_TOKEN_SECRET }}
+          PVE_NODES: ${{ secrets.PVE_NODES }}
+          PVE_TEMPLATE_STORAGE: ${{ secrets.PVE_TEMPLATE_STORAGE }}
+          PVE_IMPORT_STORAGE: ${{ secrets.PVE_IMPORT_STORAGE }}
+          PVE_ISO_STORAGE: ${{ secrets.PVE_ISO_STORAGE }}
+          PVE_BRIDGE: ${{ secrets.PVE_BRIDGE }}
+          BUILD_GATEWAY: ${{ secrets.BUILD_GATEWAY }}
+          BUILD_NAMESERVER: ${{ secrets.BUILD_NAMESERVER }}
+          EXPORT_TEST_ADDRESSES: ${{ secrets.EXPORT_TEST_ADDRESSES }}
+          EXPORT_VLAN: ${{ vars.EXPORT_VLAN || '0' }}
+          EXPORT_SOURCE_MOUNT: ${{ vars.EXPORT_SOURCE_MOUNT || '/srv/pc-ci-images' }}
+        run: exec python3 -m vm_export.pipeline config
+      - name: Guarded cleanup of what an earlier run left on the lab
+        env:
+          PVE_URL: ${{ secrets.PVE_URL }}
+          PVE_TOKEN_ID: ${{ secrets.PVE_TOKEN_ID }}
+          PVE_TOKEN_SECRET: ${{ secrets.PVE_TOKEN_SECRET }}
+        run: exec python3 -m vm_export.pipeline recover
+      - name: Pull the pinned tool image by digest (no stored registry credential)
+        run: exec python3 -m vm_export.pipeline tools
+      - name: Template guard and read-only copy from the storage mount
+        env:
+          PVE_URL: ${{ secrets.PVE_URL }}
+          PVE_TOKEN_ID: ${{ secrets.PVE_TOKEN_ID }}
+          PVE_TOKEN_SECRET: ${{ secrets.PVE_TOKEN_SECRET }}
+          PVE_NODES: ${{ secrets.PVE_NODES }}
+          PVE_TEMPLATE_STORAGE: ${{ secrets.PVE_TEMPLATE_STORAGE }}
+          PVE_IMPORT_STORAGE: ${{ secrets.PVE_IMPORT_STORAGE }}
+          PVE_ISO_STORAGE: ${{ secrets.PVE_ISO_STORAGE }}
+          PVE_BRIDGE: ${{ secrets.PVE_BRIDGE }}
+          BUILD_GATEWAY: ${{ secrets.BUILD_GATEWAY }}
+          BUILD_NAMESERVER: ${{ secrets.BUILD_NAMESERVER }}
+          EXPORT_TEST_ADDRESSES: ${{ secrets.EXPORT_TEST_ADDRESSES }}
+          EXPORT_VLAN: ${{ vars.EXPORT_VLAN || '0' }}
+          EXPORT_SOURCE_MOUNT: ${{ vars.EXPORT_SOURCE_MOUNT || '/srv/pc-ci-images' }}
+        run: exec python3 -m vm_export.pipeline copy
+      - name: Inventory in a read-only capsule
+        run: exec python3 -m vm_export.pipeline inventory
+      - name: Review against the committed baseline (kubernetes) or the eligibility gate (os)
+        run: exec python3 -m vm_export.pipeline review
+      - name: Sanitize offline and seal the disk
+        run: exec python3 -m vm_export.pipeline sanitize
+      - name: Postscan the sealed disk in an independent capsule
+        run: exec python3 -m vm_export.pipeline postscan
+      - name: Cold boot two clones through the PVE API
+        env:
+          PVE_URL: ${{ secrets.PVE_URL }}
+          PVE_TOKEN_ID: ${{ secrets.PVE_TOKEN_ID }}
+          PVE_TOKEN_SECRET: ${{ secrets.PVE_TOKEN_SECRET }}
+          PVE_NODES: ${{ secrets.PVE_NODES }}
+          PVE_TEMPLATE_STORAGE: ${{ secrets.PVE_TEMPLATE_STORAGE }}
+          PVE_IMPORT_STORAGE: ${{ secrets.PVE_IMPORT_STORAGE }}
+          PVE_ISO_STORAGE: ${{ secrets.PVE_ISO_STORAGE }}
+          PVE_BRIDGE: ${{ secrets.PVE_BRIDGE }}
+          BUILD_GATEWAY: ${{ secrets.BUILD_GATEWAY }}
+          BUILD_NAMESERVER: ${{ secrets.BUILD_NAMESERVER }}
+          EXPORT_TEST_ADDRESSES: ${{ secrets.EXPORT_TEST_ADDRESSES }}
+          EXPORT_VLAN: ${{ vars.EXPORT_VLAN || '0' }}
+          EXPORT_SOURCE_MOUNT: ${{ vars.EXPORT_SOURCE_MOUNT || '/srv/pc-ci-images' }}
+        run: exec python3 -m vm_export.pipeline coldboot
+      - name: Bundle the three files and re-check them as the publisher will
+        id: bundle
+        run: exec python3 -m vm_export.pipeline bundle
+      - name: Build the public evidence record
+        id: evidence
+        run: exec python3 -m vm_export.pipeline evidence
+
+      - name: Upload the three-file bundle
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.bundle.outputs.artifact_name }}
+          path: |
+            ${{ runner.temp }}/vm-export/bundle/disk.qcow2
+            ${{ runner.temp }}/vm-export/bundle/manifest.json
+            ${{ runner.temp }}/vm-export/bundle/SHA256SUMS
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload the public evidence record
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.bundle.outputs.artifact_name }}-evidence
+          path: ${{ runner.temp }}/vm-export/evidence/vm-export-evidence.json
+          if-no-files-found: error
+          retention-days: 90
+
+      # The state is outside the runner's temp directory: what this step cannot clean, the next run's does.
+      - name: Guarded cold-boot cleanup from the state file
+        if: always()
+        env:
+          PVE_URL: ${{ secrets.PVE_URL }}
+          PVE_TOKEN_ID: ${{ secrets.PVE_TOKEN_ID }}
+          PVE_TOKEN_SECRET: ${{ secrets.PVE_TOKEN_SECRET }}
+        run: exec python3 -m vm_export.pipeline recover
+      - name: Delete the private copy, the scratch and every work file
+        if: always()
+        run: exec python3 -m vm_export.pipeline purge
+
+  # The hosted publisher. Its own checks (images/vm_publish_stage.py) accept only the export job above.
+  publish:
+    needs: export
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    uses: ./.github/workflows/vm-artifacts.yml
+    with:
+      artifact_name: ${{ needs.export.outputs.artifact_name }}
+      expected_manifest_sha256: ${{ needs.export.outputs.manifest_sha256 }}
+      expected_disk_sha256: ${{ needs.export.outputs.disk_sha256 }}
+      # What was dispatched: the publisher refuses a bundle that stands for anything else.
+      variant: ${{ inputs.variant }}
+      os: ${{ inputs.os }}
+      kubernetes_version: ${{ inputs.kubernetes_version }}
+      # Not used by the publisher: it must only have arrived, so that nothing is pushed which `attest` and
+      # `verify` could not finish (GitHub drops a job output that contains a masked value).
+      evidence_sha256: ${{ needs.export.outputs.evidence_sha256 }}
+
+  # Build provenance for the pushed digest, signed with this workflow's identity (gh attestation verify).
+  # The signer is this hosted job: the provenance names a GitHub-hosted runner although the disk was
+  # produced on the export runner inside the lab.
+  attest:
+    needs: [export, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      id-token: write
+      attestations: write
+      packages: write
+    env:
+      PACKAGE: ${{ needs.publish.outputs.package }}
+      DIGEST: ${{ needs.publish.outputs.digest }}
+      EVIDENCE_SHA256: ${{ needs.export.outputs.evidence_sha256 }}
+    steps:
+      - name: Validate the published reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$PACKAGE" =~ ^ghcr\.io/mutex-solutions/proxcloud-vm-ubuntu-2[46]04(-k8s)?$ ]]
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$EVIDENCE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+      - name: Authenticate for the attestation only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ needs.publish.outputs.package }}
+          subject-digest: ${{ needs.publish.outputs.digest }}
+          push-to-registry: true
+      - name: Verify the attestation exactly as the final summary tells anyone to
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh attestation verify "oci://$PACKAGE@$DIGEST" --repo mutex-solutions/proxcloud --signer-workflow mutex-solutions/proxcloud/.github/workflows/vm-artifact-export.yml --source-ref refs/heads/main > /dev/null
+      # The evidence record is an Actions artifact with a limited life: its sha256 is attested, so a kept copy
+      # stays verifiable (gh attestation verify vm-export-evidence.json ...) after the artifact expired.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: vm-export-evidence.json
+          subject-digest: sha256:${{ needs.export.outputs.evidence_sha256 }}
+      - name: Remove registry login
+        if: always()
+        shell: bash
+        run: docker logout ghcr.io
+
+  # What anyone can do: no registry credential, no packages permission, no login.
+  verify:
+    needs: [export, publish, attest]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      EXPORT_RUN_ID: ${{ github.run_id }}
+      EXPORT_RUN_ATTEMPT: ${{ github.run_attempt }}
+      ARTIFACT_NAME: ${{ needs.export.outputs.artifact_name }}
+      EXPECTED_MANIFEST_SHA256: ${{ needs.export.outputs.manifest_sha256 }}
+      EXPECTED_DISK_SHA256: ${{ needs.export.outputs.disk_sha256 }}
+      PUBLISHER_SHA: ${{ github.sha }}
+      PUBLISHER_REPOSITORY: ${{ github.repository }}
+      PUBLISHER_WORKFLOW_REF: ${{ github.workflow_ref }}
+      EXPORT_VARIANT: ${{ inputs.variant }}
+      EXPORT_OS: ${{ inputs.os }}
+      EXPORT_KUBERNETES_VERSION: ${{ inputs.kubernetes_version }}
+      PACKAGE: ${{ needs.publish.outputs.package }}
+      DIGEST: ${{ needs.publish.outputs.digest }}
+      EVIDENCE_SHA256: ${{ needs.export.outputs.evidence_sha256 }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: mutex-solutions/proxcloud
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            images/vm_artifact.py
+            images/vm_publish_stage.py
+          sparse-checkout-cone-mode: false
+      # One JSON file, checked against the sha256 the export job reported before it is printed.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.export.outputs.artifact_name }}-evidence
+          path: ${{ runner.temp }}/evidence
+      - uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1; official pin reviewed separately
+        with:
+          version: 1.3.0
+      - name: Pull the digest anonymously, verify the three files and write the final summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          reference="$(python3 images/vm_publish_stage.py reference)"
+          anonymous="${RUNNER_TEMP:?}/anonymous"
+          mkdir --mode=700 "$anonymous" "$anonymous/home" "$anonymous/pull"
+          printf '{"auths":{}}\n' > "$anonymous/config.json"
+          # An empty registry configuration and an emptied environment: nothing ambient can authenticate.
+          env -i PATH="$PATH" HOME="$anonymous/home" DOCKER_CONFIG="$anonymous" XDG_CONFIG_HOME="$anonymous" \
+            oras pull --registry-config "$anonymous/config.json" --no-tty --output "$anonymous/pull" "$reference" > /dev/null
+          test "$(<"$anonymous/config.json")" = '{"auths":{}}'
+          python3 images/vm_artifact.py verify --staging-dir "$anonymous/pull" \
+            --expected-manifest-sha256 "$EXPECTED_MANIFEST_SHA256" --expected-disk-sha256 "$EXPECTED_DISK_SHA256" > /dev/null
+          # Exactly the three files, of exactly this artifact name, in exactly the package it stands for.
+          python3 images/vm_publish_stage.py pulled --staging-dir "$anonymous/pull" \
+            --evidence "$RUNNER_TEMP/evidence/vm-export-evidence.json" >> "$GITHUB_STEP_SUMMARY"

@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **One workflow run from a template to a published VM image** (`vm-artifact-export.yml`): choose the
+  variant, the OS, the Kubernetes version and the template VMID, and one manual run on `main` does the rest.
+  The `export` job (self-hosted, inside the lab, no registry credential) guards and copies the template
+  read-only, then runs inventory, review, sanitize, postscan and the two-clone cold boot in a fixed order
+  (`images/vm_export/pipeline.py`: a stage refuses unless the earlier ones completed and their records
+  match), and builds the three-file bundle. Hosted jobs then publish it to GHCR (only for the variant,
+  OS and Kubernetes version that were dispatched), create a GitHub build-provenance attestation for the
+  digest of that push, check it with the command the run prints, and pull the digest with no credential
+  to verify the files. The run also uploads one public evidence record (hashes, check results, versions,
+  the tool image digest, the commit and the run), built from an allowlist so it holds no path, address,
+  VMID or guest data; its sha256 is attested too and the final summary prints it. A cold boot that could
+  not clean up keeps its state on the runner, and the next export finishes that cleanup before it
+  starts. `docs/vm-artifact-publishing.md` has the flow, the trust model with the settings the owner
+  must make outside the repository (runner group, fork approval, branch protection, the environment
+  `vm-artifact-export`), the secrets and variables to set (`EXPORT_TEST_ADDRESSES` and `EXPORT_VLAN` are
+  new) and the commands anyone can use to verify an image. The workflow has not run on the lab yet.
+
 - **VM export tool image built by CI** (`images/vm_export/tools/`, `vm-export-tools.yml`): the image the
   export containers run from (`qemu-img`, Python with libguestfs, the appliance kernel) was built on a
   workstation and loaded onto the runner by hand. It now has a recipe in the repository: Debian 12 pinned
@@ -16,8 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   package list, no `sudo`, no account and no setuid file, usable as any non-root uid. The workflow builds it on a hosted runner, runs a smoke test without network as an
   arbitrary uid, scans it with the existing Trivy gate and, on `main`, pushes it to
   `ghcr.io/mutex-solutions/proxcloud-vm-export-tools` under one tag that the workflow never replaces. The
-  digest is recorded in the job summary and as an artifact. `capsule.py` still pins the hand-loaded image;
-  a follow-up change pins the published one after the first build.
+  digest is recorded in the job summary and as an artifact. `capsule.py` now pins that published image by
+  registry digest: the export job pulls it and containers start only from its local ID.
 
 - **VM image export steps as repository code** (`images/vm_export/`): the copy, inventory, review,
   sanitize, postscan and bundle steps that prepared the published VM images were private operator
@@ -33,8 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails the check), requires snapd on both and different machine-id, host key and snapd identity, and
   removes only what its own state file names. Names, the ownership tag and the upload carry a random
   per-run token, so two runs of one disk never touch each other's VMs or files. Cleanup ignores a
-  cancel, retries, and can be repeated from the state file. No workflow runs them yet; the export
-  workflow follows.
+  cancel, retries, and can be repeated from the state file. The export workflow above runs them.
 
 - **Production install on one host with Docker Compose** (`deploy/compose/`): `./proxcloud-up.sh` asks for the
   domain (or four hostnames), the TLS mode and two email addresses, generates every secret once into `.env`
@@ -59,6 +75,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (HTTP-01, and DNS-01 through Cloudflare), and an upgrade between two different releases.
 
 ### Changed
+
+- **The hand-fed VM publishing path is removed**: `vm-artifact-stage.yml` read a directory an operator had
+  filled on the runner, and `vm-artifacts.yml` took a run id and two hashes typed by hand. Both are gone.
+  `vm-artifacts.yml` is now a reusable workflow that only `vm-artifact-export.yml` calls, and it accepts
+  one producer: the successful `export` job of the same run, at the same commit on `main`
+  (`images/vm_publish_stage.py`). `images/vm_stage_local.py` is deleted. Images published earlier stay
+  where they are; an export through the workflow gets a new tag. The runner label
+  `proxcloud-vm-artifact-stage` is no longer used.
 
 - **Helm chart: the realms derived by `keycloakConfigCli` have Keycloak's brute force detection on**
   (`bruteForceProtected`, Keycloak's default thresholds: a temporary lockout after repeated failed logins). Their

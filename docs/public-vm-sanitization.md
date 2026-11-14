@@ -1,6 +1,6 @@
 # Offline public VM sanitization: native OS and the accepted Kubernetes template
 
-[The sanitizer](<../images/vm_sanitize.py>) is an **actual offline scratch-copy transformer**, not a receipt-only helper. This source change was authored without running commands, tests, libguestfs, or an image. It does not grant permission to run it or publish its output. The separately reviewed parent operator owns the containment, read-only input copy, resource limits, exact container/cgroup termination, private spool, acceptance boot and publication gates. No runner, wrapper, workflow, uploader or publisher is added here.
+[The sanitizer](<../images/vm_sanitize.py>) is an **actual offline scratch-copy transformer**, not a receipt-only helper. It never publishes anything itself. The parent that runs it owns the containment, the read-only input copy, the resource limits, the exact container/cgroup termination, the private spool, the acceptance boot and the publication gates: that parent is the `export` job of [`vm-artifact-export.yml`](<../.github/workflows/vm-artifact-export.yml>), which runs the launchers in `images/vm_export/` in a fixed order through `images/vm_export/pipeline.py`. The whole flow, its trust model and how to verify a published image are in [VM artifact export and publishing](<vm-artifact-publishing.md>).
 
 ## Deliberately fixed boundary
 
@@ -95,7 +95,7 @@ The probes are deliberately narrow heuristics. They are now informed by the real
 
 ## Cold-boot acceptance through the PVE API
 
-Items 4 and 5 above are automated by `images/vm_export/coldboot.py` (`python3 -m vm_export.coldboot run`). It uses the same least-privilege token as the template builds. There is no root, no `pvesh`, no SSH to the hypervisor and no guest-exec. The token reaches a VM only through the `pc-templates` pool ACL, so a VM outside the pool answers 403 exactly like a missing one.
+Items 4 and 5 above are automated by `images/vm_export/coldboot.py` (`python3 -m vm_export.coldboot run`), which the export workflow runs as its `coldboot` stage after the postscan. The state file is kept outside the runner's temp directory (`$HOME/.proxcloud-vm-export-coldboot/<run>` on the export runner), and the workflow's `recover` step repeats `python3 -m vm_export.coldboot cleanup` from it: always at the end of the run, and at the start of the next run for anything still not recorded clean. Item 6 is the workflow's `publish` and `verify` jobs. It uses the same least-privilege token as the template builds. There is no root, no `pvesh`, no SSH to the hypervisor and no guest-exec. The token reaches a VM only through the `pc-templates` pool ACL, so a VM outside the pool answers 403 exactly like a missing one.
 
 What a run does, in order:
 
@@ -122,7 +122,7 @@ What a run does, in order:
 - A disk that a killed import left in no config can't be removed with this token. It is reported (`volumes_remain`, `storage_set_changed`) and that VMID is not reused until an operator frees it.
 - The SSH host key is trust on first use. The check proves that the record came from the peer the job talked to for the whole session, not that this peer is the clone: the guest reports its own key. Reading the key through the hypervisor would need rights this token doesn't have.
 - The PVE connection is the one `images/build.py` uses, which doesn't verify the PVE certificate today; the result records `pve_tls_verified: false`.
-- The fake-PVE tests in `images/tests/test_vm_export_coldboot.py` cover the guards, not a real boot: a real run on the lab is still the acceptance. Three PVE behaviours are assumed and not yet checked by a lab run of this code: a create may carry a name and an upload's task runs on the API node (both as the portal's Go client does it), and `GET .../pending` lists no pending change for a clone that was configured while stopped.
+- The fake-PVE tests in `images/tests/test_vm_export_coldboot.py` cover the guards, not a real boot: a real run of the export workflow on the lab is still the acceptance. Three PVE behaviours are assumed and not yet checked by a lab run of this code: a create may carry a name and an upload's task runs on the API node (both as the portal's Go client does it), and `GET .../pending` lists no pending change for a clone that was configured while stopped.
 
 ## Facts are not publication authority
 

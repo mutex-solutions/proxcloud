@@ -26,6 +26,8 @@ OS = {"ubuntu-2404": ("ubuntu", 24, 4, "ubuntu"),
       "debian-12": ("debian", 12, 0, "debian"),
       "debian-13": ("debian", 13, 0, "debian")}
 VIRTUAL_BYTES = 20 << 30  # Deliberately narrower than the artifact contract.
+# A native template disk is a QCOW2 FILE: with preallocated metadata it is larger than its virtual size.
+NATIVE_SOURCE_MAX_BYTES = 24 << 30
 MAX_BYTES = 8 << 30
 ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "HOME": "/scratch", "TMPDIR": "/scratch",
        "LC_ALL": "C", "LIBGUESTFS_BACKEND": "direct", "LIBGUESTFS_BACKEND_SETTINGS": "force_tcg"}
@@ -924,7 +926,7 @@ def main(argv=None):
                       "source_stopped": review["source_stopped"]}
         else:
             source = os.lstat(SOURCE)
-            require(stat.S_ISREG(source.st_mode) and source.st_nlink == 1 and 0 < source.st_size <= 24 << 30)
+            require(stat.S_ISREG(source.st_mode) and source.st_nlink == 1 and 0 < source.st_size <= NATIVE_SOURCE_MAX_BYTES)
             os.mkdir("/scratch/work", 0o700)
             os.mkdir("/scratch/export", 0o700)
             image_info(SOURCE)

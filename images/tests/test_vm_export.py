@@ -32,13 +32,18 @@ CID = "c" * 64
 REAL_POPEN = subprocess.Popen
 HOST_USER = capsule.host_user  # The real rule; everything else sees the CI runner's uid:gid (not 1000).
 RUNNER = patch.object(capsule, "host_user", return_value=(1002, 1002))
+LOCAL_IMAGE = capsule.local_image  # The real lookup; everything else sees the image as pulled (no docker here).
+PULLED = patch.object(capsule, "local_image", return_value=capsule.IMAGE_IDS[0])
+HAND_LOADED = "sha256:1c0e402e0ff1da2732b03f93ff61e2c1e16a05f0a2091749abffc4d5360367d9"
 
 
 def setUpModule():
     RUNNER.start()
+    PULLED.start()
 
 
 def tearDownModule():
+    PULLED.stop()
     RUNNER.stop()
 
 
@@ -72,12 +77,62 @@ def inspected(s):
 
 class CapsuleTests(unittest.TestCase):
     def test_spec_refuses_unpinned_image_odd_paths_and_limits(self):
-        for changes in ({"image": "proxcloud-vm-inspection-tools:latest"}, {"check": "../x"},
+        for changes in ({"image": "proxcloud-vm-inspection-tools:latest"}, {"image": HAND_LOADED},
+                        {"image": "sha256:" + "0" * 64}, {"image": capsule.IMAGE_REFERENCE}, {"check": "../x"},
                         {"binds": {"/a": "/etc/shadow"}}, {"binds": {"/a": "/input/x", "/b": "/input/x"}},
                         {"scratch": "relative"}, {"argv": []}, {"memory": "8G"}, {"pids": 0},
                         {"binds": {"/a,dst=/etc": "/input/x"}}, {"scratch": "/runner/a=b"}):
             with self.subTest(changes=changes), self.assertRaises(capsule.CapsuleError):
                 capsule_spec(**changes)
+
+    def test_only_the_ci_built_tool_image_starts_a_capsule(self):
+        """Pinned by registry digest; locally known by its manifest digest (containerd image store) or its
+        config digest (classic store), and by nothing else."""
+        repository, digest = capsule.IMAGE_REFERENCE.split("@")
+        self.assertEqual(repository, "ghcr.io/mutex-solutions/proxcloud-vm-export-tools")
+        self.assertEqual(capsule.IMAGE_IDS, (digest, "sha256:df1770b213fb1bb85f72659797f6123ccce8941f0cf1959f999728552454f917"))
+        self.assertEqual(digest, "sha256:d3ab36a5efbe47a285be14356bcbac92ced6f6eeb69555aa1e3338a5f37328b3")
+        self.assertNotIn(HAND_LOADED, capsule.IMAGE_IDS)
+        self.assertFalse(hasattr(capsule, "IMAGE"))
+        for image in capsule.IMAGE_IDS:
+            self.assertEqual(capsule_spec(image=image)["image"], image)
+        calls = []
+
+        def docker(stdout, code=0):
+            def run(args, **kw):
+                calls.append((args, kw))
+                return subprocess.CompletedProcess(args, code, stdout=stdout)
+            return patch.object(capsule, "_command", run)
+        for image in capsule.IMAGE_IDS:
+            with docker(image + "\n"):
+                self.assertEqual(LOCAL_IMAGE(), image)
+                with patch.object(capsule, "local_image", LOCAL_IMAGE):
+                    self.assertEqual(capsule_spec()["image"], image)  # The default is the image that is present.
+        self.assertEqual(calls[0][0], ["docker", "image", "inspect", "--format", "{{.Id}}", capsule.IMAGE_REFERENCE])
+        for stdout, code in ((HAND_LOADED + "\n", 0), ("sha256:" + "0" * 64 + "\n", 0), ("", 1), (capsule.IMAGE_IDS[0], 1)):
+            with self.subTest(stdout=stdout, code=code), docker(stdout, code), self.assertRaises(capsule.CapsuleError):
+                LOCAL_IMAGE()
+
+    def test_pull_is_by_digest_reference_without_stored_credentials(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            calls = []
+
+            def run(args, **kw):
+                calls.append((args, kw))
+                return subprocess.CompletedProcess(args, 0)
+            with patch.object(capsule, "_command", run):
+                self.assertEqual(capsule.pull(tmp), capsule.IMAGE_IDS[0])
+            args, kw = calls[0]
+            self.assertEqual(args, ["docker", "pull", "--quiet", capsule.IMAGE_REFERENCE])
+            self.assertEqual(kw["env"]["DOCKER_CONFIG"], tmp)
+            failed = lambda args, **kw: subprocess.CompletedProcess(args, 1)  # noqa: E731
+            with patch.object(capsule, "_command", failed), self.assertRaises(capsule.CapsuleError):
+                capsule.pull(tmp)
+            (Path(tmp) / "config.json").write_text("{}")  # A client configuration could carry a credential.
+            with patch.object(capsule, "_command", run), self.assertRaises(capsule.CapsuleError):
+                capsule.pull(tmp)
+        # A capsule itself never pulls.
+        self.assertIn("--pull=never", capsule.create_argv(capsule_spec(), "n"))
 
     def test_create_argv_is_confined_and_binds_are_readonly(self):
         s = capsule_spec()

@@ -4,6 +4,40 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-14: VM image export and publishing in one workflow run
+
+**What changed:** a new workflow, `vm-artifact-export.yml`, takes a template in
+`pc-templates` to a public VM image in one manual run. Its `export` job runs on a
+self-hosted runner inside the lab: it pulls the pinned tool image by digest, guards and
+copies the template read-only, runs inventory, review, sanitize and postscan in containers
+without network, cold-boots two clones through the PVE API and uploads the three-file
+bundle and one public evidence record. Hosted jobs of the same run publish the bundle to
+GHCR, attest the digest of that push and the sha256 of the evidence record (GitHub build
+provenance), check the attestation with the command the run prints and verify the image
+with an anonymous pull. The publisher accepts the bundle only for the variant, OS and
+Kubernetes version that were dispatched. The export job reads its lab secrets from the
+environment `vm-artifact-export`, and keeps the state of a cold boot on the runner outside
+the job's temp directory so the next run can finish an unclean cleanup.
+`vm-artifacts.yml` became a reusable workflow that only this workflow calls;
+`vm-artifact-stage.yml` and `images/vm_stage_local.py` are removed. `capsule.py` now pins
+the tool image that `vm-export-tools.yml` published, instead of an image loaded by hand.
+
+**Why:** ProxCloud is open source, so every public artifact has to be produced and
+published by workflows in the repository that anyone can audit. Before this change an
+operator copied, sanitized and booted the image with private scripts, filled a directory
+on the runner and typed a run id and two hashes into the publisher. The publisher is
+called from the export run itself, so producer and publisher are one run at one commit and
+the hashes travel as job outputs; a publisher triggered by `workflow_run` would run the
+default branch's code of that moment and would have to read the hashes from the upload it
+checks. The export runner keeps no registry credential: it decides the image's content,
+but only hosted jobs can push or sign. The digest that is attested is computed from the
+manifest the publisher pushed, not read back from the tag, because a registry tag can be
+moved by another writer. What the repository cannot express is who may run jobs on the
+export runner: the runner group, the fork pull request approval, the protection of `main`
+and the environment's branch limit are owner settings, listed in the publishing document.
+
+**Views updated:** [C2c build and delivery](c2-containers.md#c2c-build-and-delivery).
+
 ## 2026-11-14: VM export tool image built by CI
 
 **What changed:** a new workflow, `vm-export-tools.yml`, builds the image the VM export
