@@ -38,8 +38,7 @@ capabilities to AI agents.
 - **API** (Go) — one backend serving three surfaces: the customer API, the SigV4-signed operator API, and an MCP endpoint.
 
 > [!WARNING]
-> **Release status.** `v0.5.2` is the current stable ProxCloud release (a patch release on top of
-> `v0.5.1`); its tag publishes
+> **Release status.** `v0.6.0` is the current stable ProxCloud release (after `v0.5.2`); its tag publishes
 > the images and app chart (`v0.4.0` was the first stable release, `v0.4.0-rc.1` a
 > prerelease). `v0.5.0` has breaking API changes; read the
 > [changelog](CHANGELOG.md) before upgrading. Stable is not full
@@ -119,7 +118,7 @@ before upgrading; mail durability is a separate follow-up.
 
 ## 🚀 Quickstart
 
-Broker-free defaults target the stable **v0.5.2** API/chart release. Its tag publishes
+Broker-free defaults target the stable **v0.6.0** API/chart release. Its tag publishes
 the images and chart; until you have verified them pullable, build from a checkout
 containing the PostgreSQL job engine (installer `images.build: true`, the default) or
 pin known compatible new images; do not use the older Rabbit-dependent API with these
@@ -230,7 +229,7 @@ separate workflows. The managed Kubernetes and database charts have independent
 release tags; merging to `main` does **not** publish an OCI chart or deploy a site.
 
 `v0.4.0-rc.1` was published as a prerelease and `v0.4.0` as the first stable app
-release; `v0.5.2` is the current stable release. See [build and release
+release; `v0.6.0` is the current stable release. See [build and release
 operations](docs/ci-release.md) for current triggers, release limitations, required permissions and release verification.
 
 </details>

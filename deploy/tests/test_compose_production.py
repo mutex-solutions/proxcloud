@@ -408,13 +408,13 @@ class ScriptDryRunTests(unittest.TestCase):
 
         self.assertIn("usage:", install.run("upgrade", "--dry-run").stderr)
         self.assertIn("invalid version", install.run("upgrade", "0.6.0", "--dry-run").stderr)
-        upgrade = install.run("upgrade", "v0.6.0", "--dry-run")
+        upgrade = install.run("upgrade", "v9.9.9", "--dry-run")
         self.assertEqual(upgrade.returncode, 0, upgrade.stderr)
         self.assertLess(upgrade.stdout.index("pg_dumpall"), upgrade.stdout.index("pull"))  # backup first
         self.assertLess(upgrade.stdout.index("pull"), upgrade.stdout.index("up -d keycloak-config"))
-        self.assertEqual(read_env(install.dir)["PROXCLOUD_VERSION"], "v0.6.0")
+        self.assertEqual(read_env(install.dir)["PROXCLOUD_VERSION"], "v9.9.9")
         # The install's own .env keeps its release: the next plain install must not upgrade without a backup.
-        self.assertNotEqual(read_env(install.dir, ".env")["PROXCLOUD_VERSION"], "v0.6.0")
+        self.assertNotEqual(read_env(install.dir, ".env")["PROXCLOUD_VERSION"], "v9.9.9")
 
     def test_uninstall_asks_and_deletes_volumes_only_with_purge(self):
         install = Install(self)

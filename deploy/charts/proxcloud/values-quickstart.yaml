@@ -9,7 +9,7 @@
 #     --set postgresql.auth.password=$(openssl rand -hex 16) \
 #     --set keycloakConfigCli.adminPassword=$(openssl rand -hex 12)
 #
-# The chart's appVersion (v0.5.2) images are published on ghcr.io by the release tag. Until you have
+# The chart's appVersion (v0.6.0) images are published on ghcr.io by the release tag. Until you have
 # verified they are pullable, build and load the api/web/admin images yourself and override
 # api/ui/admin.image (chart README, "Images first").
 #
