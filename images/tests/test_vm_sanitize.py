@@ -1124,6 +1124,12 @@ class KubernetesSanitizeTests(unittest.TestCase):
             self.assertEqual(s.main(["--k8s-os", "ubuntu-2604"]), 2)
         self.assertEqual(calls, [("info", "--output=json"), ("convert", "-f")])
         calls.clear()
+        info = json.dumps({"format": "raw", "virtual-size": 8192}).encode()  # Allowlisted, but not the hashed file's size.
+        with patch.object(s.os, "mkdir"), patch.object(s, "command", side_effect=fake), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(s.main(["--k8s-os", "ubuntu-2604"]), 2)
+        self.assertEqual(calls, [("info", "--output=json")])  # Never converted.
+        calls.clear()
         with patch.object(s.os, "mkdir"), patch.object(s, "command", side_effect=lambda *a: (calls.append(a[:2]), json.dumps({"format": "qcow2", "virtual-size": 4096}).encode())[1]), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(s.main(["--k8s-os", "ubuntu-2604"]), 2)

@@ -81,7 +81,10 @@ class FakePVE:
         if endpoint == "config":
             if method == "GET":
                 self.events.append(("readback", vmid, row.get("scsi0")))
-                return dict(row, digest="fake-digest") if self.fail != "digest" else dict(row)
+                shown = dict(row, digest="fake-digest") if self.fail != "digest" else dict(row)
+                if self.fail == "shrunk-readback" and "scsi0" in row:  # Later reads report less, with no resize between.
+                    row["scsi0"] = row["scsi0"].rsplit("=", 1)[0] + "=10G"
+                return shown
             if "scsi0" in params and self.fail == "config":
                 raise SystemExit("import failed")
             row.update({key: value for key, value in params.items() if key != "delete"})
@@ -177,6 +180,15 @@ class DiskFloorTests(unittest.TestCase):
                 vmid = self.create(pve)
                 self.assertTrue(pve.rows[vmid]["scsi0"].endswith("size=" + size))
                 self.assertFalse(any(e[0] == "PUT" for e in pve.events))
+
+    def test_readback_below_the_imported_size_refuses_conversion(self):
+        """A 20 GiB import is above the floor and is not resized; a 10 GiB readback is still above the 5 GiB floor,
+        but it is not the disk that was imported."""
+        pve = FakePVE(size="20G", fail="shrunk-readback")
+        with self.assertRaisesRegex(SystemExit, "readback below floor"):
+            self.create(pve)
+        self.assertFalse(any(e[0] == "PUT" or (e[0] == "POST" and e[1].endswith("/template")) for e in pve.events))
+        self.assertEqual(pve.rows, pve.protected)
 
     def test_unreadable_import_size_fails_before_resize_and_conversion(self):
         for size in ("", "0G", "garbage", "20G,size=30G"):

@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 IMAGES = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(IMAGES))
@@ -327,7 +327,8 @@ class ReviewTests(unittest.TestCase):
         small, _ = review.derive(inv, BASELINE, "1.37.2", SOURCE_SHA)
         self.assertEqual(small, legacy)
         for virtual, raw in ((5 << 30, 5 << 30), (10 << 30, 10 << 30), (8 << 30, 20 << 30), (20 << 30, 8 << 30),
-                             (float(8 << 30), float(8 << 30)), ("8589934592", "8589934592")):
+                             (float(8 << 30), float(8 << 30)), (float(8 << 30), 8 << 30), (8 << 30, float(8 << 30)),
+                             ("8589934592", "8589934592")):
             inv = reviewed_inventory()
             inv["facts"]["parent"].update(virtual_bytes=virtual, raw_bytes=raw)
             with self.subTest(virtual=virtual, raw=raw), self.assertRaises(review.ReviewRefused) as caught:
@@ -891,6 +892,53 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(capsule.pinned_input(Path(root) / "real" / "f"), hashlib.sha256(b"x").hexdigest())
             with self.assertRaises(capsule.CapsuleError):
                 capsule.pinned_input(Path(root) / "link" / "f")
+
+
+class ProbeSizeTests(unittest.TestCase):
+    """The probes run under libguestfs only inside the capsule; these pin which disk sizes each one admits."""
+
+    def run_main(self, module, argv, **replaced):
+        """main() up to the first replaced call that raises: host uid, no KVM, a fake guestfs, nothing touched."""
+        with contextlib.ExitStack() as stack:
+            for mocked in (patch.object(module.os, "getuid", return_value=1002),
+                           patch.object(module.os, "geteuid", return_value=1002),
+                           patch.object(module.pathlib.Path, "exists", return_value=False),
+                           patch.object(module.pathlib.Path, "mkdir"),
+                           patch.object(module.pathlib.Path, "read_bytes", return_value=b"{}"),
+                           patch.dict(os.environ), patch.object(sys, "path", list(sys.path)),
+                           patch.dict(sys.modules, {"guestfs": MagicMock()}),
+                           patch.object(vm_sanitize, "mount_all"), patch.object(vm_sanitize, "load_review")):
+                stack.enter_context(mocked)
+            mocks = {name: stack.enter_context(patch.object(owner, name, **how))
+                     for name, (owner, how) in replaced.items()}
+            with self.assertRaisesRegex(RuntimeError, "stop"):
+                module.main(list(argv))
+        return mocks
+
+    def test_each_probe_admits_exactly_its_own_variant_row(self):
+        stop = {"side_effect": RuntimeError("stop at the size gate")}
+        for module, argv, variant in ((inspect_os, ["ubuntu-2404"], "os"), (postscan_probe, ["--os", "debian-13"], "os"),
+                                      (postscan_probe, ["--k8s", "1.37.2"], "kubernetes")):
+            with self.subTest(module=module.__name__, variant=variant):
+                gate = self.run_main(module, argv, image_info=(vm_sanitize, stop))["image_info"]
+                gate.assert_called_once_with(module.SOURCE, vm_sanitize.VIRTUAL_BYTES[variant])
+        self.assertNotEqual(vm_sanitize.VIRTUAL_BYTES["os"], vm_sanitize.VIRTUAL_BYTES["kubernetes"])
+
+    def test_kubernetes_inventory_records_the_size_that_was_read(self):
+        for size in vm_sanitize.VIRTUAL_BYTES["kubernetes"]:
+            with self.subTest(size=size):
+                mocks = self.run_main(inspect_k8s, ["1.37.2", "2.3.2", "1.4.3"],
+                                      raw_info=(vm_sanitize, {"return_value": {"virtual-size": size}}),
+                                      inventory=(inspect_k8s, {"side_effect": RuntimeError("stop at the inventory")}))
+                mocks["raw_info"].assert_called_once_with(inspect_k8s.RAW)  # The allowlist gate; its size is passed on.
+                self.assertEqual(mocks["inventory"].call_args.args[3:], (size, "1.37.2", "2.3.2", "1.4.3"))
+                vs = MagicMock()
+                vs.k8s_inventory.side_effect = RuntimeError("stop at the facts")
+                with patch.object(inspect_k8s, "layout_facts", return_value=(True, {})), \
+                        patch.object(inspect_k8s, "sudo_hashes", return_value={}), self.assertRaisesRegex(RuntimeError, "stop"):
+                    inspect_k8s.inventory(vs, None, MagicMock(), size, "1.37.2", "2.3.2", "1.4.3")
+                parent = vs.k8s_inventory.call_args.args[3]
+                self.assertEqual((parent["virtual_bytes"], parent["raw_bytes"]), (size, size))  # Never a constant.
 
 
 class CapsuleUidTests(unittest.TestCase):
