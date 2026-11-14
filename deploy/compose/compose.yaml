@@ -10,15 +10,24 @@
 # keycloak-config/ and seed/ are rendered from the chart and kept equal to it by
 # deploy/tests/test_compose_production.py.
 
+# Bounded container logs: the json-file default keeps everything, on a host that runs for years.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "5"
+
 x-traefik: &traefik
   image: traefik:v3.7.18
   restart: unless-stopped
+  logging: *logging
   ports:
     - "${HTTP_PORT:?run ./proxcloud-up.sh}:80"
     - "${HTTPS_PORT:?run ./proxcloud-up.sh}:443"
   volumes:
-    # Read-only, to discover this project's containers. Traefik can still read every container's
-    # settings through it: keep the host dedicated to the portal.
+    # To discover this project's containers. ":ro" protects the socket file only, not the API
+    # behind it: whoever controls this Traefik, the one process the internet reaches, controls
+    # Docker, and with it the host. Keep the host dedicated to the portal.
     - /var/run/docker.sock:/var/run/docker.sock:ro
     - traefik-acme:/acme
 
@@ -85,6 +94,7 @@ services:
   postgres:
     image: postgres:17-alpine
     restart: unless-stopped
+    logging: *logging
     environment:
       POSTGRES_USER: proxcloud
       POSTGRES_PASSWORD: ${PG_PASSWORD:?run ./proxcloud-up.sh}
@@ -94,13 +104,16 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ./postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U proxcloud -d proxcloud"]
+      # Over TCP: the server that runs the init scripts on the first start listens on the socket
+      # only, and must not count as ready.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U proxcloud -d proxcloud"]
       interval: 5s
       retries: 30
 
   keycloak:
     image: quay.io/keycloak/keycloak:26.8.2
     restart: unless-stopped
+    logging: *logging
     command: ["start"]
     depends_on:
       postgres: {condition: service_healthy}
@@ -134,20 +147,24 @@ services:
   # with redirects to the two consoles, the SSO service account). Unmanaged clients are kept.
   # The console URLs and the SSO secret are substituted from the environment at import.
   # Profile "setup": a plain "docker compose up" does not run it. proxcloud-up.sh runs it by name
-  # before it touches anything else, so a failure here (a changed Keycloak admin password, for
-  # example) leaves the running portal as it is.
+  # before it touches anything else (the Traefik of a previous TLS mode included), so a failure
+  # here (a changed Keycloak admin password, for example) leaves the running portal as it is.
   keycloak-config:
     image: docker.io/adorsys/keycloak-config-cli:6.5.1-26.5.5
     profiles: [setup]
     restart: "no"
+    logging: *logging
     depends_on:
       keycloak: {condition: service_healthy}
     environment:
       KEYCLOAK_URL: http://keycloak:8080
       KEYCLOAK_USER: admin
       KEYCLOAK_PASSWORD: ${KC_ADMIN_PASSWORD}
-      KEYCLOAK_AVAILABILITYCHECK_ENABLED: "true"
-      KEYCLOAK_AVAILABILITYCHECK_TIMEOUT: 120s
+      # No availability check (the chart's Job has one): depends_on already waits for a healthy
+      # Keycloak, and the check retries the admin login for its whole timeout. With a wrong
+      # password that is a slow failure, and enough failed logins for the brute force detection of
+      # realm master to lock the admin account.
+      KEYCLOAK_AVAILABILITYCHECK_ENABLED: "false"
       IMPORT_FILES_LOCATIONS: /config/*.json
       IMPORT_VARSUBSTITUTION_ENABLED: "true"
       IMPORT_MANAGED_CLIENT: no-delete
@@ -163,17 +180,25 @@ services:
   seed:
     image: ghcr.io/mutex-solutions/proxcloud-api:${PROXCLOUD_VERSION:?run ./proxcloud-up.sh}
     restart: on-failure
+    logging: *logging
     depends_on:
       postgres: {condition: service_healthy}
-    entrypoint: ["/bin/sh", "-c", "psql \"$$PROXCLOUD_DB_URL\" -v ON_ERROR_STOP=1 -q -f /seed/seed.sql && echo 'seed applied (existing documents kept)'"]
+    # The connection comes from the PG* environment, not from a URL argument: the password must
+    # not show in the process list.
+    entrypoint: ["/bin/sh", "-c", "psql -v ON_ERROR_STOP=1 -q -f /seed/seed.sql && echo 'seed applied (existing documents kept)'"]
     environment:
-      PROXCLOUD_DB_URL: postgres://proxcloud:${PG_PASSWORD}@postgres:5432/proxcloud?sslmode=disable
+      PGHOST: postgres
+      PGDATABASE: proxcloud
+      PGUSER: proxcloud
+      PGPASSWORD: ${PG_PASSWORD}
+      PGSSLMODE: disable
     volumes:
       - ./seed:/seed:ro
 
   api:
     image: ghcr.io/mutex-solutions/proxcloud-api:${PROXCLOUD_VERSION}
     restart: unless-stopped
+    logging: *logging
     # The API reads the realms' OIDC metadata when it starts and retries every 30 seconds until
     # it has them. proxcloud-up.sh applies the realms first, so the first attempt succeeds.
     depends_on:
@@ -215,6 +240,7 @@ services:
   web:
     image: ghcr.io/mutex-solutions/proxcloud-web:${PROXCLOUD_VERSION}
     restart: unless-stopped
+    logging: *logging
     depends_on: [api]
     environment:
       PROXCLOUD_API_URL: https://${API_HOST}${URL_PORT-}/api/v1
@@ -229,6 +255,7 @@ services:
   admin:
     image: ghcr.io/mutex-solutions/proxcloud-admin:${PROXCLOUD_VERSION}
     restart: unless-stopped
+    logging: *logging
     depends_on: [api]
     environment:
       PROXCLOUD_API_URL: https://${API_HOST}${URL_PORT-}/api/v1

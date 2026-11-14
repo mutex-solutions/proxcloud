@@ -8,7 +8,7 @@ umask 077
 # .github/scripts/tests/test_release_policy.py.
 DEFAULT_VERSION="v0.5.2"
 
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 cd "$DIR"
 ENV_FILE=.env
 TLS_MODES="internal acme-http acme-dns-cloudflare"
@@ -29,19 +29,22 @@ install (default) is idempotent: it asks only for what is missing, keeps the sec
   --acme-email <e>             Let's Encrypt account email (acme modes)
   --cloudflare-token-file <f>  Cloudflare API token file, copied to ./cf-token (or CF_DNS_API_TOKEN)
   --operator-email <e>         first operator, created in Keycloak realm master
-  --version <vX.Y.Z>           ProxCloud release (default: the pinned release, or the one in .env)
+  --version <vX.Y.Z>           ProxCloud release of a first install (default: the pinned release).
+                               Afterwards the release changes with: upgrade <version>
   --http-port <n> --https-port <n>   host ports (default 80 and 443)
-  --project-name <n>           Compose project name (default proxcloud; fixed after the first install)
+  --project-name <n>           Compose project name (default proxcloud-prod; fixed after the first install)
 
 Common:
   --yes        answer yes to confirmations (uninstall)
   --purge      uninstall only: also delete the volumes (database, Keycloak, certificates)
-  --dry-run    write .env and print the docker commands, run none of them, check no host state
+  --dry-run    print the docker commands and write what .env would become to .env.dry-run;
+               runs nothing, checks no host state, leaves .env and the install untouched
   -h, --help
 
 Environment, same meaning as the flags: PROXCLOUD_DOMAIN, PROXCLOUD_APP_HOST, PROXCLOUD_ADMIN_HOST,
 PROXCLOUD_API_HOST, PROXCLOUD_AUTH_HOST, PROXCLOUD_TLS_MODE, PROXCLOUD_ACME_EMAIL,
-PROXCLOUD_OPERATOR_EMAIL, PROXCLOUD_VERSION, CF_DNS_API_TOKEN.
+PROXCLOUD_OPERATOR_EMAIL, PROXCLOUD_VERSION, CF_DNS_API_TOKEN. No other variable of the calling shell
+reaches Compose: the stack runs with the values in .env.
 EOF
 }
 
@@ -58,6 +61,13 @@ env_set() { # KEY VALUE: replace the line or append it; every other line is kept
     index($0, k "=") == 1 { print k "=" v; done = 1; next }
     { print }
     END { if (!done) print k "=" v }' "$ENV_FILE" > "$tmp"
+  mv "$tmp" "$ENV_FILE"
+}
+
+env_del() { # KEY: drop its line
+  local tmp
+  tmp="$(mktemp "$ENV_FILE.XXXXXX")"
+  grep -v "^$1=" "$ENV_FILE" > "$tmp" || true
   mv "$tmp" "$ENV_FILE"
 }
 
@@ -93,43 +103,77 @@ is_version() { [[ "$1" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-r
 is_project() { [[ "$1" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; }
 
 # ---- docker ----
-dc() { # docker compose for this project; printed, not run, with --dry-run
+# docker compose for this project. Compose lets the calling shell's environment win over .env, so
+# every name .env sets (and three more that would change the model) is dropped from it first: an
+# exported PROXCLOUD_VERSION or HTTP_PORT cannot start something else than .env says.
+# PULL_VERSION is the one deliberate override (upgrade pulls before it writes .env).
+compose() {
+  local drop=(-u COMPOSE_FILE -u COMPOSE_ENV_FILES -u ACME_CA_SERVER) key
+  while IFS= read -r key; do
+    drop+=(-u "$key")
+  done < <(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$ENV_FILE")
+  env "${drop[@]}" ${PULL_VERSION:+"PROXCLOUD_VERSION=$PULL_VERSION"} docker compose -p "$PROJECT" "$@"
+}
+
+dc() { # compose; printed, not run, with --dry-run
   if [ "$DRY_RUN" = 1 ]; then echo "+ docker compose -p $PROJECT $*"; return 0; fi
-  docker compose -p "$PROJECT" "$@"
+  compose "$@"
 }
 
 preflight() {
-  local engine compose
+  local engine compose major minor
   command -v docker >/dev/null || die "docker is not installed"
   engine="$(docker version --format '{{.Server.Version}}' 2>/dev/null)" \
     || die "cannot reach the Docker daemon: is it running, and may this user use it?"
   compose="$(docker compose version --short 2>/dev/null)" \
     || die "the Docker Compose plugin (docker compose, v2 or later) is not installed"
   compose="${compose#v}"
-  [[ "${engine%%.*}" =~ ^[0-9]+$ ]] && [ "${engine%%.*}" -ge 20 ] || die "Docker Engine 20.10 or later is required (found $engine)"
+  IFS=. read -r major minor _ <<< "$engine"
+  [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] && [ $((10#$major * 100 + 10#$minor)) -ge 2010 ] \
+    || die "Docker Engine 20.10 or later is required (found $engine)"
   [[ "${compose%%.*}" =~ ^[0-9]+$ ]] && [ "${compose%%.*}" -ge 2 ] || die "Docker Compose v2 or later is required (found $compose)"
 }
 
 # ponytail: probes 127.0.0.1 only; a listener bound to one other address shows up as Docker's own bind error.
 port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
+# Never take over what something else owns. The development stack (docker-compose.yml in the
+# repository root) has the same service and volume names, and its project is named after the
+# checkout directory: under one project name each side would recreate, and with "down -v" delete,
+# the other's database.
+guard_project() {
+  local other
+  if [ -f ../../docker-compose.yml ] && [ "$PROJECT" = "$(basename "$(cd ../.. && pwd -P)")" ]; then
+    die "'$PROJECT' is the Compose project of the development stack of this checkout (docker-compose.yml in its root); choose another --project-name"
+  fi
+  other="$(docker ps -a --filter "label=com.docker.compose.project=$PROJECT" \
+    --format '{{.Label "com.docker.compose.project.working_dir"}}' | grep -vxF "$DIR" | head -n 1 || true)"
+  [ -z "$other" ] || die "Compose project '$PROJECT' already has containers, created from '$other' and not from $DIR. Another stack: choose another --project-name. This checkout, moved: run ./proxcloud-up.sh uninstall first (the data is kept)."
+  # The volume outlives "uninstall" and a deleted checkout; its database only opens with the
+  # passwords, and its content only decrypts with the key, of the .env it was created with.
+  if [ -z "$(env_get PG_PASSWORD)" ] && docker volume inspect "${PROJECT}_postgres-data" >/dev/null 2>&1; then
+    die "the volume ${PROJECT}_postgres-data exists, but there is no .env with its passwords here. Restore your .env (backups/env-<time>) and run install again; or, for another install on this host, choose another --project-name."
+  fi
+}
+
 load_env() { # for every command but install
-  [ -f "$ENV_FILE" ] || die "no $ENV_FILE here: run ./proxcloud-up.sh install first"
+  [ -f "$ENV_FILE" ] || die "no .env here: run ./proxcloud-up.sh install first"
   PROJECT="$(env_get COMPOSE_PROJECT_NAME)"
-  is_project "$PROJECT" || die "COMPOSE_PROJECT_NAME is missing or invalid in $ENV_FILE"
+  is_project "$PROJECT" || die "COMPOSE_PROJECT_NAME is missing or invalid in .env"
+  TLS_MODE="$(env_get COMPOSE_PROFILES)"
   HTTPS_PORT="$(env_get HTTPS_PORT)" URL_PORT="$(env_get URL_PORT)"
   APP_HOST="$(env_get APP_HOST)" ADMIN_HOST="$(env_get ADMIN_HOST)"
   API_HOST="$(env_get API_HOST)" AUTH_HOST="$(env_get AUTH_HOST)"
 }
 
-wait_for() { # SECONDS LABEL COMMAND...
+wait_for() { # SECONDS LABEL COMMAND...: false when the time is up
   local deadline=$((SECONDS + $1)) label=$2
   shift 2
   printf 'Waiting for %s ' "$label"
   until "$@" >/dev/null 2>&1; do
     if [ "$SECONDS" -ge "$deadline" ]; then
-      echo
-      die "$label is not ready. Look at: docker compose -p $PROJECT ps, and: docker compose -p $PROJECT logs"
+      echo ' not ready'
+      return 1
     fi
     printf '.'
     sleep 5
@@ -142,7 +186,7 @@ wait_oneshot() { # SECONDS SERVICE LABEL: until its container ends; a failed run
   [ "$DRY_RUN" = 1 ] && return 0
   printf 'Waiting for %s ' "$label"
   while :; do
-    id="$(docker compose -p "$PROJECT" ps -aq "$service")"
+    id="$(compose ps -aq "$service")"
     state="$(docker inspect -f '{{.State.Status}}:{{.State.ExitCode}}' "$id" 2>/dev/null || true)"
     case "$state" in
       exited:0) echo ' ok'; return 0 ;;
@@ -164,7 +208,7 @@ wait_oneshot() { # SECONDS SERVICE LABEL: until its container ends; a failed run
 # API only once Docker reports it healthy, so that is the state to wait for.
 api_ready() {
   local id
-  id="$(docker compose -p "$PROJECT" ps -q api)"
+  id="$(compose ps -q api)"
   [ -n "$id" ] && [ "$(docker inspect -f '{{.State.Health.Status}}' "$id")" = healthy ]
 }
 
@@ -180,13 +224,24 @@ api_routed() {
 # Start or update the stack. Keycloak and its realms come first: the API reads their OIDC metadata
 # when it starts, and a failed realm import stops here, before any running service is replaced.
 bring_up() {
+  local mode others=()
   dc up -d keycloak-config
   wait_oneshot 600 keycloak-config "Keycloak and its realms"
+  # Each TLS mode is its own Traefik service and all three publish the same ports: one of another
+  # mode has to give them back. Only now, so that a failed realm import leaves it serving.
+  for mode in $TLS_MODES; do
+    [ "$mode" = "$TLS_MODE" ] || others+=("traefik-$mode")
+  done
+  dc rm -sf "${others[@]}"
   dc up -d --remove-orphans
   [ "$DRY_RUN" = 1 ] && return 0
   wait_oneshot 300 seed "the first-run seed"
-  wait_for 300 "the API" api_ready
-  if command -v curl >/dev/null; then wait_for 120 "the API through Traefik" api_routed; fi
+  wait_for 300 "the API" api_ready \
+    || die "the API is not ready. Look at: docker compose -p $PROJECT ps -a, and: docker compose -p $PROJECT logs api"
+  # Not fatal: where Docker publishes ports on one address only, 127.0.0.1 does not answer.
+  if command -v curl >/dev/null && ! wait_for 120 "the API through Traefik" api_routed; then
+    warn "no answer from the API at https://$API_HOST:$HTTPS_PORT on 127.0.0.1. Expected if Docker publishes ports on another address only; otherwise look at: docker compose -p $PROJECT logs traefik-$TLS_MODE"
+  fi
 }
 
 print_urls() {
@@ -194,7 +249,7 @@ print_urls() {
   Customer console  https://$APP_HOST$URL_PORT    customers register themselves (realm clients)
   Operator console  https://$ADMIN_HOST$URL_PORT  operators only (realm master)
   API               https://$API_HOST$URL_PORT
-  Keycloak          https://$AUTH_HOST$URL_PORT   user admin, password KC_ADMIN_PASSWORD in $DIR/$ENV_FILE
+  Keycloak          https://$AUTH_HOST$URL_PORT   user admin, password KC_ADMIN_PASSWORD in $DIR/.env
 EOF
 }
 
@@ -207,24 +262,27 @@ create_operator() {
     return 0
   fi
   password="$(gen_hex 10)"
-  # Email and password go in on stdin, so neither shows in this host's process list.
-  result="$(printf '%s\n%s\n' "$email" "$password" | docker compose -p "$PROJECT" exec -T keycloak sh -c '
+  # No password is ever a command argument, here or in the container (whose processes any local
+  # user of this host can list): the admin password reaches kcadm in its environment, and the user
+  # with its password as one JSON document on stdin. One call creates both, so a failure cannot
+  # leave an operator without a password. The email is validated: it needs no JSON escaping.
+  # The quoted script is expanded by the shell in the container, not by this one:
+  # shellcheck disable=SC2016
+  result="$(printf '%s\n{"username":"%s","email":"%s","emailVerified":true,"enabled":true,"credentials":[{"type":"password","value":"%s","temporary":true}]}\n' \
+      "$email" "$email" "$email" "$password" | compose exec -T keycloak sh -c '
     set -e
     read -r email
-    read -r password
     kcadm=/opt/keycloak/bin/kcadm.sh
     config=/tmp/pc-kcadm.config
     trap "rm -f $config" EXIT
-    "$kcadm" config credentials --config "$config" --server http://localhost:8080 --realm master \
-      --user "$KC_BOOTSTRAP_ADMIN_USERNAME" --password "$KC_BOOTSTRAP_ADMIN_PASSWORD" >/dev/null 2>&1
-    if "$kcadm" get users --config "$config" -r master -q "username=$email" -q exact=true --fields username \
+    KC_CLI_PASSWORD="$KC_BOOTSTRAP_ADMIN_PASSWORD" "$kcadm" config credentials --config "$config" \
+      --server http://localhost:8080 --realm master --user "$KC_BOOTSTRAP_ADMIN_USERNAME" </dev/null >/dev/null 2>&1
+    if "$kcadm" get users --config "$config" -r master -q "username=$email" -q exact=true --fields username </dev/null \
         | grep -qF "\"$email\""; then
       echo exists
       exit 0
     fi
-    "$kcadm" create users --config "$config" -r master -s "username=$email" -s "email=$email" \
-      -s emailVerified=true -s enabled=true >/dev/null 2>&1
-    "$kcadm" set-password --config "$config" -r master --username "$email" --new-password "$password" --temporary
+    "$kcadm" create users --config "$config" -r master -f - >/dev/null 2>&1
     echo created
   ')" || die "could not create the operator in Keycloak. If the admin password was changed in Keycloak, add the operator there (realm master)."
   case "$result" in
@@ -239,27 +297,19 @@ create_operator() {
 }
 
 cmd_install() {
-  local fresh=0 domain missing="" key value previous_project previous_mode token="" operator_email
+  local domain missing="" key value previous_project previous_version recorded_operator token="" operator_email
 
+  # Nothing is written before every input is validated and guard_project has passed: a run that
+  # stops early leaves no .env behind.
   [ "$DRY_RUN" = 1 ] || preflight
-  if [ ! -f "$ENV_FILE" ]; then
-    fresh=1
-    cat > "$ENV_FILE" <<'EOF'
-# Written by proxcloud-up.sh. Keep it mode 600 and BACK IT UP together with the database:
-# ENCRYPTION_KEY decrypts the provider secrets stored there and cannot be recovered.
-# Change settings by re-running ./proxcloud-up.sh install with flags, not by hand.
-EOF
-  fi
-  chmod 600 "$ENV_FILE"
 
   previous_project="$(env_get COMPOSE_PROJECT_NAME)"
-  PROJECT="$(first "$F_PROJECT" "$previous_project" proxcloud)"
+  PROJECT="$(first "$F_PROJECT" "$previous_project" proxcloud-prod)"
   is_project "$PROJECT" || die "invalid --project-name '$PROJECT' (lowercase letters, digits, - and _)"
   [ -z "$previous_project" ] || [ "$PROJECT" = "$previous_project" ] \
     || die "this install is Compose project '$previous_project': the project name cannot change (its volumes carry that name)"
 
-  previous_mode="$(env_get COMPOSE_PROFILES)"
-  TLS_MODE="$(first "$F_TLS" "${PROXCLOUD_TLS_MODE:-}" "$previous_mode")"
+  TLS_MODE="$(first "$F_TLS" "${PROXCLOUD_TLS_MODE:-}" "$(env_get COMPOSE_PROFILES)")"
   [ -n "$TLS_MODE" ] || TLS_MODE="$(ask "TLS mode (${TLS_MODES// / | })" acme-http)"
 
   domain="$(lower "$(first "$F_DOMAIN" "${PROXCLOUD_DOMAIN:-}")")"
@@ -281,7 +331,8 @@ EOF
 
   HTTP_PORT="$(first "$F_HTTP_PORT" "$(env_get HTTP_PORT)" 80)"
   HTTPS_PORT="$(first "$F_HTTPS_PORT" "$(env_get HTTPS_PORT)" 443)"
-  VERSION="$(first "$F_VERSION" "${PROXCLOUD_VERSION:-}" "$(env_get PROXCLOUD_VERSION)" "$DEFAULT_VERSION")"
+  previous_version="$(env_get PROXCLOUD_VERSION)"
+  VERSION="$(first "$F_VERSION" "${PROXCLOUD_VERSION:-}" "$previous_version" "$DEFAULT_VERSION")"
 
   ACME_EMAIL="$(first "$F_ACME_EMAIL" "${PROXCLOUD_ACME_EMAIL:-}" "$(env_get ACME_EMAIL)")"
   case "$TLS_MODE" in
@@ -289,11 +340,13 @@ EOF
   esac
 
   # Once created, the operator is not asked for again; more operators are added in Keycloak.
-  operator_email="$(env_get OPERATOR_EMAIL)"
+  # Lower case, as Keycloak stores a username.
+  recorded_operator="$(env_get OPERATOR_EMAIL)"
+  operator_email="$recorded_operator"
   if [ -z "$operator_email" ]; then
-    operator_email="$(first "$F_OPERATOR_EMAIL" "${PROXCLOUD_OPERATOR_EMAIL:-}")"
-    [ -n "$operator_email" ] || operator_email="$(ask "Email of the first operator")"
-  elif [ -n "$F_OPERATOR_EMAIL" ] && [ "$F_OPERATOR_EMAIL" != "$operator_email" ]; then
+    operator_email="$(lower "$(first "$F_OPERATOR_EMAIL" "${PROXCLOUD_OPERATOR_EMAIL:-}")")"
+    [ -n "$operator_email" ] || operator_email="$(lower "$(ask "Email of the first operator")")"
+  elif [ -n "$F_OPERATOR_EMAIL" ] && [ "$(lower "$F_OPERATOR_EMAIL")" != "$operator_email" ]; then
     warn "the first operator ($operator_email) already exists; add more operators in Keycloak, realm master"
   fi
 
@@ -321,6 +374,10 @@ EOF
   is_port "$HTTPS_PORT" || die "invalid --https-port '$HTTPS_PORT'"
   [ "$HTTP_PORT" != "$HTTPS_PORT" ] || die "--http-port and --https-port must differ"
   is_version "$VERSION" || die "invalid version '$VERSION' (vX.Y.Z or vX.Y.Z-rc.N)"
+  # An install that completed (its operator exists) changes release with "upgrade": backup, then pull.
+  if [ -n "$recorded_operator" ] && [ -n "$previous_version" ] && [ "$VERSION" != "$previous_version" ]; then
+    die "this install runs $previous_version: change the release with ./proxcloud-up.sh upgrade $VERSION (it takes a backup first)"
+  fi
   is_email "$operator_email" || die "invalid operator email '$operator_email'"
   case "$TLS_MODE" in
     acme-*) is_email "$ACME_EMAIL" || die "invalid ACME email '$ACME_EMAIL'" ;;
@@ -329,6 +386,8 @@ EOF
     warn "acme-http: Let's Encrypt validates on public port 80. Forward it to this host's port $HTTP_PORT, or no certificate is issued."
   fi
 
+  [ -z "$F_CF_TOKEN_FILE" ] || [ "$TLS_MODE" = acme-dns-cloudflare ] \
+    || die "--cloudflare-token-file belongs to --tls acme-dns-cloudflare"
   if [ "$TLS_MODE" = acme-dns-cloudflare ]; then
     if [ -n "$F_CF_TOKEN_FILE" ]; then
       [ -r "$F_CF_TOKEN_FILE" ] || die "cannot read --cloudflare-token-file $F_CF_TOKEN_FILE"
@@ -339,20 +398,39 @@ EOF
       read -r -s -p "Cloudflare API token (Zone:DNS:Edit on the zone; not shown): " token || true
       echo >&2
     fi
-    if [ -n "$token" ]; then
-      [[ "$token" =~ ^[A-Za-z0-9_-]+$ ]] || die "the Cloudflare API token has unexpected characters"
-      printf '%s' "$token" > cf-token
+    [ -z "$token" ] || [[ "$token" =~ ^[A-Za-z0-9_-]+$ ]] || die "the Cloudflare API token has unexpected characters"
+    [ -n "$token" ] || [ -s cf-token ] || die "missing: --cloudflare-token-file (or CF_DNS_API_TOKEN)"
+  fi
+
+  if [ "$DRY_RUN" = 0 ]; then
+    guard_project
+    case "$TLS_MODE" in
+      acme-*)
+        if command -v getent >/dev/null; then
+          for value in "$APP_HOST" "$ADMIN_HOST" "$API_HOST" "$AUTH_HOST"; do
+            getent hosts "$value" >/dev/null \
+              || warn "$value does not resolve on this host. Without its DNS record no certificate is issued for it, and failed attempts count against the Let's Encrypt rate limits (README.md, Troubleshooting)."
+          done
+        fi
+        ;;
+    esac
+    if [ "$TLS_MODE" = acme-dns-cloudflare ]; then
+      [ -z "$token" ] || printf '%s' "$token" > cf-token
+      chmod 600 cf-token
     fi
-    [ -s cf-token ] || die "missing: --cloudflare-token-file (or CF_DNS_API_TOKEN)"
-    chmod 600 cf-token
+    # A checkout made under umask 077 is unreadable to the containers' own users, and PostgreSQL
+    # would skip its init script without a word. These three directories hold no secret.
+    chmod -R a+rX postgres-init keycloak-config seed
   fi
 
-  if [ "$DRY_RUN" = 0 ] && [ "$fresh" = 1 ] \
-     && [ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT")" ]; then
-    rm -f "$ENV_FILE"
-    die "containers of another Compose project named '$PROJECT' exist on this host; choose another --project-name"
+  if [ ! -f "$ENV_FILE" ]; then
+    cat > "$ENV_FILE" <<'EOF'
+# Written by proxcloud-up.sh. Keep it mode 600 and BACK IT UP together with the database:
+# ENCRYPTION_KEY decrypts the provider secrets stored there and cannot be recovered.
+# Change settings by re-running ./proxcloud-up.sh install with flags, not by hand.
+EOF
   fi
-
+  chmod 600 "$ENV_FILE"
   env_set COMPOSE_PROJECT_NAME "$PROJECT"
   env_set COMPOSE_PROFILES "$TLS_MODE"
   env_set PROXCLOUD_VERSION "$VERSION"
@@ -374,7 +452,8 @@ EOF
       case "$key" in
         ENCRYPTION_KEY)
           env_set "$key" "$(gen_hex 32)"
-          warn "new ENCRYPTION_KEY written to $DIR/$ENV_FILE. Back that file up now: without the key, stored provider secrets are lost."
+          [ "$DRY_RUN" = 1 ] \
+            || warn "new ENCRYPTION_KEY written to $DIR/.env. Back that file up now: without the key, stored provider secrets are lost."
           ;;
         *) env_set "$key" "$(gen_hex 24)" ;;
       esac
@@ -382,18 +461,14 @@ EOF
   done
 
   # Our own running stack already holds the ports on a re-run.
-  if [ "$DRY_RUN" = 0 ] && [ -z "$(docker compose -p "$PROJECT" ps -q 2>/dev/null)" ]; then
+  if [ "$DRY_RUN" = 0 ] && [ -z "$(compose ps -q 2>/dev/null)" ]; then
     for value in "$HTTP_PORT" "$HTTPS_PORT"; do
       ! port_in_use "$value" || die "port $value is in use on this host; free it or pass --http-port / --https-port"
     done
   fi
 
-  # Each TLS mode is its own Traefik service: the previous one must give the ports back.
-  if [ -n "$previous_mode" ] && [ "$previous_mode" != "$TLS_MODE" ]; then
-    dc rm -sf "traefik-$previous_mode"
-  fi
   bring_up
-  [ -n "$(env_get OPERATOR_EMAIL)" ] || create_operator "$operator_email"
+  [ -n "$recorded_operator" ] || create_operator "$operator_email"
 
   echo
   echo "ProxCloud $VERSION is installed (TLS mode $TLS_MODE)."
@@ -401,9 +476,9 @@ EOF
   cat <<EOF
 
 Next steps:
-  1. Sign in to the operator console as $(first "$(env_get OPERATOR_EMAIL)" "$operator_email").
+  1. Sign in to the operator console as $operator_email.
   2. Operator console -> System -> Cloud providers: register your Proxmox provider.
-  3. Back up $DIR/$ENV_FILE off this host, and schedule: ./proxcloud-up.sh backup
+  3. Back up $DIR/.env off this host, and schedule: ./proxcloud-up.sh backup
 EOF
   if [ "$TLS_MODE" = internal ]; then
     echo "  TLS mode internal: the certificate is self-signed. A browser must accept it for each of the four hostnames."
@@ -421,7 +496,7 @@ cmd_backup() {
   fi
   mkdir -p backups
   # pipefail: a failed dump fails the pipe, and the partial file is not kept under the final name.
-  if ! docker compose -p "$PROJECT" exec -T postgres pg_dumpall -U proxcloud | gzip > "$out.partial"; then
+  if ! compose exec -T postgres pg_dumpall -U proxcloud | gzip > "$out.partial"; then
     rm -f "$out.partial"
     die "the database dump failed; nothing was written"
   fi
@@ -438,7 +513,7 @@ cmd_upgrade() {
   echo "Upgrading $(env_get PROXCLOUD_VERSION) -> $version (read the release notes first)."
   cmd_backup
   # Pull before .env changes, so a release that cannot be pulled leaves the running install as it is.
-  PROXCLOUD_VERSION="$version" dc pull
+  PULL_VERSION="$version" dc pull
   env_set PROXCLOUD_VERSION "$version"
   bring_up
   echo "ProxCloud is now $version."
@@ -459,7 +534,10 @@ cmd_uninstall() {
     confirm "This DELETES the database, Keycloak and the certificates of project '$PROJECT'. Type the project name to confirm:" "$PROJECT" \
       || die "not confirmed: nothing was removed"
     dc --profile setup down -v --remove-orphans
-    echo "Removed the containers and volumes. $ENV_FILE and backups/ are kept: delete them by hand."
+    # The first operator went with the Keycloak database: the next install creates it again.
+    env_del OPERATOR_EMAIL
+    [ "$DRY_RUN" = 1 ] || rm -f operator-password
+    echo "Removed the containers and volumes. .env (the secrets) and backups/ are kept: delete them by hand."
   else
     confirm "Remove the containers of project '$PROJECT'? The volumes (database, certificates) are kept. Type yes:" yes \
       || die "not confirmed: nothing was removed"
@@ -478,7 +556,7 @@ esac
 DRY_RUN=0 ASSUME_YES=0 PURGE=0 POSITIONAL=""
 F_DOMAIN="" F_APP_HOST="" F_ADMIN_HOST="" F_API_HOST="" F_AUTH_HOST="" F_TLS="" F_ACME_EMAIL=""
 F_CF_TOKEN_FILE="" F_OPERATOR_EMAIL="" F_VERSION="" F_HTTP_PORT="" F_HTTPS_PORT="" F_PROJECT=""
-PROJECT="" URL_PORT=""
+PROJECT="" URL_PORT="" TLS_MODE="" PULL_VERSION="" INSTALL_OPTIONS=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -508,11 +586,20 @@ while [ $# -gt 0 ]; do
     --project-name) F_PROJECT=$2 ;;
     *) die "unknown option '$1' (see --help)" ;;
   esac
+  INSTALL_OPTIONS="$INSTALL_OPTIONS $1"
   shift 2
 done
 
 [ "$PURGE" = 0 ] || [ "$COMMAND" = uninstall ] || die "--purge belongs to uninstall"
 [ -z "$POSITIONAL" ] || [ "$COMMAND" = upgrade ] || die "unexpected argument '$POSITIONAL'"
+[ -z "$INSTALL_OPTIONS" ] || [ "$COMMAND" = install ] || die "$COMMAND does not take$INSTALL_OPTIONS (install only)"
+
+# A dry run works on a copy of .env, left behind as the preview of what the real run would write.
+if [ "$DRY_RUN" = 1 ]; then
+  rm -f .env.dry-run
+  [ ! -f .env ] || cp -p .env .env.dry-run
+  ENV_FILE=.env.dry-run
+fi
 
 case "$COMMAND" in
   install) cmd_install ;;

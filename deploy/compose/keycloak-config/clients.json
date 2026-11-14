@@ -2,6 +2,7 @@
   "attributes": {
     "userProfileEnabled": "true"
   },
+  "bruteForceProtected": true,
   "clientScopes": [
     {
       "attributes": {

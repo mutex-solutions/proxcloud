@@ -1,5 +1,6 @@
 # Site state written by proxcloud-up.sh: secrets and backups, never committed.
-.env
+# .env, the --dry-run preview (.env.dry-run) and the temporary file of an interrupted write.
+.env*
 cf-token
 operator-password
 backups/

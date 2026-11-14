@@ -61,7 +61,7 @@ Or name each one: `--app-host`, `--admin-host`, `--api-host`, `--auth-host`. Cre
 | TLS mode | Certificates | DNS records | Also needed |
 |---|---|---|---|
 | `acme-http` | Let's Encrypt, HTTP-01 | Public records to the host's public address | Port 80 reachable from the internet. Port 443 for your users |
-| `acme-dns-cloudflare` | Let's Encrypt, DNS-01 | Records in a Cloudflare zone, **DNS only** (not proxied). They may point to a private address: the host does not need to be reachable from the internet | A Cloudflare API token with `Zone / DNS / Edit` on that zone |
+| `acme-dns-cloudflare` | Let's Encrypt, DNS-01 | Records in a Cloudflare zone, **DNS only** (not proxied). They may point to a private address: nothing has to reach the host from the internet | A Cloudflare API token with `Zone / DNS / Edit` on that zone. Outbound access from the host to Let's Encrypt, the Cloudflare API and the DNS resolvers `1.1.1.1` and `1.0.0.1` (port 53) |
 | `internal` | Traefik's self-signed certificate | Any records your users resolve (a LAN DNS server, or `hosts` files) | Every browser must accept the certificate once per hostname. For evaluation on a LAN |
 
 Let's Encrypt renews by itself. Its rate limits are low: while you experiment, add
@@ -76,7 +76,9 @@ docker volume rm <project>_traefik-acme
 
 The Cloudflare token is read from `--cloudflare-token-file <file>`, from the environment variable
 `CF_DNS_API_TOKEN`, or typed at the prompt. It is stored in `./cf-token` (mode 600) and reaches
-Traefik as a Docker secret file, never as a command argument or in `.env`.
+Traefik as a Docker secret file, never as a command argument or in `.env`. To replace it, run
+`install` with the new token, then `docker compose restart traefik-acme-dns-cloudflare`: Traefik
+reads the file when it starts.
 
 ## Install
 
@@ -98,7 +100,8 @@ CF_DNS_API_TOKEN=... ./proxcloud-up.sh install \
   --operator-email admin@example.com
 ```
 
-`--dry-run` writes `.env` and prints the docker commands without running any.
+`--dry-run` prints the docker commands without running any, and writes what `.env` would become
+to `.env.dry-run`. It changes nothing else: not `.env`, not the running install.
 
 What the install leaves next to the script (all mode 600, none in git):
 
@@ -108,14 +111,28 @@ What the install leaves next to the script (all mode 600, none in git):
 | `operator-password` | Temporary password of the first operator. Keycloak asks for a new one at the first login: delete the file then |
 | `cf-token` | The Cloudflare API token (`acme-dns-cloudflare` only) |
 | `backups/` | Written by `backup` |
+| `.env.dry-run` | Only after `--dry-run`: the preview, with the same secrets. Delete it when read |
 
 **Back up `.env` now, off this host.** `ENCRYPTION_KEY` decrypts the provider credentials stored in
 the database. It cannot be recovered or regenerated: without it, a database backup is not enough.
 
 The install is idempotent. Run it again to resume after an error or to change a setting, for
 example `./proxcloud-up.sh install --admin-host ops.example.com` or `--tls acme-http --acme-email
-ops@example.com`. Secrets already in `.env` are never regenerated or printed. The Compose project
-name (`--project-name`, default `proxcloud`) cannot change afterwards.
+ops@example.com`. Secrets already in `.env` are never regenerated or printed. The release of a
+finished install changes with `upgrade` only, which takes a backup first.
+
+The Compose project name (`--project-name`, default `proxcloud-prod`) cannot change afterwards: the
+containers and volumes carry it. The install refuses a name that something else on the host uses:
+
+- the development stack of this checkout (`docker compose up` in the repository root), whose
+  project is named after the checkout directory and whose services and volumes have the same names;
+- containers that another directory created under that name;
+- an existing database volume `<project>_postgres-data` when there is no `.env` here. That database
+  only opens with the passwords of the `.env` it was created with: restore that file.
+
+The stack runs with the values in `.env`. Variables exported in your shell (`PROXCLOUD_VERSION`,
+`HTTP_PORT`, ...) do not reach Compose through the script; with a plain `docker compose` command
+they do, and they win over `.env`.
 
 ### After the install
 
@@ -143,8 +160,13 @@ In `docker compose` commands the Traefik service is named after the TLS mode:
 
 `./proxcloud-up.sh backup` writes `backups/proxcloud-<UTC time>.sql.gz` (a `pg_dumpall` of both
 databases: the portal and Keycloak with its users) and `backups/env-<UTC time>` (a copy of `.env`).
-Both hold secrets. Run it from cron and copy the files off the host. The Let's Encrypt
-certificates are not backed up: they are issued again.
+Both hold secrets. Run it from cron and copy the files off the host. Not in the backup:
+
+- the Let's Encrypt certificates: they are issued again;
+- `cf-token`: keep the Cloudflare token elsewhere, and pass it again when you restore on a new host.
+
+Nothing deletes old backups, and every `upgrade` adds one. Prune them yourself, for example
+`find backups -type f -mtime +30 -delete` in the same cron job.
 
 ### Restore
 
@@ -153,7 +175,7 @@ Into an **empty** database, on this host or a new one (same checkout, the saved 
 ```sh
 ./proxcloud-up.sh uninstall                         # only if the stack is running here
 docker volume rm <project>_postgres-data            # only to replace an existing database: this deletes it
-docker compose up -d postgres
+docker compose up -d --wait postgres                # --wait: until the new database accepts connections
 gunzip -c backups/proxcloud-<UTC time>.sql.gz | docker compose exec -T postgres psql -U proxcloud -d postgres
 ./proxcloud-up.sh install
 ```
@@ -172,11 +194,19 @@ vX.Y.Z`), then:
 ```
 
 It takes a backup, pulls the three images at that tag, restarts what changed and waits for the API.
-A tag that cannot be pulled leaves the running install untouched. To go back, restore the backup
-taken by the upgrade, then `./proxcloud-up.sh upgrade <previous version>`.
+A tag that cannot be pulled leaves the running install untouched.
 
-Traefik, Keycloak and PostgreSQL are pinned in `compose.yaml` and move with the checkout. A new
-PostgreSQL major version needs a dump and restore, not just a new image.
+To go back to the previous release, restore the backup the upgrade took, with its own `.env`:
+
+1. Check out the previous release (`git checkout <previous version>`): `compose.yaml` belongs to it.
+2. Copy `backups/env-<UTC time>` of that backup over `.env`. It still names the previous release;
+   the current `.env` would start the new one on the restored database.
+3. Follow [Restore](#restore) with `backups/proxcloud-<UTC time>.sql.gz` of the same backup. Its
+   last step, `install`, starts the previous release.
+
+Traefik and Keycloak are pinned to a version in `compose.yaml`, PostgreSQL to its major version
+(`17-alpine` follows the minor releases); they move with the checkout. A new PostgreSQL major
+version needs a dump and restore, not just a new image.
 
 ### Uninstall
 
@@ -184,7 +214,9 @@ PostgreSQL major version needs a dump and restore, not just a new image.
 (database, certificates) stay, and `install` starts everything again.
 
 `./proxcloud-up.sh uninstall --purge` also deletes the volumes, after you type the project name.
-`.env` and `backups/` are never deleted by the script.
+The first operator goes with them: `operator-password` is deleted, and the next `install` asks for
+the operator email and creates it again. `.env` (the secrets) and `backups/` are never deleted by
+the script.
 
 ## Security notes
 
@@ -198,10 +230,19 @@ PostgreSQL major version needs a dump and restore, not just a new image.
   it on every start.
 - **The Keycloak admin console is reachable** at `https://<Keycloak hostname>/admin`, like the rest
   of Keycloak. Restrict it with your firewall if operators only work from known networks.
-- **Traefik reads the Docker socket** (read-only mount) to find this project's containers. Access
-  to that socket is access to the host: run nothing else on this host.
-- **`.env`, `cf-token`, `operator-password` and `backups/` are secrets.** They are created with
-  mode 600; keep the directory private to the account that runs the script.
+- **Operator sign-in is a password on a public endpoint.** Both realms have Keycloak's brute force
+  detection on (repeated failed logins lock the account for a while, the user `admin` included).
+  That slows guessing; it does not replace a second factor, and it lets anyone who can reach
+  Keycloak lock `admin` out for a while by guessing, which also stops `install` and `upgrade` at
+  the realm settings until the lock ends (the running portal is not affected). Limiting who can
+  reach the Keycloak hostname avoids both. For realm `master`, set a password
+  policy (Authentication, Policies) and require an OTP (Authentication, Required actions,
+  Configure OTP as a default action) before the portal is open to the internet.
+- **Traefik reads the Docker socket** to find this project's containers. The mount is read-only,
+  but that protects the socket file, not the Docker API behind it: a compromised Traefik controls
+  Docker, and so the host. Run nothing else on this host.
+- **`.env`, `.env.dry-run`, `cf-token`, `operator-password` and `backups/` are secrets.** They are
+  created with mode 600; keep the directory private to the account that runs the script.
 - There are no default credentials: every secret is generated on this host at the first install.
 - PostgreSQL and the API's management port are not published; only Traefik listens on the host.
 - Feature flags (template updates, sandboxes), the job scheduler and debug triggers keep their
@@ -228,9 +269,13 @@ Written by the script; change them by re-running `install` with flags.
 | Symptom | Look at |
 |---|---|
 | The install stops at "Waiting for ..." | `docker compose ps -a`, then `docker compose logs <service>` |
-| The browser shows Traefik's self-signed certificate in an `acme-*` mode | `docker compose logs traefik-<mode>`: the DNS record, port 80 (HTTP-01) or the Cloudflare token (DNS-01) |
+| The browser shows Traefik's self-signed certificate in an `acme-*` mode | The install does not wait for certificates. `docker compose logs traefik-<mode>`: the DNS record, port 80 (HTTP-01) or the Cloudflare token (DNS-01). Fix the cause first, then `docker compose restart traefik-<mode>` to try again: every failed attempt counts against the Let's Encrypt rate limits |
+| "does not resolve on this host" (warning) | The hostname has no DNS record yet, as seen from this host. Create it before Let's Encrypt is asked again |
+| "already has containers, created from ..." or "the development stack" | The project name is in use on this host, see [Install](#install). Choose another `--project-name`; after moving this checkout, run `uninstall` and `install` once |
+| "the volume ..._postgres-data exists, but there is no .env" | The database of an earlier install is still there and its `.env` is not. Restore the `.env` (a copy is in every backup: `backups/env-<UTC time>`) |
+| "no answer from the API ... on 127.0.0.1" (warning) | Docker publishes the ports on another address only, or Traefik is not up: `docker compose logs traefik-<mode>` |
 | "port 80 is in use" | Another web server on the host. Stop it, or use `--http-port` and `--https-port` |
-| "keycloak-config failed" after about two minutes | Most often the Keycloak `admin` password was changed in Keycloak: write the new one to `KC_ADMIN_PASSWORD` in `.env` and run `install` again. The realm settings are applied first, so the running portal was not touched |
+| "keycloak-config failed" | `docker compose logs keycloak-config`. Most often the Keycloak `admin` password was changed in Keycloak: write the new one to `KC_ADMIN_PASSWORD` in `.env` and run `install` again. The realm settings are applied first, so the running portal was not touched. If the password is right and the log still shows `invalid_grant`, the `admin` account is locked after failed logins (yours, or someone guessing): it unlocks by itself, at most 15 minutes after the last failure |
 
 `keycloak-config/` and `seed/` are generated from the Helm chart (`deploy/charts/proxcloud`) and
 must not be edited: `deploy/tests/test_compose_production.py` fails when they differ from it, and
