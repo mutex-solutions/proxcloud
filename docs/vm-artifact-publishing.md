@@ -4,7 +4,7 @@
 
 One manual run of [`vm-artifact-export.yml`](<../.github/workflows/vm-artifact-export.yml>) takes a template on the lab to a published, attested and publicly verified VM image. Every step that produces or publishes bytes is a workflow in this repository; nothing is prepared by hand. The earlier flow, where an operator filled a directory on the runner and typed a run id and two hashes into a second workflow, is removed (`vm-artifact-stage.yml` and `images/vm_stage_local.py` no longer exist, and the publisher has no manual trigger).
 
-**What has run, and what has not (2026-11-14).** The driver was run on a workstation, stage by stage as the workflow runs it, with the CI-built tool image pulled by digest and the private copy of the Kubernetes 1.37.2 template: `plan`, `config`, `recover`, `tools`, `inventory`, `review`, `sanitize`, `postscan`, `bundle`, `evidence`, then `recover` and `purge`. The derived review is byte-identical to the one used for the published 1.37.2 image, and the bundle and the evidence record pass the publisher's and the verifier's own checks. In that run the copy stage was replaced by the earlier guarded copy and its receipt, and the cold boot by a synthetic result: no PVE API was called. The workflow itself, the template guard through the API from the export runner, the cold boot from that runner, the publisher inside the same run, the attestations and the anonymous verification have **not** run yet, and no native template has gone through the driver. The first real run is their acceptance; [what it has to confirm](#what-only-a-real-run-can-confirm) is listed below. The settings that keep other workflows off the export runner are the owner's and are [not checked by any run](#trust-model).
+**What has run, and what has not (2026-11-14).** The workflow has run end to end on the lab for both variants: one native export (`ubuntu-2404`) and the three Kubernetes versions. Each of those runs did the template guard and the read-only copy on the export runner, inventory, review, sanitize, postscan, the two-clone cold boot through the PVE API, the publish inside the same run, both attestations and the anonymous verification. The images are listed under [published images](#published-images). Not run: a native `ubuntu-2604` export (the public `ubuntu-2604` image is still an earlier, manually prepared publication), an export of a template built with the 5 GiB and 8 GiB disks, and the cleanup after a cancel in the middle of a cold boot or after a dead runner (`recover` has cleaned up only against fakes). [What a real run had to confirm](#what-only-a-real-run-can-confirm) is listed below. The settings that keep other workflows off the export runner are the owner's and are [not checked by any run](#trust-model).
 
 The workflow exports native OS templates (`variant: os`) of `ubuntu-2404` and `ubuntu-2604`, and Kubernetes node templates (`variant: kubernetes`, `os: ubuntu-2604`, `kubernetes_version` one of `1.35.10`, `1.36.6`, `1.37.2`: the allowlist `K8S_VERSIONS`, the same in the publisher, the sanitizer and the copy policy, kept equal by `images/tests/test_k8s_versions.py`). Debian is accepted by the artifact contract but is not an input of this workflow. Kubernetes images publish to `ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2604-k8s`, native ones to `ghcr.io/mutex-solutions/proxcloud-vm-<os>`.
 
@@ -224,7 +224,31 @@ gh attestation verify vm-export-evidence.json --repo mutex-solutions/proxcloud -
 
 The QCOW2 is for a reviewed hypervisor import, **not `docker run`**. The byte verification does not prove that the image boots; the cold boot of the export run is the boot evidence.
 
+## Published images
+
+Every image below was exported, published, attested and verified by one run of the export workflow on `main`. The disks are 20 GiB templates built before the [smaller disk sizes](<template-build-disk.md>). `gh attestation verify` with the flags [above](#how-anyone-verifies-an-image) was repeated from a workstation for each digest and passed.
+
+| Image | Digest | Tag | Run |
+| --- | --- | --- | --- |
+| Ubuntu 24.04 (native OS) | `ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2404@sha256:cd0c5de58737e4205390f63258d413a88d934bece8ed111467d32406250db5a2` | `ubuntu-2404-os-20261114110705-f931a4ada3fb` | [43588459305](https://github.com/mutex-solutions/proxcloud/actions/runs/43588459305) |
+| Kubernetes 1.35.10 node (Ubuntu 26.04) | `ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2604-k8s@sha256:6b3af37d649f48b3b80e4f9317116187ebfa2842a0919958dff67eb9ac098b40` | `ubuntu-2604-k8s-1.35.10-20261114142123-3593f6f0f889` | [43604410797](https://github.com/mutex-solutions/proxcloud/actions/runs/43604410797) |
+| Kubernetes 1.36.6 node (Ubuntu 26.04) | `ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2604-k8s@sha256:025b22d11bdca8d3ec0cd729ef21c27724c7b4b2eeefc562e248303d4618766a` | `ubuntu-2604-k8s-1.36.6-20261114121843-f931a4ada3fb` | [43594160934](https://github.com/mutex-solutions/proxcloud/actions/runs/43594160934) |
+| Kubernetes 1.37.2 node (Ubuntu 26.04) | `ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2604-k8s@sha256:8eecb3eadc0d472056bf38e805eeb639dacb7d79ed51e91326079ffd7bcf9d72` | `ubuntu-2604-k8s-1.37.2-20261114113857-f931a4ada3fb` | [43591002446](https://github.com/mutex-solutions/proxcloud/actions/runs/43591002446) |
+
+The manifest and disk hashes for `vm_artifact.py verify`:
+
+| Image | Manifest sha256 | Disk sha256 |
+| --- | --- | --- |
+| Ubuntu 24.04 (native OS) | `b167db533b8e76fcbcdbfc676914031036700e2d01a4a47a57d96f559e93d758` | `810fab18f10d72806c54658aac5f1ca77c64ccf9c9aa18119aae0551d4eaf480` |
+| Kubernetes 1.35.10 node (Ubuntu 26.04) | `62b0ef1213014a8922652d132f64e05730e68deffc6e3c8900584e685e7e7416` | `2d6f4e30fcd827c92590641dbf9608722601c63066926fadcee3448399d4d657` |
+| Kubernetes 1.36.6 node (Ubuntu 26.04) | `63ae0500d714d5796aee0ec16435b9da80064d1b34ce25f2407433b49535260f` | `cad44fc115b4861bbc74e29d37c762e2afecd0bb1b14204b54c337de860cbf19` |
+| Kubernetes 1.37.2 node (Ubuntu 26.04) | `fead781d8317e2c3bd4ca60b28be2cb6892141f0bfde126c5abd12d905a2878d` | `49d334a498197a570946e1a85fdce93e7b01452475944ad25c947b32b5c4d3e2` |
+
+Publication is not node acceptance: no kubeadm join, NodeReady or portal import of these digests is claimed.
+
 ## What only a real run can confirm
+
+The runs under [published images](#published-images) were green and passed through every item below except the cancel and dead-runner cleanup and the owner preconditions. The list stays as the things a change to the workflow or to the lab can break without a test noticing.
 
 - The GitHub API lists an artifact, and serves its archive, while the run that uploaded it is still in progress, and it accepts the `name` filter on a run's artifact list as an exact match (the evidence artifact's name starts with the bundle's).
 - The jobs API names the export job `export` in a run that also calls a reusable workflow and whose export job uses an environment, and reports its `labels` as the four `runs-on` labels. The run object carries `created_at` in the form `2026-11-14T12:00:00Z`.

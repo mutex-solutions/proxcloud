@@ -14,10 +14,10 @@ The stages are designed for convergent re-runs, but `make install` is **not** a 
 
 **Back up `inventory/mysite/generated/`.** It holds the encryption key, database passwords and Proxmox token secrets. The encryption key cannot be recovered, and without it the stored provider secrets are lost. The directory is gitignored.
 
-The BOM pins the broker-free chart/API at the stable release **v0.5.2** (after the
+The BOM pins the broker-free chart/API at the stable release **v0.6.0** (after the
 first stable `v0.4.0`); its tag publishes the images and app chart. Use
 `images.build: true` (default) from a checkout containing the new core, or set
-`images.build: false` once you have verified the `v0.5.2` chart and images are
+`images.build: false` once you have verified the `v0.6.0` chart and images are
 pullable from your site.
 `images.build: false` with an older Rabbit-dependent release is refused before
 stage 40 writes secrets; the pin itself is not proof that images/packages exist.
@@ -336,7 +336,7 @@ that reads its own images and the built-in ones only ([managed-sandbox.md §6](m
 The registry sync invokes `sandbox-proxy registry-users`, so its image must contain that subcommand; an
 older incompatible image stops with "unknown subcommand". The Docker workflow now builds five images, including
 `proxcloud-sandbox-proxy` and `proxcloud-sandbox-runtime`, and development tags are public. **Stage 35 still builds
-only API/web/admin**, and the BOM selects the stable release `v0.5.2`; this source pin does not prove its sandbox images were published or are pullable. On a source-build site,
+only API/web/admin**, and the BOM selects the stable release `v0.6.0`; this source pin does not prove its sandbox images were published or are pullable. On a source-build site,
 explicitly pin `sandbox.proxy.image` and `sandbox.runtime_image` to compatible, pullable development tags or digests;
 do not assume `<images.registry>/…:<release>` exists. A complete split/sandbox installation from coordinated public
 release artifacts has not been accepted yet.

@@ -6,7 +6,7 @@ umask 077
 
 # Release pin of the proxcloud-{api,web,admin} images. Kept equal to the chart appVersion by
 # .github/scripts/tests/test_release_policy.py.
-DEFAULT_VERSION="v0.5.2"
+DEFAULT_VERSION="v0.6.0"
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 cd "$DIR"

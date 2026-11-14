@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-14
+
+A feature release on top of `v0.5.2`, with no breaking API change.
+
+- The portal can be installed on one host with one command (`deploy/compose`).
+- VM images are now exported, published, attested and verified by one GitHub Actions run; nothing is
+  prepared by hand. The images published this way are listed in
+  [docs/vm-artifact-publishing.md](docs/vm-artifact-publishing.md).
+- Template disks shrink to 5 GiB (native OS) and 8 GiB (Kubernetes node). **Upgrade portals before using
+  images built with the new sizes**: portals up to `v0.5.2` refuse an image below 20 GiB.
+
+Everything `v0.5.0` to `v0.5.2` say is **not** verified still holds. Also not verified: a lab build with
+the new disk sizes, Let's Encrypt issuance in the Compose install, and an import of a CI-published image
+into a portal.
+
 ### Added
 
 - **One workflow run from a template to a published VM image** (`vm-artifact-export.yml`): choose the
@@ -24,7 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   starts. `docs/vm-artifact-publishing.md` has the flow, the trust model with the settings the owner
   must make outside the repository (runner group, fork approval, branch protection, the environment
   `vm-artifact-export`), the secrets and variables to set (`EXPORT_TEST_ADDRESSES` and `EXPORT_VLAN` are
-  new) and the commands anyone can use to verify an image. The workflow has not run on the lab yet.
+  new) and the commands anyone can use to verify an image. The workflow has run on the lab for
+  `ubuntu-2404` and for the three Kubernetes versions; the document lists those images.
 
 - **VM export tool image built by CI** (`images/vm_export/tools/`, `vm-export-tools.yml`): the image the
   export containers run from (`qemu-img`, Python with libguestfs, the appliance kernel) was built on a
