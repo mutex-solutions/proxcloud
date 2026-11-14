@@ -32,6 +32,7 @@ NODE, API_NODE, STORAGE, POOL = "pve1", "pve0", "pc-ci-images", "pc-templates"
 TOKEN = "images@pve!packer"
 AUTH = "PVEAPIToken=%s=not-a-secret" % TOKEN
 ADDRESSES = ("192.0.2.50/24", "192.0.2.51/24")
+PROBE = coldboot.address_answers  # The real probe: every test case replaces the module attribute.
 DISK = b"sealed sanitized qcow2 bytes " * 4096
 SHA = hashlib.sha256(DISK).hexdigest()
 TAG = "pc-artifact-" + SHA[:12]
@@ -258,8 +259,10 @@ class ColdBootCase(unittest.TestCase):
         self.sleep = patch.object(coldboot.time, "sleep")
         # One SSH attempt unless a test asks for more, and a short task deadline (a fake task ends at its first
         # poll): a broken run must fail here, not spin for minutes.
+        self.answering = set()  # Test addresses a foreign host holds.
         for mocked in (patch.object(coldboot.subprocess, "run", self.host), patch.object(coldboot, "SSH_DEADLINE", 0),
-                       patch.object(coldboot, "TASK_DEADLINE", 5)):
+                       patch.object(coldboot, "TASK_DEADLINE", 5),
+                       patch.object(coldboot, "address_answers", lambda ip: ip in self.answering)):
             mocked.start()
             self.addCleanup(mocked.stop)
         self.slept = self.sleep.start()
@@ -440,6 +443,47 @@ class RefusalTests(ColdBootCase):
         self.assert_untouched(self.run_job(), "test_address_in_use")
         self.pve.vms[9205]["config"] = {"net1": "name=eth0,bridge=vmbr0,ip=192.0.2.50/24"}  # A container's form.
         self.assert_untouched(self.run_job(), "test_address_in_use")
+
+    def test_test_address_held_by_a_foreign_host_refuses_before_any_mutation(self):
+        # The token cannot see a guest outside its pool, and other machines share the VLAN.
+        for held in ("192.0.2.50", "192.0.2.51"):
+            self.answering = {held}
+            self.assert_untouched(self.run_job(), "test_address_answers")
+
+    def test_address_probe_reads_ping_then_tcp_22(self):
+        probe = PROBE  # The unpatched function, captured at import.
+        calls = []
+
+        def ping(code=None, timeout=False):
+            def run(argv, **kwargs):
+                calls.append(argv)
+                if timeout:
+                    raise subprocess.TimeoutExpired(argv, 15)
+                return subprocess.CompletedProcess(argv, code)
+            return run
+
+        def connect(error=None):
+            def create(address, timeout):
+                calls.append(address)
+                if error:
+                    raise error
+                return types.SimpleNamespace(close=lambda: None)
+            return create
+        for name, run, sock, answers in (
+                ("ping answers", ping(0), connect(TimeoutError()), True),
+                ("ping never returns", ping(timeout=True), connect(TimeoutError()), True),
+                ("ssh open", ping(1), connect(), True),
+                ("ssh refused: a host is there", ping(1), connect(ConnectionRefusedError()), True),
+                ("silent", ping(1), connect(TimeoutError()), False),
+                ("no route", ping(1), connect(OSError(113, "No route to host")), False)):
+            with self.subTest(name), patch.object(coldboot.shutil, "which", return_value="/usr/bin/ping"), \
+                    patch.object(coldboot.subprocess, "run", run), patch.object(coldboot.socket, "create_connection", sock):
+                self.assertIs(probe("192.0.2.50"), answers)
+        self.assertEqual(calls[0], ["/usr/bin/ping", "-n", "-c", "2", "-W", "1", "192.0.2.50"])
+        self.assertIn(("192.0.2.50", 22), calls)
+        with patch.object(coldboot.shutil, "which", return_value=None), \
+                patch.object(coldboot.socket, "create_connection", connect()):  # No ping binary: tcp/22 alone decides.
+            self.assertIs(probe("192.0.2.50"), True)
 
     def test_upload_name_exists_refuses_and_never_deletes_that_volume(self):
         volume = "%s:import/pc-export-%s-%s.qcow2" % (STORAGE, SHA[:12], "00" * 6)
