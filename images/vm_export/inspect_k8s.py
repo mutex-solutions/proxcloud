@@ -209,7 +209,7 @@ def emit(record, code):
 def main(argv):
     if len(argv) != 3 or not all(VERSION.fullmatch(a) for a in argv):
         emit({"phase": "probe_error", "error_class": "Usage", "frames": []}, 3)
-    assert os.getuid() == 1000 and not pathlib.Path("/dev/kvm").exists()
+    assert os.getuid() == os.geteuid() >= 1000 and not pathlib.Path("/dev/kvm").exists()
     for name in ("home", "tmp", "cache"):
         pathlib.Path("/scratch", name).mkdir(mode=0o700, exist_ok=True)
     os.environ.clear()

@@ -897,7 +897,7 @@ def main(argv=None):
     kubernetes = args.k8s_os is not None
     selected = args.k8s_os if kubernetes else args.os
     try:
-        require(os.getuid() == os.geteuid() == 1000)
+        require(os.getuid() == os.geteuid() >= 1000)  # The capsule runs as the invoking host user; never root.
         os.umask(0o077)
         if kubernetes:
             handle, _ = open_private(K8S_REVIEW, 65536)  # O_NOFOLLOW + fstat; parent-reviewed data.

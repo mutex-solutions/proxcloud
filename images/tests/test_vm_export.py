@@ -30,6 +30,16 @@ SOURCE_SHA = "1749277d590172e38e1928922daa53908ab3a88b860aa1aa3f1cc7cd02bed492"
 IMAGE_ENV = ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/scratch/home"]
 CID = "c" * 64
 REAL_POPEN = subprocess.Popen
+HOST_USER = capsule.host_user  # The real rule; everything else sees the CI runner's uid:gid (not 1000).
+RUNNER = patch.object(capsule, "host_user", return_value=(1002, 1002))
+
+
+def setUpModule():
+    RUNNER.start()
+
+
+def tearDownModule():
+    RUNNER.stop()
 
 
 def capsule_spec(**changes):
@@ -42,7 +52,7 @@ def capsule_spec(**changes):
 
 def inspected(s):
     """What `docker inspect` reports for a container created from create_argv(s)."""
-    return {"Image": s["image"], "Config": {"User": "1000:1000", "Entrypoint": ["/usr/bin/env"], "Env": list(IMAGE_ENV),
+    return {"Image": s["image"], "Config": {"User": "1002:1002", "Entrypoint": ["/usr/bin/env"], "Env": list(IMAGE_ENV),
                                             "Cmd": ["-i", *capsule.ENV, *s["argv"]]},
             "HostConfig": {"NetworkMode": "none", "ReadonlyRootfs": True, "Privileged": False, "Runtime": "runc",
                            "CgroupnsMode": "private", "UTSMode": "", "UsernsMode": "", "GroupAdd": None,
@@ -52,7 +62,7 @@ def inspected(s):
                            "Memory": capsule.size_bytes(s["memory"]), "MemorySwap": capsule.size_bytes(s["memory"]),
                            "NanoCpus": s["cpus"] * 10 ** 9, "PidsLimit": s["pids"], "ShmSize": 128 << 20,
                            "PortBindings": {}, "Binds": None, "VolumesFrom": None, "Links": None,
-                           "Tmpfs": {"/tmp": "rw,exec,nosuid,nodev,size=1g,mode=0700,uid=1000,gid=1000"},
+                           "Tmpfs": {"/tmp": "rw,exec,nosuid,nodev,size=1g,mode=0700,uid=1002,gid=1002"},
                            "Ulimits": [{"Name": "core", "Soft": 0, "Hard": 0}, {"Name": "nofile", "Soft": 256, "Hard": 256},
                                        {"Name": "fsize", "Soft": s["fsize"], "Hard": s["fsize"]},
                                        {"Name": "cpu", "Soft": s["cpu_seconds"], "Hard": s["cpu_seconds"]}]},
@@ -72,7 +82,7 @@ class CapsuleTests(unittest.TestCase):
     def test_create_argv_is_confined_and_binds_are_readonly(self):
         s = capsule_spec()
         argv = capsule.create_argv(s, "n")
-        for flag in ("--pull=never", "--network=none", "--read-only", "--user=1000:1000", "--cap-drop=ALL",
+        for flag in ("--pull=never", "--network=none", "--read-only", "--user=1002:1002", "--cap-drop=ALL",
                      "--security-opt=no-new-privileges", "--memory=8g", "--memory-swap=8g", "--log-driver=none"):
             self.assertIn(flag, argv)
         mounts = [argv[i + 1] for i, a in enumerate(argv) if a == "--mount"]
@@ -80,6 +90,24 @@ class CapsuleTests(unittest.TestCase):
         self.assertTrue(all(m.endswith(",readonly") for m in mounts[1:]))
         self.assertEqual(argv[argv.index(s["image"]) + 1:argv.index(s["image"]) + 2], ["-i"])
         self.assertNotIn("--privileged", argv)
+
+    def test_capsule_user_is_the_invoking_non_root_host_user(self):
+        ids = lambda uid, euid, gid, egid: [patch.object(capsule.os, n, return_value=v) for n, v in (  # noqa: E731
+            ("getuid", uid), ("geteuid", euid), ("getgid", gid), ("getegid", egid))]
+        with contextlib.ExitStack() as stack:
+            [stack.enter_context(p) for p in ids(1002, 1002, 1003, 1003)]
+            self.assertEqual(HOST_USER(), (1002, 1003))
+        for bad in ((0, 0, 0, 0), (999, 999, 999, 999), (1002, 0, 1002, 1002), (0, 1002, 1002, 1002),
+                    (1002, 1002, 0, 0), (1002, 1002, 1002, 0)):
+            with self.subTest(ids=bad), contextlib.ExitStack() as stack, self.assertRaises(capsule.CapsuleError):
+                [stack.enter_context(p) for p in ids(*bad)]
+                HOST_USER()
+        with patch.object(capsule, "host_user", return_value=(1234, 1235)):  # Follows the uid, never a constant.
+            argv = capsule.create_argv(capsule_spec(), "n")
+            self.assertIn("--user=1234:1235", argv)
+            self.assertIn("/tmp:rw,exec,nosuid,nodev,mode=0700,uid=1234,gid=1235,size=1g", argv)
+            with self.assertRaises(capsule.CapsuleError):  # An inspect of a 1002:1002 container.
+                capsule.check_confinement(inspected(capsule_spec()), capsule_spec(), IMAGE_ENV)
 
     def test_confinement_inspect_accepts_exact_and_refuses_any_drift(self):
         s = capsule_spec()
@@ -90,7 +118,10 @@ class CapsuleTests(unittest.TestCase):
                   hc(Binds=["/:/host"]), hc(VolumesFrom=["other"]), hc(Links=["x:y"]), hc(Runtime="runsc"),
                   hc(CgroupnsMode="host"), hc(UTSMode="host"), hc(UsernsMode="host"), hc(GroupAdd=["0"]),
                   hc(Sysctls={"net.ipv4.ip_forward": "1"}), hc(Init=True), hc(MaskedPaths=[]), hc(ReadonlyPaths=None),
-                  hc(Tmpfs={"/tmp": "rw,exec,nosuid,nodev,size=1g,mode=0700,uid=1000,gid=1000,suid"}),
+                  hc(Tmpfs={"/tmp": "rw,exec,nosuid,nodev,size=1g,mode=0700,uid=1002,gid=1002,suid"}),
+                  hc(Tmpfs={"/tmp": "rw,exec,nosuid,nodev,size=1g,mode=0700,uid=1000,gid=1000"}),
+                  lambda i: i["Config"].update(User="1000:1000"), lambda i: i["Config"].update(User="0:0"),
+                  lambda i: i["Config"].update(User="1002:0"), lambda i: i["Config"].update(User=""),
                   lambda i: i["Config"]["Env"].append("LD_PRELOAD=/scratch/x.so"),
 lambda i: i["HostConfig"].update(NetworkMode="bridge"),
                   lambda i: i["HostConfig"].update(Privileged=True),
@@ -490,17 +521,17 @@ class ScratchTests(unittest.TestCase):
     def test_prepare_scratch_guards(self):
         with tempfile.TemporaryDirectory() as base:
             with patch.object(capsule, "fs_type", return_value="ext4"):
-                with patch.object(capsule.os, "getuid", return_value=1001), self.assertRaises(capsule.CapsuleError):
+                with patch.object(capsule, "host_user", side_effect=capsule.CapsuleError("capsule user")), \
+                        self.assertRaises(capsule.CapsuleError):
                     capsule.prepare_scratch(base, "x", 0)
-                with patch.object(capsule.os, "getuid", return_value=1000):
-                    for check in ("../escaped", "/abs", "UPPER"):
-                        with self.subTest(check=check), self.assertRaises(capsule.CapsuleError):
-                            capsule.prepare_scratch(base, check, 0)
-                    self.assertFalse((Path(base).parent / "escaped-scratch").exists())
-                    self.assertEqual(capsule.prepare_scratch(base, "ok", 0), Path(base) / "ok-scratch")
+                self.assertFalse((Path(base) / "x-scratch").exists())
+                for check in ("../escaped", "/abs", "UPPER"):
+                    with self.subTest(check=check), self.assertRaises(capsule.CapsuleError):
+                        capsule.prepare_scratch(base, check, 0)
+                self.assertFalse((Path(base).parent / "escaped-scratch").exists())
+                self.assertEqual(capsule.prepare_scratch(base, "ok", 0), Path(base) / "ok-scratch")
             for kind in ("tmpfs", "ramfs"):
-                with patch.object(capsule, "fs_type", return_value=kind), \
-                        patch.object(capsule.os, "getuid", return_value=1000), self.assertRaises(capsule.CapsuleError):
+                with patch.object(capsule, "fs_type", return_value=kind), self.assertRaises(capsule.CapsuleError):
                     capsule.prepare_scratch(base, "y", 0)
         self.assertIsNotNone(capsule.fs_type("/"))
 
@@ -748,6 +779,38 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(capsule.pinned_input(Path(root) / "real" / "f"), hashlib.sha256(b"x").hexdigest())
             with self.assertRaises(capsule.CapsuleError):
                 capsule.pinned_input(Path(root) / "link" / "f")
+
+
+class CapsuleUidTests(unittest.TestCase):
+    """In-capsule entry points accept the invoking host uid (>= 1000, real == effective), never root."""
+    UIDS = ((1002, 1002, True), (1000, 1000, True), (0, 0, False), (999, 999, False), (1002, 0, False),
+            (0, 1002, False), (1002, 1000, False))
+
+    def test_probes_follow_the_host_uid(self):
+        stop = RuntimeError("past the uid gate")  # The scratch mkdir is the first thing after it.
+        for module, argv in ((inspect_k8s, ["1.37.2", "1.37.2", "1.37.2"]), (inspect_os, ["ubuntu-2404"]),
+                             (postscan_probe, ["--os", "ubuntu-2404"])):
+            for uid, euid, accepted in self.UIDS:
+                with self.subTest(module=module.__name__, uid=uid, euid=euid), \
+                        patch.object(module.os, "getuid", return_value=uid), \
+                        patch.object(module.os, "geteuid", return_value=euid), \
+                        patch.object(module.pathlib.Path, "exists", return_value=False), \
+                        patch.object(module.pathlib.Path, "mkdir", side_effect=stop), \
+                        self.assertRaises(RuntimeError if accepted else AssertionError):
+                    module.main(list(argv))
+
+    def test_stream_launcher_follows_the_host_uid(self):
+        stop = RuntimeError("past the uid gate")
+        for uid, euid, accepted in self.UIDS:
+            with self.subTest(uid=uid, euid=euid), patch.object(stream_sanitized.os, "getuid", return_value=uid), \
+                    patch.object(stream_sanitized.os, "geteuid", return_value=euid), \
+                    patch.object(stream_sanitized.subprocess, "run", side_effect=stop) as run:
+                if accepted:
+                    with self.assertRaises(RuntimeError):
+                        stream_sanitized.main(["--os", "ubuntu-2404", "600"])
+                else:
+                    self.assertEqual(stream_sanitized.main(["--os", "ubuntu-2404", "600"]), 1)
+                    run.assert_not_called()
 
 
 class NativeProbeTests(unittest.TestCase):
