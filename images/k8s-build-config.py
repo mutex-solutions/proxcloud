@@ -296,6 +296,7 @@ def prepare(capi, run, env):
     vars = {"kubernetes_semver": "v" + config["version"], "kubernetes_series": "v" + config["version"].rsplit(".", 1)[0], "kubernetes_deb_version": config["version"] + "-1.1", "kubernetes_rpm_version": config["version"], "disk_format": "raw", "cores": "2", "sockets": "2", "memory": "4096", "disk_size": "%dG" % K8S_BUILD_DISK_GIB, "cpu_type": "host",
             "artifact_name": config["os"] + "-kube-v" + config["version"],
             "iso_url": config["image"]["iso_url"], "iso_checksum_type": "sha256", "iso_checksum": config["image"]["iso_sha256"]}
+    cleanup = Path(__file__).with_name("k8s-build-cleanup.sh").read_text()
     if config["mode"] == "static":
         seed = run / "seed"
         seed.mkdir(mode=0o700)
@@ -331,10 +332,14 @@ def prepare(capi, run, env):
         final["expect_disconnect"] = False
         final.pop("inline", None)
         final.pop("inline_shebang", None)
-        cleanup = Path(__file__).with_name("k8s-build-cleanup.sh").read_text()
         private_write(run / "cleanup.sh", cleanup)
         final["script"] = str(run / "cleanup.sh")
         final["execute_command"] = "sudo -n bash '{{.Path}}'"
+    else:
+        # DHCP keeps upstream's own final shutdown provisioner, so the cleanup script never runs there.
+        # Its free-space admission still must: the same lines, taken from the script, run just before it.
+        admission = cleanup[cleanup.index("MIN_FREE_KIB="):cleanup.rindex("\nsync")].splitlines()
+        doc["provisioners"].insert(-1, {"type": "shell", "inline_shebang": "/bin/sh -eu", "inline": admission})
     # The adaptation is validated against this plugin API, not whatever latest
     # version happens to satisfy upstream's open-ended >= constraint.
     private_write(capi / "packer/proxmox/config.pkr.hcl", 'packer {\n  required_plugins {\n    proxmox = {\n      version = "1.2.4"\n      source = "github.com/hashicorp/proxmox"\n    }\n  }\n}\n')
