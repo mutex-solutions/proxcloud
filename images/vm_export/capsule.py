@@ -42,10 +42,11 @@ def need(ok, reason):
 
 def host_user():
     """(uid, gid) the capsule runs as: the invoking host user, because the disk-backed scratch is a bind
-    mount that user must own. Never root or a system account, never a setuid/setgid context."""
+    mount that user must own. Never root, a system account or a system group (docker, disk, kvm), never a
+    setuid/setgid context."""
     uid, gid = os.getuid(), os.getgid()
-    need(uid == os.geteuid() and gid == os.getegid() and uid >= 1000 and gid > 0,
-         "capsule user must be a non-root host uid >= 1000 (real == effective)")
+    need(uid == os.geteuid() and gid == os.getegid() and uid >= 1000 and gid >= 1000,
+         "capsule user must be a non-root host uid and gid >= 1000 (real == effective)")
     return uid, gid
 
 

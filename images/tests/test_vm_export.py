@@ -97,8 +97,8 @@ class CapsuleTests(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             [stack.enter_context(p) for p in ids(1002, 1002, 1003, 1003)]
             self.assertEqual(HOST_USER(), (1002, 1003))
-        for bad in ((0, 0, 0, 0), (999, 999, 999, 999), (1002, 0, 1002, 1002), (0, 1002, 1002, 1002),
-                    (1002, 1002, 0, 0), (1002, 1002, 1002, 0)):
+        for bad in ((0, 0, 0, 0), (999, 999, 999, 999), (999, 999, 1002, 1002), (1002, 0, 1002, 1002), (0, 1002, 1002, 1002),
+                    (1002, 1002, 0, 0), (1002, 1002, 1002, 0), (1002, 1002, 999, 999), (1002, 1002, 6, 6)):
             with self.subTest(ids=bad), contextlib.ExitStack() as stack, self.assertRaises(capsule.CapsuleError):
                 [stack.enter_context(p) for p in ids(*bad)]
                 HOST_USER()
