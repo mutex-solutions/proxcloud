@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Production install on one host with Docker Compose** (`deploy/compose/`): `./proxcloud-up.sh` asks for the
+  domain (or four hostnames), the TLS mode and two email addresses, generates every secret once into `.env`
+  (mode 600), starts Traefik, Keycloak in production mode, PostgreSQL, the API and both consoles at the pinned
+  release, creates the first operator with a temporary password and prints the URLs. TLS modes: `acme-http`
+  (Let's Encrypt HTTP-01), `acme-dns-cloudflare` (DNS-01, the token as a Docker secret file) and `internal`
+  (Traefik's self-signed certificate, for a LAN evaluation). Also `upgrade <version>` (backup first, pull before
+  anything changes), `status`, `backup` and `uninstall` (volumes are deleted only with `--purge`). The Keycloak
+  realm settings and the first-run seed are rendered from the Helm chart's own templates and a test keeps them
+  equal; the default image tag is part of the release contract test. It installs the portal only: no Proxmox
+  provider, no managed services. Guide: `deploy/compose/README.md`, quick start path F.
+  **Verified** on one Docker host with `internal` TLS: install, re-run, hostname change, backup and restore into
+  an empty database, upgrade to the same release, uninstall with and without `--purge`, and a realm import that
+  fails (the running portal is left untouched). In the two Let's Encrypt modes Traefik was only started against
+  an unreachable CA: the configuration loads and requests a certificate for the four hostnames. **Not
+  verified**: certificate issuance and renewal (HTTP-01, and DNS-01 through Cloudflare), and an upgrade between
+  two different releases.
+
 ### Fixed
 
 - **Kubernetes 1.37 node templates did not build**: the pinned image-builder `v0.1.55` renders its kubeadm

@@ -1,0 +1,5 @@
+# Site state written by proxcloud-up.sh: secrets and backups, never committed.
+.env
+cf-token
+operator-password
+backups/

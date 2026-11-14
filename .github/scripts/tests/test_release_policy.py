@@ -9,6 +9,7 @@ import copy
 import importlib.util
 import io
 from pathlib import Path
+import re
 import unittest
 from unittest import mock
 
@@ -134,6 +135,12 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(pinned["version"], chart["version"])
         # The pinned app release is stable: published as latest, never a prerelease.
         self.assertEqual(pinned["flags"], ["--latest"])
+        # The Docker Compose install (deploy/compose) defaults to the same release, in one place.
+        compose_script = (ROOT / "deploy/compose/proxcloud-up.sh").read_text(encoding="utf-8")
+        self.assertEqual(re.findall(r'(?m)^DEFAULT_VERSION="([^"]*)"$', compose_script), [chart["appVersion"]])
+        compose_file = (ROOT / "deploy/compose/compose.yaml").read_text(encoding="utf-8")
+        self.assertEqual(set(re.findall(r"proxcloud-(?:api|web|admin):(\S+)", compose_file)),
+                         {"${PROXCLOUD_VERSION:?run", "${PROXCLOUD_VERSION}"})
         defaults = read_yaml("installer/playbooks/group_vars/all/defaults.yml")["pc_defaults"]
         self.assertIs(defaults["images"]["build"], True)
         self.assertIs(defaults["jobs"]["scheduler_enabled"], False)

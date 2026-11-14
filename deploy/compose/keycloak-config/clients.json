@@ -1,0 +1,239 @@
+{
+  "attributes": {
+    "userProfileEnabled": "true"
+  },
+  "clientScopes": [
+    {
+      "attributes": {
+        "display.on.consent.screen": "false",
+        "include.in.token.scope": "true"
+      },
+      "description": "Per-organization SSO: which IdP the session came through and its groups",
+      "name": "proxcloud-sso",
+      "protocol": "openid-connect",
+      "protocolMappers": [
+        {
+          "config": {
+            "access.token.claim": "true",
+            "claim.name": "idp",
+            "id.token.claim": "true",
+            "jsonType.label": "String",
+            "user.session.note": "identity_provider",
+            "userinfo.token.claim": "false"
+          },
+          "name": "idp",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usersessionmodel-note-mapper"
+        },
+        {
+          "config": {
+            "access.token.claim": "true",
+            "claim.name": "idp_groups",
+            "id.token.claim": "true",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "user.attribute": "idp_groups",
+            "userinfo.token.claim": "false"
+          },
+          "name": "idp_groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper"
+        }
+      ]
+    }
+  ],
+  "clients": [
+    {
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "$(env:PROXCLOUD_SELF_UI_BASE_URL)/*"
+      },
+      "clientId": "proxcloud-ui",
+      "defaultClientScopes": [
+        "profile",
+        "email",
+        "roles",
+        "web-origins",
+        "acr",
+        "basic",
+        "proxcloud-sso"
+      ],
+      "directAccessGrantsEnabled": true,
+      "enabled": true,
+      "publicClient": true,
+      "redirectUris": [
+        "$(env:PROXCLOUD_SELF_UI_BASE_URL)/*"
+      ],
+      "standardFlowEnabled": true,
+      "webOrigins": [
+        "$(env:PROXCLOUD_SELF_UI_BASE_URL)"
+      ]
+    },
+    {
+      "clientId": "proxcloud-idp-admin",
+      "defaultClientScopes": [
+        "basic",
+        "roles",
+        "kc-admin-api"
+      ],
+      "description": "ProxCloud API: manages the per-organization identity providers",
+      "directAccessGrantsEnabled": false,
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "$(env:PROXCLOUD_SSO_KC_CLIENT_SECRET)",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false
+    }
+  ],
+  "defaultDefaultClientScopes": [
+    "profile",
+    "email",
+    "roles",
+    "web-origins",
+    "acr",
+    "basic",
+    "proxcloud-sso"
+  ],
+  "enabled": true,
+  "loginWithEmailAllowed": true,
+  "realm": "clients",
+  "registrationAllowed": true,
+  "registrationEmailAsUsername": true,
+  "resetPasswordAllowed": true,
+  "sslRequired": "external",
+  "userProfile": {
+    "attributes": [
+      {
+        "displayName": "${username}",
+        "multivalued": false,
+        "name": "username",
+        "permissions": {
+          "edit": [
+            "admin",
+            "user"
+          ],
+          "view": [
+            "admin",
+            "user"
+          ]
+        },
+        "validations": {
+          "length": {
+            "max": 255,
+            "min": 3
+          },
+          "up-username-not-idn-homograph": {},
+          "username-prohibited-characters": {}
+        }
+      },
+      {
+        "displayName": "${email}",
+        "multivalued": false,
+        "name": "email",
+        "permissions": {
+          "edit": [
+            "admin",
+            "user"
+          ],
+          "view": [
+            "admin",
+            "user"
+          ]
+        },
+        "required": {
+          "roles": [
+            "user"
+          ]
+        },
+        "validations": {
+          "email": {},
+          "length": {
+            "max": 255
+          }
+        }
+      },
+      {
+        "displayName": "${firstName}",
+        "multivalued": false,
+        "name": "firstName",
+        "permissions": {
+          "edit": [
+            "admin",
+            "user"
+          ],
+          "view": [
+            "admin",
+            "user"
+          ]
+        },
+        "required": {
+          "roles": [
+            "user"
+          ]
+        },
+        "validations": {
+          "length": {
+            "max": 255
+          },
+          "person-name-prohibited-characters": {}
+        }
+      },
+      {
+        "displayName": "${lastName}",
+        "multivalued": false,
+        "name": "lastName",
+        "permissions": {
+          "edit": [
+            "admin",
+            "user"
+          ],
+          "view": [
+            "admin",
+            "user"
+          ]
+        },
+        "required": {
+          "roles": [
+            "user"
+          ]
+        },
+        "validations": {
+          "length": {
+            "max": 255
+          },
+          "person-name-prohibited-characters": {}
+        }
+      },
+      {
+        "displayName": "IdP groups",
+        "multivalued": true,
+        "name": "idp_groups",
+        "permissions": {
+          "edit": [
+            "admin"
+          ],
+          "view": [
+            "admin"
+          ]
+        }
+      }
+    ]
+  },
+  "users": [
+    {
+      "clientRoles": {
+        "realm-management": [
+          "manage-identity-providers",
+          "view-identity-providers",
+          "query-users",
+          "view-users",
+          "manage-users"
+        ]
+      },
+      "enabled": true,
+      "serviceAccountClientId": "proxcloud-idp-admin",
+      "username": "service-account-proxcloud-idp-admin"
+    }
+  ]
+}

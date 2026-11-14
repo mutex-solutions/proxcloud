@@ -28,6 +28,12 @@ jobs:
         env:
           CI: "1"
         run: go test ./...
+      # Standard library only. Helm renders the realm and seed files from the chart; the Compose
+      # plugin of the runner renders the model. No container is started.
+      - name: Docker Compose production install (chart equality, script dry run)
+        env:
+          CI: "1"
+        run: python3 deploy/tests/test_compose_production.py -v
       - name: Sandbox prepull admission policy (CEL, k8s.io/apiserver, its own module)
         run: |
           python3 -m venv /tmp/iv && /tmp/iv/bin/pip install -q -r installer/requirements.txt

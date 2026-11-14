@@ -46,7 +46,8 @@ The configured destination for app Helm publication is
 `0.4.0` stable charts).
 On an app release tag, the workflow sets chart version to the tag without `v` and
 appVersion to the full tag, matching the image tags. The release contract is app
-chart `0.5.2`, appVersion/image tag and installer BOM `v0.5.2`.
+chart `0.5.2`, appVersion/image tag and installer BOM `v0.5.2`, and the same tag as
+`DEFAULT_VERSION` of the Docker Compose install (`deploy/compose/proxcloud-up.sh`).
 Keep `images.build: true` until the exact chart and images are published and
 verified; use `false` explicitly for released-artifact evaluation after that.
 The installer's broker-free floor compares the SemVer **base** against `0.4.0`:
