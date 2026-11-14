@@ -159,7 +159,8 @@ class GeneratedFromChartTests(unittest.TestCase):
             if os.environ.get("CI"):
                 self.fail("helm is required in CI, or this test proves nothing")
             self.skipTest("helm not installed")
-        rendered = render_from_chart()
+        # Helm versions differ in how many newlines end a rendered document: compare and store one.
+        rendered = {path: content.rstrip("\n") + "\n" for path, content in render_from_chart().items()}
         if os.environ.get("UPDATE_COMPOSE_GENERATED"):
             for path, content in rendered.items():
                 (COMPOSE / path).parent.mkdir(parents=True, exist_ok=True)

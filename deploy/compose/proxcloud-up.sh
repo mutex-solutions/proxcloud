@@ -129,9 +129,12 @@ preflight() {
     || die "the Docker Compose plugin (docker compose, v2 or later) is not installed"
   compose="${compose#v}"
   IFS=. read -r major minor _ <<< "$engine"
-  [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] && [ $((10#$major * 100 + 10#$minor)) -ge 2010 ] \
-    || die "Docker Engine 20.10 or later is required (found $engine)"
-  [[ "${compose%%.*}" =~ ^[0-9]+$ ]] && [ "${compose%%.*}" -ge 2 ] || die "Docker Compose v2 or later is required (found $compose)"
+  if ! [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] || [ $((10#$major * 100 + 10#$minor)) -lt 2010 ]; then
+    die "Docker Engine 20.10 or later is required (found $engine)"
+  fi
+  if ! [[ "${compose%%.*}" =~ ^[0-9]+$ ]] || [ "${compose%%.*}" -lt 2 ]; then
+    die "Docker Compose v2 or later is required (found $compose)"
+  fi
 }
 
 # ponytail: probes 127.0.0.1 only; a listener bound to one other address shows up as Docker's own bind error.
