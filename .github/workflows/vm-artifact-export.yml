@@ -75,6 +75,10 @@ jobs:
           git -C "$GITHUB_WORKSPACE" sparse-checkout disable
           test "$(git -C "$GITHUB_WORKSPACE" config --bool --get core.sparseCheckout)" = false
           test "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" = "$GITHUB_SHA"
+          # The runner keeps its workspace between jobs. Files an older commit or a sparse checkout left
+          # behind are removed, and the tree must then be exactly the commit.
+          git -C "$GITHUB_WORKSPACE" clean -ffdxq
+          test -z "$(git -C "$GITHUB_WORKSPACE" status --porcelain --untracked-files=all --ignored)"
           test -f "$GITHUB_WORKSPACE/images/vm_export/pipeline.py" && test -f "$GITHUB_WORKSPACE/images/vm_sanitize.py"
 
       # Each stage refuses unless exactly the earlier ones completed (images/vm_export/pipeline.py).

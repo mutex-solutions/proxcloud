@@ -203,7 +203,7 @@ class FakeHost:
         return {"checks": {name: True for name in names}, "machine_id_sha256": sha("machine" + address),
                 "host_key_sha256": sha(self.host_key(address)), "snapd_present": True,
                 "snapd_serial_sha256": sha("serial" + address), "snapd_device_key_sha256": sha("key" + address),
-                "snapd_changes_error_lines": 0, "cloud_init_recoverable_warnings": 0}
+                "snapd_changes_error_lines": 0, "snapd_snaps": 3, "cloud_init_recoverable_warnings": 0}
 
     @staticmethod
     def host_key(address):
@@ -689,6 +689,21 @@ class FailureCleanupTests(ColdBootCase):
         self.setUp()  # A serial that never came back is not a new identity either.
         self.host.rows = {"192.0.2.50": {"snapd_serial_sha256": None}}
         self.assertEqual(self.run_job()["reason"], "identity_not_distinct")
+        # Neither clone registered and neither has a snap (a native cloud image): there is no snapd identity
+        # to share, so the run is accepted. One clone registered, or snaps installed with no serial, is not.
+        unregistered = {"snapd_serial_sha256": None, "snapd_device_key_sha256": None, "snapd_snaps": 0}
+        self.setUp()
+        self.host.rows = {a.split("/")[0]: unregistered for a in ADDRESSES}
+        result = self.run_job()
+        self.assertEqual((result["accepted"], result["reason"]), (True, None))
+        self.assertTrue(all(result["distinct_identity"].values()))
+        for rows in ({"192.0.2.50": unregistered},  # Only one clone is unregistered.
+                     {a.split("/")[0]: dict(unregistered, snapd_snaps=2) for a in ADDRESSES},  # Snaps, but no serial.
+                     {"192.0.2.50": unregistered, "192.0.2.51": dict(unregistered, snapd_snaps=1)}):
+            with self.subTest(rows=rows):
+                self.setUp()
+                self.host.rows = rows
+                self.assertEqual(self.run_job()["reason"], "identity_not_distinct")
         absent = {"snapd_present": False, "snapd_serial_sha256": None, "snapd_device_key_sha256": None}
         for rows in ({a.split("/")[0]: absent for a in ADDRESSES},  # No snapd on either clone proves nothing.
                      {"192.0.2.51": {"snapd_present": False}}):  # ... and one saying so while it still reports hashes.
@@ -1607,6 +1622,7 @@ class FakeGuest:
                       "/etc/ssh/ssh_host_ed25519_key.pub": "ssh-ed25519 AAAAhostkey root@clone\n",
                       "/proc/swaps": "Filename Type Size Used Priority\n"}
         self.dirs = {"/var/lib/snapd/device/private-keys-v1": ["newkey"]}
+        self.snaps = 3  # Installed snaps: a node image has some, a native cloud image has none.
 
     def run(self, args, timeout=60):
         out, code = self.tools.get(args[0], ""), self.rc.get(args[0], 0)
@@ -1618,6 +1634,9 @@ class FakeGuest:
             out = self.sudo % args[-1] if "%s" in self.sudo else self.sudo
         elif args[:2] == ["/usr/bin/snap", "version"]:
             code = self.snap_rc
+        elif args[:2] == ["/usr/bin/snap", "list"]:
+            out = "".join(["Name Version Rev Tracking Publisher Notes\n"] + ["snap%d 1 1 stable x -\n" % i
+                                                                             for i in range(self.snaps)]) if self.snaps else ""
         elif args[:2] == ["/usr/bin/snap", "model"]:
             out, code = self.serial, 0 if self.serial else 1
             if self.serial_late:  # snapd has not got its new serial yet.
@@ -1740,6 +1759,28 @@ class GuestScriptTests(unittest.TestCase):
         guest = FakeGuest()
         guest.changes += "2 Error today today Refresh snap\n3 Error today today Install\n"
         self.assertEqual(guest.record()["snapd_changes_error_lines"], 2)
+
+    def test_snapd_without_snaps_may_stay_unregistered(self):
+        # A classic system with no snap installed registers with the store at its first install (seen on the
+        # lab: both ubuntu-2404 clones had no serial). No serial, no device key and no key file is then fine.
+        def native(**changes):
+            guest = FakeGuest("os")
+            guest.snaps, guest.serial, guest.dirs = 0, "", {}
+            for key, value in changes.items():
+                setattr(guest, key, value)
+            return guest
+        row = native().record()
+        self.assertTrue(row["checks"]["snapd_reregistered_new_key"])
+        self.assertEqual((row["snapd_snaps"], row["snapd_serial_sha256"], row["snapd_device_key_sha256"]), (0, None, None))
+        with patch.object(coldboot_guest.time, "sleep") as slept:  # Nothing to wait for.
+            native().record()
+        slept.assert_not_called()
+        for name, guest in (("a key file is left", native(dirs={"/var/lib/snapd/device/private-keys-v1": ["old"]})),
+                            ("a serial without a key", native(serial="serial: 7c1f-serial\n")),
+                            ("snaps installed, no serial", native(snaps=2))):
+            with self.subTest(name):
+                self.assertFalse(guest.record()["checks"]["snapd_reregistered_new_key"])
+        self.assertEqual(FakeGuest("kubernetes").record()["snapd_snaps"], 3)
 
     def test_root_growth_floor_follows_the_image_layout(self):
         # 30G disk: a node image is one partition; a native image also has /boot and the ESP, so its root

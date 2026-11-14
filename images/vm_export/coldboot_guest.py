@@ -53,9 +53,13 @@ def build_user(name, home, shadow):
 
 
 def snapd():
-    """(active, serial, device key) once snapd is registered again; read-only presence and values to hash."""
+    """(active, serial, device key, failed changes, installed snaps); read-only presence and values to hash.
+    snapd on a classic system with no snap installed does not register with the store until the first
+    install, so only a system that has snaps is given time to get its new serial."""
     ok = run(["/usr/bin/snap", "version"]).returncode == 0
-    end = time.monotonic() + SERIAL_WAIT
+    listed = run(["/usr/bin/snap", "list"])
+    snaps = max(0, len(listed.stdout.splitlines()) - 1) if listed.returncode == 0 else 0
+    end = time.monotonic() + (SERIAL_WAIT if snaps else 0)
     while True:
         model = run(["/usr/bin/snap", "model", "--serial", "--assertion"], timeout=120)
         assertion = model.stdout if model.returncode == 0 else ""
@@ -65,7 +69,7 @@ def snapd():
             break
         time.sleep(10)
     errors = sum(1 for row in run(["/usr/bin/snap", "changes"]).stdout.splitlines() if " Error " in row)
-    return ok and active("snapd"), serial and serial.group(1), key and key.group(1), errors
+    return ok and active("snapd"), serial and serial.group(1), key and key.group(1), errors, snaps
 
 
 def main(argv):
@@ -88,8 +92,9 @@ def main(argv):
     machine_id = pathlib.Path("/etc/machine-id").read_text().strip()
     host_key = pathlib.Path("/etc/ssh/ssh_host_ed25519_key.pub").read_text().split()[1]
     snapd_present = os.path.exists("/usr/bin/snap")
-    snapd_ok, serial, device_key, snap_errors = snapd() if snapd_present else (True, None, None, 0)
+    snapd_ok, serial, device_key, snap_errors, snaps = snapd() if snapd_present else (True, None, None, 0, 0)
     key_dir = pathlib.Path("/var/lib/snapd/device/private-keys-v1")
+    key_files = key_dir.is_dir() and any(key_dir.iterdir())
     lsblk = json.loads(run(["/usr/bin/lsblk", "-b", "-J", "-o", "NAME,TYPE,SIZE,MOUNTPOINTS"]).stdout)
     disks = [d for d in lsblk.get("blockdevices", []) if d.get("type") == "disk"]
     disk = disks[0] if disks else {}
@@ -106,8 +111,10 @@ def main(argv):
         "machine_id_valid": re.fullmatch("[0-9a-f]{32}", machine_id) is not None,
         "qemu_guest_agent_active": active("qemu-guest-agent"),
         "snapd_active": snapd_ok,
-        "snapd_reregistered_new_key": not snapd_present or (
-            bool(serial) and bool(device_key) and key_dir.is_dir() and any(key_dir.iterdir())),
+        # Registered again with a key of its own, or (no snap installed) not registered at all: no serial,
+        # no device key and no key file, so there is no identity a clone could share. Anything between fails.
+        "snapd_reregistered_new_key": not snapd_present or (bool(serial) and bool(device_key) and key_files) or (
+            snaps == 0 and not serial and not device_key and not key_files),
         # `snap changes` must show no failed change. cloud-init's recoverable warnings stay a reported counter.
         "snapd_no_change_errors": snap_errors == 0,
         "no_active_swap": not pathlib.Path("/proc/swaps").read_text().splitlines()[1:],
@@ -141,7 +148,7 @@ def main(argv):
         "checks": checks, "machine_id_sha256": sha(machine_id), "host_key_sha256": sha(host_key),
         "snapd_present": snapd_present, "snapd_serial_sha256": sha(serial) if serial else None,
         "snapd_device_key_sha256": sha(device_key) if device_key else None,
-        "snapd_changes_error_lines": snap_errors,
+        "snapd_changes_error_lines": snap_errors, "snapd_snaps": snaps,
         "cloud_init_recoverable_warnings": sum(
             len(v["recoverable_errors"].get("WARNING", [])) for v in cloud.values()
             if isinstance(v, dict) and isinstance(v.get("recoverable_errors"), dict))}, sort_keys=True), flush=True)

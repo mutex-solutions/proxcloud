@@ -72,7 +72,8 @@ DISK_KEY = re.compile(r"(?:ide|sata|scsi|virtio|unused|efidisk|tpmstate)[0-9]+")
 HEX64 = re.compile(r"[0-9a-f]{64}")
 STORAGE_TASK = r"[a-z]+:[^:]*"
 GUEST_KEYS = {"checks", "machine_id_sha256", "host_key_sha256", "snapd_present", "snapd_serial_sha256",
-              "snapd_device_key_sha256", "snapd_changes_error_lines", "cloud_init_recoverable_warnings"}
+              "snapd_device_key_sha256", "snapd_changes_error_lines", "snapd_snaps",
+              "cloud_init_recoverable_warnings"}
 IDENTITY = ("machine_id_sha256", "host_key_sha256", "snapd_serial_sha256", "snapd_device_key_sha256")
 # A clone's recorded steps. "not_created" and "destroyed" are terminal: cleanup makes no call for them.
 CLONE_STATES = ("reserved", "created", "tagged", "imported", "preboot", "started", "destroying", "destroyed",
@@ -434,7 +435,8 @@ def guest_record(raw, variant):
          and set(row["checks"]) == names and all(type(v) is bool for v in row["checks"].values())
          and sha(row["machine_id_sha256"]) and sha(row["host_key_sha256"]) and type(row["snapd_present"]) is bool
          and all(row[k] is None or sha(row[k]) for k in ("snapd_serial_sha256", "snapd_device_key_sha256"))
-         and count(row["snapd_changes_error_lines"]) and count(row["cloud_init_recoverable_warnings"]),
+         and count(row["snapd_changes_error_lines"]) and count(row["snapd_snaps"])
+         and count(row["cloud_init_recoverable_warnings"]),
          "guest_output_refused")
     return row
 
@@ -465,10 +467,17 @@ def guest_checks(sdir, cfg, clone, address, public):
     return dict(row, suffix=suffix, name=clone["name"], all_passed=all(row["checks"].values()))
 
 
+SNAPD_IDENTITY = ("snapd_serial_sha256", "snapd_device_key_sha256")
+
+
 def distinct(a, b):
-    """Two cold boots of one image must not share an identity (hashes only). The snapd serial and device
-    key are required, not optional: every supported OS ships snapd, so a guest without it proves nothing."""
+    """Two cold boots of one image must not share an identity (hashes only). snapd must be present on both:
+    every supported OS ships it. Its serial and device key must differ, unless NEITHER clone is registered and
+    neither has a snap installed (a classic system registers at its first install): then no snapd identity
+    exists to share. One registered clone next to an unregistered one is refused."""
     proof = {key: None not in (a[key], b[key]) and a[key] != b[key] for key in IDENTITY}
+    if all(row[key] is None for row in (a, b) for key in SNAPD_IDENTITY) and a["snapd_snaps"] == b["snapd_snaps"] == 0:
+        proof.update(dict.fromkeys(SNAPD_IDENTITY, True))
     return dict(proof, snapd_present=a["snapd_present"] is True and b["snapd_present"] is True)
 
 
