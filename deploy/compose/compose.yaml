@@ -1,0 +1,276 @@
+# ProxCloud portal on one host: Traefik (TLS), Keycloak, PostgreSQL, the API and the two consoles.
+#
+# Site settings live in .env (mode 600), written by ./proxcloud-up.sh: do not put them here.
+# Nothing in this file is a default credential; a missing required value stops Compose.
+# The TLS mode is the active profile (COMPOSE_PROFILES in .env): internal, acme-http or
+# acme-dns-cloudflare. Each one starts its own Traefik service.
+#
+# Same settings as the Helm chart (deploy/charts/proxcloud): separate customer (clients) and
+# operator (master) realms applied by keycloak-config-cli, first-run documents by the seed step.
+# keycloak-config/ and seed/ are rendered from the chart and kept equal to it by
+# deploy/tests/test_compose_production.py.
+
+# Bounded container logs: the json-file default keeps everything, on a host that runs for years.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "5"
+
+x-traefik: &traefik
+  image: traefik:v3.7.18
+  restart: unless-stopped
+  logging: *logging
+  ports:
+    - "${HTTP_PORT:?run ./proxcloud-up.sh}:80"
+    - "${HTTPS_PORT:?run ./proxcloud-up.sh}:443"
+  volumes:
+    # To discover this project's containers. ":ro" protects the socket file only, not the API
+    # behind it: whoever controls this Traefik, the one process the internet reaches, controls
+    # Docker, and with it the host. Keep the host dedicated to the portal.
+    - /var/run/docker.sock:/var/run/docker.sock:ro
+    - traefik-acme:/acme
+
+services:
+  # TLS mode "internal": Traefik's own self-signed certificate. For a LAN evaluation.
+  traefik-internal:
+    <<: *traefik
+    profiles: [internal]
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.constraints=Label(`com.docker.compose.project`,`${COMPOSE_PROJECT_NAME}`)
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=:${HTTPS_PORT}
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.websecure.http.tls=true
+      - --log.level=INFO
+
+  # TLS mode "acme-http": Let's Encrypt, HTTP-01. The four names must resolve to this host on the
+  # public internet and port 80 must be reachable from it.
+  traefik-acme-http:
+    <<: *traefik
+    profiles: [acme-http]
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.constraints=Label(`com.docker.compose.project`,`${COMPOSE_PROJECT_NAME}`)
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=:${HTTPS_PORT}
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.websecure.http.tls.certresolver=le
+      - --certificatesresolvers.le.acme.email=${ACME_EMAIL-}
+      - --certificatesresolvers.le.acme.storage=/acme/acme.json
+      - --certificatesresolvers.le.acme.caserver=${ACME_CA_SERVER:-https://acme-v02.api.letsencrypt.org/directory}
+      - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
+      - --log.level=INFO
+
+  # TLS mode "acme-dns-cloudflare": Let's Encrypt, DNS-01 through the Cloudflare API. Works for a
+  # host that is not reachable from the internet. The API token is the file ./cf-token.
+  traefik-acme-dns-cloudflare:
+    <<: *traefik
+    profiles: [acme-dns-cloudflare]
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.constraints=Label(`com.docker.compose.project`,`${COMPOSE_PROJECT_NAME}`)
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=:${HTTPS_PORT}
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.websecure.http.tls.certresolver=le
+      - --certificatesresolvers.le.acme.email=${ACME_EMAIL-}
+      - --certificatesresolvers.le.acme.storage=/acme/acme.json
+      - --certificatesresolvers.le.acme.caserver=${ACME_CA_SERVER:-https://acme-v02.api.letsencrypt.org/directory}
+      - --certificatesresolvers.le.acme.dnschallenge.provider=cloudflare
+      - --certificatesresolvers.le.acme.dnschallenge.resolvers=1.1.1.1:53,1.0.0.1:53
+      - --log.level=INFO
+    environment:
+      CF_DNS_API_TOKEN_FILE: /run/secrets/cf-token
+    secrets: [cf-token]
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      POSTGRES_USER: proxcloud
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?run ./proxcloud-up.sh}
+      POSTGRES_DB: proxcloud
+      KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?run ./proxcloud-up.sh}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # Over TCP: the server that runs the init scripts on the first start listens on the socket
+      # only, and must not count as ready.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U proxcloud -d proxcloud"]
+      interval: 5s
+      retries: 30
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.2
+    restart: unless-stopped
+    logging: *logging
+    command: ["start"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?run ./proxcloud-up.sh}
+      KC_HOSTNAME: https://${AUTH_HOST:?run ./proxcloud-up.sh}${URL_PORT-}
+      # The API fetches OIDC metadata at http://keycloak:8080 (backchannel); tokens keep the public issuer.
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:?run ./proxcloud-up.sh}
+    healthcheck:
+      # The image has no curl: bash asks the management port (KC_HEALTH_ENABLED) itself.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '^HTTP/1.1 200' <&3"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 60s
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.auth.rule: Host(`${AUTH_HOST}`)
+      traefik.http.routers.auth.entrypoints: websecure
+      traefik.http.services.auth.loadbalancer.server.port: "8080"
+
+  # One-shot, idempotent: the clients and master realm settings the chart derives (PKCE clients
+  # with redirects to the two consoles, the SSO service account). Unmanaged clients are kept.
+  # The console URLs and the SSO secret are substituted from the environment at import.
+  # Profile "setup": a plain "docker compose up" does not run it. proxcloud-up.sh runs it by name
+  # before it touches anything else (the Traefik of a previous TLS mode included), so a failure
+  # here (a changed Keycloak admin password, for example) leaves the running portal as it is.
+  keycloak-config:
+    image: docker.io/adorsys/keycloak-config-cli:6.5.1-26.5.5
+    profiles: [setup]
+    restart: "no"
+    logging: *logging
+    depends_on:
+      keycloak: {condition: service_healthy}
+    environment:
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_USER: admin
+      KEYCLOAK_PASSWORD: ${KC_ADMIN_PASSWORD}
+      # No availability check (the chart's Job has one): depends_on already waits for a healthy
+      # Keycloak, and the check retries the admin login for its whole timeout. With a wrong
+      # password that is a slow failure, and enough failed logins for the brute force detection of
+      # realm master to lock the admin account.
+      KEYCLOAK_AVAILABILITYCHECK_ENABLED: "false"
+      IMPORT_FILES_LOCATIONS: /config/*.json
+      IMPORT_VARSUBSTITUTION_ENABLED: "true"
+      IMPORT_MANAGED_CLIENT: no-delete
+      IMPORT_MANAGED_IDENTITY_PROVIDER: no-delete
+      IMPORT_MANAGED_IDENTITY_PROVIDER_MAPPER: no-delete
+      PROXCLOUD_SSO_KC_CLIENT_SECRET: ${SSO_CLIENT_SECRET:?run ./proxcloud-up.sh}
+      PROXCLOUD_SELF_UI_BASE_URL: https://${APP_HOST:?run ./proxcloud-up.sh}${URL_PORT-}
+      PROXCLOUD_SELF_ADMIN_BASE_URL: https://${ADMIN_HOST:?run ./proxcloud-up.sh}${URL_PORT-}
+    volumes:
+      - ./keycloak-config:/config:ro
+
+  # One-shot: first-run configuration documents, written only while their table is empty.
+  seed:
+    image: ghcr.io/mutex-solutions/proxcloud-api:${PROXCLOUD_VERSION:?run ./proxcloud-up.sh}
+    restart: on-failure
+    logging: *logging
+    depends_on:
+      postgres: {condition: service_healthy}
+    # The connection comes from the PG* environment, not from a URL argument: the password must
+    # not show in the process list.
+    entrypoint: ["/bin/sh", "-c", "psql -v ON_ERROR_STOP=1 -q -f /seed/seed.sql && echo 'seed applied (existing documents kept)'"]
+    environment:
+      PGHOST: postgres
+      PGDATABASE: proxcloud
+      PGUSER: proxcloud
+      PGPASSWORD: ${PG_PASSWORD}
+      PGSSLMODE: disable
+    volumes:
+      - ./seed:/seed:ro
+
+  api:
+    image: ghcr.io/mutex-solutions/proxcloud-api:${PROXCLOUD_VERSION}
+    restart: unless-stopped
+    logging: *logging
+    # The API reads the realms' OIDC metadata when it starts and retries every 30 seconds until
+    # it has them. proxcloud-up.sh applies the realms first, so the first attempt succeeds.
+    depends_on:
+      postgres: {condition: service_healthy}
+      keycloak: {condition: service_started}
+    environment:
+      PROXCLOUD_DB_URL: postgres://proxcloud:${PG_PASSWORD}@postgres:5432/proxcloud?sslmode=disable
+      PROXCLOUD_ENCRYPTION_DEFAULT_KEY: ${ENCRYPTION_KEY:?run ./proxcloud-up.sh}
+      PROXCLOUD_SSO_KC_CLIENT_SECRET: ${SSO_CLIENT_SECRET}
+      PROXCLOUD_SELF_API_BASE_URL: https://${API_HOST:?run ./proxcloud-up.sh}${URL_PORT-}
+      PROXCLOUD_SELF_UI_BASE_URL: https://${APP_HOST}${URL_PORT-}
+      PROXCLOUD_SELF_ADMIN_BASE_URL: https://${ADMIN_HOST}${URL_PORT-}
+      AUTH_MAIN_OAUTH2_ISSUER_URI: https://${AUTH_HOST}${URL_PORT-}/realms/clients
+      AUTH_MAIN_OAUTH2_CLIENT_ID: proxcloud-ui
+      AUTH_MAIN_OAUTH2_DISCOVERY_URI: http://keycloak:8080/realms/clients
+      AUTH_ADMIN_OAUTH2_ISSUER_URI: https://${AUTH_HOST}${URL_PORT-}/realms/master
+      AUTH_ADMIN_OAUTH2_CLIENT_ID: proxcloud-admin
+      AUTH_ADMIN_OAUTH2_DISCOVERY_URI: http://keycloak:8080/realms/master
+      AUTH_ADMIN_API_OAUTH2_ISSUER_URI: https://${AUTH_HOST}${URL_PORT-}/realms/master
+      AUTH_ADMIN_API_OAUTH2_CLIENT_ID: proxcloud-admin-api
+      AUTH_ADMIN_API_OAUTH2_DISCOVERY_URI: http://keycloak:8080/realms/master
+      PROXCLOUD_JOBS_WORKER_CONCURRENCY: "2"
+      PROXCLOUD_JOBS_POLL_INTERVAL: 1s
+      PROXCLOUD_JOBS_LEASE_DURATION: 1m
+      PROXCLOUD_BILLING_PROVIDER: native
+      # Template updates, the sandbox flag, the scheduler and debug triggers stay at their defaults (off).
+    healthcheck:
+      # Readiness, on the management port (8081), which Traefik does not route. Traefik sends
+      # requests to the API only while this check passes.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/actuator/health/readiness"]
+      interval: 5s
+      retries: 30
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.api.rule: Host(`${API_HOST}`)
+      traefik.http.routers.api.entrypoints: websecure
+      traefik.http.services.api.loadbalancer.server.port: "8080"
+
+  web:
+    image: ghcr.io/mutex-solutions/proxcloud-web:${PROXCLOUD_VERSION}
+    restart: unless-stopped
+    logging: *logging
+    depends_on: [api]
+    environment:
+      PROXCLOUD_API_URL: https://${API_HOST}${URL_PORT-}/api/v1
+      PROXCLOUD_OAUTH2_ISSUER: https://${AUTH_HOST}${URL_PORT-}/realms/clients
+      PROXCLOUD_OAUTH2_CLIENT_ID: proxcloud-ui
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.web.rule: Host(`${APP_HOST}`)
+      traefik.http.routers.web.entrypoints: websecure
+      traefik.http.services.web.loadbalancer.server.port: "80"
+
+  admin:
+    image: ghcr.io/mutex-solutions/proxcloud-admin:${PROXCLOUD_VERSION}
+    restart: unless-stopped
+    logging: *logging
+    depends_on: [api]
+    environment:
+      PROXCLOUD_API_URL: https://${API_HOST}${URL_PORT-}/api/v1
+      PROXCLOUD_OAUTH2_ISSUER: https://${AUTH_HOST}${URL_PORT-}/realms/master
+      PROXCLOUD_OAUTH2_CLIENT_ID: proxcloud-admin
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.admin.rule: Host(`${ADMIN_HOST}`)
+      traefik.http.routers.admin.entrypoints: websecure
+      traefik.http.services.admin.loadbalancer.server.port: "80"
+
+secrets:
+  cf-token:
+    file: ./cf-token
+
+volumes:
+  traefik-acme:
+  postgres-data:

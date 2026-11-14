@@ -1,0 +1,32 @@
+{
+  "bruteForceProtected": true,
+  "clients": [
+    {
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "$(env:PROXCLOUD_SELF_ADMIN_BASE_URL)/*"
+      },
+      "clientId": "proxcloud-admin",
+      "directAccessGrantsEnabled": true,
+      "enabled": true,
+      "publicClient": true,
+      "redirectUris": [
+        "$(env:PROXCLOUD_SELF_ADMIN_BASE_URL)/*"
+      ],
+      "standardFlowEnabled": true,
+      "webOrigins": [
+        "$(env:PROXCLOUD_SELF_ADMIN_BASE_URL)"
+      ]
+    },
+    {
+      "clientId": "proxcloud-admin-api",
+      "directAccessGrantsEnabled": true,
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": false
+    }
+  ],
+  "enabled": true,
+  "realm": "master",
+  "sslRequired": "external"
+}

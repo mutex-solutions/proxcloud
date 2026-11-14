@@ -31,6 +31,7 @@ Addresses and names below are documentation examples (`192.0.2.x`, `198.51.100.x
 | A small production site, one management host | [C](#c-production-one-management-host-allinone) | k3s on your Linux host, the platform, RustFS, templates, the provider, optional NAS stores | PVE 9.2+ cluster, a Linux host that is not a PVE node, a DNS domain | `make install` |
 | Managed Kubernetes, managed databases, sandboxes | [D](#d-managed-kubernetes-databases-and-sandboxes-split) | All of C, plus a services cluster (Kamaji, Cluster API, MetalLB, database operators), optionally a sandbox cluster | Path C installed, k8s node templates, a services subnet | `make install` with `mode: split` |
 | The portal only, on a Kubernetes cluster you run | [E](#e-install-on-kubernetes-with-helm) | API, both consoles, PostgreSQL durable jobs and Keycloak (quick start), or CloudNativePG and your OIDC issuer (production), no broker | Any cluster with a default StorageClass (quick start); the CloudNativePG operator and an OIDC issuer (production) | `helm install` |
+| The portal only, in production, on one Docker host | [F](#f-production-on-one-host-with-docker-compose) | API, both consoles, PostgreSQL (also durable jobs), Keycloak in production mode, Traefik with TLS on your domain | A Linux host with Docker and Compose, four DNS names | `deploy/compose/proxcloud-up.sh` |
 
 Then add what you sell, on any installer path:
 
@@ -62,7 +63,7 @@ No Proxmox needed. Cloud pages stay empty until a provider is registered.
    | Keycloak | `http://localhost:8090` | `admin` / `admin` |
 
    These are fixed development credentials (`deploy/dev/keycloak-realm.json`, `docker-compose.yml`). Never expose
-   this stack. To reach it from another machine, put `PROXCLOUD_HOST=<this machine's address>` in a `.env` file next
+   this stack. For a real install with Docker Compose use [F](#f-production-on-one-host-with-docker-compose). To reach it from another machine, put `PROXCLOUD_HOST=<this machine's address>` in a `.env` file next
    to `docker-compose.yml`.
 
 Scheduler/debug gates default **off**; PostgreSQL workers always finish any
@@ -478,6 +479,49 @@ retain runbook](postgres-jobs-migration.md); do not let Helm/Argo prune the old 
    ```
 
    The operator client (`proxcloud-admin`) must allow the password grant; the clients `keycloakConfigCli` creates do.
+
+### F. Production on one host with Docker Compose
+
+The portal only, on your own domain with TLS, on one Linux host: the API, both consoles, PostgreSQL, Keycloak in
+production mode and Traefik. Like [E](#e-install-on-kubernetes-with-helm) it creates no OS templates, Proxmox tokens
+or providers, and it does not include managed Kubernetes, databases or sandboxes. Operator guide (DNS per TLS mode,
+backup and restore, upgrade, security notes): [deploy/compose/README.md](../deploy/compose/README.md).
+
+**Before you start:** Docker Engine 20.10+ with the Compose plugin v2+, ports 80 and 443 free, and four DNS names
+pointing at the host (`app.`, `admin.`, `api.` and `id.` under your domain, or any four names).
+
+1. Run the installer. It asks for the domain, the TLS mode and two email addresses:
+
+   ```sh
+   cd deploy/compose
+   ./proxcloud-up.sh
+   ```
+
+   Or without questions:
+
+   ```sh
+   ./proxcloud-up.sh install --domain cloud.example.org \
+     --tls acme-http --acme-email ops@example.org --operator-email admin@example.org
+   ```
+
+   | TLS mode | Certificates | Needs |
+   |---|---|---|
+   | `acme-http` | Let's Encrypt, HTTP-01 | Public DNS records and port 80 reachable from the internet |
+   | `acme-dns-cloudflare` | Let's Encrypt, DNS-01 | The zone on Cloudflare and an API token; the host may be private |
+   | `internal` | Traefik's self-signed certificate | Nothing; browsers warn. For a LAN evaluation |
+
+2. **Success** is the script printing the four URLs. It generated every secret into `deploy/compose/.env`
+   (mode 600) and wrote the first operator's temporary password to `deploy/compose/operator-password`; Keycloak
+   asks for a new one at the first login.
+
+   **Back up `deploy/compose/.env` off the host**: it holds the encryption key (unrecoverable) and the database
+   passwords.
+
+3. Sign in to the operator console, register the provider as in
+   [A2](#a2-connect-an-existing-proxmox-cluster), then follow [After any install](#5-after-any-install).
+
+Day 2: `./proxcloud-up.sh status`, `backup`, `upgrade vX.Y.Z`, `uninstall` (keeps the data unless `--purge`).
+Operators are the users of Keycloak realm `master`: never add a customer there.
 
 ## 3. Storage tier: Standard or Full
 

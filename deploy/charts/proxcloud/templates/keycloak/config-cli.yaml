@@ -4,6 +4,9 @@ and apply them with a post-install/post-upgrade Job (idempotent; existing
 realms like master are updated in place, and unmanaged clients are never
 deleted). This is what makes `helm install` a one-shot bring-up when the
 bundled keycloakx is enabled.
+Every derived realm has Keycloak's brute force detection on (its default thresholds:
+a temporary lockout after repeated failed logins): the token endpoints are public and
+the clients allow the password grant.
 */ -}}
 {{- if .Values.keycloakConfigCli.enabled }}
 {{- $cli := .Values.keycloakConfigCli }}
@@ -39,6 +42,7 @@ bundled keycloakx is enabled.
       "registrationEmailAsUsername" true
       "loginWithEmailAllowed" true
       "resetPasswordAllowed" true
+      "bruteForceProtected" true
       "sslRequired" .Values.keycloakConfigCli.sslRequired
       "clients" (list $client)) }}
 {{- if .Values.auth.sso.enabled }}
@@ -66,7 +70,7 @@ bundled keycloakx is enabled.
       "webOrigins" (list $admin)
       "attributes" (dict "pkce.code.challenge.method" (ternary "S256" "" .Values.keycloakConfigCli.requirePkce) "post.logout.redirect.uris" (printf "%s/*" $admin)) }}
 {{- if and $ssoScopes (eq $name $mainRealm) }}{{- $_ := set $client "defaultClientScopes" $ssoScopes }}{{- end }}
-{{- $def := index $realms $name | default (dict "realm" $name "enabled" true "sslRequired" .Values.keycloakConfigCli.sslRequired "clients" (list)) }}
+{{- $def := index $realms $name | default (dict "realm" $name "enabled" true "bruteForceProtected" true "sslRequired" .Values.keycloakConfigCli.sslRequired "clients" (list)) }}
 {{- $_ := set $def "clients" (append (index $def "clients") $client) }}
 {{- $_ := set $realms $name $def }}
 {{- end }}
@@ -79,7 +83,7 @@ bundled keycloakx is enabled.
       "standardFlowEnabled" false
       "directAccessGrantsEnabled" true }}
 {{- if and $ssoScopes (eq $name $mainRealm) }}{{- $_ := set $client "defaultClientScopes" $ssoScopes }}{{- end }}
-{{- $def := index $realms $name | default (dict "realm" $name "enabled" true "sslRequired" .Values.keycloakConfigCli.sslRequired "clients" (list)) }}
+{{- $def := index $realms $name | default (dict "realm" $name "enabled" true "bruteForceProtected" true "sslRequired" .Values.keycloakConfigCli.sslRequired "clients" (list)) }}
 {{- $_ := set $def "clients" (append (index $def "clients") $client) }}
 {{- $_ := set $realms $name $def }}
 {{- end }}

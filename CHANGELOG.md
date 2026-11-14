@@ -18,6 +18,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capabilities and read-only inputs, and the parent checks the container's settings before start and
   proves it stopped. No workflow runs them yet; the export workflow follows.
 
+- **Production install on one host with Docker Compose** (`deploy/compose/`): `./proxcloud-up.sh` asks for the
+  domain (or four hostnames), the TLS mode and two email addresses, generates every secret once into `.env`
+  (mode 600), starts Traefik, Keycloak in production mode, PostgreSQL, the API and both consoles at the pinned
+  release, creates the first operator with a temporary password and prints the URLs. TLS modes: `acme-http`
+  (Let's Encrypt HTTP-01), `acme-dns-cloudflare` (DNS-01, the token as a Docker secret file) and `internal`
+  (Traefik's self-signed certificate, for a LAN evaluation). Also `upgrade <version>` (backup first, pull before
+  anything changes), `status`, `backup` and `uninstall` (volumes are deleted only with `--purge`). The Compose
+  project is `proxcloud-prod` by default, and the install refuses a project name that the development stack,
+  another directory's containers or a database volume without its `.env` already use. `--dry-run` writes its
+  preview to `.env.dry-run` and never changes `.env`; variables of the calling shell do not reach Compose. No
+  password is a command argument, inside the containers either. The Keycloak
+  realm settings and the first-run seed are rendered from the Helm chart's own templates and a test keeps them
+  equal; the default image tag is part of the release contract test. It installs the portal only: no Proxmox
+  provider, no managed services. Guide: `deploy/compose/README.md`, quick start path F.
+  **Verified** on one Docker host with `internal` TLS: install, re-run, hostname change, backup and restore into
+  an empty database, upgrade to the same release, uninstall with and without `--purge` (and the install after a
+  purge, which creates the operator again), a switch of the TLS mode and back, a realm import that fails during
+  that switch (the running portal, its Traefik included, is left untouched), and the refusal of a project name
+  in use. In the two Let's Encrypt modes Traefik was only started against an unreachable CA: the configuration
+  loads and requests a certificate for the four hostnames. **Not verified**: certificate issuance and renewal
+  (HTTP-01, and DNS-01 through Cloudflare), and an upgrade between two different releases.
+
+### Changed
+
+- **Helm chart: the realms derived by `keycloakConfigCli` have Keycloak's brute force detection on**
+  (`bruteForceProtected`, Keycloak's default thresholds: a temporary lockout after repeated failed logins). Their
+  token endpoints are public and the console clients allow the password grant. Applied at the next
+  `helm upgrade`, and by the Compose install, which renders the same realm files.
+
 ### Fixed
 
 - **Native OS images kept the build VM's snapd identity**: the offline sanitizer reset the snapd device

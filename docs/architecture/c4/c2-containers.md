@@ -235,6 +235,8 @@ flowchart LR
   dbchart["Chart database-cluster<br/>DBaaS engines"]:::impl
   k8schart["Chart proxmox-kamaji-cluster<br/>tenant and sandbox clusters"]:::impl
   inst["Installer (Ansible)<br/>make install, day-2 targets"]:::impl
+  compose["One-host Compose install<br/>deploy/compose, proxcloud-up.sh"]:::impl
+  host["Single Docker host<br/>portal only"]:::impl
   vmt["VM template pipeline<br/>build.py, Packer, tags"]:::impl
   k8st["K8s node template pipeline<br/>k8s-node-templates.yml, image-builder"]:::impl
   k8sseed["Private build seed<br/>local NoCloud cidata ISO"]:::impl
@@ -249,6 +251,8 @@ flowchart LR
   k8schart --> helm
   ghcr -->|"helm install, ArgoCD"| mgmt
   ghcr --> inst
+  ghcr -->|"released api, web, admin images"| compose
+  compose -->|"Traefik, Keycloak, PostgreSQL, API, consoles"| host
   inst -->|"k3s, ArgoCD Applications, register"| mgmt
   inst -->|"API: roles, tokens, stores, VMs"| pve
   inst --> vmt
@@ -257,6 +261,12 @@ flowchart LR
   k8sseed -->|"exact owned ISO upload; attach for install only"| pve
   k8st -->|"verify seed detachment/deletion, then tag node templates"| pve
 ```
+
+The one-host Compose install (`deploy/compose`) runs the same released API and console
+images on a single Docker host behind Traefik, with Keycloak and PostgreSQL next to them.
+It carries the portal only: no management cluster, no ArgoCD and no managed services.
+Its Keycloak realm files are generated from the chart's realm templates and a test keeps
+them equal.
 
 Both SPA images normalize only nginx's public document root to 0755 directories
 and 0644 files; the entrypoint also sets generated `config.js` to 0644 so nginx
