@@ -214,8 +214,13 @@ def content(cfg):
     return "/nodes/%s/storage/%s/content" % (cfg["node"], cfg["storage"])
 
 
-def volids(api, cfg, **query):
-    return sorted(str(v.get("volid")) for v in api.call("GET", content(cfg), **query))
+def volids(api, cfg, vmid=None, **query):
+    """Volume ids on the storage; with vmid, only the volumes that guest owns. PVE's own vmid filter also
+    returns every volume that belongs to no guest (import files, ISOs), so the row's vmid decides."""
+    if vmid is not None:
+        query["vmid"] = vmid
+    return sorted(str(v.get("volid")) for v in api.call("GET", content(cfg), **query)
+                  if vmid is None or str(v.get("vmid")) == str(vmid))
 
 
 def address_in_use(configs, addresses):

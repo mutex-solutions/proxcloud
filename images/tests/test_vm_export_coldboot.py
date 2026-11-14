@@ -116,10 +116,13 @@ class FakePVE:
                 {"type": "cluster", "name": "lab"}, {"type": "node", "name": NODE, "local": 0},
                 {"type": "node", "name": API_NODE, "local": 1}]
         if (method, path) == ("GET", CONTENT):
+            # As PVE 9: a row of a guest's volume carries its vmid; an import file or ISO carries none, and
+            # the vmid filter keeps those ownerless rows (seen on the lab: every reserved VMID "had" volumes).
+            rows = [{"volid": v} for v in self.volumes] + [{"volid": v, "vmid": owner}
+                                                           for owner, volumes in self.orphans.items() for v in volumes]
             if "vmid" in params:
-                return [{"volid": v} for v in self.orphans.get(int(params["vmid"]), [])]
-            rows = self.volumes + [v for volumes in self.orphans.values() for v in volumes]
-            return [{"volid": v} for v in rows if params.get("content") != "import" or ":import/" in v]
+                rows = [r for r in rows if r.get("vmid") in (None, int(params["vmid"]))]
+            return [r for r in rows if params.get("content") != "import" or ":import/" in r["volid"]]
         if method == "DELETE" and path.startswith(CONTENT + "/"):
             volume = urllib.parse.unquote(path.rsplit("/", 1)[1])
             assert volume in self.volumes
