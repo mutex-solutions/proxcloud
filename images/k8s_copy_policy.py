@@ -9,7 +9,7 @@ in that future backend. This module implements NONE of those actions.
 
 Inventory is bounded metadata from a trusted confined producer, NOT guest-provided
 JSON, log contents, hashes/passwords, or an assertion of cleanliness. Parent must
-verify raw framing/EOF/20GiB/source hash/stopped-source binding independently;
+verify raw framing/EOF/allowlisted size/source hash/stopped-source binding independently;
 parent facts below are required inputs, not verification by this module. Input is
 root volume ONLY: old EFI vars and cloud-init media are never candidate artifacts.
 Per-build cloud drop-in review must come independently of inventory, with exact name/hash
@@ -33,7 +33,9 @@ import re
 # and the other module of this pair by images/tests/test_k8s_versions.py.
 K8S_VERSIONS = ("1.35.10", "1.36.6", "1.37.2")
 
-VIRTUAL_BYTES = 20 << 30
+# Accepted raw root sizes: the size image-builder makes now, then the 20 GiB of templates built before 2026-11.
+# Kept equal to vm_sanitize.VIRTUAL_BYTES["kubernetes"] by images/tests/test_template_disk_sizes.py.
+VIRTUAL_BYTES = (8 << 30, 20 << 30)
 REFUSAL = "k8s copy policy refused"
 # GUEST paths/patterns, descriptive only; never expand these on the host.
 COPY_WIPE = ("/home/builder/.ssh", "/root/.ssh", "/etc/ssh/ssh_host_*",
@@ -144,7 +146,8 @@ def validate_inventory(facts, reviewed_dropins=()):
     _keys(p, ("format", "virtual_bytes", "raw_bytes", "source_hash_verified", "source_stopped"))
     _need(type(p["format"]) is str and p["format"] == "raw")
     for key in ("virtual_bytes", "raw_bytes"):
-        _need(type(p[key]) is int and p[key] == VIRTUAL_BYTES)
+        _need(type(p[key]) is int and p[key] in VIRTUAL_BYTES)
+    _need(p["raw_bytes"] == p["virtual_bytes"])
     _need(p["source_hash_verified"] is True and p["source_stopped"] is True)
     o = facts["os"]
     _keys(o, ("distro", "major", "minor"))

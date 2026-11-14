@@ -2,8 +2,10 @@
 
     cd images && PVE_URL=... PVE_TOKEN_ID=... PVE_TOKEN_SECRET=... python3 -m vm_export.copy \
         --node NODE --vmid 105 --name NAME --tags 'a;b' --mount /srv/pc-ci-images \
-        --expected-bytes 21474836480 --out DIR/source.raw --receipt DIR/copy-receipt.json
+        --expected-bytes 8589934592 --out DIR/source.raw --receipt DIR/copy-receipt.json
 
+--expected-bytes is the template disk's exact size: 8589934592 (8 GiB Kubernetes node), 5368709120 (5 GiB
+native OS) or 21474836480 (a 20 GiB template built before 2026-11). The sanitizer refuses any other size.
 Never parses the disk and never runs guest code. The PVE API template guard runs before and after the
 copy and must return the same snapshot (stopped unlocked template, exact name/tags/pool, config digest
 and root disk volume); the copied file is derived from that volume, never given by the caller. File

@@ -49,7 +49,8 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
   residual limits; [export and publication](vm-artifact-publishing.md) describes the
   one workflow run from a lab template to an attested, anonymously verified image.
 
-- [Native template build disk](template-build-disk.md) — fresh-base-only 20 GiB
+- [Template build disk sizes](template-build-disk.md) — 5 GiB native OS and 8 GiB
+  Kubernetes node templates (20 GiB before 2026-11, still accepted), fresh-base-only
   disk floor, exact readback and bounded cleanup after the Ubuntu 26.04 APT-space
   canary failure; guest filesystem and full build acceptance remain separate gates.
 

@@ -1,4 +1,60 @@
-# Native OS template build disk floor
+# Template build disk sizes
+
+## Current sizes (owner decision, 2026-11-14)
+
+| Template | Virtual disk | Single source constant | Before |
+| --- | --- | --- | --- |
+| Native OS (`debian-12`, `debian-13`, `ubuntu-2404`, `ubuntu-2604`) | **5 GiB** | `DEFAULT_BUILD_DISK_GIB` in the [native builder](<../images/build.py>) | 20 GiB |
+| Kubernetes node (`ubuntu-2404`, `ubuntu-2604`) | **8 GiB** | `K8S_BUILD_DISK_GIB` in the [Kubernetes build configuration](<../images/k8s-build-config.py>) | 20 GiB |
+
+Why smaller: a template's disk is the smallest disk anything made from it can have, the size every full clone copies first, and the size the offline sanitizer has to write in full (it zeroes the free space). Measured on the lab on 2026-11-14, the 20 GiB templates held 3.8 to 4.1 GB (Kubernetes node), 1.3 GB (`ubuntu-2604`), 0.9 GB (`ubuntu-2404`) and 0.4 GB (Debian). What a user gets does not change: a server or a node made from a template gets the root disk size that was asked for, and cloud-init grows the root filesystem into it at first boot.
+
+What stays valid:
+
+- **Existing 20 GiB templates** are not rebuilt, resized or withdrawn. The sanitizer and the export tools accept an explicit allowlist per variant: native OS **5 GiB or 20 GiB**, Kubernetes node **8 GiB or 20 GiB** (`VIRTUAL_BYTES` in the [sanitizer](<../images/vm_sanitize.py>)). Any other size is refused; the facts and the manifest carry the size of the disk that was read.
+- **Published 20 GiB images** stay valid in the [artifact contract](<public-vm-artifacts.md>), whose virtual size range is now 5..100 GiB, and importable by every portal version.
+- **Compatibility:** portals up to **v0.5.2** refuse an image whose virtual disk is below 20 GiB: they read its `manifest.json` during discovery, reject it as an invalid artifact contract and never download the disk. An image built with the new sizes needs a portal that has this change. A 20 GiB image is importable by old and new portals.
+
+The native builder still only grows: a vendor disk larger than 5 GiB is left as it is, and the sanitizer then refuses that template because its size is not on the allowlist. Add the size deliberately; do not round or shrink.
+
+### What must fail loudly
+
+5 GiB is 1.5 to 2 GiB more than the vendor disks (Debian 3 GiB, Ubuntu 3.5 GiB) on which the Ubuntu 26.04 dist-upgrade ran out of space (see the history below), and 8 GiB is about twice what a built node holds. Neither was proven by a lab build when this was written, so a full disk must stop the build and never produce a template:
+
+- Native OS: both provisioning scripts run under `sh -eu`; a failing `apt-get` ends the Packer build, which ends `build.py` before the smoke test and before the `pc-public` tag. [`base.sh`](<../images/packer/scripts/base.sh>) prints `df -Pk /` before and after the upgrade into the build log.
+- Native OS and Kubernetes node: the last cleanup step ([`cleanup.sh`](<../images/packer/scripts/cleanup.sh>), [`k8s-build-cleanup.sh`](<../images/k8s-build-cleanup.sh>)) refuses a root filesystem with less than **1 GiB free** (`MIN_FREE_KIB`). A nearly full image is not converted to a template.
+- Kubernetes node: image-builder's own Ansible run (packages, containerd, `kubeadm config images pull`), reboot and goss stay unchanged and each ends the build on an error. The pinned autoinstall partitions the whole disk as one ext4 root with no swap (`size: -1`), so it has no minimum of its own.
+
+[`test_template_disk_sizes.py`](<../images/tests/test_template_disk_sizes.py>) keeps the constants equal across the builders, the sanitizer, the copy policy, the artifact contract and the portal, and pins these checks.
+
+### First lab build of each image type must confirm
+
+Nothing below was run for this change. Until it is, the new sizes are unproven.
+
+Native OS, once per OS slug (`ubuntu-2604` first: it is the one that failed at 3.5 GiB):
+
+1. The base readback before the first boot is exactly `size=5G`.
+2. In the build log, the first `df -Pk /` shows the root filesystem grown to the 5 GiB disk (growpart ran), and the second one shows the room left after the dist-upgrade. Record both numbers.
+3. `apt-get dist-upgrade` and the package install end with exit 0, and the cleanup admission passes (1 GiB free or more).
+4. The build's smoke clone boots and the template is published at `size=5G`.
+5. A server created from it with a larger root disk (for example 10 GiB) boots with the root filesystem grown to that size.
+6. The export path: guarded copy with `--expected-bytes 5368709120`, sanitize, postscan and cold boot accept it, and the facts state `virtual_size_bytes: 5368709120`.
+7. A portal with this change imports the image and its smoke test passes; a portal at v0.5.2 refuses it.
+
+Kubernetes node, once per OS slug and for the newest Kubernetes version:
+
+1. The template's `scsi0` is `size=8G`.
+2. The Ubuntu installer accepts the 8 GiB disk and the image-builder run ends without an out-of-space error in the package install, the containerd install or the kubeadm image pull.
+3. The cleanup's `df -Pk /` line: record the used and free space; the admission passes.
+4. A managed cluster node group with the default 30 GiB root volume joins, and its root filesystem is 30 GiB.
+5. The export path: guarded copy with `--expected-bytes 8589934592`, inventory, review against the committed baseline (which records a 20 GiB template; the size is checked against the allowlist instead), sanitize, postscan and cold boot (import read back as `size=8G`, then grown to 30G).
+6. A portal with this change imports the image and its smoke test passes.
+
+If a build runs out of space, raise the one constant, add the new size to `VIRTUAL_BYTES` (and the copy policy, the stream gate and the tests that pair them), and build again. Do not suppress the error, skip the upgrade or clean caches to make it fit.
+
+## History: the 20 GiB floor (PR #203)
+
+The sections below describe the change that introduced the floor, at its original value of 20 GiB. The mechanism is unchanged; only the number is now 5 GiB (`size=5G`, 5,368,709,120 bytes).
 
 ## Failure and scope
 

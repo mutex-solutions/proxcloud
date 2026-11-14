@@ -59,6 +59,7 @@ class StaticPreparationTests(unittest.TestCase):
                 config.prepare(capi, run, environment(os_slug))
                 variables = json.loads((run / "vars.json").read_text())
                 self.assertEqual(variables["artifact_name"], os_slug + "-kube-v1.35.10")
+                self.assertEqual((config.K8S_BUILD_DISK_GIB, variables["disk_size"]), (8, "8G"))  # It was 20G.
                 self.assertEqual(variables["iso_checksum"], config.K8S_IMAGES[os_slug]["iso_sha256"])
                 self.assertEqual(variables["iso_url"], config.K8S_IMAGES[os_slug]["iso_url"])
                 self.assertIn("  network:", (run / "seed/user-data").read_text())

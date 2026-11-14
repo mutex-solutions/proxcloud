@@ -228,17 +228,28 @@ class SanitizeTests(unittest.TestCase):
                 s.verify(g, "ubuntu")
 
     def test_qcow_metadata_rejected_before_any_check_or_conversion(self):
-        clean = {"format": "qcow2", "virtual-size": 20 << 30, "format-specific": {"data": {"corrupt": False}}}
+        sizes = s.VIRTUAL_BYTES["os"]
+        self.assertEqual(s.VIRTUAL_BYTES, {"os": (5 << 30, 20 << 30), "kubernetes": (8 << 30, 20 << 30)})
+        clean = {"format": "qcow2", "virtual-size": 5 << 30, "format-specific": {"data": {"corrupt": False}}}
+        # Any size off the native OS allowlist refuses, the Kubernetes 8 GiB included.
         bad = [{"backing-filename": "/etc/passwd"}, {"data-file": "/etc/shadow"}, {"encrypted": True},
                {"snapshots": [{"name": "private"}]}, {"format": "raw"}, {"virtual-size": 21 << 30},
+               {"virtual-size": 8 << 30}, {"virtual-size": 10 << 30}, {"virtual-size": (5 << 30) - 512},
+               {"virtual-size": (5 << 30) + 512}, {"virtual-size": 4 << 30}, {"virtual-size": float(5 << 30)},
                {"format-specific": {"data": {"encrypt": {"format": "luks"}}}}]
         for fields in bad:
             with self.subTest(fields=fields), patch.object(s, "command", return_value=__import__("json").dumps(dict(clean, **fields)).encode()) as run:
-                with self.assertRaises(ValueError): s.image_info(s.SOURCE)
+                with self.assertRaises(ValueError): s.image_info(s.SOURCE, sizes)
                 self.assertEqual(run.call_count, 1)
-        with patch.object(s, "command", side_effect=[__import__("json").dumps(clean).encode(), b""]) as run:
-            self.assertEqual(s.image_info(s.SOURCE), clean)
-            self.assertEqual(run.call_args_list[1].args, ("check", "-f", "qcow2", s.SOURCE))
+        for size in sizes:  # The new 5 GiB and the legacy 20 GiB templates.
+            row = dict(clean, **{"virtual-size": size})
+            with self.subTest(size=size), patch.object(s, "command", side_effect=[__import__("json").dumps(row).encode(), b""]) as run:
+                self.assertEqual(s.image_info(s.SOURCE, sizes), row)
+                self.assertEqual(run.call_args_list[1].args, ("check", "-f", "qcow2", s.SOURCE))
+        # A copy of a source must keep exactly that source's size, not merely an allowlisted one.
+        legacy = dict(clean, **{"virtual-size": 20 << 30})
+        with patch.object(s, "command", return_value=__import__("json").dumps(legacy).encode()):
+            with self.assertRaises(ValueError): s.image_info(s.OUTPUT, (5 << 30,))
 
     def test_cli_refuses_unknown_os_variant_and_paths_without_execution(self):
         for args in (["--os", "debian-14"], ["--os", "ubuntu-2604", "--variant", "kubernetes"],
@@ -379,7 +390,8 @@ def k8s_review(**changes):
     return review
 
 
-PARENT = {"format": "raw", "virtual_bytes": s.VIRTUAL_BYTES, "raw_bytes": s.VIRTUAL_BYTES,
+K8S_BYTES, LEGACY_BYTES = s.VIRTUAL_BYTES["kubernetes"]  # 8 GiB now, 20 GiB before 2026-11.
+PARENT = {"format": "raw", "virtual_bytes": K8S_BYTES, "raw_bytes": K8S_BYTES,
           "source_hash_verified": True, "source_stopped": True}
 
 
@@ -1010,8 +1022,9 @@ class KubernetesSanitizeTests(unittest.TestCase):
                            ("source_hash_verified", False)):
             with self.subTest(key=key):
                 self.refuses(FakeK8sGuestFS(), k8s_review(**{key: value}))
-        for key, value in (("format", "qcow2"), ("raw_bytes", s.VIRTUAL_BYTES - 1), ("source_stopped", False)):
-            with self.subTest(parent=key):
+        for key, value in (("format", "qcow2"), ("raw_bytes", K8S_BYTES - 1), ("raw_bytes", LEGACY_BYTES),
+                           ("virtual_bytes", 5 << 30), ("source_stopped", False)):
+            with self.subTest(parent=key, value=value):
                 self.refuses(FakeK8sGuestFS(), parent=dict(PARENT, **{key: value}))
         with self.assertRaises(ValueError): s.sanitize_k8s(FakeK8sGuestFS(), "ubuntu-2404", k8s_review(), dict(PARENT))
 
@@ -1024,14 +1037,17 @@ class KubernetesSanitizeTests(unittest.TestCase):
                     raw.replace(b'"' + b"e" * 64 + b'"', b'"sha256:' + b"e" * 64 + b'"'),
                     raw.replace(b'"source_raw_sha256": "' + b"e" * 64 + b'", ', b'')):
             with self.subTest(bad=bad[:24]), self.assertRaises(ValueError): s.load_review(bad)
-        clean = {"format": "raw", "virtual-size": s.VIRTUAL_BYTES}
-        for fields in ({"format": "qcow2"}, {"virtual-size": s.VIRTUAL_BYTES + 512}, {"backing-filename": "/x"},
+        clean = {"format": "raw", "virtual-size": K8S_BYTES}
+        for fields in ({"format": "qcow2"}, {"virtual-size": K8S_BYTES + 512}, {"virtual-size": 5 << 30},
+                       {"virtual-size": 10 << 30}, {"virtual-size": LEGACY_BYTES + 512}, {"backing-filename": "/x"},
                        {"data-file": "/x"}, {"encrypted": True}):
             with self.subTest(fields=fields), patch.object(s, "command", return_value=json.dumps(dict(clean, **fields)).encode()):
                 with self.assertRaises(ValueError): s.raw_info(s.RAW_SOURCE)
-        with patch.object(s, "command", return_value=json.dumps(clean).encode()) as run:
-            self.assertEqual(s.raw_info(s.RAW_SOURCE), clean)
-            self.assertEqual(run.call_args.args, ("info", "--output=json", "-f", "raw", s.RAW_SOURCE))
+        for size in (K8S_BYTES, LEGACY_BYTES):  # The new 8 GiB and the legacy 20 GiB node templates.
+            row = dict(clean, **{"virtual-size": size})
+            with self.subTest(size=size), patch.object(s, "command", return_value=json.dumps(row).encode()) as run:
+                self.assertEqual(s.raw_info(s.RAW_SOURCE), row)
+                self.assertEqual(run.call_args.args, ("info", "--output=json", "-f", "raw", s.RAW_SOURCE))
 
     def main_fixture(self, raw=b"\0" * 4096, digest=None, size=4096):
         """Synthetic tiny 'raw' file with VIRTUAL_BYTES patched; never a real disk or qemu run."""
@@ -1043,7 +1059,7 @@ class KubernetesSanitizeTests(unittest.TestCase):
         (root / "review.json").write_bytes(json.dumps(review).encode())
         for mocked in (patch.object(s, "RAW_SOURCE", str(root / "source.raw")),
                        patch.object(s, "K8S_REVIEW", str(root / "review.json")),
-                       patch.object(s, "VIRTUAL_BYTES", size), patch.object(s.os, "getuid", return_value=1002),
+                       patch.object(s, "VIRTUAL_BYTES", {"os": (size,), "kubernetes": (size, 2 * size)}), patch.object(s.os, "getuid", return_value=1002),
                        patch.object(s.os, "geteuid", return_value=1002), patch.object(s.os, "umask")):
             mocked.start(); self.addCleanup(mocked.stop)
         return root
@@ -1183,6 +1199,90 @@ class NativeSnapdResetTests(unittest.TestCase):
         g = FakeGuestFS("debian-13")
         s.sanitize(g, "debian-13")
         self.assertFalse([p for p in g.nodes if p.startswith("/var/lib/snapd")])
+
+
+class VirtualSizeTests(unittest.TestCase):
+    """main() end to end with qemu-img, libguestfs and the cleanup itself replaced: the accepted virtual
+    sizes are an allowlist per variant, and the facts carry the size of the disk that was read."""
+
+    def run_main(self, argv, sizes, raw=None, allowlist=None):
+        """sizes: virtual size qemu-img reports per path. Returns (exit code, facts or None, sanitize mock)."""
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        paths = {name: str(root / name) for name in ("source", "work", "output", "facts", "review")}
+        (root / "source").write_bytes(raw if raw is not None else b"qcow2-bytes")
+
+        def command(*args):
+            if args[0] == "info":
+                return json.dumps({"format": args[3], "virtual-size": sizes[args[4]]}).encode()
+            if args[0] == "convert" and args[-1] == paths["output"]:
+                (root / "output").write_bytes(b"sanitized")
+            return b""
+        guestfs = type(sys)("guestfs")
+        guestfs.GuestFS = lambda **kwargs: unittest.mock.MagicMock()
+        if raw is not None:
+            review = dict(k8s_review(source_raw_sha256=hashlib.sha256(raw).hexdigest()),
+                          reviewed_dropins=[list(r) for r in k8s_review()["reviewed_dropins"]])
+            (root / "review").write_bytes(json.dumps(review).encode())
+        out = io.StringIO()
+        with patch.object(s, "SOURCE", paths["source"]), patch.object(s, "RAW_SOURCE", paths["source"]), \
+                patch.object(s, "WORK", paths["work"]), patch.object(s, "OUTPUT", paths["output"]), \
+                patch.object(s, "FACTS", paths["facts"]), patch.object(s, "K8S_REVIEW", paths["review"]), \
+                patch.object(s, "VIRTUAL_BYTES", allowlist or s.VIRTUAL_BYTES), \
+                patch.object(s.os, "getuid", return_value=1002), patch.object(s.os, "geteuid", return_value=1002), \
+                patch.object(s.os, "umask"), patch.object(s.os, "mkdir"), patch.dict(os.environ), \
+                patch.dict(sys.modules, guestfs=guestfs), patch.object(s, "command", side_effect=command), \
+                patch.object(s, "sanitize") as native, patch.object(s, "sanitize_k8s") as k8s, \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = s.main(argv)
+        facts = json.loads((root / "facts").read_text()) if (root / "facts").exists() else None
+        self.assertEqual(facts, json.loads(out.getvalue()) if code == 0 else None)
+        return code, facts, k8s if raw is not None else native, paths
+
+    def test_native_os_accepts_5_and_legacy_20_gib_and_reports_the_actual_size(self):
+        for size in (5 << 30, 20 << 30):
+            with self.subTest(size=size):
+                code, facts, native, _ = self.run_main(["--os", "debian-13"], SizeOf(size))
+                self.assertEqual((code, facts["virtual_size_bytes"], facts["variant"]), (0, size, "os"))
+                native.assert_called_once()
+
+    def test_native_os_refuses_other_sizes_and_an_export_of_another_size(self):
+        for size in (8 << 30, 10 << 30, 4 << 30, (5 << 30) + 512, 100 << 30):
+            with self.subTest(size=size):
+                code, facts, native, _ = self.run_main(["--os", "ubuntu-2604"], SizeOf(size))
+                self.assertEqual((code, facts), (2, None))
+                native.assert_not_called()
+        # A 5 GiB source whose compressed export reports the other allowlisted size is not that source's export.
+        code, facts, _, _ = self.run_main(["--os", "ubuntu-2604"], SizeOf(5 << 30, output=20 << 30))
+        self.assertEqual((code, facts), (2, None))
+
+    def test_kubernetes_accepts_the_new_and_legacy_raw_size_and_reports_the_actual_size(self):
+        """Tiny synthetic raw files: the allowlist is patched to (4096, 8192) for (new, legacy)."""
+        allowlist = {"os": (1,), "kubernetes": (4096, 8192)}
+        for size in allowlist["kubernetes"]:
+            with self.subTest(size=size):
+                code, facts, k8s, _ = self.run_main(["--k8s-os", "ubuntu-2604"], SizeOf(size),
+                                                    raw=b"\0" * size, allowlist=allowlist)
+                self.assertEqual((code, facts["virtual_size_bytes"], facts["variant"]), (0, size, "kubernetes"))
+                parent = k8s.call_args.args[3]
+                self.assertEqual((parent["virtual_bytes"], parent["raw_bytes"]), (size, size))
+        for case, raw, sizes in (("unlisted file size", b"\0" * 12288, SizeOf(12288)),
+                                 ("qemu-img disagrees with the file", b"\0" * 4096, SizeOf(8192)),
+                                 ("work copy of another size", b"\0" * 4096, SizeOf(4096, work=8192)),
+                                 ("export of another size", b"\0" * 4096, SizeOf(4096, output=8192))):
+            with self.subTest(case=case):
+                code, facts, _, _ = self.run_main(["--k8s-os", "ubuntu-2604"], sizes, raw=raw, allowlist=allowlist)
+                self.assertEqual((code, facts), (2, None))
+
+
+class SizeOf(dict):
+    """qemu-img's reported virtual size per path: one size, with an override for the work or output copy."""
+    def __init__(self, size, **override):
+        super().__init__()
+        self.size, self.override = size, override
+
+    def __missing__(self, path):
+        return self.override.get(Path(path).name, self.size)
 
 
 if __name__ == "__main__":

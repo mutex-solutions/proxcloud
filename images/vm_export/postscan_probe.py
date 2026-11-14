@@ -103,7 +103,7 @@ def main(argv):
     import vm_sanitize as vs
     import guestfs
     review = vs.load_review(pathlib.Path("/input/k8s-review.json").read_bytes()) if variant == "kubernetes" else None
-    vs.image_info(SOURCE)  # Read-only qemu-img info/check, no repair.
+    vs.image_info(SOURCE, vs.VIRTUAL_BYTES[variant])  # Read-only qemu-img info/check, no repair.
     g = guestfs.GuestFS(python_return_dict=True)
     try:
         g.set_backend("direct")

@@ -247,6 +247,18 @@ lambda i: i["HostConfig"].update(NetworkMode="bridge"),
             with self.assertRaises(ValueError):
                 stream_sanitized.parse(argv)
 
+    def test_stream_gate_accepts_only_the_variants_allowlisted_virtual_sizes(self):
+        k8s = {"kind": "OfflineSanitizationFacts", "os": "ubuntu-2604", "variant": "kubernetes",
+               "kubernetes_version": "1.37.2", "disk_sha256": "a" * 64, "disk_bytes": 100,
+               "checks": {k: True for k in stream_sanitized.CHECKS}}
+        native = {k: v for k, v in dict(k8s, os="debian-13", variant="os").items() if k != "kubernetes_version"}
+        cases = ((k8s, "ubuntu-2604", "1.37.2", (8 << 30, 20 << 30), (5 << 30, 10 << 30, (8 << 30) + 512, float(8 << 30))),
+                 (native, "debian-13", None, (5 << 30, 20 << 30), (8 << 30, 4 << 30, (5 << 30) - 1, "5368709120")))
+        for facts, selected, version, good, bad in cases:
+            for size, accepted in [(size, True) for size in good] + [(size, False) for size in bad]:
+                with self.subTest(variant=facts["variant"], size=size):
+                    self.assertIs(stream_sanitized.valid(dict(facts, virtual_size_bytes=size), selected, version), accepted)
+
 
 def reviewed_inventory(version="1.37.2", cni="1.9.1-1.1"):
     inv = copy_module.deepcopy(BASELINE["inventory"])
@@ -305,6 +317,33 @@ class ReviewTests(unittest.TestCase):
         with self.assertRaises(review.ReviewRefused) as caught:
             review.derive(reviewed_inventory(), broken, "1.37.2", SOURCE_SHA)
         self.assertEqual(caught.exception.fields, ["review.reviewed_dropins"])
+
+    def test_source_disk_size_is_allowlisted_not_compared_with_the_baselines_20_gib(self):
+        """The committed baseline records its own 20 GiB template; an 8 GiB template derives the same review."""
+        self.assertEqual(BASELINE["inventory"]["facts"]["parent"]["virtual_bytes"], 20 << 30)
+        legacy, _ = review.derive(reviewed_inventory(), BASELINE, "1.37.2", SOURCE_SHA)
+        inv = reviewed_inventory()
+        inv["facts"]["parent"].update(virtual_bytes=8 << 30, raw_bytes=8 << 30)
+        small, _ = review.derive(inv, BASELINE, "1.37.2", SOURCE_SHA)
+        self.assertEqual(small, legacy)
+        for virtual, raw in ((5 << 30, 5 << 30), (10 << 30, 10 << 30), (8 << 30, 20 << 30), (20 << 30, 8 << 30),
+                             (float(8 << 30), float(8 << 30)), ("8589934592", "8589934592")):
+            inv = reviewed_inventory()
+            inv["facts"]["parent"].update(virtual_bytes=virtual, raw_bytes=raw)
+            with self.subTest(virtual=virtual, raw=raw), self.assertRaises(review.ReviewRefused) as caught:
+                review.derive(inv, BASELINE, "1.37.2", SOURCE_SHA)
+            self.assertEqual(caught.exception.fields, ["facts.parent.virtual_bytes"])
+        for mutate in (lambda i: i["facts"]["parent"].pop("raw_bytes"), lambda i: i["facts"].pop("parent")):
+            inv = reviewed_inventory()
+            mutate(inv)
+            with self.assertRaises(review.ReviewRefused):
+                review.derive(inv, BASELINE, "1.37.2", SOURCE_SHA)
+        # Every other parent fact still has to equal the baseline.
+        inv = reviewed_inventory()
+        inv["facts"]["parent"].update(virtual_bytes=8 << 30, raw_bytes=8 << 30, source_stopped=False)
+        with self.assertRaises(review.ReviewRefused) as caught:
+            review.derive(inv, BASELINE, "1.37.2", SOURCE_SHA)
+        self.assertEqual(caught.exception.fields, ["facts.parent.source_stopped"])
 
     def test_project_drops_only_version_fields(self):
         inv = reviewed_inventory()
@@ -825,6 +864,24 @@ class EvidenceTests(unittest.TestCase):
                     dict(run, pins={"/input/source.raw": SOURCE_SHA, "/input/source.qcow2": SOURCE_SHA})):
             with self.assertRaises(ValueError):
                 bundle.sealed_facts(bad, SOURCE_SHA)
+
+    def test_bundle_manifest_carries_the_sealed_facts_actual_virtual_size(self):
+        """5 GiB native OS, 8 GiB Kubernetes node and the legacy 20 GiB reach the manifest unchanged."""
+        disk = b"QFI\xfb" + bytes(100)
+        for version, virtual in ((None, 5 << 30), (None, 20 << 30), ("1.37.2", 8 << 30), ("1.37.2", 20 << 30)):
+            with self.subTest(version=version, virtual=virtual), tempfile.TemporaryDirectory() as root:
+                q = bundle.request("ubuntu-2604", "a" * 40, "b" * 64, "20261114000000", kubernetes_version=version)
+                facts = {"kind": "OfflineSanitizationFacts", "os": "ubuntu-2604", "variant": q["variant"],
+                         "disk_sha256": hashlib.sha256(disk).hexdigest(), "disk_bytes": len(disk),
+                         "virtual_size_bytes": virtual, "checks": {k: True for k in stream_sanitized.CHECKS}}
+                if version:
+                    facts["kubernetes_version"] = version
+                self.assertIs(stream_sanitized.valid(facts, "ubuntu-2604", version), True)
+                (Path(root) / "disk").write_bytes(disk)
+                (Path(root) / "staging").mkdir()
+                m = bundle.stage(Path(root) / "staging", q, bundle.receipt(q, facts, 1, 2, SOURCE_SHA), Path(root) / "disk")
+                self.assertEqual((m["disk"]["virtual_size_bytes"], m["clean_export_receipt"]["virtual_size_bytes"]),
+                                 (virtual, virtual))
 
     def test_pinned_input_refuses_symlinked_parents(self):
         with tempfile.TemporaryDirectory() as root:

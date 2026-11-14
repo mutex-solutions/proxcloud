@@ -25,7 +25,10 @@ OS = {"ubuntu-2404": ("ubuntu", 24, 4, "ubuntu"),
       "ubuntu-2604": ("ubuntu", 26, 4, "ubuntu"),
       "debian-12": ("debian", 12, 0, "debian"),
       "debian-13": ("debian", 13, 0, "debian")}
-VIRTUAL_BYTES = 20 << 30  # Deliberately narrower than the artifact contract.
+# Accepted template virtual disk sizes per variant: an explicit allowlist, deliberately narrower than the artifact
+# contract. First the size the builders make now (images/build.py DEFAULT_BUILD_DISK_GIB, images/k8s-build-config.py
+# K8S_BUILD_DISK_GIB), then the 20 GiB of templates built before 2026-11. The facts carry the ACTUAL size.
+VIRTUAL_BYTES = {"os": (5 << 30, 20 << 30), "kubernetes": (8 << 30, 20 << 30)}
 # A native template disk is a QCOW2 FILE: with preallocated metadata it is larger than its virtual size.
 NATIVE_SOURCE_MAX_BYTES = 24 << 30
 MAX_BYTES = 8 << 30
@@ -168,10 +171,11 @@ def inspect(value):
             inspect(item)
 
 
-def image_info(path):
+def image_info(path, sizes):
+    """sizes: the accepted virtual sizes (a VIRTUAL_BYTES row, or exactly the source's size for its copies)."""
     info = json.loads(command("info", "--output=json", "-f", "qcow2", path))
     require(type(info) is dict and info.get("format") == "qcow2")
-    require(type(info.get("virtual-size")) is int and info["virtual-size"] == VIRTUAL_BYTES)
+    require(type(info.get("virtual-size")) is int and info["virtual-size"] in sizes)
     inspect(info)  # Before qemu-img check/convert; never follow a backing or external file.
     command("check", "-f", "qcow2", path)
     return info
@@ -181,7 +185,7 @@ def raw_info(path):
     """variant=kubernetes RAW root only, inside the capsule. qemu-img cannot check raw."""
     info = json.loads(command("info", "--output=json", "-f", "raw", path))
     require(type(info) is dict and info.get("format") == "raw")
-    require(type(info.get("virtual-size")) is int and info["virtual-size"] == VIRTUAL_BYTES)
+    require(type(info.get("virtual-size")) is int and info["virtual-size"] in VIRTUAL_BYTES["kubernetes"])
     inspect(info)  # Before conversion; an explicit -f raw never probes guest bytes as a format.
     return info
 
@@ -443,11 +447,13 @@ def open_private(path, limit):
     return handle, info
 
 
-def raw_digest(path, expected_size):
-    """Stream-hash the exact raw root INSIDE the capsule; bounded, stable-file checked."""
-    handle, before = open_private(path, expected_size)
+def raw_digest(path, sizes):
+    """Stream-hash the exact raw root INSIDE the capsule; bounded, stable-file checked. The file must have
+    one of the accepted sizes; its actual size is in the returned identity."""
+    handle, before = open_private(path, max(sizes))
     with handle:
-        require(before.st_size == expected_size)
+        expected_size = before.st_size
+        require(expected_size in sizes)
         size, digest = 0, hashlib.sha256()
         for block in iter(lambda: handle.read(1 << 20), b""):
             size += len(block)
@@ -906,17 +912,19 @@ def main(argv=None):
             with handle:
                 review = load_review(handle.read(65537))
             require(review["kubernetes_version"] in K8S_VERSIONS)
-            # Exactly the 20 GiB raw root; EFI vars and cloud-init media are never inputs.
+            # Exactly the raw root, at an allowlisted size; EFI vars and cloud-init media are never inputs.
             # The digest is computed HERE, streamed and bounded, and must equal the parent's
             # independently recorded source hash; a mismatch refuses before any parser runs.
-            digest, hashed = raw_digest(RAW_SOURCE, VIRTUAL_BYTES)
+            digest, hashed = raw_digest(RAW_SOURCE, VIRTUAL_BYTES["kubernetes"])
             require(digest == review["source_raw_sha256"])
+            virtual = hashed[2]  # The hashed file's own size: every later check and the facts use it.
             os.mkdir("/scratch/work", 0o700)
             os.mkdir("/scratch/export", 0o700)
             info = raw_info(RAW_SOURCE)
+            require(info["virtual-size"] == virtual)
             # Confined conversion to a standalone QCOW2 work copy; the raw input stays read-only.
             command("convert", "-f", "raw", "-O", "qcow2", "-o", "compat=1.1,lazy_refcounts=off", RAW_SOURCE, WORK)
-            image_info(WORK)
+            image_info(WORK, (virtual,))
             raw_after = os.lstat(RAW_SOURCE)
             # The path qemu-img reopened must still be the exact hashed file (no swap or rewrite).
             require(stat.S_ISREG(raw_after.st_mode) and identity(raw_after) == hashed)
@@ -929,7 +937,7 @@ def main(argv=None):
             require(stat.S_ISREG(source.st_mode) and source.st_nlink == 1 and 0 < source.st_size <= NATIVE_SOURCE_MAX_BYTES)
             os.mkdir("/scratch/work", 0o700)
             os.mkdir("/scratch/export", 0o700)
-            image_info(SOURCE)
+            virtual = image_info(SOURCE, VIRTUAL_BYTES["os"])["virtual-size"]
             command("convert", "-f", "qcow2", "-O", "qcow2", "-o", "compat=1.1,lazy_refcounts=off", SOURCE, WORK)
         os.environ.clear()
         os.environ.update(ENV)
@@ -949,7 +957,7 @@ def main(argv=None):
         finally:
             g.close()
         command("convert", "-f", "qcow2", "-O", "qcow2", "-c", "-o", "compat=1.1,lazy_refcounts=off", WORK, OUTPUT)
-        image_info(OUTPUT)
+        image_info(OUTPUT, (virtual,))  # The export keeps exactly its source's virtual size.
         size, digest = 0, hashlib.sha256()
         with open(OUTPUT, "rb") as disk:
             for block in iter(lambda: disk.read(1 << 20), b""):
@@ -958,7 +966,7 @@ def main(argv=None):
                 digest.update(block)
         extra = dict(variant="kubernetes", kubernetes_version=review["kubernetes_version"]) if kubernetes else dict(variant="os")
         facts = dict(kind="OfflineSanitizationFacts", os=selected, **extra, disk_sha256=digest.hexdigest(),
-                     disk_bytes=size, virtual_size_bytes=VIRTUAL_BYTES, checks={key: True for key in
+                     disk_bytes=size, virtual_size_bytes=virtual, checks={key: True for key in
                      ("cleaned_copy_only", "no_backing_file", "qemu_img_check", "offline_sanitization",
                       "zero_free_space", "no_build_credentials_or_lab_network")})
         require(0 < size < MAX_BYTES)

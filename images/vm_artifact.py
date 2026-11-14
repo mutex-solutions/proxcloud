@@ -12,6 +12,10 @@ import sys
 
 ARTIFACT_TYPE = "application/vnd.proxcloud.vm-template.v1+json"
 MAX_DISK_BYTES = 8 * 1024 ** 3  # Strictly below this, not GHCR's 10 GB ceiling.
+# Virtual disk bounds, equal to the portal's (internal/templateupdates/vmartifact.go). The minimum was 20 GiB
+# until 2026-11: portals up to v0.5.2 refuse a smaller image, 20 GiB images stay valid everywhere.
+MIN_VIRTUAL_BYTES = 5 * 1024 ** 3
+MAX_VIRTUAL_BYTES = 100 * 1024 ** 3
 META = {"kind", "os", "arch", "variant", "source_commit", "upstream_checksum", "build_version"}
 OPTIONAL = {"kubernetes_version", "provenance"}
 CHECKS = {"cleaned_copy_only", "no_backing_file", "qemu_img_check", "offline_sanitization",
@@ -116,7 +120,7 @@ def validate(m):
     keys(r, RECEIPT)
     require(d["filename"] == "disk.qcow2" and d["format"] == "qcow2" and match(r"[0-9a-f]{64}", d["sha256"]))
     require(type(d["bytes"]) is int and 0 < d["bytes"] < MAX_DISK_BYTES)
-    require(type(d["virtual_size_bytes"]) is int and 20 * 1024 ** 3 <= d["virtual_size_bytes"] <= 100 * 1024 ** 3)
+    require(type(d["virtual_size_bytes"]) is int and MIN_VIRTUAL_BYTES <= d["virtual_size_bytes"] <= MAX_VIRTUAL_BYTES)
     require(r["kind"] == "CleanExportReceipt" and match(r"sha256:[0-9a-f]{64}", r["source_identity"]))
     require(match(r"https://github\.com/mutex-solutions/proxcloud/actions/runs/[1-9][0-9]{0,19}", r["run_ref"]))
     require(r["source_commit"] == q["source_commit"] and r["request_sha256"] == sha(encode(q)))
