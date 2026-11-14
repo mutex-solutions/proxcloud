@@ -1,0 +1,53 @@
+# Tool image for the VM export capsules (images/vm_export/capsule.py): qemu-img, python3 with the
+# libguestfs binding, and the kernel + supermin inputs of the libguestfs appliance. Built and
+# published only by .github/workflows/vm-export-tools.yml; never built or loaded by hand.
+#
+# debian:bookworm-slim (Debian 12.15), linux/amd64 index digest.
+FROM debian@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
+
+# Every package comes from one snapshot.debian.org timestamp, so a rebuild resolves the same versions.
+# To take security updates: move the timestamp (and the base digest), nothing else.
+# Plain http is deliberate: the slim base has no CA bundle, and apt verifies the archive signature with
+# the keyring of the digest-pinned base. check-valid-until=no because a snapshot's Release file expires.
+# Neither stops a replay of an older signed index, so the workflow compares the installed package set
+# with packages.lock: moving the snapshot means regenerating that file in the same pull request.
+#
+# Installed: exactly what a capsule executes. qemu-utils is /usr/bin/qemu-img; python3-guestfs brings
+# libguestfs0, which depends on the appliance packages (e2fsprogs, lvm2, ...) and on qemu-system-x86;
+# supermin assembles the appliance from them and from the kernel + modules of linux-image-amd64.
+# Not requested: sudo (a capsule runs with --cap-drop=ALL and no-new-privileges, so it could never
+# work), libguestfs-tools (guestfish and the virt-* CLIs: the capsules only use the Python binding),
+# ca-certificates (a capsule has no network; it still arrives as a dependency).
+RUN set -eux; \
+    snapshot=20261114T000000Z; \
+    archive=http://snapshot.debian.org/archive; \
+    options='[signed-by=/usr/share/keyrings/debian-archive-keyring.gpg check-valid-until=no]'; \
+    rm /etc/apt/sources.list.d/debian.sources; \
+    { echo "deb $options $archive/debian/$snapshot bookworm main"; \
+      echo "deb $options $archive/debian/$snapshot bookworm-updates main"; \
+      echo "deb $options $archive/debian-security/$snapshot bookworm-security main"; \
+    } > /etc/apt/sources.list; \
+    export DEBIAN_FRONTEND=noninteractive; \
+    apt-get -o Acquire::Retries=5 update; \
+    apt-get -o Acquire::Retries=5 upgrade -y; \
+    apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+        qemu-utils python3 python3-guestfs supermin linux-image-amd64 e2fsprogs; \
+    rm -rf /var/lib/apt/lists/*; \
+    # supermin runs as the capsule user and must read the kernel and its modules.
+    chmod -R a+rX /boot /lib/modules; \
+    # No file keeps a privilege of its own (setuid ntfs-3g, mount, su, ...; one file capability from
+    # gstreamer): a capsule cannot use them, and neither can a container started by hand. smoke.sh checks.
+    find / -xdev -type f -perm /6000 -exec chmod a-s {} +; \
+    setcap -r /usr/lib/x86_64-linux-gnu/gstreamer1.0/gstreamer-1.0/gst-ptp-helper
+
+# No account is created: the image is usable as any non-root numeric uid (smoke.sh runs it as one
+# without a passwd entry) and takes HOME and TMPDIR from its environment. capsule.py currently runs it
+# as 1000:1000; the defaults below match it.
+USER 1000:1000
+ENV LIBGUESTFS_BACKEND=direct LIBGUESTFS_BACKEND_SETTINGS=force_tcg LIBGUESTFS_CACHEDIR=/scratch/cache \
+    LIBGUESTFS_TMPDIR=/scratch/tmp TMPDIR=/scratch/tmp HOME=/scratch/home
+
+ARG REVISION=unknown
+LABEL org.opencontainers.image.source="https://github.com/mutex-solutions/proxcloud" \
+      org.opencontainers.image.description="ProxCloud VM export tools: qemu-img, python3-guestfs and the libguestfs TCG appliance inputs" \
+      org.opencontainers.image.revision="$REVISION"

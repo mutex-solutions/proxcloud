@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **VM export tool image built by CI** (`images/vm_export/tools/`, `vm-export-tools.yml`): the image the
+  export containers run from (`qemu-img`, Python with libguestfs, the appliance kernel) was built on a
+  workstation and loaded onto the runner by hand. It now has a recipe in the repository: Debian 12 pinned
+  by digest, every package from one `snapshot.debian.org` timestamp and checked against a committed
+  package list, no `sudo`, no account and no setuid file, usable as any non-root uid. The workflow builds it on a hosted runner, runs a smoke test without network as an
+  arbitrary uid, scans it with the existing Trivy gate and, on `main`, pushes it to
+  `ghcr.io/mutex-solutions/proxcloud-vm-export-tools` under one tag that the workflow never replaces. The
+  digest is recorded in the job summary and as an artifact. `capsule.py` still pins the hand-loaded image;
+  a follow-up change pins the published one after the first build.
+
 - **VM image export steps as repository code** (`images/vm_export/`): the copy, inventory, review,
   sanitize, postscan and bundle steps that prepared the published VM images were private operator
   scripts. They are now reviewed modules with one evidence chain: a guarded read-only copy receipt, an

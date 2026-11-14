@@ -4,6 +4,22 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-14: VM export tool image built by CI
+
+**What changed:** a new workflow, `vm-export-tools.yml`, builds the image the VM export
+containers run from (`images/vm_export/tools/Containerfile`: `qemu-img`, Python with
+libguestfs, the appliance kernel) on a hosted runner, smoke-tests it without network as an
+arbitrary uid, scans it with the existing Trivy gate and pushes it to
+`ghcr.io/mutex-solutions/proxcloud-vm-export-tools` under one tag it never replaces. The export
+pipeline is unchanged: `capsule.py` still pins the image ID it starts containers from.
+
+**Why:** the tool image was built on a workstation and loaded onto the runner by hand.
+Every public artifact, and every tool that produces one, has to come from the repository
+through GitHub Actions. A reviewed follow-up change pins the published image in
+`capsule.py`; until then the hand-loaded image stays, as a transitional state.
+
+**Views updated:** [C2c build and delivery](c2-containers.md#c2c-build-and-delivery).
+
 ## 2026-11-14: One-host Docker Compose install of the portal
 
 **What changed:** a third delivery path next to the Helm chart and the Ansible installer:
