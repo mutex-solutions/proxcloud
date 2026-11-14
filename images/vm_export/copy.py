@@ -1,20 +1,24 @@
 """Read-only private copy of a stopped template's disk from the read-only NFS mount of its storage.
 
-    cd images && python3 -m vm_export.copy --source /srv/pc-ci-images/images/<vmid>/base-<vmid>-disk-N.raw \
+    cd images && PVE_URL=... PVE_TOKEN_ID=... PVE_TOKEN_SECRET=... python3 -m vm_export.copy \
+        --node NODE --vmid 105 --name NAME --tags 'a;b' --mount /srv/pc-ci-images \
         --expected-bytes 21474836480 --out DIR/source.raw --receipt DIR/copy-receipt.json
 
-Never parses the disk and never runs guest code. Guards: S_ISREG, nlink 1, exact size, file identity
-(dev/ino/size/mtime/ctime) unchanged before == after, streamed sha256 of the copy equal to a second
-full re-read of the source, sparse local write, output mode 0400. The PVE API template guard
-(template_guard) takes an injected client; the workflow calls it before and after the copy.
+Never parses the disk and never runs guest code. The PVE API template guard runs before and after the
+copy and must return the same snapshot (stopped unlocked template, exact name/tags/pool, config digest
+and root disk volume); the copied file is derived from that volume, never given by the caller. File
+guards: S_ISREG, nlink 1, exact size, identity (dev/ino/size/mtime/ctime) unchanged before == after,
+streamed sha256 of the copy equal to a second full re-read of the source, sparse local write, mode 0400.
 """
 import argparse
 import hashlib
 import json
 import os
+from pathlib import Path
 import re
 import stat
 import sys
+import types
 
 BLOCK = 1 << 20
 ZERO = bytes(BLOCK)
@@ -88,12 +92,14 @@ def copy(source, expected_bytes, out):
 
 # --- PVE API template guard (client injected; the workflow supplies the real token client) ---
 POOL = "pc-templates"
+STORAGE = "pc-ci-images"
 
 
 def template_guard(client, node, vmid, name, tags):
     """Snapshot that must be identical before and after the copy. client.get(path) returns the decoded
     `data` of a GET /api2/json<path>. Refuses unless the VM is a stopped, unlocked template in pool
-    pc-templates with the exact name/tags and no running task for the vmid."""
+    pc-templates with the exact name/tags, no running task for the vmid and a root disk (scsi0, else
+    virtio0) that is its own base volume on pc-ci-images."""
     need(re.fullmatch(r"[a-z0-9-]{1,63}", str(node)) is not None and type(vmid) is int and vmid > 0, "node/vmid")
     config = client.get("/nodes/%s/qemu/%d/config" % (node, vmid))
     status = client.get("/nodes/%s/qemu/%d/status/current" % (node, vmid))
@@ -106,24 +112,55 @@ def template_guard(client, node, vmid, name, tags):
          "name/tags")
     need(len(pools) == 1 and pools[0].get("pool") == POOL and pools[0].get("template") == 1, "pool")
     need(re.fullmatch(r"[0-9a-f]{40}", str(config.get("digest"))) is not None, "config digest")
-    return {"node": node, "vmid": vmid, "name": name, "digest": config["digest"]}
+    volume = str(config.get("scsi0") or config.get("virtio0") or "").split(",")[0]
+    need(re.fullmatch(r"%s:%d/base-%d-disk-[0-9]{1,2}\.(?:raw|qcow2)" % (STORAGE, vmid, vmid), volume) is not None,
+         "root disk volume")
+    return {"node": node, "vmid": vmid, "name": name, "digest": config["digest"], "volume": volume}
+
+
+def template_source(snapshot, mount):
+    """The file of the guarded root volume under the read-only storage mount: <mount>/images/<vmid>/<file>."""
+    need(os.path.isabs(mount), "mount must be absolute")
+    return str(Path(mount) / "images" / str(snapshot["vmid"]) / snapshot["volume"].split("/", 1)[1])
+
+
+def guarded_copy(client, node, vmid, name, tags, mount, expected_bytes, out):
+    """Template guard before, copy of the guarded volume, template guard after (must be equal)."""
+    before = template_guard(client, node, vmid, name, tags)
+    source = template_source(before, mount)
+    receipt = copy(source, expected_bytes, out)
+    try:
+        need(template_guard(client, node, vmid, name, tags) == before, "template changed during the copy")
+    except BaseException:
+        os.unlink(out)
+        raise
+    return dict(receipt, source=source, template=before, template_unchanged_stopped=True)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--source", required=True)
+    parser.add_argument("--node", required=True)
+    parser.add_argument("--vmid", required=True, type=int)
+    parser.add_argument("--name", required=True)
+    parser.add_argument("--tags", required=True, help="';'-separated exact tag set")
+    parser.add_argument("--mount", default="/srv/" + STORAGE)
     parser.add_argument("--expected-bytes", required=True, type=int)
     parser.add_argument("--out", required=True)
     parser.add_argument("--receipt", required=True)
     a = parser.parse_args(argv)
     try:
-        receipt = copy(a.source, a.expected_bytes, a.out)
+        need(not os.path.lexists(a.receipt), "receipt already exists")  # Never leave a copy without its receipt.
+        from build import PVE  # Token client from PVE_URL/PVE_TOKEN_ID/PVE_TOKEN_SECRET.
+        pve = PVE()
+        client = types.SimpleNamespace(get=lambda path: pve.call("GET", path))
+        receipt = guarded_copy(client, a.node, a.vmid, a.name, list(filter(None, a.tags.split(";"))), a.mount,
+                               a.expected_bytes, a.out)
         with open(a.receipt, "x", encoding="ascii") as f:
             json.dump(receipt, f, indent=2, sort_keys=True)
             f.write("\n")
         print(json.dumps({"raw_sha256": receipt["raw_sha256"], "raw_bytes": receipt["raw_bytes"]}))
         return 0
-    except (CopyRefused, OSError) as exc:
+    except (CopyRefused, OSError, KeyError) as exc:
         print("copy refused: " + (str(exc) if isinstance(exc, CopyRefused) else type(exc).__name__), file=sys.stderr)
         return 2
 

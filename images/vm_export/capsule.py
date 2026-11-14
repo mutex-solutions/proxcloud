@@ -25,6 +25,7 @@ ENV = ("PATH=/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/scratch/home", "TMPDIR=/scra
        "LIBGUESTFS_BACKEND=direct", "LIBGUESTFS_BACKEND_SETTINGS=force_tcg",
        "LIBGUESTFS_CACHEDIR=/scratch/cache", "LIBGUESTFS_TMPDIR=/scratch/tmp")
 TMP_OPTS = ("rw", "exec", "nosuid", "nodev", "mode=0700", "uid=1000", "gid=1000")
+SCRATCH_FLOOR = 1 << 30  # Stop the capsule before its scratch writes can fill the runner's filesystem.
 
 
 class CapsuleError(RuntimeError):
@@ -54,12 +55,38 @@ def sha256_file(path):
 
 
 def pinned_input(path):
-    """A bind source must be an absolute, regular, single-link, non-symlink file; returns its sha256."""
+    """A bind source must be an absolute, regular, single-link file with no symlink anywhere in its path
+    (docker reports and follows the unresolved source); returns its sha256."""
     path = Path(path)
-    need(path.is_absolute() and ".." not in path.parts, "input path refused")
+    need(path.is_absolute() and ".." not in path.parts and os.path.realpath(path) == str(path), "input path refused")
     st = path.lstat()
     need(stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and "docker.sock" not in path.name, "input file refused")
     return sha256_file(path)
+
+
+def pin_all(binds):
+    return {guest: pinned_input(host) for host, guest in binds.items()}
+
+
+def load_receipt(path):
+    """The copy receipt (vm_export.copy) of a guarded template disk copy."""
+    try:
+        receipt = json.loads(Path(path).read_bytes().decode("ascii"))
+    except (ValueError, UnicodeError):
+        receipt = None
+    need(type(receipt) is dict and receipt.get("kind") == "TemplateDiskCopy"
+         and receipt.get("template_unchanged_stopped") is True and type(receipt.get("template")) is dict
+         and type(receipt.get("raw_bytes")) is int and re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("raw_sha256"))),
+         "copy receipt refused")
+    return receipt
+
+
+def bound_to_receipt(receipt_path, source, pin):
+    """The bound source is the very file the guarded copy wrote: same sha256 and size."""
+    receipt = load_receipt(receipt_path)
+    need(pin == receipt["raw_sha256"] and os.lstat(source).st_size == receipt["raw_bytes"],
+         "source does not match the copy receipt")
+    return receipt
 
 
 def spec(check, binds, scratch, argv, memory="8g", cpus=2, pids=256, wall=2400, cpu_seconds=2400,
@@ -72,6 +99,8 @@ def spec(check, binds, scratch, argv, memory="8g", cpus=2, pids=256, wall=2400, 
     need(len(set(binds.values())) == len(binds), "duplicate guest path")
     scratch = Path(scratch)
     need(scratch.is_absolute() and ".." not in scratch.parts, "invalid scratch")
+    # A ',' or '=' in a host path would inject --mount options.
+    need(not any(c in p for p in (*binds, str(scratch)) for c in ",=\n"), "invalid mount path")
     need(type(argv) is list and argv and all(type(a) is str and "\x00" not in a for a in argv), "invalid argv")
     for value in (cpus, pids, wall, cpu_seconds, fsize):
         need(type(value) is int and value > 0, "invalid limit")
@@ -95,23 +124,28 @@ def create_argv(s, name):
     return argv + [s["image"], "-i", *ENV, *s["argv"]]
 
 
-def check_confinement(info, s):
-    """Pre-start proof from `docker inspect`: anything not exactly declared refuses the run."""
+def check_confinement(info, s, image_env):
+    """Pre-start proof from `docker inspect`: anything not exactly declared refuses the run.
+    image_env is the pinned image's own Config.Env (the container may add nothing to it)."""
     hc = info["HostConfig"]
     need(info["Image"] == s["image"] and info["Config"]["User"] == USER, "image or user")
+    need(info["Config"]["Env"] == image_env, "environment")
     need(info["Config"]["Entrypoint"] == ["/usr/bin/env"] and info["Config"]["Cmd"] == ["-i", *ENV, *s["argv"]],
          "command")
     need(hc["NetworkMode"] == "none" and hc["ReadonlyRootfs"] is True and not hc["Privileged"], "network or rootfs")
     need(hc["LogConfig"]["Type"] == "none" and hc["PidMode"] == "" and hc["IpcMode"] == "private", "namespaces")
     need(not hc.get("DeviceRequests") and not hc.get("Devices") and not hc.get("CapAdd"), "devices or caps")
-    need(set(hc.get("CapDrop") or ()) == {"ALL"} and "no-new-privileges" in (hc.get("SecurityOpt") or ()), "caps")
+    need(hc.get("CapDrop") == ["ALL"] and hc.get("SecurityOpt") == ["no-new-privileges"], "caps")
+    need(hc.get("Runtime") == "runc" and hc.get("CgroupnsMode") == "private" and hc.get("UTSMode") == ""
+         and hc.get("UsernsMode") == "" and not hc.get("GroupAdd") and not hc.get("Sysctls") and not hc.get("Init")
+         and hc.get("MaskedPaths") and hc.get("ReadonlyPaths"), "runtime or namespaces")
     memory = size_bytes(s["memory"])
     need(hc["Memory"] == memory and hc["MemorySwap"] == memory and hc["NanoCpus"] == s["cpus"] * 10 ** 9, "memory")
     need(hc["PidsLimit"] == s["pids"] and hc["ShmSize"] == 128 << 20 and not hc.get("PortBindings"), "pids or ports")
     need(not hc.get("Binds") and not hc.get("VolumesFrom") and not hc.get("Links"), "extra mounts")
     need(set(hc.get("Tmpfs") or {}) == {"/tmp"}, "tmpfs")
     opts = hc["Tmpfs"]["/tmp"].split(",")
-    need(all(item in opts for item in TMP_OPTS + ("size=" + s["tmp"],)), "tmpfs options")
+    need(sorted(opts) == sorted(TMP_OPTS + ("size=" + s["tmp"],)), "tmpfs options")
     expected = {(h, g, False) for h, g in s["binds"].items()} | {(s["scratch"], "/scratch", True)}
     mounts = {(m["Source"], m["Destination"], m["RW"]) for m in info["Mounts"]}
     need(len(info["Mounts"]) == len(expected) and mounts == expected, "mounts")
@@ -130,37 +164,73 @@ def _inspect(cid):
     return json.loads(_command(["docker", "inspect", cid], capture_output=True, text=True, check=True).stdout)[0]
 
 
+def fs_type(path):
+    """Filesystem type of the mount holding path, from /proc/self/mountinfo (last, longest match wins)."""
+    path, best, kind = os.path.realpath(path), "", None
+    for line in Path("/proc/self/mountinfo").read_text().splitlines():
+        left, _, right = line.partition(" - ")
+        mount = left.split()[4].encode().decode("unicode_escape")  # Octal escapes (a space is "\040").
+        if (path == mount or path.startswith(mount.rstrip("/") + "/")) and len(mount) >= len(best):
+            best, kind = mount, right.split()[0]
+    return kind
+
+
 def prepare_scratch(base, check, min_free):
     """Fresh private disk-backed scratch directory under base; the capsule user (uid 1000) owns it."""
+    need(CHECK_ID.fullmatch(check) is not None, "invalid check id")  # Before any path is built from it.
     base = Path(base)
     need(base.is_absolute() and base.is_dir() and not base.is_symlink(), "scratch base refused")
+    need(fs_type(base) not in (None, "tmpfs", "ramfs"), "scratch must be disk-backed, not tmpfs")
     need(os.getuid() == 1000, "scratch owner must be the capsule uid 1000")
     vfs = os.statvfs(base)
     need(vfs.f_bavail * vfs.f_frsize >= min_free, "insufficient scratch space")
     path = base / (check + "-scratch")
+    need(path.parent == base, "scratch path")
     os.mkdir(path, 0o700)  # Must not exist yet.
     return path
 
 
 def remove_scratch(path):
-    """After the exact stop proof only: no capsule process can still write here."""
+    """After the exact stop and cgroup-empty proof only: no capsule process can still write here."""
     path = Path(path)
     st = path.lstat()
     need(stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid(), "scratch identity")
+
+    def unlock(directory):  # A capsule-written chmod-000 directory must not keep guest data behind.
+        os.chmod(directory, 0o700)
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    unlock(entry.path)
+    unlock(path)
     shutil.rmtree(path)
 
 
-def run(s, sink, stderr_limit=65536):
-    """Create, verify, start and fully stop one capsule. sink(chunk) -> reason|None consumes stdout.
+def _cgroup_of(pid):
+    """cgroup v2 path rows of a live pid (raises FileNotFoundError once it is gone)."""
+    return [x.split(":", 2)[2] for x in (Path("/proc") / str(pid) / "cgroup").read_text().splitlines()
+            if x.startswith("0::")]
 
-    Returns the termination record; raises CapsuleError when the exact container cannot be proven stopped."""
+
+def _cgroup_empty(known):
+    cg = Path("/sys/fs/cgroup") / known.lstrip("/")
+    return not cg.exists() or dict(x.split() for x in (cg / "cgroup.events").read_text().splitlines()
+                                   ).get("populated") == "0"
+
+
+def run(s, sink, pins, stderr_limit=65536):
+    """Create, verify, start and fully stop one capsule. sink(chunk) -> reason|None consumes stdout.
+    pins = pin_all(s["binds"]) taken by the caller; the inputs are re-pinned after the stop.
+
+    Returns the termination record; raises Unresolved when the exact container cannot be proven stopped
+    or its known cgroup is still populated (the caller then keeps the scratch)."""
     name = "proxcloud-vm-export-%s-%d" % (s["check"], os.getpid())
     cid = _command(create_argv(s, name), capture_output=True, text=True, check=True).stdout.strip()
     need(re.fullmatch(r"[0-9a-f]{64}", cid) is not None, "container id")
     proc = selector = state = None
     known, reason, cleanup_errors, stderr_bytes, code = "", None, [], 0, -1
     try:
-        check_confinement(_inspect(cid), s)
+        check_confinement(_inspect(cid), s, _inspect(s["image"])["Config"]["Env"])
         started = time.monotonic()
         proc = subprocess.Popen(["docker", "start", "--attach", cid], stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True)
@@ -172,8 +242,7 @@ def run(s, sink, stderr_limit=65536):
             pid = live["State"]["Pid"]
             if pid > 0:
                 try:
-                    rows = [x.split(":", 2)[2] for x in (Path("/proc") / str(pid) / "cgroup").read_text().splitlines()
-                            if x.startswith("0::")]
+                    rows = _cgroup_of(pid)
                 except FileNotFoundError:
                     continue
                 need(len(rows) == 1 and cid in rows[0] and ".." not in rows[0].split("/"), "cgroup identity")
@@ -187,6 +256,10 @@ def run(s, sink, stderr_limit=65536):
             left = s["wall"] - (time.monotonic() - started)
             if left <= 0:
                 reason = "parent_wall_limit"
+                break
+            vfs = os.statvfs(s["scratch"])
+            if vfs.f_bavail * vfs.f_frsize < SCRATCH_FLOOR:
+                reason = "scratch_space_floor"
                 break
             for key, _ in selector.select(min(left, 1)):
                 data = os.read(key.fileobj.fileno(), 65536)
@@ -236,13 +309,14 @@ def run(s, sink, stderr_limit=65536):
             proc.stderr.close()
     if state is None or state["Id"] != cid or state["State"]["Running"] or state["State"]["Pid"] != 0:
         raise Unresolved("UNRESOLVED exact capsule cleanup " + cid)
-    empty = False
-    if known:
-        cg = Path("/sys/fs/cgroup") / known.lstrip("/")
-        empty = not cg.exists() or dict(x.split() for x in (cg / "cgroup.events").read_text().splitlines()
-                                        ).get("populated") == "0"
-    if not empty:
-        reason = reason or "cgroup_not_proven_empty"
+    empty = bool(known) and _cgroup_empty(known)
+    if known and not empty:
+        raise Unresolved("UNRESOLVED capsule cgroup still populated " + cid)
+    try:  # (An unknown cgroup already carries a stop reason; cgroup_empty_or_absent stays False.)
+        if pin_all(s["binds"]) != pins:
+            reason = reason or "input_changed_during_run"
+    except (CapsuleError, OSError):
+        reason = reason or "input_changed_during_run"
     try:
         _command(["docker", "rm", cid], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # Exact id only.
     except (subprocess.SubprocessError, OSError) as exc:
@@ -272,7 +346,8 @@ def gate_json(term, data, validator, limit=60000):
     passed the validator, or one of the bounded message-free diagnostics (probe_error/layout_refused)."""
     exitcode, code = term["exit_code"], term["attach_exit_code"]
     refused = {"phase": "inspection_refused", "exit_code": exitcode, "raw_output_retained": False}
-    if term["stop_reason"] or not term["known_cgroup"] or exitcode != code:
+    if (term["stop_reason"] or not term["known_cgroup"] or exitcode != code or term["cleanup_errors"]
+            or not term["cgroup_empty_or_absent"]):
         return False, refused
     try:
         lines = bytes(data).decode("ascii").splitlines()

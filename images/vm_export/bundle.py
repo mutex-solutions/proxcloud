@@ -1,11 +1,12 @@
 """Stage the sealed export as a vm_artifact bundle (request + CleanExportReceipt + disk, then prepare).
 
-    cd images && python3 -m vm_export.bundle --staging-dir DIR --disk disk.qcow2 --sanitize-facts sanitize-facts.json \
+    cd images && python3 -m vm_export.bundle --staging-dir DIR --disk disk.qcow2 --sanitize-run sanitize-run.json \
         --build-run-id N --export-run-id M --source-raw-sha256 H --source-commit SHA40 \
         --upstream-checksum HEX --build-version YYYYMMDDHHMMSS --os ubuntu-2604 [--kubernetes-version V] [--upstream-url URL]
 
 source_identity = "sha256:" + sha256("proxcloud-template-build:run=<build run id>:raw_sha256=<source sha>"):
 a run-scoped, non-secret identifier (never a bare VMID). run_ref is the public export workflow run.
+The facts come from a sealed sanitize run whose bound source pin must equal --source-raw-sha256.
 """
 import argparse
 import hashlib
@@ -23,6 +24,15 @@ def source_identity(build_run_id, raw_sha256):
     vm_artifact.require(type(build_run_id) is int and build_run_id > 0 and vm_artifact.match(r"[0-9a-f]{64}", raw_sha256))
     preimage = "proxcloud-template-build:run=%d:raw_sha256=%s" % (build_run_id, raw_sha256)
     return "sha256:" + hashlib.sha256(preimage.encode("ascii")).hexdigest()
+
+
+def sealed_facts(sanitize_run, raw_sha256):
+    """Facts of a sealed sanitize run of exactly the named source (raw for k8s, qcow2 for native)."""
+    pins = sanitize_run["pins"]
+    sources = [pins[g] for g in ("/input/source.raw", "/input/source.qcow2") if g in pins]
+    vm_artifact.require(sanitize_run["sealed_after_cgroup_stop"] is True and type(sanitize_run["facts"]) is dict
+                        and sources == [raw_sha256])
+    return sanitize_run["facts"]
 
 
 def request(os_name, source_commit, upstream_checksum, build_version, kubernetes_version=None, upstream_url=None):
@@ -66,7 +76,7 @@ def stage(staging_dir, q, r, disk):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    for name in ("--staging-dir", "--disk", "--sanitize-facts", "--source-raw-sha256", "--source-commit",
+    for name in ("--staging-dir", "--disk", "--sanitize-run", "--source-raw-sha256", "--source-commit",
                  "--upstream-checksum", "--build-version", "--os"):
         parser.add_argument(name, required=True)
     parser.add_argument("--build-run-id", required=True, type=int)
@@ -76,8 +86,8 @@ def main(argv=None):
     a = parser.parse_args(argv)
     try:
         q = request(a.os, a.source_commit, a.upstream_checksum, a.build_version, a.kubernetes_version, a.upstream_url)
-        with open(a.sanitize_facts, encoding="ascii") as f:
-            facts = json.load(f)
+        with open(a.sanitize_run, encoding="ascii") as f:
+            facts = sealed_facts(json.load(f), a.source_raw_sha256)
         m = stage(a.staging_dir, q, receipt(q, facts, a.build_run_id, a.export_run_id, a.source_raw_sha256), a.disk)
         print(json.dumps(vm_artifact.plan(m), sort_keys=True))
         return 0

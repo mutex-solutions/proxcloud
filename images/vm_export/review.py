@@ -1,14 +1,17 @@
 """Derive the per-run Kubernetes k8s-review.json from a gated inventory and a committed reviewed baseline.
 
-    cd images && python3 -m vm_export.review derive --inventory inventory.json \
-        --baseline vm_export/baselines/ubuntu-2604-k8s.json --kubernetes-version 1.37.2 \
-        --source-raw-sha256 <64 hex> --out k8s-review.json
+    cd images && python3 -m vm_export.review derive --inventory inventory.json --inventory-run inventory-run.json \
+        --copy-receipt copy-receipt.json --baseline vm_export/baselines/ubuntu-2604-k8s.json \
+        --kubernetes-version 1.37.2 --out k8s-review.json
     cd images && python3 -m vm_export.review project --inventory inventory.json   # baseline "inventory" draft
 
 The inventory must equal the baseline's reviewed facts EXCEPT the allowlisted version fields:
 kubeadm/kubelet/kubectl == the requested K8S_VERSIONS member (deb revision -1.1) and kubernetes-cni
 from the baseline's explicit allowlist. Any other difference refuses with the differing field paths
-only (never values). package_policy_sha256 = sha256 of the compact sorted JSON of the package policy.
+only (never values or guest-chosen names). package_policy_sha256 = sha256 of the compact sorted JSON of
+the package policy. The source sha256 and the stopped-template fact come from the evidence chain only:
+the inventory bytes must be the ones its clean, accepted inventory run recorded, and that run's source
+pin must be the raw of a guarded copy receipt (template stopped and unchanged before == after).
 """
 import argparse
 import copy
@@ -29,6 +32,8 @@ REVIEW_KEYS = {"bios", "cloud_base_config_reviewed", "cloud_default_user", "kube
                "retained_package_policy_reviewed", "runtime_version", "reviewed_dropins", "sudoers_sha256",
                "sudoers_readme_sha256"}
 POLICY_KEYS = {"containerd", "runc", "image_builder"}
+# Maps keyed by guest-chosen strings (drop-in file names, account names): a refusal names the map only.
+GUEST_KEYED = {"dropin_default_users", "shadow_marker_classes"}
 
 
 class ReviewRefused(ValueError):
@@ -55,13 +60,13 @@ def project(inventory):
 
 def diff(a, b, path=""):
     """Field paths where a and b differ (dict keys recursively, lists/scalars compared whole)."""
-    if type(a) is dict and type(b) is dict:
+    if type(a) is dict and type(b) is dict and path not in GUEST_KEYED:
         found = []
         for key in sorted(set(a) | set(b)):
             sub = path + "." + key if path else key
             found += [sub] if (key in a) != (key in b) else diff(a[key], b[key], sub)
         return found
-    return [] if (type(a), a) == (type(b), b) else [path or "<root>"]
+    return [] if (type(a), compact(a)) == (type(b), compact(b)) else [path or "<root>"]  # Type-strict, lists too.
 
 
 def package_policy(inventory, baseline):
@@ -75,7 +80,26 @@ def package_policy(inventory, baseline):
             "image_builder": baseline["package_policy"]["image_builder"]}
 
 
+def bind(inventory_bytes, inventory_run, receipt):
+    """The source sha256 the inventory was taken from, proven by the run record and the copy receipt."""
+    try:
+        ok = (inventory_run["clean"] is True and inventory_run["accepted"] is True
+              and inventory_run["stop_reason"] is None and inventory_run["cleanup_errors"] == []
+              and inventory_run["cgroup_empty_or_absent"] is True
+              and inventory_run["inventory_sha256"] == hashlib.sha256(inventory_bytes).hexdigest())
+        sha = inventory_run["pins"]["/input/source.raw"]
+        bound = (receipt["kind"] == "TemplateDiskCopy" and receipt["template_unchanged_stopped"] is True
+                 and receipt["raw_sha256"] == sha)
+    except (KeyError, TypeError):
+        raise ReviewRefused(["evidence"]) from None
+    refused = ([] if ok else ["inventory_run"]) + ([] if bound else ["copy_receipt"])
+    if refused:
+        raise ReviewRefused(refused)
+    return sha
+
+
 def derive(inventory, baseline, k8s_version, source_raw_sha256):
+    """Pure diff against the baseline; source_raw_sha256 must come from bind()."""
     if not (type(baseline) is dict and set(baseline) == BASELINE_KEYS and baseline["kind"] == "K8sReviewBaseline"
             and set(baseline["review"]) == REVIEW_KEYS and set(baseline["package_policy"]) == POLICY_KEYS):
         raise ReviewRefused(["baseline"])
@@ -130,7 +154,8 @@ def main(argv=None):
     d = sub.add_parser("derive")
     d.add_argument("--baseline", required=True)
     d.add_argument("--kubernetes-version", required=True)
-    d.add_argument("--source-raw-sha256", required=True)
+    d.add_argument("--inventory-run", required=True)
+    d.add_argument("--copy-receipt", required=True)
     d.add_argument("--out", required=True)
     p = sub.add_parser("project")
     for s in (d, p):
@@ -141,7 +166,8 @@ def main(argv=None):
         if a.command == "project":
             print(json.dumps(project(inventory), indent=1, sort_keys=True))
             return 0
-        review, policy = derive(inventory, load(a.baseline), a.kubernetes_version, a.source_raw_sha256)
+        sha = bind(Path(a.inventory).read_bytes(), load(a.inventory_run), load(a.copy_receipt))
+        review, policy = derive(inventory, load(a.baseline), a.kubernetes_version, sha)
         with open(a.out, "x", encoding="ascii") as f:
             f.write(compact(review))  # Exactly the bytes the sanitizer capsule reads; no trailing newline.
         print(json.dumps({"package_policy": policy, "package_policy_sha256": review["package_policy_sha256"]},

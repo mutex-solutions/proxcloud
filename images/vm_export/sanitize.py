@@ -1,8 +1,11 @@
 """Parent launcher: run the repo offline sanitizer (vm_sanitize.py) in one confined no-network capsule.
 
-    cd images && python3 -m vm_export.sanitize k8s --source RAW --review k8s-review.json \
+    cd images && python3 -m vm_export.sanitize k8s --source RAW --copy-receipt R --review k8s-review.json \
         --kubernetes-version 1.37.2 --scratch-base DIR --out-dir DIR
-    cd images && python3 -m vm_export.sanitize os --os ubuntu-2404 --source QCOW2 --scratch-base DIR --out-dir DIR
+    cd images && python3 -m vm_export.sanitize os --os ubuntu-2404 --source QCOW2 --copy-receipt R \
+        --scratch-base DIR --out-dir DIR
+
+The source must be the file of the copy receipt; a k8s review must name that same source sha256.
 
 The capsule streams one fixed facts line plus the disk bytes over stdout; the parent spools them
 privately into <out-dir>/disk.qcow2.partial, and only after the exact stop/cgroup proof, a matching
@@ -14,7 +17,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
+import subprocess
 import sys
 
 from vm_export import capsule
@@ -59,10 +64,27 @@ def mem_available():
     return int(rows["MemAvailable"].split()[0]) * 1024
 
 
-def launch(selected, k8s_version, source, review, scratch_base, out_dir, memory, wall):
+OUTPUTS = ("disk.qcow2.partial", "disk.qcow2", "sanitize-facts.json", "sanitize-run.json")
+
+
+def sealable(term, sink, spool_path):
+    """Seal only after the exact stop and cgroup proof, a complete stream whose hash matches the facts
+    header, and a re-read of the private spool with the same hash."""
+    facts = sink.facts
+    if not (facts is not None and term["exit_code"] == term["attach_exit_code"] == 0 and term["stop_reason"] is None
+            and term["cgroup_empty_or_absent"] and not term["cleanup_errors"]
+            and sink.received == facts["disk_bytes"] and sink.hashed.hexdigest() == facts["disk_sha256"]):
+        return False
+    st = spool_path.lstat()
+    return (stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and st.st_size == sink.received
+            and capsule.sha256_file(spool_path) == facts["disk_sha256"])
+
+
+def launch(selected, k8s_version, source, receipt, review, scratch_base, out_dir, memory, wall):
     out_dir = Path(out_dir)
     need = capsule.need
     need(out_dir.is_absolute() and out_dir.is_dir() and not out_dir.is_symlink(), "out dir refused")
+    need(not any((out_dir / name).exists() for name in OUTPUTS), "output already exists")
     need(mem_available() >= capsule.size_bytes(memory) + (2 << 30), "insufficient memory for the capsule")
     binds = {str(Path(source)): "/input/source.raw" if k8s_version else "/input/source.qcow2",
              str(IMAGES / "vm_sanitize.py"): "/bootstrap/vm_sanitize.py",
@@ -73,10 +95,17 @@ def launch(selected, k8s_version, source, review, scratch_base, out_dir, memory,
         args = ["--k8s-os", selected, k8s_version, str(wall - 120)]
     else:
         args = ["--os", selected, str(wall - 120)]
-    pins = {guest: capsule.pinned_input(host) for host, guest in binds.items()}
+    pins = capsule.pin_all(binds)
+    guest_source = "/input/source.raw" if k8s_version else "/input/source.qcow2"
+    capsule.bound_to_receipt(receipt, source, pins[guest_source])
+    if k8s_version:
+        try:
+            reviewed = json.loads(Path(review).read_bytes().decode("ascii")).get("source_raw_sha256")
+        except (ValueError, UnicodeError, AttributeError):
+            reviewed = None
+        need(reviewed == pins[guest_source], "review names another source")
     check = "sanitize-" + selected + ("-k8s-" + k8s_version if k8s_version else "")
     spool_path, final = out_dir / "disk.qcow2.partial", out_dir / "disk.qcow2"
-    need(not spool_path.exists() and not final.exists(), "output already exists")
     vfs = os.statvfs(out_dir)
     need(vfs.f_bavail * vfs.f_frsize >= MAX + (1 << 30), "insufficient output space")
     scratch = capsule.prepare_scratch(scratch_base, check, 24 << 30)
@@ -86,23 +115,19 @@ def launch(selected, k8s_version, source, review, scratch_base, out_dir, memory,
         fd = os.open(spool_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "wb") as spool:
             sink = StreamSink(spool, selected, k8s_version)
-            term = capsule.run(s, sink)
+            term = capsule.run(s, sink, pins)
             spool.flush()
             os.fsync(spool.fileno())
-    except capsule.Unresolved:
-        scratch = None
+    except BaseException as exc:
+        spool_path.unlink(missing_ok=True)  # Parent-owned; no half-written disk is left behind.
+        if isinstance(exc, capsule.Unresolved):
+            scratch = None
         raise
     finally:
         if scratch is not None:
             capsule.remove_scratch(scratch)
     facts = sink.facts
-    success = bool(facts is not None and term["exit_code"] == term["attach_exit_code"] == 0
-                   and term["stop_reason"] is None and term["cgroup_empty_or_absent"] and not term["cleanup_errors"]
-                   and sink.received == facts["disk_bytes"] and sink.hashed.hexdigest() == facts["disk_sha256"])
-    if success:
-        st = spool_path.lstat()
-        success = (stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and st.st_size == sink.received
-                   and capsule.sha256_file(spool_path) == facts["disk_sha256"])
+    success = sealable(term, sink, spool_path)
     if success:
         os.chmod(spool_path, 0o400)  # Seal only after exact stop and surviving-writer/cgroup proof.
         os.rename(spool_path, final)
@@ -128,6 +153,7 @@ def main(argv=None):
     o.add_argument("--os", required=True, choices=("ubuntu-2404", "ubuntu-2604", "debian-12", "debian-13"))
     for p in (k, o):
         p.add_argument("--source", required=True)
+        p.add_argument("--copy-receipt", required=True)
         p.add_argument("--scratch-base", required=True)
         p.add_argument("--out-dir", required=True)
         p.add_argument("--memory", default="8g", help="capsule memory limit (default 8g; scratch must be disk-backed)")
@@ -136,15 +162,17 @@ def main(argv=None):
     if a.wall_seconds < 300:
         parser.error("wall too small")
     if a.variant == "k8s":
-        return launch("ubuntu-2604", a.kubernetes_version, a.source, a.review, a.scratch_base, a.out_dir,
-                      a.memory, a.wall_seconds)
-    return launch(a.os, None, a.source, None, a.scratch_base, a.out_dir, a.memory, a.wall_seconds)
+        if not re.fullmatch(r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}", a.kubernetes_version):
+            parser.error("invalid version")
+        return launch("ubuntu-2604", a.kubernetes_version, a.source, a.copy_receipt, a.review, a.scratch_base,
+                      a.out_dir, a.memory, a.wall_seconds)
+    return launch(a.os, None, a.source, a.copy_receipt, None, a.scratch_base, a.out_dir, a.memory, a.wall_seconds)
 
 
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except (capsule.CapsuleError, OSError) as exc:
+    except (capsule.CapsuleError, OSError, subprocess.SubprocessError) as exc:
         print("sanitize refused: " + (str(exc) if isinstance(exc, capsule.CapsuleError) else type(exc).__name__),
               file=sys.stderr)
         sys.exit(2)
