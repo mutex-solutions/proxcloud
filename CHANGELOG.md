@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **VM image export steps as repository code** (`images/vm_export/`): the copy, inventory, review,
+  sanitize, postscan and bundle steps that prepared the published VM images were private operator
+  scripts. They are now reviewed modules with one evidence chain: a guarded read-only copy receipt, an
+  inventory bound to that copy, a review derived from a committed baseline
+  (`baselines/ubuntu-2604-k8s.json`, only the Kubernetes package versions may differ), a sealed
+  sanitize run and a postscan bound to it. Each step runs in a container with no network, no
+  capabilities and read-only inputs, and the parent checks the container's settings before start and
+  proves it stopped. No workflow runs them yet; the export workflow follows.
+
 - **Production install on one host with Docker Compose** (`deploy/compose/`): `./proxcloud-up.sh` asks for the
   domain (or four hostnames), the TLS mode and two email addresses, generates every secret once into `.env`
   (mode 600), starts Traefik, Keycloak in production mode, PostgreSQL, the API and both consoles at the pinned
@@ -39,6 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `helm upgrade`, and by the Compose install, which renders the same realm files.
 
 ### Fixed
+
+- **Native OS images kept the build VM's snapd identity**: the offline sanitizer reset the snapd device
+  key and serial only on the Kubernetes path. The native Ubuntu path now does the same reset and its
+  final check refuses a remaining key, serial, session macaroon or store user.
 
 - **Kubernetes 1.37 node templates did not build**: the pinned image-builder `v0.1.55` renders its kubeadm
   config with `kubeadm.k8s.io/v1beta3`, which kubeadm 1.37 refuses ("old API spec"), so

@@ -1114,5 +1114,65 @@ class KubernetesSanitizeTests(unittest.TestCase):
         self.assertEqual((out.getvalue(), err.getvalue()), ("", "sanitization refused\n"))
 
 
+
+class FakeSnapdGuestFS(FakeGuestFS):
+    """Native Ubuntu layout plus a registered snapd identity from image seeding (synthetic values)."""
+    def __init__(self, selected="ubuntu-2404"):
+        super().__init__(selected)
+        self.nlinks = {}
+        self.put(s.K8S_SNAPD_KEYS + "/synthetic-device-key-id", b"synthetic device key bytes\n")
+        self.put(SERIAL + "/generic/generic-classic/synthetic-serial/active", b"type: serial\n")
+        self.put(s.K8S_SNAPD_STATE, SNAPD_STATE)
+        self.put("/var/lib/snapd/seed/seed.yaml", b"snaps: []\n")
+        self.calls.clear()
+    def lstatns(self, path):
+        assert path in self.nodes
+        return {"st_nlink": self.nlinks.get(path, 1)}
+
+
+class NativeSnapdResetTests(unittest.TestCase):
+    def test_wipe_patterns_equal_kubernetes_copy_policy(self):
+        self.assertEqual(s.SNAPD_WIPE, tuple(p for p in k8s_copy_policy.COPY_WIPE if p.startswith("/var/lib/snapd/")))
+
+    def test_native_os_resets_registered_snapd_identity(self):
+        for selected in ("ubuntu-2404", "ubuntu-2604"):
+            with self.subTest(selected=selected):
+                g = FakeSnapdGuestFS(selected)
+                s.sanitize(g, selected)
+                self.assertEqual(g.read_file(s.K8S_SNAPD_STATE), SNAPD_RESET)
+                self.assertEqual(g.ls(s.K8S_SNAPD_KEYS), [])
+                self.assertFalse([p for p in g.nodes if p.startswith(SERIAL)])
+                self.assertIn("/var/lib/snapd/seed/seed.yaml", g.nodes)  # Seed and snaps are kept.
+                s.snapd_unregistered(g)  # The postscan guard passes on the result.
+
+    def test_store_credentials_and_unwipeable_keys_refuse_before_any_write(self):
+        changes = (lambda g: g.put(s.K8S_SNAPD_STATE, SNAPD_STATE.replace(
+                       b'"key-id":"synthetic-key-id"}', b'"key-id":"synthetic-key-id","session-macaroon":"m"}')),
+                   lambda g: g.put(s.K8S_SNAPD_STATE, SNAPD_STATE.replace(b'"users":[]', b'"users":[{"id":1}]')),
+                   lambda g: g.put(s.K8S_SNAPD_KEYS + "/.hidden", b"synthetic"),
+                   lambda g: g.nlinks.__setitem__(s.K8S_SNAPD_KEYS + "/synthetic-device-key-id", 2),
+                   lambda g: g.put(s.K8S_SNAPD_STATE, b"{"))
+        for change in changes:
+            g = FakeSnapdGuestFS()
+            change(g)
+            g.calls.clear()
+            with self.assertRaisesRegex(ValueError, "^sanitization refused$"):
+                s.sanitize(g, "ubuntu-2404")
+            self.assertFalse([c for c in g.calls if c[0] in ("rm", "rm_rf", "zero")])
+
+    def test_reset_that_does_not_land_refuses_before_zeroing(self):
+        g = FakeSnapdGuestFS()
+        real_write = g.write
+        g.write = lambda path, data: real_write(path, SNAPD_STATE if path == s.K8S_SNAPD_STATE else data)
+        with self.assertRaises(ValueError):
+            s.sanitize(g, "ubuntu-2404")
+        self.assertFalse([c for c in g.calls if c[0] == "zero"])
+
+    def test_unseeded_image_is_untouched(self):
+        g = FakeGuestFS("debian-13")
+        s.sanitize(g, "debian-13")
+        self.assertFalse([p for p in g.nodes if p.startswith("/var/lib/snapd")])
+
+
 if __name__ == "__main__":
     unittest.main()
