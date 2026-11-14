@@ -39,7 +39,8 @@ into a portal.
   starts. `docs/vm-artifact-publishing.md` has the flow, the trust model with the settings the owner
   must make outside the repository (runner group, fork approval, branch protection, the environment
   `vm-artifact-export`), the secrets and variables to set (`EXPORT_TEST_ADDRESSES` and `EXPORT_VLAN` are
-  new) and the commands anyone can use to verify an image. The workflow has not run on the lab yet.
+  new) and the commands anyone can use to verify an image. The workflow has run on the lab for
+  `ubuntu-2404` and for the three Kubernetes versions; the document lists those images.
 
 - **VM export tool image built by CI** (`images/vm_export/tools/`, `vm-export-tools.yml`): the image the
   export containers run from (`qemu-img`, Python with libguestfs, the appliance kernel) was built on a
