@@ -4,6 +4,20 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-14: One-host Docker Compose install of the portal
+
+**What changed:** a third delivery path next to the Helm chart and the Ansible installer:
+`deploy/compose` with `proxcloud-up.sh` runs Traefik, Keycloak, PostgreSQL, the API and
+both consoles from the released images on one Docker host. It installs the portal only.
+The Keycloak realm files are generated from the chart's templates; brute-force detection
+is now on in those templates, so chart installs get it at their next upgrade.
+
+**Why:** a first install needed either a Kubernetes cluster or the full installer. A
+single host with one command is the entry path for evaluation and small sites; managed
+services are added later from the portal, not by this path.
+
+**Views updated:** [C2c build and delivery](c2-containers.md#c2c-build-and-delivery).
+
 ## 2026-11-11: Managed PostgreSQL patch and fresh catalog baseline
 
 **What changed:** database chart 0.5.1 maps PG majors 15/16/17/18 to patch images
