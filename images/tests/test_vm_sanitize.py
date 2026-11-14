@@ -1043,8 +1043,8 @@ class KubernetesSanitizeTests(unittest.TestCase):
         (root / "review.json").write_bytes(json.dumps(review).encode())
         for mocked in (patch.object(s, "RAW_SOURCE", str(root / "source.raw")),
                        patch.object(s, "K8S_REVIEW", str(root / "review.json")),
-                       patch.object(s, "VIRTUAL_BYTES", size), patch.object(s.os, "getuid", return_value=1000),
-                       patch.object(s.os, "geteuid", return_value=1000), patch.object(s.os, "umask")):
+                       patch.object(s, "VIRTUAL_BYTES", size), patch.object(s.os, "getuid", return_value=1002),
+                       patch.object(s.os, "geteuid", return_value=1002), patch.object(s.os, "umask")):
             mocked.start(); self.addCleanup(mocked.stop)
         return root
 
@@ -1057,6 +1057,17 @@ class KubernetesSanitizeTests(unittest.TestCase):
             self.assertEqual(s.main(["--k8s-os", "ubuntu-2604"]), 2)
         self.assertEqual(err.getvalue(), "sanitization refused\n")
         return run, mkdir
+
+    def test_main_runs_only_as_a_non_root_host_uid(self):
+        """The capsule runs as the invoking host user: real == effective, >= 1000, not only 1000."""
+        for uid, euid, accepted in ((1002, 1002, True), (1000, 1000, True), (65534, 65534, True), (0, 0, False),
+                                    (999, 999, False), (1002, 0, False), (0, 1002, False), (1002, 1000, False)):
+            with self.subTest(uid=uid, euid=euid):
+                self.main_fixture()
+                with patch.object(s.os, "getuid", return_value=uid), patch.object(s.os, "geteuid", return_value=euid), \
+                        patch.object(s, "raw_digest", wraps=s.raw_digest) as digest:
+                    _, mkdir = self.run_main()
+                self.assertEqual((digest.called, mkdir.called), (accepted, accepted))  # Refused before any read.
 
     def test_main_k8s_source_binding_refuses_before_any_tool(self):
         root = self.main_fixture()

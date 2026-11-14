@@ -52,7 +52,7 @@ def parse(argv):
 
 def main(argv):
     flag, selected, k8s_version, timeout = parse(argv)
-    if os.getuid() != 1000:
+    if not os.getuid() == os.geteuid() >= 1000:  # The invoking host user's uid; never root.
         return 1
     result = subprocess.run(["/usr/bin/python3", "-I", "-c", LAUNCH % (flag, selected)], stdin=subprocess.DEVNULL,
                             capture_output=True, timeout=timeout, env=ENV)

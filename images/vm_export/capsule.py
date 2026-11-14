@@ -17,14 +17,13 @@ import subprocess
 import time
 
 IMAGE = "sha256:1c0e402e0ff1da2732b03f93ff61e2c1e16a05f0a2091749abffc4d5360367d9"
-USER = "1000:1000"
 GUEST_PATH = re.compile(r"/(?:input|bootstrap)/[A-Za-z0-9_.-]{1,64}")
 CHECK_ID = re.compile(r"[a-z0-9][a-z0-9.-]{0,63}")
 SIZE = re.compile(r"[1-9][0-9]{0,4}[mg]")
 ENV = ("PATH=/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/scratch/home", "TMPDIR=/scratch/tmp", "LC_ALL=C", "LANG=C",
        "LIBGUESTFS_BACKEND=direct", "LIBGUESTFS_BACKEND_SETTINGS=force_tcg",
        "LIBGUESTFS_CACHEDIR=/scratch/cache", "LIBGUESTFS_TMPDIR=/scratch/tmp")
-TMP_OPTS = ("rw", "exec", "nosuid", "nodev", "mode=0700", "uid=1000", "gid=1000")
+TMP_OPTS = ("rw", "exec", "nosuid", "nodev", "mode=0700")  # Plus uid=/gid= of the capsule user and size=.
 SCRATCH_FLOOR = 1 << 30  # Stop the capsule before its scratch writes can fill the runner's filesystem.
 
 
@@ -39,6 +38,20 @@ class Unresolved(CapsuleError):
 def need(ok, reason):
     if not ok:
         raise CapsuleError(reason)
+
+
+def host_user():
+    """(uid, gid) the capsule runs as: the invoking host user, because the disk-backed scratch is a bind
+    mount that user must own. Never root, a system account or a system group (docker, disk, kvm), never a
+    setuid/setgid context."""
+    uid, gid = os.getuid(), os.getgid()
+    need(uid == os.geteuid() and gid == os.getegid() and uid >= 1000 and gid >= 1000,
+         "capsule user must be a non-root host uid and gid >= 1000 (real == effective)")
+    return uid, gid
+
+
+def tmp_opts(s):
+    return TMP_OPTS + ("uid=%d" % host_user()[0], "gid=%d" % host_user()[1], "size=" + s["tmp"])
 
 
 def size_bytes(text):
@@ -112,12 +125,12 @@ def spec(check, binds, scratch, argv, memory="8g", cpus=2, pids=256, wall=2400, 
 
 def create_argv(s, name):
     argv = ["docker", "create", "--pull=never", "--name", name, "--log-driver=none", "--network=none",
-            "--read-only", "--user=" + USER, "--cap-drop=ALL", "--security-opt=no-new-privileges",
+            "--read-only", "--user=%d:%d" % host_user(), "--cap-drop=ALL", "--security-opt=no-new-privileges",
             "--pids-limit=%d" % s["pids"], "--memory=" + s["memory"], "--memory-swap=" + s["memory"],
             "--cpus=%d" % s["cpus"], "--shm-size=128m", "--ulimit", "core=0:0", "--ulimit", "nofile=256:256",
             "--ulimit", "fsize=%d:%d" % (s["fsize"], s["fsize"]),
             "--ulimit", "cpu=%d:%d" % (s["cpu_seconds"], s["cpu_seconds"]),
-            "--tmpfs", "/tmp:" + ",".join(TMP_OPTS[:4] + ("size=" + s["tmp"],) + TMP_OPTS[4:]),
+            "--tmpfs", "/tmp:" + ",".join(tmp_opts(s)),
             "--mount", "type=bind,src=" + s["scratch"] + ",dst=/scratch", "--entrypoint", "/usr/bin/env"]
     for host, guest in s["binds"].items():
         argv += ["--mount", "type=bind,src=" + host + ",dst=" + guest + ",readonly"]
@@ -128,7 +141,7 @@ def check_confinement(info, s, image_env):
     """Pre-start proof from `docker inspect`: anything not exactly declared refuses the run.
     image_env is the pinned image's own Config.Env (the container may add nothing to it)."""
     hc = info["HostConfig"]
-    need(info["Image"] == s["image"] and info["Config"]["User"] == USER, "image or user")
+    need(info["Image"] == s["image"] and info["Config"]["User"] == "%d:%d" % host_user(), "image or user")
     need(info["Config"]["Env"] == image_env, "environment")
     need(info["Config"]["Entrypoint"] == ["/usr/bin/env"] and info["Config"]["Cmd"] == ["-i", *ENV, *s["argv"]],
          "command")
@@ -145,7 +158,7 @@ def check_confinement(info, s, image_env):
     need(not hc.get("Binds") and not hc.get("VolumesFrom") and not hc.get("Links"), "extra mounts")
     need(set(hc.get("Tmpfs") or {}) == {"/tmp"}, "tmpfs")
     opts = hc["Tmpfs"]["/tmp"].split(",")
-    need(sorted(opts) == sorted(TMP_OPTS + ("size=" + s["tmp"],)), "tmpfs options")
+    need(sorted(opts) == sorted(tmp_opts(s)), "tmpfs options")
     expected = {(h, g, False) for h, g in s["binds"].items()} | {(s["scratch"], "/scratch", True)}
     mounts = {(m["Source"], m["Destination"], m["RW"]) for m in info["Mounts"]}
     need(len(info["Mounts"]) == len(expected) and mounts == expected, "mounts")
@@ -176,12 +189,12 @@ def fs_type(path):
 
 
 def prepare_scratch(base, check, min_free):
-    """Fresh private disk-backed scratch directory under base; the capsule user (uid 1000) owns it."""
+    """Fresh private disk-backed scratch directory under base, owned by the capsule user (host_user)."""
     need(CHECK_ID.fullmatch(check) is not None, "invalid check id")  # Before any path is built from it.
     base = Path(base)
     need(base.is_absolute() and base.is_dir() and not base.is_symlink(), "scratch base refused")
     need(fs_type(base) not in (None, "tmpfs", "ramfs"), "scratch must be disk-backed, not tmpfs")
-    need(os.getuid() == 1000, "scratch owner must be the capsule uid 1000")
+    host_user()
     vfs = os.statvfs(base)
     need(vfs.f_bavail * vfs.f_frsize >= min_free, "insufficient scratch space")
     path = base / (check + "-scratch")
