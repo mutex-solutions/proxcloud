@@ -99,6 +99,8 @@ K8S_SNAPD_STATE_MAX = 32 << 20
 K8S_SNAPD_DROP = ("serial", "key-id", "session-macaroon")
 K8S_SNAPD_AUTH = ("device", "last-id", "users")  # Observed data.auth keys; any other key refuses.
 K8S_SNAPD_DEVICE = ("brand", "model") + K8S_SNAPD_DROP  # Allowed data.auth.device keys.
+# Native OS path wipes the same entries as k8s_copy_policy.COPY_WIPE (kept equal by the tests).
+SNAPD_WIPE = (K8S_SNAPD_KEYS + "/*", K8S_SNAPD_SERIAL)
 K8S_PROXY_FILES = ("/etc/apt/apt.conf.d", "/etc/apt/apt.conf", "/etc/environment",
                    "/etc/systemd/system/containerd.service.d")
 K8S_KUBELET_STATE = "/var/lib/kubelet"  # Scanned except pki/ and pods/ (cluster counts cover those).
@@ -349,9 +351,44 @@ def journal(g, device, enabled):
 def sanitize(g, selected):
     mounts, user = layout(g, selected)
     mount_all(g, mounts)
-    cleanup(g, user)
-    verify(g, user)
-    reset_and_zero(g, mounts, lambda: verify(g, user))
+    # snapd identity reset, same owner decision as variant=kubernetes; computed BEFORE any write.
+    state_before, state_reset = snapd_reset_plan(g)
+    patterns = REMOVE + SNAPD_WIPE
+    cleanup(g, user, patterns)
+    snapd_write_reset(g, state_before, state_reset)
+
+    def check():
+        verify(g, user, patterns)
+        snapd_unregistered(g)
+    check()
+    reset_and_zero(g, mounts, check)
+
+
+def snapd_reset_plan(g):
+    """Native OS: reset a registered snapd identity to unregistered (copy-only), as the Kubernetes path does.
+
+    Device key files and the serial assertion subtree are wiped (SNAPD_WIPE) and state.json data.auth.device
+    serial/key-id are dropped. Store user credentials (session macaroon, any snapd user) and key entries the
+    `private-keys-v1/*` wipe would not cleanly remove refuse instead. Returns (original, reset) state bytes."""
+    facts, original, reset = k8s_snapd(g)
+    require(not facts["snapd_session_macaroon"] and facts["snapd_users"] == 0 and k8s_snapd_unwipeable(g) == 0)
+    return original, reset
+
+
+def snapd_write_reset(g, original, reset):
+    if original is not None and reset != original:
+        require(read(g, K8S_SNAPD_STATE, K8S_SNAPD_STATE_MAX) == original)  # Unchanged since the plan.
+        write(g, K8S_SNAPD_STATE, reset)
+
+
+def snapd_unregistered(g):
+    """snapd is unregistered: no device key, no serial assertion, no serial/key-id/session in state.json,
+    and still no store user."""
+    snapd, _, _ = k8s_snapd(g)
+    require(not exists(g, K8S_SNAPD_KEYS) or (not g.is_symlink(K8S_SNAPD_KEYS) and g.ls(K8S_SNAPD_KEYS) == []))
+    require(not exists(g, K8S_SNAPD_SERIAL) and snapd["snapd_serial_assertions"] == 0)
+    require(not (snapd["snapd_device_serial"] or snapd["snapd_device_key_id"] or snapd["snapd_session_macaroon"]))
+    require(snapd["snapd_users"] == 0)
 
 
 def reset_and_zero(g, mounts, final_check):
@@ -840,21 +877,13 @@ def sanitize_k8s(g, selected, review, parent):
         # stock sudoers plus the reviewed README (no other drop-in, rule or include survives).
         require(k8s_builder_groups(g) == 0 and k8s_builder_primary_group_own(g) is True)
         k8s_sudo(g, review, after=True)  # Includes the sudoers-rs / sudo.conf / userdb guards.
-        # snapd is unregistered: no device key, no serial assertion, no serial/key-id/session in state.json,
-        # and still no store user.
-        snapd, _, _ = k8s_snapd(g)
-        require(not exists(g, K8S_SNAPD_KEYS) or (not g.is_symlink(K8S_SNAPD_KEYS) and g.ls(K8S_SNAPD_KEYS) == []))
-        require(not exists(g, K8S_SNAPD_SERIAL) and snapd["snapd_serial_assertions"] == 0)
-        require(not (snapd["snapd_device_serial"] or snapd["snapd_device_key_id"] or snapd["snapd_session_macaroon"]))
-        require(snapd["snapd_users"] == 0)
+        snapd_unregistered(g)
     cleanup(g, K8S_USER, patterns)
     # Copy-only identity reset AFTER validate_inventory. The strip runs on current bytes (cleanup's lock_table
     # has replaced gshadow password fields); the inventory already dry-ran it on the same row format.
     for path, indexes in K8S_GROUP_TABLES:
         write(g, path, k8s_group_strip(read(g, path), indexes))
-    if state_before is not None and state_reset != state_before:
-        require(read(g, K8S_SNAPD_STATE, K8S_SNAPD_STATE_MAX) == state_before)  # Unchanged since the inventory.
-        write(g, K8S_SNAPD_STATE, state_reset)
+    snapd_write_reset(g, state_before, state_reset)  # Only if unchanged since the inventory.
     check()
     reset_and_zero(g, mounts, check)
 
