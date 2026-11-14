@@ -21,8 +21,8 @@ artifacts and later controlled PVE template canaries remain separate steps. Read
 | `helm.yml` | Chart-path PRs to `main`; app or managed-chart tags | PR lint/render only. App `v*` publishes `proxcloud`; `database-cluster-v*` and `proxmox-kamaji-cluster-v*` publish their independent charts. Hosted runner; no publication on ordinary merge. |
 | `sandbox-templates.yml` | Selected source pushes/PRs, schedule, manual dispatch | PR read-only build; trusted runs push built-in images, then `main` opens a digest-pin PR. Not cluster deployment. Hosted runner. |
 | `vm-export-tools.yml` | Tool-image recipe pushes/PRs, manual dispatch on `main` | PR builds, smokes and scans the VM export tool image with a read-only token. `main` then pushes it to GHCR under one tag it never replaces and records the digest; `capsule.py` pins one reviewed digest and the export job pulls it. Hosted runner. |
-| `vm-artifact-export.yml` | Manual dispatch on `main` only: `variant`, `os`, `kubernetes_version`, `template_vmid` | One run from a lab template to a published image. `export` (self-hosted, label `proxcloud-vm-artifact-export`, no registry credential): template guard, read-only copy, inventory, review, sanitize, postscan, cold boot, bundle, public evidence. Then hosted: `publish` (calls `vm-artifacts.yml`), `attest` (build provenance for the pushed digest) and `verify` (anonymous pull, no credential). No PR/fork trigger. See [VM artifact export and publishing](vm-artifact-publishing.md). |
-| `vm-artifacts.yml` | Called by `vm-artifact-export.yml` only (`workflow_call`); no manual or event trigger | The reusable publisher: accepts only the successful `export` job of the calling run, re-verifies the three files, refuses an existing tag, pushes with ORAS and records the digest. Hosted runner. |
+| `vm-artifact-export.yml` | Manual dispatch on `main` only: `variant`, `os`, `kubernetes_version`, `template_vmid` | One run from a lab template to a published image. `export` (self-hosted, label `proxcloud-vm-artifact-export`, no registry credential): template guard, read-only copy, inventory, review, sanitize, postscan, cold boot, bundle, public evidence. Then hosted: `publish` (calls `vm-artifacts.yml`), `attest` (build provenance for the pushed digest, verified in the job, and for the evidence record's sha256) and `verify` (anonymous pull, no credential). No PR/fork trigger; the export job uses the environment `vm-artifact-export`, and its runner must be restricted to this workflow on `main` (owner settings, not expressible here). See [VM artifact export and publishing](vm-artifact-publishing.md). |
+| `vm-artifacts.yml` | Called by `vm-artifact-export.yml` only (`workflow_call`); no manual or event trigger | The reusable publisher: accepts only the successful `export` job of the calling run and only for what was dispatched, re-verifies the three files, refuses an existing tag, pushes with ORAS and records the digest of that push. Hosted runner. |
 | `vm-templates.yml` | Selected image-source pushes to `main`, weekly schedule, manual dispatch | Builds Debian/Ubuntu templates directly in PVE and publishes by pool/tags. Privileged self-hosted runner; no PR/fork trigger. |
 | `k8s-node-templates.yml` | Manual dispatch, required Kubernetes `version` | Builds node templates; `network_mode` defaults `static`. Privileged self-hosted runner; no PR/fork trigger. |
 
@@ -116,7 +116,13 @@ DHCP on the guest network. A routed runner is not automatically on that VLAN's L
 routing hints, not authorization boundaries. Two systemd users or containers on
 one host do not isolate a compromised host/kernel or privileged network. Protect
 workflow changes and restrict runner access; a private ops repository is safer
-for credentials with cloud mutation rights.
+for credentials with cloud mutation rights. For the export runner the concrete
+settings (a runner group restricted to `vm-artifact-export.yml` on `main`, approval
+for every outside contributor's fork pull request, protection of `main`, lab secrets
+in an environment limited to `main`) are listed under "Trust model" in
+[VM artifact export and publishing](vm-artifact-publishing.md#trust-model). A
+compromised export or template runner can publish a bad image with a valid
+attestation, so these settings are part of the release process, not optional hardening.
 
 Both PVE template workflows and the `export` job of `vm-artifact-export.yml` share
 concurrency group `vm-templates`, intentionally serializing their shared

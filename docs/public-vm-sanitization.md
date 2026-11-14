@@ -95,7 +95,7 @@ The probes are deliberately narrow heuristics. They are now informed by the real
 
 ## Cold-boot acceptance through the PVE API
 
-Items 4 and 5 above are automated by `images/vm_export/coldboot.py` (`python3 -m vm_export.coldboot run`), which the export workflow runs as its `coldboot` stage after the postscan; an always-run step repeats `python3 -m vm_export.coldboot cleanup` from the state file. Item 6 is the workflow's `publish` and `verify` jobs. It uses the same least-privilege token as the template builds. There is no root, no `pvesh`, no SSH to the hypervisor and no guest-exec. The token reaches a VM only through the `pc-templates` pool ACL, so a VM outside the pool answers 403 exactly like a missing one.
+Items 4 and 5 above are automated by `images/vm_export/coldboot.py` (`python3 -m vm_export.coldboot run`), which the export workflow runs as its `coldboot` stage after the postscan. The state file is kept outside the runner's temp directory (`$HOME/.proxcloud-vm-export-coldboot/<run>` on the export runner), and the workflow's `recover` step repeats `python3 -m vm_export.coldboot cleanup` from it: always at the end of the run, and at the start of the next run for anything still not recorded clean. Item 6 is the workflow's `publish` and `verify` jobs. It uses the same least-privilege token as the template builds. There is no root, no `pvesh`, no SSH to the hypervisor and no guest-exec. The token reaches a VM only through the `pc-templates` pool ACL, so a VM outside the pool answers 403 exactly like a missing one.
 
 What a run does, in order:
 

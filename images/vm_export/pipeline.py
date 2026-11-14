@@ -17,11 +17,19 @@ the earlier ones did):
     bundle     the three-file bundle (vm_artifact.prepare), re-checked exactly as the publisher checks it
     evidence   the one public evidence record (vm_export.evidence)
 
-`purge` runs whatever happened before (workflow `if: always()`, after `vm_export.coldboot cleanup`): it
-deletes the private copy, the scratch and every other work file.
+Two more commands are not stages:
 
-The work directory is $RUNNER_TEMP/vm-export. Settings come from the environment (the workflow maps
-inputs, secrets and variables to it); nothing private is printed: a refusal is one fixed reason code.
+    recover    guarded cold-boot cleanup (vm_export.coldboot cleanup) of every state directory on this
+               runner: this run's and any an earlier run left. A directory is deleted only when its
+               cleanup is recorded clean; otherwise the command fails. The workflow runs it before the
+               first stage that touches the lab and again whatever happened (`if: always()`).
+    purge      whatever happened before (`if: always()`, last): deletes the private copy, the scratch and
+               every other work file. A capsule container that was not proven stopped is removed first.
+
+The work directory is $RUNNER_TEMP/vm-export; the runner empties it after every job. The cold-boot state
+(what a run created on the lab) must outlive a failed job, so it lives in $HOME/.proxcloud-vm-export-coldboot,
+one directory per run. Settings come from the environment (the workflow maps inputs, secrets and
+variables to it); nothing private is printed: a refusal is one fixed reason code.
 """
 import argparse
 import datetime
@@ -31,7 +39,6 @@ import json
 import os
 from pathlib import Path
 import re
-import subprocess
 import sys
 import types
 
@@ -45,11 +52,17 @@ STAGES = ("plan", "config", "tools", "copy", "inventory", "review", "sanitize", 
           "evidence")
 DIRS = ("private", "scratch", "docker-anonymous", "inventory", "review", "sanitize", "postscan", "coldboot", "bundle",
         "evidence")
-FILES = ("plan.json", "stages.json", "stages.json.tmp", "tools.json", "source.json")
+UNRESOLVED = "unresolved-container"  # The id of a capsule container that was not proven stopped.
+FILES = ("plan.json", "stages.json", "stages.json.tmp", "tools.json", "source.json", UNRESOLVED)
+STATE_ROOT = ".proxcloud-vm-export-coldboot"
 OSES = ("ubuntu-2404", "ubuntu-2604")
 EVIDENCE = "vm-export-evidence.json"
-REQUIRED = ("PVE_URL", "PVE_TOKEN_ID", "PVE_TOKEN_SECRET", "PVE_NODES", "PVE_TEMPLATE_STORAGE", "PVE_IMPORT_STORAGE",
-            "PVE_BRIDGE", "BUILD_GATEWAY", "EXPORT_TEST_ADDRESSES")
+REQUIRED = ("PVE_URL", "PVE_TOKEN_ID", "PVE_TOKEN_SECRET", "PVE_NODES", "PVE_TEMPLATE_STORAGE", "PVE_BRIDGE",
+            "BUILD_GATEWAY", "EXPORT_TEST_ADDRESSES")
+# Secrets too, but not needed by every export: the import storage (native), the ISO storage (kubernetes;
+# falls back to the template storage, as in images/k8s-node-template.sh) and the name servers.
+OPTIONAL = ("PVE_IMPORT_STORAGE", "PVE_ISO_STORAGE", "BUILD_NAMESERVER")
+CLOCK_SKEW = 300  # Seconds allowed between the two lab clocks behind a file time and a VM creation time.
 CLONE_VMIDS = (9290, 9299)
 WORK_ROOM = 48 << 30  # Private copy aside: sanitizer scratch (24 GiB floor), sealed disk and its bundle copy.
 # The sanitizer runs under TCG: about 12 minutes on the workstation it was measured on. The launcher's own
@@ -66,11 +79,20 @@ def need(ok, code):
         raise Refused(code)
 
 
+def plain_dir(env, key, code):
+    base = env.get(key, "")
+    need(re.fullmatch(r"/[A-Za-z0-9/._-]+", base) is not None and ".." not in base and os.path.isdir(base), code)
+    return Path(base)
+
+
 def workdir(env):
-    base = env.get("RUNNER_TEMP", "")
-    need(re.fullmatch(r"/[A-Za-z0-9/._-]+", base) is not None and ".." not in base and os.path.isdir(base),
-         "runner_temp_refused")
-    return Path(base) / "vm-export"
+    return plain_dir(env, "RUNNER_TEMP", "runner_temp_refused") / "vm-export"
+
+
+def state_root(env):
+    """Where the cold-boot state of each run lives: the runner user's home, NOT the runner's temp directory
+    (emptied after every job), so an unclean cleanup still has its record when the next run starts."""
+    return plain_dir(env, "HOME", "runner_home_refused") / STATE_ROOT
 
 
 def load(path):
@@ -96,6 +118,9 @@ def plan(env, now=None):
          and env.get("GITHUB_EVENT_NAME") == "workflow_dispatch", "invalid_run")
     need(re.fullmatch(r"[0-9a-f]{40}", sha) is not None and re.fullmatch(r"[1-9][0-9]{0,19}", run_id) is not None
          and re.fullmatch(r"[1-9][0-9]{0,3}", attempt) is not None, "invalid_run")
+    # A re-run would export with this run's commit, however old: main may have moved since. The hosted jobs
+    # of a run may be re-run (they reuse the export job of attempt 1); the export itself needs a new dispatch.
+    need(attempt == "1", "rerun_refused_dispatch_a_new_run")
     build_version = (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y%m%d%H%M%S")
     name = "%s-%s-%s-%s" % ("vm-k8s-export" if variant == "kubernetes" else "vm-export", os_name, build_version, sha[:12])
     need(vm_publish_stage.selector(name) == (os_name, build_version, sha[:12], variant), "invalid_run")
@@ -106,18 +131,26 @@ def plan(env, now=None):
 
 def settings(env, selected):
     """The validated runner configuration. Refusals name the variable, never its value."""
-    for key in REQUIRED:
-        need(env.get(key, "").strip() != "", "config_missing_" + key)
+    env = {key: (env.get(key) or "").strip() for key in REQUIRED + OPTIONAL + ("EXPORT_VLAN", "EXPORT_SOURCE_MOUNT")}
+    for key in REQUIRED + (() if selected["kubernetes_version"] else ("PVE_IMPORT_STORAGE",)):
+        need(env[key] != "", "config_missing_" + key)
+    for key in REQUIRED + OPTIONAL:
+        # GitHub drops a job output that contains a masked value, and every secret of this job is masked. A
+        # secret that can occur in a hex digest or in the artifact name would cost the publisher its inputs
+        # after the whole export: refuse it now. (The VLAN is a variable for this reason: never a secret.)
+        need(re.fullmatch(r"[0-9a-f]{1,16}", env[key]) is None and (env[key] or " ") not in selected["artifact_name"],
+             "config_%s_would_hide_a_job_output" % key)
     need(re.fullmatch(r"[a-z0-9-]{1,63}", env["PVE_NODES"]) is not None, "config_PVE_NODES_must_be_one_node")
-    vlan = env.get("PVE_BUILD_VLAN") or "0"
-    need(re.fullmatch(r"0|[1-9][0-9]{0,3}", vlan) is not None and int(vlan) <= 4094, "config_PVE_BUILD_VLAN")
-    mount = env.get("EXPORT_SOURCE_MOUNT") or "/srv/" + copy.STORAGE
+    vlan = env["EXPORT_VLAN"] or "0"
+    need(re.fullmatch(r"0|[1-9][0-9]{0,3}", vlan) is not None and int(vlan) <= 4094, "config_EXPORT_VLAN")
+    mount = env["EXPORT_SOURCE_MOUNT"] or "/srv/" + copy.STORAGE
     need(re.fullmatch(r"/[A-Za-z0-9/._-]+", mount) is not None and ".." not in mount, "config_EXPORT_SOURCE_MOUNT")
     cfg = {"node": env["PVE_NODES"], "storage": env["PVE_TEMPLATE_STORAGE"], "import_storage": env["PVE_IMPORT_STORAGE"],
-           "bridge": env["PVE_BRIDGE"], "vlan": int(vlan), "mount": mount, "gateway": env["BUILD_GATEWAY"].strip(),
+           "iso_storage": env["PVE_ISO_STORAGE"] or env["PVE_TEMPLATE_STORAGE"],
+           "bridge": env["PVE_BRIDGE"], "vlan": int(vlan), "mount": mount, "gateway": env["BUILD_GATEWAY"],
            "addresses": [a.strip() for a in env["EXPORT_TEST_ADDRESSES"].split(",")],
            # As images/build.py: the name server falls back to the gateway.
-           "nameservers": re.split(r"[\s,]+", (env.get("BUILD_NAMESERVER") or env["BUILD_GATEWAY"]).strip())}
+           "nameservers": re.split(r"[\s,]+", env["BUILD_NAMESERVER"] or env["BUILD_GATEWAY"])}
     try:  # The cold boot's own rules (two addresses of one network, the gateway in it), before any work.
         coldboot.settings(types.SimpleNamespace(
             test_address=cfg["addresses"], gateway=cfg["gateway"], nameserver=cfg["nameservers"],
@@ -125,7 +158,7 @@ def settings(env, selected):
             bridge=cfg["bridge"], vlan=cfg["vlan"], variant=selected["variant"], os=selected["os"],
             kubernetes_version=selected["kubernetes_version"], sanitize_run=None))
     except coldboot.Refused:
-        raise Refused("config_cold_boot_network") from None
+        raise Refused("config_cold_boot_settings") from None
     return cfg
 
 
@@ -167,30 +200,39 @@ def template_identity(selected, client, node):
 def upstream(selected, api, cfg, name):
     """(checksum, url) of the vendor image the template was built from, from repository source only.
 
-    Kubernetes: the installer ISO pinned in images/k8s-build-config.py. Native: images/build.py verifies the
-    vendor image against the vendor's sums file at build time and keeps exactly one download per OS, named
-    by the first 12 hex of that checksum. The checksum published now is accepted only when that file is the
-    one the node holds and the template is the newest published one of its OS."""
-    # ponytail: a build that failed after a newer vendor download leaves an older newest template next to
-    # the newer file; record the checksum on the template in build.py if that ever has to be excluded.
-    os_name = selected["os"]
+    Kubernetes: the installer ISO pinned in images/k8s-build-config.py at THIS commit. Native: the checksum
+    the vendor publishes NOW; images/build.py verifies the vendor image against it at build time and keeps
+    exactly one download per OS, named by the first 12 hex of that checksum, and the template must be the
+    newest published one of its OS. Neither is recorded on the template, so both are accepted only when
+    the node holds the vendor file of that name and that file is not newer than the template: a pin moved,
+    or a vendor image downloaded by a later (even failed) build, refuses instead of being attributed."""
+    # ponytail: a bound, not a proof (a vendor file that already was on the node when the template was built
+    # from another one still passes). Record the checksum on the template in the two builders to close it.
+    os_name, node, vmid = selected["os"], cfg["node"], selected["template_vmid"]
     if selected["kubernetes_version"]:
         image = k8s_images()[os_name]
-        return image["iso_sha256"], image["iso_url"]
-    import build
-    image = build.IMAGES[os_name]
-    try:
-        checksum = build.checksum_of(image)
-    except (SystemExit, OSError, ValueError):
-        raise Refused("upstream_checksum_unavailable") from None
-    need(type(checksum) is str and re.fullmatch(r"[0-9a-f]{64}", checksum) is not None, "upstream_checksum_unavailable")
-    listed = api.call("GET", "/nodes/%s/storage/%s/content" % (cfg["node"], cfg["import_storage"]), content="import")
-    held = [str(v.get("volid")).rsplit("/", 1)[-1] for v in listed]
-    need([n for n in held if n.startswith("pc-%s-" % os_name)] == ["pc-%s-%s.qcow2" % (os_name, checksum[:12])],
+        checksum, url, storage, content, wanted = image["iso_sha256"], image["iso_url"], cfg["iso_storage"], "iso", image["iso_name"]
+    else:
+        import build
+        image = build.IMAGES[os_name]
+        try:
+            checksum = build.checksum_of(image)
+        except (SystemExit, OSError, ValueError):
+            raise Refused("upstream_checksum_unavailable") from None
+        need(type(checksum) is str and re.fullmatch(r"[0-9a-f]{64}", checksum) is not None, "upstream_checksum_unavailable")
+        url, storage, content, wanted = image["url"], cfg["import_storage"], "import", "pc-%s-%s.qcow2" % (os_name, checksum[:12])
+    listed = api.call("GET", "/nodes/%s/storage/%s/content" % (node, storage), content=content)
+    held = {str(v.get("volid")).rsplit("/", 1)[-1]: v.get("ctime") for v in listed}
+    # Native: exactly one download of this OS. Kubernetes: the ISO store also holds other things.
+    need(wanted in held and (content == "iso" or [n for n in held if n.startswith("pc-%s-" % os_name)] == [wanted]),
          "upstream_image_is_not_the_built_one")
-    versions = build.versions_of(api.call("GET", "/cluster/resources", type="vm"), os_name, cfg["node"])
-    need(bool(versions) and versions[-1] == (name.rsplit("-", 1)[1], selected["template_vmid"]), "template_not_newest")
-    return checksum, image["url"]
+    if content == "import":
+        versions = build.versions_of(api.call("GET", "/cluster/resources", type="vm"), os_name, node)
+        need(bool(versions) and versions[-1] == (name.rsplit("-", 1)[1], vmid), "template_not_newest")
+    created = re.search(r"(?:^|,)ctime=([0-9]{1,12})(?:,|$)", str(api.call("GET", "/nodes/%s/qemu/%d/config" % (node, vmid)).get("meta")))
+    need(type(held[wanted]) is int and held[wanted] > 0 and created is not None, "upstream_image_time_unknown")
+    need(held[wanted] <= int(created[1]) + CLOCK_SKEW, "upstream_image_newer_than_the_template")
+    return checksum, url
 
 
 def os_gate(inventory_bytes, run, receipt):
@@ -245,7 +287,9 @@ class Run:
         snapshot = copy.template_guard(client, cfg["node"], selected["template_vmid"], name, tags)
         need(snapshot["volume"].endswith(self.source.suffix), "template_disk_format")
         size = os.lstat(copy.template_source(snapshot, cfg["mount"])).st_size
-        need(size == vm_sanitize.VIRTUAL_BYTES if self.k8s else 0 < size <= vm_sanitize.VIRTUAL_BYTES, "template_disk_size")
+        # Kubernetes: a raw disk, exactly its virtual size. Native: a QCOW2 file, bounded as the sanitizer bounds it.
+        need(size == vm_sanitize.VIRTUAL_BYTES if self.k8s else 0 < size <= vm_sanitize.NATIVE_SOURCE_MAX_BYTES,
+             "template_disk_size")
         free = os.statvfs(self.work)
         need(free.f_bavail * free.f_frsize >= size + WORK_ROOM, "insufficient_work_space")
         checksum, url = upstream(selected, api, cfg, name)
@@ -296,9 +340,17 @@ class Run:
     def coldboot(self):
         self.sealed()
         cfg = settings(self.env, self.plan)
+        root = state_root(self.env)
+        os.makedirs(root, 0o700, exist_ok=True)
+        # `recover` ran before this stage: never start a cold boot next to a run that is not recorded clean
+        # (its clones still hold the two test addresses).
+        need(os.listdir(root) == [], "leftover_cold_boot_state")
+        state = root / ("%d-%d" % (self.plan["run_id"], self.plan["run_attempt"]))
+        os.mkdir(state, 0o700)
         argv = ["run", "--sanitize-run", str(self.sanitize_run), "--variant", self.plan["variant"], "--os", self.plan["os"],
                 "--node", cfg["node"], "--storage", cfg["storage"], "--bridge", cfg["bridge"], "--vlan", str(cfg["vlan"]),
-                "--gateway", cfg["gateway"], "--vmid-range", "%d-%d" % CLONE_VMIDS, "--state-dir", str(self.work / "coldboot")]
+                "--gateway", cfg["gateway"], "--vmid-range", "%d-%d" % CLONE_VMIDS, "--state-dir", str(state),
+                "--out", str(self.work / "coldboot" / coldboot.RESULT)]
         argv += ["--kubernetes-version", self.k8s] if self.k8s else []
         for flag, values in (("--test-address", cfg["addresses"]), ("--nameserver", cfg["nameservers"])):
             for value in values:
@@ -331,14 +383,18 @@ class Run:
         # Exactly the publisher's check: three files, the pinned hashes, the name's OS, time, commit and variant.
         chosen = vm_publish_stage.inputs(str(selected["run_id"]), str(selected["run_attempt"]), selected["artifact_name"],
                                          pins["manifest_sha256"], pins["disk_sha256"], selected["source_commit"],
-                                         vm_publish_stage.REPOSITORY, vm_publish_stage.WORKFLOW_REF)
+                                         vm_publish_stage.REPOSITORY, vm_publish_stage.WORKFLOW_REF, selected["variant"],
+                                         selected["os"], self.k8s or "none")
         reference = vm_publish_stage.publication_plan(str(staging), chosen)["reference"]
         outputs = dict(pins, artifact_name=selected["artifact_name"])
-        if self.env.get("GITHUB_OUTPUT"):
-            with open(self.env["GITHUB_OUTPUT"], "a", encoding="ascii") as f:
-                f.write("".join("%s=%s\n" % item for item in sorted(outputs.items())))
+        self.output(outputs)
         print(json.dumps(dict(outputs, reference=reference), sort_keys=True))
         return 0
+
+    def output(self, values):
+        if self.env.get("GITHUB_OUTPUT"):
+            with open(self.env["GITHUB_OUTPUT"], "a", encoding="ascii") as f:
+                f.write("".join("%s=%s\n" % item for item in sorted(values.items())))
 
     def evidence(self):
         _, result = self.accepted()
@@ -349,12 +405,17 @@ class Run:
             self.review.read_bytes() if self.k8s else None, baseline(self.plan).read_bytes() if self.k8s else None,
             load(self.sanitize_run), load(self.work / "postscan" / "postscan-run.json"), result,
             vm_artifact.decode(manifest_bytes), manifest_bytes)
-        capsule.write_new(self.work / "evidence" / EVIDENCE, evidence.encode(record))
+        data = evidence.encode(record)
+        capsule.write_new(self.work / "evidence" / EVIDENCE, data)
+        digest = hashlib.sha256(data).hexdigest()
+        self.output({"evidence_sha256": digest})
+        # The record itself is printed by the hosted `verify` job: this job's log and summary are masked, and
+        # a masked copy next to the unmasked artifact would show where a masked value occurs in public data.
         if self.env.get("GITHUB_STEP_SUMMARY"):
             with open(self.env["GITHUB_STEP_SUMMARY"], "a", encoding="ascii") as f:
-                f.write("## VM export evidence (bundle staged; NOT yet published)\n\n```json\n%s```\n"
-                        % evidence.encode(record).decode("ascii"))
-        print(json.dumps({"evidence": EVIDENCE, "reference": record["reference"]}, sort_keys=True))
+                f.write("## VM export staged (NOT yet published)\n\nEvidence record `%s`, sha256 `%s`: uploaded as the "
+                        "artifact `%s-evidence`; the `verify` job prints it.\n" % (EVIDENCE, digest, self.plan["artifact_name"]))
+        print(json.dumps({"evidence": EVIDENCE, "evidence_sha256": digest, "reference": record["reference"]}, sort_keys=True))
         return 0
 
 
@@ -386,41 +447,56 @@ def run_stage(work, name, env, now=None):
     return code
 
 
+def recover(env):
+    """Guarded cold-boot cleanup of every state directory on this runner. A directory is deleted only when
+    its cleanup is recorded clean (or its run never wrote a state file: it changed nothing on the lab);
+    otherwise it stays, as the only record of what is left on the lab, and the command fails."""
+    root = state_root(env)
+    left = 0
+    for state in sorted(root.iterdir()) if os.path.lexists(root) else ():
+        if os.path.lexists(state / coldboot.STATE) and coldboot.main(["cleanup", "--state-dir", str(state)]) != 0:
+            left += 1
+        else:
+            capsule.remove_scratch(state)
+    if left:
+        print("recover: %d cold-boot run(s) not recorded clean on the lab; the state is kept" % left, file=sys.stderr)
+    return 1 if left else 0
+
+
 def purge(work):
-    """Delete the private copy, the scratch and every other work file. The cold-boot state stays (and the
-    step fails) while its cleanup is not recorded clean: it is the only record of what is left on the lab."""
+    """Delete the private copy, the scratch and every other work file (the cold-boot state is not here: see
+    recover). A capsule container that could not be proven stopped is removed first; while docker still
+    lists it, nothing it may write to is deleted under it and the step fails."""
     if not os.path.lexists(work):
         return 0
-    state = work / "coldboot" / coldboot.STATE
-    try:
-        left = os.path.lexists(state) and load(state).get("clean") is not True
-    except (OSError, ValueError, AttributeError):
-        left = True
+    if os.path.lexists(work / UNRESOLVED):
+        need(capsule.force_remove((work / UNRESOLVED).read_text(encoding="ascii").strip()), "capsule_container_still_present")
     for name in DIRS:
-        if os.path.lexists(work / name) and not (left and name == "coldboot"):
+        if os.path.lexists(work / name):
             capsule.remove_scratch(work / name)
     for name in FILES:
         (work / name).unlink(missing_ok=True)
-    if left:
-        print("purge: the cold-boot state is kept: its cleanup is not recorded clean", file=sys.stderr)
-        return 1
     os.rmdir(work)
     return 0
 
 
 FIXED = (Refused, capsule.CapsuleError, coldboot.Refused, coldboot.ApiError, copy.CopyRefused, evidence.EvidenceRefused)
+COMMANDS = {"recover": lambda work, env: recover(env), "purge": lambda work, env: purge(work)}
 
 
 def main(argv=None, env=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("stage", choices=STAGES + ("purge",))
+    parser.add_argument("stage", choices=STAGES + tuple(COMMANDS))
     stage = parser.parse_args(argv).stage
     env = os.environ if env is None else env
+    work = None
     try:
         work = workdir(env)
-        return purge(work) if stage == "purge" else run_stage(work, stage, env)
-    except (*FIXED, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
-        # Fixed texts only; anything else is reduced to its class name.
+        return COMMANDS[stage](work, env) if stage in COMMANDS else run_stage(work, stage, env)
+    except Exception as exc:  # noqa: BLE001 - fixed texts only; anything else is reduced to its class name
+        if isinstance(exc, capsule.Unresolved) and work is not None:
+            # The message ends with the container id: `purge` removes exactly that container first.
+            (work / UNRESOLVED).write_text(str(exc).rsplit(" ", 1)[-1] + "\n", encoding="ascii")
         print("%s refused: %s" % (stage, str(exc) if isinstance(exc, FIXED) else type(exc).__name__), file=sys.stderr)
         return 2
 

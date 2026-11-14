@@ -231,7 +231,7 @@ flowchart LR
   sbxt["sandbox-templates.yml<br/>built-in template images"]:::impl
   vmtools["vm-export-tools.yml<br/>VM export tool image"]:::impl
   vmexport["vm-artifact-export.yml, export job<br/>self-hosted: copy, sanitize, cold boot, bundle"]:::impl
-  vmpublish["vm-artifact-export.yml, hosted jobs<br/>publish (vm-artifacts.yml), attest, verify"]:::impl
+  vmpublish["vm-artifact-export.yml, hosted jobs<br/>publish (vm-artifacts.yml), attest and verify the attestation, verify by anonymous pull"]:::impl
   helm["helm.yml<br/>lint, OCI chart publish"]:::impl
   ghcr["ghcr.io<br/>images and OCI charts"]:::impl
   chart["Chart proxcloud<br/>api, SPAs, gateway, Keycloak, CNPG"]:::impl
@@ -267,8 +267,8 @@ flowchart LR
   ghcr -->|"tool image, pulled by pinned digest"| vmexport
   pve -->|"template guard (API), read-only disk copy (storage mount)"| vmexport
   vmexport -->|"cold boot: two clones, guarded cleanup"| pve
-  vmexport -->|"three-file bundle and public evidence (run artifacts)"| vmpublish
-  vmpublish -->|"VM image by digest, provenance attestation, anonymous pull check"| ghcr
+  vmexport -->|"three-file bundle and public evidence (run artifacts), their sha256 (job outputs)"| vmpublish
+  vmpublish -->|"VM image by the digest of its own push, provenance attestation, anonymous pull check"| ghcr
 ```
 
 The one-host Compose install (`deploy/compose`) runs the same released API and console
@@ -289,8 +289,14 @@ token but no registry credential: it guards and copies the template read-only, s
 the copy in containers without network, cold-boots two clones through the PVE API and
 uploads the three-file bundle plus one public evidence record as run artifacts. The hosted
 jobs of the same run publish the bundle to GHCR (`vm-artifacts.yml`, a reusable workflow
-that accepts only this run's successful export job), attest the pushed digest and verify
-it with an anonymous pull. Details: [VM artifact export and publishing](../../vm-artifact-publishing.md).
+that accepts only this run's successful export job, and only for the variant, OS and
+Kubernetes version that were dispatched), attest the digest of that push and the sha256 of
+the evidence record, check the attestation with the command the run prints, and verify the
+image with an anonymous pull. The export job reads its lab secrets from the environment
+`vm-artifact-export`; that the export runner accepts no other workflow is a setting of the
+organization, not of this repository. The state of a cold boot is kept on the export runner
+outside the job's temp directory, so the next run can finish a cleanup the previous one
+could not. Details: [VM artifact export and publishing](../../vm-artifact-publishing.md).
 
 Both SPA images normalize only nginx's public document root to 0755 directories
 and 0644 files; the entrypoint also sets generated `config.js` to 0644 so nginx

@@ -29,8 +29,10 @@ SHA = "c" * 40
 NOW = datetime.datetime(2026, 11, 14, 12, 0, 0, tzinfo=datetime.timezone.utc)
 NODE, STORAGE, VMID = "labnode7", "pc-ci-images", 105
 PRIVATE = ("labnode7", "192.0.2.50", "192.0.2.51", "192.0.2.1", "203.0.113.9", "images@pve!packer", "token-secret-value",
-           "pc-templates", "import-store", "vmbr7", "/srv/", "/tmp/", "/system.slice", "pc-export-test", "d" * 64,
+           "pc-templates", "import-store", "iso-store", "vmbr7", "/srv/", "/tmp/", "/system.slice", "pc-export-test", "d" * 64,
            "base-105-disk-0")
+BUILT = 1794650400  # The template's creation time on the lab (`meta: ...,ctime=`), seconds.
+ISO = "ubuntu-26.04.1-live-server-amd64.iso"
 DISK = b"QFI\xfb" + bytes(4092)  # NOT a valid QCOW2; no image parser runs here.
 VENDOR = "9" * 64
 
@@ -46,8 +48,9 @@ def github(**changes):
 
 def secrets(mount, **changes):
     env = {"PVE_URL": "https://203.0.113.9:8006", "PVE_TOKEN_ID": "images@pve!packer", "PVE_TOKEN_SECRET": "token-secret-value",
-           "PVE_NODES": NODE, "PVE_TEMPLATE_STORAGE": STORAGE, "PVE_IMPORT_STORAGE": "import-store", "PVE_BRIDGE": "vmbr7",
-           "PVE_BUILD_VLAN": "242", "BUILD_GATEWAY": "192.0.2.1", "BUILD_NAMESERVER": "",
+           "PVE_NODES": NODE, "PVE_TEMPLATE_STORAGE": STORAGE, "PVE_IMPORT_STORAGE": "import-store",
+           "PVE_ISO_STORAGE": "iso-store", "PVE_BRIDGE": "vmbr7", "EXPORT_VLAN": "242", "BUILD_GATEWAY": "192.0.2.1",
+           "BUILD_NAMESERVER": "",
            "EXPORT_TEST_ADDRESSES": "192.0.2.50/24,192.0.2.51/24", "EXPORT_SOURCE_MOUNT": str(mount)}
     env.update(changes)
     return env
@@ -56,14 +59,18 @@ def secrets(mount, **changes):
 class FakePVE:
     """coldboot.Client's surface: call(method, path, **params) returning decoded data."""
 
-    def __init__(self, name, tags, volume, imports=(), templates=()):
-        self.config = {"template": 1, "name": name, "tags": ";".join(tags), "digest": "a" * 40, "scsi0": volume + ",size=20G"}
-        self.imports, self.templates, self.calls = list(imports), list(templates), []
+    def __init__(self, name, tags, volume, imports=(), templates=(), isos=(ISO, "virtio-win.iso")):
+        self.config = {"template": 1, "name": name, "tags": ";".join(tags), "digest": "a" * 40, "scsi0": volume + ",size=20G",
+                       "meta": "creation-qemu=10.0.2,ctime=%d" % BUILT}
+        self.imports, self.templates, self.isos, self.calls = list(imports), list(templates), list(isos), []
+        self.held = BUILT - 3600  # When the node got the vendor file: before the template was built from it.
 
     def call(self, method, path, **params):
         self.calls.append((method, path))
         if method != "GET":
             raise AssertionError("the copy stage only reads")
+        if params:  # As coldboot.Client: the parameters of a GET travel in the query string.
+            path += "?" + "&".join("%s=%s" % item for item in params.items())
         if path.endswith("/config"):
             return dict(self.config)
         if path.endswith("/status/current"):
@@ -73,8 +80,12 @@ class FakePVE:
         if path.startswith("/cluster/resources"):
             return [{"vmid": VMID, "pool": "pc-templates", "template": 1, "node": NODE, "name": self.config["name"],
                      "tags": self.config["tags"]}, *self.templates]
-        if path.endswith("/content"):
-            return [{"volid": "import-store:import/" + name} for name in self.imports]
+        if path.endswith("/content?content=import"):
+            self.storages = getattr(self, "storages", []) + [path.split("/")[4]]
+            return [{"volid": "import-store:import/" + name, "ctime": self.held} for name in self.imports]
+        if path.endswith("/content?content=iso"):
+            self.storages = getattr(self, "storages", []) + [path.split("/")[4]]
+            return [{"volid": "iso-store:iso/" + name, "ctime": self.held} for name in self.isos]
         raise AssertionError(path)
 
 
@@ -86,15 +97,19 @@ class Lab:
         self.tmp = tempfile.TemporaryDirectory()
         case.addCleanup(self.tmp.cleanup)
         root = Path(os.path.realpath(self.tmp.name))
-        self.runner, self.mount = root / "runner", root / "mount"
+        self.runner, self.mount, self.home = root / "runner", root / "mount", root / "home"
         (self.mount / "images" / str(VMID)).mkdir(parents=True)
         self.runner.mkdir()
+        self.home.mkdir()
         self.work = self.runner / "vm-export"
-        self.env = dict(github(**inputs), **secrets(self.mount), RUNNER_TEMP=str(self.runner),
+        self.states = self.home / ".proxcloud-vm-export-coldboot"  # NOT under the runner's temp directory.
+        self.env = dict(github(**inputs), **secrets(self.mount), RUNNER_TEMP=str(self.runner), HOME=str(self.home),
                         GITHUB_OUTPUT=str(root / "output.txt"), GITHUB_STEP_SUMMARY=str(root / "summary.md"))
         self.k8s = self.env["EXPORT_KUBERNETES_VERSION"] or None
         self.os = self.env["EXPORT_OS"]
         self.raw = bytes(1024) + b"template" + bytes(3064)  # 4096 bytes, mostly zeros (sparse copy path).
+        if not self.k8s:  # A native template disk is a QCOW2 file: LARGER than its virtual size (metadata).
+            self.raw += b"qcow2 metadata" + bytes(498)
         suffix = "raw" if self.k8s else "qcow2"
         volume = "%s:%d/base-%d-disk-0.%s" % (STORAGE, VMID, VMID, suffix)
         (self.mount / "images" / str(VMID) / ("base-%d-disk-0.%s" % (VMID, suffix))).write_bytes(self.raw)
@@ -126,7 +141,7 @@ class Lab:
         import build
         for patcher in (patch.object(pipeline, "pve", lambda: self.api),
                         patch.object(capsule, "pull", self.pull), patch.object(pipeline.os, "statvfs", statvfs),
-                        patch.object(pipeline.vm_sanitize, "VIRTUAL_BYTES", len(self.raw)),
+                        patch.object(pipeline.vm_sanitize, "VIRTUAL_BYTES", 4096),
                         patch.object(pipeline, "WORK_ROOM", 1 << 20),
                         patch.object(build, "checksum_of", lambda image: VENDOR)):
             patcher.start()
@@ -213,7 +228,14 @@ class Lab:
         return self.finish("postscan", argv)
 
     def coldboot(self, argv):
+        if argv[0] == "cleanup":  # `recover`: the real cleanup would call PVE; a state recorded clean is clean.
+            self.calls.append(("cleanup", list(argv)))
+            try:
+                return 0 if pipeline.load(Path(argv[2]) / coldboot.STATE).get("clean") is True else 1
+            except (ValueError, AttributeError):
+                return 2
         state = Path(self.option(argv, "--state-dir"))
+        self.case.assertEqual((state.parent, state.stat().st_mode & 0o777, os.listdir(state)), (self.states, 0o700, []))
         run = pipeline.load(self.option(argv, "--sanitize-run"))
         names = coldboot_guest.COMMON + (coldboot_guest.K8S if self.k8s else coldboot_guest.OS_ONLY)
 
@@ -222,7 +244,7 @@ class Lab:
                     "checks": dict.fromkeys(names, True), "machine_id_sha256": suffix * 64, "host_key_sha256": suffix * 64,
                     "snapd_present": True, "snapd_serial_sha256": suffix * 64, "snapd_device_key_sha256": suffix * 64,
                     "snapd_changes_error_lines": 0, "cloud_init_recoverable_warnings": 1}
-        pipeline.write(state / coldboot.RESULT, {
+        pipeline.write(self.option(argv, "--out"), {
             "kind": "ColdBootAcceptance", "accepted": True, "reason": None, "step": "done",
             "variant": "kubernetes" if self.k8s else "os", "os": self.os, "kubernetes_version": self.k8s,
             "pve_tls_verified": False, "api_node_room": "checked", "disk_sha256": run["facts"]["disk_sha256"],
@@ -232,15 +254,16 @@ class Lab:
             "cleanup": {"clones": {"a": "destroyed", "b": "destroyed"}, "import_volume": "deleted", "private_key_deleted": True},
             "protected_set": {"scope": coldboot.SCOPE, "guests": 7, "unchanged": True},
             "storage_set": {"volumes": 31, "unchanged": True}})
-        pipeline.write(state / coldboot.STATE, {"clean": True})
-        return self.finish("coldboot", argv)
+        pipeline.write(state / coldboot.STATE, {"clean": self.fail != "cleanup"})
+        return max(self.finish("coldboot", argv), int(self.fail == "cleanup"))  # Not accepted unless cleaned up.
 
     def stage(self, name, env=None):
-        err = io.StringIO()
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err), \
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
                 patch.object(pipeline.datetime, "datetime", FixedNow):
             code = pipeline.main([name], self.env if env is None else env)
-        self.stderr = err.getvalue()
+        self.stdout, self.stderr = out.getvalue(), err.getvalue()
+        self.printed = dict(getattr(self, "printed", {}), **{name: self.stdout})
         return code
 
     def through(self, last):
@@ -291,6 +314,11 @@ class PlanTests(unittest.TestCase):
                         {"GITHUB_RUN_ATTEMPT": "0"}, {"GITHUB_RUN_ATTEMPT": "x"}):
             with self.subTest(changes=changes), self.assertRaises(pipeline.Refused):
                 pipeline.plan(github(**changes), NOW)
+        # A re-run exports at the commit of the first attempt, however old: only a new dispatch exports.
+        for attempt in ("2", "17"):
+            with self.subTest(attempt=attempt), self.assertRaises(pipeline.Refused) as caught:
+                pipeline.plan(github(GITHUB_RUN_ATTEMPT=attempt), NOW)
+            self.assertEqual(str(caught.exception), "rerun_refused_dispatch_a_new_run")
         self.assertEqual(pipeline.plan(github(EXPORT_TEMPLATE_VMID="9289"), NOW)["template_vmid"], 9289)
         self.assertEqual(pipeline.CLONE_VMIDS, (9290, 9299))  # coldboot's default reserved range.
         self.assertIn('default="9290-9299"', (IMAGES / "vm_export" / "coldboot.py").read_text())
@@ -309,15 +337,50 @@ class SettingsTests(unittest.TestCase):
 
     def test_valid_configuration_and_the_masks_of_its_parts(self):
         cfg = pipeline.settings(secrets("/srv/pc-ci-images"), self.plan)
-        self.assertEqual(cfg, {"node": NODE, "storage": STORAGE, "import_storage": "import-store", "bridge": "vmbr7",
-                               "vlan": 242, "mount": "/srv/pc-ci-images", "gateway": "192.0.2.1",
+        self.assertEqual(cfg, {"node": NODE, "storage": STORAGE, "import_storage": "import-store", "iso_storage": "iso-store",
+                               "bridge": "vmbr7", "vlan": 242, "mount": "/srv/pc-ci-images", "gateway": "192.0.2.1",
                                "addresses": ["192.0.2.50/24", "192.0.2.51/24"], "nameservers": ["192.0.2.1"]})
         self.assertEqual(pipeline.masks(cfg), ["::add-mask::" + v for v in (
             NODE, "192.0.2.1", "192.0.2.50/24", "192.0.2.51/24", "192.0.2.50", "192.0.2.51")])
-        defaults = secrets("/x", EXPORT_SOURCE_MOUNT="", PVE_BUILD_VLAN="", BUILD_NAMESERVER="198.51.100.1 198.51.100.2")
+        defaults = secrets("/x", EXPORT_SOURCE_MOUNT="", EXPORT_VLAN="", PVE_ISO_STORAGE="", PVE_IMPORT_STORAGE="",
+                           BUILD_NAMESERVER="198.51.100.1 198.51.100.2")
         cfg = pipeline.settings(defaults, self.plan)
-        self.assertEqual((cfg["mount"], cfg["vlan"], cfg["nameservers"]),
-                         ("/srv/pc-ci-images", 0, ["198.51.100.1", "198.51.100.2"]))
+        # The ISO store falls back to the template storage, as in the node template builder.
+        self.assertEqual((cfg["mount"], cfg["vlan"], cfg["nameservers"], cfg["iso_storage"], cfg["import_storage"]),
+                         ("/srv/pc-ci-images", 0, ["198.51.100.1", "198.51.100.2"], STORAGE, ""))
+        self.assertIn('PVE_ISO_STORAGE="${PVE_ISO_STORAGE:-$PVE_TEMPLATE_STORAGE}"', (IMAGES / "k8s-node-template.sh").read_text())
+        # Each name server is masked too (GitHub masks a secret as a whole, not its parts).
+        self.assertEqual(pipeline.masks(cfg), ["::add-mask::" + v for v in (
+            NODE, "192.0.2.1", "198.51.100.1", "198.51.100.2", "192.0.2.50/24", "192.0.2.51/24", "192.0.2.50", "192.0.2.51")])
+        # A value pasted with a trailing newline or space is the value: used stripped, everywhere.
+        padded = {key: value + " \n" for key, value in secrets("/srv/pc-ci-images").items()}
+        self.assertEqual(pipeline.settings(padded, self.plan), pipeline.settings(secrets("/srv/pc-ci-images"), self.plan))
+        # The VLAN is not read from the secret the template builds use: a masked short number hides job outputs.
+        self.assertEqual(pipeline.settings(secrets("/x", EXPORT_VLAN="", PVE_BUILD_VLAN="77"), self.plan)["vlan"], 0)
+        # The import storage is a native export's need only.
+        native = pipeline.plan(github(EXPORT_VARIANT="os", EXPORT_KUBERNETES_VERSION=""), NOW)
+        with self.assertRaises(pipeline.Refused) as caught:
+            pipeline.settings(secrets("/x", PVE_IMPORT_STORAGE=" "), native)
+        self.assertEqual(str(caught.exception), "config_missing_PVE_IMPORT_STORAGE")
+        self.assertEqual(pipeline.settings(secrets("/x"), native)["import_storage"], "import-store")
+
+    def test_a_secret_that_would_hide_a_job_output_is_refused_before_any_work(self):
+        """GitHub drops a job output that contains a masked value: the publisher would get empty inputs after
+        the whole export. A secret that can occur in a hex digest or in the artifact name refuses at once."""
+        self.assertEqual(self.plan["artifact_name"], "vm-k8s-export-ubuntu-2604-20261114120000-cccccccccccc")
+        for key, value in (("PVE_NODES", "a1"), ("PVE_NODES", "cafe"), ("PVE_TEMPLATE_STORAGE", "26"), ("PVE_BRIDGE", "0"),
+                           ("PVE_IMPORT_STORAGE", "deadbeef"), ("PVE_ISO_STORAGE", "f" * 16), ("PVE_NODES", "ubuntu"),
+                           ("PVE_TEMPLATE_STORAGE", "export"), ("PVE_BRIDGE", "vm"), ("PVE_ISO_STORAGE", "k8s"),
+                           ("PVE_TOKEN_SECRET", "2604"), ("PVE_TOKEN_ID", "c"), ("BUILD_NAMESERVER", "1114")):
+            with self.subTest(key=key, value=value), self.assertRaises(pipeline.Refused) as caught:
+                pipeline.settings(secrets("/srv/x", **{key: value}), self.plan)
+            self.assertEqual(str(caught.exception), "config_%s_would_hide_a_job_output" % key)
+        # Longer than any chance match, or with a character no digest and no name contains: accepted.
+        for key, value in (("PVE_ISO_STORAGE", "f" * 17), ("PVE_TEMPLATE_STORAGE", "ceph-vm"), ("PVE_NODES", "pve"),
+                           ("PVE_BRIDGE", "vmbr0")):
+            pipeline.settings(secrets("/srv/x", **{key: value}), self.plan)
+        self.assertEqual(sorted(pipeline.REQUIRED + pipeline.OPTIONAL), sorted(
+            key for key in secrets("/x") if key not in ("EXPORT_VLAN", "EXPORT_SOURCE_MOUNT")))
 
     def test_a_refusal_names_the_variable_never_its_value(self):
         for key in pipeline.REQUIRED:
@@ -327,18 +390,19 @@ class SettingsTests(unittest.TestCase):
                 self.assertEqual(str(caught.exception), "config_missing_" + key)
         cases = (({"PVE_NODES": "node1 node2"}, "config_PVE_NODES_must_be_one_node"),
                  ({"PVE_NODES": "Node_1"}, "config_PVE_NODES_must_be_one_node"),
-                 ({"PVE_BUILD_VLAN": "4095"}, "config_PVE_BUILD_VLAN"), ({"PVE_BUILD_VLAN": "-1"}, "config_PVE_BUILD_VLAN"),
+                 ({"EXPORT_VLAN": "4095"}, "config_EXPORT_VLAN"), ({"EXPORT_VLAN": "-1"}, "config_EXPORT_VLAN"),
+                 ({"PVE_TEMPLATE_STORAGE": "pc ci"}, "config_cold_boot_settings"),
                  ({"EXPORT_SOURCE_MOUNT": "srv/x"}, "config_EXPORT_SOURCE_MOUNT"),
                  ({"EXPORT_SOURCE_MOUNT": "/srv/../etc"}, "config_EXPORT_SOURCE_MOUNT"),
                  ({"EXPORT_SOURCE_MOUNT": "/srv/a b"}, "config_EXPORT_SOURCE_MOUNT"),
-                 ({"EXPORT_TEST_ADDRESSES": "192.0.2.50/24"}, "config_cold_boot_network"),
-                 ({"EXPORT_TEST_ADDRESSES": "192.0.2.50/24,192.0.2.50/24"}, "config_cold_boot_network"),
-                 ({"EXPORT_TEST_ADDRESSES": "192.0.2.50/24,198.51.100.51/24"}, "config_cold_boot_network"),
-                 ({"EXPORT_TEST_ADDRESSES": "192.0.2.50/24,192.0.2.51/24,192.0.2.52/24"}, "config_cold_boot_network"),
-                 ({"EXPORT_TEST_ADDRESSES": "192.0.2.50,192.0.2.1/24"}, "config_cold_boot_network"),
-                 ({"BUILD_GATEWAY": "198.51.100.1"}, "config_cold_boot_network"),
-                 ({"BUILD_NAMESERVER": "not-an-address"}, "config_cold_boot_network"),
-                 ({"PVE_BRIDGE": "vmbr0,firewall=1"}, "config_cold_boot_network"))
+                 ({"EXPORT_TEST_ADDRESSES": "192.0.2.50/24"}, "config_cold_boot_settings"),
+                 ({"EXPORT_TEST_ADDRESSES": "192.0.2.50/24,192.0.2.50/24"}, "config_cold_boot_settings"),
+                 ({"EXPORT_TEST_ADDRESSES": "192.0.2.50/24,198.51.100.51/24"}, "config_cold_boot_settings"),
+                 ({"EXPORT_TEST_ADDRESSES": "192.0.2.50/24,192.0.2.51/24,192.0.2.52/24"}, "config_cold_boot_settings"),
+                 ({"EXPORT_TEST_ADDRESSES": "192.0.2.50,192.0.2.1/24"}, "config_cold_boot_settings"),
+                 ({"BUILD_GATEWAY": "198.51.100.1"}, "config_cold_boot_settings"),
+                 ({"BUILD_NAMESERVER": "not-an-address"}, "config_cold_boot_settings"),
+                 ({"PVE_BRIDGE": "vmbr0,firewall=1"}, "config_cold_boot_settings"))
         for changes, code in cases:
             with self.subTest(changes=changes), self.assertRaises(pipeline.Refused) as caught:
                 pipeline.settings(secrets("/srv/x", **changes), self.plan)
@@ -367,13 +431,42 @@ class SourceTests(unittest.TestCase):
             with self.subTest(name=name), self.assertRaises(pipeline.Refused):
                 pipeline.template_identity(native, client, NODE)
 
-    def test_kubernetes_upstream_is_the_pinned_installer_iso(self):
+    def test_kubernetes_upstream_is_the_pinned_installer_iso_the_node_held_before_the_build(self):
         plan = pipeline.plan(github(), NOW)
-        checksum, url = pipeline.upstream(plan, None, None, None)
+        cfg = {"node": NODE, "iso_storage": "iso-store"}
+        name = "ubuntu-2604-kube-v1.37.2"
+        api = FakePVE(name, [], "x")
+        checksum, url = pipeline.upstream(plan, api, cfg, name)
         self.assertRegex(checksum, r"^[0-9a-f]{64}$")
-        self.assertEqual(url, "https://releases.ubuntu.com/26.04/ubuntu-26.04.1-live-server-amd64.iso")
-        self.assertIn('"iso_sha256": "%s"' % checksum, (IMAGES / "k8s-build-config.py").read_text())
+        self.assertEqual(url, "https://releases.ubuntu.com/26.04/" + ISO)
+        self.assertEqual(api.storages, ["iso-store"])
+        source = (IMAGES / "k8s-build-config.py").read_text()
+        self.assertIn('"iso_sha256": "%s"' % checksum, source)
+        self.assertIn('"iso_name": "%s"' % ISO, source)
         vm_artifact.request_valid(pipeline.bundle.request("ubuntu-2604", SHA, checksum, "20261114120000", "1.37.2", url))
+        # The pin is read at the export commit: after a pin bump the node holds no such ISO yet, or one that
+        # arrived after this template was built. Either refuses instead of attributing the new ISO.
+        self.assertEqual(pipeline.CLOCK_SKEW, 300)
+        for change, code in ((dict(isos=["ubuntu-26.04.2-live-server-amd64.iso"]), "upstream_image_is_not_the_built_one"),
+                             (dict(isos=[]), "upstream_image_is_not_the_built_one"),
+                             (dict(held=BUILT + 301), "upstream_image_newer_than_the_template"),
+                             (dict(held=None), "upstream_image_time_unknown"), (dict(held=True), "upstream_image_time_unknown"),
+                             (dict(held="1794650400"), "upstream_image_time_unknown"), (dict(held=0), "upstream_image_time_unknown"),
+                             (dict(meta=None), "upstream_image_time_unknown"), (dict(meta="creation-qemu=10.0.2"), "upstream_image_time_unknown"),
+                             (dict(meta="creation-qemu=10.0.2,xctime=1"), "upstream_image_time_unknown")):
+            api = FakePVE(name, [], "x")
+            if "meta" in change:
+                api.config["meta"] = change["meta"]
+            else:
+                vars(api).update(change)
+            with self.subTest(change=change), self.assertRaises(pipeline.Refused) as caught:
+                pipeline.upstream(plan, api, cfg, name)
+            self.assertEqual(str(caught.exception), code)
+        for held, meta in ((BUILT + 300, None), (1, "ctime=%d" % BUILT), (BUILT, "ctime=%d,creation-qemu=10.0.2" % BUILT)):
+            api = FakePVE(name, [], "x")
+            api.held = held
+            api.config["meta"] = meta or api.config["meta"]
+            pipeline.upstream(plan, api, cfg, name)
 
     def test_native_upstream_must_be_the_image_the_node_holds_for_the_newest_template(self):
         import build
@@ -388,6 +481,14 @@ class SourceTests(unittest.TestCase):
         held = ["pc-ubuntu-2604-%s.qcow2" % VENDOR[:12], "pc-ubuntu-2404-aaaaaaaaaaaa.qcow2"]
         with patch.object(build, "checksum_of", lambda image: VENDOR):
             self.assertEqual(pipeline.upstream(plan, api(held), cfg, name), (VENDOR, build.IMAGES["ubuntu-2604"]["url"]))
+            # A later build (even one that failed) replaced the vendor download: the checksum published now is
+            # not the one of the image this older template was built from.
+            later = api(held)
+            later.held = BUILT + 86400
+            with self.assertRaises(pipeline.Refused) as caught:
+                pipeline.upstream(plan, later, cfg, name)
+            self.assertEqual(str(caught.exception), "upstream_image_newer_than_the_template")
+            self.assertEqual(later.storages, ["import-store"])
             newer = {"vmid": 106, "pool": "pc-templates", "template": 1, "node": NODE, "tags": tags + "202611150900"}
             for imports, templates, code in (
                     ([], (), "upstream_image_is_not_the_built_one"),
@@ -452,8 +553,13 @@ class ChainTests(unittest.TestCase):
         self.assertEqual(argv["coldboot"], [
             "run", "--sanitize-run", str(work / "sanitize" / "sanitize-run.json"), "--variant", "kubernetes", "--os",
             "ubuntu-2604", "--node", NODE, "--storage", STORAGE, "--bridge", "vmbr7", "--vlan", "242", "--gateway",
-            "192.0.2.1", "--vmid-range", "9290-9299", "--state-dir", str(work / "coldboot"), "--kubernetes-version",
+            "192.0.2.1", "--vmid-range", "9290-9299", "--state-dir", str(lab.states / "4242-1"), "--out",
+            str(work / "coldboot" / "coldboot-result.json"), "--kubernetes-version",
             "1.37.2", "--test-address", "192.0.2.50/24", "--test-address", "192.0.2.51/24", "--nameserver", "192.0.2.1"])
+        # The state of the cold boot is outside the runner's temp directory; its result is a work file.
+        self.assertEqual(os.listdir(lab.states), ["4242-1"])
+        self.assertEqual(os.listdir(work / "coldboot"), ["coldboot-result.json"])
+        self.assertNotIn(str(lab.runner), str(lab.states))
         # The real launchers parse exactly these argument lists.
         for name, module in (("inventory", pipeline.inventory), ("sanitize", pipeline.sanitize), ("postscan", pipeline.postscan)):
             self.assertIn('add_parser("k8s")', Path(module.__file__).read_text(), name)
@@ -470,12 +576,20 @@ class ChainTests(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(work / "bundle")), ["SHA256SUMS", "disk.qcow2", "manifest.json"])
         outputs = dict(line.split("=", 1) for line in Path(lab.env["GITHUB_OUTPUT"]).read_text().splitlines())
         manifest = json.loads((work / "bundle" / "manifest.json").read_bytes())
-        self.assertEqual(outputs, {"artifact_name": "vm-k8s-export-ubuntu-2604-20261114120000-cccccccccccc",
-                                   "manifest_sha256": lab.sha(work / "bundle" / "manifest.json"),
-                                   "disk_sha256": hashlib.sha256(DISK).hexdigest()})
+        self.assertEqual({key: value for key, value in outputs.items() if key != "evidence_sha256"},
+                         {"artifact_name": "vm-k8s-export-ubuntu-2604-20261114120000-cccccccccccc",
+                          "manifest_sha256": lab.sha(work / "bundle" / "manifest.json"),
+                          "disk_sha256": hashlib.sha256(DISK).hexdigest()})
         chosen = vm_publish_stage.inputs("4242", "1", outputs["artifact_name"], outputs["manifest_sha256"],
-                                         outputs["disk_sha256"], SHA, vm_publish_stage.REPOSITORY, vm_publish_stage.WORKFLOW_REF)
+                                         outputs["disk_sha256"], SHA, vm_publish_stage.REPOSITORY, vm_publish_stage.WORKFLOW_REF,
+                                         "kubernetes", "ubuntu-2604", "1.37.2")
         plan = vm_publish_stage.publication_plan(str(work / "bundle"), chosen)
+        # The dispatch decides what the bundle may be: the same bytes are refused for any other dispatch.
+        for dispatched in (("os", "ubuntu-2604", "none"), ("kubernetes", "ubuntu-2604", "1.36.6"), ("kubernetes", "ubuntu-2404", "1.37.2")):
+            with self.subTest(dispatched=dispatched), self.assertRaises(ValueError):
+                vm_publish_stage.publication_plan(str(work / "bundle"), vm_publish_stage.inputs(
+                    "4242", "1", outputs["artifact_name"], outputs["manifest_sha256"], outputs["disk_sha256"], SHA,
+                    vm_publish_stage.REPOSITORY, vm_publish_stage.WORKFLOW_REF, *dispatched))
         self.assertEqual(plan["reference"], "ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2604-k8s:"
                                             "ubuntu-2604-k8s-1.37.2-20261114120000-cccccccccccc")
         receipt_row = manifest["clean_export_receipt"]
@@ -490,12 +604,43 @@ class ChainTests(unittest.TestCase):
         evidence.check(record, dict(pipeline.load(work / "plan.json"), tool_image_id=capsule.IMAGE_IDS[0]))
         self.assertEqual((record["reference"], record["bundle"]["manifest_sha256"], record["run_id"]),
                          (plan["reference"], outputs["manifest_sha256"], 4242))
-        summary = Path(lab.env["GITHUB_STEP_SUMMARY"]).read_text()
-        self.assertIn(text, summary)
+        # The log and the summary of this job are masked, the artifact is not: the record itself is NOT printed
+        # here (a masked copy next to the unmasked one shows where a masked value occurs in public data). The
+        # summary and every stage's output are exactly these lines: no plan (it holds the VMID), no receipt.
+        digest = hashlib.sha256(text.encode()).hexdigest()
+        self.assertEqual(Path(lab.env["GITHUB_STEP_SUMMARY"]).read_text(), (
+            "## VM export staged (NOT yet published)\n\nEvidence record `vm-export-evidence.json`, sha256 `%s`: uploaded as "
+            "the artifact `vm-k8s-export-ubuntu-2604-20261114120000-cccccccccccc-evidence`; the `verify` job prints it.\n" % digest))
+        outputs = dict(line.split("=", 1) for line in Path(lab.env["GITHUB_OUTPUT"]).read_text().splitlines())
+        self.assertEqual(sorted(outputs), ["artifact_name", "disk_sha256", "evidence_sha256", "manifest_sha256"])
+        self.assertEqual(outputs["evidence_sha256"], digest)
+
+        def line(**row):
+            return json.dumps(row, sort_keys=True) + "\n"
+        cfg = pipeline.settings(lab.env, pipeline.load(work / "plan.json"))
+        self.assertEqual(lab.printed, {
+            "plan": line(artifact_name=outputs["artifact_name"], build_version="20261114120000", variant="kubernetes",
+                         os="ubuntu-2604", kubernetes_version="1.37.2"),
+            "config": "".join(mask + "\n" for mask in pipeline.masks(cfg)), "tools": "",
+            "copy": json.dumps({"raw_sha256": copied["raw_sha256"], "raw_bytes": 4096}) + "\n",
+            "inventory": "", "review": "", "sanitize": "", "postscan": "", "coldboot": "",
+            "bundle": line(artifact_name=outputs["artifact_name"], manifest_sha256=outputs["manifest_sha256"],
+                           disk_sha256=outputs["disk_sha256"], reference=plan["reference"]),
+            "evidence": line(evidence="vm-export-evidence.json", evidence_sha256=digest, reference=plan["reference"])})
         for private in PRIVATE + (str(VMID),):
             self.assertNotIn(private, text.replace("ubuntu-26.04.1-live", ""), private)
+            for name, printed in lab.printed.items():
+                if name != "config":  # The masks ARE the private values, by design.
+                    self.assertNotIn(private, printed, (name, private))
         # Nothing private was printed by a refusal-free run either.
         self.assertEqual(lab.stderr, "")
+        # The hosted verifier accepts exactly this record for exactly this publication.
+        chosen = vm_publish_stage.inputs("4242", "1", outputs["artifact_name"], outputs["manifest_sha256"],
+                                         outputs["disk_sha256"], SHA, vm_publish_stage.REPOSITORY, vm_publish_stage.WORKFLOW_REF,
+                                         "kubernetes", "ubuntu-2604", "1.37.2")
+        self.assertEqual(vm_publish_stage.evidence_text(
+            str(work / "evidence" / "vm-export-evidence.json"), digest,
+            vm_publish_stage.publication_plan(str(work / "bundle"), chosen), chosen), text)
 
     def test_native_run_uses_the_os_paths_and_the_eligibility_gate(self):
         lab = Lab(self, EXPORT_VARIANT="os", EXPORT_OS="ubuntu-2404", EXPORT_KUBERNETES_VERSION="")
@@ -516,6 +661,28 @@ class ChainTests(unittest.TestCase):
         record = json.loads((work / "evidence" / "vm-export-evidence.json").read_text())
         self.assertEqual((record["review"], record["kubernetes_version"]), ({"sanitize_eligible": True}, None))
         self.assertEqual(pipeline.load(receipt)["template"]["name"], "pc-ubuntu-2404-202611140900")
+        # The copied QCOW2 FILE is larger than the virtual size of the disk (metadata): its length is the bound
+        # of the copy, never the virtual size. (Recorded on the lab: 21478375424 bytes for a 20 GiB disk.)
+        self.assertEqual(pipeline.load(receipt)["raw_bytes"], 4096 + 512)
+        self.assertGreater(len(lab.raw), pipeline.vm_sanitize.VIRTUAL_BYTES)
+        self.assertEqual(lab.printed["review"], '{"sanitize_eligible": true}\n')
+        self.assertEqual(lab.printed["copy"], json.dumps({"raw_sha256": hashlib.sha256(lab.raw).hexdigest(), "raw_bytes": 4608}) + "\n")
+        self.assertEqual(lab.api.storages, ["import-store"])
+
+    def test_native_disk_file_is_bounded_as_the_sanitizer_bounds_it(self):
+        self.assertEqual(vm_sanitize.NATIVE_SOURCE_MAX_BYTES, 24 << 30)
+        self.assertGreater(21478375424, vm_sanitize.VIRTUAL_BYTES)  # The real ubuntu-2604 template file.
+        self.assertLess(21478375424, vm_sanitize.NATIVE_SOURCE_MAX_BYTES)
+        self.assertIn("0 < source.st_size <= NATIVE_SOURCE_MAX_BYTES)", (IMAGES / "vm_sanitize.py").read_text())
+        for limit, written, code in ((4608, None, 0), (4607, None, 2), (1 << 20, b"", 2)):
+            with self.subTest(limit=limit, written=written):
+                lab = Lab(self, EXPORT_VARIANT="os", EXPORT_OS="ubuntu-2604", EXPORT_KUBERNETES_VERSION="")
+                lab.through("tools")
+                if written is not None:
+                    (lab.mount / "images" / "105" / "base-105-disk-0.qcow2").write_bytes(written)
+                with patch.object(pipeline.vm_sanitize, "NATIVE_SOURCE_MAX_BYTES", limit):
+                    self.assertEqual(lab.stage("copy"), code)
+                self.assertEqual(lab.stderr, "copy refused: template_disk_size\n" if code else "")
 
     def test_a_stage_runs_only_after_exactly_the_earlier_ones(self):
         lab = Lab(self)
@@ -551,6 +718,9 @@ class ChainTests(unittest.TestCase):
         lab.through("copy")
         for error, printed in ((OSError(13, "Permission denied", "/srv/pc-ci-images/images/105/base-105-disk-0.raw"), "PermissionError"),
                                (KeyError("token-secret-value"), "KeyError"), (ValueError("guest said: 192.0.2.50"), "ValueError"),
+                               (AttributeError("'NoneType' object has no attribute 'token-secret-value'"), "AttributeError"),
+                               (IndexError("192.0.2.50"), "IndexError"), (__import__("http.client").client.IncompleteRead(b"192.0.2.50"), "IncompleteRead"),
+                               (RuntimeError("/srv/pc-ci-images"), "RuntimeError"),
                                (capsule.CapsuleError("source does not match the copy receipt"), "source does not match the copy receipt"),
                                (coldboot.ApiError(403), "pve_http_403")):
             def fail(argv, error=error):
@@ -564,7 +734,8 @@ class ChainTests(unittest.TestCase):
         lab = Lab(self)
         lab.through("plan")
         self.assertEqual(lab.stage("config", dict(lab.env, EXPORT_TEST_ADDRESSES="192.0.2.50/24,203.0.113.77/24")), 2)
-        self.assertEqual(lab.stderr, "config refused: config_cold_boot_network\n")
+        self.assertEqual(lab.stderr, "config refused: config_cold_boot_settings\n")
+        self.assertEqual(lab.stdout, "")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(pipeline.main(["config"], lab.env), 0)
@@ -633,7 +804,7 @@ class ChainTests(unittest.TestCase):
                     self.assertNotIn("manifest.json", os.listdir(lab.work / "bundle"))
                     self.assertFalse(Path(lab.env["GITHUB_OUTPUT"]).exists())
 
-    def test_purge_deletes_everything_but_an_unclean_cold_boot_state(self):
+    def test_purge_deletes_every_work_file(self):
         lab = Lab(self)
         self.assertEqual(lab.stage("purge"), 0)  # Nothing to delete before a plan.
         lab.through("evidence")
@@ -642,16 +813,90 @@ class ChainTests(unittest.TestCase):
         self.assertEqual(lab.stage("purge"), 0)
         self.assertFalse(lab.work.exists())
         self.assertEqual(os.listdir(lab.runner), [])
-        for state in ({"clean": False}, {}, "not json"):
-            with self.subTest(state=state):
-                lab = Lab(self)
-                lab.through("postscan")
-                (lab.work / "coldboot" / coldboot.STATE).write_text(state if type(state) is str else json.dumps(state))
-                self.assertEqual(lab.stage("purge"), 1)
-                self.assertEqual(os.listdir(lab.work), ["coldboot"])  # The private copy and the scratch are gone.
-                self.assertEqual(os.listdir(lab.work / "coldboot"), [coldboot.STATE])
+        self.assertEqual(os.listdir(lab.states), ["4242-1"])  # Not purge's to delete: see recover.
         self.assertEqual(sorted(pipeline.DIRS), sorted(["private", "scratch", "docker-anonymous", "inventory", "review",
                                                         "sanitize", "postscan", "coldboot", "bundle", "evidence"]))
+
+    def test_cold_boot_state_outlives_the_job_until_its_cleanup_is_recorded_clean(self):
+        """The runner empties its temp directory after every job. What a cold boot left on the lab is known
+        only from its state file, so that file lives elsewhere and goes only when the cleanup is clean."""
+        lab = Lab(self)
+        self.assertEqual(lab.stage("recover"), 0)  # No state directory at all: nothing to do, no API call.
+        lab.through("evidence")
+        self.assertEqual((lab.stage("recover"), os.listdir(lab.states)), (0, []))
+        self.assertEqual(lab.calls[-1], ("cleanup", ["cleanup", "--state-dir", str(lab.states / "4242-1")]))
+        # An unclean cleanup: the state stays and the step fails, whatever purge and the runner then delete.
+        lab = Lab(self)
+        lab.fail = "cleanup"
+        lab.through("postscan")
+        self.assertEqual(lab.stage("coldboot"), 1)
+        self.assertEqual(lab.stage("recover"), 1)
+        self.assertEqual(lab.stderr, "recover: 1 cold-boot run(s) not recorded clean on the lab; the state is kept\n")
+        self.assertEqual(lab.stage("purge"), 0)
+        self.assertFalse(lab.work.exists())
+        self.assertEqual(os.listdir(lab.states / "4242-1"), [coldboot.STATE])
+        # The next run (a new dispatch, the same runner): its cold boot does not start next to that state...
+        later = Lab(self, GITHUB_RUN_ID="4243")
+        later.env["HOME"], later.states = lab.env["HOME"], lab.states
+        later.through("postscan")
+        self.assertEqual(later.stage("coldboot"), 2)
+        self.assertEqual(later.stderr, "coldboot refused: leftover_cold_boot_state\n")
+        self.assertEqual(later.stage("recover"), 1)
+        # ...and once the lab answers the guarded cleanup, `recover` (which runs first) removes it.
+        pipeline.write(lab.states / "4242-1" / "x", {})
+        (lab.states / "4242-1" / coldboot.STATE).write_text(json.dumps({"clean": True}))
+        self.assertEqual((later.stage("recover"), os.listdir(lab.states)), (0, []))
+        self.assertEqual(later.stage("coldboot"), 0)
+        self.assertEqual(os.listdir(lab.states), ["4243-1"])
+        # A run that never wrote a state file changed nothing on the lab: removed without any API call. One
+        # whose state cannot be read is kept.
+        lab = Lab(self)
+        for name, content in (("7-1", None), ("8-1", "not json"), ("9-1", json.dumps({"clean": True}))):
+            (lab.states / name).mkdir(parents=True)
+            (lab.states / name / "id_ed25519").write_text("key")
+            if content is not None:
+                (lab.states / name / coldboot.STATE).write_text(content)
+        self.assertEqual(lab.stage("recover"), 1)
+        self.assertEqual(os.listdir(lab.states), ["8-1"])
+        self.assertEqual([argv[2] for name, argv in lab.calls if name == "cleanup"], [str(lab.states / "8-1"), str(lab.states / "9-1")])
+        for home in ("", "relative/home", "/no/such/home", str(lab.home) + "/../home", str(lab.home) + "/a b"):
+            with self.subTest(home=home):
+                self.assertEqual(lab.stage("recover", dict(lab.env, HOME=home)), 2)
+                self.assertEqual(lab.stderr, "recover refused: runner_home_refused\n")
+
+    def test_a_capsule_not_proven_stopped_is_removed_before_anything_under_it_is_deleted(self):
+        cid = "e" * 64
+        lab = Lab(self)
+        lab.through("copy")
+
+        def unresolved(argv):
+            raise capsule.Unresolved("UNRESOLVED exact capsule cleanup " + cid)
+        with patch.object(pipeline.inventory, "main", unresolved):
+            self.assertEqual(lab.stage("inventory"), 2)
+        self.assertEqual((lab.work / "unresolved-container").read_text(), cid + "\n")
+        commands = []
+
+        def docker(listed):
+            def run(args, **kw):
+                commands.append(args)
+                return types.SimpleNamespace(returncode=0, stdout=listed if args[1] == "ps" else "")
+            return run
+        with patch.object(capsule, "_command", docker(cid + "\n")):  # Docker still lists it: nothing is deleted.
+            self.assertEqual(lab.stage("purge"), 2)
+        self.assertEqual(lab.stderr, "purge refused: capsule_container_still_present\n")
+        self.assertTrue((lab.work / "private" / "source.raw").exists())
+        self.assertEqual(commands, [["docker", "rm", "--force", cid],
+                                    ["docker", "ps", "--all", "--quiet", "--no-trunc", "--filter", "id=" + cid]])
+        with patch.object(capsule, "_command", lambda args, **kw: types.SimpleNamespace(returncode=1, stdout="")):
+            self.assertEqual(lab.stage("purge"), 2)  # Docker does not answer: not proven gone.
+        (lab.work / "unresolved-container").write_text("--all\n")
+        with patch.object(capsule, "_command", docker("")):
+            self.assertEqual(lab.stage("purge"), 2)  # Never an option or a name: exactly a container id.
+        self.assertEqual(lab.stderr, "purge refused: container id\n")
+        (lab.work / "unresolved-container").write_text(cid + "\n")
+        with patch.object(capsule, "_command", docker("")):
+            self.assertEqual(lab.stage("purge"), 0)
+        self.assertFalse(lab.work.exists())
 
 
 class EvidenceTests(unittest.TestCase):

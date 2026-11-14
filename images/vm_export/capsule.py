@@ -248,6 +248,16 @@ def remove_scratch(path):
     shutil.rmtree(path)
 
 
+def force_remove(cid):
+    """Kill and remove exactly this container (one that run() could not prove stopped). True only once
+    docker answers and no longer lists it."""
+    need(re.fullmatch(r"[0-9a-f]{64}", cid) is not None, "container id")
+    _command(["docker", "rm", "--force", cid], timeout=60, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    listed = _command(["docker", "ps", "--all", "--quiet", "--no-trunc", "--filter", "id=" + cid], capture_output=True,
+                      text=True)
+    return listed.returncode == 0 and listed.stdout.strip() == ""
+
+
 def _cgroup_of(pid):
     """cgroup v2 path rows of a live pid (raises FileNotFoundError once it is gone)."""
     return [x.split(":", 2)[2] for x in (Path("/proc") / str(pid) / "cgroup").read_text().splitlines()

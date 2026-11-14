@@ -268,7 +268,7 @@ jobs:
           printf '{"reference": "%s", "tag": "%s", "config_digest": "%s", "image_id": "%s", "source_sha": "%s"}\n' \
             "$reference" "$tag" "$config" "$image_id" "$SOURCE_SHA" > digest/vm-export-tools-image.json
           {
-            echo '## VM export tool image published; NOT yet used by the export pipeline'
+            echo '## VM export tool image published; the export uses it only once its digest is pinned in images/vm_export/capsule.py'
             echo
             echo "Reference: \`$reference\`"
             echo

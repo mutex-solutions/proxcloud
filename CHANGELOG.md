@@ -14,13 +14,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The `export` job (self-hosted, inside the lab, no registry credential) guards and copies the template
   read-only, then runs inventory, review, sanitize, postscan and the two-clone cold boot in a fixed order
   (`images/vm_export/pipeline.py`: a stage refuses unless the earlier ones completed and their records
-  match), and builds the three-file bundle. Hosted jobs then publish it to GHCR, create a GitHub
-  build-provenance attestation for the pushed digest and pull that digest with no credential to verify
-  the files. The run also uploads one public evidence record (hashes, check results, versions, the tool
-  image digest, the commit and the run), built from an allowlist so it holds no path, address, VMID or
-  guest data. `docs/vm-artifact-publishing.md` has the flow, the trust model, the secrets to set
-  (`EXPORT_TEST_ADDRESSES` is new) and the three commands anyone can use to verify an image. The
-  workflow has not run on the lab yet.
+  match), and builds the three-file bundle. Hosted jobs then publish it to GHCR (only for the variant,
+  OS and Kubernetes version that were dispatched), create a GitHub build-provenance attestation for the
+  digest of that push, check it with the command the run prints, and pull the digest with no credential
+  to verify the files. The run also uploads one public evidence record (hashes, check results, versions,
+  the tool image digest, the commit and the run), built from an allowlist so it holds no path, address,
+  VMID or guest data; its sha256 is attested too and the final summary prints it. A cold boot that could
+  not clean up keeps its state on the runner, and the next export finishes that cleanup before it
+  starts. `docs/vm-artifact-publishing.md` has the flow, the trust model with the settings the owner
+  must make outside the repository (runner group, fork approval, branch protection, the environment
+  `vm-artifact-export`), the secrets and variables to set (`EXPORT_TEST_ADDRESSES` and `EXPORT_VLAN` are
+  new) and the commands anyone can use to verify an image. The workflow has not run on the lab yet.
 
 - **VM export tool image built by CI** (`images/vm_export/tools/`, `vm-export-tools.yml`): the image the
   export containers run from (`qemu-img`, Python with libguestfs, the appliance kernel) was built on a
