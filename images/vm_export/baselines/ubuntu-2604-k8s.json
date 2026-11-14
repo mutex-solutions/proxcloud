@@ -1,0 +1,517 @@
+{
+ "basis": "Reviewed Ubuntu 26.04 Kubernetes node template (image-builder): the 1.35.10 review, re-confirmed by the 1.37.2 read-only inventory, which differed ONLY in kubeadm/kubelet/kubectl and kubernetes-cni. inventory = vm_export.review project of the 1.37.2 inventory (repo sanitizer at c50ca9e).",
+ "inventory": {
+  "close_error": null,
+  "cloud_base_default_user": "ubuntu",
+  "dropin_default_users": {
+   "05_logging.cfg": null,
+   "20-disable-cc-dpkg-grub.cfg": null,
+   "90_dpkg.cfg": null,
+   "README": null
+  },
+  "facts": {
+   "accounts": [
+    {
+     "home": "/root",
+     "kind": "root",
+     "name": "root",
+     "passwd_marker": "x",
+     "shadow_marker": "*",
+     "shell": "/bin/bash",
+     "uid": 0
+    },
+    {
+     "home": "/usr/sbin",
+     "kind": "system",
+     "name": "daemon",
+     "passwd_marker": "x",
+     "shadow_marker": "*",
+     "shell": "/usr/sbin/nologin",
+     "uid": 1
+    },
+    {
+     "home": "/bin",
+     "kind": "system",
+     "name": "bin",
+     "passwd_marker": "x",
+     "shadow_marker": "*",
+     "shell": "/usr/sbin/nologin",
+     "uid": 2
+    },
+    {
+     "home": "/dev",
+     "kind": "system",
+     "name": "sys",
+     "passwd_marker": "x",
+     "shadow_marker": "*",
+     "shell": "/usr/sbin/nologin",
+     "uid": 3
+    },
+    {
+     "home": "/bin",
+     "kind": "system",
+     "name": "sync",
+     "passwd_marker": "x",
+     "shadow_marker": "*",
+     "shell": "/bin/sync",
+     "uid": 4
+    },
+    {
+     "home": "/usr/games",
+     "kind": "system",
+     "name": "games",
+     "passwd_marker": "x",
+     "shadow_marker": "*",
+     "shell": "/usr/sbin/nologin",
+     "uid": 5
+    },
+    {
+     "home": "/var/cache/man",
+     "kind": "system",
+     "name": "man",
+     "passwd_marker": "x",
+     "shadow_marker": "*",
+     "shell": "/usr/sbin/nologin",
+     "uid": 6
+    },
+    {
+     "home": "/var/spool/lpd",
+     "kind": "system",
+     "name": "lp",
+     "passwd_marker": "x",
+     "shadow_marker": "*",
+     "shell": "/usr/sbin/nologin",
+     "uid": 7
+    },
+    {
+     "home": "/var/mail",
+     "kind": "system",
+     "name": "mail",
+     "passwd_marker": "x",
+     "shadow_marker": "*",
+     "shell": "/usr/sbin/nologin",
+     "uid": 8
+    },
+    {
+     "home": "/var/spool/news",
+     "kind": "system",
+     "name": "news",
+     "passwd_marker": "x",
+     "shadow_marker": "*",
+     "shell": "/usr/sbin/nologin",
+     "uid": 9
+    },
+    {
+     "home": "/var/spool/uucp",
+     "kind": "system",
+     "name": "uucp",
+     "passwd_marker": "x",
+     "shadow_marker": "*",
+     "shell": "/usr/sbin/nologin",
+     "uid": 10
+    },
+    {
+     "home": "/bin",
+     "kind": "system",
+     "name": "proxy",
+     "passwd_marker": "x",
+     "shadow_marker": "*",
+     "shell": "/usr/sbin/nologin",
+     "uid": 13
+    },
+    {
+     "home": "/var/www",
+     "kind": "system",
+     "name": "www-data",
+     "passwd_marker": "x",
+     "shadow_marker": "*",
+     "shell": "/usr/sbin/nologin",
+     "uid": 33
+    },
+    {
+     "home": "/var/backups",
+     "kind": "system",
+     "name": "backup",
+     "passwd_marker": "x",
+     "shadow_marker": "*",
+     "shell": "/usr/sbin/nologin",
+     "uid": 34
+    },
+    {
+     "home": "/var/list",
+     "kind": "system",
+     "name": "list",
+     "passwd_marker": "x",
+     "shadow_marker": "*",
+     "shell": "/usr/sbin/nologin",
+     "uid": 38
+    },
+    {
+     "home": "/run/ircd",
+     "kind": "system",
+     "name": "irc",
+     "passwd_marker": "x",
+     "shadow_marker": "*",
+     "shell": "/usr/sbin/nologin",
+     "uid": 39
+    },
+    {
+     "home": "/nonexistent",
+     "kind": "system",
+     "name": "_apt",
+     "passwd_marker": "x",
+     "shadow_marker": "*",
+     "shell": "/usr/sbin/nologin",
+     "uid": 42
+    },
+    {
+     "home": "/nonexistent",
+     "kind": "system",
+     "name": "nobody",
+     "passwd_marker": "x",
+     "shadow_marker": "*",
+     "shell": "/usr/sbin/nologin",
+     "uid": 65534
+    },
+    {
+     "home": "/",
+     "kind": "system",
+     "name": "systemd-network",
+     "passwd_marker": "x",
+     "shadow_marker": "!*",
+     "shell": "/usr/sbin/nologin",
+     "uid": 998
+    },
+    {
+     "home": "/usr/lib/dhcpcd",
+     "kind": "system",
+     "name": "dhcpcd",
+     "passwd_marker": "x",
+     "shadow_marker": "!*",
+     "shell": "/bin/false",
+     "uid": 997
+    },
+    {
+     "home": "/nonexistent",
+     "kind": "system",
+     "name": "messagebus",
+     "passwd_marker": "x",
+     "shadow_marker": "!*",
+     "shell": "/usr/sbin/nologin",
+     "uid": 996
+    },
+    {
+     "home": "/",
+     "kind": "system",
+     "name": "systemd-resolve",
+     "passwd_marker": "x",
+     "shadow_marker": "!*",
+     "shell": "/usr/sbin/nologin",
+     "uid": 990
+    },
+    {
+     "home": "/var/lib/chrony",
+     "kind": "system",
+     "name": "_chrony",
+     "passwd_marker": "x",
+     "shadow_marker": "!*",
+     "shell": "/usr/sbin/nologin",
+     "uid": 989
+    },
+    {
+     "home": "/var/lib/usbmux",
+     "kind": "system",
+     "name": "usbmux",
+     "passwd_marker": "x",
+     "shadow_marker": "!",
+     "shell": "/usr/sbin/nologin",
+     "uid": 100
+    },
+    {
+     "home": "/",
+     "kind": "system",
+     "name": "polkitd",
+     "passwd_marker": "x",
+     "shadow_marker": "!*",
+     "shell": "/usr/sbin/nologin",
+     "uid": 988
+    },
+    {
+     "home": "/nonexistent",
+     "kind": "system",
+     "name": "syslog",
+     "passwd_marker": "x",
+     "shadow_marker": "!",
+     "shell": "/usr/sbin/nologin",
+     "uid": 101
+    },
+    {
+     "home": "/run/uuidd",
+     "kind": "system",
+     "name": "uuidd",
+     "passwd_marker": "x",
+     "shadow_marker": "!",
+     "shell": "/usr/sbin/nologin",
+     "uid": 102
+    },
+    {
+     "home": "/nonexistent",
+     "kind": "system",
+     "name": "tcpdump",
+     "passwd_marker": "x",
+     "shadow_marker": "!*",
+     "shell": "/usr/sbin/nologin",
+     "uid": 986
+    },
+    {
+     "home": "/",
+     "kind": "system",
+     "name": "tss",
+     "passwd_marker": "x",
+     "shadow_marker": "!*",
+     "shell": "/usr/sbin/nologin",
+     "uid": 985
+    },
+    {
+     "home": "/var/lib/landscape",
+     "kind": "system",
+     "name": "landscape",
+     "passwd_marker": "x",
+     "shadow_marker": "!",
+     "shell": "/usr/sbin/nologin",
+     "uid": 103
+    },
+    {
+     "home": "/var/lib/fwupd",
+     "kind": "system",
+     "name": "fwupd-refresh",
+     "passwd_marker": "x",
+     "shadow_marker": "!*",
+     "shell": "/usr/sbin/nologin",
+     "uid": 984
+    },
+    {
+     "home": "/run/sshd",
+     "kind": "system",
+     "name": "sshd",
+     "passwd_marker": "x",
+     "shadow_marker": "!*",
+     "shell": "/usr/sbin/nologin",
+     "uid": 983
+    },
+    {
+     "home": "/home/builder",
+     "kind": "native_login",
+     "name": "builder",
+     "passwd_marker": "x",
+     "shadow_marker": "!",
+     "shell": "/bin/bash",
+     "uid": 1000
+    }
+   ],
+   "cloud_dropins": [
+    {
+     "name": "05_logging.cfg",
+     "regular_no_symlinks": true,
+     "sha256": "5ed299a6d036a305a709241191de28d2f5698933d1fb410d818002c5cafa6050"
+    },
+    {
+     "name": "20-disable-cc-dpkg-grub.cfg",
+     "regular_no_symlinks": true,
+     "sha256": "c641a7465864bdfd769af93272e69197310248c83da88e6d60f3578aa2d5face"
+    },
+    {
+     "name": "90_dpkg.cfg",
+     "regular_no_symlinks": true,
+     "sha256": "3a332451812d01505e9d10e0a480adb168df9bf7b88506cbd82c326eee5508ee"
+    },
+    {
+     "name": "README",
+     "regular_no_symlinks": true,
+     "sha256": "1c80199250aeabaa9ced4990d3e222ae83859a983e781c4d6b4c64808fc5a6c2"
+    }
+   ],
+   "firstboot": {
+    "cloud_base_config_reviewed": true,
+    "cloud_default_user": "ubuntu",
+    "network_backend": "netplan-systemd-networkd"
+   },
+   "hygiene": {
+    "registry_config_credentials": 0,
+    "unclassified_credentials": 0,
+    "unsafe_apt_repo_urls": 0
+   },
+   "identity": {
+    "builder_primary_group_own": true,
+    "builder_supplementary_groups": 6,
+    "snapd": {
+     "device_key_id": true,
+     "device_keys": 1,
+     "device_serial": true,
+     "serial_assertions": 4,
+     "session_macaroon": false,
+     "state": true,
+     "users": 0
+    }
+   },
+   "k8s": {
+    "bootstrap_token_files": 0,
+    "cluster": {
+     "admin_conf": 0,
+     "bootstrap_kubelet_conf": 0,
+     "etcd_db": 0,
+     "etcd_other": 0,
+     "kubelet_conf": 0,
+     "kubelet_pki": 0,
+     "kubernetes_pki": 0,
+     "static_manifests": 0,
+     "workloads": 0
+    },
+    "kubelet_active": false,
+    "kubelet_enabled": true,
+    "package_policy_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "retained_package_policy_reviewed": true,
+    "runtime_version": "0.0.0"
+   },
+   "layout": {
+    "bios": "seabios",
+    "esp_count": 0,
+    "external_fstab": false,
+    "extra_filesystems": 0,
+    "mountpoints": [
+     "/"
+    ],
+    "partition_count": 1,
+    "partition_table": "msdos",
+    "root_count": 1,
+    "root_fs": "ext4",
+    "root_partition_number": 1,
+    "swap_entries": 0,
+    "unsafe_links": 0
+   },
+   "os": {
+    "distro": "ubuntu",
+    "major": 26,
+    "minor": 4
+   },
+   "parent": {
+    "format": "raw",
+    "raw_bytes": 21474836480,
+    "source_hash_verified": true,
+    "source_stopped": true,
+    "virtual_bytes": 21474836480
+   }
+  },
+  "hygiene_detail": {
+   "apt_url_files": 0,
+   "containerd_auth_files": 0,
+   "credential_scan_dirs": [],
+   "credential_scan_files": 0,
+   "kubelet_state_files": 0,
+   "proxy_dirs": [],
+   "proxy_files": 0,
+   "registry_files_present": 0,
+   "secret_paths": {
+    "/var/lib/systemd/credential.secret": 0
+   }
+  },
+  "observed_backend": "netplan-systemd-networkd",
+  "package_status_word": {
+   "cloud-init": "hold",
+   "kubeadm": "hold",
+   "kubectl": "hold",
+   "kubelet": "hold",
+   "kubernetes-cni": "hold",
+   "openssh-server": "hold",
+   "qemu-guest-agent": "hold",
+   "snapd": "hold"
+  },
+  "packages": {
+   "cloud-init": "26.2-0ubuntu1~26.04.1",
+   "openssh-server": "1:10.2p1-2ubuntu3.8",
+   "qemu-guest-agent": "1:10.2.1+ds-1ubuntu3.3",
+   "snapd": "2.78+ubuntu26.04"
+  },
+  "phase": "k8s-readonly-inventory-v1",
+  "policy_result": "PASS_WITH_PLACEHOLDER_REVIEW",
+  "publication_eligible": false,
+  "readonly_no_guest_code_or_mutation": true,
+  "runtime": {
+   "containerd": {
+    "2.3.2": true,
+    "bytes": 43139584,
+    "v2.3.2": true
+   },
+   "containerd_config_sha256": "bc4ffe16f2bc76847ae58681d504621bad25fdc56758e1672bb8542b39a9ef1e",
+   "containerd_unit_enabled": true,
+   "crictl_present": true,
+   "runc": {
+    "1.4.3": true,
+    "bytes": 12245392
+   }
+  },
+  "shadow_marker_classes": {},
+  "snapd": {
+   "installed": true,
+   "seed_dir": true,
+   "snaps": 3
+  },
+  "sudoers": {
+   "sudoers_readme_sha256": "5c108b32f7e4f0f33ed7a76e6e6aa1713358ccfc76ec0719b17a1b3a87b8e1ef",
+   "sudoers_sha256": "5bac27ce5ff1a78ace8f3ef81bfd60cbd44810ac3f3d280da9d7649fe90c18f8"
+  },
+  "swap": {
+   "fstab_rows_active": 0,
+   "fstab_rows_any": 0,
+   "swap_img": false,
+   "swapfile": false,
+   "units": 0
+  },
+  "token_files": 0,
+  "unknown_kind_accounts": []
+ },
+ "kind": "K8sReviewBaseline",
+ "kubernetes_cni_versions": [
+  "1.8.0-1.1",
+  "1.9.1-1.1"
+ ],
+ "os": "ubuntu-2604",
+ "package_policy": {
+  "containerd": "2.3.2",
+  "image_builder": "kubernetes-sigs/image-builder v0.1.55 defaults (containerd 2.3.2, runc 1.4.3)",
+  "runc": "1.4.3"
+ },
+ "review": {
+  "bios": "seabios",
+  "cloud_base_config_reviewed": true,
+  "cloud_default_user": "ubuntu",
+  "kubelet_active": false,
+  "network_backend": "netplan-systemd-networkd",
+  "retained_package_policy_reviewed": true,
+  "reviewed_dropins": [
+   [
+    "05_logging.cfg",
+    "5ed299a6d036a305a709241191de28d2f5698933d1fb410d818002c5cafa6050",
+    "preserve_vendor"
+   ],
+   [
+    "README",
+    "1c80199250aeabaa9ced4990d3e222ae83859a983e781c4d6b4c64808fc5a6c2",
+    "preserve_vendor"
+   ],
+   [
+    "90_dpkg.cfg",
+    "3a332451812d01505e9d10e0a480adb168df9bf7b88506cbd82c326eee5508ee",
+    "preserve_vendor"
+   ],
+   [
+    "20-disable-cc-dpkg-grub.cfg",
+    "c641a7465864bdfd769af93272e69197310248c83da88e6d60f3578aa2d5face",
+    "remove_build"
+   ]
+  ],
+  "runtime_version": "2.3.2",
+  "sudoers_readme_sha256": "5c108b32f7e4f0f33ed7a76e6e6aa1713358ccfc76ec0719b17a1b3a87b8e1ef",
+  "sudoers_sha256": "5bac27ce5ff1a78ace8f3ef81bfd60cbd44810ac3f3d280da9d7649fe90c18f8"
+ }
+}
