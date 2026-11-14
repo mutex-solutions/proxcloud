@@ -16,12 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`baselines/ubuntu-2604-k8s.json`, only the Kubernetes package versions may differ), a sealed
   sanitize run and a postscan bound to it. Each step runs in a container with no network, no
   capabilities and read-only inputs, and the parent checks the container's settings before start and
-  proves it stopped. The container runs as the invoking host user (non-root, uid 1000 or higher), no
-  longer only uid 1000, so a CI runner account can run it. The cold-boot acceptance is code too
-  (`vm_export.coldboot`): through the PVE API with the build token it uploads the sealed disk, boots
-  two clones with fresh cloud-init, checks both guests over SSH, requires different machine-id, host
-  key and snapd identity, and removes only what its own state file names. No workflow runs them yet;
-  the export workflow follows.
+  proves it stopped. The container runs as the invoking host user (non-root, uid and gid 1000 or
+  higher), no longer only uid 1000, so a CI runner account can run it. The cold-boot acceptance is
+  code too (`vm_export.coldboot`): through the PVE API with the build token it uploads the sealed
+  disk, boots two clones with fresh cloud-init, checks both guests over SSH (a failed snapd change
+  fails the check), requires snapd on both and different machine-id, host key and snapd identity, and
+  removes only what its own state file names. Names, the ownership tag and the upload carry a random
+  per-run token, so two runs of one disk never touch each other's VMs or files. Cleanup ignores a
+  cancel, retries, and can be repeated from the state file. No workflow runs them yet; the export
+  workflow follows.
 
 - **Production install on one host with Docker Compose** (`deploy/compose/`): `./proxcloud-up.sh` asks for the
   domain (or four hostnames), the TLS mode and two email addresses, generates every secret once into `.env`

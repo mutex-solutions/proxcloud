@@ -17,8 +17,9 @@ import time
 
 COMMON = ("os_release", "cloud_init_done_no_errors", "default_user_exactly_job_key", "build_user_only_own_group",
           "build_user_no_sudo", "build_user_locked", "build_user_no_keys", "machine_id_valid",
-          "qemu_guest_agent_active", "snapd_active", "snapd_reregistered_new_key", "no_active_swap", "disk_30g",
-          "root_grown")
+          "qemu_guest_agent_active", "snapd_active", "snapd_reregistered_new_key", "snapd_no_change_errors",
+          "no_active_swap", "disk_30g", "root_grown")
+OS_ONLY = ("apt_metadata_available", "root_partition_grown")
 K8S = ("builder_account_retained", "kubelet_enabled", "containerd_active", "k8s_binaries_exact",
        "crictl_talks_to_containerd")
 BUILD_USERS = ("builder", "packer")
@@ -90,7 +91,8 @@ def main(argv):
     snapd_ok, serial, device_key, snap_errors = snapd() if snapd_present else (True, None, None, 0)
     key_dir = pathlib.Path("/var/lib/snapd/device/private-keys-v1")
     lsblk = json.loads(run(["/usr/bin/lsblk", "-b", "-J", "-o", "NAME,TYPE,SIZE,MOUNTPOINTS"]).stdout)
-    disk = next((d for d in lsblk.get("blockdevices", []) if d.get("type") == "disk"), {})
+    disks = [d for d in lsblk.get("blockdevices", []) if d.get("type") == "disk"]
+    disk = disks[0] if disks else {}
     root = os.statvfs("/")
     checks = {
         "os_release": osr.get("ID") == "ubuntu" and osr.get("VERSION_ID", "").strip('"') == version_id,
@@ -106,10 +108,20 @@ def main(argv):
         "snapd_active": snapd_ok,
         "snapd_reregistered_new_key": not snapd_present or (
             bool(serial) and bool(device_key) and key_dir.is_dir() and any(key_dir.iterdir())),
+        # `snap changes` must show no failed change. cloud-init's recoverable warnings stay a reported counter.
+        "snapd_no_change_errors": snap_errors == 0,
         "no_active_swap": not pathlib.Path("/proc/swaps").read_text().splitlines()[1:],
         "disk_30g": disk.get("size") == 30 << 30,
         "root_grown": root.f_blocks * root.f_frsize >= 28 << 30,
     }
+    if variant == "os":
+        parts = [row for d in disks for row in d.get("children", []) if "/" in (row.get("mountpoints") or [])]
+        apt = run(["/usr/bin/apt-cache", "policy", "cloud-init", "qemu-guest-agent", "openssh-server"])
+        checks.update({
+            "apt_metadata_available": apt.returncode == 0 and all(
+                name in apt.stdout for name in ("cloud-init:", "qemu-guest-agent:", "openssh-server:")),
+            "root_partition_grown": len(parts) == 1 and parts[0].get("size", 0) >= 28 << 30,
+        })
     if variant == "kubernetes":
         want = "v" + k8s_version
         kubectl = run(["/usr/bin/kubectl", "version", "--client", "-o", "json"])
