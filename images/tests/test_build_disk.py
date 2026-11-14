@@ -17,6 +17,8 @@ SPEC = importlib.util.spec_from_file_location("disk_image_build", Path(__file__)
 build = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(build)
 
+FLOOR = "%dG" % build.DEFAULT_BUILD_DISK_GIB  # The size the builder asks PVE for; pinned to 5 GiB below.
+FLOOR_BYTES = build.DEFAULT_BUILD_DISK_GIB << 30
 UPID = "UPID:test-node:00000001:00000002:00000003:resize:9200:images@pve!packer:"
 
 
@@ -79,7 +81,10 @@ class FakePVE:
         if endpoint == "config":
             if method == "GET":
                 self.events.append(("readback", vmid, row.get("scsi0")))
-                return dict(row, digest="fake-digest") if self.fail != "digest" else dict(row)
+                shown = dict(row, digest="fake-digest") if self.fail != "digest" else dict(row)
+                if self.fail == "shrunk-readback" and "scsi0" in row:  # Later reads report less, with no resize between.
+                    row["scsi0"] = row["scsi0"].rsplit("=", 1)[0] + "=10G"
+                return shown
             if "scsi0" in params and self.fail == "config":
                 raise SystemExit("import failed")
             row.update({key: value for key, value in params.items() if key != "delete"})
@@ -92,17 +97,17 @@ class FakePVE:
             return "config-task"
         if endpoint == "resize":
             assert method == "PUT"
-            assert params == {"disk": "scsi0", "size": "20G", "digest": "fake-digest"}
+            assert params == {"disk": "scsi0", "size": FLOOR, "digest": "fake-digest"}
             assert row["template"] == 0
             if self.fail in ("resize", "cleanup"):
                 raise SystemExit("resize failed")
             if self.fail != "readback":
-                row["scsi0"] = "disk-store:vm-%s-disk-0,discard=on,size=20G" % vmid
+                row["scsi0"] = "disk-store:vm-%s-disk-0,discard=on,size=%s" % (vmid, FLOOR)
             if self.fail == "disk-changed":
-                row["scsi0"] = "disk-store:other-disk,size=20G"
+                row["scsi0"] = "disk-store:other-disk,size=" + FLOOR
             return self.result
         assert endpoint == "template" and method == "POST"
-        assert build.disk_size_bytes(row["scsi0"]) >= 20 * 1024 ** 3
+        assert build.disk_size_bytes(row["scsi0"]) >= FLOOR_BYTES
         if self.fail == "template":
             raise SystemExit("template conversion failed")
         row["template"] = 1
@@ -119,7 +124,7 @@ class DiskFloorTests(unittest.TestCase):
         a = arguments(os_slug)
 
         def packer_stub(args, base, vmid, name, version):
-            self.assertEqual(build.disk_size_bytes(pve.rows[base]["scsi0"]), max(build.disk_size_bytes("disk,size=" + pve.size), 20 * 1024 ** 3))
+            self.assertEqual(build.disk_size_bytes(pve.rows[base]["scsi0"]), max(build.disk_size_bytes("disk,size=" + pve.size), FLOOR_BYTES))
             self.assertEqual(pve.rows[base]["template"], 1)
             pve.rows[vmid] = dict(pve.rows[base], name=name, tags="pc-building", template=1)
             pve.events.append(("packer", vmid))
@@ -145,7 +150,7 @@ class DiskFloorTests(unittest.TestCase):
                 build.disk_size_bytes(raw)
 
     def test_every_os_floor_readback_precedes_template_and_packer(self):
-        self.assertEqual(build.DEFAULT_BUILD_DISK_GIB, 20)
+        self.assertEqual(build.DEFAULT_BUILD_DISK_GIB, 5)  # Owner decision 2026-11-14; it was 20.
         self.assertEqual(set(build.IMAGES), {"debian-12", "debian-13", "ubuntu-2404", "ubuntu-2604"})
         for os_slug in build.IMAGES:
             with self.subTest(os=os_slug):
@@ -153,7 +158,7 @@ class DiskFloorTests(unittest.TestCase):
                 self.run_build(pve, os_slug)
                 imported = next(i for i, e in enumerate(pve.events) if e[0] == "POST" and "scsi0" in e[2])
                 resized = next(i for i, e in enumerate(pve.events) if e[0] == "PUT")
-                readback = next(i for i, e in enumerate(pve.events) if e[0] == "readback" and e[2].endswith("size=20G"))
+                readback = next(i for i, e in enumerate(pve.events) if e[0] == "readback" and e[2].endswith("size=" + FLOOR))
                 template = next(i for i, e in enumerate(pve.events) if e[0] == "POST" and e[1].endswith("/template"))
                 packer = next(i for i, e in enumerate(pve.events) if e[0] == "packer")
                 smoke = next(i for i, e in enumerate(pve.events) if e[0] == "smoke")
@@ -168,12 +173,22 @@ class DiskFloorTests(unittest.TestCase):
                 self.assertFalse(any(e[0] == "POST" and e[1].endswith("/status/start") for e in pve.events))
 
     def test_at_or_above_floor_never_resets_or_shrinks(self):
-        for size in ("20G", "20480M", "21474836480", "20.5G", "40G", "1T"):
+        # At the 5 GiB floor in every unit, just above it, and the old 20 GiB floor: never a resize.
+        for size in ("5G", "5120M", "5368709120", "5.5G", "20G", "20480M", "21474836480", "40G", "1T"):
             with self.subTest(size=size):
                 pve = FakePVE(size=size)
                 vmid = self.create(pve)
                 self.assertTrue(pve.rows[vmid]["scsi0"].endswith("size=" + size))
                 self.assertFalse(any(e[0] == "PUT" for e in pve.events))
+
+    def test_readback_below_the_imported_size_refuses_conversion(self):
+        """A 20 GiB import is above the floor and is not resized; a 10 GiB readback is still above the 5 GiB floor,
+        but it is not the disk that was imported."""
+        pve = FakePVE(size="20G", fail="shrunk-readback")
+        with self.assertRaisesRegex(SystemExit, "readback below floor"):
+            self.create(pve)
+        self.assertFalse(any(e[0] == "PUT" or (e[0] == "POST" and e[1].endswith("/template")) for e in pve.events))
+        self.assertEqual(pve.rows, pve.protected)
 
     def test_unreadable_import_size_fails_before_resize_and_conversion(self):
         for size in ("", "0G", "garbage", "20G,size=30G"):
@@ -185,9 +200,17 @@ class DiskFloorTests(unittest.TestCase):
                 self.assertFalse(any(e[0] == "PUT" or (e[0] == "POST" and e[1].endswith("/template")) for e in pve.events))
 
     def test_one_kib_below_floor_is_not_rounded_up(self):
-        pve = FakePVE(size="20971519K")
+        pve = FakePVE(size="5242879K")
         self.create(pve)
         self.assertEqual(sum(e[0] == "PUT" for e in pve.events), 1)
+
+    def test_vendor_image_sizes_grow_to_exactly_the_floor(self):
+        """Debian (3 GiB) and Ubuntu (3.5 GiB) vendor disks end at 5 GiB: the size the sanitizer accepts."""
+        for size in ("3G", "3584M"):
+            with self.subTest(size=size):
+                pve = FakePVE(size=size)
+                vmid = self.create(pve)
+                self.assertEqual(build.disk_size_bytes(pve.rows[vmid]["scsi0"]), 5 << 30)
 
     def test_synchronous_null_or_empty_never_waits_but_still_reads_back(self):
         for result in (None, ""):
@@ -195,13 +218,13 @@ class DiskFloorTests(unittest.TestCase):
                 pve = FakePVE(result=result)
                 self.create(pve)
                 self.assertNotIn(("wait", result), pve.events)
-                self.assertIn(("readback", 9200, "disk-store:vm-9200-disk-0,discard=on,size=20G"), pve.events)
+                self.assertIn(("readback", 9200, "disk-store:vm-9200-disk-0,discard=on,size=" + FLOOR), pve.events)
 
     def test_valid_async_upid_is_waited_before_readback(self):
         pve = FakePVE(result=UPID)
         self.create(pve)
         waited = pve.events.index(("wait", UPID))
-        readback = pve.events.index(("readback", 9200, "disk-store:vm-9200-disk-0,discard=on,size=20G"))
+        readback = pve.events.index(("readback", 9200, "disk-store:vm-9200-disk-0,discard=on,size=" + FLOOR))
         self.assertLess(waited, readback)
 
     def test_bad_resize_response_fails_without_wait_or_publication(self):

@@ -6,8 +6,10 @@
     cd images && python3 -m vm_export.review project --inventory inventory.json   # baseline "inventory" draft
 
 The inventory must equal the baseline's reviewed facts EXCEPT the allowlisted version fields:
-kubeadm/kubelet/kubectl == the requested K8S_VERSIONS member (deb revision -1.1) and kubernetes-cni
-from the baseline's explicit allowlist. Any other difference refuses with the differing field paths
+kubeadm/kubelet/kubectl == the requested K8S_VERSIONS member (deb revision -1.1), kubernetes-cni
+from the baseline's explicit allowlist, and the source disk size (facts.parent raw_bytes ==
+virtual_bytes, a member of vm_sanitize.VIRTUAL_BYTES["kubernetes"]; the baseline records its own
+20 GiB). Any other difference refuses with the differing field paths
 only (never values or guest-chosen names). package_policy_sha256 = sha256 of the compact sorted JSON of
 the package policy. The source sha256 and the stopped-template fact come from the evidence chain only:
 the inventory bytes must be the ones its clean, accepted inventory run recorded, and that run's source
@@ -21,12 +23,14 @@ from pathlib import Path
 import re
 import sys
 
-from vm_sanitize import K8S_DEB_RELEASE, K8S_VERSIONS
+from vm_sanitize import K8S_DEB_RELEASE, K8S_VERSIONS, VIRTUAL_BYTES
 
 K8S_PACKAGES = ("kubeadm", "kubelet", "kubectl")
 # Inventory paths that may differ between reviewed builds; each is checked separately below.
 VERSION_FIELDS = (("facts", "k8s", "version"), ("facts", "k8s", "kubernetes_packages"),
                   *(("packages", name) for name in K8S_PACKAGES + ("kubernetes-cni",)))
+# The source disk size: the baseline records its own template's (20 GiB); an inventory may carry any allowlisted one.
+SIZE_FIELDS = (("facts", "parent", "raw_bytes"), ("facts", "parent", "virtual_bytes"))
 BASELINE_KEYS = {"kind", "os", "basis", "kubernetes_cni_versions", "review", "package_policy", "inventory"}
 REVIEW_KEYS = {"bios", "cloud_base_config_reviewed", "cloud_default_user", "kubelet_active", "network_backend",
                "retained_package_policy_reviewed", "runtime_version", "reviewed_dropins", "sudoers_sha256",
@@ -46,10 +50,10 @@ def compact(obj):
     return json.dumps(obj, sort_keys=True, separators=(",", ":"))
 
 
-def project(inventory):
+def project(inventory, fields=VERSION_FIELDS):
     """The inventory without the allowlisted version fields."""
     out = copy.deepcopy(inventory)
-    for path in VERSION_FIELDS:
+    for path in fields:
         node = out
         for key in path[:-1]:
             node = node.get(key, {}) if type(node) is dict else {}
@@ -121,9 +125,13 @@ def derive(inventory, baseline, k8s_version, source_raw_sha256):
                     if packages.get(name) != k8s_version + "-" + K8S_DEB_RELEASE]
         if packages.get("kubernetes-cni") not in baseline["kubernetes_cni_versions"]:
             refused.append("packages.kubernetes-cni")
+        parent = inventory["facts"]["parent"]
+        if not (type(parent["virtual_bytes"]) is int and parent["virtual_bytes"] in VIRTUAL_BYTES["kubernetes"]
+                and type(parent["raw_bytes"]) is int and parent["raw_bytes"] == parent["virtual_bytes"]):
+            refused.append("facts.parent.virtual_bytes")
     except (KeyError, TypeError):
         raise ReviewRefused(refused + ["inventory"]) from None
-    refused += diff(baseline["inventory"], project(inventory))
+    refused += diff(project(baseline["inventory"], SIZE_FIELDS), project(project(inventory), SIZE_FIELDS))
     # The reviewed decisions must cover exactly the observed drop-ins and sudo bytes (baseline self-consistency).
     reviewed = baseline["review"]
     if ({(n, d) for n, d, _ in reviewed["reviewed_dropins"]} !=

@@ -24,7 +24,7 @@ const (
 	MediaVMManifest     = "application/vnd.proxcloud.vm-template.manifest.v1+json"
 	MediaSHA256SUMS     = "text/plain"
 	MaxDiskBytes        = 8 << 30 // strictly below
-	MinVirtualSizeBytes = 20 << 30
+	MinVirtualSizeBytes = 5 << 30 // 20 GiB until v0.5.2: older portals refuse a smaller image
 	MaxVirtualSizeBytes = 100 << 30
 	maxSmallFileBytes   = 64 << 10
 	annotationTitle     = "org.opencontainers.image.title"

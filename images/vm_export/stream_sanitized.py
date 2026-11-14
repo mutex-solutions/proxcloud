@@ -20,6 +20,9 @@ import sys
 CHECKS = {"cleaned_copy_only", "no_backing_file", "qemu_img_check", "offline_sanitization",
           "zero_free_space", "no_build_credentials_or_lab_network"}
 MAX = 8 << 30
+# Accepted virtual sizes per variant. This file runs alone inside the capsule, so it repeats
+# vm_sanitize.VIRTUAL_BYTES; images/tests/test_template_disk_sizes.py keeps the two equal.
+VIRTUAL_BYTES = {"os": (5 << 30, 20 << 30), "kubernetes": (8 << 30, 20 << 30)}
 OSES = ("ubuntu-2404", "ubuntu-2604", "debian-12", "debian-13")
 ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "HOME": "/scratch", "TMPDIR": "/scratch",
        "LC_ALL": "C", "LIBGUESTFS_BACKEND": "direct", "LIBGUESTFS_BACKEND_SETTINGS": "force_tcg"}
@@ -31,12 +34,13 @@ LAUNCH = ("import runpy, sys; sys.path.insert(0, '/bootstrap'); "
 def valid(row, selected, k8s_version):
     keys = {"kind", "os", "variant", "disk_sha256", "disk_bytes", "virtual_size_bytes", "checks"}
     keys |= {"kubernetes_version"} if k8s_version else set()
+    variant = "kubernetes" if k8s_version else "os"
     return (type(row) is dict and set(row) == keys and row["kind"] == "OfflineSanitizationFacts"
-            and row["os"] == selected and row["variant"] == ("kubernetes" if k8s_version else "os")
+            and row["os"] == selected and row["variant"] == variant
             and row.get("kubernetes_version") == k8s_version
             and type(row["disk_sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", row["disk_sha256"]) is not None
             and type(row["disk_bytes"]) is int and 0 < row["disk_bytes"] < MAX
-            and type(row["virtual_size_bytes"]) is int and row["virtual_size_bytes"] == 20 << 30
+            and type(row["virtual_size_bytes"]) is int and row["virtual_size_bytes"] in VIRTUAL_BYTES[variant]
             and type(row["checks"]) is dict and set(row["checks"]) == CHECKS
             and all(value is True for value in row["checks"].values()))
 

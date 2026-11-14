@@ -52,4 +52,9 @@ for directory in /etc/netplan /run/netplan; do
 done
 [ ! -d /var/lib/cloud/seed ]
 [ "$(getent shadow builder | cut -d: -f2)" = '!' ]
+# Admission: a nearly full root filesystem never becomes a node template (K8S_BUILD_DISK_GIB is small).
+MIN_FREE_KIB=1048576
+df -Pk /
+set -- $(df -Pk / | tail -n 1)
+[ "$4" -ge "$MIN_FREE_KIB" ] || { echo "Template refused: root filesystem has $4 KiB free, needs $MIN_FREE_KIB" >&2; exit 1; }
 sync

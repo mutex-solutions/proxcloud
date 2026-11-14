@@ -328,3 +328,27 @@ func TestPVEVolumeProfileFunc(t *testing.T) {
 		}
 	}
 }
+
+// Per-node copies of one template can differ in size (a 5 GiB rebuild next to a 20 GiB copy that
+// --if-missing kept). A server placed on the node with the larger copy gets that size, so the catalog
+// minimum is the largest copy, not the newest one.
+func TestPVEImageCatalogMinDiskIsTheLargestCopy(t *testing.T) {
+	found := []pve.DiscoveredTemplate{{Slug: "ubuntu-2404", Node: "pve1", VMID: 9300, Copies: map[string]pve.TemplateCopy{
+		"pve1": {VMID: 9300, Version: "20261114", DiskGb: 5},
+		"pve2": {VMID: 9200, Version: "20261001", DiskGb: 20},
+	}}, {Slug: "debian-13", Node: "pve1", VMID: 9301, Copies: map[string]pve.TemplateCopy{
+		"pve1": {VMID: 9301, Version: "20261114", DiskGb: 5},
+		"pve2": {VMID: 9302, Version: "20261114", DiskGb: 5},
+	}}}
+	es := &ExternalService{Config: map[string]any{"templates": map[string]any{"debian-13": map[string]any{"minDiskGb": float64(8)}}}}
+	got := map[string]int{}
+	for _, tpl := range es.PVEImageCatalog(found) {
+		got[tpl.Slug] = tpl.MinDiskGb
+	}
+	if want := map[string]int{"ubuntu-2404": 20, "debian-13": 8}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("minimum disk per slug = %v, want %v", got, want)
+	}
+	if got := (&ExternalService{}).PVEImageCatalog(found[1:])[0].MinDiskGb; got != 5 {
+		t.Fatalf("equal 5 GiB copies: minimum %d, want 5", got)
+	}
+}

@@ -799,6 +799,8 @@ func TestPayloadValidation(t *testing.T) {
 		},
 		func(q *VMPayload) { q.Package = "proxcloud-vm-debian-12" },
 		func(q *VMPayload) { q.DiskBytes = MaxDiskBytes },
+		func(q *VMPayload) { q.VirtualSizeBytes = 5<<30 - 1 },
+		func(q *VMPayload) { q.VirtualSizeBytes = 100<<30 + 1 },
 		func(q *VMPayload) { q.Node = "pve1/../x" },
 		func(q *VMPayload) { q.DiskDigest = "sha256:abc" },
 		func(q *VMPayload) { q.Variant = "kubernetes" },
@@ -808,6 +810,14 @@ func TestPayloadValidation(t *testing.T) {
 		fn(&q)
 		if q.Validate() == nil {
 			t.Errorf("case %d accepted", i)
+		}
+	}
+	// The new 5 GiB (native OS) and 8 GiB (Kubernetes node) images, and the 20 GiB ones published before.
+	for _, size := range []int64{5 << 30, 8 << 30, 20 << 30} {
+		q := p
+		q.VirtualSizeBytes = size
+		if err := q.Validate(); err != nil {
+			t.Errorf("virtual size %d: %v", size, err)
 		}
 	}
 	raw := []byte(`{"version":1,"package":"proxcloud-vm-debian-13","extra":1}`)

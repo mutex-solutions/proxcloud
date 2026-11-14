@@ -141,7 +141,7 @@ class Lab:
         import build
         for patcher in (patch.object(pipeline, "pve", lambda: self.api),
                         patch.object(capsule, "pull", self.pull), patch.object(pipeline.os, "statvfs", statvfs),
-                        patch.object(pipeline.vm_sanitize, "VIRTUAL_BYTES", 4096),
+                        patch.object(pipeline.vm_sanitize, "VIRTUAL_BYTES", {"os": (4096,), "kubernetes": (4096,)}),
                         patch.object(pipeline, "WORK_ROOM", 1 << 20),
                         patch.object(build, "checksum_of", lambda image: VENDOR)):
             patcher.start()
@@ -664,14 +664,14 @@ class ChainTests(unittest.TestCase):
         # The copied QCOW2 FILE is larger than the virtual size of the disk (metadata): its length is the bound
         # of the copy, never the virtual size. (Recorded on the lab: 21478375424 bytes for a 20 GiB disk.)
         self.assertEqual(pipeline.load(receipt)["raw_bytes"], 4096 + 512)
-        self.assertGreater(len(lab.raw), pipeline.vm_sanitize.VIRTUAL_BYTES)
+        self.assertGreater(len(lab.raw), max(pipeline.vm_sanitize.VIRTUAL_BYTES["os"]))
         self.assertEqual(lab.printed["review"], '{"sanitize_eligible": true}\n')
         self.assertEqual(lab.printed["copy"], json.dumps({"raw_sha256": hashlib.sha256(lab.raw).hexdigest(), "raw_bytes": 4608}) + "\n")
         self.assertEqual(lab.api.storages, ["import-store"])
 
     def test_native_disk_file_is_bounded_as_the_sanitizer_bounds_it(self):
         self.assertEqual(vm_sanitize.NATIVE_SOURCE_MAX_BYTES, 24 << 30)
-        self.assertGreater(21478375424, vm_sanitize.VIRTUAL_BYTES)  # The real ubuntu-2604 template file.
+        self.assertGreater(21478375424, max(vm_sanitize.VIRTUAL_BYTES["os"]))  # The real ubuntu-2604 template file.
         self.assertLess(21478375424, vm_sanitize.NATIVE_SOURCE_MAX_BYTES)
         self.assertIn("0 < source.st_size <= NATIVE_SOURCE_MAX_BYTES)", (IMAGES / "vm_sanitize.py").read_text())
         for limit, written, code in ((4608, None, 0), (4607, None, 2), (1 << 20, b"", 2)):

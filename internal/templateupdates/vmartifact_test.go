@@ -102,6 +102,37 @@ func TestParseVMManifestRefuses(t *testing.T) {
 	}
 }
 
+// The virtual disk bound: 5 GiB native OS and 8 GiB Kubernetes node images (built since 2026-11) and the
+// 20 GiB images published before stay importable; below 5 GiB or above 100 GiB is refused. Disk and receipt
+// change together, so only the bound decides.
+func TestParseVMManifestVirtualSizeBounds(t *testing.T) {
+	if MinVirtualSizeBytes != 5<<30 || MaxVirtualSizeBytes != 100<<30 {
+		t.Fatalf("bounds = %d..%d", int64(MinVirtualSizeBytes), int64(MaxVirtualSizeBytes))
+	}
+	raw, _, _ := golden(t, "os")
+	sized := func(size int64) []byte {
+		return mutate(t, raw, func(m map[string]any) {
+			m["disk"].(map[string]any)["virtual_size_bytes"] = size
+			m["clean_export_receipt"].(map[string]any)["virtual_size_bytes"] = size
+		})
+	}
+	for _, size := range []int64{5 << 30, 8 << 30, 20 << 30, 100 << 30} {
+		m, err := ParseVMManifest(sized(size))
+		if err != nil || m.Disk.VirtualSizeBytes != size {
+			t.Errorf("%d: %v", size, err)
+		}
+	}
+	for _, size := range []int64{5<<30 - 1, 4 << 30, 0, 100<<30 + 1} {
+		if _, err := ParseVMManifest(sized(size)); err == nil {
+			t.Errorf("%d: accepted", size)
+		}
+	}
+	// The receipt must state the disk's own size.
+	if _, err := ParseVMManifest(mutate(t, raw, func(m map[string]any) { m["disk"].(map[string]any)["virtual_size_bytes"] = int64(5 << 30) })); err == nil {
+		t.Error("disk and receipt sizes differ: accepted")
+	}
+}
+
 func TestCheckSHA256SUMSRefusesTampering(t *testing.T) {
 	raw, sums, _ := golden(t, "os")
 	m, _ := ParseVMManifest(raw)

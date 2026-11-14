@@ -16,12 +16,14 @@ try:
 finally:
     sys.path.pop(0)
 
+K8S_BYTES, LEGACY_BYTES = VIRTUAL_BYTES  # 8 GiB now, 20 GiB before 2026-11.
+
 
 def fixture():
     """Hypothetical inventory, NOT discovered facts or a ready-for-public receipt."""
     return {
-        "parent": {"format": "raw", "virtual_bytes": VIRTUAL_BYTES,
-                   "raw_bytes": VIRTUAL_BYTES, "source_hash_verified": True, "source_stopped": True},
+        "parent": {"format": "raw", "virtual_bytes": K8S_BYTES,
+                   "raw_bytes": K8S_BYTES, "source_hash_verified": True, "source_stopped": True},
         "os": {"distro": "ubuntu", "major": 26, "minor": 4},
         "layout": {"bios": "seabios", "partition_table": "msdos", "root_fs": "ext4",
                    "root_count": 1, "partition_count": 1, "root_partition_number": 1,
@@ -56,6 +58,19 @@ class CopyPolicyTests(unittest.TestCase):
         with self.assertRaises(PolicyRefusal) as caught:
             validate_inventory(facts, review)
         self.assertEqual(str(caught.exception), REFUSAL)
+
+    def test_parent_size_is_the_new_8_gib_or_the_legacy_20_gib_only(self):
+        self.assertEqual(VIRTUAL_BYTES, (8 << 30, 20 << 30))
+        for size in VIRTUAL_BYTES:
+            with self.subTest(size=size):
+                f = fixture()
+                f["parent"].update(virtual_bytes=size, raw_bytes=size)
+                self.assertTrue(validate_inventory(f).copy_only)
+        for size in (5 << 30, 10 << 30, 30 << 30, (8 << 30) + 512, 0, float(8 << 30), "8589934592", True):
+            with self.subTest(size=size):
+                f = fixture()
+                f["parent"].update(virtual_bytes=size, raw_bytes=size)
+                self.refuses(f)
 
     def test_plan_is_not_public_or_execution_receipt(self):
         facts = fixture()
@@ -100,8 +115,10 @@ class CopyPolicyTests(unittest.TestCase):
                  ("layout", "extra_filesystems", 1), ("layout", "unsafe_links", 1),
                  ("os", "minor", 10), ("k8s", "version", "1.35.11"),
                  ("k8s", "kubelet_active", True), ("k8s", "kubelet_enabled", False),
-                 ("parent", "format", "qcow2"), ("parent", "raw_bytes", VIRTUAL_BYTES - 1),
-                 ("parent", "virtual_bytes", VIRTUAL_BYTES + 1),
+                 ("parent", "format", "qcow2"), ("parent", "raw_bytes", K8S_BYTES - 1),
+                 ("parent", "virtual_bytes", K8S_BYTES + 1),
+                 # Each allowlisted on its own, but the raw file and its virtual size must be the same one.
+                 ("parent", "raw_bytes", LEGACY_BYTES), ("parent", "virtual_bytes", LEGACY_BYTES),
                  ("parent", "source_hash_verified", False),
                  ("hygiene", "unsafe_apt_repo_urls", 1),
                  ("hygiene", "registry_config_credentials", 1)]

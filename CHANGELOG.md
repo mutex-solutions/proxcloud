@@ -84,6 +84,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   where they are; an export through the workflow gets a new tag. The runner label
   `proxcloud-vm-artifact-stage` is no longer used.
 
+- **Smaller template disks: 5 GiB for native OS templates, 8 GiB for Kubernetes node templates** (both were
+  20 GiB). The built images hold 0.4 to 1.3 GB (native OS) and about 4 GB (Kubernetes node), and every clone,
+  copy and sanitize run paid for the whole 20 GiB. A server or node made from a template still gets the root
+  disk size its user asks for: cloud-init grows the filesystem at first boot. One constant per builder
+  (`DEFAULT_BUILD_DISK_GIB` in `images/build.py`, `K8S_BUILD_DISK_GIB` in `images/k8s-build-config.py`).
+  - **A server with a root disk below 20 GiB now gets that size.** With a 20 GiB template a smaller request
+    (the seeded `s1-small` flavor has 10 GiB) still produced a 20 GiB disk and counted 20 GiB against the
+    quota; with a 5 GiB template it produces and counts 10 GiB. The create page's minimum root size drops
+    from 20 to 5 GiB.
+  - The minimum disk of an image is the largest of its per-node template copies, not the newest copy's. A
+    cluster where one node has the 5 GiB copy and another still has the 20 GiB copy keeps a 20 GiB minimum:
+    before, a 10 GiB server placed on the second node passed the check, counted 10 GiB and got 20 GiB.
+  - The sanitizer and the export tools accept an explicit allowlist per variant instead of one fixed size:
+    native OS 5 GiB or 20 GiB, Kubernetes node 8 GiB or 20 GiB. Any other size is refused, the export must
+    keep exactly its source's size, and the facts and the manifest carry the actual size. The cold-boot
+    acceptance requires the import to have the artifact's own size (reason `import_size_mismatch`, formerly
+    `import_not_20g`), then still grows it to 30 GiB and checks the growth in the guest. The Kubernetes
+    review checks the source size against the allowlist, not against the 20 GiB recorded in the committed
+    baseline.
+  - The artifact contract's minimum virtual size is 5 GiB (was 20 GiB) in `images/vm_artifact.py` and in the
+    portal's Template updates import.
+  - **Compatibility:** portals up to v0.5.2 refuse an image whose virtual disk is below 20 GiB (invalid
+    artifact contract, nothing is downloaded), so an image built with the new sizes needs a portal with this
+    change. Existing 20 GiB templates and the already published 20 GiB images stay valid; nothing is rebuilt
+    or resized. **Upgrade the portals before the third small image of a line is published:** a portal up to
+    v0.5.2 checks only the newest three tags of a line, so after the third 5 or 8 GiB image it offers nothing
+    on that line, and the older 20 GiB image is importable only by an API call that names its digest.
+  - A build that runs out of disk space still fails: the provisioning scripts stop at the first failing
+    command, and the last cleanup step of both builders now refuses a root filesystem with less than 1 GiB
+    free (in both network modes of the Kubernetes build). The new sizes were not yet confirmed by a lab build; what the first build of each image type has
+    to confirm is listed in [docs/template-build-disk.md](docs/template-build-disk.md).
+
 - **Helm chart: the realms derived by `keycloakConfigCli` have Keycloak's brute force detection on**
   (`bruteForceProtected`, Keycloak's default thresholds: a temporary lockout after repeated failed logins). Their
   token endpoints are public and the console clients allow the password grant. Applied at the next

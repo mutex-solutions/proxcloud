@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 IMAGES = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(IMAGES))
@@ -247,6 +247,18 @@ lambda i: i["HostConfig"].update(NetworkMode="bridge"),
             with self.assertRaises(ValueError):
                 stream_sanitized.parse(argv)
 
+    def test_stream_gate_accepts_only_the_variants_allowlisted_virtual_sizes(self):
+        k8s = {"kind": "OfflineSanitizationFacts", "os": "ubuntu-2604", "variant": "kubernetes",
+               "kubernetes_version": "1.37.2", "disk_sha256": "a" * 64, "disk_bytes": 100,
+               "checks": {k: True for k in stream_sanitized.CHECKS}}
+        native = {k: v for k, v in dict(k8s, os="debian-13", variant="os").items() if k != "kubernetes_version"}
+        cases = ((k8s, "ubuntu-2604", "1.37.2", (8 << 30, 20 << 30), (5 << 30, 10 << 30, (8 << 30) + 512, float(8 << 30))),
+                 (native, "debian-13", None, (5 << 30, 20 << 30), (8 << 30, 4 << 30, (5 << 30) - 1, "5368709120")))
+        for facts, selected, version, good, bad in cases:
+            for size, accepted in [(size, True) for size in good] + [(size, False) for size in bad]:
+                with self.subTest(variant=facts["variant"], size=size):
+                    self.assertIs(stream_sanitized.valid(dict(facts, virtual_size_bytes=size), selected, version), accepted)
+
 
 def reviewed_inventory(version="1.37.2", cni="1.9.1-1.1"):
     inv = copy_module.deepcopy(BASELINE["inventory"])
@@ -305,6 +317,34 @@ class ReviewTests(unittest.TestCase):
         with self.assertRaises(review.ReviewRefused) as caught:
             review.derive(reviewed_inventory(), broken, "1.37.2", SOURCE_SHA)
         self.assertEqual(caught.exception.fields, ["review.reviewed_dropins"])
+
+    def test_source_disk_size_is_allowlisted_not_compared_with_the_baselines_20_gib(self):
+        """The committed baseline records its own 20 GiB template; an 8 GiB template derives the same review."""
+        self.assertEqual(BASELINE["inventory"]["facts"]["parent"]["virtual_bytes"], 20 << 30)
+        legacy, _ = review.derive(reviewed_inventory(), BASELINE, "1.37.2", SOURCE_SHA)
+        inv = reviewed_inventory()
+        inv["facts"]["parent"].update(virtual_bytes=8 << 30, raw_bytes=8 << 30)
+        small, _ = review.derive(inv, BASELINE, "1.37.2", SOURCE_SHA)
+        self.assertEqual(small, legacy)
+        for virtual, raw in ((5 << 30, 5 << 30), (10 << 30, 10 << 30), (8 << 30, 20 << 30), (20 << 30, 8 << 30),
+                             (float(8 << 30), float(8 << 30)), (float(8 << 30), 8 << 30), (8 << 30, float(8 << 30)),
+                             ("8589934592", "8589934592")):
+            inv = reviewed_inventory()
+            inv["facts"]["parent"].update(virtual_bytes=virtual, raw_bytes=raw)
+            with self.subTest(virtual=virtual, raw=raw), self.assertRaises(review.ReviewRefused) as caught:
+                review.derive(inv, BASELINE, "1.37.2", SOURCE_SHA)
+            self.assertEqual(caught.exception.fields, ["facts.parent.virtual_bytes"])
+        for mutate in (lambda i: i["facts"]["parent"].pop("raw_bytes"), lambda i: i["facts"].pop("parent")):
+            inv = reviewed_inventory()
+            mutate(inv)
+            with self.assertRaises(review.ReviewRefused):
+                review.derive(inv, BASELINE, "1.37.2", SOURCE_SHA)
+        # Every other parent fact still has to equal the baseline.
+        inv = reviewed_inventory()
+        inv["facts"]["parent"].update(virtual_bytes=8 << 30, raw_bytes=8 << 30, source_stopped=False)
+        with self.assertRaises(review.ReviewRefused) as caught:
+            review.derive(inv, BASELINE, "1.37.2", SOURCE_SHA)
+        self.assertEqual(caught.exception.fields, ["facts.parent.source_stopped"])
 
     def test_project_drops_only_version_fields(self):
         inv = reviewed_inventory()
@@ -826,6 +866,24 @@ class EvidenceTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 bundle.sealed_facts(bad, SOURCE_SHA)
 
+    def test_bundle_manifest_carries_the_sealed_facts_actual_virtual_size(self):
+        """5 GiB native OS, 8 GiB Kubernetes node and the legacy 20 GiB reach the manifest unchanged."""
+        disk = b"QFI\xfb" + bytes(100)
+        for version, virtual in ((None, 5 << 30), (None, 20 << 30), ("1.37.2", 8 << 30), ("1.37.2", 20 << 30)):
+            with self.subTest(version=version, virtual=virtual), tempfile.TemporaryDirectory() as root:
+                q = bundle.request("ubuntu-2604", "a" * 40, "b" * 64, "20261114000000", kubernetes_version=version)
+                facts = {"kind": "OfflineSanitizationFacts", "os": "ubuntu-2604", "variant": q["variant"],
+                         "disk_sha256": hashlib.sha256(disk).hexdigest(), "disk_bytes": len(disk),
+                         "virtual_size_bytes": virtual, "checks": {k: True for k in stream_sanitized.CHECKS}}
+                if version:
+                    facts["kubernetes_version"] = version
+                self.assertIs(stream_sanitized.valid(facts, "ubuntu-2604", version), True)
+                (Path(root) / "disk").write_bytes(disk)
+                (Path(root) / "staging").mkdir()
+                m = bundle.stage(Path(root) / "staging", q, bundle.receipt(q, facts, 1, 2, SOURCE_SHA), Path(root) / "disk")
+                self.assertEqual((m["disk"]["virtual_size_bytes"], m["clean_export_receipt"]["virtual_size_bytes"]),
+                                 (virtual, virtual))
+
     def test_pinned_input_refuses_symlinked_parents(self):
         with tempfile.TemporaryDirectory() as root:
             (Path(root) / "real").mkdir()
@@ -834,6 +892,53 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(capsule.pinned_input(Path(root) / "real" / "f"), hashlib.sha256(b"x").hexdigest())
             with self.assertRaises(capsule.CapsuleError):
                 capsule.pinned_input(Path(root) / "link" / "f")
+
+
+class ProbeSizeTests(unittest.TestCase):
+    """The probes run under libguestfs only inside the capsule; these pin which disk sizes each one admits."""
+
+    def run_main(self, module, argv, **replaced):
+        """main() up to the first replaced call that raises: host uid, no KVM, a fake guestfs, nothing touched."""
+        with contextlib.ExitStack() as stack:
+            for mocked in (patch.object(module.os, "getuid", return_value=1002),
+                           patch.object(module.os, "geteuid", return_value=1002),
+                           patch.object(module.pathlib.Path, "exists", return_value=False),
+                           patch.object(module.pathlib.Path, "mkdir"),
+                           patch.object(module.pathlib.Path, "read_bytes", return_value=b"{}"),
+                           patch.dict(os.environ), patch.object(sys, "path", list(sys.path)),
+                           patch.dict(sys.modules, {"guestfs": MagicMock()}),
+                           patch.object(vm_sanitize, "mount_all"), patch.object(vm_sanitize, "load_review")):
+                stack.enter_context(mocked)
+            mocks = {name: stack.enter_context(patch.object(owner, name, **how))
+                     for name, (owner, how) in replaced.items()}
+            with self.assertRaisesRegex(RuntimeError, "stop"):
+                module.main(list(argv))
+        return mocks
+
+    def test_each_probe_admits_exactly_its_own_variant_row(self):
+        stop = {"side_effect": RuntimeError("stop at the size gate")}
+        for module, argv, variant in ((inspect_os, ["ubuntu-2404"], "os"), (postscan_probe, ["--os", "debian-13"], "os"),
+                                      (postscan_probe, ["--k8s", "1.37.2"], "kubernetes")):
+            with self.subTest(module=module.__name__, variant=variant):
+                gate = self.run_main(module, argv, image_info=(vm_sanitize, stop))["image_info"]
+                gate.assert_called_once_with(module.SOURCE, vm_sanitize.VIRTUAL_BYTES[variant])
+        self.assertNotEqual(vm_sanitize.VIRTUAL_BYTES["os"], vm_sanitize.VIRTUAL_BYTES["kubernetes"])
+
+    def test_kubernetes_inventory_records_the_size_that_was_read(self):
+        for size in vm_sanitize.VIRTUAL_BYTES["kubernetes"]:
+            with self.subTest(size=size):
+                mocks = self.run_main(inspect_k8s, ["1.37.2", "2.3.2", "1.4.3"],
+                                      raw_info=(vm_sanitize, {"return_value": {"virtual-size": size}}),
+                                      inventory=(inspect_k8s, {"side_effect": RuntimeError("stop at the inventory")}))
+                mocks["raw_info"].assert_called_once_with(inspect_k8s.RAW)  # The allowlist gate; its size is passed on.
+                self.assertEqual(mocks["inventory"].call_args.args[3:], (size, "1.37.2", "2.3.2", "1.4.3"))
+                vs = MagicMock()
+                vs.k8s_inventory.side_effect = RuntimeError("stop at the facts")
+                with patch.object(inspect_k8s, "layout_facts", return_value=(True, {})), \
+                        patch.object(inspect_k8s, "sudo_hashes", return_value={}), self.assertRaisesRegex(RuntimeError, "stop"):
+                    inspect_k8s.inventory(vs, None, MagicMock(), size, "1.37.2", "2.3.2", "1.4.3")
+                parent = vs.k8s_inventory.call_args.args[3]
+                self.assertEqual((parent["virtual_bytes"], parent["raw_bytes"]), (size, size))  # Never a constant.
 
 
 class CapsuleUidTests(unittest.TestCase):

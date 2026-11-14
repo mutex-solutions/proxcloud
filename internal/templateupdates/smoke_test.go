@@ -459,6 +459,32 @@ func TestSmokePassRecordsAndCleansUp(t *testing.T) {
 	}
 }
 
+// The growth check is relative to the template's own disk, so the 5 GiB (native OS) and 8 GiB (Kubernetes
+// node) templates pass it like the 20 GiB ones, and a root filesystem that did not grow still fails.
+func TestSmokeSmallTemplateDisks(t *testing.T) {
+	for variant, gib := range map[string]int64{"os": 5, "kubernetes": 8} {
+		for _, noGrow := range []bool{false, true} {
+			x, pv, rec, p := smokeSetup(t, variant)
+			pv.baseDiskBytes, pv.noGrow = gib<<30, noGrow
+			pv.vms[9300].cfg["scsi0"] = fmt.Sprintf("local-zfs:base-9300-disk-0,discard=on,size=%dG", gib)
+			if err := x.Run(context.Background(), smokeJob, p, &testFence{epoch: 1, budget: -1}); err != nil {
+				t.Fatal(err)
+			}
+			r, _ := rec.LoadSmoke(context.Background(), smokeJob)
+			want, code := SmokePass, ""
+			if noGrow {
+				want, code = SmokeFail, SmokeDiskNotGrown
+			}
+			if r.Result != want || r.Code != code || r.Checks.TemplateDiskBytes != gib<<30 || !r.Cleaned {
+				t.Fatalf("%s %d GiB noGrow=%v: receipt %+v", variant, gib, noGrow, r)
+			}
+			if !noGrow && r.Checks.RootFSBytes != (gib+8)<<30-512<<20 {
+				t.Fatalf("%s: root fs %d after the default 8 GiB grow", variant, r.Checks.RootFSBytes)
+			}
+		}
+	}
+}
+
 // The test VM's cloud-init: ephemeral key, no password, the smoke network, owner tag replacing the
 // template's copied tags.
 func TestSmokeCloudInitShape(t *testing.T) {

@@ -59,6 +59,7 @@ class StaticPreparationTests(unittest.TestCase):
                 config.prepare(capi, run, environment(os_slug))
                 variables = json.loads((run / "vars.json").read_text())
                 self.assertEqual(variables["artifact_name"], os_slug + "-kube-v1.35.10")
+                self.assertEqual((config.K8S_BUILD_DISK_GIB, variables["disk_size"]), (8, "8G"))  # It was 20G.
                 self.assertEqual(variables["iso_checksum"], config.K8S_IMAGES[os_slug]["iso_sha256"])
                 self.assertEqual(variables["iso_url"], config.K8S_IMAGES[os_slug]["iso_url"])
                 self.assertIn("  network:", (run / "seed/user-data").read_text())
@@ -178,6 +179,28 @@ class StaticPreparationTests(unittest.TestCase):
                 run=Path(tmp);capi=run/"image-builder/images/capi";upstream(capi);config.prepare(capi,run,environment())
                 identities.append((run/"seed/meta-data").read_text())
         self.assertNotEqual(*identities)
+
+    def test_dhcp_build_runs_the_free_space_admission_before_upstream_shutdown(self):
+        """DHCP is the script default and keeps upstream's final provisioner, so cleanup.sh never runs there."""
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp); capi = run / "image-builder/images/capi"; template = upstream(capi)
+            before = json.loads(template.read_text())["provisioners"]
+            before[2]["pause_before"] = "90s"  # Existing reconnect grace, as in static mode.
+            config.prepare(capi, run, {"K8S_VERSION": "1.35.10"})
+            after = json.loads((capi / "packer/proxmox/packer.json").read_text())["provisioners"]
+            self.assertEqual(after[:-2] + after[-1:], before)  # Nothing upstream is waived or reordered.
+            self.assertFalse((run / "cleanup.sh").exists())
+            guard = after[-2]
+            self.assertEqual((guard["type"], guard["inline_shebang"], len(guard["inline"])), ("shell", "/bin/sh -eu", 4))
+            self.assertIn("\n".join(guard["inline"]) + "\nsync\n", (ROOT / "images/k8s-build-cleanup.sh").read_text())
+            fake = run / "bin"; fake.mkdir()
+            (fake / "df").write_text('#!/bin/sh\n[ -n "$FREE" ] || exit 1\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/sda1 8000000 1 $FREE 1% /"\n')
+            (fake / "df").chmod(0o700)
+            for free, code in (("1048576", 0), ("1048575", 1), ("0", 1), ("", 1)):  # 1 GiB free or refused; df failing refuses.
+                with self.subTest(free=free):
+                    done = subprocess.run(["/bin/sh", "-eu", "-c", "\n".join(guard["inline"])], capture_output=True, text=True,
+                                          env={"PATH": "%s:/usr/bin:/bin" % fake, "FREE": free})
+                    self.assertEqual(done.returncode, code, done.stderr)
 
     def test_cleanup_returns_without_power_or_network_changes(self):
         text=(ROOT/"images/k8s-build-cleanup.sh").read_text()

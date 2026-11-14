@@ -374,14 +374,16 @@ def load_state(sdir):
 
 
 def sealed_disk(path, variant, os_name, k8s_version):
-    """(disk path, sha256, bytes) of a SEALED sanitize run of exactly this variant; the file is re-hashed."""
+    """(disk path, sha256, bytes, virtual bytes) of a SEALED sanitize run of exactly this variant; the file is
+    re-hashed. The virtual size is the artifact's own, one of the sanitizer's allowlisted (whole GiB) sizes."""
     try:
         run = json.loads(Path(path).read_bytes().decode("ascii"))
         facts, disk = run["facts"], Path(run["disk"])
-        sha, size = facts["disk_sha256"], facts["disk_bytes"]
+        sha, size, virtual = facts["disk_sha256"], facts["disk_bytes"], facts["virtual_size_bytes"]
         ok = (run["sealed_after_cgroup_stop"] is True and facts["variant"] == variant and facts["os"] == os_name
               and facts.get("kubernetes_version") == k8s_version and HEX64.fullmatch(sha) is not None
-              and type(size) is int and 0 < size <= MAX_DISK_BYTES and disk.is_absolute())
+              and type(size) is int and 0 < size <= MAX_DISK_BYTES and disk.is_absolute()
+              and type(virtual) is int and virtual in vm_sanitize.VIRTUAL_BYTES[variant])
         st = disk.lstat()
     except (OSError, ValueError, KeyError, TypeError):
         raise Refused("sanitize_run_refused") from None
@@ -389,7 +391,7 @@ def sealed_disk(path, variant, os_name, k8s_version):
     need(stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and not st.st_mode & 0o222 and st.st_size == size,
          "sealed_disk_refused")
     need(capsule.sha256_file(disk) == sha, "sealed_disk_refused")
-    return str(disk), sha, size
+    return str(disk), sha, size, virtual
 
 
 def keygen(sdir):
@@ -521,7 +523,8 @@ def create_clone(api, cfg, sdir, state, suffix, address, public):
                    serial0="socket", vga="serial0", boot="order=scsi0", net0=net,
                    scsi0="%s:0,discard=on,import-from=%s" % (cfg["storage"], volid(cfg)),
                    ide2="%s:cloudinit" % cfg["storage"])
-    need("size=20G" in str(config.get("scsi0")).split(","), "import_not_20g")
+    # The import must have the artifact's own virtual size; the grow below then proves it can still grow.
+    need("size=%dG" % (cfg["virtual_bytes"] >> 30) in str(config.get("scsi0")).split(","), "import_size_mismatch")
     need(set(net.split(",")[1:]) <= set(str(config.get("net0")).split(",")), "network_readback")
     mark("imported")
     wait(api, node, api.call("PUT", path + "/resize", digest=config["digest"], disk="scsi0", size="30G"),
@@ -678,9 +681,10 @@ def run(api, cfg, sdir):
     recorded = False
     try:
         need(not os.path.lexists(sdir / STATE), "state_exists")  # A previous run's record is never overwritten.
-        disk, sha, size = sealed_disk(cfg["sanitize_run"], cfg["variant"], cfg["os"], cfg["kubernetes_version"])
-        cfg = dict(cfg, sha256=sha, run=os.urandom(6).hex())
-        result.update(disk_sha256=sha, disk_bytes=size, run=cfg["run"], import_volume=import_file(cfg), step="preflight")
+        disk, sha, size, virtual = sealed_disk(cfg["sanitize_run"], cfg["variant"], cfg["os"], cfg["kubernetes_version"])
+        cfg = dict(cfg, sha256=sha, run=os.urandom(6).hex(), virtual_bytes=virtual)
+        result.update(disk_sha256=sha, disk_bytes=size, virtual_size_bytes=virtual, run=cfg["run"],
+                      import_volume=import_file(cfg), step="preflight")
         before, configs = protected(api)
         need(not address_in_use(configs, cfg["addresses"]), "test_address_in_use")
         need(not any(address_answers(a.split("/")[0]) for a in cfg["addresses"]), "test_address_answers")

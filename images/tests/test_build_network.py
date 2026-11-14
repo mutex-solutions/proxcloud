@@ -71,8 +71,8 @@ class FakePVE:
         elif path.endswith("/status/current"):
             return {"status": "stopped"}
         elif path.endswith("/resize"):
-            assert method == "PUT" and params == {"disk": "scsi0", "size": "20G", "digest": "fake-digest"}
-            self.rows[vmid]["scsi0"] = "disk-store:vm-%s-disk-0,discard=on,size=20G" % vmid
+            assert method == "PUT" and params == {"disk": "scsi0", "size": "5G", "digest": "fake-digest"}
+            self.rows[vmid]["scsi0"] = "disk-store:vm-%s-disk-0,discard=on,size=5G" % vmid
             return None  # synchronous PVE response; wait(None) is invalid
         elif path.endswith("/clone"):
             self.rows[params["newid"]] = dict(self.rows[vmid])

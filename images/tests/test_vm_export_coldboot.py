@@ -175,7 +175,7 @@ class FakePVE:
             return self.task("qmconfig", vmid, lambda: config.update(changes))
         if (method, tail) == ("PUT", "/resize"):
             size = self.resize_to or params["size"]
-            return self.task("resize", vmid, lambda: config.update(scsi0=config["scsi0"].replace("size=20G", "size=" + size)))
+            return self.task("resize", vmid, lambda: config.update(scsi0=re.sub(r"size=[0-9]+G", "size=" + size, config["scsi0"])))
         if method == "POST" and tail in ("/status/start", "/status/stop"):
             verb = tail.rsplit("/", 1)[1]
             return self.task("qm" + verb, vmid, lambda: vm.update(status="running" if verb == "start" else "stopped"))
@@ -270,9 +270,11 @@ class ColdBootCase(unittest.TestCase):
         handlers = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT)}  # finish() ignores both.
         self.addCleanup(lambda: [signal.signal(s, h) for s, h in handlers.items()])
 
-    def record(self, variant="kubernetes", os_name="ubuntu-2604", version="1.37.2", size=len(DISK), **changes):
+    def record(self, variant="kubernetes", os_name="ubuntu-2604", version="1.37.2", size=len(DISK), virtual=20 << 30,
+               **changes):
+        """virtual: the artifact's virtual size. The default is a legacy 20 GiB export, which FakePVE imports as 20G."""
         facts = {"kind": "OfflineSanitizationFacts", "variant": variant, "os": os_name, "disk_sha256": SHA,
-                 "disk_bytes": size, "virtual_size_bytes": 20 << 30}
+                 "disk_bytes": size, "virtual_size_bytes": virtual}
         if version:
             facts["kubernetes_version"] = version
         run = dict({"sealed_after_cgroup_stop": True, "facts": facts, "disk": str(self.disk)}, **changes)
@@ -396,6 +398,33 @@ class HappyPathTests(ColdBootCase):
         result = self.run_job(variant="os", os="ubuntu-2404", kubernetes_version=None)
         self.assertTrue(result["accepted"])
         self.assertEqual(set(result["clones"][1]["checks"]), set(coldboot_guest.COMMON + coldboot_guest.OS_ONLY))
+
+    def test_the_import_must_have_the_artifacts_own_virtual_size_then_grow_to_30g(self):
+        """8 GiB Kubernetes, 5 GiB native OS and the legacy 20 GiB of both: accepted only when PVE imports exactly
+        the size the sealed facts state, and each is then grown to 30G before the boot."""
+        k8s, native = dict(variant="kubernetes"), dict(variant="os", os_name="ubuntu-2404", version=None)
+        job = {"kubernetes": {}, "os": dict(variant="os", os="ubuntu-2404", kubernetes_version=None)}
+        for facts, virtual, imported, reason in ((k8s, 8 << 30, "8G", None), (k8s, 20 << 30, "20G", None),
+                                                 (native, 5 << 30, "5G", None), (native, 20 << 30, "20G", None),
+                                                 (k8s, 8 << 30, "20G", "import_size_mismatch"),
+                                                 (k8s, 20 << 30, "8G", "import_size_mismatch"),
+                                                 (native, 5 << 30, "20G", "import_size_mismatch"),
+                                                 (native, 5 << 30, "8G", "import_size_mismatch")):
+            with self.subTest(variant=facts["variant"], virtual=virtual, imported=imported):
+                self.setUp()
+                self.record(virtual=virtual, **facts)
+                self.pve.import_size = imported
+                if facts["variant"] == "os":
+                    self.host.expect = ("os", "24.04", "-")
+                result = self.run_job(**job[facts["variant"]])
+                self.assertEqual((result["accepted"], result["reason"], result["virtual_size_bytes"]),
+                                 (reason is None, reason, virtual))
+                resized = [m for m in self.pve.mutations if m[1].endswith("/resize")]
+                started = [m for m in self.pve.mutations if m[1].endswith("/status/start")]
+                if reason:
+                    self.assertEqual(resized + started, [])  # Refused at the import readback: never grown or booted.
+                else:
+                    self.assertEqual([m[2]["size"] for m in resized], ["30G", "30G"])
 
     def test_the_guest_script_gets_exactly_this_jobs_variant_version_and_key_hash(self):
         for wrong in (("kubernetes", "26.04", "1.36.6"), ("os", "26.04", "1.37.2"), ("kubernetes", "24.04", "1.37.2")):
@@ -555,6 +584,21 @@ class RefusalTests(ColdBootCase):
                 self.assert_untouched(self.run_job(), "sealed_disk_refused")
                 self.disk.chmod(0o400)
                 (self.root / "alias").unlink(missing_ok=True)
+
+    def test_a_virtual_size_off_the_variants_allowlist_refuses_before_any_mutation(self):
+        native = dict(variant="os", os_name="ubuntu-2404", version=None)
+        for facts, job, virtual in (({}, {}, 5 << 30), ({}, {}, 10 << 30), ({}, {}, (8 << 30) + 512), ({}, {}, "8G"),
+                                    ({}, {}, float(8 << 30)), ({}, {}, None),
+                                    (native, dict(variant="os", os="ubuntu-2404", kubernetes_version=None), 8 << 30),
+                                    (native, dict(variant="os", os="ubuntu-2404", kubernetes_version=None), 4 << 30)):
+            with self.subTest(variant=facts.get("variant", "kubernetes"), virtual=virtual):
+                self.record(virtual=virtual, **facts)
+                self.assert_untouched(self.run_job(**job), "sanitize_run_refused")
+        self.record()
+        run = json.loads((self.root / "sanitize-run.json").read_text())
+        del run["facts"]["virtual_size_bytes"]
+        (self.root / "sanitize-run.json").write_text(json.dumps(run))
+        self.assert_untouched(self.run_job(), "sanitize_run_refused")
 
     def test_api_node_room_is_checked_when_the_token_may_read_it(self):
         self.pve.rootfs = len(DISK) + coldboot.ROOM_MARGIN - 1
@@ -872,7 +916,7 @@ class FailureCleanupTests(ColdBootCase):
                 if method == "GET" and path.endswith("/9290/config") and key in config:
                     config.update({k: v(config) if callable(v) else v for k, v in change.items()})
             return lambda: setattr(self.pve, "hook", hook)
-        cases = {"import_not_20g": lambda: setattr(self.pve, "import_size", "10G"),
+        cases = {"import_size_mismatch": lambda: setattr(self.pve, "import_size", "10G"),
                  "resize_not_30g": lambda: setattr(self.pve, "resize_to", "25G"),
                  "network_readback": late("net0", net0=lambda c: c["net0"].replace(",tag=242", "")),
                  "network_readback bridge": late("net0", net0=lambda c: c["net0"].replace("vmbr0", "vmbr1")),

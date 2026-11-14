@@ -288,8 +288,8 @@ class Run:
         need(snapshot["volume"].endswith(self.source.suffix), "template_disk_format")
         size = os.lstat(copy.template_source(snapshot, cfg["mount"])).st_size
         # Kubernetes: a raw disk, exactly its virtual size. Native: a QCOW2 file, bounded as the sanitizer bounds it.
-        need(size == vm_sanitize.VIRTUAL_BYTES if self.k8s else 0 < size <= vm_sanitize.NATIVE_SOURCE_MAX_BYTES,
-             "template_disk_size")
+        need(size in vm_sanitize.VIRTUAL_BYTES["kubernetes"] if self.k8s
+             else 0 < size <= vm_sanitize.NATIVE_SOURCE_MAX_BYTES, "template_disk_size")
         free = os.statvfs(self.work)
         need(free.f_bavail * free.f_frsize >= size + WORK_ROOM, "insufficient_work_space")
         checksum, url = upstream(selected, api, cfg, name)

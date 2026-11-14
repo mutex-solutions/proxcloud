@@ -22,8 +22,11 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 POOL = "pc-templates"
-# Artifact floor for every newly imported native OS base, before its first boot.
-DEFAULT_BUILD_DISK_GIB = 20
+# Virtual disk of every newly built native OS template: the floor a fresh vendor-image base is grown to before
+# its first boot (docs/template-build-disk.md). It was 20 until 2026-11; 5 GiB still leaves the dist-upgrade room
+# over the vendor images (3 to 3.5 GiB) and a server made from the template gets the size its user asks for.
+# Kept equal to vm_sanitize.VIRTUAL_BYTES["os"][0] by images/tests/test_template_disk_sizes.py.
+DEFAULT_BUILD_DISK_GIB = 5
 
 # The vendor images. The sums file is fetched at build time and hands Proxmox the checksum to verify.
 IMAGES = {

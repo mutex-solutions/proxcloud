@@ -59,6 +59,18 @@ class ArtifactTests(unittest.TestCase):
             for part in path: obj = obj[part]
             obj[key] = value
             with self.subTest(key=key, value=value), self.assertRaises(ValueError): a.validate(bad)
+    def test_virtual_size_is_5_to_100_gib_with_the_legacy_20_gib_still_valid(self):
+        """Disk and receipt changed together, so only the bound decides (a lone change fails the receipt match)."""
+        self.assertEqual((a.MIN_VIRTUAL_BYTES, a.MAX_VIRTUAL_BYTES), (5 << 30, 100 << 30))
+        m = self.prepare()
+        def with_size(size):
+            row = copy.deepcopy(m)
+            row["disk"]["virtual_size_bytes"] = row["clean_export_receipt"]["virtual_size_bytes"] = size
+            return row
+        for size in (5 << 30, 8 << 30, 20 << 30, 100 << 30):
+            with self.subTest(size=size): a.validate(with_size(size))
+        for size in ((5 << 30) - 1, 4 << 30, 0, (100 << 30) + 1, float(5 << 30), True):
+            with self.subTest(size=size), self.assertRaises(ValueError): a.validate(with_size(size))
     def test_selectors_provenance_and_duplicate_keys(self):
         for slug in ("ubuntu-2404", "ubuntu-2604", "debian-12", "debian-13"):
             a.request_valid(dict(self.q, os=slug))

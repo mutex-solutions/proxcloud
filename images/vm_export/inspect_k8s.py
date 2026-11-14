@@ -87,8 +87,8 @@ def binary_has(vs, g, path, needles, limit=192 << 20):
     return {"bytes": size, **found}
 
 
-def inventory(vs, policy, g, k8s_version, containerd_version, runc_version):
-    """All facts from an attached read-only drive. Returns (exit_code, record)."""
+def inventory(vs, policy, g, virtual_bytes, k8s_version, containerd_version, runc_version):
+    """All facts from an attached read-only drive of virtual_bytes (raw_info's size). Returns (exit_code, record)."""
     ok, layout = layout_facts(vs, g)
     if not ok:
         return 4, {"phase": "layout_refused", "layout": layout}
@@ -99,7 +99,7 @@ def inventory(vs, policy, g, k8s_version, containerd_version, runc_version):
               "cloud_base_config_reviewed": True, "kubernetes_version": k8s_version, "kubelet_active": False,
               "runtime_version": "0.0.0", "retained_package_policy_reviewed": True,
               "package_policy_sha256": "0" * 64, **sudo}
-    parent = {"format": "raw", "virtual_bytes": vs.VIRTUAL_BYTES, "raw_bytes": vs.VIRTUAL_BYTES,
+    parent = {"format": "raw", "virtual_bytes": virtual_bytes, "raw_bytes": virtual_bytes,
               "source_hash_verified": True, "source_stopped": True}
     _, facts, tokens = vs.k8s_inventory(g, "ubuntu-2604", review, parent)
     observed_backend = ("netplan-systemd-networkd" if g.exists("/usr/sbin/netplan") and
@@ -227,14 +227,14 @@ def main(argv):
         vs.require(options == "ro")  # The inventory never mounts read-write.
         real_mount(g, mounts, options)
     vs.mount_all = ro_only
-    vs.raw_info(RAW)  # Explicit -f raw; exact 20 GiB; no backing/external data.
+    virtual_bytes = vs.raw_info(RAW)["virtual-size"]  # Explicit -f raw; allowlisted size; no backing/external data.
     g = guestfs.GuestFS(python_return_dict=True)
     g.set_backend("direct")
     g.set_backend_setting("force_tcg", "true")
     g.set_network(False)
     g.add_drive_opts(RAW, format="raw", readonly=True)
     g.launch()
-    code, record = inventory(vs, policy, g, *argv)
+    code, record = inventory(vs, policy, g, virtual_bytes, *argv)
     if code == 0:
         try:
             g.umount_all()

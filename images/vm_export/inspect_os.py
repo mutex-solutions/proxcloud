@@ -96,7 +96,7 @@ def main(argv):
     sys.path.insert(0, "/bootstrap")
     import vm_sanitize as vs
     import guestfs
-    vs.image_info(SOURCE)  # Read-only qemu-img info/check: qcow2, 20 GiB, no backing/data-file/snapshots.
+    vs.image_info(SOURCE, vs.VIRTUAL_BYTES["os"])  # Read-only: qcow2, allowlisted size, no backing/data-file/snapshots.
     g = guestfs.GuestFS(python_return_dict=True)
     g.set_backend("direct")
     g.set_backend_setting("force_tcg", "true")
