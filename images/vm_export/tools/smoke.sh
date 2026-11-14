@@ -14,7 +14,7 @@ exec docker run --rm --pull=never --network=none --read-only --user="$uid:$uid" 
     TMPDIR=/scratch/tmp LC_ALL=C LANG=C LIBGUESTFS_BACKEND=direct LIBGUESTFS_BACKEND_SETTINGS=force_tcg \
     LIBGUESTFS_CACHEDIR=/scratch/cache LIBGUESTFS_TMPDIR=/scratch/tmp \
     /usr/bin/python3 -I -c '
-import os, pwd, subprocess, sys
+import os, pwd, stat, subprocess, sys
 uid = int(sys.argv[1])
 assert os.getuid() == uid and os.getgid() == uid
 try:
@@ -22,6 +22,14 @@ try:
     raise SystemExit("uid unexpectedly has a passwd entry")
 except KeyError:
     pass
+# No file of the image keeps a privilege of its own: no setuid, no setgid, no file capability.
+root = os.stat("/").st_dev
+for top, dirs, files in os.walk("/"):
+    dirs[:] = [name for name in dirs if os.lstat(os.path.join(top, name)).st_dev == root]
+    for path in (os.path.join(top, name) for name in files):
+        mode = os.lstat(path).st_mode
+        if stat.S_ISREG(mode):
+            assert not mode & 0o6000 and "security.capability" not in os.listxattr(path), path
 for name in ("home", "tmp", "cache"):
     os.mkdir("/scratch/" + name, 0o700)
 import guestfs

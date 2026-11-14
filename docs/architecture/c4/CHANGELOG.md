@@ -10,7 +10,7 @@ and rules: [README.md](README.md#maintenance-rule).
 containers run from (`images/vm_export/tools/Containerfile`: `qemu-img`, Python with
 libguestfs, the appliance kernel) on a hosted runner, smoke-tests it without network as an
 arbitrary uid, scans it with the existing Trivy gate and pushes it to
-`ghcr.io/mutex-solutions/proxcloud-vm-export-tools` under one immutable tag. The export
+`ghcr.io/mutex-solutions/proxcloud-vm-export-tools` under one tag it never replaces. The export
 pipeline is unchanged: `capsule.py` still pins the image ID it starts containers from.
 
 **Why:** the tool image was built on a workstation and loaded onto the runner by hand.

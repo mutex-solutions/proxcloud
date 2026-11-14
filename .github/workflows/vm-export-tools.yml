@@ -4,7 +4,7 @@ name: vm-export-tools
 # libguestfs appliance inputs) that images/vm_export/capsule.py runs by pinned ID, and publishes it to
 # ghcr.io/mutex-solutions/proxcloud-vm-export-tools.
 #   pull request      -> build, smoke and scan with a read-only token: no login, nothing is pushed
-#   push to main      -> the same, then push under one immutable tag and record the digest
+#   push to main      -> the same, then push under one tag this workflow never replaces and record the digest
 #   manual run (main) -> as a push to main; a commit publishes once (replacing a tag is refused)
 # Hosted runner only: no PVE access, no VM disk, no secret other than the built-in token.
 on:
@@ -60,6 +60,9 @@ jobs:
           docker image inspect "$LOCAL_IMAGE" --format '{{.Id}}' > result/image-id.txt
           docker run --rm --pull=never --network=none --entrypoint /usr/bin/dpkg-query \
             "$LOCAL_IMAGE" --show > result/packages.txt
+          # The installed package set is the reviewed one: a replayed older archive index, or a moved
+          # snapshot without a regenerated lock file, stops here.
+          diff -u images/vm_export/tools/packages.lock result/packages.txt
 
       - name: Smoke as an arbitrary uid without network
         run: images/vm_export/tools/smoke.sh "$LOCAL_IMAGE"
@@ -141,6 +144,9 @@ jobs:
           docker image inspect "$LOCAL_IMAGE" --format '{{.Id}}' > result/image-id.txt
           docker run --rm --pull=never --network=none --entrypoint /usr/bin/dpkg-query \
             "$LOCAL_IMAGE" --show > result/packages.txt
+          # The installed package set is the reviewed one: a replayed older archive index, or a moved
+          # snapshot without a regenerated lock file, stops here.
+          diff -u images/vm_export/tools/packages.lock result/packages.txt
 
       - name: Smoke as an arbitrary uid without network
         run: images/vm_export/tools/smoke.sh "$LOCAL_IMAGE"
@@ -204,7 +210,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Immutable: the Containerfile content hash plus the commit. Never latest, never a moving tag.
+          # One tag per commit: the Containerfile content hash plus the commit. Never latest, never a
+          # moving tag, never replaced by this workflow (the registry itself would allow it).
           tag="$(sha256sum images/vm_export/tools/Containerfile | cut -c1-16)-$SOURCE_SHA"
           [[ "$tag" =~ ^[0-9a-f]{16}-[0-9a-f]{40}$ ]]
           python3 - "$tag" <<'PY'
@@ -226,13 +233,14 @@ jobs:
                   stage.require(len(body) <= 65536)
                   return response.status, body
           package = os.environ['PACKAGE'].removeprefix('ghcr.io/')
+          tag = sys.argv[1]
           basic = base64.b64encode((os.environ['GITHUB_ACTOR'] + ':' + os.environ['GH_TOKEN']).encode()).decode()
           query = urllib.parse.urlencode({'service': 'ghcr.io', 'scope': 'repository:' + package + ':pull,push'})
           status, raw = request('https://ghcr.io/token?' + query, {'Authorization': 'Basic ' + basic})
           stage.require(status == 200)
           token = json.loads(raw)['token']
           stage.require(type(token) is str and 0 < len(token) <= 16384 and '\n' not in token and '\r' not in token)
-          status, raw = request('https://ghcr.io/v2/' + package + '/manifests/' + sys.argv[1], {
+          status, raw = request('https://ghcr.io/v2/' + package + '/manifests/' + tag, {
               'Authorization': 'Bearer ' + token,
               'Accept': 'application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, '
                         'application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json'})
@@ -245,22 +253,30 @@ jobs:
           # Read back from the registry: one single-platform manifest whose config is the image that
           # passed the smoke and the scan (the local ID is the config digest, or the manifest digest
           # when Docker uses the containerd image store).
-          docker manifest inspect "$reference" > "$RUNNER_TEMP/manifest.json"
+          # The tag exists from here on and this commit can never publish again, so a transient
+          # registry error is retried before the run gives up without a digest record.
+          for attempt in 1 2 3 4 5; do
+            if docker manifest inspect "$reference" > "$RUNNER_TEMP/manifest.json"; then break; fi
+            [[ "$attempt" -lt 5 ]]
+            sleep "$((attempt * 10))"
+          done
           config="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["config"]["digest"])' "$RUNNER_TEMP/manifest.json")"
           [[ "$config" =~ ^sha256:[0-9a-f]{64}$ ]]
           image_id="$(<result/image-id.txt)"
           test "$image_id" = "$config" || test "$image_id" = "${reference#*@}"
           mkdir digest
-          printf '{"reference": "%s", "tag": "%s", "config_digest": "%s", "source_sha": "%s"}\n' \
-            "$reference" "$tag" "$config" "$SOURCE_SHA" > digest/vm-export-tools-image.json
+          printf '{"reference": "%s", "tag": "%s", "config_digest": "%s", "image_id": "%s", "source_sha": "%s"}\n' \
+            "$reference" "$tag" "$config" "$image_id" "$SOURCE_SHA" > digest/vm-export-tools-image.json
           {
             echo '## VM export tool image published; NOT yet used by the export pipeline'
             echo
             echo "Reference: \`$reference\`"
             echo
-            echo "Tag: \`$tag\` (immutable)"
+            echo "Tag: \`$tag\` (never replaced by this workflow; pin the reference above, not the tag)"
             echo
             echo "Image config digest: \`$config\`"
+            echo
+            echo "Image ID on this runner's Docker (the smoked and scanned image): \`$image_id\`"
             echo
             echo 'Pending: a reviewed change pins this image in images/vm_export/capsule.py. No latest tag, no deployment.'
           } >> "$GITHUB_STEP_SUMMARY"

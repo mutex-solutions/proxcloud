@@ -246,7 +246,7 @@ flowchart LR
 
   docker --> ghcr
   sbxt --> ghcr
-  vmtools -->|"smoke, scan, immutable tag"| ghcr
+  vmtools -->|"smoke, scan, one tag per commit"| ghcr
   helm --> ghcr
   chart --> helm
   dbchart --> helm
@@ -271,7 +271,7 @@ Its Keycloak realm files are generated from the chart's realm templates and a te
 them equal.
 
 `vm-export-tools.yml` builds the image the VM export containers run from
-(`images/vm_export/tools/Containerfile`) and pushes it to GHCR under one immutable tag
+(`images/vm_export/tools/Containerfile`) and pushes it to GHCR under one tag it never replaces,
 after a smoke test and the Trivy gate. The export pipeline starts containers only from
 the image ID pinned in `images/vm_export/capsule.py`; publishing an image changes nothing
 until a reviewed change moves that pin.
