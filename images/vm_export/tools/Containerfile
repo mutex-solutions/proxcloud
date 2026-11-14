@@ -1,0 +1,46 @@
+# Tool image for the VM export capsules (images/vm_export/capsule.py): qemu-img, python3 with the
+# libguestfs binding, and the kernel + supermin inputs of the libguestfs appliance. Built and
+# published only by .github/workflows/vm-export-tools.yml; never built or loaded by hand.
+#
+# debian:bookworm-slim (Debian 12.15), linux/amd64 index digest.
+FROM debian@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
+
+# Every package comes from one snapshot.debian.org timestamp, so a rebuild resolves the same versions.
+# To take security updates: move the timestamp (and the base digest), nothing else.
+# Plain http is deliberate: the slim base has no CA bundle, and apt verifies the archive signature with
+# the keyring of the digest-pinned base. check-valid-until=no because a snapshot's Release file expires.
+#
+# Installed: exactly what a capsule executes. qemu-utils is /usr/bin/qemu-img; python3-guestfs brings
+# libguestfs0, which depends on the appliance packages (e2fsprogs, lvm2, ...) and on qemu-system-x86;
+# supermin assembles the appliance from them and from the kernel + modules of linux-image-amd64.
+# Not requested: sudo (a capsule runs with --cap-drop=ALL and no-new-privileges, so it could never
+# work), libguestfs-tools (guestfish and the virt-* CLIs: the capsules only use the Python binding),
+# ca-certificates (a capsule has no network; it still arrives as a dependency).
+RUN set -eux; \
+    snapshot=20261114T000000Z; \
+    archive=http://snapshot.debian.org/archive; \
+    options='[signed-by=/usr/share/keyrings/debian-archive-keyring.gpg check-valid-until=no]'; \
+    rm /etc/apt/sources.list.d/debian.sources; \
+    { echo "deb $options $archive/debian/$snapshot bookworm main"; \
+      echo "deb $options $archive/debian/$snapshot bookworm-updates main"; \
+      echo "deb $options $archive/debian-security/$snapshot bookworm-security main"; \
+    } > /etc/apt/sources.list; \
+    export DEBIAN_FRONTEND=noninteractive; \
+    apt-get -o Acquire::Retries=5 update; \
+    apt-get -o Acquire::Retries=5 upgrade -y; \
+    apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+        qemu-utils python3 python3-guestfs supermin linux-image-amd64 e2fsprogs; \
+    rm -rf /var/lib/apt/lists/*; \
+    # supermin runs as the capsule user and must read the kernel and its modules.
+    chmod -R a+rX /boot /lib/modules
+
+# No account is created: a capsule runs as the invoking user's numeric uid (any uid >= 1000), takes
+# HOME and TMPDIR from its environment and needs no passwd entry. The defaults below match capsule.py.
+USER 1000:1000
+ENV LIBGUESTFS_BACKEND=direct LIBGUESTFS_BACKEND_SETTINGS=force_tcg LIBGUESTFS_CACHEDIR=/scratch/cache \
+    LIBGUESTFS_TMPDIR=/scratch/tmp TMPDIR=/scratch/tmp HOME=/scratch/home
+
+ARG REVISION=unknown
+LABEL org.opencontainers.image.source="https://github.com/mutex-solutions/proxcloud" \
+      org.opencontainers.image.description="ProxCloud VM export tools: qemu-img, python3-guestfs and the libguestfs TCG appliance inputs" \
+      org.opencontainers.image.revision="$REVISION"
