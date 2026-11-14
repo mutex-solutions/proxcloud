@@ -243,7 +243,7 @@ class Lab:
             return {"suffix": suffix, "name": "pc-export-test-12345678-0123456789ab-" + suffix, "all_passed": True,
                     "checks": dict.fromkeys(names, True), "machine_id_sha256": suffix * 64, "host_key_sha256": suffix * 64,
                     "snapd_present": True, "snapd_serial_sha256": suffix * 64, "snapd_device_key_sha256": suffix * 64,
-                    "snapd_changes_error_lines": 0, "cloud_init_recoverable_warnings": 1}
+                    "snapd_changes_error_lines": 0, "snapd_snaps": 3, "cloud_init_recoverable_warnings": 1}
         pipeline.write(self.option(argv, "--out"), {
             "kind": "ColdBootAcceptance", "accepted": True, "reason": None, "step": "done",
             "variant": "kubernetes" if self.k8s else "os", "os": self.os, "kubernetes_version": self.k8s,

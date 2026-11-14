@@ -253,6 +253,10 @@ class ExportJobTests(unittest.TestCase):
             '          git -C "$GITHUB_WORKSPACE" sparse-checkout disable\n'
             '          test "$(git -C "$GITHUB_WORKSPACE" config --bool --get core.sparseCheckout)" = false\n'
             '          test "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" = "$GITHUB_SHA"\n'
+            "          # The runner keeps its workspace between jobs. Files an older commit or a sparse checkout left\n"
+            "          # behind are removed, and the tree must then be exactly the commit.\n"
+            '          git -C "$GITHUB_WORKSPACE" clean -ffdxq\n'
+            '          test -z "$(git -C "$GITHUB_WORKSPACE" status --porcelain --untracked-files=all --ignored)"\n'
             '          test -f "$GITHUB_WORKSPACE/images/vm_export/pipeline.py" && test -f "$GITHUB_WORKSPACE/images/vm_sanitize.py"\n\n'
             "      # Each stage refuses unless exactly the earlier ones completed (images/vm_export/pipeline.py).\n"))
 

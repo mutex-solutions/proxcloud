@@ -82,7 +82,7 @@ def schema(plan):
                 "cleanup_errors": exactly([]), "stderr_bytes_discarded": count, "pins": dict.fromkeys(pins, HEX)}
     guest = coldboot_guest.COMMON + (coldboot_guest.K8S if k8s else coldboot_guest.OS_ONLY)
     clone = {"suffix": r"[ab]", "all_passed": true, "checks": dict.fromkeys(guest, true), "snapd_present": true,
-             "snapd_changes_error_lines": count, "cloud_init_recoverable_warnings": count}
+             "snapd_changes_error_lines": count, "snapd_snaps": count, "cloud_init_recoverable_warnings": count}
     return {
         "kind": exactly("VmExportEvidence"), "schema_version": exactly(1),
         "repository": exactly(vm_publish_stage.REPOSITORY), "source_commit": r"[0-9a-f]{40}",
@@ -216,7 +216,7 @@ def build(plan, source, receipt, inventory_run, review, baseline, sanitize_run, 
             "coldboot": dict(pick(coldboot, "accepted", "reason", "step", "pve_tls_verified", "api_node_room", "disk_sha256",
                                   "distinct_identity"),
                              clones=[pick(row, "suffix", "all_passed", "checks", "snapd_present",
-                                          "snapd_changes_error_lines", "cloud_init_recoverable_warnings")
+                                          "snapd_changes_error_lines", "snapd_snaps", "cloud_init_recoverable_warnings")
                                      for row in coldboot["clones"]],
                              cleanup=pick(coldboot["cleanup"], "clones", "import_volume", "private_key_deleted"),
                              protected_set_unchanged=coldboot["protected_set"]["unchanged"],
