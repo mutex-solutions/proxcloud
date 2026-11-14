@@ -1,6 +1,7 @@
 """Trusted parent launcher for one confined, no-network, unprivileged tool capsule (docker).
 
-Port of the proven private launchers: pinned image by ID (--pull=never), confinement inspected
+Port of the proven private launchers: the CI-built tool image by local ID (--pull=never; pull() is the
+explicit earlier step), confinement inspected
 BEFORE start, only declared read-only binds plus one disk-backed scratch bind, exact-cid
 stop/kill, cgroup emptiness proof, bounded stdout handed to a parent-side sink. Guest data is
 never printed: a failed run reports only fixed reason codes.
@@ -16,7 +17,14 @@ import stat
 import subprocess
 import time
 
-IMAGE = "sha256:1c0e402e0ff1da2732b03f93ff61e2c1e16a05f0a2091749abffc4d5360367d9"
+# The tool image built and pushed by .github/workflows/vm-export-tools.yml (main at 83ebd33). pull() fetches
+# it by this registry digest; a capsule itself never pulls and starts from the local ID only.
+IMAGE_REFERENCE = ("ghcr.io/mutex-solutions/proxcloud-vm-export-tools"
+                   "@sha256:d3ab36a5efbe47a285be14356bcbac92ced6f6eeb69555aa1e3338a5f37328b3")
+# The local ID of exactly that image: its manifest digest under Docker's containerd image store, its
+# config digest under the classic store. Nothing else starts a capsule.
+IMAGE_IDS = ("sha256:d3ab36a5efbe47a285be14356bcbac92ced6f6eeb69555aa1e3338a5f37328b3",
+             "sha256:df1770b213fb1bb85f72659797f6123ccce8941f0cf1959f999728552454f917")
 GUEST_PATH = re.compile(r"/(?:input|bootstrap)/[A-Za-z0-9_.-]{1,64}")
 CHECK_ID = re.compile(r"[a-z0-9][a-z0-9.-]{0,63}")
 SIZE = re.compile(r"[1-9][0-9]{0,4}[mg]")
@@ -103,10 +111,12 @@ def bound_to_receipt(receipt_path, source, pin):
 
 
 def spec(check, binds, scratch, argv, memory="8g", cpus=2, pids=256, wall=2400, cpu_seconds=2400,
-         fsize=30 << 30, tmp="1g", image=IMAGE):
-    """Validated capsule description. binds: {absolute host file: /input|/bootstrap/<name>} read-only."""
+         fsize=30 << 30, tmp="1g", image=None):
+    """Validated capsule description. binds: {absolute host file: /input|/bootstrap/<name>} read-only.
+    image: a local ID of the pinned tool image (default: the one present, see local_image)."""
     need(CHECK_ID.fullmatch(check) is not None, "invalid check id")
-    need(re.fullmatch(r"sha256:[0-9a-f]{64}", image) is not None, "image must be pinned by id")
+    image = local_image() if image is None else image
+    need(image in IMAGE_IDS, "image must be the pinned tool image")
     need(type(binds) is dict and 0 < len(binds) <= 16, "invalid binds")
     need(all(GUEST_PATH.fullmatch(guest) for guest in binds.values()), "invalid guest path")
     need(len(set(binds.values())) == len(binds), "duplicate guest path")
@@ -175,6 +185,25 @@ def _command(args, timeout=20, **kw):
 
 def _inspect(cid):
     return json.loads(_command(["docker", "inspect", cid], capture_output=True, text=True, check=True).stdout)[0]
+
+
+def local_image():
+    """The local ID of the pinned tool image; refuses unless it is present under one of its two IDs."""
+    done = _command(["docker", "image", "inspect", "--format", "{{.Id}}", IMAGE_REFERENCE], capture_output=True, text=True)
+    image = done.stdout.strip() if done.returncode == 0 else ""
+    need(image in IMAGE_IDS, "pinned tool image not present")
+    return image
+
+
+def pull(config_dir):
+    """The explicit step before any capsule: fetch the pinned tool image by its registry digest. config_dir
+    is an empty directory used as the Docker client configuration, so no stored registry credential is
+    sent: the image is the one anyone can pull."""
+    need(os.path.isdir(config_dir) and not os.listdir(config_dir), "docker config dir must be empty")
+    done = _command(["docker", "pull", "--quiet", IMAGE_REFERENCE], timeout=1800, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, env=dict(os.environ, DOCKER_CONFIG=str(config_dir)))
+    need(done.returncode == 0, "tool image pull failed")
+    return local_image()
 
 
 def fs_type(path):

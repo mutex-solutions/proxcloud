@@ -15,7 +15,7 @@ WORKFLOWS = {
     "k8s-node-templates.yml": ("images/k8s-node-template.sh", "images/k8s-build-config.py", "-x", 1),
     "sandbox-templates.yml": ("deploy/templates/build.sh", "deploy/templates/images.yaml", "-x", 2),
 }
-HELPERS = ("images/vm_artifact.py", "images/vm_publish_stage.py", "images/vm_stage_local.py")
+HELPERS = ("images/vm_artifact.py", "images/vm_publish_stage.py")
 
 
 def preflights(text):

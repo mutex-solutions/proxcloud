@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Actions staging authorization and bounded ZIP extraction; no network/subprocess/image parser.
+"""Publisher-side authorization of the export job's bundle and bounded ZIP extraction; no
+network/subprocess/image parser.
 
-The hosted workflow supplies API responses from fixed same-repository endpoints. This
-module treats those responses and the archive as data, never as executable code.
+The only accepted producer is the `export` job of the SAME run of .github/workflows/vm-artifact-export.yml
+(the publisher is called from that run as a reusable workflow). The hosted workflow supplies API
+responses from fixed same-repository endpoints. This module treats those responses and the archive
+as data, never as executable code.
 """
 import argparse
 import datetime
@@ -16,7 +19,10 @@ import zipfile
 import vm_artifact as contract
 
 REPOSITORY = "mutex-solutions/proxcloud"
-STAGING_WORKFLOW = ".github/workflows/vm-artifact-stage.yml"
+EXPORT_WORKFLOW = ".github/workflows/vm-artifact-export.yml"
+WORKFLOW_REF = REPOSITORY + "/" + EXPORT_WORKFLOW + "@refs/heads/main"
+EXPORT_JOB = "export"
+EXPORT_LABELS = ["self-hosted", "linux", "x64", "proxcloud-vm-artifact-export"]
 MEMBERS = {"disk.qcow2": contract.MAX_DISK_BYTES - 1, "manifest.json": 65536, "SHA256SUMS": 65536}
 MAX_PAYLOAD_BYTES = sum(MEMBERS.values())
 MAX_ARCHIVE_BYTES = MAX_PAYLOAD_BYTES + 1024 ** 2
@@ -56,28 +62,50 @@ def positive(value):
     return type(value) is int and 0 < value <= 10 ** 20 - 1
 
 
-def inputs(run_id, artifact_name, manifest_sha, disk_sha, publisher_sha, repository):
-    require(contract.match(r"[1-9][0-9]{0,19}", run_id) and repository == REPOSITORY)
+def inputs(run_id, run_attempt, artifact_name, manifest_sha, disk_sha, publisher_sha, repository, workflow_ref):
+    require(contract.match(r"[1-9][0-9]{0,19}", run_id) and contract.match(r"[1-9][0-9]{0,3}", run_attempt))
+    require(repository == REPOSITORY and workflow_ref == WORKFLOW_REF)  # The caller workflow, on main.
     require(all(contract.match(r"[0-9a-f]{64}", value) for value in (manifest_sha, disk_sha)))
     require(contract.match(r"[0-9a-f]{40}", publisher_sha))
     os_name, build_version, source_prefix, variant = selector(artifact_name)
-    return dict(run_id=int(run_id), artifact_name=artifact_name, manifest_sha=manifest_sha,
+    return dict(run_id=int(run_id), run_attempt=int(run_attempt), artifact_name=artifact_name, manifest_sha=manifest_sha,
                 disk_sha=disk_sha, publisher_sha=publisher_sha, os=os_name,
                 build_version=build_version, source_prefix=source_prefix, variant=variant)
 
 
-def authorize(workflow, run, listing, selected):
-    """Bind exactly one unexpired artifact to the approved successful producer run."""
+def export_job(jobs, selected):
+    """The one `export` job of this run attempt, concluded success on the export runner. The publisher runs
+    inside the same run, so the run itself is still in progress: the job, not the run, is what completed.
+    A job kept from an earlier attempt (re-run of failed jobs only) reports that attempt's number."""
+    require(type(jobs) is dict and type(jobs.get("total_count")) is int and type(jobs.get("jobs")) is list)
+    require(0 < jobs["total_count"] == len(jobs["jobs"]) <= 100)  # One page holds every job: none is hidden.
+    require(all(type(row) is dict for row in jobs["jobs"]))
+    found = [row for row in jobs["jobs"] if row.get("name") == EXPORT_JOB]
+    require(len(found) == 1)
+    job = found[0]
+    require(positive(job.get("id")) and job.get("run_id") == selected["run_id"])
+    require(job.get("head_sha") == selected["publisher_sha"] and job.get("labels") == EXPORT_LABELS)
+    require(job.get("status") == "completed" and job.get("conclusion") == "success")
+    require(type(job.get("run_attempt")) is int and 1 <= job["run_attempt"] <= selected["run_attempt"])
+    return job["id"]
+
+
+def authorize(workflow, run, jobs, listing, selected):
+    """Bind exactly one unexpired artifact of the exact name to the successful export job of this run."""
     require(type(workflow) is dict and positive(workflow.get("id")))
-    require(workflow.get("path") == STAGING_WORKFLOW and workflow.get("state") == "active")
+    require(workflow.get("path") == EXPORT_WORKFLOW and workflow.get("state") == "active")
     require(type(run) is dict and run.get("id") == selected["run_id"])
-    require(run.get("workflow_id") == workflow["id"] and run.get("path") == STAGING_WORKFLOW)
-    require(run.get("event") == "workflow_dispatch" and run.get("status") == "completed")
-    require(run.get("conclusion") == "success" and run.get("head_branch") == "main")
+    require(run.get("workflow_id") == workflow["id"] and run.get("path") == EXPORT_WORKFLOW)
+    require(run.get("event") == "workflow_dispatch" and run.get("head_branch") == "main")
+    # This very run, this very attempt, still running: a completed run cannot be calling the publisher.
+    require(run.get("status") == "in_progress" and run.get("conclusion") is None)
+    require(type(run.get("run_attempt")) is int and run["run_attempt"] == selected["run_attempt"])
     require(run.get("head_sha") == selected["publisher_sha"])
     repo, head = run.get("repository"), run.get("head_repository")
     require(type(repo) is dict and type(head) is dict and positive(repo.get("id")))
     require(repo.get("full_name") == head.get("full_name") == REPOSITORY and repo["id"] == head.get("id"))
+    export_job(jobs, selected)
+    # The listing is asked for the exact name: other artifacts of the run (the public evidence) are not in it.
     require(type(listing) is dict and type(listing.get("total_count")) is int and listing["total_count"] == 1)
     rows = listing.get("artifacts")
     require(type(rows) is list and len(rows) == 1 and type(rows[0]) is dict)
@@ -192,6 +220,33 @@ def publication_plan(staging_dir, selected):
     return plan
 
 
+def public_reference(selected, package, digest):
+    """package@digest of a published bundle; the package is the one the artifact name stands for."""
+    expected = "ghcr.io/%s-vm-%s%s" % (REPOSITORY, selected["os"], "-k8s" if selected["variant"] == "kubernetes" else "")
+    require(package == expected and contract.match(r"sha256:[0-9a-f]{64}", digest))
+    return package + "@" + digest
+
+
+def final_summary(plan, reference):
+    """The run's last word, written by the job that pulled the digest without any credential."""
+    verify = ("python3 images/vm_artifact.py verify --staging-dir \"$PWD/pull\" --expected-manifest-sha256 %s "
+              "--expected-disk-sha256 %s" % (plan["expected_manifest_sha256"], plan["expected_disk_sha256"]))
+    return "\n".join((
+        "## VM image published, attested and verified by an anonymous pull", "",
+        "| | |", "|---|---|",
+        "| Package | `%s` |" % plan["package"], "| Tag | `%s` |" % plan["reference"].split(":", 1)[1],
+        "| OCI digest | `%s` |" % reference.split("@", 1)[1],
+        "| manifest.json sha256 | `%s` |" % plan["expected_manifest_sha256"],
+        "| disk.qcow2 sha256 | `%s` |" % plan["expected_disk_sha256"],
+        "| Source commit | `%s` |" % plan["source_commit"], "",
+        "This job held no registry credential: it pulled the digest as anyone can and re-checked the three files.", "",
+        "Verify it yourself:", "", "```text",
+        "gh attestation verify oci://%s --repo %s" % (reference, REPOSITORY),
+        "oras pull --output pull %s" % reference, verify, "```", "",
+        "The QCOW2 is for a hypervisor import, not `docker run`. No `latest` tag, no deployment, no provider pin "
+        "was changed.", ""))
+
+
 def absent_tag(status, body):
     """Only an explicit registry unknown-manifest/name 404 authorizes a first push."""
     require(status == 404)
@@ -210,21 +265,32 @@ def metadata_file(directory, name):
         os.close(fd)
 
 
+ENVIRONMENT = ("EXPORT_RUN_ID", "EXPORT_RUN_ATTEMPT", "ARTIFACT_NAME", "EXPECTED_MANIFEST_SHA256", "EXPECTED_DISK_SHA256",
+               "PUBLISHER_SHA", "PUBLISHER_REPOSITORY", "PUBLISHER_WORKFLOW_REF")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("check-inputs", "authorize", "unpack"))
+    parser.add_argument("command", choices=("check-inputs", "authorize", "unpack", "reference", "pulled"))
     parser.add_argument("--metadata-dir")
     parser.add_argument("--archive")
     parser.add_argument("--staging-dir")
     args = parser.parse_args(argv)
     try:
-        selected = inputs(*(os.environ.get(key, "") for key in
-                            ("STAGING_RUN_ID", "ARTIFACT_NAME", "EXPECTED_MANIFEST_SHA256",
-                             "EXPECTED_DISK_SHA256", "PUBLISHER_SHA", "PUBLISHER_REPOSITORY")))
-        if args.command == "authorize":
+        selected = inputs(*(os.environ.get(key, "") for key in ENVIRONMENT))
+        if args.command in ("reference", "pulled"):
+            reference = public_reference(selected, os.environ.get("PACKAGE", ""), os.environ.get("DIGEST", ""))
+            if args.command == "reference":
+                print(reference)
+            else:  # The anonymous pull holds exactly the three pinned files of this artifact name.
+                require(args.staging_dir is not None)
+                plan = publication_plan(args.staging_dir, selected)
+                require(plan["package"] == reference.split("@", 1)[0])
+                print(final_summary(plan, reference), end="")
+        elif args.command == "authorize":
             require(args.metadata_dir is not None and os.path.isabs(args.metadata_dir))
             artifact_id = authorize(*(metadata_file(args.metadata_dir, name) for name in
-                                      ("workflow.json", "run.json", "artifacts.json")), selected)
+                                      ("workflow.json", "run.json", "jobs.json", "artifacts.json")), selected)
             print("artifact_id=%s\nmax_archive_bytes=%s" % (artifact_id, MAX_ARCHIVE_BYTES))
         elif args.command == "unpack":
             require(args.archive is not None and args.staging_dir is not None)

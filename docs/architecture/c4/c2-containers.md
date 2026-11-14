@@ -230,6 +230,8 @@ flowchart LR
   docker["docker.yml<br/>api, web, admin,<br/>sandbox-proxy, sandbox-runtime images"]:::impl
   sbxt["sandbox-templates.yml<br/>built-in template images"]:::impl
   vmtools["vm-export-tools.yml<br/>VM export tool image"]:::impl
+  vmexport["vm-artifact-export.yml, export job<br/>self-hosted: copy, sanitize, cold boot, bundle"]:::impl
+  vmpublish["vm-artifact-export.yml, hosted jobs<br/>publish (vm-artifacts.yml), attest, verify"]:::impl
   helm["helm.yml<br/>lint, OCI chart publish"]:::impl
   ghcr["ghcr.io<br/>images and OCI charts"]:::impl
   chart["Chart proxcloud<br/>api, SPAs, gateway, Keycloak, CNPG"]:::impl
@@ -262,6 +264,11 @@ flowchart LR
   k8st -->|"static mode: private seed generation"| k8sseed
   k8sseed -->|"exact owned ISO upload; attach for install only"| pve
   k8st -->|"verify seed detachment/deletion, then tag node templates"| pve
+  ghcr -->|"tool image, pulled by pinned digest"| vmexport
+  pve -->|"template guard (API), read-only disk copy (storage mount)"| vmexport
+  vmexport -->|"cold boot: two clones, guarded cleanup"| pve
+  vmexport -->|"three-file bundle and public evidence (run artifacts)"| vmpublish
+  vmpublish -->|"VM image by digest, provenance attestation, anonymous pull check"| ghcr
 ```
 
 The one-host Compose install (`deploy/compose`) runs the same released API and console
@@ -272,9 +279,18 @@ them equal.
 
 `vm-export-tools.yml` builds the image the VM export containers run from
 (`images/vm_export/tools/Containerfile`) and pushes it to GHCR under one tag it never replaces,
-after a smoke test and the Trivy gate. The export pipeline starts containers only from
-the image ID pinned in `images/vm_export/capsule.py`; publishing an image changes nothing
-until a reviewed change moves that pin.
+after a smoke test and the Trivy gate. `images/vm_export/capsule.py` pins one reviewed
+digest of it: the export job pulls that digest and starts containers only from its local
+ID, so publishing a new tool image changes nothing until a reviewed change moves the pin.
+
+`vm-artifact-export.yml` is one manual run from a template in `pc-templates` to a public VM
+image. Its `export` job runs on a self-hosted runner inside the lab and holds the image
+token but no registry credential: it guards and copies the template read-only, sanitizes
+the copy in containers without network, cold-boots two clones through the PVE API and
+uploads the three-file bundle plus one public evidence record as run artifacts. The hosted
+jobs of the same run publish the bundle to GHCR (`vm-artifacts.yml`, a reusable workflow
+that accepts only this run's successful export job), attest the pushed digest and verify
+it with an anonymous pull. Details: [VM artifact export and publishing](../../vm-artifact-publishing.md).
 
 Both SPA images normalize only nginx's public document root to 0755 directories
 and 0644 files; the entrypoint also sets generated `config.js` to 0644 so nginx

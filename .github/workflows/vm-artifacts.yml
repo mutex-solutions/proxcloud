@@ -1,26 +1,31 @@
 name: vm-artifacts
 
-# Source-only bridge: the separately reviewed vm-artifact-stage.yml must exist
-# before this workflow can authorize any payload. No PVE access or export here.
+# Reusable publisher. It is called ONLY by vm-artifact-export.yml, from the run whose `export` job produced
+# the bundle: there is no manual dispatch and no other trigger, so no hand-fed run id, name or hash exists.
+# It accepts exactly one producer (images/vm_publish_stage.py): the `export` job of THIS run attempt,
+# concluded success, in this repository, on main, at this very commit. Hosted runner: no PVE access.
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
-      staging_run_id:
-        description: Successful approved staging workflow_dispatch run on main at this exact revision
-        type: string
-        required: true
       artifact_name:
-        description: Exact vm-export-<os>-… or vm-k8s-export-ubuntu-2604-<YYYYMMDDHHMMSS UTC>-<12 lowercase source hex> name
+        description: Exact bundle artifact name the export job of this run uploaded
         type: string
         required: true
       expected_manifest_sha256:
-        description: Independently reviewed manifest.json SHA256 (64 lowercase hex, no prefix)
+        description: manifest.json SHA256 the export job recorded (64 lowercase hex, no prefix)
         type: string
         required: true
       expected_disk_sha256:
-        description: Independently reviewed disk.qcow2 SHA256 (64 lowercase hex, no prefix)
+        description: disk.qcow2 SHA256 the export job recorded (64 lowercase hex, no prefix)
         type: string
         required: true
+    outputs:
+      package:
+        description: The GHCR package the bundle was pushed to
+        value: ${{ jobs.publish.outputs.package }}
+      digest:
+        description: The OCI digest of the pushed artifact (sha256:<64 hex>)
+        value: ${{ jobs.publish.outputs.digest }}
 
 permissions: {}
 
@@ -37,15 +42,22 @@ jobs:
       contents: read
       actions: read
       packages: write
+    outputs:
+      package: ${{ steps.push.outputs.package }}
+      digest: ${{ steps.push.outputs.digest }}
     env:
-      STAGING_RUN_ID: ${{ inputs.staging_run_id }}
+      # The producer is this run: its id and attempt are GitHub's, never an input.
+      EXPORT_RUN_ID: ${{ github.run_id }}
+      EXPORT_RUN_ATTEMPT: ${{ github.run_attempt }}
       ARTIFACT_NAME: ${{ inputs.artifact_name }}
       EXPECTED_MANIFEST_SHA256: ${{ inputs.expected_manifest_sha256 }}
       EXPECTED_DISK_SHA256: ${{ inputs.expected_disk_sha256 }}
       PUBLISHER_SHA: ${{ github.sha }}
       PUBLISHER_REPOSITORY: ${{ github.repository }}
+      # In a called workflow this is the CALLER: it must be the export workflow on main.
+      PUBLISHER_WORKFLOW_REF: ${{ github.workflow_ref }}
     steps:
-      - name: Reject malformed inputs before checkout or API access
+      - name: Reject a wrong caller or malformed inputs before checkout or API access
         shell: bash
         run: |
           set -euo pipefail
@@ -54,7 +66,8 @@ jobs:
           def match(pattern, value):
               return re.fullmatch(pattern, value, flags=re.ASCII) is not None
           valid = os.environ['PUBLISHER_REPOSITORY'] == 'mutex-solutions/proxcloud'
-          valid &= match(r'[1-9][0-9]{0,19}', os.environ['STAGING_RUN_ID'])
+          valid &= os.environ['PUBLISHER_WORKFLOW_REF'] == 'mutex-solutions/proxcloud/.github/workflows/vm-artifact-export.yml@refs/heads/main'
+          valid &= match(r'[1-9][0-9]{0,19}', os.environ['EXPORT_RUN_ID']) and match(r'[1-9][0-9]{0,3}', os.environ['EXPORT_RUN_ATTEMPT'])
           valid &= match(r'[0-9a-f]{40}', os.environ['PUBLISHER_SHA'])
           valid &= all(match(r'[0-9a-f]{64}', os.environ[key]) for key in ('EXPECTED_MANIFEST_SHA256', 'EXPECTED_DISK_SHA256'))
           found = re.fullmatch(r'(?:vm-export-(?:ubuntu-2404|ubuntu-2604|debian-12|debian-13)|vm-k8s-export-ubuntu-2604)-([0-9]{14})-([0-9a-f]{12})', os.environ['ARTIFACT_NAME'], flags=re.ASCII)
@@ -65,7 +78,7 @@ jobs:
           except ValueError:
               valid = False
           if not valid:
-              raise SystemExit('Publication refused: invalid dispatch inputs')
+              raise SystemExit('Publication refused: invalid caller or inputs')
           PY
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -76,7 +89,7 @@ jobs:
             images/vm_artifact.py
             images/vm_publish_stage.py
           sparse-checkout-cone-mode: false
-      - name: Authorize the same-repository approved staging producer
+      - name: Authorize the successful export job of this run as the only producer
         id: authority
         env:
           GH_TOKEN: ${{ github.token }}
@@ -91,9 +104,13 @@ jobs:
           opts=(--fail --silent --show-error --proto '=https' --connect-timeout 20 --max-time 60 --max-filesize 1048576
                 --header "Authorization: Bearer $GH_TOKEN" --header 'Accept: application/vnd.github+json'
                 --header 'X-GitHub-Api-Version: 2022-11-28')
-          curl "${opts[@]}" "$api/workflows/vm-artifact-stage.yml" --output "$metadata/workflow.json"
-          curl "${opts[@]}" "$api/runs/$STAGING_RUN_ID" --output "$metadata/run.json"
-          curl "${opts[@]}" "$api/runs/$STAGING_RUN_ID/artifacts?per_page=100" --output "$metadata/artifacts.json"
+          curl "${opts[@]}" "$api/workflows/vm-artifact-export.yml" --output "$metadata/workflow.json"
+          curl "${opts[@]}" "$api/runs/$EXPORT_RUN_ID" --output "$metadata/run.json"
+          # The run is still in progress (this job is part of it): what must have concluded success is the
+          # export JOB of this attempt. One page holds every job of the run; the helper refuses otherwise.
+          curl "${opts[@]}" "$api/runs/$EXPORT_RUN_ID/attempts/$EXPORT_RUN_ATTEMPT/jobs?per_page=100" --output "$metadata/jobs.json"
+          # Asked for the exact (already validated) name: exactly one such artifact may exist in the run.
+          curl "${opts[@]}" "$api/runs/$EXPORT_RUN_ID/artifacts?per_page=100&name=$ARTIFACT_NAME" --output "$metadata/artifacts.json"
           python3 images/vm_publish_stage.py authorize --metadata-dir "$metadata" >> "$GITHUB_OUTPUT"
       - name: Download bounded archive and verify pinned three-file payload
         env:
@@ -125,6 +142,7 @@ jobs:
           set -euo pipefail
           printf '%s' "$GH_TOKEN" | oras login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
       - name: Refuse tag replacement, push exact payload and record OCI digest
+        id: push
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -135,7 +153,7 @@ jobs:
           from pathlib import Path
           sys.path.insert(0, str(Path(os.environ['GITHUB_WORKSPACE']) / 'images'))
           import vm_publish_stage as stage
-          selected = stage.inputs(*(os.environ[key] for key in ('STAGING_RUN_ID', 'ARTIFACT_NAME', 'EXPECTED_MANIFEST_SHA256', 'EXPECTED_DISK_SHA256', 'PUBLISHER_SHA', 'PUBLISHER_REPOSITORY')))
+          selected = stage.inputs(*(os.environ[key] for key in stage.ENVIRONMENT))
           payload = str(Path(os.environ['RUNNER_TEMP']) / 'vm-publish-payload')
           plan = stage.publication_plan(payload, selected)  # Rehash immediately before publishing.
           class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -170,13 +188,14 @@ jobs:
           digest = resolved.stdout.strip()
           stage.require(re.fullmatch(r'sha256:[0-9a-f]{64}', digest, flags=re.ASCII) is not None)
           reference = plan['package'] + '@' + digest
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write('package=' + plan['package'] + '\ndigest=' + digest + '\n')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
-              summary.write('## VM artifact uploaded; public release NOT yet accepted\n\n')
+              summary.write('## VM artifact pushed; attestation and anonymous verification follow in this run\n\n')
               summary.write('OCI reference: `' + reference + '`\n\n')
               summary.write('Manifest SHA256: `' + plan['expected_manifest_sha256'] + '`\n\nDisk SHA256: `' + plan['expected_disk_sha256'] + '`\n\n')
-              summary.write('End-user retrieval after the public gate: `oras pull ' + reference + '`\n\n')
-              summary.write('Pending: independent trusted exporter review; isolated digest-pinned pull/import/boot acceptance; owner explicitly sets package PUBLIC; anonymous pull without ambient credentials. A successful authenticated upload does not prove any of these gates. No latest tag, deployment or provider-pin update.\n')
-          print('Uploaded exact three-file VM artifact. OCI digest recorded in job summary; public/boot gates pending.')
+              summary.write('A successful authenticated push is not the release: the `attest` and `verify` jobs of this run must pass, and a NEW package stays private until an owner sets it public. No latest tag, deployment or provider-pin update.\n')
+          print('Pushed the exact three-file VM artifact. OCI digest recorded as a job output and in the job summary.')
           PY
       - name: Remove registry login
         if: always()

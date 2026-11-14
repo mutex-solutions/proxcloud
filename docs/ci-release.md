@@ -20,7 +20,9 @@ artifacts and later controlled PVE template canaries remain separate steps. Read
 | `docker.yml` | PRs to `main`, `main` pushes, `v*` tags, manual dispatch | PRs build five images without pushing. Image-relevant `main` pushes publish `dev-<7-char-sha>`; docs/chart-only changes can skip. Tags publish exact image tags; manual dispatch pushes `dev-<sha>` or `dev-<suffix>`. Hosted runner. |
 | `helm.yml` | Chart-path PRs to `main`; app or managed-chart tags | PR lint/render only. App `v*` publishes `proxcloud`; `database-cluster-v*` and `proxmox-kamaji-cluster-v*` publish their independent charts. Hosted runner; no publication on ordinary merge. |
 | `sandbox-templates.yml` | Selected source pushes/PRs, schedule, manual dispatch | PR read-only build; trusted runs push built-in images, then `main` opens a digest-pin PR. Not cluster deployment. Hosted runner. |
-| `vm-export-tools.yml` | Tool-image recipe pushes/PRs, manual dispatch on `main` | PR builds, smokes and scans the VM export tool image with a read-only token. `main` then pushes it to GHCR under one tag it never replaces and records the digest; a later reviewed change pins it in `capsule.py`. Hosted runner. |
+| `vm-export-tools.yml` | Tool-image recipe pushes/PRs, manual dispatch on `main` | PR builds, smokes and scans the VM export tool image with a read-only token. `main` then pushes it to GHCR under one tag it never replaces and records the digest; `capsule.py` pins one reviewed digest and the export job pulls it. Hosted runner. |
+| `vm-artifact-export.yml` | Manual dispatch on `main` only: `variant`, `os`, `kubernetes_version`, `template_vmid` | One run from a lab template to a published image. `export` (self-hosted, label `proxcloud-vm-artifact-export`, no registry credential): template guard, read-only copy, inventory, review, sanitize, postscan, cold boot, bundle, public evidence. Then hosted: `publish` (calls `vm-artifacts.yml`), `attest` (build provenance for the pushed digest) and `verify` (anonymous pull, no credential). No PR/fork trigger. See [VM artifact export and publishing](vm-artifact-publishing.md). |
+| `vm-artifacts.yml` | Called by `vm-artifact-export.yml` only (`workflow_call`); no manual or event trigger | The reusable publisher: accepts only the successful `export` job of the calling run, re-verifies the three files, refuses an existing tag, pushes with ORAS and records the digest. Hosted runner. |
 | `vm-templates.yml` | Selected image-source pushes to `main`, weekly schedule, manual dispatch | Builds Debian/Ubuntu templates directly in PVE and publishes by pool/tags. Privileged self-hosted runner; no PR/fork trigger. |
 | `k8s-node-templates.yml` | Manual dispatch, required Kubernetes `version` | Builds node templates; `network_mode` defaults `static`. Privileged self-hosted runner; no PR/fork trigger. |
 
@@ -116,8 +118,9 @@ one host do not isolate a compromised host/kernel or privileged network. Protect
 workflow changes and restrict runner access; a private ops repository is safer
 for credentials with cloud mutation rights.
 
-Both PVE workflows share concurrency group `vm-templates`, intentionally
-serializing their shared network/build resource use. Two registered runners do
+Both PVE template workflows and the `export` job of `vm-artifact-export.yml` share
+concurrency group `vm-templates`, intentionally serializing their shared
+network/build resource use. Two registered runners do
 not imply two concurrent template builds are safe. Before enabling final routing
 labels, review/cancel stale queued runs: assigning a matching runner can start an
 old workflow immediately. Runner registration must not accidentally execute an
@@ -145,7 +148,7 @@ The workflows currently **do not** provide a single atomic release gate:
 The owner's stable `v0.5.x` decision does not replace exact-commit checks or
 evidence, and it does not claim live installer or split/managed-service acceptance.
 A `v*` tag triggers the app Docker and Helm workflows, not either PVE template
-workflow, the sandbox template build or VM image publication. Keep later template
+workflow, the sandbox template build or the VM image export (a manual dispatch). Keep later template
 canaries on their separately reviewed branch/run path; do not change credentials,
 secrets or runner routing as part of the app release. Routine docs updates must
 not create tags. Use the checklist in

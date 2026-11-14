@@ -46,8 +46,8 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
 - [Public VM artifacts](public-vm-artifacts.md) — portable QCOW2 contract and
   digest/checksum verification, distinct from site-local Proxmox templates.
   [Offline sanitization](public-vm-sanitization.md) defines copy-only policy and
-  residual limits; [staging/publication](vm-artifact-publishing.md) separates
-  unprivileged sealed staging, hosted GHCR upload and actual public/boot gates.
+  residual limits; [export and publication](vm-artifact-publishing.md) describes the
+  one workflow run from a lab template to an attested, anonymously verified image.
 
 - [Native template build disk](template-build-disk.md) — fresh-base-only 20 GiB
   disk floor, exact readback and bounded cleanup after the Ubuntu 26.04 APT-space
