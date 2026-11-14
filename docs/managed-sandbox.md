@@ -1051,7 +1051,7 @@ workers with the entry rule and pushed the appliance's HAProxy config. Lab devia
 on SB0, so the proxy ran on a worker; the client reached the appliance through a lab host forward.
 
 - Release check: all three gates held; provider set `PUBLIC`.
-- `tests/e2b-compat/compat.py` with the stock `e2b` 2.63.0 and `e2b-code-interpreter` 2.11.9: all checks pass. Create of
+- `test/e2b-compat/compat.py` with the stock `e2b` 2.63.0 and `e2b-code-interpreter` 2.11.9: all checks pass. Create of
   `base` in about 9 s; commands as `user` in `/home/user` with `envVars`, streamed output, exit code, background process
   listed and killed; `python3` run; files written, read, listed, binary round trip; a port served at
   `https://8000-<id>.<domain>` through the appliance and the proxy; `set_timeout`, `get_info` with metadata, list by
@@ -1551,7 +1551,7 @@ Teardown archives the project's snapshot rows, deletes its templates and snapsho
 - A third attempt (pc-sb8, 2026-11-08) with the stock SDK: pause, fork and create from a snapshot were each cut by
   the SDK at exactly 120 s (section 8.2), and no snapshot assembled because the cluster isolation dropped the
   sandbox subnet's traffic to the build bucket on a management network (section 2.1). Both are fixed; the strict
-  drill is `tests/e2b-compat/pause.py` (a connect counts as a resume only after the sandbox was seen paused and
+  drill is `test/e2b-compat/pause.py` (a connect counts as a resume only after the sandbox was seen paused and
   stopped; every resumed, forked or snapshot sandbox must read back the file written before), not yet rerun.
 - Not run on the lab: resume, fork, autoPause, the wake through `sandbox-proxy`, and a pause with the capture check.
   The workers were in use by another drill, and two portals fencing one sandbox pool roll each other's firewall back.
@@ -1655,7 +1655,7 @@ fetches its feature flags from desktopcommander.app every 5 minutes from every s
 sent), and its npm postinstall sends an install event during the image build.
 
 A tenant's keys are as safe as anything else in their sandbox: whoever runs code in it as root can read them, which is
-the tenant's choice. `tests/e2b-compat/mcp.py` checks the keyed path with a dummy key (the server has it, no platform
+the tenant's choice. `test/e2b-compat/mcp.py` checks the keyed path with a dummy key (the server has it, no platform
 variable or gateway bearer is in its environment, no token is mounted, a missing key fails the create).
 
 ### 9.3 Measured on the lab (2026-11-08)
@@ -1681,7 +1681,7 @@ user, the account sync limited to this provider's namespaces with `SERVICE_ID`),
   at start (`SyntaxError: Unexpected token 'with'`, `process.loadEnvFile is not a function`), so a create with any of
   them failed; EE's image has the same base. EE's build check only looked for the binaries; it now starts each server.
 - **Not run on the lab**: the sandbox path itself (the SDK creating an `mcp-gateway` sandbox on the SB0 workers,
-  `tests/e2b-compat/mcp.py` and `catalog.py base mcp-gateway`). It needs the nodes to trust this Zot's CA, and applying
+  `test/e2b-compat/mcp.py` and `catalog.py base mcp-gateway`). It needs the nodes to trust this Zot's CA, and applying
   the trust DaemonSet (the hostPath writer of `registry.yaml`, under this drill's own names) on SB0 was refused by the
   session's permission check; without it no node can pull from the registry. Pause, resume and fork of a gateway
   sandbox were not run either (SB7 merged after this drill).
