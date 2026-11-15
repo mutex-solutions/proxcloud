@@ -26,7 +26,8 @@ exploitable flaws.
 
 Artifacts used: `security-<target>-13276f5…` (product images, `filesystem`, controlled-base prototype),
 `security-template-images-13276f5…` (`templates/<name>/scan.json`, `template-status.json`),
-`security-base-images-13276f5…` (report-only, not reviewed here) and
+`security-base-images-13276f5…` (report-only; of its thirteen bases only `external-python`, the default
+`python` template, is reviewed here) and
 `vm-export-tools-reports-d3a4351…` (`scan.json`, `packages.txt`). The counts below were recomputed from
 each `scan.json` (HIGH/CRITICAL, empty `FixedVersion`); they equal the gate's "tracked" count for
 every target. The Debian/Ubuntu status is Trivy's `Status` field from that DB: `affected` (no fixed
@@ -39,7 +40,10 @@ security tracker was not consulted directly.
   (`api`, `web-client`, `web-admin`, `sandbox-proxy`, `sandbox-runtime`, `sandbox-import`), the eleven
   non-GPU sandbox templates, the controlled-base prototype, and the VM export tool image (same CLI, in
   `vm-export-tools.yml`).
-- **Report-only**: the thirteen raw upstream bases (`scan_base_images.py`).
+- **Report-only**: the thirteen raw upstream bases (`scan_base_images.py`). One of them,
+  `external-python`, is not only a base: it is the exact digest of the default `python` sandbox
+  template, which sites run as is (see [Default `python` template](#default-python-template)). None of
+  its findings blocks, with or without a fixed version, before or after 2027-03-12.
 - **Not scanned**: the GPU/CUDA template `code-interpreter-gpu`.
 
 ## Per-target counts
@@ -57,9 +61,10 @@ of one source package counts four times, as the gate counts).
 | `template/desktop` | Ubuntu 22.04 | 0 | 0 | 0 | 0 | 0 | none |
 | `controlled-base-prototype` | Debian 13.7 | 152 (1) | 148 | 4 | 0 | 61 | krb5 56, util-linux 36, linux 18, openssh 6, git 6, sqlite3 6 |
 | VM export tool image | Debian 12.15 | 372 (8) | 300 | 70 | 2 | 134 | qemu 172 (43 CVEs), krb5 56, util-linux 36, curl 15, glib2.0 7, libxml2 7 |
+| `python` template (raw base `external-python`; **report-only**, never blocks) | Debian 13.7 | 47 (0) | 46 | 1 | 0 | 11 | util-linux 36, ncurses 4, sqlite3 3, systemd 2, acl 1, perl 1; plus 2 HIGH **with** a fixed version (zlib) |
 
-Across all blocking targets: 6,111 tracked findings, 413 unique CVEs. All of them are in OS packages;
-no language package (npm, PyPI, Go) has an unfixed HIGH/CRITICAL finding.
+Across all blocking targets (every row except `python`): 6,111 tracked findings, 413 unique CVEs. All
+of them are in OS packages; no language package (npm, PyPI, Go) has an unfixed HIGH/CRITICAL finding.
 
 ## Reachability
 
@@ -120,7 +125,8 @@ title (not the code):
     GStreamer. Not verified.
 
   None of these has a fixed package in Debian or Ubuntu as of the DB date. Every template build runs
-  `apt-get upgrade`, so a distribution fix reaches the next build; a finding that gains a fix while
+  `apt-get upgrade`, so a distribution fix reaches the next build (this does not cover the `python`
+  template, which is never built; see below); a finding that gains a fix while
   an image still carries the old version blocks at the next scan. Most of group C in the Debian 12
   templates comes from what `e2bdev/base` and `node:bookworm` install (image libraries, `-dev`
   packages, Debian's gh), not from what the templates add; the controlled-base prototype, which drops
@@ -134,6 +140,37 @@ is not in `build.sh` or `images.yaml`, never published, and no site runs it. No 
 reaches it today. If it becomes the base, it runs as a sandbox template with the boundary above. Its
 group C is curl (2), wget (2), git (3), openssh-client (6, including CVE-2026-60002), expat (4),
 SQLite (3) and Perl Archive::Tar (1).
+
+### Default `python` template
+
+**What and where.** The only template in the installer defaults
+(`installer/playbooks/group_vars/all/defaults.yml`: `python: {image: "pin:python", …}`).
+`deploy/templates/images.yaml` pins it to `docker.io/library/python:3.12-slim@sha256:05a994d2…`, a
+public image used as is ([managed-sandbox.md](managed-sandbox.md) §6.3). It runs tenant code with the
+same boundary as the other templates. This project never rebuilds it, so the `apt-get upgrade`
+argument above does not apply: a Debian fix reaches sites only when someone moves the pin.
+
+**Gate.** `security-scan` scans that exact digest only as the raw base `external-python`
+(`scan_base_images.py`, "external runtime (not PR rebuild)"), which is report-only. Its `gate.txt`
+says `Blocking HIGH/CRITICAL: 2; tracked without fix …: 47`, but neither number fails the job, today
+or after 2027-03-12. The review date and the VEX do not change anything for this image.
+
+**Findings** (`bases/external-python/scan.json`, Debian 13.7):
+
+- **2 HIGH with a fixed version**, both in `zlib1g` 1:1.3.dfsg+really1.3.1-1+b1, fixed in
+  1:1.3.dfsg+really1.3.1-1+deb13u1: CVE-2026-85091 (title: heap buffer overflow in `gz_vacate()`
+  allows arbitrary code execution) and CVE-2026-76844 (title in this DB is about webpack-dev-middleware;
+  in the tool image's DB it is a zlib heap buffer overflow through a stale `gzwrite` pointer). The
+  rebuilt Debian 13 templates (`code-interpreter`, the prototype) do not report them, because
+  `apt-get upgrade` installs the fixed package. Not checked whether the Python runtime or a tenant's
+  code reaches the `gz*` file functions.
+- **47 without a fixed version**: 11 CVEs, 0 CRITICAL, 46 `affected`, 1 `fix_deferred`. Group B
+  (local privilege only): 43 findings / 7 CVEs in util-linux (mount helpers, nsenter), systemd-homed,
+  libacl and ncurses. Group C: 4 / 4, SQLite (3: a crafted FTS5 index, crafted session changesets, an
+  FTS5 heap overflow) and Perl Archive::Tar (1: a crafted tar header). Nothing in group A.
+
+So the only default template carries two HIGH zlib findings with a fixed version, and no job fails
+because of them. Unlike the other templates, the scanned digest here is the pinned one itself.
 
 ### VM export tool image
 
@@ -187,9 +224,12 @@ targets: the templates `amp`, `base`, `browser`, `claude`, `code-interpreter`, `
 `mcp-gateway`, `opencode` and the controlled-base prototype. The gate classifies it as the owner VEX
 (setuptools 70.3.0 is listed only in pip 26.3's vendored SBOM, `pip/_vendor/bom.cdx.json`), which is
 why it does not block today. It is not in `node`, `desktop`, the product images or the tool image.
-No other finding with a fixed version exists in any blocking target. Raw upstream bases have many
-findings with a fixed version (for example 2,987 in `template-e2b-base`); they are report-only and
-not reviewed here.
+No other finding with a fixed version exists in any blocking target. That holds only for the
+blocking set: the default `python` template is outside it and has 2 (zlib; see
+[Default `python` template](#default-python-template)). The other twelve raw upstream bases also have
+many findings with a fixed version (for example 2,987 in `template-e2b-base`); they are parents,
+builders or donors of images that are rebuilt and scanned as blocking targets, and are not reviewed
+here.
 
 ## The VEX date (not part of this decision)
 
@@ -207,14 +247,15 @@ not affected by the VEX.
 
 From **2027-03-12T00:00Z** every tracked finding blocks again (replayed: `base` 651 blocking,
 `node` 640, `code-interpreter` 396, the prototype 153, the tool image 372; all exit 1). Until then
-the gate behaves as before, with the new date in its messages.
+the gate behaves as before, with the new date in its messages. This applies to the blocking targets
+only: the `python` template's findings, fixable or not, still do not block after that date.
 
 ## What was and was not checked
 
 Checked:
 
-- The counts and statuses of every blocking target, recomputed from each `scan.json` and compared
-  with the gate's output.
+- The counts and statuses of every blocking target and of `external-python` (the `python` template),
+  recomputed from each `scan.json` and compared with the gate's output.
 - The source package of every finding, and Trivy's title of every unique CVE except those of the
   `linux` source package (kernel headers).
 - The recipes and documents of each target named above.
@@ -231,9 +272,9 @@ Not checked:
 - Kernels: the sandbox workers' kernels and the export appliance's kernel.
 - The images sites actually run: `images.yaml` pins template builds from `20261112-9d00563`, and
   `capsule.py` pins the `83ebd33` tool image. The gate scans fresh local builds of the current
-  sources.
-- The GPU/CUDA template (pinned in `images.yaml`, never scanned), the raw upstream bases, and MEDIUM
-  and LOW findings.
+  sources. The `python` pin is the exception: its digest is the one scanned.
+- The GPU/CUDA template (pinned in `images.yaml`, never scanned), the raw upstream bases other than
+  `external-python`, and MEDIUM and LOW findings.
 - Which interpreter each template's tools use (Debian's `python3.x` or `/usr/local`), whether
   Playwright's WebKit loads the GStreamer H.265 parser, which packages supermin puts into the
   appliance and which devices the appliance configures.
@@ -251,5 +292,8 @@ Not checked:
    the qemu CVEs without a title.
 5. Scan the digests that are pinned (`images.yaml`, `capsule.py`), not only fresh builds, and decide
    on the GPU template.
-6. Add the result here as a new dated section. `UNFIXED_REVIEW_BY` moves only by a new owner
+6. For the default `python` template: move the `images.yaml` pin to a digest that carries zlib
+   1:1.3.dfsg+really1.3.1-1+deb13u1 or later, and put that digest under the blocking gate (or build it
+   like the other templates), so that its findings can block.
+7. Add the result here as a new dated section. `UNFIXED_REVIEW_BY` moves only by a new owner
    decision. The VEX needs its own decision before 2026-12-31.
