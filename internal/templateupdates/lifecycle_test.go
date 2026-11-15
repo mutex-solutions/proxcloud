@@ -3,6 +3,7 @@ package templateupdates
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 )
@@ -221,7 +222,34 @@ func TestTemplateGoneNeedsProof(t *testing.T) {
 		"node down":           {[]pve.ClusterResource{{Type: "qemu", VMID: vmid, Node: "pve1", Name: "something", NodeDown: true}}, false},
 		"blank row":           {[]pve.ClusterResource{{Type: "qemu", VMID: vmid, Node: "pve1", Status: "unknown"}}, false},
 	} {
-		if err := templateGone(c.rows, vmid, p); (err == nil) != c.gone {
+		if err := templateGone(c.rows, Receipt{ID: "a", Payload: p, VMID: vmid}, nil); (err == nil) != c.gone {
+			t.Errorf("%s: gone=%v, err=%v", name, err == nil, err)
+		}
+	}
+	// Stage 2 imports one artifact on several nodes, and every import takes the lowest free VMID from
+	// 9200. Once this receipt's template (pve2) is deleted, a later import of the same artifact on pve1
+	// can take its VMID. That row is the sibling's template: the sibling was enqueued after this
+	// receipt's last write, so this receipt's VM had left the VMID by then. Only a finished, unmarked
+	// receipt of the same provider recorded at exactly the row's node and VMID proves it.
+	t0 := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	rec := Receipt{ID: "a", Payload: p, VMID: vmid, UpdatedAt: t0}
+	rec.Payload.Node = "pve2"
+	row := []pve.ClusterResource{{Type: "qemu", VMID: vmid, Node: "pve1", Template: 1, Pool: pve.TemplatePool, Name: TemplateName(p), Tags: TemplateTags(p)}}
+	for name, c := range map[string]struct {
+		edit func(*Receipt)
+		gone bool
+	}{
+		"sibling's template":      {func(*Receipt) {}, true},
+		"sibling enqueued before": {func(o *Receipt) { o.CreatedAt = t0.Add(-time.Minute) }, false},
+		"sibling marked gone":     {func(o *Receipt) { o.TemplateGone = true }, false},
+		"sibling on pve3":         {func(o *Receipt) { o.Payload.Node = "pve3" }, false},
+		"sibling elsewhere":       {func(o *Receipt) { o.Payload.ServiceID = "svc2" }, false},
+		"sibling at 9211":         {func(o *Receipt) { o.VMID = vmid + 1 }, false},
+		"the receipt itself":      {func(o *Receipt) { o.ID = rec.ID }, false},
+	} {
+		sib := Receipt{ID: "b", Payload: p, VMID: vmid, CreatedAt: t0.Add(time.Minute), Step: StepSucceeded}
+		c.edit(&sib)
+		if err := templateGone(row, rec, []Receipt{rec, sib}); (err == nil) != c.gone {
 			t.Errorf("%s: gone=%v, err=%v", name, err == nil, err)
 		}
 	}

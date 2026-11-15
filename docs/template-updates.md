@@ -137,10 +137,14 @@ A receipt whose template was deleted since stops blocking only through `Service.
 (no route yet; the managed-services job calls it). It reads the receipt's own provider and marks the
 receipt `templateGone` only when no guest in the cluster holds the receipt's VMID any more, or the VM
 that does is visible to the portal token, has a name, sits on a node that is up and carries neither
-the template's name nor its `pc-src-` tag (the VMID was reused). "No guest" comes from
-`GET /cluster/nextid?vmid=`, which reads the cluster's whole guest list; `/cluster/resources` lists
-only the guests the token has `VM.Audit` on (through its pools), so a VMID missing from it proves
-nothing. A read error, a node that is down, a blank row, a held VMID the token cannot see (a template
+the template's name nor its `pc-src-` tag (the VMID was reused), or the VM there is another
+import's template of the same artifact: a finished, unmarked receipt of the same provider records
+exactly that node and VMID and was created after this receipt's last write. Every import takes the
+lowest free VMID from 9200, so once a template is deleted, a copy of its artifact imported on another
+node can take its VMID; without this rule that copy would block the node of the deleted one. "No
+guest" comes from `GET /cluster/nextid?vmid=`, which reads the cluster's whole guest list;
+`/cluster/resources` lists only the guests the token has `VM.Audit` on (through its pools), so a VMID
+missing from it proves nothing. A read error, a node that is down, a blank row, a held VMID the token cannot see (a template
 moved out of `pc-templates`, or a token that lost its pool rights), or a template that was only
 renamed or migrated changes nothing. A marked receipt then counts as failed for the duplicate check
 and shows `template_missing` on the page.

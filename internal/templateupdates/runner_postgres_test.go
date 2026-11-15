@@ -581,6 +581,47 @@ func TestPGReimportOnlyAfterVerifiedGone(t *testing.T) {
 	}
 }
 
+// MarkTemplateGone with sibling imports of one artifact: A2 (pve2, 9210) is deleted, and B1, a later
+// import of the same artifact on pve1, takes the lowest free VMID, 9210. The row at 9210 is B1's
+// template, so A2 is freed and pve2 imports again; B1 itself stays.
+func TestPGSiblingImportFreesReceipt(t *testing.T) {
+	db, jobs := pgFixture(t)
+	ctx := context.Background()
+	s, req := pgService(t, db, jobs)
+	enqueueFinished := func(node string) *Receipt {
+		req.Node = node
+		r, err := s.EnqueueVM(ctx, req, "admin")
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Step, r.VMID = StepSucceeded, 9210
+		if err := s.Receipts.Save(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	a2 := enqueueFinished("pve2")
+	b1 := enqueueFinished("pve1")
+	p := b1.Payload
+	pv := func(context.Context, string) (LifecyclePVE, error) {
+		return rowsPVE{rows: []pve.ClusterResource{{Type: "qemu", VMID: 9210, Node: "pve1", Template: 1, Pool: pve.TemplatePool, Name: TemplateName(p), Tags: TemplateTags(p)}}}, nil
+	}
+	if err := s.MarkTemplateGone(ctx, pv, b1.ID); err == nil {
+		t.Fatal("B1's own template was marked gone")
+	}
+	if err := s.MarkTemplateGone(ctx, pv, a2.ID); err != nil {
+		t.Fatalf("A2 stays blocked by B1's template: %v", err)
+	}
+	req.Node = "pve2"
+	if _, err := s.EnqueueVM(ctx, req, "admin"); err != nil {
+		t.Fatalf("pve2 re-import: %v", err)
+	}
+	req.Node = "pve1"
+	if _, err := s.EnqueueVM(ctx, req, "admin"); !errors.Is(err, ErrDuplicate) {
+		t.Fatalf("pve1 re-import beside B1: %v", err)
+	}
+}
+
 // Defer (busy smoke lock): the job returns to pending without spending an attempt, a stale
 // acquisition cannot defer, and a deferred smoke job is claimable again later.
 func TestPGDeferKeepsAttempts(t *testing.T) {

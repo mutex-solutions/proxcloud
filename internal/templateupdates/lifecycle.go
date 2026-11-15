@@ -501,7 +501,11 @@ func (s *Service) MarkTemplateGone(ctx context.Context, pvFor PVEResolver, id st
 		if err != nil {
 			return err
 		}
-		if err := templateGone(rows, r.VMID, r.Payload); err != nil {
+		others, err := s.Receipts.FinishedByDigest(ctx, r.Payload.Digest)
+		if err != nil {
+			return err
+		}
+		if err := templateGone(rows, *r, others); err != nil {
 			return err
 		}
 	}
@@ -509,23 +513,44 @@ func (s *Service) MarkTemplateGone(ctx context.Context, pvFor PVEResolver, id st
 	return err
 }
 
-// templateGone is MarkTemplateGone's proof once nextid said some guest holds vmid (unique cluster-wide):
-// nil only when this token sees that guest and it is plainly another VM (its node is up, it has a name,
-// and it has neither the import's template name nor its source tag: the VMID was reused). The rows list
-// only guests the token has VM.Audit on (through its pools), so a held VMID missing from them is a guest
-// out of its view (a template moved out of pc-templates, or rights lost), and counts as present, as does
-// a renamed template.
-func templateGone(rows []pve.ClusterResource, vmid int, p VMPayload) error {
+// templateGone is MarkTemplateGone's proof once nextid said some guest holds rec.VMID (unique
+// cluster-wide): nil only when this token sees that guest and it is plainly another VM (its node is up,
+// it has a name, and it has neither the import's template name nor its source tag: the VMID was
+// reused), or it is a sibling's template (siblingHolds). The rows list only guests the token has
+// VM.Audit on (through its pools), so a held VMID missing from them is a guest out of its view (a
+// template moved out of pc-templates, or rights lost), and counts as present, as does a renamed or
+// migrated template.
+func templateGone(rows []pve.ClusterResource, rec Receipt, others []Receipt) error {
+	vmid, p := rec.VMID, rec.Payload
 	for _, r := range rows {
 		if r.VMID != vmid {
 			continue
 		}
-		if r.NodeDown || r.Name == "" || r.Name == TemplateName(p) || hasTagValue(r.Tags, TagSource+digestPrefix(p.Digest)) {
-			return lcErr(http.StatusConflict, "template_present", fmt.Sprintf("VM %d on %s may still be this import's template; nothing was changed", vmid, r.Node))
+		switch {
+		case r.NodeDown || r.Name == "": // the row says only that a VM exists
+		case r.Name != TemplateName(p) && !hasTagValue(r.Tags, TagSource+digestPrefix(p.Digest)):
+			return nil
+		case siblingHolds(r, rec, others):
+			return nil
 		}
-		return nil
+		return lcErr(http.StatusConflict, "template_present", fmt.Sprintf("VM %d on %s may still be this import's template; nothing was changed", vmid, r.Node))
 	}
 	return lcErr(http.StatusConflict, "template_present", fmt.Sprintf("VM %d exists outside what this provider's token can see (moved out of pc-templates?); nothing was changed", vmid))
+}
+
+// siblingHolds reports whether row is another import's template of the same artifact. Stage 2 imports
+// one artifact on several nodes and every import takes the lowest free VMID from 9200, so a later import
+// can take the VMID of this receipt's deleted template. A finished, unmarked receipt of the same
+// provider recorded at exactly row's node and VMID, enqueued after rec's last write (when rec's
+// template still held that VMID, or was already gone), made a VM there: rec's VM had left it by then.
+func siblingHolds(row pve.ClusterResource, rec Receipt, others []Receipt) bool {
+	for _, o := range others {
+		if o.ID != rec.ID && !o.TemplateGone && o.Payload.ServiceID == rec.Payload.ServiceID &&
+			o.Payload.Node == row.Node && o.VMID == row.VMID && o.CreatedAt.After(rec.UpdatedAt) {
+			return true
+		}
+	}
+	return false
 }
 
 // lockDigest serializes lifecycle actions on one artifact across API replicas.
