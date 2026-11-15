@@ -13,6 +13,10 @@ import (
 
 var updateGolden = flag.Bool("update", false, "rewrite the chart goldens in testdata/")
 
+// goldenHelm is the Helm the goldens are made with: run -update with it. The go-test job of .github/workflows/test.yml
+// pins the same (test_release_policy.py holds them equal), because another Helm may format the same render otherwise.
+const goldenHelm = "v3.21.4"
+
 // helmTemplate renders the cluster chart with one values document, as ArgoCD does for an Application.
 func helmTemplate(t *testing.T, release, namespace, values string) string {
 	t.Helper()
@@ -63,7 +67,7 @@ func TestChartGolden(t *testing.T) {
 				t.Fatalf("read golden (run with -update to create): %v", err)
 			}
 			if got != string(want) {
-				t.Errorf("render differs from %s (review, then -update):\n%s", golden, got)
+				t.Errorf("render differs from %s (review, then -update with helm %s):\n%s", golden, goldenHelm, got)
 			}
 		})
 	}

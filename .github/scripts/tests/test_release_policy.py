@@ -150,6 +150,14 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(read_yaml("deploy/charts/database-cluster/Chart.yaml")["version"], "0.5.1")
         self.assertEqual(read_yaml("deploy/charts/proxmox-kamaji-cluster/Chart.yaml")["version"], "0.1.11")
 
+    def test_chart_goldens_render_with_the_helm_that_made_them(self):
+        # The goldens compare helm template output byte for byte; an unpinned setup-helm takes the latest Helm.
+        golden_test = (ROOT / "internal/cloud/kamaji/chart_golden_test.go").read_text(encoding="utf-8")
+        made_with = re.findall(r'(?m)^const goldenHelm = "(v[0-9.]+)"', golden_test)
+        steps = read_yaml(".github/workflows/test.yml")["jobs"]["go-test"]["steps"]
+        helm = next(step for step in steps if step.get("uses", "").startswith("azure/setup-helm@"))
+        self.assertEqual(made_with, [helm.get("with", {}).get("version")])
+
     def test_image_and_app_chart_publication_validate_before_effects(self):
         build = read_yaml(".github/workflows/docker.yml")["jobs"]["build"]["steps"]
         compute = next(step for step in build if step.get("id") == "meta")
