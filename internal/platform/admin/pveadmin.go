@@ -269,7 +269,7 @@ func templatePoolCheck(ctx context.Context, cc *pve.Client) PVECheck {
 	case err != nil:
 		return PVECheck{ID: "template-pool", Status: checkWarn, Message: "Could not read the pool " + pve.TemplatePool + ": " + err.Error()}
 	case pool == nil:
-		return PVECheck{ID: "template-pool", Status: checkWarn, Message: "The pool " + pve.TemplatePool + " does not exist. OS templates are read from it: create it with `pveum pool add " + pve.TemplatePool + "`."}
+		return PVECheck{ID: "template-pool", Status: checkWarn, Message: "The pool " + pve.TemplatePool + " does not exist yet. OS templates are read from it. The first template import creates it with the portal token (ProxCloudPlatform holds Pool.Allocate on /pool); for a token without Pool.Allocate on /pool, create it with `pveum pool add " + pve.TemplatePool + "`."}
 	}
 	return PVECheck{ID: "template-pool", Status: checkOK, Message: "The pool " + pve.TemplatePool + " exists."}
 }

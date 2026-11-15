@@ -124,7 +124,7 @@ several findings puts one on each line of `message`. Rows after `connect` or
 | `store-reach` | Stored provider: tenant networks cannot reach the network stores | `warn` |
 | `boot-iso` | Stored provider: the Kubernetes bootstrap ISO store is usable | `warn` |
 | `version` | Proxmox VE 9.2 or later | `fail` |
-| `template-pool` | The pool `pc-templates` exists | `warn` |
+| `template-pool` | The pool `pc-templates` exists. When it does not, the first template import creates it (`Pool.Allocate` on `/pool`); `pveum pool add pc-templates` is only for a token without that privilege | `warn` |
 | `import-store` | Some storage takes `import` content. Stored provider with `importStorage`: that storage exists, takes it, and the token can delete files there | `warn` |
 | `zone` | Stored provider: a default tenant network zone is configured, and Proxmox has no zone of that id with another type | `fail` |
 | `cidr-pool` | Stored provider: `cidrPool` is an IPv4 range of /24 or larger; `warn` when it overlaps a management network of the nodes, or when a node's networks could not be read (that node was not compared) | `fail` |

@@ -657,7 +657,8 @@ func TestPVESetupChecks(t *testing.T) {
 		{"version unreadable", map[string]string{"/version": `{"data":{"version":"next"}}`}, nil, "version", checkWarn, "Could not read"},
 
 		{"template pool exists", nil, nil, "template-pool", checkOK, ""},
-		{"template pool missing", map[string]string{"/pools/pc-templates": "!404"}, nil, "template-pool", checkWarn, "pveum pool add pc-templates"},
+		{"template pool missing", map[string]string{"/pools/pc-templates": "!404"}, nil, "template-pool", checkWarn, "The first template import creates it"},
+		{"template pool missing: the manual step stays the fallback", map[string]string{"/pools/pc-templates": "!404"}, nil, "template-pool", checkWarn, "for a token without Pool.Allocate on /pool, create it with `pveum pool add pc-templates`"},
 		{"template pool unreadable", map[string]string{"/pools/pc-templates": "!403"}, nil, "template-pool", checkWarn, "Could not read the pool"},
 
 		{"zone made later", nil, provider(nil), "zone", checkOK, "created with the first tenant network"},

@@ -90,7 +90,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   creates its VM in that pool, and on a cluster where nobody ran `pveum pool add pc-templates` the create failed. The
   job now reads the pool before the upload and creates it once, fenced like its other Proxmox writes; an existing
   pool is only read, so a token without `Pool.Allocate` keeps importing where the pool was made by hand. A token that
-  may not create it fails the job as `pve_forbidden` before anything is downloaded. Not verified: that the
+  may not create it fails the job as `pve_forbidden` before anything is downloaded. The connection test's
+  `template-pool` row, which the setup status shows in the connect step, says so instead of sending the operator to a
+  root shell for `pveum pool add`, which it keeps as the fallback for such a token. Not verified: that the
   least-privilege portal token can create `pc-templates` on a lab cluster (it holds `Pool.Allocate` on `/pool`, which
   creates the project pools).
 
