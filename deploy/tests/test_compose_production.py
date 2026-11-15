@@ -283,6 +283,13 @@ class ReadmeTests(unittest.TestCase):
                      "have no admin endpoint", "`send-test-mail` is not available"):
             self.assertIn(text, body)
 
+    def test_a_rerun_names_the_setting_that_managed_services_change(self):
+        # "--managed-services" also writes TEMPLATE_UPDATES_VM_ENABLED=true: the rerun paragraph must not
+        # promise that only named settings change, nor count two optional features.
+        body = self.text.split("The install is idempotent. ", 1)[1].split("The Compose project name", 1)[0]
+        self.assertNotIn("the two [optional features]", body)
+        self.assertIn("`--managed-services` also turns template updates on", body)
+
     def test_scheduler_off_is_not_described_as_no_billing_write(self):
         # The API's job worker runs with the scheduler off too: it processes the charge work that
         # is already queued in the database, for example in a restored backup.

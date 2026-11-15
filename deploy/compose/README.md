@@ -130,7 +130,8 @@ The install is idempotent. Run it again to resume after an error or to change a 
 example `./proxcloud-up.sh install --admin-host ops.example.com` or `--tls acme-http --acme-email
 ops@example.com`. Secrets already in `.env` are never regenerated or printed. The release of a
 finished install changes with `upgrade` only, which takes a backup first. A setting you do not
-name keeps its value, the two [optional features](#optional-features) included.
+name keeps its value, the three [optional features](#optional-features) included, with one
+exception: `--managed-services` also turns template updates on.
 
 The Compose project name (`--project-name`, default `proxcloud-prod`) cannot change afterwards: the
 containers and volumes carry it. The install refuses a name that something else on the host uses:
