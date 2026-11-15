@@ -1,11 +1,13 @@
 package pve
 
 import (
+	"cmp"
 	"context"
 	"net"
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 )
 
 // ClusterResource is one row of GET /cluster/resources — the sync workhorse: a
@@ -224,8 +226,53 @@ func (c *Client) clusterNodeIPs(ctx context.Context) (map[string]string, error) 
 }
 
 func (c *Client) nodeManagementIfaces(ctx context.Context, node, ip string) ([]mgmtIface, error) {
+	bridges, err := c.nodeBridges(ctx, node, ip)
+	if err != nil {
+		return nil, err
+	}
+	var out []mgmtIface
+	for _, b := range bridges {
+		if b.Management {
+			out = append(out, mgmtIface{b.Iface, node, b.CIDR})
+		}
+	}
+	return out, nil
+}
+
+// NodeBridge is one bridge of a node. Management: it carries the node's own address or a default gateway, so a
+// public network must not use it (ManagementBridges).
+type NodeBridge struct {
+	Node       string `json:"node"`
+	Iface      string `json:"iface"`
+	Type       string `json:"type"` // "bridge" | "OVSBridge" | "vnet"
+	CIDR       string `json:"cidr,omitempty"`
+	Management bool   `json:"management"`
+}
+
+// NodeBridges lists the bridges of every node, by node and name. A node that cannot answer is left out.
+func (c *Client) NodeBridges(ctx context.Context) ([]NodeBridge, error) {
+	nodeIP, err := c.clusterNodeIPs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := []NodeBridge{}
+	for node, ip := range nodeIP {
+		bridges, err := c.nodeBridges(ctx, node, ip)
+		if err != nil {
+			continue
+		}
+		out = append(out, bridges...)
+	}
+	slices.SortFunc(out, func(a, b NodeBridge) int {
+		return cmp.Or(strings.Compare(a.Node, b.Node), strings.Compare(a.Iface, b.Iface))
+	})
+	return out, nil
+}
+
+func (c *Client) nodeBridges(ctx context.Context, node, ip string) ([]NodeBridge, error) {
 	var ifaces []struct {
 		Iface    string `json:"iface"`
+		Type     string `json:"type"`
 		Address  string `json:"address"`
 		Address6 string `json:"address6"`
 		Gateway  string `json:"gateway"`
@@ -236,11 +283,42 @@ func (c *Client) nodeManagementIfaces(ctx context.Context, node, ip string) ([]m
 	if err := c.get(ctx, "/nodes/"+url.PathEscape(node)+"/network", form, &ifaces); err != nil {
 		return nil, err
 	}
-	var out []mgmtIface
+	var out []NodeBridge
 	for _, i := range ifaces {
-		if i.Gateway != "" || i.Gateway6 != "" || (ip != "" && (i.Address == ip || i.Address6 == ip)) {
-			out = append(out, mgmtIface{i.Iface, node, i.CIDR})
+		mgmt := i.Gateway != "" || i.Gateway6 != "" || (ip != "" && (i.Address == ip || i.Address6 == ip))
+		out = append(out, NodeBridge{Node: node, Iface: i.Iface, Type: i.Type, CIDR: i.CIDR, Management: mgmt})
+	}
+	return out, nil
+}
+
+// NodesWithoutPackage lists the online nodes where a Debian package is not installed, from the package list
+// `pveversion -v` prints (GET /nodes/{node}/apt/versions). The installer's preflight reads frr-pythontools the same
+// way with its install credential; reading it with PVEAuditor on /nodes is not lab-verified.
+func (c *Client) NodesWithoutPackage(ctx context.Context, pkg string) ([]string, error) {
+	nodes, err := c.Nodes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, n := range nodes {
+		if n.Status != "online" {
+			continue
+		}
+		var pkgs []struct {
+			Package      string `json:"Package"`
+			CurrentState string `json:"CurrentState"`
+		}
+		if err := c.get(ctx, "/nodes/"+url.PathEscape(n.Node)+"/apt/versions", nil, &pkgs); err != nil {
+			return nil, err
+		}
+		installed := false
+		for _, p := range pkgs {
+			installed = installed || (p.Package == pkg && p.CurrentState == "Installed")
+		}
+		if !installed {
+			out = append(out, n.Node)
 		}
 	}
+	slices.Sort(out)
 	return out, nil
 }

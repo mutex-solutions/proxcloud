@@ -352,3 +352,23 @@ func TestPVEImageCatalogMinDiskIsTheLargestCopy(t *testing.T) {
 		t.Fatalf("equal 5 GiB copies: minimum %d, want 5", got)
 	}
 }
+
+func TestParseCIDRPool(t *testing.T) {
+	tests := []struct {
+		pool, want string // want "" = refused
+	}{
+		{"10.100.0.0/16", "10.100.0.0/16"},
+		{"10.100.0.0/24", "10.100.0.0/24"},
+		{"10.100.3.7/16", "10.100.0.0/16"},
+		{"10.100.0.0/25", ""},
+		{"fd00::/48", ""},
+		{"10.100.0.0", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		got, err := ParseCIDRPool(tt.pool)
+		if (tt.want == "") != (err != nil) || (err == nil && got.String() != tt.want) {
+			t.Errorf("ParseCIDRPool(%q) = %v, %v; want %q", tt.pool, got, err, tt.want)
+		}
+	}
+}

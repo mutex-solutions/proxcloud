@@ -76,6 +76,11 @@ type PVEAuthResponse struct {
 	Warnings []string `json:"warnings"`
 	// Checks is every check that ran, one row each; only with ?checks=all.
 	Checks []PVECheck `json:"checks,omitempty"`
+	// Bridges and PresentedFingerprint come with ?checks=all, for callers who may change the provider only: both say
+	// how the site is wired, and the fingerprint is there to be pinned. Bridges are the nodes' bridges, to choose a
+	// public network from. PresentedFingerprint is the certificate of a connection that was refused over it.
+	Bridges              []pve.NodeBridge `json:"bridges,omitempty"`
+	PresentedFingerprint string           `json:"presentedFingerprint,omitempty"`
 }
 
 func (h *Handler) proxmoxAuth(w http.ResponseWriter, r *http.Request) {
@@ -95,12 +100,13 @@ func (h *Handler) proxmoxAuth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_, granted, _ := h.adminContext(r)
-	cfg, ok := pveAuthConfig(req, es, rbac.Matches(granted, externalServiceManagePerm))
+	manage := rbac.Matches(granted, externalServiceManagePerm)
+	cfg, ok := pveAuthConfig(req, es, manage)
 	if !ok {
 		httpx.WriteError(w, httpx.BadRequest("apiUrl, tokenId and tokenSecret are required"))
 		return
 	}
-	out, herr := pveConnectionTest(ctx, cfg, es, r.URL.Query().Get("checks") == "all")
+	out, herr := pveConnectionTest(ctx, cfg, es, r.URL.Query().Get("checks") == "all", manage)
 	if herr != nil {
 		httpx.WriteError(w, herr)
 		return
@@ -111,8 +117,9 @@ func (h *Handler) proxmoxAuth(w http.ResponseWriter, r *http.Request) {
 // pveConnectionTest runs the connection test against cfg; es is the stored provider when the caller named one. It
 // answers the first failed check as a 400, as it always has: installer stage 60 relies on that. With all it runs every
 // check it still can and reports each one in Checks, so a cluster with its firewall off still gets its privilege gaps
-// listed. Only a cluster that cannot be reached, or refuses the token, ends the list early.
-func pveConnectionTest(ctx context.Context, cfg pve.Config, es *externalservice.ExternalService, all bool) (PVEAuthResponse, *httpx.HTTPError) {
+// listed. Only a cluster that cannot be reached, or refuses the token, ends the list early. details adds the node
+// bridges and the fingerprint of a refused certificate to that answer.
+func pveConnectionTest(ctx context.Context, cfg pve.Config, es *externalservice.ExternalService, all, details bool) (PVEAuthResponse, *httpx.HTTPError) {
 	out := PVEAuthResponse{Nodes: []pve.Node{}, Storages: []pve.StorageDef{}, SDNZones: []pve.SDNZone{}, PCIMappings: []pve.PCIMapping{}, Warnings: []string{}}
 	add := func(id, status, msg string) {
 		if all {
@@ -131,14 +138,14 @@ func pveConnectionTest(ctx context.Context, cfg pve.Config, es *externalservice.
 		}
 		return herr
 	}
-	// warn records a check that only ever warns, with the warnings it found.
-	warn := func(id, passed string, found []string) {
-		out.Warnings = append(out.Warnings, found...)
+	// warn records a check that only ever warns, with what it found, and returns that.
+	warn := func(id, passed string, found []string) []string {
 		if len(found) == 0 {
 			add(id, checkOK, passed)
 		} else {
 			add(id, checkWarn, strings.Join(found, "\n"))
 		}
+		return found
 	}
 	cc, err := pve.New(cfg)
 	if err != nil {
@@ -152,6 +159,8 @@ func pveConnectionTest(ctx context.Context, cfg pve.Config, es *externalservice.
 		if errors.As(err, &ae) { // PVE answered: the address and its certificate are fine, the token is not
 			add("connect", checkOK, "Proxmox answers at this address.")
 			id = "token"
+		} else if all && details {
+			out.PresentedFingerprint = pve.PresentedFingerprint(err)
 		}
 		return out, check(id, httpx.BadRequest("Proxmox authentication failed: "+err.Error()), "")
 	}
@@ -178,12 +187,14 @@ func pveConnectionTest(ctx context.Context, cfg pve.Config, es *externalservice.
 			out.Warnings = append(out.Warnings, c.Message)
 		}
 	}
+	var importFound []string // what is wrong with the import store; its row comes with the storage list below
 	if es != nil {
 		if es.PVEImportStorage() != "" {
-			warn("import-store", "The token can delete files on the import store.", importStoreWarnings(ctx, cc, es.PVEImportStorage()))
+			importFound = importStoreWarnings(ctx, cc, es.PVEImportStorage())
+			out.Warnings = append(out.Warnings, importFound...)
 		}
-		warn("store-reach", "Tenant networks cannot reach the network stores.", storeReachWarnings(ctx, cc, es.PVENetworkConfig().BlockedCIDRs))
-		warn("boot-iso", "The Kubernetes bootstrap ISO store is node-local and takes ISOs.", bootISOWarnings(ctx, cc, es.PVEBootISOStorage()))
+		out.Warnings = append(out.Warnings, warn("store-reach", "Tenant networks cannot reach the network stores.", storeReachWarnings(ctx, cc, es.PVENetworkConfig().BlockedCIDRs))...)
+		out.Warnings = append(out.Warnings, warn("boot-iso", "The Kubernetes bootstrap ISO store is node-local and takes ISOs.", bootISOWarnings(ctx, cc, es.PVEBootISOStorage()))...)
 		out.Warnings = append(out.Warnings, "Ordinary server seed CDs retain plaintext user-data. Check GET /admin/service/"+es.ID+"/seed-cleanup for pending cleanup; a separate complete global read-only inventory credential is required (docs/server-seed-safety.md).")
 	}
 	// Best-effort enrichment: a token narrow enough to miss one of these should not
@@ -191,16 +202,169 @@ func pveConnectionTest(ctx context.Context, cfg pve.Config, es *externalservice.
 	if ns, err := cc.Nodes(ctx); err == nil {
 		out.Nodes = ns
 	}
-	if ss, err := cc.ListStorage(ctx); err == nil {
+	ss, storageErr := cc.ListStorage(ctx)
+	if storageErr == nil {
 		out.Storages = ss
 	}
-	if zs, err := cc.ListSDNZones(ctx); err == nil {
+	zs, zoneErr := cc.ListSDNZones(ctx)
+	if zoneErr == nil {
 		out.SDNZones = zs
 	}
 	if ms, err := cc.ListPCIMappings(ctx); err == nil {
 		out.PCIMappings = ms
 	}
+	if !all {
+		return out, nil
+	}
+	// From here on: what only ?checks=all reports. None of it ever failed the connection test or was a warning of
+	// it, and none may start to: these are rows, never a 400 and never in Warnings.
+	out.Checks = append(out.Checks, versionCheck(out.Version), templatePoolCheck(ctx, cc))
+	importStorage := ""
+	if es != nil {
+		netCfg := es.PVENetworkConfig()
+		out.Checks = append(out.Checks, zoneCheck(netCfg, zs, zoneErr), cidrPoolCheck(ctx, cc, netCfg.CIDRPool), storageProfileCheck(es))
+		if z, ok := netCfg.Zones[netCfg.DefaultZone]; netCfg.Isolation == pve.IsolationEVPN || (ok && zoneKind(z) == "evpn") {
+			out.Checks = append(out.Checks, frrCheck(ctx, cc))
+		}
+		importStorage = es.PVEImportStorage()
+	}
+	if storageErr != nil {
+		importFound = append(importFound, "Could not read the storages: "+storageErr.Error())
+	} else {
+		importFound = append(importFound, importContentProblems(ss, importStorage)...)
+	}
+	passed := "A storage takes import content."
+	if importStorage != "" {
+		passed = "Storage " + importStorage + " takes import content and the token can delete files there."
+	}
+	warn("import-store", passed, importFound)
+	if details {
+		out.Bridges, _ = cc.NodeBridges(ctx)
+	}
 	return out, nil
+}
+
+// minPVE is the oldest Proxmox VE the portal supports (docs/install.md).
+var minPVE = [2]int{9, 2}
+
+func versionCheck(version string) PVECheck {
+	var major, minor int
+	if n, _ := fmt.Sscanf(version, "%d.%d", &major, &minor); n == 0 {
+		return PVECheck{ID: "version", Status: checkWarn, Message: fmt.Sprintf("Could not read the Proxmox VE version %q. ProxCloud needs %d.%d or later.", version, minPVE[0], minPVE[1])}
+	}
+	if major < minPVE[0] || (major == minPVE[0] && minor < minPVE[1]) {
+		return PVECheck{ID: "version", Status: checkFail, Message: fmt.Sprintf("Proxmox VE %s found. ProxCloud needs %d.%d or later.", version, minPVE[0], minPVE[1])}
+	}
+	return PVECheck{ID: "version", Status: checkOK, Message: "Proxmox VE " + version + "."}
+}
+
+// templatePoolCheck: OS templates are read from pve.TemplatePool only, so without the pool the image list stays empty.
+func templatePoolCheck(ctx context.Context, cc *pve.Client) PVECheck {
+	pool, err := cc.GetPool(ctx, pve.TemplatePool)
+	switch {
+	case err != nil:
+		return PVECheck{ID: "template-pool", Status: checkWarn, Message: "Could not read the pool " + pve.TemplatePool + ": " + err.Error()}
+	case pool == nil:
+		return PVECheck{ID: "template-pool", Status: checkWarn, Message: "The pool " + pve.TemplatePool + " does not exist. OS templates are read from it: create it with `pveum pool add " + pve.TemplatePool + "`."}
+	}
+	return PVECheck{ID: "template-pool", Status: checkOK, Message: "The pool " + pve.TemplatePool + " exists."}
+}
+
+// zoneKind is the PVE zone type a configured zone becomes (pve.Service.EnsureZone).
+func zoneKind(z pve.ZoneConfig) string {
+	if z.Kind == "" || z.Kind == "overlay" {
+		return "evpn"
+	}
+	return z.Kind
+}
+
+// zoneCheck: tenant networks need a default zone in the provider config. The zone itself is made with the first
+// network, so it may be absent in Proxmox, but not be there as another type.
+func zoneCheck(netCfg externalservice.PVENetwork, live []pve.SDNZone, liveErr error) PVECheck {
+	z, ok := netCfg.Zones[netCfg.DefaultZone]
+	if !ok {
+		return PVECheck{ID: "zone", Status: checkFail, Message: "No tenant network zone is configured (config.network.defaultZone and zones). Network creates answer 503."}
+	}
+	if liveErr != nil {
+		return PVECheck{ID: "zone", Status: checkWarn, Message: "Could not read the SDN zones: " + liveErr.Error()}
+	}
+	for _, l := range live {
+		if l.Zone != z.Key {
+			continue
+		}
+		if l.Type != zoneKind(z) {
+			return PVECheck{ID: "zone", Status: checkFail, Message: fmt.Sprintf("Zone %s exists in Proxmox as a %s zone, but is configured as %s.", z.Key, l.Type, zoneKind(z))}
+		}
+		return PVECheck{ID: "zone", Status: checkOK, Message: fmt.Sprintf("Zone %s (%s) exists.", z.Key, l.Type)}
+	}
+	return PVECheck{ID: "zone", Status: checkOK, Message: fmt.Sprintf("Zone %s (%s) is created with the first tenant network.", z.Key, zoneKind(z))}
+}
+
+// cidrPoolCheck: tenant CIDRs are carved from the pool. Inside a management network they would shadow the nodes.
+func cidrPoolCheck(ctx context.Context, cc *pve.Client, pool string) PVECheck {
+	if pool == "" {
+		return PVECheck{ID: "cidr-pool", Status: checkFail, Message: "No cidrPool is configured (config.network.cidrPool). Network creates answer 503."}
+	}
+	p, err := externalservice.ParseCIDRPool(pool)
+	if err != nil {
+		return PVECheck{ID: "cidr-pool", Status: checkFail, Message: err.Error() + "; it is " + pool + "."}
+	}
+	mgmt, _, err := cc.ManagementCIDRs(ctx)
+	if err != nil {
+		return PVECheck{ID: "cidr-pool", Status: checkWarn, Message: "Could not read the node networks to compare cidrPool with them: " + err.Error()}
+	}
+	for _, m := range mgmt {
+		if mp, err := netip.ParsePrefix(m); err == nil && mp.Overlaps(p) {
+			return PVECheck{ID: "cidr-pool", Status: checkWarn, Message: "cidrPool " + pool + " overlaps a management network of the nodes. Tenant networks carved there would shadow the nodes' own addresses: choose a range the site does not use."}
+		}
+	}
+	return PVECheck{ID: "cidr-pool", Status: checkOK, Message: "cidrPool " + pool + " is clear of the nodes' management networks."}
+}
+
+// storageProfileCheck: a server whose flavor names no profile is placed on the default one.
+func storageProfileCheck(es *externalservice.ExternalService) PVECheck {
+	def := es.PVEDefaultStorageProfile()
+	if def == "" {
+		return PVECheck{ID: "storage-profile", Status: checkFail, Message: "No default storage profile is configured (config.storageProfiles and defaultStorageProfile). Servers cannot be placed."}
+	}
+	if _, ok := es.PVEStorageProfiles()[def]; !ok {
+		return PVECheck{ID: "storage-profile", Status: checkFail, Message: "defaultStorageProfile " + def + " is not one of the storage profiles."}
+	}
+	return PVECheck{ID: "storage-profile", Status: checkOK, Message: "The default storage profile is " + def + "."}
+}
+
+// frrCheck: an EVPN zone's FRR config is reloaded with frr-pythontools, which a stock node does not have.
+func frrCheck(ctx context.Context, cc *pve.Client) PVECheck {
+	missing, err := cc.NodesWithoutPackage(ctx, "frr-pythontools")
+	switch {
+	case err != nil:
+		return PVECheck{ID: "frr", Status: checkWarn, Message: "Could not read the node packages to check for frr-pythontools, which EVPN zones need: " + err.Error()}
+	case len(missing) > 0:
+		return PVECheck{ID: "frr", Status: checkWarn, Message: "frr-pythontools is not installed on node " + strings.Join(missing, ", ") + ". EVPN zones need it: run `apt install frr-pythontools` there."}
+	}
+	return PVECheck{ID: "frr", Status: checkOK, Message: "frr-pythontools is installed on every online node."}
+}
+
+// importContentProblems: template import and customer image import write to a storage with import content, which no
+// stock storage has. importStorage is the provider's configured one ("" = none yet).
+func importContentProblems(defs []pve.StorageDef, importStorage string) []string {
+	takes := func(d pve.StorageDef) bool {
+		return d.Disable != 1 && slices.Contains(strings.Split(d.Content, ","), "import")
+	}
+	if importStorage == "" {
+		if slices.ContainsFunc(defs, takes) {
+			return nil
+		}
+		return []string{"No storage takes import content, which template import and customer image import need. Add it to a file storage: `pvesm set <storage> --content <its content>,import`."}
+	}
+	i := slices.IndexFunc(defs, func(d pve.StorageDef) bool { return d.Storage == importStorage })
+	switch {
+	case i < 0:
+		return []string{"importStorage " + importStorage + " is not a storage of this cluster."}
+	case !takes(defs[i]):
+		return []string{"importStorage " + importStorage + " does not take import content: `pvesm set " + importStorage + " --content " + defs[i].Content + ",import`."}
+	}
+	return nil
 }
 
 // checkDatacenterFirewall rejects a cluster whose datacenter firewall is off or cannot be read.

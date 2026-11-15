@@ -22,6 +22,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A read-only caller still tests the stored connection. `docs/api.md` lists the check ids. Tested against a
   fake PVE API only; not run against a lab cluster.
 
+- **Setup checks in the Proxmox connection test** (`?checks=all` only): Proxmox VE 9.2 or later, the pool
+  `pc-templates`, a storage with `import` content, and for a stored provider its default network zone,
+  `cidrPool` (valid, and a warning when it overlaps a management network of the nodes), default storage
+  profile and, with an EVPN zone, `frr-pythontools` on every node. A new provider used to pass the test
+  and then answer 503 on the first tenant network, or show no images, with nothing saying why. These rows
+  never fail the default call and never add to `warnings`. A caller with `admin:service:manage` also gets
+  the bridges of every node with a management flag, to choose a public network from, and, when the
+  connection is refused over the certificate, the SHA-256 fingerprint the server presented, so it can be
+  compared on the node and pinned. A read-only caller gets neither. A refused pin now reads
+  `tls: failed to verify certificate: pve: certificate fingerprint mismatch` in the error text. Not
+  lab-verified: reading a node's package list with the least-privilege token (the check warns when it is
+  refused), and the type Proxmox reports for an SDN vnet in the bridge list.
+
 ### Changed
 
 - **The smaller template disks are confirmed by one lab build each** (`docs/template-build-disk.md`): a

@@ -82,6 +82,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -397,6 +398,15 @@ func (e *ExternalService) PVENetworkConfig() PVENetwork {
 		}
 	}
 	return out
+}
+
+// ParseCIDRPool parses config.network.cidrPool, the range tenant networks are carved from: IPv4, /24 or larger.
+func ParseCIDRPool(pool string) (netip.Prefix, error) {
+	p, err := netip.ParsePrefix(pool)
+	if err != nil || !p.Addr().Is4() || p.Bits() > 24 {
+		return netip.Prefix{}, fmt.Errorf("cidrPool must be an IPv4 range of /24 or larger")
+	}
+	return p.Masked(), nil
 }
 
 // PVESandbox is config.sandbox: the platform's sandbox workers, whose VM firewall the sync job applies and keeps

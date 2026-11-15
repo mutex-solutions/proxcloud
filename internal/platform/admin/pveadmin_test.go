@@ -2,8 +2,11 @@ package admin
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -325,6 +328,8 @@ func fakeCluster(t *testing.T, over map[string]string, lacks ...string) pve.Conf
 		"/cluster/resources":           `{"data":[{"type":"storage","storage":"local","node":"pve1","status":"available"}]}`,
 		"/cluster/sdn/zones":           `{"data":[]}`,
 		"/cluster/mapping/pci":         `{"data":[]}`,
+		"/pools/pc-templates":          `{"data":{"members":[]}}`,
+		"/nodes/pve1/apt/versions":     `{"data":[{"Package":"frr-pythontools","CurrentState":"Installed"},{"Package":"ceph","CurrentState":"NotInstalled"}]}`,
 	}
 	for path, body := range over {
 		answers[path] = body
@@ -402,7 +407,7 @@ func TestPVEConnectionTest(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			out, herr := pveConnectionTest(context.Background(), fakeCluster(t, tt.over, tt.lacks...), nil, tt.all)
+			out, herr := pveConnectionTest(context.Background(), fakeCluster(t, tt.over, tt.lacks...), nil, tt.all, true)
 			if tt.wantErr != "" {
 				if herr == nil || herr.Status != http.StatusBadRequest || herr.Msg != tt.wantErr {
 					t.Fatalf("got %+v, want 400 %q", herr, tt.wantErr)
@@ -430,13 +435,13 @@ func TestPVEConnectionTest(t *testing.T) {
 	t.Run("unreachable, all checks", func(t *testing.T) {
 		cfg := fakeCluster(t, nil)
 		cfg.APIURL = "http://127.0.0.1:1"
-		out, herr := pveConnectionTest(context.Background(), cfg, nil, true)
+		out, herr := pveConnectionTest(context.Background(), cfg, nil, true, true)
 		if herr != nil || len(out.Checks) != 1 || out.Checks[0].ID != "connect" || out.Checks[0].Status != checkFail {
 			t.Fatalf("got %+v %+v, want one failed connect row", herr, out.Checks)
 		}
 	})
 	t.Run("healthy call keeps the response shape", func(t *testing.T) {
-		out, herr := pveConnectionTest(context.Background(), fakeCluster(t, nil, "Mapping.Use"), nil, false)
+		out, herr := pveConnectionTest(context.Background(), fakeCluster(t, nil, "Mapping.Use"), nil, false, true)
 		if herr != nil || out.Version != "9.2.1" || len(out.Nodes) != 1 || len(out.Storages) != 1 {
 			t.Fatalf("got %+v %+v", herr, out)
 		}
@@ -452,11 +457,11 @@ func TestPVEConnectionTestStoredProvider(t *testing.T) {
 		"provider": "proxmox", "isoStorage": "local",
 		"network": map[string]any{"publicNetworks": []any{map[string]any{"id": "vmbr0"}}},
 	}}
-	_, herr := pveConnectionTest(context.Background(), fakeCluster(t, nil), es, false)
+	_, herr := pveConnectionTest(context.Background(), fakeCluster(t, nil), es, false, true)
 	if herr == nil || !strings.Contains(herr.Msg, `public network "vmbr0" is the management bridge on node pve1`) {
 		t.Fatalf("default call: %+v", herr)
 	}
-	out, herr := pveConnectionTest(context.Background(), fakeCluster(t, nil), es, true)
+	out, herr := pveConnectionTest(context.Background(), fakeCluster(t, nil), es, true, true)
 	if herr != nil {
 		t.Fatalf("all checks: %+v", herr)
 	}
@@ -543,4 +548,176 @@ func TestProxmoxAuthRoute(t *testing.T) {
 	if c := checkRow(got.Data.Checks, "privileges:/pool"); c == nil || c.Status != checkOK {
 		t.Fatalf("checks = %+v", got.Data.Checks)
 	}
+}
+
+// What only ?checks=all reports: one case per check against the fake cluster. The same provider passes the default
+// call whatever these find, because none of them was ever part of it.
+func TestPVESetupChecks(t *testing.T) {
+	provider := func(edit func(cfg map[string]any)) *externalservice.ExternalService {
+		cfg := map[string]any{
+			"provider": "proxmox", "isoStorage": "local",
+			"network": map[string]any{"defaultZone": "overlay", "cidrPool": "10.100.0.0/16",
+				"zones": map[string]any{"overlay": map[string]any{"kind": "evpn"}}},
+			"storageProfiles":       map[string]any{"std": map[string]any{"storages": map[string]any{"*": "local"}}},
+			"defaultStorageProfile": "std",
+		}
+		if edit != nil {
+			edit(cfg)
+		}
+		return &externalservice.ExternalService{ID: "svc1", Config: cfg}
+	}
+	network := func(key string, value any) func(map[string]any) {
+		return func(cfg map[string]any) {
+			n := cfg["network"].(map[string]any)
+			if value == nil {
+				delete(n, key)
+			} else {
+				n[key] = value
+			}
+		}
+	}
+	const noImport = `{"data":[{"storage":"local","type":"dir","content":"iso,images"}]}`
+	tests := []struct {
+		name    string
+		over    map[string]string
+		es      *externalservice.ExternalService
+		id      string
+		want    string // status; "" = no such row
+		wantMsg string
+	}{
+		{"version 9.2", nil, nil, "version", checkOK, "9.2.1"},
+		{"version 9.1", map[string]string{"/version": `{"data":{"version":"9.1.4"}}`}, nil, "version", checkFail, "needs 9.2 or later"},
+		{"version 8", map[string]string{"/version": `{"data":{"version":"8.4.1"}}`}, nil, "version", checkFail, "Proxmox VE 8.4.1 found"},
+		{"version 10", map[string]string{"/version": `{"data":{"version":"10.0"}}`}, nil, "version", checkOK, ""},
+		{"version unreadable", map[string]string{"/version": `{"data":{"version":"next"}}`}, nil, "version", checkWarn, "Could not read"},
+
+		{"template pool exists", nil, nil, "template-pool", checkOK, ""},
+		{"template pool missing", map[string]string{"/pools/pc-templates": "!404"}, nil, "template-pool", checkWarn, "pveum pool add pc-templates"},
+		{"template pool unreadable", map[string]string{"/pools/pc-templates": "!403"}, nil, "template-pool", checkWarn, "Could not read the pool"},
+
+		{"zone made later", nil, provider(nil), "zone", checkOK, "created with the first tenant network"},
+		{"zone exists", map[string]string{"/cluster/sdn/zones": `{"data":[{"zone":"overlay","type":"evpn"}]}`}, provider(nil), "zone", checkOK, "Zone overlay (evpn) exists"},
+		{"zone of another type", map[string]string{"/cluster/sdn/zones": `{"data":[{"zone":"overlay","type":"vlan"}]}`}, provider(nil), "zone", checkFail, "exists in Proxmox as a vlan zone"},
+		{"zone not configured", nil, provider(network("zones", nil)), "zone", checkFail, "No tenant network zone is configured"},
+		{"zones unreadable", map[string]string{"/cluster/sdn/zones": "!403"}, provider(nil), "zone", checkWarn, "Could not read the SDN zones"},
+		{"no zone row without a stored provider", nil, nil, "zone", "", ""},
+
+		{"cidrPool clear", nil, provider(nil), "cidr-pool", checkOK, ""},
+		{"cidrPool missing", nil, provider(network("cidrPool", nil)), "cidr-pool", checkFail, "No cidrPool is configured"},
+		{"cidrPool too small", nil, provider(network("cidrPool", "10.100.0.0/25")), "cidr-pool", checkFail, "IPv4 range of /24 or larger"},
+		{"cidrPool IPv6", nil, provider(network("cidrPool", "fd00::/48")), "cidr-pool", checkFail, "IPv4 range of /24 or larger"},
+		{"cidrPool over the management network", nil, provider(network("cidrPool", "10.0.0.0/16")), "cidr-pool", checkWarn, "overlaps a management network"},
+
+		{"default storage profile", nil, provider(nil), "storage-profile", checkOK, "std"},
+		{"no storage profile", nil, provider(func(cfg map[string]any) { delete(cfg, "storageProfiles"); delete(cfg, "defaultStorageProfile") }), "storage-profile", checkFail, "No default storage profile"},
+		{"default profile unknown", nil, provider(func(cfg map[string]any) { cfg["defaultStorageProfile"] = "fast" }), "storage-profile", checkFail, "fast is not one of the storage profiles"},
+
+		{"import content present", nil, nil, "import-store", checkOK, ""},
+		{"no import content", map[string]string{"/storage": noImport}, nil, "import-store", checkWarn, "pvesm set <storage> --content <its content>,import"},
+		{"import store without import content", map[string]string{"/storage": noImport}, provider(func(cfg map[string]any) { cfg["importStorage"] = "local" }), "import-store", checkWarn, "pvesm set local --content iso,images,import"},
+		{"import store unknown", nil, provider(func(cfg map[string]any) { cfg["importStorage"] = "nas" }), "import-store", checkWarn, "importStorage nas is not a storage of this cluster"},
+		{"storages unreadable", map[string]string{"/storage": "!403"}, nil, "import-store", checkWarn, "Could not read the storages"},
+
+		{"frr installed", nil, provider(nil), "frr", checkOK, ""},
+		{"frr missing", map[string]string{"/nodes/pve1/apt/versions": `{"data":[{"Package":"frr-pythontools","CurrentState":"NotInstalled"}]}`}, provider(nil), "frr", checkWarn, "not installed on node pve1"},
+		{"frr unreadable", map[string]string{"/nodes/pve1/apt/versions": "!403"}, provider(nil), "frr", checkWarn, "Could not read the node packages"},
+		{"no frr row on a simple zone", nil, provider(network("zones", map[string]any{"overlay": map[string]any{"kind": "simple"}})), "frr", "", ""},
+		{"no frr row without a zone", nil, provider(network("zones", nil)), "frr", "", ""},
+		{"frr row with a zone per project", nil, provider(func(cfg map[string]any) {
+			network("zones", map[string]any{"overlay": map[string]any{"kind": "simple"}})(cfg)
+			network("isolation", "evpn-per-project")(cfg)
+		}), "frr", checkOK, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := fakeCluster(t, tt.over)
+			out, herr := pveConnectionTest(context.Background(), cfg, tt.es, true, true)
+			if herr != nil {
+				t.Fatalf("unexpected error %+v", herr)
+			}
+			c := checkRow(out.Checks, tt.id)
+			if tt.want == "" {
+				if c != nil {
+					t.Fatalf("unexpected row %+v", c)
+				}
+			} else if c == nil || c.Status != tt.want || !strings.Contains(c.Message, tt.wantMsg) {
+				t.Fatalf("check %s = %+v, want %s containing %q", tt.id, c, tt.want, tt.wantMsg)
+			}
+			plain, herr := pveConnectionTest(context.Background(), cfg, tt.es, false, true)
+			if herr != nil || plain.Checks != nil || plain.Bridges != nil {
+				t.Fatalf("default call: %+v %+v", herr, plain)
+			}
+			for _, w := range plain.Warnings {
+				if tt.wantMsg != "" && strings.Contains(w, tt.wantMsg) {
+					t.Fatalf("default call gained the warning %q", w)
+				}
+			}
+		})
+	}
+}
+
+// Bridges and the fingerprint of a refused certificate say how the site is wired: only a caller who may change the
+// provider gets them.
+func TestPVEConnectionTestDetails(t *testing.T) {
+	cfg := fakeCluster(t, nil)
+	out, herr := pveConnectionTest(context.Background(), cfg, nil, true, true)
+	want := []pve.NodeBridge{
+		{Node: "pve1", Iface: "vmbr0", CIDR: "10.0.0.11/24", Management: true},
+		{Node: "pve1", Iface: "vmbr1"},
+	}
+	if herr != nil || !reflect.DeepEqual(out.Bridges, want) {
+		t.Fatalf("bridges = %+v (%+v), want %+v", out.Bridges, herr, want)
+	}
+	if out, _ := pveConnectionTest(context.Background(), cfg, nil, true, false); out.Bridges != nil || len(out.Checks) == 0 {
+		t.Fatalf("without manage: bridges %+v, %d checks", out.Bridges, len(out.Checks))
+	}
+
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"data":{"version":"9.2.1"}}`)
+	}))
+	srv.Config.ErrorLog = log.New(io.Discard, "", 0) // the refused handshakes below
+	srv.StartTLS()
+	defer srv.Close()
+	sum := sha256.Sum256(srv.Certificate().Raw)
+	presented := strings.ToUpper(strings.ReplaceAll(fmt.Sprintf("% x", sum[:]), " ", ":"))
+	for _, tls := range []struct {
+		name string
+		cfg  pve.Config
+	}{
+		{"system CA pool", pve.Config{}},
+		{"another fingerprint pinned", pve.Config{Fingerprint: "00" + presented[2:]}},
+		{"another CA pinned", pve.Config{CACert: "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----"}},
+	} {
+		t.Run(tls.name, func(t *testing.T) {
+			cfg := tls.cfg
+			cfg.APIURL, cfg.TokenID, cfg.Secret = srv.URL, "proxcloud@pve!platform", "sec"
+			out, herr := pveConnectionTest(context.Background(), cfg, nil, true, true)
+			if herr != nil || out.PresentedFingerprint != presented {
+				t.Fatalf("fingerprint = %q (%+v), want %q", out.PresentedFingerprint, herr, presented)
+			}
+			if c := checkRow(out.Checks, "connect"); c == nil || c.Status != checkFail || len(out.Checks) != 1 {
+				t.Fatalf("checks = %+v", out.Checks)
+			}
+			if out, _ := pveConnectionTest(context.Background(), cfg, nil, true, false); out.PresentedFingerprint != "" {
+				t.Fatalf("without manage: fingerprint %q", out.PresentedFingerprint)
+			}
+			// Pinning what was presented is accepted, and the default call says nothing new.
+			pinned := cfg
+			pinned.CACert, pinned.Fingerprint = "", presented
+			if c, err := pve.New(pinned); err != nil {
+				t.Fatal(err)
+			} else if _, err := c.Version(context.Background()); err != nil {
+				t.Fatalf("pinning the presented fingerprint: %v", err)
+			}
+			if _, herr := pveConnectionTest(context.Background(), cfg, nil, false, true); herr == nil || !strings.HasPrefix(herr.Msg, "Proxmox authentication failed: ") || strings.Contains(herr.Msg, presented) {
+				t.Fatalf("default call: %+v", herr)
+			}
+		})
+	}
+	t.Run("refused token is not a certificate refusal", func(t *testing.T) {
+		out, _ := pveConnectionTest(context.Background(), fakeCluster(t, map[string]string{"/version": "!401"}), nil, true, true)
+		if out.PresentedFingerprint != "" {
+			t.Fatalf("fingerprint = %q", out.PresentedFingerprint)
+		}
+	})
 }

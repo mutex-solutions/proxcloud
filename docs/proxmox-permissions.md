@@ -14,7 +14,7 @@ ProxCloud needs no `root@pam` access on the cluster. The [installer](install.md)
 
 Every token is created with **privilege separation** (`--privsep 1`). A privilege-separated token's rights are the **intersection** of the user's ACLs and the token's ACLs, so each ACL below is granted to both the user and the token.
 
-The admin **Test connection** button on the Proxmox provider reads the token's effective permissions (`GET /access/permissions`) and lists each `ProxCloudPlatform` privilege the token lacks, plus a warning for a `root@pam` token. Missing privileges are only reported as warnings. A cluster without GPUs can, for example, leave out `/mapping/pci`. The list it checks is `pve.PlatformPrivileges` in `internal/cloud/pve/access.go`. Keep it in sync with this page.
+The admin **Test connection** button on the Proxmox provider reads the token's effective permissions (`GET /access/permissions`) and lists each `ProxCloudPlatform` privilege the token lacks, plus a warning for a `root@pam` token. Missing privileges are only reported as warnings. A cluster without GPUs can, for example, leave out `/mapping/pci`. The list it checks is `pve.PlatformPrivileges` in `internal/cloud/pve/access.go`. Keep it in sync with this page. The setup checks of the same test (`?checks=all`, [api.md](api.md)) read more with the same token: the pool `pc-templates`, and for an EVPN zone each node's package list (`GET /nodes/{node}/apt/versions`) to find `frr-pythontools`. That last read is expected to work with `PVEAuditor` on `/nodes` but is not lab-verified; when it is refused the check says so and stays a warning.
 
 ## Inventory visibility repair
 

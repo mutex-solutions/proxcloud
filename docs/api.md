@@ -114,9 +114,26 @@ several findings puts one on each line of `message`. Rows after `connect` or
 | `firewall-nodes` | Every online node runs the nftables firewall | `fail` |
 | `public-networks` | Stored provider: no public network on a management bridge | `fail` |
 | `privileges:<path>` | The token holds the `ProxCloudPlatform` privileges on that ACL path (`/`, `/nodes`, `/pool`, `/sdn`, `/sdn/zones`, `/storage`, `/mapping/pci`). One row `privileges` when they cannot be read | `warn` |
-| `import-store` | Stored provider with `importStorage`: the token can delete files there | `warn` |
 | `store-reach` | Stored provider: tenant networks cannot reach the network stores | `warn` |
 | `boot-iso` | Stored provider: the Kubernetes bootstrap ISO store is usable | `warn` |
+| `version` | Proxmox VE 9.2 or later | `fail` |
+| `template-pool` | The pool `pc-templates` exists | `warn` |
+| `import-store` | Some storage takes `import` content. Stored provider with `importStorage`: that storage exists, takes it, and the token can delete files there | `warn` |
+| `zone` | Stored provider: a default tenant network zone is configured, and Proxmox has no zone of that id with another type | `fail` |
+| `cidr-pool` | Stored provider: `cidrPool` is an IPv4 range of /24 or larger; `warn` when it overlaps a management network of the nodes | `fail` |
+| `storage-profile` | Stored provider: a default storage profile is configured and exists | `fail` |
+| `frr` | Stored provider with an EVPN zone: `frr-pythontools` is installed on every online node | `warn` |
+
+The rows from `version` down exist only in `checks`: they never turn the default
+call into a `400` and never add to `warnings`.
+
+With `?checks=all` a caller with `admin:service:manage` also gets `bridges`,
+the bridges of every node as `{node, iface, type, cidr, management}`
+(`management`: the bridge carries the node's own address or a default gateway,
+so it cannot be a public network), and, when the connection was refused over the
+certificate, `presentedFingerprint`: the SHA-256 of the certificate the server
+presented, in the form `fingerprint` takes. Pinning it without comparing it to
+`pvenode cert info` on the node is trust on first use.
 
 Cloud service selection: the project cloud routes (`/project/{id}/cloud`, its
 actions and deletes, `quota-usage`, `gpu-capacity`, `public-networks`, the S3
