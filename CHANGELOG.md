@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The managed-services platform's bill of materials** (`deploy/platform/platform-bom.yaml`,
+  `GET /api/v1/admin/platform/bom`): ADR 0009 says every release ships one list of the exact version and digest of
+  everything the platform runs, so that the installer and the console's "Enable managed services" build the same
+  thing and an upgrade has one source. The file names release `0.7.0-dev`, Kubernetes 1.35.10 with its published
+  node image, the seed image and k3s v1.35.10+k3s1 (binary and install script by sha256), the Cluster API
+  providers, the tenant charts and the 15 seed and workload components with wave, namespace, node group and chart.
+  The API embeds it (`deploy/embed.go`; the image copies `deploy/embed.go` and `deploy/platform`, and the docker
+  workflow rebuilds on a change to either) and validates it in `internal/platformlife`: exact versions only, a
+  digest on every chart and image, and `pending` digests (our own four packages, not public yet) and `0.0.0+latest`
+  (Kamaji) only in a `-dev` release. The route needs `admin:service:read`. Tests keep `versions.yml`,
+  `pc_defaults.services.k8s_version` and stage 40's ArgoCD and cert-manager chart and values equal to the BOM; the
+  installer itself is unchanged and does not read the file. Inert: nothing installs from the BOM, there is no run,
+  job or flag yet. Not verified: the third-party chart and image digests and the k3s sha256 values were read once
+  from the public registries, chart indexes and k3s release on 2026-11-15, with no CI job checking them yet; whether
+  `proxcloud-platform` 0.1.0, `proxmox-kamaji-cluster` 0.1.11 and `proxcloud-clusterctl` v1.14.4-1 get those
+  versions depends on PRs that do not exist yet.
 - **Every check of the Proxmox connection test in one answer**
   (`POST /api/v1/admin/service/proxmox/auth?checks=all`): the test stopped at the first failure, so an
   operator fixed the datacenter firewall only to learn about the node firewall, and then about missing

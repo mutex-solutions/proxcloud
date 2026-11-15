@@ -303,6 +303,24 @@ makes the step `todo`, and a step is `blocked` only when it cannot start.
   off (`PROXCLOUD_JOBS_SCHEDULER_ENABLED`) are `attention` items: they block
   nothing. An attach policy that is on while steps are open is `attention`.
 
+### Managed-services platform — `/api/v1/admin/platform`
+
+**BOM.** `GET /api/v1/admin/platform/bom` answers the platform bill of
+materials this release carries (`deploy/platform/platform-bom.yaml`, compiled
+into the API; [ADR 0009](adr/0009-managed-services-platform-lifecycle.md)):
+`release`, the Kubernetes version and node image, the seed image and k3s
+release with their sha256, the Cluster API providers, the tenant charts, and
+every component with its cluster, wave, namespace, node group and chart
+(`repo`, `name`, `version`, `digest`). `sha256` is the hash of the file, the
+key a run records it by. It needs `admin:service:read` and changes nothing.
+
+The file pins exact versions only. A digest is the chart's OCI manifest
+digest, or for an `https://` repository the `digest` of that version in its
+`index.yaml`. A `-dev` release (main) may still carry `pending` digests for
+the project's own packages and a `0.0.0+latest` version for Kamaji; the
+validation refuses both in any other release. Nothing installs from the BOM
+yet.
+
 ## Admin API — `/admin-api/v1`
 
 A machine-to-machine surface (`internal/platform/adminapi`). Authenticated with an
