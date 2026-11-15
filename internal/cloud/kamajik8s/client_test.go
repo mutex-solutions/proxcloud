@@ -262,7 +262,11 @@ func TestCreateServiceAccountToken(t *testing.T) {
 	if body["kind"] != "TokenRequest" || body["apiVersion"] != "authentication.k8s.io/v1" || spec["expirationSeconds"] != float64(31536000) {
 		t.Errorf("body = %v", body)
 	}
-	for _, r := range []string{`{"status":{}}`, `{"status":{"token":"t","expirationTimestamp":"soon"}}`} {
+	for _, r := range []string{
+		`{"status":{"expirationTimestamp":"2027-11-15T10:00:00Z"}}`, // no token
+		`{"status":{"token":"t","expirationTimestamp":"soon"}}`,     // bad expiry
+		`{"status":{"token":"t"}}`,                                  // no expiry
+	} {
 		reply = r
 		if _, _, err := c.CreateServiceAccountToken(ctx, "kube-system", "argocd-manager", time.Hour); err == nil {
 			t.Errorf("reply %s: want error", r)
