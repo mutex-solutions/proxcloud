@@ -35,7 +35,17 @@ The native builder still only grows: a vendor disk larger than 5 GiB is left as 
 
 ### First lab build of each image type must confirm
 
-Nothing below was run for this change. Until it is, the new sizes are unproven.
+The first lab builds ran on 2026-11-14, one per image type, each followed by an export through the [export workflow](<vm-artifact-publishing.md>). What they confirmed and what is still open:
+
+| Item | Native OS `ubuntu-2604` (5 GiB) | Kubernetes node 1.37.2 on `ubuntu-2604` (8 GiB) |
+| --- | --- | --- |
+| Template disk | `size=5G` | `size=8G` |
+| Build | green; dist-upgrade, package install and the 1 GiB admission passed | green; installer, image-builder run and the 1 GiB admission passed (static network mode) |
+| Space on `/` | 3,881,164 KiB filesystem; 985,308 KiB free before the upgrade, 980,500 KiB after it (75% used); the admission runs after the cleanup and prints nothing when it passes | not in the workflow log (image-builder's output is not copied there) |
+| Export path | green: `virtual_size_bytes: 5368709120`, sanitize, postscan, cold boot of two clones grown to 30 GiB | green: `virtual_size_bytes: 8589934592`, inventory, review against the committed baseline, sanitize, postscan, cold boot of two clones grown to 30 GiB |
+| Still open | items 5, 7 and 8 (a server through a portal, a portal import, the mixed-size minimum) | the free-space numbers of item 3, a DHCP build, items 4 and 6 (a node group joining a cluster, a portal import) |
+
+**The 5 GiB native size is close to its limit on Ubuntu 26.04.** The vendor image has a separate `/boot`, so the root filesystem is 3.7 GiB, and the build left less than 1 GiB free before its cleanup. It passed the 1 GiB admission only after `apt-get clean` and the other cleanup steps. A later build with a larger upgrade can fail that admission; that is the intended loud failure, and the answer is then a larger size for this OS, as described under the list. The other native OS slugs have not been built at 5 GiB.
 
 Native OS, once per OS slug (`ubuntu-2604` first: it is the one that failed at 3.5 GiB):
 
