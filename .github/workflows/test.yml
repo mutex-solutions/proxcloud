@@ -78,7 +78,11 @@ jobs:
       - uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3
         with:
           version: "1.16.2"
-      - name: Validate Packer expressions and plugin configuration (offline)
+      - name: Validate Packer expressions and plugin configuration (no VM build)
+        # packer init asks the GitHub API for the plugin's tags. Unauthenticated, that shares the
+        # hosted runner's address-wide limit and fails often; the job token raises the limit.
+        env:
+          PACKER_GITHUB_API_TOKEN: ${{ github.token }}
         run: bash images/packer/validate.sh
       - name: Check the installer
         working-directory: installer
