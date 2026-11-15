@@ -7,7 +7,7 @@ upstream chart cannot mount a kubeconfig for its sidecars, hence this template. 
 the tenant's csi-proxmox namespace, as with the tenant-side controller.
 */ -}}
 {{- $gw := .Values.proxmox.csi.gateway | default dict }}
-{{- if and $gw.secretName .Values.proxmox.csi.storageClasses }}
+{{- if and $gw.secretName .Values.proxmox.csi.storageClasses (not (include "pkc.kubeadm" .)) }}
 {{- $img := .Values.csiController.images }}
 {{- $kube := "--kubeconfig=/etc/tenant/kubeconfig" }}
 {{- $sc := dict "allowPrivilegeEscalation" false "readOnlyRootFilesystem" true "capabilities" (dict "drop" (list "ALL")) "seccompProfile" (dict "type" "RuntimeDefault") }}

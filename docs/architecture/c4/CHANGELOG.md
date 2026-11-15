@@ -4,6 +4,29 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-15: Cluster chart kubeadm mode for the platform cluster
+
+**What changed:** chart `proxmox-kamaji-cluster` 0.1.11 has a second control-plane kind,
+`controlPlane.kind: kubeadm`, for the platform's own workload cluster of managed services
+(ADR 0009). It renders a `KubeadmControlPlane` with one replica on one PVE node, with the
+kube-vip static pod, prepare script, provider-id kubelet argument and certSANs of installer
+stage 50's services cluster, the endpoint on the `ProxmoxCluster`, and `PodNodeSelector` and
+`PodTolerationRestriction` next to `NodeRestriction`. It skips the CAAPH add-ons, the
+ClusterResourceSet, the services-side CSI controller and the Gateway API carriers; the node
+groups are the tenant ones. The default `kamaji` renders byte-identical output for tenant
+values. Nothing renders kubeadm mode yet, and the 0.1.11 tag is not cut.
+
+**Why:** the managed-services design reuses this chart for the platform cluster, so both the
+installer path and the in-platform path end in the same ArgoCD Application shape instead of a
+second cluster template. The chart element's scope grows; no running flow, credential or
+network path changes until the platform job uses it.
+
+**Diagrams updated:** [C2c build and delivery](c2-containers.md#c2c-build-and-delivery) (chart
+element) and the [container table](c2-containers.md#container-table) (chart row).
+
+Files: `deploy/charts/proxmox-kamaji-cluster/{Chart.yaml,values.yaml,templates/*}`,
+`internal/cloud/kamaji/{chart_golden_test.go,chart_kubeadm_test.go,testdata/}`,
+`deploy/charts/README.md`, `docs/architecture/c4/c2-containers.md`.
 ## 2026-11-15: Kubernetes API client gains cluster-scoped apply, TokenRequest and access review
 
 **What changed:** `internal/cloud/kamajik8s` gained four calls: `ApplyClusterScoped`
