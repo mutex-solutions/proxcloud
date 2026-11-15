@@ -43,6 +43,8 @@ var (
 		return q
 	}()}}
 	setupOn = map[string]any{"attachToNewProjects": true}
+	// setupSeeds is the operator's seed choice: by URL.
+	setupSeeds = map[string]any{"metadata": map[string]any{"forceIso": false}}
 	// setupPinned pins a template in the provider configuration, so the templates step is read without live.
 	setupPinned = map[string]any{"templates": map[string]any{"debian-13": map[string]any{"vmid": float64(9000), "node": "pve1"}}}
 )
@@ -57,8 +59,8 @@ func setupCatalogDone(s setupSnapshot) setupSnapshot {
 
 func TestSetupStatus(t *testing.T) {
 	ready := func(cfg ...map[string]any) setupSnapshot {
-		s := setupCatalogDone(setupSnapshot{Provider: setupProviderWith(append([]map[string]any{setupNetwork, setupStorage, setupQuota}, cfg...)...)})
-		s.Scheduler = true
+		s := setupCatalogDone(setupSnapshot{Provider: setupProviderWith(append([]map[string]any{setupNetwork, setupStorage, setupQuota, setupSeeds}, cfg...)...)})
+		s.Scheduler, s.APIBaseURL = true, "https://api.example.com"
 		return s
 	}
 	liveOK := func() *setupLive {
@@ -182,6 +184,9 @@ func TestSetupStatus(t *testing.T) {
 			map[string]string{stepStorage: stateAttention}, map[string]string{"storage/importStore": stateAttention}},
 		{"live: the storages could not be read", withLive(ready(), &setupLive{Images: 1, ImportErr: "the cluster's storage could not be read"}),
 			map[string]string{stepStorage: stateUnknown}, map[string]string{"storage/importStore": stateUnknown}},
+		// No seed choice is a warning in network and holds nothing back.
+		{"no seed choice warns and blocks nothing", withLive(ready(map[string]any{"metadata": map[string]any{"vendorData": "#cloud-config\n"}}), liveOK()),
+			map[string]string{stepNetwork: stateAttention, stepGoLive: stateTodo}, map[string]string{"network/seeds": stateAttention}},
 	}
 	order := []string{stepConnect, stepNetwork, stepStorage, stepTemplates, stepCatalog, stepGoLive}
 	for _, tt := range tests {
@@ -228,6 +233,40 @@ func TestSetupStatus(t *testing.T) {
 				t.Errorf("fresh install: %s/%s is done", st.ID, it.ID)
 			}
 		}
+	}
+}
+
+// The seed item is done only on the operator's choice; the message names where a URL seed is fetched from.
+func TestSeedsItem(t *testing.T) {
+	const api = "https://api.example.com/"
+	for _, tt := range []struct {
+		name     string
+		metadata any // config.metadata (nil = not set)
+		apiBase  string
+		state    string
+		says     string
+	}{
+		{"nothing chosen", nil, api, stateAttention, "fetch their seed from https://api.example.com unless ISO seeds are on (config.metadata.forceIso): tenant servers must reach it and trust its certificate"},
+		{"other metadata keys only", map[string]any{"vendorData": "#cloud-config\n", "isoStorage": "local"}, api, stateAttention, "unless ISO seeds are on"},
+		{"forceIso not a boolean is not a choice", map[string]any{"forceIso": "true"}, api, stateAttention, "unless ISO seeds are on"},
+		{"ISO chosen", map[string]any{"forceIso": true}, api, stateDone, "on an ISO"},
+		{"ISO wins over a URL", map[string]any{"forceIso": true, "url": "https://seeds.example.com"}, api, stateDone, "on an ISO"},
+		{"URL chosen", map[string]any{"forceIso": false}, api, stateDone, "fetch their seed from https://api.example.com;"},
+		{"own seed URL", map[string]any{"url": "https://seeds.example.com/"}, api, stateDone, "fetch their seed from https://seeds.example.com;"},
+		{"own seed URL without an API base URL", map[string]any{"url": "https://seeds.example.com"}, "", stateDone, "https://seeds.example.com"},
+		{"no URL anywhere", nil, "", stateAttention, "the API has no base URL"},
+		{"URL chosen without any URL", map[string]any{"forceIso": false}, "", stateAttention, "the API has no base URL"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := map[string]any{}
+			if tt.metadata != nil {
+				cfg["metadata"] = tt.metadata
+			}
+			it := seedsItem(setupProviderWith(cfg), tt.apiBase)
+			if it.ID != "seeds" || it.State != tt.state || !strings.Contains(it.Message, tt.says) {
+				t.Errorf("%+v, want %s saying %q", it, tt.state, tt.says)
+			}
+		})
 	}
 }
 
