@@ -138,6 +138,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behind the fence while kamaji-etcd, the kubelets, the PVE API and argocd-repo-server stay unreachable, and that
   Cilium matches the API server on its port 6443 after the `kubernetes` Service is translated are all unverified until
   the lab run.
+- **Managed-services installations, their credentials, preflight and plan** (`/api/v1/admin/platform/installations`,
+  behind the new `PROXCLOUD_PLATFORM_ENABLED`, default off): the console's "Enable managed services" needs a record
+  of what it builds before any job can build it (ADR 0009, design §3). An installation (`internal/platformlife`,
+  collection `platformInstallation`, one per Proxmox provider) holds the spec of the shared layout (PVE API address,
+  boot, ISO and import stores, the untagged platform network, the seed, one cluster with the node groups `system`,
+  `kamaji` and `dbaas`, the node image) and the status a run will write. Create and update check every rule of the
+  design that needs no cluster: addresses inside the prefix and apart from each other, a node range that holds every
+  machine plus one surge per MachineDeployment, SSH keys that parse, no overlap with the provider's tenant pool,
+  sandbox or public networks, and a MetalLB range tenants can reach. An update names the `rev` it read and is refused
+  during a run, for a change of provider, and for the fields that cannot change once a run succeeded (path, layout,
+  name, network, the seed's mode, pool, node and address, cluster name, endpoint and node groups); a draft stays
+  correctable. The two platform tokens (`capmox@pve!capi`, `csi@pve!csi`) are pasted write-only
+  into collection `platformSecret`, sealed with the data key like the Ceph credentials, refused without one, and
+  never returned or put into an audit diff; `kubeconfig`, `seedKubeconfig`, `k3sToken`, `bootstrapToken` and `caKey`
+  join the audit's secret keys. The preflight reads only: flags, both tokens' privileges and the portal token's mint
+  grant (`pve.CAPIPrivileges` and the other tables of the managed-services script), the fence of both platform pools,
+  the ISO store the CAPI token sees, the stores and image placement, the blocklist, and layer 0 through the new
+  `(*pve.Service).CheckIsolation` (the sandbox gate's check without its sandbox requirement): the seed, VIP and node
+  range must be blocked networks, and it names the CIDRs to add; before the first tenant network, when no sync has
+  written the cluster firewall rules yet, the row passes, also on a provider with `sandboxCidrs`. The plan diffs the installed BOM against this
+  release's. The model of a run (`platformRun`, its states and the failure codes) is in place for the job. Inert: no
+  job kind is registered, so nothing provisions; there are no run, seed-kubeconfig or rotation routes and no page yet,
+  and with the flag off the routes answer `404 platform_disabled`. Not verified: the preflight against a real Proxmox
+  (tests use a fake PVE API), and whether every privilege row reads the same on PVE 9.2 as the tables assume.
+- **`proxcloud-clusterctl` image and its tag flow** (`deploy/clusterctl/`, `.github/workflows/clusterctl.yml`): the
+  image the clusterctl Job of the managed-services platform will run (ADR 0009; the `proxcloud-platform` chart that
+  runs it comes separately). It holds clusterctl v1.14.4, kubectl v1.35.10 and, as a clusterctl local repository, the
+  provider manifests of Cluster API core, kubeadm bootstrap and kubeadm control plane v1.14.4, CAPMOX v0.9.2, the
+  in-cluster IPAM provider v1.1.1, the Kamaji control plane v0.22.0 and CAAPH v0.6.4: the versions of
+  `installer/playbooks/group_vars/all/versions.yml` (the platform BOM is not on `main` yet), which a test keeps equal.
+  Every download is checked against a sha256 in the Dockerfile, and the build resolves every provider with no network.
+  The entrypoint reads the clusterctl inventory and installs only the missing providers, does nothing when every
+  provider is at its wanted version, and refuses, installing nothing, when one is at another version (upgrades are a
+  later release) or when it is asked for a provider, type or version it does not carry (clusterctl would otherwise
+  take a built-in one such as docker or metal3 from GitHub). It empties `PROXMOX_*` as stage 50 does and turns
+  clusterctl's version check off; cert-manager is not baked, so a cluster without one fails on a local path instead of
+  downloading it from GitHub. Why: the Job makes no GitHub call at runtime, and the platform pins one reviewed image
+  by digest. A pull request builds and scans the image; a `proxcloud-clusterctl-v<version>` tag, which must equal the
+  image's version label and point at a commit of `main`, builds it, scans it with the existing Trivy gate and pushes
+  it once to `ghcr.io/mutex-solutions/proxcloud-clusterctl`. Nothing uses the image yet. **Not publishable today:**
+  the gate blocks the upstream clusterctl v1.14.4 and kubectl v1.35.10 release binaries (`golang.org/x/net` and
+  `golang.org/x/text` with fixed HIGH CVEs; kubectl v1.36.6 and v1.37.2 have them too), so no tag can publish until
+  upstream ships fixed binaries or a source rebuild is decided. The workflow has not run on GitHub. The entrypoint ran
+  against k3s v1.35.10 in Docker (empty, partial, equal and different-version inventories, cert-manager down, egress
+  through a dead proxy), not on a lab seed or workload cluster; the refusal of a provider it does not carry ran only
+  against a fake kubectl and clusterctl, under busybox.
 - **What the managed-services platform job will apply, rendered from the BOM** (`internal/platformlife`, P3 design
   §4.2 to §5): pure functions, no PVE or Kubernetes call, so each stage of the coming job has exact objects to apply
   and tests to hold them. The seed VM gets a server CA the portal generates (ECDSA P-256, key never stored) and a
@@ -173,28 +219,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bootstrap-token auth with `anonymous-auth=false`), and no ArgoCD has synced these Applications; the upstream charts
   (cilium, cert-manager, metallb, argo-cd, cloudnative-pg, proxmox-csi-plugin, kamaji-crds, kamaji-etcd, kamaji)
   rendered the workload values once by hand with `helm template` on 2026-11-15, not in CI.
-- **`proxcloud-clusterctl` image and its tag flow** (`deploy/clusterctl/`, `.github/workflows/clusterctl.yml`): the
-  image the clusterctl Job of the managed-services platform will run (ADR 0009; the `proxcloud-platform` chart that
-  runs it comes separately). It holds clusterctl v1.14.4, kubectl v1.35.10 and, as a clusterctl local repository, the
-  provider manifests of Cluster API core, kubeadm bootstrap and kubeadm control plane v1.14.4, CAPMOX v0.9.2, the
-  in-cluster IPAM provider v1.1.1, the Kamaji control plane v0.22.0 and CAAPH v0.6.4: the versions of
-  `installer/playbooks/group_vars/all/versions.yml` (the platform BOM is not on `main` yet), which a test keeps equal.
-  Every download is checked against a sha256 in the Dockerfile, and the build resolves every provider with no network.
-  The entrypoint reads the clusterctl inventory and installs only the missing providers, does nothing when every
-  provider is at its wanted version, and refuses, installing nothing, when one is at another version (upgrades are a
-  later release) or when it is asked for a provider, type or version it does not carry (clusterctl would otherwise
-  take a built-in one such as docker or metal3 from GitHub). It empties `PROXMOX_*` as stage 50 does and turns
-  clusterctl's version check off; cert-manager is not baked, so a cluster without one fails on a local path instead of
-  downloading it from GitHub. Why: the Job makes no GitHub call at runtime, and the platform pins one reviewed image
-  by digest. A pull request builds and scans the image; a `proxcloud-clusterctl-v<version>` tag, which must equal the
-  image's version label and point at a commit of `main`, builds it, scans it with the existing Trivy gate and pushes
-  it once to `ghcr.io/mutex-solutions/proxcloud-clusterctl`. Nothing uses the image yet. **Not publishable today:**
-  the gate blocks the upstream clusterctl v1.14.4 and kubectl v1.35.10 release binaries (`golang.org/x/net` and
-  `golang.org/x/text` with fixed HIGH CVEs; kubectl v1.36.6 and v1.37.2 have them too), so no tag can publish until
-  upstream ships fixed binaries or a source rebuild is decided. The workflow has not run on GitHub. The entrypoint ran
-  against k3s v1.35.10 in Docker (empty, partial, equal and different-version inventories, cert-manager down, egress
-  through a dead proxy), not on a lab seed or workload cluster; the refusal of a provider it does not carry ran only
-  against a fake kubectl and clusterctl, under busybox.
 
 ### Changed
 

@@ -29,6 +29,32 @@ contract are checked here, in one package, by goldens and tests.
 
 **Views updated:** [C3e managed services](c3-components.md#c3e-managed-services-and-object-storage)
 (`platformlife` node label and table row).
+## 2026-11-15: Managed-services installations and their credentials in the API
+
+**What changed:** `internal/platformlife` gains the installation record of the managed-services
+platform and its routes under `/api/v1/admin/platform/installations` (`internal/platform/admin/platform.go`),
+behind `PROXCLOUD_PLATFORM_ENABLED` (off by default: the routes answer `404 platform_disabled`). Three
+new collections in the portal's PostgreSQL: `platformInstallation` (spec and status, one per Proxmox
+provider), `platformSecret` (the pasted `capmox@pve!capi` and `csi@pve!csi` secrets, sealed with the
+data key as `cephcred` does, never returned or audited) and `platformRun` (the run record, unused until
+the job exists). A new credential crosses the API-to-Proxmox boundary: the preflight
+(`POST …/{id}/preflight`) calls the PVE API at the provider's stored address with the portal token and
+both platform tokens, reading permissions, storage and the cluster firewall only, through the new
+`(*pve.Service).CheckIsolation` among others. No container, external system or key flow is added; no
+job kind is registered, so nothing writes to Proxmox with the platform tokens.
+
+**Why:** the in-platform path (ADR 0009, design §3 and §5) needs the record, the credentials and the
+checks before its runner can build anything, and the credentials need a store no read can return. The
+API now holding two more PVE tokens is a trust-boundary change, so the C2 row says what they reach and
+that today they only read.
+
+**Views updated:** [C2 containers](c2-containers.md) (trust boundaries: "API to Proxmox" row) and
+[C3e managed services](c3-components.md#c3e-managed-services-and-object-storage) (`platformlife` node
+renamed, edge to the PVE API, new "Platform installations" row).
+
+Files: `internal/platformlife/{installation,store,run,preflight,plan}.go`, `internal/platform/admin/platform.go`,
+`internal/platform/admin/{handler,audit_mw}.go`, `internal/platform/audit/diff.go`, `internal/cloud/pve/network.go`,
+`internal/config/config.go`, `cmd/api/main.go`, `docs/api.md`, `docs/architecture/c4/{c2-containers,c3-components}.md`.
 ## 2026-11-15: Platform tokens narrowed to the platform pools
 
 **What changed:** the Proxmox credentials of the services cluster reach less. Installer

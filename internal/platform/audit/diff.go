@@ -31,6 +31,8 @@ var sensitiveSnapshotKeys = map[string]bool{
 	"secret": true, "secretKey": true, "password": true, "adminPassword": true,
 	"payload": true, "privateKey": true, "apiKey": true, "token": true,
 	"clientSecret": true, "accessKey": true, "hmacKeyId": true,
+	// the managed-services platform's credentials (platformlife.Secrets), should one ever reach a snapshot
+	"kubeconfig": true, "seedKubeconfig": true, "k3sToken": true, "bootstrapToken": true, "caKey": true,
 }
 
 // skipDiffKey reports whether a snapshot key is excluded from the diff (volatile metadata OR a secret).
