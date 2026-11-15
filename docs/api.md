@@ -273,7 +273,11 @@ none saved every step that needs one is `blocked`.
 ```
 
 The steps, in order: `connect`, `network`, `storage`, `templates`, `catalog`,
-`golive`. An item's `state` is `done`, `attention` (works, but look at it),
+`golive`, `managed`. `managed` is optional and read from the database only: the
+phase of the provider's managed-services installation (`todo` with the switch
+off, without an installation, for a draft or a removed one; `attention` during
+a run and after a failed one; `done` when ready). It is computed after `golive`
+and is not one of its inputs. An item's `state` is `done`, `attention` (works, but look at it),
 `todo`, `blocked` (needs another step first) or `unknown` (could not be read).
 The worst item decides the step's state and its `summary`; a `blocked` item
 makes the step `todo`, and a step is `blocked` only when it cannot start.

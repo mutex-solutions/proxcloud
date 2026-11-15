@@ -4,6 +4,7 @@ import (
 	"context"
 	"maps"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/platformconfig"
+	"github.com/mutex-solutions/proxcloud/internal/platformlife"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
@@ -188,7 +190,7 @@ func TestSetupStatus(t *testing.T) {
 		{"no seed choice warns and blocks nothing", withLive(ready(map[string]any{"metadata": map[string]any{"vendorData": "#cloud-config\n"}}), liveOK()),
 			map[string]string{stepNetwork: stateAttention, stepGoLive: stateTodo}, map[string]string{"network/seeds": stateAttention}},
 	}
-	order := []string{stepConnect, stepNetwork, stepStorage, stepTemplates, stepCatalog, stepGoLive}
+	order := []string{stepConnect, stepNetwork, stepStorage, stepTemplates, stepCatalog, stepGoLive, stepManaged}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			steps := setupStatus(tt.s)
@@ -319,5 +321,63 @@ func TestSetupStatusRouteGate(t *testing.T) {
 		if m := missingPerm(rolePermissions(role), defaultsReadPerms); m != "" {
 			t.Errorf("%s cannot read the setup status: %s", role, m)
 		}
+	}
+}
+
+// The managed step follows the installation's phase, and no state of it changes go live.
+func TestSetupStatusManaged(t *testing.T) {
+	base := func() setupSnapshot {
+		s := setupCatalogDone(setupSnapshot{Provider: setupProviderWith(setupNetwork, setupStorage, setupQuota, setupSeeds, setupPinned)})
+		s.Scheduler = true
+		return s
+	}
+	in := func(phase string) *platformlife.Installation {
+		return &platformlife.Installation{Name: "lab", Status: platformlife.Status{Phase: phase}}
+	}
+	goLive := func(steps []setupStep) setupStep { return steps[len(steps)-2] }
+	want := goLive(setupStatus(base()))
+	if want.ID != stepGoLive || want.State != stateTodo {
+		t.Fatalf("go live without managed services: %+v", want)
+	}
+	tests := []struct {
+		name  string
+		on    bool
+		in    *platformlife.Installation
+		state string
+		says  string
+	}{
+		{"the switch is off", false, nil, stateTodo, "--managed-services"},
+		{"no installation", true, nil, stateTodo, "No managed-services installation yet"},
+		{"draft", true, in(platformlife.PhaseDraft), stateTodo, "draft"},
+		{"applying", true, in(platformlife.PhaseApplying), stateAttention, "being installed"},
+		{"failed: Go-live not blocked", true, in(platformlife.PhaseFailed), stateAttention, "failed"},
+		{"removing", true, in(platformlife.PhaseRemoving), stateAttention, "being removed"},
+		{"removed", true, in(platformlife.PhaseRemoved), stateTodo, "removed"},
+		{"ready", true, in(platformlife.PhaseReady), stateDone, "installed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := base()
+			s.PlatformOn, s.Installation = tt.on, tt.in
+			steps := setupStatus(s)
+			m := steps[len(steps)-1]
+			if m.ID != stepManaged || m.State != tt.state || !strings.Contains(m.Summary, tt.says) || len(m.Items) != 1 {
+				t.Errorf("managed = %+v, want %s saying %q", m, tt.state, tt.says)
+			}
+			if got := goLive(steps); !reflect.DeepEqual(got, want) {
+				t.Errorf("go live changed with the managed step:\n got %+v\nwant %+v", got, want)
+			}
+		})
+	}
+	// Gone live stays done whatever the managed step says, and without a provider the step cannot start.
+	s := base()
+	s.Provider.Config["attachToNewProjects"] = true
+	s.PlatformOn, s.Installation = true, in(platformlife.PhaseFailed)
+	if steps := setupStatus(s); goLive(steps).State != stateDone {
+		t.Errorf("gone live with a failed installation: go live is %s", goLive(steps).State)
+	}
+	steps := setupStatus(setupSnapshot{PlatformOn: true})
+	if m := steps[len(steps)-1]; m.ID != stepManaged || m.State != stateBlocked {
+		t.Errorf("without a provider: %+v", m)
 	}
 }
