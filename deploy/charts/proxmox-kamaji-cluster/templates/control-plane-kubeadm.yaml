@@ -20,6 +20,9 @@ pod in it, whatever chart created the pod.
 {{- if ne (len $kv) 2 }}
 {{- fail (printf "controlPlane.kubeadm.machineImageId %q is not <node>=<vmid> (one node)" $cp.machineImageId) }}
 {{- end }}
+{{- if not $cp.machineTags }}
+{{- fail "controlPlane.kubeadm.machineTags is required" }}
+{{- end }}
 {{- $node := index $kv 0 }}
 {{- $machine := dict "sourceNode" $node "templateID" (int (index $kv 1)) "allowedNodes" (list $node) "storage" .Values.proxmox.storage "format" "raw" "full" true "pool" .Values.proxmox.pool "checks" (dict "skipCloudInitStatus" true) "tags" $cp.machineTags "numSockets" 1 "numCores" (int $cp.machineCores) "memoryMiB" (int $cp.machineMemoryMiB) "disks" (dict "bootVolume" (dict "disk" "scsi0" "sizeGb" (int $cp.machineRootVolume.diskSize))) }}
 {{- $device := dict "name" "net0" "bridge" $net.bridge "model" "virtio" }}

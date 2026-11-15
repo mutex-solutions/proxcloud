@@ -53,12 +53,14 @@ controlPlane:
     certSANs: []
     # -- Default = installer versions.yml kube_vip (a test keeps them equal). A digest-pinned reference works too.
     kubeVipImage: ghcr.io/kube-vip/kube-vip:v0.8.9
-    # -- <pve node>=<template vmid>, one entry: the control-plane VM is cloned on that node.
-    machineImageId: "pve1=9210"
+    # -- <pve node>=<template vmid>, one entry: the control-plane VM is cloned on that node. Required, no default.
+    machineImageId: ""
     machineCores: 2
     machineMemoryMiB: 4096
     machineRootVolume: {diskSize: 30}
-    machineTags: [proxcloud]
+    # -- PVE tags of the control-plane VM, [proxcloud, pc-platform, pc-platform-<id>]: a Remove after a lost seed finds
+    # the VMs by the last one. Required, no default.
+    machineTags: []
 
 clusterNetwork:
   pods: 10.244.0.0/16

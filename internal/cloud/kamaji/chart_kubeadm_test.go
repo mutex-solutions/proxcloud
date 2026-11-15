@@ -184,3 +184,22 @@ func installerKubeVipVersion(t *testing.T) string {
 	}
 	return v.Versions.KubeVip
 }
+
+// The control-plane VM's template and tags have no default: a values document that leaves one out fails the render
+// instead of cloning some other template (9210 is the docs' tenant node template) or leaving the VM without the
+// pc-platform-<id> tag a Remove after a lost seed finds it by.
+func TestChartKubeadmRequiresMachineImageAndTags(t *testing.T) {
+	for _, key := range []string{"machineImageId", "machineTags"} {
+		t.Run(key, func(t *testing.T) {
+			var values map[string]any
+			if err := yaml.Unmarshal([]byte(kubeadmTestValues), &values); err != nil {
+				t.Fatal(err)
+			}
+			delete(dig(values, "controlPlane", "kubeadm").(map[string]any), key)
+			out, err := gatewayRenderRawChart(t, "pc-platform", values)
+			if want := "controlPlane.kubeadm." + key + " is required"; err == nil || !strings.Contains(out, want) {
+				t.Errorf("render without %s must fail with %q, got err=%v\n%s", key, want, err, out)
+			}
+		})
+	}
+}

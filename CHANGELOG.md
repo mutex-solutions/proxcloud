@@ -187,7 +187,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   services cluster (`services-cluster.yml.j2`), the endpoint on the `ProxmoxCluster`, and the admission plugins
   `NodeRestriction,PodNodeSelector,PodTolerationRestriction`, so namespace annotations can place pods on a node
   group. It renders no CAAPH add-ons, no ClusterResourceSet, no services-side CSI controller and no Gateway API
-  carriers; the node groups are unchanged. The default stays `kamaji`: for tenant values the output is
+  carriers; the node groups are unchanged. The control plane's endpoint, `machineImageId` and `machineTags` have no
+  default, so values that leave one out fail the render instead of cloning another template or leaving the VM without
+  its `pc-platform-<id>` tag. The default stays `kamaji`: for tenant values the output is
   byte-identical to 0.1.10 (`TestChartGolden` pins the defaults alone, with the CSI gateway and with Gateway Fabric,
   as 0.1.10 renders them), and existing clusters and providers keep their chart pin. Inert:
   nothing renders kubeadm mode yet. The tag `proxmox-kamaji-cluster-v0.1.11` is not cut, so the chart is not
