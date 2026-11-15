@@ -84,6 +84,31 @@
         - {src: files/argocd-default-project.yaml, dest: manifests/default-appproject.yaml}
         - {src: "{{ pc_repo_root }}/deploy/charts/proxmox-kamaji-cluster/", dest: charts/proxmox-kamaji-cluster/}
         - {src: "{{ pc_repo_root }}/deploy/charts/database-cluster/", dest: charts/database-cluster/}
+    # The script locks ArgoCD's default project. An Application still in it (an empty project is default too) would stop
+    # syncing, and deleting it would then delete nothing it created, since ArgoCD only deletes what the project permits.
+    # Here and not in the script, whose output no_log hides. No ArgoCD yet (first run): nothing to list.
+    - name: List ArgoCD Applications on the services cluster still in project default
+      ansible.builtin.shell: |
+        set -euo pipefail
+        crd=$(kubectl get crd applications.argoproj.io --ignore-not-found -o name)
+        [ -n "$crd" ] || exit 0
+        kubectl get applications.argoproj.io -A -o jsonpath='{range .items[*]}{.spec.project}{"\t"}{.metadata.namespace}/{.metadata.name}{"\n"}{end}' |
+          awk -F'\t' '$1 == "" || $1 == "default" {print $2}'
+      args: {executable: /bin/bash}
+      environment: {KUBECONFIG: /root/services.kubeconfig}
+      register: pc_default_apps
+      changed_when: false
+      retries: 30
+      delay: 20
+      until: pc_default_apps.rc == 0
+    - name: Stop while any of them is in project default
+      ansible.builtin.fail:
+        msg: >-
+          These ArgoCD Applications on the services cluster are in project default, which this stage locks:
+          {{ pc_default_apps.stdout_lines | join(', ') }}. Locked, they stop syncing, and deleting one then deletes
+          nothing it created. Move each to proxcloud-k8s or proxcloud-dbaas (spec.project, and config.argocd.project of
+          the provider that made it, under Cloud providers), then run this stage again.
+      when: pc_default_apps.stdout != ''
     - name: Run the platform script
       ansible.builtin.command: bash /root/services-bundle/services-platform.sh
       environment:

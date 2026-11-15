@@ -246,11 +246,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `kamaji.BuildApplication` and the database form already did (`web/admin/e2e/provider-connection.spec.ts`). The
   management cluster stays open, because stage 40's `cnpg`, `cert-manager` and `proxcloud` Applications use
   `default`. Nothing here is behind a flag: the lock applies at the next run of stage 50 (`make install`; `make
-  upgrade` does not run it), on existing sites too, and an Application in `default` on the services cluster then
-  stops syncing: one made by hand, or a tenant cluster of a provider whose `config.argocd.project` is `default`
-  (typed in, set through the API, or saved from the console with a blank AppProject before this change). Move it,
-  and its provider, to a named project first. Checked with `ansible-playbook --syntax-check`, the offline test and
-  the console e2e spec only; not applied to a running cluster.
+  upgrade` does not run it), on existing sites too. Locked, an Application in `default` (or with no project) on
+  the services cluster stops syncing, and deleting it deletes nothing it created, because ArgoCD only deletes what
+  the project permits: its workloads stay, and for a tenant cluster its control plane, Cluster API objects and PVE
+  VMs. Such an Application is one made by hand, or a tenant cluster of a provider whose `config.argocd.project` is
+  `default` (typed in, set through the API, or saved from the console with a blank AppProject before this change).
+  So stage 50 first lists those Applications and stops, naming them, while any is left; move each, and its
+  provider, to a named project, then run it again. Checked with `ansible-playbook --syntax-check`, the offline test
+  (which runs the listing against a stub `kubectl`) and the console e2e spec only; not applied to a running
+  cluster.
 - **HIGH/CRITICAL findings without a fixed version stay tracked until 2027-03-12** instead of
   2026-12-12 (`UNFIXED_REVIEW_BY` in `.github/scripts/check_scan_report.py`; owner decision of
   2026-11-15). The reason is the review in `docs/security-unfixed-review.md`: per-target counts by

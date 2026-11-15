@@ -3,7 +3,8 @@
 # apply (services-platform.sh, guardrails) wins and a re-run of stage 50 puts it back. Neither the installer nor the
 # console picks it here: tenant clusters and pc-sandbox are in proxcloud-k8s, databases in proxcloud-dbaas
 # (installer/tests/test_services_argocd.py, web/admin/e2e/provider-connection.spec.ts); a provider can still name it
-# (typed in, or through the API). An Application left in `default` stops syncing; move it to a named project.
+# (typed in, or through the API). Stage 50 stops before this apply while an Application is still in `default`:
+# locked, it would stop syncing, and its delete would delete nothing it created.
 apiVersion: argoproj.io/v1alpha1
 kind: AppProject
 metadata:
