@@ -227,11 +227,18 @@ class VexTests(unittest.TestCase):
     def test_realistic_vendored_sbom_component_is_visible_vex(self):
         gate = self.assertVex(vex_report())
         self.assertEqual((gate.vex[0]["package"], gate.vex[0]["installed"], gate.vex[0]["fixed"]), ("setuptools", "70.3.0", "78.1.1"))
-        # Still applies when unfixed findings start blocking, and across layers. The VEX now
-        # expires before the review date, so an earlier review date stands in for that case.
-        with patch.object(GATE, "UNFIXED_REVIEW_BY", EXPIRY.date() - timedelta(days=1)):
-            self.assertVex(vex_report(), EXPIRY - timedelta(seconds=1))
+        # Applies across layers until the end of the day before expiry.
         self.assertVex(vex_report(), EXPIRY - timedelta(seconds=1))
+        # Still applies once unfixed findings block. The VEX now expires before the review date,
+        # so an earlier review date stands in for that case.
+        data = vex_report()
+        data["Results"][0]["Vulnerabilities"] = [finding(fixed="")]
+        with patch.object(GATE, "UNFIXED_REVIEW_BY", EXPIRY.date() - timedelta(days=1)):
+            gate = GATE.validate_report(data, IMAGE_ID, EXPIRY - timedelta(seconds=1))
+        self.assertEqual([(f["id"], f["reason"]) for f in gate.blocking],
+                         [("CVE-2026-0001", "no fixed version; re-review deadline 2026-12-30 reached")])
+        self.assertEqual([f["id"] for f in gate.vex], ["CVE-2025-47273"])
+        self.assertEqual(gate.tracked, [])
 
     def test_pip_in_other_result_and_multiple_pip_26_3_still_match(self):
         data = vex_report()

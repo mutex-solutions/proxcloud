@@ -134,6 +134,11 @@ class CommentTests(unittest.TestCase):
                      "Exactly one owner-approved VEX: CVE-2025-47273", "expires 2026-12-31",
                      "No other ignore", "Missing/invalid reports, stale DB and scanner failures block"):
             self.assertIn(text, body)
+        # 2026-12-31 to 2027-03-11: the VEX has expired, unfixed findings are still tracked.
+        between = R.render(self.root, SHA, URL, "failure", "failure", "failure", now=datetime(2027, 1, 1, tzinfo=timezone.utc))
+        self.assertIn("**tracked** (shown and counted here, not blocking) until 2027-03-12 (UTC)", between)
+        self.assertIn("expired on 2026-12-31 and is no longer applied", between)
+        self.assertNotIn("re-review deadline has passed", between)
         late = R.render(self.root, SHA, URL, "failure", "failure", "failure", now=datetime(2027, 3, 12, tzinfo=timezone.utc))
         self.assertIn("re-review deadline has passed", late)
         self.assertIn("expired on 2026-12-31 and is no longer applied", late)
