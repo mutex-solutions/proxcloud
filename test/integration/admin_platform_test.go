@@ -242,3 +242,37 @@ func anyStrings(v any) []string {
 	}
 	return out
 }
+
+// TestPlatformSecretWritesSerialize: a credentials write waits for the installation's run lock, so one that races
+// another write (or a run stage that writes the seed's identity) adds to it instead of putting back the copy it read.
+func TestPlatformSecretWritesSerialize(t *testing.T) {
+	ctx := context.Background()
+	db := freshPG(t)
+	store := platformlife.NewStore(db, textcrypt.New("test-key"))
+	if err := store.Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	capi := &platformlife.TokenCredential{TokenID: pve.CAPITokenID, Secret: plantedCAPI}
+	csi := &platformlife.TokenCredential{TokenID: pve.CSITokenID, Secret: plantedCSI}
+	done := make(chan error, 1)
+	if err := db.WithTx(ctx, func(tctx context.Context) error {
+		if err := db.LockXact(tctx, "platform-run:pi-1"); err != nil {
+			return err
+		}
+		if err := store.SaveCredentials(tctx, "pi-1", nil, csi); err != nil {
+			return err
+		}
+		go func() { done <- store.SaveCredentials(ctx, "pi-1", capi, nil) }()
+		time.Sleep(300 * time.Millisecond) // the second writer reads while the first has not committed
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	sec, err := store.Secrets(ctx, "pi-1")
+	if err != nil || sec == nil || sec.CAPI == nil || sec.CSI == nil {
+		t.Fatalf("one of two racing writes was lost: %+v %v", sec, err)
+	}
+}

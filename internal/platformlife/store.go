@@ -157,12 +157,16 @@ func (s *Store) Update(ctx context.Context, id string, rev int64, change func(ol
 }
 
 // SaveCredentials replaces the CAPI and the CSI token of an installation; a nil one is kept. Nothing is stored
-// without a data key: the textcrypt encryptor would keep the secret in plain text.
+// without a data key: the textcrypt encryptor would keep the secret in plain text. Every write of platformSecret
+// rewrites the whole document, so each takes the installation's run lock before it reads.
 func (s *Store) SaveCredentials(ctx context.Context, id string, capi, csi *TokenCredential) error {
 	if !s.enc.HasKey() {
 		return ErrNoEncryptionKey
 	}
 	return s.DB.WithTx(ctx, func(ctx context.Context) error {
+		if err := s.DB.LockXact(ctx, "platform-run:"+id); err != nil {
+			return err
+		}
 		sec, err := s.Secrets(ctx, id)
 		if err != nil {
 			return err
