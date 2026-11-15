@@ -465,3 +465,31 @@ func TestNamespacePlacement(t *testing.T) {
 		}
 	}
 }
+
+// No redirect is followed: net/http would resend the bearer token to the same host on another port or over plain http.
+func TestClientFollowsNoRedirect(t *testing.T) {
+	hits := 0
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if r.URL.Path == "/elsewhere" {
+			t.Errorf("redirect followed with Authorization %q", r.Header.Get("Authorization"))
+		}
+		http.Redirect(w, r, "/elsewhere", http.StatusFound)
+	}))
+	t.Cleanup(ts.Close)
+	kc, err := BuildKubeconfig("x", ts.URL, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ts.Certificate().Raw}), "sa-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := New(kc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ae *APIError
+	if err := c.Readyz(context.Background()); !errors.As(err, &ae) || ae.Status != http.StatusFound || hits != 1 {
+		t.Fatalf("Readyz = %v, hits %d", err, hits)
+	}
+	if _, err := c.ListNodes(context.Background()); !errors.As(err, &ae) || ae.Status != http.StatusFound || hits != 2 {
+		t.Fatalf("ListNodes = %v, hits %d", err, hits)
+	}
+}

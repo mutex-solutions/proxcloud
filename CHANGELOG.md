@@ -219,6 +219,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bootstrap-token auth with `anonymous-auth=false`), and no ArgoCD has synced these Applications; the upstream charts
   (cilium, cert-manager, metallb, argo-cd, cloudnative-pg, proxmox-csi-plugin, kamaji-crds, kamaji-etcd, kamaji)
   rendered the workload values once by hand with `helm template` on 2026-11-15, not in CI.
+- **The managed-services run, stages 1 to 5, and the seed part of Remove** (`POST /api/v1/admin/platform/installations/{id}/runs`,
+  durable job kind `platform.run/v1`, `internal/platformlife/{job,runner,stages}.go`; with
+  `PROXCLOUD_PLATFORM_ENABLED` off the route answers `404 platform_disabled` like the other installation routes; with
+  only `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED` off, `409 platform_disabled`): the installation record needs a job that builds the seed before the platform stages can
+  run on it (ADR 0009, design §4). One run per installation at a time; the runner holds a one-minute lease renewed
+  every 20 seconds, writes intent and result through `Checkpoint`, gives the job back with `Defer` for waits and
+  transient errors (40 per stage, no attempt spent), fails it only on a permanent error, a spent budget or a passed
+  deadline, honours Cancel at every claim and write, and ends `portal_changed` when the release no longer embeds the
+  run's BOM. Stage 1 runs the preflight; stage 2 imports the seed and node images through Template updates (a finished
+  import is reused only while its template is still in `pc-templates`, else `MarkTemplateGone` frees it); stage 3
+  clones the seed with `capmox@pve!capi` into `proxcloud-seed` (ours = the receipt's VMID, the pool and the exact name
+  `pc-seed-<id>-g<n>`, never the tags), replaces its tags, puts net0 on the platform bridge behind the new VM firewall
+  (`pve.AddVMFirewallRule`: 6443, and 22 with SSH keys, from `apiSources` only), uploads and attaches the
+  `pcplat-<id>-g<n>.iso` CD and starts it, with a new generation when the CD was lost with its CA key, when the VM of a generation
+  that has its CA is gone or no longer ours (a CD fits one clone only), or when a Retry finds a seed that never became
+  ready; stage 4 waits for `/readyz` over TLS pinned to the seed's CA (`seed_tls_mismatch`
+  otherwise) and tells `seed_not_booted` from `seed_api_unreachable` with the guest agent; stage 5 stores the seed's
+  service-account kubeconfig, deletes the bootstrap token and RBAC, deletes the CD and wipes the bootstrap token, done
+  only when neither the spec's ISO store nor the one the seed status recorded at upload lists the CD. An apply then ends `stage_unavailable` at stage 6; Remove deletes
+  the seed and every `pcplat-<id>-*` CD and wipes `platformSecret`, and refuses while a workload cluster status
+  exists. Messages carry fixed text and clipped Proxmox or Kubernetes errors with every secret the run holds
+  replaced; a run's job is never replayed through `/admin/durable-jobs`. Not verified: none of it has run against a
+  real Proxmox or k3s (tests use a fake PVE API, a fake seed API and fake stores; the run routes, the start lock and
+  the replay refusal are tested on PostgreSQL); lab checks L2, L8 and L9 are owed, including whether k3s keeps the
+  server CA the CD writes whether PVE adds a clone to its pool only when the clone ends, which stage 3 assumes, and whether detaching the CD
+  from the running seed and deleting the ISO it had attached (stage 5) takes effect on a real PVE: an IDE CD removed
+  from a running VM may stay a pending change, and only the fake shows the store no longer listing the volume.
 
 ### Changed
 

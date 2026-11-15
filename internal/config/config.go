@@ -118,7 +118,8 @@ type Config struct {
 		// fenced runner AND the mirror/rollback endpoints. OFF by default until verified on a real cluster.
 		TemplateUpdatesSandbox bool
 		// PlatformEnabled turns on the managed-services platform's installation routes (docs/adr/0009): its records,
-		// credentials, preflight and plan. OFF by default until the in-platform path has run on a lab; no job runs yet.
+		// credentials, preflight, plan and runs. Its runner starts only with TemplateUpdatesVM on too. OFF by default until
+		// the in-platform path has run on a lab.
 		PlatformEnabled bool
 	}
 	// Billing selects which engine charges bills, and — when that is an external service — how to

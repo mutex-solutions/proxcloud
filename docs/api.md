@@ -337,7 +337,8 @@ digest, or for an `https://` repository the `digest` of that version in its
 the project's own packages and for a chart at a moving `0.0.0+` version
 (today `kamaji` and `kamaji-crds` at `0.0.0+latest`, which therefore have
 neither an exact version nor a digest); the validation refuses `pending` and
-`0.0.0+` in any other release. Nothing installs from the BOM yet.
+`0.0.0+` in any other release. A run imports the BOM's two images and builds the
+seed from it; nothing else installs from the BOM yet.
 
 **Installations.** With `PROXCLOUD_PLATFORM_ENABLED=true` (default off; off,
 these routes answer `404` with `errors.details.code` `platform_disabled`) an
@@ -384,8 +385,27 @@ are several, `errors.details.problems`.
   `upgradeFrom` and the removal of a stateful component block, and an installed
   BOM this release does not carry blocks with `bom_unsupported`.
 
-Runs, the seed kubeconfig and the seed credential rotation are not there yet:
-no job kind exists, so nothing provisions.
+- `POST /installations/{id}/runs` `{kind: apply|remove}`: `202 {runId}`. A run
+  and its durable job (`platform.run/v1`, key `platform-run-<runId>`) are
+  written in one transaction; `409 run_active` while another run of the
+  installation is not finished, `409 bom_unsupported` when the installed BOM is
+  not one this release carries. Without the runner (it starts only when
+  `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true` too) the route answers
+  `409 platform_disabled`; the reads below still work.
+- `GET /installations/{id}/runs[/{runId}]`: the newest runs, or one, with
+  their stages (`state`, `retries`, `deadline`, `items`, `code`, `message`,
+  `receipt`). A run whose job ran out of attempts reads `failed` with code
+  `job_dead`; a cancel not honoured yet reads `cancelling`.
+- `POST /installations/{id}/runs/{runId}/cancel`: the runner stops at its next
+  claim or write; the run ends `cancelled` and the installation `failed`.
+  Nothing is deleted.
+
+This build runs stages 1 to 5 of an apply (`validate`, `images`, `seed-vm`,
+`seed-api`, `seed-identity`) and the seed part of a remove; an apply that
+reaches stage 6 ends `failed` with code `stage_unavailable`, and a remove is
+refused the same way while a workload cluster status exists. A run's job is
+never replayed through `/admin/durable-jobs` (`409`): a new run is the retry.
+The seed kubeconfig and the seed credential rotation are not there yet.
 
 ## Admin API — `/admin-api/v1`
 

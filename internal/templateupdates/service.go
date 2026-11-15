@@ -414,6 +414,16 @@ func PlacementAllowed(opts []PlacementOption, node, importStorage, diskStorage s
 	return false
 }
 
+// ErrRefused marks what an import is refused for however often it is asked again: a request or an artifact that
+// fails validation (errors.Is). A registry, network or database error does not carry it.
+var ErrRefused = errors.New("refused")
+
+// refusal is an ErrRefused with its own text.
+type refusal string
+
+func (r refusal) Error() string      { return string(r) }
+func (refusal) Is(target error) bool { return target == ErrRefused }
+
 // ErrDuplicate is an identical update already queued or running (or done) on that node.
 var ErrDuplicate = errors.New("this artifact is already being imported (or was imported) on that node")
 
@@ -427,7 +437,7 @@ func (s *Service) EnqueueVM(ctx context.Context, req VMRequest, actor string) (*
 		return nil, ErrPublishAtImport
 	}
 	if req.ConfirmDigest != req.Digest || !digestRE.MatchString(req.Digest) {
-		return nil, errors.New("confirm the exact digest to import")
+		return nil, refusal("confirm the exact digest to import")
 	}
 	if b, err := s.Receipts.Blocked(ctx, req.Digest); err != nil {
 		return nil, err
@@ -452,7 +462,7 @@ func (s *Service) EnqueueVM(ctx context.Context, req VMRequest, actor string) (*
 		}
 	}
 	if cand == nil {
-		return nil, errors.New("that digest is not a published version of the package with a contract tag")
+		return nil, refusal("that digest is not a published version of the package with a contract tag")
 	}
 	v, err := VerifyVM(ctx, reg, *cand)
 	if err != nil {
@@ -462,7 +472,7 @@ func (s *Service) EnqueueVM(ctx context.Context, req VMRequest, actor string) (*
 		VirtualSizeBytes: v.Manifest.Disk.VirtualSizeBytes, OS: v.Manifest.OS, Variant: v.Manifest.Variant, KubernetesVersion: v.Manifest.KubernetesVersion,
 		BuildVersion: v.Manifest.BuildVersion, ServiceID: req.ServiceID, Node: req.Node, ImportStorage: req.ImportStorage, DiskStorage: req.DiskStorage}
 	if err := p.Validate(); err != nil {
-		return nil, err
+		return nil, refusal(err.Error())
 	}
 	raw, _ := json.Marshal(p)
 	now := time.Now().UTC()

@@ -166,6 +166,11 @@ func (c *Client) SetVMFirewallOptions(ctx context.Context, node string, vmid int
 	return c.put(ctx, vmFirewallPath(node, vmid)+"/options", formVals(opts).values(), nil)
 }
 
+// AddVMFirewallRule appends a rule to the VM's own rules (the platform seed's ACCEPT rows).
+func (c *Client) AddVMFirewallRule(ctx context.Context, node string, vmid int, r FirewallRule) error {
+	return c.post(ctx, vmFirewallPath(node, vmid)+"/rules", ruleForm(r), nil)
+}
+
 // AddVMGroupRule references a security group from the VM's rules.
 func (c *Client) AddVMGroupRule(ctx context.Context, node string, vmid int, group string) error {
 	form := formVals{"type": "group", "action": group, "enable": "1"}.values()

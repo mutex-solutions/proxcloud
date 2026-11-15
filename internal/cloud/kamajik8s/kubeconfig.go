@@ -215,10 +215,13 @@ func load(b64, path string) ([]byte, error) {
 	return nil, nil
 }
 
-// httpClient builds the TLS-configured http.Client for this restConfig.
+// httpClient builds the TLS-configured http.Client for this restConfig. It follows no redirect: net/http resends the
+// Authorization header to the same host on any port or scheme, plain http included, and an API server has no reason to
+// redirect these paths. A 3xx reaches the caller as an APIError.
 func (rc *restConfig) httpClient() *http.Client {
 	return &http.Client{
-		Timeout:   rc.timeout,
-		Transport: &http.Transport{TLSClientConfig: rc.tlsCfg},
+		Timeout:       rc.timeout,
+		Transport:     &http.Transport{TLSClientConfig: rc.tlsCfg},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 }

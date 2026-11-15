@@ -46,7 +46,7 @@ func VerifyVM(ctx context.Context, reg Registry, c Candidate) (*VerifiedVM, erro
 	}
 	layers, err := CheckVMArtifactManifest(m)
 	if err != nil {
-		return nil, err
+		return nil, refusal(err.Error())
 	}
 	raw, err := reg.FetchBlob(ctx, c.Package, layers.Manifest, maxSmallFileBytes)
 	if err != nil {
@@ -54,20 +54,20 @@ func VerifyVM(ctx context.Context, reg Registry, c Candidate) (*VerifiedVM, erro
 	}
 	vm, err := ParseVMManifest(raw)
 	if err != nil {
-		return nil, err
+		return nil, refusal(err.Error())
 	}
 	if vm.ImageTag != c.Tag || vm.Package() != c.Package {
-		return nil, errors.New("manifest.json does not belong to this tag/package")
+		return nil, refusal("manifest.json does not belong to this tag/package")
 	}
 	sums, err := reg.FetchBlob(ctx, c.Package, layers.Sums, maxSmallFileBytes)
 	if err != nil {
 		return nil, err
 	}
 	if err := CheckSHA256SUMS(vm, raw, sums); err != nil {
-		return nil, err
+		return nil, refusal(err.Error())
 	}
 	if layers.Disk.Digest != "sha256:"+vm.Disk.SHA256 || layers.Disk.Size != vm.Disk.Bytes {
-		return nil, errors.New("disk layer does not match manifest.json disk sha256/bytes")
+		return nil, refusal("disk layer does not match manifest.json disk sha256/bytes")
 	}
 	return &VerifiedVM{Candidate: c, Manifest: vm, Layers: layers, DiskDigest: layers.Disk.Digest, DiskBytes: layers.Disk.Size, ManifestSHA: strings.TrimPrefix(layers.Manifest.Digest, "sha256:")}, nil
 }
