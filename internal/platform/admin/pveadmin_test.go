@@ -10,11 +10,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/go-chi/chi/v5"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
@@ -720,4 +723,51 @@ func TestPVEConnectionTestDetails(t *testing.T) {
 			t.Fatalf("fingerprint = %q", out.PresentedFingerprint)
 		}
 	})
+}
+
+// GET /admin/setup/proxmox-script answers the generated script as text, and refuses anything that is not a plain id.
+func TestProxmoxSetupScriptRoute(t *testing.T) {
+	router := chi.NewRouter()
+	(&Handler{adminIssuer: "operator-realm"}).Routes(router)
+	get := func(query string, rc *httpx.RequestContext) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/admin/setup/proxmox-script"+query, nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req.WithContext(httpx.WithRC(req.Context(), rc)))
+		return rec
+	}
+	op := &httpx.RequestContext{SigV4KeyID: "pk-test"}
+	if rec := get("", &httpx.RequestContext{Sub: "tenant", Issuer: "tenant-realm"}); rec.Code != http.StatusForbidden {
+		t.Fatalf("tenant: %d %s", rec.Code, rec.Body.String())
+	}
+	script := func(tokenID string, gpu bool, importStorage string) string {
+		t.Helper()
+		s, err := pve.PlatformSetupScript(tokenID, gpu, importStorage)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	for query, want := range map[string]string{
+		"": script(pve.DefaultPlatformTokenID, false, ""),
+		"?tokenId=portal%40pve%21cloud&gpu=true&importStorage=nas-templates": script("portal@pve!cloud", true, "nas-templates"),
+		"?tokenId=portal@pve!cloud&gpu=0":                                    script("portal@pve!cloud", false, ""),
+	} {
+		rec := get(query, op)
+		if rec.Code != http.StatusOK || rec.Body.String() != want || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/plain") {
+			t.Errorf("GET %q: %d %s\n%s", query, rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
+		}
+	}
+	for _, query := range []string{
+		"?tokenId=" + url.QueryEscape("proxcloud@pve!platform; rm -rf /"),
+		"?tokenId=" + url.QueryEscape("proxcloud@pve!platform'$(id)'"),
+		"?tokenId=" + url.QueryEscape("proxcloud@pve!platform\nreboot"),
+		"?tokenId=proxcloud",
+		"?importStorage=" + url.QueryEscape("nas`id`"),
+		"?importStorage=" + url.QueryEscape("nas' 'x"),
+		"?gpu=maybe",
+	} {
+		if rec := get(query, op); rec.Code != http.StatusBadRequest || strings.Contains(rec.Body.String(), "pveum") {
+			t.Errorf("GET %q: %d %s", query, rec.Code, rec.Body.String())
+		}
+	}
 }

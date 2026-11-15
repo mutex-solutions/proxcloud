@@ -135,6 +135,15 @@ certificate, `presentedFingerprint`: the SHA-256 of the certificate the server
 presented, in the form `fingerprint` takes. Pinning it without comparing it to
 `pvenode cert info` on the node is trust on first use.
 
+Proxmox setup script: `GET /api/v1/admin/setup/proxmox-script`
+(`admin:service:read`) answers, as `text/plain`, the shell script an operator
+runs as root on a Proxmox node to create the portal token's role, pools, user,
+token and ACLs. Query: `tokenId` (default `proxcloud@pve!platform`), `gpu`
+(`true` adds the `/mapping/pci` ACL; default `false`) and `importStorage` (adds
+`PVEDatastoreAdmin` on that store). A value that is not a plain id is a `400`.
+The script and what it does are in
+[proxmox-permissions.md](proxmox-permissions.md#portal-token-script).
+
 Cloud service selection: the project cloud routes (`/project/{id}/cloud`, its
 actions and deletes, `quota-usage`, `gpu-capacity`, `public-networks`, the S3
 key routes) run against the service named by the `x-service-id` header (with

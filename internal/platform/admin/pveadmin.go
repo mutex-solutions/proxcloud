@@ -367,6 +367,37 @@ func importContentProblems(defs []pve.StorageDef, importStorage string) []string
 	return nil
 }
 
+// proxmoxSetupScript answers GET /admin/setup/proxmox-script as text: the script an operator runs as root on a node to
+// create the portal token's identity (pve.PlatformSetupScript). Query: tokenId (default proxcloud@pve!platform), gpu
+// (default false) and importStorage (default none). The portal holds no root credential and asks for none, so it
+// cannot run this itself. A value that is not a plain id is a 400: the answer is run by a root shell.
+func (h *Handler) proxmoxSetupScript(w http.ResponseWriter, r *http.Request) {
+	if !h.require(w, r, "admin:service:read") {
+		return
+	}
+	q := r.URL.Query()
+	tokenID := q.Get("tokenId")
+	if tokenID == "" {
+		tokenID = pve.DefaultPlatformTokenID
+	}
+	gpu := false
+	if v := q.Get("gpu"); v != "" {
+		var err error
+		if gpu, err = strconv.ParseBool(v); err != nil {
+			httpx.WriteError(w, httpx.BadRequest("gpu must be true or false"))
+			return
+		}
+	}
+	script, err := pve.PlatformSetupScript(tokenID, gpu, q.Get("importStorage"))
+	if err != nil {
+		httpx.WriteError(w, httpx.BadRequest(err.Error()))
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	fmt.Fprint(w, script)
+}
+
 // checkDatacenterFirewall rejects a cluster whose datacenter firewall is off or cannot be read.
 func checkDatacenterFirewall(ctx context.Context, cc *pve.Client) *httpx.HTTPError {
 	fwOn, err := cc.DatacenterFirewallEnabled(ctx)

@@ -35,6 +35,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lab-verified: reading a node's package list with the least-privilege token (the check warns when it is
   refused), and the type Proxmox reports for an SDN vnet in the bridge list.
 
+- **A generated script for the portal token** (`GET /api/v1/admin/setup/proxmox-script`): a portal that was
+  not set up by the installer needed the role, two pools, a user, a token and seven ACLs typed from
+  `docs/proxmox-permissions.md`, and the usual mistake (an ACL on the user but not on the token) only showed
+  as missing privileges later. The route answers one script as text, for a token ID, with or without the
+  GPU mapping ACL and the import store ACL. It can be pasted into a root shell and run again: it runs in a
+  subshell, single-quotes every value (the `!` of a token ID is history expansion otherwise), creates the
+  role empty and appends its privileges, and ends with the token's effective permissions and
+  `pvenode cert info`. The ACLs now live in one table next to the privilege list
+  (`pve.PlatformACLs`); tests keep the script in `docs/proxmox-permissions.md`, the installer's role and
+  ACL rows (stage 10) and that table equal, and refuse a token ID or storage that is not a plain id. The
+  portal still holds no root credential. The script has not been run on a Proxmox node.
+
 ### Changed
 
 - **The smaller template disks are confirmed by one lab build each** (`docs/template-build-disk.md`): a
