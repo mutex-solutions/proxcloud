@@ -21,10 +21,13 @@ fences the seed VM only: its disk sits on the boot store, where `csi@pve!csi` ho
 store, and a stolen portal token with `Permissions.Modify` on `/pool` could have widened
 them further on the platform VMs. A more specific row wins in PVE, so the users' own rows
 on the platform pools fence them against a later `/pool` grant. The remaining reach of that
-mint grant (other users without a row there) is accepted for M1 and measured by lab check
-L1. A store of its own for the seed, which would fence its disk from the CSI token, changes
-the platform's storage and is open with the owner. Existing sites keep their broad token
-rows until removed by hand, because stage 10 only adds rows.
+mint grant on `/pool` (other users without a row there) is accepted for M1. It also holds
+`Permissions.Modify` on `/storage`, so a stolen portal token can grant itself
+`Datastore.Allocate` on the boot store and read every disk there, the seed's included,
+through a tenant VM; no row closes that in M1, and it is open with the owner, as is a store
+of its own for the seed, which would fence its disk from the CSI token. Lab check L1
+measures each of them. Existing sites keep their broad token rows until removed by hand,
+because stage 10 only adds rows.
 
 **Views updated:** [C2 containers](c2-containers.md) (trust boundaries: new "Services
 cluster to Proxmox" row).

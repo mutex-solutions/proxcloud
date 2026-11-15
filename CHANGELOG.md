@@ -33,7 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   live, behind no flag: running its answer creates the identities and gives the portal token `ProxCloudKubeMint`
   (`Permissions.Modify`, `User.Modify`) at once. Only the privilege tables and the ISO check are inert: nothing calls
   them until the managed-services runner (later PRs). `docs/proxmox-permissions.md` documents the mint-grant risk the
-  owner accepted for M1 and what lab check L1 measures. The script has not been run on a Proxmox node, and L1 has not
+  owner accepted for M1 (on `/pool`), its reach through `/storage` (a stolen portal token can grant itself
+  `Datastore.Allocate` on the boot store and read every disk there, the seed's included; open with the owner) and
+  what lab check L1 measures. The script has not been run on a Proxmox node, and L1 has not
   run.
 - **Every check of the Proxmox connection test in one answer**
   (`POST /api/v1/admin/service/proxmox/auth?checks=all`): the test stopped at the first failure, so an
