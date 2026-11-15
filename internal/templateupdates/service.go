@@ -358,10 +358,60 @@ type VMRequest struct {
 	ConfirmDigest string `json:"confirmDigest"`
 }
 
-// Placement is the provider check the admin handler performs before enqueue.
-type Placement struct {
-	ImportStorageOK, DiskStorageOK bool
-	Error                          string
+// PlacementOption is one node with its import-capable and template-capable storages.
+type PlacementOption struct {
+	Node           string   `json:"node"`
+	ImportStorages []string `json:"importStorages"`
+	DiskStorages   []string `json:"diskStorages"`
+}
+
+// PlacementOptions lists, per node, the active storages with import content and the active storages
+// with images content (where a template disk can live), from pve.Client.DetectStorage. preferImport
+// (the provider's configured importStorage) is listed first; nothing is guessed: the caller picks.
+func PlacementOptions(caps map[string]pve.StorageCapability, preferImport string) []PlacementOption {
+	byNode := map[string]*PlacementOption{}
+	for name, c := range caps {
+		for node, st := range c.Nodes {
+			if !st.Active {
+				continue
+			}
+			o := byNode[node]
+			if o == nil {
+				o = &PlacementOption{Node: node, ImportStorages: []string{}, DiskStorages: []string{}}
+				byNode[node] = o
+			}
+			if c.HasContent("import") {
+				o.ImportStorages = append(o.ImportStorages, name)
+			}
+			if c.HasContent("images") {
+				o.DiskStorages = append(o.DiskStorages, name)
+			}
+		}
+	}
+	out := make([]PlacementOption, 0, len(byNode))
+	for _, o := range byNode {
+		sort.Slice(o.ImportStorages, func(i, j int) bool {
+			if (o.ImportStorages[i] == preferImport) != (o.ImportStorages[j] == preferImport) {
+				return o.ImportStorages[i] == preferImport
+			}
+			return o.ImportStorages[i] < o.ImportStorages[j]
+		})
+		sort.Strings(o.DiskStorages)
+		out = append(out, *o)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Node < out[j].Node })
+	return out
+}
+
+// PlacementAllowed reports whether node offers both storages of an import (fail closed: an unknown
+// node, or a storage not in its lists, is refused).
+func PlacementAllowed(opts []PlacementOption, node, importStorage, diskStorage string) bool {
+	for _, o := range opts {
+		if o.Node == node {
+			return contains(o.ImportStorages, importStorage) && contains(o.DiskStorages, diskStorage)
+		}
+	}
+	return false
 }
 
 // ErrDuplicate is an identical update already queued or running (or done) on that node.
@@ -428,6 +478,10 @@ func (s *Service) EnqueueVM(ctx context.Context, req VMRequest, actor string) (*
 			return err
 		}
 		for _, r := range prior {
+			// A template verifiably deleted since (MarkTemplateGone) counts as a failed receipt.
+			if r.TemplateGone {
+				continue
+			}
 			// A template already made (the final write landed) blocks a re-import whatever its job
 			// state: a job that died after its final write must not yield a duplicate template.
 			if r.Step == StepTemplated || r.Step == StepSucceeded {

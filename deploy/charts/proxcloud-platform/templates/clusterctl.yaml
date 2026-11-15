@@ -1,0 +1,98 @@
+{{- if .Values.clusterctl.enabled }}
+{{- $c := .Values.clusterctl }}
+{{- if not (regexMatch "@sha256:[0-9a-f]{64}$" $c.image) }}
+{{- fail (printf "clusterctl.image must be pinned by digest (...@sha256:<64 hex>), got %q" $c.image) }}
+{{- end }}
+{{- $_ := required "clusterctl.providers.core is required (the BOM's capi.seed or capi.workload)" $c.providers.core }}
+# clusterctl init as an ArgoCD Sync hook: the image's entrypoint reads the provider inventory, installs only the missing
+# providers from the provider YAMLs baked into the image (no GitHub call), does nothing when all match, and fails when an
+# installed provider has another version (upgrades come with a later release). BeforeHookCreation: a new sync replaces
+# the Job instead of failing on its immutable fields. Installing CRDs, webhooks and RBAC needs cluster-admin.
+# A hook's outcome counts in neither the Application's sync status nor its health: a failed or timed-out Job leaves it
+# Synced and Healthy, with only status.operationState.phase Failed. Automated sync does not retry a failed sync of the
+# same revision, and a change to the image or the providers alone does not make the Application OutOfSync. Whatever
+# applies the Application must therefore set syncPolicy.retry, gate on operationState.phase Succeeded and on the
+# clusterctl inventory, and request a sync (.operation.sync) itself when the inventory differs.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: proxcloud-clusterctl
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: proxcloud-clusterctl
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: proxcloud-clusterctl
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: proxcloud-clusterctl
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    # After wave 0, so the ServiceAccount and its binding exist when the pod starts.
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  backoffLimit: 2
+  # Fails the sync with a reason (an image that does not pull, a provider that never gets ready) before the run's stage
+  # deadline does.
+  activeDeadlineSeconds: 900
+  template:
+    spec:
+      serviceAccountName: proxcloud-clusterctl
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with $c.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: clusterctl
+          image: {{ $c.image }}
+          args:
+            {{- range $key, $version := $c.providers }}
+            {{- if $version }}
+            - --{{ kebabcase $key }}={{ $version }}
+            {{- end }}
+            {{- end }}
+          env:
+            # Empty on purpose: a manager-level credential silently wins over every ProxmoxCluster.credentialsRef
+            # (services-platform.sh).
+            - name: PROXMOX_URL
+              value: ""
+            - name: PROXMOX_TOKEN
+              value: ""
+            - name: PROXMOX_SECRET
+              value: ""
+            {{- if $c.clusterResourceSet }}
+            - name: EXP_CLUSTER_RESOURCE_SET
+              value: "true"
+            {{- end }}
+            - name: CLUSTERCTL_DISABLE_VERSIONCHECK
+              value: "true"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+{{- else if not .Values.platform.enabled }}
+{{- fail "nothing to render: set clusterctl.enabled (BOM components capi, capi-tenant) or platform.enabled (platform)" }}
+{{- end }}

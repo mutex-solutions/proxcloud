@@ -133,6 +133,24 @@ service/node/digest, so it never exceeds the 256-byte key limit; a retry after a
 `-<n>` suffix) and creates the receipt — refusing (409) if a receipt for that job id already exists
 instead of resetting its progress.
 
+A receipt whose template was deleted since stops blocking only through `Service.MarkTemplateGone`
+(no route yet; the managed-services job calls it). It reads the receipt's own provider and marks the
+receipt `templateGone` only when no guest in the cluster holds the receipt's VMID any more, or the VM
+that does is visible to the portal token, has a name, sits on a node that is up and carries neither
+the template's name nor its `pc-src-` tag (the VMID was reused), or the VM there is another
+import's template of the same artifact: a finished, unmarked receipt of the same provider records
+exactly that node and VMID and was created after this receipt's last write. Every import takes the
+lowest free VMID from 9200, so once a template is deleted, a copy of its artifact imported on another
+node can take its VMID; without this rule that copy would block the node of the deleted one. "No
+guest" comes from `GET /cluster/nextid?vmid=`, which reads the cluster's whole guest list;
+`/cluster/resources` lists only the guests the token has `VM.Audit` on (through its pools), so a VMID
+missing from it proves nothing. A read error, a node that is down, a blank row, a held VMID the token cannot see (a template
+moved out of `pc-templates`, or a token that lost its pool rights), or a template that was only
+renamed or migrated changes nothing. Such a template keeps blocking a re-import on the receipt's node
+until the operator deletes it in Proxmox (the next call then frees the receipt) or puts it back (its
+node, name and pool). A marked receipt then counts as failed for the duplicate check and shows
+`template_missing` on the page.
+
 ### Download path
 
 The large blob stream uses a separate HTTP client with **no total timeout** (a `http.Client.Timeout`

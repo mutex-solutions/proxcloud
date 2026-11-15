@@ -1,0 +1,317 @@
+---
+# Source: proxmox-kamaji-cluster/templates/addons.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pc-c-abcd1234-metallb-config
+type: addons.cluster.x-k8s.io/resource-set
+stringData:
+  metallb.yaml: |
+    apiVersion: metallb.io/v1beta1
+    kind: IPAddressPool
+    metadata:
+      name: tenant
+      namespace: metallb-system
+    spec:
+      addresses: ["192.0.2.216-192.0.2.231"]
+    ---
+    apiVersion: metallb.io/v1beta1
+    kind: L2Advertisement
+    metadata:
+      name: tenant
+      namespace: metallb-system
+    spec:
+      ipAddressPools: [tenant]
+---
+# Source: proxmox-kamaji-cluster/templates/csi-controller.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pc-c-abcd1234-csi-controller
+  labels:
+    app.kubernetes.io/name: proxmox-csi-controller
+    proxcloud.io/cluster-id: pc-c-abcd1234
+spec:
+  replicas: 1
+  # One controller at a time: the sidecars elect a leader in the tenant anyway, Recreate just skips the overlap.
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: proxmox-csi-controller
+      proxcloud.io/cluster-id: pc-c-abcd1234
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: proxmox-csi-controller
+        proxcloud.io/cluster-id: pc-c-abcd1234
+    spec:
+      # Nothing here talks to the services cluster's own API.
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532}
+      containers:
+        - name: proxmox-csi-controller
+          image: "ghcr.io/sergelogvinov/proxmox-csi-controller:v0.22.0"
+          args: ["-v=4", "--csi-address=unix:///csi/csi.sock", "--cloud-config=/etc/proxmox/config.yaml", "--kubeconfig=/etc/tenant/kubeconfig"]
+          securityContext: {"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true,"seccompProfile":{"type":"RuntimeDefault"}}
+          resources: {requests: {cpu: 10m, memory: 32Mi}}
+          volumeMounts:
+            - {name: socket-dir, mountPath: /csi}
+            - {name: cloud-config, mountPath: /etc/proxmox, readOnly: true}
+            - {name: tenant, mountPath: /etc/tenant, readOnly: true}
+        - name: csi-attacher
+          image: "registry.k8s.io/sig-storage/csi-attacher:v4.13.0"
+          args: ["-v=2", "--csi-address=unix:///csi/csi.sock", "--timeout=3m", "--default-fstype=ext4",
+                 "--leader-election", "--leader-election-namespace=csi-proxmox", "--kubeconfig=/etc/tenant/kubeconfig"]
+          securityContext: {"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true,"seccompProfile":{"type":"RuntimeDefault"}}
+          resources: {requests: {cpu: 10m, memory: 32Mi}}
+          volumeMounts:
+            - {name: socket-dir, mountPath: /csi}
+            - {name: tenant, mountPath: /etc/tenant, readOnly: true}
+        - name: csi-provisioner
+          image: "registry.k8s.io/sig-storage/csi-provisioner:v6.4.0"
+          # The CSIDriver says storageCapacity, so the scheduler wants capacity objects: they go to the tenant's
+          # csi-proxmox, owned by nothing there (this pod is not in the tenant).
+          args: ["-v=2", "--csi-address=unix:///csi/csi.sock", "--timeout=3m", "--default-fstype=ext4",
+                 "--enable-capacity", "--capacity-ownerref-level=-1",
+                 "--leader-election", "--leader-election-namespace=csi-proxmox", "--kubeconfig=/etc/tenant/kubeconfig"]
+          env:
+            - {name: NAMESPACE, value: csi-proxmox}
+          securityContext: {"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true,"seccompProfile":{"type":"RuntimeDefault"}}
+          resources: {requests: {cpu: 10m, memory: 32Mi}}
+          volumeMounts:
+            - {name: socket-dir, mountPath: /csi}
+            - {name: tenant, mountPath: /etc/tenant, readOnly: true}
+        - name: csi-resizer
+          image: "registry.k8s.io/sig-storage/csi-resizer:v2.3.0"
+          args: ["-v=2", "--csi-address=unix:///csi/csi.sock", "--timeout=3m", "--handle-volume-inuse-error=false",
+                 "--leader-election", "--leader-election-namespace=csi-proxmox", "--kubeconfig=/etc/tenant/kubeconfig"]
+          securityContext: {"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true,"seccompProfile":{"type":"RuntimeDefault"}}
+          resources: {requests: {cpu: 10m, memory: 32Mi}}
+          volumeMounts:
+            - {name: socket-dir, mountPath: /csi}
+            - {name: tenant, mountPath: /etc/tenant, readOnly: true}
+      volumes:
+        - {name: socket-dir, emptyDir: {}}
+        - name: cloud-config
+          secret:
+            secretName: pc-c-abcd1234-csi-gateway
+            items: [{key: config.yaml, path: config.yaml}, {key: ca.crt, path: ca.crt}]
+        - name: tenant
+          secret:
+            secretName: pc-c-abcd1234-kamaji-cp-admin-kubeconfig
+            # The control plane's in-cluster address; admin.conf names the LoadBalancer, which the API allowlist guards.
+            items: [{key: admin.svc, path: kubeconfig}]
+---
+# Source: proxmox-kamaji-cluster/templates/cluster.yaml
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: Cluster
+metadata:
+  name: pc-c-abcd1234
+  labels:
+    proxcloud.io/cluster-id: pc-c-abcd1234
+spec:
+  clusterNetwork:
+    pods:
+      cidrBlocks: ["10.244.0.0/16"]
+    services:
+      cidrBlocks: ["10.96.0.0/12"]
+  controlPlaneRef:
+    apiGroup: controlplane.cluster.x-k8s.io
+    kind: KamajiControlPlane
+    name: pc-c-abcd1234-kamaji-cp
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: ProxmoxCluster
+    name: pc-c-abcd1234
+---
+# Source: proxmox-kamaji-cluster/templates/addons.yaml
+apiVersion: addons.cluster.x-k8s.io/v1beta2
+kind: ClusterResourceSet
+metadata:
+  name: pc-c-abcd1234-tenant-config
+spec:
+  clusterSelector:
+    matchLabels:
+      proxcloud.io/cluster-id: pc-c-abcd1234
+  strategy: Reconcile
+  resources:
+    - {kind: Secret, name: pc-c-abcd1234-metallb-config}
+    - {kind: Secret, name: example-csi-config}
+---
+# Source: proxmox-kamaji-cluster/templates/addons.yaml
+apiVersion: addons.cluster.x-k8s.io/v1alpha1
+kind: HelmChartProxy
+metadata:
+  name: pc-c-abcd1234-cilium
+spec:
+  clusterSelector:
+    matchLabels:
+      proxcloud.io/cluster-id: pc-c-abcd1234
+  repoURL: https://helm.cilium.io
+  chartName: cilium
+  version: "1.18.16"
+  namespace: kube-system
+  releaseName: cilium
+  options:
+    wait: false
+    timeout: 10m
+    install:
+      createNamespace: true
+  valuesTemplate: "{\"bandwidthManager\":{\"enabled\":false},\"cni\":{\"customConf\":false},\"hubble\":{\"enabled\":false},\"ipam\":{\"mode\":\"kubernetes\"},\"kubeProxyReplacement\":false,\"operator\":{\"replicas\":1},\"routingMode\":\"tunnel\",\"tunnelProtocol\":\"vxlan\"}"
+---
+# Source: proxmox-kamaji-cluster/templates/addons.yaml
+apiVersion: addons.cluster.x-k8s.io/v1alpha1
+kind: HelmChartProxy
+metadata:
+  name: pc-c-abcd1234-proxmoxcsi
+spec:
+  clusterSelector:
+    matchLabels:
+      proxcloud.io/cluster-id: pc-c-abcd1234
+  repoURL: oci://ghcr.io/sergelogvinov/charts
+  chartName: proxmox-csi-plugin
+  version: "0.5.15"
+  namespace: csi-proxmox
+  releaseName: proxmoxcsi
+  options:
+    wait: false
+    timeout: 10m
+    install:
+      createNamespace: true
+  valuesTemplate: "{\"existingConfigSecret\":\"proxmox-csi-plugin\",\"node\":{\"tolerations\":[{\"operator\":\"Exists\"}]},\"replicaCount\":0,\"storageClass\":[{\"annotations\":{\"storageclass.kubernetes.io/is-default-class\":\"true\"},\"fstype\":\"ext4\",\"name\":\"std\",\"reclaimPolicy\":\"Delete\",\"storage\":\"local-zfs\"}]}"
+---
+# Source: proxmox-kamaji-cluster/templates/addons.yaml
+apiVersion: addons.cluster.x-k8s.io/v1alpha1
+kind: HelmChartProxy
+metadata:
+  name: pc-c-abcd1234-metallb
+spec:
+  clusterSelector:
+    matchLabels:
+      proxcloud.io/cluster-id: pc-c-abcd1234
+  repoURL: https://metallb.github.io/metallb
+  chartName: metallb
+  version: "0.16.2"
+  namespace: metallb-system
+  releaseName: metallb
+  options:
+    wait: false
+    timeout: 10m
+    install:
+      createNamespace: true
+  valuesTemplate: "{\"frrk8s\":{\"enabled\":false},\"speaker\":{\"frr\":{\"enabled\":false}}}"
+---
+# Source: proxmox-kamaji-cluster/templates/addons.yaml
+apiVersion: addons.cluster.x-k8s.io/v1alpha1
+kind: HelmChartProxy
+metadata:
+  name: pc-c-abcd1234-metricsserver
+spec:
+  clusterSelector:
+    matchLabels:
+      proxcloud.io/cluster-id: pc-c-abcd1234
+  repoURL: https://kubernetes-sigs.github.io/metrics-server
+  chartName: metrics-server
+  version: "3.13.0"
+  namespace: kube-system
+  releaseName: metricsserver
+  options:
+    wait: false
+    timeout: 10m
+    install:
+      createNamespace: true
+  valuesTemplate: "{\"args\":[\"--kubelet-insecure-tls\"]}"
+---
+# Source: proxmox-kamaji-cluster/templates/cluster.yaml
+apiVersion: controlplane.cluster.x-k8s.io/v1alpha2
+kind: KamajiControlPlane
+metadata:
+  name: pc-c-abcd1234-kamaji-cp
+spec:
+  dataStoreName: default
+  replicas: 1
+  version: "v1.35.10"
+  admissionControllers: ["CertificateApproval","CertificateSigning","CertificateSubjectRestriction","DefaultIngressClass","DefaultStorageClass","DefaultTolerationSeconds","LimitRanger","MutatingAdmissionWebhook","NamespaceLifecycle","NodeRestriction","PersistentVolumeClaimResize","Priority","ResourceQuota","RuntimeClass","ServiceAccount","StorageObjectInUseProtection","TaintNodesByCondition","ValidatingAdmissionWebhook"]
+  addons:
+    coreDNS: {}
+    kubeProxy: {}
+    konnectivity: {}
+  kubelet:
+    cgroupfs: systemd
+    preferredAddressTypes: [InternalIP, Hostname]
+  network:
+    serviceType: LoadBalancer
+---
+# Source: proxmox-kamaji-cluster/templates/node-groups.yaml
+apiVersion: bootstrap.cluster.x-k8s.io/v1beta2
+kind: KubeadmConfigTemplate
+metadata:
+  name: pc-c-abcd1234-workers-pve1-c89b099b
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  template:
+    spec: {"joinConfiguration":{"nodeRegistration":{"kubeletExtraArgs":[{"name":"provider-id","value":"proxmox://'{{ ds.meta_data.instance_id }}'"},{"name":"node-labels","value":"proxcloud.io/node-group=workers,topology.kubernetes.io/region=example,topology.kubernetes.io/zone=pve1"}],"name":"{{ local_hostname }}"}}}
+---
+# Source: proxmox-kamaji-cluster/templates/node-groups.yaml
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: MachineDeployment
+metadata:
+  name: pc-c-abcd1234-workers-pve1
+  labels:
+    cluster.x-k8s.io/cluster-name: pc-c-abcd1234
+    proxcloud.io/node-group: workers
+spec:
+  clusterName: pc-c-abcd1234
+  replicas: 1
+  selector:
+    matchLabels:
+      cluster.x-k8s.io/cluster-name: pc-c-abcd1234
+      proxcloud.io/machine-deployment: pc-c-abcd1234-workers-pve1
+  template:
+    metadata:
+      labels:
+        cluster.x-k8s.io/cluster-name: pc-c-abcd1234
+        proxcloud.io/machine-deployment: pc-c-abcd1234-workers-pve1
+        proxcloud.io/node-group: workers
+    spec:
+      clusterName: pc-c-abcd1234
+      version: "v1.35.10"
+      bootstrap:
+        configRef:
+          apiGroup: bootstrap.cluster.x-k8s.io
+          kind: KubeadmConfigTemplate
+          name: pc-c-abcd1234-workers-pve1-c89b099b
+      infrastructureRef:
+        apiGroup: infrastructure.cluster.x-k8s.io
+        kind: ProxmoxMachineTemplate
+        name: pc-c-abcd1234-workers-pve1-3abab8d8
+---
+# Source: proxmox-kamaji-cluster/templates/cluster.yaml
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha2
+kind: ProxmoxCluster
+metadata:
+  name: pc-c-abcd1234
+spec:
+  # The control plane is Kamaji's: CAPMOX must not wait for or check an endpoint of its own.
+  externalManagedControlPlane: true
+  credentialsRef:
+    name: example-cloud-config
+    namespace: pc-p1
+  ipv4Config:
+    addresses: ["192.0.2.200-192.0.2.215"]
+    gateway: 192.0.2.1
+    prefix: 24
+  dnsServers: ["192.0.2.53"]
+---
+# Source: proxmox-kamaji-cluster/templates/node-groups.yaml
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha2
+kind: ProxmoxMachineTemplate
+metadata:
+  name: pc-c-abcd1234-workers-pve1-3abab8d8
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  template:
+    spec: {"allowedNodes":["pve1"],"checks":{"skipCloudInitStatus":true},"disks":{"bootVolume":{"disk":"scsi0","sizeGb":30}},"format":"raw","full":true,"memoryMiB":2048,"network":{"networkDevices":[{"bridge":"vexample","model":"virtio","name":"net0"}]},"numCores":2,"numSockets":1,"pool":"pc-example","sourceNode":"pve1","storage":"local-zfs","tags":["proxcloud"],"templateID":9210}

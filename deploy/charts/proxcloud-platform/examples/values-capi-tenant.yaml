@@ -1,0 +1,9 @@
+# BOM component `capi-tenant` (workload, wave 2, group system): capi.workload, with the ClusterResourceSet feature
+# the CAAPH add-ons of tenant clusters need. The digest is a stand-in; the run passes the BOM's images.clusterctl.
+clusterctl:
+  enabled: true
+  image: ghcr.io/mutex-solutions/proxcloud-clusterctl:v1.14.4-1@sha256:0000000000000000000000000000000000000000000000000000000000000000
+  providers: {core: "cluster-api:v1.14.4", bootstrap: "kubeadm:v1.14.4", controlPlane: "kamaji:v0.22.0", infrastructure: "proxmox:v0.9.2", ipam: "in-cluster:v1.1.1", addon: "helm:v0.6.4"}
+  clusterResourceSet: true
+  nodeSelector:
+    node-restriction.kubernetes.io/proxcloud-node-group: system
