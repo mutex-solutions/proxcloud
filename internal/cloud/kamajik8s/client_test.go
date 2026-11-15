@@ -354,13 +354,26 @@ func TestBuildKubeconfig(t *testing.T) {
 		t.Errorf("wrong CA: err = %v, hits %d", err, hits)
 	}
 
+	// Only the certificate blocks are written: text around them, even a broken key, stays out.
+	keyDER, _ := x509.MarshalPKCS8PrivateKey(key)
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	wrapped, err := BuildKubeconfig("x", ts.URL, []byte("subject=CN=seed\n"+string(caPEM)+string(keyPEM[:40])), "t")
+	if err != nil {
+		t.Fatalf("CA with text around it: %v", err)
+	}
+	if !strings.Contains(wrapped, base64.StdEncoding.EncodeToString(caPEM)+"\n") {
+		t.Errorf("CA with text around it: want only the certificate, got\n%s", wrapped)
+	}
+
 	for name, args := range map[string][]string{
-		"http server": {"x", "http://10.0.0.1:6443", string(caPEM), "t"},
-		"no host":     {"x", "https://", string(caPEM), "t"},
-		"no CA":       {"x", ts.URL, "", "t"},
-		"garbage CA":  {"x", ts.URL, "not pem", "t"},
-		"no token":    {"x", ts.URL, string(caPEM), ""},
-		"no name":     {"", ts.URL, string(caPEM), "t"},
+		"CA with a key block": {"x", ts.URL, string(caPEM) + string(keyPEM), "t"},
+		"bad certificate":     {"x", ts.URL, string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("x")})), "t"},
+		"http server":         {"x", "http://10.0.0.1:6443", string(caPEM), "t"},
+		"no host":             {"x", "https://", string(caPEM), "t"},
+		"no CA":               {"x", ts.URL, "", "t"},
+		"garbage CA":          {"x", ts.URL, "not pem", "t"},
+		"no token":            {"x", ts.URL, string(caPEM), ""},
+		"no name":             {"", ts.URL, string(caPEM), "t"},
 	} {
 		if _, err := BuildKubeconfig(args[0], args[1], []byte(args[2]), args[3]); err == nil {
 			t.Errorf("%s: want error", name)
