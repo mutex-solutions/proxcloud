@@ -114,30 +114,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   switch only records the value until the release with the platform API. **Not verified**: the switch on a running
   Compose install (the tests run the script with `--dry-run` and against a fake `docker`, and check the model
   `docker compose config` builds), and a platform built from this stack.
-- **Managed-services installations, their credentials, preflight and plan** (`/api/v1/admin/platform/installations`,
-  behind the new `PROXCLOUD_PLATFORM_ENABLED`, default off): the console's "Enable managed services" needs a record
-  of what it builds before any job can build it (ADR 0009, design §3). An installation (`internal/platformlife`,
-  collection `platformInstallation`, one per Proxmox provider) holds the spec of the shared layout (PVE API address,
-  boot, ISO and import stores, the untagged platform network, the seed, one cluster with the node groups `system`,
-  `kamaji` and `dbaas`, the node image) and the status a run will write. Create and update check every rule of the
-  design that needs no cluster: addresses inside the prefix and apart from each other, a node range that holds every
-  machine plus one surge per MachineDeployment, SSH keys that parse, no overlap with the provider's tenant pool,
-  sandbox or public networks, and a MetalLB range tenants can reach. An update names the `rev` it read and is refused
-  during a run, for a change of provider, and for the fields that cannot change once a run succeeded (path, layout,
-  name, network, the seed's mode, pool, node and address, cluster name, endpoint and node groups); a draft stays
-  correctable. The two platform tokens (`capmox@pve!capi`, `csi@pve!csi`) are pasted write-only
-  into collection `platformSecret`, sealed with the data key like the Ceph credentials, refused without one, and
-  never returned or put into an audit diff; `kubeconfig`, `seedKubeconfig`, `k3sToken`, `bootstrapToken` and `caKey`
-  join the audit's secret keys. The preflight reads only: flags, both tokens' privileges and the portal token's mint
-  grant (`pve.CAPIPrivileges` and the other tables of the managed-services script), the fence of both platform pools,
-  the ISO store the CAPI token sees, the stores and image placement, the blocklist, and layer 0 through the new
-  `(*pve.Service).CheckIsolation` (the sandbox gate's check without its sandbox requirement): the seed, VIP and node
-  range must be blocked networks, and it names the CIDRs to add; before the first tenant network, when no sync has
-  written the cluster firewall rules yet, the row passes, also on a provider with `sandboxCidrs`. The plan diffs the installed BOM against this
-  release's. The model of a run (`platformRun`, its states and the failure codes) is in place for the job. Inert: no
-  job kind is registered, so nothing provisions; there are no run, seed-kubeconfig or rotation routes and no page yet,
-  and with the flag off the routes answer `404 platform_disabled`. Not verified: the preflight against a real Proxmox
-  (tests use a fake PVE API), and whether every privilege row reads the same on PVE 9.2 as the tables assume.
 - **Node-group placement and an egress fence for the Kubernetes and database providers** (ADR 0009, shared layout). On
   one cluster with node groups, tenant control planes and databases must stay on their own groups whatever their
   charts render, and a tenant with PostgreSQL superuser can run a shell in its database pod and reach the rest of that
@@ -162,6 +138,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behind the fence while kamaji-etcd, the kubelets, the PVE API and argocd-repo-server stay unreachable, and that
   Cilium matches the API server on its port 6443 after the `kubernetes` Service is translated are all unverified until
   the lab run.
+- **Managed-services installations, their credentials, preflight and plan** (`/api/v1/admin/platform/installations`,
+  behind the new `PROXCLOUD_PLATFORM_ENABLED`, default off): the console's "Enable managed services" needs a record
+  of what it builds before any job can build it (ADR 0009, design §3). An installation (`internal/platformlife`,
+  collection `platformInstallation`, one per Proxmox provider) holds the spec of the shared layout (PVE API address,
+  boot, ISO and import stores, the untagged platform network, the seed, one cluster with the node groups `system`,
+  `kamaji` and `dbaas`, the node image) and the status a run will write. Create and update check every rule of the
+  design that needs no cluster: addresses inside the prefix and apart from each other, a node range that holds every
+  machine plus one surge per MachineDeployment, SSH keys that parse, no overlap with the provider's tenant pool,
+  sandbox or public networks, and a MetalLB range tenants can reach. An update names the `rev` it read and is refused
+  during a run, for a change of provider, and for the fields that cannot change once a run succeeded (path, layout,
+  name, network, the seed's mode, pool, node and address, cluster name, endpoint and node groups); a draft stays
+  correctable. The two platform tokens (`capmox@pve!capi`, `csi@pve!csi`) are pasted write-only
+  into collection `platformSecret`, sealed with the data key like the Ceph credentials, refused without one, and
+  never returned or put into an audit diff; `kubeconfig`, `seedKubeconfig`, `k3sToken`, `bootstrapToken` and `caKey`
+  join the audit's secret keys. The preflight reads only: flags, both tokens' privileges and the portal token's mint
+  grant (`pve.CAPIPrivileges` and the other tables of the managed-services script), the fence of both platform pools,
+  the ISO store the CAPI token sees, the stores and image placement, the blocklist, and layer 0 through the new
+  `(*pve.Service).CheckIsolation` (the sandbox gate's check without its sandbox requirement): the seed, VIP and node
+  range must be blocked networks, and it names the CIDRs to add; before the first tenant network, when no sync has
+  written the cluster firewall rules yet, the row passes, also on a provider with `sandboxCidrs`. The plan diffs the installed BOM against this
+  release's. The model of a run (`platformRun`, its states and the failure codes) is in place for the job. Inert: no
+  job kind is registered, so nothing provisions; there are no run, seed-kubeconfig or rotation routes and no page yet,
+  and with the flag off the routes answer `404 platform_disabled`. Not verified: the preflight against a real Proxmox
+  (tests use a fake PVE API), and whether every privilege row reads the same on PVE 9.2 as the tables assume.
 - **`proxcloud-clusterctl` image and its tag flow** (`deploy/clusterctl/`, `.github/workflows/clusterctl.yml`): the
   image the clusterctl Job of the managed-services platform will run (ADR 0009; the `proxcloud-platform` chart that
   runs it comes separately). It holds clusterctl v1.14.4, kubectl v1.35.10 and, as a clusterctl local repository, the

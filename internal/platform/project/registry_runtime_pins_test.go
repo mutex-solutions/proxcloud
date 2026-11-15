@@ -103,7 +103,7 @@ func runtimeStr(in map[string]any, path ...string) string {
 	s, _ := runtimeDig(in, path...).(string)
 	return s
 }
-func (a *runtimeCreateAPI) EnsureNamespace(ctx context.Context, _ string, _ map[string]string) error {
+func (a *runtimeCreateAPI) EnsureNamespace(ctx context.Context, _ string, _, _ map[string]string) error {
 	a.mu.Lock()
 	a.calls++
 	a.mu.Unlock()

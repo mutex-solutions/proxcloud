@@ -10,10 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -225,14 +228,115 @@ func (c *Client) delete(ctx context.Context, path, name string) error {
 	return err
 }
 
-// EnsureNamespace applies the namespace with the given labels (create-or-update).
-func (c *Client) EnsureNamespace(ctx context.Context, name string, labels map[string]string) error {
+// EnsureNamespace applies the namespace with the given labels (create-or-update). annotations may be nil, and then
+// the namespace is applied without any, as before they existed here.
+func (c *Client) EnsureNamespace(ctx context.Context, name string, labels, annotations map[string]string) error {
+	meta := map[string]any{"name": name, "labels": toAny(labels)}
+	if len(annotations) > 0 {
+		meta["annotations"] = toAny(annotations)
+	}
 	_, err := c.apply(ctx, pathNamespaces, name, map[string]any{
 		"apiVersion": "v1",
 		"kind":       "Namespace",
-		"metadata":   map[string]any{"name": name, "labels": toAny(labels)},
+		"metadata":   meta,
 	})
 	return err
+}
+
+// LabelPlatformRole names the platform node group a namespace with a NamespacePlacement is pinned to (kamaji, dbaas).
+const LabelPlatformRole = "proxcloud.io/platform-role"
+
+// The namespace annotations of the PodNodeSelector and PodTolerationRestriction admission plugins.
+const (
+	annotationNodeSelector       = "scheduler.alpha.kubernetes.io/node-selector"
+	annotationDefaultTolerations = "scheduler.alpha.kubernetes.io/defaultTolerations"
+)
+
+// NamespacePlacement pins every pod of a namespace to a node group, whatever the chart that made the pod renders: the
+// API server merges NodeSelector into each pod (and refuses one that conflicts) and adds Tolerations to it. Only an API
+// server that runs both admission plugins does that; on any other the annotations change nothing.
+type NamespacePlacement struct {
+	NodeSelector map[string]string
+	// Tolerations are Kubernetes toleration objects, passed on unchanged once Validate has checked them.
+	Tolerations []map[string]any
+}
+
+// Annotations renders the placement as namespace annotations; nil when it is empty.
+func (p NamespacePlacement) Annotations() map[string]string {
+	out := map[string]string{}
+	if len(p.NodeSelector) > 0 {
+		pairs := make([]string, 0, len(p.NodeSelector))
+		for _, k := range slices.Sorted(maps.Keys(p.NodeSelector)) {
+			pairs = append(pairs, k+"="+p.NodeSelector[k])
+		}
+		out[annotationNodeSelector] = strings.Join(pairs, ",")
+	}
+	if len(p.Tolerations) > 0 {
+		b, _ := json.Marshal(p.Tolerations) // decoded from the provider's JSON config, so it encodes
+		out[annotationDefaultTolerations] = string(b)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+var (
+	labelKeyRE   = regexp.MustCompile(`^([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?/)?[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$`)
+	labelValueRE = regexp.MustCompile(`^([A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)?$`)
+)
+
+// Validate refuses a selector that is not label keys and values: the plugin splits the annotation on "," and "=", so
+// anything else would pin the pods to a different selector than the one configured. It refuses a toleration the API
+// server would refuse too, or one with a field it would drop: nothing checks the annotation when the namespace is
+// applied, and the plugin parses it on every pod create there, so a bad one would refuse every pod in the namespace.
+func (p NamespacePlacement) Validate() error {
+	for k, v := range p.NodeSelector {
+		if !labelKeyRE.MatchString(k) || !labelValueRE.MatchString(v) {
+			return fmt.Errorf("nodeSelector %q=%q is not a label key and value", k, v)
+		}
+	}
+	if len(p.Tolerations) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(p.Tolerations)
+	if err != nil {
+		return fmt.Errorf("tolerations: %w", err)
+	}
+	// The fields of a core/v1 Toleration, decoded the way the plugin decodes the annotation.
+	var ts []struct {
+		Key, Operator, Value, Effect string
+		TolerationSeconds            *int64
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&ts); err != nil {
+		return fmt.Errorf("tolerations: %w", err)
+	}
+	// The checks of the API server's pod validation (ValidateTolerations).
+	for i, t := range ts {
+		var bad string
+		switch {
+		case t.Key == "" && t.Operator != "Exists":
+			bad = "an empty key needs operator Exists"
+		case t.Key != "" && !labelKeyRE.MatchString(t.Key):
+			bad = "key is not a label key"
+		case !slices.Contains([]string{"", "Equal", "Exists"}, t.Operator):
+			bad = "operator is not Equal or Exists"
+		case t.Operator == "Exists" && t.Value != "":
+			bad = "operator Exists takes no value"
+		case !labelValueRE.MatchString(t.Value):
+			bad = "value is not a label value"
+		case !slices.Contains([]string{"", "NoSchedule", "PreferNoSchedule", "NoExecute"}, t.Effect):
+			bad = "effect is not NoSchedule, PreferNoSchedule or NoExecute"
+		case t.TolerationSeconds != nil && t.Effect != "NoExecute":
+			bad = "tolerationSeconds needs effect NoExecute"
+		}
+		if bad != "" {
+			return fmt.Errorf("tolerations[%d]: %s", i, bad)
+		}
+	}
+	return nil
 }
 
 // GetNamespace returns the namespace object, or nil when absent.

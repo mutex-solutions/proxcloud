@@ -19,7 +19,7 @@ import (
 // K8sAPI is the sandbox-cluster surface Service consumes: implemented by *kamajik8s.Client,
 // fake-able in tests.
 type K8sAPI interface {
-	EnsureNamespace(ctx context.Context, name string, labels map[string]string) error
+	EnsureNamespace(ctx context.Context, name string, labels, annotations map[string]string) error
 	GetNamespace(ctx context.Context, name string) (map[string]any, error)
 	DeleteNamespace(ctx context.Context, name string) error
 	ApplyResourceQuota(ctx context.Context, rq map[string]any) error
@@ -102,7 +102,7 @@ func (s *Service) ensureTenantNamespace(ctx context.Context, projectID string) e
 		LabelService:   s.serviceID,
 		LabelManagedBy: ManagedByValue,
 		LabelTenant:    "true",
-	})
+	}, nil)
 }
 
 // EnsureProjectNamespace creates/labels sb-<projectId> and its ResourceQuota (the bootstrap

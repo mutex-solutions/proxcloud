@@ -12,6 +12,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 )
 
 // Namespace / naming derivations — the ONE place these are derived (ceph RGWUIDFor precedent).
@@ -121,6 +123,10 @@ type Config struct {
 	ChartName     string // required — no default until the Proxmox cluster chart lands
 	ChartVersion  string // pinned default for NEW clusters; existing clusters keep their own pin
 	Defaults      ClusterDefaults
+	// NamespacePlacement pins the new pods of each project namespace EnsureProjectNamespace applies to a node group
+	// (config.namespacePlacement). Empty: the namespaces carry no placement and no platform-role label, as before it
+	// existed.
+	NamespacePlacement kamajik8s.NamespacePlacement
 }
 
 // ClusterDefaults are the per-provider chart value defaults every cluster inherits.
@@ -226,6 +232,9 @@ func (c Config) Validate() error {
 		return fmt.Errorf("kamaji provider: config.argocd.chartName is required")
 	case c.ChartVersion == "":
 		return fmt.Errorf("kamaji provider: config.argocd.chartVersion is required (never latest — plan §9)")
+	}
+	if err := c.NamespacePlacement.Validate(); err != nil {
+		return fmt.Errorf("kamaji provider: config.namespacePlacement: %w", err)
 	}
 	return nil
 }

@@ -89,7 +89,7 @@ func TestApplyAndNotFound(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	if err := c.EnsureNamespace(ctx, "pc-p1", map[string]string{"a": "b"}); err != nil {
+	if err := c.EnsureNamespace(ctx, "pc-p1", map[string]string{"a": "b"}, nil); err != nil {
 		t.Fatalf("EnsureNamespace: %v", err)
 	}
 	if gotPath != "/api/v1/namespaces/pc-p1" {
@@ -103,6 +103,16 @@ func TestApplyAndNotFound(t *testing.T) {
 	}
 	if gotBody["kind"] != "Namespace" {
 		t.Errorf("body kind = %v", gotBody["kind"])
+	}
+	// No annotations: the body carries no annotations key, so this field manager owns none.
+	if meta, _ := gotBody["metadata"].(map[string]any); meta == nil || meta["annotations"] != nil {
+		t.Errorf("metadata without annotations = %v", gotBody["metadata"])
+	}
+	if err := c.EnsureNamespace(ctx, "pc-p1", nil, map[string]string{"k": "v"}); err != nil {
+		t.Fatalf("EnsureNamespace: %v", err)
+	}
+	if meta, _ := gotBody["metadata"].(map[string]any); fmt.Sprint(meta["annotations"]) != "map[k:v]" {
+		t.Errorf("annotations = %v", gotBody["metadata"])
 	}
 
 	// GET on an absent object → (nil, nil); DELETE absent → nil (idempotent).
@@ -384,6 +394,74 @@ func TestBuildKubeconfig(t *testing.T) {
 	} {
 		if _, err := BuildKubeconfig(args[0], args[1], []byte(args[2]), args[3]); err == nil {
 			t.Errorf("%s: want error", name)
+		}
+	}
+}
+
+func TestNamespacePlacement(t *testing.T) {
+	toleration := map[string]any{"key": "proxcloud.io/node-group", "operator": "Equal", "value": "dbaas", "effect": "NoSchedule"}
+	for name, tc := range map[string]struct {
+		p    NamespacePlacement
+		want map[string]string
+	}{
+		"empty":                {NamespacePlacement{}, nil},
+		"blank maps are empty": {NamespacePlacement{NodeSelector: map[string]string{}, Tolerations: []map[string]any{}}, nil},
+		"selector sorted": {NamespacePlacement{NodeSelector: map[string]string{"z": "1", "a.io/g": "kamaji"}},
+			map[string]string{"scheduler.alpha.kubernetes.io/node-selector": "a.io/g=kamaji,z=1"}},
+		"both": {NamespacePlacement{
+			NodeSelector: map[string]string{"node-restriction.kubernetes.io/proxcloud-node-group": "dbaas"},
+			Tolerations:  []map[string]any{toleration},
+		}, map[string]string{
+			"scheduler.alpha.kubernetes.io/node-selector":      "node-restriction.kubernetes.io/proxcloud-node-group=dbaas",
+			"scheduler.alpha.kubernetes.io/defaultTolerations": `[{"effect":"NoSchedule","key":"proxcloud.io/node-group","operator":"Equal","value":"dbaas"}]`,
+		}},
+	} {
+		if got := tc.p.Annotations(); fmt.Sprint(got) != fmt.Sprint(tc.want) || (got == nil) != (tc.want == nil) {
+			t.Errorf("%s: Annotations() = %v, want %v", name, got, tc.want)
+		}
+	}
+	for sel, ok := range map[string]bool{
+		"node-restriction.kubernetes.io/proxcloud-node-group=dbaas": true,
+		"role=":                        true,
+		"a=b,c":                        false, // a value with a comma would add a second pair
+		"a=b=c":                        false,
+		"a b=c":                        false,
+		"/x=y":                         false,
+		"Up.io/x=y":                    false,
+		"x=" + strings.Repeat("v", 64): false,
+	} {
+		k, v, _ := strings.Cut(sel, "=")
+		err := NamespacePlacement{NodeSelector: map[string]string{k: v}}.Validate()
+		if (err == nil) != ok {
+			t.Errorf("Validate(%q) = %v, want ok=%v", sel, err, ok)
+		}
+	}
+	// Nothing checks the annotation when the namespace is applied; a toleration the plugin cannot parse, or one pod
+	// validation refuses, would refuse every pod created in the namespace. The config is decoded JSON: numbers are
+	// float64.
+	for name, tc := range map[string]struct {
+		t  map[string]any
+		ok bool
+	}{
+		"equal":                      {toleration, true},
+		"no operator means equal":    {map[string]any{"key": "k", "value": "v"}, true},
+		"exists, all keys":           {map[string]any{"operator": "Exists"}, true},
+		"seconds with NoExecute":     {map[string]any{"key": "k", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": float64(30)}, true},
+		"lowercase operator":         {map[string]any{"key": "k", "operator": "equal", "value": "v"}, false},
+		"exists with a value":        {map[string]any{"key": "k", "operator": "Exists", "value": "v"}, false},
+		"empty key without exists":   {map[string]any{"value": "v"}, false},
+		"key not a label key":        {map[string]any{"key": "a b", "operator": "Exists"}, false},
+		"value not a label value":    {map[string]any{"key": "k", "value": "a b"}, false},
+		"value a number":             {map[string]any{"key": "k", "value": float64(1)}, false},
+		"lowercase effect":           {map[string]any{"key": "k", "operator": "Exists", "effect": "noschedule"}, false},
+		"seconds a string":           {map[string]any{"key": "k", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": "30"}, false},
+		"seconds a fraction":         {map[string]any{"key": "k", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 1.5}, false},
+		"seconds without NoExecute":  {map[string]any{"key": "k", "operator": "Exists", "effect": "NoSchedule", "tolerationSeconds": float64(30)}, false},
+		"misspelt field (no effect)": {map[string]any{"key": "k", "operator": "Exists", "efect": "NoSchedule"}, false},
+	} {
+		err := NamespacePlacement{Tolerations: []map[string]any{tc.t}}.Validate()
+		if (err == nil) != tc.ok {
+			t.Errorf("Validate(%s) = %v, want ok=%v", name, err, tc.ok)
 		}
 	}
 }
