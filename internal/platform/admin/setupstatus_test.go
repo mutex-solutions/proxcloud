@@ -119,6 +119,12 @@ func TestSetupStatus(t *testing.T) {
 			map[string]string{stepConnect: stateAttention, stepNetwork: stateAttention, stepStorage: stateAttention, stepGoLive: stateTodo},
 			map[string]string{"connect/version": stateDone, "connect/template-pool": stateAttention, "network/zone": stateDone, "network/cidrPool": stateAttention,
 				"network/cidr-pool": "", "network/frr": stateAttention, "storage/defaultProfile": stateDone, "storage/storage-profile": "", "storage/import-store": stateAttention}},
+		// The public network is chosen in the network step, so a public network on a management bridge is network's.
+		{"live: a public network on a management bridge is a network problem", withLive(ready(), &setupLive{Checks: []PVECheck{
+			{ID: "connect", Status: checkOK}, {ID: "public-networks", Status: checkFail, Message: `public network "vmbr0" is the management bridge on node pve1`},
+		}, Images: 1, ImportNodes: []string{"pve1"}, Nodes: 1}),
+			map[string]string{stepConnect: stateDone, stepNetwork: stateTodo, stepGoLive: stateBlocked},
+			map[string]string{"network/public-networks": stateTodo, "connect/public-networks": ""}},
 		// The network rows come only from a cluster that answered: without them the database items stay.
 		{"live: an unreachable cluster keeps the database items", withLive(ready(), &setupLive{Checks: []PVECheck{{ID: "connect", Status: checkFail, Message: "Proxmox authentication failed: dial tcp: connection refused"}}, Images: 1, ImportNodes: []string{"pve1"}}),
 			map[string]string{stepConnect: stateTodo, stepNetwork: stateDone, stepGoLive: stateBlocked}, map[string]string{"connect/connect": stateTodo, "network/cidrPool": stateDone}},

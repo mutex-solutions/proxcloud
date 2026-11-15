@@ -104,6 +104,7 @@ var checkSteps = map[string]struct{ step, replaces string }{
 	"zone":            {stepNetwork, "zone"},
 	"cidr-pool":       {stepNetwork, "cidrPool"},
 	"frr":             {stepNetwork, ""},
+	"public-networks": {stepNetwork, ""},
 	"store-reach":     {stepNetwork, ""},
 	"storage-profile": {stepStorage, "defaultProfile"},
 	"import-store":    {stepStorage, ""},

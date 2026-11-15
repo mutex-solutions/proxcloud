@@ -69,10 +69,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   branding configured on a fresh Compose install, because the seed writes those rows. One pure function computes six
   steps (connect, network, storage, templates, catalog, go live) with one item per check, from the database alone,
   and with `live=1` also from the cluster: every row of the connection test (`?checks=all`, the same function, not a
-  copy of its checks), each in the step it is about (network and storage rows replace the database item that asks
-  the same, keeping its id), the nodes with an active import store, the published OS images and the imported
-  templates. A table test pins a fresh
-  Compose install to no step done. Go live waits for connect, network, storage and templates, and is `unknown`
+  copy of its checks), each in the step it is about (the zone, cidrPool, frr, public network and store reach rows
+  in network, so a network problem does not send the operator back to the connection form; network and storage
+  rows replace the database item that asks the same, keeping its id), the nodes with an active import store, the
+  published OS images and the imported templates. A table test pins a fresh Compose install to no step done. Go live waits for connect, network, storage and templates, and is `unknown`
   while one of them could not be read (templates, without `live=1`), so the database-only answer never offers
   go live on a cluster nobody looked at; an open catalog and
   a job scheduler that is off are warnings, by the owner's decision, so they block nothing. Only enabled public

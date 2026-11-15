@@ -288,10 +288,10 @@ makes the step `todo`, and a step is `blocked` only when it cannot start.
   a read-only caller, every row as an item with the row's id (`ok` is `done`,
   `warn` is `attention`, `fail` is `todo`); the nodes with an active `import`
   store; the published OS images; and the imported templates by lifecycle
-  state. `zone`, `cidr-pool`, `frr` and `store-reach` go to `network`,
-  `storage-profile`, `import-store` and `boot-iso` to `storage`, every other row
-  to `connect`. A row that asks what a database item asks takes that item's
-  place and id: `zone` the item `zone`, `cidr-pool` the item `cidrPool`,
+  state. `zone`, `cidr-pool`, `frr`, `public-networks` and `store-reach` go to
+  `network`, `storage-profile`, `import-store` and `boot-iso` to `storage`,
+  every other row to `connect`. A row that asks what a database item asks
+  takes that item's place and id: `zone` the item `zone`, `cidr-pool` the item `cidrPool`,
   `storage-profile` the item `defaultProfile`. A cluster that does not answer
   is a failed `connect` item, not a failed request, and the database items stay.
 - **Go live** waits for `connect`, `network`, `storage` and `templates`
