@@ -261,7 +261,7 @@ another type); without it the first Proxmox provider by name is used, and with
 none saved every step that needs one is `blocked`.
 
 ```json
-{"data": {"serviceId": "svc-1", "live": false, "steps": [
+{"data": {"serviceId": "svc-1", "live": false, "seedUrl": "https://api.example.com", "steps": [
   {"id": "connect", "state": "done", "summary": "Provider lab is saved", "items": [{"id": "provider", "state": "done", "message": "Provider lab is saved"}]},
   {"id": "catalog", "state": "todo", "summary": "No flavor in the catalog: tenants cannot create a server", "items": []}
 ]}}
@@ -302,6 +302,16 @@ makes the step `todo`, and a step is `blocked` only when it cannot start.
   runs the connection checks. An open catalog and a job scheduler that is
   off (`PROXCLOUD_JOBS_SCHEDULER_ENABLED`) are `attention` items: they block
   nothing. An attach policy that is on while steps are open is `attention`.
+- **Server seeds.** `network` has the item `seeds`: `done` once the operator
+  chose how servers get their seed, that is `config.metadata.forceIso` is saved
+  (`true` or `false`) or `config.metadata.url` is set; `attention` otherwise,
+  saying that servers on a DHCP network fetch their seed from the API base URL
+  unless ISO seeds are on, and must reach it and trust its certificate. It never
+  holds go live back, and nothing is probed: only the operator knows what tenant
+  servers reach. `seedUrl` is where a URL seed is fetched from:
+  `config.metadata.url`, else the API's own base URL
+  (`PROXCLOUD_SELF_API_BASE_URL`); `""` means none, so every seed goes on an ISO
+  ([Server seeds](cloud-integration.md#server-seeds)).
 
 ## Admin API — `/admin-api/v1`
 

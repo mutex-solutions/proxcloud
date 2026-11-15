@@ -221,6 +221,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The setup status asks how servers get their seed** (`GET /api/v1/admin/setup/status`, network step, item
+  `seeds`). On a DHCP (simple) zone a server fetches its NoCloud seed from the API URL; a tenant server that cannot
+  reach that URL, or does not trust its certificate (Compose TLS mode `internal` is self-signed), boots with the
+  template's hostname, no password and no guest agent, and nothing told the operator (lab acceptance of
+  v0.7.0-rc.1). The item is `done` once `config.metadata.forceIso` is saved (`true` or `false`) or
+  `config.metadata.url` is set, and `attention` otherwise, naming the URL seeds are fetched from and that tenant
+  servers must reach it and trust its certificate; it never holds go live back, and nothing is probed. The answer
+  also carries `seedUrl`, the base a URL seed is fetched from (`config.metadata.url`, else
+  `PROXCLOUD_SELF_API_BASE_URL`). Unit-tested; not run against a live API.
 - **The Proxmox provider page saves the failover URLs and the cluster CA** (operator console, Cloud providers,
   Connection tab). The form showed both fields, but Save sent neither, so an edit of `apiUrls` or `caCert` was
   dropped while the page reported it saved. Save now takes the connection keys from the same mapping as Add
