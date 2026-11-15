@@ -487,11 +487,8 @@ func (h *Handler) platformRunCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, runID := chi.URLParam(r, "id"), chi.URLParam(r, "runId")
-	if platformStoreErr(w, h.platform.CancelRun(r.Context(), h.platformJobs, id, runID)) {
-		return
-	}
-	run, err := h.platform.Run(r.Context(), runID)
-	if httpx.WriteError(w, err) {
+	run, err := h.platform.CancelRun(r.Context(), h.platformJobs, id, runID)
+	if platformStoreErr(w, err) {
 		return
 	}
 	v, err := platformlife.RunView(r.Context(), h.platformJobs, *run)

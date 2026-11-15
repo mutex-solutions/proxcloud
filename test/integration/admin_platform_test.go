@@ -388,6 +388,16 @@ func TestPlatformRunStartCancelAndReplay(t *testing.T) {
 	if len(list) != 2 || list[0].(map[string]any)["kind"] != platformlife.RunRemove {
 		t.Fatalf("runs %v", list)
 	}
+	// Cancel on a run whose job died: the run ends failed/job_dead and the installation failed, as after any other run
+	// that did not succeed, not left removing with no run.
+	second, _ := store.Run(ctx, list[0].(map[string]any)["id"].(string))
+	if _, err := db.Pool.Exec(ctx, `UPDATE durable_job SET state='dead',finished_at=clock_timestamp(),owner=NULL,lease_until=NULL WHERE id=$1`, second.JobID); err != nil {
+		t.Fatal(err)
+	}
+	v = call(http.MethodPost, runs+"/"+second.ID+"/cancel", "", http.StatusOK)["data"].(map[string]any)
+	if got, _ := store.Get(ctx, in.ID); v["state"] != platformlife.RunFailed || v["code"] != platformlife.CodeJobDead || got.Status.Phase != platformlife.PhaseFailed {
+		t.Fatalf("cancel on a dead job: view %v, phase %s", v, got.Status.Phase)
+	}
 }
 
 // TestPlatformRunMutate: the runner's write seals the secrets, deletes a secrets document left empty, and keeps the

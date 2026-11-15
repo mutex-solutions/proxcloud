@@ -123,15 +123,24 @@ func (s *Store) StartRun(ctx context.Context, jobs *durablejobs.Store, installat
 	return run, nil
 }
 
-// settleDead ends a run whose job is dead (its attempts ran out on crashes) as failed/job_dead; dead=false when the
-// job still lives.
+// settleDead ends a run whose job is dead (its attempts ran out on crashes) as failed/job_dead, with the installation
+// failed like after any other run that did not succeed; dead=false when the job still lives.
 func (s *Store) settleDead(ctx context.Context, jobs *durablejobs.Store, run *Run) (dead bool, err error) {
 	if state, err := jobState(ctx, jobs, run.JobID); err != nil || state != "dead" {
 		return false, err
 	}
 	now := time.Now().UTC()
 	run.State, run.Code, run.Message, run.FinishedAt = RunFailed, CodeJobDead, "The run's job ran out of attempts: Retry starts a new run.", &now
-	return true, s.SaveRun(ctx, run)
+	if err := s.SaveRun(ctx, run); err != nil {
+		return true, err
+	}
+	var in Installation
+	if found, err := s.installations().GetForUpdate(ctx, run.InstallationID, &in); err != nil || !found {
+		return true, err
+	}
+	in.Status.Phase, in.UpdatedAt = PhaseFailed, now
+	_, err = s.installations().Replace(ctx, in.ID, &in)
+	return true, err
 }
 
 func jobState(ctx context.Context, jobs *durablejobs.Store, id string) (string, error) {
@@ -149,13 +158,13 @@ func jobState(ctx context.Context, jobs *durablejobs.Store, id string) (string, 
 }
 
 // CancelRun asks an unfinished run to stop; the runner honours it at its next claim or write. A run whose job died is
-// finished as failed/job_dead instead.
-func (s *Store) CancelRun(ctx context.Context, jobs *durablejobs.Store, installationID, runID string) error {
-	return s.DB.WithTx(ctx, func(tc context.Context) error {
+// finished as failed/job_dead instead. It answers the run as it is stored after that.
+func (s *Store) CancelRun(ctx context.Context, jobs *durablejobs.Store, installationID, runID string) (run *Run, err error) {
+	err = s.DB.WithTx(ctx, func(tc context.Context) error {
 		if err := s.DB.LockXact(tc, "platform-run:"+installationID); err != nil {
 			return err
 		}
-		run, err := s.Run(tc, runID)
+		run, err = s.Run(tc, runID)
 		switch {
 		case err != nil:
 			return err
@@ -170,6 +179,7 @@ func (s *Store) CancelRun(ctx context.Context, jobs *durablejobs.Store, installa
 		run.CancelRequested = true
 		return s.SaveRun(tc, run)
 	})
+	return run, err
 }
 
 // Run reads one run (nil when absent).
