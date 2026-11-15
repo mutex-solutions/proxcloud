@@ -278,9 +278,9 @@ they are registered with, next to Kamaji and CloudNativePG. Keeping that keeps w
 providers create tenant objects, and their registration model (one provider row per
 service, as installer stage 60 writes it), unchanged. The providers gain configuration for
 node-group placement and the database egress fence, and the registered bodies carry it
-(design §4.2 and §4.4). Tenant objects never reach
-the seed, so its set of components stays small and fixed, and a lost seed does not stop
-tenant clusters from scaling or repairing.
+(design §4.2 and §4.4). Tenant objects never reach the seed, so its set of components
+stays small and fixed, and a lost seed does not stop tenant clusters from scaling or
+repairing.
 
 ### A6. Chart digests verified by CI until a mirror exists
 
@@ -306,11 +306,11 @@ installer's choice, not always an upstream limit: cert-manager's install guide c
 OCI chart, `oci://quay.io/jetstack/charts/cert-manager`, the source of truth and its HTTP
 repository a legacy one that updates hours later. Wherever upstream publishes a chart in an
 OCI registry, the BOM may take it from there and record its manifest digest. The installer
-installs Kamaji as chart `0.0.0+latest`, pinned by image tag only. ArgoCD's target revision for a chart is a
-version, and the portal cannot look up third-party digests (`internal/templateupdates`
-talks only to our GHCR organisation). Until a mirror under our GHCR organisation serves the
-checked charts, a chart changed upstream behind the same version is caught by CI, not at
-pull time; that gap is stated, not hidden.
+installs Kamaji as chart `0.0.0+latest`, pinned by image tag only. ArgoCD's target revision
+for a chart is a version, and the portal cannot look up third-party digests
+(`internal/templateupdates` talks only to our GHCR organisation). Until a mirror under our
+GHCR organisation serves the checked charts, a chart changed upstream behind the same
+version is caught by CI, not at pull time; that gap is stated, not hidden.
 
 ### A7. Seed backup by a PVE backup job
 
@@ -416,8 +416,9 @@ above.
 ## Open points for the implementation
 
 Resolved on 2026-11-15, except the sandbox's shape, which stays open until the third
-milestone. Each original question is kept, followed by its answer and where the detail is. "Design" is the P3 design of the in-platform path ("Enable managed
-services"); the files it names land with its implementation.
+milestone. Each original question is kept, followed by its answer and where the detail
+is. "Design" is the P3 design of the in-platform path ("Enable managed services"); the
+files it names land with its implementation.
 
 - The exact schema of `platform-bom.yaml` and of `PlatformInstallation`.
 
