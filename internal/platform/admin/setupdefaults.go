@@ -287,14 +287,25 @@ func defaultQuotaFor(p *externalservice.ExternalService) (map[string]any, []stri
 }
 
 // planPricePlan is the price plan item. Every enabled PUBLIC plan is billed (pricing.SelectPricePlans), so a second
-// one would charge every resource twice: the default is added only when there is none.
+// one would charge every resource twice: the default is added only when there is none. When every one is scoped to
+// other providers than serviceId, the default (unscoped) plan would bill those twice, so the item is blocked.
 func planPricePlan(sd *seedDefaults, st defaultsState, w *defaultsWrite) defaultsItem {
 	it := defaultsItem{setupItem: setupItem{ID: defaultsPricePlan}}
+	var elsewhere []string
 	for _, p := range st.Plans {
-		if p.Enabled && p.AccessMode == pricing.AccessPublic {
+		if !p.Enabled || p.AccessMode != pricing.AccessPublic {
+			continue
+		}
+		if st.Provider == nil || p.IsServiceProviderScoped(st.Provider.ID) {
 			it.State, it.Message = stateDone, fmt.Sprintf("The enabled public price plan %q exists; the default plan is not added, because every enabled public plan is billed", p.Name)
 			return it
 		}
+		elsewhere = append(elsewhere, fmt.Sprintf("%q", p.Name))
+	}
+	if len(elsewhere) > 0 {
+		it.State, it.Message = stateBlocked, "No enabled public price plan covers this provider: "+strings.Join(elsewhere, ", ")+
+			" bills other providers only. The default plan is not added, because it would bill those a second time; add this provider to one of them or add a plan scoped to it"
+		return it
 	}
 	for _, p := range st.Plans {
 		if p.Name == sd.Plan.Name {

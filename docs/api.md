@@ -234,8 +234,13 @@ It answers one result per requested item, with `state` `created`, `skipped`
   currency; the preview says so when that is not the currency they were written
   in (USD), and refuses (`blocked`) when no base currency is set.
 - **One public plan.** Every enabled PUBLIC plan is billed, so the default plan
-  is skipped when one exists, whatever its name. A plan with the default's name
-  that is disabled or not public blocks the item instead of getting a twin.
+  is skipped when one exists, whatever its name. With `serviceId`, only a plan
+  that applies to that provider (no `serviceProviders`, or one naming it) counts:
+  when every enabled PUBLIC plan is scoped to other providers the item is
+  `blocked`, because the unscoped default would bill those a second time. Add
+  the provider to one of those plans, or add a plan scoped to it. A plan with the
+  default's name that is disabled or not public blocks the item instead of
+  getting a twin.
 - **Rules.** The plan gets the rules for `instance`, `instance_traffic`,
   `volume`, `floating_ip`, `image`, `server_snapshot` and `server_protection`.
   GPU rules are added only when a Proxmox provider maps GPUs (`config.gpus`),

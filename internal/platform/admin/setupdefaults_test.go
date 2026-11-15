@@ -168,6 +168,25 @@ func TestPlanDefaults(t *testing.T) {
 					t.Fatalf("plan written or not named: %v %+v", w.Plan, items)
 				}
 			}},
+		// A second unscoped plan would bill svc-other twice, so the item asks the operator instead of adding one.
+		{"every enabled public plan is scoped to another provider", func() defaultsState {
+			st := withProvider(nil)
+			st.Plans = []pricing.PricePlan{{Name: "Other site", Enabled: true, AccessMode: "PUBLIC", ServiceProviders: []pricing.PricePlanServiceProvider{{ServiceID: "svc-other"}}}}
+			return st
+		}(), map[string]string{defaultsPricePlan: stateBlocked},
+			func(t *testing.T, w defaultsWrite, items []defaultsItem) {
+				if m := itemByID(t, items, defaultsPricePlan).Message; w.Plan != nil || !strings.Contains(m, `"Other site"`) || !strings.Contains(m, "add this provider") {
+					t.Fatalf("plan %v, message %s", w.Plan, m)
+				}
+			}},
+		{"an enabled public plan scoped to this provider", func() defaultsState {
+			st := withProvider(nil)
+			st.Plans = []pricing.PricePlan{{Name: "Lab", Enabled: true, AccessMode: "PUBLIC", ServiceProviders: []pricing.PricePlanServiceProvider{{ServiceID: "svc-1"}}}}
+			return st
+		}(), map[string]string{defaultsPricePlan: stateDone}, nil},
+		{"no provider named: a scoped public plan still counts", defaultsState{Flavors: map[string]bool{}, Currency: "USD", Plans: []pricing.PricePlan{
+			{Name: "Other site", Enabled: true, AccessMode: "PUBLIC", ServiceProviders: []pricing.PricePlanServiceProvider{{ServiceID: "svc-other"}}}}},
+			map[string]string{defaultsPricePlan: stateDone}, nil},
 		{"only disabled and scoped plans", defaultsState{Flavors: map[string]bool{}, Currency: "USD", Plans: []pricing.PricePlan{
 			{Name: "Off", Enabled: false, AccessMode: "PUBLIC"}, {Name: "Partner", Enabled: true, AccessMode: "SCOPED"}}},
 			map[string]string{defaultsPricePlan: stateTodo}, nil},

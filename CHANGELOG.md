@@ -56,7 +56,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   copies `deploy/seed`) and applies them on request. The preview shows what would be written. The apply only creates:
   it never changes a document that exists, runs in one transaction under one advisory lock, and answers one result
   per item. The price plan is created enabled, so the apply refuses it without `"confirmRates": true`, and it is
-  skipped when any enabled PUBLIC plan exists, because every enabled public plan is billed. The plan gets the rules a
+  skipped when any enabled PUBLIC plan exists, because every enabled public plan is billed. When every such plan is
+  scoped to other providers than `serviceId` the item is blocked and says so, instead of reading done while that
+  provider is billed nothing; the setup status agrees. The plan gets the rules a
   Proxmox install bills; GPU, share and bucket rules are added only when such a provider exists. The default quota
   is merged under the stored one, so per-model GPU limits and limits the operator set are kept. Each item needs the
   permission of the endpoint that writes the same document by hand. `seed-operator.py` is unchanged.
