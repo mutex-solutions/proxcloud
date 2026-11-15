@@ -100,9 +100,10 @@ type Config struct {
 	// PROXCLOUD_JOBS_SCHEDULER_ENABLED=true (so deploys never charge bills unexpectedly).
 	Jobs struct {
 		SchedulerEnabled bool // auto-start the charge/metrics crons (charges bills on a timer)
-		// DebugTriggers exposes the on-demand mgmt triggers (/debug/run-{sync,metrics,charge})
-		// WITHOUT auto-starting the crons — so a deploy can be driven deterministically for the
-		// golden run while staying dormant (no timed bill charging).
+		// DebugTriggers exposes the on-demand mgmt triggers (POST /debug/run-{sync,metrics,charge},
+		// gen-hmac-key, ...) WITHOUT auto-starting the crons. They have no authentication, so this
+		// flag alone mounts them (SchedulerEnabled does not) and belongs on development and lab
+		// installs only.
 		DebugTriggers bool
 		// RabbitFanout is a rejected legacy migration flag, not a live code path.
 		RabbitFanout      bool

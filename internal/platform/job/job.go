@@ -1,7 +1,7 @@
-// Package job serves /api/v1/admin/job/* — the operator job triggers. The path is whitelisted
-// (no bearer; an internal scheduler/sidecar drives it). Each endpoint with an in-process job
-// runs it directly; the gated / per-id-rabbit / not-wired ones return 202 Accepted (they are
-// fanned out to RabbitMQ consumers we don't run here).
+// Package job serves /api/v1/admin/job/* — the operator job triggers. The path needs an admin
+// credential (a SigV4 hmac key or an admin/admin-api realm bearer, see pkg/auth). Each endpoint
+// with an in-process job runs it directly; the gated / per-id-rabbit / not-wired ones return 202
+// Accepted (they are fanned out to RabbitMQ consumers we don't run here).
 package job
 
 import (

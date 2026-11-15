@@ -88,7 +88,7 @@ the services cluster arrive with split mode.
 | `object_store.mode` | `vm` | `vm`, `truenas-app`, `external`, `ceph-rgw` |
 | `templates.per_node` | `auto` | `auto`: a copy per node unless the default profile is on shared storage |
 | `storage_profiles`, `storage_classes` | detected | Override detection; confirm a fio suggestion |
-| `jobs.scheduler_enabled`, `jobs.debug_triggers` | `false`, `false` | Gates for new scheduled work/debug routes, **not** a pause of existing durable jobs. Enable scheduling deliberately after cutover. |
+| `jobs.scheduler_enabled`, `jobs.debug_triggers` | `false`, `false` | Gates for new scheduled work/debug routes, **not** a pause of existing durable jobs. Enable scheduling deliberately after cutover. `debug_triggers` alone mounts the unauthenticated `POST :8081/debug/*` job triggers: lab installs only. On demand, use the authenticated `/api/v1/admin/job/*` endpoints ([jobs-scheduling.md](jobs-scheduling.md#manual-triggers)). |
 | `jobs.worker_concurrency`, `jobs.poll_interval`, `jobs.lease_duration` | `2`, `1s`, `1m` | Per-pod worker bounds: `1..16`, `100ms..1m`, `10s..10m`. |
 | `database.instances`, `database.status_read_replica` | `1`, `false` | Replica opt-in for history/metrics only, requires at least two instances. Queue/finance use `-rw`. |
 | `jobs_migration.*` | unset | Existing-site explicit retain/cutover, old producers/consumers stopped, drain/reconciliation and snapshot evidence; [runbook](postgres-jobs-migration.md). |

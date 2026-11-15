@@ -13,8 +13,8 @@ spec:
     - name: http
       port: {{ .Values.api.service.port }}
       targetPort: http
-    # Management port (probes, operator /debug triggers). Cluster-internal
-    # only — never route an Ingress/HTTPRoute at it.
+    # Management port (probes; the unauthenticated /debug triggers only with
+    # api.jobs.debugTriggers). Cluster-internal only — never route an Ingress/HTTPRoute at it.
     - name: mgmt
       port: {{ .Values.api.managementPort }}
       targetPort: mgmt
