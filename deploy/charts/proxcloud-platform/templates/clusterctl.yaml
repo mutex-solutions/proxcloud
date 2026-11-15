@@ -8,6 +8,11 @@
 # providers from the provider YAMLs baked into the image (no GitHub call), does nothing when all match, and fails when an
 # installed provider has another version (upgrades come with a later release). BeforeHookCreation: a new sync replaces
 # the Job instead of failing on its immutable fields. Installing CRDs, webhooks and RBAC needs cluster-admin.
+# A hook's outcome counts in neither the Application's sync status nor its health: a failed or timed-out Job leaves it
+# Synced and Healthy, with only status.operationState.phase Failed. Automated sync does not retry a failed sync of the
+# same revision, and a change to the image or the providers alone does not make the Application OutOfSync. Whatever
+# applies the Application must therefore set syncPolicy.retry, gate on operationState.phase Succeeded and on the
+# clusterctl inventory, and request a sync (.operation.sync) itself when the inventory differs.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

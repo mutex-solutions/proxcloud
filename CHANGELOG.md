@@ -178,9 +178,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   four files, or when the chart renders anything else. `helm.yml` lints and renders the examples on chart PRs and
   publishes the chart on a `proxcloud-platform-v*` tag that matches `Chart.yaml`. Inert: nothing applies the chart,
   the tag is not cut, and the `proxcloud-clusterctl` image and its entrypoint (the argument contract above, run as
-  uid 65532) do not exist yet. Not verified on a cluster: the hook running after its service account (sync wave 1),
-  and whether the seed's ArgoCD takes over the `default` project the workload's ArgoCD created and shows it Synced
-  with empty lists.
+  uid 65532) do not exist yet. The hook's outcome counts in neither the Application's sync status nor its health: a
+  failed or timed-out Job leaves the `capi` or `capi-tenant` Application Synced and Healthy with only
+  `status.operationState.phase` Failed, automated sync does not retry it, and a change to the image or providers
+  alone does not make the Application OutOfSync. Whatever applies those Applications must set `syncPolicy.retry`,
+  gate on `operationState.phase` Succeeded and on the clusterctl inventory, and request a sync itself when the
+  inventory differs; nothing does yet. Not verified on a cluster: the hook running after its service account (sync
+  wave 1), and whether the seed's ArgoCD takes over the `default` project the workload's ArgoCD created and shows it
+  Synced with empty lists.
 - **Catalog, Go live and Next steps of the Platform setup page.** The defaults (flavors, public price plan, default
   quota, region row) needed a checkout and `seed-operator.py`, and going live meant the provider's Projects tab plus a
   sync nobody ran on a Compose install. Step 6 shows what `GET /api/v1/admin/setup/defaults` would write, the rate
