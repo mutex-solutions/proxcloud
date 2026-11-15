@@ -1,6 +1,7 @@
 package platformlife
 
-// stages.go — stages 1 to 5 of an apply (design §4.2) and the seed part of a remove (§4.6). Each observes first and
+// stages.go — stages 1 to 5 of an apply (design §4.2) and the seed part of a remove (§4.6); cluster.go and remove.go
+// hold the rest. Each observes first and
 // then acts, so a stage resumed after a crash, a lost lease or a Defer continues from what exists.
 
 import (
@@ -727,14 +728,6 @@ func asTransient(err error) error {
 	return err
 }
 
-// removeCluster refuses the cluster part of a remove, which comes with stages 6 to 11.
-func (x *acq) removeCluster(context.Context) error {
-	if len(x.in.Status.Clusters) > 0 {
-		return permanent(CodeStageUnavailable, "This build removes the seed only, and only while no workload cluster was built; the cluster part of Remove comes with the next release.")
-	}
-	return errSkipped
-}
-
 // removeSeed deletes the seed VM and every pcplat-<id>-* CD.
 func (x *acq) removeSeed(ctx context.Context) error {
 	st := x.in.Status.Seed
@@ -754,11 +747,11 @@ func (x *acq) removeSeed(ctx context.Context) error {
 	return x.purgeCDs(ctx, node)
 }
 
-// removeSecrets wipes platformSecret and the seed's status.
+// removeSecrets wipes platformSecret and what the status says was built.
 func (x *acq) removeSecrets(ctx context.Context) error {
 	return x.save(ctx, func(_ *Run, in *Installation, sec *Secrets) {
 		*sec = Secrets{ID: sec.ID}
-		in.Status.Seed, in.Status.BOM = nil, nil
+		in.Status = Status{Phase: in.Status.Phase, Providers: in.Status.Providers} // the rows stay, DISABLED
 	})
 }
 
@@ -772,7 +765,7 @@ func (x *acq) deleteSeed(ctx context.Context, vmid, gen int) error {
 	if err != nil || vm.absent || vm.foreign {
 		return err
 	}
-	for _, t := range strings.FieldsFunc(vm.cfg.Str("tags"), func(r rune) bool { return r == ';' || r == ',' || r == ' ' }) {
+	for _, t := range vmTags(vm.cfg) {
 		if strings.HasPrefix(t, "pc-platform-") && t != "pc-platform-"+x.in.ID {
 			return permanent(CodeSeedConfigRefused, "VM %d carries this installation's seed name but the tag %s: it is not deleted.", vmid, t)
 		}
@@ -796,6 +789,10 @@ func (x *acq) deleteSeed(ctx context.Context, vmid, gen int) error {
 		}
 	}
 	return nil
+}
+
+func vmTags(cfg pve.VMConfig) []string {
+	return strings.FieldsFunc(cfg.Str("tags"), func(r rune) bool { return r == ';' || r == ',' || r == ' ' })
 }
 
 // cds lists this installation's CDs (volids) on the spec's ISO store and on the store the seed status says its CD

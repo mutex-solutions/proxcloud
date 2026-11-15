@@ -995,7 +995,7 @@ func run() error {
 	}
 	adminH.SetTemplateUpdates(tuSvc)
 	// The managed-services platform (docs/adr/0009): its installation routes only with PROXCLOUD_PLATFORM_ENABLED=true;
-	// its runner (stages 1 to 5 of an apply, the seed part of a remove) only with PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED
+	// its runner (applies and removes) only with PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED
 	// too, since stage 2 imports the platform images through Template updates. Without the runner POST …/runs answers
 	// 409 platform_disabled.
 	if cfg.Jobs.PlatformEnabled {
@@ -1008,7 +1008,8 @@ func run() error {
 			adminH.SetPlatformRuns(jobStore)
 			prRunner := &platformlife.Runner{
 				Jobs: jobStore, State: platformStore, Log: log, Preflight: adminH.PlatformPreflight,
-				Imports: platformlife.TemplateUpdates{Service: tuSvc},
+				Imports:  platformlife.TemplateUpdates{Service: tuSvc},
+				Register: adminH.PlatformRegister, Disable: adminH.PlatformDisable,
 				Provider: func(ctx context.Context, id string) (*externalservice.ExternalService, error) {
 					es, err := esSvc.Get(ctx, id)
 					if errors.Is(err, externalservice.ErrNotFound) {
@@ -1035,7 +1036,7 @@ func run() error {
 			prDone := make(chan struct{})
 			go func() { defer close(prDone); prRunner.Run(prCtx) }()
 			defer func() { stopPR(); <-prDone }()
-			log.Warn("managed services: platform runner ENABLED (stages 1 to 5)")
+			log.Warn("managed services: platform runner ENABLED")
 		}
 	}
 	adminH.SetJobsScheduler(cfg.Jobs.SchedulerEnabled)

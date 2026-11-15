@@ -31,6 +31,7 @@ const JobAttempts = 20
 
 var (
 	ErrBadKind      = errors.New("kind must be apply or remove")
+	ErrBadConfirm   = errors.New(`confirm must be "remove <installation name>", and only a remove takes it`)
 	ErrRunNotFound  = errors.New("no run with that id")
 	ErrRunFinished  = errors.New("this run has finished")
 	ErrBOMNotHere   = errors.New(CodeBOMUnsupported + ": the installed BOM is not one this release embeds; upgrade through the release before it first")
@@ -59,8 +60,9 @@ func stageIDs(kind string) []string {
 
 // StartRun records a run of kind and enqueues its job (key platform-run-<runId>) in one transaction under the
 // installation's run lock: ErrRunActive while another run is unfinished. A run whose job died is finished first, as
-// failed/job_dead. An apply targets the installed BOM, or this release's for a new installation.
-func (s *Store) StartRun(ctx context.Context, jobs *durablejobs.Store, installationID, kind, actor string) (*Run, error) {
+// failed/job_dead. An apply targets the installed BOM, or this release's for a new installation. confirm is the typed
+// confirmation of a Remove ("remove <name>", or empty): see Run.Confirmed.
+func (s *Store) StartRun(ctx context.Context, jobs *durablejobs.Store, installationID, kind, actor, confirm string) (*Run, error) {
 	if kind != RunApply && kind != RunRemove {
 		return nil, ErrBadKind
 	}
@@ -88,6 +90,10 @@ func (s *Store) StartRun(ctx context.Context, jobs *durablejobs.Store, installat
 		} else if !found {
 			return ErrNotFound
 		}
+		if confirm != "" && (kind != RunRemove || confirm != "remove "+in.Name) {
+			return ErrBadConfirm
+		}
+		run.Confirmed = confirm != ""
 		if active, err := s.ActiveRun(tc, installationID); err != nil {
 			return err
 		} else if active != nil {

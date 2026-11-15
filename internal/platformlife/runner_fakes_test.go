@@ -199,6 +199,7 @@ type fakeVM struct {
 	cfg     map[string]any
 	running bool
 	pooled  bool
+	system  bool // a member of proxcloud-system
 }
 
 // fakePVE is one node (pve1) with the seed pool, an ISO store "local" and the template 9100. It records every
@@ -220,6 +221,8 @@ type fakePVE struct {
 	onWrite   func(w string) // called with every recorded request
 	cloneTags string
 	uploads   [][]byte
+	disks     []string              // volumes on local-lvm (the names after "local-lvm:")
+	writers   []string              // the token id of each recorded request, parallel to writes
 	templates []pve.ClusterResource // /cluster/resources?type=vm
 }
 
@@ -264,6 +267,8 @@ func (f *fakePVE) serve(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api2/json")
 	if r.Method != http.MethodGet {
 		f.writes = append(f.writes, r.Method+" "+path)
+		id, _, _ := strings.Cut(strings.TrimPrefix(r.Header.Get("Authorization"), "PVEAPIToken="), "=")
+		f.writers = append(f.writers, id)
 		if f.onWrite != nil {
 			f.onWrite(r.Method + " " + path)
 		}
@@ -297,6 +302,24 @@ func (f *fakePVE) serve(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		data(map[string]any{"poolid": "proxcloud-seed", "members": members})
+	case path == "/pools/"+pve.SystemPool:
+		var members []map[string]any
+		for id, vm := range f.vms {
+			if vm.system {
+				members = append(members, map[string]any{"id": fmt.Sprintf("qemu/%d", id), "vmid": id, "node": "pve1", "type": "qemu"})
+			}
+		}
+		data(map[string]any{"poolid": pve.SystemPool, "members": members})
+	case path == "/nodes/pve1/storage/local-lvm/content":
+		var out []map[string]any
+		for _, d := range f.disks {
+			out = append(out, map[string]any{"volid": "local-lvm:" + d, "content": "images"})
+		}
+		data(out)
+	case strings.HasPrefix(path, "/nodes/pve1/storage/local-lvm/content/"):
+		name := strings.TrimPrefix(path, "/nodes/pve1/storage/local-lvm/content/")
+		f.disks = slices.DeleteFunc(f.disks, func(n string) bool { return n == name })
+		data(f.upid("imgdel", 0))
 	case path == "/cluster/nextid":
 		if v := r.Form.Get("vmid"); v != "" {
 			id, _ := strconv.Atoi(v)
@@ -472,10 +495,20 @@ type fakeSeed struct {
 	saAllowed bool
 	forbid    int // reads of the token Secret answered 403: the Role and RoleBinding are not applied yet
 	calls     []string
+	// A small Kubernetes for the service account: objects by URL path, lists by collection path and label selector.
+	objs     map[string]map[string]any
+	extra    map[string]bool // more tokens that are the service account's (rotated ones)
+	unsynced map[string]bool // Applications ArgoCD does not sync
+	syncs    []string        // Applications a sync operation was started on
+	onSync   func(name string)
+	writes   []string // every request of the service account that is not a GET or an access review
+	tokens   []string // TokenRequest tokens, with ttls the seconds each was asked for
+	ttls     []float64
+	uids     int
 }
 
 func newFakeSeed(t *testing.T, ca func() (string, string), boot func() string) *fakeSeed {
-	f := &fakeSeed{ca: ca, boot: boot, sa: runSA, ready: true, saAllowed: true}
+	f := &fakeSeed{ca: ca, boot: boot, sa: runSA, ready: true, saAllowed: true, objs: map[string]map[string]any{}, extra: map[string]bool{}, unsynced: map[string]bool{}}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -529,7 +562,7 @@ func (f *fakeSeed) serve(w http.ResponseWriter, r *http.Request) {
 	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	kind := ""
 	switch {
-	case tok == f.sa:
+	case tok == f.sa || f.extra[tok]:
 		kind = "sa"
 	case tok != "" && tok == f.boot():
 		kind = "boot"
@@ -554,7 +587,11 @@ func (f *fakeSeed) serve(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews" && kind == "sa":
 		fmt.Fprintf(w, `{"status":{"allowed":%t}}`, f.saAllowed)
 	case r.Method == http.MethodDelete && kind == "sa":
+		f.writes = append(f.writes, "DELETE "+r.URL.Path)
+		delete(f.objs, r.URL.Path)
 		fmt.Fprint(w, `{}`)
+	case kind == "sa":
+		f.object(w, r)
 	default:
 		w.WriteHeader(http.StatusForbidden)
 		fmt.Fprint(w, `{"message":"forbidden"}`)
@@ -632,7 +669,7 @@ func (e *env) upTo(id string) {
 			}
 			run.Stages[i].State = StageDone
 			if run.Stages[i].ID == StageImages {
-				run.Stages[i].Receipt = &StageReceipt{Templates: map[string]int{"seed:pve1": 9100}}
+				run.Stages[i].Receipt = &StageReceipt{Templates: map[string]int{"seed:pve1": 9100, "node:pve1": 9101, "node:pve2": 9102, "node:pve3": 9103}}
 			}
 		}
 	})
@@ -688,4 +725,132 @@ func (e *env) seedAt(vmid, gen int, seed *fakeSeed, running bool) {
 			CDVolume: "local:iso/" + SeedCDName("pi-0a1b2c3d", gen)}
 		sec.BootstrapToken, sec.K3sToken = runBoot, runK3s
 	})
+}
+
+// put stores obj at its URL path (tests seed what a controller would have made).
+func (f *fakeSeed) put(path string, obj map[string]any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.objs[path] = obj
+}
+
+func (f *fakeSeed) obj(path string) map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.objs[path]
+}
+
+func (f *fakeSeed) writeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.writes)
+}
+
+// object serves the generic part (called with the lock held): apply and merge patches, gets, lists, token requests.
+func (f *fakeSeed) object(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Path
+	answer := func(v any) { _ = json.NewEncoder(w).Encode(v) }
+	var body map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if r.Method != http.MethodGet {
+		f.writes = append(f.writes, r.Method+" "+path)
+	}
+	switch {
+	case r.Method == http.MethodPost && strings.HasSuffix(path, "/token"):
+		token := fmt.Sprintf("requested-token-%d-0123456789", len(f.tokens)+1)
+		secs, _ := dig(body, "spec", "expirationSeconds").(float64)
+		f.tokens, f.ttls = append(f.tokens, token), append(f.ttls, secs)
+		answer(map[string]any{"status": map[string]any{"token": token,
+			"expirationTimestamp": time.Now().Add(time.Duration(secs) * time.Second).UTC().Format(time.RFC3339)}})
+	case r.Method == http.MethodPatch && r.Header.Get("Content-Type") == "application/merge-patch+json":
+		cur := f.objs[path]
+		if cur == nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if body["operation"] != nil { // ArgoCD takes the operation off the Application as it starts it
+			name := path[strings.LastIndex(path, "/")+1:]
+			f.syncs = append(f.syncs, name)
+			if f.onSync != nil {
+				f.onSync(name)
+			}
+		}
+		answer(cur)
+	case r.Method == http.MethodPatch:
+		cur := f.objs[path]
+		if cur == nil {
+			f.uids++
+			cur = map[string]any{}
+			body["metadata"].(map[string]any)["uid"] = fmt.Sprintf("uid-%d", f.uids)
+		} else {
+			body["metadata"].(map[string]any)["uid"] = dig(cur, "metadata", "uid")
+		}
+		for _, keep := range []string{"status", "data"} {
+			if body[keep] == nil && cur[keep] != nil {
+				body[keep] = cur[keep]
+			}
+		}
+		name := str(body, "metadata", "name")
+		if sd, ok := body["stringData"].(map[string]any); ok {
+			data := map[string]any{}
+			for k, v := range sd {
+				data[k] = base64.StdEncoding.EncodeToString([]byte(v.(string)))
+			}
+			body["data"] = data
+			delete(body, "stringData")
+		}
+		if body["type"] == "kubernetes.io/service-account-token" && body["data"] == nil { // the token controller
+			token := "rotated-token-of-" + name
+			f.extra[token] = true
+			body["data"] = map[string]any{"token": base64.StdEncoding.EncodeToString([]byte(token))}
+		}
+		if body["kind"] == "Application" && !f.unsynced[name] {
+			body["status"] = map[string]any{"health": map[string]any{"status": "Healthy"}, "operationState": map[string]any{"phase": "Succeeded"},
+				"sync": map[string]any{"status": "Synced", "comparedTo": map[string]any{"source": map[string]any{"targetRevision": dig(body, "spec", "source", "targetRevision")}}}}
+		}
+		f.objs[path] = body
+		answer(body)
+	case r.Method != http.MethodGet:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	case f.objs[path] != nil:
+		answer(f.objs[path])
+	case isCollection(path):
+		var keys []string
+		for k := range f.objs {
+			if strings.HasPrefix(k, path+"/") && !strings.Contains(k[len(path)+1:], "/") && matches(f.objs[k], r.URL.Query().Get("labelSelector")) {
+				keys = append(keys, k)
+			}
+		}
+		slices.Sort(keys)
+		items := []any{}
+		for _, k := range keys {
+			items = append(items, f.objs[k])
+		}
+		answer(map[string]any{"items": items})
+	default:
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"message":"not found"}`)
+	}
+}
+
+// isCollection tells /api/v1/nodes and /apis/g/v/namespaces/ns/plural from the path of one object.
+func isCollection(path string) bool {
+	p := strings.Split(strings.Trim(path, "/"), "/")
+	rest := p[min(len(p), 3):]
+	if p[0] == "api" {
+		rest = p[min(len(p), 2):]
+	}
+	return len(rest) == 1 || (len(rest) == 3 && rest[0] == "namespaces")
+}
+
+// matches is a label selector of "k=v" and "k" terms.
+func matches(obj map[string]any, selector string) bool {
+	for _, term := range strings.FieldsFunc(selector, func(r rune) bool { return r == ',' }) {
+		k, v, eq := strings.Cut(term, "=")
+		got, has := dig(obj, "metadata", "labels").(map[string]any)[k]
+		if !has || (eq && got != v) {
+			return false
+		}
+	}
+	return true
 }

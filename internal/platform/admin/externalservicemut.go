@@ -111,10 +111,21 @@ func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
 		return
 	}
+	doc, err := h.createExternalService(r.Context(), body)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	// TODO(audit): write an admin audit event when a service is created.
+	shapeExternalService(doc) // strips secret, _id→id
+	httpx.OK(w, doc)
+}
+
+// createExternalService validates and stores a new provider row from a POST /admin/service body and answers the
+// stored document (secret encrypted, `_id` set). The handler and a platform run's stage 10 share it.
+func (h *Handler) createExternalService(ctx context.Context, body map[string]any) (pgdoc.M, error) {
 	name, _ := body["name"].(string)
 	if name == "" {
-		httpx.WriteError(w, httpx.BadRequest("Name is required"))
-		return
+		return nil, httpx.BadRequest("Name is required")
 	}
 	doc := pgdoc.M{}
 	for k, v := range body {
@@ -129,31 +140,27 @@ func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) 
 	if _, ok := doc["status"]; !ok {
 		doc["status"] = "PUBLIC"
 	}
-	if cfg, ok := doc["config"].(map[string]any); ok && cfg["provider"] == "truenas" {
+	cfg, _ := doc["config"].(map[string]any)
+	if cfg["provider"] == "truenas" {
 		if _, err := externalservice.ParseSNATSources(cfg["snatSources"]); err != nil {
-			httpx.WriteError(w, httpx.BadRequest(err.Error()))
-			return
+			return nil, httpx.BadRequest(err.Error())
 		}
 	}
-	if cfg, _ := doc["config"].(map[string]any); cfg["provider"] == "powerdns" {
+	if cfg["provider"] == "powerdns" {
 		if _, err := powerdns.OwnershipResolvers(cfg["ownershipResolvers"]); err != nil {
-			httpx.WriteError(w, httpx.BadRequest(err.Error()))
-			return
+			return nil, httpx.BadRequest(err.Error())
 		}
 	}
-	if cfg, _ := doc["config"].(map[string]any); kamajiRemovedKeysErr(cfg) != nil {
-		httpx.WriteError(w, kamajiRemovedKeysErr(cfg))
-		return
+	if herr := kamajiRemovedKeysErr(cfg); herr != nil {
+		return nil, herr
 	}
-	if cfg, _ := doc["config"].(map[string]any); cfg["provider"] == "proxmox" {
+	if cfg["provider"] == "proxmox" {
 		if err := externalservice.ValidatePVENetwork(cfg["network"], nil); err != nil {
-			httpx.WriteError(w, httpx.BadRequest(err.Error()))
-			return
+			return nil, httpx.BadRequest(err.Error())
 		}
 	}
-	if cfg, _ := doc["config"].(map[string]any); externalservice.ValidateAttachPolicy(cfg) != nil {
-		httpx.WriteError(w, httpx.BadRequest(externalservice.ValidateAttachPolicy(cfg).Error()))
-		return
+	if err := externalservice.ValidateAttachPolicy(cfg); err != nil {
+		return nil, httpx.BadRequest(err.Error())
 	}
 	// Stable string _id (String-id convention — same shape as the seeded provider docs;
 	// projects reference the service by this id string).
@@ -164,20 +171,16 @@ func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) 
 	if sec, ok := doc["secret"]; ok && h.esSvc != nil {
 		doc["secret"] = h.esSvc.EncryptSecret(sec)
 	}
-	if herr := h.checkObjectStoreRow(r.Context(), doc); herr != nil {
-		httpx.WriteError(w, herr)
-		return
+	if herr := h.checkObjectStoreRow(ctx, doc); herr != nil {
+		return nil, herr
 	}
-	if herr := h.checkSandboxGoLive(r.Context(), doc); herr != nil {
-		httpx.WriteError(w, herr)
-		return
+	if herr := h.checkSandboxGoLive(ctx, doc); herr != nil {
+		return nil, herr
 	}
-	if err := h.repo.InsertDocKeepID(r.Context(), externalServiceCollection, doc); httpx.WriteError(w, err) {
-		return
+	if err := h.repo.InsertDocKeepID(ctx, externalServiceCollection, doc); err != nil {
+		return nil, err
 	}
-	// TODO(audit): write an admin audit event when a service is created.
-	shapeExternalService(doc) // strips secret, _id→id
-	httpx.OK(w, doc)
+	return doc, nil
 }
 
 // objectStoreTest proves an object-store connection before it is stored (POST /service/object-store/test): the

@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -417,7 +418,7 @@ func TestPlatformRunMutate(t *testing.T) {
 	if err := store.Create(ctx, in); err != nil {
 		t.Fatal(err)
 	}
-	run, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub")
+	run, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,5 +445,42 @@ func TestPlatformRunMutate(t *testing.T) {
 	}
 	if n, _ := db.C(platformlife.SecretCollection).Count(ctx, pgdoc.M{}); n != 0 {
 		t.Fatalf("%d secrets documents after a wipe", n)
+	}
+
+	// A rotated seed credential is stored sealed, only outside a run and only over the token Secret it replaces.
+	seeded := func(r *platformlife.Run, in *platformlife.Installation, sec *platformlife.Secrets) error {
+		r.State = platformlife.RunSucceeded
+		in.Status.Seed = &platformlife.SeedStatus{VMID: 120, TokenSecret: "proxcloud-portal-token-g1"}
+		sec.SeedKubeconfig = &platformlife.SeedKubeconfig{Server: "https://10.0.0.1:6443", CA: "ca", Token: "old-token-0123456789"}
+		return nil
+	}
+	if err := store.SetSeedToken(ctx, in.ID, "proxcloud-portal-token-g1", "proxcloud-portal-token-g2", "new-token-0123456789"); !errors.Is(err, platformlife.ErrRunActive) {
+		t.Fatalf("rotation during a run: %v", err)
+	}
+	if err := store.Mutate(ctx, run.ID, seeded); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSeedToken(ctx, in.ID, "proxcloud-portal-token-g7", "proxcloud-portal-token-g8", "x"); !errors.Is(err, platformlife.ErrRevConflict) {
+		t.Fatalf("rotation over another Secret: %v", err)
+	}
+	if err := store.SetSeedToken(ctx, in.ID, "proxcloud-portal-token-g1", "proxcloud-portal-token-g2", "new-token-0123456789"); err != nil {
+		t.Fatal(err)
+	}
+	raw = nil
+	_ = db.C(platformlife.SecretCollection).Find(ctx, pgdoc.M{}, &raw)
+	got, _ = store.Get(ctx, in.ID)
+	if sec, _ := store.Secrets(ctx, in.ID); sec.SeedKubeconfig.Token != "new-token-0123456789" || got.Status.Seed.TokenSecret != "proxcloud-portal-token-g2" ||
+		strings.Contains(fmt.Sprint(raw), "new-token") {
+		t.Fatalf("stored %+v, raw %v", got.Status.Seed, raw)
+	}
+	// The typed confirmation belongs to a remove and must name the installation.
+	if _, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "remove lab"); !errors.Is(err, platformlife.ErrBadConfirm) {
+		t.Fatalf("confirm on an apply: %v", err)
+	}
+	if _, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunRemove, "admin-sub", "remove other"); !errors.Is(err, platformlife.ErrBadConfirm) {
+		t.Fatalf("a wrong confirmation: %v", err)
+	}
+	if r, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunRemove, "admin-sub", "remove lab"); err != nil || !r.Confirmed {
+		t.Fatalf("confirmed remove: %+v %v", r, err)
 	}
 }

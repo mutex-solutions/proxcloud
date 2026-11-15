@@ -11,15 +11,20 @@ package admin
 //	PUT  /admin/platform/installations/{id}/credentials   the CAPI and CSI token secrets, write-only        (service:manage)
 //	POST /admin/platform/installations/{id}/preflight     read-only checks against Proxmox                  (service:manage)
 //	GET  /admin/platform/installations/{id}/plan          the installed BOM against this release's          (service:read)
-//	POST /admin/platform/installations/{id}/runs          {kind: apply|remove} → 202 {runId}                (service:manage)
+//	GET  /admin/platform/installations/{id}?live=1        one, with the components' live sync and health    (service:read)
+//	POST /admin/platform/installations/{id}/runs          {kind: apply|remove, confirm} → 202 {runId}       (service:manage)
 //	GET  /admin/platform/installations/{id}/runs[/{runId}] the newest runs, or one, with their stages       (service:read)
 //	POST /admin/platform/installations/{id}/runs/{runId}/cancel                                             (service:manage)
+//	GET  /admin/platform/installations/{id}/seed-kubeconfig a one-hour cluster-admin kubeconfig of the seed  (service:manage)
+//	POST /admin/platform/installations/{id}/seed-credential/rotate  a new stored seed credential; refused
+//	                                                      during a run                                       (service:manage)
 //
 // The installation routes answer 404 platform_disabled unless PROXCLOUD_PLATFORM_ENABLED is on (SetPlatform); a run
 // also needs the runner (SetPlatformRuns, with PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED), else 409 platform_disabled. No
 // route returns a credential: an installation shows only which token ids are stored, a run only fixed text and codes.
 // The preflight changes nothing, so the audit middleware skips it; it needs service:manage because it uses the stored
-// platform tokens. The seed kubeconfig and the seed credential rotation come with stages 6 to 11.
+// platform tokens. The one exception to "no credential" is seed-kubeconfig, the break-glass download: it needs
+// service:manage although it is a GET, and it writes its own audit entry (actor and expiry, never the token).
 
 import (
 	"context"
@@ -28,12 +33,15 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/durablejobs"
+	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
+	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platformlife"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
@@ -57,6 +65,8 @@ func (h *Handler) routePlatform(r chi.Router) {
 	r.Get("/platform/installations/{id}/runs", h.platformRuns)
 	r.Get("/platform/installations/{id}/runs/{runId}", h.platformRun)
 	r.Post("/platform/installations/{id}/runs/{runId}/cancel", h.platformRunCancel)
+	r.Get("/platform/installations/{id}/seed-kubeconfig", h.platformSeedKubeconfig)
+	r.Post("/platform/installations/{id}/seed-credential/rotate", h.platformSeedRotate)
 }
 
 func (h *Handler) platformBOM(w http.ResponseWriter, r *http.Request) {
@@ -109,6 +119,10 @@ func platformStoreErr(w http.ResponseWriter, err error) bool {
 		platformErr(w, http.StatusConflict, "run_active", err.Error(), nil)
 	case errors.Is(err, platformlife.ErrNoEncryptionKey):
 		platformErr(w, http.StatusConflict, "no_encryption_key", err.Error(), nil)
+	case errors.Is(err, platformlife.ErrBadConfirm):
+		platformErr(w, http.StatusBadRequest, "invalid_confirmation", err.Error(), nil)
+	case errors.Is(err, platformlife.ErrNoSeed):
+		platformErr(w, http.StatusConflict, "no_seed", err.Error(), nil)
 	case errors.Is(err, platformlife.ErrBadKind):
 		platformErr(w, http.StatusBadRequest, "invalid_kind", err.Error(), nil)
 	case errors.Is(err, platformlife.ErrRunNotFound):
@@ -140,6 +154,8 @@ type installationView struct {
 		CAPI *tokenView `json:"capi,omitempty"`
 		CSI  *tokenView `json:"csi,omitempty"`
 	} `json:"credentials"`
+	// Live is set with ?live=1 only: read from the seed at request time, never stored.
+	Live *platformlife.LiveState `json:"live,omitempty"`
 }
 
 type tokenView struct {
@@ -191,6 +207,16 @@ func (h *Handler) platformGet(w http.ResponseWriter, r *http.Request) {
 	v, err := h.platformView(r, in)
 	if httpx.WriteError(w, err) {
 		return
+	}
+	if r.URL.Query().Get("live") == "1" {
+		sec, err := h.platform.Secrets(r.Context(), in.ID)
+		if httpx.WriteError(w, err) {
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		live := platformlife.Live(ctx, in, sec)
+		v.Live = &live
 	}
 	httpx.OK(w, v)
 }
@@ -434,12 +460,13 @@ func (h *Handler) platformRunStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Kind string `json:"kind"`
+		Kind    string `json:"kind"`
+		Confirm string `json:"confirm"` // "remove <name>": lets a remove go on with the seed gone or the workload silent
 	}
 	if !decodeStrictLimited(w, r, &req, 1<<10) {
 		return
 	}
-	run, err := h.platform.StartRun(r.Context(), h.platformJobs, chi.URLParam(r, "id"), req.Kind, adminActor(r))
+	run, err := h.platform.StartRun(r.Context(), h.platformJobs, chi.URLParam(r, "id"), req.Kind, adminActor(r), req.Confirm)
 	if platformStoreErr(w, err) {
 		return
 	}
@@ -496,4 +523,152 @@ func (h *Handler) platformRunCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.OK(w, v)
+}
+
+// ActionBreakGlass is the audit action of a seed kubeconfig download.
+const ActionBreakGlass = "BREAK_GLASS"
+
+// breakGlassEvent is the audit entry of a seed kubeconfig download: who, which installation and when the token
+// expires. It is built without the token or the kubeconfig, so it cannot carry them.
+func breakGlassEvent(r *http.Request, in *platformlife.Installation, expires time.Time) audit.AuditEvent {
+	actor := adminActor(r)
+	ev := audit.AdminEvent(actor, actor)
+	ev.EventContext = audit.ContextPlatform
+	ev.Action, ev.ResourceType, ev.ResourceID, ev.ResourceDisplayName = ActionBreakGlass, "PLATFORM_INSTALLATION", in.ID, in.Name
+	ev.ResourceMetadata = map[string]any{"operation": "seed-kubeconfig", "expiresAt": expires.UTC().Format(time.RFC3339)}
+	ev.Outcome = audit.OutcomeSuccess
+	if ev.Actor != nil {
+		ev.Actor.IPAddress = clientIP(r)
+		ev.Actor.UserAgent = r.UserAgent()
+	}
+	return ev
+}
+
+// platformSeedKubeconfig hands the operator a kubeconfig of the seed with a one-hour token of the portal's
+// service account (cluster-admin). The entry is audited before the kubeconfig goes out; one that cannot be written
+// keeps it in.
+func (h *Handler) platformSeedKubeconfig(w http.ResponseWriter, r *http.Request) {
+	if !h.platformGate(w, r, externalServiceManagePerm) {
+		return
+	}
+	in, err := h.platform.Get(r.Context(), chi.URLParam(r, "id"))
+	if platformStoreErr(w, err) {
+		return
+	}
+	sec, err := h.platform.Secrets(r.Context(), in.ID)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	kubeconfig, expires, err := platformlife.BreakGlassKubeconfig(r.Context(), in, sec)
+	if errors.Is(err, platformlife.ErrNoSeed) {
+		platformStoreErr(w, err)
+		return
+	} else if err != nil {
+		platformErr(w, http.StatusBadGateway, platformlife.CodeSeedAPIUnreachable, "The seed did not issue a token", nil)
+		return
+	}
+	if h.audit != nil {
+		if err := h.audit.Log(r.Context(), breakGlassEvent(r, in, expires)); httpx.WriteError(w, err) {
+			return
+		}
+	}
+	httpx.OK(w, map[string]any{"kubeconfig": kubeconfig, "expiresAt": expires.UTC()})
+}
+
+// platformSeedRotate replaces the stored seed credential with a new token Secret's and deletes the old Secret.
+// Refused while a run is unfinished: the run holds the credential it loaded.
+func (h *Handler) platformSeedRotate(w http.ResponseWriter, r *http.Request) {
+	if !h.platformGate(w, r, externalServiceManagePerm) {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	in, err := h.platform.Get(r.Context(), id)
+	if platformStoreErr(w, err) {
+		return
+	}
+	if run, err := h.platform.ActiveRun(r.Context(), id); httpx.WriteError(w, err) {
+		return
+	} else if run != nil {
+		platformStoreErr(w, platformlife.ErrRunActive)
+		return
+	}
+	sec, err := h.platform.Secrets(r.Context(), id)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	err = platformlife.RotateSeedCredential(r.Context(), in, sec, func(ctx context.Context, old, next, token string) error {
+		return h.platform.SetSeedToken(ctx, id, old, next, token)
+	})
+	switch {
+	case errors.Is(err, platformlife.ErrNoSeed), errors.Is(err, platformlife.ErrRunActive), errors.Is(err, platformlife.ErrRevConflict),
+		errors.Is(err, platformlife.ErrNoEncryptionKey), errors.Is(err, platformlife.ErrNotFound):
+		platformStoreErr(w, err)
+		return
+	case err != nil: // fixed text: the seed's own words stay in
+		platformErr(w, http.StatusBadGateway, platformlife.CodeSeedAPIUnreachable,
+			"The rotation did not finish. status.seed.tokenSecret names the credential that is stored; rotate again to delete the older token Secrets.", nil)
+		return
+	}
+	after, err := h.platform.Get(r.Context(), id)
+	if platformStoreErr(w, err) {
+		return
+	}
+	v, err := h.platformView(r, after)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	httpx.OK(w, v)
+}
+
+// PlatformRegister creates or adopts one provider row of a managed-services installation from a stage 10 body and
+// answers its id. A row is the installation's by config.provider plus config.platformInstallationId; on an adopted
+// row only the keys stage 10 owns and the kubeconfig are rewritten.
+func (h *Handler) PlatformRegister(ctx context.Context, body map[string]any) (string, error) {
+	rows, err := h.repo.ListRaw(ctx, externalServiceCollection)
+	if err != nil {
+		return "", err
+	}
+	row, err := platformlife.AdoptProvider(rows, body)
+	if err != nil {
+		return "", err
+	}
+	if row == nil {
+		if row, err = h.createExternalService(ctx, body); err != nil {
+			return "", err
+		}
+		id, _ := row["_id"].(string)
+		return id, nil
+	}
+	secret, _ := body["secret"].(map[string]any)
+	kubeconfig, _ := secret["kubeconfig"].(string)
+	setSecretLeaf(h, ensureMap(row, "secret"), "kubeconfig", kubeconfig)
+	id := serviceRowID(row)
+	return id, h.repo.ReplaceDoc(ctx, externalServiceCollection, id, row)
+}
+
+// PlatformDisable sets the provider rows of an installation DISABLED (Remove).
+func (h *Handler) PlatformDisable(ctx context.Context, installationID string) error {
+	rows, err := h.repo.ListRaw(ctx, externalServiceCollection)
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		cfg, _ := row["config"].(map[string]any)
+		if cfg[platformlife.ProviderMarker] != installationID || row["status"] == externalservice.StatusDisabled {
+			continue
+		}
+		row["status"] = externalservice.StatusDisabled
+		if err := h.repo.ReplaceDoc(ctx, externalServiceCollection, serviceRowID(row), row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func serviceRowID(row pgdoc.M) string {
+	if id, ok := row["_id"].(string); ok {
+		return id
+	}
+	id, _ := row["id"].(string)
+	return id
 }

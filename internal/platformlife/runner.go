@@ -74,6 +74,11 @@ type Runner struct {
 	Imports   Imports
 	// OnImport records the audit entry of an image import the run enqueued (the admin handler's entry).
 	OnImport func(rec *templateupdates.Receipt, actor string)
+	// Register creates or adopts one provider row of the installation from a stage 10 body and answers its id
+	// (ErrProviderConflict when a row that is not the installation's is in the way). Disable sets the installation's
+	// provider rows DISABLED (Remove). The admin handler implements both.
+	Register func(ctx context.Context, body map[string]any) (string, error)
+	Disable  func(ctx context.Context, installationID string) error
 	Log      *slog.Logger
 	Poll     time.Duration
 	Lease    time.Duration // one minute when zero, renewed every third
@@ -213,6 +218,8 @@ type acq struct {
 	run          *Run
 	in           *Installation
 	sec          *Secrets
+	es           *externalservice.ExternalService
+	hidden       []string // secrets this acquisition read from a cluster: no message may carry them
 	bom          *BOM
 	portal, capi *pve.Client
 	si           int // the stage being run
@@ -300,6 +307,7 @@ func (x *acq) execute(ctx context.Context) end {
 	if es == nil || !es.IsProxmox() {
 		return x.finish(ctx, RunFailed, CodePreflightFailed, "The installation's Proxmox provider no longer exists.")
 	}
+	x.es = es
 	if x.portal, err = pve.New(es.PVEConfig()); err == nil {
 		x.capi, err = TokenClient(es, sec.CAPI)
 	}
@@ -328,17 +336,23 @@ type stageDef struct {
 	run      func(*acq, context.Context) error
 }
 
-// stageDefs are the stages this build runs, with their deadlines (design §4.2: stage 2's is a stall timer the stage
-// renews whenever an import moves). Any other stage ends the run with stage_unavailable.
+// stageDefs are the stages with their deadlines (design §4.2: stage 2's is a stall timer the stage renews whenever an
+// import moves, stage 9's starts again at every wave; a remove waits up to 45 minutes for the machines to go).
 var stageDefs = map[string]stageDef{
-	StageValidate:      {5 * time.Minute, (*acq).validate},
-	StageImages:        {60 * time.Minute, (*acq).images},
-	StageSeedVM:        {30 * time.Minute, (*acq).seedVM},
-	StageSeedAPI:       {20 * time.Minute, (*acq).seedAPI},
-	StageSeedIdentity:  {10 * time.Minute, (*acq).seedIdentity},
-	StageRemoveCluster: {5 * time.Minute, (*acq).removeCluster},
-	StageRemoveSeed:    {30 * time.Minute, (*acq).removeSeed},
-	StageRemoveSecrets: {5 * time.Minute, (*acq).removeSecrets},
+	StageValidate:         {5 * time.Minute, (*acq).validate},
+	StageImages:           {60 * time.Minute, (*acq).images},
+	StageSeedVM:           {30 * time.Minute, (*acq).seedVM},
+	StageSeedAPI:          {20 * time.Minute, (*acq).seedAPI},
+	StageSeedIdentity:     {10 * time.Minute, (*acq).seedIdentity},
+	stageSeedPlatform:     {30 * time.Minute, (*acq).seedPlatform},
+	stageCluster:          {60 * time.Minute, (*acq).cluster},
+	stageWorkloadAccess:   {10 * time.Minute, (*acq).workloadAccess},
+	stageWorkloadPlatform: {waveStall, (*acq).workloadPlatform},
+	stageRegister:         {5 * time.Minute, (*acq).register},
+	stageDone:             {5 * time.Minute, (*acq).done},
+	StageRemoveCluster:    {45 * time.Minute, (*acq).removeCluster},
+	StageRemoveSeed:       {30 * time.Minute, (*acq).removeSeed},
+	StageRemoveSecrets:    {5 * time.Minute, (*acq).removeSecrets},
 }
 
 // stage runs the current stage once; done=true when the acquisition ends with it.
@@ -353,8 +367,7 @@ func (x *acq) stage(ctx context.Context) (end, bool) {
 		if err := x.saveStage(ctx, func(s *Stage) { s.State, s.StartedAt = StageRunning, &now }); err != nil {
 			return x.ended(ctx, err), true
 		}
-		return x.finish(ctx, RunFailed, CodeStageUnavailable, "This build runs stages 1 to 5 of an apply (up to "+StageSeedIdentity+
-			"); stage "+s.ID+" and the ones after it come with the next release."), true
+		return x.finish(ctx, RunFailed, CodeStageUnavailable, "This build has no stage "+s.ID+": the run was made by another release."), true
 	}
 	if s.StartedAt == nil {
 		if err := x.saveStage(ctx, func(s *Stage) {
@@ -545,7 +558,7 @@ func (x *acq) secrets() []string {
 			add(t.Secret)
 		}
 	}
-	return out
+	return append(out, x.hidden...)
 }
 
 func (x *acq) redact(s string) string {
