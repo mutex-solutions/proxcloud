@@ -160,6 +160,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   uses an existing zone as it is). Tested with unit tests and the preflight task run on its own against the
   inventory defaults; not run in a full install.
 
+### Fixed
+
+- **The Proxmox provider page saves the failover URLs and the cluster CA** (operator console, Cloud providers,
+  Connection tab). The form showed both fields, but Save sent neither, so an edit of `apiUrls` or `caCert` was
+  dropped while the page reported it saved. Save now takes the connection keys from the same mapping as Add
+  provider. A Playwright spec checks the request body against the mock API; not run against a live API.
+
 ### Security
 
 - **HIGH/CRITICAL findings without a fixed version stay tracked until 2027-03-12** instead of
