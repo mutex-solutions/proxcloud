@@ -104,8 +104,9 @@ Admin UI → System → Cloud providers → Add provider → **Database (DBaaS)*
   Cilium and `get`, `create` and `patch` on `ciliumnetworkpolicies` for the provider ServiceAccount,
   which `deploy/dbaas-cluster/rbac.yaml` does not grant: without them every database create fails. A
   namespace gets it at its next bootstrap or database create. Setting the key back to false leaves
-  the policies in place; delete them by hand. It allows no object store, so it does not fit backups
-  yet.
+  the policies in place; delete them by hand. It allows no object store yet, so a provider that sets
+  it together with `config.database.backup` is refused when it is built: behind the fence every
+  PostgreSQL pod's WAL archiving would fail until `pg_wal` fills its volume.
 - `config.services.database.<region> = true` — un-hides the client Databases surface and
   enables the sync.
 

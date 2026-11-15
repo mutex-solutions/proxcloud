@@ -146,7 +146,8 @@ type Config struct {
 	// the chart renders. Empty: the namespaces carry no placement and no platform-role label, as before it existed.
 	NamespacePlacement kamajik8s.NamespacePlacement
 	// EgressFence (config.database.egressFence) stamps EgressFencePolicyName in every project namespace, so a tenant
-	// with a shell in its database pod reaches nothing of the cluster it shares. Off: no such policy is written.
+	// with a shell in its database pod reaches nothing of the cluster it shares. Off: no such policy is written. Not
+	// together with Backup (Validate): the fence has no object-store rule yet.
 	EgressFence bool
 }
 
@@ -175,6 +176,11 @@ func (c Config) Validate() error {
 	}
 	if err := c.NamespacePlacement.Validate(); err != nil {
 		return fmt.Errorf("dbaas provider: config.namespacePlacement: %w", err)
+	}
+	// With a store every new PostgreSQL pod archives its WAL there (BuildValues), and the fence has no rule for it:
+	// archiving would fail until pg_wal fills the volume.
+	if c.EgressFence && c.Backup.Enabled() {
+		return fmt.Errorf("dbaas provider: config.database.egressFence does not allow the object store of config.database.backup yet")
 	}
 	return nil
 }

@@ -604,6 +604,28 @@ func TestEnsureProjectNamespaceStampsOnlyWhenConfigured(t *testing.T) {
 	}
 }
 
+// The fence has no object-store rule, and a provider with a backup store wires the WAL archiver into every new
+// PostgreSQL pod: the two together would fill pg_wal behind the fence, so the provider is refused when it is built.
+func TestConfigValidateEgressFenceWithoutBackup(t *testing.T) {
+	store := BackupConfig{Endpoint: "http://s3.example.com:9000", Bucket: "dbaas-backups"}
+	for name, tc := range map[string]struct {
+		fence  bool
+		backup BackupConfig
+		ok     bool
+	}{
+		"neither":          {false, BackupConfig{}, true},
+		"fence":            {true, BackupConfig{}, true},
+		"backup":           {false, store, true},
+		"fence and backup": {true, store, false},
+	} {
+		cfg := testConfig()
+		cfg.EgressFence, cfg.Backup = tc.fence, tc.backup
+		if err := cfg.Validate(); (err == nil) != tc.ok {
+			t.Errorf("%s: Validate() = %v, want ok=%v", name, err, tc.ok)
+		}
+	}
+}
+
 var updateGolden = flag.Bool("update", false, "rewrite testdata/egress-fence.golden.json")
 
 // The egress fence is a security control: any change to what a database pod may reach shows up as a diff here.
