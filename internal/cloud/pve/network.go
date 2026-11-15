@@ -47,6 +47,14 @@ type ZoneConfig struct {
 	MTU        int      // evpn: usually 1450
 }
 
+// Type is the PVE zone type the zone becomes: an empty kind and "overlay" are EVPN (EnsureZone).
+func (z ZoneConfig) Type() string {
+	if z.Kind == "" || z.Kind == "overlay" {
+		return "evpn"
+	}
+	return z.Kind
+}
+
 // OwnershipAlias is the vnet ownership marker — the ONE derivation.
 func OwnershipAlias(projectID, name string) string { return "st:" + projectID + ":" + name }
 

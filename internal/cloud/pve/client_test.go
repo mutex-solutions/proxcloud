@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -208,8 +209,16 @@ func TestFingerprintPinning(t *testing.T) {
 
 	// wrong fingerprint must refuse
 	bad, _ := New(Config{APIURL: srv.URL, TokenID: "proxcloud@pve!t1", Secret: "sec", Fingerprint: "00" + fp[2:]})
-	if _, err := bad.Version(context.Background()); err == nil {
+	_, err = bad.Version(context.Background())
+	if err == nil {
 		t.Fatal("wrong fingerprint must fail the handshake")
+	}
+	// The refusal names what the server presented, in the form the pin takes.
+	if got := PresentedFingerprint(err); got != strings.ToUpper(pretty) {
+		t.Fatalf("presented fingerprint = %q, want %q (%v)", got, strings.ToUpper(pretty), err)
+	}
+	if got := PresentedFingerprint(&APIError{Status: 401}); got != "" {
+		t.Fatalf("an API error presented %q", got)
 	}
 }
 
@@ -274,6 +283,45 @@ func TestManagementBridges(t *testing.T) {
 	}
 	if want := map[string]string{"vmbr2": "pve2"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("pve2 only: got %v, want %v", got, want)
+	}
+}
+
+// NodeBridges lists every bridge with its management flag; NodesWithoutPackage reads the installed state per node.
+func TestNodeBridgesAndPackages(t *testing.T) {
+	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/cluster/status": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":[{"type":"node","name":"pve2","ip":"10.0.0.12"},{"type":"node","name":"pve1","ip":"10.0.0.11"},{"type":"node","name":"pve3","ip":"10.0.0.13"}]}`)
+		},
+		"GET /api2/json/nodes/pve1/network": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":[{"iface":"vmbr1","type":"bridge"},{"iface":"vmbr0","type":"bridge","address":"10.0.0.11","gateway":"10.0.0.1","cidr":"10.0.0.11/24"}]}`)
+		},
+		"GET /api2/json/nodes/pve2/network": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":[{"iface":"vmbr2","type":"OVSBridge","address":"10.0.0.12","cidr":"10.0.0.12/24"}]}`)
+		},
+		// pve3 does not answer its network list: it is left out.
+		"GET /api2/json/nodes": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":[{"node":"pve1","status":"online"},{"node":"pve2","status":"online"},{"node":"pve3","status":"offline"}]}`)
+		},
+		"GET /api2/json/nodes/pve1/apt/versions": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":[{"Package":"frr-pythontools","CurrentState":"Installed"},{"Package":"ceph","CurrentState":"NotInstalled"}]}`)
+		},
+		"GET /api2/json/nodes/pve2/apt/versions": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":[{"Package":"frr-pythontools","CurrentState":"NotInstalled"}]}`)
+		},
+	})
+	got, err := c.NodeBridges(context.Background())
+	want := []NodeBridge{
+		{Node: "pve1", Iface: "vmbr0", Type: "bridge", CIDR: "10.0.0.11/24", Management: true},
+		{Node: "pve1", Iface: "vmbr1", Type: "bridge"},
+		{Node: "pve2", Iface: "vmbr2", Type: "OVSBridge", CIDR: "10.0.0.12/24", Management: true},
+	}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("bridges = %+v (%v), want %+v", got, err, want)
+	}
+	for pkg, want := range map[string][]string{"frr-pythontools": {"pve2"}, "ceph": {"pve1", "pve2"}} {
+		if got, err := c.NodesWithoutPackage(context.Background(), pkg); err != nil || !reflect.DeepEqual(got, want) {
+			t.Errorf("nodes without %s = %v (%v), want %v", pkg, got, err, want)
+		}
 	}
 }
 

@@ -14,7 +14,7 @@ ProxCloud needs no `root@pam` access on the cluster. The [installer](install.md)
 
 Every token is created with **privilege separation** (`--privsep 1`). A privilege-separated token's rights are the **intersection** of the user's ACLs and the token's ACLs, so each ACL below is granted to both the user and the token.
 
-The admin **Test connection** button on the Proxmox provider reads the token's effective permissions (`GET /access/permissions`) and lists each `ProxCloudPlatform` privilege the token lacks, plus a warning for a `root@pam` token. Missing privileges are only reported as warnings. A cluster without GPUs can, for example, leave out `/mapping/pci`. The list it checks is `pve.PlatformPrivileges` in `internal/cloud/pve/access.go`. Keep it in sync with this page.
+The admin **Test connection** button on the Proxmox provider reads the token's effective permissions (`GET /access/permissions`) and lists each `ProxCloudPlatform` privilege the token lacks, plus a warning for a `root@pam` token. Missing privileges are only reported as warnings. A cluster without GPUs can, for example, leave out `/mapping/pci`. The list it checks is `pve.PlatformPrivileges` in `internal/cloud/pve/access.go`. Keep it in sync with this page. The setup checks of the same test (`?checks=all`, [api.md](api.md)) read more with the same token: the pool `pc-templates`, and for an EVPN zone each node's package list (`GET /nodes/{node}/apt/versions`) to find `frr-pythontools`. That last read is expected to work with `PVEAuditor` on `/nodes` but is not lab-verified; when it is refused the check says so and stays a warning.
 
 ## Inventory visibility repair
 
@@ -248,6 +248,56 @@ Privileges: `Sys.Audit Sys.AccessNetwork Pool.Allocate Pool.Audit VM.Allocate VM
 `VM.Console` is for image-builder: Packer types the Ubuntu installer's boot command over the VM's console.
 
 There is no ACL on `/vms`, so the token holds `VM.Config.*` only on VMs already in the pool. `build.py` therefore creates a VM empty, with just `pool`, and configures it in a second call.
+
+## Portal token script
+
+For a portal that was not set up by the installer (the [Compose install](../deploy/compose/README.md), or a cluster moving off `root@pam`), this script creates what the portal token needs and nothing else: the `ProxCloudPlatform` role, the pools `pc-templates` and `proxcloud-system`, the user, its privilege-separated token and the ACLs of the table above. Paste it into a root shell on one node. It can be run again: the role's privileges are appended, never replaced, and a pool, user or token that exists is left alone. It ends with the token's effective permissions and the certificate fingerprints of the node, to compare with what the provider form shows.
+
+The operator console's API generates it: `GET /api/v1/admin/setup/proxmox-script` (`admin:service:read`) answers it as text. `tokenId` (default `proxcloud@pve!platform`) names the token, `gpu=true` adds the `/mapping/pci` ACL, and `importStorage=<storage>` adds `PVEDatastoreAdmin` on that store for image import. A `tokenId` or `importStorage` with anything but letters, digits, dot, dash and underscore is refused with a 400. The script below is the answer to `?gpu=true`; a test keeps the two equal.
+
+<!-- generated: GET /api/v1/admin/setup/proxmox-script?gpu=true -->
+```sh
+# ProxCloud: the Proxmox VE identity of the portal token.
+# Paste into a root shell on one node (the cluster shares it). Safe to run again.
+(
+set -eu
+PC_USER='proxcloud@pve'
+PC_TOKEN_NAME='platform'
+PC_TOKEN='proxcloud@pve!platform'
+
+# role: created empty when missing, then the privileges are appended (a re-run adds new ones, removes none)
+pveum role add 'ProxCloudPlatform' 2>/dev/null || true
+pveum role modify 'ProxCloudPlatform' --append 1 --privs 'Sys.Audit Sys.Console Sys.Modify Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Backup VM.Console VM.GuestAgent.Audit VM.GuestAgent.Unrestricted VM.Migrate VM.PowerMgmt VM.Replicate VM.Snapshot VM.Snapshot.Rollback SDN.Allocate SDN.Audit SDN.Use Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit Mapping.Audit Mapping.Use'
+
+# pools: OS templates, and the management VMs the token must not reach
+pveum pool add 'pc-templates' --comment 'ProxCloud templates' 2>/dev/null || true
+pveum pool add 'proxcloud-system' --comment 'ProxCloud management (not tenant)' 2>/dev/null || true
+
+# user and privilege-separated token. The secret is printed once: store it
+pveum user add "$PC_USER" --comment 'ProxCloud portal' 2>/dev/null || true
+pveum user token add "$PC_USER" "$PC_TOKEN_NAME" --privsep 1 || echo "The token $PC_TOKEN exists already: its secret was printed when it was created."
+
+# ACLs, for the user and for the token: a privilege-separated token holds the intersection of the two
+grant() { # path role propagate
+  pveum acl modify "$1" --users "$PC_USER" --roles "$2" --propagate "$3"
+  pveum acl modify "$1" --tokens "$PC_TOKEN" --roles "$2" --propagate "$3"
+}
+grant '/' 'ProxCloudPlatform' 0
+grant '/nodes' 'PVEAuditor' 1
+grant '/pool' 'ProxCloudPlatform' 1
+grant '/pool/proxcloud-system' 'NoAccess' 1
+grant '/sdn' 'ProxCloudPlatform' 1
+grant '/storage' 'ProxCloudPlatform' 1
+grant '/mapping/pci' 'ProxCloudPlatform' 1
+
+# what the token really holds
+pveum user token permissions "$PC_USER" "$PC_TOKEN_NAME"
+# the certificate fingerprint to pin on the provider: pve-ssl.pem, or pveproxy-ssl.pem when the node has its own
+pvenode cert info
+)
+```
+
+The script does not turn on the datacenter firewall or the nftables firewall of the nodes, and adds no `import` content to a storage: those change a running cluster, and are done in the Proxmox UI ([quickstart.md](quickstart.md)). It creates none of the other identities on this page (CAPI, CSI, images).
 
 ## pveum commands
 

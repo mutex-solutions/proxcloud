@@ -7,8 +7,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Every check of the Proxmox connection test in one answer**
+  (`POST /api/v1/admin/service/proxmox/auth?checks=all`): the test stopped at the first failure, so an
+  operator fixed the datacenter firewall only to learn about the node firewall, and then about missing
+  privileges. With `?checks=all` the route answers `200` with `checks`, one `{id, status, message}` row per
+  check (reachable, token, both firewalls, public networks, privileges per ACL path, the stored provider's
+  store checks), and runs every check it still can. The call without the parameter is unchanged: the first
+  failure is a `400` with the same message, which installer stage 60 reads. The body also takes `apiUrls`
+  (failover addresses were tested only from a stored provider). With a stored provider and a blank secret,
+  the fields the body carries now replace the stored ones for the test, so an edited form can be tested
+  before Save; this needs `admin:service:manage`, because it sends the stored secret to the edited address.
+  Such a test, when it sends the stored secret with an address, CA, fingerprint or `insecureTls` other than
+  the stored ones, writes a `CONNECTION_TEST` audit event on the provider (actor, the fields that differ, the
+  addresses tested, success or failure): the route is otherwise not audited and the provider does not change,
+  so nothing else would say where the secret went. The event is built by a tested function; its write to the
+  audit store was not run in a test. A read-only caller still tests the stored connection. `docs/api.md` lists the check ids. Tested against a
+  fake PVE API only; not run against a lab cluster.
+- **Setup checks in the Proxmox connection test** (`?checks=all` only): Proxmox VE 9.2 or later, the pool
+  `pc-templates`, a storage with `import` content, and for a stored provider its default network zone,
+  `cidrPool` (valid, and a warning when it overlaps a management network of the nodes or when a node's
+  networks could not be read, so a node left out is not reported clear), default storage
+  profile and, with an EVPN zone, `frr-pythontools` on every node. A new provider used to pass the test
+  and then answer 503 on the first tenant network, or show no images, with nothing saying why. These rows
+  never fail the default call and never add to `warnings`. A caller with `admin:service:manage` also gets
+  the bridges of every node with a management flag, to choose a public network from, and, when the
+  connection is refused over the certificate, the SHA-256 fingerprint the server presented, so it can be
+  compared on the node and pinned. A read-only caller gets neither. A refused pin now reads
+  `tls: failed to verify certificate: pve: certificate fingerprint mismatch` in the error text. Not
+  lab-verified: reading a node's package list with the least-privilege token (the check warns when it is
+  refused), and the type Proxmox reports for an SDN vnet in the bridge list.
+- **A generated script for the portal token** (`GET /api/v1/admin/setup/proxmox-script`): a portal that was
+  not set up by the installer needed the role, two pools, a user, a token and seven ACLs typed from
+  `docs/proxmox-permissions.md`, and the usual mistake (an ACL on the user but not on the token) only showed
+  as missing privileges later. The route answers one script as text, for a token ID, with or without the
+  GPU mapping ACL and the import store ACL. It can be pasted into a root shell and run again: it runs in a
+  subshell, single-quotes every value (the `!` of a token ID is history expansion otherwise), creates the
+  role empty and appends its privileges, and ends with the token's effective permissions and
+  `pvenode cert info`. The ACLs now live in one table next to the privilege list
+  (`pve.PlatformACLs`); tests keep the script in `docs/proxmox-permissions.md`, the installer's role and
+  ACL rows (stage 10) and that table equal, and refuse a token ID or storage that is not a plain id. The
+  portal still holds no root credential. The script has not been run on a Proxmox node.
+
+### Changed
+
+- **The smaller template disks are confirmed by one lab build each** (`docs/template-build-disk.md`): a
+  native `ubuntu-2604` template at 5 GiB and a Kubernetes 1.37.2 node template at 8 GiB were built on
+  the lab and exported through the export workflow; both images are listed in
+  `docs/vm-artifact-publishing.md`. The native 5 GiB size is close to its limit on Ubuntu 26.04: the
+  root filesystem is 3.7 GiB and the build left less than 1 GiB free before its cleanup. Not done: the
+  other native OS slugs at 5 GiB, a portal import of either image, a node group joining a cluster.
+- **Native Ubuntu 26.04 templates build at 6 GiB** (`BUILD_DISK_GIB_BY_OS` in `images/build.py`; 6 GiB
+  added to the sanitizer's allowlist). Its vendor image has a separate `/boot`, and the 5 GiB build kept
+  less than 1 GiB free on `/` after the upgrade, too close to the 1 GiB admission of the cleanup step.
+  Ubuntu 24.04 at 5 GiB (built and exported on 2026-11-15, 1.7 GiB free) and the other OS keep 5 GiB.
+  Templates and images already built at 5 GiB stay valid. The first 6 GiB lab build (2026-11-15) kept
+  2.0 GiB free after the upgrade and was exported through CI; the image is listed in
+  `docs/vm-artifact-publishing.md`.
+- **A Proxmox provider's `config.network` is checked when it is saved** (`POST /api/v1/admin/service`,
+  `PUT /api/v1/admin/service/{id}` and `PUT /api/v1/admin/service/{id}/update`): the block was stored as
+  sent, so a `cidrPool` of `/25`, a zone id of nine characters or a VLAN zone without a bridge showed up
+  only as a failed or 503 network create in a tenant's project. A save whose body carries `network` is now a
+  `400` naming the field when `cidrPool` is not an IPv4 range of `/24` or larger, `defaultZone` names no
+  zone of `zones` (or there are several zones and no `defaultZone`), a zone's `kind` is not `evpn`, `vlan`
+  or `simple`, a zone id is longer than 8 characters, a `vlan` zone has no `bridge`, or `isolation` is
+  `evpn-per-project` with a default zone that is not EVPN. What is only missing is still accepted (no
+  `cidrPool`, no zone yet, as the console's Add provider form sends it). A save is refused only for a
+  problem the block it replaces does not have already: the console's Connection tab sends the stored block
+  back with every save, and a block saved before this check may work (a zone that exists in Proxmox is used
+  as it is, and the portal reads only the default zone), so it must not lock the provider. A new problem, or
+  a wrong value changed to another wrong value, is still refused. The dev
+  seed and the network block installer stage 60 builds from the inventory defaults pass. Installer stage 00
+  now refuses, before anything is changed, an inventory the check would refuse at stage 60 after stages 10 to
+  55 had run: `network.kind` not `evpn`, `simple` or `vlan`, `kind: vlan` with the shipped empty `bridge`,
+  `isolation: evpn` with `kind: simple` or `vlan`, a `cidr_pool` that is not IPv4 `/24` or larger (or is
+  empty), and a `default_zone` that is empty or longer than 8 characters. A site whose VLAN zone was made by
+  hand in Proxmox with no bridge in the inventory sets `network.bridge` to that zone's bridge (the portal
+  uses an existing zone as it is). Tested with unit tests and the preflight task run on its own against the
+  inventory defaults; not run in a full install.
+
 ### Security
 
+- **HIGH/CRITICAL findings without a fixed version stay tracked until 2027-03-12** instead of
+  2026-12-12 (`UNFIXED_REVIEW_BY` in `.github/scripts/check_scan_report.py`; owner decision of
+  2026-11-15). The reason is the review in `docs/security-unfixed-review.md`: per-target counts by
+  Debian status for the eleven non-GPU templates, the controlled-base prototype and the VM export tool
+  image (the product images and lockfiles have none), which findings a third party's data can reach,
+  and what was not checked. The gate still blocks every finding with a fixed version in those targets,
+  and from 2027-03-12 the unfixed ones again. The default `python` template is outside that set: it is
+  a public image run as is and scanned report-only, so its 2 HIGH zlib findings with a fixed version
+  and its 47 without one do not block, before or after 2027-03-12. The single VEX (CVE-2025-47273) did not move: it stops applying
+  on 2026-12-31 (UTC), and from then the setuptools finding it covers blocks in nine templates and the
+  prototype unless the owner decides otherwise.
 - **The job triggers on the management port are no longer exposed when the scheduler is on**
   (`cmd/api/main.go`, `debugTriggers`). The API mounted every unauthenticated `POST /debug/*` trigger
   on the management port (`:8081`, every interface) when `PROXCLOUD_JOBS_SCHEDULER_ENABLED` **or**
@@ -32,36 +123,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keep them. Docs, the chart's values and README, the installer defaults and the development compose
   file say so. Verified by unit tests only (the management router with the scheduler on and triggers off answers `404` on
   `/debug/*`, the admin job endpoints still run their jobs); not checked on a running install.
-
-### Changed
-
-- **The smaller template disks are confirmed by one lab build each** (`docs/template-build-disk.md`): a
-  native `ubuntu-2604` template at 5 GiB and a Kubernetes 1.37.2 node template at 8 GiB were built on
-  the lab and exported through the export workflow; both images are listed in
-  `docs/vm-artifact-publishing.md`. The native 5 GiB size is close to its limit on Ubuntu 26.04: the
-  root filesystem is 3.7 GiB and the build left less than 1 GiB free before its cleanup. Not done: the
-  other native OS slugs at 5 GiB, a portal import of either image, a node group joining a cluster.
-- **Native Ubuntu 26.04 templates build at 6 GiB** (`BUILD_DISK_GIB_BY_OS` in `images/build.py`; 6 GiB
-  added to the sanitizer's allowlist). Its vendor image has a separate `/boot`, and the 5 GiB build kept
-  less than 1 GiB free on `/` after the upgrade, too close to the 1 GiB admission of the cleanup step.
-  Ubuntu 24.04 at 5 GiB (built and exported on 2026-11-15, 1.7 GiB free) and the other OS keep 5 GiB.
-  Templates and images already built at 5 GiB stay valid. The first 6 GiB lab build (2026-11-15) kept
-  2.0 GiB free after the upgrade and was exported through CI; the image is listed in
-  `docs/vm-artifact-publishing.md`.
-
-### Security
-
-- **HIGH/CRITICAL findings without a fixed version stay tracked until 2027-03-12** instead of
-  2026-12-12 (`UNFIXED_REVIEW_BY` in `.github/scripts/check_scan_report.py`; owner decision of
-  2026-11-15). The reason is the review in `docs/security-unfixed-review.md`: per-target counts by
-  Debian status for the eleven non-GPU templates, the controlled-base prototype and the VM export tool
-  image (the product images and lockfiles have none), which findings a third party's data can reach,
-  and what was not checked. The gate still blocks every finding with a fixed version in those targets,
-  and from 2027-03-12 the unfixed ones again. The default `python` template is outside that set: it is
-  a public image run as is and scanned report-only, so its 2 HIGH zlib findings with a fixed version
-  and its 47 without one do not block, before or after 2027-03-12. The single VEX (CVE-2025-47273) did not move: it stops applying
-  on 2026-12-31 (UTC), and from then the setuptools finding it covers blocks in nine templates and the
-  prototype unless the owner decides otherwise.
 
 ## [0.6.0] - 2026-11-14
 

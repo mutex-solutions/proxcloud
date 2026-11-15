@@ -145,6 +145,12 @@ func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteError(w, kamajiRemovedKeysErr(cfg))
 		return
 	}
+	if cfg, _ := doc["config"].(map[string]any); cfg["provider"] == "proxmox" {
+		if err := externalservice.ValidatePVENetwork(cfg["network"], nil); err != nil {
+			httpx.WriteError(w, httpx.BadRequest(err.Error()))
+			return
+		}
+	}
 	if cfg, _ := doc["config"].(map[string]any); externalservice.ValidateAttachPolicy(cfg) != nil {
 		httpx.WriteError(w, httpx.BadRequest(externalservice.ValidateAttachPolicy(cfg).Error()))
 		return
@@ -297,12 +303,19 @@ func (h *Handler) applyServiceConnectionBody(req *http.Request, doc pgdoc.M) *ht
 			return httpx.BadRequest(err.Error())
 		}
 		cfg := ensureConfig(doc)
+		storedNetwork := cfg["network"]
 		for k, v := range c {
 			cfg[k] = v
 		}
 		if _, ok := c["cluster"]; ok { // the body's cluster block replaced the stored one
 			if herr := kamajiRemovedKeysErr(cfg); herr != nil {
 				return herr
+			}
+		}
+		// Only a body with a network block, and only for a problem the stored block does not have already.
+		if raw, ok := c["network"]; ok && cfg["provider"] == "proxmox" {
+			if err := externalservice.ValidatePVENetwork(raw, storedNetwork); err != nil {
+				return httpx.BadRequest(err.Error())
 			}
 		}
 		if raw, ok := c["storageProfiles"]; ok && cfg["provider"] == "proxmox" {

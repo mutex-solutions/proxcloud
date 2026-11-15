@@ -65,7 +65,8 @@ func isMutation(m string) bool {
 }
 
 // auditSkip drops read-via-POST admin endpoints (the Proxmox and object store connection tests, the bulk attach
-// preview — no state change → not an auditable mutation).
+// preview — no state change → not an auditable mutation). A Proxmox test that sends the stored token secret to
+// another address writes its own event (pveAuthAuditEvent).
 func auditSkip(path string) bool {
 	return strings.HasSuffix(path, "/service/proxmox/auth") || strings.HasSuffix(path, "/object-store/test") ||
 		strings.HasSuffix(path, "/bulk-attach/preview")

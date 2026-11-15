@@ -9,6 +9,7 @@ package admin
 // a node runs the iptables (not nftables) firewall, or a stored provider's public
 // network sits on a node's management bridge.
 // Missing ProxCloudPlatform privileges come back as warnings, not failures.
+// ?checks=all answers 200 with one row per check instead of stopping at the first failure.
 //
 // Storage capabilities: POST /service/{id}/storage/detect re-detects and persists
 // config.capabilities; PUT /service/{id}/storage-classes sets the per-storage class overrides;
@@ -31,20 +32,38 @@ import (
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
+	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
+	"github.com/mutex-solutions/proxcloud/internal/platform/rbac"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
 // pveAuthReq is the connection-test request body. All fields optional when
-// ?externalServiceId resolves a stored provider.
+// ?externalServiceId resolves a stored provider. A field the body leaves out is nil, so that with
+// a stored provider and a blank secret only the fields it does carry replace the stored ones.
 type pveAuthReq struct {
-	APIURL      string `json:"apiUrl"`
-	CACert      string `json:"caCert"`
-	TokenID     string `json:"tokenId"`
-	TokenSecret string `json:"tokenSecret"`
-	Fingerprint string `json:"fingerprint"`
-	InsecureTLS bool   `json:"insecureTls"`
+	APIURL      *string  `json:"apiUrl"`
+	APIURLs     []string `json:"apiUrls"`
+	CACert      *string  `json:"caCert"`
+	TokenID     *string  `json:"tokenId"`
+	TokenSecret string   `json:"tokenSecret"`
+	Fingerprint *string  `json:"fingerprint"`
+	InsecureTLS *bool    `json:"insecureTls"`
 }
+
+// PVECheck is one row of the connection test, returned with ?checks=all. The ids are part of the API (docs/api.md).
+type PVECheck struct {
+	ID      string `json:"id"`
+	Status  string `json:"status"` // checkOK | checkWarn | checkFail
+	Message string `json:"message"`
+}
+
+// checkWarn works but wants the operator's attention; checkFail does not work.
+const (
+	checkOK   = "ok"
+	checkWarn = "warn"
+	checkFail = "fail"
+)
 
 // PVEAuthResponse feeds the admin provider form.
 type PVEAuthResponse struct {
@@ -56,6 +75,13 @@ type PVEAuthResponse struct {
 	// Warnings are non-fatal findings, chiefly privileges the token lacks
 	// against the ProxCloudPlatform role (docs/proxmox-permissions.md).
 	Warnings []string `json:"warnings"`
+	// Checks is every check that ran, one row each; only with ?checks=all.
+	Checks []PVECheck `json:"checks,omitempty"`
+	// Bridges and PresentedFingerprint come with ?checks=all, for callers who may change the provider only: both say
+	// how the site is wired, and the fingerprint is there to be pinned. Bridges are the nodes' bridges, to choose a
+	// public network from. PresentedFingerprint is the certificate of a connection that was refused over it.
+	Bridges              []pve.NodeBridge `json:"bridges,omitempty"`
+	PresentedFingerprint string           `json:"presentedFingerprint,omitempty"`
 }
 
 func (h *Handler) proxmoxAuth(w http.ResponseWriter, r *http.Request) {
@@ -67,93 +93,351 @@ func (h *Handler) proxmoxAuth(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
 		return
 	}
-	cfg, ok := h.pveConfig(r.Context(), req, r.URL.Query().Get("externalServiceId"))
+	ctx := r.Context()
+	var es *externalservice.ExternalService
+	if id := r.URL.Query().Get("externalServiceId"); id != "" && h.esSvc != nil {
+		if got, err := h.esSvc.Get(ctx, id); err == nil && got != nil && got.IsProxmox() {
+			es = got
+		}
+	}
+	_, granted, _ := h.adminContext(r)
+	manage := rbac.Matches(granted, externalServiceManagePerm)
+	cfg, ok := pveAuthConfig(req, es, manage)
 	if !ok {
 		httpx.WriteError(w, httpx.BadRequest("apiUrl, tokenId and tokenSecret are required"))
 		return
 	}
-	cc, err := pve.New(cfg)
-	if err != nil {
-		httpx.WriteError(w, httpx.BadRequest("Proxmox connection failed: "+err.Error()))
-		return
+	out, herr := pveConnectionTest(ctx, cfg, es, r.URL.Query().Get("checks") == "all", manage)
+	if ev, ok := pveAuthAuditEvent(r, req, es, cfg, herr); ok && h.audit != nil {
+		h.logAuditNow(r, ev)
 	}
-	ctx := r.Context()
-	ver, err := cc.Version(ctx)
-	if err != nil {
-		// connection test → 400, not 500 (a bad credential is a client error)
-		httpx.WriteError(w, httpx.BadRequest("Proxmox authentication failed: "+err.Error()))
-		return
-	}
-	// Preflight: with the datacenter firewall off, security groups, VM anti-spoof
-	// and the vnet tenant-isolation rules are all silently unenforced.
-	fwOn, err := cc.DatacenterFirewallEnabled(ctx)
-	if err != nil {
-		httpx.WriteError(w, httpx.BadRequest("Proxmox preflight failed: cannot read the datacenter firewall options: "+err.Error()))
-		return
-	}
-	if !fwOn {
-		httpx.WriteError(w, httpx.BadRequest("Proxmox preflight failed: the datacenter firewall is disabled, so security groups and tenant network isolation are not enforced. Enable it under Datacenter > Firewall > Options."))
-		return
-	}
-	if herr := checkNodeFirewalls(ctx, cc); herr != nil {
+	if herr != nil {
 		httpx.WriteError(w, herr)
 		return
 	}
+	httpx.OK(w, out)
+}
+
+// pveConnectionTest runs the connection test against cfg; es is the stored provider when the caller named one. It
+// answers the first failed check as a 400, as it always has: installer stage 60 relies on that. With all it runs every
+// check it still can and reports each one in Checks, so a cluster with its firewall off still gets its privilege gaps
+// listed. Only a cluster that cannot be reached, or refuses the token, ends the list early. details adds the node
+// bridges and the fingerprint of a refused certificate to that answer.
+func pveConnectionTest(ctx context.Context, cfg pve.Config, es *externalservice.ExternalService, all, details bool) (PVEAuthResponse, *httpx.HTTPError) {
+	out := PVEAuthResponse{Nodes: []pve.Node{}, Storages: []pve.StorageDef{}, SDNZones: []pve.SDNZone{}, PCIMappings: []pve.PCIMapping{}, Warnings: []string{}}
+	add := func(id, status, msg string) {
+		if all {
+			out.Checks = append(out.Checks, PVECheck{ID: id, Status: status, Message: msg})
+		}
+	}
+	// check records one check that fails the test: herr is its failure, nil when it passed. What it returns ends the test.
+	check := func(id string, herr *httpx.HTTPError, passed string) *httpx.HTTPError {
+		if herr == nil {
+			add(id, checkOK, passed)
+			return nil
+		}
+		add(id, checkFail, herr.Msg)
+		if all {
+			return nil
+		}
+		return herr
+	}
+	// warn records a check that only ever warns, with what it found, and returns that.
+	warn := func(id, passed string, found []string) []string {
+		if len(found) == 0 {
+			add(id, checkOK, passed)
+		} else {
+			add(id, checkWarn, strings.Join(found, "\n"))
+		}
+		return found
+	}
+	cc, err := pve.New(cfg)
+	if err != nil {
+		return out, check("connect", httpx.BadRequest("Proxmox connection failed: "+err.Error()), "")
+	}
+	ver, err := cc.Version(ctx)
+	if err != nil {
+		// connection test → 400, not 500 (a bad credential is a client error)
+		id := "connect"
+		var ae *pve.APIError
+		if errors.As(err, &ae) { // PVE answered: the address and its certificate are fine, the token is not
+			add("connect", checkOK, "Proxmox answers at this address.")
+			id = "token"
+		} else if all && details {
+			out.PresentedFingerprint = pve.PresentedFingerprint(err)
+		}
+		return out, check(id, httpx.BadRequest("Proxmox authentication failed: "+err.Error()), "")
+	}
+	out.Version, _ = ver["version"].(string)
+	add("connect", checkOK, "Reached Proxmox VE "+out.Version+".")
+	// Preflight: with the datacenter firewall off, security groups, VM anti-spoof
+	// and the vnet tenant-isolation rules are all silently unenforced.
+	if herr := check("firewall-datacenter", checkDatacenterFirewall(ctx, cc), "The datacenter firewall is on."); herr != nil {
+		return out, herr
+	}
+	if herr := check("firewall-nodes", checkNodeFirewalls(ctx, cc), "Every online node runs the nftables firewall."); herr != nil {
+		return out, herr
+	}
 	// Preflight: a stored provider's public networks must not sit on a node's
 	// management bridge.
-	if id := r.URL.Query().Get("externalServiceId"); id != "" && h.esSvc != nil {
-		if es, err := h.esSvc.Get(ctx, id); err == nil && es != nil && es.IsProxmox() {
-			if herr := checkPublicNetworks(ctx, cc, es.PVENetworkConfig().PublicNetworks); herr != nil {
-				httpx.WriteError(w, herr)
-				return
-			}
+	if es != nil {
+		if herr := check("public-networks", checkPublicNetworks(ctx, cc, es.PVENetworkConfig().PublicNetworks), "No public network is on a management bridge."); herr != nil {
+			return out, herr
 		}
 	}
-	out := PVEAuthResponse{Nodes: []pve.Node{}, Storages: []pve.StorageDef{}, SDNZones: []pve.SDNZone{}, PCIMappings: []pve.PCIMapping{}, Warnings: tokenWarnings(ctx, cc, cfg.TokenID)}
-	if id := r.URL.Query().Get("externalServiceId"); id != "" && h.esSvc != nil {
-		if es, err := h.esSvc.Get(ctx, id); err == nil && es != nil && es.IsProxmox() {
-			if es.PVEImportStorage() != "" {
-				out.Warnings = append(out.Warnings, importStoreWarnings(ctx, cc, es.PVEImportStorage())...)
-			}
-			out.Warnings = append(out.Warnings, storeReachWarnings(ctx, cc, es.PVENetworkConfig().BlockedCIDRs)...)
-			out.Warnings = append(out.Warnings, bootISOWarnings(ctx, cc, es.PVEBootISOStorage())...)
-			out.Warnings = append(out.Warnings, "Ordinary server seed CDs retain plaintext user-data. Check GET /admin/service/"+es.ID+"/seed-cleanup for pending cleanup; a separate complete global read-only inventory credential is required (docs/server-seed-safety.md).")
+	for _, c := range tokenChecks(ctx, cc, cfg.TokenID) {
+		add(c.ID, c.Status, c.Message)
+		if c.Status != checkOK {
+			out.Warnings = append(out.Warnings, c.Message)
 		}
 	}
-	if v, ok := ver["version"].(string); ok {
-		out.Version = v
+	var importFound []string // what is wrong with the import store; its row comes with the storage list below
+	if es != nil {
+		if es.PVEImportStorage() != "" {
+			importFound = importStoreWarnings(ctx, cc, es.PVEImportStorage())
+			out.Warnings = append(out.Warnings, importFound...)
+		}
+		out.Warnings = append(out.Warnings, warn("store-reach", "Tenant networks cannot reach the network stores.", storeReachWarnings(ctx, cc, es.PVENetworkConfig().BlockedCIDRs))...)
+		out.Warnings = append(out.Warnings, warn("boot-iso", "The Kubernetes bootstrap ISO store is node-local and takes ISOs.", bootISOWarnings(ctx, cc, es.PVEBootISOStorage()))...)
+		out.Warnings = append(out.Warnings, "Ordinary server seed CDs retain plaintext user-data. Check GET /admin/service/"+es.ID+"/seed-cleanup for pending cleanup; a separate complete global read-only inventory credential is required (docs/server-seed-safety.md).")
 	}
 	// Best-effort enrichment: a token narrow enough to miss one of these should not
 	// fail the whole test — the form renders what it can.
 	if ns, err := cc.Nodes(ctx); err == nil {
 		out.Nodes = ns
 	}
-	if ss, err := cc.ListStorage(ctx); err == nil {
+	ss, storageErr := cc.ListStorage(ctx)
+	if storageErr == nil {
 		out.Storages = ss
 	}
-	if zs, err := cc.ListSDNZones(ctx); err == nil {
+	zs, zoneErr := cc.ListSDNZones(ctx)
+	if zoneErr == nil {
 		out.SDNZones = zs
 	}
 	if ms, err := cc.ListPCIMappings(ctx); err == nil {
 		out.PCIMappings = ms
 	}
-	httpx.OK(w, out)
+	if !all {
+		return out, nil
+	}
+	// From here on: what only ?checks=all reports. None of it ever failed the connection test or was a warning of
+	// it, and none may start to: these are rows, never a 400 and never in Warnings.
+	out.Checks = append(out.Checks, versionCheck(out.Version), templatePoolCheck(ctx, cc))
+	importStorage := ""
+	if es != nil {
+		netCfg := es.PVENetworkConfig()
+		out.Checks = append(out.Checks, zoneCheck(netCfg, zs, zoneErr), cidrPoolCheck(ctx, cc, netCfg.CIDRPool), storageProfileCheck(es))
+		if z, ok := netCfg.Zones[netCfg.DefaultZone]; netCfg.Isolation == pve.IsolationEVPN || (ok && z.Type() == "evpn") {
+			out.Checks = append(out.Checks, frrCheck(ctx, cc))
+		}
+		importStorage = es.PVEImportStorage()
+	}
+	if storageErr != nil {
+		importFound = append(importFound, "Could not read the storages: "+storageErr.Error())
+	} else {
+		importFound = append(importFound, importContentProblems(ss, importStorage)...)
+	}
+	passed := "A storage takes import content."
+	if importStorage != "" {
+		passed = "Storage " + importStorage + " takes import content and the token can delete files there."
+	}
+	warn("import-store", passed, importFound)
+	if details {
+		out.Bridges, _ = cc.NodeBridges(ctx)
+	}
+	return out, nil
 }
 
-// tokenWarnings reports a root@pam token and every ProxCloudPlatform privilege
-// the token lacks. Warnings only: an operator may grant less on purpose (no GPUs,
-// no EVPN) and the test must still pass.
+// minPVE is the oldest Proxmox VE the portal supports (docs/install.md).
+var minPVE = [2]int{9, 2}
+
+func versionCheck(version string) PVECheck {
+	var major, minor int
+	if n, _ := fmt.Sscanf(version, "%d.%d", &major, &minor); n == 0 {
+		return PVECheck{ID: "version", Status: checkWarn, Message: fmt.Sprintf("Could not read the Proxmox VE version %q. ProxCloud needs %d.%d or later.", version, minPVE[0], minPVE[1])}
+	}
+	if major < minPVE[0] || (major == minPVE[0] && minor < minPVE[1]) {
+		return PVECheck{ID: "version", Status: checkFail, Message: fmt.Sprintf("Proxmox VE %s found. ProxCloud needs %d.%d or later.", version, minPVE[0], minPVE[1])}
+	}
+	return PVECheck{ID: "version", Status: checkOK, Message: "Proxmox VE " + version + "."}
+}
+
+// templatePoolCheck: OS templates are read from pve.TemplatePool only, so without the pool the image list stays empty.
+func templatePoolCheck(ctx context.Context, cc *pve.Client) PVECheck {
+	pool, err := cc.GetPool(ctx, pve.TemplatePool)
+	switch {
+	case err != nil:
+		return PVECheck{ID: "template-pool", Status: checkWarn, Message: "Could not read the pool " + pve.TemplatePool + ": " + err.Error()}
+	case pool == nil:
+		return PVECheck{ID: "template-pool", Status: checkWarn, Message: "The pool " + pve.TemplatePool + " does not exist. OS templates are read from it: create it with `pveum pool add " + pve.TemplatePool + "`."}
+	}
+	return PVECheck{ID: "template-pool", Status: checkOK, Message: "The pool " + pve.TemplatePool + " exists."}
+}
+
+// zoneCheck: tenant networks need a default zone in the provider config. The zone itself is made with the first
+// network, so it may be absent in Proxmox, but not be there as another type.
+func zoneCheck(netCfg externalservice.PVENetwork, live []pve.SDNZone, liveErr error) PVECheck {
+	z, ok := netCfg.Zones[netCfg.DefaultZone]
+	if !ok {
+		return PVECheck{ID: "zone", Status: checkFail, Message: "No tenant network zone is configured (config.network.defaultZone and zones). Network creates answer 503."}
+	}
+	if liveErr != nil {
+		return PVECheck{ID: "zone", Status: checkWarn, Message: "Could not read the SDN zones: " + liveErr.Error()}
+	}
+	for _, l := range live {
+		if l.Zone != z.Key {
+			continue
+		}
+		if l.Type != z.Type() {
+			return PVECheck{ID: "zone", Status: checkFail, Message: fmt.Sprintf("Zone %s exists in Proxmox as a %s zone, but is configured as %s.", z.Key, l.Type, z.Type())}
+		}
+		return PVECheck{ID: "zone", Status: checkOK, Message: fmt.Sprintf("Zone %s (%s) exists.", z.Key, l.Type)}
+	}
+	return PVECheck{ID: "zone", Status: checkOK, Message: fmt.Sprintf("Zone %s (%s) is created with the first tenant network.", z.Key, z.Type())}
+}
+
+// cidrPoolCheck: tenant CIDRs are carved from the pool. Inside a management network they would shadow the nodes.
+func cidrPoolCheck(ctx context.Context, cc *pve.Client, pool string) PVECheck {
+	if pool == "" {
+		return PVECheck{ID: "cidr-pool", Status: checkFail, Message: "No cidrPool is configured (config.network.cidrPool). Network creates answer 503."}
+	}
+	p, err := externalservice.ParseCIDRPool(pool)
+	if err != nil {
+		return PVECheck{ID: "cidr-pool", Status: checkFail, Message: err.Error() + "; it is " + pool + "."}
+	}
+	mgmt, complete, err := cc.ManagementCIDRs(ctx)
+	if err != nil {
+		return PVECheck{ID: "cidr-pool", Status: checkWarn, Message: "Could not read the node networks to compare cidrPool with them: " + err.Error()}
+	}
+	for _, m := range mgmt {
+		if mp, err := netip.ParsePrefix(m); err == nil && mp.Overlaps(p) {
+			return PVECheck{ID: "cidr-pool", Status: checkWarn, Message: "cidrPool " + pool + " overlaps a management network of the nodes. Tenant networks carved there would shadow the nodes' own addresses: choose a range the site does not use."}
+		}
+	}
+	if !complete { // a node that did not answer is left out of mgmt: not compared is not clear
+		return PVECheck{ID: "cidr-pool", Status: checkWarn, Message: "Could not read the networks of every node; cidrPool " + pool + " was compared with the nodes that answered only."}
+	}
+	return PVECheck{ID: "cidr-pool", Status: checkOK, Message: "cidrPool " + pool + " is clear of the nodes' management networks."}
+}
+
+// storageProfileCheck: a server whose flavor names no profile is placed on the default one.
+func storageProfileCheck(es *externalservice.ExternalService) PVECheck {
+	def := es.PVEDefaultStorageProfile()
+	if def == "" {
+		return PVECheck{ID: "storage-profile", Status: checkFail, Message: "No default storage profile is configured (config.storageProfiles and defaultStorageProfile). Servers cannot be placed."}
+	}
+	if _, ok := es.PVEStorageProfiles()[def]; !ok {
+		return PVECheck{ID: "storage-profile", Status: checkFail, Message: "defaultStorageProfile " + def + " is not one of the storage profiles."}
+	}
+	return PVECheck{ID: "storage-profile", Status: checkOK, Message: "The default storage profile is " + def + "."}
+}
+
+// frrCheck: an EVPN zone's FRR config is reloaded with frr-pythontools, which a stock node does not have.
+func frrCheck(ctx context.Context, cc *pve.Client) PVECheck {
+	missing, err := cc.NodesWithoutPackage(ctx, "frr-pythontools")
+	switch {
+	case err != nil:
+		return PVECheck{ID: "frr", Status: checkWarn, Message: "Could not read the node packages to check for frr-pythontools, which EVPN zones need: " + err.Error()}
+	case len(missing) > 0:
+		return PVECheck{ID: "frr", Status: checkWarn, Message: "frr-pythontools is not installed on node " + strings.Join(missing, ", ") + ". EVPN zones need it: run `apt install frr-pythontools` there."}
+	}
+	return PVECheck{ID: "frr", Status: checkOK, Message: "frr-pythontools is installed on every online node."}
+}
+
+// importContentProblems: template import and customer image import write to a storage with import content, which no
+// stock storage has. importStorage is the provider's configured one ("" = none yet).
+func importContentProblems(defs []pve.StorageDef, importStorage string) []string {
+	takes := func(d pve.StorageDef) bool {
+		return d.Disable != 1 && slices.Contains(strings.Split(d.Content, ","), "import")
+	}
+	if importStorage == "" {
+		if slices.ContainsFunc(defs, takes) {
+			return nil
+		}
+		return []string{"No storage takes import content, which template import and customer image import need. Add it to a file storage: `pvesm set <storage> --content <its content>,import`."}
+	}
+	i := slices.IndexFunc(defs, func(d pve.StorageDef) bool { return d.Storage == importStorage })
+	switch {
+	case i < 0:
+		return []string{"importStorage " + importStorage + " is not a storage of this cluster."}
+	case !takes(defs[i]):
+		return []string{"importStorage " + importStorage + " does not take import content: `pvesm set " + importStorage + " --content " + defs[i].Content + ",import`."}
+	}
+	return nil
+}
+
+// proxmoxSetupScript answers GET /admin/setup/proxmox-script as text: the script an operator runs as root on a node to
+// create the portal token's identity (pve.PlatformSetupScript). Query: tokenId (default proxcloud@pve!platform), gpu
+// (default false) and importStorage (default none). The portal holds no root credential and asks for none, so it
+// cannot run this itself. A value that is not a plain id is a 400: the answer is run by a root shell.
+func (h *Handler) proxmoxSetupScript(w http.ResponseWriter, r *http.Request) {
+	if !h.require(w, r, "admin:service:read") {
+		return
+	}
+	q := r.URL.Query()
+	tokenID := q.Get("tokenId")
+	if tokenID == "" {
+		tokenID = pve.DefaultPlatformTokenID
+	}
+	gpu := false
+	if v := q.Get("gpu"); v != "" {
+		var err error
+		if gpu, err = strconv.ParseBool(v); err != nil {
+			httpx.WriteError(w, httpx.BadRequest("gpu must be true or false"))
+			return
+		}
+	}
+	script, err := pve.PlatformSetupScript(tokenID, gpu, q.Get("importStorage"))
+	if err != nil {
+		httpx.WriteError(w, httpx.BadRequest(err.Error()))
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	fmt.Fprint(w, script)
+}
+
+// checkDatacenterFirewall rejects a cluster whose datacenter firewall is off or cannot be read.
+func checkDatacenterFirewall(ctx context.Context, cc *pve.Client) *httpx.HTTPError {
+	fwOn, err := cc.DatacenterFirewallEnabled(ctx)
+	if err != nil {
+		return httpx.BadRequest("Proxmox preflight failed: cannot read the datacenter firewall options: " + err.Error())
+	}
+	if !fwOn {
+		return httpx.BadRequest("Proxmox preflight failed: the datacenter firewall is disabled, so security groups and tenant network isolation are not enforced. Enable it under Datacenter > Firewall > Options.")
+	}
+	return nil
+}
+
+// tokenWarnings is what tokenChecks found wrong, as the warnings the route has always returned.
 func tokenWarnings(ctx context.Context, cc *pve.Client, tokenID string) []string {
 	out := []string{}
+	for _, c := range tokenChecks(ctx, cc, tokenID) {
+		if c.Status != checkOK {
+			out = append(out, c.Message)
+		}
+	}
+	return out
+}
+
+// tokenChecks reports a root@pam token and, per ACL path, every ProxCloudPlatform privilege
+// the token lacks. Warnings only: an operator may grant less on purpose (no GPUs,
+// no EVPN) and the test must still pass.
+func tokenChecks(ctx context.Context, cc *pve.Client, tokenID string) []PVECheck {
+	out := []PVECheck{{ID: "token", Status: checkOK, Message: "Proxmox accepts the token " + tokenID + "."}}
 	if strings.HasPrefix(tokenID, "root@pam!") {
-		out = append(out, "The token belongs to root@pam and has full rights on the cluster. Use a dedicated proxcloud@pve token with the ProxCloudPlatform role (see docs/proxmox-permissions.md).")
+		out[0] = PVECheck{ID: "token", Status: checkWarn, Message: "The token belongs to root@pam and has full rights on the cluster. Use a dedicated proxcloud@pve token with the ProxCloudPlatform role (see docs/proxmox-permissions.md)."}
 	}
-	missing, err := cc.MissingPrivileges(ctx, pve.PlatformPrivileges)
-	if err != nil {
-		return append(out, "Could not read the token's permissions: "+err.Error())
-	}
-	for _, m := range missing {
-		out = append(out, "Token lacks "+m+" (see docs/proxmox-permissions.md)")
+	for _, chk := range pve.PlatformPrivileges {
+		missing, err := cc.MissingPrivileges(ctx, []pve.PrivCheck{chk})
+		if err != nil {
+			return append(out[:1], PVECheck{ID: "privileges", Status: checkWarn, Message: "Could not read the token's permissions: " + err.Error()})
+		}
+		c := PVECheck{ID: "privileges:" + chk.Path, Status: checkOK, Message: "The token holds what the portal needs on " + chk.Path + "."}
+		if len(missing) > 0 {
+			c.Status, c.Message = checkWarn, "Token lacks "+missing[0]+" (see docs/proxmox-permissions.md)"
+		}
+		out = append(out, c)
 	}
 	return out
 }
@@ -299,25 +583,76 @@ func checkPublicNetworks(ctx context.Context, cc *pve.Client, pns []externalserv
 	return nil
 }
 
-// pveConfig builds the pve.Config from the request, or from the stored service
-// when externalServiceId is given and the body carries no secret.
-func (h *Handler) pveConfig(ctx context.Context, req pveAuthReq, externalServiceID string) (pve.Config, bool) {
-	if externalServiceID != "" && req.TokenSecret == "" && h.esSvc != nil {
-		if es, err := h.esSvc.Get(ctx, externalServiceID); err == nil && es != nil && es.IsProxmox() {
-			return es.PVEConfig(), true
+// pveAuthConfig builds the pve.Config to test: the body's, or the stored provider's when the body has no secret. With
+// overlay the fields the body does carry replace the stored ones, so an edited form is tested with the stored secret
+// before it is saved. overlay is for callers who may change the provider: sending the stored secret to an address of
+// the caller's choosing hands it over, so a caller who can only read gets the stored config as it is.
+func pveAuthConfig(req pveAuthReq, es *externalservice.ExternalService, overlay bool) (pve.Config, bool) {
+	var cfg pve.Config
+	stored := es != nil && req.TokenSecret == ""
+	if stored {
+		if cfg = es.PVEConfig(); !overlay {
+			return cfg, true
 		}
+	} else {
+		cfg.Secret = req.TokenSecret
 	}
-	if req.APIURL == "" || req.TokenID == "" || req.TokenSecret == "" {
-		return pve.Config{}, false
+	cfg.APIURL = valueOr(req.APIURL, cfg.APIURL)
+	cfg.CACert = valueOr(req.CACert, cfg.CACert)
+	cfg.TokenID = valueOr(req.TokenID, cfg.TokenID)
+	cfg.Fingerprint = valueOr(req.Fingerprint, cfg.Fingerprint)
+	cfg.InsecureTLS = valueOr(req.InsecureTLS, cfg.InsecureTLS)
+	if req.APIURLs != nil {
+		cfg.APIURLs = req.APIURLs
 	}
-	return pve.Config{
-		APIURL:      req.APIURL,
-		CACert:      req.CACert,
-		TokenID:     req.TokenID,
-		Secret:      req.TokenSecret,
-		Fingerprint: req.Fingerprint,
-		InsecureTLS: req.InsecureTLS,
-	}, true
+	return cfg, stored || (cfg.APIURL != "" && cfg.TokenID != "" && cfg.Secret != "")
+}
+
+// ActionConnectionTest is the audit action of a Proxmox connection test that sent the stored token secret elsewhere.
+const ActionConnectionTest = "CONNECTION_TEST"
+
+// pveAuthAuditEvent is the audit event of a connection test that sends the stored token secret to an address, or
+// under a certificate trust, the stored provider does not hold: an edited form tested before Save. The route is not
+// audited otherwise (auditSkip: it is a read) and the provider does not change, so nothing else records where the
+// secret went. ok is false for a test with its own secret or with the stored connection. Written whatever the outcome:
+// a failed test has sent the secret too.
+func pveAuthAuditEvent(r *http.Request, req pveAuthReq, es *externalservice.ExternalService, cfg pve.Config, herr *httpx.HTTPError) (audit.AuditEvent, bool) {
+	if es == nil || req.TokenSecret != "" {
+		return audit.AuditEvent{}, false
+	}
+	target := func(c pve.Config) map[string]any {
+		return map[string]any{"apiUrl": c.APIURL, "apiUrls": append([]string{}, c.APIURLs...), "caCert": c.CACert,
+			"fingerprint": c.Fingerprint, "insecureTls": c.InsecureTLS}
+	}
+	changes := audit.DiffSnapshots(target(es.PVEConfig()), target(cfg))
+	if len(changes) == 0 {
+		return audit.AuditEvent{}, false
+	}
+	actor := adminActor(r)
+	ev := audit.AdminEvent(actor, actor)
+	ev.EventContext = audit.ContextPlatform
+	ev.Action = ActionConnectionTest
+	ev.ResourceType = "EXTERNAL_SERVICE"
+	ev.ResourceID = es.ID
+	ev.ResourceDisplayName = es.Name
+	ev.ResourceMetadata = map[string]any{"operation": "proxmox-auth", "storedSecret": true, "apiUrl": cfg.APIURL, "apiUrls": cfg.APIURLs}
+	ev.Changes = changes
+	ev.Outcome = audit.OutcomeSuccess
+	if herr != nil {
+		ev.Outcome, ev.ErrorMessage = audit.OutcomeFailure, herr.Msg
+	}
+	if ev.Actor != nil {
+		ev.Actor.IPAddress = clientIP(r)
+		ev.Actor.UserAgent = r.UserAgent()
+	}
+	return ev, true
+}
+
+func valueOr[T any](p *T, fallback T) T {
+	if p != nil {
+		return *p
+	}
+	return fallback
 }
 
 // proxmoxMigrateServer moves a VM to another node: POST /service/{id}/server/{vmid}/migrate {target}. Operator only,

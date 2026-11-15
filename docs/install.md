@@ -46,7 +46,7 @@ installer's split path end to end; dated lab reports below remain historical.
 
 | Stage | Playbook | What it does |
 |---|---|---|
-| 00 | `00-preflight.yml` | Version, firewall, FRR, reach, refuses a Proxmox node as management host, detects storage and proposes profiles, pins the API certificate, fio class suggestion. |
+| 00 | `00-preflight.yml` | Version, firewall, FRR, reach, refuses a Proxmox node as management host, refuses a tenant network the portal would refuse at stage 60 (see `network.kind`), detects storage and proposes profiles, pins the API certificate, fio class suggestion. |
 | 05 | `05-storage.yml` | With a NAS: creates `nas-templates`, `nas-capacity`, `nas-backup` over NFS. |
 | 10 | `10-pve-identity.yml` | Roles, users, privilege-separated tokens, ACLs and pools. |
 | 25 | `25-mgmt-vms.yml` | `placement: pve-vm` only: the management VMs. |
@@ -84,7 +84,7 @@ the services cluster arrive with split mode.
 | `ingress.tls` | `none` | `none`, `acme` (Let's Encrypt, needs public DNS), or the name of a TLS Secret |
 | `images.build` | `true` | Builds images and chart from this checkout and pushes them to a registry on the management cluster. `false` pulls the release pinned in `versions.yml` from `images.registry` (for that, a release must be published) |
 | `images.pull_secret` | none | `{username, password}` for a private registry |
-| `network.kind` | `evpn` | `evpn`, `simple` (one node), `vlan` |
+| `network.kind` | `evpn` | `evpn`, `simple` (one node), `vlan` (needs `network.bridge`). `network.isolation: evpn` needs `evpn`, and `network.cidr_pool` is IPv4 `/24` or larger: preflight refuses anything else, as the portal would at stage 60 |
 | `object_store.mode` | `vm` | `vm`, `truenas-app`, `external`, `ceph-rgw` |
 | `templates.per_node` | `auto` | `auto`: a copy per node unless the default profile is on shared storage |
 | `storage_profiles`, `storage_classes` | detected | Override detection; confirm a fio suggestion |

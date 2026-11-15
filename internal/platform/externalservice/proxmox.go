@@ -80,12 +80,16 @@ package externalservice
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
+	"net/netip"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 )
@@ -395,6 +399,86 @@ func (e *ExternalService) PVENetworkConfig() PVENetwork {
 		for k := range out.Zones {
 			out.DefaultZone = k
 		}
+	}
+	return out
+}
+
+// ParseCIDRPool parses config.network.cidrPool, the range tenant networks are carved from: IPv4, /24 or larger.
+func ParseCIDRPool(pool string) (netip.Prefix, error) {
+	p, err := netip.ParsePrefix(pool)
+	if err != nil || !p.Addr().Is4() || p.Bits() > 24 {
+		return netip.Prefix{}, fmt.Errorf("cidrPool must be an IPv4 range of /24 or larger")
+	}
+	return p.Masked(), nil
+}
+
+// ValidatePVENetwork checks the config.network value a save carries (raw; nil is no network) against the block it
+// replaces (stored; nil on a create). It refuses what is wrong and lets through what is missing: a provider is stored
+// before its network is set up, and the setup checks of the connection test report what is still to do. A refused
+// block is one whose tenant networks would fail: Proxmox takes an SDN zone id of at most 8 characters and a VLAN zone
+// only on a bridge, the network code knows three kinds of zone, and a zone per project is copied from the default
+// zone, which must then be EVPN (EnsureProjectZone). A problem the stored block already has is not refused again: the
+// console sends the stored block back with every save, and a block from before this check may work (EnsureZone uses a
+// zone that exists in Proxmox as it is), so it must not lock the provider.
+func ValidatePVENetwork(raw, stored any) error {
+	old := pveNetworkProblems(stored)
+	for _, p := range pveNetworkProblems(raw) {
+		if !slices.Contains(old, p) {
+			return errors.New(p)
+		}
+	}
+	return nil
+}
+
+// pveNetworkProblems lists every problem of a config.network value. A message names the value it refuses, so a
+// changed wrong value is a new problem.
+func pveNetworkProblems(raw any) (out []string) {
+	if raw == nil {
+		return nil
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return []string{"config.network must be an object"}
+	}
+	add := func(format string, a ...any) { out = append(out, fmt.Sprintf(format, a...)) }
+	for _, k := range []string{"cidrPool", "defaultZone", "isolation"} {
+		if _, isStr := m[k].(string); m[k] != nil && !isStr {
+			add("config.network.%s must be a string", k)
+		}
+	}
+	if pool := str(m["cidrPool"]); pool != "" {
+		if _, err := ParseCIDRPool(pool); err != nil {
+			add("config.network.%v, not %s", err, pool)
+		}
+	}
+	zones, ok := m["zones"].(map[string]any)
+	if !ok && m["zones"] != nil {
+		add("config.network.zones must be an object")
+	}
+	for _, key := range sortedKeys(zones) {
+		z, ok := zones[key].(map[string]any)
+		if !ok {
+			add("config.network.zones.%s must be an object", key)
+			continue
+		}
+		if n := utf8.RuneCountInString(key); n == 0 || n > 8 {
+			add("config.network.zones: the zone id %q is the Proxmox SDN zone id, of 1 to 8 characters", key)
+		}
+		kind, isStr := z["kind"].(string)
+		if (z["kind"] != nil && !isStr) || !slices.Contains([]string{"", "evpn", "overlay", "vlan", "simple"}, kind) {
+			add("config.network.zones.%s.kind must be evpn, vlan or simple, not %v", key, z["kind"])
+		}
+		if bridge, _ := z["bridge"].(string); kind == "vlan" && bridge == "" {
+			add("config.network.zones.%s is a vlan zone and needs a bridge", key)
+		}
+	}
+	n := (&ExternalService{Config: map[string]any{"network": m}}).PVENetworkConfig()
+	def, ok := n.Zones[n.DefaultZone]
+	if !ok && (n.DefaultZone != "" || len(zones) > 0) {
+		add("config.network.defaultZone must name one of config.network.zones, not %q", n.DefaultZone)
+	}
+	if ok && n.Isolation == pve.IsolationEVPN && def.Type() != "evpn" {
+		add("config.network.isolation evpn-per-project copies every project's zone from the default zone, which must then be an evpn zone; %s is %s", def.Key, def.Type())
 	}
 	return out
 }

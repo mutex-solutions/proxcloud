@@ -81,6 +81,76 @@ address from that network's pool, pinned by the VM firewall's ipfilter
 project's allow-list. Attaching again while the NIC is plugged answers 409 and
 leaves it alone; an address held by a NIC that never got plugged is plugged.
 
+Proxmox connection test: `POST /api/v1/admin/service/proxmox/auth`
+(`admin:service:read`) tests a connection and stores nothing. The body takes
+`apiUrl`, `apiUrls` (other nodes or a VIP to fail over to), `tokenId`,
+`tokenSecret`, `caCert`, `fingerprint` and `insecureTls`. With
+`?externalServiceId=<id>` and a blank `tokenSecret` it tests the stored provider
+with its stored secret. For a caller with `admin:service:manage`, the fields the
+body does carry then replace the stored ones for this test (an empty string
+clears one), so an edited form can be tested before it is saved. A caller with
+read access only always gets the stored connection: the stored secret is never
+sent to an address such a caller chose. The route is a read and is not in the
+admin audit log, except for this: a test that sends the stored secret with an
+`apiUrl`, `apiUrls`, `caCert`, `fingerprint` or `insecureTls` other than the
+stored one writes a `CONNECTION_TEST` event on the provider (`EXTERNAL_SERVICE`),
+whatever the outcome, with the actor, the fields that differ and the addresses
+tested. The secret itself is not in the event.
+
+By default the first failed check is a `400` with the reason, and a pass is
+`200 {version, nodes, storages, sdnZones, pciMappings, warnings}`. The installer
+depends on this. With `?checks=all` a failed check is not an error: the answer
+is `200` and also has `checks`, one row per check that could still run:
+
+```json
+{"data": {"version": "9.2.1", "warnings": [], "checks": [
+  {"id": "connect", "status": "ok", "message": "Reached Proxmox VE 9.2.1."},
+  {"id": "firewall-datacenter", "status": "fail", "message": "Proxmox preflight failed: the datacenter firewall is disabled, …"},
+  {"id": "privileges:/pool", "status": "warn", "message": "Token lacks VM.Audit on /pool (see docs/proxmox-permissions.md)"}]}}
+```
+
+`status` is `ok`, `warn` (it works, but wants attention) or `fail`. A check with
+several findings puts one on each line of `message`. Rows after `connect` or
+`token` are missing when that one failed, because nothing else can run.
+
+| `id` | Checks | Worst status |
+|------|--------|--------------|
+| `connect` | The address answers and its certificate is trusted | `fail` |
+| `token` | Proxmox accepts the token; `warn` for a `root@pam` token | `fail` |
+| `firewall-datacenter` | The datacenter firewall is on | `fail` |
+| `firewall-nodes` | Every online node runs the nftables firewall | `fail` |
+| `public-networks` | Stored provider: no public network on a management bridge | `fail` |
+| `privileges:<path>` | The token holds the `ProxCloudPlatform` privileges on that ACL path (`/`, `/nodes`, `/pool`, `/sdn`, `/sdn/zones`, `/storage`, `/mapping/pci`). One row `privileges` when they cannot be read | `warn` |
+| `store-reach` | Stored provider: tenant networks cannot reach the network stores | `warn` |
+| `boot-iso` | Stored provider: the Kubernetes bootstrap ISO store is usable | `warn` |
+| `version` | Proxmox VE 9.2 or later | `fail` |
+| `template-pool` | The pool `pc-templates` exists | `warn` |
+| `import-store` | Some storage takes `import` content. Stored provider with `importStorage`: that storage exists, takes it, and the token can delete files there | `warn` |
+| `zone` | Stored provider: a default tenant network zone is configured, and Proxmox has no zone of that id with another type | `fail` |
+| `cidr-pool` | Stored provider: `cidrPool` is an IPv4 range of /24 or larger; `warn` when it overlaps a management network of the nodes, or when a node's networks could not be read (that node was not compared) | `fail` |
+| `storage-profile` | Stored provider: a default storage profile is configured and exists | `fail` |
+| `frr` | Stored provider with an EVPN zone: `frr-pythontools` is installed on every online node | `warn` |
+
+The rows from `version` down exist only in `checks`: they never turn the default
+call into a `400` and never add to `warnings`.
+
+With `?checks=all` a caller with `admin:service:manage` also gets `bridges`,
+the bridges of every node as `{node, iface, type, cidr, management}`
+(`management`: the bridge carries the node's own address or a default gateway,
+so it cannot be a public network), and, when the connection was refused over the
+certificate, `presentedFingerprint`: the SHA-256 of the certificate the server
+presented, in the form `fingerprint` takes. Pinning it without comparing it to
+`pvenode cert info` on the node is trust on first use.
+
+Proxmox setup script: `GET /api/v1/admin/setup/proxmox-script`
+(`admin:service:read`) answers, as `text/plain`, the shell script an operator
+runs as root on a Proxmox node to create the portal token's role, pools, user,
+token and ACLs. Query: `tokenId` (default `proxcloud@pve!platform`), `gpu`
+(`true` adds the `/mapping/pci` ACL; default `false`) and `importStorage` (adds
+`PVEDatastoreAdmin` on that store). A value that is not a plain id is a `400`.
+The script and what it does are in
+[proxmox-permissions.md](proxmox-permissions.md#portal-token-script).
+
 Cloud service selection: the project cloud routes (`/project/{id}/cloud`, its
 actions and deletes, `quota-usage`, `gpu-capacity`, `public-networks`, the S3
 key routes) run against the service named by the `x-service-id` header (with

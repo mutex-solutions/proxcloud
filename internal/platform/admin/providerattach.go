@@ -426,6 +426,11 @@ func (h *Handler) bulkAttachAudit(r *http.Request, run *providerattach.Run, op s
 		ev.Actor.UserAgent = r.UserAgent()
 	}
 	// Synchronously, so the event is there when the answer is: it records who attached what to how many projects.
+	h.logAuditNow(r, ev)
+}
+
+// logAuditNow writes an event before the answer goes out, and in the background when that write fails.
+func (h *Handler) logAuditNow(r *http.Request, ev audit.AuditEvent) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), auditWriteTimeout)
 	defer cancel()
 	if err := h.audit.Log(ctx, ev); err != nil {

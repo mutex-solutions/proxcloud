@@ -1,9 +1,13 @@
 package externalservice
 
 import (
+	"encoding/json"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 )
@@ -350,5 +354,196 @@ func TestPVEImageCatalogMinDiskIsTheLargestCopy(t *testing.T) {
 	}
 	if got := (&ExternalService{}).PVEImageCatalog(found[1:])[0].MinDiskGb; got != 5 {
 		t.Fatalf("equal 5 GiB copies: minimum %d, want 5", got)
+	}
+}
+
+func TestParseCIDRPool(t *testing.T) {
+	tests := []struct {
+		pool, want string // want "" = refused
+	}{
+		{"10.100.0.0/16", "10.100.0.0/16"},
+		{"10.100.0.0/24", "10.100.0.0/24"},
+		{"10.100.3.7/16", "10.100.0.0/16"},
+		{"10.100.0.0/25", ""},
+		{"fd00::/48", ""},
+		{"10.100.0.0", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		got, err := ParseCIDRPool(tt.pool)
+		if (tt.want == "") != (err != nil) || (err == nil && got.String() != tt.want) {
+			t.Errorf("ParseCIDRPool(%q) = %v, %v; want %q", tt.pool, got, err, tt.want)
+		}
+	}
+}
+
+// A network block is refused when its tenant networks would fail, and kept when it is only not set up yet.
+func TestValidatePVENetwork(t *testing.T) {
+	tests := []struct {
+		name, network string // JSON, as a save body carries it
+		wantErr       string // "" = accepted
+	}{
+		{"no network", `null`, ""},
+		{"empty", `{}`, ""},
+		{"the console's create form", `{"isolation":"shared","blockedCidrs":["192.0.2.0/24"]}`, ""},
+		{"a zone per project, no zone yet", `{"isolation":"evpn-per-project","evpnController":"pcx"}`, ""},
+		{"the documented example", `{"defaultZone":"overlay","zones":{"overlay":{"kind":"evpn","controller":"proxcloud","asn":65000,"peers":["10.0.0.1"],"exitNodes":["pve1"],"mtu":1450}},
+			"publicNetworks":[{"id":"vmbr1","name":"Internet","cidr":"203.0.113.0/24"}],"cidrPool":"10.100.0.0/16","isolation":"shared"}`, ""},
+		{"one zone needs no defaultZone", `{"zones":{"simple":{"kind":"simple"}},"cidrPool":"10.100.0.0/24"}`, ""},
+		{"vlan zone on a bridge", `{"defaultZone":"vlan","zones":{"vlan":{"kind":"vlan","bridge":"vmbr0","vlanMin":100,"vlanMax":199}}}`, ""},
+		{"kind left out is evpn", `{"defaultZone":"overlay","zones":{"overlay":{}},"isolation":"evpn-per-project"}`, ""},
+		{"overlay kind is evpn", `{"defaultZone":"o","zones":{"o":{"kind":"overlay"}},"isolation":"evpn-per-project"}`, ""},
+		{"8-character zone id", `{"defaultZone":"zone1234","zones":{"zone1234":{"kind":"simple"},"vlan":{"kind":"vlan","bridge":"vmbr1"}}}`, ""},
+		{"blank cidrPool", `{"cidrPool":""}`, ""},
+
+		{"not an object", `["overlay"]`, "config.network must be an object"},
+		{"cidrPool /25", `{"cidrPool":"10.100.0.0/25"}`, "config.network.cidrPool must be an IPv4 range of /24 or larger"},
+		{"cidrPool IPv6", `{"cidrPool":"fd00::/48"}`, "config.network.cidrPool must be an IPv4 range"},
+		{"cidrPool without a prefix", `{"cidrPool":"10.100.0.0"}`, "config.network.cidrPool must be an IPv4 range"},
+		{"cidrPool not a string", `{"cidrPool":16}`, "config.network.cidrPool must be a string"},
+		{"isolation not a string", `{"isolation":true}`, "config.network.isolation must be a string"},
+		{"zones not an object", `{"zones":["overlay"]}`, "config.network.zones must be an object"},
+		{"zone not an object", `{"zones":{"overlay":"evpn"}}`, "config.network.zones.overlay must be an object"},
+		{"9-character zone id", `{"zones":{"overlay12":{"kind":"evpn"}}}`, `the zone id "overlay12" is the Proxmox SDN zone id, of 1 to 8 characters`},
+		{"empty zone id", `{"zones":{"":{"kind":"evpn"}}}`, `the zone id ""`},
+		{"unknown kind", `{"zones":{"overlay":{"kind":"vxlan"}}}`, "config.network.zones.overlay.kind must be evpn, vlan or simple"},
+		{"kind not a string", `{"zones":{"overlay":{"kind":1}}}`, "config.network.zones.overlay.kind must be"},
+		{"vlan without a bridge", `{"zones":{"vlan":{"kind":"vlan","vlanMin":100}}}`, "config.network.zones.vlan is a vlan zone and needs a bridge"},
+		{"vlan on a blank bridge", `{"zones":{"vlan":{"kind":"vlan","bridge":""}}}`, "needs a bridge"},
+		{"defaultZone not a zone", `{"defaultZone":"overlay","zones":{"simple":{"kind":"simple"}}}`, "config.network.defaultZone must name one of config.network.zones"},
+		{"defaultZone without zones", `{"defaultZone":"overlay"}`, "config.network.defaultZone must name one"},
+		{"two zones, no defaultZone", `{"zones":{"a":{"kind":"simple"},"b":{"kind":"simple"}}}`, "config.network.defaultZone must name one"},
+		{"a zone per project from a simple zone", `{"defaultZone":"s","zones":{"s":{"kind":"simple"}},"isolation":"evpn-per-project"}`,
+			"evpn-per-project copies every project's zone from the default zone, which must then be an evpn zone; s is simple"},
+		{"a zone per project from a vlan zone", `{"defaultZone":"v","zones":{"v":{"kind":"vlan","bridge":"vmbr0"}},"isolation":"evpn-per-project"}`, "v is vlan"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var raw any
+			if err := json.Unmarshal([]byte(tt.network), &raw); err != nil {
+				t.Fatal(err)
+			}
+			err := ValidatePVENetwork(raw, nil)
+			if (tt.wantErr == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("ValidatePVENetwork(%s) = %v, want %q", tt.network, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// A save is refused only for a problem the block it replaces does not have: a wrong value that changes is a new one.
+func TestValidatePVENetworkStored(t *testing.T) {
+	tests := []struct {
+		name, network, stored string // JSON
+		wantErr               string // "" = accepted
+	}{
+		{"the stored problem kept", `{"cidrPool":"10.100.0.0/26"}`, `{"cidrPool":"10.100.0.0/26"}`, ""},
+		{"the stored problem fixed", `{"cidrPool":"10.100.0.0/16"}`, `{"cidrPool":"10.100.0.0/26"}`, ""},
+		{"another wrong pool", `{"cidrPool":"10.100.0.0/25"}`, `{"cidrPool":"10.100.0.0/26"}`, "not 10.100.0.0/25"},
+		{"another missing default zone", `{"defaultZone":"b","zones":{"s":{"kind":"simple"}}}`, `{"defaultZone":"a","zones":{"s":{"kind":"simple"}}}`, `not "b"`},
+		{"another unknown kind", `{"zones":{"o":{"kind":"geneve"}}}`, `{"zones":{"o":{"kind":"vxlan"}}}`, "not geneve"},
+		{"stored is not an object", `{"zones":{"o":{"kind":"vxlan"}}}`, `"overlay"`, "config.network.zones.o.kind must be"},
+		{"no stored block", `{"cidrPool":"10.100.0.0/26"}`, `null`, "config.network.cidrPool must be"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var raw, stored any
+			if err := json.Unmarshal([]byte(tt.network), &raw); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(tt.stored), &stored); err != nil {
+				t.Fatal(err)
+			}
+			err := ValidatePVENetwork(raw, stored)
+			if (tt.wantErr == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("ValidatePVENetwork(%s, %s) = %v, want %q", tt.network, tt.stored, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// The network blocks the repository registers pass the save check: the dev seed, and what installer stage 60
+// (installer/playbooks/60-register.yml, provider_base.config.network) builds from the inventory defaults, for each
+// zone kind and isolation the defaults offer.
+func TestValidatePVENetworkAcceptsShippedConfigs(t *testing.T) {
+	raw, err := os.ReadFile("../../../deploy/seed/external-service-dev.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seed []map[string]any
+	if err := json.Unmarshal(raw, &seed); err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	for _, doc := range seed {
+		if cfg, _ := doc["config"].(map[string]any); cfg["provider"] == "proxmox" {
+			seen++
+			if err := ValidatePVENetwork(cfg["network"], nil); err != nil {
+				t.Errorf("seed %v: %v", doc["_id"], err)
+			}
+		}
+	}
+	if seen == 0 {
+		t.Fatal("the seed has no proxmox provider")
+	}
+
+	raw, err = os.ReadFile("../../../installer/playbooks/group_vars/all/defaults.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var defaults struct {
+		PC struct {
+			Network struct {
+				DefaultZone string   `yaml:"default_zone"`
+				Kind        string   `yaml:"kind"`
+				Bridge      string   `yaml:"bridge"`
+				VlanMin     int      `yaml:"vlan_min"`
+				VlanMax     int      `yaml:"vlan_max"`
+				Controller  string   `yaml:"controller"`
+				CIDRPool    string   `yaml:"cidr_pool"`
+				Isolation   string   `yaml:"isolation"`
+				Blocked     []string `yaml:"blocked_cidrs"`
+			} `yaml:"network"`
+		} `yaml:"pc_defaults"`
+	}
+	if err := yaml.Unmarshal(raw, &defaults); err != nil {
+		t.Fatal(err)
+	}
+	n := defaults.PC.Network
+	if n.DefaultZone == "" || n.Kind == "" || n.CIDRPool == "" {
+		t.Fatalf("installer network defaults not found: %+v", n)
+	}
+	// The refused ones are what stage 00 refuses first (00-preflight.yml, "Check the tenant network settings"), so an
+	// install does not get as far as stage 60 with them.
+	for _, v := range []struct{ kind, bridge, isolation, pool, wantErr string }{
+		{n.Kind, n.Bridge, n.Isolation, n.CIDRPool, ""}, // as shipped
+		{"simple", n.Bridge, n.Isolation, n.CIDRPool, ""},
+		{"vlan", "vmbr1", n.Isolation, n.CIDRPool, ""},
+		{n.Kind, n.Bridge, "evpn", n.CIDRPool, ""},
+		{"vlan", n.Bridge, n.Isolation, n.CIDRPool, "is a vlan zone and needs a bridge"},
+		{"simple", n.Bridge, "evpn", n.CIDRPool, "must then be an evpn zone"},
+		{n.Kind, n.Bridge, n.Isolation, "10.100.0.0/25", "cidrPool must be an IPv4 range of /24 or larger"},
+	} {
+		isolation := pve.IsolationShared // stage 60 registers evpn and evpn-per-project as evpn-per-project
+		if v.isolation == "evpn" || v.isolation == pve.IsolationEVPN {
+			isolation = pve.IsolationEVPN
+		}
+		network := map[string]any{
+			"defaultZone": n.DefaultZone,
+			"zones": map[string]any{n.DefaultZone: map[string]any{
+				"kind": v.kind, "controller": n.Controller, "asn": 65000, "peers": []any{"192.0.2.11"}, "exitNodes": []any{"pve1"},
+				"vrfVxlan": 10000, "mtu": 1450, "bridge": v.bridge, "vlanMin": n.VlanMin, "vlanMax": n.VlanMax,
+			}},
+			"publicNetworks": []any{},
+			"cidrPool":       v.pool,
+			"isolation":      isolation,
+			"blockedCidrs":   n.Blocked,
+			"sandboxCidrs":   []any{},
+			"evpnController": n.Controller,
+		}
+		err := ValidatePVENetwork(network, nil)
+		if (v.wantErr == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), v.wantErr)) {
+			t.Errorf("installer defaults with kind %s, bridge %q, isolation %s, cidr_pool %s: %v, want %q", v.kind, v.bridge, v.isolation, v.pool, err, v.wantErr)
+		}
 	}
 }

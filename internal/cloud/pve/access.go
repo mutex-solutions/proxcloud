@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 )
 
@@ -170,6 +171,48 @@ var PlatformPrivileges = []PrivCheck{
 	{Path: "/sdn/zones", Privs: []string{"SDN.Allocate", "SDN.Audit", "SDN.Use"}},
 	{Path: "/storage", Privs: []string{"Datastore.AllocateSpace", "Datastore.AllocateTemplate", "Datastore.Audit"}},
 	{Path: "/mapping/pci", Privs: []string{"Mapping.Audit", "Mapping.Use"}},
+}
+
+// The portal token's role and the pool it must not reach, as docs/proxmox-permissions.md names them.
+const (
+	PlatformRole = "ProxCloudPlatform"
+	SystemPool   = "proxcloud-system"
+)
+
+// PlatformACL is one ACL of the portal token: Role on Path, granted to its user and to the token itself (a
+// privilege-separated token holds the intersection of the two).
+type PlatformACL struct {
+	Path, Role string
+	Propagate  bool
+	GPUOnly    bool // only a cluster with GPUs needs it
+}
+
+// PlatformACLs are the ACLs that give the portal token PlatformPrivileges and nothing on the management VMs. It is
+// what PlatformSetupScript writes; installer/playbooks/10-pve-identity.yml and docs/proxmox-permissions.md list the
+// same rows.
+var PlatformACLs = []PlatformACL{
+	// Sys.* only, and not propagated: they must not reach /nodes.
+	{Path: "/", Role: PlatformRole},
+	{Path: "/nodes", Role: "PVEAuditor", Propagate: true},
+	{Path: "/pool", Role: PlatformRole, Propagate: true},
+	// The more specific path wins, and NoAccess cancels every other role.
+	{Path: "/pool/" + SystemPool, Role: "NoAccess", Propagate: true},
+	{Path: "/sdn", Role: PlatformRole, Propagate: true},
+	{Path: "/storage", Role: PlatformRole, Propagate: true},
+	{Path: "/mapping/pci", Role: PlatformRole, Propagate: true, GPUOnly: true},
+}
+
+// PlatformRolePrivileges is the privilege list of PlatformRole: everything PlatformPrivileges asks for, once.
+func PlatformRolePrivileges() []string {
+	var out []string
+	for _, chk := range PlatformPrivileges {
+		for _, p := range chk.Privs {
+			if !slices.Contains(out, p) {
+				out = append(out, p)
+			}
+		}
+	}
+	return out
 }
 
 // Permissions returns the calling token's effective privileges on path

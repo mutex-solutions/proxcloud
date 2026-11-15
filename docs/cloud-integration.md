@@ -184,6 +184,23 @@ The shape is documented in the header of `proxmox.go`:
 }
 ```
 
+A save whose body carries `config.network` (`POST /service`, `PUT /service/{id}`,
+`PUT /service/{id}/update`) is checked first (`externalservice.ValidatePVENetwork`)
+and refused with a `400` naming the field when a tenant network could not work
+with it: `cidrPool` is not an IPv4 range of `/24` or larger, `defaultZone` names
+no zone of `zones` (one zone needs no `defaultZone`, several do), a zone's `kind`
+is not `evpn` (or the older `overlay`, or left out), `vlan` or `simple`, a zone id
+is longer than the 8 characters of a Proxmox SDN zone id, a `vlan` zone has no
+`bridge`, or `isolation` is `evpn-per-project` and the default zone is not EVPN
+(every project's zone is copied from it). A block that is only incomplete is
+stored: no `cidrPool` or no zone yet is what the Add provider form sends, and the
+connection test's setup checks report it. A save without `network` leaves the
+stored block alone, and a save with one is refused only for a problem the stored
+block does not have already: the console sends the stored block back with every
+Connection tab save, and a block saved before this check may work (a zone that
+exists in Proxmox is used as it is), so it must not lock the provider. A new
+problem, or a wrong value changed to another wrong value, is still refused.
+
 Typed accessors used by the rest of the code:
 
 | Accessor | Config key | Meaning |
@@ -222,7 +239,8 @@ Give it the least-privilege `ProxCloudPlatform` role described in
 console (`internal/platform/admin/pveadmin.go`) warns when privileges are missing
 or the token belongs to `root@pam`, refuses a cluster whose datacenter firewall
 is off or whose nodes still run the legacy iptables firewall, and refuses a
-public network on the management bridge.
+public network on the management bridge. `?checks=all` returns every check as a
+row instead of stopping at the first failure ([api.md](api.md)).
 
 TLS to the cluster (`pve.TLSConfigFor`, `internal/cloud/pve/client.go`): a
 `fingerprint` pins the server certificate by its SHA-256 fingerprint (the format

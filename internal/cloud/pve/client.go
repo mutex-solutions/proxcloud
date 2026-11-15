@@ -198,8 +198,10 @@ func TLSConfigFor(cfg Config) *tls.Config {
 					inter.AddCert(c)
 				}
 			}
-			_, err = leaf.Verify(x509.VerifyOptions{Roots: roots, Intermediates: inter, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}})
-			return err
+			if _, err = leaf.Verify(x509.VerifyOptions{Roots: roots, Intermediates: inter, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}}); err != nil {
+				return &tls.CertificateVerificationError{UnverifiedCertificates: []*x509.Certificate{leaf}, Err: err}
+			}
+			return nil
 		}
 	case cfg.Fingerprint != "":
 		want := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(cfg.Fingerprint), ":", ""))
@@ -212,12 +214,29 @@ func TLSConfigFor(cfg Config) *tls.Config {
 			}
 			sum := sha256.Sum256(raw[0])
 			if hex.EncodeToString(sum[:]) != want {
-				return fmt.Errorf("pve: certificate fingerprint mismatch")
+				err := fmt.Errorf("pve: certificate fingerprint mismatch")
+				if leaf, perr := x509.ParseCertificate(raw[0]); perr == nil {
+					return &tls.CertificateVerificationError{UnverifiedCertificates: []*x509.Certificate{leaf}, Err: err}
+				}
+				return err
 			}
 			return nil
 		}
 	}
 	return tlsCfg
+}
+
+// PresentedFingerprint is the SHA-256 fingerprint of the certificate a server presented when err is its refusal, in
+// the form Config.Fingerprint takes and `pvenode cert info` prints; "" for any other error. The pins above report a
+// refusal the way crypto/tls reports its own, so this covers the system CA pool, CACert and Fingerprint alike.
+// Pinning what a server presents is trust on first use: only a comparison on the node makes it more than that.
+func PresentedFingerprint(err error) string {
+	var ce *tls.CertificateVerificationError
+	if !errors.As(err, &ce) || len(ce.UnverifiedCertificates) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(ce.UnverifiedCertificates[0].Raw)
+	return strings.ToUpper(strings.ReplaceAll(fmt.Sprintf("% x", sum[:]), " ", ":"))
 }
 
 // do performs one API call. form is sent urlencoded for POST/PUT and as the query
