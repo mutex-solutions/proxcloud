@@ -1,0 +1,113 @@
+{
+  "apiVersion": "v1",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "Namespace",
+      "metadata": {
+        "name": "proxcloud-system"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "metadata": {
+        "name": "proxcloud-portal",
+        "namespace": "proxcloud-system"
+      }
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRoleBinding",
+      "metadata": {
+        "name": "proxcloud-portal"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": "cluster-admin"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "proxcloud-portal",
+          "namespace": "proxcloud-system"
+        }
+      ]
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "annotations": {
+          "kubernetes.io/service-account.name": "proxcloud-portal"
+        },
+        "name": "proxcloud-portal-token-g1",
+        "namespace": "proxcloud-system"
+      },
+      "type": "kubernetes.io/service-account-token"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "bootstrap-token-plant7",
+        "namespace": "kube-system"
+      },
+      "stringData": {
+        "auth-extra-groups": "system:bootstrappers:proxcloud",
+        "description": "ProxCloud portal: reads proxcloud-system/proxcloud-portal-token-g1 once",
+        "expiration": "2026-11-15T13:00:00Z",
+        "token-id": "plant7",
+        "token-secret": "plant0bootstrap6",
+        "usage-bootstrap-authentication": "true"
+      },
+      "type": "bootstrap.kubernetes.io/token"
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "Role",
+      "metadata": {
+        "name": "proxcloud-bootstrap",
+        "namespace": "proxcloud-system"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resourceNames": [
+            "proxcloud-portal-token-g1"
+          ],
+          "resources": [
+            "secrets"
+          ],
+          "verbs": [
+            "get"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleBinding",
+      "metadata": {
+        "name": "proxcloud-bootstrap",
+        "namespace": "proxcloud-system"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "Role",
+        "name": "proxcloud-bootstrap"
+      },
+      "subjects": [
+        {
+          "apiGroup": "rbac.authorization.k8s.io",
+          "kind": "Group",
+          "name": "system:bootstrappers:proxcloud"
+        }
+      ]
+    }
+  ],
+  "kind": "List"
+}

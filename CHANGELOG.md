@@ -138,6 +138,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behind the fence while kamaji-etcd, the kubelets, the PVE API and argocd-repo-server stay unreachable, and that
   Cilium matches the API server on its port 6443 after the `kubernetes` Service is translated are all unverified until
   the lab run.
+- **What the managed-services platform job will apply, rendered from the BOM** (`internal/platformlife`, P3 design
+  §4.2 to §5): pure functions, no PVE or Kubernetes call, so each stage of the coming job has exact objects to apply
+  and tests to hold them. The seed VM gets a server CA the portal generates (ECDSA P-256, key never stored) and a
+  NoCloud CD whose user-data writes that CA before k3s first starts, installs the BOM's k3s after `sha256sum -c` of
+  binary and install script, applies a one-shot manifest from tmpfs (the portal's cluster-admin service account and a
+  bootstrap token that expires after 3 hours and may `get` only that account's token Secret), then turns cloud-init
+  off; meta-data, vendor-data (break-glass SSH keys) and the static network config come from the tenant seed's
+  `pve.RenderSeed` and `pve.RenderNetworkConfig`. The workload cluster gets `proxmox-kamaji-cluster` values in kubeadm
+  mode with the node groups (group label on every machine, a `NoSchedule` taint on every group but `system`, the
+  machine tags a seed-lost Remove finds the VMs by). The seed ArgoCD gets its HelmChart, an AppProject that may source
+  only the BOM's charts and deploy only into its namespaces, a locked `default` project, OCI repository entries without
+  credentials and one Application per BOM component: values inline, secrets named only (`pc-platform-pve`,
+  `proxmox-csi-plugin`, rendered separately), automated sync with self-heal, no prune for stateful components, no
+  resources finalizer, a retry policy on every Application (the clusterctl hooks can fail), `CreateNamespace=true`
+  (capi-tenant syncs into `proxcloud-system` before the platform component creates it), and the namespace placement
+  annotations on the one Application per namespace whose pods all go to one group. The workload ArgoCD's values carry
+  the tenant health checks of `deploy/{mgmt,dbaas}-cluster/argocd-health.yaml`, which `deploy/embed.go` now embeds
+  (the API image copies both files; the docker workflow rebuilds on a change to either). The Kubernetes and Databases
+  provider bodies are stage 60's, with the BOM's tenant charts, no node image versions yet, node-group placement, the
+  database egress fence, no backup store, PostgreSQL 3 replicas only with three `dbaas` nodes, `attachToNewProjects:
+  false` and the `platformInstallationId` marker. Tests: goldens of every renderer, a scan that planted credentials
+  appear only where design §5 puts them, a key-set test against stage 60's loop, the providers parsing the bodies, the
+  Applications against the `proxcloud-platform` chart's examples and contract, and the cluster values rendered through
+  the chart. Inert: nothing calls the renderers; the runner (stages 1 to 11) and the flag are later changes. Not
+  verified: no seed has booted this user-data (whether k3s keeps a portal-made `server-ca` and generates the other CAs
+  is lab check L2, as is bootstrap-token auth with `anonymous-auth=false`), and no ArgoCD has synced these
+  Applications; the upstream charts (cilium, cert-manager, metallb, argo-cd, cloudnative-pg, proxmox-csi-plugin,
+  kamaji-crds, kamaji-etcd, kamaji) rendered the workload values once by hand with `helm template` on 2026-11-15, not in
+  CI.
+- **`proxcloud-clusterctl` image and its tag flow** (`deploy/clusterctl/`, `.github/workflows/clusterctl.yml`): the
+  image the clusterctl Job of the managed-services platform will run (ADR 0009; the `proxcloud-platform` chart that
+  runs it comes separately). It holds clusterctl v1.14.4, kubectl v1.35.10 and, as a clusterctl local repository, the
+  provider manifests of Cluster API core, kubeadm bootstrap and kubeadm control plane v1.14.4, CAPMOX v0.9.2, the
+  in-cluster IPAM provider v1.1.1, the Kamaji control plane v0.22.0 and CAAPH v0.6.4: the versions of
+  `installer/playbooks/group_vars/all/versions.yml` (the platform BOM is not on `main` yet), which a test keeps equal.
+  Every download is checked against a sha256 in the Dockerfile, and the build resolves every provider with no network.
+  The entrypoint reads the clusterctl inventory and installs only the missing providers, does nothing when every
+  provider is at its wanted version, and refuses, installing nothing, when one is at another version (upgrades are a
+  later release) or when it is asked for a provider, type or version it does not carry (clusterctl would otherwise
+  take a built-in one such as docker or metal3 from GitHub). It empties `PROXMOX_*` as stage 50 does and turns
+  clusterctl's version check off; cert-manager is not baked, so a cluster without one fails on a local path instead of
+  downloading it from GitHub. Why: the Job makes no GitHub call at runtime, and the platform pins one reviewed image
+  by digest. A pull request builds and scans the image; a `proxcloud-clusterctl-v<version>` tag, which must equal the
+  image's version label and point at a commit of `main`, builds it, scans it with the existing Trivy gate and pushes
+  it once to `ghcr.io/mutex-solutions/proxcloud-clusterctl`. Nothing uses the image yet. **Not publishable today:**
+  the gate blocks the upstream clusterctl v1.14.4 and kubectl v1.35.10 release binaries (`golang.org/x/net` and
+  `golang.org/x/text` with fixed HIGH CVEs; kubectl v1.36.6 and v1.37.2 have them too), so no tag can publish until
+  upstream ships fixed binaries or a source rebuild is decided. The workflow has not run on GitHub. The entrypoint ran
+  against k3s v1.35.10 in Docker (empty, partial, equal and different-version inventories, cert-manager down, egress
+  through a dead proxy), not on a lab seed or workload cluster; the refusal of a provider it does not carry ran only
+  against a fake kubectl and clusterctl, under busybox.
 
 ### Changed
 
