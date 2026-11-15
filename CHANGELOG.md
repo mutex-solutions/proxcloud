@@ -218,6 +218,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hand in Proxmox with no bridge in the inventory sets `network.bridge` to that zone's bridge (the portal
   uses an existing zone as it is). Tested with unit tests and the preflight task run on its own against the
   inventory defaults; not run in a full install.
+- **Template updates: the import placement check and a way to re-import a deleted template live in
+  `internal/templateupdates`** (P3 groundwork, design §11 PR 11). The managed-services job will import its
+  two images without the admin handler, so the node/storage check it needs (`PlacementOptions`,
+  `PlacementAllowed`) moved out of `POST /admin/template-updates/vm` as pure functions; the handler calls
+  them and answers as before. A finished import blocked every re-import of that artifact on that node,
+  even after its template VM was deleted, which would stop the job's image stage for good. NEW
+  `Service.MarkTemplateGone` reads the receipt's provider and marks the receipt `templateGone` only on proof
+  that the template was deleted (its VMID is free, or held by a VM with a name, on a node that is up,
+  without the template's name or source tag); a read error, a down node or a template that was renamed,
+  migrated or moved out of `pc-templates` changes nothing. `EnqueueVM` then treats that receipt as failed,
+  and the page shows it as `template_missing`. Inert: nothing calls `MarkTemplateGone` yet (no route; the
+  managed-services runner, still to come and off behind its flag, will). Tested with unit tests and the
+  opt-in PostgreSQL tests (`TEMPLATEUPDATES_TEST_POSTGRES`) against a throwaway database; not run against a
+  Proxmox cluster.
 
 ### Fixed
 

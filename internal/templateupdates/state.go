@@ -203,6 +203,11 @@ func (s *Service) States(ctx context.Context, rows map[string]ProviderRows) ([]T
 			st.Withdrawal = &b
 		}
 		switch {
+		case rec.TemplateGone:
+			// Its VMID may now hold a re-import of the same artifact: never shown as that template.
+			st.State = StateTemplateMissing
+			out = append(out, st)
+			continue
 		case rec.Step == StepFailed:
 			st.State = StateImportFailed
 			out = append(out, st)

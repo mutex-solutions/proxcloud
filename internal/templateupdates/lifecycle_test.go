@@ -195,3 +195,32 @@ func TestPlanWithdraw(t *testing.T) {
 		t.Fatalf("plan %+v", pl)
 	}
 }
+
+// templateGone: a receipt's template counts as deleted only on proof from a successful read. Any row
+// at its VMID that may still be it (its name or source tag, a node that is down, a blank row) refuses.
+func TestTemplateGoneNeedsProof(t *testing.T) {
+	p := osPayload()
+	const vmid = 9210
+	other := pve.ClusterResource{Type: "qemu", VMID: 101, Node: "pve1", Name: "tenant-vm", Tags: "proxcloud"}
+	for name, c := range map[string]struct {
+		rows []pve.ClusterResource
+		gone bool
+	}{
+		"vmid absent":         {[]pve.ClusterResource{other}, true},
+		"empty cluster":       {[]pve.ClusterResource{}, true},
+		"vmid reused":         {[]pve.ClusterResource{other, {Type: "qemu", VMID: vmid, Node: "pve1", Name: "pc-ghcr-debian-13-os-20261201000000", Tags: "pc-src-111111111111"}}, true},
+		"vmid reused by lxc":  {[]pve.ClusterResource{{Type: "lxc", VMID: vmid, Node: "pve2", Name: "ct1"}}, true},
+		"unread (nil)":        {nil, false},
+		"still the template":  {[]pve.ClusterResource{{Type: "qemu", VMID: vmid, Node: "pve1", Template: 1, Pool: pve.TemplatePool, Name: TemplateName(p), Tags: TemplateTags(p)}}, false},
+		"out of pc-templates": {[]pve.ClusterResource{{Type: "qemu", VMID: vmid, Node: "pve1", Template: 1, Name: TemplateName(p), Tags: TemplateTags(p)}}, false},
+		"renamed":             {[]pve.ClusterResource{{Type: "qemu", VMID: vmid, Node: "pve1", Template: 1, Pool: pve.TemplatePool, Name: "renamed", Tags: TemplateTags(p)}}, false},
+		"tags stripped":       {[]pve.ClusterResource{{Type: "qemu", VMID: vmid, Node: "pve1", Template: 1, Name: TemplateName(p)}}, false},
+		"migrated":            {[]pve.ClusterResource{{Type: "qemu", VMID: vmid, Node: "pve2", Template: 1, Pool: pve.TemplatePool, Name: TemplateName(p), Tags: TemplateTags(p)}}, false},
+		"node down":           {[]pve.ClusterResource{{Type: "qemu", VMID: vmid, Node: "pve1", Name: "something", NodeDown: true}}, false},
+		"blank row":           {[]pve.ClusterResource{{Type: "qemu", VMID: vmid, Node: "pve1", Status: "unknown"}}, false},
+	} {
+		if err := templateGone(c.rows, vmid, p); (err == nil) != c.gone {
+			t.Errorf("%s: gone=%v, err=%v", name, err == nil, err)
+		}
+	}
+}

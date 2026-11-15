@@ -194,13 +194,6 @@ func (h *Handler) templateUpdatesHistory(w http.ResponseWriter, r *http.Request)
 	httpx.OK(w, map[string]any{"items": items, "jobs": jobs})
 }
 
-// PlacementOption is one node with its import-capable and template-capable storages.
-type PlacementOption struct {
-	Node           string   `json:"node"`
-	ImportStorages []string `json:"importStorages"`
-	DiskStorages   []string `json:"diskStorages"`
-}
-
 // templateUpdatesPlacement lists, per node, the active storages with import content and the
 // active storages with images content (where a template disk can live). The provider's
 // configured importStorage is listed first; nothing is guessed: the admin picks.
@@ -220,7 +213,7 @@ func (h *Handler) templateUpdatesPlacement(w http.ResponseWriter, r *http.Reques
 	httpx.OK(w, map[string]any{"configuredImportStorage": es.PVEImportStorage(), "nodes": opts})
 }
 
-func (h *Handler) placementOptions(ctx context.Context, es *externalservice.ExternalService) ([]PlacementOption, error) {
+func (h *Handler) placementOptions(ctx context.Context, es *externalservice.ExternalService) ([]templateupdates.PlacementOption, error) {
 	if !es.IsProxmox() || h.pveFor == nil {
 		return nil, errors.New("not a Proxmox provider")
 	}
@@ -232,39 +225,7 @@ func (h *Handler) placementOptions(ctx context.Context, es *externalservice.Exte
 	if err != nil {
 		return nil, errors.New("the cluster's storage could not be read")
 	}
-	byNode := map[string]*PlacementOption{}
-	for name, c := range caps {
-		for node, st := range c.Nodes {
-			if !st.Active {
-				continue
-			}
-			o := byNode[node]
-			if o == nil {
-				o = &PlacementOption{Node: node, ImportStorages: []string{}, DiskStorages: []string{}}
-				byNode[node] = o
-			}
-			if c.HasContent("import") {
-				o.ImportStorages = append(o.ImportStorages, name)
-			}
-			if c.HasContent("images") {
-				o.DiskStorages = append(o.DiskStorages, name)
-			}
-		}
-	}
-	pref := es.PVEImportStorage()
-	out := make([]PlacementOption, 0, len(byNode))
-	for _, o := range byNode {
-		sort.Slice(o.ImportStorages, func(i, j int) bool {
-			if (o.ImportStorages[i] == pref) != (o.ImportStorages[j] == pref) {
-				return o.ImportStorages[i] == pref
-			}
-			return o.ImportStorages[i] < o.ImportStorages[j]
-		})
-		sort.Strings(o.DiskStorages)
-		out = append(out, *o)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Node < out[j].Node })
-	return out, nil
+	return templateupdates.PlacementOptions(caps, es.PVEImportStorage()), nil
 }
 
 func decodeStrictBody(w http.ResponseWriter, r *http.Request, out any) bool {
@@ -310,7 +271,7 @@ func (h *Handler) templateUpdatesVM(w http.ResponseWriter, r *http.Request) {
 		templateUpdatesErr(w, err)
 		return
 	}
-	if !placementAllowed(opts, req.Node, req.ImportStorage, req.DiskStorage) {
+	if !templateupdates.PlacementAllowed(opts, req.Node, req.ImportStorage, req.DiskStorage) {
 		httpx.WriteError(w, httpx.BadRequest("The node must have the chosen import storage (import content) and disk storage (images content) active"))
 		return
 	}
@@ -327,24 +288,6 @@ func (h *Handler) templateUpdatesVM(w http.ResponseWriter, r *http.Request) {
 	audit.RecordSnapshots(r.Context(), nil, map[string]any{"package": rec.Payload.Package, "tag": rec.Payload.Tag, "digest": rec.Payload.Digest,
 		"serviceId": rec.Payload.ServiceID, "node": rec.Payload.Node, "importStorage": rec.Payload.ImportStorage, "diskStorage": rec.Payload.DiskStorage, "lifecycle": "staged"})
 	httpx.OK(w, rec)
-}
-
-func placementAllowed(opts []PlacementOption, node, importStorage, diskStorage string) bool {
-	for _, o := range opts {
-		if o.Node != node {
-			continue
-		}
-		in := func(list []string, v string) bool {
-			for _, x := range list {
-				if x == v {
-					return true
-				}
-			}
-			return false
-		}
-		return in(o.ImportStorages, importStorage) && in(o.DiskStorages, diskStorage)
-	}
-	return false
 }
 
 // ── GitHub integration (thirdPartyIntegration type "GitHub") ─────────────────────────────────

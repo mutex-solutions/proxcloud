@@ -460,6 +460,60 @@ func (s *Service) importReceipt(ctx context.Context, id string) (*Receipt, error
 	return r, nil
 }
 
+// MarkTemplateGone records that the template a finished import produced was deleted, so EnqueueVM
+// treats the receipt like a failed one and the artifact can be imported on that node again. It reads
+// the receipt's own provider (pvFor) and marks only on proof (templateGone); a read error, or a VM
+// that may still be the template, changes nothing. A receipt already marked answers nil.
+func (s *Service) MarkTemplateGone(ctx context.Context, pvFor PVEResolver, id string) error {
+	if !s.VMEnabled {
+		return errVMDisabled
+	}
+	r, err := s.Receipts.Load(ctx, id)
+	if err != nil {
+		return err
+	}
+	switch {
+	case r == nil:
+		return lcErr(http.StatusNotFound, "not_found", "No template import with that id")
+	case r.TemplateGone:
+		return nil
+	case (r.Step != StepSucceeded && r.Step != StepTemplated) || r.VMID <= 0:
+		return lcErr(http.StatusConflict, "import_unfinished", "That import has not produced its template")
+	}
+	pv, err := pvFor(ctx, r.Payload.ServiceID)
+	if err != nil {
+		return err
+	}
+	rows, err := pv.ClusterResources(ctx, "vm")
+	if err != nil {
+		return err
+	}
+	if err := templateGone(rows, r.VMID, r.Payload); err != nil {
+		return err
+	}
+	_, err = s.DB.C(ReceiptCollection).SetByID(ctx, id, pgdoc.M{"templateGone": true, "updatedAt": time.Now().UTC()}, nil)
+	return err
+}
+
+// templateGone is MarkTemplateGone's proof on one successful read of the cluster's VM rows: nil when
+// no row holds vmid (unique cluster-wide) any more, or the row that does is plainly another VM (its
+// node is up, it has a name, and it has neither the import's template name nor its source tag: the
+// VMID was reused). A template moved out of pc-templates or renamed still counts as present.
+func templateGone(rows []pve.ClusterResource, vmid int, p VMPayload) error {
+	if rows == nil {
+		return errors.New("the cluster's VM list could not be read")
+	}
+	for _, r := range rows {
+		if r.VMID != vmid {
+			continue
+		}
+		if r.NodeDown || r.Name == "" || r.Name == TemplateName(p) || hasTagValue(r.Tags, TagSource+digestPrefix(p.Digest)) {
+			return lcErr(http.StatusConflict, "template_present", fmt.Sprintf("VM %d on %s may still be this import's template; nothing was changed", vmid, r.Node))
+		}
+	}
+	return nil
+}
+
 // lockDigest serializes lifecycle actions on one artifact across API replicas.
 func (s *Service) lockDigest(ctx context.Context, digest string) (func(), error) {
 	release, ok, err := s.DB.TryAdvisoryLock(ctx, "templateupdate-lifecycle:"+digest)

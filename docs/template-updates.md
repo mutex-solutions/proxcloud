@@ -133,6 +133,14 @@ service/node/digest, so it never exceeds the 256-byte key limit; a retry after a
 `-<n>` suffix) and creates the receipt — refusing (409) if a receipt for that job id already exists
 instead of resetting its progress.
 
+A receipt whose template was deleted since stops blocking only through `Service.MarkTemplateGone`
+(no route yet; the managed-services job calls it). It reads the receipt's own provider and marks the
+receipt `templateGone` only when no VM holds the receipt's VMID any more, or the VM that does has a
+name, sits on a node that is up and carries neither the template's name nor its `pc-src-` tag (the
+VMID was reused). A read error, a node that is down, a blank row, or a template that was only renamed,
+migrated or moved out of `pc-templates` changes nothing. A marked receipt then counts as failed for
+the duplicate check and shows `template_missing` on the page.
+
 ### Download path
 
 The large blob stream uses a separate HTTP client with **no total timeout** (a `http.Client.Timeout`
