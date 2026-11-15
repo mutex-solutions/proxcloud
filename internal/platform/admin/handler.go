@@ -416,6 +416,8 @@ func (h *Handler) Routes(r chi.Router) {
 		h.routeProviderAttach(r)
 		// Platform setup: the defaults of a new install (setupdefaults.go).
 		h.routeSetup(r)
+		// The managed-services platform (platform.go).
+		h.routePlatform(r)
 	})
 }
 

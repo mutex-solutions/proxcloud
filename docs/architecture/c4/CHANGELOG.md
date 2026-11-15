@@ -70,6 +70,23 @@ credential before using it, and build the seed and provider kubeconfigs. `ApplyC
 lands.
 
 **Views updated:** [C3 components](c3-components.md) (Kubernetes API client row).
+## 2026-11-15: Platform bill of materials in the API
+
+**What changed:** a new component of `proxcloud-api`, `internal/platformlife`, parses and
+validates `deploy/platform/platform-bom.yaml`, which `deploy/embed.go` compiles into the
+binary (the API image copies both). `GET /api/v1/admin/platform/bom` (`admin:service:read`,
+`internal/platform/admin/platform.go`) serves it read-only with the file's sha256. No
+container, external system, trust boundary or flow changes: the route reads only the
+embedded file, and nothing installs from the BOM yet.
+
+**Why:** ADR 0009 makes one BOM per release the version source of the managed-services
+platform for both provisioning paths. The lifecycle job and its pages, which come later, read
+it through this package, so it lands first with the rules that keep it exact (versions,
+digests, `pending` and `0.0.0+` only in a `-dev` release) and tests that hold the installer's
+pins equal to it.
+
+**Views updated:** [C3e managed services](c3-components.md#c3e-managed-services-and-object-storage)
+(new `platformlife` node and table row).
 
 ## 2026-11-15: Management port job triggers only with debug triggers on
 
