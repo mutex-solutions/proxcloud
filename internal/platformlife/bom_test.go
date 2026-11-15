@@ -8,6 +8,7 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -49,6 +50,33 @@ func TestCurrentIsValid(t *testing.T) {
 	}
 }
 
+// Our four packages are published, so the BOM pins them: the only pending digests left are the two kamaji charts at
+// 0.0.0+latest, which go with the chart mirror. .github/scripts/bom_verify.py compares the digests with the registry.
+func TestOwnPackagesArePinned(t *testing.T) {
+	b := embedded(t)
+	if strings.HasSuffix(b.Images.Clusterctl, "@pending") {
+		t.Errorf("images.clusterctl %s is pending", b.Images.Clusterctl)
+	}
+	charts := map[string]Chart{"tenantCharts.kubernetes": b.TenantCharts.Kubernetes, "tenantCharts.database": b.TenantCharts.Database}
+	for _, c := range b.Components {
+		charts[c.Cluster+"/"+c.Name] = c.Chart
+	}
+	var pending []string
+	for field, c := range charts {
+		switch {
+		case c.Digest != "pending":
+		case strings.HasPrefix(c.Repo, ownRepo):
+			t.Errorf("%s: our own chart %s %s is pending", field, c.Name, c.Version)
+		default:
+			pending = append(pending, c.Name)
+		}
+	}
+	slices.Sort(pending)
+	if want := []string{"kamaji", "kamaji-crds"}; !slices.Equal(pending, want) {
+		t.Errorf("pending digests on %v, want only %v", pending, want)
+	}
+}
+
 func TestParseRefusesUnknownKeys(t *testing.T) {
 	for name, raw := range map[string]string{
 		"top level": string(deploy.PlatformBOM) + "\nlatest: true\n",
@@ -73,7 +101,11 @@ func TestValidate(t *testing.T) {
 		{"two parts", func(t *testing.T, b *BOM) { comp(t, b, "workload", "cilium").Chart.Version = "1.18" }, []string{"not an exact version"}},
 		{"a wildcard", func(t *testing.T, b *BOM) { comp(t, b, "workload", "cilium").Chart.Version = "1.18.x" }, []string{"not an exact version"}},
 		{"a comparison", func(t *testing.T, b *BOM) { b.Kubernetes.Version = ">=1.35.10" }, []string{"kubernetes.version", "not an exact version"}},
-		{"a release keeps no pending digest and no 0.0.0+ version", func(_ *testing.T, b *BOM) { b.Release = "0.7.0" },
+		{"a release keeps no pending digest and no 0.0.0+ version", func(_ *testing.T, b *BOM) {
+			b.Release = "0.7.0"
+			b.Images.Clusterctl = strings.Split(b.Images.Clusterctl, "@")[0] + "@pending" // as before its first publication
+			b.TenantCharts.Kubernetes.Digest = "pending"
+		},
 			[]string{"tenantCharts.kubernetes: digest pending is allowed only in a -dev release", "images.clusterctl: digest pending",
 				"workload/kamaji.version: 0.0.0+latest is allowed only in a -dev release"}},
 		{"a release with everything pinned", func(_ *testing.T, b *BOM) {
