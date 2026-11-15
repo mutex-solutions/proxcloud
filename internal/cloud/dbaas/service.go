@@ -15,12 +15,13 @@ import (
 // K8sAPI is the DB-cluster surface Service consumes — implemented by *kamajik8s.Client,
 // fake-able in tests.
 type K8sAPI interface {
-	EnsureNamespace(ctx context.Context, name string, labels map[string]string) error
+	EnsureNamespace(ctx context.Context, name string, labels, annotations map[string]string) error
 	GetNamespace(ctx context.Context, name string) (map[string]any, error)
 	DeleteNamespace(ctx context.Context, name string) error
 	ApplySecret(ctx context.Context, ns, name string, stringData map[string]string, labels, annotations map[string]string) error
 	PatchSecretData(ctx context.Context, ns, name string, stringData map[string]string) error
 	ApplyNetworkPolicy(ctx context.Context, np map[string]any) error
+	ApplyCR(ctx context.Context, group, version, plural string, obj map[string]any) error
 	GetSecretData(ctx context.Context, ns, name string) (map[string][]byte, error)
 	ListSecrets(ctx context.Context, ns, labelSelector string) ([]map[string]any, error)
 	ListSecretsAllNamespaces(ctx context.Context, labelSelector string) ([]map[string]any, error)
@@ -76,17 +77,23 @@ func (s *Service) Config() Config { return s.cfg }
 // The default-deny lives HERE, not in the chart: multiple releases share one pc-* namespace and
 // would collide on its name, and the isolation promise must hold for any pod that ever lands in
 // the namespace, not only chart-rendered ones. The chart's per-database policy then opens the
-// engine-specific holes.
+// engine-specific holes. With a NamespacePlacement the namespace's pods are pinned to the dbaas node group, and with
+// EgressFence their egress is fenced too (egressFencePolicy).
 func (s *Service) EnsureProjectNamespace(ctx context.Context, projectID string) error {
 	ns := NamespaceFor(projectID)
-	if err := s.api.EnsureNamespace(ctx, ns, map[string]string{
+	labels := map[string]string{
 		LabelProject:   projectID,
 		LabelService:   s.serviceID,
 		LabelManagedBy: ManagedByValue,
-	}); err != nil {
+	}
+	annotations := s.cfg.NamespacePlacement.Annotations()
+	if annotations != nil {
+		labels[kamajik8s.LabelPlatformRole] = "dbaas"
+	}
+	if err := s.api.EnsureNamespace(ctx, ns, labels, annotations); err != nil {
 		return err
 	}
-	return s.api.ApplyNetworkPolicy(ctx, map[string]any{
+	if err := s.api.ApplyNetworkPolicy(ctx, map[string]any{
 		"apiVersion": "networking.k8s.io/v1",
 		"kind":       "NetworkPolicy",
 		"metadata": map[string]any{
@@ -102,7 +109,59 @@ func (s *Service) EnsureProjectNamespace(ctx context.Context, projectID string) 
 			"podSelector": map[string]any{},
 			"policyTypes": []any{"Ingress"},
 		},
-	})
+	}); err != nil {
+		return err
+	}
+	if !s.cfg.EgressFence {
+		return nil
+	}
+	return s.api.ApplyCR(ctx, "cilium.io", "v2", "ciliumnetworkpolicies", egressFencePolicy(projectID, s.serviceID))
+}
+
+// EgressFencePolicyName is the namespace-wide egress allow-list config.database.egressFence stamps. Turning the key
+// off later does not delete it: a fence left in place fails closed, and the policy is removed by hand.
+const EgressFencePolicyName = "proxcloud-default-egress"
+
+// kubeAPIServerPort is where the API server listens on its nodes. Cilium matches the port after the kubernetes
+// Service is translated, and the API server's identity covers its whole node address, so without the port the fence
+// would let a database pod reach that node's kubelet (10250) and etcd (2379) too.
+const kubeAPIServerPort = "6443"
+
+// egressFencePolicy is the CiliumNetworkPolicy that lets the pods of a project's database namespace reach only that
+// namespace (replication, poolers), kube-dns, and the API server, which the CloudNativePG instance manager needs. All
+// else is dropped: kamaji-etcd, every kubelet, the PVE API, ArgoCD and the internet. A Cilium policy, because a
+// NetworkPolicy ipBlock cannot name the API server's node addresses on Cilium. The allow-list is what CloudNativePG
+// needs: another engine, or backups to an object store, needs its own rule first.
+func egressFencePolicy(projectID, serviceID string) map[string]any {
+	return map[string]any{
+		"apiVersion": "cilium.io/v2",
+		"kind":       "CiliumNetworkPolicy",
+		"metadata": map[string]any{
+			"name":      EgressFencePolicyName,
+			"namespace": NamespaceFor(projectID),
+			"labels": map[string]any{
+				LabelProject:   projectID,
+				LabelService:   serviceID,
+				LabelManagedBy: ManagedByValue,
+			},
+		},
+		"spec": map[string]any{
+			"endpointSelector": map[string]any{},
+			"egress": []any{
+				map[string]any{"toEndpoints": []any{map[string]any{}}},
+				map[string]any{
+					"toEndpoints": []any{map[string]any{"matchLabels": map[string]any{
+						"k8s:io.kubernetes.pod.namespace": "kube-system", "k8s:k8s-app": "kube-dns",
+					}}},
+					"toPorts": []any{map[string]any{"ports": []any{map[string]any{"port": "53", "protocol": "ANY"}}}},
+				},
+				map[string]any{
+					"toEntities": []any{"kube-apiserver"},
+					"toPorts":    []any{map[string]any{"ports": []any{map[string]any{"port": kubeAPIServerPort, "protocol": "TCP"}}}},
+				},
+			},
+		},
+	}
 }
 
 // CreateDatabase provisions one database: marker secret FIRST (the durable record), then the

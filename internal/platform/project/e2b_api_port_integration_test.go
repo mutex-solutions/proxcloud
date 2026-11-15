@@ -107,8 +107,10 @@ func (a *portImportAPI) DeleteCore(_ context.Context, plural, _, name string) er
 func (a *portImportAPI) ListNamespaces(context.Context, string) ([]map[string]any, error) {
 	return nil, nil
 }
-func (a *portImportAPI) ApplyNamespace(context.Context, map[string]any) error             { return nil }
-func (a *portImportAPI) EnsureNamespace(context.Context, string, map[string]string) error { return nil }
+func (a *portImportAPI) ApplyNamespace(context.Context, map[string]any) error { return nil }
+func (a *portImportAPI) EnsureNamespace(context.Context, string, map[string]string, map[string]string) error {
+	return nil
+}
 
 func TestImportPortConcurrentAliasesTerminalBindingAndUnknownHold(t *testing.T) {
 	ctx := context.Background()

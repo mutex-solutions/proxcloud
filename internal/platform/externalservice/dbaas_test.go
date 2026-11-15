@@ -121,3 +121,36 @@ func TestDbaasConfigNetworkBackupScheduling(t *testing.T) {
 		t.Error("no backup block must leave backups off")
 	}
 }
+
+// config.namespacePlacement reads the same for both providers, and config.database.egressFence only as a JSON bool.
+// A document without either key gives the zero values, which stamp nothing.
+func TestNamespacePlacementAndEgressFence(t *testing.T) {
+	placement := map[string]any{
+		"nodeSelector": map[string]any{"node-restriction.kubernetes.io/proxcloud-node-group": "dbaas", "blank": ""},
+		"tolerations":  []any{map[string]any{"key": "proxcloud.io/node-group", "operator": "Exists"}, map[string]any{}},
+	}
+	for name, tc := range map[string]struct {
+		config    map[string]any
+		selectors int
+		fence     bool
+	}{
+		"absent":         {map[string]any{"database": map[string]any{}}, 0, false},
+		"configured":     {map[string]any{"namespacePlacement": placement, "database": map[string]any{"egressFence": true}}, 1, true},
+		"fence not bool": {map[string]any{"database": map[string]any{"egressFence": "true"}}, 0, false},
+	} {
+		es := &ExternalService{Config: tc.config}
+		d, k := es.DbaasConfig(), es.KamajiConfig()
+		if len(d.NamespacePlacement.NodeSelector) != tc.selectors || len(k.NamespacePlacement.NodeSelector) != tc.selectors {
+			t.Errorf("%s: selectors %v %v", name, d.NamespacePlacement, k.NamespacePlacement)
+		}
+		if tc.selectors == 0 && (d.NamespacePlacement.Annotations() != nil || k.NamespacePlacement.Annotations() != nil) {
+			t.Errorf("%s: an absent block must stamp nothing", name)
+		}
+		if tc.selectors > 0 && (len(d.NamespacePlacement.Tolerations) != 1 || len(k.NamespacePlacement.Tolerations) != 1) {
+			t.Errorf("%s: tolerations %v %v", name, d.NamespacePlacement.Tolerations, k.NamespacePlacement.Tolerations)
+		}
+		if d.EgressFence != tc.fence {
+			t.Errorf("%s: EgressFence = %v", name, d.EgressFence)
+		}
+	}
+}

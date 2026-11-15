@@ -91,6 +91,28 @@ Admin UI → System → Cloud providers → Add provider → **Database (DBaaS)*
   allowlist (see Networking on Proxmox).
 - `config.database.backup` + `secret.backupAccessKey` / `secret.backupSecretKey` — the S3 store
   (see Backups and restore).
+- `config.namespacePlacement` (`nodeSelector`, `tolerations`) — optional, API only (a form save keeps
+  it). A `pc-db-*` namespace gets the `scheduler.alpha.kubernetes.io/node-selector` and
+  `…/defaultTolerations` annotations and the label `proxcloud.io/platform-role: dbaas`, so the API
+  server puts every new pod there on that node group, whatever the chart renders. It needs the
+  `PodNodeSelector` and `PodTolerationRestriction` admission plugins on the DB cluster's API server;
+  without them the annotations do nothing. Absent: nothing is stamped. A selector that is not label
+  keys and values, or a toleration the API server would refuse, is refused when the provider is
+  built: the API server checks the annotation on every pod create, so it would refuse every pod there.
+- `config.database.egressFence: true` — optional, API only (a form save keeps it). A `pc-db-*`
+  namespace gets the CiliumNetworkPolicy `proxcloud-default-egress`: its pods reach only their own
+  namespace, kube-dns on 53 and the API server on 6443 (what CloudNativePG needs), so a tenant with a
+  shell in its database pod cannot reach etcd, the kubelets, the Proxmox API or ArgoCD. It needs
+  Cilium and `get`, `create` and `patch` on `ciliumnetworkpolicies` for the provider ServiceAccount,
+  which `deploy/dbaas-cluster/rbac.yaml` does not grant: without them attaching a project and every
+  database create fail with 403. Setting the key back to false leaves the policies in place; delete
+  them by hand. It allows no object store yet, so a provider that sets it together with
+  `config.database.backup` is refused when it is built: behind the fence every PostgreSQL pod's WAL
+  archiving would fail until `pg_wal` fills its volume.
+- Both keys are stamped on a namespace when it is next ensured: a project's first attach to the
+  provider, or a new database create. Nothing in the sync ensures a namespace again, so a project
+  attached before the key was set keeps its namespace as it is until its next database create, and
+  pods already running are not moved.
 - `config.services.database.<region> = true` — un-hides the client Databases surface and
   enables the sync.
 
