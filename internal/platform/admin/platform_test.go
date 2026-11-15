@@ -11,11 +11,12 @@ import (
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
-// GET /admin/platform/bom needs admin:service:read and answers the embedded BOM with its sha256.
+// GET /admin/platform/bom needs admin:service:read and answers the embedded BOM with its sha256. It goes through
+// Routes, so the test also fails when Routes stops registering the route.
 func TestPlatformBOMRoute(t *testing.T) {
 	h := &Handler{adminIssuer: "operator-realm"}
 	r := chi.NewRouter()
-	r.Route("/admin", h.routePlatform)
+	h.Routes(r)
 
 	if w := tuDo(r, "GET", "/admin/platform/bom", "", &httpx.RequestContext{Sub: "tenant", Issuer: "tenant-realm"}); w.Code != http.StatusForbidden {
 		t.Fatalf("tenant: %d", w.Code)
