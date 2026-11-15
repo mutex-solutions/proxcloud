@@ -31,11 +31,25 @@ stored and proven.
 
 **Not verified:** nothing here has run against a real k3s, ArgoCD, Cluster API or Proxmox. The tests use
 a fake Kubernetes API for the seed and the workload, a fake PVE API and in-memory stores; the PostgreSQL
-tests of the rotation's store and of the typed confirmation were compiled, not run. The gate reads
-ArgoCD's `status.sync.comparedTo.source.targetRevision` and `status.operationState.phase` and starts a
+tests of the rotation's store and of the typed confirmation were compiled, not run (see the review
+fixes below). The gate reads
+ArgoCD's `status.sync.comparedTo.source` and `status.operationState.phase` and starts a
 sync by patching `operation` onto the Application; the inventory read assumes clusterctl's `Provider`
 fields; the volume sweep assumes proxmox-csi handles of the form `region/node/storage/volume`. Each is
 owed a lab check.
+
+**Review fixes (same PR):** stage 9's deadline starts again only when the run reaches a wave for the
+first time, because every acquisition walks the waves from the first and the deadline otherwise never
+fired; the gate compares `status.sync.comparedTo.source` with `spec.source`, so a status computed for
+other values of the same chart version does not pass; stage 7 reads the conditions of the ProxmoxCluster
+and the ProxmoxMachines for `capmox_auth_failed`; `PlatformRegister` lists and inserts in one transaction
+under `platform-run:<id>`, so two runners cannot both create a row, and adopts
+`database.engines.postgresql.replicas`; a rotation deletes the token Secret it created when it stops
+before the store, and stage 6 deletes every portal token Secret but the stored one; the cluster part of a
+remove clears `status.clusters` and `status.volumes` when it is done; `GET …/seed-kubeconfig` answers
+`503` without an audit service and sends `Cache-Control: no-store`. Not verified on a lab: the
+`comparedTo.source` equality on a real ArgoCD, and the condition messages CAPMOX sets on a refused token.
+The PostgreSQL tests of this PR ran against a local container.
 
 **Views updated:** [C3e managed services](c3-components.md#c3e-managed-services-and-object-storage)
 (`platformlife` and PVE node labels, new workload API node, edges to the seed API and the workload API,

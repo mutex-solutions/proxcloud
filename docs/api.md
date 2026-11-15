@@ -402,7 +402,9 @@ are several, `errors.details.problems`.
   `proxcloud-system` tagged `pc-platform-<id>` and the recorded volumes, and a
   remove whose workload cluster does not answer goes on without checking for
   tenants. Without it the first fails `seed_lost` and the second is retried,
-  then fails `workload_api_unreachable`.
+  then fails `workload_api_unreachable`. A remove started again after an
+  earlier one finished the cluster part and deleted the seed VM needs no
+  confirmation.
 - `GET /installations/{id}/runs[/{runId}]`: the newest runs, or one, with
   their stages (`state`, `retries`, `deadline`, `items`, `code`, `message`,
   `receipt`). A run whose job ran out of attempts reads `failed` with code
@@ -416,14 +418,17 @@ are several, `errors.details.problems`.
   token of its `proxcloud-portal` service account (cluster-admin). Nothing
   stores it. The audit entry (`BREAK_GLASS`) has the actor, the installation
   and the expiry, never the token, and is written before the answer; `409
-  no_seed` without a ready seed, `502` when the seed issues no token.
+  no_seed` without a ready seed, `502` when the seed issues no token, `503`
+  when the API has no audit service (no token is asked for). The answer
+  carries `Cache-Control: no-store`.
 - `POST /installations/{id}/seed-credential/rotate`: creates the service
   account's next token Secret (`proxcloud-portal-token-g<n+1>`), checks that
   its token is cluster-admin, stores it, then deletes the older token Secrets,
   which revokes their tokens. `409 run_active` during a run, `409 no_seed`
-  without a ready seed. A `502` means the rotation did not finish:
-  `status.seed.tokenSecret` names the stored credential, and a second call
-  deletes what the first left.
+  without a ready seed. A rotation that stops before the new token is stored
+  deletes the Secret it created. A `502` means the rotation did not finish:
+  `status.seed.tokenSecret` names the stored credential, and a second call,
+  or stage 6 of the next apply, deletes every other token Secret.
 
 An apply runs `validate`, `images`, `seed-vm`, `seed-api`, `seed-identity`,
 `seed-platform`, `cluster`, `workload-access`, `workload-platform`, `register`
@@ -432,8 +437,11 @@ and `done`; a remove runs `remove-cluster`, `remove-seed` and
 run on the platform. Stage 10 (`register`) creates the Kubernetes and Databases
 providers, or adopts the rows that carry `config.platformInstallationId`; on
 an adopted row it rewrites `config.argocd`, `config.namespacePlacement`,
-`config.cluster.pveApiUrl`, `config.database.{egressFence,lbAddressPool,storageClasses}`
-and the kubeconfig, and leaves the name, the status and every other key. A
+`config.cluster.pveApiUrl`, `config.database.{egressFence,lbAddressPool,storageClasses}`,
+`config.database.engines.postgresql.replicas` (`[1]` when the dbaas group
+spans fewer than three PVE nodes) and the kubeconfig, and leaves the name, the
+status and every other key. A body the provider validation refuses fails
+`provider_conflict`. A
 remove sets both providers `DISABLED` and does not delete them; a later apply
 adopts them and leaves them `DISABLED`. A seed of `mode: existing` still ends
 `stage_unavailable`. A run's job is never replayed through
