@@ -157,5 +157,5 @@ rationale, in Nygard format:
   PostgreSQL durable-worker contract.
 - [ADR-0008](adr/0008-postgres-jsonb-document-store.md) — PostgreSQL + JSONB as
   the document store (supersedes ADR-0004's engine choice).
-- [ADR-0009](adr/0009-managed-services-platform-lifecycle.md) — proposed: managed-services
+- [ADR-0009](adr/0009-managed-services-platform-lifecycle.md) — accepted, amended 2026-11-15: managed-services
   platform with two provisioning paths (installer, in-portal), one BOM and one upgrade lifecycle.

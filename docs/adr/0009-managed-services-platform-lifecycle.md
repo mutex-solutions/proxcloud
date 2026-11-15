@@ -2,7 +2,12 @@
 
 ## Status
 
-Proposed (owner decisions of 2026-11-14 recorded below; not implemented yet).
+Accepted, as amended on 2026-11-15 (owner decisions of 2026-11-14 and 2026-11-15). The
+review that merges the amendments is the owner's sign-off. Not implemented yet.
+
+The Decision below is the proposal of 2026-11-14, kept as written. Where an amendment
+changes a section, the section ends with a note, and
+[Amendments (2026-11-15)](#amendments-2026-11-15) holds the decision in force.
 
 ## Context
 
@@ -47,6 +52,9 @@ and one implementation:
   A site built from the portal can be upgraded with `make upgrade`. The button and the
   make target run the same ordered plan and the same preflight.
 
+*Amended: sites built before this lifecycle stay observe-only
+([A9](#a9-existing-installer-sites-stay-observe-only)).*
+
 ### Seed cluster
 
 A single k3s VM is the long-lived management cluster ("seed"). It runs Cluster API, the
@@ -57,6 +65,11 @@ node groups.
 The seed's etcd is snapshotted to the NAS on a schedule. If the seed is lost, the workload
 clusters keep running but cannot scale, repair nodes or upgrade until the seed is restored
 on a fresh VM from the node template.
+
+*Amended: the seed's image and pool ([A2](#a2-seed-vm-from-a-native-template-in-its-own-pool)),
+its ArgoCD and cert-manager ([A4](#a4-seed-argocd-and-cert-manager)), which Cluster API
+manages what ([A5](#a5-the-workload-cluster-keeps-its-own-argocd-and-tenant-cluster-api)),
+its backup and restore ([A7](#a7-seed-backup-by-a-pve-backup-job)).*
 
 ### Cluster layout is the operator's choice
 
@@ -83,6 +96,9 @@ The installer's `versions.yml` is generated from this file, or a test keeps the 
 A component version changes only through a ProxCloud release. The release is tested end to
 end on a lab before its tag is pushed.
 
+*Amended: digests of charts in HTTP repositories, verification by CI, development BOMs
+([A6](#a6-chart-digests-verified-by-ci-until-a-mirror-exists)).*
+
 ### Delivery: Helm through ArgoCD
 
 Every component is an ArgoCD `Application` whose source is the pinned OCI Helm chart. The
@@ -92,6 +108,10 @@ repository is needed.
 - Stateless components sync automatically and self-heal.
 - Stateful components (database clusters, Kamaji datastores, CSI) are never pruned
   automatically and sync in explicit waves.
+
+*Amended: values inline ([A1](#a1-helm-values-inline)), the Cluster API providers
+([A3](#a3-cluster-api-providers-by-a-clusterctl-job)), the seed's ArgoCD
+([A4](#a4-seed-argocd-and-cert-manager)).*
 
 ### Upgrade
 
@@ -142,12 +162,235 @@ a tenant cluster's Kubernetes version or a database's major version.
   backup and restore need a tested runbook.
 - Supporting two platform versions per portal minor adds test combinations.
 
+*Amended: [Consequences of the amendments](#consequences-of-the-amendments).*
+
+## Amendments (2026-11-15)
+
+The owner decided these on 2026-11-14 and 2026-11-15, after the design of the in-platform
+path ("P3: Enable managed services") was checked against the code. Each amendment says
+what changes in the Decision and why. Everything else above stands.
+
+### A1. Helm values inline
+
+**Change.** An Application carries its non-secret Helm values inline
+(`spec.source.helm.valuesObject`). Secret values never appear in an Application: the
+provisioning path writes them into a Secret, and the chart refers to that Secret by name.
+This replaces "the values come from Secrets and ConfigMaps that the provisioning path
+writes".
+
+**Why.** ArgoCD has no Helm values source that reads a Secret or a ConfigMap. Its sources
+are inline values and values files in the chart or in a Git repository, and a Git
+repository is ruled out. The Kubernetes and Databases providers already build their
+Applications this way (`kamaji.BuildApplication`, `dbaas.BuildApplication`), so tenant and
+platform Applications have one shape.
+
+### A2. Seed VM from a native template in its own pool
+
+**Change.** The seed is a full clone of the published native OS image
+(`proxcloud-vm-ubuntu-2604`), not of the Kubernetes node template. The BOM pins the image
+by digest, and the portal imports it through Template updates like a node image. The VM
+lives in a new pool, `proxcloud-seed`, and is created with the platform's CAPI token
+`capmox@pve!capi`. The portal token and `csi@pve` have NoAccess on that pool. The workload
+clusters' VMs stay in `proxcloud-system`, where the installer puts them. This replaces
+"restored on a fresh VM from the node template" and the open point's "cloud-init from the
+published node template".
+
+**Why.** The native image is 6 GiB against 20 GiB and carries no kubeadm or kubelet units
+next to k3s's own. The seed holds admin rights over every platform cluster, so it must be
+out of reach of the workload's CSI token, which needs `VM.Config.Disk` on
+`proxcloud-system` and which the providers' service account on the workload can read; a
+pool of its own is that fence. Creating the seed with the portal token would need rights
+for that token on the pool, `VM.GuestAgent.Unrestricted` among them, which would give the
+portal root on the seed.
+
+### A3. Cluster API providers by a clusterctl Job
+
+**Change.** On the seed and on each workload cluster, the Cluster API providers are
+installed by a `clusterctl` Job, run as an ArgoCD Sync hook of a new pinned chart of ours,
+`proxcloud-platform`. Its image, `proxcloud-clusterctl`, is built by GitHub Actions with
+clusterctl and kubectl pinned by sha256 and the provider manifests of the BOM baked in as a
+local repository; the BOM pins the image by digest. The Job installs only the providers
+that are missing, does nothing when the installed set equals the BOM, and refuses when an
+installed provider has another version: provider upgrades come with the upgrade run.
+
+**Why.** It is the tool and the provider inventory installer sites already have
+(`clusterctl init` in stage 50), so both paths stay one thing to operate. The image digest
+pins every provider manifest, and nothing calls GitHub at run time. The
+cluster-api-operator would add a component and an inventory that installer sites do not
+have.
+
+### A4. Seed ArgoCD and cert-manager
+
+**Change.** The seed's ArgoCD is the one component installed outside an Application,
+because it is what applies them: a k3s `HelmChart` resource that the portal creates through
+the Kubernetes API, never a file in the k3s manifests directory. cert-manager on the seed is
+an Application pinned by the BOM, in the shape installer stage 40 uses today, and runs
+before the Cluster API Job. Stage 40 moves its HelmChart from the manifests directory to the
+API when the installer converges, so both paths own the seed's ArgoCD and cert-manager the
+same way.
+
+**Why.** k3s re-applies every file in its manifests directory at each start, which would
+undo an upgrade made through the API. cert-manager is a Cluster API prerequisite; as an
+Application the BOM pins and upgrades it like every other component, and `clusterctl` does
+not install its own when one exists.
+
+### A5. The workload cluster keeps its own ArgoCD and tenant Cluster API
+
+**Change.** The seed's Cluster API manages the platform's workload clusters only. A
+workload cluster that runs Kamaji or the database operators has its own ArgoCD and its own
+Cluster API (core, kubeadm bootstrap, the Kamaji control plane, CAPMOX, IPAM and the Helm
+add-on provider), as the services cluster of an installer site has today. Tenant Kubernetes
+clusters and databases are Applications of that ArgoCD and Cluster API objects of that
+cluster. The seed's ArgoCD installs the platform components into the workload cluster; the
+seed itself runs Cluster API, CAPMOX, ArgoCD and cert-manager, and nothing of a tenant.
+
+**Why.** The Kubernetes and Databases providers (`internal/cloud/kamaji`,
+`internal/cloud/dbaas`) create tenant Applications and Cluster API objects in the cluster
+they are registered with, next to Kamaji and CloudNativePG. Keeping that keeps both
+providers and their registration (installer stage 60) unchanged. Tenant objects never reach
+the seed, so its set of components stays small and fixed, and a lost seed does not stop
+tenant clusters from scaling or repairing.
+
+### A6. Chart digests verified by CI until a mirror exists
+
+**Change.** The BOM records an exact version and a digest for every chart: for a chart in
+an OCI registry its manifest digest, for a chart in an HTTP Helm repository the `digest` of
+that version in the repository's `index.yaml`. ArgoCD still pulls by version. A GitHub
+Actions job (`bom-verify`) pulls every chart and image of the BOM anonymously at every BOM
+change and at the release tag, and fails on any difference. A version that is not exact
+(Kamaji's `0.0.0+latest`) or a digest not yet known (`pending`) is allowed only in a BOM
+whose release ends in `-dev`; the release gate on the tag refuses both. Our packages
+`proxmox-kamaji-cluster`, `database-cluster`, `proxcloud-platform` and
+`proxcloud-clusterctl` are public on GHCR and, like everything public, built and published
+by GitHub Actions only, so pulls need no credentials. This replaces "each chart pinned by
+OCI digest" and qualifies "never a range or `latest`" for development BOMs.
+
+**Why.** cilium, cert-manager, MetalLB, CloudNativePG and Kamaji publish their charts in
+HTTP repositories, which have no OCI digest, and the installer installs Kamaji as chart
+`0.0.0+latest`, pinned by image tag only. ArgoCD's target revision for a chart is a
+version, and the portal cannot look up third-party digests (`internal/templateupdates`
+talks only to our GHCR organisation). Until a mirror under our GHCR organisation serves the
+checked charts, a chart changed upstream behind the same version is caught by CI, not at
+pull time; that gap is stated, not hidden.
+
+### A7. Seed backup by a PVE backup job
+
+**Change.** The seed is backed up as a whole VM by a Proxmox VE backup job to the site's
+backup storage. The console prints the one root command that creates the job and shows
+attention until a backup job covers the seed. Restoring the seed means restoring that VM
+backup. This replaces "the seed's etcd is snapshotted to the NAS on a schedule" and
+"restored on a fresh VM from the node template".
+
+**Why.** k3s sends etcd snapshots off the VM only to S3-compatible storage, which would make
+an object store a prerequisite of managed services. A VM backup keeps the k3s token, the
+server CA, the datastore and the Cluster API state together, so a restored seed answers
+with the certificate the portal pins. Creating a backup job needs `Sys.Modify` on `/`
+together with backup rights on the seed: the CAPI and CSI tokens hold no `Sys.Modify`, and
+the portal token holds nothing on the seed's pool, so the operator runs the command as
+root. etcd snapshots to an object store can follow if a site needs them.
+
+### A8. Mint-grant risk accepted for the first milestone
+
+**Change.** Managed Kubernetes keeps `ProxCloudKubeMint` (`User.Modify Permissions.Modify`)
+for the portal token on `/access/groups`, `/pool`, `/storage`, `/sdn/zones` and `/nodes`.
+The portal token itself has NoAccess on both platform pools, but a stolen portal token can
+grant a role on `/pool` to a principal it can mint a token for, and that grant reaches the
+platform pools for every principal without a row of its own there. The first milestone
+narrows this: the token rows of `capmox@pve!capi` and `csi@pve!csi` are narrowed from
+`/pool` to the platform pools, and `capmox@pve` and `csi@pve` get explicit user rows there
+(in PVE the more specific path wins). The rest is accepted for the first milestone. The lab
+measures which principals a stolen token could still raise, and whether PVE lets it mint a
+token for `root@pam`, and `docs/proxmox-permissions.md` records the result.
+
+**Why.** The structural fix, scoping the mint grant to a parent pool of the tenant pools
+(nested pools in PVE), renames every tenant pool and is a change of its own. Sites whose
+tenant workers run in the shared mode (`kamaji.ClusterDefaults.Shared`) need no mint grant
+at all. `docs/proxmox-permissions.md` already says that a stolen portal token can grant
+itself anything on those paths; this amendment makes the acceptance explicit and bounds it
+to the first milestone.
+
+### A9. Existing installer sites stay observe-only
+
+**Change.** Sites the installer built before this lifecycle existed are recorded in the
+portal with their versions and shown in the console, but they are not upgraded through this
+lifecycle, neither by the button nor by `make upgrade`. Their Helm-built services clusters
+are not migrated in place to Applications; they join fully when rebuilt. Sites the
+installer builds after it provisions through the portal's API are full members from the
+start. This narrows "a site built by the installer shows the same status and upgrade
+screen".
+
+**Why.** On those sites the components were applied with Helm, not as Applications of a
+pinned BOM. Moving them in place needs its own migration and lab test; recording them gives
+status now without that risk.
+
+### Scope of the first milestone
+
+These owner decisions set the scope; they do not change a decision above.
+
+- The in-platform path comes first, behind a flag that stays off until the path has run on
+  a lab. The installer provisions through the portal's API in the second milestone.
+- Layout: shared only, one workload cluster with the groups `system`, `kamaji` and `dbaas`.
+  The separate layout comes later; the data model holds a list of clusters from the start.
+- The sandbox's shape is decided in the third milestone (see the open points).
+- On a Docker Compose portal there are no tenant block volumes (no CSI gateway listener)
+  and no database backups. The console shows both as warnings.
+
+### Consequences of the amendments
+
+- Every site runs Cluster API twice, on the seed and on each workload cluster, both from the
+  same clusterctl image.
+- The operator creates the seed's backup job; the console warns until it exists.
+- A chart changed upstream behind the same version is caught by CI, not by ArgoCD, until
+  the mirror exists.
+- The mint-grant escalation stays open in the first milestone, documented and measured.
+
 ## Open points for the implementation
 
+Resolved on 2026-11-15. Each original question is kept, followed by its answer and where
+the detail is. "Design" is the P3 design of the in-platform path ("Enable managed
+services"); the files it names land with its implementation.
+
 - The exact schema of `platform-bom.yaml` and of `PlatformInstallation`.
+
+  **Answer.** The BOM is `deploy/platform/platform-bom.yaml`, `schemaVersion: 1`: the
+  release; the Kubernetes version and node image (package, tag, digest); the seed image and
+  k3s (version, binary and install script by sha256); the clusterctl image; the Cluster API
+  providers of the seed and of the workload; the tenant charts the providers pin; and one
+  entry per component (name, cluster, wave, install kind, namespace, chart with version and
+  digest, node group, stateful, `upgradeFrom`). The API image embeds it,
+  `internal/platformlife` parses and validates it, and the installer reads the same file.
+  `PlatformInstallation` is a portal document (collection `platformInstallation`) with a
+  spec (layout, PVE API address, storage, network, seed, clusters and node groups, node
+  image) and a status (phase, installed BOM, seed, clusters, components, volumes,
+  providers); its credentials sit in a separate collection that no route returns. Design
+  §3.1 to §3.3.
 - Whether the shared upgrade plan is a Go package the installer calls through the API, or
   a data file both sides interpret.
+
+  **Answer.** A Go package, `internal/platformlife`, called through the admin API by the
+  console and by the installer, as stage 60 already calls the API. The BOM is the only data
+  both sides read, and a test keeps the installer's `versions.yml` equal to it. The plan
+  needs live state (Application health, Cluster API conditions, the clusterctl inventory)
+  that the portal reads, a second interpreter in Ansible would drift, and the portal is
+  always upgraded first, so its interpreter is the newest. Design §0 and §7.
 - How the seed VM is bootstrapped without SSH (cloud-init from the published node
   template) and how its first credentials reach the portal.
+
+  **Answer.** Image and pool: [A2](#a2-seed-vm-from-a-native-template-in-its-own-pool). The
+  clone gets a NoCloud CD, `pcplat-<id>-g<n>.iso`, with k3s pinned by sha256, a server CA
+  the portal generated, and a one-shot bootstrap manifest whose bootstrap token lives 3
+  hours and can read one ServiceAccount token Secret. Cloud-init applies it once and then
+  disables itself. The portal holds the token and the CA certificate before the VM boots:
+  it pins TLS to that CA from the first call, waits for `/readyz`, reads and stores the
+  ServiceAccount token, deletes the bootstrap objects, then detaches and deletes the CD.
+  Nothing calls back from the seed and no command runs in the guest. Design §4.2 (stages 3
+  to 5), §4.3 and §5.
 - The sandbox cluster as a node group of a shared cluster: gVisor nodes and their network
   isolation rules need their own review.
+
+  **Answer.** Decided in the third milestone. gVisor workers joining the shared cluster as a
+  node group are rejected: they would share the CNI overlay and the API server with
+  kamaji-etcd and the databases. The recommended shape is a Kamaji-hosted sandbox cluster
+  whose control plane runs in the `kamaji` group, with its gVisor workers in their own
+  pool, vnet and firewall, as installer stage 55 builds it today. It needs per-group
+  address ranges first. Design §8.
