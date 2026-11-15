@@ -54,6 +54,8 @@ class APIRuntimeContractTests(unittest.TestCase):
             ("COPY", "cmd ./cmd"),
             ("COPY", "internal ./internal"),
             ("COPY", "pkg ./pkg"),
+            # seed.go and the default documents it embeds; .dockerignore drops the rest.
+            ("COPY", "deploy/seed ./deploy/seed"),
             ("RUN", 'CGO_ENABLED=0 GOOS=linux go build -trimpath '
              '-ldflags="-s -w" -o /out/proxcloud-api ./cmd/api'),
         ])

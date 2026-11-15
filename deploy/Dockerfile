@@ -7,11 +7,11 @@ FROM golang:1.27.4-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
-# Copy ONLY the Go source the binary needs (not the whole repo): no values overlays, seeds,
-# docs, or tests reach the build context/image.
+# Only the Go source the binary needs. deploy/seed is seed.go and the JSON it embeds (.dockerignore keeps the rest out).
 COPY cmd ./cmd
 COPY internal ./internal
 COPY pkg ./pkg
+COPY deploy/seed ./deploy/seed
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/proxcloud-api ./cmd/api
 
 # CGO_ENABLED=0 keeps the Go binary independent of the runtime's libc. This

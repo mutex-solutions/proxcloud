@@ -90,6 +90,10 @@ type Repo struct{ col *pgdoc.Store }
 
 func New(db *pgdoc.DB) *Repo { return &Repo{col: db.C("flavor")} }
 
+// Ensure creates the catalog table when it is missing. A caller that reads or writes the catalog inside a transaction
+// needs it first: a statement on a missing table fails the transaction.
+func (r *Repo) Ensure(ctx context.Context) error { return r.col.Ensure(ctx) }
+
 // Save upserts a flavor keyed by slug.
 func (r *Repo) Save(ctx context.Context, f *Flavor) error {
 	if err := f.Validate(); err != nil {

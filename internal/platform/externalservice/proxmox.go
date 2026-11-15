@@ -82,6 +82,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/netip"
 	"slices"
@@ -851,6 +852,15 @@ func (e *ExternalService) PVEVolumeProfileFunc() pve.VolumeProfileFunc {
 	}
 }
 
+// PVEProposedProfiles is pve.ProposeProfiles for caps (a fresh detection) under the provider's class overrides.
+func (e *ExternalService) PVEProposedProfiles(caps map[string]pve.StorageCapability) map[string]any {
+	classes := map[string]string{}
+	for id, c := range e.PVEStorageClasses() {
+		classes[id] = c.Class
+	}
+	return pve.ProposeProfiles(caps, classes)
+}
+
 // PVEEffectiveStorageClass is the class a storage is treated as: a valid admin override,
 // else the detected class ("" when the storage was never detected).
 func (e *ExternalService) PVEEffectiveStorageClass(storage string) string {
@@ -973,4 +983,34 @@ func (e *ExternalService) PVEDefaultQuota() map[string]any {
 		return nil
 	}
 	return out
+}
+
+// MergePVEDefaultQuota fills the keys of defaults that the stored default quota (config.provisioning.quota) does not
+// set, and returns the result with the keys it added (sorted). What is stored always wins: a key set under its legacy
+// alias, or set to a negative value (unlimited), counts as set, and every other stored key (the per-model "gpu" limits,
+// the sandbox keys) is kept as it is.
+func MergePVEDefaultQuota(stored map[string]any, defaults map[string]int) (map[string]any, []string) {
+	out := maps.Clone(stored)
+	if out == nil {
+		out = map[string]any{}
+	}
+	set := func(key string) bool {
+		if _, ok := stored[key]; ok {
+			return true
+		}
+		for alias, k := range pveQuotaAliases {
+			if _, ok := stored[alias]; ok && k == key {
+				return true
+			}
+		}
+		return false
+	}
+	var added []string
+	for _, key := range sortedKeys(defaults) {
+		if !set(key) {
+			out[key] = defaults[key]
+			added = append(added, key)
+		}
+	}
+	return out, added
 }
