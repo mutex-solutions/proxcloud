@@ -19,7 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (failover addresses were tested only from a stored provider). With a stored provider and a blank secret,
   the fields the body carries now replace the stored ones for the test, so an edited form can be tested
   before Save; this needs `admin:service:manage`, because it sends the stored secret to the edited address.
-  A read-only caller still tests the stored connection. `docs/api.md` lists the check ids. Tested against a
+  Such a test, when it sends the stored secret with an address, CA, fingerprint or `insecureTls` other than
+  the stored ones, writes a `CONNECTION_TEST` audit event on the provider (actor, the fields that differ, the
+  addresses tested, success or failure): the route is otherwise not audited and the provider does not change,
+  so nothing else would say where the secret went. The event is built by a tested function; its write to the
+  audit store was not run in a test. A read-only caller still tests the stored connection. `docs/api.md` lists the check ids. Tested against a
   fake PVE API only; not run against a lab cluster.
 
 - **Setup checks in the Proxmox connection test** (`?checks=all` only): Proxmox VE 9.2 or later, the pool

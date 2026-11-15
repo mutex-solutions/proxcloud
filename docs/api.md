@@ -88,7 +88,12 @@ with its stored secret. For a caller with `admin:service:manage`, the fields the
 body does carry then replace the stored ones for this test (an empty string
 clears one), so an edited form can be tested before it is saved. A caller with
 read access only always gets the stored connection: the stored secret is never
-sent to an address such a caller chose.
+sent to an address such a caller chose. The route is a read and is not in the
+admin audit log, except for this: a test that sends the stored secret with an
+`apiUrl`, `apiUrls`, `caCert`, `fingerprint` or `insecureTls` other than the
+stored one writes a `CONNECTION_TEST` event on the provider (`EXTERNAL_SERVICE`),
+whatever the outcome, with the actor, the fields that differ and the addresses
+tested. The secret itself is not in the event.
 
 By default the first failed check is a `400` with the reason, and a pass is
 `200 {version, nodes, storages, sdnZones, pciMappings, warnings}`. The installer

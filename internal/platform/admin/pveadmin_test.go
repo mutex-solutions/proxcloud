@@ -21,6 +21,7 @@ import (
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
+	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
@@ -515,6 +516,66 @@ func TestPVEAuthConfig(t *testing.T) {
 			got, ok := pveAuthConfig(tt.req, tt.es, tt.overlay)
 			if ok != tt.wantOK || (ok && !reflect.DeepEqual(got, tt.want)) {
 				t.Fatalf("got %+v %v, want %+v %v", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+// A test that sends the stored token secret to another address, or under another trust, is written to the audit log:
+// the route is otherwise not audited and the stored provider does not change, so nothing else would say where the
+// secret went.
+func TestPVEAuthAuditEvent(t *testing.T) {
+	p := func(s string) *string { return &s }
+	yes := true
+	stored := &externalservice.ExternalService{ID: "pve1", Name: "Proxmox",
+		Config: map[string]any{"provider": "proxmox", "apiUrl": "https://pve1:8006", "tokenId": "proxcloud@pve!platform", "fingerprint": "AA:BB"},
+		Secret: map[string]any{"tokenSecret": "stored-secret"}}
+	tests := []struct {
+		name    string
+		req     pveAuthReq
+		manage  bool
+		herr    *httpx.HTTPError
+		want    []audit.PropertyChange // nil = no event
+		outcome string
+	}{
+		{"the stored connection", pveAuthReq{}, true, nil, nil, ""},
+		{"the stored address sent again", pveAuthReq{APIURL: p("https://pve1:8006"), Fingerprint: p("AA:BB")}, true, nil, nil, ""},
+		{"an edited token id", pveAuthReq{TokenID: p("other@pve!t")}, true, nil, nil, ""},
+		{"its own secret", pveAuthReq{APIURL: p("https://elsewhere:8006"), TokenID: p("t@pve!x"), TokenSecret: "own"}, true, nil, nil, ""},
+		{"edits ignored without manage", pveAuthReq{APIURL: p("https://elsewhere:8006"), InsecureTLS: &yes}, false, nil, nil, ""},
+		{"another address", pveAuthReq{APIURL: p("https://elsewhere:8006")}, true, nil,
+			[]audit.PropertyChange{{Field: "apiUrl", OldValue: "https://pve1:8006", NewValue: "https://elsewhere:8006"}}, audit.OutcomeSuccess},
+		{"a failover address", pveAuthReq{APIURLs: []string{"https://pve2:8006"}}, true, nil,
+			[]audit.PropertyChange{{Field: "apiUrls", OldValue: "[]", NewValue: `["https://pve2:8006"]`}}, audit.OutcomeSuccess},
+		{"no certificate check", pveAuthReq{InsecureTLS: &yes, Fingerprint: p("")}, true, httpx.BadRequest("Proxmox authentication failed: x"),
+			[]audit.PropertyChange{{Field: "fingerprint", OldValue: "AA:BB", NewValue: ""}, {Field: "insecureTls", OldValue: "false", NewValue: "true"}},
+			audit.OutcomeFailure},
+		{"another CA", pveAuthReq{CACert: p("PEM")}, true, nil, []audit.PropertyChange{{Field: "caCert", OldValue: "", NewValue: "PEM"}}, audit.OutcomeSuccess},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, ok := pveAuthConfig(tt.req, stored, tt.manage)
+			if !ok {
+				t.Fatal("pveAuthConfig refused")
+			}
+			r := httptest.NewRequest(http.MethodPost, "/service/proxmox/auth?externalServiceId=pve1", nil)
+			r = r.WithContext(httpx.WithRC(r.Context(), &httpx.RequestContext{Sub: "op-1"}))
+			ev, ok := pveAuthAuditEvent(r, tt.req, stored, cfg, tt.herr)
+			if tt.want == nil {
+				if ok {
+					t.Fatalf("unexpected event %+v", ev)
+				}
+				return
+			}
+			if !ok || !reflect.DeepEqual(ev.Changes, tt.want) || ev.Outcome != tt.outcome || ev.ResourceID != "pve1" ||
+				ev.ResourceType != "EXTERNAL_SERVICE" || ev.Actor == nil || ev.Actor.ID != "op-1" || ev.ResourceMetadata["apiUrl"] != cfg.APIURL {
+				t.Fatalf("event %v %+v, want changes %+v outcome %s", ok, ev, tt.want, tt.outcome)
+			}
+			if tt.herr != nil && ev.ErrorMessage != tt.herr.Msg {
+				t.Fatalf("error message %q", ev.ErrorMessage)
+			}
+			if b, _ := json.Marshal(ev); strings.Contains(string(b), "stored-secret") {
+				t.Fatalf("the secret is in the event: %s", b)
 			}
 		})
 	}

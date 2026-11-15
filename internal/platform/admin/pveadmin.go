@@ -32,6 +32,7 @@ import (
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
+	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/rbac"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
@@ -107,6 +108,9 @@ func (h *Handler) proxmoxAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out, herr := pveConnectionTest(ctx, cfg, es, r.URL.Query().Get("checks") == "all", manage)
+	if ev, ok := pveAuthAuditEvent(r, req, es, cfg, herr); ok && h.audit != nil {
+		h.logAuditNow(r, ev)
+	}
 	if herr != nil {
 		httpx.WriteError(w, herr)
 		return
@@ -602,6 +606,46 @@ func pveAuthConfig(req pveAuthReq, es *externalservice.ExternalService, overlay 
 		cfg.APIURLs = req.APIURLs
 	}
 	return cfg, stored || (cfg.APIURL != "" && cfg.TokenID != "" && cfg.Secret != "")
+}
+
+// ActionConnectionTest is the audit action of a Proxmox connection test that sent the stored token secret elsewhere.
+const ActionConnectionTest = "CONNECTION_TEST"
+
+// pveAuthAuditEvent is the audit event of a connection test that sends the stored token secret to an address, or
+// under a certificate trust, the stored provider does not hold: an edited form tested before Save. The route is not
+// audited otherwise (auditSkip: it is a read) and the provider does not change, so nothing else records where the
+// secret went. ok is false for a test with its own secret or with the stored connection. Written whatever the outcome:
+// a failed test has sent the secret too.
+func pveAuthAuditEvent(r *http.Request, req pveAuthReq, es *externalservice.ExternalService, cfg pve.Config, herr *httpx.HTTPError) (audit.AuditEvent, bool) {
+	if es == nil || req.TokenSecret != "" {
+		return audit.AuditEvent{}, false
+	}
+	target := func(c pve.Config) map[string]any {
+		return map[string]any{"apiUrl": c.APIURL, "apiUrls": append([]string{}, c.APIURLs...), "caCert": c.CACert,
+			"fingerprint": c.Fingerprint, "insecureTls": c.InsecureTLS}
+	}
+	changes := audit.DiffSnapshots(target(es.PVEConfig()), target(cfg))
+	if len(changes) == 0 {
+		return audit.AuditEvent{}, false
+	}
+	actor := adminActor(r)
+	ev := audit.AdminEvent(actor, actor)
+	ev.EventContext = audit.ContextPlatform
+	ev.Action = ActionConnectionTest
+	ev.ResourceType = "EXTERNAL_SERVICE"
+	ev.ResourceID = es.ID
+	ev.ResourceDisplayName = es.Name
+	ev.ResourceMetadata = map[string]any{"operation": "proxmox-auth", "storedSecret": true, "apiUrl": cfg.APIURL, "apiUrls": cfg.APIURLs}
+	ev.Changes = changes
+	ev.Outcome = audit.OutcomeSuccess
+	if herr != nil {
+		ev.Outcome, ev.ErrorMessage = audit.OutcomeFailure, herr.Msg
+	}
+	if ev.Actor != nil {
+		ev.Actor.IPAddress = clientIP(r)
+		ev.Actor.UserAgent = r.UserAgent()
+	}
+	return ev, true
 }
 
 func valueOr[T any](p *T, fallback T) T {
