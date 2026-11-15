@@ -61,7 +61,7 @@ published. App publication tags are narrower (stable/RC, no build metadata), sin
 images use the raw tag and Docker tags cannot contain `+`.
 
 Managed charts use their own metadata versions and reject a mismatching tag.
-`database-cluster` `0.5.1` and `proxmox-kamaji-cluster` `0.1.10` need separate
+`database-cluster` `0.5.1` and `proxmox-kamaji-cluster` `0.1.11` need separate
 publication checks/tags; the app tag does not publish them or move existing
 provider pins or managed data. Re-publishing an already existing chart version is
 skipped; it does not replace old contents. See the
