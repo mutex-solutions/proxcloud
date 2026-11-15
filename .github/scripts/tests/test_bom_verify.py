@@ -2,12 +2,14 @@
 """bom_verify.py against a fake opener: no network, standard library only."""
 import email.message
 import hashlib
+import http.client
 import importlib.util
 import io
 import json
 from pathlib import Path
 import unittest
 import urllib.error
+import urllib.request
 
 ROOT = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location("bom_verify", ROOT / ".github/scripts/bom_verify.py")
@@ -75,7 +77,7 @@ class Registry:
         self.manifests = {"ghcr.io/mutex-solutions/vm-os:os-1": A, "reg.test/kube-vip/kube-vip:v0.8.9": B,
                           "reg.test/org/charts/ours:0.1.0": A}
         self.files = {"https://charts.test/repo/index.yaml": INDEX.encode(), "https://example.test/v1%2Bk3s1/install.sh": SCRIPT}
-        self.calls, self.fail = [], {}
+        self.calls, self.fail, self.token = [], {}, {"token": "anon"}
 
     def __call__(self, req, timeout=None):
         url = req.full_url
@@ -83,7 +85,7 @@ class Registry:
         if self.fail.get(url):
             raise self.fail[url].pop(0)
         if url.startswith("https://auth.test/token"):
-            return Response(json.dumps({"token": "anon"}).encode())
+            return Response(json.dumps(self.token).encode())
         if "/v2/" in url:
             host, rest = url[len("https://"):].split("/v2/")
             ref = "%s/%s" % (host, rest.replace("/manifests/", ":"))
@@ -176,6 +178,72 @@ class BomVerifyTest(unittest.TestCase):
             bv.parse_bom(BOM.replace("https://charts.test", "http://charts.test"))
         with self.assertRaises(bv.VerifyError):
             bv.fetch(Registry(), "http://example.test/install.sh")
+
+    def test_the_release_line_fails_closed(self):
+        for line in ("release: '0.8.0-dev'", 'release: "0.8.0-dev"  # main', "release: 0.8.0-dev"):
+            with self.subTest(line):
+                failures, lines = run(BOM.replace("release: 0.8.0-dev", line), release=True)
+                self.assertEqual(failures, 1, lines)
+                self.assertIn("needs a BOM without -dev", lines[0])
+        self.assertEqual(bv.parse_bom(BOM.replace("release: 0.8.0-dev", "release: '0.8.0-rc.1'"))[0], "0.8.0-rc.1")
+        for line in ("release: !!str 0.8.0-dev", "release: latest", "release: '0.8.0-dev\"", "release:",
+                     "release: 0.8.0\nrelease: 0.8.0-dev"):
+            with self.subTest(line), self.assertRaises(bv.VerifyError):
+                bv.parse_bom(BOM.replace("release: 0.8.0-dev", line))
+
+    def test_a_nested_key_does_not_shadow_the_chart(self):
+        shadow = """  aaa:
+  - annotations:
+      notes: |
+        cilium:
+        - version: 1.18.16
+          digest: %s
+    version: 1.0.0
+""" % ("1" * 64)
+        index = INDEX.replace("entries:\n", "entries:\n" + shadow)
+        self.assertEqual(bv.index_digest(index, "cilium", "1.18.16"), C)
+        with self.assertRaises(bv.VerifyError):
+            bv.index_digest(index.replace("  cilium:\n", "  other:\n"), "cilium", "1.18.16")
+
+    def test_redirects_keep_https_and_never_carry_a_manifest_request(self):
+        handler = bv.Redirects()
+
+        def follow(url, target, headers=None, method="GET"):
+            req = urllib.request.Request(url, headers=headers or {}, method=method)
+            return handler.redirect_request(req, io.BytesIO(), 307, "", email.message.Message(), target)
+
+        self.assertEqual(follow("https://example.test/k3s", "https://objects.test/k3s").full_url, "https://objects.test/k3s")
+        manifest = "https://reg.test/v2/x/manifests/1"
+        for name, args in {
+            "http target": ("https://example.test/k3s", "http://objects.test/k3s"),
+            "manifest HEAD": (manifest, "https://other.test/v2/x/manifests/1", None, "HEAD"),
+            "token": (manifest, "https://other.test/v2/x/manifests/1", {"Authorization": "Bearer anon"}),
+        }.items():
+            with self.subTest(name), self.assertRaises(bv.VerifyError):
+                follow(*args)
+        self.assertTrue(any(isinstance(h, bv.Redirects) for h in bv.OPENER.handlers))
+
+    def test_a_cut_connection_is_retried(self):
+        index = "https://charts.test/repo/index.yaml"
+        registry = Registry()
+        registry.fail[index] = [http.client.IncompleteRead(b""), http.client.BadStatusLine("")]
+        self.assertEqual(run(registry=registry)[0], 0)
+        self.assertEqual(sum(url == index for _, url in registry.calls), 3)
+        registry = Registry()
+        registry.fail[index] = [http.client.IncompleteRead(b"")] * bv.ATTEMPTS
+        failures, lines = run(registry=registry)
+        self.assertEqual(failures, 1, lines)
+        self.assertEqual(len(lines), 5)  # the other pins are still reported
+
+    def test_odd_bodies_are_a_failure_line_not_a_traceback(self):
+        registry = Registry()
+        registry.token = {"token": 7}
+        failures, lines = run(registry=registry)
+        self.assertEqual(failures, 3, lines)  # the three OCI pins
+        self.assertEqual(len(lines), 5)
+        registry = Registry()  # bytes that are not UTF-8 outside the digest do not hide it
+        registry.files["https://charts.test/repo/index.yaml"] = INDEX.encode().replace(b"apiVersion: v2", b"description: \xff")
+        self.assertEqual(run(registry=registry)[0], 0)
 
     def test_the_repository_bom_parses(self):
         release, items = bv.parse_bom((ROOT / bv.BOM).read_text(encoding="utf-8"))

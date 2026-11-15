@@ -12,7 +12,8 @@ What is checked, per kind of pin:
   url    a download ({url, sha256}): the file is downloaded (at most --max-download-mb) and its sha256 must equal the
          pin.
 A `pending` digest has nothing to compare and is reported as "skip"; with --release it fails, and so do a `0.0.0+`
-version and a `-dev` release.
+version and a `-dev` release. The `release` line must be one plain version (quotes allowed), or the run fails.
+Redirects: a manifest request is never redirected; a download follows https redirects only.
 
 The BOM is read without a YAML library (the CI scripts are stdlib only): each pin is one line in one of the shapes
 above, and a line that holds a pin in any other shape fails the run, so a pin cannot be skipped by being unreadable.
@@ -20,6 +21,7 @@ platformlife.Validate (Go) stays the judge of the BOM's schema.
 """
 import argparse
 import hashlib
+import http.client
 import json
 import re
 import sys
@@ -43,7 +45,9 @@ _VM = re.compile(r"\{package: %s, tag: %s, digest: %s\}" % (_V, _V, _V))
 _URL = re.compile(r"\{url: %s, sha256: %s\}" % (_V, _V))
 _IMAGE = re.compile(r'^\s+\w+:\s+"?([^"@\s]+):([^"@\s:/]+)@([^"\s]+)"?\s*$')
 _PIN = re.compile(r"digest:|\bsha256:\s|@(?:sha256:|pending)")  # every way a line can hold a pin
-_RELEASE = re.compile(r'^release:\s*"?([^"\s#]+)"?', re.M)
+_RELEASE = re.compile(r"^release:(.*)$", re.M)
+_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?")
+_COMMENT = re.compile(r"(^|\s)#.*$")  # no pin holds " #"
 
 
 class VerifyError(Exception):
@@ -52,12 +56,18 @@ class VerifyError(Exception):
 
 def parse_bom(text):
     """Return (release, items). An item is a dict: kind oci|index|url, ref, digest, version, line."""
-    m = _RELEASE.search(text)
-    if not m:
-        raise VerifyError("the BOM has no release")
+    release = [_COMMENT.sub("", value).strip() for value in _RELEASE.findall(text)]
+    if len(release) != 1:
+        raise VerifyError("the BOM has %d release lines, want one" % len(release))
+    release = release[0]
+    if release[:1] in "'\"" and release[-1:] == release[:1]:
+        release = release[1:-1]
+    # Anything else (a YAML tag, an anchor, a half quote) could read as a -dev release in Go and not here.
+    if not _VERSION.fullmatch(release):
+        raise VerifyError("the BOM's release %r is not a plain version" % release)
     items = []
     for n, raw in enumerate(text.splitlines(), 1):
-        line = re.sub(r"(^|\s)#.*$", "", raw)  # no pin holds " #"
+        line = _COMMENT.sub("", raw)
         found = []
         for repo, name, version, digest in _CHART.findall(line):
             if "://" in repo and not repo.startswith("https://"):
@@ -83,7 +93,22 @@ def parse_bom(text):
         items.extend(found)
     if not items:
         raise VerifyError("the BOM has no pins")
-    return m.group(1), items
+    return release, items
+
+
+class Redirects(urllib.request.HTTPRedirectHandler):
+    """Follow https redirects of plain downloads only (github.com release files need them; their bytes are hashed).
+    A manifest request is never redirected: another host would state the digest and receive the pull token."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if req.get_method() == "HEAD" or req.has_header("Authorization"):
+            raise VerifyError("%s redirects to %s: a manifest request is not redirected" % (req.full_url, newurl))
+        if not newurl.startswith("https://"):
+            raise VerifyError("%s redirects to %s, which is not https://" % (req.full_url, newurl))
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+OPENER = urllib.request.build_opener(Redirects)
 
 
 def fetch(opener, url, headers=None, method="GET", limit=MAX_SMALL, digest=None):
@@ -116,8 +141,8 @@ def fetch(opener, url, headers=None, method="GET", limit=MAX_SMALL, digest=None)
             if err.code < 500 and err.code != 429:
                 return err.code, err.headers, b""
             last = "HTTP %d" % err.code
-        except (urllib.error.URLError, OSError) as err:  # timeouts and resets included
-            last = str(getattr(err, "reason", err))
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as err:  # timeouts, resets, cut bodies
+            last = str(getattr(err, "reason", err)) or repr(err)
     raise VerifyError("%s: %s after %d attempts" % (url, last, ATTEMPTS))
 
 
@@ -135,7 +160,7 @@ def oci_digest(opener, ref):
         query = urllib.parse.urlencode({k: params[k] for k in ("service", "scope") if k in params})
         status, _, body = fetch(opener, params["realm"] + "?" + query)
         try:
-            token = json.loads(body)["token"]
+            token = "" + json.loads(body)["token"]  # TypeError unless a string
         except (ValueError, KeyError, TypeError):
             raise VerifyError("%s: no anonymous token (HTTP %d)" % (params["realm"], status))
         headers["Authorization"] = "Bearer " + token
@@ -160,12 +185,15 @@ def index_digest(index, name, version):
     except ValueError:
         raise VerifyError("index.yaml has no entries")
     key = re.compile(r'^(\s+)["\']?%s["\']?:\s*$' % re.escape(name))
+    depth = None  # the indentation of the chart names: that of the first line under entries
     for i in range(start, len(lines)):
         if lines[i] and not lines[i].startswith((" ", "-")):
             break  # the next top-level key
+        if depth is None and lines[i].strip():
+            depth = len(lines[i]) - len(lines[i].lstrip())
         m = key.match(lines[i])
-        if not m:
-            continue
+        if not m or len(m.group(1)) != depth:
+            continue  # a deeper line is not a chart, whatever it says
         entry, found = {}, []
         dash = None
         for line in lines[i + 1:]:
@@ -200,7 +228,8 @@ def resolve(opener, item, max_download):
         status, _, body = fetch(opener, url)
         if status != 200:
             raise VerifyError("HTTP %d for %s" % (status, url))
-        return index_digest(body.decode("utf-8"), item["name"], item["version"])
+        # "replace": a byte that is not UTF-8 cannot make a digest match, it can only break the line it is on.
+        return index_digest(body.decode("utf-8", "replace"), item["name"], item["version"])
     status, _, got = fetch(opener, item["ref"], limit=max_download, digest=hashlib.sha256())
     if status != 200:
         raise VerifyError("HTTP %d" % status)
@@ -258,7 +287,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         with open(args.bom, encoding="utf-8") as handle:
-            failures = verify(handle.read(), urllib.request.urlopen, args.release, args.max_download_mb << 20)
+            failures = verify(handle.read(), OPENER.open, args.release, args.max_download_mb << 20)
     except VerifyError as err:
         print("FAIL %s" % err)
         failures = 1
