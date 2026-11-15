@@ -12,16 +12,19 @@ instead of `/pool`, and `csi@pve!csi` `ProxCloudCSI` on the services pool and it
 instead of `/pool` and `/storage`; both users get a row of their own on that pool. The
 setup script route gains `managedServices=true`, which writes the same rows for a Compose
 site, the portal token's mint grant, and the new pool `proxcloud-seed` for the seed VM of
-managed services, where the portal token and every `csi@pve` token get `NoAccess`. The rows
-are `pve.ManagedACLs`; a test keeps them equal to stage 10.
+managed services, where the portal token and every `csi@pve` token get `NoAccess`. That
+fences the seed VM only: its disk sits on the boot store, where `csi@pve!csi` holds
+`Datastore.Allocate`, which in PVE opens every volume on the store. The rows are
+`pve.ManagedACLs`; a test keeps them equal to stage 10.
 
 **Why:** both tokens only ever work on the services cluster, but held every tenant pool and
 store, and a stolen portal token with `Permissions.Modify` on `/pool` could have widened
 them further on the platform VMs. A more specific row wins in PVE, so the users' own rows
 on the platform pools fence them against a later `/pool` grant. The remaining reach of that
 mint grant (other users without a row there) is accepted for M1 and measured by lab check
-L1. Existing sites keep their broad token rows until removed by hand, because stage 10 only
-adds rows.
+L1. A store of its own for the seed, which would fence its disk from the CSI token, changes
+the platform's storage and is open with the owner. Existing sites keep their broad token
+rows until removed by hand, because stage 10 only adds rows.
 
 **Views updated:** [C2 containers](c2-containers.md) (trust boundaries: new "Services
 cluster to Proxmox" row).

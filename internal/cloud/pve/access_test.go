@@ -217,8 +217,9 @@ func TestManagedACLsGrantThePrivilegeTables(t *testing.T) {
 			}
 		}
 	}
-	// Nothing where a token must hold nothing: the portal on both platform pools, the CSI token on the seed, the
-	// platform tokens on a tenant pool and on another store.
+	// Nothing where a token must hold nothing: the portal on both platform pools, the CSI token on the seed's pool,
+	// the platform tokens on a tenant pool and on another store. The seed's pool fences the seed VM only: its disk is on
+	// boot, where CSIPrivileges itself wants Datastore.Allocate, and PVE lets that open every volume on the store.
 	for _, c := range []struct{ tokenID, path string }{
 		{DefaultPlatformTokenID, "/pool/" + SystemPool}, {DefaultPlatformTokenID, "/pool/" + SeedPool},
 		{CSITokenID, "/pool/" + SeedPool}, {"csi@pve!gateway", "/pool/" + SeedPool},

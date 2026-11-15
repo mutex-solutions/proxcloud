@@ -75,7 +75,7 @@ sync/refresh afterward. Unrelated projects with a single owner are not blocked.
 | `pc-<projectId>` | one per project, created by the portal (the prefix is the provider's `poolPrefix`) |
 | `pc-templates` | OS and k8s node templates |
 | `proxcloud-system` | management VMs, the services cluster and its storage VMs. The platform token gets `NoAccess` here. Its name must **not** start with `poolPrefix`. |
-| `proxcloud-seed` | [managed services](#managed-services) from the console only: the seed VM (k3s with Cluster API, CAPMOX and ArgoCD). Only `capmox@pve!capi` holds a role there; the portal token and every `csi@pve` token get `NoAccess`. Its name must **not** start with `poolPrefix`. |
+| `proxcloud-seed` | [managed services](#managed-services) from the console only: the seed VM (k3s with Cluster API, CAPMOX and ArgoCD). Only `capmox@pve!capi` holds a role there; the portal token and every `csi@pve` token get `NoAccess`. That fences the seed VM, not its disks on the boot store ([what the seed pool does not fence](#what-the-seed-pool-does-not-fence)). Its name must **not** start with `poolPrefix`. |
 | `proxcloud-sandbox` | `sandbox.enabled` only: the sandbox cluster's workers ([managed-sandbox.md](managed-sandbox.md)). No project owns it, so nothing in it is synced or billed to a tenant. Its name must **not** start with `poolPrefix`. |
 | `proxcloud-sandbox-entry` | `sandbox.entry.public.bridge` set: the sandbox entry appliance (HAProxy, stage 56). The platform token holds only `ProxCloudSandboxEntry` there. Its name must **not** start with `poolPrefix`. |
 
@@ -352,7 +352,8 @@ grant '/sdn/zones' 'ProxCloudKubeMint' 1
 grant '/sdn/zones' 'ProxCloudPlatform' 1
 grant '/nodes' 'ProxCloudKubeMint' 0
 grant '/pool/proxcloud-seed' 'NoAccess' 1
-# what the platform tokens hold on the platform pools: the CAPI token ProxCloudCAPI on both, the CSI token nothing on the seed
+# what the platform tokens hold on the platform pools: the CAPI token ProxCloudCAPI on both, the CSI token nothing on the
+# seed VM (its disks on the boot store stay open to the CSI token: docs/proxmox-permissions.md, "What the seed pool does not fence")
 pveum user token permissions 'capmox@pve' 'capi' --path '/pool/proxcloud-system'
 pveum user token permissions 'capmox@pve' 'capi' --path '/pool/proxcloud-seed'
 pveum user token permissions 'csi@pve' 'csi' --path '/pool/proxcloud-system'
@@ -366,7 +367,7 @@ The rows are `pve.ManagedACLs` (`internal/cloud/pve/access.go`). Installer stage
 | `capmox@pve!capi` (token) | `/pool/proxcloud-system`, `/pool/proxcloud-seed` | `ProxCloudCAPI` | Not `/pool`: the token never needs a tenant pool. |
 | `capmox@pve` (user) | `/pool/proxcloud-system`, `/pool/proxcloud-seed` | `ProxCloudCAPI` | The same rights it inherits from `/pool`, as a more specific row: a `/pool` grant written for this user later does not reach the platform VMs. The user keeps `/pool` for the tenant clusters' tokens. |
 | `csi@pve!csi` (token) | `/pool/proxcloud-system`; `/storage/<bootStorage>` | `ProxCloudCSI` | Not `/pool` and `/storage`. |
-| `csi@pve` (user) | `/pool/proxcloud-system`; `/pool/proxcloud-seed` | `ProxCloudCSI`; `NoAccess` | The first as for `capmox@pve`; the second caps every `csi@pve` token off the seed, the CSI gateway's included. |
+| `csi@pve` (user) | `/pool/proxcloud-system`; `/pool/proxcloud-seed` | `ProxCloudCSI`; `NoAccess` | The first as for `capmox@pve`; the second caps every `csi@pve` token off the seed VM, the CSI gateway's included, but not off its disks ([below](#what-the-seed-pool-does-not-fence)). |
 | `proxcloud@pve!platform` (user and token) | `/pool/proxcloud-seed` | `NoAccess` | As on `proxcloud-system`. |
 | `proxcloud@pve!platform` (user and token) | `/access/groups`, `/pool`, `/storage`, `/sdn/zones` (propagate), `/nodes` (no propagate) | `ProxCloudKubeMint` | Mint and grant the tenant clusters' tokens ([Managed Kubernetes](#managed-kubernetes)), with `ProxCloudPlatform` repeated on `/sdn/zones`. |
 | `proxcloud@pve!platform` (user and token) | `/storage/<importStorage>` (no propagate), only with `importStorage` | `ProxCloudKubeMint` | The `PVEDatastoreAdmin` row there replaces what `/storage` passes down, and a tenant cluster's ISO or boot store may be that store (`local` on a site without a NAS): without it PVE refuses the cluster token's row there and the cluster create fails. Stage 10 writes the same row (`nas_mint_acls`). |
@@ -374,6 +375,21 @@ The rows are `pve.ManagedACLs` (`internal/cloud/pve/access.go`). Installer stage
 The other rows (`/`, `/nodes`, `/pool/pc-templates`, `/sdn/zones`, the two `/storage` rows of `capmox@pve!capi`, and `/pool` and `/storage` for both users) are those of [ProxCloudCAPI](#proxcloudcapi) and [ProxCloudCSI](#proxcloudcsi).
 
 The portal checks a site against the same tables (`internal/cloud/pve/access.go`), each with a client on that token: `MissingPrivileges` with `CAPIPrivileges`, `CSIPrivileges` and `KubeMintPrivileges` (which checks the import store apart); `ISOVisibilityProblem`, which asks PVE per `iso` store whether the CAPI token sees it and wants exactly `isoStorage` (CAPMOX puts each bootstrap ISO on the first `iso` store its token sees, as stage 10 checks for the services cluster); and `CheckBootISOGrant` for `capmox@pve`. The Managed services page that runs them comes later.
+
+### What the seed pool does not fence
+
+PVE checks a disk against two places: the VM that owns it (`VM.Config.Disk` there, with `Datastore.Audit` on the
+store) or the store alone. `Datastore.Allocate` on a store passes the check for every volume on it, whatever VM owns
+it; it is how proxmox-csi attaches its `vm-9999-pvc-*` volumes to other VMs, and the reason the role carries it. The
+`NoAccess` rows on `proxcloud-seed` close the first way for the portal and every `csi@pve` token. The second stays
+open: the seed's disk is cloned onto `bootStorage`, where `csi@pve!csi` holds `ProxCloudCSI`, and so is every other
+VM disk on that store, tenant ones included when tenants use it. Whoever holds that token (the workload's proxmox-csi
+Secret, which the providers' service account can read, or anyone who takes over the workload) can attach the seed's
+disk to a workload VM, where the token holds `VM.Config.Disk`, and read the seed's k3s datastore with its cluster-admin
+token and the `capmox@pve!capi` secret; or delete the disk while the seed is stopped. The portal token holds
+`Datastore.Allocate` on the boot store too when `importStorage` is that store. Fencing the disks needs a store for the
+seed where no `csi@pve` token holds a role, refused when it is `bootStorage` or `importStorage`; that changes the
+storage the operator gives the platform and is open with the owner. Lab check L1 measures it.
 
 ### An existing site
 
@@ -391,7 +407,7 @@ pveum user token permissions csi@pve csi --path /storage/<services.storage>
 
 `ProxCloudKubeMint` gives the portal token `Permissions.Modify` on `/pool` and `User.Modify` on `/access/groups`. A stolen portal token can therefore mint a token for an existing principal and grant it a role on `/pool`, with propagate, which reaches every pool where that principal has no row of its own. `NoAccess` keeps the portal token itself off both platform pools, and the user rows above keep `capmox@pve` and `csi@pve` to their roles there. Any other user of the site without a row on the platform pools is not covered. The owner accepted this for M1 on 2026-11-15, documented here and measured on the lab. The structural fix is to grant the mint role on a parent pool of the tenant pools (nested pools), which renames every tenant pool; a site whose Kubernetes provider runs in `sharedWorkers` mode needs no mint grant at all.
 
-Lab check L1 measures it on PVE 9.2 and records the results here: the checks above are green; `pveum user token permissions` for the portal token is empty on both platform pools and `csi@pve csi` is empty on `proxcloud-seed`; `capmox@pve capi` sees one ISO store. Then a drill with the portal token, reverted afterwards: grant `capmox@pve` `ProxCloudPlatform` on `/pool` and read its effective rights on `/pool/proxcloud-seed`, which must stay `ProxCloudCAPI`; and try `POST /access/users/root@pam/token/x`, to learn whether PVE lets it mint for `root@pam`. **Not run yet.**
+Lab check L1 measures it on PVE 9.2 and records the results here: the checks above are green; `pveum user token permissions` for the portal token is empty on both platform pools and `csi@pve csi` is empty on `proxcloud-seed` but holds `Datastore.Allocate` on `/storage/<bootStorage>`; `capmox@pve capi` sees one ISO store. With two scratch VMs on one node and the boot store, one in `proxcloud-seed` and one in `proxcloud-system`, the CSI token attaches the first one's disk to the second (`PUT /nodes/<node>/qemu/<second>/config` with `scsi9=<bootStorage>:vm-<first>-disk-0`): PVE is expected to allow it ([what the seed pool does not fence](#what-the-seed-pool-does-not-fence)); destroy both scratch VMs afterwards. Then a drill with the portal token, reverted afterwards: grant `capmox@pve` `ProxCloudPlatform` on `/pool` and read its effective rights on `/pool/proxcloud-seed`, which must stay `ProxCloudCAPI`; and try `POST /access/users/root@pam/token/x`, to learn whether PVE lets it mint for `root@pam`. **Not run yet.**
 
 ## pveum commands
 

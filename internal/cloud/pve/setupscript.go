@@ -123,7 +123,8 @@ func setupScript(tokenID string, gpu bool, importStorage string, managed []Manag
 				}
 			}
 		}
-		line("# what the platform tokens hold on the platform pools: the CAPI token ProxCloudCAPI on both, the CSI token nothing on the seed")
+		line("# what the platform tokens hold on the platform pools: the CAPI token ProxCloudCAPI on both, the CSI token nothing on the")
+		line(`# seed VM (its disks on the boot store stay open to the CSI token: docs/proxmox-permissions.md, "What the seed pool does not fence")`)
 		for _, id := range []string{CAPITokenID, CSITokenID} {
 			user, name, _ := strings.Cut(id, "!")
 			for _, pool := range []string{SystemPool, SeedPool} {

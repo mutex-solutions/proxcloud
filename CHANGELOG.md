@@ -19,7 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pools instead of `/pool`, `csi@pve!csi` gets `ProxCloudCSI` on `proxcloud-system` and the boot store instead of
   `/pool` and `/storage`, both users get rows of their own on the platform pools (so a `/pool` grant written later
   for them does not reach the platform VMs), and the portal token and every `csi@pve` token get `NoAccess` on
-  `proxcloud-seed`. With `importStorage` the portal also gets `ProxCloudKubeMint` on that store, as stage 10's
+  `proxcloud-seed`. That fences the seed VM, not its disk: the disk is on the boot store, where `csi@pve!csi` holds
+  `Datastore.Allocate`, which in PVE opens every volume on the store, so the CSI token can attach the seed's disk to
+  a workload VM (documented, measured by lab check L1; a store of its own for the seed is open with the owner). With `importStorage` the portal also gets `ProxCloudKubeMint` on that store, as stage 10's
   `nas_mint_acls`: its `PVEDatastoreAdmin` row there replaces what `/storage` passes down, and on a site without a NAS
   the import store is `local`, the ISO store of tenant clusters, so without it every cluster create would fail on the
   ACL its token gets there. The rows (`pve.ManagedACLs`), the privilege tables the portal will check each token against

@@ -259,7 +259,8 @@ func ManagedACLs(portalTokenID, boot, iso, importStorage string) []ManagedACL {
 		{"/storage/" + boot, roleCAPI, false, "", CAPITokenID},
 		{"/storage/" + iso, roleISOStorage, false, capiUser, CAPITokenID},
 		// The platform's proxmox-csi: disks of the workload VMs on boot. NoAccess on the user caps every csi@pve
-		// token off the seed, the CSI gateway's included.
+		// token off the seed VM, the CSI gateway's included. Not off its disk on boot: Datastore.Allocate there
+		// opens every volume on the store, whatever VM owns it (docs/proxmox-permissions.md).
 		{"/pool", roleCSI, true, csiUser, ""},
 		{"/pool/" + SystemPool, roleCSI, true, csiUser, CSITokenID},
 		{"/pool/" + SeedPool, "NoAccess", true, csiUser, ""},
