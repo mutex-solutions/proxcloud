@@ -135,11 +135,15 @@ instead of resetting its progress.
 
 A receipt whose template was deleted since stops blocking only through `Service.MarkTemplateGone`
 (no route yet; the managed-services job calls it). It reads the receipt's own provider and marks the
-receipt `templateGone` only when no VM holds the receipt's VMID any more, or the VM that does has a
-name, sits on a node that is up and carries neither the template's name nor its `pc-src-` tag (the
-VMID was reused). A read error, a node that is down, a blank row, or a template that was only renamed,
-migrated or moved out of `pc-templates` changes nothing. A marked receipt then counts as failed for
-the duplicate check and shows `template_missing` on the page.
+receipt `templateGone` only when no guest in the cluster holds the receipt's VMID any more, or the VM
+that does is visible to the portal token, has a name, sits on a node that is up and carries neither
+the template's name nor its `pc-src-` tag (the VMID was reused). "No guest" comes from
+`GET /cluster/nextid?vmid=`, which reads the cluster's whole guest list; `/cluster/resources` lists
+only the guests the token has `VM.Audit` on (through its pools), so a VMID missing from it proves
+nothing. A read error, a node that is down, a blank row, a held VMID the token cannot see (a template
+moved out of `pc-templates`, or a token that lost its pool rights), or a template that was only
+renamed or migrated changes nothing. A marked receipt then counts as failed for the duplicate check
+and shows `template_missing` on the page.
 
 ### Download path
 

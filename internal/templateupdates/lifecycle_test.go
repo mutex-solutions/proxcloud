@@ -196,8 +196,10 @@ func TestPlanWithdraw(t *testing.T) {
 	}
 }
 
-// templateGone: a receipt's template counts as deleted only on proof from a successful read. Any row
-// at its VMID that may still be it (its name or source tag, a node that is down, a blank row) refuses.
+// templateGone runs once nextid said some guest holds the receipt's VMID. The template counts as
+// deleted only when this token sees that guest and it is plainly another VM. /cluster/resources lists
+// only the guests the token has VM.Audit on (through pc-* and pc-templates), so a VMID missing from
+// the rows is hidden (moved out of pc-templates, or the token lost its rights), not free.
 func TestTemplateGoneNeedsProof(t *testing.T) {
 	p := osPayload()
 	const vmid = 9210
@@ -206,13 +208,13 @@ func TestTemplateGoneNeedsProof(t *testing.T) {
 		rows []pve.ClusterResource
 		gone bool
 	}{
-		"vmid absent":         {[]pve.ClusterResource{other}, true},
-		"empty cluster":       {[]pve.ClusterResource{}, true},
+		"hidden from token":   {[]pve.ClusterResource{other}, false},
+		"token sees no VM":    {[]pve.ClusterResource{}, false},
 		"vmid reused":         {[]pve.ClusterResource{other, {Type: "qemu", VMID: vmid, Node: "pve1", Name: "pc-ghcr-debian-13-os-20261201000000", Tags: "pc-src-111111111111"}}, true},
 		"vmid reused by lxc":  {[]pve.ClusterResource{{Type: "lxc", VMID: vmid, Node: "pve2", Name: "ct1"}}, true},
 		"unread (nil)":        {nil, false},
 		"still the template":  {[]pve.ClusterResource{{Type: "qemu", VMID: vmid, Node: "pve1", Template: 1, Pool: pve.TemplatePool, Name: TemplateName(p), Tags: TemplateTags(p)}}, false},
-		"out of pc-templates": {[]pve.ClusterResource{{Type: "qemu", VMID: vmid, Node: "pve1", Template: 1, Name: TemplateName(p), Tags: TemplateTags(p)}}, false},
+		"out of pc-templates": {[]pve.ClusterResource{{Type: "qemu", VMID: vmid, Node: "pve1", Template: 1, Pool: "pc-p1", Name: TemplateName(p), Tags: TemplateTags(p)}}, false},
 		"renamed":             {[]pve.ClusterResource{{Type: "qemu", VMID: vmid, Node: "pve1", Template: 1, Pool: pve.TemplatePool, Name: "renamed", Tags: TemplateTags(p)}}, false},
 		"tags stripped":       {[]pve.ClusterResource{{Type: "qemu", VMID: vmid, Node: "pve1", Template: 1, Name: TemplateName(p)}}, false},
 		"migrated":            {[]pve.ClusterResource{{Type: "qemu", VMID: vmid, Node: "pve2", Template: 1, Pool: pve.TemplatePool, Name: TemplateName(p), Tags: TemplateTags(p)}}, false},

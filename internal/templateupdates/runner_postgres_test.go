@@ -489,12 +489,16 @@ func TestPGEnqueueBlockedByTemplatedDeadJob(t *testing.T) {
 	}
 }
 
-// rowsPVE answers ClusterResources only (the read MarkTemplateGone makes).
+// rowsPVE answers the two reads MarkTemplateGone makes: nextid for the VMID, then the VM rows.
 type rowsPVE struct {
 	LifecyclePVE
-	rows []pve.ClusterResource
-	err  error
+	free    bool
+	freeErr error
+	rows    []pve.ClusterResource
+	err     error
 }
+
+func (f rowsPVE) VMIDFree(context.Context, int) (bool, error) { return f.free, f.freeErr }
 
 func (f rowsPVE) ClusterResources(context.Context, string) ([]pve.ClusterResource, error) {
 	return f.rows, f.err
@@ -519,17 +523,21 @@ func TestPGReimportOnlyAfterVerifiedGone(t *testing.T) {
 	_ = s.Receipts.Save(ctx, r)
 	p := r.Payload
 	var asked string
-	via := func(rows []pve.ClusterResource, err error) PVEResolver {
+	via := func(f rowsPVE) PVEResolver {
 		return func(_ context.Context, svc string) (LifecyclePVE, error) {
 			asked = svc
-			return rowsPVE{rows: rows, err: err}, nil
+			return f, nil
 		}
 	}
 	tpl := pve.ClusterResource{Type: "qemu", VMID: 9210, Node: "pve1", Template: 1, Pool: pve.TemplatePool, Name: TemplateName(p), Tags: TemplateTags(p)}
 	for name, pvFor := range map[string]PVEResolver{
-		"read error":       via(nil, errors.New("unreachable")),
-		"template present": via([]pve.ClusterResource{tpl}, nil),
-		"node down":        via([]pve.ClusterResource{{Type: "qemu", VMID: 9210, Node: "pve1", NodeDown: true}}, nil),
+		"nextid error":     via(rowsPVE{freeErr: errors.New("unreachable")}),
+		"read error":       via(rowsPVE{err: errors.New("unreachable")}),
+		"template present": via(rowsPVE{rows: []pve.ClusterResource{tpl}}),
+		"node down":        via(rowsPVE{rows: []pve.ClusterResource{{Type: "qemu", VMID: 9210, Node: "pve1", NodeDown: true}}}),
+		// Held, but not in this token's view: moved out of pc-templates, or the token lost VM.Audit.
+		"hidden":      via(rowsPVE{rows: []pve.ClusterResource{{Type: "qemu", VMID: 101, Node: "pve1", Name: "tenant-vm"}}}),
+		"token blind": via(rowsPVE{rows: []pve.ClusterResource{}}),
 		"provider missing": func(context.Context, string) (LifecyclePVE, error) {
 			return nil, lcErr(404, "provider_missing", "gone")
 		},
@@ -544,8 +552,8 @@ func TestPGReimportOnlyAfterVerifiedGone(t *testing.T) {
 	if asked != p.ServiceID {
 		t.Fatalf("read provider %q, not the receipt's", asked)
 	}
-	// Deleted (its VMID taken by an unrelated VM since): freed once, idempotently.
-	gone := via([]pve.ClusterResource{{Type: "qemu", VMID: 9210, Node: "pve1", Name: "tenant-vm", Tags: "proxcloud"}}, nil)
+	// Deleted (nextid: no guest anywhere holds VMID 9210): freed once, idempotently.
+	gone := via(rowsPVE{free: true})
 	for i := 0; i < 2; i++ {
 		if err := s.MarkTemplateGone(ctx, gone, first.ID); err != nil {
 			t.Fatalf("mark %d: %v", i, err)

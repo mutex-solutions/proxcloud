@@ -213,6 +213,7 @@ func copyOf(r pve.ClusterResource, p VMPayload) bool {
 // LifecyclePVE is the subset of *pve.Client Publish/Withdraw/state use.
 type LifecyclePVE interface {
 	ClusterResources(ctx context.Context, kind string) ([]pve.ClusterResource, error)
+	VMIDFree(ctx context.Context, vmid int) (bool, error)
 	GetPool(ctx context.Context, poolID string) (*pve.PoolInfo, error)
 	GetVMConfig(ctx context.Context, node string, vmid int) (pve.VMConfig, error)
 	SetVMConfig(ctx context.Context, node string, vmid int, params map[string]string, del ...string) (pve.UPID, error)
@@ -226,7 +227,13 @@ func importTemplate(ctx context.Context, pv LifecyclePVE, p VMPayload, node stri
 	return importTemplateBy(ctx, pv, TemplateName(p), p.Digest, node, vmid)
 }
 
-func importTemplateBy(ctx context.Context, pv LifecyclePVE, name, digest, node string, vmid int) (pve.VMConfig, error) {
+// templateReader is what importTemplateBy reads (LifecyclePVE and SmokePVE both have it).
+type templateReader interface {
+	GetPool(ctx context.Context, poolID string) (*pve.PoolInfo, error)
+	GetVMConfig(ctx context.Context, node string, vmid int) (pve.VMConfig, error)
+}
+
+func importTemplateBy(ctx context.Context, pv templateReader, name, digest, node string, vmid int) (pve.VMConfig, error) {
 	pool, err := pv.GetPool(ctx, pve.TemplatePool)
 	if err != nil {
 		return nil, err
@@ -462,8 +469,9 @@ func (s *Service) importReceipt(ctx context.Context, id string) (*Receipt, error
 
 // MarkTemplateGone records that the template a finished import produced was deleted, so EnqueueVM
 // treats the receipt like a failed one and the artifact can be imported on that node again. It reads
-// the receipt's own provider (pvFor) and marks only on proof (templateGone); a read error, or a VM
-// that may still be the template, changes nothing. A receipt already marked answers nil.
+// the receipt's own provider (pvFor) and marks only on proof: nextid says no guest anywhere holds the
+// VMID, or the guest that does is visibly another VM (templateGone). A read error, or a VM that may
+// still be the template, changes nothing. A receipt already marked answers nil.
 func (s *Service) MarkTemplateGone(ctx context.Context, pvFor PVEResolver, id string) error {
 	if !s.VMEnabled {
 		return errVMDisabled
@@ -484,25 +492,30 @@ func (s *Service) MarkTemplateGone(ctx context.Context, pvFor PVEResolver, id st
 	if err != nil {
 		return err
 	}
-	rows, err := pv.ClusterResources(ctx, "vm")
+	free, err := pv.VMIDFree(ctx, r.VMID)
 	if err != nil {
 		return err
 	}
-	if err := templateGone(rows, r.VMID, r.Payload); err != nil {
-		return err
+	if !free {
+		rows, err := pv.ClusterResources(ctx, "vm")
+		if err != nil {
+			return err
+		}
+		if err := templateGone(rows, r.VMID, r.Payload); err != nil {
+			return err
+		}
 	}
 	_, err = s.DB.C(ReceiptCollection).SetByID(ctx, id, pgdoc.M{"templateGone": true, "updatedAt": time.Now().UTC()}, nil)
 	return err
 }
 
-// templateGone is MarkTemplateGone's proof on one successful read of the cluster's VM rows: nil when
-// no row holds vmid (unique cluster-wide) any more, or the row that does is plainly another VM (its
-// node is up, it has a name, and it has neither the import's template name nor its source tag: the
-// VMID was reused). A template moved out of pc-templates or renamed still counts as present.
+// templateGone is MarkTemplateGone's proof once nextid said some guest holds vmid (unique cluster-wide):
+// nil only when this token sees that guest and it is plainly another VM (its node is up, it has a name,
+// and it has neither the import's template name nor its source tag: the VMID was reused). The rows list
+// only guests the token has VM.Audit on (through its pools), so a held VMID missing from them is a guest
+// out of its view (a template moved out of pc-templates, or rights lost), and counts as present, as does
+// a renamed template.
 func templateGone(rows []pve.ClusterResource, vmid int, p VMPayload) error {
-	if rows == nil {
-		return errors.New("the cluster's VM list could not be read")
-	}
 	for _, r := range rows {
 		if r.VMID != vmid {
 			continue
@@ -510,8 +523,9 @@ func templateGone(rows []pve.ClusterResource, vmid int, p VMPayload) error {
 		if r.NodeDown || r.Name == "" || r.Name == TemplateName(p) || hasTagValue(r.Tags, TagSource+digestPrefix(p.Digest)) {
 			return lcErr(http.StatusConflict, "template_present", fmt.Sprintf("VM %d on %s may still be this import's template; nothing was changed", vmid, r.Node))
 		}
+		return nil
 	}
-	return nil
+	return lcErr(http.StatusConflict, "template_present", fmt.Sprintf("VM %d exists outside what this provider's token can see (moved out of pc-templates?); nothing was changed", vmid))
 }
 
 // lockDigest serializes lifecycle actions on one artifact across API replicas.
