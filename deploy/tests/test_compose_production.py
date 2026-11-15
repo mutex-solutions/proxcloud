@@ -28,6 +28,11 @@ COMPOSE = ROOT / "deploy/compose"
 SCRIPT = "proxcloud-up.sh"
 TLS_MODES = ("internal", "acme-http", "acme-dns-cloudflare")
 SECRETS = ("PG_PASSWORD", "KEYCLOAK_DB_PASSWORD", "KC_ADMIN_PASSWORD", "SSO_CLIENT_SECRET", "ENCRYPTION_KEY")
+# Opt-in features: the install flag, its .env key, and the API variable compose.yaml sets from it.
+FEATURES = {
+    "template-updates": ("TEMPLATE_UPDATES_VM_ENABLED", "PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED"),
+    "scheduler": ("JOBS_SCHEDULER_ENABLED", "PROXCLOUD_JOBS_SCHEDULER_ENABLED"),
+}
 
 # The chart values the Compose install stands for: two realms (customers in "clients", operators in
 # "master"), per-organization SSO on, PKCE required. The console URLs stay placeholders that
@@ -222,6 +227,45 @@ class ComposeFileTests(unittest.TestCase):
         self.assertNotRegex(script, r"--(new-)?password")
         self.assertIn("pg_isready -h 127.0.0.1", self.text)  # not the socket-only server of the first start
 
+    def test_optional_features_come_from_env_and_default_to_off(self):
+        for key, variable in FEATURES.values():
+            with self.subTest(variable=variable):
+                self.assertEqual(re.findall(r"(?m)^      %s: (.+)$" % variable, self.text), ["${%s:-false}" % key])
+        # Still not configurable here: they keep the API's own default (off).
+        for variable in ("PROXCLOUD_JOBS_DEBUG_TRIGGERS", "PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED"):
+            self.assertNotIn(variable, self.text)
+        # Only the debug triggers flag mounts the unauthenticated job triggers on the management port,
+        # never the scheduler, and it is not set above. Only Traefik publishes ports, and it routes to
+        # the API's application port: the management port stays off the network, not off the
+        # processes of the Docker host (ReadmeTests).
+        self.assertEqual(len(re.findall(r"(?m)^\s+ports:$", self.text)), 1)
+        self.assertIn('traefik.http.services.api.loadbalancer.server.port: "8080"', self.text)
+
+
+class ReadmeTests(unittest.TestCase):
+    """What the README promises about the scheduler must be what the API does (cmd/api/main.go)."""
+
+    def setUp(self):
+        self.text = " ".join((COMPOSE / "README.md").read_text().split())
+
+    def test_job_triggers_are_described_as_debug_triggers_only(self):
+        # Only PROXCLOUD_JOBS_DEBUG_TRIGGERS mounts the unauthenticated /debug/* triggers, never the
+        # scheduler (debugTriggers in cmd/api/main.go). An unpublished container port still answers
+        # on the container's bridge address to every process of the Docker host.
+        wrong = ("With the scheduler on, the API also serves", "With the scheduler on, the API serves",
+                 "open to every local account", "only the containers of this Compose project",
+                 "inside the Compose network only")
+        self.assertEqual([claim for claim in wrong if claim in self.text], [])
+        said = {
+            "### Optional features": ("come only with `PROXCLOUD_JOBS_DEBUG_TRIGGERS`", "scheduler does not mount them",
+                                      "every process on the Docker host can reach it", "/api/v1/admin/job/"),
+            "## Security notes": ("The scheduler does not mount the unauthenticated job triggers",),
+        }
+        for section, texts in said.items():
+            with self.subTest(section=section):
+                body = self.text.split(section + " ", 1)[1].split("## ", 1)[0]
+                self.assertEqual([text for text in texts if text not in body], [])
+
 
 class ScriptLintTests(unittest.TestCase):
     def test_script_parses_and_is_shellcheck_clean(self):
@@ -271,18 +315,24 @@ class ScriptDryRunTests(unittest.TestCase):
                 self.assertNotIn("render-only-token", result.stdout + result.stderr)
                 self.check_compose_model(install, mode, values)
 
-    def check_compose_model(self, install, mode, values):
+    def compose_model(self, install, mode):
+        """The model Compose builds from the dry run's preview; None without the Compose plugin."""
         if not shutil.which("docker") or subprocess.run(["docker", "compose", "version"], capture_output=True).returncode:
             if os.environ.get("CI"):
                 self.fail("the Docker Compose plugin is required in CI")
-            return  # no Compose plugin: the .env checks above still ran
+            return None
         # .env selects the TLS profile; "setup" adds the realm import the script runs by name.
         result = subprocess.run(["docker", "compose", "--env-file", DRY, "--profile", mode, "--profile", "setup",
                                  "config", "--format", "json"],
                                 cwd=install.dir, capture_output=True, text=True, timeout=60,
                                 env={k: v for k, v in os.environ.items() if not k.startswith(("COMPOSE_", "PROXCLOUD_"))})
         self.assertEqual(result.returncode, 0, result.stderr)
-        model = json.loads(result.stdout)
+        return json.loads(result.stdout)
+
+    def check_compose_model(self, install, mode, values):
+        model = self.compose_model(install, mode)
+        if model is None:
+            return  # no Compose plugin: the .env checks above still ran
         self.assertEqual(model["name"], "pc-compose-test")
         services = model["services"]
         self.assertEqual(set(services), {"traefik-" + mode, "postgres", "keycloak", "keycloak-config", "seed",
@@ -303,6 +353,8 @@ class ScriptDryRunTests(unittest.TestCase):
         self.assertEqual(api["AUTH_MAIN_OAUTH2_ISSUER_URI"], "https://id.cloud.example.com/realms/clients")
         self.assertEqual(api["AUTH_ADMIN_OAUTH2_ISSUER_URI"], "https://id.cloud.example.com/realms/master")
         self.assertEqual(api["PROXCLOUD_ENCRYPTION_DEFAULT_KEY"], values["ENCRYPTION_KEY"])
+        for _, variable in FEATURES.values():
+            self.assertEqual(api[variable], "false")
         self.assertEqual(services["keycloak"]["environment"]["KC_HOSTNAME"], "https://id.cloud.example.com")
         config = services["keycloak-config"]["environment"]
         self.assertEqual(config["PROXCLOUD_SELF_ADMIN_BASE_URL"], "https://admin.cloud.example.com")
@@ -331,6 +383,67 @@ class ScriptDryRunTests(unittest.TestCase):
         keys = [line.split("=")[0] for line in lines if line and not line.startswith("#")]
         self.assertEqual(len(keys), len(set(keys)))
 
+    def test_optional_features_are_set_by_flag_and_kept_by_a_rerun_without_it(self):
+        # Each step is one more dry run on the same install, adopted afterwards: (flags, expected values).
+        on, off = "true", "false"
+        steps = [
+            ((), {"template-updates": off, "scheduler": off}),  # a first install: both off, both written
+            (("--template-updates",), {"template-updates": on, "scheduler": off}),
+            (("--scheduler",), {"template-updates": on, "scheduler": on}),  # the other one is kept
+            ((), {"template-updates": on, "scheduler": on}),  # a plain re-run turns nothing off
+            (("--admin-host", "ops.example.com"), {"template-updates": on, "scheduler": on}),
+            (("--no-scheduler",), {"template-updates": on, "scheduler": off}),
+            (("--no-template-updates", "--scheduler"), {"template-updates": off, "scheduler": on}),
+            (("--scheduler", "--no-scheduler"), {"template-updates": off, "scheduler": off}),  # the last one wins
+        ]
+        install = Install(self)
+        for flags, expected in steps:
+            with self.subTest(flags=flags):
+                result = install.install(*BASE, "--tls", "internal", *flags)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                values = read_env(install.dir)
+                self.assertEqual({flag: values[key] for flag, (key, _) in FEATURES.items()}, expected)
+                # The dry run says what the real run would start with.
+                self.assertRegex(result.stdout, r"Job scheduler +%s\b" % ("on" if expected["scheduler"] == on else "off"))
+                self.assertRegex(result.stdout,
+                                 r"Template updates +%s\b" % ("on" if expected["template-updates"] == on else "off"))
+                model = self.compose_model(install, "internal")
+                if model is not None:
+                    api = model["services"]["api"]["environment"]
+                    self.assertEqual({flag: api[variable] for flag, (_, variable) in FEATURES.items()}, expected)
+                install.adopt()
+
+    def test_optional_features_survive_an_upgrade_and_belong_to_install_only(self):
+        install = Install(self)
+        self.assertEqual(install.install(*BASE, "--tls", "internal", "--template-updates", "--scheduler").returncode, 0)
+        install.adopt()
+        upgrade = install.run("upgrade", "v9.9.9", "--dry-run")
+        self.assertEqual(upgrade.returncode, 0, upgrade.stderr)
+        values = read_env(install.dir)
+        self.assertEqual([values[key] for key, _ in FEATURES.values()], ["true", "true"])
+        for command, flag in (("status", "--scheduler"), ("upgrade", "--no-scheduler"), ("backup", "--template-updates")):
+            with self.subTest(command=command, flag=flag):
+                refused = install.run(command, flag, "--dry-run")
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertIn("%s does not take %s" % (command, flag), refused.stderr)
+
+    def test_a_feature_value_edited_by_hand_must_be_true_or_false(self):
+        for flag, (key, _) in FEATURES.items():
+            for value in ("yes", "TRUE", "1"):
+                with self.subTest(key=key, value=value):
+                    install = Install(self)
+                    self.assertEqual(install.install(*BASE, "--tls", "internal").returncode, 0)
+                    install.adopt()
+                    env = install.dir / ".env"
+                    env.write_text(env.read_text().replace("%s=false" % key, "%s=%s" % (key, value)))
+                    refused = install.install(*BASE, "--tls", "internal")
+                    self.assertNotEqual(refused.returncode, 0)
+                    self.assertIn("invalid %s '%s'" % (key, value), refused.stderr)
+                    self.assertNotIn("+ docker", refused.stdout)
+                    # The flag is the way out, in either direction.
+                    self.assertEqual(install.install(*BASE, "--tls", "internal", "--no-" + flag).returncode, 0)
+                    self.assertEqual(read_env(install.dir)[key], "false")
+
     def test_environment_and_single_hostnames_work_without_flags(self):
         install = Install(self)
         result = install.install(env={
@@ -357,6 +470,7 @@ class ScriptDryRunTests(unittest.TestCase):
             (("--domain", "cloud.example.com", "--tls", "internal", "--operator-email", "nobody"), "invalid operator email"),
             ((*BASE, "--tls", "internal", "--bogus", "x"), "unknown option"),
             ((*BASE, "--tls"), "--tls needs a value"),
+            ((*BASE, "--tls", "internal", "--scheduler=true"), "unexpected argument 'true'"),  # a flag, not a value
             ((*BASE, "--tls", "internal", "--purge"), "--purge belongs to uninstall"),
             ((*BASE, "--tls", "internal", "--cloudflare-token-file", "/dev/null"), "belongs to --tls acme-dns-cloudflare"),
         ]
@@ -515,6 +629,27 @@ class ScriptRealRunTests(unittest.TestCase):
             if call not in pulls:
                 self.assertTrue(call.startswith("PROXCLOUD_VERSION= HTTP_PORT= : "), call)  # .env decides
         self.assertNotEqual(installed, "v9.9.9")
+
+    def test_an_exported_feature_variable_does_not_reach_compose(self):
+        # An install made before the two feature keys existed has neither in .env, and Compose would
+        # take them from the shell: "upgrade" must not start the billing timers that way.
+        install = self.installed()
+        env = install.dir / ".env"
+        keys = [key for key, _ in FEATURES.values()]
+        env.write_text("".join(line for line in env.read_text().splitlines(True) if line.split("=")[0] not in keys))
+        prefix = "".join("%s=${%s-} " % (key, key) for key in keys)
+        (install.bin / "docker").write_text(FAKE_DOCKER.replace('echo "', 'echo "' + prefix, 1))
+        install.log.unlink()
+        result = install.real("upgrade", "v9.9.9", env={key: "true" for key in keys})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        compose = [call for call in install.calls() if " : compose -p pc-compose-test " in call]
+        self.assertTrue(any(call.endswith(" up -d --remove-orphans") for call in compose))
+        for call in compose:
+            self.assertTrue(call.startswith("".join(key + "= " for key in keys)), call)
+        # A feature turned on with the flag is in .env, and is what a real run records.
+        self.assertEqual(install.real("install", "--scheduler").returncode, 0)
+        values = read_env(install.dir, ".env")
+        self.assertEqual([values[key] for key in keys], ["false", "true"])
 
     def test_a_finished_install_changes_release_only_through_upgrade(self):
         install = self.installed()

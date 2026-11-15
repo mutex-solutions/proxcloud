@@ -260,6 +260,9 @@ discovery, the template states and the blocklist are still readable; every PVE-m
 answers 409 `vm_updates_disabled` and the buttons are disabled. Before turning it on, run one import
 + smoke test per OS on the lab (PVE 9.2): see *Open items*.
 
+On the Docker Compose install the variable is set by `./proxcloud-up.sh install --template-updates`
+(`--no-template-updates` clears it): [deploy/compose/README.md](../deploy/compose/README.md#optional-features).
+
 ## 4. Lifecycle: staged → smoke test → publish → withdraw
 
 Owner decision (2026-11-13): **Staged (hidden) → automatic smoke test → admin Publish (only after a

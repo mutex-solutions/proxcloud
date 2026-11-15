@@ -35,6 +35,9 @@ you pass `--version`.
 - **No high availability and no off-host backup.** One host, one database. `backup` writes to this
   host: copy the files elsewhere.
 - **No object storage, no monitoring.**
+- **No timers and no template updates until you turn them on.** The job scheduler (resource sync,
+  charging, bills) and VM template updates are off after a plain install: see
+  [Optional features](#optional-features).
 
 ## Requirements
 
@@ -119,7 +122,8 @@ the database. It cannot be recovered or regenerated: without it, a database back
 The install is idempotent. Run it again to resume after an error or to change a setting, for
 example `./proxcloud-up.sh install --admin-host ops.example.com` or `--tls acme-http --acme-email
 ops@example.com`. Secrets already in `.env` are never regenerated or printed. The release of a
-finished install changes with `upgrade` only, which takes a backup first.
+finished install changes with `upgrade` only, which takes a backup first. A setting you do not
+name keeps its value, the two [optional features](#optional-features) included.
 
 The Compose project name (`--project-name`, default `proxcloud-prod`) cannot change afterwards: the
 containers and volumes carry it. The install refuses a name that something else on the host uses:
@@ -140,6 +144,66 @@ they do, and they win over `.env`.
 2. System, Cloud providers: register the Proxmox provider, then **Test connection**.
 3. Continue with [After any install](../../docs/quickstart.md#5-after-any-install): price plan,
    flavors, quota, first tenant.
+
+### Optional features
+
+Two features are off after a plain install. Each has an install flag, and the API reads both only
+when it starts, so the operator console cannot switch them:
+
+```sh
+./proxcloud-up.sh install --template-updates    # VM template updates on
+./proxcloud-up.sh install --scheduler           # job scheduler on
+./proxcloud-up.sh install --no-scheduler        # off again; --no-template-updates likewise
+```
+
+The flag is recorded in `.env` and the API container is recreated with it. A later `install`
+without the flag, and every `upgrade`, keep the recorded value: only the `--no-` flag turns a
+feature off. The last lines of `install` (also with `--dry-run`) say what is on.
+
+- **`--template-updates`** starts the VM template update runner: import of a published OS image as
+  a new staged template, smoke test, publish and withdraw, in the operator console under System,
+  Template updates. Without it the page lists versions and states, and every action that changes
+  Proxmox answers `409 vm_updates_disabled`. It also needs a GitHub token integration and a Proxmox
+  store with `import` content: [template updates](../../docs/template-updates.md).
+- **`--scheduler`** starts the timed jobs ([jobs and scheduling](../../docs/jobs-scheduling.md)).
+  Without it nothing runs on a timer: resources are synchronised only when an operator starts a
+  sync, and usage is never charged. With it, among others:
+  - resources and Proxmox state are synchronised every minute to every 15 minutes;
+  - usage is charged every minute and every hour, at the rates of the enabled price plans;
+  - the bills of the previous month are issued, cards are collected, unpaid profiles are
+    suspended, and projects scheduled for deletion are deleted, with their cloud resources.
+
+  Turn it on once the price plan and the billing settings are the ones you want invoiced. Times
+  are UTC.
+
+What the scheduler needs on this one host, and what it adds:
+
+- **Locking: nothing to add.** Every timed job runs under a lock in the stack's own PostgreSQL
+  ([ADR 0007](../../docs/adr/0007-distributed-job-locking.md)); the API creates its table
+  (`shedLock`) on first use. The charge work is queued in the same database. No broker
+  and no second service is needed, and with one API container no other process competes for a
+  lock. Keep it at one API container: the lock limits a second one to one run per tick, but this
+  stack is not tested with more than one.
+- **A restart in the middle of a job** (an `install`, an `upgrade`, a reboot) leaves that job's
+  lock in place until it expires: one minute to one hour, depending on the job. The job then runs
+  again at its next tick.
+- **No job triggers on the management port.** The API's unauthenticated `POST /debug/*` job
+  triggers (`run-charge`, `run-collect`, `send-test-mail` and the others,
+  [the list](../../docs/jobs-scheduling.md#mgmt-debug-triggers)) come only with
+  `PROXCLOUD_JOBS_DEBUG_TRIGGERS`, a development and lab setting this stack never sets. The
+  scheduler does not mount them, so port 8081 serves health, readiness and build information only.
+  The port is not published on the host and Traefik does not route it, but every process on the
+  Docker host can reach it on the container address: do not add the debug triggers setting here,
+  for example in a Compose override file. To run a job on demand, use the authenticated operator
+  job API on the API hostname (`POST /api/v1/admin/job/...` with an admin credential, see
+  [operator job API](../../docs/jobs-scheduling.md#operator-job-api)).
+- **Mail.** Bills and reminders are sent through the SMTP integration; this stack has none until
+  you add it ([What is not included](#what-is-not-included)).
+- **Keep the host clock synchronised** (NTP): job times and lock expiry use it.
+
+Not verified on a Compose install: a full billing month with the scheduler on, what the bill and
+reminder jobs do while no SMTP integration exists, and how charging catches up after the host
+was down.
 
 ## Operate
 
@@ -179,6 +243,9 @@ docker compose up -d --wait postgres                # --wait: until the new data
 gunzip -c backups/proxcloud-<UTC time>.sql.gz | docker compose exec -T postgres psql -U proxcloud -d postgres
 ./proxcloud-up.sh install
 ```
+
+To start a restored database without the timed jobs, end with `./proxcloud-up.sh install
+--no-scheduler`, and turn the scheduler on again when you have checked the data.
 
 `<project>` is `COMPOSE_PROJECT_NAME` in `.env`. Four errors are expected: roles `keycloak` and
 `proxcloud` and databases `keycloak` and `proxcloud` "already exist" (the empty database starts
@@ -245,8 +312,10 @@ the script.
   created with mode 600; keep the directory private to the account that runs the script.
 - There are no default credentials: every secret is generated on this host at the first install.
 - PostgreSQL and the API's management port are not published; only Traefik listens on the host.
-- Feature flags (template updates, sandboxes), the job scheduler and debug triggers keep their
-  defaults (off).
+- VM template updates and the job scheduler are off unless you install with `--template-updates`
+  or `--scheduler`. The sandbox flag and the debug triggers flag keep their defaults (off).
+  The scheduler does not mount the unauthenticated job triggers on the management port; only the
+  debug triggers flag does: see [Optional features](#optional-features).
 
 ## Settings in `.env`
 
@@ -262,6 +331,8 @@ Written by the script; change them by re-running `install` with flags.
 | `ACME_EMAIL` | Let's Encrypt account email |
 | `ACME_CA_SERVER` | Optional, by hand: another ACME directory, for example Let's Encrypt staging |
 | `OPERATOR_EMAIL` | The first operator, once created |
+| `TEMPLATE_UPDATES_VM_ENABLED` | `true` or `false`: VM template updates (`--template-updates`, `--no-template-updates`) |
+| `JOBS_SCHEDULER_ENABLED` | `true` or `false`: the job scheduler (`--scheduler`, `--no-scheduler`) |
 | `PG_PASSWORD`, `KEYCLOAK_DB_PASSWORD`, `KC_ADMIN_PASSWORD`, `SSO_CLIENT_SECRET`, `ENCRYPTION_KEY` | Generated secrets. The two database passwords only take effect when the database is first created |
 
 ## Troubleshooting
