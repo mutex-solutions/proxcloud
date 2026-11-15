@@ -523,7 +523,8 @@ pointing at the host (`app.`, `admin.`, `api.` and `id.` under your domain, or a
 4. Two features are off until you ask for them, and the console cannot switch them: VM template updates
    (`./proxcloud-up.sh install --template-updates`) and the job scheduler (`./proxcloud-up.sh install --scheduler`).
    Without the scheduler nothing is synchronised or charged on a timer. With it usage is charged and bills are
-   issued automatically: turn it on once the price plan is the one you want invoiced. Both are kept by later
+   issued automatically: turn it on once the price plan is the one you want invoiced. It needs a release after
+   v0.6.0. Both are kept by later
    runs and by `upgrade`; `--no-scheduler` and `--no-template-updates` turn them off. What each one starts:
    [deploy/compose/README.md](../deploy/compose/README.md#optional-features).
 

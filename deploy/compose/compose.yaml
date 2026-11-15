@@ -230,8 +230,10 @@ services:
       PROXCLOUD_JOBS_SCHEDULER_ENABLED: ${JOBS_SCHEDULER_ENABLED:-false}
       # The sandbox flag and the debug triggers flag stay at their defaults (off). Only the debug
       # triggers flag mounts the unauthenticated job triggers (POST /debug/...) on the management
-      # port 8081, the scheduler does not. Keep it off: 8081 is not published and Traefik does not
-      # route it, but every process on the Docker host reaches it on the container address.
+      # port 8081, the scheduler does not: from the first release after v0.6.0, and
+      # proxcloud-up.sh refuses the scheduler with an older one. Keep it off: 8081 is not published
+      # and Traefik does not route it, but every process on the Docker host reaches it on the
+      # container address.
     healthcheck:
       # Readiness, on the management port (8081), which Traefik does not route. Traefik sends
       # requests to the API only while this check passes.

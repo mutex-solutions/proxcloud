@@ -156,6 +156,8 @@ esac
 
 
 BASE = ("--domain", "cloud.example.com", "--operator-email", "ops@example.com")
+# The first release the script runs with the scheduler on (test_the_scheduler_needs_a_release_after_v0_6_0).
+LATER = ("--version", "v0.6.1")
 
 
 class GeneratedFromChartTests(unittest.TestCase):
@@ -258,8 +260,10 @@ class ReadmeTests(unittest.TestCase):
         self.assertEqual([claim for claim in wrong if claim in self.text], [])
         said = {
             "### Optional features": ("come only with `PROXCLOUD_JOBS_DEBUG_TRIGGERS`", "scheduler does not mount them",
-                                      "every process on the Docker host can reach it", "/api/v1/admin/job/"),
-            "## Security notes": ("The scheduler does not mount the unauthenticated job triggers",),
+                                      "every process on the Docker host can reach it", "/api/v1/admin/job/",
+                                      "It needs a ProxCloud release after v0.6.0"),
+            "## Security notes": ("The scheduler does not mount the unauthenticated job triggers",
+                                  "the script runs no older release with the scheduler on"),
         }
         for section, texts in said.items():
             with self.subTest(section=section):
@@ -408,7 +412,7 @@ class ScriptDryRunTests(unittest.TestCase):
         install = Install(self)
         for flags, expected in steps:
             with self.subTest(flags=flags):
-                result = install.install(*BASE, "--tls", "internal", *flags)
+                result = install.install(*BASE, "--tls", "internal", *LATER, *flags)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 values = read_env(install.dir)
                 self.assertEqual({flag: values[key] for flag, (key, _) in FEATURES.items()}, expected)
@@ -424,7 +428,7 @@ class ScriptDryRunTests(unittest.TestCase):
 
     def test_optional_features_survive_an_upgrade_and_belong_to_install_only(self):
         install = Install(self)
-        self.assertEqual(install.install(*BASE, "--tls", "internal", "--template-updates", "--scheduler").returncode, 0)
+        self.assertEqual(install.install(*BASE, "--tls", "internal", *LATER, "--template-updates", "--scheduler").returncode, 0)
         install.adopt()
         upgrade = install.run("upgrade", "v9.9.9", "--dry-run")
         self.assertEqual(upgrade.returncode, 0, upgrade.stderr)
@@ -435,6 +439,30 @@ class ScriptDryRunTests(unittest.TestCase):
                 refused = install.run(command, flag, "--dry-run")
                 self.assertNotEqual(refused.returncode, 0)
                 self.assertIn("%s does not take %s" % (command, flag), refused.stderr)
+
+    def test_the_scheduler_needs_a_release_after_v0_6_0(self):
+        # Up to v0.6.0 the API also mounts its unauthenticated /debug/* job triggers on the management
+        # port whenever the scheduler is on (CHANGELOG, Security): the script starts none of them with it.
+        for version, allowed in (("v0.4.0-rc.1", False), ("v0.6.0", False), ("v0.6.0-rc.1", False),
+                                 ("v0.6.1", True), ("v0.7.0-rc.1", True), ("v0.10.0", True)):
+            with self.subTest(version=version):
+                install = Install(self)
+                result = install.install(*BASE, "--tls", "internal", "--version", version, "--scheduler")
+                if allowed:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    continue
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("the job scheduler needs a ProxCloud release after v0.6.0", result.stderr)
+                self.assertFalse((install.dir / DRY).exists())
+                self.assertEqual(install.install(*BASE, "--tls", "internal", "--version", version).returncode, 0)
+        # The scheduler stays on across an upgrade, so an upgrade cannot go back to one of them either.
+        install = Install(self)
+        self.assertEqual(install.install(*BASE, "--tls", "internal", *LATER, "--scheduler").returncode, 0)
+        install.adopt()
+        refused = install.run("upgrade", "v0.6.0", "--dry-run")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("the job scheduler needs a ProxCloud release after v0.6.0", refused.stderr)
+        self.assertNotIn("+ docker", refused.stdout)
 
     def test_a_feature_value_edited_by_hand_must_be_true_or_false(self):
         for flag, (key, _) in FEATURES.items():

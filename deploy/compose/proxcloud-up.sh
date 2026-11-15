@@ -35,7 +35,8 @@ install (default) is idempotent: it asks only for what is missing, keeps the sec
   --project-name <n>           Compose project name (default proxcloud-prod; fixed after the first install)
   --template-updates           turn on VM template updates (import, smoke test, publish); off by default
   --scheduler                  turn on the job scheduler: resource sync, and usage is charged and bills
-                               are issued and collected on a timer; off by default
+                               are issued and collected on a timer; off by default. Needs a release
+                               after v0.6.0
   --no-template-updates, --no-scheduler
                                turn one off again. Without its flag an option keeps the value in .env
 
@@ -107,6 +108,14 @@ is_port() { [[ "$1" =~ ^[0-9]{1,5}$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; 
 is_version() { [[ "$1" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.(0|[1-9][0-9]*))?$ ]]; }
 is_project() { [[ "$1" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; }
 is_bool() { [ "$1" = true ] || [ "$1" = false ]; }
+
+# Up to v0.6.0 the API also mounts its unauthenticated job triggers (POST /debug/...) on the
+# management port whenever the scheduler is on; later releases only with PROXCLOUD_JOBS_DEBUG_TRIGGERS,
+# which this stack never sets. An -rc.N counts as its release.
+check_scheduler_release() { # VERSION
+  [ "$(printf '%s\n' v0.6.0 "${1%%-*}" | sort -V | tail -n 1)" != v0.6.0 ] \
+    || die "the job scheduler needs a ProxCloud release after v0.6.0: with the scheduler on, the API of $1 also serves its unauthenticated job triggers (POST /debug/...) to every process on this host. Use a later release, or turn the scheduler off (install --no-scheduler)"
+}
 
 # ---- docker ----
 # docker compose for this project. Compose lets the calling shell's environment win over .env, so
@@ -394,6 +403,7 @@ cmd_install() {
     || die "invalid TEMPLATE_UPDATES_VM_ENABLED '$TEMPLATE_UPDATES' in .env (true or false): pass --template-updates or --no-template-updates"
   is_bool "$SCHEDULER" \
     || die "invalid JOBS_SCHEDULER_ENABLED '$SCHEDULER' in .env (true or false): pass --scheduler or --no-scheduler"
+  [ "$SCHEDULER" = false ] || check_scheduler_release "$VERSION"
   # An install that completed (its operator exists) changes release with "upgrade": backup, then pull.
   if [ -n "$recorded_operator" ] && [ -n "$previous_version" ] && [ "$VERSION" != "$previous_version" ]; then
     die "this install runs $previous_version: change the release with ./proxcloud-up.sh upgrade $VERSION (it takes a backup first)"
@@ -542,6 +552,7 @@ cmd_upgrade() {
   [ -n "$version" ] || die "usage: proxcloud-up.sh upgrade <version>"
   is_version "$version" || die "invalid version '$version' (vX.Y.Z or vX.Y.Z-rc.N)"
   load_env
+  [ "$(env_get JOBS_SCHEDULER_ENABLED)" != true ] || check_scheduler_release "$version"
   echo "Upgrading $(env_get PROXCLOUD_VERSION) -> $version (read the release notes first)."
   cmd_backup
   # Pull before .env changes, so a release that cannot be pulled leaves the running install as it is.

@@ -174,7 +174,10 @@ feature off. The last lines of `install` (also with `--dry-run`) say what is on.
     suspended, and projects scheduled for deletion are deleted, with their cloud resources.
 
   Turn it on once the price plan and the billing settings are the ones you want invoiced. Times
-  are UTC.
+  are UTC. It needs a ProxCloud release after v0.6.0: up to v0.6.0 the API also serves its
+  unauthenticated job triggers (below) while the scheduler is on, so `install` and `upgrade` refuse
+  to run one of those releases with it, the default release of a checkout still pinned to v0.6.0
+  included. Pass a later one with `--version` on a first install, or `upgrade` to it.
 
   `--no-scheduler` stops new timed work from being created. It does not stop the API's job
   worker, which always runs: billing work already queued in the database is still processed when
@@ -191,8 +194,9 @@ What the scheduler needs on this one host, and what it adds:
 - **A restart in the middle of a job** (an `install`, an `upgrade`, a reboot) leaves that job's
   lock in place until it expires: one minute to one hour, depending on the job. The job then runs
   again at its next tick.
-- **No job triggers on the management port.** The API's unauthenticated `POST /debug/*` job
-  triggers (`run-charge`, `run-collect`, `send-test-mail` and the others,
+- **No job triggers on the management port.** In the releases this script runs with the scheduler
+  (after v0.6.0), the API's unauthenticated `POST /debug/*` job triggers (`run-charge`,
+  `run-collect`, `send-test-mail` and the others,
   [the list](../../docs/jobs-scheduling.md#mgmt-debug-triggers)) come only with
   `PROXCLOUD_JOBS_DEBUG_TRIGGERS`, a development and lab setting this stack never sets. The
   scheduler does not mount them, so port 8081 serves health, readiness and build information only.
@@ -324,7 +328,8 @@ the script.
 - VM template updates and the job scheduler are off unless you install with `--template-updates`
   or `--scheduler`. The sandbox flag and the debug triggers flag keep their defaults (off).
   The scheduler does not mount the unauthenticated job triggers on the management port; only the
-  debug triggers flag does: see [Optional features](#optional-features).
+  debug triggers flag does. That holds from the first release after v0.6.0, and the script runs no
+  older release with the scheduler on: see [Optional features](#optional-features).
 
 ## Settings in `.env`
 

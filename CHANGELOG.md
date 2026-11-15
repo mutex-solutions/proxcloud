@@ -64,8 +64,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (Optional features) lists what each switch starts and what the scheduler means on one host. Turning
   the scheduler on does not mount the unauthenticated `POST /debug/*` job triggers on the management
   port: only `PROXCLOUD_JOBS_DEBUG_TRIGGERS` does (see the management port entry under Security), and
-  this stack never sets it. The port stays unpublished and unrouted, and the README points on-demand
-  runs at the authenticated `/api/v1/admin/job/*` endpoints. The README also says that `--no-scheduler`
+  this stack never sets it. That is true from the first release after v0.6.0: up to v0.6.0 the API
+  mounted them with the scheduler too, so `install` and `upgrade` refuse to run such a release with the
+  scheduler on (`install --scheduler` on a checkout still pinned to v0.6.0 included) and say why. The
+  port stays unpublished and unrouted, and the README points on-demand runs at the authenticated
+  `/api/v1/admin/job/*` endpoints. The README also says that `--no-scheduler`
   only stops new timed work: the API's job worker always runs and still processes the billing work
   already queued in the database, which matters when a backup is restored. **Not verified**: either
   switch on a running Compose install (the tests run the script with `--dry-run` and against a fake
