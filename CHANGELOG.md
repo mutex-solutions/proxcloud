@@ -96,6 +96,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inventory differs; nothing does yet. Not verified on a cluster: the hook running after its service account (sync
   wave 1), and whether the seed's ArgoCD takes over the `default` project the workload's ArgoCD created and shows it
   Synced with empty lists.
+- **Docker Compose install: opt-in managed services** (`deploy/compose/`): `./proxcloud-up.sh install
+  --managed-services` writes the `.env` key `PLATFORM_ENABLED=true`, which `compose.yaml` passes to the API as
+  `PROXCLOUD_PLATFORM_ENABLED` (`false` by default), and `--no-managed-services` writes `false`. The in-platform path
+  of ADR 0009 runs its platform job only with this variable and VM template updates both on, and the API reads both
+  only when it starts, so a one-host install needs a switch for it. It behaves like `--template-updates` and
+  `--scheduler`: a later `install` without the flag and every `upgrade` keep the recorded value, the last lines of
+  `install` (also with `--dry-run`) say whether it is on, and the script removes `PLATFORM_ENABLED` from the
+  environment it hands to Compose, so a variable exported in the calling shell cannot turn it on. It implies
+  `--template-updates`, because the job imports the seed and node images through the template update runner:
+  `--managed-services` turns template updates on, `--no-managed-services` leaves them on, and `--no-template-updates`
+  is refused while managed services are on. `install` and `upgrade` refuse the switch with a release older than
+  v0.8.0, the first with the platform API: an older API ignores the variable, and the switch would read as on while
+  nothing can run. `deploy/compose/README.md` (Optional features) says what it needs from the host, a route from the
+  API container to the platform network, and what a platform built from Compose lacks: tenant block volumes (no CSI
+  gateway listener) and database backups. **Inert today**: no API reads `PROXCLOUD_PLATFORM_ENABLED` yet, so the
+  switch only records the value until the release with the platform API. **Not verified**: the switch on a running
+  Compose install (the tests run the script with `--dry-run` and against a fake `docker`, and check the model
+  `docker compose config` builds), and a platform built from this stack.
 
 ### Changed
 
