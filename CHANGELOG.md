@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/vm-artifact-publishing.md`. The native 5 GiB size is close to its limit on Ubuntu 26.04: the
   root filesystem is 3.7 GiB and the build left less than 1 GiB free before its cleanup. Not done: the
   other native OS slugs at 5 GiB, a portal import of either image, a node group joining a cluster.
+- **Native Ubuntu 26.04 templates build at 6 GiB** (`BUILD_DISK_GIB_BY_OS` in `images/build.py`; 6 GiB
+  added to the sanitizer's allowlist). Its vendor image has a separate `/boot`, and the 5 GiB build kept
+  less than 1 GiB free on `/` after the upgrade, too close to the 1 GiB admission of the cleanup step.
+  Ubuntu 24.04 at 5 GiB (built and exported on 2026-11-15, 1.7 GiB free) and the other OS keep 5 GiB.
+  Templates and images already built at 5 GiB stay valid. Not verified yet: a lab build at 6 GiB.
 
 ## [0.6.0] - 2026-11-14
 

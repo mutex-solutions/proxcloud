@@ -22,7 +22,7 @@ CHECKS = {"cleaned_copy_only", "no_backing_file", "qemu_img_check", "offline_san
 MAX = 8 << 30
 # Accepted virtual sizes per variant. This file runs alone inside the capsule, so it repeats
 # vm_sanitize.VIRTUAL_BYTES; images/tests/test_template_disk_sizes.py keeps the two equal.
-VIRTUAL_BYTES = {"os": (5 << 30, 20 << 30), "kubernetes": (8 << 30, 20 << 30)}
+VIRTUAL_BYTES = {"os": (5 << 30, 6 << 30, 20 << 30), "kubernetes": (8 << 30, 20 << 30)}
 OSES = ("ubuntu-2404", "ubuntu-2604", "debian-12", "debian-13")
 ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "HOME": "/scratch", "TMPDIR": "/scratch",
        "LC_ALL": "C", "LIBGUESTFS_BACKEND": "direct", "LIBGUESTFS_BACKEND_SETTINGS": "force_tcg"}

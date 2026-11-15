@@ -229,7 +229,7 @@ class SanitizeTests(unittest.TestCase):
 
     def test_qcow_metadata_rejected_before_any_check_or_conversion(self):
         sizes = s.VIRTUAL_BYTES["os"]
-        self.assertEqual(s.VIRTUAL_BYTES, {"os": (5 << 30, 20 << 30), "kubernetes": (8 << 30, 20 << 30)})
+        self.assertEqual(s.VIRTUAL_BYTES, {"os": (5 << 30, 6 << 30, 20 << 30), "kubernetes": (8 << 30, 20 << 30)})
         clean = {"format": "qcow2", "virtual-size": 5 << 30, "format-specific": {"data": {"corrupt": False}}}
         # Any size off the native OS allowlist refuses, the Kubernetes 8 GiB included.
         bad = [{"backing-filename": "/etc/passwd"}, {"data-file": "/etc/shadow"}, {"encrypted": True},

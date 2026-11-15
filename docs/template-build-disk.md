@@ -4,7 +4,8 @@
 
 | Template | Virtual disk | Single source constant | Before |
 | --- | --- | --- | --- |
-| Native OS (`debian-12`, `debian-13`, `ubuntu-2404`, `ubuntu-2604`) | **5 GiB** | `DEFAULT_BUILD_DISK_GIB` in the [native builder](<../images/build.py>) | 20 GiB |
+| Native OS (`debian-12`, `debian-13`, `ubuntu-2404`) | **5 GiB** | `DEFAULT_BUILD_DISK_GIB` in the [native builder](<../images/build.py>) | 20 GiB |
+| Native OS `ubuntu-2604` | **6 GiB** | `BUILD_DISK_GIB_BY_OS` in the [native builder](<../images/build.py>) (see [below](#first-lab-build-of-each-image-type-must-confirm)) | 5 GiB (2026-11-14), 20 GiB before |
 | Kubernetes node (`ubuntu-2404`, `ubuntu-2604`) | **8 GiB** | `K8S_BUILD_DISK_GIB` in the [Kubernetes build configuration](<../images/k8s-build-config.py>) | 20 GiB |
 
 Why smaller: a template's disk is the smallest disk anything made from it can have, the size every full clone copies first, and the size the offline sanitizer has to write in full (it zeroes the free space). Measured on the lab on 2026-11-14, the 20 GiB templates held 3.8 to 4.1 GB (Kubernetes node), 1.3 GB (`ubuntu-2604`), 0.9 GB (`ubuntu-2404`) and 0.4 GB (Debian). A server or a node made from a template gets the root disk size that was asked for, and cloud-init grows the root filesystem into it at first boot.
@@ -16,12 +17,12 @@ What changes for a user:
 
 What stays valid:
 
-- **Existing 20 GiB templates** are not rebuilt, resized or withdrawn. The sanitizer and the export tools accept an explicit allowlist per variant: native OS **5 GiB or 20 GiB**, Kubernetes node **8 GiB or 20 GiB** (`VIRTUAL_BYTES` in the [sanitizer](<../images/vm_sanitize.py>)). Any other size is refused; the facts and the manifest carry the size of the disk that was read.
+- **Existing 20 GiB templates** are not rebuilt, resized or withdrawn. The sanitizer and the export tools accept an explicit allowlist per variant: native OS **5 GiB, 6 GiB or 20 GiB**, Kubernetes node **8 GiB or 20 GiB** (`VIRTUAL_BYTES` in the [sanitizer](<../images/vm_sanitize.py>)). Any other size is refused; the facts and the manifest carry the size of the disk that was read.
 - **Published 20 GiB images** stay valid in the [artifact contract](<public-vm-artifacts.md>), whose virtual size range is now 5..100 GiB for both variants. The contract is deliberately wider than the sanitizer's allowlist: a bound in a released portal cannot be changed afterwards (see the next point), so the exact sizes are enforced where an image is made, not where it is imported.
 - **Compatibility:** portals up to **v0.5.2** refuse an image whose virtual disk is below 20 GiB: they read its `manifest.json` during discovery, reject it as an invalid artifact contract and never download the disk. An image built with the new sizes needs a portal that has this change. A portal with this change imports both sizes.
 - **Old portals lose a line after its third small image.** A portal up to v0.5.2 checks only the newest three tags of a line (an OS, or an OS with a Kubernetes minor) and offers the first valid one. After one or two small images it lists them as skipped and still offers the newest 20 GiB image. After the third, all three checked tags are small, so it offers nothing on that line; the 20 GiB image is then importable only by an API call that names its digest. Nothing can be changed in the released portals. **Rule: upgrade every portal that follows a line before the third 5 or 8 GiB image is published on it.**
 
-The native builder still only grows: a vendor disk larger than 5 GiB is left as it is, and the sanitizer then refuses that template because its size is not on the allowlist. Add the size deliberately; do not round or shrink.
+The native builder still only grows: a vendor disk larger than the size of its OS is left as it is, and the sanitizer then refuses that template because its size is not on the allowlist. Add the size deliberately; do not round or shrink.
 
 ### What must fail loudly
 
@@ -35,17 +36,17 @@ The native builder still only grows: a vendor disk larger than 5 GiB is left as 
 
 ### First lab build of each image type must confirm
 
-The first lab builds ran on 2026-11-14, one per image type, each followed by an export through the [export workflow](<vm-artifact-publishing.md>). What they confirmed and what is still open:
+The first lab builds ran on 2026-11-14 and 2026-11-15, each followed by an export through the [export workflow](<vm-artifact-publishing.md>). What they confirmed and what is still open:
 
-| Item | Native OS `ubuntu-2604` (5 GiB) | Kubernetes node 1.37.2 on `ubuntu-2604` (8 GiB) |
-| --- | --- | --- |
-| Template disk | `size=5G` | `size=8G` |
-| Build | green; dist-upgrade, package install and the 1 GiB admission passed | green; installer, image-builder run and the 1 GiB admission passed (static network mode) |
-| Space on `/` | 3,881,164 KiB filesystem; 985,308 KiB free before the upgrade, 980,500 KiB after it (75% used); the admission runs after the cleanup and prints nothing when it passes | not in the workflow log (image-builder's output is not copied there) |
-| Export path | green: `virtual_size_bytes: 5368709120`, sanitize, postscan, cold boot of two clones grown to 30 GiB | green: `virtual_size_bytes: 8589934592`, inventory, review against the committed baseline, sanitize, postscan, cold boot of two clones grown to 30 GiB |
-| Still open | items 5, 7 and 8 (a server through a portal, a portal import, the mixed-size minimum) | the free-space numbers of item 3, a DHCP build, items 4 and 6 (a node group joining a cluster, a portal import) |
+| Item | Native OS `ubuntu-2604` (5 GiB) | Native OS `ubuntu-2404` (5 GiB) | Kubernetes node 1.37.2 on `ubuntu-2604` (8 GiB) |
+| --- | --- | --- | --- |
+| Template disk | `size=5G` | `size=5G` | `size=8G` |
+| Build | green; dist-upgrade, package install and the 1 GiB admission passed | green; same steps passed | green; installer, image-builder run and the 1 GiB admission passed (static network mode) |
+| Space on `/` | 3,881,164 KiB filesystem; 985,308 KiB free before the upgrade, 980,500 KiB after it (75% used); the admission runs after the cleanup and prints nothing when it passes | 3,988,172 KiB filesystem; 1,704,092 KiB free before the upgrade, 1,702,348 KiB after it (58% used) | not in the workflow log (image-builder's output is not copied there) |
+| Export path | green: `virtual_size_bytes: 5368709120`, sanitize, postscan, cold boot of two clones grown to 30 GiB | green, same checks | green: `virtual_size_bytes: 8589934592`, inventory, review against the committed baseline, sanitize, postscan, cold boot of two clones grown to 30 GiB |
+| Still open | items 5, 7 and 8 (a server through a portal, a portal import, the mixed-size minimum) | the same | the free-space numbers of item 3, a DHCP build, items 4 and 6 (a node group joining a cluster, a portal import) |
 
-**The 5 GiB native size is close to its limit on Ubuntu 26.04.** The vendor image has a separate `/boot`, so the root filesystem is 3.7 GiB, and the build left less than 1 GiB free before its cleanup. It passed the 1 GiB admission only after `apt-get clean` and the other cleanup steps. A later build with a larger upgrade can fail that admission; that is the intended loud failure, and the answer is then a larger size for this OS, as described under the list. The other native OS slugs have not been built at 5 GiB.
+**Ubuntu 26.04 now builds at 6 GiB.** Its vendor image has a separate `/boot`, so a 5 GiB disk leaves a 3.7 GiB root filesystem, and the 5 GiB build left less than 1 GiB free before its cleanup: it passed the 1 GiB admission only after `apt-get clean` and the other cleanup steps, so a later build with a larger upgrade could fail it. Ubuntu 24.04 at 5 GiB kept 1.7 GiB free. `BUILD_DISK_GIB_BY_OS` in the native builder gives `ubuntu-2604` 6 GiB and every other OS the 5 GiB default; 6 GiB is on the sanitizer allowlist, and the portal contract (5 to 100 GiB) already accepts it. The 5 GiB `ubuntu-2604` template and image stay valid. The Debian slugs have not been built at 5 GiB (Debian publication is on hold).
 
 Native OS, once per OS slug (`ubuntu-2604` first: it is the one that failed at 3.5 GiB):
 

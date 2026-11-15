@@ -27,6 +27,15 @@ POOL = "pc-templates"
 # over the vendor images (3 to 3.5 GiB) and a server made from the template gets the size its user asks for.
 # Kept equal to vm_sanitize.VIRTUAL_BYTES["os"][0] by images/tests/test_template_disk_sizes.py.
 DEFAULT_BUILD_DISK_GIB = 5
+# An OS that needs more than the default. Ubuntu 26.04: the vendor image has a separate /boot, so a 5 GiB disk
+# leaves a 3.7 GiB root filesystem; the first 5 GiB lab build (2026-11-14) had 980,500 KiB free after the
+# dist-upgrade and passed the 1 GiB cleanup admission only after apt-get clean. Every size here must be in
+# vm_sanitize.VIRTUAL_BYTES["os"] (same test).
+BUILD_DISK_GIB_BY_OS = {"ubuntu-2604": 6}
+
+
+def build_disk_gib(os_slug):
+    return BUILD_DISK_GIB_BY_OS.get(os_slug, DEFAULT_BUILD_DISK_GIB)
 
 # The vendor images. The sums file is fetched at build time and hands Proxmox the checksum to verify.
 IMAGES = {
@@ -167,11 +176,12 @@ def ensure_build_disk(pve, a, vmid, name):
     cfg = new_base_config(pve, a, vmid, name)
     disk = cfg.get("scsi0", "")
     before = disk_size_bytes(disk)
-    floor = DEFAULT_BUILD_DISK_GIB * 1024 ** 3
+    gib = build_disk_gib(a.os)
+    floor = gib * 1024 ** 3
     if before < floor:
         if not cfg.get("digest"):
             raise SystemExit("base disk: missing config digest; refusing resize")
-        result = pve.call("PUT", path + "/resize", disk="scsi0", size="%sG" % DEFAULT_BUILD_DISK_GIB, digest=cfg["digest"])
+        result = pve.call("PUT", path + "/resize", disk="scsi0", size="%sG" % gib, digest=cfg["digest"])
         # PVE can return null for synchronous completion. Never pass null/garbage to wait().
         if result not in (None, ""):
             pattern = r"UPID:%s:[0-9A-Fa-f]+:[0-9A-Fa-f]+:[0-9A-Fa-f]+:[^:]+:%s:[^:]+:" % (re.escape(a.node), vmid)

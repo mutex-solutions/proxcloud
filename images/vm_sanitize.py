@@ -27,8 +27,9 @@ OS = {"ubuntu-2404": ("ubuntu", 24, 4, "ubuntu"),
       "debian-13": ("debian", 13, 0, "debian")}
 # Accepted template virtual disk sizes per variant: an explicit allowlist, deliberately narrower than the artifact
 # contract. First the size the builders make now (images/build.py DEFAULT_BUILD_DISK_GIB, images/k8s-build-config.py
-# K8S_BUILD_DISK_GIB), then the 20 GiB of templates built before 2026-11. The facts carry the ACTUAL size.
-VIRTUAL_BYTES = {"os": (5 << 30, 20 << 30), "kubernetes": (8 << 30, 20 << 30)}
+# K8S_BUILD_DISK_GIB), then the per-OS sizes of build.py BUILD_DISK_GIB_BY_OS (6 GiB: Ubuntu 26.04), then the 20 GiB
+# of templates built before 2026-11. The facts carry the ACTUAL size.
+VIRTUAL_BYTES = {"os": (5 << 30, 6 << 30, 20 << 30), "kubernetes": (8 << 30, 20 << 30)}
 # A native template disk is a QCOW2 FILE: with preallocated metadata it is larger than its virtual size.
 NATIVE_SOURCE_MAX_BYTES = 24 << 30
 MAX_BYTES = 8 << 30
