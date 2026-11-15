@@ -24,7 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Setup checks in the Proxmox connection test** (`?checks=all` only): Proxmox VE 9.2 or later, the pool
   `pc-templates`, a storage with `import` content, and for a stored provider its default network zone,
-  `cidrPool` (valid, and a warning when it overlaps a management network of the nodes), default storage
+  `cidrPool` (valid, and a warning when it overlaps a management network of the nodes or when a node's
+  networks could not be read, so a node left out is not reported clear), default storage
   profile and, with an EVPN zone, `frr-pythontools` on every node. A new provider used to pass the test
   and then answer 503 on the first tenant network, or show no images, with nothing saying why. These rows
   never fail the default call and never add to `warnings`. A caller with `admin:service:manage` also gets

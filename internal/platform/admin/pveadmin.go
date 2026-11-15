@@ -301,7 +301,7 @@ func cidrPoolCheck(ctx context.Context, cc *pve.Client, pool string) PVECheck {
 	if err != nil {
 		return PVECheck{ID: "cidr-pool", Status: checkFail, Message: err.Error() + "; it is " + pool + "."}
 	}
-	mgmt, _, err := cc.ManagementCIDRs(ctx)
+	mgmt, complete, err := cc.ManagementCIDRs(ctx)
 	if err != nil {
 		return PVECheck{ID: "cidr-pool", Status: checkWarn, Message: "Could not read the node networks to compare cidrPool with them: " + err.Error()}
 	}
@@ -309,6 +309,9 @@ func cidrPoolCheck(ctx context.Context, cc *pve.Client, pool string) PVECheck {
 		if mp, err := netip.ParsePrefix(m); err == nil && mp.Overlaps(p) {
 			return PVECheck{ID: "cidr-pool", Status: checkWarn, Message: "cidrPool " + pool + " overlaps a management network of the nodes. Tenant networks carved there would shadow the nodes' own addresses: choose a range the site does not use."}
 		}
+	}
+	if !complete { // a node that did not answer is left out of mgmt: not compared is not clear
+		return PVECheck{ID: "cidr-pool", Status: checkWarn, Message: "Could not read the networks of every node; cidrPool " + pool + " was compared with the nodes that answered only."}
 	}
 	return PVECheck{ID: "cidr-pool", Status: checkOK, Message: "cidrPool " + pool + " is clear of the nodes' management networks."}
 }

@@ -610,6 +610,12 @@ func TestPVESetupChecks(t *testing.T) {
 		{"cidrPool too small", nil, provider(network("cidrPool", "10.100.0.0/25")), "cidr-pool", checkFail, "IPv4 range of /24 or larger"},
 		{"cidrPool IPv6", nil, provider(network("cidrPool", "fd00::/48")), "cidr-pool", checkFail, "IPv4 range of /24 or larger"},
 		{"cidrPool over the management network", nil, provider(network("cidrPool", "10.0.0.0/16")), "cidr-pool", checkWarn, "overlaps a management network"},
+		{"cidrPool with a node network unread", map[string]string{"/nodes/pve1/network": "!500"}, provider(nil), "cidr-pool", checkWarn,
+			"Could not read the networks of every node; cidrPool 10.100.0.0/16 was compared with the nodes that answered only"},
+		{"cidrPool overlap found among the nodes that answered", map[string]string{
+			"/cluster/status":     `{"data":[{"type":"node","name":"pve1","ip":"10.0.0.11"},{"type":"node","name":"pve2","ip":"10.0.5.12"}]}`,
+			"/nodes/pve2/network": "!500",
+		}, provider(network("cidrPool", "10.0.0.0/16")), "cidr-pool", checkWarn, "overlaps a management network"},
 
 		{"default storage profile", nil, provider(nil), "storage-profile", checkOK, "std"},
 		{"no storage profile", nil, provider(func(cfg map[string]any) { delete(cfg, "storageProfiles"); delete(cfg, "defaultStorageProfile") }), "storage-profile", checkFail, "No default storage profile"},
