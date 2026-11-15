@@ -270,6 +270,15 @@ class ReadmeTests(unittest.TestCase):
                 body = self.text.split(section + " ", 1)[1].split("## ", 1)[0]
                 self.assertEqual([text for text in texts if text not in body], [])
 
+    def test_the_operator_job_api_is_not_promised_for_every_job(self):
+        # /api/v1/admin/job/* runs eight jobs (internal/platform/job): bills, dunning, project deletion
+        # and send-test-mail have no admin endpoint, only a debug trigger this stack never mounts.
+        self.assertNotIn("To run a job on demand, use the authenticated operator job API", self.text)
+        body = self.text.split("### Optional features ", 1)[1].split("## ", 1)[0]
+        for text in ("runs the charge, metrics, sync, collect, savings expiry, reminder and transaction scan jobs",
+                     "have no admin endpoint", "`send-test-mail` is not available"):
+            self.assertIn(text, body)
+
     def test_scheduler_off_is_not_described_as_no_billing_write(self):
         # The API's job worker runs with the scheduler off too: it processes the charge work that
         # is already queued in the database, for example in a restored backup.

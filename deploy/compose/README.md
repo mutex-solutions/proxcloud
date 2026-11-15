@@ -202,9 +202,12 @@ What the scheduler needs on this one host, and what it adds:
   scheduler does not mount them, so port 8081 serves health, readiness and build information only.
   The port is not published on the host and Traefik does not route it, but every process on the
   Docker host can reach it on the container address: do not add the debug triggers setting here,
-  for example in a Compose override file. To run a job on demand, use the authenticated operator
-  job API on the API hostname (`POST /api/v1/admin/job/...` with an admin credential, see
-  [operator job API](../../docs/jobs-scheduling.md#operator-job-api)).
+  for example in a Compose override file. The authenticated operator job API on the API hostname
+  (`POST /api/v1/admin/job/...` with an admin credential, see
+  [operator job API](../../docs/jobs-scheduling.md#operator-job-api)) runs the charge, metrics,
+  sync, collect, savings expiry, reminder and transaction scan jobs on demand. The other jobs,
+  among them the bills, dunning and project deletion, have no admin endpoint and run only on the
+  scheduler's timer here, and `send-test-mail` is not available on this stack.
 - **Mail.** Bills and reminders are sent through the SMTP integration; this stack has none until
   you add it ([What is not included](#what-is-not-included)).
 - **Keep the host clock synchronised** (NTP): job times and lock expiry use it.
