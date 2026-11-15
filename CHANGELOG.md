@@ -145,6 +145,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in-cluster IPAM provider v1.1.1, the Kamaji control plane v0.22.0 and CAAPH v0.6.4: the versions of
   `installer/playbooks/group_vars/all/versions.yml` (the platform BOM is not on `main` yet), which a test keeps equal.
   Every download is checked against a sha256 in the Dockerfile, and the build resolves every provider with no network.
+  clusterctl and kubectl are built in the image build from the upstream source archives of those two tags (sha256
+  pinned) with Go 1.26.10, the toolchain upstream releases them with, as static binaries with upstream's build tags
+  and version fields; they are not the upstream release binaries. `deploy/clusterctl/patches/` changes only `go.mod`
+  and `go.sum`: `golang.org/x/net` v0.62.0 and `golang.org/x/text` v0.43.0 (the version x/net v0.62.0 requires), and
+  what module resolution then forces (`x/crypto`, `x/mod`, `x/sync`, `x/sys`, `x/term`, `x/tools`, and the `go`
+  directive 1.26.0 in Kubernetes). No Go source is changed. The build runs with `-mod=readonly`, so it fails rather
+  than edit `go.mod` or `go.sum`, and every module download is verified against upstream's `go.sum` plus the patch's
+  lines; it reads the two module versions back from each binary. The binaries report the upstream versions, the
+  tag's commit and commit date, and `gitTreeState: dirty` because `go.mod` and `go.sum` differ from that commit.
+  Why: the Trivy gate refuses the upstream release binaries (CVE-2026-78661 and CVE-2026-78669 in `golang.org/x/net`
+  v0.60.0 and v0.56.0, CVE-2026-56851 in `golang.org/x/text` v0.39.0; kubectl v1.36.6 and v1.37.2 have them too),
+  and the owner decided to rebuild at the same tags instead of waiting for upstream.
   The entrypoint reads the clusterctl inventory and installs only the missing providers, does nothing when every
   provider is at its wanted version, and refuses, installing nothing, when one is at another version (upgrades are a
   later release) or when it is asked for a provider, type or version it does not carry (clusterctl would otherwise
@@ -153,13 +165,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   downloading it from GitHub. Why: the Job makes no GitHub call at runtime, and the platform pins one reviewed image
   by digest. A pull request builds and scans the image; a `proxcloud-clusterctl-v<version>` tag, which must equal the
   image's version label and point at a commit of `main`, builds it, scans it with the existing Trivy gate and pushes
-  it once to `ghcr.io/mutex-solutions/proxcloud-clusterctl`. Nothing uses the image yet. **Not publishable today:**
-  the gate blocks the upstream clusterctl v1.14.4 and kubectl v1.35.10 release binaries (`golang.org/x/net` and
-  `golang.org/x/text` with fixed HIGH CVEs; kubectl v1.36.6 and v1.37.2 have them too), so no tag can publish until
-  upstream ships fixed binaries or a source rebuild is decided. The workflow has not run on GitHub. The entrypoint ran
-  against k3s v1.35.10 in Docker (empty, partial, equal and different-version inventories, cert-manager down, egress
-  through a dead proxy), not on a lab seed or workload cluster; the refusal of a provider it does not carry ran only
-  against a fake kubectl and clusterctl, under busybox.
+  it once to `ghcr.io/mutex-solutions/proxcloud-clusterctl`. Nothing uses the image yet. Verified locally on
+  2026-11-15: the image builds, two builds without cache on one machine give byte-identical binaries, both binaries print their
+  upstream version, and a scan with the gate's Trivy release and that day's database, read by the gate's script,
+  finds no HIGH or CRITICAL finding in the image. That is one scan on one day, not a statement about later
+  databases. Not verified: the workflow has not run on GitHub, so the build on a hosted runner and the gate there
+  are not confirmed; the rebuilt binaries have not been run against any cluster and upstream's test suites were not
+  run against the changed modules; GitHub generates the source archives on request and does not promise stable
+  bytes, so a changed archive fails the build until the sha256 is recomputed. The entrypoint ran against k3s v1.35.10
+  in Docker (empty, partial, equal and different-version inventories, cert-manager down, egress through a dead
+  proxy) with the upstream release binaries, before this rebuild, not on a lab seed or workload cluster; the refusal
+  of a provider it does not carry ran only against a fake kubectl and clusterctl, under busybox.
 
 ### Changed
 

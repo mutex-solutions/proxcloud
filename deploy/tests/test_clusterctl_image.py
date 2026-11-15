@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The proxcloud-clusterctl image (deploy/clusterctl): entrypoint, pins and workflow. Standard library plus PyYAML.
+"""The proxcloud-clusterctl image (deploy/clusterctl): entrypoint, pins, source build and workflow. Standard library plus PyYAML.
 
   python3 deploy/tests/test_clusterctl_image.py
 
@@ -179,18 +179,64 @@ class PinTests(unittest.TestCase):
         self.assertEqual(len(re.findall(r"^ADD ", DOCKERFILE, flags=re.M)), 16)
         self.assertNotIn("curl", DOCKERFILE)
         self.assertNotIn("wget", DOCKERFILE)
-        froms = re.findall(r"^FROM (\S+)", DOCKERFILE, flags=re.M)
-        self.assertEqual(len(froms), 2)
-        for base in froms:
-            self.assertRegex(base, r"^alpine@sha256:[0-9a-f]{64}$")
+        froms = re.findall(r"^FROM (.+)$", DOCKERFILE, flags=re.M)
+        self.assertEqual(len(froms), 5)
+        self.assertRegex(froms[0], r"^golang@sha256:[0-9a-f]{64} AS go$")
+        self.assertEqual(froms[1:3], ["go AS clusterctl", "go AS kubectl"])
+        self.assertRegex(froms[3], r"^alpine@sha256:[0-9a-f]{64} AS fetch$")
+        self.assertRegex(froms[4], r"^alpine@sha256:[0-9a-f]{64}$")
+
+    def test_binaries_are_built_from_the_pinned_source_with_only_the_module_patch(self):
+        # No step may rewrite go.mod or go.sum, fetch another toolchain or skip the checksum database: the modules
+        # that go into the binaries are the ones of upstream's go.sum plus the lines of the reviewed patch.
+        env = DOCKERFILE.split("\nENV CGO_ENABLED=0 ", 1)[1].split("\n\n", 1)[0].replace("\\\n", " ").split()
+        for item in ("GOTOOLCHAIN=local", "GOWORK=off", 'GOFLAGS="-mod=readonly', '-trimpath"', "GONOSUMDB=",
+                     "GONOSUMCHECK=", "GOPRIVATE=", "GOINSECURE=", "GOPROXY=https://proxy.golang.org"):
+            self.assertIn(item, env)
+        for item in ("go get", "go mod", "-mod=mod", "-mod=vendor", "GOFLAGS=-", "apk add", "apt-get"):
+            self.assertNotIn(item, DOCKERFILE)
+        wanted = dict(re.findall(r"\b(X_NET|X_TEXT)=(v[0-9.]+)", DOCKERFILE))
+        self.assertEqual(sorted(wanted), ["X_NET", "X_TEXT"])
+        for name, version in (("cluster-api", VERSIONS["capi"]),
+                              ("kubernetes", "v" + DEFAULTS["services"]["k8s_version"])):
+            with self.subTest(name=name):
+                patch = "%s-%s.patch" % (name, version)
+                self.assertIn("\nCOPY patches/%s /src/\n" % patch, DOCKERFILE)
+                self.assertIn("tar -xzf ../%s.tar.gz --strip-components=1; git apply ../%s; \\\n" % (name, patch),
+                              DOCKERFILE)
+                text = (IMAGE / "patches" / patch).read_text()
+                self.assertEqual(re.findall(r"^(?:---|\+\+\+) (\S+)$", text, flags=re.M),
+                                 ["a/go.mod", "b/go.mod", "a/go.sum", "b/go.sum"])
+                for module, version in (("net", wanted["X_NET"]), ("text", wanted["X_TEXT"])):
+                    self.assertRegex(text, r"(?m)^\+\tgolang\.org/x/%s %s( // indirect)?$" % (module, re.escape(version)))
+                    for suffix in ("", "/go.mod"):
+                        self.assertRegex(text, r"(?m)^\+golang\.org/x/%s %s%s h1:[A-Za-z0-9+/]{43}=$"
+                                         % (module, re.escape(version), suffix))
+                # Module requirements and the go directive only: no replace, no other module family.
+                changed = re.findall(r"^[+-](?![+-])(.*)$", text.split("--- a/go.sum")[0], flags=re.M)
+                for line in changed:
+                    self.assertRegex(line, r"^(\tgolang\.org/x/[a-z]+ v[0-9.]+( // indirect)?|go 1\.[0-9]+\.[0-9]+)$")
+        self.assertEqual(sorted(path.name for path in (IMAGE / "patches").iterdir()),
+                         ["cluster-api-%s.patch" % VERSIONS["capi"],
+                          "kubernetes-v%s.patch" % DEFAULTS["services"]["k8s_version"]])
+        # The build itself reads the module versions back from each binary.
+        for binary in ("clusterctl", "kubectl"):
+            for module, variable in (("net", "X_NET"), ("text", "X_TEXT")):
+                self.assertIn('grep -q "golang.org/x/%s[[:space:]]$%s[[:space:]]" /out/%s.modules'
+                              % (module, variable, binary), DOCKERFILE)
+            self.assertIn("\nCOPY --from=%s /out/%s /out/usr/local/bin/%s\n" % (binary, binary, binary), DOCKERFILE)
 
     def test_versions_equal_the_installer(self):
         downloads = {destination: url for _, url, destination in adds()}
-        self.assertEqual(downloads["/out/usr/local/bin/clusterctl"],
-                         "https://github.com/kubernetes-sigs/cluster-api/releases/download/%s/clusterctl-linux-amd64"
-                         % VERSIONS["capi"])
-        self.assertEqual(downloads["/out/usr/local/bin/kubectl"],
-                         "https://dl.k8s.io/release/v%s/bin/linux/amd64/kubectl" % DEFAULTS["services"]["k8s_version"])
+        kubectl = "v" + DEFAULTS["services"]["k8s_version"]
+        self.assertEqual(downloads["/src/cluster-api.tar.gz"],
+                         "https://github.com/kubernetes-sigs/cluster-api/archive/refs/tags/%s.tar.gz" % VERSIONS["capi"])
+        self.assertEqual(downloads["/src/kubernetes.tar.gz"],
+                         "https://github.com/kubernetes/kubernetes/archive/refs/tags/%s.tar.gz" % kubectl)
+        # The binaries report the upstream versions, and the offline build check compares them.
+        self.assertEqual(re.findall(r"-X \$v\.gitVersion=(\S+)", DOCKERFILE), [VERSIONS["capi"], kubectl])
+        self.assertIn('test "$(clusterctl version -o short)" = %s; ' % VERSIONS["capi"], DOCKERFILE)
+        self.assertIn('kubectl version --client | grep -Fx "Client Version: %s"; ' % kubectl, DOCKERFILE)
         repository = sorted(destination.split("/")[5] + "/" + destination.split("/")[6]
                             for destination in downloads if destination.startswith("/out/opt/"))
         self.assertEqual(sorted(set(repository)), sorted([

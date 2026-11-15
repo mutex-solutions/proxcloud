@@ -289,7 +289,9 @@ ID, so publishing a new tool image changes nothing until a reviewed change moves
 
 `clusterctl.yml` builds `proxcloud-clusterctl` (`deploy/clusterctl`): clusterctl, kubectl and the
 Cluster API provider manifests as a clusterctl local repository, every download checked against a
-pinned sha256. On a `proxcloud-clusterctl-v*` tag that matches the image's version label and is on
+pinned sha256. clusterctl and kubectl are built from the upstream source of their release tags with a
+`go.mod`/`go.sum` patch that raises `golang.org/x/net` and `golang.org/x/text`, because the Trivy gate
+refuses the upstream release binaries. On a `proxcloud-clusterctl-v*` tag that matches the image's version label and is on
 `main`, it scans the image with the Trivy gate and pushes it once. The clusterctl Job of the planned
 managed-services platform (ADR 0009) is to run it by digest, so installing providers needs no GitHub
 call; no cluster runs it yet.

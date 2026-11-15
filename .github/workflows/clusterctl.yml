@@ -53,7 +53,8 @@ jobs:
           mkdir -p result tools
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           printf 'TRIVY_CACHE_DIR=%s/clusterctl-trivy\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
-          # The build checks every download against its sha256 and resolves every provider with no network.
+          # The build checks every download against its sha256, builds clusterctl and kubectl from the upstream
+          # source (measured locally on 4 CPUs: about 2 minutes of compiling, 2.5 GB of build cache) and resolves every provider with no network.
           docker build --pull --platform linux/amd64 --provenance=false --load \
             --file deploy/clusterctl/Dockerfile --build-arg "REVISION=$SOURCE_SHA" \
             --tag "$LOCAL_IMAGE" deploy/clusterctl 2>&1 | tee result/build.log
@@ -140,7 +141,8 @@ jobs:
           mkdir -p result tools
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           printf 'TRIVY_CACHE_DIR=%s/clusterctl-trivy\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
-          # The build checks every download against its sha256 and resolves every provider with no network.
+          # The build checks every download against its sha256, builds clusterctl and kubectl from the upstream
+          # source (measured locally on 4 CPUs: about 2 minutes of compiling, 2.5 GB of build cache) and resolves every provider with no network.
           docker build --pull --platform linux/amd64 --provenance=false --load \
             --file deploy/clusterctl/Dockerfile --build-arg "REVISION=$SOURCE_SHA" \
             --tag "$LOCAL_IMAGE" deploy/clusterctl 2>&1 | tee result/build.log

@@ -236,8 +236,8 @@ The fix is a boot store for the seed, and a backup store for its backups
 **Change.** On the seed and on each workload cluster, the Cluster API providers are
 installed by a `clusterctl` Job, run as an ArgoCD Sync hook of a new pinned chart of ours,
 `proxcloud-platform`. Its image, `proxcloud-clusterctl`, is built by GitHub Actions with
-clusterctl and kubectl pinned by sha256 and the provider manifests of the BOM baked in as a
-local repository; the BOM pins the image by digest. The Job installs only the providers
+clusterctl and kubectl built from upstream source pinned by sha256 and the provider
+manifests of the BOM baked in as a local repository; the BOM pins the image by digest. The Job installs only the providers
 that are missing, does nothing when the installed set equals the BOM, and refuses when an
 installed provider has another version: provider upgrades come with the upgrade run.
 

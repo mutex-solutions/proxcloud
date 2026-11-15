@@ -74,7 +74,9 @@ lands.
 
 **What changed:** a new workflow, `clusterctl.yml`, builds the `proxcloud-clusterctl` image
 (`deploy/clusterctl`: clusterctl, kubectl and the Cluster API provider manifests as a clusterctl local
-repository, every download checked against a pinned sha256) on a hosted runner, scans it with the existing
+repository, every download checked against a pinned sha256; the two binaries are built from the upstream
+source of their release tags with `golang.org/x/net` and `golang.org/x/text` raised by a `go.mod`/`go.sum`
+patch, because the Trivy gate refuses the upstream release binaries) on a hosted runner, scans it with the existing
 Trivy gate and, on a `proxcloud-clusterctl-v*` tag that matches the image's version label and is on `main`,
 pushes it once to `ghcr.io/mutex-solutions/proxcloud-clusterctl`. Pull requests build and scan only. No
 cluster runs the image yet.

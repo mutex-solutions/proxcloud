@@ -4,18 +4,65 @@
 #
 # Versions: those of installer/playbooks/group_vars/all/versions.yml (capi, capmox, capi_ipam, capi_kamaji, caaph),
 # kubectl that of pc_defaults.services.k8s_version; deploy/tests/test_clusterctl_image.py keeps them equal. Every
-# download is checked against the sha256 written here (computed from the upstream release assets, which publish no
-# checksum file except for kubectl). A version change means new checksums, a new image version below and a new tag.
+# download is checked against the sha256 written here (computed from the upstream release assets and source
+# archives, which publish no checksum file). A version change means new checksums, new patches, a new image version
+# below and a new tag.
+#
+# clusterctl and kubectl are built here from the upstream source of their release tags, not downloaded: the upstream
+# release binaries carry golang.org/x/net and golang.org/x/text versions with fixed HIGH CVEs, which the Trivy gate
+# refuses. patches/ changes only go.mod and go.sum (x/net, x/text and what they force); no Go source is changed.
+# -mod=readonly makes the build fail instead of editing go.mod or go.sum, so every module download is verified
+# against the go.sum lines of upstream and of the patch. GitHub generates the source archives on request: if their
+# bytes ever change, the build fails on the sha256 and the pin is recomputed from the tag's commit.
+
+# golang:1.26.10-bookworm, multi-platform index digest. Go 1.26.10 is the toolchain upstream builds both releases
+# with (cluster-api Makefile GO_VERSION, kubernetes .go-version); GOTOOLCHAIN=local keeps go from fetching another.
+FROM golang@sha256:5de7c99eb78ca5e515a4c340235d0955ec5964a5071c492c15503d7c267da473 AS go
+ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOTOOLCHAIN=local GOWORK=off GOFLAGS="-mod=readonly -trimpath" \
+    GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org GONOSUMDB= GONOSUMCHECK= GONOPROXY= GOPRIVATE= GOINSECURE= \
+    X_NET=v0.62.0 X_TEXT=v0.43.0
+
+# Version fields as upstream's hack/scripts/release/version.sh sets them, with the tag's commit and commit date, except
+# gitTreeState: "dirty", because go.mod and go.sum differ from that commit.
+FROM go AS clusterctl
+ADD --checksum=sha256:0d22b58ffeb5b6bddb9085a1b35c059e2109507e8cfddec7b54b1fad87f49849 \
+    https://github.com/kubernetes-sigs/cluster-api/archive/refs/tags/v1.14.4.tar.gz /src/cluster-api.tar.gz
+COPY patches/cluster-api-v1.14.4.patch /src/
+RUN set -eu; mkdir /src/cluster-api; cd /src/cluster-api; \
+    tar -xzf ../cluster-api.tar.gz --strip-components=1; git apply ../cluster-api-v1.14.4.patch; \
+    v=sigs.k8s.io/cluster-api/version commit=4356c154f4a76b8939748ef7ebc2d0793ffe47e8; \
+    go build -o /out/clusterctl -ldflags "-s -w -X $v.gitVersion=v1.14.4 -X $v.gitMajor=1 -X $v.gitMinor=14 \
+      -X $v.gitCommit=$commit -X $v.gitReleaseCommit=$commit -X $v.gitTreeState=dirty \
+      -X $v.buildDate=2026-11-03T08:29:50Z" ./cmd/clusterctl; \
+    go version -m /out/clusterctl > /out/clusterctl.modules; \
+    grep -q "golang.org/x/net[[:space:]]$X_NET[[:space:]]" /out/clusterctl.modules; \
+    grep -q "golang.org/x/text[[:space:]]$X_TEXT[[:space:]]" /out/clusterctl.modules
+
+# Only ./cmd/kubectl, from the root module: its replace directives resolve k8s.io/* to staging/ without the workspace,
+# and -mod=readonly ignores vendor/ (which holds the unpatched modules). Tags and version fields as upstream's
+# hack/lib/golang.sh and hack/lib/version.sh set them for a release binary, gitTreeState as above.
+FROM go AS kubectl
+ADD --checksum=sha256:e58917e90074bf61fa5b5e2a2bd5555880f856367abe60f32a4fe01b6ac43ebd \
+    https://github.com/kubernetes/kubernetes/archive/refs/tags/v1.35.10.tar.gz /src/kubernetes.tar.gz
+COPY patches/kubernetes-v1.35.10.patch /src/
+RUN set -eu; mkdir /src/kubernetes; cd /src/kubernetes; \
+    tar -xzf ../kubernetes.tar.gz --strip-components=1; git apply ../kubernetes-v1.35.10.patch; \
+    x=""; for v in k8s.io/client-go/pkg/version k8s.io/component-base/version; do \
+      x="$x -X $v.gitVersion=v1.35.10 -X $v.gitMajor=1 -X $v.gitMinor=35 -X $v.gitTreeState=dirty \
+        -X $v.gitCommit=ae6fece6fea92ecfcccd13af7d5f2ea8cb9b33fe -X $v.buildDate=2026-10-27T12:02:52Z"; \
+    done; \
+    go build -o /out/kubectl -tags selinux,notest,grpcnotrace -ldflags "all=-s -w $x" ./cmd/kubectl; \
+    go version -m /out/kubectl > /out/kubectl.modules; \
+    grep -q "golang.org/x/net[[:space:]]$X_NET[[:space:]]" /out/kubectl.modules; \
+    grep -q "golang.org/x/text[[:space:]]$X_TEXT[[:space:]]" /out/kubectl.modules
 
 # alpine:3.24.4 (the runtime base of deploy/Dockerfile), multi-platform index digest. The downloads land in a stage of
 # their own: ADD writes a downloaded file with mode 600 (and --chmod would apply to the directories it creates too),
 # so the modes are set once there and the final stage copies a readable tree in one layer.
 FROM alpine@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS fetch
 
-ADD --checksum=sha256:c7301a8515ed329562b06c958463051dd55d9649fac591393f5df54a868fa79b \
-    https://github.com/kubernetes-sigs/cluster-api/releases/download/v1.14.4/clusterctl-linux-amd64 /out/usr/local/bin/clusterctl
-ADD --checksum=sha256:c49a28f1f4efc4d475ed05f47f2ce8e563bf7bef69ed77fe1b924ea6d83b6327 \
-    https://dl.k8s.io/release/v1.35.10/bin/linux/amd64/kubectl /out/usr/local/bin/kubectl
+COPY --from=clusterctl /out/clusterctl /out/usr/local/bin/clusterctl
+COPY --from=kubectl /out/kubectl /out/usr/local/bin/kubectl
 
 # The local repository, in clusterctl's layout {base}/{provider label}/{version}/{file}; clusterctl.yaml points every
 # provider at it. Cluster API core, kubeadm bootstrap and kubeadm control plane share one metadata.yaml.
@@ -61,7 +108,7 @@ ENV HOME=/tmp CLUSTERCTL_DISABLE_VERSIONCHECK=true
 
 # Build-time proof that every provider resolves from the baked repository with no network at all.
 RUN --network=none set -eu; \
-    clusterctl version -o short; kubectl version --client; \
+    test "$(clusterctl version -o short)" = v1.14.4; kubectl version --client | grep -Fx "Client Version: v1.35.10"; \
     for provider in --core=cluster-api:v1.14.4 --bootstrap=kubeadm:v1.14.4 --control-plane=kubeadm:v1.14.4 \
         --control-plane=kamaji:v0.22.0 --infrastructure=proxmox:v0.9.2 --ipam=in-cluster:v1.1.1 --addon=helm:v0.6.4; do \
       clusterctl generate provider --config /opt/clusterctl/clusterctl.yaml "$provider" --describe; \
