@@ -245,6 +245,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `internal` it adds that tenant servers cannot fetch seeds over HTTPS with the self-signed certificate, so choose
   "On an ISO" in Platform setup → Network; `deploy/compose/README.md` says the same under the TLS modes.
   `deploy/tests/test_compose_production.py` checks both lines per TLS mode in the dry run; not run in a real install.
+- **The seed choice is documented** (`docs/cloud-integration.md` "Server seeds", and step 3 of the console's
+  Platform setup docs page): when to choose a URL seed and when an ISO, what a missed URL seed looks like, and
+  that the setup status asks until the operator chose.
 - **The Proxmox provider page saves the failover URLs and the cluster CA** (operator console, Cloud providers,
   Connection tab). The form showed both fields, but Save sent neither, so an edit of `apiUrls` or `caCert` was
   dropped while the page reported it saved. Save now takes the connection keys from the same mapping as Add

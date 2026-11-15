@@ -388,6 +388,19 @@ snippet.
 | With DHCP (simple zone), and an API URL | `smbios1` serial `ds=nocloud;s=<api>/api/v1/nocloud/<token>/` | cloud-init fetches it in its network stage, with DHCP on the first NIC |
 | Without DHCP (EVPN, VLAN), or `forceIso`, or no URL | a `cidata` ISO in the VM's cloud-init slot, uploaded to `isoStorage` | a URL seed means no network until it is fetched: the local stage gives up on any CD, so a static address has nowhere to come from |
 
+**Choosing.** Only the operator knows whether tenant servers reach the URL and trust its certificate,
+and a server that misses its URL seed boots with the template's hostname, no password and no guest agent,
+with nothing reporting it. So the setup status (`GET /api/v1/admin/setup/status`, network item `seeds`)
+asks for a choice: it is `attention`, never blocking, until `metadata.forceIso` is saved (`true` or `false`)
+or `metadata.url` is set, and its message names the URL seeds are fetched from (`metadata.url`, else
+`PROXCLOUD_SELF_API_BASE_URL`; the answer's `seedUrl`). Platform setup, step 3 Network, offers the two
+answers under **Server seeds** and saves `metadata.forceIso`, keeping the other `metadata` keys:
+
+- **By URL** (`forceIso: false`): tenant servers reach that URL with a certificate they trust, for example
+  a public ACME certificate on an address the tenant vnets route to.
+- **On an ISO** (`forceIso: true`): a LAN install, or a self-signed certificate such as Compose TLS mode
+  `internal`. The seed needs no network; it lives on `isoStorage` (see Secrets below).
+
 Both carry the same files. `meta-data` holds the instance id, hostname and tenant metadata under `meta`
 (`cloud-init query ds.meta_data.meta`), so a tenant key can never set `instance-id`, `dsmode` or
 `seedfrom`. `user-data` is the tenant's, passed through. `vendor-data` is the platform's cloud-config
