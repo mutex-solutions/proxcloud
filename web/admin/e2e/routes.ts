@@ -47,6 +47,7 @@ export const routes: RouteEntry[] = [
   { path: "/setup?tab=connect", name: "setup-connect" },
   { path: "/setup?tab=network", name: "setup-network" },
   { path: "/setup?tab=storage", name: "setup-storage" },
+  { path: "/setup?tab=templates", name: "setup-templates" },
   { path: "/system/cloud-providers", name: "cloud-providers", hasTable: true, hasDialogs: true },
   { path: "/system/cloud-providers/svc-proxmox-01", name: "cloud-provider-detail", hasTable: true, hasDialogs: true },
   { path: "/system/catalog", name: "catalog", hasTable: true, hasDialogs: true },

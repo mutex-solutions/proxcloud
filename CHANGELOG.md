@@ -147,6 +147,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   creates) and the prerequisites of a TrueNAS provider, with a link that opens Add provider on TrueNAS
   (`/system/cloud-providers?add=truenas`). Playwright specs check the saved bodies against the mock API; not run
   against a live API or cluster.
+- **OS templates step of the Platform setup page.** Getting a first template onto a console install meant the
+  Template updates page, the Integrations page and raw JSON for the smoke network, one image and one node at a time.
+  The step is done once the provider publishes an OS image, however it was built, and then shows nothing more.
+  Otherwise it shows whether template updates are on (if not, the installer command
+  `./proxcloud-up.sh install --template-updates`, because the API reads the flag only at start), takes the GitHub
+  token (`read:packages`; version listing has no anonymous access), saves the smoke-test network
+  (`config.templateSmoke`), imports the picked OS images on the picked nodes in one go (one request per image and node,
+  each staged and smoke-tested as before) with their progress, and has one **Publish all that passed** button that
+  sends one publish request per template whose smoke test passed. Nothing is published without that click.
+  Kubernetes node images are left to the Template updates page. Playwright specs check the flag-off state, the import
+  requests and that publish is called once per passed template, against the mock API; not run against a live API.
 
 ### Changed
 

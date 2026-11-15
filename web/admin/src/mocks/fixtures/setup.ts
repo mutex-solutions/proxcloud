@@ -37,3 +37,37 @@ export const proposedProfiles: Doc = {
   std: { storages: { "*": "local-zfs" }, snapshots: true, thin: true, replication: true },
   capacity: { storages: { "*": "nas-capacity" }, shared: true, liveMigrate: true, label: "Capacity HDD (NFS)" },
 }
+
+// Template updates: the published OS images on GitHub Packages, where they can be imported, and the imports so far.
+const digest = (c: string) => `sha256:${c.repeat(64)}`
+const vmLine = (os: string, pkg: string, tag: string, c: string, variant = "os") => ({
+  line: `${pkg}/${variant}`, package: pkg, os, variant, installed: [], updateAvailable: true,
+  latest: { package: pkg, tag, digest: digest(c), createdAt: "2026-11-10T09:00:00Z", diskDigest: digest("e"), diskBytes: 1_200_000_000, manifestSha256: "f".repeat(64),
+    manifest: { build_version: tag, source_commit: "3593f6f", disk: { virtual_size_bytes: 5_368_709_120 } } },
+})
+export const templateDiscovery: Doc = {
+  vm: [
+    vmLine("Ubuntu 24.04", "proxcloud-vm-ubuntu-2404", "ubuntu-2404-20261110", "a"),
+    vmLine("Debian 13", "proxcloud-vm-debian-13", "debian-13-20261110", "b"),
+    { ...vmLine("Ubuntu 24.04", "proxcloud-vm-k8s-1-37", "k8s-1.37.2-20261110", "c", "kubernetes"), kubernetesVersion: "1.37.2" },
+  ],
+  sandbox: [], checkedAt: "2026-11-15T08:00:00Z", providers: [{ id: "svc-proxmox-01", name: "Helium Proxmox" }],
+}
+export const templatePlacement: Doc = {
+  configuredImportStorage: "nas-templates",
+  nodes: [
+    { node: "pve1", importStorages: ["nas-templates"], diskStorages: ["local-zfs", "nas-capacity"] },
+    { node: "pve2", importStorages: ["nas-templates"], diskStorages: ["local-zfs"] },
+  ],
+}
+const imported = (id: string, slug: string, tag: string, c: string, state: string, result?: string) => ({
+  id, package: `proxcloud-vm-${slug}`, tag, digest: digest(c), os: slug, variant: "os", buildVersion: tag, slug, serviceId: "svc-proxmox-01",
+  node: "pve1", vmid: 9201, state, importedAt: "2026-11-14T10:00:00Z", requestedBy: "admin@example.com", publishedOnLine: 0,
+  smoke: result ? { jobId: `smoke-${id}`, step: "done", result, ...(result === "FAIL" ? { code: "cloud_init_failed" } : {}) } : undefined,
+  actions: { smoke: true, publish: state === "ready_to_publish", withdraw: false, lastPublished: false },
+})
+export const importedTemplates: Doc[] = [
+  imported("tpl-ubuntu", "ubuntu-2404", "ubuntu-2404-20261110", "a", "ready_to_publish", "PASS"),
+  imported("tpl-debian", "debian-13", "debian-13-20261110", "b", "ready_to_publish", "PASS"),
+  imported("tpl-rocky", "rocky-10", "rocky-10-20261110", "d", "smoke_failed", "FAIL"),
+]

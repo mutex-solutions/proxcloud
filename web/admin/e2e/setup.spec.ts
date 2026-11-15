@@ -1,6 +1,25 @@
 // Platform setup page (/setup) against the mock API. Request bodies are read from the recorded mock calls.
+import { AxeBuilder } from "@axe-core/playwright"
 import { expect, test, type Page } from "@playwright/test"
 import { calls, recordCalls } from "./mock-calls.ts"
+
+// A status answer with the given step states (every other step done).
+const statusWith = (states: Record<string, string>, items: Record<string, unknown[]> = {}) => ({
+  serviceId: "svc-proxmox-01", live: true,
+  steps: ["connect", "network", "storage", "templates", "catalog", "golive"].map((id) => ({
+    id, state: states[id] ?? "done", summary: `${id}: ${states[id] ?? "done"}`, items: items[id] ?? [],
+  })),
+})
+
+// The axe check of e2e/a11y.spec.ts, for a state only an override reaches.
+async function expectAccessible(page: Page) {
+  const results = await new AxeBuilder({ page })
+    .withTags(["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"])
+    .exclude('button[class*="bg-primary"]')
+    .exclude('a[class*="bg-primary"]')
+    .analyze()
+  expect(results.violations.map((v) => ({ id: v.id, nodes: v.nodes.slice(0, 5).map((n) => n.target.join(" ")) }))).toEqual([])
+}
 
 const noProvider = {
   serviceId: "", live: false,
@@ -141,4 +160,63 @@ test("Storage saves the confirmed proposals with the default and the backup stor
     defaultStorageProfile: "std",
     backupStorage: "local",
   })
+})
+
+const templatesTodo = statusWith({ templates: "todo", golive: "blocked" }, {
+  templates: [{ id: "images", state: "todo", message: "No OS image is published: tenants cannot create a server" }],
+})
+const tuOn = { configured: true, login: "proxcloud-ops", scopes: ["read:packages"], vmUpdatesEnabled: true, sandboxMirrorEnabled: false }
+
+test("Templates with the flag off show the installer command", async ({ page }) => {
+  await openStep(page, "templates", {
+    "GET /admin/setup/status": templatesTodo,
+    "GET /admin/template-updates/status": { configured: false, vmUpdatesEnabled: false, sandboxMirrorEnabled: false },
+  })
+  await expect(page.getByLabel("installer command", { exact: true })).toHaveText("./proxcloud-up.sh install --template-updates")
+  await expect(page.getByText("Needs template updates turned on and a GitHub token.")).toBeVisible()
+  await expect(page.getByLabel("Personal access token (classic)")).toBeVisible()
+})
+
+test("Templates import every picked image on every picked node, then publish all that passed once each", async ({ page }) => {
+  await openStep(page, "templates", { "GET /admin/setup/status": templatesTodo, "GET /admin/template-updates/status": tuOn })
+  await expect(page.getByRole("checkbox", { name: /Kubernetes|k8s/ })).toHaveCount(0)
+  await page.getByRole("checkbox", { name: /Ubuntu 24\.04/ }).click()
+  await page.getByRole("checkbox", { name: /Debian 13/ }).click()
+  await page.getByRole("checkbox", { name: "pve1" }).click()
+  await page.getByRole("checkbox", { name: "pve2" }).click()
+  await page.getByRole("combobox", { name: "Template disk storage" }).click()
+  await expect(page.getByRole("option")).toHaveText(["local-zfs"])
+  await page.getByRole("option", { name: "local-zfs" }).click()
+  await expectAccessible(page)
+  await page.getByRole("button", { name: "Import 4 templates" }).click()
+
+  await expect.poll(() => calls(page, "POST", "/admin/template-updates/vm")).toHaveLength(4)
+  const imports = await calls(page, "POST", "/admin/template-updates/vm")
+  for (const c of imports) {
+    expect(c.body.confirmDigest).toBe(c.body.digest)
+    expect(c.body).toMatchObject({ serviceId: "svc-proxmox-01", importStorage: "nas-templates", diskStorage: "local-zfs" })
+  }
+  expect(imports.map((c) => `${c.body.package}@${c.body.node}`).sort()).toEqual([
+    "proxcloud-vm-debian-13@pve1", "proxcloud-vm-debian-13@pve2", "proxcloud-vm-ubuntu-2404@pve1", "proxcloud-vm-ubuntu-2404@pve2",
+  ])
+  await expect(page.getByRole("table", { name: "Imported templates" })).toContainText("Importing")
+
+  await page.getByRole("button", { name: "Publish all that passed (2)" }).click()
+  const publishPath = /\/admin\/template-updates\/templates\/.+\/publish$/
+  await expect(page.getByRole("button", { name: "Publish all that passed (0)" })).toBeDisabled()
+  const published = await calls(page, "POST", publishPath)
+  expect(published.map((c) => c.path).sort()).toEqual([
+    "/admin/template-updates/templates/tpl-debian/publish", "/admin/template-updates/templates/tpl-ubuntu/publish",
+  ])
+  expect(published.map((c) => c.body.confirmDigest).sort()).toEqual([`sha256:${"a".repeat(64)}`, `sha256:${"b".repeat(64)}`])
+})
+
+test("Templates save the smoke-test network", async ({ page }) => {
+  await openStep(page, "templates", { "GET /admin/setup/status": templatesTodo, "GET /admin/template-updates/status": tuOn })
+  await page.getByLabel("Bridge", { exact: true }).fill("vmbr0")
+  await page.getByLabel("VLAN tag").fill("29")
+  await page.getByRole("button", { name: "Save smoke-test network" }).click()
+  await expect.poll(() => calls(page, "PUT", "/admin/service/svc-proxmox-01/update")).toHaveLength(1)
+  const [put] = await calls(page, "PUT", "/admin/service/svc-proxmox-01/update")
+  expect(put.body).toEqual({ config: { templateSmoke: { bridge: "vmbr0", vlan: 29 } } })
 })

@@ -40,6 +40,7 @@ import {
   type SetupStep,
 } from "./common"
 import { NetworkStep, StorageStep } from "./NetworkStorage"
+import { TemplatesStep } from "./TemplatesStep"
 
 const DEFAULT_TOKEN_ID = "proxcloud@pve!platform"
 
@@ -274,7 +275,7 @@ export default function SetupPage() {
           </TabsContent>
           <TabsContent value="network"><NetworkStep step={stepOf("network")} serviceId={serviceId} /></TabsContent>
           <TabsContent value="storage"><StorageStep step={stepOf("storage")} serviceId={serviceId} /></TabsContent>
-          <TabsContent value="templates"><StatusOnlyStep n={5} title="OS templates" step={stepOf("templates")} serviceId={serviceId} /></TabsContent>
+          <TabsContent value="templates"><TemplatesStep step={stepOf("templates")} serviceId={serviceId} /></TabsContent>
           <TabsContent value="catalog"><StatusOnlyStep n={6} title="Catalog and pricing" step={stepOf("catalog")} serviceId={serviceId} /></TabsContent>
           <TabsContent value="golive"><StatusOnlyStep n={7} title="Go live" step={stepOf("golive")} serviceId={serviceId} /></TabsContent>
           <TabsContent value="next"><StatusOnlyStep n={8} title="Next: managed services" serviceId="" /></TabsContent>

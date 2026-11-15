@@ -5,7 +5,7 @@
 import { ApiError } from "@/lib/api"
 import { on } from "../router"
 import { db } from "../db"
-import { detectedStorages, proposedProfiles, setupChecks } from "../fixtures/setup"
+import { detectedStorages, importedTemplates, proposedProfiles, setupChecks, templateDiscovery, templatePlacement } from "../fixtures/setup"
 
 type Doc = Record<string, any>
 
@@ -157,4 +157,52 @@ on("POST /admin/service/:id/storage/detect", ({ params }) => {
   const capabilities = { detectedAt: new Date().toISOString(), storages: structuredClone(detectedStorages) }
   ;(svc.config ??= {}).capabilities = capabilities
   return { data: { ...capabilities, proposedProfiles: structuredClone(proposedProfiles) } }
+})
+
+// ─── Template updates (the subset the setup page and the Template updates page read) ───
+
+const templates = structuredClone(importedTemplates)
+const github = () => db.integrations.find((i) => i.thirdParty === "GitHub")
+
+on("GET /admin/template-updates/status", () => ({
+  data: {
+    configured: !!github(), integrationId: github()?.id, login: github() ? "proxcloud-ops" : undefined, scopes: github() ? ["read:packages"] : undefined,
+    vmUpdatesEnabled: mockSetup.templateFlag, sandboxMirrorEnabled: false,
+  },
+}))
+on("GET /admin/template-updates", () => ({ data: templateDiscovery }))
+on("GET /admin/template-updates/history", () => ({ data: { items: [], jobs: {} } }))
+on("GET /admin/template-updates/placement/:serviceId", () => ({ data: templatePlacement }))
+on("GET /admin/template-updates/templates", () => ({ data: { items: templates, smokes: [], vmUpdatesEnabled: mockSetup.templateFlag } }))
+
+on("POST /admin/template-updates/vm", ({ opts }) => {
+  const b = (opts.body ?? {}) as Doc
+  if (!mockSetup.templateFlag) throw new ApiError(409, 409, "vm_updates_disabled")
+  if (b.confirmDigest !== b.digest) throw new ApiError(400, 400, "confirmDigest must repeat digest")
+  const line = templateDiscovery.vm.find((l: Doc) => l.package === b.package)
+  const slug = String(b.package).replace("proxcloud-vm-", "")
+  templates.push({
+    id: db.nextId("tpl"), package: b.package, tag: line?.latest?.tag ?? "", digest: b.digest, os: slug, variant: "os", buildVersion: "", slug,
+    serviceId: b.serviceId, node: b.node, state: "importing", importedAt: new Date().toISOString(), requestedBy: "admin@example.com",
+    publishedOnLine: 0, actions: { smoke: false, publish: false, withdraw: false, lastPublished: false },
+  })
+  return { data: { id: db.nextId("rcpt"), payload: b, step: "queued" } }
+})
+
+on("POST /admin/template-updates/templates/:id/publish", ({ params, opts }) => {
+  const t = templates.find((x: Doc) => x.id === params.id)
+  if (!t) throw new ApiError(404, 404, "Template not found")
+  if ((opts.body as Doc | undefined)?.confirmDigest !== t.digest) throw new ApiError(400, 400, "confirmDigest must repeat the template's digest")
+  if (!t.actions.publish) throw new ApiError(409, 409, "Publish needs a passing smoke test of this template")
+  t.state = "published_default"
+  t.actions = { ...t.actions, publish: false, withdraw: true }
+  return { data: { complete: true, providers: [] } }
+})
+
+// The no-provision save replaces the top-level config keys the body carries, like PUT /admin/service/{id}.
+on("PUT /admin/service/:id/update", ({ params, opts }) => {
+  const svc = db.services.find((s) => s.id === params.id)
+  if (!svc) throw new ApiError(404, 404, `Service not found: ${params.id}`)
+  Object.assign((svc.config ??= {}), ((opts.body ?? {}) as Doc).config ?? {})
+  return { data: svc }
 })
