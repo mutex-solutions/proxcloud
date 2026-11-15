@@ -187,6 +187,94 @@ test("Network saves a VLAN zone only with a tag range of 1 to 4094, first not ab
   expect(put.body.config.network.zones.overlay).toMatchObject({ kind: "vlan", bridge: "vmbr1", vlanMin: 100, vlanMax: 199 })
 })
 
+test("Network saves the server seed choice, keeps the other metadata keys and shows what is saved", async ({ page }) => {
+  await page.goto("/setup?tab=network")
+  const seeds = page.getByRole("group", { name: "Server seeds" })
+  const byUrl = seeds.getByRole("radio", { name: /^By URL from https:\/\/api\.helium\.example\.com \(tenant servers reach it with a trusted certificate\)$/ })
+  const onIso = seeds.getByRole("radio", { name: "On an ISO (LAN installs, self-signed certificates)" })
+  const save = seeds.getByRole("button", { name: "Save server seeds" })
+  await expect(seeds).toContainText("Not chosen yet: servers fetch it by URL.")
+  await expect(page.getByRole("list", { name: "Checks of this step" })).toContainText(
+    "fetch their seed from https://api.helium.example.com unless ISO seeds are on (config.metadata.forceIso): tenant servers must reach it and trust its certificate")
+  await expect(page.getByRole("tab", { name: /3\. Network \(Needs attention\)/ })).toBeVisible()
+  await expect(byUrl).not.toBeChecked()
+  await expect(onIso).not.toBeChecked()
+  await expect(save).toBeDisabled()
+  await expectAccessible(page)
+
+  const others = { isoStorage: "local", vendorData: "#cloud-config\npackage_update: true\n" }
+  await recordCalls(page)
+  await onIso.check()
+  await save.click()
+  await expect.poll(() => calls(page, "PUT", "/admin/service/svc-proxmox-01")).toHaveLength(1)
+  let [put] = await calls(page, "PUT", "/admin/service/svc-proxmox-01")
+  // Only the metadata block, read fresh and sent whole: the network block is not in the body, so it stays as stored.
+  expect(put.body).toEqual({ config: { metadata: { ...others, forceIso: true } } })
+  await expect(seeds).toContainText("Saved: on an ISO.")
+  await expect(onIso).toBeChecked()
+  await expect(page.getByRole("tab", { name: /3\. Network \(Done\)/ })).toBeVisible()
+
+  await recordCalls(page)
+  await byUrl.check()
+  await save.click()
+  await expect.poll(() => calls(page, "PUT", "/admin/service/svc-proxmox-01")).toHaveLength(1)
+  ;[put] = await calls(page, "PUT", "/admin/service/svc-proxmox-01")
+  expect(put.body).toEqual({ config: { metadata: { ...others, forceIso: false } } })
+  await expect(seeds).toContainText("Saved: by URL.")
+  await expect(byUrl).toBeChecked()
+})
+
+test("Network and Server seeds each keep the other's unsaved edits when one is saved", async ({ page }) => {
+  await page.goto("/setup?tab=network")
+  const seeds = page.getByRole("group", { name: "Server seeds" })
+  const zone = page.getByLabel("Zone ID")
+  // A save invalidates the stored provider; wait for its refetch (the save's own fresh read is the first GET) and
+  // the 120 ms mock latency, since the mock store is shared with the cache and shows the save before the refetch.
+  const refetched = async () => {
+    await expect.poll(async () => (await calls(page, "GET", "/admin/service/svc-proxmox-01")).length).toBeGreaterThanOrEqual(2)
+    await page.waitForTimeout(500)
+  }
+  await expect(zone).toHaveValue("overlay")
+  await zone.fill("zedit1")
+  await seeds.getByRole("radio", { name: /^On an ISO/ }).check()
+  await recordCalls(page)
+  await seeds.getByRole("button", { name: "Save server seeds" }).click()
+  await refetched()
+  await expect(seeds).toContainText("Saved: on an ISO.")
+  await expect(zone).toHaveValue("zedit1")
+
+  await zone.fill("overlay")
+  await page.getByLabel("Networks tenants must not reach").fill("198.51.100.0/24")
+  await seeds.getByRole("radio", { name: /^By URL/ }).check()
+  await recordCalls(page)
+  await page.getByRole("button", { name: "Save network" }).click()
+  await refetched()
+  await expect(seeds.getByRole("radio", { name: /^By URL/ })).toBeChecked()
+  await expect(seeds).toContainText("Saved: on an ISO.")
+})
+
+test("Server seeds offers no URL when the API has none, and says a saved URL choice goes on an ISO", async ({ page }) => {
+  await page.goto("/setup?tab=network")
+  const seeds = page.getByRole("group", { name: "Server seeds" })
+  await recordCalls(page)
+  await seeds.getByRole("radio", { name: /^By URL/ }).check()
+  await seeds.getByRole("button", { name: "Save server seeds" }).click()
+  await expect(seeds).toContainText("Saved: by URL.")
+
+  // The same install without PROXCLOUD_SELF_API_BASE_URL or config.metadata.url: the status has no seed URL.
+  await recordCalls(page, { "GET /admin/setup/status": { ...statusWith({ network: "attention", golive: "todo" }), seedUrl: "" } })
+  await page.getByRole("button", { name: "Check again" }).click()
+  await expect(page.getByRole("button", { name: "Check again" })).toBeEnabled()
+  const byUrl = seeds.getByRole("radio", { name: "By URL (not available: the API has no base URL and config.metadata.url is not set)" })
+  await expect(byUrl).toBeDisabled()
+  await expect(seeds).toContainText("Saved: by URL, but no URL is set, so seeds go on an ISO.")
+  await expect(seeds.getByRole("button", { name: "Save server seeds" })).toBeDisabled()
+  await seeds.getByRole("radio", { name: /^On an ISO/ }).check()
+  await expect(seeds.getByRole("button", { name: "Save server seeds" })).toBeEnabled()
+  await expect(page.getByText("Server seeds saved")).toBeHidden({ timeout: 10_000 }) // the toast fades in and out
+  await expectAccessible(page)
+})
+
 test("Network never offers a bridge that is the management bridge on any node", async ({ page }) => {
   // pve1 manages through vmbr0, pve2 through vmbr1: each lists the other's management bridge without an address.
   const bridges = [

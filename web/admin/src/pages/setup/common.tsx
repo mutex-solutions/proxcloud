@@ -12,7 +12,8 @@ import { cn } from "@/lib/utils"
 export type SetupState = "done" | "attention" | "todo" | "blocked" | "unknown"
 export type SetupItem = { id: string; state: SetupState; message: string }
 export type SetupStep = { id: string; state: SetupState; summary: string; items: SetupItem[] }
-export type SetupStatus = { serviceId: string; live: boolean; steps: SetupStep[] }
+// seedUrl: where a URL seed is fetched from (config.metadata.url, else the API's own base URL; "" = none).
+export type SetupStatus = { serviceId: string; live: boolean; seedUrl?: string; steps: SetupStep[] }
 
 // One row of POST /admin/service/proxmox/auth?checks=all.
 export type PVECheck = { id: string; status: "ok" | "warn" | "fail"; message: string }

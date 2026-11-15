@@ -273,7 +273,7 @@ export default function SetupPage() {
               rechecking={status.live.isFetching}
             />
           </TabsContent>
-          <TabsContent value="network"><NetworkStep step={stepOf("network")} serviceId={serviceId} /></TabsContent>
+          <TabsContent value="network"><NetworkStep step={stepOf("network")} serviceId={serviceId} seedUrl={status.data?.seedUrl ?? ""} /></TabsContent>
           <TabsContent value="storage"><StorageStep step={stepOf("storage")} serviceId={serviceId} /></TabsContent>
           <TabsContent value="templates"><TemplatesStep step={stepOf("templates")} serviceId={serviceId} /></TabsContent>
           <TabsContent value="catalog"><CatalogStep step={stepOf("catalog")} serviceId={serviceId} /></TabsContent>
