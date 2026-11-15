@@ -6,7 +6,7 @@ import { config } from "./config"
 export type Paging = { limit: number; offset: number; total: number }
 export type Envelope<T> = {
   data?: T
-  errors?: { code: number; message: string }
+  errors?: { code: number; message: string; details?: Record<string, any> }
   paging?: Paging
   redirectUrl?: string
 }
@@ -14,10 +14,13 @@ export type Envelope<T> = {
 export class ApiError extends Error {
   status: number
   code: number
-  constructor(status: number, code: number, message: string) {
+  // errors.details of the envelope: machine-readable context, e.g. {code: "platform_disabled", problems: [...]}.
+  details?: Record<string, any>
+  constructor(status: number, code: number, message: string, details?: Record<string, any>) {
     super(message)
     this.status = status
     this.code = code
+    this.details = details
   }
 }
 
@@ -90,7 +93,7 @@ export async function apiFetchEnvelope<T = unknown>(path: string, opts: ReqOpts 
     if (!resp.ok) throw new ApiError(resp.status, resp.status, text || resp.statusText)
     return { data: undefined }
   }
-  if (env.errors) throw new ApiError(resp.status, env.errors.code, env.errors.message)
+  if (env.errors) throw new ApiError(resp.status, env.errors.code, env.errors.message, env.errors.details)
   if (!resp.ok) throw new ApiError(resp.status, resp.status, resp.statusText)
   // raw (non-enveloped) JSON endpoints: treat the whole payload as data
   if (env.data === undefined && !("paging" in env)) return { data: env as unknown as T }

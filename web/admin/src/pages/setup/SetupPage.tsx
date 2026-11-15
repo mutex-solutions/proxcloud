@@ -41,7 +41,7 @@ import {
 } from "./common"
 import { NetworkStep, StorageStep } from "./NetworkStorage"
 import { TemplatesStep } from "./TemplatesStep"
-import { CatalogStep, GoLiveStep, NextStep } from "./CatalogGoLive"
+import { CatalogStep, GoLiveStep, ManagedStep } from "./CatalogGoLive"
 
 const DEFAULT_TOKEN_ID = "proxcloud@pve!platform"
 
@@ -248,9 +248,9 @@ export default function SetupPage() {
       <Tabs value={tab} onValueChange={setTab} orientation="vertical" className="gap-4 max-lg:flex-col">
         <TabsList className="h-fit w-full shrink-0 lg:w-60" aria-label="Setup steps">
           {SETUP_STEPS.map((s, i) => {
-            const state = s.id === "prepare" || s.id === "next" ? undefined : stepOf(s.id)?.state
+            const state = s.id === "prepare" ? undefined : stepOf(s.id)?.state
             const v = stateView(state)
-            const label = s.id === "prepare" ? "manual" : s.id === "next" ? "later" : v.label
+            const label = s.id === "prepare" ? "manual" : v.label
             return (
               <TabsTrigger key={s.id} value={s.id} className="justify-start gap-2">
                 <span className={cn("status-dot", state ? v.dot : "status-dot-muted")} aria-hidden="true" />
@@ -278,7 +278,7 @@ export default function SetupPage() {
           <TabsContent value="templates"><TemplatesStep step={stepOf("templates")} serviceId={serviceId} /></TabsContent>
           <TabsContent value="catalog"><CatalogStep step={stepOf("catalog")} serviceId={serviceId} /></TabsContent>
           <TabsContent value="golive"><GoLiveStep status={status.data} serviceId={serviceId} /></TabsContent>
-          <TabsContent value="next"><NextStep /></TabsContent>
+          <TabsContent value="managed"><ManagedStep step={stepOf("managed")} /></TabsContent>
         </div>
       </Tabs>
     </>

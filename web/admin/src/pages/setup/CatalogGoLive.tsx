@@ -1,7 +1,7 @@
 // CatalogGoLive.tsx — steps 6 to 8 of the Platform setup page. Step 6 previews the install defaults
 // (GET /admin/setup/defaults) and applies the chosen items; the price plan is created enabled, so the operator confirms
 // the rates first and the apply carries confirmRates. Step 7 turns on the attach policy, runs one provider sync and
-// attaches the projects created meanwhile. Step 8 only says what comes next.
+// attaches the projects created meanwhile. Step 8 shows the optional managed-services installation and links to its page.
 import { useState } from "react"
 import { Link } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
@@ -303,29 +303,26 @@ export function GoLiveStep({ status, serviceId }: { status?: SetupStatus; servic
   )
 }
 
-// ── Step 8: Next ──────────────────────────────────────────────────────────────
+// ── Step 8: Managed services ──────────────────────────────────────────────────
 
-export function NextStep() {
+// Optional and after go live: the step shows the installation's phase and leads to its own page. Go live never reads it.
+export function ManagedStep({ step }: { step?: SetupStep }) {
   return (
-    <StepCard n={8} title="Next: managed services" description="Not part of this setup. Managed Kubernetes, databases and sandboxes come with the platform lifecycle work.">
-      <div className="grid gap-2 text-sm text-muted-foreground" aria-disabled="true">
+    <StepCard
+      n={8}
+      title="Managed services (optional)"
+      step={step}
+      description="Kubernetes clusters and databases for tenants. Not needed to go live: tenants can create servers without it."
+    >
+      <div className="grid gap-2 text-sm text-muted-foreground">
         <p>What it adds:</p>
         <ul className="list-disc pl-5">
-          <li>the seed cluster the managed services run on;</li>
-          <li>more Proxmox identities: ProxCloudKubeMint, <code>capmox@pve</code> and <code>csi@pve</code>;</li>
-          <li>price rules and quota for <code>kubernetes_cluster</code>, <code>database_cluster</code> and <code>sandbox</code>.</li>
+          <li>a platform cluster on Proxmox, built from one small VM called the seed;</li>
+          <li>two more Proxmox users with a token each, <code>capmox@pve</code> and <code>csi@pve</code>;</li>
+          <li>the providers for Kubernetes and for databases, held back until you attach them.</li>
         </ul>
-        <a
-          className={LINK}
-          href="https://github.com/mutex-solutions/proxcloud/blob/main/docs/adr/0009-managed-services-platform-lifecycle.md"
-          target="_blank"
-          rel="noreferrer"
-        >
-          ADR 0009: managed-services platform lifecycle
-        </a>
-        <div><Button disabled variant="outline">Enable managed services (not available yet)</Button></div>
       </div>
+      <div><Button asChild variant="outline"><Link to="/platform">Open Managed services</Link></Button></div>
     </StepCard>
   )
 }
-
