@@ -8,6 +8,8 @@
 #   the `digest` of that version in the repo's index.yaml (the sha256 of the .tgz).
 # - Only a `-dev` release may hold a `pending` digest (our own packages before they are published, and a chart at a
 #   moving `0.0.0+` version) and a `0.0.0+` version. A release tag needs neither.
+# - CI compares every pin with what the registry serves (.github/scripts/bom_verify.py, docs/ci-release.md); on a
+#   `v*` tag it also refuses `-dev`, `pending` and `0.0.0+` before any image is built.
 #
 # internal/platformlife/bom_test.go keeps installer/playbooks/group_vars/all/versions.yml,
 # pc_defaults.services.k8s_version and the values of stage 40's ArgoCD and cert-manager equal to this file.
@@ -24,13 +26,13 @@ seed:
     installScript: {url: "https://raw.githubusercontent.com/k3s-io/k3s/v1.35.10%2Bk3s1/install.sh", sha256: 8598e002e61d658fed7b7542fc6d2c66d8da6eae69e088830105d2ee1ffb6d91}
 images:
   kubeVip: "ghcr.io/kube-vip/kube-vip:v0.8.9@sha256:717b8bef2758c10042d64ae7949201ef7f243d928fce265b04e488e844bf9528"
-  clusterctl: "ghcr.io/mutex-solutions/proxcloud-clusterctl:v1.14.4-1@pending"   # carries the provider YAMLs of capi.*
+  clusterctl: "ghcr.io/mutex-solutions/proxcloud-clusterctl:v1.14.4-1@sha256:4658fe52b66e5e402f0ae9d8db6e7e89378055fea584799fa14788fecc3e2c96"   # carries the provider YAMLs of capi.*
 capi:
   seed:     {core: "cluster-api:v1.14.4", bootstrap: "kubeadm:v1.14.4", controlPlane: "kubeadm:v1.14.4", infrastructure: "proxmox:v0.9.2", ipam: "in-cluster:v1.1.1"}
   workload: {core: "cluster-api:v1.14.4", bootstrap: "kubeadm:v1.14.4", controlPlane: "kamaji:v0.22.0", infrastructure: "proxmox:v0.9.2", ipam: "in-cluster:v1.1.1", addon: "helm:v0.6.4"}
 tenantCharts:                      # what the providers pin for new tenant clusters and databases
-  kubernetes: {repo: ghcr.io/mutex-solutions/charts, name: proxmox-kamaji-cluster, version: 0.1.11, digest: pending}
-  database:   {repo: ghcr.io/mutex-solutions/charts, name: database-cluster, version: 0.5.1, digest: pending}
+  kubernetes: {repo: ghcr.io/mutex-solutions/charts, name: proxmox-kamaji-cluster, version: 0.1.11, digest: "sha256:b31ee35aa55b4b3e0d5d5ef2430eaeaaf4d416884f1f5fafef361acd697c405d"}
+  database:   {repo: ghcr.io/mutex-solutions/charts, name: database-cluster, version: 0.5.1, digest: "sha256:44e34154ce4b734ea511ea6eb9a05fea937428c4ad229b5d2c9270994bde5aa6"}
 # Per component: cluster seed | workload; wave: applied and health-gated in ascending order per cluster (also the
 # upgrade order); install: application (default) | helmchart (the seed's ArgoCD only, the bootstrap exception);
 # group: the workload node group its pods go to ("" = system, "all" = a DaemonSet everywhere); stateful: prune off,
@@ -58,12 +60,12 @@ components:
     cluster: seed
     wave: 2
     namespace: proxcloud-system
-    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.0, digest: pending}
+    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.0, digest: "sha256:1a2667a6a092a2ee5f5a820ef318ef024a3e318b54e8c20364feacab5e1a2cbc"}
   - name: pc-platform              # the workload cluster
     cluster: seed
     wave: 3
     namespace: pc-platform
-    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxmox-kamaji-cluster, version: 0.1.11, digest: pending}
+    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxmox-kamaji-cluster, version: 0.1.11, digest: "sha256:b31ee35aa55b4b3e0d5d5ef2430eaeaaf4d416884f1f5fafef361acd697c405d"}
     stateful: true
   - name: cilium
     cluster: workload
@@ -106,7 +108,7 @@ components:
     cluster: workload
     wave: 2
     namespace: proxcloud-system
-    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.0, digest: pending}
+    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.0, digest: "sha256:1a2667a6a092a2ee5f5a820ef318ef024a3e318b54e8c20364feacab5e1a2cbc"}
     group: system
   - name: kamaji-crds
     cluster: workload
@@ -132,4 +134,4 @@ components:
     cluster: workload
     wave: 3
     namespace: proxcloud-system
-    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.0, digest: pending}
+    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.0, digest: "sha256:1a2667a6a092a2ee5f5a820ef318ef024a3e318b54e8c20364feacab5e1a2cbc"}

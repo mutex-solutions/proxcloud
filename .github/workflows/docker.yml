@@ -15,6 +15,10 @@ name: docker
 # GitHub's auto-generated commit list. Stable vX.Y.Z releases become latest;
 # vX.Y.Z-rc.N releases are explicitly prerelease/non-latest. Other tags fail closed.
 #
+# On a `v*` tag the `bom-verify` job first runs .github/scripts/bom_verify.py --release: no image is built or
+# pushed, and no GitHub Release is created, when the platform BOM is still `-dev`, holds a `pending` digest or a
+# `0.0.0+` version, or pins a digest the registry no longer serves.
+#
 # Auth is the built-in GITHUB_TOKEN (packages: write / contents: write) — no
 # external secrets.
 on:
@@ -66,8 +70,26 @@ jobs:
             echo "build=false" >> "$GITHUB_OUTPUT"
           fi
 
+  # Release gate of the platform BOM (docs/ci-release.md). The job runs on every event so that `build` can need it
+  # (a skipped job would skip `build` too); off a tag it only runs the script's offline unit tests. Anonymous pulls,
+  # no login, no secret.
+  bom-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Unit tests (no network)
+        run: python3 -m unittest discover -s .github/scripts/tests -p test_bom_verify.py -v
+      - name: Release gate - the BOM is pinned and every pin matches the registries
+        if: github.ref_type == 'tag'
+        run: python3 .github/scripts/bom_verify.py --release
+
   build:
-    needs: changes
+    needs: [changes, bom-verify]
     # Tags (release), PRs, and manual runs always build; a push to main builds only when the
     # gate saw image-relevant changes.
     if: github.ref_type == 'tag' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || needs.changes.outputs.build == 'true'

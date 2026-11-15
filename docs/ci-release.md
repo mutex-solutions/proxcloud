@@ -18,8 +18,9 @@ artifacts and later controlled PVE template canaries remain separate steps. Read
 |---|---|---|
 | `test.yml` | PRs targeting `main`; pushes to `main` | Hosted Go unit/integration tests, both SPA build/smoke tests, installer syntax/tests, credential-free Packer validation and offline image-pipeline tests, naming gates. Not triggered by release tags. |
 | `security-scan.yml` | PRs targeting `main`; pushes to `main` | Exact-head Trivy 0.76.2 scans of lockfiles, six local product images, eleven non-GPU template outputs, thirteen raw upstream bases (report-only) and a nondefault controlled-base prototype; required `security-gate` job and a PR summary comment. Nothing is pushed. Not triggered by release tags. |
-| `docker.yml` | PRs to `main`, `main` pushes, `v*` tags, manual dispatch | PRs build five images without pushing. Image-relevant `main` pushes publish `dev-<7-char-sha>`; docs/chart-only changes can skip. Tags publish exact image tags; manual dispatch pushes `dev-<sha>` or `dev-<suffix>`. Hosted runner. |
+| `docker.yml` | PRs to `main`, `main` pushes, `v*` tags, manual dispatch | Job `bom-verify` runs first; on a tag it is the [platform BOM release gate](#platform-bom-verification-and-release-gate) and the builds wait for it. PRs build five images without pushing. Image-relevant `main` pushes publish `dev-<7-char-sha>`; docs/chart-only changes can skip. Tags publish exact image tags; manual dispatch pushes `dev-<sha>` or `dev-<suffix>`. Hosted runner. |
 | `helm.yml` | Chart-path PRs to `main`; app or managed-chart tags | PR lint/render only. App `v*` publishes `proxcloud`; `database-cluster-v*`, `proxmox-kamaji-cluster-v*` and `proxcloud-platform-v*` publish their independent charts. Hosted runner; no publication on ordinary merge. |
+| `bom-verify.yml` | PRs to `main` that touch `deploy/platform/**` or the script; weekly schedule; manual dispatch | Compares every pin of the platform BOM with its registry by anonymous pull. Read-only token, no secret, nothing is pushed. Hosted runner. |
 | `sandbox-templates.yml` | Selected source pushes/PRs, schedule, manual dispatch | PR read-only build; trusted runs push built-in images, then `main` opens a digest-pin PR. Not cluster deployment. Hosted runner. |
 | `vm-export-tools.yml` | Tool-image recipe pushes/PRs, manual dispatch on `main` | PR builds, smokes and scans the VM export tool image with a read-only token. `main` then pushes it to GHCR under one tag it never replaces and records the digest; `capsule.py` pins one reviewed digest and the export job pulls it. Hosted runner. |
 | `clusterctl.yml` | Image-recipe PRs to `main`; `proxcloud-clusterctl-v*` tags | PR builds and scans `proxcloud-clusterctl` (clusterctl and kubectl built from the upstream source of their release tags with patched `golang.org/x/net` and `golang.org/x/text`, baked provider manifests) with a read-only token. A tag that equals the image's version label and points at a commit of `main` pushes it once to GHCR under that version, refusing an existing tag, and records the digest. Hosted runner. |
@@ -134,15 +135,74 @@ labels, review/cancel stale queued runs: assigning a matching runner can start a
 old workflow immediately. Runner registration must not accidentally execute an
 all-OS scheduled run when only one canary was approved.
 
+## Platform BOM verification and release gate
+
+`deploy/platform/platform-bom.yaml` pins everything the managed-services platform
+runs. [`bom_verify.py`](../.github/scripts/bom_verify.py) (standard library only,
+no credentials) prints one line per pin and exits 1 on any failure:
+
+| Pin | What is compared |
+|---|---|
+| OCI chart, container image, VM image | Anonymous pull token, then `HEAD` of the tag's manifest: its `Docker-Content-Digest` header must equal the pin. |
+| Chart in an `https://` repository | The repository's `index.yaml` is fetched; the `digest` of the entry with that exact name and version must equal the pin. |
+| k3s binary and install script (`url` + `sha256`) | The file is downloaded (at most `--max-download-mb`, default 256) and hashed. |
+
+A `pending` digest has nothing to compare and is printed as `skip`. A mismatch, a
+missing digest header, a missing tag or index entry, a download over the size
+cap, a pin the script cannot read, a `release` line that is not one plain
+version, and a network error or cut response after three attempts all fail the
+run. A manifest request is never redirected, so the pull token stays with the
+registry that issued the challenge; a file download follows `https://`
+redirects only.
+
+Where it runs:
+
+- `bom-verify.yml`, on pull requests that touch the BOM, the script or its
+  tests, and every Monday on `main`. The schedule was chosen over a run on each
+  `main` push: the BOM only changes through a pull request, which already ran
+  the check, while a tag or index entry moved upstream is independent of our
+  pushes. GitHub disables a schedule after 60 days without repository activity.
+- `docker.yml`, job `bom-verify`, on every `v*` tag with `--release`. This also
+  fails on a `-dev` release, a `pending` digest and a `0.0.0+` version. `build`
+  needs this job and `release` needs `build`, so a failing gate publishes no
+  image and creates no GitHub Release. Off a tag the job only runs the script's
+  offline unit tests; it exists on every event because a skipped job would skip
+  the builds that need it.
+- `helm.yml`, job `publish`, on every `v*` tag with `--release`, as a step
+  before the registry login. A published chart version is never replaced, so a
+  tag that fails the gate must not publish the `proxcloud` chart either.
+
+`v0.8.0` cannot be tagged yet: the BOM is `0.8.0-dev`, and the `kamaji` and
+`kamaji-crds` charts are `0.0.0+latest` with a `pending` digest. The tag passes
+once the chart mirror pins both and the release drops `-dev`. The same applies
+to a `v0.8.0-rc.N` tag.
+
+Not verified:
+
+- The content behind a digest: OCI layers are not pulled and chart archives of
+  `https://` repositories are not downloaded. Only the digest that the registry
+  or the index states is compared.
+- Signatures and provenance of third-party charts and images.
+- That the BOM's `release` equals the tag. Only `-dev` is refused.
+- That both workflows see the same answer. `docker.yml` and `helm.yml` run the
+  gate separately on the same tag; a registry error that hits only one of them
+  fails that one and not the other. A BOM that is `-dev`, `pending` or `0.0.0+`
+  fails both. `helm.yml` still does not wait for the image builds.
+- The chart index parser against anything but the layout Helm writes. It reads
+  `index.yaml` by indentation, not with a YAML library.
+- Whether a pinned version is still the wanted one. The check proves a pin is
+  still served, not that it is current.
+
 ## Current release-gate limitations
 
 The workflows currently **do not** provide a single atomic release gate:
 
 - Docker publication, `test.yml` and `security-scan.yml` are independent. Tag
-  pushes run neither tests nor scans. Choose an exact commit whose tests and
+  pushes run neither tests nor scans; the only check they run before the image
+  builds is the platform BOM gate above. Choose an exact commit whose tests and
   security gate completed successfully.
 - GitHub Release creation waits for all five image builds, but not for the
-  separate Helm publication workflow. Verify both before telling users to install.
+  separate Helm publication workflow (which runs the platform BOM gate itself). Verify both before telling users to install.
 - The Release job validates the tag from the environment with the stdlib
   [release policy](../.github/scripts/release_policy.py). Only `vX.Y.Z` and
   `vX.Y.Z-rc.N` (no leading zeroes) pass. RCs use `--prerelease --latest=false`;
