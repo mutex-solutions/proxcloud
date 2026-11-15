@@ -68,6 +68,7 @@ class EntrypointTests(unittest.TestCase):
 
     def run_entrypoint(self, *args, crd=True, rows="", **env):
         environ = {"PATH": "%s:/usr/bin:/bin" % self.bin, "FAKE_LOG": str(self.log),
+                   "CLUSTERCTL_INIT_CONFIG": str(IMAGE / "clusterctl.yaml"),
                    "FAKE_CRD": "yes" if crd else "", "FAKE_INVENTORY": rows,
                    # A caller-set credential must never reach the provider manifests.
                    "PROXMOX_URL": "https://pve.example:8006", "PROXMOX_TOKEN": "t", "PROXMOX_SECRET": "s", **env}
@@ -79,7 +80,7 @@ class EntrypointTests(unittest.TestCase):
         return [call for call in calls if call.startswith("clusterctl ")]
 
     def init(self, *flags):
-        return ("clusterctl init --config /opt/clusterctl/clusterctl.yaml " + " ".join(flags) + " --wait-providers"
+        return ("clusterctl init --config %s " % (IMAGE / "clusterctl.yaml") + " ".join(flags) + " --wait-providers"
                 " | PROXMOX_URL=[] PROXMOX_TOKEN=[] PROXMOX_SECRET=[]")
 
     def test_empty_cluster_installs_every_provider_once(self):
@@ -141,6 +142,20 @@ class EntrypointTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("usage: clusterctl-init", result.stderr)
                 self.assertEqual(self.clusterctl_calls(), [])
+
+    def test_a_provider_the_image_does_not_carry_is_refused(self):
+        # clusterctl adds its built-in providers (docker, metal3, ...) to clusterctl.yaml's: an unbaked name would
+        # install from GitHub. A baked name at another version, or under another type, is refused the same way.
+        for args in (["--infrastructure", "docker:v1.14.4"], ["--ipam", "metal3:v1.10.0"],
+                     ["--infrastructure", "proxmox:v0.9.3"], ["--core", "kubeadm:v1.14.4"]):
+            with self.subTest(args=args):
+                result = self.run_entrypoint("--core", "cluster-api:v1.14.4", *args, crd=False)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("%s %s is not baked into this image" % tuple(args[1].split(":")), result.stderr)
+                self.assertEqual(self.clusterctl_calls(), [])
+        # The seed's kubeadm control plane is baked.
+        result = self.run_entrypoint("--control-plane", "kubeadm:v1.14.4", crd=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_script_is_posix_and_shellcheck_clean(self):
         self.assertTrue(os.access(ENTRYPOINT, os.X_OK))
@@ -210,6 +225,9 @@ class PinTests(unittest.TestCase):
         self.assertIn("\nENV HOME=/tmp CLUSTERCTL_DISABLE_VERSIONCHECK=true\n", DOCKERFILE)
         self.assertIn("\nRUN --network=none set -eu; \\\n", DOCKERFILE)
         self.assertIn('\nENTRYPOINT ["/usr/local/bin/clusterctl-init"]\n', DOCKERFILE)
+        # The entrypoint tests override the config path; by default it is the one the image carries.
+        self.assertIn("\nCONFIG=${CLUSTERCTL_INIT_CONFIG:-/opt/clusterctl/clusterctl.yaml}\n", ENTRYPOINT.read_text())
+        self.assertIn("\nCOPY clusterctl.yaml /out/opt/clusterctl/clusterctl.yaml\n", DOCKERFILE)
 
 
 class WorkflowTests(unittest.TestCase):

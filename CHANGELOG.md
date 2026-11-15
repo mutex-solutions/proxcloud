@@ -18,17 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Every download is checked against a sha256 in the Dockerfile, and the build resolves every provider with no network.
   The entrypoint reads the clusterctl inventory and installs only the missing providers, does nothing when every
   provider is at its wanted version, and refuses, installing nothing, when one is at another version (upgrades are a
-  later release). It empties `PROXMOX_*` as stage 50 does and turns clusterctl's version check off; cert-manager is not
-  baked, so a cluster without one fails on a local path instead of downloading it from GitHub. Why: the Job makes no
-  GitHub call at runtime, and the platform pins one reviewed image by digest. A pull request builds and scans the
-  image; a `proxcloud-clusterctl-v<version>` tag, which must equal the image's version label and point at a commit of
-  `main`, builds it, scans it with the existing Trivy gate and pushes it once to
-  `ghcr.io/mutex-solutions/proxcloud-clusterctl`. Nothing uses the image yet. **Not publishable today:** the gate
-  blocks the upstream clusterctl v1.14.4 and kubectl v1.35.10 release binaries (`golang.org/x/net` and
+  later release) or when it is asked for a provider, type or version it does not carry (clusterctl would otherwise
+  take a built-in one such as docker or metal3 from GitHub). It empties `PROXMOX_*` as stage 50 does and turns
+  clusterctl's version check off; cert-manager is not baked, so a cluster without one fails on a local path instead of
+  downloading it from GitHub. Why: the Job makes no GitHub call at runtime, and the platform pins one reviewed image
+  by digest. A pull request builds and scans the image; a `proxcloud-clusterctl-v<version>` tag, which must equal the
+  image's version label and point at a commit of `main`, builds it, scans it with the existing Trivy gate and pushes
+  it once to `ghcr.io/mutex-solutions/proxcloud-clusterctl`. Nothing uses the image yet. **Not publishable today:**
+  the gate blocks the upstream clusterctl v1.14.4 and kubectl v1.35.10 release binaries (`golang.org/x/net` and
   `golang.org/x/text` with fixed HIGH CVEs; kubectl v1.36.6 and v1.37.2 have them too), so no tag can publish until
   upstream ships fixed binaries or a source rebuild is decided. The workflow has not run on GitHub. The entrypoint ran
   against k3s v1.35.10 in Docker (empty, partial, equal and different-version inventories, cert-manager down, egress
-  through a dead proxy), not on a lab seed or workload cluster.
+  through a dead proxy), not on a lab seed or workload cluster; the refusal of a provider it does not carry ran only
+  against a fake kubectl and clusterctl, under busybox.
 - **Every check of the Proxmox connection test in one answer**
   (`POST /api/v1/admin/service/proxmox/auth?checks=all`): the test stopped at the first failure, so an
   operator fixed the datacenter firewall only to learn about the node firewall, and then about missing
