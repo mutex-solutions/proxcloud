@@ -20,6 +20,21 @@ credential before using it, and build the seed and provider kubeconfigs. `ApplyC
 lands.
 
 **Views updated:** [C3 components](c3-components.md) (Kubernetes API client row).
+## 2026-11-15: Cluster API provider image built by CI
+
+**What changed:** a new workflow, `clusterctl.yml`, builds the `proxcloud-clusterctl` image
+(`deploy/clusterctl`: clusterctl, kubectl and the Cluster API provider manifests as a clusterctl local
+repository, every download checked against a pinned sha256) on a hosted runner, scans it with the existing
+Trivy gate and, on a `proxcloud-clusterctl-v*` tag that matches the image's version label and is on `main`,
+pushes it once to `ghcr.io/mutex-solutions/proxcloud-clusterctl`. Pull requests build and scan only. No
+cluster runs the image yet.
+
+**Why:** ADR 0009's seed and workload clusters install their Cluster API providers with a clusterctl Job
+inside an ArgoCD sync. Baking the provider manifests into an image built in the repository means that Job
+pins one reviewed digest and makes no GitHub API call at runtime, and the image is public only through
+GitHub Actions. The consumer edge (the `proxcloud-platform` chart's Job) is added with that chart.
+
+**Views updated:** [C2c build and delivery](c2-containers.md#c2c-build-and-delivery).
 
 ## 2026-11-15: Management port job triggers only with debug triggers on
 

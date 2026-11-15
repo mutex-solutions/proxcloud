@@ -1,0 +1,15 @@
+# clusterctl configuration of the proxcloud-clusterctl image: every provider resolves to the local repository baked
+# into the image ({base}/{provider label}/{version}/{file}, clusterctl's layout), so nothing is fetched at runtime.
+providers:
+  - {name: cluster-api, type: CoreProvider, url: /opt/clusterctl/repository/cluster-api/v1.14.4/core-components.yaml}
+  - {name: kubeadm, type: BootstrapProvider, url: /opt/clusterctl/repository/bootstrap-kubeadm/v1.14.4/bootstrap-components.yaml}
+  - {name: kubeadm, type: ControlPlaneProvider, url: /opt/clusterctl/repository/control-plane-kubeadm/v1.14.4/control-plane-components.yaml}
+  - {name: kamaji, type: ControlPlaneProvider, url: /opt/clusterctl/repository/control-plane-kamaji/v0.22.0/control-plane-components.yaml}
+  - {name: proxmox, type: InfrastructureProvider, url: /opt/clusterctl/repository/infrastructure-proxmox/v0.9.2/infrastructure-components.yaml}
+  - {name: in-cluster, type: IPAMProvider, url: /opt/clusterctl/repository/ipam-in-cluster/v1.1.1/ipam-components.yaml}
+  - {name: helm, type: AddonProvider, url: /opt/clusterctl/repository/addon-helm/v0.6.4/addon-components.yaml}
+# Not baked on purpose: cert-manager is an ArgoCD Application of an earlier wave, and clusterctl skips one that
+# answers. Without it, init fails on this missing file instead of downloading cert-manager from GitHub.
+cert-manager:
+  url: /opt/clusterctl/repository/cert-manager/v1.20.2/cert-manager.yaml
+  version: v1.20.2

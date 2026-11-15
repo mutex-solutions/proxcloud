@@ -230,6 +230,7 @@ flowchart LR
   docker["docker.yml<br/>api, web, admin,<br/>sandbox-proxy, sandbox-runtime images"]:::impl
   sbxt["sandbox-templates.yml<br/>built-in template images"]:::impl
   vmtools["vm-export-tools.yml<br/>VM export tool image"]:::impl
+  capictl["clusterctl.yml<br/>proxcloud-clusterctl image:<br/>clusterctl, kubectl, provider manifests"]:::impl
   vmexport["vm-artifact-export.yml, export job<br/>self-hosted: copy, sanitize, cold boot, bundle"]:::impl
   vmpublish["vm-artifact-export.yml, hosted jobs<br/>publish (vm-artifacts.yml), attest and verify the attestation, verify by anonymous pull"]:::impl
   helm["helm.yml<br/>lint, OCI chart publish"]:::impl
@@ -249,6 +250,7 @@ flowchart LR
   docker --> ghcr
   sbxt --> ghcr
   vmtools -->|"smoke, scan, one tag per commit"| ghcr
+  capictl -->|"scan, one push per proxcloud-clusterctl-v* tag"| ghcr
   helm --> ghcr
   chart --> helm
   dbchart --> helm
@@ -282,6 +284,13 @@ them equal.
 after a smoke test and the Trivy gate. `images/vm_export/capsule.py` pins one reviewed
 digest of it: the export job pulls that digest and starts containers only from its local
 ID, so publishing a new tool image changes nothing until a reviewed change moves the pin.
+
+`clusterctl.yml` builds `proxcloud-clusterctl` (`deploy/clusterctl`): clusterctl, kubectl and the
+Cluster API provider manifests as a clusterctl local repository, every download checked against a
+pinned sha256. On a `proxcloud-clusterctl-v*` tag that matches the image's version label and is on
+`main`, it scans the image with the Trivy gate and pushes it once. The clusterctl Job of the planned
+managed-services platform (ADR 0009) is to run it by digest, so installing providers needs no GitHub
+call; no cluster runs it yet.
 
 `vm-artifact-export.yml` is one manual run from a template in `pc-templates` to a public VM
 image. Its `export` job runs on a self-hosted runner inside the lab and holds the image
@@ -342,7 +351,7 @@ separate controlled canary.
 | Helm chart `proxcloud` | `deploy/charts/proxcloud` | ghcr OCI | Implemented |
 | Helm chart `database-cluster` | `deploy/charts/database-cluster` | ghcr OCI | Implemented |
 | Helm chart `proxmox-kamaji-cluster` | `deploy/charts/proxmox-kamaji-cluster` (tag `proxmox-kamaji-cluster-v*`) | ghcr OCI | Implemented |
-| CI | GitHub Actions `test.yml`, `docker.yml` (api, web, admin, sandbox-proxy, sandbox-runtime), `helm.yml`, `sandbox-templates.yml`, and the self-hosted `vm-templates.yml` and `k8s-node-templates.yml` | GitHub | Implemented |
+| CI | GitHub Actions `test.yml`, `docker.yml` (api, web, admin, sandbox-proxy, sandbox-runtime), `helm.yml`, `sandbox-templates.yml`, `clusterctl.yml` (proxcloud-clusterctl, on its tag), and the self-hosted `vm-templates.yml` and `k8s-node-templates.yml` | GitHub | Implemented |
 | Installer | Ansible playbooks and Makefile (`installer/`): allinone, split service stages and day-2 targets exist; published-artifact fresh install and current full split acceptance remain separate | Operator workstation | Implemented code; do not infer production acceptance |
 | VM template pipeline | `images/build.py` + Packer, `vm-templates.yml`; tag-published, one copy per node on local-disk sites | Self-hosted runner in the Proxmox network, or the installer from the first management host | Implemented |
 | K8s node template pipeline | image-builder; static NoCloud seed ISO or explicit DHCP mode | Self-hosted runner with PVE API and build-guest SSH access; no guest-to-runner HTTP needed in static mode | Implemented; static ISO runtime acceptance pending |
