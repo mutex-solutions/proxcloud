@@ -84,7 +84,7 @@ the services cluster arrive with split mode.
 | `ingress.tls` | `none` | `none`, `acme` (Let's Encrypt, needs public DNS), or the name of a TLS Secret |
 | `images.build` | `true` | Builds images and chart from this checkout and pushes them to a registry on the management cluster. `false` pulls the release pinned in `versions.yml` from `images.registry` (for that, a release must be published) |
 | `images.pull_secret` | none | `{username, password}` for a private registry |
-| `network.kind` | `evpn` | `evpn`, `simple` (one node), `vlan` (needs `network.bridge`). `network.isolation: evpn` needs `evpn`, and `network.cidr_pool` is IPv4 `/24` or larger: preflight refuses anything else, as the portal would at stage 60 |
+| `network.kind` | `evpn` | `evpn`, `simple` (one node), `vlan` (needs `network.bridge`, and `network.vlan_min` to `network.vlan_max` as whole numbers from 1 to 4094 with `vlan_min` at most `vlan_max`). `network.isolation: evpn` needs `evpn`, and `network.cidr_pool` is IPv4 `/24` or larger: preflight refuses anything else, as the portal would at stage 60 |
 | `object_store.mode` | `vm` | `vm`, `truenas-app`, `external`, `ceph-rgw` |
 | `templates.per_node` | `auto` | `auto`: a copy per node unless the default profile is on shared storage |
 | `storage_profiles`, `storage_classes` | detected | Override detection; confirm a fio suggestion |
