@@ -186,14 +186,21 @@ platform Applications have one shape.
 
 ### A2. Seed VM from a native template in its own pool
 
-**Change.** The seed is a full clone of the published native OS image
-(`proxcloud-vm-ubuntu-2604`), not of the Kubernetes node template. The BOM pins the image
-by digest, and the portal imports it through Template updates like a node image. The VM
-lives in a new pool, `proxcloud-seed`, and is created with the platform's CAPI token
-`capmox@pve!capi`. The portal token and `csi@pve` have NoAccess on that pool. The workload
-clusters' VMs stay in `proxcloud-system`, where the installer puts them. This replaces
-"restored on a fresh VM from the node template" and the open point's "cloud-init from the
-published node template".
+**Change.** A seed the portal builds (`seed.mode: vm`) is a full clone of the published
+native OS image (`proxcloud-vm-ubuntu-2604`), not of the Kubernetes node template. The BOM
+pins the image by digest, and the portal imports it through Template updates like a node
+image. The VM lives in a new pool, `proxcloud-seed`, and is created with the platform's
+CAPI token `capmox@pve!capi`. The portal token and `csi@pve` have NoAccess on that pool.
+The workload clusters' VMs stay in `proxcloud-system`, where the installer puts them. This
+replaces "restored on a fresh VM from the node template" and the open point's "cloud-init
+from the published node template".
+
+On the installer path the seed is the mgmt k3s VM that stage 25 clones from a vendor base
+template into `proxcloud-system` (`pc.pve.system_pool`). It stays there when the installer
+provisions through the portal's API in the second milestone (`seed.mode: existing`), and
+`csi@pve!csi` holds `ProxCloudCSI` there, `VM.Config.Disk` included. The pool fence does
+not apply to installer seeds until they are moved into `proxcloud-seed`, which the design
+leaves to adoption (design §6).
 
 **Why.** The native image is 6 GiB against 20 GiB and carries no kubeadm or kubelet units
 next to k3s's own. The seed holds admin rights over every platform cluster, so it must be
