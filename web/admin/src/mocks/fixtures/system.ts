@@ -55,6 +55,8 @@ export const services: Doc[] = [
         quota: { servers: 20, vcpus: 64, ramMb: 262144, diskGb: 4000, floatingIps: 10, gpu: { "*": 4 } },
       },
       metrics: { source: "none" },
+      // Server seeds without a choice yet: the setup page's Network step asks for one.
+      metadata: { isoStorage: "local", vendorData: "#cloud-config\npackage_update: true\n" },
     },
   },
   {

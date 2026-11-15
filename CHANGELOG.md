@@ -9,6 +9,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Chart `proxcloud-platform` 0.1.0 for the managed-services platform** (`deploy/charts/proxcloud-platform`, ADR
+  0009): the platform's own objects as one pinned chart, which ADR 0009 installs through ArgoCD on both provisioning
+  paths. Installer stage 50 is unchanged and still applies `deploy/{mgmt,dbaas}-cluster/*.yaml` with `kubectl`. One
+  part per component of the platform BOM, which is not in the repository yet. `clusterctl.enabled` (components
+  `capi` on the seed and `capi-tenant` on the workload cluster) renders `clusterctl init` as an ArgoCD Sync hook Job
+  (`BeforeHookCreation`, cluster-admin service account, `PROXMOX_*` empty, no version check against GitHub) whose
+  arguments are the BOM's providers (`--core=cluster-api:v1.14.4`, …) and whose image, `proxcloud-clusterctl`, must be
+  pinned by `@sha256:` digest: the chart refuses the BOM's `pending` placeholder and a tag. `platform.enabled`
+  (component `platform`) renders on the workload cluster the provider service account, token Secret and RBAC of
+  `deploy/mgmt-cluster/rbac.yaml` and `deploy/dbaas-cluster/rbac.yaml` (the Namespace, ServiceAccount, Secret, Role
+  and RoleBinding both define, once), a ClusterRole for `ciliumnetworkpolicies` (get, create, patch) that the
+  database egress fence needs, both tenant AppProjects, a locked `default` AppProject (no source repository, no
+  destination, no cluster-scoped kind), the MetalLB pool `services` with its L2 advertisement, and the tenant chart
+  repository entry, OCI and without credentials. Bare defaults do not render. `internal/platformlife/chart_test.go`
+  pins the render of each component's example and fails when the RBAC or the tenant AppProjects stop equalling those
+  four files, or when the chart renders anything else. `helm.yml` lints and renders the examples on chart PRs and
+  publishes the chart on a `proxcloud-platform-v*` tag that matches `Chart.yaml`. Inert: nothing applies the chart,
+  the tag is not cut, and the `proxcloud-clusterctl` image and its entrypoint (the argument contract above, run as
+  uid 65532) do not exist yet. The hook's outcome counts in neither the Application's sync status nor its health: a
+  failed or timed-out Job leaves the `capi` or `capi-tenant` Application Synced and Healthy with only
+  `status.operationState.phase` Failed, automated sync does not retry it, and a change to the image or providers
+  alone does not make the Application OutOfSync. Whatever applies those Applications must set `syncPolicy.retry`,
+  gate on `operationState.phase` Succeeded and on the clusterctl inventory, and request a sync itself when the
+  inventory differs; nothing does yet. Not verified on a cluster: the hook running after its service account (sync
+  wave 1), and whether the seed's ArgoCD takes over the `default` project the workload's ArgoCD created and shows it
+  Synced with empty lists.
+
+## [0.7.0] - 2026-11-15
+
+A feature release on top of `v0.6.0`.
+
+- **Platform setup** in the operator console (`/setup`) takes a new install from the Proxmox token to the
+  first tenant in one page, on new API routes: every connection check in one answer (`?checks=all`), a
+  generated script for the portal token, the setup defaults and the setup status. Its Network step asks
+  how servers get their seed (by URL or on an ISO). The Docker Compose install gains `--template-updates`
+  and `--scheduler`, both off by default.
+- **Security fix:** turning the job scheduler on no longer mounts the unauthenticated `POST /debug/*` job
+  triggers on the management port. Every tag from `v0.4.0-rc.1` to `v0.6.0` did; see the management port
+  entry under Security.
+- HIGH/CRITICAL findings without a fixed version stay tracked, not blocking, until 2027-03-12 instead of
+  2026-12-12 (Security).
+- The smaller template disks of `v0.6.0` have one lab build each for `ubuntu-2604` (5 GiB, then
+  6 GiB), `ubuntu-2404` (5 GiB) and a Kubernetes 1.37.2 node on `ubuntu-2604` (8 GiB); native Ubuntu
+  26.04 templates now build at 6 GiB. The Debian slugs at 5 GiB and a Kubernetes node on `ubuntu-2404`
+  have not been built (Changed).
+- Groundwork for managed services, inert in this release: the Kubernetes API client
+  (`internal/cloud/kamajik8s`) gained cluster-scoped apply, TokenRequest, an access review and a
+  kubeconfig builder, with no caller yet (Added), and ADR 0009 records the managed-services decisions
+  of 2026-11-15 (Changed). Nothing provisions a platform yet.
+
+No breaking API change, but two behaviour changes can break an existing setup:
+
+- A script that calls a `/debug/*` trigger on an install with only the scheduler on now gets `404`. Use
+  the authenticated `/api/v1/admin/job/*` endpoints, or set `PROXCLOUD_JOBS_DEBUG_TRIGGERS=true` on a
+  development or lab install only (Security).
+- Saving a Proxmox provider whose `config.network` has a new problem (for example a `cidrPool` smaller
+  than `/24`, a `defaultZone` that names no zone, or a VLAN zone without a bridge or with a tag outside
+  1 to 4094) is now a `400`; a problem the stored block already has does not stop a save. Installer
+  stage 00 now refuses such an inventory before it changes anything. It checks the inventory alone, so
+  on an existing installer site `make upgrade` (and `make templates`, `make mgmt-scale`,
+  `make storage-rebench`) stops on such a value even when the stored block already had it. For a VLAN
+  zone made by hand in Proxmox, set `network.bridge` to that zone's bridge (Changed).
+
+Verified on a lab: Platform setup end to end on `v0.7.0-rc.1`, on a nested three-node Proxmox VE 9.2
+cluster, from a fresh Docker Compose install with TLS mode `internal`, through go live to a tenant server
+running on a tenant network. That run found that URL seeds cannot work on such an install; the seed
+fixes (under Fixed, and the server seed choice under Added) came from it. On the same install with
+images built from `main` (`9c09945`), the setup status `seeds` item and seed URL, and the Network step's
+Server seeds form showing the stored choice, were re-checked; the `proxcloud-up.sh` next steps and
+saving the seed choice from the form were not. The steps, and what the run did not check, are in the
+release readiness page, section [Platform setup lab acceptance](docs/release-readiness.md#platform-setup-lab-acceptance).
+
+The not-verified notes in the entries below were written when each change merged. The lab run covers
+the connection checks (`?checks=all`), the generated script run on a node, the defaults apply, the live
+setup status, the setup page steps 1 to 7 except a template import, and a Compose install started with
+`--template-updates` (nothing was imported). The other not-verified notes still hold, among them anything
+that applies only to an EVPN or VLAN zone (the run used a simple zone) and `--scheduler`.
+
+Everything `v0.5.0` to `v0.6.0` say is **not** verified still holds, except one lab build each of
+`ubuntu-2604` (5 and 6 GiB), `ubuntu-2404` (5 GiB) and a Kubernetes 1.37.2 node on `ubuntu-2604`
+(8 GiB); the Debian slugs at 5 GiB are still not built. Also not verified: a template import through the setup page, the job scheduler on a running
+install, a login into a tenant server, an installer or Helm install of this release, and the network
+check in a full installer run.
+
+### Added
+
 - **Every check of the Proxmox connection test in one answer**
   (`POST /api/v1/admin/service/proxmox/auth?checks=all`): the test stopped at the first failure, so an
   operator fixed the datacenter firewall only to learn about the node firewall, and then about missing
@@ -161,32 +247,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sends one publish request per template whose smoke test passed. Nothing is published without that click.
   Kubernetes node images are left to the Template updates page. Playwright specs check the flag-off state, the import
   requests and that publish is called once per passed template, against the mock API; not run against a live API.
-- **Chart `proxcloud-platform` 0.1.0 for the managed-services platform** (`deploy/charts/proxcloud-platform`, ADR
-  0009): the platform's own objects as one pinned chart, which ADR 0009 installs through ArgoCD on both provisioning
-  paths. Installer stage 50 is unchanged and still applies `deploy/{mgmt,dbaas}-cluster/*.yaml` with `kubectl`. One
-  part per component of the platform BOM, which is not in the repository yet. `clusterctl.enabled` (components
-  `capi` on the seed and `capi-tenant` on the workload cluster) renders `clusterctl init` as an ArgoCD Sync hook Job
-  (`BeforeHookCreation`, cluster-admin service account, `PROXMOX_*` empty, no version check against GitHub) whose
-  arguments are the BOM's providers (`--core=cluster-api:v1.14.4`, …) and whose image, `proxcloud-clusterctl`, must be
-  pinned by `@sha256:` digest: the chart refuses the BOM's `pending` placeholder and a tag. `platform.enabled`
-  (component `platform`) renders on the workload cluster the provider service account, token Secret and RBAC of
-  `deploy/mgmt-cluster/rbac.yaml` and `deploy/dbaas-cluster/rbac.yaml` (the Namespace, ServiceAccount, Secret, Role
-  and RoleBinding both define, once), a ClusterRole for `ciliumnetworkpolicies` (get, create, patch) that the
-  database egress fence needs, both tenant AppProjects, a locked `default` AppProject (no source repository, no
-  destination, no cluster-scoped kind), the MetalLB pool `services` with its L2 advertisement, and the tenant chart
-  repository entry, OCI and without credentials. Bare defaults do not render. `internal/platformlife/chart_test.go`
-  pins the render of each component's example and fails when the RBAC or the tenant AppProjects stop equalling those
-  four files, or when the chart renders anything else. `helm.yml` lints and renders the examples on chart PRs and
-  publishes the chart on a `proxcloud-platform-v*` tag that matches `Chart.yaml`. Inert: nothing applies the chart,
-  the tag is not cut, and the `proxcloud-clusterctl` image and its entrypoint (the argument contract above, run as
-  uid 65532) do not exist yet. The hook's outcome counts in neither the Application's sync status nor its health: a
-  failed or timed-out Job leaves the `capi` or `capi-tenant` Application Synced and Healthy with only
-  `status.operationState.phase` Failed, automated sync does not retry it, and a change to the image or providers
-  alone does not make the Application OutOfSync. Whatever applies those Applications must set `syncPolicy.retry`,
-  gate on `operationState.phase` Succeeded and on the clusterctl inventory, and request a sync itself when the
-  inventory differs; nothing does yet. Not verified on a cluster: the hook running after its service account (sync
-  wave 1), and whether the seed's ArgoCD takes over the `default` project the workload's ArgoCD created and shows it
-  Synced with empty lists.
 - **Catalog, Go live and Next steps of the Platform setup page.** The defaults (flavors, public price plan, default
   quota, region row) needed a checkout and `seed-operator.py`, and going live meant the provider's Projects tab plus a
   sync nobody ran on a Compose install. Step 6 shows what `GET /api/v1/admin/setup/defaults` would write, the rate
@@ -205,6 +265,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   template updates and job scheduler). Playwright specs check the preview before Apply, the confirmation in the apply
   body and Go live staying disabled until its prerequisites hold, against the mock API; not run against a live API,
   and Go live not run against a cluster.
+- **Server seed choice in the Network step of the Platform setup page.** Whether a server on a DHCP network
+  fetches its NoCloud seed from the API URL or gets it on an ISO was a raw JSON key on the provider page
+  (`config.metadata.forceIso`), and a server that missed its URL seed booted without its hostname, password and
+  guest agent with nothing on the page saying why. Step 3 now has a **Server seeds** choice: "By URL from
+  `<seedUrl>`" (the URL the setup status reports: `config.metadata.url`, else the API's own base URL) for tenant
+  servers that reach it with a trusted certificate, or "On an ISO" for LAN installs and self-signed certificates;
+  without a seed URL the URL choice is disabled, and a saved one is shown as going on an ISO. It shows what is
+  saved, and saves only `config.metadata` with `PUT /api/v1/admin/service/{id}`, read fresh and sent whole because
+  the route replaces top-level config keys: `url`, `isoStorage`, `vendorData` and the other keys are kept, and the
+  network block is not sent. Each of the step's two forms is reset only when the block it edits
+  changes, so saving the seeds keeps an unsaved network edit and the other way round. Playwright specs check both
+  saves' bodies, the kept edits, the disabled URL choice and the axe checks against the mock API; not run against
+  a live API or cluster.
+- **Kubernetes API client calls for managed services** (`internal/cloud/kamajik8s`; groundwork, nothing calls
+  them in this release): `ApplyClusterScoped` (server-side apply of a cluster-scoped kind such as a
+  ClusterRoleBinding; an object with a namespace is refused), `CreateServiceAccountToken` (TokenRequest; returns
+  the expiry the API server granted), `CanI` (SelfSubjectAccessReview; an answer without a verdict counts as
+  denied) and `BuildKubeconfig` (server, CA and bearer token, no client certificate; a server that is not
+  `https` is refused). `BuildKubeconfig` writes only the CERTIFICATE blocks of the CA it is given and refuses a
+  CA input with any other block or with no certificate, so a CA private key passed with its certificate never
+  lands in the file. Unit-tested against a fake API server; not run against a cluster.
 
 ### Changed
 
@@ -244,9 +325,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hand in Proxmox with no bridge in the inventory sets `network.bridge` to that zone's bridge (the portal
   uses an existing zone as it is). Tested with unit tests and the preflight task run on its own against the
   inventory defaults; not run in a full install.
+- **ADR 0009 is amended with the managed-services decisions of 2026-11-15**
+  (`docs/adr/0009-managed-services-platform-lifecycle.md`, section "Amendments (2026-11-15)"; the original
+  decisions stay readable): ArgoCD Helm values go inline, the seed VM is cloned from a published native OS
+  template into its own pool, Cluster API providers are installed by a clusterctl Job from a CI-built image,
+  how the seed's ArgoCD and cert-manager are installed, the workload cluster keeping its own ArgoCD and Cluster
+  API for tenant objects, chart digests verified by CI until a mirror exists, seed backup by a PVE
+  backup job, the risks accepted for the first milestone, existing installer sites staying observe-only, and
+  the BOM's wave order as the upgrade order. Documentation only: the ADR says "Not implemented yet".
 
 ### Fixed
 
+- **The setup status asks how servers get their seed** (`GET /api/v1/admin/setup/status`, network step, item
+  `seeds`). On a DHCP (simple) zone a server fetches its NoCloud seed from the API URL; a tenant server that cannot
+  reach that URL, or does not trust its certificate (Compose TLS mode `internal` is self-signed), boots with the
+  template's hostname, no password and no guest agent, and nothing told the operator (lab acceptance of
+  v0.7.0-rc.1). The item is `done` once `config.metadata.forceIso` is `true`, or is `false` with a seed URL, or
+  `config.metadata.url` is set, and `attention` otherwise, naming the URL seeds are fetched from and that tenant
+  servers must reach it and trust its certificate; without any seed URL it stays `attention` even with
+  `forceIso: false`, saying every seed goes on an ISO. It never holds go live back, and nothing is probed. The
+  answer also carries `seedUrl`, the base a URL seed is fetched from (`config.metadata.url`, else
+  `PROXCLOUD_SELF_API_BASE_URL`; `""` when neither is set). Unit-tested; not run against a live API.
+- **`proxcloud-up.sh` sends the operator to Platform setup** (Docker Compose). Its "Next steps" named System →
+  Cloud providers, a raw form that skips the setup steps; it now names System → Platform setup. With TLS mode
+  `internal` it adds that tenant servers cannot fetch seeds over HTTPS with the self-signed certificate, so choose
+  "On an ISO" in Platform setup → Network; `deploy/compose/README.md` says the same under the TLS modes.
+  `deploy/tests/test_compose_production.py` checks both lines per TLS mode in the dry run; not run in a real install.
+- **The seed choice is documented** (`docs/cloud-integration.md` "Server seeds", and step 3 of the console's
+  Platform setup docs page): when to choose a URL seed and when an ISO, what a missed URL seed looks like, and
+  that the setup status asks until the operator chose.
 - **The Proxmox provider page saves the failover URLs and the cluster CA** (operator console, Cloud providers,
   Connection tab). The form showed both fields, but Save sent neither, so an edit of `apiUrls` or `caCert` was
   dropped while the page reported it saved. Save now takes the connection keys from the same mapping as Add

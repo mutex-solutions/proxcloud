@@ -119,6 +119,8 @@ type Handler struct {
 	githubCountFn func(ctx context.Context) (int64, error)
 	// jobsScheduler is PROXCLOUD_JOBS_SCHEDULER_ENABLED (SetJobsScheduler): the setup status warns without it.
 	jobsScheduler bool
+	// apiBaseURL is PROXCLOUD_SELF_API_BASE_URL (SetAPIBaseURL): the setup status names it as the seed URL.
+	apiBaseURL string
 }
 
 // SetHmacEncryptor wires the data-at-rest key for hmac key secrets.
