@@ -29,6 +29,13 @@ Enter the API URL, the token ID and secret, and how to trust the certificate. Pi
 
 The tenant network settings, as a form: the zone kind (simple, VLAN or EVPN) and its id, the CIDR range tenant subnets are carved from (set it once: subnets outside a later range lose the rule that separates them), the exit nodes, an optional public network on a bridge that is not any node's management bridge, and the networks tenants must not reach. Saving keeps every other stored network setting.
 
+**Server seeds** says how a new server on a network with DHCP gets its hostname, password and SSH keys. A server that cannot get them boots with the template's hostname, no password and no guest agent, and nothing reports it, so the step needs attention until you choose (it does not block going live):
+
+- **By URL from** the API address shown: tenant servers download their seed from it. Choose this only when they can reach that address and trust its certificate. When the API has no base URL and the provider sets no seed URL, this choice is disabled: every seed goes on an ISO.
+- **On an ISO**: the seed goes on a CD in the server. Choose this for a LAN install or a self-signed certificate, for example the one-host install with TLS mode `internal`.
+
+Servers on a network without DHCP always get an ISO. **Save server seeds** changes only this choice; the other seed settings of the provider are kept.
+
 ## 4. Storage
 
 **Detect** lists the cluster's storages with a proposed storage profile for each. Confirm the profiles, pick the default, the store for image imports (it needs the `import` content type) and the store for server backups. The page explains how to add NAS stores to Proxmox and how to connect TrueNAS for tenant file shares.
