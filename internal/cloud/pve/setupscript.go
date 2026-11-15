@@ -27,6 +27,22 @@ var (
 // gpu adds the GPUOnly ACLs. importStorage adds what image import needs on that store, where the portal deletes the
 // files it uploaded (docs/proxmox-permissions.md).
 func PlatformSetupScript(tokenID string, gpu bool, importStorage string) (string, error) {
+	return setupScript(tokenID, gpu, importStorage, nil)
+}
+
+// ManagedSetupScript is PlatformSetupScript plus what managed services need: ManagedRoles, the pool SeedPool, the
+// users capmox@pve and csi@pve with their tokens capi and csi, ManagedACLs (the three stores as there), and the
+// effective rights of both tokens on both platform pools. Safe to run again, as PlatformSetupScript.
+func ManagedSetupScript(tokenID string, gpu bool, importStorage, bootStorage, isoStorage string) (string, error) {
+	for _, s := range [][2]string{{"bootStorage", bootStorage}, {"isoStorage", isoStorage}} {
+		if !setupStorageID.MatchString(s[1]) {
+			return "", fmt.Errorf("%s must be a storage id: a letter, then letters, digits, dot, dash and underscore", s[0])
+		}
+	}
+	return setupScript(tokenID, gpu, importStorage, ManagedACLs(tokenID, bootStorage, isoStorage, importStorage))
+}
+
+func setupScript(tokenID string, gpu bool, importStorage string, managed []ManagedACL) (string, error) {
 	m := setupTokenID.FindStringSubmatch(tokenID)
 	if m == nil {
 		return "", fmt.Errorf("tokenId must be user@realm!name, of letters, digits, dot, dash and underscore")
@@ -76,6 +92,45 @@ func PlatformSetupScript(tokenID string, gpu bool, importStorage string) (string
 	}
 	if importStorage != "" {
 		grant("/storage/"+importStorage, "PVEDatastoreAdmin", false)
+	}
+	if managed != nil {
+		line("")
+		line("# managed services: roles, the seed pool, the users and tokens of CAPMOX and proxmox-csi on the platform, and")
+		line("# their ACLs; the portal token may then mint the tokens of tenant clusters. Both secrets are printed once: store them")
+		for _, r := range ManagedRoles {
+			line("pveum role add %s 2>/dev/null || true", q(r.Name))
+			line("pveum role modify %s --append 1 --privs %s", q(r.Name), q(strings.Join(r.Privs, " ")))
+		}
+		line("pveum pool add %s --comment %s 2>/dev/null || true", q(SeedPool), q("ProxCloud seed cluster (not tenant)"))
+		for _, t := range []struct{ id, comment string }{{CAPITokenID, "ProxCloud CAPI"}, {CSITokenID, "ProxCloud CSI"}} {
+			user, name, _ := strings.Cut(t.id, "!")
+			line("pveum user add %s --comment %s 2>/dev/null || true", q(user), q(t.comment))
+			line("pveum user token add %s %s --privsep 1 || echo %s", q(user), q(name),
+				q("The token "+t.id+" exists already: its secret was printed when it was created."))
+		}
+		for _, a := range managed {
+			if a.User == m[1] && a.Token == tokenID {
+				grant(a.Path, a.Role, a.Propagate)
+				continue
+			}
+			n := 0
+			if a.Propagate {
+				n = 1
+			}
+			for _, p := range []struct{ flag, id string }{{"--users", a.User}, {"--tokens", a.Token}} {
+				if p.id != "" {
+					line("pveum acl modify %s %s %s --roles %s --propagate %d", q(a.Path), p.flag, q(p.id), q(a.Role), n)
+				}
+			}
+		}
+		line("# what the platform tokens hold on the platform pools: the CAPI token ProxCloudCAPI on both, the CSI token nothing on the")
+		line(`# seed VM (its disks on the boot store stay open to the CSI token: docs/proxmox-permissions.md, "What the seed pool does not fence")`)
+		for _, id := range []string{CAPITokenID, CSITokenID} {
+			user, name, _ := strings.Cut(id, "!")
+			for _, pool := range []string{SystemPool, SeedPool} {
+				line("pveum user token permissions %s %s --path %s", q(user), q(name), q("/pool/"+pool))
+			}
+		}
 	}
 	line("")
 	line("# what the token really holds")

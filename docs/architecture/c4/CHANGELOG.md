@@ -4,6 +4,33 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-15: Platform tokens narrowed to the platform pools
+
+**What changed:** the Proxmox credentials of the services cluster reach less. Installer
+stage 10 (`split_acls`) now grants `capmox@pve!capi` `ProxCloudCAPI` on the services pool
+instead of `/pool`, and `csi@pve!csi` `ProxCloudCSI` on the services pool and its boot store
+instead of `/pool` and `/storage`; both users get a row of their own on that pool. The
+setup script route gains `managedServices=true`, which writes the same rows for a Compose
+site, the portal token's mint grant, and the new pool `proxcloud-seed` for the seed VM of
+managed services, where the portal token and every `csi@pve` token get `NoAccess`. That
+fences the seed VM only: its disk sits on the boot store, where `csi@pve!csi` holds
+`Datastore.Allocate`, which in PVE opens every volume on the store. The rows are
+`pve.ManagedACLs`; a test keeps them equal to stage 10.
+
+**Why:** both tokens only ever work on the services cluster, but held every tenant pool and
+store, and a stolen portal token with `Permissions.Modify` on `/pool` could have widened
+them further on the platform VMs. A more specific row wins in PVE, so the users' own rows
+on the platform pools fence them against a later `/pool` grant. The remaining reach of that
+mint grant on `/pool` (other users without a row there) is accepted for M1. It also holds
+`Permissions.Modify` on `/storage`, so a stolen portal token can grant itself
+`Datastore.Allocate` on the boot store and read every disk there, the seed's included,
+through a tenant VM; no row closes that in M1. ADR 0009 accepts both reaches for M1 (A2
+"Limit", A8); a store of the seed's own, which would fence its disk from the CSI token, is a
+change of its own. Lab check L1 measures each of them. Existing sites keep their broad token rows until removed by hand,
+because stage 10 only adds rows.
+
+**Views updated:** [C2 containers](c2-containers.md) (trust boundaries: new "Services
+cluster to Proxmox" row).
 ## 2026-11-15: Cluster chart kubeadm mode for the platform cluster
 
 **What changed:** chart `proxmox-kamaji-cluster` 0.1.11 has a second control-plane kind,
