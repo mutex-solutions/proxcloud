@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-15
+
+A feature release on top of `v0.6.0`.
+
+- **Platform setup** in the operator console (`/setup`) takes a new install from the Proxmox token to the
+  first tenant in one page, on new API routes: every connection check in one answer (`?checks=all`), a
+  generated script for the portal token, the setup defaults and the setup status. Its Network step asks
+  how servers get their seed (by URL or on an ISO). The Docker Compose install gains `--template-updates`
+  and `--scheduler`, both off by default.
+- **Security fix:** turning the job scheduler on no longer mounts the unauthenticated `POST /debug/*` job
+  triggers on the management port. Every tag from `v0.4.0-rc.1` to `v0.6.0` did; see the management port
+  entry under Security.
+- HIGH/CRITICAL findings without a fixed version stay tracked, not blocking, until 2027-03-12 instead of
+  2026-12-12 (Security).
+- The smaller template disks of `v0.6.0` have one lab build each for `ubuntu-2604` (5 GiB, then
+  6 GiB), `ubuntu-2404` (5 GiB) and a Kubernetes 1.37.2 node on `ubuntu-2604` (8 GiB); native Ubuntu
+  26.04 templates now build at 6 GiB. The Debian slugs at 5 GiB and a Kubernetes node on `ubuntu-2404`
+  have not been built (Changed).
+- Groundwork for managed services, inert in this release: the Kubernetes API client
+  (`internal/cloud/kamajik8s`) gained cluster-scoped apply, TokenRequest, an access review and a
+  kubeconfig builder, with no caller yet (Added), and ADR 0009 records the managed-services decisions
+  of 2026-11-15 (Changed). Nothing provisions a platform yet.
+
+No breaking API change, but two behaviour changes can break an existing setup:
+
+- A script that calls a `/debug/*` trigger on an install with only the scheduler on now gets `404`. Use
+  the authenticated `/api/v1/admin/job/*` endpoints, or set `PROXCLOUD_JOBS_DEBUG_TRIGGERS=true` on a
+  development or lab install only (Security).
+- Saving a Proxmox provider whose `config.network` has a new problem (for example a `cidrPool` smaller
+  than `/24`, a `defaultZone` that names no zone, or a VLAN zone without a bridge or with a tag outside
+  1 to 4094) is now a `400`; a problem the stored block already has does not stop a save. Installer
+  stage 00 now refuses such an inventory before it changes anything. It checks the inventory alone, so
+  on an existing installer site `make upgrade` (and `make templates`, `make mgmt-scale`,
+  `make storage-rebench`) stops on such a value even when the stored block already had it. For a VLAN
+  zone made by hand in Proxmox, set `network.bridge` to that zone's bridge (Changed).
+
+Verified on a lab: Platform setup end to end on `v0.7.0-rc.1`, on a nested three-node Proxmox VE 9.2
+cluster, from a fresh Docker Compose install with TLS mode `internal`, through go live to a tenant server
+running on a tenant network. That run found that URL seeds cannot work on such an install; the seed
+fixes (under Fixed, and the server seed choice under Added) came from it. On the same install with
+images built from `main` (`9c09945`), the setup status `seeds` item and seed URL, and the Network step's
+Server seeds form showing the stored choice, were re-checked; the `proxcloud-up.sh` next steps and
+saving the seed choice from the form were not. The steps, and what the run did not check, are in the
+release readiness page, section
+[Platform setup lab acceptance](docs/release-readiness.md#platform-setup-lab-acceptance).
+
+The not-verified notes in the entries below were written when each change merged. The lab run covers
+the connection checks (`?checks=all`), the generated script run on a node, the defaults apply, the live
+setup status, the setup page steps 1 to 7 except a template import, and a Compose install started with
+`--template-updates` (nothing was imported). The other not-verified notes still hold, among them anything
+that applies only to an EVPN or VLAN zone (the run used a simple zone) and `--scheduler`.
+
+Everything `v0.5.0` to `v0.6.0` say is **not** verified still holds, except one lab build each of
+`ubuntu-2604` (5 and 6 GiB), `ubuntu-2404` (5 GiB) and a Kubernetes 1.37.2 node on `ubuntu-2604`
+(8 GiB); the Debian slugs at 5 GiB are still not built. Also not verified: a template import through the setup page, the job scheduler on a running
+install, a login into a tenant server, an installer or Helm install of this release, and the network
+check in a full installer run.
+
 ### Added
 
 - **Every check of the Proxmox connection test in one answer**
@@ -192,6 +250,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changes, so saving the seeds keeps an unsaved network edit and the other way round. Playwright specs check both
   saves' bodies, the kept edits, the disabled URL choice and the axe checks against the mock API; not run against
   a live API or cluster.
+- **Kubernetes API client calls for managed services** (`internal/cloud/kamajik8s`; groundwork, nothing calls
+  them in this release): `ApplyClusterScoped` (server-side apply of a cluster-scoped kind such as a
+  ClusterRoleBinding; an object with a namespace is refused), `CreateServiceAccountToken` (TokenRequest; returns
+  the expiry the API server granted), `CanI` (SelfSubjectAccessReview; an answer without a verdict counts as
+  denied) and `BuildKubeconfig` (server, CA and bearer token, no client certificate; a server that is not
+  `https` is refused). `BuildKubeconfig` writes only the CERTIFICATE blocks of the CA it is given and refuses a
+  CA input with any other block or with no certificate, so a CA private key passed with its certificate never
+  lands in the file. Unit-tested against a fake API server; not run against a cluster.
 
 ### Changed
 
@@ -231,6 +297,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hand in Proxmox with no bridge in the inventory sets `network.bridge` to that zone's bridge (the portal
   uses an existing zone as it is). Tested with unit tests and the preflight task run on its own against the
   inventory defaults; not run in a full install.
+- **ADR 0009 is amended with the managed-services decisions of 2026-11-15**
+  (`docs/adr/0009-managed-services-platform-lifecycle.md`, section "Amendments (2026-11-15)"; the original
+  decisions stay readable): ArgoCD Helm values go inline, the seed VM is cloned from a published native OS
+  template into its own pool, Cluster API providers are installed by a clusterctl Job from a CI-built image,
+  how the seed's ArgoCD and cert-manager are installed, the workload cluster keeping its own ArgoCD and Cluster
+  API for tenant objects, chart digests verified by CI until a mirror exists, seed backup by a PVE
+  backup job, the risks accepted for the first milestone, existing installer sites staying observe-only, and
+  the BOM's wave order as the upgrade order. Documentation only: the ADR says "Not implemented yet".
 
 ### Fixed
 
