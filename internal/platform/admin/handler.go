@@ -410,6 +410,8 @@ func (h *Handler) Routes(r chi.Router) {
 		h.routeProjectManager(r)
 		h.routeExternalServiceMut(r)
 		h.routeProviderAttach(r)
+		// Platform setup: the defaults of a new install (setupdefaults.go).
+		h.routeSetup(r)
 	})
 }
 

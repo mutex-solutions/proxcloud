@@ -86,6 +86,39 @@ func TestPVEDefaultQuota(t *testing.T) {
 	}
 }
 
+// The setup defaults fill only what the operator has not set: a limit under either spelling, an explicit unlimited
+// and the per-model GPU limits all stay.
+func TestMergePVEDefaultQuota(t *testing.T) {
+	defaults := map[string]int{"servers": 20, "vcpus": 80, "networks": 10}
+	gpu := map[string]any{"nvidia-4090": float64(2), "*": float64(0)}
+	tests := []struct {
+		name   string
+		stored map[string]any
+		want   map[string]any
+		added  []string
+	}{
+		{"nothing stored", nil, map[string]any{"servers": 20, "vcpus": 80, "networks": 10}, []string{"networks", "servers", "vcpus"}},
+		{"gpu limits survive", map[string]any{"gpu": gpu}, map[string]any{"gpu": gpu, "servers": 20, "vcpus": 80, "networks": 10}, []string{"networks", "servers", "vcpus"}},
+		{"stored value wins", map[string]any{"servers": float64(50)}, map[string]any{"servers": float64(50), "vcpus": 80, "networks": 10}, []string{"networks", "vcpus"}},
+		{"legacy alias counts as set", map[string]any{"instances": float64(3), "cores": float64(6)}, map[string]any{"instances": float64(3), "cores": float64(6), "networks": 10}, []string{"networks"}},
+		{"unlimited stays unlimited", map[string]any{"vcpus": float64(-1)}, map[string]any{"vcpus": float64(-1), "servers": 20, "networks": 10}, []string{"networks", "servers"}},
+		{"complete", map[string]any{"servers": float64(1), "vcpus": float64(2), "networks": float64(3), "sandboxes": float64(4)},
+			map[string]any{"servers": float64(1), "vcpus": float64(2), "networks": float64(3), "sandboxes": float64(4)}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, added := MergePVEDefaultQuota(tt.stored, defaults)
+			if !reflect.DeepEqual(got, tt.want) || !reflect.DeepEqual(added, tt.added) {
+				t.Fatalf("got %#v added %v, want %#v added %v", got, added, tt.want, tt.added)
+			}
+		})
+	}
+	stored := map[string]any{"gpu": gpu}
+	if MergePVEDefaultQuota(stored, defaults); len(stored) != 1 {
+		t.Fatalf("the stored map was changed: %v", stored)
+	}
+}
+
 func TestPVEStorageProfilePlacement(t *testing.T) {
 	zfs1 := pve.StorageNodeState{Active: true, Total: 100, Avail: 60}
 	zfs2 := pve.StorageNodeState{Active: true, Total: 100, Avail: 5}

@@ -49,6 +49,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`pve.PlatformACLs`); tests keep the script in `docs/proxmox-permissions.md`, the installer's role and
   ACL rows (stage 10) and that table equal, and refuse a token ID or storage that is not a plain id. The
   portal still holds no root credential. The script has not been run on a Proxmox node.
+- **Defaults applied from the API** (`GET` and `POST /api/v1/admin/setup/defaults`). A new install needs a flavor
+  catalog, a public price plan, a default project quota and a region row before a tenant can create a server. Until
+  now that took a checkout, python3 and `deploy/seed/seed-operator.py` with four overridden variables on a Compose
+  install. The API now carries the same `deploy/seed` documents (`deploy/seed/seed.go` embeds them; the API image
+  copies `deploy/seed`) and applies them on request. The preview shows what would be written. The apply only creates:
+  it never changes a document that exists, runs in one transaction under one advisory lock, and answers one result
+  per item. The price plan is created enabled, so the apply refuses it without `"confirmRates": true`, and it is
+  skipped when any enabled PUBLIC plan exists, because every enabled public plan is billed. The plan gets the rules a
+  Proxmox install bills; GPU, share and bucket rules are added only when such a provider exists. The default quota
+  is merged under the stored one, so per-model GPU limits and limits the operator set are kept. Each item needs the
+  permission of the endpoint that writes the same document by hand. `seed-operator.py` is unchanged.
+  `docs/api.md` describes both routes. Not verified: a run against a Compose install, and the published image build
+  (the build stage was built locally; CI builds the image).
 
 ### Changed
 

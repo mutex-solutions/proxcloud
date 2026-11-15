@@ -4,12 +4,18 @@ docs
 *.md
 .env
 # Keep the build context to ONLY what the Go build + the chart's wait-script need.
-# Exclude the secret-bearing values overlays, the seed docs, tasks, and tests so the build
+# Exclude the secret-bearing values overlays, the seed scripts, tasks, and tests so the build
 # context (and pushed image) never carries credentials or non-build repo content.
 tasks
 test
 deploy/values-*.yaml
 deploy/*-values.yaml
-deploy/seed
+# Of deploy/seed only the Go package and the four documents it embeds (seed.go) are build input.
+deploy/seed/*
+!deploy/seed/seed.go
+!deploy/seed/flavors.json
+!deploy/seed/price-plan-seed.json
+!deploy/seed/platform-configuration.json
+!deploy/seed/billing-configuration.json
 **/*_test.go
 web

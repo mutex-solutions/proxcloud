@@ -180,6 +180,74 @@ answers `409` with the reason in `errors.details`:
 | `scheduled_for_deletion` / `deletion_in_progress` / `deleted` | The project is on its way out. |
 | `not_enabled` | Any other case where the project is not ENABLED. |
 
+### Platform setup — `/api/v1/admin/setup`
+
+Operator console surface for bringing a new install to its first tenant.
+
+**Defaults.** `GET /api/v1/admin/setup/defaults?serviceId=` previews, and
+`POST /api/v1/admin/setup/defaults` applies, the documents an install needs
+before tenants can use a Proxmox provider. They are the files in `deploy/seed`,
+compiled into the API (`deploy/seed/seed.go`), so no checkout and no
+`seed-operator.py` run is needed. `seed-operator.py` is unchanged and still
+works; unlike it, this route never updates a document that exists.
+
+| Item | What an apply adds | Permission to apply |
+|------|--------------------|---------------------|
+| `flavors` | The default flavors whose slug is not in the catalog | `admin:service:manage` |
+| `pricePlan` | The public rate card, enabled, when no enabled PUBLIC plan exists | `admin:price_plan:manage` + `admin:billing_config:read` |
+| `quota` | The default project quota limits the provider does not set yet | `admin:service:manage` |
+| `region` | The provider's region row in the platform configuration | `admin:platform_config:update` |
+
+`flavors` and `pricePlan` need no provider. `quota` and `region` need
+`serviceId` (a Proxmox provider) and answer `blocked` without one.
+
+The preview needs all four reads (`admin:service:read`,
+`admin:price_plan:read`, `admin:platform_config:read`,
+`admin:billing_config:read`) and changes nothing:
+
+```json
+{"data": {"currency": "USD", "items": [
+  {"id": "flavors", "state": "todo", "message": "3 of the 3 default flavors are missing", "preview": [{"slug": "s1-small", "vcpus": 1, "ramMb": 1024, "diskGb": 10}]},
+  {"id": "pricePlan", "state": "todo", "message": "…", "preview": {"currency": "USD", "plan": {"name": "Public rate card", "enabled": true, "accessMode": "PUBLIC"}, "rules": []}},
+  {"id": "quota", "state": "blocked", "message": "Needs a Proxmox provider (serviceId)"},
+  {"id": "region", "state": "blocked", "message": "Needs a Proxmox provider (serviceId)"}
+]}}
+```
+
+`state` is `todo` (an apply would write `preview`), `done` (nothing to add) or
+`blocked` (the message says what is missing). `preview` is exactly what an
+apply would write for the item.
+
+The apply body is `{"serviceId": "…", "items": ["flavors", "pricePlan", "quota", "region"], "confirmRates": true}`.
+`items` is required. Unknown fields and unknown items are refused with `400`.
+It answers one result per requested item, with `state` `created`, `skipped`
+(nothing was missing) or `blocked`.
+
+- **Create-only.** An apply adds what is missing and never changes or deletes a
+  document that exists. Applying twice leaves the same documents. One
+  transaction under one advisory lock does the whole apply, so two operators
+  applying at once get one price plan, and an apply that fails writes nothing.
+- **Rates need a confirmation.** The plan is created enabled, so its rates are
+  billed from the next charge run. `pricePlan` is refused with `400` unless the
+  body carries `"confirmRates": true`. Show the previewed rules to the operator
+  before sending it. The rates are amounts in the billing configuration's base
+  currency; the preview says so when that is not the currency they were written
+  in (USD), and refuses (`blocked`) when no base currency is set.
+- **One public plan.** Every enabled PUBLIC plan is billed, so the default plan
+  is skipped when one exists, whatever its name. A plan with the default's name
+  that is disabled or not public blocks the item instead of getting a twin.
+- **Rules.** The plan gets the rules for `instance`, `instance_traffic`,
+  `volume`, `floating_ip`, `image`, `server_snapshot` and `server_protection`.
+  GPU rules are added only when a Proxmox provider maps GPUs (`config.gpus`),
+  the `share` rule only when a TrueNAS provider exists, the `bucket` rule only
+  when an object-store provider exists. The Kubernetes, database and sandbox
+  rules of the file are not applied here. Rules are not added later to a plan
+  that exists: after adding GPUs or a share provider, add those rules under
+  System → Price plans, and check `GET /api/v1/admin/service/{id}/unpriced-flavors`.
+- **Quota.** The stored default quota wins: only limits it does not set are
+  added (a limit stored under a legacy key such as `instances`, or set to `-1`,
+  counts as set), and the per-model `gpu` limits are kept.
+
 ## Admin API — `/admin-api/v1`
 
 A machine-to-machine surface (`internal/platform/adminapi`). Authenticated with an
