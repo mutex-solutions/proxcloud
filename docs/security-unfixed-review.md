@@ -87,21 +87,39 @@ from a **third party** inside the sandbox (a web page, a repository, a document,
 tenant's code or agent connects to): a flaw there can hand that third party the tenant's sandbox. The
 sandbox boundary itself (gVisor, the guardrail, the worker firewall) is not in these images.
 
-I sorted the findings by source package into three groups, using the package's role and each CVE's
-title (not the code):
+I sorted the findings by source package into three groups, using the package's role, each CVE's
+title and, for group A, its description (not the code):
 
 | Group | `base` and the five agent templates and `mcp-gateway` | `node` | `code-interpreter` | prototype |
 |---|---|---|---|---|
-| A. No code that runs in a sandbox: `linux`, `krb5`, `mariadb`, `postgresql-15`, `bluez`, `gnupg2` | 377 findings / 221 CVEs | 369 / 217 | 229 / 51 | 74 / 32 |
-| B. Local privilege only: `util-linux`, `sudo`, `pam`, `acl`, `systemd`, `ncurses` | 49 / 8 | 49 / 8 | 58 / 8 | 44 / 8 |
-| C. Network clients and parsers of third-party data | 224 / 100 | 222 / 98 | 108 / 43 | 34 / 21 |
+| A. Server-side code of installed libraries (KDC, kadmind, MariaDB and PostgreSQL servers), kernel headers, Bluetooth and TPM daemons: `linux`, `krb5`, `mariadb` (except CVE-2026-44172), `postgresql-15`, `bluez`, `gnupg2` | 377 findings / 221 CVEs | 369 / 217 | 225 / 50 | 74 / 32 |
+| B. Local privilege only: `util-linux` (except CVE-2026-53615), `sudo`, `pam`, `acl`, `systemd`, `ncurses` | 38 / 7 | 38 / 7 | 58 / 8 | 44 / 8 |
+| C. Network clients and parsers of third-party data, with CVE-2026-44172 and CVE-2026-53615 | 235 / 101 | 233 / 99 | 112 / 44 | 34 / 21 |
 
 - **A.** `linux` is `linux-libc-dev`, kernel headers, no kernel code (193 of 650 findings in the
   Debian 12 templates). The kernel of the sandbox workers is outside these images and outside this
-  scan. The krb5 CVEs describe the KDC and kadmind, the MariaDB and PostgreSQL ones the servers and
-  server tools, the BlueZ ones the AVRCP/A2DP stack, the GnuPG one `tpm2daemon`; the templates carry
-  only client libraries and headers of those packages (`libkrb5-3`, `libmariadb3`, `libpq5`,
-  `libbluetooth3`, their `-dev` packages). Not checked against the code one by one.
+  scan. For the other packages the templates carry libraries and headers, not the servers or daemons
+  the CVE descriptions name. The libraries themselves are installed and some are in use, so this group
+  rests on the descriptions, not on the code being absent:
+  - krb5 (14 CVEs): the KDC, kadmind and the kadmin RPC layer. No KDC or kadmind is installed, but
+    their libraries are (`libkdb5-10`, `libkadm5srv-mit12`, `libgssrpc4`, pulled in by `libkrb5-dev`
+    through `krb5-multidev`), and the client libraries are loaded in a sandbox: Trivy's `DependsOn`
+    lists `libgssapi-krb5-2` under `libcurl4`, `libcurl3-gnutls` (git), `openssh-client` and `libpq5`
+    (Debian 12 names; on Debian 13 the curl packages carry a `t64` suffix). Two CVEs are in the ASN.1
+    decoder of `libkrb5-3` itself (CVE-2026-107364, a read overrun; CVE-2026-119079, quadratic CPU in
+    `decode_sequence_of()`), and their descriptions name only the KDC as the victim. A client decodes
+    such data only during Kerberos authentication with a server the attacker controls. Not checked
+    whether the client path reaches the same code, or whether a template ships a Kerberos
+    configuration.
+  - MariaDB: the server, Galera state transfer, `mbstream` and `mariadb-dump`; none is installed. The
+    exception is CVE-2026-44172 (`code-interpreter` only, CRITICAL), which is in group C.
+  - PostgreSQL (2, Debian 12 only): `reindexdb` and the server. Both descriptions say versions before
+    17 are unaffected; the Debian 12 templates carry `libpq5` 15.20.
+  - BlueZ (4): Bluetooth radio input (AVRCP, A2DP and the `name2utf8` helper during discovery); there
+    is no Bluetooth device in a sandbox.
+  - GnuPG (1, `code-interpreter`): `tpm2daemon`.
+
+  None of these was checked against the code one by one.
 - **B.** sudo, PAM, mount/nsenter, libacl, systemd-homed, ncurses: privilege inside the sandbox, which
   the tenant already has.
 - **C.** These are the findings that can matter to a tenant. Reached when the tenant's code or agent
@@ -120,6 +138,13 @@ title (not the code):
     packages (tarfile, expat; on Debian 13 also the HTML parser and TLS certificate checks), GLib
     (GVariant, key files, regex, D-Bus introspection), libX11/libXrender (a hostile X server),
     OpenLDAP;
+  - two moved here from A and B: **CVE-2026-44172** (CRITICAL, `libmariadb3` 11.8.6 and its `-dev`
+    packages in `code-interpreter`; 4 findings) is in MariaDB's client library: text-protocol queries
+    escaped with `mysql_real_escape_string()` in the big5 character set can still be injected. Tenant
+    code reaches it when it passes third-party strings through that function to a database it talks
+    to. Not checked whether 11.8.6 bundles an affected Connector/C version. **CVE-2026-53615**
+    (util-linux, an integer overflow in libblkid's DOS partition parser; 11 findings in each Debian 12
+    template) is reached when tenant code probes a disk image that a third party supplied;
   - `browser` (Playwright, Ubuntu 24.04): its only finding, CVE-2025-3887 in GStreamer's H.265 parser,
     may be reached by a web page with H.265 media when the tenant drives WebKit, which uses the system
     GStreamer. Not verified.
@@ -130,7 +155,7 @@ title (not the code):
   an image still carries the old version blocks at the next scan. Most of group C in the Debian 12
   templates comes from what `e2bdev/base` and `node:bookworm` install (image libraries, `-dev`
   packages, Debian's gh), not from what the templates add; the controlled-base prototype, which drops
-  most of that, has 34 findings in group C instead of 224.
+  most of that, has 34 findings in group C instead of 235.
 
 ### Controlled-base prototype
 
@@ -199,12 +224,14 @@ it as an untrusted disk image.
   9pfs, lsi53c895a, virtio-snd/-gpu/-net/-scsi/-balloon, qxl, VGA, xHCI, Hyper-V, VAPIC), the socket
   I/O channel and the guest agent; none names a disk format driver. The other 24 have no usable title
   in the DB and were not triaged. A device-model flaw needs code running in the appliance guest to drive
-  it, so a hostile disk would first have to take over the appliance kernel.
+  it, so a hostile disk would first need code execution in that guest: through the appliance kernel,
+  or through a tool that parses the disk as root inside it (for example libblkid, CVE-2026-53615, open
+  in this image). Root in the guest is enough to drive the emulated devices.
 - **The appliance kernel has no findings in this report**: Trivy reported none for it (its source
   package is `linux-signed-amd64`). The headers of the same kernel version (6.1.190) carry 193 open
   findings in the Debian 12 templates. Kernel flaws reachable through a crafted filesystem are
   therefore not counted here.
-- A disk that broke through the appliance kernel and QEMU would run as the unprivileged capsule uid,
+- A disk that took over the appliance guest and then QEMU would run as the unprivileged capsule uid,
   without network or capabilities, and could falsify that capsule's own output (inventory, review,
   sanitized disk, postscan). Whoever can put such a disk on the template store already controls the
   template being published; nobody else has an input path.
@@ -265,9 +292,9 @@ Checked:
 
 Not checked:
 
-- No CVE was traced to the code paths or binaries it affects. The groups above rest on each
-  package's role and the CVE title; some titles in the DB are missing or wrong (24 of the 43 qemu
-  CVEs; one zlib CVE carries a webpack title in one of the two DBs).
+- No CVE was traced to the code paths or binaries it affects. The groups above rest on each package's
+  role and the CVE title (for group A also the description); some titles in the DB are missing or
+  wrong (24 of the 43 qemu CVEs; one zlib CVE carries a webpack title in one of the two DBs).
 - The Debian and Ubuntu security trackers, beyond the status in the Trivy DB.
 - Kernels: the sandbox workers' kernels and the export appliance's kernel.
 - The images sites actually run: `images.yaml` pins template builds from `20261112-9d00563`, and
