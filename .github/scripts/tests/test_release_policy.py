@@ -189,6 +189,14 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("bom-verify", jobs["build"]["needs"])
         self.assertEqual(jobs["release"]["needs"], "build")
         self.assertNotIn("secrets.", str(gate))
+        # helm.yml is a separate workflow: its app chart publication runs the same gate before it logs in or pushes.
+        publish = read_yaml(".github/workflows/helm.yml")["jobs"]["publish"]["steps"]
+        chart_gate = next(s for s in publish if s.get("run") == "python3 .github/scripts/bom_verify.py --release")
+        self.assertNotIn("if", chart_gate)
+        for name in ("ghcr login", "Package + publish chart at the tag version"):
+            later = next(s for s in publish if s.get("name") == name)
+            self.assertLess(publish.index(chart_gate), publish.index(later))
+        self.assertIn("helm push", later["run"])
 
     def test_release_job_uses_validated_environment_and_array_flags(self):
         workflow = read_yaml(".github/workflows/docker.yml")

@@ -320,12 +320,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registry: the manifest digest of an OCI chart, image or VM image, the `digest` of the exact chart version in an
   `https://` repository's `index.yaml`, and the sha256 of the downloaded k3s binary and install script. It runs on
   pull requests that touch the BOM or the script and weekly (`bom-verify.yml`), and with `--release` on every `v*`
-  tag as a job the image builds and the GitHub Release wait for (`docker.yml`): a tag whose BOM is still `-dev`,
-  holds a `pending` digest or a `0.0.0+` version, or pins a digest that has moved, publishes no image. The BOM stays
+  tag as a job the image builds and the GitHub Release wait for (`docker.yml`) and as a step before the app chart is
+  pushed (`helm.yml`): a tag whose BOM is still `-dev`, holds a `pending` digest or a `0.0.0+` version, or pins a
+  digest that has moved, publishes no image and no `proxcloud` chart. The BOM stays
   `0.8.0-dev`: the `kamaji` and `kamaji-crds` charts are still `0.0.0+latest` with a `pending` digest, so `v0.8.0`
   cannot be tagged until the chart mirror pins them. Not checked: the bytes of OCI layers and of chart archives from
-  `https://` repositories (only the digest the registry or index states), signatures, and the app chart that
-  `helm.yml` publishes on the same tag, which does not wait for this job.
+  `https://` repositories (only the digest the registry or index states) and signatures. The two workflows run
+  the gate separately, so a registry error can fail one and not the other.
 
 - **Installer stage 10 narrows the services cluster's CAPMOX and CSI tokens** (`split_acls` in
   `installer/playbooks/10-pve-identity.yml`): `capmox@pve!capi` held `ProxCloudCAPI` on all of `/pool` and

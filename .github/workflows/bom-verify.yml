@@ -6,7 +6,8 @@ name: bom-verify
 #   weekly                                      -> the comparison on main: a tag or an index entry that was moved
 #                                                  upstream shows within a week, without waiting for a BOM change
 #   manual run                                  -> the same, from any branch
-# The release gate (--release on a v* tag) is the bom-verify job of docker.yml, which the image builds wait for.
+# The release gate (--release on a v* tag) is the bom-verify job of docker.yml, which the image builds wait for,
+# and a step of the publish job of helm.yml, before the app chart is pushed.
 # Anonymous pulls only: no login, no secret, read-only token. Hosted runner.
 on:
   pull_request:

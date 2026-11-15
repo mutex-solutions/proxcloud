@@ -149,8 +149,11 @@ no credentials) prints one line per pin and exits 1 on any failure:
 
 A `pending` digest has nothing to compare and is printed as `skip`. A mismatch, a
 missing digest header, a missing tag or index entry, a download over the size
-cap, a pin the script cannot read, and a network error after three attempts all
-fail the run.
+cap, a pin the script cannot read, a `release` line that is not one plain
+version, and a network error or cut response after three attempts all fail the
+run. A manifest request is never redirected, so the pull token stays with the
+registry that issued the challenge; a file download follows `https://`
+redirects only.
 
 Where it runs:
 
@@ -165,6 +168,9 @@ Where it runs:
   image and creates no GitHub Release. Off a tag the job only runs the script's
   offline unit tests; it exists on every event because a skipped job would skip
   the builds that need it.
+- `helm.yml`, job `publish`, on every `v*` tag with `--release`, as a step
+  before the registry login. A published chart version is never replaced, so a
+  tag that fails the gate must not publish the `proxcloud` chart either.
 
 `v0.8.0` cannot be tagged yet: the BOM is `0.8.0-dev`, and the `kamaji` and
 `kamaji-crds` charts are `0.0.0+latest` with a `pending` digest. The tag passes
@@ -178,9 +184,12 @@ Not verified:
   or the index states is compared.
 - Signatures and provenance of third-party charts and images.
 - That the BOM's `release` equals the tag. Only `-dev` is refused.
-- The app chart: `helm.yml` publishes `proxcloud` on the same `v*` tag in
-  parallel and does not wait for the gate. The chart does not contain the BOM;
-  the API image does.
+- That both workflows see the same answer. `docker.yml` and `helm.yml` run the
+  gate separately on the same tag; a registry error that hits only one of them
+  fails that one and not the other. A BOM that is `-dev`, `pending` or `0.0.0+`
+  fails both. `helm.yml` still does not wait for the image builds.
+- The chart index parser against anything but the layout Helm writes. It reads
+  `index.yaml` by indentation, not with a YAML library.
 - Whether a pinned version is still the wanted one. The check proves a pin is
   still served, not that it is current.
 
@@ -193,7 +202,7 @@ The workflows currently **do not** provide a single atomic release gate:
   builds is the platform BOM gate above. Choose an exact commit whose tests and
   security gate completed successfully.
 - GitHub Release creation waits for all five image builds, but not for the
-  separate Helm publication workflow. Verify both before telling users to install.
+  separate Helm publication workflow (which runs the platform BOM gate itself). Verify both before telling users to install.
 - The Release job validates the tag from the environment with the stdlib
   [release policy](../.github/scripts/release_policy.py). Only `vX.Y.Z` and
   `vX.Y.Z-rc.N` (no leading zeroes) pass. RCs use `--prerelease --latest=false`;

@@ -64,7 +64,7 @@ Files: `internal/platformlife/{cluster,remove,seedaccess,runner,run,job,stages}.
 run `.github/scripts/bom_verify.py`, which compares every pin of
 `deploy/platform/platform-bom.yaml` with what ghcr.io, the chart repositories and the k3s
 download URLs serve (anonymous, read-only). On a `v*` tag the job runs with `--release` and
-the image builds wait for it. The BOM now pins the four packages this repository publishes
+the image builds wait for it; `helm.yml` runs the same check before it pushes the app chart. The BOM now pins the four packages this repository publishes
 by digest. No container, external system or trust boundary changes: CI already pulled from
 ghcr.io, and the job has a read-only token and no secret.
 
