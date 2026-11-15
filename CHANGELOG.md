@@ -148,7 +148,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pve.RenderSeed` and `pve.RenderNetworkConfig`. The workload cluster gets `proxmox-kamaji-cluster` values in kubeadm
   mode with the node groups (group label on every machine, a `NoSchedule` taint on every group but `system`, the
   machine tags a seed-lost Remove finds the VMs by). The seed ArgoCD gets its HelmChart, an AppProject that may source
-  only the BOM's charts and deploy only into its namespaces, a locked `default` project, OCI repository entries without
+  only the BOM's charts and deploy only to the seed and the workload cluster (any namespace there: ArgoCD checks every
+  object a chart renders, and cert-manager writes leader-election Roles into `kube-system`, cilium into
+  `cilium-secrets`), a locked `default` project, OCI repository entries without
   credentials and one Application per BOM component: values inline, secrets named only (`pc-platform-pve`,
   `proxmox-csi-plugin`, rendered separately), automated sync with self-heal, no prune for stateful components, no
   resources finalizer, a retry policy on every Application (the clusterctl hooks can fail), `CreateNamespace=true`
@@ -160,13 +162,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   database egress fence, no backup store, PostgreSQL 3 replicas only with three `dbaas` nodes, `attachToNewProjects:
   false` and the `platformInstallationId` marker. Tests: goldens of every renderer, a scan that planted credentials
   appear only where design §5 puts them, a key-set test against stage 60's loop, the providers parsing the bodies, the
-  Applications against the `proxcloud-platform` chart's examples and contract, and the cluster values rendered through
-  the chart. Inert: nothing calls the renderers; the runner (stages 1 to 11) and the flag are later changes. Not
-  verified: no seed has booted this user-data (whether k3s keeps a portal-made `server-ca` and generates the other CAs
-  is lab check L2, as is bootstrap-token auth with `anonymous-auth=false`), and no ArgoCD has synced these
-  Applications; the upstream charts (cilium, cert-manager, metallb, argo-cd, cloudnative-pg, proxmox-csi-plugin,
-  kamaji-crds, kamaji-etcd, kamaji) rendered the workload values once by hand with `helm template` on 2026-11-15, not in
-  CI.
+  Applications against the `proxcloud-platform` chart's examples and contract, the cluster values rendered through
+  the chart, and every Application's chart rendered with its values to check each object's namespace against the
+  project (upstream charts only from the local Helm cache, so not in CI). Inert: nothing calls the renderers; the
+  runner (stages 1 to 11) and the flag are later changes. Not verified: no seed has booted this user-data (whether k3s
+  keeps a portal-made `server-ca` and generates the other CAs is lab check L2, as is bootstrap-token auth with
+  `anonymous-auth=false`), and no ArgoCD has synced these Applications; the upstream charts (cilium, cert-manager,
+  metallb, argo-cd, cloudnative-pg, proxmox-csi-plugin, kamaji-crds, kamaji-etcd, kamaji) rendered the workload values
+  once by hand with `helm template` on 2026-11-15, not in CI.
 - **`proxcloud-clusterctl` image and its tag flow** (`deploy/clusterctl/`, `.github/workflows/clusterctl.yml`): the
   image the clusterctl Job of the managed-services platform will run (ADR 0009; the `proxcloud-platform` chart that
   runs it comes separately). It holds clusterctl v1.14.4, kubectl v1.35.10 and, as a clusterctl local repository, the

@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -237,7 +238,7 @@ func TestApplicationsFollowTheContract(t *testing.T) {
 		if !slices.Contains(project["sourceRepos"].([]any), src["repoURL"]) {
 			t.Errorf("%s: repo %v is not in the project's sourceRepos", name, src["repoURL"])
 		}
-		if !slices.ContainsFunc(project["destinations"].([]any), func(d any) bool { return reflect.DeepEqual(d, dst) }) {
+		if !permitted(project["destinations"].([]any), dst["server"].(string), dst["namespace"].(string)) {
 			t.Errorf("%s: destination %v is not in the project's destinations", name, dst)
 		}
 		if src["targetRevision"] != c.Chart.Version || dst["namespace"] != c.Namespace {
@@ -380,6 +381,76 @@ func TestClusterValuesRenderThroughTheChart(t *testing.T) {
 	}
 	if kcp != 1 || endpoint != "192.0.2.10" {
 		t.Errorf("control plane replicas %v, endpoint %v", kcp, endpoint)
+	}
+}
+
+// permitted is ArgoCD's destination check of an AppProject for one object: the server exact, the namespace a glob.
+func permitted(destinations []any, server, namespace string) bool {
+	return slices.ContainsFunc(destinations, func(d any) bool {
+		m := d.(map[string]any)
+		ok, _ := path.Match(m["namespace"].(string), namespace)
+		return m["server"] == server && ok
+	})
+}
+
+// Every Application's chart rendered with its values, as ArgoCD renders it: each namespaced object lands in a namespace
+// the project permits on that server (ArgoCD checks every object, not only the destination). Our charts render from
+// deploy/charts; the upstream ones only from the Helm repository cache, as unit tests are offline, so an uncached chart
+// is skipped: `helm pull <repo>/<chart> --version <v> -d "$(helm env HELM_REPOSITORY_CACHE)"` caches one.
+func TestApplicationsRenderInsideTheProject(t *testing.T) {
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatal("helm is required in CI, or this test proves nothing")
+		}
+		t.Skip("helm not installed")
+	}
+	cache, err := exec.Command(helm, "env", "HELM_REPOSITORY_CACHE").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, in := embedded(t), renderInput()
+	b.Images.Clusterctl = "ghcr.io/mutex-solutions/proxcloud-clusterctl:v1.14.4-1@sha256:" + strings.Repeat("0", 64) // the chart refuses `pending`
+	apps, err := Applications(b, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinations := SeedProjects(b, in)[0]["spec"].(map[string]any)["destinations"].([]any)
+	var comps []Component // apps[i] is comps[i]
+	for _, c := range b.Components {
+		if c.Install == InstallApplication {
+			comps = append(comps, c)
+		}
+	}
+	for i, app := range apps {
+		c, name := comps[i], app["metadata"].(map[string]any)["name"].(string)
+		chart := filepath.Join("../../deploy/charts", c.Chart.Name)
+		if c.Chart.Repo != "ghcr.io/mutex-solutions/charts" {
+			chart = filepath.Join(strings.TrimSpace(string(cache)), c.Chart.Name+"-"+c.Chart.Version+".tgz")
+			if _, err := os.Stat(chart); err != nil {
+				t.Logf("%s: %s not in the Helm cache, not rendered", name, filepath.Base(chart))
+				continue
+			}
+		}
+		spec := app["spec"].(map[string]any)
+		f := filepath.Join(t.TempDir(), "values.yaml")
+		if err := os.WriteFile(f, yamlDoc(t, spec["source"].(map[string]any)["helm"].(map[string]any)["valuesObject"]), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(helm, "template", c.Name, chart, "-n", c.Namespace, "--kube-version", b.Kubernetes.Version, "-f", f)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("%s: helm template: %v\n%s", name, err, stderr.String())
+		}
+		server := spec["destination"].(map[string]any)["server"].(string)
+		for _, o := range yamlObjects(t, out) {
+			meta := o["metadata"].(map[string]any)
+			if ns, ok := meta["namespace"].(string); ok && !permitted(destinations, server, ns) {
+				t.Errorf("%s: %v %s/%v is outside the project's destinations on %s", name, o["kind"], ns, meta["name"], server)
+			}
+		}
 	}
 }
 

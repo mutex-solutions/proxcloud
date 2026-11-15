@@ -205,8 +205,10 @@ func SeedArgoCD(b *BOM, in RenderInput) (map[string]any, error) {
 }
 
 // SeedProjects are the seed ArgoCD's project and repositories: AppProject proxcloud-platform, which may source only the
-// BOM's charts and deploy only into the BOM's namespaces of the two clusters; the default project locked; one repository
-// entry per OCI repository, without credentials (the packages are public).
+// BOM's charts (design §9) and deploy only to the seed and the workload cluster, in any namespace there: ArgoCD checks
+// every object a chart renders, and charts write outside their release namespace (cert-manager's leader-election Roles
+// in kube-system, cilium's in cilium-secrets). The default project locked; one repository entry per OCI repository,
+// without credentials (the packages are public).
 func SeedProjects(b *BOM, in RenderInput) []map[string]any {
 	var repos, dests []any
 	seen := map[string]bool{}
@@ -219,9 +221,9 @@ func SeedProjects(b *BOM, in RenderInput) []map[string]any {
 			repos = append(repos, c.Chart.Repo)
 		}
 		server := destination(c.Cluster, in)
-		if !seen[server+" "+c.Namespace] {
-			seen[server+" "+c.Namespace] = true
-			dests = append(dests, map[string]any{"server": server, "namespace": c.Namespace})
+		if !seen[server] {
+			seen[server] = true
+			dests = append(dests, map[string]any{"server": server, "namespace": "*"})
 		}
 	}
 	project := object("argoproj.io/v1alpha1", "AppProject", argoNamespace, argoProject)

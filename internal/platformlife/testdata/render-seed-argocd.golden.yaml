@@ -951,27 +951,9 @@ projects:
           kind: '*'
       description: The managed-services platform's own components, from the BOM of ProxCloud 0.7.0-dev.
       destinations:
-        - namespace: cert-manager
+        - namespace: '*'
           server: https://kubernetes.default.svc
-        - namespace: proxcloud-system
-          server: https://kubernetes.default.svc
-        - namespace: pc-platform
-          server: https://kubernetes.default.svc
-        - namespace: kube-system
-          server: https://192.0.2.10:6443
-        - namespace: cert-manager
-          server: https://192.0.2.10:6443
-        - namespace: metallb-system
-          server: https://192.0.2.10:6443
-        - namespace: argocd
-          server: https://192.0.2.10:6443
-        - namespace: cnpg-system
-          server: https://192.0.2.10:6443
-        - namespace: csi-proxmox
-          server: https://192.0.2.10:6443
-        - namespace: proxcloud-system
-          server: https://192.0.2.10:6443
-        - namespace: kamaji-system
+        - namespace: '*'
           server: https://192.0.2.10:6443
       sourceRepos:
         - https://charts.jetstack.io
