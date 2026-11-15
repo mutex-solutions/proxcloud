@@ -137,6 +137,23 @@ test("Network adds a public network on a bridge that is not the management bridg
   ])
 })
 
+test("Network never offers a bridge that is the management bridge on any node", async ({ page }) => {
+  // pve1 manages through vmbr0, pve2 through vmbr1: each lists the other's management bridge without an address.
+  const bridges = [
+    { node: "pve1", iface: "vmbr0", type: "bridge", cidr: "192.0.2.11/24", management: true },
+    { node: "pve1", iface: "vmbr1", type: "bridge", management: false },
+    { node: "pve2", iface: "vmbr0", type: "bridge", management: false },
+    { node: "pve2", iface: "vmbr1", type: "bridge", cidr: "192.0.2.12/24", management: true },
+    { node: "pve2", iface: "vmbr2", type: "bridge", management: false },
+  ]
+  await page.goto("/system/taxes")
+  await expect(page.getByRole("heading", { name: "Taxes", level: 1 })).toBeVisible()
+  await recordCalls(page, { "POST /admin/service/proxmox/auth": { nodes: [{ node: "pve1" }, { node: "pve2" }], checks: [], bridges } })
+  await navigate(page, "/setup?tab=network")
+  await page.getByRole("combobox", { name: "Bridge" }).click()
+  await expect(page.getByRole("option")).toHaveText(["None", "vmbr2"])
+})
+
 test("Storage saves the confirmed proposals with the default and the backup store", async ({ page }) => {
   await page.goto("/setup?tab=storage")
   await expect(page.getByRole("button", { name: "Detect storage" })).toBeVisible()

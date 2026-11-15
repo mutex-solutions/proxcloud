@@ -64,7 +64,10 @@ function NetworkForm({ serviceId, cfg }: { serviceId: string; cfg: Doc }) {
   const bridges = cluster.data?.bridges ?? []
   // EVPN peers default to the nodes' own addresses: the address of each node's management bridge.
   const nodeIPs = [...new Set(bridges.filter((b) => b.management && b.cidr).map((b) => b.cidr!.split("/")[0]))]
-  const publicBridges = [...new Set(bridges.filter((b) => !b.management).map((b) => b.iface))].sort()
+  // A bridge that is the management bridge on any node is refused by name (checkPublicNetworks), whatever it is on
+  // the other nodes.
+  const mgmt = new Set(bridges.filter((b) => b.management).map((b) => b.iface))
+  const publicBridges = [...new Set(bridges.filter((b) => !mgmt.has(b.iface)).map((b) => b.iface))].sort()
 
   const [kind, setKind] = useState<Kind>(storedZone.kind === "vlan" || storedZone.kind === "simple" ? storedZone.kind : "evpn")
   const [zoneId, setZoneId] = useState<string>(stored.defaultZone || "overlay")
@@ -203,7 +206,7 @@ function NetworkForm({ serviceId, cfg }: { serviceId: string; cfg: Doc }) {
             </Select>
             <p className="text-xs text-muted-foreground">
               {cluster.isLoading ? "Reading the bridges…" : publicBridges.length
-                ? "Only bridges that carry no node address and no default gateway: never the management bridge."
+                ? "Only bridges that carry no node address and no default gateway on any node: never a management bridge."
                 : "No bridge without a node address was found, or the bridges could not be read."}
             </p>
           </div>
