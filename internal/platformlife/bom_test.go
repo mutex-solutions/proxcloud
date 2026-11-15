@@ -8,7 +8,6 @@ import (
 	"os"
 	"reflect"
 	"regexp"
-	"slices"
 	"strings"
 	"testing"
 
@@ -50,30 +49,23 @@ func TestCurrentIsValid(t *testing.T) {
 	}
 }
 
-// Our four packages are published, so the BOM pins them: the only pending digests left are the two kamaji charts at
-// 0.0.0+latest, which go with the chart mirror. .github/scripts/bom_verify.py compares the digests with the registry.
-func TestOwnPackagesArePinned(t *testing.T) {
+// The four package versions this repository has published stay pinned by digest. A newer version of one of them may
+// be `pending` in a -dev BOM until its own tag has published it (Validate, mayPend), and the third-party charts that
+// are still pending are not listed here: .github/scripts/bom_verify.py --release refuses every `pending` at a v* tag.
+func TestPublishedPackagesArePinned(t *testing.T) {
 	b := embedded(t)
-	if strings.HasSuffix(b.Images.Clusterctl, "@pending") {
+	if strings.HasSuffix(b.Images.Clusterctl, "/proxcloud-clusterctl:v1.14.4-1@pending") {
 		t.Errorf("images.clusterctl %s is pending", b.Images.Clusterctl)
 	}
-	charts := map[string]Chart{"tenantCharts.kubernetes": b.TenantCharts.Kubernetes, "tenantCharts.database": b.TenantCharts.Database}
+	published := map[string]string{"proxmox-kamaji-cluster": "0.1.11", "database-cluster": "0.5.1", "proxcloud-platform": "0.1.0"}
+	charts := []Chart{b.TenantCharts.Kubernetes, b.TenantCharts.Database}
 	for _, c := range b.Components {
-		charts[c.Cluster+"/"+c.Name] = c.Chart
+		charts = append(charts, c.Chart)
 	}
-	var pending []string
-	for field, c := range charts {
-		switch {
-		case c.Digest != "pending":
-		case strings.HasPrefix(c.Repo, ownRepo):
-			t.Errorf("%s: our own chart %s %s is pending", field, c.Name, c.Version)
-		default:
-			pending = append(pending, c.Name)
+	for _, c := range charts {
+		if c.Digest == "pending" && strings.HasPrefix(c.Repo, ownRepo) && published[c.Name] == c.Version {
+			t.Errorf("our published chart %s %s is pending", c.Name, c.Version)
 		}
-	}
-	slices.Sort(pending)
-	if want := []string{"kamaji", "kamaji-crds"}; !slices.Equal(pending, want) {
-		t.Errorf("pending digests on %v, want only %v", pending, want)
 	}
 }
 
