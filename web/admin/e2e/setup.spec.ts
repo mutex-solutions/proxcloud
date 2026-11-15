@@ -79,3 +79,66 @@ test("Connect of a saved provider shows the live checks", async ({ page }) => {
   await expect(page.getByRole("tab", { name: /2\. Connect \(Needs attention\)/ })).toBeVisible()
   await expect(page.getByRole("link", { name: "Change the connection on the provider page" })).toHaveAttribute("href", "/system/cloud-providers/svc-proxmox-01")
 })
+
+const storedPublic = [{ id: "net-ext-01", name: "Internet", cidr: "203.0.113.0/24", gateway: "203.0.113.1", ranges: ["203.0.113.10-203.0.113.200"] }]
+
+test("Network save sends the whole block and keeps the stored public networks", async ({ page }) => {
+  await page.goto("/setup?tab=network")
+  await expect(page.getByRole("button", { name: "Save network" })).toBeEnabled()
+  await expect(page.getByLabel("Project range (cidrPool)")).toBeDisabled()
+  await recordCalls(page)
+  await page.getByLabel("Networks tenants must not reach").fill("198.51.100.0/24")
+  await page.getByRole("button", { name: "Save network" }).click()
+
+  await expect.poll(() => calls(page, "PUT", "/admin/service/svc-proxmox-01")).toHaveLength(1)
+  const [put] = await calls(page, "PUT", "/admin/service/svc-proxmox-01")
+  const net = put.body.config.network
+  expect(Object.keys(put.body.config)).toEqual(["network"])
+  expect(net.publicNetworks).toEqual(storedPublic)
+  expect(net).toMatchObject({ defaultZone: "overlay", cidrPool: "10.100.0.0/16", isolation: "shared", blockedCidrs: ["198.51.100.0/24"] })
+  expect(net.zones.overlay).toMatchObject({ kind: "evpn", peers: ["10.0.0.1"], exitNodes: ["pve1"] })
+})
+
+test("Network adds a public network on a bridge that is not the management bridge", async ({ page }) => {
+  await page.goto("/setup?tab=network")
+  await expect(page.getByRole("button", { name: "Save network" })).toBeEnabled()
+  await recordCalls(page)
+  await page.getByRole("combobox", { name: "Bridge" }).click()
+  await expect(page.getByRole("option")).toHaveText(["None", "vmbr1"])
+  await page.getByRole("option", { name: "vmbr1" }).click()
+  await page.getByLabel("Range (CIDR)").fill("198.51.100.0/24")
+  await page.getByLabel("Gateway").fill("198.51.100.1")
+  await page.getByRole("button", { name: "Save network" }).click()
+
+  await expect.poll(() => calls(page, "PUT", "/admin/service/svc-proxmox-01")).toHaveLength(1)
+  const [put] = await calls(page, "PUT", "/admin/service/svc-proxmox-01")
+  expect(put.body.config.network.publicNetworks).toEqual([
+    ...storedPublic,
+    { id: "vmbr1", name: "Internet", cidr: "198.51.100.0/24", gateway: "198.51.100.1" },
+  ])
+})
+
+test("Storage saves the confirmed proposals with the default and the backup store", async ({ page }) => {
+  await page.goto("/setup?tab=storage")
+  await expect(page.getByRole("button", { name: "Detect storage" })).toBeVisible()
+  await recordCalls(page)
+  await page.getByRole("button", { name: "Detect storage" }).click()
+  await expect(page.getByLabel("Add profile capacity")).toBeChecked()
+  await expect(page.getByLabel("pvesm set command", { exact: true })).toHaveText("pvesm set local --content iso,vztmpl,backup,import")
+  await page.getByRole("combobox", { name: "Default profile" }).click()
+  await page.getByRole("option", { name: "std" }).click()
+  await page.getByRole("combobox", { name: "Backup store (backup content)" }).click()
+  await page.getByRole("option", { name: "local" }).click()
+  await page.getByRole("button", { name: "Save storage" }).click()
+
+  await expect.poll(() => calls(page, "PUT", "/admin/service/svc-proxmox-01")).toHaveLength(1)
+  const [put] = await calls(page, "PUT", "/admin/service/svc-proxmox-01")
+  expect(put.body.config).toEqual({
+    storageProfiles: {
+      capacity: { storages: { "*": "nas-capacity" }, shared: true, liveMigrate: true, label: "Capacity HDD (NFS)" },
+      std: { storages: { "*": "local-zfs" }, shared: false, snapshots: true, thin: true, liveMigrate: false, replication: false },
+    },
+    defaultStorageProfile: "std",
+    backupStorage: "local",
+  })
+})

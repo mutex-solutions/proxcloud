@@ -134,6 +134,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider with `attachToNewProjects: false`, so no project is attached before Go live. The other steps list their
   checks and link to the provider page until their forms land. Playwright specs against the mock API cover the
   script, the check rows, the pin, the create body and the axe checks; not run against a live API or cluster.
+- **Network and storage steps of the Platform setup page.** A provider's network and storage were raw JSON on the
+  provider page, and a wrong block showed up only as a failed tenant network. Step 3 is a form: zone kind (EVPN, VLAN,
+  simple), zone ID, the project network range (`cidrPool`, default `10.100.0.0/16`, locked once saved because every
+  tenant network is cut from it), EVPN peers and exit nodes from the cluster's nodes, an optional public network that
+  only a bridge without a node address or default gateway can carry, and the networks tenants must not reach. It saves
+  with `PUT /api/v1/admin/service/{id}`, which replaces each top-level config key, so it reads the stored block first
+  and sends it whole: public networks, isolation and other zones are kept. Step 4 detects the storage, shows the
+  proposed profiles to confirm (a saved profile wins over a proposal of the same name), and saves the default
+  profile, the import store and the backup store. Without a store that takes `import` content it shows the one
+  `pvesm set` command; it also lists the three `pvesm add nfs` commands of a NAS (the stores installer stage 05
+  creates) and the prerequisites of a TrueNAS provider, with a link that opens Add provider on TrueNAS
+  (`/system/cloud-providers?add=truenas`). Playwright specs check the saved bodies against the mock API; not run
+  against a live API or cluster.
 
 ### Changed
 

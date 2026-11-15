@@ -39,6 +39,7 @@ import {
   type PVEAuthResult,
   type SetupStep,
 } from "./common"
+import { NetworkStep, StorageStep } from "./NetworkStorage"
 
 const DEFAULT_TOKEN_ID = "proxcloud@pve!platform"
 
@@ -271,8 +272,8 @@ export default function SetupPage() {
               rechecking={status.live.isFetching}
             />
           </TabsContent>
-          <TabsContent value="network"><StatusOnlyStep n={3} title="Network" step={stepOf("network")} serviceId={serviceId} /></TabsContent>
-          <TabsContent value="storage"><StatusOnlyStep n={4} title="Storage" step={stepOf("storage")} serviceId={serviceId} /></TabsContent>
+          <TabsContent value="network"><NetworkStep step={stepOf("network")} serviceId={serviceId} /></TabsContent>
+          <TabsContent value="storage"><StorageStep step={stepOf("storage")} serviceId={serviceId} /></TabsContent>
           <TabsContent value="templates"><StatusOnlyStep n={5} title="OS templates" step={stepOf("templates")} serviceId={serviceId} /></TabsContent>
           <TabsContent value="catalog"><StatusOnlyStep n={6} title="Catalog and pricing" step={stepOf("catalog")} serviceId={serviceId} /></TabsContent>
           <TabsContent value="golive"><StatusOnlyStep n={7} title="Go live" step={stepOf("golive")} serviceId={serviceId} /></TabsContent>

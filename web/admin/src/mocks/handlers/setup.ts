@@ -5,7 +5,7 @@
 import { ApiError } from "@/lib/api"
 import { on } from "../router"
 import { db } from "../db"
-import { setupChecks } from "../fixtures/setup"
+import { detectedStorages, proposedProfiles, setupChecks } from "../fixtures/setup"
 
 type Doc = Record<string, any>
 
@@ -148,4 +148,13 @@ on("GET /admin/setup/proxmox-script", ({ query }) => {
     `pveum user token permissions "$PC_USER" "$PC_TOKEN_NAME"`, "pvenode cert info", ")", "",
   ].join("\n")
   return { data: new Response(script, { headers: { "Content-Type": "text/plain" } }) }
+})
+
+// Storage detection stores config.capabilities and answers it with the proposal (nothing of the proposal is stored).
+on("POST /admin/service/:id/storage/detect", ({ params }) => {
+  const svc = db.services.find((s) => s.id === params.id)
+  if (!svc) throw new ApiError(404, 404, `Service not found: ${params.id}`)
+  const capabilities = { detectedAt: new Date().toISOString(), storages: structuredClone(detectedStorages) }
+  ;(svc.config ??= {}).capabilities = capabilities
+  return { data: { ...capabilities, proposedProfiles: structuredClone(proposedProfiles) } }
 })

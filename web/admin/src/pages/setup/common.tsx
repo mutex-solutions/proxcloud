@@ -187,9 +187,28 @@ export function useSetupStatus(serviceId: string) {
   return { data: live.data ?? db.data, db, live }
 }
 
+// useClusterInfo reads the nodes and bridges of a saved provider: the connection test on its stored connection. The
+// bridges come only for a caller with admin:service:manage; without them the forms take names as text.
+export function useClusterInfo(serviceId: string) {
+  return useQuery({
+    queryKey: ["setup-cluster", serviceId],
+    queryFn: () => apiFetch<PVEAuthResult>(`/admin/service/proxmox/auth?checks=all&externalServiceId=${encodeURIComponent(serviceId)}`, { method: "POST", body: {} }),
+    enabled: !!serviceId,
+    retry: false,
+    staleTime: 60_000,
+  })
+}
+
+// The provider document, read fresh before a save: the update route replaces each top-level config key, so a block is
+// sent whole, built on what is stored now rather than on what the form was opened with.
+export const readProvider = (serviceId: string) => apiFetch<{ name?: string; config?: Record<string, any> }>(`/admin/service/${serviceId}`)
+
 export function useInvalidateSetup() {
   const qc = useQueryClient()
-  return () => void qc.invalidateQueries({ queryKey: ["setup-status"] })
+  return (serviceId?: string) => {
+    void qc.invalidateQueries({ queryKey: ["setup-status"] })
+    if (serviceId) void qc.invalidateQueries({ queryKey: ["admin-get", `/admin/service/${serviceId}`] })
+  }
 }
 
 // fetchText reads a text/plain answer (the setup script); an error answer carries the usual envelope.

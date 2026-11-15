@@ -26,3 +26,14 @@ export const nodeBridges: Doc[] = [
   { node: "pve2", iface: "vmbr0", type: "bridge", cidr: "192.0.2.12/24", management: true },
   { node: "pve2", iface: "vmbr1", type: "bridge", management: false },
 ]
+
+// What storage detection finds (config.capabilities.storages) and proposes. No store takes import content yet.
+export const detectedStorages: Doc = {
+  "local": { type: "dir", content: ["iso", "vztmpl", "backup"], shared: false, nodes: { pve1: { active: true }, pve2: { active: true } } },
+  "local-zfs": { type: "zfspool", content: ["images", "rootdir"], shared: false, snapshots: true, thin: true, replication: true, nodes: { pve1: { active: true }, pve2: { active: true } } },
+  "nas-capacity": { type: "nfs", content: ["images"], shared: true, liveMigrate: true, nodes: { pve1: { active: true }, pve2: { active: true } } },
+}
+export const proposedProfiles: Doc = {
+  std: { storages: { "*": "local-zfs" }, snapshots: true, thin: true, replication: true },
+  capacity: { storages: { "*": "nas-capacity" }, shared: true, liveMigrate: true, label: "Capacity HDD (NFS)" },
+}
