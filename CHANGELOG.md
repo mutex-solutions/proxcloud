@@ -145,17 +145,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in-cluster IPAM provider v1.1.1, the Kamaji control plane v0.22.0 and CAAPH v0.6.4: the versions of
   `installer/playbooks/group_vars/all/versions.yml` (the platform BOM is not on `main` yet), which a test keeps equal.
   Every download is checked against a sha256 in the Dockerfile, and the build resolves every provider with no network.
-  clusterctl and kubectl are built in the image build from the upstream source archives of those two tags (sha256
-  pinned) with Go 1.26.10, the toolchain upstream releases them with, as static binaries with upstream's build tags
-  and version fields; they are not the upstream release binaries. `deploy/clusterctl/patches/` changes only `go.mod`
+  clusterctl and kubectl are built in the image build from the upstream source of those two tags (cluster-api: the
+  GitHub archive of the tag, sha256 computed from the download; Kubernetes: the release's `kubernetes-src.tar.gz`
+  at the sha256 upstream publishes beside it) with Go 1.26.11, as static binaries with upstream's build tags and
+  version fields; they are not the upstream release binaries. Upstream releases both with Go 1.26.10; 1.26.11 is the
+  patch release that fixes CVE-2026-97054 in the standard library (unrated on 2026-11-15, so the gate did not
+  count it). `deploy/clusterctl/patches/` changes only `go.mod`
   and `go.sum`: `golang.org/x/net` v0.62.0 and `golang.org/x/text` v0.43.0 (the version x/net v0.62.0 requires), and
   what module resolution then forces (`x/crypto`, `x/mod`, `x/sync`, `x/sys`, `x/term`, `x/tools`, and the `go`
   directive 1.26.0 in Kubernetes). No Go source is changed. The build runs with `-mod=readonly`, so it fails rather
   than edit `go.mod` or `go.sum`, and every module download is verified against upstream's `go.sum` plus the patch's
   lines; it reads the two module versions back from each binary. The binaries report the upstream versions, the
   tag's commit and commit date, and `gitTreeState: dirty` because `go.mod` and `go.sum` differ from that commit.
-  Why: the Trivy gate refuses the upstream release binaries (CVE-2026-78661 and CVE-2026-78669 in `golang.org/x/net`
-  v0.60.0 and v0.56.0, CVE-2026-56851 in `golang.org/x/text` v0.39.0; kubectl v1.36.6 and v1.37.2 have them too),
+  Why: the Trivy gate refuses the upstream release binaries (clusterctl v1.14.4: CVE-2026-78661 in
+  `golang.org/x/net` v0.60.0; kubectl v1.35.10: CVE-2026-78661 and CVE-2026-78669 in `golang.org/x/net` v0.56.0 and
+  CVE-2026-56851 in `golang.org/x/text` v0.39.0; kubectl v1.36.6 and v1.37.2 have them too),
   and the owner decided to rebuild at the same tags instead of waiting for upstream.
   The entrypoint reads the clusterctl inventory and installs only the missing providers, does nothing when every
   provider is at its wanted version, and refuses, installing nothing, when one is at another version (upgrades are a
@@ -171,9 +175,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the gate's script, finds no HIGH or CRITICAL finding in the image. That is one scan on one day, not a statement about later
   databases. Not verified: the workflow has not run on GitHub, so the build on a hosted runner and the gate there
   are not confirmed; the rebuilt binaries have not been run against any cluster and upstream's test suites were not
-  run against the changed modules; GitHub generates the source archives on request and does not promise stable
-  bytes, so a changed archive fails the build until the sha256 is recomputed. The entrypoint ran against k3s v1.35.10
-  in Docker (empty, partial, equal and different-version inventories, cert-manager down, egress through a dead
+  run against the changed modules or the newer Go patch release; GitHub generates the cluster-api source archive on
+  request and does not promise stable bytes, so a changed archive fails the build until the sha256 is recomputed.
+  The entrypoint ran against k3s v1.35.10 in Docker (empty, partial, equal and different-version inventories, cert-manager down, egress through a dead
   proxy) with the upstream release binaries, before this rebuild, not on a lab seed or workload cluster; the refusal
   of a provider it does not carry ran only against a fake kubectl and clusterctl, under busybox.
 

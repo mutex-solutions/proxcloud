@@ -4,26 +4,30 @@
 #
 # Versions: those of installer/playbooks/group_vars/all/versions.yml (capi, capmox, capi_ipam, capi_kamaji, caaph),
 # kubectl that of pc_defaults.services.k8s_version; deploy/tests/test_clusterctl_image.py keeps them equal. Every
-# download is checked against the sha256 written here (computed from the upstream release assets and source
-# archives, which publish no checksum file). A version change means new checksums, new patches, a new image version
-# below and a new tag.
+# download is checked against the sha256 written here: the one upstream publishes beside kubernetes-src.tar.gz, and
+# for the release assets and the cluster-api source archive, which have no published checksum, one computed from the
+# download. A version change means new checksums, new patches, the new tags' commits, build dates and gitMajor/gitMinor
+# in the two builds, a new image version below and a new tag.
 #
 # clusterctl and kubectl are built here from the upstream source of their release tags, not downloaded: the upstream
 # release binaries carry golang.org/x/net and golang.org/x/text versions with fixed HIGH CVEs, which the Trivy gate
 # refuses. patches/ changes only go.mod and go.sum (x/net, x/text and what they force); no Go source is changed.
 # -mod=readonly makes the build fail instead of editing go.mod or go.sum, so every module download is verified
-# against the go.sum lines of upstream and of the patch. GitHub generates the source archives on request: if their
-# bytes ever change, the build fails on the sha256 and the pin is recomputed from the tag's commit.
+# against the go.sum lines of upstream and of the patch. GitHub generates the cluster-api source archive on request
+# (cluster-api publishes no source asset): if its bytes ever change, the build fails on the sha256 and the pin is
+# recomputed from the tag's commit.
 
-# golang:1.26.10-bookworm, multi-platform index digest. Go 1.26.10 is the toolchain upstream builds both releases
-# with (cluster-api Makefile GO_VERSION, kubernetes .go-version); GOTOOLCHAIN=local keeps go from fetching another.
-FROM golang@sha256:5de7c99eb78ca5e515a4c340235d0955ec5964a5071c492c15503d7c267da473 AS go
+# golang:1.26.11-bookworm, multi-platform index digest. Upstream builds both releases with Go 1.26.10 (cluster-api
+# Makefile GO_VERSION, kubernetes .go-version); 1.26.11 is the patch release that fixes CVE-2026-97054 in the standard
+# library both binaries link. GOTOOLCHAIN=local keeps go from fetching another.
+FROM golang@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0 AS go
 ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOTOOLCHAIN=local GOWORK=off GOFLAGS="-mod=readonly -trimpath" \
-    GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org GONOSUMDB= GONOSUMCHECK= GONOPROXY= GOPRIVATE= GOINSECURE= \
+    GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org GONOSUMDB= GONOPROXY= GOPRIVATE= GOINSECURE= \
     X_NET=v0.62.0 X_TEXT=v0.43.0
 
 # Version fields as upstream's hack/scripts/release/version.sh sets them, with the tag's commit and commit date, except
-# gitTreeState: "dirty", because go.mod and go.sum differ from that commit.
+# gitTreeState: "dirty", because go.mod and go.sum differ from that commit. The archive is `git archive` of that commit
+# (git get-tar-commit-id prints it).
 FROM go AS clusterctl
 ADD --checksum=sha256:0d22b58ffeb5b6bddb9085a1b35c059e2109507e8cfddec7b54b1fad87f49849 \
     https://github.com/kubernetes-sigs/cluster-api/archive/refs/tags/v1.14.4.tar.gz /src/cluster-api.tar.gz
@@ -40,13 +44,14 @@ RUN set -eu; mkdir /src/cluster-api; cd /src/cluster-api; \
 
 # Only ./cmd/kubectl, from the root module: its replace directives resolve k8s.io/* to staging/ without the workspace,
 # and -mod=readonly ignores vendor/ (which holds the unpatched modules). Tags and version fields as upstream's
-# hack/lib/golang.sh and hack/lib/version.sh set them for a release binary, gitTreeState as above.
+# hack/lib/golang.sh and hack/lib/version.sh set them for a release binary, gitTreeState as above. The source is the
+# release's own kubernetes-src.tar.gz (no top-level directory), at the sha256 upstream publishes beside it.
 FROM go AS kubectl
-ADD --checksum=sha256:e58917e90074bf61fa5b5e2a2bd5555880f856367abe60f32a4fe01b6ac43ebd \
-    https://github.com/kubernetes/kubernetes/archive/refs/tags/v1.35.10.tar.gz /src/kubernetes.tar.gz
+ADD --checksum=sha256:3049a97c6be1aed0cefe5db304d6a6ff1a440c95bcd031a7a9b6976049f40730 \
+    https://dl.k8s.io/v1.35.10/kubernetes-src.tar.gz /src/kubernetes.tar.gz
 COPY patches/kubernetes-v1.35.10.patch /src/
 RUN set -eu; mkdir /src/kubernetes; cd /src/kubernetes; \
-    tar -xzf ../kubernetes.tar.gz --strip-components=1; git apply ../kubernetes-v1.35.10.patch; \
+    tar -xzf ../kubernetes.tar.gz; git apply ../kubernetes-v1.35.10.patch; \
     x=""; for v in k8s.io/client-go/pkg/version k8s.io/component-base/version; do \
       x="$x -X $v.gitVersion=v1.35.10 -X $v.gitMajor=1 -X $v.gitMinor=35 -X $v.gitTreeState=dirty \
         -X $v.gitCommit=ae6fece6fea92ecfcccd13af7d5f2ea8cb9b33fe -X $v.buildDate=2026-10-27T12:02:52Z"; \

@@ -191,19 +191,20 @@ class PinTests(unittest.TestCase):
         # that go into the binaries are the ones of upstream's go.sum plus the lines of the reviewed patch.
         env = DOCKERFILE.split("\nENV CGO_ENABLED=0 ", 1)[1].split("\n\n", 1)[0].replace("\\\n", " ").split()
         for item in ("GOTOOLCHAIN=local", "GOWORK=off", 'GOFLAGS="-mod=readonly', '-trimpath"', "GONOSUMDB=",
-                     "GONOSUMCHECK=", "GOPRIVATE=", "GOINSECURE=", "GOPROXY=https://proxy.golang.org"):
+                     "GONOPROXY=", "GOPRIVATE=", "GOINSECURE=", "GOPROXY=https://proxy.golang.org",
+                     "GOSUMDB=sum.golang.org"):
             self.assertIn(item, env)
         for item in ("go get", "go mod", "-mod=mod", "-mod=vendor", "GOFLAGS=-", "apk add", "apt-get"):
             self.assertNotIn(item, DOCKERFILE)
         wanted = dict(re.findall(r"\b(X_NET|X_TEXT)=(v[0-9.]+)", DOCKERFILE))
         self.assertEqual(sorted(wanted), ["X_NET", "X_TEXT"])
-        for name, version in (("cluster-api", VERSIONS["capi"]),
-                              ("kubernetes", "v" + DEFAULTS["services"]["k8s_version"])):
+        # The GitHub archive has one top-level directory, kubernetes-src.tar.gz has none.
+        for name, version, strip in (("cluster-api", VERSIONS["capi"], " --strip-components=1"),
+                                     ("kubernetes", "v" + DEFAULTS["services"]["k8s_version"], "")):
             with self.subTest(name=name):
                 patch = "%s-%s.patch" % (name, version)
                 self.assertIn("\nCOPY patches/%s /src/\n" % patch, DOCKERFILE)
-                self.assertIn("tar -xzf ../%s.tar.gz --strip-components=1; git apply ../%s; \\\n" % (name, patch),
-                              DOCKERFILE)
+                self.assertIn("tar -xzf ../%s.tar.gz%s; git apply ../%s; \\\n" % (name, strip, patch), DOCKERFILE)
                 text = (IMAGE / "patches" / patch).read_text()
                 self.assertEqual(re.findall(r"^(?:---|\+\+\+) (\S+)$", text, flags=re.M),
                                  ["a/go.mod", "b/go.mod", "a/go.sum", "b/go.sum"])
@@ -231,10 +232,12 @@ class PinTests(unittest.TestCase):
         kubectl = "v" + DEFAULTS["services"]["k8s_version"]
         self.assertEqual(downloads["/src/cluster-api.tar.gz"],
                          "https://github.com/kubernetes-sigs/cluster-api/archive/refs/tags/%s.tar.gz" % VERSIONS["capi"])
-        self.assertEqual(downloads["/src/kubernetes.tar.gz"],
-                         "https://github.com/kubernetes/kubernetes/archive/refs/tags/%s.tar.gz" % kubectl)
-        # The binaries report the upstream versions, and the offline build check compares them.
+        self.assertEqual(downloads["/src/kubernetes.tar.gz"], "https://dl.k8s.io/%s/kubernetes-src.tar.gz" % kubectl)
+        # The binaries report the upstream versions, and the offline build check compares them. Commit and build date
+        # are not derivable here: a version change updates them by hand (see the Dockerfile header).
         self.assertEqual(re.findall(r"-X \$v\.gitVersion=(\S+)", DOCKERFILE), [VERSIONS["capi"], kubectl])
+        self.assertEqual(re.findall(r"-X \$v\.gitMajor=(\S+) -X \$v\.gitMinor=(\S+)", DOCKERFILE),
+                         [tuple(version[1:].split(".")[:2]) for version in (VERSIONS["capi"], kubectl)])
         self.assertIn('test "$(clusterctl version -o short)" = %s; ' % VERSIONS["capi"], DOCKERFILE)
         self.assertIn('kubectl version --client | grep -Fx "Client Version: %s"; ' % kubectl, DOCKERFILE)
         repository = sorted(destination.split("/")[5] + "/" + destination.split("/")[6]
