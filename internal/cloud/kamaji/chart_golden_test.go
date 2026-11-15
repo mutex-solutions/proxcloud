@@ -1,10 +1,13 @@
 package kamaji
 
 import (
+	"crypto/sha256"
 	"flag"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -32,16 +35,20 @@ func helmTemplate(t *testing.T, release, namespace, values string) string {
 }
 
 // The chart's whole output for fixed values documents. A chart change that moves a render shows up as a diff of these
-// files to review; `go test ./internal/cloud/kamaji -run TestChartGolden -update` rewrites them. The tenant case is the
-// chart's own defaults, so a change of the portal's values (BuildValues) does not touch it; the kubeadm case is the
-// platform's own cluster (controlPlane.kind kubeadm, kubeadmTestValues).
+// files to review; `go test ./internal/cloud/kamaji -run TestChartGolden -update` rewrites them. The tenant cases are
+// the chart's own defaults, alone and with the two tenant templates the defaults leave out (the services-side CSI
+// controller, the Gateway API carriers of Gateway Fabric), so a change of the portal's values (BuildValues) does not
+// touch them; the kubeadm case is the platform's own cluster (controlPlane.kind kubeadm, kubeadmTestValues).
 func TestChartGolden(t *testing.T) {
 	for _, c := range []struct{ name, release, namespace, values string }{
 		{"tenant", "pc-c-abcd1234", "pc-p1", "{}\n"},
+		{"tenant-csi-gateway", "pc-c-abcd1234", "pc-p1", "proxmox:\n  csi:\n    gateway:\n      secretName: " +
+			CSIGatewaySecretName("pc-c-abcd1234") + "\n      kubeconfigSecretName: " + AdminKubeconfigSecretName("pc-c-abcd1234") + "\n"},
+		{"tenant-gateway-fabric", "pc-c-abcd1234", "pc-p1", "addons:\n  nginxGatewayFabric: {enabled: true}\n"},
 		{"kubeadm", "pc-platform", "pc-platform", kubeadmTestValues},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			got := helmTemplate(t, c.release, c.namespace, c.values)
+			got := elideGatewayAPIFiles(t, helmTemplate(t, c.release, c.namespace, c.values))
 			golden := filepath.Join("testdata", "chart-"+c.name+".golden.yaml")
 			if *updateGolden {
 				if err := os.MkdirAll("testdata", 0o755); err != nil {
@@ -60,4 +67,24 @@ func TestChartGolden(t *testing.T) {
 			}
 		})
 	}
+}
+
+// elideGatewayAPIFiles puts a digest line in place of each pinned upstream Gateway API file the chart embeds verbatim
+// (1.2 MB, reviewed as files of their own), so a golden keeps the template's own bytes and still moves when a file does.
+func elideGatewayAPIFiles(t *testing.T, out string) string {
+	t.Helper()
+	files, err := filepath.Glob("../../../deploy/charts/proxmox-kamaji-cluster/files/gateway-api/v1.6.3/*.yaml")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("gateway-api files: %v", err)
+	}
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// What `indent 4` and the trimming `{{- end }}` of templates/gateway-api.yaml make of the file.
+		body := strings.TrimRight("    "+strings.ReplaceAll(string(b), "\n", "\n    "), " \n")
+		out = strings.ReplaceAll(out, body, fmt.Sprintf("    # %s sha256:%x", filepath.Base(f), sha256.Sum256(b)))
+	}
+	return out
 }
