@@ -198,10 +198,23 @@ published node template".
 **Why.** The native image is 6 GiB against 20 GiB and carries no kubeadm or kubelet units
 next to k3s's own. The seed holds admin rights over every platform cluster, so it must be
 out of reach of the workload's CSI token, which needs `VM.Config.Disk` on
-`proxcloud-system` and which the providers' service account on the workload can read; a
-pool of its own is that fence. Creating the seed with the portal token would need rights
-for that token on the pool, `VM.GuestAgent.Unrestricted` among them, which would give the
-portal root on the seed.
+`proxcloud-system` and which the providers' service account on the workload can read. A
+pool of its own keeps that token off the seed's VM: it cannot read or change the VM's
+configuration. Creating the seed with the portal token would need rights for that token on
+the pool, `VM.GuestAgent.Unrestricted` among them, which would give the portal root on the
+seed.
+
+**Limit.** The pool fences the seed's VM, not its disk. The disk is a volume on the boot
+store, which is also the store of the `std` StorageClass, and `csi@pve!csi` keeps
+`ProxCloudCSI` on `/storage/<boot>`. That role holds `Datastore.Allocate`, and PVE's
+volume check accepts any volume on a store for a principal with `Datastore.Allocate` there,
+whoever owns the volume; that is how proxmox-csi attaches its `vm-9999-pvc-*` volumes
+(`docs/proxmox-permissions.md`: it "opens every disk on it"). Whoever holds the CSI token
+can therefore attach the seed's disk to a workload VM and read the k3s datastore, the
+server CA key, the secrets-encryption key, the CAPI token and the portal's service-account
+token. The first milestone accepts this ([A8](#a8-risks-accepted-for-the-first-milestone)).
+The fix is a boot store for the seed, and a backup store for its backups
+([A7](#a7-seed-backup-by-a-pve-backup-job)), where `csi@pve` holds nothing.
 
 ### A3. Cluster API providers by a clusterctl Job
 
@@ -289,25 +302,34 @@ together with backup rights on the seed: the CAPI and CSI tokens hold no `Sys.Mo
 the portal token holds nothing on the seed's pool, so the operator runs the command as
 root. etcd snapshots to an object store can follow if a site needs them.
 
-### A8. Mint-grant risk accepted for the first milestone
+### A8. Risks accepted for the first milestone
 
 **Change.** Managed Kubernetes keeps `ProxCloudKubeMint` (`User.Modify Permissions.Modify`)
 for the portal token on `/access/groups`, `/pool`, `/storage`, `/sdn/zones` and `/nodes`.
 The portal token itself has NoAccess on both platform pools, but a stolen portal token can
 grant a role on `/pool` to a principal it can mint a token for, and that grant reaches the
 platform pools for every principal without a row of its own there. The first milestone
-narrows this: the token rows of `capmox@pve!capi` and `csi@pve!csi` are narrowed from
-`/pool` to the platform pools, and `capmox@pve` and `csi@pve` get explicit user rows there
-(in PVE the more specific path wins). The rest is accepted for the first milestone. The lab
-measures which principals a stolen token could still raise, and whether PVE lets it mint a
-token for `root@pam`, and `docs/proxmox-permissions.md` records the result.
+narrows this: the token rows of `capmox@pve!capi` are narrowed from `/pool` to the two
+platform pools, those of `csi@pve!csi` from `/pool` and `/storage` to
+`/pool/proxcloud-system` and `/storage/<boot>`, and `capmox@pve` and `csi@pve` get explicit
+user rows on the platform pools (in PVE the more specific path wins). The rest is accepted
+for the first milestone. The lab measures which principals a stolen token could still
+raise, and whether PVE lets it mint a token for `root@pam`, and
+`docs/proxmox-permissions.md` records the result.
+
+The `csi@pve!csi` row on `/storage/<boot>` keeps `Datastore.Allocate` on the store that
+holds the seed's disk, so the CSI token can reach that disk
+([A2](#a2-seed-vm-from-a-native-template-in-its-own-pool), "Limit"). That is accepted for
+the first milestone too.
 
 **Why.** The structural fix, scoping the mint grant to a parent pool of the tenant pools
 (nested pools in PVE), renames every tenant pool and is a change of its own. Sites whose
 tenant workers run in the shared mode (`kamaji.ClusterDefaults.Shared`) need no mint grant
 at all. `docs/proxmox-permissions.md` already says that a stolen portal token can grant
 itself anything on those paths; this amendment makes the acceptance explicit and bounds it
-to the first milestone.
+to the first milestone. The workload's proxmox-csi needs `Datastore.Allocate` on the store
+of the `std` StorageClass to attach its volumes, and the first milestone has one boot store
+for the platform (design §8.5). A store of the seed's own is a change of its own.
 
 ### A9. Existing installer sites stay observe-only
 
@@ -343,6 +365,8 @@ These owner decisions set the scope; they do not change a decision above.
 - A chart changed upstream behind the same version is caught by CI, not by ArgoCD, until
   the mirror exists.
 - The mint-grant escalation stays open in the first milestone, documented and measured.
+- The CSI token can reach the seed's disk through the shared boot store in the first
+  milestone, documented.
 
 ## Open points for the implementation
 
