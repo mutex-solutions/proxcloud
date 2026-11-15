@@ -846,7 +846,7 @@ func TestPVEDetectResponseShape(t *testing.T) {
 	caps := externalservice.PVECapabilities{DetectedAt: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC), Storages: map[string]pve.StorageCapability{
 		"local-zfs": {Storage: "local-zfs", Type: "zfspool", Content: []string{"images"}, Snapshots: true, Nodes: map[string]pve.StorageNodeState{"pve1": {Active: true}}},
 	}}
-	raw, err := json.Marshal(pveDetectResponse{caps, pve.ProposeProfiles(caps.Storages)})
+	raw, err := json.Marshal(pveDetectResponse{caps, pve.ProposeProfiles(caps.Storages, nil)})
 	if err != nil {
 		t.Fatal(err)
 	}

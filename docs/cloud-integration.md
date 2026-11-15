@@ -331,9 +331,11 @@ active / total / avail. A node outside the storage's `nodes` list is ignored and
   `local-lvm`, `nfs` / `cifs` → `capacity`, one storage per profile (the first
   by name), only storages with `images` content, and an NFS or CIFS store that
   also takes `iso` or `import` is the template store, not a profile. Unlike the
-  installer it skips a storage active on no node and claims a flag only when the
-  storage has it (a zfspool without `sparse` is not thin), so the proposal passes
-  the profile save as it is.
+  installer it skips a storage active on no node, claims a flag only when the
+  storage has it (a zfspool without `sparse` is not thin), and claims no
+  snapshots for a storage whose effective class is `capacity` (an override set
+  with `storage-classes` below wins over the detected class), so the proposal
+  passes the profile save as it is.
 - **Class.** `PUT /api/v1/admin/service/{id}/storage-classes` takes
   `{"<storage>": "performance|standard|capacity|"}`; `""` clears the override. The
   installer's fio result (`suggestedClass`) is only a suggestion and is never

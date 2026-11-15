@@ -128,8 +128,10 @@ var proposedProfile = map[string]struct {
 // first storage by name wins, only storages that take VM disks, and an NFS or CIFS store that also holds ISOs or
 // import files is the template store, not a tenant profile. Two things follow from having the detection: a storage
 // active on no node is left out, and a profile claims a flag only when the storage has it (a thick zfspool is not
-// thin), so what is proposed passes the validation of a storageProfiles save.
-func ProposeProfiles(caps map[string]StorageCapability) map[string]any {
+// thin). classes are the operator's class overrides by storage id (config.storageClasses; an invalid one is ignored):
+// a storage whose effective class is capacity claims no snapshots, so what is proposed passes the validation of a
+// storageProfiles save.
+func ProposeProfiles(caps map[string]StorageCapability, classes map[string]string) map[string]any {
 	ids := make([]string, 0, len(caps))
 	for id := range caps {
 		ids = append(ids, id)
@@ -152,7 +154,11 @@ func ProposeProfiles(caps map[string]StorageCapability) map[string]any {
 		if !active {
 			continue
 		}
-		has := map[string]bool{"shared": c.Shared, "snapshots": c.Snapshots, "thin": c.Thin, "liveMigrate": c.LiveMigrate, "replication": c.Replication}
+		class := c.Class
+		if o := classes[id]; ValidClass(o) {
+			class = o
+		}
+		has := map[string]bool{"shared": c.Shared, "snapshots": c.Snapshots && class != ClassCapacity, "thin": c.Thin, "liveMigrate": c.LiveMigrate, "replication": c.Replication}
 		prof := map[string]any{"storages": map[string]any{"*": id}}
 		for _, f := range p.flags {
 			if has[f] {

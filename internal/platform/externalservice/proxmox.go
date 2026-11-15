@@ -852,6 +852,15 @@ func (e *ExternalService) PVEVolumeProfileFunc() pve.VolumeProfileFunc {
 	}
 }
 
+// PVEProposedProfiles is pve.ProposeProfiles for caps (a fresh detection) under the provider's class overrides.
+func (e *ExternalService) PVEProposedProfiles(caps map[string]pve.StorageCapability) map[string]any {
+	classes := map[string]string{}
+	for id, c := range e.PVEStorageClasses() {
+		classes[id] = c.Class
+	}
+	return pve.ProposeProfiles(caps, classes)
+}
+
 // PVEEffectiveStorageClass is the class a storage is treated as: a valid admin override,
 // else the detected class ("" when the storage was never detected).
 func (e *ExternalService) PVEEffectiveStorageClass(storage string) string {

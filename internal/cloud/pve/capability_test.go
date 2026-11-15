@@ -68,37 +68,44 @@ func TestProposeProfiles(t *testing.T) {
 	}
 	star := func(id string) map[string]any { return map[string]any{"*": id} }
 	tests := []struct {
-		name string
-		caps map[string]StorageCapability
-		want map[string]any
+		name    string
+		caps    map[string]StorageCapability
+		classes map[string]string // config.storageClasses overrides
+		want    map[string]any
 	}{
-		{"standard tier (the installer's STD rows)", detected(std), map[string]any{
+		{"standard tier (the installer's STD rows)", detected(std), nil, map[string]any{
 			// Not thin: these rows have no sparse flag, and a profile may claim only what the storage has.
 			"std":       map[string]any{"storages": star("local-zfs"), "snapshots": true, "replication": true},
 			"local-lvm": map[string]any{"storages": star("local-lvm"), "snapshots": true, "thin": true},
 			"capacity":  map[string]any{"storages": star("nas-capacity"), "shared": true, "liveMigrate": true, "label": "Capacity HDD (NFS)"},
 		}},
-		{"ceph", detected([]StorageDef{{Storage: "ceph", Type: "rbd", Content: "images"}}), map[string]any{
+		{"ceph", detected([]StorageDef{{Storage: "ceph", Type: "rbd", Content: "images"}}), nil, map[string]any{
 			"ceph": map[string]any{"storages": star("ceph"), "shared": true, "snapshots": true, "thin": true, "liveMigrate": true},
 		}},
-		{"sparse zfs is thin", detected([]StorageDef{{Storage: "tank", Type: "zfspool", Content: "images", Sparse: 1}}), map[string]any{
+		{"sparse zfs is thin", detected([]StorageDef{{Storage: "tank", Type: "zfspool", Content: "images", Sparse: 1}}), nil, map[string]any{
 			"std": map[string]any{"storages": star("tank"), "snapshots": true, "thin": true, "replication": true},
 		}},
-		{"first storage by name wins a slug", detected([]StorageDef{{Storage: "zfs-b", Type: "zfspool", Content: "images"}, {Storage: "zfs-a", Type: "zfspool", Content: "images"}}), map[string]any{
+		{"first storage by name wins a slug", detected([]StorageDef{{Storage: "zfs-b", Type: "zfspool", Content: "images"}, {Storage: "zfs-a", Type: "zfspool", Content: "images"}}), nil, map[string]any{
 			"std": map[string]any{"storages": star("zfs-a"), "snapshots": true, "replication": true},
 		}},
-		{"a storage active nowhere is skipped for the next one", detected([]StorageDef{{Storage: "zfs-a", Type: "zfspool", Content: "images"}, {Storage: "zfs-b", Type: "zfspool", Content: "images"}}, "zfs-a"), map[string]any{
+		{"a storage active nowhere is skipped for the next one", detected([]StorageDef{{Storage: "zfs-a", Type: "zfspool", Content: "images"}, {Storage: "zfs-b", Type: "zfspool", Content: "images"}}, "zfs-a"), nil, map[string]any{
 			"std": map[string]any{"storages": star("zfs-b"), "snapshots": true, "replication": true},
 		}},
-		{"cifs is capacity, a cifs template store is not", detected([]StorageDef{{Storage: "smb", Type: "cifs", Content: "images"}, {Storage: "smb-iso", Type: "cifs", Content: "images,iso"}}), map[string]any{
+		{"cifs is capacity, a cifs template store is not", detected([]StorageDef{{Storage: "smb", Type: "cifs", Content: "images"}, {Storage: "smb-iso", Type: "cifs", Content: "images,iso"}}), nil, map[string]any{
 			"capacity": map[string]any{"storages": star("smb"), "shared": true, "liveMigrate": true, "label": "Capacity HDD (NFS)"},
 		}},
-		{"no storage takes VM disks", detected([]StorageDef{{Storage: "local", Type: "dir", Content: "iso"}, {Storage: "pbs", Type: "pbs", Content: "backup"}, {Storage: "lvm", Type: "lvm", Content: "images"}}), map[string]any{}},
-		{"nothing detected", nil, map[string]any{}},
+		{"no storage takes VM disks", detected([]StorageDef{{Storage: "local", Type: "dir", Content: "iso"}, {Storage: "pbs", Type: "pbs", Content: "backup"}, {Storage: "lvm", Type: "lvm", Content: "images"}}), nil, map[string]any{}},
+		{"nothing detected", nil, nil, map[string]any{}},
+		// The operator's class wins over the detected one: a capacity store is not sold with snapshots.
+		{"a capacity override drops snapshots", detected([]StorageDef{{Storage: "local-zfs", Type: "zfspool", Content: "images"}, {Storage: "ceph", Type: "rbd", Content: "images"}}),
+			map[string]string{"local-zfs": ClassCapacity, "ceph": "fast"}, map[string]any{
+				"std":  map[string]any{"storages": star("local-zfs"), "replication": true},
+				"ceph": map[string]any{"storages": star("ceph"), "shared": true, "snapshots": true, "thin": true, "liveMigrate": true},
+			}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := ProposeProfiles(tt.caps); !reflect.DeepEqual(got, tt.want) {
+			if got := ProposeProfiles(tt.caps, tt.classes); !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("got %v\nwant %v", got, tt.want)
 			}
 		})

@@ -128,12 +128,25 @@ func TestProposedProfilesPassValidation(t *testing.T) {
 		"nas-capacity": {Storage: "nas-capacity", Type: "nfs", Content: []string{"images"}, Shared: true, Thin: true, LiveMigrate: true, Class: pve.ClassCapacity, Nodes: on},
 		"ceph":         {Storage: "ceph", Type: "rbd", Content: []string{"images"}, Shared: true, Snapshots: true, Thin: true, LiveMigrate: true, Tier: pve.TierFull, Class: pve.ClassPerformance, Nodes: on},
 	}
-	proposed := pve.ProposeProfiles(caps)
-	if len(proposed) != 4 {
-		t.Fatalf("proposed: %v", proposed)
+	tests := []struct {
+		name    string
+		classes map[string]any // config.storageClasses
+	}{
+		{"detected classes", nil},
+		// An operator who marks a snapshot-capable store capacity class gets a proposal without snapshots.
+		{"capacity overrides", map[string]any{"local-zfs": map[string]any{"class": "capacity"}, "ceph": map[string]any{"class": "capacity"}, "local-lvm": map[string]any{"class": "capacity"}}},
+		{"an invalid override is ignored", map[string]any{"local-zfs": map[string]any{"class": "fast"}}},
 	}
-	if err := ValidatePVEStorageProfiles(proposed, caps, nil); err != nil {
-		t.Fatal(err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proposed := (&ExternalService{Config: map[string]any{"storageClasses": tt.classes}}).PVEProposedProfiles(caps)
+			if len(proposed) != 4 {
+				t.Fatalf("proposed: %v", proposed)
+			}
+			if err := ValidatePVEStorageProfiles(proposed, caps, tt.classes); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

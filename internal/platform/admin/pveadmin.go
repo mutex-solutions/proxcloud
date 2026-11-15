@@ -696,7 +696,7 @@ func (h *Handler) proxmoxMigrateServer(w http.ResponseWriter, r *http.Request) {
 
 // proxmoxDetectStorage is the admin "Re-detect capabilities" action: detect every cluster
 // storage now and persist config.capabilities. The answer is what was stored plus proposedProfiles,
-// the storage profiles pve.ProposeProfiles suggests for those storages; nothing of the proposal is
+// the storage profiles pve.ProposeProfiles suggests for those storages under the provider's class overrides; nothing of the proposal is
 // stored, the operator saves the profiles they confirm.
 func (h *Handler) proxmoxDetectStorage(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, externalServiceManagePerm) {
@@ -720,7 +720,7 @@ func (h *Handler) proxmoxDetectStorage(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, "Storage detection failed: "+err.Error()))
 		return
 	}
-	httpx.OK(w, pveDetectResponse{caps, pve.ProposeProfiles(caps.Storages)})
+	httpx.OK(w, pveDetectResponse{caps, es.PVEProposedProfiles(caps.Storages)})
 }
 
 // pveDetectResponse is the detect answer: config.capabilities as stored (detectedAt, storages: the installer reads
