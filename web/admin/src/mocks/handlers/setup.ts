@@ -18,6 +18,9 @@ const RANK: Record<string, number> = { done: 0, unknown: 1, attention: 2, todo: 
 const ROLLUP = ["done", "unknown", "attention", "todo"]
 const CHECK_STATE: Record<string, string> = { ok: "done", warn: "attention", fail: "todo" }
 
+// PROXCLOUD_SELF_API_BASE_URL of the mock install.
+const MOCK_API_BASE = "https://api.helium.example.com"
+
 const item = (id: string, ok: boolean, done: string, todo: string) => ({ id, state: ok ? "done" : "todo", message: ok ? done : todo })
 function step(id: string, done: string, items: Doc[]) {
   let worst = 0
@@ -95,7 +98,7 @@ on("GET /admin/setup/status", ({ query }) => {
     const blocked = (id: string) => ({ id, state: "blocked", summary: "Needs a saved Proxmox provider", items: [] })
     return {
       data: {
-        serviceId: "", live: false,
+        serviceId: "", live: false, seedUrl: MOCK_API_BASE,
         steps: [{ id: "connect", state: "todo", summary: "No Proxmox provider is saved", items: [] }, blocked("network"), blocked("storage"), blocked("templates"), catalogStep(), blocked("golive")],
       },
     }
@@ -106,11 +109,19 @@ on("GET /admin/setup/status", ({ query }) => {
   const profiles = Object.keys(c.storageProfiles ?? {}).sort()
   const detectedAt = c.capabilities?.detectedAt
   const checks = live ? setupChecks.map((ck) => ({ id: ck.id, state: CHECK_STATE[ck.status], message: ck.message })) : []
+  const md = c.metadata ?? {}
+  const seedUrl = String(md.url || MOCK_API_BASE).replace(/\/+$/, "")
+  const seeds = md.forceIso === true
+    ? { id: "seeds", state: "done", message: "Server seeds go on an ISO (config.metadata.forceIso)" }
+    : md.forceIso === false || md.url
+      ? { id: "seeds", state: "done", message: `Servers on a DHCP network fetch their seed from ${seedUrl}; the others get it on an ISO` }
+      : { id: "seeds", state: "attention", message: `Servers on a DHCP network fetch their seed from ${seedUrl} unless ISO seeds are on (config.metadata.forceIso): tenant servers must reach it and trust its certificate, or they boot without their hostname, password and guest agent. Choose how servers get their seed` }
   const steps = [
     step("connect", `Provider ${p.name} is saved`, [{ id: "provider", state: "done", message: `Provider ${p.name} is saved` }, ...checks]),
     step("network", `Project networks use zone ${n.defaultZone} and ${n.cidrPool}`, [
       item("cidrPool", !!n.cidrPool, `Project networks are cut from ${n.cidrPool}`, "No address pool for project networks (config.network.cidrPool): creating a network fails"),
       item("zone", !!zone, `Default zone ${n.defaultZone} (${zone?.kind})`, "No default zone (config.network.defaultZone and zones): creating a network fails"),
+      seeds,
     ]),
     step("storage", `Storage profiles are saved, default ${c.defaultStorageProfile}`, [
       item("detected", !!detectedAt, `Storage was detected on ${String(detectedAt).slice(0, 10)}`, "Storage was never detected (POST /admin/service/{id}/storage/detect)"),
@@ -120,7 +131,7 @@ on("GET /admin/setup/status", ({ query }) => {
     templatesStep(p, live),
     catalogStep(p),
   ]
-  return { data: { serviceId: p.id, live, steps: [...steps, goLiveStep(p, steps)] } }
+  return { data: { serviceId: p.id, live, seedUrl, steps: [...steps, goLiveStep(p, steps)] } }
 })
 
 // The script the API generates (pve.PlatformSetupScript), shortened: the same inputs and the same refusal.

@@ -1,5 +1,5 @@
-// NetworkStorage.tsx — steps 3 and 4 of the Platform setup page: the provider's config.network as a form, and its
-// storage (detection, the proposed profiles, the default, the import and backup stores, the NAS and TrueNAS items).
+// NetworkStorage.tsx — steps 3 and 4 of the Platform setup page: the provider's config.network as a form with the
+// server seed choice (config.metadata.forceIso), and its storage (detection, the proposed profiles, the default, the import and backup stores, the NAS and TrueNAS items).
 // Both save with PUT /admin/service/{id}, which replaces each top-level config key: the block is read fresh and sent
 // whole, so keys this page does not show (public networks, isolation, other zones, profiles) are kept.
 import { useState } from "react"
@@ -39,8 +39,9 @@ function ProviderGate({ serviceId, q, children }: { serviceId: string; q: Return
 
 type Kind = "simple" | "vlan" | "evpn"
 
-export function NetworkStep({ step, serviceId }: { step?: SetupStep; serviceId: string }) {
+export function NetworkStep({ step, serviceId, seedUrl }: { step?: SetupStep; serviceId: string; seedUrl: string }) {
   const q = useStoredProvider(serviceId)
+  const cfg: Doc = q.data?.config ?? {}
   return (
     <StepCard
       n={3}
@@ -49,7 +50,9 @@ export function NetworkStep({ step, serviceId }: { step?: SetupStep; serviceId: 
       description="The SDN zone tenant networks are created in, the range they are cut from, and what tenants must not reach. Proxmox gets the zone when the first tenant network is created."
     >
       <ProviderGate serviceId={serviceId} q={q}>
-        <NetworkForm key={q.dataUpdatedAt} serviceId={serviceId} cfg={q.data?.config ?? {}} />
+        {/* Each form remounts only when the block it edits changes, so saving one keeps the other's unsaved edits. */}
+        <NetworkForm key={`network-${JSON.stringify(cfg.network ?? {})}`} serviceId={serviceId} cfg={cfg} />
+        <SeedsForm key={`seeds-${JSON.stringify(cfg.metadata ?? {})}`} serviceId={serviceId} cfg={cfg} seedUrl={seedUrl} />
       </ProviderGate>
     </StepCard>
   )
@@ -240,6 +243,56 @@ function NetworkForm({ serviceId, cfg }: { serviceId: string; cfg: Doc }) {
         <Button onClick={() => save.mutate()} disabled={!ready || save.isPending}>{save.isPending ? "Saving…" : "Save network"}</Button>
       </div>
     </div>
+  )
+}
+
+// How a server on a DHCP network gets its NoCloud seed (docs/cloud-integration.md "Server seeds"): fetched from the
+// API URL, or on an ISO in the cloud-init slot. Only the operator knows whether tenant servers reach that URL and trust
+// its certificate, so the page asks. Saved as config.metadata.forceIso, the other metadata keys read fresh and kept.
+type SeedMode = "url" | "iso"
+
+function SeedsForm({ serviceId, cfg, seedUrl }: { serviceId: string; cfg: Doc; seedUrl: string }) {
+  const invalidate = useInvalidateSetup()
+  const md: Doc = cfg.metadata ?? {}
+  const stored: SeedMode | "" = md.forceIso === true ? "iso" : md.forceIso === false || md.url ? "url" : ""
+  const [mode, setMode] = useState<SeedMode | "">(stored)
+  // seedUrl "" = no API base URL and no config.metadata.url: every seed goes on an ISO, so a URL choice cannot hold.
+  const ready = mode === "iso" || (mode === "url" && !!seedUrl)
+  const save = useMutation({
+    mutationFn: async () => {
+      const fresh: Doc = (await readProvider(serviceId)).config?.metadata ?? {}
+      return apiFetch(`/admin/service/${serviceId}`, { method: "PUT", body: { config: { metadata: { ...fresh, forceIso: mode === "iso" } } } })
+    },
+    onSuccess: () => {
+      toast.success("Server seeds saved")
+      invalidate(serviceId)
+    },
+    onError: (e) => toast.error(errMsg(e)),
+  })
+  const options: { value: SeedMode; label: string }[] = [
+    { value: "url", label: seedUrl ? `By URL from ${seedUrl} (tenant servers reach it with a trusted certificate)` : "By URL (not available: the API has no base URL and config.metadata.url is not set)" },
+    { value: "iso", label: "On an ISO (LAN installs, self-signed certificates)" },
+  ]
+  return (
+    <fieldset className="grid gap-3 rounded-lg border p-3" aria-describedby="seeds-help">
+      <legend className="px-1 text-sm font-medium">Server seeds</legend>
+      <p id="seeds-help" className="text-sm text-muted-foreground">
+        How a server on a DHCP network gets its hostname, password and SSH keys. A server that cannot fetch its seed
+        boots with the template&apos;s hostname, no password and no guest agent, and nothing reports it. Servers on a
+        network without DHCP always get an ISO.{" "}
+        {stored === "iso" ? "Saved: on an ISO." : stored === "url" ? (seedUrl ? "Saved: by URL." : "Saved: by URL, but no URL is set, so seeds go on an ISO.")
+          : `Not chosen yet: ${seedUrl ? "servers fetch it by URL" : "it goes on an ISO"}.`}
+      </p>
+      {options.map((o) => (
+        <label key={o.value} className="flex items-start gap-2 text-sm">
+          <input type="radio" name="seed-mode" value={o.value} checked={mode === o.value} onChange={() => setMode(o.value)} disabled={o.value === "url" && !seedUrl} className="mt-0.5 size-4 accent-primary" />
+          <span className="break-words">{o.label}</span>
+        </label>
+      ))}
+      <div className="flex justify-end">
+        <Button onClick={() => save.mutate()} disabled={!ready || save.isPending}>{save.isPending ? "Saving…" : "Save server seeds"}</Button>
+      </div>
+    </fieldset>
   )
 }
 
