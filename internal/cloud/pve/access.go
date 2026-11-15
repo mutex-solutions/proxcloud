@@ -237,12 +237,13 @@ type ManagedACL struct {
 }
 
 // ManagedACLs are the rows ManagedSetupScript writes for the portal token portalTokenID, with boot the store of the
-// platform VMs' disks (and of proxmox-csi's volumes) and iso the node-local store of their bootstrap ISOs. Installer
-// stage 10 writes the same rows in split_acls, without the SeedPool ones and with two for the CSI gateway's token,
-// which has no listener on Compose (a test keeps the two equal).
-func ManagedACLs(portalTokenID, boot, iso string) []ManagedACL {
+// platform VMs' disks (and of proxmox-csi's volumes), iso the node-local store of their bootstrap ISOs and importStorage
+// PlatformSetupScript's (none when ""). Installer stage 10 writes the same rows in split_acls and nas_mint_acls,
+// without the SeedPool ones and with two for the CSI gateway's token, which has no listener on Compose (a test keeps
+// the two equal).
+func ManagedACLs(portalTokenID, boot, iso, importStorage string) []ManagedACL {
 	portal, _, _ := strings.Cut(portalTokenID, "!")
-	return []ManagedACL{
+	acls := []ManagedACL{
 		// The platform's CAPMOX: the platform pools only. The user keeps /pool, /storage and /sdn/zones for the
 		// tenant clusters' tokens the portal mints under it, and its own rows on the platform pools win over any
 		// grant on /pool written for it later (the mint grant below can write one).
@@ -274,6 +275,12 @@ func ManagedACLs(portalTokenID, boot, iso string) []ManagedACL {
 		{"/nodes", KubeMintRole, false, portal, portalTokenID},
 		{"/pool/" + SeedPool, "NoAccess", true, portal, portalTokenID},
 	}
+	if importStorage != "" {
+		// The PVEDatastoreAdmin row there replaces what /storage passes down, and a tenant cluster's ISO or boot store
+		// may be that store: without the mint role the portal could not write the cluster token's row on it.
+		acls = append(acls, ManagedACL{"/storage/" + importStorage, KubeMintRole, false, portal, portalTokenID})
+	}
+	return acls
 }
 
 // CAPIPrivileges is what CAPITokenID must hold, per ACL path, for the platform's CAPMOX and for the job that builds
@@ -300,13 +307,20 @@ func CSIPrivileges(boot string) []PrivCheck {
 }
 
 // KubeMintPrivileges is what the portal token must hold, per ACL path, to mint the tenant clusters' tokens
-// (MintClusterTokens): a token create wants User.Modify, an ACL write Permissions.Modify on its path.
-var KubeMintPrivileges = []PrivCheck{
-	{Path: "/access/groups", Privs: ManagedRoles[2].Privs},
-	{Path: "/pool", Privs: ManagedRoles[2].Privs},
-	{Path: "/storage", Privs: ManagedRoles[2].Privs},
-	{Path: "/sdn/zones", Privs: ManagedRoles[2].Privs},
-	{Path: "/nodes", Privs: ManagedRoles[2].Privs},
+// (MintClusterTokens): a token create wants User.Modify, an ACL write Permissions.Modify on its path. importStorage
+// as for ManagedACLs: its own row shadows /storage, so it is checked apart.
+func KubeMintPrivileges(importStorage string) []PrivCheck {
+	checks := []PrivCheck{
+		{Path: "/access/groups", Privs: ManagedRoles[2].Privs},
+		{Path: "/pool", Privs: ManagedRoles[2].Privs},
+		{Path: "/storage", Privs: ManagedRoles[2].Privs},
+		{Path: "/sdn/zones", Privs: ManagedRoles[2].Privs},
+		{Path: "/nodes", Privs: ManagedRoles[2].Privs},
+	}
+	if importStorage != "" {
+		checks = append(checks, PrivCheck{Path: "/storage/" + importStorage, Privs: ManagedRoles[2].Privs})
+	}
+	return checks
 }
 
 // PlatformRolePrivileges is the privilege list of PlatformRole: everything PlatformPrivileges asks for, once.

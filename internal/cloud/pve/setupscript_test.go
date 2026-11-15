@@ -124,6 +124,28 @@ func TestPlatformSetupScriptOptions(t *testing.T) {
 	}
 }
 
+// With managed services the import store keeps the mint role: its PVEDatastoreAdmin row replaces what /storage passes
+// down, and a tenant cluster's ISO or boot store may be that store (stage 10 repeats it in nas_mint_acls).
+func TestManagedSetupScriptImportStorage(t *testing.T) {
+	base, err := ManagedSetupScript(DefaultPlatformTokenID, true, "", "local-lvm", "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ManagedSetupScript(DefaultPlatformTokenID, true, "local", "local-lvm", "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var added []string
+	for _, l := range strings.Split(got, "\n") {
+		if !slices.Contains(strings.Split(base, "\n"), l) {
+			added = append(added, l)
+		}
+	}
+	if want := []string{"grant '/storage/local' 'PVEDatastoreAdmin' 0", "grant '/storage/local' 'ProxCloudKubeMint' 0"}; !slices.Equal(added, want) {
+		t.Errorf("importStorage added %q, want %q", added, want)
+	}
+}
+
 // A root shell runs the answer: nothing but a plain id gets into it.
 func TestPlatformSetupScriptRejectsInjection(t *testing.T) {
 	for _, tokenID := range []string{
@@ -212,8 +234,8 @@ func TestPlatformIdentityMatchesInstaller(t *testing.T) {
 }
 
 // The managed-services rows and roles are stage 10's split mode: the same roles once {{ vm_config }} is expanded, and
-// the same rows once its Jinja paths are expanded and the CSI gateway's token (no listener on Compose) is left out.
-// The proxcloud-seed rows are the one difference.
+// the same rows (split_acls, then nas_mint_acls for the import store) once its Jinja paths are expanded and the CSI
+// gateway's token (no listener on Compose) is left out. The proxcloud-seed rows are the one difference.
 func TestManagedIdentityMatchesInstaller(t *testing.T) {
 	raw, err := os.ReadFile("../../../installer/playbooks/10-pve-identity.yml")
 	if err != nil {
@@ -228,6 +250,7 @@ func TestManagedIdentityMatchesInstaller(t *testing.T) {
 				Path, Role, User, Token string
 				Propagate               int
 			} `yaml:"split_acls"`
+			NASMintACLs string `yaml:"nas_mint_acls"`
 		} `yaml:"vars"`
 	}
 	if err := yaml.Unmarshal(raw, &plays); err != nil || len(plays) != 1 {
@@ -248,7 +271,7 @@ func TestManagedIdentityMatchesInstaller(t *testing.T) {
 		}
 	}
 
-	const boot, iso = "boot-store", "iso-store"
+	const boot, iso, imp = "boot-store", "iso-store", "import-store"
 	jinja := strings.NewReplacer("{{ pc.services.pool }}", SystemPool, "{{ pc.services.storage }}", boot, "{{ pc.services.iso_storage }}", iso)
 	var installer []ManagedACL
 	for _, a := range v.SplitACLs {
@@ -261,8 +284,14 @@ func TestManagedIdentityMatchesInstaller(t *testing.T) {
 		}
 		installer = append(installer, row)
 	}
+	// nas_mint_acls is a Jinja list of one row on the NAS template store, stage 10's import store.
+	mint := regexp.MustCompile(`^\{\{ \[\{'path': '/storage/' ~ pc\.nas\.names\.templates, 'role': '(\w+)', 'propagate': ([01]), 'user': '([^']*)', 'token': '([^']*)'\}\] if nas_acls \| length > 0 else \[\] \}\}$`).FindStringSubmatch(v.NASMintACLs)
+	if mint == nil {
+		t.Fatalf("stage 10 nas_mint_acls is not one row on the import store: %q", v.NASMintACLs)
+	}
+	installer = append(installer, ManagedACL{"/storage/" + imp, mint[1], mint[2] == "1", mint[3], mint[4]})
 	var portal, seed []ManagedACL
-	for _, a := range ManagedACLs(DefaultPlatformTokenID, boot, iso) {
+	for _, a := range ManagedACLs(DefaultPlatformTokenID, boot, iso, imp) {
 		if a.Path == "/pool/"+SeedPool {
 			seed = append(seed, a)
 		} else {
@@ -270,7 +299,7 @@ func TestManagedIdentityMatchesInstaller(t *testing.T) {
 		}
 	}
 	if !slices.Equal(installer, portal) {
-		t.Errorf("managed-services rows differ from stage 10's split_acls:\ninstaller %+v\nportal    %+v", installer, portal)
+		t.Errorf("managed-services rows differ from stage 10's split_acls and nas_mint_acls:\ninstaller %+v\nportal    %+v", installer, portal)
 	}
 	wantSeed := []ManagedACL{
 		{"/pool/" + SeedPool, roleCAPI, true, capiUser, CAPITokenID},

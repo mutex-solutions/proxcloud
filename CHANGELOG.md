@@ -19,7 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pools instead of `/pool`, `csi@pve!csi` gets `ProxCloudCSI` on `proxcloud-system` and the boot store instead of
   `/pool` and `/storage`, both users get rows of their own on the platform pools (so a `/pool` grant written later
   for them does not reach the platform VMs), and the portal token and every `csi@pve` token get `NoAccess` on
-  `proxcloud-seed`. The rows (`pve.ManagedACLs`), the privilege tables the portal will check each token against
+  `proxcloud-seed`. With `importStorage` the portal also gets `ProxCloudKubeMint` on that store, as stage 10's
+  `nas_mint_acls`: its `PVEDatastoreAdmin` row there replaces what `/storage` passes down, and on a site without a NAS
+  the import store is `local`, the ISO store of tenant clusters, so without it every cluster create would fail on the
+  ACL its token gets there. The rows (`pve.ManagedACLs`), the privilege tables the portal will check each token against
   (`pve.CAPIPrivileges`, `pve.CSIPrivileges`, `pve.KubeMintPrivileges`) and a check that the CAPI token sees exactly
   one ISO store (`(*pve.Client).ISOVisibilityProblem`, asked of PVE per store as stage 10 does) live next to
   `pve.PlatformACLs`. Tests keep the generated block equal to `docs/proxmox-permissions.md`, the rows and roles equal

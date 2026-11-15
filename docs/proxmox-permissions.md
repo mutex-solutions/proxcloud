@@ -369,10 +369,11 @@ The rows are `pve.ManagedACLs` (`internal/cloud/pve/access.go`). Installer stage
 | `csi@pve` (user) | `/pool/proxcloud-system`; `/pool/proxcloud-seed` | `ProxCloudCSI`; `NoAccess` | The first as for `capmox@pve`; the second caps every `csi@pve` token off the seed, the CSI gateway's included. |
 | `proxcloud@pve!platform` (user and token) | `/pool/proxcloud-seed` | `NoAccess` | As on `proxcloud-system`. |
 | `proxcloud@pve!platform` (user and token) | `/access/groups`, `/pool`, `/storage`, `/sdn/zones` (propagate), `/nodes` (no propagate) | `ProxCloudKubeMint` | Mint and grant the tenant clusters' tokens ([Managed Kubernetes](#managed-kubernetes)), with `ProxCloudPlatform` repeated on `/sdn/zones`. |
+| `proxcloud@pve!platform` (user and token) | `/storage/<importStorage>` (no propagate), only with `importStorage` | `ProxCloudKubeMint` | The `PVEDatastoreAdmin` row there replaces what `/storage` passes down, and a tenant cluster's ISO or boot store may be that store (`local` on a site without a NAS): without it PVE refuses the cluster token's row there and the cluster create fails. Stage 10 writes the same row (`nas_mint_acls`). |
 
 The other rows (`/`, `/nodes`, `/pool/pc-templates`, `/sdn/zones`, the two `/storage` rows of `capmox@pve!capi`, and `/pool` and `/storage` for both users) are those of [ProxCloudCAPI](#proxcloudcapi) and [ProxCloudCSI](#proxcloudcsi).
 
-The portal checks a site against the same tables (`internal/cloud/pve/access.go`), each with a client on that token: `MissingPrivileges` with `CAPIPrivileges`, `CSIPrivileges` and `KubeMintPrivileges`; `ISOVisibilityProblem`, which asks PVE per `iso` store whether the CAPI token sees it and wants exactly `isoStorage` (CAPMOX puts each bootstrap ISO on the first `iso` store its token sees, as stage 10 checks for the services cluster); and `CheckBootISOGrant` for `capmox@pve`. The Managed services page that runs them comes later.
+The portal checks a site against the same tables (`internal/cloud/pve/access.go`), each with a client on that token: `MissingPrivileges` with `CAPIPrivileges`, `CSIPrivileges` and `KubeMintPrivileges` (which checks the import store apart); `ISOVisibilityProblem`, which asks PVE per `iso` store whether the CAPI token sees it and wants exactly `isoStorage` (CAPMOX puts each bootstrap ISO on the first `iso` store its token sees, as stage 10 checks for the services cluster); and `CheckBootISOGrant` for `capmox@pve`. The Managed services page that runs them comes later.
 
 ### An existing site
 

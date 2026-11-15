@@ -150,8 +150,9 @@ token and ACLs. Query: `tokenId` (default `proxcloud@pve!platform`), `gpu`
 `PVEDatastoreAdmin` on that store). `managedServices=true` adds the identities
 of managed services: the CAPI and CSI users and tokens, pool `proxcloud-seed`,
 their roles and ACLs, with `bootStorage` (required) and `isoStorage` (default
-`local`); either store without `managedServices=true` is a `400`. A value that
-is not a plain id is a `400`. The script and what it does are in
+`local`), and with `importStorage` the mint role on that store too; either store
+without `managedServices=true` is a `400`. A value that is not a plain id is a
+`400`. The script and what it does are in
 [proxmox-permissions.md](proxmox-permissions.md#portal-token-script) and
 [Managed services](proxmox-permissions.md#managed-services).
 

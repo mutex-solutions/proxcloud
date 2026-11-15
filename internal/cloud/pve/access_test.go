@@ -151,9 +151,10 @@ func TestDeleteAPITokenUnresolvableHost(t *testing.T) {
 
 // What the managed-services rows give each token, worked out as PVE does (effectiveRoles: the most specific level
 // wins, a privilege-separated token holds its user's rights intersected with its own): the privilege tables hold, and
-// the fences do. Lab check L1 asks PVE the same.
+// the fences do. Lab check L1 asks PVE the same. The import store is the ISO store, as on a Compose site without a NAS
+// (docs/quickstart.md): a tenant cluster's ISO row lands where the portal's PVEDatastoreAdmin row shadows /storage.
 func TestManagedACLsGrantThePrivilegeTables(t *testing.T) {
-	const boot, iso = "local-lvm", "local"
+	const boot, iso, imp = "local-lvm", "local", "local"
 	roles := map[string][]string{ // a role not named here (NoAccess) gives nothing
 		PlatformRole:   PlatformRolePrivileges(),
 		roleTemplate:   {"VM.Audit", "VM.Clone"},
@@ -163,10 +164,11 @@ func TestManagedACLsGrantThePrivilegeTables(t *testing.T) {
 		roles[r.Name] = r.Privs
 	}
 	rows := func(extra ...ManagedACL) []ACLEntry {
-		all := slices.Concat(ManagedACLs(DefaultPlatformTokenID, boot, iso), extra)
+		all := slices.Concat(ManagedACLs(DefaultPlatformTokenID, boot, iso, imp), extra)
 		for _, a := range PlatformACLs {
 			all = append(all, ManagedACL{a.Path, a.Role, a.Propagate, "proxcloud@pve", DefaultPlatformTokenID})
 		}
+		all = append(all, ManagedACL{"/storage/" + imp, roleISOStorage, false, "proxcloud@pve", DefaultPlatformTokenID}) // PlatformSetupScript's
 		var out []ACLEntry
 		for _, a := range all {
 			for _, id := range []string{a.User, a.Token} {
@@ -198,10 +200,13 @@ func TestManagedACLsGrantThePrivilegeTables(t *testing.T) {
 	}
 	// The CSI gateway's rows of an installer site, which the seed's NoAccess on csi@pve must cap too.
 	acls := rows(ManagedACL{"/pool", roleCSI, true, csiUser, "csi@pve!gateway"}, ManagedACL{"/storage", roleCSI, true, csiUser, "csi@pve!gateway"})
+	if !slices.ContainsFunc(KubeMintPrivileges(imp), func(c PrivCheck) bool { return c.Path == "/storage/"+imp }) {
+		t.Errorf("KubeMintPrivileges does not check /storage/%s, where its own row shadows /storage", imp)
+	}
 	for tokenID, checks := range map[string][]PrivCheck{
 		CAPITokenID:            CAPIPrivileges(boot, iso),
 		CSITokenID:             CSIPrivileges(boot),
-		DefaultPlatformTokenID: KubeMintPrivileges,
+		DefaultPlatformTokenID: KubeMintPrivileges(imp),
 	} {
 		for _, chk := range checks {
 			have := effective(acls, tokenID, chk.Path)

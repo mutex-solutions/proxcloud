@@ -31,15 +31,15 @@ func PlatformSetupScript(tokenID string, gpu bool, importStorage string) (string
 }
 
 // ManagedSetupScript is PlatformSetupScript plus what managed services need: ManagedRoles, the pool SeedPool, the
-// users capmox@pve and csi@pve with their tokens capi and csi, ManagedACLs (bootStorage and isoStorage as there), and
-// the effective rights of both tokens on both platform pools. Safe to run again, as PlatformSetupScript.
+// users capmox@pve and csi@pve with their tokens capi and csi, ManagedACLs (the three stores as there), and the
+// effective rights of both tokens on both platform pools. Safe to run again, as PlatformSetupScript.
 func ManagedSetupScript(tokenID string, gpu bool, importStorage, bootStorage, isoStorage string) (string, error) {
 	for _, s := range [][2]string{{"bootStorage", bootStorage}, {"isoStorage", isoStorage}} {
 		if !setupStorageID.MatchString(s[1]) {
 			return "", fmt.Errorf("%s must be a storage id: a letter, then letters, digits, dot, dash and underscore", s[0])
 		}
 	}
-	return setupScript(tokenID, gpu, importStorage, ManagedACLs(tokenID, bootStorage, isoStorage))
+	return setupScript(tokenID, gpu, importStorage, ManagedACLs(tokenID, bootStorage, isoStorage, importStorage))
 }
 
 func setupScript(tokenID string, gpu bool, importStorage string, managed []ManagedACL) (string, error) {
