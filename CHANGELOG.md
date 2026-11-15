@@ -11,20 +11,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The Proxmox identities of managed services in the setup script**
   (`GET /api/v1/admin/setup/proxmox-script?managedServices=true&bootStorage=<store>&isoStorage=<store>`): managed
-  Kubernetes and databases from the console (ADR 0009) run on a seed VM and a workload cluster of their own, driven
-  by two tokens the portal cannot mint for itself. The answer is the portal token script plus a block that creates
-  the roles `ProxCloudCAPI`, `ProxCloudCSI` and `ProxCloudKubeMint`, the new pool `proxcloud-seed` for the seed VM,
-  the users `capmox@pve` and `csi@pve` with the tokens `capi` and `csi`, their ACLs and the portal's mint grant, and
-  ends with what both tokens hold on both platform pools. `capmox@pve!capi` gets `ProxCloudCAPI` on the two platform
-  pools instead of `/pool`, `csi@pve!csi` gets `ProxCloudCSI` on `proxcloud-system` and the boot store instead of
-  `/pool` and `/storage`, both users get rows of their own on the platform pools (so a `/pool` grant written later
-  for them does not reach the platform VMs), and the portal token and every `csi@pve` token get `NoAccess` on
-  `proxcloud-seed`. That fences the seed VM, not its disk: the disk is on the boot store, where `csi@pve!csi` holds
-  `Datastore.Allocate`, which in PVE opens every volume on the store, so the CSI token can attach the seed's disk to
-  a workload VM (documented, measured by lab check L1; a store of its own for the seed is open with the owner). With `importStorage` the portal also gets `ProxCloudKubeMint` on that store, as stage 10's
-  `nas_mint_acls`: its `PVEDatastoreAdmin` row there replaces what `/storage` passes down, and on a site without a NAS
-  the import store is `local`, the ISO store of tenant clusters, so without it every cluster create would fail on the
-  ACL its token gets there. The rows (`pve.ManagedACLs`), the privilege tables the portal will check each token against
+  Kubernetes and databases from the console (ADR 0009) run on a seed VM and a workload cluster of their own, driven by
+  two tokens the portal cannot mint for itself. The answer is the portal token script plus a block that creates the
+  roles `ProxCloudCAPI`, `ProxCloudCSI` and `ProxCloudKubeMint`, the new pool `proxcloud-seed` for the seed VM, the
+  users `capmox@pve` and `csi@pve` with the tokens `capi` and `csi`, their ACLs and the portal's mint grant, and ends
+  with what both tokens hold on both platform pools. `capmox@pve!capi` gets `ProxCloudCAPI` on the two platform pools
+  instead of `/pool`, `csi@pve!csi` gets `ProxCloudCSI` on `proxcloud-system` and the boot store instead of `/pool`
+  and `/storage`, both users get rows of their own on the platform pools (so a `/pool` grant written later for them
+  does not reach the platform VMs), and the portal token and every `csi@pve` token get `NoAccess` on `proxcloud-seed`.
+  That fences the seed VM, not its disk: the disk is on the boot store, where `csi@pve!csi` holds
+  `Datastore.Allocate`, which in PVE opens every volume on the store, so the CSI token can attach the seed's disk to a
+  workload VM (accepted for M1 in ADR 0009, documented, measured by lab check L1; a store of the seed's own is a later
+  change). With `importStorage` the portal also gets `ProxCloudKubeMint` on that store, as stage 10's `nas_mint_acls`:
+  its `PVEDatastoreAdmin` row there replaces what `/storage` passes down, and on a site without a NAS the import store
+  is `local`, the ISO store of tenant clusters, so without it every cluster create would fail on the ACL its token
+  gets there. The rows (`pve.ManagedACLs`), the privilege tables the portal will check each token against
   (`pve.CAPIPrivileges`, `pve.CSIPrivileges`, `pve.KubeMintPrivileges`) and a check that the CAPI token sees exactly
   one ISO store (`(*pve.Client).ISOVisibilityProblem`, asked of PVE per store as stage 10 does) live next to
   `pve.PlatformACLs`. Tests keep the generated block equal to `docs/proxmox-permissions.md`, the rows and roles equal
@@ -34,9 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`Permissions.Modify`, `User.Modify`) at once. Only the privilege tables and the ISO check are inert: nothing calls
   them until the managed-services runner (later PRs). `docs/proxmox-permissions.md` documents the mint-grant risk the
   owner accepted for M1 (on `/pool`), its reach through `/storage` (a stolen portal token can grant itself
-  `Datastore.Allocate` on the boot store and read every disk there, the seed's included; open with the owner) and
-  what lab check L1 measures. The script has not been run on a Proxmox node, and L1 has not
-  run.
+  `Datastore.Allocate` on the boot store and read every disk there, the seed's included; accepted for M1 in ADR 0009)
+  and what lab check L1 measures. The script has not been run on a Proxmox node, and L1 has not run.
 - **Every check of the Proxmox connection test in one answer**
   (`POST /api/v1/admin/service/proxmox/auth?checks=all`): the test stopped at the first failure, so an
   operator fixed the datacenter firewall only to learn about the node firewall, and then about missing

@@ -387,9 +387,11 @@ VM disk on that store, tenant ones included when tenants use it. Whoever holds t
 Secret, which the providers' service account can read, or anyone who takes over the workload) can attach the seed's
 disk to a workload VM, where the token holds `VM.Config.Disk`, and read the seed's k3s datastore with its cluster-admin
 token and the `capmox@pve!capi` secret; or delete the disk while the seed is stopped. The portal token holds
-`Datastore.Allocate` on the boot store too when `importStorage` is that store. Fencing the disks needs a store for the
-seed where no `csi@pve` token holds a role, refused when it is `bootStorage` or `importStorage`; that changes the
-storage the operator gives the platform and is open with the owner. Lab check L1 measures it.
+`Datastore.Allocate` on the boot store too when `importStorage` is that store. M1 accepts this
+([ADR 0009](adr/0009-managed-services-platform-lifecycle.md#a2-seed-vm-from-a-native-template-in-its-own-pool), A2
+"Limit", and A8). The fix is a boot store of the seed's own, and a store for its backups, where no `csi@pve` token
+holds a role (refused when it is `bootStorage` or `importStorage`); M1 gives the platform one boot store, so that is a
+change of its own. Lab check L1 measures it.
 
 ### An existing site
 
@@ -407,8 +409,8 @@ pveum user token permissions csi@pve csi --path /storage/<services.storage>
 
 `ProxCloudKubeMint` gives the portal token `User.Modify` on `/access/groups` and `Permissions.Modify` on `/access/groups`, `/pool`, `/storage`, `/sdn/zones` (all propagated) and `/nodes` (that path only). With `Permissions.Modify` on a path, PVE lets the holder write any role there, with propagate, for any user or token, itself included. A stolen portal token can therefore:
 
-- **on `/pool`:** mint a token for an existing principal and grant it a role on `/pool`, which reaches every pool where that principal has no row of its own. `NoAccess` keeps the portal token off both platform pools, and the user rows above keep `capmox@pve` and `csi@pve` to their roles there. Any other user of the site without a row on the platform pools is not covered. The owner accepted this for M1 on 2026-11-15, documented here and measured on the lab.
-- **on `/storage`:** grant its own user and token `PVEDatastoreAdmin` on `/storage/<bootStorage>`. No pool row stands in the way, because PVE checks a disk against its store alone once the caller holds `Datastore.Allocate` there ([what the seed pool does not fence](#what-the-seed-pool-does-not-fence)). With `VM.Config.Disk` and `VM.GuestAgent.Unrestricted` on the tenant pools it then attaches any disk of that store, the seed's, a workload VM's or another tenant's, to a tenant VM and reads it through the guest agent: the seed's cluster-admin token and the `capmox@pve!capi` secret are on the seed's disk. This reach was found after the owner's decision and is open with the owner; M1 has no row that closes it.
+- **on `/pool`:** mint a token for an existing principal and grant it a role on `/pool`, which reaches every pool where that principal has no row of its own. `NoAccess` keeps the portal token off both platform pools, and the user rows above keep `capmox@pve` and `csi@pve` to their roles there. Any other user of the site without a row on the platform pools is not covered. The owner accepted this for M1 on 2026-11-15 ([ADR 0009](adr/0009-managed-services-platform-lifecycle.md#a8-risks-accepted-for-the-first-milestone), A8), documented here and measured on the lab.
+- **on `/storage`:** grant its own user and token `PVEDatastoreAdmin` on `/storage/<bootStorage>`. No pool row stands in the way, because PVE checks a disk against its store alone once the caller holds `Datastore.Allocate` there ([what the seed pool does not fence](#what-the-seed-pool-does-not-fence)). With `VM.Config.Disk` and `VM.GuestAgent.Unrestricted` on the tenant pools it then attaches any disk of that store, the seed's, a workload VM's or another tenant's, to a tenant VM and reads it through the guest agent: the seed's cluster-admin token and the `capmox@pve!capi` secret are on the seed's disk. A8 accepts it for M1 with the rest of the mint grant (a stolen portal token "can grant itself anything on those paths"), and M1 has no row that closes it.
 - **on `/sdn/zones` and `/nodes`:** the same, for the zones and vnets and for every node.
 
 The structural fix is to grant the mint role on a parent pool of the tenant pools (nested pools), which renames every tenant pool, and to narrow the `/storage` grant to the stores tenant clusters use, with the platform's disks on a store outside them; a site whose Kubernetes provider runs in `sharedWorkers` mode needs no mint grant at all.

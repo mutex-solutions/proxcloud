@@ -24,9 +24,9 @@ on the platform pools fence them against a later `/pool` grant. The remaining re
 mint grant on `/pool` (other users without a row there) is accepted for M1. It also holds
 `Permissions.Modify` on `/storage`, so a stolen portal token can grant itself
 `Datastore.Allocate` on the boot store and read every disk there, the seed's included,
-through a tenant VM; no row closes that in M1, and it is open with the owner, as is a store
-of its own for the seed, which would fence its disk from the CSI token. Lab check L1
-measures each of them. Existing sites keep their broad token rows until removed by hand,
+through a tenant VM; no row closes that in M1. ADR 0009 accepts both reaches for M1 (A2
+"Limit", A8); a store of the seed's own, which would fence its disk from the CSI token, is a
+change of its own. Lab check L1 measures each of them. Existing sites keep their broad token rows until removed by hand,
 because stage 10 only adds rows.
 
 **Views updated:** [C2 containers](c2-containers.md) (trust boundaries: new "Services
