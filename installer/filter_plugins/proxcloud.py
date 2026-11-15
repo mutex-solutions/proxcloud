@@ -305,6 +305,13 @@ def tenant_network_problem(net):
     if kind == "vlan" and not net.get("bridge"):
         return ("network.kind vlan needs network.bridge, the bridge the VLAN zone is on (for a zone made by hand in "
                 "Proxmox, its bridge)")
+    tags = [net.get("vlan_min"), net.get("vlan_max")]
+    if kind == "vlan" and not (
+        all(not isinstance(t, bool) and str(t).strip().isdecimal() and 1 <= int(t) <= 4094 for t in tags)
+        and int(tags[0]) <= int(tags[1])
+    ):
+        return ("network.kind vlan gives tenant networks the VLAN tags network.vlan_min to network.vlan_max: whole "
+                "numbers from 1 to 4094, vlan_min at most vlan_max, not %r to %r" % tuple(tags))
     if net.get("isolation") in ("evpn", "evpn-per-project") and kind not in ("", "evpn", "overlay"):
         return ("network.isolation %s copies every project's zone from the default zone, so network.kind must be evpn, "
                 "not %s" % (net.get("isolation"), kind))

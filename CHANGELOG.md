@@ -201,8 +201,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only as a failed or 503 network create in a tenant's project. A save whose body carries `network` is now a
   `400` naming the field when `cidrPool` is not an IPv4 range of `/24` or larger, `defaultZone` names no
   zone of `zones` (or there are several zones and no `defaultZone`), a zone's `kind` is not `evpn`, `vlan`
-  or `simple`, a zone id is longer than 8 characters, a `vlan` zone has no `bridge`, or `isolation` is
-  `evpn-per-project` with a default zone that is not EVPN. What is only missing is still accepted (no
+  or `simple`, a zone id is longer than 8 characters, a `vlan` zone has no `bridge`, a `vlan` zone's
+  `vlanMin` or `vlanMax` is missing or not a whole number from 1 to 4094 (a VLAN tag), or `vlanMin` is
+  above `vlanMax`, or `isolation` is `evpn-per-project` with a default zone that is not EVPN. What is only missing is still accepted (no
   `cidrPool`, no zone yet, as the console's Add provider form sends it). A save is refused only for a
   problem the block it replaces does not have already: the console's Connection tab sends the stored block
   back with every save, and a block saved before this check may work (a zone that exists in Proxmox is used
@@ -210,8 +211,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a wrong value changed to another wrong value, is still refused. The dev
   seed and the network block installer stage 60 builds from the inventory defaults pass. Installer stage 00
   now refuses, before anything is changed, an inventory the check would refuse at stage 60 after stages 10 to
-  55 had run: `network.kind` not `evpn`, `simple` or `vlan`, `kind: vlan` with the shipped empty `bridge`,
-  `isolation: evpn` with `kind: simple` or `vlan`, a `cidr_pool` that is not IPv4 `/24` or larger (or is
+  55 had run: `network.kind` not `evpn`, `simple` or `vlan`, `kind: vlan` with the shipped empty `bridge`
+  or with a `vlan_min` or `vlan_max` that is not a whole number from 1 to 4094 or a `vlan_min` above
+  `vlan_max`, `isolation: evpn` with `kind: simple` or `vlan`, a `cidr_pool` that is not IPv4 `/24` or larger (or is
   empty), and a `default_zone` that is empty or longer than 8 characters. A site whose VLAN zone was made by
   hand in Proxmox with no bridge in the inventory sets `network.bridge` to that zone's bridge (the portal
   uses an existing zone as it is). Tested with unit tests and the preflight task run on its own against the
