@@ -56,9 +56,11 @@ class APIRuntimeContractTests(unittest.TestCase):
             ("COPY", "pkg ./pkg"),
             # seed.go and the default documents it embeds; .dockerignore drops the rest.
             ("COPY", "deploy/seed ./deploy/seed"),
-            # deploy/embed.go and the platform BOM it embeds.
+            # deploy/embed.go, the platform BOM and the two ArgoCD health files it embeds.
             ("COPY", "deploy/embed.go ./deploy/"),
             ("COPY", "deploy/platform ./deploy/platform"),
+            ("COPY", "deploy/mgmt-cluster/argocd-health.yaml ./deploy/mgmt-cluster/"),
+            ("COPY", "deploy/dbaas-cluster/argocd-health.yaml ./deploy/dbaas-cluster/"),
             ("RUN", 'CGO_ENABLED=0 GOOS=linux go build -trimpath '
              '-ldflags="-s -w" -o /out/proxcloud-api ./cmd/api'),
         ])

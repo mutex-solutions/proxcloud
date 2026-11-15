@@ -4,6 +4,31 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-15: Renderers of the managed-services platform
+
+**What changed:** `internal/platformlife` gained pure renderers (no PVE or Kubernetes call)
+for the in-platform path of ADR 0009 (P3 design §4.2 to §5): the seed's k3s server CA and
+tokens, the NoCloud files of its CD (cloud-init user-data with the CA, k3s pinned by sha256
+from the BOM, a one-shot bootstrap manifest whose 3-hour token can read one Secret, and
+cloud-init turning itself off; meta-data, vendor-data and network config through
+`pve.RenderSeed` and `pve.RenderNetworkConfig`), the workload cluster's
+`proxmox-kamaji-cluster` values in kubeadm mode with the node groups, the seed ArgoCD's
+HelmChart, AppProject `proxcloud-platform`, locked `default`, OCI repository entries and one
+Application per BOM component, the seed's `pc-platform-pve` and the workload's
+`proxmox-csi-plugin` Secrets, and the Kubernetes and Databases provider bodies.
+`deploy/embed.go` also embeds `deploy/{mgmt,dbaas}-cluster/argocd-health.yaml` (the API
+image copies both) so the workload ArgoCD's values carry the tenant health checks that
+installer stage 50 patches into `argocd-cm`. No container, external system, trust boundary
+or flow changes: nothing calls the renderers until the platform job lands, and the
+credentials they place are the ones design §5 already assigns.
+
+**Why:** the job's stages need deterministic, testable objects before they apply anything,
+and the rules that keep secrets out of Applications and user-data, keep the provider bodies
+equal to stage 60's and keep the Applications inside the `proxcloud-platform` chart's
+contract are checked here, in one package, by goldens and tests.
+
+**Views updated:** [C3e managed services](c3-components.md#c3e-managed-services-and-object-storage)
+(`platformlife` node label and table row).
 ## 2026-11-15: Managed-services installations and their credentials in the API
 
 **What changed:** `internal/platformlife` gains the installation record of the managed-services
