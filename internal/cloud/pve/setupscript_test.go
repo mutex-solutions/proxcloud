@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // The script printed in docs/proxmox-permissions.md is what the API generates: an operator reading the page and one
@@ -26,6 +28,32 @@ func TestPlatformSetupScriptMatchesDocs(t *testing.T) {
 	}
 	if got != block {
 		t.Fatalf("docs/proxmox-permissions.md differs from the generated script. Generated:\n%s", got)
+	}
+}
+
+// The managed-services script is the portal token's script with one block before its last checks, and that block is
+// the one printed in docs/proxmox-permissions.md.
+func TestManagedSetupScriptMatchesDocs(t *testing.T) {
+	doc, err := os.ReadFile("../../../docs/proxmox-permissions.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, rest, ok := strings.Cut(string(doc), "<!-- generated: the lines GET /api/v1/admin/setup/proxmox-script?gpu=true&managedServices=true&bootStorage=local-lvm&isoStorage=local adds -->\n```sh\n")
+	block, _, closed := strings.Cut(rest, "```\n")
+	if !ok || !closed {
+		t.Fatal("docs/proxmox-permissions.md has no generated managed-services block")
+	}
+	base, err := PlatformSetupScript(DefaultPlatformTokenID, true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ManagedSetupScript(DefaultPlatformTokenID, true, "", "local-lvm", "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := strings.Index(base, "\n# what the token really holds\n")
+	if want := base[:at] + "\n" + block + base[at:]; got != want {
+		t.Fatalf("the managed-services script is not the portal token's script plus the block of docs/proxmox-permissions.md. Generated:\n%s", got)
 	}
 }
 
@@ -76,8 +104,12 @@ func TestPlatformSetupScriptOptions(t *testing.T) {
 	// The script is pasted into an interactive root shell, where a `!` outside single quotes is history expansion
 	// and a failing `set -e` outside a subshell ends the session. A re-run must not fail on what exists.
 	script := strings.Join(base, "\n")
-	for _, l := range base {
-		if strings.Contains(l, "!") && l != "PC_TOKEN='proxcloud@pve!platform'" {
+	managed, err := ManagedSetupScript(DefaultPlatformTokenID, true, "", "local-lvm", "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range append(base, strings.Split(managed, "\n")...) {
+		if bangOutsideSingleQuotes(l) {
 			t.Errorf("a ! outside single quotes: %s", l)
 		}
 	}
@@ -109,7 +141,33 @@ func TestPlatformSetupScriptRejectsInjection(t *testing.T) {
 		if s, err := PlatformSetupScript(DefaultPlatformTokenID, true, store); err == nil {
 			t.Errorf("import storage %q accepted:\n%s", store, s)
 		}
+		for _, args := range [][3]string{{store, "local-lvm", "local"}, {"", store, "local"}, {"", "local-lvm", store}} {
+			if s, err := ManagedSetupScript(DefaultPlatformTokenID, true, args[0], args[1], args[2]); err == nil {
+				t.Errorf("managed script with storages %q accepted:\n%s", args, s)
+			}
+		}
 	}
+	if s, err := ManagedSetupScript(DefaultPlatformTokenID, true, "", "", "local"); err == nil {
+		t.Errorf("managed script without a boot store accepted:\n%s", s)
+	}
+	if s, err := ManagedSetupScript("proxcloud@pve!platform'; id; '", true, "", "local-lvm", "local"); err == nil {
+		t.Errorf("managed script with a bad token id accepted:\n%s", s)
+	}
+}
+
+// bangOutsideSingleQuotes: an interactive shell expands history on a `!` anywhere but inside single quotes, comments
+// and double quotes included.
+func bangOutsideSingleQuotes(line string) bool {
+	quoted := false
+	for _, r := range line {
+		switch {
+		case r == '\'':
+			quoted = !quoted
+		case r == '!' && !quoted:
+			return true
+		}
+	}
+	return false
 }
 
 // The role and the ACLs the portal knows are the ones the installer writes (stage 10).
@@ -150,5 +208,76 @@ func TestPlatformIdentityMatchesInstaller(t *testing.T) {
 		if !covered {
 			t.Errorf("no ACL gives the token anything on %s", chk.Path)
 		}
+	}
+}
+
+// The managed-services rows and roles are stage 10's split mode: the same roles once {{ vm_config }} is expanded, and
+// the same rows once its Jinja paths are expanded and the CSI gateway's token (no listener on Compose) is left out.
+// The proxcloud-seed rows are the one difference.
+func TestManagedIdentityMatchesInstaller(t *testing.T) {
+	raw, err := os.ReadFile("../../../installer/playbooks/10-pve-identity.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plays []struct {
+		Vars struct {
+			VMConfig   string            `yaml:"vm_config"`
+			Roles      map[string]string `yaml:"roles"`
+			SplitRoles map[string]string `yaml:"split_roles"`
+			SplitACLs  []struct {
+				Path, Role, User, Token string
+				Propagate               int
+			} `yaml:"split_acls"`
+		} `yaml:"vars"`
+	}
+	if err := yaml.Unmarshal(raw, &plays); err != nil || len(plays) != 1 {
+		t.Fatalf("stage 10: %v, %d plays", err, len(plays))
+	}
+	v := plays[0].Vars
+	for _, r := range ManagedRoles {
+		privs, ok := v.Roles[r.Name]
+		if !ok {
+			privs, ok = v.SplitRoles[r.Name]
+		}
+		installer := strings.Fields(strings.ReplaceAll(privs, "{{ vm_config }}", v.VMConfig))
+		portal := slices.Clone(r.Privs)
+		slices.Sort(installer)
+		slices.Sort(portal)
+		if !ok || !slices.Equal(installer, portal) {
+			t.Errorf("%s privileges differ:\ninstaller %q\nportal    %q", r.Name, installer, portal)
+		}
+	}
+
+	const boot, iso = "boot-store", "iso-store"
+	jinja := strings.NewReplacer("{{ pc.services.pool }}", SystemPool, "{{ pc.services.storage }}", boot, "{{ pc.services.iso_storage }}", iso)
+	var installer []ManagedACL
+	for _, a := range v.SplitACLs {
+		if a.Token == "csi@pve!gateway" {
+			continue
+		}
+		row := ManagedACL{Path: jinja.Replace(a.Path), Role: a.Role, Propagate: a.Propagate == 1, User: a.User, Token: a.Token}
+		if strings.Contains(row.Path, "{{") {
+			t.Fatalf("stage 10 row with an unexpanded path: %+v", row)
+		}
+		installer = append(installer, row)
+	}
+	var portal, seed []ManagedACL
+	for _, a := range ManagedACLs(DefaultPlatformTokenID, boot, iso) {
+		if a.Path == "/pool/"+SeedPool {
+			seed = append(seed, a)
+		} else {
+			portal = append(portal, a)
+		}
+	}
+	if !slices.Equal(installer, portal) {
+		t.Errorf("managed-services rows differ from stage 10's split_acls:\ninstaller %+v\nportal    %+v", installer, portal)
+	}
+	wantSeed := []ManagedACL{
+		{"/pool/" + SeedPool, roleCAPI, true, capiUser, CAPITokenID},
+		{"/pool/" + SeedPool, "NoAccess", true, csiUser, ""},
+		{"/pool/" + SeedPool, "NoAccess", true, "proxcloud@pve", DefaultPlatformTokenID},
+	}
+	if !slices.Equal(seed, wantSeed) {
+		t.Errorf("proxcloud-seed rows = %+v, want %+v", seed, wantSeed)
 	}
 }

@@ -48,10 +48,16 @@
     # Unexercised on a lab so far: see "Managed Kubernetes" in docs/proxmox-permissions.md.
     split_roles:
       ProxCloudKubeMint: "User.Modify Permissions.Modify"
+    # The same rows as pve.ManagedACLs (internal/cloud/pve/access.go), which the managed-services script of the console
+    # writes, without its proxcloud-seed rows and with the two of the CSI gateway; a test keeps them equal.
     split_acls:
+      # The services cluster's CAPMOX token reaches its own pool only, never a tenant pool. The user keeps /pool for the
+      # tenant clusters' tokens and holds its own row on the services pool: a more specific row wins, so a grant on
+      # /pool written later for this user (ProxCloudKubeMint can write one) does not reach the services VMs.
       - {path: /, role: ProxCloudCAPI, propagate: 0, user: capmox@pve, token: capmox@pve!capi}
       - {path: /nodes, role: ProxCloudCAPI, propagate: 1, user: capmox@pve, token: capmox@pve!capi}
-      - {path: /pool, role: ProxCloudCAPI, propagate: 1, user: capmox@pve, token: capmox@pve!capi}
+      - {path: /pool, role: ProxCloudCAPI, propagate: 1, user: capmox@pve, token: ""}
+      - {path: "/pool/{{ pc.services.pool }}", role: ProxCloudCAPI, propagate: 1, user: capmox@pve, token: capmox@pve!capi}
       - {path: /pool/pc-templates, role: PVETemplateUser, propagate: 1, user: capmox@pve, token: capmox@pve!capi}
       - {path: /sdn/zones, role: ProxCloudCAPI, propagate: 1, user: capmox@pve, token: capmox@pve!capi}
       # CAPMOX puts a bootstrap ISO (kubeadm join token) on the first iso store its token sees, in no fixed order: the
@@ -60,10 +66,14 @@
       - {path: /storage, role: ProxCloudCAPI, propagate: 1, user: capmox@pve, token: ""}
       - {path: "/storage/{{ pc.services.storage }}", role: ProxCloudCAPI, propagate: 0, user: "", token: capmox@pve!capi}
       - {path: "/storage/{{ pc.services.iso_storage }}", role: PVEDatastoreAdmin, propagate: 0, user: capmox@pve, token: capmox@pve!capi}
-      - {path: /pool, role: ProxCloudCSI, propagate: 1, user: csi@pve, token: csi@pve!csi}
-      - {path: /storage, role: ProxCloudCSI, propagate: 1, user: csi@pve, token: csi@pve!csi}
+      # The services cluster's proxmox-csi: the disks of the services VMs on its one store. The user keeps /pool and
+      # /storage for the CSI gateway's token, with its own row on the services pool as for capmox@pve.
+      - {path: /pool, role: ProxCloudCSI, propagate: 1, user: csi@pve, token: ""}
+      - {path: "/pool/{{ pc.services.pool }}", role: ProxCloudCSI, propagate: 1, user: csi@pve, token: csi@pve!csi}
+      - {path: /storage, role: ProxCloudCSI, propagate: 1, user: csi@pve, token: ""}
+      - {path: "/storage/{{ pc.services.storage }}", role: ProxCloudCSI, propagate: 0, user: "", token: csi@pve!csi}
       # The CSI gateway (portal API) calls PVE for every tenant cluster's proxmox-csi with this one token and checks
-      # ownership itself; the same role and paths as the services cluster's own CSI token.
+      # ownership itself, so it holds ProxCloudCSI on all of /pool and /storage.
       - {path: /pool, role: ProxCloudCSI, propagate: 1, user: csi@pve, token: csi@pve!gateway}
       - {path: /storage, role: ProxCloudCSI, propagate: 1, user: csi@pve, token: csi@pve!gateway}
       - {path: /access/groups, role: ProxCloudKubeMint, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
@@ -93,8 +103,9 @@
       # A user row on csi@pve: its tokens are privilege-separated, so this caps them there (min with the user) to nothing.
       - {path: "/pool/{{ pc.sandbox.pool }}", role: NoAccess, propagate: 1, user: csi@pve, token: ""}
       # The services cluster's own CAPMOX token manages the services cluster only; the sandbox cluster runs through
-      # capmox@pve!{{ pc.sandbox.token }} (above). Through /pool, capmox@pve!capi otherwise inherits ProxCloudCAPI on the
-      # sandbox workers (clone, config, power, migrate on VMs that run tenant code), which it never needs. A token row,
+      # capmox@pve!{{ pc.sandbox.token }} (above). Through /pool, which installs before split_acls narrowed it still
+      # grant, capmox@pve!capi otherwise inherits ProxCloudCAPI on the sandbox workers (clone, config, power, migrate
+      # on VMs that run tenant code), which it never needs. A token row,
       # not a user row: capmox@pve owns the sandbox token, so a user NoAccess here would cap that token to nothing too.
       - {path: "/pool/{{ pc.sandbox.pool }}", role: NoAccess, propagate: 1, user: "", token: capmox@pve!capi}
     # The entry appliance's pool (stage 56): the portal gets what its sync needs there and nothing else (no power, disk,
@@ -114,7 +125,7 @@
     - name: Read what exists
       check_mode: false
       ansible.builtin.uri: {url: "{{ pc_api }}/{{ item }}"}
-      loop: [access/roles, access/users?full=1, pools, access/acl]
+      loop: [access/roles, "access/users?full=1", pools, access/acl]
       register: pc_id
 
     - name: Index what exists

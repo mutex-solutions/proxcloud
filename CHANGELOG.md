@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The Proxmox identities of managed services in the setup script**
+  (`GET /api/v1/admin/setup/proxmox-script?managedServices=true&bootStorage=<store>&isoStorage=<store>`): managed
+  Kubernetes and databases from the console (ADR 0009) run on a seed VM and a workload cluster of their own, driven
+  by two tokens the portal cannot mint for itself. The answer is the portal token script plus a block that creates
+  the roles `ProxCloudCAPI`, `ProxCloudCSI` and `ProxCloudKubeMint`, the new pool `proxcloud-seed` for the seed VM,
+  the users `capmox@pve` and `csi@pve` with the tokens `capi` and `csi`, their ACLs and the portal's mint grant, and
+  ends with what both tokens hold on both platform pools. `capmox@pve!capi` gets `ProxCloudCAPI` on the two platform
+  pools instead of `/pool`, `csi@pve!csi` gets `ProxCloudCSI` on `proxcloud-system` and the boot store instead of
+  `/pool` and `/storage`, both users get rows of their own on the platform pools (so a `/pool` grant written later
+  for them does not reach the platform VMs), and the portal token and every `csi@pve` token get `NoAccess` on
+  `proxcloud-seed`. The rows (`pve.ManagedACLs`), the privilege tables the portal will check each token against
+  (`pve.CAPIPrivileges`, `pve.CSIPrivileges`, `pve.KubeMintPrivileges`) and a check that the CAPI token sees exactly
+  one ISO store (`(*pve.Client).ISOVisibilityProblem`, asked of PVE per store as stage 10 does) live next to
+  `pve.PlatformACLs`. Tests keep the generated block equal to `docs/proxmox-permissions.md`, the rows and roles equal
+  to installer stage 10 (the `proxcloud-seed` rows the only difference, the CSI gateway's rows left out), work out
+  each token's effective rights from the rows, and refuse a storage or token id that is not a plain id. Inert until
+  the managed-services runner exists: no route calls the tables or the ISO check yet, and the platform flag stays off
+  until the lab run. `docs/proxmox-permissions.md` documents the mint-grant risk the owner accepted for M1 and what lab
+  check L1 measures. The script has not been run on a Proxmox node, and L1 has not run.
 - **Every check of the Proxmox connection test in one answer**
   (`POST /api/v1/admin/service/proxmox/auth?checks=all`): the test stopped at the first failure, so an
   operator fixed the datacenter firewall only to learn about the node firewall, and then about missing
@@ -182,6 +201,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Installer stage 10 narrows the services cluster's CAPMOX and CSI tokens** (`split_acls` in
+  `installer/playbooks/10-pve-identity.yml`): `capmox@pve!capi` held `ProxCloudCAPI` on all of `/pool` and
+  `csi@pve!csi` `ProxCloudCSI` on all of `/pool` and `/storage`, although each only works on the services cluster.
+  They now hold `/pool/<services.pool>` (and the CSI token `/storage/<services.storage>`), and both users get a row of
+  their own on the services pool, the same rows as the console's managed-services script. The users keep `/pool` and
+  `/storage` for the tenant clusters' tokens and the CSI gateway. Stage 10 only adds rows, so a site installed before
+  keeps its broad token rows until an operator removes them (`docs/proxmox-permissions.md`, "An existing site"); the
+  added rows grant nothing new there. One loop item of the stage is now quoted so that strict YAML parsers read the
+  file, as a Go test now does. Checked with the tests above and `ansible-playbook --syntax-check`; not run against a
+  cluster.
 - **The smaller template disks are confirmed by one lab build each** (`docs/template-build-disk.md`): a
   native `ubuntu-2604` template at 5 GiB and a Kubernetes 1.37.2 node template at 8 GiB were built on
   the lab and exported through the export workflow; both images are listed in

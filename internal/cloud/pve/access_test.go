@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -145,5 +146,90 @@ func TestDeleteAPITokenUnresolvableHost(t *testing.T) {
 	}
 	if isTokenAbsent(errors.New("pve: DELETE /x: dial tcp: lookup pve: no such host")) {
 		t.Fatal("no such host")
+	}
+}
+
+// What the managed-services rows give each token, worked out as PVE does (effectiveRoles: the most specific level
+// wins, a privilege-separated token holds its user's rights intersected with its own): the privilege tables hold, and
+// the fences do. Lab check L1 asks PVE the same.
+func TestManagedACLsGrantThePrivilegeTables(t *testing.T) {
+	const boot, iso = "local-lvm", "local"
+	roles := map[string][]string{ // a role not named here (NoAccess) gives nothing
+		PlatformRole:   PlatformRolePrivileges(),
+		roleTemplate:   {"VM.Audit", "VM.Clone"},
+		roleISOStorage: {"Datastore.Allocate", "Datastore.AllocateSpace", "Datastore.AllocateTemplate", "Datastore.Audit"},
+	}
+	for _, r := range ManagedRoles {
+		roles[r.Name] = r.Privs
+	}
+	rows := func(extra ...ManagedACL) []ACLEntry {
+		all := slices.Concat(ManagedACLs(DefaultPlatformTokenID, boot, iso), extra)
+		for _, a := range PlatformACLs {
+			all = append(all, ManagedACL{a.Path, a.Role, a.Propagate, "proxcloud@pve", DefaultPlatformTokenID})
+		}
+		var out []ACLEntry
+		for _, a := range all {
+			for _, id := range []string{a.User, a.Token} {
+				if id != "" { // effectiveRoles walks one principal; a token is walked the same way as a user
+					out = append(out, ACLEntry{Path: a.Path, RoleID: a.Role, Type: "user", UGID: id, Propagate: map[bool]int{true: 1}[a.Propagate]})
+				}
+			}
+		}
+		return out
+	}
+	effective := func(acls []ACLEntry, tokenID, path string) map[string]bool {
+		privs := func(id string) map[string]bool {
+			out := map[string]bool{}
+			for _, r := range effectiveRoles(acls, id, nil, path) {
+				for _, p := range roles[r] {
+					out[p] = true
+				}
+			}
+			return out
+		}
+		user, _, _ := strings.Cut(tokenID, "!")
+		u, tok := privs(user), privs(tokenID)
+		for p := range tok {
+			if !u[p] {
+				delete(tok, p)
+			}
+		}
+		return tok
+	}
+	// The CSI gateway's rows of an installer site, which the seed's NoAccess on csi@pve must cap too.
+	acls := rows(ManagedACL{"/pool", roleCSI, true, csiUser, "csi@pve!gateway"}, ManagedACL{"/storage", roleCSI, true, csiUser, "csi@pve!gateway"})
+	for tokenID, checks := range map[string][]PrivCheck{
+		CAPITokenID:            CAPIPrivileges(boot, iso),
+		CSITokenID:             CSIPrivileges(boot),
+		DefaultPlatformTokenID: KubeMintPrivileges,
+	} {
+		for _, chk := range checks {
+			have := effective(acls, tokenID, chk.Path)
+			for _, p := range chk.Privs {
+				if !have[p] {
+					t.Errorf("%s lacks %s on %s", tokenID, p, chk.Path)
+				}
+			}
+		}
+	}
+	// Nothing where a token must hold nothing: the portal on both platform pools, the CSI token on the seed, the
+	// platform tokens on a tenant pool and on another store.
+	for _, c := range []struct{ tokenID, path string }{
+		{DefaultPlatformTokenID, "/pool/" + SystemPool}, {DefaultPlatformTokenID, "/pool/" + SeedPool},
+		{CSITokenID, "/pool/" + SeedPool}, {"csi@pve!gateway", "/pool/" + SeedPool},
+		{CAPITokenID, "/pool/pc-p1"}, {CSITokenID, "/pool/pc-p1"},
+		{CAPITokenID, "/storage/nas-images"}, {CSITokenID, "/storage/nas-images"},
+	} {
+		if have := effective(acls, c.tokenID, c.path); len(have) > 0 {
+			t.Errorf("%s holds %v on %s, want nothing", c.tokenID, slices.Sorted(maps.Keys(have)), c.path)
+		}
+	}
+	// The mint grant can write a /pool row for capmox@pve; the user's own rows on the platform pools still cap what
+	// its tokens hold there.
+	rogue := rows(ManagedACL{"/pool", PlatformRole, true, capiUser, CAPITokenID})
+	for _, pool := range []string{SystemPool, SeedPool} {
+		if have := effective(rogue, CAPITokenID, "/pool/"+pool); have["VM.GuestAgent.Unrestricted"] || have["Permissions.Modify"] || len(have) != len(ManagedRoles[0].Privs) {
+			t.Errorf("after a /pool grant to capmox@pve its token holds %v on /pool/%s", slices.Sorted(maps.Keys(have)), pool)
+		}
 	}
 }
