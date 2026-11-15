@@ -74,11 +74,12 @@ func setupStatusStates(steps []setupStatusStep) map[string]string {
 	return out
 }
 
-// A fresh Compose install shows nothing done: the seeded billing and platform rows are not setup work.
+// A fresh Compose install shows nothing done: the seeded billing and platform rows are not setup work. Seven steps:
+// the six of the wizard and the optional managed step.
 func TestAdminSetupStatus_FreshCompose(t *testing.T) {
 	_, call := setupStatusEnv(t, map[string][]pgdoc.M{})
 	code, steps := call(http.MethodGet, "/admin/setup/status", "")
-	if code != 200 || len(steps) != 6 {
+	if code != 200 || len(steps) != 7 {
 		t.Fatalf("status: %d %+v", code, steps)
 	}
 	for id, state := range setupStatusStates(steps) {
