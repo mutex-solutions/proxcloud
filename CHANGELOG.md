@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The managed-services platform's bill of materials** (`deploy/platform/platform-bom.yaml`,
   `GET /api/v1/admin/platform/bom`): ADR 0009 says every release ships one list of the exact version and digest of
   everything the platform runs, so that the installer and the console's "Enable managed services" build the same
-  thing and an upgrade has one source. The file names release `0.7.0-dev`, Kubernetes 1.35.10 with its published
+  thing and an upgrade has one source. The file names release `0.8.0-dev`, Kubernetes 1.35.10 with its published
   node image, the seed image and k3s v1.35.10+k3s1 (binary and install script by sha256), the Cluster API
   providers, the tenant charts and the 15 seed and workload components with wave, namespace, node group and chart.
   The API embeds it (`deploy/embed.go`; the image copies `deploy/embed.go` and `deploy/platform`, and the docker
