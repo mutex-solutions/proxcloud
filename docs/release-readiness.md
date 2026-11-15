@@ -1,20 +1,24 @@
 # Current support boundaries and first-release readiness
 
-Status snapshot: **2026-11-14**, preparing the stable release `v0.6.0` on top of `v0.5.2`
+Status snapshot: **2026-11-15**, preparing the stable release `v0.7.0` on top of `v0.6.0`
 (tag 2026-11-14). This is an evidence summary, not a release announcement or a production SLA.
 `v0.4.0-rc.1` (tag 2026-11-11) was published as a non-latest prerelease, `v0.4.0` (tag 2026-11-12)
-as the first stable release, `v0.5.0` (tag 2026-11-13) as the second and the patches `v0.5.1` and `v0.5.2` (tags 2026-11-14). Pushing the `v0.6.0` tag
-publishes the stable images, app chart and GitHub Release. `v0.5.1`, `v0.5.2` and `v0.6.0` have no breaking API change against
-`v0.5.0` (`v0.6.0` changes the VM image size contract, see the changelog); `v0.5.0` contains breaking API changes against `v0.4.0`; see the [changelog](../CHANGELOG.md). This source change publishes
-nothing and performs no live acceptance. Check GitHub's Releases/Actions pages before choosing a deployment
+as the first stable release, `v0.5.0` (tag 2026-11-13) as the second, the patches `v0.5.1` and `v0.5.2` and the
+stable `v0.6.0` (tags 2026-11-14), and `v0.7.0-rc.1` (tag 2026-11-15) as a non-latest prerelease. Pushing the `v0.7.0` tag
+publishes the stable images, app chart and GitHub Release. `v0.5.1` to `v0.7.0` have no breaking API change against
+`v0.5.0` (`v0.6.0` changes the VM image size contract; `v0.7.0` stops serving the management port job triggers with
+only the scheduler on and refuses a new problem in a Proxmox provider's network block on save; see the changelog);
+`v0.5.0` contains breaking API changes against `v0.4.0`; see the [changelog](../CHANGELOG.md). This source change publishes
+nothing and performs no live acceptance; the [lab acceptance of Platform setup](#platform-setup-lab-acceptance)
+was run on `v0.7.0-rc.1` before it. Check GitHub's Releases/Actions pages before choosing a deployment
 commit.
 
 ## What is available now
 
 - Source on `main`, public development container images on GHCR, the
-  `v0.4.0-rc.1` prerelease and the stable releases `v0.4.0`, `v0.5.0`, `v0.5.1` and `v0.5.2` (images and app
-  charts `0.4.0-rc.1`, `0.4.0`, `0.5.0`, `0.5.1` and `0.5.2`). The app chart `0.6.0`, appVersion and installer
-  BOM `v0.6.0` name the current stable release; its tag publishes those artifacts.
+  `v0.4.0-rc.1` and `v0.7.0-rc.1` prereleases and the stable releases `v0.4.0`, `v0.5.0`, `v0.5.1`, `v0.5.2` and
+  `v0.6.0` (images and app charts `0.4.0-rc.1`, `0.7.0-rc.1`, `0.4.0`, `0.5.0`, `0.5.1`, `0.5.2` and `0.6.0`). The
+  app chart `0.7.0`, appVersion and installer BOM `v0.7.0` name the current stable release; its tag publishes those artifacts.
   Verify they are pullable before using `images.build: false`; a source pin is not proof that a registry artifact exists.
 - The installer defaults to `images.build: true`, building the API and two
   consoles plus app chart from the checkout. A source/local-registry installation
@@ -46,6 +50,44 @@ See [quickstart](quickstart.md), [installation](install.md),
 
 No environment-specific endpoint, token, node name, build address or runner
 registration belongs in public documentation or release artifacts.
+
+## Platform setup lab acceptance
+
+On 2026-11-15 the Platform setup page (`/setup`) was run end to end on the `v0.7.0-rc.1` tag
+(commit `938a5ce`) against a nested three-node Proxmox VE 9.2 cluster. The portal was a fresh Docker
+Compose install of the tag with TLS mode `internal` and `--template-updates`, all containers healthy.
+It used a new token, its own project network range and its own pool prefix, so the isolation rules of the
+other portal on that cluster were not touched.
+
+| Step | What was checked |
+|---|---|
+| Dashboard | The Platform setup card showed the fresh Compose seed as not done. |
+| 1 Prepare | `GET /api/v1/admin/setup/proxmox-script` returned the script; run as root on one node, it created the token. The role it uses gained no privilege. |
+| 2 Connect | Without a pin the connection failed on TLS and the answer carried the fingerprint the server presented; with that fingerprint pinned every check passed, and the GPU mapping row warned (the cluster has no GPU). The provider was saved with `attachToNewProjects: false`, and the response held no secret. |
+| 3 Network | A simple zone with its own `cidrPool`. |
+| 4 Storage | Detect listed the cluster's stores; the two proposed profiles were saved, with an import store and a backup store. |
+| 5 OS templates | Done at once: the cluster already had three published OS images. No template was imported through the page. |
+| 6 Catalog | An apply without `confirmRates` was refused (`400`). The first apply created the flavors, the price plan (7 rules, USD), the default quota and the region row; a second apply skipped all four. |
+| 7 Go live | The attach policy was turned on, the provider sync was accepted (`202`), and the bulk attach had nothing to attach. Go live then showed only the warning that the job scheduler is off. |
+| Tenant | A user registered in the customer realm and created an organisation and a project. The project stayed disabled until the operator activated its billing profile, then was enabled and bootstrapped (its pool was created on the cluster). A tenant network became active, and a Debian 13 server became active with its address shown in the customer console after a sync. |
+| Pricing | The customer price preview of the server's flavor matched the rate card. The hourly charge job created the open bill, with no item yet (the server was younger than the charged hour). |
+
+**Finding, fixed after the prerelease.** URL seeds cannot work on such an install: the lab VMs could not
+reach the portal host, and TLS mode `internal` is self-signed. The first server booted without its seed
+(the template's hostname, no guest agent). With `config.metadata.forceIso: true` the second server got its
+seed (its own hostname, guest agent up). The setup page had no seed item and no warning, and the
+`proxcloud-up.sh` next steps pointed at Cloud providers. The fixes are in the changelog (`[0.7.0]`, Fixed and
+the server seed choice under Added). They were re-checked on the same install with images built from `main`
+at `9c09945`: the network step's `seeds` item was done ("server seeds go on an ISO"), the setup status
+carried the portal's real seed URL, the Network step showed the Server seeds form with the stored choice,
+and the console showed no errors. Not re-checked: the `proxcloud-up.sh` next steps (the install was not run
+again) and saving the seed choice from the form (`forceIso` was set before the fix).
+
+**Not checked on the lab:** a password or SSH login into a tenant server, a public IP, an hourly bill
+item (it needs the next hour), a template import through the page, the job scheduler turned on, and the
+seed ISO left on the store after a server is deleted (known, see [server seed safety](server-seed-safety.md)).
+This is one run on one lab, not a clean install from released artifacts (gate step 5 below), not an
+installer or Helm install, and not acceptance of `v0.7.0` itself.
 
 ## Intentional safety holds and operational defaults
 
@@ -82,8 +124,8 @@ registration belongs in public documentation or release artifacts.
 The owner decided on 2026-11-12 to release `v0.4.0` as stable, and on 2026-11-13
 that the next release is the stable `v0.5.0`, each with a narrowly scoped core and
 explicitly held features; neither need claim every managed service. Those decisions
-are not evidence of publication or installation. The releases `v0.5.1`, `v0.5.2` and `v0.6.0` (2026-11-14) follow the
-same gate. For every release:
+are not evidence of publication or installation. The releases `v0.5.1`, `v0.5.2` and `v0.6.0` (2026-11-14) and
+`v0.7.0` (2026-11-15) follow the same gate. For every release:
 
 1. Review the exact release commit for the release and its supported core surface
    and explicit experimental/held features. The version is not published until
@@ -102,8 +144,9 @@ same gate. For every release:
    completion or a deployment. Keep the default `images.build: true` meanwhile.
 5. After publication, install the exact released chart/images with
    `images.build: false` on a clean evaluation site (not performed for `v0.4.0`,
-   and not yet performed for `v0.5.0`, `v0.5.1`, `v0.5.2` or `v0.6.0` when this was prepared; a portal-only Docker Compose
-   site is running `v0.5.2` on a homelab, which is not this acceptance). The installer
+   and not yet performed for `v0.5.0` to `v0.7.0` when this was prepared; a portal-only Docker Compose
+   site is running `v0.5.2` on a homelab, and the [Platform setup lab acceptance](#platform-setup-lab-acceptance)
+   used a Docker Compose install of `v0.7.0-rc.1`; neither is this acceptance). The installer
    accepts valid SemVer with **base version >= 0.4.0**, including prereleases; this local guard
    does not prove publication or a stable release. Check login/client/admin,
    provider connection, one basic server create/delete, configuration/secrets and
