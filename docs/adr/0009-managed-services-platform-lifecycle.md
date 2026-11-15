@@ -135,6 +135,8 @@ repository is needed.
    Kubernetes itself are forward-only, as upstream; the preflight and the backups protect
    them.
 
+*Amended: the order of step 3 ([A10](#a10-upgrade-order-is-the-boms-wave-order)).*
+
 ### Compatibility rules
 
 - A **patch** release may change component patch versions only: no CRD storage-version
@@ -171,8 +173,9 @@ a tenant cluster's Kubernetes version or a database's major version.
 
 ## Amendments (2026-11-15)
 
-The owner decided these on 2026-11-14 and 2026-11-15, after the design of the in-platform
-path ("P3: Enable managed services") was checked against the code. Each amendment says
+The owner decided these on 2026-11-14 and 2026-11-15, or they follow from those decisions,
+after the design of the in-platform path ("P3: Enable managed services") was checked
+against the code. Each amendment says
 what changes in the Decision and why. Everything else above stands.
 
 ### A1. Helm values inline
@@ -356,6 +359,23 @@ screen".
 **Why.** On those sites the components were applied with Helm, not as Applications of a
 pinned BOM. Moving them in place needs its own migration and lab test; recording them gives
 status now without that risk.
+
+### A10. Upgrade order is the BOM's wave order
+
+**Change.** Step 3 of the upgrade runs the components in the BOM's wave order, cluster by
+cluster: on the seed its ArgoCD, cert-manager, the Cluster API providers (one component,
+the clusterctl Job of [A3](#a3-cluster-api-providers-by-a-clusterctl-job)), then the
+workload cluster's Kubernetes version (rolling); then the workload cluster's components in
+their waves. Install uses the same order. This replaces "cert-manager, Cluster API core,
+CAPMOX, ArgoCD, the workload cluster's Kubernetes version (rolling), then the operators":
+the seed's ArgoCD moves first.
+
+**Why.** The seed's ArgoCD applies cert-manager and the Cluster API Job
+([A4](#a4-seed-argocd-and-cert-manager)), so install needs it first, and the upgrade runs
+the same wave executor as install (design §1 and §7). Upgrading it first also means every
+later component is synced by the ArgoCD version its BOM was tested with. The BOM's wave
+numbers are then the only place the order is written. The upgrade run itself comes with
+the first release that changes the BOM.
 
 ### Scope of the first milestone
 
