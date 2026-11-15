@@ -1,6 +1,6 @@
 import { NavLink, Outlet, useLocation } from "react-router-dom"
 import {
-  Banknote, Blocks, BookOpen, Building2, Check, CheckSquare, Cloud, CreditCard, FileClock, FileText,
+  Banknote, Blocks, BookOpen, Boxes, Building2, Check, CheckSquare, Cloud, CreditCard, FileClock, FileText,
   FolderKanban, Gauge, KeyRound, LayoutDashboard, ListChecks, LogOut, Mail, Menu as MenuIcon,
   Monitor, Moon, PackageCheck, Percent, PiggyBank, Receipt, Search as SearchIcon, Server, Settings2, Shield, Sun, Tag, Users, Wallet,
 } from "lucide-react"
@@ -19,6 +19,7 @@ import {
   SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuButton, SidebarMenuItem,
   SidebarProvider, SidebarTrigger,
 } from "@/components/ui/sidebar"
+import { hasPermission } from "@/lib/permissions"
 import { cn } from "@/lib/utils"
 import SearchModal from "@/components/search-modal"
 import { SETUP_READ_PERMS } from "@/pages/setup/common"
@@ -70,6 +71,7 @@ const groups: Group[] = [
       { to: "/system/pve-flavors", label: "Flavors (Proxmox)", icon: Blocks, permission: "admin:service:read" },
       { to: "/system/cloud-providers", label: "Cloud providers", icon: Cloud, permission: "admin:service:read" },
       { to: "/system/template-updates", label: "Template updates", icon: PackageCheck, permission: "admin:service:read" },
+      { to: "/platform", label: "Managed services", icon: Boxes, permission: "admin:service:read" },
       { to: "/system/savings-plans", label: "Savings plans", icon: PiggyBank, permission: "admin:savings_plan:read" },
       { to: "/system/promotions", label: "Promotion codes", icon: Gauge, permission: "admin:promotional_credit:manage" },
       { to: "/system/integrations", label: "Integrations", icon: Settings2, permission: "admin:integration:read" },
@@ -80,16 +82,6 @@ const groups: Group[] = [
     ],
   },
 ]
-
-// Permission match supports the wildcard grants /admin/me can carry
-// (admin:* or admin:<area>:*), mirroring the API's ExpandPatterns.
-function hasPermission(granted: string[] | undefined, want?: string): boolean {
-  if (!want) return true
-  if (!granted) return true // still loading — don't flash-hide
-  if (granted.includes(want) || granted.includes("admin:*")) return true
-  const area = want.split(":").slice(0, 2).join(":")
-  return granted.includes(`${area}:*`)
-}
 
 const THEME_OPTIONS: Array<{ value: ThemePref; label: string; icon: React.ComponentType<{ className?: string }> }> = [
   { value: "light", label: "Light", icon: Sun },

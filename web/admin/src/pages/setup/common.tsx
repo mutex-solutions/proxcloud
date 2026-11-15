@@ -33,7 +33,8 @@ export const LINK = "justify-self-start text-sm underline underline-offset-4"
 
 export const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
-// The steps of the page in order. prepare and next have no state of their own: the API reports the other six.
+// The steps of the page in order. prepare has no state of its own: the API reports the others. managed is optional and
+// comes after go live, which does not wait for it.
 export const SETUP_STEPS = [
   { id: "prepare", title: "Prepare Proxmox" },
   { id: "connect", title: "Connect" },
@@ -42,7 +43,7 @@ export const SETUP_STEPS = [
   { id: "templates", title: "OS templates" },
   { id: "catalog", title: "Catalog and pricing" },
   { id: "golive", title: "Go live" },
-  { id: "next", title: "Next: managed services" },
+  { id: "managed", title: "Managed services (optional)" },
 ] as const
 
 // Literal classes so Tailwind emits them. Anything the API did not call done is never shown as done: an unknown or

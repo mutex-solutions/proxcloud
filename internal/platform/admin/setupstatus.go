@@ -22,6 +22,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/platformconfig"
+	"github.com/mutex-solutions/proxcloud/internal/platformlife"
 	"github.com/mutex-solutions/proxcloud/internal/templateupdates"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
@@ -35,6 +36,7 @@ const (
 	stepTemplates = "templates"
 	stepCatalog   = "catalog"
 	stepGoLive    = "golive"
+	stepManaged   = "managed" // optional, after go live: managed Kubernetes and databases (platform.go)
 )
 
 // setupStep is one step: its state, one sentence, and the checks behind it.
@@ -57,6 +59,10 @@ type setupSnapshot struct {
 	Scheduler     bool       // PROXCLOUD_JOBS_SCHEDULER_ENABLED: syncs and charges run on a timer
 	APIBaseURL    string     // PROXCLOUD_SELF_API_BASE_URL: where a URL seed is fetched without config.metadata.url
 	Live          *setupLive // nil = database only
+	// PlatformOn is PROXCLOUD_PLATFORM_ENABLED; Installation is the provider's managed-services installation (nil =
+	// none). Only stepManaged reads them.
+	PlatformOn   bool
+	Installation *platformlife.Installation
 }
 
 // setupLive is what only the cluster and the running API know.
@@ -156,10 +162,40 @@ func setupStatus(s setupSnapshot) []setupStep {
 		return []setupStep{
 			{ID: stepConnect, State: stateTodo, Summary: "No Proxmox provider is saved", Items: []setupItem{}},
 			blocked(stepNetwork), blocked(stepStorage), blocked(stepTemplates), catalogStep(s), blocked(stepGoLive),
+			blocked(stepManaged),
 		}
 	}
 	steps := []setupStep{connectStep(s), networkStep(s), storageStep(s), templatesStep(s), catalogStep(s)}
-	return append(steps, goLiveStep(s, steps))
+	// managedStep comes after goLiveStep and is never passed to it: go live does not wait for managed services.
+	return append(steps, goLiveStep(s, steps), managedStep(s))
+}
+
+// managedStep is the optional step after go live: the phase of the provider's managed-services installation, from the
+// database only (the Managed services page reads the live state).
+func managedStep(s setupSnapshot) setupStep {
+	it := setupItem{ID: "installation", State: stateTodo}
+	switch in := s.Installation; {
+	case !s.PlatformOn:
+		it.Message = "Managed services are off on this install (optional): turn them on with ./proxcloud-up.sh install --managed-services"
+	case in == nil:
+		it.Message = "No managed-services installation yet (optional): Kubernetes and databases for tenants are set up on the Managed services page"
+	default:
+		switch in.Status.Phase {
+		case platformlife.PhaseReady:
+			it.State, it.Message = stateDone, "Managed services "+in.Name+" are installed"
+		case platformlife.PhaseApplying:
+			it.State, it.Message = stateAttention, "Managed services "+in.Name+" are being installed"
+		case platformlife.PhaseRemoving:
+			it.State, it.Message = stateAttention, "Managed services "+in.Name+" are being removed"
+		case platformlife.PhaseFailed:
+			it.State, it.Message = stateAttention, "The last run of managed services "+in.Name+" failed: open the Managed services page"
+		case platformlife.PhaseRemoved:
+			it.Message = "Managed services " + in.Name + " were removed"
+		default:
+			it.Message = "Managed services " + in.Name + " are a draft: finish and install them on the Managed services page"
+		}
+	}
+	return newStep(stepManaged, it.Message, it)
 }
 
 func connectStep(s setupSnapshot) setupStep {
@@ -450,6 +486,17 @@ func (h *Handler) readSetupSnapshot(ctx context.Context, serviceID string, live 
 	if h.billing != nil {
 		if s.Issuer, err = h.billing.IssuerInfo(ctx); err != nil {
 			return s, err
+		}
+	}
+	if s.PlatformOn = h.platform != nil; s.PlatformOn && s.Provider != nil {
+		all, err := h.platform.List(ctx)
+		if err != nil {
+			return s, err
+		}
+		for i := range all {
+			if all[i].ServiceID == s.Provider.ID {
+				s.Installation = &all[i]
+			}
 		}
 	}
 	if live && s.Provider != nil {

@@ -52,6 +52,6 @@ Shows the default flavors, quota and price rules before anything is created. **A
 
 Enabled when steps 2 to 5 are done and step 6 is done or knowingly skipped, on a status just read from the cluster. It attaches new projects to the provider, runs one provider sync and attaches the projects created meanwhile. When the job scheduler is off, the step says so: nothing syncs on a timer and no charge runs until you turn it on (`./proxcloud-up.sh install --scheduler` on the one-host install). It does not block going live.
 
-## 8. Next: managed services
+## 8. Managed services (optional)
 
-Managed Kubernetes, managed databases and sandboxes need a platform cluster. Enabling them from the console is planned; see the architecture decision record 0009 in the repository.
+Kubernetes clusters and databases for tenants need a platform cluster. This step shows whether one is installed and links to **System → Managed services**, where it is set up; see [Managed services](/docs/platform-admin/managed-services). It comes after Go live and never holds it back.

@@ -414,6 +414,7 @@ const goLiveItems = [
 
 test("Go live waits for steps 2 to 5, warns without blocking when the scheduler is off, then attaches and syncs", async ({ page }) => {
   await page.goto("/setup?tab=golive")
+  await expect(page.getByRole("button", { name: "Check again" })).toBeEnabled() // the live answer is in
   const goLive = page.getByRole("button", { name: "Go live", exact: true })
   // The mock install has storage open.
   await expect(page.getByText("Finish first: 4. Storage.")).toBeVisible()
@@ -475,8 +476,25 @@ test("Go live needs a current live answer: a database-only status or a failed li
   await expect(goLive).toBeDisabled()
 })
 
-test("Next is a static card that links ADR 0009", async ({ page }) => {
-  await page.goto("/setup?tab=next")
-  await expect(page.getByRole("link", { name: /ADR 0009/ })).toHaveAttribute("href", /docs\/adr\/0009-managed-services-platform-lifecycle\.md$/)
-  await expect(page.getByRole("button", { name: /Enable managed services/ })).toBeDisabled()
+test("Managed services is an optional step after Go live that shows the installation and links to its page", async ({ page }) => {
+  await page.goto("/setup?tab=managed")
+  const tab = page.getByRole("tab", { name: /8\. Managed services \(optional\)/ })
+  await expect(tab).toContainText("(To do)")
+  await expect(page.getByText(/No managed-services installation yet \(optional\)/).first()).toBeVisible()
+  await page.getByRole("link", { name: "Open Managed services" }).click()
+  await expect(page).toHaveURL(/\/platform$/)
+
+  // With a failed installation the step asks for attention, and Go live reads as it does without one.
+  await page.goto("/setup?tab=golive")
+  await expect(page.getByRole("button", { name: "Check again" })).toBeEnabled() // the live answer is in
+  const goLive = await page.getByRole("tab", { name: /7\. Go live/ }).innerText()
+  await page.goto("/setup?tab=managed&mock-platform=failed")
+  await expect(page.getByRole("button", { name: "Check again" })).toBeEnabled() // the live answer is in
+  await expect(page.getByRole("tab", { name: /8\. Managed services/ })).toContainText("(Needs attention)")
+  await expect(page.getByText(/The last run of managed services lab failed/).first()).toBeVisible()
+  expect(await page.getByRole("tab", { name: /7\. Go live/ }).innerText()).toBe(goLive)
+
+  // An API without the step (an older one) leaves the tab without a state.
+  await openStep(page, "managed", { "GET /admin/setup/status": statusWith({}) })
+  await expect(page.getByRole("tab", { name: /8\. Managed services/ })).toContainText("(Unknown)")
 })

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Admin console: the Managed services page** (System → Managed services, `/platform`, ADR 0009). It walks an
+  operator through the platform installation: the settings of a draft (node groups, platform network, seed, control
+  plane, storage, checked in the page before the API checks them), the Proxmox identities script with the two
+  write-only token secrets, the checks with what to do for each failed one, the review, and the run with its stages,
+  failure code, Retry and Cancel. A ready installation shows the live state of its components, its two providers,
+  the seed kubeconfig download, the seed credential replacement and Remove behind a typed confirmation. With the
+  switch off the page names `./proxcloud-up.sh install --managed-services`. Platform setup and the Dashboard gain an
+  optional `managed` step after Go live (`GET /api/v1/admin/setup/status`), which Go live never waits for. The mock
+  mode (`npm run dev:mock`, `?mock-platform=<state>`) walks every state without a cluster.
+
 - **Cluster chart `proxmox-kamaji-cluster` 0.1.11 can render the platform's own cluster** (`controlPlane.kind:
   kubeadm`, ADR 0009): the managed-services job of a later release creates its workload cluster (node groups
   `system`, `kamaji`, `dbaas`) from the same chart the tenants use, through ArgoCD, instead of a template of its own.

@@ -5,6 +5,7 @@
 import { ApiError } from "@/lib/api"
 import { on } from "../router"
 import { db } from "../db"
+import { mockPlatform } from "./platform"
 import {
   detectedStorages, importedTemplates, proposedProfiles, seedFlavors, seedPricePlan, seedQuota, setupChecks, templateDiscovery, templatePlacement,
 } from "../fixtures/setup"
@@ -89,6 +90,23 @@ function goLiveStep(p: Doc, steps: Doc[]) {
   return step("golive", attach.message, items)
 }
 
+// managedStep in setupstatus.go: the installation's phase, after go live and never one of its inputs.
+function managedStep(p: Doc) {
+  const in_ = mockPlatform.installations.find((i) => i.serviceId === p.id)
+  const it = (state: string, message: string) => step("managed", message, [{ id: "installation", state, message }])
+  if (!mockPlatform.enabled) return it("todo", "Managed services are off on this install (optional): turn them on with ./proxcloud-up.sh install --managed-services")
+  if (!in_) return it("todo", "No managed-services installation yet (optional): Kubernetes and databases for tenants are set up on the Managed services page")
+  const name = `Managed services ${in_.name}`
+  switch (in_.status.phase) {
+    case "ready": return it("done", `${name} are installed`)
+    case "applying": return it("attention", `${name} are being installed`)
+    case "removing": return it("attention", `${name} are being removed`)
+    case "failed": return it("attention", `The last run of managed services ${in_.name} failed: open the Managed services page`)
+    case "removed": return it("todo", `${name} were removed`)
+    default: return it("todo", `${name} are a draft: finish and install them on the Managed services page`)
+  }
+}
+
 on("GET /admin/setup/status", ({ query }) => {
   const sid = query.get("serviceId") ?? ""
   const live = query.get("live") === "1"
@@ -99,7 +117,7 @@ on("GET /admin/setup/status", ({ query }) => {
     return {
       data: {
         serviceId: "", live: false, seedUrl: MOCK_API_BASE,
-        steps: [{ id: "connect", state: "todo", summary: "No Proxmox provider is saved", items: [] }, blocked("network"), blocked("storage"), blocked("templates"), catalogStep(), blocked("golive")],
+        steps: [{ id: "connect", state: "todo", summary: "No Proxmox provider is saved", items: [] }, blocked("network"), blocked("storage"), blocked("templates"), catalogStep(), blocked("golive"), blocked("managed")],
       },
     }
   }
@@ -131,7 +149,7 @@ on("GET /admin/setup/status", ({ query }) => {
     templatesStep(p, live),
     catalogStep(p),
   ]
-  return { data: { serviceId: p.id, live, seedUrl, steps: [...steps, goLiveStep(p, steps)] } }
+  return { data: { serviceId: p.id, live, seedUrl, steps: [...steps, goLiveStep(p, steps), managedStep(p)] } }
 })
 
 // The script the API generates (pve.PlatformSetupScript), shortened: the same inputs and the same refusal.
@@ -141,7 +159,10 @@ on("GET /admin/setup/proxmox-script", ({ query }) => {
   const m = /^([A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z][A-Za-z0-9._-]*)!([A-Za-z][A-Za-z0-9._-]*)$/.exec(tokenId)
   const bad = !m ? "tokenId must be user@realm!name, of letters, digits, dot, dash and underscore"
     : store && !/^[A-Za-z][A-Za-z0-9._-]*$/.test(store) ? "importStorage must be a storage id: a letter, then letters, digits, dot, dash and underscore" : ""
-  if (bad) return { data: new Response(JSON.stringify({ errors: { code: 400, message: bad } }), { status: 400 }) }
+  const managed = ["true", "1"].includes(query.get("managedServices") ?? "")
+  const boot = query.get("bootStorage") ?? "", iso = query.get("isoStorage") || "local"
+  const badManaged = managed && !/^[A-Za-z][A-Za-z0-9._-]*$/.test(boot) ? "bootStorage must be a storage id: a letter, then letters, digits, dot, dash and underscore" : ""
+  if (bad || badManaged) return { data: new Response(JSON.stringify({ errors: { code: 400, message: bad || badManaged } }), { status: 400 }) }
   const grants = ["'/' 'ProxCloudPlatform' 0", "'/nodes' 'PVEAuditor' 1", "'/pool' 'ProxCloudPlatform' 1", "'/pool/proxcloud-system' 'NoAccess' 1",
     "'/sdn' 'ProxCloudPlatform' 1", "'/storage' 'ProxCloudPlatform' 1"]
   if (query.get("gpu") === "true") grants.push("'/mapping/pci' 'ProxCloudPlatform' 1")
@@ -158,7 +179,19 @@ on("GET /admin/setup/proxmox-script", ({ query }) => {
     `pveum user token add "$PC_USER" "$PC_TOKEN_NAME" --privsep 1`,
     `grant() { pveum acl modify "$1" --users "$PC_USER" --roles "$2" --propagate "$3"; pveum acl modify "$1" --tokens "$PC_TOKEN" --roles "$2" --propagate "$3"; }`,
     ...grants.map((g) => `grant ${g}`), "",
-    `pveum user token permissions "$PC_USER" "$PC_TOKEN_NAME"`, "pvenode cert info", ")", "",
+    `pveum user token permissions "$PC_USER" "$PC_TOKEN_NAME"`, "pvenode cert info",
+    // pve.ManagedSetupScript, shortened: the two identities of managed services and their pool.
+    ...(managed ? [
+      "", "# Managed services: the machines' and the volumes' identities.",
+      "pveum role add 'ProxCloudCAPI' 2>/dev/null || true", "pveum role add 'ProxCloudCSI' 2>/dev/null || true", "pveum role add 'ProxCloudKubeMint' 2>/dev/null || true",
+      "pveum pool add 'proxcloud-seed' --comment 'ProxCloud seed' 2>/dev/null || true",
+      "pveum user add 'capmox@pve' 2>/dev/null || true", "pveum user add 'csi@pve' 2>/dev/null || true",
+      "pveum user token add 'capmox@pve' 'capi' --privsep 1", "pveum user token add 'csi@pve' 'csi' --privsep 1",
+      `pveum acl modify '/storage/${boot}' --tokens 'capmox@pve!capi' --roles 'ProxCloudCAPI'`,
+      `pveum acl modify '/storage/${iso}' --tokens 'capmox@pve!capi' --roles 'PVEDatastoreAdmin'`,
+      "pveum user token permissions 'capmox@pve' 'capi'", "pveum user token permissions 'csi@pve' 'csi'",
+    ] : []),
+    ")", "",
   ].join("\n")
   return { data: new Response(script, { headers: { "Content-Type": "text/plain" } }) }
 })
@@ -259,4 +292,7 @@ on("POST /admin/setup/defaults", ({ opts }) => {
 })
 
 // The operator job trigger answers 202 with no body.
-on("POST /admin/job/external-service/sync", () => ({ data: undefined }))
+on("POST /admin/job/external-service/sync", () => {
+  mockPlatform.synced = true
+  return { data: undefined }
+})

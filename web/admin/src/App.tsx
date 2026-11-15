@@ -69,6 +69,7 @@ export default function App() {
           <Route path="system/cloud-providers" element={lazyPage(() => import("@/pages/system/CloudProvidersPage"))} />
           <Route path="system/cloud-providers/:id" element={lazyPage(() => import("@/pages/system/CloudProviderDetailPage"))} />
           <Route path="system/template-updates" element={lazyPage(() => import("@/pages/system/TemplateUpdatesPage"))} />
+          <Route path="platform" element={lazyPage(() => import("@/pages/platform/PlatformPage"))} />
           <Route path="system/catalog" element={lazyPage(() => import("@/pages/system/CatalogPage"))} />
           <Route path="system/pve-flavors" element={lazyPage(() => import("@/pages/system/PVEFlavorsPage"))} />
           <Route path="system/templates" element={lazyPage(() => import("@/pages/system/TemplatesPage"))} />
