@@ -27,10 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one ISO store (`(*pve.Client).ISOVisibilityProblem`, asked of PVE per store as stage 10 does) live next to
   `pve.PlatformACLs`. Tests keep the generated block equal to `docs/proxmox-permissions.md`, the rows and roles equal
   to installer stage 10 (the `proxcloud-seed` rows the only difference, the CSI gateway's rows left out), work out
-  each token's effective rights from the rows, and refuse a storage or token id that is not a plain id. Inert until
-  the managed-services runner exists: no route calls the tables or the ISO check yet, and the platform flag stays off
-  until the lab run. `docs/proxmox-permissions.md` documents the mint-grant risk the owner accepted for M1 and what lab
-  check L1 measures. The script has not been run on a Proxmox node, and L1 has not run.
+  each token's effective rights from the rows, and refuse a storage or token id that is not a plain id. The route is
+  live, behind no flag: running its answer creates the identities and gives the portal token `ProxCloudKubeMint`
+  (`Permissions.Modify`, `User.Modify`) at once. Only the privilege tables and the ISO check are inert: nothing calls
+  them until the managed-services runner (later PRs). `docs/proxmox-permissions.md` documents the mint-grant risk the
+  owner accepted for M1 and what lab check L1 measures. The script has not been run on a Proxmox node, and L1 has not
+  run.
 - **Every check of the Proxmox connection test in one answer**
   (`POST /api/v1/admin/service/proxmox/auth?checks=all`): the test stopped at the first failure, so an
   operator fixed the datacenter firewall only to learn about the node firewall, and then about missing
