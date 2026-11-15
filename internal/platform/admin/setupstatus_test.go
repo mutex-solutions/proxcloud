@@ -39,6 +39,8 @@ var (
 	}
 	setupQuota = map[string]any{"provisioning": map[string]any{"quota": map[string]any{"servers": float64(20)}}}
 	setupOn    = map[string]any{"attachToNewProjects": true}
+	// setupPinned pins a template in the provider configuration, so the templates step is read without live.
+	setupPinned = map[string]any{"templates": map[string]any{"debian-13": map[string]any{"vmid": float64(9000), "node": "pve1"}}}
 )
 
 // setupCatalogDone fills the provider-independent half of a finished catalog step.
@@ -74,8 +76,9 @@ func TestSetupStatus(t *testing.T) {
 			map[string]string{stepConnect: stateDone, stepNetwork: stateTodo, stepStorage: stateTodo, stepTemplates: stateUnknown, stepCatalog: stateTodo, stepGoLive: stateBlocked},
 			map[string]string{"network/cidrPool": stateTodo, "network/zone": stateTodo, "storage/detected": stateTodo, "storage/profiles": stateTodo, "storage/defaultProfile": stateTodo,
 				"catalog/quota": stateTodo, "catalog/region": stateTodo, "golive/attachPolicy": stateTodo}},
+		// Templates are not read without live, so go live cannot say it may start.
 		{"configured, database only", ready(),
-			map[string]string{stepConnect: stateDone, stepNetwork: stateDone, stepStorage: stateDone, stepTemplates: stateUnknown, stepCatalog: stateDone, stepGoLive: stateTodo},
+			map[string]string{stepConnect: stateDone, stepNetwork: stateDone, stepStorage: stateDone, stepTemplates: stateUnknown, stepCatalog: stateDone, stepGoLive: stateUnknown},
 			map[string]string{"storage/importStore": stateDone, "templates/images": stateUnknown, "golive/attachPolicy": stateTodo}},
 		{"configured and live", withLive(ready(), liveOK()),
 			map[string]string{stepConnect: stateDone, stepNetwork: stateDone, stepStorage: stateDone, stepTemplates: stateDone, stepCatalog: stateDone, stepGoLive: stateTodo},
@@ -89,8 +92,12 @@ func TestSetupStatus(t *testing.T) {
 			s.Scheduler = false
 			return s
 		}(), map[string]string{stepGoLive: stateAttention}, map[string]string{"golive/attachPolicy": stateDone, "golive/scheduler": stateAttention}},
-		{"a template pinned in the configuration counts without live", ready(map[string]any{"templates": map[string]any{"debian-13": map[string]any{"vmid": float64(9000), "node": "pve1"}}}),
-			map[string]string{stepTemplates: stateDone}, nil},
+		{"a template pinned in the configuration counts without live", ready(setupPinned),
+			map[string]string{stepTemplates: stateDone, stepGoLive: stateTodo}, nil},
+		{"live: a step that could not be read holds go live", withLive(ready(), &setupLive{Images: 1, ImportErr: "the cluster's storage could not be read"}),
+			map[string]string{stepStorage: stateUnknown, stepGoLive: stateUnknown}, map[string]string{"golive/attachPolicy": stateTodo}},
+		{"attached while a step could not be read", ready(setupOn),
+			map[string]string{stepTemplates: stateUnknown, stepGoLive: stateDone}, map[string]string{"golive/attachPolicy": stateDone}},
 		{"no image yet: the sub-steps show", withLive(ready(), &setupLive{ImportNodes: []string{"pve1"}, Nodes: 1, GitHubToken: true, Imports: map[string]int{"ready_to_publish": 2, "importing": 1}}),
 			map[string]string{stepTemplates: stateTodo, stepGoLive: stateBlocked},
 			map[string]string{"templates/images": stateTodo, "templates/flag": stateTodo, "templates/githubToken": stateDone, "templates/smokeNetwork": stateTodo, "templates/imports": stateTodo}},
@@ -110,7 +117,7 @@ func TestSetupStatus(t *testing.T) {
 			return p
 		}()}), map[string]string{stepNetwork: stateTodo, stepGoLive: stateAttention}, map[string]string{"golive/attachPolicy": stateAttention}},
 		{"an open catalog does not block go live", func() setupSnapshot {
-			s := ready()
+			s := withLive(ready(), liveOK())
 			s.Flavors = 0
 			return s
 		}(), map[string]string{stepCatalog: stateTodo, stepGoLive: stateTodo}, map[string]string{"golive/catalog": stateAttention, "golive/attachPolicy": stateTodo}},
@@ -138,7 +145,7 @@ func TestSetupStatus(t *testing.T) {
 		{"the default profile names no saved profile", ready(map[string]any{"defaultStorageProfile": "gone"}),
 			map[string]string{stepStorage: stateTodo}, map[string]string{"storage/defaultProfile": stateTodo, "storage/profiles": stateDone}},
 		{"no store takes import content", func() setupSnapshot {
-			s := ready()
+			s := ready(setupPinned)
 			s.Provider.Config["capabilities"] = map[string]any{"detectedAt": "2026-11-01T00:00:00Z", "storages": map[string]any{
 				"local-zfs": map[string]any{"storage": "local-zfs", "type": "zfspool", "content": []any{"images"}}}}
 			return s

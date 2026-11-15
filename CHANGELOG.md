@@ -68,7 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   steps (connect, network, storage, templates, catalog, go live) with one item per check, from the database alone,
   and with `live=1` also from the cluster: every check of the connection test (not only the first that fails), the
   nodes with an active import store, the published OS images and the imported templates. A table test pins a fresh
-  Compose install to no step done. Go live waits for connect, network, storage and templates; an open catalog and
+  Compose install to no step done. Go live waits for connect, network, storage and templates, and is `unknown`
+  while one of them could not be read (templates, without `live=1`), so the database-only answer never offers
+  go live on a cluster nobody looked at; an open catalog and
   a job scheduler that is off are warnings, by the owner's decision, so they block nothing. Only enabled public
   plans that apply to the provider count as pricing it. The route needs the four reads of the defaults preview.
   Not verified: a live run against a Proxmox cluster (the live checks run against the test fake).

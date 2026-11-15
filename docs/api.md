@@ -284,7 +284,11 @@ makes the step `todo`, and a step is `blocked` only when it cannot start.
   and the imported templates by lifecycle state. A cluster that does not answer
   is a failed item, not a failed request.
 - **Go live** waits for `connect`, `network`, `storage` and `templates`
-  (`blocked` until none is `todo`). An open catalog and a job scheduler that is
+  (`blocked` until none is `todo`). While one of them is `unknown` (without
+  `live`, `templates` is unless a template is pinned) go live is `unknown` too,
+  not `todo`: ask again with `live=1` before turning on the attach policy.
+  Without `live`, `connect` is `done` once the provider is saved; only `live=1`
+  runs the connection checks. An open catalog and a job scheduler that is
   off (`PROXCLOUD_JOBS_SCHEDULER_ENABLED`) are `attention` items: they block
   nothing. An attach policy that is on while steps are open is `attention`.
 

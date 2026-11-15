@@ -256,18 +256,21 @@ func catalogStep(s setupSnapshot) setupStep {
 }
 
 // goLiveStep is the last switch: attach new projects to the provider. It waits for connect, network, storage and
-// templates; a warning there does not hold it back, and neither does a state that was not read. The catalog is the
-// operator's call (usage without a rule is billed as zero), and so is running without the job scheduler: both are
-// shown as warnings and block nothing.
+// templates; a warning there does not hold it back, but a state that was not read does: go live is then unknown, not
+// todo. The catalog is the operator's call (usage without a rule is billed as zero), and so is running without the job
+// scheduler: both are shown as warnings and block nothing.
 func goLiveStep(s setupSnapshot, steps []setupStep) setupStep {
 	p := s.Provider
-	var open []string
+	var open, unread []string
 	catalog := stateDone
 	for _, st := range steps {
-		if st.ID == stepCatalog {
+		switch {
+		case st.ID == stepCatalog:
 			catalog = st.State
-		} else if st.State == stateTodo || st.State == stateBlocked {
+		case st.State == stateTodo || st.State == stateBlocked:
 			open = append(open, st.ID)
+		case st.State == stateUnknown:
+			unread = append(unread, st.ID)
 		}
 	}
 	attach := setupItem{ID: "attachPolicy", State: stateTodo, Message: "New projects are not attached to the provider yet (attach policy off)"}
@@ -278,6 +281,12 @@ func goLiveStep(s setupSnapshot, steps []setupStep) setupStep {
 		attach = setupItem{ID: "attachPolicy", State: stateDone, Message: "New projects are attached to the provider"}
 	case len(open) > 0:
 		return setupStep{ID: stepGoLive, State: stateBlocked, Summary: "Finish these steps first: " + strings.Join(open, ", "), Items: []setupItem{attach}}
+	case len(unread) > 0:
+		msg := "These steps could not be checked: " + strings.Join(unread, ", ")
+		if s.Live == nil {
+			msg += "; ask again with live=1"
+		}
+		return setupStep{ID: stepGoLive, State: stateUnknown, Summary: msg, Items: []setupItem{attach}}
 	}
 	items := []setupItem{attach}
 	if catalog == stateTodo {
