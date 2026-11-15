@@ -11,6 +11,7 @@ export const sections: DocSection[] = [
     title: "Running the platform",
     pages: [
       { slug: "platform-admin/overview", title: "Overview" },
+      { slug: "platform-admin/platform-setup", title: "Platform setup" },
       { slug: "platform-admin/account-activation", title: "Account activation" },
     ],
   },
