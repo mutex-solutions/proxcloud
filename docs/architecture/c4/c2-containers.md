@@ -235,8 +235,9 @@ flowchart LR
   helm["helm.yml<br/>lint, OCI chart publish"]:::impl
   ghcr["ghcr.io<br/>images and OCI charts"]:::impl
   chart["Chart proxcloud<br/>api, SPAs, gateway, Keycloak, CNPG"]:::impl
+  platchart["Chart proxcloud-platform<br/>clusterctl hook, provider RBAC, AppProjects,<br/>MetalLB pool (nothing applies it yet)"]:::impl
   dbchart["Chart database-cluster<br/>DBaaS engines"]:::impl
-  k8schart["Chart proxmox-kamaji-cluster<br/>tenant and sandbox clusters"]:::impl
+  k8schart["Chart proxmox-kamaji-cluster<br/>tenant and sandbox clusters;<br/>kubeadm mode: platform cluster (unused yet)"]:::impl
   inst["Installer (Ansible)<br/>make install, day-2 targets"]:::impl
   compose["One-host Compose install<br/>deploy/compose, proxcloud-up.sh"]:::impl
   host["Single Docker host<br/>portal only"]:::impl
@@ -253,6 +254,7 @@ flowchart LR
   chart --> helm
   dbchart --> helm
   k8schart --> helm
+  platchart --> helm
   ghcr -->|"helm install, ArgoCD"| mgmt
   ghcr --> inst
   ghcr -->|"released api, web, admin images"| compose
@@ -339,9 +341,10 @@ separate controlled canary.
 | TrueNAS (Standard tier) | NFS, SMB, iSCSI, WebSocket API | Appliance outside the Proxmox cluster | Implemented |
 | RustFS (Standard tier) | S3 + admin API, deployed by the installer with internal buckets; also serves tenant buckets (provider `rustfs`, registered by the installer) | VM in the system pool, or TrueNAS app | Implemented |
 | Configured shared backup store / PBS | PVE vzdump/restore target; guarded archive operations in the API, no automatic PBS appliance installation | Operator-provided storage | Implemented integration; site acceptance required |
+| Helm chart `proxcloud-platform` | `deploy/charts/proxcloud-platform` (tag `proxcloud-platform-v*`). The managed-services platform's own objects (ADR 0009), one part per BOM component: `clusterctl init` as an ArgoCD Sync hook Job (cluster-admin service account, image `proxcloud-clusterctl` by digest) for the seed and the workload cluster; on the workload cluster the provider service account and RBAC of `deploy/{mgmt,dbaas}-cluster/rbac.yaml` (shared objects once) plus a CiliumNetworkPolicy grant, both tenant AppProjects, a locked `default` AppProject, MetalLB pool `services` and the tenant chart repository entry without credentials. Nothing applies it yet | ghcr OCI | Implemented (not published, not run on a cluster) |
 | Helm chart `proxcloud` | `deploy/charts/proxcloud` | ghcr OCI | Implemented |
 | Helm chart `database-cluster` | `deploy/charts/database-cluster` | ghcr OCI | Implemented |
-| Helm chart `proxmox-kamaji-cluster` | `deploy/charts/proxmox-kamaji-cluster` (tag `proxmox-kamaji-cluster-v*`) | ghcr OCI | Implemented |
+| Helm chart `proxmox-kamaji-cluster` | `deploy/charts/proxmox-kamaji-cluster` (tag `proxmox-kamaji-cluster-v*`). Tenant and sandbox clusters with a Kamaji control plane (default); from 0.1.11 `controlPlane.kind: kubeadm` renders the platform's own workload cluster of managed services (ADR 0009: one `KubeadmControlPlane` VM with kube-vip, node groups, no tenant add-ons), which no path renders yet | ghcr OCI | Implemented (kubeadm mode not run on a cluster) |
 | CI | GitHub Actions `test.yml`, `docker.yml` (api, web, admin, sandbox-proxy, sandbox-runtime), `helm.yml`, `sandbox-templates.yml`, and the self-hosted `vm-templates.yml` and `k8s-node-templates.yml` | GitHub | Implemented |
 | Installer | Ansible playbooks and Makefile (`installer/`): allinone, split service stages and day-2 targets exist; published-artifact fresh install and current full split acceptance remain separate | Operator workstation | Implemented code; do not infer production acceptance |
 | VM template pipeline | `images/build.py` + Packer, `vm-templates.yml`; tag-published, one copy per node on local-disk sites | Self-hosted runner in the Proxmox network, or the installer from the first management host | Implemented |
@@ -364,6 +367,7 @@ boundaries rather than an unqualified `Implemented` component label.
 | A VM or a browser console to `/api/v1/nocloud/`, `/api/v1/console/` | A per-VM seed token or a console token in the path | Implemented |
 | Management port `:8081` | On the cluster Service only, never on the gateway or ingress. Billing callbacks are mounted only when a shared token is configured | Implemented |
 | API to Proxmox | Privilege-separated API token with the `ProxCloudPlatform` role; test connection warns on missing privileges and on `root@pam` | Implemented |
+| Services cluster to Proxmox | CAPMOX with `capmox@pve!capi` (`ProxCloudCAPI` on the services pool, its boot and ISO stores, `PVETemplateUser` on `pc-templates`) and proxmox-csi with `csi@pve!csi` (`ProxCloudCSI` on the services pool and its boot store), never `/pool` or `/storage` as a whole; each user also holds its own row on that pool, so a later `/pool` grant to it (the portal's mint role can write one) does not reach the services VMs. The mint role's `Permissions.Modify` on `/storage` still lets a stolen portal token grant itself `Datastore.Allocate` on the boot store and reach those VMs' disks (accepted for M1, [ADR 0009](../../adr/0009-managed-services-platform-lifecycle.md#a8-risks-accepted-for-the-first-milestone) A8). The console's managed-services script (`GET /admin/setup/proxmox-script?managedServices=true`) writes the same rows, the portal's mint grant, and pool `proxcloud-seed`, where only the CAPI token holds a role (nothing runs there yet). That fences the seed VM, not its disk on the boot store: the CSI token's `Datastore.Allocate` there opens every volume on it, the seed's included (accepted for M1, ADR 0009 A2 "Limit"). Installs before 2026-11-15 keep their broader token rows until an operator removes them ([proxmox-permissions.md](../../proxmox-permissions.md#managed-services)) | Implemented |
 | Tenant to tenant on the SDN | Cluster firewall rules (forward and input DROP inside the CIDR pool, per-project ACCEPT), reconciled every sync; non-overlapping CIDRs; optional per-project EVPN zone | Implemented |
 | Tenant VM to the network | VM firewall `policy_in DROP`, ipfilter/macfilter anti-spoof, security groups | Implemented |
 | Tenant database pod to the cluster it runs on | Ingress default-deny on every `pc-db-*` namespace; with `config.database.egressFence`, a CiliumNetworkPolicy that lets its pods reach only their namespace, kube-dns and the API server on 6443 (not kamaji-etcd, kubelets, the PVE API or ArgoCD); with `config.namespacePlacement`, its new pods pinned to their node group by the API server. Fence and placement land on a namespace when it is next ensured (a project's first attach or a new database), not on namespaces ensured before the key was set | Ingress implemented; fence and placement implemented, opt-in, set by nothing yet, not lab-verified |

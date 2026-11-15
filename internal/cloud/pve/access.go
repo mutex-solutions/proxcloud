@@ -202,6 +202,128 @@ var PlatformACLs = []PlatformACL{
 	{Path: "/mapping/pci", Role: PlatformRole, Propagate: true, GPUOnly: true},
 }
 
+// Managed services (docs/proxmox-permissions.md "Managed services"): the platform's own CAPMOX and proxmox-csi
+// tokens, the pool of the seed VM, and the portal token's right to mint the per-cluster tokens of tenant clusters.
+const (
+	SeedPool     = "proxcloud-seed" // the seed VM alone; the portal and the CSI tokens get NoAccess there
+	KubeMintRole = "ProxCloudKubeMint"
+	CAPITokenID  = capiUser + "!capi"
+	CSITokenID   = csiUser + "!csi"
+)
+
+// vmConfig is stage 10's {{ vm_config }}.
+var vmConfig = []string{"VM.Config.CDROM", "VM.Config.CPU", "VM.Config.Cloudinit", "VM.Config.Disk", "VM.Config.HWType", "VM.Config.Memory", "VM.Config.Network", "VM.Config.Options"}
+
+// ManagedRole is a role of the managed-services identities and its privileges.
+type ManagedRole struct {
+	Name  string
+	Privs []string
+}
+
+// ManagedRoles are the roles ManagedSetupScript creates, with the privileges installer stage 10 gives them.
+var ManagedRoles = []ManagedRole{
+	{roleCAPI, slices.Concat([]string{"Sys.Audit", "Pool.Audit", "VM.Allocate", "VM.Audit", "VM.Clone"}, vmConfig,
+		[]string{"VM.GuestAgent.Audit", "VM.Migrate", "VM.PowerMgmt", "Datastore.AllocateSpace", "Datastore.Audit", "SDN.Use"})},
+	{roleCSI, []string{"VM.Audit", "VM.Config.Disk", "Datastore.Allocate", "Datastore.AllocateSpace", "Datastore.Audit"}},
+	{KubeMintRole, []string{"User.Modify", "Permissions.Modify"}},
+}
+
+// ManagedACL is one ACL row of the managed services, in stage 10's shape: Role on Path for User and for Token, ""
+// for no row of that one. A privilege-separated token holds the intersection of its user's rights and its own.
+type ManagedACL struct {
+	Path, Role  string
+	Propagate   bool
+	User, Token string
+}
+
+// ManagedACLs are the rows ManagedSetupScript writes for the portal token portalTokenID, with boot the store of the
+// platform VMs' disks (and of proxmox-csi's volumes), iso the node-local store of their bootstrap ISOs and importStorage
+// PlatformSetupScript's (none when ""). Installer stage 10 writes the same rows in split_acls and nas_mint_acls,
+// without the SeedPool ones and with two for the CSI gateway's token, which has no listener on Compose (a test keeps
+// the two equal).
+func ManagedACLs(portalTokenID, boot, iso, importStorage string) []ManagedACL {
+	portal, _, _ := strings.Cut(portalTokenID, "!")
+	acls := []ManagedACL{
+		// The platform's CAPMOX: the platform pools only. The user keeps /pool, /storage and /sdn/zones for the
+		// tenant clusters' tokens the portal mints under it, and its own rows on the platform pools win over any
+		// grant on /pool written for it later (the mint grant below can write one).
+		{"/", roleCAPI, false, capiUser, CAPITokenID},
+		{"/nodes", roleCAPI, true, capiUser, CAPITokenID},
+		{"/pool", roleCAPI, true, capiUser, ""},
+		{"/pool/" + SystemPool, roleCAPI, true, capiUser, CAPITokenID},
+		{"/pool/" + SeedPool, roleCAPI, true, capiUser, CAPITokenID},
+		{"/pool/" + TemplatePool, roleTemplate, true, capiUser, CAPITokenID},
+		{"/sdn/zones", roleCAPI, true, capiUser, CAPITokenID},
+		// CAPMOX puts each bootstrap ISO on the first iso store its token sees (bootiso.go): it sees boot and iso alone.
+		{"/storage", roleCAPI, true, capiUser, ""},
+		{"/storage/" + boot, roleCAPI, false, "", CAPITokenID},
+		{"/storage/" + iso, roleISOStorage, false, capiUser, CAPITokenID},
+		// The platform's proxmox-csi: disks of the workload VMs on boot. NoAccess on the user caps every csi@pve
+		// token off the seed VM, the CSI gateway's included. Not off its disk on boot: Datastore.Allocate there
+		// opens every volume on the store, whatever VM owns it (docs/proxmox-permissions.md).
+		{"/pool", roleCSI, true, csiUser, ""},
+		{"/pool/" + SystemPool, roleCSI, true, csiUser, CSITokenID},
+		{"/pool/" + SeedPool, "NoAccess", true, csiUser, ""},
+		{"/storage", roleCSI, true, csiUser, ""},
+		{"/storage/" + boot, roleCSI, false, "", CSITokenID},
+		// The portal mints and grants the tenant clusters' tokens. An ACL on a path replaces what its parent passes
+		// down, so /sdn/zones repeats the platform role.
+		{"/access/groups", KubeMintRole, true, portal, portalTokenID},
+		{"/pool", KubeMintRole, true, portal, portalTokenID},
+		{"/storage", KubeMintRole, true, portal, portalTokenID},
+		{"/sdn/zones", KubeMintRole, true, portal, portalTokenID},
+		{"/sdn/zones", PlatformRole, true, portal, portalTokenID},
+		{"/nodes", KubeMintRole, false, portal, portalTokenID},
+		{"/pool/" + SeedPool, "NoAccess", true, portal, portalTokenID},
+	}
+	if importStorage != "" {
+		// The PVEDatastoreAdmin row there replaces what /storage passes down, and a tenant cluster's ISO or boot store
+		// may be that store: without the mint role the portal could not write the cluster token's row on it.
+		acls = append(acls, ManagedACL{"/storage/" + importStorage, KubeMintRole, false, portal, portalTokenID})
+	}
+	return acls
+}
+
+// CAPIPrivileges is what CAPITokenID must hold, per ACL path, for the platform's CAPMOX and for the job that builds
+// the seed (MissingPrivileges with a client on that token). boot and iso as for ManagedACLs.
+func CAPIPrivileges(boot, iso string) []PrivCheck {
+	return []PrivCheck{
+		{Path: "/", Privs: []string{"Sys.Audit"}},
+		{Path: "/nodes", Privs: []string{"Sys.Audit"}},
+		{Path: "/pool/" + SystemPool, Privs: ManagedRoles[0].Privs},
+		{Path: "/pool/" + SeedPool, Privs: ManagedRoles[0].Privs},
+		{Path: "/pool/" + TemplatePool, Privs: []string{"VM.Audit", "VM.Clone"}},
+		{Path: "/sdn/zones", Privs: []string{"SDN.Use"}},
+		{Path: "/storage/" + boot, Privs: []string{"Datastore.AllocateSpace", "Datastore.Audit"}},
+		{Path: "/storage/" + iso, Privs: bootISOPrivs},
+	}
+}
+
+// CSIPrivileges is what CSITokenID must hold, per ACL path, for the platform's proxmox-csi on boot.
+func CSIPrivileges(boot string) []PrivCheck {
+	return []PrivCheck{
+		{Path: "/pool/" + SystemPool, Privs: []string{"VM.Audit", "VM.Config.Disk"}},
+		{Path: "/storage/" + boot, Privs: []string{"Datastore.Allocate", "Datastore.AllocateSpace", "Datastore.Audit"}},
+	}
+}
+
+// KubeMintPrivileges is what the portal token must hold, per ACL path, to mint the tenant clusters' tokens
+// (MintClusterTokens): a token create wants User.Modify, an ACL write Permissions.Modify on its path. importStorage
+// as for ManagedACLs: its own row shadows /storage, so it is checked apart.
+func KubeMintPrivileges(importStorage string) []PrivCheck {
+	checks := []PrivCheck{
+		{Path: "/access/groups", Privs: ManagedRoles[2].Privs},
+		{Path: "/pool", Privs: ManagedRoles[2].Privs},
+		{Path: "/storage", Privs: ManagedRoles[2].Privs},
+		{Path: "/sdn/zones", Privs: ManagedRoles[2].Privs},
+		{Path: "/nodes", Privs: ManagedRoles[2].Privs},
+	}
+	if importStorage != "" {
+		checks = append(checks, PrivCheck{Path: "/storage/" + importStorage, Privs: ManagedRoles[2].Privs})
+	}
+	return checks
+}
+
 // PlatformRolePrivileges is the privilege list of PlatformRole: everything PlatformPrivileges asks for, once.
 func PlatformRolePrivileges() []string {
 	var out []string

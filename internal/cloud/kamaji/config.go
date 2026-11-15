@@ -118,7 +118,7 @@ type Config struct {
 	Kubeconfig    string // management-cluster kubeconfig (provider secret)
 	Region        string // the proxcloud region stamped on cached resources
 	ArgoNamespace string // namespace holding Application CRs (default "argocd")
-	ArgoProject   string // AppProject constraining sources/destinations (default "default")
+	ArgoProject   string // AppProject constraining sources/destinations (default "proxcloud-k8s")
 	ChartRepo     string // OCI helm repo, e.g. "ghcr.io/mutex-solutions/charts" (no oci:// prefix in Argo repoURL)
 	ChartName     string // required — no default until the Proxmox cluster chart lands
 	ChartVersion  string // pinned default for NEW clusters; existing clusters keep their own pin

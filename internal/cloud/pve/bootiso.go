@@ -42,6 +42,34 @@ func BootISOProblem(caps map[string]StorageCapability, iso, boot string) string 
 	return ""
 }
 
+// ISOVisibilityProblem says why the calling token could put a bootstrap ISO elsewhere than on iso, or "". PVE lists a
+// store to whoever holds Datastore.Audit or Datastore.AllocateSpace on it, so the token must hold one of them on iso
+// and neither on any other enabled iso store of defs (GET /storage, read with a token that sees every store, the
+// portal's). Asked of PVE per store, as installer stage 10 does for capmox@pve!capi.
+func (c *Client) ISOVisibilityProblem(ctx context.Context, defs []StorageDef, iso string) (string, error) {
+	var seen []string
+	for _, d := range defs {
+		if d.Disable == 1 || !slices.Contains(strings.Split(d.Content, ","), "iso") {
+			continue
+		}
+		have, err := c.Permissions(ctx, "/storage/"+d.Storage)
+		if err != nil {
+			return "", err
+		}
+		if have["Datastore.Audit"] || have["Datastore.AllocateSpace"] {
+			seen = append(seen, d.Storage)
+		}
+	}
+	if slices.Equal(seen, []string{iso}) {
+		return "", nil
+	}
+	list := strings.Join(seen, ", ")
+	if list == "" {
+		list = "none"
+	}
+	return fmt.Sprintf("the token sees the ISO stores [%s]; CAPMOX puts each bootstrap ISO on the first it sees, so it must see %s alone: look for other ACLs on those stores for the token or its user (docs/proxmox-permissions.md)", list, iso), nil
+}
+
 // ACLEntry is one row of GET /access/acl.
 type ACLEntry struct {
 	Path      string `json:"path"`
