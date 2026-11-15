@@ -1,0 +1,5 @@
+# BOM component `platform` (workload, wave 3).
+platform:
+  enabled: true
+  metallb:
+    addresses: [192.0.2.240-192.0.2.250]

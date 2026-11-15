@@ -1,0 +1,135 @@
+# The platform bill of materials (docs/adr/0009-managed-services-platform-lifecycle.md): the exact version and digest of
+# everything the managed-services platform runs. It ships inside each ProxCloud release: deploy/embed.go compiles it
+# into the API, internal/platformlife parses and validates it, and GET /api/v1/admin/platform/bom serves it.
+#
+# Rules (platformlife.Validate):
+# - Exact versions only, never a range or `latest`.
+# - Every chart and image has a digest. A bare OCI repo records the chart's manifest digest; an https:// repo records
+#   the `digest` of that version in the repo's index.yaml (the sha256 of the .tgz).
+# - Only a `-dev` release may hold a `pending` digest (our own packages before they are published, and a chart at a
+#   moving `0.0.0+` version) and a `0.0.0+` version. A release tag needs neither.
+#
+# internal/platformlife/bom_test.go keeps installer/playbooks/group_vars/all/versions.yml,
+# pc_defaults.services.k8s_version and the values of stage 40's ArgoCD and cert-manager equal to this file.
+schemaVersion: 1
+release: 0.8.0-dev                 # "-dev" on main; deploy/charts/proxcloud appVersion without "v" at the tag
+kubernetes:
+  version: 1.35.10
+  nodeImage: {package: proxcloud-vm-ubuntu-2604-k8s, tag: ubuntu-2604-k8s-1.35.10-20261114142123-3593f6f0f889, digest: "sha256:6b3af37d649f48b3b80e4f9317116187ebfa2842a0919958dff67eb9ac098b40"}
+seed:
+  image: {package: proxcloud-vm-ubuntu-2604, tag: ubuntu-2604-os-20261115023741-49992b8b28b2, digest: "sha256:babd2a90dfdf4a8f62335e86efa06f82316126bb08a7f494d9869343055c5b97"}
+  k3s:
+    version: v1.35.10+k3s1
+    binary: {url: "https://github.com/k3s-io/k3s/releases/download/v1.35.10%2Bk3s1/k3s", sha256: 5cd49f0faca5b2ea4355d4761e7b1445b8aa05cd50e612fd9c370551db49e5e2}
+    installScript: {url: "https://raw.githubusercontent.com/k3s-io/k3s/v1.35.10%2Bk3s1/install.sh", sha256: 8598e002e61d658fed7b7542fc6d2c66d8da6eae69e088830105d2ee1ffb6d91}
+images:
+  kubeVip: "ghcr.io/kube-vip/kube-vip:v0.8.9@sha256:717b8bef2758c10042d64ae7949201ef7f243d928fce265b04e488e844bf9528"
+  clusterctl: "ghcr.io/mutex-solutions/proxcloud-clusterctl:v1.14.4-1@pending"   # carries the provider YAMLs of capi.*
+capi:
+  seed:     {core: "cluster-api:v1.14.4", bootstrap: "kubeadm:v1.14.4", controlPlane: "kubeadm:v1.14.4", infrastructure: "proxmox:v0.9.2", ipam: "in-cluster:v1.1.1"}
+  workload: {core: "cluster-api:v1.14.4", bootstrap: "kubeadm:v1.14.4", controlPlane: "kamaji:v0.22.0", infrastructure: "proxmox:v0.9.2", ipam: "in-cluster:v1.1.1", addon: "helm:v0.6.4"}
+tenantCharts:                      # what the providers pin for new tenant clusters and databases
+  kubernetes: {repo: ghcr.io/mutex-solutions/charts, name: proxmox-kamaji-cluster, version: 0.1.11, digest: pending}
+  database:   {repo: ghcr.io/mutex-solutions/charts, name: database-cluster, version: 0.5.1, digest: pending}
+# Per component: cluster seed | workload; wave: applied and health-gated in ascending order per cluster (also the
+# upgrade order); install: application (default) | helmchart (the seed's ArgoCD only, the bootstrap exception);
+# group: the workload node group its pods go to ("" = system, "all" = a DaemonSet everywhere); stateful: prune off,
+# never deleted by a run; upgradeFrom: the versions this entry may replace in place (none = fresh install only);
+# values: Helm values the component always gets.
+components:
+  - name: argocd
+    cluster: seed
+    wave: 0
+    install: helmchart
+    namespace: argocd
+    chart: {repo: ghcr.io/argoproj/argo-helm, name: argo-cd, version: 10.14.0, digest: "sha256:09ca0a888b05bdf4c21a7c812dd7612156f63eb2a9fde0434ddb3ee095599a85"}
+    values:                        # = valuesContent of installer/playbooks/templates/argocd-helmchart.yml.j2
+      dex: {enabled: false}
+      notifications: {enabled: false}
+      applicationSet: {enabled: false}
+      configs: {params: {server.insecure: true}}
+  - name: cert-manager
+    cluster: seed
+    wave: 1
+    namespace: cert-manager
+    chart: {repo: "https://charts.jetstack.io", name: cert-manager, version: v1.20.2, digest: "sha256:d2a50bd44a09d838c2576a8f3dfca1524597c7393cf8d82ab3ec8a465b9eeb79"}
+    values: {crds: {enabled: true}}  # = stage 40's Application (installer/playbooks/templates/apps-operators.yml.j2)
+  - name: capi
+    cluster: seed
+    wave: 2
+    namespace: proxcloud-system
+    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.0, digest: pending}
+  - name: pc-platform              # the workload cluster
+    cluster: seed
+    wave: 3
+    namespace: pc-platform
+    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxmox-kamaji-cluster, version: 0.1.11, digest: pending}
+    stateful: true
+  - name: cilium
+    cluster: workload
+    wave: 0
+    namespace: kube-system
+    chart: {repo: "https://helm.cilium.io", name: cilium, version: 1.18.16, digest: "sha256:a28a48ef4c5250684317ebeb8f55b7de422235a86eef3530b6288b4f23fd4dd5"}
+    group: all
+  - name: cert-manager
+    cluster: workload
+    wave: 1
+    namespace: cert-manager
+    chart: {repo: "https://charts.jetstack.io", name: cert-manager, version: v1.20.2, digest: "sha256:d2a50bd44a09d838c2576a8f3dfca1524597c7393cf8d82ab3ec8a465b9eeb79"}
+    group: system
+  - name: metallb
+    cluster: workload
+    wave: 1
+    namespace: metallb-system
+    chart: {repo: "https://metallb.github.io/metallb", name: metallb, version: 0.16.2, digest: "sha256:96667a810bdf9b9d1e6d320af16a4e66c63ba56301bc21005e645cd7a1c298a4"}
+    group: system                  # the speaker tolerates every group
+  - name: argocd
+    cluster: workload
+    wave: 1
+    namespace: argocd
+    chart: {repo: ghcr.io/argoproj/argo-helm, name: argo-cd, version: 10.14.0, digest: "sha256:09ca0a888b05bdf4c21a7c812dd7612156f63eb2a9fde0434ddb3ee095599a85"}
+    group: system
+  - name: cnpg
+    cluster: workload
+    wave: 1
+    namespace: cnpg-system
+    chart: {repo: "https://cloudnative-pg.github.io/charts", name: cloudnative-pg, version: 0.29.1, digest: "sha256:b53d3991fe84bcf38767e7702cae78666265427a127a26fff168ab4207d2b1df"}
+    group: system
+  - name: proxmox-csi
+    cluster: workload
+    wave: 1
+    namespace: csi-proxmox
+    chart: {repo: ghcr.io/sergelogvinov/charts, name: proxmox-csi-plugin, version: 0.5.15, digest: "sha256:d5125be66d23c3380f3ccadc26018d21f0a44e203d93998a9e80ef82eaa2dc59"}
+    group: system                  # the node DaemonSet tolerates every group
+    stateful: true
+  - name: capi-tenant
+    cluster: workload
+    wave: 2
+    namespace: proxcloud-system
+    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.0, digest: pending}
+    group: system
+  - name: kamaji-crds
+    cluster: workload
+    wave: 2
+    namespace: kamaji-system
+    chart: {repo: "https://clastix.github.io/charts", name: kamaji-crds, version: 0.0.0+latest, digest: pending}  # until the chart mirror
+    group: kamaji
+  - name: kamaji-etcd
+    cluster: workload
+    wave: 2
+    namespace: kamaji-system
+    chart: {repo: "https://clastix.github.io/charts", name: kamaji-etcd, version: 0.18.1, digest: "sha256:634fccec8f9434f8f53f8b49d9c34d634c93f14478cf1c550fb3b5c1ec8e90be"}
+    group: kamaji
+    stateful: true
+  - name: kamaji
+    cluster: workload
+    wave: 3
+    namespace: kamaji-system
+    chart: {repo: "https://clastix.github.io/charts", name: kamaji, version: 0.0.0+latest, digest: pending}  # until the chart mirror
+    group: kamaji
+    values: {image: {tag: 26.11.2-edge}}  # the chart is 0.0.0+latest, so the image is the pin
+  - name: platform                 # provider RBAC, tenant AppProjects, locked default project, MetalLB pool, repo entry
+    cluster: workload
+    wave: 3
+    namespace: proxcloud-system
+    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.0, digest: pending}

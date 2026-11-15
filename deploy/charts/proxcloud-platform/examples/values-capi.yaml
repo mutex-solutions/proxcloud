@@ -1,0 +1,5 @@
+# BOM component `capi` (seed, wave 2): capi.seed. The digest is a stand-in; the run passes the BOM's images.clusterctl.
+clusterctl:
+  enabled: true
+  image: ghcr.io/mutex-solutions/proxcloud-clusterctl:v1.14.4-1@sha256:0000000000000000000000000000000000000000000000000000000000000000
+  providers: {core: "cluster-api:v1.14.4", bootstrap: "kubeadm:v1.14.4", controlPlane: "kubeadm:v1.14.4", infrastructure: "proxmox:v0.9.2", ipam: "in-cluster:v1.1.1"}

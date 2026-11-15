@@ -1,4 +1,5 @@
 # Release BOM: `make upgrade` moves the platform to whatever is pinned here.
+# Every key the platform BOM also pins must equal deploy/platform/platform-bom.yaml (internal/platformlife/bom_test.go).
 pc_versions:
   k3s: v1.35.10+k3s1
   argocd_chart: 10.14.0        # oci://ghcr.io/argoproj/argo-helm/argo-cd

@@ -126,7 +126,7 @@ export function kamajiConfigBlocks(f: KamajiFormState) {
   return {
     argocd: {
       namespace: f.argoNamespace.trim() || "argocd",
-      project: f.argoProject.trim() || "default",
+      project: f.argoProject.trim() || "proxcloud-k8s",
       chartRepo: f.chartRepo.trim(),
       chartName: f.chartName.trim(),
       chartVersion: f.chartVersion.trim(),
@@ -193,7 +193,7 @@ export function kamajiFormFromService(svc: {
     chartName: String(argo.chartName ?? ""),
     chartVersion: String(argo.chartVersion ?? ""),
     argoNamespace: String(argo.namespace ?? "argocd"),
-    argoProject: String(argo.project ?? "default"),
+    argoProject: String(argo.project ?? "proxcloud-k8s"),
     dataStoreName: String(cluster.dataStoreName ?? ""),
     dnsZone: String(cluster.dnsZone ?? ""),
     rootVolumeGiB: String(cluster.rootVolumeGiB ?? emptyKamajiForm.rootVolumeGiB),

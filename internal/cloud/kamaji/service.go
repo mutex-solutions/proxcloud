@@ -18,7 +18,7 @@ import (
 // K8sAPI is the management-cluster surface Service consumes — implemented by *kamajik8s.Client,
 // fake-able in tests.
 type K8sAPI interface {
-	EnsureNamespace(ctx context.Context, name string, labels map[string]string) error
+	EnsureNamespace(ctx context.Context, name string, labels, annotations map[string]string) error
 	GetNamespace(ctx context.Context, name string) (map[string]any, error)
 	DeleteNamespace(ctx context.Context, name string) error
 	ApplySecret(ctx context.Context, ns, name string, stringData map[string]string, labels, annotations map[string]string) error
@@ -106,13 +106,19 @@ func NewWithAPI(api K8sAPI, cfg Config, serviceID string) *Service {
 func (s *Service) Config() Config { return s.cfg }
 
 // EnsureProjectNamespace creates/labels the project's namespace on the management cluster —
-// the kamaji bootstrap leg (BootstrapKamajiOnto).
+// the kamaji bootstrap leg (BootstrapKamajiOnto). With a NamespacePlacement it also pins the namespace's pods (the
+// tenant control planes) to the kamaji node group.
 func (s *Service) EnsureProjectNamespace(ctx context.Context, projectID string) error {
-	return s.api.EnsureNamespace(ctx, NamespaceFor(projectID), map[string]string{
+	labels := map[string]string{
 		LabelProject:   projectID,
 		LabelService:   s.serviceID,
 		LabelManagedBy: ManagedByValue,
-	})
+	}
+	annotations := s.cfg.NamespacePlacement.Annotations()
+	if annotations != nil {
+		labels[kamajik8s.LabelPlatformRole] = "kamaji"
+	}
+	return s.api.EnsureNamespace(ctx, NamespaceFor(projectID), labels, annotations)
 }
 
 // CreateCluster provisions one cluster: cloud credentials secret (mgmt-side only) + Application

@@ -26,6 +26,8 @@ package externalservice
 //	        "nodeSelector": {"node-role": "database"},     // dedicated database node pool
 //	        "tolerations":  [{"key": "dedicated", "operator": "Equal", "value": "database", "effect": "NoSchedule"}]
 //	      },
+//	      "egressFence": true,               // optional: pc-db-* pods reach only their namespace, kube-dns and
+//	                                         // the API server (CiliumNetworkPolicy proxcloud-default-egress)
 //	      "backup": {                        // optional S3 object store; absent = backups off.
 //	        "endpoint":     "http://s3.example.com:9000",  // WITH scheme; plain http works
 //	        "bucket":       "dbaas-backups",
@@ -41,6 +43,11 @@ package externalservice
 //	                                         // engineVersion→image map (_helpers.tpl) — an
 //	                                         // unmapped version passes Validate and then hard-
 //	                                         // fails the ArgoCD render
+//	    },
+//	    "namespacePlacement": {              // optional: pins every pod of pc-db-* to a node group through the
+//	                                         // PodNodeSelector/PodTolerationRestriction namespace annotations
+//	      "nodeSelector": {"node-restriction.kubernetes.io/proxcloud-node-group": "dbaas"},
+//	      "tolerations":  [{"key": "proxcloud.io/node-group", "operator": "Equal", "value": "dbaas", "effect": "NoSchedule"}]
 //	    }
 //	  },
 //	  "secret": {                          // encrypted at rest
@@ -53,7 +60,10 @@ package externalservice
 // The databases run on OPS-owned nodes; the only tenant-facing artifact is the LB ingress IP
 // (MetalLB, from the lbAddressPool services subnet), restricted by loadBalancerSourceRanges.
 
-import "github.com/mutex-solutions/proxcloud/internal/cloud/dbaas"
+import (
+	"github.com/mutex-solutions/proxcloud/internal/cloud/dbaas"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
+)
 
 // IsDbaas reports whether this is a Managed-Database provider (config.provider == "dbaas").
 func (e *ExternalService) IsDbaas() bool { return e.Provider() == "dbaas" }
@@ -95,13 +105,29 @@ func dbaasBackupConfig(db map[string]any, secret map[string]any) dbaas.BackupCon
 }
 
 // dbaasScheduling reads config.database.scheduling: the replica spread key plus the optional
-// dedicated-node-pool selector and tolerations (opaque toleration objects, passed to the chart
-// unchanged — the API server's admission rejects a bad one).
+// dedicated-node-pool selector and tolerations (placementOf).
 func dbaasScheduling(db map[string]any) (zoneKey string, nodeSelector map[string]string, tolerations []map[string]any) {
 	block, _ := db["scheduling"].(map[string]any)
 	if block == nil {
 		return "", nil, nil
 	}
+	nodeSelector, tolerations = placementOf(block)
+	return str(block["zoneKey"]), nodeSelector, tolerations
+}
+
+// namespacePlacement reads config.namespacePlacement, the same {nodeSelector, tolerations} block for a kamaji and a
+// dbaas provider. Absent: an empty placement.
+func namespacePlacement(cfg map[string]any) kamajik8s.NamespacePlacement {
+	block, _ := cfg["namespacePlacement"].(map[string]any)
+	nodeSelector, tolerations := placementOf(block)
+	return kamajik8s.NamespacePlacement{NodeSelector: nodeSelector, Tolerations: tolerations}
+}
+
+// placementOf reads a {nodeSelector, tolerations} block, dropping blank selector entries. Tolerations are opaque
+// toleration objects, passed on unchanged: in config.database.scheduling the API server refuses a bad one at that
+// database's pod create; in config.namespacePlacement NamespacePlacement.Validate checks them when the provider is
+// built, since a bad one there would refuse every pod in the namespace.
+func placementOf(block map[string]any) (nodeSelector map[string]string, tolerations []map[string]any) {
 	if ns, ok := block["nodeSelector"].(map[string]any); ok {
 		for k, v := range ns {
 			if s := str(v); k != "" && s != "" {
@@ -119,7 +145,7 @@ func dbaasScheduling(db map[string]any) (zoneKey string, nodeSelector map[string
 			}
 		}
 	}
-	return str(block["zoneKey"]), nodeSelector, tolerations
+	return nodeSelector, tolerations
 }
 
 // dbaasStorageClasses reads the customer-facing storage-class allowlist, dropping the capacity
@@ -185,9 +211,11 @@ func (e *ExternalService) DbaasConfig() dbaas.Config {
 			MaxMemoryGiB:  intOf(limits["maxMemoryGiB"]),
 			MaxStorageGiB: intOf(limits["maxStorageGiB"]),
 		},
-		Engines:      engines,
-		NodeSelector: nodeSelector,
-		Tolerations:  tolerations,
+		Engines:            engines,
+		NodeSelector:       nodeSelector,
+		Tolerations:        tolerations,
+		NamespacePlacement: namespacePlacement(e.Config),
+		EgressFence:        db["egressFence"] == true, // a JSON bool only
 	}
 	if cfg.ArgoNamespace == "" {
 		cfg.ArgoNamespace = "argocd"

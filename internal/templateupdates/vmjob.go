@@ -142,6 +142,9 @@ type Receipt struct {
 	Warnings    []string  `json:"warnings,omitempty"`
 	// Cleaned marks a dead job whose leftovers the runner already removed.
 	Cleaned bool `json:"cleaned,omitempty"`
+	// TemplateGone: the template this import produced was verifiably deleted since (MarkTemplateGone),
+	// so EnqueueVM treats the receipt like a failed one and the artifact can be imported there again.
+	TemplateGone bool `json:"templateGone,omitempty"`
 	// Smoke is the latest smoke test of the template this import produced (mirrored by PGSmokes).
 	Smoke *SmokeSummary `json:"smoke,omitempty"`
 }

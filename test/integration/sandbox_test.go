@@ -50,7 +50,7 @@ func newSbxCluster() *sbxCluster {
 	return &sbxCluster{ns: map[string]map[string]any{}, crs: map[string]map[string]any{}}
 }
 
-func (c *sbxCluster) EnsureNamespace(_ context.Context, name string, labels map[string]string) error {
+func (c *sbxCluster) EnsureNamespace(_ context.Context, name string, labels, _ map[string]string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	l := map[string]any{}

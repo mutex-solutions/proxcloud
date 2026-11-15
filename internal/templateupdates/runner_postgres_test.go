@@ -489,6 +489,139 @@ func TestPGEnqueueBlockedByTemplatedDeadJob(t *testing.T) {
 	}
 }
 
+// rowsPVE answers the two reads MarkTemplateGone makes: nextid for the VMID, then the VM rows.
+type rowsPVE struct {
+	LifecyclePVE
+	free    bool
+	freeErr error
+	rows    []pve.ClusterResource
+	err     error
+}
+
+func (f rowsPVE) VMIDFree(context.Context, int) (bool, error) { return f.free, f.freeErr }
+
+func (f rowsPVE) ClusterResources(context.Context, string) ([]pve.ClusterResource, error) {
+	return f.rows, f.err
+}
+
+// MarkTemplateGone: a finished import blocks a re-import until its template is verifiably deleted. A
+// read error, an unknown provider or a VM that may still be the template change nothing; a deleted
+// template frees the receipt (like a failed one) and the artifact is imported again.
+func TestPGReimportOnlyAfterVerifiedGone(t *testing.T) {
+	db, jobs := pgFixture(t)
+	ctx := context.Background()
+	s, req := pgService(t, db, jobs)
+	first, err := s.EnqueueVM(ctx, req, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkTemplateGone(ctx, nil, first.ID); err == nil {
+		t.Fatal("an unfinished import was marked gone")
+	}
+	r, _ := s.Receipts.Load(ctx, first.ID)
+	r.Step, r.VMID = StepSucceeded, 9210
+	_ = s.Receipts.Save(ctx, r)
+	p := r.Payload
+	var asked string
+	via := func(f rowsPVE) PVEResolver {
+		return func(_ context.Context, svc string) (LifecyclePVE, error) {
+			asked = svc
+			return f, nil
+		}
+	}
+	tpl := pve.ClusterResource{Type: "qemu", VMID: 9210, Node: "pve1", Template: 1, Pool: pve.TemplatePool, Name: TemplateName(p), Tags: TemplateTags(p)}
+	for name, pvFor := range map[string]PVEResolver{
+		"nextid error":     via(rowsPVE{freeErr: errors.New("unreachable")}),
+		"read error":       via(rowsPVE{err: errors.New("unreachable")}),
+		"template present": via(rowsPVE{rows: []pve.ClusterResource{tpl}}),
+		"node down":        via(rowsPVE{rows: []pve.ClusterResource{{Type: "qemu", VMID: 9210, Node: "pve1", NodeDown: true}}}),
+		// Held, but not in this token's view: moved out of pc-templates, or the token lost VM.Audit.
+		"hidden":      via(rowsPVE{rows: []pve.ClusterResource{{Type: "qemu", VMID: 101, Node: "pve1", Name: "tenant-vm"}}}),
+		"token blind": via(rowsPVE{rows: []pve.ClusterResource{}}),
+		"provider missing": func(context.Context, string) (LifecyclePVE, error) {
+			return nil, lcErr(404, "provider_missing", "gone")
+		},
+	} {
+		if err := s.MarkTemplateGone(ctx, pvFor, first.ID); err == nil {
+			t.Fatalf("%s: marked gone", name)
+		}
+		if _, err := s.EnqueueVM(ctx, req, "admin"); !errors.Is(err, ErrDuplicate) {
+			t.Fatalf("%s: re-import allowed: %v", name, err)
+		}
+	}
+	if asked != p.ServiceID {
+		t.Fatalf("read provider %q, not the receipt's", asked)
+	}
+	// Deleted (nextid: no guest anywhere holds VMID 9210): freed once, idempotently.
+	gone := via(rowsPVE{free: true})
+	for i := 0; i < 2; i++ {
+		if err := s.MarkTemplateGone(ctx, gone, first.ID); err != nil {
+			t.Fatalf("mark %d: %v", i, err)
+		}
+	}
+	if r, _ := s.Receipts.Load(ctx, first.ID); !r.TemplateGone || r.Step != StepSucceeded || r.VMID != 9210 {
+		t.Fatalf("receipt after mark: %+v", r)
+	}
+	second, err := s.EnqueueVM(ctx, req, "admin")
+	if err != nil || second.ID == first.ID {
+		t.Fatalf("re-import after a verified gone: %v", err)
+	}
+	if _, err := s.EnqueueVM(ctx, req, "admin"); !errors.Is(err, ErrDuplicate) {
+		t.Fatalf("the re-import is not deduplicated: %v", err)
+	}
+	// The re-import may reuse VMID 9210: the old receipt is never shown as that template.
+	states, err := s.States(ctx, map[string]ProviderRows{p.ServiceID: {Rows: []pve.ClusterResource{tpl}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, st := range states {
+		if st.ID == first.ID && st.State != StateTemplateMissing {
+			t.Fatalf("gone receipt state %q", st.State)
+		}
+	}
+}
+
+// MarkTemplateGone with sibling imports of one artifact: A2 (pve2, 9210) is deleted, and B1, a later
+// import of the same artifact on pve1, takes the lowest free VMID, 9210. The row at 9210 is B1's
+// template, so A2 is freed and pve2 imports again; B1 itself stays.
+func TestPGSiblingImportFreesReceipt(t *testing.T) {
+	db, jobs := pgFixture(t)
+	ctx := context.Background()
+	s, req := pgService(t, db, jobs)
+	enqueueFinished := func(node string) *Receipt {
+		req.Node = node
+		r, err := s.EnqueueVM(ctx, req, "admin")
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Step, r.VMID = StepSucceeded, 9210
+		if err := s.Receipts.Save(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	a2 := enqueueFinished("pve2")
+	b1 := enqueueFinished("pve1")
+	p := b1.Payload
+	pv := func(context.Context, string) (LifecyclePVE, error) {
+		return rowsPVE{rows: []pve.ClusterResource{{Type: "qemu", VMID: 9210, Node: "pve1", Template: 1, Pool: pve.TemplatePool, Name: TemplateName(p), Tags: TemplateTags(p)}}}, nil
+	}
+	if err := s.MarkTemplateGone(ctx, pv, b1.ID); err == nil {
+		t.Fatal("B1's own template was marked gone")
+	}
+	if err := s.MarkTemplateGone(ctx, pv, a2.ID); err != nil {
+		t.Fatalf("A2 stays blocked by B1's template: %v", err)
+	}
+	req.Node = "pve2"
+	if _, err := s.EnqueueVM(ctx, req, "admin"); err != nil {
+		t.Fatalf("pve2 re-import: %v", err)
+	}
+	req.Node = "pve1"
+	if _, err := s.EnqueueVM(ctx, req, "admin"); !errors.Is(err, ErrDuplicate) {
+		t.Fatalf("pve1 re-import beside B1: %v", err)
+	}
+}
+
 // Defer (busy smoke lock): the job returns to pending without spending an attempt, a stale
 // acquisition cannot defer, and a deferred smoke job is claimable again later.
 func TestPGDeferKeepsAttempts(t *testing.T) {

@@ -96,6 +96,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inventory differs; nothing does yet. Not verified on a cluster: the hook running after its service account (sync
   wave 1), and whether the seed's ArgoCD takes over the `default` project the workload's ArgoCD created and shows it
   Synced with empty lists.
+- **Docker Compose install: opt-in managed services** (`deploy/compose/`): `./proxcloud-up.sh install
+  --managed-services` writes the `.env` key `PLATFORM_ENABLED=true`, which `compose.yaml` passes to the API as
+  `PROXCLOUD_PLATFORM_ENABLED` (`false` by default), and `--no-managed-services` writes `false`. The in-platform path
+  of ADR 0009 runs its platform job only with this variable and VM template updates both on, and the API reads both
+  only when it starts, so a one-host install needs a switch for it. It behaves like `--template-updates` and
+  `--scheduler`: a later `install` without the flag and every `upgrade` keep the recorded value, the last lines of
+  `install` (also with `--dry-run`) say whether it is on, and the script removes `PLATFORM_ENABLED` from the
+  environment it hands to Compose, so a variable exported in the calling shell cannot turn it on. It implies
+  `--template-updates`, because the job imports the seed and node images through the template update runner:
+  `--managed-services` turns template updates on, `--no-managed-services` leaves them on, and `--no-template-updates`
+  is refused while managed services are on. `install` and `upgrade` refuse the switch with a release older than
+  v0.8.0, the first with the platform API: an older API ignores the variable, and the switch would read as on while
+  nothing can run. `deploy/compose/README.md` (Optional features) says what it needs from the host, a route from the
+  API container to the platform network, and what a platform built from Compose lacks: tenant block volumes (no CSI
+  gateway listener) and database backups. **Inert today**: no API reads `PROXCLOUD_PLATFORM_ENABLED` yet, so the
+  switch only records the value until the release with the platform API. **Not verified**: the switch on a running
+  Compose install (the tests run the script with `--dry-run` and against a fake `docker`, and check the model
+  `docker compose config` builds), and a platform built from this stack.
+- **Node-group placement and an egress fence for the Kubernetes and database providers** (ADR 0009, shared layout). On
+  one cluster with node groups, tenant control planes and databases must stay on their own groups whatever their
+  charts render, and a tenant with PostgreSQL superuser can run a shell in its database pod and reach the rest of that
+  cluster. Two optional provider keys, API only: `config.namespacePlacement` (`nodeSelector`, `tolerations`; kamaji
+  and dbaas) stamps the `PodNodeSelector` and `PodTolerationRestriction` namespace annotations
+  (`scheduler.alpha.kubernetes.io/node-selector`, `…/defaultTolerations`) and the label `proxcloud.io/platform-role:
+  kamaji` or `dbaas` on a `pc-*` or `pc-db-*` namespace, and `config.database.egressFence: true` adds the
+  CiliumNetworkPolicy `proxcloud-default-egress` to a `pc-db-*` namespace, so its pods reach only that namespace,
+  kube-dns on 53 and the API server on 6443. Both are stamped on a namespace when it is next ensured: a project's
+  first attach to the provider, or a new cluster or database create. A namespace ensured before the key was set keeps
+  what it has until then (nothing in the sync ensures it again), and pods already running are not moved. A selector
+  that is not label keys and values, or a toleration the API server would refuse (it would then refuse every pod in
+  the namespace), is refused when the provider is built, and so is the fence together with `config.database.backup`:
+  it has no object-store rule yet, and WAL archiving would fail behind it until `pg_wal` filled the volume. A provider
+  without the keys applies exactly the namespace and policies it applied before, and nothing writes the keys yet: the
+  managed-services run that will set them when it registers the providers comes later and stays off behind its flag
+  until the lab run, so this is inert on every existing site, installer sites included. The keys need both admission
+  plugins on the cluster's API server, and the fence needs Cilium and `ciliumnetworkpolicies` rights for the provider
+  ServiceAccount, which `deploy/dbaas-cluster/rbac.yaml` does not grant (attaching a project and database creates then
+  fail with 403). Setting the fence back to false leaves the policies in place. Tested with table tests, a golden of
+  the policy and a fake API server. Not run on a cluster: that the API server places the pods, that a database works
+  behind the fence while kamaji-etcd, the kubelets, the PVE API and argocd-repo-server stay unreachable, and that
+  Cilium matches the API server on its port 6443 after the `kubernetes` Service is translated are all unverified until
+  the lab run.
 - **`proxcloud-clusterctl` image and its tag flow** (`deploy/clusterctl/`, `.github/workflows/clusterctl.yml`): the
   image the clusterctl Job of the managed-services platform will run (ADR 0009; the `proxcloud-platform` chart that
   runs it comes separately). It holds clusterctl v1.14.4, kubectl v1.35.10 and, as a clusterctl local repository, the
@@ -130,6 +172,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keeps its broad token rows until an operator removes them (`docs/proxmox-permissions.md`, "An existing site"); the
   added rows grant nothing new there. One loop item of the stage is now quoted so that strict YAML parsers read the
   file, as a Go test now does. Checked with the tests above and `ansible-playbook --syntax-check`; not run against a
+  cluster.
+- **Template updates: the import placement check and a way to re-import a deleted template live in
+  `internal/templateupdates`** (P3 groundwork, design §11 PR 11). The managed-services job will import its
+  two images without the admin handler, so the node/storage check it needs (`PlacementOptions`,
+  `PlacementAllowed`) moved out of `POST /admin/template-updates/vm` as pure functions; the handler calls
+  them and answers as before. A finished import blocked every re-import of that artifact on that node,
+  even after its template VM was deleted, which would stop the job's image stage for good. NEW
+  `Service.MarkTemplateGone` reads the receipt's provider and marks the receipt `templateGone` only on proof
+  that the template was deleted: `GET /cluster/nextid?vmid=`, which sees every guest, says its VMID is
+  free; or the token sees the VM now holding it, and that VM has a name, is on a node that is up and has
+  neither the template's name nor its source tag; or it is a later import of the same artifact recorded at
+  that node and VMID (every import takes the lowest free VMID, so a copy on another node can take a deleted
+  template's VMID). A read error, a down node, a held VMID the token cannot see (a template moved out of
+  `pc-templates`, or lost pool rights) or a template that was renamed or migrated changes nothing.
+  `EnqueueVM` then treats that receipt as failed, and the page shows it as `template_missing`. Inert:
+  nothing calls `MarkTemplateGone` yet (no route; the managed-services runner, still to come and off behind
+  its flag, will). Tested with unit tests and the opt-in PostgreSQL tests (`TEMPLATEUPDATES_TEST_POSTGRES`)
+  against a throwaway database; not run against a Proxmox cluster, so nextid's answer for a held VMID is
+  taken from the PVE source and `images/vm_export/coldboot.py`, not measured.
+
+### Security
+
+- **ArgoCD's `default` project is locked on installer-built services clusters**
+  (`installer/playbooks/files/argocd-default-project.yaml`, applied by stage 50's guardrails step in
+  `services-platform.sh`): empty `sourceRepos`, `destinations` and `clusterResourceWhitelist`. ArgoCD creates
+  `default` open (every repository, every cluster and namespace, every kind) and never resets it, so any
+  Application in `default` could deploy anything anywhere on the cluster that holds every tenant's control plane
+  and database, around the `proxcloud-k8s` and `proxcloud-dbaas` guardrails. Neither the installer nor the
+  console picks `default` there: tenant clusters and `pc-sandbox` are in `proxcloud-k8s`, databases in
+  `proxcloud-dbaas`, and a new test (`installer/tests/test_services_argocd.py`, in `make test`) keeps it so. The
+  console's Kubernetes provider form used to fall back to `default` when its ArgoCD AppProject field was blank,
+  and when it loaded a provider stored without `argocd.project`; it now falls back to `proxcloud-k8s`, as
+  `kamaji.BuildApplication` and the database form already did (`web/admin/e2e/provider-connection.spec.ts`). The
+  management cluster stays open, because stage 40's `cnpg`, `cert-manager` and `proxcloud` Applications use
+  `default`. Nothing here is behind a flag: the lock applies at the next run of stage 50 (`make install`; `make
+  upgrade` does not run it), on existing sites too. Locked, an Application in `default` (or with no project) on
+  the services cluster stops syncing, and deleting it deletes nothing it created, because ArgoCD only deletes what
+  the project permits: its workloads stay, and for a tenant cluster its control plane, Cluster API objects and PVE
+  VMs. Such an Application is one made by hand, or a tenant cluster of a provider whose `config.argocd.project` is
+  `default` (typed in, set through the API, or saved from the console with a blank AppProject before this change).
+  So stage 50 first lists those Applications and stops, naming them, while any is left; move each, and its
+  provider, to a named project, then run it again. Checked with `ansible-playbook --syntax-check`, the offline test
+  (which runs the listing against a stub `kubectl`) and the console e2e spec only; not applied to a running
   cluster.
 
 ## [0.7.0] - 2026-11-15
