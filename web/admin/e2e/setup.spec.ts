@@ -224,6 +224,35 @@ test("Network saves the server seed choice, keeps the other metadata keys and sh
   await expect(byUrl).toBeChecked()
 })
 
+test("Network and Server seeds each keep the other's unsaved edits when one is saved", async ({ page }) => {
+  await page.goto("/setup?tab=network")
+  const seeds = page.getByRole("group", { name: "Server seeds" })
+  const zone = page.getByLabel("Zone ID")
+  // A save invalidates the stored provider; wait for its refetch (the save's own fresh read is the first GET) and
+  // the 120 ms mock latency, since the mock store is shared with the cache and shows the save before the refetch.
+  const refetched = async () => {
+    await expect.poll(async () => (await calls(page, "GET", "/admin/service/svc-proxmox-01")).length).toBeGreaterThanOrEqual(2)
+    await page.waitForTimeout(500)
+  }
+  await expect(zone).toHaveValue("overlay")
+  await zone.fill("zedit1")
+  await seeds.getByRole("radio", { name: /^On an ISO/ }).check()
+  await recordCalls(page)
+  await seeds.getByRole("button", { name: "Save server seeds" }).click()
+  await refetched()
+  await expect(seeds).toContainText("Saved: on an ISO.")
+  await expect(zone).toHaveValue("zedit1")
+
+  await zone.fill("overlay")
+  await page.getByLabel("Networks tenants must not reach").fill("198.51.100.0/24")
+  await seeds.getByRole("radio", { name: /^By URL/ }).check()
+  await recordCalls(page)
+  await page.getByRole("button", { name: "Save network" }).click()
+  await refetched()
+  await expect(seeds.getByRole("radio", { name: /^By URL/ })).toBeChecked()
+  await expect(seeds).toContainText("Saved: on an ISO.")
+})
+
 test("Network never offers a bridge that is the management bridge on any node", async ({ page }) => {
   // pve1 manages through vmbr0, pve2 through vmbr1: each lists the other's management bridge without an address.
   const bridges = [

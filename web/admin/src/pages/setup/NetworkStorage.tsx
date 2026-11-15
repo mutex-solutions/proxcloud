@@ -41,6 +41,7 @@ type Kind = "simple" | "vlan" | "evpn"
 
 export function NetworkStep({ step, serviceId, seedUrl }: { step?: SetupStep; serviceId: string; seedUrl: string }) {
   const q = useStoredProvider(serviceId)
+  const cfg: Doc = q.data?.config ?? {}
   return (
     <StepCard
       n={3}
@@ -49,8 +50,9 @@ export function NetworkStep({ step, serviceId, seedUrl }: { step?: SetupStep; se
       description="The SDN zone tenant networks are created in, the range they are cut from, and what tenants must not reach. Proxmox gets the zone when the first tenant network is created."
     >
       <ProviderGate serviceId={serviceId} q={q}>
-        <NetworkForm key={q.dataUpdatedAt} serviceId={serviceId} cfg={q.data?.config ?? {}} />
-        <SeedsForm key={`seeds-${q.dataUpdatedAt}`} serviceId={serviceId} cfg={q.data?.config ?? {}} seedUrl={seedUrl} />
+        {/* Each form remounts only when the block it edits changes, so saving one keeps the other's unsaved edits. */}
+        <NetworkForm key={`network-${JSON.stringify(cfg.network ?? {})}`} serviceId={serviceId} cfg={cfg} />
+        <SeedsForm key={`seeds-${JSON.stringify(cfg.metadata ?? {})}`} serviceId={serviceId} cfg={cfg} seedUrl={seedUrl} />
       </ProviderGate>
     </StepCard>
   )

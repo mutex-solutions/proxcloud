@@ -187,8 +187,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   servers that reach it with a trusted certificate, or "On an ISO" for LAN installs and self-signed certificates. It
   shows what is saved, and saves only `config.metadata` with `PUT /api/v1/admin/service/{id}`, read fresh and sent
   whole because the route replaces top-level config keys: `url`, `isoStorage`, `vendorData` and the other keys are
-  kept, and the network block is not sent. A Playwright spec checks both saves' bodies and the axe checks against
-  the mock API; not run against a live API or cluster.
+  kept, and the network block is not sent. Each of the step's two forms is reset only when the block it edits
+  changes, so saving the seeds keeps an unsaved network edit and the other way round. Playwright specs check both
+  saves' bodies, the kept edits and the axe checks against the mock API; not run against a live API or cluster.
 
 ### Changed
 
