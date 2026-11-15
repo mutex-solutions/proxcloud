@@ -122,6 +122,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docker`, and check the model `docker compose config` builds), a billing month with the scheduler on,
   the bill and reminder jobs without an SMTP integration, and how charging catches up after the host
   was down.
+- **Platform setup page in the operator console** (`/setup`, also reached as `/onboarding`, where the API sends an
+  install without a platform configuration; linked from System and from the Dashboard). A new install was set up from
+  four pages and a doc block, and the Dashboard checklist counted rows that the Compose seed writes, so it called a
+  fresh install configured. The page shows one tab per step with the state `GET /api/v1/admin/setup/status` reports
+  (the database answer at once, the live one when the cluster has answered; a state the API could not read shows
+  Unknown, never done), and the Dashboard card shows the same steps. Step 1 asks for the token ID, GPUs and an import
+  store and shows the generated root script with a copy button and the two firewall switches. Step 2 takes the
+  connection, runs every check of the connection test (`?checks=all`) with one row each, offers to pin the
+  fingerprint the server presented only after the operator compared it with `pvenode cert info`, and saves the
+  provider with `attachToNewProjects: false`, so no project is attached before Go live. The other steps list their
+  checks and link to the provider page until their forms land. Playwright specs against the mock API cover the
+  script, the check rows, the pin, the create body and the axe checks; not run against a live API or cluster.
 
 ### Changed
 

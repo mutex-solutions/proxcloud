@@ -1,7 +1,7 @@
 import { NavLink, Outlet, useLocation } from "react-router-dom"
 import {
   Banknote, Blocks, BookOpen, Building2, Check, CheckSquare, Cloud, CreditCard, FileClock, FileText,
-  FolderKanban, Gauge, KeyRound, LayoutDashboard, LogOut, Mail, Menu as MenuIcon,
+  FolderKanban, Gauge, KeyRound, LayoutDashboard, ListChecks, LogOut, Mail, Menu as MenuIcon,
   Monitor, Moon, PackageCheck, Percent, PiggyBank, Receipt, Search as SearchIcon, Server, Settings2, Shield, Sun, Tag, Users, Wallet,
 } from "lucide-react"
 import { useEffect, useState } from "react"
@@ -58,6 +58,7 @@ const groups: Group[] = [
   {
     label: "System",
     items: [
+      { to: "/setup", label: "Platform setup", icon: ListChecks, permission: "admin:service:read" },
       { to: "/system/configuration", label: "Platform", icon: FileText, permission: "admin:platform_config:read" },
       { to: "/system/price-plans", label: "Price plans", icon: Tag, permission: "admin:price_plan:read" },
       { to: "/system/billing-configuration", label: "Billing configuration", icon: Gauge, permission: "admin:billing_config:read" },

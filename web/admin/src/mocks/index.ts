@@ -6,6 +6,7 @@ import { dispatch } from "./router"
 import "./handlers/dashboard"
 import "./handlers/clients"
 import "./handlers/system"
+import "./handlers/setup"
 import "./handlers/audit"
 
 export function enableMocks() {
