@@ -27,7 +27,7 @@ import { fmtDateTime, timeAgo } from "@/lib/format"
 import { useTabParam } from "@/lib/hooks"
 
 type RateLimit = { limit: number; remaining: number; used: number; reset: string; resource?: string }
-type Status = {
+export type Status = {
   configured: boolean
   integrationId?: string
   login?: string
@@ -50,7 +50,7 @@ type VerifiedVM = {
 }
 type InstalledVM = { serviceId: string; serviceName: string; node: string; vmid: number; version: string; sourceDigest?: string; published: boolean; withdrawn?: boolean }
 type Withdrawal = { id: string; package: string; tag: string; reason: string; actor: string; at: string; vmid?: number }
-type VMLine = {
+export type VMLine = {
   line: string
   package: string
   os: string
@@ -86,7 +86,7 @@ type Receipt = {
 }
 type History = { items: Receipt[]; jobs: Record<string, { state: string; attempts: number; maxAttempts: number; lastError?: string }> }
 type SmokeSummary = { jobId: string; step?: string; result?: "PASS" | "FAIL"; code?: string; message?: string; startedAt?: string; finishedAt?: string }
-type TemplateState = {
+export type TemplateState = {
   id: string
   package: string
   tag: string
@@ -126,8 +126,8 @@ type SmokeReceipt = {
   checks?: { osPrettyName?: string; cloudInitStatus?: string; rootFsBytes?: number; templateDiskBytes?: number; kubelet?: string }
   warnings?: string[]
 }
-type Templates = { items: TemplateState[]; smokes: SmokeReceipt[]; vmUpdatesEnabled: boolean }
-type Placement = { configuredImportStorage: string; nodes: { node: string; importStorages: string[]; diskStorages: string[] }[] }
+export type Templates = { items: TemplateState[]; smokes: SmokeReceipt[]; vmUpdatesEnabled: boolean }
+export type Placement = { configuredImportStorage: string; nodes: { node: string; importStorages: string[]; diskStorages: string[] }[] }
 type SandboxPin = { id: string; template: string; registry: string; tag: string; digest: string; ref: string; action: string; previous?: string; serviceId: string; actor: string; at: string; mirrorJob: string }
 type SandboxReceipt = {
   id: string
@@ -865,7 +865,7 @@ function HistoryTab({ data, loading }: { data?: History; loading: boolean }) {
 
 // ── imported templates: lifecycle ─────────────────────────────────────────────────────────────
 
-const STATE: Record<string, { label: string; variant: "default" | "secondary" | "outline" | "destructive" }> = {
+export const STATE: Record<string, { label: string; variant: "default" | "secondary" | "outline" | "destructive" }> = {
   importing: { label: "Importing", variant: "outline" },
   import_failed: { label: "Import failed", variant: "destructive" },
   staged: { label: "Staged", variant: "outline" },

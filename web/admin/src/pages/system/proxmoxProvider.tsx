@@ -141,13 +141,15 @@ type PVEAuthResponse = {
 }
 
 export function ProxmoxProviderForm({
-  form, setForm, serviceId, mode = "create",
+  form, setForm, serviceId, mode = "create", setup = false,
 }: {
   form: ProxmoxFormState
   setForm: (f: ProxmoxFormState) => void
   // On the detail page: lets Test reuse the stored secret when the field is blank.
   serviceId?: string
   mode?: "create" | "edit"
+  // The Platform setup page: the connection only. It runs the checks itself and sets the network in a later step.
+  setup?: boolean
 }) {
   const edit = mode === "edit"
   const [testing, setTesting] = useState(false)
@@ -243,6 +245,7 @@ export function ProxmoxProviderForm({
           Every project gets one PVE pool (<code>{form.poolPrefix || "pc-"}&lt;projectId&gt;</code>) — the tenancy boundary.
         </p>
       </div>
+      {setup ? null : (<>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="grid gap-2">
           <Label htmlFor="pve-isolation">Tenant network isolation</Label>
@@ -294,6 +297,7 @@ export function ProxmoxProviderForm({
         Test connection lists any privilege it lacks. Networking zones,
         storage profiles, templates and GPU mappings are configured on the provider detail page after creation.
       </p>
+      </>)}
     </div>
   )
 }

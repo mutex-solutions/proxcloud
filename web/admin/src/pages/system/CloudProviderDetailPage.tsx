@@ -39,6 +39,7 @@ import {
   ProxmoxProviderForm,
   proxmoxNetworkConfig,
   proxmoxFormFromService,
+  proxmoxFormToBody,
   proxmoxFormValid,
   type ProxmoxFormState,
 } from "./proxmoxProvider"
@@ -333,16 +334,14 @@ function ProxmoxConnectionTab({ id, provider }: TabProps) {
   const [form, setForm] = useState<ProxmoxFormState>(() => proxmoxFormFromService(provider))
   const save = useEsSave(id)
   const submit = () => {
+    // The connection keys come from the same mapping as Add provider, so a field of the form is never left out.
+    const { apiUrl, tokenId, fingerprint, apiUrls, caCert, insecureTls, poolPrefix } = proxmoxFormToBody(form).config
     save.mutate({
       path: `/admin/service/${id}`,
       body: {
         name: form.name.trim(),
         config: {
-          apiUrl: form.apiUrl.trim().replace(/\/+$/, ""),
-          tokenId: form.tokenId.trim(),
-          fingerprint: form.fingerprint.trim(),
-          insecureTls: form.insecureTls,
-          poolPrefix: form.poolPrefix.trim() || "pc-",
+          apiUrl, tokenId, fingerprint, apiUrls, caCert, insecureTls, poolPrefix,
           // Merge into the CURRENT stored network (not the mount-time copy) so a Network-JSON
           // save made since this tab mounted is not reverted.
           network: proxmoxNetworkConfig({ ...form, storedConfig: asObj(provider.config) }),

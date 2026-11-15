@@ -1,4 +1,6 @@
 import { useMemo } from "react"
+import { Link } from "react-router-dom"
+import { useQuery } from "@tanstack/react-query"
 import { Area, AreaChart, CartesianGrid, Cell, Pie, PieChart, XAxis, YAxis } from "recharts"
 import { CreditCard, Cpu, FolderKanban, Server, Users } from "lucide-react"
 import { PageHeader } from "@/components/layout/PageHeader"
@@ -16,6 +18,8 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { useAdminList, useAdminStats } from "@/lib/hooks"
 import { fmtMoney, fmtMoneyTight } from "@/lib/format"
 import { cn } from "@/lib/utils"
+import { hasPermission, useAdminMe } from "@/lib/auth"
+import { SETUP_READ_PERMS, SETUP_STEPS, setupStatusQuery, stateView } from "@/pages/setup/common"
 
 // Stable slot assignment: categories are sorted before colors are handed out,
 // so a resource type keeps its hue across reloads; >7 fold into "Other".
@@ -103,18 +107,44 @@ function GpuCapacityCard() {
   )
 }
 
-// Setup checklist row — the status dot carries the color, the neutral label
-// carries the information (design-system convention; keeps colored copy off the page).
-// Literal classes so Tailwind emits them: status-dot-ok status-dot-warn
-function SetupRow({ label, ok }: { label: string; ok?: boolean }) {
+// Platform setup card — the steps of GET /admin/setup/status (database only, so it is fast). The status dot carries
+// the color, the neutral label the information (design-system convention). It counts no rows: the Compose seed
+// writes the billing and platform configuration, so row counts would call a fresh install configured.
+function SetupCard() {
+  const status = useQuery(setupStatusQuery("", false))
+  const titles = Object.fromEntries(SETUP_STEPS.map((s) => [s.id, s.title]))
   return (
-    <div className="flex items-center justify-between border-b py-2.5 text-sm last:border-0">
-      <span>{label}</span>
-      <span className="inline-flex items-center gap-1.5">
-        <span className={cn("status-dot", ok ? "status-dot-ok" : "status-dot-warn")} />
-        <span className="text-muted-foreground">{ok ? "Configured" : "Not set up"}</span>
-      </span>
-    </div>
+    <Card>
+      <CardHeader className="border-b">
+        <CardTitle className="text-base">Platform setup</CardTitle>
+        <p className="text-sm text-muted-foreground">From a new install to the first tenant.</p>
+      </CardHeader>
+      <CardContent>
+        {status.isLoading ? (
+          <div className="space-y-3 py-1">
+            {[0, 1, 2, 3, 4, 5].map((i) => (
+              <Skeleton key={i} className="h-6" />
+            ))}
+          </div>
+        ) : status.error ? (
+          <p className="py-2 text-sm text-muted-foreground">The setup status could not be read: {(status.error as Error).message}</p>
+        ) : (
+          status.data?.steps.map((st) => {
+            const v = stateView(st.state)
+            return (
+              <div key={st.id} className="flex items-center justify-between border-b py-2.5 text-sm last:border-0">
+                <span>{titles[st.id] ?? st.id}</span>
+                <span className="inline-flex items-center gap-1.5">
+                  <span className={cn("status-dot", v.dot)} />
+                  <span className="text-muted-foreground">{v.label}</span>
+                </span>
+              </div>
+            )
+          })
+        )}
+        <Link to="/setup" className="mt-3 inline-block text-sm underline underline-offset-4">Open platform setup</Link>
+      </CardContent>
+    </Card>
   )
 }
 
@@ -130,6 +160,8 @@ const signupConfig = {
 
 export function DashboardPage() {
   const { data, isLoading } = useAdminStats()
+  const { data: me } = useAdminMe()
+  const canSetup = SETUP_READ_PERMS.every((p) => hasPermission(me?.permissions, p))
   const resources = useAdminList<{ id?: string; type?: string }>("/admin/cloud-resource")
 
   // Billed (invoices raised) vs collected (payments received), last 12 months.
@@ -227,31 +259,9 @@ export function DashboardPage() {
       )}
 
       <div className="mt-6 grid gap-4 lg:grid-cols-3">
-        <Card>
-          <CardHeader className="border-b">
-            <CardTitle className="text-base">Platform setup</CardTitle>
-            <p className="text-sm text-muted-foreground">One-time configuration checklist.</p>
-          </CardHeader>
-          <CardContent>
-            {isLoading ? (
-              <div className="space-y-3 py-1">
-                {[0, 1, 2, 3, 4].map((i) => (
-                  <Skeleton key={i} className="h-6" />
-                ))}
-              </div>
-            ) : (
-              <>
-                <SetupRow label="Cloud provider" ok={data?.cloudProviderConfigured} />
-                <SetupRow label="Billing" ok={data?.billingConfigured} />
-                <SetupRow label="Branding" ok={data?.brandingConfigured} />
-                <SetupRow label="Mail gateway" ok={data?.mailGatewayConfigured} />
-                <SetupRow label="Price plan" ok={data?.pricePlanConfigured} />
-              </>
-            )}
-          </CardContent>
-        </Card>
+        {canSetup ? <SetupCard /> : null}
 
-        <Card className="lg:col-span-2">
+        <Card className={canSetup ? "lg:col-span-2" : "lg:col-span-3"}>
           <CardHeader className="border-b">
             <CardTitle className="text-base">Billed vs collected</CardTitle>
             <p className="text-sm text-muted-foreground">Invoices raised and payments received, last 12 months.</p>

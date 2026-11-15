@@ -2,7 +2,7 @@ import { useMemo, useState } from "react"
 import { useMutation, useQueryClient } from "@tanstack/react-query"
 import type { ColumnDef } from "@tanstack/react-table"
 import { Cloud, Plus } from "lucide-react"
-import { useNavigate } from "react-router-dom"
+import { useNavigate, useSearchParams } from "react-router-dom"
 import { toast } from "sonner"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { DataTable, sortableHeader } from "@/components/data-table"
@@ -351,8 +351,11 @@ export default function CloudProvidersPage() {
   const { data, isLoading, error } = useAdminList<CloudProvider>(LIST_PATH)
   const items = data?.data ?? []
 
-  const [createOpen, setCreateOpen] = useState(false)
-  const [kind, setKind] = useState<"ceph-s3" | "rustfs" | "truenas" | "powerdns" | "kamaji" | "dbaas" | "sandbox" | "proxmox">("proxmox")
+  // ?add=truenas opens Add provider on TrueNAS (the Platform setup page links here).
+  const [params] = useSearchParams()
+  const addTrueNAS = params.get("add") === "truenas"
+  const [createOpen, setCreateOpen] = useState(addTrueNAS)
+  const [kind, setKind] = useState<"ceph-s3" | "rustfs" | "truenas" | "powerdns" | "kamaji" | "dbaas" | "sandbox" | "proxmox">(addTrueNAS ? "truenas" : "proxmox")
   const [powerDNSForm, setPowerDNSForm] = useState<PowerDNSFormState>(emptyPowerDNSForm)
   const [trueNASForm, setTrueNASForm] = useState<TrueNASFormState>(emptyTrueNASForm)
   const [cephForm, setCephForm] = useState<CephFormState>(emptyCephForm)

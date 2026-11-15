@@ -122,6 +122,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docker`, and check the model `docker compose config` builds), a billing month with the scheduler on,
   the bill and reminder jobs without an SMTP integration, and how charging catches up after the host
   was down.
+- **Platform setup page in the operator console** (`/setup`, also reached as `/onboarding`, where the API sends an
+  install without a platform configuration; linked from System and from the Dashboard for an admin who holds the four
+  reads the status needs: service, price plan, platform configuration and billing configuration). A new install was
+  set up from four pages and a doc block, and the Dashboard checklist counted rows that the Compose seed writes, so it
+  called a fresh install configured. The page shows one tab per step with the state `GET /api/v1/admin/setup/status`
+  reports (the database answer at once, the live one when the cluster has answered; a state the API could not read
+  shows Unknown, never done, and when a later read fails the page drops the answer it had instead of showing it as
+  current), and the Dashboard card shows the same steps. Step 1 asks for the token ID, GPUs and an import store and
+  shows the generated root script with a copy button and the two firewall switches. Step 2 takes the connection, runs
+  every check of the connection test (`?checks=all`) with one row each, offers to pin the fingerprint the server
+  presented only after the operator compared it with `pvenode cert info`, and saves the provider with
+  `attachToNewProjects: false`, so no project is attached before Go live. Steps 3 to 8 are described below. Playwright
+  specs against the mock API cover the script, the check rows, the pin, the create body and the axe checks; not run
+  against a live API or cluster.
+- **Network and storage steps of the Platform setup page.** A provider's network and storage were raw JSON on the
+  provider page, and a wrong block showed up only as a failed tenant network. Step 3 is a form: zone kind (EVPN, VLAN,
+  simple), zone ID, the VLAN tag range (1 to 4094, first not above last, which the API does not check), the project
+  network range (`cidrPool`, default `10.100.0.0/16`, locked once saved because every tenant network is cut from it),
+  EVPN peers and exit nodes from the cluster's nodes, an optional public network that only a bridge without a node
+  address or default gateway on any node can carry, and the networks tenants must not reach. It saves with
+  `PUT /api/v1/admin/service/{id}`, which replaces each top-level config key, so it reads the stored block first and
+  sends it whole: public networks, isolation and other zones are kept. Step 4 detects the storage, shows the proposed
+  profiles to confirm (a saved profile wins over a proposal of the same name), and saves the default profile, the
+  import store and the backup store. Without a store that takes `import` content it shows the one `pvesm set` command;
+  it also lists the three `pvesm add nfs` commands of a NAS (the stores installer stage 05 creates) and the
+  prerequisites of a TrueNAS provider, with a link that opens Add provider on TrueNAS
+  (`/system/cloud-providers?add=truenas`). Playwright specs check the saved bodies against the mock API; not run
+  against a live API or cluster.
+- **OS templates step of the Platform setup page.** Getting a first template onto a console install meant the
+  Template updates page, the Integrations page and raw JSON for the smoke network, one image and one node at a time.
+  The step is done once the provider publishes an OS image, however it was built, and then shows nothing more.
+  Otherwise it shows whether template updates are on (if not, the installer command
+  `./proxcloud-up.sh install --template-updates`, because the API reads the flag only at start), takes the GitHub
+  token (`read:packages`; version listing has no anonymous access), saves the smoke-test network
+  (`config.templateSmoke`), imports the picked OS images on the picked nodes in one go (one request per image and node,
+  each staged and smoke-tested as before) with their progress, and has one **Publish all that passed** button that
+  sends one publish request per template whose smoke test passed. Nothing is published without that click.
+  Kubernetes node images are left to the Template updates page. Playwright specs check the flag-off state, the import
+  requests and that publish is called once per passed template, against the mock API; not run against a live API.
+- **Catalog, Go live and Next steps of the Platform setup page.** The defaults (flavors, public price plan, default
+  quota, region row) needed a checkout and `seed-operator.py`, and going live meant the provider's Projects tab plus a
+  sync nobody ran on a Compose install. Step 6 shows what `GET /api/v1/admin/setup/defaults` would write, the rate
+  table included, before anything is applied; the price plan is applied only after the operator ticks that the rates
+  were reviewed, and the apply sends `confirmRates` only then. It warns about flavors that no rule prices (billed as
+  zero) and links the billing details and mail as recommended. Step 7 is enabled when Connect, Network, Storage and OS
+  templates are done (a warning there does not hold it back, a state the cluster did not report does) in a live
+  answer, and the catalog is done or the operator ticks going live without it. A database-only answer never enables
+  it: there Connect is done once the provider is saved, without its connection checks. When the job scheduler is off
+  it says that nothing then syncs or charges on a timer and shows `./proxcloud-up.sh install --scheduler`, without
+  blocking. Go live turns the attach policy on, runs one provider sync
+  (`POST /api/v1/admin/job/external-service/sync`) and starts a bulk attach of the projects created meanwhile when
+  there are any, then lists the first tenant's path. Step 8 is a static card that links ADR 0009. `docs/quickstart.md`
+  (path A2 and After any install) and `deploy/compose/README.md` now point at the page; the install flags
+  `--template-updates` and `--scheduler` the page names are those of the Docker Compose entry above (opt-in VM
+  template updates and job scheduler). Playwright specs check the preview before Apply, the confirmation in the apply
+  body and Go live staying disabled until its prerequisites hold, against the mock API; not run against a live API,
+  and Go live not run against a cluster.
 
 ### Changed
 
@@ -159,6 +216,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hand in Proxmox with no bridge in the inventory sets `network.bridge` to that zone's bridge (the portal
   uses an existing zone as it is). Tested with unit tests and the preflight task run on its own against the
   inventory defaults; not run in a full install.
+
+### Fixed
+
+- **The Proxmox provider page saves the failover URLs and the cluster CA** (operator console, Cloud providers,
+  Connection tab). The form showed both fields, but Save sent neither, so an edit of `apiUrls` or `caCert` was
+  dropped while the page reported it saved. Save now takes the connection keys from the same mapping as Add
+  provider. A Playwright spec checks the request body against the mock API; not run against a live API.
 
 ### Security
 

@@ -25,8 +25,8 @@ you pass `--version`.
 
 ## What is not included
 
-- **No Proxmox setup.** No provider, token, OS template or network is created. Register your
-  Proxmox VE cluster in the operator console afterwards
+- **No Proxmox setup.** No provider, token, OS template or network is created. Connect your
+  Proxmox VE cluster afterwards with the operator console's Platform setup page
   ([quickstart, A2](../../docs/quickstart.md#a2-connect-an-existing-proxmox-cluster)).
 - **No managed services.** Managed Kubernetes, managed databases and sandboxes need the services
   cluster of the [installer](../../docs/install.md); they are not part of this stack.
@@ -141,9 +141,12 @@ they do, and they win over `.env`.
 ### After the install
 
 1. Open the operator console and sign in with the operator email and the temporary password.
-2. System, Cloud providers: register the Proxmox provider, then **Test connection**.
-3. Continue with [After any install](../../docs/quickstart.md#5-after-any-install): price plan,
-   flavors, quota, first tenant.
+2. System, Platform setup (`/setup`): it walks from the Proxmox token script to Go live, one step
+   per tab, and applies the flavors, the price plan and the quota from the console, so no checkout
+   and no `seed-operator.py` run is needed ([quickstart, A2](../../docs/quickstart.md#a2-connect-an-existing-proxmox-cluster)).
+   Template imports need the API started with template updates on, and on this stack nothing syncs
+   or charges on a timer while the job scheduler is off: the page says so at Go live.
+3. Then the first tenant: [After any install](../../docs/quickstart.md#5-after-any-install).
 
 ### Optional features
 

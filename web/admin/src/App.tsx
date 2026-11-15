@@ -63,6 +63,9 @@ export default function App() {
           <Route path="system/promotions" element={lazyPage(() => import("@/pages/system/PromotionsPage"))} />
 
           {/* Platform */}
+          <Route path="setup" element={lazyPage(() => import("@/pages/setup/SetupPage"))} />
+          {/* The API redirects an install without a platform configuration here. */}
+          <Route path="onboarding" element={<Navigate to="/setup" replace />} />
           <Route path="system/cloud-providers" element={lazyPage(() => import("@/pages/system/CloudProvidersPage"))} />
           <Route path="system/cloud-providers/:id" element={lazyPage(() => import("@/pages/system/CloudProviderDetailPage"))} />
           <Route path="system/template-updates" element={lazyPage(() => import("@/pages/system/TemplateUpdatesPage"))} />

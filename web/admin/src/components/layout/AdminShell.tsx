@@ -1,7 +1,7 @@
 import { NavLink, Outlet, useLocation } from "react-router-dom"
 import {
   Banknote, Blocks, BookOpen, Building2, Check, CheckSquare, Cloud, CreditCard, FileClock, FileText,
-  FolderKanban, Gauge, KeyRound, LayoutDashboard, LogOut, Mail, Menu as MenuIcon,
+  FolderKanban, Gauge, KeyRound, LayoutDashboard, ListChecks, LogOut, Mail, Menu as MenuIcon,
   Monitor, Moon, PackageCheck, Percent, PiggyBank, Receipt, Search as SearchIcon, Server, Settings2, Shield, Sun, Tag, Users, Wallet,
 } from "lucide-react"
 import { useEffect, useState } from "react"
@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/sidebar"
 import { cn } from "@/lib/utils"
 import SearchModal from "@/components/search-modal"
+import { SETUP_READ_PERMS } from "@/pages/setup/common"
 
 // Mirrors the OLD admin's structure: Dashboard · Client Area (users → cloud
 // resources, in the old sidebar order) · System (the old Settings areas).
@@ -31,7 +32,7 @@ type Item = {
   to: string
   label: string
   icon: React.ComponentType<{ className?: string }>
-  permission?: string
+  permission?: string | string[] // every one is needed
   special?: "validations"
 }
 type Group = { label: string; items: Item[] }
@@ -58,6 +59,7 @@ const groups: Group[] = [
   {
     label: "System",
     items: [
+      { to: "/setup", label: "Platform setup", icon: ListChecks, permission: SETUP_READ_PERMS },
       { to: "/system/configuration", label: "Platform", icon: FileText, permission: "admin:platform_config:read" },
       { to: "/system/price-plans", label: "Price plans", icon: Tag, permission: "admin:price_plan:read" },
       { to: "/system/billing-configuration", label: "Billing configuration", icon: Gauge, permission: "admin:billing_config:read" },
@@ -134,7 +136,7 @@ export function AdminShell() {
     .map((g) => ({
       ...g,
       items: g.items.filter((it) => {
-        if (!hasPermission(me?.permissions, it.permission)) return false
+        if (![it.permission].flat().every((p) => hasPermission(me?.permissions, p))) return false
         if (it.special === "validations" && !validationsVisible) return false
         return true
       }),

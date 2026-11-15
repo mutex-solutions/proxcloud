@@ -3,6 +3,7 @@
 import { ApiError } from "@/lib/api"
 import { on } from "../router"
 import { db } from "../db"
+import { nodeBridges, presentedFingerprint, setupChecks, untrustedChecks } from "../fixtures/setup"
 
 type Doc = Record<string, any>
 
@@ -44,8 +45,16 @@ on("POST /admin/service", ({ opts }) => {
 // Project templates across Proxmox providers (register before /admin/service/:id).
 on("GET /admin/service/os-images", () => ({ data: db.osImages }))
 
-// Proxmox connection test (stored token, or the form's unsaved one).
-on("POST /admin/service/proxmox/auth", () => ({ data: db.proxmoxAuthResult }))
+// Proxmox connection test (stored token, or the form's unsaved one). With ?checks=all it adds one row per check and
+// the node bridges; an unsaved connection without a pin is refused over the certificate, with its fingerprint.
+on("POST /admin/service/proxmox/auth", ({ query, opts }) => {
+  if (query.get("checks") !== "all") return { data: db.proxmoxAuthResult }
+  const b = (opts.body ?? {}) as Doc
+  if (!query.get("externalServiceId") && !b.fingerprint && !b.caCert && !b.insecureTls) {
+    return { data: { ...db.proxmoxAuthResult, checks: untrustedChecks, presentedFingerprint } }
+  }
+  return { data: { ...db.proxmoxAuthResult, checks: setupChecks, bridges: nodeBridges } }
+})
 
 // ceph-s3 connection check on the Add dialog's unsaved values.
 on("POST /admin/service/object-store/test", () => ({ data: { ok: true } }))
