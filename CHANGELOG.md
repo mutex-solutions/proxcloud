@@ -123,8 +123,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   design that needs no cluster: addresses inside the prefix and apart from each other, a node range that holds every
   machine plus one surge per MachineDeployment, SSH keys that parse, no overlap with the provider's tenant pool,
   sandbox or public networks, and a MetalLB range tenants can reach. An update names the `rev` it read and is refused
-  during a run, and for the fields that cannot change once a run succeeded (network, seed node and address, cluster
-  name, endpoint and node groups). The two platform tokens (`capmox@pve!capi`, `csi@pve!csi`) are pasted write-only
+  during a run, for a change of provider, and for the fields that cannot change once a run succeeded (path, layout,
+  name, network, the seed's mode, pool, node and address, cluster name, endpoint and node groups); a draft stays
+  correctable. The two platform tokens (`capmox@pve!capi`, `csi@pve!csi`) are pasted write-only
   into collection `platformSecret`, sealed with the data key like the Ceph credentials, refused without one, and
   never returned or put into an audit diff; `kubeconfig`, `seedKubeconfig`, `k3sToken`, `bootstrapToken` and `caKey`
   join the audit's secret keys. The preflight reads only: flags, both tokens' privileges and the portal token's mint

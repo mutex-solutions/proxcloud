@@ -256,7 +256,7 @@ func (h *Handler) platformUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		if fixed := platformlife.FixedChanges(&old, &next); len(fixed) > 0 {
 			return nil, &invalidInstallation{status: http.StatusConflict, code: "fixed_fields",
-				msg: "These fields cannot change once the platform was installed (or ever): " + strings.Join(fixed, ", "), problems: fixed}
+				msg: "These fields cannot change once the platform was installed (serviceId never): " + strings.Join(fixed, ", "), problems: fixed}
 		}
 		return &next, nil
 	})

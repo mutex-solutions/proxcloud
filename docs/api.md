@@ -360,10 +360,11 @@ are several, `errors.details.problems`.
   refused until a later release.
 - `GET|PUT /installations/{id}`: the PUT replaces `name` and `spec` and names
   the `rev` it read (`409 rev_conflict` otherwise). It is refused during a run
-  (`409 run_active`) and for a fixed field (`409 fixed_fields`): `serviceId`,
-  `provisionedBy`, `layout` and the seed pool always; once a run succeeded also
-  `name`, `spec.network`, the seed's mode, node and address, and the cluster's
-  name, endpoint and node groups.
+  (`409 run_active`) and for a fixed field (`409 fixed_fields`): `serviceId`
+  always; once a run succeeded also `provisionedBy`, `layout`, `name`,
+  `spec.network`, the seed's mode, pool, node and address, and the cluster's
+  name, endpoint and node groups. A draft can be corrected; no route deletes
+  one.
 - `PUT /installations/{id}/credentials`: `{capi: {tokenId, secret}, csi:
   {tokenId, secret}}`, either or both, write-only. The ids must be
   `capmox@pve!capi` and `csi@pve!csi` (the managed-services script's), the

@@ -187,7 +187,7 @@ func TestUnfenced(t *testing.T) {
 	}
 }
 
-// Fixed fields: the provider, the path, the layout and the seed pool always; the network, the seed's place and the
+// Fixed fields: the provider always; the path, the layout, the network, the seed's mode, pool and place and the
 // cluster's identity once a run succeeded. Sizes and counts stay changeable.
 func TestFixedChanges(t *testing.T) {
 	old := validInstallation(t)
@@ -200,8 +200,22 @@ func TestFixedChanges(t *testing.T) {
 	if f := FixedChanges(old, next(func(n *Installation) { n.Spec.Network.Gateway = "10.200.200.254"; n.Name = "lab2" })); len(f) != 0 {
 		t.Fatalf("before the first run, network and name change: %v", f)
 	}
-	if f := FixedChanges(old, next(func(n *Installation) { n.ServiceID = "svc-other"; n.Layout = LayoutSeparate })); !slices.Equal(f, []string{"serviceId", "layout"}) {
+	if f := FixedChanges(old, next(func(n *Installation) { n.ServiceID = "svc-other"; n.Layout = LayoutSeparate })); !slices.Equal(f, []string{"serviceId"}) {
 		t.Fatalf("always fixed: %v", f)
+	}
+	// A draft made with the wrong path and seed mode can be corrected: existing in proxcloud-system to a portal seed,
+	// whose pool Normalize fills.
+	draft := next(func(n *Installation) {
+		n.ProvisionedBy, n.Spec.Seed.Mode, n.Spec.Seed.Pool, n.Spec.NodeImage.Mode = ByInstaller, SeedExisting, "proxcloud-system", ImageTemplates
+		n.Spec.NodeImage.Templates = map[string]int{"pve1": 9000, "pve2": 9000, "pve3": 9000}
+	})
+	if err := draft.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	fixed := next(func(n *Installation) { n.Spec.Seed.Pool = "" })
+	fixed.Normalize()
+	if f := FixedChanges(draft, fixed); len(f) != 0 || fixed.Validate() != nil {
+		t.Fatalf("a draft's path and seed mode: %v %v", f, fixed.Validate())
 	}
 	old.Status.BOM = &BOMRef{Release: "0.7.0-dev", SHA256: "x"}
 	for _, tc := range []struct {
@@ -212,7 +226,9 @@ func TestFixedChanges(t *testing.T) {
 			n.Spec.Seed.Cores, n.Spec.Clusters[0].NodeGroups[1].Count, n.Spec.Clusters[0].MetalLBRange = 4, 2, "10.200.200.200-10.200.200.230"
 			n.Spec.Clusters[0].NodeGroups[1].Nodes = []string{"pve2", "pve3"}
 		}},
+		{[]string{"provisionedBy", "layout"}, func(n *Installation) { n.ProvisionedBy, n.Layout = ByInstaller, LayoutSeparate }},
 		{[]string{"name"}, func(n *Installation) { n.Name = "lab2" }},
+		{[]string{"spec.seed.mode", "spec.seed.pool"}, func(n *Installation) { n.Spec.Seed.Mode, n.Spec.Seed.Pool = SeedExisting, "proxcloud-system" }},
 		{[]string{"spec.network"}, func(n *Installation) { n.Spec.Network.DNS = []string{"1.1.1.1"} }},
 		{[]string{"spec.seed.node", "spec.seed.address"}, func(n *Installation) { n.Spec.Seed.Node, n.Spec.Seed.Address = "pve2", "10.200.200.11" }},
 		{[]string{"spec.clusters[0].name", "spec.clusters[0].endpoint"}, func(n *Installation) {

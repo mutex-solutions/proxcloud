@@ -562,9 +562,9 @@ func (in *Installation) Unfenced(fenced []string) []string {
 // Installed reports whether a run ever succeeded, which fixes the fields FixedChanges names.
 func (in *Installation) Installed() bool { return in.Status.BOM != nil }
 
-// FixedChanges names the fields next changes that may not change: the provider, the path, the layout and the seed's
-// pool always; once a run succeeded also the name, the network, the seed's mode, node and address, and each cluster's
-// name, endpoint and node groups.
+// FixedChanges names the fields next changes that may not change: the provider always; once a run succeeded also the
+// path, the layout, the name, the network, the seed's mode, pool, node and address, and each cluster's name, endpoint
+// and node groups. Before that nothing was built, so a draft can be corrected (no route deletes one).
 func FixedChanges(old, next *Installation) []string {
 	var out []string
 	same := func(field string, a, b any) {
@@ -573,15 +573,15 @@ func FixedChanges(old, next *Installation) []string {
 		}
 	}
 	same("serviceId", old.ServiceID, next.ServiceID)
-	same("provisionedBy", old.ProvisionedBy, next.ProvisionedBy)
-	same("layout", old.Layout, next.Layout)
-	same("spec.seed.pool", old.Spec.Seed.Pool, next.Spec.Seed.Pool)
 	if !old.Installed() {
 		return out
 	}
+	same("provisionedBy", old.ProvisionedBy, next.ProvisionedBy)
+	same("layout", old.Layout, next.Layout)
 	same("name", old.Name, next.Name)
 	same("spec.network", old.Spec.Network, next.Spec.Network)
 	same("spec.seed.mode", old.Spec.Seed.Mode, next.Spec.Seed.Mode)
+	same("spec.seed.pool", old.Spec.Seed.Pool, next.Spec.Seed.Pool)
 	same("spec.seed.node", old.Spec.Seed.Node, next.Spec.Seed.Node)
 	same("spec.seed.address", old.Spec.Seed.Address, next.Spec.Seed.Address)
 	if len(old.Spec.Clusters) != len(next.Spec.Clusters) {
