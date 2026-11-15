@@ -256,7 +256,8 @@ function SeedsForm({ serviceId, cfg, seedUrl }: { serviceId: string; cfg: Doc; s
   const md: Doc = cfg.metadata ?? {}
   const stored: SeedMode | "" = md.forceIso === true ? "iso" : md.forceIso === false || md.url ? "url" : ""
   const [mode, setMode] = useState<SeedMode | "">(stored)
-  const url = seedUrl || "the API (no base URL is set, so seeds go on an ISO)"
+  // seedUrl "" = no API base URL and no config.metadata.url: every seed goes on an ISO, so a URL choice cannot hold.
+  const ready = mode === "iso" || (mode === "url" && !!seedUrl)
   const save = useMutation({
     mutationFn: async () => {
       const fresh: Doc = (await readProvider(serviceId)).config?.metadata ?? {}
@@ -269,7 +270,7 @@ function SeedsForm({ serviceId, cfg, seedUrl }: { serviceId: string; cfg: Doc; s
     onError: (e) => toast.error(errMsg(e)),
   })
   const options: { value: SeedMode; label: string }[] = [
-    { value: "url", label: `By URL from ${url} (tenant servers reach it with a trusted certificate)` },
+    { value: "url", label: seedUrl ? `By URL from ${seedUrl} (tenant servers reach it with a trusted certificate)` : "By URL (not available: the API has no base URL and config.metadata.url is not set)" },
     { value: "iso", label: "On an ISO (LAN installs, self-signed certificates)" },
   ]
   return (
@@ -279,16 +280,17 @@ function SeedsForm({ serviceId, cfg, seedUrl }: { serviceId: string; cfg: Doc; s
         How a server on a DHCP network gets its hostname, password and SSH keys. A server that cannot fetch its seed
         boots with the template&apos;s hostname, no password and no guest agent, and nothing reports it. Servers on a
         network without DHCP always get an ISO.{" "}
-        {stored === "iso" ? "Saved: on an ISO." : stored === "url" ? "Saved: by URL." : `Not chosen yet: ${seedUrl ? "servers fetch it by URL" : "it goes on an ISO"}.`}
+        {stored === "iso" ? "Saved: on an ISO." : stored === "url" ? (seedUrl ? "Saved: by URL." : "Saved: by URL, but no URL is set, so seeds go on an ISO.")
+          : `Not chosen yet: ${seedUrl ? "servers fetch it by URL" : "it goes on an ISO"}.`}
       </p>
       {options.map((o) => (
         <label key={o.value} className="flex items-start gap-2 text-sm">
-          <input type="radio" name="seed-mode" value={o.value} checked={mode === o.value} onChange={() => setMode(o.value)} className="mt-0.5 size-4 accent-primary" />
+          <input type="radio" name="seed-mode" value={o.value} checked={mode === o.value} onChange={() => setMode(o.value)} disabled={o.value === "url" && !seedUrl} className="mt-0.5 size-4 accent-primary" />
           <span className="break-words">{o.label}</span>
         </label>
       ))}
       <div className="flex justify-end">
-        <Button onClick={() => save.mutate()} disabled={!mode || save.isPending}>{save.isPending ? "Saving…" : "Save server seeds"}</Button>
+        <Button onClick={() => save.mutate()} disabled={!ready || save.isPending}>{save.isPending ? "Saving…" : "Save server seeds"}</Button>
       </div>
     </fieldset>
   )

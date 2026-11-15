@@ -391,13 +391,15 @@ snippet.
 **Choosing.** Only the operator knows whether tenant servers reach the URL and trust its certificate,
 and a server that misses its URL seed boots with the template's hostname, no password and no guest agent,
 with nothing reporting it. So the setup status (`GET /api/v1/admin/setup/status`, network item `seeds`)
-asks for a choice: it is `attention`, never blocking, until `metadata.forceIso` is saved (`true` or `false`)
-or `metadata.url` is set, and its message names the URL seeds are fetched from (`metadata.url`, else
-`PROXCLOUD_SELF_API_BASE_URL`; the answer's `seedUrl`). Platform setup, step 3 Network, offers the two
-answers under **Server seeds** and saves `metadata.forceIso`, keeping the other `metadata` keys:
+asks for a choice: it is `attention`, never blocking, until `metadata.forceIso` is `true`, or is `false`
+with a seed URL, or `metadata.url` is set, and its message names the URL seeds are fetched from
+(`metadata.url`, else `PROXCLOUD_SELF_API_BASE_URL`; the answer's `seedUrl`). With neither set every seed
+goes on an ISO whatever `forceIso` says, so the item stays `attention` and says so. Platform setup, step 3
+Network, offers the two answers under **Server seeds** and saves `metadata.forceIso`, keeping the other
+`metadata` keys:
 
 - **By URL** (`forceIso: false`): tenant servers reach that URL with a certificate they trust, for example
-  a public ACME certificate on an address the tenant vnets route to.
+  a public ACME certificate on an address the tenant vnets route to. Disabled when there is no seed URL.
 - **On an ISO** (`forceIso: true`): a LAN install, or a self-signed certificate such as Compose TLS mode
   `internal`. The seed needs no network; it lives on `isoStorage` (see Secrets below).
 

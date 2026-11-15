@@ -303,10 +303,12 @@ makes the step `todo`, and a step is `blocked` only when it cannot start.
   off (`PROXCLOUD_JOBS_SCHEDULER_ENABLED`) are `attention` items: they block
   nothing. An attach policy that is on while steps are open is `attention`.
 - **Server seeds.** `network` has the item `seeds`: `done` once the operator
-  chose how servers get their seed, that is `config.metadata.forceIso` is saved
-  (`true` or `false`) or `config.metadata.url` is set; `attention` otherwise,
-  saying that servers on a DHCP network fetch their seed from the API base URL
-  unless ISO seeds are on, and must reach it and trust its certificate. It never
+  chose how servers get their seed, that is `config.metadata.forceIso` is
+  `true`, or is `false` with a seed URL, or `config.metadata.url` is set;
+  `attention` otherwise, saying that servers on a DHCP network fetch their seed
+  from the API base URL unless ISO seeds are on, and must reach it and trust its
+  certificate. With no seed URL at all it stays `attention`, `forceIso: false`
+  included, and says every seed goes on an ISO. It never
   holds go live back, and nothing is probed: only the operator knows what tenant
   servers reach. `seedUrl` is where a URL seed is fetched from:
   `config.metadata.url`, else the API's own base URL

@@ -253,6 +253,28 @@ test("Network and Server seeds each keep the other's unsaved edits when one is s
   await expect(seeds).toContainText("Saved: on an ISO.")
 })
 
+test("Server seeds offers no URL when the API has none, and says a saved URL choice goes on an ISO", async ({ page }) => {
+  await page.goto("/setup?tab=network")
+  const seeds = page.getByRole("group", { name: "Server seeds" })
+  await recordCalls(page)
+  await seeds.getByRole("radio", { name: /^By URL/ }).check()
+  await seeds.getByRole("button", { name: "Save server seeds" }).click()
+  await expect(seeds).toContainText("Saved: by URL.")
+
+  // The same install without PROXCLOUD_SELF_API_BASE_URL or config.metadata.url: the status has no seed URL.
+  await recordCalls(page, { "GET /admin/setup/status": { ...statusWith({ network: "attention", golive: "todo" }), seedUrl: "" } })
+  await page.getByRole("button", { name: "Check again" }).click()
+  await expect(page.getByRole("button", { name: "Check again" })).toBeEnabled()
+  const byUrl = seeds.getByRole("radio", { name: "By URL (not available: the API has no base URL and config.metadata.url is not set)" })
+  await expect(byUrl).toBeDisabled()
+  await expect(seeds).toContainText("Saved: by URL, but no URL is set, so seeds go on an ISO.")
+  await expect(seeds.getByRole("button", { name: "Save server seeds" })).toBeDisabled()
+  await seeds.getByRole("radio", { name: /^On an ISO/ }).check()
+  await expect(seeds.getByRole("button", { name: "Save server seeds" })).toBeEnabled()
+  await expect(page.getByText("Server seeds saved")).toBeHidden({ timeout: 10_000 }) // the toast fades in and out
+  await expectAccessible(page)
+})
+
 test("Network never offers a bridge that is the management bridge on any node", async ({ page }) => {
   // pve1 manages through vmbr0, pve2 through vmbr1: each lists the other's management bridge without an address.
   const bridges = [

@@ -31,7 +31,7 @@ The tenant network settings, as a form: the zone kind (simple, VLAN or EVPN) and
 
 **Server seeds** says how a new server on a network with DHCP gets its hostname, password and SSH keys. A server that cannot get them boots with the template's hostname, no password and no guest agent, and nothing reports it, so the step needs attention until you choose (it does not block going live):
 
-- **By URL from** the API address shown: tenant servers download their seed from it. Choose this only when they can reach that address and trust its certificate.
+- **By URL from** the API address shown: tenant servers download their seed from it. Choose this only when they can reach that address and trust its certificate. When the API has no base URL and the provider sets no seed URL, this choice is disabled: every seed goes on an ISO.
 - **On an ISO**: the seed goes on a CD in the server. Choose this for a LAN install or a self-signed certificate, for example the one-host install with TLS mode `internal`.
 
 Servers on a network without DHCP always get an ISO. **Save server seeds** changes only this choice; the other seed settings of the provider are kept.
