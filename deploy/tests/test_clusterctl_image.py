@@ -198,6 +198,14 @@ class PinTests(unittest.TestCase):
             "control-plane-kubeadm/" + VERSIONS["capi"], "control-plane-kamaji/" + VERSIONS["capi_kamaji"],
             "infrastructure-proxmox/" + VERSIONS["capmox"], "ipam-in-cluster/" + VERSIONS["capi_ipam"],
             "addon-helm/" + VERSIONS["caaph"]]))
+        # What lands in {label}/{version}/ is that version's release asset, and a file clusterctl reads.
+        config = yaml.safe_load((IMAGE / "clusterctl.yaml").read_text())
+        files = {Path(provider["url"]).name for provider in config["providers"]} | {"metadata.yaml"}
+        for _, url, destination in adds():
+            if destination.startswith("/out/opt/"):
+                with self.subTest(url=url):
+                    self.assertEqual(re.search(r"/releases/download/([^/]+)/", url).group(1), destination.split("/")[6])
+                    self.assertIn(Path(url).name, files)
         for flag, provider in zip(REAL[::2], REAL[1::2]):
             self.assertIn("%s=%s" % (flag, provider), DOCKERFILE)  # the offline build check covers the workload set
         self.assertIn("--control-plane=kubeadm:%s" % VERSIONS["capi"], DOCKERFILE)  # and the seed's control plane
