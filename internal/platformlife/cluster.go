@@ -172,9 +172,10 @@ func (x *acq) apps(cluster string) ([]appOf, error) {
 	return out, nil
 }
 
-// appState is an Application as ArgoCD reports it: ok when it is Synced and Healthy and that was compared against
-// version, so the status of the version before does not pass.
-func appState(app map[string]any, version string) (state, detail string, ok bool) {
+// appState is an Application as ArgoCD reports it: ok when it is Synced and Healthy and that was compared against the
+// source the Application has now (both read in one GET), so the status of another version or of other values does
+// not pass.
+func appState(app map[string]any) (state, detail string, ok bool) {
 	sync, health := str(app, "status", "sync", "status"), str(app, "status", "health", "status")
 	var msgs []string
 	conds, _ := dig(app, "status", "conditions").([]any)
@@ -188,7 +189,8 @@ func appState(app map[string]any, version string) (state, detail string, ok bool
 	if sync == "" {
 		sync, health = "Unknown", "Unknown"
 	}
-	ok = sync == "Synced" && health == "Healthy" && str(app, "status", "sync", "comparedTo", "source", "targetRevision") == version
+	source := dig(app, "spec", "source")
+	ok = sync == "Synced" && health == "Healthy" && source != nil && reflect.DeepEqual(source, dig(app, "status", "sync", "comparedTo", "source"))
 	return sync + "/" + health, strings.Join(msgs, "; "), ok
 }
 
@@ -248,8 +250,8 @@ func (x *acq) inventory(ctx context.Context, seed, target *kamajik8s.Client, a a
 }
 
 // waves applies apps wave by wave on the seed's ArgoCD, each wave only once the one before is Synced and Healthy
-// (and, for a clusterctl component, its inventory on target equals the BOM); after runs when a wave is. With stall,
-// the stage's deadline starts again at every wave.
+// (and, for a clusterctl component, its inventory on target equals the BOM); after runs when a wave is. With stall, the stage's deadline starts again when the run reaches a wave for the first time: every
+// acquisition walks the waves from the first, and the ones the stored progress already names leave the deadline alone.
 func (x *acq) waves(ctx context.Context, seed, target *kamajik8s.Client, apps []appOf, stall time.Duration, after func(wave int) error) error {
 	var order []int
 	for _, a := range apps {
@@ -258,6 +260,8 @@ func (x *acq) waves(ctx context.Context, seed, target *kamajik8s.Client, apps []
 	slices.Sort(order)
 	order = slices.Compact(order)
 	var items []StageItem
+	seen := 0 // the wave the stored progress names
+	_, _ = fmt.Sscanf(x.run.Stages[x.si].Progress, "wave %d", &seen)
 	for i, w := range order {
 		if err := x.check(ctx); err != nil {
 			return err
@@ -274,7 +278,7 @@ func (x *acq) waves(ctx context.Context, seed, target *kamajik8s.Client, apps []
 			if err != nil {
 				return classify(CodeComponentUnhealthy, err)
 			}
-			state, detail, ok := appState(live, a.c.Chart.Version)
+			state, detail, ok := appState(live)
 			if want, has := clusterctlProviders(x.bom, a.c); has {
 				msg, err := x.inventory(ctx, seed, target, a, live, want)
 				if err != nil {
@@ -290,14 +294,17 @@ func (x *acq) waves(ctx context.Context, seed, target *kamajik8s.Client, apps []
 			items = append(items, StageItem{ID: a.name(), State: state, Message: clip(strings.TrimSuffix(detail, "; "))})
 		}
 		progress := fmt.Sprintf("wave %d of %d", i+1, len(order))
-		if s := x.run.Stages[x.si]; s.Progress != progress || !slices.Equal(s.Items, items) {
+		// Written where the run stands: a new wave, the stored one, or an earlier one that is pending again.
+		if reached := i+1 > seen; reached || ((len(pending) > 0 || i+1 == seen) && !slices.Equal(x.run.Stages[x.si].Items, items)) {
 			if err := x.saveStage(ctx, func(s *Stage) {
-				if stall > 0 && s.Progress != progress {
-					now := time.Now().UTC()
-					d := now.Add(stall)
-					s.LastProgressAt, s.Deadline = &now, &d
+				if reached {
+					if s.Progress = progress; stall > 0 {
+						now := time.Now().UTC()
+						d := now.Add(stall)
+						s.LastProgressAt, s.Deadline = &now, &d
+					}
 				}
-				s.Items, s.Progress = items, progress
+				s.Items = items
 			}); err != nil {
 				return err
 			}
@@ -328,6 +335,21 @@ func (x *acq) seedPlatform(ctx context.Context) error {
 	}
 	if err := x.check(ctx); err != nil {
 		return err
+	}
+	// A rotation that died between storing the new credential and deleting the old Secrets left a token Secret that
+	// nothing stores: every one but the stored credential's goes.
+	if stored := x.in.Status.Seed.TokenSecret; stored != "" {
+		all, err := seed.ListSecrets(ctx, SeedPortalNamespace, "")
+		if err != nil {
+			return classify(CodeSeedAPIUnreachable, err)
+		}
+		for _, s := range all {
+			if name := str(s, "metadata", "name"); strings.HasPrefix(name, strings.TrimSuffix(SeedPortalTokenSecret, "1")) && name != stored {
+				if err := seed.DeleteSecret(ctx, SeedPortalNamespace, name); err != nil {
+					return classify(CodeSeedAPIUnreachable, err)
+				}
+			}
+		}
 	}
 	if err := seed.ApplyCR(ctx, "helm.cattle.io", "v1", "helmcharts", chart); err != nil {
 		return classify(CodeComponentUnhealthy, err)
@@ -431,9 +453,22 @@ func (x *acq) cluster(ctx context.Context) error {
 			return err
 		}
 	}
-	machines, vmids, err := x.machines(ctx, seed)
+	machines, vmids, infra, err := x.machines(ctx, seed)
 	if err != nil {
 		return err
+	}
+	// CAPMOX reports a refused token on its own objects; no Machine gets a failure message for it.
+	pc, err := seed.GetCR(ctx, infraGroup, infraVersion, "proxmoxclusters", ClusterName, ClusterName)
+	if err != nil && !kamajik8s.NotFound(err) {
+		return classify(CodeSeedAPIUnreachable, err)
+	}
+	for _, obj := range append(infra, pc) {
+		conds, _ := dig(obj, "status", "conditions").([]any)
+		for _, c := range conds {
+			if m, _ := c.(map[string]any); str(m, "status") != "True" && pveAuthFailure(str(m, "message")) {
+				return permanent(CodeCAPMOXAuthFailed, "Proxmox refuses the token of Cluster API (%s): %s", str(obj, "metadata", "name"), clip(str(m, "message")))
+			}
+		}
 	}
 	var items []StageItem
 	var failed error
@@ -451,7 +486,7 @@ func (x *acq) cluster(ctx context.Context) error {
 		if phase == "Failed" || msg != "" {
 			item.State, item.Message = "Failed", clip(item.Message+": "+msg)
 			code := CodeMachineFailed
-			if low := strings.ToLower(msg); strings.Contains(low, "401") || strings.Contains(low, "authentication") {
+			if pveAuthFailure(msg) {
 				code = CodeCAPMOXAuthFailed
 			}
 			if failed == nil {
@@ -487,17 +522,23 @@ func (x *acq) cluster(ctx context.Context) error {
 	return nil
 }
 
-// machines lists the workload cluster's Machines on the seed with the VMID of each, read from its ProxmoxMachine.
-func (x *acq) machines(ctx context.Context, seed *kamajik8s.Client) ([]map[string]any, map[string]int, error) {
-	machines, err := seed.ListCRs(ctx, capiGroup, capiVersion, "machines", ClusterName, clusterSelector)
-	if err != nil {
-		return nil, nil, classify(CodeSeedAPIUnreachable, err)
+// pveAuthFailure tells a message that carries Proxmox's refusal of a token: "401 authentication failure" from the
+// API, "not authorized to access endpoint" from the client CAPMOX uses. A bare 401 is not enough: VMIDs are numbers.
+func pveAuthFailure(msg string) bool {
+	low := strings.ToLower(msg)
+	return strings.Contains(low, "authentication failure") || strings.Contains(low, "not authorized") || strings.Contains(low, "401 unauthorized")
+}
+
+// machines lists the workload cluster's Machines on the seed with the VMID of each, read from its ProxmoxMachine, and
+// the ProxmoxMachines.
+func (x *acq) machines(ctx context.Context, seed *kamajik8s.Client) (machines []map[string]any, vmids map[string]int, infra []map[string]any, err error) {
+	if machines, err = seed.ListCRs(ctx, capiGroup, capiVersion, "machines", ClusterName, clusterSelector); err != nil {
+		return nil, nil, nil, classify(CodeSeedAPIUnreachable, err)
 	}
-	infra, err := seed.ListCRs(ctx, infraGroup, infraVersion, "proxmoxmachines", ClusterName, "")
-	if err != nil {
-		return nil, nil, classify(CodeSeedAPIUnreachable, err)
+	if infra, err = seed.ListCRs(ctx, infraGroup, infraVersion, "proxmoxmachines", ClusterName, ""); err != nil {
+		return nil, nil, nil, classify(CodeSeedAPIUnreachable, err)
 	}
-	vmids := map[string]int{}
+	vmids = map[string]int{}
 	for _, m := range machines {
 		for _, pm := range infra {
 			if str(pm, "metadata", "name") == str(m, "spec", "infrastructureRef", "name") {
@@ -506,7 +547,7 @@ func (x *acq) machines(ctx context.Context, seed *kamajik8s.Client) ([]map[strin
 			}
 		}
 	}
-	return machines, vmids, nil
+	return machines, vmids, infra, nil
 }
 
 // workloadAccess is stage 8: the seed ArgoCD's service account on the workload, cluster-admin and without a token
@@ -562,7 +603,7 @@ func (x *acq) workloadAccess(ctx context.Context) error {
 		config, err := jsonText(map[string]any{"bearerToken": token,
 			"tlsClientConfig": map[string]any{"insecure": false, "caData": base64.StdEncoding.EncodeToString(ca["tls.crt"])}})
 		if err != nil {
-			return err
+			return permanent(CodeComponentUnhealthy, "The seed ArgoCD's cluster Secret could not be rendered.")
 		}
 		if err := seed.ApplySecret(ctx, argoNamespace, argoClusterSecret,
 			map[string]string{"name": ClusterName, "server": WorkloadServer(in.Cluster.Endpoint), "config": config},
@@ -587,7 +628,7 @@ func (x *acq) workloadAccess(ctx context.Context) error {
 	}
 	csi, err := CSIConfigSecret(x.bom, in, PVEToken{ID: x.sec.CSI.TokenID, Secret: x.sec.CSI.Secret})
 	if err != nil {
-		return err
+		return permanent(CodeComponentUnhealthy, "The CSI configuration could not be rendered.")
 	}
 	return classify(CodeWorkloadUnreachable, wl.ApplyCore(ctx, "secrets", csi))
 }
@@ -603,14 +644,15 @@ func (x *acq) workloadPlatform(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	stateful := -1
+	stateful, first := -1, apps[0].c.Wave // the CNI's wave is the lowest, wherever the BOM lists it
 	for _, a := range apps {
+		first = min(first, a.c.Wave)
 		if a.c.Stateful {
 			stateful = max(stateful, a.c.Wave)
 		}
 	}
 	return x.waves(ctx, seed, wl, apps, waveStall, func(wave int) error {
-		if wave == apps[0].c.Wave {
+		if wave == first {
 			if err := x.nodes(ctx, wl); err != nil {
 				return err
 			}
@@ -742,7 +784,8 @@ const ProviderMarker = "platformInstallationId"
 // providerOwned are the config keys stage 10 rewrites on a row it adopts. Everything else is written when the row is
 // created and is the operator's from then on: its name, its status, the node image versions, the attach policy.
 var providerOwned = [][]string{{"argocd"}, {"namespacePlacement"}, {"cluster", "pveApiUrl"},
-	{"database", "egressFence"}, {"database", "lbAddressPool"}, {"database", "storageClasses"}}
+	{"database", "egressFence"}, {"database", "lbAddressPool"}, {"database", "storageClasses"},
+	{"database", "engines", "postgresql", "replicas"}} // [1] again when the dbaas group drops below three PVE nodes
 
 // AdoptProvider finds among the stored provider rows the one a stage 10 body adopts, the row of the body's
 // config.provider that carries its marker, and rewrites the owned keys on it. nil = there is none: create it. Two rows

@@ -104,34 +104,45 @@ func RotateSeedCredential(ctx context.Context, in *Installation, sec *Secrets, s
 		map[string]any{"type": "kubernetes.io/service-account-token"}, "kubernetes.io/service-account.name", SeedPortalAccount)); err != nil {
 		return err
 	}
+	// A rotation that stops before the store holds the new token deletes the Secret it made: nothing stores its token,
+	// and it would stay a second cluster-admin credential on the seed.
+	drop := func(err error) error {
+		_ = c.DeleteSecret(context.WithoutCancel(ctx), SeedPortalNamespace, next)
+		return err
+	}
 	token := ""
 	for range 20 { // the token controller fills the Secret
 		data, err := c.GetSecretData(ctx, SeedPortalNamespace, next)
 		if err != nil {
-			return err
+			return drop(err)
 		}
 		if token = string(data["token"]); token != "" {
 			break
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return drop(ctx.Err())
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
 	if token == "" {
-		return fmt.Errorf("platform: the seed did not fill %s/%s with a token", SeedPortalNamespace, next)
+		return drop(fmt.Errorf("platform: the seed did not fill %s/%s with a token", SeedPortalNamespace, next))
 	}
 	fresh, err := seedClient(st, token)
 	if err != nil {
-		return err
+		return drop(err)
 	}
 	if ok, err := fresh.CanI(ctx, kamajik8s.AccessCheck{Verb: "*", Group: "*", Resource: "*"}); err != nil {
-		return err
+		return drop(err)
 	} else if !ok {
-		return fmt.Errorf("platform: the token of %s/%s is not cluster-admin; the stored credential was kept", SeedPortalNamespace, next)
+		return drop(fmt.Errorf("platform: the token of %s/%s is not cluster-admin; the stored credential was kept", SeedPortalNamespace, next))
 	}
 	if err := store(ctx, st.TokenSecret, next, token); err != nil {
+		// Only a refusal is known to have stored nothing. After any other error the commit may have happened, and the
+		// Secret may be the stored credential's: it stays, and the next run's stage 6 sweeps whichever is not.
+		if errors.Is(err, ErrRunActive) || errors.Is(err, ErrRevConflict) || errors.Is(err, ErrNoEncryptionKey) || errors.Is(err, ErrNotFound) {
+			return drop(err)
+		}
 		return err
 	}
 	// With the new credential, which proves the store holds one that works. Older Secrets a failed rotation left go too.

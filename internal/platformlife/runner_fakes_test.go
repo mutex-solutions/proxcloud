@@ -806,7 +806,7 @@ func (f *fakeSeed) object(w http.ResponseWriter, r *http.Request) {
 		}
 		if body["kind"] == "Application" && !f.unsynced[name] {
 			body["status"] = map[string]any{"health": map[string]any{"status": "Healthy"}, "operationState": map[string]any{"phase": "Succeeded"},
-				"sync": map[string]any{"status": "Synced", "comparedTo": map[string]any{"source": map[string]any{"targetRevision": dig(body, "spec", "source", "targetRevision")}}}}
+				"sync": map[string]any{"status": "Synced", "comparedTo": map[string]any{"source": dig(body, "spec", "source")}}}
 		}
 		f.objs[path] = body
 		answer(body)

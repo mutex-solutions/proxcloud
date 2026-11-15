@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -228,6 +229,14 @@ func TestWaveGating(t *testing.T) {
 	if end := p.once(); end != "defer:waiting_workload_platform" || p.seed.obj(appsPath+"pc-platform-cert-manager") != nil {
 		t.Fatalf("an older version passed: %s", end)
 	}
+	// The same version, compared against other values than the Application has now: not this wave's either.
+	app := p.seed.objs[appsPath+"pc-platform-cilium"]
+	old["sync"] = map[string]any{"status": "Synced", "comparedTo": map[string]any{"source": map[string]any{
+		"repoURL": dig(app, "spec", "source", "repoURL"), "chart": dig(app, "spec", "source", "chart"), "targetRevision": dig(app, "spec", "source", "targetRevision"),
+		"helm": map[string]any{"valuesObject": map[string]any{"before": "the edit"}}}}}
+	if end := p.once(); end != "defer:waiting_workload_platform" || p.stage(stageWorkloadPlatform).Code != CodeComponentUnhealthy {
+		t.Fatalf("a status of other values passed: %s %+v", end, p.stage(stageWorkloadPlatform))
+	}
 	delete(p.seed.unsynced, "pc-platform-cilium")
 	if end := p.once(); end != "defer:waiting_workload_platform" || p.stage(stageWorkloadPlatform).Code != CodeNodesTimeout ||
 		p.seed.obj(appsPath+"pc-platform-cert-manager") != nil {
@@ -237,6 +246,105 @@ func TestWaveGating(t *testing.T) {
 	first := *p.stage(stageWorkloadPlatform).Deadline
 	if end := p.until(10); end != "complete" || !p.stage(stageWorkloadPlatform).Deadline.After(first) {
 		t.Fatalf("end %s, deadline %v after %v", end, p.stage(stageWorkloadPlatform).Deadline, first)
+	}
+}
+
+// A wave that stays stuck keeps its deadline over the acquisitions and fails at it: walking the waves before it again
+// neither starts the deadline again nor writes the stage.
+func TestWaveStallDeadline(t *testing.T) {
+	p := newPlatform(t, RunApply)
+	p.only(stageWorkloadPlatform)
+	p.seed.unsynced["pc-platform-cert-manager"] = true
+	if end := p.once(); end != "defer:waiting_workload_platform" || p.stage(stageWorkloadPlatform).Progress != "wave 2 of 4" {
+		t.Fatalf("end %s: %+v", end, p.stage(stageWorkloadPlatform))
+	}
+	first := p.stage(stageWorkloadPlatform)
+	for range 3 {
+		if end := p.once(); end != "defer:waiting_workload_platform" {
+			t.Fatalf("end %s", end)
+		}
+	}
+	if s := p.stage(stageWorkloadPlatform); !s.Deadline.Equal(*first.Deadline) || !s.LastProgressAt.Equal(*first.LastProgressAt) || s.Progress != "wave 2 of 4" {
+		t.Fatalf("the deadline moved while wave 2 is stuck: %v -> %v (%s)", first.Deadline, s.Deadline, s.Progress)
+	}
+	// Wave 1 pending again shows in the items and leaves the progress and the deadline where they were.
+	p.seed.unsynced["pc-platform-cilium"] = true
+	p.seed.objs[appsPath+"pc-platform-cilium"]["status"] = map[string]any{"sync": map[string]any{"status": "OutOfSync"}, "health": map[string]any{"status": "Degraded"}}
+	if end := p.once(); end != "defer:waiting_workload_platform" {
+		t.Fatalf("end %s", end)
+	}
+	if s := p.stage(stageWorkloadPlatform); !s.Deadline.Equal(*first.Deadline) || s.Progress != "wave 2 of 4" || len(s.Items) != 1 || s.Items[0].State != "OutOfSync/Degraded" {
+		t.Fatalf("wave 1 pending again: %+v", s)
+	}
+	p.mutate(func(run *Run, _ *Installation, _ *Secrets) {
+		for i := range run.Stages {
+			if past := time.Now().Add(-time.Second); run.Stages[i].ID == stageWorkloadPlatform {
+				run.Stages[i].Deadline = &past
+			}
+		}
+	})
+	if end := p.once(); end != "fail:"+CodeComponentUnhealthy {
+		t.Fatalf("after the deadline: %s", end)
+	}
+}
+
+// The nodes are waited for after the lowest wave, also when the BOM lists a component of a later wave first.
+func TestNodeWaitFollowsTheLowestWave(t *testing.T) {
+	cur, _ := Current()
+	order := slices.Clone(cur.BOM.Components)
+	t.Cleanup(func() { cur.BOM.Components = order })
+	cur.BOM.Components = slices.Clone(order)
+	slices.Reverse(cur.BOM.Components)
+	p := newPlatform(t, RunApply)
+	p.only(stageWorkloadPlatform)
+	p.wl.objs["/api/v1/nodes/pc-platform-dbaas-pve3"]["status"] = map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "False"}}}
+	if end := p.once(); end != "defer:waiting_workload_platform" || p.stage(stageWorkloadPlatform).Code != CodeNodesTimeout ||
+		p.stage(stageWorkloadPlatform).Progress != "wave 1 of 4" || p.seed.obj(appsPath+"pc-platform-cert-manager") != nil {
+		t.Fatalf("end %s: %+v", end, p.stage(stageWorkloadPlatform))
+	}
+}
+
+// CAPMOX reports a token Proxmox refuses on the ProxmoxCluster or a ProxmoxMachine, not on a Machine: the stage fails
+// capmox_auth_failed with that message instead of waiting for its deadline. A VMID that reads 401 is not a refusal.
+func TestCAPMOXAuthFailure(t *testing.T) {
+	infra := "/apis/infrastructure.cluster.x-k8s.io/v1alpha2/namespaces/pc-platform/"
+	cond := func(msg string) map[string]any {
+		return map[string]any{"conditions": []any{map[string]any{"type": "ProxmoxAvailable", "status": "False", "message": msg}}}
+	}
+	for _, path := range []string{infra + "proxmoxclusters/pc-platform", infra + "proxmoxmachines/pc-platform-cp-infra"} {
+		p := newPlatform(t, RunApply)
+		p.only(stageCluster)
+		obj := p.seed.obj(path)
+		if obj == nil {
+			obj = meta("pc-platform", nil)
+		}
+		obj["status"] = cond("cannot clone VM 401: still locked")
+		p.seed.put(path, obj)
+		if end := p.once(); end != "complete" {
+			t.Fatalf("%s, a VMID 401: end %s %+v", path, end, p.stage(stageCluster))
+		}
+		p.again(stageCluster)
+		obj["status"] = cond("failed to list nodes: 401 authentication failure " + runCAPI)
+		if end := p.once(); end != "fail:"+CodeCAPMOXAuthFailed || !strings.Contains(p.stage(stageCluster).Message, "401 authentication failure") {
+			t.Fatalf("%s: end %s %+v", path, end, p.stage(stageCluster))
+		}
+		p.leaks(t)
+	}
+}
+
+// Stage 6 deletes the portal's token Secrets a rotation left on the seed, and keeps the one whose token is stored.
+func TestSeedPlatformSweepsTokenSecrets(t *testing.T) {
+	p := newPlatform(t, RunApply)
+	p.only(stageSeedPlatform)
+	ns := seedNS + "proxcloud-system/secrets/"
+	for _, name := range []string{"proxcloud-portal-token-g1", "proxcloud-portal-token-g2", "unrelated"} {
+		p.seed.put(ns+name, meta(name, nil))
+	}
+	if end := p.until(6); end != "complete" {
+		t.Fatalf("end %s: %+v", end, p.stage(stageSeedPlatform))
+	}
+	if p.seed.obj(ns+"proxcloud-portal-token-g2") != nil || p.seed.obj(ns+"proxcloud-portal-token-g1") == nil || p.seed.obj(ns+"unrelated") == nil {
+		t.Fatalf("Secrets after stage 6: %v", p.seed.writes)
 	}
 }
 
@@ -314,6 +422,14 @@ func TestAdoptProvider(t *testing.T) {
 	if row, err := AdoptProvider(nil, body); row != nil || err != nil {
 		t.Fatalf("no rows: %v %v", row, err)
 	}
+	// The replicas offered follow the dbaas group: a row adopted after the group dropped below three PVE nodes offers 1.
+	_, dbBody := ProviderBodies(cur.BOM, RenderInput{ID: inID, Name: "lab", Region: "r1", Cluster: RenderCluster{NodeGroups: []RenderNodeGroup{{Name: "dbaas", Nodes: []string{"pve1", "pve2"}}}}}, "KUBECONFIG")
+	wide := map[string]any{"_id": "svc-9", "name": "lab Databases", "config": map[string]any{"provider": "dbaas", ProviderMarker: inID,
+		"database": map[string]any{"engines": map[string]any{"postgresql": map[string]any{"replicas": []any{1, 3}, "versions": "the operator's"}}}}}
+	if row, err := AdoptProvider([]map[string]any{wide}, dbBody); err != nil || !reflect.DeepEqual(dig(row, "config", "database", "engines", "postgresql", "replicas"), []any{1}) ||
+		dig(row, "config", "database", "engines", "postgresql", "versions") != "the operator's" {
+		t.Fatalf("replicas on an adopted row: %v %v", row, err)
+	}
 	mine := map[string]any{"_id": "svc-1", "name": "renamed by the operator", "status": "DISABLED", "secret": map[string]any{"kubeconfig": "sealed"},
 		"config": map[string]any{"provider": "kamaji", ProviderMarker: inID, "attachToNewProjects": true, "argocd": map[string]any{"chartVersion": "0.0.1"},
 			"cluster": map[string]any{"versions": map[string]any{"1.34": "img"}, "pveApiUrl": "https://old:8006"}}}
@@ -351,6 +467,35 @@ func removal(t *testing.T) *platform {
 	p.seed.put(appsPath+"pc-platform", meta("pc-platform", nil))
 	p.pve.vms[120].cfg["protection"] = "1"
 	return p
+}
+
+// The cluster part of a remove takes the cluster and the volumes out of the status when it is done. A Remove started
+// again after the seed VM was deleted then has nothing to ask of Cluster API and needs no confirmation.
+func TestRemoveResumesAfterTheSeedIsGone(t *testing.T) {
+	p := removal(t)
+	p.only(StageRemoveCluster)
+	p.seed.mu.Lock()
+	for k := range p.seed.objs {
+		if strings.HasPrefix(k, capiNS+"machines/") {
+			delete(p.seed.objs, k)
+		}
+	}
+	p.seed.mu.Unlock()
+	if end := p.until(8); end != "complete" {
+		t.Fatalf("end %s: %+v", end, p.stage(StageRemoveCluster))
+	}
+	if _, in, _ := p.state.snapshot(); len(in.Status.Clusters)+len(in.Status.Volumes) != 0 {
+		t.Fatalf("status after the cluster part: %+v", in.Status)
+	}
+	delete(p.pve.vms, 120)
+	p.again(StageRemoveCluster)
+	disabled, k8s, pveWrites := p.disabled, p.k8sWrites(), len(p.pve.writes)
+	if end := p.once(); end != "complete" || p.stage(StageRemoveCluster).State != StageDone {
+		t.Fatalf("a Remove after the seed VM is gone: %s %+v", end, p.stage(StageRemoveCluster))
+	}
+	if p.disabled != disabled || p.k8sWrites() != k8s || len(p.pve.writes) != pveWrites {
+		t.Fatalf("something was written: %v %v", p.seed.writes, p.pve.writes)
+	}
 }
 
 // A remove is refused while tenant Applications exist on the workload: nothing is disabled, deleted or written.
@@ -515,8 +660,19 @@ func TestRotateSeedCredential(t *testing.T) {
 	p.seed.put(g1, meta("proxcloud-portal-token-g1", nil))
 	p.seed.put(seedNS+"proxcloud-system/secrets/unrelated", meta("unrelated", nil))
 	err := RotateSeedCredential(context.Background(), in, sec, func(context.Context, string, string, string) error { return ErrRunActive })
-	if !errors.Is(err, ErrRunActive) || p.seed.obj(g1) == nil {
-		t.Fatalf("refused store: %v, old Secret %v", err, p.seed.obj(g1))
+	if !errors.Is(err, ErrRunActive) || p.seed.obj(g1) == nil || p.seed.obj(g2) != nil {
+		t.Fatalf("refused store: %v, old Secret %v, new Secret %v", err, p.seed.obj(g1), p.seed.obj(g2))
+	}
+	p.seed.saAllowed = false
+	if err := RotateSeedCredential(context.Background(), in, sec, func(context.Context, string, string, string) error { t.Error("stored"); return nil }); err == nil ||
+		p.seed.obj(g1) == nil || p.seed.obj(g2) != nil {
+		t.Fatalf("a token that is not cluster-admin: %v, new Secret %v", err, p.seed.obj(g2))
+	}
+	p.seed.saAllowed = true
+	// A store error that is not a refusal may have committed: the new Secret stays.
+	if err := RotateSeedCredential(context.Background(), in, sec, func(context.Context, string, string, string) error { return errors.New("connection lost") }); err == nil ||
+		p.seed.obj(g1) == nil || p.seed.obj(g2) == nil {
+		t.Fatalf("an ambiguous store error: %v, Secrets %v %v", err, p.seed.obj(g1), p.seed.obj(g2))
 	}
 	var stored []string
 	err = RotateSeedCredential(context.Background(), in, sec, func(_ context.Context, old, next, token string) error {

@@ -34,6 +34,9 @@ func (x *acq) removeCluster(ctx context.Context) error {
 		gone = vm.absent || vm.foreign
 	}
 	if gone {
+		if len(x.in.Status.Clusters) == 0 && len(x.in.Status.Volumes) == 0 {
+			return nil // an earlier Remove finished this part and then deleted the seed VM: nothing is left to delete
+		}
 		if !x.run.Confirmed {
 			return permanent(CodeSeedLost, "The seed VM is gone, so Cluster API cannot delete the workload cluster. Start Remove with confirm \"remove %s\" "+
 				"to delete the VMs of pool %s tagged pc-platform-%s and the %d recorded volumes.", x.in.Name, pve.SystemPool, x.in.ID, len(x.in.Status.Volumes))
@@ -44,7 +47,7 @@ func (x *acq) removeCluster(ctx context.Context) error {
 		if err := x.deleteTagged(ctx); err != nil {
 			return err
 		}
-		return x.deleteVolumes(ctx)
+		return x.clusterRemoved(ctx)
 	}
 	seed, err := x.seed()
 	if err != nil {
@@ -100,7 +103,7 @@ func (x *acq) removeCluster(ctx context.Context) error {
 			}
 		}
 	}
-	machines, vmids, err := x.machines(ctx, seed)
+	machines, vmids, _, err := x.machines(ctx, seed)
 	if err != nil {
 		return err
 	}
@@ -111,7 +114,16 @@ func (x *acq) removeCluster(ctx context.Context) error {
 		}
 		return waiting(CodeMachineDeleteStuck, "Cluster API is deleting %s; %d machines are left: %s", ClusterName, len(left), clip(strings.Join(left, ", ")))
 	}
-	return x.deleteVolumes(ctx)
+	return x.clusterRemoved(ctx)
+}
+
+// clusterRemoved deletes the recorded volumes and then takes the cluster and the volumes out of the status, so a
+// Remove started again after the seed VM is deleted has nothing to ask of Cluster API.
+func (x *acq) clusterRemoved(ctx context.Context) error {
+	if err := x.deleteVolumes(ctx); err != nil {
+		return err
+	}
+	return x.record(ctx, func(_ *Run, in *Installation, _ *Secrets) { in.Status.Clusters, in.Status.Volumes = nil, nil })
 }
 
 // tenantsGone refuses the remove while tenant Applications exist on the workload, and answers the workload's client
