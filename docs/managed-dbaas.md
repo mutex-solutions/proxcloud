@@ -91,6 +91,21 @@ Admin UI → System → Cloud providers → Add provider → **Database (DBaaS)*
   allowlist (see Networking on Proxmox).
 - `config.database.backup` + `secret.backupAccessKey` / `secret.backupSecretKey` — the S3 store
   (see Backups and restore).
+- `config.namespacePlacement` (`nodeSelector`, `tolerations`) — optional, API only (a form save keeps
+  it). Every `pc-db-*` namespace gets the `scheduler.alpha.kubernetes.io/node-selector` and
+  `…/defaultTolerations` annotations and the label `proxcloud.io/platform-role: dbaas`, so the API
+  server puts every pod there on that node group, whatever the chart renders. It needs the
+  `PodNodeSelector` and `PodTolerationRestriction` admission plugins on the DB cluster's API server;
+  without them the annotations do nothing. Absent: nothing is stamped.
+- `config.database.egressFence: true` — optional, API only (a form save keeps it). Every `pc-db-*`
+  namespace gets the CiliumNetworkPolicy `proxcloud-default-egress`: its pods reach only their own
+  namespace, kube-dns on 53 and the API server on 6443 (what CloudNativePG needs), so a tenant with a
+  shell in its database pod cannot reach etcd, the kubelets, the Proxmox API or ArgoCD. It needs
+  Cilium and `get`, `create` and `patch` on `ciliumnetworkpolicies` for the provider ServiceAccount,
+  which `deploy/dbaas-cluster/rbac.yaml` does not grant: without them every database create fails. A
+  namespace gets it at its next bootstrap or database create. Setting the key back to false leaves
+  the policies in place; delete them by hand. It allows no object store, so it does not fit backups
+  yet.
 - `config.services.database.<region> = true` — un-hides the client Databases surface and
   enables the sync.
 

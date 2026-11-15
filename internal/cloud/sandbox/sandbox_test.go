@@ -91,7 +91,7 @@ func (f *fakeAPI) GetSecretData(_ context.Context, ns, name string) (map[string]
 	return f.secrets[ns+"/"+name], nil
 }
 
-func (f *fakeAPI) EnsureNamespace(_ context.Context, name string, labels map[string]string) error {
+func (f *fakeAPI) EnsureNamespace(_ context.Context, name string, labels, _ map[string]string) error {
 	f.namespaces[name] = labels
 	return nil
 }

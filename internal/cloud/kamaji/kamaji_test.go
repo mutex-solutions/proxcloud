@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 )
 
 func testCfg() Config {
@@ -427,6 +430,7 @@ func TestBuildApplication(t *testing.T) {
 
 type fakeAPI struct {
 	namespaces map[string]map[string]string
+	nsAnnots   map[string]map[string]string // name → annotations EnsureNamespace was given
 	secrets    map[string]map[string]string // ns/name → stringData
 	secretObjs map[string]map[string]any    // ns/name → full object (metadata for ListSecrets)
 	apps       map[string]map[string]any    // ns/name → object
@@ -452,8 +456,12 @@ func newFakeAPI() *fakeAPI {
 	}
 }
 
-func (f *fakeAPI) EnsureNamespace(_ context.Context, name string, labels map[string]string) error {
+func (f *fakeAPI) EnsureNamespace(_ context.Context, name string, labels, annotations map[string]string) error {
 	f.namespaces[name] = labels
+	if f.nsAnnots == nil {
+		f.nsAnnots = map[string]map[string]string{}
+	}
+	f.nsAnnots[name] = annotations
 	return nil
 }
 func (f *fakeAPI) GetNamespace(_ context.Context, name string) (map[string]any, error) {
@@ -758,6 +766,41 @@ func TestClusterLifeWithEitherIDShape(t *testing.T) {
 				t.Fatal("delete")
 			}
 		})
+	}
+}
+
+// A provider without config.namespacePlacement applies the namespace it applied before; with one, the namespace is
+// pinned to the kamaji group and says so in its platform-role label.
+func TestEnsureProjectNamespacePlacement(t *testing.T) {
+	base := map[string]string{LabelProject: "p1", LabelService: "svc-1", LabelManagedBy: ManagedByValue}
+	placement := kamajik8s.NamespacePlacement{
+		NodeSelector: map[string]string{"node-restriction.kubernetes.io/proxcloud-node-group": "kamaji"},
+		Tolerations:  []map[string]any{{"key": "proxcloud.io/node-group", "operator": "Equal", "value": "kamaji", "effect": "NoSchedule"}},
+	}
+	for name, tc := range map[string]struct {
+		placement   kamajik8s.NamespacePlacement
+		labels      map[string]string
+		annotations map[string]string
+	}{
+		"not configured": {kamajik8s.NamespacePlacement{}, base, nil},
+		"configured": {placement, map[string]string{
+			LabelProject: "p1", LabelService: "svc-1", LabelManagedBy: ManagedByValue, kamajik8s.LabelPlatformRole: "kamaji",
+		}, placement.Annotations()},
+	} {
+		api := newFakeAPI()
+		cfg := testCfg()
+		cfg.NamespacePlacement = tc.placement
+		if err := NewWithAPI(api, cfg, "svc-1").EnsureProjectNamespace(context.Background(), "p1"); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !reflect.DeepEqual(api.namespaces["pc-p1"], tc.labels) || !reflect.DeepEqual(api.nsAnnots["pc-p1"], tc.annotations) {
+			t.Errorf("%s: labels %v annotations %v, want %v %v", name, api.namespaces["pc-p1"], api.nsAnnots["pc-p1"], tc.labels, tc.annotations)
+		}
+	}
+	cfg := testCfg()
+	cfg.NamespacePlacement = kamajik8s.NamespacePlacement{NodeSelector: map[string]string{"a": "b,c=d"}}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "config.namespacePlacement") {
+		t.Fatalf("a selector the plugin would split differently: %v", err)
 	}
 }
 

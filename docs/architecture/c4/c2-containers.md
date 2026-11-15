@@ -366,6 +366,7 @@ boundaries rather than an unqualified `Implemented` component label.
 | API to Proxmox | Privilege-separated API token with the `ProxCloudPlatform` role; test connection warns on missing privileges and on `root@pam` | Implemented |
 | Tenant to tenant on the SDN | Cluster firewall rules (forward and input DROP inside the CIDR pool, per-project ACCEPT), reconciled every sync; non-overlapping CIDRs; optional per-project EVPN zone | Implemented |
 | Tenant VM to the network | VM firewall `policy_in DROP`, ipfilter/macfilter anti-spoof, security groups | Implemented |
+| Tenant database pod to the cluster it runs on | Ingress default-deny on every `pc-db-*` namespace; with `config.database.egressFence`, a CiliumNetworkPolicy that lets its pods reach only their namespace, kube-dns and the API server on 6443 (not kamaji-etcd, kubelets, the PVE API or ArgoCD); with `config.namespacePlacement`, its pods pinned to their node group by the API server | Ingress implemented; fence and placement implemented, opt-in, set by nothing yet, not lab-verified |
 | Public NIC to management network | Public networks on the management bridge are refused at test connection and at attach. What the uplink itself routes is filtered at the operator's edge | Implemented |
 | Identity matching by email | Only IdP-verified emails resolve to a user for add-member and invites | Implemented |
 | Tenant IdP to customer realm | Keycloak brokering; a guard on every API request holds the IdP to its verified domains and its own accounts; enforced SSO | Implemented |

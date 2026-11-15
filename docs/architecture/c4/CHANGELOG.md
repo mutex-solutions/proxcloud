@@ -20,6 +20,23 @@ credential before using it, and build the seed and provider kubeconfigs. `ApplyC
 lands.
 
 **Views updated:** [C3 components](c3-components.md) (Kubernetes API client row).
+## 2026-11-15: Node-group placement and egress fence for provider namespaces
+
+**What changed:** two optional provider keys. `config.namespacePlacement` makes the
+Kubernetes and database providers stamp the PodNodeSelector and PodTolerationRestriction
+annotations and a `proxcloud.io/platform-role` label on their project namespaces, so the
+API server keeps every pod there on one node group. `config.database.egressFence` adds a
+CiliumNetworkPolicy to every `pc-db-*` namespace: its pods reach only that namespace,
+kube-dns and the API server on 6443. Without the keys nothing changes, and nothing sets
+them yet: the managed-services run (ADR 0009) will, and it is off behind its flag.
+
+**Why:** a new control at a trust boundary. On a shared platform cluster the databases sit
+next to kamaji-etcd, the kubelets, ArgoCD and a route to the PVE API, and a tenant with
+PostgreSQL superuser can run commands in its database pod. Node groups only place pods;
+they do not fence the network.
+
+**Views updated:** [C2 containers](c2-containers.md) (trust boundaries: tenant database pod
+to its cluster), [C3 components](c3-components.md) (Managed Kubernetes, DBaaS).
 
 ## 2026-11-15: Management port job triggers only with debug triggers on
 

@@ -2,8 +2,12 @@ package dbaas
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
+	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -50,13 +54,30 @@ func newFakeAPI() *fakeAPI {
 
 func key(ns, name string) string { return ns + "/" + name }
 
-func (f *fakeAPI) EnsureNamespace(_ context.Context, name string, labels map[string]string) error {
+func (f *fakeAPI) EnsureNamespace(_ context.Context, name string, labels, annotations map[string]string) error {
 	f.ops = append(f.ops, "ns:"+name)
 	l := map[string]any{}
 	for k, v := range labels {
 		l[k] = v
 	}
-	f.namespaces[name] = map[string]any{"metadata": map[string]any{"name": name, "labels": l}}
+	meta := map[string]any{"name": name, "labels": l}
+	if len(annotations) > 0 { // the real client sends no annotations key without any
+		a := map[string]any{}
+		for k, v := range annotations {
+			a[k] = v
+		}
+		meta["annotations"] = a
+	}
+	f.namespaces[name] = map[string]any{"metadata": meta}
+	return nil
+}
+func (f *fakeAPI) ApplyCR(_ context.Context, _, _, plural string, obj map[string]any) error {
+	name, ns := digStr(obj, "metadata", "name"), digStr(obj, "metadata", "namespace")
+	f.ops = append(f.ops, plural+":"+name)
+	if f.crs[plural] == nil {
+		f.crs[plural] = map[string]map[string]any{}
+	}
+	f.crs[plural][key(ns, name)] = obj
 	return nil
 }
 func (f *fakeAPI) GetNamespace(_ context.Context, name string) (map[string]any, error) {
@@ -537,6 +558,78 @@ func TestOwnershipGuards(t *testing.T) {
 	}
 	if err := s.PatchDatabaseApp(ctx, "pc-d-foreign", func(map[string]any) error { return nil }); err == nil {
 		t.Fatal("patch of unmanaged application must refuse")
+	}
+}
+
+// A provider without the placement and fence keys applies exactly the namespace and policies it applied before.
+// With them the namespace is pinned to the dbaas group, says so in its platform-role label, and gets the egress fence.
+func TestEnsureProjectNamespaceStampsOnlyWhenConfigured(t *testing.T) {
+	placement := kamajik8s.NamespacePlacement{
+		NodeSelector: map[string]string{"node-restriction.kubernetes.io/proxcloud-node-group": "dbaas"},
+		Tolerations:  []map[string]any{{"key": "proxcloud.io/node-group", "operator": "Equal", "value": "dbaas", "effect": "NoSchedule"}},
+	}
+	base := map[string]any{LabelProject: "p1", LabelService: "svc-dbaas", LabelManagedBy: ManagedByValue}
+	withRole := map[string]any{LabelProject: "p1", LabelService: "svc-dbaas", LabelManagedBy: ManagedByValue, kamajik8s.LabelPlatformRole: "dbaas"}
+	for name, tc := range map[string]struct {
+		placement   kamajik8s.NamespacePlacement
+		fence       bool
+		labels      map[string]any
+		annotations any
+		ops         string
+	}{
+		"not configured": {kamajik8s.NamespacePlacement{}, false, base, nil, "ns:pc-db-p1,np:proxcloud-default-deny"},
+		"placement": {placement, false, withRole, map[string]any{
+			"scheduler.alpha.kubernetes.io/node-selector":      "node-restriction.kubernetes.io/proxcloud-node-group=dbaas",
+			"scheduler.alpha.kubernetes.io/defaultTolerations": `[{"effect":"NoSchedule","key":"proxcloud.io/node-group","operator":"Equal","value":"dbaas"}]`,
+		}, "ns:pc-db-p1,np:proxcloud-default-deny"},
+		"egress fence": {kamajik8s.NamespacePlacement{}, true, base, nil,
+			"ns:pc-db-p1,np:proxcloud-default-deny,ciliumnetworkpolicies:" + EgressFencePolicyName},
+	} {
+		api := newFakeAPI()
+		cfg := testConfig()
+		cfg.NamespacePlacement, cfg.EgressFence = tc.placement, tc.fence
+		if err := NewWithAPI(api, cfg, "svc-dbaas").EnsureProjectNamespace(context.Background(), "p1"); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		meta := api.namespaces["pc-db-p1"]["metadata"].(map[string]any)
+		if !reflect.DeepEqual(meta["labels"], tc.labels) || !reflect.DeepEqual(meta["annotations"], tc.annotations) {
+			t.Errorf("%s: namespace metadata = %v", name, meta)
+		}
+		if got := strings.Join(api.ops, ","); got != tc.ops {
+			t.Errorf("%s: ops = %s, want %s", name, got, tc.ops)
+		}
+		if _, has := api.crs["ciliumnetworkpolicies"][key("pc-db-p1", EgressFencePolicyName)]; has != tc.fence {
+			t.Errorf("%s: egress fence present = %v", name, has)
+		}
+	}
+}
+
+var updateGolden = flag.Bool("update", false, "rewrite testdata/egress-fence.golden.json")
+
+// The egress fence is a security control: any change to what a database pod may reach shows up as a diff here.
+// After an intended change: go test ./internal/cloud/dbaas -run TestEgressFenceGolden -update
+func TestEgressFenceGolden(t *testing.T) {
+	const path = "testdata/egress-fence.golden.json"
+	got, err := json.MarshalIndent(egressFencePolicy("p1", "svc-dbaas"), "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = append(got, '\n')
+	if *updateGolden {
+		if err := os.MkdirAll("testdata", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, got, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read golden (run with -update to create): %v", err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("the egress fence changed; if intended, rerun with -update.\ngot:\n%s\nwant:\n%s", got, want)
 	}
 }
 

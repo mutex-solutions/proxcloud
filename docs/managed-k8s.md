@@ -109,6 +109,7 @@ Seed-file twin of the form: `deploy/seed/external-service-dev.json`
 | RWX dataset size | `config.cluster.rwxGiB` | Optional, API or installer (`services.kamaji.rwx_gib`). See [section 9](#9-how-a-cluster-lands-on-proxmox). |
 | Block volumes for tenants | — | Through the CSI gateway only, with no credential in the tenant ([section 9](#9-how-a-cluster-lands-on-proxmox)). `csiSharedStores` and `pveCsiUrl` were removed: the API answers 400 to a `cluster` block that still has one, and the form drops them on save. |
 | Flavors allowlist | `config.cluster.flavors` | Flavor ids offered for node groups. Empty = no restriction. |
+| Namespace placement | `config.namespacePlacement` | Optional, API only: `{nodeSelector, tolerations}`. Every `pc-*` namespace gets the `scheduler.alpha.kubernetes.io/node-selector` and `…/defaultTolerations` annotations and the label `proxcloud.io/platform-role: kamaji`, so the API server puts the tenant control planes on that node group. Needs the `PodNodeSelector` and `PodTolerationRestriction` admission plugins on the management cluster's API server; without them the annotations do nothing. Absent: nothing is stamped. |
 
 **Changing a setting later.** The installer's `services.kamaji.*` keys take effect only when stage 60 first registers the provider: it skips a provider
 whose name already exists, so a re-run neither applies a changed key nor overwrites one set by hand. On an existing site use the

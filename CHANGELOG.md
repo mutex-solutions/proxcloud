@@ -179,6 +179,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   template updates and job scheduler). Playwright specs check the preview before Apply, the confirmation in the apply
   body and Go live staying disabled until its prerequisites hold, against the mock API; not run against a live API,
   and Go live not run against a cluster.
+- **Node-group placement and an egress fence for the Kubernetes and database providers** (ADR 0009, shared layout).
+  On one cluster with node groups, tenant control planes and databases must stay on their own groups whatever their
+  charts render, and a tenant with PostgreSQL superuser can run a shell in its database pod and reach the rest of that
+  cluster. Two optional provider keys, API only: `config.namespacePlacement` (`nodeSelector`, `tolerations`; kamaji
+  and dbaas) stamps the `PodNodeSelector` and `PodTolerationRestriction` namespace annotations
+  (`scheduler.alpha.kubernetes.io/node-selector`, `…/defaultTolerations`) and the label
+  `proxcloud.io/platform-role: kamaji` or `dbaas` on every `pc-*` or `pc-db-*` namespace, and
+  `config.database.egressFence: true` adds the CiliumNetworkPolicy `proxcloud-default-egress` to every `pc-db-*`
+  namespace, so its pods reach only that namespace, kube-dns on 53 and the API server on 6443. A selector that is not
+  label keys and values is refused when the provider is built. A provider without the keys applies exactly the
+  namespace and policies it applied before, and nothing writes the keys yet: the managed-services run that will set
+  them when it registers the providers comes later and stays off behind its flag until the lab run, so this is inert
+  on every existing site, installer sites included. The keys need both admission plugins on the cluster's API server,
+  and the fence needs Cilium and `ciliumnetworkpolicies` rights for the provider ServiceAccount, which
+  `deploy/dbaas-cluster/rbac.yaml` does not grant (database creates then fail). Setting the fence back to false leaves
+  the policies in place. Tested with table tests, a golden of the policy and a fake API server. Not run on a cluster:
+  that the API server places the pods, that a database works behind the fence while kamaji-etcd, the kubelets, the
+  PVE API and argocd-repo-server stay unreachable, and that Cilium matches the API server on its port 6443 after the
+  `kubernetes` Service is translated are all unverified until the lab run.
 
 ### Changed
 

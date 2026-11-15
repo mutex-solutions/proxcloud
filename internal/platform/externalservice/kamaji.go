@@ -23,6 +23,11 @@ package externalservice
 //	      "imageVariants":     {"nvidia": {"1.35.4": "<node-image-id>"}},  // optional per-version variants
 //	      "pveApiUrl":         "https://192.0.2.11:8006",  // the PVE API as CAPMOX reaches it
 //	      "workerMtu":         1450                        // EVPN vnets
+//	    },
+//	    "namespacePlacement": {           // optional: pins every pod of pc-* (the tenant control planes) to a node
+//	                                      // group through the PodNodeSelector/PodTolerationRestriction annotations
+//	      "nodeSelector": {"node-restriction.kubernetes.io/proxcloud-node-group": "kamaji"},
+//	      "tolerations":  [{"key": "proxcloud.io/node-group", "operator": "Equal", "value": "kamaji", "effect": "NoSchedule"}]
 //	    }
 //	  },
 //	  "secret": {"kubeconfig": "<management-cluster kubeconfig>"}  // encrypted at rest
@@ -118,6 +123,7 @@ func (e *ExternalService) KamajiConfig() kamaji.Config {
 
 			ProxmoxServiceID: str(cl["proxmoxServiceId"]),
 		},
+		NamespacePlacement: namespacePlacement(e.Config),
 	}
 	if sw, ok := cl["sharedWorkers"].(map[string]any); ok && str(sw["bridge"]) != "" {
 		sec := e.secretMap()
