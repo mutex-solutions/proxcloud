@@ -80,6 +80,11 @@ The operator chooses one of:
   each service is pinned to its group.
 - **Separate:** one workload cluster per service.
 
+*Amended: the first milestone builds the shared layout without a `sandbox` group, and the
+sandbox's shape is open until the third milestone
+([Scope of the first milestone](#scope-of-the-first-milestone),
+[open points](#open-points-for-the-implementation)).*
+
 ### One version source: the platform BOM
 
 Every ProxCloud release ships `platform-bom.yaml`. It lists the exact version of every
@@ -354,13 +359,15 @@ status now without that risk.
 
 ### Scope of the first milestone
 
-These owner decisions set the scope; they do not change a decision above.
+These owner decisions set the scope. Apart from the sandbox, they do not change a decision
+above.
 
 - The in-platform path comes first, behind a flag that stays off until the path has run on
   a lab. The installer provisions through the portal's API in the second milestone.
 - Layout: shared only, one workload cluster with the groups `system`, `kamaji` and `dbaas`.
   The separate layout comes later; the data model holds a list of clusters from the start.
-- The sandbox's shape is decided in the third milestone (see the open points).
+- The sandbox's shape is decided in the third milestone, so the `sandbox` group of the
+  shared layout above is open until then (see the open points).
 - On a Docker Compose portal there are no tenant block volumes (no CSI gateway listener)
   and no database backups. The console shows both as warnings.
 
@@ -377,8 +384,8 @@ These owner decisions set the scope; they do not change a decision above.
 
 ## Open points for the implementation
 
-Resolved on 2026-11-15. Each original question is kept, followed by its answer and where
-the detail is. "Design" is the P3 design of the in-platform path ("Enable managed
+Resolved on 2026-11-15, except the sandbox's shape, which stays open until the third
+milestone. Each original question is kept, followed by its answer and where the detail is. "Design" is the P3 design of the in-platform path ("Enable managed
 services"); the files it names land with its implementation.
 
 - The exact schema of `platform-bom.yaml` and of `PlatformInstallation`.
@@ -419,9 +426,10 @@ services"); the files it names land with its implementation.
 - The sandbox cluster as a node group of a shared cluster: gVisor nodes and their network
   isolation rules need their own review.
 
-  **Answer.** Decided in the third milestone. gVisor workers joining the shared cluster as a
-  node group are rejected: they would share the CNI overlay and the API server with
-  kamaji-etcd and the databases. The recommended shape is a Kamaji-hosted sandbox cluster
+  **Answer.** Open: the owner decides the sandbox's shape in the third milestone, and the
+  first milestone has no `sandbox` group. The design recommends against gVisor workers
+  joining the shared cluster as a node group: they would share the CNI overlay and the API
+  server with kamaji-etcd and the databases. It recommends a Kamaji-hosted sandbox cluster
   whose control plane runs in the `kamaji` group, with its gVisor workers in their own
-  pool, vnet and firewall, as installer stage 55 builds it today. It needs per-group
-  address ranges first. Design §8.
+  pool, vnet and firewall, as installer stage 55 builds it today. That shape needs
+  per-group address ranges first. Design §8 and its question 1.
