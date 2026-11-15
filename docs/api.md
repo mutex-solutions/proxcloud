@@ -147,9 +147,14 @@ Proxmox setup script: `GET /api/v1/admin/setup/proxmox-script`
 runs as root on a Proxmox node to create the portal token's role, pools, user,
 token and ACLs. Query: `tokenId` (default `proxcloud@pve!platform`), `gpu`
 (`true` adds the `/mapping/pci` ACL; default `false`) and `importStorage` (adds
-`PVEDatastoreAdmin` on that store). A value that is not a plain id is a `400`.
-The script and what it does are in
-[proxmox-permissions.md](proxmox-permissions.md#portal-token-script).
+`PVEDatastoreAdmin` on that store). `managedServices=true` adds the identities
+of managed services: the CAPI and CSI users and tokens, pool `proxcloud-seed`,
+their roles and ACLs, with `bootStorage` (required) and `isoStorage` (default
+`local`), and with `importStorage` the mint role on that store too; either store
+without `managedServices=true` is a `400`. A value that is not a plain id is a
+`400`. The script and what it does are in
+[proxmox-permissions.md](proxmox-permissions.md#portal-token-script) and
+[Managed services](proxmox-permissions.md#managed-services).
 
 Cloud service selection: the project cloud routes (`/project/{id}/cloud`, its
 actions and deletes, `quota-usage`, `gpu-capacity`, `public-networks`, the S3

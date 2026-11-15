@@ -368,7 +368,8 @@ func importContentProblems(defs []pve.StorageDef, importStorage string) []string
 
 // proxmoxSetupScript answers GET /admin/setup/proxmox-script as text: the script an operator runs as root on a node to
 // create the portal token's identity (pve.PlatformSetupScript). Query: tokenId (default proxcloud@pve!platform), gpu
-// (default false) and importStorage (default none). The portal holds no root credential and asks for none, so it
+// (default false) and importStorage (default none); managedServices=true answers pve.ManagedSetupScript, with
+// bootStorage (required) and isoStorage (default local). The portal holds no root credential and asks for none, so it
 // cannot run this itself. A value that is not a plain id is a 400: the answer is run by a root shell.
 func (h *Handler) proxmoxSetupScript(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:service:read") {
@@ -387,7 +388,27 @@ func (h *Handler) proxmoxSetupScript(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	script, err := pve.PlatformSetupScript(tokenID, gpu, q.Get("importStorage"))
+	managed := false
+	if v := q.Get("managedServices"); v != "" {
+		var err error
+		if managed, err = strconv.ParseBool(v); err != nil {
+			httpx.WriteError(w, httpx.BadRequest("managedServices must be true or false"))
+			return
+		}
+	}
+	var script string
+	var err error
+	switch boot, iso := q.Get("bootStorage"), q.Get("isoStorage"); {
+	case managed:
+		if iso == "" {
+			iso = pve.DefaultBootISOStorage
+		}
+		script, err = pve.ManagedSetupScript(tokenID, gpu, q.Get("importStorage"), boot, iso)
+	case boot != "" || iso != "":
+		err = fmt.Errorf("bootStorage and isoStorage go with managedServices=true")
+	default:
+		script, err = pve.PlatformSetupScript(tokenID, gpu, q.Get("importStorage"))
+	}
 	if err != nil {
 		httpx.WriteError(w, httpx.BadRequest(err.Error()))
 		return
