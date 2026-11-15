@@ -320,6 +320,10 @@ The runtime settings (`internal/config/config.go`):
 | `PROXCLOUD_DB_READ_URL` | optional read-only HISTORY/metrics; empty uses primary for history |
 | `PROXCLOUD_JOBS_RABBIT_FANOUT=true` | startup migration error: drain/reconcile old queue and clear flag |
 
+On the Docker Compose install (`deploy/compose`) the scheduler variable is set by
+`./proxcloud-up.sh install --scheduler` and cleared by `--no-scheduler`; what it needs on one host is
+in [deploy/compose/README.md](../deploy/compose/README.md#optional-features).
+
 An explicitly configured unavailable history pool returns a stats error; it does
 not redirect claims, auth, business reads or writes there. History is always
 marked lag-tolerant and never drives replay or financial decisions. No physical

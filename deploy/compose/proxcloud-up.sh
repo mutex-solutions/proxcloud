@@ -33,6 +33,12 @@ install (default) is idempotent: it asks only for what is missing, keeps the sec
                                Afterwards the release changes with: upgrade <version>
   --http-port <n> --https-port <n>   host ports (default 80 and 443)
   --project-name <n>           Compose project name (default proxcloud-prod; fixed after the first install)
+  --template-updates           turn on VM template updates (import, smoke test, publish); off by default
+  --scheduler                  turn on the job scheduler: resource sync, and usage is charged and bills
+                               are issued and collected on a timer; off by default. Needs a release
+                               after v0.6.0
+  --no-template-updates, --no-scheduler
+                               turn one off again. Without its flag an option keeps the value in .env
 
 Common:
   --yes        answer yes to confirmations (uninstall)
@@ -101,14 +107,26 @@ is_email() { [[ "$1" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; }
 is_port() { [[ "$1" =~ ^[0-9]{1,5}$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
 is_version() { [[ "$1" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.(0|[1-9][0-9]*))?$ ]]; }
 is_project() { [[ "$1" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; }
+is_bool() { [ "$1" = true ] || [ "$1" = false ]; }
+
+# Up to v0.6.0 the API also mounts its unauthenticated job triggers (POST /debug/...) on the
+# management port whenever the scheduler is on; later releases only with PROXCLOUD_JOBS_DEBUG_TRIGGERS,
+# which this stack never sets. An -rc.N counts as its release.
+check_scheduler_release() { # VERSION
+  [ "$(printf '%s\n' v0.6.0 "${1%%-*}" | sort -V | tail -n 1)" != v0.6.0 ] \
+    || die "the job scheduler needs a ProxCloud release after v0.6.0: with the scheduler on, the API of $1 also serves its unauthenticated job triggers (POST /debug/...) to every process on this host. Use a later release, or turn the scheduler off (install --no-scheduler)"
+}
 
 # ---- docker ----
 # docker compose for this project. Compose lets the calling shell's environment win over .env, so
-# every name .env sets (and three more that would change the model) is dropped from it first: an
-# exported PROXCLOUD_VERSION or HTTP_PORT cannot start something else than .env says.
+# every name .env sets (and five more that would change the model) is dropped from it first: an
+# exported PROXCLOUD_VERSION or HTTP_PORT cannot start something else than .env says. The two
+# feature keys are named here because the .env of an install older than them does not have them:
+# an exported JOBS_SCHEDULER_ENABLED must not start the billing timers on "upgrade".
 # PULL_VERSION is the one deliberate override (upgrade pulls before it writes .env).
 compose() {
-  local drop=(-u COMPOSE_FILE -u COMPOSE_ENV_FILES -u ACME_CA_SERVER) key
+  local drop=(-u COMPOSE_FILE -u COMPOSE_ENV_FILES -u ACME_CA_SERVER -u TEMPLATE_UPDATES_VM_ENABLED
+    -u JOBS_SCHEDULER_ENABLED) key
   while IFS= read -r key; do
     drop+=(-u "$key")
   done < <(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$ENV_FILE")
@@ -336,6 +354,10 @@ cmd_install() {
   HTTPS_PORT="$(first "$F_HTTPS_PORT" "$(env_get HTTPS_PORT)" 443)"
   previous_version="$(env_get PROXCLOUD_VERSION)"
   VERSION="$(first "$F_VERSION" "${PROXCLOUD_VERSION:-}" "$previous_version" "$DEFAULT_VERSION")"
+  # Opt-in features: a flag sets one, and a run without the flag keeps what .env has. Only the
+  # --no- flag turns one off again.
+  TEMPLATE_UPDATES="$(first "$F_TEMPLATE_UPDATES" "$(env_get TEMPLATE_UPDATES_VM_ENABLED)" false)"
+  SCHEDULER="$(first "$F_SCHEDULER" "$(env_get JOBS_SCHEDULER_ENABLED)" false)"
 
   ACME_EMAIL="$(first "$F_ACME_EMAIL" "${PROXCLOUD_ACME_EMAIL:-}" "$(env_get ACME_EMAIL)")"
   case "$TLS_MODE" in
@@ -377,6 +399,11 @@ cmd_install() {
   is_port "$HTTPS_PORT" || die "invalid --https-port '$HTTPS_PORT'"
   [ "$HTTP_PORT" != "$HTTPS_PORT" ] || die "--http-port and --https-port must differ"
   is_version "$VERSION" || die "invalid version '$VERSION' (vX.Y.Z or vX.Y.Z-rc.N)"
+  is_bool "$TEMPLATE_UPDATES" \
+    || die "invalid TEMPLATE_UPDATES_VM_ENABLED '$TEMPLATE_UPDATES' in .env (true or false): pass --template-updates or --no-template-updates"
+  is_bool "$SCHEDULER" \
+    || die "invalid JOBS_SCHEDULER_ENABLED '$SCHEDULER' in .env (true or false): pass --scheduler or --no-scheduler"
+  [ "$SCHEDULER" = false ] || check_scheduler_release "$VERSION"
   # An install that completed (its operator exists) changes release with "upgrade": backup, then pull.
   if [ -n "$recorded_operator" ] && [ -n "$previous_version" ] && [ "$VERSION" != "$previous_version" ]; then
     die "this install runs $previous_version: change the release with ./proxcloud-up.sh upgrade $VERSION (it takes a backup first)"
@@ -448,6 +475,8 @@ EOF
   [ "$HTTPS_PORT" = 443 ] || URL_PORT=":$HTTPS_PORT"
   env_set URL_PORT "$URL_PORT"
   [ -z "$ACME_EMAIL" ] || env_set ACME_EMAIL "$ACME_EMAIL"
+  env_set TEMPLATE_UPDATES_VM_ENABLED "$TEMPLATE_UPDATES"
+  env_set JOBS_SCHEDULER_ENABLED "$SCHEDULER"
 
   # Secrets: generated once, never regenerated, never printed.
   for key in $SECRET_KEYS; do
@@ -476,6 +505,16 @@ EOF
   echo
   echo "ProxCloud $VERSION is installed (TLS mode $TLS_MODE)."
   print_urls
+  if [ "$SCHEDULER" = true ]; then
+    echo "  Job scheduler     on: usage is charged and bills are issued on a timer (--no-scheduler turns it off)"
+  else
+    echo "  Job scheduler     off: no resource sync and no charge on a timer (--scheduler turns it on)"
+  fi
+  if [ "$TEMPLATE_UPDATES" = true ]; then
+    echo "  Template updates  on (--no-template-updates turns them off)"
+  else
+    echo "  Template updates  off (--template-updates turns them on)"
+  fi
   cat <<EOF
 
 Next steps:
@@ -513,6 +552,7 @@ cmd_upgrade() {
   [ -n "$version" ] || die "usage: proxcloud-up.sh upgrade <version>"
   is_version "$version" || die "invalid version '$version' (vX.Y.Z or vX.Y.Z-rc.N)"
   load_env
+  [ "$(env_get JOBS_SCHEDULER_ENABLED)" != true ] || check_scheduler_release "$version"
   echo "Upgrading $(env_get PROXCLOUD_VERSION) -> $version (read the release notes first)."
   cmd_backup
   # Pull before .env changes, so a release that cannot be pulled leaves the running install as it is.
@@ -559,6 +599,7 @@ esac
 DRY_RUN=0 ASSUME_YES=0 PURGE=0 POSITIONAL=""
 F_DOMAIN="" F_APP_HOST="" F_ADMIN_HOST="" F_API_HOST="" F_AUTH_HOST="" F_TLS="" F_ACME_EMAIL=""
 F_CF_TOKEN_FILE="" F_OPERATOR_EMAIL="" F_VERSION="" F_HTTP_PORT="" F_HTTPS_PORT="" F_PROJECT=""
+F_TEMPLATE_UPDATES="" F_SCHEDULER=""
 PROJECT="" URL_PORT="" TLS_MODE="" PULL_VERSION="" INSTALL_OPTIONS=""
 
 while [ $# -gt 0 ]; do
@@ -567,6 +608,11 @@ while [ $# -gt 0 ]; do
     --yes|-y) ASSUME_YES=1; shift; continue ;;
     --purge) PURGE=1; shift; continue ;;
     -h|--help) usage; exit 0 ;;
+    # Install options without a value.
+    --template-updates) F_TEMPLATE_UPDATES=true; INSTALL_OPTIONS="$INSTALL_OPTIONS $1"; shift; continue ;;
+    --no-template-updates) F_TEMPLATE_UPDATES=false; INSTALL_OPTIONS="$INSTALL_OPTIONS $1"; shift; continue ;;
+    --scheduler) F_SCHEDULER=true; INSTALL_OPTIONS="$INSTALL_OPTIONS $1"; shift; continue ;;
+    --no-scheduler) F_SCHEDULER=false; INSTALL_OPTIONS="$INSTALL_OPTIONS $1"; shift; continue ;;
     --*=*) set -- "${1%%=*}" "${1#*=}" "${@:2}"; continue ;;
     --*) [ $# -ge 2 ] || die "$1 needs a value" ;;
     *)

@@ -95,6 +95,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   root shell for `pveum pool add`, which it keeps as the fallback for such a token. Not verified: that the
   least-privilege portal token can create `pc-templates` on a lab cluster (it holds `Pool.Allocate` on `/pool`, which
   creates the project pools).
+- **Docker Compose install: opt-in VM template updates and job scheduler** (`deploy/compose/`): the API
+  reads both switches only when it starts, and the Compose install had no way to set them, so on one host
+  nothing was synchronised or charged on a timer and no template could be imported. `compose.yaml` now
+  passes `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED` and `PROXCLOUD_JOBS_SCHEDULER_ENABLED` to the API from the
+  `.env` keys `TEMPLATE_UPDATES_VM_ENABLED` and `JOBS_SCHEDULER_ENABLED`, both `false` by default.
+  `./proxcloud-up.sh install --template-updates` and `--scheduler` write `true`, `--no-template-updates`
+  and `--no-scheduler` write `false`. A later `install` without the flag and every `upgrade` keep the
+  recorded value, so a re-run cannot turn billing off or on by omission; the last lines of `install`,
+  also with `--dry-run`, say what is on. The script removes both names from the environment it hands to
+  Compose: an install whose `.env` predates the keys cannot have its billing timers started by a
+  variable exported in the calling shell. The scheduler needs nothing the stack does not have: its job
+  locks (ADR 0007) and the queued charge work live in the stack's PostgreSQL. `deploy/compose/README.md`
+  (Optional features) lists what each switch starts and what the scheduler means on one host. Turning
+  the scheduler on does not mount the unauthenticated `POST /debug/*` job triggers on the management
+  port: only `PROXCLOUD_JOBS_DEBUG_TRIGGERS` does (see the management port entry under Security), and
+  this stack never sets it. That is true from the first release after v0.6.0: up to v0.6.0 the API
+  mounted them with the scheduler too, so `install` and `upgrade` refuse to run such a release with the
+  scheduler on (`install --scheduler` on a checkout still pinned to v0.6.0 included) and say why. The
+  port stays unpublished and unrouted. The README points on-demand runs at the authenticated
+  `/api/v1/admin/job/*` endpoints and names the jobs they cover; the bill, dunning and project deletion
+  jobs run only on the timer, and `send-test-mail` is not available here. The README also says that `--no-scheduler`
+  only stops new timed work: the API's job worker always runs and still processes the billing work
+  already queued in the database, which matters when a backup is restored. **Not verified**: either
+  switch on a running Compose install (the tests run the script with `--dry-run` and against a fake
+  `docker`, and check the model `docker compose config` builds), a billing month with the scheduler on,
+  the bill and reminder jobs without an SMTP integration, and how charging catches up after the host
+  was down.
 
 ### Changed
 
