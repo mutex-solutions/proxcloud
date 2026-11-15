@@ -4,6 +4,33 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-15: Platform tokens narrowed to the platform pools
+
+**What changed:** the Proxmox credentials of the services cluster reach less. Installer
+stage 10 (`split_acls`) now grants `capmox@pve!capi` `ProxCloudCAPI` on the services pool
+instead of `/pool`, and `csi@pve!csi` `ProxCloudCSI` on the services pool and its boot store
+instead of `/pool` and `/storage`; both users get a row of their own on that pool. The
+setup script route gains `managedServices=true`, which writes the same rows for a Compose
+site, the portal token's mint grant, and the new pool `proxcloud-seed` for the seed VM of
+managed services, where the portal token and every `csi@pve` token get `NoAccess`. That
+fences the seed VM only: its disk sits on the boot store, where `csi@pve!csi` holds
+`Datastore.Allocate`, which in PVE opens every volume on the store. The rows are
+`pve.ManagedACLs`; a test keeps them equal to stage 10.
+
+**Why:** both tokens only ever work on the services cluster, but held every tenant pool and
+store, and a stolen portal token with `Permissions.Modify` on `/pool` could have widened
+them further on the platform VMs. A more specific row wins in PVE, so the users' own rows
+on the platform pools fence them against a later `/pool` grant. The remaining reach of that
+mint grant on `/pool` (other users without a row there) is accepted for M1. It also holds
+`Permissions.Modify` on `/storage`, so a stolen portal token can grant itself
+`Datastore.Allocate` on the boot store and read every disk there, the seed's included,
+through a tenant VM; no row closes that in M1. ADR 0009 accepts both reaches for M1 (A2
+"Limit", A8); a store of the seed's own, which would fence its disk from the CSI token, is a
+change of its own. Lab check L1 measures each of them. Existing sites keep their broad token rows until removed by hand,
+because stage 10 only adds rows.
+
+**Views updated:** [C2 containers](c2-containers.md) (trust boundaries: new "Services
+cluster to Proxmox" row).
 ## 2026-11-15: Cluster chart kubeadm mode for the platform cluster
 
 **What changed:** chart `proxmox-kamaji-cluster` 0.1.11 has a second control-plane kind,
@@ -73,6 +100,23 @@ chart is applied, which no code does yet.
 Files: `deploy/charts/proxcloud-platform/`, `internal/platformlife/{chart_test.go,testdata/}`,
 `.github/workflows/helm.yml`, `deploy/charts/README.md`, `docs/ci-release.md`,
 `CONTRIBUTING.md`, `docs/architecture/c4/c2-containers.md`.
+## 2026-11-15: Platform bill of materials in the API
+
+**What changed:** a new component of `proxcloud-api`, `internal/platformlife`, parses and
+validates `deploy/platform/platform-bom.yaml`, which `deploy/embed.go` compiles into the
+binary (the API image copies both). `GET /api/v1/admin/platform/bom` (`admin:service:read`,
+`internal/platform/admin/platform.go`) serves it read-only with the file's sha256. No
+container, external system, trust boundary or flow changes: the route reads only the
+embedded file, and nothing installs from the BOM yet.
+
+**Why:** ADR 0009 makes one BOM per release the version source of the managed-services
+platform for both provisioning paths. The lifecycle job and its pages, which come later, read
+it through this package, so it lands first with the rules that keep it exact (versions,
+digests, `pending` and `0.0.0+` only in a `-dev` release) and tests that hold the installer's
+pins equal to it.
+
+**Views updated:** [C3e managed services](c3-components.md#c3e-managed-services-and-object-storage)
+(new `platformlife` node and table row).
 
 ## 2026-11-15: Management port job triggers only with debug triggers on
 

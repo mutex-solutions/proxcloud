@@ -821,10 +821,21 @@ func TestProxmoxSetupScriptRoute(t *testing.T) {
 		}
 		return s
 	}
+	managed := func(tokenID string, gpu bool, importStorage, boot, iso string) string {
+		t.Helper()
+		s, err := pve.ManagedSetupScript(tokenID, gpu, importStorage, boot, iso)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
 	for query, want := range map[string]string{
 		"": script(pve.DefaultPlatformTokenID, false, ""),
-		"?tokenId=portal%40pve%21cloud&gpu=true&importStorage=nas-templates": script("portal@pve!cloud", true, "nas-templates"),
-		"?tokenId=portal@pve!cloud&gpu=0":                                    script("portal@pve!cloud", false, ""),
+		"?tokenId=portal%40pve%21cloud&gpu=true&importStorage=nas-templates":                     script("portal@pve!cloud", true, "nas-templates"),
+		"?tokenId=portal@pve!cloud&gpu=0":                                                        script("portal@pve!cloud", false, ""),
+		"?managedServices=false":                                                                 script(pve.DefaultPlatformTokenID, false, ""),
+		"?managedServices=1&bootStorage=local-lvm":                                               managed(pve.DefaultPlatformTokenID, false, "", "local-lvm", "local"),
+		"?managedServices=true&bootStorage=local-zfs&isoStorage=iso1&gpu=true&importStorage=nas": managed(pve.DefaultPlatformTokenID, true, "nas", "local-zfs", "iso1"),
 	} {
 		rec := get(query, op)
 		if rec.Code != http.StatusOK || rec.Body.String() != want || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/plain") {
@@ -839,6 +850,12 @@ func TestProxmoxSetupScriptRoute(t *testing.T) {
 		"?importStorage=" + url.QueryEscape("nas`id`"),
 		"?importStorage=" + url.QueryEscape("nas' 'x"),
 		"?gpu=maybe",
+		"?managedServices=maybe&bootStorage=local-lvm",
+		"?managedServices=true",
+		"?managedServices=true&bootStorage=" + url.QueryEscape("local-lvm; reboot"),
+		"?managedServices=true&bootStorage=local-lvm&isoStorage=" + url.QueryEscape("local'$(id)'"),
+		"?bootStorage=local-lvm",
+		"?isoStorage=local",
 	} {
 		if rec := get(query, op); rec.Code != http.StatusBadRequest || strings.Contains(rec.Body.String(), "pveum") {
 			t.Errorf("GET %q: %d %s", query, rec.Code, rec.Body.String())
