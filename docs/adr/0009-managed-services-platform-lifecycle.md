@@ -289,9 +289,13 @@ change and at the release tag, and fails on any difference. A version that is no
 (Kamaji's `0.0.0+latest`) or a digest not yet known (`pending`) is allowed only in a BOM
 whose release ends in `-dev`; the release gate on the tag refuses both. Our packages
 `proxmox-kamaji-cluster`, `database-cluster`, `proxcloud-platform` and
-`proxcloud-clusterctl` are public on GHCR and, like everything public, built and published
-by GitHub Actions only, so pulls need no credentials. This replaces "each chart pinned by
-OCI digest" and qualifies "never a range or `latest`" for development BOMs.
+`proxcloud-clusterctl` are, like everything public, built and published by GitHub Actions
+only. They will be made public on GHCR, an owner step before the first lab run (M0): today
+`proxcloud-platform` and `proxcloud-clusterctl` do not exist yet, and the other two are
+private. Once they are public, pulls need no credentials; until then they need the
+repository credential (`deploy/mgmt-cluster/repo-credential.yaml`). This replaces "each
+chart pinned by OCI digest" and qualifies "never a range or `latest`" for development
+BOMs.
 
 **Why.** cilium, cert-manager, MetalLB, CloudNativePG and Kamaji publish their charts in
 HTTP repositories, which have no OCI digest, and the installer installs Kamaji as chart
