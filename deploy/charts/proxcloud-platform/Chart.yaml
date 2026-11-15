@@ -1,0 +1,11 @@
+apiVersion: v2
+name: proxcloud-platform
+description: >-
+  ProxCloud's own objects on the managed-services platform (ADR 0009): the clusterctl install of the Cluster API
+  providers as an ArgoCD Sync hook, and on the workload cluster the provider service account and RBAC, the tenant
+  AppProjects, a locked default AppProject, the MetalLB address pool and the tenant chart repository entry.
+type: application
+# Made for the platform BOM of ADR 0009, whose components capi, capi-tenant and platform are to pin this version.
+# internal/platformlife/chart_test.go pins the render of each and keeps the provider RBAC and the tenant
+# AppProjects equal to deploy/{mgmt,dbaas}-cluster/{rbac,appproject}.yaml.
+version: 0.1.0

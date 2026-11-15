@@ -1,0 +1,183 @@
+{{- if .Values.platform.enabled }}
+# The proxcloud service account of the Kubernetes and the Database providers, on the platform's one workload cluster.
+# The union of deploy/mgmt-cluster/rbac.yaml and deploy/dbaas-cluster/rbac.yaml: both define the same Namespace,
+# ServiceAccount, token Secret and argocd Role and RoleBinding, which appear once here. Why each rule exists, and how to
+# build the provider kubeconfig from proxcloud-token, is in those files. internal/platformlife/chart_test.go keeps this
+# render equal to their objects: change both together.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: proxcloud-system
+  labels:
+    app.kubernetes.io/managed-by: proxcloud
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: proxcloud
+  namespace: proxcloud-system
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: proxcloud-token
+  namespace: proxcloud-system
+  annotations:
+    kubernetes.io/service-account.name: proxcloud
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: proxcloud-mgmt
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: ["kamaji.clastix.io"]
+    resources: ["tenantcontrolplanes"]
+    verbs: ["get", "list"]
+  - apiGroups: ["cluster.x-k8s.io"]
+    resources: ["machinedeployments"]
+    verbs: ["get", "list"]
+  - apiGroups: ["addons.cluster.x-k8s.io"]
+    resources: ["helmchartproxies", "clusterresourcesets"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: proxcloud-mgmt
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: proxcloud-mgmt
+subjects:
+  - kind: ServiceAccount
+    name: proxcloud
+    namespace: proxcloud-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: proxcloud-dbaas
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "create", "patch"]
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: ["clusters"]
+    verbs: ["get", "list"]
+  - apiGroups: ["ps.percona.com"]
+    resources: ["perconaservermysqls"]
+    verbs: ["get", "list"]
+  - apiGroups: ["k8s.mariadb.com"]
+    resources: ["mariadbs"]
+    verbs: ["get", "list"]
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: ["backups"]
+    verbs: ["get", "list"]
+  - apiGroups: ["ps.percona.com"]
+    resources: ["perconaservermysqlbackups"]
+    verbs: ["get", "list"]
+  - apiGroups: ["k8s.mariadb.com"]
+    resources: ["physicalbackups"]
+    verbs: ["get", "list"]
+  - apiGroups: ["valkey.io"]
+    resources: ["valkeyclusters"]
+    verbs: ["get", "list"]
+  - apiGroups: ["kafka.strimzi.io"]
+    resources: ["kafkas", "kafkanodepools", "kafkausers"]
+    verbs: ["get", "list"]
+  - apiGroups: ["autoscaling.k8s.io"]
+    resources: ["verticalpodautoscalers"]
+    verbs: ["get", "list"]
+  - apiGroups: ["opensearch.opster.io", "opensearch.org"]
+    resources: ["opensearchclusters"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: proxcloud-dbaas
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: proxcloud-dbaas
+subjects:
+  - kind: ServiceAccount
+    name: proxcloud
+    namespace: proxcloud-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: proxcloud-applications
+  namespace: argocd
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: proxcloud-applications
+  namespace: argocd
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: proxcloud-applications
+subjects:
+  - kind: ServiceAccount
+    name: proxcloud
+    namespace: proxcloud-system
+---
+# Not in either file: with database.egressFence the Database provider stamps the CiliumNetworkPolicy
+# proxcloud-default-egress into each pc-db-* namespace (egress to the namespace, kube-dns and the API server only),
+# because on a shared cluster a tenant with PostgreSQL superuser can run a shell next to kamaji-etcd. get/create/patch,
+# as for its NetworkPolicy. deploy/dbaas-cluster/rbac.yaml leaves it out: installer stage 60 does not turn the fence on.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: proxcloud-dbaas-egress
+rules:
+  - apiGroups: ["cilium.io"]
+    resources: ["ciliumnetworkpolicies"]
+    verbs: ["get", "create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: proxcloud-dbaas-egress
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: proxcloud-dbaas-egress
+subjects:
+  - kind: ServiceAccount
+    name: proxcloud
+    namespace: proxcloud-system
+{{- end }}

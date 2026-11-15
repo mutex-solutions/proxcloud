@@ -5,7 +5,7 @@ CAAPH and ClusterResourceSet reconcile independently: an early Helm discovery fa
 these resources are established. This is eventual convergence, not a cross-controller ordering fence.
 No Job, shell, remote URL, management-cluster CRD grant or application Gateway/listener is created.
 */ -}}
-{{- if (.Values.addons.nginxGatewayFabric | default dict).enabled }}
+{{- if and (.Values.addons.nginxGatewayFabric | default dict).enabled (not (include "pkc.kubeadm" .)) }}
 {{- $root := . }}
 {{- $resources := list }}
 {{- range $path, $_ := .Files.Glob "files/gateway-api/v1.6.3/*.yaml" }}

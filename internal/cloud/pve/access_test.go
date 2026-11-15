@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -145,5 +146,110 @@ func TestDeleteAPITokenUnresolvableHost(t *testing.T) {
 	}
 	if isTokenAbsent(errors.New("pve: DELETE /x: dial tcp: lookup pve: no such host")) {
 		t.Fatal("no such host")
+	}
+}
+
+// What the managed-services rows give each token, worked out as PVE does (effectiveRoles: the most specific level
+// wins, a privilege-separated token holds its user's rights intersected with its own): the privilege tables hold, and
+// the fences do. Lab check L1 asks PVE the same. The import store is the ISO store, as on a Compose site without a NAS
+// (docs/quickstart.md): a tenant cluster's ISO row lands where the portal's PVEDatastoreAdmin row shadows /storage.
+func TestManagedACLsGrantThePrivilegeTables(t *testing.T) {
+	const boot, iso, imp = "local-lvm", "local", "local"
+	roles := map[string][]string{ // a role not named here (NoAccess) gives nothing
+		PlatformRole:   PlatformRolePrivileges(),
+		roleTemplate:   {"VM.Audit", "VM.Clone"},
+		roleISOStorage: {"Datastore.Allocate", "Datastore.AllocateSpace", "Datastore.AllocateTemplate", "Datastore.Audit"},
+	}
+	for _, r := range ManagedRoles {
+		roles[r.Name] = r.Privs
+	}
+	rows := func(extra ...ManagedACL) []ACLEntry {
+		all := slices.Concat(ManagedACLs(DefaultPlatformTokenID, boot, iso, imp), extra)
+		for _, a := range PlatformACLs {
+			all = append(all, ManagedACL{a.Path, a.Role, a.Propagate, "proxcloud@pve", DefaultPlatformTokenID})
+		}
+		all = append(all, ManagedACL{"/storage/" + imp, roleISOStorage, false, "proxcloud@pve", DefaultPlatformTokenID}) // PlatformSetupScript's
+		var out []ACLEntry
+		for _, a := range all {
+			for _, id := range []string{a.User, a.Token} {
+				if id != "" { // effectiveRoles walks one principal; a token is walked the same way as a user
+					out = append(out, ACLEntry{Path: a.Path, RoleID: a.Role, Type: "user", UGID: id, Propagate: map[bool]int{true: 1}[a.Propagate]})
+				}
+			}
+		}
+		return out
+	}
+	effective := func(acls []ACLEntry, tokenID, path string) map[string]bool {
+		privs := func(id string) map[string]bool {
+			out := map[string]bool{}
+			for _, r := range effectiveRoles(acls, id, nil, path) {
+				for _, p := range roles[r] {
+					out[p] = true
+				}
+			}
+			return out
+		}
+		user, _, _ := strings.Cut(tokenID, "!")
+		u, tok := privs(user), privs(tokenID)
+		for p := range tok {
+			if !u[p] {
+				delete(tok, p)
+			}
+		}
+		return tok
+	}
+	// The CSI gateway's rows of an installer site, which the seed's NoAccess on csi@pve must cap too.
+	acls := rows(ManagedACL{"/pool", roleCSI, true, csiUser, "csi@pve!gateway"}, ManagedACL{"/storage", roleCSI, true, csiUser, "csi@pve!gateway"})
+	if !slices.ContainsFunc(KubeMintPrivileges(imp), func(c PrivCheck) bool { return c.Path == "/storage/"+imp }) {
+		t.Errorf("KubeMintPrivileges does not check /storage/%s, where its own row shadows /storage", imp)
+	}
+	for tokenID, checks := range map[string][]PrivCheck{
+		CAPITokenID:            CAPIPrivileges(boot, iso),
+		CSITokenID:             CSIPrivileges(boot),
+		DefaultPlatformTokenID: KubeMintPrivileges(imp),
+	} {
+		for _, chk := range checks {
+			have := effective(acls, tokenID, chk.Path)
+			for _, p := range chk.Privs {
+				if !have[p] {
+					t.Errorf("%s lacks %s on %s", tokenID, p, chk.Path)
+				}
+			}
+		}
+	}
+	// Nothing where a token must hold nothing: the portal on both platform pools, the CSI token on the seed's pool,
+	// the platform tokens on a tenant pool and on another store. The seed's pool fences the seed VM only: its disk is on
+	// boot, where CSIPrivileges itself wants Datastore.Allocate, and PVE lets that open every volume on the store.
+	for _, c := range []struct{ tokenID, path string }{
+		{DefaultPlatformTokenID, "/pool/" + SystemPool}, {DefaultPlatformTokenID, "/pool/" + SeedPool},
+		{CSITokenID, "/pool/" + SeedPool}, {"csi@pve!gateway", "/pool/" + SeedPool},
+		{CAPITokenID, "/pool/pc-p1"}, {CSITokenID, "/pool/pc-p1"},
+		{CAPITokenID, "/storage/nas-images"}, {CSITokenID, "/storage/nas-images"},
+	} {
+		if have := effective(acls, c.tokenID, c.path); len(have) > 0 {
+			t.Errorf("%s holds %v on %s, want nothing", c.tokenID, slices.Sorted(maps.Keys(have)), c.path)
+		}
+	}
+	// A stolen portal token can mint a token for capmox@pve or csi@pve with a /pool row of its own and grant the user
+	// /pool too (ProxCloudKubeMint). The users' own rows on the platform pools still cap such a token there; the
+	// existing capi token keeps exactly its role.
+	rogue := rows(ManagedACL{"/pool", PlatformRole, true, capiUser, "capmox@pve!x"}, ManagedACL{"/pool", PlatformRole, true, csiUser, "csi@pve!x"})
+	for _, c := range []struct{ tokenID, pool, atMost string }{
+		{"capmox@pve!x", SystemPool, roleCAPI}, {"capmox@pve!x", SeedPool, roleCAPI},
+		{CAPITokenID, SystemPool, roleCAPI}, {CAPITokenID, SeedPool, roleCAPI},
+		{"csi@pve!x", SystemPool, roleCSI}, {"csi@pve!x", SeedPool, "NoAccess"},
+	} {
+		have := effective(rogue, c.tokenID, "/pool/"+c.pool)
+		for p := range have {
+			if !slices.Contains(roles[c.atMost], p) {
+				t.Errorf("after a /pool grant %s holds %v on /pool/%s, more than %s", c.tokenID, slices.Sorted(maps.Keys(have)), c.pool, c.atMost)
+				break
+			}
+		}
+	}
+	for _, pool := range []string{SystemPool, SeedPool} {
+		if have := effective(rogue, CAPITokenID, "/pool/"+pool); len(have) != len(ManagedRoles[0].Privs) {
+			t.Errorf("after a /pool grant %s holds %v on /pool/%s, want %s", CAPITokenID, slices.Sorted(maps.Keys(have)), pool, roleCAPI)
+		}
 	}
 }

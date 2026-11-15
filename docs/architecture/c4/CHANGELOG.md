@@ -4,6 +4,56 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-15: Platform tokens narrowed to the platform pools
+
+**What changed:** the Proxmox credentials of the services cluster reach less. Installer
+stage 10 (`split_acls`) now grants `capmox@pve!capi` `ProxCloudCAPI` on the services pool
+instead of `/pool`, and `csi@pve!csi` `ProxCloudCSI` on the services pool and its boot store
+instead of `/pool` and `/storage`; both users get a row of their own on that pool. The
+setup script route gains `managedServices=true`, which writes the same rows for a Compose
+site, the portal token's mint grant, and the new pool `proxcloud-seed` for the seed VM of
+managed services, where the portal token and every `csi@pve` token get `NoAccess`. That
+fences the seed VM only: its disk sits on the boot store, where `csi@pve!csi` holds
+`Datastore.Allocate`, which in PVE opens every volume on the store. The rows are
+`pve.ManagedACLs`; a test keeps them equal to stage 10.
+
+**Why:** both tokens only ever work on the services cluster, but held every tenant pool and
+store, and a stolen portal token with `Permissions.Modify` on `/pool` could have widened
+them further on the platform VMs. A more specific row wins in PVE, so the users' own rows
+on the platform pools fence them against a later `/pool` grant. The remaining reach of that
+mint grant on `/pool` (other users without a row there) is accepted for M1. It also holds
+`Permissions.Modify` on `/storage`, so a stolen portal token can grant itself
+`Datastore.Allocate` on the boot store and read every disk there, the seed's included,
+through a tenant VM; no row closes that in M1. ADR 0009 accepts both reaches for M1 (A2
+"Limit", A8); a store of the seed's own, which would fence its disk from the CSI token, is a
+change of its own. Lab check L1 measures each of them. Existing sites keep their broad token rows until removed by hand,
+because stage 10 only adds rows.
+
+**Views updated:** [C2 containers](c2-containers.md) (trust boundaries: new "Services
+cluster to Proxmox" row).
+## 2026-11-15: Cluster chart kubeadm mode for the platform cluster
+
+**What changed:** chart `proxmox-kamaji-cluster` 0.1.11 has a second control-plane kind,
+`controlPlane.kind: kubeadm`, for the platform's own workload cluster of managed services
+(ADR 0009). It renders a `KubeadmControlPlane` with one replica on one PVE node, with the
+kube-vip static pod, prepare script, provider-id kubelet argument and certSANs of installer
+stage 50's services cluster, the endpoint on the `ProxmoxCluster`, and `PodNodeSelector` and
+`PodTolerationRestriction` next to `NodeRestriction`. It skips the CAAPH add-ons, the
+ClusterResourceSet, the services-side CSI controller and the Gateway API carriers; the node
+groups are the tenant ones. The default `kamaji` renders byte-identical output for tenant
+values. Nothing renders kubeadm mode yet, and the 0.1.11 tag is not cut.
+
+**Why:** the managed-services design reuses this chart for the platform cluster, so both the
+installer path and the in-platform path end in the same ArgoCD Application shape instead of a
+second cluster template. The chart element's scope grows; no running flow, credential or
+network path changes until the platform job uses it.
+
+**Diagrams updated:** [C2c build and delivery](c2-containers.md#c2c-build-and-delivery) (chart
+element) and the [container table](c2-containers.md#container-table) (chart row).
+
+Files: `deploy/charts/proxmox-kamaji-cluster/{Chart.yaml,values.yaml,templates/*}`,
+`internal/cloud/kamaji/{chart_golden_test.go,chart_kubeadm_test.go,testdata/}`,
+`deploy/charts/README.md`, `docs/architecture/c4/c2-containers.md`.
 ## 2026-11-15: Kubernetes API client gains cluster-scoped apply, TokenRequest and access review
 
 **What changed:** `internal/cloud/kamajik8s` gained four calls: `ApplyClusterScoped`
@@ -20,6 +70,53 @@ credential before using it, and build the seed and provider kubeconfigs. `ApplyC
 lands.
 
 **Views updated:** [C3 components](c3-components.md) (Kubernetes API client row).
+## 2026-11-15: Chart proxcloud-platform for the managed-services platform
+
+**What changed:** a new chart, `deploy/charts/proxcloud-platform` 0.1.0, with its own tag
+flow `proxcloud-platform-v*` in `helm.yml` (PR lint and render of one example per part; OCI
+push to `ghcr.io/mutex-solutions/charts` from GitHub Actions only). It has two parts, chosen
+per platform BOM component. `clusterctl.enabled` (`capi` on the seed, `capi-tenant` on the
+workload cluster) renders `clusterctl init` as an ArgoCD Sync hook Job
+(`BeforeHookCreation`) with a cluster-admin service account and the `proxcloud-clusterctl`
+image pinned by digest; it refuses to render without a `@sha256:` digest. `platform.enabled`
+(`platform`, workload cluster) renders the provider service account, token Secret and RBAC
+of `deploy/mgmt-cluster/rbac.yaml` and `deploy/dbaas-cluster/rbac.yaml`, with the objects
+both define once, plus a ClusterRole for `ciliumnetworkpolicies` (the database egress
+fence), the two tenant AppProjects, a locked `default` AppProject (no source, no
+destination), the MetalLB pool `services` and the tenant chart repository entry without
+credentials. Nothing applies the chart yet, the tag is not cut and the image does not exist.
+
+**Why:** the managed-services design installs the platform's own objects through ArgoCD from
+pinned charts, on both provisioning paths; the installer applies the same objects with
+`kubectl` today, from two files that both define the shared objects. One chart with a test that holds it equal to
+those files keeps the two paths giving the provider the same rights. No running flow,
+credential or network path changes; the cluster-admin Job identity exists only where the
+chart is applied, which no code does yet.
+
+**Diagrams updated:** [C2c build and delivery](c2-containers.md#c2c-build-and-delivery)
+(chart element and its edge to `helm.yml`) and the
+[container table](c2-containers.md#container-table) (chart row).
+
+Files: `deploy/charts/proxcloud-platform/`, `internal/platformlife/{chart_test.go,testdata/}`,
+`.github/workflows/helm.yml`, `deploy/charts/README.md`, `docs/ci-release.md`,
+`CONTRIBUTING.md`, `docs/architecture/c4/c2-containers.md`.
+## 2026-11-15: Platform bill of materials in the API
+
+**What changed:** a new component of `proxcloud-api`, `internal/platformlife`, parses and
+validates `deploy/platform/platform-bom.yaml`, which `deploy/embed.go` compiles into the
+binary (the API image copies both). `GET /api/v1/admin/platform/bom` (`admin:service:read`,
+`internal/platform/admin/platform.go`) serves it read-only with the file's sha256. No
+container, external system, trust boundary or flow changes: the route reads only the
+embedded file, and nothing installs from the BOM yet.
+
+**Why:** ADR 0009 makes one BOM per release the version source of the managed-services
+platform for both provisioning paths. The lifecycle job and its pages, which come later, read
+it through this package, so it lands first with the rules that keep it exact (versions,
+digests, `pending` and `0.0.0+` only in a `-dev` release) and tests that hold the installer's
+pins equal to it.
+
+**Views updated:** [C3e managed services](c3-components.md#c3e-managed-services-and-object-storage)
+(new `platformlife` node and table row).
 
 ## 2026-11-15: Management port job triggers only with debug triggers on
 
