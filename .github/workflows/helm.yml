@@ -9,8 +9,8 @@ name: helm
 #                                          Chart.yaml version, to the same charts repo.
 #   - tag database-cluster-v*:             the managed-database (DBaaS) chart, at its own
 #                                          Chart.yaml version, to the same charts repo.
-#   - tag proxcloud-platform-v*:           the managed-services platform chart (the platform BOM
-#                                          pins it), at its own Chart.yaml version, same repo.
+#   - tag proxcloud-platform-v*:           the managed-services platform chart (ADR 0009),
+#                                          at its own Chart.yaml version, same repo.
 #
 # The DBaaS chart is deliberately NOT released off the app tag: a customer database pins a
 # chart version and keeps it until something explicitly moves it, so that chart's lifecycle

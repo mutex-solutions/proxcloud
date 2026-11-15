@@ -21,7 +21,7 @@ Four charts live here:
   CI does.
 - **`proxcloud-platform`**: ProxCloud's own objects on the managed-services platform
   ([ADR 0009](../../docs/adr/0009-managed-services-platform-lifecycle.md)); nothing applies it
-  yet. One part per component of the platform BOM (`deploy/platform/platform-bom.yaml`):
+  yet. One part per component of the platform BOM that ADR 0009 describes:
   `clusterctl.enabled` (components `capi` on the seed and `capi-tenant` on the workload
   cluster) renders `clusterctl init` as an ArgoCD Sync hook Job from the
   `proxcloud-clusterctl` image, pinned by digest; `platform.enabled` (component `platform`)

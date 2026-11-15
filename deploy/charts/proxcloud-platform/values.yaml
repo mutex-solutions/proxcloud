@@ -1,4 +1,4 @@
-# One chart, two parts, chosen per BOM component (deploy/platform/platform-bom.yaml):
+# One chart, two parts, chosen per component of the platform BOM (ADR 0009):
 #   capi (seed), capi-tenant (workload): clusterctl.enabled, with that cluster's providers;
 #   platform (workload):                 platform.enabled.
 # Bare defaults render nothing and fail; examples/ holds one values file per component. No secrets here: this

@@ -162,9 +162,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Kubernetes node images are left to the Template updates page. Playwright specs check the flag-off state, the import
   requests and that publish is called once per passed template, against the mock API; not run against a live API.
 - **Chart `proxcloud-platform` 0.1.0 for the managed-services platform** (`deploy/charts/proxcloud-platform`, ADR
-  0009): the platform's own objects, installed through ArgoCD from a pinned chart on both provisioning paths instead of
-  `kubectl apply` of loose files. One part per platform BOM component. `clusterctl.enabled` (components `capi` on the
-  seed and `capi-tenant` on the workload cluster) renders `clusterctl init` as an ArgoCD Sync hook Job
+  0009): the platform's own objects as one pinned chart, which ADR 0009 installs through ArgoCD on both provisioning
+  paths. Installer stage 50 is unchanged and still applies `deploy/{mgmt,dbaas}-cluster/*.yaml` with `kubectl`. One
+  part per component of the platform BOM, which is not in the repository yet. `clusterctl.enabled` (components
+  `capi` on the seed and `capi-tenant` on the workload cluster) renders `clusterctl init` as an ArgoCD Sync hook Job
   (`BeforeHookCreation`, cluster-admin service account, `PROXMOX_*` empty, no version check against GitHub) whose
   arguments are the BOM's providers (`--core=cluster-api:v1.14.4`, …) and whose image, `proxcloud-clusterctl`, must be
   pinned by `@sha256:` digest: the chart refuses the BOM's `pending` placeholder and a tag. `platform.enabled`
