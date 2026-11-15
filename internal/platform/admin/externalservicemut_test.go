@@ -298,7 +298,7 @@ func TestPVENetworkStoredProblemsKept(t *testing.T) {
 			"config.network.zones.w is a vlan zone and needs a bridge"},
 		{"a pool too small", `{"defaultZone":"overlay","zones":{"overlay":{"kind":"evpn"}},"cidrPool":"10.100.0.0/25"}`,
 			"config.network.cidrPool must be an IPv4 range of /24 or larger"},
-		{"a zone per project from the vlan zone", `{"defaultZone":"v","zones":{"v":{"kind":"vlan","vlanMin":100}},"isolation":"evpn-per-project"}`,
+		{"a zone per project from the vlan zone", `{"defaultZone":"v","zones":{"v":{"kind":"vlan","vlanMin":100,"vlanMax":199}},"isolation":"evpn-per-project"}`,
 			"must then be an evpn zone"},
 	}
 	for _, tt := range tests {

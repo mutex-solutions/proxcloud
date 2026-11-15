@@ -416,11 +416,12 @@ func ParseCIDRPool(pool string) (netip.Prefix, error) {
 // ValidatePVENetwork checks the config.network value a save carries (raw; nil is no network) against the block it
 // replaces (stored; nil on a create). It refuses what is wrong and lets through what is missing: a provider is stored
 // before its network is set up, and the setup checks of the connection test report what is still to do. A refused
-// block is one whose tenant networks would fail: Proxmox takes an SDN zone id of at most 8 characters and a VLAN zone
-// only on a bridge, the network code knows three kinds of zone, and a zone per project is copied from the default
-// zone, which must then be EVPN (EnsureProjectZone). A problem the stored block already has is not refused again: the
-// console sends the stored block back with every save, and a block from before this check may work (EnsureZone uses a
-// zone that exists in Proxmox as it is), so it must not lock the provider.
+// block is one whose tenant networks would fail: Proxmox takes an SDN zone id of at most 8 characters, a VLAN zone
+// only on a bridge and a VLAN tag from 1 to 4094 (a vlan zone's vlanMin to vlanMax), the network code knows three
+// kinds of zone, and a zone per project is copied from the default zone, which must then be EVPN
+// (EnsureProjectZone). A problem the stored block already has is not refused again: the console sends the stored
+// block back with every save, and a block from before this check may work (EnsureZone uses a zone that exists in
+// Proxmox as it is), so it must not lock the provider.
 func ValidatePVENetwork(raw, stored any) error {
 	old := pveNetworkProblems(stored)
 	for _, p := range pveNetworkProblems(raw) {
@@ -471,6 +472,24 @@ func pveNetworkProblems(raw any) (out []string) {
 		}
 		if bridge, _ := z["bridge"].(string); kind == "vlan" && bridge == "" {
 			add("config.network.zones.%s is a vlan zone and needs a bridge", key)
+		}
+		if kind == "vlan" {
+			// The tags tenant vnets are given, read as PVENetworkConfig reads them (intOf: a JSON number, or the
+			// string Ansible's "| int" sends); network.go counts from vlanMin to vlanMax.
+			var tags [2]int
+			before := len(out)
+			for i, k := range []string{"vlanMin", "vlanMax"} {
+				f, isFloat := z[k].(float64)
+				tags[i] = intOf(z[k])
+				if z[k] == nil {
+					add("config.network.zones.%s is a vlan zone and needs %s (its networks get the VLAN tags vlanMin to vlanMax)", key, k)
+				} else if tags[i] < 1 || tags[i] > 4094 || (isFloat && f != float64(tags[i])) {
+					add("config.network.zones.%s.%s must be a VLAN tag, a whole number from 1 to 4094, not %v", key, k, z[k])
+				}
+			}
+			if len(out) == before && tags[0] > tags[1] {
+				add("config.network.zones.%s.vlanMin must be at most vlanMax, not %d with vlanMax %d", key, tags[0], tags[1])
+			}
 		}
 	}
 	n := (&ExternalService{Config: map[string]any{"network": m}}).PVENetworkConfig()

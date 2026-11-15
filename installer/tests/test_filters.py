@@ -75,13 +75,26 @@ import yaml  # noqa: E402
 NET = yaml.safe_load(open(os.path.join(os.path.dirname(__file__), "..", "playbooks", "group_vars", "all", "defaults.yml")))["pc_defaults"]["network"]
 assert f.tenant_network_problem(NET) == "", f.tenant_network_problem(NET)
 for edit in [{"kind": "simple"}, {"kind": "vlan", "bridge": "vmbr1"}, {"isolation": "evpn"}, {"isolation": "evpn-per-project"},
-             {"cidr_pool": "10.100.0.0/24"}, {"cidr_pool": "10.100.0.1/16"}, {"default_zone": "zone1234"}, {"kind": "overlay", "isolation": "evpn"}]:
+             {"cidr_pool": "10.100.0.0/24"}, {"cidr_pool": "10.100.0.1/16"}, {"default_zone": "zone1234"}, {"kind": "overlay", "isolation": "evpn"},
+             {"kind": "vlan", "bridge": "vmbr1", "vlan_min": 1, "vlan_max": 4094}, {"kind": "vlan", "bridge": "vmbr1", "vlan_min": 7, "vlan_max": 7},
+             {"kind": "vlan", "bridge": "vmbr1", "vlan_min": "100", "vlan_max": " 199 "}, {"kind": "vlan", "bridge": "vmbr1", "vlan_min": 100.0, "vlan_max": "199.0"},
+             {"kind": "simple", "vlan_min": 0, "vlan_max": "x"}]:
     assert f.tenant_network_problem(dict(NET, **edit)) == "", (edit, f.tenant_network_problem(dict(NET, **edit)))
 for edit, want in [
     ({"kind": "vxlan"}, "network.kind must be evpn, simple or vlan"),
     ({"kind": "vlan"}, "network.kind vlan needs network.bridge"),  # the shipped bridge is ""
     ({"kind": "simple", "isolation": "evpn"}, "network.kind must be evpn"),
     ({"kind": "vlan", "bridge": "vmbr1", "isolation": "evpn-per-project"}, "not vlan"),
+    ({"kind": "vlan", "bridge": "vmbr1", "vlan_min": 0}, "network.kind vlan gives tenant networks the VLAN tags network.vlan_min to network.vlan_max"),
+    ({"kind": "vlan", "bridge": "vmbr1", "vlan_max": 4095}, "not 100 to 4095"),
+    ({"kind": "vlan", "bridge": "vmbr1", "vlan_min": None}, "not None to 199"),
+    ({"kind": "vlan", "bridge": "vmbr1", "vlan_min": 100.5}, "whole numbers from 1 to 4094"),
+    ({"kind": "vlan", "bridge": "vmbr1", "vlan_min": "-1"}, "whole numbers from 1 to 4094"),
+    ({"kind": "vlan", "bridge": "vmbr1", "vlan_max": "199.5"}, "whole numbers from 1 to 4094"),
+    ({"kind": "vlan", "bridge": "vmbr1", "vlan_max": "nan"}, "whole numbers from 1 to 4094"),
+    ({"kind": "vlan", "bridge": "vmbr1", "vlan_min": True}, "whole numbers from 1 to 4094"),
+    ({"kind": "vlan", "bridge": "vmbr1", "vlan_max": "many"}, "whole numbers from 1 to 4094"),
+    ({"kind": "vlan", "bridge": "vmbr1", "vlan_min": 200, "vlan_max": 100}, "vlan_min at most vlan_max, not 200 to 100"),
     ({"cidr_pool": "10.100.0.0/25"}, "network.cidr_pool must be an IPv4 range of /24 or larger"),
     ({"cidr_pool": "fd00::/48"}, "network.cidr_pool must be"),
     ({"cidr_pool": "10.100.0.0"}, "network.cidr_pool must be"),

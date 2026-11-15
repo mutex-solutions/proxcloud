@@ -65,7 +65,7 @@ func TestCheckPublicNetworks(t *testing.T) {
 	}
 }
 
-func TestTokenWarnings(t *testing.T) {
+func TestTokenChecks(t *testing.T) {
 	full := map[string]bool{}
 	for _, chk := range pve.PlatformPrivileges {
 		for _, p := range chk.Privs {
@@ -108,7 +108,12 @@ func TestTokenWarnings(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got := tokenWarnings(context.Background(), cc, tt.tokenID)
+			var got []string // what the route returns as warnings
+			for _, c := range tokenChecks(context.Background(), cc, tt.tokenID) {
+				if c.Status != checkOK {
+					got = append(got, c.Message)
+				}
+			}
 			if len(got) != len(tt.want) {
 				t.Fatalf("warnings = %q, want %d matching %q", got, len(tt.want), tt.want)
 			}

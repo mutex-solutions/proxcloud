@@ -4,7 +4,7 @@ The operator's job ends where yours begins. Once ProxCloud is installed, wired t
 
 ## A suggested order of setup
 
-Most deployments configure things in roughly this sequence. You can jump around, but pricing tends to come first because everything downstream depends on it.
+On a new install, start with [Platform setup](/docs/platform-admin/platform-setup): it connects the first Proxmox VE cluster, sets networks, storage and templates, applies a default catalog and goes live. After that, most deployments configure things in roughly this sequence. You can jump around, but pricing tends to come first because everything downstream depends on it.
 
 1. **Pricing** — define your price plans and the resource types they charge for.
 2. **Clouds** — register and tune your Proxmox VE clusters and S3 stores.

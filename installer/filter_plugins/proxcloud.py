@@ -290,6 +290,15 @@ def sandbox_net_problem(net, cidr_pool, avoid=None):
     return ""
 
 
+def _whole(v):
+    """v as an int when it is a whole number (an int, or a float or numeric string with no fraction), else None."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return int(f) if not isinstance(v, bool) and f.is_integer() else None
+
+
 def tenant_network_problem(net):
     """Why proxcloud.network would be refused when stage 60 registers it, or "". The portal refuses a provider's
     network block that tenant networks cannot work with (externalservice.ValidatePVENetwork); stage 60 runs after
@@ -305,6 +314,11 @@ def tenant_network_problem(net):
     if kind == "vlan" and not net.get("bridge"):
         return ("network.kind vlan needs network.bridge, the bridge the VLAN zone is on (for a zone made by hand in "
                 "Proxmox, its bridge)")
+    raw = [net.get("vlan_min"), net.get("vlan_max")]
+    tags = [_whole(t) for t in raw]  # stage 60 sends "| int" of them, which keeps 100.0 or "100.0" as 100
+    if kind == "vlan" and not (all(t is not None and 1 <= t <= 4094 for t in tags) and tags[0] <= tags[1]):
+        return ("network.kind vlan gives tenant networks the VLAN tags network.vlan_min to network.vlan_max: whole "
+                "numbers from 1 to 4094, vlan_min at most vlan_max, not %r to %r" % tuple(raw))
     if net.get("isolation") in ("evpn", "evpn-per-project") and kind not in ("", "evpn", "overlay"):
         return ("network.isolation %s copies every project's zone from the default zone, so network.kind must be evpn, "
                 "not %s" % (net.get("isolation"), kind))
