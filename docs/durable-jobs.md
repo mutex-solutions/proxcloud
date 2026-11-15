@@ -100,11 +100,18 @@ pass (`ClaimDeadKinds`: import, smoke, sandbox — not the bulk attach).
   attempts audit commits in `durable_job_replay` with dead→pending. No payload edit,
   arbitrary command, replay-success job, or hidden force operation. The standard
   admin audit middleware also records the authenticated HTTP mutation.
-- With debug triggers or scheduler on: `POST :8081/debug/jobs-selftest` verifies
+- With debug triggers on (`PROXCLOUD_JOBS_DEBUG_TRIGGERS=true`; the scheduler alone
+  no longer mounts them): `POST :8081/debug/jobs-selftest` verifies
   enqueue→running worker→ACK without billing fixtures, and `jobs-status` reports
-  history. Keep management port private as before. `run-charge` now means durable
-  enqueue acceptance, not synchronous completion. Old rabbit-selftest/fanout debug
-  endpoints are gone.
+  history. They have no authentication, and the flag mounts every trigger at once
+  (`gen-hmac-key`, `run-project-deletion`, `send-test-mail` included), so
+  `jobs-selftest` is a development or lab check only; it has no admin equivalent.
+  Keep the flag off on a production install, even for a short check: an Admin API
+  key minted through `gen-hmac-key` meanwhile stays valid after the flag is off
+  again. On a production install the supported view is the history from
+  `GET /api/v1/admin/durable-jobs` above. Keep management port private as before.
+  `run-charge` now means durable enqueue acceptance, not synchronous completion.
+  Old rabbit-selftest/fanout debug endpoints are gone.
 
 `PROXCLOUD_DB_READ_URL` opens a separate max-two-connection read-only history pool.
 Empty uses primary **for history only**. Configured-unavailable history returns

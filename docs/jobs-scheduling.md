@@ -213,14 +213,20 @@ retention, migration, primary/read-pool boundaries, and exact regression command
 ## Manual triggers
 
 Two ways to run a job on demand instead of waiting for its cron — useful for a
-controlled first live run, or for driving a job deterministically in a drill.
+controlled first live run, or for driving a job deterministically in a drill. On a
+production install use the operator job API; the debug triggers are for development
+and lab installs.
 
 ### mgmt debug triggers
 
-Exposed on the **management port** when `PROXCLOUD_JOBS_SCHEDULER_ENABLED=true`
-**or** `PROXCLOUD_JOBS_DEBUG_TRIGGERS=true` (`server.MgmtRouter(..., jobsDebug)`),
-except `gen-hmac-key`, which only `PROXCLOUD_JOBS_DEBUG_TRIGGERS=true` exposes
-(it is unauthenticated).
+Exposed on the **management port** only when `PROXCLOUD_JOBS_DEBUG_TRIGGERS=true`
+(`debugTriggers` in `cmd/api/main.go`, mounted by `server.MgmtRouter`). The
+scheduler does **not** expose them. They have **no authentication**, and the
+management port listens on every interface: anything that reaches the pod or
+container (any pod that can reach the API pod in Kubernetes, any process on the
+Docker host through the container's bridge address) can call them. Turn them on
+only on a development or lab install. Up to v0.6.0, turning the scheduler on
+also exposed every trigger except `gen-hmac-key`.
 Each is `POST /debug/<name>` and returns a small JSON result:
 
 | Trigger | Runs |
@@ -230,6 +236,8 @@ Each is `POST /debug/<name>` and returns a small JSON result:
 | `run-pve-state` | one Proxmox state sample |
 | `run-sandbox-state` | one sandbox state read |
 | `run-sandbox-builds` | record finished custom template builds |
+| `run-sandbox-abuse` | one sandbox abuse sampling pass ([managed-sandbox.md](managed-sandbox.md)) |
+| `run-sandbox-rotation` | one sandbox worker rotation pass, honouring its interval and scope |
 | `run-sandbox-autopause` | invokes the same capability-gated runner; does not bypass the saved-lifecycle hold |
 | `run-registry-prune` | preview/HOLD as configured; `?grace=10m` lowers only the candidate age floor, never enables real DELETE |
 | `run-pve-tasks` | one Proxmox task poll |
@@ -249,14 +257,38 @@ Each is `POST /debug/<name>` and returns a small JSON result:
 | `jobs-status` | bounded lag-tolerant queue history and WAL replay metadata |
 | `sse-emit` | push a synthetic SSE event to open streams |
 | `send-test-mail` | render + send a system message template |
-| `gen-hmac-key` | mint an Admin-API SigV4 access key pair (debug triggers only) |
+| `gen-hmac-key` | mint an Admin-API SigV4 access key pair |
 
 ### Operator job API
 
 `internal/platform/job` also exposes `/api/v1/admin/job/*` on the app port,
-reusing the **same** in-process job objects (charge, metrics, services-sync,
-collect, savings-expire, reminder schedule/dispatch, transaction-scan). This is
-the authenticated operator surface for the same runners.
+reusing the **same** in-process job objects. It needs an admin credential (a SigV4
+hmac key or an admin / admin-api realm bearer, see [auth.md](auth.md)) and works
+whatever the scheduler and debug trigger settings are. This is the supported way to
+run a job on demand on a production install. Each `POST` runs the same function as
+the trigger it replaces and returns `202` when it returned without error (for
+`billing/rate` on the native provider that means the durable charge work was
+accepted, as with `run-charge`), `500` with the error otherwise:
+
+| Endpoint | Debug trigger it replaces |
+|---|---|
+| `/api/v1/admin/job/billing/rate?timeUnit=minute\|hour\|month` | `run-charge` (`timeUnit` is required here) |
+| `/api/v1/admin/job/usage/metrics` | `run-metrics` |
+| `/api/v1/admin/job/external-service/sync` | `run-sync` |
+| `/api/v1/admin/job/collect` | `run-collect` |
+| `/api/v1/admin/job/savings-contracts/expiry-check` | `run-savings-expire` |
+| `/api/v1/admin/job/savings-contracts/reminder-check` | `run-expiry-reminders` |
+| `/api/v1/admin/job/notifications/reminder` | `run-reminders` |
+| `/api/v1/admin/job/transactions/sync` | `run-txn-scan` |
+
+`GET /api/v1/admin/durable-jobs` (`admin:bill:read`) returns the same history as
+`jobs-status` ([durable-jobs.md](durable-jobs.md)). The other triggers
+(`run-send-bills`, `run-dunning`, `run-review`, `run-project-deletion`, the Proxmox
+and sandbox jobs, `run-registry-prune`, `run-sso-reconcile`, `jobs-selftest`,
+`sse-emit`, `send-test-mail`) have no admin endpoint: they need `PROXCLOUD_JOBS_DEBUG_TRIGGERS=true` (the scheduled
+ones also run on their cron). `/api/v1/admin/job/send-bill` answers `202` without running anything. An
+Admin API key is minted in the admin console or with `proxcloud-api admin-key create`
+([auth.md](auth.md#hmac-keys)), not with `gen-hmac-key`.
 
 ---
 
@@ -280,7 +312,7 @@ The runtime settings (`internal/config/config.go`):
 | Env var | Default / effect |
 |---|---|
 | `PROXCLOUD_JOBS_SCHEDULER_ENABLED` | false; starts timed cron producers |
-| `PROXCLOUD_JOBS_DEBUG_TRIGGERS` | false; expose management debug triggers |
+| `PROXCLOUD_JOBS_DEBUG_TRIGGERS` | false; expose the unauthenticated management debug triggers (development and lab only) |
 | `PROXCLOUD_JOBS_WORKER_CONCURRENCY` | 2 per API replica; 1..16 |
 | `PROXCLOUD_JOBS_POLL_INTERVAL` | 1s; 100ms..1m, jittered empty/error polling |
 | `PROXCLOUD_JOBS_LEASE_DURATION` | 1m; 10s..10m; DB-only transaction deadline is 3/4 of lease |

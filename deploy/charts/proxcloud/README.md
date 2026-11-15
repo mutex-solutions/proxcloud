@@ -185,7 +185,7 @@ complete production set: `installer/playbooks/templates/app-proxcloud.yml.j2`.
 | `api.corsAllowedOrigins` | `[]` | Extra CORS origins. |
 | `api.defaultRegion` | `""` (`default`) | Region assumed when a provider names none. |
 | `api.jobs.schedulerEnabled` | `false` | Admit new scheduled billing/sync work. Opt in deliberately after fresh-install verification or the migration/cutover checklist; false does not stop existing durable workers. |
-| `api.jobs.debugTriggers` | `false` | On-demand `POST :8081/debug/run-*` triggers. Keep off in production. |
+| `api.jobs.debugTriggers` | `false` | On-demand `POST :8081/debug/*` triggers, with no authentication: any pod that can reach the API pod can run them. Development and lab only. `schedulerEnabled` does not expose them; in production run a job on demand with the authenticated `/api/v1/admin/job/*` endpoints ([jobs-scheduling.md](../../../docs/jobs-scheduling.md#manual-triggers)). |
 | `api.jobs.workerConcurrency` | `2` | Bounded workers per API pod, `1..16`; always run even with scheduler/debug off. |
 | `api.jobs.pollInterval`, `api.jobs.leaseDuration` | `1s`, `1m` | Go durations, `100ms..1m` / `10s..10m`. |
 | `api.jobs.rabbitFanout` | `false` | Deprecated; **true is a migration error**, not a legacy consumer opt-in. |
@@ -288,7 +288,8 @@ before the first install with `--set seed.billingConfiguration.baseCurrency=EUR`
 ## Exposure
 
 Per-component Ingress or Gateway API HTTPRoutes. The management port (`:8081`:
-probes and operator triggers) stays cluster-internal; never route to it.
+probes, billing callbacks, and the unauthenticated job triggers when
+`api.jobs.debugTriggers` is on) stays cluster-internal; never route to it.
 
 ## Upgrading
 

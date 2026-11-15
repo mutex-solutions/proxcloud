@@ -102,7 +102,9 @@ Useful env toggles (both default off; full table in
   dev instance never charges on a timer).
 - `PROXCLOUD_JOBS_DEBUG_TRIGGERS=true` — expose on-demand job triggers on the
   management port (`POST :8081/debug/run-{sync,metrics,charge,…}`) without
-  starting the crons — the deterministic way to drive jobs in dev.
+  starting the crons — the deterministic way to drive jobs in dev. They have no
+  authentication, so keep this to a development machine. The scheduler does not
+  expose them: a dev instance that had only the scheduler on needs this flag too.
 
 ## Seed base configuration
 
@@ -142,7 +144,8 @@ records.
    [cloud-integration.md](cloud-integration.md#the-proxmox-provider-document).
 3. Enter a project in the customer console: it is bootstrapped onto the provider
    (pool, default security group, default quota). Drive a sync with
-   `POST :8081/debug/run-sync`.
+   `POST :8081/debug/run-sync` (with `PROXCLOUD_JOBS_DEBUG_TRIGGERS=true`, see above),
+   or with an admin credential `POST :8080/api/v1/admin/job/external-service/sync`.
 
 ### Seed an operator setup
 

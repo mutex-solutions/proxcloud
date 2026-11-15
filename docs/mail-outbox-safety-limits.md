@@ -53,7 +53,9 @@ contract-expired mail remain legacy best-effort; there is no historical backfill
   Existing purely legacy contracts retain their best-effort path. Mixed-version
   rollout writers are unsupported: upgrade all API replicas before enabling enqueue.
 - Existing savings cron/debug triggers determine when decisions run; this flag
-  starts no scheduler. `/debug/run-reminders` reports `queuedDecisions` and
+  starts no scheduler. `/debug/run-reminders` (only with
+  `PROXCLOUD_JOBS_DEBUG_TRIGGERS=true`; `POST /api/v1/admin/job/notifications/reminder`
+  runs the same dispatch with an admin credential) reports `queuedDecisions` and
   `dispatchEnabled:false` in durable mode; legacy mode retains `sent` best-effort counts.
   There is **no automatic release of blocked rows or production dispatcher** in this
   slice. Queue-only opt-in cannot yet deliver mail; delivery rollout/reconciliation

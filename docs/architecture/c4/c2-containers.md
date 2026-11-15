@@ -79,7 +79,7 @@ router in `internal/server/server.go`).
 | `/api/v1/events/{projectId}` | 8080 | OIDC bearer (a short-lived stream token is not built yet) | Server-sent events per project | Implemented |
 | `/openapi.json` | 8080 | public | Stub document | Implemented |
 | `/actuator/health*`, `/__build` | 8081 | none; not routed by the chart's gateway or ingress | Liveness, readiness, build info | Implemented |
-| `POST /debug/<job>` | 8081 | none; not routed by the chart's gateway or ingress | Manual job triggers (with the scheduler or debug triggers on; `gen-hmac-key` with debug triggers only) | Implemented |
+| `POST /debug/<job>` | 8081 | none; not routed by the chart's gateway or ingress | Manual job triggers, `gen-hmac-key` included, only with `PROXCLOUD_JOBS_DEBUG_TRIGGERS` on (development and lab); the scheduler does not mount them. Production runs a job on demand through `/api/v1/admin/job/*` (admin credential) | Implemented |
 | Billing service callbacks | 8081 | shared token | Suspend/resume and mail callbacks from an external billing service | Implemented |
 | CSI gateway `/api2/json/**` | `PROXCLOUD_CSI_GATEWAY_ADDR` (TLS only; off when empty) | per-cluster credential `csi@proxcloud!<clusterId>`, only its SHA-256 stored | The PVE calls a tenant cluster's proxmox-csi controller may make, each checked for ownership, sent on with one gateway token. Called by the proxmox-csi controllers of new tenant clusters, which run on the services cluster (`PROXCLOUD_CSI_GATEWAY_URL`); only the services nodes reach the port (chart NetworkPolicy) | Implemented |
 | `/e2b/**` | 8080 | a project's `e2b_` sandbox API key (`X-API-Key` or bearer), only its SHA-256 stored | E2B-compatible sandbox API ([e2b-compat.md](../../e2b-compat.md)) | Implemented |
