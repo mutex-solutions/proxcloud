@@ -55,6 +55,7 @@ type setupSnapshot struct {
 	Regions       []platformconfig.RegionDisplayConfig
 	Issuer        billing.IssuerInfo
 	Scheduler     bool       // PROXCLOUD_JOBS_SCHEDULER_ENABLED: syncs and charges run on a timer
+	APIBaseURL    string     // PROXCLOUD_SELF_API_BASE_URL: where a URL seed is fetched without config.metadata.url
 	Live          *setupLive // nil = database only
 }
 
@@ -176,7 +177,38 @@ func networkStep(s setupSnapshot) setupStep {
 	return newStep(stepNetwork, "Project networks use zone "+n.DefaultZone+" and "+n.CIDRPool, withChecks(stepNetwork, []setupItem{
 		checkItem("cidrPool", n.CIDRPool != "", "Project networks are cut from "+n.CIDRPool, "No address pool for project networks (config.network.cidrPool): creating a network fails"),
 		checkItem("zone", hasZone, "Default zone "+n.DefaultZone+" ("+zone.Kind+")", "No default zone (config.network.defaultZone and zones): creating a network fails"),
+		seedsItem(s.Provider, s.APIBaseURL),
 	}, s.Live)...)
+}
+
+// seedBase is where a server on a DHCP vnet fetches its seed (project.pveSeedStep): config.metadata.url, else the
+// API's own base URL; "" = nowhere, so every seed goes on an ISO.
+func seedBase(p *externalservice.ExternalService, apiBase string) string {
+	if u := p.PVEMetadataSettings().URL; u != "" {
+		apiBase = u
+	}
+	return strings.TrimRight(apiBase, "/")
+}
+
+// seedsItem asks the operator how servers get their seed (pve/seed.go). Only the operator knows whether tenant servers
+// reach the API and trust its certificate, so nothing is probed: a saved config.metadata.forceIso (either value) or
+// config.metadata.url is the answer, and without one the item is a warning. A server that misses its URL seed boots
+// with the template's hostname, no password and no guest agent, and nothing reports it.
+func seedsItem(p *externalservice.ExternalService, apiBase string) setupItem {
+	m, _ := p.Config["metadata"].(map[string]any)
+	force, chosen := m["forceIso"].(bool)
+	chosen = chosen || p.PVEMetadataSettings().URL != ""
+	base := seedBase(p, apiBase)
+	switch {
+	case force:
+		return setupItem{ID: "seeds", State: stateDone, Message: "Server seeds go on an ISO (config.metadata.forceIso)"}
+	case base == "":
+		return setupItem{ID: "seeds", State: stateAttention, Message: "Server seeds go on an ISO: the API has no base URL (PROXCLOUD_SELF_API_BASE_URL) and config.metadata.url is not set"}
+	case chosen:
+		return setupItem{ID: "seeds", State: stateDone, Message: "Servers on a DHCP network fetch their seed from " + base + "; the others get it on an ISO"}
+	}
+	return setupItem{ID: "seeds", State: stateAttention, Message: "Servers on a DHCP network fetch their seed from " + base + " unless ISO seeds are on (config.metadata.forceIso): " +
+		"tenant servers must reach it and trust its certificate, or they boot without their hostname, password and guest agent. Choose how servers get their seed"}
 }
 
 func storageStep(s setupSnapshot) setupStep {
@@ -373,7 +405,7 @@ func (h *Handler) setupProvider(ctx context.Context, serviceID string) (*externa
 
 // readSetupSnapshot reads the snapshot from the database, and from the cluster when live.
 func (h *Handler) readSetupSnapshot(ctx context.Context, serviceID string, live bool) (setupSnapshot, error) {
-	s := setupSnapshot{Scheduler: h.jobsScheduler}
+	s := setupSnapshot{Scheduler: h.jobsScheduler, APIBaseURL: h.apiBaseURL}
 	var err error
 	if s.Provider, err = h.setupProvider(ctx, serviceID); err != nil {
 		return s, err
@@ -475,16 +507,21 @@ func (h *Handler) readSetupLive(ctx context.Context, es *externalservice.Externa
 }
 
 // setupStatusResponse is the answer: the provider the steps were computed for ("" = none is saved), whether the
-// cluster was asked, and the steps.
+// cluster was asked, where a URL seed is fetched from ("" = nowhere: seeds go on an ISO), and the steps.
 type setupStatusResponse struct {
 	ServiceID string      `json:"serviceId"`
 	Live      bool        `json:"live"`
+	SeedURL   string      `json:"seedUrl"`
 	Steps     []setupStep `json:"steps"`
 }
 
 // SetJobsScheduler records whether the job scheduler runs (PROXCLOUD_JOBS_SCHEDULER_ENABLED); the go live step warns
 // without it.
 func (h *Handler) SetJobsScheduler(on bool) { h.jobsScheduler = on }
+
+// SetAPIBaseURL records the API's own base URL (PROXCLOUD_SELF_API_BASE_URL), where servers fetch a URL seed unless
+// the provider sets config.metadata.url.
+func (h *Handler) SetAPIBaseURL(u string) { h.apiBaseURL = u }
 
 // setupStatusGet handles GET /admin/setup/status. Like the defaults preview it shows providers, price plans, the
 // platform and the billing configuration, so it needs the four reads.
@@ -498,9 +535,9 @@ func (h *Handler) setupStatusGet(w http.ResponseWriter, r *http.Request) {
 	if httpx.WriteError(w, err) {
 		return
 	}
-	out := setupStatusResponse{Live: s.Live != nil, Steps: setupStatus(s)}
+	out := setupStatusResponse{Live: s.Live != nil, SeedURL: s.APIBaseURL, Steps: setupStatus(s)}
 	if s.Provider != nil {
-		out.ServiceID = s.Provider.ID
+		out.ServiceID, out.SeedURL = s.Provider.ID, seedBase(s.Provider, s.APIBaseURL)
 	}
 	httpx.OK(w, out)
 }

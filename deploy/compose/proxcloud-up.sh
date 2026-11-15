@@ -519,11 +519,12 @@ EOF
 
 Next steps:
   1. Sign in to the operator console as $operator_email.
-  2. Operator console -> System -> Cloud providers: register your Proxmox provider.
+  2. Operator console -> System -> Platform setup: connect your Proxmox cluster and walk to Go live.
   3. Back up $DIR/.env off this host, and schedule: ./proxcloud-up.sh backup
 EOF
   if [ "$TLS_MODE" = internal ]; then
     echo "  TLS mode internal: the certificate is self-signed. A browser must accept it for each of the four hostnames."
+    echo "  Tenant servers cannot fetch seeds over HTTPS with a self-signed certificate: choose \"On an ISO\" in Platform setup -> Network."
   fi
 }
 
