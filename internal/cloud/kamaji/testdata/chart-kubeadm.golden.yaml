@@ -1,0 +1,294 @@
+---
+# Source: proxmox-kamaji-cluster/templates/cluster.yaml
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: Cluster
+metadata:
+  name: pc-platform
+  labels:
+    proxcloud.io/cluster-id: pc-platform
+spec:
+  clusterNetwork:
+    pods:
+      cidrBlocks: ["10.244.0.0/16"]
+    services:
+      cidrBlocks: ["10.96.0.0/16"]
+  controlPlaneRef:
+    apiGroup: controlplane.cluster.x-k8s.io
+    kind: KubeadmControlPlane
+    name: pc-platform-cp
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: ProxmoxCluster
+    name: pc-platform
+---
+# Source: proxmox-kamaji-cluster/templates/node-groups.yaml
+apiVersion: bootstrap.cluster.x-k8s.io/v1beta2
+kind: KubeadmConfigTemplate
+metadata:
+  name: pc-platform-system-pve1-25cc42d9
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  template:
+    spec: {"joinConfiguration":{"nodeRegistration":{"kubeletExtraArgs":[{"name":"provider-id","value":"proxmox://'{{ ds.meta_data.instance_id }}'"},{"name":"node-labels","value":"proxcloud.io/node-group=system,topology.kubernetes.io/region=az1,topology.kubernetes.io/zone=pve1"}],"name":"{{ local_hostname }}"}}}
+---
+# Source: proxmox-kamaji-cluster/templates/node-groups.yaml
+apiVersion: bootstrap.cluster.x-k8s.io/v1beta2
+kind: KubeadmConfigTemplate
+metadata:
+  name: pc-platform-system-pve2-37e20059
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  template:
+    spec: {"joinConfiguration":{"nodeRegistration":{"kubeletExtraArgs":[{"name":"provider-id","value":"proxmox://'{{ ds.meta_data.instance_id }}'"},{"name":"node-labels","value":"proxcloud.io/node-group=system,topology.kubernetes.io/region=az1,topology.kubernetes.io/zone=pve2"}],"name":"{{ local_hostname }}"}}}
+---
+# Source: proxmox-kamaji-cluster/templates/node-groups.yaml
+apiVersion: bootstrap.cluster.x-k8s.io/v1beta2
+kind: KubeadmConfigTemplate
+metadata:
+  name: pc-platform-kamaji-pve2-1bb3a941
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  template:
+    spec: {"joinConfiguration":{"nodeRegistration":{"kubeletExtraArgs":[{"name":"provider-id","value":"proxmox://'{{ ds.meta_data.instance_id }}'"},{"name":"node-labels","value":"proxcloud.io/node-group=kamaji,topology.kubernetes.io/region=az1,topology.kubernetes.io/zone=pve2"}],"name":"{{ local_hostname }}","taints":[{"effect":"NoSchedule","key":"proxcloud.io/node-group","value":"kamaji"}]}}}
+---
+# Source: proxmox-kamaji-cluster/templates/control-plane-kubeadm.yaml
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+kind: KubeadmControlPlane
+metadata:
+  name: pc-platform-cp
+spec:
+  replicas: 1
+  version: "v1.35.10"
+  machineTemplate:
+    spec:
+      infrastructureRef: {apiGroup: infrastructure.cluster.x-k8s.io, kind: ProxmoxMachineTemplate, name: pc-platform-cp-pve1-88f58870}
+  kubeadmConfigSpec:
+    clusterConfiguration:
+      apiServer:
+        certSANs: ["192.0.2.10","platform.example.com"]
+        extraArgs:
+          - {name: enable-admission-plugins, value: "NodeRestriction,PodNodeSelector,PodTolerationRestriction"}
+    files:
+      - path: /etc/kubernetes/manifests/kube-vip.yaml
+        owner: root:root
+        content: |
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: kube-vip
+            namespace: kube-system
+          spec:
+            containers:
+            - args: ["manager"]
+              env:
+              - {name: cp_enable, value: "true"}
+              - {name: vip_interface, value: ""}
+              - {name: address, value: "192.0.2.10"}
+              - {name: port, value: "6443"}
+              - {name: vip_arp, value: "true"}
+              - {name: vip_leaderelection, value: "true"}
+              - {name: vip_leaseduration, value: "15"}
+              - {name: vip_renewdeadline, value: "10"}
+              - {name: vip_retryperiod, value: "2"}
+              image: ghcr.io/kube-vip/kube-vip:v0.8.9
+              imagePullPolicy: IfNotPresent
+              name: kube-vip
+              securityContext:
+                capabilities:
+                  add: [NET_ADMIN, NET_RAW]
+              volumeMounts:
+              - {mountPath: /etc/kubernetes/admin.conf, name: kubeconfig}
+            hostAliases:
+            - {hostnames: [localhost, kubernetes], ip: 127.0.0.1}
+            hostNetwork: true
+            volumes:
+            - name: kubeconfig
+              hostPath: {path: /etc/kubernetes/admin.conf, type: FileOrCreate}
+      - path: /etc/kube-vip-prepare.sh
+        owner: root:root
+        permissions: "0700"
+        content: |
+          #!/bin/bash
+          set -e
+          # kubeadm init has no admin.conf with rights yet: kube-vip uses super-admin.conf until then.
+          if [[ -f /run/kubeadm/kubeadm.yaml ]]; then
+            sed -i 's#path: /etc/kubernetes/admin.conf#path: /etc/kubernetes/super-admin.conf#' /etc/kubernetes/manifests/kube-vip.yaml
+          fi
+    preKubeadmCommands: [/etc/kube-vip-prepare.sh]
+    initConfiguration:
+      nodeRegistration:
+        kubeletExtraArgs: [{"name":"provider-id","value":"proxmox://'{{ ds.meta_data.instance_id }}'"},{"name":"node-labels","value":"topology.kubernetes.io/region=az1,topology.kubernetes.io/zone=pve1"}]
+    joinConfiguration:
+      nodeRegistration:
+        kubeletExtraArgs: [{"name":"provider-id","value":"proxmox://'{{ ds.meta_data.instance_id }}'"},{"name":"node-labels","value":"topology.kubernetes.io/region=az1,topology.kubernetes.io/zone=pve1"}]
+---
+# Source: proxmox-kamaji-cluster/templates/node-groups.yaml
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: MachineDeployment
+metadata:
+  name: pc-platform-system-pve1
+  labels:
+    cluster.x-k8s.io/cluster-name: pc-platform
+    proxcloud.io/node-group: system
+spec:
+  clusterName: pc-platform
+  replicas: 1
+  selector:
+    matchLabels:
+      cluster.x-k8s.io/cluster-name: pc-platform
+      proxcloud.io/machine-deployment: pc-platform-system-pve1
+  template:
+    metadata:
+      labels:
+        cluster.x-k8s.io/cluster-name: pc-platform
+        proxcloud.io/machine-deployment: pc-platform-system-pve1
+        proxcloud.io/node-group: system
+        node-restriction.kubernetes.io/proxcloud-node-group: "system"
+    spec:
+      clusterName: pc-platform
+      version: "v1.35.10"
+      bootstrap:
+        configRef:
+          apiGroup: bootstrap.cluster.x-k8s.io
+          kind: KubeadmConfigTemplate
+          name: pc-platform-system-pve1-25cc42d9
+      infrastructureRef:
+        apiGroup: infrastructure.cluster.x-k8s.io
+        kind: ProxmoxMachineTemplate
+        name: pc-platform-system-pve1-88f58870
+---
+# Source: proxmox-kamaji-cluster/templates/node-groups.yaml
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: MachineDeployment
+metadata:
+  name: pc-platform-system-pve2
+  labels:
+    cluster.x-k8s.io/cluster-name: pc-platform
+    proxcloud.io/node-group: system
+spec:
+  clusterName: pc-platform
+  replicas: 1
+  selector:
+    matchLabels:
+      cluster.x-k8s.io/cluster-name: pc-platform
+      proxcloud.io/machine-deployment: pc-platform-system-pve2
+  template:
+    metadata:
+      labels:
+        cluster.x-k8s.io/cluster-name: pc-platform
+        proxcloud.io/machine-deployment: pc-platform-system-pve2
+        proxcloud.io/node-group: system
+        node-restriction.kubernetes.io/proxcloud-node-group: "system"
+    spec:
+      clusterName: pc-platform
+      version: "v1.35.10"
+      bootstrap:
+        configRef:
+          apiGroup: bootstrap.cluster.x-k8s.io
+          kind: KubeadmConfigTemplate
+          name: pc-platform-system-pve2-37e20059
+      infrastructureRef:
+        apiGroup: infrastructure.cluster.x-k8s.io
+        kind: ProxmoxMachineTemplate
+        name: pc-platform-system-pve2-ddbc031d
+---
+# Source: proxmox-kamaji-cluster/templates/node-groups.yaml
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: MachineDeployment
+metadata:
+  name: pc-platform-kamaji-pve2
+  labels:
+    cluster.x-k8s.io/cluster-name: pc-platform
+    proxcloud.io/node-group: kamaji
+spec:
+  clusterName: pc-platform
+  replicas: 1
+  selector:
+    matchLabels:
+      cluster.x-k8s.io/cluster-name: pc-platform
+      proxcloud.io/machine-deployment: pc-platform-kamaji-pve2
+  template:
+    metadata:
+      labels:
+        cluster.x-k8s.io/cluster-name: pc-platform
+        proxcloud.io/machine-deployment: pc-platform-kamaji-pve2
+        proxcloud.io/node-group: kamaji
+        node-restriction.kubernetes.io/proxcloud-node-group: "kamaji"
+    spec:
+      clusterName: pc-platform
+      version: "v1.35.10"
+      bootstrap:
+        configRef:
+          apiGroup: bootstrap.cluster.x-k8s.io
+          kind: KubeadmConfigTemplate
+          name: pc-platform-kamaji-pve2-1bb3a941
+      infrastructureRef:
+        apiGroup: infrastructure.cluster.x-k8s.io
+        kind: ProxmoxMachineTemplate
+        name: pc-platform-kamaji-pve2-ddbc031d
+---
+# Source: proxmox-kamaji-cluster/templates/cluster.yaml
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha2
+kind: ProxmoxCluster
+metadata:
+  name: pc-platform
+spec:
+  # kube-vip holds this address on the control-plane VM (control-plane-kubeadm.yaml).
+  controlPlaneEndpoint:
+    host: 192.0.2.10
+    port: 6443
+  credentialsRef:
+    name: pc-platform-pve
+    namespace: pc-platform
+  ipv4Config:
+    addresses: ["192.0.2.20-192.0.2.39"]
+    gateway: 192.0.2.1
+    prefix: 24
+  dnsServers: ["192.0.2.53"]
+---
+# Source: proxmox-kamaji-cluster/templates/control-plane-kubeadm.yaml
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha2
+kind: ProxmoxMachineTemplate
+metadata:
+  name: pc-platform-cp-pve1-88f58870
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  template:
+    spec: {"allowedNodes":["pve1"],"checks":{"skipCloudInitStatus":true},"disks":{"bootVolume":{"disk":"scsi0","sizeGb":30}},"format":"raw","full":true,"memoryMiB":4096,"network":{"networkDevices":[{"bridge":"vmbr0","model":"virtio","name":"net0"}]},"numCores":2,"numSockets":1,"pool":"proxcloud-system","sourceNode":"pve1","storage":"local-zfs","tags":["proxcloud","pc-platform","pc-platform-pi-0123abcd"],"templateID":9100}
+---
+# Source: proxmox-kamaji-cluster/templates/node-groups.yaml
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha2
+kind: ProxmoxMachineTemplate
+metadata:
+  name: pc-platform-system-pve1-88f58870
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  template:
+    spec: {"allowedNodes":["pve1"],"checks":{"skipCloudInitStatus":true},"disks":{"bootVolume":{"disk":"scsi0","sizeGb":30}},"format":"raw","full":true,"memoryMiB":4096,"network":{"networkDevices":[{"bridge":"vmbr0","model":"virtio","name":"net0"}]},"numCores":2,"numSockets":1,"pool":"proxcloud-system","sourceNode":"pve1","storage":"local-zfs","tags":["proxcloud","pc-platform","pc-platform-pi-0123abcd"],"templateID":9100}
+---
+# Source: proxmox-kamaji-cluster/templates/node-groups.yaml
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha2
+kind: ProxmoxMachineTemplate
+metadata:
+  name: pc-platform-system-pve2-ddbc031d
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  template:
+    spec: {"allowedNodes":["pve2"],"checks":{"skipCloudInitStatus":true},"disks":{"bootVolume":{"disk":"scsi0","sizeGb":30}},"format":"raw","full":true,"memoryMiB":4096,"network":{"networkDevices":[{"bridge":"vmbr0","model":"virtio","name":"net0"}]},"numCores":2,"numSockets":1,"pool":"proxcloud-system","sourceNode":"pve2","storage":"local-zfs","tags":["proxcloud","pc-platform","pc-platform-pi-0123abcd"],"templateID":9101}
+---
+# Source: proxmox-kamaji-cluster/templates/node-groups.yaml
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha2
+kind: ProxmoxMachineTemplate
+metadata:
+  name: pc-platform-kamaji-pve2-ddbc031d
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  template:
+    spec: {"allowedNodes":["pve2"],"checks":{"skipCloudInitStatus":true},"disks":{"bootVolume":{"disk":"scsi0","sizeGb":30}},"format":"raw","full":true,"memoryMiB":4096,"network":{"networkDevices":[{"bridge":"vmbr0","model":"virtio","name":"net0"}]},"numCores":2,"numSockets":1,"pool":"proxcloud-system","sourceNode":"pve2","storage":"local-zfs","tags":["proxcloud","pc-platform","pc-platform-pi-0123abcd"],"templateID":9101}

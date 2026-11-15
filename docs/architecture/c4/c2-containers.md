@@ -236,7 +236,7 @@ flowchart LR
   ghcr["ghcr.io<br/>images and OCI charts"]:::impl
   chart["Chart proxcloud<br/>api, SPAs, gateway, Keycloak, CNPG"]:::impl
   dbchart["Chart database-cluster<br/>DBaaS engines"]:::impl
-  k8schart["Chart proxmox-kamaji-cluster<br/>tenant and sandbox clusters"]:::impl
+  k8schart["Chart proxmox-kamaji-cluster<br/>tenant and sandbox clusters;<br/>kubeadm mode: platform cluster (unused yet)"]:::impl
   inst["Installer (Ansible)<br/>make install, day-2 targets"]:::impl
   compose["One-host Compose install<br/>deploy/compose, proxcloud-up.sh"]:::impl
   host["Single Docker host<br/>portal only"]:::impl
@@ -341,7 +341,7 @@ separate controlled canary.
 | Configured shared backup store / PBS | PVE vzdump/restore target; guarded archive operations in the API, no automatic PBS appliance installation | Operator-provided storage | Implemented integration; site acceptance required |
 | Helm chart `proxcloud` | `deploy/charts/proxcloud` | ghcr OCI | Implemented |
 | Helm chart `database-cluster` | `deploy/charts/database-cluster` | ghcr OCI | Implemented |
-| Helm chart `proxmox-kamaji-cluster` | `deploy/charts/proxmox-kamaji-cluster` (tag `proxmox-kamaji-cluster-v*`) | ghcr OCI | Implemented |
+| Helm chart `proxmox-kamaji-cluster` | `deploy/charts/proxmox-kamaji-cluster` (tag `proxmox-kamaji-cluster-v*`). Tenant and sandbox clusters with a Kamaji control plane (default); from 0.1.11 `controlPlane.kind: kubeadm` renders the platform's own workload cluster of managed services (ADR 0009: one `KubeadmControlPlane` VM with kube-vip, node groups, no tenant add-ons), which no path renders yet | ghcr OCI | Implemented (kubeadm mode not run on a cluster) |
 | CI | GitHub Actions `test.yml`, `docker.yml` (api, web, admin, sandbox-proxy, sandbox-runtime), `helm.yml`, `sandbox-templates.yml`, and the self-hosted `vm-templates.yml` and `k8s-node-templates.yml` | GitHub | Implemented |
 | Installer | Ansible playbooks and Makefile (`installer/`): allinone, split service stages and day-2 targets exist; published-artifact fresh install and current full split acceptance remain separate | Operator workstation | Implemented code; do not infer production acceptance |
 | VM template pipeline | `images/build.py` + Packer, `vm-templates.yml`; tag-published, one copy per node on local-disk sites | Self-hosted runner in the Proxmox network, or the installer from the first management host | Implemented |

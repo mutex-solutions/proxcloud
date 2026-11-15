@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cluster chart `proxmox-kamaji-cluster` 0.1.11 can render the platform's own cluster** (`controlPlane.kind:
+  kubeadm`, ADR 0009): the managed-services job of a later release creates its workload cluster (node groups
+  `system`, `kamaji`, `dbaas`) from the same chart the tenants use, through ArgoCD, instead of a template of its own.
+  That mode renders a `KubeadmControlPlane` with one replica, pinned to one PVE node, with the kube-vip static pod,
+  its prepare script, `preKubeadmCommands`, provider-id kubelet argument and certSANs of installer stage 50's
+  services cluster (`services-cluster.yml.j2`), the endpoint on the `ProxmoxCluster`, and the admission plugins
+  `NodeRestriction,PodNodeSelector,PodTolerationRestriction`, so namespace annotations can place pods on a node
+  group. It renders no CAAPH add-ons, no ClusterResourceSet, no services-side CSI controller and no Gateway API
+  carriers; the node groups are unchanged. The control plane's endpoint, `machineImageId` and `machineTags` have no
+  default, so values that leave one out fail the render instead of cloning another template or leaving the VM without
+  its `pc-platform-<id>` tag. The default stays `kamaji`: for tenant values the output is
+  byte-identical to 0.1.10 (`TestChartGolden` pins the defaults alone, with the CSI gateway and with Gateway Fabric,
+  as 0.1.10 renders them), and existing clusters and providers keep their chart pin. Inert:
+  nothing renders kubeadm mode yet. The tag `proxmox-kamaji-cluster-v0.1.11` is not cut, so the chart is not
+  published, and kubeadm mode has not run against a cluster (the first kubeadm join of the platform cluster is a
+  lab check of the managed-services design).
 - **The Proxmox identities of managed services in the setup script**
   (`GET /api/v1/admin/setup/proxmox-script?managedServices=true&bootStorage=<store>&isoStorage=<store>`): managed
   Kubernetes and databases from the console (ADR 0009) run on a seed VM and a workload cluster of their own, driven by
