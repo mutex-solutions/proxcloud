@@ -132,7 +132,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grant (`pve.CAPIPrivileges` and the other tables of the managed-services script), the fence of both platform pools,
   the ISO store the CAPI token sees, the stores and image placement, the blocklist, and layer 0 through the new
   `(*pve.Service).CheckIsolation` (the sandbox gate's check without its sandbox requirement): the seed, VIP and node
-  range must be blocked networks, and it names the CIDRs to add. The plan diffs the installed BOM against this
+  range must be blocked networks, and it names the CIDRs to add; before the first tenant network, when no sync has
+  written the cluster firewall rules yet, the row passes, also on a provider with `sandboxCidrs`. The plan diffs the installed BOM against this
   release's. The model of a run (`platformRun`, its states and the failure codes) is in place for the job. Inert: no
   job kind is registered, so nothing provisions; there are no run, seed-kubeconfig or rotation routes and no page yet,
   and with the flag off the routes answer `404 platform_disabled`. Not verified: the preflight against a real Proxmox

@@ -108,8 +108,9 @@ func TestCheckSandboxIsolation(t *testing.T) {
 	}
 }
 
-// The managed-services check: with no rule of this portal and no tenant network it is pending, not passed; with tenant
-// networks and no rules it fails; once ReconcileIsolation wrote them it passes. It never writes.
+// The managed-services check: with no rule of this portal and no tenant network it is pending, not passed, with or
+// without sandbox networks; with tenant networks and no rules it fails; once ReconcileIsolation wrote them it passes.
+// It never writes.
 func TestCheckIsolation(t *testing.T) {
 	ctx := context.Background()
 	vnets := `{"data":[{"vnet":"vaaa11","zone":"overlay","alias":"st:p1:web"}]}`
@@ -124,6 +125,15 @@ func TestCheckIsolation(t *testing.T) {
 	vnets = `{"data":[{"vnet":"pcplat","zone":"overlay","alias":"not a tenant network"}]}`
 	if err := srv.CheckIsolation(ctx, "10.100.0.0/16", nil, nil); !errors.Is(err, ErrIsolationPending) {
 		t.Fatalf("no tenant network yet: %v", err)
+	}
+	// With sandbox networks too: the sync writes nothing before a tenant network, and the sandbox gate, which refuses
+	// every sandbox create until the rules are in, keeps failing.
+	sbx := []string{"10.110.0.0/24"}
+	if err := srv.CheckIsolation(ctx, "10.100.0.0/16", nil, sbx); !errors.Is(err, ErrIsolationPending) {
+		t.Fatalf("no tenant network yet, sandboxCidrs set: %v", err)
+	}
+	if err := srv.CheckSandboxIsolation(ctx, "10.100.0.0/16", nil, sbx); err == nil || errors.Is(err, ErrIsolationPending) {
+		t.Fatalf("the sandbox gate with no rules: %v", err)
 	}
 	vnets = `{"data":[{"vnet":"vaaa11","zone":"overlay","alias":"st:p1:web"}]}`
 	if err := srv.CheckIsolation(ctx, "10.100.0.0/16", nil, nil); err == nil || errors.Is(err, ErrIsolationPending) {
