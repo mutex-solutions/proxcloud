@@ -229,12 +229,26 @@ func TestManagedACLsGrantThePrivilegeTables(t *testing.T) {
 			t.Errorf("%s holds %v on %s, want nothing", c.tokenID, slices.Sorted(maps.Keys(have)), c.path)
 		}
 	}
-	// The mint grant can write a /pool row for capmox@pve; the user's own rows on the platform pools still cap what
-	// its tokens hold there.
-	rogue := rows(ManagedACL{"/pool", PlatformRole, true, capiUser, CAPITokenID})
+	// A stolen portal token can mint a token for capmox@pve or csi@pve with a /pool row of its own and grant the user
+	// /pool too (ProxCloudKubeMint). The users' own rows on the platform pools still cap such a token there; the
+	// existing capi token keeps exactly its role.
+	rogue := rows(ManagedACL{"/pool", PlatformRole, true, capiUser, "capmox@pve!x"}, ManagedACL{"/pool", PlatformRole, true, csiUser, "csi@pve!x"})
+	for _, c := range []struct{ tokenID, pool, atMost string }{
+		{"capmox@pve!x", SystemPool, roleCAPI}, {"capmox@pve!x", SeedPool, roleCAPI},
+		{CAPITokenID, SystemPool, roleCAPI}, {CAPITokenID, SeedPool, roleCAPI},
+		{"csi@pve!x", SystemPool, roleCSI}, {"csi@pve!x", SeedPool, "NoAccess"},
+	} {
+		have := effective(rogue, c.tokenID, "/pool/"+c.pool)
+		for p := range have {
+			if !slices.Contains(roles[c.atMost], p) {
+				t.Errorf("after a /pool grant %s holds %v on /pool/%s, more than %s", c.tokenID, slices.Sorted(maps.Keys(have)), c.pool, c.atMost)
+				break
+			}
+		}
+	}
 	for _, pool := range []string{SystemPool, SeedPool} {
-		if have := effective(rogue, CAPITokenID, "/pool/"+pool); have["VM.GuestAgent.Unrestricted"] || have["Permissions.Modify"] || len(have) != len(ManagedRoles[0].Privs) {
-			t.Errorf("after a /pool grant to capmox@pve its token holds %v on /pool/%s", slices.Sorted(maps.Keys(have)), pool)
+		if have := effective(rogue, CAPITokenID, "/pool/"+pool); len(have) != len(ManagedRoles[0].Privs) {
+			t.Errorf("after a /pool grant %s holds %v on /pool/%s, want %s", CAPITokenID, slices.Sorted(maps.Keys(have)), pool, roleCAPI)
 		}
 	}
 }
