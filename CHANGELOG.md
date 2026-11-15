@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Every check of the Proxmox connection test in one answer**
+  (`POST /api/v1/admin/service/proxmox/auth?checks=all`): the test stopped at the first failure, so an
+  operator fixed the datacenter firewall only to learn about the node firewall, and then about missing
+  privileges. With `?checks=all` the route answers `200` with `checks`, one `{id, status, message}` row per
+  check (reachable, token, both firewalls, public networks, privileges per ACL path, the stored provider's
+  store checks), and runs every check it still can. The call without the parameter is unchanged: the first
+  failure is a `400` with the same message, which installer stage 60 reads. The body also takes `apiUrls`
+  (failover addresses were tested only from a stored provider). With a stored provider and a blank secret,
+  the fields the body carries now replace the stored ones for the test, so an edited form can be tested
+  before Save; this needs `admin:service:manage`, because it sends the stored secret to the edited address.
+  A read-only caller still tests the stored connection. `docs/api.md` lists the check ids. Tested against a
+  fake PVE API only; not run against a lab cluster.
+
 ### Changed
 
 - **The smaller template disks are confirmed by one lab build each** (`docs/template-build-disk.md`): a

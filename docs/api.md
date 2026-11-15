@@ -79,6 +79,45 @@ address from that network's pool, pinned by the VM firewall's ipfilter
 project's allow-list. Attaching again while the NIC is plugged answers 409 and
 leaves it alone; an address held by a NIC that never got plugged is plugged.
 
+Proxmox connection test: `POST /api/v1/admin/service/proxmox/auth`
+(`admin:service:read`) tests a connection and stores nothing. The body takes
+`apiUrl`, `apiUrls` (other nodes or a VIP to fail over to), `tokenId`,
+`tokenSecret`, `caCert`, `fingerprint` and `insecureTls`. With
+`?externalServiceId=<id>` and a blank `tokenSecret` it tests the stored provider
+with its stored secret. For a caller with `admin:service:manage`, the fields the
+body does carry then replace the stored ones for this test (an empty string
+clears one), so an edited form can be tested before it is saved. A caller with
+read access only always gets the stored connection: the stored secret is never
+sent to an address such a caller chose.
+
+By default the first failed check is a `400` with the reason, and a pass is
+`200 {version, nodes, storages, sdnZones, pciMappings, warnings}`. The installer
+depends on this. With `?checks=all` a failed check is not an error: the answer
+is `200` and also has `checks`, one row per check that could still run:
+
+```json
+{"data": {"version": "9.2.1", "warnings": [], "checks": [
+  {"id": "connect", "status": "ok", "message": "Reached Proxmox VE 9.2.1."},
+  {"id": "firewall-datacenter", "status": "fail", "message": "Proxmox preflight failed: the datacenter firewall is disabled, …"},
+  {"id": "privileges:/pool", "status": "warn", "message": "Token lacks VM.Audit on /pool (see docs/proxmox-permissions.md)"}]}}
+```
+
+`status` is `ok`, `warn` (it works, but wants attention) or `fail`. A check with
+several findings puts one on each line of `message`. Rows after `connect` or
+`token` are missing when that one failed, because nothing else can run.
+
+| `id` | Checks | Worst status |
+|------|--------|--------------|
+| `connect` | The address answers and its certificate is trusted | `fail` |
+| `token` | Proxmox accepts the token; `warn` for a `root@pam` token | `fail` |
+| `firewall-datacenter` | The datacenter firewall is on | `fail` |
+| `firewall-nodes` | Every online node runs the nftables firewall | `fail` |
+| `public-networks` | Stored provider: no public network on a management bridge | `fail` |
+| `privileges:<path>` | The token holds the `ProxCloudPlatform` privileges on that ACL path (`/`, `/nodes`, `/pool`, `/sdn`, `/sdn/zones`, `/storage`, `/mapping/pci`). One row `privileges` when they cannot be read | `warn` |
+| `import-store` | Stored provider with `importStorage`: the token can delete files there | `warn` |
+| `store-reach` | Stored provider: tenant networks cannot reach the network stores | `warn` |
+| `boot-iso` | Stored provider: the Kubernetes bootstrap ISO store is usable | `warn` |
+
 Cloud service selection: the project cloud routes (`/project/{id}/cloud`, its
 actions and deletes, `quota-usage`, `gpu-capacity`, `public-networks`, the S3
 key routes) run against the service named by the `x-service-id` header (with

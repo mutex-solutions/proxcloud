@@ -2,17 +2,21 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
+	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
 func TestCheckPublicNetworks(t *testing.T) {
@@ -303,5 +307,240 @@ func TestBootISOWarnings(t *testing.T) {
 	}
 	if got := bootISOWarnings(context.Background(), cc, "nas-templates"); len(got) != 1 || !strings.Contains(got[0], "is shared") {
 		t.Fatalf("nas-templates: %q", got)
+	}
+}
+
+// fakeCluster serves a healthy one-node PVE 9.2 cluster whose token holds every platform privilege but lacks, and
+// returns the config that reaches it. over replaces the answer of a path: a JSON body, or "!<status>" to fail it.
+func fakeCluster(t *testing.T, over map[string]string, lacks ...string) pve.Config {
+	t.Helper()
+	answers := map[string]string{
+		"/version":                     `{"data":{"version":"9.2.1","release":"9.2"}}`,
+		"/cluster/firewall/options":    `{"data":{"enable":1}}`,
+		"/nodes":                       `{"data":[{"node":"pve1","status":"online"}]}`,
+		"/nodes/pve1/firewall/options": `{"data":{"nftables":1}}`,
+		"/cluster/status":              `{"data":[{"type":"node","name":"pve1","ip":"10.0.0.11"}]}`,
+		"/nodes/pve1/network":          `{"data":[{"iface":"vmbr0","address":"10.0.0.11","gateway":"10.0.0.1","cidr":"10.0.0.11/24"},{"iface":"vmbr1"}]}`,
+		"/storage":                     `{"data":[{"storage":"local","type":"dir","content":"iso,images,import"}]}`,
+		"/cluster/resources":           `{"data":[{"type":"storage","storage":"local","node":"pve1","status":"available"}]}`,
+		"/cluster/sdn/zones":           `{"data":[]}`,
+		"/cluster/mapping/pci":         `{"data":[]}`,
+	}
+	for path, body := range over {
+		answers[path] = body
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/api2/json")
+		body, ok := answers[path]
+		switch {
+		case !ok && path == "/access/permissions":
+			var ps []string
+			for _, chk := range pve.PlatformPrivileges {
+				for _, p := range chk.Privs {
+					if !slices.Contains(lacks, p) {
+						ps = append(ps, fmt.Sprintf("%q:1", p))
+					}
+				}
+			}
+			fmt.Fprintf(w, `{"data":{%q:{%s}}}`, r.URL.Query().Get("path"), strings.Join(ps, ","))
+		case !ok:
+			w.WriteHeader(http.StatusInternalServerError)
+		case strings.HasPrefix(body, "!"):
+			status, _ := strconv.Atoi(body[1:])
+			w.WriteHeader(status)
+		default:
+			fmt.Fprint(w, body)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return pve.Config{APIURL: srv.URL, TokenID: "proxcloud@pve!platform", Secret: "sec"}
+}
+
+// checkRow finds a row of the connection test by id.
+func checkRow(checks []PVECheck, id string) *PVECheck {
+	for i := range checks {
+		if checks[i].ID == id {
+			return &checks[i]
+		}
+	}
+	return nil
+}
+
+// The default call stops at the first failed check with the 400 it has always answered (installer stage 60 reads
+// it); ?checks=all answers every check it could still run.
+func TestPVEConnectionTest(t *testing.T) {
+	const fwOff = "Proxmox preflight failed: the datacenter firewall is disabled, so security groups and tenant network isolation are not enforced. Enable it under Datacenter > Firewall > Options."
+	tests := []struct {
+		name    string
+		over    map[string]string
+		lacks   []string
+		all     bool
+		wantErr string            // the 400 message, exactly
+		want    map[string]string // check id -> status
+		wantMsg map[string]string // check id -> substring of its message
+	}{
+		{name: "healthy, default call", want: map[string]string{}},
+		{name: "healthy, all checks", all: true, want: map[string]string{
+			"connect": checkOK, "firewall-datacenter": checkOK, "firewall-nodes": checkOK, "token": checkOK,
+			"privileges:/": checkOK, "privileges:/pool": checkOK, "privileges:/mapping/pci": checkOK}},
+		{name: "firewall off, default call", over: map[string]string{"/cluster/firewall/options": `{"data":{"enable":0}}`}, lacks: []string{"VM.Audit"}, wantErr: fwOff},
+		{name: "firewall off still lists privilege gaps", over: map[string]string{"/cluster/firewall/options": `{"data":{"enable":0}}`}, lacks: []string{"VM.Audit"}, all: true,
+			want:    map[string]string{"connect": checkOK, "firewall-datacenter": checkFail, "firewall-nodes": checkOK, "privileges:/pool": checkWarn, "privileges:/sdn": checkOK},
+			wantMsg: map[string]string{"firewall-datacenter": fwOff, "privileges:/pool": "Token lacks VM.Audit on /pool"}},
+		{name: "firewall unreadable, default call", over: map[string]string{"/cluster/firewall/options": "!403"},
+			wantErr: "Proxmox preflight failed: cannot read the datacenter firewall options: pve: 403 Forbidden"},
+		{name: "iptables node, default call", over: map[string]string{"/nodes/pve1/firewall/options": `{"data":{"enable":1}}`},
+			wantErr: "Proxmox preflight failed: node pve1 runs the legacy iptables firewall, which ignores the FORWARD rules that isolate tenant networks. Set nftables: 1 under Node > Firewall > Options on every node, then restart its guests."},
+		{name: "iptables node, all checks", over: map[string]string{"/nodes/pve1/firewall/options": `{"data":{"enable":1}}`}, all: true,
+			want: map[string]string{"firewall-datacenter": checkOK, "firewall-nodes": checkFail, "token": checkOK}},
+		{name: "token refused, default call", over: map[string]string{"/version": "!401"}, wantErr: "Proxmox authentication failed: pve: 401 Unauthorized"},
+		{name: "token refused, all checks", over: map[string]string{"/version": "!401"}, all: true,
+			want:    map[string]string{"connect": checkOK, "token": checkFail},
+			wantMsg: map[string]string{"token": "Proxmox authentication failed: pve: 401 Unauthorized"}},
+		{name: "permissions unreadable, all checks", over: map[string]string{"/access/permissions": "!500"}, all: true,
+			want: map[string]string{"token": checkOK, "privileges": checkWarn}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, herr := pveConnectionTest(context.Background(), fakeCluster(t, tt.over, tt.lacks...), nil, tt.all)
+			if tt.wantErr != "" {
+				if herr == nil || herr.Status != http.StatusBadRequest || herr.Msg != tt.wantErr {
+					t.Fatalf("got %+v, want 400 %q", herr, tt.wantErr)
+				}
+				return
+			}
+			if herr != nil {
+				t.Fatalf("unexpected error %+v", herr)
+			}
+			if !tt.all && out.Checks != nil {
+				t.Fatalf("default call returned checks: %+v", out.Checks)
+			}
+			for id, status := range tt.want {
+				if c := checkRow(out.Checks, id); c == nil || c.Status != status {
+					t.Errorf("check %s = %+v, want status %s (all: %+v)", id, c, status, out.Checks)
+				}
+			}
+			for id, msg := range tt.wantMsg {
+				if c := checkRow(out.Checks, id); c == nil || !strings.Contains(c.Message, msg) {
+					t.Errorf("check %s = %+v, want message containing %q", id, c, msg)
+				}
+			}
+		})
+	}
+	t.Run("unreachable, all checks", func(t *testing.T) {
+		cfg := fakeCluster(t, nil)
+		cfg.APIURL = "http://127.0.0.1:1"
+		out, herr := pveConnectionTest(context.Background(), cfg, nil, true)
+		if herr != nil || len(out.Checks) != 1 || out.Checks[0].ID != "connect" || out.Checks[0].Status != checkFail {
+			t.Fatalf("got %+v %+v, want one failed connect row", herr, out.Checks)
+		}
+	})
+	t.Run("healthy call keeps the response shape", func(t *testing.T) {
+		out, herr := pveConnectionTest(context.Background(), fakeCluster(t, nil, "Mapping.Use"), nil, false)
+		if herr != nil || out.Version != "9.2.1" || len(out.Nodes) != 1 || len(out.Storages) != 1 {
+			t.Fatalf("got %+v %+v", herr, out)
+		}
+		if want := []string{"Token lacks Mapping.Use on /mapping/pci (see docs/proxmox-permissions.md)"}; !reflect.DeepEqual(out.Warnings, want) {
+			t.Fatalf("warnings = %q, want %q", out.Warnings, want)
+		}
+	})
+}
+
+// A stored provider adds its own checks; each finding is a warning and a row.
+func TestPVEConnectionTestStoredProvider(t *testing.T) {
+	es := &externalservice.ExternalService{ID: "svc1", Config: map[string]any{
+		"provider": "proxmox", "isoStorage": "local",
+		"network": map[string]any{"publicNetworks": []any{map[string]any{"id": "vmbr0"}}},
+	}}
+	_, herr := pveConnectionTest(context.Background(), fakeCluster(t, nil), es, false)
+	if herr == nil || !strings.Contains(herr.Msg, `public network "vmbr0" is the management bridge on node pve1`) {
+		t.Fatalf("default call: %+v", herr)
+	}
+	out, herr := pveConnectionTest(context.Background(), fakeCluster(t, nil), es, true)
+	if herr != nil {
+		t.Fatalf("all checks: %+v", herr)
+	}
+	for id, status := range map[string]string{"public-networks": checkFail, "token": checkOK, "store-reach": checkOK, "boot-iso": checkOK} {
+		if c := checkRow(out.Checks, id); c == nil || c.Status != status {
+			t.Errorf("check %s = %+v, want status %s", id, c, status)
+		}
+	}
+	if len(out.Warnings) != 1 || !strings.Contains(out.Warnings[0], "/admin/service/svc1/seed-cleanup") {
+		t.Errorf("warnings = %q", out.Warnings)
+	}
+}
+
+func TestPVEAuthConfig(t *testing.T) {
+	p := func(s string) *string { return &s }
+	yes, no := true, false
+	stored := func() *externalservice.ExternalService {
+		return &externalservice.ExternalService{
+			Config: map[string]any{"provider": "proxmox", "apiUrl": "https://pve1:8006", "apiUrls": []any{"https://pve2:8006"},
+				"tokenId": "proxcloud@pve!platform", "fingerprint": "AA:BB", "insecureTls": true},
+			Secret: map[string]any{"tokenSecret": "stored-secret"},
+		}
+	}
+	storedCfg := pve.Config{APIURL: "https://pve1:8006", APIURLs: []string{"https://pve2:8006"}, TokenID: "proxcloud@pve!platform",
+		Secret: "stored-secret", Fingerprint: "AA:BB", InsecureTLS: true}
+	edited := pveAuthReq{APIURL: p("https://vip:8006"), APIURLs: []string{}, CACert: p("PEM"), Fingerprint: p(""), InsecureTLS: &no}
+	tests := []struct {
+		name    string
+		req     pveAuthReq
+		es      *externalservice.ExternalService
+		overlay bool
+		want    pve.Config
+		wantOK  bool
+	}{
+		{"body credentials", pveAuthReq{APIURL: p("https://a:8006"), APIURLs: []string{"https://b:8006"}, TokenID: p("t@pve!x"), TokenSecret: "s", InsecureTLS: &yes}, nil, true,
+			pve.Config{APIURL: "https://a:8006", APIURLs: []string{"https://b:8006"}, TokenID: "t@pve!x", Secret: "s", InsecureTLS: true}, true},
+		{"body without a secret", pveAuthReq{APIURL: p("https://a:8006"), TokenID: p("t@pve!x")}, nil, true, pve.Config{}, false},
+		{"body without a url", pveAuthReq{TokenID: p("t@pve!x"), TokenSecret: "s"}, nil, true, pve.Config{}, false},
+		{"stored, empty body", pveAuthReq{}, stored(), true, storedCfg, true},
+		{"stored, edited fields keep the stored secret", edited, stored(), true,
+			pve.Config{APIURL: "https://vip:8006", APIURLs: []string{}, CACert: "PEM", TokenID: "proxcloud@pve!platform", Secret: "stored-secret"}, true},
+		{"stored, edited fields ignored without manage", edited, stored(), false, storedCfg, true},
+		{"stored, body secret wins", pveAuthReq{APIURL: p("https://a:8006"), TokenID: p("t@pve!x"), TokenSecret: "new"}, stored(), true,
+			pve.Config{APIURL: "https://a:8006", TokenID: "t@pve!x", Secret: "new"}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := pveAuthConfig(tt.req, tt.es, tt.overlay)
+			if ok != tt.wantOK || (ok && !reflect.DeepEqual(got, tt.want)) {
+				t.Fatalf("got %+v %v, want %+v %v", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+// The route itself: the default call answers the first failure as a 400, ?checks=all as a 200 with rows, and
+// apiUrls in the body is a failover address.
+func TestProxmoxAuthRoute(t *testing.T) {
+	cfg := fakeCluster(t, map[string]string{"/cluster/firewall/options": `{"data":{"enable":0}}`})
+	body := fmt.Sprintf(`{"apiUrl":"http://127.0.0.1:1","apiUrls":[%q],"tokenId":%q,"tokenSecret":"sec"}`, cfg.APIURL, cfg.TokenID)
+	call := func(query string, rc *httpx.RequestContext) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/service/proxmox/auth"+query, strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		(&Handler{adminIssuer: "operator-realm"}).proxmoxAuth(rec, req.WithContext(httpx.WithRC(req.Context(), rc)))
+		return rec
+	}
+	op := &httpx.RequestContext{SigV4KeyID: "pk-test"}
+	if rec := call("", &httpx.RequestContext{Sub: "tenant", Issuer: "tenant-realm"}); rec.Code != http.StatusForbidden {
+		t.Fatalf("tenant: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := call("", op); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "the datacenter firewall is disabled") {
+		t.Fatalf("default call: %d %s", rec.Code, rec.Body.String())
+	}
+	rec := call("?checks=all", op)
+	var got struct {
+		Data PVEAuthResponse `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("checks=all: %d %s (%v)", rec.Code, rec.Body.String(), err)
+	}
+	if c := checkRow(got.Data.Checks, "firewall-datacenter"); c == nil || c.Status != checkFail {
+		t.Fatalf("checks = %+v", got.Data.Checks)
+	}
+	if c := checkRow(got.Data.Checks, "privileges:/pool"); c == nil || c.Status != checkOK {
+		t.Fatalf("checks = %+v", got.Data.Checks)
 	}
 }

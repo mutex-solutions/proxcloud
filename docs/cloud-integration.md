@@ -222,7 +222,8 @@ Give it the least-privilege `ProxCloudPlatform` role described in
 console (`internal/platform/admin/pveadmin.go`) warns when privileges are missing
 or the token belongs to `root@pam`, refuses a cluster whose datacenter firewall
 is off or whose nodes still run the legacy iptables firewall, and refuses a
-public network on the management bridge.
+public network on the management bridge. `?checks=all` returns every check as a
+row instead of stopping at the first failure ([api.md](api.md)).
 
 TLS to the cluster (`pve.TLSConfigFor`, `internal/cloud/pve/client.go`): a
 `fingerprint` pins the server certificate by its SHA-256 fingerprint (the format
