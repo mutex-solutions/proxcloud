@@ -25,6 +25,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/rbac"
 	"github.com/mutex-solutions/proxcloud/internal/platform/sso"
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
+	"github.com/mutex-solutions/proxcloud/internal/platformlife"
 	"github.com/mutex-solutions/proxcloud/internal/providerattach"
 	"github.com/mutex-solutions/proxcloud/internal/templateupdates"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
@@ -121,6 +122,9 @@ type Handler struct {
 	jobsScheduler bool
 	// apiBaseURL is PROXCLOUD_SELF_API_BASE_URL (SetAPIBaseURL): the setup status names it as the seed URL.
 	apiBaseURL string
+	// platform is the managed-services platform store (SetPlatform, PROXCLOUD_PLATFORM_ENABLED; nil → its
+	// installation routes answer 404).
+	platform *platformlife.Store
 }
 
 // SetHmacEncryptor wires the data-at-rest key for hmac key secrets.
