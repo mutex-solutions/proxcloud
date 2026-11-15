@@ -158,6 +158,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sends one publish request per template whose smoke test passed. Nothing is published without that click.
   Kubernetes node images are left to the Template updates page. Playwright specs check the flag-off state, the import
   requests and that publish is called once per passed template, against the mock API; not run against a live API.
+- **Catalog, Go live and Next steps of the Platform setup page.** The defaults (flavors, public price plan, default
+  quota, region row) needed a checkout and `seed-operator.py`, and going live meant the provider's Projects tab plus a
+  sync nobody ran on a Compose install. Step 6 shows what `GET /api/v1/admin/setup/defaults` would write, the rate
+  table included, before anything is applied; the price plan is applied only after the operator ticks that the rates
+  were reviewed, and the apply sends `confirmRates` only then. It warns about flavors that no rule prices (billed as
+  zero) and links the billing details and mail as recommended. Step 7 is enabled when Connect, Network, Storage and
+  OS templates are done (a warning there does not hold it back, a state the cluster did not report does) and the
+  catalog is done or the operator ticks going live without it. When the job scheduler is off it says that nothing
+  then syncs or charges on a timer and shows `./proxcloud-up.sh install --scheduler`, without blocking. Go live turns
+  the attach policy on, runs one provider sync (`POST /api/v1/admin/job/external-service/sync`) and starts a bulk
+  attach of the projects created meanwhile when there are any, then lists the first tenant's path. Step 8 is a
+  static card that links ADR 0009. `docs/quickstart.md` (path A2 and After any install) and
+  `deploy/compose/README.md` now point at the page; the install flags `--template-updates` and `--scheduler` the
+  page names come with the Compose change that adds them. Playwright specs check the preview before Apply, the
+  confirmation in the apply body and Go live staying disabled until its prerequisites hold, against the mock API;
+  not run against a live API, and Go live not run against a cluster.
 
 ### Changed
 

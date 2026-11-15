@@ -332,7 +332,7 @@ function StorageForm({ serviceId, cfg }: { serviceId: string; cfg: Doc }) {
       <ErrorNote title="Storage detection failed" error={detect.error} />
 
       {ids.length ? (
-        <div className="overflow-x-auto">
+        <div>
           <Table aria-label="Detected storage">
             <TableHeader>
               <TableRow className="hover:bg-transparent">
@@ -355,7 +355,7 @@ function StorageForm({ serviceId, cfg }: { serviceId: string; cfg: Doc }) {
       ) : null}
 
       {profileSlugs.length || Object.keys(proposed).length ? (
-        <div className="overflow-x-auto">
+        <div>
           <Table aria-label="Storage profiles">
             <TableHeader>
               <TableRow className="hover:bg-transparent">

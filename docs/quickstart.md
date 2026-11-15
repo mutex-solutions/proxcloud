@@ -75,19 +75,33 @@ More: [development.md](development.md).
 
 ### A2. Connect an existing Proxmox cluster
 
-1. On a PVE node, create the roles, the user `proxcloud@pve`, its token `platform` and the ACLs: the
-   [pveum commands](proxmox-permissions.md#pveum-commands). Keep the token secret it prints.
-2. Turn on the datacenter firewall and the nftables firewall on every node (Datacenter → Firewall → Options, and
-   each node → Firewall → Options). Test connection refuses a cluster without them.
-3. Templates: tenants clone servers from templates tagged `pc-public` in pool `pc-templates`. Build them with
-   [images/build.py](../images/README.md), or use path B, which builds them for you.
-4. Operator console → System → Cloud providers → Add provider → Proxmox: API URL `https://192.0.2.11:8006`, token ID
-   `proxcloud@pve!platform`, the secret, the certificate fingerprint. Then **Test connection**.
-5. Give it the customer basics (flavors, public price plan, billing configuration, quota) in one command:
+Operator console → System → **Platform setup** (`/setup`) walks the whole path, one tab per step, and shows which
+steps are done (the state `GET /api/v1/admin/setup/status` reports, read again from the cluster on **Check again**):
 
-   ```sh
-   PROXCLOUD_HOST=localhost deploy/seed/seed-operator.py --provider "<provider name>"
-   ```
+1. **Prepare Proxmox.** Copy the generated script and run it as root on one PVE node: role, pools, user
+   `proxcloud@pve`, its token `platform` and the ACLs ([what it does](proxmox-permissions.md#portal-token-script)).
+   Keep the token secret it prints. Then turn on the datacenter firewall and the nftables firewall on every node
+   (Datacenter → Firewall → Options, and each node → Firewall → Options); the script does not change traffic.
+2. **Connect.** API URL `https://192.0.2.11:8006`, token ID `proxcloud@pve!platform`, the secret. **Run the checks**
+   lists every check with its result. Pin the certificate fingerprint the page shows only after comparing it with
+   `pvenode cert info` on the node. **Save provider** keeps new projects off the provider until Go live.
+3. **Network** and 4. **Storage**: the default zone and the project network range (`cidrPool`, set once), then the
+   storage profiles, the default one, and the import and backup stores. The page gives the `pvesm` commands for a
+   missing `import` store and for NAS stores.
+5. **OS templates**: done at once when templates built with [images/build.py](../images/README.md) are published
+   (path B builds them). Otherwise turn on template updates (Compose: `./proxcloud-up.sh install --template-updates`),
+   save a GitHub token with `read:packages`, set the smoke-test network, import, and click **Publish all that passed**.
+6. **Catalog and pricing**: review the flavors, the default quota and the rate table, confirm the rates, **Apply**.
+   The rates are placeholders until you change them under System → Price plans.
+7. **Go live**: turns on the attach policy, runs one provider sync and attaches the projects created meanwhile. It
+   warns when the job scheduler is off: nothing then syncs or charges on a timer.
+
+Without the page, the same still works by hand: the [pveum commands](proxmox-permissions.md#pveum-commands), System →
+Cloud providers → Add provider → Proxmox with **Test connection**, and the customer basics in one command:
+
+```sh
+PROXCLOUD_HOST=localhost deploy/seed/seed-operator.py --provider "<provider name>"
+```
 
 ### B. One Proxmox node (evaluation)
 
@@ -591,11 +605,12 @@ keeps `object_store.mode: vm` and adds Ceph RGW for tenants in the console: Add 
 
 The installer's stage 60 already did steps 1 and 2. The other paths do them by hand.
 
-1. **Provider.** Operator console → System → Cloud providers: one Proxmox provider, **Test connection** green. Read
-   any warning about missing privileges.
+1. **Provider.** Operator console → System → Platform setup (or Cloud providers): one Proxmox provider whose checks
+   pass. Read any warning about missing privileges.
 2. **Price plan, flavors, quota.** `deploy/seed/seed-operator.py` (stage 60 runs it once) creates the public price
    plan, the flavor catalog and the default quota. Review them under System → Price plans and System → Flavors
-   (Proxmox); the seed's rates are placeholders. Without a checkout, the API applies the same defaults:
+   (Proxmox); the seed's rates are placeholders. Without a checkout, the Platform setup page applies the same
+   defaults (step 6, after showing the rates), and so does the API:
    `GET /api/v1/admin/setup/defaults?serviceId=<id>` shows them and `POST /api/v1/admin/setup/defaults` adds what is
    missing ([docs/api.md](api.md#platform-setup--apiv1adminsetup)).
 3. **First tenant.** Sign up on the customer console (self-registration is on), create an organization and a project,

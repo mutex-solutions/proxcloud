@@ -5,7 +5,9 @@
 import { ApiError } from "@/lib/api"
 import { on } from "../router"
 import { db } from "../db"
-import { detectedStorages, importedTemplates, proposedProfiles, setupChecks, templateDiscovery, templatePlacement } from "../fixtures/setup"
+import {
+  detectedStorages, importedTemplates, proposedProfiles, seedFlavors, seedPricePlan, seedQuota, setupChecks, templateDiscovery, templatePlacement,
+} from "../fixtures/setup"
 
 type Doc = Record<string, any>
 
@@ -206,3 +208,44 @@ on("PUT /admin/service/:id/update", ({ params, opts }) => {
   Object.assign((svc.config ??= {}), ((opts.body ?? {}) as Doc).config ?? {})
   return { data: svc }
 })
+
+// ─── Install defaults: the preview and the create-only apply (POST refuses pricePlan without confirmRates) ───
+
+function defaultsItems(serviceId: string) {
+  const a = mockSetup.applied
+  const p = db.services.find((s) => s.id === serviceId && isPve(s))
+  const currency = db.billingConfiguration?.baseCurrency ?? "USD"
+  const item = (id: string, todo: string, done: string, preview: unknown, needsProvider = false) =>
+    needsProvider && !p ? { id, state: "blocked", message: "Needs a Proxmox provider (serviceId)" }
+      : a.has(id) ? { id, state: "done", message: done } : { id, state: "todo", message: todo, preview }
+  return [
+    item("flavors", "3 of the 3 default flavors are missing", "The 3 default flavors exist", seedFlavors),
+    item("pricePlan", `No enabled public price plan: "Public rate card" with ${seedPricePlan.rules.length} rules would be added, enabled, in ${currency}`,
+      'The enabled public price plan "Public rate card" exists; the default plan is not added, because every enabled public plan is billed', { ...seedPricePlan, currency }),
+    item("quota", "The default project quota does not limit networks; limits already set are kept", "The default project quota sets every limit",
+      { ...seedQuota, ...(p?.config?.provisioning?.quota ?? {}) }, true),
+    item("region", `Region ${p?.config?.region ?? "pve"} is not listed in the platform configuration`, "The provider has a region row in the platform configuration",
+      { serviceId, region: p?.config?.region ?? "pve", order: 0 }, true),
+  ]
+}
+
+on("GET /admin/setup/defaults", ({ query }) => ({
+  data: { currency: db.billingConfiguration?.baseCurrency ?? "USD", items: defaultsItems(query.get("serviceId") ?? "") },
+}))
+
+on("POST /admin/setup/defaults", ({ opts }) => {
+  const b = (opts.body ?? {}) as Doc
+  const want: string[] = b.items ?? []
+  if (!want.length) throw new ApiError(400, 400, "items is required: any of flavors, pricePlan, quota, region")
+  if (want.includes("pricePlan") && b.confirmRates !== true) {
+    throw new ApiError(400, 400, "confirmRates must be true to apply pricePlan: the default plan is created enabled and its rates are billed. Review them in GET /admin/setup/defaults first")
+  }
+  const items = defaultsItems(b.serviceId ?? "").filter((i) => want.includes(i.id)).map((i) => {
+    if (i.state === "todo") mockSetup.applied.add(i.id)
+    return { id: i.id, state: i.state === "todo" ? "created" : i.state === "done" ? "skipped" : "blocked", message: i.message }
+  })
+  return { data: { items } }
+})
+
+// The operator job trigger answers 202 with no body.
+on("POST /admin/job/external-service/sync", () => ({ data: undefined }))

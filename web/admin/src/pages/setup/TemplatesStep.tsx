@@ -323,7 +323,7 @@ function ImportForm({ serviceId, onQueued }: { serviceId: string; onQueued: () =
 function ImportedTable({ items }: { items: TemplateState[] }) {
   if (!items.length) return <p className="text-sm text-muted-foreground">No template was imported on this provider yet.</p>
   return (
-    <div className="overflow-x-auto">
+    <div>
       <Table aria-label="Imported templates">
         <TableHeader>
           <TableRow className="hover:bg-transparent">

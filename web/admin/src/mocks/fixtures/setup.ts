@@ -71,3 +71,22 @@ export const importedTemplates: Doc[] = [
   imported("tpl-debian", "debian-13", "debian-13-20261110", "b", "ready_to_publish", "PASS"),
   imported("tpl-rocky", "rocky-10", "rocky-10-20261110", "d", "smoke_failed", "FAIL"),
 ]
+
+// The install defaults (deploy/seed), shortened to what the preview shows.
+export const seedFlavors: Doc[] = [
+  { slug: "s1-small", name: "Small (1 vCPU, 1 GB)", vcpus: 1, ramMb: 1024, diskGb: 10, active: true, orderNumber: 10 },
+  { slug: "s2-medium", name: "Medium (2 vCPU, 2 GB)", vcpus: 2, ramMb: 2048, diskGb: 20, active: true, orderNumber: 20 },
+  { slug: "s4-large", name: "Large (4 vCPU, 8 GB)", vcpus: 4, ramMb: 8192, diskGb: 40, active: true, orderNumber: 30 },
+]
+const rule = (name: string, resourceType: string, prices: Doc[], filters: Doc[] = []) => ({ name, timeUnit: "hour", resourceType, applyMethod: "ADD_TO_TOTAL", prices, filters, modifiers: [] })
+export const seedPricePlan: Doc = {
+  plan: { name: "Public rate card", enabled: true, accessMode: "PUBLIC", serviceProviders: [] },
+  rules: [
+    rule("Compute: CPU + RAM components", "instance", [{ attributeName: "vcpus", tiers: [{ value: "0.008" }] }, { attributeName: "ram_gb", tiers: [{ value: "0.004" }] }]),
+    rule("GPU:nvidia-a100-80gb", "instance", [{ attributeName: "gpu_count", tiers: [{ value: "1.19" }] }], [{ attributeName: "gpu_model", operator: "eq", value: "nvidia-a100-80gb" }]),
+    rule("Public egress: 1 TiB free, then $0.01/GB", "instance_traffic", [{ attributeName: "outgoing_public_traffic_mb", tiers: [{ from: "0", to: "1048576", value: "0" }, { from: "1048576", value: "0.00001" }] }]),
+    rule("Block storage", "volume", [{ attributeName: "size", tiers: [{ value: "0.000137" }] }]),
+    rule("Public IP", "floating_ip", [{ attributeName: "existence", tiers: [{ value: "0.005" }] }]),
+  ],
+}
+export const seedQuota: Doc = { servers: 20, vcpus: 80, ramMb: 102400, diskGb: 2000, networks: 10, floatingIps: 5 }

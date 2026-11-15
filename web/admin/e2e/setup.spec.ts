@@ -220,3 +220,80 @@ test("Templates save the smoke-test network", async ({ page }) => {
   const [put] = await calls(page, "PUT", "/admin/service/svc-proxmox-01/update")
   expect(put.body).toEqual({ config: { templateSmoke: { bridge: "vmbr0", vlan: 29 } } })
 })
+
+test("Catalog shows the rates before Apply, and Apply sends the rate confirmation", async ({ page }) => {
+  await page.goto("/setup?tab=catalog")
+  const rates = page.getByRole("table", { name: "Rates" })
+  await expect(rates).toContainText("Compute: CPU + RAM components")
+  await expect(rates).toContainText("vcpus: 0.008")
+  await expect(page.getByText("g1.h200.8 in eu-west-1: no gpu rule")).toBeVisible()
+  const apply = page.getByRole("button", { name: "Apply 4 items" })
+  await expect(apply).toBeDisabled()
+  await recordCalls(page)
+  await page.getByText("I reviewed these rates.").click()
+  await apply.click()
+
+  await expect.poll(() => calls(page, "POST", "/admin/setup/defaults")).toHaveLength(1)
+  const [post] = await calls(page, "POST", "/admin/setup/defaults")
+  expect(post.body).toEqual({ serviceId: "svc-proxmox-01", items: ["flavors", "pricePlan", "quota", "region"], confirmRates: true })
+  await expect(page.getByRole("list", { name: "Applied" })).toContainText("created")
+})
+
+test("Catalog without the price plan needs no rate confirmation", async ({ page }) => {
+  await page.goto("/setup?tab=catalog")
+  await expect(page.getByRole("table", { name: "Rates" })).toBeVisible()
+  await recordCalls(page)
+  await page.getByRole("checkbox", { name: "Apply: Public price plan" }).click()
+  await expect(page.getByText("I reviewed these rates.")).toHaveCount(0)
+  await page.getByRole("button", { name: "Apply 3 items" }).click()
+  await expect.poll(() => calls(page, "POST", "/admin/setup/defaults")).toHaveLength(1)
+  const [post] = await calls(page, "POST", "/admin/setup/defaults")
+  expect(post.body).toEqual({ serviceId: "svc-proxmox-01", items: ["flavors", "quota", "region"], confirmRates: false })
+})
+
+const goLiveItems = [
+  { id: "attachPolicy", state: "todo", message: "New projects are not attached to the provider yet (attach policy off)" },
+  { id: "catalog", state: "attention", message: "Catalog and pricing is not complete: usage that matches no rule is billed as zero" },
+  { id: "scheduler", state: "attention", message: "The job scheduler is off (PROXCLOUD_JOBS_SCHEDULER_ENABLED)" },
+]
+
+test("Go live waits for steps 2 to 5, warns without blocking when the scheduler is off, then attaches and syncs", async ({ page }) => {
+  await page.goto("/setup?tab=golive")
+  const goLive = page.getByRole("button", { name: "Go live", exact: true })
+  // The mock install has storage open.
+  await expect(page.getByText("Finish first: 4. Storage.")).toBeVisible()
+  await expect(goLive).toBeDisabled()
+
+  // A step the cluster could not answer for keeps it disabled too.
+  await recordCalls(page, { "GET /admin/setup/status": statusWith({ templates: "unknown", golive: "unknown" }) })
+  await page.getByRole("button", { name: "Check again" }).click()
+  await expect(page.getByText("Some steps could not be checked: use Check again.")).toBeVisible()
+  await expect(goLive).toBeDisabled()
+
+  await recordCalls(page, { "GET /admin/setup/status": statusWith({ connect: "attention", catalog: "todo", golive: "todo" }, { golive: goLiveItems }) })
+  await page.getByRole("button", { name: "Check again" }).click()
+  await expect(page.getByText("Finish the catalog, or go live without it.")).toBeVisible()
+  await expect(goLive).toBeDisabled()
+  await page.getByText("Go live without a complete catalog").click()
+  await expect(goLive).toBeEnabled()
+  await expect(page.getByLabel("scheduler command", { exact: true })).toHaveText("./proxcloud-up.sh install --scheduler")
+  await expectAccessible(page)
+
+  await goLive.click()
+  await expect(page.getByRole("list", { name: "Go live results" })).toContainText("Existing projects")
+  const all = await page.evaluate(() => (window as unknown as { __calls: { method: string; path: string; body?: any }[] }).__calls)
+  const writes = all.filter((c) => c.method !== "GET").map((c) => `${c.method} ${c.path}`)
+  expect(writes.slice(0, 3)).toEqual([
+    "PUT /admin/service/svc-proxmox-01/attach-policy",
+    "POST /admin/job/external-service/sync",
+    "POST /admin/service/svc-proxmox-01/bulk-attach/preview",
+  ])
+  expect(all.find((c) => c.path.endsWith("/attach-policy"))?.body).toEqual({ attachToNewProjects: true })
+  expect(all.find((c) => c.path.endsWith("/bulk-attach/preview"))?.body).toEqual({ scope: { mode: "all" } })
+})
+
+test("Next is a static card that links ADR 0009", async ({ page }) => {
+  await page.goto("/setup?tab=next")
+  await expect(page.getByRole("link", { name: /ADR 0009/ })).toHaveAttribute("href", /docs\/adr\/0009-managed-services-platform-lifecycle\.md$/)
+  await expect(page.getByRole("button", { name: /Enable managed services/ })).toBeDisabled()
+})

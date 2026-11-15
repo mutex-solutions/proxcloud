@@ -41,6 +41,7 @@ import {
 } from "./common"
 import { NetworkStep, StorageStep } from "./NetworkStorage"
 import { TemplatesStep } from "./TemplatesStep"
+import { CatalogStep, GoLiveStep, NextStep } from "./CatalogGoLive"
 
 const DEFAULT_TOKEN_ID = "proxcloud@pve!platform"
 
@@ -190,17 +191,6 @@ function ConnectStep({ step, serviceId, loading, onCreated, onRecheck, recheckin
   )
 }
 
-// A step whose form this page does not have yet: its checks, and where it is set today.
-function StatusOnlyStep({ n, title, step, serviceId }: { n: number; title: string; step?: SetupStep; serviceId: string }) {
-  return (
-    <StepCard n={n} title={title} step={step}>
-      {serviceId ? (
-        <Link to={`/system/cloud-providers/${serviceId}`} className={LINK}>Set it on the provider page</Link>
-      ) : null}
-    </StepCard>
-  )
-}
-
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function SetupPage() {
@@ -276,9 +266,9 @@ export default function SetupPage() {
           <TabsContent value="network"><NetworkStep step={stepOf("network")} serviceId={serviceId} /></TabsContent>
           <TabsContent value="storage"><StorageStep step={stepOf("storage")} serviceId={serviceId} /></TabsContent>
           <TabsContent value="templates"><TemplatesStep step={stepOf("templates")} serviceId={serviceId} /></TabsContent>
-          <TabsContent value="catalog"><StatusOnlyStep n={6} title="Catalog and pricing" step={stepOf("catalog")} serviceId={serviceId} /></TabsContent>
-          <TabsContent value="golive"><StatusOnlyStep n={7} title="Go live" step={stepOf("golive")} serviceId={serviceId} /></TabsContent>
-          <TabsContent value="next"><StatusOnlyStep n={8} title="Next: managed services" serviceId="" /></TabsContent>
+          <TabsContent value="catalog"><CatalogStep step={stepOf("catalog")} serviceId={serviceId} /></TabsContent>
+          <TabsContent value="golive"><GoLiveStep status={status.data} serviceId={serviceId} /></TabsContent>
+          <TabsContent value="next"><NextStep /></TabsContent>
         </div>
       </Tabs>
     </>
