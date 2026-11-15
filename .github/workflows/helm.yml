@@ -1,6 +1,6 @@
 name: helm
 
-# Chart releases — two charts, two independent tag flows:
+# Chart releases — four charts, four independent tag flows:
 #   - PR touching deploy/charts/**:        lint + template all charts, publish nothing.
 #   - tag v*:                              the proxcloud APP chart, versioned by the tag
 #                                          (v0.1.2 -> 0.1.2, shared with the image tags),
@@ -9,6 +9,8 @@ name: helm
 #                                          Chart.yaml version, to the same charts repo.
 #   - tag database-cluster-v*:             the managed-database (DBaaS) chart, at its own
 #                                          Chart.yaml version, to the same charts repo.
+#   - tag proxcloud-platform-v*:           the managed-services platform chart (the platform BOM
+#                                          pins it), at its own Chart.yaml version, same repo.
 #
 # The DBaaS chart is deliberately NOT released off the app tag: a customer database pins a
 # chart version and keeps it until something explicitly moves it, so that chart's lifecycle
@@ -22,6 +24,7 @@ on:
       - "v*"
       - "database-cluster-v*"
       - "proxmox-kamaji-cluster-v*"
+      - "proxcloud-platform-v*"
   pull_request:
     branches:
       - main
@@ -36,6 +39,8 @@ env:
   DB_CHART_NAME: database-cluster
   K8S_CHART_DIR: deploy/charts/proxmox-kamaji-cluster
   K8S_CHART_NAME: proxmox-kamaji-cluster
+  PLATFORM_CHART_DIR: deploy/charts/proxcloud-platform
+  PLATFORM_CHART_NAME: proxcloud-platform
 
 jobs:
   # ---- PR: sanity only ------------------------------------------------------
@@ -80,6 +85,17 @@ jobs:
           set -euo pipefail
           helm lint "$K8S_CHART_DIR"
           helm template test "$K8S_CHART_DIR" -n pc-demo >/dev/null
+
+      - name: Lint + template the proxcloud-platform chart
+        run: |
+          set -euo pipefail
+          # Bare defaults DO NOT render by design: each platform BOM component turns on its part.
+          # One example per component (capi, capi-tenant, platform) is the render check.
+          for f in "$PLATFORM_CHART_DIR"/examples/values-*.yaml; do
+            echo "==> $f"
+            helm lint "$PLATFORM_CHART_DIR" -f "$f"
+            helm template test "$PLATFORM_CHART_DIR" -n proxcloud-system -f "$f" >/dev/null
+          done
 
   # ---- tag v*: the proxcloud app chart at the tag version ----------------------
   publish:
@@ -190,3 +206,40 @@ jobs:
           done
           helm package "$DB_CHART_DIR" -d /tmp/pkg
           helm push "/tmp/pkg/$DB_CHART_NAME-$version.tgz" "$OCI_REPO"
+
+  # ---- tag proxcloud-platform-v*: the managed-services platform chart ----------
+  publish-platform-chart:
+    if: github.event_name == 'push' && startsWith(github.ref_name, 'proxcloud-platform-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: ghcr login
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Publish at the Chart.yaml version (tag must match)
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#"$PLATFORM_CHART_NAME"-v}"
+          version="$(helm show chart "$PLATFORM_CHART_DIR" | awk '/^version:/ {print $2}')"
+          if [ "$tag_version" != "$version" ]; then
+            echo "tag says $tag_version but $PLATFORM_CHART_DIR/Chart.yaml says $version — bump Chart.yaml (or fix the tag) and re-tag." >&2
+            exit 1
+          fi
+          if helm show chart "$OCI_REPO/$PLATFORM_CHART_NAME" --version "$version" >/dev/null 2>&1; then
+            echo "chart $PLATFORM_CHART_NAME $version already published — nothing to do."
+            exit 0
+          fi
+          # Bare defaults fail by design — render every component example.
+          for f in "$PLATFORM_CHART_DIR"/examples/values-*.yaml; do
+            echo "==> $f"
+            helm lint "$PLATFORM_CHART_DIR" -f "$f"
+            helm template test "$PLATFORM_CHART_DIR" -n proxcloud-system -f "$f" >/dev/null
+          done
+          helm package "$PLATFORM_CHART_DIR" -d /tmp/pkg
+          helm push "/tmp/pkg/$PLATFORM_CHART_NAME-$version.tgz" "$OCI_REPO"

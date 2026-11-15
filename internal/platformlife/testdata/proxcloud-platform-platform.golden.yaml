@@ -1,0 +1,360 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: default
+  namespace: argocd
+spec:
+  clusterResourceWhitelist: []
+  destinations: []
+  sourceRepos: []
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
+  name: proxcloud-dbaas
+  namespace: argocd
+spec:
+  clusterResourceWhitelist: []
+  description: ProxCloud managed-database customer clusters (database-cluster chart). Applications here are written exclusively by the proxcloud API — do not hand-edit.
+  destinations:
+    - namespace: pc-*
+      server: https://kubernetes.default.svc
+  sourceRepos:
+    - ghcr.io/mutex-solutions/charts
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
+  name: proxcloud-k8s
+  namespace: argocd
+spec:
+  clusterResourceWhitelist: []
+  description: ProxCloud managed-Kubernetes customer clusters (kamaji cluster chart). Applications here are written exclusively by the proxcloud API — do not hand-edit.
+  destinations:
+    - namespace: pc-*
+      server: https://kubernetes.default.svc
+  sourceRepos:
+    - ghcr.io/mutex-solutions/charts
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: services
+  namespace: metallb-system
+spec:
+  addresses:
+    - 192.0.2.240-192.0.2.250
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: services
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - services
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: proxcloud-dbaas
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - namespaces
+    verbs:
+      - get
+      - list
+      - create
+      - patch
+      - delete
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
+      - list
+      - create
+      - patch
+      - delete
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - ""
+    resources:
+      - pods/log
+    verbs:
+      - get
+  - apiGroups:
+      - ""
+    resources:
+      - services
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - networkpolicies
+    verbs:
+      - get
+      - create
+      - patch
+  - apiGroups:
+      - postgresql.cnpg.io
+    resources:
+      - clusters
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - ps.percona.com
+    resources:
+      - perconaservermysqls
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - k8s.mariadb.com
+    resources:
+      - mariadbs
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - postgresql.cnpg.io
+    resources:
+      - backups
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - ps.percona.com
+    resources:
+      - perconaservermysqlbackups
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - k8s.mariadb.com
+    resources:
+      - physicalbackups
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - valkey.io
+    resources:
+      - valkeyclusters
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - kafka.strimzi.io
+    resources:
+      - kafkas
+      - kafkanodepools
+      - kafkausers
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - autoscaling.k8s.io
+    resources:
+      - verticalpodautoscalers
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - opensearch.opster.io
+      - opensearch.org
+    resources:
+      - opensearchclusters
+    verbs:
+      - get
+      - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: proxcloud-dbaas-egress
+rules:
+  - apiGroups:
+      - cilium.io
+    resources:
+      - ciliumnetworkpolicies
+    verbs:
+      - get
+      - create
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: proxcloud-mgmt
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - namespaces
+    verbs:
+      - get
+      - list
+      - create
+      - patch
+      - delete
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
+      - list
+      - create
+      - patch
+      - delete
+  - apiGroups:
+      - kamaji.clastix.io
+    resources:
+      - tenantcontrolplanes
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - cluster.x-k8s.io
+    resources:
+      - machinedeployments
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - addons.cluster.x-k8s.io
+    resources:
+      - helmchartproxies
+      - clusterresourcesets
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - ""
+    resources:
+      - persistentvolumes
+    verbs:
+      - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: proxcloud-dbaas
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: proxcloud-dbaas
+subjects:
+  - kind: ServiceAccount
+    name: proxcloud
+    namespace: proxcloud-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: proxcloud-dbaas-egress
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: proxcloud-dbaas-egress
+subjects:
+  - kind: ServiceAccount
+    name: proxcloud
+    namespace: proxcloud-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: proxcloud-mgmt
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: proxcloud-mgmt
+subjects:
+  - kind: ServiceAccount
+    name: proxcloud
+    namespace: proxcloud-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: proxcloud-applications
+  namespace: argocd
+rules:
+  - apiGroups:
+      - argoproj.io
+    resources:
+      - applications
+    verbs:
+      - get
+      - list
+      - create
+      - patch
+      - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: proxcloud-applications
+  namespace: argocd
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: proxcloud-applications
+subjects:
+  - kind: ServiceAccount
+    name: proxcloud
+    namespace: proxcloud-system
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: proxcloud
+  name: proxcloud-system
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  labels:
+    argocd.argoproj.io/secret-type: repository
+  name: proxcloud-charts-creds
+  namespace: argocd
+stringData:
+  enableOCI: "true"
+  name: proxcloud-charts
+  type: helm
+  url: ghcr.io/mutex-solutions/charts
+type: Opaque
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  annotations:
+    kubernetes.io/service-account.name: proxcloud
+  name: proxcloud-token
+  namespace: proxcloud-system
+type: kubernetes.io/service-account-token
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: proxcloud
+  namespace: proxcloud-system

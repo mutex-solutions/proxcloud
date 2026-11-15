@@ -1,0 +1,23 @@
+{{- if .Values.platform.enabled }}
+{{- if not .Values.platform.metallb.addresses }}
+{{- fail "platform.metallb.addresses is required: the MetalLB range of the platform network" }}
+{{- end }}
+# Pool `services`, the providers' lbAddressPool, announced on L2: what installer stage 50 applies
+# (services-platform.sh). Tenant cluster APIs and databases get their LoadBalancer addresses from it.
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: services
+  namespace: metallb-system
+spec:
+  addresses:
+    {{- toYaml .Values.platform.metallb.addresses | nindent 4 }}
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: services
+  namespace: metallb-system
+spec:
+  ipAddressPools: [services]
+{{- end }}

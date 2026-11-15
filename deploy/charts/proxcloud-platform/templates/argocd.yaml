@@ -1,0 +1,71 @@
+{{- if .Values.platform.enabled }}
+# The workload cluster's own ArgoCD, which runs only the tenant Applications the providers write. The two tenant
+# AppProjects are deploy/mgmt-cluster/appproject.yaml and deploy/dbaas-cluster/appproject.yaml (why each field is what it
+# is, there), kept equal by internal/platformlife/chart_test.go.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: proxcloud-k8s
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  description: >-
+    ProxCloud managed-Kubernetes customer clusters (kamaji cluster chart).
+    Applications here are written exclusively by the proxcloud API — do not hand-edit.
+  sourceRepos:
+    - {{ .Values.platform.chartRepository }}
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: "pc-*"
+  clusterResourceWhitelist: []
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: proxcloud-dbaas
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  description: >-
+    ProxCloud managed-database customer clusters (database-cluster chart).
+    Applications here are written exclusively by the proxcloud API — do not hand-edit.
+  sourceRepos:
+    - {{ .Values.platform.chartRepository }}
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: "pc-*"
+  clusterResourceWhitelist: []
+---
+# ArgoCD creates `default` open: any repository, any destination, any cluster-scoped kind. No Application here uses it
+# (the tenants' name the two projects above; the platform's own come from the seed's ArgoCD), so it is locked: an
+# Application in `default` can source nothing and deploy nowhere.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: default
+  namespace: argocd
+spec:
+  sourceRepos: []
+  destinations: []
+  clusterResourceWhitelist: []
+---
+# The tenant chart repository, OCI, without credentials: the packages are public (owner decision of 2026-11-15). The
+# name is the installer's (services-platform.sh), so a site that has its entry gets this one in its place, not a second
+# entry for the same URL.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: proxcloud-charts-creds
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+type: Opaque
+stringData:
+  type: helm
+  name: proxcloud-charts
+  url: {{ .Values.platform.chartRepository }}
+  enableOCI: "true"
+{{- end }}
