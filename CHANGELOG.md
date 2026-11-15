@@ -133,9 +133,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shows the generated root script with a copy button and the two firewall switches. Step 2 takes the connection, runs
   every check of the connection test (`?checks=all`) with one row each, offers to pin the fingerprint the server
   presented only after the operator compared it with `pvenode cert info`, and saves the provider with
-  `attachToNewProjects: false`, so no project is attached before Go live. The other steps list their checks and link
-  to the provider page until their forms land. Playwright specs against the mock API cover the script, the check rows,
-  the pin, the create body and the axe checks; not run against a live API or cluster.
+  `attachToNewProjects: false`, so no project is attached before Go live. Steps 3 to 8 are described below. Playwright
+  specs against the mock API cover the script, the check rows, the pin, the create body and the axe checks; not run
+  against a live API or cluster.
 - **Network and storage steps of the Platform setup page.** A provider's network and storage were raw JSON on the
   provider page, and a wrong block showed up only as a failed tenant network. Step 3 is a form: zone kind (EVPN, VLAN,
   simple), zone ID, the VLAN tag range (1 to 4094, first not above last, which the API does not check), the project
@@ -166,18 +166,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sync nobody ran on a Compose install. Step 6 shows what `GET /api/v1/admin/setup/defaults` would write, the rate
   table included, before anything is applied; the price plan is applied only after the operator ticks that the rates
   were reviewed, and the apply sends `confirmRates` only then. It warns about flavors that no rule prices (billed as
-  zero) and links the billing details and mail as recommended. Step 7 is enabled when Connect, Network, Storage and
-  OS templates are done (a warning there does not hold it back, a state the cluster did not report does) in a live
+  zero) and links the billing details and mail as recommended. Step 7 is enabled when Connect, Network, Storage and OS
+  templates are done (a warning there does not hold it back, a state the cluster did not report does) in a live
   answer, and the catalog is done or the operator ticks going live without it. A database-only answer never enables
-  it: there Connect is done once the provider is saved, without its connection checks. When the job scheduler is off it says that nothing
-  then syncs or charges on a timer and shows `./proxcloud-up.sh install --scheduler`, without blocking. Go live turns
-  the attach policy on, runs one provider sync (`POST /api/v1/admin/job/external-service/sync`) and starts a bulk
-  attach of the projects created meanwhile when there are any, then lists the first tenant's path. Step 8 is a
-  static card that links ADR 0009. `docs/quickstart.md` (path A2 and After any install) and
-  `deploy/compose/README.md` now point at the page; the install flags `--template-updates` and `--scheduler` the
-  page names come with the Compose change that adds them. Playwright specs check the preview before Apply, the
-  confirmation in the apply body and Go live staying disabled until its prerequisites hold, against the mock API;
-  not run against a live API, and Go live not run against a cluster.
+  it: there Connect is done once the provider is saved, without its connection checks. When the job scheduler is off
+  it says that nothing then syncs or charges on a timer and shows `./proxcloud-up.sh install --scheduler`, without
+  blocking. Go live turns the attach policy on, runs one provider sync
+  (`POST /api/v1/admin/job/external-service/sync`) and starts a bulk attach of the projects created meanwhile when
+  there are any, then lists the first tenant's path. Step 8 is a static card that links ADR 0009. `docs/quickstart.md`
+  (path A2 and After any install) and `deploy/compose/README.md` now point at the page; the install flags
+  `--template-updates` and `--scheduler` the page names are those of the Docker Compose entry above (opt-in VM
+  template updates and job scheduler). Playwright specs check the preview before Apply, the confirmation in the apply
+  body and Go live staying disabled until its prerequisites hold, against the mock API; not run against a live API,
+  and Go live not run against a cluster.
 
 ### Changed
 
