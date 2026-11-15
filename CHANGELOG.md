@@ -166,9 +166,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by digest. A pull request builds and scans the image; a `proxcloud-clusterctl-v<version>` tag, which must equal the
   image's version label and point at a commit of `main`, builds it, scans it with the existing Trivy gate and pushes
   it once to `ghcr.io/mutex-solutions/proxcloud-clusterctl`. Nothing uses the image yet. Verified locally on
-  2026-11-15: the image builds, two builds without cache on one machine give byte-identical binaries, both binaries print their
-  upstream version, and a scan with the gate's Trivy release and that day's database, read by the gate's script,
-  finds no HIGH or CRITICAL finding in the image. That is one scan on one day, not a statement about later
+  2026-11-15: the image builds, two builds without cache on one machine give byte-identical binaries, both
+  binaries print their upstream version, and a scan with the gate's Trivy release and that day's database, read by
+  the gate's script, finds no HIGH or CRITICAL finding in the image. That is one scan on one day, not a statement about later
   databases. Not verified: the workflow has not run on GitHub, so the build on a hosted runner and the gate there
   are not confirmed; the rebuilt binaries have not been run against any cluster and upstream's test suites were not
   run against the changed modules; GitHub generates the source archives on request and does not promise stable
