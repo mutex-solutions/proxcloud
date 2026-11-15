@@ -2,14 +2,23 @@ package kamajik8s
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // testServer spins a TLS fake apiserver and returns a Client whose kubeconfig trusts it
@@ -193,6 +202,164 @@ func TestCustomResourceHelpers(t *testing.T) {
 	for i := range want {
 		if calls[i] != want[i] {
 			t.Errorf("call %d = %+v, want %+v", i, calls[i], want[i])
+		}
+	}
+}
+
+func TestApplyClusterScoped(t *testing.T) {
+	var paths []string
+	c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch || r.Header.Get("Content-Type") != "application/apply-patch+yaml" ||
+			r.URL.Query().Get("fieldManager") != fieldManager || r.URL.Query().Get("force") != "true" {
+			t.Errorf("request = %s %s ?%s", r.Method, r.Header.Get("Content-Type"), r.URL.RawQuery)
+		}
+		paths = append(paths, r.URL.Path)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	ctx := context.Background()
+	crb := map[string]any{"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRoleBinding",
+		"metadata": map[string]any{"name": "argocd-manager"}}
+	if err := c.ApplyClusterScoped(ctx, "rbac.authorization.k8s.io", "v1", "clusterrolebindings", crb); err != nil {
+		t.Fatalf("ApplyClusterScoped: %v", err)
+	}
+	if err := c.ApplyClusterScoped(ctx, "", "v1", "persistentvolumes", map[string]any{"metadata": map[string]any{"name": "pv-1"}}); err != nil {
+		t.Fatalf("ApplyClusterScoped core: %v", err)
+	}
+	for _, bad := range []map[string]any{
+		{"metadata": map[string]any{}},
+		{"metadata": map[string]any{"name": "x", "namespace": "kube-system"}},
+	} {
+		if err := c.ApplyClusterScoped(ctx, "rbac.authorization.k8s.io", "v1", "clusterroles", bad); err == nil {
+			t.Errorf("ApplyClusterScoped(%v): want error", bad)
+		}
+	}
+	want := []string{"/apis/rbac.authorization.k8s.io/v1/clusterrolebindings/argocd-manager", "/api/v1/persistentvolumes/pv-1"}
+	if !slices.Equal(paths, want) {
+		t.Errorf("paths = %v, want %v", paths, want)
+	}
+}
+
+func TestCreateServiceAccountToken(t *testing.T) {
+	var body map[string]any
+	reply := `{"status":{"token":"sa-token","expirationTimestamp":"2027-11-15T10:00:00Z"}}`
+	c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/namespaces/kube-system/serviceaccounts/argocd-manager/token" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(reply))
+	})
+	ctx := context.Background()
+	tok, exp, err := c.CreateServiceAccountToken(ctx, "kube-system", "argocd-manager", 365*24*time.Hour)
+	if err != nil {
+		t.Fatalf("CreateServiceAccountToken: %v", err)
+	}
+	if tok != "sa-token" || !exp.Equal(time.Date(2027, 11, 15, 10, 0, 0, 0, time.UTC)) {
+		t.Errorf("token, expiry = %q, %v", tok, exp)
+	}
+	spec, _ := body["spec"].(map[string]any)
+	if body["kind"] != "TokenRequest" || body["apiVersion"] != "authentication.k8s.io/v1" || spec["expirationSeconds"] != float64(31536000) {
+		t.Errorf("body = %v", body)
+	}
+	for _, r := range []string{`{"status":{}}`, `{"status":{"token":"t","expirationTimestamp":"soon"}}`} {
+		reply = r
+		if _, _, err := c.CreateServiceAccountToken(ctx, "kube-system", "argocd-manager", time.Hour); err == nil {
+			t.Errorf("reply %s: want error", r)
+		}
+	}
+}
+
+func TestCanI(t *testing.T) {
+	allowed := true
+	var attrs map[string]any
+	c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		var body struct {
+			Kind string
+			Spec struct {
+				ResourceAttributes map[string]any `json:"resourceAttributes"`
+			}
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.Kind != "SelfSubjectAccessReview" {
+			t.Errorf("kind = %q", body.Kind)
+		}
+		attrs = body.Spec.ResourceAttributes
+		w.WriteHeader(http.StatusCreated)
+		_, _ = fmt.Fprintf(w, `{"status":{"allowed":%t}}`, allowed)
+	})
+	ctx := context.Background()
+	ok, err := c.CanI(ctx, AccessCheck{Verb: "*", Group: "*", Resource: "*"})
+	if err != nil || !ok {
+		t.Fatalf("CanI cluster-admin = %v, %v", ok, err)
+	}
+	if fmt.Sprint(attrs) != "map[group:* resource:* verb:*]" {
+		t.Errorf("attrs = %v", attrs)
+	}
+	allowed = false
+	ok, err = c.CanI(ctx, AccessCheck{Namespace: "proxcloud-system", Verb: "get", Resource: "secrets", Name: "t"})
+	if err != nil || ok {
+		t.Fatalf("CanI denied = %v, %v", ok, err)
+	}
+	if fmt.Sprint(attrs) != "map[name:t namespace:proxcloud-system resource:secrets verb:get]" {
+		t.Errorf("attrs = %v", attrs)
+	}
+}
+
+func TestBuildKubeconfig(t *testing.T) {
+	hits := 0
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if got := r.Header.Get("Authorization"); got != "Bearer sa-token" {
+			t.Errorf("Authorization = %q", got)
+		}
+		_, _ = w.Write([]byte(`{"items":[]}`))
+	}))
+	t.Cleanup(ts.Close)
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ts.Certificate().Raw})
+
+	kc, err := BuildKubeconfig("pc-platform-seed", ts.URL, caPEM, "sa-token")
+	if err != nil {
+		t.Fatalf("BuildKubeconfig: %v", err)
+	}
+	if strings.Contains(kc, "client-") || !strings.Contains(kc, "current-context: pc-platform-seed") {
+		t.Errorf("kubeconfig:\n%s", kc)
+	}
+	c, err := New(kc)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := c.ListNodes(context.Background()); err != nil || hits != 1 {
+		t.Fatalf("ListNodes = %v, hits %d", err, hits)
+	}
+
+	// Another CA: the handshake fails before any request, so the token never leaves.
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "other"}, NotAfter: time.Now().Add(time.Hour),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	other, _ := BuildKubeconfig("x", ts.URL, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), "sa-token")
+	oc, err := New(other)
+	if err != nil {
+		t.Fatalf("New other: %v", err)
+	}
+	if _, err := oc.ListNodes(context.Background()); !errors.Is(err, ErrUnreachable) || hits != 1 {
+		t.Errorf("wrong CA: err = %v, hits %d", err, hits)
+	}
+
+	for name, args := range map[string][]string{
+		"http server": {"x", "http://10.0.0.1:6443", string(caPEM), "t"},
+		"no host":     {"x", "https://", string(caPEM), "t"},
+		"no CA":       {"x", ts.URL, "", "t"},
+		"garbage CA":  {"x", ts.URL, "not pem", "t"},
+		"no token":    {"x", ts.URL, string(caPEM), ""},
+		"no name":     {"", ts.URL, string(caPEM), "t"},
+	} {
+		if _, err := BuildKubeconfig(args[0], args[1], []byte(args[2]), args[3]); err == nil {
+			t.Errorf("%s: want error", name)
 		}
 	}
 }
