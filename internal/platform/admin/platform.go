@@ -11,11 +11,15 @@ package admin
 //	PUT  /admin/platform/installations/{id}/credentials   the CAPI and CSI token secrets, write-only        (service:manage)
 //	POST /admin/platform/installations/{id}/preflight     read-only checks against Proxmox                  (service:manage)
 //	GET  /admin/platform/installations/{id}/plan          the installed BOM against this release's          (service:read)
+//	POST /admin/platform/installations/{id}/runs          {kind: apply|remove} → 202 {runId}                (service:manage)
+//	GET  /admin/platform/installations/{id}/runs[/{runId}] the newest runs, or one, with their stages       (service:read)
+//	POST /admin/platform/installations/{id}/runs/{runId}/cancel                                             (service:manage)
 //
-// The installation routes answer 404 platform_disabled unless PROXCLOUD_PLATFORM_ENABLED is on (SetPlatform). No route
-// returns a credential: an installation shows only which token ids are stored. The preflight changes nothing, so the
-// audit middleware skips it; it needs service:manage because it uses the stored platform tokens. Runs, the seed
-// kubeconfig and the seed credential rotation come with the runner.
+// The installation routes answer 404 platform_disabled unless PROXCLOUD_PLATFORM_ENABLED is on (SetPlatform); a run
+// also needs the runner (SetPlatformRuns, with PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED), else 409 platform_disabled. No
+// route returns a credential: an installation shows only which token ids are stored, a run only fixed text and codes.
+// The preflight changes nothing, so the audit middleware skips it; it needs service:manage because it uses the stored
+// platform tokens. The seed kubeconfig and the seed credential rotation come with stages 6 to 11.
 
 import (
 	"context"
@@ -28,6 +32,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/durablejobs"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platformlife"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
@@ -35,6 +40,9 @@ import (
 
 // SetPlatform wires the platform store (PROXCLOUD_PLATFORM_ENABLED). Unwired, the installation routes answer 404.
 func (h *Handler) SetPlatform(s *platformlife.Store) { h.platform = s }
+
+// SetPlatformRuns lets POST …/runs enqueue on jobs; cmd/api calls it only where the platform runner runs.
+func (h *Handler) SetPlatformRuns(jobs *durablejobs.Store) { h.platformJobs = jobs }
 
 func (h *Handler) routePlatform(r chi.Router) {
 	r.Get("/platform/bom", h.platformBOM)
@@ -45,6 +53,10 @@ func (h *Handler) routePlatform(r chi.Router) {
 	r.Put("/platform/installations/{id}/credentials", h.platformCredentials)
 	r.Post("/platform/installations/{id}/preflight", h.platformPreflight)
 	r.Get("/platform/installations/{id}/plan", h.platformPlan)
+	r.Post("/platform/installations/{id}/runs", h.platformRunStart)
+	r.Get("/platform/installations/{id}/runs", h.platformRuns)
+	r.Get("/platform/installations/{id}/runs/{runId}", h.platformRun)
+	r.Post("/platform/installations/{id}/runs/{runId}/cancel", h.platformRunCancel)
 }
 
 func (h *Handler) platformBOM(w http.ResponseWriter, r *http.Request) {
@@ -97,6 +109,14 @@ func platformStoreErr(w http.ResponseWriter, err error) bool {
 		platformErr(w, http.StatusConflict, "run_active", err.Error(), nil)
 	case errors.Is(err, platformlife.ErrNoEncryptionKey):
 		platformErr(w, http.StatusConflict, "no_encryption_key", err.Error(), nil)
+	case errors.Is(err, platformlife.ErrBadKind):
+		platformErr(w, http.StatusBadRequest, "invalid_kind", err.Error(), nil)
+	case errors.Is(err, platformlife.ErrRunNotFound):
+		platformErr(w, http.StatusNotFound, "not_found", err.Error(), nil)
+	case errors.Is(err, platformlife.ErrRunFinished):
+		platformErr(w, http.StatusConflict, "run_finished", err.Error(), nil)
+	case errors.Is(err, platformlife.ErrBOMNotHere):
+		platformErr(w, http.StatusConflict, platformlife.CodeBOMUnsupported, err.Error(), nil)
 	default:
 		httpx.WriteError(w, err)
 	}
@@ -332,27 +352,36 @@ func (h *Handler) platformPreflight(w http.ResponseWriter, r *http.Request) {
 	if !h.platformGate(w, r, externalServiceManagePerm) {
 		return
 	}
-	ctx := r.Context()
-	in, err := h.platform.Get(ctx, chi.URLParam(r, "id"))
+	in, err := h.platform.Get(r.Context(), chi.URLParam(r, "id"))
 	if platformStoreErr(w, err) {
 		return
 	}
-	es, ok := h.loadServiceOr(w, r, in.ServiceID)
-	if !ok {
+	checks, err := h.PlatformPreflight(r.Context(), in)
+	if httpx.WriteError(w, err) {
 		return
 	}
+	httpx.OK(w, map[string]any{"ok": platformlife.OK(checks), "checks": checks})
+}
+
+// PlatformPreflight runs the read-only checks of an installation against its provider; a run's first stage calls it.
+func (h *Handler) PlatformPreflight(ctx context.Context, in *platformlife.Installation) ([]platformlife.Check, error) {
+	if h.esSvc == nil {
+		return nil, serviceNotFoundErr(in.ServiceID)
+	}
+	es, err := h.esSvc.Get(ctx, in.ServiceID)
+	if err != nil || es == nil {
+		return nil, serviceNotFoundErr(in.ServiceID)
+	}
 	if h.pveFor == nil {
-		httpx.Err(w, http.StatusServiceUnavailable, http.StatusServiceUnavailable, "Proxmox access is not configured")
-		return
+		return nil, httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable, "Proxmox access is not configured")
 	}
 	portal, err := h.pveFor(es)
 	if err != nil {
-		httpx.WriteError(w, httpx.BadRequest("Proxmox connection failed: "+err.Error()))
-		return
+		return nil, httpx.BadRequest("Proxmox connection failed: " + err.Error())
 	}
 	sec, err := h.platform.Secrets(ctx, in.ID)
-	if httpx.WriteError(w, err) {
-		return
+	if err != nil {
+		return nil, err
 	}
 	if sec == nil {
 		sec = &platformlife.Secrets{}
@@ -360,11 +389,11 @@ func (h *Handler) platformPreflight(w http.ResponseWriter, r *http.Request) {
 	pf := platformlife.Preflight{Installation: in, Site: platformlife.SiteOf(es), Allow: es.PVESandboxEndpoints(),
 		ProviderImport: es.PVEImportStorage(), Portal: portal,
 		TemplateUpdatesVM: h.templateUpdates != nil && h.templateUpdates.VMEnabled}
-	if pf.CAPI, err = platformlife.TokenClient(es, sec.CAPI); httpx.WriteError(w, err) {
-		return
+	if pf.CAPI, err = platformlife.TokenClient(es, sec.CAPI); err != nil {
+		return nil, err
 	}
-	if pf.CSI, err = platformlife.TokenClient(es, sec.CSI); httpx.WriteError(w, err) {
-		return
+	if pf.CSI, err = platformlife.TokenClient(es, sec.CSI); err != nil {
+		return nil, err
 	}
 	if n, err := h.githubCount(ctx); err == nil {
 		pf.GitHub = n > 0
@@ -376,8 +405,7 @@ func (h *Handler) platformPreflight(w http.ResponseWriter, r *http.Request) {
 			return b != nil, err
 		}
 	}
-	checks := pf.Run(ctx)
-	httpx.OK(w, map[string]any{"ok": platformlife.OK(checks), "checks": checks})
+	return pf.Run(ctx), nil
 }
 
 func (h *Handler) platformPlan(w http.ResponseWriter, r *http.Request) {
@@ -393,4 +421,79 @@ func (h *Handler) platformPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.OK(w, plan)
+}
+
+// platformRunStart starts an apply or a remove: 202 with the run's id, 409 run_active while another run is unfinished.
+func (h *Handler) platformRunStart(w http.ResponseWriter, r *http.Request) {
+	if !h.platformGate(w, r, externalServiceManagePerm) {
+		return
+	}
+	if h.platformJobs == nil {
+		platformErr(w, http.StatusConflict, platformlife.CodePlatformDisabled,
+			"Runs need the platform runner: set PROXCLOUD_PLATFORM_ENABLED=true and PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true", nil)
+		return
+	}
+	var req struct {
+		Kind string `json:"kind"`
+	}
+	if !decodeStrictLimited(w, r, &req, 1<<10) {
+		return
+	}
+	run, err := h.platform.StartRun(r.Context(), h.platformJobs, chi.URLParam(r, "id"), req.Kind, adminActor(r))
+	if platformStoreErr(w, err) {
+		return
+	}
+	httpx.Raw(w, http.StatusAccepted, httpx.Response[map[string]string]{Data: &map[string]string{"runId": run.ID}})
+}
+
+func (h *Handler) platformRuns(w http.ResponseWriter, r *http.Request) {
+	if !h.platformGate(w, r, serviceReadPerm) {
+		return
+	}
+	runs, err := h.platform.Runs(r.Context(), chi.URLParam(r, "id"), 20)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	for i := range runs {
+		if runs[i], err = platformlife.RunView(r.Context(), h.platformJobs, runs[i]); httpx.WriteError(w, err) {
+			return
+		}
+	}
+	httpx.List(w, runs)
+}
+
+func (h *Handler) platformRun(w http.ResponseWriter, r *http.Request) {
+	if !h.platformGate(w, r, serviceReadPerm) {
+		return
+	}
+	run, err := h.platform.Run(r.Context(), chi.URLParam(r, "runId"))
+	if httpx.WriteError(w, err) {
+		return
+	}
+	if run == nil || run.InstallationID != chi.URLParam(r, "id") {
+		platformStoreErr(w, platformlife.ErrRunNotFound)
+		return
+	}
+	v, err := platformlife.RunView(r.Context(), h.platformJobs, *run)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	httpx.OK(w, v)
+}
+
+// platformRunCancel asks a run to stop at its next claim or write; the run ends cancelled and the installation failed.
+func (h *Handler) platformRunCancel(w http.ResponseWriter, r *http.Request) {
+	if !h.platformGate(w, r, externalServiceManagePerm) {
+		return
+	}
+	id, runID := chi.URLParam(r, "id"), chi.URLParam(r, "runId")
+	run, err := h.platform.CancelRun(r.Context(), h.platformJobs, id, runID)
+	if platformStoreErr(w, err) {
+		return
+	}
+	v, err := platformlife.RunView(r.Context(), h.platformJobs, *run)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	httpx.OK(w, v)
 }

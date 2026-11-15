@@ -1,9 +1,12 @@
 package platformlife
 
 // run.go — a platformRun (design §3.4): one apply or remove of an installation, with the BOM frozen at its creation
-// and one entry per stage. The runner that executes runs comes later; this is the record and its states.
+// and one entry per stage. runner.go executes it.
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Run kinds.
 const (
@@ -62,10 +65,35 @@ const (
 	CodePortalChanged        = "portal_changed"
 	CodeJobDead              = "job_dead"
 	CodePlatformDisabled     = "platform_disabled"
+	// CodeStageUnavailable ends a run that reaches a stage this build does not run (stages 6 to 11 of an apply, the
+	// cluster part of a remove, a seed of mode existing).
+	CodeStageUnavailable   = "stage_unavailable"
+	CodeCredentialsMissing = "credentials_missing"
+	// CodeSeedLost: a seed that became ready is gone or no longer ours. It is never rebuilt automatically, because a
+	// new, empty seed would orphan the workload's Cluster API state.
+	CodeSeedLost = "seed_lost"
 )
 
-// TimeoutCode is the failure code of a stage whose deadline passed.
-func TimeoutCode(stage string) string { return stage + "_timeout" }
+// Stage ids of an apply (design §4.2) and of a remove (§4.6).
+const (
+	StageValidate         = "validate"
+	StageImages           = "images"
+	StageSeedVM           = "seed-vm"
+	StageSeedAPI          = "seed-api"
+	StageSeedIdentity     = "seed-identity"
+	StageRemoveCluster    = "remove-cluster"
+	StageRemoveSeed       = "remove-seed"
+	StageRemoveSecrets    = "remove-secrets"
+	stageSeedPlatform     = "seed-platform"
+	stageCluster          = "cluster"
+	stageWorkloadAccess   = "workload-access"
+	stageWorkloadPlatform = "workload-platform"
+	stageRegister         = "register"
+	stageDone             = "done"
+)
+
+// TimeoutCode is the failure code of a stage whose deadline passed, in the [a-z_] form job codes take.
+func TimeoutCode(stage string) string { return strings.ReplaceAll(stage, "-", "_") + "_timeout" }
 
 // Run is one document of collection platformRun.
 type Run struct {
@@ -111,13 +139,15 @@ type StageItem struct {
 // StageReceipt journals a stage's effects that are not idempotent, so a resumed stage finds them. It has no field for
 // a secret.
 type StageReceipt struct {
-	VMID                      int      `json:"vmid,omitempty"`
-	Name                      string   `json:"name,omitempty"`
-	CloneUPID                 string   `json:"cloneUpid,omitempty"`
-	CDVolume                  string   `json:"cdVolume,omitempty"`
-	Generation                int      `json:"generation,omitempty"`
-	ImportReceipts            []string `json:"importReceipts,omitempty"`
-	MachineDeploymentsDeleted []string `json:"machineDeploymentsDeleted,omitempty"`
+	VMID           int      `json:"vmid,omitempty"`
+	Name           string   `json:"name,omitempty"`
+	CloneUPID      string   `json:"cloneUpid,omitempty"`
+	CDVolume       string   `json:"cdVolume,omitempty"`
+	Generation     int      `json:"generation,omitempty"`
+	ImportReceipts []string `json:"importReceipts,omitempty"`
+	// Templates is the template VMID stage 2 found or imported per image and node: "seed:<node>", "node:<node>".
+	Templates                 map[string]int `json:"templates,omitempty"`
+	MachineDeploymentsDeleted []string       `json:"machineDeploymentsDeleted,omitempty"`
 }
 
 // Terminal reports a run state that will not change any more.

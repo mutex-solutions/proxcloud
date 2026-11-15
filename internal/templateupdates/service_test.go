@@ -1,6 +1,8 @@
 package templateupdates
 
 import (
+	"context"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -46,5 +48,14 @@ func TestPlacementOptionsAndAllowed(t *testing.T) {
 		if PlacementAllowed(got, c.node, c.imp, c.disk) != c.ok {
 			t.Errorf("PlacementAllowed(%s, %s, %s) != %v", c.node, c.imp, c.disk, c.ok)
 		}
+	}
+}
+
+// What EnqueueVM refuses for the request itself is ErrRefused, so a caller that retries knows not to.
+func TestEnqueueVMRefusalIsErrRefused(t *testing.T) {
+	s := &Service{VMEnabled: true}
+	if _, err := s.EnqueueVM(context.Background(), VMRequest{Digest: "pending", ConfirmDigest: "pending"}, "a"); !errors.Is(err, ErrRefused) ||
+		err.Error() != "confirm the exact digest to import" {
+		t.Fatalf("err %v", err)
 	}
 }

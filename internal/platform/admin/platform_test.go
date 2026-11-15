@@ -61,6 +61,10 @@ var platformRoutes = []struct{ method, path, perm string }{
 	{"PUT", "/admin/platform/installations/pi-1/credentials", externalServiceManagePerm},
 	{"POST", "/admin/platform/installations/pi-1/preflight", externalServiceManagePerm},
 	{"GET", "/admin/platform/installations/pi-1/plan", serviceReadPerm},
+	{"POST", "/admin/platform/installations/pi-1/runs", externalServiceManagePerm},
+	{"GET", "/admin/platform/installations/pi-1/runs", serviceReadPerm},
+	{"GET", "/admin/platform/installations/pi-1/runs/pr-1", serviceReadPerm},
+	{"POST", "/admin/platform/installations/pi-1/runs/pr-1/cancel", externalServiceManagePerm},
 }
 
 // Every installation route is admin-only (a tenant gets 403). With PROXCLOUD_PLATFORM_ENABLED off (no store wired) an

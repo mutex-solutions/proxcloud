@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/durablejobs"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/admin"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
@@ -274,5 +276,173 @@ func TestPlatformSecretWritesSerialize(t *testing.T) {
 	sec, err := store.Secrets(ctx, "pi-1")
 	if err != nil || sec == nil || sec.CAPI == nil || sec.CSI == nil {
 		t.Fatalf("one of two racing writes was lost: %+v %v", sec, err)
+	}
+}
+
+// TestPlatformRunStartCancelAndReplay drives the run routes against PostgreSQL: a run and its job are written together
+// (key platform-run-<runId>, 20 attempts), a second run of the installation is refused while the first is unfinished,
+// a cancel is shown as cancelling, the job is never replayed through /admin/durable-jobs, and a run whose job died is
+// shown failed/job_dead and stops blocking a new run. A Defer gives the attempt back.
+func TestPlatformRunStartCancelAndReplay(t *testing.T) {
+	ctx := context.Background()
+	db := freshPG(t)
+	enc := textcrypt.New("test-key")
+	jobs := durablejobs.New(db)
+	if err := jobs.Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	store := platformlife.NewStore(db, enc)
+	if err := store.Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mustInsert(t, db, "adminPermission", pgdoc.M{"_id": "admin-sub", "role": "ADMIN"})
+	in := &platformlife.Installation{Name: "lab", ServiceID: "svc-pve"}
+	if err := store.Create(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	h := admin.NewHandler(admin.NewRepo(db), nil, nil, nil, nil, nil, nil, nil, audit.NewService(audit.NewRepo(db), slog.Default()),
+		externalservice.NewService(externalservice.NewRepo(db), enc), "", "", "")
+	h.SetPlatform(store)
+	h.SetDurableJobs(jobs, nil, func(*durablejobs.Job) error { return nil })
+	router := chi.NewRouter()
+	h.Routes(router)
+	call := func(method, path, body string, want int) map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req = req.WithContext(httpx.WithRC(req.Context(), &httpx.RequestContext{Sub: "admin-sub"}))
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != want {
+			t.Fatalf("%s %s: %d %s, want %d", method, path, w.Code, w.Body.String(), want)
+		}
+		var out map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		return out
+	}
+	runs := "/admin/platform/installations/" + in.ID + "/runs"
+
+	// Without the runner the start is refused; reads still answer.
+	if a := call(http.MethodPost, runs, `{"kind":"apply"}`, http.StatusConflict); !strings.Contains(fmt.Sprint(a), platformlife.CodePlatformDisabled) {
+		t.Fatalf("runner off: %v", a)
+	}
+	call(http.MethodGet, runs, "", http.StatusOK)
+	h.SetPlatformRuns(jobs)
+
+	call(http.MethodPost, runs, `{"kind":"upgrade"}`, http.StatusBadRequest)
+	call(http.MethodPost, runs, `{"kind":"apply","extra":1}`, http.StatusBadRequest)
+	data := call(http.MethodPost, runs, `{"kind":"apply"}`, http.StatusAccepted)["data"].(map[string]any)
+	runID, _ := data["runId"].(string)
+	run, err := store.Run(ctx, runID)
+	if err != nil || run == nil || run.State != platformlife.RunQueued || len(run.Stages) != 11 || run.RequestedBy != "admin-sub" {
+		t.Fatalf("run %+v %v", run, err)
+	}
+	job, err := jobs.Get(ctx, run.JobID)
+	if err != nil || job.Kind != durablejobs.PlatformRun || job.Key != "platform-run-"+runID || job.MaxAttempts != 20 {
+		t.Fatalf("job %+v %v", job, err)
+	}
+	if p, err := platformlife.DecodePayload(job.Payload); err != nil || p.RunID != runID || p.InstallationID != in.ID {
+		t.Fatalf("payload %s %v", job.Payload, err)
+	}
+	got, _ := store.Get(ctx, in.ID)
+	if got.Status.Phase != platformlife.PhaseApplying || got.LastRunID != runID {
+		t.Fatalf("installation %+v", got.Status)
+	}
+	// One unfinished run per installation, and no spec change during it.
+	if a := call(http.MethodPost, runs, `{"kind":"remove"}`, http.StatusConflict); !strings.Contains(fmt.Sprint(a), "run_active") {
+		t.Fatalf("second run: %v", a)
+	}
+	// The job: a Defer gives back the attempt the claim took.
+	j, err := jobs.ClaimKinds(ctx, time.Minute, []string{durablejobs.PlatformRun})
+	if err != nil || j == nil || j.Attempts != 1 {
+		t.Fatalf("claim %+v %v", j, err)
+	}
+	if err := jobs.Defer(ctx, j, 0, "waiting_seed_api"); err != nil {
+		t.Fatal(err)
+	}
+	if j, _ = jobs.Get(ctx, run.JobID); j.Attempts != 0 || j.State != "pending" {
+		t.Fatalf("after Defer: %+v", j)
+	}
+	// Cancel: shown as cancelling until the runner honours it.
+	v := call(http.MethodPost, runs+"/"+runID+"/cancel", "", http.StatusOK)["data"].(map[string]any)
+	if v["state"] != "cancelling" || v["cancelRequested"] != true {
+		t.Fatalf("cancel view %v", v)
+	}
+	// Never replayed, whatever its state.
+	if _, err := db.Pool.Exec(ctx, `UPDATE durable_job SET state='dead',finished_at=clock_timestamp(),owner=NULL,lease_until=NULL WHERE id=$1`, run.JobID); err != nil {
+		t.Fatal(err)
+	}
+	if a := call(http.MethodPost, "/admin/durable-jobs/"+run.JobID+"/replay", `{"reason":"try it again"}`, http.StatusConflict); !strings.Contains(fmt.Sprint(a),
+		"use Retry on the Managed services page") {
+		t.Fatalf("replay: %v", a)
+	}
+	// A dead job: the run reads failed/job_dead and a new run may start.
+	v = call(http.MethodGet, runs+"/"+runID, "", http.StatusOK)["data"].(map[string]any)
+	if v["state"] != platformlife.RunFailed || v["code"] != platformlife.CodeJobDead {
+		t.Fatalf("dead job view %v", v)
+	}
+	call(http.MethodPost, runs, `{"kind":"remove"}`, http.StatusAccepted)
+	if old, _ := store.Run(ctx, runID); old.State != platformlife.RunFailed || old.Code != platformlife.CodeJobDead || old.FinishedAt == nil {
+		t.Fatalf("old run %+v", old)
+	}
+	list := call(http.MethodGet, runs, "", http.StatusOK)["data"].([]any)
+	if len(list) != 2 || list[0].(map[string]any)["kind"] != platformlife.RunRemove {
+		t.Fatalf("runs %v", list)
+	}
+	// Cancel on a run whose job died: the run ends failed/job_dead and the installation failed, as after any other run
+	// that did not succeed, not left removing with no run.
+	second, _ := store.Run(ctx, list[0].(map[string]any)["id"].(string))
+	if _, err := db.Pool.Exec(ctx, `UPDATE durable_job SET state='dead',finished_at=clock_timestamp(),owner=NULL,lease_until=NULL WHERE id=$1`, second.JobID); err != nil {
+		t.Fatal(err)
+	}
+	v = call(http.MethodPost, runs+"/"+second.ID+"/cancel", "", http.StatusOK)["data"].(map[string]any)
+	if got, _ := store.Get(ctx, in.ID); v["state"] != platformlife.RunFailed || v["code"] != platformlife.CodeJobDead || got.Status.Phase != platformlife.PhaseFailed {
+		t.Fatalf("cancel on a dead job: view %v, phase %s", v, got.Status.Phase)
+	}
+}
+
+// TestPlatformRunMutate: the runner's write seals the secrets, deletes a secrets document left empty, and keeps the
+// run and the installation together.
+func TestPlatformRunMutate(t *testing.T) {
+	ctx := context.Background()
+	db := freshPG(t)
+	jobs := durablejobs.New(db)
+	if err := jobs.Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	store := platformlife.NewStore(db, textcrypt.New("test-key"))
+	if err := store.Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	in := &platformlife.Installation{Name: "lab", ServiceID: "svc-pve"}
+	if err := store.Create(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Mutate(ctx, run.ID, func(r *platformlife.Run, in *platformlife.Installation, sec *platformlife.Secrets) error {
+		r.State, sec.BootstrapToken = platformlife.RunRunning, "abcdef.0123456789abcdef"
+		in.Status.Seed = &platformlife.SeedStatus{VMID: 120}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var raw []pgdoc.M
+	if err := db.C(platformlife.SecretCollection).Find(ctx, pgdoc.M{}, &raw); err != nil || len(raw) != 1 || strings.Contains(fmt.Sprint(raw), "0123456789abcdef") {
+		t.Fatalf("secrets %v %v", raw, err)
+	}
+	r, got, sec, err := store.Load(ctx, run.ID)
+	if err != nil || r.State != platformlife.RunRunning || got.Status.Seed.VMID != 120 || sec.BootstrapToken != "abcdef.0123456789abcdef" {
+		t.Fatalf("load %+v %+v %+v %v", r, got, sec, err)
+	}
+	if err := store.Mutate(ctx, run.ID, func(_ *platformlife.Run, _ *platformlife.Installation, sec *platformlife.Secrets) error {
+		*sec = platformlife.Secrets{ID: sec.ID}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := db.C(platformlife.SecretCollection).Count(ctx, pgdoc.M{}); n != 0 {
+		t.Fatalf("%d secrets documents after a wipe", n)
 	}
 }
