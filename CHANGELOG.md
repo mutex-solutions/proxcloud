@@ -179,6 +179,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   template updates and job scheduler). Playwright specs check the preview before Apply, the confirmation in the apply
   body and Go live staying disabled until its prerequisites hold, against the mock API; not run against a live API,
   and Go live not run against a cluster.
+- **Server seed choice in the Network step of the Platform setup page.** Whether a server on a DHCP network
+  fetches its NoCloud seed from the API URL or gets it on an ISO was a raw JSON key on the provider page
+  (`config.metadata.forceIso`), and a server that missed its URL seed booted without its hostname, password and
+  guest agent with nothing on the page saying why. Step 3 now has a **Server seeds** choice: "By URL from
+  `<seedUrl>`" (the URL the setup status reports: `config.metadata.url`, else the API's own base URL) for tenant
+  servers that reach it with a trusted certificate, or "On an ISO" for LAN installs and self-signed certificates. It
+  shows what is saved, and saves only `config.metadata` with `PUT /api/v1/admin/service/{id}`, read fresh and sent
+  whole because the route replaces top-level config keys: `url`, `isoStorage`, `vendorData` and the other keys are
+  kept, and the network block is not sent. A Playwright spec checks both saves' bodies and the axe checks against
+  the mock API; not run against a live API or cluster.
 
 ### Changed
 

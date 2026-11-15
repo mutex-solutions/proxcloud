@@ -187,6 +187,43 @@ test("Network saves a VLAN zone only with a tag range of 1 to 4094, first not ab
   expect(put.body.config.network.zones.overlay).toMatchObject({ kind: "vlan", bridge: "vmbr1", vlanMin: 100, vlanMax: 199 })
 })
 
+test("Network saves the server seed choice, keeps the other metadata keys and shows what is saved", async ({ page }) => {
+  await page.goto("/setup?tab=network")
+  const seeds = page.getByRole("group", { name: "Server seeds" })
+  const byUrl = seeds.getByRole("radio", { name: /^By URL from https:\/\/api\.helium\.example\.com \(tenant servers reach it with a trusted certificate\)$/ })
+  const onIso = seeds.getByRole("radio", { name: "On an ISO (LAN installs, self-signed certificates)" })
+  const save = seeds.getByRole("button", { name: "Save server seeds" })
+  await expect(seeds).toContainText("Not chosen yet: servers fetch it by URL.")
+  await expect(page.getByRole("list", { name: "Checks of this step" })).toContainText(
+    "fetch their seed from https://api.helium.example.com unless ISO seeds are on (config.metadata.forceIso): tenant servers must reach it and trust its certificate")
+  await expect(page.getByRole("tab", { name: /3\. Network \(Needs attention\)/ })).toBeVisible()
+  await expect(byUrl).not.toBeChecked()
+  await expect(onIso).not.toBeChecked()
+  await expect(save).toBeDisabled()
+  await expectAccessible(page)
+
+  const others = { isoStorage: "local", vendorData: "#cloud-config\npackage_update: true\n" }
+  await recordCalls(page)
+  await onIso.check()
+  await save.click()
+  await expect.poll(() => calls(page, "PUT", "/admin/service/svc-proxmox-01")).toHaveLength(1)
+  let [put] = await calls(page, "PUT", "/admin/service/svc-proxmox-01")
+  // Only the metadata block, read fresh and sent whole: the network block is not in the body, so it stays as stored.
+  expect(put.body).toEqual({ config: { metadata: { ...others, forceIso: true } } })
+  await expect(seeds).toContainText("Saved: on an ISO.")
+  await expect(onIso).toBeChecked()
+  await expect(page.getByRole("tab", { name: /3\. Network \(Done\)/ })).toBeVisible()
+
+  await recordCalls(page)
+  await byUrl.check()
+  await save.click()
+  await expect.poll(() => calls(page, "PUT", "/admin/service/svc-proxmox-01")).toHaveLength(1)
+  ;[put] = await calls(page, "PUT", "/admin/service/svc-proxmox-01")
+  expect(put.body).toEqual({ config: { metadata: { ...others, forceIso: false } } })
+  await expect(seeds).toContainText("Saved: by URL.")
+  await expect(byUrl).toBeChecked()
+})
+
 test("Network never offers a bridge that is the management bridge on any node", async ({ page }) => {
   // pve1 manages through vmbr0, pve2 through vmbr1: each lists the other's management bridge without an address.
   const bridges = [
