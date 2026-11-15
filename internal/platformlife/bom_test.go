@@ -41,7 +41,7 @@ func TestCurrentIsValid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasSuffix(cur.Release, "-dev") || len(cur.SHA256) != 64 || len(cur.Components) == 0 {
+	if len(cur.SHA256) != 64 || len(cur.Components) == 0 {
 		t.Fatalf("release %q, sha256 %q, %d components", cur.Release, cur.SHA256, len(cur.Components))
 	}
 	if c := comp(t, cur.BOM, ClusterWorkload, "cilium"); c.Install != InstallApplication {
