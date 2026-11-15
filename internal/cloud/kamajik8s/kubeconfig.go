@@ -161,6 +161,32 @@ func parseKubeconfig(raw []byte) (*restConfig, error) {
 	return rc, nil
 }
 
+// BuildKubeconfig renders a one-context kubeconfig with a bearer token and no client certificate,
+// trusting caPEM only (New pins TLS to it): the shape installer stage 60 writes into the provider
+// secrets. name names the cluster, user and context, so the file merges into another without clashing.
+func BuildKubeconfig(name, server string, caPEM []byte, token string) (string, error) {
+	if u, err := url.Parse(server); err != nil || u.Scheme != "https" || u.Host == "" {
+		return "", fmt.Errorf("kubeconfig: server %q is not an https URL", server)
+	}
+	if !x509.NewCertPool().AppendCertsFromPEM(caPEM) {
+		return "", fmt.Errorf("kubeconfig: CA has no PEM certificate")
+	}
+	if name == "" || token == "" {
+		return "", fmt.Errorf("kubeconfig: name and token required")
+	}
+	out, err := yaml.Marshal(map[string]any{
+		"apiVersion":      "v1",
+		"kind":            "Config",
+		"current-context": name,
+		"clusters": []any{map[string]any{"name": name, "cluster": map[string]any{
+			"server": server, "certificate-authority-data": base64.StdEncoding.EncodeToString(caPEM),
+		}}},
+		"contexts": []any{map[string]any{"name": name, "context": map[string]any{"cluster": name, "user": name}}},
+		"users":    []any{map[string]any{"name": name, "user": map[string]any{"token": token}}},
+	})
+	return string(out), err
+}
+
 // load returns inline base64 data when present, else reads the referenced file (both empty → nil).
 func load(b64, path string) ([]byte, error) {
 	if b64 != "" {

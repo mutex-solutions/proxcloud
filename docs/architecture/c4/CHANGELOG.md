@@ -27,6 +27,22 @@ element) and the [container table](c2-containers.md#container-table) (chart row)
 Files: `deploy/charts/proxmox-kamaji-cluster/{Chart.yaml,values.yaml,templates/*}`,
 `internal/cloud/kamaji/{chart_golden_test.go,chart_kubeadm_test.go,testdata/}`,
 `deploy/charts/README.md`, `docs/architecture/c4/c2-containers.md`.
+## 2026-11-15: Kubernetes API client gains cluster-scoped apply, TokenRequest and access review
+
+**What changed:** `internal/cloud/kamajik8s` gained four calls: `ApplyClusterScoped`
+(server-side apply of a cluster-scoped kind such as a ClusterRoleBinding; it refuses an
+object with a namespace), `CreateServiceAccountToken` (TokenRequest; returns the expiry the
+API server granted), `CanI` (SelfSubjectAccessReview) and `BuildKubeconfig` (server, one CA,
+bearer token, no client certificate; refuses a non-https server). Nothing calls them yet.
+
+**Why:** the managed-services job (P3 design §4.2 stages 5 and 8, §5) must bind
+`argocd-manager` to cluster-admin on the workload, give the seed ArgoCD a token that no
+Secret on the workload holds and that deleting the account revokes, check a stored seed
+credential before using it, and build the seed and provider kubeconfigs. `ApplyCR` and
+`ApplyCore` are namespaced only. No container, trust boundary or flow changes until a caller
+lands.
+
+**Views updated:** [C3 components](c3-components.md) (Kubernetes API client row).
 
 ## 2026-11-15: Management port job triggers only with debug triggers on
 
