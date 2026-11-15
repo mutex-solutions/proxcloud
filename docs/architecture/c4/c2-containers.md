@@ -235,6 +235,7 @@ flowchart LR
   helm["helm.yml<br/>lint, OCI chart publish"]:::impl
   ghcr["ghcr.io<br/>images and OCI charts"]:::impl
   chart["Chart proxcloud<br/>api, SPAs, gateway, Keycloak, CNPG"]:::impl
+  platchart["Chart proxcloud-platform<br/>clusterctl hook, provider RBAC, AppProjects,<br/>MetalLB pool (nothing applies it yet)"]:::impl
   dbchart["Chart database-cluster<br/>DBaaS engines"]:::impl
   k8schart["Chart proxmox-kamaji-cluster<br/>tenant and sandbox clusters;<br/>kubeadm mode: platform cluster (unused yet)"]:::impl
   inst["Installer (Ansible)<br/>make install, day-2 targets"]:::impl
@@ -253,6 +254,7 @@ flowchart LR
   chart --> helm
   dbchart --> helm
   k8schart --> helm
+  platchart --> helm
   ghcr -->|"helm install, ArgoCD"| mgmt
   ghcr --> inst
   ghcr -->|"released api, web, admin images"| compose
@@ -339,6 +341,7 @@ separate controlled canary.
 | TrueNAS (Standard tier) | NFS, SMB, iSCSI, WebSocket API | Appliance outside the Proxmox cluster | Implemented |
 | RustFS (Standard tier) | S3 + admin API, deployed by the installer with internal buckets; also serves tenant buckets (provider `rustfs`, registered by the installer) | VM in the system pool, or TrueNAS app | Implemented |
 | Configured shared backup store / PBS | PVE vzdump/restore target; guarded archive operations in the API, no automatic PBS appliance installation | Operator-provided storage | Implemented integration; site acceptance required |
+| Helm chart `proxcloud-platform` | `deploy/charts/proxcloud-platform` (tag `proxcloud-platform-v*`). The managed-services platform's own objects (ADR 0009), one part per BOM component: `clusterctl init` as an ArgoCD Sync hook Job (cluster-admin service account, image `proxcloud-clusterctl` by digest) for the seed and the workload cluster; on the workload cluster the provider service account and RBAC of `deploy/{mgmt,dbaas}-cluster/rbac.yaml` (shared objects once) plus a CiliumNetworkPolicy grant, both tenant AppProjects, a locked `default` AppProject, MetalLB pool `services` and the tenant chart repository entry without credentials. Nothing applies it yet | ghcr OCI | Implemented (not published, not run on a cluster) |
 | Helm chart `proxcloud` | `deploy/charts/proxcloud` | ghcr OCI | Implemented |
 | Helm chart `database-cluster` | `deploy/charts/database-cluster` | ghcr OCI | Implemented |
 | Helm chart `proxmox-kamaji-cluster` | `deploy/charts/proxmox-kamaji-cluster` (tag `proxmox-kamaji-cluster-v*`). Tenant and sandbox clusters with a Kamaji control plane (default); from 0.1.11 `controlPlane.kind: kubeadm` renders the platform's own workload cluster of managed services (ADR 0009: one `KubeadmControlPlane` VM with kube-vip, node groups, no tenant add-ons), which no path renders yet | ghcr OCI | Implemented (kubeadm mode not run on a cluster) |

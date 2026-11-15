@@ -70,6 +70,36 @@ credential before using it, and build the seed and provider kubeconfigs. `ApplyC
 lands.
 
 **Views updated:** [C3 components](c3-components.md) (Kubernetes API client row).
+## 2026-11-15: Chart proxcloud-platform for the managed-services platform
+
+**What changed:** a new chart, `deploy/charts/proxcloud-platform` 0.1.0, with its own tag
+flow `proxcloud-platform-v*` in `helm.yml` (PR lint and render of one example per part; OCI
+push to `ghcr.io/mutex-solutions/charts` from GitHub Actions only). It has two parts, chosen
+per platform BOM component. `clusterctl.enabled` (`capi` on the seed, `capi-tenant` on the
+workload cluster) renders `clusterctl init` as an ArgoCD Sync hook Job
+(`BeforeHookCreation`) with a cluster-admin service account and the `proxcloud-clusterctl`
+image pinned by digest; it refuses to render without a `@sha256:` digest. `platform.enabled`
+(`platform`, workload cluster) renders the provider service account, token Secret and RBAC
+of `deploy/mgmt-cluster/rbac.yaml` and `deploy/dbaas-cluster/rbac.yaml`, with the objects
+both define once, plus a ClusterRole for `ciliumnetworkpolicies` (the database egress
+fence), the two tenant AppProjects, a locked `default` AppProject (no source, no
+destination), the MetalLB pool `services` and the tenant chart repository entry without
+credentials. Nothing applies the chart yet, the tag is not cut and the image does not exist.
+
+**Why:** the managed-services design installs the platform's own objects through ArgoCD from
+pinned charts, on both provisioning paths; the installer applies the same objects with
+`kubectl` today, from two files that both define the shared objects. One chart with a test that holds it equal to
+those files keeps the two paths giving the provider the same rights. No running flow,
+credential or network path changes; the cluster-admin Job identity exists only where the
+chart is applied, which no code does yet.
+
+**Diagrams updated:** [C2c build and delivery](c2-containers.md#c2c-build-and-delivery)
+(chart element and its edge to `helm.yml`) and the
+[container table](c2-containers.md#container-table) (chart row).
+
+Files: `deploy/charts/proxcloud-platform/`, `internal/platformlife/{chart_test.go,testdata/}`,
+`.github/workflows/helm.yml`, `deploy/charts/README.md`, `docs/ci-release.md`,
+`CONTRIBUTING.md`, `docs/architecture/c4/c2-containers.md`.
 ## 2026-11-15: Platform bill of materials in the API
 
 **What changed:** a new component of `proxcloud-api`, `internal/platformlife`, parses and

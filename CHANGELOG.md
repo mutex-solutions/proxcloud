@@ -70,6 +70,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the public registries, chart indexes and k3s release on 2026-11-15, with no CI job checking them yet; whether
   `proxcloud-platform` 0.1.0, `proxmox-kamaji-cluster` 0.1.11 and `proxcloud-clusterctl` v1.14.4-1 get those
   versions depends on PRs that do not exist yet.
+- **Chart `proxcloud-platform` 0.1.0 for the managed-services platform** (`deploy/charts/proxcloud-platform`, ADR
+  0009): the platform's own objects as one pinned chart, which ADR 0009 installs through ArgoCD on both provisioning
+  paths. Installer stage 50 is unchanged and still applies `deploy/{mgmt,dbaas}-cluster/*.yaml` with `kubectl`. One
+  part per component of the platform BOM, which is not in the repository yet. `clusterctl.enabled` (components
+  `capi` on the seed and `capi-tenant` on the workload cluster) renders `clusterctl init` as an ArgoCD Sync hook Job
+  (`BeforeHookCreation`, cluster-admin service account, `PROXMOX_*` empty, no version check against GitHub) whose
+  arguments are the BOM's providers (`--core=cluster-api:v1.14.4`, …) and whose image, `proxcloud-clusterctl`, must be
+  pinned by `@sha256:` digest: the chart refuses the BOM's `pending` placeholder and a tag. `platform.enabled`
+  (component `platform`) renders on the workload cluster the provider service account, token Secret and RBAC of
+  `deploy/mgmt-cluster/rbac.yaml` and `deploy/dbaas-cluster/rbac.yaml` (the Namespace, ServiceAccount, Secret, Role
+  and RoleBinding both define, once), a ClusterRole for `ciliumnetworkpolicies` (get, create, patch) that the
+  database egress fence needs, both tenant AppProjects, a locked `default` AppProject (no source repository, no
+  destination, no cluster-scoped kind), the MetalLB pool `services` with its L2 advertisement, and the tenant chart
+  repository entry, OCI and without credentials. Bare defaults do not render. `internal/platformlife/chart_test.go`
+  pins the render of each component's example and fails when the RBAC or the tenant AppProjects stop equalling those
+  four files, or when the chart renders anything else. `helm.yml` lints and renders the examples on chart PRs and
+  publishes the chart on a `proxcloud-platform-v*` tag that matches `Chart.yaml`. Inert: nothing applies the chart,
+  the tag is not cut, and the `proxcloud-clusterctl` image and its entrypoint (the argument contract above, run as
+  uid 65532) do not exist yet. The hook's outcome counts in neither the Application's sync status nor its health: a
+  failed or timed-out Job leaves the `capi` or `capi-tenant` Application Synced and Healthy with only
+  `status.operationState.phase` Failed, automated sync does not retry it, and a change to the image or providers
+  alone does not make the Application OutOfSync. Whatever applies those Applications must set `syncPolicy.retry`,
+  gate on `operationState.phase` Succeeded and on the clusterctl inventory, and request a sync itself when the
+  inventory differs; nothing does yet. Not verified on a cluster: the hook running after its service account (sync
+  wave 1), and whether the seed's ArgoCD takes over the `default` project the workload's ArgoCD created and shows it
+  Synced with empty lists.
 
 ### Changed
 
