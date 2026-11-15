@@ -114,6 +114,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   switch only records the value until the release with the platform API. **Not verified**: the switch on a running
   Compose install (the tests run the script with `--dry-run` and against a fake `docker`, and check the model
   `docker compose config` builds), and a platform built from this stack.
+- **Managed-services installations, their credentials, preflight and plan** (`/api/v1/admin/platform/installations`,
+  behind the new `PROXCLOUD_PLATFORM_ENABLED`, default off): the console's "Enable managed services" needs a record
+  of what it builds before any job can build it (ADR 0009, design §3). An installation (`internal/platformlife`,
+  collection `platformInstallation`, one per Proxmox provider) holds the spec of the shared layout (PVE API address,
+  boot, ISO and import stores, the untagged platform network, the seed, one cluster with the node groups `system`,
+  `kamaji` and `dbaas`, the node image) and the status a run will write. Create and update check every rule of the
+  design that needs no cluster: addresses inside the prefix and apart from each other, a node range that holds every
+  machine plus one surge per MachineDeployment, SSH keys that parse, no overlap with the provider's tenant pool,
+  sandbox or public networks, and a MetalLB range tenants can reach. An update names the `rev` it read and is refused
+  during a run, and for the fields that cannot change once a run succeeded (network, seed node and address, cluster
+  name, endpoint and node groups). The two platform tokens (`capmox@pve!capi`, `csi@pve!csi`) are pasted write-only
+  into collection `platformSecret`, sealed with the data key like the Ceph credentials, refused without one, and
+  never returned or put into an audit diff; `kubeconfig`, `seedKubeconfig`, `k3sToken`, `bootstrapToken` and `caKey`
+  join the audit's secret keys. The preflight reads only: flags, both tokens' privileges and the portal token's mint
+  grant (`pve.CAPIPrivileges` and the other tables of the managed-services script), the fence of both platform pools,
+  the ISO store the CAPI token sees, the stores and image placement, the blocklist, and layer 0 through the new
+  `(*pve.Service).CheckIsolation` (the sandbox gate's check without its sandbox requirement): the seed, VIP and node
+  range must be blocked networks, and it names the CIDRs to add. The plan diffs the installed BOM against this
+  release's. The model of a run (`platformRun`, its states and the failure codes) is in place for the job. Inert: no
+  job kind is registered, so nothing provisions; there are no run, seed-kubeconfig or rotation routes and no page yet,
+  and with the flag off the routes answer `404 platform_disabled`. Not verified: the preflight against a real Proxmox
+  (tests use a fake PVE API), and whether every privilege row reads the same on PVE 9.2 as the tables assume.
+- **Node-group placement and an egress fence for the Kubernetes and database providers** (ADR 0009, shared layout). On
+  one cluster with node groups, tenant control planes and databases must stay on their own groups whatever their
+  charts render, and a tenant with PostgreSQL superuser can run a shell in its database pod and reach the rest of that
+  cluster. Two optional provider keys, API only: `config.namespacePlacement` (`nodeSelector`, `tolerations`; kamaji
+  and dbaas) stamps the `PodNodeSelector` and `PodTolerationRestriction` namespace annotations
+  (`scheduler.alpha.kubernetes.io/node-selector`, `…/defaultTolerations`) and the label `proxcloud.io/platform-role:
+  kamaji` or `dbaas` on a `pc-*` or `pc-db-*` namespace, and `config.database.egressFence: true` adds the
+  CiliumNetworkPolicy `proxcloud-default-egress` to a `pc-db-*` namespace, so its pods reach only that namespace,
+  kube-dns on 53 and the API server on 6443. Both are stamped on a namespace when it is next ensured: a project's
+  first attach to the provider, or a new cluster or database create. A namespace ensured before the key was set keeps
+  what it has until then (nothing in the sync ensures it again), and pods already running are not moved. A selector
+  that is not label keys and values, or a toleration the API server would refuse (it would then refuse every pod in
+  the namespace), is refused when the provider is built, and so is the fence together with `config.database.backup`:
+  it has no object-store rule yet, and WAL archiving would fail behind it until `pg_wal` filled the volume. A provider
+  without the keys applies exactly the namespace and policies it applied before, and nothing writes the keys yet: the
+  managed-services run that will set them when it registers the providers comes later and stays off behind its flag
+  until the lab run, so this is inert on every existing site, installer sites included. The keys need both admission
+  plugins on the cluster's API server, and the fence needs Cilium and `ciliumnetworkpolicies` rights for the provider
+  ServiceAccount, which `deploy/dbaas-cluster/rbac.yaml` does not grant (attaching a project and database creates then
+  fail with 403). Setting the fence back to false leaves the policies in place. Tested with table tests, a golden of
+  the policy and a fake API server. Not run on a cluster: that the API server places the pods, that a database works
+  behind the fence while kamaji-etcd, the kubelets, the PVE API and argocd-repo-server stay unreachable, and that
+  Cilium matches the API server on its port 6443 after the `kubernetes` Service is translated are all unverified until
+  the lab run.
+- **`proxcloud-clusterctl` image and its tag flow** (`deploy/clusterctl/`, `.github/workflows/clusterctl.yml`): the
+  image the clusterctl Job of the managed-services platform will run (ADR 0009; the `proxcloud-platform` chart that
+  runs it comes separately). It holds clusterctl v1.14.4, kubectl v1.35.10 and, as a clusterctl local repository, the
+  provider manifests of Cluster API core, kubeadm bootstrap and kubeadm control plane v1.14.4, CAPMOX v0.9.2, the
+  in-cluster IPAM provider v1.1.1, the Kamaji control plane v0.22.0 and CAAPH v0.6.4: the versions of
+  `installer/playbooks/group_vars/all/versions.yml` (the platform BOM is not on `main` yet), which a test keeps equal.
+  Every download is checked against a sha256 in the Dockerfile, and the build resolves every provider with no network.
+  The entrypoint reads the clusterctl inventory and installs only the missing providers, does nothing when every
+  provider is at its wanted version, and refuses, installing nothing, when one is at another version (upgrades are a
+  later release) or when it is asked for a provider, type or version it does not carry (clusterctl would otherwise
+  take a built-in one such as docker or metal3 from GitHub). It empties `PROXMOX_*` as stage 50 does and turns
+  clusterctl's version check off; cert-manager is not baked, so a cluster without one fails on a local path instead of
+  downloading it from GitHub. Why: the Job makes no GitHub call at runtime, and the platform pins one reviewed image
+  by digest. A pull request builds and scans the image; a `proxcloud-clusterctl-v<version>` tag, which must equal the
+  image's version label and point at a commit of `main`, builds it, scans it with the existing Trivy gate and pushes
+  it once to `ghcr.io/mutex-solutions/proxcloud-clusterctl`. Nothing uses the image yet. **Not publishable today:**
+  the gate blocks the upstream clusterctl v1.14.4 and kubectl v1.35.10 release binaries (`golang.org/x/net` and
+  `golang.org/x/text` with fixed HIGH CVEs; kubectl v1.36.6 and v1.37.2 have them too), so no tag can publish until
+  upstream ships fixed binaries or a source rebuild is decided. The workflow has not run on GitHub. The entrypoint ran
+  against k3s v1.35.10 in Docker (empty, partial, equal and different-version inventories, cert-manager down, egress
+  through a dead proxy), not on a lab seed or workload cluster; the refusal of a provider it does not carry ran only
+  against a fake kubectl and clusterctl, under busybox.
 
 ### Changed
 

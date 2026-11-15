@@ -65,11 +65,12 @@ func isMutation(m string) bool {
 }
 
 // auditSkip drops read-via-POST admin endpoints (the Proxmox and object store connection tests, the bulk attach
-// preview — no state change → not an auditable mutation). A Proxmox test that sends the stored token secret to
-// another address writes its own event (pveAuthAuditEvent).
+// preview, the managed-services preflight — no state change → not an auditable mutation). A Proxmox test that sends
+// the stored token secret to another address writes its own event (pveAuthAuditEvent).
 func auditSkip(path string) bool {
 	return strings.HasSuffix(path, "/service/proxmox/auth") || strings.HasSuffix(path, "/object-store/test") ||
-		strings.HasSuffix(path, "/bulk-attach/preview")
+		strings.HasSuffix(path, "/bulk-attach/preview") ||
+		(strings.Contains(path, "/admin/platform/installations/") && strings.HasSuffix(path, "/preflight"))
 }
 
 func methodToAction(m string) string {
@@ -120,6 +121,7 @@ var auditResourceTypes = map[string]string{
 	"user":                        "USER",
 	"user-management":             "USER",
 	"platform-configuration":      "PLATFORM_CONFIGURATION",
+	"platform":                    "PLATFORM_INSTALLATION",
 }
 
 // pathResourceType maps the first segment after /api/v1/admin/ to a resource type.

@@ -70,6 +70,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/sse"
 	"github.com/mutex-solutions/proxcloud/internal/platform/sso"
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
+	"github.com/mutex-solutions/proxcloud/internal/platformlife"
 	"github.com/mutex-solutions/proxcloud/internal/providerattach"
 	"github.com/mutex-solutions/proxcloud/internal/registrypins"
 	"github.com/mutex-solutions/proxcloud/internal/server"
@@ -993,6 +994,15 @@ func run() error {
 		return fmt.Errorf("template update sandbox store: %w", err)
 	}
 	adminH.SetTemplateUpdates(tuSvc)
+	// The managed-services platform (docs/adr/0009): its installation routes only with PROXCLOUD_PLATFORM_ENABLED=true.
+	// No job kind exists yet, so nothing runs.
+	if cfg.Jobs.PlatformEnabled {
+		platformStore := platformlife.NewStore(pg, enc)
+		if err := platformStore.Ensure(ctx); err != nil {
+			return fmt.Errorf("platform store: %w", err)
+		}
+		adminH.SetPlatform(platformStore)
+	}
 	adminH.SetJobsScheduler(cfg.Jobs.SchedulerEnabled)
 	adminH.SetAPIBaseURL(cfg.Self.APIBaseURL)
 	adminH.SetSandboxCluster(func(es *externalservice.ExternalService) (admin.SandboxCluster, error) { return sandboxServiceFor(es) })

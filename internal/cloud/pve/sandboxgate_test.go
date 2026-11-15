@@ -107,3 +107,41 @@ func TestCheckSandboxIsolation(t *testing.T) {
 		t.Fatal("datacenter firewall off: the gate passed")
 	}
 }
+
+// The managed-services check: with no rule of this portal and no tenant network it is pending, not passed; with tenant
+// networks and no rules it fails; once ReconcileIsolation wrote them it passes. It never writes.
+func TestCheckIsolation(t *testing.T) {
+	ctx := context.Background()
+	vnets := `{"data":[{"vnet":"vaaa11","zone":"overlay","alias":"st:p1:web"}]}`
+	opts := map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/cluster/firewall/options": func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"data":{"enable":1}}`) },
+		"GET /api2/json/cluster/sdn/vnets":        func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, vnets) },
+		"GET /api2/json/cluster/sdn/vnets/vaaa11/subnets": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":[{"cidr":"10.100.1.0/24"}]}`)
+		},
+	}
+	srv, rules, writes := isolationFakeNodes(t, nil, opts)
+	vnets = `{"data":[{"vnet":"pcplat","zone":"overlay","alias":"not a tenant network"}]}`
+	if err := srv.CheckIsolation(ctx, "10.100.0.0/16", nil, nil); !errors.Is(err, ErrIsolationPending) {
+		t.Fatalf("no tenant network yet: %v", err)
+	}
+	vnets = `{"data":[{"vnet":"vaaa11","zone":"overlay","alias":"st:p1:web"}]}`
+	if err := srv.CheckIsolation(ctx, "10.100.0.0/16", nil, nil); err == nil || errors.Is(err, ErrIsolationPending) {
+		t.Fatalf("a tenant network without rules: %v", err)
+	}
+	if *writes != 0 {
+		t.Fatal("the check wrote to PVE")
+	}
+	if err := srv.ReconcileIsolation(ctx, "p1", "10.100.0.0/16", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	for i := range *rules {
+		(*rules)[i].Enable = 1
+	}
+	if err := srv.CheckIsolation(ctx, "10.100.0.0/16", nil, nil); err != nil {
+		t.Fatalf("rules in place: %v", err)
+	}
+	if err := srv.CheckIsolation(ctx, "10.100.0.0/16", []string{"10.200.200.0/24"}, nil); err == nil {
+		t.Fatal("a blocked network the rules do not drop: the check passed")
+	}
+}

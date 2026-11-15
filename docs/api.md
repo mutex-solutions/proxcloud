@@ -339,6 +339,53 @@ the project's own packages and for a chart at a moving `0.0.0+` version
 neither an exact version nor a digest); the validation refuses `pending` and
 `0.0.0+` in any other release. Nothing installs from the BOM yet.
 
+**Installations.** With `PROXCLOUD_PLATFORM_ENABLED=true` (default off; off,
+these routes answer `404` with `errors.details.code` `platform_disabled`) an
+installation records what "Enable managed services" builds on one Proxmox
+provider (`internal/platformlife`, collection `platformInstallation`, one per
+`serviceId`). Reads need `admin:service:read`, everything else
+`admin:service:manage`. Refusals carry `errors.details.code` and, where there
+are several, `errors.details.problems`.
+
+- `GET|POST /installations`: list; create `{name, serviceId, provisionedBy?,
+  layout?, spec}` in phase `draft`. `spec` has `pveApiUrl`, `storage {boot,
+  iso, import}` (import defaults to the provider's `importStorage`), `network
+  {bridge, prefix, gateway, dns[], mtu}`, `seed {mode, pool, node, address,
+  cores, memoryMiB, diskGiB, sshKeys[], apiSources[]}`, one cluster `{name,
+  roles, endpoint, nodeRange, metallbRange, controlPlane, nodeGroups[]}` with
+  exactly the groups `system`, `kamaji` and `dbaas`, and `nodeImage {mode,
+  templates}`. A spec that breaks a rule, or overlaps the provider's
+  `cidrPool`, `sandboxCidrs` or public networks, or puts the MetalLB range in
+  `blockedCidrs`, is a `400 invalid_installation`; `layout: separate` is
+  refused until a later release.
+- `GET|PUT /installations/{id}`: the PUT replaces `name` and `spec` and names
+  the `rev` it read (`409 rev_conflict` otherwise). It is refused during a run
+  (`409 run_active`) and for a fixed field (`409 fixed_fields`): `serviceId`,
+  `provisionedBy`, `layout` and the seed pool always; once a run succeeded also
+  `name`, `spec.network`, the seed's mode, node and address, and the cluster's
+  name, endpoint and node groups.
+- `PUT /installations/{id}/credentials`: `{capi: {tokenId, secret}, csi:
+  {tokenId, secret}}`, either or both, write-only. The ids must be
+  `capmox@pve!capi` and `csi@pve!csi` (the managed-services script's), the
+  secrets UUIDs. They are sealed with the data key in `platformSecret`; without
+  `PROXCLOUD_ENCRYPTION_DEFAULT_KEY` the route answers `409 no_encryption_key`.
+  No route returns a secret: an installation shows `credentials.{capi,csi}.tokenId`.
+- `POST /installations/{id}/preflight`: read-only, not audited; `{ok, checks}`
+  with rows `flags`, `spec`, `network`, `isolation`, `credentials`,
+  `privileges:capi`, `privileges:csi`, `privileges:kubemint`, `pool-fence`,
+  `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement` and
+  `images`. `isolation` fails, naming the CIDRs to add to `blockedCidrs`, when
+  the seed, the API VIP or the node range is outside the blocked and management
+  networks, and when the cluster firewall's isolation rules are not the ones the
+  sync writes; with no tenant network yet it passes. A row that cannot be read fails.
+- `GET /installations/{id}/plan`: the installed BOM against this release's
+  (`installed`, `target`, `changes`, `blocking`); a version change not listed in
+  `upgradeFrom` and the removal of a stateful component block, and an installed
+  BOM this release does not carry blocks with `bom_unsupported`.
+
+Runs, the seed kubeconfig and the seed credential rotation are not there yet:
+no job kind exists, so nothing provisions.
+
 ## Admin API — `/admin-api/v1`
 
 A machine-to-machine surface (`internal/platform/adminapi`). Authenticated with an
