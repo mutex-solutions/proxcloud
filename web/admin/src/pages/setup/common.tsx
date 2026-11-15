@@ -167,6 +167,10 @@ export function StepCard({ n, title, step, description, children }: {
   )
 }
 
+// GET /admin/setup/status needs all four reads (defaultsReadPerms in internal/platform/admin/setupdefaults.go): the
+// nav link and the Dashboard card are shown only with every one of them.
+export const SETUP_READ_PERMS = ["admin:service:read", "admin:price_plan:read", "admin:platform_config:read", "admin:billing_config:read"]
+
 // The status of the install. live=false reads the database only (the Dashboard card); live=true also asks the cluster.
 export function setupStatusQuery(serviceId: string, live: boolean) {
   const q = new URLSearchParams()

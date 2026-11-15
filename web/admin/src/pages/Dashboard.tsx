@@ -18,7 +18,8 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { useAdminList, useAdminStats } from "@/lib/hooks"
 import { fmtMoney, fmtMoneyTight } from "@/lib/format"
 import { cn } from "@/lib/utils"
-import { SETUP_STEPS, setupStatusQuery, stateView } from "@/pages/setup/common"
+import { hasPermission, useAdminMe } from "@/lib/auth"
+import { SETUP_READ_PERMS, SETUP_STEPS, setupStatusQuery, stateView } from "@/pages/setup/common"
 
 // Stable slot assignment: categories are sorted before colors are handed out,
 // so a resource type keeps its hue across reloads; >7 fold into "Other".
@@ -159,6 +160,8 @@ const signupConfig = {
 
 export function DashboardPage() {
   const { data, isLoading } = useAdminStats()
+  const { data: me } = useAdminMe()
+  const canSetup = SETUP_READ_PERMS.every((p) => hasPermission(me?.permissions, p))
   const resources = useAdminList<{ id?: string; type?: string }>("/admin/cloud-resource")
 
   // Billed (invoices raised) vs collected (payments received), last 12 months.
@@ -256,9 +259,9 @@ export function DashboardPage() {
       )}
 
       <div className="mt-6 grid gap-4 lg:grid-cols-3">
-        <SetupCard />
+        {canSetup ? <SetupCard /> : null}
 
-        <Card className="lg:col-span-2">
+        <Card className={canSetup ? "lg:col-span-2" : "lg:col-span-3"}>
           <CardHeader className="border-b">
             <CardTitle className="text-base">Billed vs collected</CardTitle>
             <p className="text-sm text-muted-foreground">Invoices raised and payments received, last 12 months.</p>

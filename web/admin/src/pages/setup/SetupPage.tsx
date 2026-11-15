@@ -162,10 +162,11 @@ function NewProvider({ onCreated }: { onCreated: (id: string) => void }) {
   )
 }
 
-function ConnectStep({ step, serviceId, loading, onCreated, onRecheck, rechecking }: {
+function ConnectStep({ step, serviceId, loading, unreadable, onCreated, onRecheck, rechecking }: {
   step?: SetupStep
   serviceId: string
   loading: boolean
+  unreadable: boolean
   onCreated: (id: string) => void
   onRecheck: () => void
   rechecking: boolean
@@ -177,7 +178,12 @@ function ConnectStep({ step, serviceId, loading, onCreated, onRecheck, recheckin
       step={step}
       description="The API URL, the token and how to trust the certificate. Save creates the provider, held back from new projects until Go live."
     >
-      {loading ? (
+      {unreadable ? (
+        <p className="text-sm text-muted-foreground">
+          Without the setup status the page cannot tell whether a provider is saved, so it offers no form. The reason is
+          shown above.
+        </p>
+      ) : loading ? (
         <Skeleton className="h-40" />
       ) : serviceId ? (
         <div className="flex flex-wrap items-center gap-3">
@@ -261,6 +267,7 @@ export default function SetupPage() {
               step={stepOf("connect")}
               serviceId={serviceId}
               loading={!status.data /* unread status: never offer a second provider */}
+              unreadable={!!status.db.error && !!status.live.error}
               onCreated={onCreated}
               onRecheck={recheck}
               rechecking={status.live.isFetching}

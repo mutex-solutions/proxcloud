@@ -50,6 +50,30 @@ test("the Dashboard card, the nav link and /onboarding lead to the setup page", 
   await expect(page).toHaveURL(/\/setup$/)
 })
 
+test("Platform setup is offered only to an admin who holds the four reads of its status", async ({ page }) => {
+  // The mock signs in with admin:*; serve its identity with admin:service:read but not admin:billing_config:read.
+  await page.route(/\/src\/mocks\/fixtures\/dashboard\.ts/, async (route) => {
+    const resp = await route.fetch()
+    const body = (await resp.text()).replace('permissions: ["admin:*"]', 'permissions: ["admin:service:read", "admin:price_plan:read", "admin:platform_config:read"]')
+    await route.fulfill({ response: resp, body })
+  })
+  await page.goto("/dashboard")
+  await expect(page.getByRole("link", { name: "Cloud providers" })).toBeVisible()
+  await expect(page.getByRole("link", { name: "Billing configuration" })).toHaveCount(0)
+  await expect(page.getByRole("link", { name: "Platform setup", exact: true })).toHaveCount(0)
+  await expect(page.getByRole("link", { name: "Open platform setup" })).toHaveCount(0)
+})
+
+test("Connect shows that the status could not be read instead of loading forever", async ({ page }) => {
+  await page.goto("/system/taxes")
+  await expect(page.getByRole("heading", { name: "Taxes", level: 1 })).toBeVisible()
+  await recordCalls(page, { "GET /admin/setup/status": { apiError: { status: 403, message: "You do not have the required permission: admin:billing_config:read" } } })
+  await navigate(page, "/setup?tab=connect")
+  const step = page.getByRole("tabpanel", { name: /2\. Connect/ })
+  await expect(step).toContainText("Without the setup status the page cannot tell whether a provider is saved")
+  await expect(step.getByRole("button", { name: "Save provider" })).toHaveCount(0)
+})
+
 test("Prepare shows the script for the token, GPU and import store", async ({ page }) => {
   await page.goto("/setup")
   const script = page.getByLabel("setup script", { exact: true })
