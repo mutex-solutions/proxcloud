@@ -638,6 +638,23 @@ func (s *Service) CheckSandboxIsolation(ctx context.Context, pool string, blocke
 	if len(sandbox) == 0 {
 		return errors.New("pve isolation: network.sandboxCidrs is empty, so no rule fences the sandbox network")
 	}
+	return s.checkIsolation(ctx, false, pool, blocked, sandbox, allow...)
+}
+
+// ErrIsolationPending: none of this portal's isolation rules is in the cluster firewall, and no tenant network
+// exists yet. ReconcileIsolation writes them with the first one, and until then the sandbox gate (CheckSandboxIsolation)
+// refuses every sandbox, so no tenant can reach anything.
+var ErrIsolationPending = errors.New("pve isolation: no rule is written yet; the first tenant network writes them")
+
+// CheckIsolation is CheckSandboxIsolation without its sandbox requirement (the managed-services preflight): read-only,
+// it checks that the datacenter firewall is on and that this portal's isolation DROPs are in the cluster firewall,
+// enabled, exactly as ReconcileIsolation writes them. With no rule of this portal and no tenant network it answers
+// ErrIsolationPending, with or without sandbox networks: no sync writes the rules before a tenant network exists.
+func (s *Service) CheckIsolation(ctx context.Context, pool string, blocked, sandbox []string, allow ...string) error {
+	return s.checkIsolation(ctx, true, pool, blocked, sandbox, allow...)
+}
+
+func (s *Service) checkIsolation(ctx context.Context, pendingOK bool, pool string, blocked, sandbox []string, allow ...string) error {
 	want, owner, _, complete, err := s.isolationWant(ctx, pool, blocked, sandbox, allow)
 	if err != nil {
 		return err
@@ -665,9 +682,22 @@ func (s *Service) CheckSandboxIsolation(ctx context.Context, pool string, blocke
 			mine = append(mine, r)
 		}
 	}
+	if len(mine) == 0 && pendingOK {
+		vnets, err := s.C.ListSDNVnets(ctx)
+		if err != nil {
+			return err
+		}
+		if !slices.ContainsFunc(vnets, func(v SDNVnet) bool { _, _, ok := aliasProject(v.Alias); return ok }) {
+			return ErrIsolationPending
+		}
+	}
 	if !slices.EqualFunc(mine, want, sameRule) {
-		return fmt.Errorf("pve isolation: the %s rules in the cluster firewall are not the ones for sandbox networks %s (%d in place, %d wanted); the next sync rewrites them",
-			owner, strings.Join(sandbox, ","), len(mine), len(want))
+		what := "for sandbox networks " + strings.Join(sandbox, ",")
+		if len(sandbox) == 0 {
+			what = "for these blocked networks"
+		}
+		return fmt.Errorf("pve isolation: the %s rules in the cluster firewall are not the ones %s (%d in place, %d wanted); the next sync rewrites them",
+			owner, what, len(mine), len(want))
 	}
 	return nil
 }

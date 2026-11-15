@@ -117,6 +117,9 @@ type Config struct {
 		// TemplateUpdatesSandbox turns on the built-in sandbox image mirror (docs/template-updates.md §5): the
 		// fenced runner AND the mirror/rollback endpoints. OFF by default until verified on a real cluster.
 		TemplateUpdatesSandbox bool
+		// PlatformEnabled turns on the managed-services platform's installation routes (docs/adr/0009): its records,
+		// credentials, preflight and plan. OFF by default until the in-platform path has run on a lab; no job runs yet.
+		PlatformEnabled bool
 	}
 	// Billing selects which engine charges bills, and — when that is an external service — how to
 	// reach it.
@@ -255,6 +258,7 @@ func Load() (*Config, error) {
 	c.Jobs.RabbitFanout = boolEnv("PROXCLOUD_JOBS_RABBIT_FANOUT") || k.Bool("proxcloud.jobs.rabbit-fanout")
 	c.Jobs.TemplateUpdatesVM = boolEnv("PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED") || k.Bool("proxcloud.template-updates.vm-enabled")
 	c.Jobs.TemplateUpdatesSandbox = boolEnv("PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED") || k.Bool("proxcloud.template-updates.sandbox-enabled")
+	c.Jobs.PlatformEnabled = boolEnv("PROXCLOUD_PLATFORM_ENABLED") || k.Bool("proxcloud.platform.enabled")
 	c.Jobs.WorkerConcurrency = 2
 	if raw := os.Getenv("PROXCLOUD_JOBS_WORKER_CONCURRENCY"); raw != "" {
 		value, err := strconv.Atoi(raw)
