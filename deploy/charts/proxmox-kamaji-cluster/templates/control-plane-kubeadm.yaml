@@ -1,0 +1,113 @@
+{{- /*
+kubeadm mode (controlPlane.kind kubeadm): the platform's own workload cluster of managed services, never a tenant's. Its
+control plane is one CAPMOX VM, as installer stage 50 builds the services cluster
+(installer/playbooks/templates/services-cluster.yml.j2, which internal/cloud/kamaji/chart_kubeadm_test.go compares with
+this file): kube-vip as a static pod holds controlPlane.kubeadm.endpoint, the ProxmoxCluster's endpoint (cluster.yaml).
+
+One replica: the machine template is pinned to one PVE node (a clone to local storage stays on its template's node), so
+more replicas would share that node. Its name carries a hash of its spec, as in node-groups.yaml, so a changed flavor or
+image rolls the control plane instead of failing on an immutable template.
+
+The API server enables PodNodeSelector and PodTolerationRestriction next to kubeadm's NodeRestriction (the flag replaces
+kubeadm's own value): a namespace's scheduler.alpha.kubernetes.io/node-selector and defaultTolerations then place every
+pod in it, whatever chart created the pod.
+*/ -}}
+{{- if include "pkc.kubeadm" . }}
+{{- $cp := .Values.controlPlane.kubeadm }}
+{{- $net := .Values.proxmox.network }}
+{{- $endpoint := required "controlPlane.kubeadm.endpoint is required with controlPlane.kind kubeadm" $cp.endpoint }}
+{{- $kv := splitList "=" (required "controlPlane.kubeadm.machineImageId is required" $cp.machineImageId) }}
+{{- if ne (len $kv) 2 }}
+{{- fail (printf "controlPlane.kubeadm.machineImageId %q is not <node>=<vmid> (one node)" $cp.machineImageId) }}
+{{- end }}
+{{- if not $cp.machineTags }}
+{{- fail "controlPlane.kubeadm.machineTags is required" }}
+{{- end }}
+{{- $node := index $kv 0 }}
+{{- $machine := dict "sourceNode" $node "templateID" (int (index $kv 1)) "allowedNodes" (list $node) "storage" .Values.proxmox.storage "format" "raw" "full" true "pool" .Values.proxmox.pool "checks" (dict "skipCloudInitStatus" true) "tags" $cp.machineTags "numSockets" 1 "numCores" (int $cp.machineCores) "memoryMiB" (int $cp.machineMemoryMiB) "disks" (dict "bootVolume" (dict "disk" "scsi0" "sizeGb" (int $cp.machineRootVolume.diskSize))) }}
+{{- $device := dict "name" "net0" "bridge" $net.bridge "model" "virtio" }}
+{{- if $net.mtu }}{{- $_ := set $device "linkMtu" (int $net.mtu) }}{{- $_ := set $device "mtu" 1 }}{{- end }}
+{{- $_ := set $machine "network" (dict "networkDevices" (list $device)) }}
+{{- $mtName := printf "%s-cp-%s-%s" .Release.Name $node (toJson $machine | sha256sum | trunc 8) }}
+{{- $kubelet := list (dict "name" "provider-id" "value" "proxmox://'{{ ds.meta_data.instance_id }}'") (dict "name" "node-labels" "value" (printf "topology.kubernetes.io/region=%s,topology.kubernetes.io/zone=%s" .Values.proxmox.region $node)) }}
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha2
+kind: ProxmoxMachineTemplate
+metadata:
+  name: {{ $mtName }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  template:
+    spec: {{ toJson $machine }}
+---
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+kind: KubeadmControlPlane
+metadata:
+  name: {{ .Release.Name }}-cp
+spec:
+  replicas: 1
+  version: {{ printf "v%s" (.Values.kubernetesVersion | trimPrefix "v") | quote }}
+  machineTemplate:
+    spec:
+      infrastructureRef: {apiGroup: infrastructure.cluster.x-k8s.io, kind: ProxmoxMachineTemplate, name: {{ $mtName }}}
+  kubeadmConfigSpec:
+    clusterConfiguration:
+      apiServer:
+        certSANs: {{ toJson (prepend ($cp.certSANs | default list) $endpoint) }}
+        extraArgs:
+          - {name: enable-admission-plugins, value: "NodeRestriction,PodNodeSelector,PodTolerationRestriction"}
+    files:
+      - path: /etc/kubernetes/manifests/kube-vip.yaml
+        owner: root:root
+        content: |
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: kube-vip
+            namespace: kube-system
+          spec:
+            containers:
+            - args: ["manager"]
+              env:
+              - {name: cp_enable, value: "true"}
+              - {name: vip_interface, value: ""}
+              - {name: address, value: "{{ $endpoint }}"}
+              - {name: port, value: "6443"}
+              - {name: vip_arp, value: "true"}
+              - {name: vip_leaderelection, value: "true"}
+              - {name: vip_leaseduration, value: "15"}
+              - {name: vip_renewdeadline, value: "10"}
+              - {name: vip_retryperiod, value: "2"}
+              image: {{ required "controlPlane.kubeadm.kubeVipImage is required" $cp.kubeVipImage }}
+              imagePullPolicy: IfNotPresent
+              name: kube-vip
+              securityContext:
+                capabilities:
+                  add: [NET_ADMIN, NET_RAW]
+              volumeMounts:
+              - {mountPath: /etc/kubernetes/admin.conf, name: kubeconfig}
+            hostAliases:
+            - {hostnames: [localhost, kubernetes], ip: 127.0.0.1}
+            hostNetwork: true
+            volumes:
+            - name: kubeconfig
+              hostPath: {path: /etc/kubernetes/admin.conf, type: FileOrCreate}
+      - path: /etc/kube-vip-prepare.sh
+        owner: root:root
+        permissions: "0700"
+        content: |
+          #!/bin/bash
+          set -e
+          # kubeadm init has no admin.conf with rights yet: kube-vip uses super-admin.conf until then.
+          if [[ -f /run/kubeadm/kubeadm.yaml ]]; then
+            sed -i 's#path: /etc/kubernetes/admin.conf#path: /etc/kubernetes/super-admin.conf#' /etc/kubernetes/manifests/kube-vip.yaml
+          fi
+    preKubeadmCommands: [/etc/kube-vip-prepare.sh]
+    initConfiguration:
+      nodeRegistration:
+        kubeletExtraArgs: {{ toJson $kubelet }}
+    joinConfiguration:
+      nodeRegistration:
+        kubeletExtraArgs: {{ toJson $kubelet }}
+{{- end }}

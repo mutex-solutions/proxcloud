@@ -1,0 +1,28 @@
+# One chart, two parts, chosen per component of the platform BOM (ADR 0009):
+#   capi (seed), capi-tenant (workload): clusterctl.enabled, with that cluster's providers;
+#   platform (workload):                 platform.enabled.
+# Bare defaults render nothing and fail; examples/ holds one values file per component. No secrets here: this
+# document sits in an ArgoCD Application.
+
+clusterctl:
+  enabled: false
+  # -- The proxcloud-clusterctl image (clusterctl, kubectl and the provider YAMLs as a local repository), by digest:
+  # the BOM's images.clusterctl. `pending` is the BOM's placeholder until CI publishes the image; the chart renders
+  # no Job without a `@sha256:` digest.
+  image: ghcr.io/mutex-solutions/proxcloud-clusterctl:v1.14.4-1@pending
+  # -- The BOM's capi.seed or capi.workload: key = clusterctl init flag in camelCase, value = name:version.
+  # Each becomes an argument `--<flag>=<name:version>`, e.g. `--control-plane=kamaji:v0.22.0`.
+  providers: {}
+  # -- true sets EXP_CLUSTER_RESOURCE_SET=true (the workload's CAAPH add-ons need it); false leaves the upstream default.
+  clusterResourceSet: false
+  nodeSelector: {}
+  tolerations: []
+
+platform:
+  enabled: false
+  # -- The tenant chart repository (the BOM's tenantCharts repo), without oci://: the repository entry's URL and the
+  # one sourceRepos entry of both tenant AppProjects.
+  chartRepository: ghcr.io/mutex-solutions/charts
+  metallb:
+    # -- Required: the platform network's MetalLB range, pool `services` (the providers' lbAddressPool).
+    addresses: []

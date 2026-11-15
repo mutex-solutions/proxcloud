@@ -23,7 +23,10 @@ jobs:
         with:
           go-version: '1.27.4'
           cache: true
+      # The Helm the chart goldens are made with (goldenHelm in internal/cloud/kamaji/chart_golden_test.go).
       - uses: azure/setup-helm@v5
+        with:
+          version: v3.21.4
       - name: Unit tests (including required offline chart renders)
         env:
           CI: "1"

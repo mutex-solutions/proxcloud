@@ -1,0 +1,69 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "1"
+  name: proxcloud-clusterctl
+  namespace: proxcloud-system
+spec:
+  activeDeadlineSeconds: 900
+  backoffLimit: 2
+  template:
+    spec:
+      containers:
+        - args:
+            - --addon=helm:v0.6.4
+            - --bootstrap=kubeadm:v1.14.4
+            - --control-plane=kamaji:v0.22.0
+            - --core=cluster-api:v1.14.4
+            - --infrastructure=proxmox:v0.9.2
+            - --ipam=in-cluster:v1.1.1
+          env:
+            - name: PROXMOX_URL
+              value: ""
+            - name: PROXMOX_TOKEN
+              value: ""
+            - name: PROXMOX_SECRET
+              value: ""
+            - name: EXP_CLUSTER_RESOURCE_SET
+              value: "true"
+            - name: CLUSTERCTL_DISABLE_VERSIONCHECK
+              value: "true"
+          image: ghcr.io/mutex-solutions/proxcloud-clusterctl:v1.14.4-1@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          name: clusterctl
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      nodeSelector:
+        node-restriction.kubernetes.io/proxcloud-node-group: system
+      restartPolicy: Never
+      securityContext:
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: proxcloud-clusterctl
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: proxcloud-clusterctl
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: proxcloud-clusterctl
+    namespace: proxcloud-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: proxcloud-clusterctl
+  namespace: proxcloud-system

@@ -147,3 +147,49 @@ func TestEffectiveRoles(t *testing.T) {
 		}
 	}
 }
+
+// The CAPI token must see its bootstrap ISO store and no other iso store, as PVE answers per store for that token.
+func TestISOVisibilityProblem(t *testing.T) {
+	defs := []StorageDef{
+		{Storage: "local", Content: "iso,vztmpl,backup"},
+		{Storage: "local-lvm", Content: "images,rootdir"},
+		{Storage: "nas-templates", Content: "iso,import"},
+		{Storage: "old-iso", Content: "iso", Disable: 1},
+	}
+	for _, c := range []struct {
+		name string
+		sees map[string]string // store -> its privileges as GET /access/permissions answers them
+		want string            // "" or a part of the problem
+	}{
+		{"the bootstrap store alone", map[string]string{"local": `{"Datastore.Audit":1,"Datastore.AllocateTemplate":1}`, "nas-templates": `{}`}, ""},
+		{"AllocateSpace lists a store too", map[string]string{"local": `{"Datastore.Audit":1}`, "nas-templates": `{"Datastore.AllocateSpace":1}`}, "[local, nas-templates]"},
+		{"another store only", map[string]string{"local": `{}`, "nas-templates": `{"Datastore.Audit":1}`}, "[nas-templates]; CAPMOX puts each bootstrap ISO on the first it sees, so it must see local alone"},
+		{"no store", map[string]string{"local": `{}`, "nas-templates": `{}`}, "[none]"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var asked []string
+			_, cl := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
+				"GET /api2/json/access/permissions": func(w http.ResponseWriter, r *http.Request) {
+					path := r.URL.Query().Get("path")
+					asked = append(asked, path)
+					fmt.Fprintf(w, `{"data":{%q:%s}}`, path, c.sees[strings.TrimPrefix(path, "/storage/")])
+				},
+			})
+			got, err := cl.ISOVisibilityProblem(context.Background(), defs, "local")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (c.want == "") != (got == "") || !strings.Contains(got, c.want) {
+				t.Errorf("problem = %q, want %q", got, c.want)
+			}
+			// Only the enabled iso stores are asked about.
+			if !slices.Equal(asked, []string{"/storage/local", "/storage/nas-templates"}) {
+				t.Errorf("asked about %v", asked)
+			}
+		})
+	}
+	_, cl := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){})
+	if _, err := cl.ISOVisibilityProblem(context.Background(), defs, "local"); err == nil {
+		t.Error("a failed permissions read must be an error, not a verdict")
+	}
+}

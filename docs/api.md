@@ -147,9 +147,14 @@ Proxmox setup script: `GET /api/v1/admin/setup/proxmox-script`
 runs as root on a Proxmox node to create the portal token's role, pools, user,
 token and ACLs. Query: `tokenId` (default `proxcloud@pve!platform`), `gpu`
 (`true` adds the `/mapping/pci` ACL; default `false`) and `importStorage` (adds
-`PVEDatastoreAdmin` on that store). A value that is not a plain id is a `400`.
-The script and what it does are in
-[proxmox-permissions.md](proxmox-permissions.md#portal-token-script).
+`PVEDatastoreAdmin` on that store). `managedServices=true` adds the identities
+of managed services: the CAPI and CSI users and tokens, pool `proxcloud-seed`,
+their roles and ACLs, with `bootStorage` (required) and `isoStorage` (default
+`local`), and with `importStorage` the mint role on that store too; either store
+without `managedServices=true` is a `400`. A value that is not a plain id is a
+`400`. The script and what it does are in
+[proxmox-permissions.md](proxmox-permissions.md#portal-token-script) and
+[Managed services](proxmox-permissions.md#managed-services).
 
 Cloud service selection: the project cloud routes (`/project/{id}/cloud`, its
 actions and deletes, `quota-usage`, `gpu-capacity`, `public-networks`, the S3
@@ -314,6 +319,25 @@ makes the step `todo`, and a step is `blocked` only when it cannot start.
   `config.metadata.url`, else the API's own base URL
   (`PROXCLOUD_SELF_API_BASE_URL`); `""` means none, so every seed goes on an ISO
   ([Server seeds](cloud-integration.md#server-seeds)).
+
+### Managed-services platform — `/api/v1/admin/platform`
+
+**BOM.** `GET /api/v1/admin/platform/bom` answers the platform bill of
+materials this release carries (`deploy/platform/platform-bom.yaml`, compiled
+into the API; [ADR 0009](adr/0009-managed-services-platform-lifecycle.md)):
+`release`, the Kubernetes version and node image, the seed image and k3s
+release with their sha256, the Cluster API providers, the tenant charts, and
+every component with its cluster, wave, namespace, node group and chart
+(`repo`, `name`, `version`, `digest`). `sha256` is the hash of the file, the
+key a run records it by. It needs `admin:service:read` and changes nothing.
+
+The file pins exact versions only. A digest is the chart's OCI manifest
+digest, or for an `https://` repository the `digest` of that version in its
+`index.yaml`. A `-dev` release (main) may still carry `pending` digests for
+the project's own packages and for a chart at a moving `0.0.0+` version
+(today `kamaji` and `kamaji-crds` at `0.0.0+latest`, which therefore have
+neither an exact version nor a digest); the validation refuses `pending` and
+`0.0.0+` in any other release. Nothing installs from the BOM yet.
 
 ## Admin API — `/admin-api/v1`
 

@@ -7,6 +7,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Cluster chart `proxmox-kamaji-cluster` 0.1.11 can render the platform's own cluster** (`controlPlane.kind:
+  kubeadm`, ADR 0009): the managed-services job of a later release creates its workload cluster (node groups
+  `system`, `kamaji`, `dbaas`) from the same chart the tenants use, through ArgoCD, instead of a template of its own.
+  That mode renders a `KubeadmControlPlane` with one replica, pinned to one PVE node, with the kube-vip static pod,
+  its prepare script, `preKubeadmCommands`, provider-id kubelet argument and certSANs of installer stage 50's
+  services cluster (`services-cluster.yml.j2`), the endpoint on the `ProxmoxCluster`, and the admission plugins
+  `NodeRestriction,PodNodeSelector,PodTolerationRestriction`, so namespace annotations can place pods on a node
+  group. It renders no CAAPH add-ons, no ClusterResourceSet, no services-side CSI controller and no Gateway API
+  carriers; the node groups are unchanged. The control plane's endpoint, `machineImageId` and `machineTags` have no
+  default, so values that leave one out fail the render instead of cloning another template or leaving the VM without
+  its `pc-platform-<id>` tag. The default stays `kamaji`: for tenant values the output is
+  byte-identical to 0.1.10 (`TestChartGolden` pins the defaults alone, with the CSI gateway and with Gateway Fabric,
+  as 0.1.10 renders them), and existing clusters and providers keep their chart pin. Inert:
+  nothing renders kubeadm mode yet. The tag `proxmox-kamaji-cluster-v0.1.11` is not cut, so the chart is not
+  published, and kubeadm mode has not run against a cluster (the first kubeadm join of the platform cluster is a
+  lab check of the managed-services design).
+- **The Proxmox identities of managed services in the setup script**
+  (`GET /api/v1/admin/setup/proxmox-script?managedServices=true&bootStorage=<store>&isoStorage=<store>`): managed
+  Kubernetes and databases from the console (ADR 0009) run on a seed VM and a workload cluster of their own, driven by
+  two tokens the portal cannot mint for itself. The answer is the portal token script plus a block that creates the
+  roles `ProxCloudCAPI`, `ProxCloudCSI` and `ProxCloudKubeMint`, the new pool `proxcloud-seed` for the seed VM, the
+  users `capmox@pve` and `csi@pve` with the tokens `capi` and `csi`, their ACLs and the portal's mint grant, and ends
+  with what both tokens hold on both platform pools. `capmox@pve!capi` gets `ProxCloudCAPI` on the two platform pools
+  instead of `/pool`, `csi@pve!csi` gets `ProxCloudCSI` on `proxcloud-system` and the boot store instead of `/pool`
+  and `/storage`, both users get rows of their own on the platform pools (so a `/pool` grant written later for them
+  does not reach the platform VMs), and the portal token and every `csi@pve` token get `NoAccess` on `proxcloud-seed`.
+  That fences the seed VM, not its disk: the disk is on the boot store, where `csi@pve!csi` holds
+  `Datastore.Allocate`, which in PVE opens every volume on the store, so the CSI token can attach the seed's disk to a
+  workload VM (accepted for M1 in ADR 0009, documented, measured by lab check L1; a store of the seed's own is a later
+  change). With `importStorage` the portal also gets `ProxCloudKubeMint` on that store, as stage 10's `nas_mint_acls`:
+  its `PVEDatastoreAdmin` row there replaces what `/storage` passes down, and on a site without a NAS the import store
+  is `local`, the ISO store of tenant clusters, so without it every cluster create would fail on the ACL its token
+  gets there. The rows (`pve.ManagedACLs`), the privilege tables the portal will check each token against
+  (`pve.CAPIPrivileges`, `pve.CSIPrivileges`, `pve.KubeMintPrivileges`) and a check that the CAPI token sees exactly
+  one ISO store (`(*pve.Client).ISOVisibilityProblem`, asked of PVE per store as stage 10 does) live next to
+  `pve.PlatformACLs`. Tests keep the generated block equal to `docs/proxmox-permissions.md`, the rows and roles equal
+  to installer stage 10 (the `proxcloud-seed` rows the only difference, the CSI gateway's rows left out), work out
+  each token's effective rights from the rows, and refuse a storage or token id that is not a plain id. The route is
+  live, behind no flag: running its answer creates the identities and gives the portal token `ProxCloudKubeMint`
+  (`Permissions.Modify`, `User.Modify`) at once. Only the privilege tables and the ISO check are inert: nothing calls
+  them until the managed-services runner (later PRs). `docs/proxmox-permissions.md` documents the mint-grant risk the
+  owner accepted for M1 (on `/pool`), its reach through `/storage` (a stolen portal token can grant itself
+  `Datastore.Allocate` on the boot store and read every disk there, the seed's included; accepted for M1 in ADR 0009)
+  and what lab check L1 measures. The script has not been run on a Proxmox node, and L1 has not run.
+- **The managed-services platform's bill of materials** (`deploy/platform/platform-bom.yaml`,
+  `GET /api/v1/admin/platform/bom`): ADR 0009 says every release ships one list of the exact version and digest of
+  everything the platform runs, so that the installer and the console's "Enable managed services" build the same
+  thing and an upgrade has one source. The file names release `0.8.0-dev`, Kubernetes 1.35.10 with its published
+  node image, the seed image and k3s v1.35.10+k3s1 (binary and install script by sha256), the Cluster API
+  providers, the tenant charts and the 15 seed and workload components with wave, namespace, node group and chart.
+  The API embeds it (`deploy/embed.go`; the image copies `deploy/embed.go` and `deploy/platform`, and the docker
+  workflow rebuilds on a change to either) and validates it in `internal/platformlife`: exact versions only, a
+  digest on every chart and image, and `pending` digests (our own four packages, not public yet, and the `kamaji` and
+  `kamaji-crds` charts at `0.0.0+latest`, which have no stable digest) and `0.0.0+` versions only in a `-dev`
+  release. The route needs `admin:service:read`. Tests keep `versions.yml`,
+  `pc_defaults.services.k8s_version` and stage 40's ArgoCD and cert-manager chart and values equal to the BOM; the
+  installer itself is unchanged and does not read the file. Inert: nothing installs from the BOM, there is no run,
+  job or flag yet. Not verified: the third-party chart and image digests and the k3s sha256 values were read once
+  from the public registries, chart indexes and k3s release on 2026-11-15, with no CI job checking them yet; whether
+  `proxcloud-platform` 0.1.0, `proxmox-kamaji-cluster` 0.1.11 and `proxcloud-clusterctl` v1.14.4-1 get those
+  versions depends on PRs that do not exist yet.
+- **Chart `proxcloud-platform` 0.1.0 for the managed-services platform** (`deploy/charts/proxcloud-platform`, ADR
+  0009): the platform's own objects as one pinned chart, which ADR 0009 installs through ArgoCD on both provisioning
+  paths. Installer stage 50 is unchanged and still applies `deploy/{mgmt,dbaas}-cluster/*.yaml` with `kubectl`. One
+  part per component of the platform BOM, which is not in the repository yet. `clusterctl.enabled` (components
+  `capi` on the seed and `capi-tenant` on the workload cluster) renders `clusterctl init` as an ArgoCD Sync hook Job
+  (`BeforeHookCreation`, cluster-admin service account, `PROXMOX_*` empty, no version check against GitHub) whose
+  arguments are the BOM's providers (`--core=cluster-api:v1.14.4`, …) and whose image, `proxcloud-clusterctl`, must be
+  pinned by `@sha256:` digest: the chart refuses the BOM's `pending` placeholder and a tag. `platform.enabled`
+  (component `platform`) renders on the workload cluster the provider service account, token Secret and RBAC of
+  `deploy/mgmt-cluster/rbac.yaml` and `deploy/dbaas-cluster/rbac.yaml` (the Namespace, ServiceAccount, Secret, Role
+  and RoleBinding both define, once), a ClusterRole for `ciliumnetworkpolicies` (get, create, patch) that the
+  database egress fence needs, both tenant AppProjects, a locked `default` AppProject (no source repository, no
+  destination, no cluster-scoped kind), the MetalLB pool `services` with its L2 advertisement, and the tenant chart
+  repository entry, OCI and without credentials. Bare defaults do not render. `internal/platformlife/chart_test.go`
+  pins the render of each component's example and fails when the RBAC or the tenant AppProjects stop equalling those
+  four files, or when the chart renders anything else. `helm.yml` lints and renders the examples on chart PRs and
+  publishes the chart on a `proxcloud-platform-v*` tag that matches `Chart.yaml`. Inert: nothing applies the chart,
+  the tag is not cut, and the `proxcloud-clusterctl` image and its entrypoint (the argument contract above, run as
+  uid 65532) do not exist yet. The hook's outcome counts in neither the Application's sync status nor its health: a
+  failed or timed-out Job leaves the `capi` or `capi-tenant` Application Synced and Healthy with only
+  `status.operationState.phase` Failed, automated sync does not retry it, and a change to the image or providers
+  alone does not make the Application OutOfSync. Whatever applies those Applications must set `syncPolicy.retry`,
+  gate on `operationState.phase` Succeeded and on the clusterctl inventory, and request a sync itself when the
+  inventory differs; nothing does yet. Not verified on a cluster: the hook running after its service account (sync
+  wave 1), and whether the seed's ArgoCD takes over the `default` project the workload's ArgoCD created and shows it
+  Synced with empty lists.
+
+### Changed
+
+- **Installer stage 10 narrows the services cluster's CAPMOX and CSI tokens** (`split_acls` in
+  `installer/playbooks/10-pve-identity.yml`): `capmox@pve!capi` held `ProxCloudCAPI` on all of `/pool` and
+  `csi@pve!csi` `ProxCloudCSI` on all of `/pool` and `/storage`, although each only works on the services cluster.
+  They now hold `/pool/<services.pool>` (and the CSI token `/storage/<services.storage>`), and both users get a row of
+  their own on the services pool, the same rows as the console's managed-services script. The users keep `/pool` and
+  `/storage` for the tenant clusters' tokens and the CSI gateway. Stage 10 only adds rows, so a site installed before
+  keeps its broad token rows until an operator removes them (`docs/proxmox-permissions.md`, "An existing site"); the
+  added rows grant nothing new there. One loop item of the stage is now quoted so that strict YAML parsers read the
+  file, as a Go test now does. Checked with the tests above and `ansible-playbook --syntax-check`; not run against a
+  cluster.
+
 ### Security
 
 - **ArgoCD's `default` project is locked on installer-built services clusters**
