@@ -179,6 +179,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   template updates and job scheduler). Playwright specs check the preview before Apply, the confirmation in the apply
   body and Go live staying disabled until its prerequisites hold, against the mock API; not run against a live API,
   and Go live not run against a cluster.
+- **Server seed choice in the Network step of the Platform setup page.** Whether a server on a DHCP network
+  fetches its NoCloud seed from the API URL or gets it on an ISO was a raw JSON key on the provider page
+  (`config.metadata.forceIso`), and a server that missed its URL seed booted without its hostname, password and
+  guest agent with nothing on the page saying why. Step 3 now has a **Server seeds** choice: "By URL from
+  `<seedUrl>`" (the URL the setup status reports: `config.metadata.url`, else the API's own base URL) for tenant
+  servers that reach it with a trusted certificate, or "On an ISO" for LAN installs and self-signed certificates;
+  without a seed URL the URL choice is disabled, and a saved one is shown as going on an ISO. It shows what is
+  saved, and saves only `config.metadata` with `PUT /api/v1/admin/service/{id}`, read fresh and sent whole because
+  the route replaces top-level config keys: `url`, `isoStorage`, `vendorData` and the other keys are kept, and the
+  network block is not sent. Each of the step's two forms is reset only when the block it edits
+  changes, so saving the seeds keeps an unsaved network edit and the other way round. Playwright specs check both
+  saves' bodies, the kept edits, the disabled URL choice and the axe checks against the mock API; not run against
+  a live API or cluster.
 - **Cluster chart `proxmox-kamaji-cluster` 0.1.11 can render the platform's own cluster** (`controlPlane.kind:
   kubeadm`, ADR 0009): the managed-services job of a later release creates its workload cluster (node groups
   `system`, `kamaji`, `dbaas`) from the same chart the tenants use, through ArgoCD, instead of a template of its own.
@@ -237,6 +250,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The setup status asks how servers get their seed** (`GET /api/v1/admin/setup/status`, network step, item
+  `seeds`). On a DHCP (simple) zone a server fetches its NoCloud seed from the API URL; a tenant server that cannot
+  reach that URL, or does not trust its certificate (Compose TLS mode `internal` is self-signed), boots with the
+  template's hostname, no password and no guest agent, and nothing told the operator (lab acceptance of
+  v0.7.0-rc.1). The item is `done` once `config.metadata.forceIso` is `true`, or is `false` with a seed URL, or
+  `config.metadata.url` is set, and `attention` otherwise, naming the URL seeds are fetched from and that tenant
+  servers must reach it and trust its certificate; without any seed URL it stays `attention` even with
+  `forceIso: false`, saying every seed goes on an ISO. It never holds go live back, and nothing is probed. The
+  answer also carries `seedUrl`, the base a URL seed is fetched from (`config.metadata.url`, else
+  `PROXCLOUD_SELF_API_BASE_URL`; `""` when neither is set). Unit-tested; not run against a live API.
+- **`proxcloud-up.sh` sends the operator to Platform setup** (Docker Compose). Its "Next steps" named System →
+  Cloud providers, a raw form that skips the setup steps; it now names System → Platform setup. With TLS mode
+  `internal` it adds that tenant servers cannot fetch seeds over HTTPS with the self-signed certificate, so choose
+  "On an ISO" in Platform setup → Network; `deploy/compose/README.md` says the same under the TLS modes.
+  `deploy/tests/test_compose_production.py` checks both lines per TLS mode in the dry run; not run in a real install.
+- **The seed choice is documented** (`docs/cloud-integration.md` "Server seeds", and step 3 of the console's
+  Platform setup docs page): when to choose a URL seed and when an ISO, what a missed URL seed looks like, and
+  that the setup status asks until the operator chose.
 - **The Proxmox provider page saves the failover URLs and the cluster CA** (operator console, Cloud providers,
   Connection tab). The form showed both fields, but Save sent neither, so an edit of `apiUrls` or `caCert` was
   dropped while the page reported it saved. Save now takes the connection keys from the same mapping as Add
