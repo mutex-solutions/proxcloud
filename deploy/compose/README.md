@@ -167,7 +167,7 @@ feature off. The last lines of `install` (also with `--dry-run`) say what is on.
   store with `import` content: [template updates](../../docs/template-updates.md).
 - **`--scheduler`** starts the timed jobs ([jobs and scheduling](../../docs/jobs-scheduling.md)).
   Without it nothing runs on a timer: resources are synchronised only when an operator starts a
-  sync, and usage is never charged. With it, among others:
+  sync, and no new charge is started. With it, among others:
   - resources and Proxmox state are synchronised every minute to every 15 minutes;
   - usage is charged every minute and every hour, at the rates of the enabled price plans;
   - the bills of the previous month are issued, cards are collected, unpaid profiles are
@@ -175,6 +175,10 @@ feature off. The last lines of `install` (also with `--dry-run`) say what is on.
 
   Turn it on once the price plan and the billing settings are the ones you want invoiced. Times
   are UTC.
+
+  `--no-scheduler` stops new timed work from being created. It does not stop the API's job
+  worker, which always runs: billing work already queued in the database is still processed when
+  the API starts, and written to the bills.
 
 What the scheduler needs on this one host, and what it adds:
 
@@ -244,8 +248,13 @@ gunzip -c backups/proxcloud-<UTC time>.sql.gz | docker compose exec -T postgres 
 ./proxcloud-up.sh install
 ```
 
-To start a restored database without the timed jobs, end with `./proxcloud-up.sh install
---no-scheduler`, and turn the scheduler on again when you have checked the data.
+To start a restored database without new timed jobs, end with `./proxcloud-up.sh install
+--no-scheduler`, and turn the scheduler on again when you have checked the data. That is not a
+start without billing writes: billing work already queued in the database is still processed by
+the API's job worker when it starts, and a backup taken while the scheduler was on (every
+`upgrade` takes one) can hold such work. To read the data before anything is written, query the
+restored database before the last `install`
+(`docker compose exec postgres psql -U proxcloud -d proxcloud`).
 
 `<project>` is `COMPOSE_PROJECT_NAME` in `.env`. Four errors are expected: roles `keycloak` and
 `proxcloud` and databases `keycloak` and `proxcloud` "already exist" (the empty database starts

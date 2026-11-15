@@ -65,7 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the scheduler on does not mount the unauthenticated `POST /debug/*` job triggers on the management
   port: only `PROXCLOUD_JOBS_DEBUG_TRIGGERS` does (see the management port entry under Security), and
   this stack never sets it. The port stays unpublished and unrouted, and the README points on-demand
-  runs at the authenticated `/api/v1/admin/job/*` endpoints. **Not verified**: either
+  runs at the authenticated `/api/v1/admin/job/*` endpoints. The README also says that `--no-scheduler`
+  only stops new timed work: the API's job worker always runs and still processes the billing work
+  already queued in the database, which matters when a backup is restored. **Not verified**: either
   switch on a running Compose install (the tests run the script with `--dry-run` and against a fake
   `docker`, and check the model `docker compose config` builds), a billing month with the scheduler on,
   the bill and reminder jobs without an SMTP integration, and how charging catches up after the host

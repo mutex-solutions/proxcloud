@@ -266,6 +266,15 @@ class ReadmeTests(unittest.TestCase):
                 body = self.text.split(section + " ", 1)[1].split("## ", 1)[0]
                 self.assertEqual([text for text in texts if text not in body], [])
 
+    def test_scheduler_off_is_not_described_as_no_billing_write(self):
+        # The API's job worker runs with the scheduler off too: it processes the charge work that
+        # is already queued in the database, for example in a restored backup.
+        self.assertNotIn("usage is never charged", self.text)
+        for section in ("### Optional features", "### Restore"):
+            with self.subTest(section=section):
+                body = self.text.split(section + " ", 1)[1].split("## ", 1)[0]
+                self.assertIn("already queued in the database is still processed", body)
+
 
 class ScriptLintTests(unittest.TestCase):
     def test_script_parses_and_is_shellcheck_clean(self):
