@@ -81,6 +81,7 @@
         - {src: "{{ pc_repo_root }}/deploy/dbaas-cluster/rbac.yaml", dest: manifests/dbaas-rbac.yaml}
         - {src: "{{ pc_repo_root }}/deploy/dbaas-cluster/appproject.yaml", dest: manifests/dbaas-appproject.yaml}
         - {src: "{{ pc_repo_root }}/deploy/dbaas-cluster/argocd-health.yaml", dest: manifests/dbaas-health.yaml}
+        - {src: files/argocd-default-project.yaml, dest: manifests/default-appproject.yaml}
         - {src: "{{ pc_repo_root }}/deploy/charts/proxmox-kamaji-cluster/", dest: charts/proxmox-kamaji-cluster/}
         - {src: "{{ pc_repo_root }}/deploy/charts/database-cluster/", dest: charts/database-cluster/}
     - name: Run the platform script

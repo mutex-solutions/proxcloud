@@ -233,6 +233,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **ArgoCD's `default` project is locked on installer-built services clusters**
+  (`installer/playbooks/files/argocd-default-project.yaml`, applied by stage 50's guardrails step in
+  `services-platform.sh`): empty `sourceRepos`, `destinations` and `clusterResourceWhitelist`. ArgoCD creates
+  `default` open (every repository, every cluster and namespace, every kind) and never resets it, so any
+  Application in `default` could deploy anything anywhere on the cluster that holds every tenant's control plane
+  and database, around the `proxcloud-k8s` and `proxcloud-dbaas` guardrails. Nothing the installer or the portal
+  puts on that cluster uses `default`: tenant clusters and `pc-sandbox` are in `proxcloud-k8s`, databases in
+  `proxcloud-dbaas`, and a new test (`installer/tests/test_services_argocd.py`, in `make test`) keeps it so. The
+  management cluster stays open, because stage 40's `cnpg`, `cert-manager` and `proxcloud` Applications use
+  `default`. Nothing here is behind a flag: the lock applies at the next run of stage 50 (`make install`; `make
+  upgrade` does not run it), on existing sites too, and a hand-made Application in `default` on the services
+  cluster then stops syncing; move it to a named project first. Checked with `ansible-playbook --syntax-check`
+  and the offline test only; not applied to a running cluster.
 - **HIGH/CRITICAL findings without a fixed version stay tracked until 2027-03-12** instead of
   2026-12-12 (`UNFIXED_REVIEW_BY` in `.github/scripts/check_scan_report.py`; owner decision of
   2026-11-15). The reason is the review in `docs/security-unfixed-review.md`: per-target counts by
