@@ -184,6 +184,19 @@ The shape is documented in the header of `proxmox.go`:
 }
 ```
 
+A save whose body carries `config.network` (`POST /service`, `PUT /service/{id}`,
+`PUT /service/{id}/update`) is checked first (`externalservice.ValidatePVENetwork`)
+and refused with a `400` naming the field when a tenant network could not work
+with it: `cidrPool` is not an IPv4 range of `/24` or larger, `defaultZone` names
+no zone of `zones` (one zone needs no `defaultZone`, several do), a zone's `kind`
+is not `evpn` (or the older `overlay`, or left out), `vlan` or `simple`, a zone id
+is longer than the 8 characters of a Proxmox SDN zone id, a `vlan` zone has no
+`bridge`, or `isolation` is `evpn-per-project` and the default zone is not EVPN
+(every project's zone is copied from it). A block that is only incomplete is
+stored: no `cidrPool` or no zone yet is what the Add provider form sends, and the
+connection test's setup checks report it. A save without `network` leaves the
+stored block alone.
+
 Typed accessors used by the rest of the code:
 
 | Accessor | Config key | Meaning |

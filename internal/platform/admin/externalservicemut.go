@@ -145,6 +145,12 @@ func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteError(w, kamajiRemovedKeysErr(cfg))
 		return
 	}
+	if cfg, _ := doc["config"].(map[string]any); cfg["provider"] == "proxmox" {
+		if err := externalservice.ValidatePVENetwork(cfg["network"]); err != nil {
+			httpx.WriteError(w, httpx.BadRequest(err.Error()))
+			return
+		}
+	}
 	if cfg, _ := doc["config"].(map[string]any); externalservice.ValidateAttachPolicy(cfg) != nil {
 		httpx.WriteError(w, httpx.BadRequest(externalservice.ValidateAttachPolicy(cfg).Error()))
 		return
@@ -303,6 +309,12 @@ func (h *Handler) applyServiceConnectionBody(req *http.Request, doc pgdoc.M) *ht
 		if _, ok := c["cluster"]; ok { // the body's cluster block replaced the stored one
 			if herr := kamajiRemovedKeysErr(cfg); herr != nil {
 				return herr
+			}
+		}
+		// Only a body with a network block: a stored block from before this check is left alone by other saves.
+		if raw, ok := c["network"]; ok && cfg["provider"] == "proxmox" {
+			if err := externalservice.ValidatePVENetwork(raw); err != nil {
+				return httpx.BadRequest(err.Error())
 			}
 		}
 		if raw, ok := c["storageProfiles"]; ok && cfg["provider"] == "proxmox" {

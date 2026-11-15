@@ -223,7 +223,7 @@ func pveConnectionTest(ctx context.Context, cfg pve.Config, es *externalservice.
 	if es != nil {
 		netCfg := es.PVENetworkConfig()
 		out.Checks = append(out.Checks, zoneCheck(netCfg, zs, zoneErr), cidrPoolCheck(ctx, cc, netCfg.CIDRPool), storageProfileCheck(es))
-		if z, ok := netCfg.Zones[netCfg.DefaultZone]; netCfg.Isolation == pve.IsolationEVPN || (ok && zoneKind(z) == "evpn") {
+		if z, ok := netCfg.Zones[netCfg.DefaultZone]; netCfg.Isolation == pve.IsolationEVPN || (ok && z.Type() == "evpn") {
 			out.Checks = append(out.Checks, frrCheck(ctx, cc))
 		}
 		importStorage = es.PVEImportStorage()
@@ -270,14 +270,6 @@ func templatePoolCheck(ctx context.Context, cc *pve.Client) PVECheck {
 	return PVECheck{ID: "template-pool", Status: checkOK, Message: "The pool " + pve.TemplatePool + " exists."}
 }
 
-// zoneKind is the PVE zone type a configured zone becomes (pve.Service.EnsureZone).
-func zoneKind(z pve.ZoneConfig) string {
-	if z.Kind == "" || z.Kind == "overlay" {
-		return "evpn"
-	}
-	return z.Kind
-}
-
 // zoneCheck: tenant networks need a default zone in the provider config. The zone itself is made with the first
 // network, so it may be absent in Proxmox, but not be there as another type.
 func zoneCheck(netCfg externalservice.PVENetwork, live []pve.SDNZone, liveErr error) PVECheck {
@@ -292,12 +284,12 @@ func zoneCheck(netCfg externalservice.PVENetwork, live []pve.SDNZone, liveErr er
 		if l.Zone != z.Key {
 			continue
 		}
-		if l.Type != zoneKind(z) {
-			return PVECheck{ID: "zone", Status: checkFail, Message: fmt.Sprintf("Zone %s exists in Proxmox as a %s zone, but is configured as %s.", z.Key, l.Type, zoneKind(z))}
+		if l.Type != z.Type() {
+			return PVECheck{ID: "zone", Status: checkFail, Message: fmt.Sprintf("Zone %s exists in Proxmox as a %s zone, but is configured as %s.", z.Key, l.Type, z.Type())}
 		}
 		return PVECheck{ID: "zone", Status: checkOK, Message: fmt.Sprintf("Zone %s (%s) exists.", z.Key, l.Type)}
 	}
-	return PVECheck{ID: "zone", Status: checkOK, Message: fmt.Sprintf("Zone %s (%s) is created with the first tenant network.", z.Key, zoneKind(z))}
+	return PVECheck{ID: "zone", Status: checkOK, Message: fmt.Sprintf("Zone %s (%s) is created with the first tenant network.", z.Key, z.Type())}
 }
 
 // cidrPoolCheck: tenant CIDRs are carved from the pool. Inside a management network they would shadow the nodes.

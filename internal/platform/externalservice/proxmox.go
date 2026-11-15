@@ -83,10 +83,12 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 )
@@ -407,6 +409,60 @@ func ParseCIDRPool(pool string) (netip.Prefix, error) {
 		return netip.Prefix{}, fmt.Errorf("cidrPool must be an IPv4 range of /24 or larger")
 	}
 	return p.Masked(), nil
+}
+
+// ValidatePVENetwork checks a config.network value before a save stores it; nil is no network. It refuses what is
+// wrong and lets through what is missing: a provider is stored before its network is set up, and the setup checks of
+// the connection test report what is still to do. A refused block is one whose tenant networks would fail: Proxmox
+// takes an SDN zone id of at most 8 characters and a VLAN zone only on a bridge, the network code knows three kinds
+// of zone, and a zone per project is copied from the default zone, which must then be EVPN (EnsureProjectZone).
+func ValidatePVENetwork(raw any) error {
+	if raw == nil {
+		return nil
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return fmt.Errorf("config.network must be an object")
+	}
+	for _, k := range []string{"cidrPool", "defaultZone", "isolation"} {
+		if _, isStr := m[k].(string); m[k] != nil && !isStr {
+			return fmt.Errorf("config.network.%s must be a string", k)
+		}
+	}
+	if pool := str(m["cidrPool"]); pool != "" {
+		if _, err := ParseCIDRPool(pool); err != nil {
+			return fmt.Errorf("config.network.%w", err)
+		}
+	}
+	zones, ok := m["zones"].(map[string]any)
+	if !ok && m["zones"] != nil {
+		return fmt.Errorf("config.network.zones must be an object")
+	}
+	for _, key := range sortedKeys(zones) {
+		z, ok := zones[key].(map[string]any)
+		if !ok {
+			return fmt.Errorf("config.network.zones.%s must be an object", key)
+		}
+		if n := utf8.RuneCountInString(key); n == 0 || n > 8 {
+			return fmt.Errorf("config.network.zones: the zone id %q is the Proxmox SDN zone id, of 1 to 8 characters", key)
+		}
+		kind, isStr := z["kind"].(string)
+		if (z["kind"] != nil && !isStr) || !slices.Contains([]string{"", "evpn", "overlay", "vlan", "simple"}, kind) {
+			return fmt.Errorf("config.network.zones.%s.kind must be evpn, vlan or simple", key)
+		}
+		if bridge, _ := z["bridge"].(string); kind == "vlan" && bridge == "" {
+			return fmt.Errorf("config.network.zones.%s is a vlan zone and needs a bridge", key)
+		}
+	}
+	n := (&ExternalService{Config: map[string]any{"network": m}}).PVENetworkConfig()
+	def, ok := n.Zones[n.DefaultZone]
+	if !ok && (n.DefaultZone != "" || len(zones) > 0) {
+		return fmt.Errorf("config.network.defaultZone must name one of config.network.zones")
+	}
+	if ok && n.Isolation == pve.IsolationEVPN && def.Type() != "evpn" {
+		return fmt.Errorf("config.network.isolation evpn-per-project copies every project's zone from the default zone, which must then be an evpn zone, not %s", def.Type())
+	}
+	return nil
 }
 
 // PVESandbox is config.sandbox: the platform's sandbox workers, whose VM firewall the sync job applies and keeps

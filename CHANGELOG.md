@@ -49,6 +49,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A Proxmox provider's `config.network` is checked when it is saved** (`POST /api/v1/admin/service`,
+  `PUT /api/v1/admin/service/{id}` and `PUT /api/v1/admin/service/{id}/update`): the block was stored as
+  sent, so a `cidrPool` of `/25`, a zone id of nine characters or a VLAN zone without a bridge showed up
+  only as a failed or 503 network create in a tenant's project. A save whose body carries `network` is now a
+  `400` naming the field when `cidrPool` is not an IPv4 range of `/24` or larger, `defaultZone` names no
+  zone of `zones` (or there are several zones and no `defaultZone`), a zone's `kind` is not `evpn`, `vlan`
+  or `simple`, a zone id is longer than 8 characters, a `vlan` zone has no `bridge`, or `isolation` is
+  `evpn-per-project` with a default zone that is not EVPN. What is only missing is still accepted (no
+  `cidrPool`, no zone yet, as the console's Add provider form sends it), and a save without `network`
+  leaves a stored block alone, so a block saved before this check does not lock the provider. The dev
+  seed and the network block installer stage 60 builds from the inventory defaults pass; an inventory
+  with `isolation: evpn` and `kind: simple` or `vlan` is now refused at stage 60 instead of failing at the
+  first tenant network. Tested with unit tests only.
+
 - **The smaller template disks are confirmed by one lab build each** (`docs/template-build-disk.md`): a
   native `ubuntu-2604` template at 5 GiB and a Kubernetes 1.37.2 node template at 8 GiB were built on
   the lab and exported through the export workflow; both images are listed in

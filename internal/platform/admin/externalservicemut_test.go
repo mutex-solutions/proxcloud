@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -222,6 +223,48 @@ func TestKamajiRemovedKeysRefused(t *testing.T) {
 		t.Fatalf("update without a cluster block: %#v", herr)
 	}
 	if herr := put(pgdoc.M{"config": pgdoc.M{"provider": "proxmox"}}, `{"config":{"cluster":{"pveCsiUrl":"x"}}}`); herr != nil {
+		t.Fatalf("another provider kind: %#v", herr)
+	}
+}
+
+// A Proxmox network block is checked on create and on an update that carries one. An update without a network block
+// passes even when the stored one would now be refused, so a block saved before the check does not lock the row.
+func TestPVENetworkValidatedOnSave(t *testing.T) {
+	h := &Handler{}
+	ctx := httpx.WithRC(t.Context(), &httpx.RequestContext{SigV4KeyID: "pk-test"})
+	for body, want := range map[string]string{
+		`{"name":"p","config":{"provider":"proxmox","network":{"cidrPool":"10.100.0.0/25"}}}`:                      "config.network.cidrPool must be an IPv4 range of /24 or larger",
+		`{"name":"p","config":{"provider":"proxmox","network":{"zones":{"overlay12":{"kind":"evpn"}}}}}`:           "is the Proxmox SDN zone id, of 1 to 8 characters",
+		`{"name":"p","config":{"provider":"proxmox","network":{"zones":{"v":{"kind":"vlan"}},"defaultZone":"v"}}}`: "config.network.zones.v is a vlan zone and needs a bridge",
+	} {
+		rec := httptest.NewRecorder()
+		h.externalServiceCreate(rec, httptest.NewRequest(http.MethodPost, "/service", strings.NewReader(body)).WithContext(ctx))
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("create %s: %d %s", body, rec.Code, rec.Body.String())
+		}
+	}
+
+	stored := func() pgdoc.M { // a block from before the check: its pool is too small
+		return pgdoc.M{"config": pgdoc.M{"provider": "proxmox", "network": map[string]any{"cidrPool": "10.100.0.0/26"}}}
+	}
+	put := func(doc pgdoc.M, body string) *httpx.HTTPError {
+		return h.applyServiceConnectionBody(httptest.NewRequest(http.MethodPut, "/service/p", strings.NewReader(body)), doc)
+	}
+	doc := stored()
+	if herr := put(doc, `{"name":"p","config":{"fingerprint":"AA:BB"}}`); herr != nil {
+		t.Fatalf("update without a network block: %#v", herr)
+	}
+	if got := doc["config"].(pgdoc.M)["network"]; !reflect.DeepEqual(got, stored()["config"].(pgdoc.M)["network"]) {
+		t.Fatalf("update without a network block changed it to %v", got)
+	}
+	if herr := put(stored(), `{"config":{"network":{"defaultZone":"overlay","zones":{"simple":{"kind":"simple"}}}}}`); herr == nil ||
+		herr.Status != http.StatusBadRequest || !strings.Contains(herr.Msg, "config.network.defaultZone must name one of config.network.zones") {
+		t.Fatalf("update with a bad network block: %#v", herr)
+	}
+	if herr := put(stored(), `{"config":{"network":{"defaultZone":"s","zones":{"s":{"kind":"simple"}},"cidrPool":"10.100.0.0/16"}}}`); herr != nil {
+		t.Fatalf("update with a good network block: %#v", herr)
+	}
+	if herr := put(pgdoc.M{"config": pgdoc.M{"provider": "kamaji"}}, `{"config":{"network":{"cidrPool":"x"}}}`); herr != nil {
 		t.Fatalf("another provider kind: %#v", herr)
 	}
 }
