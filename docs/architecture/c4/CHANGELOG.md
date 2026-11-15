@@ -29,6 +29,38 @@ contract are checked here, in one package, by goldens and tests.
 
 **Views updated:** [C3e managed services](c3-components.md#c3e-managed-services-and-object-storage)
 (`platformlife` node label and table row).
+## 2026-11-15: PR 14 (P3): the platform run job, seed stages 1 to 5 and the seed part of Remove
+
+**What changed:** `internal/platformlife` gains the durable job of a managed-services run (kind
+`platform.run/v1`, `job.go`), its runner (`runner.go`) and stages 1 to 5 of an apply plus the seed part
+of a remove (`stages.go`); `POST|GET …/installations/{id}/runs[/{runId}][/cancel]` start, read and cancel
+runs (`internal/platform/admin/platform.go`), and `/admin/durable-jobs` refuses to replay one. The runner
+is wired in `cmd/api/main.go` next to the other job runners and starts only with
+`PROXCLOUD_PLATFORM_ENABLED` and `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED`. Two flows are new: the API writes
+to Proxmox with the pasted `capmox@pve!capi` token (clone into `proxcloud-seed`, VM config and firewall
+through the new `pve.AddVMFirewallRule`, upload and delete of the `pcplat-<id>-g<n>.iso` CD, stop and
+delete of the seed), and the API calls the seed's k3s API on 6443 over TLS pinned to the CA it generated
+for that seed (`kamajik8s.Client.Readyz`, the token Secret read with the bootstrap token, the access
+review and the bootstrap cleanup with the stored service-account token). Stage 2 enqueues image imports
+through Template updates with the run as the audit actor. Stages 6 to 11 are listed but end the run with
+`stage_unavailable`.
+
+**Why:** design §4.1 to §4.6 and §11 row 14: the seed has to exist, be reachable only from the API sources
+and hold a credential the portal stored before the platform stages (PR 15) can run on it, and every step
+has to survive a crash, a lost lease or a cancel without leaving a second VM or a CD with secrets behind.
+
+**Not verified:** nothing here has run against a real Proxmox or k3s; the tests use a fake PVE API, a fake
+seed API and in-memory stores, and PostgreSQL for the run routes, the start lock, Defer and the replay
+refusal.
+
+**Views updated:** [C2 containers](c2-containers.md) (trust boundaries: "API to Proxmox" row) and
+[C3e managed services](c3-components.md#c3e-managed-services-and-object-storage) (`platformlife` and PVE
+node labels, new seed API node and edge, new "Platform runs" row).
+
+Files: `internal/platformlife/{job,runner,stages,run}.go`, `internal/durablejobs/store.go`,
+`internal/platform/admin/{platform,durable_jobs,handler}.go`, `internal/cloud/pve/firewall.go`,
+`internal/cloud/kamajik8s/client.go`, `internal/config/config.go`, `cmd/api/main.go`, `docs/api.md`,
+`docs/architecture/c4/{c2-containers,c3-components}.md`.
 ## 2026-11-15: Managed-services installations and their credentials in the API
 
 **What changed:** `internal/platformlife` gains the installation record of the managed-services
