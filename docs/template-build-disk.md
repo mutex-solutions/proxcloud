@@ -36,15 +36,15 @@ The native builder still only grows: a vendor disk larger than the size of its O
 
 ### First lab build of each image type must confirm
 
-The first lab builds ran on 2026-11-14 and 2026-11-15, each followed by an export through the [export workflow](<vm-artifact-publishing.md>). What they confirmed and what is still open:
+The first lab builds ran on 2026-11-14 and 2026-11-15 (the 6 GiB one after the change below), each followed by an export through the [export workflow](<vm-artifact-publishing.md>). What they confirmed and what is still open:
 
-| Item | Native OS `ubuntu-2604` (5 GiB) | Native OS `ubuntu-2404` (5 GiB) | Kubernetes node 1.37.2 on `ubuntu-2604` (8 GiB) |
-| --- | --- | --- | --- |
-| Template disk | `size=5G` | `size=5G` | `size=8G` |
-| Build | green; dist-upgrade, package install and the 1 GiB admission passed | green; same steps passed | green; installer, image-builder run and the 1 GiB admission passed (static network mode) |
-| Space on `/` | 3,881,164 KiB filesystem; 985,308 KiB free before the upgrade, 980,500 KiB after it (75% used); the admission runs after the cleanup and prints nothing when it passes | 3,988,172 KiB filesystem; 1,704,092 KiB free before the upgrade, 1,702,348 KiB after it (58% used) | not in the workflow log (image-builder's output is not copied there) |
-| Export path | green: `virtual_size_bytes: 5368709120`, sanitize, postscan, cold boot of two clones grown to 30 GiB | green, same checks | green: `virtual_size_bytes: 8589934592`, inventory, review against the committed baseline, sanitize, postscan, cold boot of two clones grown to 30 GiB |
-| Still open | items 5, 7 and 8 (a server through a portal, a portal import, the mixed-size minimum) | the same | the free-space numbers of item 3, a DHCP build, items 4 and 6 (a node group joining a cluster, a portal import) |
+| Item | Native OS `ubuntu-2604` (5 GiB) | Native OS `ubuntu-2604` (6 GiB) | Native OS `ubuntu-2404` (5 GiB) | Kubernetes node 1.37.2 on `ubuntu-2604` (8 GiB) |
+| --- | --- | --- | --- | --- |
+| Template disk | `size=5G` | `size=6G` | `size=5G` | `size=8G` |
+| Build | green; dist-upgrade, package install and the 1 GiB admission passed | green; same steps passed | green; same steps passed | green; installer, image-builder run and the 1 GiB admission passed (static network mode) |
+| Space on `/` | 3,881,164 KiB filesystem; 985,308 KiB free before the upgrade, 980,500 KiB after it (75% used); the admission runs after the cleanup and prints nothing when it passes | 4,898,316 KiB filesystem; 2,017,744 KiB free before the upgrade, 2,012,936 KiB after it (59% used) | 3,988,172 KiB filesystem; 1,704,092 KiB free before the upgrade, 1,702,348 KiB after it (58% used) | not in the workflow log (image-builder's output is not copied there) |
+| Export path | green: `virtual_size_bytes: 5368709120`, sanitize, postscan, cold boot of two clones grown to 30 GiB | green: `virtual_size_bytes: 6442450944`, same checks | green, same checks | green: `virtual_size_bytes: 8589934592`, inventory, review against the committed baseline, sanitize, postscan, cold boot of two clones grown to 30 GiB |
+| Still open | items 5, 7 and 8 (a server through a portal, a portal import, the mixed-size minimum) | the same | the same | the free-space numbers of item 3, a DHCP build, items 4 and 6 (a node group joining a cluster, a portal import) |
 
 **Ubuntu 26.04 now builds at 6 GiB.** Its vendor image has a separate `/boot`, so a 5 GiB disk leaves a 3.7 GiB root filesystem, and the 5 GiB build left less than 1 GiB free before its cleanup: it passed the 1 GiB admission only after `apt-get clean` and the other cleanup steps, so a later build with a larger upgrade could fail it. Ubuntu 24.04 at 5 GiB kept 1.7 GiB free. `BUILD_DISK_GIB_BY_OS` in the native builder gives `ubuntu-2604` 6 GiB and every other OS the 5 GiB default; 6 GiB is on the sanitizer allowlist, and the portal contract (5 to 100 GiB) already accepts it. The 5 GiB `ubuntu-2604` template and image stay valid. The Debian slugs have not been built at 5 GiB (Debian publication is on hold).
 
