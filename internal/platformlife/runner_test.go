@@ -3,6 +3,8 @@ package platformlife
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"regexp"
 	"slices"
 	"strings"
@@ -203,6 +205,75 @@ func TestSeedVMWaitsForACloneInFlight(t *testing.T) {
 	}
 }
 
+// A clone that ends, and joins the pool, between the pool read and the task read is ours, not a foreign VM: no second
+// clone, no new VMID.
+func TestSeedVMCloneJoinsThePoolBetweenTheReads(t *testing.T) {
+	e := newEnv(t, RunApply)
+	e.only(StageSeedVM)
+	e.pve.vms[120] = &fakeVM{pooled: true, cfg: map[string]any{"name": SeedVMName(inID, 1), "tags": "pc-template", "net0": "virtio=AA:00:00:00:00:01,bridge=vmbr0",
+		"scsi0": "local-lvm:vm-120-disk-0,size=6G", "ide2": "local-lvm:vm-120-cloudinit,media=cdrom"}}
+	e.pve.poolLag = 1
+	e.mutate(func(run *Run, in *Installation, _ *Secrets) {
+		run.Stages[2].Receipt = &StageReceipt{VMID: 120, Name: SeedVMName(inID, 1), Generation: 1}
+		in.Status.Seed = &SeedStatus{VMID: 120, Node: "pve1", Generation: 1}
+	})
+	e.until(5)
+	if s := e.stage(StageSeedVM); e.pve.writeCount("POST /nodes/pve1/qemu/9100/clone") != 0 || s.Receipt.VMID != 120 || len(e.pve.vms) != 1 || !e.pve.vms[120].running {
+		t.Fatalf("receipt %+v, writes %v", s.Receipt, e.pve.writes)
+	}
+}
+
+// A generation whose CA exists never gets a second clone: its CD names the first clone's MAC, and a clone is configured
+// where its CD is made. A VMID turned foreign or a VM gone after the upload starts the next generation with one clone,
+// configured and behind its firewall; so does a VM deleted for a lost CD when the run stopped before the new intent.
+func TestSeedVMNeverReclonesAGenerationWithItsCA(t *testing.T) {
+	for name, tc := range map[string]struct {
+		vm   *fakeVM
+		cd   bool
+		vmid int
+	}{
+		"foreign with the CD": {&fakeVM{pooled: true, running: true, cfg: map[string]any{"name": "renamed-by-an-operator"}}, true, 121},
+		"absent with the CD":  {nil, true, 120},
+		"absent, CD lost":     {nil, false, 120},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t, RunApply)
+			e.only(StageSeedVM)
+			if tc.vm != nil {
+				e.pve.vms[120] = tc.vm
+			}
+			if tc.cd {
+				e.pve.iso = []string{SeedCDName(inID, 1)}
+			}
+			e.mutate(func(run *Run, in *Installation, sec *Secrets) {
+				run.Stages[2].Receipt = &StageReceipt{VMID: 120, Name: SeedVMName(inID, 1), Generation: 1}
+				in.Status.Seed = &SeedStatus{VMID: 120, Node: "pve1", Generation: 1, CACert: "-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----\n",
+					CDVolume: "local:iso/" + SeedCDName(inID, 1)}
+				sec.K3sToken, sec.BootstrapToken = runK3s, runBoot
+			})
+			if end := e.until(5); end != "fail:"+CodeStageUnavailable {
+				t.Fatalf("end %s", end)
+			}
+			_, in, _ := e.state.snapshot()
+			st := in.Status.Seed
+			if st.Generation != 2 || st.VMID != tc.vmid || e.pve.writeCount("POST /nodes/pve1/qemu/9100/clone") != 1 || len(e.pve.uploads) != 1 ||
+				!slices.Equal(e.pve.iso, []string{SeedCDName(inID, 2)}) || st.CDVolume != "local:iso/"+SeedCDName(inID, 2) {
+				t.Fatalf("seed %+v, ISO %v, writes %v", st, e.pve.iso, e.pve.writes)
+			}
+			cfg := e.pve.vms[st.VMID].cfg
+			if cfg["name"] != SeedVMName(inID, 2) || cfg["net0"] != "virtio=BC:24:11:00:00:01,bridge=vmbr1,firewall=1" || cfg["protection"] != "1" ||
+				cfg["tags"] != "proxcloud;pc-platform;pc-platform-"+inID || !strings.HasSuffix(fmt.Sprint(cfg["scsi0"]), "size=30G") {
+				t.Fatalf("the clone was not configured: %v", cfg)
+			}
+			for _, w := range e.pve.writes {
+				if tc.vm != nil && strings.Contains(w, "/qemu/120") {
+					t.Fatalf("foreign VM written: %s", w)
+				}
+			}
+		})
+	}
+}
+
 // Generation rules: secrets committed but no CD on the store means the CA key is gone with its process, so the VM is
 // deleted (protection off first) and generation 2 is built on a new VMID.
 func TestSeedVMNewGenerationWhenTheCDIsLost(t *testing.T) {
@@ -323,6 +394,45 @@ func TestCancelAtWakeUp(t *testing.T) {
 	}
 }
 
+// Cancel is honoured between two external calls of a stage: the result of the call in flight is still recorded, no
+// other Proxmox call follows, and the run ends cancelled with the installation failed.
+func TestCancelBetweenExternalCalls(t *testing.T) {
+	e := newEnv(t, RunApply)
+	e.only(StageSeedVM)
+	e.pve.onWrite = func(w string) {
+		if w == "POST /nodes/pve1/qemu/9100/clone" {
+			e.mutate(func(run *Run, _ *Installation, _ *Secrets) { run.CancelRequested = true })
+		}
+	}
+	if end := e.once(); end != "complete" || !slices.Equal(e.pve.writes, []string{"POST /nodes/pve1/qemu/9100/clone"}) {
+		t.Fatalf("end %s, writes %v", end, e.pve.writes)
+	}
+	run, in, _ := e.state.snapshot()
+	if s := e.stage(StageSeedVM); run.State != RunCancelled || in.Status.Phase != PhaseFailed || !strings.HasPrefix(s.Receipt.CloneUPID, "UPID:pve1:") {
+		t.Fatalf("run %s, phase %s, receipt %+v", run.State, in.Status.Phase, s.Receipt)
+	}
+}
+
+// A lease no renewal reaches in time is lost, whatever the renewal failed with: the work stops and the job is not
+// given back by this acquisition.
+func TestLeaseThatCannotBeRenewedStopsTheRun(t *testing.T) {
+	e := newEnv(t, RunApply)
+	e.r.Lease = 60 * time.Millisecond
+	e.jobs.renewErr = errors.New("database unreachable")
+	e.r.Preflight = func(ctx context.Context, _ *Installation) ([]Check, error) {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(3 * time.Second):
+			return []Check{{ID: "flags", Status: CheckFail}}, nil
+		}
+	}
+	start := time.Now()
+	if end := e.once(); end != "" || time.Since(start) > 2*time.Second {
+		t.Fatalf("end %q after %s", end, time.Since(start))
+	}
+}
+
 // A passed absolute deadline fails the stage with the code of its last observation (or <stage>_timeout).
 func TestDeadline(t *testing.T) {
 	e := newEnv(t, RunApply)
@@ -337,8 +447,13 @@ func TestDeadline(t *testing.T) {
 	if s := e.stage(StageSeedAPI); s.State != StageFailed || len(e.pve.writes) != 0 {
 		t.Fatalf("stage %+v, writes %v", s, e.pve.writes)
 	}
-	if got := TimeoutCode(StageSeedIdentity); got != "seed_identity_timeout" {
-		t.Fatalf("timeout code %s", got)
+	e = newEnv(t, RunApply)
+	e.only(StageSeedAPI)
+	e.mutate(func(run *Run, _ *Installation, _ *Secrets) {
+		run.Stages[3] = Stage{ID: StageSeedAPI, State: StageRunning, StartedAt: &started, Deadline: &past}
+	})
+	if end := e.once(); end != "fail:seed_api_timeout" || e.stage(StageSeedAPI).Code != "seed_api_timeout" {
+		t.Fatalf("no code yet: %s %+v", end, e.stage(StageSeedAPI))
 	}
 }
 
@@ -457,6 +572,39 @@ func TestSeedIdentityDoneOnlyWhenTheCDIsGone(t *testing.T) {
 	}
 }
 
+// The CD is deleted where the seed status says it went, not only on the spec's ISO store, which may have changed since
+// the upload: stage 5 and Remove are done only when that store no longer lists it.
+func TestTheCDIsDeletedWhereItWasUploaded(t *testing.T) {
+	e, _ := fakeSeedEnv(t, StageSeedIdentity)
+	e.mutate(func(_ *Run, in *Installation, _ *Secrets) { in.Spec.Storage.ISO = "nas-iso" })
+	if end := e.until(3); end != "fail:"+CodeStageUnavailable || e.stage(StageSeedIdentity).State != StageDone {
+		t.Fatalf("end %s, stage %+v", end, e.stage(StageSeedIdentity))
+	}
+	if _, in, _ := e.state.snapshot(); len(e.pve.iso) != 0 || in.Status.Seed.CDVolume != "" {
+		t.Fatalf("stage 5 left the CD: ISO %v, cdVolume %q", e.pve.iso, in.Status.Seed.CDVolume)
+	}
+
+	e = newEnv(t, RunRemove)
+	e.seedAt(120, 1, nil, true)
+	e.mutate(func(_ *Run, in *Installation, _ *Secrets) { in.Spec.Storage.ISO = "nas-iso" })
+	if end := e.until(5); end != "complete" || len(e.pve.iso) != 0 {
+		t.Fatalf("Remove left the CD: %s, ISO %v", end, e.pve.iso)
+	}
+}
+
+// The seed applies the bootstrap token before the Role and RoleBinding that let it read the token Secret: a 403 on that
+// read is waited for, not taken for a lost identity.
+func TestSeedIdentityWaitsForTheBootstrapRBAC(t *testing.T) {
+	e, seed := fakeSeedEnv(t, StageSeedIdentity)
+	seed.forbid = 1
+	if end := e.once(); end != "defer:waiting_seed_identity" || e.stage(StageSeedIdentity).Code != CodeSeedIdentityLost {
+		t.Fatalf("403 on the first read: %s %+v", end, e.stage(StageSeedIdentity))
+	}
+	if end := e.until(3); end != "fail:"+CodeStageUnavailable || e.stage(StageSeedIdentity).State != StageDone {
+		t.Fatalf("end %s, stage %+v", end, e.stage(StageSeedIdentity))
+	}
+}
+
 // A service account that is not cluster-admin, or a refused bootstrap token, ends the stage seed_identity_lost.
 func TestSeedIdentityLost(t *testing.T) {
 	e, seed := fakeSeedEnv(t, StageSeedIdentity)
@@ -548,6 +696,30 @@ func TestImageFailures(t *testing.T) {
 	e.imports.enqueueErr = templateupdates.ErrBlocklisted
 	if end := e.once(); end != "fail:"+CodeImageBlocked {
 		t.Fatalf("blocklisted: %s", end)
+	}
+
+	// Only a refusal is permanent: a request or an artifact that fails validation, or no proof that a template is gone.
+	// A read that failed (Proxmox, the registry, the database) is retried within the stage's budget.
+	for name, tc := range map[string]struct {
+		mark, enqueue error
+		end           string
+	}{
+		"mark: read failed":    {context.DeadlineExceeded, nil, "defer:retry_images"},
+		"mark: no proof":       {&templateupdates.LifecycleError{Status: 409, Code: "template_present", Message: "may still be the template"}, nil, "fail:" + CodeImageImportFailed},
+		"enqueue: refused":     {nil, fmt.Errorf("the artifact failed verification: %w", templateupdates.ErrRefused), "fail:" + CodeImageImportFailed},
+		"enqueue: flag off":    {nil, &templateupdates.LifecycleError{Status: 409, Code: "vm_updates_disabled", Message: "not enabled"}, "fail:" + CodeImageImportFailed},
+		"enqueue: read failed": {nil, errors.New("ghcr: 503"), "defer:retry_images"},
+	} {
+		e = imageEnv(t)
+		e.imports.recs = []templateupdates.Receipt{{ID: "tu-old", Step: templateupdates.StepSucceeded, VMID: 9100,
+			Payload: templateupdates.VMPayload{ServiceID: "svc-pve", Node: "pve1", Digest: seedDigest}}}
+		if tc.mark == nil {
+			e.imports.recs = nil
+		}
+		e.imports.markErr, e.imports.enqueueErr = tc.mark, tc.enqueue
+		if end := e.once(); end != tc.end {
+			t.Fatalf("%s: %s", name, end)
+		}
 	}
 
 	e = imageEnv(t)

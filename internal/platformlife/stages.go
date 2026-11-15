@@ -149,9 +149,13 @@ func (x *acq) image(ctx context.Context, node string, img VMImage, rows []pve.Cl
 				return "done", rec.VMID, nil
 			}
 			// Its template was deleted: free the receipt (only on proof), then import again.
-			if err := x.r.Imports.MarkTemplateGone(ctx, pvFor, rec.ID); err != nil {
+			// Only its refusal (no proof) is permanent; a read that failed is tried again.
+			err := x.r.Imports.MarkTemplateGone(ctx, pvFor, rec.ID)
+			if le := (*templateupdates.LifecycleError)(nil); errors.As(err, &le) {
 				return "", 0, permanent(CodeImageImportFailed, "VM %d on %s is no template in %s, and it could not be shown to be gone: %s",
 					rec.VMID, node, pve.TemplatePool, clip(err.Error()))
+			} else if err != nil {
+				return "", 0, classify(CodeImageImportFailed, err)
 			}
 		case rec.Step == templateupdates.StepFailed || x.jobDead(ctx, rec.ID):
 			if rec.RequestedBy == actor {
@@ -166,12 +170,15 @@ func (x *acq) image(ctx context.Context, node string, img VMImage, rows []pve.Cl
 	}
 	rec, err := x.r.Imports.EnqueueVM(ctx, templateupdates.VMRequest{Package: img.Package, Digest: img.Digest, ConfirmDigest: img.Digest,
 		ServiceID: x.in.ServiceID, Node: node, ImportStorage: x.in.Spec.Storage.Import, DiskStorage: x.in.Spec.Storage.Boot}, actor)
+	var refusal *templateupdates.LifecycleError
 	switch {
 	case errors.Is(err, templateupdates.ErrBlocklisted):
 		return "", 0, permanent(CodeImageBlocked, "%s %s is on the template update blocklist: install a newer ProxCloud release.", img.Package, img.Digest)
 	case errors.Is(err, templateupdates.ErrDuplicate):
 		return string(templateupdates.StepQueued), 0, nil
-	case err != nil:
+	case errors.As(err, &refusal) || errors.Is(err, templateupdates.ErrRefused):
+		return "", 0, permanent(CodeImageImportFailed, "The import of %s on %s was refused: %s", img.Tag, node, clip(err.Error()))
+	case err != nil: // the registry, the network or the database
 		return "", 0, transient(CodeImageImportFailed, err)
 	}
 	*ours = append(*ours, rec.ID)
@@ -194,16 +201,24 @@ type vmState struct {
 	cfg                              pve.VMConfig
 }
 
-func (x *acq) observe(ctx context.Context, vmid, gen int) (vmState, error) {
+// poolNode is the node of vmid when it is a member of proxcloud-seed ("" when it is not).
+func (x *acq) poolNode(ctx context.Context, vmid int) (string, error) {
 	pool, err := x.capi.GetPool(ctx, pve.SeedPool)
 	if err != nil {
-		return vmState{}, classify(CodeSeedCloneFailed, err)
+		return "", classify(CodeSeedCloneFailed, err)
 	}
-	node := ""
 	for i := 0; pool != nil && i < len(pool.Members); i++ {
 		if pool.Members[i].VMID == vmid {
-			node = pool.Members[i].Node
+			return pool.Members[i].Node, nil
 		}
+	}
+	return "", nil
+}
+
+func (x *acq) observe(ctx context.Context, vmid, gen int) (vmState, error) {
+	node, err := x.poolNode(ctx, vmid)
+	if err != nil {
+		return vmState{}, err
 	}
 	if node == "" {
 		free, err := x.capi.VMIDFree(ctx, vmid)
@@ -216,7 +231,14 @@ func (x *acq) observe(ctx context.Context, vmid, gen int) (vmState, error) {
 		if err != nil {
 			return vmState{}, classify(CodeSeedCloneFailed, err)
 		}
-		return vmState{foreign: !busy, locked: busy}, nil
+		if busy {
+			return vmState{locked: true}, nil
+		}
+		// Our clone may have ended, and joined the pool, between the pool read and the task read: only a pool read
+		// taken after the task read makes the VMID foreign.
+		if node, err = x.poolNode(ctx, vmid); err != nil || node == "" {
+			return vmState{foreign: err == nil}, err
+		}
 	}
 	cfg, err := x.capi.GetVMConfig(ctx, node, vmid)
 	if err != nil {
@@ -270,14 +292,19 @@ func (x *acq) seedVM(ctx context.Context) error {
 		switch {
 		case err != nil:
 			return err
-		case vm.foreign:
-			// Someone else's VM holds the VMID: a new intent, a new VMID; nothing is deleted.
-			if err := x.intent(ctx, rc.Generation); err != nil {
-				return err
+		case vm.foreign || vm.absent:
+			// A CD fits one clone only (its network config names that clone's MAC, and a clone is configured where its
+			// CD is made), so a generation that has its CA never gets another clone: the next generation does.
+			st := x.in.Status.Seed
+			switch {
+			case st != nil && st.Generation == rc.Generation && st.CACert != "":
+				err = x.intent(ctx, rc.Generation+1)
+			case vm.foreign: // someone else's VM holds the VMID: a new VMID; nothing is deleted
+				err = x.intent(ctx, rc.Generation)
+			default:
+				err = x.clone(ctx, rc)
 			}
-			continue
-		case vm.absent:
-			if err := x.clone(ctx, rc); err != nil {
+			if err != nil {
 				return err
 			}
 			continue
@@ -290,8 +317,11 @@ func (x *acq) seedVM(ctx context.Context) error {
 			if err != nil {
 				return classify(CodeSeedConfigRefused, err)
 			}
-			if !slices.ContainsFunc(vols, func(v string) bool { return path.Base(v) == cd }) {
-				if st := x.in.Status.Seed; st != nil && st.Generation == rc.Generation && st.CACert != "" && x.caKey == "" {
+			vol := x.in.Spec.Storage.ISO + ":iso/" + cd
+			if i := slices.IndexFunc(vols, func(v string) bool { return path.Base(v) == cd }); i >= 0 {
+				vol = vols[i] // where it was uploaded, should the spec's ISO store have changed since
+			} else {
+				if st := x.in.Status.Seed; st != nil && st.Generation == rc.Generation && st.CACert != "" {
 					// The CA key lived in the process that made it and the CD never reached the store: next generation.
 					if err := x.deleteSeed(ctx, rc.VMID, rc.Generation); err != nil {
 						return err
@@ -305,11 +335,10 @@ func (x *acq) seedVM(ctx context.Context) error {
 					return err
 				}
 			}
-			vol := x.in.Spec.Storage.ISO + ":iso/" + cd
 			if err := x.attach(ctx, vm, rc.VMID, vol); err != nil {
 				return err
 			}
-			if st := x.in.Status.Seed; st != nil && st.CDVolume != vol { // uploaded by an acquisition that lost its lease before recording it
+			if x.receipt().CDVolume != vol { // uploaded by an acquisition that lost its lease before recording it
 				if err := x.recordReceipt(ctx, func(r *StageReceipt, in *Installation, _ *Secrets) { r.CDVolume, in.Status.Seed.CDVolume = vol, vol }); err != nil {
 					return err
 				}
@@ -336,13 +365,15 @@ func (x *acq) intent(ctx context.Context, gen int) error {
 		return classify(CodeSeedCloneFailed, err)
 	}
 	sp := x.in.Spec.Seed
+	if old := x.in.Status.Seed; old != nil && old.CDVolume != "" {
+		// The status is the only record of the store a CD went to: the CD goes before the status stops naming it.
+		if err := x.purgeCDs(ctx, old.Node); err != nil {
+			return err
+		}
+	}
 	return x.saveReceipt(ctx, func(r *StageReceipt, in *Installation, _ *Secrets) {
 		*r = StageReceipt{VMID: vmid, Name: SeedVMName(in.ID, gen), Generation: gen}
-		st := &SeedStatus{VMID: vmid, Node: sp.Node, Generation: gen, APIServer: x.r.seedServer(sp.Address)}
-		if old := in.Status.Seed; old != nil && old.Generation == gen {
-			st.CACert, st.CDVolume = old.CACert, old.CDVolume // same generation on a new VMID: its CD still fits
-		}
-		in.Status.Seed = st
+		in.Status.Seed = &SeedStatus{VMID: vmid, Node: sp.Node, Generation: gen, APIServer: x.r.seedServer(sp.Address)}
 	})
 }
 
@@ -388,8 +419,9 @@ func (x *acq) clone(ctx context.Context, rc StageReceipt) error {
 	return x.task(ctx, up, CodeSeedCloneFailed)
 }
 
-// uploadCD configures the clone, makes the generation's secrets (committed before the upload: its CA is what stage 4
-// pins, its tokens what stages 4 and 5 send; the CA key stays in memory), and uploads its CD.
+// uploadCD configures the clone, makes the generation's secrets (committed before the upload, with the volume the CD
+// goes to: its CA is what stage 4 pins, its tokens what stages 4 and 5 send; the CA key stays in memory), and uploads
+// its CD.
 func (x *acq) uploadCD(ctx context.Context, rc StageReceipt, vm vmState) error {
 	sp := x.in.Spec
 	net0 := withNet0(vm.cfg.Str("net0"), sp.Network.Bridge, sp.Network.MTU)
@@ -412,13 +444,14 @@ func (x *acq) uploadCD(ctx context.Context, rc StageReceipt, vm vmState) error {
 	if err != nil {
 		return err
 	}
+	name := SeedCDName(x.in.ID, rc.Generation)
+	vol := sp.Storage.ISO + ":iso/" + name
 	if err := x.save(ctx, func(_ *Run, in *Installation, sec *Secrets) {
-		in.Status.Seed.CACert, in.Status.Seed.CDVolume = secrets.CACert, ""
+		in.Status.Seed.CACert, in.Status.Seed.CDVolume = secrets.CACert, vol
 		sec.K3sToken, sec.BootstrapToken = secrets.K3sToken, secrets.BootstrapToken
 	}); err != nil {
 		return err
 	}
-	x.caKey = secrets.CAKey
 	prefix, _ := netip.ParsePrefix(sp.Network.Prefix)
 	files, err := SeedFiles(x.bom, RenderInput{ID: x.in.ID, SeedAddress: sp.Seed.Address, SSHKeys: sp.Seed.SSHKeys,
 		Network: RenderNetwork{Bridge: sp.Network.Bridge, Gateway: sp.Network.Gateway, Prefix: prefix.Bits(), DNS: sp.Network.DNS, MTU: sp.Network.MTU}},
@@ -430,21 +463,21 @@ func (x *acq) uploadCD(ctx context.Context, rc StageReceipt, vm vmState) error {
 	if err != nil {
 		return permanent(CodeSeedConfigRefused, "The seed's CD could not be built: %s", clip(err.Error()))
 	}
-	name := SeedCDName(x.in.ID, rc.Generation)
 	if err := x.pveTask(ctx, CodeSeedConfigRefused, func() (pve.UPID, error) {
 		return x.capi.UploadISO(ctx, vm.node, sp.Storage.ISO, name, iso)
 	}); err != nil {
 		return err
 	}
-	vol := sp.Storage.ISO + ":iso/" + name
 	return x.recordReceipt(ctx, func(r *StageReceipt, in *Installation, _ *Secrets) { r.CDVolume, in.Status.Seed.CDVolume = vol, vol })
 }
 
 // attach puts the CD in the clone's cloud-init slot (its PVE drive is dropped first: two cidata CDs would make the pick
 // arbitrary) or ide2.
+var cdSlots = []string{"ide0", "ide1", "ide2", "ide3", "scsi1", "sata0"}
+
 func (x *acq) attach(ctx context.Context, vm vmState, vmid int, vol string) error {
 	slot := "ide2"
-	for _, s := range []string{"ide0", "ide1", "ide2", "ide3", "scsi1", "sata0"} {
+	for _, s := range cdSlots {
 		if v := vm.cfg.Str(s); strings.Contains(v, "cloudinit") || strings.Contains(v, "iso/pcplat-") {
 			slot = s
 			break
@@ -615,8 +648,12 @@ func (x *acq) seedIdentity(ctx context.Context) error {
 		}
 		data, err := boot.GetSecretData(ctx, SeedPortalNamespace, SeedPortalTokenSecret)
 		var ka *kamajik8s.APIError
-		if errors.As(err, &ka) && (ka.Status == http.StatusUnauthorized || ka.Status == http.StatusForbidden) {
+		if errors.As(err, &ka) && ka.Status == http.StatusUnauthorized {
 			return permanent(CodeSeedIdentityLost, "The seed refused the bootstrap token (it expires %s after the seed was built): Retry rebuilds the seed.", SeedBootstrapTTL)
+		}
+		if errors.As(err, &ka) && ka.Status == http.StatusForbidden {
+			// The seed applies the token before the Role and RoleBinding that let it read the Secret.
+			return waiting(CodeSeedIdentityLost, "The seed does not let the bootstrap token read %s/%s yet.", SeedPortalNamespace, SeedPortalTokenSecret)
 		}
 		if err != nil {
 			return classify(CodeSeedIdentityLost, err)
@@ -666,7 +703,7 @@ func (x *acq) seedIdentity(ctx context.Context) error {
 	if err != nil {
 		return transient(CodeSeedCDNotDeleted, err)
 	}
-	for _, slot := range []string{"ide0", "ide1", "ide2", "ide3", "scsi1", "sata0"} {
+	for _, slot := range cdSlots {
 		if strings.Contains(cfg.Str(slot), "iso/pcplat-"+x.in.ID+"-") {
 			if err := x.pveTask(ctx, CodeSeedCDNotDeleted, func() (pve.UPID, error) {
 				return x.capi.SetVMConfig(ctx, st.Node, st.VMID, nil, slot)
@@ -675,14 +712,8 @@ func (x *acq) seedIdentity(ctx context.Context) error {
 			}
 		}
 	}
-	if err := x.dropCDs(ctx, st.Node, ""); err != nil {
+	if err := x.purgeCDs(ctx, st.Node); err != nil {
 		return err
-	}
-	if left, err := x.cds(ctx, st.Node); err != nil || len(left) > 0 {
-		if err != nil {
-			return transient(CodeSeedCDNotDeleted, err)
-		}
-		return waiting(CodeSeedCDNotDeleted, "%s still lists %s.", x.in.Spec.Storage.ISO, strings.Join(left, ", "))
 	}
 	return x.record(ctx, func(_ *Run, in *Installation, sec *Secrets) { sec.BootstrapToken, in.Status.Seed.CDVolume = "", "" })
 }
@@ -720,15 +751,7 @@ func (x *acq) removeSeed(ctx context.Context) error {
 		}
 		node = st.Node
 	}
-	if err := x.dropCDs(ctx, node, ""); err != nil {
-		return err
-	}
-	if left, err := x.cds(ctx, node); err != nil {
-		return transient(CodeSeedCDNotDeleted, err)
-	} else if len(left) > 0 {
-		return waiting(CodeSeedCDNotDeleted, "%s still lists %s.", x.in.Spec.Storage.ISO, strings.Join(left, ", "))
-	}
-	return nil
+	return x.purgeCDs(ctx, node)
 }
 
 // removeSecrets wipes platformSecret and the seed's status.
@@ -775,20 +798,43 @@ func (x *acq) deleteSeed(ctx context.Context, vmid, gen int) error {
 	return nil
 }
 
-// cds lists this installation's CDs on the ISO store (volids).
+// cds lists this installation's CDs (volids) on the spec's ISO store and on the store the seed status says its CD
+// went to: the spec's may have changed since the upload.
 func (x *acq) cds(ctx context.Context, node string) ([]string, error) {
-	iso := x.in.Spec.Storage.ISO
-	all, err := x.capi.StorageContents(ctx, node, iso, "iso", 0)
-	if err != nil {
-		return nil, err
+	stores := []string{x.in.Spec.Storage.ISO}
+	if st := x.in.Status.Seed; st != nil {
+		if s, _, ok := strings.Cut(st.CDVolume, ":"); ok && s != stores[0] {
+			stores = append(stores, s)
+		}
 	}
 	var out []string
-	for _, c := range all {
-		if strings.HasPrefix(c.VolID, iso+":iso/pcplat-"+x.in.ID+"-") {
-			out = append(out, c.VolID)
+	for _, iso := range stores {
+		all, err := x.capi.StorageContents(ctx, node, iso, "iso", 0)
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range all {
+			if strings.HasPrefix(c.VolID, iso+":iso/pcplat-"+x.in.ID+"-") {
+				out = append(out, c.VolID)
+			}
 		}
 	}
 	return out, nil
+}
+
+// purgeCDs deletes every CD of this installation and proves it: no store that may hold one lists one any more.
+func (x *acq) purgeCDs(ctx context.Context, node string) error {
+	if err := x.dropCDs(ctx, node, ""); err != nil {
+		return err
+	}
+	left, err := x.cds(ctx, node)
+	if err != nil {
+		return transient(CodeSeedCDNotDeleted, err)
+	}
+	if len(left) > 0 {
+		return waiting(CodeSeedCDNotDeleted, "Proxmox still lists %s.", strings.Join(left, ", "))
+	}
+	return nil
 }
 
 // dropCDs deletes this installation's CDs but keep (a file name; "" deletes all), by name.
@@ -797,7 +843,6 @@ func (x *acq) dropCDs(ctx context.Context, node, keep string) error {
 	if err != nil {
 		return transient(CodeSeedCDNotDeleted, err)
 	}
-	iso := x.in.Spec.Storage.ISO
 	for _, v := range vols {
 		if path.Base(v) == keep {
 			continue
@@ -805,7 +850,8 @@ func (x *acq) dropCDs(ctx context.Context, node, keep string) error {
 		if err := x.check(ctx); err != nil {
 			return err
 		}
-		if err := x.capi.DeleteStorageVolume(ctx, node, iso, strings.TrimPrefix(v, iso+":")); err != nil {
+		iso, rel, _ := strings.Cut(v, ":")
+		if err := x.capi.DeleteStorageVolume(ctx, node, iso, rel); err != nil {
 			return transient(CodeSeedCDNotDeleted, err)
 		}
 	}

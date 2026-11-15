@@ -168,7 +168,8 @@ func (r *Runner) perform(parent context.Context, j *durablejobs.Job) {
 	}
 }
 
-// heartbeat renews the lease every third of it until work ends; a refused renewal cancels work.
+// heartbeat renews the lease every third of it until work ends. A refused renewal cancels work, and so does a lease
+// that no renewal reached in time (the database away, the process paused): another runner may hold the job by then.
 func (r *Runner) heartbeat(work context.Context, cancel context.CancelFunc, j *durablejobs.Job) (isLost func() bool, stop func()) {
 	var mu sync.Mutex
 	lost := false
@@ -177,6 +178,7 @@ func (r *Runner) heartbeat(work context.Context, cancel context.CancelFunc, j *d
 		defer close(done)
 		t := time.NewTicker(r.Lease / 3)
 		defer t.Stop()
+		renewed := time.Now()
 		for {
 			select {
 			case <-work.Done():
@@ -185,7 +187,11 @@ func (r *Runner) heartbeat(work context.Context, cancel context.CancelFunc, j *d
 				rc, rcancel := context.WithTimeout(work, r.Lease/3)
 				err := r.Jobs.Renew(rc, j, r.Lease)
 				rcancel()
-				if errors.Is(err, durablejobs.ErrLeaseLost) {
+				if err == nil {
+					renewed = time.Now()
+					continue
+				}
+				if errors.Is(err, durablejobs.ErrLeaseLost) || time.Since(renewed) >= r.Lease {
 					mu.Lock()
 					lost = true
 					mu.Unlock()
@@ -200,17 +206,16 @@ func (r *Runner) heartbeat(work context.Context, cancel context.CancelFunc, j *d
 
 // acq is one acquisition of one run.
 type acq struct {
-	r                 *Runner
-	j                 *durablejobs.Job
-	lost              func() bool
-	runID             string
-	run               *Run
-	in                *Installation
-	sec               *Secrets
-	bom               *BOM
-	portal, capi, csi *pve.Client // csi: the volume sweep at Remove, with the cluster part of Remove
-	si                int         // the stage being run
-	caKey             string      // the seed CA key of the generation this acquisition made: in memory only
+	r            *Runner
+	j            *durablejobs.Job
+	lost         func() bool
+	runID        string
+	run          *Run
+	in           *Installation
+	sec          *Secrets
+	bom          *BOM
+	portal, capi *pve.Client
+	si           int // the stage being run
 }
 
 var (
@@ -296,9 +301,7 @@ func (x *acq) execute(ctx context.Context) end {
 		return x.finish(ctx, RunFailed, CodePreflightFailed, "The installation's Proxmox provider no longer exists.")
 	}
 	if x.portal, err = pve.New(es.PVEConfig()); err == nil {
-		if x.capi, err = TokenClient(es, sec.CAPI); err == nil {
-			x.csi, err = TokenClient(es, sec.CSI)
-		}
+		x.capi, err = TokenClient(es, sec.CAPI)
 	}
 	if err != nil {
 		return x.finish(ctx, RunFailed, CodePreflightFailed, "The Proxmox connection is not valid: "+clip(err.Error()))
@@ -529,7 +532,6 @@ func (x *acq) secrets() []string {
 		}
 	}
 	sec := x.sec
-	add(x.caKey)
 	add(sec.K3sToken)
 	add(sec.BootstrapToken)
 	if _, s, ok := strings.Cut(sec.BootstrapToken, "."); ok {

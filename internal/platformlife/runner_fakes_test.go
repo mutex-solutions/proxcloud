@@ -39,6 +39,7 @@ type fakeJobs struct {
 	loseAt      int
 	checkpoints int
 	lost        bool
+	renewErr    error // what Renew answers while the lease is not lost
 	onLose      func()
 	ends        []string // complete | defer:<code> | fail:<code> | retry:<code>
 }
@@ -52,7 +53,7 @@ func (f *fakeJobs) Renew(context.Context, *durablejobs.Job, time.Duration) error
 	if f.lost {
 		return durablejobs.ErrLeaseLost
 	}
-	return nil
+	return f.renewErr
 }
 func (f *fakeJobs) Checkpoint(ctx context.Context, _ *durablejobs.Job, fn func(context.Context) error) error {
 	f.mu.Lock()
@@ -214,7 +215,9 @@ type fakePVE struct {
 	failOnce  map[string]string // "METHOD path" → an error body answered once with 500
 	keepISO   int               // deletes of an ISO that answer OK but leave the file
 	agent     bool
-	cloneBusy bool // a qmclone task is listed as running
+	cloneBusy bool           // a qmclone task is listed as running
+	poolLag   int            // pool reads that answer without members: a clone that joins its pool after them
+	onWrite   func(w string) // called with every recorded request
 	cloneTags string
 	uploads   [][]byte
 	templates []pve.ClusterResource // /cluster/resources?type=vm
@@ -261,6 +264,9 @@ func (f *fakePVE) serve(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api2/json")
 	if r.Method != http.MethodGet {
 		f.writes = append(f.writes, r.Method+" "+path)
+		if f.onWrite != nil {
+			f.onWrite(r.Method + " " + path)
+		}
 	}
 	if body, ok := f.failOnce[r.Method+" "+path]; ok {
 		delete(f.failOnce, r.Method+" "+path)
@@ -284,8 +290,9 @@ func (f *fakePVE) serve(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case path == "/pools/proxcloud-seed":
 		var members []map[string]any
+		f.poolLag--
 		for id, vm := range f.vms {
-			if vm.pooled {
+			if vm.pooled && f.poolLag < 0 {
 				members = append(members, map[string]any{"id": fmt.Sprintf("qemu/%d", id), "vmid": id, "node": "pve1", "type": "qemu"})
 			}
 		}
@@ -436,6 +443,8 @@ func (f *fakePVE) serve(w http.ResponseWriter, r *http.Request) {
 			out = append(out, map[string]any{"volid": "local:iso/" + n, "content": "iso"})
 		}
 		data(out)
+	case path == "/nodes/pve1/storage/nas-iso/content": // a second ISO store, empty
+		data([]any{})
 	case strings.HasPrefix(path, "/nodes/pve1/storage/local/content/iso/"):
 		name := strings.TrimPrefix(path, "/nodes/pve1/storage/local/content/iso/")
 		if f.keepISO > 0 {
@@ -461,6 +470,7 @@ type fakeSeed struct {
 	sa        string
 	ready     bool
 	saAllowed bool
+	forbid    int // reads of the token Secret answered 403: the Role and RoleBinding are not applied yet
 	calls     []string
 }
 
@@ -535,6 +545,10 @@ func (f *fakeSeed) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		fmt.Fprint(w, "ok")
+	case r.URL.Path == "/api/v1/namespaces/proxcloud-system/secrets/proxcloud-portal-token-g1" && kind == "boot" && f.forbid > 0:
+		f.forbid--
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"message":"forbidden"}`)
 	case r.URL.Path == "/api/v1/namespaces/proxcloud-system/secrets/proxcloud-portal-token-g1" && kind == "boot":
 		fmt.Fprintf(w, `{"data":{"token":%q}}`, base64.StdEncoding.EncodeToString([]byte(f.sa)))
 	case r.URL.Path == "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews" && kind == "sa":
