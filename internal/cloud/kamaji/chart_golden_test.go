@@ -33,10 +33,12 @@ func helmTemplate(t *testing.T, release, namespace, values string) string {
 
 // The chart's whole output for fixed values documents. A chart change that moves a render shows up as a diff of these
 // files to review; `go test ./internal/cloud/kamaji -run TestChartGolden -update` rewrites them. The tenant case is the
-// chart's own defaults, so a change of the portal's values (BuildValues) does not touch it.
+// chart's own defaults, so a change of the portal's values (BuildValues) does not touch it; the kubeadm case is the
+// platform's own cluster (controlPlane.kind kubeadm, kubeadmTestValues).
 func TestChartGolden(t *testing.T) {
 	for _, c := range []struct{ name, release, namespace, values string }{
 		{"tenant", "pc-c-abcd1234", "pc-p1", "{}\n"},
+		{"kubeadm", "pc-platform", "pc-platform", kubeadmTestValues},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			got := helmTemplate(t, c.release, c.namespace, c.values)

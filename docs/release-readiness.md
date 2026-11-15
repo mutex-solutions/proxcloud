@@ -90,7 +90,7 @@ same gate. For every release:
    its tag's workflows succeed.
 2. Verify app/chart/installer BOM alignment with that exact version. Keep managed
    charts independent: `database-cluster` `0.5.1` and `proxmox-kamaji-cluster`
-   `0.1.10` need their own tag/publication checks. Do not move existing provider
+   `0.1.11` need their own tag/publication checks. Do not move existing provider
    pins or managed data as a consequence of the app release.
 3. Verify the release-policy tests on the selected commit. The Release job accepts
    strict stable/RC tags from the environment: RCs use

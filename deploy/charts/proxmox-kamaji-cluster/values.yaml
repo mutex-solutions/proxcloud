@@ -1,6 +1,7 @@
 # FULL values contract, mirrored by internal/cloud/kamaji/values.go (BuildValues). The portal renders
 # every key per cluster; the defaults below only make `helm template` and lint work. No secrets here:
 # this document sits in an ArgoCD Application. Credentials live in the two Secrets named below.
+# controlPlane is the exception: tenant clusters never set it and keep its kamaji default.
 
 # -- Kubernetes version of the control plane and the workers, without the leading v.
 kubernetesVersion: "1.35.10"
@@ -37,6 +38,27 @@ kamajiControlPlane:
     # loadBalancerSourceRanges: [192.0.2.0/24]
     # certSANs: [cluster.example.com]
     # serviceAnnotations: {}
+
+controlPlane:
+  # -- kamaji: a tenant cluster, its control plane hosted by Kamaji (kamajiControlPlane above). kubeadm: the platform's
+  # own workload cluster of managed services (docs/adr/0009), its control plane on one CAPMOX VM with kube-vip, as
+  # installer stage 50 builds the services cluster. kubeadm renders no CAAPH add-ons, no services-side CSI controller
+  # and no Gateway API carriers: the platform installs its components as ArgoCD Applications.
+  kind: kamaji
+  # -- kubeadm only.
+  kubeadm:
+    # -- The API address kube-vip holds, also the ProxmoxCluster endpoint (port 6443). Outside proxmox.network.addresses.
+    endpoint: ""
+    # -- More names or addresses on the API server certificate, after the endpoint.
+    certSANs: []
+    # -- Default = installer versions.yml kube_vip (a test keeps them equal). A digest-pinned reference works too.
+    kubeVipImage: ghcr.io/kube-vip/kube-vip:v0.8.9
+    # -- <pve node>=<template vmid>, one entry: the control-plane VM is cloned on that node.
+    machineImageId: "pve1=9210"
+    machineCores: 2
+    machineMemoryMiB: 4096
+    machineRootVolume: {diskSize: 30}
+    machineTags: [proxcloud]
 
 clusterNetwork:
   pods: 10.244.0.0/16

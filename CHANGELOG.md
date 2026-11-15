@@ -179,6 +179,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   template updates and job scheduler). Playwright specs check the preview before Apply, the confirmation in the apply
   body and Go live staying disabled until its prerequisites hold, against the mock API; not run against a live API,
   and Go live not run against a cluster.
+- **Cluster chart `proxmox-kamaji-cluster` 0.1.11 can render the platform's own cluster** (`controlPlane.kind:
+  kubeadm`, ADR 0009): the managed-services job of a later release creates its workload cluster (node groups
+  `system`, `kamaji`, `dbaas`) from the same chart the tenants use, through ArgoCD, instead of a template of its own.
+  That mode renders a `KubeadmControlPlane` with one replica, pinned to one PVE node, with the kube-vip static pod,
+  its prepare script, `preKubeadmCommands`, provider-id kubelet argument and certSANs of installer stage 50's
+  services cluster (`services-cluster.yml.j2`), the endpoint on the `ProxmoxCluster`, and the admission plugins
+  `NodeRestriction,PodNodeSelector,PodTolerationRestriction`, so namespace annotations can place pods on a node
+  group. It renders no CAAPH add-ons, no ClusterResourceSet, no services-side CSI controller and no Gateway API
+  carriers; the node groups are unchanged. The default stays `kamaji`: for tenant values the output is
+  byte-identical to 0.1.10 (`TestChartGolden`), and existing clusters and providers keep their chart pin. Inert:
+  nothing renders kubeadm mode yet. The tag `proxmox-kamaji-cluster-v0.1.11` is not cut, so the chart is not
+  published, and kubeadm mode has not run against a cluster (the first kubeadm join of the platform cluster is a
+  lab check of the managed-services design).
 
 ### Changed
 

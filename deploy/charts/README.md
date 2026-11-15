@@ -24,7 +24,12 @@ Three charts live here:
   on the services cluster through an ArgoCD `Application` that ProxCloud writes
   (`internal/cloud/kamaji`). The installer also uses it for the sandbox cluster (stage 55).
   Block volumes through the CSI gateway need chart 0.1.7 or later
-  ([managed-k8s.md](../../docs/managed-k8s.md)).
+  ([managed-k8s.md](../../docs/managed-k8s.md)). From 0.1.11, `controlPlane.kind: kubeadm`
+  renders the platform's own workload cluster of managed services instead
+  ([ADR 0009](../../docs/adr/0009-managed-services-platform-lifecycle.md)): a
+  `KubeadmControlPlane` on one VM with kube-vip, as installer stage 50 builds the services
+  cluster, and no tenant add-ons, CSI controller or Gateway API carriers. Tenant clusters keep
+  the default `kamaji`, whose output is unchanged; nothing renders kubeadm mode yet.
 
 ## Publishing
 
@@ -47,7 +52,7 @@ pullable; see [release readiness](../../docs/release-readiness.md).
 For `database-cluster` and `proxmox-kamaji-cluster`, bump `version:` in `Chart.yaml`
 in the PR that changes the chart, merge, then have a maintainer deliberately cut
 the matching tag. The current source versions are database `0.5.1` and Kubernetes
-`0.1.10`; they are independent of the app's `0.6.0`. Publishing is idempotent — an
+`0.1.11`; they are independent of the app's `0.6.0`. Publishing is idempotent — an
 already-published version is skipped, so a reused version does not update an old
 artifact. These are release operations, not commands to run during normal setup.
 See [CI/release operations](../../docs/ci-release.md) for full verification.

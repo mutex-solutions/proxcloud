@@ -148,7 +148,7 @@ class ReleaseContractTests(unittest.TestCase):
 
     def test_managed_chart_versions_stay_independent(self):
         self.assertEqual(read_yaml("deploy/charts/database-cluster/Chart.yaml")["version"], "0.5.1")
-        self.assertEqual(read_yaml("deploy/charts/proxmox-kamaji-cluster/Chart.yaml")["version"], "0.1.10")
+        self.assertEqual(read_yaml("deploy/charts/proxmox-kamaji-cluster/Chart.yaml")["version"], "0.1.11")
 
     def test_image_and_app_chart_publication_validate_before_effects(self):
         build = read_yaml(".github/workflows/docker.yml")["jobs"]["build"]["steps"]
