@@ -385,13 +385,24 @@ are several, `errors.details.problems`.
   `upgradeFrom` and the removal of a stateful component block, and an installed
   BOM this release does not carry blocks with `bom_unsupported`.
 
-- `POST /installations/{id}/runs` `{kind: apply|remove}`: `202 {runId}`. A run
+- `GET /installations/{id}?live=1`: the installation with `live`
+  (`phase`, `components[] {name, cluster, sync, health}`, `error`), read from
+  the seed's ArgoCD for this request and never stored. `live.phase` is
+  `degraded` when the stored phase is `ready` and the seed does not answer,
+  lists no Application, or one is not Synced and Healthy.
+- `POST /installations/{id}/runs` `{kind: apply|remove, confirm}`: `202 {runId}`. A run
   and its durable job (`platform.run/v1`, key `platform-run-<runId>`) are
   written in one transaction; `409 run_active` while another run of the
   installation is not finished, `409 bom_unsupported` when the installed BOM is
   not one this release carries. Without the runner (it starts only when
   `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true` too) the route answers
-  `409 platform_disabled`; the reads below still work.
+  `409 platform_disabled`; the reads below still work. `confirm` belongs to a
+  remove and must be `remove <installation name>` (`400 invalid_confirmation`
+  otherwise). With it, a remove whose seed VM is gone deletes the VMs of pool
+  `proxcloud-system` tagged `pc-platform-<id>` and the recorded volumes, and a
+  remove whose workload cluster does not answer goes on without checking for
+  tenants. Without it the first fails `seed_lost` and the second is retried,
+  then fails `workload_api_unreachable`.
 - `GET /installations/{id}/runs[/{runId}]`: the newest runs, or one, with
   their stages (`state`, `retries`, `deadline`, `items`, `code`, `message`,
   `receipt`). A run whose job ran out of attempts reads `failed` with code
@@ -400,12 +411,34 @@ are several, `errors.details.problems`.
   claim or write; the run ends `cancelled` and the installation `failed`.
   Nothing is deleted.
 
-This build runs stages 1 to 5 of an apply (`validate`, `images`, `seed-vm`,
-`seed-api`, `seed-identity`) and the seed part of a remove; an apply that
-reaches stage 6 ends `failed` with code `stage_unavailable`, and a remove is
-refused the same way while a workload cluster status exists. A run's job is
-never replayed through `/admin/durable-jobs` (`409`): a new run is the retry.
-The seed kubeconfig and the seed credential rotation are not there yet.
+- `GET /installations/{id}/seed-kubeconfig` (`admin:service:manage`, although
+  a GET): `{kubeconfig, expiresAt}`, a kubeconfig of the seed with a one-hour
+  token of its `proxcloud-portal` service account (cluster-admin). Nothing
+  stores it. The audit entry (`BREAK_GLASS`) has the actor, the installation
+  and the expiry, never the token, and is written before the answer; `409
+  no_seed` without a ready seed, `502` when the seed issues no token.
+- `POST /installations/{id}/seed-credential/rotate`: creates the service
+  account's next token Secret (`proxcloud-portal-token-g<n+1>`), checks that
+  its token is cluster-admin, stores it, then deletes the older token Secrets,
+  which revokes their tokens. `409 run_active` during a run, `409 no_seed`
+  without a ready seed. A `502` means the rotation did not finish:
+  `status.seed.tokenSecret` names the stored credential, and a second call
+  deletes what the first left.
+
+An apply runs `validate`, `images`, `seed-vm`, `seed-api`, `seed-identity`,
+`seed-platform`, `cluster`, `workload-access`, `workload-platform`, `register`
+and `done`; a remove runs `remove-cluster`, `remove-seed` and
+`remove-secrets`, and fails `tenants_exist` while tenant clusters or databases
+run on the platform. Stage 10 (`register`) creates the Kubernetes and Databases
+providers, or adopts the rows that carry `config.platformInstallationId`; on
+an adopted row it rewrites `config.argocd`, `config.namespacePlacement`,
+`config.cluster.pveApiUrl`, `config.database.{egressFence,lbAddressPool,storageClasses}`
+and the kubeconfig, and leaves the name, the status and every other key. A
+remove sets both providers `DISABLED` and does not delete them; a later apply
+adopts them and leaves them `DISABLED`. A seed of `mode: existing` still ends
+`stage_unavailable`. A run's job is never replayed through
+`/admin/durable-jobs` (`409`): a new run is the retry. None of the stages after
+`seed-identity` has run against a real cluster yet.
 
 ## Admin API — `/admin-api/v1`
 

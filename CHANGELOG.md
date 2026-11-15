@@ -267,6 +267,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server CA the CD writes whether PVE adds a clone to its pool only when the clone ends, which stage 3 assumes, and whether detaching the CD
   from the running seed and deleting the ISO it had attached (stage 5) takes effect on a real PVE: an IDE CD removed
   from a running VM may stay a pending change, and only the fake shows the store no longer listing the volume.
+- **The managed-services run, stages 6 to 11, the cluster part of Remove, the live read, the break-glass kubeconfig
+  and the seed credential rotation** (`internal/platformlife/{cluster,remove,seedaccess}.go`,
+  `internal/platform/admin/platform.go`): with the seed ready, a run now builds the platform on it, so an apply no
+  longer ends `stage_unavailable` at stage 6 (ADR 0009, design §4.2, §4.6, §5). Stage 6 creates the seed's ArgoCD
+  (a k3s HelmChart through the API), its project and repositories and the seed's components wave by wave; stage 7
+  writes the CAPI token's Secret and the workload cluster's Application, deletes the MachineDeployments of nodes no
+  longer in a group and waits for the control plane, the admin kubeconfig and every Machine Running (`machine_failed`
+  names the machine, its VMID and Cluster API's message); stage 8 gives the seed's ArgoCD a `TokenRequest` token of
+  `kube-system/argocd-manager` on the workload, written only to the seed's cluster Secret and renewed only under 90
+  days or when the account was recreated, and writes the CSI token's Secret; stage 9 applies the workload's
+  components, each wave only when the one before is Synced and Healthy against the BOM's version (20 minutes per
+  wave), waits for every node Ready with its group label and records the proxmox-csi volumes of the platform's own
+  claims in `status.volumes`; stage 10 creates or adopts the Kubernetes and Databases providers by `config.provider`
+  plus `config.platformInstallationId` (`provider_conflict` otherwise; on an adopted row only `argocd`,
+  `namespacePlacement`, `cluster.pveApiUrl`, `database.{egressFence,lbAddressPool,storageClasses}` and the kubeconfig
+  are rewritten, so name, status, versions and the attach policy stay the operator's); stage 11 writes the components
+  and the BOM. The clusterctl components are gated on the clusterctl inventory equal to the BOM, and the run starts
+  the Application's sync again when the hook ended with providers missing; a provider at another version fails
+  `capi_init_failed`. Remove now refuses while tenant Applications exist on the workload (`tenants_exist`), sets the
+  providers `DISABLED`, reads the platform's volumes again, deletes the Application and then the Cluster, waits up to
+  45 minutes for the machines (`machine_delete_stuck`) and deletes exactly the recorded volumes with the CSI token
+  before the seed. `POST …/runs` takes `confirm: "remove <name>"`: with it a remove whose seed VM is gone deletes the
+  VMs of `proxcloud-system` tagged `pc-platform-<id>` and the recorded volumes, and a remove whose workload does not
+  answer goes on without the tenant check; without it the first fails `seed_lost` and the second is retried.
+  `GET …/installations/{id}?live=1` adds the components' sync and health from the seed and a derived `degraded`;
+  `GET …/seed-kubeconfig` answers a one-hour cluster-admin kubeconfig and audits actor and expiry only;
+  `POST …/seed-credential/rotate` creates the next token Secret, checks and stores its token, then deletes the older
+  ones, and is refused during a run. Not verified: none of it has run against a real k3s, ArgoCD, Cluster API or
+  Proxmox (the tests use a fake Kubernetes API for the seed and the workload and a fake PVE API; the rotation's store
+  and the confirmation have PostgreSQL tests that were compiled but not run here). Owed on the lab: that ArgoCD
+  reports `status.sync.comparedTo.source.targetRevision` and takes an `operation` patched onto an Application the
+  way the gate assumes, the clusterctl inventory's `type`/`providerName`/`version` values, the Cluster and Machine
+  status fields of the Cluster API release in the BOM, the name `argocd-repo-server` under the k3s HelmChart, the
+  proxmox-csi volume handle form `region/node/storage/volume`, and that the CSI token may list and delete on the
+  boot store. Not in this change: deleting the seed's other Applications before the seed (the seed VM is deleted
+  with them), the `seed.mode: existing` path, and `capmox_auth_failed` from anything but a Machine's failure message.
 
 ### Changed
 
