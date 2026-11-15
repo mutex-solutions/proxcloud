@@ -30,6 +30,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
@@ -39,7 +40,6 @@ import (
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/durablejobs"
-	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platformlife"
@@ -546,9 +546,14 @@ func breakGlassEvent(r *http.Request, in *platformlife.Installation, expires tim
 
 // platformSeedKubeconfig hands the operator a kubeconfig of the seed with a one-hour token of the portal's
 // service account (cluster-admin). The entry is audited before the kubeconfig goes out; one that cannot be written
-// keeps it in.
+// keeps it in, and without an audit service no token is asked for. No cache may keep the answer.
 func (h *Handler) platformSeedKubeconfig(w http.ResponseWriter, r *http.Request) {
 	if !h.platformGate(w, r, externalServiceManagePerm) {
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	if h.audit == nil {
+		httpx.WriteError(w, httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable, "The audit log is not available, so no seed kubeconfig is issued"))
 		return
 	}
 	in, err := h.platform.Get(r.Context(), chi.URLParam(r, "id"))
@@ -567,10 +572,8 @@ func (h *Handler) platformSeedKubeconfig(w http.ResponseWriter, r *http.Request)
 		platformErr(w, http.StatusBadGateway, platformlife.CodeSeedAPIUnreachable, "The seed did not issue a token", nil)
 		return
 	}
-	if h.audit != nil {
-		if err := h.audit.Log(r.Context(), breakGlassEvent(r, in, expires)); httpx.WriteError(w, err) {
-			return
-		}
+	if err := h.audit.Log(r.Context(), breakGlassEvent(r, in, expires)); httpx.WriteError(w, err) {
+		return
 	}
 	httpx.OK(w, map[string]any{"kubeconfig": kubeconfig, "expiresAt": expires.UTC()})
 }
@@ -622,28 +625,40 @@ func (h *Handler) platformSeedRotate(w http.ResponseWriter, r *http.Request) {
 
 // PlatformRegister creates or adopts one provider row of a managed-services installation from a stage 10 body and
 // answers its id. A row is the installation's by config.provider plus config.platformInstallationId; on an adopted
-// row only the keys stage 10 owns and the kubeconfig are rewritten.
-func (h *Handler) PlatformRegister(ctx context.Context, body map[string]any) (string, error) {
-	rows, err := h.repo.ListRaw(ctx, externalServiceCollection)
-	if err != nil {
-		return "", err
-	}
-	row, err := platformlife.AdoptProvider(rows, body)
-	if err != nil {
-		return "", err
-	}
-	if row == nil {
-		if row, err = h.createExternalService(ctx, body); err != nil {
-			return "", err
+// row only the keys stage 10 owns and the kubeconfig are rewritten. The list and the insert run in one transaction
+// under the installation's run lock, so two runners cannot both find no row and both create one. A body the provider
+// validation refuses is ErrProviderConflict: no retry changes it.
+func (h *Handler) PlatformRegister(ctx context.Context, body map[string]any) (id string, err error) {
+	cfg, _ := body["config"].(map[string]any)
+	installation, _ := cfg[platformlife.ProviderMarker].(string)
+	err = h.repo.db.WithTx(ctx, func(ctx context.Context) error {
+		if err := h.repo.db.LockXact(ctx, "platform-run:"+installation); err != nil {
+			return err
 		}
-		id, _ := row["_id"].(string)
-		return id, nil
-	}
-	secret, _ := body["secret"].(map[string]any)
-	kubeconfig, _ := secret["kubeconfig"].(string)
-	setSecretLeaf(h, ensureMap(row, "secret"), "kubeconfig", kubeconfig)
-	id := serviceRowID(row)
-	return id, h.repo.ReplaceDoc(ctx, externalServiceCollection, id, row)
+		rows, err := h.repo.ListRaw(ctx, externalServiceCollection)
+		if err != nil {
+			return err
+		}
+		row, err := platformlife.AdoptProvider(rows, body)
+		if err != nil {
+			return err
+		}
+		if row == nil {
+			row, err = h.createExternalService(ctx, body)
+			var refused *httpx.HTTPError
+			if errors.As(err, &refused) && refused.Status >= 400 && refused.Status < 500 {
+				return fmt.Errorf("%w: %s", platformlife.ErrProviderConflict, refused.Msg)
+			}
+			id, _ = row["_id"].(string)
+			return err
+		}
+		secret, _ := body["secret"].(map[string]any)
+		kubeconfig, _ := secret["kubeconfig"].(string)
+		setSecretLeaf(h, ensureMap(row, "secret"), "kubeconfig", kubeconfig)
+		id, _ = row["_id"].(string)
+		return h.repo.ReplaceDoc(ctx, externalServiceCollection, id, row)
+	})
+	return id, err
 }
 
 // PlatformDisable sets the provider rows of an installation DISABLED (Remove).
@@ -658,17 +673,10 @@ func (h *Handler) PlatformDisable(ctx context.Context, installationID string) er
 			continue
 		}
 		row["status"] = externalservice.StatusDisabled
-		if err := h.repo.ReplaceDoc(ctx, externalServiceCollection, serviceRowID(row), row); err != nil {
+		id, _ := row["_id"].(string)
+		if err := h.repo.ReplaceDoc(ctx, externalServiceCollection, id, row); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-func serviceRowID(row pgdoc.M) string {
-	if id, ok := row["_id"].(string); ok {
-		return id
-	}
-	id, _ := row["id"].(string)
-	return id
 }

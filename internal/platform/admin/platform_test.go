@@ -131,3 +131,16 @@ func TestBreakGlassEventHasNoToken(t *testing.T) {
 		t.Fatalf("the entry carries more than actor and expiry: %s", raw)
 	}
 }
+
+// Without an audit service the break-glass route issues nothing: it answers 503 before it reads the installation or
+// asks the seed for a token (the store here has no database, so a read would panic), and the answer is not cacheable.
+func TestSeedKubeconfigNeedsTheAuditLog(t *testing.T) {
+	h := &Handler{adminIssuer: "operator-realm"}
+	h.SetPlatform(platformlife.NewStore(nil, nil))
+	r := chi.NewRouter()
+	h.Routes(r)
+	w := tuDo(r, "GET", "/admin/platform/installations/pi-1/seed-kubeconfig", "", &httpx.RequestContext{SigV4KeyID: "pk-test"})
+	if w.Code != http.StatusServiceUnavailable || w.Header().Get("Cache-Control") != "no-store" || strings.Contains(w.Body.String(), "kubeconfig\":") {
+		t.Fatalf("%d %q %s", w.Code, w.Header().Get("Cache-Control"), w.Body.String())
+	}
+}
