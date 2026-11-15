@@ -1,8 +1,12 @@
 // Managed services: /admin/platform (internal/platform/admin/platform.go), enough to walk the whole page without a
 // cluster. The first apply run fails at "seed-api" with seed_api_unreachable and every later one succeeds, so Retry has
 // something to do; the preflight fails "credentials" until both token secrets are stored. A run moves one stage per
-// STAGE_MS of wall time. `?mock-platform=<preset>` in the URL starts the page in one state:
-// disabled | draft | running | failed | ready | removing (none: enabled, nothing saved).
+// STAGE_MS of wall time. Like the API, `rev` moves only when the settings are saved, and every write refuses a body
+// field the API's structs do not have. `?mock-platform=<preset>` in the URL starts the page in one state:
+// disabled | draft | isolation (the isolation check fails until a provider sync) | norunner (runs answer 409) |
+// running | waiting (stage 4 is trying again) | failed | dead (the run's job died: the stored phase stays applying) |
+// ready | degraded (one component out of sync) | silent (the seed does not answer) | unread (the live read fails) | removing
+// (none: enabled, nothing saved).
 import { ApiError } from "@/lib/api"
 import { on } from "../router"
 import { db } from "../db"
@@ -29,10 +33,38 @@ export const mockPlatform = {
   secrets: {} as Record<string, { capi?: boolean; csi?: boolean }>, // which secrets are stored; never their values
   runs: [] as Doc[],
   applies: 0,
+  synced: false, // a provider sync ran (handlers/setup.ts): the isolation preset's check passes after it
 }
 
 const fail = (status: number, code: string, message: string, details: Doc = {}) => new ApiError(status, status, message, { code, ...details })
 const now = () => new Date().toISOString()
+const TERMINAL = ["succeeded", "failed", "cancelled"]
+
+// The API decodes every write with DisallowUnknownFields: strict refuses a key its struct does not have. A shape names
+// the keys; true is a value, an object a nested struct, [shape] a list of them.
+type Shape = { [k: string]: true | Shape | [Shape] }
+function strict(v: unknown, shape: Shape, at = "") {
+  if (v === null || typeof v !== "object") return
+  for (const [k, x] of Object.entries(v)) {
+    const want = shape[k]
+    if (!want) throw new ApiError(400, 400, `Invalid request body: unknown field "${at}${k}"`)
+    if (Array.isArray(want)) for (const item of Array.isArray(x) ? x : []) strict(item, want[0], `${at}${k}.`)
+    else if (want !== true) strict(x, want, `${at}${k}.`)
+  }
+}
+const MACHINE: Shape = { node: true, cores: true, memoryMiB: true, diskGiB: true }
+const INSTALLATION: Shape = {
+  name: true, serviceId: true, provisionedBy: true, layout: true, rev: true,
+  spec: {
+    pveApiUrl: true, storage: { boot: true, iso: true, import: true },
+    network: { bridge: true, prefix: true, gateway: true, dns: true, mtu: true },
+    seed: { mode: true, pool: true, node: true, address: true, cores: true, memoryMiB: true, diskGiB: true, sshKeys: true, apiSources: true },
+    clusters: [{ name: true, roles: true, endpoint: true, nodeRange: true, metallbRange: true, controlPlane: MACHINE,
+      nodeGroups: [{ name: true, nodes: true, count: true, cores: true, memoryMiB: true, diskGiB: true }] }],
+    nodeImage: { mode: true, templates: true },
+  },
+}
+const TOKEN: Shape = { tokenId: true, secret: true }
 
 export const mockSpec: Doc = {
   pveApiUrl: "https://10.90.0.2:8006",
@@ -72,7 +104,7 @@ const view = (in_: Doc) => {
   const sec = mockPlatform.secrets[in_.id] ?? {}
   return { ...in_, credentials: { ...(sec.capi ? { capi: { tokenId: "capmox@pve!capi" } } : {}), ...(sec.csi ? { csi: { tokenId: "csi@pve!csi" } } : {}) } }
 }
-const activeRun = (id: string) => mockPlatform.runs.find((r) => r.installationId === id && !["succeeded", "failed", "cancelled"].includes(tick(r).state))
+const activeRun = (id: string) => mockPlatform.runs.find((r) => r.installationId === id && !TERMINAL.includes(tick(r).state))
 
 function seedStatus(in_: Doc) {
   if (in_.status.seed?.readyAt) return
@@ -89,18 +121,16 @@ function newRun(in_: Doc, kind: string, startedAt = Date.now()): Doc {
   mockPlatform.runs.unshift(run)
   in_.lastRunId = run.id
   in_.status.phase = kind === "apply" ? "applying" : "removing"
-  in_.rev++
   return run
 }
 
 // tick moves a run to where the clock says it is, and its installation with it.
 function tick(run: Doc): Doc {
-  if (["succeeded", "failed", "cancelled"].includes(run.state)) return run
+  if (TERMINAL.includes(run.state) || run.dead) return run
   const in_ = mockPlatform.installations.find((i) => i.id === run.installationId)!
   const end = (state: string, phase: string, code?: string, message?: string) => {
     Object.assign(run, { state, code, message, finishedAt: now() })
     in_.status.phase = phase
-    in_.rev++
   }
   if (run.cancelRequested && Date.now() >= run.cancelAt) {
     for (const s of run.stages) if (s.state === "running") s.state = "pending"
@@ -121,6 +151,11 @@ function tick(run: Doc): Doc {
       end("failed", "failed", s.code, s.message)
       return run
     }
+    if (s.id === run.waitAt) { // the stage keeps trying: the runner stores why on the waiting stage
+      Object.assign(s, { state: "waiting", retries: 2, code: "seed_api_unreachable", message: `The seed's API at ${in_.spec.seed.address}:6443 does not answer yet: dial tcp: i/o timeout.` })
+      run.state = "waiting"
+      return run
+    }
     if (i < at) Object.assign(s, { state: "done", finishedAt: t(i + 1) })
     else s.state = "running"
     if (s.id === "seed-identity" && s.state === "done") seedStatus(in_)
@@ -128,7 +163,7 @@ function tick(run: Doc): Doc {
   if (at >= run.stages.length) {
     if (run.kind === "remove") {
       end("succeeded", "removed")
-      in_.status.seed = undefined
+      in_.status = { phase: "removed", providers: in_.status.providers } // what was built is forgotten; the provider rows stay
       delete mockPlatform.secrets[in_.id]
       for (const s of db.services) if (s.config?.platformInstallationId === in_.id) s.status = "DISABLED"
     } else {
@@ -137,6 +172,15 @@ function tick(run: Doc): Doc {
     }
   }
   return run
+}
+
+// settleDead ends a run whose job died, as the API does before the next run starts or when the run is cancelled.
+function settleDead(in_: Doc) {
+  for (const run of mockPlatform.runs) {
+    if (run.installationId !== in_.id || !run.dead || TERMINAL.includes(run.state)) continue
+    Object.assign(run, { state: "failed", code: "job_dead", finishedAt: now() })
+    in_.status.phase = "failed"
+  }
 }
 
 function ready(in_: Doc) {
@@ -166,7 +210,8 @@ function checks(in_: Doc): Doc[] {
     row("flags", true, "Managed services and VM template updates are on, and a GitHub integration is saved.", ""),
     row("spec", true, "The installation is complete and consistent.", ""),
     row("network", true, "The platform network is apart from every tenant, sandbox and public network, and tenants can reach the MetalLB range.", ""),
-    row("isolation", true, "The platform addresses are blocked networks; the cluster firewall rules are written with the first tenant network.", ""),
+    row("isolation", preset !== "isolation" || mockPlatform.synced, "The platform addresses are blocked networks; the cluster firewall rules are written with the first tenant network.",
+      "The seed address 10.90.0.5 and the API address 10.90.0.10 are not among the provider's blocked networks: add 10.90.0.5/32 and 10.90.0.10/32."),
     row("credentials", both, "Both platform tokens are stored.", `No secret is stored for ${[!sec.capi && "capmox@pve!capi", !sec.csi && "csi@pve!csi"].filter(Boolean).join(" and ")}.`),
     ...["capi", "csi"].map((t) => row(`privileges:${t}`, both, `The ${t} token holds its privileges.`, `The ${t} token could not be checked: no secret is stored.`)),
     row("privileges:kubemint", true, "The portal token holds the ProxCloudKubeMint privileges.", ""),
@@ -199,8 +244,14 @@ if (preset && preset !== "disabled") {
   const in_ = create("lab", mockSpec)
   if (preset !== "draft") mockPlatform.secrets[in_.id] = { capi: true, csi: true }
   if (preset === "running") { mockPlatform.applies = 1; newRun(in_, "apply", Date.now() - 6.5 * STAGE_MS) }
+  if (preset === "waiting") { mockPlatform.applies = 1; newRun(in_, "apply", Date.now() - 6.5 * STAGE_MS).waitAt = "seed-api" }
   if (preset === "failed") tick(newRun(in_, "apply", Date.now() - 60_000))
-  if (preset === "ready" || preset === "removing") {
+  if (preset === "dead") {
+    mockPlatform.applies = 1
+    tick(newRun(in_, "apply", Date.now() - 3.5 * STAGE_MS)).dead = true
+    in_.status.seed = { vmid: 9100, node: "pve1", generation: 1, cdVolume: "local:iso/pc-seed-pi-00000001.iso" }
+  }
+  if (["ready", "degraded", "silent", "unread", "removing"].includes(preset)) {
     mockPlatform.applies = 1
     tick(newRun(in_, "apply", Date.now() - 3_600_000))
     if (preset === "removing") newRun(in_, "remove", Date.now() - 0.5 * STAGE_MS)
@@ -218,30 +269,51 @@ on("GET /admin/platform/installations", () => {
 on("POST /admin/platform/installations", ({ opts }) => {
   const b = (opts.body ?? {}) as Doc
   if (!mockPlatform.enabled) find("")
+  strict(b, INSTALLATION)
   refuse(b.name, b.spec)
   if (mockPlatform.installations.some((i) => i.serviceId === b.serviceId)) throw fail(409, "installation_exists", "this provider already has an installation")
-  return { data: view(create(b.name, { ...b.spec, seed: { mode: "vm", pool: "proxcloud-seed", ...b.spec.seed }, nodeImage: { mode: "bom" } })) }
+  // What the API fills in: the seed's mode and pool, the cluster's name and roles, the node image mode, and the import
+  // store of the provider when none is named.
+  const provider = db.services.find((s) => s.id === b.serviceId)
+  return { data: view(create(b.name, {
+    ...b.spec,
+    storage: { ...b.spec.storage, import: b.spec.storage?.import || provider?.config?.importStorage || "local" },
+    seed: { mode: "vm", pool: "proxcloud-seed", ...b.spec.seed },
+    clusters: (b.spec.clusters ?? []).map((c: Doc) => ({ name: "pc-platform", roles: ["kamaji", "dbaas"], ...c })),
+    nodeImage: { mode: "bom" },
+  })) }
 })
 
 on("GET /admin/platform/installations/:id", ({ params, query }) => {
   const in_ = find(params.id)
   mockPlatform.runs.forEach(tick)
   if (query.get("live") !== "1") return { data: view(in_) }
-  const components = in_.status.phase === "ready" ? bom.components.map((c) => ({ name: c.name, cluster: c.cluster, sync: "Synced", health: "Healthy" })) : []
-  return { data: { ...view(in_), live: { phase: in_.status.phase, components } } }
+  if (in_.status.phase !== "ready") return { data: { ...view(in_), live: { phase: in_.status.phase, components: [] } } }
+  if (preset === "unread") throw new ApiError(500, 500, "The installation's secrets could not be read")
+  if (preset === "silent") return { data: { ...view(in_), live: { phase: "degraded", components: [], error: "The seed's API did not answer or refused the stored credential." } } }
+  const components = bom.components.map((c) => ({ name: c.name, cluster: c.cluster, sync: "Synced", health: "Healthy" }))
+  if (preset === "degraded") Object.assign(components[2], { sync: "OutOfSync", health: "Progressing" })
+  return { data: { ...view(in_), live: { phase: preset === "degraded" ? "degraded" : "ready", components } } }
 })
 
 on("PUT /admin/platform/installations/:id", ({ params, opts }) => {
   const in_ = find(params.id)
   const b = (opts.body ?? {}) as Doc
-  if (activeRun(in_.id)) throw fail(409, "run_active", "a run of this installation is not finished")
-  if (b.rev !== in_.rev) throw fail(409, "rev_conflict", "the installation changed since it was read")
+  strict(b, INSTALLATION)
+  if (b.rev !== in_.rev) throw fail(409, "rev_conflict", "the installation changed since it was read: read it again")
+  if (activeRun(in_.id)) throw fail(409, "run_active", "a run of this installation is not finished: wait for it or cancel it")
   refuse(b.name, b.spec)
-  if (in_.status.bom) {
+  if (in_.status.bom) { // FixedChanges in internal/platformlife/installation.go
+    const same = (a: unknown, c: unknown) => JSON.stringify(a) === JSON.stringify(c)
+    const [old, next] = [in_.spec.clusters[0], b.spec.clusters?.[0] ?? {}]
     const fixed = [
       b.name !== in_.name && "name",
-      JSON.stringify(b.spec.network) !== JSON.stringify(in_.spec.network) && "spec.network",
-      b.spec.seed.address !== in_.spec.seed.address && "spec.seed.address",
+      !same(b.spec.network, in_.spec.network) && "spec.network",
+      ...["mode", "pool", "node", "address"].map((k) => b.spec.seed?.[k] !== in_.spec.seed[k] && `spec.seed.${k}`),
+      b.spec.clusters?.length !== in_.spec.clusters.length && "spec.clusters",
+      next.name !== old.name && "spec.clusters[0].name",
+      next.endpoint !== old.endpoint && "spec.clusters[0].endpoint",
+      !same((next.nodeGroups ?? []).map((g: Doc) => g.name), old.nodeGroups.map((g: Doc) => g.name)) && "spec.clusters[0].nodeGroups",
     ].filter(Boolean) as string[]
     if (fixed.length) throw fail(409, "fixed_fields", `These fields cannot change once the platform was installed (serviceId never): ${fixed.join(", ")}`, { problems: fixed })
   }
@@ -252,6 +324,7 @@ on("PUT /admin/platform/installations/:id", ({ params, opts }) => {
 on("PUT /admin/platform/installations/:id/credentials", ({ params, opts }) => {
   const in_ = find(params.id)
   const b = (opts.body ?? {}) as Doc
+  strict(b, { capi: TOKEN, csi: TOKEN })
   const uuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
   const problems = [["capi", "capmox@pve!capi"], ["csi", "csi@pve!csi"]].flatMap(([k, want]) =>
     !b[k] ? [] : b[k].tokenId !== want ? [`tokenId must be ${want}`] : !uuid.test(b[k].secret ?? "") ? [`the secret of ${want} is not a PVE token secret (a UUID)`] : [])
@@ -275,15 +348,19 @@ on("GET /admin/platform/installations/:id/plan", ({ params }) => {
 
 on("POST /admin/platform/installations/:id/runs", ({ params, opts }) => {
   const in_ = find(params.id)
+  if (preset === "norunner") throw fail(409, "platform_disabled", "Runs need the platform runner: set PROXCLOUD_PLATFORM_ENABLED=true and PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true")
   const b = (opts.body ?? {}) as Doc
+  strict(b, { kind: true, confirm: true })
   if (b.kind !== "apply" && b.kind !== "remove") throw fail(400, "invalid_kind", "kind is apply or remove")
   if (b.confirm && (b.kind !== "remove" || b.confirm !== `remove ${in_.name}`)) throw fail(400, "invalid_confirmation", `confirm must be "remove ${in_.name}"`)
+  settleDead(in_) // a run whose job died is finished first
   if (activeRun(in_.id)) throw fail(409, "run_active", "a run of this installation is not finished")
   return { data: { runId: newRun(in_, b.kind).id } }
 })
 
 const publicRun = (run: Doc) => {
-  const { t0: _t0, failAt: _failAt, cancelAt: _cancelAt, ...out } = tick(run)
+  const { t0: _t0, failAt: _failAt, cancelAt: _cancelAt, waitAt: _waitAt, dead, ...out } = tick(run)
+  if (dead && !TERMINAL.includes(out.state)) return { ...out, state: "failed", code: "job_dead" } // the view only: nothing is stored yet
   return out.cancelRequested && out.state !== "cancelled" ? { ...out, state: "cancelling" } : out
 }
 const findRun = (id: string, runId: string) => {
@@ -297,7 +374,11 @@ on("GET /admin/platform/installations/:id/runs/:runId", ({ params }) => ({ data:
 
 on("POST /admin/platform/installations/:id/runs/:runId/cancel", ({ params }) => {
   const run = findRun(params.id, params.runId)
-  if (["succeeded", "failed", "cancelled"].includes(tick(run).state)) throw fail(409, "run_finished", "the run is finished")
+  if (run.dead) {
+    settleDead(find(params.id))
+    return { data: publicRun(run) }
+  }
+  if (TERMINAL.includes(tick(run).state)) throw fail(409, "run_finished", "the run is finished")
   Object.assign(run, { cancelRequested: true, cancelAt: Date.now() + STAGE_MS }) // honoured at the runner's next wake-up
   return { data: publicRun(run) }
 })
@@ -315,6 +396,5 @@ on("POST /admin/platform/installations/:id/seed-credential/rotate", ({ params })
   if (!in_.status.seed?.readyAt) throw fail(409, "no_seed", "the installation has no ready seed")
   const n = Number(/g(\d+)$/.exec(in_.status.seed.tokenSecret)?.[1] ?? 1) + 1
   in_.status.seed = { ...in_.status.seed, generation: n, tokenSecret: `proxcloud-portal-token-g${n}` }
-  in_.rev++
   return { data: view(in_) }
 })

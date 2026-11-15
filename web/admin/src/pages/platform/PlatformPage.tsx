@@ -2,7 +2,7 @@
 // clusters and databases run on, through /api/v1/admin/platform (docs/api.md "Managed-services platform"). The page
 // shows one installation, the one of the first Proxmox provider: the API keeps one per provider.
 // ponytail: one installation on the page; add a picker when an install has two Proxmox providers with managed services.
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Link } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
@@ -23,7 +23,7 @@ import { hasPermission } from "@/lib/permissions"
 import { cn } from "@/lib/utils"
 import { CopyBlock, ErrorNote, LINK, errMsg, setupStatusQuery } from "@/pages/setup/common"
 import { CheckStep, IdentitiesStep, ReviewStep, SettingsStep } from "./InstallSteps"
-import { PLATFORM_KEY, STAGE_TITLE, codeAction, errCode, runActive, type Installation, type Run, type Stage } from "./model"
+import { PLATFORM_KEY, STAGE_TITLE, codeAction, errCode, isConflict, runActive, type Installation, type Run, type Stage } from "./model"
 
 const POLL_MS = 3000
 const INSTALL_SWITCH = "./proxcloud-up.sh install --managed-services"
@@ -62,12 +62,17 @@ function State({ state, className }: { state: string; className?: string }) {
   )
 }
 
-function Section({ title, state, description, children }: { title: string; state?: string; description?: React.ReactNode; children: React.ReactNode }) {
+// titleRef makes the title a place the page can move keyboard focus to (it is not in the tab order).
+function Section({ title, state, description, titleRef, children }: {
+  title: string; state?: string; description?: React.ReactNode; titleRef?: React.Ref<HTMLDivElement>; children: React.ReactNode
+}) {
   return (
     <Card>
       <CardHeader className="border-b">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <CardTitle className="text-base">{title}</CardTitle>
+          <div ref={titleRef} tabIndex={titleRef ? -1 : undefined} className="rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            <CardTitle className="text-base">{title}</CardTitle>
+          </div>
           {state ? <State state={state} /> : null}
         </div>
         {description ? <CardDescription>{description}</CardDescription> : null}
@@ -150,17 +155,35 @@ function Prerequisites({ serviceId, providerName }: { serviceId: string; provide
 
 const clock = (v?: string) => (v ? new Date(v).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "")
 
-function Failure({ code, message }: { code?: string; message?: string }) {
+// Why a stage or a run failed and what to do. retrying: the stage is still trying, so the same is shown without alarm,
+// while there is time to act before the stage's time limit.
+function Failure({ code, message, kind, retrying }: { code?: string; message?: string; kind: Run["kind"]; retrying?: boolean }) {
   if (!code && !message) return null
   return (
-    <div className="grid gap-1 rounded-lg border border-destructive/40 p-3 text-sm" role="group" aria-label="Failure">
+    <div className={cn("grid gap-1 rounded-lg border p-3 text-sm", !retrying && "border-destructive/40")} role="group" aria-label={retrying ? "Trying again" : "Failure"}>
+      {retrying ? <p className="font-medium">Trying again. It did not work yet:</p> : null}
       <p>{code ? <span className="mr-2 font-mono text-xs">{code}</span> : null}{message}</p>
-      {code ? <p><span className="font-medium">What to do: </span>{codeAction(code)}</p> : null}
+      {code ? <p><span className="font-medium">{retrying ? "What you can do meanwhile: " : "What to do: "}</span>{codeAction(code, kind)}</p> : null}
     </div>
   )
 }
 
-function StageRow({ stage, n }: { stage: Stage; n: number }) {
+const RUN_TITLE = { apply: "Installation run", remove: "Removal" }
+
+// One sentence for screen readers that changes as the run moves: the stage at work, then how the run ended.
+function announcement(run?: Run): string {
+  if (!run) return ""
+  if (!runActive(run)) {
+    return `${RUN_TITLE[run.kind]}: ${(STATE[run.state]?.label ?? run.state).toLowerCase()}.${run.code ? ` ${codeAction(run.code, run.kind)}` : ""}`
+  }
+  const stages = run.stages ?? []
+  const i = stages.findIndex((s) => s.state === "running" || s.state === "waiting")
+  if (i < 0) return `${RUN_TITLE[run.kind]}: ${(STATE[run.state]?.label ?? run.state).toLowerCase()}.`
+  const s = stages[i]
+  return `Stage ${i + 1} of ${stages.length}: ${STAGE_TITLE[s.id] ?? s.id}, ${s.state === "waiting" ? "trying again" : "running"}.`
+}
+
+function StageRow({ stage, n, kind }: { stage: Stage; n: number; kind: Run["kind"] }) {
   const times = [
     stage.startedAt ? `started ${clock(stage.startedAt)}` : "",
     stage.finishedAt ? `finished ${clock(stage.finishedAt)}` : stage.deadline ? `must finish by ${clock(stage.deadline)}` : "",
@@ -177,7 +200,9 @@ function StageRow({ stage, n }: { stage: Stage; n: number }) {
       </div>
       {stage.progress ? <p className="text-muted-foreground sm:pl-35">{stage.progress}</p> : null}
       {stage.receipt?.vmid ? <p className="text-muted-foreground sm:pl-35">VM {stage.receipt.vmid}{stage.receipt.name ? ` (${stage.receipt.name})` : ""}</p> : null}
-      {stage.state === "failed" ? <div className="sm:pl-35"><Failure code={stage.code} message={stage.message} /></div> : null}
+      {stage.state === "failed" || (stage.state === "waiting" && stage.code) ? (
+        <div className="sm:pl-35"><Failure code={stage.code} message={stage.message} kind={kind} retrying={stage.state === "waiting"} /></div>
+      ) : null}
       {stage.items?.length ? (
         <details className="sm:pl-35" open={stage.state === "failed"}>
           <summary className="cursor-pointer text-xs underline underline-offset-4">{stage.items.length} {stage.items.length === 1 ? "item" : "items"}</summary>
@@ -195,33 +220,58 @@ function StageRow({ stage, n }: { stage: Stage; n: number }) {
   )
 }
 
-function RunCard({ run, installation, canManage, onRetry, retrying, retryError, onRemove }: {
-  run: Run; installation: Installation; canManage: boolean; onRetry: () => void; retrying: boolean; retryError: unknown; onRemove: () => void
+// focus: this session started the run, so keyboard focus (lost with the pressed button) moves to the card's title.
+function RunCard({ run, installation, canManage, dirty, focus, onRetry, retrying, retryError, onRemove }: {
+  run: Run; installation: Installation; canManage: boolean; dirty: boolean; focus: boolean
+  onRetry: () => void; retrying: boolean; retryError: unknown; onRemove: () => void
 }) {
   const qc = useQueryClient()
+  const title = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (focus) title.current?.focus()
+  }, [focus, run.id])
   const cancel = useMutation({
     mutationFn: () => apiFetch<Run>(`${base(installation.id)}/runs/${run.id}/cancel`, { method: "POST", body: {} }),
     onSuccess: () => qc.invalidateQueries({ queryKey: PLATFORM_KEY }),
-    onError: (e) => toast.error(errMsg(e)),
+    onError: (e) => {
+      toast.error(errMsg(e))
+      if (isConflict(e)) void qc.invalidateQueries({ queryKey: PLATFORM_KEY }) // the run ended meanwhile
+    },
   })
   const active = runActive(run)
+  const remove = run.kind === "remove"
   const ended = run.state === "failed" || run.state === "cancelled"
   const seedCD = run.code === "job_dead" && installation.status.seed?.cdVolume
   // The run's own failure repeats its failed stage's; show it only when no stage carries it (job_dead, a cancel).
   const stageFailed = run.stages?.some((s) => s.state === "failed" && s.code === run.code)
   return (
     <Section
-      title={run.kind === "remove" ? "Removal" : "Installation run"}
+      title={RUN_TITLE[run.kind]}
+      titleRef={title}
       state={run.state}
       description={`Started ${fmtDateTime(run.startedAt ?? run.createdAt)}${run.requestedBy ? ` by ${run.requestedBy}` : ""}${run.finishedAt ? `, ended ${fmtDateTime(run.finishedAt)}` : ""}.`}
     >
-      {active ? <p className="text-sm text-muted-foreground" role="status">This page reads the run every few seconds. You can leave it: the run goes on.</p> : null}
+      {active ? <p className="text-sm text-muted-foreground">This page reads the run every few seconds. You can leave it: the run goes on.</p> : null}
       <ol aria-label="Stages">
-        {(run.stages ?? []).map((s, i) => <StageRow key={s.id} stage={s} n={i + 1} />)}
+        {(run.stages ?? []).map((s, i) => <StageRow key={s.id} stage={s} n={i + 1} kind={run.kind} />)}
       </ol>
-      {ended && !stageFailed ? <Failure code={run.code} message={run.message ?? (run.state === "cancelled" ? "The run was cancelled. Nothing was deleted." : undefined)} /> : null}
+      {ended && !stageFailed ? (
+        <Failure
+          kind={run.kind}
+          code={run.code}
+          message={run.message ?? (run.state !== "cancelled" ? undefined
+            : remove ? "The removal was cancelled. What it had already deleted stays deleted; the stages above show how far it came."
+              : "The run was cancelled. Nothing was deleted.")}
+        />
+      ) : null}
       {seedCD ? <p className="text-sm">The seed's start-up disc is still on <span className="font-mono">{seedCD}</span>. Retry or Remove deletes it.</p> : null}
-      {ended ? <p className="text-sm text-muted-foreground">Nothing is deleted when a run fails. Retry starts a new run that looks at what exists and goes on from there.</p> : null}
+      {ended ? (
+        <p className="text-sm text-muted-foreground">
+          {remove
+            ? "A removal that stops keeps what it already deleted. Remove again goes on from there."
+            : "Nothing is deleted when a run fails. Retry starts a new run that looks at what exists and goes on from there."}
+        </p>
+      ) : null}
       <ErrorNote title="The run did not start" error={retryError} />
       <div className="flex flex-wrap items-center gap-3">
         {active ? (
@@ -232,8 +282,9 @@ function RunCard({ run, installation, canManage, onRetry, retrying, retryError, 
             <span className="text-sm text-muted-foreground">A cancel takes effect within about 15 seconds; a task Proxmox has started finishes first.</span>
           </>
         ) : null}
-        {ended && run.kind === "apply" ? <Button disabled={!canManage || retrying} onClick={onRetry}>{retrying ? "Starting…" : "Retry"}</Button> : null}
-        {ended && run.kind === "remove" ? <Button variant="destructive" disabled={!canManage} onClick={onRemove}>Remove again</Button> : null}
+        {ended && !remove ? <Button disabled={!canManage || retrying || dirty} onClick={onRetry}>{retrying ? "Starting…" : "Retry"}</Button> : null}
+        {ended && !remove && dirty ? <span className="text-sm text-muted-foreground">Save the settings first: Retry runs with what is saved.</span> : null}
+        {ended && remove ? <Button variant="destructive" disabled={!canManage} onClick={onRemove}>Remove again</Button> : null}
       </div>
     </Section>
   )
@@ -241,8 +292,10 @@ function RunCard({ run, installation, canManage, onRetry, retrying, retryError, 
 
 // ── Ready ─────────────────────────────────────────────────────────────────────
 
-function Ready({ installation }: { installation: Installation }) {
-  const live = installation.live
+// live is the seed's answer of this page load; without one (it is being read, or the read failed) the card falls back
+// to what the last run recorded.
+function Ready({ installation, live, loading, error }: { installation: Installation; live?: Installation["live"]; loading: boolean; error: unknown }) {
+  const recorded = installation.status.components ?? []
   const p = installation.status.providers
   const expires = installation.status.clusters?.[0]?.argocdTokenExpiresAt
   const days = expires ? Math.floor((new Date(expires).getTime() - Date.now()) / 86_400_000) : undefined
@@ -254,7 +307,15 @@ function Ready({ installation }: { installation: Installation }) {
       description={`Release ${installation.status.bom?.release ?? "unknown"}. The components below are read from the seed each time this page loads.`}
     >
       {live?.error ? <Alert variant="destructive"><AlertTitle>The seed did not answer</AlertTitle><AlertDescription>{live.error}</AlertDescription></Alert> : null}
-      {!live ? <Skeleton className="h-24" /> : live.components.length ? (
+      <ErrorNote title="The live state could not be read" error={error} />
+      {loading ? <Skeleton className="h-24" /> : !live ? (
+        <div className="grid gap-1 text-sm">
+          <p className="text-muted-foreground">What the last run installed. Whether it is healthy now is not known.</p>
+          <ul aria-label="Components the last run installed" className="list-disc pl-5">
+            {recorded.map((c) => <li key={c.cluster + c.name}><span className="font-mono">{c.name}</span> {c.version}, on the {c.cluster === "seed" ? "seed" : "platform cluster"}</li>)}
+          </ul>
+        </div>
+      ) : live.components.length ? (
         <div className="overflow-x-auto">
           <table className="w-full text-left text-sm">
             <caption className="sr-only">Components and their live state</caption>
@@ -346,8 +407,8 @@ function RemoveDialog({ installation, open, onClose, onRemove, pending, error }:
           <div className="flex items-start gap-2">
             <Checkbox id="remove-force" checked={force} onCheckedChange={(v) => setForce(v === true)} className="mt-0.5" />
             <Label htmlFor="remove-force" className="leading-snug font-normal">
-              Go on even when the seed VM is gone or the platform cluster does not answer. Tenant clusters and databases are then not
-              looked for.
+              Go on even when the seed VM is gone or the platform cluster does not answer. ProxCloud then cannot see whether tenant
+              clusters or databases still run there: any that do are deleted with the cluster's machines and volumes.
             </Label>
           </div>
           <ErrorNote title="The removal did not start" error={error} />
@@ -361,7 +422,10 @@ function RemoveDialog({ installation, open, onClose, onRemove, pending, error }:
   )
 }
 
-function SeedAccess({ installation, canManage, active, onRemove }: { installation: Installation; canManage: boolean; active: boolean; onRemove: () => void }) {
+// active: a run is going on. locked: the API still holds the installation for a run (going on, or ended unsettled).
+function SeedAccess({ installation, canManage, active, locked, onRemove }: {
+  installation: Installation; canManage: boolean; active: boolean; locked: boolean; onRemove: () => void
+}) {
   const qc = useQueryClient()
   // The kubeconfig goes from the answer straight into a file: it is not kept in page state and never rendered.
   const download = useMutation({
@@ -383,6 +447,9 @@ function SeedAccess({ installation, canManage, active, onRemove }: { installatio
       toast.success("ProxCloud now uses a new seed credential; the old one no longer works")
       return qc.invalidateQueries({ queryKey: PLATFORM_KEY })
     },
+    onError: (e) => {
+      if (isConflict(e)) void qc.invalidateQueries({ queryKey: PLATFORM_KEY }) // a run started meanwhile: show it
+    },
   })
   const seedReady = !!installation.status.seed?.readyAt
   const phase = installation.status.phase
@@ -396,7 +463,7 @@ function SeedAccess({ installation, canManage, active, onRemove }: { installatio
             <ErrorNote title="No kubeconfig was issued" error={download.error} />
           </div>
           <div className="grid gap-1.5 text-sm">
-            <div><Button variant="outline" disabled={!canManage || active || rotate.isPending} onClick={() => rotate.mutate()}>{rotate.isPending ? "Replacing…" : "Replace the seed credential"}</Button></div>
+            <div><Button variant="outline" disabled={!canManage || locked || rotate.isPending} onClick={() => rotate.mutate()}>{rotate.isPending ? "Replacing…" : "Replace the seed credential"}</Button></div>
             <p className="text-muted-foreground">Gives ProxCloud a new credential for the seed and ends the old one. Not possible during a run.</p>
             <ErrorNote title="The credential was not replaced" error={rotate.error} />
           </div>
@@ -420,12 +487,13 @@ export default function PlatformPage() {
   const canManage = hasPermission(me?.permissions, "admin:service:manage")
   const [dirty, setDirty] = useState(false)
   const [removing, setRemoving] = useState(false)
+  const [conflict, setConflict] = useState(false) // the last Save lost against someone else's
+  const [started, setStarted] = useState("") // the run this session started last
 
   const list = useQuery({
     queryKey: [...PLATFORM_KEY, "installations"],
     queryFn: () => apiFetch<Installation[]>("/admin/platform/installations"),
     retry: false,
-    refetchInterval: (q) => (["applying", "removing"].includes(q.state.data?.[0]?.status.phase ?? "") ? POLL_MS : false),
   })
   const stored = list.data?.[0]
   const services = useAdminList<{ id: string; name: string; config?: Record<string, any> }>("/admin/service")
@@ -441,21 +509,38 @@ export default function PlatformPage() {
     retry: false,
     refetchInterval: (q) => (runActive(q.state.data) ? POLL_MS : false),
   })
-  // The list is read again while the phase says a run is going on, so a run that ended shows within one interval.
-  const active = runActive(run.data) || phase === "applying" || phase === "removing"
+  // The run says whether it is going on; the stored phase stands in until the run is read. A run whose job died is
+  // answered as failed while the stored phase stays applying or removing until Retry or Remove settles it: the page
+  // then offers both, and keeps locked what the API refuses until then (a settings save, a new seed credential).
+  const held = phase === "applying" || phase === "removing"
+  const active = run.data ? runActive(run.data) : held
+  const locked = active || held
+  // The installation is read again once when its run ends, for the phase and the status the run left.
+  const runEnded = !!run.data && !runActive(run.data)
+  const runId = run.data?.id
+  useEffect(() => {
+    if (runEnded) void qc.invalidateQueries({ queryKey: [...PLATFORM_KEY, "installations"] })
+  }, [qc, runEnded, runId])
 
+  // Keyed on the last run: the API changes `rev` only when the settings are saved, never with a run.
   const live = useQuery({
-    queryKey: [...PLATFORM_KEY, "live", stored?.id, stored?.rev],
+    queryKey: [...PLATFORM_KEY, "live", stored?.id, stored?.lastRunId],
     queryFn: () => apiFetch<Installation>(`${base(stored!.id)}?live=1`),
     enabled: phase === "ready",
     retry: false,
   })
+  // A query that is off still holds its last answer: the live state counts only while the installation is ready.
+  const liveState = phase === "ready" ? live.data?.live : undefined
 
   const start = useMutation({
     mutationFn: (body: { kind: "apply" | "remove"; confirm?: string }) => apiFetch<{ runId: string }>(`${base(stored!.id)}/runs`, { method: "POST", body }),
-    onSuccess: () => {
+    onSuccess: (r) => {
       setRemoving(false)
+      setStarted(r.runId)
       return qc.invalidateQueries({ queryKey: PLATFORM_KEY })
+    },
+    onError: (e) => {
+      if (isConflict(e)) void qc.invalidateQueries({ queryKey: PLATFORM_KEY }) // another session's run: show it
     },
   })
   const apply = () => start.mutate({ kind: "apply" })
@@ -466,7 +551,7 @@ export default function PlatformPage() {
       title="Managed services"
       eyebrow="System"
       description="Kubernetes clusters and databases for tenants. They run on a platform cluster that this page builds on Proxmox, starting from one small VM called the seed."
-      actions={stored ? <State state={live.data?.live?.phase ?? phase} /> : undefined}
+      actions={stored ? <span data-platform-state={liveState?.phase ?? phase}><State state={liveState?.phase ?? phase} /></span> : undefined}
     />
   )
   if (list.isLoading) return <>{header}<Skeleton className="h-64" /></>
@@ -483,7 +568,8 @@ export default function PlatformPage() {
         {!canManage ? (
           <Alert><AlertTitle>You can read this page</AlertTitle><AlertDescription>Changing anything needs the permission admin:service:manage.</AlertDescription></Alert>
         ) : null}
-        {ready && stored ? <Ready installation={live.data ?? stored} /> : null}
+        <p className="sr-only" role="status" aria-atomic="true">{announcement(run.data)}</p>
+        {ready && stored ? <Ready installation={stored} live={liveState} loading={live.isLoading} error={live.error} /> : null}
         {phase === "removed" && stored ? (
           <Section title={`Managed services “${stored.name}” were removed`} state="removed">
             <p className="text-sm">The two tokens are yours to end. Run this as root on one Proxmox node:</p>
@@ -492,13 +578,14 @@ export default function PlatformPage() {
           </Section>
         ) : null}
         {showRun ? (
-          <RunCard run={run.data!} installation={stored!} canManage={canManage} onRetry={apply} retrying={start.isPending} retryError={startError} onRemove={() => setRemoving(true)} />
+          <RunCard run={run.data!} installation={stored!} canManage={canManage} dirty={dirty} focus={run.data!.id === started} onRetry={apply} retrying={start.isPending} retryError={startError} onRemove={() => setRemoving(true)} />
         ) : null}
         <ErrorNote title="The run could not be read" error={run.error} />
         {!active ? (
           <>
             {!ready ? <Prerequisites serviceId={serviceId} providerName={provider?.name} /> : null}
-            <SettingsStep key={`${stored?.id}:${stored?.rev}`} installation={stored} serviceId={serviceId} canManage={canManage} onDirty={setDirty} />
+            <SettingsStep key={`${stored?.id}:${stored?.rev}`} installation={stored} serviceId={serviceId} canManage={canManage} locked={held}
+              conflict={conflict} onConflict={setConflict} onDirty={setDirty} />
             {stored ? (
               <>
                 <IdentitiesStep installation={stored} tokenId={provider?.config?.tokenId} canManage={canManage} />
@@ -510,7 +597,7 @@ export default function PlatformPage() {
             )}
           </>
         ) : null}
-        {stored ? <SeedAccess installation={stored} canManage={canManage} active={active} onRemove={() => setRemoving(true)} /> : null}
+        {stored ? <SeedAccess installation={stored} canManage={canManage} active={active} locked={locked} onRemove={() => setRemoving(true)} /> : null}
         {stored ? (
           <RemoveDialog
             key={String(removing)}

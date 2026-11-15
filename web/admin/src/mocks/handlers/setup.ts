@@ -292,4 +292,7 @@ on("POST /admin/setup/defaults", ({ opts }) => {
 })
 
 // The operator job trigger answers 202 with no body.
-on("POST /admin/job/external-service/sync", () => ({ data: undefined }))
+on("POST /admin/job/external-service/sync", () => {
+  mockPlatform.synced = true
+  return { data: undefined }
+})

@@ -69,6 +69,8 @@ export const GROUP_USE: Record<string, string> = {
 
 // errors.details.code of a refusal ("platform_disabled", "run_active", …) and its problems.
 export const errCode = (e: unknown) => (e instanceof ApiError ? (e.details?.code as string | undefined) : undefined)
+// A 409 says the page's copy is behind (another session saved, or started a run): the caller reads it again.
+export const isConflict = (e: unknown) => e instanceof ApiError && e.status === 409
 export const errProblems = (e: unknown): string[] => (e instanceof ApiError && Array.isArray(e.details?.problems) ? e.details.problems : [])
 
 export const runActive = (r?: Run) => !!r && ["queued", "running", "waiting", "cancelling"].includes(r.state)
@@ -260,14 +262,16 @@ export function validate(f: Form): Problem[] {
 // ── What the operator does ────────────────────────────────────────────────────
 
 const RERUN = "Run the identities script again (step 2), then press Check."
-const ISOLATION = "Add the networks named in the message to the provider's blocked networks (Cloud providers, the provider's network settings), run a provider sync, and check that the datacenter firewall is on."
+// The field is "Networks tenants must not reach" on the provider's page; the Check step links there and has the sync button.
+const BLOCKED = "Add the networks named in the message to “Networks tenants must not reach” on the provider's page under Cloud providers"
+const ISOLATION = `${BLOCKED}. Then press Check in step 3: its isolation row runs the provider sync that writes the rules. Check too that the datacenter firewall is on.`
 
 // One row of the preflight (POST …/preflight) → what fixes it.
 const CHECK_ACTION: Record<string, string> = {
   flags: "Turn the switches on with ./proxcloud-up.sh install --managed-services, and save a GitHub token under Integrations.",
   spec: "Correct the settings in step 1 and save.",
   network: "Correct the platform network in step 1 and save.",
-  isolation: ISOLATION,
+  isolation: `${BLOCKED}, then run a provider sync. Check too that the datacenter firewall is on.`,
   credentials: "Paste both token secrets in step 2.",
   privileges: RERUN,
   "pool-fence": "A token reaches a pool it must not. Remove that permission in Proxmox (Datacenter, Permissions).",
@@ -294,7 +298,7 @@ const CODE_ACTION: Record<string, string> = {
   seed_config_refused: "Fix the storage or the node named in the message, then Retry.",
   seed_not_booted: "Open the seed VM's console in Proxmox. Retry builds a new seed when this one never became ready.",
   seed_api_unreachable: "Add a route from the ProxCloud host to the platform network, or correct the seed API sources. Retry writes the seed's firewall rules again first.",
-  seed_tls_mismatch: "Another server answers on the seed address. Correct the address.",
+  seed_tls_mismatch: "Another server answers on the seed address. Correct the seed address in the settings, then Retry.",
   seed_identity_lost: "Press Retry. It builds the seed again.",
   seed_cd_not_deleted: `${CAPI_TOKEN} cannot delete on the ISO store. Run the identities script again, then Retry.`,
   seed_lost: "The seed VM is gone or is no longer this installation's. It is not built again on its own. Remove the installation with the option for a missing seed, then install again.",
@@ -302,7 +306,7 @@ const CODE_ACTION: Record<string, string> = {
   capi_init_failed: "The cluster manager did not start on the seed. Download the seed kubeconfig to look closer, then Retry.",
   machine_failed: "Check the boot store, the nodes and the Proxmox API URL in the settings, then Retry.",
   capmox_auth_failed: `Proxmox refused ${CAPI_TOKEN}. Check the Proxmox API URL and paste the token secret again, then Retry.`,
-  workload_api_unreachable: "Add a route from the ProxCloud host to the API address.",
+  workload_api_unreachable: "Add a route from the ProxCloud host to the API address, then Retry.",
   bom_unsupported: "The installed version is too old for this release. Upgrade through the previous ProxCloud release first.",
   provider_conflict: "A provider row of this installation was refused. Read the message, correct that provider under Cloud providers, then Retry.",
   machine_delete_stuck: "Delete the VM named in the message in Proxmox, then start Remove again.",
@@ -314,7 +318,14 @@ const CODE_ACTION: Record<string, string> = {
   portal_changed: RETRY,
   job_dead: RETRY,
 }
-export const codeAction = (code: string) => CODE_ACTION[code] ?? (code.endsWith("_timeout") ? RETRY : "Read the message, correct it, then Retry.")
+// A removal has no Retry: its button is "Remove again", and a cluster that does not answer has the forced option.
+export function codeAction(code: string, kind: Run["kind"] = "apply") {
+  if (kind === "remove" && code === "workload_api_unreachable") {
+    return "Restore the route from the ProxCloud host to the API address and press Remove again. If the cluster is beyond repair, tick the option for a cluster that does not answer."
+  }
+  const action = CODE_ACTION[code] ?? (code.endsWith("_timeout") ? RETRY : "Read the message, correct it, then Retry.")
+  return kind === "remove" ? action.replace(/\bRetry\b/g, "Remove again") : action
+}
 
 export const STAGE_TITLE: Record<string, string> = {
   validate: "Check the settings and Proxmox",

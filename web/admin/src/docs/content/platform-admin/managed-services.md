@@ -64,8 +64,10 @@ The page lists the stages and reads the run every few seconds:
 10. Create the two providers
 11. Finish
 
-- **Cancel the run** takes effect within about 15 seconds. A task Proxmox has started finishes first. Nothing is deleted.
-- **Retry** starts a new run. It looks at what exists and goes on from there. Nothing is deleted when a run fails, with one exception: a seed that never became ready is built again.
+- **Cancel the run** takes effect within about 15 seconds. A task Proxmox has started finishes first. Cancelling an installation deletes nothing. Cancelling a removal does not bring back what it had already deleted: the stage list shows how far it came, and **Remove again** goes on from there.
+- **Retry** starts a new run. It looks at what exists and goes on from there. Nothing is deleted when an installation run fails, with one exception: a seed that never became ready is built again. **Retry** runs with the saved settings, so save a change first.
+- A stage that did not work yet and is trying again shows why and what you can do meanwhile, before its time limit ends the run.
+- If ProxCloud itself stopped during a run, the run is shown as failed with `job_dead`. **Retry** or **Remove managed services** goes on; until then the settings cannot be saved.
 
 ## When a run fails
 
@@ -74,23 +76,23 @@ The failed stage shows a code, a message and what to do.
 | Code | What to do |
 |---|---|
 | `preflight_failed`, `privileges_missing`, `network_problem`, `iso_store_visibility` | Run the script again or correct the settings, then **Check**. |
-| `isolation_not_enforced` | Add the networks named in the message to the provider's blocked networks, run a provider sync, and check that the datacenter firewall is on. |
+| `isolation_not_enforced` | Add the networks named in the message to **Networks tenants must not reach** on the provider's page under **Cloud providers**. Then press **Check**: its isolation row links to that page and has the button **Run a provider sync, then check again**. Check too that the datacenter firewall is on. |
 | `image_import_failed`, `image_import_stalled`, `image_blocked` | Open **Template updates** to see the import. A blocked image needs a newer ProxCloud release. |
 | `seed_clone_failed`, `seed_config_refused` | Fix the storage or the node named in the message, then **Retry**. |
 | `seed_not_booted` | Open the seed VM's console in Proxmox. **Retry** builds a new seed. |
 | `seed_api_unreachable` | Add a route from the ProxCloud host to the platform network, or correct the seed API sources. |
-| `seed_tls_mismatch` | Another server answers on the seed address. Correct the address. |
+| `seed_tls_mismatch` | Another server answers on the seed address. Correct the seed address in the settings, then **Retry**. |
 | `seed_identity_lost` | **Retry**. It builds the seed again. |
 | `seed_cd_not_deleted` | Run the script again, then **Retry**. |
 | `seed_lost` | The seed VM is gone. Remove the installation with the option for a missing seed, then install again. |
 | `component_unhealthy`, `capi_init_failed` | Download the seed kubeconfig to look closer, then **Retry**. |
 | `machine_failed`, `capmox_auth_failed` | Check the boot store, the nodes, the Proxmox API URL and the token secret, then **Retry**. |
-| `workload_api_unreachable` | Add a route from the ProxCloud host to the API address. |
+| `workload_api_unreachable` | Add a route from the ProxCloud host to the API address, then **Retry**. During a removal: restore the route and **Remove again**, or tick the option for a cluster that does not answer when it is beyond repair. |
 | `provider_conflict` | Correct the provider named in the message under **Cloud providers**, then **Retry**. |
 | `bom_unsupported` | The installed version is too old. Upgrade through the previous ProxCloud release first. |
 | `tenants_exist` | Delete the tenant clusters and databases, then **Remove** again. |
 | `machine_delete_stuck`, `volume_delete_failed` | Delete the VM or fix the storage named in the message, then **Remove** again. |
-| a code ending in `_timeout`, `portal_changed`, `job_dead` | **Retry**. The time limits start again. |
+| a code ending in `_timeout`, `portal_changed`, `job_dead` | **Retry**, or **Remove again** for a removal. The time limits start again. |
 
 ## When it is ready
 
@@ -106,7 +108,8 @@ After a ProxCloud upgrade, **Apply this release** in step 4 brings the component
 
 - **Download seed kubeconfig** gives full access to the seed for one hour, for looking closer when a component fails. The download is written to the audit log.
 - **Replace the seed credential** gives ProxCloud a new credential for the seed and ends the old one.
-- **Remove managed services** deletes the platform cluster, its volumes and the seed VM and disables the two providers. You type `remove <name>` to confirm. It is refused while tenant clusters or databases exist. Tick the extra option only when the seed VM is already gone or the cluster no longer answers: tenants are then not looked for. Afterwards the page prints the two commands that end the tokens; they are yours to run.
+- If someone else saved the settings while you were editing them, your **Save** is refused: the page reads the settings again and asks you to enter your change once more.
+- **Remove managed services** deletes the platform cluster, its volumes and the seed VM and disables the two providers. You type `remove <name>` to confirm. It is refused while tenant clusters or databases exist. Tick the extra option only when the seed VM is already gone or the cluster no longer answers. ProxCloud then cannot see whether tenant clusters or databases still run there: any that do are deleted with the cluster's machines and volumes. Afterwards the page prints the two commands that end the tokens; they are yours to run.
 
 ## What this release does not do
 

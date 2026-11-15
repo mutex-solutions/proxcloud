@@ -1,7 +1,7 @@
 // InstallSteps.tsx — the four steps of the Managed services page before a run: the settings (a draft installation),
 // the Proxmox identities and their two token secrets, the checks, and the review with Install. The settings come
 // first because the script and the tokens belong to a saved installation (the script takes its two stores).
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { Link } from "react-router-dom"
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
@@ -16,7 +16,7 @@ import { apiFetch } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { CheckRows, CopyBlock, ErrorNote, LINK, StepCard, errMsg, fetchText, useClusterInfo } from "@/pages/setup/common"
 import {
-  CAPI_TOKEN, CSI_TOKEN, GROUPS, PLATFORM_KEY, GROUP_USE, TOKEN_SECRET, checkAction, emptyForm, errProblems, formToSpec, labProfile, specToForm, validate,
+  CAPI_TOKEN, CSI_TOKEN, GROUPS, PLATFORM_KEY, GROUP_USE, TOKEN_SECRET, checkAction, emptyForm, errCode, errProblems, formToSpec, isConflict, labProfile, specToForm, validate,
   type BOM, type Check, type Form, type Installation, type MachineForm, type Plan, type Problem,
 } from "./model"
 
@@ -99,14 +99,19 @@ function NodePicker({ id, group, nodes, value, onChange, problems, disabled }: {
 
 const H3 = ({ children }: { children: React.ReactNode }) => <h3 className="border-b pb-1 text-sm font-semibold">{children}</h3>
 
-export function SettingsStep({ installation, serviceId, canManage, onDirty }: {
-  installation?: Installation; serviceId: string; canManage: boolean; onDirty: (dirty: boolean) => void
+// The page mounts this form anew (by key) when the stored settings changed, so it always starts from what is stored.
+// locked: a run that ended without being settled still holds the installation, and the API refuses a save until then.
+// conflict: the last Save was refused because someone else had saved first; the page keeps that across the remount.
+export function SettingsStep({ installation, serviceId, canManage, locked, conflict, onConflict, onDirty }: {
+  installation?: Installation; serviceId: string; canManage: boolean; locked: boolean
+  conflict: boolean; onConflict: (conflict: boolean) => void; onDirty: (dirty: boolean) => void
 }) {
   const qc = useQueryClient()
   const cluster = useClusterInfo(serviceId)
   const stored = installation ? specToForm(installation.name, installation.spec) : emptyForm
   const [form, setFormState] = useState<Form>(stored)
   const [shown, setShown] = useState(false) // problems are shown after the first Save
+  useEffect(() => onDirty(false), [onDirty]) // a form that just mounted shows what is stored
   const setForm = (f: Form) => {
     setFormState(f)
     onDirty(JSON.stringify(f) !== JSON.stringify(stored))
@@ -125,7 +130,14 @@ export function SettingsStep({ installation, serviceId, canManage, onDirty }: {
     onSuccess: () => {
       toast.success("Settings saved")
       onDirty(false)
+      onConflict(false)
       return qc.invalidateQueries({ queryKey: PLATFORM_KEY })
+    },
+    // Refused because the page's copy is behind: read the installation again, which shows the other save or the run.
+    onError: (e) => {
+      if (!isConflict(e)) return
+      if (errCode(e) === "rev_conflict") onConflict(true)
+      void qc.invalidateQueries({ queryKey: PLATFORM_KEY })
     },
   })
   const refused = errProblems(save.error)
@@ -205,11 +217,13 @@ export function SettingsStep({ installation, serviceId, canManage, onDirty }: {
         <div className="grid content-start gap-1.5 sm:col-span-2">
           <Label htmlFor="sshKeys">SSH public keys (optional)</Label>
           <Textarea id="sshKeys" className="font-mono text-xs" rows={2} value={form.sshKeys} onChange={set("sshKeys")} disabled={!canManage}
-            aria-invalid={problems.some((p) => p.field === "sshKeys") || undefined} aria-describedby="sshKeys-hint" />
+            aria-invalid={problems.some((p) => p.field === "sshKeys") || undefined} aria-describedby={problems.some((p) => p.field === "sshKeys") ? "sshKeys-hint sshKeys-error" : "sshKeys-hint"} />
           <p id="sshKeys-hint" className="text-xs text-muted-foreground">
             For emergencies only, one per line. With a key, the seed also accepts SSH from the API sources. ProxCloud never uses SSH.
           </p>
-          {problems.filter((p) => p.field === "sshKeys").map((p) => <p key={p.message} className="text-xs text-destructive">{p.message}</p>)}
+          {problems.some((p) => p.field === "sshKeys") ? (
+            <p id="sshKeys-error" className="text-xs text-destructive">{problems.filter((p) => p.field === "sshKeys").map((p) => p.message).join(" ")}</p>
+          ) : null}
         </div>
       </div>
 
@@ -236,7 +250,13 @@ export function SettingsStep({ installation, serviceId, canManage, onDirty }: {
           <AlertDescription><ul className="list-disc pl-5">{all.map((p) => <li key={p.field + p.message}>{p.message}</li>)}</ul></AlertDescription>
         </Alert>
       ) : null}
-      {save.error ? (
+      {conflict ? (
+        <Alert>
+          <AlertTitle>Someone else changed these settings</AlertTitle>
+          <AlertDescription>Your change was not saved. The settings were read again and show what is stored now: enter your change once more, then save.</AlertDescription>
+        </Alert>
+      ) : null}
+      {save.error && errCode(save.error) !== "rev_conflict" ? (
         <Alert variant="destructive" role="alert">
           <AlertTitle>The settings were not saved</AlertTitle>
           <AlertDescription>
@@ -245,9 +265,9 @@ export function SettingsStep({ installation, serviceId, canManage, onDirty }: {
           </AlertDescription>
         </Alert>
       ) : null}
-      <div>
+      <div className="flex flex-wrap items-center gap-3">
         <Button
-          disabled={!canManage || save.isPending || !serviceId}
+          disabled={!canManage || save.isPending || !serviceId || locked}
           onClick={() => {
             setShown(true)
             if (!all.length) save.mutate()
@@ -255,6 +275,7 @@ export function SettingsStep({ installation, serviceId, canManage, onDirty }: {
         >
           {save.isPending ? "Saving…" : installation ? "Save settings" : "Save draft"}
         </Button>
+        {locked ? <span className="text-sm text-muted-foreground">The run above ended without finishing. Press Retry or remove the installation first; settings can be saved after that.</span> : null}
       </div>
     </StepCard>
   )
@@ -296,7 +317,7 @@ export function IdentitiesStep({ installation, tokenId, canManage }: { installat
   const secret = (id: string, token: string, value: string, set: (v: string) => void, stored: boolean) => (
     <div className="grid content-start gap-1.5">
       <Label htmlFor={id}>Secret of <span className="font-mono">{token}</span></Label>
-      <Input id={id} type="password" className="font-mono" autoComplete="off" value={value} onChange={(e) => set(e.target.value)} disabled={!canManage}
+      <Input id={id} type="password" className="font-mono" autoComplete="new-password" data-1p-ignore data-lpignore="true" spellCheck={false} value={value} onChange={(e) => set(e.target.value)} disabled={!canManage}
         placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" aria-invalid={bad(value) || undefined} aria-describedby={`${id}-state`} />
       <p id={`${id}-state`} className="text-xs text-muted-foreground">
         {bad(value) ? <span className="text-destructive">Not a Proxmox token secret: it looks like xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx. </span> : null}
@@ -335,6 +356,11 @@ export function CheckStep({ installation, canManage, dirty }: { installation: In
   const check = useMutation({
     mutationFn: () => apiFetch<{ ok: boolean; checks: Check[] }>(`${base(installation.id)}/preflight`, { method: "POST", body: {} }),
   })
+  // The isolation rules are written by a provider sync; nothing else on this page starts one (Go live does, once).
+  const sync = useMutation({
+    mutationFn: () => apiFetch("/admin/job/external-service/sync", { method: "POST" }),
+    onSuccess: () => check.mutate(),
+  })
   const failed = (check.data?.checks ?? []).filter((c) => c.status === "fail")
   return (
     <StepCard n={3} title="Check" description="Reads Proxmox with the stored tokens and changes nothing. Install runs the same checks first.">
@@ -356,9 +382,20 @@ export function CheckStep({ installation, canManage, dirty }: { installation: In
           <h3 className="text-sm font-semibold">What to do</h3>
           <ul aria-label="What to do for each failed check" className="grid gap-2 text-sm">
             {failed.map((c) => (
-              <li key={c.id}><span className="mr-2 font-mono text-xs text-muted-foreground">{c.id}</span>{checkAction(c.id)}</li>
+              <li key={c.id} className="grid gap-1.5">
+                <span><span className="mr-2 font-mono text-xs text-muted-foreground">{c.id}</span>{checkAction(c.id)}</span>
+                {c.id === "isolation" ? (
+                  <span className="flex flex-wrap items-center gap-3">
+                    <Link to={`/system/cloud-providers/${installation.serviceId}`} className="underline underline-offset-4">Open the provider's page</Link>
+                    <Button variant="outline" size="sm" disabled={!canManage || sync.isPending || check.isPending} onClick={() => sync.mutate()}>
+                      {sync.isPending ? "Syncing…" : "Run a provider sync, then check again"}
+                    </Button>
+                  </span>
+                ) : null}
+              </li>
             ))}
           </ul>
+          <ErrorNote title="The provider sync did not run" error={sync.error} />
         </div>
       ) : null}
     </StepCard>
@@ -373,7 +410,8 @@ export function ReviewStep({ installation, canManage, dirty, onInstall, installi
   installation: Installation; canManage: boolean; dirty: boolean; onInstall: () => void; installing: boolean; error: unknown
 }) {
   const bom = useQuery({ queryKey: ["platform-bom"], queryFn: () => apiFetch<BOM>("/admin/platform/bom"), retry: false, staleTime: 300_000 })
-  const plan = useQuery({ queryKey: [...PLATFORM_KEY, "plan", installation.id, installation.rev], queryFn: () => apiFetch<Plan>(`${base(installation.id)}/plan`), retry: false })
+  // Keyed on the last run too: a run changes what is installed, and the API leaves `rev` alone then.
+  const plan = useQuery({ queryKey: [...PLATFORM_KEY, "plan", installation.id, installation.rev, installation.lastRunId], queryFn: () => apiFetch<Plan>(`${base(installation.id)}/plan`), retry: false })
   const s = installation.spec
   const c = s.clusters[0]
   const workers = c.nodeGroups.reduce((n, g) => n + g.count, 0)
