@@ -409,17 +409,6 @@ func checkDatacenterFirewall(ctx context.Context, cc *pve.Client) *httpx.HTTPErr
 	return nil
 }
 
-// tokenWarnings is what tokenChecks found wrong, as the warnings the route has always returned.
-func tokenWarnings(ctx context.Context, cc *pve.Client, tokenID string) []string {
-	out := []string{}
-	for _, c := range tokenChecks(ctx, cc, tokenID) {
-		if c.Status != checkOK {
-			out = append(out, c.Message)
-		}
-	}
-	return out
-}
-
 // tokenChecks reports a root@pam token and, per ACL path, every ProxCloudPlatform privilege
 // the token lacks. Warnings only: an operator may grant less on purpose (no GPUs,
 // no EVPN) and the test must still pass.
