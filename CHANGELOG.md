@@ -50,8 +50,7 @@ fixes (under Fixed, and the server seed choice under Added) came from it. On the
 images built from `main` (`9c09945`), the setup status `seeds` item and seed URL, and the Network step's
 Server seeds form showing the stored choice, were re-checked; the `proxcloud-up.sh` next steps and
 saving the seed choice from the form were not. The steps, and what the run did not check, are in the
-release readiness page, section
-[Platform setup lab acceptance](docs/release-readiness.md#platform-setup-lab-acceptance).
+release readiness page, section [Platform setup lab acceptance](docs/release-readiness.md#platform-setup-lab-acceptance).
 
 The not-verified notes in the entries below were written when each change merged. The lab run covers
 the connection checks (`?checks=all`), the generated script run on a node, the defaults apply, the live
