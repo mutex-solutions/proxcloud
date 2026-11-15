@@ -54,7 +54,7 @@ of one source package counts four times, as the gate counts).
 | Target | OS | Unfixed (CRITICAL) | affected | fix_deferred | will_not_fix | Unique CVEs | Source packages carrying most findings |
 |---|---|---:|---:|---:|---:|---:|---|
 | `filesystem` and the six product images | — / Alpine 3.24.4 / Debian 12.15, 13.7 | 0 | 0 | 0 | 0 | 0 | none: no HIGH/CRITICAL at all, with or without a fix |
-| `template/base`, `amp`, `claude`, `codex`, `gemini`, `mcp-gateway`, `opencode` (each; identical sets) | Debian 12.15 | 650 (22) | 514 | 126 | 10 | 329 | linux 193 (headers), krb5 140, openexr 46, glib2.0 35, util-linux 33, mariadb 32 |
+| `template/base` and the six templates built `FROM` it: the five agent-CLI templates and `mcp-gateway` (each; identical sets) | Debian 12.15 | 650 (22) | 514 | 126 | 10 | 329 | linux 193 (headers), krb5 140, openexr 46, glib2.0 35, util-linux 33, mariadb 32 |
 | `template/node` | Debian 12.15 | 640 (20) | 508 | 122 | 10 | 323 | as `base`, without gh and bluez |
 | `template/code-interpreter` | Debian 13.7 | 395 (11) | 380 | 12 | 3 | 102 | krb5 140, mariadb 56, util-linux 48, python3.13 20, linux 18, libxml2 16 |
 | `template/browser` | Ubuntu 24.04 | 2 (0) | 2 | 0 | 0 | 1 | gst-plugins-bad1.0 2 (CVE-2025-3887) |
@@ -79,7 +79,7 @@ sudo, and with `allow_suid` on (the default) any process in a sandbox can become
 (§1.4). Egress reaches the internet by default (private and link-local ranges and TCP 25 denied;
 `allow_internet_access=False` blocks it). What a sandbox holds belongs to its tenant: their files,
 envd's access token, the MCP servers' keys in `mcp-gateway` (§9.2), the agent CLIs' credentials in
-`claude`, `codex`, `gemini`, `amp` and `opencode`.
+the five agent-CLI templates.
 
 **The boundary.** The tenant already runs arbitrary code as root inside the sandbox, so a flaw in a
 package the tenant can run gives that tenant nothing new. What matters is a package that parses data
@@ -247,16 +247,15 @@ same package versions. The pinned digest itself was not scanned.
 ## Findings with a fixed version in blocking targets
 
 One: **CVE-2025-47273**, setuptools 70.3.0 (fixed in 78.1.1), HIGH, in the `Python` result of ten
-targets: the templates `amp`, `base`, `browser`, `claude`, `code-interpreter`, `codex`, `gemini`,
-`mcp-gateway`, `opencode` and the controlled-base prototype. The gate classifies it as the owner VEX
-(setuptools 70.3.0 is listed only in pip 26.3's vendored SBOM, `pip/_vendor/bom.cdx.json`), which is
-why it does not block today. It is not in `node`, `desktop`, the product images or the tool image.
-No other finding with a fixed version exists in any blocking target. That holds only for the
-blocking set: the default `python` template is outside it and has 2 (zlib; see
-[Default `python` template](#default-python-template)). The other twelve raw upstream bases also have
-many findings with a fixed version (for example 2,987 in `template-e2b-base`); they are parents,
-builders or donors of images that are rebuilt and scanned as blocking targets, and are not reviewed
-here.
+targets: nine of the eleven non-GPU templates (all but `node` and `desktop`: `base`, the six built on
+it, `browser` and `code-interpreter`) and the controlled-base prototype. The gate classifies it as the
+owner VEX (setuptools 70.3.0 is listed only in pip 26.3's vendored SBOM, `pip/_vendor/bom.cdx.json`),
+which is why it does not block today. It is not in `node`, `desktop`, the product images or the tool
+image. No other finding with a fixed version exists in any blocking target. That holds only for the
+blocking set: the default `python` template is outside it and has 2 (zlib; see [Default `python`
+template](#default-python-template)). The other twelve raw upstream bases also have many findings with
+a fixed version (for example 2,987 in `template-e2b-base`); they are parents, builders or donors of
+images that are rebuilt and scanned as blocking targets, and are not reviewed here.
 
 ## The VEX date (not part of this decision)
 
