@@ -110,6 +110,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file, as a Go test now does. Checked with the tests above and `ansible-playbook --syntax-check`; not run against a
   cluster.
 
+### Security
+
+- **ArgoCD's `default` project is locked on installer-built services clusters**
+  (`installer/playbooks/files/argocd-default-project.yaml`, applied by stage 50's guardrails step in
+  `services-platform.sh`): empty `sourceRepos`, `destinations` and `clusterResourceWhitelist`. ArgoCD creates
+  `default` open (every repository, every cluster and namespace, every kind) and never resets it, so any
+  Application in `default` could deploy anything anywhere on the cluster that holds every tenant's control plane
+  and database, around the `proxcloud-k8s` and `proxcloud-dbaas` guardrails. Neither the installer nor the
+  console picks `default` there: tenant clusters and `pc-sandbox` are in `proxcloud-k8s`, databases in
+  `proxcloud-dbaas`, and a new test (`installer/tests/test_services_argocd.py`, in `make test`) keeps it so. The
+  console's Kubernetes provider form used to fall back to `default` when its ArgoCD AppProject field was blank,
+  and when it loaded a provider stored without `argocd.project`; it now falls back to `proxcloud-k8s`, as
+  `kamaji.BuildApplication` and the database form already did (`web/admin/e2e/provider-connection.spec.ts`). The
+  management cluster stays open, because stage 40's `cnpg`, `cert-manager` and `proxcloud` Applications use
+  `default`. Nothing here is behind a flag: the lock applies at the next run of stage 50 (`make install`; `make
+  upgrade` does not run it), on existing sites too. Locked, an Application in `default` (or with no project) on
+  the services cluster stops syncing, and deleting it deletes nothing it created, because ArgoCD only deletes what
+  the project permits: its workloads stay, and for a tenant cluster its control plane, Cluster API objects and PVE
+  VMs. Such an Application is one made by hand, or a tenant cluster of a provider whose `config.argocd.project` is
+  `default` (typed in, set through the API, or saved from the console with a blank AppProject before this change).
+  So stage 50 first lists those Applications and stops, naming them, while any is left; move each, and its
+  provider, to a named project, then run it again. Checked with `ansible-playbook --syntax-check`, the offline test
+  (which runs the listing against a stub `kubectl`) and the console e2e spec only; not applied to a running
+  cluster.
+
 ## [0.7.0] - 2026-11-15
 
 A feature release on top of `v0.6.0`.
