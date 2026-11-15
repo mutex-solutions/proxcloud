@@ -532,7 +532,9 @@ EOF
   else
     echo "  Job scheduler     off: no resource sync and no charge on a timer (--scheduler turns it on)"
   fi
-  if [ "$TEMPLATE_UPDATES" = true ]; then
+  if [ "$MANAGED" = true ]; then
+    echo "  Template updates  on (needed by managed services)"
+  elif [ "$TEMPLATE_UPDATES" = true ]; then
     echo "  Template updates  on (--no-template-updates turns them off)"
   else
     echo "  Template updates  off (--template-updates turns them on)"

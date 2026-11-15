@@ -525,7 +525,11 @@ class ScriptDryRunTests(unittest.TestCase):
                 self.assertNotEqual(refused.returncode, 0)
                 self.assertIn("managed services need template updates", refused.stderr)
                 self.assertFalse((install.dir / DRY).exists())
-        self.assertEqual(install.install(*args, "--managed-services").returncode, 0)
+        result = install.install(*args, "--managed-services")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # The summary must not offer the flag that is refused below.
+        self.assertRegex(result.stdout, r"Template updates +on \(needed by managed services\)")
+        self.assertNotIn("--no-template-updates", result.stdout)
         install.adopt()
         # Recorded on, a later --no-template-updates alone is refused as well; with both off it passes.
         refused = install.install(*args, "--no-template-updates")
