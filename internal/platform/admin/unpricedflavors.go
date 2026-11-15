@@ -8,6 +8,7 @@ package admin
 // public default rate card. ADMIN_SERVICE_READ; cloud errors skip that region.
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/billingresource"
+	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/pricing"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
@@ -42,7 +44,11 @@ func (h *Handler) unpricedFlavors(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	ctx := r.Context()
+	httpx.List(w, h.unpricedFlavorsOf(r.Context(), es))
+}
+
+// unpricedFlavorsOf lists the catalog flavors with a pricing gap on a provider (the setup status shows the same list).
+func (h *Handler) unpricedFlavorsOf(ctx context.Context, es *externalservice.ExternalService) []UnpricedFlavor {
 	plans := pricing.SelectPricePlansForService(h.pricing.PlanSource(ctx), nil, true, es.ID)
 	rules := []pricing.PricePlanRule{}
 	for _, tu := range pricePlanTimeUnits {
@@ -110,5 +116,5 @@ func (h *Handler) unpricedFlavors(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	httpx.List(w, out)
+	return out
 }

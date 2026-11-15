@@ -595,7 +595,9 @@ The installer's stage 60 already did steps 1 and 2. The other paths do them by h
    any warning about missing privileges.
 2. **Price plan, flavors, quota.** `deploy/seed/seed-operator.py` (stage 60 runs it once) creates the public price
    plan, the flavor catalog and the default quota. Review them under System → Price plans and System → Flavors
-   (Proxmox); the seed's rates are placeholders.
+   (Proxmox); the seed's rates are placeholders. Without a checkout, the API applies the same defaults:
+   `GET /api/v1/admin/setup/defaults?serviceId=<id>` shows them and `POST /api/v1/admin/setup/defaults` adds what is
+   missing ([docs/api.md](api.md#platform-setup--apiv1adminsetup)).
 3. **First tenant.** Sign up on the customer console (self-registration is on), create an organization and a project,
    fill the billing details. Activate the billing profile: Client area → Billing profiles → Activate, or turn on
    auto-activation. The project is then bootstrapped onto the provider (pool, default security group, quota).

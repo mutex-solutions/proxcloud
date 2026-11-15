@@ -124,7 +124,7 @@ several findings puts one on each line of `message`. Rows after `connect` or
 | `store-reach` | Stored provider: tenant networks cannot reach the network stores | `warn` |
 | `boot-iso` | Stored provider: the Kubernetes bootstrap ISO store is usable | `warn` |
 | `version` | Proxmox VE 9.2 or later | `fail` |
-| `template-pool` | The pool `pc-templates` exists | `warn` |
+| `template-pool` | The pool `pc-templates` exists. When it does not, the first template import creates it (`Pool.Allocate` on `/pool`); `pveum pool add pc-templates` is only for a token without that privilege | `warn` |
 | `import-store` | Some storage takes `import` content. Stored provider with `importStorage`: that storage exists, takes it, and the token can delete files there | `warn` |
 | `zone` | Stored provider: a default tenant network zone is configured, and Proxmox has no zone of that id with another type | `fail` |
 | `cidr-pool` | Stored provider: `cidrPool` is an IPv4 range of /24 or larger; `warn` when it overlaps a management network of the nodes, or when a node's networks could not be read (that node was not compared) | `fail` |
@@ -179,6 +179,129 @@ answers `409` with the reason in `errors.details`:
 | `disabled_by_operator` | An operator disabled the project; only an operator enables it. |
 | `scheduled_for_deletion` / `deletion_in_progress` / `deleted` | The project is on its way out. |
 | `not_enabled` | Any other case where the project is not ENABLED. |
+
+### Platform setup — `/api/v1/admin/setup`
+
+Operator console surface for bringing a new install to its first tenant.
+
+**Defaults.** `GET /api/v1/admin/setup/defaults?serviceId=` previews, and
+`POST /api/v1/admin/setup/defaults` applies, the documents an install needs
+before tenants can use a Proxmox provider. They are the files in `deploy/seed`,
+compiled into the API (`deploy/seed/seed.go`), so no checkout and no
+`seed-operator.py` run is needed. `seed-operator.py` is unchanged and still
+works; unlike it, this route never updates a document that exists.
+
+| Item | What an apply adds | Permission to apply |
+|------|--------------------|---------------------|
+| `flavors` | The default flavors whose slug is not in the catalog | `admin:service:manage` |
+| `pricePlan` | The public rate card, enabled, when no enabled PUBLIC plan exists | `admin:price_plan:manage` + `admin:billing_config:read` |
+| `quota` | The default project quota limits the provider does not set yet | `admin:service:manage` |
+| `region` | The provider's region row in the platform configuration | `admin:platform_config:update` |
+
+`flavors` and `pricePlan` need no provider. `quota` and `region` need
+`serviceId` (a Proxmox provider) and answer `blocked` without one.
+
+The preview needs all four reads (`admin:service:read`,
+`admin:price_plan:read`, `admin:platform_config:read`,
+`admin:billing_config:read`) and changes nothing:
+
+```json
+{"data": {"currency": "USD", "items": [
+  {"id": "flavors", "state": "todo", "message": "3 of the 3 default flavors are missing", "preview": [{"slug": "s1-small", "vcpus": 1, "ramMb": 1024, "diskGb": 10}]},
+  {"id": "pricePlan", "state": "todo", "message": "…", "preview": {"currency": "USD", "plan": {"name": "Public rate card", "enabled": true, "accessMode": "PUBLIC"}, "rules": []}},
+  {"id": "quota", "state": "blocked", "message": "Needs a Proxmox provider (serviceId)"},
+  {"id": "region", "state": "blocked", "message": "Needs a Proxmox provider (serviceId)"}
+]}}
+```
+
+`state` is `todo` (an apply would write `preview`), `done` (nothing to add) or
+`blocked` (the message says what is missing). `preview` is exactly what an
+apply would write for the item.
+
+The apply body is `{"serviceId": "…", "items": ["flavors", "pricePlan", "quota", "region"], "confirmRates": true}`.
+`items` is required. Unknown fields and unknown items are refused with `400`.
+It answers one result per requested item, with `state` `created`, `skipped`
+(nothing was missing) or `blocked`.
+
+- **Create-only.** An apply adds what is missing and never changes or deletes a
+  document that exists. Applying twice leaves the same documents. One
+  transaction under one advisory lock does the whole apply, so two operators
+  applying at once get one price plan, and an apply that fails writes nothing.
+- **Rates need a confirmation.** The plan is created enabled, so its rates are
+  billed from the next charge run. `pricePlan` is refused with `400` unless the
+  body carries `"confirmRates": true`. Show the previewed rules to the operator
+  before sending it. The rates are amounts in the billing configuration's base
+  currency; the preview says so when that is not the currency they were written
+  in (USD), and refuses (`blocked`) when no base currency is set.
+- **One public plan.** Every enabled PUBLIC plan is billed, so the default plan
+  is skipped when one exists, whatever its name. With `serviceId`, only a plan
+  that applies to that provider (no `serviceProviders`, or one naming it) counts:
+  when every enabled PUBLIC plan is scoped to other providers the item is
+  `blocked`, because the unscoped default would bill those a second time. Add
+  the provider to one of those plans, or add a plan scoped to it. A plan with the
+  default's name that is disabled or not public blocks the item instead of
+  getting a twin.
+- **Rules.** The plan gets the rules for `instance`, `instance_traffic`,
+  `volume`, `floating_ip`, `image`, `server_snapshot` and `server_protection`.
+  GPU rules are added only when a Proxmox provider maps GPUs (`config.gpus`),
+  the `share` rule only when a TrueNAS provider exists, the `bucket` rule only
+  when an object-store provider exists. The Kubernetes, database and sandbox
+  rules of the file are not applied here. Rules are not added later to a plan
+  that exists: after adding GPUs or a share provider, add those rules under
+  System → Price plans, and check `GET /api/v1/admin/service/{id}/unpriced-flavors`.
+- **Quota.** The stored default quota wins: only limits it does not set are
+  added (a limit stored under a legacy key such as `instances`, or set to `-1`,
+  counts as set), and the per-model `gpu` limits are kept.
+
+**Status.** `GET /api/v1/admin/setup/status?serviceId=&live=1` says how far
+the install is from its first tenant, for the Dashboard card and the setup
+page. It needs the same four reads as the defaults preview and changes nothing.
+`serviceId` names a Proxmox provider (`404` when there is none, `400` for
+another type); without it the first Proxmox provider by name is used, and with
+none saved every step that needs one is `blocked`.
+
+```json
+{"data": {"serviceId": "svc-1", "live": false, "steps": [
+  {"id": "connect", "state": "done", "summary": "Provider lab is saved", "items": [{"id": "provider", "state": "done", "message": "Provider lab is saved"}]},
+  {"id": "catalog", "state": "todo", "summary": "No flavor in the catalog: tenants cannot create a server", "items": []}
+]}}
+```
+
+The steps, in order: `connect`, `network`, `storage`, `templates`, `catalog`,
+`golive`. An item's `state` is `done`, `attention` (works, but look at it),
+`todo`, `blocked` (needs another step first) or `unknown` (could not be read).
+The worst item decides the step's state and its `summary`; a `blocked` item
+makes the step `todo`, and a step is `blocked` only when it cannot start.
+
+- **Without `live`** only the database is read: the provider, its
+  `cidrPool` and default zone, storage detection, profiles and the default
+  profile, flavors and the flavors no rule prices, the enabled PUBLIC plans
+  that apply to the provider and their `instance` rules, the default quota
+  (`done` only when it sets every limit the defaults item would add, so a quota
+  with only per-model `gpu` limits is `todo`), the region row, the business name, address and country of the billing
+  configuration, and the attach policy. Rows are not counted: the Compose seed
+  writes the billing and platform configuration, and a fresh install shows no
+  step done. `templates` is `unknown` unless the provider configuration pins a
+  template.
+- **With `live=1`** the cluster is asked too: the connection test, run as
+  `POST /admin/service/proxmox/auth?checks=all&externalServiceId=` runs it for
+  a read-only caller, every row as an item with the row's id (`ok` is `done`,
+  `warn` is `attention`, `fail` is `todo`); the nodes with an active `import`
+  store; the published OS images; and the imported templates by lifecycle
+  state. `zone`, `cidr-pool`, `frr`, `public-networks` and `store-reach` go to
+  `network`, `storage-profile`, `import-store` and `boot-iso` to `storage`,
+  every other row to `connect`. A row that asks what a database item asks
+  takes that item's place and id: `zone` the item `zone`, `cidr-pool` the item `cidrPool`,
+  `storage-profile` the item `defaultProfile`. A cluster that does not answer
+  is a failed `connect` item, not a failed request, and the database items stay.
+- **Go live** waits for `connect`, `network`, `storage` and `templates`
+  (`blocked` until none is `todo`). While one of them is `unknown` (without
+  `live`, `templates` is unless a template is pinned) go live is `unknown` too,
+  not `todo`: ask again with `live=1` before turning on the attach policy.
+  Without `live`, `connect` is `done` once the provider is saved; only `live=1`
+  runs the connection checks. An open catalog and a job scheduler that is
+  off (`PROXCLOUD_JOBS_SCHEDULER_ENABLED`) are `attention` items: they block
+  nothing. An attach policy that is on while steps are open is `attention`.
 
 ## Admin API — `/admin-api/v1`
 

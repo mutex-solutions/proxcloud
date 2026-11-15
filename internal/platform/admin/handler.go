@@ -117,6 +117,8 @@ type Handler struct {
 	githubOptions templateupdates.Options
 	// githubCountFn overrides the GitHub integration count (tests only; nil = the repository).
 	githubCountFn func(ctx context.Context) (int64, error)
+	// jobsScheduler is PROXCLOUD_JOBS_SCHEDULER_ENABLED (SetJobsScheduler): the setup status warns without it.
+	jobsScheduler bool
 }
 
 // SetHmacEncryptor wires the data-at-rest key for hmac key secrets.
@@ -410,6 +412,8 @@ func (h *Handler) Routes(r chi.Router) {
 		h.routeProjectManager(r)
 		h.routeExternalServiceMut(r)
 		h.routeProviderAttach(r)
+		// Platform setup: the defaults of a new install (setupdefaults.go).
+		h.routeSetup(r)
 	})
 }
 

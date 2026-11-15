@@ -49,6 +49,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`pve.PlatformACLs`); tests keep the script in `docs/proxmox-permissions.md`, the installer's role and
   ACL rows (stage 10) and that table equal, and refuse a token ID or storage that is not a plain id. The
   portal still holds no root credential. The script has not been run on a Proxmox node.
+- **Defaults applied from the API** (`GET` and `POST /api/v1/admin/setup/defaults`). A new install needs a flavor
+  catalog, a public price plan, a default project quota and a region row before a tenant can create a server. Until
+  now that took a checkout, python3 and `deploy/seed/seed-operator.py` with four overridden variables on a Compose
+  install. The API now carries the same `deploy/seed` documents (`deploy/seed/seed.go` embeds them; the API image
+  copies `deploy/seed`) and applies them on request. The preview shows what would be written. The apply only creates:
+  it never changes a document that exists, runs in one transaction under one advisory lock, and answers one result
+  per item. The price plan is created enabled, so the apply refuses it without `"confirmRates": true`, and it is
+  skipped when any enabled PUBLIC plan exists, because every enabled public plan is billed. When every such plan is
+  scoped to other providers than `serviceId` the item is blocked and says so, instead of reading done while that
+  provider is billed nothing; the setup status agrees. The plan gets the rules a
+  Proxmox install bills; GPU, share and bucket rules are added only when such a provider exists. The default quota
+  is merged under the stored one, so per-model GPU limits and limits the operator set are kept. Each item needs the
+  permission of the endpoint that writes the same document by hand. `seed-operator.py` is unchanged.
+  `docs/api.md` describes both routes. Not verified: a run against a Compose install, and the published image build
+  (the build stage was built locally; CI builds the image).
+- **Setup status from the API** (`GET /api/v1/admin/setup/status?serviceId=&live=1`). The Dashboard and the setup
+  page need to know which step of a new install is done, and the row counts of `/admin/stats` call billing and
+  branding configured on a fresh Compose install, because the seed writes those rows. One pure function computes six
+  steps (connect, network, storage, templates, catalog, go live) with one item per check, from the database alone,
+  and with `live=1` also from the cluster: every row of the connection test (`?checks=all`, the same function, not a
+  copy of its checks), each in the step it is about (the zone, cidrPool, frr, public network and store reach rows
+  in network, so a network problem does not send the operator back to the connection form; network and storage
+  rows replace the database item that asks the same, keeping its id), the nodes with an active import store, the
+  published OS images and the imported templates. A table test pins a fresh Compose install to no step done. Go live waits for connect, network, storage and templates, and is `unknown`
+  while one of them could not be read (templates, without `live=1`), so the database-only answer never offers
+  go live on a cluster nobody looked at; an open catalog and
+  a job scheduler that is off are warnings, by the owner's decision, so they block nothing. Only enabled public
+  plans that apply to the provider count as pricing it, and the quota counts as set only when it sets every limit
+  the defaults would add, the same rule as the defaults preview. The route needs the four reads of the defaults
+  preview.
+  Not verified: a live run against a Proxmox cluster (the live checks run against the test fake).
+- **Proposed storage profiles** (`proposedProfiles` in `POST /api/v1/admin/service/{id}/storage/detect`). The
+  installer proposes profiles from the storages it finds (`classify_storages`); a console install had to write them
+  by hand. The detect answer now carries the same proposal (`pve.ProposeProfiles`, tested on the installer's own
+  cases), nothing of it stored. It skips a storage active on no node, claims a flag only when the storage has it, and
+  claims no snapshots on a storage the operator set to capacity class (`storage-classes`), so the proposal passes the
+  profile save unchanged. The rest of the answer is as before.
+- **Template imports create pool `pc-templates` when it is missing** (`docs/template-updates.md`). A template import
+  creates its VM in that pool, and on a cluster where nobody ran `pveum pool add pc-templates` the create failed. The
+  job now reads the pool before the upload and creates it once, fenced like its other Proxmox writes; an existing
+  pool is only read, so a token without `Pool.Allocate` keeps importing where the pool was made by hand. A token that
+  may not create it fails the job as `pve_forbidden` before anything is downloaded. The connection test's
+  `template-pool` row, which the setup status shows in the connect step, says so instead of sending the operator to a
+  root shell for `pveum pool add`, which it keeps as the fallback for such a token. Not verified: that the
+  least-privilege portal token can create `pc-templates` on a lab cluster (it holds `Pool.Allocate` on `/pool`, which
+  creates the project pools).
 - **Docker Compose install: opt-in VM template updates and job scheduler** (`deploy/compose/`): the API
   reads both switches only when it starts, and the Compose install had no way to set them, so on one host
   nothing was synchronised or charged on a timer and no template could be imported. `compose.yaml` now

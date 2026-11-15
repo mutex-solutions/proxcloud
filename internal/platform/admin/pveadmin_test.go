@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -656,7 +657,8 @@ func TestPVESetupChecks(t *testing.T) {
 		{"version unreadable", map[string]string{"/version": `{"data":{"version":"next"}}`}, nil, "version", checkWarn, "Could not read"},
 
 		{"template pool exists", nil, nil, "template-pool", checkOK, ""},
-		{"template pool missing", map[string]string{"/pools/pc-templates": "!404"}, nil, "template-pool", checkWarn, "pveum pool add pc-templates"},
+		{"template pool missing", map[string]string{"/pools/pc-templates": "!404"}, nil, "template-pool", checkWarn, "The first template import creates it"},
+		{"template pool missing: the manual step stays the fallback", map[string]string{"/pools/pc-templates": "!404"}, nil, "template-pool", checkWarn, "for a token without Pool.Allocate on /pool, create it with `pveum pool add pc-templates`"},
 		{"template pool unreadable", map[string]string{"/pools/pc-templates": "!403"}, nil, "template-pool", checkWarn, "Could not read the pool"},
 
 		{"zone made later", nil, provider(nil), "zone", checkOK, "created with the first tenant network"},
@@ -836,5 +838,25 @@ func TestProxmoxSetupScriptRoute(t *testing.T) {
 		if rec := get(query, op); rec.Code != http.StatusBadRequest || strings.Contains(rec.Body.String(), "pveum") {
 			t.Errorf("GET %q: %d %s", query, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+// The detect answer keeps the stored capabilities at the top level (installer stages 60 and 70 read it) and adds the
+// proposal next to them.
+func TestPVEDetectResponseShape(t *testing.T) {
+	caps := externalservice.PVECapabilities{DetectedAt: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC), Storages: map[string]pve.StorageCapability{
+		"local-zfs": {Storage: "local-zfs", Type: "zfspool", Content: []string{"images"}, Snapshots: true, Nodes: map[string]pve.StorageNodeState{"pve1": {Active: true}}},
+	}}
+	raw, err := json.Marshal(pveDetectResponse{caps, pve.ProposeProfiles(caps.Storages, nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || string(got["detectedAt"]) != `"2026-11-01T00:00:00Z"` || !strings.Contains(string(got["storages"]), `"local-zfs"`) ||
+		string(got["proposedProfiles"]) != `{"std":{"snapshots":true,"storages":{"*":"local-zfs"}}}` {
+		t.Fatalf("detect answer: %s", raw)
 	}
 }
