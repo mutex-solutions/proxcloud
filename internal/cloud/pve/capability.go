@@ -8,6 +8,7 @@ package pve
 
 import (
 	"context"
+	"slices"
 	"strings"
 )
 
@@ -107,6 +108,63 @@ func classify(d StorageDef) StorageCapability {
 		c.Class, c.Snapshots, c.Thin = ClassStandard, true, d.Sparse == 1
 	}
 	return c
+}
+
+// proposedProfile is the storage profile a storage type is proposed as and the capabilities that profile claims.
+var proposedProfile = map[string]struct {
+	slug, label string
+	flags       []string
+}{
+	"rbd":     {slug: "ceph", flags: []string{"shared", "snapshots", "thin", "liveMigrate"}},
+	"zfspool": {slug: "std", flags: []string{"snapshots", "thin", "replication"}},
+	"lvmthin": {slug: "local-lvm", flags: []string{"snapshots", "thin"}},
+	"nfs":     {slug: "capacity", label: "Capacity HDD (NFS)", flags: []string{"shared", "liveMigrate"}},
+	"cifs":    {slug: "capacity", label: "Capacity HDD (NFS)", flags: []string{"shared", "liveMigrate"}},
+}
+
+// ProposeProfiles proposes storage profiles for the detected storages, in the shape of config.storageProfiles
+// ({slug: {storages: {"*": id}, <flag>: true, …}}), for an operator to confirm. It is the installer's
+// classify_storages (installer/filter_plugins/proxcloud.py) on DetectStorage's output: one profile per slug, the
+// first storage by name wins, only storages that take VM disks, and an NFS or CIFS store that also holds ISOs or
+// import files is the template store, not a tenant profile. Two things follow from having the detection: a storage
+// active on no node is left out, and a profile claims a flag only when the storage has it (a thick zfspool is not
+// thin), so what is proposed passes the validation of a storageProfiles save.
+func ProposeProfiles(caps map[string]StorageCapability) map[string]any {
+	ids := make([]string, 0, len(caps))
+	for id := range caps {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	out := map[string]any{}
+	for _, id := range ids {
+		c := caps[id]
+		p, ok := proposedProfile[c.Type]
+		if _, taken := out[p.slug]; !ok || taken || !c.HasContent("images") {
+			continue
+		}
+		if p.slug == "capacity" && (c.HasContent("iso") || c.HasContent("import")) {
+			continue
+		}
+		active := false
+		for _, n := range c.Nodes {
+			active = active || n.Active
+		}
+		if !active {
+			continue
+		}
+		has := map[string]bool{"shared": c.Shared, "snapshots": c.Snapshots, "thin": c.Thin, "liveMigrate": c.LiveMigrate, "replication": c.Replication}
+		prof := map[string]any{"storages": map[string]any{"*": id}}
+		for _, f := range p.flags {
+			if has[f] {
+				prof[f] = true
+			}
+		}
+		if p.label != "" {
+			prof["label"] = p.label
+		}
+		out[p.slug] = prof
+	}
+	return out
 }
 
 // rowState is one GET /cluster/resources?type=storage row as a node state (avail clamped at 0).

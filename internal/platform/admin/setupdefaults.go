@@ -87,6 +87,7 @@ func defaultsPerms(items []string) []string {
 func (h *Handler) routeSetup(r chi.Router) {
 	r.Get("/setup/defaults", h.setupDefaultsPreview)
 	r.Post("/setup/defaults", h.setupDefaultsApply)
+	r.Get("/setup/status", h.setupStatusGet)
 }
 
 // setupItem is one line of a setup answer.
@@ -359,15 +360,23 @@ func (h *Handler) readDefaultsState(ctx context.Context, serviceID string) (defa
 		return st, err
 	}
 	st.Currency = str(bill["baseCurrency"])
-	plat, err := h.repo.currentConfigDoc(ctx, pcfgCollection)
+	st.PlatformID, st.Regions, err = h.repo.currentRegions(ctx)
+	return st, err
+}
+
+// currentRegions is the region list of the current platform configuration and that document's id ("" = the install
+// has none). A list that is not a region list reads as empty.
+func (r *Repo) currentRegions(ctx context.Context) (string, []platformconfig.RegionDisplayConfig, error) {
+	plat, err := r.currentConfigDoc(ctx, pcfgCollection)
 	if err != nil {
-		return st, err
+		return "", nil, err
 	}
-	st.PlatformID, _ = pricePlanDocID(plat)
+	var regions []platformconfig.RegionDisplayConfig
 	if raw, err := json.Marshal(plat["regions"]); err == nil {
-		_ = json.Unmarshal(raw, &st.Regions) // a malformed list reads as empty; the write then replaces only what it adds to
+		_ = json.Unmarshal(raw, &regions)
 	}
-	return st, nil
+	id, _ := pricePlanDocID(plat)
+	return id, regions, nil
 }
 
 // defaultsLockKey serializes applies: the check for an enabled public plan and the insert of the default one must not

@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -836,5 +837,25 @@ func TestProxmoxSetupScriptRoute(t *testing.T) {
 		if rec := get(query, op); rec.Code != http.StatusBadRequest || strings.Contains(rec.Body.String(), "pveum") {
 			t.Errorf("GET %q: %d %s", query, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+// The detect answer keeps the stored capabilities at the top level (installer stages 60 and 70 read it) and adds the
+// proposal next to them.
+func TestPVEDetectResponseShape(t *testing.T) {
+	caps := externalservice.PVECapabilities{DetectedAt: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC), Storages: map[string]pve.StorageCapability{
+		"local-zfs": {Storage: "local-zfs", Type: "zfspool", Content: []string{"images"}, Snapshots: true, Nodes: map[string]pve.StorageNodeState{"pve1": {Active: true}}},
+	}}
+	raw, err := json.Marshal(pveDetectResponse{caps, pve.ProposeProfiles(caps.Storages)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || string(got["detectedAt"]) != `"2026-11-01T00:00:00Z"` || !strings.Contains(string(got["storages"]), `"local-zfs"`) ||
+		string(got["proposedProfiles"]) != `{"std":{"snapshots":true,"storages":{"*":"local-zfs"}}}` {
+		t.Fatalf("detect answer: %s", raw)
 	}
 }

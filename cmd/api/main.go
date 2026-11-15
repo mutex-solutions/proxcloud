@@ -993,6 +993,7 @@ func run() error {
 		return fmt.Errorf("template update sandbox store: %w", err)
 	}
 	adminH.SetTemplateUpdates(tuSvc)
+	adminH.SetJobsScheduler(cfg.Jobs.SchedulerEnabled)
 	adminH.SetSandboxCluster(func(es *externalservice.ExternalService) (admin.SandboxCluster, error) { return sandboxServiceFor(es) })
 	// The sandbox mirror runner always runs: with PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED off (CleanupOnly) it runs
 	// no job — a queued one, or one whose lease expired, ends as feature_disabled with its cleanup; a live-leased one is

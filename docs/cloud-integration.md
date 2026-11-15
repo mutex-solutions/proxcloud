@@ -323,6 +323,17 @@ active / total / avail. A node outside the storage's `nodes` list is ignored and
   /api/v1/admin/service/{id}/storage/detect` (the Storage tab's Re-detect), and on
   every `storageProfiles` save. The result is written as a partial update of
   `config.capabilities`.
+- **Proposed profiles.** The detect answer carries `proposedProfiles` next to
+  `detectedAt` and `storages`: storage profiles in the `config.storageProfiles`
+  shape for the operator to confirm, nothing of it stored. It is the
+  installer's `classify_storages` (`installer/filter_plugins/proxcloud.py`,
+  `pve.ProposeProfiles`): `rbd` → `ceph`, `zfspool` → `std`, `lvmthin` →
+  `local-lvm`, `nfs` / `cifs` → `capacity`, one storage per profile (the first
+  by name), only storages with `images` content, and an NFS or CIFS store that
+  also takes `iso` or `import` is the template store, not a profile. Unlike the
+  installer it skips a storage active on no node and claims a flag only when the
+  storage has it (a zfspool without `sparse` is not thin), so the proposal passes
+  the profile save as it is.
 - **Class.** `PUT /api/v1/admin/service/{id}/storage-classes` takes
   `{"<storage>": "performance|standard|capacity|"}`; `""` clears the override. The
   installer's fio result (`suggestedClass`) is only a suggestion and is never

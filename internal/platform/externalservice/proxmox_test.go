@@ -119,6 +119,24 @@ func TestMergePVEDefaultQuota(t *testing.T) {
 	}
 }
 
+// What storage detection proposes can be saved as it is: a proposal never claims more than the storage has.
+func TestProposedProfilesPassValidation(t *testing.T) {
+	on := map[string]pve.StorageNodeState{"pve1": {Active: true}}
+	caps := map[string]pve.StorageCapability{
+		"local-zfs":    {Storage: "local-zfs", Type: "zfspool", Content: []string{"images"}, Snapshots: true, Replication: true, Class: pve.ClassPerformance, Nodes: on},
+		"local-lvm":    {Storage: "local-lvm", Type: "lvmthin", Content: []string{"images"}, Snapshots: true, Thin: true, Class: pve.ClassPerformance, Nodes: on},
+		"nas-capacity": {Storage: "nas-capacity", Type: "nfs", Content: []string{"images"}, Shared: true, Thin: true, LiveMigrate: true, Class: pve.ClassCapacity, Nodes: on},
+		"ceph":         {Storage: "ceph", Type: "rbd", Content: []string{"images"}, Shared: true, Snapshots: true, Thin: true, LiveMigrate: true, Tier: pve.TierFull, Class: pve.ClassPerformance, Nodes: on},
+	}
+	proposed := pve.ProposeProfiles(caps)
+	if len(proposed) != 4 {
+		t.Fatalf("proposed: %v", proposed)
+	}
+	if err := ValidatePVEStorageProfiles(proposed, caps, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPVEStorageProfilePlacement(t *testing.T) {
 	zfs1 := pve.StorageNodeState{Active: true, Total: 100, Avail: 60}
 	zfs2 := pve.StorageNodeState{Active: true, Total: 100, Avail: 5}

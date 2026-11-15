@@ -62,6 +62,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   permission of the endpoint that writes the same document by hand. `seed-operator.py` is unchanged.
   `docs/api.md` describes both routes. Not verified: a run against a Compose install, and the published image build
   (the build stage was built locally; CI builds the image).
+- **Setup status from the API** (`GET /api/v1/admin/setup/status?serviceId=&live=1`). The Dashboard and the setup
+  page need to know which step of a new install is done, and the row counts of `/admin/stats` call billing and
+  branding configured on a fresh Compose install, because the seed writes those rows. One pure function computes six
+  steps (connect, network, storage, templates, catalog, go live) with one item per check, from the database alone,
+  and with `live=1` also from the cluster: every check of the connection test (not only the first that fails), the
+  nodes with an active import store, the published OS images and the imported templates. A table test pins a fresh
+  Compose install to no step done. Go live waits for connect, network, storage and templates; an open catalog and
+  a job scheduler that is off are warnings, by the owner's decision, so they block nothing. Only enabled public
+  plans that apply to the provider count as pricing it. The route needs the four reads of the defaults preview.
+  Not verified: a live run against a Proxmox cluster (the live checks run against the test fake).
+- **Proposed storage profiles** (`proposedProfiles` in `POST /api/v1/admin/service/{id}/storage/detect`). The
+  installer proposes profiles from the storages it finds (`classify_storages`); a console install had to write them
+  by hand. The detect answer now carries the same proposal (`pve.ProposeProfiles`, tested on the installer's own
+  cases), nothing of it stored. It skips a storage active on no node and claims a flag only when the storage has it,
+  so the proposal passes the profile save unchanged. The rest of the answer is as before.
 
 ### Changed
 

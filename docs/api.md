@@ -248,6 +248,46 @@ It answers one result per requested item, with `state` `created`, `skipped`
   added (a limit stored under a legacy key such as `instances`, or set to `-1`,
   counts as set), and the per-model `gpu` limits are kept.
 
+**Status.** `GET /api/v1/admin/setup/status?serviceId=&live=1` says how far
+the install is from its first tenant, for the Dashboard card and the setup
+page. It needs the same four reads as the defaults preview and changes nothing.
+`serviceId` names a Proxmox provider (`404` when there is none, `400` for
+another type); without it the first Proxmox provider by name is used, and with
+none saved every step that needs one is `blocked`.
+
+```json
+{"data": {"serviceId": "svc-1", "live": false, "steps": [
+  {"id": "connect", "state": "done", "summary": "Provider lab is saved", "items": [{"id": "provider", "state": "done", "message": "Provider lab is saved"}]},
+  {"id": "catalog", "state": "todo", "summary": "No flavor in the catalog: tenants cannot create a server", "items": []}
+]}}
+```
+
+The steps, in order: `connect`, `network`, `storage`, `templates`, `catalog`,
+`golive`. An item's `state` is `done`, `attention` (works, but look at it),
+`todo`, `blocked` (needs another step first) or `unknown` (could not be read).
+The worst item decides the step's state and its `summary`; a `blocked` item
+makes the step `todo`, and a step is `blocked` only when it cannot start.
+
+- **Without `live`** only the database is read: the provider, its
+  `cidrPool` and default zone, storage detection, profiles and the default
+  profile, flavors and the flavors no rule prices, the enabled PUBLIC plans
+  that apply to the provider and their `instance` rules, the default quota, the
+  region row, the business name, address and country of the billing
+  configuration, and the attach policy. Rows are not counted: the Compose seed
+  writes the billing and platform configuration, and a fresh install shows no
+  step done. `templates` is `unknown` unless the provider configuration pins a
+  template.
+- **With `live=1`** the cluster is asked too: the connection test's checks (API
+  and token, datacenter firewall, nftables per node, public networks off the
+  management bridge, platform privileges), one row each, all of them even when
+  one fails; the nodes with an active `import` store; the published OS images;
+  and the imported templates by lifecycle state. A cluster that does not answer
+  is a failed item, not a failed request.
+- **Go live** waits for `connect`, `network`, `storage` and `templates`
+  (`blocked` until none is `todo`). An open catalog and a job scheduler that is
+  off (`PROXCLOUD_JOBS_SCHEDULER_ENABLED`) are `attention` items: they block
+  nothing. An attach policy that is on while steps are open is `attention`.
+
 ## Admin API — `/admin-api/v1`
 
 A machine-to-machine surface (`internal/platform/adminapi`). Authenticated with an
