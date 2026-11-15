@@ -146,7 +146,7 @@ func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if cfg, _ := doc["config"].(map[string]any); cfg["provider"] == "proxmox" {
-		if err := externalservice.ValidatePVENetwork(cfg["network"]); err != nil {
+		if err := externalservice.ValidatePVENetwork(cfg["network"], nil); err != nil {
 			httpx.WriteError(w, httpx.BadRequest(err.Error()))
 			return
 		}
@@ -303,6 +303,7 @@ func (h *Handler) applyServiceConnectionBody(req *http.Request, doc pgdoc.M) *ht
 			return httpx.BadRequest(err.Error())
 		}
 		cfg := ensureConfig(doc)
+		storedNetwork := cfg["network"]
 		for k, v := range c {
 			cfg[k] = v
 		}
@@ -311,9 +312,9 @@ func (h *Handler) applyServiceConnectionBody(req *http.Request, doc pgdoc.M) *ht
 				return herr
 			}
 		}
-		// Only a body with a network block: a stored block from before this check is left alone by other saves.
+		// Only a body with a network block, and only for a problem the stored block does not have already.
 		if raw, ok := c["network"]; ok && cfg["provider"] == "proxmox" {
-			if err := externalservice.ValidatePVENetwork(raw); err != nil {
+			if err := externalservice.ValidatePVENetwork(raw, storedNetwork); err != nil {
 				return httpx.BadRequest(err.Error())
 			}
 		}

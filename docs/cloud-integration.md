@@ -195,7 +195,11 @@ is longer than the 8 characters of a Proxmox SDN zone id, a `vlan` zone has no
 (every project's zone is copied from it). A block that is only incomplete is
 stored: no `cidrPool` or no zone yet is what the Add provider form sends, and the
 connection test's setup checks report it. A save without `network` leaves the
-stored block alone.
+stored block alone, and a save with one is refused only for a problem the stored
+block does not have already: the console sends the stored block back with every
+Connection tab save, and a block saved before this check may work (a zone that
+exists in Proxmox is used as it is), so it must not lock the provider. A new
+problem, or a wrong value changed to another wrong value, is still refused.
 
 Typed accessors used by the rest of the code:
 

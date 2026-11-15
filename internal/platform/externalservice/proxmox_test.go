@@ -414,8 +414,8 @@ func TestValidatePVENetwork(t *testing.T) {
 		{"defaultZone without zones", `{"defaultZone":"overlay"}`, "config.network.defaultZone must name one"},
 		{"two zones, no defaultZone", `{"zones":{"a":{"kind":"simple"},"b":{"kind":"simple"}}}`, "config.network.defaultZone must name one"},
 		{"a zone per project from a simple zone", `{"defaultZone":"s","zones":{"s":{"kind":"simple"}},"isolation":"evpn-per-project"}`,
-			"evpn-per-project copies every project's zone from the default zone, which must then be an evpn zone, not simple"},
-		{"a zone per project from a vlan zone", `{"defaultZone":"v","zones":{"v":{"kind":"vlan","bridge":"vmbr0"}},"isolation":"evpn-per-project"}`, "not vlan"},
+			"evpn-per-project copies every project's zone from the default zone, which must then be an evpn zone; s is simple"},
+		{"a zone per project from a vlan zone", `{"defaultZone":"v","zones":{"v":{"kind":"vlan","bridge":"vmbr0"}},"isolation":"evpn-per-project"}`, "v is vlan"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -423,9 +423,40 @@ func TestValidatePVENetwork(t *testing.T) {
 			if err := json.Unmarshal([]byte(tt.network), &raw); err != nil {
 				t.Fatal(err)
 			}
-			err := ValidatePVENetwork(raw)
+			err := ValidatePVENetwork(raw, nil)
 			if (tt.wantErr == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), tt.wantErr)) {
 				t.Fatalf("ValidatePVENetwork(%s) = %v, want %q", tt.network, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// A save is refused only for a problem the block it replaces does not have: a wrong value that changes is a new one.
+func TestValidatePVENetworkStored(t *testing.T) {
+	tests := []struct {
+		name, network, stored string // JSON
+		wantErr               string // "" = accepted
+	}{
+		{"the stored problem kept", `{"cidrPool":"10.100.0.0/26"}`, `{"cidrPool":"10.100.0.0/26"}`, ""},
+		{"the stored problem fixed", `{"cidrPool":"10.100.0.0/16"}`, `{"cidrPool":"10.100.0.0/26"}`, ""},
+		{"another wrong pool", `{"cidrPool":"10.100.0.0/25"}`, `{"cidrPool":"10.100.0.0/26"}`, "not 10.100.0.0/25"},
+		{"another missing default zone", `{"defaultZone":"b","zones":{"s":{"kind":"simple"}}}`, `{"defaultZone":"a","zones":{"s":{"kind":"simple"}}}`, `not "b"`},
+		{"another unknown kind", `{"zones":{"o":{"kind":"geneve"}}}`, `{"zones":{"o":{"kind":"vxlan"}}}`, "not geneve"},
+		{"stored is not an object", `{"zones":{"o":{"kind":"vxlan"}}}`, `"overlay"`, "config.network.zones.o.kind must be"},
+		{"no stored block", `{"cidrPool":"10.100.0.0/26"}`, `null`, "config.network.cidrPool must be"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var raw, stored any
+			if err := json.Unmarshal([]byte(tt.network), &raw); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(tt.stored), &stored); err != nil {
+				t.Fatal(err)
+			}
+			err := ValidatePVENetwork(raw, stored)
+			if (tt.wantErr == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("ValidatePVENetwork(%s, %s) = %v, want %q", tt.network, tt.stored, err, tt.wantErr)
 			}
 		})
 	}
@@ -447,7 +478,7 @@ func TestValidatePVENetworkAcceptsShippedConfigs(t *testing.T) {
 	for _, doc := range seed {
 		if cfg, _ := doc["config"].(map[string]any); cfg["provider"] == "proxmox" {
 			seen++
-			if err := ValidatePVENetwork(cfg["network"]); err != nil {
+			if err := ValidatePVENetwork(cfg["network"], nil); err != nil {
 				t.Errorf("seed %v: %v", doc["_id"], err)
 			}
 		}
@@ -505,7 +536,7 @@ func TestValidatePVENetworkAcceptsShippedConfigs(t *testing.T) {
 			"sandboxCidrs":   []any{},
 			"evpnController": n.Controller,
 		}
-		if err := ValidatePVENetwork(network); err != nil {
+		if err := ValidatePVENetwork(network, nil); err != nil {
 			t.Errorf("installer defaults with kind %s, isolation %s: %v", v.kind, v.isolation, err)
 		}
 	}

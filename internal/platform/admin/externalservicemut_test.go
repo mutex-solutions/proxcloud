@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -266,5 +267,50 @@ func TestPVENetworkValidatedOnSave(t *testing.T) {
 	}
 	if herr := put(pgdoc.M{"config": pgdoc.M{"provider": "kamaji"}}, `{"config":{"network":{"cidrPool":"x"}}}`); herr != nil {
 		t.Fatalf("another provider kind: %#v", herr)
+	}
+}
+
+// The console sends the stored network block back with every Connection tab save, with its own isolation keys merged
+// in. A problem the stored block already has is not refused again, so a block from before the check (which may work:
+// a zone that exists in Proxmox is used as it is) does not lock the provider; a problem the save adds still is.
+func TestPVENetworkStoredProblemsKept(t *testing.T) {
+	h := &Handler{}
+	const legacy = `{"defaultZone":"overlay","zones":{"overlay":{"kind":"evpn"},"legacyzone1":{"kind":"evpn"},` +
+		`"v":{"kind":"vlan","vlanMin":100,"vlanMax":199}},"blockedCidrs":[]}`
+	stored := func() pgdoc.M {
+		var network map[string]any
+		if err := json.Unmarshal([]byte(legacy), &network); err != nil {
+			t.Fatal(err)
+		}
+		return pgdoc.M{"config": pgdoc.M{"provider": "proxmox", "network": network}}
+	}
+	tests := []struct {
+		name, network string
+		wantErr       string // "" = accepted
+	}{
+		{"sent back unchanged", legacy, ""},
+		{"sent back by the Connection tab", `{"defaultZone":"overlay","zones":{"overlay":{"kind":"evpn"},"legacyzone1":{"kind":"evpn"},` +
+			`"v":{"kind":"vlan","vlanMin":100,"vlanMax":199}},"isolation":"shared"}`, ""},
+		{"an old problem fixed, the other kept", `{"defaultZone":"overlay","zones":{"overlay":{"kind":"evpn"},"legacyzone1":{"kind":"evpn"}}}`, ""},
+		{"a new zone id too long", `{"defaultZone":"overlay","zones":{"overlay":{"kind":"evpn"},"legacyzone1":{"kind":"evpn"},"legacyzone2":{"kind":"evpn"}}}`,
+			`the zone id "legacyzone2"`},
+		{"a new vlan zone without a bridge", `{"defaultZone":"overlay","zones":{"overlay":{"kind":"evpn"},"w":{"kind":"vlan"}}}`,
+			"config.network.zones.w is a vlan zone and needs a bridge"},
+		{"a pool too small", `{"defaultZone":"overlay","zones":{"overlay":{"kind":"evpn"}},"cidrPool":"10.100.0.0/25"}`,
+			"config.network.cidrPool must be an IPv4 range of /24 or larger"},
+		{"a zone per project from the vlan zone", `{"defaultZone":"v","zones":{"v":{"kind":"vlan","vlanMin":100}},"isolation":"evpn-per-project"}`,
+			"must then be an evpn zone"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := `{"config":{"network":` + tt.network + `}}`
+			herr := h.applyServiceConnectionBody(httptest.NewRequest(http.MethodPut, "/service/p", strings.NewReader(body)), stored())
+			if tt.wantErr == "" && herr != nil {
+				t.Fatalf("refused: %#v", herr)
+			}
+			if tt.wantErr != "" && (herr == nil || herr.Status != http.StatusBadRequest || !strings.Contains(herr.Msg, tt.wantErr)) {
+				t.Fatalf("got %#v, want a 400 containing %q", herr, tt.wantErr)
+			}
+		})
 	}
 }

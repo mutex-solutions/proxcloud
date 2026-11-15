@@ -57,8 +57,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   zone of `zones` (or there are several zones and no `defaultZone`), a zone's `kind` is not `evpn`, `vlan`
   or `simple`, a zone id is longer than 8 characters, a `vlan` zone has no `bridge`, or `isolation` is
   `evpn-per-project` with a default zone that is not EVPN. What is only missing is still accepted (no
-  `cidrPool`, no zone yet, as the console's Add provider form sends it), and a save without `network`
-  leaves a stored block alone, so a block saved before this check does not lock the provider. The dev
+  `cidrPool`, no zone yet, as the console's Add provider form sends it). A save is refused only for a
+  problem the block it replaces does not have already: the console's Connection tab sends the stored block
+  back with every save, and a block saved before this check may work (a zone that exists in Proxmox is used
+  as it is, and the portal reads only the default zone), so it must not lock the provider. A new problem, or
+  a wrong value changed to another wrong value, is still refused. The dev
   seed and the network block installer stage 60 builds from the inventory defaults pass; an inventory
   with `isolation: evpn` and `kind: simple` or `vlan` is now refused at stage 60 instead of failing at the
   first tenant network. Tested with unit tests only.

@@ -80,6 +80,7 @@ package externalservice
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -411,58 +412,75 @@ func ParseCIDRPool(pool string) (netip.Prefix, error) {
 	return p.Masked(), nil
 }
 
-// ValidatePVENetwork checks a config.network value before a save stores it; nil is no network. It refuses what is
-// wrong and lets through what is missing: a provider is stored before its network is set up, and the setup checks of
-// the connection test report what is still to do. A refused block is one whose tenant networks would fail: Proxmox
-// takes an SDN zone id of at most 8 characters and a VLAN zone only on a bridge, the network code knows three kinds
-// of zone, and a zone per project is copied from the default zone, which must then be EVPN (EnsureProjectZone).
-func ValidatePVENetwork(raw any) error {
+// ValidatePVENetwork checks the config.network value a save carries (raw; nil is no network) against the block it
+// replaces (stored; nil on a create). It refuses what is wrong and lets through what is missing: a provider is stored
+// before its network is set up, and the setup checks of the connection test report what is still to do. A refused
+// block is one whose tenant networks would fail: Proxmox takes an SDN zone id of at most 8 characters and a VLAN zone
+// only on a bridge, the network code knows three kinds of zone, and a zone per project is copied from the default
+// zone, which must then be EVPN (EnsureProjectZone). A problem the stored block already has is not refused again: the
+// console sends the stored block back with every save, and a block from before this check may work (EnsureZone uses a
+// zone that exists in Proxmox as it is), so it must not lock the provider.
+func ValidatePVENetwork(raw, stored any) error {
+	old := pveNetworkProblems(stored)
+	for _, p := range pveNetworkProblems(raw) {
+		if !slices.Contains(old, p) {
+			return errors.New(p)
+		}
+	}
+	return nil
+}
+
+// pveNetworkProblems lists every problem of a config.network value. A message names the value it refuses, so a
+// changed wrong value is a new problem.
+func pveNetworkProblems(raw any) (out []string) {
 	if raw == nil {
 		return nil
 	}
 	m, ok := raw.(map[string]any)
 	if !ok {
-		return fmt.Errorf("config.network must be an object")
+		return []string{"config.network must be an object"}
 	}
+	add := func(format string, a ...any) { out = append(out, fmt.Sprintf(format, a...)) }
 	for _, k := range []string{"cidrPool", "defaultZone", "isolation"} {
 		if _, isStr := m[k].(string); m[k] != nil && !isStr {
-			return fmt.Errorf("config.network.%s must be a string", k)
+			add("config.network.%s must be a string", k)
 		}
 	}
 	if pool := str(m["cidrPool"]); pool != "" {
 		if _, err := ParseCIDRPool(pool); err != nil {
-			return fmt.Errorf("config.network.%w", err)
+			add("config.network.%v, not %s", err, pool)
 		}
 	}
 	zones, ok := m["zones"].(map[string]any)
 	if !ok && m["zones"] != nil {
-		return fmt.Errorf("config.network.zones must be an object")
+		add("config.network.zones must be an object")
 	}
 	for _, key := range sortedKeys(zones) {
 		z, ok := zones[key].(map[string]any)
 		if !ok {
-			return fmt.Errorf("config.network.zones.%s must be an object", key)
+			add("config.network.zones.%s must be an object", key)
+			continue
 		}
 		if n := utf8.RuneCountInString(key); n == 0 || n > 8 {
-			return fmt.Errorf("config.network.zones: the zone id %q is the Proxmox SDN zone id, of 1 to 8 characters", key)
+			add("config.network.zones: the zone id %q is the Proxmox SDN zone id, of 1 to 8 characters", key)
 		}
 		kind, isStr := z["kind"].(string)
 		if (z["kind"] != nil && !isStr) || !slices.Contains([]string{"", "evpn", "overlay", "vlan", "simple"}, kind) {
-			return fmt.Errorf("config.network.zones.%s.kind must be evpn, vlan or simple", key)
+			add("config.network.zones.%s.kind must be evpn, vlan or simple, not %v", key, z["kind"])
 		}
 		if bridge, _ := z["bridge"].(string); kind == "vlan" && bridge == "" {
-			return fmt.Errorf("config.network.zones.%s is a vlan zone and needs a bridge", key)
+			add("config.network.zones.%s is a vlan zone and needs a bridge", key)
 		}
 	}
 	n := (&ExternalService{Config: map[string]any{"network": m}}).PVENetworkConfig()
 	def, ok := n.Zones[n.DefaultZone]
 	if !ok && (n.DefaultZone != "" || len(zones) > 0) {
-		return fmt.Errorf("config.network.defaultZone must name one of config.network.zones")
+		add("config.network.defaultZone must name one of config.network.zones, not %q", n.DefaultZone)
 	}
 	if ok && n.Isolation == pve.IsolationEVPN && def.Type() != "evpn" {
-		return fmt.Errorf("config.network.isolation evpn-per-project copies every project's zone from the default zone, which must then be an evpn zone, not %s", def.Type())
+		add("config.network.isolation evpn-per-project copies every project's zone from the default zone, which must then be an evpn zone; %s is %s", def.Key, def.Type())
 	}
-	return nil
+	return out
 }
 
 // PVESandbox is config.sandbox: the platform's sandbox workers, whose VM firewall the sync job applies and keeps
