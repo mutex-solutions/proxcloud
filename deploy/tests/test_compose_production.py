@@ -32,6 +32,7 @@ SECRETS = ("PG_PASSWORD", "KEYCLOAK_DB_PASSWORD", "KC_ADMIN_PASSWORD", "SSO_CLIE
 FEATURES = {
     "template-updates": ("TEMPLATE_UPDATES_VM_ENABLED", "PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED"),
     "scheduler": ("JOBS_SCHEDULER_ENABLED", "PROXCLOUD_JOBS_SCHEDULER_ENABLED"),
+    "managed-services": ("PLATFORM_ENABLED", "PROXCLOUD_PLATFORM_ENABLED"),
 }
 
 # The chart values the Compose install stands for: two realms (customers in "clients", operators in
@@ -158,6 +159,9 @@ esac
 BASE = ("--domain", "cloud.example.com", "--operator-email", "ops@example.com")
 # The first release the script runs with the scheduler on (test_the_scheduler_needs_a_release_after_v0_6_0).
 LATER = ("--version", "v0.6.1")
+# The first release with the platform API, the one the script runs with managed services on
+# (test_managed_services_need_v0_8_0_or_later).
+PLATFORM = ("--version", "v0.8.0")
 
 
 class GeneratedFromChartTests(unittest.TestCase):
@@ -409,22 +413,28 @@ class ScriptDryRunTests(unittest.TestCase):
         self.assertEqual(len(keys), len(set(keys)))
 
     def test_optional_features_are_set_by_flag_and_kept_by_a_rerun_without_it(self):
-        # Each step is one more dry run on the same install, adopted afterwards: (flags, expected values).
+        # Each step is one more dry run on the same install, adopted afterwards: (flags, expected values
+        # of template updates, scheduler and managed services, in FEATURES order).
         on, off = "true", "false"
         steps = [
-            ((), {"template-updates": off, "scheduler": off}),  # a first install: both off, both written
-            (("--template-updates",), {"template-updates": on, "scheduler": off}),
-            (("--scheduler",), {"template-updates": on, "scheduler": on}),  # the other one is kept
-            ((), {"template-updates": on, "scheduler": on}),  # a plain re-run turns nothing off
-            (("--admin-host", "ops.example.com"), {"template-updates": on, "scheduler": on}),
-            (("--no-scheduler",), {"template-updates": on, "scheduler": off}),
-            (("--no-template-updates", "--scheduler"), {"template-updates": off, "scheduler": on}),
-            (("--scheduler", "--no-scheduler"), {"template-updates": off, "scheduler": off}),  # the last one wins
+            ((), (off, off, off)),  # a first install: all off, all written
+            (("--template-updates",), (on, off, off)),
+            (("--scheduler",), (on, on, off)),  # the other one is kept
+            ((), (on, on, off)),  # a plain re-run turns nothing off
+            (("--admin-host", "ops.example.com"), (on, on, off)),
+            (("--no-scheduler",), (on, off, off)),
+            (("--no-template-updates", "--scheduler"), (off, on, off)),
+            (("--scheduler", "--no-scheduler"), (off, off, off)),  # the last one wins
+            (("--managed-services",), (on, off, on)),  # implies template updates
+            ((), (on, off, on)),
+            (("--no-managed-services",), (on, off, off)),  # template updates stay on
+            (("--no-template-updates", "--managed-services", "--no-managed-services"), (off, off, off)),
         ]
         install = Install(self)
-        for flags, expected in steps:
+        for flags, states in steps:
+            expected = dict(zip(FEATURES, states))
             with self.subTest(flags=flags):
-                result = install.install(*BASE, "--tls", "internal", *LATER, *flags)
+                result = install.install(*BASE, "--tls", "internal", *PLATFORM, *flags)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 values = read_env(install.dir)
                 self.assertEqual({flag: values[key] for flag, (key, _) in FEATURES.items()}, expected)
@@ -432,6 +442,8 @@ class ScriptDryRunTests(unittest.TestCase):
                 self.assertRegex(result.stdout, r"Job scheduler +%s\b" % ("on" if expected["scheduler"] == on else "off"))
                 self.assertRegex(result.stdout,
                                  r"Template updates +%s\b" % ("on" if expected["template-updates"] == on else "off"))
+                self.assertRegex(result.stdout,
+                                 r"Managed services +%s\b" % ("on" if expected["managed-services"] == on else "off"))
                 model = self.compose_model(install, "internal")
                 if model is not None:
                     api = model["services"]["api"]["environment"]
@@ -440,13 +452,14 @@ class ScriptDryRunTests(unittest.TestCase):
 
     def test_optional_features_survive_an_upgrade_and_belong_to_install_only(self):
         install = Install(self)
-        self.assertEqual(install.install(*BASE, "--tls", "internal", *LATER, "--template-updates", "--scheduler").returncode, 0)
+        self.assertEqual(install.install(*BASE, "--tls", "internal", *PLATFORM, "--scheduler", "--managed-services").returncode, 0)
         install.adopt()
         upgrade = install.run("upgrade", "v9.9.9", "--dry-run")
         self.assertEqual(upgrade.returncode, 0, upgrade.stderr)
         values = read_env(install.dir)
-        self.assertEqual([values[key] for key, _ in FEATURES.values()], ["true", "true"])
-        for command, flag in (("status", "--scheduler"), ("upgrade", "--no-scheduler"), ("backup", "--template-updates")):
+        self.assertEqual([values[key] for key, _ in FEATURES.values()], ["true", "true", "true"])
+        for command, flag in (("status", "--scheduler"), ("upgrade", "--no-scheduler"), ("backup", "--template-updates"),
+                              ("status", "--managed-services"), ("upgrade", "--no-managed-services")):
             with self.subTest(command=command, flag=flag):
                 refused = install.run(command, flag, "--dry-run")
                 self.assertNotEqual(refused.returncode, 0)
@@ -475,6 +488,52 @@ class ScriptDryRunTests(unittest.TestCase):
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn("the job scheduler needs a ProxCloud release after v0.6.0", refused.stderr)
         self.assertNotIn("+ docker", refused.stdout)
+
+    def test_managed_services_need_v0_8_0_or_later(self):
+        # The platform API (PROXCLOUD_PLATFORM_ENABLED, the Managed services page) arrives in v0.8.0. An
+        # older API ignores the variable: the switch would read as on while nothing can run.
+        for version, allowed in (("v0.6.1", False), ("v0.7.0", False), ("v0.7.9", False), ("v0.8.0-rc.1", True),
+                                 ("v0.8.0", True), ("v0.10.0", True)):
+            with self.subTest(version=version):
+                install = Install(self)
+                result = install.install(*BASE, "--tls", "internal", "--version", version, "--managed-services")
+                if allowed:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    continue
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("managed services need ProxCloud v0.8.0 or later", result.stderr)
+                self.assertFalse((install.dir / DRY).exists())
+        # Recorded on, the switch also stops an upgrade back to such a release; recorded off, it does not.
+        install = Install(self)
+        self.assertEqual(install.install(*BASE, "--tls", "internal", *PLATFORM, "--managed-services").returncode, 0)
+        install.adopt()
+        refused = install.run("upgrade", "v0.7.9", "--dry-run")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("managed services need ProxCloud v0.8.0 or later", refused.stderr)
+        self.assertNotIn("+ docker", refused.stdout)
+        self.assertEqual(install.install(*BASE, "--tls", "internal", *PLATFORM, "--no-managed-services").returncode, 0)
+        install.adopt()
+        self.assertEqual(install.run("upgrade", "v0.7.9", "--dry-run").returncode, 0)
+
+    def test_managed_services_do_not_run_without_template_updates(self):
+        # The platform job imports its node images through template updates.
+        install = Install(self)
+        args = (*BASE, "--tls", "internal", *PLATFORM)
+        for flags in (("--managed-services", "--no-template-updates"), ("--no-template-updates", "--managed-services")):
+            with self.subTest(flags=flags):
+                refused = install.install(*args, *flags)
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertIn("managed services need template updates", refused.stderr)
+                self.assertFalse((install.dir / DRY).exists())
+        self.assertEqual(install.install(*args, "--managed-services").returncode, 0)
+        install.adopt()
+        # Recorded on, a later --no-template-updates alone is refused as well; with both off it passes.
+        refused = install.install(*args, "--no-template-updates")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("managed services need template updates", refused.stderr)
+        self.assertNotIn("+ docker", refused.stdout)
+        self.assertEqual(install.install(*args, "--no-template-updates", "--no-managed-services").returncode, 0)
+        self.assertEqual([read_env(install.dir)[key] for key, _ in FEATURES.values()], ["false", "false", "false"])
 
     def test_a_feature_value_edited_by_hand_must_be_true_or_false(self):
         for flag, (key, _) in FEATURES.items():
@@ -680,7 +739,7 @@ class ScriptRealRunTests(unittest.TestCase):
         self.assertNotEqual(installed, "v9.9.9")
 
     def test_an_exported_feature_variable_does_not_reach_compose(self):
-        # An install made before the two feature keys existed has neither in .env, and Compose would
+        # An install made before the three feature keys existed has none in .env, and Compose would
         # take them from the shell: "upgrade" must not start the billing timers that way.
         install = self.installed()
         env = install.dir / ".env"
@@ -698,7 +757,7 @@ class ScriptRealRunTests(unittest.TestCase):
         # A feature turned on with the flag is in .env, and is what a real run records.
         self.assertEqual(install.real("install", "--scheduler").returncode, 0)
         values = read_env(install.dir, ".env")
-        self.assertEqual([values[key] for key in keys], ["false", "true"])
+        self.assertEqual([values[key] for key in keys], ["false", "true", "false"])
 
     def test_a_finished_install_changes_release_only_through_upgrade(self):
         install = self.installed()

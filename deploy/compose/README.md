@@ -28,8 +28,11 @@ you pass `--version`.
 - **No Proxmox setup.** No provider, token, OS template or network is created. Connect your
   Proxmox VE cluster afterwards with the operator console's Platform setup page
   ([quickstart, A2](../../docs/quickstart.md#a2-connect-an-existing-proxmox-cluster)).
-- **No managed services.** Managed Kubernetes, managed databases and sandboxes need the services
-  cluster of the [installer](../../docs/install.md); they are not part of this stack.
+- **No managed services in the stack itself.** Managed Kubernetes, managed databases and sandboxes
+  run on clusters outside this host: the services cluster of the [installer](../../docs/install.md),
+  or, for Kubernetes and databases, a platform the operator console builds on your Proxmox VE
+  cluster once you install with `--managed-services` (v0.8.0 or later,
+  [Optional features](#optional-features)).
 - **No mail.** Customers register without email verification until you add an SMTP integration
   (operator console, System, Integrations) and a mail server in Keycloak.
 - **No high availability and no off-host backup.** One host, one database. `backup` writes to this
@@ -154,13 +157,14 @@ they do, and they win over `.env`.
 
 ### Optional features
 
-Two features are off after a plain install. Each has an install flag, and the API reads both only
+Three features are off after a plain install. Each has an install flag, and the API reads them only
 when it starts, so the operator console cannot switch them:
 
 ```sh
 ./proxcloud-up.sh install --template-updates    # VM template updates on
 ./proxcloud-up.sh install --scheduler           # job scheduler on
-./proxcloud-up.sh install --no-scheduler        # off again; --no-template-updates likewise
+./proxcloud-up.sh install --managed-services    # managed services on (and template updates)
+./proxcloud-up.sh install --no-scheduler        # off again; --no-template-updates, --no-managed-services likewise
 ```
 
 The flag is recorded in `.env` and the API container is recreated with it. A later `install`
@@ -189,6 +193,20 @@ feature off. The last lines of `install` (also with `--dry-run`) say what is on.
   `--no-scheduler` stops new timed work from being created. It does not stop the API's job
   worker, which always runs: billing work already queued in the database is still processed when
   the API starts, and written to the bills.
+- **`--managed-services`** sets `PROXCLOUD_PLATFORM_ENABLED`, which lets the operator console build
+  managed Kubernetes and managed databases on your Proxmox VE cluster: a seed VM and one shared
+  platform cluster with the node groups `system`, `kamaji` and `dbaas`, provisioned by a durable job
+  of the API ([ADR 0009](../../docs/adr/0009-managed-services-platform-lifecycle.md)). It implies
+  `--template-updates`, because the job imports the seed and node images through them:
+  `--no-managed-services` leaves template updates on, and `--no-template-updates` is refused while
+  managed services are on. It needs ProxCloud v0.8.0 or later, the first release with the platform
+  API: `install` and `upgrade` refuse an older one with it. The API container must reach the
+  platform network (the seed and the platform cluster's API address, port 6443) besides the Proxmox
+  API. On this stack the platform has no tenant block volumes (no CSI gateway listener) and no
+  database backups; the console shows both as warnings.
+
+  v0.8.0 is not released yet, so no image reads `PROXCLOUD_PLATFORM_ENABLED` today. Not verified: a
+  platform built from this stack (the path has not run on a lab).
 
 What the scheduler needs on this one host, and what it adds:
 
@@ -335,8 +353,9 @@ the script.
   created with mode 600; keep the directory private to the account that runs the script.
 - There are no default credentials: every secret is generated on this host at the first install.
 - PostgreSQL and the API's management port are not published; only Traefik listens on the host.
-- VM template updates and the job scheduler are off unless you install with `--template-updates`
-  or `--scheduler`. The sandbox flag and the debug triggers flag keep their defaults (off).
+- VM template updates, the job scheduler and managed services are off unless you install with
+  `--template-updates`, `--scheduler` or `--managed-services`. The sandbox flag and the debug
+  triggers flag keep their defaults (off).
   The scheduler does not mount the unauthenticated job triggers on the management port; only the
   debug triggers flag does. That holds from the first release after v0.6.0, and the script runs no
   older release with the scheduler on: see [Optional features](#optional-features).
@@ -357,6 +376,7 @@ Written by the script; change them by re-running `install` with flags.
 | `OPERATOR_EMAIL` | The first operator, once created |
 | `TEMPLATE_UPDATES_VM_ENABLED` | `true` or `false`: VM template updates (`--template-updates`, `--no-template-updates`) |
 | `JOBS_SCHEDULER_ENABLED` | `true` or `false`: the job scheduler (`--scheduler`, `--no-scheduler`) |
+| `PLATFORM_ENABLED` | `true` or `false`: managed services (`--managed-services`, `--no-managed-services`) |
 | `PG_PASSWORD`, `KEYCLOAK_DB_PASSWORD`, `KC_ADMIN_PASSWORD`, `SSO_CLIENT_SECRET`, `ENCRYPTION_KEY` | Generated secrets. The two database passwords only take effect when the database is first created |
 
 ## Troubleshooting
