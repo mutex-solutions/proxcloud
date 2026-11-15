@@ -58,6 +58,20 @@ The PostgreSQL tests of this PR ran against a local container.
 Files: `internal/platformlife/{cluster,remove,seedaccess,runner,run,job,stages}.go`,
 `internal/platform/admin/{platform,externalservicemut}.go`, `cmd/api/main.go`, `docs/api.md`,
 `CHANGELOG.md`.
+## 2026-11-15: CI verifies the platform BOM
+
+**What changed:** a new workflow, `bom-verify.yml`, and a `bom-verify` job in `docker.yml`
+run `.github/scripts/bom_verify.py`, which compares every pin of
+`deploy/platform/platform-bom.yaml` with what ghcr.io, the chart repositories and the k3s
+download URLs serve (anonymous, read-only). On a `v*` tag the job runs with `--release` and
+the image builds wait for it. The BOM now pins the four packages this repository publishes
+by digest. No container, external system or trust boundary changes: CI already pulled from
+ghcr.io, and the job has a read-only token and no secret.
+
+**Why:** the portal cannot resolve third-party digests and ArgoCD pulls charts by version,
+so CI is where a moved tag or a release with an unpinned package is caught (P3 design §3.1).
+
+**Views updated:** [C2 containers](c2-containers.md) (CI row of the deployment table)
 
 ## 2026-11-15: Renderers of the managed-services platform
 

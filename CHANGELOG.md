@@ -313,6 +313,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The platform BOM pins our four published packages by digest, and CI checks every pin**
+  (`deploy/platform/platform-bom.yaml`): the charts `proxmox-kamaji-cluster` 0.1.11, `database-cluster` 0.5.1 and
+  `proxcloud-platform` 0.1.0 and the image `proxcloud-clusterctl:v1.14.4-1` held `pending`; they now hold the digests
+  ghcr.io serves. New `.github/scripts/bom_verify.py` (standard library, anonymous pulls) compares each pin with its
+  registry: the manifest digest of an OCI chart, image or VM image, the `digest` of the exact chart version in an
+  `https://` repository's `index.yaml`, and the sha256 of the downloaded k3s binary and install script. It runs on
+  pull requests that touch the BOM or the script and weekly (`bom-verify.yml`), and with `--release` on every `v*`
+  tag as a job the image builds and the GitHub Release wait for (`docker.yml`): a tag whose BOM is still `-dev`,
+  holds a `pending` digest or a `0.0.0+` version, or pins a digest that has moved, publishes no image. The BOM stays
+  `0.8.0-dev`: the `kamaji` and `kamaji-crds` charts are still `0.0.0+latest` with a `pending` digest, so `v0.8.0`
+  cannot be tagged until the chart mirror pins them. Not checked: the bytes of OCI layers and of chart archives from
+  `https://` repositories (only the digest the registry or index states), signatures, and the app chart that
+  `helm.yml` publishes on the same tag, which does not wait for this job.
+
 - **Installer stage 10 narrows the services cluster's CAPMOX and CSI tokens** (`split_acls` in
   `installer/playbooks/10-pve-identity.yml`): `capmox@pve!capi` held `ProxCloudCAPI` on all of `/pool` and
   `csi@pve!csi` `ProxCloudCSI` on all of `/pool` and `/storage`, although each only works on the services cluster.

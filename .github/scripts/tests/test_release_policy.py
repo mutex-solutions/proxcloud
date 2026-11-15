@@ -179,6 +179,17 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn('--app-version "$RELEASE_TAG"', package["run"])
         self.assertNotIn("${{", package["run"])
 
+    def test_images_and_release_wait_for_the_bom_gate(self):
+        jobs = read_yaml(".github/workflows/docker.yml")["jobs"]
+        gate = jobs["bom-verify"]
+        self.assertNotIn("if", gate)  # a skipped job would skip the build that needs it
+        self.assertEqual(gate["permissions"], {"contents": "read"})
+        step = next(s for s in gate["steps"] if s.get("run") == "python3 .github/scripts/bom_verify.py --release")
+        self.assertEqual(step["if"], "github.ref_type == 'tag'")
+        self.assertIn("bom-verify", jobs["build"]["needs"])
+        self.assertEqual(jobs["release"]["needs"], "build")
+        self.assertNotIn("secrets.", str(gate))
+
     def test_release_job_uses_validated_environment_and_array_flags(self):
         workflow = read_yaml(".github/workflows/docker.yml")
         steps = workflow["jobs"]["release"]["steps"]

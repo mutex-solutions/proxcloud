@@ -1,0 +1,41 @@
+name: bom-verify
+
+# Compares every pin of deploy/platform/platform-bom.yaml with what the registries serve
+# (.github/scripts/bom_verify.py: OCI manifest digests, chart index digests, sha256 of the k3s downloads).
+#   pull request touching the BOM or the script -> the script's unit tests, then the comparison
+#   weekly                                      -> the comparison on main: a tag or an index entry that was moved
+#                                                  upstream shows within a week, without waiting for a BOM change
+#   manual run                                  -> the same, from any branch
+# The release gate (--release on a v* tag) is the bom-verify job of docker.yml, which the image builds wait for.
+# Anonymous pulls only: no login, no secret, read-only token. Hosted runner.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "deploy/platform/**"
+      - ".github/scripts/bom_verify.py"
+      - ".github/scripts/tests/test_bom_verify.py"
+      - ".github/workflows/bom-verify.yml"
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bom-verify-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  bom-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Unit tests (no network)
+        run: python3 -m unittest discover -s .github/scripts/tests -p test_bom_verify.py -v
+      - name: Compare the BOM with the registries
+        run: python3 .github/scripts/bom_verify.py
