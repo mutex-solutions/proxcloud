@@ -25,10 +25,13 @@ lands.
 **What changed:** two optional provider keys. `config.namespacePlacement` makes the
 Kubernetes and database providers stamp the PodNodeSelector and PodTolerationRestriction
 annotations and a `proxcloud.io/platform-role` label on their project namespaces, so the
-API server keeps every pod there on one node group. `config.database.egressFence` adds a
-CiliumNetworkPolicy to every `pc-db-*` namespace: its pods reach only that namespace,
-kube-dns and the API server on 6443. Without the keys nothing changes, and nothing sets
-them yet: the managed-services run (ADR 0009) will, and it is off behind its flag.
+API server keeps every new pod there on one node group. `config.database.egressFence` adds a
+CiliumNetworkPolicy to a `pc-db-*` namespace: its pods reach only that namespace, kube-dns
+and the API server on 6443. Both land on a namespace when it is next ensured (a project's
+first attach or a new cluster or database create); nothing in the sync ensures namespaces
+again, so namespaces ensured before the key was set are not changed. Without the keys nothing
+changes, and nothing sets them yet: the managed-services run (ADR 0009) will, and it is off
+behind its flag.
 
 **Why:** a new control at a trust boundary. On a shared platform cluster the databases sit
 next to kamaji-etcd, the kubelets, ArgoCD and a route to the PVE API, and a tenant with

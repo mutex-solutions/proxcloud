@@ -142,12 +142,14 @@ type Config struct {
 	NodeSelector map[string]string
 	// Tolerations are opaque Kubernetes toleration objects, passed to the chart unchanged.
 	Tolerations []map[string]any
-	// NamespacePlacement pins the pods of every project namespace to a node group (config.namespacePlacement), whatever
-	// the chart renders. Empty: the namespaces carry no placement and no platform-role label, as before it existed.
+	// NamespacePlacement pins the new pods of each project namespace EnsureProjectNamespace applies to a node group
+	// (config.namespacePlacement), whatever the chart renders. Empty: the namespaces carry no placement and no
+	// platform-role label, as before it existed.
 	NamespacePlacement kamajik8s.NamespacePlacement
-	// EgressFence (config.database.egressFence) stamps EgressFencePolicyName in every project namespace, so a tenant
-	// with a shell in its database pod reaches nothing of the cluster it shares. Off: no such policy is written. Not
-	// together with Backup (Validate): the fence has no object-store rule yet.
+	// EgressFence (config.database.egressFence) stamps EgressFencePolicyName in each project namespace
+	// EnsureProjectNamespace applies, so a tenant with a shell in its database pod reaches nothing of the cluster it
+	// shares. Off: no such policy is written. Not together with Backup (Validate): the fence has no object-store rule
+	// yet.
 	EgressFence bool
 }
 

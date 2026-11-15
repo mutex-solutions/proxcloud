@@ -123,8 +123,9 @@ type Config struct {
 	ChartName     string // required — no default until the Proxmox cluster chart lands
 	ChartVersion  string // pinned default for NEW clusters; existing clusters keep their own pin
 	Defaults      ClusterDefaults
-	// NamespacePlacement pins the pods of every project namespace to a node group (config.namespacePlacement). Empty:
-	// the namespaces carry no placement and no platform-role label, as before it existed.
+	// NamespacePlacement pins the new pods of each project namespace EnsureProjectNamespace applies to a node group
+	// (config.namespacePlacement). Empty: the namespaces carry no placement and no platform-role label, as before it
+	// existed.
 	NamespacePlacement kamajik8s.NamespacePlacement
 }
 

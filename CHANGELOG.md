@@ -185,21 +185,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cluster. Two optional provider keys, API only: `config.namespacePlacement` (`nodeSelector`, `tolerations`; kamaji
   and dbaas) stamps the `PodNodeSelector` and `PodTolerationRestriction` namespace annotations
   (`scheduler.alpha.kubernetes.io/node-selector`, `…/defaultTolerations`) and the label `proxcloud.io/platform-role:
-  kamaji` or `dbaas` on every `pc-*` or `pc-db-*` namespace, and `config.database.egressFence: true` adds the
-  CiliumNetworkPolicy `proxcloud-default-egress` to every `pc-db-*` namespace, so its pods reach only that namespace,
-  kube-dns on 53 and the API server on 6443. A selector that is not label keys and values, or a toleration the API
-  server would refuse (it would then refuse every pod in the namespace), is refused when the provider is built, and so
-  is the fence together with `config.database.backup`: it has no object-store rule yet, and WAL archiving would fail
-  behind it until `pg_wal` filled the volume. A provider without the keys applies exactly the namespace and policies
-  it applied before, and nothing writes the keys yet: the managed-services run that will set them when it registers
-  the providers comes later and stays off behind its flag until the lab run, so this is inert on every existing site,
-  installer sites included. The keys need both admission plugins on the cluster's API server, and the fence needs
-  Cilium and `ciliumnetworkpolicies` rights for the provider ServiceAccount, which `deploy/dbaas-cluster/rbac.yaml`
-  does not grant (database creates then fail). Setting the fence back to false leaves the policies in place. Tested
-  with table tests, a golden of the policy and a fake API server. Not run on a cluster: that the API server places the
-  pods, that a database works behind the fence while kamaji-etcd, the kubelets, the PVE API and argocd-repo-server
-  stay unreachable, and that Cilium matches the API server on its port 6443 after the `kubernetes` Service is
-  translated are all unverified until the lab run.
+  kamaji` or `dbaas` on a `pc-*` or `pc-db-*` namespace, and `config.database.egressFence: true` adds the
+  CiliumNetworkPolicy `proxcloud-default-egress` to a `pc-db-*` namespace, so its pods reach only that namespace,
+  kube-dns on 53 and the API server on 6443. Both are stamped on a namespace when it is next ensured: a project's
+  first attach to the provider, or a new cluster or database create. A namespace ensured before the key was set keeps
+  what it has until then (nothing in the sync ensures it again), and pods already running are not moved. A selector
+  that is not label keys and values, or a toleration the API server would refuse (it would then refuse every pod in
+  the namespace), is refused when the provider is built, and so is the fence together with `config.database.backup`:
+  it has no object-store rule yet, and WAL archiving would fail behind it until `pg_wal` filled the volume. A provider
+  without the keys applies exactly the namespace and policies it applied before, and nothing writes the keys yet: the
+  managed-services run that will set them when it registers the providers comes later and stays off behind its flag
+  until the lab run, so this is inert on every existing site, installer sites included. The keys need both admission
+  plugins on the cluster's API server, and the fence needs Cilium and `ciliumnetworkpolicies` rights for the provider
+  ServiceAccount, which `deploy/dbaas-cluster/rbac.yaml` does not grant (attaching a project and database creates then
+  fail with 403). Setting the fence back to false leaves the policies in place. Tested with table tests, a golden of
+  the policy and a fake API server. Not run on a cluster: that the API server places the pods, that a database works
+  behind the fence while kamaji-etcd, the kubelets, the PVE API and argocd-repo-server stay unreachable, and that
+  Cilium matches the API server on its port 6443 after the `kubernetes` Service is translated are all unverified until
+  the lab run.
 
 ### Changed
 
