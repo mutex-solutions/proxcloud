@@ -109,6 +109,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   added rows grant nothing new there. One loop item of the stage is now quoted so that strict YAML parsers read the
   file, as a Go test now does. Checked with the tests above and `ansible-playbook --syntax-check`; not run against a
   cluster.
+- **Template updates: the import placement check and a way to re-import a deleted template live in
+  `internal/templateupdates`** (P3 groundwork, design §11 PR 11). The managed-services job will import its
+  two images without the admin handler, so the node/storage check it needs (`PlacementOptions`,
+  `PlacementAllowed`) moved out of `POST /admin/template-updates/vm` as pure functions; the handler calls
+  them and answers as before. A finished import blocked every re-import of that artifact on that node,
+  even after its template VM was deleted, which would stop the job's image stage for good. NEW
+  `Service.MarkTemplateGone` reads the receipt's provider and marks the receipt `templateGone` only on proof
+  that the template was deleted: `GET /cluster/nextid?vmid=`, which sees every guest, says its VMID is
+  free; or the token sees the VM now holding it, and that VM has a name, is on a node that is up and has
+  neither the template's name nor its source tag; or it is a later import of the same artifact recorded at
+  that node and VMID (every import takes the lowest free VMID, so a copy on another node can take a deleted
+  template's VMID). A read error, a down node, a held VMID the token cannot see (a template moved out of
+  `pc-templates`, or lost pool rights) or a template that was renamed or migrated changes nothing.
+  `EnqueueVM` then treats that receipt as failed, and the page shows it as `template_missing`. Inert:
+  nothing calls `MarkTemplateGone` yet (no route; the managed-services runner, still to come and off behind
+  its flag, will). Tested with unit tests and the opt-in PostgreSQL tests (`TEMPLATEUPDATES_TEST_POSTGRES`)
+  against a throwaway database; not run against a Proxmox cluster, so nextid's answer for a held VMID is
+  taken from the PVE source and `images/vm_export/coldboot.py`, not measured.
 
 ### Security
 

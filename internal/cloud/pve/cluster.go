@@ -3,7 +3,9 @@ package pve
 import (
 	"cmp"
 	"context"
+	"errors"
 	"net"
+	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
@@ -110,6 +112,18 @@ func (c *Client) NextID(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	return strconv.Atoi(s)
+}
+
+// VMIDFree reports whether no guest in the cluster holds vmid. /cluster/nextid?vmid= reads the cluster's
+// whole guest list, so unlike /cluster/resources it also sees guests this token has no VM.Audit on; any
+// user may call it. PVE answers 400 "VM <id> already exists" for a held id; any other refusal is an error.
+func (c *Client) VMIDFree(ctx context.Context, vmid int) (bool, error) {
+	err := c.get(ctx, "/cluster/nextid", formVals{"vmid": strconv.Itoa(vmid)}.values(), nil)
+	var ae *APIError
+	if errors.As(err, &ae) && ae.Status == http.StatusBadRequest && strings.Contains(ae.Errors["vmid"], "already exists") {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // ManagementBridges maps each bridge that carries a node's own IP — the node

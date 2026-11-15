@@ -158,6 +158,41 @@ func TestNextIDStringDecode(t *testing.T) {
 	}
 }
 
+// VMIDFree asks /cluster/nextid?vmid=, which reads the cluster's whole guest list (PVE answers 400
+// "VM <id> already exists" for a held id); any other refusal is an error, never "free".
+func TestVMIDFree(t *testing.T) {
+	answer := map[string]func(http.ResponseWriter){
+		"9210": func(w http.ResponseWriter) { fmt.Fprint(w, `{"data":"9210"}`) },
+		"9211": func(w http.ResponseWriter) {
+			w.WriteHeader(400)
+			fmt.Fprint(w, `{"errors":{"vmid":"VM 9211 already exists\n"},"data":null}`)
+		},
+		"9212": func(w http.ResponseWriter) {
+			w.WriteHeader(400)
+			fmt.Fprint(w, `{"errors":{"vmid":"value must have a minimum value of 100"},"data":null}`)
+		},
+	}
+	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/cluster/nextid": func(w http.ResponseWriter, r *http.Request) {
+			if a, ok := answer[r.URL.Query().Get("vmid")]; ok {
+				a(w)
+				return
+			}
+			w.WriteHeader(500)
+		},
+	})
+	for vmid, want := range map[int]bool{9210: true, 9211: false} {
+		if free, err := c.VMIDFree(context.Background(), vmid); err != nil || free != want {
+			t.Errorf("VMIDFree(%d) = %v, %v", vmid, free, err)
+		}
+	}
+	for _, vmid := range []int{9212, 9213} {
+		if _, err := c.VMIDFree(context.Background(), vmid); err == nil {
+			t.Errorf("VMIDFree(%d): no error", vmid)
+		}
+	}
+}
+
 func TestCreatePoolIdempotent(t *testing.T) {
 	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
 		"POST /api2/json/pools": func(w http.ResponseWriter, r *http.Request) {
