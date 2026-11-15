@@ -146,8 +146,10 @@ guest" comes from `GET /cluster/nextid?vmid=`, which reads the cluster's whole g
 `/cluster/resources` lists only the guests the token has `VM.Audit` on (through its pools), so a VMID
 missing from it proves nothing. A read error, a node that is down, a blank row, a held VMID the token cannot see (a template
 moved out of `pc-templates`, or a token that lost its pool rights), or a template that was only
-renamed or migrated changes nothing. A marked receipt then counts as failed for the duplicate check
-and shows `template_missing` on the page.
+renamed or migrated changes nothing. Such a template keeps blocking a re-import on the receipt's node
+until the operator deletes it in Proxmox (the next call then frees the receipt) or puts it back (its
+node, name and pool). A marked receipt then counts as failed for the duplicate check and shows
+`template_missing` on the page.
 
 ### Download path
 
