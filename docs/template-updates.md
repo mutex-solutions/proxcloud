@@ -180,6 +180,10 @@ succeeded | failed`.
 - **Every PVE mutation is immediately preceded by a successful fence check** (no other PVE call in
   between). A lost lease therefore stops the executor before its next effect; it does not complete,
   dead-letter or clean up — the next acquisition owns the job. Tested at every possible loss point.
+- **Pool**: before the upload the job reads pool `pc-templates` and creates it when the cluster has
+  none (a new install that skipped `pveum pool add pc-templates` of `docs/proxmox-permissions.md`). An
+  existing pool is only read. A token that may not create it fails the job as `pve_forbidden` before
+  any byte is downloaded.
 - **Resume**: a new acquisition continues from the last committed step. `uploaded` is reused while
   the verified file is still in the import store; an intent-only `uploading` (outcome unknown) is
   redone under a fresh, epoch-specific file name, so a superseded runner still uploading can never
@@ -244,7 +248,8 @@ succeeded | failed`.
 
 **Proxmox rights** (the portal token, as for customer image import): `Datastore.AllocateTemplate` on
 the import storage (upload), `Sys.Audit` on `/nodes` (upload room check), `VM.Allocate`/`VM.Config.*`
-on `/pool/pc-templates` (already granted by `ProxCloudPlatform` on `/pool`) and `Datastore.AllocateSpace`
+on `/pool/pc-templates` (already granted by `ProxCloudPlatform` on `/pool`, as is `Pool.Allocate`, which creates
+`pc-templates` when it is missing) and `Datastore.AllocateSpace`
 on the disk storage. Deleting the uploaded file needs `Datastore.Allocate` on the import store; without
 it the template is still created and the receipt carries a warning.
 

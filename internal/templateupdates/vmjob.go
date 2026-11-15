@@ -176,6 +176,7 @@ type PVE interface {
 	ToTemplate(ctx context.Context, node string, vmid int) (pve.UPID, error)
 	DeleteVM(ctx context.Context, node string, vmid int) (pve.UPID, error)
 	GetPool(ctx context.Context, poolID string) (*pve.PoolInfo, error)
+	CreatePool(ctx context.Context, poolID, comment string) error
 }
 
 // BlobSource opens a blob by digest (the GHCR client, built from the integration's token at run
@@ -323,6 +324,12 @@ func (x *Executor) Run(ctx context.Context, jobID string, p VMPayload, f Fence) 
 	case StepFailed:
 		return permanent(r.Code, r.Message)
 	}
+	// 0. The VM is created in pool pc-templates, which a new cluster may not have: make sure of it before the upload.
+	if r.Step != StepImported {
+		if err := x.ensureTemplatePool(ctx, f); err != nil {
+			return err
+		}
+	}
 	// 1. Upload (fresh file name per epoch). A verified upload of an earlier epoch is reused only
 	// while it is still in the import store.
 	if r.Step == StepUploaded {
@@ -446,6 +453,25 @@ func (x *Executor) upload(ctx context.Context, jobID string, p VMPayload, r *Rec
 		return permanent("pve_checksum_refused", "Proxmox refused the upload (checksum mismatch, invalid qcow2 or a backing file)")
 	}
 	return x.checkpoint(ctx, f, r, StepUploaded, nil)
+}
+
+// ensureTemplatePool creates pool pc-templates when the cluster has none. An existing pool is never touched, so a
+// token without Pool.Allocate imports as before wherever the pool was made by hand.
+func (x *Executor) ensureTemplatePool(ctx context.Context, f Fence) error {
+	pool, err := x.PVE.GetPool(ctx, pve.TemplatePool)
+	if err != nil || pool != nil {
+		return err
+	}
+	if err := x.guard(ctx, f); err != nil {
+		return err
+	}
+	if err := x.PVE.CreatePool(ctx, pve.TemplatePool, "ProxCloud templates"); err != nil {
+		if pve.IsForbidden(err) {
+			return permanent("pve_forbidden", "the provider token cannot create pool pc-templates (Pool.Allocate)")
+		}
+		return err
+	}
+	return nil
 }
 
 // owned reports whether vmid on node is a VM this job created and may still mutate or destroy:

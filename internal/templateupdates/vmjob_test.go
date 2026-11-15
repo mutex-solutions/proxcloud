@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,6 +52,8 @@ type fakePVE struct {
 	poolMembersExtra   []pve.PoolMember // listed as members of every pool read (a member the token still cannot read)
 	createRunning      map[int]bool     // a create task of this VMID has not ended (PVE adds the VM to its pool only then)
 	taskErr            error            // TaskRunning fails with it
+	noPool             bool             // pool pc-templates does not exist until CreatePool makes it
+	createPoolErr      error            // CreatePool fails with it
 }
 
 func newFakePVE() *fakePVE {
@@ -190,6 +193,9 @@ func (f *fakePVE) CreateVM(_ context.Context, node string, params map[string]str
 	if _, ok := f.vms[id]; ok {
 		return "", errors.New("VM " + params["vmid"] + " already exists")
 	}
+	if f.noPool && params["pool"] == pve.TemplatePool {
+		return "", &pve.APIError{Status: 500, Message: "pool 'pc-templates' does not exist"}
+	}
 	cfg := pve.VMConfig{}
 	for k, v := range params {
 		cfg[k] = v
@@ -266,6 +272,9 @@ func (f *fakePVE) GetPool(_ context.Context, poolID string) (*pve.PoolInfo, erro
 	if f.poolErr != nil {
 		return nil, f.poolErr
 	}
+	if f.noPool && poolID == pve.TemplatePool {
+		return nil, nil
+	}
 	out := &pve.PoolInfo{PoolID: poolID}
 	for id, vm := range f.vms {
 		if vm.cfg.Str("pool") == poolID {
@@ -274,6 +283,19 @@ func (f *fakePVE) GetPool(_ context.Context, poolID string) (*pve.PoolInfo, erro
 	}
 	out.Members = append(out.Members, f.poolMembersExtra...)
 	return out, nil
+}
+
+func (f *fakePVE) CreatePool(_ context.Context, poolID, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.call("create-pool "+poolID, true)
+	if f.createPoolErr != nil {
+		return f.createPoolErr
+	}
+	if poolID == pve.TemplatePool {
+		f.noPool = false
+	}
+	return nil
 }
 
 func (f *fakePVE) DeleteVM(_ context.Context, node string, vmid int) (pve.UPID, error) {
@@ -527,6 +549,55 @@ func TestExecutorStopsAtLostLease(t *testing.T) {
 	}
 	if stopped < 8 {
 		t.Fatalf("only %d budgets stopped the run: the test does not exercise the steps", stopped)
+	}
+}
+
+// A new cluster has no pool pc-templates: the import creates it once, fenced like every mutation, and an existing pool
+// is only read.
+func TestExecutorEnsuresTemplatePool(t *testing.T) {
+	tests := []struct {
+		name      string
+		noPool    bool
+		createErr error
+		creates   int    // create-pool calls
+		wantCode  string // permanent failure code ("" = the import succeeds)
+	}{
+		{"pool missing: created once, import proceeds", true, nil, 1, ""},
+		{"pool exists: not created again", false, nil, 0, ""},
+		{"pool missing and the token may not create it", true, &pve.APIError{Status: 403, Message: "Permission check failed (/pool/pc-templates, Pool.Allocate)"}, 1, "pve_forbidden"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			x, pv, blobs, rec, p := setup(t)
+			pv.noPool, pv.createPoolErr = tt.noPool, tt.createErr
+			ops := func() int { return pv.ops }
+			f := &testFence{epoch: 1, budget: -1, ops: ops, lostAfter: 1 << 30}
+			err := x.Run(context.Background(), testJob, p, f)
+			creates, fenced := 0, false
+			for i, c := range pv.calls { // every recorded call is a mutation: calls[i] ran as op mutAt[i]
+				if c == "create-pool "+pve.TemplatePool {
+					creates++
+					at := pv.mutAt[i]
+					fenced = slices.Contains(f.okAt, at-1)
+				}
+			}
+			if creates != tt.creates || (creates > 0 && !fenced) {
+				t.Fatalf("%d pool creates (fenced %v), want %d: %v", creates, fenced, tt.creates, pv.calls)
+			}
+			if tt.wantCode != "" {
+				var perm *Permanent
+				if !errors.As(err, &perm) || perm.Code != tt.wantCode || blobs.opens != 0 {
+					t.Fatalf("got %v after %d downloads, want %s before any download", err, blobs.opens, tt.wantCode)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r, _ := rec.Load(context.Background(), testJob); r.Step != StepTemplated || pv.vms[r.VMID].cfg.Str("pool") != pve.TemplatePool {
+				t.Fatalf("receipt %+v", r)
+			}
+		})
 	}
 }
 

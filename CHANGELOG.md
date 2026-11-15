@@ -77,6 +77,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by hand. The detect answer now carries the same proposal (`pve.ProposeProfiles`, tested on the installer's own
   cases), nothing of it stored. It skips a storage active on no node and claims a flag only when the storage has it,
   so the proposal passes the profile save unchanged. The rest of the answer is as before.
+- **Template imports create pool `pc-templates` when it is missing** (`docs/template-updates.md`). A template import
+  creates its VM in that pool, and on a cluster where nobody ran `pveum pool add pc-templates` the create failed. The
+  job now reads the pool before the upload and creates it once, fenced like its other Proxmox writes; an existing
+  pool is only read, so a token without `Pool.Allocate` keeps importing where the pool was made by hand. A token that
+  may not create it fails the job as `pve_forbidden` before anything is downloaded. Not verified: that the
+  least-privilege portal token can create `pc-templates` on a lab cluster (it holds `Pool.Allocate` on `/pool`, which
+  creates the project pools).
 
 ### Changed
 
