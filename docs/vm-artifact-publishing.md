@@ -226,7 +226,7 @@ The QCOW2 is for a reviewed hypervisor import, **not `docker run`**. The byte ve
 
 ## Published images
 
-Every image below was exported, published, attested and verified by one run of the export workflow on `main`. The first four are 20 GiB templates built before the [smaller disk sizes](<template-build-disk.md>); the others are 5 GiB and 8 GiB ones, and portals up to `v0.5.2` skip them. `gh attestation verify` with the flags [above](#how-anyone-verifies-an-image) was repeated from a workstation for each digest and passed.
+Every image below was exported, published, attested and verified by one run of the export workflow on `main`. The first four are 20 GiB templates built before the [smaller disk sizes](<template-build-disk.md>); the others are 5, 6 and 8 GiB ones, and portals up to `v0.5.2` skip them. `gh attestation verify` with the flags [above](#how-anyone-verifies-an-image) was repeated from a workstation for each digest and passed.
 
 | Image | Digest | Tag | Run |
 | --- | --- | --- | --- |
@@ -237,6 +237,7 @@ Every image below was exported, published, attested and verified by one run of t
 | Ubuntu 26.04 (native OS), 5 GiB | `ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2604@sha256:85a5f23601b7df941cd1f638c972e3c64a7cc939ddcbd59a1732c52376653ad4` | `ubuntu-2604-os-20261114160835-948be2705e12` | [43613951056](https://github.com/mutex-solutions/proxcloud/actions/runs/43613951056) |
 | Kubernetes 1.37.2 node (Ubuntu 26.04), 8 GiB | `ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2604-k8s@sha256:1317d15301ae81ac1a49b9d450a55b68da396ea1b0165784a3bef928364171c9` | `ubuntu-2604-k8s-1.37.2-20261114171227-948be2705e12` | [43619815627](https://github.com/mutex-solutions/proxcloud/actions/runs/43619815627) |
 | Ubuntu 24.04 (native OS), 5 GiB | `ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2404@sha256:e31caeb71edea7bbb8d0957682bccf69dd3fd6be7037887412bb2e98ac00c499` | `ubuntu-2404-os-20261115015316-948be2705e12` | [43665067865](https://github.com/mutex-solutions/proxcloud/actions/runs/43665067865) |
+| Ubuntu 26.04 (native OS), 6 GiB | `ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2604@sha256:babd2a90dfdf4a8f62335e86efa06f82316126bb08a7f494d9869343055c5b97` | `ubuntu-2604-os-20261115023741-49992b8b28b2` | [43668656274](https://github.com/mutex-solutions/proxcloud/actions/runs/43668656274) |
 
 The manifest and disk hashes for `vm_artifact.py verify`:
 
@@ -249,6 +250,7 @@ The manifest and disk hashes for `vm_artifact.py verify`:
 | Ubuntu 26.04 (native OS), 5 GiB | `c92d68c22b199c6e80927a1b38299ef0b9e16e167edb4d579196c9205252d44f` | `38f51634da2779caf8b084449a846369825ec21ed0a5d9957569ba5af84afb89` |
 | Kubernetes 1.37.2 node (Ubuntu 26.04), 8 GiB | `67433d7e5e8fdd931af6f42c3bae167cab1a72f4fa2ef034d6434c0247f1e7b0` | `3d2326b55a1a528202b0d4c652d502e2b35b77c5e9f8c295726f9285abf9266d` |
 | Ubuntu 24.04 (native OS), 5 GiB | `46ea9966e945c47ec56a0c6fea3ba48d03f633aed0d8c340e81869adfb2c87b6` | `4d676ff6d9f70b86589909cad29bcf6bd1e1c4cd33a84a8d33883fc777dcb074` |
+| Ubuntu 26.04 (native OS), 6 GiB | `42f2ecd83122996b90437ff4bf2d411661666450530b8ed3c92a0e5bd149dc92` | `147be04f4bb1732ec8b5af5958926e01342d09693df6f5f8ff369558df3a49e6` |
 
 Publication is not node acceptance: no kubeadm join, NodeReady or portal import of these digests is claimed.
 

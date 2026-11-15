@@ -45,7 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   added to the sanitizer's allowlist). Its vendor image has a separate `/boot`, and the 5 GiB build kept
   less than 1 GiB free on `/` after the upgrade, too close to the 1 GiB admission of the cleanup step.
   Ubuntu 24.04 at 5 GiB (built and exported on 2026-11-15, 1.7 GiB free) and the other OS keep 5 GiB.
-  Templates and images already built at 5 GiB stay valid. Not verified yet: a lab build at 6 GiB.
+  Templates and images already built at 5 GiB stay valid. The first 6 GiB lab build (2026-11-15) kept
+  2.0 GiB free after the upgrade and was exported through CI; the image is listed in
+  `docs/vm-artifact-publishing.md`.
 
 ### Security
 
