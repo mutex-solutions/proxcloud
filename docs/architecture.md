@@ -72,8 +72,9 @@ provider on demand (RustFS, TrueNAS, PowerDNS, and the Kamaji and DBaaS manageme
 clusters through ArgoCD); see [cloud-integration.md](cloud-integration.md).
 
 The process listens on **two ports**. `:8080` is the public API surface behind
-the ingress; `:8081` is the management/operations port (health probes, on-demand
-job triggers, billing callbacks) and is never exposed to the internet.
+the ingress; `:8081` is the management/operations port (health probes, billing
+callbacks, and on-demand job triggers when debug triggers are on) and is never
+exposed to the internet.
 
 PostgreSQL is connected **eagerly at startup** — dialed and pinged before the
 service listens, so a failed connection aborts the boot. It must be the **writable
@@ -137,8 +138,9 @@ Key properties of the boot, all visible in `run()`:
 - **Jobs are wired but gated.** Every cron is registered, but the scheduler only
   `Start()`s when `PROXCLOUD_JOBS_SCHEDULER_ENABLED=true`. A plain deploy therefore
   enqueues no new timed billing work. **Workers always start** and finish existing
-  jobs even with both gates off. Operators deliberately expose the `:8081`
-  `/debug/run-*` triggers only on an isolated management port when needed.
+  jobs even with both gates off. The unauthenticated `:8081` `/debug/*` triggers
+  are mounted only with `PROXCLOUD_JOBS_DEBUG_TRIGGERS=true` (development and lab
+  installs), never by the scheduler.
 - **Cross-service wiring uses setters to break import cycles.** For example the
   org handler can't import project, so `orgH.SetProjectMemberAdder(projectSvc)`
   injects the project service after both exist. The same pattern wires the
@@ -199,12 +201,15 @@ credential there.
 A plain `net/http.ServeMux`: `GET /actuator/health` (liveness),
 `GET /actuator/health/readiness` (PostgreSQL; no broker health dependency),
 `GET /actuator/info`, a build probe, the billing-service callbacks (when a shared
-token is configured), and — when jobs are enabled or debug-triggers are on — a family of
-`POST /debug/run-*` triggers to drive crons on demand (sync, the Proxmox state,
-task and traffic samples, the sandbox state, builds, auto-pause and registry prune, SSO
-reconcile, metrics, charge, collect, dunning, review, savings expiry, project
-deletion and mail send). HMAC key minting (`gen-hmac-key`) is
-unauthenticated, so only debug-triggers exposes it, never the scheduler alone.
+token is configured), and — only when debug triggers are on
+(`PROXCLOUD_JOBS_DEBUG_TRIGGERS`) — a family of `POST /debug/*` triggers to drive
+crons on demand (sync, the Proxmox state, task and traffic samples, the sandbox
+state, builds, auto-pause and registry prune, SSO reconcile, metrics, charge,
+collect, dunning, review, savings expiry, project deletion, mail send and HMAC key
+minting). They have no authentication and the port listens on every interface, so
+the scheduler never mounts them (`debugTriggers` in `cmd/api/main.go`); on a
+production install the authenticated `/api/v1/admin/job/*` endpoints run a job on
+demand.
 
 ---
 

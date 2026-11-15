@@ -4,6 +4,23 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-15: Management port job triggers only with debug triggers on
+
+**What changed:** the unauthenticated `POST /debug/<job>` triggers on the management
+port (`:8081`) are mounted only when `PROXCLOUD_JOBS_DEBUG_TRIGGERS` is on. Turning the
+scheduler on no longer mounts them (`debugTriggers` in `cmd/api/main.go`). The
+authenticated `/api/v1/admin/job/*` endpoints on `:8080` are unchanged and are the
+production way to run a job on demand.
+
+**Why:** a trust boundary was wider than documented. The management port has no
+authentication and listens on every interface; the chart keeps it off the gateway, but
+any pod that can reach the API pod, or any process on a Docker host through the
+container's bridge address, could charge bills, run dunning, delete projects or send
+mail as soon as the scheduler was on, which every production install does.
+`gen-hmac-key` was already gated on debug triggers alone for this reason.
+
+**Views updated:** [C2 containers](c2-containers.md) (management port row).
+
 ## 2026-11-14: VM image export and publishing in one workflow run
 
 **What changed:** a new workflow, `vm-artifact-export.yml`, takes a template in

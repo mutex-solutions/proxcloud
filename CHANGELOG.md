@@ -88,6 +88,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Ubuntu 24.04 at 5 GiB (built and exported on 2026-11-15, 1.7 GiB free) and the other OS keep 5 GiB.
   Templates and images already built at 5 GiB stay valid. Not verified yet: a lab build at 6 GiB.
 
+### Security
+
+- **The job triggers on the management port are no longer exposed when the scheduler is on**
+  (`cmd/api/main.go`, `debugTriggers`). The API mounted every unauthenticated `POST /debug/*` trigger
+  on the management port (`:8081`, every interface) when `PROXCLOUD_JOBS_SCHEDULER_ENABLED` **or**
+  `PROXCLOUD_JOBS_DEBUG_TRIGGERS` was true. That includes `run-charge`, `run-collect`,
+  `run-send-bills`, `run-dunning`, `run-project-deletion` (deletes cloud resources),
+  `run-registry-prune`, `send-test-mail` (mail to any address), `sse-emit` and `jobs-status`; only
+  `gen-hmac-key` was already limited to debug triggers. The chart never routes the port through its
+  gateway or ingress, but any pod that could reach the API pod, or any process on a Docker host
+  through the container's bridge address, could call them. This was in the code since the first
+  ProxCloud release and is in every tag from `v0.4.0-rc.1` to `v0.6.0`. Affected: every install with
+  the scheduler on (Helm `api.jobs.schedulerEnabled: true`, installer `jobs.scheduler_enabled: true`,
+  or the environment variable), which is every production install that bills on a timer. Now only
+  `PROXCLOUD_JOBS_DEBUG_TRIGGERS` mounts them; health and readiness on the port are unchanged.
+  **Behaviour change:** a script that called a `/debug/*` trigger on an install with only the
+  scheduler on now gets `404`. Migration: on a production install, use the authenticated
+  `/api/v1/admin/job/*` endpoints (admin credential), which cover charge, metrics, sync, collect,
+  savings expiry, reminders and the transaction scan, and `GET /api/v1/admin/durable-jobs` for the
+  `jobs-status` history; the mapping is in `docs/jobs-scheduling.md` ("Manual triggers"). The other
+  triggers have no admin endpoint: set `PROXCLOUD_JOBS_DEBUG_TRIGGERS=true` (Helm
+  `api.jobs.debugTriggers`, installer `jobs.debug_triggers`) only on a development or lab install to
+  keep them. Docs, the chart's values and README, the installer defaults and the development compose
+  file say so. Verified by unit tests only (the management router with the scheduler on and triggers off answers `404` on
+  `/debug/*`, the admin job endpoints still run their jobs); not checked on a running install.
+
 ## [0.6.0] - 2026-11-14
 
 A feature release on top of `v0.5.2`, with no breaking API change.

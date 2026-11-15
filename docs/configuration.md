@@ -34,7 +34,7 @@ Legend: **env** = environment variable, **file** = `application.yml` key, **helm
 | Concern | env | file | helm | Default | Meaning |
 |---------|-----|------|------|---------|---------|
 | API port | — | `server.port` | fixed `8080` | `8080` | Public API listener. |
-| Management port | — | `management.server.port` | fixed `8081` | `8081` | Health probes + operator debug triggers. |
+| Management port | — | `management.server.port` | fixed `8081` | `8081` | Health probes; also the unauthenticated debug triggers when `PROXCLOUD_JOBS_DEBUG_TRIGGERS` is on. |
 | Log level | — | `logging.level.root` | through `api.applicationYml` | `INFO` | Root log level. |
 | CORS origins | `PROXCLOUD_CORS_ALLOWED_ORIGINS` | — | `api.corsAllowedOrigins` | the origins of the UI and admin self URLs | Extra browser origins allowed to call the API (comma list), on top of the two consoles. |
 
@@ -156,7 +156,7 @@ pause, and there is no `QUEUE_ENABLED` setting.
 | Concern | env | file | Default | Meaning |
 |---------|-----|------|---------|---------|
 | Scheduler | `PROXCLOUD_JOBS_SCHEDULER_ENABLED` | `proxcloud.jobs.scheduler-enabled` | `false` | Auto-start the charge/metrics crons (charges bills on a timer). |
-| Debug triggers | `PROXCLOUD_JOBS_DEBUG_TRIGGERS` | `proxcloud.jobs.debug-triggers` | `false` | Expose on-demand `POST :8081/debug/run-*` triggers **without** starting the crons — for deterministic, manual runs. |
+| Debug triggers | `PROXCLOUD_JOBS_DEBUG_TRIGGERS` | `proxcloud.jobs.debug-triggers` | `false` | Expose the unauthenticated on-demand `POST :8081/debug/*` triggers **without** starting the crons — for deterministic, manual runs on a development or lab install. The scheduler does not expose them. |
 | Worker concurrency | `PROXCLOUD_JOBS_WORKER_CONCURRENCY` | — (env only) | `2` | `1..16` bounded workers per API pod (`api.jobs.workerConcurrency`). Always active, using the writable primary. |
 | Poll interval | `PROXCLOUD_JOBS_POLL_INTERVAL` | — (env only) | `1s` | Go duration, `100ms..1m` (`api.jobs.pollInterval`). |
 | Lease duration | `PROXCLOUD_JOBS_LEASE_DURATION` | — (env only) | `1m` | Go duration, `10s..10m` (`api.jobs.leaseDuration`); engine uses database-time owner+epoch CAS fencing. |
@@ -183,10 +183,13 @@ Network MTU is set per EVPN zone on the Proxmox provider
 (`config.network.zones.<zone>.mtu`, default 1450; vlan and simple zones take no MTU).
 There is no deployment-wide MTU setting.
 
-With debug triggers enabled (`PROXCLOUD_JOBS_DEBUG_TRIGGERS`, not the scheduler), the
-management port also exposes `POST :8081/debug/gen-hmac-key` (mint an Admin API key,
-see `docs/auth.md`). It is unauthenticated, which is why the scheduler alone never
-turns it on.
+The debug triggers (`POST :8081/debug/*`, the list is in
+[jobs-scheduling.md](jobs-scheduling.md#manual-triggers)) exist only with
+`PROXCLOUD_JOBS_DEBUG_TRIGGERS` on, never because the scheduler is on. They have no
+authentication, and they include `run-charge`, `run-project-deletion` and
+`gen-hmac-key` (mint an Admin API key, see `docs/auth.md`): anything that can reach the
+management port could call them. Keep the flag off on a production install and run a
+job on demand through the authenticated `/api/v1/admin/job/*` endpoints instead.
 
 ### Durable savings reminder enqueue (not delivery)
 

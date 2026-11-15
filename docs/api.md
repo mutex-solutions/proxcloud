@@ -18,8 +18,10 @@ ProxCloud exposes three HTTP surfaces, all mounted on the same router
 | E2B-compatible sandboxes | `/e2b` | a project's sandbox API key (`X-API-Key`) | E2B's camelCase | E2B's `{code, message}` errors; [e2b-compat.md](e2b-compat.md), document at `/e2b/openapi.json` |
 
 All four are described in `docs/auth.md`. The management port (`:8081`, separate
-from the API port `:8080`) additionally serves health probes and operator debug
-triggers — see `docs/configuration.md`.
+from the API port `:8080`) additionally serves health probes and, only with
+`PROXCLOUD_JOBS_DEBUG_TRIGGERS` on, the unauthenticated debug triggers — see
+`docs/configuration.md`. On demand in production, use `/api/v1/admin/job/*`
+([jobs-scheduling.md](jobs-scheduling.md#manual-triggers)).
 
 ## Customer API — `/api/v1`
 
