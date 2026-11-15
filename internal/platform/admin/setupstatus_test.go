@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/mutex-solutions/proxcloud/deploy/seed"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
@@ -37,8 +38,14 @@ var (
 			"local":     map[string]any{"storage": "local", "type": "dir", "content": []any{"iso", "import"}},
 		}},
 	}
-	setupQuota = map[string]any{"provisioning": map[string]any{"quota": map[string]any{"servers": float64(20)}}}
-	setupOn    = map[string]any{"attachToNewProjects": true}
+	setupQuota = map[string]any{"provisioning": map[string]any{"quota": func() map[string]any {
+		q := map[string]any{}
+		for k, v := range seed.DefaultQuota {
+			q[k] = float64(v)
+		}
+		return q
+	}()}}
+	setupOn = map[string]any{"attachToNewProjects": true}
 	// setupPinned pins a template in the provider configuration, so the templates step is read without live.
 	setupPinned = map[string]any{"templates": map[string]any{"debian-13": map[string]any{"vmid": float64(9000), "node": "pve1"}}}
 )
@@ -142,6 +149,11 @@ func TestSetupStatus(t *testing.T) {
 			s.Regions, s.Issuer = nil, billing.IssuerInfo{BaseCurrency: "USD"}
 			return s
 		}(), map[string]string{stepCatalog: stateTodo}, map[string]string{"catalog/quota": stateTodo, "catalog/region": stateTodo, "catalog/billingDetails": stateAttention}},
+		// The same rule as the defaults: a quota that leaves a limit unset leaves new projects unlimited there.
+		{"only per-model GPU limits are set", ready(map[string]any{"provisioning": map[string]any{"quota": map[string]any{"gpu": map[string]any{"nvidia-4090": float64(2)}}}}),
+			map[string]string{stepCatalog: stateTodo}, map[string]string{"catalog/quota": stateTodo}},
+		{"one limit is unset", ready(map[string]any{"provisioning": map[string]any{"quota": map[string]any{"servers": float64(20)}}}),
+			map[string]string{stepCatalog: stateTodo}, map[string]string{"catalog/quota": stateTodo}},
 		{"the default profile names no saved profile", ready(map[string]any{"defaultStorageProfile": "gone"}),
 			map[string]string{stepStorage: stateTodo}, map[string]string{"storage/defaultProfile": stateTodo, "storage/profiles": stateDone}},
 		{"no store takes import content", func() setupSnapshot {

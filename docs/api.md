@@ -271,8 +271,9 @@ makes the step `todo`, and a step is `blocked` only when it cannot start.
 - **Without `live`** only the database is read: the provider, its
   `cidrPool` and default zone, storage detection, profiles and the default
   profile, flavors and the flavors no rule prices, the enabled PUBLIC plans
-  that apply to the provider and their `instance` rules, the default quota, the
-  region row, the business name, address and country of the billing
+  that apply to the provider and their `instance` rules, the default quota
+  (`done` only when it sets every limit the defaults item would add, so a quota
+  with only per-model `gpu` limits is `todo`), the region row, the business name, address and country of the billing
   configuration, and the attach policy. Rows are not counted: the Compose seed
   writes the billing and platform configuration, and a fresh install shows no
   step done. `templates` is `unknown` unless the provider configuration pins a

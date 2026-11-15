@@ -72,7 +72,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while one of them could not be read (templates, without `live=1`), so the database-only answer never offers
   go live on a cluster nobody looked at; an open catalog and
   a job scheduler that is off are warnings, by the owner's decision, so they block nothing. Only enabled public
-  plans that apply to the provider count as pricing it. The route needs the four reads of the defaults preview.
+  plans that apply to the provider count as pricing it, and the quota counts as set only when it sets every limit
+  the defaults would add, the same rule as the defaults preview. The route needs the four reads of the defaults
+  preview.
   Not verified: a live run against a Proxmox cluster (the live checks run against the test fake).
 - **Proposed storage profiles** (`proposedProfiles` in `POST /api/v1/admin/service/{id}/storage/detect`). The
   installer proposes profiles from the storages it finds (`classify_storages`); a console install had to write them

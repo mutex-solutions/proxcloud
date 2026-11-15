@@ -241,8 +241,9 @@ func catalogStep(s setupSnapshot) setupStep {
 	if p == nil {
 		items = append(items, setupItem{ID: "quota", State: stateBlocked, Message: "Needs a saved Proxmox provider"}, setupItem{ID: "region", State: stateBlocked, Message: "Needs a saved Proxmox provider"})
 	} else {
+		_, unset := defaultQuotaFor(p)
 		items = append(items,
-			checkItem("quota", p.PVEDefaultQuota() != nil, "The provider has a default project quota", "No default project quota: new projects are unlimited"),
+			checkItem("quota", len(unset) == 0, "The provider's default project quota sets every limit", "The default project quota does not limit "+strings.Join(unset, ", ")+": new projects are unlimited there"),
 			checkItem("region", slices.ContainsFunc(s.Regions, func(r platformconfig.RegionDisplayConfig) bool { return r.ServiceID == p.ID }),
 				"The provider's region is listed in the platform configuration", "The provider's region is not listed in the platform configuration"))
 	}

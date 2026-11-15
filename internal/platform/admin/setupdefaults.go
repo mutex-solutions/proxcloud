@@ -258,9 +258,7 @@ func planDefaults(sd *seedDefaults, st defaultsState) (defaultsWrite, []defaults
 		items = append(items, item(defaultsQuota, stateBlocked, "The provider is not a Proxmox VE provider", nil),
 			item(defaultsRegion, stateBlocked, "The provider is not a Proxmox VE provider", nil))
 	default:
-		prov, _ := p.Config["provisioning"].(map[string]any)
-		stored, _ := prov["quota"].(map[string]any)
-		if merged, added := externalservice.MergePVEDefaultQuota(stored, seed.DefaultQuota); len(added) > 0 {
+		if merged, added := defaultQuotaFor(p); len(added) > 0 {
 			w.Quota = merged
 			items = append(items, item(defaultsQuota, stateTodo, "The default project quota does not limit "+strings.Join(added, ", ")+"; limits already set are kept", merged))
 		} else {
@@ -278,6 +276,14 @@ func planDefaults(sd *seedDefaults, st defaultsState) (defaultsWrite, []defaults
 		}
 	}
 	return w, items
+}
+
+// defaultQuotaFor is the provider's stored default quota with the default limits added where it sets none, and the
+// limits it added. The apply writes it; the setup status calls the quota done only when it adds nothing.
+func defaultQuotaFor(p *externalservice.ExternalService) (map[string]any, []string) {
+	prov, _ := p.Config["provisioning"].(map[string]any)
+	stored, _ := prov["quota"].(map[string]any)
+	return externalservice.MergePVEDefaultQuota(stored, seed.DefaultQuota)
 }
 
 // planPricePlan is the price plan item. Every enabled PUBLIC plan is billed (pricing.SelectPricePlans), so a second
