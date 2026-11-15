@@ -82,8 +82,10 @@ api:
   jobs:
     # Auto-start the charge/metrics crons (charges bills on a timer!).
     schedulerEnabled: false
-    # Expose the on-demand POST :<managementPort>/debug/run-* triggers
-    # without starting the crons.
+    # Expose the on-demand POST :<managementPort>/debug/* triggers without starting the crons.
+    # They have NO authentication: any pod that can reach the API pod can run them (charge bills,
+    # delete projects, mint an Admin API key). Development and lab only. schedulerEnabled does
+    # not expose them; on demand in production use the authenticated /api/v1/admin/job/*.
     debugTriggers: false
     # Deprecated. true FAILS rendering/startup: drain/reconcile the legacy queue before clearing.
     # false is not proof of a drained broker; existing upgrades need jobsMigration below.

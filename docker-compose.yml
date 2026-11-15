@@ -99,6 +99,9 @@ services:
       PROXCLOUD_SELF_UI_BASE_URL: http://${PROXCLOUD_HOST:-localhost}:8082
       PROXCLOUD_SELF_ADMIN_BASE_URL: http://${PROXCLOUD_HOST:-localhost}:8083
       # Off means no NEW timed work/debug routes, not a pause of already-enqueued work.
+      # DEBUG_TRIGGERS alone mounts the unauthenticated POST :8081/debug/* triggers (the scheduler
+      # does not); docs/development.md drives jobs by setting it true in .env. 8081 is published
+      # on every host interface below, so set it only on a machine nobody else can reach.
       PROXCLOUD_JOBS_DEBUG_TRIGGERS: ${PROXCLOUD_JOBS_DEBUG_TRIGGERS:-false}
       PROXCLOUD_JOBS_SCHEDULER_ENABLED: ${PROXCLOUD_JOBS_SCHEDULER_ENABLED:-false}
       # Both entry points stay usable (LAN IP for other machines, localhost on this box).

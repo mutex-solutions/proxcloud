@@ -2,6 +2,8 @@
 
     export E2B_API_URL=https://api.example.org/e2b   E2B_API_KEY=e2b_...   E2B_OTHER_API_KEY=e2b_... (another project)
     export E2B_AUTOPAUSE_URL=http://<mgmt>:<mgmt port>/debug/run-sandbox-autopause   # optional: trigger the job
+    (the trigger exists only when the API runs with PROXCLOUD_JOBS_DEBUG_TRIGGERS=true, a lab install: it has no
+    authentication and no admin-API equivalent; without it the URL answers 404 and the drill waits for the cron)
     python pause.py [steps]      steps: all (default) or a comma list of pause,fork,snapshot,autopause,wake,other
 
 Strict on purpose: a pause must answer within the SDK's request timeout, the sandbox must stop once its image is ready,

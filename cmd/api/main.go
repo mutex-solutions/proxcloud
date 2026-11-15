@@ -1173,14 +1173,11 @@ func run() error {
 	} else {
 		log.Info("scheduled jobs are wired but NOT started (set PROXCLOUD_JOBS_SCHEDULER_ENABLED=true to enable)")
 	}
-	// On-demand triggers (mgmt port) for the golden run — deterministic instead of cron-timed:
-	// run-sync (populate the cache) → run-metrics (ingest usage metrics) → run-charge. Exposed when the
-	// scheduler is on OR debug-triggers is on, so a deploy can be driven manually while the timed
-	// crons stay dormant (no automatic bill charging).
-	var jobsDebug map[string]http.HandlerFunc
-	if cfg.Jobs.SchedulerEnabled || cfg.Jobs.DebugTriggers {
-		log.Warn("job debug triggers ENABLED on the mgmt port (/debug/run-{sync,metrics,charge})")
-		jobsDebug = map[string]http.HandlerFunc{
+	// On-demand triggers (mgmt port) for development and lab drills — deterministic instead of
+	// cron-timed: run-sync (populate the cache) → run-metrics (ingest usage metrics) → run-charge.
+	// Debug triggers only, never the scheduler: see debugTriggers.
+	jobsDebug := debugTriggers(cfg, log, func() map[string]http.HandlerFunc {
+		return map[string]http.HandlerFunc{
 			"run-sso-reconcile": func(w http.ResponseWriter, r *http.Request) {
 				if ssoSvc == nil {
 					httpx.Err(w, http.StatusNotFound, http.StatusNotFound, "SSO is off")
@@ -1347,19 +1344,15 @@ func run() error {
 				stats, err := jobHistory.Stats(ctx)
 				jobResult(w, map[string]any{"history": stats}, err)
 			},
-		}
-		// gen-hmac-key mints an Admin-API SigV4 key pair on the operator mgmt port and is
-		// UNAUTHENTICATED, so it is gated on DebugTriggers ONLY — deliberately NOT the scheduler. A
-		// production billing deploy must set SchedulerEnabled=true to run the charge crons; that must
-		// not also expose unauthenticated key-minting. The secret is returned ONCE and stored encrypted.
-		if cfg.Jobs.DebugTriggers {
-			jobsDebug["gen-hmac-key"] = func(w http.ResponseWriter, r *http.Request) {
+			// gen-hmac-key mints an Admin-API SigV4 key pair. The secret is returned ONCE and
+			// stored encrypted.
+			"gen-hmac-key": func(w http.ResponseWriter, r *http.Request) {
 				doc := admin.NewAdminAPIKey(r.URL.Query().Get("description"))
 				_, err := pg.C("hmac_keys").InsertOne(r.Context(), admin.SealHmacKey(enc, doc))
 				jobResult(w, map[string]any{"id": doc["_id"], "secretKey": doc["secretKey"]}, err)
-			}
+			},
 		}
-	}
+	})
 
 	h := health.New(health.Checker{Name: "postgres", Check: pg.Ping},
 		health.Checker{Name: "durableJobsPrimary", Check: func(ctx context.Context) error { return pgdoc.RequirePrimary(ctx, pg.Pool) }})
@@ -1853,6 +1846,20 @@ func (s billingCloudSuspender) resumeVM(ctx context.Context, ps *pve.Service, ro
 		return nil
 	}
 	return s.cloud.MarkPausedBySuspension(ctx, row, false)
+}
+
+// debugTriggers returns the management port's POST /debug/<name> job triggers, or nil when they are
+// off. They have no authentication and the management port listens on every interface, so anything
+// that reaches the pod or container could charge bills, delete projects or mint an Admin API key.
+// Only PROXCLOUD_JOBS_DEBUG_TRIGGERS turns them on, never the scheduler: a production install runs
+// the scheduler, and runs a job on demand through the authenticated /api/v1/admin/job/* endpoints.
+func debugTriggers(cfg *config.Config, log *slog.Logger, build func() map[string]http.HandlerFunc) map[string]http.HandlerFunc {
+	if !cfg.Jobs.DebugTriggers {
+		return nil
+	}
+	log.Warn("job debug triggers ENABLED: POST /debug/* on the management port runs jobs with no authentication",
+		"port", cfg.Management.Port)
+	return build()
 }
 
 // jobResult writes a debug-trigger response: the result map on success, or a 500 with the error.

@@ -258,8 +258,11 @@ command in this runbook deletes or moves historical data.
   failed/retrying job before redrive. Mail remains on its existing send path in this
   release: do not claim email survives a crash until the separate outbox is wired.
 - Explicitly enable `schedulerEnabled` / installer `jobs.scheduler_enabled` only
-  after the operator accepts the cutover. Debug triggers stay off unless deliberately
-  used on an isolated management port. External billing remains HTTP-based and is
+  after the operator accepts the cutover. Debug triggers stay off on production: they
+  have no authentication, and only `debugTriggers` / `jobs.debug_triggers` mounts
+  them (up to v0.6.0 the scheduler did too). Run a job on demand
+  through the authenticated `/api/v1/admin/job/*` endpoints
+  ([jobs-scheduling.md](jobs-scheduling.md#manual-triggers)). External billing remains HTTP-based and is
   not silently switched to native rating on errors.
 
 Rollback is not a blind image downgrade: first stop new producers/workers and

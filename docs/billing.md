@@ -1021,8 +1021,11 @@ runs each tick.
   become required); proxcloud still resolves what to bill. See
   `internal/platform/billingprovider` and `docs/configuration.md`.
 - **`PROXCLOUD_JOBS_SCHEDULER_ENABLED`** (default false) — allows new scheduled
-  work. `PROXCLOUD_JOBS_DEBUG_TRIGGERS` separately gates management triggers;
-  neither pauses accepted PostgreSQL jobs.
+  work. `PROXCLOUD_JOBS_DEBUG_TRIGGERS` alone gates the unauthenticated management
+  triggers (`POST :8081/debug/run-charge` and the rest; development and lab only);
+  the scheduler does not expose them. On a production install run a charge on demand
+  with `POST /api/v1/admin/job/billing/rate?timeUnit=…` (admin credential). Neither
+  flag pauses accepted PostgreSQL jobs.
 - **`PROXCLOUD_JOBS_RABBIT_FANOUT`** (`proxcloud.jobs.rabbit-fanout`, default false)
   is retired; true fails startup with migration guidance. It must not be used to
   enable or switch native/external dispatch.

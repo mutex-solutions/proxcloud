@@ -1822,7 +1822,7 @@ tokens, commands, images, tenant payload or kubeconfigs. Existing org audit rema
   with explicit project filter. Requires `admin:audit:read`; no tenant access.
 - `GET /api/v1/admin/audit?resourceType=SANDBOX_ABUSE&projectId=<id>`: detections and action outcomes.
 - Mgmt-only `POST /debug/run-sandbox-abuse`: normal sampling, no forged metrics/window override. Only registered
-  when scheduler or debug triggers are enabled. Invoke across the real configured window; a single trigger proves no sustained load.
+  when debug triggers are enabled (`PROXCLOUD_JOBS_DEBUG_TRIGGERS=true`, a lab install; the scheduler does not). Invoke across the real configured window; a single trigger proves no sustained load.
 
 ### 10.4 Default-off CAPI worker replacement: wait, never evict
 
@@ -1855,7 +1855,8 @@ sandbox node/root boundary are trusted. This mitigates residence time, not a mal
 
 `GET /api/v1/admin/service/{id}/sandbox/rotation-plan` requires `admin:service:read` and is **read-only**, including
 when disabled: no cordon, SQL state initialization or CAPI patch. It returns ready/nodes/deployments/reasons.
-`POST /debug/run-sandbox-rotation` is mgmt-only and honors the interval/scope; no force override. On a loaded lab run
+`POST /debug/run-sandbox-rotation` is mgmt-only (registered only with `PROXCLOUD_JOBS_DEBUG_TRIGGERS=true`) and honors
+the interval/scope; no force override. On a loaded lab run
 **only the admin plan**, never an actual rotation.
 
 ### 10.5 Upgrade and verification

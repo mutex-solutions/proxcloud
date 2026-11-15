@@ -7,7 +7,7 @@ pc_defaults:
   # API durable workers always run. These gates control NEW scheduled work and debug routes only.
   jobs:
     scheduler_enabled: false
-    debug_triggers: false
+    debug_triggers: false        # unauthenticated POST :8081/debug/*; lab only, scheduler_enabled does not expose them
     worker_concurrency: 2         # 1..16 per API pod
     poll_interval: 1s            # 100ms..1m
     lease_duration: 1m           # 10s..10m
