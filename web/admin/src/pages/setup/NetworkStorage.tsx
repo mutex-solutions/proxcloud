@@ -109,7 +109,11 @@ function NetworkForm({ serviceId, cfg }: { serviceId: string; cfg: Doc }) {
     onError: (e) => toast.error(errMsg(e)),
   })
   const zoneOK = /^[A-Za-z][A-Za-z0-9]{0,7}$/.test(zoneId.trim())
-  const ready = zoneOK && cidrPool.trim() && (kind !== "vlan" || bridge.trim()) && (!pub.id || (pub.cidr.trim() && pub.gateway.trim()))
+  // The API does not check the tag range; a tenant network takes the first free tag in it, so an empty or inverted
+  // range fails only there ("vlan range exhausted").
+  const tag = (v: string) => (/^\d+$/.test(v.trim()) ? Number(v) : NaN)
+  const vlanOK = tag(vlanMin) >= 1 && tag(vlanMin) <= tag(vlanMax) && tag(vlanMax) <= 4094
+  const ready = zoneOK && cidrPool.trim() && (kind !== "vlan" || (bridge.trim() && vlanOK)) && (!pub.id || (pub.cidr.trim() && pub.gateway.trim()))
 
   return (
     <div className="grid gap-4">
@@ -148,12 +152,15 @@ function NetworkForm({ serviceId, cfg }: { serviceId: string; cfg: Doc }) {
           </div>
           <div className="grid gap-2">
             <Label htmlFor="net-vlan-min">First VLAN tag</Label>
-            <Input id="net-vlan-min" type="number" min={1} max={4094} value={vlanMin} onChange={(e) => setVlanMin(e.target.value)} />
+            <Input id="net-vlan-min" type="number" min={1} max={4094} value={vlanMin} onChange={(e) => setVlanMin(e.target.value)} aria-invalid={!vlanOK} aria-describedby="net-vlan-help" />
           </div>
           <div className="grid gap-2">
             <Label htmlFor="net-vlan-max">Last VLAN tag</Label>
-            <Input id="net-vlan-max" type="number" min={1} max={4094} value={vlanMax} onChange={(e) => setVlanMax(e.target.value)} />
+            <Input id="net-vlan-max" type="number" min={1} max={4094} value={vlanMax} onChange={(e) => setVlanMax(e.target.value)} aria-invalid={!vlanOK} aria-describedby="net-vlan-help" />
           </div>
+          <p id="net-vlan-help" className="text-xs text-muted-foreground sm:col-span-3">
+            Whole tags from 1 to 4094, the first not above the last: each tenant network takes one tag of the range.
+          </p>
         </div>
       ) : null}
 

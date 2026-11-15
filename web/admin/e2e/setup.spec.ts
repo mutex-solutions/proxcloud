@@ -137,6 +137,32 @@ test("Network adds a public network on a bridge that is not the management bridg
   ])
 })
 
+test("Network saves a VLAN zone only with a tag range of 1 to 4094, first not above last", async ({ page }) => {
+  await page.goto("/setup?tab=network")
+  const save = page.getByRole("button", { name: "Save network" })
+  await expect(save).toBeEnabled()
+  await page.getByRole("combobox", { name: "Zone kind" }).click()
+  await page.getByRole("option", { name: "VLAN on a bridge" }).click()
+  await page.locator("#net-bridge").fill("vmbr1") // the public network's Bridge select has the same name
+  const first = page.getByLabel("First VLAN tag")
+  const last = page.getByLabel("Last VLAN tag")
+  await expect(save).toBeEnabled()
+  for (const [lo, hi] of [["100", ""], ["100", "50"], ["0", "199"], ["100", "4095"]]) {
+    await first.fill(lo)
+    await last.fill(hi)
+    await expect(save).toBeDisabled()
+    await expect(last).toHaveAttribute("aria-invalid", "true")
+  }
+  await first.fill("100")
+  await last.fill("199")
+  await expect(save).toBeEnabled()
+  await recordCalls(page)
+  await save.click()
+  await expect.poll(() => calls(page, "PUT", "/admin/service/svc-proxmox-01")).toHaveLength(1)
+  const [put] = await calls(page, "PUT", "/admin/service/svc-proxmox-01")
+  expect(put.body.config.network.zones.overlay).toMatchObject({ kind: "vlan", bridge: "vmbr1", vlanMin: 100, vlanMax: 199 })
+})
+
 test("Network never offers a bridge that is the management bridge on any node", async ({ page }) => {
   // pve1 manages through vmbr0, pve2 through vmbr1: each lists the other's management bridge without an address.
   const bridges = [
