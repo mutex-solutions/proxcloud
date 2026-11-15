@@ -250,14 +250,6 @@ func stage40(t *testing.T, name string) []map[string]any {
 	return docs
 }
 
-func dig(m any, path ...string) any {
-	for _, k := range path {
-		mm, _ := m.(map[string]any)
-		m = mm[k]
-	}
-	return m
-}
-
 // The seed's ArgoCD and cert-manager are installed as stage 40 installs them on the installer's mgmt cluster: same
 // chart, version and values.
 func TestBOMMatchesStage40(t *testing.T) {

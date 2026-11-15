@@ -18,17 +18,13 @@ import (
 
 const inID = "pi-0a1b2c3d"
 
-// only marks every stage of the apply up to stage 5 done but id, so a run ends at stage 6 once id is done.
+// only marks every stage of the run done but id, so the run succeeds once id is done.
 func (e *env) only(id string) {
 	e.upTo(id)
 	e.mutate(func(run *Run, _ *Installation, _ *Secrets) {
-		after := false
 		for i := range run.Stages {
-			switch s := &run.Stages[i]; {
-			case s.ID == id:
-				after = true
-			case after && slices.Contains([]string{StageSeedAPI, StageSeedIdentity}, s.ID):
-				s.State = StageDone
+			if run.Stages[i].ID != id {
+				run.Stages[i].State = StageDone
 			}
 		}
 	})
@@ -66,7 +62,7 @@ func TestPlatformRunIsAnExternalKindWithoutCleanup(t *testing.T) {
 func TestSeedVMBuildsTheSeed(t *testing.T) {
 	e := newEnv(t, RunApply)
 	e.only(StageSeedVM)
-	if end := e.until(5); end != "fail:"+CodeStageUnavailable {
+	if end := e.until(5); end != "complete" {
 		t.Fatalf("end %s; logs %s", end, e.logs)
 	}
 	if s := e.stage(StageSeedVM); s.State != StageDone || s.Receipt == nil || s.Receipt.VMID != 120 || s.Receipt.Generation != 1 ||
@@ -100,12 +96,8 @@ func TestSeedVMBuildsTheSeed(t *testing.T) {
 		sec.K3sToken == "" || !bootstrapTokenRE.MatchString(sec.BootstrapToken) {
 		t.Fatalf("seed status %+v", in.Status.Seed)
 	}
-	if in.Status.Phase != PhaseFailed {
-		t.Fatalf("phase %s after stage 6 is refused", in.Status.Phase)
-	}
-	run, _, _ := e.state.snapshot()
-	if run.State != RunFailed || run.Code != CodeStageUnavailable || !strings.Contains(run.Message, "stages 1 to 5") {
-		t.Fatalf("run %s %s %q", run.State, run.Code, run.Message)
+	if run, _, _ := e.state.snapshot(); in.Status.Phase != PhaseReady || run.State != RunSucceeded {
+		t.Fatalf("phase %s, run %s %s %q", in.Status.Phase, run.State, run.Code, run.Message)
 	}
 }
 
@@ -130,7 +122,7 @@ func TestSeedVMLeaseLossAfterEachIntent(t *testing.T) {
 		}
 		e.jobs = &fakeJobs{}
 		e.r.Jobs = e.jobs
-		if end := e.until(8); end != "fail:"+CodeStageUnavailable {
+		if end := e.until(8); end != "complete" {
 			t.Fatalf("lost at %d, resumed: %s", n, end)
 		}
 		_, in, _ := e.state.snapshot()
@@ -251,7 +243,7 @@ func TestSeedVMNeverReclonesAGenerationWithItsCA(t *testing.T) {
 					CDVolume: "local:iso/" + SeedCDName(inID, 1)}
 				sec.K3sToken, sec.BootstrapToken = runK3s, runBoot
 			})
-			if end := e.until(5); end != "fail:"+CodeStageUnavailable {
+			if end := e.until(5); end != "complete" {
 				t.Fatalf("end %s", end)
 			}
 			_, in, _ := e.state.snapshot()
@@ -285,7 +277,7 @@ func TestSeedVMNewGenerationWhenTheCDIsLost(t *testing.T) {
 		in.Status.Seed = &SeedStatus{VMID: 120, Node: "pve1", Generation: 1, CACert: "-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----\n"}
 		sec.K3sToken, sec.BootstrapToken = runK3s, runBoot
 	})
-	if end := e.until(5); end != "fail:"+CodeStageUnavailable {
+	if end := e.until(5); end != "complete" {
 		t.Fatalf("end %s", end)
 	}
 	_, in, _ := e.state.snapshot()
@@ -305,7 +297,7 @@ func TestSeedRecreatedOnlyBeforeReady(t *testing.T) {
 		e := newEnv(t, RunApply)
 		e.only(StageSeedVM)
 		e.seedAt(120, 1, nil, true)
-		if end := e.until(5); end != "fail:"+CodeStageUnavailable {
+		if end := e.until(5); end != "complete" {
 			t.Fatalf("end %s", end)
 		}
 		_, in, _ := e.state.snapshot()
@@ -514,7 +506,7 @@ func fakeSeedEnv(t *testing.T, stage string) (*env, *fakeSeed) {
 // While the API does not answer, the guest agent tells a seed that has not booted from one the portal cannot reach.
 func TestSeedAPI(t *testing.T) {
 	e, seed := fakeSeedEnv(t, StageSeedAPI)
-	if end := e.until(3); end != "fail:"+CodeStageUnavailable || !slices.Equal(seed.callsOf("boot"), []string{"GET /readyz"}) {
+	if end := e.until(3); end != "complete" || !slices.Equal(seed.callsOf("boot"), []string{"GET /readyz"}) {
 		t.Fatalf("end %s, calls %v", end, seed.calls)
 	}
 
@@ -553,7 +545,7 @@ func TestSeedIdentityDoneOnlyWhenTheCDIsGone(t *testing.T) {
 	if _, attached := e.pve.vms[120].cfg["ide2"]; attached {
 		t.Fatal("the CD is still attached")
 	}
-	if end := e.until(3); end != "fail:"+CodeStageUnavailable {
+	if end := e.until(3); end != "complete" {
 		t.Fatalf("end %s", end)
 	}
 	_, in, sec = e.state.snapshot()
@@ -577,7 +569,7 @@ func TestSeedIdentityDoneOnlyWhenTheCDIsGone(t *testing.T) {
 func TestTheCDIsDeletedWhereItWasUploaded(t *testing.T) {
 	e, _ := fakeSeedEnv(t, StageSeedIdentity)
 	e.mutate(func(_ *Run, in *Installation, _ *Secrets) { in.Spec.Storage.ISO = "nas-iso" })
-	if end := e.until(3); end != "fail:"+CodeStageUnavailable || e.stage(StageSeedIdentity).State != StageDone {
+	if end := e.until(3); end != "complete" || e.stage(StageSeedIdentity).State != StageDone {
 		t.Fatalf("end %s, stage %+v", end, e.stage(StageSeedIdentity))
 	}
 	if _, in, _ := e.state.snapshot(); len(e.pve.iso) != 0 || in.Status.Seed.CDVolume != "" {
@@ -600,7 +592,7 @@ func TestSeedIdentityWaitsForTheBootstrapRBAC(t *testing.T) {
 	if end := e.once(); end != "defer:waiting_seed_identity" || e.stage(StageSeedIdentity).Code != CodeSeedIdentityLost {
 		t.Fatalf("403 on the first read: %s %+v", end, e.stage(StageSeedIdentity))
 	}
-	if end := e.until(3); end != "fail:"+CodeStageUnavailable || e.stage(StageSeedIdentity).State != StageDone {
+	if end := e.until(3); end != "complete" || e.stage(StageSeedIdentity).State != StageDone {
 		t.Fatalf("end %s, stage %+v", end, e.stage(StageSeedIdentity))
 	}
 }
@@ -735,11 +727,6 @@ func TestImageFailures(t *testing.T) {
 // stopped, deleted) and every pcplat CD go, platformSecret is wiped and the phase is removed. It resumes after a lost
 // lease at any checkpoint.
 func TestRemoveSeed(t *testing.T) {
-	e := newEnv(t, RunRemove)
-	e.mutate(func(_ *Run, in *Installation, _ *Secrets) { in.Status.Clusters = []ClusterStatus{{Name: ClusterName}} })
-	if end := e.once(); end != "fail:"+CodeStageUnavailable || len(e.pve.writes) != 0 {
-		t.Fatalf("with a cluster: %s %v", end, e.pve.writes)
-	}
 	total := -1
 	for n := 0; n <= total || total < 0; n++ {
 		e := newEnv(t, RunRemove)
@@ -772,8 +759,8 @@ func TestRemoveSeed(t *testing.T) {
 	}
 }
 
-// The whole of what this build runs: stages 1 to 5 against fakes, the seed API answering with a certificate of the CA
-// that went onto the CD, then stage 6 refused. No secret appears in the run, the installation, the job codes or the
+// Stages 1 to 5 against fakes, the seed API answering with a certificate of the CA that went onto the CD, up to stage 6
+// waiting for the seed's ArgoCD. No secret appears in the run, the installation, the job codes or the
 // logs, even when Proxmox echoes one in an error.
 func TestApplyRunsStagesOneToFive(t *testing.T) {
 	e := newEnv(t, RunApply)
@@ -807,7 +794,13 @@ func TestApplyRunsStagesOneToFive(t *testing.T) {
 	})
 	e.mutate(func(_ *Run, in *Installation, _ *Secrets) { in.Spec.Seed.Address = "127.0.0.1" })
 	e.r.SeedPort = seed.url[strings.LastIndex(seed.url, ":")+1:]
-	if end := e.until(20); end != "fail:"+CodeStageUnavailable {
+	end := ""
+	for range 20 { // until stage 6 waits for the seed's ArgoCD, which this fake seed never starts
+		if end = e.once(); end == "defer:waiting_seed_platform" {
+			break
+		}
+	}
+	if end != "defer:waiting_seed_platform" {
 		t.Fatalf("end %s: %s", end, e.logs)
 	}
 	run, in, sec := e.state.snapshot()
@@ -816,7 +809,7 @@ func TestApplyRunsStagesOneToFive(t *testing.T) {
 			t.Fatalf("stage %d %s: %+v", i+1, s.ID, s)
 		}
 	}
-	if run.Stages[5].State != StageFailed || run.Stages[5].Code != CodeStageUnavailable || sec.SeedKubeconfig == nil ||
+	if run.Stages[5].State != StageWaiting || run.Stages[5].Code != CodeComponentUnhealthy || sec.SeedKubeconfig == nil ||
 		sec.BootstrapToken != "" || len(e.pve.iso) != 0 || in.Status.Seed.ReadyAt == nil || e.stage(StageSeedVM).Retries != 1 {
 		t.Fatalf("run %+v, seed %+v", run.Stages[5], in.Status.Seed)
 	}

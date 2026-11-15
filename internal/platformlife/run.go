@@ -65,9 +65,13 @@ const (
 	CodePortalChanged        = "portal_changed"
 	CodeJobDead              = "job_dead"
 	CodePlatformDisabled     = "platform_disabled"
-	// CodeStageUnavailable ends a run that reaches a stage this build does not run (stages 6 to 11 of an apply, the
-	// cluster part of a remove, a seed of mode existing).
-	CodeStageUnavailable   = "stage_unavailable"
+	// CodeStageUnavailable ends a run that reaches something this build does not do: a seed of mode existing, or a
+	// stage another release recorded.
+	CodeStageUnavailable = "stage_unavailable"
+	// CodeTenantsExist refuses a Remove while tenant clusters or databases still run on the workload cluster.
+	CodeTenantsExist = "tenants_exist"
+	// CodeVolumeDeleteFailed: a recorded volume of the platform could not be deleted at Remove.
+	CodeVolumeDeleteFailed = "volume_delete_failed"
 	CodeCredentialsMissing = "credentials_missing"
 	// CodeSeedLost: a seed that became ready is gone or no longer ours. It is never rebuilt automatically, because a
 	// new, empty seed would orphan the workload's Cluster API state.
@@ -97,20 +101,23 @@ func TimeoutCode(stage string) string { return strings.ReplaceAll(stage, "-", "_
 
 // Run is one document of collection platformRun.
 type Run struct {
-	ID              string     `json:"id"`
-	InstallationID  string     `json:"installationId"`
-	Kind            string     `json:"kind"`
-	BOM             BOMRef     `json:"bom"` // frozen at creation
-	JobID           string     `json:"jobId,omitempty"`
-	RequestedBy     string     `json:"requestedBy"`
-	CancelRequested bool       `json:"cancelRequested,omitempty"`
-	State           string     `json:"state"`
-	Code            string     `json:"code,omitempty"`
-	Message         string     `json:"message,omitempty"`
-	Stages          []Stage    `json:"stages,omitempty"`
-	CreatedAt       time.Time  `json:"createdAt"`
-	StartedAt       *time.Time `json:"startedAt,omitempty"`
-	FinishedAt      *time.Time `json:"finishedAt,omitempty"`
+	ID              string `json:"id"`
+	InstallationID  string `json:"installationId"`
+	Kind            string `json:"kind"`
+	BOM             BOMRef `json:"bom"` // frozen at creation
+	JobID           string `json:"jobId,omitempty"`
+	RequestedBy     string `json:"requestedBy"`
+	CancelRequested bool   `json:"cancelRequested,omitempty"`
+	// Confirmed: the operator typed "remove <name>" when starting a Remove. It lets the run go on where it cannot
+	// observe: the seed VM is gone, or the workload cluster does not answer whether tenants still run on it.
+	Confirmed  bool       `json:"confirmed,omitempty"`
+	State      string     `json:"state"`
+	Code       string     `json:"code,omitempty"`
+	Message    string     `json:"message,omitempty"`
+	Stages     []Stage    `json:"stages,omitempty"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	StartedAt  *time.Time `json:"startedAt,omitempty"`
+	FinishedAt *time.Time `json:"finishedAt,omitempty"`
 }
 
 // Stage is one stage of a run. Deadline is absolute, so a restart does not reset it.

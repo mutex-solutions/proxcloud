@@ -4,6 +4,61 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-16: PR 15 (P3): platform stages 6 to 11, the cluster part of Remove, live read, break-glass and rotation
+
+**What changed:** `internal/platformlife` gains stages 6 to 11 of an apply (`cluster.go`), the cluster
+part and the seed-lost mode of a remove (`remove.go`) and what the routes do on a ready seed outside a
+run (`seedaccess.go`); the stop at stage 6 is gone. Three flows are new. The API now writes to the
+seed's k3s API beyond the bootstrap: the ArgoCD HelmChart, AppProjects, repository Secrets,
+Applications (and a sync operation where a clusterctl hook has to run again), the CAPI token's Secret,
+MachineDeployment and Cluster deletes, and ArgoCD's cluster Secret for the workload. The API calls the
+workload cluster's API with the admin kubeconfig Cluster API keeps on the seed, read per run into memory
+only: the `argocd-manager` service account and its `TokenRequest`, the CSI token's Secret, nodes,
+PersistentVolumes, the clusterctl inventory, the providers' service-account token and, at Remove, the
+tenant Applications. And the run writes provider rows: `PlatformRegister` creates or adopts the
+Kubernetes and Databases providers through the body factored out of `externalServiceCreate`,
+`PlatformDisable` sets them `DISABLED` at Remove. On Proxmox, the CAPI token also deletes the VMs of
+`proxcloud-system` tagged for the installation (seed-lost mode only), and the CSI token is used by the
+API for the first time, to delete the recorded volumes. New routes: `GET …/installations/{id}?live=1`,
+`GET …/seed-kubeconfig`, `POST …/seed-credential/rotate`; `POST …/runs` takes `confirm`.
+
+**Why:** design §4.2 rows 6 to 11, §4.6, §5 and §11 row 15: the platform has to be built, upgraded in
+place and removed by a job that resumes after a crash, and the credentials it creates have to stay
+where §5 puts them. The seed ArgoCD's token for the workload is in the seed's cluster Secret only, the
+workload admin kubeconfig is never stored, the break-glass token is stored nowhere and its audit entry
+has no field for it, and a rotation deletes the old token Secret only after the new credential is
+stored and proven.
+
+**Not verified:** nothing here has run against a real k3s, ArgoCD, Cluster API or Proxmox. The tests use
+a fake Kubernetes API for the seed and the workload, a fake PVE API and in-memory stores; the PostgreSQL
+tests of the rotation's store and of the typed confirmation were compiled, not run (see the review
+fixes below). The gate reads
+ArgoCD's `status.sync.comparedTo.source` and `status.operationState.phase` and starts a
+sync by patching `operation` onto the Application; the inventory read assumes clusterctl's `Provider`
+fields; the volume sweep assumes proxmox-csi handles of the form `region/node/storage/volume`. Each is
+owed a lab check.
+
+**Review fixes (same PR):** stage 9's deadline starts again only when the run reaches a wave for the
+first time, because every acquisition walks the waves from the first and the deadline otherwise never
+fired; the gate compares `status.sync.comparedTo.source` with `spec.source`, so a status computed for
+other values of the same chart version does not pass; stage 7 reads the conditions of the ProxmoxCluster
+and the ProxmoxMachines for `capmox_auth_failed`; `PlatformRegister` lists and inserts in one transaction
+under `platform-run:<id>`, so two runners cannot both create a row, and adopts
+`database.engines.postgresql.replicas`; a rotation deletes the token Secret it created when it stops
+before the store, and stage 6 deletes every portal token Secret but the stored one; the cluster part of a
+remove clears `status.clusters` and `status.volumes` when it is done; `GET …/seed-kubeconfig` answers
+`503` without an audit service and sends `Cache-Control: no-store`. Not verified on a lab: the
+`comparedTo.source` equality on a real ArgoCD, and the condition messages CAPMOX sets on a refused token.
+The PostgreSQL tests of this PR ran against a local container.
+
+**Views updated:** [C3e managed services](c3-components.md#c3e-managed-services-and-object-storage)
+(`platformlife` and PVE node labels, new workload API node, edges to the seed API and the workload API,
+"Platform runs" row).
+
+Files: `internal/platformlife/{cluster,remove,seedaccess,runner,run,job,stages}.go`,
+`internal/platform/admin/{platform,externalservicemut}.go`, `cmd/api/main.go`, `docs/api.md`,
+`CHANGELOG.md`.
+
 ## 2026-11-15: Renderers of the managed-services platform
 
 **What changed:** `internal/platformlife` gained pure renderers (no PVE or Kubernetes call)

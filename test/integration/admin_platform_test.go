@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -417,7 +418,7 @@ func TestPlatformRunMutate(t *testing.T) {
 	if err := store.Create(ctx, in); err != nil {
 		t.Fatal(err)
 	}
-	run, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub")
+	run, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,5 +445,150 @@ func TestPlatformRunMutate(t *testing.T) {
 	}
 	if n, _ := db.C(platformlife.SecretCollection).Count(ctx, pgdoc.M{}); n != 0 {
 		t.Fatalf("%d secrets documents after a wipe", n)
+	}
+
+	// A rotated seed credential is stored sealed, only outside a run and only over the token Secret it replaces.
+	seeded := func(r *platformlife.Run, in *platformlife.Installation, sec *platformlife.Secrets) error {
+		r.State = platformlife.RunSucceeded
+		in.Status.Seed = &platformlife.SeedStatus{VMID: 120, TokenSecret: "proxcloud-portal-token-g1"}
+		sec.SeedKubeconfig = &platformlife.SeedKubeconfig{Server: "https://10.0.0.1:6443", CA: "ca", Token: "old-token-0123456789"}
+		return nil
+	}
+	if err := store.SetSeedToken(ctx, in.ID, "proxcloud-portal-token-g1", "proxcloud-portal-token-g2", "new-token-0123456789"); !errors.Is(err, platformlife.ErrRunActive) {
+		t.Fatalf("rotation during a run: %v", err)
+	}
+	if err := store.Mutate(ctx, run.ID, seeded); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSeedToken(ctx, in.ID, "proxcloud-portal-token-g7", "proxcloud-portal-token-g8", "x"); !errors.Is(err, platformlife.ErrRevConflict) {
+		t.Fatalf("rotation over another Secret: %v", err)
+	}
+	if err := store.SetSeedToken(ctx, in.ID, "proxcloud-portal-token-g1", "proxcloud-portal-token-g2", "new-token-0123456789"); err != nil {
+		t.Fatal(err)
+	}
+	raw = nil
+	_ = db.C(platformlife.SecretCollection).Find(ctx, pgdoc.M{}, &raw)
+	got, _ = store.Get(ctx, in.ID)
+	if sec, _ := store.Secrets(ctx, in.ID); sec.SeedKubeconfig.Token != "new-token-0123456789" || got.Status.Seed.TokenSecret != "proxcloud-portal-token-g2" ||
+		strings.Contains(fmt.Sprint(raw), "new-token") {
+		t.Fatalf("stored %+v, raw %v", got.Status.Seed, raw)
+	}
+	// The typed confirmation belongs to a remove and must name the installation.
+	if _, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "remove lab"); !errors.Is(err, platformlife.ErrBadConfirm) {
+		t.Fatalf("confirm on an apply: %v", err)
+	}
+	if _, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunRemove, "admin-sub", "remove other"); !errors.Is(err, platformlife.ErrBadConfirm) {
+		t.Fatalf("a wrong confirmation: %v", err)
+	}
+	if r, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunRemove, "admin-sub", "remove lab"); err != nil || !r.Confirmed {
+		t.Fatalf("confirmed remove: %+v %v", r, err)
+	}
+}
+
+// TestPlatformRegisterAndDisable runs the code that writes provider rows for a platform run against PostgreSQL: a row
+// is created with its kubeconfig sealed, adopted by marker at the next call (name and status left alone, the owned
+// keys and the kubeconfig rewritten, still sealed), a foreign row under the name and a body the validation refuses
+// are ErrProviderConflict, racing calls create one row, and Disable touches only the installation's rows.
+func TestPlatformRegisterAndDisable(t *testing.T) {
+	ctx := context.Background()
+	db := freshPG(t)
+	enc := textcrypt.New("test-key")
+	repo := admin.NewRepo(db)
+	h := admin.NewHandler(repo, nil, nil, nil, nil, nil, nil, nil, audit.NewService(audit.NewRepo(db), slog.Default()),
+		externalservice.NewService(externalservice.NewRepo(db), enc), "", "", "")
+	// An installation always has its Proxmox provider row.
+	mustInsert(t, db, "externalService", pgdoc.M{"_id": "svc-pve", "name": "lab", "type": "CLOUD", "status": "PUBLIC", "config": pgdoc.M{"provider": "proxmox", "region": "lab"}})
+	cur, err := platformlife.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodies := func(id, name, kubeconfig string) (k8s, database map[string]any) {
+		return platformlife.ProviderBodies(cur.BOM, platformlife.RenderInput{ID: id, Name: name, Region: "lab", RegionName: "Lab", PVEAPIURL: "https://10.200.200.2:8006"}, kubeconfig)
+	}
+	row := func(id string) pgdoc.M {
+		t.Helper()
+		rows, err := repo.ListRaw(ctx, "externalService")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range rows {
+			if r["_id"] == id {
+				return r
+			}
+		}
+		t.Fatalf("no row %s", id)
+		return nil
+	}
+	sealed := func(r pgdoc.M, plain string) bool {
+		stored, _ := r["secret"].(map[string]any)["kubeconfig"].(string)
+		return stored != "" && !strings.Contains(stored, plain) && enc.Decrypt(stored) == plain
+	}
+
+	k8s, database := bodies("pi-1", "lab", "kubeconfig-one-0123456789")
+	id, err := h.PlatformRegister(ctx, k8s)
+	if err != nil || id == "" {
+		t.Fatalf("create: %q %v", id, err)
+	}
+	if r := row(id); r["name"] != "lab Kubernetes" || r["status"] != "PUBLIC" || !sealed(r, "kubeconfig-one-0123456789") {
+		t.Fatalf("created row: %v", r)
+	}
+	// The operator renames and hides the row; a chart version from an older BOM is on it.
+	r := row(id)
+	r["name"], r["status"] = "renamed", "PRIVATE"
+	r["config"].(map[string]any)["argocd"].(map[string]any)["chartVersion"] = "0.0.1"
+	if err := repo.ReplaceDoc(ctx, "externalService", id, r); err != nil {
+		t.Fatal(err)
+	}
+	k8s, _ = bodies("pi-1", "lab", "kubeconfig-two-0123456789")
+	again, err := h.PlatformRegister(ctx, k8s)
+	r = row(id)
+	if err != nil || again != id || r["name"] != "renamed" || r["status"] != "PRIVATE" || !sealed(r, "kubeconfig-two-0123456789") ||
+		r["config"].(map[string]any)["argocd"].(map[string]any)["chartVersion"] != cur.TenantCharts.Kubernetes.Version {
+		t.Fatalf("adopted row: %q %v %v", again, err, r)
+	}
+
+	mustInsert(t, db, "externalService", pgdoc.M{"_id": "svc-foreign", "name": "lab Databases", "type": "CLOUD", "status": "PUBLIC", "config": pgdoc.M{"provider": "dbaas"}})
+	if _, err := h.PlatformRegister(ctx, database); !errors.Is(err, platformlife.ErrProviderConflict) {
+		t.Fatalf("a foreign row under the name: %v", err)
+	}
+	// A refusal of the provider validation is a conflict too (a run fails on it instead of spending its attempts).
+	refused, _ := bodies("pi-2", "", "kubeconfig-0123456789")
+	refused["name"] = ""
+	if _, err := h.PlatformRegister(ctx, refused); !errors.Is(err, platformlife.ErrProviderConflict) {
+		t.Fatalf("a body the validation refuses: %v", err)
+	}
+
+	// Two runners of one installation (one that lost its lease while paused, and its successor): the second waits for
+	// the first under the installation's run lock and adopts its row, instead of listing none and creating another.
+	racing, _ := bodies("pi-race", "race", "kubeconfig-0123456789")
+	second := make(chan string, 1)
+	var first string
+	if err := db.WithTx(ctx, func(tctx context.Context) error {
+		var err error
+		if first, err = h.PlatformRegister(tctx, racing); err != nil {
+			return err
+		}
+		go func() {
+			body, _ := bodies("pi-race", "race", "kubeconfig-0123456789")
+			id, err := h.PlatformRegister(ctx, body)
+			if err != nil {
+				id = "error: " + err.Error()
+			}
+			second <- id
+		}()
+		time.Sleep(300 * time.Millisecond) // the second lists while the first has not committed
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-second; got != first {
+		t.Fatalf("racing registrations answered %q and %q", first, got)
+	}
+
+	if err := h.PlatformDisable(ctx, "pi-1"); err != nil {
+		t.Fatal(err)
+	}
+	if row(id)["status"] != "DISABLED" || row(first)["status"] != "PUBLIC" || row("svc-foreign")["status"] != "PUBLIC" || !sealed(row(id), "kubeconfig-two-0123456789") {
+		t.Fatalf("after Disable: %v %v %v", row(id), row(first), row("svc-foreign"))
 	}
 }

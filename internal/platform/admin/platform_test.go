@@ -3,8 +3,10 @@ package admin
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -65,6 +67,8 @@ var platformRoutes = []struct{ method, path, perm string }{
 	{"GET", "/admin/platform/installations/pi-1/runs", serviceReadPerm},
 	{"GET", "/admin/platform/installations/pi-1/runs/pr-1", serviceReadPerm},
 	{"POST", "/admin/platform/installations/pi-1/runs/pr-1/cancel", externalServiceManagePerm},
+	{"GET", "/admin/platform/installations/pi-1/seed-kubeconfig", externalServiceManagePerm}, // a GET that hands out cluster-admin
+	{"POST", "/admin/platform/installations/pi-1/seed-credential/rotate", externalServiceManagePerm},
 }
 
 // Every installation route is admin-only (a tenant gets 403). With PROXCLOUD_PLATFORM_ENABLED off (no store wired) an
@@ -106,5 +110,37 @@ func TestPlatformAuditSkip(t *testing.T) {
 		if auditSkip(p) || pathResourceType(p) != "PLATFORM_INSTALLATION" {
 			t.Fatalf("%s: skipped or typed %s", p, pathResourceType(p))
 		}
+	}
+}
+
+// The audit entry of a break-glass download says who, which installation and until when, and has no place for the
+// token: it is built without it.
+func TestBreakGlassEventHasNoToken(t *testing.T) {
+	r := httptest.NewRequest("GET", "/admin/platform/installations/pi-1/seed-kubeconfig", nil)
+	r = r.WithContext(httpx.WithRC(r.Context(), &httpx.RequestContext{Sub: "operator-1"}))
+	expires := time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC)
+	ev := breakGlassEvent(r, &platformlife.Installation{ID: "pi-1", Name: "lab"}, expires)
+	raw, _ := json.Marshal(ev)
+	for _, want := range []string{"operator-1", "pi-1", "2026-11-16T10:00:00Z", ActionBreakGlass} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("no %s in %s", want, raw)
+		}
+	}
+	if len(ev.ResourceMetadata) != 2 || len(ev.Changes) != 0 || strings.Contains(strings.ToLower(string(raw)), "kubeconfig\":") ||
+		strings.Contains(string(raw), "eyJ") {
+		t.Fatalf("the entry carries more than actor and expiry: %s", raw)
+	}
+}
+
+// Without an audit service the break-glass route issues nothing: it answers 503 before it reads the installation or
+// asks the seed for a token (the store here has no database, so a read would panic), and the answer is not cacheable.
+func TestSeedKubeconfigNeedsTheAuditLog(t *testing.T) {
+	h := &Handler{adminIssuer: "operator-realm"}
+	h.SetPlatform(platformlife.NewStore(nil, nil))
+	r := chi.NewRouter()
+	h.Routes(r)
+	w := tuDo(r, "GET", "/admin/platform/installations/pi-1/seed-kubeconfig", "", &httpx.RequestContext{SigV4KeyID: "pk-test"})
+	if w.Code != http.StatusServiceUnavailable || w.Header().Get("Cache-Control") != "no-store" || strings.Contains(w.Body.String(), "kubeconfig\":") {
+		t.Fatalf("%d %q %s", w.Code, w.Header().Get("Cache-Control"), w.Body.String())
 	}
 }
