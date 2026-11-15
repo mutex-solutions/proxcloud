@@ -129,12 +129,17 @@ class CommentTests(unittest.TestCase):
     def test_policy_sentence_describes_owner_policy(self):
         body = self.render()
         self.assertNotIn("including unfixed findings", body)
-        for text in ("block on any HIGH/CRITICAL with a fixed version", "tracked", "until 2026-12-12 (UTC)",
+        for text in ("block on any HIGH/CRITICAL with a fixed version", "tracked", "until 2027-03-12 (UTC)",
                      "raw upstream/builder/donor bases are report-only", "missing, stale or incomplete base scan does",
                      "Exactly one owner-approved VEX: CVE-2025-47273", "expires 2026-12-31",
                      "No other ignore", "Missing/invalid reports, stale DB and scanner failures block"):
             self.assertIn(text, body)
-        late = R.render(self.root, SHA, URL, "failure", "failure", "failure", now=datetime(2027, 1, 1, tzinfo=timezone.utc))
+        # 2026-12-31 to 2027-03-11: the VEX has expired, unfixed findings are still tracked.
+        between = R.render(self.root, SHA, URL, "failure", "failure", "failure", now=datetime(2027, 1, 1, tzinfo=timezone.utc))
+        self.assertIn("**tracked** (shown and counted here, not blocking) until 2027-03-12 (UTC)", between)
+        self.assertIn("expired on 2026-12-31 and is no longer applied", between)
+        self.assertNotIn("re-review deadline has passed", between)
+        late = R.render(self.root, SHA, URL, "failure", "failure", "failure", now=datetime(2027, 3, 12, tzinfo=timezone.utc))
         self.assertIn("re-review deadline has passed", late)
         self.assertIn("expired on 2026-12-31 and is no longer applied", late)
 
@@ -144,11 +149,11 @@ class CommentTests(unittest.TestCase):
         body = self.render()
         self.assertIn("| filesystem | 1 | 1 | 1 / 1 | 0 | 🔴 Blocking findings |", body)
         self.assertIn("⛔ Blocking: 1 · ⏳ Tracked (no fix): 1", body)
-        self.assertIn("| filesystem | CRITICAL | ⏳ tracked, no fix (until 2026-12-12) |", body)
+        self.assertIn("| filesystem | CRITICAL | ⏳ tracked, no fix (until 2027-03-12) |", body)
         self.assertLess(body.index("[CVE-2026-1001]"), body.index("[CVE-2026-2001]"))  # blocking first
         self.fixture(vulns=[unfixed])
         self.assertIn("| filesystem | 1 | 0 | 0 / 1 | 0 | 🟡 Tracked (no fix) only |", self.render())
-        later = datetime(2026, 12, 12, tzinfo=timezone.utc)
+        later = datetime(2027, 3, 12, tzinfo=timezone.utc)
         self.fixture(vulns=[unfixed])  # Same evidence; DB refreshed on the review date.
         stamp = later.isoformat()
         (self.root / f"security-filesystem-{SHA}" / "db-metadata.json").write_text(json.dumps({"Version": 2, "UpdatedAt": stamp, "DownloadedAt": stamp}))

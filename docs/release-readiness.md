@@ -114,9 +114,14 @@ same gate. For every release:
    deferred. Intentional safety holds stay in place.
 7. Confirm the exact-commit `security-scan` gate passed. Fixable HIGH/CRITICAL
    findings block; findings without an upstream fix are tracked (not blocking)
-   until 2026-12-12; raw upstream bases are report-only; the GPU/CUDA template is
-   not scanned. Built-in sandbox template digests in `deploy/templates/images.yaml`
-   must come from a `sandbox-templates` build of the release sources.
+   until 2027-03-12 ([review of 2026-11-15](security-unfixed-review.md)); the single
+   VEX expires on 2026-12-31; raw upstream bases are report-only; the GPU/CUDA
+   template is not scanned. The default `python` template is a public image pinned
+   as is and scanned only as the report-only base `external-python`, so its findings
+   never block, even with a fixed version: read `base/external-python` in the
+   security comment by hand. The other built-in sandbox template digests in
+   `deploy/templates/images.yaml` must come from a `sandbox-templates` build of the
+   release sources.
 
 A `v*` tag is an app publication trigger, not a PVE template trigger. Later
 owner-authorized template canaries remain separate reviewed branch/run operations;

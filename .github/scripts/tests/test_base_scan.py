@@ -99,7 +99,7 @@ class BaseTests(unittest.TestCase):
             with patch.object(SCAN, "run_command", return_value=subprocess.CompletedProcess([], rc, stdout)), self.assertRaises(ValueError):
                 SCAN.inspect_json("fixture", ["--raw"], 999999999)
 
-    SUMMARY = ("Blocking HIGH/CRITICAL: 1; tracked without fix (non-blocking until 2026-12-12): 0; "
+    SUMMARY = ("Blocking HIGH/CRITICAL: 1; tracked without fix (non-blocking until 2027-03-12): 0; "
                "owner-approved VEX CVE-2025-47273 (expires 2026-12-31): 0; image OS EOL: False\n")
 
     def scan_fixture(self, scan_rc=0, gate_rc=0, timeout=False, gate_output=SUMMARY):
