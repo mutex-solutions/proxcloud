@@ -17,8 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   providers, the tenant charts and the 15 seed and workload components with wave, namespace, node group and chart.
   The API embeds it (`deploy/embed.go`; the image copies `deploy/embed.go` and `deploy/platform`, and the docker
   workflow rebuilds on a change to either) and validates it in `internal/platformlife`: exact versions only, a
-  digest on every chart and image, and `pending` digests (our own four packages, not public yet) and `0.0.0+latest`
-  (Kamaji) only in a `-dev` release. The route needs `admin:service:read`. Tests keep `versions.yml`,
+  digest on every chart and image, and `pending` digests (our own four packages, not public yet, and the `kamaji` and
+  `kamaji-crds` charts at `0.0.0+latest`, which have no stable digest) and `0.0.0+` versions only in a `-dev`
+  release. The route needs `admin:service:read`. Tests keep `versions.yml`,
   `pc_defaults.services.k8s_version` and stage 40's ArgoCD and cert-manager chart and values equal to the BOM; the
   installer itself is unchanged and does not read the file. Inert: nothing installs from the BOM, there is no run,
   job or flag yet. Not verified: the third-party chart and image digests and the k3s sha256 values were read once

@@ -317,9 +317,10 @@ key a run records it by. It needs `admin:service:read` and changes nothing.
 The file pins exact versions only. A digest is the chart's OCI manifest
 digest, or for an `https://` repository the `digest` of that version in its
 `index.yaml`. A `-dev` release (main) may still carry `pending` digests for
-the project's own packages and a `0.0.0+latest` version for Kamaji; the
-validation refuses both in any other release. Nothing installs from the BOM
-yet.
+the project's own packages and for a chart at a moving `0.0.0+` version
+(today `kamaji` and `kamaji-crds` at `0.0.0+latest`, which therefore have
+neither an exact version nor a digest); the validation refuses `pending` and
+`0.0.0+` in any other release. Nothing installs from the BOM yet.
 
 ## Admin API — `/admin-api/v1`
 
