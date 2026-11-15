@@ -3,7 +3,10 @@ What every tenant cluster runs, installed by CAAPH from the management side: the
 a StorageClass is offered, csi-driver-nfs when the cluster has a NAS dataset, the rest from the tenant's picks. The ClusterResourceSet carries what a chart value must not: the
 CSI token (a Secret the portal writes, never in this document) and the MetalLB custom resources, which need
 the chart's CRDs first (ClusterResourceSet retries until they exist).
+kubeadm mode (controlPlane.kind kubeadm, the platform's own cluster) renders none of this: the platform installs its
+components as ArgoCD Applications.
 */ -}}
+{{- if not (include "pkc.kubeadm" .) }}
 {{- $root := . }}
 {{- $fabric := (.Values.addons.nginxGatewayFabric | default dict).enabled | default false }}
 {{- if and $fabric ((.Values.addons.ingress | default dict).enabled | default false) }}
@@ -110,3 +113,4 @@ spec:
     {{- if $classes }}
     - {kind: Secret, name: {{ required "proxmox.csi.configSecretName is required" .Values.proxmox.csi.configSecretName }}}
     {{- end }}
+{{- end }}

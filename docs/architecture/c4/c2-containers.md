@@ -237,7 +237,7 @@ flowchart LR
   chart["Chart proxcloud<br/>api, SPAs, gateway, Keycloak, CNPG"]:::impl
   platchart["Chart proxcloud-platform<br/>clusterctl hook, provider RBAC, AppProjects,<br/>MetalLB pool (nothing applies it yet)"]:::impl
   dbchart["Chart database-cluster<br/>DBaaS engines"]:::impl
-  k8schart["Chart proxmox-kamaji-cluster<br/>tenant and sandbox clusters"]:::impl
+  k8schart["Chart proxmox-kamaji-cluster<br/>tenant and sandbox clusters;<br/>kubeadm mode: platform cluster (unused yet)"]:::impl
   inst["Installer (Ansible)<br/>make install, day-2 targets"]:::impl
   compose["One-host Compose install<br/>deploy/compose, proxcloud-up.sh"]:::impl
   host["Single Docker host<br/>portal only"]:::impl
@@ -344,7 +344,7 @@ separate controlled canary.
 | Helm chart `proxcloud-platform` | `deploy/charts/proxcloud-platform` (tag `proxcloud-platform-v*`). The managed-services platform's own objects (ADR 0009), one part per BOM component: `clusterctl init` as an ArgoCD Sync hook Job (cluster-admin service account, image `proxcloud-clusterctl` by digest) for the seed and the workload cluster; on the workload cluster the provider service account and RBAC of `deploy/{mgmt,dbaas}-cluster/rbac.yaml` (shared objects once) plus a CiliumNetworkPolicy grant, both tenant AppProjects, a locked `default` AppProject, MetalLB pool `services` and the tenant chart repository entry without credentials. Nothing applies it yet | ghcr OCI | Implemented (not published, not run on a cluster) |
 | Helm chart `proxcloud` | `deploy/charts/proxcloud` | ghcr OCI | Implemented |
 | Helm chart `database-cluster` | `deploy/charts/database-cluster` | ghcr OCI | Implemented |
-| Helm chart `proxmox-kamaji-cluster` | `deploy/charts/proxmox-kamaji-cluster` (tag `proxmox-kamaji-cluster-v*`) | ghcr OCI | Implemented |
+| Helm chart `proxmox-kamaji-cluster` | `deploy/charts/proxmox-kamaji-cluster` (tag `proxmox-kamaji-cluster-v*`). Tenant and sandbox clusters with a Kamaji control plane (default); from 0.1.11 `controlPlane.kind: kubeadm` renders the platform's own workload cluster of managed services (ADR 0009: one `KubeadmControlPlane` VM with kube-vip, node groups, no tenant add-ons), which no path renders yet | ghcr OCI | Implemented (kubeadm mode not run on a cluster) |
 | CI | GitHub Actions `test.yml`, `docker.yml` (api, web, admin, sandbox-proxy, sandbox-runtime), `helm.yml`, `sandbox-templates.yml`, and the self-hosted `vm-templates.yml` and `k8s-node-templates.yml` | GitHub | Implemented |
 | Installer | Ansible playbooks and Makefile (`installer/`): allinone, split service stages and day-2 targets exist; published-artifact fresh install and current full split acceptance remain separate | Operator workstation | Implemented code; do not infer production acceptance |
 | VM template pipeline | `images/build.py` + Packer, `vm-templates.yml`; tag-published, one copy per node on local-disk sites | Self-hosted runner in the Proxmox network, or the installer from the first management host | Implemented |
