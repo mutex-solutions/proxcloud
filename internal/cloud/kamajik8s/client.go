@@ -540,6 +540,72 @@ func (c *Client) ApplyCore(ctx context.Context, plural string, obj map[string]an
 	return err
 }
 
+// clusterPath is the collection path of a cluster-scoped kind; group "" is the core API (/api/v1).
+func clusterPath(group, version, plural string) string {
+	if group == "" {
+		return fmt.Sprintf("/api/%s/%s", version, plural)
+	}
+	return fmt.Sprintf("/apis/%s/%s/%s", group, version, plural)
+}
+
+// ApplyClusterScoped server-side-applies a cluster-scoped object (ClusterRoleBinding, ClusterRole …;
+// group "" for core kinds). obj carries apiVersion, kind and metadata.name and no metadata.namespace:
+// a namespace there means a namespaced kind sent to the wrong path, so it is refused.
+func (c *Client) ApplyClusterScoped(ctx context.Context, group, version, plural string, obj map[string]any) error {
+	name, ns := metaNameNS(obj)
+	if name == "" || ns != "" {
+		return fmt.Errorf("%s: metadata.name required, metadata.namespace not allowed", plural)
+	}
+	_, err := c.apply(ctx, clusterPath(group, version, plural), name, obj)
+	return err
+}
+
+// CreateServiceAccountToken asks for a token of service account ns/name (TokenRequest, the API behind
+// `kubectl create token`): no Secret holds it, and deleting the account revokes it. The API server may
+// shorten ttl (--service-account-max-token-expiration), so the expiry it granted is returned.
+func (c *Client) CreateServiceAccountToken(ctx context.Context, ns, name string, ttl time.Duration) (string, time.Time, error) {
+	out, err := c.do(ctx, http.MethodPost, corePath("serviceaccounts", ns)+"/"+name+"/token", nil, map[string]any{
+		"apiVersion": "authentication.k8s.io/v1",
+		"kind":       "TokenRequest",
+		"spec":       map[string]any{"expirationSeconds": int64(ttl / time.Second)},
+	}, "")
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	status, _ := out["status"].(map[string]any)
+	token := strValue(status["token"])
+	exp, err := time.Parse(time.RFC3339, strValue(status["expirationTimestamp"]))
+	if token == "" || err != nil {
+		return "", time.Time{}, fmt.Errorf("serviceaccount %s/%s: token request answered without token or expiry", ns, name)
+	}
+	return token, exp, nil
+}
+
+// AccessCheck is the resource a SelfSubjectAccessReview asks about ("" group = core, "*" = any).
+type AccessCheck struct {
+	Namespace string `json:"namespace,omitempty"`
+	Verb      string `json:"verb"`
+	Group     string `json:"group,omitempty"`
+	Resource  string `json:"resource"`
+	Name      string `json:"name,omitempty"`
+}
+
+// CanI reports whether this client's own credential may do check (SelfSubjectAccessReview, the API
+// behind `kubectl auth can-i`). An answer without status counts as denied.
+func (c *Client) CanI(ctx context.Context, check AccessCheck) (bool, error) {
+	out, err := c.do(ctx, http.MethodPost, "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", nil, map[string]any{
+		"apiVersion": "authorization.k8s.io/v1",
+		"kind":       "SelfSubjectAccessReview",
+		"spec":       map[string]any{"resourceAttributes": check},
+	}, "")
+	if err != nil {
+		return false, err
+	}
+	status, _ := out["status"].(map[string]any)
+	allowed, _ := status["allowed"].(bool)
+	return allowed, nil
+}
+
 // CreateCore creates (never applies/upserts) a namespaced object. Together with ReplaceCore's
 // resourceVersion check this supports bounded multi-replica controllers without a CRI client.
 func (c *Client) CreateCore(ctx context.Context, plural string, obj map[string]any) error {
