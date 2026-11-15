@@ -58,7 +58,7 @@ applications:
           valuesObject:
             clusterctl:
               enabled: true
-              image: ghcr.io/mutex-solutions/proxcloud-clusterctl:v1.14.4-1@pending
+              image: ghcr.io/mutex-solutions/proxcloud-clusterctl:v1.14.4-1@sha256:4658fe52b66e5e402f0ae9d8db6e7e89378055fea584799fa14788fecc3e2c96
               providers:
                 bootstrap: kubeadm:v1.14.4
                 controlPlane: kubeadm:v1.14.4
@@ -712,7 +712,7 @@ applications:
             clusterctl:
               clusterResourceSet: true
               enabled: true
-              image: ghcr.io/mutex-solutions/proxcloud-clusterctl:v1.14.4-1@pending
+              image: ghcr.io/mutex-solutions/proxcloud-clusterctl:v1.14.4-1@sha256:4658fe52b66e5e402f0ae9d8db6e7e89378055fea584799fa14788fecc3e2c96
               nodeSelector:
                 node-restriction.kubernetes.io/proxcloud-node-group: system
               providers:

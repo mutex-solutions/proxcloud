@@ -49,6 +49,26 @@ func TestCurrentIsValid(t *testing.T) {
 	}
 }
 
+// The four package versions this repository has published stay pinned by digest. A newer version of one of them may
+// be `pending` in a -dev BOM until its own tag has published it (Validate, mayPend), and the third-party charts that
+// are still pending are not listed here: .github/scripts/bom_verify.py --release refuses every `pending` at a v* tag.
+func TestPublishedPackagesArePinned(t *testing.T) {
+	b := embedded(t)
+	if strings.HasSuffix(b.Images.Clusterctl, "/proxcloud-clusterctl:v1.14.4-1@pending") {
+		t.Errorf("images.clusterctl %s is pending", b.Images.Clusterctl)
+	}
+	published := map[string]string{"proxmox-kamaji-cluster": "0.1.11", "database-cluster": "0.5.1", "proxcloud-platform": "0.1.0"}
+	charts := []Chart{b.TenantCharts.Kubernetes, b.TenantCharts.Database}
+	for _, c := range b.Components {
+		charts = append(charts, c.Chart)
+	}
+	for _, c := range charts {
+		if c.Digest == "pending" && strings.HasPrefix(c.Repo, ownRepo) && published[c.Name] == c.Version {
+			t.Errorf("our published chart %s %s is pending", c.Name, c.Version)
+		}
+	}
+}
+
 func TestParseRefusesUnknownKeys(t *testing.T) {
 	for name, raw := range map[string]string{
 		"top level": string(deploy.PlatformBOM) + "\nlatest: true\n",
@@ -73,7 +93,11 @@ func TestValidate(t *testing.T) {
 		{"two parts", func(t *testing.T, b *BOM) { comp(t, b, "workload", "cilium").Chart.Version = "1.18" }, []string{"not an exact version"}},
 		{"a wildcard", func(t *testing.T, b *BOM) { comp(t, b, "workload", "cilium").Chart.Version = "1.18.x" }, []string{"not an exact version"}},
 		{"a comparison", func(t *testing.T, b *BOM) { b.Kubernetes.Version = ">=1.35.10" }, []string{"kubernetes.version", "not an exact version"}},
-		{"a release keeps no pending digest and no 0.0.0+ version", func(_ *testing.T, b *BOM) { b.Release = "0.7.0" },
+		{"a release keeps no pending digest and no 0.0.0+ version", func(_ *testing.T, b *BOM) {
+			b.Release = "0.7.0"
+			b.Images.Clusterctl = strings.Split(b.Images.Clusterctl, "@")[0] + "@pending" // as before its first publication
+			b.TenantCharts.Kubernetes.Digest = "pending"
+		},
 			[]string{"tenantCharts.kubernetes: digest pending is allowed only in a -dev release", "images.clusterctl: digest pending",
 				"workload/kamaji.version: 0.0.0+latest is allowed only in a -dev release"}},
 		{"a release with everything pinned", func(_ *testing.T, b *BOM) {

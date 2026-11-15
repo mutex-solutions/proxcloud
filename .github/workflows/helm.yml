@@ -111,6 +111,10 @@ jobs:
         env:
           GITHUB_REF_NAME: ${{ github.ref_name }}
         run: python3 .github/scripts/release_policy.py >> "$GITHUB_OUTPUT"
+      # The same gate as docker.yml's bom-verify job (docs/ci-release.md). A published chart version is never
+      # replaced, so a tag whose BOM fails the gate must not publish one. Anonymous pulls, before any login.
+      - name: Release gate - the BOM is pinned and every pin matches the registries
+        run: python3 .github/scripts/bom_verify.py --release
       - uses: azure/setup-helm@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
