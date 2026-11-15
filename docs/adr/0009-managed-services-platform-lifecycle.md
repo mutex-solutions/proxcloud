@@ -274,8 +274,11 @@ seed itself runs Cluster API, CAPMOX, ArgoCD and cert-manager, and nothing of a 
 
 **Why.** The Kubernetes and Databases providers (`internal/cloud/kamaji`,
 `internal/cloud/dbaas`) create tenant Applications and Cluster API objects in the cluster
-they are registered with, next to Kamaji and CloudNativePG. Keeping that keeps both
-providers and their registration (installer stage 60) unchanged. Tenant objects never reach
+they are registered with, next to Kamaji and CloudNativePG. Keeping that keeps where the
+providers create tenant objects, and their registration model (one provider row per
+service, as installer stage 60 writes it), unchanged. The providers gain configuration for
+node-group placement and the database egress fence, and the registered bodies carry it
+(design §4.2 and §4.4). Tenant objects never reach
 the seed, so its set of components stays small and fixed, and a lost seed does not stop
 tenant clusters from scaling or repairing.
 
