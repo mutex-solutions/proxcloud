@@ -62,9 +62,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   back with every save, and a block saved before this check may work (a zone that exists in Proxmox is used
   as it is, and the portal reads only the default zone), so it must not lock the provider. A new problem, or
   a wrong value changed to another wrong value, is still refused. The dev
-  seed and the network block installer stage 60 builds from the inventory defaults pass; an inventory
-  with `isolation: evpn` and `kind: simple` or `vlan` is now refused at stage 60 instead of failing at the
-  first tenant network. Tested with unit tests only.
+  seed and the network block installer stage 60 builds from the inventory defaults pass. Installer stage 00
+  now refuses, before anything is changed, an inventory the check would refuse at stage 60 after stages 10 to
+  55 had run: `network.kind` not `evpn`, `simple` or `vlan`, `kind: vlan` with the shipped empty `bridge`,
+  `isolation: evpn` with `kind: simple` or `vlan`, a `cidr_pool` that is not IPv4 `/24` or larger (or is
+  empty), and a `default_zone` that is empty or longer than 8 characters. A site whose VLAN zone was made by
+  hand in Proxmox with no bridge in the inventory sets `network.bridge` to that zone's bridge (the portal
+  uses an existing zone as it is). Tested with unit tests and the preflight task run on its own against the
+  inventory defaults; not run in a full install.
 
 - **The smaller template disks are confirmed by one lab build each** (`docs/template-build-disk.md`): a
   native `ubuntu-2604` template at 5 GiB and a Kubernetes 1.37.2 node template at 8 GiB were built on

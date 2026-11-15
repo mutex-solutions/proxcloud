@@ -69,6 +69,29 @@ assert "is shared" in f.boot_iso_problem(STD + [{"storage": "d", "type": "dir", 
 assert "does not take ISO" in f.boot_iso_problem(STD, "local-zfs", "local-zfs")
 assert "does not exist" in f.boot_iso_problem(STD, "gone", "local-zfs")
 assert "on either" in f.boot_iso_problem(STD, "local", "nas-templates")
+# Stage 00 refuses a tenant network the portal's save check would refuse at stage 60, after stages 10 to 55 ran.
+import yaml  # noqa: E402
+
+NET = yaml.safe_load(open(os.path.join(os.path.dirname(__file__), "..", "playbooks", "group_vars", "all", "defaults.yml")))["pc_defaults"]["network"]
+assert f.tenant_network_problem(NET) == "", f.tenant_network_problem(NET)
+for edit in [{"kind": "simple"}, {"kind": "vlan", "bridge": "vmbr1"}, {"isolation": "evpn"}, {"isolation": "evpn-per-project"},
+             {"cidr_pool": "10.100.0.0/24"}, {"cidr_pool": "10.100.0.1/16"}, {"default_zone": "zone1234"}, {"kind": "overlay", "isolation": "evpn"}]:
+    assert f.tenant_network_problem(dict(NET, **edit)) == "", (edit, f.tenant_network_problem(dict(NET, **edit)))
+for edit, want in [
+    ({"kind": "vxlan"}, "network.kind must be evpn, simple or vlan"),
+    ({"kind": "vlan"}, "network.kind vlan needs network.bridge"),  # the shipped bridge is ""
+    ({"kind": "simple", "isolation": "evpn"}, "network.kind must be evpn"),
+    ({"kind": "vlan", "bridge": "vmbr1", "isolation": "evpn-per-project"}, "not vlan"),
+    ({"cidr_pool": "10.100.0.0/25"}, "network.cidr_pool must be an IPv4 range of /24 or larger"),
+    ({"cidr_pool": "fd00::/48"}, "network.cidr_pool must be"),
+    ({"cidr_pool": "10.100.0.0"}, "network.cidr_pool must be"),
+    ({"cidr_pool": "10.100.0.0/255.255.0.0"}, "network.cidr_pool must be"),
+    ({"cidr_pool": ""}, "network.cidr_pool must be"),
+    ({"default_zone": "overlay12"}, "network.default_zone must have 1 to 8 characters"),
+    ({"default_zone": ""}, "network.default_zone must have 1 to 8 characters"),
+]:
+    assert want in f.tenant_network_problem(dict(NET, **edit)), (edit, f.tenant_network_problem(dict(NET, **edit)))
+
 assert f.iso_stores(STD + [{"storage": "off", "type": "dir", "content": "iso", "disable": 1}]) == [s["storage"] for s in STD if "iso" in s.get("content", "")]
 # Stage 10's check: a store is in the token's view with Datastore.Audit or AllocateSpace there, as PVE answers it.
 res = [{"item": "local", "json": {"data": {"/storage/local": {"Datastore.Audit": 1, "Datastore.AllocateTemplate": 1}}}},

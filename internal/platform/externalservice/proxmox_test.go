@@ -513,11 +513,16 @@ func TestValidatePVENetworkAcceptsShippedConfigs(t *testing.T) {
 	if n.DefaultZone == "" || n.Kind == "" || n.CIDRPool == "" {
 		t.Fatalf("installer network defaults not found: %+v", n)
 	}
-	for _, v := range []struct{ kind, bridge, isolation string }{
-		{n.Kind, n.Bridge, n.Isolation}, // as shipped
-		{"simple", n.Bridge, n.Isolation},
-		{"vlan", "vmbr1", n.Isolation},
-		{n.Kind, n.Bridge, "evpn"},
+	// The refused ones are what stage 00 refuses first (00-preflight.yml, "Check the tenant network settings"), so an
+	// install does not get as far as stage 60 with them.
+	for _, v := range []struct{ kind, bridge, isolation, pool, wantErr string }{
+		{n.Kind, n.Bridge, n.Isolation, n.CIDRPool, ""}, // as shipped
+		{"simple", n.Bridge, n.Isolation, n.CIDRPool, ""},
+		{"vlan", "vmbr1", n.Isolation, n.CIDRPool, ""},
+		{n.Kind, n.Bridge, "evpn", n.CIDRPool, ""},
+		{"vlan", n.Bridge, n.Isolation, n.CIDRPool, "is a vlan zone and needs a bridge"},
+		{"simple", n.Bridge, "evpn", n.CIDRPool, "must then be an evpn zone"},
+		{n.Kind, n.Bridge, n.Isolation, "10.100.0.0/25", "cidrPool must be an IPv4 range of /24 or larger"},
 	} {
 		isolation := pve.IsolationShared // stage 60 registers evpn and evpn-per-project as evpn-per-project
 		if v.isolation == "evpn" || v.isolation == pve.IsolationEVPN {
@@ -530,14 +535,15 @@ func TestValidatePVENetworkAcceptsShippedConfigs(t *testing.T) {
 				"vrfVxlan": 10000, "mtu": 1450, "bridge": v.bridge, "vlanMin": n.VlanMin, "vlanMax": n.VlanMax,
 			}},
 			"publicNetworks": []any{},
-			"cidrPool":       n.CIDRPool,
+			"cidrPool":       v.pool,
 			"isolation":      isolation,
 			"blockedCidrs":   n.Blocked,
 			"sandboxCidrs":   []any{},
 			"evpnController": n.Controller,
 		}
-		if err := ValidatePVENetwork(network, nil); err != nil {
-			t.Errorf("installer defaults with kind %s, isolation %s: %v", v.kind, v.isolation, err)
+		err := ValidatePVENetwork(network, nil)
+		if (v.wantErr == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), v.wantErr)) {
+			t.Errorf("installer defaults with kind %s, bridge %q, isolation %s, cidr_pool %s: %v, want %q", v.kind, v.bridge, v.isolation, v.pool, err, v.wantErr)
 		}
 	}
 }

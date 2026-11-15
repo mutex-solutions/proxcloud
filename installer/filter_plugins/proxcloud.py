@@ -290,6 +290,34 @@ def sandbox_net_problem(net, cidr_pool, avoid=None):
     return ""
 
 
+def tenant_network_problem(net):
+    """Why proxcloud.network would be refused when stage 60 registers it, or "". The portal refuses a provider's
+    network block that tenant networks cannot work with (externalservice.ValidatePVENetwork); stage 60 runs after
+    stages 10 to 55 have changed the cluster, so stage 00 refuses the same inventories first. Kept to the same rules:
+    an empty kind and "overlay" are EVPN there too."""
+    import ipaddress
+
+    zone, kind = str(net.get("default_zone") or ""), net.get("kind")
+    if not 1 <= len(zone) <= 8:
+        return "network.default_zone must have 1 to 8 characters (it is the Proxmox SDN zone id), not %r" % zone
+    if kind not in ("", "evpn", "overlay", "simple", "vlan"):
+        return "network.kind must be evpn, simple or vlan, not %r" % kind
+    if kind == "vlan" and not net.get("bridge"):
+        return ("network.kind vlan needs network.bridge, the bridge the VLAN zone is on (for a zone made by hand in "
+                "Proxmox, its bridge)")
+    if net.get("isolation") in ("evpn", "evpn-per-project") and kind not in ("", "evpn", "overlay"):
+        return ("network.isolation %s copies every project's zone from the default zone, so network.kind must be evpn, "
+                "not %s" % (net.get("isolation"), kind))
+    pool = str(net.get("cidr_pool") or "")
+    try:
+        p = ipaddress.ip_network(pool, strict=False) if pool.partition("/")[2].isdigit() else None
+    except ValueError:
+        p = None
+    if p is None or p.version != 4 or p.prefixlen > 24:
+        return "network.cidr_pool must be an IPv4 range of /24 or larger, such as 10.100.0.0/16, not %r" % pool
+    return ""
+
+
 def sandbox_guardrail_problem(nets):
     """Which of nets ({setting name: CIDR or list}) the sandbox guardrail does not deny, or "". A sandbox pod reaches
     whatever lies outside SANDBOX_GUARDRAIL_DENY without leaving gVisor, and the PVE isolation rules do not stop it
@@ -568,6 +596,7 @@ class FilterModule:
             "pc_ip_cidrs": ip_cidrs,
             "pc_node_with_address": node_with_address,
             "pc_sandbox_net_problem": sandbox_net_problem,
+            "pc_tenant_network_problem": tenant_network_problem,
             "pc_sandbox_guardrail_problem": sandbox_guardrail_problem,
             "pc_sandbox_edge_problem": sandbox_edge_problem,
         }
