@@ -49,6 +49,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   2.0 GiB free after the upgrade and was exported through CI; the image is listed in
   `docs/vm-artifact-publishing.md`.
 
+### Security
+
+- **HIGH/CRITICAL findings without a fixed version stay tracked until 2027-03-12** instead of
+  2026-12-12 (`UNFIXED_REVIEW_BY` in `.github/scripts/check_scan_report.py`; owner decision of
+  2026-11-15). The reason is the review in `docs/security-unfixed-review.md`: per-target counts by
+  Debian status for the eleven non-GPU templates, the controlled-base prototype and the VM export tool
+  image (the product images and lockfiles have none), which findings a third party's data can reach,
+  and what was not checked. The gate still blocks every finding with a fixed version in those targets,
+  and from 2027-03-12 the unfixed ones again. The default `python` template is outside that set: it is
+  a public image run as is and scanned report-only, so its 2 HIGH zlib findings with a fixed version
+  and its 47 without one do not block, before or after 2027-03-12. The single VEX (CVE-2025-47273) did not move: it stops applying
+  on 2026-12-31 (UTC), and from then the setuptools finding it covers blocks in nine templates and the
+  prototype unless the owner decides otherwise.
+
 ## [0.6.0] - 2026-11-14
 
 A feature release on top of `v0.5.2`, with no breaking API change.
