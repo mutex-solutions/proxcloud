@@ -283,12 +283,17 @@ makes the step `todo`, and a step is `blocked` only when it cannot start.
   writes the billing and platform configuration, and a fresh install shows no
   step done. `templates` is `unknown` unless the provider configuration pins a
   template.
-- **With `live=1`** the cluster is asked too: the connection test's checks (API
-  and token, datacenter firewall, nftables per node, public networks off the
-  management bridge, platform privileges), one row each, all of them even when
-  one fails; the nodes with an active `import` store; the published OS images;
-  and the imported templates by lifecycle state. A cluster that does not answer
-  is a failed item, not a failed request.
+- **With `live=1`** the cluster is asked too: the connection test, run as
+  `POST /admin/service/proxmox/auth?checks=all&externalServiceId=` runs it for
+  a read-only caller, every row as an item with the row's id (`ok` is `done`,
+  `warn` is `attention`, `fail` is `todo`); the nodes with an active `import`
+  store; the published OS images; and the imported templates by lifecycle
+  state. `zone`, `cidr-pool`, `frr` and `store-reach` go to `network`,
+  `storage-profile`, `import-store` and `boot-iso` to `storage`, every other row
+  to `connect`. A row that asks what a database item asks takes that item's
+  place and id: `zone` the item `zone`, `cidr-pool` the item `cidrPool`,
+  `storage-profile` the item `defaultProfile`. A cluster that does not answer
+  is a failed `connect` item, not a failed request, and the database items stay.
 - **Go live** waits for `connect`, `network`, `storage` and `templates`
   (`blocked` until none is `todo`). While one of them is `unknown` (without
   `live`, `templates` is unless a template is pinned) go live is `unknown` too,

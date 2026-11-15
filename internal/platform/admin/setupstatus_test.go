@@ -2,17 +2,14 @@ package admin
 
 import (
 	"context"
-	"fmt"
 	"maps"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/mutex-solutions/proxcloud/deploy/seed"
-	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/platformconfig"
@@ -65,7 +62,7 @@ func TestSetupStatus(t *testing.T) {
 		return s
 	}
 	liveOK := func() *setupLive {
-		return &setupLive{Checks: []setupItem{{ID: "reachable", State: stateDone}, {ID: "firewall", State: stateDone}}, ImportNodes: []string{"pve1"}, Nodes: 1, Images: 3}
+		return &setupLive{Checks: []PVECheck{{ID: "connect", Status: checkOK, Message: "Reached Proxmox VE 9.2.1."}, {ID: "firewall-datacenter", Status: checkOK, Message: "The datacenter firewall is on."}}, ImportNodes: []string{"pve1"}, Nodes: 1, Images: 3}
 	}
 	withLive := func(s setupSnapshot, l *setupLive) setupSnapshot { s.Live = l; return s }
 	tests := []struct {
@@ -89,7 +86,7 @@ func TestSetupStatus(t *testing.T) {
 			map[string]string{"storage/importStore": stateDone, "templates/images": stateUnknown, "golive/attachPolicy": stateTodo}},
 		{"configured and live", withLive(ready(), liveOK()),
 			map[string]string{stepConnect: stateDone, stepNetwork: stateDone, stepStorage: stateDone, stepTemplates: stateDone, stepCatalog: stateDone, stepGoLive: stateTodo},
-			map[string]string{"connect/firewall": stateDone, "storage/importStore": stateDone, "templates/images": stateDone}},
+			map[string]string{"connect/firewall-datacenter": stateDone, "storage/importStore": stateDone, "templates/images": stateDone}},
 		{"gone live", withLive(ready(setupOn), liveOK()),
 			map[string]string{stepConnect: stateDone, stepNetwork: stateDone, stepStorage: stateDone, stepTemplates: stateDone, stepCatalog: stateDone, stepGoLive: stateDone},
 			map[string]string{"golive/scheduler": stateDone}},
@@ -108,10 +105,23 @@ func TestSetupStatus(t *testing.T) {
 		{"no image yet: the sub-steps show", withLive(ready(), &setupLive{ImportNodes: []string{"pve1"}, Nodes: 1, GitHubToken: true, Imports: map[string]int{"ready_to_publish": 2, "importing": 1}}),
 			map[string]string{stepTemplates: stateTodo, stepGoLive: stateBlocked},
 			map[string]string{"templates/images": stateTodo, "templates/flag": stateTodo, "templates/githubToken": stateDone, "templates/smokeNetwork": stateTodo, "templates/imports": stateTodo}},
-		{"a failed connection check blocks go live", withLive(ready(), &setupLive{Checks: []setupItem{{ID: "reachable", State: stateDone}, {ID: "firewall", State: stateTodo, Message: "The datacenter firewall is disabled"}}, Images: 1, ImportNodes: []string{"pve1"}}),
-			map[string]string{stepConnect: stateTodo, stepGoLive: stateBlocked}, nil},
-		{"a missing privilege is a warning and blocks nothing", withLive(ready(), &setupLive{Checks: []setupItem{{ID: "privileges", State: stateAttention, Message: "Token lacks Mapping.Use on /mapping/pci"}}, Images: 1, ImportNodes: []string{"pve1"}}),
+		{"a failed connection check blocks go live", withLive(ready(), &setupLive{Checks: []PVECheck{{ID: "connect", Status: checkOK}, {ID: "firewall-datacenter", Status: checkFail, Message: "The datacenter firewall is disabled"}}, Images: 1, ImportNodes: []string{"pve1"}}),
+			map[string]string{stepConnect: stateTodo, stepGoLive: stateBlocked}, map[string]string{"connect/firewall-datacenter": stateTodo}},
+		{"a missing privilege is a warning and blocks nothing", withLive(ready(), &setupLive{Checks: []PVECheck{{ID: "privileges:/mapping/pci", Status: checkWarn, Message: "Token lacks Mapping.Use"}}, Images: 1, ImportNodes: []string{"pve1"}}),
 			map[string]string{stepConnect: stateAttention, stepGoLive: stateTodo}, nil},
+		// The connection test's setup rows go to the step they are about. One that asks a database item's question takes
+		// that item's place and id; the version and the template pool are part of connecting.
+		{"live: setup rows land in their own steps", withLive(ready(), &setupLive{Checks: []PVECheck{
+			{ID: "connect", Status: checkOK}, {ID: "version", Status: checkOK}, {ID: "template-pool", Status: checkWarn, Message: "The pool pc-templates does not exist."},
+			{ID: "zone", Status: checkOK}, {ID: "cidr-pool", Status: checkWarn, Message: "cidrPool 10.100.0.0/16 overlaps a management network of the nodes."}, {ID: "frr", Status: checkWarn, Message: "frr-pythontools is not installed on node pve1."},
+			{ID: "storage-profile", Status: checkOK}, {ID: "import-store", Status: checkWarn, Message: "No storage takes import content."},
+		}, Images: 1, ImportNodes: []string{"pve1"}, Nodes: 1}),
+			map[string]string{stepConnect: stateAttention, stepNetwork: stateAttention, stepStorage: stateAttention, stepGoLive: stateTodo},
+			map[string]string{"connect/version": stateDone, "connect/template-pool": stateAttention, "network/zone": stateDone, "network/cidrPool": stateAttention,
+				"network/cidr-pool": "", "network/frr": stateAttention, "storage/defaultProfile": stateDone, "storage/storage-profile": "", "storage/import-store": stateAttention}},
+		// The network rows come only from a cluster that answered: without them the database items stay.
+		{"live: an unreachable cluster keeps the database items", withLive(ready(), &setupLive{Checks: []PVECheck{{ID: "connect", Status: checkFail, Message: "Proxmox authentication failed: dial tcp: connection refused"}}, Images: 1, ImportNodes: []string{"pve1"}}),
+			map[string]string{stepConnect: stateTodo, stepNetwork: stateDone, stepGoLive: stateBlocked}, map[string]string{"connect/connect": stateTodo, "network/cidrPool": stateDone}},
 		{"a disabled provider", func() setupSnapshot {
 			s := ready()
 			s.Provider.Status = externalservice.StatusDisabled
@@ -215,84 +225,34 @@ func TestSetupStatus(t *testing.T) {
 	}
 }
 
-// pveLiveChecks answers every check, not only the first that fails, against the fake PVE API.
-func TestPVELiveChecks(t *testing.T) {
-	tests := []struct {
-		name                string
-		version             int    // status of GET /version
-		firewall            string // datacenter firewall options body
-		nodeFirewall        string // pve1's firewall options body
-		privs               bool   // the token holds every platform privilege
-		publicNet           string // a configured public network ("" = none)
-		want                map[string]string
-		wantFirewallMessage string
-	}{
-		{"healthy", 200, `{"data":{"enable":1}}`, `{"data":{"nftables":1}}`, true, "vmbr1",
-			map[string]string{"reachable": stateDone, "firewall": stateDone, "nftables": stateDone, "publicNetworks": stateDone, "privileges": stateDone}, ""},
-		{"firewall off still lists the other findings", 200, `{"data":{"enable":0}}`, `{"data":{"enable":1}}`, false, "vmbr0",
-			map[string]string{"reachable": stateDone, "firewall": stateTodo, "nftables": stateTodo, "publicNetworks": stateTodo, "privileges": stateAttention}, "Datacenter > Firewall > Options"},
-		{"no public network configured: no such check", 200, `{"data":{"enable":1}}`, `{"data":{"nftables":1}}`, true, "",
-			map[string]string{"reachable": stateDone, "firewall": stateDone, "nftables": stateDone, "privileges": stateDone}, ""},
-		{"the API refuses the token: nothing else is asked", 401, "", "", false, "vmbr1", map[string]string{"reachable": stateTodo}, ""},
+// The live status runs the connection test itself: a cluster with its firewall off still lists the privilege gaps and
+// the setup rows, and the rows reach the steps through the pure function.
+func TestReadSetupLive(t *testing.T) {
+	cfg := fakeCluster(t, map[string]string{"/cluster/firewall/options": `{"data":{"enable":0}}`}, "Mapping.Use")
+	es := setupProviderWith(setupNetwork, setupStorage, setupQuota, map[string]any{"apiUrl": cfg.APIURL, "tokenId": cfg.TokenID})
+	es.Secret = map[string]any{"tokenSecret": cfg.Secret}
+	h := &Handler{githubCountFn: func(context.Context) (int64, error) { return 1, nil }}
+	l := h.readSetupLive(context.Background(), es)
+	for id, want := range map[string]string{"firewall-datacenter": checkFail, "privileges:/mapping/pci": checkWarn, "zone": checkOK, "cidr-pool": checkOK} {
+		if c := checkRow(l.Checks, id); c == nil || c.Status != want {
+			t.Errorf("row %s: %+v, want %s", id, c, want)
+		}
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch r.URL.Path {
-				case "/api2/json/version":
-					if tt.version != 200 {
-						w.WriteHeader(tt.version)
-						return
-					}
-					fmt.Fprint(w, `{"data":{"version":"9.2.1"}}`)
-				case "/api2/json/cluster/firewall/options":
-					fmt.Fprint(w, tt.firewall)
-				case "/api2/json/nodes":
-					fmt.Fprint(w, `{"data":[{"node":"pve1","status":"online"}]}`)
-				case "/api2/json/nodes/pve1/firewall/options":
-					fmt.Fprint(w, tt.nodeFirewall)
-				case "/api2/json/cluster/status":
-					fmt.Fprint(w, `{"data":[{"type":"node","name":"pve1","ip":"10.0.0.11"}]}`)
-				case "/api2/json/nodes/pve1/network":
-					fmt.Fprint(w, `{"data":[{"iface":"vmbr0","address":"10.0.0.11","gateway":"10.0.0.1"},{"iface":"vmbr1"}]}`)
-				case "/api2/json/access/permissions":
-					var ps []string
-					for _, chk := range pve.PlatformPrivileges {
-						for _, p := range chk.Privs {
-							if tt.privs || p != "Mapping.Use" {
-								ps = append(ps, fmt.Sprintf("%q:1", p))
-							}
-						}
-					}
-					fmt.Fprintf(w, `{"data":{%q:{%s}}}`, r.URL.Query().Get("path"), strings.Join(ps, ","))
-				default:
-					w.WriteHeader(http.StatusInternalServerError)
-				}
-			}))
-			defer srv.Close()
-			cc, err := pve.New(pve.Config{APIURL: srv.URL, TokenID: "proxcloud@pve!platform", Secret: "sec"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			cfg := map[string]any{"tokenId": "proxcloud@pve!platform"}
-			if tt.publicNet != "" {
-				cfg["network"] = map[string]any{"publicNetworks": []any{map[string]any{"id": tt.publicNet}}}
-			}
-			items := pveLiveChecks(context.Background(), cc, setupProviderWith(cfg))
-			got := map[string]string{}
-			for _, it := range items {
-				got[it.ID] = it.State
-				if it.Message == "" || strings.Contains(it.Message, "Proxmox preflight failed") {
-					t.Errorf("%s: message %q", it.ID, it.Message)
-				}
-				if it.ID == "firewall" && !strings.Contains(it.Message, tt.wantFirewallMessage) {
-					t.Errorf("firewall message %q", it.Message)
-				}
-			}
-			if !maps.Equal(got, tt.want) {
-				t.Fatalf("got %v, want %v", got, tt.want)
-			}
-		})
+	if !l.GitHubToken || l.ImportErr == "" {
+		t.Errorf("live: %+v", l)
+	}
+	s := setupCatalogDone(setupSnapshot{Provider: es, Live: l, Scheduler: true})
+	got := map[string]setupStep{}
+	for _, st := range setupStatus(s) {
+		got[st.ID] = st
+	}
+	if got[stepConnect].State != stateTodo || got[stepGoLive].State != stateBlocked || !strings.Contains(got[stepConnect].Summary, "datacenter firewall") {
+		t.Fatalf("connect %+v, golive %+v", got[stepConnect], got[stepGoLive])
+	}
+	for _, it := range got[stepNetwork].Items {
+		if it.ID == "cidrPool" && !strings.Contains(it.Message, "clear of the nodes' management networks") {
+			t.Errorf("network/cidrPool is not the live row: %q", it.Message)
+		}
 	}
 }
 

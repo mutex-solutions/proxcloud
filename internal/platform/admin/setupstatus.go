@@ -60,7 +60,7 @@ type setupSnapshot struct {
 
 // setupLive is what only the cluster and the running API know.
 type setupLive struct {
-	Checks []setupItem // the connection test's checks, one item each
+	Checks []PVECheck // the connection test's rows (pveConnectionTest with checks=all), placed by checkSteps
 	// ImportNodes are the nodes with an active store that takes import content, of Nodes nodes; ImportErr says why
 	// that could not be read.
 	ImportNodes  []string
@@ -98,6 +98,45 @@ func newStep(id, done string, items ...setupItem) setupStep {
 	return st
 }
 
+// checkSteps places a row of the connection test (PVECheck.ID) in the step it is about, and names the database item
+// it replaces there: the row asks that item's question and reads the cluster as well. A row not listed is connect's.
+var checkSteps = map[string]struct{ step, replaces string }{
+	"zone":            {stepNetwork, "zone"},
+	"cidr-pool":       {stepNetwork, "cidrPool"},
+	"frr":             {stepNetwork, ""},
+	"store-reach":     {stepNetwork, ""},
+	"storage-profile": {stepStorage, "defaultProfile"},
+	"import-store":    {stepStorage, ""},
+	"boot-iso":        {stepStorage, ""},
+}
+
+var checkStates = map[string]string{checkOK: stateDone, checkWarn: stateAttention, checkFail: stateTodo}
+
+// withChecks adds the live rows of step to its items. A row that replaces an item takes its place and its id, so an
+// item has the same id with and without live.
+func withChecks(step string, items []setupItem, l *setupLive) []setupItem {
+	if l == nil {
+		return items
+	}
+	for _, c := range l.Checks {
+		place := checkSteps[c.ID]
+		if place.step == "" {
+			place.step = stepConnect
+		}
+		if place.step != step {
+			continue
+		}
+		it := setupItem{ID: c.ID, State: checkStates[c.Status], Message: c.Message}
+		if i := slices.IndexFunc(items, func(x setupItem) bool { return x.ID == place.replaces }); place.replaces != "" && i >= 0 {
+			it.ID = place.replaces
+			items[i] = it
+			continue
+		}
+		items = append(items, it)
+	}
+	return items
+}
+
 func checkItem(id string, ok bool, done, todo string) setupItem {
 	if ok {
 		return setupItem{ID: id, State: stateDone, Message: done}
@@ -117,7 +156,7 @@ func setupStatus(s setupSnapshot) []setupStep {
 			blocked(stepNetwork), blocked(stepStorage), blocked(stepTemplates), catalogStep(s), blocked(stepGoLive),
 		}
 	}
-	steps := []setupStep{connectStep(s), networkStep(p), storageStep(s), templatesStep(s), catalogStep(s)}
+	steps := []setupStep{connectStep(s), networkStep(s), storageStep(s), templatesStep(s), catalogStep(s)}
 	return append(steps, goLiveStep(s, steps))
 }
 
@@ -127,18 +166,16 @@ func connectStep(s setupSnapshot) setupStep {
 	if p.IsDisabled() {
 		items = append(items, setupItem{ID: "status", State: stateAttention, Message: "The provider is disabled: nothing syncs and templates cannot be imported"})
 	}
-	if s.Live != nil {
-		items = append(items, s.Live.Checks...)
-	}
-	return newStep(stepConnect, "Provider "+p.Name+" is saved", items...)
+	return newStep(stepConnect, "Provider "+p.Name+" is saved", withChecks(stepConnect, items, s.Live)...)
 }
 
-func networkStep(p *externalservice.ExternalService) setupStep {
-	n := p.PVENetworkConfig()
+func networkStep(s setupSnapshot) setupStep {
+	n := s.Provider.PVENetworkConfig()
 	zone, hasZone := n.Zones[n.DefaultZone]
-	return newStep(stepNetwork, "Project networks use zone "+n.DefaultZone+" and "+n.CIDRPool,
+	return newStep(stepNetwork, "Project networks use zone "+n.DefaultZone+" and "+n.CIDRPool, withChecks(stepNetwork, []setupItem{
 		checkItem("cidrPool", n.CIDRPool != "", "Project networks are cut from "+n.CIDRPool, "No address pool for project networks (config.network.cidrPool): creating a network fails"),
-		checkItem("zone", hasZone, "Default zone "+n.DefaultZone+" ("+zone.Kind+")", "No default zone (config.network.defaultZone and zones): creating a network fails"))
+		checkItem("zone", hasZone, "Default zone "+n.DefaultZone+" ("+zone.Kind+")", "No default zone (config.network.defaultZone and zones): creating a network fails"),
+	}, s.Live)...)
 }
 
 func storageStep(s setupSnapshot) setupStep {
@@ -175,7 +212,7 @@ func storageStep(s setupSnapshot) setupStep {
 		}
 		items = append(items, it)
 	}
-	return newStep(stepStorage, "Storage profiles are saved, default "+def, items...)
+	return newStep(stepStorage, "Storage profiles are saved, default "+def, withChecks(stepStorage, items, s.Live)...)
 }
 
 // templatesStep is done as soon as one OS image is published, however it got there: a site that built its templates
@@ -394,18 +431,19 @@ func (h *Handler) readSetupLive(ctx context.Context, es *externalservice.Externa
 	if n, err := h.githubCount(ctx); err == nil {
 		l.GitHubToken = n > 0
 	}
+	// The connection test as POST /admin/service/proxmox/auth?checks=all&externalServiceId= runs it for a caller who
+	// may only read: the stored connection, every check. With all, a failed check is a row, never an error.
+	test, _ := pveConnectionTest(ctx, es.PVEConfig(), es, true, false)
+	l.Checks = test.Checks
 	if h.pveFor == nil {
-		l.Checks = []setupItem{{ID: "reachable", State: stateUnknown, Message: "Proxmox access is not wired in this API"}}
 		l.ImportErr = "Proxmox access is not wired in this API"
 		return l
 	}
 	ps, err := h.pveFor(es)
 	if err != nil {
-		l.Checks = []setupItem{{ID: "reachable", State: stateTodo, Message: "Proxmox connection failed: " + err.Error()}}
 		l.ImportErr = "the provider configuration is incomplete"
 		return l
 	}
-	l.Checks = pveLiveChecks(ctx, ps.C, es)
 	if opts, err := h.placementOptions(ctx, es); err != nil {
 		l.ImportErr = err.Error()
 	} else {
@@ -433,42 +471,6 @@ func (h *Handler) readSetupLive(ctx context.Context, es *externalservice.Externa
 		}
 	}
 	return l
-}
-
-// pveLiveChecks runs the connection test's checks on a saved provider and answers one item per check, all of them
-// even when one fails. It makes the calls POST /admin/service/proxmox/auth makes; once that route collects its checks
-// in a list of its own, this is the one place to call it instead.
-func pveLiveChecks(ctx context.Context, cc *pve.Client, es *externalservice.ExternalService) []setupItem {
-	if _, err := cc.Version(ctx); err != nil {
-		// Nothing else can be read without the API.
-		return []setupItem{{ID: "reachable", State: stateTodo, Message: "Proxmox authentication failed: " + err.Error()}}
-	}
-	items := []setupItem{{ID: "reachable", State: stateDone, Message: "The Proxmox API answers and accepts the token"}}
-	switch on, err := cc.DatacenterFirewallEnabled(ctx); {
-	case err != nil:
-		items = append(items, setupItem{ID: "firewall", State: stateTodo, Message: "The datacenter firewall options could not be read: " + err.Error()})
-	case !on:
-		items = append(items, setupItem{ID: "firewall", State: stateTodo, Message: "The datacenter firewall is disabled, so security groups and tenant network isolation are not enforced. Enable it under Datacenter > Firewall > Options."})
-	default:
-		items = append(items, setupItem{ID: "firewall", State: stateDone, Message: "The datacenter firewall is on"})
-	}
-	herrItem := func(id string, herr *httpx.HTTPError, done string) setupItem {
-		if herr != nil {
-			return setupItem{ID: id, State: stateTodo, Message: strings.TrimPrefix(herr.Msg, "Proxmox preflight failed: ")}
-		}
-		return setupItem{ID: id, State: stateDone, Message: done}
-	}
-	items = append(items, herrItem("nftables", checkNodeFirewalls(ctx, cc), "Every node runs the nftables firewall"))
-	if pns := es.PVENetworkConfig().PublicNetworks; len(pns) > 0 {
-		items = append(items, herrItem("publicNetworks", checkPublicNetworks(ctx, cc, pns), "No public network is on a management bridge"))
-	}
-	// Missing privileges are warnings, as in the connection test: an operator may grant less on purpose (no GPUs).
-	if warns := tokenWarnings(ctx, cc, es.PVEConfig().TokenID); len(warns) > 0 {
-		items = append(items, setupItem{ID: "privileges", State: stateAttention, Message: strings.Join(warns, "; ")})
-	} else {
-		items = append(items, setupItem{ID: "privileges", State: stateDone, Message: "The token holds every ProxCloudPlatform privilege"})
-	}
-	return items
 }
 
 // setupStatusResponse is the answer: the provider the steps were computed for ("" = none is saved), whether the
