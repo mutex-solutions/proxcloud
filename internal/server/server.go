@@ -145,7 +145,7 @@ func AppRouter(log *slog.Logger, corsOrigins []string, authn *auth.Authenticator
 		inviteH.Routes(r)     // project-invite by-token (empty {} under seed)
 		adminH.Routes(r)      // /admin/** surface (admin-permission gated)
 		sseH.Routes(r)        // SSE real-time stream (/events/{projectId}); source connected later
-		jobH.Routes(r)        // operator job triggers (/admin/job/*; whitelisted)
+		jobH.Routes(r)        // operator job triggers (/admin/job/*; admin credential, see pkg/auth)
 		if ssoH != nil {
 			ssoH.Routes(r) // per-organization SSO
 		}
@@ -180,9 +180,10 @@ func MgmtRouter(h *health.Handler, jobsDebug map[string]http.HandlerFunc, billin
 	// projects or send mail. Mounted here rather than on the API port because they are
 	// service-to-service and can pause a customer's fleet; nil (no token configured) mounts nothing.
 	billingCB.Routes(mux)
-	// Job triggers (mgmt port, NOT the /api/v1 surface) — present only when the scheduler is
-	// enabled, so a dormant deploy exposes nothing. Used to run sync/metrics/charge on demand
-	// for the golden run instead of waiting on cron.
+	// Job triggers (mgmt port, NOT the /api/v1 surface, no authentication). main passes them only
+	// with debug triggers on (PROXCLOUD_JOBS_DEBUG_TRIGGERS), never for the scheduler, so a
+	// production deploy exposes nothing here. Used to run sync/metrics/charge on demand in
+	// development and lab drills instead of waiting on cron.
 	for name, fn := range jobsDebug {
 		mux.HandleFunc("POST /debug/"+name, fn)
 	}

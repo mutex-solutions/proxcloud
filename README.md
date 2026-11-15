@@ -111,7 +111,8 @@ and [C2 containers](docs/architecture/c4/c2-containers.md).
 One Go process serves all three HTTP surfaces on port `8080`, runs bounded
 PostgreSQL durable workers, and optionally schedules jobs (billing, sync, metrics).
 Scheduler/debug gates default off; workers still finish already-enqueued work.
-A separate management port (`8081`) exposes health and operational triggers.
+A separate management port (`8081`) exposes health, and unauthenticated job
+triggers for development when `PROXCLOUD_JOBS_DEBUG_TRIGGERS` is on.
 No RabbitMQ is required. Existing deployments must follow the
 [drain/reconcile and retain cutover runbook](docs/postgres-jobs-migration.md)
 before upgrading; mail durability is a separate follow-up.
