@@ -205,7 +205,9 @@ export function GoLiveStep({ status, serviceId }: { status?: SetupStatus; servic
   // The API answers blocked or unknown when a prerequisite is open or was not read (without live=1, templates).
   const unread = step?.state === "unknown" || PREREQS.some(([id]) => stepOf(id)?.state === "unknown")
   const open = PREREQS.filter(([id]) => !passes(stepOf(id)?.state) && stepOf(id)?.state !== "unknown").map(([, title]) => title)
-  const ready = !!serviceId && !!step && !open.length && !unread && step.state !== "blocked" && (passes(catalog?.state) || skipCatalog)
+  // Only a live answer ran the connection checks: from the database alone connect is done once the provider is saved.
+  const live = status?.live === true
+  const ready = !!serviceId && !!step && live && !open.length && !unread && step.state !== "blocked" && (passes(catalog?.state) || skipCatalog)
 
   const go = useMutation({
     mutationFn: async (): Promise<Outcome[]> => {
@@ -274,6 +276,7 @@ export function GoLiveStep({ status, serviceId }: { status?: SetupStatus; servic
           <span className="text-sm text-muted-foreground">
             {!serviceId ? "Save a provider first."
               : open.length ? `Finish first: ${open.join(", ")}.`
+              : !live ? "The cluster has not answered: Go live waits for its checks. Use Check again."
               : unread ? "Some steps could not be checked: use Check again."
               : !passes(catalog?.state) && !skipCatalog ? "Finish the catalog, or go live without it." : ""}
           </span>

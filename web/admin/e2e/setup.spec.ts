@@ -1,7 +1,7 @@
 // Platform setup page (/setup) against the mock API. Request bodies are read from the recorded mock calls.
 import { AxeBuilder } from "@axe-core/playwright"
 import { expect, test, type Page } from "@playwright/test"
-import { calls, recordCalls } from "./mock-calls.ts"
+import { calls, navigate, recordCalls } from "./mock-calls.ts"
 
 // A status answer with the given step states (every other step done).
 const statusWith = (states: Record<string, string>, items: Record<string, unknown[]> = {}) => ({
@@ -290,6 +290,34 @@ test("Go live waits for steps 2 to 5, warns without blocking when the scheduler 
   ])
   expect(all.find((c) => c.path.endsWith("/attach-policy"))?.body).toEqual({ attachToNewProjects: true })
   expect(all.find((c) => c.path.endsWith("/bulk-attach/preview"))?.body).toEqual({ scope: { mode: "all" } })
+})
+
+test("Go live needs a current live answer: a database-only status or a failed live read keeps it disabled", async ({ page }) => {
+  const live = statusWith({ golive: "todo" })
+  // Without live=1 a pinned template makes templates done and a saved provider makes connect done.
+  const liveDown = {
+    "GET /admin/setup/status": { ...live, live: false },
+    "GET /admin/setup/status?live=1": { apiError: { status: 502, message: "Bad gateway" } },
+  }
+  const goLive = page.getByRole("button", { name: "Go live", exact: true })
+  // Start on a page that reads no setup status, so both reads of the setup page go through the recorder.
+  await page.goto("/system/taxes")
+  await expect(page.getByRole("heading", { name: "Taxes", level: 1 })).toBeVisible()
+  await recordCalls(page, liveDown)
+  await navigate(page, "/setup?tab=golive")
+  await expect(page.getByText("The cluster was not asked")).toBeVisible()
+  await expect(page.getByText("The cluster has not answered: Go live waits for its checks. Use Check again.")).toBeVisible()
+  await expect(goLive).toBeDisabled()
+
+  await recordCalls(page, { "GET /admin/setup/status": live })
+  await page.getByRole("button", { name: "Check again" }).click()
+  await expect(goLive).toBeEnabled()
+
+  // A later live read that fails does not leave the earlier answer on the page as current.
+  await recordCalls(page, liveDown)
+  await page.getByRole("button", { name: "Check again" }).click()
+  await expect(page.getByText("The cluster was not asked")).toBeVisible()
+  await expect(goLive).toBeDisabled()
 })
 
 test("Next is a static card that links ADR 0009", async ({ page }) => {

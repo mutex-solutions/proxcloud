@@ -230,7 +230,10 @@ export default function SetupPage() {
       ) : status.live.error ? (
         <Alert className="mb-4">
           <AlertTitle>The cluster was not asked</AlertTitle>
-          <AlertDescription>{errMsg(status.live.error)}. The states below come from the database only; steps the cluster decides read Unknown.</AlertDescription>
+          <AlertDescription>
+            {errMsg(status.live.error)}. The states below come from the database only: Connect reads done once the provider
+            is saved, without its connection checks, and Go live waits until the cluster answers.
+          </AlertDescription>
         </Alert>
       ) : status.data && !status.data.live && serviceId ? (
         <p className="mb-4 text-sm text-muted-foreground">Asking the cluster… until it answers, the states come from the database only.</p>

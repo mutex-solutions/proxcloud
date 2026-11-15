@@ -127,7 +127,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   four pages and a doc block, and the Dashboard checklist counted rows that the Compose seed writes, so it called a
   fresh install configured. The page shows one tab per step with the state `GET /api/v1/admin/setup/status` reports
   (the database answer at once, the live one when the cluster has answered; a state the API could not read shows
-  Unknown, never done), and the Dashboard card shows the same steps. Step 1 asks for the token ID, GPUs and an import
+  Unknown, never done, and when a later read fails the page drops the answer it had instead of showing it as
+  current), and the Dashboard card shows the same steps. Step 1 asks for the token ID, GPUs and an import
   store and shows the generated root script with a copy button and the two firewall switches. Step 2 takes the
   connection, runs every check of the connection test (`?checks=all`) with one row each, offers to pin the
   fingerprint the server presented only after the operator compared it with `pvenode cert info`, and saves the
@@ -164,8 +165,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   table included, before anything is applied; the price plan is applied only after the operator ticks that the rates
   were reviewed, and the apply sends `confirmRates` only then. It warns about flavors that no rule prices (billed as
   zero) and links the billing details and mail as recommended. Step 7 is enabled when Connect, Network, Storage and
-  OS templates are done (a warning there does not hold it back, a state the cluster did not report does) and the
-  catalog is done or the operator ticks going live without it. When the job scheduler is off it says that nothing
+  OS templates are done (a warning there does not hold it back, a state the cluster did not report does) in a live
+  answer, and the catalog is done or the operator ticks going live without it. A database-only answer never enables
+  it: there Connect is done once the provider is saved, without its connection checks. When the job scheduler is off it says that nothing
   then syncs or charges on a timer and shows `./proxcloud-up.sh install --scheduler`, without blocking. Go live turns
   the attach policy on, runs one provider sync (`POST /api/v1/admin/job/external-service/sync`) and starts a bulk
   attach of the projects created meanwhile when there are any, then lists the first tenant's path. Step 8 is a

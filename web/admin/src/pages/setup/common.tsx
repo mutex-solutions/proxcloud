@@ -180,11 +180,14 @@ export function setupStatusQuery(serviceId: string, live: boolean) {
   }
 }
 
-// useSetupStatus shows the database answer at once and the live one when the cluster has answered.
+// useSetupStatus shows the database answer at once and the live one when the cluster has answered. An answer whose
+// last read failed is not current (react-query keeps the data of the read before), so it is not shown: a failed live
+// read falls back to the database answer, and with both failed there is none.
 export function useSetupStatus(serviceId: string) {
   const db = useQuery(setupStatusQuery(serviceId, false))
   const live = useQuery(setupStatusQuery(serviceId, true))
-  return { data: live.data ?? db.data, db, live }
+  const current = (q: typeof db) => (q.error ? undefined : q.data)
+  return { data: current(live) ?? current(db), db, live }
 }
 
 // useClusterInfo reads the nodes and bridges of a saved provider: the connection test on its stored connection. The
