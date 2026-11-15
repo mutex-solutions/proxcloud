@@ -275,7 +275,7 @@ func TestCreateServiceAccountToken(t *testing.T) {
 }
 
 func TestCanI(t *testing.T) {
-	allowed := true
+	reply := `{"status":{"allowed":true}}`
 	var attrs map[string]any
 	c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews" {
@@ -293,7 +293,7 @@ func TestCanI(t *testing.T) {
 		}
 		attrs = body.Spec.ResourceAttributes
 		w.WriteHeader(http.StatusCreated)
-		_, _ = fmt.Fprintf(w, `{"status":{"allowed":%t}}`, allowed)
+		_, _ = w.Write([]byte(reply))
 	})
 	ctx := context.Background()
 	ok, err := c.CanI(ctx, AccessCheck{Verb: "*", Group: "*", Resource: "*"})
@@ -303,13 +303,20 @@ func TestCanI(t *testing.T) {
 	if fmt.Sprint(attrs) != "map[group:* resource:* verb:*]" {
 		t.Errorf("attrs = %v", attrs)
 	}
-	allowed = false
+	reply = `{"status":{"allowed":false}}`
 	ok, err = c.CanI(ctx, AccessCheck{Namespace: "proxcloud-system", Verb: "get", Resource: "secrets", Name: "t"})
 	if err != nil || ok {
 		t.Fatalf("CanI denied = %v, %v", ok, err)
 	}
 	if fmt.Sprint(attrs) != "map[name:t namespace:proxcloud-system resource:secrets verb:get]" {
 		t.Errorf("attrs = %v", attrs)
+	}
+	// A 2xx answer without a verdict is a denial, not an error and never an allow.
+	for _, r := range []string{`{}`, `{"status":{}}`, ``} {
+		reply = r
+		if ok, err := c.CanI(ctx, AccessCheck{Verb: "*", Group: "*", Resource: "*"}); err != nil || ok {
+			t.Errorf("reply %q: CanI = %v, %v; want false, nil", r, ok, err)
+		}
 	}
 }
 
@@ -354,13 +361,26 @@ func TestBuildKubeconfig(t *testing.T) {
 		t.Errorf("wrong CA: err = %v, hits %d", err, hits)
 	}
 
+	// Only the certificate blocks are written: text around them, even a broken key, stays out.
+	keyDER, _ := x509.MarshalPKCS8PrivateKey(key)
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	wrapped, err := BuildKubeconfig("x", ts.URL, []byte("subject=CN=seed\n"+string(caPEM)+string(keyPEM[:40])), "t")
+	if err != nil {
+		t.Fatalf("CA with text around it: %v", err)
+	}
+	if !strings.Contains(wrapped, base64.StdEncoding.EncodeToString(caPEM)+"\n") {
+		t.Errorf("CA with text around it: want only the certificate, got\n%s", wrapped)
+	}
+
 	for name, args := range map[string][]string{
-		"http server": {"x", "http://10.0.0.1:6443", string(caPEM), "t"},
-		"no host":     {"x", "https://", string(caPEM), "t"},
-		"no CA":       {"x", ts.URL, "", "t"},
-		"garbage CA":  {"x", ts.URL, "not pem", "t"},
-		"no token":    {"x", ts.URL, string(caPEM), ""},
-		"no name":     {"", ts.URL, string(caPEM), "t"},
+		"CA with a key block": {"x", ts.URL, string(caPEM) + string(keyPEM), "t"},
+		"bad certificate":     {"x", ts.URL, string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("x")})), "t"},
+		"http server":         {"x", "http://10.0.0.1:6443", string(caPEM), "t"},
+		"no host":             {"x", "https://", string(caPEM), "t"},
+		"no CA":               {"x", ts.URL, "", "t"},
+		"garbage CA":          {"x", ts.URL, "not pem", "t"},
+		"no token":            {"x", ts.URL, string(caPEM), ""},
+		"no name":             {"", ts.URL, string(caPEM), "t"},
 	} {
 		if _, err := BuildKubeconfig(args[0], args[1], []byte(args[2]), args[3]); err == nil {
 			t.Errorf("%s: want error", name)
