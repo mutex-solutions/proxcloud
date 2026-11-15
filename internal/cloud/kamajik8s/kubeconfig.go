@@ -13,6 +13,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -164,11 +165,27 @@ func parseKubeconfig(raw []byte) (*restConfig, error) {
 // BuildKubeconfig renders a one-context kubeconfig with a bearer token and no client certificate,
 // trusting caPEM only (New pins TLS to it): the shape installer stage 60 writes into the provider
 // secrets. name names the cluster, user and context, so the file merges into another without clashing.
+// caPEM must hold certificates only: a key block is refused, and only the certificate blocks are
+// written, so a CA private key handed in with its certificate never lands in the file.
 func BuildKubeconfig(name, server string, caPEM []byte, token string) (string, error) {
 	if u, err := url.Parse(server); err != nil || u.Scheme != "https" || u.Host == "" {
 		return "", fmt.Errorf("kubeconfig: server %q is not an https URL", server)
 	}
-	if !x509.NewCertPool().AppendCertsFromPEM(caPEM) {
+	var certs []byte
+	for rest := caPEM; ; {
+		var b *pem.Block
+		if b, rest = pem.Decode(rest); b == nil {
+			break
+		}
+		if b.Type != "CERTIFICATE" {
+			return "", fmt.Errorf("kubeconfig: CA holds a %s block, want certificates only", b.Type)
+		}
+		if _, err := x509.ParseCertificate(b.Bytes); err != nil {
+			return "", fmt.Errorf("kubeconfig: CA: %w", err)
+		}
+		certs = append(certs, pem.EncodeToMemory(&pem.Block{Type: b.Type, Bytes: b.Bytes})...)
+	}
+	if len(certs) == 0 {
 		return "", fmt.Errorf("kubeconfig: CA has no PEM certificate")
 	}
 	if name == "" || token == "" {
@@ -179,7 +196,7 @@ func BuildKubeconfig(name, server string, caPEM []byte, token string) (string, e
 		"kind":            "Config",
 		"current-context": name,
 		"clusters": []any{map[string]any{"name": name, "cluster": map[string]any{
-			"server": server, "certificate-authority-data": base64.StdEncoding.EncodeToString(caPEM),
+			"server": server, "certificate-authority-data": base64.StdEncoding.EncodeToString(certs),
 		}}},
 		"contexts": []any{map[string]any{"name": name, "context": map[string]any{"cluster": name, "user": name}}},
 		"users":    []any{map[string]any{"name": name, "user": map[string]any{"token": token}}},
