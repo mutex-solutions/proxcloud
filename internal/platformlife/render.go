@@ -115,6 +115,22 @@ func groupPlacement(group string) kamajik8s.NamespacePlacement {
 	return p
 }
 
+// placementValues is a group's placement as chart values, {nodeSelector, tolerations}: what a pod-creating chart on a
+// tainted group sets itself, with the namespace annotations only a backstop (design §4.4), and the providers'
+// namespacePlacement.
+func placementValues(group string) map[string]any {
+	p := groupPlacement(group)
+	nodeSelector := map[string]any{}
+	for k, v := range p.NodeSelector {
+		nodeSelector[k] = v
+	}
+	tolerations := []any{}
+	for _, t := range p.Tolerations {
+		tolerations = append(tolerations, t)
+	}
+	return map[string]any{"nodeSelector": nodeSelector, "tolerations": tolerations}
+}
+
 // ClusterValues are the proxmox-kamaji-cluster values of the workload cluster: controlPlane.kind kubeadm, one control
 // plane VM, the node groups in pool proxcloud-system, each group labelled and every group but system tainted.
 func ClusterValues(b *BOM, in RenderInput) (map[string]any, error) {
@@ -288,7 +304,8 @@ func Applications(b *BOM, in RenderInput) ([]map[string]any, error) {
 			"retry":       map[string]any{"limit": 10, "backoff": map[string]any{"duration": "30s", "factor": 2, "maxDuration": "5m"}},
 		}
 		// One Application owns a namespace's metadata (ArgoCD lets only one): the first in BOM order of a namespace whose
-		// pods all go to one group.
+		// pods all go to one group. A backstop: it acts only on pods created after it, so a chart on a tainted group also
+		// places its pods through its values.
 		if p.pin != "" && !ownsMetadata[server+" "+c.Namespace] {
 			ownsMetadata[server+" "+c.Namespace] = true
 			annotations := map[string]any{}
@@ -400,9 +417,15 @@ func componentPart(b *BOM, c Component, in RenderInput) (part, error) {
 	case "workload/kamaji-crds":
 		return part{pin: group}, nil
 	case "workload/kamaji-etcd":
-		return part{values: map[string]any{"replicas": 1, "datastore": map[string]any{"enabled": true, "name": defaultDatastore}}, pin: group}, nil
+		// The StatefulSet and the setup and teardown hook Jobs: kamaji-crds, which owns the namespace's metadata, syncs in
+		// the same wave and may create kamaji-system after them.
+		v := placementValues(group)
+		v["replicas"], v["datastore"], v["jobs"] = 1, map[string]any{"enabled": true, "name": defaultDatastore}, placementValues(group)
+		return part{values: v, pin: group}, nil
 	case "workload/kamaji":
-		return part{values: map[string]any{"kamaji-etcd": map[string]any{"deploy": false}, "defaultDatastoreName": defaultDatastore}, pin: group}, nil
+		v := placementValues(group)
+		v["kamaji-etcd"], v["defaultDatastoreName"] = map[string]any{"deploy": false}, defaultDatastore
+		return part{values: v, pin: group}, nil
 	case "workload/platform":
 		return part{
 			values: map[string]any{"platform": map[string]any{"enabled": true, "chartRepository": b.TenantCharts.Kubernetes.Repo,
@@ -521,18 +544,6 @@ func CSIConfigSecret(b *BOM, in RenderInput, csi PVEToken) (map[string]any, erro
 // marker that adopts a row at the next run. kubeconfig is the workload's proxcloud service account (provider secret).
 func ProviderBodies(b *BOM, in RenderInput, kubeconfig string) (kubernetes, database map[string]any) {
 	regions := map[string]any{in.Region: map[string]any{"displayName": in.RegionName}}
-	placement := func(group string) map[string]any {
-		p := groupPlacement(group)
-		nodeSelector := map[string]any{}
-		for k, v := range p.NodeSelector {
-			nodeSelector[k] = v
-		}
-		tolerations := []any{}
-		for _, t := range p.Tolerations {
-			tolerations = append(tolerations, t)
-		}
-		return map[string]any{"nodeSelector": nodeSelector, "tolerations": tolerations}
-	}
 	argo := func(project string, c Chart) map[string]any {
 		return map[string]any{"namespace": argoNamespace, "project": project, "chartRepo": c.Repo, "chartName": c.Name, "chartVersion": c.Version}
 	}
@@ -558,7 +569,7 @@ func ProviderBodies(b *BOM, in RenderInput, kubeconfig string) (kubernetes, data
 				"dataStoreName": defaultDatastore, "versions": map[string]any{}, "rootVolumeGiB": 30,
 				"workerMtu": in.WorkerMTU, "rwxGiB": 0, "pveApiUrl": in.PVEAPIURL,
 			},
-			"namespacePlacement":     placement("kamaji"),
+			"namespacePlacement":     placementValues("kamaji"),
 			"attachToNewProjects":    false,
 			"platformInstallationId": in.ID,
 		},
@@ -574,7 +585,7 @@ func ProviderBodies(b *BOM, in RenderInput, kubeconfig string) (kubernetes, data
 				"lbAddressPool": "services", "storageClasses": []any{"std"}, "egressFence": true,
 				"engines": map[string]any{"postgresql": map[string]any{"versions": []any{"17", "18"}, "default": "18", "replicas": replicas}},
 			},
-			"namespacePlacement":     placement("dbaas"),
+			"namespacePlacement":     placementValues("dbaas"),
 			"attachToNewProjects":    false,
 			"platformInstallationId": in.ID,
 		},

@@ -798,7 +798,22 @@ applications:
             datastore:
               enabled: true
               name: default
+            jobs:
+              nodeSelector:
+                node-restriction.kubernetes.io/proxcloud-node-group: kamaji
+              tolerations:
+                - effect: NoSchedule
+                  key: proxcloud.io/node-group
+                  operator: Equal
+                  value: kamaji
+            nodeSelector:
+              node-restriction.kubernetes.io/proxcloud-node-group: kamaji
             replicas: 1
+            tolerations:
+              - effect: NoSchedule
+                key: proxcloud.io/node-group
+                operator: Equal
+                value: kamaji
         repoURL: https://clastix.github.io/charts
         targetRevision: 0.18.1
       syncPolicy:
@@ -839,6 +854,13 @@ applications:
               tag: 26.11.2-edge
             kamaji-etcd:
               deploy: false
+            nodeSelector:
+              node-restriction.kubernetes.io/proxcloud-node-group: kamaji
+            tolerations:
+              - effect: NoSchedule
+                key: proxcloud.io/node-group
+                operator: Equal
+                value: kamaji
         repoURL: https://clastix.github.io/charts
         targetRevision: 0.0.0+latest
       syncPolicy:

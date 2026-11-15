@@ -393,8 +393,28 @@ func permitted(destinations []any, server, namespace string) bool {
 	})
 }
 
+// podSpec is the pod spec an object creates pods from, or nil.
+func podSpec(o map[string]any) map[string]any {
+	spec, _ := o["spec"].(map[string]any)
+	switch o["kind"] {
+	case "Pod":
+		return spec
+	case "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job":
+	case "CronJob":
+		spec, _ = spec["jobTemplate"].(map[string]any)["spec"].(map[string]any)
+	default:
+		return nil
+	}
+	tmpl, _ := spec["template"].(map[string]any)
+	pod, _ := tmpl["spec"].(map[string]any)
+	return pod
+}
+
 // Every Application's chart rendered with its values, as ArgoCD renders it: each namespaced object lands in a namespace
-// the project permits on that server (ArgoCD checks every object, not only the destination). Our charts render from
+// the project permits on that server (ArgoCD checks every object, not only the destination), and every pod of a
+// component on a tainted group is placed there by its own spec. The namespace annotations are only a backstop:
+// PodNodeSelector acts when a pod is created, and another Application of the same wave may create the namespace first,
+// without them (kamaji-etcd next to kamaji-crds in kamaji-system). Our charts render from
 // deploy/charts; the upstream ones only from the Helm repository cache, as unit tests are offline, so an uncached chart
 // is skipped: `helm pull <repo>/<chart> --version <v> -d "$(helm env HELM_REPOSITORY_CACHE)"` caches one.
 func TestApplicationsRenderInsideTheProject(t *testing.T) {
@@ -445,10 +465,20 @@ func TestApplicationsRenderInsideTheProject(t *testing.T) {
 			t.Fatalf("%s: helm template: %v\n%s", name, err, stderr.String())
 		}
 		server := spec["destination"].(map[string]any)["server"].(string)
+		tainted := c.Group != "" && c.Group != GroupSystem && c.Group != "all"
 		for _, o := range yamlObjects(t, out) {
 			meta := o["metadata"].(map[string]any)
 			if ns, ok := meta["namespace"].(string); ok && !permitted(destinations, server, ns) {
 				t.Errorf("%s: %v %s/%v is outside the project's destinations on %s", name, o["kind"], ns, meta["name"], server)
+			}
+			if pod := podSpec(o); tainted && pod != nil {
+				sel, _ := pod["nodeSelector"].(map[string]any)
+				tols, _ := pod["tolerations"].([]any)
+				want := groupPlacement(c.Group).Tolerations[0]
+				if sel[GroupLabel] != c.Group || !slices.ContainsFunc(tols, func(t any) bool { return reflect.DeepEqual(t, want) }) {
+					t.Errorf("%s: %v %v is not placed on group %s by its values: nodeSelector %v, tolerations %v",
+						name, o["kind"], meta["name"], c.Group, sel, tols)
+				}
 			}
 		}
 	}

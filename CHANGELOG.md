@@ -155,21 +155,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `proxmox-csi-plugin`, rendered separately), automated sync with self-heal, no prune for stateful components, no
   resources finalizer, a retry policy on every Application (the clusterctl hooks can fail), `CreateNamespace=true`
   (capi-tenant syncs into `proxcloud-system` before the platform component creates it), and the namespace placement
-  annotations on the one Application per namespace whose pods all go to one group. The workload ArgoCD's values carry
-  the tenant health checks of `deploy/{mgmt,dbaas}-cluster/argocd-health.yaml`, which `deploy/embed.go` now embeds
-  (the API image copies both files; the docker workflow rebuilds on a change to either). The Kubernetes and Databases
-  provider bodies are stage 60's, with the BOM's tenant charts, no node image versions yet, node-group placement, the
-  database egress fence, no backup store, PostgreSQL 3 replicas only with three `dbaas` nodes, `attachToNewProjects:
-  false` and the `platformInstallationId` marker. Tests: goldens of every renderer, a scan that planted credentials
-  appear only where design §5 puts them, a key-set test against stage 60's loop, the providers parsing the bodies, the
-  Applications against the `proxcloud-platform` chart's examples and contract, the cluster values rendered through
-  the chart, and every Application's chart rendered with its values to check each object's namespace against the
-  project (upstream charts only from the local Helm cache, so not in CI). Inert: nothing calls the renderers; the
-  runner (stages 1 to 11) and the flag are later changes. Not verified: no seed has booted this user-data (whether k3s
-  keeps a portal-made `server-ca` and generates the other CAs is lab check L2, as is bootstrap-token auth with
-  `anonymous-auth=false`), and no ArgoCD has synced these Applications; the upstream charts (cilium, cert-manager,
-  metallb, argo-cd, cloudnative-pg, proxmox-csi-plugin, kamaji-crds, kamaji-etcd, kamaji) rendered the workload values
-  once by hand with `helm template` on 2026-11-15, not in CI.
+  annotations on the one Application per namespace whose pods all go to one group, as a backstop: `kamaji-etcd` (its
+  StatefulSet and hook Jobs) and `kamaji` set the `kamaji` group's `nodeSelector` and toleration in their own values,
+  since `kamaji-crds`, which owns `kamaji-system`'s metadata, may sync after `kamaji-etcd` in the same wave and
+  `PodNodeSelector` acts only on new pods. The workload ArgoCD's values carry the tenant health checks of
+  `deploy/{mgmt,dbaas}-cluster/argocd-health.yaml`, which `deploy/embed.go` now embeds (the API image copies both files;
+  the docker workflow rebuilds on a change to either). The Kubernetes and Databases provider bodies are stage 60's, with
+  the BOM's tenant charts, no node image versions yet, node-group placement, the database egress fence, no backup store,
+  PostgreSQL 3 replicas only with three `dbaas` nodes, `attachToNewProjects: false` and the `platformInstallationId`
+  marker. Tests: goldens of every renderer, a scan that planted credentials appear only where design §5 puts them, a
+  key-set test against stage 60's loop, the providers parsing the bodies, the Applications against the
+  `proxcloud-platform` chart's examples and contract, the cluster values rendered through the chart, and every
+  Application's chart rendered with its values to check each object's namespace against the project and the placement of
+  every pod on the `kamaji` group (upstream charts only from the local Helm cache, so not in CI). Inert: nothing calls
+  the renderers; the runner (stages 1 to 11) and the flag are later changes. Not verified: no seed has booted this
+  user-data (whether k3s keeps a portal-made `server-ca` and generates the other CAs is lab check L2, as is
+  bootstrap-token auth with `anonymous-auth=false`), and no ArgoCD has synced these Applications; the upstream charts
+  (cilium, cert-manager, metallb, argo-cd, cloudnative-pg, proxmox-csi-plugin, kamaji-crds, kamaji-etcd, kamaji)
+  rendered the workload values once by hand with `helm template` on 2026-11-15, not in CI.
 - **`proxcloud-clusterctl` image and its tag flow** (`deploy/clusterctl/`, `.github/workflows/clusterctl.yml`): the
   image the clusterctl Job of the managed-services platform will run (ADR 0009; the `proxcloud-platform` chart that
   runs it comes separately). It holds clusterctl v1.14.4, kubectl v1.35.10 and, as a clusterctl local repository, the
