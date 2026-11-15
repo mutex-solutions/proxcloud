@@ -994,14 +994,49 @@ func run() error {
 		return fmt.Errorf("template update sandbox store: %w", err)
 	}
 	adminH.SetTemplateUpdates(tuSvc)
-	// The managed-services platform (docs/adr/0009): its installation routes only with PROXCLOUD_PLATFORM_ENABLED=true.
-	// No job kind exists yet, so nothing runs.
+	// The managed-services platform (docs/adr/0009): its installation routes only with PROXCLOUD_PLATFORM_ENABLED=true;
+	// its runner (stages 1 to 5 of an apply, the seed part of a remove) only with PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED
+	// too, since stage 2 imports the platform images through Template updates. Without the runner POST …/runs answers
+	// 409 platform_disabled.
 	if cfg.Jobs.PlatformEnabled {
 		platformStore := platformlife.NewStore(pg, enc)
 		if err := platformStore.Ensure(ctx); err != nil {
 			return fmt.Errorf("platform store: %w", err)
 		}
 		adminH.SetPlatform(platformStore)
+		if cfg.Jobs.TemplateUpdatesVM {
+			adminH.SetPlatformRuns(jobStore)
+			prRunner := &platformlife.Runner{
+				Jobs: jobStore, State: platformStore, Log: log, Preflight: adminH.PlatformPreflight,
+				Imports: platformlife.TemplateUpdates{Service: tuSvc},
+				Provider: func(ctx context.Context, id string) (*externalservice.ExternalService, error) {
+					es, err := esSvc.Get(ctx, id)
+					if errors.Is(err, externalservice.ErrNotFound) {
+						return nil, nil
+					}
+					return es, err
+				},
+				// The admin handler's audit entry of an import, with the run as its actor.
+				OnImport: func(rec *templateupdates.Receipt, actor string) {
+					ev := audit.SystemEvent()
+					ev.Actor.ID, ev.Actor.DisplayName = actor, actor
+					ev.Action, ev.ResourceType, ev.ResourceID = audit.ActionCreate, "EXTERNAL_SERVICE", rec.Payload.ServiceID
+					ev.ResourceDisplayName = "template-update " + rec.Payload.Package
+					ev.Outcome = audit.OutcomeSuccess
+					for _, c := range [][2]string{{"package", rec.Payload.Package}, {"tag", rec.Payload.Tag}, {"digest", rec.Payload.Digest},
+						{"serviceId", rec.Payload.ServiceID}, {"node", rec.Payload.Node}, {"importStorage", rec.Payload.ImportStorage},
+						{"diskStorage", rec.Payload.DiskStorage}, {"lifecycle", "staged"}} {
+						ev.Changes = append(ev.Changes, audit.PropertyChange{Field: c[0], NewValue: c[1]})
+					}
+					auditSvc.LogAsync(ev)
+				},
+			}
+			prCtx, stopPR := context.WithCancel(ctx)
+			prDone := make(chan struct{})
+			go func() { defer close(prDone); prRunner.Run(prCtx) }()
+			defer func() { stopPR(); <-prDone }()
+			log.Warn("managed services: platform runner ENABLED (stages 1 to 5)")
+		}
 	}
 	adminH.SetJobsScheduler(cfg.Jobs.SchedulerEnabled)
 	adminH.SetAPIBaseURL(cfg.Self.APIBaseURL)

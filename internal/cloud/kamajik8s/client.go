@@ -573,6 +573,12 @@ func (c *Client) rawLimit(ctx context.Context, path string, limit int64) ([]byte
 	return body, nil
 }
 
+// Readyz asks the API server's /readyz (plain text, not JSON): nil when it answers 2xx.
+func (c *Client) Readyz(ctx context.Context) error {
+	_, err := c.rawLimit(ctx, "/readyz", 4<<10)
+	return err
+}
+
 // ListCRs lists any namespaced custom resource by group/version/plural, filtered by
 // labelSelector. Read-only escape hatch for CRs that need no typed helper — the dbaas backup
 // list, where the kind differs per engine. A missing CRD 404s the same way an empty list does,

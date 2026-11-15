@@ -31,6 +31,10 @@ const (
 	// TemplateUpdateSandbox mirrors a built-in sandbox template image into the sandbox registry and points the
 	// prepull DaemonSets at it, or rolls that back (internal/templateupdates, sandbox*.go). External-effect kind.
 	TemplateUpdateSandbox = "templateupdate.sandbox/v1"
+	// PlatformRun runs one apply or remove of a managed-services installation (internal/platformlife). External-effect
+	// kind: every stage commits its intent and result through Checkpoint and waits through Defer. It has no cleanup
+	// pass (not in ClaimDeadKinds) and is never replayed: the Managed services page starts a new run instead.
+	PlatformRun = "platform.run/v1"
 )
 
 var (
@@ -73,7 +77,8 @@ func known(kind string) bool { return kind == Billing || kind == Selftest || Ext
 // dedicated runner that renews its lease and commits each step through Checkpoint; the DB-only
 // Worker refuses to register them.
 func External(kind string) bool {
-	return kind == TemplateUpdateVM || kind == ProviderAttach || kind == TemplateUpdateSmoke || kind == TemplateUpdateSandbox
+	return kind == TemplateUpdateVM || kind == ProviderAttach || kind == TemplateUpdateSmoke || kind == TemplateUpdateSandbox ||
+		kind == PlatformRun
 }
 
 // ClaimDeadKinds are the kinds ClaimDead re-acquires for a cleanup: the template update runner's
@@ -154,7 +159,10 @@ func (s *Store) Fail(ctx context.Context, j *Job, delay time.Duration, permanent
 
 // Defer returns an external-kind acquisition to pending after delay WITHOUT spending an attempt:
 // the job could not start because a resource lock it needs is busy (e.g. one smoke test per
-// provider), which is no failure of the job. Fenced like Fail; code is a fixed classification.
+// provider), or it is waiting for something outside it (a platform run's stage that checked once
+// and re-observes later, or retries a transient error within its own per-stage budget). None of
+// that is a failure of the job, so only a crash re-claim spends an attempt. Fenced like Fail; code
+// is a fixed classification.
 func (s *Store) Defer(ctx context.Context, j *Job, delay time.Duration, code string) error {
 	if delay < 0 || delay > time.Hour || !failCodeRE(code) || !External(j.Kind) {
 		return errors.New("invalid deferral")
