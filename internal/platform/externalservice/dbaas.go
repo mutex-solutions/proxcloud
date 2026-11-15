@@ -124,7 +124,9 @@ func namespacePlacement(cfg map[string]any) kamajik8s.NamespacePlacement {
 }
 
 // placementOf reads a {nodeSelector, tolerations} block, dropping blank selector entries. Tolerations are opaque
-// toleration objects, passed on unchanged: the API server's admission rejects a bad one.
+// toleration objects, passed on unchanged: in config.database.scheduling the API server refuses a bad one at that
+// database's pod create; in config.namespacePlacement NamespacePlacement.Validate checks them when the provider is
+// built, since a bad one there would refuse every pod in the namespace.
 func placementOf(block map[string]any) (nodeSelector map[string]string, tolerations []map[string]any) {
 	if ns, ok := block["nodeSelector"].(map[string]any); ok {
 		for k, v := range ns {

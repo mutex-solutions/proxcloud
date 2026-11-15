@@ -96,7 +96,9 @@ Admin UI → System → Cloud providers → Add provider → **Database (DBaaS)*
   `…/defaultTolerations` annotations and the label `proxcloud.io/platform-role: dbaas`, so the API
   server puts every pod there on that node group, whatever the chart renders. It needs the
   `PodNodeSelector` and `PodTolerationRestriction` admission plugins on the DB cluster's API server;
-  without them the annotations do nothing. Absent: nothing is stamped.
+  without them the annotations do nothing. Absent: nothing is stamped. A selector that is not label
+  keys and values, or a toleration the API server would refuse, is refused when the provider is
+  built: the API server checks the annotation on every pod create, so it would refuse every pod there.
 - `config.database.egressFence: true` — optional, API only (a form save keeps it). Every `pc-db-*`
   namespace gets the CiliumNetworkPolicy `proxcloud-default-egress`: its pods reach only their own
   namespace, kube-dns on 53 and the API server on 6443 (what CloudNativePG needs), so a tenant with a

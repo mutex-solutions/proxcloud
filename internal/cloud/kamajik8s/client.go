@@ -257,7 +257,7 @@ const (
 // server that runs both admission plugins does that; on any other the annotations change nothing.
 type NamespacePlacement struct {
 	NodeSelector map[string]string
-	// Tolerations are Kubernetes toleration objects, passed on unchanged.
+	// Tolerations are Kubernetes toleration objects, passed on unchanged once Validate has checked them.
 	Tolerations []map[string]any
 }
 
@@ -287,11 +287,53 @@ var (
 )
 
 // Validate refuses a selector that is not label keys and values: the plugin splits the annotation on "," and "=", so
-// anything else would pin the pods to a different selector than the one configured.
+// anything else would pin the pods to a different selector than the one configured. It refuses a toleration the API
+// server would refuse too, or one with a field it would drop: nothing checks the annotation when the namespace is
+// applied, and the plugin parses it on every pod create there, so a bad one would refuse every pod in the namespace.
 func (p NamespacePlacement) Validate() error {
 	for k, v := range p.NodeSelector {
 		if !labelKeyRE.MatchString(k) || !labelValueRE.MatchString(v) {
 			return fmt.Errorf("nodeSelector %q=%q is not a label key and value", k, v)
+		}
+	}
+	if len(p.Tolerations) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(p.Tolerations)
+	if err != nil {
+		return fmt.Errorf("tolerations: %w", err)
+	}
+	// The fields of a core/v1 Toleration, decoded the way the plugin decodes the annotation.
+	var ts []struct {
+		Key, Operator, Value, Effect string
+		TolerationSeconds            *int64
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&ts); err != nil {
+		return fmt.Errorf("tolerations: %w", err)
+	}
+	// The checks of the API server's pod validation (ValidateTolerations).
+	for i, t := range ts {
+		var bad string
+		switch {
+		case t.Key == "" && t.Operator != "Exists":
+			bad = "an empty key needs operator Exists"
+		case t.Key != "" && !labelKeyRE.MatchString(t.Key):
+			bad = "key is not a label key"
+		case !slices.Contains([]string{"", "Equal", "Exists"}, t.Operator):
+			bad = "operator is not Equal or Exists"
+		case t.Operator == "Exists" && t.Value != "":
+			bad = "operator Exists takes no value"
+		case !labelValueRE.MatchString(t.Value):
+			bad = "value is not a label value"
+		case !slices.Contains([]string{"", "NoSchedule", "PreferNoSchedule", "NoExecute"}, t.Effect):
+			bad = "effect is not NoSchedule, PreferNoSchedule or NoExecute"
+		case t.TolerationSeconds != nil && t.Effect != "NoExecute":
+			bad = "tolerationSeconds needs effect NoExecute"
+		}
+		if bad != "" {
+			return fmt.Errorf("tolerations[%d]: %s", i, bad)
 		}
 	}
 	return nil

@@ -436,4 +436,32 @@ func TestNamespacePlacement(t *testing.T) {
 			t.Errorf("Validate(%q) = %v, want ok=%v", sel, err, ok)
 		}
 	}
+	// Nothing checks the annotation when the namespace is applied; a toleration the plugin cannot parse, or one pod
+	// validation refuses, would refuse every pod created in the namespace. The config is decoded JSON: numbers are
+	// float64.
+	for name, tc := range map[string]struct {
+		t  map[string]any
+		ok bool
+	}{
+		"equal":                      {toleration, true},
+		"no operator means equal":    {map[string]any{"key": "k", "value": "v"}, true},
+		"exists, all keys":           {map[string]any{"operator": "Exists"}, true},
+		"seconds with NoExecute":     {map[string]any{"key": "k", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": float64(30)}, true},
+		"lowercase operator":         {map[string]any{"key": "k", "operator": "equal", "value": "v"}, false},
+		"exists with a value":        {map[string]any{"key": "k", "operator": "Exists", "value": "v"}, false},
+		"empty key without exists":   {map[string]any{"value": "v"}, false},
+		"key not a label key":        {map[string]any{"key": "a b", "operator": "Exists"}, false},
+		"value not a label value":    {map[string]any{"key": "k", "value": "a b"}, false},
+		"value a number":             {map[string]any{"key": "k", "value": float64(1)}, false},
+		"lowercase effect":           {map[string]any{"key": "k", "operator": "Exists", "effect": "noschedule"}, false},
+		"seconds a string":           {map[string]any{"key": "k", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": "30"}, false},
+		"seconds a fraction":         {map[string]any{"key": "k", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 1.5}, false},
+		"seconds without NoExecute":  {map[string]any{"key": "k", "operator": "Exists", "effect": "NoSchedule", "tolerationSeconds": float64(30)}, false},
+		"misspelt field (no effect)": {map[string]any{"key": "k", "operator": "Exists", "efect": "NoSchedule"}, false},
+	} {
+		err := NamespacePlacement{Tolerations: []map[string]any{tc.t}}.Validate()
+		if (err == nil) != tc.ok {
+			t.Errorf("Validate(%s) = %v, want ok=%v", name, err, tc.ok)
+		}
+	}
 }
