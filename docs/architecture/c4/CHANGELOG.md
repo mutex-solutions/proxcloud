@@ -51,7 +51,9 @@ has to survive a crash, a lost lease or a cancel without leaving a second VM or 
 
 **Not verified:** nothing here has run against a real Proxmox or k3s; the tests use a fake PVE API, a fake
 seed API and in-memory stores, and PostgreSQL for the run routes, the start lock, Defer and the replay
-refusal.
+refusal. Stage 5 detaches the CD from the running seed and then deletes the ISO it had attached; on a real
+PVE an IDE CD removed from a running VM may stay a pending change, so that the store then stops listing the
+volume is proven on the fake only.
 
 **Views updated:** [C2 containers](c2-containers.md) (trust boundaries: "API to Proxmox" row) and
 [C3e managed services](c3-components.md#c3e-managed-services-and-object-storage) (`platformlife` and PVE
