@@ -34,8 +34,12 @@ LEGACY = 20 << 30
 
 class TemplateDiskSizeTests(unittest.TestCase):
     def test_one_size_per_variant_plus_the_legacy_20_gib(self):
-        self.assertEqual(vm_sanitize.VIRTUAL_BYTES, {"os": (5 << 30, LEGACY), "kubernetes": (8 << 30, LEGACY)})
+        self.assertEqual(vm_sanitize.VIRTUAL_BYTES, {"os": (5 << 30, 6 << 30, LEGACY), "kubernetes": (8 << 30, LEGACY)})
         self.assertEqual(build.DEFAULT_BUILD_DISK_GIB << 30, vm_sanitize.VIRTUAL_BYTES["os"][0])
+        # A per-OS build size the sanitizer does not accept would build templates that can never be exported.
+        self.assertEqual({build.build_disk_gib(o) << 30 for o in build.IMAGES} | {LEGACY},
+                         set(vm_sanitize.VIRTUAL_BYTES["os"]))
+        self.assertTrue(set(build.BUILD_DISK_GIB_BY_OS) <= set(build.IMAGES))
         self.assertEqual(k8s_config.K8S_BUILD_DISK_GIB << 30, vm_sanitize.VIRTUAL_BYTES["kubernetes"][0])
         self.assertEqual(k8s_copy_policy.VIRTUAL_BYTES, vm_sanitize.VIRTUAL_BYTES["kubernetes"])
         self.assertEqual(stream_sanitized.VIRTUAL_BYTES, vm_sanitize.VIRTUAL_BYTES)

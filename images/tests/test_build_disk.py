@@ -22,22 +22,22 @@ FLOOR_BYTES = build.DEFAULT_BUILD_DISK_GIB << 30
 UPID = "UPID:test-node:00000001:00000002:00000003:resize:9200:images@pve!packer:"
 
 
-def arguments(os_slug="ubuntu-2604"):
+def arguments(os_slug="ubuntu-2404"):
     return argparse.Namespace(os=os_slug, node="test-node", storage="disk-store", import_storage="import-store",
                               bridge="build-bridge", vlan=29, build_ip="192.0.2.40/24", build_gateway="192.0.2.1",
                               nameserver="", keep=3, if_missing=False)
 
 
 class FakePVE:
-    def __init__(self, size="3G", result=None, fail="", change=None):
-        self.size, self.result, self.fail, self.change = size, result, fail, change
+    def __init__(self, size="3G", result=None, fail="", change=None, floor=FLOOR):
+        self.size, self.result, self.fail, self.change, self.floor = size, result, fail, change, floor
         self.events = []
         # Both old tenant/system VMs and already published templates must survive every failure.
         self.rows = {vmid: {"name": "protected-%s" % vmid, "node": "test-node", "pool": "protected", "template": 0}
                      for vmid in (101, 102, 103, 110, 120)}
         for vmid in (9201, 9202):
-            self.rows[vmid] = dict(name="pc-ubuntu-2604-old-%s" % vmid, node="test-node", pool=build.POOL, template=1,
-                                   tags="proxcloud;pc-public;pc-img-ubuntu-2604;pc-v-old-%s" % vmid, scsi0="disk:old,size=3G")
+            self.rows[vmid] = dict(name="pc-ubuntu-2404-old-%s" % vmid, node="test-node", pool=build.POOL, template=1,
+                                   tags="proxcloud;pc-public;pc-img-ubuntu-2404;pc-v-old-%s" % vmid, scsi0="disk:old,size=3G")
         self.protected = copy.deepcopy(self.rows)
 
     def vms(self):
@@ -97,14 +97,14 @@ class FakePVE:
             return "config-task"
         if endpoint == "resize":
             assert method == "PUT"
-            assert params == {"disk": "scsi0", "size": FLOOR, "digest": "fake-digest"}
+            assert params == {"disk": "scsi0", "size": self.floor, "digest": "fake-digest"}
             assert row["template"] == 0
             if self.fail in ("resize", "cleanup"):
                 raise SystemExit("resize failed")
             if self.fail != "readback":
-                row["scsi0"] = "disk-store:vm-%s-disk-0,discard=on,size=%s" % (vmid, FLOOR)
+                row["scsi0"] = "disk-store:vm-%s-disk-0,discard=on,size=%s" % (vmid, self.floor)
             if self.fail == "disk-changed":
-                row["scsi0"] = "disk-store:other-disk,size=" + FLOOR
+                row["scsi0"] = "disk-store:other-disk,size=" + self.floor
             return self.result
         assert endpoint == "template" and method == "POST"
         assert build.disk_size_bytes(row["scsi0"]) >= FLOOR_BYTES
@@ -115,16 +115,16 @@ class FakePVE:
 
 
 class DiskFloorTests(unittest.TestCase):
-    def create(self, pve, os_slug="ubuntu-2604"):
+    def create(self, pve, os_slug="ubuntu-2404"):
         a = arguments(os_slug)
         with patch.object(build, "ensure_cloud_image", return_value="import-store:import/reviewed.qcow2"):
             return build.create_base(pve, a, build.IMAGES[a.os], "pc-tmp-%s-test-node" % a.os)
 
-    def run_build(self, pve, os_slug="ubuntu-2604"):
+    def run_build(self, pve, os_slug="ubuntu-2404"):
         a = arguments(os_slug)
 
         def packer_stub(args, base, vmid, name, version):
-            self.assertEqual(build.disk_size_bytes(pve.rows[base]["scsi0"]), max(build.disk_size_bytes("disk,size=" + pve.size), FLOOR_BYTES))
+            self.assertEqual(build.disk_size_bytes(pve.rows[base]["scsi0"]), max(build.disk_size_bytes("disk,size=" + pve.size), build.build_disk_gib(os_slug) << 30))
             self.assertEqual(pve.rows[base]["template"], 1)
             pve.rows[vmid] = dict(pve.rows[base], name=name, tags="pc-building", template=1)
             pve.events.append(("packer", vmid))
@@ -154,11 +154,12 @@ class DiskFloorTests(unittest.TestCase):
         self.assertEqual(set(build.IMAGES), {"debian-12", "debian-13", "ubuntu-2404", "ubuntu-2604"})
         for os_slug in build.IMAGES:
             with self.subTest(os=os_slug):
-                pve = FakePVE()
+                pve = FakePVE(floor="%dG" % build.build_disk_gib(os_slug))
                 self.run_build(pve, os_slug)
                 imported = next(i for i, e in enumerate(pve.events) if e[0] == "POST" and "scsi0" in e[2])
                 resized = next(i for i, e in enumerate(pve.events) if e[0] == "PUT")
-                readback = next(i for i, e in enumerate(pve.events) if e[0] == "readback" and e[2].endswith("size=" + FLOOR))
+                floor = "size=%dG" % build.build_disk_gib(os_slug)
+                readback = next(i for i, e in enumerate(pve.events) if e[0] == "readback" and e[2].endswith(floor))
                 template = next(i for i, e in enumerate(pve.events) if e[0] == "POST" and e[1].endswith("/template"))
                 packer = next(i for i, e in enumerate(pve.events) if e[0] == "packer")
                 smoke = next(i for i, e in enumerate(pve.events) if e[0] == "smoke")
@@ -211,6 +212,21 @@ class DiskFloorTests(unittest.TestCase):
                 pve = FakePVE(size=size)
                 vmid = self.create(pve)
                 self.assertEqual(build.disk_size_bytes(pve.rows[vmid]["scsi0"]), 5 << 30)
+
+    def test_ubuntu_2604_gets_six_gib_and_the_other_os_five(self):
+        """Ubuntu 26.04 has a separate /boot: at 5 GiB its first lab build had under 1 GiB free after the upgrade."""
+        self.assertEqual(build.BUILD_DISK_GIB_BY_OS, {"ubuntu-2604": 6})
+        self.assertEqual({o: build.build_disk_gib(o) for o in build.IMAGES},
+                         {"debian-12": 5, "debian-13": 5, "ubuntu-2404": 5, "ubuntu-2604": 6})
+        for size, resized in (("3584M", True), ("5G", True), ("6143M", True), ("6G", False), ("20G", False)):
+            with self.subTest(size=size):
+                pve = FakePVE(size=size, floor="6G")
+                vmid = self.create(pve, "ubuntu-2604")
+                puts = [e for e in pve.events if e[0] == "PUT"]
+                self.assertEqual(len(puts), 1 if resized else 0)
+                if resized:
+                    self.assertEqual(puts[0][2]["size"], "6G")
+                    self.assertEqual(build.disk_size_bytes(pve.rows[vmid]["scsi0"]), 6 << 30)
 
     def test_synchronous_null_or_empty_never_waits_but_still_reads_back(self):
         for result in (None, ""):
@@ -289,10 +305,10 @@ class DiskFloorTests(unittest.TestCase):
 
     def test_existing_cmd_base_reuse_is_never_resized(self):
         pve = FakePVE()
-        pve.rows[9201].update(name="pc-base-ubuntu-2604-test-node", scsi0="disk:old,size=3G")
+        pve.rows[9201].update(name="pc-base-ubuntu-2404-test-node", scsi0="disk:old,size=3G")
         before = copy.deepcopy(pve.rows)
         with patch.object(build, "ensure_cloud_image") as download, contextlib.redirect_stdout(io.StringIO()) as output:
-            build.cmd_base(pve, arguments(), build.IMAGES["ubuntu-2604"])
+            build.cmd_base(pve, arguments(), build.IMAGES["ubuntu-2404"])
         self.assertEqual(output.getvalue().strip(), "9201")
         download.assert_not_called()
         self.assertEqual(pve.rows, before)

@@ -5,7 +5,7 @@
         --expected-bytes 8589934592 --out DIR/source.raw --receipt DIR/copy-receipt.json
 
 --expected-bytes is the template disk's exact size: 8589934592 (8 GiB Kubernetes node), 5368709120 (5 GiB
-native OS) or 21474836480 (a 20 GiB template built before 2026-11). The sanitizer refuses any other size.
+native OS), 6442450944 (6 GiB native Ubuntu 26.04) or 21474836480 (a 20 GiB template built before 2026-11). The sanitizer refuses any other size.
 Never parses the disk and never runs guest code. The PVE API template guard runs before and after the
 copy and must return the same snapshot (stopped unlocked template, exact name/tags/pool, config digest
 and root disk volume); the copied file is derived from that volume, never given by the caller. File
