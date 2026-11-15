@@ -297,9 +297,13 @@ repository credential (`deploy/mgmt-cluster/repo-credential.yaml`). This replace
 chart pinned by OCI digest" and qualifies "never a range or `latest`" for development
 BOMs.
 
-**Why.** cilium, cert-manager, MetalLB, CloudNativePG and Kamaji publish their charts in
-HTTP repositories, which have no OCI digest, and the installer installs Kamaji as chart
-`0.0.0+latest`, pinned by image tag only. ArgoCD's target revision for a chart is a
+**Why.** The installer pulls cilium, cert-manager, MetalLB, CloudNativePG and Kamaji from
+HTTP Helm repositories (`services-platform.sh`), which serve no OCI digest. That is the
+installer's choice, not always an upstream limit: cert-manager's install guide calls its
+OCI chart, `oci://quay.io/jetstack/charts/cert-manager`, the source of truth and its HTTP
+repository a legacy one that updates hours later. Wherever upstream publishes a chart in an
+OCI registry, the BOM may take it from there and record its manifest digest. The installer
+installs Kamaji as chart `0.0.0+latest`, pinned by image tag only. ArgoCD's target revision for a chart is a
 version, and the portal cannot look up third-party digests (`internal/templateupdates`
 talks only to our GHCR organisation). Until a mirror under our GHCR organisation serves the
 checked charts, a chart changed upstream behind the same version is caught by CI, not at
