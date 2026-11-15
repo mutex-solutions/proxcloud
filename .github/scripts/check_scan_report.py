@@ -27,7 +27,9 @@ import sys
 
 # Owner decision 2026-11-12 (pr209-merge-policy): unfixed HIGH/CRITICAL are
 # time-bounded tracking only. From this UTC date on they block to force re-review.
-UNFIXED_REVIEW_BY = date(2026, 12, 12)
+# Owner decision 2026-11-15, after the review in docs/security-unfixed-review.md:
+# moved from 2026-12-12 to 2027-03-12. OWNER_VEX.expires below did not move.
+UNFIXED_REVIEW_BY = date(2027, 3, 12)
 
 OwnerVex = namedtuple("OwnerVex", "vulnerability package installed carrier carrier_version expires summary")
 # The ONLY VEX, approved by the owner for PR209 (2026-11-12). Evidence

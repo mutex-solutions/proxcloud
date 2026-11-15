@@ -18,7 +18,7 @@ SPEC.loader.exec_module(GATE)
 NOW = datetime(2026, 11, 12, 2, 0, tzinfo=timezone.utc)
 IMAGE_ID = "sha256:" + "a" * 64
 CLEAN = GATE.GateResult([], [], [], False)
-REVIEW = datetime(2026, 12, 12, tzinfo=timezone.utc)
+REVIEW = datetime(2027, 3, 12, tzinfo=timezone.utc)
 EXPIRY = datetime(2026, 12, 31, tzinfo=timezone.utc)
 
 
@@ -118,23 +118,23 @@ class ReportTests(unittest.TestCase):
         data = report()
         data["Results"] = [{"Target": "go.mod", "Vulnerabilities": [finding("CRITICAL", ""), finding(fixed=None)]}]
         del data["Results"][0]["Vulnerabilities"][1]["FixedVersion"]  # Trivy omits it when unfixed.
-        # 2026-12-12T06:59+07:00 is still 2026-12-11 in UTC.
+        # 2027-03-12T06:59+07:00 is still 2027-03-11 in UTC.
         for now in (NOW, REVIEW - timedelta(seconds=1),
-                    datetime(2026, 12, 12, 6, 59, tzinfo=timezone(timedelta(hours=7)))):
+                    datetime(2027, 3, 12, 6, 59, tzinfo=timezone(timedelta(hours=7)))):
             with self.subTest(now=now):
                 gate = GATE.validate_report(data, now=now)
                 self.assertEqual(gate.blocking, [])
                 self.assertEqual(len(gate.tracked), 2)
                 self.assertEqual({f["class"] for f in gate.tracked}, {"tracked"})
                 self.assertEqual({f["fixed"] for f in gate.tracked}, {""})
-                self.assertIn("2026-12-12", gate.tracked[0]["reason"])
+                self.assertIn("2027-03-12", gate.tracked[0]["reason"])
 
     def test_unfixed_block_on_and_after_review_deadline(self):
-        self.assertEqual(GATE.UNFIXED_REVIEW_BY, date(2026, 12, 12))
+        self.assertEqual(GATE.UNFIXED_REVIEW_BY, date(2027, 3, 12))
         data = report()
         data["Results"] = [{"Target": "go.mod", "Vulnerabilities": [finding("CRITICAL", ""), finding("HIGH", "")]}]
         for now in (REVIEW, REVIEW + timedelta(hours=23), datetime(2027, 6, 1, tzinfo=timezone.utc),
-                    datetime(2026, 12, 12, 7, 0, tzinfo=timezone(timedelta(hours=7)))):
+                    datetime(2027, 3, 12, 7, 0, tzinfo=timezone(timedelta(hours=7)))):
             with self.subTest(now=now):
                 gate = GATE.validate_report(data, now=now)
                 self.assertEqual(len(gate.blocking), 2)
@@ -227,8 +227,10 @@ class VexTests(unittest.TestCase):
     def test_realistic_vendored_sbom_component_is_visible_vex(self):
         gate = self.assertVex(vex_report())
         self.assertEqual((gate.vex[0]["package"], gate.vex[0]["installed"], gate.vex[0]["fixed"]), ("setuptools", "70.3.0", "78.1.1"))
-        # Still applies when unfixed findings start blocking, and across layers.
-        self.assertVex(vex_report(), REVIEW)
+        # Still applies when unfixed findings start blocking, and across layers. The VEX now
+        # expires before the review date, so an earlier review date stands in for that case.
+        with patch.object(GATE, "UNFIXED_REVIEW_BY", EXPIRY.date() - timedelta(days=1)):
+            self.assertVex(vex_report(), EXPIRY - timedelta(seconds=1))
         self.assertVex(vex_report(), EXPIRY - timedelta(seconds=1))
 
     def test_pip_in_other_result_and_multiple_pip_26_3_still_match(self):
@@ -431,7 +433,7 @@ class CliTests(unittest.TestCase):
         code, records, summary = self.run_cli(data, NOW)
         self.assertEqual(code, 0)
         self.assertEqual([(r["class"], r["fixed"]) for r in records], [("tracked", "NO FIX AVAILABLE")])
-        self.assertIn("tracked without fix (non-blocking until 2026-12-12): 1", summary)
+        self.assertIn("tracked without fix (non-blocking until 2027-03-12): 1", summary)
         code, records, summary = self.run_cli(data, REVIEW)
         self.assertEqual(code, 1)
         self.assertEqual([r["class"] for r in records], ["blocking"])

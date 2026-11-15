@@ -43,8 +43,11 @@ published artifacts are pullable before relying on them.
 | Older / untagged downstream builds | No stated backport support; report the exact commit |
 
 Unfixed HIGH/CRITICAL findings in shipped images are tracked by the security-scan
-gate until **2026-12-12**, after which they block again; the GPU/CUDA template is
-not scanned.
+gate until **2027-03-12**, after which they block again; the GPU/CUDA template is
+not scanned. The date moved from 2026-12-12 after the
+[review of 2026-11-15](docs/security-unfixed-review.md), which records what was and
+was not checked. The single owner-approved VEX (CVE-2025-47273) still expires on
+2026-12-31.
 
 See [release readiness](docs/release-readiness.md) for validation limits.
 
