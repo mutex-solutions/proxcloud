@@ -335,6 +335,9 @@ class ScriptDryRunTests(unittest.TestCase):
                 self.assertEqual(steps, sorted(steps))
                 self.assertFalse((install.dir / "cf-token").exists())
                 self.assertNotIn("render-only-token", result.stdout + result.stderr)
+                # The next steps lead to the setup page; only a self-signed certificate needs ISO seeds.
+                self.assertIn("System -> Platform setup", result.stdout)
+                self.assertEqual('choose "On an ISO" in Platform setup -> Network' in result.stdout, mode == "internal")
                 self.check_compose_model(install, mode, values)
 
     def compose_model(self, install, mode):

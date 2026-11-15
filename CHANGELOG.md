@@ -240,6 +240,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   servers must reach it and trust its certificate; it never holds go live back, and nothing is probed. The answer
   also carries `seedUrl`, the base a URL seed is fetched from (`config.metadata.url`, else
   `PROXCLOUD_SELF_API_BASE_URL`). Unit-tested; not run against a live API.
+- **`proxcloud-up.sh` sends the operator to Platform setup** (Docker Compose). Its "Next steps" named System →
+  Cloud providers, a raw form that skips the setup steps; it now names System → Platform setup. With TLS mode
+  `internal` it adds that tenant servers cannot fetch seeds over HTTPS with the self-signed certificate, so choose
+  "On an ISO" in Platform setup → Network; `deploy/compose/README.md` says the same under the TLS modes.
+  `deploy/tests/test_compose_production.py` checks both lines per TLS mode in the dry run; not run in a real install.
 - **The Proxmox provider page saves the failover URLs and the cluster CA** (operator console, Cloud providers,
   Connection tab). The form showed both fields, but Save sent neither, so an edit of `apiUrls` or `caCert` was
   dropped while the page reported it saved. Save now takes the connection keys from the same mapping as Add

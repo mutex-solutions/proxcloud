@@ -67,6 +67,10 @@ Or name each one: `--app-host`, `--admin-host`, `--api-host`, `--auth-host`. Cre
 | `acme-dns-cloudflare` | Let's Encrypt, DNS-01 | Records in a Cloudflare zone, **DNS only** (not proxied). They may point to a private address: nothing has to reach the host from the internet | A Cloudflare API token with `Zone / DNS / Edit` on that zone. Outbound access from the host to Let's Encrypt, the Cloudflare API and the DNS resolvers `1.1.1.1` and `1.0.0.1` (port 53) |
 | `internal` | Traefik's self-signed certificate | Any records your users resolve (a LAN DNS server, or `hosts` files) | Every browser must accept the certificate once per hostname. For evaluation on a LAN |
 
+With `internal`, tenant servers cannot fetch their seed (hostname, password, SSH keys) from the API over
+HTTPS either, because they do not trust the certificate: choose **On an ISO** under Server seeds in Platform
+setup, step 3 Network.
+
 Let's Encrypt renews by itself. Its rate limits are low: while you experiment, add
 `ACME_CA_SERVER=https://acme-staging-v02.api.letsencrypt.org/directory` to `.env` (untrusted test
 certificates). When done, remove the line and the stored test certificates:
