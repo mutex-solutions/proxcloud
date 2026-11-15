@@ -9,7 +9,7 @@ test("project quota tab shows GPU usage and editable per-model limits", async ({
   await expect(page.getByTestId("gpu-used-total")).toHaveText("1")
   await expect(page.getByTestId("gpu-status-nvidia-a100-80gb")).toContainText("3 remaining")
   await expect(page.getByText("nvidia-a100-80gb", { exact: true }).first()).toBeVisible()
-  const limitInput = page.getByLabel("Limit for nvidia-a100-80gb")
+  const limitInput = page.getByLabel("Limit for nvidia-a100-80gb", { exact: true })
   await expect(limitInput).toHaveValue("4")
   await limitInput.fill("")
   await expect(limitInput).toHaveAttribute("aria-invalid", "true")
@@ -39,7 +39,7 @@ test("project quota tab saves a canonical per-model GPU limit", async ({ page })
   await page.getByLabel("Limit", { exact: true }).fill("2")
   await page.getByRole("button", { name: "Add limit" }).click()
 
-  const limitInput = page.getByLabel("Limit for nvidia-l40s")
+  const limitInput = page.getByLabel("Limit for nvidia-l40s", { exact: true })
   await expect(limitInput).toHaveValue("2")
   await page.getByRole("button", { name: "Save quota" }).click()
 

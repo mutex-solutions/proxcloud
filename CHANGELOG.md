@@ -225,6 +225,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Connection tab). The form showed both fields, but Save sent neither, so an edit of `apiUrls` or `caCert` was
   dropped while the page reported it saved. Save now takes the connection keys from the same mapping as Add
   provider. A Playwright spec checks the request body against the mock API; not run against a live API.
+- **The admin console's Proxmox resources editors have a label a screen reader announces**
+  (`CloudProviderDetailPage.tsx`): the five JSON text areas (network, storage profiles, OS templates, GPU
+  mappings, server seeds) were not tied to their visible headings, so assistive technology read them as
+  unlabelled edit fields. Each heading is now the text area's label. Checked with the axe matrix of
+  `e2e/a11y.spec.ts`, light and dark.
 
 ### Security
 

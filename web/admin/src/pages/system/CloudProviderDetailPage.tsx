@@ -288,8 +288,9 @@ function ProxmoxConfigCard({ id, provider }: TabProps) {
       <CardContent className="grid gap-6">
         {blocks.map((b) => (
           <div key={b.key} className="grid gap-2">
-            <Label className="font-medium">{b.label} <span className="font-mono text-xs text-muted-foreground">config.{b.key}</span></Label>
+            <Label htmlFor={`pve-config-${b.key}`} className="font-medium">{b.label} <span className="font-mono text-xs text-muted-foreground">config.{b.key}</span></Label>
             <Textarea
+              id={`pve-config-${b.key}`}
               className="min-h-28 font-mono text-xs"
               value={drafts[b.key]}
               onChange={(e) => setDrafts({ ...drafts, [b.key]: e.target.value })}
