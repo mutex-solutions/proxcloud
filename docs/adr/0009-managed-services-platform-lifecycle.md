@@ -456,7 +456,7 @@ files it names land with its implementation.
   hours and can read one ServiceAccount token Secret. Cloud-init applies it once and then
   disables itself. The portal holds the token and the CA certificate before the VM boots:
   it pins TLS to that CA from the first call, waits for `/readyz`, reads and stores the
-  ServiceAccount token, deletes the bootstrap objects, then detaches and deletes the CD.
+  ServiceAccount token, deletes the bootstrap objects, then ejects and deletes the CD.
   Nothing calls back from the seed and no command runs in the guest. Design §4.2 (stages 3
   to 5), §4.3 and §5.
 - The sandbox cluster as a node group of a shared cluster: gVisor nodes and their network

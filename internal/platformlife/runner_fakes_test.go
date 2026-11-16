@@ -216,6 +216,8 @@ type fakePVE struct {
 	failOnce  map[string]string // "METHOD path" → an error body answered once with 500
 	keepISO   int               // deletes of an ISO that answer OK but leave the file
 	agent     bool
+	noMAC     bool           // a NIC set without a MAC address stays without one
+	macs      int            // MAC addresses given so far
 	cloneBusy bool           // a qmclone task is listed as running
 	poolLag   int            // pool reads that answer without members: a clone that joins its pool after them
 	onWrite   func(w string) // called with every recorded request
@@ -369,9 +371,10 @@ func (f *fakePVE) serve(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, `{"errors":{"newid":"VM %d already exists"}}`, id)
 			return
 		}
+		// What a clone of a template made by Template updates has (vmjob.go): no NIC, a cloud-init drive on the boot store.
 		f.vms[id] = &fakeVM{pooled: r.Form.Get("pool") == pve.SeedPool, cfg: map[string]any{
-			"name": r.Form.Get("name"), "tags": f.cloneTags, "net0": "virtio=BC:24:11:00:00:01,bridge=vmbr0",
-			"scsi0": fmt.Sprintf("local-lvm:vm-%d-disk-0,size=6G", id), "ide2": fmt.Sprintf("local-lvm:vm-%d-cloudinit,media=cdrom", id)}}
+			"name": r.Form.Get("name"), "tags": f.cloneTags, "agent": "1", "boot": "order=scsi0", "scsihw": "virtio-scsi-single",
+			"scsi0": fmt.Sprintf("local-lvm:vm-%d-disk-0,discard=on,size=6G", id), "ide2": fmt.Sprintf("local-lvm:vm-%d-cloudinit,media=cdrom", id)}}
 		data(f.upid("qmclone", 9100))
 	case strings.HasPrefix(path, "/nodes/pve1/qemu/"):
 		id, vm := vmid()
@@ -385,18 +388,29 @@ func (f *fakePVE) serve(w http.ResponseWriter, r *http.Request) {
 		case "GET config":
 			data(vm.cfg)
 		case "POST config":
+			// As Proxmox: deletes are checked against the stored config (a protected VM keeps its drives), then the
+			// values are set, and a NIC sent without a MAC address gets one.
+			for _, d := range strings.Split(r.PostForm.Get("delete"), ",") {
+				if _, has := vm.cfg[d]; has && vm.cfg["protection"] == "1" && d != "protection" {
+					w.WriteHeader(http.StatusInternalServerError)
+					fmt.Fprintf(w, `{"message":"can't remove drive '%s' - protection mode enabled"}`, d)
+					return
+				}
+				delete(vm.cfg, d)
+			}
 			for k := range r.PostForm {
-				if k == "delete" {
-					for _, d := range strings.Split(r.PostForm.Get(k), ",") {
-						delete(vm.cfg, d)
-					}
-				} else {
-					vm.cfg[k] = r.PostForm.Get(k)
+				v := r.PostForm.Get(k)
+				if model, rest, _ := strings.Cut(v, ","); k == "net0" && !strings.Contains(model, "=") && !f.noMAC {
+					f.macs++ // a new address each time, as Proxmox
+					v = fmt.Sprintf("%s=BC:24:11:00:00:%02X,%s", model, f.macs, rest)
+				}
+				if k != "delete" {
+					vm.cfg[k] = v
 				}
 			}
 			data(f.upid("qmconfig", id))
 		case "PUT resize":
-			vm.cfg["scsi0"] = fmt.Sprintf("local-lvm:vm-%d-disk-0,size=%s", id, r.PostForm.Get("size"))
+			vm.cfg["scsi0"] = fmt.Sprintf("local-lvm:vm-%d-disk-0,discard=on,size=%s", id, r.PostForm.Get("size"))
 			data(f.upid("qmresize", id))
 		case "GET status/current":
 			st := "stopped"
@@ -712,7 +726,7 @@ func (e *env) stage(id string) Stage {
 // readySeedAt puts a seed generation that stage 3 built at vmid on fake PVE and in the state, with the seed API at seed.
 func (e *env) seedAt(vmid, gen int, seed *fakeSeed, running bool) {
 	e.pve.vms[vmid] = &fakeVM{pooled: true, running: running, cfg: map[string]any{"name": SeedVMName("pi-0a1b2c3d", gen),
-		"tags": "proxcloud;pc-platform;pc-platform-pi-0a1b2c3d", "net0": "virtio=BC:24:11:00:00:01,bridge=vmbr1,firewall=1",
+		"tags": "proxcloud;pc-platform;pc-platform-pi-0a1b2c3d", "protection": "1", "net0": "virtio=BC:24:11:00:00:01,bridge=vmbr1,firewall=1",
 		"ide2": "local:iso/" + SeedCDName("pi-0a1b2c3d", gen) + ",media=cdrom"}}
 	e.pve.iso = append(e.pve.iso, SeedCDName("pi-0a1b2c3d", gen))
 	server := ""
