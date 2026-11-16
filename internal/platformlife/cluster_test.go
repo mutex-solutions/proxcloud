@@ -496,6 +496,84 @@ func TestCAPMOXMachineConditions(t *testing.T) {
 	if end := p.once(); end != "defer:waiting_cluster" || item(p).Message != "VM 132: WaitingForBootstrapReady" {
 		t.Fatalf("a step without an error: end %s, item %+v", end, item(p))
 	}
+	// A VMID that holds another VM: deleting the Machine would make CAPMOX delete that VM, so the message has no
+	// delete command and says not to.
+	p = newPlatform(t, RunApply)
+	p.only(stageCluster)
+	set(p, "VMProvisionFailed", `expected VM name to match "pc-platform-kamaji-pve2-infra" but it was "pc-seed-other"`)
+	if end, s := p.once(), p.stage(stageCluster); end != "fail:"+CodeMachineFailed || strings.Contains(s.Message, "kubectl") ||
+		!strings.Contains(s.Message, "Do not delete the Machine") || !strings.Contains(s.Message, "ProxmoxMachine pc-platform-kamaji-pve2-infra") {
+		t.Fatalf("a VMID of another VM: end %s, message %q", end, s.Message)
+	}
+}
+
+// CAPMOX calls a VM provisioned as soon as it runs and has its addresses. A machine that then does not join (kubeadm,
+// the API address, etcd) shows on Cluster API's own conditions: the Machine's Ready in its item and in the waiting
+// message, the KubeadmControlPlane's Available in the message. The Application comes last and only while its sync is
+// not done: it is Progressing for as long as the machines are built.
+func TestClusterWaitingNote(t *testing.T) {
+	p := newPlatform(t, RunApply)
+	p.only(stageCluster)
+	p.seed.unsynced[ClusterName] = true
+	app := func(sync string) {
+		obj := meta(ClusterName, nil)
+		obj["status"] = map[string]any{"sync": map[string]any{"status": sync}, "health": map[string]any{"status": "Progressing"},
+			"operationState": map[string]any{"phase": "Succeeded", "message": "successfully synced (all tasks run)"}}
+		p.seed.put(appsPath+ClusterName, obj)
+	}
+	app("Synced")
+	p.seed.mu.Lock()
+	p.seed.objs[capiNS+"machines/pc-platform-kamaji-pve2-x"]["status"] = map[string]any{"phase": "Provisioned", "conditions": []any{map[string]any{"type": "Ready",
+		"status": "False", "reason": "NotReady", "message": "* NodeHealthy: Waiting for a Node with spec.providerID proxmox://a to exist\n* Control plane: not reachable"}}}
+	p.seed.objs["/apis/infrastructure.cluster.x-k8s.io/v1alpha2/namespaces/pc-platform/proxmoxmachines/pc-platform-kamaji-pve2-infra"]["status"] = map[string]any{
+		"conditions": []any{map[string]any{"type": "VirtualMachineProvisioned", "status": "True", "reason": "Provisioned"}}}
+	p.seed.objs["/apis/controlplane.cluster.x-k8s.io/v1beta2/namespaces/pc-platform/kubeadmcontrolplanes/pc-platform-cp"] = map[string]any{"status": map[string]any{
+		"conditions": []any{map[string]any{"type": "Available", "status": "False", "reason": "NotAvailable", "message": "etcd member pc-platform-cp-x is not healthy"}}}}
+	p.seed.mu.Unlock()
+	const ready = "Cluster API: NotReady: * NodeHealthy: Waiting for a Node with spec.providerID proxmox://a to exist * Control plane: not reachable"
+	end, s := p.once(), p.stage(stageCluster)
+	i := slices.IndexFunc(s.Items, func(it StageItem) bool { return it.ID == "pc-platform-kamaji-pve2-x" })
+	if end != "defer:waiting_cluster" || i < 0 || s.Items[i].Message != "VM 132: "+ready || !strings.Contains(s.Message, "pc-platform-kamaji-pve2-x (VM 132): "+ready) ||
+		!strings.Contains(s.Message, "Control plane: NotAvailable: etcd member pc-platform-cp-x is not healthy") || strings.Contains(s.Message, "Application") {
+		t.Fatalf("end %s, items %+v, message %q", end, s.Items, s.Message)
+	}
+	app("OutOfSync")
+	p.once()
+	if msg := p.stage(stageCluster).Message; !strings.Contains(msg, "Application pc-platform is OutOfSync/Progressing") || strings.Index(msg, "Application") < strings.Index(msg, "Cluster API:") {
+		t.Fatalf("an Application that is not synced: %q", msg)
+	}
+}
+
+// A sync that keeps failing is not waited out to the stage's time limit: ArgoCD spends about 40 minutes on the ten
+// attempts of one operation. After four failed attempts, the last of them in this run, the stage fails with what the
+// attempt failed on. An attempt that failed before this run began does not count: a Retry gives the fix one attempt.
+func TestFailingSyncIsNotWaitedOut(t *testing.T) {
+	p := newPlatform(t, RunApply)
+	p.only(stageWorkloadPlatform)
+	const name = "pc-platform-cert-manager"
+	p.seed.unsynced[name] = true
+	status := func(retries int, finished time.Time) {
+		p.seed.mu.Lock()
+		defer p.seed.mu.Unlock()
+		p.seed.objs[appsPath+name]["status"] = map[string]any{"sync": map[string]any{"status": "OutOfSync"}, "health": map[string]any{"status": "Missing"},
+			"operationState": map[string]any{"phase": "Running", "retryCount": retries, "finishedAt": finished.UTC().Format(time.RFC3339), "message": "one or more synchronization tasks completed unsuccessfully. Retrying attempt",
+				"syncResult": map[string]any{"resources": []any{map[string]any{"kind": "Job", "namespace": "cert-manager", "name": "startupapicheck", "hookPhase": "Failed", "message": "deadline exceeded"}}}}}
+	}
+	p.once()
+	for what, st := range map[string]struct {
+		retries  int
+		finished time.Time
+	}{"three attempts": {3, time.Now().Add(time.Minute)}, "attempts of the run before": {6, time.Now().Add(-time.Hour)}} {
+		status(st.retries, st.finished)
+		if end := p.once(); end != "defer:waiting_workload_platform" {
+			t.Fatalf("%s: end %s %+v", what, end, p.stage(stageWorkloadPlatform))
+		}
+	}
+	status(4, time.Now().Add(time.Minute))
+	if end, s := p.once(), p.stage(stageWorkloadPlatform); end != "fail:"+CodeComponentUnhealthy || len(p.seed.syncs) != 0 ||
+		!strings.Contains(s.Message, "failed 4 times") || !strings.Contains(s.Message, "Job cert-manager/startupapicheck: deadline exceeded") {
+		t.Fatalf("four attempts: end %s, syncs %v, %+v", end, p.seed.syncs, s)
+	}
 }
 
 // CAPMOX opens the Proxmox API before it writes anything on the ProxmoxCluster: a URL the seed cannot reach or a token
@@ -521,6 +599,29 @@ func TestCAPMOXSilence(t *testing.T) {
 	})
 	if end := p.once(); end != "fail:"+CodeCAPMOXAuthFailed || !strings.Contains(p.stage(stageCluster).Message, capmoxLog) {
 		t.Fatalf("after ten minutes: end %s %+v", end, p.stage(stageCluster))
+	}
+	// A Retry finds the ProxmoxCluster of the run before, on which CAPMOX is in a backoff of up to 1000 s: the run
+	// makes it look again, once, with an update of the object. A ProxmoxCluster made in this run is left alone.
+	for age, want := range map[time.Duration]int{-time.Hour: 1, time.Minute: 0} {
+		p = newPlatform(t, RunApply)
+		p.only(stageCluster)
+		obj := meta("pc-platform", nil)
+		obj["metadata"].(map[string]any)["creationTimestamp"] = time.Now().Add(age).UTC().Format(time.RFC3339)
+		p.seed.put(pc, obj)
+		p.seed.mu.Lock()
+		p.seed.objs[capiNS+"machines/pc-platform-cp-x"]["status"] = map[string]any{"phase": "Pending"}
+		p.seed.mu.Unlock()
+		for range 2 {
+			if end := p.once(); end != "defer:waiting_cluster" {
+				t.Fatalf("made %s ago: end %s %+v", -age, end, p.stage(stageCluster))
+			}
+		}
+		p.seed.mu.Lock()
+		got := len(slices.DeleteFunc(slices.Clone(p.seed.writes), func(w string) bool { return w != "PATCH "+pc }))
+		p.seed.mu.Unlock()
+		if got != want {
+			t.Fatalf("made %s ago: %d updates of the ProxmoxCluster, want %d: %v", -age, got, want, p.seed.writes)
+		}
 	}
 	// A condition, also a False one, is CAPMOX reporting: its text is shown and the stage waits.
 	p = newPlatform(t, RunApply)
@@ -553,6 +654,13 @@ func TestNodeTemplateCloudInitDrive(t *testing.T) {
 	p.again(stageCluster)
 	if end := p.once(); end != "complete" {
 		t.Fatalf("the drive on ide0: end %s %+v", end, p.stage(stageCluster))
+	}
+	// A template the portal token may not read is not checked, and the stage goes on with an item that says so.
+	p = newPlatform(t, RunApply)
+	p.only(stageCluster)
+	p.pve.tmplDeny = map[int]bool{9102: true}
+	if end, s := p.once(), p.stage(stageCluster); end != "complete" || len(s.Items) == 0 || s.Items[0].ID != "template-9102" || s.Items[0].State != "not checked" {
+		t.Fatalf("a template that may not be read: end %s %+v", end, s)
 	}
 }
 
@@ -762,22 +870,27 @@ func TestRemoveRefusedWithTenants(t *testing.T) {
 	}
 }
 
-// A cluster that never could hold a tenant (no provider was registered for it, or its control plane never came up) is
-// removed without the tenant check standing in the way: a silent API is neither retried nor needs the confirmation.
+// A cluster whose control plane never came up never could hold a tenant: it is removed without the tenant check
+// standing in the way, a silent API is neither retried nor needs the confirmation. That no provider is recorded says
+// nothing: stage 10 records them only after both are registered, and the first row is public once it exists. Such a
+// cluster's silence is retried, needs the confirmation, and is passed with the note on the volumes.
 func TestRemoveOfAClusterWithoutTenants(t *testing.T) {
-	for name, mut := range map[string]func(*platform){
-		"no provider registered": func(p *platform) { p.mutate(func(_ *Run, in *Installation, _ *Secrets) { in.Status.Providers = nil }) },
-		"control plane never initialized": func(p *platform) {
-			p.seed.put(capiNS+"clusters/pc-platform", map[string]any{"metadata": map[string]any{"name": ClusterName}})
-		},
-	} {
-		p := removal(t)
-		mut(p)
-		p.wl.sa = "another-token" // the kubeconfig is on the seed and the API does not answer with it
-		if end := p.once(); end != "defer:waiting_remove_cluster" || p.stage(StageRemoveCluster).Code != CodeMachineDeleteStuck ||
-			p.seed.obj(capiNS+"clusters/pc-platform") != nil || p.disabled != 1 {
-			t.Fatalf("%s: end %s %+v", name, end, p.stage(StageRemoveCluster))
-		}
+	p := removal(t)
+	p.seed.put(capiNS+"clusters/pc-platform", map[string]any{"metadata": map[string]any{"name": ClusterName}})
+	p.wl.sa = "another-token" // the kubeconfig is on the seed and the API does not answer with it
+	if end := p.once(); end != "defer:waiting_remove_cluster" || p.stage(StageRemoveCluster).Code != CodeMachineDeleteStuck ||
+		p.seed.obj(capiNS+"clusters/pc-platform") != nil || p.disabled != 1 {
+		t.Fatalf("control plane never initialized: end %s %+v", end, p.stage(StageRemoveCluster))
+	}
+	p = removal(t)
+	p.mutate(func(_ *Run, in *Installation, _ *Secrets) { in.Status.Providers, in.Status.Volumes = nil, nil })
+	p.wl.sa = "another-token"
+	if end := p.once(); end != "defer:retry_remove_cluster" || p.stage(StageRemoveCluster).Code != CodeWorkloadUnreachable || p.k8sWrites() != 0 || p.disabled != 0 {
+		t.Fatalf("no provider recorded: end %s %+v", end, p.stage(StageRemoveCluster))
+	}
+	p.mutate(func(run *Run, _ *Installation, _ *Secrets) { run.Confirmed = true })
+	if end, s := p.once(), p.stage(StageRemoveCluster); end != "defer:waiting_remove_cluster" || len(s.Items) != 1 || s.Items[0].State != "not checked" {
+		t.Fatalf("no provider recorded, confirmed: end %s %+v", end, s)
 	}
 }
 

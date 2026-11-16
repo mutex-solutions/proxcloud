@@ -64,10 +64,10 @@ func (x *acq) removeCluster(ctx context.Context) error {
 	live := cl != nil && str(cl, "metadata", "deletionTimestamp") == ""
 	var wl *kamajik8s.Client
 	if live {
-		// No tenant can be on a cluster that no provider was ever registered for (stage 10 never ran) or whose control
-		// plane never came up: such a cluster's silence is not retried and needs no confirmation.
-		empty := x.in.Status.Providers == nil ||
-			(dig(cl, "status", "initialization", "controlPlaneInitialized") != true && condition(cl, "ControlPlaneInitialized") != "True")
+		// No tenant can be on a cluster whose control plane never came up: its silence is not retried and needs no
+		// confirmation. The recorded providers do not say so: stage 10 records them only after both are registered,
+		// and the first row is public from the moment it exists.
+		empty := dig(cl, "status", "initialization", "controlPlaneInitialized") != true && condition(cl, "ControlPlaneInitialized") != "True"
 		if wl, err = x.tenantsGone(ctx, seed, empty); err != nil {
 			return err
 		}

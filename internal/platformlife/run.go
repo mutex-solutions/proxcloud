@@ -154,6 +154,8 @@ type StageReceipt struct {
 	MachineDeploymentsDeleted []string       `json:"machineDeploymentsDeleted,omitempty"`
 	// Resynced are the Applications whose failed sync this run started again (once each).
 	Resynced []string `json:"resynced,omitempty"`
+	// CAPMOXWokenAt is when this run made CAPMOX look at a ProxmoxCluster an earlier run had left without a condition.
+	CAPMOXWokenAt *time.Time `json:"capmoxWokenAt,omitempty"`
 }
 
 // Terminal reports a run state that will not change any more.
