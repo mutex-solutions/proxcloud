@@ -42,7 +42,12 @@ Four charts live here:
   ([ADR 0009](../../docs/adr/0009-managed-services-platform-lifecycle.md)): a
   `KubeadmControlPlane` on one VM with kube-vip, as installer stage 50 builds the services
   cluster, and no tenant add-ons, CSI controller or Gateway API carriers. Tenant clusters keep
-  the default `kamaji`, whose output is unchanged; nothing renders kubeadm mode yet.
+  the default `kamaji`, whose output is unchanged. 0.1.12 changes kubeadm mode only: the control
+  plane's kubelet gets the machine's own address as `node-ip` (it registered the kube-vip
+  address), and kube-vip's lease is 60 s with a renew deadline of 40 s, so it tries a renewal
+  again for 40 s before it gives up the API address. Each request is still cut at 10 s by
+  kube-vip's client: a stall of about half a minute is survived, a write that takes over 10 s at
+  every try is not.
 
 ## Publishing
 
@@ -66,7 +71,8 @@ pullable; see [release readiness](../../docs/release-readiness.md).
 For `database-cluster`, `proxmox-kamaji-cluster` and `proxcloud-platform`, bump `version:` in `Chart.yaml`
 in the PR that changes the chart, merge, then have a maintainer deliberately cut
 the matching tag. The current source versions are database `0.5.1` and Kubernetes
-`0.1.11`; they are independent of the app's `0.7.0`. Publishing is idempotent — an
+`0.1.12` (published: `0.1.11`; `0.1.12` changes kubeadm mode only and waits for its tag);
+they are independent of the app's `0.7.0`. Publishing is idempotent — an
 already-published version is skipped, so a reused version does not update an old
 artifact. These are release operations, not commands to run during normal setup.
 See [CI/release operations](../../docs/ci-release.md) for full verification.

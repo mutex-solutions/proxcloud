@@ -17,6 +17,23 @@ import (
 // tenantSelector matches the Applications the Kubernetes and database providers create on the workload's ArgoCD.
 const tenantSelector = "app.kubernetes.io/managed-by=proxcloud"
 
+// note adds items to the current stage, each replacing the one of its id: a Remove lists what it deleted, what it
+// left and what it could not check, so the finished run says what happened on Proxmox.
+func (x *acq) note(ctx context.Context, items ...StageItem) error {
+	cur := slices.Clone(x.run.Stages[x.si].Items)
+	for _, it := range items {
+		if i := slices.IndexFunc(cur, func(c StageItem) bool { return c.ID == it.ID }); i >= 0 {
+			cur[i] = it
+		} else {
+			cur = append(cur, it)
+		}
+	}
+	if slices.Equal(cur, x.run.Stages[x.si].Items) {
+		return nil
+	}
+	return x.saveStage(ctx, func(s *Stage) { s.Items = cur })
+}
+
 func (x *acq) removeCluster(ctx context.Context) error {
 	st := x.in.Status.Seed
 	if x.sec.SeedKubeconfig == nil && len(x.in.Status.Clusters) == 0 && len(x.in.Status.Volumes) == 0 {
@@ -35,13 +52,19 @@ func (x *acq) removeCluster(ctx context.Context) error {
 	}
 	if gone {
 		if len(x.in.Status.Clusters) == 0 && len(x.in.Status.Volumes) == 0 {
-			return nil // an earlier Remove finished this part and then deleted the seed VM: nothing is left to delete
+			// An earlier Remove finished this part and then deleted the seed VM, or the apply never reached stage 7
+			// (which records the cluster) and the seed VM was deleted by hand: nothing is left to delete.
+			return x.note(ctx, StageItem{ID: "cluster", State: "gone", Message: "No platform cluster and no volume is recorded and the seed VM is gone: " +
+				"nothing to delete here (an earlier Remove deleted them, or none was built)."})
 		}
 		if !x.run.Confirmed {
 			return permanent(CodeSeedLost, "The seed VM is gone, so Cluster API cannot delete the workload cluster. Start Remove with confirm \"remove %s\" "+
 				"to delete the VMs of pool %s tagged pc-platform-%s and the %d recorded volumes.", x.in.Name, pve.SystemPool, x.in.ID, len(x.in.Status.Volumes))
 		}
 		if err := x.disableProviders(ctx); err != nil {
+			return err
+		}
+		if err := x.note(ctx, StageItem{ID: "tenants", State: "not checked", Message: "The seed VM is gone, so nothing could say whether tenant clusters or databases still ran on the platform."}); err != nil {
 			return err
 		}
 		if err := x.deleteTagged(ctx); err != nil {
@@ -71,14 +94,22 @@ func (x *acq) removeCluster(ctx context.Context) error {
 		if wl, err = x.tenantsGone(ctx, seed, empty); err != nil {
 			return err
 		}
+		tenants := StageItem{ID: "tenants", State: "none", Message: "The platform cluster lists no tenant cluster or database."}
+		switch {
+		case wl != nil:
+		case empty:
+			tenants.State, tenants.Message = "not checked", "The cluster's control plane never came up, so no tenant cluster or database could run on it."
+		default:
+			tenants.State, tenants.Message = "not checked", "The cluster did not answer whether tenant clusters or databases still ran on it; the run went on without the check."
+		}
+		items := []StageItem{tenants}
 		if wl == nil && len(x.in.Status.Volumes) == 0 && !empty {
 			// Passed on the confirmation alone: the volumes could not be read again, and none was recorded.
-			if err := x.saveStage(ctx, func(s *Stage) {
-				s.Items = []StageItem{{ID: "volumes", State: "not checked", Message: "The cluster did not answer and no volume of the platform was recorded, so none " +
-					"is deleted. Look on the boot store for vm-*-pvc-* disks of the platform's own components (etcd of Kamaji) and delete them by hand."}}
-			}); err != nil {
-				return err
-			}
+			items = append(items, StageItem{ID: "volumes", State: "not checked", Message: "The cluster did not answer and no volume of the platform was recorded, so none " +
+				"is deleted. Look on the boot store for vm-*-pvc-* disks of the platform's own components (etcd of Kamaji) and delete them by hand."})
+		}
+		if err := x.note(ctx, items...); err != nil {
+			return err
 		}
 	}
 	if err := x.disableProviders(ctx); err != nil {
@@ -127,10 +158,27 @@ func (x *acq) removeCluster(ctx context.Context) error {
 	}
 	if cl != nil || len(machines) > 0 {
 		var left []string
+		var items []StageItem
 		for _, m := range machines {
-			left = append(left, fmt.Sprintf("%s (VM %d)", str(m, "metadata", "name"), vmids[str(m, "metadata", "name")]))
+			name := str(m, "metadata", "name")
+			left = append(left, fmt.Sprintf("%s (%s)", name, vmText(vmids[name])))
+			items = append(items, StageItem{ID: name, State: "deleting", Message: vmText(vmids[name])})
+		}
+		if err := x.note(ctx, items...); err != nil {
+			return err
 		}
 		return waiting(CodeMachineDeleteStuck, "Cluster API is deleting %s; %d machines are left: %s", ClusterName, len(left), clip(strings.Join(left, ", ")))
+	}
+	// The machines this run saw are gone now: Cluster API deleted each with its VM, disk and bootstrap ISO.
+	done := []StageItem{{ID: "cluster", State: "gone", Message: "The seed lists no cluster " + ClusterName + " and no machine of it."}}
+	for _, it := range x.run.Stages[x.si].Items {
+		if it.State == "deleting" {
+			it.State = "deleted"
+			done = append(done, it)
+		}
+	}
+	if err := x.note(ctx, done...); err != nil {
+		return err
 	}
 	return x.clusterRemoved(ctx)
 }
@@ -187,7 +235,7 @@ func (x *acq) deleteTagged(ctx context.Context) error {
 	if err != nil {
 		return classify(CodeMachineDeleteStuck, err)
 	}
-	var left []StageItem
+	var items []StageItem
 	for i := 0; pool != nil && i < len(pool.Members); i++ {
 		m := pool.Members[i]
 		if m.Type != "qemu" {
@@ -199,7 +247,7 @@ func (x *acq) deleteTagged(ctx context.Context) error {
 		}
 		if !slices.Contains(vmTags(cfg), "pc-platform-"+x.in.ID) {
 			if strings.HasPrefix(cfg.Str("name"), ClusterName+"-") && !slices.ContainsFunc(vmTags(cfg), func(t string) bool { return strings.HasPrefix(t, "pc-platform-") }) {
-				left = append(left, StageItem{ID: fmt.Sprintf("vm-%d", m.VMID), State: "left", Message: fmt.Sprintf("VM %d (%s) on %s is in pool %s and carries no "+
+				items = append(items, StageItem{ID: fmt.Sprintf("vm-%d", m.VMID), State: "left", Message: fmt.Sprintf("VM %d (%s) on %s is in pool %s and carries no "+
 					"installation's tag: not deleted. If it is a machine of this platform that was still being cloned, delete it in Proxmox.", m.VMID, cfg.Str("name"), m.Node, pve.SystemPool)})
 			}
 			continue
@@ -230,19 +278,26 @@ func (x *acq) deleteTagged(ctx context.Context) error {
 		if err := x.pveTask(ctx, CodeMachineDeleteStuck, func() (pve.UPID, error) { return x.capi.DeleteVM(ctx, m.Node, m.VMID) }); err != nil {
 			return err
 		}
+		if err := x.note(ctx, StageItem{ID: fmt.Sprintf("vm-%d", m.VMID), State: "deleted", Message: fmt.Sprintf("VM %d (%s) on %s, after its bootstrap ISO.", m.VMID, cfg.Str("name"), m.Node)}); err != nil {
+			return err
+		}
 	}
-	if !slices.Equal(left, x.run.Stages[x.si].Items) {
-		return x.saveStage(ctx, func(s *Stage) { s.Items = left })
-	}
-	return nil
+	return x.note(ctx, items...)
 }
 
 // deleteVolumes deletes the recorded volumes with the CSI token, by their exact handles (region/node/storage/volume):
 // names like vm-9999-pvc-* are shared with tenant volumes, so nothing is matched by pattern. Done when no store lists
 // one of them any more.
 func (x *acq) deleteVolumes(ctx context.Context) error {
+	// noted: the stage has an item of that id; with "", any item about volumes.
+	noted := func(id string) bool {
+		return slices.ContainsFunc(x.run.Stages[x.si].Items, func(it StageItem) bool { return it.ID == id || (id == "" && strings.HasPrefix(it.ID, "volume")) })
+	}
 	if len(x.in.Status.Volumes) == 0 {
-		return nil
+		if noted("") {
+			return nil
+		}
+		return x.note(ctx, StageItem{ID: "volumes", State: "none recorded", Message: "No volume of the platform's own components was recorded (stage 9 records them), so none was deleted."})
 	}
 	csi, err := TokenClient(x.es, x.sec.CSI)
 	if err != nil || csi == nil {
@@ -260,7 +315,13 @@ func (x *acq) deleteVolumes(ctx context.Context) error {
 		if err != nil {
 			return classify(CodeVolumeDeleteFailed, err)
 		}
+		item := StageItem{ID: "volume-" + vol, State: "not found", Message: fmt.Sprintf("%s (%s, claim %s): the store no longer lists it.", v.Handle, v.Component, v.PVC)}
 		if !slices.ContainsFunc(listed, func(c pve.StorageContent) bool { return c.VolID == storage+":"+vol }) {
+			if !noted(item.ID) {
+				if err := x.note(ctx, item); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 		if err := x.check(ctx); err != nil {
@@ -268,6 +329,10 @@ func (x *acq) deleteVolumes(ctx context.Context) error {
 		}
 		if err := csi.DeleteStorageVolume(ctx, node, storage, vol); err != nil {
 			return classify(CodeVolumeDeleteFailed, err)
+		}
+		item.State, item.Message = "deleted", fmt.Sprintf("%s (%s, claim %s)", v.Handle, v.Component, v.PVC)
+		if err := x.note(ctx, item); err != nil {
+			return err
 		}
 		deleted++
 	}

@@ -122,6 +122,7 @@ type Stage struct {
 	ID             string        `json:"id"`
 	State          string        `json:"state"`
 	Retries        int           `json:"retries"`
+	Refused        int           `json:"refused,omitempty"` // looks on end a cluster answered 401 or 403 (see startingUp)
 	StartedAt      *time.Time    `json:"startedAt,omitempty"`
 	Deadline       *time.Time    `json:"deadline,omitempty"`
 	FinishedAt     *time.Time    `json:"finishedAt,omitempty"`

@@ -648,6 +648,31 @@ func refused(err error) bool {
 	return errors.As(err, &ka) && ka.Status >= 400 && ka.Status < 500 && ka.Status != http.StatusConflict && ka.Status != http.StatusTooManyRequests
 }
 
+// startingUp reports a Kubernetes 401 or 403: what a cluster answers to a credential it refuses, and also what its API
+// server answers to a good one for some seconds after it starts, while its caches fill (seen on a lab after the
+// seed's k3s restarted under disk load). At v1.35:
+//   - a 401, the bare "Unauthorized" of every failed authentication (apiserver/pkg/endpoints/filters/
+//     authentication.go), also for a service account token whose Secret the server cannot read yet;
+//   - a 403 of the RBAC authorizer, with "RBAC: [clusterrole … not found]" when it has read the subject's bindings
+//     and not the roles (plugin/pkg/auth/authorizer/rbac/rbac.go), and with no reason when it has read neither;
+//   - a 403 "not yet ready to handle request" of an admission plugin whose informer has not synced in 10 s
+//     (apiserver/pkg/admission/plugin/namespace/lifecycle: every write of a namespaced object).
+//
+// No wording tells the start from a revoked token, a deleted role or binding, a quota or a namespace that is being
+// deleted, and /readyz does not either: it answers the same 401 to a token the server does not know (k3s allows no
+// anonymous request). So the stage counts the looks on end that end so (Stage.Refused): the first refusedLooks-1 are
+// passing errors, the next ends the run with the stage's code and the server's text. With the delays of a retry
+// that is 3 min 45 s or more, where a start takes seconds.
+func startingUp(err error) bool {
+	var ka *kamajik8s.APIError
+	return errors.As(err, &ka) && (ka.Status == http.StatusUnauthorized || ka.Status == http.StatusForbidden)
+}
+
+const (
+	refusedLooks   = 5
+	startingUpNote = "The cluster's API refuses the run's credential, as an API server does for some seconds after it starts. "
+)
+
 // seedIdentity is stage 5: read the portal's service account token with the bootstrap token, store it, delete the
 // bootstrap objects with it, then eject and delete the CD. Done only when the running seed's config no longer names
 // the CD and the ISO store no longer lists it.
@@ -667,7 +692,10 @@ func (x *acq) seedIdentity(ctx context.Context) error {
 		data, err := boot.GetSecretData(ctx, SeedPortalNamespace, SeedPortalTokenSecret)
 		var ka *kamajik8s.APIError
 		if errors.As(err, &ka) && ka.Status == http.StatusUnauthorized {
-			return permanent(CodeSeedIdentityLost, "The seed refused the bootstrap token (it expires %s after the seed was built): Retry rebuilds the seed.", SeedBootstrapTTL)
+			// Not final at once: a seed that has just started knows no bootstrap token until it has read its Secrets
+			// (plugin/pkg/auth/authenticator/token/bootstrap reads them from a cache only).
+			return &stageErr{kindRefused, CodeSeedIdentityLost, fmt.Sprintf("The seed refuses the bootstrap token, which expires %s after the seed was built: "+
+				"Retry rebuilds the seed.", SeedBootstrapTTL)}
 		}
 		if errors.As(err, &ka) && ka.Status == http.StatusForbidden {
 			// The seed applies the token before the Role and RoleBinding that let it read the Secret.
@@ -689,7 +717,8 @@ func (x *acq) seedIdentity(ctx context.Context) error {
 			return classify(CodeSeedIdentityLost, err)
 		}
 		if !admin {
-			return permanent(CodeSeedIdentityLost, "The seed's service account %s is not cluster-admin.", SeedPortalAccount)
+			// Waited for: a seed that has just started denies every review until its RBAC caches are filled.
+			return waiting(CodeSeedIdentityLost, "The seed does not report its service account %s as cluster-admin (yet).", SeedPortalAccount)
 		}
 		if err := x.record(ctx, func(_ *Run, in *Installation, sec *Secrets) {
 			now := time.Now().UTC()
@@ -773,14 +802,34 @@ func (x *acq) removeSeed(ctx context.Context) error {
 		}
 		node = st.Node
 	}
-	return x.purgeCDs(ctx, node)
+	if err := x.purgeCDs(ctx, node); err != nil {
+		return err
+	}
+	// What the finished run shows: the seed VM as it is now, and that no CD is left.
+	items := []StageItem{{ID: "cds", State: "gone", Message: fmt.Sprintf("No CD pcplat-%s-* is on the ISO store of %s.", x.in.ID, node)}}
+	if st != nil && st.VMID != 0 {
+		vm, err := x.observe(ctx, st.VMID, st.Generation)
+		if err != nil {
+			return err
+		}
+		// "gone", not "deleted": an earlier Remove may have deleted it, and this one only found it absent.
+		seed := StageItem{ID: fmt.Sprintf("vm-%d", st.VMID), State: "gone", Message: fmt.Sprintf("Proxmox no longer has the seed VM %d (%s) of %s: it was deleted with its disk and its firewall rules.",
+			st.VMID, SeedVMName(x.in.ID, st.Generation), st.Node)}
+		if !vm.absent {
+			seed.State, seed.Message = "left", fmt.Sprintf("The VM at %d is not this installation's seed (%s): not deleted.", st.VMID, SeedVMName(x.in.ID, st.Generation))
+		}
+		items = append(items, seed)
+	}
+	return x.note(ctx, items...)
 }
 
 // removeSecrets wipes platformSecret and what the status says was built.
 func (x *acq) removeSecrets(ctx context.Context) error {
-	return x.save(ctx, func(_ *Run, in *Installation, sec *Secrets) {
+	return x.save(ctx, func(run *Run, in *Installation, sec *Secrets) {
 		*sec = Secrets{ID: sec.ID}
 		in.Status = Status{Phase: in.Status.Phase, Providers: in.Status.Providers} // the rows stay, DISABLED
+		run.Stages[x.si].Items = []StageItem{{ID: "secrets", State: "deleted", Message: "The stored secrets of both tokens, the seed's credential and tokens, and the recorded status. " +
+			"The tokens themselves still exist in Proxmox, and the provider rows stay, disabled."}}
 	})
 }
 

@@ -489,12 +489,30 @@ func TestDeadline(t *testing.T) {
 	}
 }
 
-// A run whose BOM this build no longer embeds ends portal_changed.
+// A run whose BOM this build no longer embeds ends portal_changed. The stage it stood at ends with it: it does not
+// keep reading waiting with the code it had, and the log names that stage, not the first.
 func TestPortalChanged(t *testing.T) {
 	e := newEnv(t, RunApply)
 	e.mutate(func(run *Run, _ *Installation, _ *Secrets) { run.BOM.SHA256 = strings.Repeat("0", 64) })
 	if end := e.once(); end != "fail:"+CodePortalChanged {
 		t.Fatalf("end %s", end)
+	}
+	if s := e.stage(StageValidate); s.State != StagePending || strings.Contains(e.logs.String(), "stage=validate") {
+		t.Fatalf("a run that had not started a stage: %+v\n%s", s, e.logs)
+	}
+	e = newEnv(t, RunApply)
+	e.upTo(stageCluster)
+	started := time.Now().Add(-time.Minute)
+	e.mutate(func(run *Run, _ *Installation, _ *Secrets) {
+		run.BOM.SHA256, run.State = strings.Repeat("0", 64), RunWaiting
+		run.Stages[6] = Stage{ID: stageCluster, State: StageWaiting, StartedAt: &started, Code: CodeControlPlaneTimeout, Message: "0 of 4 machines are Running"}
+	})
+	if end := e.once(); end != "fail:"+CodePortalChanged {
+		t.Fatalf("end %s", end)
+	}
+	if s := e.stage(stageCluster); s.State != StageFailed || s.Code != CodePortalChanged || !strings.Contains(s.Message, "upgraded") || s.FinishedAt == nil ||
+		!strings.Contains(e.logs.String(), "stage=cluster") || e.stage(StageValidate).State != StageDone {
+		t.Fatalf("the stage the run stood at: %+v\n%s", s, e.logs)
 	}
 }
 
@@ -638,17 +656,59 @@ func TestSeedIdentityWaitsForTheBootstrapRBAC(t *testing.T) {
 	}
 }
 
-// A service account that is not cluster-admin, or a refused bootstrap token, ends the stage seed_identity_lost.
+// A service account that is not cluster-admin, or a refused bootstrap token, ends the stage seed_identity_lost. Not at
+// the first look: a seed that has just started knows no bootstrap token and denies every access review until its
+// caches are filled, so both are tried again. The stage's time limit ends the first with that code, the fifth refused
+// look on end the second.
 func TestSeedIdentityLost(t *testing.T) {
+	past := time.Now().Add(-time.Minute)
+	expire := func(e *env) {
+		e.mutate(func(run *Run, _ *Installation, _ *Secrets) { run.Stages[4].Deadline = &past })
+	}
 	e, seed := fakeSeedEnv(t, StageSeedIdentity)
 	seed.saAllowed = false
-	if end := e.once(); end != "fail:"+CodeSeedIdentityLost {
-		t.Fatalf("not cluster-admin: %s", end)
+	if end := e.once(); end != "defer:waiting_seed_identity" || e.stage(StageSeedIdentity).Code != CodeSeedIdentityLost {
+		t.Fatalf("not cluster-admin: %s %+v", end, e.stage(StageSeedIdentity))
 	}
+	if _, _, sec := e.state.snapshot(); sec.SeedKubeconfig != nil {
+		t.Fatal("a credential that is not cluster-admin was stored")
+	}
+	expire(e)
+	if end := e.once(); end != "fail:"+CodeSeedIdentityLost || !strings.Contains(e.stage(StageSeedIdentity).Message, "cluster-admin") {
+		t.Fatalf("not cluster-admin at the time limit: %s %+v", end, e.stage(StageSeedIdentity))
+	}
+	// A seed that answers the review only after its start: the stage goes on.
+	e, seed = fakeSeedEnv(t, StageSeedIdentity)
+	seed.saAllowed = false
+	e.once()
+	seed.mu.Lock()
+	seed.saAllowed = true
+	seed.mu.Unlock()
+	if end := e.until(3); end != "complete" {
+		t.Fatalf("cluster-admin at the second look: %s %+v", end, e.stage(StageSeedIdentity))
+	}
+
 	e, seed = fakeSeedEnv(t, StageSeedIdentity)
 	seed.boot = func() string { return "zzzzzz.zzzzzzzzzzzzzzzz" }
-	if end := e.once(); end != "fail:"+CodeSeedIdentityLost {
-		t.Fatalf("expired bootstrap token: %s", end)
+	if end, s := e.once(), e.stage(StageSeedIdentity); end != "defer:retry_seed_identity" || s.Code != CodeSeedIdentityLost || s.Retries != 1 {
+		t.Fatalf("a refused bootstrap token: %s %+v", end, s)
+	}
+	// An expired token is not waited out to the time limit: the fifth refused look on end is final.
+	if end, s := e.until(refusedLooks-2), e.stage(StageSeedIdentity); end != "defer:retry_seed_identity" || s.Refused != refusedLooks-1 {
+		t.Fatalf("a bootstrap token refused four times: %s %+v", end, s)
+	}
+	if end := e.once(); end != "fail:"+CodeSeedIdentityLost || !strings.Contains(e.stage(StageSeedIdentity).Message, "bootstrap token") {
+		t.Fatalf("expired bootstrap token: %s %+v", end, e.stage(StageSeedIdentity))
+	}
+	// The same 401 from a seed whose token is good once it has read its Secrets.
+	e, seed = fakeSeedEnv(t, StageSeedIdentity)
+	seed.boot = func() string { return "zzzzzz.zzzzzzzzzzzzzzzz" }
+	e.once()
+	seed.mu.Lock()
+	seed.boot = func() string { return runBoot }
+	seed.mu.Unlock()
+	if end := e.until(3); end != "complete" {
+		t.Fatalf("a bootstrap token the seed knows at the second look: %s %+v", end, e.stage(StageSeedIdentity))
 	}
 }
 
@@ -858,6 +918,11 @@ func TestRemoveSeed(t *testing.T) {
 		if e.pve.vms[120] != nil || e.pve.vms[300] == nil || !slices.Equal(e.pve.iso, []string{"pcseed-tenant.iso"}) ||
 			run.State != RunSucceeded || in.Status.Phase != PhaseRemoved || in.Status.Seed != nil || sec.CAPI != nil || sec.BootstrapToken != "" {
 			t.Fatalf("lost at %d: VMs %v, ISO %v, run %s, phase %s, secrets %+v", n, e.pve.pooled(), e.pve.iso, run.State, in.Status.Phase, sec)
+		}
+		// The finished run says what it deleted.
+		if vm, cds, secrets := item(e.stage(StageRemoveSeed), "vm-120"), item(e.stage(StageRemoveSeed), "cds"), item(e.stage(StageRemoveSecrets), "secrets"); vm == nil ||
+			vm.State != "gone" || !strings.Contains(vm.Message, SeedVMName(inID, 2)) || cds == nil || secrets == nil || secrets.State != "deleted" {
+			t.Fatalf("lost at %d: items %+v %+v", n, e.stage(StageRemoveSeed).Items, e.stage(StageRemoveSecrets).Items)
 		}
 		if n == 0 {
 			total = e.jobs.checkpoints
