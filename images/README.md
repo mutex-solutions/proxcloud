@@ -46,9 +46,9 @@ Vendor cloud-init must grow the guest partition/filesystem on first boot; the PV
 
 ## Known issue: published Ubuntu 26.04 images
 
-Every Ubuntu 26.04 OS and Kubernetes node image published up to 2026-11-15 carries a stale ext4 superblock
+Every Ubuntu 26.04 OS and Kubernetes node image exported before the fix carries a stale ext4 superblock
 field that can turn a VM's root read-only at a reboot. Affected images, guest test and repair:
-[docs/template-updates.md](../docs/template-updates.md#known-issue-ubuntu-2604-images-published-before-2026-11-16).
+[docs/template-updates.md](../docs/template-updates.md#known-issue-ubuntu-2604-images-exported-before-the-orphan-file-fix).
 The export now removes the field and refuses to publish an image that has it
 ([docs/public-vm-sanitization.md](../docs/public-vm-sanitization.md#known-issue-stale-orphan-file-inode-in-ubuntu-2604-images-published-before-the-fix)).
 
