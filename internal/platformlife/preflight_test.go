@@ -19,6 +19,7 @@ type preflightPVE struct {
 	perms   map[string]map[string][]string
 	writes  []string
 	bootISO bool   // the boot store local-lvm takes ISO images too
+	outside string // a service user that is not in the group proxcloud-kube: PVE refuses to show it to the portal token
 	vnets   string // the cluster's vnets, [] when empty
 }
 
@@ -52,7 +53,8 @@ func (f *preflightPVE) serve(w http.ResponseWriter, r *http.Request) {
 			{"path":"/storage","type":"token","ugid":"capmox@pve!capi","roleid":"ProxCloudCAPI","propagate":1},
 			{"path":"/pool","type":"token","ugid":"capmox@pve!capi","roleid":"ProxCloudCAPI","propagate":1},
 			{"path":"/storage/local","type":"token","ugid":"capmox@pve!capi","roleid":"PVEDatastoreAdmin","propagate":0}]`,
-		"/access/users/capmox@pve": `{"groups":[]}`,
+		"/access/users/capmox@pve": `{"groups":["proxcloud-kube"]}`,
+		"/access/users/csi@pve":    `{"groups":["proxcloud-kube","ops"]}`,
 		"/access/roles":            `[{"roleid":"PVEDatastoreAdmin","privs":"Datastore.Allocate,Datastore.AllocateSpace,Datastore.AllocateTemplate,Datastore.Audit"}]`,
 	}
 	if f.bootISO {
@@ -71,6 +73,11 @@ func (f *preflightPVE) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		b, _ := json.Marshal(map[string]any{p: privs})
 		body, ok = string(b), true
+	}
+	if f.outside != "" && path == "/access/users/"+f.outside {
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"data":null}`)
+		return
 	}
 	if !ok {
 		w.WriteHeader(http.StatusNotImplemented)
@@ -160,6 +167,16 @@ func TestPreflight(t *testing.T) {
 		t.Errorf("the mint role on /access/groups: %+v, %+v", c["mint-scope"], c["privileges:kubemint"])
 	}
 	delete(f.perms[pve.DefaultPlatformTokenID], "/access/groups")
+	// An operator took csi@pve out of the group (pveum user modify without --append): the privileges read complete,
+	// yet PVE refuses every token delete for it, so a cluster release fails.
+	f.outside = "csi@pve"
+	if c := checkMap(pf.Run(ctx)); c["mint-scope"].Status != CheckFail || c["privileges:kubemint"].Status != CheckOK ||
+		!strings.Contains(c["mint-scope"].Message, "csi@pve is not in the group proxcloud-kube") ||
+		!strings.Contains(c["mint-scope"].Message, "pveum user modify csi@pve --groups proxcloud-kube --append 1") ||
+		strings.Contains(c["mint-scope"].Message, "capmox@pve") {
+		t.Errorf("a service user outside the group: %+v", c["mint-scope"])
+	}
+	f.outside = ""
 	// The same site's row on /pool: the portal needs no Permissions.Modify there.
 	onPool := f.perms[pve.DefaultPlatformTokenID]["/pool"]
 	f.perms[pve.DefaultPlatformTokenID]["/pool"] = append(slices.Clone(onPool), "Permissions.Modify")

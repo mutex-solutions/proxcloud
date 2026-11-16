@@ -352,6 +352,31 @@ var KubeMintForbidden = []PrivCheck{
 	{Path: "/pool", Privs: []string{"Permissions.Modify"}},
 }
 
+// KubeMintGroupProblems names each of KubeMintGroupMembers that is not in KubeMintGroup, with the command that puts
+// it there. PVE lets the token create and delete tokens for the members of that group alone ("userid-group"), so a
+// user outside it makes every cluster create or release fail with 403 while the token's privileges read complete.
+// GET /access/users/{user} passes the same check: 403 is a user the token does not reach through any group.
+func (c *Client) KubeMintGroupProblems(ctx context.Context) ([]string, error) {
+	var out []string
+	for _, u := range KubeMintGroupMembers {
+		var got struct {
+			Groups []string `json:"groups"`
+		}
+		err := c.get(ctx, "/access/users/"+u, nil, &got)
+		var ae *APIError
+		if errors.As(err, &ae) && ae.Status == http.StatusForbidden {
+			err, got.Groups = nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !slices.Contains(got.Groups, KubeMintGroup) {
+			out = append(out, u+" is not in the group "+KubeMintGroup+", so the portal token cannot create or delete its tokens: pveum user modify "+u+" --groups "+KubeMintGroup+" --append 1")
+		}
+	}
+	return out, nil
+}
+
 // KubeMintOldPaths are the paths where earlier versions granted KubeMintRole to the portal's user and token and this
 // one does not: ManagedSetupScript and installer stage 10 delete exactly those rows.
 var KubeMintOldPaths = []string{"/access/groups", "/pool"}

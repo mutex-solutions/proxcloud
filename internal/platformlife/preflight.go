@@ -171,12 +171,15 @@ func (p Preflight) Run(ctx context.Context) []Check {
 
 	// The mint grant reaches the users of pve.KubeMintGroup alone. On /access/groups itself (where sites set up before
 	// the group hold it) PVE lets the token create an API token for every user of the cluster, root@pam included.
+	// And only them: a service user outside the group fails every cluster create and release.
 	if held, err := p.Portal.C.HeldPrivileges(ctx, pve.KubeMintForbidden); err != nil {
 		row("mint-scope", readErr("the permissions of the portal token", err), "")
 	} else if len(held) > 0 {
 		row("mint-scope", []string{"the portal token holds " + strings.Join(held, "; ") + ": " + pve.KubeMintNarrowing}, "")
+	} else if outside, err := p.Portal.C.KubeMintGroupProblems(ctx); err != nil {
+		row("mint-scope", readErr("the users the portal token creates tokens for", err), "")
 	} else {
-		row("mint-scope", nil, "The portal token may create tokens for the users of the group "+pve.KubeMintGroup+" alone.")
+		row("mint-scope", outside, "The portal token may create tokens for the users of the group "+pve.KubeMintGroup+" alone, and both are in it.")
 	}
 
 	// The fence: the portal token holds nothing on either platform pool, the CSI token nothing on the seed's.
