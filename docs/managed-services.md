@@ -76,8 +76,8 @@ reading [section 3](#3-proxmox-identities): they share the pool `proxcloud-syste
 | A GitHub integration | System → Integrations. Template updates finds and downloads the two images through it. |
 | Permissions | `admin:service:read` to read the page, `admin:service:manage` for every button, the Check and the seed kubeconfig download included. |
 | A platform network | One bridge that exists on every node used, untagged (no VLAN), with a free IPv4 network from /8 to /29, a gateway and one to three DNS servers. It must not overlap the provider's tenant address pool (`cidrPool`), a sandbox network or a public network. |
-| Routes | The API (on Compose: the API container) reaches the Proxmox API, the seed address on 6443 and the cluster's API address on 6443. The seed and the cluster machines reach the Proxmox API URL you enter, `github.com` (the seed downloads k3s at first boot, checked by sha256) and the registries and chart repositories of the BOM (`ghcr.io`, `charts.jetstack.io`, `helm.cilium.io`, `metallb.github.io`, `cloudnative-pg.github.io`, `clastix.github.io`, and the image registries those charts pull from). Tenant networks must reach the load balancer range and nothing else of the platform network. |
-| Storage | A boot store that takes VM disks on every node used; an ISO store that is local to each node and takes ISOs (default `local`); an import store with `import` content on every node an image goes to (default: the provider's `importStorage`). |
+| Routes | The API (on Compose: the API container) reaches the Proxmox API, the seed address on 6443 and the cluster's API address on 6443. The seed and the cluster machines reach the Proxmox API URL you enter, `github.com` and `raw.githubusercontent.com` (at first boot the seed downloads the k3s binary from the first and the k3s install script from the second, both checked by sha256; GitHub redirects a release download to another host of its own, which must be reachable too and is not named in the BOM) and the registries and chart repositories of the BOM (`ghcr.io`, `charts.jetstack.io`, `helm.cilium.io`, `metallb.github.io`, `cloudnative-pg.github.io`, `clastix.github.io`, and the image registries those charts pull from). Tenant networks must reach the load balancer range and nothing else of the platform network. |
+| Storage | A boot store that takes VM disks on every node used; an ISO store that is local to each node and takes ISOs (default `local`); an import store with `import` content on every node an image goes to (default: the provider's `importStorage`). Use an import store that is not the boot store: the portal token holds `PVEDatastoreAdmin` on the import store, which reaches every disk on it ([section 10](#10-security-boundaries)). Nothing checks this. |
 | Capacity | The smallest machine is 2 cores, 4 GiB of memory and a 20 GiB disk. The smallest layout (seed, control plane, one machine per group) is five VMs. The review step adds up cores and memory per node; it does not read what is free. |
 | Root on one node | Once, to run the identities script. |
 | The datacenter firewall | On, with the provider's isolation rules written by a provider sync: the Check verifies that tenant traffic to the seed, the API address and the node range is dropped. |
@@ -91,8 +91,9 @@ Go live never waits for it.
 
 ## 3. Proxmox identities
 
-The portal token cannot create users, tokens or pools, and ProxCloud asks for no root password. Step
-2 of the page shows a script to run as root on one node:
+The portal token cannot create users or roles or grant itself the rows below, and it must hold
+nothing on the seed's pool; ProxCloud asks for no root password. Step 2 of the page shows a script to
+run as root on one node:
 
 ```
 GET /api/v1/admin/setup/proxmox-script?managedServices=true&bootStorage=<store>&isoStorage=<store>[&tokenId=<portal token>][&importStorage=<store>]
@@ -100,7 +101,10 @@ GET /api/v1/admin/setup/proxmox-script?managedServices=true&bootStorage=<store>&
 
 It is the [portal token script](proxmox-permissions.md#portal-token-script) followed by the
 managed-services block. The page fills in the stores of the saved settings and the provider's token
-id, and leaves `gpu` out. The block:
+id, and leaves `gpu` out. Because the provider is saved, the portal token exists already: the first
+lines of the output report it as existing, which is expected. Do not remove it; the saved provider
+uses its secret. Only the two secrets printed for `capmox@pve!capi` and `csi@pve!csi` are pasted in
+step 2. The block:
 
 - creates the roles `ProxCloudCAPI`, `ProxCloudCSI` and `ProxCloudKubeMint` when missing and appends
   their privileges (a re-run adds privileges and removes none);
@@ -121,10 +125,10 @@ id, and leaves `gpu` out. The block:
 they are sealed with the encryption key in the collection `platformSecret`, no route returns them,
 and an installation shows only which ids are stored. To replace one, paste a new one.
 
-**When a token already exists**, `pveum user token add` fails, the script prints
+**When `capmox@pve!capi` or `csi@pve!csi` already exists**, `pveum user token add` fails, the script prints
 `The token … exists already: its secret was printed when it was created.` and goes on with the
-ACL rows. Proxmox does not show a secret again. Either paste the secret you kept, or remove the
-token and run the script again:
+ACL rows. Proxmox does not show a secret again. Either paste the secret you kept, or remove that
+token (never the portal token) and run the script again:
 
 ```sh
 pveum user token remove capmox@pve capi
@@ -196,7 +200,7 @@ the settings (`409 rev_conflict`: the page reads them again).
 | `isolation` | The seed, the API address or part of the node range is in no blocked or management network, or the cluster firewall's isolation rules are not the ones a sync writes | Add the CIDRs the message names to **Networks tenants must not reach** on the provider's page (`blockedCidrs`), then **Run a provider sync, then check again**. Check that the datacenter firewall is on. With no tenant network yet the check passes: the rules are written with the first one |
 | `credentials` | A token secret is not stored | Paste it in step 2 |
 | `privileges:capi`, `privileges:csi`, `privileges:kubemint` | The CAPI token, the CSI token or the portal token lacks a privilege on a path; the message names both | Run the script again |
-| `pool-fence` | The portal token holds a privilege on `proxcloud-system` or `proxcloud-seed`, or the CSI token on `proxcloud-seed` | Remove that permission in Proxmox |
+| `pool-fence` | The portal token holds a privilege on `proxcloud-system` or `proxcloud-seed`, or the CSI token on `proxcloud-seed` | Run the script again with the provider's token id: it writes the `NoAccess` rows on both pools, and a missing row is the usual cause (the portal token's `/pool` rows pass down to them). Only if the check still fails, remove the row granted to that user or token on `/pool/proxcloud-system` or `/pool/proxcloud-seed` itself. Do not remove its `/pool` rows: every tenant operation needs them |
 | `iso-store-visibility` | The CAPI token sees an ISO store other than the one in the settings. CAPMOX puts each bootstrap ISO on the first ISO store its token sees | Remove its permission on the others, or change the ISO store and run the script again |
 | `boot-iso-grant` | `capmox@pve` may not upload and delete on the ISO store | Run the script again |
 | `boot-iso` | The ISO store is shared, takes no ISOs, or is not the only ISO store of the boot storage | Name a node-local ISO store |
@@ -222,7 +226,7 @@ One run per installation at a time. The page reads the run every 3 seconds.
 | 2 | Import the two images (`images`) | The seed image on the seed's node and the node image on the control plane's node and every node of a group, through template updates. An image whose template from an earlier import still exists on that node is not imported again; a template deleted by hand is imported again. | No import moved for 60 min |
 | 3 | Create the seed VM (`seed-vm`) | Takes a free VMID, clones the seed template into `proxcloud-seed` with the CAPI token, sets size and network, generates the seed's k3s server CA and tokens, uploads a NoCloud CD (`pcplat-<id>-…`) to the ISO store, turns on the VM firewall (policy DROP; 6443, and 22 when SSH keys are set, from the API sources only) and starts the VM. | 30 min |
 | 4 | Reach the seed (`seed-api`) | Waits until `https://<seed address>:6443/readyz` answers with a certificate of the CA made in stage 3. While it does not, the stage says whether the guest agent answers (`seed_not_booted`) or only the API does not (`seed_api_unreachable`). | 20 min |
-| 5 | Secure the seed (`seed-identity`) | Reads the token of the service account `proxcloud-system/proxcloud-portal` with a bootstrap token, checks that it is cluster-admin, stores it encrypted, deletes the bootstrap token and its RBAC, then detaches and deletes the CD. Done only when no store lists the CD. From here the seed counts as ready. | 10 min |
+| 5 | Secure the seed (`seed-identity`) | Reads the token of the service account `proxcloud-system/proxcloud-portal` with a bootstrap token, checks that it is cluster-admin, stores it encrypted, deletes the bootstrap token and its RBAC, then detaches and deletes the CD. The seed counts as ready from the moment its credential is stored; the stage is done only when no store lists the CD. | 10 min |
 | 6 | Install the seed's components (`seed-platform`) | ArgoCD as a k3s HelmChart, the AppProject `proxcloud-platform` (BOM chart repositories only; the `default` project locked), then `cert-manager` and `capi` wave by wave. `capi` is done when the clusterctl inventory equals the BOM. | 30 min |
 | 7 | Build the platform cluster (`cluster`) | The CAPI token's Secret and the Application `pc-platform` on the seed; MachineDeployments of nodes no longer in a group are deleted; then waits for the control plane, the admin kubeconfig and every Machine Running. The items list each machine with its VMID. | 60 min |
 | 8 | Reach the platform cluster (`workload-access`) | Creates the seed ArgoCD's service account on the cluster and a token for it (one year, renewed by any later apply when under 90 days are left), kept only in the seed's cluster Secret; writes the CSI token's Secret for proxmox-csi. | 10 min |
@@ -244,8 +248,8 @@ A Remove has three stages: Delete the platform cluster (`remove-cluster`, 45 min
   you can do meanwhile and `must finish by`. This is normal during stages 2, 4, 7 and 9: an import,
   a boot, a kubeadm join and a chart sync take minutes.
 - A stage fails when its time limit passes (with the code it was waiting on, or `<stage>_timeout`
-  when it had none), after 40 passing errors, or at once on a refusal: a Proxmox or Kubernetes 4xx
-  other than 409 and 429, a failed Proxmox task, a failed Machine.
+  when it had none), after 40 passing errors, or at once on a refusal: a Proxmox 4xx other than 429, a
+  Kubernetes 4xx other than 409 and 429, a failed Proxmox task, a failed Machine.
 - **Skipped**: the stage had nothing to do (for example `remove-cluster` when no seed ever became
   ready).
 - The installation's phase is `applying` or `removing` during a run, then `ready`, `removed` or
@@ -273,15 +277,15 @@ stage is still trying.
 | `image_import_failed` | 2 | Proxmox could not be read; a node lacks the import or boot store; an import failed or was refused; a template is gone and that could not be proven | Open Template updates to see the import, then **Retry**. If it keeps failing, install a newer release |
 | `image_import_stalled` | 2 | No import moved for an hour | The same |
 | `image_blocked` | 2 | A BOM image is on the template update blocklist | Install a newer ProxCloud release |
-| `seed_clone_failed` | 3 | The clone task failed or was refused; stage 2 recorded no seed template; the VM stays locked | Fix the storage or the node the message names, **Retry** |
+| `seed_clone_failed` | 3, Remove | The clone task failed or was refused; stage 2 recorded no seed template; the VM stays locked. Also, with nothing being cloned: Proxmox could not be read with the CAPI token while looking at the seed VM or the pool `proxcloud-seed` (unreachable, or the token is refused), in stage 3 on a ready seed or in `remove-cluster` and `remove-seed` | Fix the storage or the node the message names, **Retry**. For a read that failed: check that `capmox@pve!capi` still exists and the stored secret is current, then **Retry** or **Remove again** |
 | `seed_config_refused` | 3, Remove | Proxmox refused a config change, the CD upload, a firewall rule or the start; the CD could not be built; at Remove, the VM is locked or carries another installation's tag | The same. A VM with another installation's tag is not deleted: look at it in Proxmox |
-| `seed_not_booted` | 4 | The seed's guest agent did not answer in time: the VM did not boot, or its first boot failed (for example k3s could not be downloaded or failed its checksum) | Open the seed VM's console in Proxmox. **Retry** builds a new seed |
-| `seed_api_unreachable` | 4, 6, 7, Remove, seed access | The seed is booted but its API does not answer from the API's host; or a seed call failed later | Add a route from the ProxCloud host to the platform network, or correct the seed API sources and save. **Retry** writes the seed's firewall rules again first |
+| `seed_not_booted` | 4 | The seed's guest agent did not answer in time: the VM did not boot, or its first boot failed (for example the k3s binary or its install script could not be downloaded, or one failed its checksum) | Open the seed VM's console in Proxmox. **Retry** builds a new seed |
+| `seed_api_unreachable` | 4, 6 to 10, Remove, seed access | The seed is booted but its API does not answer from the API's host; or a seed call failed later (stages 8 to 10 read the cluster's admin kubeconfig from the seed) | Add a route from the ProxCloud host to the platform network, or correct the seed API sources and save. **Retry** writes the seed's firewall rules again first |
 | `seed_tls_mismatch` | 4 | The server on the seed address presents a certificate of another CA | Another machine holds that address. Correct the seed address, **Retry** |
 | `seed_identity_lost` | 4, 5, later | The run holds no credential for the seed; the bootstrap token was refused (it expires 3 hours after the seed was built); the service account is not cluster-admin | **Retry**. It builds the seed again when it never became ready |
 | `seed_cd_not_deleted` | 5, Remove | The CD could not be detached or deleted, or Proxmox still lists it | The CAPI token cannot delete on the ISO store: run the script again, **Retry** |
 | `seed_lost` | 3, Remove | A seed that had become ready is gone, or the VM at its VMID is no longer this installation's. It is not rebuilt: a new, empty seed would have no record of the cluster's machines | Remove with the option for a missing seed, then install again ([Remove](#remove)) |
-| `component_unhealthy` | 6, 8, 9 | An Application is not Synced and Healthy in time (the message names it and its condition); or something could not be rendered or applied | Download the seed kubeconfig to look closer, then **Retry** |
+| `component_unhealthy` | 6 to 9 | An Application is not Synced and Healthy in time (the message names it and its condition); or something could not be rendered or applied, in stage 7 the Application `pc-platform` | Download the seed kubeconfig to look closer, then **Retry** |
 | `capi_init_failed` | 6, 9 | clusterctl did not install the providers of the BOM; or a provider is installed at another version than the BOM names (provider upgrades are not in this release) | The same |
 | `machine_failed` | 7 | Cluster API reports a failed Machine (the message has its name, VMID and CAPMOX's text) | Check the boot store, the nodes and the Proxmox API URL, **Retry** |
 | `capmox_auth_failed` | 7 | Proxmox refuses the CAPI token when CAPMOX uses it | Check the Proxmox API URL (as the platform network reaches it), paste the secret again, **Retry** |
@@ -307,9 +311,11 @@ stage 1 as `preflight_failed` with the check among its items.
 
 **Retry** starts a new run of the saved settings (save a change first). Every stage looks at what
 exists, so finished work is not repeated and the time limits start again. Nothing is deleted when an
-apply fails, with one exception: a seed that never became ready (stage 5 not finished) is deleted
-and built again as the next generation, with a new CA and a new CD. A seed that became ready is
-never deleted or rebuilt by an apply.
+apply fails, with one exception: a seed that never became ready (its credential was never stored in
+stage 5) is deleted and built again as the next generation, with a new CA and a new CD. A seed that
+became ready is never deleted or rebuilt by an apply: a stage 5 that failed after storing the
+credential, for example with `seed_cd_not_deleted`, keeps the seed, and Retry goes on with the
+bootstrap objects and the CD.
 
 **Cancel the run** sets a flag the runner reads at its next claim and before every write: usually
 within about 15 seconds, and up to 5 minutes while a stage pauses after repeated errors. A Proxmox
@@ -382,6 +388,15 @@ as root on one node with a backup store of your own:
 pvesh create /cluster/backup --vmid <seed VMID> --storage <backup store> --schedule daily --mode snapshot
 ```
 
+The backup contains the seed's cluster-admin token and the secret of `capmox@pve!capi`. Choose a
+backup store that is not the boot, ISO or import store of the settings, and on which neither the
+portal token nor any `csi@pve` or `capmox@pve` token holds `Datastore.Allocate`. Check each with
+`pveum user token permissions <user> <token name> --path /storage/<backup store>`. Nothing in
+ProxCloud checks the store you choose. On a site whose only backup store is `local` while the ISO or
+import store is `local` too, the backup is within reach of those tokens: `capmox@pve!capi` holds
+`PVEDatastoreAdmin` on the ISO store and the portal token on the import store. That is the limit ADR
+0009 A2 accepts for this milestone.
+
 A restore from such a backup has not been run. Without a backup, a lost seed means Remove with the
 option for a missing seed and a new install, which deletes the cluster's machines and volumes.
 
@@ -412,8 +427,14 @@ In short; the full account is in [proxmox-permissions.md](proxmox-permissions.md
 and ADR 0009, A2 and A8.
 
 - The portal token holds `NoAccess` on `proxcloud-system` and `proxcloud-seed`: with its own token
-  ProxCloud cannot see or change a platform VM. The job uses the CAPI token for that, on those two
-  pools, the boot store and the ISO store.
+  ProxCloud cannot read or change the configuration of a platform VM. This fences the VM, not its
+  disks: when the import store is also the boot store, the portal token holds `Datastore.Allocate`
+  there (`PVEDatastoreAdmin`) and can reach every platform disk on it, the seed's included. Use an
+  import store that is not the boot store; no check refuses it.
+- The job uses the CAPI token for the platform VMs. That token holds `ProxCloudCAPI` on `/` (that
+  path only), on `/nodes`, on `/sdn/zones` (`SDN.Use` on every zone and vnet, tenant ones included),
+  on those two pools and on the boot store; `PVETemplateUser` on `pc-templates`; and
+  `PVEDatastoreAdmin` on the ISO store, which reaches every volume on it.
 - The seed's API is behind its VM firewall (the API sources only) and the datacenter isolation rules
   (tenant networks cannot reach the seed, the API address or the node range). ProxCloud talks to it
   only over TLS pinned to the CA it made for that seed.
@@ -423,9 +444,13 @@ and ADR 0009, A2 and A8.
   own namespace, DNS and the API server.
 - Both ArgoCDs have their `default` project locked; the seed's project may source only the BOM's
   chart repositories.
-- **Accepted for this milestone, not closed:** `ProxCloudKubeMint` lets a stolen portal token write
-  ACL rows on `/pool`, `/storage`, `/sdn/zones` and `/nodes`; the CSI token's `Datastore.Allocate`
-  on the boot store reaches every disk on it, the seed's included; the providers' service account
+- **Accepted for this milestone, not closed:** `ProxCloudKubeMint` (`User.Modify` and
+  `Permissions.Modify` on `/access/groups`, `/pool`, `/storage`, `/sdn/zones` and `/nodes`, and on the
+  import store's own path) lets a stolen portal token mint tokens for other existing users and grant
+  any role on those paths, to itself as well, which reaches the seed's disk through the boot store;
+  whether it can mint for `root@pam` is not yet measured on the lab (L1); the CSI token's
+  `Datastore.Allocate` on the boot store reaches every disk on it, the seed's included, and so does
+  the portal token's when the import store is the boot store; the providers' service account
   reads every Secret on the cluster, the CSI token's among them; CAPMOX and proxmox-csi reach the
   Proxmox API without verifying its certificate; ArgoCD pulls charts by version, and their digests
   are compared in CI, not at pull time.

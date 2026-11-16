@@ -18,9 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   seed's other Applications at Remove, the `kamaji` charts at `0.0.0+latest` until the chart mirror) and states that
   no run of this path has finished on a lab (M0 and checks L0 to L11 are pending). `docs/install.md` and the Compose
   README point to it from `--managed-services`; `docs/proxmox-permissions.md` drops two sentences that predate the
-  job and the page and gains a table for the L1 drill results, marked not yet measured; the console's own Managed
-  services page no longer says that **Apply this release** upgrades the components after a ProxCloud upgrade, which
-  this release refuses with `bom_unsupported`.
+  job and the page and gains a table for the L1 drill results, marked not yet measured; `docs/quickstart.md` no
+  longer says that the Compose install cannot have managed Kubernetes and databases; the console's in-app
+  documentation page for Managed services no longer says that **Apply this release** upgrades the components after a
+  ProxCloud upgrade, which this release refuses with `bom_unsupported`, and no longer advises an upgrade path for
+  that code. The page's own `bom_unsupported` and `pool-fence` action texts are unchanged and still differ from the
+  guide.
 
 - **Admin console: the Managed services page** (System → Managed services, `/platform`, ADR 0009). It walks an
   operator through the platform installation: the settings of a draft (node groups, platform network, seed, control

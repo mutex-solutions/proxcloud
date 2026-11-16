@@ -204,7 +204,8 @@ feature off. The last lines of `install` (also with `--dry-run`) say what is on.
   API: `install` and `upgrade` refuse an older one with it. The API container must reach the
   platform network (the seed and the platform cluster's API address, port 6443) besides the Proxmox
   API. On this stack the platform has no tenant block volumes (no CSI gateway listener) and no
-  database backups; the console shows both as warnings.
+  database backups; the Managed services page lists both under **What this release does not do**
+  once the platform is ready.
 
   The switch creates nothing on Proxmox. It makes the console's Managed services page work; the
   operator then saves the settings there, runs a script as root on one Proxmox node, pastes two
