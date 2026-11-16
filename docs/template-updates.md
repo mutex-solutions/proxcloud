@@ -798,6 +798,44 @@ predates `VM.GuestAgent.Unrestricted` adds it as described in
 --append 1 --privs "VM.GuestAgent.Unrestricted …"`); the smoke network's bridge needs `SDN.Use` as for
 any NIC ([proxmox-permissions.md](proxmox-permissions.md#pveum-commands)).
 
+## Known issue: Ubuntu 26.04 images published before 2026-11-16
+
+Every `proxcloud-vm-ubuntu-2604` and `proxcloud-vm-ubuntu-2604-k8s` artifact published up to 2026-11-15 has
+a stale field in its ext4 superblock (cause and pipeline fix:
+[public-vm-sanitization.md](public-vm-sanitization.md#known-issue-stale-orphan-file-inode-in-ubuntu-2604-images-published-before-the-fix)).
+A VM made from one can get `EXT4-fs error ... ext4_lookup ... EFSCORRUPTED` and a read-only root at a
+reboot, once inode 12 holds a file. Affected: every template named `pc-ghcr-ubuntu-2604-*` and every server
+or Kubernetes node cloned from one. `proxcloud-vm-ubuntu-2404` images are not affected.
+
+**Test**, as root inside the guest (reads only). The same reads were checked against image files; the loop
+was not run inside a guest:
+
+```sh
+for d in $(findmnt -rn -t ext4 -o SOURCE | sort -u); do
+  f=$(dd if=$d bs=1 skip=1116 count=4 2>/dev/null | od -An -tx4 | tr -d ' ')
+  i=$(dd if=$d bs=1 skip=1664 count=4 2>/dev/null | od -An -tu4 | tr -d ' ')
+  if [ $((0x$f & 0x1000)) -eq 0 ] && [ "$i" != 0 ]; then echo "AFFECTED $d s_orphan_file_inum=$i"; else echo "ok $d"; fi
+done
+```
+
+**Repair**, only on an UNMOUNTED filesystem: shut the VM down cleanly and run it on the PVE host against the
+partition of the disk (for ZFS `/dev/zvol/<pool>/vm-<id>-disk-0-part1`), or run it from a rescue system. A
+template is repaired the same way, or replaced by importing a fixed image once one is published.
+
+```sh
+debugfs -w -R 'ssv orphan_file_inum 0' /dev/XXX && e2fsck -f -p /dev/XXX
+```
+
+- Tested only on scratch image files (e2fsprogs 1.47.0 and 1.47.2), including one where inode 12 held a
+  file: the field became 0, the file kept its content, `e2fsck -fn` was clean afterwards.
+- **Not tested** on a real VM disk, on a zvol, or on a filesystem whose journal needs recovery
+  (`dumpe2fs -h` lists `needs_recovery`). In that case replay the journal first by mounting and unmounting
+  the partition once; a replay after the repair could restore the old superblock.
+- **Do not** run the repair on a mounted filesystem: `debugfs -w` also rewrites group descriptors.
+- **Do not** run `e2fsck -y`/`-p` before the field is zero: on the scratch image it deleted the file in
+  inode 12 and left the field in place. `tune2fs -O orphan_file` destroys that file too.
+- There is no online repair. A root filesystem already read-only needs the offline path.
+
 ## 7. Open items
 
 - **Sandbox mirror not cluster-verified**: no sandbox cluster, Zot, GHCR or PAT was used. Verify on the

@@ -5,7 +5,7 @@ Usage (in capsule): python3 -I /bootstrap/postscan_probe.py --k8s <kubernetes_ve
                     python3 -I /bootstrap/postscan_probe.py --os <os>
 
 Re-runs the repo sanitizer's own post-cleanup guards against the exported bytes (including the
-snapd unregistered check), plus boot-essentials and journal checks. Never writes, never runs guest
+snapd unregistered check), plus boot-essentials, journal and ext4 superblock/fsck checks. Never writes, never runs guest
 code. Prints ONE fixed-schema line of booleans; any failed guard exits 3 with class+frames only.
 """
 import hashlib
@@ -23,7 +23,7 @@ def expected(variant, value):
     """The exact success line; the parent compares the probe output to this byte-for-byte schema."""
     common = {"sanitizer_final_guards_reverified": True, "snapd_unregistered": True,
               "accounts_locked_no_keys_no_hostkeys_empty_machine_id": True, "boot_and_runtime_binaries_present": True,
-              "ext4_journal_restored": True, "fresh_independent_readonly_appliance": True,
+              "ext4_journal_restored": True, "ext4_orphan_file_inum_consistent_fsck_clean": True, "fresh_independent_readonly_appliance": True,
               "guest_code_executed": False, "not_boot_acceptance": True}
     if variant == "kubernetes":
         return dict(common, phase="sealed-k8s-export-postscan", variant="kubernetes", kubernetes_version=value,
@@ -38,6 +38,14 @@ def parse(argv):
     if len(argv) == 2 and argv[0] == "--os" and argv[1] in OSES:
         return "os", argv[1]
     raise ValueError("usage")
+
+
+def check_ext4(vs, g):
+    """Every ext4 partition of the export, before anything is mounted: see vm_sanitize.ext4_clean."""
+    devices = sorted(device for device, kind in g.list_filesystems().items() if kind == "ext4")
+    assert devices
+    for device in devices:
+        vs.ext4_clean(g, device)
 
 
 def check_k8s(vs, k8s, g, review, version):
@@ -111,6 +119,7 @@ def main(argv):
         g.set_network(False)
         g.add_drive_opts(SOURCE, format="qcow2", readonly=True)
         g.launch()
+        check_ext4(vs, g)
         if variant == "kubernetes":
             import k8s_copy_policy as k8s
             check_k8s(vs, k8s, g, review, value)

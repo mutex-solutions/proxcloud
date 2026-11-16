@@ -412,6 +412,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Defect in the published Ubuntu 26.04 VM images: the root filesystem can go read-only at a reboot.** Every
+  `proxcloud-vm-ubuntu-2604` and `proxcloud-vm-ubuntu-2604-k8s` image published up to 2026-11-15 has an ext4
+  superblock that names inode 12 as the orphan file while the `orphan_file` feature is off; once a VM stores a file
+  in inode 12, Linux 6.16 and newer answer its lookup with `EFSCORRUPTED` after the next reboot (measured on a lab
+  seed VM). The export sanitizer removed only the journal and left e2fsck to drop the feature, which keeps the
+  field; it now removes `orphan_file` with the journal (`images/vm_sanitize.py`). The sanitize stage and the
+  read-only postscan of the final export refuse any ext4 partition with such a superblock or with an unclean
+  `e2fsck -fn`. The published images stay affected until the export workflow has run again; Ubuntu 24.04 images are
+  not affected. Test and repair for existing templates and VMs: `docs/template-updates.md`.
+
 - **Managed services: what the review of the L7, L11 and seed-reboot fixes found.** A Kubernetes node template that
   still has its Proxmox cloud-init drive on another slot than `ide0` (imported before the drive moved) booted and
   passed its smoke test, so it could be published to tenant clusters, whose machines then never join: the smoke test

@@ -111,7 +111,11 @@ class SmokeTests(unittest.TestCase):
         for item in ("pwd.getpwuid(uid)", "import guestfs", '"/usr/bin/qemu-img", "--version"',
                      'assert not mode & 0o6000 and "security.capability" not in os.listxattr(path), path',
                      'g.set_backend_setting("force_tcg", "true")', 'format="qcow2", readonly=True', "\ng.launch()\n",
-                     '\nassert g.list_devices() == ["/dev/sda", "/dev/sdb"]\n', '\ng.e2fsck("/dev/sdb", correct=True)\n'):
+                     '\nassert g.list_devices() == ["/dev/sda", "/dev/sdb"]\n', '\ng.e2fsck("/dev/sdb", correct=True)\n',
+                     # The journal strip on a filesystem WITH orphan_file, then the field and read-only fsck checks.
+                     '\ng.mkfs("ext4", "/dev/sdb", label="smoke", features="orphan_file")\n',
+                     '\ng.debug("sh", ["/usr/sbin/tune2fs -O ^orphan_file,^has_journal LABEL=smoke"])\n',
+                     "\nassert orphan() == (0, 0), orphan()\n", "e2fsck -fn LABEL=smoke >/dev/null 2>&1 && echo ext4-clean"):
             self.assertIn(item, body)
         # The passwd probe is the only place that may swallow an error or stop early.
         self.assertEqual([body.count(item) for item in ("try:", "except", "except KeyError:", "SystemExit", "exit")],

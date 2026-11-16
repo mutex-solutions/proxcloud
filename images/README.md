@@ -44,6 +44,14 @@ build.py build --os debian-13 --node pve1 --storage nas-templates --import-stora
 
 Vendor cloud-init must grow the guest partition/filesystem on first boot; the PVE virtual-disk readback alone does not prove that happened. Before admitting a new artifact, prove guest root capacity, normal APT dist-upgrade and all unchanged provisioning/smoke/cleanup gates. The Ubuntu 26.04 canary that booted/reached SSH but ran out of space in APT is **not accepted**. The floor and FakePVE regressions are source changes only, not an executed test/build result. See [disk sizing, scope and operator acceptance](<../docs/template-build-disk.md>) for the failure boundary and review gates.
 
+## Known issue: published Ubuntu 26.04 images
+
+Every Ubuntu 26.04 OS and Kubernetes node image published up to 2026-11-15 carries a stale ext4 superblock
+field that can turn a VM's root read-only at a reboot. Affected images, guest test and repair:
+[docs/template-updates.md](../docs/template-updates.md#known-issue-ubuntu-2604-images-published-before-2026-11-16).
+The export now removes the field and refuses to publish an image that has it
+([docs/public-vm-sanitization.md](../docs/public-vm-sanitization.md#known-issue-stale-orphan-file-inode-in-ubuntu-2604-images-published-before-the-fix)).
+
 ## Tags
 
 A template is in the catalog when it is in pool `pc-templates` and tagged:
