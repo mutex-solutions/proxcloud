@@ -124,7 +124,11 @@ assert "{path: /storage, role: ProxCloudCAPI, propagate: 1, user: capmox@pve, to
 stage = open(os.path.join(os.path.dirname(__file__), "..", "playbooks", "10-pve-identity.yml")).read()
 for path in ("/pool", "/storage", "/sdn/zones"):
     for role in ("ProxCloudKubeMint", "ProxCloudPlatform"):
-        assert f"{{path: {path}, role: {role}, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}}" in stage, (path, role)
+        row = f"{{path: {path}, role: {role}, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}}"
+        # No mint role on /pool: the cluster tokens' pool rows pass on Pool.Allocate, and Permissions.Modify there
+        # would let the portal token write any role on every pool.
+        assert (row in stage) == ((path, role) != ("/pool", "ProxCloudKubeMint")), (path, role)
+assert "mint_old_paths: [/access/groups, /pool]" in stage and "item.path in mint_old_paths" in stage
 # The portal creates tokens for the members of one group only. On /access/groups itself PVE takes User.Modify for
 # every user of the cluster, root@pam included, so no row sits there and the role on the other paths lacks it.
 assert "path: /access/groups," not in stage and "/access/groups/proxcloud-kube, role: ProxCloudKubeToken, propagate: 0, user: proxcloud@pve" in stage

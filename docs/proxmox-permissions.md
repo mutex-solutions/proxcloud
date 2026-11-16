@@ -359,16 +359,17 @@ pveum acl modify '/pool/proxcloud-seed' --users 'csi@pve' --roles 'NoAccess' --p
 pveum acl modify '/storage' --users 'csi@pve' --roles 'ProxCloudCSI' --propagate 1
 pveum acl modify '/storage/local-lvm' --tokens 'csi@pve!csi' --roles 'ProxCloudCSI' --propagate 0
 grant '/access/groups/proxcloud-kube' 'ProxCloudKubeToken' 0
-grant '/pool' 'ProxCloudKubeMint' 1
 grant '/storage' 'ProxCloudKubeMint' 1
 grant '/sdn/zones' 'ProxCloudKubeMint' 1
 grant '/sdn/zones' 'ProxCloudPlatform' 1
 grant '/nodes' 'ProxCloudKubeMint' 0
 grant '/pool/proxcloud-seed' 'NoAccess' 1
-# a site set up before the group: the mint role sat on /access/groups and held User.Modify. These remove exactly
-# those rows and that privilege, after the grant on the group above, and change nothing on a new site
+# a site set up before the group: the mint role sat on /access/groups and /pool and held User.Modify. These remove
+# exactly those rows and that privilege, after the grant on the group above, and change nothing on a new site
 pveum acl delete '/access/groups' --users "$PC_USER" --roles 'ProxCloudKubeMint'
 pveum acl delete '/access/groups' --tokens "$PC_TOKEN" --roles 'ProxCloudKubeMint'
+pveum acl delete '/pool' --users "$PC_USER" --roles 'ProxCloudKubeMint'
+pveum acl delete '/pool' --tokens "$PC_TOKEN" --roles 'ProxCloudKubeMint'
 pveum role modify 'ProxCloudKubeMint' --privs 'Permissions.Modify'
 # what the platform tokens hold on the platform pools: the CAPI token ProxCloudCAPI on both, the CSI token nothing on the
 # seed VM (its disks on the boot store stay open to the CSI token: docs/proxmox-permissions.md, "What the seed pool does not fence")

@@ -34,7 +34,7 @@ func PlatformSetupScript(tokenID string, gpu bool, importStorage string) (string
 // users capmox@pve and csi@pve with their tokens capi and csi, the group KubeMintGroup with both users in it,
 // ManagedACLs (the three stores as there), and the effective rights of both tokens on both platform pools. Safe to run
 // again, as PlatformSetupScript, with one exception to "removes none": it takes the mint role's rows off
-// /access/groups and User.Modify out of that role, which an earlier version of this script wrote.
+// KubeMintOldPaths and User.Modify out of that role, which an earlier version of this script wrote.
 func ManagedSetupScript(tokenID string, gpu bool, importStorage, bootStorage, isoStorage string) (string, error) {
 	for _, s := range [][2]string{{"bootStorage", bootStorage}, {"isoStorage", isoStorage}} {
 		if !setupStorageID.MatchString(s[1]) {
@@ -131,10 +131,12 @@ func setupScript(tokenID string, gpu bool, importStorage string, managed []Manag
 				}
 			}
 		}
-		line("# a site set up before the group: the mint role sat on /access/groups and held User.Modify. These remove exactly")
-		line("# those rows and that privilege, after the grant on the group above, and change nothing on a new site")
-		line(`pveum acl delete '/access/groups' --users "$PC_USER" --roles %s`, q(KubeMintRole))
-		line(`pveum acl delete '/access/groups' --tokens "$PC_TOKEN" --roles %s`, q(KubeMintRole))
+		line("# a site set up before the group: the mint role sat on /access/groups and /pool and held User.Modify. These remove")
+		line("# exactly those rows and that privilege, after the grant on the group above, and change nothing on a new site")
+		for _, path := range KubeMintOldPaths {
+			line(`pveum acl delete %s --users "$PC_USER" --roles %s`, q(path), q(KubeMintRole))
+			line(`pveum acl delete %s --tokens "$PC_TOKEN" --roles %s`, q(path), q(KubeMintRole))
+		}
 		line("pveum role modify %s --privs %s", q(KubeMintRole), q(strings.Join(ManagedRoles[2].Privs, " ")))
 		line("# what the platform tokens hold on the platform pools: the CAPI token ProxCloudCAPI on both, the CSI token nothing on the")
 		line(`# seed VM (its disks on the boot store stay open to the CSI token: docs/proxmox-permissions.md, "What the seed pool does not fence")`)

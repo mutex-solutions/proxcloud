@@ -217,9 +217,11 @@ func TestManagedACLsGrantThePrivilegeTables(t *testing.T) {
 			}
 		}
 	}
-	// The mint grant: User.Modify on the group of the portal's service users and nowhere else, and nothing that lets
-	// the portal token write itself a row under /access. On /access/groups PVE takes User.Modify for every user of the
-	// cluster, root@pam included (lab, PVE 9.2.26: POST /access/users/root@pam/token/x answered 200).
+	// The mint grant: User.Modify on the group of the portal's service users and nowhere else, nothing that lets
+	// the portal token write itself a row under /access, and no Permissions.Modify on /pool (the cluster token's rows
+	// on a pool pass on Pool.Allocate and the privileges KubeMintPrivileges checks there). On /access/groups PVE takes
+	// User.Modify for every user of the cluster, root@pam included (lab, PVE 9.2.26: POST
+	// /access/users/root@pam/token/x answered 200).
 	for _, chk := range KubeMintForbidden {
 		have := effective(acls, DefaultPlatformTokenID, chk.Path)
 		for _, p := range chk.Privs {
@@ -250,9 +252,9 @@ func TestManagedACLsGrantThePrivilegeTables(t *testing.T) {
 			t.Errorf("%s holds %v on %s, want nothing", c.tokenID, slices.Sorted(maps.Keys(have)), c.path)
 		}
 	}
-	// A stolen portal token can mint a token for capmox@pve or csi@pve with a /pool row of its own and grant the user
-	// /pool too (ProxCloudKubeMint). The users' own rows on the platform pools still cap such a token there; the
-	// existing capi token keeps exactly its role.
+	// A site that still holds ProxCloudKubeMint on /pool: a stolen portal token can mint a token for capmox@pve or
+	// csi@pve with a /pool row of its own and grant the user /pool too. The users' own rows on the platform pools
+	// still cap such a token there; the existing capi token keeps exactly its role.
 	rogue := rows(ManagedACL{"/pool", PlatformRole, true, capiUser, "capmox@pve!x"}, ManagedACL{"/pool", PlatformRole, true, csiUser, "csi@pve!x"})
 	for _, c := range []struct{ tokenID, pool, atMost string }{
 		{"capmox@pve!x", SystemPool, roleCAPI}, {"capmox@pve!x", SeedPool, roleCAPI},

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -155,10 +156,18 @@ func TestPreflight(t *testing.T) {
 	f.perms[pve.DefaultPlatformTokenID]["/access/groups"] = []string{"User.Modify", "Permissions.Modify"}
 	if c := checkMap(pf.Run(ctx)); c["mint-scope"].Status != CheckFail || c["privileges:kubemint"].Status != CheckOK ||
 		!strings.Contains(c["mint-scope"].Message, "the portal token holds User.Modify, Permissions.Modify on /access/groups") ||
-		!strings.Contains(c["mint-scope"].Message, "root@pam included. Run the managed-services script again") {
+		!strings.Contains(c["mint-scope"].Message, "Run the managed-services script again as root on a node (GET /api/v1/admin/setup/proxmox-script?managedServices=true&bootStorage=<store>") {
 		t.Errorf("the mint role on /access/groups: %+v, %+v", c["mint-scope"], c["privileges:kubemint"])
 	}
 	delete(f.perms[pve.DefaultPlatformTokenID], "/access/groups")
+	// The same site's row on /pool: the portal needs no Permissions.Modify there.
+	onPool := f.perms[pve.DefaultPlatformTokenID]["/pool"]
+	f.perms[pve.DefaultPlatformTokenID]["/pool"] = append(slices.Clone(onPool), "Permissions.Modify")
+	if c := checkMap(pf.Run(ctx)); c["mint-scope"].Status != CheckFail || c["privileges:kubemint"].Status != CheckOK ||
+		!strings.Contains(c["mint-scope"].Message, "the portal token holds Permissions.Modify on /pool: ") {
+		t.Errorf("the mint role on /pool: %+v, %+v", c["mint-scope"], c["privileges:kubemint"])
+	}
+	f.perms[pve.DefaultPlatformTokenID]["/pool"] = onPool
 
 	capi["/pool/"+pve.SeedPool] = []string{"VM.Audit"}
 	f.perms[pve.DefaultPlatformTokenID]["/pool/"+pve.SeedPool] = []string{"VM.Audit"}

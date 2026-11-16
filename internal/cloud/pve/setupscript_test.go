@@ -160,6 +160,8 @@ func TestManagedSetupScriptNarrowsTheMintGrant(t *testing.T) {
 		"grant '/access/groups/proxcloud-kube' 'ProxCloudKubeToken' 0",
 		`pveum acl delete '/access/groups' --users "$PC_USER" --roles 'ProxCloudKubeMint'`,
 		`pveum acl delete '/access/groups' --tokens "$PC_TOKEN" --roles 'ProxCloudKubeMint'`,
+		`pveum acl delete '/pool' --users "$PC_USER" --roles 'ProxCloudKubeMint'`,
+		`pveum acl delete '/pool' --tokens "$PC_TOKEN" --roles 'ProxCloudKubeMint'`,
 		"pveum role modify 'ProxCloudKubeMint' --privs 'Permissions.Modify'",
 	}
 	at := 0
@@ -169,6 +171,9 @@ func TestManagedSetupScriptNarrowsTheMintGrant(t *testing.T) {
 		}
 		if strings.HasPrefix(l, "grant '/access/groups' ") || strings.HasPrefix(l, "grant '/access' ") || strings.Contains(l, "User.Modify Permissions.Modify") {
 			t.Errorf("the script still grants on all of /access/groups: %s", l)
+		}
+		if l == "grant '/pool' 'ProxCloudKubeMint' 1" {
+			t.Errorf("the script still grants Permissions.Modify on /pool: %s", l)
 		}
 		if strings.Contains(l, "pveum user modify") && !slices.Contains(want, l) || strings.Contains(l, "acl delete") && !slices.Contains(want, l) {
 			t.Errorf("an unexpected membership or removal: %s", l)
@@ -284,6 +289,7 @@ func TestManagedIdentityMatchesInstaller(t *testing.T) {
 				Propagate               int
 			} `yaml:"split_acls"`
 			NASMintACLs    string   `yaml:"nas_mint_acls"`
+			MintOldPaths   []string `yaml:"mint_old_paths"`
 			MintGroup      string   `yaml:"mint_group"`
 			MintGroupUsers []string `yaml:"mint_group_users"`
 		} `yaml:"vars"`
@@ -308,6 +314,9 @@ func TestManagedIdentityMatchesInstaller(t *testing.T) {
 
 	if v.MintGroup != KubeMintGroup || !slices.Equal(v.MintGroupUsers, KubeMintGroupMembers) {
 		t.Errorf("stage 10 mints for %q %v, the portal for %q %v", v.MintGroup, v.MintGroupUsers, KubeMintGroup, KubeMintGroupMembers)
+	}
+	if !slices.Equal(v.MintOldPaths, KubeMintOldPaths) {
+		t.Errorf("stage 10 takes the old mint rows off %v, the script off %v", v.MintOldPaths, KubeMintOldPaths)
 	}
 
 	const boot, iso, imp = "boot-store", "iso-store", "import-store"

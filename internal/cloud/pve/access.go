@@ -257,7 +257,7 @@ func ManagedACLs(portalTokenID, boot, iso, importStorage string) []ManagedACL {
 	acls := []ManagedACL{
 		// The platform's CAPMOX: the platform pools only. The user keeps /pool, /storage and /sdn/zones for the
 		// tenant clusters' tokens the portal mints under it, and its own rows on the platform pools win over any
-		// grant on /pool written for it later (the mint grant below can write one).
+		// grant on /pool written for it later.
 		{"/", roleCAPI, false, capiUser, CAPITokenID},
 		{"/nodes", roleCAPI, true, capiUser, CAPITokenID},
 		{"/pool", roleCAPI, true, capiUser, ""},
@@ -279,9 +279,12 @@ func ManagedACLs(portalTokenID, boot, iso, importStorage string) []ManagedACL {
 		{"/storage/" + boot, roleCSI, false, "", CSITokenID},
 		// The portal mints and grants the tenant clusters' tokens: tokens for the members of KubeMintGroup alone
 		// (never a row on /access/groups itself: KubeTokenRole), ACL writes on the paths below. An ACL on a path
-		// replaces what its parent passes down, so /sdn/zones repeats the platform role.
+		// replaces what its parent passes down, so /sdn/zones repeats the platform role. No row on /pool: on
+		// /pool/<pool> PVE takes Pool.Allocate for a role whose privileges the caller holds there with propagate
+		// (PVE::API2::ACL update_acl), and PlatformACLs gives the portal ProxCloudPlatform on /pool, which holds every
+		// privilege of the two roles MintClusterTokens writes. Permissions.Modify there would let a stolen portal token
+		// write any role on /pool itself, for any principal.
 		{"/access/groups/" + KubeMintGroup, KubeTokenRole, false, portal, portalTokenID},
-		{"/pool", KubeMintRole, true, portal, portalTokenID},
 		{"/storage", KubeMintRole, true, portal, portalTokenID},
 		{"/sdn/zones", KubeMintRole, true, portal, portalTokenID},
 		{"/sdn/zones", PlatformRole, true, portal, portalTokenID},
@@ -321,12 +324,13 @@ func CSIPrivileges(boot string) []PrivCheck {
 
 // KubeMintPrivileges is what the portal token must hold, per ACL path, to mint the tenant clusters' tokens
 // (MintClusterTokens): a token create wants User.Modify on a group of the token's user, an ACL write
-// Permissions.Modify on its path. importStorage as for ManagedACLs: its own row shadows /storage, so it is checked
-// apart.
+// Permissions.Modify on its path, or on a pool Pool.Allocate and every privilege of the role written (ProxCloudCAPI;
+// PVETemplateUser is VM.Audit and VM.Clone, both in it). /pool stands in for the tenant pools, as in
+// PlatformPrivileges. importStorage as for ManagedACLs: its own row shadows /storage, so it is checked apart.
 func KubeMintPrivileges(importStorage string) []PrivCheck {
 	checks := []PrivCheck{
 		{Path: "/access/groups/" + KubeMintGroup, Privs: ManagedRoles[3].Privs},
-		{Path: "/pool", Privs: ManagedRoles[2].Privs},
+		{Path: "/pool", Privs: slices.Concat([]string{"Pool.Allocate"}, ManagedRoles[0].Privs)},
 		{Path: "/storage", Privs: ManagedRoles[2].Privs},
 		{Path: "/sdn/zones", Privs: ManagedRoles[2].Privs},
 		{Path: "/nodes", Privs: ManagedRoles[2].Privs},
@@ -339,18 +343,25 @@ func KubeMintPrivileges(importStorage string) []PrivCheck {
 
 // KubeMintForbidden is what the portal token must hold nowhere, per ACL path (HeldPrivileges): User.Modify on
 // /access/groups reaches every user of the cluster, and Permissions.Modify on any of the three lets the token write
-// itself that row. Sites set up before KubeMintGroup hold ProxCloudKubeMint on /access/groups.
+// itself that row; Permissions.Modify on /pool lets it write any role on /pool itself. Sites set up before
+// KubeMintGroup hold ProxCloudKubeMint on /access/groups and on /pool.
 var KubeMintForbidden = []PrivCheck{
 	{Path: "/", Privs: []string{"User.Modify", "Permissions.Modify"}},
 	{Path: "/access", Privs: []string{"User.Modify", "Permissions.Modify"}},
 	{Path: "/access/groups", Privs: []string{"User.Modify", "Permissions.Modify"}},
+	{Path: "/pool", Privs: []string{"Permissions.Modify"}},
 }
 
+// KubeMintOldPaths are the paths where earlier versions granted KubeMintRole to the portal's user and token and this
+// one does not: ManagedSetupScript and installer stage 10 delete exactly those rows.
+var KubeMintOldPaths = []string{"/access/groups", "/pool"}
+
 // KubeMintNarrowing is what to tell the operator of a site where HeldPrivileges(KubeMintForbidden) names something.
-const KubeMintNarrowing = "with it a stolen portal token can create an API token for any user of the cluster, root@pam included. " +
-	"Run the managed-services script again as root on a node (GET /admin/setup/proxmox-script?managedServices=true; an installer site: make upgrade, stage 10): " +
-	"it grants " + KubeTokenRole + " on /access/groups/" + KubeMintGroup + " instead and removes the " + KubeMintRole + " rows on /access/groups. " +
-	"If this still fails afterwards, another row grants it: pveum acl list | grep -F '<the portal user>', then pveum acl delete <path> --users|--tokens '<id>' --roles <role> for a row on /, /access or /access/groups (docs/proxmox-permissions.md)"
+const KubeMintNarrowing = "with User.Modify or Permissions.Modify on /, /access or /access/groups a stolen portal token can create an API token for any user of the cluster, root@pam included; " +
+	"with Permissions.Modify on /pool it can write any role on every pool. " +
+	"Run the managed-services script again as root on a node (GET /api/v1/admin/setup/proxmox-script?managedServices=true&bootStorage=<store>, or step 2 of the Managed services page; an installer site in split mode: make upgrade, stage 10): " +
+	"it grants " + KubeTokenRole + " on /access/groups/" + KubeMintGroup + " instead and removes the " + KubeMintRole + " rows on /access/groups and /pool. " +
+	"If this still fails afterwards, another row grants it: pveum acl list | grep -F '<the portal user>', then pveum acl delete <path> --users|--tokens '<id>' --roles <role> for a row on /, /access, /access/groups or /pool with a role other than " + PlatformRole + " (docs/proxmox-permissions.md)"
 
 // PlatformRolePrivileges is the privilege list of PlatformRole: everything PlatformPrivileges asks for, once.
 func PlatformRolePrivileges() []string {
