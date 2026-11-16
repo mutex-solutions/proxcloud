@@ -365,12 +365,25 @@ grant '/sdn/zones' 'ProxCloudPlatform' 1
 grant '/nodes' 'ProxCloudKubeMint' 0
 grant '/pool/proxcloud-seed' 'NoAccess' 1
 # a site set up before the group: the mint role sat on /access/groups and /pool and held User.Modify. These remove
-# exactly those rows and that privilege, after the grant on the group above, and change nothing on a new site
+# exactly this token's rows, after the grant on the group above, and change nothing on a new site
 pveum acl delete '/access/groups' --users "$PC_USER" --roles 'ProxCloudKubeMint'
 pveum acl delete '/access/groups' --tokens "$PC_TOKEN" --roles 'ProxCloudKubeMint'
 pveum acl delete '/pool' --users "$PC_USER" --roles 'ProxCloudKubeMint'
 pveum acl delete '/pool' --tokens "$PC_TOKEN" --roles 'ProxCloudKubeMint'
-pveum role modify 'ProxCloudKubeMint' --privs 'Permissions.Modify'
+# User.Modify leaves the role for every holder at once, so only when no other portal token still creates tokens
+# through a row on /access/groups: run this script for each of them, the last run takes the privilege out
+PC_LEFT=$(pveum acl list --output-format json | perl -MJSON::PP -e 'print map { "  $_->{type} $_->{ugid}\n" } grep { $_->{path} eq "/access/groups" && $_->{roleid} eq "ProxCloudKubeMint" } @{ decode_json(join "", <STDIN>) }')
+[ -n "$PC_LEFT" ] || pveum role modify 'ProxCloudKubeMint' --privs 'Permissions.Modify'
+pc_left() { # said last, when this subshell ends, below everything the script prints
+  echo 'NOT FINISHED: ProxCloudKubeMint still holds User.Modify, because these still hold that role on /access/groups:'
+  echo "$PC_LEFT"
+  echo 'Each is another portal token, or its user, that creates cluster tokens through that row and would stop if the role lost'
+  echo 'User.Modify now. Run this script for each such token (tokenId=<its id>), or make upgrade for the token of an installer site;'
+  echo 'the last run takes User.Modify out of the role. Until then a token listed here whose user is listed too can create an API'
+  echo 'token for any user of the cluster, root@pam included. A row no portal uses: pveum acl delete /access/groups --users <user>'
+  echo '(or --tokens <token id>, in single quotes) --roles ProxCloudKubeMint, then this script again.'
+}
+[ -z "$PC_LEFT" ] || trap pc_left EXIT
 # what the platform tokens hold on the platform pools: the CAPI token ProxCloudCAPI on both, the CSI token nothing on the
 # seed VM (its disks on the boot store stay open to the CSI token: docs/proxmox-permissions.md, "What the seed pool does not fence")
 pveum user token permissions 'capmox@pve' 'capi' --path '/pool/proxcloud-system'

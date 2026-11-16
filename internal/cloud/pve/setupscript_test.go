@@ -2,6 +2,8 @@ package pve
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -162,7 +164,7 @@ func TestManagedSetupScriptNarrowsTheMintGrant(t *testing.T) {
 		`pveum acl delete '/access/groups' --tokens "$PC_TOKEN" --roles 'ProxCloudKubeMint'`,
 		`pveum acl delete '/pool' --users "$PC_USER" --roles 'ProxCloudKubeMint'`,
 		`pveum acl delete '/pool' --tokens "$PC_TOKEN" --roles 'ProxCloudKubeMint'`,
-		"pveum role modify 'ProxCloudKubeMint' --privs 'Permissions.Modify'",
+		`[ -n "$PC_LEFT" ] || pveum role modify 'ProxCloudKubeMint' --privs 'Permissions.Modify'`,
 	}
 	at := 0
 	for _, l := range strings.Split(script, "\n") {
@@ -175,12 +177,64 @@ func TestManagedSetupScriptNarrowsTheMintGrant(t *testing.T) {
 		if l == "grant '/pool' 'ProxCloudKubeMint' 1" {
 			t.Errorf("the script still grants Permissions.Modify on /pool: %s", l)
 		}
-		if strings.Contains(l, "pveum user modify") && !slices.Contains(want, l) || strings.Contains(l, "acl delete") && !slices.Contains(want, l) {
+		if !strings.HasPrefix(l, "  echo ") && (strings.Contains(l, "pveum user modify") || strings.Contains(l, "acl delete")) && !slices.Contains(want, l) {
 			t.Errorf("an unexpected membership or removal: %s", l)
 		}
 	}
 	if at != len(want) {
 		t.Errorf("the script lacks, in this order, %q:\n%s", want[at], script)
+	}
+}
+
+// The role is the cluster's: User.Modify leaves it only when no other principal still holds it on /access/groups,
+// or every other portal token that creates tokens through its old row would stop. The script runs here as on a
+// node, with a pveum that records its arguments and answers `acl list` with what is left after the script's deletes.
+func TestManagedSetupScriptKeepsUserModifyWhileAnotherTokenNeedsIt(t *testing.T) {
+	for _, bin := range []string{"sh", "perl"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			t.Skipf("no %s", bin)
+		}
+	}
+	script, err := ManagedSetupScript("proxcloud@pve!m0", false, "", "local-zfs", "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const strip = "role modify ProxCloudKubeMint --privs Permissions.Modify\n"
+	for _, tt := range []struct {
+		name, acl string
+		strip     bool
+		says      string
+	}{
+		{"no other holder", `[{"path":"/pool","roleid":"ProxCloudKubeMint","type":"user","ugid":"other@pve","propagate":1},
+			{"path":"/access/groups/proxcloud-kube","roleid":"ProxCloudKubeToken","type":"token","ugid":"proxcloud@pve!m0","propagate":0}]`, true, ""},
+		{"the installer's token still mints through its row", `[{"path":"/access/groups","roleid":"ProxCloudKubeMint","type":"token","ugid":"proxcloud@pve!platform","propagate":1}]`,
+			false, "NOT FINISHED: ProxCloudKubeMint still holds User.Modify, because these still hold that role on /access/groups:\n  token proxcloud@pve!platform\n"},
+		{"the list cannot be read", "", false, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			calls := filepath.Join(dir, "calls")
+			fake := "#!/bin/sh\necho \"$*\" >> " + calls + "\nif [ \"$1 $2\" = 'acl list' ]; then [ -n \"$FAKE_ACL\" ] || exit 1; printf '%s' \"$FAKE_ACL\"; fi\n"
+			for _, bin := range []string{"pveum", "pvenode"} {
+				if err := os.WriteFile(filepath.Join(dir, bin), []byte(fake), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := exec.Command("sh")
+			cmd.Stdin = strings.NewReader(script)
+			cmd.Env = []string{"PATH=" + dir + ":" + os.Getenv("PATH"), "FAKE_ACL=" + tt.acl}
+			out, err := cmd.CombinedOutput()
+			log, _ := os.ReadFile(calls)
+			if (err == nil) != (tt.acl != "") {
+				t.Fatalf("the script: %v\n%s", err, out)
+			}
+			if got := strings.Contains(string(log), strip); got != tt.strip {
+				t.Errorf("User.Modify taken out of the role: %v, want %v\n%s", got, tt.strip, log)
+			}
+			if !strings.Contains(string(out), tt.says) || tt.says == "" && strings.Contains(string(out), "NOT FINISHED") {
+				t.Errorf("the script says:\n%s\nwant %q", out, tt.says)
+			}
+		})
 	}
 }
 
