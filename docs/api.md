@@ -387,10 +387,13 @@ are several, `errors.details.problems`.
   `privileges:capi`, `privileges:csi`, `privileges:kubemint`, `mint-scope`, `pool-fence`,
   `token-scope`, `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement` and
   `images`. A row's `status` is `ok`, `fail` or `warn`; `ok` in the answer is
-  false only when a row failed. `tenant-network` never fails: it is `warn` when
-  the provider's default zone is a `simple` zone (its networks have DHCP, and
-  every tenant Kubernetes cluster create is then refused with a `400`), `ok`
-  for an EVPN or VLAN zone, and absent when the provider names no zone.
+  false only when a row failed. `tenant-network` never fails. It reads the provider's default
+  zone in Proxmox: `warn` when that zone has DHCP, when it does not exist yet and is
+  configured as a `simple` zone (ProxCloud creates one with DHCP), or when the zones
+  could not be read; a tenant Kubernetes cluster create on a network of such a zone is
+  refused with a `400`, except on a Kubernetes provider with shared workers
+  (`cluster.shared`), which uses no tenant network. It is `ok` for a zone without
+  DHCP, and absent when the provider names no zone.
   `isolation` fails, naming the CIDRs to add to `blockedCidrs`, when
   the seed, the API VIP or the node range is outside the blocked and management
   networks, and when the cluster firewall's isolation rules are not the ones the

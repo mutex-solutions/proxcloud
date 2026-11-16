@@ -22,6 +22,7 @@ type preflightPVE struct {
 	bootISO bool   // the boot store local-lvm takes ISO images too
 	outside string // a service user that is not in the group proxcloud-kube: PVE refuses to show it to the portal token
 	vnets   string // the cluster's vnets, [] when empty
+	zones   string // the cluster's SDN zones, [] when empty; "!" answers 403
 }
 
 func (f *preflightPVE) client(t *testing.T, url, token string) *pve.Client {
@@ -64,6 +65,10 @@ func (f *preflightPVE) serve(w http.ResponseWriter, r *http.Request) {
 	if f.vnets != "" {
 		data["/cluster/sdn/vnets"] = f.vnets
 	}
+	data["/cluster/sdn/zones"] = "[]"
+	if f.zones != "" {
+		data["/cluster/sdn/zones"] = f.zones
+	}
 	path := strings.TrimPrefix(r.URL.Path, "/api2/json")
 	body, ok := data[path]
 	if path == "/access/permissions" {
@@ -75,7 +80,7 @@ func (f *preflightPVE) serve(w http.ResponseWriter, r *http.Request) {
 		b, _ := json.Marshal(map[string]any{p: privs})
 		body, ok = string(b), true
 	}
-	if f.outside != "" && path == "/access/users/"+f.outside {
+	if f.outside != "" && path == "/access/users/"+f.outside || body == "!" {
 		w.WriteHeader(http.StatusForbidden)
 		fmt.Fprint(w, `{"data":null}`)
 		return
@@ -150,9 +155,26 @@ func TestPreflight(t *testing.T) {
 	if c := checkMap(warned)["tenant-network"]; c.Status != CheckWarn || !strings.Contains(c.Message, "pcm0") || !strings.Contains(c.Message, "EVPN or a VLAN zone") || !OK(warned) {
 		t.Errorf("a simple default zone: %+v ok=%v", c, OK(warned))
 	}
-	pf.Site.DefaultZoneKind = "evpn"
+	if c := checkMap(warned)["tenant-network"]; !strings.Contains(c.Message, "cluster.shared") || strings.Contains(c.Message, "every cluster create") {
+		t.Errorf("the warning must name the shared-workers exception and not claim every create: %+v", c)
+	}
+	// The create reads the live zone's dhcp field, and an existing zone is never changed: so does the row.
+	f.zones = `[{"zone":"pcm0","type":"simple"}]`
 	if c := checkMap(pf.Run(ctx))["tenant-network"]; c.Status != CheckOK {
-		t.Errorf("an EVPN default zone: %+v", c)
+		t.Errorf("a simple zone made without DHCP: %+v", c)
+	}
+	pf.Site.DefaultZoneKind = "evpn"
+	f.zones = `[{"zone":"pcm0","type":"simple","dhcp":"dnsmasq"}]`
+	if c := checkMap(pf.Run(ctx))["tenant-network"]; c.Status != CheckWarn || !strings.Contains(c.Message, "has DHCP") {
+		t.Errorf("a live zone with DHCP under another configured kind: %+v", c)
+	}
+	f.zones = "!"
+	if got := pf.Run(ctx); checkMap(got)["tenant-network"].Status != CheckWarn || !strings.Contains(checkMap(got)["tenant-network"].Message, "Could not read") || !OK(got) {
+		t.Errorf("zones unreadable: %+v", checkMap(got)["tenant-network"])
+	}
+	f.zones = ""
+	if c := checkMap(pf.Run(ctx))["tenant-network"]; c.Status != CheckOK {
+		t.Errorf("an EVPN default zone not made yet: %+v", c)
 	}
 	pf.Site.DefaultZone, pf.Site.DefaultZoneKind = "", ""
 	// A provider sync skips a disabled provider, so the row must not send the operator to one without saying so.

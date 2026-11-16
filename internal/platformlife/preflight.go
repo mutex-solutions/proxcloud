@@ -146,15 +146,30 @@ func (p Preflight) Run(ctx context.Context) []Check {
 	}
 
 	// A warning, never a failure: the platform installs and databases run on any zone. But a tenant cluster's nodes get
-	// fixed addresses, the product gives a simple zone DHCP (pve.EnsureZone), and a cluster create on a network with
-	// DHCP is refused. Said here so the operator reads it before a tenant does.
-	if site.DefaultZoneKind == "simple" {
-		out = append(out, Check{ID: "tenant-network", Status: CheckWarn, Message: "The provider's default zone " + site.DefaultZone + " is a simple zone, " +
-			"and its networks have DHCP. A tenant Kubernetes cluster needs a network without DHCP, so every cluster create on this provider is refused " +
-			"(400, \"Worker nodes need a network without DHCP\") until its default zone is an EVPN or a VLAN zone (config.network.zones and defaultZone, " +
-			"under Cloud providers). The install and managed databases do not need it."})
-	} else if site.DefaultZone != "" {
-		row("tenant-network", nil, "The provider's default zone "+site.DefaultZone+" ("+site.DefaultZoneKind+") has no DHCP: a tenant cluster can use its networks.")
+	// fixed addresses, and a cluster create on a network whose zone has DHCP is refused. The create reads the live
+	// zone (pve.VnetStaticPoolFor) and an existing zone is never changed (pve.EnsureZone), so this row reads it too;
+	// a zone not made yet gets DHCP when its kind is simple. Said here so the operator reads it before a tenant does.
+	if site.DefaultZone != "" {
+		const remedy = " A tenant Kubernetes cluster needs a network without DHCP, so a cluster create on a network of this zone is refused " +
+			"(400, \"Worker nodes need a network without DHCP\") until the default zone is an EVPN or a VLAN zone (config.network.zones and defaultZone, " +
+			"under Cloud providers). A Kubernetes provider with shared workers (cluster.shared) uses no tenant network and is not affected. " +
+			"The install and managed databases do not need it."
+		zones, err := p.Portal.C.ListSDNZones(ctx)
+		i := slices.IndexFunc(zones, func(z pve.SDNZone) bool { return z.Zone == site.DefaultZone })
+		switch {
+		case err != nil:
+			out = append(out, Check{ID: "tenant-network", Status: CheckWarn, Message: "Could not read the SDN zones, so whether the provider's default zone " +
+				site.DefaultZone + " has DHCP is not known: " + err.Error() + "." + remedy})
+		case i >= 0 && zones[i].DHCP != "":
+			out = append(out, Check{ID: "tenant-network", Status: CheckWarn, Message: "The provider's default zone " + site.DefaultZone + " has DHCP in Proxmox." + remedy})
+		case i < 0 && site.DefaultZoneKind == "simple":
+			out = append(out, Check{ID: "tenant-network", Status: CheckWarn, Message: "The provider's default zone " + site.DefaultZone +
+				" is a simple zone that does not exist yet, and ProxCloud creates a simple zone with DHCP." + remedy})
+		case i >= 0:
+			row("tenant-network", nil, "The provider's default zone "+site.DefaultZone+" has no DHCP in Proxmox: a tenant cluster can use its networks.")
+		default:
+			row("tenant-network", nil, "The provider's default zone "+site.DefaultZone+" ("+site.DefaultZoneKind+") does not exist yet and is created without DHCP: a tenant cluster can use its networks.")
+		}
 	}
 
 	var creds []string

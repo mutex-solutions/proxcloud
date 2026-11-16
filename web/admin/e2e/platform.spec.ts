@@ -383,7 +383,7 @@ test("a warning of the check does not read as a pass and does not stop the insta
   await open(page, "simplezone")
   await page.getByRole("button", { name: "Check", exact: true }).click()
   await expect(page.getByRole("status").filter({ hasText: "No check failed. 1 warning does not stop the install" })).toBeVisible()
-  await expect(page.getByRole("list", { name: "Connection checks" })).toContainText("every cluster create on this provider is refused")
+  await expect(page.getByRole("list", { name: "Connection checks" })).toContainText("a cluster create on a network of this zone is refused")
   await expect(page.getByRole("list", { name: "What to do for each failed check" })).toHaveCount(0)
   await expect(page.getByRole("button", { name: "Install", exact: true })).toBeEnabled()
 })
