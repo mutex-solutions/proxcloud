@@ -402,7 +402,9 @@ above.
 - The sandbox's shape is decided in the third milestone, so the `sandbox` group of the
   shared layout above is open until then (see the open points).
 - On a Docker Compose portal there are no tenant block volumes (no CSI gateway listener)
-  and no database backups. The console shows both as warnings.
+  and no database backups. The console lists both in a note on the ready installation's
+  card. *(Corrected on 2026-11-16: this said "shows both as warnings"; the page shows an
+  informational note, not a warning.)*
 
 ### Consequences of the amendments
 
