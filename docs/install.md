@@ -37,7 +37,7 @@ installer's split path end to end; dated lab reports below remain historical.
 | | |
 |---|---|
 | Installer host | Linux with `python3`, `openssl`, `docker` and `helm`; `make deps` creates a virtualenv with `ansible-core`. SSH to the management host(s). `docker` and `helm` are for `images.build`, the default. |
-| Proxmox VE | 9.2 or newer, datacenter firewall on, nftables firewall on every node. For EVPN tenant networks, `frr-pythontools` on every node. |
+| Proxmox VE | 9.2 or newer, datacenter firewall on, nftables firewall on every node. For EVPN tenant networks, `frr-pythontools` on every node. For `mode: split`, `libpve-access-control` 9.2.1 or newer on every node (`pveversion -v \| grep access-control`; [why](proxmox-permissions.md#the-mint-grant-in-m1)); the installer does not check it. |
 | Management host | `mgmt.placement: ssh` (default): 1 or 3 Linux hosts with sudo, 4 vCPU and 8 GiB RAM or more, that are **not** Proxmox nodes. `mgmt.placement: pve-vm`: the installer creates the VMs. |
 | Network | The management host reaches the Proxmox API, port 8006, and the internet (k3s, charts, images). OS-template builds use a reserved unused static address on the template bridge/access VLAN; the build host must reach its SSH port and the guest must reach working DNS/package repositories. DHCP is not required for OS templates. |
 | Credential | A root-equivalent Proxmox credential for the install, in the vault. The portal itself runs on a least-privilege token the installer creates ([proxmox-permissions.md](proxmox-permissions.md)). |
@@ -162,6 +162,7 @@ Offline regression commands (no endpoint or private inventory required):
 ```sh
 installer/.venv/bin/python installer/tests/test_registration.py
 installer/.venv/bin/python installer/tests/test_filters.py
+installer/.venv/bin/python installer/tests/test_identity_migration.py   # stage 10 against a fake Proxmox API, about 3 minutes
 ```
 
 ### Access over plain HTTP
@@ -209,7 +210,7 @@ Not automated yet: the off-site copy, OTLP metrics, and pointing CloudNativePG a
 
 | Command | What it does |
 |---|---|
-| `make upgrade` | After bumping `versions.yml`: stages 00, 10 (Proxmox identity), 30 (k3s), 35 (images), 40 (chart, operators), 55 (registry: copies the newly pinned sandbox images in), 56 (sandbox edge) and 60. It does not run stage 50 or stage 55 (cluster): run those playbooks yourself when a pin they use changed (CAPI, CAPMOX, kamaji, the sandbox runtime image). |
+| `make upgrade` | After bumping `versions.yml`: stages 00, 10 (Proxmox identity), 30 (k3s), 35 (images), 40 (chart, operators), 55 (registry: copies the newly pinned sandbox images in), 56 (sandbox edge) and 60. It does not run stage 50 or stage 55 (cluster): run those playbooks yourself when a pin they use changed (CAPI, CAPMOX, kamaji, the sandbox runtime image). In split mode stage 10 also moves the portal's mint grant of an install from before 2026-11-16 ([an existing site](proxmox-permissions.md#an-existing-site)); a task that fails with `NOT FINISHED` and is ignored means another portal token of the Proxmox cluster still needs its own script run. |
 | `make identity-check` | What stage 10 would grant, align and take away, writing nothing. Run it before an upgrade that changes grants. |
 | `make templates` | Build new template versions now. Keeps two per OS and node. |
 | `make storage-rebench` | Re-run fio. Never changes the class of a live volume. |

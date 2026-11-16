@@ -220,6 +220,10 @@ func TestPreflight(t *testing.T) {
 			t.Errorf("%s: want a failure naming %q, got %+v", id, want, c)
 		}
 	}
+	// The script's address as the API serves it: /api/v1 and the boot store, without which it answers 400.
+	if m := got["privileges:kubemint"].Message; !strings.Contains(m, "GET /api/v1/admin/setup/proxmox-script?managedServices=true&bootStorage="+s.Boot+",") {
+		t.Errorf("privileges:kubemint does not say where the script is: %s", m)
+	}
 	// Both name the row to remove and the command, and never a row the script writes (the token's own on the ISO store).
 	if m := got["token-scope"].Message; !strings.Contains(m, "pveum acl delete /pool --tokens 'capmox@pve!capi' --roles ProxCloudCAPI") || strings.Contains(m, "delete /storage") {
 		t.Errorf("token-scope does not name the /pool row alone: %s", m)

@@ -161,7 +161,7 @@ func (p Preflight) Run(ctx context.Context) []Check {
 			return
 		}
 		for i := range missing {
-			missing[i] = who + " lacks " + missing[i] + " (run the managed-services script again: GET /admin/setup/proxmox-script?managedServices=true)"
+			missing[i] = who + " lacks " + missing[i] + " (run the managed-services script again: GET /api/v1/admin/setup/proxmox-script?managedServices=true&bootStorage=" + s.Storage.Boot + ", or step 2 of the Managed services page)"
 		}
 		row(id, missing, who+" holds what it needs.")
 	}

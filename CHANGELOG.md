@@ -549,23 +549,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- **The portal token can create API tokens for `capmox@pve` and `csi@pve` only, no longer for every Proxmox user**
+- **The portal token can create API tokens for `capmox@pve` and `csi@pve` only, no longer for every Proxmox user,
+  and holds no `Permissions.Modify` on `/pool`**
   (`internal/cloud/pve/access.go`, the managed-services setup script, installer stage 10). The mint grant of managed
   Kubernetes put `User.Modify` on `/access/groups`, where Proxmox VE takes it for every user of the cluster: on the
   lab (2026-11-16, `pve-manager/9.2.26`) the portal token created a privilege-separated API token for `root@pam`. A
   token without privilege separation (full root) was not tried; by the PVE source the same grant allowed it before
   `libpve-access-control` 9.2.1. `User.Modify` now sits in a role of its own, `ProxCloudKubeToken`, on
-  `/access/groups/proxcloud-kube`, a new group that holds the two service users; `ProxCloudKubeMint` keeps
-  `Permissions.Modify` on `/pool`, `/storage`, `/sdn/zones` and `/nodes` and has no row under `/access`.
+  `/access/groups/proxcloud-kube`, a new group that holds the two service users. `ProxCloudKubeMint` keeps
+  `Permissions.Modify` on `/storage`, `/sdn/zones` and `/nodes` and has no row under `/access` or on `/pool`: the
+  portal writes a cluster token's pool rows with its own `ProxCloudPlatform` rights, so a stolen token can no longer
+  write any role on every pool. **Managed Kubernetes now needs `libpve-access-control` 9.2.1 or later on every
+  node** (not checked by the product).
   **Existing sites must act:** run the managed-services script again as root on a node, or `make upgrade` on an
-  installer site in split mode. Both write the new grant first and then remove exactly the old rows and the old
-  privilege, so cluster creates and deletes keep working. Until then the new preflight row `mint-scope` fails and
-  Test connection warns (`mint-scope`), with what to run; stage 10 asserts the result. Afterwards list the tokens of
-  `root@pam` and of the other administrator accounts for ones nobody on your side created. Still open and accepted
-  for M1 (ADR 0009 A8, corrected): `Permissions.Modify` on those four paths, and the portal token's power to delete
-  the tokens of the two service users. The grant on the group has not run on a Proxmox cluster yet; the tests are
-  the generated script against the docs, the rows against stage 10, the effective rights worked out from the rows,
-  and the two checks against a fake API (`docs/proxmox-permissions.md`, "The mint grant in M1").
+  installer site in split mode. Both write the new grant first, then remove exactly the old rows, then the old
+  privilege, so the portal token creates and deletes cluster tokens throughout. **A cluster with more than one
+  portal token** (a second provider or portal): run it for each; until the last one has run, the role keeps
+  `User.Modify` so the others keep working, and the script and stage 10 end with `NOT FINISHED` and the tokens
+  left. Until then the new preflight row `mint-scope` fails and Test connection warns (`mint-scope`), with what to
+  run; the row also fails when one of the two users is not in the group. Stage 10 asserts the result. Afterwards
+  list the tokens of `root@pam` and of the other administrator accounts for ones nobody on your side created. Still
+  open and accepted for M1 (ADR 0009 A8, corrected): `Permissions.Modify` on those three paths, and the portal
+  token's power to delete the tokens of the two service users. Neither the grant on the group nor a cluster create
+  without the `/pool` row has run on a Proxmox cluster yet; the tests are the generated script against the docs and
+  against a fake `pveum`, the rows against stage 10, stage 10 against a fake Proxmox API, the effective rights worked
+  out from the rows, and the checks against a fake API (`docs/proxmox-permissions.md`, "The mint grant in M1" and
+  "The re-drill, still to run").
 
 - **ArgoCD's `default` project is locked on installer-built services clusters**
   (`installer/playbooks/files/argocd-default-project.yaml`, applied by stage 50's guardrails step in

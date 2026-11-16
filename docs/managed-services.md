@@ -147,14 +147,18 @@ step 2. The block:
   `/pool/proxcloud-seed` (not `/pool`), the CSI token on `/pool/proxcloud-system` and the boot store,
   `NoAccess` on `/pool/proxcloud-seed` for `csi@pve` and for the portal user and token, and
   `ProxCloudKubeToken` (`User.Modify`) for the portal user and token on
-  `/access/groups/proxcloud-kube`, and `ProxCloudKubeMint` (`Permissions.Modify`) on `/pool`,
-  `/storage`, `/sdn/zones` and `/nodes`. The full list and the reasons are in
+  `/access/groups/proxcloud-kube`, and `ProxCloudKubeMint` (`Permissions.Modify`) on `/storage`,
+  `/sdn/zones` and `/nodes`, not on `/pool`. The full list and the reasons are in
   [proxmox-permissions.md](proxmox-permissions.md#managed-services);
 - removes what an earlier version of this script wrote and this one no longer does: the
-  `ProxCloudKubeMint` rows of the portal user and token on `/access/groups`, and `User.Modify` in
-  that role. On `/access/groups` that privilege let the portal token create an API token for every
-  user of the cluster, `root@pam` included. Nothing else is removed, and on a new site these lines
-  change nothing;
+  `ProxCloudKubeMint` rows of the portal user and token on `/access/groups` and on `/pool`, and
+  `User.Modify` in that role. On `/access/groups` that privilege let the portal token create an API
+  token for every user of the cluster, `root@pam` included; on `/pool` the role let it write any
+  role on every pool. Nothing else is removed, and on a new site these lines change nothing. When
+  another portal token of the cluster still holds the role on `/access/groups`, the script leaves
+  `User.Modify` in the role, so that token keeps working, and ends with `NOT FINISHED` and the
+  list: run the script for each token named
+  ([more than one portal token](proxmox-permissions.md#an-existing-site));
 - ends with `pveum user token permissions` for both tokens on both platform pools.
 
 **The token ids are fixed.** `PUT …/installations/{id}/credentials` refuses any id but
@@ -272,7 +276,7 @@ the settings (`409 rev_conflict`: the page reads them again).
 | `isolation` | The seed, the API address or part of the node range is in no blocked or management network, or the cluster firewall's isolation rules are not the ones a sync writes | Add the CIDRs the message names to **Networks tenants must not reach** on the provider's page (`blockedCidrs`). The message lists the smallest ranges that are missing; one network that covers them does the same (`10.90.0.0/26` for a seed on `.5`, an API address on `.10` and nodes on `.20` to `.60`), as long as the load balancer range stays outside it. Then **Run a provider sync, then check again**: with the installation saved (step 1), the sync writes the provider's rules whether or not it has a project. Check that the datacenter firewall is on. Five messages name a cause no sync of a provider without a project repairs: `cidrPool … overlaps the management network …` (choose another `cidrPool`), `rules … are for another pool`, `rules … drop … to …, which this provider's cidrPool, blockedCidrs and sandboxCidrs do not`, `rules … have an ACCEPT …` or `have no ACCEPT …` and `rules … are not this provider's set …, and a project's rules for cidrPool … are in place` (another portal or provider shares the rules: give this provider its own `poolPrefix`; the provider's own older rules: delete them under Datacenter > Firewall and sync). ([More](#the-isolation-check-and-the-provider-sync)) |
 | `credentials` | A token secret is not stored | Paste it in step 2 |
 | `privileges:capi`, `privileges:csi`, `privileges:kubemint` | The CAPI token, the CSI token or the portal token lacks a privilege on a path; the message names both | Run the script again. `privileges:kubemint` on `/storage/<store>`: that is the provider's `importStorage`; when the settings name another import store the script does not write that row ([what to do](#when-the-providers-import-store-is-the-boot-store)) |
-| `mint-scope` | The portal token holds `User.Modify` or `Permissions.Modify` on `/`, `/access` or `/access/groups`. With it a stolen portal token can create an API token for any user of the cluster, `root@pam` included. A site set up before the group `proxcloud-kube` holds `ProxCloudKubeMint` on `/access/groups` | Run the script again: it grants `ProxCloudKubeToken` on `/access/groups/proxcloud-kube` and removes the old rows ([the commands](proxmox-permissions.md#an-existing-site)). If it still fails, another row grants it: `pveum acl list \| grep -F '<the portal user>'` on a node, then `pveum acl delete <path> --users <user> --roles <role>` (or `--tokens`) for a row on `/`, `/access` or `/access/groups` |
+| `mint-scope` | The portal token holds `User.Modify` or `Permissions.Modify` on `/`, `/access` or `/access/groups` (a stolen portal token can then create an API token for any user of the cluster, `root@pam` included) or `Permissions.Modify` on `/pool` (it can then write any role on every pool). A site set up before the group `proxcloud-kube` holds `ProxCloudKubeMint` on `/access/groups` and `/pool`. Or: `capmox@pve` or `csi@pve` is not in the group `proxcloud-kube`, and Proxmox refuses every token create or delete for it | Run the script again: it grants `ProxCloudKubeToken` on `/access/groups/proxcloud-kube`, puts both users in the group and removes the old rows ([the commands](proxmox-permissions.md#an-existing-site)). If it still fails on a privilege, another row grants it: `pveum acl list \| grep -F '<the portal user>'` on a node, then `pveum acl delete <path> --users <user> --roles <role>` (or `--tokens`) for a row on `/`, `/access`, `/access/groups` or `/pool` with a role other than `ProxCloudPlatform`. For a user outside the group the message gives the line: `pveum user modify <user> --groups proxcloud-kube --append 1` |
 | `token-scope` | `capmox@pve!capi` or `csi@pve!csi` holds a privilege on `/pool`, `/storage` or `/vms` as a whole, which reaches every tenant's VMs or disks. The script writes no such row; an older setup may have, and the script removes none | Run the `pveum acl delete` command the message gives, as root on one node, then check again. When the portal token cannot read the row (one on `/`, for example) the message gives `pveum acl list` to find it: the row to remove is one on the named path itself, or on a parent of it (`/` included) with propagate 1, with a role other than `NoAccess`. The list is not empty on a site the script set up, and its rows on the platform pools and stores and on `/` without propagate stay. When no listed row is such a row, remove none: the token was made without privilege separation and holds its user's rights (the users keep `/pool` and `/storage`): run `pveum user token modify <user> <token name> --privsep 1` (`capmox@pve capi`, `csi@pve csi`), then the script again. Leave the tokens' rows on the platform pools and on the boot and ISO stores |
 | `pool-fence` | The portal token holds a privilege on `proxcloud-system` or `proxcloud-seed`, or the CSI token on `proxcloud-seed` | Run the script again with the provider's token id: it writes the `NoAccess` rows on both pools, and a missing row is the usual cause (the portal token's `/pool` rows pass down to them). Only if the check still fails, remove the row granted to that user or token on `/pool/proxcloud-system` or `/pool/proxcloud-seed` itself. Do not remove its `/pool` rows: every tenant operation needs them |
 | `iso-store-visibility` | The CAPI token sees an ISO store other than the one in the settings. CAPMOX puts each bootstrap ISO on the first ISO store its token sees | The message names the stores seen and, for each row of the token that reaches another ISO store, the command that removes it (`pveum acl delete <path> --tokens 'capmox@pve!capi' --roles <role>`, as root on one node); run them and check again, and `privileges:capi` must stay ok. A row the portal token cannot read is found with `pveum acl list \| grep -F 'capmox@pve!capi'`: it is on the other store's path or on a parent of it with propagate 1 (no listed row is such a row: the token lacks privilege separation, see `token-scope`). Or change the ISO store and run the script again. When the extra store is the boot store, the message gives no command: the token needs its row there, so name another boot store or take `iso` out of its content (the `boot-iso` row) |
@@ -640,12 +644,17 @@ and ADR 0009, A2 and A8.
   that group holds the grant on `/access/groups`, where the lab measured that the portal token can
   create a token for `root@pam` (2026-11-16, PVE 9.2.26); the `mint-scope` check fails there until
   the script has run again
-  ([the mint grant](proxmox-permissions.md#the-mint-grant-in-m1)).
-- **Accepted for this milestone, not closed:** `ProxCloudKubeMint` (`Permissions.Modify` on `/pool`,
+  ([the mint grant](proxmox-permissions.md#the-mint-grant-in-m1)). The nodes need
+  `libpve-access-control` 9.2.1 or later: before it the same grant also allowed a token without
+  privilege separation for those two users, and a new secret for their existing tokens.
+- The portal token holds no `Permissions.Modify` on `/pool`: it writes a cluster token's row on a
+  tenant pool with its own `ProxCloudPlatform` rights, cannot write on `/pool` itself or on the
+  platform pools, and cannot hand out a privilege it lacks. A site set up before 2026-11-16 holds
+  `ProxCloudKubeMint` on `/pool` until the script has run again (`mint-scope`).
+- **Accepted for this milestone, not closed:** `ProxCloudKubeMint` (`Permissions.Modify` on
   `/storage`, `/sdn/zones` and `/nodes`, and on the import store's own path) lets a stolen portal
-  token grant any role on those paths, to itself or to a token it minted for `capmox@pve` or
-  `csi@pve`, which reaches the seed's disk through the boot store and gives a minted `capmox@pve`
-  token `ProxCloudCAPI` on both platform pools; with `ProxCloudKubeToken` it can delete or expire
+  token grant any role on those paths, to itself or to any other user or token, which reaches
+  the seed's disk through the boot store; with `ProxCloudKubeToken` it can delete or expire
   the tokens of those two users and disable the users; the CSI token's
   `Datastore.Allocate` on the boot store reaches every disk on it, the seed's included, and so does
   the portal token's when it holds `PVEDatastoreAdmin` on the boot store (the settings may not name

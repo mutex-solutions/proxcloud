@@ -334,14 +334,15 @@ root. etcd snapshots to an object store can follow if a site needs them.
 ### A8. Risks accepted for the first milestone
 
 **Change.** Managed Kubernetes keeps `ProxCloudKubeMint` (`Permissions.Modify`) for the
-portal token on `/pool`, `/storage`, `/sdn/zones` and `/nodes`, and `ProxCloudKubeToken`
+portal token on `/storage`, `/sdn/zones` and `/nodes`, and `ProxCloudKubeToken`
 (`User.Modify`) on `/access/groups/proxcloud-kube`, a group that holds `capmox@pve` and
 `csi@pve` and no one else. *(Corrected on 2026-11-16: this said `ProxCloudKubeMint`
 (`User.Modify Permissions.Modify`) on `/access/groups`, `/pool`, `/storage`, `/sdn/zones`
 and `/nodes`; see "Correction" below.)*
-The portal token itself has NoAccess on both platform pools, but a stolen portal token can
-grant a role on `/pool` to a principal it can mint a token for, and that grant reaches the
-platform pools for every principal without a row of its own there. The first milestone
+The portal token itself has NoAccess on both platform pools. As accepted on 2026-11-15, a
+stolen portal token could grant a role on `/pool` to a principal it can mint a token for,
+and that grant reached the platform pools for every principal without a row of its own
+there *(no longer possible: the `/pool` row is gone, see "Correction")*. The first milestone
 narrows this: the token rows of `capmox@pve!capi` are narrowed from `/pool` to the two
 platform pools, those of `csi@pve!csi` from `/pool` and `/storage` to
 `/pool/proxcloud-system` and `/storage/<boot>`, and `capmox@pve` and `csi@pve` get explicit
@@ -378,16 +379,32 @@ release:
   wrote on `/access/groups`; the preflight (`mint-scope`), the connection test and stage 10
   report a site that still holds them.
 
-What stays accepted for the first milestone, unchanged: `Permissions.Modify` on `/pool`,
-`/storage`, `/sdn/zones` and `/nodes`, with which a stolen portal token writes any role
-there for itself or for a token it minted under `capmox@pve` or `csi@pve` (such a
-`capmox@pve` token reaches `ProxCloudCAPI` on both platform pools, the user's own rows
-being its ceiling), and the power to delete or expire the tokens of those two users and to
-disable them. The grant on the group has not run on a lab yet;
-`docs/proxmox-permissions.md` has the drill results and what is still to measure.
+- `ProxCloudKubeMint` also leaves `/pool` (same day, from the review of the change above).
+  The product writes two rows on pools, `ProxCloudCAPI` on the tenant pool and
+  `PVETemplateUser` on `pc-templates`, and PVE accepts those from a caller with
+  `Pool.Allocate` that holds the role's privileges on that pool itself, which
+  `ProxCloudPlatform` on `/pool` gives the portal. `Permissions.Modify` on `/pool` only
+  served a stolen token: any role on `/pool` itself, for any principal, and through it
+  `ProxCloudCAPI` on both platform pools for a token minted under `capmox@pve`. That path,
+  accepted above, is closed on nodes with `libpve-access-control` 9.2.1 or later, which
+  managed Kubernetes now requires: before that version a token without privilege separation
+  for `capmox@pve` reaches the same pools through the group grant.
+- A second portal token on the same cluster keeps working while the grant moves: the role
+  loses `User.Modify` only when no other principal holds it on `/access/groups`, and the
+  script and stage 10 name the ones that do.
 
-**Why.** The structural fix, scoping the mint grant to a parent pool of the tenant pools
-(nested pools in PVE), renames every tenant pool and is a change of its own. Sites whose
+What stays accepted for the first milestone: `Permissions.Modify` on `/storage`,
+`/sdn/zones` and `/nodes`, with which a stolen portal token writes any role there for
+itself or for any other principal (on `/storage` that is `Datastore.Allocate` on the boot
+store and so every disk on it, the seed's included), and the power to delete or expire the
+tokens of `capmox@pve` and `csi@pve` and to disable those two users. Neither the grant on
+the group nor a cluster create without the `/pool` row has run on a lab yet;
+`docs/proxmox-permissions.md` has the drill results and the re-drill that is still to run.
+
+**Why.** The structural fix as first written, scoping the mint grant to a parent pool of
+the tenant pools (nested pools in PVE), renames every tenant pool and is a change of its
+own *(not needed for pools any more: the 2026-11-16 correction removes the `/pool` row
+without it; the rows on `/storage`, `/sdn/zones` and `/nodes` have no such way out)*. Sites whose
 tenant workers run in the shared mode (`kamaji.ClusterDefaults.Shared`) need no mint grant
 at all. `docs/proxmox-permissions.md` already says that a stolen portal token can grant
 itself anything on those paths; this amendment makes the acceptance explicit and bounds it

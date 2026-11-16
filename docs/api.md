@@ -121,6 +121,7 @@ several findings puts one on each line of `message`. Rows after `connect` or
 | `firewall-nodes` | Every online node runs the nftables firewall | `fail` |
 | `public-networks` | Stored provider: no public network on a management bridge | `fail` |
 | `privileges:<path>` | The token holds the `ProxCloudPlatform` privileges on that ACL path (`/`, `/nodes`, `/pool`, `/sdn`, `/sdn/zones`, `/storage`, `/mapping/pci`). One row `privileges` when they cannot be read | `warn` |
+| `mint-scope` | Only when it applies: the token holds `User.Modify` or `Permissions.Modify` on `/`, `/access` or `/access/groups` (it could create an API token for any user, `root@pam` included) or `Permissions.Modify` on `/pool` (it could write any role on every pool). The message says what to run | `warn` |
 | `store-reach` | Stored provider: tenant networks cannot reach the network stores | `warn` |
 | `boot-iso` | Stored provider: the Kubernetes bootstrap ISO store is usable | `warn` |
 | `version` | Proxmox VE 9.2 or later | `fail` |
@@ -399,7 +400,9 @@ are several, `errors.details.problems`.
   tenant network on the whole Proxmox cluster yet it passes. `mint-scope` fails
   when the portal token holds `User.Modify` or `Permissions.Modify` on `/`,
   `/access` or `/access/groups`, where it could create an API token for any user
-  (`root@pam` included), and says to run the identities script again. `token-scope` fails
+  (`root@pam` included), or `Permissions.Modify` on `/pool`, and says to run the
+  identities script again; and when `capmox@pve` or `csi@pve` is not in the group
+  `proxcloud-kube`, with the `pveum user modify` line that puts it there. `token-scope` fails
   when `capmox@pve!capi` or `csi@pve!csi` holds a privilege on `/pool`, `/storage`
   or `/vms`, and names the `pveum acl delete` command, or which row of
   `pveum acl list` is the one to remove. A row that cannot be read fails.
