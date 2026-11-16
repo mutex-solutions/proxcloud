@@ -563,7 +563,7 @@ func (s *Service) ReconcileIsolationInventory(ctx context.Context, projectID, po
 }
 
 func (s *Service) reconcileIsolation(ctx context.Context, projectID, pool string, blocked, sandbox []string, verifiedCIDRs *[]string, allow ...string) error {
-	if err := s.reconcileDrops(ctx, pool, blocked, sandbox, allow); err != nil {
+	if err := s.reconcileDrops(ctx, false, pool, blocked, sandbox, allow); err != nil {
 		return err
 	}
 
@@ -597,8 +597,19 @@ func (s *Service) reconcileIsolation(ctx context.Context, projectID, pool string
 // it once per provider, so the rules exist before the first tenant network and the managed-services preflight can be
 // made green on a provider with no project (on a cluster another portal shares, ErrIsolationPending never applies).
 // A cidrPool that overlaps a management network is refused: with no tenant yet, "DROP pool to pool" would only cut
-// the nodes off each other.
+// the nodes off each other. So are rules in place for another pool (otherPool): with no tenant of its own to protect,
+// this call must not delete the DROPs of a portal or provider that shares the rule owner. A changed cidrPool is
+// therefore rolled out by the per-project path, not by this one.
 func (s *Service) ReconcileProviderIsolation(ctx context.Context, pool string, blocked, sandbox []string, allow ...string) error {
+	if err := s.poolOverManagement(ctx, pool); err != nil {
+		return err
+	}
+	return s.reconcileDrops(ctx, true, pool, blocked, sandbox, allow)
+}
+
+// poolOverManagement is the error for a cidrPool that overlaps a management network of the nodes, which
+// ReconcileProviderIsolation refuses to write rules for.
+func (s *Service) poolOverManagement(ctx context.Context, pool string) error {
 	_, poolNet, err := net.ParseCIDR(pool)
 	if err != nil {
 		return fmt.Errorf("pve isolation: invalid cidrPool %q", pool)
@@ -609,14 +620,27 @@ func (s *Service) ReconcileProviderIsolation(ctx context.Context, pool string, b
 	}
 	for _, m := range mgmt {
 		if _, n, err := net.ParseCIDR(m); err == nil && (poolNet.Contains(n.IP) || n.Contains(poolNet.IP)) {
-			return fmt.Errorf("pve isolation: cidrPool %s overlaps the management network %s; no rule is written", poolNet, n)
+			return fmt.Errorf("pve isolation: cidrPool %s overlaps the management network %s: the provider sync writes no rule for it, choose another cidrPool", poolNet, n)
 		}
 	}
-	return s.reconcileDrops(ctx, pool, blocked, sandbox, allow)
+	return nil
 }
 
-// reconcileDrops brings this portal's provider-wide rules (isolationWant) into the cluster firewall.
-func (s *Service) reconcileDrops(ctx context.Context, pool string, blocked, sandbox, allow []string) error {
+// otherPool is the error for owner rules in place that fence another pool than pool, nil otherwise: every rule set
+// has "DROP pool to pool" (isolationRules), which names the pool it was written for.
+func otherPool(mine []FirewallRule, owner string, pool *net.IPNet) error {
+	for _, r := range mine {
+		if r.Action == "DROP" && r.Source == r.Dest && r.Source != pool.String() {
+			return fmt.Errorf("pve isolation: the %s rules in the cluster firewall are for another pool (%s), not cidrPool %s: another portal or provider on this cluster uses the same pool prefix (give this provider its own poolPrefix), or this provider's cidrPool changed (its first tenant network or a project's sync rewrites them); a provider sync with no project leaves them in place",
+				owner, r.Source, pool)
+		}
+	}
+	return nil
+}
+
+// reconcileDrops brings this portal's provider-wide rules (isolationWant) into the cluster firewall. keepOtherPool
+// (the provider-level call) refuses instead when the rules in place are for another pool.
+func (s *Service) reconcileDrops(ctx context.Context, keepOtherPool bool, pool string, blocked, sandbox, allow []string) error {
 	want, owner, poolNet, complete, err := s.isolationWant(ctx, pool, blocked, sandbox, allow)
 	if err != nil {
 		return err
@@ -629,6 +653,11 @@ func (s *Service) reconcileDrops(ctx context.Context, pool string, blocked, sand
 	for _, r := range rules {
 		if r.Comment == owner {
 			mine = append(mine, r)
+		}
+	}
+	if keepOtherPool {
+		if err := otherPool(mine, owner, poolNet); err != nil {
+			return err
 		}
 	}
 	// With a node down the list may miss a network only it knew, so DROPs in place stay until it is
@@ -686,7 +715,7 @@ func (s *Service) CheckIsolation(ctx context.Context, pool string, blocked, sand
 }
 
 func (s *Service) checkIsolation(ctx context.Context, pendingOK bool, pool string, blocked, sandbox []string, allow ...string) error {
-	want, owner, _, complete, err := s.isolationWant(ctx, pool, blocked, sandbox, allow)
+	want, owner, poolNet, complete, err := s.isolationWant(ctx, pool, blocked, sandbox, allow)
 	if err != nil {
 		return err
 	}
@@ -712,6 +741,16 @@ func (s *Service) checkIsolation(ctx context.Context, pendingOK bool, pool strin
 			}
 			mine = append(mine, r)
 		}
+	}
+	// No sync writes rules for such a pool (ReconcileProviderIsolation), so neither "pending" nor "a sync writes
+	// them" would be true.
+	if len(mine) == 0 {
+		if err := s.poolOverManagement(ctx, pool); err != nil {
+			return err
+		}
+	}
+	if err := otherPool(mine, owner, poolNet); err != nil {
+		return err
 	}
 	if len(mine) == 0 && pendingOK {
 		vnets, err := s.C.ListSDNVnets(ctx)

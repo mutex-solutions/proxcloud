@@ -127,6 +127,10 @@ func TestCheckIsolation(t *testing.T) {
 	if err := srv.CheckIsolation(ctx, "10.100.0.0/16", nil, nil); !errors.Is(err, ErrIsolationPending) {
 		t.Fatalf("no tenant network yet: %v", err)
 	}
+	// A pool over a management network is not pending: the sync refuses to write its rules.
+	if err := srv.CheckIsolation(ctx, "192.0.0.0/16", nil, nil); err == nil || !strings.Contains(err.Error(), "overlaps the management network 192.0.2.0/24") {
+		t.Fatalf("cidrPool over a management network, no tenant network: %v", err)
+	}
 	// With sandbox networks too: the sandbox gate, which refuses every sandbox create until the rules are in, keeps
 	// failing.
 	sbx := []string{"10.110.0.0/24"}
@@ -179,9 +183,12 @@ func TestProviderIsolationOnASharedCluster(t *testing.T) {
 	if err == nil || errors.Is(err, ErrIsolationPending) || !strings.Contains(err.Error(), "a provider sync writes them") {
 		t.Fatalf("another portal's tenant network, none of this portal's rules: %v", err)
 	}
-	// A pool over a management network: nothing is written.
+	// A pool over a management network: nothing is written, and the check names that cause, not a sync.
 	if err := srv.ReconcileProviderIsolation(ctx, "192.0.0.0/16", blocked, nil); err == nil || *writes != 0 {
 		t.Fatalf("cidrPool over a management network: err %v, %d writes", err, *writes)
+	}
+	if err := srv.CheckIsolation(ctx, "192.0.0.0/16", blocked, nil); err == nil || !strings.Contains(err.Error(), "the provider sync writes no rule") {
+		t.Fatalf("cidrPool over a management network: %v", err)
 	}
 	if err := srv.ReconcileProviderIsolation(ctx, "10.121.0.0/16", blocked, nil); err != nil {
 		t.Fatal(err)
@@ -214,5 +221,44 @@ func TestProviderIsolationOnASharedCluster(t *testing.T) {
 	}
 	if err := srv.CheckIsolation(ctx, "10.121.0.0/16", blocked, nil); err == nil || errors.Is(err, ErrIsolationPending) {
 		t.Fatalf("the same DROPs under another portal's comment: %v", err)
+	}
+}
+
+// Two portals with the same pool prefix (pc- is the default) share one rule owner. The provider-level reconcile of the
+// one with no project must not replace the other's DROPs with its own: it writes nothing and says why, and so does its
+// check. Its own pool with other blocked networks is still rewritten.
+func TestProviderIsolationKeepsAnotherPoolsRules(t *testing.T) {
+	ctx := context.Background()
+	a, rules, writes := isolationFakeNodes(t, nil, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/cluster/firewall/options": func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"data":{"enable":1}}`) },
+	})
+	if err := a.ReconcileIsolation(ctx, "p1", "10.100.0.0/16", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.CheckIsolation(ctx, "10.100.0.0/16", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	before, n := slices.Clone(*rules), *writes
+	b := &Service{C: a.C, ServiceID: "svc2", PoolPrefix: "pc-"}
+	err := b.ReconcileProviderIsolation(ctx, "10.121.0.0/16", nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "another pool (10.100.0.0/16)") || !strings.Contains(err.Error(), "poolPrefix") {
+		t.Fatalf("rules of another pool under the same owner: %v", err)
+	}
+	if *writes != n || !slices.EqualFunc(*rules, before, sameLiveRule) {
+		t.Fatalf("the other portal's rules changed (%d writes): %+v", *writes-n, *rules)
+	}
+	if err := a.CheckIsolation(ctx, "10.100.0.0/16", nil, nil); err != nil {
+		t.Fatalf("the first portal after the second one's sync: %v", err)
+	}
+	if err := b.CheckIsolation(ctx, "10.121.0.0/16", nil, nil); err == nil || !strings.Contains(err.Error(), "poolPrefix") || strings.Contains(err.Error(), "a provider sync writes them") {
+		t.Fatalf("the second portal's check: %v", err)
+	}
+	// The same pool, another blocked list: this provider's own rules, rewritten as before.
+	blocked := []string{"10.90.0.0/26"}
+	if err := a.ReconcileProviderIsolation(ctx, "10.100.0.0/16", blocked, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.CheckIsolation(ctx, "10.100.0.0/16", blocked, nil); err != nil {
+		t.Fatalf("a changed blocked list: %v", err)
 	}
 }
