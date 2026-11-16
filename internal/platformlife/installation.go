@@ -24,7 +24,7 @@ type Installation struct {
 	ID            string    `json:"id"`   // pi-<8hex>
 	Name          string    `json:"name"` // prefixes the providers: "<name> Kubernetes", "<name> Databases"
 	ServiceID     string    `json:"serviceId"`
-	ProvisionedBy string    `json:"provisionedBy"` // portal | installer
+	ProvisionedBy string    `json:"provisionedBy"` // portal | installer (M2: refused by Validate)
 	Layout        string    `json:"layout"`        // shared (separate is refused in M1)
 	Spec          Spec      `json:"spec"`
 	Status        Status    `json:"status"`
@@ -64,7 +64,7 @@ type Network struct {
 
 // SeedSpec is the k3s management cluster. Mode, pool, node and address are fixed.
 type SeedSpec struct {
-	Mode       string   `json:"mode"` // vm (the job clones it) | existing (installer seeds, M2)
+	Mode       string   `json:"mode"` // vm (the job clones it) | existing (installer seeds, M2: refused by Validate)
 	Pool       string   `json:"pool"`
 	Node       string   `json:"node"`
 	Address    string   `json:"address"`
@@ -266,8 +266,12 @@ func (in *Installation) Validate() error {
 	if in.ServiceID == "" {
 		bad("serviceId is required")
 	}
-	if in.ProvisionedBy != ByPortal && in.ProvisionedBy != ByInstaller {
-		bad("provisionedBy %q is neither portal nor installer", in.ProvisionedBy)
+	switch in.ProvisionedBy {
+	case ByPortal:
+	case ByInstaller:
+		bad("provisionedBy installer comes in a later release; use portal")
+	default:
+		bad("provisionedBy %q is not portal", in.ProvisionedBy)
 	}
 	switch in.Layout {
 	case LayoutShared:
@@ -285,6 +289,11 @@ func (in *Installation) Validate() error {
 		if (st.v != "" || st.field != "import" || imports) && !storageRE.MatchString(st.v) {
 			bad("spec.storage.%s %q is not a storage id", st.field, st.v)
 		}
+	}
+	// The portal token holds PVEDatastoreAdmin on the import store, which reaches every disk on it: on the boot store
+	// that would undo its NoAccess on the platform pools (docs/proxmox-permissions.md).
+	if s.Storage.Import != "" && s.Storage.Import == s.Storage.Boot {
+		bad("spec.storage.import %q is the boot store: use another store for the image downloads", s.Storage.Import)
 	}
 
 	n := s.Network
@@ -325,11 +334,9 @@ func (in *Installation) Validate() error {
 			bad("spec.seed.pool must be %s for a seed the portal builds", pve.SeedPool)
 		}
 	case SeedExisting:
-		if !nameRE.MatchString(seed.Pool) {
-			bad("spec.seed.pool %q is not a pool name", seed.Pool)
-		}
+		bad("spec.seed.mode existing comes in a later release; use vm")
 	default:
-		bad("spec.seed.mode %q is neither vm nor existing", seed.Mode)
+		bad("spec.seed.mode %q is not vm", seed.Mode)
 	}
 	if !nodeRE.MatchString(seed.Node) {
 		bad("spec.seed.node %q is not a node name", seed.Node)

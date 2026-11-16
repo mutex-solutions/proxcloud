@@ -95,6 +95,9 @@ test("from an empty form to a failed run, then Retry and Cancel", async ({ page 
   await page.getByLabel("Gateway", { exact: true }).fill("10.90.0.30")
   await page.getByRole("button", { name: "Save draft" }).click()
   await expect(page.getByText("Gateway is inside the node range.").first()).toBeVisible()
+  await page.getByLabel("Import store (optional)", { exact: true }).fill("local-zfs") // the boot store
+  await expect(page.getByText("Import store: a store other than the boot store.").first()).toBeVisible()
+  await page.getByLabel("Import store (optional)", { exact: true }).fill("")
   await page.getByLabel("Node range", { exact: true }).fill("10.90.0.20-10.90.0.24")
   await expect(page.getByText(/Node range: it holds 5 addresses; 5 machines and 3 spare for updates need 8/).first()).toBeVisible()
   await page.getByLabel("Gateway", { exact: true }).fill("10.100.0.1")
@@ -183,6 +186,7 @@ test("from an empty form to a failed run, then Retry and Cancel", async ({ page 
   await page.getByRole("button", { name: "Retry" }).click()
   await expect(stages.getByText("Running")).toBeVisible()
   await shot(page, "run-progress")
+  await expect(page.getByText(/up to 5 minutes while a stage pauses after repeated errors/)).toBeVisible()
   await page.getByRole("button", { name: "Cancel the run" }).click()
   await expect(page.getByText("The run was cancelled. Nothing was deleted.")).toBeVisible({ timeout: 15_000 })
   await expect(page.getByRole("button", { name: "Retry" })).toBeVisible()
@@ -203,6 +207,7 @@ test("a run ends ready: live components, providers, seed credential and the brea
   await expect(page.getByRole("link", { name: "lab Kubernetes" })).toHaveAttribute("href", /\/system\/cloud-providers\/svc-/)
   await expect(page.getByRole("link", { name: "lab Databases" })).toBeVisible()
   await expect(page.getByLabel("backup command", { exact: true })).toContainText("pvesh create /cluster/backup --vmid 9100")
+  await expect(page.getByText(/a backup store that is not the boot, ISO or import store of the settings/)).toBeVisible()
   await expect(page.getByText("Tenant databases are not backed up.")).toBeVisible()
   await expect(page.getByText("Tenant Kubernetes clusters get no block volumes on a one-host install.")).toBeVisible()
 

@@ -24,7 +24,8 @@ func TestPlanFor(t *testing.T) {
 		t.Fatalf("installed = current: %+v", same)
 	}
 	old, _ := PlanFor(&BOMRef{Release: "0.5.0", SHA256: strings.Repeat("0", 64)})
-	if len(old.Blocking) != 1 || !strings.HasPrefix(old.Blocking[0], CodeBOMUnsupported) {
+	// No release upgrades between BOMs, so the reason must not name an upgrade path.
+	if len(old.Blocking) != 1 || !strings.HasPrefix(old.Blocking[0], CodeBOMUnsupported) || strings.Contains(old.Blocking[0], "upgrade through") {
 		t.Fatalf("a BOM this release does not embed: %+v", old)
 	}
 }

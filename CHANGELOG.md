@@ -22,8 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer says that the Compose install cannot have managed Kubernetes and databases; the console's in-app
   documentation page for Managed services no longer says that **Apply this release** upgrades the components after a
   ProxCloud upgrade, which this release refuses with `bom_unsupported`, and no longer advises an upgrade path for
-  that code. The page's own `bom_unsupported` and `pool-fence` action texts are unchanged and still differ from the
-  guide.
+  that code.
 
 - **Admin console: the Managed services page** (System → Managed services, `/platform`, ADR 0009). It walks an
   operator through the platform installation: the settings of a draft (node groups, platform network, seed, control
@@ -398,6 +397,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its flag, will). Tested with unit tests and the opt-in PostgreSQL tests (`TEMPLATEUPDATES_TEST_POSTGRES`)
   against a throwaway database; not run against a Proxmox cluster, so nextid's answer for a held VMID is
   taken from the PVE source and `images/vm_export/coldboot.py`, not measured.
+
+### Fixed
+
+- **Managed services (ADR 0009): what the API accepts and what the page advises now match what a run can do.** The
+  API refuses an installation whose import store is its boot store (the portal token's `PVEDatastoreAdmin` on the
+  import store would reach the platform's disks behind its `NoAccess` on the platform pools), and refuses
+  `seed.mode: existing` and `provisionedBy: installer` when the installation is saved, where before a run failed at
+  stage 3 with `stage_unavailable`; the page checks the store rule before it saves. `bom_unsupported` no longer
+  names an upgrade path that does not exist, in the page, the plan and the `409`: it says to go back to the release
+  that installed the platform, or to remove and install again. The `pool-fence` check says to run the identities
+  script again first, and not to remove the token's `/pool` permissions. The Cancel hint gives the real bound (up to
+  5 minutes while a stage pauses after repeated errors), and the ready card says which stores not to back the seed up
+  to. The failure codes `privileges_missing`, `network_problem` and `iso_store_visibility`, which no stage emitted,
+  are gone from the code and the page. A draft saved with the boot store as its import store fails the `spec` check
+  until the store is changed.
 
 ### Security
 

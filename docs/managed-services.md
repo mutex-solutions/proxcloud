@@ -77,7 +77,7 @@ reading [section 3](#3-proxmox-identities): they share the pool `proxcloud-syste
 | Permissions | `admin:service:read` to read the page, `admin:service:manage` for every button, the Check and the seed kubeconfig download included. |
 | A platform network | One bridge that exists on every node used, untagged (no VLAN), with a free IPv4 network from /8 to /29, a gateway and one to three DNS servers. It must not overlap the provider's tenant address pool (`cidrPool`), a sandbox network or a public network. |
 | Routes | The API (on Compose: the API container) reaches the Proxmox API, the seed address on 6443 and the cluster's API address on 6443. The seed and the cluster machines reach the Proxmox API URL you enter, `github.com` and `raw.githubusercontent.com` (at first boot the seed downloads the k3s binary from the first and the k3s install script from the second, both checked by sha256; GitHub redirects a release download to another host of its own, which must be reachable too and is not named in the BOM) and the registries and chart repositories of the BOM (`ghcr.io`, `charts.jetstack.io`, `helm.cilium.io`, `metallb.github.io`, `cloudnative-pg.github.io`, `clastix.github.io`, and the image registries those charts pull from). Tenant networks must reach the load balancer range and nothing else of the platform network. |
-| Storage | A boot store that takes VM disks on every node used; an ISO store that is local to each node and takes ISOs (default `local`); an import store with `import` content on every node an image goes to (default: the provider's `importStorage`). Use an import store that is not the boot store: the portal token holds `PVEDatastoreAdmin` on the import store, which reaches every disk on it ([section 10](#10-security-boundaries)). Nothing checks this. |
+| Storage | A boot store that takes VM disks on every node used; an ISO store that is local to each node and takes ISOs (default `local`); an import store with `import` content on every node an image goes to (default: the provider's `importStorage`). The import store must not be the boot store: the portal token holds `PVEDatastoreAdmin` on the import store, which reaches every disk on it ([section 10](#10-security-boundaries)). The API refuses settings that name the same store for both; the form says so before it saves. |
 | Capacity | The smallest machine is 2 cores, 4 GiB of memory and a 20 GiB disk. The smallest layout (seed, control plane, one machine per group) is five VMs. The review step adds up cores and memory per node; it does not read what is free. |
 | Root on one node | Once, to run the identities script. |
 | The datacenter firewall | On, with the provider's isolation rules written by a provider sync: the Check verifies that tenant traffic to the seed, the API address and the node range is dropped. |
@@ -195,7 +195,7 @@ the settings (`409 rev_conflict`: the page reads them again).
 | Check | Fails when | What to do |
 |---|---|---|
 | `flags` | Template updates are off, or no GitHub integration is saved | `--managed-services`; save a GitHub token |
-| `spec` | The saved settings break a rule | Correct step 1 and save |
+| `spec` | The saved settings break a rule, for example an import store that is the boot store | Correct step 1 and save |
 | `network` | The platform network overlaps a tenant, sandbox or public network, a seed API source is a tenant network, the load balancer range is inside a blocked or management network, or a node did not report its networks | Correct the network in step 1 |
 | `isolation` | The seed, the API address or part of the node range is in no blocked or management network, or the cluster firewall's isolation rules are not the ones a sync writes | Add the CIDRs the message names to **Networks tenants must not reach** on the provider's page (`blockedCidrs`), then **Run a provider sync, then check again**. Check that the datacenter firewall is on. With no tenant network yet the check passes: the rules are written with the first one |
 | `credentials` | A token secret is not stored | Paste it in step 2 |
@@ -293,19 +293,18 @@ stage is still trying.
 | `workload_api_unreachable` | 8 to 10, Remove | The cluster's API does not answer from the API's host, or its kubeconfig or CA on the seed is not usable | Add a route from the ProxCloud host to the API address, **Retry**. At Remove: restore the route and **Remove again**, or tick the option for a cluster that does not answer |
 | `nodes_timeout` | 9 | Not every node is Ready with its group label after the first wave | **Retry** |
 | `provider_conflict` | 10 | A provider with the same name exists that is not this installation's, two rows carry its marker, or the provider validation refused the row | Correct or rename that provider under Cloud providers, **Retry** |
-| `bom_unsupported` | start, plan | The installed BOM is not the one this release carries | See [Not implemented yet](#not-implemented-yet): this release has no upgrade between BOMs |
+| `bom_unsupported` | start, plan | The installed BOM is not the one this release carries | No release upgrades between BOMs ([Not implemented yet](#not-implemented-yet)). Go back to the ProxCloud release that installed the platform, or remove managed services and install again |
 | `portal_changed` | any | ProxCloud was upgraded during the run and no longer carries the run's BOM | **Retry** |
 | `job_dead` | any | The run's job ran out of attempts | **Retry**, or **Remove again** |
 | `platform_disabled` | start | The switch, or template updates, is off | `--managed-services` |
-| `stage_unavailable` | 3, any | `seed.mode: existing`, or a run recorded by another release | No action in this release |
+| `stage_unavailable` | any | A run recorded by another release names a stage this one does not have | No action in this release |
 | `tenants_exist` | Remove | Tenant clusters or databases still run on the platform (the message names up to five) | Delete them, **Remove again** |
 | `machine_delete_stuck` | Remove | Cluster API is still deleting machines after 45 minutes, or (missing seed) a tagged VM could not be stopped or deleted | Delete the VM the message names in Proxmox, **Remove again** |
 | `volume_delete_failed` | Remove | A recorded volume could not be deleted with the CSI token | Check `csi@pve!csi` and the storage the message names, **Remove again** |
 | `<stage>_timeout` | any | A stage's time limit passed while it had stored no code, for example `validate_timeout` | **Retry** |
 
-`privileges_missing`, `network_problem` and `iso_store_visibility` exist in the code and the page has
-a text for each, but no stage emits them: a failed permission, network or ISO store check ends
-stage 1 as `preflight_failed` with the check among its items.
+A failed permission, network or ISO store check has no code of its own: it ends stage 1 as
+`preflight_failed` with the check among its items.
 
 ## 7. Retry, cancel and Remove
 
@@ -429,8 +428,11 @@ and ADR 0009, A2 and A8.
 - The portal token holds `NoAccess` on `proxcloud-system` and `proxcloud-seed`: with its own token
   ProxCloud cannot read or change the configuration of a platform VM. This fences the VM, not its
   disks: when the import store is also the boot store, the portal token holds `Datastore.Allocate`
-  there (`PVEDatastoreAdmin`) and can reach every platform disk on it, the seed's included. Use an
-  import store that is not the boot store; no check refuses it.
+  there (`PVEDatastoreAdmin`) and can reach every platform disk on it, the seed's included. The API
+  therefore refuses settings whose import store is the boot store (the `spec` check and stage 1
+  repeat the rule). It compares the two names in the settings only: it does not read the portal
+  token's rows on the boot store, so a provider whose own `importStorage` is the boot store while
+  the settings name another import store is not caught.
 - The job uses the CAPI token for the platform VMs. That token holds `ProxCloudCAPI` on `/` (that
   path only), on `/nodes`, on `/sdn/zones` (`SDN.Use` on every zone and vnet, tenant ones included),
   on those two pools and on the boot store; `PVETemplateUser` on `pc-templates`; and
@@ -450,7 +452,8 @@ and ADR 0009, A2 and A8.
   any role on those paths, to itself as well, which reaches the seed's disk through the boot store;
   whether it can mint for `root@pam` is not yet measured on the lab (L1); the CSI token's
   `Datastore.Allocate` on the boot store reaches every disk on it, the seed's included, and so does
-  the portal token's when the import store is the boot store; the providers' service account
+  the portal token's when it holds `PVEDatastoreAdmin` on the boot store (the settings may not name
+  the boot store as the import store; a row made for the provider's `importStorage` is not read); the providers' service account
   reads every Secret on the cluster, the CSI token's among them; CAPMOX and proxmox-csi reach the
   Proxmox API without verifying its certificate; ArgoCD pulls charts by version, and their digests
   are compared in CI, not at pull time.
@@ -472,10 +475,10 @@ and ADR 0009, A2 and A8.
 - **Remove does not delete the seed's other Applications** (ArgoCD, cert-manager and `capi` on the
   seed) one by one, as the design's step 6 describes. They go with the seed VM. With the seed kept
   (a Remove that stops before `remove-seed`), they stay.
-- **`seed.mode: existing` is not implemented.** The API accepts it in a spec; a run fails at stage 3
-  with `stage_unavailable`. The same holds for `provisionedBy: installer`: nothing in the installer
-  writes an installation record, and a site with an installer-built services cluster is not shown
-  on the page.
+- **`seed.mode: existing` and `provisionedBy: installer` are not implemented.** The API refuses
+  both in a create or an update (`400 invalid_installation`), and the `spec` check fails for a
+  record stored with either before that. Nothing in the installer writes an installation record,
+  and a site with an installer-built services cluster is not shown on the page.
 - **`layout: separate`** (one cluster for Kubernetes, one for databases) is refused by the API.
 - **No VLAN** on the platform network, and no IPv6.
 - **One control plane machine.** The settings take no control plane count.

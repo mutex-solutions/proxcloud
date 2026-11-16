@@ -279,7 +279,7 @@ function RunCard({ run, installation, canManage, dirty, focus, onRetry, retrying
             <Button variant="outline" disabled={!canManage || cancel.isPending || run.state === "cancelling"} onClick={() => cancel.mutate()}>
               {run.state === "cancelling" ? "Cancelling…" : "Cancel the run"}
             </Button>
-            <span className="text-sm text-muted-foreground">A cancel takes effect within about 15 seconds; a task Proxmox has started finishes first.</span>
+            <span className="text-sm text-muted-foreground">A cancel usually takes effect within about 15 seconds, and up to 5 minutes while a stage pauses after repeated errors; a task Proxmox has started finishes first.</span>
           </>
         ) : null}
         {ended && !remove ? <Button disabled={!canManage || retrying || dirty} onClick={onRetry}>{retrying ? "Starting…" : "Retry"}</Button> : null}
@@ -362,6 +362,7 @@ function Ready({ installation, live, loading, error }: { installation: Installat
           <li className="min-w-0">
             Back up the seed VM. Run this as root on one node, with your backup store:
             <CopyBlock text={`pvesh create /cluster/backup --vmid ${vmid ?? "<seed VMID>"} --storage <backup store> --schedule daily --mode snapshot`} label="backup command" />
+            Use a backup store that is not the boot, ISO or import store of the settings: the backup holds the seed's credentials.
             This page cannot see whether a backup job exists.
           </li>
           <li>Attach the two providers to projects on their pages under Cloud providers, and add price rules for clusters and databases.</li>

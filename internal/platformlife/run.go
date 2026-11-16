@@ -38,9 +38,6 @@ const (
 // ArgoCD condition text, never a kubeconfig, a token or user-data. "<stage>_timeout" is built per stage.
 const (
 	CodePreflightFailed      = "preflight_failed"
-	CodePrivilegesMissing    = "privileges_missing"
-	CodeNetworkProblem       = "network_problem"
-	CodeISOStoreVisibility   = "iso_store_visibility"
 	CodeIsolationNotEnforced = "isolation_not_enforced"
 	CodeImageImportFailed    = "image_import_failed"
 	CodeImageBlocked         = "image_blocked"
@@ -65,8 +62,8 @@ const (
 	CodePortalChanged        = "portal_changed"
 	CodeJobDead              = "job_dead"
 	CodePlatformDisabled     = "platform_disabled"
-	// CodeStageUnavailable ends a run that reaches something this build does not do: a seed of mode existing, or a
-	// stage another release recorded.
+	// CodeStageUnavailable ends a run that reaches something this build does not do: a stage another release recorded,
+	// or a seed of mode existing (Validate refuses that mode, so stage 1's spec check ends such a run first).
 	CodeStageUnavailable = "stage_unavailable"
 	// CodeTenantsExist refuses a Remove while tenant clusters or databases still run on the workload cluster.
 	CodeTenantsExist = "tenants_exist"
