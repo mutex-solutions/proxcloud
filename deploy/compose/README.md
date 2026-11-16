@@ -212,8 +212,16 @@ feature off. The last lines of `install` (also with `--dry-run`) say what is on.
   token secrets and presses Install. The steps, the stages of the job, every failure code, Remove and
   the limits of this stack are in [managed-services.md](../../docs/managed-services.md).
 
-  v0.8.0 is not released yet, so no image reads `PROXCLOUD_PLATFORM_ENABLED` today. Not verified: a
-  platform built from this stack (the path has not run on a lab).
+  v0.8.0 is not released yet, so no released image reads `PROXCLOUD_PLATFORM_ENABLED` today. Not
+  verified: a platform built from this stack (the path has not run on a lab).
+
+  **Testing before the release.** `--version dev-<sha>` and `upgrade dev-<sha>` take a build of main
+  (CI publishes the images `dev-<first 7 characters of the commit>` on every push to main that
+  changes them); `<sha>` is 7 to 40 lower-case hex digits and no other tag is accepted. The script
+  prints a warning each time: such a build is not a release, has no release notes and no tested
+  upgrade path, and is not for production. `--managed-services` is allowed on it. `--scheduler` is
+  not: a build without a release number cannot be placed after v0.6.0. Use this checkout at the same
+  commit, so that `compose.yaml` matches the images.
 
 What the scheduler needs on this one host, and what it adds:
 

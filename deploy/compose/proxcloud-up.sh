@@ -30,7 +30,8 @@ install (default) is idempotent: it asks only for what is missing, keeps the sec
   --cloudflare-token-file <f>  Cloudflare API token file, copied to ./cf-token (or CF_DNS_API_TOKEN)
   --operator-email <e>         first operator, created in Keycloak realm master
   --version <vX.Y.Z>           ProxCloud release of a first install (default: the pinned release).
-                               Afterwards the release changes with: upgrade <version>
+                               Afterwards the release changes with: upgrade <version>.
+                               dev-<sha> names a pre-release build of main: for testing only
   --http-port <n> --https-port <n>   host ports (default 80 and 443)
   --project-name <n>           Compose project name (default proxcloud-prod; fixed after the first install)
   --template-updates           turn on VM template updates (import, smoke test, publish); off by default
@@ -39,7 +40,8 @@ install (default) is idempotent: it asks only for what is missing, keeps the sec
                                after v0.6.0
   --managed-services           let the operator console provision managed Kubernetes and databases
                                on Proxmox (the platform job); off by default. Implies --template-updates
-                               (the job imports the node images). Needs ProxCloud v0.8.0 or later
+                               (the job imports the node images). Needs ProxCloud v0.8.0 or later,
+                               or a dev-<sha> build
   --no-template-updates, --no-scheduler, --no-managed-services
                                turn one off again. Without its flag an option keeps the value in .env
 
@@ -108,21 +110,35 @@ lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 is_host() { [[ "$1" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]]; }
 is_email() { [[ "$1" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; }
 is_port() { [[ "$1" =~ ^[0-9]{1,5}$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
-is_version() { [[ "$1" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.(0|[1-9][0-9]*))?$ ]]; }
+# A release, or a pre-release build of main as CI publishes it on every push (dev-<short sha>): for testing only.
+is_dev_version() { [[ "$1" =~ ^dev-[0-9a-f]{7,40}$ ]]; }
+is_version() { [[ "$1" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.(0|[1-9][0-9]*))?$ ]] || is_dev_version "$1"; }
+BAD_VERSION="(vX.Y.Z or vX.Y.Z-rc.N; dev-<sha> for a pre-release test)"
+warn_dev_version() { # VERSION
+  if is_dev_version "$1"; then
+    warn "$1 is a pre-release build of main, not a release: for testing only, not for production. It has no release notes and no upgrade path is tested from it"
+  fi
+}
 is_project() { [[ "$1" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; }
 is_bool() { [ "$1" = true ] || [ "$1" = false ]; }
 
 # Up to v0.6.0 the API also mounts its unauthenticated job triggers (POST /debug/...) on the
 # management port whenever the scheduler is on; later releases only with PROXCLOUD_JOBS_DEBUG_TRIGGERS,
 # which this stack never sets. An -rc.N counts as its release.
+# A dev build carries no release number, so the script cannot tell that it is past v0.6.0: refused as well.
 check_scheduler_release() { # VERSION
+  ! is_dev_version "$1" \
+    || die "the job scheduler is not offered on a pre-release build: $1 has no release number, so this script cannot tell that its API is past v0.6.0, whose API also serves unauthenticated job triggers (POST /debug/...) with the scheduler on. Use a release, or turn the scheduler off (install --no-scheduler)"
   [ "$(printf '%s\n' v0.6.0 "${1%%-*}" | sort -V | tail -n 1)" != v0.6.0 ] \
     || die "the job scheduler needs a ProxCloud release after v0.6.0: with the scheduler on, the API of $1 also serves its unauthenticated job triggers (POST /debug/...) to every process on this host. Use a later release, or turn the scheduler off (install --no-scheduler)"
 }
 
 # The platform API (PROXCLOUD_PLATFORM_ENABLED and the Managed services page) arrives in v0.8.0:
-# an older API ignores the switch, so it would read as on while nothing can run.
+# an older API ignores the switch, so it would read as on while nothing can run. A dev build is allowed: it is how
+# managed services are tested before v0.8.0 is cut, and a build of main older than the platform API only ignores
+# the switch.
 check_managed_release() { # VERSION
+  ! is_dev_version "$1" || return 0
   [ "$(printf '%s\n' v0.8.0 "${1%%-*}" | sort -V | head -n 1)" = v0.8.0 ] \
     || die "managed services need ProxCloud v0.8.0 or later: the API of $1 has no platform API. Use a later release, or turn managed services off (install --no-managed-services)"
 }
@@ -409,7 +425,8 @@ cmd_install() {
   is_port "$HTTP_PORT" || die "invalid --http-port '$HTTP_PORT'"
   is_port "$HTTPS_PORT" || die "invalid --https-port '$HTTPS_PORT'"
   [ "$HTTP_PORT" != "$HTTPS_PORT" ] || die "--http-port and --https-port must differ"
-  is_version "$VERSION" || die "invalid version '$VERSION' (vX.Y.Z or vX.Y.Z-rc.N)"
+  is_version "$VERSION" || die "invalid version '$VERSION' $BAD_VERSION"
+  warn_dev_version "$VERSION"
   is_bool "$TEMPLATE_UPDATES" \
     || die "invalid TEMPLATE_UPDATES_VM_ENABLED '$TEMPLATE_UPDATES' in .env (true or false): pass --template-updates or --no-template-updates"
   is_bool "$SCHEDULER" \
@@ -580,7 +597,8 @@ cmd_backup() {
 cmd_upgrade() {
   local version=${1:-}
   [ -n "$version" ] || die "usage: proxcloud-up.sh upgrade <version>"
-  is_version "$version" || die "invalid version '$version' (vX.Y.Z or vX.Y.Z-rc.N)"
+  is_version "$version" || die "invalid version '$version' $BAD_VERSION"
+  warn_dev_version "$version"
   load_env
   [ "$(env_get JOBS_SCHEDULER_ENABLED)" != true ] || check_scheduler_release "$version"
   [ "$(env_get PLATFORM_ENABLED)" != true ] || check_managed_release "$version"

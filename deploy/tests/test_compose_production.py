@@ -522,6 +522,48 @@ class ScriptDryRunTests(unittest.TestCase):
         install.adopt()
         self.assertEqual(install.run("upgrade", "v0.7.9", "--dry-run").returncode, 0)
 
+    def test_a_dev_build_of_main_installs_and_upgrades_with_a_warning(self):
+        # CI publishes dev-<short sha> on every push to main: the only images with the platform API before
+        # v0.8.0 is cut. Lab M0 had to edit .env by hand, after which every script command died on the version.
+        install = Install(self)
+        result = install.install(*BASE, "--tls", "internal", "--version", "dev-f6a9a11", "--managed-services")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("warning: dev-f6a9a11 is a pre-release build of main", result.stderr)
+        self.assertIn("not for production", result.stderr)
+        values = read_env(install.dir)
+        self.assertEqual((values["PROXCLOUD_VERSION"], values["PLATFORM_ENABLED"]), ("dev-f6a9a11", "true"))
+        install.adopt()
+        # .env names a dev build: the later commands still run, and an upgrade to the next build too.
+        self.assertEqual(install.run("status", "--dry-run").returncode, 0)
+        rerun = install.install(*BASE, "--tls", "internal")
+        self.assertEqual(rerun.returncode, 0, rerun.stderr)
+        self.assertIn("not for production", rerun.stderr)
+        upgrade = install.run("upgrade", "dev-0123456789abcdef0123456789abcdef01234567", "--dry-run")
+        self.assertEqual(upgrade.returncode, 0, upgrade.stderr)
+        self.assertIn("not for production", upgrade.stderr)
+        # A release prints no such line.
+        self.assertNotIn("pre-release", Install(self).install(*BASE, "--tls", "internal", *PLATFORM).stderr)
+        # Nothing else passes as a version: no other tag, and nothing the shell or Compose would read as more.
+        for bad in ("dev-", "dev-f6a9a1", "dev-F6A9A11", "dev-main", "dev-f6a9a11-x", "dev-f6a9a11 x", "latest",
+                    "dev-f6a9a11@sha256:" + "0" * 64, "xdev-f6a9a11"):
+            with self.subTest(version=bad):
+                refused = Install(self).install(*BASE, "--tls", "internal", "--version", bad)
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertIn("invalid version", refused.stderr)
+                self.assertIn("invalid version", install.run("upgrade", bad, "--dry-run").stderr)
+        # The scheduler stays refused: a dev build cannot be placed after v0.6.0, whose API serves the
+        # unauthenticated job triggers with the scheduler on.
+        refused = Install(self).install(*BASE, "--tls", "internal", "--version", "dev-f6a9a11", "--scheduler")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("the job scheduler is not offered on a pre-release build", refused.stderr)
+        scheduled = Install(self)
+        self.assertEqual(scheduled.install(*BASE, "--tls", "internal", *LATER, "--scheduler").returncode, 0)
+        scheduled.adopt()
+        refused = scheduled.run("upgrade", "dev-f6a9a11", "--dry-run")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("the job scheduler is not offered on a pre-release build", refused.stderr)
+        self.assertNotIn("+ docker", refused.stdout)
+
     def test_managed_services_do_not_run_without_template_updates(self):
         # The platform job imports its node images through template updates.
         install = Install(self)
