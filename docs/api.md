@@ -388,11 +388,13 @@ are several, `errors.details.problems`.
   the seed, the API VIP or the node range is outside the blocked and management
   networks, and when the cluster firewall's isolation rules are not the ones the
   sync writes (a provider sync writes them with or without a project, except for
-  a `cidrPool` over a management network and for rules in place for another
-  pool, which the message names); with no
+  a `cidrPool` over a management network, for rules in place for another pool
+  and for rules in place that drop something the provider's set does not, which
+  the message names); with no
   tenant network on the whole Proxmox cluster yet it passes. `token-scope` fails
   when `capmox@pve!capi` or `csi@pve!csi` holds a privilege on `/pool`, `/storage`
-  or `/vms`, and names the `pveum acl delete` command. A row that cannot be read fails.
+  or `/vms`, and names the `pveum acl delete` command, or which row of
+  `pveum acl list` is the one to remove. A row that cannot be read fails.
 - `GET /installations/{id}/plan`: the installed BOM against this release's
   (`installed`, `target`, `changes`, `blocking`); a version change not listed in
   `upgradeFrom` and the removal of a stateful component block, and an installed

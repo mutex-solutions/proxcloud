@@ -403,12 +403,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Managed services: the defects of the first lab attempt (M0, a Proxmox cluster shared by two portals).** The
   provider sync now writes a provider's isolation rules whether or not it has a project
   (`(*pve.Service).ReconcileProviderIsolation`, once per provider and cycle, under the SDN lock). That call, which
-  needs no project, writes nothing for a `cidrPool` that overlaps a management network, and nothing when the rules
-  in place are for another pool: the rules carry the pool prefix only, so a second portal or provider with the same
-  prefix (`pc-` is the default) would otherwise delete the first one's `DROP`s at every sync. The `isolation` check
-  gives the same two sentences instead of "a provider sync writes them". A project's sync and a network create
-  write the rules in both cases, as before, and a `cidrPool` change on a provider with no project is applied by its
-  first tenant network. Before, only a project's sync or its first tenant network wrote
+  needs no project, only ever adds protection. It writes nothing while a node does not report its networks, nothing
+  for a `cidrPool` that overlaps a management network, and nothing when the rules in place are for another pool or
+  drop a network its own set does not (an equal or a wider network covers one): the rules carry the pool prefix
+  only, so a second portal or provider with the same prefix (`pc-` is the default) would otherwise delete the first
+  one's `DROP`s at every sync. These refusals are logged as warnings (`pve.ErrIsolationRefused`), a busy or failed
+  SDN lock is logged too, and the `isolation` check gives the same sentences instead of "a provider sync writes
+  them", also when rules are in place. A project's sync and a network create write the rules in all these cases, as
+  before. A changed `cidrPool` or a narrowed `blockedCidrs` on a provider with no project is applied by its first
+  tenant network, or by deleting its rules under Datacenter > Firewall and running a sync; the messages say so.
+  Before, only a project's sync or its first tenant network wrote
   them, while the preflight's "no rule yet" pass ends as soon as any tenant network exists on the cluster: on a
   cluster where another portal had tenant networks, a portal with no project failed `isolation` with
   `0 in place, N wanted; the next sync rewrites them` and no sync ever did. The pass itself is unchanged (a vnet does
@@ -417,8 +421,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `capmox@pve!capi` or `csi@pve!csi` holds any privilege on `/pool`, `/storage` or `/vms` as a whole (rows of an older
   setup, which the script never removes; the guide's section 10 claimed they could not exist and nothing read them).
   It and `iso-store-visibility` now name the `pveum acl delete` command for each granting row the portal token can
-  read, and the `pveum acl list` recipe otherwise, with the `pveum user token modify … --privsep 1` command for a
-  token that has no row of its own because it was made without privilege separation. `iso-store-visibility` names
+  read, and the `pveum acl list` recipe otherwise: it says which listed row is the one to remove (on the path or on
+  a parent with propagate, not `NoAccess`; the script's own rows are listed too and stay), with the
+  `pveum user token modify … --privsep 1` command for a token that has no such row because it was made without
+  privilege separation. `iso-store-visibility` names
   rows only for stores the token sees, and none when the extra store is the boot store (that row is the script's;
   the fix is the `boot-iso` row's). `proxcloud-up.sh` accepts a build of main as its version
   (`--version dev-<sha>`, `upgrade dev-<sha>`, 7 to 40 hex digits) with a warning that it is not for production, and
