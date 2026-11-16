@@ -63,6 +63,7 @@ type Job struct {
 	audit         *audit.Service
 	incidents     PVEIncidentRecorder
 	sdnLock       *lock.ShedLock
+	installedOn   func(ctx context.Context, serviceID string) (bool, error)
 	shareAccess   func(ctx context.Context, projectID string) error
 	staleSeeds    func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error
 	loadBalancers func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error
@@ -107,6 +108,13 @@ func (j *Job) WithNow(now func() time.Time) *Job              { j.now = now; ret
 // WithSDNLock enables the isolation reconcile: it edits the rules a network change also edits, so
 // it takes the same lock (nil = no reconcile).
 func (j *Job) WithSDNLock(l *lock.ShedLock) *Job { j.sdnLock = l; return j }
+
+// WithPlatformInstallations wires the lookup of a provider's managed-services installation (any phase, a draft too).
+// Only such a provider gets the provider-level isolation write; nil (the platform feature is off) = none does.
+func (j *Job) WithPlatformInstallations(f func(ctx context.Context, serviceID string) (bool, error)) *Job {
+	j.installedOn = f
+	return j
+}
 
 // WithShareAccess wires the reconcile of a project's file share exports to its addresses (nil = none).
 func (j *Job) WithShareAccess(f func(ctx context.Context, projectID string) error) *Job {
@@ -427,13 +435,21 @@ func (j *Job) syncProxmoxService(ctx context.Context, p *project.Project, es *ex
 	return count
 }
 
-// reconcileProviderIsolation writes the provider's own isolation DROPs, project or not: a provider with no project
-// had none until its first tenant network, so the managed-services preflight could not pass on a cluster where another
-// portal already has tenant networks. Same lock as the per-project reconcile; a busy lock waits for the next cycle.
-// Every way out without a write leaves a log line: the preflight sends the operator to this sync.
+// reconcileProviderIsolation writes the isolation DROPs of a provider that carries a managed-services installation,
+// project or not: a provider with no project had none until its first tenant network, so the managed-services preflight
+// could not pass on a cluster where another portal already has tenant networks. Only that preflight needs the write, so
+// every other provider is left as before: no lock, no PVE request, no log line. Same lock as the per-project reconcile;
+// a busy lock waits for the next cycle. From the lookup on, every way out without a write leaves a log line: the
+// preflight sends the operator to this sync.
 func (j *Job) reconcileProviderIsolation(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) {
 	netCfg := es.PVENetworkConfig()
-	if j.sdnLock == nil || netCfg.CIDRPool == "" {
+	if j.installedOn == nil || j.sdnLock == nil || netCfg.CIDRPool == "" {
+		return
+	}
+	if has, err := j.installedOn(ctx, es.ID); err != nil {
+		j.log.Warn("syncjob: provider isolation: read the managed-services installation, retried on the next sync", "serviceId", es.ID, "err", err)
+		return
+	} else if !has {
 		return
 	}
 	start := j.now()

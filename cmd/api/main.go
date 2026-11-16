@@ -1004,6 +1004,8 @@ func run() error {
 			return fmt.Errorf("platform store: %w", err)
 		}
 		adminH.SetPlatform(platformStore)
+		// The sync writes a provider's isolation rules without a project only where an installation is saved.
+		syncJob.WithPlatformInstallations(platformStore.HasInstallation)
 		if cfg.Jobs.TemplateUpdatesVM {
 			adminH.SetPlatformRuns(jobStore)
 			prRunner := &platformlife.Runner{

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/lock"
 	"github.com/mutex-solutions/proxcloud/internal/platform/project"
+	"github.com/mutex-solutions/proxcloud/internal/platformlife"
 	"github.com/mutex-solutions/proxcloud/pkg/textcrypt"
 )
 
@@ -118,15 +120,18 @@ func TestUntrustedNetworkSyncSkipsDependentMutations(t *testing.T) {
 	}
 }
 
-// A provider with no project still gets its isolation DROPs from the sync (lab M0: on a Proxmox cluster another portal
-// shares, the managed-services preflight waits for them and nothing else writes them before the first tenant network).
-// Without the SDN lock, and for a cidrPool over a management network, the sync writes nothing.
-func TestSyncWritesProviderIsolationWithoutProjects(t *testing.T) {
+// The sync writes a provider's isolation DROPs without a project only for a provider that carries a managed-services
+// installation, a draft too (lab M0: on a Proxmox cluster another portal shares, the preflight of that installation
+// waits for them and nothing else writes them before the first tenant network). Every other provider gets from the sync
+// what it got before this write existed: the same requests, with the platform feature off and with it on. With an
+// installation, the sync still writes nothing for a cidrPool over a management network.
+func TestSyncWritesProviderIsolationOnlyWithInstallation(t *testing.T) {
 	ctx := context.Background()
 	db := freshPG(t)
-	var comments []string
+	var comments, reqs []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/api2/json")
+		reqs = append(reqs, r.Method+" "+path)
 		switch {
 		case r.Method == "POST" && path == "/cluster/firewall/rules":
 			_ = r.ParseForm()
@@ -163,20 +168,55 @@ func TestSyncWritesProviderIsolationWithoutProjects(t *testing.T) {
 		WithProxmoxFactory(func(*externalservice.ExternalService) (*pve.Service, error) {
 			return &pve.Service{C: c, PoolPrefix: "pcm-"}, nil
 		})
-	if _, err := j.Run(ctx); err != nil {
-		t.Fatal(err)
+	// One sync's requests, sorted; any firewall write fails the test until an installation is saved.
+	run := func(what string) string {
+		t.Helper()
+		reqs = nil
+		if _, err := j.Run(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if len(comments) != 0 {
+			t.Fatalf("%s, yet the sync wrote rules: %v", what, comments)
+		}
+		slices.Sort(reqs)
+		return strings.Join(reqs, "\n")
 	}
-	if len(comments) != 0 {
-		t.Fatalf("no SDN lock, yet the sync wrote rules: %v", comments)
+	// No SDN lock and no platform store: the provider-level write cannot run, as before it existed.
+	base := run("no SDN lock")
+	if strings.Contains(base, "/cluster/firewall/rules") || strings.Contains(base, "/nodes/n1/network") {
+		t.Fatalf("the base sync reads what only the provider-level write reads:\n%s", base)
 	}
 	j.WithSDNLock(lock.New(db))
-	provider("192.0.0.0/16")
-	if _, err := j.Run(ctx); err != nil {
+	if got := run("platform feature off"); got != base {
+		t.Fatalf("platform feature off: requests differ from the base sync\n%s\nwant\n%s", got, base)
+	}
+	store := platformlife.NewStore(db, textcrypt.New("k"))
+	if err := store.Ensure(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if len(comments) != 0 {
-		t.Fatalf("cidrPool over the management network, yet the sync wrote rules: %v", comments)
+	lookups := 0
+	j.WithPlatformInstallations(func(ctx context.Context, id string) (bool, error) {
+		lookups++
+		return store.HasInstallation(ctx, id)
+	})
+	if got := run("no installation"); got != base || lookups != 1 {
+		t.Fatalf("no installation: %d lookups, requests\n%s\nwant\n%s", lookups, got, base)
 	}
+	if err := store.Create(ctx, &platformlife.Installation{Name: "other", ServiceID: "svc-other"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := run("an installation on another provider"); got != base {
+		t.Fatalf("an installation on another provider: requests\n%s\nwant\n%s", got, base)
+	}
+	draft := &platformlife.Installation{Name: "m0", ServiceID: "svc-pve"}
+	if err := store.Create(ctx, draft); err != nil {
+		t.Fatal(err)
+	}
+	if draft.Status.Phase != platformlife.PhaseDraft {
+		t.Fatalf("phase %q", draft.Status.Phase)
+	}
+	provider("192.0.0.0/16")
+	run("a draft installation, cidrPool over the management network")
 	provider("10.121.0.0/16")
 	if _, err := j.Run(ctx); err != nil {
 		t.Fatal(err)

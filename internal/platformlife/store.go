@@ -112,6 +112,11 @@ func (s *Store) Get(ctx context.Context, id string) (*Installation, error) {
 	return &in, nil
 }
 
+// HasInstallation reports whether a provider carries an installation, in any phase.
+func (s *Store) HasInstallation(ctx context.Context, serviceID string) (bool, error) {
+	return s.installations().Exists(ctx, pgdoc.M{"serviceId": serviceID})
+}
+
 // List reads every installation, oldest first.
 func (s *Store) List(ctx context.Context) ([]Installation, error) {
 	out := []Installation{}
