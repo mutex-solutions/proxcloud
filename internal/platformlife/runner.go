@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -256,11 +257,15 @@ func transient(code string, err error) error { return &stageErr{kindRetry, code,
 
 // classify makes a Proxmox or Kubernetes error a stage error: a refusal is permanent (a Proxmox 4xx but 429; a
 // Kubernetes 4xx but 409 and 429, see refused), anything else (unreachable, 5xx, a clone lock, which Proxmox answers
-// as a 500) transient. Stage errors, a stop and a cancel pass through.
+// as a 500) transient, and so is what a Kubernetes API server also answers while it starts (startingUp). Stage
+// errors, a stop and a cancel pass through.
 func classify(code string, err error) error {
 	var se *stageErr
 	if err == nil || errors.As(err, &se) || errors.Is(err, errStop) || errors.Is(err, errCancelled) {
 		return err
+	}
+	if startingUp(err) {
+		return &stageErr{kindRetry, code, clip(startingUpNote + err.Error())}
 	}
 	var pa *pve.APIError
 	if errors.As(err, &pa) && pa.Status >= 400 && pa.Status < 500 && pa.Status != 429 || refused(err) {
@@ -291,6 +296,11 @@ func (x *acq) execute(ctx context.Context) end {
 		return end{kind: endComplete}
 	}
 	x.run, x.in, x.sec = run, in, sec
+	// The stage the run stands at, for an end before the stages run (an upgrade, a provider that is gone): finish
+	// marks that stage failed and the log names it, not the first.
+	if x.si = slices.IndexFunc(run.Stages, func(s Stage) bool { return s.State != StageDone && s.State != StageSkipped }); x.si < 0 {
+		x.si = len(run.Stages)
+	}
 	if run.CancelRequested {
 		return x.finish(ctx, RunCancelled, "", "")
 	}

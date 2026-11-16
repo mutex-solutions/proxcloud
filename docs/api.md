@@ -423,9 +423,10 @@ are several, `errors.details.problems`.
   installation is not finished, `409 bom_unsupported` when the installed BOM is
   not one this release carries. Without the runner (it starts only when
   `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true` too) the route answers
-  `409 platform_disabled`; the reads below still work. `confirm` belongs to a
-  remove and must be `remove <installation name>` (`400 invalid_confirmation`
-  otherwise). With it, a remove whose seed VM is gone deletes the VMs of pool
+  `409 platform_disabled`; the reads below still work. A plain remove is
+  `{"kind":"remove"}`. `confirm` is optional, belongs to a remove only and asks
+  for more: when it is sent it must be `remove <installation name>`
+  (`400 invalid_confirmation` otherwise, also on an apply). With it, a remove whose seed VM is gone deletes the VMs of pool
   `proxcloud-system` tagged `pc-platform-<id>` and the recorded volumes, and a
   remove whose workload cluster does not answer goes on without checking for
   tenants. Without it the first fails `seed_lost` and the second is retried,
@@ -435,7 +436,18 @@ are several, `errors.details.problems`.
 - `GET /installations/{id}/runs[/{runId}]`: the newest runs, or one, with
   their stages (`state`, `retries`, `deadline`, `items`, `code`, `message`,
   `receipt`). A run whose job ran out of attempts reads `failed` with code
-  `job_dead`; a cancel not honoured yet reads `cancelling`.
+  `job_dead`; a cancel not honoured yet reads `cancelling`. A run that fails
+  before its stages run again (`portal_changed`, a provider that is gone) sets
+  the stage it stood at `failed` with the run's code. `items` are
+  `{id, state, message}`: the checks of stage 1, the Applications of stages 6
+  and 9, the node templates (`template-<vmid>`: `ok` or `not checked`) and
+  machines of stage 7, and in a remove what was deleted, left or not checked
+  (`tenants`, one item per machine, `cluster`, `volume-<name>`, `volumes`,
+  `vm-<vmid>`, `cds`, `secrets`). A stage keeps its items when it is done.
+  A Kubernetes `401`, or a `403` that carries the RBAC authorizer's `not found`
+  list, from the seed or the platform cluster is counted in `retries` and
+  tried again, like an unreachable cluster, because an API server answers so
+  while it starts; the stage fails with its code after 40 or at `deadline`.
 - `POST /installations/{id}/runs/{runId}/cancel`: the runner stops at its next
   claim or write; the run ends `cancelled` and the installation `failed`.
   Nothing is deleted.

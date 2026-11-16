@@ -540,7 +540,8 @@ type fakeSeed struct {
 	sa        string
 	ready     bool
 	saAllowed bool
-	forbid    int // reads of the token Secret answered 403: the Role and RoleBinding are not applied yet
+	forbid    int      // reads of the token Secret answered 403: the Role and RoleBinding are not applied yet
+	deny      []denial // answered to the service account's next requests, one each, instead of serving them
 	calls     []string
 	// A small Kubernetes for the service account: objects by URL path, lists by collection path and label selector.
 	objs     map[string]map[string]any
@@ -553,6 +554,12 @@ type fakeSeed struct {
 	tokens   []string // TokenRequest tokens, with ttls the seconds each was asked for
 	ttls     []float64
 	uids     int
+}
+
+// denial is an error answer of the API server.
+type denial struct {
+	status  int
+	message string
 }
 
 func newFakeSeed(t *testing.T, ca func() (string, string), boot func() string) *fakeSeed {
@@ -620,6 +627,11 @@ func (f *fakeSeed) serve(w http.ResponseWriter, r *http.Request) {
 	case kind == "":
 		w.WriteHeader(http.StatusUnauthorized)
 		fmt.Fprint(w, `{"message":"Unauthorized"}`)
+	case kind == "sa" && len(f.deny) > 0:
+		d := f.deny[0]
+		f.deny = f.deny[1:]
+		w.WriteHeader(d.status)
+		_ = json.NewEncoder(w).Encode(map[string]any{"message": d.message})
 	case r.URL.Path == "/readyz":
 		if !f.ready {
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -744,6 +756,14 @@ func (e *env) until(n int) string {
 		}
 	}
 	return e.jobs.last()
+}
+
+// item is the stage's item of that id (nil when it has none).
+func item(s Stage, id string) *StageItem {
+	if i := slices.IndexFunc(s.Items, func(it StageItem) bool { return it.ID == id }); i >= 0 {
+		return &s.Items[i]
+	}
+	return nil
 }
 
 func (e *env) stage(id string) Stage {

@@ -655,6 +655,11 @@ func TestNodeTemplateCloudInitDrive(t *testing.T) {
 	if end := p.once(); end != "complete" {
 		t.Fatalf("the drive on ide0: end %s %+v", end, p.stage(stageCluster))
 	}
+	// A template that passed leaves an item, so the stage shows that it looked; one Proxmox no longer knows has none.
+	if s := p.stage(stageCluster); item(s, "template-9102") == nil || item(s, "template-9102").State != CheckOK || !strings.Contains(item(s, "template-9102").Message, "pve2") ||
+		item(s, "template-9101") == nil || item(s, "template-9103") != nil || item(s, "pc-platform-cp-x") == nil {
+		t.Fatalf("items of checked templates: %+v", s.Items)
+	}
 	// A template the portal token may not read is not checked, and the stage goes on with an item that says so.
 	p = newPlatform(t, RunApply)
 	p.only(stageCluster)
@@ -858,14 +863,15 @@ func TestRemoveRefusedWithTenants(t *testing.T) {
 		t.Fatalf("silent workload: %s %+v", end, p.stage(StageRemoveCluster))
 	}
 	p.mutate(func(run *Run, _ *Installation, _ *Secrets) { run.Confirmed = true })
-	if end := p.once(); end != "defer:waiting_remove_cluster" || p.seed.obj(capiNS+"clusters/pc-platform") != nil || len(p.stage(StageRemoveCluster).Items) != 0 {
+	if end, s := p.once(), p.stage(StageRemoveCluster); end != "defer:waiting_remove_cluster" || p.seed.obj(capiNS+"clusters/pc-platform") != nil || item(s, "volumes") != nil ||
+		item(s, "tenants") == nil || item(s, "tenants").State != "not checked" {
 		t.Fatalf("confirmed: %s %+v", end, p.stage(StageRemoveCluster))
 	}
 	// Passed on the confirmation with no volume recorded: the stage says that it could not look for one.
 	p = removal(t)
 	p.wl.sa = "another-token"
 	p.mutate(func(run *Run, in *Installation, _ *Secrets) { run.Confirmed, in.Status.Volumes = true, nil })
-	if end := p.once(); end != "defer:waiting_remove_cluster" || len(p.stage(StageRemoveCluster).Items) != 1 || p.stage(StageRemoveCluster).Items[0].State != "not checked" {
+	if end, v := p.once(), item(p.stage(StageRemoveCluster), "volumes"); end != "defer:waiting_remove_cluster" || v == nil || v.State != "not checked" {
 		t.Fatalf("confirmed without a recorded volume: %s %+v", end, p.stage(StageRemoveCluster))
 	}
 }
@@ -878,10 +884,41 @@ func TestRemoveOfAClusterWithoutTenants(t *testing.T) {
 	p := removal(t)
 	p.seed.put(capiNS+"clusters/pc-platform", map[string]any{"metadata": map[string]any{"name": ClusterName}})
 	p.wl.sa = "another-token" // the kubeconfig is on the seed and the API does not answer with it
+	// Its workers have no VM yet: the message and the items say so, not "VM 0".
+	const worker = "/apis/infrastructure.cluster.x-k8s.io/v1alpha2/namespaces/pc-platform/proxmoxmachines/pc-platform-dbaas-pve3-infra"
+	p.seed.mu.Lock()
+	delete(p.seed.objs[worker], "spec")
+	p.seed.mu.Unlock()
+	p.mutate(func(_ *Run, in *Installation, _ *Secrets) { in.Status.Volumes = nil })
 	if end := p.once(); end != "defer:waiting_remove_cluster" || p.stage(StageRemoveCluster).Code != CodeMachineDeleteStuck ||
 		p.seed.obj(capiNS+"clusters/pc-platform") != nil || p.disabled != 1 {
 		t.Fatalf("control plane never initialized: end %s %+v", end, p.stage(StageRemoveCluster))
 	}
+	if s := p.stage(StageRemoveCluster); strings.Contains(s.Message, "VM 0") || !strings.Contains(s.Message, "pc-platform-dbaas-pve3-x (no VM)") ||
+		item(s, "pc-platform-dbaas-pve3-x") == nil || item(s, "pc-platform-dbaas-pve3-x").Message != "no VM" {
+		t.Fatalf("a machine without a VM: %+v", s)
+	}
+	// The finished stage says what was deleted and what it did not check.
+	p.seed.mu.Lock()
+	for k := range p.seed.objs {
+		if strings.HasPrefix(k, capiNS+"machines/") {
+			delete(p.seed.objs, k)
+		}
+	}
+	p.seed.mu.Unlock()
+	if end := p.until(8); end != "complete" {
+		t.Fatalf("end %s: %+v", end, p.stage(StageRemoveCluster))
+	}
+	s := p.stage(StageRemoveCluster)
+	if tn, m, w, v := item(s, "tenants"), item(s, "pc-platform-cp-x"), item(s, "pc-platform-dbaas-pve3-x"), item(s, "volumes"); tn == nil || tn.State != "not checked" ||
+		!strings.Contains(tn.Message, "never came up") || m == nil || m.State != "deleted" || m.Message != "VM 130" || w == nil || w.State != "deleted" ||
+		v == nil || v.State != "none recorded" || item(s, "cluster") == nil {
+		t.Fatalf("items of the finished stage: %+v", s.Items)
+	}
+	p = removal(t)
+	p.seed.put(capiNS+"clusters/pc-platform", map[string]any{"metadata": map[string]any{"name": ClusterName}})
+	p.wl.sa = "another-token"
+	p.once()
 	p = removal(t)
 	p.mutate(func(_ *Run, in *Installation, _ *Secrets) { in.Status.Providers, in.Status.Volumes = nil, nil })
 	p.wl.sa = "another-token"
@@ -889,7 +926,7 @@ func TestRemoveOfAClusterWithoutTenants(t *testing.T) {
 		t.Fatalf("no provider recorded: end %s %+v", end, p.stage(StageRemoveCluster))
 	}
 	p.mutate(func(run *Run, _ *Installation, _ *Secrets) { run.Confirmed = true })
-	if end, s := p.once(), p.stage(StageRemoveCluster); end != "defer:waiting_remove_cluster" || len(s.Items) != 1 || s.Items[0].State != "not checked" {
+	if end, s := p.once(), p.stage(StageRemoveCluster); end != "defer:waiting_remove_cluster" || item(s, "volumes") == nil || item(s, "volumes").State != "not checked" {
 		t.Fatalf("no provider recorded, confirmed: end %s %+v", end, s)
 	}
 }
@@ -964,6 +1001,15 @@ func TestRemoveCluster(t *testing.T) {
 	if run.State != RunSucceeded || in.Status.Phase != PhaseRemoved || len(in.Status.Clusters)+len(in.Status.Volumes) != 0 || sec.CSI != nil || p.pve.vms[120] != nil {
 		t.Fatalf("run %s, status %+v", run.State, in.Status)
 	}
+	// The finished run says what it deleted: every machine with its VM, the volume, the seed VM, the secrets; and
+	// that the cluster was asked for tenants.
+	s = p.stage(StageRemoveCluster)
+	if tn, m, v := item(s, "tenants"), item(s, "pc-platform-kamaji-pve2-x"), item(s, "volume-vm-9999-pvc-etcd"); tn == nil || tn.State != "none" || m == nil ||
+		m.State != "deleted" || m.Message != "VM 132" || v == nil || v.State != "deleted" || !strings.Contains(v.Message, "lab/pve1/local-lvm/vm-9999-pvc-etcd") ||
+		item(s, "volumes") != nil || item(p.stage(StageRemoveSeed), "vm-120") == nil || item(p.stage(StageRemoveSeed), "vm-120").State != "gone" ||
+		item(p.stage(StageRemoveSecrets), "secrets") == nil {
+		t.Fatalf("items: %+v, %+v, %+v", s.Items, p.stage(StageRemoveSeed).Items, p.stage(StageRemoveSecrets).Items)
+	}
 	p.leaks(t)
 }
 
@@ -1005,9 +1051,12 @@ func TestRemoveSeedLost(t *testing.T) {
 		t.Fatalf("VMs %v, volumes %v, disabled %d", left, p.pve.disks, p.disabled)
 	}
 	// The deleted machine's bootstrap ISO went before it, and no other; the machine CAPMOX had not tagged is named.
-	if items := p.stage(StageRemoveCluster).Items; !slices.Equal(p.pve.iso, []string{"user-data-202.iso", "user-data-205.iso"}) ||
-		len(items) != 1 || items[0].ID != "vm-205" || items[0].State != "left" {
-		t.Fatalf("ISOs %v, items %+v", p.pve.iso, items)
+	// And the finished stage lists the VM and the volume it deleted, and that it could not ask for tenants.
+	s := p.stage(StageRemoveCluster)
+	if left, gone, vol, tn := item(s, "vm-205"), item(s, "vm-201"), item(s, "volume-vm-9999-pvc-old"), item(s, "tenants"); !slices.Equal(p.pve.iso, []string{"user-data-202.iso", "user-data-205.iso"}) ||
+		left == nil || left.State != "left" || gone == nil || gone.State != "deleted" || vol == nil || vol.State != "deleted" || tn == nil || tn.State != "not checked" ||
+		item(s, "vm-202") != nil || len(s.Items) != 4 {
+		t.Fatalf("ISOs %v, items %+v", p.pve.iso, s.Items)
 	}
 	if i, j := slices.Index(p.pve.writes, "DELETE /nodes/pve1/storage/local/content/iso/user-data-201.iso"), slices.Index(p.pve.writes, "DELETE /nodes/pve1/qemu/201"); i < 0 || j < i {
 		t.Fatalf("the ISO must go before its VM: %v", p.pve.writes)
@@ -1155,5 +1204,131 @@ func TestLive(t *testing.T) {
 	}
 	if _, stored, _ := p.state.snapshot(); stored.Status.Phase != PhaseReady || p.seed.writeCount() != 0 {
 		t.Fatalf("stored phase %s, writes %v", stored.Status.Phase, p.seed.writes)
+	}
+}
+
+// An API server that has just started refuses a good credential for some seconds: a 401, and a 403 with the RBAC
+// authorizer's list of roles it has not read yet (the seed's k3s restarted under disk load in a lab run, and stage 7's
+// next look ended the run seed_api_unreachable). Both are passing errors, on the seed and on the workload: the stage
+// tries again and goes on. They are not successes: the fortieth, or the time limit, ends the run with the same code.
+// A 403 without that reason is a refusal at once.
+func TestAnAPIServerThatStartsIsTriedAgain(t *testing.T) {
+	const rbac = `namespaces "pc-platform" is forbidden: User "system:serviceaccount:proxcloud-system:proxcloud-portal" cannot patch resource "namespaces" in API group "" ` +
+		`at the cluster scope: RBAC: [clusterrole.rbac.authorization.k8s.io "cluster-admin" not found, clusterrole.rbac.authorization.k8s.io "system:discovery" not found]`
+	for name, d := range map[string]denial{"rbac caches": {403, rbac}, "token authenticator": {401, "Unauthorized"}} {
+		p := newPlatform(t, RunApply)
+		p.only(stageCluster)
+		p.seed.deny = []denial{d}
+		end, s := p.once(), p.stage(stageCluster)
+		if end != "defer:retry_cluster" || s.State != StageWaiting || s.Code != CodeSeedAPIUnreachable || s.Retries != 1 || !strings.Contains(s.Message, d.message[:12]) {
+			t.Fatalf("%s on the seed: end %s %+v", name, end, s)
+		}
+		if end := p.once(); end != "complete" {
+			t.Fatalf("%s on the seed, the next look: end %s %+v", name, end, p.stage(stageCluster))
+		}
+		p.leaks(t)
+
+		p = newPlatform(t, RunApply)
+		p.only(stageWorkloadAccess)
+		p.wl.deny = []denial{d}
+		if end, s := p.once(), p.stage(stageWorkloadAccess); end != "defer:retry_workload_access" || s.Code != CodeWorkloadUnreachable || s.Retries != 1 {
+			t.Fatalf("%s on the workload: end %s %+v", name, end, s)
+		}
+		if end := p.once(); end != "complete" {
+			t.Fatalf("%s on the workload, the next look: end %s %+v", name, end, p.stage(stageWorkloadAccess))
+		}
+	}
+	// A role that does not come back: the stage's forty passing errors end the run with the code, and so does its
+	// time limit.
+	p := newPlatform(t, RunApply)
+	p.only(stageCluster)
+	p.seed.deny = []denial{{403, rbac}, {403, rbac}}
+	p.once()
+	p.mutate(func(run *Run, _ *Installation, _ *Secrets) { run.Stages[6].Retries = stageRetries })
+	if end, s := p.once(), p.stage(stageCluster); end != "fail:"+CodeSeedAPIUnreachable || s.State != StageFailed || !strings.Contains(s.Message, "Gave up after 40 retries") ||
+		!strings.Contains(s.Message, "RBAC: ") {
+		t.Fatalf("the fortieth: end %s %+v", end, s)
+	}
+	p = newPlatform(t, RunApply)
+	p.only(stageCluster)
+	p.seed.sa = "a-token-the-seed-no-longer-knows" // every answer is a 401
+	p.once()
+	past := time.Now().Add(-time.Minute)
+	p.mutate(func(run *Run, _ *Installation, _ *Secrets) { run.Stages[6].Deadline = &past })
+	if end, s := p.once(), p.stage(stageCluster); end != "fail:"+CodeSeedAPIUnreachable || !strings.Contains(s.Message, "401: Unauthorized") {
+		t.Fatalf("a revoked token at the time limit: end %s %+v", end, s)
+	}
+	// Refusals that no start explains: no binding grants the request, an admission plugin, a role named in a message
+	// of another kind.
+	for _, msg := range []string{
+		`namespaces "pc-platform" is forbidden: User "system:serviceaccount:proxcloud-system:proxcloud-portal" cannot patch resource "namespaces" in API group "" at the cluster scope`,
+		`secrets "pc-platform-pve" is forbidden: unable to create new content in namespace pc-platform because it is being terminated`,
+		`admission webhook "validate.example" denied the request: clusterrole "x" not found`,
+	} {
+		p := newPlatform(t, RunApply)
+		p.only(stageCluster)
+		p.seed.deny = []denial{{403, msg}}
+		if end, s := p.once(), p.stage(stageCluster); end != "fail:"+CodeSeedAPIUnreachable || s.State != StageFailed || s.Retries != 0 {
+			t.Fatalf("%q: end %s %+v", msg, end, s)
+		}
+	}
+	for _, c := range []struct {
+		err  error
+		want bool
+	}{
+		{&kamajik8s.APIError{Status: 401, Message: "Unauthorized"}, true},
+		{&kamajik8s.APIError{Status: 403, Message: rbac}, true},
+		{&kamajik8s.APIError{Status: 403, Message: `RBAC: clusterrole.rbac.authorization.k8s.io "cluster-admin" not found`}, true},
+		{&kamajik8s.APIError{Status: 403, Message: "forbidden"}, false},
+		{&kamajik8s.APIError{Status: 404, Message: `RBAC: role "x" not found`}, false},
+		{&kamajik8s.APIError{Status: 422, Message: "invalid"}, false},
+		{&pve.APIError{Status: 401}, false},
+		{&pve.APIError{Status: 403}, false},
+		{errors.New("connection refused"), false},
+	} {
+		if got := startingUp(c.err); got != c.want {
+			t.Errorf("startingUp(%v) = %t", c.err, got)
+		}
+	}
+	if err := classify(CodeSeedCloneFailed, &pve.APIError{Status: 401}); !strings.HasPrefix(err.Error(), CodeSeedCloneFailed) || err.(*stageErr).kind != kindFail {
+		t.Errorf("a Proxmox 401 must stay a refusal: %v", err)
+	}
+}
+
+// A machine Cluster API has made but CAPMOX has not cloned yet has no VMID: its item and the message say "no VM".
+func TestMachineWithoutAVM(t *testing.T) {
+	p := newPlatform(t, RunApply)
+	p.only(stageCluster)
+	p.seed.mu.Lock()
+	p.seed.objs[capiNS+"machines/pc-platform-kamaji-pve2-x"]["status"] = map[string]any{"phase": "Pending", "conditions": []any{map[string]any{"type": "Ready",
+		"status": "False", "reason": "NotReady", "message": "* InfrastructureReady: WaitingForBootstrapData"}}}
+	delete(p.seed.objs["/apis/infrastructure.cluster.x-k8s.io/v1alpha2/namespaces/pc-platform/proxmoxmachines/pc-platform-kamaji-pve2-infra"], "spec")
+	p.seed.mu.Unlock()
+	end, s := p.once(), p.stage(stageCluster)
+	if it := item(s, "pc-platform-kamaji-pve2-x"); end != "defer:waiting_cluster" || it == nil || !strings.HasPrefix(it.Message, "no VM: Cluster API:") ||
+		!strings.Contains(s.Message, "pc-platform-kamaji-pve2-x (no VM):") {
+		t.Fatalf("end %s, items %+v, message %q", end, s.Items, s.Message)
+	}
+	if dump, _ := json.Marshal(s); strings.Contains(string(dump), "VM 0") {
+		t.Fatalf("VM 0 is shown: %s", dump)
+	}
+}
+
+// ArgoCD can still show what an earlier attempt failed on (a condition it has not cleared yet) when the Application
+// is Synced and Healthy with its sync Succeeded: the item of a finished Application carries no such text.
+func TestFinishedApplicationItemHasNoOldFailure(t *testing.T) {
+	p := newPlatform(t, RunApply)
+	p.only(stageSeedPlatform)
+	if end := p.until(5); end != "complete" {
+		t.Fatalf("end %s: %+v", end, p.stage(stageSeedPlatform))
+	}
+	p.seed.mu.Lock()
+	p.seed.unsynced["cert-manager"] = true // the status below stays as it is
+	p.seed.objs[appsPath+"cert-manager"]["status"].(map[string]any)["conditions"] = []any{map[string]any{"type": "SyncError",
+		"message": "Failed last sync attempt: namespace auto creation failed: dial tcp 10.90.0.10:6443: connect: no route to host"}}
+	p.seed.mu.Unlock()
+	p.again(stageSeedPlatform)
+	if end, it := p.once(), item(p.stage(stageSeedPlatform), "cert-manager"); end != "complete" || it == nil || it.State != "Synced/Healthy" || it.Message != "" {
+		t.Fatalf("end %s, item %+v", end, it)
 	}
 }

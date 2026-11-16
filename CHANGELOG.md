@@ -412,6 +412,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Managed services: a seed that restarts no longer ends the run, and what the first finished lab run found**
+  (M0, attempt 5). The seed's k3s restarted under the disk load of stage 7's clones; for some seconds its API
+  answered `403 … RBAC: [clusterrole … "cluster-admin" not found …]`, which the run took for a refusal and ended
+  `seed_api_unreachable` with nothing wrong. A Kubernetes `401`, and a `403` that carries the RBAC authorizer's
+  `not found` list, from the seed or the platform cluster are now passing errors: counted, tried again, and ended by
+  the stage's 40 or its time limit with the same code and the server's text, so a revoked token or a deleted role
+  still fails the run; a `403` without that list stays a refusal at once. Stage 5 tries a refused bootstrap token and
+  a service account not yet reported as cluster-admin again until its time limit, for the same reason. Reporting: a
+  run ended before its stages (`portal_changed`) sets the stage it stood at `failed` and logs that stage, not
+  `validate`; a Remove lists what it deleted, left and did not check (`tenants`, each machine, `cluster`, volumes,
+  the seed VM, the secrets), and the list stays on the finished run; a machine without a VM reads `no VM`, not
+  `VM 0`; a node template that passed stage 7's check has an item `ok`; a finished Application's item no longer
+  carries the text of an earlier failed attempt. Cluster chart `proxmox-kamaji-cluster` 0.1.12 (kubeadm mode only;
+  tenant output unchanged; the installer's `services-cluster.yml.j2` moves with it): the control plane's kubelet
+  gets the machine's own address as `node-ip`, written by the prepare script, where the node registered the kube-vip
+  address as its InternalIP; kube-vip's lease is 60 s with a renew deadline of 40 s and a retry period of 5 s
+  (`vip_leaseduration`, `vip_renewdeadline`, `vip_retryperiod`; were 15, 10, 2), where an etcd write of 19.5 s made
+  it give up the API address five times. The tag `proxmox-kamaji-cluster-v0.1.12` is not cut and the BOM still
+  names 0.1.11, so no installation gets the chart change yet; it has not run on a cluster. The guide says that a
+  plain Remove's API body is `{"kind":"remove"}` and `confirm` is the option's field, and names the disk load of
+  stage 7's parallel clones.
+
 - **Managed services: stage 7 could not see a machine that failed, a sync hook that failed passed for done, and a
   Remove could wait 45 minutes or leave things behind** (static audit and the third lab attempt, before the first run
   reaches stage 7). Stage 7 read a Machine's `Failed` phase and failure message, which Cluster API v1.14 no longer
