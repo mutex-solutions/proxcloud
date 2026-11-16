@@ -241,7 +241,7 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
         <Field id="iso" label="ISO store" list="pf-stores" value={form.iso} onChange={set("iso")} disabled={!canManage} problems={problems} placeholder="local"
           hint="Local to each node. Start-up data of the machines goes here." />
         <Field id="import" label="Import store (optional)" list="pf-stores" value={form.import} onChange={set("import")} disabled={!canManage} problems={problems}
-          hint="Where the two images are downloaded. Empty: the provider's import store." />
+          hint="Where the two images are downloaded, not the boot store. Empty: the provider's import store." />
       </div>
 
       {shown && all.length ? (

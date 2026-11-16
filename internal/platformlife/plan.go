@@ -38,7 +38,7 @@ func embeddedBOM(sha string) (*BOM, bool) {
 }
 
 // PlanFor diffs the installed BOM (nil for a new installation) against the current one. An installed BOM this build
-// does not embed blocks with bom_unsupported: it is older than the previous minor.
+// does not embed blocks with bom_unsupported: a release embeds one BOM and none upgrades between BOMs yet.
 func PlanFor(installed *BOMRef) (Plan, error) {
 	cur, err := Current()
 	if err != nil {
@@ -49,7 +49,7 @@ func PlanFor(installed *BOMRef) (Plan, error) {
 	if installed != nil {
 		var ok bool
 		if from, ok = embeddedBOM(installed.SHA256); !ok {
-			p.Blocking = append(p.Blocking, fmt.Sprintf("%s: the installed BOM %s is not one this release supports; upgrade through the release before it first", CodeBOMUnsupported, installed.Release))
+			p.Blocking = append(p.Blocking, fmt.Sprintf("%s: the installed BOM %s is not the one this release embeds, and no release upgrades between BOMs yet; run the ProxCloud release that installed the platform, or delete every tenant cluster and database, then remove managed services and install again", CodeBOMUnsupported, installed.Release))
 			return p, nil
 		}
 	}

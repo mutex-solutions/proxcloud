@@ -361,12 +361,16 @@ are several, `errors.details.problems`.
   exactly the groups `system`, `kamaji` and `dbaas`, and `nodeImage {mode,
   templates}`. A spec that breaks a rule, or overlaps the provider's
   `cidrPool`, `sandboxCidrs` or public networks, or puts the MetalLB range in
-  `blockedCidrs`, is a `400 invalid_installation`; `layout: separate` is
-  refused until a later release.
+  `blockedCidrs`, is a `400 invalid_installation`; so is a `storage.import`
+  equal to `storage.boot` (the portal token's role on the import store would
+  reach the platform's disks), also when the empty `import` took that store
+  from the provider. `layout: separate`, `provisionedBy: installer`
+  and `seed.mode: existing` are refused until a later release.
 - `GET|PUT /installations/{id}`: the PUT replaces `name` and `spec` and names
   the `rev` it read (`409 rev_conflict` otherwise). It is refused during a run
   (`409 run_active`) and for a fixed field (`409 fixed_fields`): `serviceId`
-  always; once a run succeeded also `provisionedBy`, `layout`, `name`,
+  always; once a run succeeded also `provisionedBy` (but a stored `installer`
+  may become `portal`), `layout`, `name`,
   `spec.network`, the seed's mode, pool, node and address, and the cluster's
   name, endpoint and node groups. A draft can be corrected; no route deletes
   one.
@@ -387,7 +391,8 @@ are several, `errors.details.problems`.
 - `GET /installations/{id}/plan`: the installed BOM against this release's
   (`installed`, `target`, `changes`, `blocking`); a version change not listed in
   `upgradeFrom` and the removal of a stateful component block, and an installed
-  BOM this release does not carry blocks with `bom_unsupported`.
+  BOM this release does not carry blocks with `bom_unsupported` (no release
+  upgrades between BOMs yet).
 
 - `GET /installations/{id}?live=1`: the installation with `live`
   (`phase`, `components[] {name, cluster, sync, health}`, `error`), read from
@@ -447,8 +452,8 @@ spans fewer than three PVE nodes) and the kubeconfig, and leaves the name, the
 status and every other key. A body the provider validation refuses fails
 `provider_conflict`. A
 remove sets both providers `DISABLED` and does not delete them; a later apply
-adopts them and leaves them `DISABLED`. A seed of `mode: existing` still ends
-`stage_unavailable`. A run's job is never replayed through
+adopts them and leaves them `DISABLED`. A seed of `mode: existing` is refused when
+the installation is saved and by the `spec` check. A run's job is never replayed through
 `/admin/durable-jobs` (`409`): a new run is the retry. None of the stages after
 `seed-identity` has run against a real cluster yet.
 

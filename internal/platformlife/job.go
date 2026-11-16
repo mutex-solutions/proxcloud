@@ -34,7 +34,7 @@ var (
 	ErrBadConfirm   = errors.New(`confirm must be "remove <installation name>", and only a remove takes it`)
 	ErrRunNotFound  = errors.New("no run with that id")
 	ErrRunFinished  = errors.New("this run has finished")
-	ErrBOMNotHere   = errors.New(CodeBOMUnsupported + ": the installed BOM is not one this release embeds; upgrade through the release before it first")
+	ErrBOMNotHere   = errors.New(CodeBOMUnsupported + ": the installed BOM is not the one this release embeds, and no release upgrades between BOMs yet; run the ProxCloud release that installed the platform, or delete every tenant cluster and database, then remove managed services and install again")
 	errInvalidInput = errors.New("platform run: invalid job payload")
 )
 

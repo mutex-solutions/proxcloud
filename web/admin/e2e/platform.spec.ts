@@ -95,6 +95,9 @@ test("from an empty form to a failed run, then Retry and Cancel", async ({ page 
   await page.getByLabel("Gateway", { exact: true }).fill("10.90.0.30")
   await page.getByRole("button", { name: "Save draft" }).click()
   await expect(page.getByText("Gateway is inside the node range.").first()).toBeVisible()
+  await page.getByLabel("Import store (optional)", { exact: true }).fill("local-zfs") // the boot store
+  await expect(page.getByText("Import store: a store other than the boot store.").first()).toBeVisible()
+  await page.getByLabel("Import store (optional)", { exact: true }).fill("")
   await page.getByLabel("Node range", { exact: true }).fill("10.90.0.20-10.90.0.24")
   await expect(page.getByText(/Node range: it holds 5 addresses; 5 machines and 3 spare for updates need 8/).first()).toBeVisible()
   await page.getByLabel("Gateway", { exact: true }).fill("10.100.0.1")
@@ -183,6 +186,7 @@ test("from an empty form to a failed run, then Retry and Cancel", async ({ page 
   await page.getByRole("button", { name: "Retry" }).click()
   await expect(stages.getByText("Running")).toBeVisible()
   await shot(page, "run-progress")
+  await expect(page.getByText(/up to 5 minutes while a stage pauses after repeated errors/)).toBeVisible()
   await page.getByRole("button", { name: "Cancel the run" }).click()
   await expect(page.getByText("The run was cancelled. Nothing was deleted.")).toBeVisible({ timeout: 15_000 })
   await expect(page.getByRole("button", { name: "Retry" })).toBeVisible()
@@ -203,6 +207,7 @@ test("a run ends ready: live components, providers, seed credential and the brea
   await expect(page.getByRole("link", { name: "lab Kubernetes" })).toHaveAttribute("href", /\/system\/cloud-providers\/svc-/)
   await expect(page.getByRole("link", { name: "lab Databases" })).toBeVisible()
   await expect(page.getByLabel("backup command", { exact: true })).toContainText("pvesh create /cluster/backup --vmid 9100")
+  await expect(page.getByText(/a backup store that is not the boot, ISO or import store of the settings/)).toBeVisible()
   await expect(page.getByText("Tenant databases are not backed up.")).toBeVisible()
   await expect(page.getByText("Tenant Kubernetes clusters get no block volumes on a one-host install.")).toBeVisible()
 
@@ -390,21 +395,24 @@ test("the ready card: out of sync, a silent seed, and a live read that fails", a
   await expectAccessible(page)
 })
 
-test("the mock refuses what the API refuses: an unknown field, and a fixed field after install", async ({ page }) => {
+test("the mock refuses what the API refuses: an unknown field, a fixed field after install, and two rules of the settings", async ({ page }) => {
   await open(page, "ready")
   const answers = await page.evaluate(async (paths) => {
     const { dispatch } = await import(/* @vite-ignore */ paths.router)
     const { mockPlatform } = await import(/* @vite-ignore */ paths.state)
     const in_ = mockPlatform.installations[0]
     const put = (body: unknown) => dispatch(`/admin/platform/installations/${in_.id}`, { method: "PUT", body })
-      .then(() => "ok", (e: { status: number; message: string }) => `${e.status} ${e.message}`)
-    const spec = (change: (s: { seed: Record<string, unknown> }) => void) => { const s = structuredClone(in_.spec); change(s); return s }
+      .then(() => "ok", (e: { status: number; message: string; details?: { problems?: string[] } }) => `${e.status} ${e.message}${e.details?.problems ? ": " + e.details.problems.join("; ") : ""}`)
+    const spec = (change: (s: { seed: Record<string, unknown>; storage: Record<string, unknown> }) => void) => { const s = structuredClone(in_.spec); change(s); return s }
     return [
       await put({ name: in_.name, rev: in_.rev, spec: spec((s) => { s.seed.vmid = 1 }) }),
       await put({ name: in_.name, rev: in_.rev, spec: spec((s) => { s.seed.node = "pve2" }) }),
       await put({ name: in_.name, rev: in_.rev + 1, spec: in_.spec }),
       await dispatch(`/admin/platform/installations/${in_.id}/runs`, { method: "POST", body: { kind: "apply", force: true } }).then(() => "ok", (e: { status: number }) => String(e.status)),
       String(in_.rev),
+      await put({ name: in_.name, rev: in_.rev, spec: spec((s) => { s.storage.boot = "local" }) }), // the import store, typed
+      await put({ name: in_.name, rev: in_.rev, spec: spec((s) => { s.storage.boot = "local"; s.storage.import = "" }) }), // and filled in by the API
+      await put({ name: in_.name, rev: in_.rev, spec: spec((s) => { s.seed.mode = "existing" }) }),
     ]
   }, MOCK)
   expect(answers[0]).toBe('400 Invalid request body: unknown field "spec.seed.vmid"')
@@ -412,6 +420,9 @@ test("the mock refuses what the API refuses: an unknown field, and a fixed field
   expect(answers[2]).toMatch(/^409 the installation changed since it was read/)
   expect(answers[3]).toBe("400")
   expect(answers[4]).toBe("1") // a run, a rotation and a refused save leave rev alone
+  expect(answers[5]).toMatch(/^400 .*spec\.storage\.import "local" is the boot store/)
+  expect(answers[6]).toBe(answers[5])
+  expect(answers[7]).toMatch(/^400 .*spec\.seed\.mode existing comes in a later release/)
 })
 
 // Error and run states of the page, in both themes: the route matrix of a11y.spec.ts loads each state but opens none.

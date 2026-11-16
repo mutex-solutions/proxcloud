@@ -4,6 +4,20 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-16: Correction to the PR 15 (P3) entry: nothing upgrades the platform in place
+
+**What changed:** nothing in the code paths the diagrams show, and no diagram. The PR 15 entry below
+says under "Why" that the platform has to be "built, upgraded in place and removed" by the job. The
+job builds, repairs and removes. It does not upgrade: a release embeds one BOM
+(`internal/platformlife/plan.go`, `embeddedBOM`), an apply on an installed platform runs with the
+installed BOM, and `POST …/runs` answers `409 bom_unsupported` when that is not the embedded one. The
+entry is kept as written; this one corrects it.
+
+**Why:** the sentence described the design (§7), not what PR 15 delivered, and the console repeated it
+as an upgrade path that does not exist. The upgrade between BOMs is planned for a later release.
+
+**Views updated:** none.
+
 ## 2026-11-16: PR 19 (P3): the chart mirror flow
 
 **What changed:** a new workflow, `charts-mirror.yml`, with its script `.github/scripts/charts_mirror.py`

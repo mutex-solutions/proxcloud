@@ -387,7 +387,9 @@ VM disk on that store, tenant ones included when tenants use it. Whoever holds t
 Secret, which the providers' service account can read, or anyone who takes over the workload) can attach the seed's
 disk to a workload VM, where the token holds `VM.Config.Disk`, and read the seed's k3s datastore with its cluster-admin
 token and the `capmox@pve!capi` secret; or delete the disk while the seed is stopped. The portal token holds
-`Datastore.Allocate` on the boot store too when `importStorage` is that store. M1 accepts this
+`Datastore.Allocate` on the boot store too when `importStorage` is that store: the platform API refuses an
+installation whose import store is its boot store, comparing the two names in the settings only (a row on the boot
+store made for another installation, for a provider's earlier `importStorage` or by hand is not read; [removing it](managed-services.md#when-the-providers-import-store-is-the-boot-store)). M1 accepts the rest
 ([ADR 0009](adr/0009-managed-services-platform-lifecycle.md#a2-seed-vm-from-a-native-template-in-its-own-pool), A2
 "Limit", and A8). The fix is a boot store of the seed's own, and a store for its backups, where no `csi@pve` token
 holds a role (refused when it is `bootStorage` or `importStorage`); M1 gives the platform one boot store, so that is a

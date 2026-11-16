@@ -26,7 +26,7 @@ Saving keeps a draft. Nothing is created on Proxmox until you press **Install**,
 - **Node groups.** Three groups of worker machines: `system` (the platform's own components), `kamaji` (the control planes of tenant Kubernetes clusters) and `dbaas` (tenant databases). For each: the Proxmox nodes, the number of machines (at least one per chosen node) and their size. **Use the lab profile** sets the smallest size the installer accepts.
 - **Platform network.** The bridge, the network, gateway and DNS; the address of the cluster's API; a range for the machines (count one spare per group and node, used during updates); a range for load balancers, which tenants reach; and the Proxmox API URL as machines on this network reach it.
 - **Seed.** Its node, address and size, and the networks that may reach its API: at least the address ProxCloud reaches it from. SSH keys are optional and for emergencies only.
-- **Control plane** and **storage.** One control plane machine; one boot store; one ISO store that is local to each node; optionally the store images are downloaded to.
+- **Control plane** and **storage.** One control plane machine; one boot store; one ISO store that is local to each node; optionally the store images are downloaded to, which must not be the boot store. Left empty it is the provider's import store; if that is the boot store the save is refused, and both the provider and this field must name another store.
 
 The page checks the addresses as you save: everything inside the network, no overlaps, and a machine range that is large enough. ProxCloud then checks what only it knows, for example that the network does not overlap the address pool of tenant networks.
 
@@ -75,7 +75,7 @@ The failed stage shows a code, a message and what to do.
 
 | Code | What to do |
 |---|---|
-| `preflight_failed`, `privileges_missing`, `network_problem`, `iso_store_visibility` | Run the script again or correct the settings, then **Check**. |
+| `preflight_failed` | Open the failed checks of the stage. Run the script again or correct the settings, then **Check**. |
 | `isolation_not_enforced` | Add the networks named in the message to **Networks tenants must not reach** on the provider's page under **Cloud providers**. Then press **Check**: its isolation row links to that page and has the button **Run a provider sync, then check again**. Check too that the datacenter firewall is on. |
 | `image_import_failed`, `image_import_stalled`, `image_blocked` | Open **Template updates** to see the import. A blocked image needs a newer ProxCloud release. |
 | `seed_clone_failed`, `seed_config_refused` | Fix the storage or the node named in the message, then **Retry**. |
@@ -89,7 +89,9 @@ The failed stage shows a code, a message and what to do.
 | `machine_failed`, `capmox_auth_failed` | Check the boot store, the nodes, the Proxmox API URL and the token secret, then **Retry**. |
 | `workload_api_unreachable` | Add a route from the ProxCloud host to the API address, then **Retry**. During a removal: restore the route and **Remove again**, or tick the option for a cluster that does not answer when it is beyond repair. |
 | `provider_conflict` | Correct the provider named in the message under **Cloud providers**, then **Retry**. |
-| `bom_unsupported` | The platform was installed by another ProxCloud release, and this release cannot apply over it: there is no upgrade path yet. |
+| `bom_unsupported` | The platform was installed by another ProxCloud release, and no release upgrades an installed platform yet. Go back to the ProxCloud release that installed it. Or, if no tenant cluster or database must be kept, delete them all, then remove managed services and install again: **Remove** deletes the platform cluster. |
+| `credentials_missing` | Paste both token secrets in step 2, then **Retry**, or **Remove again** for a removal. |
+| `stage_unavailable` | The run was recorded by another ProxCloud release. No action in this release. |
 | `tenants_exist` | Delete the tenant clusters and databases, then **Remove** again. |
 | `machine_delete_stuck`, `volume_delete_failed` | Delete the VM or fix the storage named in the message, then **Remove** again. |
 | a code ending in `_timeout`, `portal_changed`, `job_dead` | **Retry**, or **Remove again** for a removal. The time limits start again. |
@@ -99,7 +101,7 @@ The failed stage shows a code, a message and what to do.
 The page shows each component with its live state, read from the seed, and the two providers. They are created held back: new projects get them only after you attach them. Then:
 
 1. Publish a Kubernetes node image for tenants in **Template updates** and enter its version on the Kubernetes provider. Until then tenants cannot create a cluster.
-2. Add a backup job for the seed VM. The page prints the command. It cannot see whether a job exists.
+2. Add a backup job for the seed VM. The page prints the command. Use a backup store that is not the boot, ISO or import store of the settings. The page cannot see whether a job exists.
 3. Attach the providers to projects, and add price rules for clusters and databases.
 
 **Apply this release** in step 4 runs the stages again with the saved settings: it repairs what is missing, applies changed sizes and counts, and renews the seed's access to the platform cluster. This release cannot yet move an installed platform to the components of a newer ProxCloud release: after such an upgrade the review says so and the run is refused with `bom_unsupported`.

@@ -24,7 +24,7 @@ type Installation struct {
 	ID            string    `json:"id"`   // pi-<8hex>
 	Name          string    `json:"name"` // prefixes the providers: "<name> Kubernetes", "<name> Databases"
 	ServiceID     string    `json:"serviceId"`
-	ProvisionedBy string    `json:"provisionedBy"` // portal | installer
+	ProvisionedBy string    `json:"provisionedBy"` // portal | installer (M2: refused by Validate)
 	Layout        string    `json:"layout"`        // shared (separate is refused in M1)
 	Spec          Spec      `json:"spec"`
 	Status        Status    `json:"status"`
@@ -64,7 +64,7 @@ type Network struct {
 
 // SeedSpec is the k3s management cluster. Mode, pool, node and address are fixed.
 type SeedSpec struct {
-	Mode       string   `json:"mode"` // vm (the job clones it) | existing (installer seeds, M2)
+	Mode       string   `json:"mode"` // vm (the job clones it) | existing (installer seeds, M2: refused by Validate)
 	Pool       string   `json:"pool"`
 	Node       string   `json:"node"`
 	Address    string   `json:"address"`
@@ -266,8 +266,12 @@ func (in *Installation) Validate() error {
 	if in.ServiceID == "" {
 		bad("serviceId is required")
 	}
-	if in.ProvisionedBy != ByPortal && in.ProvisionedBy != ByInstaller {
-		bad("provisionedBy %q is neither portal nor installer", in.ProvisionedBy)
+	switch in.ProvisionedBy {
+	case ByPortal:
+	case ByInstaller:
+		bad("provisionedBy installer comes in a later release; use portal")
+	default:
+		bad("provisionedBy %q is not portal", in.ProvisionedBy)
 	}
 	switch in.Layout {
 	case LayoutShared:
@@ -285,6 +289,12 @@ func (in *Installation) Validate() error {
 		if (st.v != "" || st.field != "import" || imports) && !storageRE.MatchString(st.v) {
 			bad("spec.storage.%s %q is not a storage id", st.field, st.v)
 		}
+	}
+	// The portal token holds PVEDatastoreAdmin on the import store, which reaches every disk on it: on the boot store
+	// that would undo its NoAccess on the platform pools (docs/proxmox-permissions.md). The API fills an empty import
+	// store from the provider, and the preflight checks the mint role on the provider's store: the message names it.
+	if s.Storage.Import != "" && s.Storage.Import == s.Storage.Boot {
+		bad("spec.storage.import %q is the boot store: use another store with import content, the one the provider's importStorage names (an empty spec.storage.import takes it)", s.Storage.Import)
 	}
 
 	n := s.Network
@@ -325,11 +335,9 @@ func (in *Installation) Validate() error {
 			bad("spec.seed.pool must be %s for a seed the portal builds", pve.SeedPool)
 		}
 	case SeedExisting:
-		if !nameRE.MatchString(seed.Pool) {
-			bad("spec.seed.pool %q is not a pool name", seed.Pool)
-		}
+		bad("spec.seed.mode existing comes in a later release; use vm")
 	default:
-		bad("spec.seed.mode %q is neither vm nor existing", seed.Mode)
+		bad("spec.seed.mode %q is not vm", seed.Mode)
 	}
 	if !nodeRE.MatchString(seed.Node) {
 		bad("spec.seed.node %q is not a node name", seed.Node)
@@ -563,7 +571,7 @@ func (in *Installation) Unfenced(fenced []string) []string {
 func (in *Installation) Installed() bool { return in.Status.BOM != nil }
 
 // FixedChanges names the fields next changes that may not change: the provider always; once a run succeeded also the
-// path, the layout, the name, the network, the seed's mode, pool, node and address, and each cluster's name, endpoint
+// path (but for installer, which Validate refuses: such a record can only be corrected), the layout, the name, the network, the seed's mode, pool, node and address, and each cluster's name, endpoint
 // and node groups. Before that nothing was built, so a draft can be corrected (no route deletes one).
 func FixedChanges(old, next *Installation) []string {
 	var out []string
@@ -576,7 +584,9 @@ func FixedChanges(old, next *Installation) []string {
 	if !old.Installed() {
 		return out
 	}
-	same("provisionedBy", old.ProvisionedBy, next.ProvisionedBy)
+	if old.ProvisionedBy != ByInstaller {
+		same("provisionedBy", old.ProvisionedBy, next.ProvisionedBy)
+	}
 	same("layout", old.Layout, next.Layout)
 	same("name", old.Name, next.Name)
 	same("spec.network", old.Spec.Network, next.Spec.Network)

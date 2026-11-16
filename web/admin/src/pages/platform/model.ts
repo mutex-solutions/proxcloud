@@ -188,6 +188,8 @@ export function validate(f: Form): Problem[] {
   for (const [field, label, v] of [["boot", "Boot store", f.boot], ["iso", "ISO store", f.iso], ["import", "Import store", f.import]] as const) {
     if ((field !== "import" || v.trim()) && !STORAGE.test(v.trim())) bad(field, `${label}: a Proxmox storage id.`)
   }
+  // The portal token's role on the import store reaches every disk on it, so it must not be the boot store.
+  if (f.import.trim() && f.import.trim() === f.boot.trim()) bad("import", "Import store: a store other than the boot store.")
   if (!BRIDGE.test(f.bridge.trim())) bad("bridge", "Bridge: an interface name such as vmbr1.")
 
   const machineOK = (field: string, label: string, m: MachineForm) => {
@@ -274,7 +276,7 @@ const CHECK_ACTION: Record<string, string> = {
   isolation: `${BLOCKED}, then run a provider sync. Check too that the datacenter firewall is on.`,
   credentials: "Paste both token secrets in step 2.",
   privileges: RERUN,
-  "pool-fence": "A token reaches a pool it must not. Remove that permission in Proxmox (Datacenter, Permissions).",
+  "pool-fence": "A token reaches a platform pool it must not, usually because its NoAccess row there is missing. Run the identities script again (step 2), then press Check. Only if it still fails, remove the permission granted to that token on the pool itself in Proxmox (Datacenter, Permissions). Do not remove its permissions on /pool.",
   "iso-store-visibility": `${CAPI_TOKEN} must see exactly one ISO store. Remove its permission on the others, or name the right ISO store in step 1 and run the script again.`,
   "boot-iso-grant": RERUN,
   "boot-iso": "Name a store that is local to each node and takes ISO files as the ISO store in step 1.",
@@ -287,9 +289,6 @@ const RETRY = "Press Retry. The time limits start again."
 // A failure code of a run or a stage (design §4.7 and internal/platformlife/run.go) → what the operator does.
 const CODE_ACTION: Record<string, string> = {
   preflight_failed: "Open the failed checks of this stage. Run the identities script again or correct the settings, then press Check.",
-  privileges_missing: RERUN,
-  network_problem: "Correct the platform network in the settings, then press Check.",
-  iso_store_visibility: CHECK_ACTION["iso-store-visibility"],
   isolation_not_enforced: ISOLATION,
   image_import_failed: "Open Template updates to see the import, then Retry. If it keeps failing, install a newer ProxCloud release.",
   image_import_stalled: "Open Template updates to see the import, then Retry. If it keeps failing, install a newer ProxCloud release.",
@@ -307,7 +306,7 @@ const CODE_ACTION: Record<string, string> = {
   machine_failed: "Check the boot store, the nodes and the Proxmox API URL in the settings, then Retry.",
   capmox_auth_failed: `Proxmox refused ${CAPI_TOKEN}. Check the Proxmox API URL and paste the token secret again, then Retry.`,
   workload_api_unreachable: "Add a route from the ProxCloud host to the API address, then Retry.",
-  bom_unsupported: "The installed version is too old for this release. Upgrade through the previous ProxCloud release first.",
+  bom_unsupported: "The platform was installed by another ProxCloud release, and no release upgrades an installed platform yet. Go back to the ProxCloud release that installed it. Or, if no tenant cluster or database must be kept, delete them all, then remove managed services and install again: Remove deletes the platform cluster.",
   provider_conflict: "A provider row of this installation was refused. Read the message, correct that provider under Cloud providers, then Retry.",
   machine_delete_stuck: "Delete the VM named in the message in Proxmox, then start Remove again.",
   tenants_exist: "Tenant clusters or databases still run on the platform. Delete them, then start Remove again.",

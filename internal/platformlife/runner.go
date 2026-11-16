@@ -254,8 +254,9 @@ func permanent(code, format string, a ...any) error {
 }
 func transient(code string, err error) error { return &stageErr{kindRetry, code, clip(err.Error())} }
 
-// classify makes a Proxmox or Kubernetes error a stage error: a refusal (4xx but 409 and 429) is permanent, anything
-// else (unreachable, 5xx, a clone lock) transient. Stage errors, a stop and a cancel pass through.
+// classify makes a Proxmox or Kubernetes error a stage error: a refusal is permanent (a Proxmox 4xx but 429; a
+// Kubernetes 4xx but 409 and 429, see refused), anything else (unreachable, 5xx, a clone lock, which Proxmox answers
+// as a 500) transient. Stage errors, a stop and a cancel pass through.
 func classify(code string, err error) error {
 	var se *stageErr
 	if err == nil || errors.As(err, &se) || errors.Is(err, errStop) || errors.Is(err, errCancelled) {
