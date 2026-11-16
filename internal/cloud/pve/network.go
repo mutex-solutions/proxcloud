@@ -602,8 +602,9 @@ func refused(format string, a ...any) error {
 }
 
 // ReconcileProviderIsolation writes this portal's provider-wide DROPs and touches no project's ACCEPTs: the sync calls
-// it once per provider, so the rules exist before the first tenant network and the managed-services preflight can be
-// made green on a provider with no project (on a cluster another portal shares, ErrIsolationPending never applies).
+// it once per provider that carries a managed-services installation (and for no other provider), so the rules exist
+// before the first tenant network and the managed-services preflight can be made green on a provider with no project
+// (on a cluster another portal shares, ErrIsolationPending never applies).
 // It has no tenant waiting and none of its own to protect, so it refuses (ErrIsolationRefused) wherever a write could
 // do harm: on a node read that is not complete, for a cidrPool that overlaps a management network ("DROP pool to pool"
 // would only cut the nodes off each other), and when the rules in place are for another pool (otherPool) or drop
@@ -739,8 +740,8 @@ func (s *Service) CheckSandboxIsolation(ctx context.Context, pool string, blocke
 }
 
 // ErrIsolationPending: none of this portal's isolation rules is in the cluster firewall, and no tenant network
-// exists on the cluster yet. The next provider sync writes them (ReconcileProviderIsolation), the first tenant network
-// does too before it goes live, and until then the sandbox gate (CheckSandboxIsolation) refuses every sandbox, so no
+// exists on the cluster yet. Only the managed-services preflight gets it, so the provider has an installation: the next
+// provider sync writes them (ReconcileProviderIsolation), the first tenant network does too before it goes live, and until then the sandbox gate (CheckSandboxIsolation) refuses every sandbox, so no
 // tenant can reach anything.
 var ErrIsolationPending = errors.New("pve isolation: no rule is written yet; a provider sync or the first tenant network writes them")
 
@@ -803,7 +804,7 @@ func (s *Service) checkIsolation(ctx context.Context, pendingOK bool, pool strin
 	if len(sandbox) == 0 {
 		what = "for these blocked networks"
 	}
-	return fmt.Errorf("pve isolation: the %s rules in the cluster firewall are not the ones %s (%d in place, %d wanted); a provider sync writes them, with or without a project",
+	return fmt.Errorf("pve isolation: the %s rules in the cluster firewall are not the ones %s (%d in place, %d wanted); a provider sync writes them for a provider that has a project or a managed-services installation",
 		owner, what, len(mine), len(want))
 }
 

@@ -401,8 +401,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Managed services: the defects of the first lab attempt (M0, a Proxmox cluster shared by two portals).** The
-  provider sync now writes a provider's isolation rules whether or not it has a project
-  (`(*pve.Service).ReconcileProviderIsolation`, once per provider and cycle, under the SDN lock). That call, which
+  provider sync now writes the isolation rules of a provider that has a managed-services installation (in any
+  phase, a saved draft too) whether or not it has a project (`(*pve.Service).ReconcileProviderIsolation`, once per
+  such provider and cycle, under the SDN lock, and only with `PROXCLOUD_PLATFORM_ENABLED=true`). For every other
+  provider the sync is unchanged: no lock, no new Proxmox request and no new log line, so an install that sets up no
+  managed services gets no new firewall write from this release. The order is therefore: save the installation, run
+  a provider sync, check; saving reads the provider's settings only and does not wait for the check. That call, which
   needs no project, only ever adds protection. It writes nothing while a node does not report its networks, nothing
   for a `cidrPool` that overlaps a management network, and nothing when the rules in place are for another pool or
   drop a network its own set does not (an equal or a wider network covers one): the rules carry the pool prefix

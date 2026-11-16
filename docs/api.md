@@ -387,7 +387,9 @@ are several, `errors.details.problems`.
   `images`. `isolation` fails, naming the CIDRs to add to `blockedCidrs`, when
   the seed, the API VIP or the node range is outside the blocked and management
   networks, and when the cluster firewall's isolation rules are not the ones the
-  sync writes (a provider sync writes them with or without a project, except for
+  sync writes (a provider sync writes them without a project only for a provider
+  that has an installation, in any phase, so `POST /installations` comes before
+  the sync and the sync before this check; it writes none for
   a `cidrPool` over a management network, for rules in place for another pool
   and for rules in place that drop something the provider's set does not, which
   the message names); with no

@@ -120,11 +120,11 @@ func (p Preflight) Run(ctx context.Context) []Check {
 		// Layer 0 drops tenant traffic to the management and blocked networks only.
 		if unf := in.Unfenced(append(slices.Clone(site.Blocked), mgmt...)); len(unf) > 0 {
 			row("isolation", []string{"Tenants could reach the seed, the API VIP or the node range: add " + strings.Join(unf, ", ") +
-				" (or one network that covers them) to the provider's blockedCidrs, then run a provider sync so the cluster firewall drops them."}, "")
+				" (or one network that covers them) to the provider's blockedCidrs, then run a provider sync so the cluster firewall drops them (with this installation saved it needs no project)."}, "")
 		} else {
 			switch err := p.Portal.CheckIsolation(ctx, site.CIDRPool, site.Blocked, site.Sandbox, p.Allow...); {
 			case errors.Is(err, pve.ErrIsolationPending):
-				row("isolation", nil, "The platform addresses are blocked networks; the cluster firewall rules are written by the next provider sync, or with the first tenant network.")
+				row("isolation", nil, "The platform addresses are blocked networks; the cluster firewall rules are written by the next provider sync (with this installation saved it needs no project), or with the first tenant network.")
 			case err != nil:
 				row("isolation", []string{err.Error()}, "")
 			default:
