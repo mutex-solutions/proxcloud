@@ -41,7 +41,6 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/durablejobs"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
-	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platformlife"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
@@ -661,7 +660,8 @@ func (h *Handler) PlatformRegister(ctx context.Context, body map[string]any) (id
 	return id, err
 }
 
-// PlatformDisable sets the provider rows of an installation DISABLED (Remove).
+// PlatformDisable sets the provider rows of an installation DISABLED (Remove), each with a note of the status it had,
+// which the next install's stage 10 gives back (platformlife.DisableProvider, AdoptProvider).
 func (h *Handler) PlatformDisable(ctx context.Context, installationID string) error {
 	rows, err := h.repo.ListRaw(ctx, externalServiceCollection)
 	if err != nil {
@@ -669,10 +669,9 @@ func (h *Handler) PlatformDisable(ctx context.Context, installationID string) er
 	}
 	for _, row := range rows {
 		cfg, _ := row["config"].(map[string]any)
-		if cfg[platformlife.ProviderMarker] != installationID || row["status"] == externalservice.StatusDisabled {
+		if cfg[platformlife.ProviderMarker] != installationID || !platformlife.DisableProvider(row) {
 			continue
 		}
-		row["status"] = externalservice.StatusDisabled
 		id, _ := row["_id"].(string)
 		if err := h.repo.ReplaceDoc(ctx, externalServiceCollection, id, row); err != nil {
 			return err

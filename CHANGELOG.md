@@ -412,6 +412,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Managed services: stage 7 could not see a machine that failed, a sync hook that failed passed for done, and a
+  Remove could wait 45 minutes or leave things behind** (static audit and the third lab attempt, before the first run
+  reaches stage 7). Stage 7 read a Machine's `Failed` phase and failure message, which Cluster API v1.14 no longer
+  sets and CAPMOX v0.9.2 never fills: every provisioning error waited out the 60 minutes as `control_plane_timeout`.
+  It now reads the ProxmoxMachine's condition `VirtualMachineProvisioned`: the items and the waiting message carry the
+  step and CAPMOX's error, `VMProvisionFailed` and `TaskFailed` fail the stage `machine_failed` with the command that
+  makes Cluster API build the machine again, and a ProxmoxCluster that CAPMOX has set no condition on for 10 minutes
+  fails `capmox_auth_failed` naming the Proxmox API URL and CAPMOX's log. Stage 7 also refuses a node template whose
+  Proxmox cloud-init drive is not on `ide0`, and template updates now puts that drive on `ide0` for a Kubernetes node
+  image: CAPMOX writes its own ISO to `ide0` only, and a machine with two `cidata` media starts from the wrong one
+  (templates imported earlier need `qm set <vmid> --delete ide2`, [template-updates.md](docs/template-updates.md)).
+  An Application now counts as done only when its last sync operation ended `Succeeded`: ArgoCD shows Synced and
+  Healthy while a sync hook still fails, which let `capi` look done on the lab while its hook failed. The item and the
+  stage's message name the failed hook with its message, the providers clusterctl has not installed are named with
+  their type, and a sync that fails again after the run started it once fails the stage instead of being started a
+  third time. Remove no longer retries the tenant check on a cluster that never could hold a tenant (no provider
+  registered, or no control plane), looks at the seed once more after deleting the Application `pc-platform` before it
+  calls the cluster gone, deletes a tagged VM's bootstrap ISO with it when the seed is gone, lists the untagged
+  `pc-platform-…` VMs it left, and says when it could not look for volumes. The providers a Remove disabled are
+  enabled again by the next install; one the operator disabled stays disabled. Stage 9 records the platform's volumes
+  at every look, not only after `kamaji-etcd`'s wave. Texts: stage 4 no longer says the seed "does not answer" for an
+  API that answers 401 while it starts; the guide says that the seed kubeconfig route answers JSON, lists the site
+  prerequisites no check reads (the seed's route to the Proxmox API, memory for CAPMOX's scheduler, one layer-2
+  segment, clone space, disk latency, MTU, the region), and states what a BOM recorded by the file's bytes means for
+  an install on a `-dev` build. Not verified on a lab.
+
 - **Managed services: the seed VM could not be built from a template made by template updates (second lab attempt,
   M0).** Such a template has no network device, so Proxmox gives the seed's `net0` its MAC address when stage 3 sets
   it; the stage rendered the seed's CD from the value it had sent, without the address, and failed

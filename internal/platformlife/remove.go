@@ -64,8 +64,21 @@ func (x *acq) removeCluster(ctx context.Context) error {
 	live := cl != nil && str(cl, "metadata", "deletionTimestamp") == ""
 	var wl *kamajik8s.Client
 	if live {
-		if wl, err = x.tenantsGone(ctx, seed); err != nil {
+		// No tenant can be on a cluster that no provider was ever registered for (stage 10 never ran) or whose control
+		// plane never came up: such a cluster's silence is not retried and needs no confirmation.
+		empty := x.in.Status.Providers == nil ||
+			(dig(cl, "status", "initialization", "controlPlaneInitialized") != true && condition(cl, "ControlPlaneInitialized") != "True")
+		if wl, err = x.tenantsGone(ctx, seed, empty); err != nil {
 			return err
+		}
+		if wl == nil && len(x.in.Status.Volumes) == 0 && !empty {
+			// Passed on the confirmation alone: the volumes could not be read again, and none was recorded.
+			if err := x.saveStage(ctx, func(s *Stage) {
+				s.Items = []StageItem{{ID: "volumes", State: "not checked", Message: "The cluster did not answer and no volume of the platform was recorded, so none " +
+					"is deleted. Look on the boot store for vm-*-pvc-* disks of the platform's own components (etcd of Kamaji) and delete them by hand."}}
+			}); err != nil {
+				return err
+			}
 		}
 	}
 	if err := x.disableProviders(ctx); err != nil {
@@ -102,6 +115,11 @@ func (x *acq) removeCluster(ctx context.Context) error {
 				return classify(CodeSeedAPIUnreachable, err)
 			}
 		}
+		if app != nil && cl == nil {
+			// A sync of the Application that was running may have created the Cluster after the read above: the next
+			// look reads it again, now that ArgoCD can build nothing more.
+			return waiting(CodeMachineDeleteStuck, "The Application %s was deleted; the seed is read again for a cluster it may still have made.", ClusterName)
+		}
 	}
 	machines, vmids, _, err := x.machines(ctx, seed)
 	if err != nil {
@@ -128,8 +146,8 @@ func (x *acq) clusterRemoved(ctx context.Context) error {
 
 // tenantsGone refuses the remove while tenant Applications exist on the workload, and answers the workload's client
 // (nil when the cluster has no API to ask). A workload that should answer and does not is retried, and passed only
-// with the typed confirmation: the run cannot see whether tenants still run there.
-func (x *acq) tenantsGone(ctx context.Context, seed *kamajik8s.Client) (*kamajik8s.Client, error) {
+// with the typed confirmation: the run cannot see whether tenants still run there. empty = it never could hold one.
+func (x *acq) tenantsGone(ctx context.Context, seed *kamajik8s.Client, empty bool) (*kamajik8s.Client, error) {
 	wl, err := x.workload(ctx, seed)
 	if err != nil || wl == nil {
 		return nil, err
@@ -138,7 +156,7 @@ func (x *acq) tenantsGone(ctx context.Context, seed *kamajik8s.Client) (*kamajik
 	switch {
 	case kamajik8s.NotFound(err): // no ArgoCD on the workload yet: no provider ever created anything
 		return wl, nil
-	case err != nil && x.run.Confirmed:
+	case err != nil && (x.run.Confirmed || empty):
 		return nil, nil
 	case err != nil:
 		return nil, &stageErr{kindRetry, CodeWorkloadUnreachable, "The workload cluster does not answer whether tenant clusters or databases still run on it. " +
@@ -161,12 +179,15 @@ func (x *acq) disableProviders(ctx context.Context) error {
 }
 
 // deleteTagged is the seed-lost mode: it deletes the VMs of pool proxcloud-system that carry this installation's tag,
-// and no other, with the CAPI token.
+// and no other, with the CAPI token, each after its bootstrap ISO (user-data-<vmid>.iso, which only CAPMOX's own
+// delete removes for a machine that never joined). CAPMOX tags a VM after its clone, so a machine that was still being
+// cloned when the seed was lost has no tag: it is not deleted, and the stage's items name it.
 func (x *acq) deleteTagged(ctx context.Context) error {
 	pool, err := x.capi.GetPool(ctx, pve.SystemPool)
 	if err != nil {
 		return classify(CodeMachineDeleteStuck, err)
 	}
+	var left []StageItem
 	for i := 0; pool != nil && i < len(pool.Members); i++ {
 		m := pool.Members[i]
 		if m.Type != "qemu" {
@@ -177,6 +198,10 @@ func (x *acq) deleteTagged(ctx context.Context) error {
 			return classify(CodeMachineDeleteStuck, err)
 		}
 		if !slices.Contains(vmTags(cfg), "pc-platform-"+x.in.ID) {
+			if strings.HasPrefix(cfg.Str("name"), ClusterName+"-") && !slices.ContainsFunc(vmTags(cfg), func(t string) bool { return strings.HasPrefix(t, "pc-platform-") }) {
+				left = append(left, StageItem{ID: fmt.Sprintf("vm-%d", m.VMID), State: "left", Message: fmt.Sprintf("VM %d (%s) on %s is in pool %s and carries no "+
+					"installation's tag: not deleted. If it is a machine of this platform that was still being cloned, delete it in Proxmox.", m.VMID, cfg.Str("name"), m.Node, pve.SystemPool)})
+			}
 			continue
 		}
 		st, err := x.capi.GetVMStatus(ctx, m.Node, m.VMID)
@@ -188,9 +213,26 @@ func (x *acq) deleteTagged(ctx context.Context) error {
 				return err
 			}
 		}
+		// The ISO before the VM: once the VM is gone nothing says whose ISO a user-data-<vmid>.iso is.
+		iso, rel := x.in.Spec.Storage.ISO, fmt.Sprintf("iso/user-data-%d.iso", m.VMID)
+		listed, err := x.capi.StorageContents(ctx, m.Node, iso, "iso", 0)
+		if err != nil {
+			return classify(CodeMachineDeleteStuck, err)
+		}
+		if slices.ContainsFunc(listed, func(c pve.StorageContent) bool { return c.VolID == iso+":"+rel }) {
+			if err := x.check(ctx); err != nil {
+				return err
+			}
+			if err := x.capi.DeleteStorageVolume(ctx, m.Node, iso, rel); err != nil {
+				return classify(CodeMachineDeleteStuck, err)
+			}
+		}
 		if err := x.pveTask(ctx, CodeMachineDeleteStuck, func() (pve.UPID, error) { return x.capi.DeleteVM(ctx, m.Node, m.VMID) }); err != nil {
 			return err
 		}
+	}
+	if !slices.Equal(left, x.run.Stages[x.si].Items) {
+		return x.saveStage(ctx, func(s *Stage) { s.Items = left })
 	}
 	return nil
 }

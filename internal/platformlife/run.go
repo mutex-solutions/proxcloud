@@ -152,6 +152,8 @@ type StageReceipt struct {
 	// Templates is the template VMID stage 2 found or imported per image and node: "seed:<node>", "node:<node>".
 	Templates                 map[string]int `json:"templates,omitempty"`
 	MachineDeploymentsDeleted []string       `json:"machineDeploymentsDeleted,omitempty"`
+	// Resynced are the Applications whose failed sync this run started again (once each).
+	Resynced []string `json:"resynced,omitempty"`
 }
 
 // Terminal reports a run state that will not change any more.
