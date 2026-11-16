@@ -71,7 +71,9 @@ spec:
           args:
             {{- range $key, $version := $c.providers }}
             {{- if $version }}
-            - --{{ kebabcase $key }}={{ $version }}
+            # Two words per provider: the entrypoint reads --core NAME:VERSION and refuses --core=NAME:VERSION.
+            - --{{ kebabcase $key }}
+            - {{ $version | quote }}
             {{- end }}
             {{- end }}
           env:

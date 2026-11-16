@@ -14,11 +14,16 @@ spec:
     spec:
       containers:
         - args:
-            - --bootstrap=kubeadm:v1.14.4
-            - --control-plane=kubeadm:v1.14.4
-            - --core=cluster-api:v1.14.4
-            - --infrastructure=proxmox:v0.9.2
-            - --ipam=in-cluster:v1.1.1
+            - --bootstrap
+            - kubeadm:v1.14.4
+            - --control-plane
+            - kubeadm:v1.14.4
+            - --core
+            - cluster-api:v1.14.4
+            - --infrastructure
+            - proxmox:v0.9.2
+            - --ipam
+            - in-cluster:v1.1.1
           env:
             - name: PROXMOX_URL
               value: ""
