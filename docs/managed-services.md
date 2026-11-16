@@ -118,7 +118,7 @@ before the first run:
   (lease 60 s, renew deadline 40 s, retry 5 s). Its client cuts every request at 10 seconds, so
   the address is kept when one try in those 40 seconds gets through in under 10: a stall of about
   half a minute is survived, an etcd whose every write takes over 10 seconds is not. The BOM of
-  this release still names 0.1.11, which gives up after 10.
+  this release names 0.1.12; chart 0.1.11 gave up after 10.
 - **The MTU of the platform network.** Cilium tunnels pod traffic between the machines at the
   machines' MTU. When the bridge's real path MTU between two nodes is below 1500 (the bridge is
   itself carried by an overlay), set the settings' MTU to it.
@@ -750,14 +750,16 @@ and ADR 0009, A2 and A8.
   `provisionedBy: installer` is corrected by a PUT that sends `provisionedBy: portal`, the one
   change of that field the API accepts after a run succeeded. Nothing in the installer writes an installation record,
   and a site with an installer-built services cluster is not shown on the page.
-- **The cluster chart's fixes of 0.1.12 are not installed by this release.** The BOM names
-  `proxmox-kamaji-cluster` 0.1.11, so a platform cluster built now has a control plane node that
-  registers the API address as its InternalIP (its kubelet has no `node-ip`; nothing failed on it
-  with one control plane machine) and a kube-vip that gives up the API address when a lease renewal
-  takes over 10 seconds. Chart 0.1.12 gives the kubelet the machine's own address and kube-vip a
-  renew deadline of 40 seconds (several tries of at most 10 seconds each, see
-  [What no check reads](#what-no-check-reads)); it reaches an installation when its tag is cut and a later BOM
-  names it, and then only a new install, because no release upgrades between BOMs.
+- **The cluster chart's fixes of 0.1.12 reach a new install only.** The BOM names
+  `proxmox-kamaji-cluster` 0.1.12, for the platform cluster and for new tenant clusters (whose
+  output did not change). A platform cluster built from the BOM that named 0.1.11 has a control
+  plane node that registers the API address as its InternalIP (its kubelet has no `node-ip`;
+  nothing failed on it with one control plane machine) and a kube-vip that gives up the API address
+  when a lease renewal takes over 10 seconds. Chart 0.1.12 gives the kubelet the machine's own
+  address and kube-vip a renew deadline of 40 seconds (several tries of at most 10 seconds each,
+  see [What no check reads](#what-no-check-reads)). No release upgrades between BOMs: an apply on
+  the earlier platform is refused (`bom_unsupported`), and it gets 0.1.12 by Remove and a new
+  install.
 - **`layout: separate`** (one cluster for Kubernetes, one for databases) is refused by the API.
 - **No VLAN** on the platform network, and no IPv6.
 - **One control plane machine.** The settings take no control plane count.

@@ -4,6 +4,22 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-16: P3, the platform BOM pins cluster chart 0.1.12
+
+**What changed:** `deploy/platform/platform-bom.yaml` names `proxmox-kamaji-cluster` 0.1.12 with the digest ghcr.io
+serves (`sha256:e44ba2cb...`), for the platform cluster (`pc-platform`) and for new tenant clusters
+(`tenantCharts.kubernetes`). No container, relation or boundary changed.
+
+**Why:** the chart was published from its tag, so a new managed-services install can get the kubelet `node-ip` and
+the longer kube-vip lease. The tenant pin moves with it: 0.1.12 renders tenant clusters as 0.1.11 does, the
+installer already registers providers with the chart's source version, and one version of the chart per BOM keeps
+the published package list of the release to one entry.
+
+**Diagrams:** none changed.
+
+**Not verified:** chart 0.1.12 on a cluster. A platform installed from the previous BOM is refused
+(`bom_unsupported`): Remove and install again.
+
 ## 2026-11-16: P3, findings of the first finished lab run (M0): start-up refusals are passing errors
 
 **What changed:** how the platform runner (`internal/platformlife`) reads an answer of a cluster. A Kubernetes
@@ -19,7 +35,7 @@ token, and a real refusal must not wait for a stage's 60 minutes; the seed's k3s
 
 **Diagrams:** none changed; the row of the cluster chart in `c2-containers.md` names 0.1.12.
 
-**Not verified:** chart 0.1.12 on a cluster (not tagged, not in the BOM); the changed runner against a seed that
+**Not verified:** chart 0.1.12 on a cluster (not tagged and not in the BOM at the time of this entry); the changed runner against a seed that
 restarts on a lab.
 
 ## 2026-11-16: PR #282 (P3): the BOM and stage 40 take the third-party charts from the chart mirror
