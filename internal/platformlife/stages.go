@@ -25,6 +25,7 @@ import (
 const (
 	seedRuleComment = "proxcloud-platform seed"
 	imagesStall     = 60 * time.Minute // stage 2 fails when no import moved for this long
+	templateSettle  = 5 * time.Minute  // how long after an import's last write its template may still be missing from the VM list
 )
 
 // validate is stage 1: the preflight on the frozen spec, with the live isolation check.
@@ -99,11 +100,12 @@ func (x *acq) images(ctx context.Context) error {
 		if !templateupdates.PlacementAllowed(opts, w.node, sp.Storage.Import, sp.Storage.Boot) {
 			return permanent(CodeImageImportFailed, "Node %s needs %s active with import content and %s with images content.", w.node, sp.Storage.Import, sp.Storage.Boot)
 		}
-		state, vmid, err := x.image(ctx, w.node, w.img, rows, actor, &ours)
+		note := ""
+		state, vmid, err := x.image(ctx, w.node, w.img, rows, actor, &ours, &note)
 		if err != nil {
 			return err
 		}
-		items = append(items, StageItem{ID: w.id, State: state})
+		items = append(items, StageItem{ID: w.id, State: state, Message: note})
 		if vmid > 0 {
 			templates[w.id] = vmid
 		}
@@ -129,8 +131,9 @@ func (x *acq) images(ctx context.Context) error {
 	return waiting(CodeImageImportStalled, "%d of %d images are templates; the stage fails when no import moves for an hour.", len(templates), len(wants))
 }
 
-// image is one image on one node: done with its template VMID, or the step of the import in flight.
-func (x *acq) image(ctx context.Context, node string, img VMImage, rows []pve.ClusterResource, actor string, ours *[]string) (string, int, error) {
+// image is one image on one node: done with its template VMID, or the step of the import in flight (note says why an
+// item is "checking").
+func (x *acq) image(ctx context.Context, node string, img VMImage, rows []pve.ClusterResource, actor string, ours *[]string, note *string) (string, int, error) {
 	recs, err := x.r.Imports.ByKey(ctx, x.in.ServiceID, node, img.Digest)
 	if err != nil {
 		return "", 0, classify(CodeImageImportFailed, err)
@@ -152,7 +155,14 @@ func (x *acq) image(ctx context.Context, node string, img VMImage, rows []pve.Cl
 			// Its template was deleted: free the receipt (only on proof), then import again.
 			// Only its refusal (no proof) is permanent; a read that failed is tried again.
 			err := x.r.Imports.MarkTemplateGone(ctx, pvFor, rec.ID)
-			if le := (*templateupdates.LifecycleError)(nil); errors.As(err, &le) {
+			if le := (*templateupdates.LifecycleError)(nil); errors.As(err, &le) && le.Code == "template_present" && time.Since(rec.UpdatedAt) < templateSettle {
+				// A VM holds the VMID and may be the template: rows is older than the receipt, and Proxmox lists a new
+				// template's flag and pool a moment after its task ends. The next look settles it. Only an import that
+				// has just written its receipt can be in that window: later the refusal is final (the template was
+				// moved, or is out of the token's view) and fails with its text.
+				*note = clip(le.Message)
+				return "checking", 0, nil
+			} else if errors.As(err, &le) {
 				return "", 0, permanent(CodeImageImportFailed, "VM %d on %s is no template in %s, and it could not be shown to be gone: %s",
 					rec.VMID, node, pve.TemplatePool, clip(err.Error()))
 			} else if err != nil {
@@ -420,18 +430,23 @@ func (x *acq) clone(ctx context.Context, rc StageReceipt) error {
 	return x.task(ctx, up, CodeSeedCloneFailed)
 }
 
-// uploadCD configures the clone, makes the generation's secrets (committed before the upload, with the volume the CD
-// goes to: its CA is what stage 4 pins, its tokens what stages 4 and 5 send; the CA key stays in memory), and uploads
-// its CD.
+// uploadCD configures the clone, renders its CD, stores the generation's secrets (committed before the upload, with the
+// volume the CD goes to: its CA is what stage 4 pins, its tokens what stages 4 and 5 send; the CA key stays in memory),
+// and uploads the CD. What cannot be rendered or built fails before anything is stored.
 func (x *acq) uploadCD(ctx context.Context, rc StageReceipt, vm vmState) error {
 	sp := x.in.Spec
-	net0 := withNet0(vm.cfg.Str("net0"), sp.Network.Bridge, sp.Network.MTU)
 	if err := x.pveTask(ctx, CodeSeedConfigRefused, func() (pve.UPID, error) {
 		return x.capi.SetVMConfig(ctx, vm.node, rc.VMID, map[string]string{"cores": strconv.Itoa(sp.Seed.Cores),
-			"memory": strconv.Itoa(sp.Seed.MemoryMiB), "agent": "1", "onboot": "1", "protection": "1",
-			"tags": "proxcloud;pc-platform;pc-platform-" + x.in.ID, "net0": net0})
+			"memory": strconv.Itoa(sp.Seed.MemoryMiB), "agent": "1", "onboot": "1",
+			"tags": "proxcloud;pc-platform;pc-platform-" + x.in.ID, "net0": withNet0(vm.cfg.Str("net0"), sp.Network.Bridge, sp.Network.MTU)})
 	}); err != nil {
 		return err
+	}
+	// A template made by Template updates has no NIC, so Proxmox gives net0 its MAC address in the call above: the CD
+	// names the one read back. A later acquisition reads it in observe and withNet0 sends it again, so it never changes.
+	set, err := x.capi.GetVMConfig(ctx, vm.node, rc.VMID)
+	if err != nil {
+		return classify(CodeSeedConfigRefused, err)
 	}
 	if disk, size := bootDisk(vm.cfg); disk != "" && size < sp.Seed.DiskGiB {
 		if err := x.pveTask(ctx, CodeSeedConfigRefused, func() (pve.UPID, error) {
@@ -445,6 +460,17 @@ func (x *acq) uploadCD(ctx context.Context, rc StageReceipt, vm vmState) error {
 	if err != nil {
 		return err
 	}
+	prefix, _ := netip.ParsePrefix(sp.Network.Prefix)
+	files, err := SeedFiles(x.bom, RenderInput{ID: x.in.ID, SeedAddress: sp.Seed.Address, SSHKeys: sp.Seed.SSHKeys,
+		Network: RenderNetwork{Bridge: sp.Network.Bridge, Gateway: sp.Network.Gateway, Prefix: prefix.Bits(), DNS: sp.Network.DNS, MTU: sp.Network.MTU}},
+		SeedBoot{Generation: rc.Generation, Net0: set.Str("net0"), Secrets: secrets, Now: now})
+	if err != nil {
+		return permanent(CodeSeedConfigRefused, "The seed's CD could not be rendered: %s", clip(err.Error()))
+	}
+	iso, err := pve.BuildSeedISO(files.Files())
+	if err != nil {
+		return permanent(CodeSeedConfigRefused, "The seed's CD could not be built: %s", clip(err.Error()))
+	}
 	name := SeedCDName(x.in.ID, rc.Generation)
 	vol := sp.Storage.ISO + ":iso/" + name
 	if err := x.save(ctx, func(_ *Run, in *Installation, sec *Secrets) {
@@ -452,17 +478,6 @@ func (x *acq) uploadCD(ctx context.Context, rc StageReceipt, vm vmState) error {
 		sec.K3sToken, sec.BootstrapToken = secrets.K3sToken, secrets.BootstrapToken
 	}); err != nil {
 		return err
-	}
-	prefix, _ := netip.ParsePrefix(sp.Network.Prefix)
-	files, err := SeedFiles(x.bom, RenderInput{ID: x.in.ID, SeedAddress: sp.Seed.Address, SSHKeys: sp.Seed.SSHKeys,
-		Network: RenderNetwork{Bridge: sp.Network.Bridge, Gateway: sp.Network.Gateway, Prefix: prefix.Bits(), DNS: sp.Network.DNS, MTU: sp.Network.MTU}},
-		SeedBoot{Generation: rc.Generation, Net0: net0, Secrets: secrets, Now: now})
-	if err != nil {
-		return permanent(CodeSeedConfigRefused, "The seed's CD could not be rendered: %s", clip(err.Error()))
-	}
-	iso, err := pve.BuildSeedISO(files.Files())
-	if err != nil {
-		return permanent(CodeSeedConfigRefused, "The seed's CD could not be built: %s", clip(err.Error()))
 	}
 	if err := x.pveTask(ctx, CodeSeedConfigRefused, func() (pve.UPID, error) {
 		return x.capi.UploadISO(ctx, vm.node, sp.Storage.ISO, name, iso)
@@ -473,7 +488,8 @@ func (x *acq) uploadCD(ctx context.Context, rc StageReceipt, vm vmState) error {
 }
 
 // attach puts the CD in the clone's cloud-init slot (its PVE drive is dropped first: two cidata CDs would make the pick
-// arbitrary) or ide2.
+// arbitrary) or ide2, and protects the VM in the same call: Proxmox removes no drive from a protected VM, so the
+// protection comes after the drop, and a VM that has its CD is protected.
 var cdSlots = []string{"ide0", "ide1", "ide2", "ide3", "scsi1", "sata0"}
 
 func (x *acq) attach(ctx context.Context, vm vmState, vmid int, vol string) error {
@@ -492,7 +508,7 @@ func (x *acq) attach(ctx context.Context, vm vmState, vmid int, vol string) erro
 		}
 	}
 	return x.pveTask(ctx, CodeSeedConfigRefused, func() (pve.UPID, error) {
-		return x.capi.SetVMConfig(ctx, vm.node, vmid, map[string]string{slot: vol + ",media=cdrom"})
+		return x.capi.SetVMConfig(ctx, vm.node, vmid, map[string]string{slot: vol + ",media=cdrom", "protection": "1"})
 	})
 }
 
@@ -633,7 +649,8 @@ func refused(err error) bool {
 }
 
 // seedIdentity is stage 5: read the portal's service account token with the bootstrap token, store it, delete the
-// bootstrap objects with it, then detach and delete the CD. Done only when the ISO store no longer lists the CD.
+// bootstrap objects with it, then eject and delete the CD. Done only when the running seed's config no longer names
+// the CD and the ISO store no longer lists it.
 func (x *acq) seedIdentity(ctx context.Context) error {
 	st := x.in.Status.Seed
 	if st == nil || st.VMID == 0 || (x.sec.SeedKubeconfig == nil && len(x.sec.BootstrapToken) < 6) {
@@ -700,14 +717,26 @@ func (x *acq) seedIdentity(ctx context.Context) error {
 			}
 		}
 	}
-	cfg, err := x.capi.GetVMConfig(ctx, st.Node, st.VMID)
-	if err != nil {
-		return transient(CodeSeedCDNotDeleted, err)
-	}
-	for _, slot := range cdSlots {
-		if strings.Contains(cfg.Str(slot), "iso/pcplat-"+x.in.ID+"-") {
+	for ejected := false; ; ejected = true {
+		// The values in effect, not the pending ones: a task that ends OK with the eject left pending would leave the
+		// CD (CA key, tokens) readable in the guest while its file is deleted and the stage calls it gone.
+		cfg, err := x.capi.GetVMConfigCurrent(ctx, st.Node, st.VMID)
+		if err != nil {
+			return transient(CodeSeedCDNotDeleted, err)
+		}
+		held := slices.DeleteFunc(slices.Clone(cdSlots), func(slot string) bool { return !strings.Contains(cfg.Str(slot), "iso/pcplat-"+x.in.ID+"-") })
+		if len(held) == 0 {
+			break
+		}
+		if ejected {
+			return waiting(CodeSeedCDNotDeleted, "Proxmox took the eject of %s on VM %d but the running seed still has the CD: the change is pending (qm pending %d).",
+				strings.Join(held, ", "), st.VMID, st.VMID)
+		}
+		for _, slot := range held {
+			// Ejected, not removed: the seed is protected and running, and Proxmox removes no drive from a protected VM
+			// (and an IDE drive of a running one only at its next start), while it changes a CD at once.
 			if err := x.pveTask(ctx, CodeSeedCDNotDeleted, func() (pve.UPID, error) {
-				return x.capi.SetVMConfig(ctx, st.Node, st.VMID, nil, slot)
+				return x.capi.SetVMConfig(ctx, st.Node, st.VMID, map[string]string{slot: "none,media=cdrom"})
 			}); err != nil {
 				return asTransient(err)
 			}
@@ -934,10 +963,13 @@ func bootDisk(cfg pve.VMConfig) (string, int) {
 				switch s[len(s)-1] {
 				case 'T':
 					n *= 1024
+				case 'G':
 				case 'M':
 					n /= 1024
 				case 'K':
 					n /= 1 << 20
+				default: // Proxmox writes a size that is no whole KiB in bytes
+					n /= 1 << 30
 				}
 				return k, int(n)
 			}

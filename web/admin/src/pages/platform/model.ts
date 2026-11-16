@@ -295,7 +295,7 @@ const CODE_ACTION: Record<string, string> = {
   image_import_stalled: "Open Template updates to see the import, then Retry. If it keeps failing, install a newer ProxCloud release.",
   image_blocked: "This image is blocked. Install a newer ProxCloud release.",
   seed_clone_failed: "Fix the storage or the node named in the message, then Retry.",
-  seed_config_refused: "Fix the storage or the node named in the message, then Retry.",
+  seed_config_refused: "The message carries the error from Proxmox: fix the bridge, the store, the node or the token right it names, then Retry. If the message says the seed's CD could not be rendered or built, Retry will not pass: report the message.",
   seed_not_booted: "Open the seed VM's console in Proxmox. Retry builds a new seed when this one never became ready.",
   seed_api_unreachable: "Add a route from the ProxCloud host to the platform network, or correct the seed API sources. Retry writes the seed's firewall rules again first.",
   seed_tls_mismatch: "Another server answers on the seed address. Correct the seed address in the settings, then Retry.",

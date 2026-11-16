@@ -400,6 +400,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Managed services: the seed VM could not be built from a template made by template updates (second lab attempt,
+  M0).** Such a template has no network device, so Proxmox gives the seed's `net0` its MAC address when stage 3 sets
+  it; the stage rendered the seed's CD from the value it had sent, without the address, and failed
+  `seed_config_refused` ("net0 has no MAC address yet") on every Retry. It now reads the VM's config back and the CD
+  names the address the VM has; the CD is rendered and built before the generation's CA and tokens are stored, so a
+  CD that cannot be made stores nothing. Found by reading on from there, not yet seen on a lab: Proxmox removes no
+  drive from a protected VM, so the stage now protects the seed in the call that attaches the CD (after the
+  template's cloud-init drive is dropped), and stage 5 ejects the CD from the running seed instead of removing its
+  drive; a disk size Proxmox writes in bytes is no longer read as GiB. Stage 2 no longer fails
+  `image_import_failed` when an import has just finished and Proxmox does not list its template yet (template
+  updates answers `template_present`): it looks again and shows `checking` with the VM it waits for, for 5 minutes
+  after the import's last step; after that a VM that is still no template in `pc-templates` fails the stage at once
+  with the refusal that names it. Stage 5 reads the seed's config in effect after the eject: an eject Proxmox took
+  but left pending keeps the CD's file and the stage waiting (`seed_cd_not_deleted`), where the CD used to be
+  deleted and called gone. A failed run is logged at ERROR (`platform run failed`, with the stage,
+  the code and the redacted message), no longer at INFO. The guide, the in-app page and the console say what
+  `seed_config_refused` can still mean.
+
 - **Managed services: the defects of the first lab attempt (M0, a Proxmox cluster shared by two portals).** The
   provider sync now writes the isolation rules of a provider that has a managed-services installation (in any
   phase, a saved draft too) whether or not it has a project (`(*pve.Service).ReconcileProviderIsolation`, once per

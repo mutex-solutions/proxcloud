@@ -144,7 +144,7 @@ func BootstrapManifest(bootstrapToken string, expires time.Time) (string, error)
 // SeedBoot is one seed generation's first boot.
 type SeedBoot struct {
 	Generation int
-	Net0       string // the clone's net0 as PVE reports it after SetVMConfig: its MAC is what the network config matches
+	Net0       string // the clone's net0 read back from PVE after SetVMConfig: its MAC is what the network config matches
 	Secrets    SeedSecrets
 	Now        time.Time // the bootstrap token expires SeedBootstrapTTL later
 }

@@ -463,7 +463,15 @@ func (x *acq) finish(ctx context.Context, state, code, msg string) end {
 		}
 		return end{kind: endRetry}
 	}
-	x.r.Log.Info("platform run finished", "run", x.runID, "state", state, "code", code)
+	if state == RunFailed {
+		stage := "" // a run can fail before its first stage starts
+		if x.si < len(x.run.Stages) && x.run.Stages[x.si].StartedAt != nil {
+			stage = x.run.Stages[x.si].ID
+		}
+		x.r.Log.Error("platform run failed", "run", x.runID, "stage", stage, "code", code, "message", x.redact(msg))
+	} else {
+		x.r.Log.Info("platform run finished", "run", x.runID, "state", state, "code", code)
+	}
 	if state == RunFailed {
 		return end{kind: endFail, code: code}
 	}

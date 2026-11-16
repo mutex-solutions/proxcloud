@@ -1,10 +1,12 @@
 package platformlife
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -83,6 +85,10 @@ func TestSeedVMBuildsTheSeed(t *testing.T) {
 	if !slices.Equal(e.pve.iso, []string{"pcplat-" + inID + "-g1.iso"}) || len(e.pve.uploads) != 1 {
 		t.Fatalf("ISO store %v", e.pve.iso)
 	}
+	// The template has no NIC: the CD's network config names the MAC address Proxmox gave net0.
+	if !bytes.Contains(e.pve.uploads[0], []byte(`"mac_address":"bc:24:11:00:00:01"`)) {
+		t.Fatal("the CD does not name the MAC address of the VM's net0")
+	}
 	var rules []string
 	for _, r := range e.pve.rules {
 		rules = append(rules, r.Type+" "+r.Action+" "+r.Proto+" "+r.Source+" "+r.DPort)
@@ -133,6 +139,40 @@ func TestSeedVMLeaseLossAfterEachIntent(t *testing.T) {
 		if name := e.pve.vms[st.VMID].cfg["name"]; name != SeedVMName(inID, st.Generation) || !e.pve.vms[st.VMID].running ||
 			!slices.Equal(e.pve.iso, []string{SeedCDName(inID, st.Generation)}) {
 			t.Fatalf("lost at %d: VM %v, ISO %v, generation %d", n, name, e.pve.iso, st.Generation)
+		}
+		// Wherever the run stopped, the CD in the store names the MAC address the VM has.
+		net0 := fmt.Sprint(e.pve.vms[st.VMID].cfg["net0"])
+		mac := strings.ToLower(net0[len("virtio="):][:17])
+		if !bytes.Contains(e.pve.uploads[len(e.pve.uploads)-1], []byte(`"mac_address":"`+mac+`"`)) || e.pve.vms[st.VMID].cfg["protection"] != "1" {
+			t.Fatalf("lost at %d: the CD does not name %s of net0 %q, or the VM is not protected", n, mac, net0)
+		}
+	}
+}
+
+// A CD that cannot be rendered fails the stage before anything is stored: no CA, no token, no CD volume, no upload.
+// The failed run is logged as an error with its stage and code.
+func TestSeedVMRenderFailureStoresNothing(t *testing.T) {
+	e := newEnv(t, RunApply)
+	e.only(StageSeedVM)
+	e.pve.noMAC = true
+	if end := e.until(5); end != "fail:"+CodeSeedConfigRefused {
+		t.Fatalf("end %s", end)
+	}
+	_, in, sec := e.state.snapshot()
+	if st := in.Status.Seed; st.CACert != "" || st.CDVolume != "" || sec.K3sToken != "" || sec.BootstrapToken != "" || len(e.pve.uploads) != 0 {
+		t.Fatalf("stored before the render: seed %+v, uploads %d", st, len(e.pve.uploads))
+	}
+	if log := e.logs.String(); !strings.Contains(log, `level=ERROR msg="platform run failed" run=pr-1 stage=seed-vm code=seed_config_refused`) {
+		t.Fatalf("the failed run is not logged as an error: %s", log)
+	}
+}
+
+// bootDisk reads the sizes Proxmox writes: a whole number of T, G, M or K, or bytes.
+func TestBootDiskSize(t *testing.T) {
+	for val, want := range map[string]int{"local-zfs:vm-102-disk-0,discard=on,size=20G": 20, "s:d,size=3584M": 3, "s:d,size=1T": 1024,
+		"s:d,size=2361393152": 2, "s:d": 0} {
+		if disk, got := bootDisk(pve.VMConfig{"ide2": "s:vm-1-cloudinit,media=cdrom", "scsi0": val}); disk != "scsi0" || got != want {
+			t.Errorf("%s: %s %d, want scsi0 %d", val, disk, got, want)
 		}
 	}
 }
@@ -542,8 +582,9 @@ func TestSeedIdentityDoneOnlyWhenTheCDIsGone(t *testing.T) {
 		sec.SeedKubeconfig.Token != runSA || in.Status.Seed.ReadyAt == nil || in.Status.Seed.TokenSecret != SeedPortalTokenSecret {
 		t.Fatalf("stage %+v, secrets %+v", s, sec)
 	}
-	if _, attached := e.pve.vms[120].cfg["ide2"]; attached {
-		t.Fatal("the CD is still attached")
+	// The seed is protected and running: its CD is ejected (Proxmox removes no drive from a protected VM).
+	if cfg := e.pve.vms[120].cfg; cfg["ide2"] != "none,media=cdrom" || cfg["protection"] != "1" || e.pve.writeCount("POST /nodes/pve1/qemu/120/config") != 1 {
+		t.Fatalf("the CD is still attached: %v, writes %v", cfg, e.pve.writes)
 	}
 	if end := e.until(3); end != "complete" {
 		t.Fatalf("end %s", end)
@@ -697,7 +738,7 @@ func TestImageFailures(t *testing.T) {
 		end           string
 	}{
 		"mark: read failed":    {context.DeadlineExceeded, nil, "defer:retry_images"},
-		"mark: no proof":       {&templateupdates.LifecycleError{Status: 409, Code: "template_present", Message: "may still be the template"}, nil, "fail:" + CodeImageImportFailed},
+		"mark: refused":        {&templateupdates.LifecycleError{Status: 409, Code: "vm_updates_disabled", Message: "not enabled"}, nil, "fail:" + CodeImageImportFailed},
 		"enqueue: refused":     {nil, fmt.Errorf("the artifact failed verification: %w", templateupdates.ErrRefused), "fail:" + CodeImageImportFailed},
 		"enqueue: flag off":    {nil, &templateupdates.LifecycleError{Status: 409, Code: "vm_updates_disabled", Message: "not enabled"}, "fail:" + CodeImageImportFailed},
 		"enqueue: read failed": {nil, errors.New("ghcr: 503"), "defer:retry_images"},
@@ -720,6 +761,71 @@ func TestImageFailures(t *testing.T) {
 	e.mutate(func(run *Run, _ *Installation, _ *Secrets) { run.Stages[1].Deadline = &past })
 	if end := e.once(); end != "fail:"+CodeImageImportStalled {
 		t.Fatalf("stalled: %s", end)
+	}
+}
+
+// An import that has just finished: the VM list does not show its template yet (it was read before the receipt, and
+// Proxmox lists the flag and the pool a moment later), and Template updates refuses to call the template gone. The
+// stage looks again and is done; nothing is imported twice. A template that never shows ends at the stall limit.
+func TestImagesWaitsForATemplateThatIsNotListedYet(t *testing.T) {
+	cur, _ := Current()
+	e := imageEnv(t)
+	e.imports.recs = []templateupdates.Receipt{{ID: "tu-seed", Step: templateupdates.StepTemplated, VMID: 9200, UpdatedAt: time.Now(),
+		Payload: templateupdates.VMPayload{ServiceID: "svc-pve", Node: "pve1", Digest: cur.Seed.Image.Digest}}}
+	for i, n := range []string{"pve1", "pve2", "pve3"} {
+		e.imports.recs = append(e.imports.recs, templateupdates.Receipt{ID: "tu-" + n, Step: templateupdates.StepSucceeded, VMID: 9201 + i,
+			Payload: templateupdates.VMPayload{ServiceID: "svc-pve", Node: n, Digest: cur.Kubernetes.NodeImage.Digest}})
+		e.pve.templates = append(e.pve.templates, pve.ClusterResource{Type: "qemu", VMID: 9201 + i, Node: n, Template: 1, Pool: pve.TemplatePool, Name: "node"})
+	}
+	e.imports.markErr = &templateupdates.LifecycleError{Status: 409, Code: "template_present", Message: "VM 9200 on pve1 may still be this import's template"}
+	if end := e.once(); end != "defer:waiting_images" {
+		t.Fatalf("template not listed yet: %s", end)
+	}
+	if s := e.stage(StageImages); s.Code != CodeImageImportStalled || len(s.Receipt.Templates) != 3 || s.Items[0].State != "checking" ||
+		!strings.Contains(s.Items[0].Message, "VM 9200 on pve1") {
+		t.Fatalf("stage %+v %+v", s, s.Receipt)
+	}
+	e.pve.templates = append(e.pve.templates, pve.ClusterResource{Type: "qemu", VMID: 9200, Node: "pve1", Template: 1, Pool: pve.TemplatePool, Name: "seed"})
+	e.mutate(func(run *Run, _ *Installation, _ *Secrets) { run.Stages[2].State = StageDone }) // stop after stage 2
+	e.once()
+	if s := e.stage(StageImages); s.State != StageDone || s.Receipt.Templates["seed:pve1"] != 9200 || len(e.imports.enqueued) != 0 || e.imports.recs[0].TemplateGone {
+		t.Fatalf("stage %+v %+v, enqueued %d", s, s.Receipt, len(e.imports.enqueued))
+	}
+
+	// An import that wrote its receipt long ago is not in that window (its template was moved out of pc-templates): the
+	// refusal fails the stage at once, with the text that names the VM, and nothing is imported.
+	e = imageEnv(t)
+	e.imports.recs = []templateupdates.Receipt{{ID: "tu-seed", Step: templateupdates.StepTemplated, VMID: 9200, UpdatedAt: time.Now().Add(-time.Hour),
+		Payload: templateupdates.VMPayload{ServiceID: "svc-pve", Node: "pve1", Digest: cur.Seed.Image.Digest}}}
+	e.imports.markErr = &templateupdates.LifecycleError{Status: 409, Code: "template_present", Message: "VM 9200 exists outside what this provider's token can see"}
+	if end := e.once(); end != "fail:"+CodeImageImportFailed || len(e.imports.enqueued) != 0 {
+		t.Fatalf("a template that was moved: %s, enqueued %d", end, len(e.imports.enqueued))
+	}
+	if s := e.stage(StageImages); !strings.Contains(s.Message, "VM 9200 exists outside") {
+		t.Fatalf("stage %+v", s)
+	}
+}
+
+// An eject that Proxmox takes (task OK) but leaves pending on the running seed is no eject: the guest still reads the
+// CD, so its file is kept, the bootstrap token and the CD's name stay recorded, and the stage waits.
+func TestSeedIdentityWaitsWhileTheEjectIsPending(t *testing.T) {
+	e, _ := fakeSeedEnv(t, StageSeedIdentity)
+	e.pve.pendCD = true
+	if end := e.once(); end != "defer:waiting_seed_identity" {
+		t.Fatalf("eject pending: %s", end)
+	}
+	_, in, sec := e.state.snapshot()
+	if s := e.stage(StageSeedIdentity); s.Code != CodeSeedCDNotDeleted || !strings.Contains(s.Message, "pending") || len(e.pve.iso) != 1 ||
+		sec.BootstrapToken != runBoot || in.Status.Seed.CDVolume == "" {
+		t.Fatalf("stage %+v, ISO %v, cd %q", s, e.pve.iso, in.Status.Seed.CDVolume)
+	}
+	e.pve.mu.Lock() // the seed's next start applies it
+	vm := e.pve.vms[120]
+	maps.Copy(vm.cfg, vm.pending)
+	vm.pending, e.pve.pendCD = nil, false
+	e.pve.mu.Unlock()
+	if end := e.until(3); end != "complete" || len(e.pve.iso) != 0 {
+		t.Fatalf("end %s, ISO %v", end, e.pve.iso)
 	}
 }
 
