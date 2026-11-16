@@ -529,6 +529,7 @@ type fakeSeed struct {
 	extra    map[string]bool // more tokens that are the service account's (rotated ones)
 	unsynced map[string]bool // Applications ArgoCD does not sync
 	syncs    []string        // Applications a sync operation was started on
+	lastOp   map[string]any  // the operation of the last one
 	onSync   func(name string)
 	writes   []string // every request of the service account that is not a GET or an access review
 	tokens   []string // TokenRequest tokens, with ttls the seconds each was asked for
@@ -800,6 +801,7 @@ func (f *fakeSeed) object(w http.ResponseWriter, r *http.Request) {
 		if body["operation"] != nil { // ArgoCD takes the operation off the Application as it starts it
 			name := path[strings.LastIndex(path, "/")+1:]
 			f.syncs = append(f.syncs, name)
+			f.lastOp, _ = body["operation"].(map[string]any)
 			if f.onSync != nil {
 				f.onSync(name)
 			}

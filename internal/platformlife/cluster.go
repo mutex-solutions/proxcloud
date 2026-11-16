@@ -206,10 +206,10 @@ func clusterctlProviders(b *BOM, c Component) (Providers, bool) {
 }
 
 // inventory gates a clusterctl component on what its hook installed, which shows in neither sync nor health: the
-// clusterctl inventory of target must equal the BOM. While providers are missing and no operation runs, the hook has
-// to run again and only a sync runs it, so the run starts one. "" = equal. A provider at another version is permanent:
-// the hook refuses it, and provider upgrades are not part of this release.
-func (x *acq) inventory(ctx context.Context, seed, target *kamajik8s.Client, a appOf, live map[string]any, want Providers) (string, error) {
+// clusterctl inventory of target must equal the BOM. "" = equal; otherwise the hook has to run again, and only a sync
+// runs it (resync). A provider at another version is permanent: the hook refuses it, and provider upgrades are not
+// part of this release.
+func inventory(ctx context.Context, target *kamajik8s.Client, want Providers) (string, error) {
 	items, err := target.ListCRsAllNamespaces(ctx, "clusterctl.cluster.x-k8s.io", "v1alpha3", "providers", "")
 	if err != nil && !kamajik8s.NotFound(err) { // 404: clusterctl has not created its CRD yet
 		return "", classify(CodeCAPIInitFailed, err)
@@ -234,19 +234,28 @@ func (x *acq) inventory(ctx context.Context, seed, target *kamajik8s.Client, a a
 		return "", nil
 	}
 	slices.Sort(missing)
+	return "clusterctl has not installed " + strings.Join(missing, ", ") + " yet", nil
+}
+
+// resync starts the sync of an Application that will not sync by itself: ArgoCD never syncs a revision again whose
+// last operation ended Failed or Error (its retries are spent, and self-heal runs only after a success), and a
+// clusterctl hook that ended Succeeded without its providers (hook) runs again only in a new sync. Nothing while an
+// operation is requested or runs. The operation carries the Application's retry policy, so a sync that keeps failing
+// backs off instead of starting at every acquisition. "" = nothing started.
+func (x *acq) resync(ctx context.Context, seed *kamajik8s.Client, a appOf, live map[string]any, hook bool, code string) (string, error) {
 	phase := str(live, "status", "operationState", "phase")
-	if live["operation"] != nil || (phase != "Succeeded" && phase != "Failed" && phase != "Error") {
-		return "clusterctl has not installed " + strings.Join(missing, ", ") + " yet", nil
+	if live["operation"] != nil || (phase != "Failed" && phase != "Error" && (phase != "Succeeded" || !hook)) {
+		return "", nil
 	}
 	if err := x.check(ctx); err != nil {
 		return "", err
 	}
-	op := map[string]any{"initiatedBy": map[string]any{"username": ManagedBy},
+	op := map[string]any{"initiatedBy": map[string]any{"username": ManagedBy}, "retry": dig(a.obj, "spec", "syncPolicy", "retry"),
 		"sync": map[string]any{"revision": a.c.Chart.Version, "syncOptions": dig(a.obj, "spec", "syncPolicy", "syncOptions")}}
 	if _, err := seed.MergePatchCR(ctx, argoGroup, argoVersion, "applications", argoNamespace, a.name(), map[string]any{"operation": op}); err != nil {
-		return "", classify(CodeCAPIInitFailed, err)
+		return "", classify(code, err)
 	}
-	return fmt.Sprintf("its sync ended %s without %s; the run started it again", phase, strings.Join(missing, ", ")), nil
+	return "its sync ended " + phase + "; the run started it again", nil
 }
 
 // waves applies apps wave by wave on the seed's ArgoCD, each wave only once the one before is Synced and Healthy
@@ -279,17 +288,26 @@ func (x *acq) waves(ctx context.Context, seed, target *kamajik8s.Client, apps []
 				return classify(CodeComponentUnhealthy, err)
 			}
 			state, detail, ok := appState(live)
+			hook, appCode := false, CodeComponentUnhealthy
 			if want, has := clusterctlProviders(x.bom, a.c); has {
-				msg, err := x.inventory(ctx, seed, target, a, live, want)
+				msg, err := inventory(ctx, target, want)
 				if err != nil {
 					return err
 				}
 				if msg != "" {
+					hook, appCode = true, CodeCAPIInitFailed
 					ok, code, detail = false, CodeCAPIInitFailed, msg+"; "+detail
 				}
 			}
 			if !ok {
 				pending = append(pending, a.name())
+				msg, err := x.resync(ctx, seed, a, live, hook, appCode)
+				if err != nil {
+					return err
+				}
+				if msg != "" {
+					detail = msg + "; " + detail
+				}
 			}
 			items = append(items, StageItem{ID: a.name(), State: state, Message: clip(strings.TrimSuffix(detail, "; "))})
 		}
@@ -431,6 +449,14 @@ func (x *acq) cluster(ctx context.Context) error {
 	}
 	if err := seed.ApplyApplication(ctx, apps[i].obj); err != nil {
 		return classify(CodeComponentUnhealthy, err)
+	}
+	// The stage reads the cluster's own objects, not this Application; a sync of it that failed is started again.
+	if live, err := seed.GetApplication(ctx, argoNamespace, apps[i].name()); err != nil {
+		return classify(CodeComponentUnhealthy, err)
+	} else if _, _, ok := appState(live); !ok {
+		if _, err := x.resync(ctx, seed, apps[i], live, false, CodeComponentUnhealthy); err != nil {
+			return err
+		}
 	}
 	mds, err := seed.ListMachineDeployments(ctx, ClusterName, clusterSelector+",proxcloud.io/node-group")
 	if err != nil && !kamajik8s.NotFound(err) {

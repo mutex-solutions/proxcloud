@@ -358,6 +358,55 @@ func TestInventoryVersionMismatch(t *testing.T) {
 	}
 }
 
+// ArgoCD does not sync a revision again once its retries are spent, self-heal included. The run starts the sync of
+// an Application that is not Synced and Healthy and whose last operation ended Failed or Error, with the
+// Application's own retry policy; it leaves one alone that has no operation yet or whose operation still runs.
+func TestFailedSyncIsStartedAgain(t *testing.T) {
+	p := newPlatform(t, RunApply)
+	p.only(stageWorkloadPlatform)
+	const name = "pc-platform-cert-manager"
+	p.seed.unsynced[name] = true
+	status := func(phase string) {
+		st := map[string]any{"sync": map[string]any{"status": "OutOfSync"}, "health": map[string]any{"status": "Missing"}}
+		if phase != "" {
+			st["operationState"] = map[string]any{"phase": phase, "message": "one or more synchronization tasks completed unsuccessfully (retried 10 times)"}
+		}
+		p.seed.mu.Lock()
+		p.seed.objs[appsPath+name]["status"] = st
+		p.seed.mu.Unlock()
+	}
+	for _, phase := range []string{"", "Running"} {
+		if end := p.once(); end != "defer:waiting_workload_platform" || len(p.seed.syncs) != 0 {
+			t.Fatalf("phase %q: end %s, syncs %v", phase, end, p.seed.syncs)
+		}
+		status("Running")
+	}
+	status("Failed")
+	if end := p.once(); end != "defer:waiting_workload_platform" || !slices.Equal(p.seed.syncs, []string{name}) {
+		t.Fatalf("end %s, syncs %v", end, p.seed.syncs)
+	}
+	app := p.seed.obj(appsPath + name)
+	if !reflect.DeepEqual(p.seed.lastOp["retry"], dig(app, "spec", "syncPolicy", "retry")) || dig(p.seed.lastOp, "sync", "revision") != dig(app, "spec", "source", "targetRevision") {
+		t.Fatalf("operation %v", p.seed.lastOp)
+	}
+	items := p.stage(stageWorkloadPlatform).Items
+	if i := slices.IndexFunc(items, func(it StageItem) bool { return it.ID == name }); i < 0 || !strings.Contains(items[i].Message, "the run started it again") {
+		t.Fatalf("items %+v", items)
+	}
+	// The workload cluster's own Application, which stage cluster applies outside the waves.
+	p = newPlatform(t, RunApply)
+	p.seed.unsynced[ClusterName] = true
+	p.only(stageCluster)
+	p.once()
+	p.seed.mu.Lock()
+	p.seed.objs[appsPath+ClusterName]["status"] = map[string]any{"sync": map[string]any{"status": "OutOfSync"}, "operationState": map[string]any{"phase": "Error"}}
+	p.seed.mu.Unlock()
+	p.again(stageCluster)
+	if end := p.once(); !slices.Contains(p.seed.syncs, ClusterName) {
+		t.Fatalf("end %s, syncs %v: %+v", end, p.seed.syncs, p.stage(stageCluster))
+	}
+}
+
 // A failed Machine fails the stage with an item naming the machine, its VMID and Cluster API's failure message; a
 // Proxmox authentication failure has its own code.
 func TestMachineFailure(t *testing.T) {
