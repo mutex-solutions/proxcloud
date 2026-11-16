@@ -460,9 +460,10 @@ and ADR 0009, A2 and A8.
 - **No released version.** The BOM is `0.8.0-dev`. `--managed-services` needs v0.8.0, which is not
   tagged, so no published image reads `PROXCLOUD_PLATFORM_ENABLED`.
 - **`kamaji` and `kamaji-crds` are at chart version `0.0.0+latest` with no digest**, until the chart
-  mirror (PR #276, open). The Kamaji image is pinned by tag (`26.11.2-edge`); the chart is not. The
+  mirror has published them and the BOM points at it (the flow is merged, PR #276; see
+  [ci-release.md](ci-release.md), "Chart mirror"). The Kamaji image is pinned by tag (`26.11.2-edge`); the chart is not. The
   BOM validation refuses such an entry in any release that is not `-dev`, so no release can be
-  tagged before the mirror.
+  tagged before that.
 - **No upgrade between BOMs.** A release carries one BOM. An apply on an installed platform runs
   with the installed BOM, which must be the one the release carries: it repairs, applies changed
   settings and renews the seed ArgoCD's token. After a ProxCloud upgrade that changes the BOM,
