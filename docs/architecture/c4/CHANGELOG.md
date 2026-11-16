@@ -15,7 +15,7 @@ the longer kube-vip lease. The tenant pin moves with it: 0.1.12 renders tenant c
 installer already registers providers with the chart's source version, and one version of the chart per BOM keeps
 the published package list of the release to one entry.
 
-**Diagrams:** none changed.
+**Diagrams:** none changed; the row of the cluster chart in `c2-containers.md` no longer says 0.1.12 is not tagged.
 
 **Not verified:** chart 0.1.12 on a cluster. A platform installed from the previous BOM is refused
 (`bom_unsupported`): Remove and install again.
