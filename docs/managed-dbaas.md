@@ -251,6 +251,9 @@ recommendation, clamps it into the customer's ceilings and applies it through th
 patch RESIZE uses, so the operator performs its own safe rolling change. Disk rides the same
 tick: when any of the database's PVCs passes 80% full (kubelet volume-stats via the provider's
 Prometheus metrics config), the volume grows 20% (grow-only), up to `maxStorageGiB`.
+`maxCpu` and `maxMemoryGiB` are whole numbers from 1, `maxStorageGiB` from 0 (0 turns the disk leg
+off), each up to the provider's limit when it sets one; outside that the answer is a `400` such as
+`maxStorageGiB must be a whole number, at least 0` (no limit) or `… from 0 to 500`.
 
 Scale-UP only by design — automatic shrink flaps and is where databases lose caches; scaling
 down stays a deliberate customer RESIZE. Billing: the scaled-to size bills through the normal
