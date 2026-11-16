@@ -62,8 +62,9 @@ func TestKamajiSpecFromData(t *testing.T) {
 }
 
 // TestRotateNodeGroupImages pins the UPGRADE image rotation: every pool follows ITS OWN variant
-// onto the target version, a variant without a target image refuses the upgrade, and a missing
-// DEFAULT image keeps the current one instead of stamping "".
+// onto the target version, a variant without a target image refuses the upgrade, and so does a
+// version the provider does not offer, an empty version set included (it used to pass any version
+// and keep the old image under the new kubernetesVersion).
 func TestRotateNodeGroupImages(t *testing.T) {
 	d := kamaji.ClusterDefaults{
 		Versions:      map[string]string{"1.35.4": "img-plain-1354"},
@@ -90,14 +91,20 @@ func TestRotateNodeGroupImages(t *testing.T) {
 		t.Errorf("missing variant image: err = %v", err)
 	}
 
-	// No default image for the target (matrix gap) → default pools keep their current image.
+	// A version the provider does not offer is refused and no image is touched: with no version at all
+	// (how managed services registers the provider), and with other versions only.
 	before := groups[0].(map[string]any)["machineImageId"]
 	noDefault := map[string]any{"nodeGroups": []any{groups[0]}}
-	if err := rotateNodeGroupImages(noDefault, kamaji.ClusterDefaults{}, "1.37.0"); err != nil {
-		t.Fatalf("matrix gap: %v", err)
+	for _, nd := range []kamaji.ClusterDefaults{{}, {Versions: map[string]string{}}, d} {
+		if err := rotateNodeGroupImages(noDefault, nd, "1.37.0"); err == nil || !strings.Contains(err.Error(), "version is not offered by this provider") {
+			t.Fatalf("version not offered (%+v): err = %v", nd.Versions, err)
+		}
+		if err := rotateNodeGroupImages(map[string]any{}, nd, "1.37.0"); err == nil {
+			t.Fatalf("version not offered, no node group (%+v): want error", nd.Versions)
+		}
 	}
 	if img := groups[0].(map[string]any)["machineImageId"]; img != before {
-		t.Errorf("matrix gap must keep the current image, got %v", img)
+		t.Errorf("a refused upgrade must keep the current image, got %v", img)
 	}
 }
 

@@ -716,7 +716,9 @@ cluster.
 - **No node image for tenants yet.** The Kubernetes provider is registered with no versions. Publish
   a Kubernetes node image in Template updates and enter its version on the provider before tenants
   can create a cluster. Until then every cluster create is refused with a `400` that says so
-  (`this provider offers no Kubernetes version yet`), before anything is reserved or a token is made.
+  (`this provider offers no Kubernetes version yet`), before anything is reserved or a token is made,
+  and an upgrade of an existing cluster is refused the same way (`version is not offered by this
+  provider`).
 - **Tenant clusters need a default zone without DHCP** on the Proxmox provider (EVPN or VLAN). On a
   default zone with DHCP (a `simple` zone that ProxCloud created) the Check warns
   (`tenant-network`), the install still registers and publishes the Kubernetes provider, and a
