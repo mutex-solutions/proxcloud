@@ -4,7 +4,7 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
-## 2026-11-16: PR 24 (P3): the BOM and stage 40 take the third-party charts from the chart mirror
+## 2026-11-16: PR #282 (P3): the BOM and stage 40 take the third-party charts from the chart mirror
 
 **What changed:** which registries the platform's clusters reach for charts. The BOM
 (`deploy/platform/platform-bom.yaml`) names `ghcr.io/mutex-solutions/charts-mirror` as the source of all
