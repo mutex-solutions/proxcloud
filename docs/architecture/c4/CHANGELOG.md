@@ -21,8 +21,8 @@ that by rule one workflow writes, and in which that workflow does not push over 
 ArgoCD one OCI registry that serves what CI checked. The rule is the script's: GHCR moves a tag on push,
 and a tag push runs the workflow file of the tagged commit, so who can publish is decided by repository
 settings (owner actions in `docs/ci-release.md`, "Limits of the gate"). The BOM switches in a later PR,
-because the packages exist only after the workflow has run on a tag; that PR also moves the two stage-40
-installer templates that `TestBOMMatchesStage40` ties to the BOM.
+because the packages exist only after the workflow has run on a tag; that PR also moves the installer
+templates and the tests tied to the BOM (listed in `docs/ci-release.md`, "Order of use").
 
 **Not verified:** any push; the publish job has only run against a fake `helm` in unit tests. The dry
 run ran against the real registries. The owner settings were not checked.

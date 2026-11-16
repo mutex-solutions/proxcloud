@@ -215,7 +215,7 @@ the same charts, versions and digests, and no chart the BOM does not use.
 |---|---|---|
 | `https://` repository | `helm pull` of the exact version; the sha256 of the `.tgz` must equal the pinned index digest. | The downloaded archive, unchanged. |
 | OCI repository | `helm pull` by the pinned manifest digest. | The pulled archive, unchanged. |
-| Upstream git tag (`kamaji`, `kamaji-crds`) | `git fetch` of the tag, which must still point at the pinned commit; no symlink in the chart directory; the chart's dependencies must be exactly the one the manifest pins by sha256, or none. | `helm package --version --app-version` of the chart directory, after `LICENSE` and `NOTICE` of the repository root were copied into it and one paragraph was added to `NOTICE`. |
+| Upstream git tag (`kamaji`, `kamaji-crds`) | `git fetch` of the tag, which must still point at the pinned commit; no symlink in the chart directory; the chart's dependencies must be exactly the one the manifest pins by sha256, or none. | `helm package --version --app-version` of the chart directory, after `LICENSE` and `NOTICE` of the repository root were copied into it, one paragraph was added to `NOTICE` and one annotation to `Chart.yaml`. |
 
 In all three cases the name and version inside the archive must be those of the
 manifest. Fetching is anonymous: those `helm` calls get an empty registry
@@ -237,23 +237,34 @@ Difference between a mirrored Kamaji chart and `charts/<chart>` of the upstream
 commit, all of it:
 
 - `Chart.yaml`: `version` and `appVersion` are `26.11.2-edge` (upstream:
-  `0.0.0+latest` and `latest`), and `helm package` rewrites the file (key order,
-  no comments).
-- `LICENSE`: added, a copy of the `LICENSE` at the root of the upstream
-  repository at that commit. The chart directories upstream hold none.
+  `0.0.0+latest` and `latest`); the annotation `charts-mirror/changes` is
+  added (`Modified by oci://ghcr.io/mutex-solutions/charts-mirror: version set
+  to 26.11.2-edge and appVersion set to 26.11.2-edge; see NOTICE`); and
+  `helm package` rewrites the file (key order, no comments, long lines
+  folded). Upstream's annotations are kept.
+- `LICENSE`: added, a byte-for-byte copy of the `LICENSE` at the root of the
+  upstream repository at that commit. The chart directories upstream hold
+  none.
 - `NOTICE`: added, the `NOTICE` at the root of the upstream repository at that
   commit, followed by one paragraph of ours that names the upstream
   repository, tag, commit and directory and lists these changes. The paragraph
   has no date, so it does not change the `content` digest between runs.
-- `kamaji` only: `charts/kamaji-etcd-0.15.0.tgz`, the dependency, as its
-  publisher's unchanged archive (upstream's own package holds it too).
+- `kamaji` only: `charts/kamaji-etcd/`, the dependency: the files of its
+  publisher's 0.15.0 archive, unpacked by `helm package`, unchanged.
+- Not included: `.helmignore`, `Makefile` and `README.md.gotmpl`, which the
+  chart's own `.helmignore` excludes from any package.
 
 The script fails when the repository has no `LICENSE`, when the chart directory
-already holds a `LICENSE` or `NOTICE` (it does not overwrite upstream's), or
-when the packaged archive lacks either file. Checked on 2026-11-16 against
-commit `31fed7a654b3`: the root has both files (`LICENSE` 11344 bytes, `NOTICE`
-913 bytes), neither chart directory has one, and both packaged archives hold
-`LICENSE` byte-equal to upstream's and a `NOTICE` that starts with upstream's.
+already holds a `LICENSE` or `NOTICE` (it does not overwrite upstream's), when
+`Chart.yaml` does not have exactly one `annotations:` block or already has
+that annotation, or when the packaged archive lacks either file or the
+annotation. Checked on 2026-11-16 against commit `31fed7a654b3` with Helm
+3.21.4: the root has both files (`LICENSE` 11344 bytes, `NOTICE` 913 bytes),
+neither chart directory has one, and both packaged archives hold `LICENSE`
+byte-equal to upstream's and a `NOTICE` that starts with upstream's 913 bytes.
+`diff -r` of each upstream chart directory against the unpacked archive shows
+exactly the differences listed above, and `charts/kamaji-etcd/` equals the
+unpacked publisher archive (sha256 `b8e88d5f...f209`) file for file.
 
 `helm package` is not byte-reproducible: it stamps the current time on every
 file, so two runs give archives with different sha256 (measured with Helm
@@ -270,8 +281,17 @@ first push:
 
 - The same files: the chart is skipped.
 - Other files: the run fails.
-- A definite "not found" (`not found`, `name unknown`, `manifest unknown`, and
-  no refusal in the same answer): the version is absent and is pushed.
+- A definite "not found": the version is absent and is pushed. That is one
+  answer only, as the last line of Helm's output, for exactly this chart and
+  version:
+  `Error: failed to perform "FetchReference" on source: ghcr.io/mutex-solutions/charts-mirror/<chart>:<version>: not found`.
+  Helm 3.21.4, the release the workflow pins, prints this for a missing
+  version and for a missing repository (measured anonymously on 2026-11-16:
+  a missing version on ghcr.io and quay.io, a missing repository on
+  registry.k8s.io, public.ecr.aws and mcr.microsoft.com). The words "not
+  found" elsewhere in an answer do not count: a 404 of the token endpoint, a
+  missing credential helper, a layer that cannot be read and a proxy error
+  all contain them.
 - With `--push`, anything else fails the run before the first push. That
   includes `denied`, `unauthorized`, 401 and 403: GHCR answers `denied` for a
   package that does not exist (anonymously; measured) and, as far as we know,
@@ -304,16 +324,44 @@ Order of use:
    `ghcr.io/mutex-solutions/charts-mirror` with the versions of the manifest
    and the manifest digests of the run (the job summary and the
    `charts-mirror-digests-<sha>` artifact, `charts-mirror.json`). `bom-verify`
-   checks them like our own OCI charts; it needed no change. The same pull
-   request must change what the Go tests tie to the BOM, or `test.yml` fails:
+   checks them like our own OCI charts; the script `bom_verify.py` needs no
+   change, one of its tests does. The same pull request must change what the
+   tests tie to the BOM, or `test.yml` and `bom-verify.yml` fail. Measured on
+   2026-11-16 in a scratch copy with all nine third-party charts switched
+   (repo, the two Kamaji versions, a placeholder digest): three tests of
+   `go test ./internal/platformlife` and one Python test fail, and no other
+   package of `go test ./...`:
    - `TestBOMMatchesStage40` (`internal/platformlife/bom_test.go`) requires
      `spec.chart` of `installer/playbooks/templates/argocd-helmchart.yml.j2`
      to be `oci://<BOM repo>/argo-cd`, and `repoURL` of the cert-manager
      Application in `installer/playbooks/templates/apps-operators.yml.j2` to
-     be the BOM repo. Both templates name the upstream repositories today.
-     Measured on 2026-11-16: with only the BOM's `argo-cd` and `cert-manager`
-     switched, that test fails on exactly these two fields. The alternative is
-     to leave the seed's `argo-cd` and `cert-manager` on upstream in the BOM.
+     be the BOM repo. Both templates name the upstream repositories today, so
+     the test fails on exactly these two fields. The alternative is to leave
+     the seed's `argo-cd` and `cert-manager` on upstream in the BOM.
+   - `TestValidate` in the same file, two cases. "a release keeps no pending
+     digest and no 0.0.0+ version" expects the error
+     `workload/kamaji.version: 0.0.0+latest is allowed only in a -dev release`
+     from the repository BOM, which then holds no `0.0.0+` version. "pending
+     on a third-party chart" sets `digest: pending` on `cilium` and expects a
+     refusal; it is accepted, for the reason in the next item.
+   - `platformlife.Validate` (`internal/platformlife/bom.go`, `ownRepo`)
+     allows `digest: pending` in a `-dev` BOM for every chart whose repo
+     starts with `ghcr.io/mutex-solutions/`. That includes
+     `ghcr.io/mutex-solutions/charts-mirror`, so a mirror chart, which is
+     third-party content, could then be `pending`; only the release gate
+     still refuses it. The follow-up must either exclude `charts-mirror` from
+     that prefix rule (then the test case above passes unchanged) or accept
+     this and change the test case. Not decided; excluding it keeps today's
+     rule for third-party charts.
+   - `TestRenderGolden` (`internal/platformlife/render_test.go`):
+     `testdata/render-seed-argocd.golden.yaml` changes. Regenerate it with
+     `-update` and review the diff.
+   - `test_the_repository_bom_parses`
+     (`.github/scripts/tests/test_bom_verify.py`) requires the repository BOM
+     to hold all three kinds of pin, `oci`, `index` and `url`. With every
+     chart on OCI no `index` pin is left. `bom-verify.yml` runs that test on
+     every pull request that touches `deploy/platform/**`. Relax it to a
+     subset check, or keep one `https://` chart.
    - For cert-manager the switch turns the stage-40 Application from an
      `https://` Helm repository into an OCI one (`repoURL` without a scheme).
      Stage 40 runs on the installer's management cluster, so that cluster then
@@ -327,13 +375,19 @@ Order of use:
      comments in `installer/playbooks/group_vars/all/versions.yml`.
 5. The release can then drop `-dev`.
 
-A run that fails after at least one chart was verified still writes
-`charts-mirror.md` and `charts-mirror.json`, marked incomplete
-(`"complete": false`, the error, and per chart the result and the digest the
-run got), and the job puts that table in its summary and in the artifact. A
-chart whose push was started but not confirmed has the result "push attempted,
-not confirmed" and no digest there; its digest, if the push reached the
-registry, is in the error text or in the next run. The run can be repeated
+The script writes `charts-mirror.md` and `charts-mirror.json` while it runs:
+after every verified chart, before every push and after it. Until the run has
+finished they are marked incomplete (`"complete": false`, an error text, and
+per chart the result and the digest the run got). A run that fails after at
+least one chart was verified, or that is killed (job timeout, cancel), so
+leaves that record, and the job puts the table in its summary and in the
+artifact. A chart whose push was started but not confirmed has the result
+"push attempted, not confirmed" and no digest there; its digest, if the push
+reached the registry, is in the error text, in the step log or in the next
+run. When no record exists at all the summary says so and does not claim that
+nothing was published. Tested with an exception raised inside a push (unit
+test) and with `SIGKILL` of a local dry run after three verified charts; a
+kill during a real push, and on a runner, was not tried. The run can be repeated
 (re-run the job, or a next tag): what is served with the same content is
 skipped and its digest is printed again.
 
@@ -413,10 +467,12 @@ Open, for the owner to decide:
   table is enough, or whether these four should be repackaged with a `LICENSE`
   like the Kamaji charts (and then pinned by the mirror's digest only), is not
   decided.
-- Section 4(b) asks that a modified file carries a notice of the change. The
-  one modified file is `Chart.yaml`, which `helm package` rewrites without
-  comments; the change is stated in the chart's `NOTICE`, in the manifest and
-  here, not inside `Chart.yaml`.
+
+Section 4(b) asks that a modified file carries a notice of the change. The one
+modified file is `Chart.yaml`. `helm package` drops comments and keeps
+annotations, so the notice is the annotation `charts-mirror/changes` in that
+file; the chart's `NOTICE`, the manifest and this document state the change
+too.
 
 This is not legal advice.
 
@@ -436,9 +492,11 @@ Not verified:
 - That GHCR never answers "not found" for a version it serves but the token
   may not read. In that case the script would push; whether GHCR then accepts
   the push is not known.
-- The exact text Helm prints for a missing version. The patterns were taken
-  from Helm's and the registry's error names, not from a run against a mirror
-  package that exists.
+- Helm's answer for a missing version of a mirror package that exists, with
+  the workflow's token. The accepted line was measured anonymously against
+  other public packages (see above), not against the mirror, which has no
+  package yet. If GHCR or a later Helm release words it differently, the
+  publish run fails before the first push.
 - The owner settings under [limits of the gate](#limits-of-the-gate), and the
   statement there that package access is per repository.
 - Signatures and provenance of the upstream charts and of the Kamaji source.
