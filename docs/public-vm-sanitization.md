@@ -132,12 +132,16 @@ The parent must stream only the fixed verified final QCOW2 bytes to a **private*
 
 ## Known issue: stale orphan-file inode in Ubuntu 26.04 images published before the fix
 
-**Defect in published images.** Every Ubuntu 26.04 image exported before this fix (the six tags of `proxcloud-vm-ubuntu-2604` and `proxcloud-vm-ubuntu-2604-k8s` listed below) has an ext4 superblock that names inode 12 as the orphan file (`s_orphan_file_inum = 12`) while the `orphan_file` feature is off. Inode 12 is free in the image, so the first boot gives it to an ordinary file. Linux 6.16 and newer (Ubuntu 26.04 runs 7.0) refuse to look up that inode after the next reboot: `EXT4-fs error ... ext4_lookup ... EFSCORRUPTED`, and a root mounted `errors=remount-ro` goes read-only. Measured on a lab seed VM, where the file was `/var/lib/systemd/random-seed`. The two published Ubuntu 24.04 images are not affected (their source filesystem never had the feature). No Debian image is published.
+**Defect in published images.** Every Ubuntu 26.04 image exported before this fix (the ten tags of `proxcloud-vm-ubuntu-2604` and `proxcloud-vm-ubuntu-2604-k8s` listed below) has an ext4 superblock that names inode 12 as the orphan file (`s_orphan_file_inum = 12`) while the `orphan_file` feature is off. Inode 12 is free in the image, so the first boot gives it to an ordinary file. Linux 6.16 and newer (Ubuntu 26.04 runs 7.0) refuse to look up that inode after the next reboot: `EXT4-fs error ... ext4_lookup ... EFSCORRUPTED`, and a root mounted `errors=remount-ro` goes read-only. Measured on a lab seed VM, where the file was `/var/lib/systemd/random-seed`. The two published Ubuntu 24.04 images are not affected (their source filesystem never had the feature). No Debian image is published.
 
-Measured on the root partition of the OS image and of the 1.35.10 node image that the lab had imported. `/boot` of the OS image (partition 13) goes through the same steps and is expected to be affected, but was not read. The Kubernetes node images have one ext4 partition and no `/boot`. The other four tags were not read; they come from the same source image and the same sanitizer.
+First measured on the root partition of the OS image and of the 1.35.10 node image that the lab had imported. All ten tags were then read from the registry (anonymous range reads of the disk layer, 2026-11-16): the root partition of each, and `/boot` (partition 13) of the three OS images, have the feature off and the field at 12. The Kubernetes node images have one ext4 partition and no `/boot`. The first four tags of the table were published before the export workflow existed and are not rows of the [published images](<vm-artifact-publishing.md#published-images>) table.
 
 | Affected tag | Digest |
 | --- | --- |
+| `ubuntu-2604-os-20261111072619-46e0dc08bc2b` | `proxcloud-vm-ubuntu-2604@sha256:5d3a865bae99f5b6c3f3e512ba42a825235c76ef0be8f20739d5fdce77da6371` |
+| `ubuntu-2604-k8s-1.35.10-20261112032843-8a2a737b331b` | `proxcloud-vm-ubuntu-2604-k8s@sha256:16e9fa7bb0e78a029d85f2958a29976b793e4ce0b889ccb05237163826762e8a` |
+| `ubuntu-2604-k8s-1.36.6-20261113183613-c0e719d8be73` | `proxcloud-vm-ubuntu-2604-k8s@sha256:e857fdac0ecf69d1e6b2ec6a60d2f3e23a837a89875fb9d0371679fbde632f02` |
+| `ubuntu-2604-k8s-1.37.2-20261113205440-c50ca9e56e78` | `proxcloud-vm-ubuntu-2604-k8s@sha256:1420befe5aefd7ea6821fda6e593124e6122558f80e9afb09daed7ac7850bd0b` |
 | `ubuntu-2604-os-20261114160835-948be2705e12` | `proxcloud-vm-ubuntu-2604@sha256:85a5f23601b7df941cd1f638c972e3c64a7cc939ddcbd59a1732c52376653ad4` |
 | `ubuntu-2604-os-20261115023741-49992b8b28b2` | `proxcloud-vm-ubuntu-2604@sha256:babd2a90dfdf4a8f62335e86efa06f82316126bb08a7f494d9869343055c5b97` |
 | `ubuntu-2604-k8s-1.35.10-20261114142123-3593f6f0f889` | `proxcloud-vm-ubuntu-2604-k8s@sha256:6b3af37d649f48b3b80e4f9317116187ebfa2842a0919958dff67eb9ac098b40` |
@@ -145,13 +149,26 @@ Measured on the root partition of the OS image and of the 1.35.10 node image tha
 | `ubuntu-2604-k8s-1.37.2-20261114113857-f931a4ada3fb` | `proxcloud-vm-ubuntu-2604-k8s@sha256:8eecb3eadc0d472056bf38e805eeb639dacb7d79ed51e91326079ffd7bcf9d72` |
 | `ubuntu-2604-k8s-1.37.2-20261114171227-948be2705e12` | `proxcloud-vm-ubuntu-2604-k8s@sha256:1317d15301ae81ac1a49b9d450a55b68da396ea1b0165784a3bef928364171c9` |
 
-An export run from a commit without this fix is affected too, whatever its date. `deploy/platform/platform-bom.yaml` still pins two of these (`kubernetes.nodeImage` and `seed.image`): the re-export and the re-pin must land before `0.8.0` is tagged.
+An export run from a commit without this fix is affected too, whatever its date. The ten tags are still in the registry: nothing was deleted, so a portal still lists them.
+
+**Fixed images.** The four images were exported again with the fix:
+
+| Fixed tag (exported 2026-11-16 from commit `72f0eaa`) | Digest |
+| --- | --- |
+| `ubuntu-2604-os-20261116170652-72f0eaa3d0d4` | `proxcloud-vm-ubuntu-2604@sha256:d598846a2422cc84b9334972493a26f3fa62144e0324a062f306db8d5d6ea8db` |
+| `ubuntu-2604-k8s-1.35.10-20261116181221-72f0eaa3d0d4` | `proxcloud-vm-ubuntu-2604-k8s@sha256:62de43787103a74e433203fbbf9bd85806011e673371591397bd30bedda03ea9` |
+| `ubuntu-2604-k8s-1.36.6-20261116194043-72f0eaa3d0d4` | `proxcloud-vm-ubuntu-2604-k8s@sha256:53740d320b09de54fc3bae4a4ed68068a3ca9c7a45cf97e632dc771f5a3d738a` |
+| `ubuntu-2604-k8s-1.37.2-20261116210716-72f0eaa3d0d4` | `proxcloud-vm-ubuntu-2604-k8s@sha256:bfed11a6831cff9e1dfeab20664796ff1ea73cf8ca5b3baa2153d6907e956210` |
+
+On each published disk every ext4 partition was read as a raw file: `orphan_file` off, `s_orphan_file_inum` 0, `e2fsck -fn` clean, inode 12 free. `deploy/platform/platform-bom.yaml` pins the first two (`seed.image` and `kubernetes.nodeImage`). No VM was booted from the published images outside the export's own cold boot of two clones.
+
+**What the operator of an existing portal does.** For each Ubuntu 26.04 template in use: import the fixed tag, let its smoke test pass, publish it, then withdraw every affected digest that was imported, so no new VM is cloned from one ([template-updates.md](template-updates.md#known-issue-ubuntu-2604-images-exported-before-the-orphan-file-fix)). A withdraw does not change VMs that already exist: test and repair those as described there.
 
 Cause: step 9 removed only the journal. e2fsck (1.47.0 in the tool image; 1.47.2 behaves the same) then clears the `orphan_file` feature bit because it cannot exist without a journal, frees the inode, and leaves the superblock field. `e2fsck -fn` reports nothing while inode 12 is free. The sanitizer now removes `orphan_file` in the same `tune2fs` call as the journal, which zeroes the field, and exported images ship without the feature, as they already did.
 
 Gate (`vm_sanitize.ext4_clean`): on every ext4 partition, unmounted, the superblock must not name an orphan-file inode without the feature (4 bytes at superblock offset 0x280, feature bit 0x1000 of `s_feature_compat`), and `e2fsck -fn` must be clean. It runs in the sanitize stage after the journals are restored, and again in the independent read-only postscan of the final export (`postscan_probe.check_ext4`, evidence key `ext4_orphan_file_inum_consistent_fsck_clean`), before cold boot, bundle and publication. The tool image smoke test repeats the journal steps on a filesystem with `orphan_file`.
 
-How to test a guest and repair a disk: [template-updates.md](template-updates.md#known-issue-ubuntu-2604-images-exported-before-the-orphan-file-fix). New images exist only after the export workflow has run again; until then the published Ubuntu 26.04 tags stay affected. A VM that has logged the error must not be rebooted before the repair.
+How to test a guest and repair a disk: [template-updates.md](template-updates.md#known-issue-ubuntu-2604-images-exported-before-the-orphan-file-fix). A VM that has logged the error must not be rebooted before the repair.
 
 ## Honest limitations and outstanding acceptance
 

@@ -816,8 +816,21 @@ in place and exited 4 (`UNEXPECTED INCONSISTENCY; RUN fsck MANUALLY`); on Ubuntu
 stops the boot in the initramfs shell. The offline repair below still applies after that, but the file that
 was in inode 12 is gone. Not measured on a real VM, and the image's fstab was not read.
 
-**Templates: do not repair in place.** Do not publish an affected template to tenants, and replace it by
-importing the re-exported image once one is published. A repair of the template disk was not tested, the
+**Templates: replace, do not repair in place.** The fixed images are published (exported 2026-11-16):
+`ubuntu-2604-os-20261116170652-72f0eaa3d0d4` in `proxcloud-vm-ubuntu-2604`, and `ubuntu-2604-k8s-1.35.10-20261116181221-72f0eaa3d0d4`,
+`ubuntu-2604-k8s-1.36.6-20261116194043-72f0eaa3d0d4` and
+`ubuntu-2604-k8s-1.37.2-20261116210716-72f0eaa3d0d4` in `proxcloud-vm-ubuntu-2604-k8s`
+(digests: the same section of public-vm-sanitization.md). Do not publish an affected template to tenants.
+For each affected template:
+
+1. Import the fixed tag and let its smoke test pass.
+2. Publish it. An OS template becomes what new servers get; for a Kubernetes node image put the version-map
+   line the row shows on the Kubernetes provider.
+3. Withdraw every affected digest you had imported (§4): it leaves the catalog on every provider and can
+   not be imported again. The template VM is kept; remove it yourself when no linked clone needs it.
+
+A withdraw changes no existing VM: every server and node cloned from an affected template still needs the
+test and the repair below. A repair of the template disk was not tested, the
 partition device nodes of a template zvol did not exist on the lab host, and a linked clone is made from the
 template's base snapshot, which a repair of the live disk does not change (PVE behaviour, not verified here).
 Until the template is replaced, repair each VM made from it before its second boot.

@@ -419,9 +419,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   seed VM). The export sanitizer removed only the journal and left e2fsck to drop the feature, which keeps the
   field; it now removes `orphan_file` with the journal (`images/vm_sanitize.py`). The sanitize stage and the
   read-only postscan of the final export refuse any ext4 partition with such a superblock or with an unclean
-  `e2fsck -fn`. The six published tags (listed in `docs/public-vm-sanitization.md`) stay affected, and
-  `deploy/platform/platform-bom.yaml` still pins two of them as seed and Kubernetes node image: the re-export and
-  the re-pin must land before `0.8.0` is tagged. Ubuntu 24.04 images are not affected. A VM that has logged the
+  `e2fsck -fn`. The ten tags published before the fix (listed in `docs/public-vm-sanitization.md`) stay in the
+  registry and stay affected. The four images were exported again on 2026-11-16 from commit `72f0eaa`:
+  `ubuntu-2604-os-20261116170652-72f0eaa3d0d4`,
+  `ubuntu-2604-k8s-1.35.10-20261116181221-72f0eaa3d0d4`,
+  `ubuntu-2604-k8s-1.36.6-20261116194043-72f0eaa3d0d4` and
+  `ubuntu-2604-k8s-1.37.2-20261116210716-72f0eaa3d0d4`; on each published disk the field is 0 and
+  `e2fsck -fn` is clean. `deploy/platform/platform-bom.yaml` now pins the first two as seed and Kubernetes node
+  image. On an existing portal: import the fixed tag, publish it, then withdraw the affected digests; VMs already
+  cloned from an affected template still need the test and repair. A managed-services platform installed from
+  the earlier BOM runs on affected images and is not upgraded by this one (`bom_unsupported`): repair its VMs,
+  or remove it and install again. Ubuntu 24.04 images are not affected. A VM that has logged the
   error must not be rebooted: its boot-time `e2fsck -p` can clear the file in inode 12 and stop in the initramfs
   (measured on a scratch image only); shut it down and repair it offline. Test and repair:
   `docs/template-updates.md`.
@@ -463,10 +471,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   break-glass kubeconfig outlives one. Kubernetes node images of Ubuntu 26.04 are built with
   `kernel.apparmor_restrict_unprivileged_unconfined = 0`: with Ubuntu's default a container's processes cannot
   signal each other on kernels from 7.0.0-42 (Launchpad 2172640) and no PostgreSQL database comes up; the
-  export's cold-boot check refuses a Kubernetes image without it. **The BOM still names the node image built
-  before this change**: a new one must be built, published and shown on a lab before a BOM names it. Not
-  changed: the seed image, and anything about the seed's filesystem error after a reboot, whose cause is not
-  known.
+  export's cold-boot check refuses a Kubernetes image without it. The node images with the setting are published
+  (`ubuntu-2604-k8s-1.35.10-20261116181221-72f0eaa3d0d4`, and the 1.36.6 and 1.37.2 images of the same day), and the
+  BOM names the 1.35.10 one; the file was read from each published disk, and no platform was installed from
+  them on a lab yet. The seed image keeps Ubuntu's default for this setting. The seed's filesystem error after
+  a reboot is the orphan-file defect of the entry above.
 
 - **Managed services: a seed that restarts no longer ends the run, and what the first finished lab run found**
   (M0, attempt 5). The seed's k3s restarted under the disk load of stage 7's clones; for some seconds its API
