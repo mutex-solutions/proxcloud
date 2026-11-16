@@ -46,6 +46,17 @@ published digest), then imported as a **new** template VM in pool `pc-templates`
 `pc-ghcr-<os>-…`. Existing templates are never changed or removed: remove old ones yourself when no
 longer needed.
 
+## Known issue: Ubuntu 26.04 images exported before the fix
+
+The first Ubuntu 26.04 OS and Kubernetes node images have a filesystem defect: the root filesystem of a VM
+made from one can become read-only at a reboot. The affected versions are listed by digest in
+`docs/public-vm-sanitization.md` of the repository. Ubuntu 24.04 images are not affected.
+
+- Do not publish such a template to tenants. Import the re-exported image once it is listed here.
+- A VM already made from one: test and repair it as described in `docs/template-updates.md` of the
+  repository (section *Known issue*).
+- Do not reboot a VM that already shows the ext4 error or a read-only root: shut it down and repair it first.
+
 ## Smoke test, publish, withdraw
 
 The **Imported templates** tab shows each imported template's state: *Staged*, *Smoke running*,

@@ -46,10 +46,21 @@ g.launch()
 assert g.list_devices() == ["/dev/sda", "/dev/sdb"]
 # The appliance tools the sanitizer relies on (images/vm_sanitize.py): mkfs, the debug shell tune2fs, e2fsck.
 # The debug shell sees the kernel device names, which are not always in drive order: address by label.
-g.mkfs("ext4", "/dev/sdb", label="smoke")
-g.debug("sh", ["/usr/sbin/tune2fs -O ^has_journal LABEL=smoke"])
-assert "has_journal" not in g.tune2fs_l("/dev/sdb")["Filesystem features"].split()
+# The filesystem carries orphan_file, as Ubuntu 26.04 and Debian 13 do: the sanitizer drops it with the journal,
+# and the superblock must not keep naming its inode (s_orphan_file_inum, 4 bytes at superblock offset 0x280).
+def orphan():
+    block = g.pread_device("/dev/sdb", 1024, 1024)
+    return int.from_bytes(block[0x5c:0x60], "little") & 0x1000, int.from_bytes(block[0x280:0x284], "little")
+g.mkfs("ext4", "/dev/sdb", label="smoke", features="orphan_file")
+assert orphan()[0] and orphan()[1]
+g.debug("sh", ["/usr/sbin/tune2fs -O ^orphan_file,^has_journal LABEL=smoke"])
+features = g.tune2fs_l("/dev/sdb")["Filesystem features"].split()
+assert "has_journal" not in features and "orphan_file" not in features
 g.e2fsck("/dev/sdb", correct=True)
+g.debug("sh", ["/usr/sbin/tune2fs -O has_journal LABEL=smoke"])
+g.e2fsck("/dev/sdb", correct=True)
+assert orphan() == (0, 0), orphan()
+assert g.debug("sh", ["/usr/sbin/e2fsck -fn LABEL=smoke >/dev/null 2>&1 && echo ext4-clean"]).strip() == "ext4-clean"
 g.lvs()
 g.shutdown()
 g.close()
