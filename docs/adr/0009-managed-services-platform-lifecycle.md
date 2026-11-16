@@ -293,10 +293,8 @@ change and at the release tag, and fails on any difference. A version that is no
 whose release ends in `-dev`; the release gate on the tag refuses both. Our packages
 `proxmox-kamaji-cluster`, `database-cluster`, `proxcloud-platform` and
 `proxcloud-clusterctl` are, like everything public, built and published by GitHub Actions
-only. They will be made public on GHCR, an owner step before the first lab run (M0): today
-`proxcloud-platform` and `proxcloud-clusterctl` do not exist yet, and the other two are
-private. Once they are public, pulls need no credentials; until then they need the
-repository credential (`deploy/mgmt-cluster/repo-credential.yaml`). This replaces "each
+only. Since 2026-11-16 all four are published and public on GHCR (`bom-verify` reads them
+anonymously), so pulls need no credentials. This replaces "each
 chart pinned by OCI digest" and qualifies "never a range or `latest`" for development
 BOMs.
 

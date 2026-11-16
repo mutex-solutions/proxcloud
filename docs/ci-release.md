@@ -208,7 +208,10 @@ packages are public, and the BOM takes every third-party chart from the mirror.
 
 `deploy/platform/charts-mirror.yaml` lists every third-party chart of the BOM
 with its source. A test (`test_charts_mirror.py`) keeps it equal to the BOM:
-the same charts, versions and digests, and no chart the BOM does not use.
+the same charts and versions, and no chart the BOM does not use. The manifest's
+digests are those of the upstream sources; the BOM holds the mirror's manifest
+digests, which the test does not compare (`bom-verify` checks them against the
+registry).
 [`charts_mirror.py`](../.github/scripts/charts_mirror.py) (standard library,
 `helm` and `git`) handles each entry by its kind:
 
