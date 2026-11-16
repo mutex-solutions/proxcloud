@@ -412,6 +412,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Managed services: what the review of the L7, L11 and seed-reboot fixes found.** A Kubernetes node template that
+  still has its Proxmox cloud-init drive on another slot than `ide0` (imported before the drive moved) booted and
+  passed its smoke test, so it could be published to tenant clusters, whose machines then never join: the smoke test
+  now fails it `template_mismatch` before it clones, with the `qm set <vmid> --delete <slot>` command; a version
+  already published from such a template stays published and the template must be corrected by hand. The check row
+  `tenant-network` reads the provider's default zone in Proxmox instead of its configured kind (a `simple` zone made
+  without DHCP warned, a live zone with DHCP under another kind read `ok`), no longer says every create is refused,
+  and names the provider with shared workers, which is not affected. An `UPGRADE` of a tenant cluster on a provider
+  with no version is refused (`version is not offered by this provider`); it passed any next-minor version and kept
+  the old node image. A seed credential rotation that answered `502` after the new credential was stored writes its
+  `ROTATE_CREDENTIAL` entry with outcome `FAILURE`. `live.error` names the guide's section by its title, "When the
+  seed does not answer". A negative autoscale storage ceiling answers `maxStorageGiB must be a whole number, at least
+  0` where it said `0..0`. Docs: the AppArmor sysctl of Ubuntu 26.04 node images is cited to containerd issue 14485
+  and pull request 14487 (merged to main on 2026-11-16, in no release yet, 2.3 backport 14590), Launchpad 2172640
+  stays the reference for the symptom only, and the kernel change is said to be intentional; the recovery section
+  says that a failed apply sets the installation to `failed` and hides the seed's live read until a Retry passes;
+  the link to the smoke test section resolves. Unit-tested; nothing of it was run on a lab.
+
 - **Managed services: findings of the first end-to-end, credential and seed-reboot lab checks** (L7, L11, L10).
   A node template without a Proxmox cloud-init drive, which is what stage 7 tells an operator to make of a template
   with the drive on another slot than `ide0`, could never pass its smoke test (`cloudinit_failed`, cloud-init

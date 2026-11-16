@@ -19,6 +19,25 @@ the published package list of the release to one entry.
 
 **Not verified:** chart 0.1.12 on a cluster. A platform installed from the previous BOM is refused
 (`bom_unsupported`): Remove and install again.
+## 2026-11-16: P3, review of the L7, L11 and seed-reboot fixes
+
+**What changed:** no container, relation or boundary. The smoke test refuses a Kubernetes node template with a
+Proxmox cloud-init drive on another slot than `ide0` before it clones (`template_mismatch`); the preflight row
+`tenant-network` reads the default zone's `dhcp` field in Proxmox (one more read with the portal token) and falls
+back to the configured kind only for a zone not made yet; a tenant cluster upgrade to a version the provider does
+not offer is refused in the image rotation, an empty version set included; a seed credential rotation that failed
+after the store committed writes its audit entry with outcome `FAILURE`; the shared database limit text takes a
+minimum.
+
+**Why:** the smoke test is the only gate before a node image reaches tenant clusters, and their provider has no
+slot check; the row claimed more than the create path does (shared workers, a simple zone without DHCP, a live zone
+with DHCP); the upgrade kept the hole the create had; the one rotation outcome that leaves old tokens alive had no
+audit entry.
+
+**Diagrams:** none changed.
+
+**Not verified:** all of it on a lab.
+
 ## 2026-11-16: P3, findings of the L7, L11 and seed-reboot lab checks
 
 **What changed:** no container, relation or boundary. The template-updates smoke test adds a Proxmox cloud-init
