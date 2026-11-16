@@ -224,9 +224,16 @@ function checks(in_: Doc): Doc[] {
   ]
 }
 
-// The API's own rules, as far as the page's states need them: the name, and one rule only the server can know.
-function refuse(name: string, spec: Doc) {
+// The import store the API fills in when none is named: the provider's.
+const importOf = (serviceId: string, spec: Doc) => spec?.storage?.import || db.services.find((s) => s.id === serviceId)?.config?.importStorage || "local"
+
+// The API's own rules, as far as the page's states need them: the name, a rule only the server can know, and the two
+// of Validate (internal/platformlife/installation.go) the form cannot or does not check.
+function refuse(name: string, spec: Doc, serviceId: string) {
   const problems: string[] = []
+  const imp = importOf(serviceId, spec)
+  if (imp === spec?.storage?.boot) problems.push(`spec.storage.import "${imp}" is the boot store: use another store with import content, the one the provider's importStorage names (an empty spec.storage.import takes it)`)
+  if (spec?.seed?.mode === "existing") problems.push("spec.seed.mode existing comes in a later release; use vm")
   if (!/^[a-z0-9]([-a-z0-9]{0,38}[a-z0-9])?$/.test(name ?? "")) problems.push(`name "${name}": lower-case letters, digits and dashes, at most 40`)
   if (String(spec?.network?.prefix ?? "").startsWith("10.100.")) problems.push(`the platform network ${spec.network.prefix} overlaps cidrPool 10.100.0.0/16`)
   if (problems.length) throw fail(400, "invalid_installation", "The installation is not valid", { problems })
@@ -270,14 +277,13 @@ on("POST /admin/platform/installations", ({ opts }) => {
   const b = (opts.body ?? {}) as Doc
   if (!mockPlatform.enabled) find("")
   strict(b, INSTALLATION)
-  refuse(b.name, b.spec)
+  refuse(b.name, b.spec, b.serviceId)
   if (mockPlatform.installations.some((i) => i.serviceId === b.serviceId)) throw fail(409, "installation_exists", "this provider already has an installation")
   // What the API fills in: the seed's mode and pool, the cluster's name and roles, the node image mode, and the import
   // store of the provider when none is named.
-  const provider = db.services.find((s) => s.id === b.serviceId)
   return { data: view(create(b.name, {
     ...b.spec,
-    storage: { ...b.spec.storage, import: b.spec.storage?.import || provider?.config?.importStorage || "local" },
+    storage: { ...b.spec.storage, import: importOf(b.serviceId, b.spec) },
     seed: { mode: "vm", pool: "proxcloud-seed", ...b.spec.seed },
     clusters: (b.spec.clusters ?? []).map((c: Doc) => ({ name: "pc-platform", roles: ["kamaji", "dbaas"], ...c })),
     nodeImage: { mode: "bom" },
@@ -302,7 +308,7 @@ on("PUT /admin/platform/installations/:id", ({ params, opts }) => {
   strict(b, INSTALLATION)
   if (b.rev !== in_.rev) throw fail(409, "rev_conflict", "the installation changed since it was read: read it again")
   if (activeRun(in_.id)) throw fail(409, "run_active", "a run of this installation is not finished: wait for it or cancel it")
-  refuse(b.name, b.spec)
+  refuse(b.name, b.spec, in_.serviceId)
   if (in_.status.bom) { // FixedChanges in internal/platformlife/installation.go
     const same = (a: unknown, c: unknown) => JSON.stringify(a) === JSON.stringify(c)
     const [old, next] = [in_.spec.clusters[0], b.spec.clusters?.[0] ?? {}]

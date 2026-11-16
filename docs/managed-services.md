@@ -77,7 +77,7 @@ reading [section 3](#3-proxmox-identities): they share the pool `proxcloud-syste
 | Permissions | `admin:service:read` to read the page, `admin:service:manage` for every button, the Check and the seed kubeconfig download included. |
 | A platform network | One bridge that exists on every node used, untagged (no VLAN), with a free IPv4 network from /8 to /29, a gateway and one to three DNS servers. It must not overlap the provider's tenant address pool (`cidrPool`), a sandbox network or a public network. |
 | Routes | The API (on Compose: the API container) reaches the Proxmox API, the seed address on 6443 and the cluster's API address on 6443. The seed and the cluster machines reach the Proxmox API URL you enter, `github.com` and `raw.githubusercontent.com` (at first boot the seed downloads the k3s binary from the first and the k3s install script from the second, both checked by sha256; GitHub redirects a release download to another host of its own, which must be reachable too and is not named in the BOM) and the registries and chart repositories of the BOM (`ghcr.io`, `charts.jetstack.io`, `helm.cilium.io`, `metallb.github.io`, `cloudnative-pg.github.io`, `clastix.github.io`, and the image registries those charts pull from). Tenant networks must reach the load balancer range and nothing else of the platform network. |
-| Storage | A boot store that takes VM disks on every node used; an ISO store that is local to each node and takes ISOs (default `local`); an import store with `import` content on every node an image goes to (default: the provider's `importStorage`). The import store must not be the boot store: the portal token holds `PVEDatastoreAdmin` on the import store, which reaches every disk on it ([section 10](#10-security-boundaries)). The API refuses settings that name the same store for both; the form says so before it saves. |
+| Storage | A boot store that takes VM disks on every node used; an ISO store that is local to each node and takes ISOs (default `local`); an import store with `import` content on every node an image goes to (default: the provider's `importStorage`). The import store must not be the boot store: the portal token holds `PVEDatastoreAdmin` on the import store, which reaches every disk on it ([section 10](#10-security-boundaries)). The API refuses settings that name the same store for both; the form says so before it saves when you type the same store in both fields. An empty import store takes the provider's `importStorage`, so it is refused too when that is the boot store. The import store of the settings and the provider's `importStorage` must be one store: the script of step 2 is written for the store of the settings, and the `privileges:kubemint` check reads the provider's ([when the provider's import store is the boot store](#when-the-providers-import-store-is-the-boot-store)). |
 | Capacity | The smallest machine is 2 cores, 4 GiB of memory and a 20 GiB disk. The smallest layout (seed, control plane, one machine per group) is five VMs. The review step adds up cores and memory per node; it does not read what is free. |
 | Root on one node | Once, to run the identities script. |
 | The datacenter firewall | On, with the provider's isolation rules written by a provider sync: the Check verifies that tenant traffic to the seed, the API address and the node range is dropped. |
@@ -144,6 +144,35 @@ instead.
 `/storage/<boot>` and `/storage/<iso>` are written for the stores in the query. The script does not
 remove the rows of the old stores.
 
+### When the provider's import store is the boot store
+
+A provider set up with `importStorage` equal to the boot store of the settings (one store for
+everything) cannot be installed as it is. With the import store left empty the save is refused,
+naming a store you did not type. With another import store in the settings only, the save passes,
+but the script writes `ProxCloudKubeMint` on that store alone, `privileges:kubemint` fails on
+`/storage/<the provider's store>`, and running the script again does not change that. Do this
+instead:
+
+1. Pick a second store with `import` content on the seed's node and on every node of the node
+   groups (`pvesm set <store> --content <its content>,import` adds it).
+2. Set the provider's `importStorage` to that store (`config.importStorage`; **Import store** in the
+   console's setup).
+3. Leave the import store of the settings empty, or type the same store, and save.
+4. Run the script of step 2 again. It now carries `importStorage=<that store>`.
+5. Remove the rows the provider's first script wrote on the boot store. The script does not, and
+   while they stay the portal token still holds `Datastore.Allocate` on every platform disk:
+
+   ```sh
+   pveum acl delete /storage/<boot> --roles PVEDatastoreAdmin --users proxcloud@pve --tokens 'proxcloud@pve!platform'
+   pveum acl delete /storage/<boot> --roles ProxCloudKubeMint --users proxcloud@pve --tokens 'proxcloud@pve!platform'
+   ```
+
+   The second line is for a site where an earlier managed-services script ran with the boot store
+   as `importStorage`. Use the provider's token id if it is not `proxcloud@pve!platform`.
+
+A site with a boot store such as `local-lvm` and `local` for ISOs and imports is not affected: the
+ISO store may be the import store.
+
 The mint grant (`ProxCloudKubeMint`) gives the portal token more than it had: read
 [the mint grant in M1](proxmox-permissions.md#the-mint-grant-in-m1) before running the script.
 
@@ -161,7 +190,7 @@ Saving keeps a draft (`POST` or `PUT /installations`). Nothing is created on Pro
 |---|---|
 | Name | Lower-case letters, digits and dashes, at most 40. The two providers are named after it. |
 | Proxmox API URL | `https://` with a host: the Proxmox API as machines on the platform network reach it. CAPMOX and the tenant clusters' providers use it. |
-| Boot store, ISO store, import store | Storage ids. The ISO store defaults to `local`; an empty import store takes the provider's `importStorage`. |
+| Boot store, ISO store, import store | Storage ids. The ISO store defaults to `local`; an empty import store takes the provider's `importStorage`. The import store may not be the boot store; if the provider's `importStorage` is, an empty field is refused as well ([what to do](#when-the-providers-import-store-is-the-boot-store)). |
 | Network | Bridge, IPv4 network (/8 to /29), gateway, one to three DNS servers, optional MTU (1280 to 9000). |
 | Seed | Node, address, cores, memory and disk; up to 8 SSH public keys (optional, for emergencies: ProxCloud never uses SSH); 1 to 16 IPv4 networks that may reach the seed's API (`apiSources`), at least the address ProxCloud reaches it from. |
 | API address | The cluster's API endpoint, held by kube-vip on the control plane machine. |
@@ -199,7 +228,7 @@ the settings (`409 rev_conflict`: the page reads them again).
 | `network` | The platform network overlaps a tenant, sandbox or public network, a seed API source is a tenant network, the load balancer range is inside a blocked or management network, or a node did not report its networks | Correct the network in step 1 |
 | `isolation` | The seed, the API address or part of the node range is in no blocked or management network, or the cluster firewall's isolation rules are not the ones a sync writes | Add the CIDRs the message names to **Networks tenants must not reach** on the provider's page (`blockedCidrs`), then **Run a provider sync, then check again**. Check that the datacenter firewall is on. With no tenant network yet the check passes: the rules are written with the first one |
 | `credentials` | A token secret is not stored | Paste it in step 2 |
-| `privileges:capi`, `privileges:csi`, `privileges:kubemint` | The CAPI token, the CSI token or the portal token lacks a privilege on a path; the message names both | Run the script again |
+| `privileges:capi`, `privileges:csi`, `privileges:kubemint` | The CAPI token, the CSI token or the portal token lacks a privilege on a path; the message names both | Run the script again. `privileges:kubemint` on `/storage/<store>`: that is the provider's `importStorage`; when the settings name another import store the script does not write that row ([what to do](#when-the-providers-import-store-is-the-boot-store)) |
 | `pool-fence` | The portal token holds a privilege on `proxcloud-system` or `proxcloud-seed`, or the CSI token on `proxcloud-seed` | Run the script again with the provider's token id: it writes the `NoAccess` rows on both pools, and a missing row is the usual cause (the portal token's `/pool` rows pass down to them). Only if the check still fails, remove the row granted to that user or token on `/pool/proxcloud-system` or `/pool/proxcloud-seed` itself. Do not remove its `/pool` rows: every tenant operation needs them |
 | `iso-store-visibility` | The CAPI token sees an ISO store other than the one in the settings. CAPMOX puts each bootstrap ISO on the first ISO store its token sees | Remove its permission on the others, or change the ISO store and run the script again |
 | `boot-iso-grant` | `capmox@pve` may not upload and delete on the ISO store | Run the script again |
@@ -293,7 +322,7 @@ stage is still trying.
 | `workload_api_unreachable` | 8 to 10, Remove | The cluster's API does not answer from the API's host, or its kubeconfig or CA on the seed is not usable | Add a route from the ProxCloud host to the API address, **Retry**. At Remove: restore the route and **Remove again**, or tick the option for a cluster that does not answer |
 | `nodes_timeout` | 9 | Not every node is Ready with its group label after the first wave | **Retry** |
 | `provider_conflict` | 10 | A provider with the same name exists that is not this installation's, two rows carry its marker, or the provider validation refused the row | Correct or rename that provider under Cloud providers, **Retry** |
-| `bom_unsupported` | start, plan | The installed BOM is not the one this release carries | No release upgrades between BOMs ([Not implemented yet](#not-implemented-yet)). Go back to the ProxCloud release that installed the platform, or remove managed services and install again |
+| `bom_unsupported` | start, plan | The installed BOM is not the one this release carries | No release upgrades between BOMs ([Not implemented yet](#not-implemented-yet)). Go back to the ProxCloud release that installed the platform. Or, if no tenant cluster or database must be kept: delete them all (Remove refuses with `tenants_exist` otherwise), remove managed services, which deletes the platform cluster, and install again |
 | `portal_changed` | any | ProxCloud was upgraded during the run and no longer carries the run's BOM | **Retry** |
 | `job_dead` | any | The run's job ran out of attempts | **Retry**, or **Remove again** |
 | `platform_disabled` | start | The switch, or template updates, is off | `--managed-services` |
@@ -431,8 +460,10 @@ and ADR 0009, A2 and A8.
   there (`PVEDatastoreAdmin`) and can reach every platform disk on it, the seed's included. The API
   therefore refuses settings whose import store is the boot store (the `spec` check and stage 1
   repeat the rule). It compares the two names in the settings only: it does not read the portal
-  token's rows on the boot store, so a provider whose own `importStorage` is the boot store while
-  the settings name another import store is not caught.
+  token's rows on the boot store, so a `PVEDatastoreAdmin` row already there (written for a
+  provider whose `importStorage` was or is the boot store) is not caught and stays until it is
+  removed by hand
+  ([step 2](#when-the-providers-import-store-is-the-boot-store)).
 - The job uses the CAPI token for the platform VMs. That token holds `ProxCloudCAPI` on `/` (that
   path only), on `/nodes`, on `/sdn/zones` (`SDN.Use` on every zone and vnet, tenant ones included),
   on those two pools and on the boot store; `PVETemplateUser` on `pc-templates`; and
@@ -477,7 +508,9 @@ and ADR 0009, A2 and A8.
   (a Remove that stops before `remove-seed`), they stay.
 - **`seed.mode: existing` and `provisionedBy: installer` are not implemented.** The API refuses
   both in a create or an update (`400 invalid_installation`), and the `spec` check fails for a
-  record stored with either before that. Nothing in the installer writes an installation record,
+  record stored with either before that. A draft can change both; an installed record stored with
+  `provisionedBy: installer` is corrected by a PUT that sends `provisionedBy: portal`, the one
+  change of that field the API accepts after a run succeeded. Nothing in the installer writes an installation record,
   and a site with an installer-built services cluster is not shown on the page.
 - **`layout: separate`** (one cluster for Kubernetes, one for databases) is refused by the API.
 - **No VLAN** on the platform network, and no IPv6.

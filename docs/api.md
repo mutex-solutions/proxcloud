@@ -363,12 +363,14 @@ are several, `errors.details.problems`.
   `cidrPool`, `sandboxCidrs` or public networks, or puts the MetalLB range in
   `blockedCidrs`, is a `400 invalid_installation`; so is a `storage.import`
   equal to `storage.boot` (the portal token's role on the import store would
-  reach the platform's disks). `layout: separate`, `provisionedBy: installer`
+  reach the platform's disks), also when the empty `import` took that store
+  from the provider. `layout: separate`, `provisionedBy: installer`
   and `seed.mode: existing` are refused until a later release.
 - `GET|PUT /installations/{id}`: the PUT replaces `name` and `spec` and names
   the `rev` it read (`409 rev_conflict` otherwise). It is refused during a run
   (`409 run_active`) and for a fixed field (`409 fixed_fields`): `serviceId`
-  always; once a run succeeded also `provisionedBy`, `layout`, `name`,
+  always; once a run succeeded also `provisionedBy` (but a stored `installer`
+  may become `portal`), `layout`, `name`,
   `spec.network`, the seed's mode, pool, node and address, and the cluster's
   name, endpoint and node groups. A draft can be corrected; no route deletes
   one.

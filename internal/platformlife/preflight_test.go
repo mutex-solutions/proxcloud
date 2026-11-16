@@ -127,12 +127,15 @@ func TestPreflight(t *testing.T) {
 	capi["/pool/"+pve.SeedPool] = []string{"VM.Audit"}
 	f.perms[pve.DefaultPlatformTokenID]["/pool/"+pve.SeedPool] = []string{"VM.Audit"}
 	f.perms[pve.CAPITokenID]["/storage/nas-iso"] = []string{"Datastore.Audit"}
+	// The mint role is checked on the provider's import store, not on the one of the settings ("local").
+	delete(f.perms[pve.DefaultPlatformTokenID], "/storage/nas-templates")
 	pf.Site.Blocked = nil
 	pf.CSI = nil
 	pf.Blocked = func(context.Context, string) (bool, error) { return true, nil }
 	got := checkMap(pf.Run(ctx))
 	for id, want := range map[string]string{
 		"privileges:capi":      "on /pool/" + pve.SeedPool,
+		"privileges:kubemint":  "on /storage/nas-templates",
 		"pool-fence":           "the portal token holds 1 privileges on /pool/" + pve.SeedPool,
 		"iso-store-visibility": "[local, nas-iso]",
 		"isolation":            "add 10.200.200.10/32, 10.200.200.20/32, 10.200.200.30/31",

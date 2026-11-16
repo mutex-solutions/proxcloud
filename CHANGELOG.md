@@ -404,14 +404,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   API refuses an installation whose import store is its boot store (the portal token's `PVEDatastoreAdmin` on the
   import store would reach the platform's disks behind its `NoAccess` on the platform pools), and refuses
   `seed.mode: existing` and `provisionedBy: installer` when the installation is saved, where before a run failed at
-  stage 3 with `stage_unavailable`; the page checks the store rule before it saves. `bom_unsupported` no longer
+  stage 3 with `stage_unavailable`; the page checks the store rule before it saves when both stores are typed, and
+  the refusal names the provider's `importStorage`, which an empty import store takes (the guide lists the steps for
+  a provider whose import store is the boot store). An installed record stored with `provisionedBy: installer` can
+  be corrected to `portal`. `bom_unsupported` no longer
   names an upgrade path that does not exist, in the page, the plan and the `409`: it says to go back to the release
-  that installed the platform, or to remove and install again. The `pool-fence` check says to run the identities
+  that installed the platform, or to delete every tenant cluster and database, remove and install again. The in-app
+  failure table gains `credentials_missing` and `stage_unavailable`. The `pool-fence` check says to run the identities
   script again first, and not to remove the token's `/pool` permissions. The Cancel hint gives the real bound (up to
   5 minutes while a stage pauses after repeated errors), and the ready card says which stores not to back the seed up
   to. The failure codes `privileges_missing`, `network_problem` and `iso_store_visibility`, which no stage emitted,
   are gone from the code and the page. A draft saved with the boot store as its import store fails the `spec` check
-  until the store is changed.
+  until the store is changed; where the provider's `importStorage` is that store, the provider must change too.
 
 ### Security
 

@@ -49,7 +49,7 @@ func PlanFor(installed *BOMRef) (Plan, error) {
 	if installed != nil {
 		var ok bool
 		if from, ok = embeddedBOM(installed.SHA256); !ok {
-			p.Blocking = append(p.Blocking, fmt.Sprintf("%s: the installed BOM %s is not the one this release embeds, and no release upgrades between BOMs yet; run the ProxCloud release that installed the platform", CodeBOMUnsupported, installed.Release))
+			p.Blocking = append(p.Blocking, fmt.Sprintf("%s: the installed BOM %s is not the one this release embeds, and no release upgrades between BOMs yet; run the ProxCloud release that installed the platform, or delete every tenant cluster and database, then remove managed services and install again", CodeBOMUnsupported, installed.Release))
 			return p, nil
 		}
 	}

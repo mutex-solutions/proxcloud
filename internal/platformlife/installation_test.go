@@ -80,7 +80,7 @@ func TestValidateTable(t *testing.T) {
 		{"existing seed", "spec.seed.mode existing comes in a later release", func(in *Installation) {
 			in.Spec.Seed.Mode, in.Spec.Seed.Pool = SeedExisting, "proxcloud-system"
 		}},
-		{"import store is the boot store", "is the boot store", func(in *Installation) { in.Spec.Storage.Import = in.Spec.Storage.Boot }},
+		{"import store is the boot store", "is the boot store: use another store with import content, the one the provider's importStorage names", func(in *Installation) { in.Spec.Storage.Import = in.Spec.Storage.Boot }},
 		{"separate layout", "later release", func(in *Installation) { in.Layout = LayoutSeparate }},
 		{"plain http api", "pveApiUrl", func(in *Installation) { in.Spec.PVEAPIURL = "http://10.200.200.2:8006" }},
 		{"api with credentials", "pveApiUrl", func(in *Installation) { in.Spec.PVEAPIURL = "https://root:pw@10.200.200.2:8006" }},
@@ -217,6 +217,12 @@ func TestFixedChanges(t *testing.T) {
 		t.Fatalf("a draft's path and seed mode: %v %v", f, fixed.Validate())
 	}
 	old.Status.BOM = &BOMRef{Release: "0.7.0-dev", SHA256: "x"}
+	// Validate refuses installer, so an installed record that holds it must be correctable to portal.
+	byInstaller := *old
+	byInstaller.ProvisionedBy = ByInstaller
+	if f := FixedChanges(&byInstaller, next(func(*Installation) {})); len(f) != 0 {
+		t.Errorf("after the first run, installer to portal: %v", f)
+	}
 	for _, tc := range []struct {
 		want []string
 		mut  func(*Installation)

@@ -291,9 +291,10 @@ func (in *Installation) Validate() error {
 		}
 	}
 	// The portal token holds PVEDatastoreAdmin on the import store, which reaches every disk on it: on the boot store
-	// that would undo its NoAccess on the platform pools (docs/proxmox-permissions.md).
+	// that would undo its NoAccess on the platform pools (docs/proxmox-permissions.md). The API fills an empty import
+	// store from the provider, and the preflight checks the mint role on the provider's store: the message names it.
 	if s.Storage.Import != "" && s.Storage.Import == s.Storage.Boot {
-		bad("spec.storage.import %q is the boot store: use another store for the image downloads", s.Storage.Import)
+		bad("spec.storage.import %q is the boot store: use another store with import content, the one the provider's importStorage names (an empty spec.storage.import takes it)", s.Storage.Import)
 	}
 
 	n := s.Network
@@ -570,7 +571,7 @@ func (in *Installation) Unfenced(fenced []string) []string {
 func (in *Installation) Installed() bool { return in.Status.BOM != nil }
 
 // FixedChanges names the fields next changes that may not change: the provider always; once a run succeeded also the
-// path, the layout, the name, the network, the seed's mode, pool, node and address, and each cluster's name, endpoint
+// path (but for installer, which Validate refuses: such a record can only be corrected), the layout, the name, the network, the seed's mode, pool, node and address, and each cluster's name, endpoint
 // and node groups. Before that nothing was built, so a draft can be corrected (no route deletes one).
 func FixedChanges(old, next *Installation) []string {
 	var out []string
@@ -583,7 +584,9 @@ func FixedChanges(old, next *Installation) []string {
 	if !old.Installed() {
 		return out
 	}
-	same("provisionedBy", old.ProvisionedBy, next.ProvisionedBy)
+	if old.ProvisionedBy != ByInstaller {
+		same("provisionedBy", old.ProvisionedBy, next.ProvisionedBy)
+	}
 	same("layout", old.Layout, next.Layout)
 	same("name", old.Name, next.Name)
 	same("spec.network", old.Spec.Network, next.Spec.Network)
