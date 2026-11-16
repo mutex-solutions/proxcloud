@@ -27,7 +27,8 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://charts.jetstack.io
+    # The chart mirror (docs/ci-release.md): an OCI Helm repository, so no scheme. Public, no repository entry needed.
+    repoURL: ghcr.io/mutex-solutions/charts-mirror
     chart: cert-manager
     targetRevision: {{ pc_ver.cert_manager_chart }}
     helm:

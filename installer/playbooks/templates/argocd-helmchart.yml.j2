@@ -4,7 +4,7 @@ metadata:
   name: argocd
   namespace: kube-system
 spec:
-  chart: oci://ghcr.io/argoproj/argo-helm/argo-cd
+  chart: oci://ghcr.io/mutex-solutions/charts-mirror/argo-cd
   version: {{ pc_ver.argocd_chart }}
   targetNamespace: argocd
   createNamespace: true

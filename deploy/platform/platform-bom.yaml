@@ -6,8 +6,14 @@
 # - Exact versions only, never a range or `latest`.
 # - Every chart and image has a digest. A bare OCI repo records the chart's manifest digest; an https:// repo records
 #   the `digest` of that version in the repo's index.yaml (the sha256 of the .tgz).
-# - Only a `-dev` release may hold a `pending` digest (our own packages before they are published, and a chart at a
-#   moving `0.0.0+` version) and a `0.0.0+` version. A release tag needs neither.
+# - Third-party charts come from our chart mirror, ghcr.io/mutex-solutions/charts-mirror (docs/ci-release.md, "Chart
+#   mirror"; deploy/platform/charts-mirror.yaml names each chart's upstream source). The digest is the manifest digest
+#   of what the mirror's CI run pushed. kamaji and kamaji-crds are version 26.11.2-edge there (upstream publishes them
+#   only as 0.0.0+latest); the chart's appVersion is that tag, so the image is clastix/kamaji:26.11.2-edge without a
+#   value.
+# - Only a `-dev` release may hold a `pending` digest (our own packages before they are published, never a chart of
+#   the mirror, and a chart at a moving `0.0.0+` version) and a `0.0.0+` version. A release tag needs neither, and
+#   this file holds neither today.
 # - CI compares every pin with what the registry serves (.github/scripts/bom_verify.py, docs/ci-release.md); on a
 #   `v*` tag it also refuses `-dev`, `pending` and `0.0.0+` before any image is built.
 #
@@ -44,7 +50,7 @@ components:
     wave: 0
     install: helmchart
     namespace: argocd
-    chart: {repo: ghcr.io/argoproj/argo-helm, name: argo-cd, version: 10.14.0, digest: "sha256:09ca0a888b05bdf4c21a7c812dd7612156f63eb2a9fde0434ddb3ee095599a85"}
+    chart: {repo: ghcr.io/mutex-solutions/charts-mirror, name: argo-cd, version: 10.14.0, digest: "sha256:c9254e48ee08a246094baedf2df0b2677f0d228bacf8310400d6684deb64bbfb"}
     values:                        # = valuesContent of installer/playbooks/templates/argocd-helmchart.yml.j2
       dex: {enabled: false}
       notifications: {enabled: false}
@@ -54,13 +60,13 @@ components:
     cluster: seed
     wave: 1
     namespace: cert-manager
-    chart: {repo: "https://charts.jetstack.io", name: cert-manager, version: v1.20.2, digest: "sha256:d2a50bd44a09d838c2576a8f3dfca1524597c7393cf8d82ab3ec8a465b9eeb79"}
+    chart: {repo: ghcr.io/mutex-solutions/charts-mirror, name: cert-manager, version: v1.20.2, digest: "sha256:a10e0fef5726140f26b035603dbd4ead0d7b8aa970e7030bb303e09eeaedb31b"}
     values: {crds: {enabled: true}}  # = stage 40's Application (installer/playbooks/templates/apps-operators.yml.j2)
   - name: capi
     cluster: seed
     wave: 2
     namespace: proxcloud-system
-    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.1, digest: pending}  # until tag proxcloud-platform-v0.1.1 publishes it
+    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.1, digest: "sha256:97e2544fabb3bfda0f0d76182607836acfb19964dfff480eba95909335107aeb"}
   - name: pc-platform              # the workload cluster
     cluster: seed
     wave: 3
@@ -71,67 +77,66 @@ components:
     cluster: workload
     wave: 0
     namespace: kube-system
-    chart: {repo: "https://helm.cilium.io", name: cilium, version: 1.18.16, digest: "sha256:a28a48ef4c5250684317ebeb8f55b7de422235a86eef3530b6288b4f23fd4dd5"}
+    chart: {repo: ghcr.io/mutex-solutions/charts-mirror, name: cilium, version: 1.18.16, digest: "sha256:d588295d0f5c6475f140a05da585a5749f992a63493b008ed89535c7f33e2533"}
     group: all
   - name: cert-manager
     cluster: workload
     wave: 1
     namespace: cert-manager
-    chart: {repo: "https://charts.jetstack.io", name: cert-manager, version: v1.20.2, digest: "sha256:d2a50bd44a09d838c2576a8f3dfca1524597c7393cf8d82ab3ec8a465b9eeb79"}
+    chart: {repo: ghcr.io/mutex-solutions/charts-mirror, name: cert-manager, version: v1.20.2, digest: "sha256:a10e0fef5726140f26b035603dbd4ead0d7b8aa970e7030bb303e09eeaedb31b"}
     group: system
   - name: metallb
     cluster: workload
     wave: 1
     namespace: metallb-system
-    chart: {repo: "https://metallb.github.io/metallb", name: metallb, version: 0.16.2, digest: "sha256:96667a810bdf9b9d1e6d320af16a4e66c63ba56301bc21005e645cd7a1c298a4"}
+    chart: {repo: ghcr.io/mutex-solutions/charts-mirror, name: metallb, version: 0.16.2, digest: "sha256:b298850f8c54ffaa5902959dade15babc49d730b5431db1067bcab9f53945f77"}
     group: system                  # the speaker tolerates every group
   - name: argocd
     cluster: workload
     wave: 1
     namespace: argocd
-    chart: {repo: ghcr.io/argoproj/argo-helm, name: argo-cd, version: 10.14.0, digest: "sha256:09ca0a888b05bdf4c21a7c812dd7612156f63eb2a9fde0434ddb3ee095599a85"}
+    chart: {repo: ghcr.io/mutex-solutions/charts-mirror, name: argo-cd, version: 10.14.0, digest: "sha256:c9254e48ee08a246094baedf2df0b2677f0d228bacf8310400d6684deb64bbfb"}
     group: system
   - name: cnpg
     cluster: workload
     wave: 1
     namespace: cnpg-system
-    chart: {repo: "https://cloudnative-pg.github.io/charts", name: cloudnative-pg, version: 0.29.1, digest: "sha256:b53d3991fe84bcf38767e7702cae78666265427a127a26fff168ab4207d2b1df"}
+    chart: {repo: ghcr.io/mutex-solutions/charts-mirror, name: cloudnative-pg, version: 0.29.1, digest: "sha256:c277b3a44b013c292eb655de9a8d814c47d8fe181fb8077c353d0b830d098c60"}
     group: system
   - name: proxmox-csi
     cluster: workload
     wave: 1
     namespace: csi-proxmox
-    chart: {repo: ghcr.io/sergelogvinov/charts, name: proxmox-csi-plugin, version: 0.5.15, digest: "sha256:d5125be66d23c3380f3ccadc26018d21f0a44e203d93998a9e80ef82eaa2dc59"}
+    chart: {repo: ghcr.io/mutex-solutions/charts-mirror, name: proxmox-csi-plugin, version: 0.5.15, digest: "sha256:a9d68723c59ce27b950c9e6d893cdd5eb9ee29660c5c5a0d81617cc65ba7fb4b"}
     group: system                  # the node DaemonSet tolerates every group
     stateful: true
   - name: capi-tenant
     cluster: workload
     wave: 2
     namespace: proxcloud-system
-    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.1, digest: pending}  # until tag proxcloud-platform-v0.1.1 publishes it
+    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.1, digest: "sha256:97e2544fabb3bfda0f0d76182607836acfb19964dfff480eba95909335107aeb"}
     group: system
   - name: kamaji-crds
     cluster: workload
     wave: 2
     namespace: kamaji-system
-    chart: {repo: "https://clastix.github.io/charts", name: kamaji-crds, version: 0.0.0+latest, digest: pending}  # until the chart mirror
+    chart: {repo: ghcr.io/mutex-solutions/charts-mirror, name: kamaji-crds, version: 26.11.2-edge, digest: "sha256:531a9658a00432f9c8f679e66dcdbeb07145b6ae9ac217ff469b3eb3714182f8"}
     group: kamaji
   - name: kamaji-etcd
     cluster: workload
     wave: 2
     namespace: kamaji-system
-    chart: {repo: "https://clastix.github.io/charts", name: kamaji-etcd, version: 0.18.1, digest: "sha256:634fccec8f9434f8f53f8b49d9c34d634c93f14478cf1c550fb3b5c1ec8e90be"}
+    chart: {repo: ghcr.io/mutex-solutions/charts-mirror, name: kamaji-etcd, version: 0.18.1, digest: "sha256:0c39f8c902a757e12bbd91284950a4405677690ed9a246e0a62323eb6cf7cb30"}
     group: kamaji
     stateful: true
   - name: kamaji
     cluster: workload
     wave: 3
     namespace: kamaji-system
-    chart: {repo: "https://clastix.github.io/charts", name: kamaji, version: 0.0.0+latest, digest: pending}  # until the chart mirror
+    chart: {repo: ghcr.io/mutex-solutions/charts-mirror, name: kamaji, version: 26.11.2-edge, digest: "sha256:540660d51e0f343a2d570c4f8e542915a8a31a2e0f24f08dfc5acc7d6455c8f7"}
     group: kamaji
-    values: {image: {tag: 26.11.2-edge}}  # the chart is 0.0.0+latest, so the image is the pin
   - name: platform                 # provider RBAC, tenant AppProjects, locked default project, MetalLB pool, repo entry
     cluster: workload
     wave: 3
     namespace: proxcloud-system
-    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.1, digest: pending}  # until tag proxcloud-platform-v0.1.1 publishes it
+    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.1, digest: "sha256:97e2544fabb3bfda0f0d76182607836acfb19964dfff480eba95909335107aeb"}

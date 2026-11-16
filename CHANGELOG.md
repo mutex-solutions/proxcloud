@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stages with their time limits and how a waiting stage looks, every failure code with cause and action, Retry,
   Cancel, Remove and Remove with the seed gone, credentials, the seed backup, the limits on the Compose install and
   the security boundaries. It lists what is not implemented (no upgrade between BOMs, `seed.mode: existing`, the
-  seed's other Applications at Remove, the `kamaji` charts at `0.0.0+latest` until the chart mirror) and states that
+  seed's other Applications at Remove) and states that
   no run of this path has finished on a lab (M0 and checks L0 to L11 are pending). `docs/install.md` and the Compose
   README point to it from `--managed-services`; `docs/proxmox-permissions.md` drops two sentences that predate the
   job and the page and gains a table for the L1 drill results, marked not yet measured; `docs/quickstart.md` no
@@ -354,6 +354,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   token for a package that does not exist yet.
 
 ### Changed
+
+- **The platform BOM takes every third-party chart from the chart mirror, and nothing in it is pending**
+  (`deploy/platform/platform-bom.yaml`, `docs/ci-release.md` "Chart mirror"). The nine third-party charts (argo-cd,
+  cert-manager, cilium, metallb, cloudnative-pg, proxmox-csi-plugin, kamaji-etcd, kamaji, kamaji-crds) now come from
+  `ghcr.io/mutex-solutions/charts-mirror` with the manifest digests of the `charts-mirror-v1` run, and
+  `proxcloud-platform` 0.1.1 has its digest. `kamaji` and `kamaji-crds` are version `26.11.2-edge` instead of
+  `0.0.0+latest`, and the `kamaji` component no longer sets `image.tag` (the chart's `appVersion` is that tag; same
+  render). The BOM validation never accepts `pending` for a chart of the mirror, which is third-party content in our
+  registry. The installer's stage 40 takes ArgoCD and cert-manager from the mirror as well (cert-manager as an OCI
+  source). The BOM stays `0.8.0-dev`; dropping `-dev` is now the only change the release gate needs. A platform
+  installed from the previous `-dev` BOM is refused with `bom_unsupported`, as for any other BOM change.
 
 - **The platform BOM pins our four published packages by digest, and CI checks every pin**
   (`deploy/platform/platform-bom.yaml`): the charts `proxmox-kamaji-cluster` 0.1.11, `database-cluster` 0.5.1 and

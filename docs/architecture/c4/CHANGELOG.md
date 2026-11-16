@@ -4,6 +4,44 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-16: PR #282 (P3): the BOM and stage 40 take the third-party charts from the chart mirror
+
+**What changed:** which registries the platform's clusters reach for charts. The BOM
+(`deploy/platform/platform-bom.yaml`) names `ghcr.io/mutex-solutions/charts-mirror` as the source of all
+nine third-party charts (argo-cd, cert-manager, cilium, metallb, cloudnative-pg, proxmox-csi-plugin,
+kamaji-crds, kamaji-etcd, kamaji), each at an exact version and with the manifest digest of the
+`charts-mirror-v1` run, which published them on 2026-11-16. So the seed and the workload cluster
+pull every chart from `ghcr.io` and no longer reach `charts.jetstack.io`,
+`helm.cilium.io`, `metallb.github.io`, `cloudnative-pg.github.io`, `clastix.github.io`,
+`ghcr.io/argoproj` or `ghcr.io/sergelogvinov` for a chart; the image registries those charts pull from
+are unchanged. `kamaji` and `kamaji-crds` are version `26.11.2-edge` and no longer `0.0.0+latest`.
+`proxcloud-platform` 0.1.1 is published and pinned by digest, so no BOM entry is `pending`. The
+installer's stage 40 takes its ArgoCD HelmChart and its cert-manager Application from the mirror as well
+(cert-manager as an OCI source); its other Applications keep their upstream repositories. This
+supersedes one sentence of the PR 19 entry below, "the BOM, and so ArgoCD, still takes these charts from
+upstream", and its "Not verified: any push": the push ran, and `bom-verify` reads all nine packages
+anonymously. That entry is kept as written.
+
+**Why:** design §12 Q2b and ADR 0009 A6. One OCI registry that serves what CI checked, and an exact
+Kamaji chart version, without which the release gate refuses the BOM. The mirror holds third-party
+content that exists before the BOM names it, so the BOM validation no longer accepts `pending` for a
+mirror chart in a `-dev` BOM; our own packages keep that allowance.
+
+**Not verified:** no cluster has pulled from the mirror; no run of this path has finished on a lab.
+ArgoCD pulls by version, not by digest, so a version replaced in the mirror between two CI checks would
+be installed.
+
+**Views updated:** [C2 containers](c2-containers.md) (CI row: the mirror is published and is the BOM's
+source). No diagram changed.
+
+Files: `deploy/platform/platform-bom.yaml`, `deploy/platform/charts-mirror.yaml`,
+`internal/platformlife/bom.go`, `internal/platformlife/bom_test.go`,
+`internal/platformlife/testdata/render-seed-argocd.golden.yaml`,
+`.github/scripts/tests/test_bom_verify.py`, `installer/playbooks/group_vars/all/versions.yml`,
+`installer/playbooks/templates/argocd-helmchart.yml.j2`,
+`installer/playbooks/templates/apps-operators.yml.j2`, `docs/ci-release.md`, `docs/managed-services.md`,
+`docs/api.md`, `docs/adr/0009-managed-services-platform-lifecycle.md`, `CHANGELOG.md`.
+
 ## 2026-11-16: Correction to the PR 15 (P3) entry: nothing upgrades the platform in place
 
 **What changed:** nothing in the code paths the diagrams show, and no diagram. The PR 15 entry below

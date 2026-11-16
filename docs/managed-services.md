@@ -76,7 +76,7 @@ reading [section 3](#3-proxmox-identities): they share the pool `proxcloud-syste
 | A GitHub integration | System → Integrations. Template updates finds and downloads the two images through it. |
 | Permissions | `admin:service:read` to read the page, `admin:service:manage` for every button, the Check and the seed kubeconfig download included. |
 | A platform network | One bridge that exists on every node used, untagged (no VLAN), with a free IPv4 network from /8 to /29, a gateway and one to three DNS servers. It must not overlap the provider's tenant address pool (`cidrPool`), a sandbox network or a public network. |
-| Routes | The API (on Compose: the API container) reaches the Proxmox API, the seed address on 6443 and the cluster's API address on 6443. The seed and the cluster machines reach the Proxmox API URL you enter, `github.com` and `raw.githubusercontent.com` (at first boot the seed downloads the k3s binary from the first and the k3s install script from the second, both checked by sha256; GitHub redirects a release download to another host of its own, which must be reachable too and is not named in the BOM) and the registries and chart repositories of the BOM (`ghcr.io`, `charts.jetstack.io`, `helm.cilium.io`, `metallb.github.io`, `cloudnative-pg.github.io`, `clastix.github.io`, and the image registries those charts pull from). Tenant networks must reach the load balancer range and nothing else of the platform network. |
+| Routes | The API (on Compose: the API container) reaches the Proxmox API, the seed address on 6443 and the cluster's API address on 6443. The seed and the cluster machines reach the Proxmox API URL you enter, `github.com` and `raw.githubusercontent.com` (at first boot the seed downloads the k3s binary from the first and the k3s install script from the second, both checked by sha256; GitHub redirects a release download to another host of its own, which must be reachable too and is not named in the BOM) and the registries of the BOM (`ghcr.io`, which serves every chart: ours and the third-party ones of the chart mirror, `ghcr.io/mutex-solutions/charts-mirror`; and the image registries those charts pull from). Tenant networks must reach the load balancer range and nothing else of the platform network. |
 | Storage | A boot store that takes VM disks on every node used; an ISO store that is local to each node and takes ISOs (default `local`); an import store with `import` content on every node an image goes to (default: the provider's `importStorage`). The import store must not be the boot store: the portal token holds `PVEDatastoreAdmin` on the import store, which reaches every disk on it ([section 10](#10-security-boundaries)). The API refuses settings that name the same store for both; the form says so before it saves when you type the same store in both fields. An empty import store takes the provider's `importStorage`, so it is refused too when that is the boot store. The import store of the settings and the provider's `importStorage` must be one store: the script of step 2 is written for the store of the settings, and the `privileges:kubemint` check reads the provider's ([when the provider's import store is the boot store](#when-the-providers-import-store-is-the-boot-store)). |
 | Capacity | The smallest machine is 2 cores, 4 GiB of memory and a 20 GiB disk. The smallest layout (seed, control plane, one machine per group) is five VMs. The review step adds up cores and memory per node; it does not read what is free. |
 | Root on one node | Once, to run the identities script. |
@@ -598,11 +598,12 @@ and ADR 0009, A2 and A8.
   `proxcloud-up.sh` takes a build of main as its version (`--version dev-<sha>`, `upgrade dev-<sha>`;
   CI publishes one per push to main) and prints that it is not for production
   ([deploy/compose/README.md](../deploy/compose/README.md)).
-- **`kamaji` and `kamaji-crds` are at chart version `0.0.0+latest` with no digest**, until the chart
-  mirror has published them and the BOM points at it (the flow is merged, PR #276; see
-  [ci-release.md](ci-release.md), "Chart mirror"). The Kamaji image is pinned by tag (`26.11.2-edge`); the chart is not. The
-  BOM validation refuses such an entry in any release that is not `-dev`, so no release can be
-  tagged before that.
+- **The third-party charts come from our mirror, and ArgoCD pulls them by version.** Every chart of the
+  BOM has an exact version and a digest; the nine third-party ones are served by
+  `ghcr.io/mutex-solutions/charts-mirror` ([ci-release.md](ci-release.md), "Chart mirror"), `kamaji`
+  and `kamaji-crds` as version `26.11.2-edge`, packaged from the upstream tag of that name. CI
+  compares the digests; ArgoCD does not, so a version replaced in the mirror between two checks
+  would be installed.
 - **No upgrade between BOMs.** A release carries one BOM. An apply on an installed platform runs
   with the installed BOM, which must be the one the release carries: it repairs, applies changed
   settings and renews the seed ArgoCD's token. After a ProxCloud upgrade that changes the BOM,

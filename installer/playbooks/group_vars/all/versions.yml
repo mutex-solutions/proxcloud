@@ -2,10 +2,10 @@
 # Every key the platform BOM also pins must equal deploy/platform/platform-bom.yaml (internal/platformlife/bom_test.go).
 pc_versions:
   k3s: v1.35.10+k3s1
-  argocd_chart: 10.14.0        # oci://ghcr.io/argoproj/argo-helm/argo-cd
+  argocd_chart: 10.14.0        # argo-cd; stage 40 from oci://ghcr.io/mutex-solutions/charts-mirror, stage 50 from upstream
   cnpg_chart: 0.29.1           # https://cloudnative-pg.github.io/charts
   rabbitmq_operator: v2.23.2   # historical pin only; stage 40 never installs/upgrades/removes it
-  cert_manager_chart: v1.20.2  # ingress TLS and CSI gateway certificates; retained without RabbitMQ
+  cert_manager_chart: v1.20.2  # ingress TLS and CSI gateway certificates; retained without RabbitMQ; stage 40 from the chart mirror
   keycloak: "26.8.2"
   # Chart + image tag of ProxCloud itself, with images.build=false. It must be a published release.
   # Stable broker-free release v0.7.0 (after v0.6.0); its tag publishes its chart and images. Keep
@@ -28,7 +28,7 @@ pc_versions:
   metallb_chart: 0.16.2        # https://metallb.github.io/metallb
   proxmox_csi_chart: 0.5.15    # oci://ghcr.io/sergelogvinov/charts/proxmox-csi-plugin
   kamaji_etcd_chart: 0.18.1    # https://clastix.github.io/charts
-  kamaji_image: 26.11.2-edge   # clastix/kamaji; the chart is 0.0.0+latest, so the image is the pin
+  kamaji_image: 26.11.2-edge   # clastix/kamaji; stage 50 installs chart 0.0.0+latest with this image, the BOM the mirrored chart of this version
   barman_plugin: v0.15.1       # github.com/cloudnative-pg/plugin-barman-cloud
   packer: 1.16.2
   packer_plugin_proxmox: 1.2.4

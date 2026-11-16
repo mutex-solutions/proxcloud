@@ -50,20 +50,21 @@ func TestCurrentIsValid(t *testing.T) {
 }
 
 // The four package versions this repository has published stay pinned by digest. A newer version of one of them may
-// be `pending` in a -dev BOM until its own tag has published it (Validate, mayPend), and the third-party charts that
-// are still pending are not listed here: .github/scripts/bom_verify.py --release refuses every `pending` at a v* tag.
+// be `pending` in a -dev BOM until its own tag has published it (Validate, mayPend). The third-party charts come from
+// the chart mirror and are never pending (TestValidate); .github/scripts/bom_verify.py --release refuses every
+// `pending` at a v* tag.
 func TestPublishedPackagesArePinned(t *testing.T) {
 	b := embedded(t)
 	if strings.HasSuffix(b.Images.Clusterctl, "/proxcloud-clusterctl:v1.14.4-1@pending") {
 		t.Errorf("images.clusterctl %s is pending", b.Images.Clusterctl)
 	}
-	published := map[string]string{"proxmox-kamaji-cluster": "0.1.11", "database-cluster": "0.5.1", "proxcloud-platform": "0.1.0"}
+	published := map[string]string{"proxmox-kamaji-cluster": "0.1.11", "database-cluster": "0.5.1", "proxcloud-platform": "0.1.1"}
 	charts := []Chart{b.TenantCharts.Kubernetes, b.TenantCharts.Database}
 	for _, c := range b.Components {
 		charts = append(charts, c.Chart)
 	}
 	for _, c := range charts {
-		if c.Digest == "pending" && strings.HasPrefix(c.Repo, ownRepo) && published[c.Name] == c.Version {
+		if c.Digest == "pending" && ownPackage(c.Repo) && published[c.Name] == c.Version {
 			t.Errorf("our published chart %s %s is pending", c.Name, c.Version)
 		}
 	}
@@ -93,15 +94,20 @@ func TestValidate(t *testing.T) {
 		{"two parts", func(t *testing.T, b *BOM) { comp(t, b, "workload", "cilium").Chart.Version = "1.18" }, []string{"not an exact version"}},
 		{"a wildcard", func(t *testing.T, b *BOM) { comp(t, b, "workload", "cilium").Chart.Version = "1.18.x" }, []string{"not an exact version"}},
 		{"a comparison", func(t *testing.T, b *BOM) { b.Kubernetes.Version = ">=1.35.10" }, []string{"kubernetes.version", "not an exact version"}},
-		{"a release keeps no pending digest and no 0.0.0+ version", func(_ *testing.T, b *BOM) {
+		{"a release keeps no pending digest and no 0.0.0+ version", func(t *testing.T, b *BOM) {
 			b.Release = "0.7.0"
+			comp(t, b, "workload", "kamaji").Chart.Version = "0.0.0+latest"               // as before the chart mirror
 			b.Images.Clusterctl = strings.Split(b.Images.Clusterctl, "@")[0] + "@pending" // as before its first publication
 			b.TenantCharts.Kubernetes.Digest = "pending"
 		},
 			[]string{"tenantCharts.kubernetes: digest pending is allowed only in a -dev release", "images.clusterctl: digest pending",
 				"workload/kamaji.version: 0.0.0+latest is allowed only in a -dev release"}},
-		{"a release with everything pinned", func(_ *testing.T, b *BOM) {
+		{"a release with everything pinned", func(t *testing.T, b *BOM) {
 			b.Release = "0.7.0"
+			// A pre-release version and a v-prefixed one are exact versions, in a release too.
+			if k, c := comp(t, b, "workload", "kamaji").Chart.Version, comp(t, b, "workload", "cert-manager").Chart.Version; k != "26.11.2-edge" || c != "v1.20.2" {
+				t.Fatalf("kamaji %s, cert-manager %s", k, c)
+			}
 			b.Images.Clusterctl = strings.Replace(b.Images.Clusterctl, "@pending", "@"+sha, 1)
 			b.TenantCharts.Kubernetes.Digest, b.TenantCharts.Database.Digest = sha, sha
 			for i := range b.Components {
@@ -113,8 +119,31 @@ func TestValidate(t *testing.T) {
 				}
 			}
 		}, nil},
-		{"pending on a third-party chart", func(t *testing.T, b *BOM) { comp(t, b, "workload", "cilium").Chart.Digest = "pending" },
-			[]string{"workload/cilium: digest pending is allowed only for our own packages"}},
+		// The chart mirror is in our registry and is not our own package: its charts are third-party.
+		{"pending on a chart of the mirror", func(t *testing.T, b *BOM) {
+			c := comp(t, b, "workload", "cilium")
+			if c.Chart.Repo != mirrorRepo {
+				t.Fatalf("cilium comes from %s, not from the mirror", c.Chart.Repo)
+			}
+			c.Chart.Digest = "pending"
+		}, []string{"workload/cilium: digest pending is allowed only for our own packages"}},
+		{"pending on a chart below the mirror path", func(t *testing.T, b *BOM) {
+			c := comp(t, b, "workload", "cilium")
+			c.Chart.Repo, c.Chart.Digest = mirrorRepo+"/sub", "pending"
+		}, []string{"workload/cilium: digest pending is allowed only for our own packages"}},
+		{"pending on a third-party chart", func(t *testing.T, b *BOM) {
+			c := comp(t, b, "workload", "cilium")
+			c.Chart.Repo, c.Chart.Digest = "https://helm.cilium.io", "pending"
+		}, []string{"workload/cilium: digest pending is allowed only for our own packages"}},
+		{"pending on our own chart in a -dev release", func(t *testing.T, b *BOM) { comp(t, b, "seed", "capi").Chart.Digest = "pending" }, nil},
+		{"pending on our own repo whose name starts like the mirror", func(t *testing.T, b *BOM) {
+			c := comp(t, b, "seed", "capi")
+			c.Chart.Repo, c.Chart.Digest = mirrorRepo+"-own", "pending"
+		}, nil},
+		{"a 0.0.0+ version with a pending digest in a -dev release", func(t *testing.T, b *BOM) {
+			c := comp(t, b, "workload", "kamaji")
+			c.Chart.Repo, c.Chart.Version, c.Chart.Digest = "https://clastix.github.io/charts", "0.0.0+latest", "pending"
+		}, nil},
 		{"pending on a third-party image", func(_ *testing.T, b *BOM) {
 			b.Images.KubeVip = strings.Split(b.Images.KubeVip, "@")[0] + "@pending"
 		}, []string{"images.kubeVip: digest pending is allowed only for our own packages"}},
@@ -207,7 +236,11 @@ func TestBOMMatchesInstallerVersions(t *testing.T) {
 		name, _, _ := strings.Cut(ref, "@")
 		return name[strings.LastIndex(name, ":")+1:]
 	}
-	kamajiTag := fmt.Sprint(dig(comp(t, b, ClusterWorkload, "kamaji").Values, "image", "tag"))
+	// The mirrored kamaji charts are packaged with version = appVersion = the image tag, and the chart's image falls
+	// back to appVersion, so the BOM sets no image.tag and the chart version is the image pin.
+	if tag := dig(comp(t, b, ClusterWorkload, "kamaji").Values, "image", "tag"); tag != nil {
+		t.Errorf("workload kamaji sets image.tag %v; the mirrored chart's appVersion is the pin", tag)
+	}
 
 	for _, p := range []struct{ key, field, bom string }{
 		{"k3s", "seed.k3s.version", b.Seed.K3s.Version},
@@ -232,7 +265,8 @@ func TestBOMMatchesInstallerVersions(t *testing.T) {
 		{"metallb_chart", "workload metallb", chart(ClusterWorkload, "metallb")},
 		{"proxmox_csi_chart", "workload proxmox-csi", chart(ClusterWorkload, "proxmox-csi")},
 		{"kamaji_etcd_chart", "workload kamaji-etcd", chart(ClusterWorkload, "kamaji-etcd")},
-		{"kamaji_image", "workload kamaji values image.tag", kamajiTag},
+		{"kamaji_image", "workload kamaji", chart(ClusterWorkload, "kamaji")},
+		{"kamaji_image", "workload kamaji-crds", chart(ClusterWorkload, "kamaji-crds")},
 	} {
 		if got := fmt.Sprint(vf.V[p.key]); got != p.bom {
 			t.Errorf("versions.yml %s = %s, BOM %s = %q", p.key, got, p.field, p.bom)

@@ -248,8 +248,17 @@ class BomVerifyTest(unittest.TestCase):
     def test_the_repository_bom_parses(self):
         release, items = bv.parse_bom((ROOT / bv.BOM).read_text(encoding="utf-8"))
         self.assertRegex(release, r"^\d+\.\d+\.\d+")
-        self.assertEqual({item["kind"] for item in items}, {"oci", "index", "url"})
+        # Every chart is in an OCI registry since the chart mirror; an https:// chart (kind index) may come back.
+        kinds = {item["kind"] for item in items}
+        self.assertLessEqual({"oci", "url"}, kinds)
+        self.assertLessEqual(kinds, {"oci", "index", "url"})
         self.assertGreaterEqual(len(items), 20)
+        mirror = [item for item in items if item["ref"].startswith("ghcr.io/mutex-solutions/charts-mirror/")]
+        self.assertGreaterEqual(len(mirror), 9)
+        for item in mirror:  # third-party content: never pending, never a moving version, a tag a registry accepts
+            self.assertRegex(item["digest"], r"^sha256:[0-9a-f]{64}$", item["ref"])
+            self.assertNotIn("0.0.0+", item["version"], item["ref"])
+            self.assertRegex(item["ref"].rpartition(":")[2], r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$", item["ref"])
 
 
 if __name__ == "__main__":

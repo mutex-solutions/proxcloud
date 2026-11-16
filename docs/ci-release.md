@@ -148,7 +148,8 @@ no credentials) prints one line per pin and exits 1 on any failure:
 | Chart in an `https://` repository | The repository's `index.yaml` is fetched; the `digest` of the entry with that exact name and version must equal the pin. |
 | k3s binary and install script (`url` + `sha256`) | The file is downloaded (at most `--max-download-mb`, default 256) and hashed. |
 
-A `pending` digest has nothing to compare and is printed as `skip`. A mismatch, a
+A `pending` digest has nothing to compare and is printed as `skip` (the BOM
+holds none today). A mismatch, a
 missing digest header, a missing tag or index entry, a download over the size
 cap, a pin the script cannot read, a `release` line that is not one plain
 version, and a network error or cut response after three attempts all fail the
@@ -173,11 +174,11 @@ Where it runs:
   before the registry login. A published chart version is never replaced, so a
   tag that fails the gate must not publish the `proxcloud` chart either.
 
-`v0.8.0` cannot be tagged yet: the BOM is `0.8.0-dev`, and the `kamaji` and
-`kamaji-crds` charts are `0.0.0+latest` with a `pending` digest. The tag passes
-once the BOM takes both from [the chart mirror](#chart-mirror) at an exact
-version and digest and the release drops `-dev`. The same applies to a
-`v0.8.0-rc.N` tag.
+`v0.8.0` cannot be tagged yet: the BOM is `0.8.0-dev`. That is the only thing
+the gate still refuses: no pin is `pending` and no version is `0.0.0+` since
+the BOM takes its third-party charts from [the chart mirror](#chart-mirror)
+(checked on 2026-11-16: `--release` on a copy with only the release changed to
+`0.8.0` prints `all pins match`). The same applies to a `v0.8.0-rc.N` tag.
 
 Not verified:
 
@@ -202,12 +203,15 @@ The platform's third-party charts are republished, public, under
 2026-11-16), so that ArgoCD can pull from one OCI registry what CI verified, and
 so that Kamaji has an exact chart version. By rule only the `charts-mirror.yml`
 workflow publishes there; the registry does not enforce that rule (see
-[limits of the gate](#limits-of-the-gate)). The mirror flow exists; **nothing has been published yet and the BOM does not
-use the mirror yet**.
+[limits of the gate](#limits-of-the-gate)). Tag `charts-mirror-v1` published all nine charts on 2026-11-16, the
+packages are public, and the BOM takes every third-party chart from the mirror.
 
 `deploy/platform/charts-mirror.yaml` lists every third-party chart of the BOM
 with its source. A test (`test_charts_mirror.py`) keeps it equal to the BOM:
-the same charts, versions and digests, and no chart the BOM does not use.
+the same charts and versions, and no chart the BOM does not use. The manifest's
+digests are those of the upstream sources; the BOM holds the mirror's manifest
+digests, which the test does not compare (`bom-verify` checks them against the
+registry).
 [`charts_mirror.py`](../.github/scripts/charts_mirror.py) (standard library,
 `helm` and `git`) handles each entry by its kind:
 
@@ -299,8 +303,8 @@ first push:
   refusing, so a refusal must not count as "absent".
 - Without `--push` (pull requests and the dry run) the read is anonymous and
   nothing is pushed. A refusal is then reported per chart as "not compared"
-  and does not fail the run; any other unknown answer still fails. Until the
-  packages exist and are public, every dry run reports "not compared".
+  and does not fail the run; any other unknown answer still fails. Before the
+  packages existed and were public, every dry run reported "not compared".
 
 After a push the chart is pulled back by the reported manifest digest and its
 bytes are compared with the pushed archive.
@@ -320,59 +324,62 @@ Order of use:
 3. Make each new package public on GHCR (owner step, package settings). A
    package pushed by the workflow starts private, and `bom-verify` pulls
    anonymously.
-4. In a follow-up pull request, point the BOM's third-party charts at
-   `ghcr.io/mutex-solutions/charts-mirror` with the versions of the manifest
+4. Done in the follow-up change of 2026-11-16, after `charts-mirror-v1`: the
+   BOM takes all nine third-party charts from
+   `ghcr.io/mutex-solutions/charts-mirror`, with the versions of the manifest
    and the manifest digests of the run (the job summary and the
-   `charts-mirror-digests-<sha>` artifact, `charts-mirror.json`). `bom-verify`
-   checks them like our own OCI charts; the script `bom_verify.py` needs no
-   change, one of its tests does. The same pull request must change what the
-   tests tie to the BOM, or `test.yml` and `bom-verify.yml` fail. Measured on
-   2026-11-16 in a scratch copy with all nine third-party charts switched
-   (repo, the two Kamaji versions, a placeholder digest): three tests of
-   `go test ./internal/platformlife` and one Python test fail, and no other
-   package of `go test ./...`:
+   `charts-mirror-digests-<sha>` artifact, `charts-mirror.json`), each compared
+   with an anonymous manifest `HEAD` before it was written. `bom-verify` checks
+   them like our own OCI charts; `bom_verify.py` did not change. A next mirror
+   tag (a new chart version) needs the same follow-up, and the same change must
+   move what the tests tie to the BOM, or `test.yml` and `bom-verify.yml` fail:
    - `TestBOMMatchesStage40` (`internal/platformlife/bom_test.go`) requires
      `spec.chart` of `installer/playbooks/templates/argocd-helmchart.yml.j2`
      to be `oci://<BOM repo>/argo-cd`, and `repoURL` of the cert-manager
      Application in `installer/playbooks/templates/apps-operators.yml.j2` to
-     be the BOM repo. Both templates name the upstream repositories today, so
-     the test fails on exactly these two fields. The alternative is to leave
-     the seed's `argo-cd` and `cert-manager` on upstream in the BOM.
-   - `TestValidate` in the same file, two cases. "a release keeps no pending
-     digest and no 0.0.0+ version" expects the error
-     `workload/kamaji.version: 0.0.0+latest is allowed only in a -dev release`
-     from the repository BOM, which then holds no `0.0.0+` version. "pending
-     on a third-party chart" sets `digest: pending` on `cilium` and expects a
-     refusal; it is accepted, for the reason in the next item.
-   - `platformlife.Validate` (`internal/platformlife/bom.go`, `ownRepo`)
-     allows `digest: pending` in a `-dev` BOM for every chart whose repo
-     starts with `ghcr.io/mutex-solutions/`. That includes
-     `ghcr.io/mutex-solutions/charts-mirror`, so a mirror chart, which is
-     third-party content, could then be `pending`; only the release gate
-     still refuses it. The follow-up must either exclude `charts-mirror` from
-     that prefix rule (then the test case above passes unchanged) or accept
-     this and change the test case. Not decided; excluding it keeps today's
-     rule for third-party charts.
+     be the BOM repo. Both templates now name the mirror. For cert-manager
+     that turned the stage-40 Application from an `https://` Helm repository
+     into an OCI one (`repoURL` without a scheme, `chart`, `targetRevision`),
+     so the installer's management cluster needs the mirror packages to be
+     public. `helm template` of both charts from the mirror with the values of
+     the templates renders (Helm 3.21.4, anonymous); neither was run on a
+     cluster.
+   - `platformlife.Validate` (`internal/platformlife/bom.go`): `digest:
+     pending` in a `-dev` BOM is for our own packages, the repositories under
+     `ghcr.io/mutex-solutions/` that our own tags publish. The mirror is under
+     that prefix and is excluded from it (`ownPackage`): its charts are
+     third-party content that exists before the BOM names it, so a mirror
+     chart without a digest is refused in every BOM, `-dev` included.
+     `TestValidate` has both sides: `pending` on a mirror chart and on an
+     upstream chart is refused, on one of our own charts in `-dev` it is
+     accepted.
+   - `TestValidate`, "a release keeps no pending digest and no 0.0.0+
+     version": the BOM holds no `0.0.0+` version any more, so the case sets
+     one.
    - `TestRenderGolden` (`internal/platformlife/render_test.go`):
-     `testdata/render-seed-argocd.golden.yaml` changes. Regenerate it with
-     `-update` and review the diff.
+     `testdata/render-seed-argocd.golden.yaml`, regenerated with `-update`.
+     The renderers did not change: a bare repository was already rendered as
+     an OCI source (`repoURL` without `oci://`, `chart`, `targetRevision`)
+     with one ArgoCD repository entry (`enableOCI: "true"`) per repository.
+     The project now allows two source repositories, the mirror and
+     `ghcr.io/mutex-solutions/charts`, and has those two entries.
    - `test_the_repository_bom_parses`
-     (`.github/scripts/tests/test_bom_verify.py`) requires the repository BOM
-     to hold all three kinds of pin, `oci`, `index` and `url`. With every
-     chart on OCI no `index` pin is left. `bom-verify.yml` runs that test on
-     every pull request that touches `deploy/platform/**`. Relax it to a
-     subset check, or keep one `https://` chart.
-   - For cert-manager the switch turns the stage-40 Application from an
-     `https://` Helm repository into an OCI one (`repoURL` without a scheme).
-     Stage 40 runs on the installer's management cluster, so that cluster then
-     needs the mirror packages to be public. Not run on a cluster.
-   - The `kamaji` component's `values: {image: {tag: 26.11.2-edge}}` may stay
-     or go: the mirrored chart's `appVersion` is that tag. The manifest test
-     accepts both and always requires tag = version = `appVersion`.
-   - Not tied to the BOM by a test, and still naming upstream after such a
-     change: `installer/playbooks/files/services-platform.sh`, the add-on
-     defaults in `deploy/charts/proxmox-kamaji-cluster/values.yaml` and the
-     comments in `installer/playbooks/group_vars/all/versions.yml`.
+     (`.github/scripts/tests/test_bom_verify.py`) required all three kinds of
+     pin, `oci`, `index` and `url`. With every chart on OCI no `index` pin is
+     left; it now requires `oci` and `url`, allows `index`, and requires every
+     mirror chart to have a digest, no `0.0.0+` version and a valid OCI tag.
+   - The `kamaji` component no longer sets `image.tag`: the mirrored chart's
+     `appVersion` is `26.11.2-edge` and `helm template` gives the same output
+     with and without the value (image `clastix/kamaji:26.11.2-edge`).
+     `TestBOMMatchesInstallerVersions` now compares the installer's
+     `kamaji_image` with the version of both Kamaji charts.
+   - `deploy/platform/charts-mirror.yaml` did not change: it names the
+     upstream sources, and its test compares name and version for a BOM chart
+     that comes from the mirror.
+   - Not tied to the BOM by a test, and still naming upstream:
+     `installer/playbooks/files/services-platform.sh` (stage 50, Kamaji as
+     chart `0.0.0+latest` with the image tag) and the add-on defaults in
+     `deploy/charts/proxmox-kamaji-cluster/values.yaml`.
 5. The release can then drop `-dev`.
 
 The script writes `charts-mirror.md` and `charts-mirror.json` while it runs:
@@ -430,8 +437,8 @@ checked from this repository):
 3. After the first run: in each mirror package's settings, Actions access for
    this repository only.
 
-What notices a replaced version: once the BOM pins a mirror chart by manifest
-digest, `bom-verify` (pull requests that touch the BOM, weekly, and the release
+What notices a replaced version: the BOM pins every mirror chart by manifest
+digest, so `bom-verify` (pull requests that touch the BOM, weekly, and the release
 gate) fails when the version resolves to another digest. ArgoCD still pulls by
 version, so between two checks it would install the replaced chart.
 

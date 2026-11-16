@@ -21,7 +21,7 @@ applications:
           valuesObject:
             crds:
               enabled: true
-        repoURL: https://charts.jetstack.io
+        repoURL: ghcr.io/mutex-solutions/charts-mirror
         targetRevision: v1.20.2
       syncPolicy:
         automated:
@@ -221,7 +221,7 @@ applications:
               mode: kubernetes
             operator:
               replicas: 1
-        repoURL: https://helm.cilium.io
+        repoURL: ghcr.io/mutex-solutions/charts-mirror
         targetRevision: 1.18.16
       syncPolicy:
         automated:
@@ -258,7 +258,7 @@ applications:
           valuesObject:
             crds:
               enabled: true
-        repoURL: https://charts.jetstack.io
+        repoURL: ghcr.io/mutex-solutions/charts-mirror
         targetRevision: v1.20.2
       syncPolicy:
         automated:
@@ -308,7 +308,7 @@ applications:
                 - effect: NoSchedule
                   key: proxcloud.io/node-group
                   operator: Exists
-        repoURL: https://metallb.github.io/metallb
+        repoURL: ghcr.io/mutex-solutions/charts-mirror
         targetRevision: 0.16.2
       syncPolicy:
         automated:
@@ -586,7 +586,7 @@ applications:
               enabled: false
             notifications:
               enabled: false
-        repoURL: ghcr.io/argoproj/argo-helm
+        repoURL: ghcr.io/mutex-solutions/charts-mirror
         targetRevision: 10.14.0
       syncPolicy:
         automated:
@@ -623,7 +623,7 @@ applications:
         chart: cloudnative-pg
         helm:
           releaseName: cnpg
-        repoURL: https://cloudnative-pg.github.io/charts
+        repoURL: ghcr.io/mutex-solutions/charts-mirror
         targetRevision: 0.29.1
       syncPolicy:
         automated:
@@ -674,7 +674,7 @@ applications:
                 name: std
                 reclaimPolicy: Delete
                 storage: local-zfs
-        repoURL: ghcr.io/sergelogvinov/charts
+        repoURL: ghcr.io/mutex-solutions/charts-mirror
         targetRevision: 0.5.15
       syncPolicy:
         automated:
@@ -756,8 +756,8 @@ applications:
         chart: kamaji-crds
         helm:
           releaseName: kamaji-crds
-        repoURL: https://clastix.github.io/charts
-        targetRevision: 0.0.0+latest
+        repoURL: ghcr.io/mutex-solutions/charts-mirror
+        targetRevision: 26.11.2-edge
       syncPolicy:
         automated:
           prune: true
@@ -814,7 +814,7 @@ applications:
                 key: proxcloud.io/node-group
                 operator: Equal
                 value: kamaji
-        repoURL: https://clastix.github.io/charts
+        repoURL: ghcr.io/mutex-solutions/charts-mirror
         targetRevision: 0.18.1
       syncPolicy:
         automated:
@@ -851,8 +851,6 @@ applications:
           skipCrds: true
           valuesObject:
             defaultDatastoreName: default
-            image:
-              tag: 26.11.2-edge
             kamaji-etcd:
               deploy: false
             nodeSelector:
@@ -862,8 +860,8 @@ applications:
                 key: proxcloud.io/node-group
                 operator: Equal
                 value: kamaji
-        repoURL: https://clastix.github.io/charts
-        targetRevision: 0.0.0+latest
+        repoURL: ghcr.io/mutex-solutions/charts-mirror
+        targetRevision: 26.11.2-edge
       syncPolicy:
         automated:
           prune: true
@@ -937,7 +935,7 @@ helmChart:
     name: argocd
     namespace: kube-system
   spec:
-    chart: oci://ghcr.io/argoproj/argo-helm/argo-cd
+    chart: oci://ghcr.io/mutex-solutions/charts-mirror/argo-cd
     createNamespace: true
     targetNamespace: argocd
     valuesContent: |
@@ -979,14 +977,8 @@ projects:
         - namespace: '*'
           server: https://192.0.2.10:6443
       sourceRepos:
-        - https://charts.jetstack.io
+        - ghcr.io/mutex-solutions/charts-mirror
         - ghcr.io/mutex-solutions/charts
-        - https://helm.cilium.io
-        - https://metallb.github.io/metallb
-        - ghcr.io/argoproj/argo-helm
-        - https://cloudnative-pg.github.io/charts
-        - ghcr.io/sergelogvinov/charts
-        - https://clastix.github.io/charts
   - apiVersion: argoproj.io/v1alpha1
     kind: AppProject
     metadata:
@@ -1004,6 +996,22 @@ projects:
         argocd.argoproj.io/secret-type: repository
         proxcloud.io/bom-release: 0.8.0-dev
         proxcloud.io/platform-installation: pi-0123abcd
+      name: pc-repo-ghcr-io-mutex-solutions-charts-mirror
+      namespace: argocd
+    stringData:
+      enableOCI: "true"
+      name: pc-repo-ghcr-io-mutex-solutions-charts-mirror
+      type: helm
+      url: ghcr.io/mutex-solutions/charts-mirror
+    type: Opaque
+  - apiVersion: v1
+    kind: Secret
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: proxcloud-platform
+        argocd.argoproj.io/secret-type: repository
+        proxcloud.io/bom-release: 0.8.0-dev
+        proxcloud.io/platform-installation: pi-0123abcd
       name: pc-repo-ghcr-io-mutex-solutions-charts
       namespace: argocd
     stringData:
@@ -1011,36 +1019,4 @@ projects:
       name: pc-repo-ghcr-io-mutex-solutions-charts
       type: helm
       url: ghcr.io/mutex-solutions/charts
-    type: Opaque
-  - apiVersion: v1
-    kind: Secret
-    metadata:
-      labels:
-        app.kubernetes.io/managed-by: proxcloud-platform
-        argocd.argoproj.io/secret-type: repository
-        proxcloud.io/bom-release: 0.8.0-dev
-        proxcloud.io/platform-installation: pi-0123abcd
-      name: pc-repo-ghcr-io-argoproj-argo-helm
-      namespace: argocd
-    stringData:
-      enableOCI: "true"
-      name: pc-repo-ghcr-io-argoproj-argo-helm
-      type: helm
-      url: ghcr.io/argoproj/argo-helm
-    type: Opaque
-  - apiVersion: v1
-    kind: Secret
-    metadata:
-      labels:
-        app.kubernetes.io/managed-by: proxcloud-platform
-        argocd.argoproj.io/secret-type: repository
-        proxcloud.io/bom-release: 0.8.0-dev
-        proxcloud.io/platform-installation: pi-0123abcd
-      name: pc-repo-ghcr-io-sergelogvinov-charts
-      namespace: argocd
-    stringData:
-      enableOCI: "true"
-      name: pc-repo-ghcr-io-sergelogvinov-charts
-      type: helm
-      url: ghcr.io/sergelogvinov/charts
     type: Opaque

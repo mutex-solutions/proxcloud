@@ -121,6 +121,7 @@ const (
 	InstallHelmChart   = "helmchart"
 	pendingDigest      = "pending"
 	ownRepo            = "ghcr.io/mutex-solutions/"
+	mirrorRepo         = ownRepo + "charts-mirror" // third-party charts republished by CI (docs/ci-release.md, "Chart mirror")
 	schemaVersion      = 1
 )
 
@@ -150,11 +151,17 @@ var (
 	workloadGrps = []string{"", "all", "system", "kamaji", "dbaas"}
 )
 
+// ownPackage: ref (a chart repo or an image name) is a package this repository builds and publishes at its own tags.
+// The chart mirror is in our registry but holds third-party charts that exist before the BOM names them, so it is not.
+func ownPackage(ref string) bool {
+	return strings.HasPrefix(ref, ownRepo) && ref != mirrorRepo && !strings.HasPrefix(ref, mirrorRepo+"/")
+}
+
 // Validate checks the rules of the BOM and returns every problem it finds:
 //   - every version is exact (no range, no latest);
 //   - every chart and image has a digest;
 //   - only a "-dev" release may hold a 0.0.0+ version or a "pending" digest, and "pending" only for our own packages
-//     (ghcr.io/mutex-solutions/) or a chart at a 0.0.0+ version, which has no stable digest;
+//     (ghcr.io/mutex-solutions/, without the chart mirror) or a chart at a 0.0.0+ version, which has no stable digest;
 //   - component names are unique per cluster and waves ascend in the order components are listed.
 func (b *BOM) Validate() error {
 	dev := strings.HasSuffix(b.Release, "-dev")
@@ -168,7 +175,7 @@ func (b *BOM) Validate() error {
 			bad("%s: %s is allowed only in a -dev release", field, v)
 		}
 	}
-	// mayPend: our own package, or a chart at a 0.0.0+ version.
+	// mayPend: our own package (ownPackage), or a chart at a 0.0.0+ version.
 	digest := func(field, d string, mayPend bool) {
 		switch {
 		case d == pendingDigest && !dev:
@@ -187,7 +194,7 @@ func (b *BOM) Validate() error {
 			bad("%s: chart name %q", field, c.Name)
 		}
 		version(field+".version", c.Version)
-		digest(field, c.Digest, strings.HasPrefix(c.Repo, ownRepo) || movingZero.MatchString(c.Version))
+		digest(field, c.Digest, ownPackage(c.Repo) || movingZero.MatchString(c.Version))
 	}
 	vmImage := func(field string, im VMImage) {
 		if !label.MatchString(im.Package) || im.Tag == "" {
@@ -205,7 +212,7 @@ func (b *BOM) Validate() error {
 			return
 		}
 		version(field+" tag", name[i+1:])
-		digest(field, d, strings.HasPrefix(name, ownRepo))
+		digest(field, d, ownPackage(name))
 	}
 	providers := func(field string, p Providers) {
 		for _, f := range []struct{ key, ref string }{{"core", p.Core}, {"bootstrap", p.Bootstrap},

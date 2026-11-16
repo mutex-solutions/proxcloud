@@ -337,10 +337,11 @@ key a run records it by. It needs `admin:service:read` and changes nothing.
 
 The file pins exact versions only. A digest is the chart's OCI manifest
 digest, or for an `https://` repository the `digest` of that version in its
-`index.yaml`. A `-dev` release (main) may still carry `pending` digests for
+`index.yaml`. A `-dev` release (main) may carry `pending` digests for
 the project's own packages and for a chart at a moving `0.0.0+` version
-(today `kamaji` and `kamaji-crds` at `0.0.0+latest`, which therefore have
-neither an exact version nor a digest); the validation refuses `pending` and
+(today none: the third-party charts come from
+`ghcr.io/mutex-solutions/charts-mirror` at exact versions, and a chart of
+that mirror may never be `pending`); the validation refuses `pending` and
 `0.0.0+` in any other release. A run imports the BOM's two images and builds the
 seed from it; nothing else installs from the BOM yet.
 
