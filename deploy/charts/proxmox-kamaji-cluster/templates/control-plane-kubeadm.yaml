@@ -8,6 +8,18 @@ One replica: the machine template is pinned to one PVE node (a clone to local st
 more replicas would share that node. Its name carries a hash of its spec, as in node-groups.yaml, so a changed flavor or
 image rolls the control plane instead of failing on an immutable template.
 
+kube-vip keeps the address by a lease it renews on the API server (vip_leaseduration, vip_renewdeadline and
+vip_retryperiod, in seconds; kube-vip v0.8.9 pkg/kubevip/config_envvar.go, defaults 15, 10 and 2). When one renewal
+does not finish within the renew deadline it takes the address off the interface and exits ("lost leadership,
+restarting kube-vip", pkg/cluster/clusterLeaderElection.go), and every client of the API loses its connection. With one
+control plane machine nobody else can take the lease, so the values are 60, 40 and 5: an etcd that takes up to 40
+seconds over one write (a lab measured 19.5) keeps the address. The same machine takes its own lease again at once
+after a restart; another machine (a rollout) waits up to 60 seconds for a holder that did not release it.
+
+The kubelet's node-ip is the machine's own address, which only the machine knows (CAPMOX's cloud-init metadata has the
+instance id and the hostname, no address): the prepare script writes it over __NODE_IP__ in kubeadm's configuration
+before kubeadm runs. Without it the node registers the kube-vip address as its InternalIP.
+
 The API server enables PodNodeSelector and PodTolerationRestriction next to kubeadm's NodeRestriction (the flag replaces
 kubeadm's own value): a namespace's scheduler.alpha.kubernetes.io/node-selector and defaultTolerations then place every
 pod in it, whatever chart created the pod.
@@ -29,7 +41,7 @@ pod in it, whatever chart created the pod.
 {{- if $net.mtu }}{{- $_ := set $device "linkMtu" (int $net.mtu) }}{{- $_ := set $device "mtu" 1 }}{{- end }}
 {{- $_ := set $machine "network" (dict "networkDevices" (list $device)) }}
 {{- $mtName := printf "%s-cp-%s-%s" .Release.Name $node (toJson $machine | sha256sum | trunc 8) }}
-{{- $kubelet := list (dict "name" "provider-id" "value" "proxmox://'{{ ds.meta_data.instance_id }}'") (dict "name" "node-labels" "value" (printf "topology.kubernetes.io/region=%s,topology.kubernetes.io/zone=%s" .Values.proxmox.region $node)) }}
+{{- $kubelet := list (dict "name" "provider-id" "value" "proxmox://'{{ ds.meta_data.instance_id }}'") (dict "name" "node-ip" "value" "__NODE_IP__") (dict "name" "node-labels" "value" (printf "topology.kubernetes.io/region=%s,topology.kubernetes.io/zone=%s" .Values.proxmox.region $node)) }}
 ---
 apiVersion: infrastructure.cluster.x-k8s.io/v1alpha2
 kind: ProxmoxMachineTemplate
@@ -76,9 +88,9 @@ spec:
               - {name: port, value: "6443"}
               - {name: vip_arp, value: "true"}
               - {name: vip_leaderelection, value: "true"}
-              - {name: vip_leaseduration, value: "15"}
-              - {name: vip_renewdeadline, value: "10"}
-              - {name: vip_retryperiod, value: "2"}
+              - {name: vip_leaseduration, value: "60"}
+              - {name: vip_renewdeadline, value: "40"}
+              - {name: vip_retryperiod, value: "5"}
               image: {{ required "controlPlane.kubeadm.kubeVipImage is required" $cp.kubeVipImage }}
               imagePullPolicy: IfNotPresent
               name: kube-vip
@@ -103,6 +115,14 @@ spec:
           if [[ -f /run/kubeadm/kubeadm.yaml ]]; then
             sed -i 's#path: /etc/kubernetes/admin.conf#path: /etc/kubernetes/super-admin.conf#' /etc/kubernetes/manifests/kube-vip.yaml
           fi
+          # The kubelet gets the machine's own address as its node-ip. Without one it registers the first address of
+          # the interface, and kube-vip puts the API address on that interface. Cloud-init's metadata has no address,
+          # so it is read here, before kube-vip runs, and written over the placeholder in kubeadm's configuration.
+          ip=$(ip -4 -o route get 1.0.0.0 | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+          [[ -n "$ip" ]]
+          for f in /run/kubeadm/kubeadm.yaml /run/kubeadm/kubeadm-join-config.yaml; do
+            if [[ -f $f ]]; then sed -i "s/__NODE_IP__/$ip/" "$f"; fi
+          done
     preKubeadmCommands: [/etc/kube-vip-prepare.sh]
     initConfiguration:
       nodeRegistration:

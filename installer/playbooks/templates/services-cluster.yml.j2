@@ -109,9 +109,9 @@ spec:
               - {name: port, value: "6443"}
               - {name: vip_arp, value: "true"}
               - {name: vip_leaderelection, value: "true"}
-              - {name: vip_leaseduration, value: "15"}
-              - {name: vip_renewdeadline, value: "10"}
-              - {name: vip_retryperiod, value: "2"}
+              - {name: vip_leaseduration, value: "60"}
+              - {name: vip_renewdeadline, value: "40"}
+              - {name: vip_retryperiod, value: "5"}
               image: ghcr.io/kube-vip/kube-vip:{{ pc_ver.kube_vip }}
               imagePullPolicy: IfNotPresent
               name: kube-vip
@@ -136,16 +136,26 @@ spec:
           if [[ -f /run/kubeadm/kubeadm.yaml ]]; then
             sed -i 's#path: /etc/kubernetes/admin.conf#path: /etc/kubernetes/super-admin.conf#' /etc/kubernetes/manifests/kube-vip.yaml
           fi
+          # The kubelet gets the machine's own address as its node-ip. Without one it registers the first address of
+          # the interface, and kube-vip puts the API address on that interface. Cloud-init's metadata has no address,
+          # so it is read here, before kube-vip runs, and written over the placeholder in kubeadm's configuration.
+          ip=$(ip -4 -o route get 1.0.0.0 | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+          [[ -n "$ip" ]]
+          for f in /run/kubeadm/kubeadm.yaml /run/kubeadm/kubeadm-join-config.yaml; do
+            if [[ -f $f ]]; then sed -i "s/__NODE_IP__/$ip/" "$f"; fi
+          done
     preKubeadmCommands: [/etc/kube-vip-prepare.sh]
     initConfiguration:
       nodeRegistration:
         kubeletExtraArgs:
           - {name: provider-id, value: "proxmox://'{{ '{{' }} ds.meta_data.instance_id {{ '}}' }}'"}
+          - {name: node-ip, value: "__NODE_IP__"}
           - {name: node-labels, value: "topology.kubernetes.io/region={{ pc.provider.region }},topology.kubernetes.io/zone={{ svc.control_plane.node }}"}
     joinConfiguration:
       nodeRegistration:
         kubeletExtraArgs:
           - {name: provider-id, value: "proxmox://'{{ '{{' }} ds.meta_data.instance_id {{ '}}' }}'"}
+          - {name: node-ip, value: "__NODE_IP__"}
           - {name: node-labels, value: "topology.kubernetes.io/region={{ pc.provider.region }},topology.kubernetes.io/zone={{ svc.control_plane.node }}"}
 {% for w in svc.workers %}
 ---
