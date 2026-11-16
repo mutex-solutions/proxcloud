@@ -102,7 +102,7 @@ The page shows each component with its live state, read from the seed, and the t
 2. Add a backup job for the seed VM. The page prints the command. It cannot see whether a job exists.
 3. Attach the providers to projects, and add price rules for clusters and databases.
 
-After a ProxCloud upgrade, **Apply this release** in step 4 brings the components to the new versions. The review lists what changes and refuses a jump that is not supported.
+**Apply this release** in step 4 runs the stages again with the saved settings: it repairs what is missing, applies changed sizes and counts, and renews the seed's access to the platform cluster. This release cannot yet move an installed platform to the components of a newer ProxCloud release: after such an upgrade the review says so and the run is refused with `bom_unsupported`.
 
 ## Seed access and removal
 
