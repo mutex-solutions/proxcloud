@@ -46,10 +46,20 @@ func (c VMConfig) Int(key string) int {
 	}
 }
 
-// GetVMConfig reads the current (non-pending) VM configuration.
+// GetVMConfig reads the VM configuration with pending changes applied (PVE's default, current=0): on a running VM a
+// value can be in it that the VM does not have yet.
 func (c *Client) GetVMConfig(ctx context.Context, node string, vmid int) (VMConfig, error) {
 	var cfg VMConfig
 	if err := c.get(ctx, qemuPath(node, vmid)+"/config", nil, &cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// GetVMConfigCurrent reads the values in effect (current=1), without pending changes.
+func (c *Client) GetVMConfigCurrent(ctx context.Context, node string, vmid int) (VMConfig, error) {
+	var cfg VMConfig
+	if err := c.get(ctx, qemuPath(node, vmid)+"/config", url.Values{"current": {"1"}}, &cfg); err != nil {
 		return nil, err
 	}
 	return cfg, nil

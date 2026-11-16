@@ -15,6 +15,7 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"maps"
 	"math/big"
 	"net"
 	"net/http"
@@ -197,6 +198,7 @@ func (f *fakeImports) MarkTemplateGone(_ context.Context, _ templateupdates.PVER
 // fakeVM is one VM of fakePVE.
 type fakeVM struct {
 	cfg     map[string]any
+	pending map[string]any // config values Proxmox took but has not applied (fakePVE.pendCD)
 	running bool
 	pooled  bool
 	system  bool // a member of proxcloud-system
@@ -217,6 +219,7 @@ type fakePVE struct {
 	keepISO   int               // deletes of an ISO that answer OK but leave the file
 	agent     bool
 	noMAC     bool           // a NIC set without a MAC address stays without one
+	pendCD    bool           // a config write to a running VM ends OK but stays pending
 	macs      int            // MAC addresses given so far
 	cloneBusy bool           // a qmclone task is listed as running
 	poolLag   int            // pool reads that answer without members: a clone that joins its pool after them
@@ -386,7 +389,11 @@ func (f *fakePVE) serve(w http.ResponseWriter, r *http.Request) {
 		rest := strings.Join(strings.Split(path, "/")[5:], "/")
 		switch r.Method + " " + rest {
 		case "GET config":
-			data(vm.cfg)
+			cfg := maps.Clone(vm.cfg)
+			if r.Form.Get("current") != "1" { // as Proxmox: the default answer has the pending values
+				maps.Copy(cfg, vm.pending)
+			}
+			data(cfg)
 		case "POST config":
 			// As Proxmox: deletes are checked against the stored config (a protected VM keeps its drives), then the
 			// values are set, and a NIC sent without a MAC address gets one.
@@ -404,9 +411,17 @@ func (f *fakePVE) serve(w http.ResponseWriter, r *http.Request) {
 					f.macs++ // a new address each time, as Proxmox
 					v = fmt.Sprintf("%s=BC:24:11:00:00:%02X,%s", model, f.macs, rest)
 				}
-				if k != "delete" {
-					vm.cfg[k] = v
+				if k == "delete" {
+					continue
 				}
+				if f.pendCD && vm.running {
+					if vm.pending == nil {
+						vm.pending = map[string]any{}
+					}
+					vm.pending[k] = v
+					continue
+				}
+				vm.cfg[k] = v
 			}
 			data(f.upid("qmconfig", id))
 		case "PUT resize":

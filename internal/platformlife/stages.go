@@ -25,6 +25,7 @@ import (
 const (
 	seedRuleComment = "proxcloud-platform seed"
 	imagesStall     = 60 * time.Minute // stage 2 fails when no import moved for this long
+	templateSettle  = 5 * time.Minute  // how long after an import's last write its template may still be missing from the VM list
 )
 
 // validate is stage 1: the preflight on the frozen spec, with the live isolation check.
@@ -99,11 +100,12 @@ func (x *acq) images(ctx context.Context) error {
 		if !templateupdates.PlacementAllowed(opts, w.node, sp.Storage.Import, sp.Storage.Boot) {
 			return permanent(CodeImageImportFailed, "Node %s needs %s active with import content and %s with images content.", w.node, sp.Storage.Import, sp.Storage.Boot)
 		}
-		state, vmid, err := x.image(ctx, w.node, w.img, rows, actor, &ours)
+		note := ""
+		state, vmid, err := x.image(ctx, w.node, w.img, rows, actor, &ours, &note)
 		if err != nil {
 			return err
 		}
-		items = append(items, StageItem{ID: w.id, State: state})
+		items = append(items, StageItem{ID: w.id, State: state, Message: note})
 		if vmid > 0 {
 			templates[w.id] = vmid
 		}
@@ -129,8 +131,9 @@ func (x *acq) images(ctx context.Context) error {
 	return waiting(CodeImageImportStalled, "%d of %d images are templates; the stage fails when no import moves for an hour.", len(templates), len(wants))
 }
 
-// image is one image on one node: done with its template VMID, or the step of the import in flight.
-func (x *acq) image(ctx context.Context, node string, img VMImage, rows []pve.ClusterResource, actor string, ours *[]string) (string, int, error) {
+// image is one image on one node: done with its template VMID, or the step of the import in flight (note says why an
+// item is "checking").
+func (x *acq) image(ctx context.Context, node string, img VMImage, rows []pve.ClusterResource, actor string, ours *[]string, note *string) (string, int, error) {
 	recs, err := x.r.Imports.ByKey(ctx, x.in.ServiceID, node, img.Digest)
 	if err != nil {
 		return "", 0, classify(CodeImageImportFailed, err)
@@ -152,10 +155,12 @@ func (x *acq) image(ctx context.Context, node string, img VMImage, rows []pve.Cl
 			// Its template was deleted: free the receipt (only on proof), then import again.
 			// Only its refusal (no proof) is permanent; a read that failed is tried again.
 			err := x.r.Imports.MarkTemplateGone(ctx, pvFor, rec.ID)
-			if le := (*templateupdates.LifecycleError)(nil); errors.As(err, &le) && le.Code == "template_present" {
+			if le := (*templateupdates.LifecycleError)(nil); errors.As(err, &le) && le.Code == "template_present" && time.Since(rec.UpdatedAt) < templateSettle {
 				// A VM holds the VMID and may be the template: rows is older than the receipt, and Proxmox lists a new
-				// template's flag and pool a moment after its task ends. The next look settles it; a template that
-				// stays out of the pool moves nothing, and the stage's stall limit ends that.
+				// template's flag and pool a moment after its task ends. The next look settles it. Only an import that
+				// has just written its receipt can be in that window: later the refusal is final (the template was
+				// moved, or is out of the token's view) and fails with its text.
+				*note = clip(le.Message)
 				return "checking", 0, nil
 			} else if errors.As(err, &le) {
 				return "", 0, permanent(CodeImageImportFailed, "VM %d on %s is no template in %s, and it could not be shown to be gone: %s",
@@ -644,7 +649,8 @@ func refused(err error) bool {
 }
 
 // seedIdentity is stage 5: read the portal's service account token with the bootstrap token, store it, delete the
-// bootstrap objects with it, then eject and delete the CD. Done only when the ISO store no longer lists the CD.
+// bootstrap objects with it, then eject and delete the CD. Done only when the running seed's config no longer names
+// the CD and the ISO store no longer lists it.
 func (x *acq) seedIdentity(ctx context.Context) error {
 	st := x.in.Status.Seed
 	if st == nil || st.VMID == 0 || (x.sec.SeedKubeconfig == nil && len(x.sec.BootstrapToken) < 6) {
@@ -711,12 +717,22 @@ func (x *acq) seedIdentity(ctx context.Context) error {
 			}
 		}
 	}
-	cfg, err := x.capi.GetVMConfig(ctx, st.Node, st.VMID)
-	if err != nil {
-		return transient(CodeSeedCDNotDeleted, err)
-	}
-	for _, slot := range cdSlots {
-		if strings.Contains(cfg.Str(slot), "iso/pcplat-"+x.in.ID+"-") {
+	for ejected := false; ; ejected = true {
+		// The values in effect, not the pending ones: a task that ends OK with the eject left pending would leave the
+		// CD (CA key, tokens) readable in the guest while its file is deleted and the stage calls it gone.
+		cfg, err := x.capi.GetVMConfigCurrent(ctx, st.Node, st.VMID)
+		if err != nil {
+			return transient(CodeSeedCDNotDeleted, err)
+		}
+		held := slices.DeleteFunc(slices.Clone(cdSlots), func(slot string) bool { return !strings.Contains(cfg.Str(slot), "iso/pcplat-"+x.in.ID+"-") })
+		if len(held) == 0 {
+			break
+		}
+		if ejected {
+			return waiting(CodeSeedCDNotDeleted, "Proxmox took the eject of %s on VM %d but the running seed still has the CD: the change is pending (qm pending %d).",
+				strings.Join(held, ", "), st.VMID, st.VMID)
+		}
+		for _, slot := range held {
 			// Ejected, not removed: the seed is protected and running, and Proxmox removes no drive from a protected VM
 			// (and an IDE drive of a running one only at its next start), while it changes a CD at once.
 			if err := x.pveTask(ctx, CodeSeedCDNotDeleted, func() (pve.UPID, error) {

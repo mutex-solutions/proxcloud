@@ -410,8 +410,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   template's cloud-init drive is dropped), and stage 5 ejects the CD from the running seed instead of removing its
   drive; a disk size Proxmox writes in bytes is no longer read as GiB. Stage 2 no longer fails
   `image_import_failed` when an import has just finished and Proxmox does not list its template yet (template
-  updates answers `template_present`): it looks again, shows `checking`, and a template that never shows ends at the
-  stall limit with `image_import_stalled`. A failed run is logged at ERROR (`platform run failed`, with the stage,
+  updates answers `template_present`): it looks again and shows `checking` with the VM it waits for, for 5 minutes
+  after the import's last step; after that a VM that is still no template in `pc-templates` fails the stage at once
+  with the refusal that names it. Stage 5 reads the seed's config in effect after the eject: an eject Proxmox took
+  but left pending keeps the CD's file and the stage waiting (`seed_cd_not_deleted`), where the CD used to be
+  deleted and called gone. A failed run is logged at ERROR (`platform run failed`, with the stage,
   the code and the redacted message), no longer at INFO. The guide, the in-app page and the console say what
   `seed_config_refused` can still mean.
 

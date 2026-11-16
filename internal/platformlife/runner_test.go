@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -769,7 +770,7 @@ func TestImageFailures(t *testing.T) {
 func TestImagesWaitsForATemplateThatIsNotListedYet(t *testing.T) {
 	cur, _ := Current()
 	e := imageEnv(t)
-	e.imports.recs = []templateupdates.Receipt{{ID: "tu-seed", Step: templateupdates.StepTemplated, VMID: 9200,
+	e.imports.recs = []templateupdates.Receipt{{ID: "tu-seed", Step: templateupdates.StepTemplated, VMID: 9200, UpdatedAt: time.Now(),
 		Payload: templateupdates.VMPayload{ServiceID: "svc-pve", Node: "pve1", Digest: cur.Seed.Image.Digest}}}
 	for i, n := range []string{"pve1", "pve2", "pve3"} {
 		e.imports.recs = append(e.imports.recs, templateupdates.Receipt{ID: "tu-" + n, Step: templateupdates.StepSucceeded, VMID: 9201 + i,
@@ -780,10 +781,10 @@ func TestImagesWaitsForATemplateThatIsNotListedYet(t *testing.T) {
 	if end := e.once(); end != "defer:waiting_images" {
 		t.Fatalf("template not listed yet: %s", end)
 	}
-	if s := e.stage(StageImages); s.Code != CodeImageImportStalled || len(s.Receipt.Templates) != 3 || s.Items[0].State != "checking" {
+	if s := e.stage(StageImages); s.Code != CodeImageImportStalled || len(s.Receipt.Templates) != 3 || s.Items[0].State != "checking" ||
+		!strings.Contains(s.Items[0].Message, "VM 9200 on pve1") {
 		t.Fatalf("stage %+v %+v", s, s.Receipt)
 	}
-	past := time.Now().Add(-time.Second)
 	e.pve.templates = append(e.pve.templates, pve.ClusterResource{Type: "qemu", VMID: 9200, Node: "pve1", Template: 1, Pool: pve.TemplatePool, Name: "seed"})
 	e.mutate(func(run *Run, _ *Installation, _ *Secrets) { run.Stages[2].State = StageDone }) // stop after stage 2
 	e.once()
@@ -791,15 +792,40 @@ func TestImagesWaitsForATemplateThatIsNotListedYet(t *testing.T) {
 		t.Fatalf("stage %+v %+v, enqueued %d", s, s.Receipt, len(e.imports.enqueued))
 	}
 
-	// The template never shows (moved out of pc-templates): nothing moves, and the stall limit ends the stage.
+	// An import that wrote its receipt long ago is not in that window (its template was moved out of pc-templates): the
+	// refusal fails the stage at once, with the text that names the VM, and nothing is imported.
 	e = imageEnv(t)
-	e.imports.recs = []templateupdates.Receipt{{ID: "tu-seed", Step: templateupdates.StepTemplated, VMID: 9200,
+	e.imports.recs = []templateupdates.Receipt{{ID: "tu-seed", Step: templateupdates.StepTemplated, VMID: 9200, UpdatedAt: time.Now().Add(-time.Hour),
 		Payload: templateupdates.VMPayload{ServiceID: "svc-pve", Node: "pve1", Digest: cur.Seed.Image.Digest}}}
-	e.imports.markErr = &templateupdates.LifecycleError{Status: 409, Code: "template_present", Message: "outside what the token can see"}
-	e.once()
-	e.mutate(func(run *Run, _ *Installation, _ *Secrets) { run.Stages[1].Deadline = &past })
-	if end := e.once(); end != "fail:"+CodeImageImportStalled {
-		t.Fatalf("a template that never shows: %s", end)
+	e.imports.markErr = &templateupdates.LifecycleError{Status: 409, Code: "template_present", Message: "VM 9200 exists outside what this provider's token can see"}
+	if end := e.once(); end != "fail:"+CodeImageImportFailed || len(e.imports.enqueued) != 0 {
+		t.Fatalf("a template that was moved: %s, enqueued %d", end, len(e.imports.enqueued))
+	}
+	if s := e.stage(StageImages); !strings.Contains(s.Message, "VM 9200 exists outside") {
+		t.Fatalf("stage %+v", s)
+	}
+}
+
+// An eject that Proxmox takes (task OK) but leaves pending on the running seed is no eject: the guest still reads the
+// CD, so its file is kept, the bootstrap token and the CD's name stay recorded, and the stage waits.
+func TestSeedIdentityWaitsWhileTheEjectIsPending(t *testing.T) {
+	e, _ := fakeSeedEnv(t, StageSeedIdentity)
+	e.pve.pendCD = true
+	if end := e.once(); end != "defer:waiting_seed_identity" {
+		t.Fatalf("eject pending: %s", end)
+	}
+	_, in, sec := e.state.snapshot()
+	if s := e.stage(StageSeedIdentity); s.Code != CodeSeedCDNotDeleted || !strings.Contains(s.Message, "pending") || len(e.pve.iso) != 1 ||
+		sec.BootstrapToken != runBoot || in.Status.Seed.CDVolume == "" {
+		t.Fatalf("stage %+v, ISO %v, cd %q", s, e.pve.iso, in.Status.Seed.CDVolume)
+	}
+	e.pve.mu.Lock() // the seed's next start applies it
+	vm := e.pve.vms[120]
+	maps.Copy(vm.cfg, vm.pending)
+	vm.pending, e.pve.pendCD = nil, false
+	e.pve.mu.Unlock()
+	if end := e.until(3); end != "complete" || len(e.pve.iso) != 0 {
+		t.Fatalf("end %s, ISO %v", end, e.pve.iso)
 	}
 }
 
