@@ -21,7 +21,11 @@ COMMON = ("os_release", "cloud_init_done_no_errors", "default_user_exactly_job_k
           "no_active_swap", "disk_30g", "root_grown")
 OS_ONLY = ("apt_metadata_available", "root_partition_grown")
 K8S = ("builder_account_retained", "kubelet_enabled", "containerd_active", "k8s_binaries_exact",
-       "crictl_talks_to_containerd")
+       "crictl_talks_to_containerd", "container_signals_not_stacked")
+# Ubuntu 26.04 sets this to 1. Since kernel 7.0.0-42 that forces a "//&unconfined" stack on container tasks, and
+# containerd's AppArmor profile (to 2.3.2 at least) allows signals to its own plain label only: a container's processes
+# cannot signal each other and PostgreSQL never starts (Launchpad 2172640). images/k8s-build-config.py writes 0.
+APPARMOR_STACK = "/proc/sys/kernel/apparmor_restrict_unprivileged_unconfined"
 BUILD_USERS = ("builder", "packer")
 SERIAL_WAIT = 300  # snapd asks for its new serial asynchronously after first boot.
 
@@ -136,6 +140,7 @@ def main(argv):
         kubectl = run(["/usr/bin/kubectl", "version", "--client", "-o", "json"])
         client = json.loads(kubectl.stdout).get("clientVersion", {}).get("gitVersion") if kubectl.returncode == 0 else None
         crictl = run(["/usr/local/bin/crictl", "--runtime-endpoint", "unix:///run/containerd/containerd.sock", "version"])
+        stack = pathlib.Path(APPARMOR_STACK)
         checks.update({
             "builder_account_retained": "builder" in homes,
             "kubelet_enabled": run(["/usr/bin/systemctl", "is-enabled", "kubelet"]).stdout.strip() == "enabled",
@@ -143,6 +148,8 @@ def main(argv):
             "k8s_binaries_exact": run(["/usr/bin/kubeadm", "version", "-o", "short"]).stdout.strip() == want
             and run(["/usr/bin/kubelet", "--version"]).stdout.split()[-1:] == [want] and client == want,
             "crictl_talks_to_containerd": crictl.returncode == 0 and "containerd" in crictl.stdout,
+            # The setting, not the behaviour: no container is started here. Absent on a kernel without it.
+            "container_signals_not_stacked": not stack.exists() or stack.read_text().strip() == "0",
         })
     print(json.dumps({
         "checks": checks, "machine_id_sha256": sha(machine_id), "host_key_sha256": sha(host_key),

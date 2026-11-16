@@ -245,6 +245,20 @@ def private_write(path, text):
     path.chmod(0o600)
 
 
+# Ubuntu 26.04 ships kernel.apparmor_restrict_unprivileged_unconfined=1 (24.04: 0). Since kernel 7.0.0-42 a container
+# task then runs under the stacked label "cri-containerd.apparmor.d//&unconfined", and the profile containerd generates
+# (2.3.2 here) allows signal and ptrace to its plain label only: the processes of one container cannot signal each
+# other, and PostgreSQL hangs at its first connection (Launchpad 2172640, seen on a lab node: 12 denied signals of
+# postgres). A node has no unprivileged local user, so it gets the 24.04 value back; the container profile stays in
+# force. Remove this once the image carries a containerd with the stacked-peer rules (containerd #14487).
+APPARMOR_STACK_SYSCTL = "/etc/sysctl.d/90-proxcloud-apparmor-stack.conf"
+APPARMOR_STACK_LINES = [
+    "printf '%s\\n' '# ProxCloud: Launchpad 2172640, see images/README.md' 'kernel.apparmor_restrict_unprivileged_unconfined = 0' | sudo -n tee " + APPARMOR_STACK_SYSCTL + " >/dev/null",
+    "sudo -n chmod 0644 " + APPARMOR_STACK_SYSCTL,
+    "sudo -n sysctl -q -p " + APPARMOR_STACK_SYSCTL,
+]
+
+
 def network(config, mac):
     return {"version": 2, "ethernets": {"build": {"match": {"macaddress": mac}, "set-name": "build0", "dhcp4": False, "dhcp6": False, "accept-ra": False, "addresses": [config["ip"]], "routes": [{"to": "default", "via": config["gateway"]}], "nameservers": {"addresses": config["dns"]}}}}
 
@@ -296,6 +310,9 @@ def prepare(capi, run, env):
     vars = {"kubernetes_semver": "v" + config["version"], "kubernetes_series": "v" + config["version"].rsplit(".", 1)[0], "kubernetes_deb_version": config["version"] + "-1.1", "kubernetes_rpm_version": config["version"], "disk_format": "raw", "cores": "2", "sockets": "2", "memory": "4096", "disk_size": "%dG" % K8S_BUILD_DISK_GIB, "cpu_type": "host",
             "artifact_name": config["os"] + "-kube-v" + config["version"],
             "iso_url": config["image"]["iso_url"], "iso_checksum_type": "sha256", "iso_checksum": config["image"]["iso_sha256"]}
+    if release != "24.04":
+        # Before the final provisioner of either mode: the static one removes the builder's sudo grant.
+        doc["provisioners"].insert(-1, {"type": "shell", "inline_shebang": "/bin/sh -eu", "inline": APPARMOR_STACK_LINES})
     cleanup = Path(__file__).with_name("k8s-build-cleanup.sh").read_text()
     if config["mode"] == "static":
         seed = run / "seed"
