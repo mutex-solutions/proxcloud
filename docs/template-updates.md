@@ -798,14 +798,29 @@ predates `VM.GuestAgent.Unrestricted` adds it as described in
 --append 1 --privs "VM.GuestAgent.Unrestricted …"`); the smoke network's bridge needs `SDN.Use` as for
 any NIC ([proxmox-permissions.md](proxmox-permissions.md#pveum-commands)).
 
-## Known issue: Ubuntu 26.04 images published before 2026-11-16
+## Known issue: Ubuntu 26.04 images exported before the orphan-file fix
 
-Every `proxcloud-vm-ubuntu-2604` and `proxcloud-vm-ubuntu-2604-k8s` artifact published up to 2026-11-15 has
-a stale field in its ext4 superblock (cause and pipeline fix:
+Every `proxcloud-vm-ubuntu-2604` and `proxcloud-vm-ubuntu-2604-k8s` artifact exported before the fix has a
+stale field in its ext4 superblock (cause, pipeline fix and the list of affected tags and digests:
 [public-vm-sanitization.md](public-vm-sanitization.md#known-issue-stale-orphan-file-inode-in-ubuntu-2604-images-published-before-the-fix)).
 A VM made from one can get `EXT4-fs error ... ext4_lookup ... EFSCORRUPTED` and a read-only root at a
-reboot, once inode 12 holds a file. Affected: every template named `pc-ghcr-ubuntu-2604-*` and every server
-or Kubernetes node cloned from one. `proxcloud-vm-ubuntu-2404` images are not affected.
+reboot, once inode 12 holds a file. Affected: every template imported from one of the listed digests (the
+**Imported templates** tab shows the digest; the name `pc-ghcr-ubuntu-2604-*` alone does not tell, fixed
+images get the same name) and every server or Kubernetes node cloned from one. `proxcloud-vm-ubuntu-2404`
+images are not affected.
+
+**Do not reboot a VM that has logged the error** (`dmesg` shows the line above, or the root is read-only).
+Shut it down and repair it offline first. Its filesystem is marked as having errors, so the next boot runs
+`e2fsck -p` on it. On a scratch image in that state `e2fsck -p` cleared the file in inode 12, left the field
+in place and exited 4 (`UNEXPECTED INCONSISTENCY; RUN fsck MANUALLY`); on Ubuntu that exit status on the root
+stops the boot in the initramfs shell. The offline repair below still applies after that, but the file that
+was in inode 12 is gone. Not measured on a real VM, and the image's fstab was not read.
+
+**Templates: do not repair in place.** Do not publish an affected template to tenants, and replace it by
+importing the re-exported image once one is published. A repair of the template disk was not tested, the
+partition device nodes of a template zvol did not exist on the lab host, and a linked clone is made from the
+template's base snapshot, which a repair of the live disk does not change (PVE behaviour, not verified here).
+Until the template is replaced, repair each VM made from it before its second boot.
 
 **Test**, as root inside the guest (reads only). The same reads were checked against image files; the loop
 was not run inside a guest:
@@ -818,22 +833,36 @@ for d in $(findmnt -rn -t ext4 -o SOURCE | sort -u); do
 done
 ```
 
-**Repair**, only on an UNMOUNTED filesystem: shut the VM down cleanly and run it on the PVE host against the
-partition of the disk (for ZFS `/dev/zvol/<pool>/vm-<id>-disk-0-part1`), or run it from a rescue system. A
-template is repaired the same way, or replaced by importing a fixed image once one is published.
+**Repair** of a VM disk, only on an UNMOUNTED filesystem: shut the VM down and run it on the PVE host, or
+from a rescue system, once for **every** partition the test reported as AFFECTED. For ZFS the partition of
+`/dev/sda1` is `/dev/zvol/<pool>/vm-<id>-disk-0-part1`; the OS image also has `/boot` on `-part13`, the
+Kubernetes node image has one ext4 partition.
 
 ```sh
-debugfs -w -R 'ssv orphan_file_inum 0' /dev/XXX && e2fsck -f -p /dev/XXX
+D=/dev/XXX
+e2fsck -E journal_only -p "$D"
+printf 'ssv orphan_file_inum 0\nclose -a\n' > /tmp/orphan-fix.cmd
+debugfs -w -f /tmp/orphan-fix.cmd "$D"
+[ "$(dd if="$D" bs=1 skip=1664 count=4 2>/dev/null | od -An -tu4 | tr -d ' ')" = 0 ] && e2fsck -f -p "$D"
 ```
 
-- Tested only on scratch image files (e2fsprogs 1.47.0 and 1.47.2), including one where inode 12 held a
-  file: the field became 0, the file kept its content, `e2fsck -fn` was clean afterwards.
-- **Not tested** on a real VM disk, on a zvol, or on a filesystem whose journal needs recovery
-  (`dumpe2fs -h` lists `needs_recovery`). In that case replay the journal first by mounting and unmounting
-  the partition once; a replay after the repair could restore the old superblock.
+- The order matters. `e2fsck -E journal_only` replays the journal and checks nothing else. A VM whose root
+  went read-only could not finish its journal, and without the replay the full check replays it first, which
+  puts the old superblock back, and then clears the file in inode 12.
+- `close -a` writes the field to the backup superblocks too. Without it they keep 12, and a later
+  `e2fsck -b <backup>` brings the field back and deletes the file.
+- `debugfs` exits 0 even when `ssv` failed, so the last line reads the field back and runs the full check
+  only when it is 0. If `e2fsck -f -p` does not run, stop: the field is still set.
+- `e2fsck -f -p` exit status 0 or 1 is success (1: it corrected something); 4 or more is not.
+- Tested only on scratch image files with e2fsprogs 1.47.2, with a file in inode 12, in four states: clean,
+  journal not replayed, marked with errors, and both. Each time the field became 0 in the primary and the
+  backup superblocks, the file kept its content and `e2fsck -fn` was clean afterwards.
+- **Not tested**: a real VM disk, a zvol, a journal left by a real kernel after the error (the scratch
+  journal was written with `debugfs`), e2fsprogs 1.47.0 for the journal and `close -a` steps, `/boot`.
 - **Do not** run the repair on a mounted filesystem: `debugfs -w` also rewrites group descriptors.
-- **Do not** run `e2fsck -y`/`-p` before the field is zero: on the scratch image it deleted the file in
-  inode 12 and left the field in place. `tune2fs -O orphan_file` destroys that file too.
+- **Do not** run `e2fsck -y`/`-p` (other than `-E journal_only`) before the field is zero: on the scratch
+  image it deleted the file in inode 12 and left the field in place. `tune2fs -O orphan_file` destroys that
+  file too.
 - There is no online repair. A root filesystem already read-only needs the offline path.
 
 ## 7. Open items
