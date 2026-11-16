@@ -231,6 +231,7 @@ flowchart LR
   sbxt["sandbox-templates.yml<br/>built-in template images"]:::impl
   vmtools["vm-export-tools.yml<br/>VM export tool image"]:::impl
   capictl["clusterctl.yml<br/>proxcloud-clusterctl image:<br/>clusterctl, kubectl, provider manifests"]:::impl
+  chartmirror["charts-mirror.yml<br/>third-party charts of the platform BOM,<br/>fetched as pinned"]:::impl
   vmexport["vm-artifact-export.yml, export job<br/>self-hosted: copy, sanitize, cold boot, bundle"]:::impl
   vmpublish["vm-artifact-export.yml, hosted jobs<br/>publish (vm-artifacts.yml), attest and verify the attestation, verify by anonymous pull"]:::impl
   helm["helm.yml<br/>lint, OCI chart publish"]:::impl
@@ -252,6 +253,7 @@ flowchart LR
   sbxt --> ghcr
   vmtools -->|"smoke, scan, one tag per commit"| ghcr
   capictl -->|"scan, one push per proxcloud-clusterctl-v* tag"| ghcr
+  chartmirror -->|"charts-mirror: push on a charts-mirror-v* tag, a version is never replaced"| ghcr
   helm --> ghcr
   chart --> helm
   dbchart --> helm
@@ -356,7 +358,7 @@ separate controlled canary.
 | Helm chart `proxcloud` | `deploy/charts/proxcloud` | ghcr OCI | Implemented |
 | Helm chart `database-cluster` | `deploy/charts/database-cluster` | ghcr OCI | Implemented |
 | Helm chart `proxmox-kamaji-cluster` | `deploy/charts/proxmox-kamaji-cluster` (tag `proxmox-kamaji-cluster-v*`). Tenant and sandbox clusters with a Kamaji control plane (default); from 0.1.11 `controlPlane.kind: kubeadm` renders the platform's own workload cluster of managed services (ADR 0009: one `KubeadmControlPlane` VM with kube-vip, node groups, no tenant add-ons), which no path renders yet | ghcr OCI | Implemented (kubeadm mode not run on a cluster) |
-| CI | GitHub Actions `test.yml`, `docker.yml` (api, web, admin, sandbox-proxy, sandbox-runtime), `helm.yml`, `sandbox-templates.yml`, `clusterctl.yml` (proxcloud-clusterctl, on its tag), `bom-verify.yml` (platform BOM pins against the registries by anonymous pull; with `--release` it is the first job of `docker.yml` and a step before the chart push of `helm.yml` on a `v*` tag), and the self-hosted `vm-templates.yml` and `k8s-node-templates.yml` | GitHub | Implemented |
+| CI | GitHub Actions `test.yml`, `docker.yml` (api, web, admin, sandbox-proxy, sandbox-runtime), `helm.yml`, `sandbox-templates.yml`, `clusterctl.yml` (proxcloud-clusterctl, on its tag), `charts-mirror.yml` (the third-party charts of the platform BOM, fetched as pinned and republished under `ghcr.io/mutex-solutions/charts-mirror` on its tag; nothing published yet), `bom-verify.yml` (platform BOM pins against the registries by anonymous pull; with `--release` it is the first job of `docker.yml` and a step before the chart push of `helm.yml` on a `v*` tag), and the self-hosted `vm-templates.yml` and `k8s-node-templates.yml` | GitHub | Implemented |
 | Installer | Ansible playbooks and Makefile (`installer/`): allinone, split service stages and day-2 targets exist; published-artifact fresh install and current full split acceptance remain separate | Operator workstation | Implemented code; do not infer production acceptance |
 | VM template pipeline | `images/build.py` + Packer, `vm-templates.yml`; tag-published, one copy per node on local-disk sites | Self-hosted runner in the Proxmox network, or the installer from the first management host | Implemented |
 | K8s node template pipeline | image-builder; static NoCloud seed ISO or explicit DHCP mode | Self-hosted runner with PVE API and build-guest SSH access; no guest-to-runner HTTP needed in static mode | Implemented; static ISO runtime acceptance pending |

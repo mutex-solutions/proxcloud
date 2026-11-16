@@ -310,7 +310,9 @@ installs Kamaji as chart `0.0.0+latest`, pinned by image tag only. ArgoCD's targ
 for a chart is a version, and the portal cannot look up third-party digests
 (`internal/templateupdates` talks only to our GHCR organisation). Until a mirror under our
 GHCR organisation serves the checked charts, a chart changed upstream behind the same
-version is caught by CI, not at pull time; that gap is stated, not hidden.
+version is caught by CI, not at pull time; that gap is stated, not hidden. The flow that
+publishes that mirror, `ghcr.io/mutex-solutions/charts-mirror`, exists since 2026-11-16
+(`docs/ci-release.md`, "Chart mirror"); the BOM does not use it yet.
 
 ### A7. Seed backup by a PVE backup job
 

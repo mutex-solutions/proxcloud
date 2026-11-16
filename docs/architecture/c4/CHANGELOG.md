@@ -4,6 +4,33 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-16: PR 19 (P3): the chart mirror flow
+
+**What changed:** a new workflow, `charts-mirror.yml`, with its script `.github/scripts/charts_mirror.py`
+and its manifest `deploy/platform/charts-mirror.yaml`. CI gains one flow to GHCR: on a
+`charts-mirror-v*` tag on a commit of `main`, the nine third-party charts of the platform BOM are
+fetched from their upstream repositories as pinned (seven unchanged; `kamaji` and `kamaji-crds` packaged
+from the upstream git tag at an exact version) and pushed to `ghcr.io/mutex-solutions/charts-mirror`.
+The publish job is the only one with `packages: write`; fetching runs without the registry login. A pull
+request runs the same fetch, verification and packaging and pushes nothing. No container of the running
+system changes: the BOM, and so ArgoCD, still takes these charts from upstream.
+
+**Why:** design §12 Q2b and ADR 0009 A6. Kamaji's chart exists upstream only as `0.0.0+latest`, which a
+release tag refuses, and a chart changed upstream behind the same version is caught by CI only. A mirror
+that is written by one workflow and never replaces a version gives ArgoCD one OCI registry that serves
+what CI checked. The BOM switches in a later PR, because the packages exist only after the workflow has
+run on a tag.
+
+**Not verified:** any push; the publish job has only run against a fake `helm` in unit tests. The dry
+run ran against the real registries.
+
+**Views updated:** [C2 containers](c2-containers.md) (CI diagram: `charts-mirror.yml` node and its edge
+to GHCR; CI row).
+
+Files: `.github/workflows/charts-mirror.yml`, `.github/scripts/charts_mirror.py`,
+`.github/scripts/tests/test_charts_mirror.py`, `deploy/platform/charts-mirror.yaml`,
+`docs/ci-release.md`, `docs/adr/0009-managed-services-platform-lifecycle.md`, `CHANGELOG.md`.
+
 ## 2026-11-16: PR 15 (P3): platform stages 6 to 11, the cluster part of Remove, live read, break-glass and rotation
 
 **What changed:** `internal/platformlife` gains stages 6 to 11 of an apply (`cluster.go`), the cluster

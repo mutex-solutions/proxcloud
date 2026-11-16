@@ -321,6 +321,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   boot store. Not in this change: deleting the seed's other Applications before the seed (the seed VM is deleted
   with them) and the `seed.mode: existing` path.
 
+- **CI: a chart mirror flow** (`charts-mirror.yml`, `.github/scripts/charts_mirror.py`,
+  `deploy/platform/charts-mirror.yaml`). The manifest lists the nine third-party charts of the platform BOM; a test
+  keeps it equal to the BOM. A pull request fetches every chart as pinned (sha256 of the archive against the index
+  digest, or a pull by OCI digest), packages `kamaji` and `kamaji-crds` from the upstream tag `26.11.2-edge` at that
+  exact chart version, and pushes nothing. A `charts-mirror-v*` tag on a commit of `main` publishes them under
+  `ghcr.io/mutex-solutions/charts-mirror` and never replaces a served version. Nothing is published yet and the BOM
+  still takes the charts from upstream: the tag, making the packages public and the BOM change are the next steps
+  (`docs/ci-release.md`, "Chart mirror"). Not verified: any push, which has only run against a fake `helm`.
+
 ### Changed
 
 - **The platform BOM pins our four published packages by digest, and CI checks every pin**

@@ -1,0 +1,170 @@
+name: charts-mirror
+
+# Republishes the third-party charts of the platform BOM, as pinned in deploy/platform/charts-mirror.yaml, under
+# oci://ghcr.io/mutex-solutions/charts-mirror (.github/scripts/charts_mirror.py, docs/ci-release.md "Chart mirror").
+#   pull request            -> the script's unit tests, then a dry run with a read-only token: every chart is fetched,
+#                              verified against its pin and packaged; no login, nothing is pushed
+#   tag charts-mirror-v<n>  -> the same, then push each chart version the mirror does not serve yet and record the
+#                              digests; a version that is already served is never replaced (same content: skipped,
+#                              different content: the run fails); the tagged commit must be on main
+# A tag and not a push to main: a published version can never be replaced, so publishing is an owner step on a chosen
+# commit, like the other package flows, and not a side effect of every merge that touches the manifest.
+# Hosted runner only: no PVE access, no secret other than the built-in token.
+on:
+  push:
+    tags: ["charts-mirror-v*"]
+  pull_request:
+    branches: [main]
+    paths:
+      - "deploy/platform/charts-mirror.yaml"
+      - "deploy/platform/platform-bom.yaml"
+      - ".github/scripts/charts_mirror.py"
+      - ".github/scripts/bom_verify.py"
+      - ".github/scripts/tests/test_charts_mirror.py"
+      - ".github/workflows/charts-mirror.yml"
+
+permissions:
+  contents: read
+
+# One publication at a time: the check "is this version served" and the push are not atomic.
+concurrency:
+  group: charts-mirror-${{ github.event.pull_request.number || 'publish' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  # The Helm release that fetches, packages and pushes; the archive is checked by size and sha256 before use.
+  HELM_VERSION: '3.21.4'
+  HELM_SHA256: 61f88ab166748cb19604d7884cb100ae9ccb13804ddeb98e08af167eacbb6a14
+  HELM_SIZE: '18056003'
+
+jobs:
+  # Pull requests (whose code is not reviewed yet) run with a read-only token: nothing is pushed.
+  check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Unit tests (no network)
+        run: python3 -m unittest discover -s .github/scripts/tests -p test_charts_mirror.py -v
+
+      - name: Download and verify the official Helm release before extracting the binary
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/helm"
+          curl --fail --silent --show-error --location --retry 3 \
+            --proto '=https' --proto-redir '=https' \
+            "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" \
+            --output "$RUNNER_TEMP/helm/helm.tar.gz"
+          test "$(stat -c %s "$RUNNER_TEMP/helm/helm.tar.gz")" = "$HELM_SIZE"
+          printf '%s  %s\n' "$HELM_SHA256" "$RUNNER_TEMP/helm/helm.tar.gz" | sha256sum --check --strict
+          tar xzf "$RUNNER_TEMP/helm/helm.tar.gz" -C "$RUNNER_TEMP/helm" --strip-components=1 linux-amd64/helm
+          printf '%s\n' "$RUNNER_TEMP/helm" >> "$GITHUB_PATH"
+
+      - name: Fetch, verify and package every chart without publishing
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          helm version --short
+          python3 .github/scripts/charts_mirror.py --out result
+          cat result/charts-mirror.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Preserve the packaged charts and the table
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: charts-mirror-dry-run-${{ github.event.pull_request.head.sha || github.sha }}
+          path: result/
+          if-no-files-found: warn
+          retention-days: 3
+
+  # Trusted runs only. The steps up to the dry run are the ones of `check`; the registry login comes after them, and
+  # the script gives it to the calls that reach the mirror only.
+  publish:
+    if: github.event_name == 'push' && github.repository == 'mutex-solutions/proxcloud' && startsWith(github.ref, 'refs/tags/charts-mirror-v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Require a mirror tag on main
+        run: |
+          set -euo pipefail
+          # The tag name comes from the environment, never spliced into the script. It only selects the commit:
+          # what is published is what the manifest of that commit pins.
+          [[ "$GITHUB_REF_NAME" =~ ^charts-mirror-v[1-9][0-9]*$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main
+
+      - name: Unit tests (no network)
+        run: python3 -m unittest discover -s .github/scripts/tests -p test_charts_mirror.py -v
+
+      - name: Download and verify the official Helm release before extracting the binary
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/helm"
+          curl --fail --silent --show-error --location --retry 3 \
+            --proto '=https' --proto-redir '=https' \
+            "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" \
+            --output "$RUNNER_TEMP/helm/helm.tar.gz"
+          test "$(stat -c %s "$RUNNER_TEMP/helm/helm.tar.gz")" = "$HELM_SIZE"
+          printf '%s  %s\n' "$HELM_SHA256" "$RUNNER_TEMP/helm/helm.tar.gz" | sha256sum --check --strict
+          tar xzf "$RUNNER_TEMP/helm/helm.tar.gz" -C "$RUNNER_TEMP/helm" --strip-components=1 linux-amd64/helm
+          printf '%s\n' "$RUNNER_TEMP/helm" >> "$GITHUB_PATH"
+
+      - name: Fetch, verify and package every chart without publishing
+        run: |
+          set -euo pipefail
+          helm version --short
+          python3 .github/scripts/charts_mirror.py --out "$RUNNER_TEMP/dry-run"
+
+      - name: Authenticate for this publication only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Publish the versions the mirror does not serve and record the digests
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/charts_mirror.py --push --out result
+          {
+            echo '## Chart mirror published; the platform uses a chart only once its digest is pinned in the BOM'
+            echo
+            cat result/charts-mirror.md
+            echo
+            echo 'Pending: an owner makes each new package public on GHCR, then a reviewed change pins these'
+            echo 'references and manifest digests in deploy/platform/platform-bom.yaml.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the digest record
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: charts-mirror-digests-${{ github.sha }}
+          path: result/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Remove registry login
+        if: always()
+        run: helm registry logout ghcr.io || true

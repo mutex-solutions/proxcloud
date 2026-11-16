@@ -20,6 +20,7 @@ artifacts and later controlled PVE template canaries remain separate steps. Read
 | `security-scan.yml` | PRs targeting `main`; pushes to `main` | Exact-head Trivy 0.76.2 scans of lockfiles, six local product images, eleven non-GPU template outputs, thirteen raw upstream bases (report-only) and a nondefault controlled-base prototype; required `security-gate` job and a PR summary comment. Nothing is pushed. Not triggered by release tags. |
 | `docker.yml` | PRs to `main`, `main` pushes, `v*` tags, manual dispatch | Job `bom-verify` runs first; on a tag it is the [platform BOM release gate](#platform-bom-verification-and-release-gate) and the builds wait for it. PRs build five images without pushing. Image-relevant `main` pushes publish `dev-<7-char-sha>`; docs/chart-only changes can skip. Tags publish exact image tags; manual dispatch pushes `dev-<sha>` or `dev-<suffix>`. Hosted runner. |
 | `helm.yml` | Chart-path PRs to `main`; app or managed-chart tags | PR lint/render only. App `v*` publishes `proxcloud`; `database-cluster-v*`, `proxmox-kamaji-cluster-v*` and `proxcloud-platform-v*` publish their independent charts. Hosted runner; no publication on ordinary merge. |
+| `charts-mirror.yml` | PRs to `main` that touch the mirror manifest, the BOM, the script or its tests; `charts-mirror-v*` tags | PR runs the script's tests and a dry run with a read-only token: every third-party chart of the BOM is fetched, verified against its pin and packaged, nothing is pushed. A tag on a commit of `main` pushes each chart version that [the chart mirror](#chart-mirror) does not serve yet to `ghcr.io/mutex-solutions/charts-mirror`, never replaces a served version, and records the digests. Hosted runner. |
 | `bom-verify.yml` | PRs to `main` that touch `deploy/platform/**` or the script; weekly schedule; manual dispatch | Compares every pin of the platform BOM with its registry by anonymous pull. Read-only token, no secret, nothing is pushed. Hosted runner. |
 | `sandbox-templates.yml` | Selected source pushes/PRs, schedule, manual dispatch | PR read-only build; trusted runs push built-in images, then `main` opens a digest-pin PR. Not cluster deployment. Hosted runner. |
 | `vm-export-tools.yml` | Tool-image recipe pushes/PRs, manual dispatch on `main` | PR builds, smokes and scans the VM export tool image with a read-only token. `main` then pushes it to GHCR under one tag it never replaces and records the digest; `capsule.py` pins one reviewed digest and the export job pulls it. Hosted runner. |
@@ -174,8 +175,9 @@ Where it runs:
 
 `v0.8.0` cannot be tagged yet: the BOM is `0.8.0-dev`, and the `kamaji` and
 `kamaji-crds` charts are `0.0.0+latest` with a `pending` digest. The tag passes
-once the chart mirror pins both and the release drops `-dev`. The same applies
-to a `v0.8.0-rc.N` tag.
+once the BOM takes both from [the chart mirror](#chart-mirror) at an exact
+version and digest and the release drops `-dev`. The same applies to a
+`v0.8.0-rc.N` tag.
 
 Not verified:
 
@@ -192,6 +194,121 @@ Not verified:
   `index.yaml` by indentation, not with a YAML library.
 - Whether a pinned version is still the wanted one. The check proves a pin is
   still served, not that it is current.
+
+## Chart mirror
+
+The platform's third-party charts are republished, public, under
+`oci://ghcr.io/mutex-solutions/charts-mirror/<chart>` (owner decision of
+2026-11-16), so that ArgoCD can pull from one OCI registry what CI verified, and
+so that Kamaji has an exact chart version. Only GitHub Actions publishes there.
+The mirror flow exists; **nothing has been published yet and the BOM does not
+use the mirror yet**.
+
+`deploy/platform/charts-mirror.yaml` lists every third-party chart of the BOM
+with its source. A test (`test_charts_mirror.py`) keeps it equal to the BOM:
+the same charts, versions and digests, and no chart the BOM does not use.
+[`charts_mirror.py`](../.github/scripts/charts_mirror.py) (standard library,
+`helm` and `git`) handles each entry by its kind:
+
+| Source | What is fetched and checked | What is published |
+|---|---|---|
+| `https://` repository | `helm pull` of the exact version; the sha256 of the `.tgz` must equal the pinned index digest. | The downloaded archive, unchanged. |
+| OCI repository | `helm pull` by the pinned manifest digest. | The pulled archive, unchanged. |
+| Upstream git tag (`kamaji`, `kamaji-crds`) | `git fetch` of the tag, which must still point at the pinned commit; no symlink in the chart directory; the chart's dependencies must be exactly the one the manifest pins by sha256, or none. | `helm package --version --app-version` of the chart directory. |
+
+In all three cases the name and version inside the archive must be those of the
+manifest. Fetching is anonymous: those `helm` calls get an empty registry
+configuration and `git` runs without configuration. All charts are verified and
+compared with the mirror before the first push.
+
+Kamaji: upstream publishes its chart for edge releases only as the moving
+version `0.0.0+latest`. The mirror packages `charts/kamaji` and
+`charts/kamaji-crds` from the upstream tag `26.11.2-edge` (commit
+`31fed7a654b361ff8332a79184e6b0d2a05eb343`), the tag of the image the BOM pins,
+as chart version and `appVersion` `26.11.2-edge`. That is a valid SemVer
+version without `+`, equal to the upstream tag, and it makes the chart's
+default image the pinned one. The `kamaji` chart declares `kamaji-etcd` as a
+dependency and locks `0.15.0`; that archive is vendored by sha256, as upstream's
+own package does, although the platform installs `kamaji-etcd` 0.18.1
+separately and sets `kamaji-etcd.deploy: false`. Apart from `Chart.yaml`
+(version, `appVersion`, and the formatting `helm package` gives it) the files
+are those of the commit.
+
+`helm package` is not byte-reproducible: it stamps the current time on every
+file, so two runs give archives with different sha256 (measured with Helm
+3.21.4). For the two Kamaji charts the digest pinned in the BOM therefore means
+"the one archive CI pushed", not "what anyone can rebuild bit for bit". The
+script prints a second digest, `content`, over the path and sha256 of every file
+in the archive; that one is equal across runs and is what decides "same
+content" below. For the seven unchanged charts the published archive has the
+sha256 of the upstream one.
+
+Publishing never replaces a version. For each chart the script first pulls that
+version from the mirror: the same files mean the chart is skipped, other files
+fail the run, and an answer other than "not found" or "denied" fails the run.
+After a push the chart is pulled back by the reported manifest digest and its
+bytes are compared with the pushed archive.
+
+Order of use:
+
+1. Merge the pull request that adds or changes `charts-mirror.yaml`. Its dry
+   run already fetched, verified and packaged every chart.
+2. Tag a commit of `main` `charts-mirror-v<n>` (`charts-mirror-v1` the first
+   time). The tag only selects the commit; the manifest decides what is
+   published. A tag and not a push to `main`: a published version can never be
+   replaced, so publishing is an owner step on a chosen commit, as for the
+   other packages, and not a side effect of every merge.
+3. Make each new package public on GHCR (owner step, package settings). A
+   package pushed by the workflow starts private, and `bom-verify` pulls
+   anonymously.
+4. In a follow-up pull request, point the BOM's third-party charts at
+   `ghcr.io/mutex-solutions/charts-mirror` with the versions of the manifest
+   and the manifest digests of the run (the job summary and the
+   `charts-mirror-digests-<sha>` artifact, `charts-mirror.json`). `bom-verify`
+   checks them like our own OCI charts; it needed no change.
+5. The release can then drop `-dev`.
+
+A run that fails after some pushes can be run again (re-run the job, or a next
+tag): what is already served with the same content is skipped and its digest
+is printed again.
+
+Licences of the mirrored charts (the licence file of each upstream repository,
+read on 2026-11-16): Apache-2.0 for all nine, `argoproj/argo-helm` (argo-cd),
+`cert-manager/cert-manager`, `cilium/cilium`, `metallb/metallb`,
+`cloudnative-pg/charts`, `sergelogvinov/proxmox-csi-plugin`, `clastix/kamaji`
+(kamaji, kamaji-crds) and `clastix/kamaji-etcd`. Apache-2.0 allows
+redistribution, also of a modified work if the change is stated; the only
+change is the version stamp of the two Kamaji charts, stated here and in the
+manifest. The script refuses a manifest entry whose `licence` is not Apache-2.0
+or MIT. Only the archives of cilium, cloudnative-pg and kamaji-etcd contain a
+licence file (the kamaji archive holds the one of its vendored kamaji-etcd),
+and cert-manager names Apache-2.0 in a `Chart.yaml` annotation; the others are
+republished as upstream ships them, without a licence file.
+This is not legal advice.
+
+Not verified:
+
+- Any push. `helm push`, the read-back, the skip of a served version and the
+  workflow's publish job have only run against a fake `helm` in the unit tests.
+  The dry run (fetch, verify, package, and the read of the still absent mirror)
+  ran against the real registries.
+- How GHCR answers a pull of a missing package for a logged-in workflow token.
+  Anonymously it answers `denied`, which the script counts as absent; if the
+  token gets another answer the run fails before any push and the pattern has
+  to be extended.
+- That "denied" can never hide a served version. It rests on GHCR giving no
+  write access without read access; in that case the push is refused too.
+- The check and the push are not atomic. The workflow's concurrency group runs
+  one publication at a time; a push from outside this workflow is not excluded
+  by code.
+- Signatures and provenance of the upstream charts and of the Kamaji source.
+  The pins are the digests the BOM already held and one git commit.
+- The Kamaji charts on a cluster. They render with `helm template`; the lab has
+  not installed them from the mirror.
+- That ArgoCD pulls by digest. It still pulls by version; the mirror makes a
+  version immutable by this workflow's rule, not by the registry.
+- The Helm download itself beyond its size and sha256, which were taken from
+  `get.helm.sh` on 2026-11-16.
 
 ## Current release-gate limitations
 
