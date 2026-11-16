@@ -593,57 +593,98 @@ func (s *Service) reconcileIsolation(ctx context.Context, projectID, pool string
 	return s.setProjectIsolation(ctx, projectID, cidrs)
 }
 
+// ErrIsolationRefused marks the cases in which ReconcileProviderIsolation writes nothing on purpose and the next cycle
+// will not either: a config or a cluster state someone has to change, not a failed call.
+var ErrIsolationRefused = errors.New("pve isolation")
+
+func refused(format string, a ...any) error {
+	return fmt.Errorf("%w: %s", ErrIsolationRefused, fmt.Sprintf(format, a...))
+}
+
 // ReconcileProviderIsolation writes this portal's provider-wide DROPs and touches no project's ACCEPTs: the sync calls
 // it once per provider, so the rules exist before the first tenant network and the managed-services preflight can be
 // made green on a provider with no project (on a cluster another portal shares, ErrIsolationPending never applies).
-// A cidrPool that overlaps a management network is refused: with no tenant yet, "DROP pool to pool" would only cut
-// the nodes off each other. So are rules in place for another pool (otherPool): with no tenant of its own to protect,
-// this call must not delete the DROPs of a portal or provider that shares the rule owner. A changed cidrPool is
-// therefore rolled out by the per-project path, not by this one.
+// It has no tenant waiting and none of its own to protect, so it refuses (ErrIsolationRefused) wherever a write could
+// do harm: on a node read that is not complete, for a cidrPool that overlaps a management network ("DROP pool to pool"
+// would only cut the nodes off each other), and when the rules in place are for another pool (otherPool) or drop
+// something its own set does not (uncovered): a portal or provider that shares the rule owner may depend on them. It
+// therefore only ever adds protection; a changed cidrPool or a narrowed list is rolled out by the per-project path,
+// or by hand.
 func (s *Service) ReconcileProviderIsolation(ctx context.Context, pool string, blocked, sandbox []string, allow ...string) error {
-	if err := s.poolOverManagement(ctx, pool); err != nil {
-		return err
-	}
 	return s.reconcileDrops(ctx, true, pool, blocked, sandbox, allow)
 }
 
 // poolOverManagement is the error for a cidrPool that overlaps a management network of the nodes, which
 // ReconcileProviderIsolation refuses to write rules for.
-func (s *Service) poolOverManagement(ctx context.Context, pool string) error {
-	_, poolNet, err := net.ParseCIDR(pool)
-	if err != nil {
-		return fmt.Errorf("pve isolation: invalid cidrPool %q", pool)
-	}
-	mgmt, _, err := s.C.ManagementCIDRs(ctx)
-	if err != nil {
-		return err
-	}
+func poolOverManagement(pool *net.IPNet, mgmt []string) error {
 	for _, m := range mgmt {
-		if _, n, err := net.ParseCIDR(m); err == nil && (poolNet.Contains(n.IP) || n.Contains(poolNet.IP)) {
-			return fmt.Errorf("pve isolation: cidrPool %s overlaps the management network %s: the provider sync writes no rule for it, choose another cidrPool", poolNet, n)
+		if _, n, err := net.ParseCIDR(m); err == nil && (pool.Contains(n.IP) || n.Contains(pool.IP)) {
+			return refused("cidrPool %s overlaps the management network %s: the provider sync writes no rule for it, choose another cidrPool", pool, n)
 		}
 	}
 	return nil
 }
+
+// byHand is how rules no provider sync replaces are replaced on a provider with no project.
+const byHand = "delete the %[1]s rules under Datacenter > Firewall and run a provider sync"
 
 // otherPool is the error for owner rules in place that fence another pool than pool, nil otherwise: every rule set
 // has "DROP pool to pool" (isolationRules), which names the pool it was written for.
 func otherPool(mine []FirewallRule, owner string, pool *net.IPNet) error {
 	for _, r := range mine {
 		if r.Action == "DROP" && r.Source == r.Dest && r.Source != pool.String() {
-			return fmt.Errorf("pve isolation: the %s rules in the cluster firewall are for another pool (%s), not cidrPool %s: another portal or provider on this cluster uses the same pool prefix (give this provider its own poolPrefix), or this provider's cidrPool changed (its first tenant network or a project's sync rewrites them); a provider sync with no project leaves them in place",
+			return refused("the %[1]s rules in the cluster firewall are for another pool (%[2]s), not cidrPool %[3]s: another portal or provider on this cluster uses the same pool prefix (give this provider its own poolPrefix), or this provider's cidrPool changed (a project's sync or a network create rewrites them; with no project, "+byHand+"); a provider sync with no project leaves them in place",
 				owner, r.Source, pool)
 		}
 	}
 	return nil
 }
 
-// reconcileDrops brings this portal's provider-wide rules (isolationWant) into the cluster firewall. keepOtherPool
-// (the provider-level call) refuses instead when the rules in place are for another pool.
-func (s *Service) reconcileDrops(ctx context.Context, keepOtherPool bool, pool string, blocked, sandbox, allow []string) error {
-	want, owner, poolNet, complete, err := s.isolationWant(ctx, pool, blocked, sandbox, allow)
+// uncovered is the error for an owner DROP in place that want would not keep: some source and destination it drops
+// (each a network of its comma lists) lies in no DROP of want of the same type. Equal or wider networks cover.
+func uncovered(mine, want []FirewallRule, owner string) error {
+	covers := func(list, entry string) bool {
+		e, eerr := netip.ParsePrefix(entry)
+		for _, c := range strings.Split(list, ",") {
+			if p, err := netip.ParsePrefix(c); c == entry || err == nil && eerr == nil && p.Bits() <= e.Bits() && p.Contains(e.Addr()) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, r := range mine {
+		if r.Action != "DROP" {
+			continue
+		}
+		for _, src := range strings.Split(r.Source, ",") {
+			for _, dst := range strings.Split(r.Dest, ",") {
+				if !slices.ContainsFunc(want, func(w FirewallRule) bool {
+					return w.Action == "DROP" && w.Type == r.Type && covers(w.Source, src) && covers(w.Dest, dst)
+				}) {
+					return refused("the %[1]s rules in the cluster firewall drop %[2]s to %[3]s, which this provider's cidrPool, blockedCidrs and sandboxCidrs do not: another portal or provider on this cluster uses the same pool prefix (give this provider its own poolPrefix), or this provider's list was narrowed (a project's sync or a network create rewrites them; with no project, "+byHand+"); a provider sync with no project removes no DROP in place",
+						owner, src, dst)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// reconcileDrops brings this portal's provider-wide rules (isolationWant) into the cluster firewall. providerLevel
+// (the call with no project) refuses instead wherever ReconcileProviderIsolation says so.
+func (s *Service) reconcileDrops(ctx context.Context, providerLevel bool, pool string, blocked, sandbox, allow []string) error {
+	want, owner, poolNet, mgmt, complete, err := s.isolationWant(ctx, pool, blocked, sandbox, allow)
 	if err != nil {
 		return err
+	}
+	if providerLevel {
+		// A node that did not answer may hold the management network the pool overlaps, and want lacks its DROP.
+		if !complete {
+			return refused("a PVE node did not report its networks; the provider sync writes no rule until it does")
+		}
+		if err := poolOverManagement(poolNet, mgmt); err != nil {
+			return err
+		}
 	}
 	rules, err := s.C.ListClusterFirewallRules(ctx)
 	if err != nil {
@@ -655,13 +696,13 @@ func (s *Service) reconcileDrops(ctx context.Context, keepOtherPool bool, pool s
 			mine = append(mine, r)
 		}
 	}
-	if keepOtherPool {
-		if err := otherPool(mine, owner, poolNet); err != nil {
+	if providerLevel {
+		if err := cmp.Or(otherPool(mine, owner, poolNet), uncovered(mine, want, owner)); err != nil {
 			return err
 		}
 	}
 	// With a node down the list may miss a network only it knew, so DROPs in place stay until it is
-	// back. A project's own ACCEPTs do not depend on it.
+	// back. A project's own ACCEPTs do not depend on it. A tenant's first network is not held up by a dead node.
 	if !slices.EqualFunc(mine, want, sameLiveRule) && (complete || len(mine) == 0) {
 		return s.rebuildIsolation(ctx, rules, want, owner, poolNet)
 	}
@@ -670,21 +711,20 @@ func (s *Service) reconcileDrops(ctx context.Context, keepOtherPool bool, pool s
 
 // isolationWant is this portal's provider-wide isolation rule set (isolationRules over the management networks plus
 // blocked). complete is false when a node did not report its networks.
-func (s *Service) isolationWant(ctx context.Context, pool string, blocked, sandbox, allow []string) (want []FirewallRule, owner string, poolNet *net.IPNet, complete bool, err error) {
+func (s *Service) isolationWant(ctx context.Context, pool string, blocked, sandbox, allow []string) (want []FirewallRule, owner string, poolNet *net.IPNet, mgmt []string, complete bool, err error) {
 	if _, poolNet, err = net.ParseCIDR(pool); err != nil {
-		return nil, "", nil, false, fmt.Errorf("pve isolation: invalid cidrPool %q", pool)
+		return nil, "", nil, nil, false, fmt.Errorf("pve isolation: invalid cidrPool %q", pool)
 	}
-	mgmt, complete, err := s.C.ManagementCIDRs(ctx)
-	if err != nil {
-		return nil, "", nil, false, err
+	if mgmt, complete, err = s.C.ManagementCIDRs(ctx); err != nil {
+		return nil, "", nil, nil, false, err
 	}
 	allow = managementEndpoints(allow, append([]string{poolNet.String()}, blocked...))
 	blocked = slices.Compact(slices.Sorted(slices.Values(append(mgmt, blocked...))))
 	if sandbox, err = sandboxNets(poolNet, blocked, sandbox); err != nil {
-		return nil, "", nil, false, err
+		return nil, "", nil, nil, false, err
 	}
 	owner = s.isolationOwner()
-	return isolationRules(poolNet.String(), blocked, sandbox, owner, allow...), owner, poolNet, complete, nil
+	return isolationRules(poolNet.String(), blocked, sandbox, owner, allow...), owner, poolNet, mgmt, complete, nil
 }
 
 // CheckSandboxIsolation is the isolation release gate of a sandbox provider (docs/managed-sandbox.md §3): read-only,
@@ -715,7 +755,7 @@ func (s *Service) CheckIsolation(ctx context.Context, pool string, blocked, sand
 }
 
 func (s *Service) checkIsolation(ctx context.Context, pendingOK bool, pool string, blocked, sandbox []string, allow ...string) error {
-	want, owner, poolNet, complete, err := s.isolationWant(ctx, pool, blocked, sandbox, allow)
+	want, owner, poolNet, mgmt, complete, err := s.isolationWant(ctx, pool, blocked, sandbox, allow)
 	if err != nil {
 		return err
 	}
@@ -742,14 +782,12 @@ func (s *Service) checkIsolation(ctx context.Context, pendingOK bool, pool strin
 			mine = append(mine, r)
 		}
 	}
-	// No sync writes rules for such a pool (ReconcileProviderIsolation), so neither "pending" nor "a sync writes
-	// them" would be true.
-	if len(mine) == 0 {
-		if err := s.poolOverManagement(ctx, pool); err != nil {
-			return err
-		}
+	if slices.EqualFunc(mine, want, sameRule) {
+		return nil
 	}
-	if err := otherPool(mine, owner, poolNet); err != nil {
+	// The provider sync refuses in these three cases (ReconcileProviderIsolation), so neither "pending" nor "a
+	// provider sync writes them" would be true.
+	if err := cmp.Or(poolOverManagement(poolNet, mgmt), otherPool(mine, owner, poolNet), uncovered(mine, want, owner)); err != nil {
 		return err
 	}
 	if len(mine) == 0 && pendingOK {
@@ -761,15 +799,12 @@ func (s *Service) checkIsolation(ctx context.Context, pendingOK bool, pool strin
 			return ErrIsolationPending
 		}
 	}
-	if !slices.EqualFunc(mine, want, sameRule) {
-		what := "for sandbox networks " + strings.Join(sandbox, ",")
-		if len(sandbox) == 0 {
-			what = "for these blocked networks"
-		}
-		return fmt.Errorf("pve isolation: the %s rules in the cluster firewall are not the ones %s (%d in place, %d wanted); a provider sync writes them, with or without a project",
-			owner, what, len(mine), len(want))
+	what := "for sandbox networks " + strings.Join(sandbox, ",")
+	if len(sandbox) == 0 {
+		what = "for these blocked networks"
 	}
-	return nil
+	return fmt.Errorf("pve isolation: the %s rules in the cluster firewall are not the ones %s (%d in place, %d wanted); a provider sync writes them, with or without a project",
+		owner, what, len(mine), len(want))
 }
 
 // sandboxNets normalises the sandbox networks. One that overlaps the tenant pool is refused: a

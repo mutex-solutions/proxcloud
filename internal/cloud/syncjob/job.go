@@ -430,6 +430,7 @@ func (j *Job) syncProxmoxService(ctx context.Context, p *project.Project, es *ex
 // reconcileProviderIsolation writes the provider's own isolation DROPs, project or not: a provider with no project
 // had none until its first tenant network, so the managed-services preflight could not pass on a cluster where another
 // portal already has tenant networks. Same lock as the per-project reconcile; a busy lock waits for the next cycle.
+// Every way out without a write leaves a log line: the preflight sends the operator to this sync.
 func (j *Job) reconcileProviderIsolation(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) {
 	netCfg := es.PVENetworkConfig()
 	if j.sdnLock == nil || netCfg.CIDRPool == "" {
@@ -437,13 +438,27 @@ func (j *Job) reconcileProviderIsolation(ctx context.Context, ps *pve.Service, e
 	}
 	start := j.now()
 	ok, err := j.sdnLock.Lock(ctx, project.SDNApplyLockName, project.SDNApplyMaxFor, start)
-	if err != nil || !ok {
+	if err != nil {
+		j.log.Warn("syncjob: provider isolation: sdn lock, retried on the next sync", "serviceId", es.ID, "err", err)
+		return
+	}
+	if !ok {
+		j.log.Info("syncjob: provider isolation: the sdn lock is busy, skipped until the next sync", "serviceId", es.ID)
 		return
 	}
 	defer func() { _ = j.sdnLock.Unlock(ctx, project.SDNApplyLockName, 0, start, j.now()) }()
 	if err := ps.ReconcileProviderIsolation(ctx, netCfg.CIDRPool, netCfg.BlockedCIDRs, netCfg.SandboxCIDRs, es.PVESandboxEndpoints()...); err != nil {
-		j.log.Error("syncjob: reconcile provider isolation", "serviceId", es.ID, "err", err)
+		j.log.Log(ctx, providerIsolationLevel(err), "syncjob: reconcile provider isolation", "serviceId", es.ID, "err", err)
 	}
+}
+
+// providerIsolationLevel: a refusal (pve.ErrIsolationRefused) comes back on every cycle until someone changes the
+// config or the cluster, and the per-project path keeps working meanwhile, so it is a warning; a failed call is an error.
+func providerIsolationLevel(err error) slog.Level {
+	if errors.Is(err, pve.ErrIsolationRefused) {
+		return slog.LevelWarn
+	}
+	return slog.LevelError
 }
 
 // reconcileIsolation brings the project's firewall rules to the current rule set: a project made
