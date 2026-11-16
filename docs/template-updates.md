@@ -228,7 +228,8 @@ succeeded | failed`.
 - **VMID** follows `images/build.py next_vmid`: the lowest free id from 9200 (cluster-wide), retried on
   "already exists".
 - **Result**: a new template in pool `pc-templates`, the pipeline's hardware shape
-  (`images/build.py`, `pve.ImportImage`; no NIC, cloud-init drive on the disk storage), named
+  (`images/build.py`, `pve.ImportImage`; no NIC, cloud-init drive on the disk storage: on `ide2` for an
+  OS image, on `ide0` for a Kubernetes node image, see below), named
   `pc-ghcr-<os>-<os|k8s-x-y-z>-<build>` (never `pc-<os>-…`, which `build.py` would treat as its own
   failed build) and tagged **staged**: `proxcloud;pc-src-<12hex>;pc-tu-import;pc-tu-staged`
   (+ `pc-tu-k8s;pc-k8sver-<x-y-z>` for a Kubernetes node image). No job ownership tag and **no catalog
@@ -449,6 +450,18 @@ from the blocklist alone: a copy whose digest is blocklisted but which is not ta
 action is the same Withdraw (the reason given then is not recorded again — the first one stands) and
 finishes every provider that is reachable now; a blocklisted digest is never published, smoke-tested
 or imported again meanwhile.
+
+**The cloud-init drive of a Kubernetes node image is on `ide0`.** Only CAPMOX clones a node image. CAPMOX
+v0.9.2 writes its NoCloud ISO to `ide0` and changes no other drive, so a drive on `ide0` is replaced by it,
+as on a template of `images/k8s-node-template.sh`. A node image imported **before this change** has the
+drive on `ide2`: a machine cloned from it starts with two media labelled `cidata`, cloud-init's NoCloud
+source takes the later device, Proxmox's own drive, and the machine gets no kubeadm data and never joins
+(read from the CAPMOX, go-proxmox and cloud-init sources; not observed on a lab, where the joins so far
+used pipeline templates). Correct such a template once, on its node, before a cluster uses it:
+`qm config <vmid> | grep cloudinit`, and when that names `ide2`: `qm set <vmid> --delete ide2`. Managed
+services refuses such a template in stage 7 with the same command
+([managed-services.md](managed-services.md#6-failure-codes), `machine_failed`); a tenant cluster's
+provider has no such check.
 
 **Kubernetes node images.** The kamaji provider's `config.cluster.versions` names template VMIDs
 explicitly, so withdrawing does **not** stop new workers from cloning a withdrawn image. The result

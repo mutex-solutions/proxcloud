@@ -219,6 +219,19 @@ func uploadName(jobID string, epoch int64, digest string) string {
 	return fmt.Sprintf("%s-e%d-%s.qcow2", OwnerTag(jobID), epoch, strings.TrimPrefix(digest, "sha256:")[:12])
 }
 
+// CloudInitSlot is where an import puts the template's Proxmox cloud-init drive. A Kubernetes node image is only ever
+// cloned by CAPMOX, which writes its NoCloud ISO to ide0 (v0.9.2 internal/inject: CloudInitISODevice) and leaves every
+// other drive alone: with the drive on ide0 that write replaces it, as it does on a pipeline template
+// (images/k8s-node-template.sh). On ide2 the clone would boot with two cidata media and cloud-init would read
+// Proxmox's, the later device, which has no kubeadm data. An OS image keeps ide2: the portal puts a server's seed in
+// whatever slot the drive has (pve.AttachSeedISO), and stage 3 of the platform replaces it the same way.
+func CloudInitSlot(p VMPayload) string {
+	if p.Variant == "kubernetes" {
+		return "ide0"
+	}
+	return "ide2"
+}
+
 // TemplateName is the final template name. Never pc-<os>-…: images/build.py treats an unpublished
 // pc-<os>-* VM as its own failed build and destroys it.
 func TemplateName(p VMPayload) string {
@@ -660,9 +673,9 @@ func (x *Executor) createAndImport(ctx context.Context, jobID string, p VMPayloa
 	up, err := x.PVE.SetVMConfig(ctx, p.Node, vmid, map[string]string{
 		"ostype": "l26", "cores": "2", "memory": "2048", "cpu": "host", "agent": "1",
 		"scsihw": "virtio-scsi-single", "serial0": "socket", "vga": "serial0", "boot": "order=scsi0",
-		"tags":  pve.TagManaged + ";" + OwnerTag(jobID),
-		"scsi0": fmt.Sprintf("%s:0,discard=on,import-from=%s", p.DiskStorage, upload),
-		"ide2":  p.DiskStorage + ":cloudinit",
+		"tags":           pve.TagManaged + ";" + OwnerTag(jobID),
+		"scsi0":          fmt.Sprintf("%s:0,discard=on,import-from=%s", p.DiskStorage, upload),
+		CloudInitSlot(p): p.DiskStorage + ":cloudinit",
 	})
 	if err != nil {
 		var ae *pve.APIError

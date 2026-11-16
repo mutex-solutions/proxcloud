@@ -427,6 +427,9 @@ func TestExecutorHappyPathCreatesNewTemplate(t *testing.T) {
 	if !strings.Contains(vm.cfg.Str("scsi0"), "import-from=nas-import:import/"+OwnerTag(testJob)+"-e1-") {
 		t.Fatalf("import-from: %s", vm.cfg.Str("scsi0"))
 	}
+	if vm.cfg.Str("ide2") != "local-zfs:cloudinit" || vm.cfg.Str("ide0") != "" {
+		t.Fatalf("an OS image's cloud-init drive: ide2 %q, ide0 %q", vm.cfg.Str("ide2"), vm.cfg.Str("ide0"))
+	}
 	if pv.checkSum != "sha256:"+strings.TrimPrefix(p.DiskDigest, "sha256:") {
 		t.Fatalf("PVE was not asked to verify sha256: %q", pv.checkSum)
 	}
@@ -488,6 +491,12 @@ func TestExecutorK8sTagsNeverPublish(t *testing.T) {
 	}
 	if TemplateName(p) != "pc-ghcr-ubuntu-2604-k8s-1-35-10-20261112010203" {
 		t.Fatalf("name: %s", TemplateName(p))
+	}
+	// CAPMOX writes its ISO to ide0 and nowhere else: a node image's own cloud-init drive must be the one it replaces.
+	os := p
+	os.Variant = "os"
+	if CloudInitSlot(p) != "ide0" || CloudInitSlot(os) != "ide2" {
+		t.Fatalf("cloud-init slots: kubernetes %s, os %s", CloudInitSlot(p), CloudInitSlot(os))
 	}
 }
 
