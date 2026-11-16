@@ -5,10 +5,15 @@ name: charts-mirror
 #   pull request            -> the script's unit tests, then a dry run with a read-only token: every chart is fetched,
 #                              verified against its pin and packaged; no login, nothing is pushed
 #   tag charts-mirror-v<n>  -> the same, then push each chart version the mirror does not serve yet and record the
-#                              digests; a version that is already served is never replaced (same content: skipped,
-#                              different content: the run fails); the tagged commit must be on main
-# A tag and not a push to main: a published version can never be replaced, so publishing is an owner step on a chosen
+#                              digests; a version that is already served is not pushed over (same content: skipped,
+#                              different content: the run fails, and so does any answer of the mirror other than a
+#                              definite "not found"); the tagged commit must be on main
+# A tag and not a push to main: a published version is not meant to change, so publishing is an owner step on a chosen
 # commit, like the other package flows, and not a side effect of every merge that touches the manifest.
+# What this file cannot enforce (docs/ci-release.md, "Chart mirror", "Limits of the gate"): a tag push runs the
+# workflow file of the tagged commit, so the "on main" step below stops a mistake, not a person with write access to
+# this repository, and GHCR moves a tag on push. Who may create a charts-mirror-v* tag and who may write to the
+# repository are repository settings. A moved version is noticed by bom-verify once the BOM pins its digest.
 # Hosted runner only: no PVE access, no secret other than the built-in token.
 on:
   push:
@@ -109,7 +114,8 @@ jobs:
         run: |
           set -euo pipefail
           # The tag name comes from the environment, never spliced into the script. It only selects the commit:
-          # what is published is what the manifest of that commit pins.
+          # what is published is what the manifest of that commit pins. This step guards against a tag on the wrong
+          # commit by mistake; it is part of the tagged commit and so no protection against a changed workflow.
           [[ "$GITHUB_REF_NAME" =~ ^charts-mirror-v[1-9][0-9]*$ ]]
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           git merge-base --is-ancestor "$SOURCE_SHA" origin/main
@@ -147,13 +153,23 @@ jobs:
         run: |
           set -euo pipefail
           python3 .github/scripts/charts_mirror.py --push --out result
+
+      # Also after a failure: a run that failed after some pushes wrote the digests it got, marked incomplete.
+      - name: Summarise the digest record
+        if: always()
+        run: |
+          set -euo pipefail
           {
-            echo '## Chart mirror published; the platform uses a chart only once its digest is pinned in the BOM'
+            echo '## Chart mirror run; the platform uses a chart only once its digest is pinned in the BOM'
             echo
-            cat result/charts-mirror.md
-            echo
-            echo 'Pending: an owner makes each new package public on GHCR, then a reviewed change pins these'
-            echo 'references and manifest digests in deploy/platform/platform-bom.yaml.'
+            if [[ -f result/charts-mirror.md ]]; then
+              cat result/charts-mirror.md
+              echo
+              echo 'Pending: an owner makes each new package public on GHCR, then a reviewed change pins these'
+              echo 'references and manifest digests in deploy/platform/platform-bom.yaml.'
+            else
+              echo 'No digest record: the run ended before the publish step verified a chart, so it pushed nothing.'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the digest record
@@ -162,7 +178,7 @@ jobs:
         with:
           name: charts-mirror-digests-${{ github.sha }}
           path: result/
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 90
 
       - name: Remove registry login

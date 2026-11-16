@@ -10,20 +10,27 @@ Per kind of entry (the shapes are described in the manifest):
   oci    `helm pull oci://<repo>/<name>@<digest>`; helm must report that digest.
   git    `git fetch` of the tag, which must still point at the pinned commit; no symlink in the chart directory; the
          dependencies of Chart.yaml and Chart.lock must be exactly the one pinned as vendor* (fetched like an https
-         chart into charts/) or none; then `helm package --version --app-version`.
+         chart into charts/) or none; LICENSE and NOTICE of the repository root are copied into the chart and the
+         NOTICE gets one paragraph that states what was changed; then `helm package --version --app-version`.
 In every case the name and version inside the archive must be the ones of the manifest.
 
 Fetching is anonymous by construction: those helm calls get an empty registry and Docker configuration, and git runs
 without any configuration or prompt. Only the calls to the mirror in a --push run use the ambient helm login.
 
-Publishing never replaces a version. A version the mirror already serves is compared file by file (path and sha256
-of every file in the archive): equal content is skipped, different content fails. `helm package` is not
+The script does not push over a version the mirror serves. A served version is compared file by file (path and
+sha256 of every file in the archive): equal content is skipped, different content fails. `helm package` is not
 byte-reproducible (it stamps the current time on every file), so for a git entry the archive's sha256 differs per
-run; what is pinned afterwards is the manifest digest of the one archive that was pushed. An answer of "not found" or
-"denied" for the mirror version counts as absent: GHCR answers "denied" for a package that does not exist, and a
-token that may not read a package may not write it either, so the push then fails without replacing anything.
+run; what is pinned afterwards is the manifest digest of the one archive that was pushed.
 
-Output: one table (also <out>/charts-mirror.md) and <out>/charts-mirror.json, with the digest to pin per chart.
+Only a definite "not found" from the mirror means that a version is absent. GHCR answers "denied" for a package that
+does not exist (anonymously; measured) and, as far as we know, for one the caller may not read, and it moves a tag
+on push instead of refusing, so with
+--push a refusal (denied, unauthorized, 401, 403) or any other answer fails the run before the first push. Without
+--push the read is anonymous and nothing is pushed: a refusal is reported as "not compared" and does not fail.
+
+Output: one table (also <out>/charts-mirror.md) and <out>/charts-mirror.json, with the digest to pin per chart. When
+a run fails after at least one chart was verified, both files are still written, marked incomplete, with the error
+and whatever digests the run got.
 """
 import argparse
 import hashlib
@@ -41,6 +48,15 @@ MIRROR = "ghcr.io/mutex-solutions/charts-mirror"
 LICENCES = ("Apache-2.0", "MIT")  # licences that allow redistribution of the unchanged chart
 MAX_CHART = 64 << 20
 TIMEOUT = 600
+LICENCE_FILES = ("LICENSE", "NOTICE")
+CHANGE_NOTICE = """\
+This Helm chart is a repackaging of %s at tag %s
+(commit %s), directory %s, published under %s.
+Changed from that commit: Chart.yaml (version set to %s and appVersion set to %s, and
+rewritten by `helm package`); LICENSE and NOTICE (copied from the repository root into the chart, and this
+paragraph added to NOTICE). A dependency that Chart.lock pins is included under charts/ as its publisher's
+unchanged archive. Nothing else was changed.
+"""
 
 _V = r'"?([^",{}\s]+)"?'
 _PAIR = r"(\w+): %s" % _V
@@ -55,7 +71,8 @@ _OCI = re.compile(r"[a-z0-9.-]+\.[a-z]+(/[a-z0-9._-]+)+")
 _GIT = re.compile(r"https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
 _TAG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _PATH = re.compile(r"[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*")
-_ABSENT = re.compile(r"not found|name unknown|manifest unknown|denied", re.I)
+_ABSENT = re.compile(r"not found|name unknown|manifest unknown", re.I)
+_REFUSED = re.compile(r"denied|unauthori[sz]ed|forbidden|\b40[13]\b", re.I)
 _REPORTED = re.compile(r"^Digest: (sha256:[0-9a-f]{64})\s*$", re.M)
 _LOCKED = re.compile(r"^- name: (\S+)\n\s+repository: (\S+)\n\s+version: (\S+)$", re.M)
 
@@ -205,13 +222,46 @@ class Mirror:
                 if os.path.islink(os.path.join(root, item)):
                     raise MirrorError("%s: %s is a symlink" % (entry["name"], os.path.join(root, item)))
         self._vendor(entry, chart)
+        self._licence(entry, src, chart)
         packed = self._dir()
         self._must(["helm", "package", chart, "--version", entry["version"], "--app-version", entry["appVersion"],
                     "-d", packed], self.anonymous)
         files = os.listdir(packed)
         if len(files) != 1:
             raise MirrorError("helm package %s left %d files, want one" % (entry["name"], len(files)))
-        return os.path.join(packed, files[0])
+        path = os.path.join(packed, files[0])
+        held = _members(path)
+        for item in LICENCE_FILES:  # a .helmignore of the chart could have dropped them
+            if "%s/%s" % (entry["name"], item) not in held:
+                raise MirrorError("%s: the packaged chart holds no %s" % (entry["name"], item))
+        return path
+
+    def _licence(self, entry, src, chart):
+        """Apache-2.0 section 4 for a chart we repackage: give the licence, keep upstream's NOTICE, state the change.
+
+        LICENSE is the one of the repository root, unchanged. NOTICE is the root's NOTICE (when it has one) followed
+        by one paragraph of ours. The text has no date, so the content digest stays equal across runs."""
+        name = entry["name"]
+        for item in LICENCE_FILES:
+            if os.path.lexists(os.path.join(chart, item)):
+                raise MirrorError("%s: the chart directory already holds %s" % (name, item))
+        texts = {}
+        for item in LICENCE_FILES:
+            path = os.path.join(src, item)
+            if os.path.islink(path) or (os.path.lexists(path) and not os.path.isfile(path)):
+                raise MirrorError("%s: %s of %s is not a regular file" % (name, item, entry["git"]))
+            if os.path.isfile(path):
+                with open(path, encoding="utf-8") as handle:
+                    texts[item] = handle.read()
+        if not texts.get("LICENSE", "").strip():
+            raise MirrorError("%s: %s has no LICENSE at %s" % (name, entry["git"], entry["tag"]))
+        changed = CHANGE_NOTICE % (entry["git"], entry["tag"], entry["commit"], entry["path"], "oci://" + MIRROR,
+                                   entry["version"], entry["appVersion"])
+        notice = texts.get("NOTICE", "").rstrip("\n")
+        texts["NOTICE"] = (notice + "\n\n" if notice else "") + changed
+        for item, text in texts.items():
+            with open(os.path.join(chart, item), "w", encoding="utf-8") as handle:
+                handle.write(text)
 
     def _vendor(self, entry, chart):
         """The chart's dependencies must be exactly the pinned one, or none."""
@@ -252,16 +302,21 @@ class Mirror:
         return final
 
     def served(self, entry, path):
-        """The manifest digest under which the mirror already serves this version with the same files, or "" when it
-        does not serve the version. Other content, or an answer that is neither, fails."""
+        """The manifest digest under which the mirror already serves this version with the same files; "" when the
+        mirror definitely does not serve the version; None when a run without --push was refused the read (the
+        package is absent or private, and nothing is pushed on that answer). Other content, a refusal with --push,
+        or any other answer fails."""
         name, version = entry["name"], entry["version"]
         ref = "oci://%s/%s" % (MIRROR, name)
         code, output, served = self._pulled(["helm", "pull", ref, "--version", version],
                                             self.ambient if self.push else self.anonymous)
         if code:
-            if not _ABSENT.search(output):
-                raise MirrorError("cannot tell whether %s %s is published: %s" % (name, version, output.strip()[-2000:]))
-            return ""
+            refused = _REFUSED.search(output)
+            if _ABSENT.search(output) and not refused:
+                return ""
+            if refused and not self.push:
+                return None
+            raise MirrorError("cannot tell whether %s %s is published: %s" % (name, version, output.strip()[-2000:]))
         digests = _REPORTED.findall(output)
         if len(digests) != 1:
             raise MirrorError("helm pull %s %s reported no digest" % (ref, version))
@@ -341,35 +396,61 @@ def table(rows):
     return "\n".join(lines) + "\n"
 
 
-def mirror(text, runner, out, push=False, log=print):
-    """Fetch and verify every chart, then compare with the mirror and (with push) publish. Returns the rows."""
+NOT_COMPARED = "not compared: the mirror refuses an anonymous read (absent or private)"
+
+
+def mirror(text, runner, out, push=False, log=print, rows=None):
+    """Fetch and verify every chart, then compare with the mirror and (with push) publish. Returns the rows.
+
+    A caller that passes `rows` finds in it what the run reached when this raises."""
+    rows = [] if rows is None else rows
     entries = parse_manifest(text)
     os.makedirs(out, exist_ok=True)
     if os.listdir(out):
         raise MirrorError("%s is not empty" % out)
     with tempfile.TemporaryDirectory(prefix="charts-mirror-") as scratch:
         job = Mirror(runner, scratch, out, push)
-        rows = []
+        paths = []
         for entry in entries:
             path = job.fetch(entry)
             source = {"https": "%s", "oci": "oci://%s", "git": "%s"}[entry["kind"]] % (
                 entry.get("repo") or "%s@%s (%s)" % (entry["git"], entry["tag"], entry["commit"][:12]))
+            paths.append(path)
             rows.append({"name": entry["name"], "version": entry["version"], "source": source, "kind": entry["kind"],
-                         "archive_sha256": sha256_file(path), "content": content(path), "path": path})
+                         "archive_sha256": sha256_file(path), "content": content(path), "digest": "",
+                         "result": "verified, not compared with the mirror",
+                         "reference": "%s/%s:%s" % (MIRROR, entry["name"], entry["version"])})
             log("verified %s %s" % (entry["name"], entry["version"]))
-        for entry, row in zip(entries, rows):  # every version is compared before the first push
-            row["digest"] = job.served(entry, row["path"])
-        for entry, row in zip(entries, rows):
-            path = row.pop("path")
-            if row["digest"]:
-                row["result"] = "already published, same content"
-            elif push:
-                row["result"], row["digest"] = "pushed", job.publish(entry, path)
-            else:
+        absent = []
+        for entry, row, path in zip(entries, rows, paths):  # every version is compared before the first push
+            found = job.served(entry, path)
+            row["digest"] = found or ""
+            row["result"] = ("already published, same content" if found else
+                             NOT_COMPARED if found is None else "not published")
+            absent.append(found == "")
+        for entry, row, path, missing in zip(entries, rows, paths, absent):
+            if missing and push:
+                row["result"] = "push attempted, not confirmed"
+                row["digest"] = job.publish(entry, path)
+                row["result"] = "pushed"
+            elif missing:
                 row["result"] = "not published (would push)"
-            row["reference"] = "%s/%s:%s" % (MIRROR, row["name"], row["version"])
             log("%s %s: %s %s" % (row["name"], row["version"], row["result"], row["digest"]))
     return rows
+
+
+def record(rows, out, push, error=None):
+    """Write <out>/charts-mirror.md and .json; returns the table. With `error` both say that the run is incomplete."""
+    text = table(rows)
+    if error:
+        text = "**Incomplete run, failed with:** %s\n\n%s" % (" ".join(error.split())[:2000], text)
+    with open(os.path.join(out, "charts-mirror.md"), "w", encoding="utf-8") as handle:
+        handle.write(text)
+    with open(os.path.join(out, "charts-mirror.json"), "w", encoding="utf-8") as handle:
+        json.dump({"mirror": MIRROR, "pushed": push, "complete": not error, "error": error, "charts": rows}, handle,
+                  indent=2)
+        handle.write("\n")
+    return text
 
 
 def main(argv=None):
@@ -378,21 +459,18 @@ def main(argv=None):
     parser.add_argument("--out", default="charts-mirror-out", help="an empty or missing directory for the result")
     parser.add_argument("--push", action="store_true", help="publish what the mirror does not serve yet")
     args = parser.parse_args(argv)
-    rows = []
+    rows, error = [], None
     try:
         with open(args.manifest, encoding="utf-8") as handle:
             text = handle.read()
-        rows = mirror(text, run, args.out, args.push)
+        mirror(text, run, args.out, args.push, rows=rows)
     except (MirrorError, OSError) as err:
-        print("FAIL %s" % err)
+        error = str(err)
+    if rows or not error:  # a run that failed before the first chart has nothing to record
+        print(record(rows, args.out, args.push, error), end="")
+    if error:
+        print("FAIL %s" % error)
         return 1
-    text = table(rows)
-    with open(os.path.join(args.out, "charts-mirror.md"), "w", encoding="utf-8") as handle:
-        handle.write(text)
-    with open(os.path.join(args.out, "charts-mirror.json"), "w", encoding="utf-8") as handle:
-        json.dump({"mirror": MIRROR, "pushed": args.push, "charts": rows}, handle, indent=2)
-        handle.write("\n")
-    print(text, end="")
     return 0
 
 

@@ -16,6 +16,8 @@
 #          Upstream publishes this chart only as the moving version 0.0.0+latest, so it is packaged here with
 #          `helm package --version <version> --app-version <appVersion>`. vendor*: the one dependency of the chart's
 #          Chart.lock, fetched like an https chart and placed in charts/ (a dependency that is not listed fails).
+#          LICENSE and NOTICE of the repository root at that commit are copied into the chart, and one paragraph in
+#          NOTICE states the source and what was changed (Apache-2.0 section 4); the repository must have a LICENSE.
 #
 # kamaji and kamaji-crds: version = appVersion = the upstream git tag 26.11.2-edge, which is also the image tag the
 # BOM pins (clastix/kamaji:26.11.2-edge). It is a valid SemVer version (a pre-release of 26.11.2, as upstream means
