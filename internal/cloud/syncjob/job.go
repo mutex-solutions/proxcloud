@@ -223,6 +223,7 @@ func (j *Job) detectProxmoxCapabilities(ctx context.Context) {
 		if inventoryFailed(ctx, es.ID, "") {
 			continue
 		}
+		j.reconcileProviderIsolation(ctx, ps, es)
 		if err := j.reconcileSandboxWorkers(ctx, ps, es); err != nil {
 			j.log.Error("syncjob: sandbox workers", "serviceId", es.ID, "err", err)
 		}
@@ -424,6 +425,25 @@ func (j *Job) syncProxmoxService(ctx context.Context, p *project.Project, es *ex
 		j.log.Warn("syncjob: remove blank VMs, retrying on the next sync", "project", p.ID, "serviceId", es.ID, "err", err)
 	}
 	return count
+}
+
+// reconcileProviderIsolation writes the provider's own isolation DROPs, project or not: a provider with no project
+// had none until its first tenant network, so the managed-services preflight could not pass on a cluster where another
+// portal already has tenant networks. Same lock as the per-project reconcile; a busy lock waits for the next cycle.
+func (j *Job) reconcileProviderIsolation(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) {
+	netCfg := es.PVENetworkConfig()
+	if j.sdnLock == nil || netCfg.CIDRPool == "" {
+		return
+	}
+	start := j.now()
+	ok, err := j.sdnLock.Lock(ctx, project.SDNApplyLockName, project.SDNApplyMaxFor, start)
+	if err != nil || !ok {
+		return
+	}
+	defer func() { _ = j.sdnLock.Unlock(ctx, project.SDNApplyLockName, 0, start, j.now()) }()
+	if err := ps.ReconcileProviderIsolation(ctx, netCfg.CIDRPool, netCfg.BlockedCIDRs, netCfg.SandboxCIDRs, es.PVESandboxEndpoints()...); err != nil {
+		j.log.Error("syncjob: reconcile provider isolation", "serviceId", es.ID, "err", err)
+	}
 }
 
 // reconcileIsolation brings the project's firewall rules to the current rule set: a project made

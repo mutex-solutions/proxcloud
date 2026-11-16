@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -126,8 +127,8 @@ func TestCheckIsolation(t *testing.T) {
 	if err := srv.CheckIsolation(ctx, "10.100.0.0/16", nil, nil); !errors.Is(err, ErrIsolationPending) {
 		t.Fatalf("no tenant network yet: %v", err)
 	}
-	// With sandbox networks too: the sync writes nothing before a tenant network, and the sandbox gate, which refuses
-	// every sandbox create until the rules are in, keeps failing.
+	// With sandbox networks too: the sandbox gate, which refuses every sandbox create until the rules are in, keeps
+	// failing.
 	sbx := []string{"10.110.0.0/24"}
 	if err := srv.CheckIsolation(ctx, "10.100.0.0/16", nil, sbx); !errors.Is(err, ErrIsolationPending) {
 		t.Fatalf("no tenant network yet, sandboxCidrs set: %v", err)
@@ -153,5 +154,65 @@ func TestCheckIsolation(t *testing.T) {
 	}
 	if err := srv.CheckIsolation(ctx, "10.100.0.0/16", []string{"10.200.200.0/24"}, nil); err == nil {
 		t.Fatal("a blocked network the rules do not drop: the check passed")
+	}
+}
+
+// A cluster two portals share (lab M0): the other portal's tenant networks end the pending case, so a portal with no
+// project fails the check until the provider-level reconcile, which needs no project, has written its rules. It
+// writes this portal's DROPs only: no project ACCEPT, and nothing of the other portal changes.
+func TestProviderIsolationOnASharedCluster(t *testing.T) {
+	ctx := context.Background()
+	opts := map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/cluster/firewall/options": func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"data":{"enable":1}}`) },
+		"GET /api2/json/cluster/sdn/vnets": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":[{"vnet":"vother1","zone":"pc8","alias":"st:other:web"}]}`)
+		},
+	}
+	other := []FirewallRule{
+		{Type: "forward", Action: "ACCEPT", Source: "10.108.1.0/24", Dest: "10.108.1.0/24", Enable: 1, Comment: "proxcloud:isolation:other"},
+		{Type: "forward", Action: "DROP", Source: "10.108.0.0/16", Dest: "10.108.0.0/16", Enable: 1, Comment: "proxcloud:isolation/pc8-"},
+	}
+	srv, rules, writes := isolationFakeNodes(t, slices.Clone(other), opts)
+	srv.PoolPrefix = "pcm-"
+	blocked := []string{"10.90.0.0/26"}
+	err := srv.CheckIsolation(ctx, "10.121.0.0/16", blocked, nil)
+	if err == nil || errors.Is(err, ErrIsolationPending) || !strings.Contains(err.Error(), "a provider sync writes them") {
+		t.Fatalf("another portal's tenant network, none of this portal's rules: %v", err)
+	}
+	// A pool over a management network: nothing is written.
+	if err := srv.ReconcileProviderIsolation(ctx, "192.0.0.0/16", blocked, nil); err == nil || *writes != 0 {
+		t.Fatalf("cidrPool over a management network: err %v, %d writes", err, *writes)
+	}
+	if err := srv.ReconcileProviderIsolation(ctx, "10.121.0.0/16", blocked, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.CheckIsolation(ctx, "10.121.0.0/16", blocked, nil); err != nil {
+		t.Fatalf("rules written with no project: %v", err)
+	}
+	var mine int
+	for _, r := range *rules {
+		switch r.Comment {
+		case "proxcloud:isolation/pcm-":
+			mine++
+		case "proxcloud:isolation:other", "proxcloud:isolation/pc8-":
+		default:
+			t.Errorf("unexpected rule %+v", r)
+		}
+	}
+	if mine != 4 || len(*rules) != 6 || !slices.EqualFunc((*rules)[4:], other, sameLiveRule) {
+		t.Fatalf("want 4 pcm- DROPs above the other portal's 2 untouched rules, got %+v", *rules)
+	}
+	// Idempotent, and a rule another owner holds never satisfies the check.
+	n := *writes
+	if err := srv.ReconcileProviderIsolation(ctx, "10.121.0.0/16", blocked, nil); err != nil || *writes != n {
+		t.Fatalf("second run: err %v, %d more writes", err, *writes-n)
+	}
+	for i := range *rules {
+		if (*rules)[i].Comment == "proxcloud:isolation/pcm-" {
+			(*rules)[i].Comment = "proxcloud:isolation/pc8-"
+		}
+	}
+	if err := srv.CheckIsolation(ctx, "10.121.0.0/16", blocked, nil); err == nil || errors.Is(err, ErrIsolationPending) {
+		t.Fatalf("the same DROPs under another portal's comment: %v", err)
 	}
 }

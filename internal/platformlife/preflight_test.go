@@ -44,7 +44,11 @@ func (f *preflightPVE) serve(w http.ResponseWriter, r *http.Request) {
 			{"storage":"nas-iso","type":"nfs","content":"iso","shared":1}]`,
 		"/cluster/resources": `[{"type":"storage","storage":"local","node":"pve1","status":"available"},
 			{"type":"storage","storage":"local-lvm","node":"pve1","status":"available"},{"type":"storage","storage":"nas-iso","node":"pve1","status":"available"}]`,
-		"/access/acl":              `[{"path":"/storage/local","type":"user","ugid":"capmox@pve","roleid":"PVEDatastoreAdmin","propagate":0}]`,
+		// The two token rows are what an older setup left on the lab (M0): they reach every store and every tenant pool.
+		"/access/acl": `[{"path":"/storage/local","type":"user","ugid":"capmox@pve","roleid":"PVEDatastoreAdmin","propagate":0},
+			{"path":"/storage","type":"token","ugid":"capmox@pve!capi","roleid":"ProxCloudCAPI","propagate":1},
+			{"path":"/pool","type":"token","ugid":"capmox@pve!capi","roleid":"ProxCloudCAPI","propagate":1},
+			{"path":"/storage/local","type":"token","ugid":"capmox@pve!capi","roleid":"PVEDatastoreAdmin","propagate":0}]`,
 		"/access/users/capmox@pve": `{"groups":[]}`,
 		"/access/roles":            `[{"roleid":"PVEDatastoreAdmin","privs":"Datastore.Allocate,Datastore.AllocateSpace,Datastore.AllocateTemplate,Datastore.Audit"}]`,
 	}
@@ -114,8 +118,8 @@ func TestPreflight(t *testing.T) {
 	if !OK(checks) {
 		t.Fatalf("a set-up site: %+v", checks)
 	}
-	if got := len(checks); got != 14 {
-		t.Errorf("%d rows, want 14: %+v", got, checks)
+	if got := len(checks); got != 15 {
+		t.Errorf("%d rows, want 15: %+v", got, checks)
 	}
 	if c := checkMap(checks)["isolation"]; !strings.Contains(c.Message, "first tenant network") {
 		t.Errorf("no tenant network yet: %+v", c)
@@ -127,6 +131,7 @@ func TestPreflight(t *testing.T) {
 	capi["/pool/"+pve.SeedPool] = []string{"VM.Audit"}
 	f.perms[pve.DefaultPlatformTokenID]["/pool/"+pve.SeedPool] = []string{"VM.Audit"}
 	f.perms[pve.CAPITokenID]["/storage/nas-iso"] = []string{"Datastore.Audit"}
+	f.perms[pve.CAPITokenID]["/pool"] = []string{"VM.Audit", "VM.Allocate"}
 	// The mint role is checked on the provider's import store, not on the one of the settings ("local").
 	delete(f.perms[pve.DefaultPlatformTokenID], "/storage/nas-templates")
 	pf.Site.Blocked = nil
@@ -138,6 +143,7 @@ func TestPreflight(t *testing.T) {
 		"privileges:kubemint":  "on /storage/nas-templates",
 		"pool-fence":           "the portal token holds 1 privileges on /pool/" + pve.SeedPool,
 		"iso-store-visibility": "[local, nas-iso]",
+		"token-scope":          pve.CAPITokenID + " holds 2 privileges on /pool",
 		"isolation":            "add 10.200.200.10/32, 10.200.200.20/32, 10.200.200.30/31",
 		"credentials":          pve.CSITokenID + " is not stored",
 		"images":               "is on the blocklist",
@@ -145,6 +151,13 @@ func TestPreflight(t *testing.T) {
 		if c := got[id]; c.Status != CheckFail || !strings.Contains(c.Message, want) {
 			t.Errorf("%s: want a failure naming %q, got %+v", id, want, c)
 		}
+	}
+	// Both name the row to remove and the command, and never a row the script writes (the token's own on the ISO store).
+	if m := got["token-scope"].Message; !strings.Contains(m, "pveum acl delete /pool --tokens 'capmox@pve!capi' --roles ProxCloudCAPI") || strings.Contains(m, "delete /storage") {
+		t.Errorf("token-scope does not name the /pool row alone: %s", m)
+	}
+	if m := got["iso-store-visibility"].Message; !strings.Contains(m, "pveum acl delete /storage --tokens 'capmox@pve!capi' --roles ProxCloudCAPI") || strings.Contains(m, "delete /storage/local") {
+		t.Errorf("iso-store-visibility does not name the /storage row alone: %s", m)
 	}
 	if _, ok := got["privileges:csi"]; ok {
 		t.Error("no CSI token, yet its privileges were checked")

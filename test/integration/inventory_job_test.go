@@ -117,3 +117,76 @@ func TestUntrustedNetworkSyncSkipsDependentMutations(t *testing.T) {
 		t.Fatalf("failure state persisted: seed=%d share=%d", seedCalls, shareCalls)
 	}
 }
+
+// A provider with no project still gets its isolation DROPs from the sync (lab M0: on a Proxmox cluster another portal
+// shares, the managed-services preflight waits for them and nothing else writes them before the first tenant network).
+// Without the SDN lock, and for a cidrPool over a management network, the sync writes nothing.
+func TestSyncWritesProviderIsolationWithoutProjects(t *testing.T) {
+	ctx := context.Background()
+	db := freshPG(t)
+	var comments []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/api2/json")
+		switch {
+		case r.Method == "POST" && path == "/cluster/firewall/rules":
+			_ = r.ParseForm()
+			comments = append(comments, r.PostFormValue("action")+" "+r.PostFormValue("source")+" "+r.PostFormValue("comment"))
+			fmt.Fprint(w, `{"data":null}`)
+		case r.Method != "GET":
+			t.Errorf("unexpected write %s %s", r.Method, path)
+			w.WriteHeader(500)
+		case path == "/cluster/status":
+			fmt.Fprint(w, `{"data":[{"type":"node","name":"n1","ip":"192.0.2.11"}]}`)
+		case path == "/nodes/n1/network":
+			fmt.Fprint(w, `{"data":[{"iface":"vmbr0","address":"192.0.2.11","gateway":"192.0.2.1","cidr":"192.0.2.11/24"}]}`)
+		default:
+			fmt.Fprint(w, `{"data":[]}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	provider := func(pool string) {
+		if _, err := db.C("externalService").SetByID(ctx, "svc-pve", pgdoc.M{"type": externalservice.TypeCloud, "config": pgdoc.M{
+			"provider": "proxmox", "apiUrl": srv.URL, "region": "r", "poolPrefix": "pcm-",
+			"network": pgdoc.M{"cidrPool": pool, "blockedCidrs": []any{"10.90.0.0/26"}},
+		}}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustInsert(t, db, "externalService", pgdoc.M{"_id": "svc-pve", "type": externalservice.TypeCloud, "config": pgdoc.M{"provider": "proxmox"}})
+	provider("10.121.0.0/16")
+	c, err := pve.New(pve.Config{APIURL: srv.URL, TokenID: "p@pve!t", Secret: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	es := externalservice.NewService(externalservice.NewRepo(db), textcrypt.New("k"))
+	j := syncjob.New(project.NewRepo(db), es, cloud.NewRepo(db), nil).
+		WithProxmoxFactory(func(*externalservice.ExternalService) (*pve.Service, error) {
+			return &pve.Service{C: c, PoolPrefix: "pcm-"}, nil
+		})
+	if _, err := j.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 0 {
+		t.Fatalf("no SDN lock, yet the sync wrote rules: %v", comments)
+	}
+	j.WithSDNLock(lock.New(db))
+	provider("192.0.0.0/16")
+	if _, err := j.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 0 {
+		t.Fatalf("cidrPool over the management network, yet the sync wrote rules: %v", comments)
+	}
+	provider("10.121.0.0/16")
+	if _, err := j.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 4 {
+		t.Fatalf("want the provider's 4 DROPs, got %v", comments)
+	}
+	for _, c := range comments {
+		if c != "DROP 10.121.0.0/16 proxcloud:isolation/pcm-" {
+			t.Errorf("unexpected rule %q", c)
+		}
+	}
+}

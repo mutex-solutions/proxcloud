@@ -67,7 +67,7 @@ func (c *Client) ISOVisibilityProblem(ctx context.Context, defs []StorageDef, is
 	if list == "" {
 		list = "none"
 	}
-	return fmt.Sprintf("the token sees the ISO stores [%s]; CAPMOX puts each bootstrap ISO on the first it sees, so it must see %s alone: look for other ACLs on those stores for the token or its user (docs/proxmox-permissions.md)", list, iso), nil
+	return fmt.Sprintf("the token sees the ISO stores [%s]; CAPMOX puts each bootstrap ISO on the first it sees, so it must see %s alone (docs/proxmox-permissions.md)", list, iso), nil
 }
 
 // ACLEntry is one row of GET /access/acl.
@@ -86,6 +86,29 @@ func (c *Client) ListACL(ctx context.Context) ([]ACLEntry, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// TokenACLRemoval says how to take from token what it holds on paths: one "pveum acl delete" per row of acls that
+// grants it there (a row on the path itself, or on a parent with propagate; NoAccess rows grant nothing). acls is
+// what the caller's token may read (ListACL: the paths it may modify, so a row on "/" is usually not in it); with no
+// row found it gives the two commands that find and remove one.
+func TokenACLRemoval(acls []ACLEntry, token string, paths ...string) string {
+	var cmds []string
+	for _, a := range acls {
+		if a.Type != "token" || a.UGID != token || a.RoleID == "NoAccess" {
+			continue
+		}
+		if slices.ContainsFunc(paths, func(p string) bool {
+			return a.Path == p || a.Propagate == 1 && (a.Path == "/" || strings.HasPrefix(p, a.Path+"/"))
+		}) {
+			cmds = append(cmds, fmt.Sprintf("pveum acl delete %s --tokens '%s' --roles %s", a.Path, token, a.RoleID))
+		}
+	}
+	if len(cmds) == 0 {
+		return fmt.Sprintf("find the row as root on a node with: pveum acl list | grep -F '%s'; remove it with: pveum acl delete <path> --tokens '%s' --roles <role>", token, token)
+	}
+	slices.Sort(cmds)
+	return "as root on a node: " + strings.Join(slices.Compact(cmds), "; ")
 }
 
 // bootISOPrivs is what CAPMOX does with its ISO: upload it, list it, delete it after the join.

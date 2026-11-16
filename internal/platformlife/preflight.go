@@ -24,8 +24,8 @@ const (
 )
 
 // Check is one row of the preflight. The ids are part of the API (docs/api.md): flags, spec, network, isolation,
-// credentials, privileges:capi, privileges:csi, privileges:kubemint, pool-fence, iso-store-visibility, boot-iso-grant,
-// boot-iso, placement, images. A run's first stage fails preflight_failed with the failed rows as its items, or
+// credentials, privileges:capi, privileges:csi, privileges:kubemint, pool-fence, token-scope, iso-store-visibility,
+// boot-iso-grant, boot-iso, placement, images. A run's first stage fails preflight_failed with the failed rows as its items, or
 // isolation_not_enforced when isolation is the only one.
 type Check struct {
 	ID      string `json:"id"`
@@ -120,11 +120,11 @@ func (p Preflight) Run(ctx context.Context) []Check {
 		// Layer 0 drops tenant traffic to the management and blocked networks only.
 		if unf := in.Unfenced(append(slices.Clone(site.Blocked), mgmt...)); len(unf) > 0 {
 			row("isolation", []string{"Tenants could reach the seed, the API VIP or the node range: add " + strings.Join(unf, ", ") +
-				" to the provider's blockedCidrs, then run a sync so the cluster firewall drops them."}, "")
+				" (or one network that covers them) to the provider's blockedCidrs, then run a provider sync so the cluster firewall drops them."}, "")
 		} else {
 			switch err := p.Portal.CheckIsolation(ctx, site.CIDRPool, site.Blocked, site.Sandbox, p.Allow...); {
 			case errors.Is(err, pve.ErrIsolationPending):
-				row("isolation", nil, "The platform addresses are blocked networks; the cluster firewall rules are written with the first tenant network.")
+				row("isolation", nil, "The platform addresses are blocked networks; the cluster firewall rules are written by the next provider sync, or with the first tenant network.")
 			case err != nil:
 				row("isolation", []string{err.Error()}, "")
 			default:
@@ -179,6 +179,34 @@ func (p Preflight) Run(ctx context.Context) []Check {
 	}
 	row("pool-fence", fence, "Neither the portal token nor "+pve.CSITokenID+" reaches the seed's pool, and the portal token does not reach "+pve.SystemPool+".")
 
+	// The rows behind a grant that must go, as far as the portal token may read them (an unreadable list names none).
+	acls, _ := p.Portal.C.ListACL(ctx)
+
+	// The platform tokens hold rows on the platform pools and on single stores. A grant on /pool, /storage or /vms
+	// (an older setup wrote some, and the script removes no row) would hand whoever reads the token's Secret on the
+	// platform cluster every tenant VM and every disk.
+	var scope []string
+	for _, tk := range []struct {
+		c   *pve.Client
+		who string
+	}{{p.CAPI, pve.CAPITokenID}, {p.CSI, pve.CSITokenID}} {
+		if tk.c == nil {
+			continue
+		}
+		for _, path := range []string{"/pool", "/storage", "/vms"} {
+			have, err := tk.c.Permissions(ctx, path)
+			if err != nil {
+				scope = append(scope, readErr("the permissions of "+tk.who, err)...)
+			} else if len(have) > 0 {
+				scope = append(scope, fmt.Sprintf("%s holds %d privileges on %s, which reaches every tenant's VMs or disks: it must hold none there. Remove the row that grants them, %s. Its rows on the platform pools and stores stay",
+					tk.who, len(have), path, pve.TokenACLRemoval(acls, tk.who, path)))
+			}
+		}
+	}
+	if p.CAPI != nil || p.CSI != nil {
+		row("token-scope", scope, "Neither platform token holds anything on /pool, /storage or /vms as a whole.")
+	}
+
 	defs, err := p.Portal.C.ListStorage(ctx)
 	if p.CAPI != nil {
 		var vis []string
@@ -186,8 +214,17 @@ func (p Preflight) Run(ctx context.Context) []Check {
 			vis = readErr("the storages", err)
 		} else if msg, err := p.CAPI.ISOVisibilityProblem(ctx, defs, s.Storage.ISO); err != nil {
 			vis = readErr("the ISO stores "+pve.CAPITokenID+" sees", err)
-		} else if msg != "" {
+		} else if strings.Contains(msg, "[none]") { // it sees no ISO store: a row is missing, none is to remove
 			vis = []string{msg}
+		} else if msg != "" {
+			var others []string
+			for _, d := range defs {
+				if d.Storage != s.Storage.ISO && d.Storage != s.Storage.Boot && slices.Contains(strings.Split(d.Content, ","), "iso") {
+					others = append(others, "/storage/"+d.Storage)
+				}
+			}
+			vis = []string{msg + ". To take the others from " + pve.CAPITokenID + ", " + pve.TokenACLRemoval(acls, pve.CAPITokenID, others...) +
+				". Then check again: privileges:capi must stay ok"}
 		}
 		row("iso-store-visibility", vis, pve.CAPITokenID+" sees one ISO store, "+s.Storage.ISO+".")
 	}
