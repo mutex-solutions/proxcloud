@@ -80,7 +80,7 @@ reading [section 3](#3-proxmox-identities): they share the pool `proxcloud-syste
 | Storage | A boot store that takes VM disks on every node used; an ISO store that is local to each node and takes ISOs (default `local`); an import store with `import` content on every node an image goes to (default: the provider's `importStorage`). The import store must not be the boot store: the portal token holds `PVEDatastoreAdmin` on the import store, which reaches every disk on it ([section 10](#10-security-boundaries)). The API refuses settings that name the same store for both; the form says so before it saves when you type the same store in both fields. An empty import store takes the provider's `importStorage`, so it is refused too when that is the boot store. The import store of the settings and the provider's `importStorage` must be one store: the script of step 2 is written for the store of the settings, and the `privileges:kubemint` check reads the provider's ([when the provider's import store is the boot store](#when-the-providers-import-store-is-the-boot-store)). |
 | Capacity | The smallest machine is 2 cores, 4 GiB of memory and a 20 GiB disk. The smallest layout (seed, control plane, one machine per group) is five VMs. The review step adds up cores and memory per node; it does not read what is free. |
 | Root on one node | Once, to run the identities script. |
-| The datacenter firewall | On, with the provider's isolation rules written by a provider sync: the Check verifies that tenant traffic to the seed, the API address and the node range is dropped. |
+| The datacenter firewall | On, with the provider's isolation rules written by a provider sync once the installation is saved: the Check verifies that tenant traffic to the seed, the API address and the node range is dropped. |
 
 The page also warns when the job scheduler is off: tenant clusters and databases then update their
 status only when a provider sync runs. It does not block an install.
@@ -137,12 +137,18 @@ pveum user token remove csi@pve csi
 
 Removing a token ends its secret for everything that uses it. On a site where the installer's
 services cluster uses the same two tokens, that cluster's CAPMOX and proxmox-csi stop working until
-they get the new secrets; take the existing secrets from the installer's `generated/` directory
-instead.
+they get the new secrets. Paste the existing secrets instead where they are kept. On an installer
+site that is `inventory/<site>/generated/token-capi` and `generated/token-csi`, in any mode, but
+only for a token stage 10 created itself (the token did not exist when stage 10 first ran) or whose
+secret is in the vault (`capi_token_secret`, `csi_token_secret`). Only `split` mode fails when the
+two files are missing. A token that existed before the installer ran, or was made by hand or by
+this script, is in no file: its secret is wherever the output was kept, and nowhere on Proxmox.
 
 **Run the script again** after changing the boot store or the ISO store in the settings: the rows on
 `/storage/<boot>` and `/storage/<iso>` are written for the stores in the query. The script does not
-remove the rows of the old stores.
+remove the rows of the old stores, nor any other row: one an older setup gave the two tokens on
+`/pool` or `/storage` stays, and the `token-scope` check of step 3 fails on it until it is removed by
+hand.
 
 ### When the provider's import store is the boot store
 
@@ -226,17 +232,98 @@ the settings (`409 rev_conflict`: the page reads them again).
 | `flags` | Template updates are off, or no GitHub integration is saved | `--managed-services`; save a GitHub token |
 | `spec` | The saved settings break a rule, for example an import store that is the boot store | Correct step 1 and save |
 | `network` | The platform network overlaps a tenant, sandbox or public network, a seed API source is a tenant network, the load balancer range is inside a blocked or management network, or a node did not report its networks | Correct the network in step 1 |
-| `isolation` | The seed, the API address or part of the node range is in no blocked or management network, or the cluster firewall's isolation rules are not the ones a sync writes | Add the CIDRs the message names to **Networks tenants must not reach** on the provider's page (`blockedCidrs`), then **Run a provider sync, then check again**. Check that the datacenter firewall is on. With no tenant network yet the check passes: the rules are written with the first one |
+| `isolation` | The seed, the API address or part of the node range is in no blocked or management network, or the cluster firewall's isolation rules are not the ones a sync writes | Add the CIDRs the message names to **Networks tenants must not reach** on the provider's page (`blockedCidrs`). The message lists the smallest ranges that are missing; one network that covers them does the same (`10.90.0.0/26` for a seed on `.5`, an API address on `.10` and nodes on `.20` to `.60`), as long as the load balancer range stays outside it. Then **Run a provider sync, then check again**: with the installation saved (step 1), the sync writes the provider's rules whether or not it has a project. Check that the datacenter firewall is on. Five messages name a cause no sync of a provider without a project repairs: `cidrPool … overlaps the management network …` (choose another `cidrPool`), `rules … are for another pool`, `rules … drop … to …, which this provider's cidrPool, blockedCidrs and sandboxCidrs do not`, `rules … have an ACCEPT …` or `have no ACCEPT …` and `rules … are not this provider's set …, and a project's rules for cidrPool … are in place` (another portal or provider shares the rules: give this provider its own `poolPrefix`; the provider's own older rules: delete them under Datacenter > Firewall and sync). ([More](#the-isolation-check-and-the-provider-sync)) |
 | `credentials` | A token secret is not stored | Paste it in step 2 |
 | `privileges:capi`, `privileges:csi`, `privileges:kubemint` | The CAPI token, the CSI token or the portal token lacks a privilege on a path; the message names both | Run the script again. `privileges:kubemint` on `/storage/<store>`: that is the provider's `importStorage`; when the settings name another import store the script does not write that row ([what to do](#when-the-providers-import-store-is-the-boot-store)) |
+| `token-scope` | `capmox@pve!capi` or `csi@pve!csi` holds a privilege on `/pool`, `/storage` or `/vms` as a whole, which reaches every tenant's VMs or disks. The script writes no such row; an older setup may have, and the script removes none | Run the `pveum acl delete` command the message gives, as root on one node, then check again. When the portal token cannot read the row (one on `/`, for example) the message gives `pveum acl list` to find it: the row to remove is one on the named path itself, or on a parent of it (`/` included) with propagate 1, with a role other than `NoAccess`. The list is not empty on a site the script set up, and its rows on the platform pools and stores and on `/` without propagate stay. When no listed row is such a row, remove none: the token was made without privilege separation and holds its user's rights (the users keep `/pool` and `/storage`): run `pveum user token modify <user> <token name> --privsep 1` (`capmox@pve capi`, `csi@pve csi`), then the script again. Leave the tokens' rows on the platform pools and on the boot and ISO stores |
 | `pool-fence` | The portal token holds a privilege on `proxcloud-system` or `proxcloud-seed`, or the CSI token on `proxcloud-seed` | Run the script again with the provider's token id: it writes the `NoAccess` rows on both pools, and a missing row is the usual cause (the portal token's `/pool` rows pass down to them). Only if the check still fails, remove the row granted to that user or token on `/pool/proxcloud-system` or `/pool/proxcloud-seed` itself. Do not remove its `/pool` rows: every tenant operation needs them |
-| `iso-store-visibility` | The CAPI token sees an ISO store other than the one in the settings. CAPMOX puts each bootstrap ISO on the first ISO store its token sees | Remove its permission on the others, or change the ISO store and run the script again |
+| `iso-store-visibility` | The CAPI token sees an ISO store other than the one in the settings. CAPMOX puts each bootstrap ISO on the first ISO store its token sees | The message names the stores seen and, for each row of the token that reaches another ISO store, the command that removes it (`pveum acl delete <path> --tokens 'capmox@pve!capi' --roles <role>`, as root on one node); run them and check again, and `privileges:capi` must stay ok. A row the portal token cannot read is found with `pveum acl list \| grep -F 'capmox@pve!capi'`: it is on the other store's path or on a parent of it with propagate 1 (no listed row is such a row: the token lacks privilege separation, see `token-scope`). Or change the ISO store and run the script again. When the extra store is the boot store, the message gives no command: the token needs its row there, so name another boot store or take `iso` out of its content (the `boot-iso` row) |
 | `boot-iso-grant` | `capmox@pve` may not upload and delete on the ISO store | Run the script again |
 | `boot-iso` | The ISO store is shared, takes no ISOs, or is not the only ISO store of the boot storage | Name a node-local ISO store |
 | `placement` | A node an image goes to lacks the import store with `import` content or the boot store | Change the nodes or the stores |
 | `images` | A BOM image is on the template update blocklist | Install a newer ProxCloud release |
 
 A check that cannot be read fails.
+
+#### The isolation check and the provider sync
+
+The rules are the provider's own: `DROP` from the tenant pool (`cidrPool`) to itself and to the
+blocked and management networks, with the comment `proxcloud:isolation` (pool prefix `pc-`) or
+`proxcloud:isolation/<poolPrefix>`. They do not depend on any project, and two things write them:
+a provider sync (the scheduler's, **Run a provider sync, then check again**, or
+`POST /api/v1/admin/job/external-service/sync`), and the first tenant network before it goes live.
+
+A sync writes them without a project only for a provider that has a managed-services installation,
+in any phase, the saved draft of step 1 and a `removed` installation included, and only with `PROXCLOUD_PLATFORM_ENABLED=true`.
+For every other provider the sync does what it did before: a project's sync writes the rules, and
+a provider with no project gets no firewall request at all. So the order is: save the installation
+(step 1), run a provider sync, then check. Saving never waits for this check: step 1 reads the
+provider's settings only, not the firewall.
+
+A provider sync skips a provider whose status is `DISABLED`, in every part and without a log line,
+so no sync writes or repairs its rules. The check's message then starts with `the provider is
+disabled`: enable the provider under **Cloud providers**, run a provider sync, then check again.
+
+That provider-level part of the sync, the one that needs no project, has no tenant waiting for it
+and none of its own to protect. It only ever adds `DROP`s, and only to a set that no project's sync
+maintains: it refuses in the cases below, logs
+the reason as a warning on every cycle, and the check gives the same sentence. A sync that skipped
+this part because the SDN lock was busy or could not be read says so in the log too and tries again
+on the next cycle.
+
+- **A node did not report its networks.** The missing node may be the one whose management network
+  the pool overlaps, and the `DROP` to its network would be missing. Nothing is written until every
+  node answers. A tenant's network create is not held up by this, as before.
+
+- **`cidrPool` overlaps a management network of the nodes.** With no tenant yet those rules would
+  only cut the nodes off each other. Choose another `cidrPool`. A project's sync and a network
+  create still write the rules for such a pool, as before.
+- **The rules in place are for another pool.** The rules carry the pool prefix only, so two portals
+  with the same prefix (`pc-` is the default), or two providers of one portal on the same cluster,
+  share one rule set, and whoever writes replaces the other's `DROP`s. A provider with no project
+  therefore leaves rules for another pool alone: give it its own `poolPrefix`. The same message
+  appears after a `cidrPool` change on a provider with no project. No sync applies the new pool
+  then: delete the provider's rules (the ones with its comment) under Datacenter > Firewall and run
+  a provider sync, or let its first tenant network rewrite them.
+- **The rules in place drop something this provider's set does not.** Same pool, but a blocked
+  network, a sandbox network or a management network in the rules is in none of this provider's
+  `DROP`s (an equal or a wider network covers it). The other portal or provider with the same prefix
+  may depend on that `DROP`, so nothing is removed and nothing is written: give this provider its
+  own `poolPrefix`. A set that keeps every `DROP` in place and adds some is written, unless one of
+  the next two cases applies. The same
+  message appears when `blockedCidrs` or `sandboxCidrs` of a provider with no project was narrowed:
+  the wider rules stay until they are deleted by hand as above, or until a project's sync rewrites
+  them.
+- **The rules in place accept other sandbox endpoints.** The `ACCEPT` rules for the sandbox
+  endpoints (registry, build bucket, portal wake) carry the same comment and sit above the sandbox
+  `DROP`s. When the ones in place are not exactly this provider's, nothing is written: removing one
+  would cut the other portal's or provider's sandbox network off its endpoint, and adding one would
+  open an address that its rules drop. Give this provider its own `poolPrefix`. The same message
+  appears when the sandbox endpoints of a provider with no project changed, or when one of its
+  `ACCEPT` rules was deleted by hand: delete the provider's rules as above and run a provider sync.
+- **A project's rules for the pool are in place and the set is not this provider's.** A project's
+  sync writes the provider-wide set on every cycle, whatever is in place. So while the cluster
+  firewall holds a project's `ACCEPT` rules (`proxcloud:isolation:<project>`) with a source in this
+  `cidrPool`, the provider-level part changes nothing, neither a wider set nor a missing or
+  disabled rule. If the project is this provider's, its own sync has already written the set in
+  the same cycle and this case does not show. If it is a project of another portal or provider
+  with the same prefix, a write here would be undone at that project's next sync and done again,
+  on every cycle, with the other's sandbox gate failing in between and its projects' `ACCEPT`s
+  deleted and added again each time: give this provider its own `poolPrefix`. A project of another
+  prefix on the same `cidrPool` gives the same message (an `ACCEPT` does not say whose project it
+  is): delete this provider's rules as above and run a provider sync, which writes a missing set.
+  Not seen: a portal or provider with the same prefix and pool whose projects have no network yet.
+  The two then replace each other's set on every cycle until its first tenant network.
+
+A provider that has projects still rewrites the rules from its projects' sync and at a network
+create, whatever is in place, as before this check existed: two such providers with one prefix
+replace each other's rules every cycle, and the check of the one that lost says so.
+
+While no rule of this provider exists and no tenant network exists on the whole Proxmox cluster, the
+check passes and says that the next provider sync or the first tenant network writes them. A vnet does not
+say which portal made it. So on a cluster that a second portal shares, the other portal's tenant
+networks end that case and the check fails with `0 in place, N wanted` until one provider sync has
+run; the saved installation is enough for it, no project or tenant network is needed.
 
 ### Step 4: Review and install
 
@@ -371,6 +458,15 @@ do. Remove leaves in place: the tokens, users, roles, ACL rows and pools of the 
 provider rows, disabled; the image templates in `pc-templates`; and the installation record in phase
 `removed`, from which the same steps install again (both secrets must be pasted again).
 
+A Remove deletes no rule of the cluster firewall. The provider's `proxcloud:isolation` or
+`proxcloud:isolation/<poolPrefix>` rules stay, and because the installation record stays, the
+provider sync keeps maintaining them without a project, as before the Remove
+([The isolation check and the provider sync](#the-isolation-check-and-the-provider-sync)); no
+setting returns the provider to the behaviour of one without an installation. If you then take
+the platform's addresses out of `blockedCidrs` on a provider with no project, the sync removes no
+`DROP` and logs a warning on every cycle: delete the provider's rules under Datacenter > Firewall
+and run a provider sync, which writes the narrower set.
+
 A Remove that fails or is cancelled keeps what it deleted; **Remove again** goes on from there.
 
 **The option "Go on even when the seed VM is gone or the platform cluster does not answer"** sends
@@ -468,6 +564,12 @@ and ADR 0009, A2 and A8.
   path only), on `/nodes`, on `/sdn/zones` (`SDN.Use` on every zone and vnet, tenant ones included),
   on those two pools and on the boot store; `PVETemplateUser` on `pc-templates`; and
   `PVEDatastoreAdmin` on the ISO store, which reaches every volume on it.
+- The preflight reads, with each of the two tokens, that it holds nothing on `/pool`, `/storage` and
+  `/vms` as a whole (`token-scope`), that the CAPI token sees one ISO store (`iso-store-visibility`)
+  and that the CSI token holds nothing on the seed's pool (`pool-fence`). It does not compare the
+  tokens' rows one by one with the script's: a row on a single tenant pool, on a single store that
+  takes no ISOs, or on another path (`/access`, `/mapping`, `/sdn` outside the zones) is not reported.
+  `pveum acl list` on a node shows them all.
 - The seed's API is behind its VM firewall (the API sources only) and the datacenter isolation rules
   (tenant networks cannot reach the seed, the API address or the node range). ProxCloud talks to it
   only over TLS pinned to the CA it made for that seed.
@@ -492,7 +594,10 @@ and ADR 0009, A2 and A8.
 ## Not implemented yet
 
 - **No released version.** The BOM is `0.8.0-dev`. `--managed-services` needs v0.8.0, which is not
-  tagged, so no published image reads `PROXCLOUD_PLATFORM_ENABLED`.
+  tagged, so no released image reads `PROXCLOUD_PLATFORM_ENABLED`. For a test before the release,
+  `proxcloud-up.sh` takes a build of main as its version (`--version dev-<sha>`, `upgrade dev-<sha>`;
+  CI publishes one per push to main) and prints that it is not for production
+  ([deploy/compose/README.md](../deploy/compose/README.md)).
 - **`kamaji` and `kamaji-crds` are at chart version `0.0.0+latest` with no digest**, until the chart
   mirror has published them and the BOM points at it (the flow is merged, PR #276; see
   [ci-release.md](ci-release.md), "Chart mirror"). The Kamaji image is pinned by tag (`26.11.2-edge`); the chart is not. The

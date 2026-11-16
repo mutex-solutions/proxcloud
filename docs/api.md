@@ -383,11 +383,22 @@ are several, `errors.details.problems`.
 - `POST /installations/{id}/preflight`: read-only, not audited; `{ok, checks}`
   with rows `flags`, `spec`, `network`, `isolation`, `credentials`,
   `privileges:capi`, `privileges:csi`, `privileges:kubemint`, `pool-fence`,
-  `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement` and
+  `token-scope`, `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement` and
   `images`. `isolation` fails, naming the CIDRs to add to `blockedCidrs`, when
   the seed, the API VIP or the node range is outside the blocked and management
   networks, and when the cluster firewall's isolation rules are not the ones the
-  sync writes; with no tenant network yet it passes. A row that cannot be read fails.
+  sync writes (a provider sync writes them without a project only for a provider
+  that has an installation, in any phase, so `POST /installations` comes before
+  the sync and the sync before this check; it writes none for
+  a `cidrPool` over a management network, for rules in place for another pool
+  for rules in place that drop something the provider's set does not or accept
+  other sandbox endpoints, and for rules that are not the provider's set while
+  a project's rules for the pool are in place, which the message names; and
+  none for a provider with status `DISABLED`, which the message says); with no
+  tenant network on the whole Proxmox cluster yet it passes. `token-scope` fails
+  when `capmox@pve!capi` or `csi@pve!csi` holds a privilege on `/pool`, `/storage`
+  or `/vms`, and names the `pveum acl delete` command, or which row of
+  `pveum acl list` is the one to remove. A row that cannot be read fails.
 - `GET /installations/{id}/plan`: the installed BOM against this release's
   (`installed`, `target`, `changes`, `blocking`); a version change not listed in
   `upgradeFrom` and the removal of a stateful component block, and an installed

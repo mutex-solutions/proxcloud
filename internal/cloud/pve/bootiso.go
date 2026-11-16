@@ -45,29 +45,29 @@ func BootISOProblem(caps map[string]StorageCapability, iso, boot string) string 
 // ISOVisibilityProblem says why the calling token could put a bootstrap ISO elsewhere than on iso, or "". PVE lists a
 // store to whoever holds Datastore.Audit or Datastore.AllocateSpace on it, so the token must hold one of them on iso
 // and neither on any other enabled iso store of defs (GET /storage, read with a token that sees every store, the
-// portal's). Asked of PVE per store, as installer stage 10 does for capmox@pve!capi.
-func (c *Client) ISOVisibilityProblem(ctx context.Context, defs []StorageDef, iso string) (string, error) {
-	var seen []string
+// portal's). Asked of PVE per store, as installer stage 10 does for capmox@pve!capi. seen are the iso stores the token
+// sees, in the order of defs.
+func (c *Client) ISOVisibilityProblem(ctx context.Context, defs []StorageDef, iso string) (problem string, seen []string, err error) {
 	for _, d := range defs {
 		if d.Disable == 1 || !slices.Contains(strings.Split(d.Content, ","), "iso") {
 			continue
 		}
 		have, err := c.Permissions(ctx, "/storage/"+d.Storage)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		if have["Datastore.Audit"] || have["Datastore.AllocateSpace"] {
 			seen = append(seen, d.Storage)
 		}
 	}
 	if slices.Equal(seen, []string{iso}) {
-		return "", nil
+		return "", seen, nil
 	}
 	list := strings.Join(seen, ", ")
 	if list == "" {
 		list = "none"
 	}
-	return fmt.Sprintf("the token sees the ISO stores [%s]; CAPMOX puts each bootstrap ISO on the first it sees, so it must see %s alone: look for other ACLs on those stores for the token or its user (docs/proxmox-permissions.md)", list, iso), nil
+	return fmt.Sprintf("the token sees the ISO stores [%s]; CAPMOX puts each bootstrap ISO on the first it sees, so it must see %s alone (docs/proxmox-permissions.md)", list, iso), seen, nil
 }
 
 // ACLEntry is one row of GET /access/acl.
@@ -86,6 +86,35 @@ func (c *Client) ListACL(ctx context.Context) ([]ACLEntry, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// TokenACLRemoval says how to take from token what it holds on paths: one "pveum acl delete" per row of acls that
+// grants it there (a row on the path itself, or on a parent with propagate; NoAccess rows grant nothing). acls is
+// what the caller's token may read (ListACL: the paths it may modify, so a row on "/" is usually not in it); with no
+// row found it gives the command that lists the token's rows, which of them is the one to remove, and what to do when
+// none is: a token without privilege separation has its user's rights (the user holds /pool and /storage), and no
+// token row to remove. The list is never empty on a site the script set up (it writes the token's rows on the platform
+// pools and stores), so the advice goes by the path of a row, not by whether one is listed.
+func TokenACLRemoval(acls []ACLEntry, token string, paths ...string) string {
+	var cmds []string
+	for _, a := range acls {
+		if a.Type != "token" || a.UGID != token || a.RoleID == "NoAccess" {
+			continue
+		}
+		if slices.ContainsFunc(paths, func(p string) bool {
+			return a.Path == p || a.Propagate == 1 && (a.Path == "/" || strings.HasPrefix(p, a.Path+"/"))
+		}) {
+			cmds = append(cmds, fmt.Sprintf("pveum acl delete %s --tokens '%s' --roles %s", a.Path, token, a.RoleID))
+		}
+	}
+	if len(cmds) == 0 {
+		user, name, _ := strings.Cut(token, "!")
+		on := strings.Join(paths, ", ")
+		return fmt.Sprintf("list the token's rows as root on a node with: pveum acl list | grep -F '%[1]s'; the row to remove is one on %[2]s itself, or on a parent of it (/ included) with propagate 1, whose role is not NoAccess: pveum acl delete <path> --tokens '%[1]s' --roles <role>. If none of the listed rows is such a row, remove none: the token is not privilege separated and holds its user's rights: pveum user token modify '%[3]s' '%[4]s' --privsep 1, then run the script again",
+			token, on, user, name)
+	}
+	slices.Sort(cmds)
+	return "as root on a node: " + strings.Join(slices.Compact(cmds), "; ")
 }
 
 // bootISOPrivs is what CAPMOX does with its ISO: upload it, list it, delete it after the join.

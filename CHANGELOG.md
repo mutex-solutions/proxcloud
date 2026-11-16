@@ -400,6 +400,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Managed services: the defects of the first lab attempt (M0, a Proxmox cluster shared by two portals).** The
+  provider sync now writes the isolation rules of a provider that has a managed-services installation (in any
+  phase, a saved draft too) whether or not it has a project (`(*pve.Service).ReconcileProviderIsolation`, once per
+  such provider and cycle, under the SDN lock, and only with `PROXCLOUD_PLATFORM_ENABLED=true`). For every other
+  provider the sync is unchanged: no lock, no new Proxmox request and no new log line, so an install that sets up no
+  managed services gets no new firewall write from this release. The order is therefore: save the installation, run
+  a provider sync, check; saving reads the provider's settings only and does not wait for the check. That call, which
+  needs no project, only ever adds `DROP`s. It writes nothing while a node does not report its networks, nothing
+  for a `cidrPool` that overlaps a management network, and nothing when the rules in place are for another pool or
+  drop a network its own set does not (an equal or a wider network covers one) or accept other sandbox endpoints
+  than its own, and nothing, not even a wider set, while a project's `ACCEPT` rules for the pool are in place and
+  the set is not its own: the rules carry the pool prefix
+  only, so a second portal or provider with the same prefix (`pc-` is the default) would otherwise delete the first
+  one's `DROP`s at every sync, or the two would replace each other's set on every cycle. These refusals are logged as warnings (`pve.ErrIsolationRefused`), a busy or failed
+  SDN lock is logged too, and the `isolation` check gives the same sentences instead of "a provider sync writes
+  them", also when rules are in place. A project's sync and a network create write the rules in all these cases, as
+  before. A changed `cidrPool`, a narrowed `blockedCidrs` or changed sandbox endpoints on a provider with no project is applied by its first
+  tenant network, or by deleting its rules under Datacenter > Firewall and running a sync; the messages say so.
+  A provider sync skips a disabled provider, and the `isolation` check now says so instead of only sending the
+  operator to a sync.
+  Before, only a project's sync or its first tenant network wrote
+  them, while the preflight's "no rule yet" pass ends as soon as any tenant network exists on the cluster: on a
+  cluster where another portal had tenant networks, a portal with no project failed `isolation` with
+  `0 in place, N wanted; the next sync rewrites them` and no sync ever did. The pass itself is unchanged (a vnet does
+  not say which portal made it), and the messages and the guide now say what writes the rules and that one covering
+  network in `blockedCidrs` works as well as the listed ranges. New preflight row `token-scope`: it fails when
+  `capmox@pve!capi` or `csi@pve!csi` holds any privilege on `/pool`, `/storage` or `/vms` as a whole (rows of an older
+  setup, which the script never removes; the guide's section 10 claimed they could not exist and nothing read them).
+  It and `iso-store-visibility` now name the `pveum acl delete` command for each granting row the portal token can
+  read, and the `pveum acl list` recipe otherwise: it says which listed row is the one to remove (on the path or on
+  a parent with propagate, not `NoAccess`; the script's own rows are listed too and stay), with the
+  `pveum user token modify … --privsep 1` command for a token that has no such row because it was made without
+  privilege separation. `iso-store-visibility` names
+  rows only for stores the token sees, and none when the extra store is the boot store (that row is the script's;
+  the fix is the `boot-iso` row's). `proxcloud-up.sh` accepts a build of main as its version
+  (`--version dev-<sha>`, `upgrade dev-<sha>`, 7 to 40 hex digits) with a warning that it is not for production, and
+  allows `--managed-services` on it; before, such a build could neither be installed nor upgraded to, and an `.env`
+  naming one stopped every later command. `--scheduler` stays refused on a dev build, and every other tag stays
+  invalid. The script now runs under `LC_ALL=C`: in a UTF-8 locale its bracket ranges also matched letters and
+  digits outside ASCII (`dev-ééééééé`, `v0.٨.0`), for the release pattern since before this change. The guide no
+  longer says that existing token secrets are always in the installer's `generated/` directory: stage 10 writes
+  `token-capi` and `token-csi` there in any mode, but only for a token it created itself or was given in the vault.
+  Not verified on a lab.
+
 - **Managed services (ADR 0009): what the API accepts and what the page advises now match what a run can do.** The
   API refuses an installation whose import store is its boot store (the portal token's `PVEDatastoreAdmin` on the
   import store would reach the platform's disks behind its `NoAccess` on the platform pools), and refuses

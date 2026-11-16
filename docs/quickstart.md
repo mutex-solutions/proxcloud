@@ -503,7 +503,7 @@ The portal only, on your own domain with TLS, on one Linux host: the API, both c
 production mode and Traefik. Like [E](#e-install-on-kubernetes-with-helm) it creates no OS templates, Proxmox tokens
 or providers. Managed Kubernetes and databases are not included by default: the operator console can build them on
 your Proxmox VE cluster after `./proxcloud-up.sh install --managed-services` (v0.8.0 or later, which is not released
-yet; not verified on a lab), see [managed-services.md](managed-services.md). Sandboxes are not included. Operator guide (DNS per TLS mode,
+yet, or a `dev-<sha>` build of main for a test; not verified on a lab), see [managed-services.md](managed-services.md). Sandboxes are not included. Operator guide (DNS per TLS mode,
 backup and restore, upgrade, security notes): [deploy/compose/README.md](../deploy/compose/README.md).
 
 **Before you start:** Docker Engine 20.10+ with the Compose plugin v2+, ports 80 and 443 free, and four DNS names

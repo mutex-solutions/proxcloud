@@ -24,8 +24,8 @@ const (
 )
 
 // Check is one row of the preflight. The ids are part of the API (docs/api.md): flags, spec, network, isolation,
-// credentials, privileges:capi, privileges:csi, privileges:kubemint, pool-fence, iso-store-visibility, boot-iso-grant,
-// boot-iso, placement, images. A run's first stage fails preflight_failed with the failed rows as its items, or
+// credentials, privileges:capi, privileges:csi, privileges:kubemint, pool-fence, token-scope, iso-store-visibility,
+// boot-iso-grant, boot-iso, placement, images. A run's first stage fails preflight_failed with the failed rows as its items, or
 // isolation_not_enforced when isolation is the only one.
 type Check struct {
 	ID      string `json:"id"`
@@ -40,12 +40,17 @@ type Preflight struct {
 	Allow             []string     // the provider's sandbox endpoints (es.PVESandboxEndpoints), part of the isolation rules
 	ProviderImport    string       // the provider's importStorage, whose own ACL row needs the mint role too (pve.ManagedACLs)
 	Portal            *pve.Service // the portal token
+	ProviderDisabled  bool         // the provider's status is DISABLED: a provider sync skips it, so none writes its isolation rules
 	CAPI, CSI         *pve.Client  // the platform tokens; nil when not stored
 	TemplateUpdatesVM bool         // PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED
 	GitHub            bool         // a GitHub integration is saved
 	// Blocked reports a digest on the template update blocklist (templateupdates.Receipts.Blocked).
 	Blocked func(ctx context.Context, digest string) (bool, error)
 }
+
+// providerDisabled is what the isolation row adds for a disabled provider: its messages send the operator to a
+// provider sync, and the sync leaves a disabled provider out without a log line.
+const providerDisabled = "the provider is disabled, and a provider sync skips a disabled provider; enable it under Cloud providers, then run a provider sync"
 
 // SiteOf is the site of a Proxmox provider, without the live management networks.
 func SiteOf(es *externalservice.ExternalService) Site {
@@ -120,11 +125,15 @@ func (p Preflight) Run(ctx context.Context) []Check {
 		// Layer 0 drops tenant traffic to the management and blocked networks only.
 		if unf := in.Unfenced(append(slices.Clone(site.Blocked), mgmt...)); len(unf) > 0 {
 			row("isolation", []string{"Tenants could reach the seed, the API VIP or the node range: add " + strings.Join(unf, ", ") +
-				" to the provider's blockedCidrs, then run a sync so the cluster firewall drops them."}, "")
+				" (or one network that covers them) to the provider's blockedCidrs, then run a provider sync so the cluster firewall drops them (with this installation saved it needs no project)."}, "")
 		} else {
 			switch err := p.Portal.CheckIsolation(ctx, site.CIDRPool, site.Blocked, site.Sandbox, p.Allow...); {
+			case errors.Is(err, pve.ErrIsolationPending) && p.ProviderDisabled:
+				row("isolation", nil, "The platform addresses are blocked networks. No cluster firewall rule is written yet: "+providerDisabled+".")
 			case errors.Is(err, pve.ErrIsolationPending):
-				row("isolation", nil, "The platform addresses are blocked networks; the cluster firewall rules are written with the first tenant network.")
+				row("isolation", nil, "The platform addresses are blocked networks; the cluster firewall rules are written by the next provider sync (with this installation saved it needs no project), or with the first tenant network.")
+			case err != nil && p.ProviderDisabled:
+				row("isolation", []string{"No provider sync writes or repairs these rules: " + providerDisabled + ". " + err.Error()}, "")
 			case err != nil:
 				row("isolation", []string{err.Error()}, "")
 			default:
@@ -179,14 +188,57 @@ func (p Preflight) Run(ctx context.Context) []Check {
 	}
 	row("pool-fence", fence, "Neither the portal token nor "+pve.CSITokenID+" reaches the seed's pool, and the portal token does not reach "+pve.SystemPool+".")
 
+	// The rows behind a grant that must go, as far as the portal token may read them (an unreadable list names none).
+	acls, _ := p.Portal.C.ListACL(ctx)
+
+	// The platform tokens hold rows on the platform pools and on single stores. A grant on /pool, /storage or /vms
+	// (an older setup wrote some, and the script removes no row) would hand whoever reads the token's Secret on the
+	// platform cluster every tenant VM and every disk.
+	var scope []string
+	for _, tk := range []struct {
+		c   *pve.Client
+		who string
+	}{{p.CAPI, pve.CAPITokenID}, {p.CSI, pve.CSITokenID}} {
+		if tk.c == nil {
+			continue
+		}
+		for _, path := range []string{"/pool", "/storage", "/vms"} {
+			have, err := tk.c.Permissions(ctx, path)
+			if err != nil {
+				scope = append(scope, readErr("the permissions of "+tk.who, err)...)
+			} else if len(have) > 0 {
+				scope = append(scope, fmt.Sprintf("%s holds %d privileges on %s, which reaches every tenant's VMs or disks: it must hold none there. Remove the row that grants them, %s. Its rows on the platform pools and stores stay",
+					tk.who, len(have), path, pve.TokenACLRemoval(acls, tk.who, path)))
+			}
+		}
+	}
+	if p.CAPI != nil || p.CSI != nil {
+		row("token-scope", scope, "Neither platform token holds anything on /pool, /storage or /vms as a whole.")
+	}
+
 	defs, err := p.Portal.C.ListStorage(ctx)
 	if p.CAPI != nil {
 		var vis []string
 		if err != nil {
 			vis = readErr("the storages", err)
-		} else if msg, err := p.CAPI.ISOVisibilityProblem(ctx, defs, s.Storage.ISO); err != nil {
+		} else if msg, seen, err := p.CAPI.ISOVisibilityProblem(ctx, defs, s.Storage.ISO); err != nil {
 			vis = readErr("the ISO stores "+pve.CAPITokenID+" sees", err)
 		} else if msg != "" {
+			// A row is to remove only for a store the token sees and has no use for. Its rows on the ISO and the boot
+			// store are the script's: privileges:capi needs them.
+			var others []string
+			for _, st := range seen {
+				if st != s.Storage.ISO && st != s.Storage.Boot {
+					others = append(others, "/storage/"+st)
+				}
+			}
+			if len(others) > 0 {
+				msg += ". To take the others from " + pve.CAPITokenID + ", " + pve.TokenACLRemoval(acls, pve.CAPITokenID, others...) +
+					". Then check again: privileges:capi must stay ok"
+			}
+			if s.Storage.Boot != s.Storage.ISO && slices.Contains(seen, s.Storage.Boot) {
+				msg += ". The boot store " + s.Storage.Boot + " takes ISO images and the token needs its row there: do not remove it, name another boot store or take iso out of its content (boot-iso)"
+			}
 			vis = []string{msg}
 		}
 		row("iso-store-visibility", vis, pve.CAPITokenID+" sees one ISO store, "+s.Storage.ISO+".")

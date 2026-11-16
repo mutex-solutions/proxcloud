@@ -63,6 +63,7 @@ type Job struct {
 	audit         *audit.Service
 	incidents     PVEIncidentRecorder
 	sdnLock       *lock.ShedLock
+	installedOn   func(ctx context.Context, serviceID string) (bool, error)
 	shareAccess   func(ctx context.Context, projectID string) error
 	staleSeeds    func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error
 	loadBalancers func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error
@@ -107,6 +108,13 @@ func (j *Job) WithNow(now func() time.Time) *Job              { j.now = now; ret
 // WithSDNLock enables the isolation reconcile: it edits the rules a network change also edits, so
 // it takes the same lock (nil = no reconcile).
 func (j *Job) WithSDNLock(l *lock.ShedLock) *Job { j.sdnLock = l; return j }
+
+// WithPlatformInstallations wires the lookup of a provider's managed-services installation (any phase, a draft too).
+// Only such a provider gets the provider-level isolation write; nil (the platform feature is off) = none does.
+func (j *Job) WithPlatformInstallations(f func(ctx context.Context, serviceID string) (bool, error)) *Job {
+	j.installedOn = f
+	return j
+}
 
 // WithShareAccess wires the reconcile of a project's file share exports to its addresses (nil = none).
 func (j *Job) WithShareAccess(f func(ctx context.Context, projectID string) error) *Job {
@@ -223,6 +231,7 @@ func (j *Job) detectProxmoxCapabilities(ctx context.Context) {
 		if inventoryFailed(ctx, es.ID, "") {
 			continue
 		}
+		j.reconcileProviderIsolation(ctx, ps, es)
 		if err := j.reconcileSandboxWorkers(ctx, ps, es); err != nil {
 			j.log.Error("syncjob: sandbox workers", "serviceId", es.ID, "err", err)
 		}
@@ -424,6 +433,49 @@ func (j *Job) syncProxmoxService(ctx context.Context, p *project.Project, es *ex
 		j.log.Warn("syncjob: remove blank VMs, retrying on the next sync", "project", p.ID, "serviceId", es.ID, "err", err)
 	}
 	return count
+}
+
+// reconcileProviderIsolation writes the isolation DROPs of a provider that carries a managed-services installation,
+// project or not: a provider with no project had none until its first tenant network, so the managed-services preflight
+// could not pass on a cluster where another portal already has tenant networks. Only that preflight needs the write, so
+// every other provider is left as before: no lock, no PVE request, no log line. Same lock as the per-project reconcile;
+// a busy lock waits for the next cycle. From the lookup on, every way out without a write leaves a log line: the
+// preflight sends the operator to this sync. A disabled provider never gets here (detectProxmoxCapabilities skips
+// it), and the preflight's isolation row says so (platformlife.Preflight.ProviderDisabled).
+func (j *Job) reconcileProviderIsolation(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) {
+	netCfg := es.PVENetworkConfig()
+	if j.installedOn == nil || j.sdnLock == nil || netCfg.CIDRPool == "" {
+		return
+	}
+	if has, err := j.installedOn(ctx, es.ID); err != nil {
+		j.log.Warn("syncjob: provider isolation: read the managed-services installation, retried on the next sync", "serviceId", es.ID, "err", err)
+		return
+	} else if !has {
+		return
+	}
+	start := j.now()
+	ok, err := j.sdnLock.Lock(ctx, project.SDNApplyLockName, project.SDNApplyMaxFor, start)
+	if err != nil {
+		j.log.Warn("syncjob: provider isolation: sdn lock, retried on the next sync", "serviceId", es.ID, "err", err)
+		return
+	}
+	if !ok {
+		j.log.Info("syncjob: provider isolation: the sdn lock is busy, skipped until the next sync", "serviceId", es.ID)
+		return
+	}
+	defer func() { _ = j.sdnLock.Unlock(ctx, project.SDNApplyLockName, 0, start, j.now()) }()
+	if err := ps.ReconcileProviderIsolation(ctx, netCfg.CIDRPool, netCfg.BlockedCIDRs, netCfg.SandboxCIDRs, es.PVESandboxEndpoints()...); err != nil {
+		j.log.Log(ctx, providerIsolationLevel(err), "syncjob: reconcile provider isolation", "serviceId", es.ID, "err", err)
+	}
+}
+
+// providerIsolationLevel: a refusal (pve.ErrIsolationRefused) comes back on every cycle until someone changes the
+// config or the cluster, and the per-project path keeps working meanwhile, so it is a warning; a failed call is an error.
+func providerIsolationLevel(err error) slog.Level {
+	if errors.Is(err, pve.ErrIsolationRefused) {
+		return slog.LevelWarn
+	}
+	return slog.LevelError
 }
 
 // reconcileIsolation brings the project's firewall rules to the current rule set: a project made

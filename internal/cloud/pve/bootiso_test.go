@@ -175,7 +175,7 @@ func TestISOVisibilityProblem(t *testing.T) {
 					fmt.Fprintf(w, `{"data":{%q:%s}}`, path, c.sees[strings.TrimPrefix(path, "/storage/")])
 				},
 			})
-			got, err := cl.ISOVisibilityProblem(context.Background(), defs, "local")
+			got, _, err := cl.ISOVisibilityProblem(context.Background(), defs, "local")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -189,7 +189,42 @@ func TestISOVisibilityProblem(t *testing.T) {
 		})
 	}
 	_, cl := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){})
-	if _, err := cl.ISOVisibilityProblem(context.Background(), defs, "local"); err == nil {
+	if _, _, err := cl.ISOVisibilityProblem(context.Background(), defs, "local"); err == nil {
 		t.Error("a failed permissions read must be an error, not a verdict")
+	}
+}
+
+// A token without privilege separation holds its user's rights: the user's rows on /pool and /storage are the
+// script's, no token row grants anything there, and the advice must say how to get out of that. The script's own token
+// rows (on /, not propagated, and NoAccess ones) are listed by pveum too, so the advice names the row by its path and
+// never asks for one of those to go.
+func TestTokenACLRemovalWithoutATokenRow(t *testing.T) {
+	user := ACLEntry{Path: "/pool", Type: "user", UGID: "capmox@pve", RoleID: "ProxCloudCAPI", Propagate: 1}
+	tok := func(path, role string, propagate int) ACLEntry {
+		return ACLEntry{Path: path, Type: "token", UGID: CAPITokenID, RoleID: role, Propagate: propagate}
+	}
+	const privsep = "pveum user token modify 'capmox@pve' 'capi' --privsep 1"
+	const recipe = "the row to remove is one on /pool itself, or on a parent of it (/ included) with propagate 1, whose role is not NoAccess"
+	for name, c := range map[string]struct {
+		acls []ACLEntry
+		want []string
+		not  []string
+	}{
+		"no token row":                      {[]ACLEntry{user}, []string{privsep, recipe, "If none of the listed rows is such a row, remove none"}, []string{"pveum acl delete /", "If no row is listed"}},
+		"the script's token rows":           {[]ACLEntry{user, tok("/", "ProxCloudCAPI", 0), tok("/pool", "NoAccess", 1), tok("/pool/proxcloud-system", "ProxCloudCAPI", 1)}, []string{privsep, recipe}, []string{"pveum acl delete /"}},
+		"a token row on / that passes down": {[]ACLEntry{user, tok("/", "ProxCloudCAPI", 1)}, []string{"pveum acl delete / --tokens 'capmox@pve!capi' --roles ProxCloudCAPI"}, []string{privsep}},
+		"a token row on the path":           {[]ACLEntry{user, tok("/", "ProxCloudCAPI", 0), tok("/pool", "PVEVMAdmin", 0)}, []string{"pveum acl delete /pool --tokens 'capmox@pve!capi' --roles PVEVMAdmin"}, []string{privsep, "pveum acl delete / "}},
+	} {
+		got := TokenACLRemoval(c.acls, CAPITokenID, "/pool")
+		for _, w := range c.want {
+			if !strings.Contains(got, w) {
+				t.Errorf("%s: advice lacks %q: %s", name, w, got)
+			}
+		}
+		for _, n := range c.not {
+			if strings.Contains(got, n) {
+				t.Errorf("%s: advice has %q: %s", name, n, got)
+			}
+		}
 	}
 }
