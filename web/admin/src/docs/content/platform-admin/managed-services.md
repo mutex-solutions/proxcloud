@@ -18,6 +18,14 @@ Reading the page needs read access to services; every button needs the permissio
 
 The page also warns when the job scheduler is off: tenant clusters and databases then update their status only when a provider sync runs.
 
+No check of step 3 reads the following, so look before the first run:
+
+- The seed and the machines reach the Proxmox API URL of the settings from the platform network. With the datacenter firewall on, a node accepts its API port only from its own management network unless you add the platform network there.
+- Each node has memory left for its machines: the cluster manager counts the configured memory of every VM it sees on the node, running or stopped.
+- The platform bridge is one network across the nodes, not a separate NAT network on each.
+- The boot store has room for a full copy of every machine's disk, on disks that write fast: the seed and the control plane stop working when a write takes seconds.
+- The Proxmox provider names its region.
+
 ## Step 1: Settings
 
 Saving keeps a draft. Nothing is created on Proxmox until you press **Install**, and a draft can be changed as often as you like.
@@ -89,8 +97,9 @@ The failed stage shows a code, a message and what to do.
 | `seed_identity_lost` | **Retry**. It builds the seed again. |
 | `seed_cd_not_deleted` | Run the script again, then **Retry**. |
 | `seed_lost` | The seed VM is gone. Remove the installation with the option for a missing seed, then install again. |
-| `component_unhealthy`, `capi_init_failed` | Download the seed kubeconfig to look closer, then **Retry**. The run starts a failed sync again itself; no manual sync is needed. |
-| `machine_failed`, `capmox_auth_failed` | Check the boot store, the nodes, the Proxmox API URL and the token secret, then **Retry**. |
+| `component_unhealthy`, `capi_init_failed` | The component's row shows what its sync failed on, for example a job and its message. Download the seed kubeconfig to look closer, then **Retry**. The run starts a failed sync again itself, once; no manual sync is needed. |
+| `machine_failed` | The message carries the cluster manager's own text: correct what it names (memory on the node, the boot store, the template). The machine is not tried again on its own: download the seed kubeconfig, run the `kubectl … delete machine` command of the message, then **Retry**. If the text says a VM's name does not match, do not delete the machine: its number belongs to another VM. If the message names a node template with a cloud-init drive, run its `qm set` command on that node, then **Retry**. |
+| `capmox_auth_failed` | Proxmox refused the token, or the seed cannot reach the Proxmox API URL of the settings. Check the URL as the platform network reaches it and paste the token secret again, then **Retry**. The message names the log that says which. |
 | `workload_api_unreachable` | Add a route from the ProxCloud host to the API address, then **Retry**. During a removal: restore the route and **Remove again**, or tick the option for a cluster that does not answer when it is beyond repair. |
 | `provider_conflict` | Correct the provider named in the message under **Cloud providers**, then **Retry**. |
 | `bom_unsupported` | The platform was installed by another ProxCloud release, and no release upgrades an installed platform yet. Go back to the ProxCloud release that installed it. Or, if no tenant cluster or database must be kept, delete them all, then remove managed services and install again: **Remove** deletes the platform cluster. |
@@ -115,7 +124,7 @@ The page shows each component with its live state, read from the seed, and the t
 - **Download seed kubeconfig** gives full access to the seed for one hour, for looking closer when a component fails. The download is written to the audit log.
 - **Replace the seed credential** gives ProxCloud a new credential for the seed and ends the old one.
 - If someone else saved the settings while you were editing them, your **Save** is refused: the page reads the settings again and asks you to enter your change once more.
-- **Remove managed services** deletes the platform cluster, its volumes and the seed VM and disables the two providers. You type `remove <name>` to confirm. It is refused while tenant clusters or databases exist. Tick the extra option only when the seed VM is already gone or the cluster no longer answers. ProxCloud then cannot see whether tenant clusters or databases still run there: any that do are deleted with the cluster's machines and volumes. Afterwards the page prints the two commands that end the tokens; they are yours to run. The removal deletes no rule of the datacenter firewall: the provider's isolation rules stay, and the provider sync keeps them up to date while the removed installation is on record. If you later take the platform's addresses out of **Networks tenants must not reach** on a provider with no project, delete the rules with the provider's comment in Proxmox under Datacenter, Firewall, then run a provider sync.
+- **Remove managed services** deletes the platform cluster, its volumes and the seed VM and disables the two providers. The next install enables the ones the removal disabled again; a provider you disabled yourself stays disabled. With the extra option and the seed VM gone, a machine that was still being copied is not deleted: the stage lists it, and you delete it in Proxmox. You type `remove <name>` to confirm. It is refused while tenant clusters or databases exist. Tick the extra option only when the seed VM is already gone or the cluster no longer answers. ProxCloud then cannot see whether tenant clusters or databases still run there: any that do are deleted with the cluster's machines and volumes. Afterwards the page prints the two commands that end the tokens; they are yours to run. The removal deletes no rule of the datacenter firewall: the provider's isolation rules stay, and the provider sync keeps them up to date while the removed installation is on record. If you later take the platform's addresses out of **Networks tenants must not reach** on a provider with no project, delete the rules with the provider's comment in Proxmox under Datacenter, Firewall, then run a provider sync.
 
 ## What this release does not do
 

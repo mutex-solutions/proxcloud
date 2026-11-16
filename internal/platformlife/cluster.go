@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"maps"
 	"net/netip"
 	"reflect"
 	"slices"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 )
 
 const (
@@ -36,7 +38,35 @@ const (
 	providerNamespace        = "proxcloud-system" // the providers' service account and its token Secret on the workload
 	providerTokenSecret      = "proxcloud-token"
 	waveStall                = 20 * time.Minute // stage 9 fails when a wave does not finish within this
+	// capmoxSilence is how long stage 7 waits for CAPMOX's first condition on the ProxmoxCluster. CAPMOX opens the
+	// Proxmox API before it writes anything, so a URL the seed cannot reach or a token Proxmox refuses shows as no
+	// condition at all (pkg/scope/cluster.go at v0.9.2: "Unable to initialize ProxmoxClient", nothing patched).
+	capmoxSilence = 10 * time.Minute
+	capmoxLog     = "kubectl -n capmox-system logs deploy/capmox-controller-manager"
+	// wokenAnnotation is what a run writes on a ProxmoxCluster that CAPMOX left without a condition before the run
+	// began (a Retry): CAPMOX v0.9.2 tries a ProxmoxCluster whose Proxmox API it could not open again only on
+	// controller-runtime's backoff, up to 1000 s apart, longer than capmoxSilence, and watches nothing a fix touches.
+	// Any update of the object makes it look at once (its only predicates are not paused, not externally managed).
+	wokenAnnotation = "proxcloud.io/retried-by"
+	// syncAttempts is how often one sync operation must have failed before a stage fails on it while ArgoCD still
+	// tries: 30s, 1m, 2m and 4m of backoff, about 8 minutes, which a slow image pull survives. The Applications'
+	// retry policy (ten attempts, about 40 minutes) outlasts the time limit of stage 6 and of a wave of stage 9.
+	syncAttempts = 4
+	kcpGroup     = "controlplane.cluster.x-k8s.io"
 )
+
+// oneLine is a condition message on one line: Cluster API's v1beta2 summaries are bullet lists.
+func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+// CAPMOX's condition on a ProxmoxMachine (api/v1alpha2/conditions_consts.go at v0.9.2). It is False with the step as its
+// reason while the VM is built. Two reasons end the machine: with VMProvisionFailed the controller skips it from then
+// on (MachineScope.HasFailed), and after TaskFailed (a Proxmox task but qmstart failed) every step of its state machine
+// is skipped, because each runs only at its own reason. CloningFailed and PoweringOnFailed are tried again.
+const vmProvisioned = "VirtualMachineProvisioned"
+
+func capmoxGaveUp(c map[string]any) bool {
+	return str(c, "status") == "False" && (str(c, "reason") == "VMProvisionFailed" || str(c, "reason") == "TaskFailed")
+}
 
 // dig reads the value at path in a decoded Kubernetes object (nil when absent); str reads a string there.
 func dig(obj any, path ...string) any {
@@ -53,16 +83,18 @@ func str(obj map[string]any, path ...string) string {
 	return s
 }
 
-// condition is the status of obj's condition of type typ ("" when it has none).
-func condition(obj map[string]any, typ string) string {
+// cond is obj's condition of type typ (nil when it has none); condition is its status.
+func cond(obj map[string]any, typ string) map[string]any {
 	conds, _ := dig(obj, "status", "conditions").([]any)
 	for _, c := range conds {
 		if m, _ := c.(map[string]any); str(m, "type") == typ {
-			return str(m, "status")
+			return m
 		}
 	}
-	return ""
+	return nil
 }
+
+func condition(obj map[string]any, typ string) string { return str(cond(obj, typ), "status") }
 
 // seed is the seed's API with the stored service-account credential, TLS pinned to the seed's CA.
 func (x *acq) seed() (*kamajik8s.Client, error) {
@@ -172,11 +204,15 @@ func (x *acq) apps(cluster string) ([]appOf, error) {
 	return out, nil
 }
 
-// appState is an Application as ArgoCD reports it: ok when it is Synced and Healthy and that was compared against the
+// appState is an Application as ArgoCD reports it: ok when it is Synced and Healthy, that was compared against the
 // source the Application has now (both read in one GET), so the status of another version or of other values does
-// not pass.
+// not pass, and no sync is asked for, runs or ended Failed or Error: ArgoCD reports Synced and Healthy from the
+// resources alone, while a Sync or PostSync hook of the same operation still runs or keeps failing. An Application
+// without any operation passes: nothing ran a hook on it. The detail names the resources and hooks the last operation
+// failed on, with their messages.
 func appState(app map[string]any) (state, detail string, ok bool) {
 	sync, health := str(app, "status", "sync", "status"), str(app, "status", "health", "status")
+	phase := str(app, "status", "operationState", "phase")
 	var msgs []string
 	conds, _ := dig(app, "status", "conditions").([]any)
 	for _, c := range conds {
@@ -186,12 +222,31 @@ func appState(app map[string]any) (state, detail string, ok bool) {
 	if m := str(app, "status", "operationState", "message"); m != "" {
 		msgs = append(msgs, m)
 	}
+	msgs = append(msgs, syncFailures(app)...)
 	if sync == "" {
 		sync, health = "Unknown", "Unknown"
 	}
+	state = sync + "/" + health
+	if phase != "" && phase != "Succeeded" {
+		state += ", sync " + phase
+	}
 	source := dig(app, "spec", "source")
-	ok = sync == "Synced" && health == "Healthy" && source != nil && reflect.DeepEqual(source, dig(app, "status", "sync", "comparedTo", "source"))
-	return sync + "/" + health, strings.Join(msgs, "; "), ok
+	ok = sync == "Synced" && health == "Healthy" && source != nil && reflect.DeepEqual(source, dig(app, "status", "sync", "comparedTo", "source")) &&
+		app["operation"] == nil && (phase == "" || phase == "Succeeded")
+	return state, strings.Join(msgs, "; "), ok
+}
+
+// syncFailures are the resources and hooks the Application's last sync attempt failed on, each with its message.
+func syncFailures(app map[string]any) []string {
+	var out []string
+	results, _ := dig(app, "status", "operationState", "syncResult", "resources").([]any)
+	for _, r := range results {
+		m, _ := r.(map[string]any)
+		if hp := str(m, "hookPhase"); hp == "Failed" || hp == "Error" || str(m, "status") == "SyncFailed" {
+			out = append(out, str(m, "kind")+" "+str(m, "namespace")+"/"+str(m, "name")+": "+str(m, "message"))
+		}
+	}
+	return out
 }
 
 // clusterctlProviders are the providers a component's clusterctl Sync hook installs (false: it has no such hook).
@@ -224,8 +279,8 @@ func inventory(ctx context.Context, target *kamajik8s.Client, want Providers) (s
 		name, version, _ := strings.Cut(ref, ":")
 		switch got := have[typ+" "+name]; {
 		case ref == "" || got == version:
-		case got == "":
-			missing = append(missing, ref)
+		case got == "": // the type too: bootstrap and control plane are both kubeadm at one version
+			missing = append(missing, strings.TrimSuffix(typ, "Provider")+" "+ref)
 		default:
 			return "", permanent(CodeCAPIInitFailed, "%s %s is installed at %s and the BOM names %s: provider upgrades come with a later release.", typ, name, got, version)
 		}
@@ -241,11 +296,29 @@ func inventory(ctx context.Context, target *kamajik8s.Client, want Providers) (s
 // last operation ended Failed or Error (its retries are spent, and self-heal runs only after a success), and a
 // clusterctl hook that ended Succeeded without its providers (hook) runs again only in a new sync. Nothing while an
 // operation is requested or runs. The operation carries the Application's retry policy, so a sync that keeps failing
-// backs off instead of starting at every acquisition. "" = nothing started.
-func (x *acq) resync(ctx context.Context, seed *kamajik8s.Client, a appOf, live map[string]any, hook bool, code string) (string, error) {
+// backs off instead of starting at every acquisition. "" = nothing started. A run starts the sync of a failed
+// Application once (the stage receipt names it): when that one ends Failed or Error too, its retries are spent a
+// second time and the stage fails with code and detail, what the operation failed on, instead of waiting for its
+// deadline. The next run (Retry) starts it once more.
+//
+// An operation that fails is not waited out either. Between two attempts ArgoCD (v3.6.1, controller/appcontroller.go)
+// keeps the phase Running with finishedAt set, the retry count raised and the failed attempt's resources: when that
+// shows syncAttempts failures, the last of them after this stage began (so a Retry gives the operation one attempt
+// with the cause fixed), the stage fails with what the attempt failed on.
+func (x *acq) resync(ctx context.Context, seed *kamajik8s.Client, a appOf, live map[string]any, hook bool, code, detail string) (string, error) {
 	phase := str(live, "status", "operationState", "phase")
+	if n, _ := dig(live, "status", "operationState", "retryCount").(float64); phase == "Running" && n >= syncAttempts {
+		at, err := time.Parse(time.RFC3339, str(live, "status", "operationState", "finishedAt"))
+		if fails := syncFailures(live); err == nil && len(fails) > 0 && at.After(*x.run.Stages[x.si].StartedAt) {
+			return "", permanent(code, "The sync of %s failed %d times and ArgoCD still tries it: %s", a.name(), int(n), clip(strings.Join(fails, "; ")))
+		}
+	}
 	if live["operation"] != nil || (phase != "Failed" && phase != "Error" && (phase != "Succeeded" || !hook)) {
 		return "", nil
+	}
+	failed := phase != "Succeeded"
+	if failed && slices.Contains(x.receipt().Resynced, a.name()) {
+		return "", permanent(code, "The sync of %s ended %s again after this run had started it once more: %s", a.name(), phase, clip(detail))
 	}
 	if err := x.check(ctx); err != nil {
 		return "", err
@@ -254,6 +327,11 @@ func (x *acq) resync(ctx context.Context, seed *kamajik8s.Client, a appOf, live 
 		"sync": map[string]any{"revision": a.c.Chart.Version, "syncOptions": dig(a.obj, "spec", "syncPolicy", "syncOptions")}}
 	if _, err := seed.MergePatchCR(ctx, argoGroup, argoVersion, "applications", argoNamespace, a.name(), map[string]any{"operation": op}); err != nil {
 		return "", classify(code, err)
+	}
+	if failed { // after the patch: a crash between the two starts one sync more, never a failure for a sync not started
+		if err := x.recordReceipt(ctx, func(r *StageReceipt, _ *Installation, _ *Secrets) { r.Resynced = append(r.Resynced, a.name()) }); err != nil {
+			return "", err
+		}
 	}
 	return "its sync ended " + phase + "; the run started it again", nil
 }
@@ -275,7 +353,7 @@ func (x *acq) waves(ctx context.Context, seed, target *kamajik8s.Client, apps []
 		if err := x.check(ctx); err != nil {
 			return err
 		}
-		code, pending := CodeComponentUnhealthy, []string(nil)
+		code, pending, why := CodeComponentUnhealthy, []string(nil), ""
 		for _, a := range apps {
 			if a.c.Wave != w {
 				continue
@@ -299,17 +377,25 @@ func (x *acq) waves(ctx context.Context, seed, target *kamajik8s.Client, apps []
 					ok, code, detail = false, CodeCAPIInitFailed, msg+"; "+detail
 				}
 			}
+			detail = strings.TrimSuffix(detail, "; ")
 			if !ok {
-				pending = append(pending, a.name())
-				msg, err := x.resync(ctx, seed, a, live, hook, appCode)
-				if err != nil {
+				pending = append(pending, a.name()+" ("+state+")")
+				msg, err := x.resync(ctx, seed, a, live, hook, appCode, detail)
+				if err != nil { // the item first: it names what the sync failed on
+					items = append(items, StageItem{ID: a.name(), State: state, Message: clip(detail)})
+					if serr := x.saveStage(ctx, func(s *Stage) { s.Items = items }); serr != nil {
+						return serr
+					}
 					return err
 				}
 				if msg != "" {
-					detail = msg + "; " + detail
+					detail = strings.TrimSuffix(msg+"; "+detail, "; ")
+				}
+				if why == "" && detail != "" {
+					why = " " + a.name() + ": " + detail
 				}
 			}
-			items = append(items, StageItem{ID: a.name(), State: state, Message: clip(strings.TrimSuffix(detail, "; "))})
+			items = append(items, StageItem{ID: a.name(), State: state, Message: clip(detail)})
 		}
 		progress := fmt.Sprintf("wave %d of %d", i+1, len(order))
 		// Written where the run stands: a new wave, the stored one, or an earlier one that is pending again.
@@ -328,7 +414,7 @@ func (x *acq) waves(ctx context.Context, seed, target *kamajik8s.Client, apps []
 			}
 		}
 		if len(pending) > 0 {
-			return waiting(code, "Waiting for %s to be Synced and Healthy (%s).", strings.Join(pending, ", "), progress)
+			return waiting(code, "Waiting for %s to be Synced and Healthy with its sync Succeeded (%s).%s", strings.Join(pending, ", "), progress, clip(why))
 		}
 		if after != nil {
 			if err := after(w); err != nil {
@@ -410,9 +496,15 @@ func machineDeployments(c ClusterSpec) []string {
 
 // cluster is stage 7: the CAPI token's Secret and the workload cluster's Application on the seed, the
 // MachineDeployments of nodes no longer in a group deleted (the Application is stateful, so ArgoCD prunes nothing),
-// then the wait for the control plane, the admin kubeconfig and every Machine Running.
+// then the wait for the control plane, the admin kubeconfig and every Machine Running. Cluster API v1.14 no longer
+// sets a Machine Failed and CAPMOX has no failure fields: what went wrong is on the ProxmoxMachine's condition, which
+// the items and the waiting message carry, and which fails the stage when CAPMOX gave the machine up.
 func (x *acq) cluster(ctx context.Context) error {
 	if err := x.needCAPI(); err != nil {
+		return err
+	}
+	unread, err := x.nodeTemplates(ctx)
+	if err != nil {
 		return err
 	}
 	seed, err := x.seed()
@@ -450,12 +542,19 @@ func (x *acq) cluster(ctx context.Context) error {
 	if err := seed.ApplyApplication(ctx, apps[i].obj); err != nil {
 		return classify(CodeComponentUnhealthy, err)
 	}
-	// The stage reads the cluster's own objects, not this Application; a sync of it that failed is started again.
+	// The stage reads the cluster's own objects, not this Application; a sync of it that failed is started again, and
+	// what it reports goes into the waiting message: without a sync there is no machine to report anything.
+	// The Application is Progressing for as long as the machines are built, so its health alone is no news: only a
+	// sync that is not done is. It goes last, after what CAPMOX and Cluster API say: the message is clipped.
+	note, appNote := "", ""
 	if live, err := seed.GetApplication(ctx, argoNamespace, apps[i].name()); err != nil {
 		return classify(CodeComponentUnhealthy, err)
-	} else if _, _, ok := appState(live); !ok {
-		if _, err := x.resync(ctx, seed, apps[i], live, false, CodeComponentUnhealthy); err != nil {
+	} else if state, detail, ok := appState(live); !ok {
+		if _, err := x.resync(ctx, seed, apps[i], live, false, CodeComponentUnhealthy, detail); err != nil {
 			return err
+		}
+		if phase := str(live, "status", "operationState", "phase"); str(live, "status", "sync", "status") != "Synced" || (phase != "" && phase != "Succeeded") {
+			appNote = strings.TrimSuffix(fmt.Sprintf(" Application %s is %s: %s", apps[i].name(), state, detail), ": ")
 		}
 	}
 	mds, err := seed.ListMachineDeployments(ctx, ClusterName, clusterSelector+",proxcloud.io/node-group")
@@ -496,18 +595,77 @@ func (x *acq) cluster(ctx context.Context) error {
 			}
 		}
 	}
-	var items []StageItem
+	// CAPMOX reports on the ProxmoxCluster only once it has opened the Proxmox API from the seed.
+	if c := cond(pc, "ProxmoxAvailable"); pc != nil && c == nil {
+		start := *x.run.Stages[x.si].StartedAt
+		since := time.Since(start) // the object's age when that is less: ArgoCD may have made it late
+		if made, err := time.Parse(time.RFC3339, str(pc, "metadata", "creationTimestamp")); err == nil {
+			since = min(since, time.Since(made))
+			// Left silent by an earlier run: CAPMOX is deep in its backoff and would not see a fix in time (wokenAnnotation).
+			if made.Before(start) && x.receipt().CAPMOXWokenAt == nil {
+				if err := x.check(ctx); err != nil {
+					return err
+				}
+				patch := map[string]any{"metadata": map[string]any{"annotations": map[string]any{wokenAnnotation: x.runID}}}
+				if _, err := seed.MergePatchCR(ctx, infraGroup, infraVersion, "proxmoxclusters", ClusterName, ClusterName, patch); err != nil {
+					return classify(CodeSeedAPIUnreachable, err)
+				}
+				now := time.Now().UTC()
+				if err := x.recordReceipt(ctx, func(r *StageReceipt, _ *Installation, _ *Secrets) { r.CAPMOXWokenAt = &now }); err != nil {
+					return err
+				}
+			}
+		}
+		if at := x.receipt().CAPMOXWokenAt; at != nil {
+			since = min(since, time.Since(*at))
+		}
+		if since > capmoxSilence {
+			return permanent(CodeCAPMOXAuthFailed, "CAPMOX has set no condition on ProxmoxCluster %s in %d minutes. It reports only after it opened the Proxmox API "+
+				"at %s from the platform network with the token of Cluster API: check that the seed reaches that URL (route, the nodes' firewall) and the token. "+
+				"Its log says what stops it: %s", ClusterName, int(since.Minutes()), in.PVEAPIURL, capmoxLog)
+		}
+		note += fmt.Sprintf(" CAPMOX has set no condition on the ProxmoxCluster yet: it opens %s from the seed first (%s).", in.PVEAPIURL, capmoxLog)
+	} else if str(c, "status") == "False" {
+		note += fmt.Sprintf(" ProxmoxCluster: %s: %s", str(c, "reason"), str(c, "message"))
+	}
+	conds := map[string]map[string]any{} // a ProxmoxMachine's name → its VirtualMachineProvisioned condition
+	for _, pm := range infra {
+		conds[str(pm, "metadata", "name")] = cond(pm, vmProvisioned)
+	}
+	items := unread
 	var failed error
-	running := 0
+	running, machineNote := 0, ""
 	for _, m := range machines {
 		name, phase := str(m, "metadata", "name"), str(m, "status", "phase")
 		msg := str(m, "status", "failureMessage")
 		if msg == "" {
 			msg = str(m, "status", "deprecated", "v1beta1", "failureMessage")
 		}
+		c := conds[str(m, "spec", "infrastructureRef", "name")]
+		step := strings.TrimSuffix(str(c, "reason")+": "+str(c, "message"), ": ")
+		if msg == "" && capmoxGaveUp(c) {
+			msg = step
+		}
 		item := StageItem{ID: name, State: phase, Message: fmt.Sprintf("VM %d", vmids[name])}
 		if phase == "Running" {
 			running++
+		} else if msg == "" {
+			text := "" // the step CAPMOX is at, with its error when it has one
+			if str(c, "status") == "False" {
+				text = step
+			}
+			// CAPMOX calls a VM provisioned once it runs and has its addresses (the chart sets skipCloudInitStatus): what
+			// keeps it from joining after that (kubeadm, the API address, etcd) is on the Machine's Ready condition,
+			// which sums up BootstrapConfigReady, InfrastructureReady and NodeHealthy.
+			if r := cond(m, "Ready"); str(c, "message") == "" && str(r, "status") != "True" && str(r, "message") != "" {
+				text = strings.TrimPrefix(text+"; Cluster API: "+str(r, "reason")+": "+oneLine(str(r, "message")), "; ")
+			}
+			if text != "" {
+				item.Message = clip(item.Message + ": " + text)
+				if text != str(c, "reason") { // a step alone is in the item only
+					machineNote += fmt.Sprintf(" %s (VM %d): %s", name, vmids[name], text)
+				}
+			}
 		}
 		if phase == "Failed" || msg != "" {
 			item.State, item.Message = "Failed", clip(item.Message+": "+msg)
@@ -515,8 +673,14 @@ func (x *acq) cluster(ctx context.Context) error {
 			if pveAuthFailure(msg) {
 				code = CodeCAPMOXAuthFailed
 			}
+			advice := fmt.Sprintf("correct the cause, delete the Machine on the seed (kubectl -n %s delete machine %s; Cluster API makes a new one), then Retry.", ClusterName, name)
+			if strings.Contains(msg, "expected VM name to match") { // internal/service/vmservice/find.go at v0.9.2
+				advice = fmt.Sprintf("VM %d is another VM, not this machine's. Do not delete the Machine as it is: CAPMOX then deletes the VM at that VMID. "+
+					"Look in Proxmox whose VM %d is; ProxmoxMachine %s must no longer name it (spec.virtualMachineID) before its Machine is deleted.",
+					vmids[name], vmids[name], str(m, "spec", "infrastructureRef", "name"))
+			}
 			if failed == nil {
-				failed = permanent(code, "Machine %s (VM %d) failed: %s", name, vmids[name], clip(msg))
+				failed = permanent(code, "Machine %s (VM %d) failed: %s. CAPMOX does not try this machine again: %s", name, vmids[name], clip(msg), advice)
 			}
 		}
 		items = append(items, item)
@@ -543,9 +707,50 @@ func (x *acq) cluster(ctx context.Context) error {
 		total += g.Count
 	}
 	if !initialized || len(kc["value"]) == 0 || running != total || len(machines) != total {
-		return waiting(CodeControlPlaneTimeout, "%d of %d machines are Running (%d exist); control plane initialized: %t.", running, total, len(machines), initialized)
+		// Shown only: a read that fails leaves the control plane's own word out.
+		kcps, _ := seed.ListCRs(ctx, kcpGroup, capiVersion, "kubeadmcontrolplanes", ClusterName, "")
+		for _, k := range kcps {
+			if a := cond(k, "Available"); a != nil && str(a, "status") != "True" {
+				note += strings.TrimSuffix(fmt.Sprintf(" Control plane: %s: %s", str(a, "reason"), oneLine(str(a, "message"))), ": ")
+			}
+		}
+		note += machineNote + appNote
+		return waiting(CodeControlPlaneTimeout, "%d of %d machines are Running (%d exist); control plane initialized: %t.%s", running, total, len(machines), initialized, clip(note))
 	}
 	return nil
+}
+
+// nodeTemplates refuses a node template that CAPMOX cannot boot a machine from: one with a Proxmox cloud-init drive on
+// another slot than ide0. CAPMOX v0.9.2 puts its NoCloud ISO on ide0 (internal/inject: CloudInitISODevice) and touches
+// no other drive, so a clone of such a template starts with two media labelled cidata, and cloud-init's NoCloud source
+// takes the first of the devices sorted downwards, the later drive: Proxmox's own, with no kubeadm data and no
+// address. The machine then never joins and the stage would wait out its hour. A drive on ide0 is replaced by CAPMOX's.
+//
+// A template the portal token may not read (an operator's own, in nodeImage mode templates) is not a reason to stop:
+// the stage goes on and lists it as an item, not checked.
+func (x *acq) nodeTemplates(ctx context.Context) (unread []StageItem, err error) {
+	templates := x.renderInput().Templates
+	for _, node := range slices.Sorted(maps.Keys(templates)) {
+		cfg, err := x.portal.GetVMConfig(ctx, node, templates[node])
+		var ae *pve.APIError
+		if pve.IsNotFound(err) {
+			continue // CAPMOX reports a template that is gone on the machine
+		} else if errors.As(err, &ae) && (ae.Status == 401 || ae.Status == 403) {
+			unread = append(unread, StageItem{ID: fmt.Sprintf("template-%d", templates[node]), State: "not checked", Message: fmt.Sprintf("The portal token may not read "+
+				"the config of node template %d on %s, so its cloud-init drive was not checked: a Proxmox cloud-init drive must be on ide0 or absent.", templates[node], node)})
+			continue
+		} else if err != nil {
+			return nil, classify(CodeMachineFailed, err)
+		}
+		for _, slot := range slices.Sorted(maps.Keys(cfg)) {
+			if s := cfg.Str(slot); slot != "ide0" && strings.Contains(s, "cloudinit") && strings.Contains(s, "media=cdrom") {
+				return nil, permanent(CodeMachineFailed, "Node template %d on %s has a Proxmox cloud-init drive on %s. Cluster API puts its own on ide0, and a machine "+
+					"with both boots from the wrong one and never joins. On %s run: qm set %d --delete %s (templates imported by this release have the drive "+
+					"on ide0), then Retry.", templates[node], node, slot, node, templates[node], slot)
+			}
+		}
+	}
+	return unread, nil
 }
 
 // pveAuthFailure tells a message that carries Proxmox's refusal of a token: "401 authentication failure" from the
@@ -675,6 +880,15 @@ func (x *acq) workloadPlatform(ctx context.Context) error {
 		first = min(first, a.c.Wave)
 		if a.c.Stateful {
 			stateful = max(stateful, a.c.Wave)
+		}
+	}
+	// Also at every look, not only once the stateful wave is Healthy: a run that fails inside that wave has made the
+	// volume already, and a Remove that cannot ask the cluster deletes only what is recorded.
+	if vols, err := platformVolumes(ctx, x.bom, wl); err != nil {
+		return classify(CodeWorkloadUnreachable, err)
+	} else if len(vols) > 0 && !slices.Equal(vols, x.in.Status.Volumes) {
+		if err := x.record(ctx, func(_ *Run, in *Installation, _ *Secrets) { in.Status.Volumes = vols }); err != nil {
+			return err
 		}
 	}
 	return x.waves(ctx, seed, wl, apps, waveStall, func(wave int) error {
@@ -807,6 +1021,22 @@ var ErrProviderConflict = errors.New(CodeProviderConflict)
 // ProviderMarker is the config key that makes a provider row an installation's.
 const ProviderMarker = "platformInstallationId"
 
+// providerStatusBefore is the config key a Remove leaves on a provider row it disables: the status the row had. Stage
+// 10 gives a row that carries it that status back, so an install after a Remove does not end ready with both
+// providers disabled; a row the operator disabled has no such key and stays as it is.
+const providerStatusBefore = "platformStatusBeforeRemove"
+
+// DisableProvider sets a provider row DISABLED for a Remove and notes the status it had; false = it was disabled already.
+func DisableProvider(row map[string]any) bool {
+	cfg, _ := row["config"].(map[string]any)
+	was := str(row, "status")
+	if cfg == nil || was == "DISABLED" {
+		return false
+	}
+	cfg[providerStatusBefore], row["status"] = was, "DISABLED"
+	return true
+}
+
 // providerOwned are the config keys stage 10 rewrites on a row it adopts. Everything else is written when the row is
 // created and is the operator's from then on: its name, its status, the node image versions, the attach policy.
 var providerOwned = [][]string{{"argocd"}, {"namespacePlacement"}, {"cluster", "pveApiUrl"},
@@ -815,8 +1045,8 @@ var providerOwned = [][]string{{"argocd"}, {"namespacePlacement"}, {"cluster", "
 
 // AdoptProvider finds among the stored provider rows the one a stage 10 body adopts, the row of the body's
 // config.provider that carries its marker, and rewrites the owned keys on it. nil = there is none: create it. Two rows
-// with the marker, or a row without it under the body's name, are ErrProviderConflict. The caller stores the row and
-// the body's secret.
+// with the marker, or a row without it under the body's name, are ErrProviderConflict. A row a Remove disabled gets
+// the status it had before. The caller stores the row and the body's secret.
 func AdoptProvider(rows []map[string]any, body map[string]any) (map[string]any, error) {
 	var found map[string]any
 	for _, row := range rows {
@@ -834,6 +1064,10 @@ func AdoptProvider(rows []map[string]any, body map[string]any) (map[string]any, 
 	}
 	if found == nil {
 		return nil, nil
+	}
+	if was := str(found, "config", providerStatusBefore); was != "" { // disabled by a Remove, not by the operator
+		found["status"] = was
+		delete(found["config"].(map[string]any), providerStatusBefore)
 	}
 	for _, path := range providerOwned {
 		v := dig(body, append([]string{"config"}, path...)...)

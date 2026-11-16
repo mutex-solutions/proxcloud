@@ -634,7 +634,7 @@ func (x *acq) seedAPI(ctx context.Context) error {
 	if perr := x.capi.AgentPing(ctx, st.Node, st.VMID); perr != nil {
 		return waiting(CodeSeedNotBooted, "The seed's guest agent does not answer yet (VM %d).", st.VMID)
 	}
-	return waiting(CodeSeedAPIUnreachable, "The seed is booted but %s/readyz does not answer: %s", st.APIServer, clip(err.Error()))
+	return waiting(CodeSeedAPIUnreachable, "The seed is booted but %s/readyz is not ready yet: %s", st.APIServer, clip(err.Error()))
 }
 
 func tlsMismatch(err error) bool {

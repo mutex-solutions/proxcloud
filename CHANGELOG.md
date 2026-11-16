@@ -412,6 +412,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Managed services: stage 7 could not see a machine that failed, a sync hook that failed passed for done, and a
+  Remove could wait 45 minutes or leave things behind** (static audit and the third lab attempt, before the first run
+  reaches stage 7). Stage 7 read a Machine's `Failed` phase and failure message, which Cluster API v1.14 no longer
+  sets and CAPMOX v0.9.2 never fills: every provisioning error waited out the 60 minutes as `control_plane_timeout`.
+  It now reads the ProxmoxMachine's condition `VirtualMachineProvisioned`: the items and the waiting message carry the
+  step and CAPMOX's error, `VMProvisionFailed` and `TaskFailed` fail the stage `machine_failed` with the command that
+  makes Cluster API build the machine again, and a ProxmoxCluster that CAPMOX has set no condition on for 10 minutes
+  fails `capmox_auth_failed` naming the Proxmox API URL and CAPMOX's log. Stage 7 also refuses a node template whose
+  Proxmox cloud-init drive is not on `ide0`, and template updates now puts that drive on `ide0` for a Kubernetes node
+  image: CAPMOX writes its own ISO to `ide0` only, and a machine with two `cidata` media starts from the wrong one
+  (templates imported earlier need `qm set <vmid> --delete ide2`, [template-updates.md](docs/template-updates.md)).
+  An Application now counts as done only when its last sync operation ended `Succeeded`: ArgoCD shows Synced and
+  Healthy while a sync hook still fails, which let `capi` look done on the lab while its hook failed. The item and the
+  stage's message name the failed hook with its message, the providers clusterctl has not installed are named with
+  their type, and a sync that fails again after the run started it once fails the stage instead of being started a
+  third time. Remove no longer retries the tenant check on a cluster that never could hold a tenant (no control
+  plane), looks at the seed once more after deleting the Application `pc-platform` before it
+  calls the cluster gone, deletes a tagged VM's bootstrap ISO with it when the seed is gone, lists the untagged
+  `pc-platform-…` VMs it left, and says when it could not look for volumes. The providers a Remove disabled are
+  enabled again by the next install; one the operator disabled stays disabled. Stage 9 records the platform's volumes
+  at every look, not only after `kamaji-etcd`'s wave. Texts: stage 4 no longer says the seed "does not answer" for an
+  API that answers 401 while it starts; the guide says that the seed kubeconfig route answers JSON, lists the site
+  prerequisites no check reads (the seed's route to the Proxmox API, memory for CAPMOX's scheduler, one layer-2
+  segment, clone space, disk latency, MTU, the region), and states what a BOM recorded by the file's bytes means for
+  an install on a `-dev` build. Not verified on a lab.
+
+- **Managed services: review of the stage 7 and Remove fixes above.** A machine whose VM runs but never joins showed
+  nothing for the 60 minutes, because CAPMOX calls it provisioned: its item and the waiting message now carry the
+  Machine's `Ready` condition, and the message the KubeadmControlPlane's `Available`; the Application `pc-platform`
+  is named last and only while its sync is not done. A Retry after `capmox_auth_failed` could fail the same way with
+  the cause fixed, since CAPMOX tries a ProxmoxCluster it could not open only every up to 17 minutes: the run now
+  updates an annotation on it once, which makes CAPMOX look at once. A sync that keeps failing no longer waits out
+  stage 6 or a wave: after four failed attempts of one operation, the last in this run, the stage fails with the hook
+  or resource ArgoCD names. The `machine_failed` message no longer tells the operator to delete the Machine when
+  CAPMOX's text is the VM name mismatch, where that deletes another VM. A node template the portal token may not
+  read is listed as not checked instead of failing the stage. Remove takes only a control plane that never came up
+  for a cluster without tenants, not a missing provider record: stage 10 can leave a public provider row without
+  recording it. Not verified on a lab.
+
 - **Managed services: the seed VM could not be built from a template made by template updates (second lab attempt,
   M0).** Such a template has no network device, so Proxmox gives the seed's `net0` its MAC address when stage 3 sets
   it; the stage rendered the seed's CD from the value it had sent, without the address, and failed

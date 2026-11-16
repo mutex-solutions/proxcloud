@@ -226,9 +226,11 @@ type fakePVE struct {
 	onWrite   func(w string) // called with every recorded request
 	cloneTags string
 	uploads   [][]byte
-	disks     []string              // volumes on local-lvm (the names after "local-lvm:")
-	writers   []string              // the token id of each recorded request, parallel to writes
-	templates []pve.ClusterResource // /cluster/resources?type=vm
+	disks     []string               // volumes on local-lvm (the names after "local-lvm:")
+	writers   []string               // the token id of each recorded request, parallel to writes
+	templates []pve.ClusterResource  // /cluster/resources?type=vm
+	tmplCfg   map[int]map[string]any // the config of node templates, on any node (none: Proxmox knows no such VM)
+	tmplDeny  map[int]bool           // node templates whose config the token may not read
 }
 
 func newFakePVE(t *testing.T) *fakePVE {
@@ -296,6 +298,22 @@ func (f *fakePVE) serve(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(path, "/")
 		id, _ := strconv.Atoi(parts[4])
 		return id, f.vms[id]
+	}
+	if p := strings.Split(path, "/"); len(p) == 6 && p[3] == "qemu" && p[5] == "config" && r.Method == http.MethodGet {
+		if id, _ := strconv.Atoi(p[4]); f.vms[id] == nil { // a template: stage 7 reads it on the node it is on
+			if f.tmplDeny[id] {
+				w.WriteHeader(http.StatusForbidden)
+				fmt.Fprint(w, `{"data":null}`)
+				return
+			}
+			if cfg := f.tmplCfg[id]; cfg != nil {
+				data(cfg)
+				return
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprintf(w, `{"errors":{"vmid":"Configuration file 'nodes/%s/qemu-server/%d.conf' does not exist"}}`, p[2], id)
+			return
+		}
 	}
 	switch {
 	case path == "/pools/proxcloud-seed":

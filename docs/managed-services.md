@@ -85,6 +85,34 @@ reading [section 3](#3-proxmox-identities): they share the pool `proxcloud-syste
 The page also warns when the job scheduler is off: tenant clusters and databases then update their
 status only when a provider sync runs. It does not block an install.
 
+### What no check reads
+
+The checks of step 3 do not see the following. Each one shows only in stage 4, 7 or 9, so look
+before the first run:
+
+- **The seed reaches the Proxmox API URL.** Until stage 7 only the ProxCloud host calls Proxmox.
+  CAPMOX calls it from the seed, with the seed's address on the platform network as the source.
+  With the datacenter firewall on, a node accepts port 8006 only from its `management` IP set
+  (by default the node's own network): add the platform network to it, or enter a URL the platform
+  network reaches. A URL that is not reached ends stage 7 with `capmox_auth_failed` after 10 minutes.
+- **Memory on each node for CAPMOX's scheduler.** CAPMOX clones a machine only when its memory fits
+  into the node's total memory minus the configured memory of every VM its token sees on that node,
+  running or stopped (the seed and the platform's other machines). A machine that does not fit ends
+  stage 7 with `machine_failed` and CAPMOX's text.
+- **One layer-2 segment for the platform bridge across the nodes.** The cluster's API address is
+  announced by ARP from the control plane's node. A bridge that is a separate NAT network on each
+  node (no port between the nodes) leaves the machines of the other nodes unable to join.
+- **Space on the boot store for full clones.** Every machine is a full raw clone of its disk size.
+  A ZFS store without `sparse` reserves the whole size for each.
+- **Disk latency.** The seed (k3s with embedded etcd) and the control plane write to etcd. An fsync
+  that takes seconds makes k3s exit and start again (seen on a lab: one write of 6.9 s), and can
+  cost the control plane its leader. Put the boot store on disks that sync in milliseconds.
+- **The MTU of the platform network.** Cilium tunnels pod traffic between the machines at the
+  machines' MTU. When the bridge's real path MTU between two nodes is below 1500 (the bridge is
+  itself carried by an overlay), set the settings' MTU to it.
+- **The provider's region.** The Proxmox provider must name its region (`config.region`), or hold
+  exactly one: the region becomes a label of every machine and the storage plugin's configuration.
+
 Platform setup and the Dashboard show an optional step `managed` after Go live
 (`GET /api/v1/admin/setup/status`). It only reports the installation's phase and links to the page;
 Go live never waits for it.
@@ -343,10 +371,10 @@ One run per installation at a time. The page reads the run every 3 seconds.
 | 3 | Create the seed VM (`seed-vm`) | Takes a free VMID, clones the seed template into `proxcloud-seed` with the CAPI token, sets size and network (the template has no network device: Proxmox gives the new one its MAC address, and the CD's network config names that address), generates the seed's k3s server CA and tokens, uploads a NoCloud CD (`pcplat-<id>-…`) to the ISO store, puts it in place of the template's cloud-init drive and protects the VM, turns on the VM firewall (policy DROP; 6443, and 22 when SSH keys are set, from the API sources only) and starts the VM. | 30 min |
 | 4 | Reach the seed (`seed-api`) | Waits until `https://<seed address>:6443/readyz` answers with a certificate of the CA made in stage 3. While it does not, the stage says whether the guest agent answers (`seed_not_booted`) or only the API does not (`seed_api_unreachable`). | 20 min |
 | 5 | Secure the seed (`seed-identity`) | Reads the token of the service account `proxcloud-system/proxcloud-portal` with a bootstrap token, checks that it is cluster-admin, stores it encrypted, deletes the bootstrap token and its RBAC, then ejects the CD (the drive stays, empty: Proxmox removes no drive from a protected VM) and deletes it. The seed counts as ready from the moment its credential is stored; the stage is done only when the running seed's config no longer names the CD (an eject Proxmox took but left pending does not count, and the CD's file is kept until then) and no store lists it. | 10 min |
-| 6 | Install the seed's components (`seed-platform`) | ArgoCD as a k3s HelmChart, the AppProject `proxcloud-platform` (BOM chart repositories only; the `default` project locked), then `cert-manager` and `capi` wave by wave. `capi` is done when the clusterctl inventory equals the BOM. | 30 min |
-| 7 | Build the platform cluster (`cluster`) | The CAPI token's Secret and the Application `pc-platform` on the seed; MachineDeployments of nodes no longer in a group are deleted; then waits for the control plane, the admin kubeconfig and every Machine Running. The items list each machine with its VMID. | 60 min |
+| 6 | Install the seed's components (`seed-platform`) | ArgoCD as a k3s HelmChart, the AppProject `proxcloud-platform` (BOM chart repositories only; the `default` project locked), then `cert-manager` and `capi` wave by wave. An Application counts when it is Synced and Healthy, compared against the chart version and values it has now, and its last sync operation ended `Succeeded`: ArgoCD shows Synced and Healthy from the resources alone while a hook of the sync still runs or fails. `capi` is done when, besides, the clusterctl inventory equals the BOM. The item of an Application names the resources and hooks its sync failed on, with their messages, and the stage's message repeats the first. | 30 min |
+| 7 | Build the platform cluster (`cluster`) | The CAPI token's Secret and the Application `pc-platform` on the seed; MachineDeployments of nodes no longer in a group are deleted; then waits for the control plane, the admin kubeconfig and every Machine Running. Before it writes anything it reads each node template: a template with a Proxmox cloud-init drive on another slot than `ide0` is refused (`machine_failed`, with the `qm set` command that removes the drive), because CAPMOX puts its own on `ide0` and a machine with both starts from the wrong one. A template whose config the portal token may not read is not checked: the stage goes on and shows an item `template-<vmid>` in state `not checked`. The items list each machine with its VMID and, while it is not Running, the step CAPMOX is at with its error (the reason and message of the ProxmoxMachine's condition `VirtualMachineProvisioned`). CAPMOX calls a VM provisioned once it runs and has its addresses; for a machine that then does not join (kubeadm, the API address, etcd) the item carries the reason and message of the Machine's own condition `Ready` after `Cluster API:`. The message of the waiting stage repeats, in this order, what the ProxmoxCluster reports, the KubeadmControlPlane's condition `Available` while it is not `True` (`Control plane:`), the machines' errors and, last, the state of the Application `pc-platform` while its sync is not done (not while it is only Progressing, which it is for as long as machines are built). On a **Retry** that finds a ProxmoxCluster still without a condition, the run updates an annotation on it (`proxcloud.io/retried-by`) once, so CAPMOX opens the Proxmox API again at once instead of at the end of its backoff of up to 17 minutes; the 10 minutes count from then. Steps CAPMOX tries again (`CloningFailed`, `PoweringOnFailed`) are waited for. `VMProvisionFailed` and `TaskFailed` end the stage: CAPMOX does not go on with such a machine. | 60 min |
 | 8 | Reach the platform cluster (`workload-access`) | Creates the seed ArgoCD's service account on the cluster and a token for it (one year, renewed by any later apply when under 90 days are left), kept only in the seed's cluster Secret; writes the CSI token's Secret for proxmox-csi. | 10 min |
-| 9 | Install the platform components (`workload-platform`) | The cluster's components wave by wave, each wave only when the one before is Synced and Healthy. After the first wave (Cilium) every node must be Ready with its group label; after `kamaji-etcd`'s wave the platform's own volumes are recorded for Remove. | 20 min per wave |
+| 9 | Install the platform components (`workload-platform`) | The cluster's components wave by wave, each wave only when the one before is Synced and Healthy with its sync `Succeeded` (as in stage 6). After the first wave (Cilium) every node must be Ready with its group label. The platform's own volumes are recorded for Remove at every look of the stage, so also when it fails inside `kamaji-etcd`'s wave. | 20 min per wave |
 | 10 | Create the two providers (`register`) | Creates the Kubernetes and Databases providers, or updates the ones this installation created before, with a kubeconfig of the cluster's `proxcloud-system/proxcloud` service account. | 5 min |
 | 11 | Finish (`done`) | Records the components and the BOM as installed. The phase becomes `ready`. | 5 min |
 
@@ -365,7 +393,8 @@ A Remove has three stages: Delete the platform cluster (`remove-cluster`, 45 min
   a boot, a kubeadm join and a chart sync take minutes.
 - A stage fails when its time limit passes (with the code it was waiting on, or `<stage>_timeout`
   when it had none), after 40 passing errors, or at once on a refusal: a Proxmox 4xx other than 429, a
-  Kubernetes 4xx other than 409 and 429, a failed Proxmox task, a failed Machine.
+  Kubernetes 4xx other than 409 and 429, a failed Proxmox task, a machine CAPMOX gave up, a sync that
+  failed again after the run had started it.
 - **Skipped**: the stage had nothing to do (for example `remove-cluster` when no seed ever became
   ready).
 - The installation's phase is `applying` or `removing` during a run, then `ready`, `removed` or
@@ -401,11 +430,11 @@ stage is still trying.
 | `seed_identity_lost` | 4, 5, later | The run holds no credential for the seed; the bootstrap token was refused (it expires 3 hours after the seed was built); the service account is not cluster-admin | **Retry**. It builds the seed again when it never became ready |
 | `seed_cd_not_deleted` | 5, Remove | The CD could not be ejected or deleted, or Proxmox still lists it; or Proxmox took the eject but left it pending on the running seed (the message says so) | The CAPI token cannot delete on the ISO store: run the script again, **Retry**. For a pending eject: `qm pending <vmid>` on the seed's node shows it; stopping and starting the seed VM applies it, then **Retry** |
 | `seed_lost` | 3, Remove | A seed that had become ready is gone, or the VM at its VMID is no longer this installation's. It is not rebuilt: a new, empty seed would have no record of the cluster's machines | Remove with the option for a missing seed, then install again ([Remove](#remove)) |
-| `component_unhealthy` | 6 to 9 | An Application is not Synced and Healthy in time (the message names it and its condition); or something could not be rendered or applied, in stage 7 the Application `pc-platform` | Download the seed kubeconfig to look closer, then **Retry**. ArgoCD does not sync an Application again by itself once its retries are spent; the run starts the sync of one whose last sync ended `Failed` or `Error`, so no manual sync is needed after the cause is fixed |
+| `component_unhealthy` | 6 to 9 | An Application is not Synced and Healthy in time (the message names it and its condition); or something could not be rendered or applied, in stage 7 the Application `pc-platform` | Download the seed kubeconfig to look closer, then **Retry**. ArgoCD does not sync an Application again by itself once its retries are spent; the run starts the sync of one whose last sync ended `Failed` or `Error`, once per run, so no manual sync is needed after the cause is fixed. When that sync ends `Failed` or `Error` too, the stage fails at once with what the sync failed on (the hook or resource and its message) instead of waiting for its time limit; **Retry** starts the sync once more. ArgoCD takes about 40 minutes to spend the ten retries of one sync, longer than the time limit of stage 6 or of a wave, so the stage does not wait for that either: once one sync has failed four times (about 8 minutes of ArgoCD's backoff), the last time in this run, and ArgoCD shows the hook or resource it failed on, the stage fails with that text while ArgoCD still tries. After a **Retry** the same sync gets one more attempt before the stage fails on it again |
 | `capi_init_failed` | 6, 9 | clusterctl did not install the providers of the BOM; or a provider is installed at another version than the BOM names (provider upgrades are not in this release) | The same |
-| `machine_failed` | 7 | Cluster API reports a failed Machine (the message has its name, VMID and CAPMOX's text) | Check the boot store, the nodes and the Proxmox API URL, **Retry** |
-| `capmox_auth_failed` | 7 | Proxmox refuses the CAPI token when CAPMOX uses it | Check the Proxmox API URL (as the platform network reaches it), paste the secret again, **Retry** |
-| `control_plane_timeout` | 7 | Not every machine is Running or the control plane is not initialized in 60 minutes | **Retry**; the time limit starts again. Look at the machines with the seed kubeconfig |
+| `machine_failed` | 7 | CAPMOX gave a machine up: its ProxmoxMachine's condition `VirtualMachineProvisioned` is `False` with `VMProvisionFailed` (not enough memory on the node for its scheduler, no free VMID, the template not found, a VMID held by another VM) or `TaskFailed` (a Proxmox task failed: a clone, a resize, a config change). The message has the machine's name, its VMID and CAPMOX's text. Also: a node template has a Proxmox cloud-init drive on another slot than `ide0` (the message has the command), or its config could not be read for another reason than a missing permission | Correct what CAPMOX's text names. CAPMOX does not try that machine again, and **Retry** alone finds it as it was: delete the Machine on the seed with the seed kubeconfig (`kubectl -n pc-platform delete machine <name>`, the command is in the message), Cluster API makes a new one, then **Retry**. Do not delete the Machine when the text says the VM's name does not match (`expected VM name to match`): the VMID in the ProxmoxMachine then belongs to another VM, and CAPMOX deletes the VM at that VMID when its token may. The message then has no delete command and says so: look in Proxmox whose VM it is, and delete the Machine only once its ProxmoxMachine no longer names that VMID. For the template: run the `qm set` command of the message on that node, then **Retry** |
+| `capmox_auth_failed` | 7 | Proxmox refuses the CAPI token when CAPMOX uses it (a condition of the ProxmoxCluster or a ProxmoxMachine says so); or CAPMOX has set no condition on the ProxmoxCluster for 10 minutes, which is how a Proxmox API URL the seed cannot reach and a refused token both show, because CAPMOX opens the API before it writes anything | Check the Proxmox API URL as the platform network reaches it ([What no check reads](#what-no-check-reads)), paste the secret again, **Retry**. The Retry makes CAPMOX try at once (it updates the ProxmoxCluster), so a fix shows within its 10 minutes. CAPMOX's log on the seed says which it is: `kubectl -n capmox-system logs deploy/capmox-controller-manager` |
+| `control_plane_timeout` | 7 | Not every machine is Running or the control plane is not initialized in 60 minutes. The items and the message carry the step each machine is at and CAPMOX's last error | **Retry**; the time limit starts again. Look at the machines with the seed kubeconfig |
 | `workload_api_unreachable` | 8 to 10, Remove | The cluster's API does not answer from the API's host, or its kubeconfig or CA on the seed is not usable | Add a route from the ProxCloud host to the API address, **Retry**. At Remove: restore the route and **Remove again**, or tick the option for a cluster that does not answer |
 | `nodes_timeout` | 9 | Not every node is Ready with its group label after the first wave | **Retry** |
 | `provider_conflict` | 10 | A provider with the same name exists that is not this installation's, two rows carry its marker, or the provider validation refused the row | Correct or rename that provider under Cloud providers, **Retry** |
@@ -443,10 +472,18 @@ Cancelling an apply deletes nothing. Cancelling a Remove does not bring back wha
 removed installation or during a run. The run:
 
 1. refuses with `tenants_exist` while the cluster's ArgoCD holds an Application labelled
-   `app.kubernetes.io/managed-by=proxcloud` (a tenant cluster or database);
-2. sets the installation's providers `DISABLED` (the rows stay);
+   `app.kubernetes.io/managed-by=proxcloud` (a tenant cluster or database). A cluster that never
+   could hold one is not asked for long: when its control plane never came up, an API that does
+   not answer is neither retried nor needs the option below. That no provider is recorded is not
+   taken for that: stage 10 records them only after both are registered, and the first is public
+   as soon as its row exists;
+2. sets the installation's providers `DISABLED` (the rows stay) and notes on each row the status it
+   had (`config.platformStatusBeforeRemove`). The next install gives a row with that note its
+   status back in stage 10. A provider you disabled yourself has no note and stays disabled;
 3. deletes the Application `pc-platform` on the seed without a cascade, then the Cluster API
-   Cluster, and waits until Cluster API has deleted every machine;
+   Cluster, and waits until Cluster API has deleted every machine. When the seed showed no Cluster
+   before the Application was deleted, the run looks once more before it goes on: a sync that was
+   running may have created one in between;
 4. deletes the platform's own volumes with the CSI token, by the exact handles recorded in stage 9
    (read again from the cluster when it answers);
 5. deletes the seed VM (only when its VMID, pool and name are this installation's and no tag names
@@ -474,10 +511,17 @@ the typed confirmation to the API (`confirm: "remove <name>"`). It changes two c
 
 - **The seed VM is gone** (or the VM at its VMID is no longer this installation's). Without the
   option the run fails `seed_lost`. With it, Cluster API cannot be asked, so the run deletes, with
-  the CAPI token, every VM of pool `proxcloud-system` that carries the tag `pc-platform-<id>`, then
-  the recorded volumes.
+  the CAPI token, every VM of pool `proxcloud-system` that carries the tag `pc-platform-<id>`, each
+  after its bootstrap ISO (`user-data-<vmid>.iso` on the ISO store, which holds the machine's
+  kubeadm data), then the recorded volumes. CAPMOX tags a VM only after its clone: a machine that
+  was still being cloned when the seed was lost has no tag and is **not** deleted. The stage lists
+  such VMs (named `pc-platform-…`, in the pool, with no installation's tag) as items in state
+  `left`; delete them in Proxmox.
 - **The cluster does not answer** whether tenants still run on it. Without the option the run
-  retries, then fails `workload_api_unreachable`. With it, the run goes on without the check.
+  retries, then fails `workload_api_unreachable`. With it, the run goes on without the check. It
+  then cannot read the platform's volumes again either and deletes the recorded ones; when none
+  was recorded, the stage shows an item `volumes` in state `not checked`: look on the boot store
+  for `vm-*-pvc-*` disks of the platform's own components.
 
 In both cases ProxCloud cannot see tenant clusters or databases on the platform: any that exist lose
 their control planes and volumes with the machines. Tenant worker VMs live in the projects' pools
@@ -496,7 +540,9 @@ and are not deleted by this; delete those clusters from the projects first where
 
 **Break-glass kubeconfig.** **Download seed kubeconfig** (`GET …/seed-kubeconfig`) asks the seed for
 a one-hour token of the portal's service account and wraps it in a kubeconfig: full access to the
-seed, and through the Secrets on it to the cluster's admin kubeconfig. It needs
+seed, and through the Secrets on it to the cluster's admin kubeconfig. The page saves it as a file.
+The route itself answers JSON, `{"data": {"kubeconfig": "<the file's text>", "expiresAt": "<time>"}}`,
+not the file: a script takes `.data.kubeconfig` (`jq -r .data.kubeconfig > seed.kubeconfig`). It needs
 `admin:service:manage`, is written to the audit log as `BREAK_GLASS` (who, which installation, the
 expiry; never the token) before it is handed out, and is refused when the audit log is not
 available. Nothing in ProxCloud ends such a token before it expires: **Replace the seed credential**
@@ -609,6 +655,18 @@ and ADR 0009, A2 and A8.
   settings and renews the seed ArgoCD's token. After a ProxCloud upgrade that changes the BOM,
   `POST …/runs` answers `409 bom_unsupported` and the plan is blocked, until a release carries the
   previous BOMs. Provider (Cluster API) upgrades are refused as `capi_init_failed`.
+  Two consequences to know before an install is finished on a build that is not a release:
+  - The installed BOM is recorded by the sha256 of the BOM file as that build carries it, in
+    stage 11 only. Any later change of the file, a digest filled in for an entry that said
+    `pending` or a comment, is another BOM. A platform installed on a `-dev` build is therefore
+    refused (`bom_unsupported`) by every later build whose BOM file differs: keep the build that
+    installed it, or Remove and install again. Finish an install you want to keep only on a build
+    whose BOM has no `pending` digest.
+  - An installation that never finished has no recorded BOM. **Retry** after a ProxCloud upgrade
+    runs with the new build's BOM on whatever the failed run left on the seed and the cluster,
+    without the comparison an installed platform gets. Nothing checks that step from one BOM to the
+    other; when the failed run had passed stage 6, Remove first if the new BOM changes a chart or
+    provider version.
 - **Remove does not delete the seed's other Applications** (ArgoCD, cert-manager and `capi` on the
   seed) one by one, as the design's step 6 describes. They go with the seed VM. With the seed kept
   (a Remove that stops before `remove-seed`), they stay.
@@ -640,7 +698,7 @@ what the code and its tests say, not as observed:
 | L1 | The script, the checks and the mint drill ([proxmox-permissions.md](proxmox-permissions.md#the-mint-grant-in-m1)) |
 | L2 | The seed: its CA, the bootstrap token, the CD gone after stage 5, cloud-init off |
 | L3 | The seed's components and the clusterctl inventory |
-| L4 | The first kubeadm join of the BOM's node image, group labels and taints, kube-vip |
+| L4 | The first kubeadm join of the BOM's node image, group labels and taints, kube-vip. With it: that a machine cloned from a template with its cloud-init drive on `ide0` starts from CAPMOX's ISO (`qm config <vmid>` shows one cloud-init medium, on `ide0`; in the machine `grep 'Using data from' /var/log/cloud-init.log`), and the texts of CAPMOX's conditions as stage 7 shows them |
 | L5 | Placement of Kamaji and etcd on the `kamaji` group; the locked `default` project |
 | L6 | The seed ArgoCD reaching the cluster with its token; a public OCI chart pulled without credentials |
 | L7 | End to end: a tenant cluster and a tenant database, and the database egress fence |
