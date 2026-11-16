@@ -232,7 +232,7 @@ the settings (`409 rev_conflict`: the page reads them again).
 | `flags` | Template updates are off, or no GitHub integration is saved | `--managed-services`; save a GitHub token |
 | `spec` | The saved settings break a rule, for example an import store that is the boot store | Correct step 1 and save |
 | `network` | The platform network overlaps a tenant, sandbox or public network, a seed API source is a tenant network, the load balancer range is inside a blocked or management network, or a node did not report its networks | Correct the network in step 1 |
-| `isolation` | The seed, the API address or part of the node range is in no blocked or management network, or the cluster firewall's isolation rules are not the ones a sync writes | Add the CIDRs the message names to **Networks tenants must not reach** on the provider's page (`blockedCidrs`). The message lists the smallest ranges that are missing; one network that covers them does the same (`10.90.0.0/26` for a seed on `.5`, an API address on `.10` and nodes on `.20` to `.60`), as long as the load balancer range stays outside it. Then **Run a provider sync, then check again**: with the installation saved (step 1), the sync writes the provider's rules whether or not it has a project. Check that the datacenter firewall is on. Three messages name a cause no sync of a provider without a project repairs: `cidrPool … overlaps the management network …` (choose another `cidrPool`), `rules … are for another pool` and `rules … drop … to …, which this provider's cidrPool, blockedCidrs and sandboxCidrs do not` (another portal or provider shares the rules: give this provider its own `poolPrefix`; the provider's own older rules: delete them under Datacenter > Firewall and sync). ([More](#the-isolation-check-and-the-provider-sync)) |
+| `isolation` | The seed, the API address or part of the node range is in no blocked or management network, or the cluster firewall's isolation rules are not the ones a sync writes | Add the CIDRs the message names to **Networks tenants must not reach** on the provider's page (`blockedCidrs`). The message lists the smallest ranges that are missing; one network that covers them does the same (`10.90.0.0/26` for a seed on `.5`, an API address on `.10` and nodes on `.20` to `.60`), as long as the load balancer range stays outside it. Then **Run a provider sync, then check again**: with the installation saved (step 1), the sync writes the provider's rules whether or not it has a project. Check that the datacenter firewall is on. Five messages name a cause no sync of a provider without a project repairs: `cidrPool … overlaps the management network …` (choose another `cidrPool`), `rules … are for another pool`, `rules … drop … to …, which this provider's cidrPool, blockedCidrs and sandboxCidrs do not`, `rules … have an ACCEPT …` or `have no ACCEPT …` and `rules … are not this provider's set …, and a project's rules for cidrPool … are in place` (another portal or provider shares the rules: give this provider its own `poolPrefix`; the provider's own older rules: delete them under Datacenter > Firewall and sync). ([More](#the-isolation-check-and-the-provider-sync)) |
 | `credentials` | A token secret is not stored | Paste it in step 2 |
 | `privileges:capi`, `privileges:csi`, `privileges:kubemint` | The CAPI token, the CSI token or the portal token lacks a privilege on a path; the message names both | Run the script again. `privileges:kubemint` on `/storage/<store>`: that is the provider's `importStorage`; when the settings name another import store the script does not write that row ([what to do](#when-the-providers-import-store-is-the-boot-store)) |
 | `token-scope` | `capmox@pve!capi` or `csi@pve!csi` holds a privilege on `/pool`, `/storage` or `/vms` as a whole, which reaches every tenant's VMs or disks. The script writes no such row; an older setup may have, and the script removes none | Run the `pveum acl delete` command the message gives, as root on one node, then check again. When the portal token cannot read the row (one on `/`, for example) the message gives `pveum acl list` to find it: the row to remove is one on the named path itself, or on a parent of it (`/` included) with propagate 1, with a role other than `NoAccess`. The list is not empty on a site the script set up, and its rows on the platform pools and stores and on `/` without propagate stay. When no listed row is such a row, remove none: the token was made without privilege separation and holds its user's rights (the users keep `/pool` and `/storage`): run `pveum user token modify <user> <token name> --privsep 1` (`capmox@pve capi`, `csi@pve csi`), then the script again. Leave the tokens' rows on the platform pools and on the boot and ISO stores |
@@ -261,7 +261,8 @@ a provider with no project gets no firewall request at all. So the order is: sav
 provider's settings only, not the firewall.
 
 That provider-level part of the sync, the one that needs no project, has no tenant waiting for it
-and none of its own to protect. It only ever adds protection: it refuses in the cases below, logs
+and none of its own to protect. It only ever adds `DROP`s, and only to a set that no project's sync
+maintains: it refuses in the cases below, logs
 the reason as a warning on every cycle, and the check gives the same sentence. A sync that skipped
 this part because the SDN lock was busy or could not be read says so in the log too and tries again
 on the next cycle.
@@ -284,10 +285,31 @@ on the next cycle.
   network, a sandbox network or a management network in the rules is in none of this provider's
   `DROP`s (an equal or a wider network covers it). The other portal or provider with the same prefix
   may depend on that `DROP`, so nothing is removed and nothing is written: give this provider its
-  own `poolPrefix`. A set that keeps every `DROP` in place and adds some is written. The same
+  own `poolPrefix`. A set that keeps every `DROP` in place and adds some is written, unless one of
+  the next two cases applies. The same
   message appears when `blockedCidrs` or `sandboxCidrs` of a provider with no project was narrowed:
   the wider rules stay until they are deleted by hand as above, or until a project's sync rewrites
   them.
+- **The rules in place accept other sandbox endpoints.** The `ACCEPT` rules for the sandbox
+  endpoints (registry, build bucket, portal wake) carry the same comment and sit above the sandbox
+  `DROP`s. When the ones in place are not exactly this provider's, nothing is written: removing one
+  would cut the other portal's or provider's sandbox network off its endpoint, and adding one would
+  open an address that its rules drop. Give this provider its own `poolPrefix`. The same message
+  appears when the sandbox endpoints of a provider with no project changed, or when one of its
+  `ACCEPT` rules was deleted by hand: delete the provider's rules as above and run a provider sync.
+- **A project's rules for the pool are in place and the set is not this provider's.** A project's
+  sync writes the provider-wide set on every cycle, whatever is in place. So while the cluster
+  firewall holds a project's `ACCEPT` rules (`proxcloud:isolation:<project>`) with a source in this
+  `cidrPool`, the provider-level part changes nothing, neither a wider set nor a missing or
+  disabled rule. If the project is this provider's, its own sync has already written the set in
+  the same cycle and this case does not show. If it is a project of another portal or provider
+  with the same prefix, a write here would be undone at that project's next sync and done again,
+  on every cycle, with the other's sandbox gate failing in between and its projects' `ACCEPT`s
+  deleted and added again each time: give this provider its own `poolPrefix`. A project of another
+  prefix on the same `cidrPool` gives the same message (an `ACCEPT` does not say whose project it
+  is): delete this provider's rules as above and run a provider sync, which writes a missing set.
+  Not seen: a portal or provider with the same prefix and pool whose projects have no network yet.
+  The two then replace each other's set on every cycle until its first tenant network.
 
 A provider that has projects still rewrites the rules from its projects' sync and at a network
 create, whatever is in place, as before this check existed: two such providers with one prefix

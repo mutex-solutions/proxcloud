@@ -407,14 +407,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider the sync is unchanged: no lock, no new Proxmox request and no new log line, so an install that sets up no
   managed services gets no new firewall write from this release. The order is therefore: save the installation, run
   a provider sync, check; saving reads the provider's settings only and does not wait for the check. That call, which
-  needs no project, only ever adds protection. It writes nothing while a node does not report its networks, nothing
+  needs no project, only ever adds `DROP`s. It writes nothing while a node does not report its networks, nothing
   for a `cidrPool` that overlaps a management network, and nothing when the rules in place are for another pool or
-  drop a network its own set does not (an equal or a wider network covers one): the rules carry the pool prefix
+  drop a network its own set does not (an equal or a wider network covers one) or accept other sandbox endpoints
+  than its own, and nothing, not even a wider set, while a project's `ACCEPT` rules for the pool are in place and
+  the set is not its own: the rules carry the pool prefix
   only, so a second portal or provider with the same prefix (`pc-` is the default) would otherwise delete the first
-  one's `DROP`s at every sync. These refusals are logged as warnings (`pve.ErrIsolationRefused`), a busy or failed
+  one's `DROP`s at every sync, or the two would replace each other's set on every cycle. These refusals are logged as warnings (`pve.ErrIsolationRefused`), a busy or failed
   SDN lock is logged too, and the `isolation` check gives the same sentences instead of "a provider sync writes
   them", also when rules are in place. A project's sync and a network create write the rules in all these cases, as
-  before. A changed `cidrPool` or a narrowed `blockedCidrs` on a provider with no project is applied by its first
+  before. A changed `cidrPool`, a narrowed `blockedCidrs` or changed sandbox endpoints on a provider with no project is applied by its first
   tenant network, or by deleting its rules under Datacenter > Firewall and running a sync; the messages say so.
   Before, only a project's sync or its first tenant network wrote
   them, while the preflight's "no rule yet" pass ends as soon as any tenant network exists on the cluster: on a

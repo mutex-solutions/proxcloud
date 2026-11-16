@@ -260,7 +260,7 @@ func TestProviderIsolationKeepsAnotherPoolsRules(t *testing.T) {
 
 // The same owner and the same pool, but the rules in place fence more than the provider with no project would: a
 // blocked network and a sandbox network of the other one. Its sync removes no DROP, so the other's gate keeps passing
-// and the two do not rewrite the set in turn; it only ever writes a set that keeps every DROP in place.
+// (a wider set: TestProviderIsolationLeavesASetAProjectMaintains, TestProviderIsolationWidensItsOwnSet).
 func TestProviderIsolationRemovesNoDrop(t *testing.T) {
 	ctx := context.Background()
 	a, rules, writes := isolationFakeNodes(t, nil, map[string]func(http.ResponseWriter, *http.Request){
@@ -297,23 +297,6 @@ func TestProviderIsolationRemovesNoDrop(t *testing.T) {
 	// Only the blocked network kept, the sandbox fence not: still refused.
 	if err := b.ReconcileProviderIsolation(ctx, "10.100.0.0/16", blocked, nil); !errors.Is(err, ErrIsolationRefused) || *writes != n {
 		t.Fatalf("a set without the sandbox fence: err %v, %d writes", err, *writes-n)
-	}
-	// One more blocked network, and one that covers the range in place: every DROP in place is kept, so it is written.
-	for _, wider := range [][]string{{"10.90.0.0/26", "10.91.0.0/24"}, {"10.90.0.0/24", "10.91.0.0/24"}} {
-		n = *writes
-		if err := b.ReconcileProviderIsolation(ctx, "10.100.0.0/16", wider, sbx); err != nil || *writes == n {
-			t.Fatalf("a set that fences more (%v): err %v, %d writes", wider, err, *writes-n)
-		}
-		if err := b.CheckSandboxIsolation(ctx, "10.100.0.0/16", wider, sbx); err != nil {
-			t.Fatalf("blocked %v: %v", wider, err)
-		}
-	}
-	// A project's sync still narrows the list: it has a tenant to answer for.
-	if err := a.ReconcileIsolation(ctx, "p1", "10.100.0.0/16", blocked, sbx); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.CheckSandboxIsolation(ctx, "10.100.0.0/16", blocked, sbx); err != nil {
-		t.Fatalf("after the project's sync: %v", err)
 	}
 }
 
@@ -368,5 +351,105 @@ func TestCheckIsolationPoolOverManagementWithRulesInPlace(t *testing.T) {
 	err := srv.CheckIsolation(ctx, "192.0.0.0/16", []string{"10.90.0.0/26"}, nil)
 	if err == nil || !strings.Contains(err.Error(), "overlaps the management network 192.0.2.0/24") || strings.Contains(err.Error(), "a provider sync writes them") {
 		t.Fatalf("a changed blocked list on a pool over a management network: %v", err)
+	}
+}
+
+// Same owner, same pool, and the provider with no project wants a wider set than the one a project's sync of the
+// other maintains (the managed-services preflight makes it add the seed, the API VIP and the node range). Writing it
+// would start a rewrite in turn on every cycle, with the other's sandbox gate failing in between and its project
+// ACCEPTs deleted and re-added twice a cycle: with a project's rules for the pool in place it writes nothing.
+func TestProviderIsolationLeavesASetAProjectMaintains(t *testing.T) {
+	ctx := context.Background()
+	a, rules, writes := isolationFakeNodes(t, nil, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/cluster/firewall/options": func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"data":{"enable":1}}`) },
+	})
+	blocked, wider, sbx := []string{"10.90.0.0/26"}, []string{"10.90.0.0/26", "10.95.0.0/24"}, []string{"10.110.0.0/24"}
+	if err := a.ReconcileIsolation(ctx, "p1", "10.100.0.0/16", blocked, sbx); err != nil {
+		t.Fatal(err)
+	}
+	before, n := slices.Clone(*rules), *writes
+	b := &Service{C: a.C, ServiceID: "svc2", PoolPrefix: "pc-"}
+	for cycle := range 3 {
+		err := b.ReconcileProviderIsolation(ctx, "10.100.0.0/16", wider, sbx)
+		if !errors.Is(err, ErrIsolationRefused) || !strings.Contains(err.Error(), "poolPrefix") {
+			t.Fatalf("cycle %d: a wider set over one a project maintains: %v", cycle, err)
+		}
+		if err := a.CheckSandboxIsolation(ctx, "10.100.0.0/16", blocked, sbx); err != nil {
+			t.Fatalf("cycle %d: the other's sandbox gate: %v", cycle, err)
+		}
+		if err := a.ReconcileIsolation(ctx, "p1", "10.100.0.0/16", blocked, sbx); err != nil {
+			t.Fatal(err)
+		}
+		if *writes != n || !slices.EqualFunc(*rules, before, sameLiveRule) {
+			t.Fatalf("cycle %d: the rules changed (%d writes): %+v", cycle, *writes-n, *rules)
+		}
+		cerr := b.CheckIsolation(ctx, "10.100.0.0/16", wider, sbx)
+		if cerr == nil || cerr.Error() != err.Error() {
+			t.Fatalf("cycle %d: the check must give the sync's sentence %q, got %v", cycle, err, cerr)
+		}
+	}
+	// A missing rule is not put back either while a project's sync maintains the set: that sync does it.
+	*rules = slices.Clone(before[:len(before)-1])
+	if err := b.ReconcileProviderIsolation(ctx, "10.100.0.0/16", blocked, sbx); !errors.Is(err, ErrIsolationRefused) || *writes != n {
+		t.Fatalf("a repair of a set a project maintains: err %v, %d writes", err, *writes-n)
+	}
+}
+
+// With no project's rules for the pool in place, a provider with no project still widens and repairs its own set.
+func TestProviderIsolationWidensItsOwnSet(t *testing.T) {
+	ctx := context.Background()
+	a, rules, writes := isolationFakeNodes(t, nil, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/cluster/firewall/options": func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"data":{"enable":1}}`) },
+	})
+	sbx := []string{"10.110.0.0/24"}
+	// One more blocked network, then one that covers the range in place: every DROP in place is kept, so it is written.
+	for _, blocked := range [][]string{{"10.90.0.0/26"}, {"10.90.0.0/26", "10.91.0.0/24"}, {"10.90.0.0/24", "10.91.0.0/24"}} {
+		n := *writes
+		if err := a.ReconcileProviderIsolation(ctx, "10.100.0.0/16", blocked, sbx); err != nil || *writes == n {
+			t.Fatalf("a set that fences more (%v): err %v, %d writes", blocked, err, *writes-n)
+		}
+		if err := a.CheckSandboxIsolation(ctx, "10.100.0.0/16", blocked, sbx); err != nil {
+			t.Fatalf("blocked %v: %v", blocked, err)
+		}
+	}
+	(*rules)[len(*rules)-1].Enable = 0
+	*rules = (*rules)[1:]
+	if err := a.ReconcileProviderIsolation(ctx, "10.100.0.0/16", []string{"10.90.0.0/24", "10.91.0.0/24"}, sbx); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.CheckSandboxIsolation(ctx, "10.100.0.0/16", []string{"10.90.0.0/24", "10.91.0.0/24"}, sbx); err != nil {
+		t.Fatalf("after a rule was deleted and one disabled by hand: %v", err)
+	}
+}
+
+// The sandbox endpoint ACCEPTs carry the owner comment too and sit above the sandbox DROPs. A provider with no project
+// that shares the owner replaces none: not the other's endpoint with nothing (its build pods would lose the build
+// bucket), and not with its own (the other's sandbox network would reach an address its set dropped).
+func TestProviderIsolationReplacesNoAccept(t *testing.T) {
+	ctx := context.Background()
+	a, rules, writes := isolationFakeNodes(t, nil, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/cluster/firewall/options": func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"data":{"enable":1}}`) },
+	})
+	blocked, sbx := []string{"10.90.0.0/26"}, []string{"10.110.0.0/24"}
+	if err := a.ReconcileProviderIsolation(ctx, "10.100.0.0/16", blocked, sbx, "10.88.0.41:9000"); err != nil {
+		t.Fatal(err)
+	}
+	before, n := slices.Clone(*rules), *writes
+	b := &Service{C: a.C, ServiceID: "svc2", PoolPrefix: "pc-"}
+	for _, allow := range [][]string{nil, {"192.0.2.11:8006"}, {"10.88.0.41:9000", "192.0.2.11:8006"}} {
+		err := b.ReconcileProviderIsolation(ctx, "10.100.0.0/16", blocked, sbx, allow...)
+		if !errors.Is(err, ErrIsolationRefused) || !strings.Contains(err.Error(), "ACCEPT") || !strings.Contains(err.Error(), "poolPrefix") {
+			t.Fatalf("endpoints %v over 10.88.0.41:9000 in place: %v", allow, err)
+		}
+		if *writes != n || !slices.EqualFunc(*rules, before, sameLiveRule) {
+			t.Fatalf("endpoints %v: the rules changed (%d writes): %+v", allow, *writes-n, *rules)
+		}
+		if cerr := b.CheckIsolation(ctx, "10.100.0.0/16", blocked, sbx, allow...); cerr == nil || cerr.Error() != err.Error() {
+			t.Fatalf("endpoints %v: the check must give the sync's sentence %q, got %v", allow, err, cerr)
+		}
+	}
+	// The set in place is still its writer's own.
+	if err := a.ReconcileProviderIsolation(ctx, "10.100.0.0/16", blocked, sbx, "10.88.0.41:9000"); err != nil || *writes != n {
+		t.Fatalf("the writer's own set: err %v, %d writes", err, *writes-n)
 	}
 }

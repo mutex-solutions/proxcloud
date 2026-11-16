@@ -607,10 +607,12 @@ func refused(format string, a ...any) error {
 // (on a cluster another portal shares, ErrIsolationPending never applies).
 // It has no tenant waiting and none of its own to protect, so it refuses (ErrIsolationRefused) wherever a write could
 // do harm: on a node read that is not complete, for a cidrPool that overlaps a management network ("DROP pool to pool"
-// would only cut the nodes off each other), and when the rules in place are for another pool (otherPool) or drop
-// something its own set does not (uncovered): a portal or provider that shares the rule owner may depend on them. It
-// therefore only ever adds protection; a changed cidrPool or a narrowed list is rolled out by the per-project path,
-// or by hand.
+// would only cut the nodes off each other), and when the rules in place are for another pool (otherPool), drop
+// something its own set does not (uncovered) or accept other sandbox endpoints than its own (otherAccepts): a portal
+// or provider that shares the rule owner may depend on them. It refuses as well while a project's rules for the pool
+// are in place and the set is not its own (projectMaintained): that project's sync writes the set. It therefore only
+// ever adds DROPs, to a set no project's sync maintains; a changed cidrPool, a narrowed list or changed sandbox
+// endpoints are rolled out by the per-project path, or by hand.
 func (s *Service) ReconcileProviderIsolation(ctx context.Context, pool string, blocked, sandbox []string, allow ...string) error {
 	return s.reconcileDrops(ctx, true, pool, blocked, sandbox, allow)
 }
@@ -671,6 +673,56 @@ func uncovered(mine, want []FirewallRule, owner string) error {
 	return nil
 }
 
+// otherAccepts is the error for owner ACCEPTs in place (the sandbox endpoints, isolationRules) that are not the ones of
+// want. They sit above the sandbox DROPs, so replacing them would close an endpoint a portal or provider that shares
+// the owner opened, or open one to its sandbox network that its own set drops.
+func otherAccepts(mine, want []FirewallRule, owner string) error {
+	if len(mine) == 0 {
+		return nil
+	}
+	lacks := func(in []FirewallRule, r FirewallRule) bool {
+		return r.Action == "ACCEPT" && !slices.ContainsFunc(in, func(x FirewallRule) bool { return sameRule(x, r) })
+	}
+	say := func(r FirewallRule, what string) error {
+		return refused("the %[1]s rules in the cluster firewall %[2]s (%[3]s to %[4]s:%[5]s): another portal or provider on this cluster uses the same pool prefix (give this provider its own poolPrefix), or this provider's sandbox endpoints changed (a project's sync or a network create rewrites them; with no project, "+byHand+"); a provider sync with no project replaces no ACCEPT in place",
+			owner, what, r.Source, r.Dest, r.DPort)
+	}
+	for _, r := range mine {
+		if lacks(want, r) {
+			return say(r, "have an ACCEPT for a sandbox endpoint that is not one of this provider's")
+		}
+	}
+	for _, r := range want {
+		if lacks(mine, r) {
+			return say(r, "have no ACCEPT for this provider's sandbox endpoint")
+		}
+	}
+	return nil
+}
+
+// projectMaintained is the error for owner rules in place that are not want while a project's ACCEPTs for this pool are
+// in the firewall: that project's sync writes the provider-wide set on every cycle, whatever is in place. If it is a
+// project of a portal or provider that shares the owner, a write here would be undone by it and done again, for ever,
+// each time with the project's ACCEPTs deleted and added again; if it is this provider's, its sync has the write.
+// ponytail: an ACCEPT does not say whose project it is. A sharer whose projects have no network yet is not seen (the
+// two then rewrite in turn until its first network), and a project of another prefix on the same cidrPool is taken for
+// a sharer; recording the set the provider-level call last wrote would tell them apart.
+func projectMaintained(rules, mine, want []FirewallRule, owner string, pool *net.IPNet) error {
+	if len(mine) == 0 || slices.EqualFunc(mine, want, sameLiveRule) ||
+		!slices.ContainsFunc(rules, func(r FirewallRule) bool { return isProjectIsolationRule(r) && sourceInPool(r.Source, pool) }) {
+		return nil
+	}
+	return refused("the %[1]s rules in the cluster firewall are not this provider's set (%[2]d in place, %[3]d wanted), and a project's rules for cidrPool %[4]s are in place, whose sync maintains them: a provider sync with no project replaces no such set. If the project is this provider's, its sync or a network create writes the set (run a provider sync). If not, another portal or provider on this cluster uses the same pool prefix (give this provider its own poolPrefix), or the same cidrPool under another prefix (then "+byHand+")",
+		owner, len(mine), len(want), pool)
+}
+
+// providerRefusal is why the provider-level call leaves the owner rules in place (mine) as they are, nil when it may
+// bring them to want.
+func providerRefusal(rules, mine, want []FirewallRule, owner string, pool *net.IPNet) error {
+	return cmp.Or(otherPool(mine, owner, pool), uncovered(mine, want, owner), otherAccepts(mine, want, owner),
+		projectMaintained(rules, mine, want, owner, pool))
+}
+
 // reconcileDrops brings this portal's provider-wide rules (isolationWant) into the cluster firewall. providerLevel
 // (the call with no project) refuses instead wherever ReconcileProviderIsolation says so.
 func (s *Service) reconcileDrops(ctx context.Context, providerLevel bool, pool string, blocked, sandbox, allow []string) error {
@@ -698,7 +750,7 @@ func (s *Service) reconcileDrops(ctx context.Context, providerLevel bool, pool s
 		}
 	}
 	if providerLevel {
-		if err := cmp.Or(otherPool(mine, owner, poolNet), uncovered(mine, want, owner)); err != nil {
+		if err := providerRefusal(rules, mine, want, owner, poolNet); err != nil {
 			return err
 		}
 	}
@@ -786,9 +838,9 @@ func (s *Service) checkIsolation(ctx context.Context, pendingOK bool, pool strin
 	if slices.EqualFunc(mine, want, sameRule) {
 		return nil
 	}
-	// The provider sync refuses in these three cases (ReconcileProviderIsolation), so neither "pending" nor "a
-	// provider sync writes them" would be true.
-	if err := cmp.Or(poolOverManagement(poolNet, mgmt), otherPool(mine, owner, poolNet), uncovered(mine, want, owner)); err != nil {
+	// The provider sync refuses in these cases (ReconcileProviderIsolation), so neither "pending" nor "a provider
+	// sync writes them" would be true.
+	if err := cmp.Or(poolOverManagement(poolNet, mgmt), providerRefusal(rules, mine, want, owner, poolNet)); err != nil {
 		return err
 	}
 	if len(mine) == 0 && pendingOK {

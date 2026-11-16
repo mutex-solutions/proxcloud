@@ -391,8 +391,9 @@ are several, `errors.details.problems`.
   that has an installation, in any phase, so `POST /installations` comes before
   the sync and the sync before this check; it writes none for
   a `cidrPool` over a management network, for rules in place for another pool
-  and for rules in place that drop something the provider's set does not, which
-  the message names); with no
+  for rules in place that drop something the provider's set does not or accept
+  other sandbox endpoints, and for rules that are not the provider's set while
+  a project's rules for the pool are in place, which the message names); with no
   tenant network on the whole Proxmox cluster yet it passes. `token-scope` fails
   when `capmox@pve!capi` or `csi@pve!csi` holds a privilege on `/pool`, `/storage`
   or `/vms`, and names the `pveum acl delete` command, or which row of
