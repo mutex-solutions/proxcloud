@@ -797,7 +797,11 @@ The BOM's node image (`ubuntu-2604-k8s-1.35.10`, built 2026-11-14) runs Ubuntu 2
 7.0.0-43. Ubuntu 26.04 sets `kernel.apparmor_restrict_unprivileged_unconfined=1`, and since kernel
 7.0.0-42 a container's processes then run under a stacked AppArmor label
 (`cri-containerd.apparmor.d//&unconfined`) to which containerd's own profile allows no signal: the
-processes of one container cannot signal each other ([Launchpad 2172640](https://bugs.launchpad.net/ubuntu/+source/linux/+bug/2172640)).
+processes of one container cannot signal each other ([Launchpad 2172640](https://bugs.launchpad.net/ubuntu/+source/linux/+bug/2172640)
+for the symptom). The kernel change is intentional (it closes CVE-2026-90231), so no kernel that undoes it is
+expected: the fix comes from containerd
+([issue 14485](https://github.com/containerd/containerd/issues/14485),
+[pull request 14487](https://github.com/containerd/containerd/pull/14487)).
 PostgreSQL wakes its processes with signals, so a new database stops at "Configuring new PostgreSQL
 instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in the `dbaas` node's
 `/var/log/audit/audit.log`). The controllers of the platform are Go programs and run.
@@ -807,13 +811,15 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
   confined by containerd's profile. The export's cold-boot check refuses a Kubernetes image without
   it. **The BOM of this release still names the image without the fix**: a new image must be built
   and published by CI, shown on a lab to bring a database up, and named by a later BOM. The setting
-  goes away again when the image carries a containerd with the stacked-label rules (containerd
-  pull request 14487, in no release yet).
+  and the cold-boot check go away again when the image carries a containerd release with the
+  stacked-label rules: pull request 14487 was merged to containerd's main branch on 2026-11-16 and is
+  in no release yet; the backport for 2.3 is pull request 14590, still open.
 - **On a platform that runs now**, on every platform machine, as root: write the same file
   (`kernel.apparmor_restrict_unprivileged_unconfined = 0`), run `sysctl --system`, then restart the
   pods or reboot the machine: a running container keeps its stacked label. A machine that Cluster
-  API replaces comes from the template again and needs it again. This is the workaround of the
-  upstream reports; it has not been run on our lab.
+  API replaces comes from the template again and needs it again. This is the workaround
+  named in containerd pull request 14487 and its discussion (set the sysctl to 0, recreate the
+  containers); nobody in the Launchpad report tested it, and it has not been run on our lab.
 - **Not changed:** the seed image (the same kernel and k3s; no denial was measured there and its
   workloads are Go programs) and the tenant OS image `ubuntu-2604`, which keeps Ubuntu's default: a
   tenant who runs Docker or containerd on a 26.04 server meets the same bug and may set the same

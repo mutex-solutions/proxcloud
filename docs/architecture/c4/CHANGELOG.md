@@ -40,7 +40,8 @@ AppArmor denies signals between the processes of one container, so no PostgreSQL
 **Diagrams:** none changed.
 
 **Not verified:** all of it on a lab. The node image is not rebuilt and the BOM still names the one of 2026-11-14;
-the sysctl is the workaround of the upstream reports and has not run on our nodes. The cause of the seed's ext4
+the sysctl is the workaround of containerd issue 14485 and pull request 14487 (the Launchpad report did not test
+it) and has not run on our nodes. The cause of the seed's ext4
 error after one reboot is not known and nothing was changed for it.
 
 ## 2026-11-16: P3, findings of the first finished lab run (M0): start-up refusals are passing errors

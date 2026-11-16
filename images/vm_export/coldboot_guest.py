@@ -24,7 +24,9 @@ K8S = ("builder_account_retained", "kubelet_enabled", "containerd_active", "k8s_
        "crictl_talks_to_containerd", "container_signals_not_stacked")
 # Ubuntu 26.04 sets this to 1. Since kernel 7.0.0-42 that forces a "//&unconfined" stack on container tasks, and
 # containerd's AppArmor profile (to 2.3.2 at least) allows signals to its own plain label only: a container's processes
-# cannot signal each other and PostgreSQL never starts (Launchpad 2172640). images/k8s-build-config.py writes 0.
+# cannot signal each other and PostgreSQL never starts (Launchpad 2172640 for the symptom; the setting of 0 is the
+# workaround of containerd issue 14485 and pull request 14487). images/k8s-build-config.py writes 0. Remove this check
+# with that sysctl, when the image carries a containerd release with the backport of #14487 (2.3: #14590).
 APPARMOR_STACK = "/proc/sys/kernel/apparmor_restrict_unprivileged_unconfined"
 BUILD_USERS = ("builder", "packer")
 SERIAL_WAIT = 300  # snapd asks for its new serial asynchronously after first boot.
