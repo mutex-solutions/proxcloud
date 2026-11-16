@@ -658,7 +658,8 @@ func TestSeedIdentityWaitsForTheBootstrapRBAC(t *testing.T) {
 
 // A service account that is not cluster-admin, or a refused bootstrap token, ends the stage seed_identity_lost. Not at
 // the first look: a seed that has just started knows no bootstrap token and denies every access review until its
-// caches are filled, so both are tried again, and the stage's time limit ends them with that code.
+// caches are filled, so both are tried again. The stage's time limit ends the first with that code, the fifth refused
+// look on end the second.
 func TestSeedIdentityLost(t *testing.T) {
 	past := time.Now().Add(-time.Minute)
 	expire := func(e *env) {
@@ -692,7 +693,10 @@ func TestSeedIdentityLost(t *testing.T) {
 	if end, s := e.once(), e.stage(StageSeedIdentity); end != "defer:retry_seed_identity" || s.Code != CodeSeedIdentityLost || s.Retries != 1 {
 		t.Fatalf("a refused bootstrap token: %s %+v", end, s)
 	}
-	expire(e)
+	// An expired token is not waited out to the time limit: the fifth refused look on end is final.
+	if end, s := e.until(refusedLooks-2), e.stage(StageSeedIdentity); end != "defer:retry_seed_identity" || s.Refused != refusedLooks-1 {
+		t.Fatalf("a bootstrap token refused four times: %s %+v", end, s)
+	}
 	if end := e.once(); end != "fail:"+CodeSeedIdentityLost || !strings.Contains(e.stage(StageSeedIdentity).Message, "bootstrap token") {
 		t.Fatalf("expired bootstrap token: %s %+v", end, e.stage(StageSeedIdentity))
 	}

@@ -77,7 +77,7 @@ The page lists the stages and reads the run every few seconds:
 
 - **Cancel the run** usually takes effect within about 15 seconds, and up to 5 minutes while a stage pauses after repeated errors. A task Proxmox has started finishes first. Cancelling an installation deletes nothing. Cancelling a removal does not bring back what it had already deleted: the stage list shows how far it came, and **Remove again** goes on from there.
 - **Retry** starts a new run. It looks at what exists and goes on from there. Nothing is deleted when an installation run fails, with one exception: a seed that never became ready is built again. **Retry** runs with the saved settings, so save a change first.
-- A stage that did not work yet and is trying again shows why and what you can do meanwhile, before its time limit ends the run. A cluster that has just started (the seed after a restart) refuses ProxCloud's credential for some seconds; the stage says so and tries again, and fails only when that goes on for 40 looks or to its time limit.
+- A stage that did not work yet and is trying again shows why and what you can do meanwhile, before its time limit ends the run. A cluster that has just started (the seed after a restart) refuses ProxCloud's credential for some seconds; the stage says so and tries again, and fails only when it is refused five times on end (about four minutes).
 - If ProxCloud itself stopped during a run, the run is shown as failed with `job_dead`. **Retry** or **Remove managed services** goes on; until then the settings cannot be saved.
 
 ## When a run fails
@@ -92,7 +92,7 @@ The failed stage shows a code, a message and what to do.
 | `seed_clone_failed` | Fix the storage or the node named in the message, then **Retry**. |
 | `seed_config_refused` | The message carries Proxmox's own error: fix the bridge, the store, the node or the token right it names, then **Retry**. A CD that could not be rendered or built is a defect: report the message. |
 | `seed_not_booted` | Open the seed VM's console in Proxmox. **Retry** builds a new seed. |
-| `seed_api_unreachable` | Add a route from the ProxCloud host to the platform network, or correct the seed API sources. When the message says the seed refuses the credential: look on the seed VM's console whether its Kubernetes keeps restarting (a slow disk does that), then **Retry**. |
+| `seed_api_unreachable` | Add a route from the ProxCloud host to the platform network, or correct the seed API sources. When the message says the cluster's API refuses the credential: it does so for some seconds after it starts; if the run failed on it, look on the seed VM's console whether its Kubernetes keeps restarting (a slow disk does that), then **Retry**. |
 | `seed_tls_mismatch` | Another server answers on the seed address. Correct the seed address in the settings, then **Retry**. |
 | `seed_identity_lost` | **Retry**. It builds the seed again. |
 | `seed_cd_not_deleted` | Run the script again, then **Retry**. |
@@ -100,7 +100,7 @@ The failed stage shows a code, a message and what to do.
 | `component_unhealthy`, `capi_init_failed` | The component's row shows what its sync failed on, for example a job and its message. Download the seed kubeconfig to look closer, then **Retry**. The run starts a failed sync again itself, once; no manual sync is needed. |
 | `machine_failed` | The message carries the cluster manager's own text: correct what it names (memory on the node, the boot store, the template). The machine is not tried again on its own: download the seed kubeconfig, run the `kubectl … delete machine` command of the message, then **Retry**. If the text says a VM's name does not match, do not delete the machine: its number belongs to another VM. If the message names a node template with a cloud-init drive, run its `qm set` command on that node, then **Retry**. |
 | `capmox_auth_failed` | Proxmox refused the token, or the seed cannot reach the Proxmox API URL of the settings. Check the URL as the platform network reaches it and paste the token secret again, then **Retry**. The message names the log that says which. |
-| `workload_api_unreachable` | Add a route from the ProxCloud host to the API address, then **Retry**. During a removal: restore the route and **Remove again**, or tick the option for a cluster that does not answer when it is beyond repair. |
+| `workload_api_unreachable` | Add a route from the ProxCloud host to the API address, then **Retry**. When the message says the cluster's API refuses the credential: it does so for some seconds after it starts; if the run failed on it, **Retry**. During a removal: restore the route and **Remove again**, or tick the option for a cluster that does not answer when it is beyond repair. |
 | `provider_conflict` | Correct the provider named in the message under **Cloud providers**, then **Retry**. |
 | `bom_unsupported` | The platform was installed by another ProxCloud release, and no release upgrades an installed platform yet. Go back to the ProxCloud release that installed it. Or, if no tenant cluster or database must be kept, delete them all, then remove managed services and install again: **Remove** deletes the platform cluster. |
 | `credentials_missing` | Paste both token secrets in step 2, then **Retry**, or **Remove again** for a removal. |

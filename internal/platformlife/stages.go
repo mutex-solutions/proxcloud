@@ -648,30 +648,30 @@ func refused(err error) bool {
 	return errors.As(err, &ka) && ka.Status >= 400 && ka.Status < 500 && ka.Status != http.StatusConflict && ka.Status != http.StatusTooManyRequests
 }
 
-// startingUp reports an answer that a Kubernetes API server also gives for some seconds after it starts, while its
-// caches fill (seen on a lab after the seed's k3s restarted under disk load). At v1.35 there are two, and no other
-// wording says "not ready":
-//   - a 401. The server answers every failed authentication with the bare "Unauthorized"
-//     (apiserver/pkg/endpoints/filters/authentication.go), also a service account token whose Secret or
-//     ServiceAccount it cannot read yet (pkg/serviceaccount/legacy.go: "Token has been invalidated", logged only);
-//   - a 403 whose reason is the RBAC authorizer's list of what it did not find: "…: RBAC: [clusterrole.rbac.
-//     authorization.k8s.io "cluster-admin" not found, …]" (plugin/pkg/auth/authorizer/rbac/rbac.go: the bindings
-//     of the subject are read, the roles they name are not yet).
+// startingUp reports a Kubernetes 401 or 403: what a cluster answers to a credential it refuses, and also what its API
+// server answers to a good one for some seconds after it starts, while its caches fill (seen on a lab after the
+// seed's k3s restarted under disk load). At v1.35:
+//   - a 401, the bare "Unauthorized" of every failed authentication (apiserver/pkg/endpoints/filters/
+//     authentication.go), also for a service account token whose Secret the server cannot read yet;
+//   - a 403 of the RBAC authorizer, with "RBAC: [clusterrole … not found]" when it has read the subject's bindings
+//     and not the roles (plugin/pkg/auth/authorizer/rbac/rbac.go), and with no reason when it has read neither;
+//   - a 403 "not yet ready to handle request" of an admission plugin whose informer has not synced in 10 s
+//     (apiserver/pkg/admission/plugin/namespace/lifecycle: every write of a namespaced object).
 //
-// Neither can be told from a token that was revoked or a role that was deleted, so they are passing errors, not
-// successes: each look counts, and the stage's forty or its time limit ends the run with the same code and the
-// server's text. A 403 without that reason stays a refusal at once: no binding grants the request, an admission
-// plugin, a quota, a namespace that is being deleted.
+// No wording tells the start from a revoked token, a deleted role or binding, a quota or a namespace that is being
+// deleted, and /readyz does not either: it answers the same 401 to a token the server does not know (k3s allows no
+// anonymous request). So the stage counts the looks on end that end so (Stage.Refused): the first refusedLooks-1 are
+// passing errors, the next ends the run with the stage's code and the server's text. With the delays of a retry
+// that is 3 min 45 s or more, where a start takes seconds.
 func startingUp(err error) bool {
 	var ka *kamajik8s.APIError
-	if !errors.As(err, &ka) {
-		return false
-	}
-	return ka.Status == http.StatusUnauthorized ||
-		ka.Status == http.StatusForbidden && strings.Contains(ka.Message, "RBAC: ") && strings.Contains(ka.Message, "not found")
+	return errors.As(err, &ka) && (ka.Status == http.StatusUnauthorized || ka.Status == http.StatusForbidden)
 }
 
-const startingUpNote = "The cluster's API refuses the run's credential, as an API server does for some seconds after it starts; the run tries again. "
+const (
+	refusedLooks   = 5
+	startingUpNote = "The cluster's API refuses the run's credential, as an API server does for some seconds after it starts. "
+)
 
 // seedIdentity is stage 5: read the portal's service account token with the bootstrap token, store it, delete the
 // bootstrap objects with it, then eject and delete the CD. Done only when the running seed's config no longer names
@@ -692,10 +692,10 @@ func (x *acq) seedIdentity(ctx context.Context) error {
 		data, err := boot.GetSecretData(ctx, SeedPortalNamespace, SeedPortalTokenSecret)
 		var ka *kamajik8s.APIError
 		if errors.As(err, &ka) && ka.Status == http.StatusUnauthorized {
-			// Counted, not final at once: a seed that has just started knows no bootstrap token until it has read
-			// its Secrets (plugin/pkg/auth/authenticator/token/bootstrap reads them from a cache only).
-			return &stageErr{kindRetry, CodeSeedIdentityLost, fmt.Sprintf("The seed refuses the bootstrap token. It does so for some seconds after it starts, and for good once the "+
-				"token has expired (%s after the seed was built): when this stage's time limit ends the run, Retry rebuilds the seed.", SeedBootstrapTTL)}
+			// Not final at once: a seed that has just started knows no bootstrap token until it has read its Secrets
+			// (plugin/pkg/auth/authenticator/token/bootstrap reads them from a cache only).
+			return &stageErr{kindRefused, CodeSeedIdentityLost, fmt.Sprintf("The seed refuses the bootstrap token, which expires %s after the seed was built: "+
+				"Retry rebuilds the seed.", SeedBootstrapTTL)}
 		}
 		if errors.As(err, &ka) && ka.Status == http.StatusForbidden {
 			// The seed applies the token before the Role and RoleBinding that let it read the Secret.

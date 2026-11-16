@@ -1062,6 +1062,17 @@ func TestRemoveSeedLost(t *testing.T) {
 		t.Fatalf("the ISO must go before its VM: %v", p.pve.writes)
 	}
 	p.leaks(t)
+
+	// An apply that failed before stage 7 recorded a cluster, and a seed VM deleted by hand: the item does not say
+	// that a Remove deleted a cluster.
+	p = removal(t)
+	delete(p.pve.vms, 120)
+	p.mutate(func(_ *Run, in *Installation, _ *Secrets) { in.Status.Clusters, in.Status.Volumes = nil, nil })
+	p.only(StageRemoveCluster)
+	if end, c := p.once(), item(p.stage(StageRemoveCluster), "cluster"); end != "complete" || c == nil || c.State != "gone" ||
+		!strings.Contains(c.Message, "or none was built") || p.k8sWrites() != 0 {
+		t.Fatalf("no cluster recorded and no seed VM: end %s, item %+v", end, c)
+	}
 }
 
 // A lease lost at any checkpoint of the new stages stops every Kubernetes, Proxmox and provider write at once; the
@@ -1207,24 +1218,32 @@ func TestLive(t *testing.T) {
 	}
 }
 
-// An API server that has just started refuses a good credential for some seconds: a 401, and a 403 with the RBAC
+// An API server that has just started refuses a good credential for some seconds: a 401, a 403 with the RBAC
 // authorizer's list of roles it has not read yet (the seed's k3s restarted under disk load in a lab run, and stage 7's
-// next look ended the run seed_api_unreachable). Both are passing errors, on the seed and on the workload: the stage
-// tries again and goes on. They are not successes: the fortieth, or the time limit, ends the run with the same code.
-// A 403 without that reason is a refusal at once.
+// next look ended the run seed_api_unreachable), a bare 403 while it has not read the bindings either, and the 403 of
+// an admission plugin that is not ready. No wording tells these from a real refusal, so every Kubernetes 401 and 403
+// is a passing error, on the seed and on the workload: the stage tries again and goes on. Not for long: the fifth
+// look on end that is refused ends the run with the same code and the server's text.
 func TestAnAPIServerThatStartsIsTriedAgain(t *testing.T) {
 	const rbac = `namespaces "pc-platform" is forbidden: User "system:serviceaccount:proxcloud-system:proxcloud-portal" cannot patch resource "namespaces" in API group "" ` +
 		`at the cluster scope: RBAC: [clusterrole.rbac.authorization.k8s.io "cluster-admin" not found, clusterrole.rbac.authorization.k8s.io "system:discovery" not found]`
-	for name, d := range map[string]denial{"rbac caches": {403, rbac}, "token authenticator": {401, "Unauthorized"}} {
+	const plain = `namespaces "pc-platform" is forbidden: User "system:serviceaccount:proxcloud-system:proxcloud-portal" cannot patch resource "namespaces" in API group "" at the cluster scope`
+	for name, d := range map[string]denial{
+		"rbac roles":          {403, rbac},
+		"rbac bindings":       {403, plain},
+		"admission":           {403, `secrets "pc-platform-pve" is forbidden: not yet ready to handle request`},
+		"token authenticator": {401, "Unauthorized"},
+	} {
 		p := newPlatform(t, RunApply)
 		p.only(stageCluster)
 		p.seed.deny = []denial{d}
 		end, s := p.once(), p.stage(stageCluster)
-		if end != "defer:retry_cluster" || s.State != StageWaiting || s.Code != CodeSeedAPIUnreachable || s.Retries != 1 || !strings.Contains(s.Message, d.message[:12]) {
+		if end != "defer:retry_cluster" || s.State != StageWaiting || s.Code != CodeSeedAPIUnreachable || s.Retries != 1 || s.Refused != 1 ||
+			!strings.HasPrefix(s.Message, startingUpNote) || !strings.Contains(s.Message, d.message[:12]) || strings.Contains(s.Message, "tries again") {
 			t.Fatalf("%s on the seed: end %s %+v", name, end, s)
 		}
-		if end := p.once(); end != "complete" {
-			t.Fatalf("%s on the seed, the next look: end %s %+v", name, end, p.stage(stageCluster))
+		if end, s := p.once(), p.stage(stageCluster); end != "complete" || s.Refused != 0 {
+			t.Fatalf("%s on the seed, the next look: end %s %+v", name, end, s)
 		}
 		p.leaks(t)
 
@@ -1238,9 +1257,45 @@ func TestAnAPIServerThatStartsIsTriedAgain(t *testing.T) {
 			t.Fatalf("%s on the workload, the next look: end %s %+v", name, end, p.stage(stageWorkloadAccess))
 		}
 	}
-	// A role that does not come back: the stage's forty passing errors end the run with the code, and so does its
-	// time limit.
+	// A refusal that stays ends the run at the fifth look on end, not at the stage's time limit (60 minutes here): a
+	// revoked token, a role or a binding that was deleted. The failed stage does not say that an API server starts.
+	for name, deny := range map[string]func(*platform){
+		"a revoked token":   func(p *platform) { p.seed.sa = "a-token-the-seed-no-longer-knows" }, // every answer is a 401
+		"a deleted role":    func(p *platform) { p.seed.deny = slices.Repeat([]denial{{403, rbac}}, refusedLooks) },
+		"a deleted binding": func(p *platform) { p.seed.deny = slices.Repeat([]denial{{403, plain}}, refusedLooks) },
+	} {
+		p := newPlatform(t, RunApply)
+		p.only(stageCluster)
+		deny(p)
+		for i := 1; i < refusedLooks; i++ {
+			if end, s := p.once(), p.stage(stageCluster); end != "defer:retry_cluster" || s.Refused != i {
+				t.Fatalf("%s, look %d: end %s %+v", name, i, end, s)
+			}
+		}
+		end, s := p.once(), p.stage(stageCluster)
+		if end != "fail:"+CodeSeedAPIUnreachable || s.State != StageFailed || s.Retries != refusedLooks-1 || !strings.Contains(s.Message, "5 looks on end") ||
+			!(strings.Contains(s.Message, "401: Unauthorized") || strings.Contains(s.Message, "is forbidden")) || strings.Contains(s.Message, "after it starts") {
+			t.Fatalf("%s at the fifth look: end %s %+v", name, end, s)
+		}
+	}
+	// Only looks on end count: four refusals, an answer of another kind, and the count starts again.
 	p := newPlatform(t, RunApply)
+	p.only(stageCluster)
+	p.seed.deny = append(slices.Repeat([]denial{{403, rbac}}, refusedLooks-1), denial{503, "etcd is slow"}, denial{403, rbac})
+	for range refusedLooks - 1 {
+		p.once()
+	}
+	if end, s := p.once(), p.stage(stageCluster); end != "defer:retry_cluster" || s.Refused != 0 {
+		t.Fatalf("a 503 after four refusals: end %s %+v", end, s)
+	}
+	if end, s := p.once(), p.stage(stageCluster); end != "defer:retry_cluster" || s.Refused != 1 {
+		t.Fatalf("a refusal after the 503: end %s %+v", end, s)
+	}
+	if end := p.once(); end != "complete" {
+		t.Fatalf("end %s %+v", end, p.stage(stageCluster))
+	}
+	// The stage's forty still end a run whose refusals come between other errors.
+	p = newPlatform(t, RunApply)
 	p.only(stageCluster)
 	p.seed.deny = []denial{{403, rbac}, {403, rbac}}
 	p.once()
@@ -1249,28 +1304,12 @@ func TestAnAPIServerThatStartsIsTriedAgain(t *testing.T) {
 		!strings.Contains(s.Message, "RBAC: ") {
 		t.Fatalf("the fortieth: end %s %+v", end, s)
 	}
+	// Any other refusal is final at once: no start explains it.
 	p = newPlatform(t, RunApply)
 	p.only(stageCluster)
-	p.seed.sa = "a-token-the-seed-no-longer-knows" // every answer is a 401
-	p.once()
-	past := time.Now().Add(-time.Minute)
-	p.mutate(func(run *Run, _ *Installation, _ *Secrets) { run.Stages[6].Deadline = &past })
-	if end, s := p.once(), p.stage(stageCluster); end != "fail:"+CodeSeedAPIUnreachable || !strings.Contains(s.Message, "401: Unauthorized") {
-		t.Fatalf("a revoked token at the time limit: end %s %+v", end, s)
-	}
-	// Refusals that no start explains: no binding grants the request, an admission plugin, a role named in a message
-	// of another kind.
-	for _, msg := range []string{
-		`namespaces "pc-platform" is forbidden: User "system:serviceaccount:proxcloud-system:proxcloud-portal" cannot patch resource "namespaces" in API group "" at the cluster scope`,
-		`secrets "pc-platform-pve" is forbidden: unable to create new content in namespace pc-platform because it is being terminated`,
-		`admission webhook "validate.example" denied the request: clusterrole "x" not found`,
-	} {
-		p := newPlatform(t, RunApply)
-		p.only(stageCluster)
-		p.seed.deny = []denial{{403, msg}}
-		if end, s := p.once(), p.stage(stageCluster); end != "fail:"+CodeSeedAPIUnreachable || s.State != StageFailed || s.Retries != 0 {
-			t.Fatalf("%q: end %s %+v", msg, end, s)
-		}
+	p.seed.deny = []denial{{422, `Namespace "pc-platform" is invalid`}}
+	if end, s := p.once(), p.stage(stageCluster); end != "fail:"+CodeSeedAPIUnreachable || s.State != StageFailed || s.Retries != 0 {
+		t.Fatalf("a 422: end %s %+v", end, s)
 	}
 	for _, c := range []struct {
 		err  error
@@ -1278,8 +1317,7 @@ func TestAnAPIServerThatStartsIsTriedAgain(t *testing.T) {
 	}{
 		{&kamajik8s.APIError{Status: 401, Message: "Unauthorized"}, true},
 		{&kamajik8s.APIError{Status: 403, Message: rbac}, true},
-		{&kamajik8s.APIError{Status: 403, Message: `RBAC: clusterrole.rbac.authorization.k8s.io "cluster-admin" not found`}, true},
-		{&kamajik8s.APIError{Status: 403, Message: "forbidden"}, false},
+		{&kamajik8s.APIError{Status: 403, Message: "forbidden"}, true},
 		{&kamajik8s.APIError{Status: 404, Message: `RBAC: role "x" not found`}, false},
 		{&kamajik8s.APIError{Status: 422, Message: "invalid"}, false},
 		{&pve.APIError{Status: 401}, false},

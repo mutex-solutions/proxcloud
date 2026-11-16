@@ -7,15 +7,15 @@ and rules: [README.md](README.md#maintenance-rule).
 ## 2026-11-16: P3, findings of the first finished lab run (M0): start-up refusals are passing errors
 
 **What changed:** how the platform runner (`internal/platformlife`) reads an answer of a cluster. A Kubernetes
-`401`, and a `403` with the RBAC authorizer's `not found` list, from the seed or the platform cluster are
-passing errors (counted, bounded by the stage's 40 and its time limit) and no longer refusals; a `403` without
-that list still is one. A run ended before its stages sets the stage it stood at `failed`. A Remove's stages keep
+`401` or `403` from the seed or the platform cluster is a passing error at first and a refusal at the fifth look
+on end that ends so (`Stage.Refused` counts them); it was a refusal at once. A run ended before its stages sets the stage it stood at `failed`. A Remove's stages keep
 items for what was deleted, left and not checked. Chart `proxmox-kamaji-cluster` 0.1.12, kubeadm mode only: the
 control plane's kubelet gets `node-ip` from its prepare script, and kube-vip's lease is 60/40/5 s; the installer's
 `services-cluster.yml.j2` carries the same. No container, relation or boundary changed.
 
-**Why:** an API server refuses a good credential for some seconds after it starts, and the seed's k3s restarts when
-its disk is slow; the run of attempt 5 ended `seed_api_unreachable` on such an answer and needed a Retry.
+**Why:** an API server refuses a good credential for some seconds after it starts (401, an RBAC 403 with or
+without its `not found` list, an admission plugin's `not yet ready`), no text or `/readyz` tells that from a revoked
+token, and a real refusal must not wait for a stage's 60 minutes; the seed's k3s restarts when its disk is slow; the run of attempt 5 ended `seed_api_unreachable` on such an answer and needed a Retry.
 
 **Diagrams:** none changed; the row of the cluster chart in `c2-containers.md` names 0.1.12.
 

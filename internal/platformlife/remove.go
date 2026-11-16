@@ -52,8 +52,10 @@ func (x *acq) removeCluster(ctx context.Context) error {
 	}
 	if gone {
 		if len(x.in.Status.Clusters) == 0 && len(x.in.Status.Volumes) == 0 {
-			// An earlier Remove finished this part and then deleted the seed VM: nothing is left to delete.
-			return x.note(ctx, StageItem{ID: "cluster", State: "gone", Message: "An earlier Remove deleted the platform cluster and its volumes; the seed VM is gone too."})
+			// An earlier Remove finished this part and then deleted the seed VM, or the apply never reached stage 7
+			// (which records the cluster) and the seed VM was deleted by hand: nothing is left to delete.
+			return x.note(ctx, StageItem{ID: "cluster", State: "gone", Message: "No platform cluster and no volume is recorded and the seed VM is gone: " +
+				"nothing to delete here (an earlier Remove deleted them, or none was built)."})
 		}
 		if !x.run.Confirmed {
 			return permanent(CodeSeedLost, "The seed VM is gone, so Cluster API cannot delete the workload cluster. Start Remove with confirm \"remove %s\" "+

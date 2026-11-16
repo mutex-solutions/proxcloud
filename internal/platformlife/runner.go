@@ -242,6 +242,7 @@ type stageErr struct {
 const (
 	kindWait = iota
 	kindRetry
+	kindRefused // a Kubernetes 401 or 403: counted like a retry, final at the fifth look on end (startingUp)
 	kindFail
 )
 
@@ -257,15 +258,15 @@ func transient(code string, err error) error { return &stageErr{kindRetry, code,
 
 // classify makes a Proxmox or Kubernetes error a stage error: a refusal is permanent (a Proxmox 4xx but 429; a
 // Kubernetes 4xx but 409 and 429, see refused), anything else (unreachable, 5xx, a clone lock, which Proxmox answers
-// as a 500) transient, and so is what a Kubernetes API server also answers while it starts (startingUp). Stage
-// errors, a stop and a cancel pass through.
+// as a 500) transient. A Kubernetes 401 or 403 is what an API server also answers while it starts: tried again, and
+// a refusal only when it stays (startingUp). Stage errors, a stop and a cancel pass through.
 func classify(code string, err error) error {
 	var se *stageErr
 	if err == nil || errors.As(err, &se) || errors.Is(err, errStop) || errors.Is(err, errCancelled) {
 		return err
 	}
 	if startingUp(err) {
-		return &stageErr{kindRetry, code, clip(startingUpNote + err.Error())}
+		return &stageErr{kindRefused, code, clip(err.Error())}
 	}
 	var pa *pve.APIError
 	if errors.As(err, &pa) && pa.Status >= 400 && pa.Status < 500 && pa.Status != 429 || refused(err) {
@@ -402,7 +403,7 @@ func (x *acq) stage(ctx context.Context) (end, bool) {
 	if err == nil {
 		err = x.saveStage(ctx, func(s *Stage) {
 			fin := time.Now().UTC()
-			s.State, s.FinishedAt, s.Code, s.Message = state, &fin, "", ""
+			s.State, s.FinishedAt, s.Code, s.Message, s.Refused = state, &fin, "", "", 0
 		})
 	}
 	if err != nil {
@@ -426,19 +427,27 @@ func (x *acq) ended(ctx context.Context, err error) end {
 		return x.finish(ctx, RunFailed, se.code, se.msg)
 	}
 	s := x.run.Stages[x.si]
-	if se.kind == kindRetry && s.Retries >= stageRetries {
-		return x.finish(ctx, RunFailed, se.code, fmt.Sprintf("Gave up after %d retries: %s", s.Retries, se.msg))
+	msg, refused := se.msg, 0
+	if se.kind == kindRefused {
+		if s.Refused >= refusedLooks-1 {
+			return x.finish(ctx, RunFailed, se.code, fmt.Sprintf("The cluster's API refused the run's credential at %d looks on end: %s", refusedLooks, se.msg))
+		}
+		msg, refused = startingUpNote+se.msg, s.Refused+1
+	}
+	retry := se.kind != kindWait
+	if retry && s.Retries >= stageRetries {
+		return x.finish(ctx, RunFailed, se.code, fmt.Sprintf("Gave up after %d retries: %s", s.Retries, msg))
 	}
 	delay, prefix := waitDelay, "waiting_"
-	if se.kind == kindRetry {
+	if retry {
 		delay, prefix = min(waitDelay<<min(s.Retries, 5), maxDelay), "retry_"
 	}
 	if err := x.save(ctx, func(run *Run, _ *Installation, _ *Secrets) {
 		st := &run.Stages[x.si]
-		if se.kind == kindRetry {
+		if retry {
 			st.Retries++
 		}
-		st.State, st.Code, st.Message = StageWaiting, se.code, se.msg
+		st.State, st.Code, st.Message, st.Refused = StageWaiting, se.code, msg, refused
 		run.State = RunWaiting
 	}); err != nil {
 		return x.ended(ctx, err)

@@ -434,8 +434,8 @@ are several, `errors.details.problems`.
   earlier one finished the cluster part and deleted the seed VM needs no
   confirmation.
 - `GET /installations/{id}/runs[/{runId}]`: the newest runs, or one, with
-  their stages (`state`, `retries`, `deadline`, `items`, `code`, `message`,
-  `receipt`). A run whose job ran out of attempts reads `failed` with code
+  their stages (`state`, `retries`, `refused`, `deadline`, `items`, `code`,
+  `message`, `receipt`). A run whose job ran out of attempts reads `failed` with code
   `job_dead`; a cancel not honoured yet reads `cancelling`. A run that fails
   before its stages run again (`portal_changed`, a provider that is gone) sets
   the stage it stood at `failed` with the run's code. `items` are
@@ -444,10 +444,10 @@ are several, `errors.details.problems`.
   machines of stage 7, and in a remove what was deleted, left or not checked
   (`tenants`, one item per machine, `cluster`, `volume-<name>`, `volumes`,
   `vm-<vmid>`, `cds`, `secrets`). A stage keeps its items when it is done.
-  A Kubernetes `401`, or a `403` that carries the RBAC authorizer's `not found`
-  list, from the seed or the platform cluster is counted in `retries` and
-  tried again, like an unreachable cluster, because an API server answers so
-  while it starts; the stage fails with its code after 40 or at `deadline`.
+  A Kubernetes `401` or `403` from the seed or the platform cluster is counted
+  in `retries` and tried again, because an API server answers so while it
+  starts; `refused` is how many looks on end ended so (absent when none), and
+  the fifth fails the stage with its code and the server's text.
 - `POST /installations/{id}/runs/{runId}/cancel`: the runner stops at its next
   claim or write; the run ends `cancelled` and the installation `failed`.
   Nothing is deleted.

@@ -114,9 +114,11 @@ before the first run:
   spaces them out. A seed that restarts then is tried again by the run (see
   [How long-running states look](#how-long-running-states-look)); a store that cannot take the
   clones of every group at once next to a running etcd is too slow for this path. From cluster
-  chart 0.1.12 kube-vip keeps the API address through a write of up to 40 seconds (lease 60 s,
-  renew deadline 40 s, retry 5 s); the BOM of this release still names 0.1.11, which gives up
-  after 10.
+  chart 0.1.12 kube-vip tries to renew its lease for 40 seconds before it gives up the API address
+  (lease 60 s, renew deadline 40 s, retry 5 s). Its client cuts every request at 10 seconds, so
+  the address is kept when one try in those 40 seconds gets through in under 10: a stall of about
+  half a minute is survived, an etcd whose every write takes over 10 seconds is not. The BOM of
+  this release still names 0.1.11, which gives up after 10.
 - **The MTU of the platform network.** Cilium tunnels pod traffic between the machines at the
   machines' MTU. When the bridge's real path MTU between two nodes is below 1500 (the bridge is
   itself carried by an overlay), set the settings' MTU to it.
@@ -412,28 +414,30 @@ A Remove has three stages: Delete the platform cluster (`remove-cluster`, 45 min
 - **Waiting**, shown with **Trying again. It did not work yet**: the stage looked, found its
   condition not met or met a passing error, and gave the job back. It looks again after 15 seconds;
   after a passing error (Proxmox or a cluster unreachable, a 5xx, or a cluster's API that refuses
-  the run's credential the way an API server does while it starts, see below) the pause doubles up
+  the run's credential, see below) the pause doubles up
   to 5 minutes and the retry counter goes up. The row shows the code the stage would fail with, the message, what
   you can do meanwhile and `must finish by`. This is normal during stages 2, 4, 7 and 9: an import,
   a boot, a kubeadm join and a chart sync take minutes.
 - A stage fails when its time limit passes (with the code it was waiting on, or `<stage>_timeout`
   when it had none), after 40 passing errors, or at once on a refusal: a Proxmox 4xx other than 429, a
-  Kubernetes 4xx other than 409 and 429 (with the two exceptions below), a failed Proxmox task, a
+  Kubernetes 4xx other than 401, 403, 409 and 429 (for 401 and 403 see below), a failed Proxmox task, a
   machine CAPMOX gave up, a sync that failed again after the run had started it.
 - **A cluster's API that has just started** (the seed's k3s after a restart, the platform cluster's
   API server) refuses a good credential for some seconds, until it has read its Secrets and RBAC
-  objects. Two answers of that kind are passing errors and not refusals, from the seed and from
-  the platform cluster: a `401`, which is all an API server says of a token it cannot check, and a
-  `403` whose text ends in the RBAC authorizer's list of roles it does not find (`RBAC: [clusterrole…
-  "cluster-admin" not found, …]`). The message then starts with "The cluster's API refuses the
-  run's credential, as an API server does for some seconds after it starts" and carries the
-  server's text. A token that was really revoked and a role that was really deleted read the same,
-  so they are not passed: the stage fails with its code (`seed_api_unreachable`,
-  `workload_api_unreachable`, `component_unhealthy`, …) and that text after 40 such errors or at its
-  time limit, whichever is first, instead of at once. A `403` without the RBAC list (no binding
-  grants the request, an admission plugin, a namespace that is being deleted) is a refusal at
-  once. In stage 5 the same holds for the bootstrap token (`401`) and for a service account the
-  seed does not report as cluster-admin: both are tried again until the stage's 10 minutes end.
+  objects: with a `401`, which is all an API server says of a token it cannot check; with a `403`
+  of the RBAC authorizer, with or without its list of roles it does not find (`RBAC: [clusterrole…
+  "cluster-admin" not found, …]`); with a `403 … not yet ready to handle request` of an admission
+  plugin. No text tells these from a token that was revoked, a role or binding that was deleted, a
+  quota or a namespace that is being deleted, and the server's `/readyz` answers a token it does
+  not know with the same `401`. So every Kubernetes `401` and `403`, from the seed and from the
+  platform cluster, is first a passing error: the message starts with "The cluster's API refuses
+  the run's credential, as an API server does for some seconds after it starts" and carries the
+  server's text. When five looks on end are refused (3 minutes 45 seconds or more, with the pauses
+  above) the refusal is taken as real: the stage fails with its code (`seed_api_unreachable`,
+  `workload_api_unreachable`, `component_unhealthy`, …) and "The cluster's API refused the run's
+  credential at 5 looks on end:" with the server's text. A look that ends another way starts the
+  count again. In stage 5 the same holds for the bootstrap token (`401`); a service account the
+  seed does not report as cluster-admin is waited for until the stage's 10 minutes end.
 - **Skipped**: the stage had nothing to do (for example `remove-cluster` when no seed ever became
   ready).
 - The installation's phase is `applying` or `removing` during a run, then `ready`, `removed` or
@@ -464,9 +468,9 @@ stage is still trying.
 | `seed_clone_failed` | 3, Remove | The clone task failed or was refused; stage 2 recorded no seed template; the VM stays locked. Also, with nothing being cloned: Proxmox could not be read with the CAPI token while looking at the seed VM or the pool `proxcloud-seed` (unreachable, or the token is refused), in stage 3 on a ready seed or in `remove-cluster` and `remove-seed` | Fix the storage or the node the message names, **Retry**. For a read that failed: check that `capmox@pve!capi` still exists and the stored secret is current, then **Retry** or **Remove again** |
 | `seed_config_refused` | 3, Remove | Proxmox refused a config change, the read of the VM's config after it, the CD upload, a firewall rule or the start (the message carries Proxmox's own error); the CD could not be rendered or built (`The seed's CD could not be rendered` or `… built`: for example Proxmox reports the seed's `net0` without a MAC address); at Remove, the VM is locked or carries another installation's tag | Fix what Proxmox's error names: the bridge, the boot or ISO store, the node, or a right of `capmox@pve!capi` (then run the script again), and **Retry**; it builds a new seed VM. A CD that could not be rendered or built is a defect, not a setting: nothing was stored and no CD was uploaded, Retry will not pass, report the message. A VM with another installation's tag is not deleted: look at it in Proxmox |
 | `seed_not_booted` | 4 | The seed's guest agent did not answer in time: the VM did not boot, or its first boot failed (for example the k3s binary or its install script could not be downloaded, or one failed its checksum) | Open the seed VM's console in Proxmox. **Retry** builds a new seed |
-| `seed_api_unreachable` | 4, 6 to 10, Remove, seed access | The seed is booted but its API does not answer from the API's host; or a seed call failed later (stages 8 to 10 read the cluster's admin kubeconfig from the seed); or the seed's API kept refusing the stored credential with a `401` or an RBAC `not found` `403` for 40 looks or to the stage's time limit (a seed that restarts answers so for some seconds, which the run waits out) | Add a route from the ProxCloud host to the platform network, or correct the seed API sources and save. **Retry** writes the seed's firewall rules again first. For a credential the seed keeps refusing: look on the seed VM's console whether k3s runs or keeps restarting (`systemctl status k3s`; a slow disk does that, see [What no check reads](#what-no-check-reads)), then **Retry** |
+| `seed_api_unreachable` | 4, 6 to 10, Remove, seed access | The seed is booted but its API does not answer from the API's host; or a seed call failed later (stages 8 to 10 read the cluster's admin kubeconfig from the seed); or the seed's API refused the stored credential or the request with a `401` or a `403` at five looks on end (a seed that restarts answers so for some seconds, with `Unauthorized`, `RBAC: … not found`, a plain `forbidden` or `not yet ready to handle request`, which the run waits out) | Add a route from the ProxCloud host to the platform network, or correct the seed API sources and save. **Retry** writes the seed's firewall rules again first. For a credential the seed keeps refusing: look on the seed VM's console whether k3s runs or keeps restarting (`systemctl status k3s`; a slow disk does that, see [What no check reads](#what-no-check-reads)), then **Retry** |
 | `seed_tls_mismatch` | 4 | The server on the seed address presents a certificate of another CA | Another machine holds that address. Correct the seed address, **Retry** |
-| `seed_identity_lost` | 4, 5, later | The run holds no credential for the seed; the seed refused the bootstrap token to the end of stage 5's time limit (it expires 3 hours after the seed was built); the seed did not report the service account as cluster-admin in that time | **Retry**. It builds the seed again when it never became ready |
+| `seed_identity_lost` | 4, 5, later | The run holds no credential for the seed; the seed refused the bootstrap token at five looks on end (it expires 3 hours after the seed was built); the seed did not report the service account as cluster-admin to the end of stage 5's time limit | **Retry**. It builds the seed again when it never became ready |
 | `seed_cd_not_deleted` | 5, Remove | The CD could not be ejected or deleted, or Proxmox still lists it; or Proxmox took the eject but left it pending on the running seed (the message says so) | The CAPI token cannot delete on the ISO store: run the script again, **Retry**. For a pending eject: `qm pending <vmid>` on the seed's node shows it; stopping and starting the seed VM applies it, then **Retry** |
 | `seed_lost` | 3, Remove | A seed that had become ready is gone, or the VM at its VMID is no longer this installation's. It is not rebuilt: a new, empty seed would have no record of the cluster's machines | Remove with the option for a missing seed, then install again ([Remove](#remove)) |
 | `component_unhealthy` | 6 to 9 | An Application is not Synced and Healthy in time (the message names it and its condition); or something could not be rendered or applied, in stage 7 the Application `pc-platform` | Download the seed kubeconfig to look closer, then **Retry**. ArgoCD does not sync an Application again by itself once its retries are spent; the run starts the sync of one whose last sync ended `Failed` or `Error`, once per run, so no manual sync is needed after the cause is fixed. When that sync ends `Failed` or `Error` too, the stage fails at once with what the sync failed on (the hook or resource and its message) instead of waiting for its time limit; **Retry** starts the sync once more. ArgoCD takes about 40 minutes to spend the ten retries of one sync, longer than the time limit of stage 6 or of a wave, so the stage does not wait for that either: once one sync has failed four times (about 8 minutes of ArgoCD's backoff), the last time in this run, and ArgoCD shows the hook or resource it failed on, the stage fails with that text while ArgoCD still tries. After a **Retry** the same sync gets one more attempt before the stage fails on it again |
@@ -474,7 +478,7 @@ stage is still trying.
 | `machine_failed` | 7 | CAPMOX gave a machine up: its ProxmoxMachine's condition `VirtualMachineProvisioned` is `False` with `VMProvisionFailed` (not enough memory on the node for its scheduler, no free VMID, the template not found, a VMID held by another VM) or `TaskFailed` (a Proxmox task failed: a clone, a resize, a config change). The message has the machine's name, its VMID and CAPMOX's text. Also: a node template has a Proxmox cloud-init drive on another slot than `ide0` (the message has the command), or its config could not be read for another reason than a missing permission | Correct what CAPMOX's text names. CAPMOX does not try that machine again, and **Retry** alone finds it as it was: delete the Machine on the seed with the seed kubeconfig (`kubectl -n pc-platform delete machine <name>`, the command is in the message), Cluster API makes a new one, then **Retry**. Do not delete the Machine when the text says the VM's name does not match (`expected VM name to match`): the VMID in the ProxmoxMachine then belongs to another VM, and CAPMOX deletes the VM at that VMID when its token may. The message then has no delete command and says so: look in Proxmox whose VM it is, and delete the Machine only once its ProxmoxMachine no longer names that VMID. For the template: run the `qm set` command of the message on that node, then **Retry** |
 | `capmox_auth_failed` | 7 | Proxmox refuses the CAPI token when CAPMOX uses it (a condition of the ProxmoxCluster or a ProxmoxMachine says so); or CAPMOX has set no condition on the ProxmoxCluster for 10 minutes, which is how a Proxmox API URL the seed cannot reach and a refused token both show, because CAPMOX opens the API before it writes anything | Check the Proxmox API URL as the platform network reaches it ([What no check reads](#what-no-check-reads)), paste the secret again, **Retry**. The Retry makes CAPMOX try at once (it updates the ProxmoxCluster), so a fix shows within its 10 minutes. CAPMOX's log on the seed says which it is: `kubectl -n capmox-system logs deploy/capmox-controller-manager` |
 | `control_plane_timeout` | 7 | Not every machine is Running or the control plane is not initialized in 60 minutes. The items and the message carry the step each machine is at and CAPMOX's last error | **Retry**; the time limit starts again. Look at the machines with the seed kubeconfig |
-| `workload_api_unreachable` | 8 to 10, Remove | The cluster's API does not answer from the API's host, or its kubeconfig or CA on the seed is not usable, or it kept refusing the admin kubeconfig as an API server does while it starts (as for `seed_api_unreachable`) | Add a route from the ProxCloud host to the API address, **Retry**. At Remove: restore the route and **Remove again**, or tick the option for a cluster that does not answer |
+| `workload_api_unreachable` | 8 to 10, Remove | The cluster's API does not answer from the API's host, or its kubeconfig or CA on the seed is not usable, or it refused the admin kubeconfig or the request with a `401` or `403` at five looks on end (as for `seed_api_unreachable`) | Add a route from the ProxCloud host to the API address, **Retry**. At Remove: restore the route and **Remove again**, or tick the option for a cluster that does not answer |
 | `nodes_timeout` | 9 | Not every node is Ready with its group label after the first wave | **Retry** |
 | `provider_conflict` | 10 | A provider with the same name exists that is not this installation's, two rows carry its marker, or the provider validation refused the row | Correct or rename that provider under Cloud providers, **Retry** |
 | `bom_unsupported` | start, plan | The installed BOM is not the one this release carries | No release upgrades between BOMs ([Not implemented yet](#not-implemented-yet)). Go back to the ProxCloud release that installed the platform. Or, if no tenant cluster or database must be kept: delete them all (Remove refuses with `tenants_exist` otherwise), remove managed services, which deletes the platform cluster, and install again |
@@ -555,7 +559,7 @@ The stages of a Remove list what happened, and the list stays on the finished ru
 |---|---|---|
 | `remove-cluster` | `tenants` | `none`: the cluster was asked and holds no tenant cluster or database. `not checked`: its control plane never came up, it did not answer and the option let the run go on, or the seed VM is gone |
 | | one per machine, by its name | `deleting` while Cluster API deletes it, then `deleted`, with its VMID (`no VM` when CAPMOX had not cloned it). Cluster API deletes the VM, its disk and its bootstrap ISO; the run does not read Proxmox to confirm it |
-| | `cluster` | `gone`: the seed lists no cluster and no machine any more |
+| | `cluster` | `gone`: the seed lists no cluster and no machine any more. Also when the seed VM is gone and the installation records no cluster and no volume: the seed was not asked, and the item says that an earlier Remove deleted them or none was built |
 | | `volume-<name>` | `deleted`, with the volume's handle, component and claim; `not found` when the store no longer listed a recorded volume |
 | | `volumes` | `none recorded`: stage 9 never recorded a volume, so none was deleted. `not checked`: see the option |
 | | `vm-<vmid>` (seed gone) | `deleted`: a tagged VM the run deleted itself. `left`: a VM of the pool it did not delete |
@@ -751,7 +755,8 @@ and ADR 0009, A2 and A8.
   registers the API address as its InternalIP (its kubelet has no `node-ip`; nothing failed on it
   with one control plane machine) and a kube-vip that gives up the API address when a lease renewal
   takes over 10 seconds. Chart 0.1.12 gives the kubelet the machine's own address and kube-vip a
-  renew deadline of 40 seconds; it reaches an installation when its tag is cut and a later BOM
+  renew deadline of 40 seconds (several tries of at most 10 seconds each, see
+  [What no check reads](#what-no-check-reads)); it reaches an installation when its tag is cut and a later BOM
   names it, and then only a new install, because no release upgrades between BOMs.
 - **`layout: separate`** (one cluster for Kubernetes, one for databases) is refused by the API.
 - **No VLAN** on the platform network, and no IPv6.
@@ -765,9 +770,12 @@ and ADR 0009, A2 and A8.
 
 ## Not verified on a lab yet
 
-No run of this path has finished on a Proxmox VE cluster. The milestone run (M0) and the lab checks
-L0 to L11 of the design are pending. Until they are recorded here, treat every behaviour above as
-what the code and its tests say, not as observed:
+The milestone run (M0) finished once on a lab Proxmox VE cluster: attempt 5, with one **Retry**, on
+the code before the changes it led to. Those changes have not run on a lab: a cluster's `401` and
+`403` tried again for five looks, the items of a Remove, and cluster chart 0.1.12 (`node-ip`,
+kube-vip's lease). The lab checks L0 to L11 of the design are not recorded as passed. Until they
+are recorded here, treat every behaviour above as what the code and its tests say, not as
+observed, except the figures this guide marks as seen on a lab:
 
 | Check | What it would show |
 |---|---|

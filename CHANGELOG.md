@@ -415,11 +415,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Managed services: a seed that restarts no longer ends the run, and what the first finished lab run found**
   (M0, attempt 5). The seed's k3s restarted under the disk load of stage 7's clones; for some seconds its API
   answered `403 … RBAC: [clusterrole … "cluster-admin" not found …]`, which the run took for a refusal and ended
-  `seed_api_unreachable` with nothing wrong. A Kubernetes `401`, and a `403` that carries the RBAC authorizer's
-  `not found` list, from the seed or the platform cluster are now passing errors: counted, tried again, and ended by
-  the stage's 40 or its time limit with the same code and the server's text, so a revoked token or a deleted role
-  still fails the run; a `403` without that list stays a refusal at once. Stage 5 tries a refused bootstrap token and
-  a service account not yet reported as cluster-admin again until its time limit, for the same reason. Reporting: a
+  `seed_api_unreachable` with nothing wrong. A starting API server also answers a bare `401`, a `403` without that
+  list and an admission plugin's `403 … not yet ready to handle request`, and no text (nor `/readyz`, which answers
+  an unknown token `401` too) tells them from a real refusal. So every Kubernetes `401` and `403` from the seed or
+  the platform cluster is now a passing error at first: counted, tried again, and final at the fifth look on end
+  that is refused (3 min 45 s or more; the stage's new field `refused` counts them), with the same code and the
+  server's text. A revoked token, a deleted role or binding and an expired bootstrap token in stage 5 still fail the
+  run, after those looks instead of at once, and never only at a stage's time limit. Stage 5 waits for a service
+  account not yet reported as cluster-admin until its time limit. Reporting: a
   run ended before its stages (`portal_changed`) sets the stage it stood at `failed` and logs that stage, not
   `validate`; a Remove lists what it deleted, left and did not check (`tenants`, each machine, `cluster`, volumes,
   the seed VM, the secrets), and the list stays on the finished run; a machine without a VM reads `no VM`, not
@@ -429,8 +432,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gets the machine's own address as `node-ip`, written by the prepare script, where the node registered the kube-vip
   address as its InternalIP; kube-vip's lease is 60 s with a renew deadline of 40 s and a retry period of 5 s
   (`vip_leaseduration`, `vip_renewdeadline`, `vip_retryperiod`; were 15, 10, 2), where an etcd write of 19.5 s made
-  it give up the API address five times. The tag `proxmox-kamaji-cluster-v0.1.12` is not cut and the BOM still
-  names 0.1.11, so no installation gets the chart change yet; it has not run on a cluster. The guide says that a
+  it give up the API address five times. kube-vip's client still cuts each request at 10 s, so the 40 s buy more
+  tries, not one write of 40 s: a stall of about half a minute is survived. The tag
+  `proxmox-kamaji-cluster-v0.1.12` is not cut and the BOM still names 0.1.11, so no managed-services platform gets
+  the chart change yet. The installer does: **a re-run of stage 50 on an existing split-mode site replaces the
+  services cluster's control plane machine** (Cluster API rolls a changed kubeadm configuration; one spare address
+  and room for a second control plane VM are needed, and the API address can be away for up to a minute, see
+  `docs/install.md`). Neither has run on a cluster. A Remove whose seed VM is gone and that has no cluster recorded
+  no longer says that an earlier Remove deleted one; the console's advice for `seed_api_unreachable` and
+  `workload_api_unreachable` covers a refused credential. The guide says that a
   plain Remove's API body is `{"kind":"remove"}` and `confirm` is the option's field, and names the disk load of
   stage 7's parallel clones.
 
