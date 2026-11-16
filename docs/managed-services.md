@@ -642,8 +642,9 @@ same holds for a seed whose VM runs but whose Kubernetes cannot be repaired
 
 ### When the seed does not answer
 
-A seed that is down does not change the record: the installation stays `ready` in the list, in the
-setup status and in `GET …/installations/{id}`, and the plan shows no change. Only the live read
+A seed that is down does not by itself change the record: the installation stays `ready` in the list,
+in the setup status and in `GET …/installations/{id}`, and the plan shows no change, until a run is
+started and fails (below). Only the live read
 tells: the page reads the seed each time it loads, shows **Needs attention** and an alert with the
 seed's address, VM and node, and `GET …/installations/{id}?live=1` answers `live.phase: degraded`
 with `live.code: seed_api_unreachable` and the same text in `live.error`. Nothing sends a
@@ -665,6 +666,12 @@ finish.
   `seed_api_unreachable` (or `seed_not_booted` when the guest agent does not answer either). A seed
   that had become ready is never rebuilt, and nothing is deleted. So an apply repairs a seed that
   was only stopped, and no other.
+- **A run that fails sets the installation to `failed`** (an apply, a Retry or a Remove). The page
+  then shows the failed run with its stage and code instead of the live read: the alert about the
+  seed and the table of components are gone, because the page asks for the live read only while
+  the stored phase is `ready` (`?live=1` itself still reads the seed and carries `live.code`, with
+  `live.phase: failed`). Nothing else changed. After the seed is repaired, **Retry** brings the
+  installation back to `ready`; reloading the page does not.
 - **Download seed kubeconfig** and **Replace the seed credential** answer `502`.
 - **Remove managed services**: the seed VM exists, so the run asks Cluster API on it to delete the
   cluster, retries, and fails `seed_api_unreachable`. The option for a missing seed does not apply
@@ -687,8 +694,9 @@ finish.
    known. Then, before anything else, keep the evidence and a way back: snapshot the seed's disk on
    its store (on ZFS `zfs snapshot <pool>/vm-<vmid>-disk-0@before-fsck`). Shut the VM down
    (`qm shutdown <vmid>`), check the root filesystem from the node (`e2fsck -f` on the first
-   partition of that disk; on ZFS `/dev/zvol/<pool>/vm-<vmid>-disk-0-part1`), start the VM and wait
-   for the page to read the seed again. **This repair has not been run on a lab.**
+   partition of that disk; on ZFS `/dev/zvol/<pool>/vm-<vmid>-disk-0-part1`), start the VM, then
+   **Retry** when an apply was started meanwhile and the installation reads `failed`, or reload the
+   page until it reads the seed again when none was. **This repair has not been run on a lab.**
 5. If the seed cannot be repaired: restore the seed VM from your backup (also not run on a lab),
    then **Apply this release**.
 6. Without a backup the seed cannot be brought back: an apply never rebuilds a ready seed, because a

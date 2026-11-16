@@ -138,11 +138,11 @@ The platform cluster, tenant clusters and databases keep running without the see
 
 1. In Proxmox, check that the seed VM runs. **Apply this release** starts a stopped seed; it never rebuilds one.
 2. On the seed's node, as root: `qm guest exec <vmid> -- systemctl is-active k3s` and `qm guest exec <vmid> -- grep ' / ' /proc/mounts`.
-3. If the line for `/` ends in `emergency_ro`, the seed's disk has a filesystem error and takes no writes. Snapshot the disk, shut the VM down, check the filesystem from the node (`e2fsck -f` on the disk's first partition) and start the VM. This repair has not been run on a lab.
+3. If the line for `/` ends in `emergency_ro`, the seed's disk has a filesystem error and takes no writes. Snapshot the disk, shut the VM down, check the filesystem from the node (`e2fsck -f` on the disk's first partition) and start the VM. Then press **Retry** if an apply was started meanwhile and failed, or reload the page if none was. This repair has not been run on a lab.
 4. If that does not help, restore the seed VM from your backup, then **Apply this release**.
 5. Without a backup the seed cannot be brought back. Delete the seed VM in Proxmox, then use **Remove managed services** with the extra option and install again. This deletes the platform cluster with every tenant control plane and database on it.
 
-While the seed does not answer, **Apply this release** waits 20 minutes and fails, **Remove managed services** fails without deleting the cluster, and the two seed buttons fail. Reboot a seed with `qm reboot`, never `qm stop`, and add the backup job before you need it.
+While the seed does not answer, **Apply this release** waits 20 minutes and fails, **Remove managed services** fails without deleting the cluster, and the two seed buttons fail. A run that fails sets the installation to **Failed**: the page then shows the failed run instead of the seed's live state, and after the seed is repaired **Retry** brings it back to ready. Reboot a seed with `qm reboot`, never `qm stop`, and add the backup job before you need it.
 
 ## What this release does not do
 
