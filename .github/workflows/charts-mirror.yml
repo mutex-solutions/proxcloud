@@ -154,7 +154,8 @@ jobs:
           set -euo pipefail
           python3 .github/scripts/charts_mirror.py --push --out result
 
-      # Also after a failure: a run that failed after some pushes wrote the digests it got, marked incomplete.
+      # Also after a failure: the script writes the record while it runs, so a run that failed or was killed after
+      # some pushes left the digests it got, marked incomplete.
       - name: Summarise the digest record
         if: always()
         run: |
@@ -168,7 +169,8 @@ jobs:
               echo 'Pending: an owner makes each new package public on GHCR, then a reviewed change pins these'
               echo 'references and manifest digests in deploy/platform/platform-bom.yaml.'
             else
-              echo 'No digest record: the run ended before the publish step verified a chart, so it pushed nothing.'
+              echo 'No digest record was written. That does not prove that nothing was published: look for'
+              echo '"pushed" lines in the log of the publish step.'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 

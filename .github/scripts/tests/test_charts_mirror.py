@@ -29,16 +29,17 @@ COMMIT = "c" * 40
 OCI_DIGEST = "sha256:" + "a" * 64
 
 
-def tgz(name, version, extra=None, mtime=0, app=None):
-    """A chart archive as bytes."""
-    chart = "name: %s\nversion: %s\n" % (name, version) + ("appVersion: %s\n" % app if app else "")
+def tgz(name, version, extra=None, mtime=0, app=None, tail=""):
+    """A chart archive as bytes; file contents are str or bytes."""
+    chart = "name: %s\nversion: %s\n" % (name, version) + ("appVersion: %s\n" % app if app else "") + tail
     files = dict({"Chart.yaml": chart, "templates/a.yaml": "kind: A\n"}, **(extra or {}))
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         for path, text in files.items():
             info = tarfile.TarInfo("%s/%s" % (name, path))
-            info.size, info.mtime = len(text), mtime
-            tar.addfile(info, io.BytesIO(text.encode()))
+            data = text if isinstance(text, bytes) else text.encode()
+            info.size, info.mtime = len(data), mtime
+            tar.addfile(info, io.BytesIO(data))
     return buf.getvalue()
 
 
@@ -54,7 +55,9 @@ charts:
   - {name: argo-cd, version: 9.9.9, repo: reg.test/argo/charts, digest: "%s", licence: Apache-2.0}
   - {name: kamaji, version: 26.11.2-edge, git: "https://github.com/clastix/kamaji", tag: 26.11.2-edge, commit: %s, path: charts/kamaji, appVersion: 26.11.2-edge, licence: Apache-2.0, vendorName: kamaji-etcd, vendorVersion: 0.15.0, vendorRepo: "https://charts.test/clastix", vendorDigest: "%s"}
 """ % (sha(CILIUM), OCI_DIGEST, COMMIT, sha(ETCD))
-NOT_FOUND = "Error: ghcr.io/mutex-solutions/charts-mirror/x:1.2.3: not found"
+# Helm 3.21.4 for a version or a package that a registry does not have (measured on 2026-11-16, anonymously, against
+# ghcr.io, quay.io, registry.k8s.io, public.ecr.aws and mcr.microsoft.com).
+NOT_FOUND = 'Error: failed to perform "FetchReference" on source: ghcr.io/mutex-solutions/charts-mirror/%s:%s: not found'
 DENIED = "Error: GET https://ghcr.io/token: response status code 403: denied"  # GHCR, anonymous, 2026-11-16
 UPSTREAM_NOTICE = "Kamaji: copyright 2022 Clastix Labs\n"
 LOCK = "dependencies:\n- name: kamaji-etcd\n  repository: https://charts.test/clastix\n  version: 0.15.0\ndigest: sha256:x\n"
@@ -68,14 +71,16 @@ class Fake:
                       ("https://charts.test/clastix", "kamaji-etcd", "0.15.0"): ETCD}
         self.oci = {"reg.test/argo/charts/argo-cd@" + OCI_DIGEST: ARGO}
         self.mirror = {}        # (name, version) -> (bytes, digest)
-        self.mirror_error = NOT_FOUND
+        self.mirror_error = None  # None: Helm's answer for a missing version; else this text
         self.tag_commit = COMMIT
         self.tree = {"charts/kamaji/Chart.yaml": "name: kamaji\nversion: 0.0.0+latest\nappVersion: latest\n"
+                                                 "annotations:\n  upstream/key: kept\n"
                                                  "dependencies:\n- name: kamaji-etcd\n  version: \">=0.15.0\"\n",
                      "charts/kamaji/Chart.lock": LOCK, "charts/kamaji/templates/a.yaml": "kind: A\n",
                      "LICENSE": "Apache License 2.0\n", "NOTICE": UPSTREAM_NOTICE}
         self.symlink = None
         self.ignored = ()       # files a .helmignore of the chart would drop
+        self.drop_annotations = False
         self.calls = []
         self.clock = 0
 
@@ -93,6 +98,8 @@ class Fake:
             else:
                 found = [v for key, v in self.mirror.items() if key == (name, args[args.index("--version") + 1])]
             if not found:
+                if self.mirror_error is None:
+                    return 1, NOT_FOUND % (name, args[args.index("--version") + 1])
                 return 1, self.mirror_error
             Path(into, name + ".tgz").write_bytes(found[0][0])
             return 0, "Pulled: x\nDigest: %s\n" % found[0][1]
@@ -111,11 +118,13 @@ class Fake:
     def helm_package(self, args, env, cwd):
         chart, into = Path(args[0]), args[args.index("-d") + 1]
         version, app = args[args.index("--version") + 1], args[args.index("--app-version") + 1]
-        name = re.search(r"^name: (\S+)", (chart / "Chart.yaml").read_text(), re.M).group(1)
-        extra = {str(p.relative_to(chart)): "x" if p.suffix == ".tgz" else p.read_text() for p in chart.rglob("*")
+        source = (chart / "Chart.yaml").read_text()
+        name = re.search(r"^name: (\S+)", source, re.M).group(1)
+        kept = "" if self.drop_annotations else "".join(re.findall(r"^annotations:\n(?:[ \t]+.*\n)*", source, re.M))
+        extra = {str(p.relative_to(chart)): b"x" if p.suffix == ".tgz" else p.read_bytes() for p in chart.rglob("*")
                  if p.is_file() and p.name != "Chart.yaml" and p.name not in self.ignored}
         self.clock += 1  # like helm: another file time on every run
-        Path(into, "%s-%s.tgz" % (name, version)).write_bytes(tgz(name, version, extra, self.clock, app))
+        Path(into, "%s-%s.tgz" % (name, version)).write_bytes(tgz(name, version, extra, self.clock, app, kept))
         return 0, "Successfully packaged chart"
 
     def helm_push(self, args, env, cwd):
@@ -138,7 +147,7 @@ class Fake:
         for path, text in self.tree.items():
             target = Path(cwd, path)
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(text)
+            target.write_bytes(text if isinstance(text, bytes) else text.encode())
         if self.symlink:
             os.symlink("/etc/hostname", Path(cwd, self.symlink))
         return 0, ""
@@ -309,7 +318,7 @@ class FetchTest(Base):
 
     def packaged(self):
         with tarfile.open(os.path.join(self.out, "kamaji-26.11.2-edge.tgz")) as tar:
-            return {m.name: tar.extractfile(m).read().decode() for m in tar if m.isfile()}
+            return {m.name: tar.extractfile(m).read().decode("latin-1") for m in tar if m.isfile()}
 
     def test_repackaged_chart_carries_licence_notice_and_the_change(self):
         first = self.go()[2]["content"]
@@ -318,10 +327,53 @@ class FetchTest(Base):
         notice = files["kamaji/NOTICE"]
         self.assertTrue(notice.startswith(UPSTREAM_NOTICE + "\n"), notice)
         for want in ("https://github.com/clastix/kamaji at tag 26.11.2-edge", COMMIT, "charts/kamaji",
-                     "oci://" + cm.MIRROR, "version set to 26.11.2-edge", "appVersion set to 26.11.2-edge"):
+                     "oci://" + cm.MIRROR, "version set to 26.11.2-edge", "appVersion set to 26.11.2-edge",
+                     "the annotation\ncharts-mirror/changes added", "under charts/ with its files unchanged",
+                     "Files that the chart's .helmignore lists are not packaged"):
             self.assertIn(want, notice)
+        self.assertNotIn("unchanged archive", notice)
         self.out += "2"  # no date in the text: the content digest is the same on the next run
         self.assertEqual(self.go()[2]["content"], first)
+
+    def test_licence_is_copied_byte_for_byte(self):
+        """CRLF line ends and bytes that are not UTF-8 reach the archive as they are."""
+        licence, notice = b"Apache License\r\nVersion 2.0 \xff\r\n", b"Kamaji \xa9 Clastix\r\n"
+        self.fake.tree.update({"LICENSE": licence, "NOTICE": notice})
+        self.go()
+        files = self.packaged()
+        self.assertEqual(files["kamaji/LICENSE"].encode("latin-1"), licence)
+        self.assertTrue(files["kamaji/NOTICE"].encode("latin-1").startswith(notice + b"\nThis Helm chart"))
+
+    def test_text_that_is_not_utf8_fails_the_run_without_a_traceback(self):
+        self.fake.tree["charts/kamaji/Chart.lock"] = b"dependencies: \xff\n"
+        manifest = Path(self.tmp.name, "manifest.yaml")
+        manifest.write_text(MANIFEST)
+        real, cm.run = cm.run, self.fake
+        self.addCleanup(setattr, cm, "run", real)
+        with contextlib.redirect_stdout(io.StringIO()) as printed:
+            self.assertEqual(cm.main(["--manifest", str(manifest), "--out", self.out]), 1)
+        self.assertIn("FAIL ", printed.getvalue())
+
+    def test_modified_chart_yaml_carries_the_change_in_an_annotation(self):
+        self.go()
+        chart = self.packaged()["kamaji/Chart.yaml"]
+        self.assertIn('annotations:\n  charts-mirror/changes: "Modified by oci://%s: version set to 26.11.2-edge and '
+                      'appVersion set to 26.11.2-edge; see NOTICE"\n  upstream/key: kept\n' % cm.MIRROR, chart)
+
+    def test_annotation_fails_closed(self):
+        tree = self.fake.tree["charts/kamaji/Chart.yaml"]
+        for n, (text, drop) in enumerate((
+                (tree.replace("annotations:\n  upstream/key: kept\n", ""), False),      # no annotations key
+                (tree.replace("  upstream/key: kept\n", ""), False),                    # an empty one
+                (tree + "annotations:\n  second: block\n", False),                     # two
+                (tree.replace("upstream/key: kept", "charts-mirror/changes: theirs"), False),
+        )):
+            self.fake.tree["charts/kamaji/Chart.yaml"], self.fake.drop_annotations = text, drop
+            self.out += str(n)
+            self.fails("Chart.yaml must have exactly one annotations: block")
+        self.fake.tree["charts/kamaji/Chart.yaml"], self.fake.drop_annotations = tree, True
+        self.out += "x"
+        self.fails("the packaged Chart.yaml lacks the annotation")
 
     def test_upstream_without_notice_gets_ours_only(self):
         del self.fake.tree["NOTICE"]
@@ -375,12 +427,52 @@ class PublishTest(Base):
         self.assertEqual(self.fake.pushes(), [])  # not even the chart before it
 
     def test_only_a_definite_not_found_means_absent(self):
-        for n, answer in enumerate((DENIED, "Error: 503 Service Unavailable", "Error: unauthorized: not found",
-                                    "Error: unexpected status code 401", "")):
+        """Absent is only Helm's answer that names this chart and version, as the last line. An error of the token
+        endpoint, of a credential helper, of a layer read or of a proxy also says "not found" and is not that."""
+        mine = NOT_FOUND % ("cilium", "1.2.3")
+        for n, answer in enumerate((
+                DENIED, "Error: 503 Service Unavailable", "Error: unauthorized: not found",
+                "Error: unexpected status code 401", "",
+                'Error: GET "https://ghcr.io/token?scope=repository%3Amutex-solutions%2Fcharts-mirror%2Fcilium%3Apull": '
+                "response status code 404: Not Found",
+                'Error: error getting credentials - err: exec: "docker-credential-desktop": executable file not found '
+                "in $PATH",
+                "Error: failed to copy: httpReadSeeker: failed open: content at https://ghcr.io/v2/mutex-solutions/"
+                "charts-mirror/cilium/blobs/sha256:aa not found: not found",
+                "Error: proxyconnect tcp: 502; upstream host not found",
+                NOT_FOUND % ("cilium", "1.2.4"), NOT_FOUND % ("cilium-x", "1.2.3"),   # another reference
+                "Error: ghcr.io/mutex-solutions/charts-mirror/cilium:1.2.3: not found",  # not Helm's sentence
+                mine + "\nError: 500 Internal Server Error", mine + " (cached)")):
             self.fake.mirror_error = answer
             self.out += str(n)
             self.fails("cannot tell whether", push=True)
             self.assertEqual(self.fake.pushes(), [], answer)
+        self.assertTrue(cm.absent("WARNING: x\n" + mine + "\n\n", "cilium", "1.2.3"))
+
+    def test_killed_run_leaves_the_record_of_what_it_pushed(self):
+        """A run that ends without returning (job timeout, cancel) has written the record before every push and
+        after it: the nearest a test gets to a kill is an exception that main() does not catch."""
+        push = self.fake.helm_push
+
+        def killed(args, env, cwd):
+            if "argo-cd" in args[0]:
+                raise KeyboardInterrupt
+            return push(args, env, cwd)
+        self.fake.helm_push = killed
+        manifest = Path(self.tmp.name, "manifest.yaml")
+        manifest.write_text(MANIFEST)
+        real, cm.run = cm.run, self.fake
+        self.addCleanup(setattr, cm, "run", real)
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(KeyboardInterrupt):
+            cm.main(["--manifest", str(manifest), "--out", self.out, "--push"])
+        got = json.loads(Path(self.out, "charts-mirror.json").read_text())
+        self.assertEqual((got["complete"], got["error"]), (False, cm.UNFINISHED))
+        rows = {r["name"]: r for r in got["charts"]}
+        self.assertEqual((rows["cilium"]["result"], rows["cilium"]["digest"]), ("pushed", self.fake.mirror[("cilium", "1.2.3")][1]))
+        self.assertEqual(rows["argo-cd"]["result"], "push attempted, not confirmed")
+        table = Path(self.out, "charts-mirror.md").read_text()
+        self.assertTrue(table.startswith("**Incomplete run:** " + cm.UNFINISHED), table)
+        self.assertIn(rows["cilium"]["digest"], table)
 
     def test_failed_run_still_records_what_it_reached(self):
         push = self.fake.helm_push
@@ -402,7 +494,7 @@ class PublishTest(Base):
         self.assertEqual((rows["argo-cd"]["result"], rows["argo-cd"]["digest"]), ("push attempted, not confirmed", ""))
         self.assertEqual((rows["kamaji"]["result"], rows["kamaji"]["digest"]), ("not published", ""))
         table = Path(self.out, "charts-mirror.md").read_text()
-        self.assertTrue(table.startswith("**Incomplete run, failed with:** helm push"), table)
+        self.assertTrue(table.startswith("**Incomplete run:** helm push"), table)
         self.assertIn(rows["cilium"]["digest"], table)
 
     def test_complete_run_is_recorded_as_complete(self):
@@ -454,6 +546,9 @@ class WorkflowTest(unittest.TestCase):
         for step in ("Summarise the digest record", "Upload the digest record"):
             self.assertIn("- name: %s\n        if: always()\n" % step, publish)
         self.assertNotIn("GITHUB_STEP_SUMMARY", publish.split("- name: Summarise the digest record")[0])
+        # A missing record does not prove that nothing was pushed (a killed run), so the summary must not say so.
+        self.assertNotIn("pushed nothing", publish)
+        self.assertIn("No digest record was written.", publish)
         # Both jobs install the same helm, by sha256.
         self.assertEqual(text.count('printf \'%s  %s\\n\' "$HELM_SHA256"'), 2)
         for uses in re.findall(r"uses: (\S+)", text):

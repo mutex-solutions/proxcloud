@@ -10,8 +10,9 @@ Per kind of entry (the shapes are described in the manifest):
   oci    `helm pull oci://<repo>/<name>@<digest>`; helm must report that digest.
   git    `git fetch` of the tag, which must still point at the pinned commit; no symlink in the chart directory; the
          dependencies of Chart.yaml and Chart.lock must be exactly the one pinned as vendor* (fetched like an https
-         chart into charts/) or none; LICENSE and NOTICE of the repository root are copied into the chart and the
-         NOTICE gets one paragraph that states what was changed; then `helm package --version --app-version`.
+         chart into charts/) or none; LICENSE and NOTICE of the repository root are copied into the chart byte for
+         byte and the NOTICE gets one paragraph that states what was changed; Chart.yaml, the one modified file,
+         gets the annotation charts-mirror/changes; then `helm package --version --app-version`.
 In every case the name and version inside the archive must be the ones of the manifest.
 
 Fetching is anonymous by construction: those helm calls get an empty registry and Docker configuration, and git runs
@@ -22,15 +23,17 @@ sha256 of every file in the archive): equal content is skipped, different conten
 byte-reproducible (it stamps the current time on every file), so for a git entry the archive's sha256 differs per
 run; what is pinned afterwards is the manifest digest of the one archive that was pushed.
 
-Only a definite "not found" from the mirror means that a version is absent. GHCR answers "denied" for a package that
-does not exist (anonymously; measured) and, as far as we know, for one the caller may not read, and it moves a tag
-on push instead of refusing, so with
---push a refusal (denied, unauthorized, 401, 403) or any other answer fails the run before the first push. Without
---push the read is anonymous and nothing is pushed: a refusal is reported as "not compared" and does not fail.
+A version is absent only when the last line of Helm's answer is its "not found" for exactly this chart and version
+(ABSENT below; measured with Helm 3.21.4). "not found" anywhere else in an answer (the token endpoint, a credential
+helper, a layer read, a proxy) is not that. GHCR answers "denied" for a package that does not exist (anonymously;
+measured) and, as far as we know, for one the caller may not read, and it moves a tag on push instead of refusing,
+so with --push a refusal (denied, unauthorized, 401, 403) or any other answer fails the run before the first push.
+Without --push the read is anonymous and nothing is pushed: a refusal is reported as "not compared" and does not
+fail.
 
-Output: one table (also <out>/charts-mirror.md) and <out>/charts-mirror.json, with the digest to pin per chart. When
-a run fails after at least one chart was verified, both files are still written, marked incomplete, with the error
-and whatever digests the run got.
+Output: one table (also <out>/charts-mirror.md) and <out>/charts-mirror.json, with the digest to pin per chart. Both
+files are written while the run goes: after every verified chart, before every push and after it, marked incomplete
+until the run has finished. A run that fails, or that is killed, therefore leaves the digests it got.
 """
 import argparse
 import hashlib
@@ -52,11 +55,21 @@ LICENCE_FILES = ("LICENSE", "NOTICE")
 CHANGE_NOTICE = """\
 This Helm chart is a repackaging of %s at tag %s
 (commit %s), directory %s, published under %s.
-Changed from that commit: Chart.yaml (version set to %s and appVersion set to %s, and
-rewritten by `helm package`); LICENSE and NOTICE (copied from the repository root into the chart, and this
-paragraph added to NOTICE). A dependency that Chart.lock pins is included under charts/ as its publisher's
-unchanged archive. Nothing else was changed.
+Changed from that commit: Chart.yaml (version set to %s and appVersion set to %s, the annotation
+charts-mirror/changes added, and the file rewritten by `helm package`); LICENSE and NOTICE (copied from the
+repository root into the chart, and this paragraph added to NOTICE). A dependency that Chart.lock pins is
+included under charts/ with its files unchanged. Files that the chart's .helmignore lists are not packaged.
+Nothing else was changed.
 """
+# Apache-2.0 section 4(b): the modified file itself says so. `helm package` drops comments and keeps annotations.
+ANNOTATION = "charts-mirror/changes"
+CHANGE_NOTE = "Modified by oci://%s: version set to %s and appVersion set to %s; see NOTICE"
+# What Helm 3.21.4 prints, as its last line, for a version or a package that a registry does not have. Measured on
+# 2026-11-16, anonymously, against ghcr.io, quay.io, registry.k8s.io, public.ecr.aws and mcr.microsoft.com. Another
+# Helm release may word it differently: the publish run then fails before the first push.
+ABSENT = 'Error: failed to perform "FetchReference" on source: %s/%s:%s: not found'
+UNFINISHED = ("the run did not finish (killed, cancelled, timed out or an unexpected error); the rows are what it had "
+              "reached, and a row \"push attempted, not confirmed\" may be published")
 
 _V = r'"?([^",{}\s]+)"?'
 _PAIR = r"(\w+): %s" % _V
@@ -71,9 +84,9 @@ _OCI = re.compile(r"[a-z0-9.-]+\.[a-z]+(/[a-z0-9._-]+)+")
 _GIT = re.compile(r"https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
 _TAG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _PATH = re.compile(r"[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*")
-_ABSENT = re.compile(r"not found|name unknown|manifest unknown", re.I)
 _REFUSED = re.compile(r"denied|unauthori[sz]ed|forbidden|\b40[13]\b", re.I)
 _REPORTED = re.compile(r"^Digest: (sha256:[0-9a-f]{64})\s*$", re.M)
+_ANNOTATIONS = re.compile(r"^(annotations:[ \t]*\n)([ \t]+)(?=\S)", re.M)  # the key and the indent of its first entry
 _LOCKED = re.compile(r"^- name: (\S+)\n\s+repository: (\S+)\n\s+version: (\S+)$", re.M)
 
 _BASE = ("name", "version", "licence")
@@ -89,6 +102,12 @@ _RULES = {"name": _NAME, "version": _VERSION, "digest": _DIGEST, "commit": _COMM
 
 class MirrorError(Exception):
     pass
+
+
+def absent(output, name, version):
+    """Whether this answer of a failed `helm pull` says that the mirror does not have the version."""
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    return bool(lines) and lines[-1] == ABSENT % (MIRROR, name, version)
 
 
 def parse_manifest(text):
@@ -223,6 +242,7 @@ class Mirror:
                     raise MirrorError("%s: %s is a symlink" % (entry["name"], os.path.join(root, item)))
         self._vendor(entry, chart)
         self._licence(entry, src, chart)
+        note = self._annotate(entry, chart)
         packed = self._dir()
         self._must(["helm", "package", chart, "--version", entry["version"], "--app-version", entry["appVersion"],
                     "-d", packed], self.anonymous)
@@ -234,13 +254,31 @@ class Mirror:
         for item in LICENCE_FILES:  # a .helmignore of the chart could have dropped them
             if "%s/%s" % (entry["name"], item) not in held:
                 raise MirrorError("%s: the packaged chart holds no %s" % (entry["name"], item))
+        rewritten = held.get("%s/Chart.yaml" % entry["name"], b"").decode("utf-8", "replace")
+        if ANNOTATION + ":" not in rewritten or note not in " ".join(rewritten.split()):  # helm may fold the line
+            raise MirrorError("%s: the packaged Chart.yaml lacks the annotation %s" % (entry["name"], ANNOTATION))
         return path
+
+    def _annotate(self, entry, chart):
+        """Put the change notice into Chart.yaml as the first annotation; returns its text."""
+        path = os.path.join(chart, "Chart.yaml")
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+        if len(_ANNOTATIONS.findall(text)) != 1 or len(re.findall(r"^annotations:", text, re.M)) != 1 \
+                or ANNOTATION + ":" in text:
+            raise MirrorError("%s: Chart.yaml must have exactly one annotations: block, without %s"
+                              % (entry["name"], ANNOTATION))
+        note = CHANGE_NOTE % (MIRROR, entry["version"], entry["appVersion"])
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(_ANNOTATIONS.sub(lambda m: '%s%s%s: "%s"\n%s' % (m.group(1), m.group(2), ANNOTATION, note,
+                                                                         m.group(2)), text))
+        return note
 
     def _licence(self, entry, src, chart):
         """Apache-2.0 section 4 for a chart we repackage: give the licence, keep upstream's NOTICE, state the change.
 
-        LICENSE is the one of the repository root, unchanged. NOTICE is the root's NOTICE (when it has one) followed
-        by one paragraph of ours. The text has no date, so the content digest stays equal across runs."""
+        LICENSE is the one of the repository root, byte for byte. NOTICE is the root's NOTICE (when it has one)
+        followed by one paragraph of ours. The text has no date, so the content digest stays equal across runs."""
         name = entry["name"]
         for item in LICENCE_FILES:
             if os.path.lexists(os.path.join(chart, item)):
@@ -251,17 +289,19 @@ class Mirror:
             if os.path.islink(path) or (os.path.lexists(path) and not os.path.isfile(path)):
                 raise MirrorError("%s: %s of %s is not a regular file" % (name, item, entry["git"]))
             if os.path.isfile(path):
-                with open(path, encoding="utf-8") as handle:
+                with open(path, "rb") as handle:  # bytes: no change of line ends, no decoding
                     texts[item] = handle.read()
-        if not texts.get("LICENSE", "").strip():
+        if not texts.get("LICENSE", b"").strip():
             raise MirrorError("%s: %s has no LICENSE at %s" % (name, entry["git"], entry["tag"]))
-        changed = CHANGE_NOTICE % (entry["git"], entry["tag"], entry["commit"], entry["path"], "oci://" + MIRROR,
-                                   entry["version"], entry["appVersion"])
-        notice = texts.get("NOTICE", "").rstrip("\n")
-        texts["NOTICE"] = (notice + "\n\n" if notice else "") + changed
-        for item, text in texts.items():
-            with open(os.path.join(chart, item), "w", encoding="utf-8") as handle:
-                handle.write(text)
+        changed = (CHANGE_NOTICE % (entry["git"], entry["tag"], entry["commit"], entry["path"], "oci://" + MIRROR,
+                                    entry["version"], entry["appVersion"])).encode()
+        notice = texts.get("NOTICE", b"")
+        if notice.strip():  # upstream's bytes as they are, then one empty line
+            notice += (b"" if notice.endswith(b"\n") else b"\n") + b"\n"
+        texts["NOTICE"] = notice + changed
+        for item, data in texts.items():
+            with open(os.path.join(chart, item), "wb") as handle:
+                handle.write(data)
 
     def _vendor(self, entry, chart):
         """The chart's dependencies must be exactly the pinned one, or none."""
@@ -303,7 +343,7 @@ class Mirror:
 
     def served(self, entry, path):
         """The manifest digest under which the mirror already serves this version with the same files; "" when the
-        mirror definitely does not serve the version; None when a run without --push was refused the read (the
+        mirror definitely does not serve the version (`absent`); None when a run without --push was refused the read (the
         package is absent or private, and nothing is pushed on that answer). Other content, a refusal with --push,
         or any other answer fails."""
         name, version = entry["name"], entry["version"]
@@ -311,10 +351,9 @@ class Mirror:
         code, output, served = self._pulled(["helm", "pull", ref, "--version", version],
                                             self.ambient if self.push else self.anonymous)
         if code:
-            refused = _REFUSED.search(output)
-            if _ABSENT.search(output) and not refused:
+            if absent(output, name, version):
                 return ""
-            if refused and not self.push:
+            if _REFUSED.search(output) and not self.push:
                 return None
             raise MirrorError("cannot tell whether %s %s is published: %s" % (name, version, output.strip()[-2000:]))
         digests = _REPORTED.findall(output)
@@ -399,10 +438,11 @@ def table(rows):
 NOT_COMPARED = "not compared: the mirror refuses an anonymous read (absent or private)"
 
 
-def mirror(text, runner, out, push=False, log=print, rows=None):
+def mirror(text, runner, out, push=False, log=print, rows=None, checkpoint=lambda: None):
     """Fetch and verify every chart, then compare with the mirror and (with push) publish. Returns the rows.
 
-    A caller that passes `rows` finds in it what the run reached when this raises."""
+    A caller that passes `rows` finds in it what the run reached when this raises. `checkpoint` is called whenever
+    the rows changed in a way a killed run must not lose: after a verified chart, before a push and after it."""
     rows = [] if rows is None else rows
     entries = parse_manifest(text)
     os.makedirs(out, exist_ok=True)
@@ -421,20 +461,24 @@ def mirror(text, runner, out, push=False, log=print, rows=None):
                          "result": "verified, not compared with the mirror",
                          "reference": "%s/%s:%s" % (MIRROR, entry["name"], entry["version"])})
             log("verified %s %s" % (entry["name"], entry["version"]))
-        absent = []
+            checkpoint()
+        missing = []
         for entry, row, path in zip(entries, rows, paths):  # every version is compared before the first push
             found = job.served(entry, path)
             row["digest"] = found or ""
             row["result"] = ("already published, same content" if found else
                              NOT_COMPARED if found is None else "not published")
-            absent.append(found == "")
-        for entry, row, path, missing in zip(entries, rows, paths, absent):
-            if missing and push:
+            missing.append(found == "")
+        checkpoint()
+        for entry, row, path, gone in zip(entries, rows, paths, missing):
+            if gone and push:
                 row["result"] = "push attempted, not confirmed"
+                checkpoint()
                 row["digest"] = job.publish(entry, path)
                 row["result"] = "pushed"
-            elif missing:
+            elif gone:
                 row["result"] = "not published (would push)"
+            checkpoint()
             log("%s %s: %s %s" % (row["name"], row["version"], row["result"], row["digest"]))
     return rows
 
@@ -443,7 +487,7 @@ def record(rows, out, push, error=None):
     """Write <out>/charts-mirror.md and .json; returns the table. With `error` both say that the run is incomplete."""
     text = table(rows)
     if error:
-        text = "**Incomplete run, failed with:** %s\n\n%s" % (" ".join(error.split())[:2000], text)
+        text = "**Incomplete run:** %s\n\n%s" % (" ".join(error.split())[:2000], text)
     with open(os.path.join(out, "charts-mirror.md"), "w", encoding="utf-8") as handle:
         handle.write(text)
     with open(os.path.join(out, "charts-mirror.json"), "w", encoding="utf-8") as handle:
@@ -463,8 +507,11 @@ def main(argv=None):
     try:
         with open(args.manifest, encoding="utf-8") as handle:
             text = handle.read()
-        mirror(text, run, args.out, args.push, rows=rows)
-    except (MirrorError, OSError) as err:
+        # The record is on disk before and after every push, so a run that is killed here (a job timeout, a cancel)
+        # leaves it too. No signal handler: the workflow's shell does not pass the runner's signal on.
+        mirror(text, run, args.out, args.push, rows=rows,
+               checkpoint=lambda: record(rows, args.out, args.push, UNFINISHED))
+    except (MirrorError, OSError, UnicodeError) as err:  # UnicodeError: an upstream text file that is not UTF-8
         error = str(err)
     if rows or not error:  # a run that failed before the first chart has nothing to record
         print(record(rows, args.out, args.push, error), end="")
