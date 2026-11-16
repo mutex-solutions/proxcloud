@@ -483,7 +483,10 @@ are several, `errors.details.problems`.
   that finished writes one audit entry of its own, action `ROTATE_CREDENTIAL`
   on the installation, with `fromSecret` and `toSecret` (the two Secret
   names) and never a token; the generic `CREATE` entry of an admin `POST` is
-  not written for this route.
+  not written for this route. A rotation that answered `502` after the new
+  credential was stored writes the same entry with `outcome: FAILURE` and both
+  names (older token Secrets may still be on the seed); a `502` that stored
+  nothing, and every refusal, writes none.
 
 An apply runs `validate`, `images`, `seed-vm`, `seed-api`, `seed-identity`,
 `seed-platform`, `cluster`, `workload-access`, `workload-platform`, `register`

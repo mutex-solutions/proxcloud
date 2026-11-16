@@ -542,6 +542,18 @@ func seedRotateEvent(r *http.Request, in *platformlife.Installation, from, to st
 	return seedEvent(r, in, ActionRotateCredential, map[string]any{"operation": "seed-credential-rotate", "fromSecret": from, "toSecret": to})
 }
 
+// seedRotateUnfinishedEvent is the entry of a rotation that answered 502, and whether there is one to write: only when
+// the stored credential changed all the same (the store committed and a later step failed), so the old token Secrets
+// may still be on the seed. A rotation that stored nothing changed nothing and has no entry.
+func seedRotateUnfinishedEvent(r *http.Request, before, after *platformlife.Installation) (audit.AuditEvent, bool) {
+	if before.Status.Seed == nil || after.Status.Seed == nil || before.Status.Seed.TokenSecret == after.Status.Seed.TokenSecret {
+		return audit.AuditEvent{}, false
+	}
+	ev := seedRotateEvent(r, after, before.Status.Seed.TokenSecret, after.Status.Seed.TokenSecret)
+	ev.Outcome, ev.ErrorMessage = audit.OutcomeFailure, "The rotation did not finish: the new credential is stored, and older token Secrets may still be on the seed."
+	return ev, true
+}
+
 func seedEvent(r *http.Request, in *platformlife.Installation, action string, meta map[string]any) audit.AuditEvent {
 	actor := adminActor(r)
 	ev := audit.AdminEvent(actor, actor)
@@ -592,7 +604,8 @@ func (h *Handler) platformSeedKubeconfig(w http.ResponseWriter, r *http.Request)
 
 // platformSeedRotate replaces the stored seed credential with a new token Secret's and deletes the old Secret.
 // Refused while a run is unfinished: the run holds the credential it loaded. A rotation that finished is audited as
-// ROTATE_CREDENTIAL with the two Secret names.
+// ROTATE_CREDENTIAL with the two Secret names; so is one that answered 502 after the new credential was stored, with
+// outcome FAILURE.
 func (h *Handler) platformSeedRotate(w http.ResponseWriter, r *http.Request) {
 	if !h.platformGate(w, r, externalServiceManagePerm) {
 		return
@@ -621,6 +634,13 @@ func (h *Handler) platformSeedRotate(w http.ResponseWriter, r *http.Request) {
 		platformStoreErr(w, err)
 		return
 	case err != nil: // fixed text: the seed's own words stay in
+		// The store may have committed before the step that failed: that change is audited too (best effort; a read
+		// that fails here leaves no entry).
+		if after, gerr := h.platform.Get(r.Context(), id); gerr == nil && h.audit != nil {
+			if ev, ok := seedRotateUnfinishedEvent(r, in, after); ok {
+				h.audit.LogEvent(ev)
+			}
+		}
 		platformErr(w, http.StatusBadGateway, platformlife.CodeSeedAPIUnreachable,
 			"The rotation did not finish. status.seed.tokenSecret names the credential that is stored; rotate again to delete the older token Secrets.", nil)
 		return

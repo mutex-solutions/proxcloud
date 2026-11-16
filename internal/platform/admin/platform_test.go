@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/rbac"
 	"github.com/mutex-solutions/proxcloud/internal/platformlife"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
@@ -151,6 +152,25 @@ func TestSeedRotateEventNamesTheSecrets(t *testing.T) {
 	if ev.Action != "ROTATE_CREDENTIAL" || ev.ResourceType != "PLATFORM_INSTALLATION" || len(ev.ResourceMetadata) != 3 || len(ev.Changes) != 0 ||
 		strings.Contains(string(raw), "eyJ") {
 		t.Fatalf("the entry is not the rotation's own, or carries more than the names: %s", raw)
+	}
+}
+
+// A rotation that answered 502 after the new credential was stored is audited too, as a failure with both names: the
+// stored cluster-admin credential changed and older token Secrets may still work. One that stored nothing writes none.
+func TestSeedRotateUnfinishedEvent(t *testing.T) {
+	r := httptest.NewRequest("POST", "/api/v1/admin/platform/installations/pi-1/seed-credential/rotate", nil)
+	r = r.WithContext(httpx.WithRC(r.Context(), &httpx.RequestContext{Sub: "operator-1"}))
+	inst := func(secret string) *platformlife.Installation {
+		return &platformlife.Installation{ID: "pi-1", Name: "lab", Status: platformlife.Status{Seed: &platformlife.SeedStatus{TokenSecret: secret}}}
+	}
+	if _, ok := seedRotateUnfinishedEvent(r, inst("proxcloud-portal-token-g1"), inst("proxcloud-portal-token-g1")); ok {
+		t.Fatal("nothing was stored: no entry")
+	}
+	ev, ok := seedRotateUnfinishedEvent(r, inst("proxcloud-portal-token-g1"), inst("proxcloud-portal-token-g2"))
+	raw, _ := json.Marshal(ev)
+	if !ok || ev.Action != ActionRotateCredential || ev.Outcome != audit.OutcomeFailure || ev.ErrorMessage == "" ||
+		ev.ResourceMetadata["fromSecret"] != "proxcloud-portal-token-g1" || ev.ResourceMetadata["toSecret"] != "proxcloud-portal-token-g2" || strings.Contains(string(raw), "eyJ") {
+		t.Fatalf("the entry of an unfinished rotation: ok=%v %s", ok, raw)
 	}
 }
 
