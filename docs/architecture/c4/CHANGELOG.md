@@ -17,12 +17,15 @@ system changes: the BOM, and so ArgoCD, still takes these charts from upstream.
 
 **Why:** design §12 Q2b and ADR 0009 A6. Kamaji's chart exists upstream only as `0.0.0+latest`, which a
 release tag refuses, and a chart changed upstream behind the same version is caught by CI only. A mirror
-that is written by one workflow and never replaces a version gives ArgoCD one OCI registry that serves
-what CI checked. The BOM switches in a later PR, because the packages exist only after the workflow has
-run on a tag.
+that by rule one workflow writes, and in which that workflow does not push over a served version, gives
+ArgoCD one OCI registry that serves what CI checked. The rule is the script's: GHCR moves a tag on push,
+and a tag push runs the workflow file of the tagged commit, so who can publish is decided by repository
+settings (owner actions in `docs/ci-release.md`, "Limits of the gate"). The BOM switches in a later PR,
+because the packages exist only after the workflow has run on a tag; that PR also moves the two stage-40
+installer templates that `TestBOMMatchesStage40` ties to the BOM.
 
 **Not verified:** any push; the publish job has only run against a fake `helm` in unit tests. The dry
-run ran against the real registries.
+run ran against the real registries. The owner settings were not checked.
 
 **Views updated:** [C2 containers](c2-containers.md) (CI diagram: `charts-mirror.yml` node and its edge
 to GHCR; CI row).

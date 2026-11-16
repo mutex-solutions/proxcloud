@@ -253,7 +253,7 @@ flowchart LR
   sbxt --> ghcr
   vmtools -->|"smoke, scan, one tag per commit"| ghcr
   capictl -->|"scan, one push per proxcloud-clusterctl-v* tag"| ghcr
-  chartmirror -->|"charts-mirror: push on a charts-mirror-v* tag, a version is never replaced"| ghcr
+  chartmirror -->|"charts-mirror: push on a charts-mirror-v* tag, a served version is not pushed over"| ghcr
   helm --> ghcr
   chart --> helm
   dbchart --> helm
