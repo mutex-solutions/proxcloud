@@ -741,3 +741,19 @@ func TestOnlyKamajiCRDsRendersTheKamajiCRDs(t *testing.T) {
 		}
 	}
 }
+
+// Neither ArgoCD runs the ApplicationSet controller. The argo-cd chart has no applicationSet.enabled (the key is
+// ignored and the controller runs); replicas 0 is what turns it off.
+func TestArgoCDRunsNoApplicationSetController(t *testing.T) {
+	b := embedded(t)
+	apps, err := Applications(b, renderInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(apps, func(a map[string]any) bool { return a["metadata"].(map[string]any)["name"] == ClusterName+"-argocd" })
+	for name, values := range map[string]any{"seed": comp(t, b, ClusterSeed, "argocd").Values, "workload": dig(apps[i], "spec", "source", "helm", "valuesObject")} {
+		if got, want := dig(values, "applicationSet"), map[string]any{"replicas": 0}; !reflect.DeepEqual(got, want) {
+			t.Errorf("%s ArgoCD: applicationSet %v, want %v", name, got, want)
+		}
+	}
+}

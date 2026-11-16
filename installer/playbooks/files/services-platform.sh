@@ -91,7 +91,7 @@ up kamaji kamaji --repo https://clastix.github.io/charts --version 0.0.0+latest 
 
 log argocd
 up argocd oci://ghcr.io/argoproj/argo-helm/argo-cd --version "$ARGOCD_VERSION" -n argocd --create-namespace \
-  --set dex.enabled=false --set notifications.enabled=false --set applicationSet.enabled=false \
+  --set dex.enabled=false --set notifications.enabled=false --set applicationSet.replicas=0 \
   --set 'configs.params.server\.insecure=true'
 
 log database operators

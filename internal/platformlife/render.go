@@ -403,7 +403,7 @@ func componentPart(b *BOM, c Component, in RenderInput) (part, error) {
 		}
 		return part{values: map[string]any{
 			"dex": map[string]any{"enabled": false}, "notifications": map[string]any{"enabled": false},
-			"applicationSet": map[string]any{"enabled": false},
+			"applicationSet": map[string]any{"replicas": 0}, // the chart has no applicationSet.enabled
 			// cm: the health of what the tenant Applications render, which the providers read their status from.
 			"configs": map[string]any{"params": map[string]any{"server.insecure": true}, "cm": health},
 		}, pin: group}, nil

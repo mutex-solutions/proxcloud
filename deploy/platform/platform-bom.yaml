@@ -48,7 +48,7 @@ components:
     values:                        # = valuesContent of installer/playbooks/templates/argocd-helmchart.yml.j2
       dex: {enabled: false}
       notifications: {enabled: false}
-      applicationSet: {enabled: false}
+      applicationSet: {replicas: 0}        # the chart has no applicationSet.enabled
       configs: {params: {server.insecure: true}}
   - name: cert-manager
     cluster: seed

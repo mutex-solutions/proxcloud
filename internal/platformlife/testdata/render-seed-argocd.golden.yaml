@@ -344,7 +344,7 @@ applications:
           releaseName: argocd
           valuesObject:
             applicationSet:
-              enabled: false
+              replicas: 0
             configs:
               cm:
                 resource.customizations.health.addons.cluster.x-k8s.io_ClusterResourceSet: |
@@ -943,7 +943,7 @@ helmChart:
     valuesContent: |
       {
         "applicationSet": {
-          "enabled": false
+          "replicas": 0
         },
         "configs": {
           "params": {
