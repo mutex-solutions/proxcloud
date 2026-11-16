@@ -312,7 +312,10 @@ for a chart is a version, and the portal cannot look up third-party digests
 GHCR organisation serves the checked charts, a chart changed upstream behind the same
 version is caught by CI, not at pull time; that gap is stated, not hidden. The flow that
 publishes that mirror, `ghcr.io/mutex-solutions/charts-mirror`, exists since 2026-11-16
-(`docs/ci-release.md`, "Chart mirror"); the BOM does not use it yet.
+(`docs/ci-release.md`, "Chart mirror"), and since its first publication that day the BOM
+takes all nine third-party charts from it at an exact version and manifest digest, Kamaji
+included. ArgoCD still pulls by version, so a version replaced in the mirror is caught by
+CI, not at pull time.
 
 ### A7. Seed backup by a PVE backup job
 
