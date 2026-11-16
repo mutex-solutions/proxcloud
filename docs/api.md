@@ -387,7 +387,9 @@ are several, `errors.details.problems`.
   `images`. `isolation` fails, naming the CIDRs to add to `blockedCidrs`, when
   the seed, the API VIP or the node range is outside the blocked and management
   networks, and when the cluster firewall's isolation rules are not the ones the
-  sync writes (a provider sync writes them with or without a project); with no
+  sync writes (a provider sync writes them with or without a project, except for
+  a `cidrPool` over a management network and for rules in place for another
+  pool, which the message names); with no
   tenant network on the whole Proxmox cluster yet it passes. `token-scope` fails
   when `capmox@pve!capi` or `csi@pve!csi` holds a privilege on `/pool`, `/storage`
   or `/vms`, and names the `pveum acl delete` command. A row that cannot be read fails.

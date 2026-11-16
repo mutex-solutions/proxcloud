@@ -137,12 +137,12 @@ pveum user token remove csi@pve csi
 
 Removing a token ends its secret for everything that uses it. On a site where the installer's
 services cluster uses the same two tokens, that cluster's CAPMOX and proxmox-csi stop working until
-they get the new secrets. Paste the existing secrets instead where they are kept: a site installed
-in `split` mode has them in `inventory/<site>/generated/token-capi` and `generated/token-csi`,
-because stage 10 writes a file only for a token it created itself or was given in the vault
-(`capi_token_secret`, `csi_token_secret`). An installer site in another mode has neither file
-(`generated/` then holds `token-platform` and `token-packer` only), and a token made by hand or by
-this script is in no file: its secret is wherever the output was kept, and nowhere on Proxmox.
+they get the new secrets. Paste the existing secrets instead where they are kept. On an installer
+site that is `inventory/<site>/generated/token-capi` and `generated/token-csi`, in any mode, but
+only for a token stage 10 created itself (the token did not exist when stage 10 first ran) or whose
+secret is in the vault (`capi_token_secret`, `csi_token_secret`). Only `split` mode fails when the
+two files are missing. A token that existed before the installer ran, or was made by hand or by
+this script, is in no file: its secret is wherever the output was kept, and nowhere on Proxmox.
 
 **Run the script again** after changing the boot store or the ISO store in the settings: the rows on
 `/storage/<boot>` and `/storage/<iso>` are written for the stores in the query. The script does not
@@ -232,12 +232,12 @@ the settings (`409 rev_conflict`: the page reads them again).
 | `flags` | Template updates are off, or no GitHub integration is saved | `--managed-services`; save a GitHub token |
 | `spec` | The saved settings break a rule, for example an import store that is the boot store | Correct step 1 and save |
 | `network` | The platform network overlaps a tenant, sandbox or public network, a seed API source is a tenant network, the load balancer range is inside a blocked or management network, or a node did not report its networks | Correct the network in step 1 |
-| `isolation` | The seed, the API address or part of the node range is in no blocked or management network, or the cluster firewall's isolation rules are not the ones a sync writes | Add the CIDRs the message names to **Networks tenants must not reach** on the provider's page (`blockedCidrs`). The message lists the smallest ranges that are missing; one network that covers them does the same (`10.90.0.0/26` for a seed on `.5`, an API address on `.10` and nodes on `.20` to `.60`), as long as the load balancer range stays outside it. Then **Run a provider sync, then check again**: the sync writes the provider's rules whether or not it has a project. Check that the datacenter firewall is on. ([More](#the-isolation-check-and-the-provider-sync)) |
+| `isolation` | The seed, the API address or part of the node range is in no blocked or management network, or the cluster firewall's isolation rules are not the ones a sync writes | Add the CIDRs the message names to **Networks tenants must not reach** on the provider's page (`blockedCidrs`). The message lists the smallest ranges that are missing; one network that covers them does the same (`10.90.0.0/26` for a seed on `.5`, an API address on `.10` and nodes on `.20` to `.60`), as long as the load balancer range stays outside it. Then **Run a provider sync, then check again**: the sync writes the provider's rules whether or not it has a project. Check that the datacenter firewall is on. Two messages name a cause no sync repairs: `cidrPool … overlaps the management network …` (choose another `cidrPool`) and `rules … are for another pool` (give the provider its own `poolPrefix`). ([More](#the-isolation-check-and-the-provider-sync)) |
 | `credentials` | A token secret is not stored | Paste it in step 2 |
 | `privileges:capi`, `privileges:csi`, `privileges:kubemint` | The CAPI token, the CSI token or the portal token lacks a privilege on a path; the message names both | Run the script again. `privileges:kubemint` on `/storage/<store>`: that is the provider's `importStorage`; when the settings name another import store the script does not write that row ([what to do](#when-the-providers-import-store-is-the-boot-store)) |
-| `token-scope` | `capmox@pve!capi` or `csi@pve!csi` holds a privilege on `/pool`, `/storage` or `/vms` as a whole, which reaches every tenant's VMs or disks. The script writes no such row; an older setup may have, and the script removes none | Run the `pveum acl delete` command the message gives, as root on one node, then check again. When the portal token cannot read the row (one on `/`, for example) the message gives `pveum acl list` to find it. Leave the tokens' rows on the platform pools and on the boot and ISO stores |
+| `token-scope` | `capmox@pve!capi` or `csi@pve!csi` holds a privilege on `/pool`, `/storage` or `/vms` as a whole, which reaches every tenant's VMs or disks. The script writes no such row; an older setup may have, and the script removes none | Run the `pveum acl delete` command the message gives, as root on one node, then check again. When the portal token cannot read the row (one on `/`, for example) the message gives `pveum acl list` to find it. When that lists no row of the token, the token was made without privilege separation and holds its user's rights (the users keep `/pool` and `/storage`): run `pveum user token modify <user> <token name> --privsep 1` (`capmox@pve capi`, `csi@pve csi`), then the script again. Leave the tokens' rows on the platform pools and on the boot and ISO stores |
 | `pool-fence` | The portal token holds a privilege on `proxcloud-system` or `proxcloud-seed`, or the CSI token on `proxcloud-seed` | Run the script again with the provider's token id: it writes the `NoAccess` rows on both pools, and a missing row is the usual cause (the portal token's `/pool` rows pass down to them). Only if the check still fails, remove the row granted to that user or token on `/pool/proxcloud-system` or `/pool/proxcloud-seed` itself. Do not remove its `/pool` rows: every tenant operation needs them |
-| `iso-store-visibility` | The CAPI token sees an ISO store other than the one in the settings. CAPMOX puts each bootstrap ISO on the first ISO store its token sees | The message names the stores seen and, for each row of the token that reaches another ISO store, the command that removes it (`pveum acl delete <path> --tokens 'capmox@pve!capi' --roles <role>`, as root on one node); run them and check again, and `privileges:capi` must stay ok. A row the portal token cannot read is found with `pveum acl list \| grep -F 'capmox@pve!capi'`. Or change the ISO store and run the script again |
+| `iso-store-visibility` | The CAPI token sees an ISO store other than the one in the settings. CAPMOX puts each bootstrap ISO on the first ISO store its token sees | The message names the stores seen and, for each row of the token that reaches another ISO store, the command that removes it (`pveum acl delete <path> --tokens 'capmox@pve!capi' --roles <role>`, as root on one node); run them and check again, and `privileges:capi` must stay ok. A row the portal token cannot read is found with `pveum acl list \| grep -F 'capmox@pve!capi'` (no row listed: the token lacks privilege separation, see `token-scope`). Or change the ISO store and run the script again. When the extra store is the boot store, the message gives no command: the token needs its row there, so name another boot store or take `iso` out of its content (the `boot-iso` row) |
 | `boot-iso-grant` | `capmox@pve` may not upload and delete on the ISO store | Run the script again |
 | `boot-iso` | The ISO store is shared, takes no ISOs, or is not the only ISO store of the boot storage | Name a node-local ISO store |
 | `placement` | A node an image goes to lacks the import store with `import` content or the boot store | Change the nodes or the stores |
@@ -252,8 +252,21 @@ blocked and management networks, with the comment `proxcloud:isolation` (pool pr
 `proxcloud:isolation/<poolPrefix>`. They do not depend on any project, and two things write them:
 every provider sync (the scheduler's, **Run a provider sync, then check again**, or
 `POST /api/v1/admin/job/external-service/sync`), and the first tenant network before it goes live.
-The sync writes nothing for a provider whose `cidrPool` overlaps a management network of the nodes,
-because those rules would cut the nodes off each other: its log line names both networks.
+
+The provider-level part of the sync, the one that needs no project, refuses in two cases, logs the
+reason, and the check gives the same sentence:
+
+- **`cidrPool` overlaps a management network of the nodes.** With no tenant yet those rules would
+  only cut the nodes off each other. Choose another `cidrPool`. A project's sync and a network
+  create still write the rules for such a pool, as before.
+- **The rules in place are for another pool.** The rules carry the pool prefix only, so two portals
+  with the same prefix (`pc-` is the default), or two providers of one portal on the same cluster,
+  share one rule set, and whoever writes replaces the other's `DROP`s. A provider with no project
+  therefore leaves rules for another pool alone: give it its own `poolPrefix`. The same message
+  appears after a `cidrPool` change on a provider with no project; then the first tenant network
+  applies the new pool, not the sync. A provider that has projects still rewrites the rules from its
+  projects' sync and at a network create, as before this check existed: two such providers with one
+  prefix replace each other's rules every cycle, and the check of the one that lost says so.
 
 While no rule of this provider exists and no tenant network exists on the whole Proxmox cluster, the
 check passes and says that the next sync or the first tenant network writes them. A vnet does not
