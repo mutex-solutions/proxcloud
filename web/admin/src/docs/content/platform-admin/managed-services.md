@@ -64,7 +64,7 @@ The page lists the stages and reads the run every few seconds:
 10. Create the two providers
 11. Finish
 
-- **Cancel the run** takes effect within about 15 seconds. A task Proxmox has started finishes first. Cancelling an installation deletes nothing. Cancelling a removal does not bring back what it had already deleted: the stage list shows how far it came, and **Remove again** goes on from there.
+- **Cancel the run** usually takes effect within about 15 seconds, and up to 5 minutes while a stage pauses after repeated errors. A task Proxmox has started finishes first. Cancelling an installation deletes nothing. Cancelling a removal does not bring back what it had already deleted: the stage list shows how far it came, and **Remove again** goes on from there.
 - **Retry** starts a new run. It looks at what exists and goes on from there. Nothing is deleted when an installation run fails, with one exception: a seed that never became ready is built again. **Retry** runs with the saved settings, so save a change first.
 - A stage that did not work yet and is trying again shows why and what you can do meanwhile, before its time limit ends the run.
 - If ProxCloud itself stopped during a run, the run is shown as failed with `job_dead`. **Retry** or **Remove managed services** goes on; until then the settings cannot be saved.
@@ -89,7 +89,7 @@ The failed stage shows a code, a message and what to do.
 | `machine_failed`, `capmox_auth_failed` | Check the boot store, the nodes, the Proxmox API URL and the token secret, then **Retry**. |
 | `workload_api_unreachable` | Add a route from the ProxCloud host to the API address, then **Retry**. During a removal: restore the route and **Remove again**, or tick the option for a cluster that does not answer when it is beyond repair. |
 | `provider_conflict` | Correct the provider named in the message under **Cloud providers**, then **Retry**. |
-| `bom_unsupported` | The installed version is too old. Upgrade through the previous ProxCloud release first. |
+| `bom_unsupported` | The platform was installed by another ProxCloud release, and this release cannot apply over it: there is no upgrade path yet. |
 | `tenants_exist` | Delete the tenant clusters and databases, then **Remove** again. |
 | `machine_delete_stuck`, `volume_delete_failed` | Delete the VM or fix the storage named in the message, then **Remove** again. |
 | a code ending in `_timeout`, `portal_changed`, `job_dead` | **Retry**, or **Remove again** for a removal. The time limits start again. |
@@ -102,7 +102,7 @@ The page shows each component with its live state, read from the seed, and the t
 2. Add a backup job for the seed VM. The page prints the command. It cannot see whether a job exists.
 3. Attach the providers to projects, and add price rules for clusters and databases.
 
-After a ProxCloud upgrade, **Apply this release** in step 4 brings the components to the new versions. The review lists what changes and refuses a jump that is not supported.
+**Apply this release** in step 4 runs the stages again with the saved settings: it repairs what is missing, applies changed sizes and counts, and renews the seed's access to the platform cluster. This release cannot yet move an installed platform to the components of a newer ProxCloud release: after such an upgrade the review says so and the run is refused with `bom_unsupported`.
 
 ## Seed access and removal
 

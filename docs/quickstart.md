@@ -277,6 +277,9 @@ database operators, and registers the Kubernetes and database providers (stage 6
 [install.md § Split mode](install.md#split-mode-managed-kubernetes-and-databases), [managed-k8s.md](managed-k8s.md),
 [managed-dbaas.md](managed-dbaas.md).
 
+Without the installer, for Kubernetes and databases only: the operator console of a [path F](#f-production-on-one-host-with-docker-compose)
+install can build them (off by default, not verified on a lab), see [managed-services.md](managed-services.md).
+
 1. Install path C first. It creates the `images@pve!packer` token the next step uses.
 2. Build the Kubernetes node templates separately, before stage 50 uses them. Stage 50 consumes template IDs;
    it does **not** invoke the template builder. Choose an offered Kubernetes version deliberately (`1.35.10` below
@@ -498,7 +501,9 @@ retain runbook](postgres-jobs-migration.md); do not let Helm/Argo prune the old 
 
 The portal only, on your own domain with TLS, on one Linux host: the API, both consoles, PostgreSQL, Keycloak in
 production mode and Traefik. Like [E](#e-install-on-kubernetes-with-helm) it creates no OS templates, Proxmox tokens
-or providers, and it does not include managed Kubernetes, databases or sandboxes. Operator guide (DNS per TLS mode,
+or providers. Managed Kubernetes and databases are not included by default: the operator console can build them on
+your Proxmox VE cluster after `./proxcloud-up.sh install --managed-services` (v0.8.0 or later, which is not released
+yet; not verified on a lab), see [managed-services.md](managed-services.md). Sandboxes are not included. Operator guide (DNS per TLS mode,
 backup and restore, upgrade, security notes): [deploy/compose/README.md](../deploy/compose/README.md).
 
 **Before you start:** Docker Engine 20.10+ with the Compose plugin v2+, ports 80 and 443 free, and four DNS names

@@ -32,7 +32,7 @@ you pass `--version`.
   run on clusters outside this host: the services cluster of the [installer](../../docs/install.md),
   or, for Kubernetes and databases, a platform the operator console builds on your Proxmox VE
   cluster once you install with `--managed-services` (v0.8.0 or later,
-  [Optional features](#optional-features)).
+  [Optional features](#optional-features), [managed-services.md](../../docs/managed-services.md)).
 - **No mail.** Customers register without email verification until you add an SMTP integration
   (operator console, System, Integrations) and a mail server in Keycloak.
 - **No high availability and no off-host backup.** One host, one database. `backup` writes to this
@@ -204,7 +204,13 @@ feature off. The last lines of `install` (also with `--dry-run`) say what is on.
   API: `install` and `upgrade` refuse an older one with it. The API container must reach the
   platform network (the seed and the platform cluster's API address, port 6443) besides the Proxmox
   API. On this stack the platform has no tenant block volumes (no CSI gateway listener) and no
-  database backups; the console shows both as warnings.
+  database backups; the Managed services page lists both under **What this release does not do**
+  once the platform is ready.
+
+  The switch creates nothing on Proxmox. It makes the console's Managed services page work; the
+  operator then saves the settings there, runs a script as root on one Proxmox node, pastes two
+  token secrets and presses Install. The steps, the stages of the job, every failure code, Remove and
+  the limits of this stack are in [managed-services.md](../../docs/managed-services.md).
 
   v0.8.0 is not released yet, so no image reads `PROXCLOUD_PLATFORM_ENABLED` today. Not verified: a
   platform built from this stack (the path has not run on a lab).

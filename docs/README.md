@@ -108,6 +108,10 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
   managed K8s/DBaaS providers.
 - [managed-k8s.md](managed-k8s.md) and [managed-dbaas.md](managed-dbaas.md) —
   managed Kubernetes and database clusters delivered through ArgoCD.
+- [managed-services.md](managed-services.md) — the platform for both, built from the
+  operator console instead of the installer: the Proxmox identities script, the setup
+  steps, the stages of the durable job, every failure code, Retry, Remove, credentials,
+  and what is not implemented or not verified on a lab yet.
 - [managed-sandbox.md](managed-sandbox.md) — gVisor sandboxes on a platform-owned
   Kamaji cluster: isolation, release gates, the public entry and wake, the sandbox
   registry and custom templates, with what ran on the lab.
