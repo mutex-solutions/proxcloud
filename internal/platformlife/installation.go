@@ -472,6 +472,9 @@ type Site struct {
 	Sandbox  []string
 	Public   []string // the public networks' CIDRs
 	Mgmt     []string // the nodes' management networks (live; nil when not read)
+	// DefaultZone is the zone a tenant network is made in (config.network.defaultZone) and DefaultZoneKind its kind
+	// (evpn, vlan or simple); both empty when the provider names no zone.
+	DefaultZone, DefaultZoneKind string
 }
 
 // SiteProblems checks an installation against its site: the platform network overlaps neither the tenant pool nor a

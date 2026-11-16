@@ -645,7 +645,8 @@ func TestNodeTemplateCloudInitDrive(t *testing.T) {
 	p.pve.tmplCfg = map[int]map[string]any{
 		9101: {"scsi0": "local-lvm:base-9101-disk-0", "ide0": "local-lvm:vm-9101-cloudinit,media=cdrom"},
 		9102: {"scsi0": "local-lvm:base-9102-disk-0", "ide2": "local-lvm:vm-9102-cloudinit,media=cdrom"}}
-	if end := p.once(); end != "fail:"+CodeMachineFailed || !strings.Contains(p.stage(stageCluster).Message, "qm set 9102 --delete ide2") || p.seed.writeCount() != 0 {
+	if end := p.once(); end != "fail:"+CodeMachineFailed || !strings.Contains(p.stage(stageCluster).Message, "qm set 9102 --delete ide2") ||
+		!strings.Contains(p.stage(stageCluster).Message, "its smoke test in Template updates adds one") || p.seed.writeCount() != 0 {
 		t.Fatalf("end %s: %+v, seed writes %v", end, p.stage(stageCluster), p.seed.writes)
 	}
 	p.pve.mu.Lock()
@@ -1210,8 +1211,20 @@ func TestLive(t *testing.T) {
 		t.Fatalf("degraded: %+v", got)
 	}
 	sec.SeedKubeconfig.Token = "revoked"
-	if got := Live(context.Background(), in, sec); got.Phase != PhaseDegraded || got.Error == "" || strings.Contains(got.Error, "revoked") {
+	if got := Live(context.Background(), in, sec); got.Phase != PhaseDegraded || got.Code != CodeSeedAPIUnreachable || strings.Contains(got.Error, "revoked") ||
+		!strings.Contains(got.Error, "refuses the stored credential") {
 		t.Fatalf("seed refuses: %+v", got)
+	}
+	// The seed VM runs and nothing listens on its API (a lab seed after a reboot): the message names the VM, its node
+	// and the console, and says that the record still reads ready.
+	sec.SeedKubeconfig.Token = runSA
+	silent := *in
+	st := *in.Status.Seed
+	st.APIServer, st.VMID, st.Node = "https://127.0.0.1:1", 102, "pve1" // nothing listens on port 1
+	silent.Status.Seed = &st
+	if got := Live(context.Background(), &silent, sec); got.Phase != PhaseDegraded || got.Code != CodeSeedAPIUnreachable || len(got.Components) != 0 ||
+		!strings.Contains(got.Error, "does not answer") || !strings.Contains(got.Error, "seed VM 102 runs on pve1") || !strings.Contains(got.Error, "qm terminal 102") {
+		t.Fatalf("seed silent: %+v", got)
 	}
 	if _, stored, _ := p.state.snapshot(); stored.Status.Phase != PhaseReady || p.seed.writeCount() != 0 {
 		t.Fatalf("stored phase %s, writes %v", stored.Status.Phase, p.seed.writes)

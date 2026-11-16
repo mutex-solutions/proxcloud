@@ -141,7 +141,9 @@ sequenceDiagram
 - **Create** — client `POST /project/{id}/cloud` `{type: DATABASE_CLUSTER, data: {name,
   engine, version, replicas, cpu, memoryGiB, storageGiB, storageClass?, allowedCidrs, beta?,
   readEndpoint?, dashboards?, sso?, restoreFrom?}}`. Nothing is placed on a tenant network, so
-  there is no network id to send. `restoreFrom` recovers another database of the project into
+  there is no network id to send. `cpu`, `memoryGiB` and `storageGiB` are whole numbers from 1 up
+  to the provider's limit, when it sets one; outside that the answer is `400`, for example
+  `database: cpu must be a whole number, at least 1` (no limit) or `… from 1 to 16`. `restoreFrom` recovers another database of the project into
   the new one (see Backups and restore).
 - **Sync** — `syncjob.syncDbaasService` (every 15 minutes, gated on the `database` toggle)
   reconciles the project's `DATABASE_CLUSTER` rows from Applications labeled with the project

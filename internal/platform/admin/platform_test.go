@@ -132,6 +132,28 @@ func TestBreakGlassEventHasNoToken(t *testing.T) {
 	}
 }
 
+// The seed credential rotation writes its own entry, ROTATE_CREDENTIAL with the two Secret names and nothing else, and
+// the audit middleware leaves the route alone: its row read CREATE on the installation.
+func TestSeedRotateEventNamesTheSecrets(t *testing.T) {
+	path := "/api/v1/admin/platform/installations/pi-1/seed-credential/rotate"
+	if !auditSkip(path) {
+		t.Fatal("the middleware would add a CREATE row")
+	}
+	r := httptest.NewRequest("POST", path, nil)
+	r = r.WithContext(httpx.WithRC(r.Context(), &httpx.RequestContext{Sub: "operator-1"}))
+	ev := seedRotateEvent(r, &platformlife.Installation{ID: "pi-1", Name: "lab"}, "proxcloud-portal-token-g1", "proxcloud-portal-token-g2")
+	raw, _ := json.Marshal(ev)
+	for _, want := range []string{"operator-1", "pi-1", ActionRotateCredential, `"fromSecret":"proxcloud-portal-token-g1"`, `"toSecret":"proxcloud-portal-token-g2"`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("no %s in %s", want, raw)
+		}
+	}
+	if ev.Action != "ROTATE_CREDENTIAL" || ev.ResourceType != "PLATFORM_INSTALLATION" || len(ev.ResourceMetadata) != 3 || len(ev.Changes) != 0 ||
+		strings.Contains(string(raw), "eyJ") {
+		t.Fatalf("the entry is not the rotation's own, or carries more than the names: %s", raw)
+	}
+}
+
 // Without an audit service the break-glass route issues nothing: it answers 503 before it reads the installation or
 // asks the seed for a token (the store here has no database, so a read would panic), and the answer is not cacheable.
 func TestSeedKubeconfigNeedsTheAuditLog(t *testing.T) {

@@ -5,7 +5,7 @@
 // field the API's structs do not have. `?mock-platform=<preset>` in the URL starts the page in one state:
 // disabled | draft | isolation (the isolation check fails until a provider sync) | norunner (runs answer 409) |
 // running | waiting (stage 4 is trying again) | failed | dead (the run's job died: the stored phase stays applying) |
-// ready | degraded (one component out of sync) | silent (the seed does not answer) | unread (the live read fails) | removing
+// ready | degraded (one component out of sync) | simplezone (the check warns: no tenant cluster on a simple zone) | silent (the seed does not answer) | unread (the live read fails) | removing
 // (none: enabled, nothing saved).
 import { ApiError } from "@/lib/api"
 import { on } from "../router"
@@ -212,6 +212,7 @@ function checks(in_: Doc): Doc[] {
     row("network", true, "The platform network is apart from every tenant, sandbox and public network, and tenants can reach the MetalLB range.", ""),
     row("isolation", preset !== "isolation" || mockPlatform.synced, "The platform addresses are blocked networks; the cluster firewall rules are written by the next provider sync (with this installation saved it needs no project), or with the first tenant network.",
       "The seed address 10.90.0.5 and the API address 10.90.0.10 are not among the provider's blocked networks: add 10.90.0.5/32 and 10.90.0.10/32."),
+    ...(preset === "simplezone" ? [{ id: "tenant-network", status: "warn", message: "The provider's default zone pcm0 is a simple zone, and its networks have DHCP. A tenant Kubernetes cluster needs a network without DHCP, so every cluster create on this provider is refused until its default zone is an EVPN or a VLAN zone." }] : []),
     row("credentials", both, "Both platform tokens are stored.", `No secret is stored for ${[!sec.capi && "capmox@pve!capi", !sec.csi && "csi@pve!csi"].filter(Boolean).join(" and ")}.`),
     ...["capi", "csi"].map((t) => row(`privileges:${t}`, both, `The ${t} token holds its privileges.`, `The ${t} token could not be checked: no secret is stored.`)),
     row("privileges:kubemint", true, "The portal token holds the ProxCloudKubeMint privileges.", ""),
@@ -298,7 +299,7 @@ on("GET /admin/platform/installations/:id", ({ params, query }) => {
   if (query.get("live") !== "1") return { data: view(in_) }
   if (in_.status.phase !== "ready") return { data: { ...view(in_), live: { phase: in_.status.phase, components: [] } } }
   if (preset === "unread") throw new ApiError(500, 500, "The installation's secrets could not be read")
-  if (preset === "silent") return { data: { ...view(in_), live: { phase: "degraded", components: [], error: "The seed's API did not answer or refused the stored credential." } } }
+  if (preset === "silent") return { data: { ...view(in_), live: { phase: "degraded", components: [], code: "seed_api_unreachable", error: "The seed's API at https://10.90.0.5:6443 does not answer. The record still says ready: nothing stores this state. The platform cluster and what runs on it keep running, but an apply or a Remove waits on the seed and then fails. Check that seed VM 9100 runs on pve1 and open its console (qm terminal 9100): the guide's section on a seed whose API is gone has the steps." } } }
   const components = bom.components.map((c) => ({ name: c.name, cluster: c.cluster, sync: "Synced", health: "Healthy" }))
   if (preset === "degraded") Object.assign(components[2], { sync: "OutOfSync", health: "Progressing" })
   return { data: { ...view(in_), live: { phase: preset === "degraded" ? "degraded" : "ready", components } } }

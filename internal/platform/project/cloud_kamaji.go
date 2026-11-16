@@ -56,7 +56,7 @@ func (h *Handler) kamajiCreate(w http.ResponseWriter, r *http.Request, u *user.U
 		h.fail(w, httpx.BadRequest(err.Error()))
 		return
 	}
-	if err := spec.Validate(ks.Config().Defaults); err != nil {
+	if err := spec.ValidateCreate(ks.Config().Defaults); err != nil {
 		h.fail(w, httpx.BadRequest(err.Error()))
 		return
 	}

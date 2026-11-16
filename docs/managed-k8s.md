@@ -222,7 +222,8 @@ What the create path resolves (`internal/platform/project/cloud_kamaji_create.go
 | What | From | Note |
 |---|---|---|
 | Workers' pool | the project's pool | they sync and bill as servers of their flavor (`fl-`, `sp-` tags) |
-| Network | the customer's pick, one of the project's networks | the zone must have no DHCP (EVPN, VLAN) |
+| Version | the customer's pick, a key of `config.cluster.versions` | a provider with no version (how managed services registers it, before a node image is published) refuses every create: `400 cluster: this provider offers no Kubernetes version yet…`, before addresses are reserved or tokens minted |
+| Network | the customer's pick, one of the project's networks | the zone must have no DHCP (EVPN, VLAN). A `simple` zone is created with DHCP, so on a Proxmox provider whose default zone is `simple` every create answers `400 Worker nodes need a network without DHCP (an EVPN or VLAN zone)`; the managed-services Check warns about it (`tenant-network`) |
 | Quota | the project's limits, like servers | every worker counts against `servers`, `vcpus`, `ramMb` and `diskGb`; a create or node group edit over them answers 409 and takes nothing |
 | Addresses | 16 for workers, 8 for tenant LoadBalancers, reserved from the top of the subnet | hence at most 15 workers: a rolling replacement needs a spare |
 | Credentials | `capmox@pve!<id>` (management side); no CSI token, block volumes use the CSI gateway's | minted at create, revoked after the delete cascade (with a `csi@pve!<id>` an older cluster may still hold) |

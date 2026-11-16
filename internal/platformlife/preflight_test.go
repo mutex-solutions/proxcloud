@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 )
 
 // preflightPVE is a one-node PVE that answers each token's effective permissions from perms (token id → path → privs)
@@ -143,6 +144,17 @@ func TestPreflight(t *testing.T) {
 	if len(f.writes) != 0 {
 		t.Fatalf("the preflight wrote to PVE: %v", f.writes)
 	}
+	// A simple default zone: tenant clusters cannot be created on it. A warning, and the preflight still passes.
+	pf.Site.DefaultZone, pf.Site.DefaultZoneKind = "pcm0", "simple"
+	warned := pf.Run(ctx)
+	if c := checkMap(warned)["tenant-network"]; c.Status != CheckWarn || !strings.Contains(c.Message, "pcm0") || !strings.Contains(c.Message, "EVPN or a VLAN zone") || !OK(warned) {
+		t.Errorf("a simple default zone: %+v ok=%v", c, OK(warned))
+	}
+	pf.Site.DefaultZoneKind = "evpn"
+	if c := checkMap(pf.Run(ctx))["tenant-network"]; c.Status != CheckOK {
+		t.Errorf("an EVPN default zone: %+v", c)
+	}
+	pf.Site.DefaultZone, pf.Site.DefaultZoneKind = "", ""
 	// A provider sync skips a disabled provider, so the row must not send the operator to one without saying so.
 	pf.ProviderDisabled = true
 	if c := checkMap(pf.Run(ctx))["isolation"]; c.Status != CheckOK || !strings.Contains(c.Message, "provider is disabled") {
@@ -243,5 +255,21 @@ func TestPreflight(t *testing.T) {
 	if c.Status != CheckFail || !strings.Contains(c.Message, "[local, local-lvm]") || !strings.Contains(c.Message, "boot-iso") ||
 		strings.Contains(c.Message, "pveum acl") {
 		t.Errorf("a boot store that takes ISO images: %+v", c)
+	}
+}
+
+// SiteOf carries the kind of the zone tenant networks are made in: the tenant-network row reads it.
+func TestSiteOfDefaultZone(t *testing.T) {
+	es := func(network map[string]any) *externalservice.ExternalService {
+		return &externalservice.ExternalService{Config: map[string]any{"network": network}}
+	}
+	if s := SiteOf(es(map[string]any{"zones": map[string]any{"pcm0": map[string]any{"kind": "simple"}}})); s.DefaultZone != "pcm0" || s.DefaultZoneKind != "simple" {
+		t.Errorf("one simple zone: %+v", s)
+	}
+	if s := SiteOf(es(map[string]any{"defaultZone": "overlay", "zones": map[string]any{"overlay": map[string]any{}, "s": map[string]any{"kind": "simple"}}})); s.DefaultZoneKind != "evpn" {
+		t.Errorf("a default zone without a kind is EVPN: %+v", s)
+	}
+	if s := SiteOf(es(nil)); s.DefaultZone != "" || s.DefaultZoneKind != "" {
+		t.Errorf("no zone: %+v", s)
 	}
 }

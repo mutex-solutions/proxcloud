@@ -125,7 +125,7 @@ func (s *Service) EnsureProjectNamespace(ctx context.Context, projectID string) 
 // CR. Returns the initial cached data payload (status PENDING until the first sync reads real
 // health).
 func (s *Service) CreateCluster(ctx context.Context, spec ClusterSpec, sec ClusterSecrets) (map[string]any, error) {
-	if err := spec.Validate(s.cfg.Defaults); err != nil {
+	if err := spec.ValidateCreate(s.cfg.Defaults); err != nil {
 		return nil, err
 	}
 	if err := ValidateCreateAddons(s.cfg.ChartVersion, spec.Addons); err != nil {

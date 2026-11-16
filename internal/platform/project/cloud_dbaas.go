@@ -255,11 +255,11 @@ func (h *Handler) dbaasAction(w http.ResponseWriter, r *http.Request, proj *Proj
 	case "RESIZE":
 		cpu, memory := intAny(data["cpu"]), intAny(data["memoryGiB"])
 		if cpu < 1 || (cfg.Limits.MaxCPU > 0 && cpu > cfg.Limits.MaxCPU) {
-			h.fail(w, httpx.BadRequest(fmt.Sprintf("cpu must be 1..%d", max(cfg.Limits.MaxCPU, 1))))
+			h.fail(w, httpx.BadRequest(dbaas.LimitText("cpu", cfg.Limits.MaxCPU)))
 			return true
 		}
 		if memory < 1 || (cfg.Limits.MaxMemoryGiB > 0 && memory > cfg.Limits.MaxMemoryGiB) {
-			h.fail(w, httpx.BadRequest(fmt.Sprintf("memoryGiB must be 1..%d", max(cfg.Limits.MaxMemoryGiB, 1))))
+			h.fail(w, httpx.BadRequest(dbaas.LimitText("memoryGiB", cfg.Limits.MaxMemoryGiB)))
 			return true
 		}
 		err := ds.PatchDatabaseValues(r.Context(), cr.ExternalID, func(values map[string]any) error {
@@ -276,7 +276,7 @@ func (h *Handler) dbaasAction(w http.ResponseWriter, r *http.Request, proj *Proj
 	case "RESIZE_STORAGE":
 		size := intAny(data["storageGiB"])
 		if size < 1 || (cfg.Limits.MaxStorageGiB > 0 && size > cfg.Limits.MaxStorageGiB) {
-			h.fail(w, httpx.BadRequest(fmt.Sprintf("storageGiB must be 1..%d", max(cfg.Limits.MaxStorageGiB, 1))))
+			h.fail(w, httpx.BadRequest(dbaas.LimitText("storageGiB", cfg.Limits.MaxStorageGiB)))
 			return true
 		}
 		err := ds.PatchDatabaseValues(r.Context(), cr.ExternalID, func(values map[string]any) error {
@@ -419,11 +419,11 @@ func (h *Handler) dbaasAction(w http.ResponseWriter, r *http.Request, proj *Proj
 		maxCPU, maxMem, maxStorage := intAny(data["maxCpu"]), intAny(data["maxMemoryGiB"]), intAny(data["maxStorageGiB"])
 		if enabled {
 			if maxCPU < 1 || (cfg.Limits.MaxCPU > 0 && maxCPU > cfg.Limits.MaxCPU) {
-				h.fail(w, httpx.BadRequest(fmt.Sprintf("maxCpu must be 1..%d", max(cfg.Limits.MaxCPU, 1))))
+				h.fail(w, httpx.BadRequest(dbaas.LimitText("maxCpu", cfg.Limits.MaxCPU)))
 				return true
 			}
 			if maxMem < 1 || (cfg.Limits.MaxMemoryGiB > 0 && maxMem > cfg.Limits.MaxMemoryGiB) {
-				h.fail(w, httpx.BadRequest(fmt.Sprintf("maxMemoryGiB must be 1..%d", max(cfg.Limits.MaxMemoryGiB, 1))))
+				h.fail(w, httpx.BadRequest(dbaas.LimitText("maxMemoryGiB", cfg.Limits.MaxMemoryGiB)))
 				return true
 			}
 			// maxStorageGiB 0 = disk leg off (also implied for engines without RESIZE_STORAGE).

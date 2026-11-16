@@ -24,7 +24,7 @@ const (
 )
 
 // Check is one row of the preflight. The ids are part of the API (docs/api.md): flags, spec, network, isolation,
-// credentials, privileges:capi, privileges:csi, privileges:kubemint, mint-scope, pool-fence, token-scope, iso-store-visibility,
+// tenant-network (a warning or ok, never a failure; absent when the provider names no zone), credentials, privileges:capi, privileges:csi, privileges:kubemint, mint-scope, pool-fence, token-scope, iso-store-visibility,
 // boot-iso-grant, boot-iso, placement, images. A run's first stage fails preflight_failed with the failed rows as its items, or
 // isolation_not_enforced when isolation is the only one.
 type Check struct {
@@ -58,6 +58,9 @@ func SiteOf(es *externalservice.ExternalService) Site {
 	site := Site{CIDRPool: n.CIDRPool, Blocked: n.BlockedCIDRs, Sandbox: n.SandboxCIDRs}
 	for _, p := range n.PublicNetworks {
 		site.Public = append(site.Public, p.CIDR)
+	}
+	if z, ok := n.Zones[n.DefaultZone]; ok {
+		site.DefaultZone, site.DefaultZoneKind = n.DefaultZone, z.Type()
 	}
 	return site
 }
@@ -140,6 +143,18 @@ func (p Preflight) Run(ctx context.Context) []Check {
 				row("isolation", nil, "The cluster firewall drops tenant traffic to the seed, the API VIP and the node range.")
 			}
 		}
+	}
+
+	// A warning, never a failure: the platform installs and databases run on any zone. But a tenant cluster's nodes get
+	// fixed addresses, the product gives a simple zone DHCP (pve.EnsureZone), and a cluster create on a network with
+	// DHCP is refused. Said here so the operator reads it before a tenant does.
+	if site.DefaultZoneKind == "simple" {
+		out = append(out, Check{ID: "tenant-network", Status: CheckWarn, Message: "The provider's default zone " + site.DefaultZone + " is a simple zone, " +
+			"and its networks have DHCP. A tenant Kubernetes cluster needs a network without DHCP, so every cluster create on this provider is refused " +
+			"(400, \"Worker nodes need a network without DHCP\") until its default zone is an EVPN or a VLAN zone (config.network.zones and defaultZone, " +
+			"under Cloud providers). The install and managed databases do not need it."})
+	} else if site.DefaultZone != "" {
+		row("tenant-network", nil, "The provider's default zone "+site.DefaultZone+" ("+site.DefaultZoneKind+") has no DHCP: a tenant cluster can use its networks.")
 	}
 
 	var creds []string

@@ -1171,3 +1171,22 @@ func TestValidateParameters(t *testing.T) {
 		t.Error("restart flag")
 	}
 }
+
+// A size below 1 on a provider without a maximum is not "1..1": that reads as if only 1 were allowed.
+func TestSpecValidateLimitText(t *testing.T) {
+	cfg := testConfig()
+	cfg.Limits = Limits{}
+	s := testSpec(EnginePostgreSQL, "17")
+	s.CPU = 0
+	if err := s.Validate(cfg); err == nil || err.Error() != "database: cpu must be a whole number, at least 1" {
+		t.Fatalf("no maximum: %v", err)
+	}
+	s.CPU = 64
+	if err := s.Validate(cfg); err != nil {
+		t.Fatalf("no maximum, 64 CPUs: %v", err)
+	}
+	cfg.Limits.MaxCPU = 8
+	if err := s.Validate(cfg); err == nil || err.Error() != "database: cpu must be a whole number from 1 to 8" {
+		t.Fatalf("maximum 8: %v", err)
+	}
+}

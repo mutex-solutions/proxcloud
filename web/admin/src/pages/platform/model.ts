@@ -31,7 +31,7 @@ export type Installation = {
   lastRunId?: string
   rev: number
   credentials: { capi?: { tokenId: string }; csi?: { tokenId: string } }
-  live?: { phase: string; components: { name: string; cluster: string; sync: string; health: string }[]; error?: string }
+  live?: { phase: string; components: { name: string; cluster: string; sync: string; health: string }[]; error?: string; code?: string }
 }
 export type Check = { id: string; status: "ok" | "warn" | "fail"; message: string }
 export type StageItem = { id: string; state: string; message?: string }

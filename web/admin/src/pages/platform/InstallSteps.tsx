@@ -362,6 +362,7 @@ export function CheckStep({ installation, canManage, dirty }: { installation: In
     onSuccess: () => check.mutate(),
   })
   const failed = (check.data?.checks ?? []).filter((c) => c.status === "fail")
+  const warned = (check.data?.checks ?? []).filter((c) => c.status === "warn").length
   return (
     <StepCard n={3} title="Check" description="Reads Proxmox with the stored tokens and changes nothing. Install runs the same checks first.">
       <div className="flex flex-wrap items-center gap-3">
@@ -373,7 +374,7 @@ export function CheckStep({ installation, canManage, dirty }: { installation: In
       <ErrorNote title="The check did not run" error={check.error} />
       {check.data ? (
         <p className="text-sm" role="status">
-          {check.data.ok ? "Every check passed." : `${failed.length} of ${check.data.checks.length} checks failed.`}
+          {check.data.ok ? (warned ? `No check failed. ${warned} ${warned === 1 ? "warning does" : "warnings do"} not stop the install: read ${warned === 1 ? "it" : "them"} below.` : "Every check passed.") : `${failed.length} of ${check.data.checks.length} checks failed.`}
         </p>
       ) : null}
       <CheckRows checks={check.data?.checks} />

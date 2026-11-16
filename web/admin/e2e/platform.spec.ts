@@ -379,13 +379,24 @@ test("a failed isolation check names the field, links to the provider and runs t
   expect(await calls(page, "POST", /\/preflight$/)).toHaveLength(2)
 })
 
+test("a warning of the check does not read as a pass and does not stop the install", async ({ page }) => {
+  await open(page, "simplezone")
+  await page.getByRole("button", { name: "Check", exact: true }).click()
+  await expect(page.getByRole("status").filter({ hasText: "No check failed. 1 warning does not stop the install" })).toBeVisible()
+  await expect(page.getByRole("list", { name: "Connection checks" })).toContainText("every cluster create on this provider is refused")
+  await expect(page.getByRole("list", { name: "What to do for each failed check" })).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "Install", exact: true })).toBeEnabled()
+})
+
 test("the ready card: out of sync, a silent seed, and a live read that fails", async ({ page }) => {
   await open(page, "degraded")
   await expect(headerState(page)).toHaveText("Needs attention")
   await expect(page.getByRole("table", { name: "Components and their live state" }).getByRole("row").filter({ hasText: "metallb" })).toContainText("OutOfSync")
 
   await open(page, "silent")
-  await expect(page.getByRole("alert").filter({ hasText: "The seed did not answer" })).toBeVisible()
+  const silent = page.getByRole("alert").filter({ hasText: "The seed could not be read" })
+  await expect(silent).toContainText("qm terminal 9100") // the VM, its node and the console, not only "did not answer"
+  await expect(silent.getByRole("link", { name: /When the seed does not answer/ })).toHaveAttribute("href", "/docs/platform-admin/managed-services")
   await expect(headerState(page)).toHaveText("Needs attention")
 
   await open(page, "unread")

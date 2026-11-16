@@ -315,6 +315,17 @@ type NodeGroup struct {
 	Tags      []string `json:"-"`
 }
 
+// ValidateCreate is Validate for a cluster about to be made: a provider that offers no version has no node image for
+// any, and nothing may be reserved or minted for a cluster that could never get a node. (Validate alone lets an empty
+// set through: the SET_NODE_GROUPS shape check passes none.)
+func (s ClusterSpec) ValidateCreate(d ClusterDefaults) error {
+	if len(d.Versions) == 0 {
+		return fmt.Errorf("cluster: this provider offers no Kubernetes version yet. An operator must publish a Kubernetes node image " +
+			"in Template updates and enter its version on the provider (cluster.versions)")
+	}
+	return s.Validate(d)
+}
+
 // Validate rejects an unbuildable spec.
 func (s ClusterSpec) Validate(d ClusterDefaults) error {
 	switch {
