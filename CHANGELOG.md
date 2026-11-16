@@ -337,6 +337,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   boot store. Not in this change: deleting the seed's other Applications before the seed (the seed VM is deleted
   with them) and the `seed.mode: existing` path.
 
+- **CI: a chart mirror flow** (`charts-mirror.yml`, `.github/scripts/charts_mirror.py`,
+  `deploy/platform/charts-mirror.yaml`). The manifest lists the nine third-party charts of the platform BOM; a test
+  keeps it equal to the BOM. A pull request fetches every chart as pinned (sha256 of the archive against the index
+  digest, or a pull by OCI digest), packages `kamaji` and `kamaji-crds` from the upstream tag `26.11.2-edge` at that
+  exact chart version with upstream's `LICENSE` and `NOTICE` and a statement of the change added (in `NOTICE` and as
+  an annotation in `Chart.yaml`), and pushes nothing.
+  A `charts-mirror-v*` tag on a commit of `main` publishes them under `ghcr.io/mutex-solutions/charts-mirror`. The
+  script pushes only a version the mirror definitely does not serve: `denied` or any answer other than Helm's "not
+  found" for exactly that chart and version fails the run before the first push, and a run that fails or is killed
+  later leaves a record of the digests it got. That is a rule
+  of the script; GHCR itself moves a tag on push, and who can publish is decided by repository settings, listed as
+  owner actions. Nothing is published yet and the BOM still takes the charts from upstream. Next steps: the owner
+  settings, the tag, making the packages public, and a BOM change that moves the installer templates and the tests
+  tied to the BOM in the same pull request (the list is in `docs/ci-release.md`, "Chart mirror", "Order of use"). Not verified: any push, which has only run against a fake `helm`, and how GHCR answers a logged-in
+  token for a package that does not exist yet.
+
 ### Changed
 
 - **The platform BOM pins our four published packages by digest, and CI checks every pin**
