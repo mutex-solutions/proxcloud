@@ -254,7 +254,7 @@ a provider sync (the scheduler's, **Run a provider sync, then check again**, or
 `POST /api/v1/admin/job/external-service/sync`), and the first tenant network before it goes live.
 
 A sync writes them without a project only for a provider that has a managed-services installation,
-in any phase, the saved draft of step 1 included, and only with `PROXCLOUD_PLATFORM_ENABLED=true`.
+in any phase, the saved draft of step 1 and a `removed` installation included, and only with `PROXCLOUD_PLATFORM_ENABLED=true`.
 For every other provider the sync does what it did before: a project's sync writes the rules, and
 a provider with no project gets no firewall request at all. So the order is: save the installation
 (step 1), run a provider sync, then check. Saving never waits for this check: step 1 reads the
@@ -457,6 +457,15 @@ Afterwards the page prints the two `pveum user token remove` commands; ending th
 do. Remove leaves in place: the tokens, users, roles, ACL rows and pools of the script; the two
 provider rows, disabled; the image templates in `pc-templates`; and the installation record in phase
 `removed`, from which the same steps install again (both secrets must be pasted again).
+
+A Remove deletes no rule of the cluster firewall. The provider's `proxcloud:isolation` or
+`proxcloud:isolation/<poolPrefix>` rules stay, and because the installation record stays, the
+provider sync keeps maintaining them without a project, as before the Remove
+([The isolation check and the provider sync](#the-isolation-check-and-the-provider-sync)); no
+setting returns the provider to the behaviour of one without an installation. If you then take
+the platform's addresses out of `blockedCidrs` on a provider with no project, the sync removes no
+`DROP` and logs a warning on every cycle: delete the provider's rules under Datacenter > Firewall
+and run a provider sync, which writes the narrower set.
 
 A Remove that fails or is cancelled keeps what it deleted; **Remove again** goes on from there.
 
