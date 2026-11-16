@@ -1,0 +1,41 @@
+# The chart mirror manifest (docs/ci-release.md, "Chart mirror"): every third-party chart of platform-bom.yaml, and
+# where its bytes come from. .github/scripts/charts_mirror.py fetches each chart exactly as pinned here, and
+# .github/workflows/charts-mirror.yml republishes it under oci://ghcr.io/mutex-solutions/charts-mirror on a
+# `charts-mirror-v<n>` tag. Nothing is published from a workstation.
+#
+# One chart per line, in one of three shapes (the script reads this file without a YAML library and fails on any
+# other line):
+#   https  {name, version, repo: "https://...", digest, licence}
+#          digest = the `digest` of that version in the repository's index.yaml = the sha256 of the .tgz. The
+#          downloaded archive is hashed and republished unchanged.
+#   oci    {name, version, repo: <host>/<path>, digest, licence}
+#          digest = the chart's OCI manifest digest. The chart is pulled by that digest and republished unchanged.
+#   git    {name, version, git, tag, commit, path, appVersion, licence[, vendorName, vendorVersion, vendorRepo,
+#          vendorDigest]}
+#          The chart directory `path` of the upstream repository at `tag`, which must still point at `commit`.
+#          Upstream publishes this chart only as the moving version 0.0.0+latest, so it is packaged here with
+#          `helm package --version <version> --app-version <appVersion>`. vendor*: the one dependency of the chart's
+#          Chart.lock, fetched like an https chart and placed in charts/ (a dependency that is not listed fails).
+#          LICENSE and NOTICE of the repository root at that commit are copied into the chart, and one paragraph in
+#          NOTICE and the annotation charts-mirror/changes in Chart.yaml state the source and what was changed
+#          (Apache-2.0 section 4); the repository must have a LICENSE and Chart.yaml an `annotations:` block.
+#
+# kamaji and kamaji-crds: version = appVersion = the upstream git tag 26.11.2-edge, which is also the image tag the
+# BOM pins (clastix/kamaji:26.11.2-edge). It is a valid SemVer version (a pre-release of 26.11.2, as upstream means
+# by "edge"), has no "+" (Helm stores "+" as "_" in an OCI tag), and makes the chart's default image the pinned one,
+# because the chart falls back to appVersion when image.tag is unset.
+#
+# .github/scripts/tests/test_charts_mirror.py keeps this file equal to platform-bom.yaml: the same third-party charts,
+# versions and digests, and nothing the BOM does not use. `licence` must be one that allows redistribution
+# (Apache-2.0 or MIT); it is the licence of the upstream repository, read by a person, not by the script.
+schemaVersion: 1
+charts:
+  - {name: argo-cd, version: 10.14.0, repo: ghcr.io/argoproj/argo-helm, digest: "sha256:09ca0a888b05bdf4c21a7c812dd7612156f63eb2a9fde0434ddb3ee095599a85", licence: Apache-2.0}
+  - {name: cert-manager, version: v1.20.2, repo: "https://charts.jetstack.io", digest: "sha256:d2a50bd44a09d838c2576a8f3dfca1524597c7393cf8d82ab3ec8a465b9eeb79", licence: Apache-2.0}
+  - {name: cilium, version: 1.18.16, repo: "https://helm.cilium.io", digest: "sha256:a28a48ef4c5250684317ebeb8f55b7de422235a86eef3530b6288b4f23fd4dd5", licence: Apache-2.0}
+  - {name: metallb, version: 0.16.2, repo: "https://metallb.github.io/metallb", digest: "sha256:96667a810bdf9b9d1e6d320af16a4e66c63ba56301bc21005e645cd7a1c298a4", licence: Apache-2.0}
+  - {name: cloudnative-pg, version: 0.29.1, repo: "https://cloudnative-pg.github.io/charts", digest: "sha256:b53d3991fe84bcf38767e7702cae78666265427a127a26fff168ab4207d2b1df", licence: Apache-2.0}
+  - {name: proxmox-csi-plugin, version: 0.5.15, repo: ghcr.io/sergelogvinov/charts, digest: "sha256:d5125be66d23c3380f3ccadc26018d21f0a44e203d93998a9e80ef82eaa2dc59", licence: Apache-2.0}
+  - {name: kamaji-etcd, version: 0.18.1, repo: "https://clastix.github.io/charts", digest: "sha256:634fccec8f9434f8f53f8b49d9c34d634c93f14478cf1c550fb3b5c1ec8e90be", licence: Apache-2.0}
+  - {name: kamaji-crds, version: 26.11.2-edge, git: "https://github.com/clastix/kamaji", tag: 26.11.2-edge, commit: 31fed7a654b361ff8332a79184e6b0d2a05eb343, path: charts/kamaji-crds, appVersion: 26.11.2-edge, licence: Apache-2.0}
+  - {name: kamaji, version: 26.11.2-edge, git: "https://github.com/clastix/kamaji", tag: 26.11.2-edge, commit: 31fed7a654b361ff8332a79184e6b0d2a05eb343, path: charts/kamaji, appVersion: 26.11.2-edge, licence: Apache-2.0, vendorName: kamaji-etcd, vendorVersion: 0.15.0, vendorRepo: "https://clastix.github.io/charts", vendorDigest: "sha256:b8e88d5f535c0d328b46a3ffb5b543d0056e9370cb503e5a11e998d1f555f209"}
