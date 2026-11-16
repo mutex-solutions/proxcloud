@@ -48,7 +48,7 @@ components:
     values:                        # = valuesContent of installer/playbooks/templates/argocd-helmchart.yml.j2
       dex: {enabled: false}
       notifications: {enabled: false}
-      applicationSet: {enabled: false}
+      applicationSet: {replicas: 0}        # the chart has no applicationSet.enabled
       configs: {params: {server.insecure: true}}
   - name: cert-manager
     cluster: seed
@@ -60,7 +60,7 @@ components:
     cluster: seed
     wave: 2
     namespace: proxcloud-system
-    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.0, digest: "sha256:1a2667a6a092a2ee5f5a820ef318ef024a3e318b54e8c20364feacab5e1a2cbc"}
+    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.1, digest: pending}  # until tag proxcloud-platform-v0.1.1 publishes it
   - name: pc-platform              # the workload cluster
     cluster: seed
     wave: 3
@@ -108,7 +108,7 @@ components:
     cluster: workload
     wave: 2
     namespace: proxcloud-system
-    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.0, digest: "sha256:1a2667a6a092a2ee5f5a820ef318ef024a3e318b54e8c20364feacab5e1a2cbc"}
+    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.1, digest: pending}  # until tag proxcloud-platform-v0.1.1 publishes it
     group: system
   - name: kamaji-crds
     cluster: workload
@@ -134,4 +134,4 @@ components:
     cluster: workload
     wave: 3
     namespace: proxcloud-system
-    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.0, digest: "sha256:1a2667a6a092a2ee5f5a820ef318ef024a3e318b54e8c20364feacab5e1a2cbc"}
+    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.1, digest: pending}  # until tag proxcloud-platform-v0.1.1 publishes it

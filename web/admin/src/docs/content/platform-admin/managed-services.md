@@ -89,7 +89,7 @@ The failed stage shows a code, a message and what to do.
 | `seed_identity_lost` | **Retry**. It builds the seed again. |
 | `seed_cd_not_deleted` | Run the script again, then **Retry**. |
 | `seed_lost` | The seed VM is gone. Remove the installation with the option for a missing seed, then install again. |
-| `component_unhealthy`, `capi_init_failed` | Download the seed kubeconfig to look closer, then **Retry**. |
+| `component_unhealthy`, `capi_init_failed` | Download the seed kubeconfig to look closer, then **Retry**. The run starts a failed sync again itself; no manual sync is needed. |
 | `machine_failed`, `capmox_auth_failed` | Check the boot store, the nodes, the Proxmox API URL and the token secret, then **Retry**. |
 | `workload_api_unreachable` | Add a route from the ProxCloud host to the API address, then **Retry**. During a removal: restore the route and **Remove again**, or tick the option for a cluster that does not answer when it is beyond repair. |
 | `provider_conflict` | Correct the provider named in the message under **Cloud providers**, then **Retry**. |

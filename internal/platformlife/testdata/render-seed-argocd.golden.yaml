@@ -66,7 +66,7 @@ applications:
                 infrastructure: proxmox:v0.9.2
                 ipam: in-cluster:v1.1.1
         repoURL: ghcr.io/mutex-solutions/charts
-        targetRevision: 0.1.0
+        targetRevision: 0.1.1
       syncPolicy:
         automated:
           prune: true
@@ -344,7 +344,7 @@ applications:
           releaseName: argocd
           valuesObject:
             applicationSet:
-              enabled: false
+              replicas: 0
             configs:
               cm:
                 resource.customizations.health.addons.cluster.x-k8s.io_ClusterResourceSet: |
@@ -723,7 +723,7 @@ applications:
                 infrastructure: proxmox:v0.9.2
                 ipam: in-cluster:v1.1.1
         repoURL: ghcr.io/mutex-solutions/charts
-        targetRevision: 0.1.0
+        targetRevision: 0.1.1
       syncPolicy:
         automated:
           prune: true
@@ -848,6 +848,7 @@ applications:
         chart: kamaji
         helm:
           releaseName: kamaji
+          skipCrds: true
           valuesObject:
             defaultDatastoreName: default
             image:
@@ -910,7 +911,7 @@ applications:
                 addresses:
                   - 192.0.2.240-192.0.2.250
         repoURL: ghcr.io/mutex-solutions/charts
-        targetRevision: 0.1.0
+        targetRevision: 0.1.1
       syncPolicy:
         automated:
           prune: true
@@ -942,7 +943,7 @@ helmChart:
     valuesContent: |
       {
         "applicationSet": {
-          "enabled": false
+          "replicas": 0
         },
         "configs": {
           "params": {

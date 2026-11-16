@@ -101,7 +101,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   part per component of the platform BOM, which is not in the repository yet. `clusterctl.enabled` (components
   `capi` on the seed and `capi-tenant` on the workload cluster) renders `clusterctl init` as an ArgoCD Sync hook Job
   (`BeforeHookCreation`, cluster-admin service account, `PROXMOX_*` empty, no version check against GitHub) whose
-  arguments are the BOM's providers (`--core=cluster-api:v1.14.4`, …) and whose image, `proxcloud-clusterctl`, must be
+  arguments are the BOM's providers, two per provider (`--core cluster-api:v1.14.4`, …), and whose image,
+  `proxcloud-clusterctl`, must be
   pinned by `@sha256:` digest: the chart refuses the BOM's `pending` placeholder and a tag. `platform.enabled`
   (component `platform`) renders on the workload cluster the provider service account, token Secret and RBAC of
   `deploy/mgmt-cluster/rbac.yaml` and `deploy/dbaas-cluster/rbac.yaml` (the Namespace, ServiceAccount, Secret, Role
@@ -417,6 +418,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deleted and called gone. A failed run is logged at ERROR (`platform run failed`, with the stage,
   the code and the redacted message), no longer at INFO. The guide, the in-app page and the console say what
   `seed_config_refused` can still mean.
+- **Managed services: four defects of stages 6 to 9, found by reading the code against the pinned charts and
+  ArgoCD before the next lab attempt (none of them has run on a lab).** The `proxcloud-platform` chart rendered each
+  Cluster API provider of the clusterctl Sync hook as one argument (`--core=cluster-api:v1.14.4`); the image's
+  entrypoint reads two (`--core cluster-api:v1.14.4`) and left with its usage and exit code 2, so no provider was
+  ever installed and stage `seed-platform` ended in `capi_init_failed` at its time limit. Chart 0.1.1 renders two
+  arguments; the BOM names it for `capi`, `capi-tenant` and `platform` with a `pending` digest until tag
+  `proxcloud-platform-v0.1.1` publishes it, and a test feeds the rendered arguments to the entrypoint. The `kamaji`
+  Application sets `helm.skipCrds`: the chart ships the three CRDs that `kamaji-crds` renders, and ArgoCD, unlike
+  `helm install`, rendered them in both Applications, which then took the CRDs from each other at every self-heal.
+  A run now starts the sync of an Application whose last sync ended `Failed` or `Error` (ArgoCD does not sync the
+  same revision again once its ten retries are spent, so a **Retry** after the cause was fixed waited out another
+  time limit), with the Application's own retry policy, for every component and for `pc-platform` in stage
+  `cluster`. Both ArgoCDs, and the installer's, set `applicationSet.replicas: 0`: the argo-cd chart has no
+  `applicationSet.enabled`, the key was ignored and the ApplicationSet controller ran.
+  On a site the installer already built, the next run of stages 40 and 50 therefore scales
+  `argocd-applicationset-controller` to 0 on the management and the services cluster, where it runs today: the
+  product uses no ApplicationSet, but a site that added its own there must set the replicas back.
 
 - **Managed services: the defects of the first lab attempt (M0, a Proxmox cluster shared by two portals).** The
   provider sync now writes the isolation rules of a provider that has a managed-services installation (in any

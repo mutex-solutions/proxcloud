@@ -185,3 +185,44 @@ func TestPlatformChartRefuses(t *testing.T) {
 		})
 	}
 }
+
+// The clusterctl Job's args, as the chart renders them, are what the image's entrypoint reads: the entrypoint takes
+// each provider as two words (--core NAME:VERSION) and answers anything else with its usage and exit 2. Run here with
+// a kubectl that reports an empty cluster and a clusterctl that records its call, so the two cannot drift apart.
+func TestClusterctlJobArgsReachTheEntrypoint(t *testing.T) {
+	for _, name := range []string{"capi", "capi-tenant"} {
+		t.Run(name, func(t *testing.T) {
+			var args []string
+			for _, o := range yamlObjects(t, renderExample(t, name)) {
+				if o["kind"] != "Job" {
+					continue
+				}
+				containers, _ := dig(o, "spec", "template", "spec", "containers").([]any)
+				raw, _ := dig(containers[0], "args").([]any)
+				for _, a := range raw {
+					args = append(args, fmt.Sprint(a))
+				}
+			}
+			if len(args) == 0 {
+				t.Fatal("the render has no clusterctl Job args")
+			}
+			bin, log := t.TempDir(), filepath.Join(t.TempDir(), "calls")
+			for file, body := range map[string]string{"kubectl": "#!/bin/sh\nexit 0\n", "clusterctl": "#!/bin/sh\necho \"$*\" >> \"$FAKE_LOG\"\n"} {
+				if err := os.WriteFile(filepath.Join(bin, file), []byte(body), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := exec.Command("/bin/sh", append([]string{"../../deploy/clusterctl/clusterctl-init.sh"}, args...)...)
+			cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "FAKE_LOG=" + log, "CLUSTERCTL_INIT_CONFIG=../../deploy/clusterctl/clusterctl.yaml"}
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("entrypoint with the chart's args %q: %v\n%s", args, err, out)
+			}
+			call, _ := os.ReadFile(log)
+			for _, a := range args {
+				if !strings.Contains(string(call), " "+a+" ") {
+					t.Errorf("clusterctl init was not given %q: %q", a, call)
+				}
+			}
+		})
+	}
+}
