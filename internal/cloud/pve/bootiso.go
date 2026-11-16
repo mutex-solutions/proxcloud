@@ -45,29 +45,29 @@ func BootISOProblem(caps map[string]StorageCapability, iso, boot string) string 
 // ISOVisibilityProblem says why the calling token could put a bootstrap ISO elsewhere than on iso, or "". PVE lists a
 // store to whoever holds Datastore.Audit or Datastore.AllocateSpace on it, so the token must hold one of them on iso
 // and neither on any other enabled iso store of defs (GET /storage, read with a token that sees every store, the
-// portal's). Asked of PVE per store, as installer stage 10 does for capmox@pve!capi.
-func (c *Client) ISOVisibilityProblem(ctx context.Context, defs []StorageDef, iso string) (string, error) {
-	var seen []string
+// portal's). Asked of PVE per store, as installer stage 10 does for capmox@pve!capi. seen are the iso stores the token
+// sees, in the order of defs.
+func (c *Client) ISOVisibilityProblem(ctx context.Context, defs []StorageDef, iso string) (problem string, seen []string, err error) {
 	for _, d := range defs {
 		if d.Disable == 1 || !slices.Contains(strings.Split(d.Content, ","), "iso") {
 			continue
 		}
 		have, err := c.Permissions(ctx, "/storage/"+d.Storage)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		if have["Datastore.Audit"] || have["Datastore.AllocateSpace"] {
 			seen = append(seen, d.Storage)
 		}
 	}
 	if slices.Equal(seen, []string{iso}) {
-		return "", nil
+		return "", seen, nil
 	}
 	list := strings.Join(seen, ", ")
 	if list == "" {
 		list = "none"
 	}
-	return fmt.Sprintf("the token sees the ISO stores [%s]; CAPMOX puts each bootstrap ISO on the first it sees, so it must see %s alone (docs/proxmox-permissions.md)", list, iso), nil
+	return fmt.Sprintf("the token sees the ISO stores [%s]; CAPMOX puts each bootstrap ISO on the first it sees, so it must see %s alone (docs/proxmox-permissions.md)", list, iso), seen, nil
 }
 
 // ACLEntry is one row of GET /access/acl.
@@ -91,7 +91,8 @@ func (c *Client) ListACL(ctx context.Context) ([]ACLEntry, error) {
 // TokenACLRemoval says how to take from token what it holds on paths: one "pveum acl delete" per row of acls that
 // grants it there (a row on the path itself, or on a parent with propagate; NoAccess rows grant nothing). acls is
 // what the caller's token may read (ListACL: the paths it may modify, so a row on "/" is usually not in it); with no
-// row found it gives the two commands that find and remove one.
+// row found it gives the two commands that find and remove one, and what to do when they list none: a token without
+// privilege separation has its user's rights (the user holds /pool and /storage), and no token row to remove.
 func TokenACLRemoval(acls []ACLEntry, token string, paths ...string) string {
 	var cmds []string
 	for _, a := range acls {
@@ -105,7 +106,9 @@ func TokenACLRemoval(acls []ACLEntry, token string, paths ...string) string {
 		}
 	}
 	if len(cmds) == 0 {
-		return fmt.Sprintf("find the row as root on a node with: pveum acl list | grep -F '%s'; remove it with: pveum acl delete <path> --tokens '%s' --roles <role>", token, token)
+		user, name, _ := strings.Cut(token, "!")
+		return fmt.Sprintf("find the row as root on a node with: pveum acl list | grep -F '%s'; remove it with: pveum acl delete <path> --tokens '%s' --roles <role>. If no row is listed, the token is not privilege separated and holds its user's rights: pveum user token modify '%s' '%s' --privsep 1, then run the script again",
+			token, token, user, name)
 	}
 	slices.Sort(cmds)
 	return "as root on a node: " + strings.Join(slices.Compact(cmds), "; ")

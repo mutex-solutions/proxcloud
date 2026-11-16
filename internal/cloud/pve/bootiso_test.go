@@ -175,7 +175,7 @@ func TestISOVisibilityProblem(t *testing.T) {
 					fmt.Fprintf(w, `{"data":{%q:%s}}`, path, c.sees[strings.TrimPrefix(path, "/storage/")])
 				},
 			})
-			got, err := cl.ISOVisibilityProblem(context.Background(), defs, "local")
+			got, _, err := cl.ISOVisibilityProblem(context.Background(), defs, "local")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -189,7 +189,17 @@ func TestISOVisibilityProblem(t *testing.T) {
 		})
 	}
 	_, cl := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){})
-	if _, err := cl.ISOVisibilityProblem(context.Background(), defs, "local"); err == nil {
+	if _, _, err := cl.ISOVisibilityProblem(context.Background(), defs, "local"); err == nil {
 		t.Error("a failed permissions read must be an error, not a verdict")
+	}
+}
+
+// A token without privilege separation holds its user's rights: the user's rows on /pool and /storage are the
+// script's, no token row grants anything, and the advice must say how to get out of that.
+func TestTokenACLRemovalWithoutATokenRow(t *testing.T) {
+	acls := []ACLEntry{{Path: "/pool", Type: "user", UGID: "capmox@pve", RoleID: "ProxCloudCAPI", Propagate: 1}}
+	got := TokenACLRemoval(acls, CAPITokenID, "/pool")
+	if strings.Contains(got, "pveum acl delete /pool") || !strings.Contains(got, "pveum user token modify 'capmox@pve' 'capi' --privsep 1") {
+		t.Errorf("advice = %q", got)
 	}
 }

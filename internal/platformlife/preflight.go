@@ -212,19 +212,25 @@ func (p Preflight) Run(ctx context.Context) []Check {
 		var vis []string
 		if err != nil {
 			vis = readErr("the storages", err)
-		} else if msg, err := p.CAPI.ISOVisibilityProblem(ctx, defs, s.Storage.ISO); err != nil {
+		} else if msg, seen, err := p.CAPI.ISOVisibilityProblem(ctx, defs, s.Storage.ISO); err != nil {
 			vis = readErr("the ISO stores "+pve.CAPITokenID+" sees", err)
-		} else if strings.Contains(msg, "[none]") { // it sees no ISO store: a row is missing, none is to remove
-			vis = []string{msg}
 		} else if msg != "" {
+			// A row is to remove only for a store the token sees and has no use for. Its rows on the ISO and the boot
+			// store are the script's: privileges:capi needs them.
 			var others []string
-			for _, d := range defs {
-				if d.Storage != s.Storage.ISO && d.Storage != s.Storage.Boot && slices.Contains(strings.Split(d.Content, ","), "iso") {
-					others = append(others, "/storage/"+d.Storage)
+			for _, st := range seen {
+				if st != s.Storage.ISO && st != s.Storage.Boot {
+					others = append(others, "/storage/"+st)
 				}
 			}
-			vis = []string{msg + ". To take the others from " + pve.CAPITokenID + ", " + pve.TokenACLRemoval(acls, pve.CAPITokenID, others...) +
-				". Then check again: privileges:capi must stay ok"}
+			if len(others) > 0 {
+				msg += ". To take the others from " + pve.CAPITokenID + ", " + pve.TokenACLRemoval(acls, pve.CAPITokenID, others...) +
+					". Then check again: privileges:capi must stay ok"
+			}
+			if s.Storage.Boot != s.Storage.ISO && slices.Contains(seen, s.Storage.Boot) {
+				msg += ". The boot store " + s.Storage.Boot + " takes ISO images and the token needs its row there: do not remove it, name another boot store or take iso out of its content (boot-iso)"
+			}
+			vis = []string{msg}
 		}
 		row("iso-store-visibility", vis, pve.CAPITokenID+" sees one ISO store, "+s.Storage.ISO+".")
 	}

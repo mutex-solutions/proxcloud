@@ -15,8 +15,9 @@ import (
 // preflightPVE is a one-node PVE that answers each token's effective permissions from perms (token id → path → privs)
 // and records every request that is not a GET.
 type preflightPVE struct {
-	perms  map[string]map[string][]string
-	writes []string
+	perms   map[string]map[string][]string
+	writes  []string
+	bootISO bool // the boot store local-lvm takes ISO images too
 }
 
 func (f *preflightPVE) client(t *testing.T, url, token string) *pve.Client {
@@ -51,6 +52,9 @@ func (f *preflightPVE) serve(w http.ResponseWriter, r *http.Request) {
 			{"path":"/storage/local","type":"token","ugid":"capmox@pve!capi","roleid":"PVEDatastoreAdmin","propagate":0}]`,
 		"/access/users/capmox@pve": `{"groups":[]}`,
 		"/access/roles":            `[{"roleid":"PVEDatastoreAdmin","privs":"Datastore.Allocate,Datastore.AllocateSpace,Datastore.AllocateTemplate,Datastore.Audit"}]`,
+	}
+	if f.bootISO {
+		data["/storage"] = strings.Replace(data["/storage"], `"content":"images"`, `"content":"images,iso"`, 1)
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/api2/json")
 	body, ok := data[path]
@@ -161,5 +165,15 @@ func TestPreflight(t *testing.T) {
 	}
 	if _, ok := got["privileges:csi"]; ok {
 		t.Error("no CSI token, yet its privileges were checked")
+	}
+
+	// The boot store takes ISO images and is the only extra store the token sees: the row behind it is the script's,
+	// so no removal is advised, neither a command nor the recipe that finds a row.
+	delete(f.perms[pve.CAPITokenID], "/storage/nas-iso")
+	f.bootISO = true
+	c := checkMap(pf.Run(ctx))["iso-store-visibility"]
+	if c.Status != CheckFail || !strings.Contains(c.Message, "[local, local-lvm]") || !strings.Contains(c.Message, "boot-iso") ||
+		strings.Contains(c.Message, "pveum acl") {
+		t.Errorf("a boot store that takes ISO images: %+v", c)
 	}
 }
