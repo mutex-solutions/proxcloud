@@ -517,7 +517,7 @@ func TestSmokeCloudInitShape(t *testing.T) {
 // A clone that has a drive, on whatever slot, keeps it and gets no second one.
 func TestSmokeAddsMissingCloudInitDrive(t *testing.T) {
 	for _, c := range []struct{ variant, has, want string }{
-		{"kubernetes", "", "ide0"}, {"os", "", "ide2"}, {"kubernetes", "ide2", "ide2"}, {"kubernetes", "ide0", "ide0"},
+		{"kubernetes", "", "ide0"}, {"os", "", "ide2"}, {"os", "ide2", "ide2"}, {"kubernetes", "ide0", "ide0"},
 	} {
 		x, pv, _, p := smokeSetup(t, c.variant)
 		if c.has != "" {
@@ -546,6 +546,20 @@ func TestSmokeAddsMissingCloudInitDrive(t *testing.T) {
 			t.Fatalf("%+v: cloud-init drives of the test VM %v: %+v", c, slots, seen)
 		}
 		protectedIntact(t, pv)
+	}
+}
+
+// A node template with its Proxmox cloud-init drive on another slot than ide0 boots and would pass, but no machine
+// cloned from it by CAPMOX joins: it is refused before anything is cloned, with the command that corrects it.
+func TestSmokeRefusesNodeTemplateDriveOffIDE0(t *testing.T) {
+	x, pv, rec, p := smokeSetup(t, "kubernetes")
+	pv.vms[9300].cfg["ide2"] = "local-zfs:vm-9300-cloudinit,media=cdrom"
+	if err := x.Run(context.Background(), smokeJob, p, &testFence{epoch: 1, budget: -1}); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := rec.LoadSmoke(context.Background(), smokeJob)
+	if r.Result != SmokeFail || r.Code != SmokeTemplateMismatch || !strings.Contains(r.Message, "qm set 9300 --delete ide2") || pv.mutations != 0 {
+		t.Fatalf("receipt %+v calls %v", r, pv.calls)
 	}
 }
 

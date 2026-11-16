@@ -34,10 +34,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/netip"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -554,6 +556,17 @@ func (x *SmokeExecutor) test(ctx context.Context, f Fence, jobID string, p Smoke
 	if tcfg.Str("digest") == "" {
 		return checks, failed(SmokeTemplateMismatch, "the template's configuration digest could not be read")
 	}
+	// A node image's Proxmox cloud-init drive is on ide0 or absent (CloudInitSlot). On another slot the clone below would
+	// still boot and pass, but every machine CAPMOX clones gets two cidata media and never joins, and no tenant path
+	// checks the slot after a publish: a PASS here is the publish gate, so it is refused here.
+	if p.Variant == "kubernetes" {
+		for _, slot := range slices.Sorted(maps.Keys(tcfg)) {
+			if s := tcfg.Str(slot); slot != "ide0" && strings.Contains(s, "cloudinit") && strings.Contains(s, "media=cdrom") {
+				return checks, failed(SmokeTemplateMismatch, fmt.Sprintf("the node template has a Proxmox cloud-init drive on %s; Cluster API puts its own on ide0, "+
+					"and a machine with both never joins. On %s run: qm set %d --delete %s, then smoke-test again", slot, p.Node, p.TemplateVMID, slot))
+			}
+		}
+	}
 	base, ok := pve.DiskSizeBytes(tcfg.Str("scsi0"))
 	if !ok {
 		return checks, failed(SmokeTemplateMismatch, "the template has no readable scsi0 size")
@@ -619,7 +632,7 @@ func (x *SmokeExecutor) test(ctx context.Context, f Fence, jobID string, p Smoke
 		params["nameserver"] = p.Network.Nameserver
 	}
 	// A template without a Proxmox cloud-init drive is a valid node template (CAPMOX brings its own ISO, and stage 7
-	// of the platform tells an operator to delete a drive on another slot than ide0), but the settings above reach the
+	// of the platform and the check above tell an operator to delete a drive on another slot than ide0), but the settings above reach the
 	// guest only through that drive: without it cloud-init finds no datasource and ends "disabled". The clone is this
 	// job's own VM, so it gets the drive an import of this variant would have.
 	if !hasCloudInitDrive(ccfg) {
