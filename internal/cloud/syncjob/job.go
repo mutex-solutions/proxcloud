@@ -440,7 +440,8 @@ func (j *Job) syncProxmoxService(ctx context.Context, p *project.Project, es *ex
 // could not pass on a cluster where another portal already has tenant networks. Only that preflight needs the write, so
 // every other provider is left as before: no lock, no PVE request, no log line. Same lock as the per-project reconcile;
 // a busy lock waits for the next cycle. From the lookup on, every way out without a write leaves a log line: the
-// preflight sends the operator to this sync.
+// preflight sends the operator to this sync. A disabled provider never gets here (detectProxmoxCapabilities skips
+// it), and the preflight's isolation row says so (platformlife.Preflight.ProviderDisabled).
 func (j *Job) reconcileProviderIsolation(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) {
 	netCfg := es.PVENetworkConfig()
 	if j.installedOn == nil || j.sdnLock == nil || netCfg.CIDRPool == "" {

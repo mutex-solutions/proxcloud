@@ -260,6 +260,10 @@ a provider with no project gets no firewall request at all. So the order is: sav
 (step 1), run a provider sync, then check. Saving never waits for this check: step 1 reads the
 provider's settings only, not the firewall.
 
+A provider sync skips a provider whose status is `DISABLED`, in every part and without a log line,
+so no sync writes or repairs its rules. The check's message then starts with `the provider is
+disabled`: enable the provider under **Cloud providers**, run a provider sync, then check again.
+
 That provider-level part of the sync, the one that needs no project, has no tenant waiting for it
 and none of its own to protect. It only ever adds `DROP`s, and only to a set that no project's sync
 maintains: it refuses in the cases below, logs

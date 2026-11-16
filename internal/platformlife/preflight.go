@@ -40,12 +40,17 @@ type Preflight struct {
 	Allow             []string     // the provider's sandbox endpoints (es.PVESandboxEndpoints), part of the isolation rules
 	ProviderImport    string       // the provider's importStorage, whose own ACL row needs the mint role too (pve.ManagedACLs)
 	Portal            *pve.Service // the portal token
+	ProviderDisabled  bool         // the provider's status is DISABLED: a provider sync skips it, so none writes its isolation rules
 	CAPI, CSI         *pve.Client  // the platform tokens; nil when not stored
 	TemplateUpdatesVM bool         // PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED
 	GitHub            bool         // a GitHub integration is saved
 	// Blocked reports a digest on the template update blocklist (templateupdates.Receipts.Blocked).
 	Blocked func(ctx context.Context, digest string) (bool, error)
 }
+
+// providerDisabled is what the isolation row adds for a disabled provider: its messages send the operator to a
+// provider sync, and the sync leaves a disabled provider out without a log line.
+const providerDisabled = "the provider is disabled, and a provider sync skips a disabled provider; enable it under Cloud providers, then run a provider sync"
 
 // SiteOf is the site of a Proxmox provider, without the live management networks.
 func SiteOf(es *externalservice.ExternalService) Site {
@@ -123,8 +128,12 @@ func (p Preflight) Run(ctx context.Context) []Check {
 				" (or one network that covers them) to the provider's blockedCidrs, then run a provider sync so the cluster firewall drops them (with this installation saved it needs no project)."}, "")
 		} else {
 			switch err := p.Portal.CheckIsolation(ctx, site.CIDRPool, site.Blocked, site.Sandbox, p.Allow...); {
+			case errors.Is(err, pve.ErrIsolationPending) && p.ProviderDisabled:
+				row("isolation", nil, "The platform addresses are blocked networks. No cluster firewall rule is written yet: "+providerDisabled+".")
 			case errors.Is(err, pve.ErrIsolationPending):
 				row("isolation", nil, "The platform addresses are blocked networks; the cluster firewall rules are written by the next provider sync (with this installation saved it needs no project), or with the first tenant network.")
+			case err != nil && p.ProviderDisabled:
+				row("isolation", []string{"No provider sync writes or repairs these rules: " + providerDisabled + ". " + err.Error()}, "")
 			case err != nil:
 				row("isolation", []string{err.Error()}, "")
 			default:

@@ -17,7 +17,8 @@ import (
 type preflightPVE struct {
 	perms   map[string]map[string][]string
 	writes  []string
-	bootISO bool // the boot store local-lvm takes ISO images too
+	bootISO bool   // the boot store local-lvm takes ISO images too
+	vnets   string // the cluster's vnets, [] when empty
 }
 
 func (f *preflightPVE) client(t *testing.T, url, token string) *pve.Client {
@@ -55,6 +56,9 @@ func (f *preflightPVE) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	if f.bootISO {
 		data["/storage"] = strings.Replace(data["/storage"], `"content":"images"`, `"content":"images,iso"`, 1)
+	}
+	if f.vnets != "" {
+		data["/cluster/sdn/vnets"] = f.vnets
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/api2/json")
 	body, ok := data[path]
@@ -131,6 +135,20 @@ func TestPreflight(t *testing.T) {
 	if len(f.writes) != 0 {
 		t.Fatalf("the preflight wrote to PVE: %v", f.writes)
 	}
+	// A provider sync skips a disabled provider, so the row must not send the operator to one without saying so.
+	pf.ProviderDisabled = true
+	if c := checkMap(pf.Run(ctx))["isolation"]; c.Status != CheckOK || !strings.Contains(c.Message, "provider is disabled") {
+		t.Errorf("a disabled provider, no tenant network yet: %+v", c)
+	}
+	f.vnets = `[{"vnet":"vother1","zone":"pc8","alias":"st:other:web"}]`
+	if c := checkMap(pf.Run(ctx))["isolation"]; c.Status != CheckFail || !strings.Contains(c.Message, "provider is disabled") || !strings.Contains(c.Message, "0 in place") {
+		t.Errorf("a disabled provider on a cluster with another portal's tenant network: %+v", c)
+	}
+	pf.ProviderDisabled = false
+	if c := checkMap(pf.Run(ctx))["isolation"]; c.Status != CheckFail || strings.Contains(c.Message, "disabled") {
+		t.Errorf("an enabled provider on a cluster with another portal's tenant network: %+v", c)
+	}
+	f.vnets = ""
 
 	capi["/pool/"+pve.SeedPool] = []string{"VM.Audit"}
 	f.perms[pve.DefaultPlatformTokenID]["/pool/"+pve.SeedPool] = []string{"VM.Audit"}

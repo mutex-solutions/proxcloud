@@ -413,7 +413,7 @@ func (h *Handler) PlatformPreflight(ctx context.Context, in *platformlife.Instal
 		sec = &platformlife.Secrets{}
 	}
 	pf := platformlife.Preflight{Installation: in, Site: platformlife.SiteOf(es), Allow: es.PVESandboxEndpoints(),
-		ProviderImport: es.PVEImportStorage(), Portal: portal,
+		ProviderImport: es.PVEImportStorage(), Portal: portal, ProviderDisabled: es.IsDisabled(),
 		TemplateUpdatesVM: h.templateUpdates != nil && h.templateUpdates.VMEnabled}
 	if pf.CAPI, err = platformlife.TokenClient(es, sec.CAPI); err != nil {
 		return nil, err

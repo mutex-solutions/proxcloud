@@ -418,6 +418,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them", also when rules are in place. A project's sync and a network create write the rules in all these cases, as
   before. A changed `cidrPool`, a narrowed `blockedCidrs` or changed sandbox endpoints on a provider with no project is applied by its first
   tenant network, or by deleting its rules under Datacenter > Firewall and running a sync; the messages say so.
+  A provider sync skips a disabled provider, and the `isolation` check now says so instead of only sending the
+  operator to a sync.
   Before, only a project's sync or its first tenant network wrote
   them, while the preflight's "no rule yet" pass ends as soon as any tenant network exists on the cluster: on a
   cluster where another portal had tenant networks, a portal with no project failed `isolation` with
