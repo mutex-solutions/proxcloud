@@ -2,6 +2,8 @@ package pve
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -146,6 +148,96 @@ func TestManagedSetupScriptImportStorage(t *testing.T) {
 	}
 }
 
+// The portal's right to create tokens sits on the group of its two service users, and a site an earlier script set
+// up loses exactly the rows and the privilege that script wrote, after the new grant so minting never stops.
+func TestManagedSetupScriptNarrowsTheMintGrant(t *testing.T) {
+	script, err := ManagedSetupScript("portal@pve!site-a", false, "", "local-lvm", "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"pveum group add 'proxcloud-kube' --comment 'ProxCloud: users the portal mints cluster tokens for' 2>/dev/null || true",
+		"pveum user modify 'capmox@pve' --groups 'proxcloud-kube' --append 1",
+		"pveum user modify 'csi@pve' --groups 'proxcloud-kube' --append 1",
+		"grant '/access/groups/proxcloud-kube' 'ProxCloudKubeToken' 0",
+		`pveum acl delete '/access/groups' --users "$PC_USER" --roles 'ProxCloudKubeMint'`,
+		`pveum acl delete '/access/groups' --tokens "$PC_TOKEN" --roles 'ProxCloudKubeMint'`,
+		`pveum acl delete '/pool' --users "$PC_USER" --roles 'ProxCloudKubeMint'`,
+		`pveum acl delete '/pool' --tokens "$PC_TOKEN" --roles 'ProxCloudKubeMint'`,
+		`[ -n "$PC_LEFT" ] || pveum role modify 'ProxCloudKubeMint' --privs 'Permissions.Modify'`,
+	}
+	at := 0
+	for _, l := range strings.Split(script, "\n") {
+		if at < len(want) && l == want[at] {
+			at++
+		}
+		if strings.HasPrefix(l, "grant '/access/groups' ") || strings.HasPrefix(l, "grant '/access' ") || strings.Contains(l, "User.Modify Permissions.Modify") {
+			t.Errorf("the script still grants on all of /access/groups: %s", l)
+		}
+		if l == "grant '/pool' 'ProxCloudKubeMint' 1" {
+			t.Errorf("the script still grants Permissions.Modify on /pool: %s", l)
+		}
+		if !strings.HasPrefix(l, "  echo ") && (strings.Contains(l, "pveum user modify") || strings.Contains(l, "acl delete")) && !slices.Contains(want, l) {
+			t.Errorf("an unexpected membership or removal: %s", l)
+		}
+	}
+	if at != len(want) {
+		t.Errorf("the script lacks, in this order, %q:\n%s", want[at], script)
+	}
+}
+
+// The role is the cluster's: User.Modify leaves it only when no other principal still holds it on /access/groups,
+// or every other portal token that creates tokens through its old row would stop. The script runs here as on a
+// node, with a pveum that records its arguments and answers `acl list` with what is left after the script's deletes.
+func TestManagedSetupScriptKeepsUserModifyWhileAnotherTokenNeedsIt(t *testing.T) {
+	for _, bin := range []string{"sh", "perl"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			t.Skipf("no %s", bin)
+		}
+	}
+	script, err := ManagedSetupScript("proxcloud@pve!m0", false, "", "local-zfs", "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const strip = "role modify ProxCloudKubeMint --privs Permissions.Modify\n"
+	for _, tt := range []struct {
+		name, acl string
+		strip     bool
+		says      string
+	}{
+		{"no other holder", `[{"path":"/pool","roleid":"ProxCloudKubeMint","type":"user","ugid":"other@pve","propagate":1},
+			{"path":"/access/groups/proxcloud-kube","roleid":"ProxCloudKubeToken","type":"token","ugid":"proxcloud@pve!m0","propagate":0}]`, true, ""},
+		{"the installer's token still mints through its row", `[{"path":"/access/groups","roleid":"ProxCloudKubeMint","type":"token","ugid":"proxcloud@pve!platform","propagate":1}]`,
+			false, "NOT FINISHED: ProxCloudKubeMint still holds User.Modify, because these still hold that role on /access/groups:\n  token proxcloud@pve!platform\n"},
+		{"the list cannot be read", "", false, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			calls := filepath.Join(dir, "calls")
+			fake := "#!/bin/sh\necho \"$*\" >> " + calls + "\nif [ \"$1 $2\" = 'acl list' ]; then [ -n \"$FAKE_ACL\" ] || exit 1; printf '%s' \"$FAKE_ACL\"; fi\n"
+			for _, bin := range []string{"pveum", "pvenode"} {
+				if err := os.WriteFile(filepath.Join(dir, bin), []byte(fake), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := exec.Command("sh")
+			cmd.Stdin = strings.NewReader(script)
+			cmd.Env = []string{"PATH=" + dir + ":" + os.Getenv("PATH"), "FAKE_ACL=" + tt.acl}
+			out, err := cmd.CombinedOutput()
+			log, _ := os.ReadFile(calls)
+			if (err == nil) != (tt.acl != "") {
+				t.Fatalf("the script: %v\n%s", err, out)
+			}
+			if got := strings.Contains(string(log), strip); got != tt.strip {
+				t.Errorf("User.Modify taken out of the role: %v, want %v\n%s", got, tt.strip, log)
+			}
+			if !strings.Contains(string(out), tt.says) || tt.says == "" && strings.Contains(string(out), "NOT FINISHED") {
+				t.Errorf("the script says:\n%s\nwant %q", out, tt.says)
+			}
+		})
+	}
+}
+
 // A root shell runs the answer: nothing but a plain id gets into it.
 func TestPlatformSetupScriptRejectsInjection(t *testing.T) {
 	for _, tokenID := range []string{
@@ -250,7 +342,10 @@ func TestManagedIdentityMatchesInstaller(t *testing.T) {
 				Path, Role, User, Token string
 				Propagate               int
 			} `yaml:"split_acls"`
-			NASMintACLs string `yaml:"nas_mint_acls"`
+			NASMintACLs    string   `yaml:"nas_mint_acls"`
+			MintOldPaths   []string `yaml:"mint_old_paths"`
+			MintGroup      string   `yaml:"mint_group"`
+			MintGroupUsers []string `yaml:"mint_group_users"`
 		} `yaml:"vars"`
 	}
 	if err := yaml.Unmarshal(raw, &plays); err != nil || len(plays) != 1 {
@@ -269,6 +364,13 @@ func TestManagedIdentityMatchesInstaller(t *testing.T) {
 		if !ok || !slices.Equal(installer, portal) {
 			t.Errorf("%s privileges differ:\ninstaller %q\nportal    %q", r.Name, installer, portal)
 		}
+	}
+
+	if v.MintGroup != KubeMintGroup || !slices.Equal(v.MintGroupUsers, KubeMintGroupMembers) {
+		t.Errorf("stage 10 mints for %q %v, the portal for %q %v", v.MintGroup, v.MintGroupUsers, KubeMintGroup, KubeMintGroupMembers)
+	}
+	if !slices.Equal(v.MintOldPaths, KubeMintOldPaths) {
+		t.Errorf("stage 10 takes the old mint rows off %v, the script off %v", v.MintOldPaths, KubeMintOldPaths)
 	}
 
 	const boot, iso, imp = "boot-store", "iso-store", "import-store"

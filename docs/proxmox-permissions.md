@@ -1,6 +1,6 @@
 # Proxmox VE permissions
 
-ProxCloud needs no `root@pam` access on the cluster. The [installer](install.md) creates everything on this page (`installer/playbooks/10-pve-identity.yml`). This page defines seven least-privilege roles, the users and API tokens that hold them, and the ACL paths they are granted on. The commands are for **PVE 9**. PVE 9 removed `VM.Monitor`; the guest-agent reads ProxCloud uses need `VM.GuestAgent.Audit` instead.
+ProxCloud needs no `root@pam` access on the cluster. The [installer](install.md) creates everything on this page (`installer/playbooks/10-pve-identity.yml`). This page defines eight least-privilege roles, the users and API tokens that hold them, and the ACL paths they are granted on. The commands are for **PVE 9**. PVE 9 removed `VM.Monitor`; the guest-agent reads ProxCloud uses need `VM.GuestAgent.Audit` instead.
 
 | Role | Held by | Used for |
 |---|---|---|
@@ -9,12 +9,13 @@ ProxCloud needs no `root@pam` access on the cluster. The [installer](install.md)
 | `ProxCloudCSI` | `csi@pve!csi`, `csi@pve!gateway` | `proxmox-csi-plugin` in the services (or managed-services workload) cluster; the CSI gateway of the portal API (split mode) |
 | `ProxCloudImages` | `images@pve!packer` | the image pipeline ([images/README.md](../images/README.md)) |
 | `ProxCloudSandboxGuard` | `proxcloud@pve!platform`, on pool `proxcloud-sandbox` only | the sync job's VM firewall on the sandbox workers (`sandbox.enabled`) |
-| `ProxCloudKubeMint` | `proxcloud@pve!platform` (`mode: split`, or the [managed-services script](#managed-services)) | minting and revoking the per-cluster tokens of managed Kubernetes ([below](#managed-kubernetes)) |
+| `ProxCloudKubeMint` (`Permissions.Modify`) | `proxcloud@pve!platform` (`mode: split`, or the [managed-services script](#managed-services)) | granting the per-cluster tokens of managed Kubernetes their roles ([below](#managed-kubernetes)) |
+| `ProxCloudKubeToken` (`User.Modify`) | `proxcloud@pve!platform`, on `/access/groups/proxcloud-kube` only (same sites) | creating and deleting those tokens, for the two users in the group `proxcloud-kube` (`capmox@pve`, `csi@pve`) and no other user ([the mint grant](#the-mint-grant-in-m1)) |
 | `ProxCloudSandboxEntry` | `proxcloud@pve!platform`, on pool `proxcloud-sandbox-entry` only | the sync job keeping the sandbox entry appliance: firewall and HAProxy config through the guest agent (stage 56) |
 
 Every token is created with **privilege separation** (`--privsep 1`). A privilege-separated token's rights are the **intersection** of the user's ACLs and the token's ACLs, so each ACL below is granted to both the user and the token.
 
-The admin **Test connection** button on the Proxmox provider reads the token's effective permissions (`GET /access/permissions`) and lists each `ProxCloudPlatform` privilege the token lacks, plus a warning for a `root@pam` token. Missing privileges are only reported as warnings. A cluster without GPUs can, for example, leave out `/mapping/pci`. The list it checks is `pve.PlatformPrivileges` in `internal/cloud/pve/access.go`. Keep it in sync with this page. The setup checks of the same test (`?checks=all`, [api.md](api.md)) read more with the same token: the pool `pc-templates`, and for an EVPN zone each node's package list (`GET /nodes/{node}/apt/versions`) to find `frr-pythontools`. That last read is expected to work with `PVEAuditor` on `/nodes` but is not lab-verified; when it is refused the check says so and stays a warning.
+The admin **Test connection** button on the Proxmox provider reads the token's effective permissions (`GET /access/permissions`) and lists each `ProxCloudPlatform` privilege the token lacks, plus a warning for a `root@pam` token, and one (`mint-scope`) for a token that holds `User.Modify` or `Permissions.Modify` on `/`, `/access` or `/access/groups`, or `Permissions.Modify` on `/pool`, where the product needs neither ([the mint grant](#the-mint-grant-in-m1)). Missing privileges are only reported as warnings. A cluster without GPUs can, for example, leave out `/mapping/pci`. The list it checks is `pve.PlatformPrivileges` in `internal/cloud/pve/access.go`. Keep it in sync with this page. The setup checks of the same test (`?checks=all`, [api.md](api.md)) read more with the same token: the pool `pc-templates`, and for an EVPN zone each node's package list (`GET /nodes/{node}/apt/versions`) to find `frr-pythontools`. That last read is expected to work with `PVEAuditor` on `/nodes` but is not lab-verified; when it is refused the check says so and stays a warning.
 
 ## Inventory visibility repair
 
@@ -123,7 +124,7 @@ There is no ACL on `/vms`. VMs get their rights only through their pool, so a VM
 
 | Path | Role | Propagate | Note |
 |---|---|---|---|
-| `/pool/proxcloud-sandbox` | `ProxCloudSandboxGuard` (`Pool.Audit VM.Audit VM.Config.Network`) | 1 | user and token rows. It replaces, on that pool and its VMs, the `ProxCloudPlatform` and `ProxCloudKubeMint` the token inherits from `/pool`: the sync reads the workers and sets their NIC flag, firewall options, rules and IP filters, and can do nothing else to them (no guest agent, console, disk, power, snapshot or ACL rights). The cluster security group and IP sets it references are written with `Sys.Modify` on `/`. Stage 10 reads the token's effective rights there and stops unless they are exactly these three ([managed-sandbox.md](managed-sandbox.md#24-permissions)) |
+| `/pool/proxcloud-sandbox` | `ProxCloudSandboxGuard` (`Pool.Audit VM.Audit VM.Config.Network`) | 1 | user and token rows. It replaces, on that pool and its VMs, the `ProxCloudPlatform` the token inherits from `/pool`: the sync reads the workers and sets their NIC flag, firewall options, rules and IP filters, and can do nothing else to them (no guest agent, console, disk, power, snapshot or ACL rights). The cluster security group and IP sets it references are written with `Sys.Modify` on `/`. Stage 10 reads the token's effective rights there and stops unless they are exactly these three ([managed-sandbox.md](managed-sandbox.md#24-permissions)) |
 | `/pool/proxcloud-sandbox` | `NoAccess` | 1 | user `csi@pve`: its tokens hold `ProxCloudCSI` on `/pool` for tenant clusters, and nothing of theirs is in this pool. A user row: the CSI tokens are privilege-separated, so capping the user caps them |
 | `/pool/proxcloud-sandbox` | `NoAccess` | 1 | token `capmox@pve!capi`: the services cluster's CAPMOX holds `ProxCloudCAPI` on `/pool` and would inherit it on the workers, but the sandbox cluster runs through `capmox@pve!sandbox`, so it never manages this pool. A token row, not a user row: `capmox@pve` owns the sandbox token, which the user `NoAccess` would cap too |
 | `/pool/proxcloud-sandbox-entry` | `ProxCloudSandboxEntry` (`Pool.Audit VM.Audit VM.Config.Network VM.GuestAgent.Audit VM.GuestAgent.Unrestricted`) | 1 | user and token rows, with an entry appliance (`sandbox.entry.public.bridge`). It replaces the platform role from `/pool` on the VM that faces the internet: the sync sets its firewall and pushes HAProxy's config through the agent, and cannot power, resize, console into or clone it |
@@ -180,9 +181,13 @@ Each tenant cluster runs under a token the portal mints at create and revokes af
 A token's rights are its user's intersected with its own, so `capmox@pve` holds the same role on `/pool`, `/storage` and `/sdn/zones`, `csi@pve` on `/pool` and `/storage`, and the portal token additionally needs the right to mint and grant. `make install` with `mode: split` sets this (stage 10, `split_acls`):
 
 ```sh
-pveum role add ProxCloudKubeMint --privs "User.Modify Permissions.Modify"
-grant /access/groups ProxCloudKubeMint 1 proxcloud@pve platform
-grant /pool          ProxCloudKubeMint 1 proxcloud@pve platform
+pveum role add ProxCloudKubeMint  --privs "Permissions.Modify"
+pveum role add ProxCloudKubeToken --privs "User.Modify"
+# the only users the portal may create and delete tokens for
+pveum group add proxcloud-kube --comment "ProxCloud: users the portal mints cluster tokens for"
+pveum user modify capmox@pve --groups proxcloud-kube --append 1
+pveum user modify csi@pve    --groups proxcloud-kube --append 1
+grant /access/groups/proxcloud-kube ProxCloudKubeToken 0 proxcloud@pve platform
 grant /storage       ProxCloudKubeMint 1 proxcloud@pve platform
 grant /sdn/zones     ProxCloudKubeMint 1 proxcloud@pve platform
 grant /sdn/zones     ProxCloudPlatform 1 proxcloud@pve platform
@@ -192,9 +197,9 @@ pveum acl modify /storage       --users capmox@pve --roles ProxCloudCAPI     --p
 pveum acl modify /storage/local --users capmox@pve --roles PVEDatastoreAdmin --propagate 0
 ```
 
-An ACL on a path replaces what the parent passes down for that user or token. The `/sdn/zones` mint grant on its own leaves the portal token without `SDN.*` under `/sdn/zones`, so every network create fails with `Permission check failed (/sdn/zones, SDN.Allocate)` and no NIC can attach, hence the second `/sdn/zones` line. `/pool` and `/storage` already hold `ProxCloudPlatform` directly. `/nodes/<node>` does not inherit the mint grant (propagate 0), by design. After any ACL change, read the result with `pveum user token permissions proxcloud@pve platform --path <path>`, not the ACL list; Test connection warns when the portal token lacks a privilege on `/sdn/zones`.
+An ACL on a path replaces what the parent passes down for that user or token. The `/sdn/zones` mint grant on its own leaves the portal token without `SDN.*` under `/sdn/zones`, so every network create fails with `Permission check failed (/sdn/zones, SDN.Allocate)` and no NIC can attach, hence the second `/sdn/zones` line. `/storage` already holds `ProxCloudPlatform` directly. `/pool` gets no mint grant: on `/pool/<pool>` PVE accepts `Pool.Allocate` for a role whose privileges the caller holds there itself, with propagate, and `ProxCloudPlatform` on `/pool` holds those of `ProxCloudCAPI` and `PVETemplateUser`, the two roles the portal writes on a pool ([the mint grant](#the-mint-grant-in-m1)). `/nodes/<node>` does not inherit the mint grant (propagate 0), by design. After any ACL change, read the result with `pveum user token permissions proxcloud@pve platform --path <path>`, not the ACL list; Test connection warns when the portal token lacks a privilege on `/sdn/zones`.
 
-`Permissions.Modify` is a big right: a stolen portal token can grant itself anything on those paths. Without these grants a cluster create fails with PVE's `Permission check failed`, or the provider runs in `sharedWorkers` mode (docs/managed-k8s.md). This list ran on a real cluster (PVE 9.2) with no other grant: create, scale-out, delete, a refused create. Without it, `POST /access/users/{user}/token/{name}` answers 403 even for the token's own user, and `PUT /access/acl` wants `Permissions.Modify` on `/sdn/zones/...` and `/nodes`, and `Permissions.Modify` or `Datastore.Allocate` on `/storage/...`.
+`Permissions.Modify` is a big right: a stolen portal token can grant itself anything on those paths. `User.Modify` is granted on the group's path and never on `/access/groups`: there PVE takes it for every user of the cluster, `root@pam` included ([the mint grant](#the-mint-grant-in-m1)). Without these grants a cluster create fails with PVE's `Permission check failed`, or the provider runs in `sharedWorkers` mode (docs/managed-k8s.md). This list ran on a real cluster (PVE 9.2) with no other grant: create, scale-out, delete, a refused create. That run predates the group: its `User.Modify` sat on `/access/groups`, and the grant on `/access/groups/proxcloud-kube` has not run on a cluster yet. It also held `ProxCloudKubeMint` on `/pool`; a create without that row has not run on a cluster yet either. Without `User.Modify`, `POST /access/users/{user}/token/{name}` answers 403 even for the token's own user, and `PUT /access/acl` wants `Permissions.Modify` on `/sdn/zones/...` and `/nodes`, and `Permissions.Modify` or `Datastore.Allocate` on `/storage/...`; on `/pool/<pool>` it wants `Permissions.Modify`, or `Pool.Allocate` and every privilege of the role written.
 
 PVE stops honouring a deleted token's ACL entries at once, but leaves them in `user.cfg` until the next write of that file. Until then `pveum` prints `ignore invalid acl token`, which is harmless; token names are never reused.
 
@@ -305,7 +310,7 @@ The script does not turn on the datacenter firewall or the nftables firewall of 
 
 ## Managed services
 
-Managed Kubernetes and databases from the operator console ([ADR 0009](adr/0009-managed-services-platform-lifecycle.md)) run on a platform of their own: a seed VM (k3s with Cluster API, CAPMOX and ArgoCD) in pool `proxcloud-seed`, and a workload cluster in `proxcloud-system`. The portal never holds root on Proxmox, so the operator creates two more tokens with the same script: `GET /api/v1/admin/setup/proxmox-script?managedServices=true&bootStorage=<store>&isoStorage=<store>` adds the block below to the portal token script. `bootStorage` (required) holds the boot disks of the seed and the workload VMs and the volumes of their `std` StorageClass; `isoStorage` (default `local`) is the node-local store of their bootstrap ISOs and the seed's CD. Both are refused unless they are plain storage ids, like `importStorage`. The block adds the roles `ProxCloudCAPI`, `ProxCloudCSI` and `ProxCloudKubeMint`, the pool `proxcloud-seed`, the users `capmox@pve` and `csi@pve` with the privilege-separated tokens `capi` and `csi`, the rows of the table below, and ends with what both tokens hold on both platform pools. The two secrets are printed once; when a token exists already the script says so, prints no secret and still writes the rows. The Managed services page shows this script in its step 2 and takes the two secrets; the durable job of the API then uses them ([managed-services.md](managed-services.md#3-proxmox-identities)).
+Managed Kubernetes and databases from the operator console ([ADR 0009](adr/0009-managed-services-platform-lifecycle.md)) run on a platform of their own: a seed VM (k3s with Cluster API, CAPMOX and ArgoCD) in pool `proxcloud-seed`, and a workload cluster in `proxcloud-system`. The portal never holds root on Proxmox, so the operator creates two more tokens with the same script: `GET /api/v1/admin/setup/proxmox-script?managedServices=true&bootStorage=<store>&isoStorage=<store>` adds the block below to the portal token script. `bootStorage` (required) holds the boot disks of the seed and the workload VMs and the volumes of their `std` StorageClass; `isoStorage` (default `local`) is the node-local store of their bootstrap ISOs and the seed's CD. Both are refused unless they are plain storage ids, like `importStorage`. The block adds the roles `ProxCloudCAPI`, `ProxCloudCSI`, `ProxCloudKubeMint` and `ProxCloudKubeToken`, the pool `proxcloud-seed`, the users `capmox@pve` and `csi@pve` with the privilege-separated tokens `capi` and `csi`, the group `proxcloud-kube` with those two users in it, the rows of the table below, the lines that take an earlier script's mint grant off `/access/groups` and `/pool` ([an existing site](#an-existing-site)), and ends with what both tokens hold on both platform pools. The two secrets are printed once; when a token exists already the script says so, prints no secret and still writes the rows. The Managed services page shows this script in its step 2 and takes the two secrets; the durable job of the API then uses them ([managed-services.md](managed-services.md#3-proxmox-identities)).
 
 <!-- generated: the lines GET /api/v1/admin/setup/proxmox-script?gpu=true&managedServices=true&bootStorage=local-lvm&isoStorage=local adds -->
 ```sh
@@ -316,12 +321,19 @@ pveum role modify 'ProxCloudCAPI' --append 1 --privs 'Sys.Audit Pool.Audit VM.Al
 pveum role add 'ProxCloudCSI' 2>/dev/null || true
 pveum role modify 'ProxCloudCSI' --append 1 --privs 'VM.Audit VM.Config.Disk Datastore.Allocate Datastore.AllocateSpace Datastore.Audit'
 pveum role add 'ProxCloudKubeMint' 2>/dev/null || true
-pveum role modify 'ProxCloudKubeMint' --append 1 --privs 'User.Modify Permissions.Modify'
+pveum role modify 'ProxCloudKubeMint' --append 1 --privs 'Permissions.Modify'
+pveum role add 'ProxCloudKubeToken' 2>/dev/null || true
+pveum role modify 'ProxCloudKubeToken' --append 1 --privs 'User.Modify'
 pveum pool add 'proxcloud-seed' --comment 'ProxCloud seed cluster (not tenant)' 2>/dev/null || true
 pveum user add 'capmox@pve' --comment 'ProxCloud CAPI' 2>/dev/null || true
 pveum user token add 'capmox@pve' 'capi' --privsep 1 || echo 'The token capmox@pve!capi exists already: its secret was printed when it was created.'
 pveum user add 'csi@pve' --comment 'ProxCloud CSI' 2>/dev/null || true
 pveum user token add 'csi@pve' 'csi' --privsep 1 || echo 'The token csi@pve!csi exists already: its secret was printed when it was created.'
+# the only users the portal token may create and delete tokens for. Its grant sits on this group, never on
+# /access/groups, which reaches every user of the cluster (root@pam too)
+pveum group add 'proxcloud-kube' --comment 'ProxCloud: users the portal mints cluster tokens for' 2>/dev/null || true
+pveum user modify 'capmox@pve' --groups 'proxcloud-kube' --append 1
+pveum user modify 'csi@pve' --groups 'proxcloud-kube' --append 1
 pveum acl modify '/' --users 'capmox@pve' --roles 'ProxCloudCAPI' --propagate 0
 pveum acl modify '/' --tokens 'capmox@pve!capi' --roles 'ProxCloudCAPI' --propagate 0
 pveum acl modify '/nodes' --users 'capmox@pve' --roles 'ProxCloudCAPI' --propagate 1
@@ -345,13 +357,32 @@ pveum acl modify '/pool/proxcloud-system' --tokens 'csi@pve!csi' --roles 'ProxCl
 pveum acl modify '/pool/proxcloud-seed' --users 'csi@pve' --roles 'NoAccess' --propagate 1
 pveum acl modify '/storage' --users 'csi@pve' --roles 'ProxCloudCSI' --propagate 1
 pveum acl modify '/storage/local-lvm' --tokens 'csi@pve!csi' --roles 'ProxCloudCSI' --propagate 0
-grant '/access/groups' 'ProxCloudKubeMint' 1
-grant '/pool' 'ProxCloudKubeMint' 1
+grant '/access/groups/proxcloud-kube' 'ProxCloudKubeToken' 0
 grant '/storage' 'ProxCloudKubeMint' 1
 grant '/sdn/zones' 'ProxCloudKubeMint' 1
 grant '/sdn/zones' 'ProxCloudPlatform' 1
 grant '/nodes' 'ProxCloudKubeMint' 0
 grant '/pool/proxcloud-seed' 'NoAccess' 1
+# a site set up before the group: the mint role sat on /access/groups and /pool and held User.Modify. These remove
+# exactly this token's rows, after the grant on the group above, and change nothing on a new site
+pveum acl delete '/access/groups' --users "$PC_USER" --roles 'ProxCloudKubeMint'
+pveum acl delete '/access/groups' --tokens "$PC_TOKEN" --roles 'ProxCloudKubeMint'
+pveum acl delete '/pool' --users "$PC_USER" --roles 'ProxCloudKubeMint'
+pveum acl delete '/pool' --tokens "$PC_TOKEN" --roles 'ProxCloudKubeMint'
+# User.Modify leaves the role for every holder at once, so only when no other portal token still creates tokens
+# through a row on /access/groups: run this script for each of them, the last run takes the privilege out
+PC_LEFT=$(pveum acl list --output-format json | perl -MJSON::PP -e 'print map { "  $_->{type} $_->{ugid}\n" } grep { $_->{path} eq "/access/groups" && $_->{roleid} eq "ProxCloudKubeMint" } @{ decode_json(join "", <STDIN>) }')
+[ -n "$PC_LEFT" ] || pveum role modify 'ProxCloudKubeMint' --privs 'Permissions.Modify'
+pc_left() { # said last, when this subshell ends, below everything the script prints
+  echo 'NOT FINISHED: ProxCloudKubeMint still holds User.Modify, because these still hold that role on /access/groups:'
+  echo "$PC_LEFT"
+  echo 'Each is another portal token, or its user, that creates cluster tokens through that row and would stop if the role lost'
+  echo 'User.Modify now. Run this script for each such token (tokenId=<its id>), or make upgrade for the token of an installer site;'
+  echo 'the last run takes User.Modify out of the role. Until then a token listed here whose user is listed too can create an API'
+  echo 'token for any user of the cluster, root@pam included. A row no portal uses: pveum acl delete /access/groups --users <user>'
+  echo '(or --tokens <token id>, in single quotes) --roles ProxCloudKubeMint, then this script again.'
+}
+[ -z "$PC_LEFT" ] || trap pc_left EXIT
 # what the platform tokens hold on the platform pools: the CAPI token ProxCloudCAPI on both, the CSI token nothing on the
 # seed VM (its disks on the boot store stay open to the CSI token: docs/proxmox-permissions.md, "What the seed pool does not fence")
 pveum user token permissions 'capmox@pve' 'capi' --path '/pool/proxcloud-system'
@@ -369,12 +400,13 @@ The rows are `pve.ManagedACLs` (`internal/cloud/pve/access.go`). Installer stage
 | `csi@pve!csi` (token) | `/pool/proxcloud-system`; `/storage/<bootStorage>` | `ProxCloudCSI` | Not `/pool` and `/storage`. |
 | `csi@pve` (user) | `/pool/proxcloud-system`; `/pool/proxcloud-seed` | `ProxCloudCSI`; `NoAccess` | The first as for `capmox@pve`; the second caps every `csi@pve` token off the seed VM, the CSI gateway's included, but not off its disks ([below](#what-the-seed-pool-does-not-fence)). |
 | `proxcloud@pve!platform` (user and token) | `/pool/proxcloud-seed` | `NoAccess` | As on `proxcloud-system`. |
-| `proxcloud@pve!platform` (user and token) | `/access/groups`, `/pool`, `/storage`, `/sdn/zones` (propagate), `/nodes` (no propagate) | `ProxCloudKubeMint` | Mint and grant the tenant clusters' tokens ([Managed Kubernetes](#managed-kubernetes)), with `ProxCloudPlatform` repeated on `/sdn/zones`. |
+| `proxcloud@pve!platform` (user and token) | `/access/groups/proxcloud-kube` (no propagate) | `ProxCloudKubeToken` | Create and delete tokens for the members of that group, `capmox@pve` and `csi@pve`. Never on `/access/groups`: there it reaches every user ([the mint grant](#the-mint-grant-in-m1)). |
+| `proxcloud@pve!platform` (user and token) | `/storage`, `/sdn/zones` (propagate), `/nodes` (no propagate) | `ProxCloudKubeMint` | No row on `/pool`: there the portal's `ProxCloudPlatform` is enough. Grant the tenant clusters' tokens their roles ([Managed Kubernetes](#managed-kubernetes)), with `ProxCloudPlatform` repeated on `/sdn/zones`. |
 | `proxcloud@pve!platform` (user and token) | `/storage/<importStorage>` (no propagate), only with `importStorage` | `ProxCloudKubeMint` | The `PVEDatastoreAdmin` row there replaces what `/storage` passes down, and a tenant cluster's ISO or boot store may be that store (`local` on a site without a NAS): without it PVE refuses the cluster token's row there and the cluster create fails. Stage 10 writes the same row (`nas_mint_acls`). |
 
 The other rows (`/`, `/nodes`, `/pool/pc-templates`, `/sdn/zones`, the two `/storage` rows of `capmox@pve!capi`, and `/pool` and `/storage` for both users) are those of [ProxCloudCAPI](#proxcloudcapi) and [ProxCloudCSI](#proxcloudcsi).
 
-The portal checks a site against the same tables (`internal/cloud/pve/access.go`), each with a client on that token: `MissingPrivileges` with `CAPIPrivileges`, `CSIPrivileges` and `KubeMintPrivileges` (which checks the import store apart); `ISOVisibilityProblem`, which asks PVE per `iso` store whether the CAPI token sees it and wants exactly `isoStorage` (CAPMOX puts each bootstrap ISO on the first `iso` store its token sees, as stage 10 checks for the services cluster); and `CheckBootISOGrant` for `capmox@pve`. They are the rows `privileges:capi`, `privileges:csi`, `privileges:kubemint`, `iso-store-visibility` and `boot-iso-grant` of the page's Check step and of a run's first stage, next to `pool-fence`, which fails when the portal token holds any privilege on `/pool/proxcloud-system` or `/pool/proxcloud-seed`, or `csi@pve!csi` on `/pool/proxcloud-seed`, and `token-scope`, which fails when `capmox@pve!capi` or `csi@pve!csi` holds any privilege on `/pool`, `/storage` or `/vms` as a whole (no row of the tables above gives one; an older setup wrote some, the script removes no row, and stage 10 removes only the CAPI token's old rows on `/storage` and on the NAS template store, so the message gives the `pveum acl delete` command; a token made without privilege separation fails it on its user's `/pool` and `/storage` rows and has no row of its own on those paths or above them with propagate to remove (its rows on the platform pools and stores stay), and the message then gives `pveum user token modify … --privsep 1`). A row of the two tokens on a single tenant pool or store is not compared with the tables ([managed-services.md](managed-services.md#step-3-check)).
+The portal checks a site against the same tables (`internal/cloud/pve/access.go`), each with a client on that token: `MissingPrivileges` with `CAPIPrivileges`, `CSIPrivileges` and `KubeMintPrivileges` (which checks the import store apart); `ISOVisibilityProblem`, which asks PVE per `iso` store whether the CAPI token sees it and wants exactly `isoStorage` (CAPMOX puts each bootstrap ISO on the first `iso` store its token sees, as stage 10 checks for the services cluster); and `CheckBootISOGrant` for `capmox@pve`. They are the rows `privileges:capi`, `privileges:csi`, `privileges:kubemint`, `iso-store-visibility` and `boot-iso-grant` of the page's Check step and of a run's first stage, next to `mint-scope`, which fails when the portal token holds `User.Modify` or `Permissions.Modify` on `/`, `/access` or `/access/groups` or `Permissions.Modify` on `/pool` (`HeldPrivileges` with `KubeMintForbidden`; Test connection warns on the same), or when `capmox@pve` or `csi@pve` is not in the group `proxcloud-kube` (`KubeMintGroupProblems`: PVE then refuses every token create or delete for that user), `pool-fence`, which fails when the portal token holds any privilege on `/pool/proxcloud-system` or `/pool/proxcloud-seed`, or `csi@pve!csi` on `/pool/proxcloud-seed`, and `token-scope`, which fails when `capmox@pve!capi` or `csi@pve!csi` holds any privilege on `/pool`, `/storage` or `/vms` as a whole (no row of the tables above gives one; an older setup wrote some, the script removes no row, and stage 10 removes only the CAPI token's old rows on `/storage` and on the NAS template store, so the message gives the `pveum acl delete` command; a token made without privilege separation fails it on its user's `/pool` and `/storage` rows and has no row of its own on those paths or above them with propagate to remove (its rows on the platform pools and stores stay), and the message then gives `pveum user token modify … --privsep 1`). A row of the two tokens on a single tenant pool or store is not compared with the tables ([managed-services.md](managed-services.md#step-3-check)).
 
 ### What the seed pool does not fence
 
@@ -407,32 +439,121 @@ pveum user token permissions capmox@pve capi --path /pool/proxcloud-system
 pveum user token permissions csi@pve csi --path /storage/<services.storage>
 ```
 
+**The mint grant.** Until this change `ProxCloudKubeMint` held `User.Modify` and `Permissions.Modify` and sat on `/access/groups`, where it let the portal token create an API token for every user of the cluster, `root@pam` included, and on `/pool`, where it let the token write any role on every pool ([below](#the-mint-grant-in-m1)). Neither path removes rows in general, but both remove exactly these four: the role on `/access/groups` and on `/pool`, for the portal's user and for its token. On an installer site, `make upgrade` (stage 10, `mode: split`) creates the group `proxcloud-kube`, puts `capmox@pve` and `csi@pve` in it, creates `ProxCloudKubeToken` and grants it on the group, then deletes its four old rows, then takes `User.Modify` out of `ProxCloudKubeMint`, and last checks with PVE that the token holds neither privilege on `/access/groups` and `/pool`. On a site set up with the console's script, run the managed-services script again as root (`GET /api/v1/admin/setup/proxmox-script?managedServices=true&bootStorage=<store>&…`, or copy it from the Managed services page): it does the same in the same order. The new grant is written before the old rows and the old privilege go, so the portal token creates and deletes cluster tokens throughout, and a run that stops half way leaves the old grant, and minting, in place.
+
+**More than one portal token on the cluster.** The role belongs to the cluster: taking `User.Modify` out of it changes it for every holder. A second portal token (another provider or portal, under the same user or another one) that was set up before the group still creates tokens through its own `ProxCloudKubeMint` row on `/access/groups` and has no grant on the group, so it would answer 403 on every cluster create and release. The script and stage 10 therefore take the privilege out of the role only when no other user or token holds the role on `/access/groups`. Otherwise they leave the role as it is and say `NOT FINISHED` with the list: the script as its last output, stage 10 as a failed task it does not stop on. Run the script for each token named (`tokenId=<its id>`), or `make upgrade` for an installer's `proxcloud@pve!platform`; the last run finds no other row and takes the privilege out. In between:
+
+- a token whose user's row is already gone (a second token of the same user) keeps minting through the user's new row on the group and reaches the two service users only;
+- a token whose user and token rows are both still there (another portal's) is as wide as before, and its own `mint-scope` check fails until its script has run.
+
+A row no portal uses is removed by hand (`pveum acl delete /access/groups --users <user> --roles ProxCloudKubeMint`, or `--tokens '<id>'`), then the script or `make upgrade` again.
+
+By hand, in this order (use the provider's token id if it is not `proxcloud@pve!platform`):
+
+```sh
+pveum group add proxcloud-kube --comment "ProxCloud: users the portal mints cluster tokens for"
+pveum user modify capmox@pve --groups proxcloud-kube --append 1
+pveum user modify csi@pve    --groups proxcloud-kube --append 1
+pveum role add ProxCloudKubeToken --privs "User.Modify"
+pveum acl modify /access/groups/proxcloud-kube --users proxcloud@pve             --roles ProxCloudKubeToken --propagate 0
+pveum acl modify /access/groups/proxcloud-kube --tokens 'proxcloud@pve!platform' --roles ProxCloudKubeToken --propagate 0
+# before anything is removed: must list User.Modify. A row on the group's own path replaces what /access/groups
+# passes down, so this reads the new row and not the old one
+pveum user token permissions proxcloud@pve platform --path /access/groups/proxcloud-kube
+pveum acl delete /access/groups --users proxcloud@pve             --roles ProxCloudKubeMint
+pveum acl delete /access/groups --tokens 'proxcloud@pve!platform' --roles ProxCloudKubeMint
+pveum acl delete /pool          --users proxcloud@pve             --roles ProxCloudKubeMint
+pveum acl delete /pool          --tokens 'proxcloud@pve!platform' --roles ProxCloudKubeMint
+# the next line only when this prints nothing: every row it prints is another portal token's (see above)
+pveum acl list | grep -F ProxCloudKubeMint | grep -F ' /access/groups '
+pveum role modify ProxCloudKubeMint --privs "Permissions.Modify"
+# must list neither User.Modify nor Permissions.Modify
+pveum user token permissions proxcloud@pve platform --path /access/groups
+# must list Pool.Allocate and not Permissions.Modify
+pveum user token permissions proxcloud@pve platform --path /pool
+# must still list User.Modify
+pveum user token permissions proxcloud@pve platform --path /access/groups/proxcloud-kube
+```
+
+`pveum` marks a privilege with `(*)` only when it is held with propagate; the group row is not, so `User.Modify` shows there without the mark (the API returns it with value 0). Read the names, not the marks or the values.
+
+Until that has run, the preflight row `mint-scope` fails and Test connection warns. The old grant was live for as long as the site ran it, so also look for tokens nobody on your side created: `pveum user token list root@pam`, and the same for every other administrator account.
+
 ### The mint grant in M1
 
-`ProxCloudKubeMint` gives the portal token `User.Modify` on `/access/groups` and `Permissions.Modify` on `/access/groups`, `/pool`, `/storage`, `/sdn/zones` (all propagated) and `/nodes` (that path only). With `Permissions.Modify` on a path, PVE lets the holder write any role there, with propagate, for any user or token, itself included. A stolen portal token can therefore:
+The portal token creates one `capmox@pve!<clusterId>` token per tenant cluster, grants it its roles, and deletes it with the cluster. Two roles carry that, on these rows, each for the portal's user and for its token, next to the portal's own role on `/pool`:
 
-- **on `/pool`:** mint a token for an existing principal and grant it a role on `/pool`, which reaches every pool where that principal has no row of its own. `NoAccess` keeps the portal token off both platform pools, and the user rows above keep `capmox@pve` and `csi@pve` to their roles there. Any other user of the site without a row on the platform pools is not covered. The owner accepted this for M1 on 2026-11-15 ([ADR 0009](adr/0009-managed-services-platform-lifecycle.md#a8-risks-accepted-for-the-first-milestone), A8), documented here and measured on the lab.
+| Path | Role | Propagate | What the product does with it |
+|---|---|---|---|
+| `/access/groups/proxcloud-kube` | `ProxCloudKubeToken` (`User.Modify`) | 0 | `POST` and `DELETE /access/users/capmox@pve/token/<clusterId>`; `DELETE /access/users/csi@pve/token/<clusterId>` for a cluster from before the CSI gateway; `GET /access/users/capmox@pve` (the boot ISO check and `mint-scope`) and `GET /access/users/csi@pve` (`mint-scope`) |
+| `/storage`, `/sdn/zones` | `ProxCloudKubeMint` (`Permissions.Modify`) | 1 | `PUT /access/acl` for the cluster token on the boot and ISO stores, `/sdn/zones/localnetwork` and the cluster's vnet |
+| `/pool` | none for minting: `ProxCloudPlatform`, which the portal holds there for its own work | 1 | `PUT /access/acl` for the cluster token on the tenant pool (`ProxCloudCAPI`) and on `pc-templates` (`PVETemplateUser`). On `/pool/<pool>` PVE accepts `Pool.Allocate` in place of `Permissions.Modify` when the caller holds every privilege of the role there itself, with propagate; `ProxCloudPlatform` holds all 19 of `ProxCloudCAPI` and both of `PVETemplateUser` |
+| `/nodes` | `ProxCloudKubeMint` | 0 | `PUT /access/acl` for the cluster token on `/nodes` |
+| `/storage/<importStorage>` | `ProxCloudKubeMint` | 0 | the same, where the portal's own `PVEDatastoreAdmin` row shadows `/storage` |
+
+The group `proxcloud-kube` holds `capmox@pve` and `csi@pve` and nothing else: not `proxcloud@pve`, not `images@pve`, no operator account. The group has no ACL row of its own, so membership gives the two users no right.
+
+**Why a group.** PVE checks a token create, update or delete for user X with `userid-group` (`PVE::RPCEnvironment::exec_api2_perm_check`, read at `libpve-access-control` 9.2.1): the caller passes with `User.Modify` on `/access/groups` itself, **for every user of the cluster, whatever its groups**; otherwise it needs `User.Modify` on `/access/groups/<g>` for a group X is in, and a user in no group, such as `root@pam`, is never reached. A token is never "its own user" for this check (`proxcloud@pve!platform` is not `proxcloud@pve`). Until this change the portal held both privileges of `ProxCloudKubeMint` on `/access/groups`, and the lab confirmed what that means ([L1 results](#l1-results)): the portal token created a token for `root@pam`.
+
+What a stolen portal token can do with each row:
+
+- **on `/access/groups/proxcloud-kube` (`User.Modify`):** create privilege-separated tokens for `capmox@pve` and `csi@pve` (a new token holds nothing until it is granted a role, and never more than its user holds); delete any token of the two users, or change its expiry and comment, the platform's `capmox@pve!capi`, `csi@pve!csi`, `csi@pve!gateway` and the sandbox cluster's token included; read the two users and set `enable`, `expire`, name, email, comment and keys on them; unlock their TFA. That stops managed Kubernetes and the platform; it does not raise the token's rights by itself. It can **not** do any of this to a user outside the group (`root@pam`, `proxcloud@pve`, `images@pve`, an operator: 403), put another user into the group (PVE wants the target to be in one of the caller's groups already, and the portal holds no `Group.Allocate`), create or delete a user or set a password (`Realm.AllocateUser`), or write an ACL row under `/access` (no `Permissions.Modify` there; `ProxCloudKubeToken` has none).
+- **on `/pool` (no mint row; `ProxCloudPlatform`):** on a pool where it holds `Pool.Allocate`, which is every tenant pool and `pc-templates` and not `proxcloud-system`, `proxcloud-seed` or the sandbox pools (its row there is `NoAccess` or a role without it), write a role made only of privileges it holds there itself, with propagate, for any user or token. A token it minted for `capmox@pve` so gets at most `ProxCloudCAPI` on tenant pools, which is nothing the stolen token could not do itself. It can **not** write a row on `/pool` itself (PVE takes `Pool.Allocate` only below `/pool`), write `Administrator`, `NoAccess` or any role with a privilege it lacks, or give a minted token a row that reaches a platform pool: such a token has no row on `/pool`, so it holds nothing on `proxcloud-system` and `proxcloud-seed`. Until 2026-11-16 the portal held `ProxCloudKubeMint` on `/pool` too, which allowed all three; the lab measured the first with that row ([L1 results](#l1-results)). That the two writes of the product pass without the row is read from the PVE source (`PVE::RPCEnvironment::check_perm_modify`, `PVE::API2::ACL` `update_acl`, `libpve-access-control` 9.2.1) and has not run on a cluster yet.
 - **on `/storage`:** grant its own user and token `PVEDatastoreAdmin` on `/storage/<bootStorage>`. No pool row stands in the way, because PVE checks a disk against its store alone once the caller holds `Datastore.Allocate` there ([what the seed pool does not fence](#what-the-seed-pool-does-not-fence)). With `VM.Config.Disk` and `VM.GuestAgent.Unrestricted` on the tenant pools it then attaches any disk of that store, the seed's, a workload VM's or another tenant's, to a tenant VM and reads it through the guest agent: the seed's cluster-admin token and the `capmox@pve!capi` secret are on the seed's disk. A8 accepts it for M1 with the rest of the mint grant (a stolen portal token "can grant itself anything on those paths"), and M1 has no row that closes it.
-- **on `/sdn/zones` and `/nodes`:** the same, for the zones and vnets and for every node.
+- **on `/sdn/zones` and `/nodes`:** any role, `Administrator` included, with propagate, for itself or any other user or token, on the zones and vnets and on every node.
 
-The structural fix is to grant the mint role on a parent pool of the tenant pools (nested pools), which renames every tenant pool, and to narrow the `/storage` grant to the stores tenant clusters use, with the platform's disks on a store outside them; a site whose Kubernetes provider runs in `sharedWorkers` mode needs no mint grant at all.
+The rows on `/storage`, `/sdn/zones` and `/nodes` are what is left of the risk the owner accepted for M1 on 2026-11-15 ([ADR 0009](adr/0009-managed-services-platform-lifecycle.md#a8-risks-accepted-for-the-first-milestone), A8), and they stay: PVE has no narrower right than `Permissions.Modify` for writing a role on `/nodes`, `/sdn/zones/...` or (without `Datastore.Allocate`) `/storage/...`, and with it the holder may write any role, `Administrator` included, with propagate, for any principal. (On `/pool/<pool>` PVE also accepts `Pool.Allocate` for a role whose privileges the caller holds there, which is why the `/pool` row is gone; `/storage/<store>` has the same with `Datastore.Allocate`, which is itself the right that opens every disk of a store, so it is no way out there.) Two things stay open inside it and are stated here, not closed:
 
-Lab check L1 is to measure it on PVE 9.2. It uses three scratch VMs on one node and the boot store, in `proxcloud-seed`, `proxcloud-system` and a tenant pool, destroyed afterwards. The checks above are green; `pveum user token permissions` for the portal token is empty on both platform pools and `csi@pve csi` is empty on `proxcloud-seed` but holds `Datastore.Allocate` on `/storage/<bootStorage>`; `capmox@pve capi` sees one ISO store. The CSI token attaches the seed-pool VM's disk to the `proxcloud-system` one (`PUT /nodes/<node>/qemu/<vmid>/config` with `scsi9=<bootStorage>:vm-<seed-pool vmid>-disk-0`), which PVE is expected to allow. Then a drill with the portal token, reverted afterwards: grant `capmox@pve` `ProxCloudPlatform` on `/pool` and read its effective rights on `/pool/proxcloud-seed`, which must stay `ProxCloudCAPI`; grant its own user and token `PVEDatastoreAdmin` on `/storage/<bootStorage>`, read `pveum user token permissions proxcloud@pve platform --path /storage/<bootStorage>`, and attach the seed-pool VM's disk to the tenant one, which PVE is expected to allow; and try `POST /access/users/root@pam/token/x`, to learn whether PVE lets it mint for `root@pam`.
+- `Administrator` on `/nodes` or `/storage` for the stolen token itself: what `Sys.Modify` and the other node privileges then reach on a host was not analysed.
+- The disruption listed for the group row.
+
+**PVE versions.** `libpve-access-control` 9.2.1 (2026-11-13) made creating a token *without* privilege separation for another user, regenerating another user's token secret, and any update that leaves such a token without privilege separation require `Realm.AllocateUser` on the realm and `Permissions.Modify` on `/`, which the portal holds on no site. Before 9.2.1, `User.Modify` through the group check was enough for all three. For a site still on the old grant that is one call to full root (`privsep=0` for `root@pam`), or the takeover of any existing token by regenerating its secret. With the grant on the group it is limited to `capmox@pve` and `csi@pve`, and there it still matters: a `privsep=0` token holds what that user holds (`ProxCloudCAPI` or `ProxCloudCSI` on `/pool` and `/storage` and the rows of the tables above, so `ProxCloudCAPI` on both platform pools), and a regenerated `capmox@pve!capi` or `csi@pve!gateway` secret is that token's rights. Both are more than a stolen portal token reaches on 9.2.1 now that the `/pool` row is gone. **Managed Kubernetes therefore needs `libpve-access-control` 9.2.1 or later on every node** (`pveversion -v | grep access-control`); the product does not check the package version. This paragraph is from the PVE source and changelog; none of it was tried on the lab, and the lab record does not say which `libpve-access-control` the lab ran. The product itself only ever sends `privsep=1`.
+
+**Detection.** The preflight row `mint-scope` fails, and Test connection on the provider warns (`mint-scope`), while the portal token holds `User.Modify` or `Permissions.Modify` on `/`, `/access` or `/access/groups`, or `Permissions.Modify` on `/pool`; the message says to run the script again. The preflight row also fails when `capmox@pve` or `csi@pve` is not in the group, with the `pveum user modify` line that puts it back: PVE then answers 403 to every token create or delete for that user although the privileges read complete. Installer stage 10 asserts the two paths for `proxcloud@pve!platform` in split mode after it has moved the grant, and names every other user or token that still holds `ProxCloudKubeMint` on `/access/groups`. [An existing site](#an-existing-site) has the commands.
+
+The structural fix for the rows that stay is to narrow the `/storage` grant to the stores tenant clusters use, with the platform's disks on a store outside them; a site whose Kubernetes provider runs in `sharedWorkers` mode needs no mint grant at all.
+
+Lab check L1 is the drill for it on PVE 9.2. **The run of 2026-11-16 was a part of it:** it created no VM and ran the read-only rows, the `/pool` grant and the token-create probes; the two disk-attach steps are still to run ([results](#l1-results)). As designed, L1 uses three scratch VMs on one node and the boot store, in `proxcloud-seed`, `proxcloud-system` and a tenant pool, destroyed afterwards. The checks above must be green; `pveum user token permissions` for the portal token must be empty on both platform pools and `csi@pve csi` is empty on `proxcloud-seed` but holds `Datastore.Allocate` on `/storage/<bootStorage>`; `capmox@pve capi` must see one ISO store. The CSI token attaches the seed-pool VM's disk to the `proxcloud-system` one (`PUT /nodes/<node>/qemu/<vmid>/config` with `scsi9=<bootStorage>:vm-<seed-pool vmid>-disk-0`), which PVE is expected to allow. Then a drill with the portal token, reverted afterwards: grant `capmox@pve` `ProxCloudPlatform` on `/pool` and read its effective rights on `/pool/proxcloud-seed`, which must stay `ProxCloudCAPI`; grant its own user and token `PVEDatastoreAdmin` on `/storage/<bootStorage>`, read `pveum user token permissions proxcloud@pve platform --path /storage/<bootStorage>`, and attach the seed-pool VM's disk to the tenant one, which PVE is expected to allow; and try `POST /access/users/root@pam/token/x`, to learn whether PVE lets it mint for `root@pam`. After this change the first and the last of these must answer 403 ([the re-drill](#the-re-drill-still-to-run)).
 
 #### L1 results
 
-> **Not yet measured on the lab.** L1 has not run. No row below is a result; each stays "not measured" until the drill has run and its output is recorded here.
+> **Measured on 2026-11-16 on the lab (`pve-manager/9.2.26`, three nested nodes), with the grant as it was before this change: `ProxCloudKubeMint` (`User.Modify Permissions.Modify`) on `/access/groups` and on `/pool`.** The portal token there was `proxcloud@pve!m0`. Rows marked "not run" were not part of that run. Nothing has been measured with the grant on `/access/groups/proxcloud-kube`, or without the row on `/pool`, yet: the re-drill after this change is still to run.
 
-| Step of the drill | Expected | Measured |
+| Step of the drill | Expected | Measured (2026-11-16, PVE 9.2.26, old grant) |
 |---|---|---|
-| `pveum user token permissions proxcloud@pve platform` on `/pool/proxcloud-system` and `/pool/proxcloud-seed` | empty | not measured |
-| `pveum user token permissions csi@pve csi` on `/pool/proxcloud-seed` | empty | not measured |
-| `csi@pve!csi` on `/storage/<bootStorage>` | holds `Datastore.Allocate` | not measured |
-| ISO stores `capmox@pve!capi` sees | one, `isoStorage` | not measured |
-| CSI token attaches the seed-pool VM's disk to the `proxcloud-system` VM | allowed (the open point of [what the seed pool does not fence](#what-the-seed-pool-does-not-fence)) | not measured |
-| Portal token grants `capmox@pve` `ProxCloudPlatform` on `/pool`; effective rights of `capmox@pve` on `/pool/proxcloud-seed` | still `ProxCloudCAPI` | not measured |
-| Portal token grants itself `PVEDatastoreAdmin` on `/storage/<bootStorage>`, then attaches the seed-pool VM's disk to the tenant VM | allowed (accepted in A8) | not measured |
-| Portal token calls `POST /access/users/root@pam/token/x` | unknown: the drill is to find out | not measured |
+| `pveum user token permissions` for the portal token on `/pool/proxcloud-system` and `/pool/proxcloud-seed` | empty | empty on both |
+| `pveum user token permissions csi@pve csi` on `/pool/proxcloud-seed` | empty | empty |
+| `csi@pve!csi` on `/storage/<bootStorage>` | holds `Datastore.Allocate` | its rows are `ProxCloudCSI` on `/pool/proxcloud-system` and on the boot store (`local-zfs`); nothing on `/`, `/pool`, `/storage`, `/vms`, `/sdn/zones`, `/nodes` |
+| ISO stores `capmox@pve!capi` sees | one, `isoStorage` | one, `local` |
+| CSI token attaches the seed-pool VM's disk to the `proxcloud-system` VM | allowed (the open point of [what the seed pool does not fence](#what-the-seed-pool-does-not-fence)) | not run |
+| Portal token grants `capmox@pve` `ProxCloudPlatform` on `/pool` (`PUT /access/acl`); effective rights of `capmox@pve` and `capmox@pve!capi` on `/pool/proxcloud-seed` and `/pool/proxcloud-system` | still `ProxCloudCAPI` | grant accepted (HTTP 200); `ProxCloudCAPI` (19 privileges) on both pools for both, unchanged; `capmox@pve` on `/pool` itself rose to 33. Reverted with the portal token (HTTP 200); the ACL list was byte-equal to the one before (102 rows) |
+| Portal token grants itself `PVEDatastoreAdmin` on `/storage/<bootStorage>`, then attaches the seed-pool VM's disk to the tenant VM | allowed (accepted in A8) | not run |
+| Portal token calls `POST /access/users/root@pam/token/l1probe` (privilege separated) | unknown: the drill was to find out | **allowed: HTTP 200, token `root@pam!l1probe` created**, privilege separated, no ACL row. The same call for `capmox@pve` and for `proxcloud@pve`: HTTP 200, created. All three removed as root at once; token lists and ACL list back to the state before |
+| The same without privilege separation (`privsep=0`, full root) | not part of the drill | **not tried**: no full-root credential was created, even for a moment |
+| Portal token's effective privileges on `/nodes` | `PVEAuditor` and `Permissions.Modify` (the `ProxCloudKubeMint` row, propagate 0) | the 7 privileges of `PVEAuditor` only, no `Permissions.Modify`, though the row `/nodes proxcloud@pve!m0 ProxCloudKubeMint` exists. Explained from the PVE source afterwards, not measured again: a privilege held without propagate comes back with value 0 (`PVE::RPCEnvironment::permissions` maps each privilege to its propagate bit, and `pveum` prints it without `(*)`), so a reading that keeps only true values drops it. The ACL write on `/nodes` of every cluster create on that lab passes, which needs the privilege. The re-drill reads the names, not the values |
+
+#### The re-drill, still to run
+
+Not run yet. It needs `libpve-access-control` 9.2.1 or later on every node (`pveversion -v | grep access-control`), the lab's two portal tokens moved (the script for `proxcloud@pve!m0` and `make upgrade` for `proxcloud@pve!platform`, in either order), and a copy of `pveum acl list` and of the token lists taken before. Each call is made with the portal token unless it says root.
+
+| Step | Expected |
+|---|---|
+| After the first of the two migrations | it ends with `NOT FINISHED` naming the other token; `pveum role list` still shows `User.Modify` in `ProxCloudKubeMint`; a cluster create with either token works |
+| After the second | no `NOT FINISHED`; `ProxCloudKubeMint` is `Permissions.Modify` alone; `mint-scope` and `privileges:kubemint` are ok for both providers |
+| `pveum user token permissions` for the portal token on `/access/groups`, `/access/groups/proxcloud-kube`, `/pool`, `/nodes` (root) | neither privilege; `User.Modify` without `(*)`; `Pool.Allocate` and no `Permissions.Modify`; `Permissions.Modify` without `(*)` |
+| `POST /access/users/root@pam/token/l1probe`, the same for `proxcloud@pve` and `images@pve` | 403, no token |
+| `POST` then `DELETE /access/users/capmox@pve/token/l1probe`, the same for `csi@pve` | 200 and 200 |
+| `POST /access/users/capmox@pve/token/l1probe0` with `privsep=0` | 403. If it answers 200, delete the token as root at once: the node is older than 9.2.1 |
+| `PUT /access/users/root@pam` with `groups=proxcloud-kube&append=1` | 403 |
+| `PUT /access/acl` `path=/access/groups roles=ProxCloudKubeToken` for its own token | 403 |
+| `PUT /access/acl` `path=/pool roles=ProxCloudPlatform users=capmox@pve` (200 on 2026-11-16), and `roles=Administrator` | 403 both |
+| `PUT /access/acl` `path=/pool/<a tenant pool> roles=ProxCloudCAPI tokens=capmox@pve!l1probe` (create the token first) | 200 |
+| The same with `roles=Administrator`, and `roles=ProxCloudCAPI` on `path=/pool/proxcloud-system` | 400 ("requires 'Permissions.Modify' or superset of privileges"); 403 |
+| Create one tenant cluster in the console, then delete it | both succeed; `capmox@pve!<clusterId>` exists in between and is gone after |
+| As root `pveum user modify csi@pve --groups ''`, then the Check step | `mint-scope` fails and names `csi@pve`; then `pveum user modify csi@pve --groups proxcloud-kube --append 1` and it passes |
+| The two disk-attach steps of L1 | allowed (they are the open points of A8 and of the seed pool), not run on 2026-11-16 |
+
+Afterwards: delete every `l1probe` token (as root if the portal token's delete fails), and compare `pveum acl list` with the copy: the only differences are the four old `ProxCloudKubeMint` rows per portal token gone and the two `ProxCloudKubeToken` rows per portal token on `/access/groups/proxcloud-kube` added.
 
 ## pveum commands
 
@@ -443,7 +564,8 @@ Run these on any node (cluster config is shared). Replace the `<…>` placeholde
 pveum role add ProxCloudPlatform --privs "Sys.Audit Sys.Console Sys.Modify Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Backup VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Console VM.GuestAgent.Audit VM.GuestAgent.Unrestricted VM.Migrate VM.PowerMgmt VM.Replicate VM.Snapshot VM.Snapshot.Rollback SDN.Allocate SDN.Audit SDN.Use Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit Mapping.Audit Mapping.Use"
 pveum role add ProxCloudCAPI --privs "Sys.Audit Pool.Audit VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.GuestAgent.Audit VM.Migrate VM.PowerMgmt Datastore.AllocateSpace Datastore.Audit SDN.Use"
 pveum role add ProxCloudCSI --privs "VM.Audit VM.Config.Disk Datastore.Allocate Datastore.AllocateSpace Datastore.Audit"
-pveum role add ProxCloudKubeMint --privs "User.Modify Permissions.Modify"                   # mode: split
+pveum role add ProxCloudKubeMint --privs "Permissions.Modify"                               # mode: split
+pveum role add ProxCloudKubeToken --privs "User.Modify"                                     # mode: split
 pveum role add ProxCloudSandboxGuard --privs "Pool.Audit VM.Audit VM.Config.Network"          # sandbox.enabled
 pveum role add ProxCloudSandboxEntry --privs "Pool.Audit VM.Audit VM.Config.Network VM.GuestAgent.Audit VM.GuestAgent.Unrestricted"  # entry appliance
 pveum role add ProxCloudImages --privs "Sys.Audit Sys.AccessNetwork Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Console VM.GuestAgent.Audit VM.PowerMgmt Datastore.Allocate Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit SDN.Use"

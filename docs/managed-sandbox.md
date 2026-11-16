@@ -498,8 +498,8 @@ another copy (24 copies of the node-address rule for the sandbox subnet on the l
 
 The portal token keeps its inherited roles everywhere except the sandbox pool, where stage 10 gives `proxcloud@pve`
 and `proxcloud@pve!platform` the role `ProxCloudSandboxGuard` (`Pool.Audit VM.Audit VM.Config.Network`). An ACL on a
-path replaces what the parent passes down, so on the pool and its VMs the token loses `ProxCloudPlatform` and
-`ProxCloudKubeMint` from `/pool`: no guest agent (`VM.GuestAgent.Unrestricted`), console, disk, power, snapshot, backup
+path replaces what the parent passes down, so on the pool and its VMs the token loses `ProxCloudPlatform`
+from `/pool`: no guest agent (`VM.GuestAgent.Unrestricted`), console, disk, power, snapshot, backup
 or ACL rights on a VM that runs tenant code. The CSI tokens and the services cluster's own CAPMOX token get nothing
 there: `csi@pve` as a user row (its tokens are privilege-separated, so the row caps them), and `capmox@pve!capi` as a
 token row — the sandbox cluster runs through `capmox@pve!sandbox`, so the services CAPMOX token never manages the pool,

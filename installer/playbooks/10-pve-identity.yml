@@ -47,13 +47,20 @@
     # mode=split: what the services cluster and the per-cluster tokens of tenant clusters hang off.
     # Unexercised on a lab so far: see "Managed Kubernetes" in docs/proxmox-permissions.md.
     split_roles:
-      ProxCloudKubeMint: "User.Modify Permissions.Modify"
+      ProxCloudKubeMint: "Permissions.Modify"
+      ProxCloudKubeToken: "User.Modify"
+    # The only users the portal token may create and delete tokens for (pve.KubeMintGroupMembers). Its User.Modify sits
+    # on this group's path: on /access/groups itself PVE lets the holder mint a token for every user, root@pam included.
+    mint_group: proxcloud-kube
+    mint_old_paths: [/access/groups, /pool]
+    mint_others: "{{ pc_id.results[3].json.data | selectattr('path', 'eq', '/access/groups') | selectattr('roleid', 'eq', 'ProxCloudKubeMint') | rejectattr('ugid', 'in', ['proxcloud@pve', 'proxcloud@pve!platform']) | map(attribute='ugid') | list }}"
+    mint_group_users: [capmox@pve, csi@pve]
     # The same rows as pve.ManagedACLs (internal/cloud/pve/access.go), which the managed-services script of the console
     # writes, without its proxcloud-seed rows and with the two of the CSI gateway; a test keeps them equal.
     split_acls:
       # The services cluster's CAPMOX token reaches its own pool only, never a tenant pool. The user keeps /pool for the
       # tenant clusters' tokens and holds its own row on the services pool: a more specific row wins, so a grant on
-      # /pool written later for this user (ProxCloudKubeMint can write one) does not reach the services VMs.
+      # /pool written later for this user does not reach the services VMs.
       - {path: /, role: ProxCloudCAPI, propagate: 0, user: capmox@pve, token: capmox@pve!capi}
       - {path: /nodes, role: ProxCloudCAPI, propagate: 1, user: capmox@pve, token: capmox@pve!capi}
       - {path: /pool, role: ProxCloudCAPI, propagate: 1, user: capmox@pve, token: ""}
@@ -76,8 +83,9 @@
       # ownership itself, so it holds ProxCloudCSI on all of /pool and /storage.
       - {path: /pool, role: ProxCloudCSI, propagate: 1, user: csi@pve, token: csi@pve!gateway}
       - {path: /storage, role: ProxCloudCSI, propagate: 1, user: csi@pve, token: csi@pve!gateway}
-      - {path: /access/groups, role: ProxCloudKubeMint, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
-      - {path: /pool, role: ProxCloudKubeMint, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
+      # The portal's mint grant. No ProxCloudKubeMint on /pool: on /pool/<pool> PVE takes Pool.Allocate for a role whose
+      # privileges the caller holds there, and ProxCloudPlatform on /pool holds those of the roles the portal writes.
+      - {path: /access/groups/proxcloud-kube, role: ProxCloudKubeToken, propagate: 0, user: proxcloud@pve, token: proxcloud@pve!platform}
       - {path: /storage, role: ProxCloudKubeMint, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
       - {path: /sdn/zones, role: ProxCloudKubeMint, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
       # An ACL on a path replaces what its parent passes down, so the mint grant alone takes SDN.* away from /sdn/zones.
@@ -96,7 +104,7 @@
       - {path: "/storage/{{ pc_sandbox_iso_storage }}", role: PVEDatastoreAdmin, propagate: 1, user: "", token: "{{ pc_sandbox_token_id }}"}
       - {path: "/sdn/zones/{{ pc_sandbox_zone }}/{{ pc.sandbox.network.vnet }}", role: ProxCloudCAPI, propagate: 1, user: "", token: "{{ pc_sandbox_token_id }}"}
       # The portal's sync only reads the workers and sets their firewall there (docs/managed-sandbox.md §2). This row
-      # replaces, on the sandbox pool alone, what the portal inherits from /pool (ProxCloudPlatform, ProxCloudKubeMint):
+      # replaces, on the sandbox pool alone, what the portal inherits from /pool (ProxCloudPlatform):
       # no guest agent, console, disk, power or ACL rights on a VM that runs tenant code.
       - {path: "/pool/{{ pc.sandbox.pool }}", role: ProxCloudSandboxGuard, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
       # The CSI tokens hold ProxCloudCSI on /pool for tenant clusters; nothing of theirs is in the sandbox pool.
@@ -125,7 +133,7 @@
     - name: Read what exists
       check_mode: false
       ansible.builtin.uri: {url: "{{ pc_api }}/{{ item }}"}
-      loop: [access/roles, "access/users?full=1", pools, access/acl]
+      loop: [access/roles, "access/users?full=1", pools, access/acl, access/groups]
       register: pc_id
 
     - name: Index what exists
@@ -145,6 +153,8 @@
       loop: "{{ (roles | combine(split_roles if pc.mode == 'split' else {})) | dict2items }}"
       loop_control: {label: "{{ item.key }}"}
 
+    # Not ProxCloudKubeMint: on an older install the portal creates cluster tokens through that role's User.Modify
+    # until its grant on the group is written, so the role is aligned after "Grant the missing ACLs", below.
     - name: Align a role's privileges
       when:
         - item.key in have_roles
@@ -155,7 +165,7 @@
         body_format: form-urlencoded
         body: {privs: "{{ item.value | split | join(',') }}"}
       changed_when: true
-      loop: "{{ (roles | combine(split_roles if pc.mode == 'split' else {})) | dict2items }}"
+      loop: "{{ (roles | combine(split_roles if pc.mode == 'split' else {})) | dict2items | rejectattr('key', 'eq', 'ProxCloudKubeMint') }}"
       loop_control: {label: "{{ item.key }}"}
 
     - name: Create a pool
@@ -179,6 +189,30 @@
       changed_when: true
       loop: "{{ users | dict2items }}"
       loop_control: {label: "{{ item.key }}"}
+
+    - name: Create the group of the users the portal mints tokens for
+      when:
+        - pc.mode == 'split'
+        - mint_group not in (pc_id.results[4].json.data | map(attribute='groupid') | list)
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/access/groups"
+        method: POST
+        body_format: form-urlencoded
+        body: {groupid: "{{ mint_group }}", comment: "ProxCloud: users the portal mints cluster tokens for"}
+      changed_when: true
+
+    # Its own step: a user that exists is not created again, and append keeps the groups an operator gave it.
+    - name: Put a user in that group
+      when:
+        - pc.mode == 'split'
+        - mint_group not in (pc_id.results[1].json.data | selectattr('userid', 'eq', item) | map(attribute='groups', default='') | join(',') | split(','))
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/access/users/{{ item }}"
+        method: PUT
+        body_format: form-urlencoded
+        body: {groups: "{{ mint_group }}", append: 1}
+      changed_when: true
+      loop: "{{ mint_group_users }}"
 
     - name: Create a token
       when: item.value.token not in (have_users[item.key] | default([], true) | map(attribute='tokenid') | list)
@@ -268,6 +302,84 @@
       changed_when: true
       loop: "{{ pc_id.results[3].json.data | pc_acl_missing(acls + nas_acls + (split_acls + nas_mint_acls if pc.mode == 'split' else []) + (sandbox_acls + sandbox_iso_user_acls if pc_sandbox_on else []) + (sandbox_entry_acls if pc_entry_on else [])) }}"
       loop_control: {label: "{{ item.path }} {{ item.roles }}"}
+
+    # Older installs put the mint role on /access/groups, where its User.Modify let the portal token create a token for
+    # every user of the cluster, root@pam included, and on /pool, where its Permissions.Modify let it write any role on
+    # every pool (pve.KubeMintOldPaths). Taken off after the grant on the group above, so minting never stops, and
+    # before the role loses User.Modify, below. Exactly the installer's own four rows.
+    - name: Take the portal's mint role off /access/groups and /pool
+      when:
+        - pc.mode == 'split'
+        - item.path in mint_old_paths
+        - item.roleid == 'ProxCloudKubeMint'
+        - item.ugid in ['proxcloud@pve', 'proxcloud@pve!platform']
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/access/acl"
+        method: PUT
+        body_format: form-urlencoded
+        body: "{{ {'path': item.path, 'roles': item.roleid, 'delete': 1} | combine({('tokens' if item.type == 'token' else 'users'): item.ugid}) }}"
+      changed_when: true
+      loop: "{{ pc_id.results[3].json.data }}"
+      loop_control: {label: "{{ item.path }} {{ item.ugid }} {{ item.roleid }}"}
+
+    # The role is the cluster's, so User.Modify leaves it for every holder at once: only when no other principal still
+    # holds the role on /access/groups (mint_others). Such a row is another portal token (a second token of
+    # proxcloud@pve, another portal's user and token) that creates cluster tokens through it and has no grant on the
+    # group yet; a token of proxcloud@pve keeps minting meanwhile through the user's new row on the group.
+    - name: Take User.Modify out of the mint role
+      when:
+        - pc.mode == 'split'
+        - "'ProxCloudKubeMint' in have_roles"
+        - (have_roles['ProxCloudKubeMint'] | split(',') | sort) != (split_roles.ProxCloudKubeMint | split | sort)
+        - mint_others | length == 0
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/access/roles/ProxCloudKubeMint"
+        method: PUT
+        body_format: form-urlencoded
+        body: {privs: "{{ split_roles.ProxCloudKubeMint | split | join(',') }}"}
+      changed_when: true
+
+    # Reported and not fatal: the row is another portal's to move, and this site's own token is checked next.
+    - name: Report the other portal tokens that still create tokens through /access/groups
+      when:
+        - pc.mode == 'split'
+        - mint_others | length > 0
+      ansible.builtin.fail:
+        msg: >-
+          NOT FINISHED: ProxCloudKubeMint keeps User.Modify, because [{{ mint_others | join(', ') }}] still hold that role
+          on /access/groups. Each is another portal token, or its user, that creates cluster tokens through that row and
+          would stop if the role lost User.Modify now. Run the managed-services script for each such token
+          (GET /api/v1/admin/setup/proxmox-script?managedServices=true&bootStorage=<store>&tokenId=<its id>, as root on a
+          node); its last run takes User.Modify out of the role. Until then a token named here whose user is named too can
+          create an API token for any user of the cluster, root@pam included. A row no portal uses:
+          pveum acl delete /access/groups --users <user> (or --tokens '<token id>') --roles ProxCloudKubeMint, then
+          make upgrade again (docs/proxmox-permissions.md, "An existing site").
+      ignore_errors: true
+
+    # Asked of PVE (user ∩ token, inheritance from / and /access, groups), not worked out from the rows.
+    - name: Read what the portal token may do on /access/groups and /pool
+      when: pc.mode == 'split'
+      check_mode: false
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/access/permissions?{{ {'userid': 'proxcloud@pve!platform', 'path': item} | urlencode }}"
+      loop: "{{ mint_old_paths }}"
+      register: pc_mint_reach
+
+    - name: Check the portal token cannot mint a token for every user nor write any role on every pool
+      when: pc.mode == 'split'
+      vars:
+        have: "{{ (item.json.data.values() | first | default({})).keys() | select('in', ['User.Modify', 'Permissions.Modify']) | sort }}"
+      ansible.builtin.assert:
+        that: have == [] or ansible_check_mode
+        fail_msg: >-
+          proxcloud@pve!platform holds [{{ have | join(', ') }}] on {{ item.item }}: on /access/groups a stolen portal token
+          can with it create an API token for any user of the cluster, root@pam included, and on /pool write any role on
+          every pool. Another row grants it: pveum acl list | grep -F proxcloud@pve, then pveum acl delete <path>
+          --users|--tokens <id> --roles <role> for a row on /, /access, /access/groups or /pool with a role other than
+          ProxCloudPlatform (docs/proxmox-permissions.md).
+        success_msg: "proxcloud@pve!platform holds neither User.Modify nor Permissions.Modify on {{ item.item }}"
+      loop: "{{ pc_mint_reach.results }}"
+      loop_control: {label: "{{ item.item }}"}
 
     # Older installs gave the services token /storage (propagate) and the ISO role on the NAS template store, so it
     # saw every iso store. Taken off after the grants above, so the token never lacks its boot or ISO store.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -18,6 +19,7 @@ type preflightPVE struct {
 	perms   map[string]map[string][]string
 	writes  []string
 	bootISO bool   // the boot store local-lvm takes ISO images too
+	outside string // a service user that is not in the group proxcloud-kube: PVE refuses to show it to the portal token
 	vnets   string // the cluster's vnets, [] when empty
 }
 
@@ -51,7 +53,8 @@ func (f *preflightPVE) serve(w http.ResponseWriter, r *http.Request) {
 			{"path":"/storage","type":"token","ugid":"capmox@pve!capi","roleid":"ProxCloudCAPI","propagate":1},
 			{"path":"/pool","type":"token","ugid":"capmox@pve!capi","roleid":"ProxCloudCAPI","propagate":1},
 			{"path":"/storage/local","type":"token","ugid":"capmox@pve!capi","roleid":"PVEDatastoreAdmin","propagate":0}]`,
-		"/access/users/capmox@pve": `{"groups":[]}`,
+		"/access/users/capmox@pve": `{"groups":["proxcloud-kube"]}`,
+		"/access/users/csi@pve":    `{"groups":["proxcloud-kube","ops"]}`,
 		"/access/roles":            `[{"roleid":"PVEDatastoreAdmin","privs":"Datastore.Allocate,Datastore.AllocateSpace,Datastore.AllocateTemplate,Datastore.Audit"}]`,
 	}
 	if f.bootISO {
@@ -70,6 +73,11 @@ func (f *preflightPVE) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		b, _ := json.Marshal(map[string]any{p: privs})
 		body, ok = string(b), true
+	}
+	if f.outside != "" && path == "/access/users/"+f.outside {
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"data":null}`)
+		return
 	}
 	if !ok {
 		w.WriteHeader(http.StatusNotImplemented)
@@ -126,8 +134,8 @@ func TestPreflight(t *testing.T) {
 	if !OK(checks) {
 		t.Fatalf("a set-up site: %+v", checks)
 	}
-	if got := len(checks); got != 15 {
-		t.Errorf("%d rows, want 15: %+v", got, checks)
+	if got := len(checks); got != 16 {
+		t.Errorf("%d rows, want 16: %+v", got, checks)
 	}
 	if c := checkMap(checks)["isolation"]; !strings.Contains(c.Message, "first tenant network") {
 		t.Errorf("no tenant network yet: %+v", c)
@@ -149,6 +157,34 @@ func TestPreflight(t *testing.T) {
 		t.Errorf("an enabled provider on a cluster with another portal's tenant network: %+v", c)
 	}
 	f.vnets = ""
+
+	// A site an earlier script set up: the mint role on /access/groups, which reaches every user. Minting works there
+	// (the group's path inherits it), so only this row tells the operator.
+	f.perms[pve.DefaultPlatformTokenID]["/access/groups"] = []string{"User.Modify", "Permissions.Modify"}
+	if c := checkMap(pf.Run(ctx)); c["mint-scope"].Status != CheckFail || c["privileges:kubemint"].Status != CheckOK ||
+		!strings.Contains(c["mint-scope"].Message, "the portal token holds User.Modify, Permissions.Modify on /access/groups") ||
+		!strings.Contains(c["mint-scope"].Message, "Run the managed-services script again as root on a node (GET /api/v1/admin/setup/proxmox-script?managedServices=true&bootStorage=<store>") {
+		t.Errorf("the mint role on /access/groups: %+v, %+v", c["mint-scope"], c["privileges:kubemint"])
+	}
+	delete(f.perms[pve.DefaultPlatformTokenID], "/access/groups")
+	// An operator took csi@pve out of the group (pveum user modify without --append): the privileges read complete,
+	// yet PVE refuses every token delete for it, so a cluster release fails.
+	f.outside = "csi@pve"
+	if c := checkMap(pf.Run(ctx)); c["mint-scope"].Status != CheckFail || c["privileges:kubemint"].Status != CheckOK ||
+		!strings.Contains(c["mint-scope"].Message, "csi@pve is not in the group proxcloud-kube") ||
+		!strings.Contains(c["mint-scope"].Message, "pveum user modify csi@pve --groups proxcloud-kube --append 1") ||
+		strings.Contains(c["mint-scope"].Message, "capmox@pve") {
+		t.Errorf("a service user outside the group: %+v", c["mint-scope"])
+	}
+	f.outside = ""
+	// The same site's row on /pool: the portal needs no Permissions.Modify there.
+	onPool := f.perms[pve.DefaultPlatformTokenID]["/pool"]
+	f.perms[pve.DefaultPlatformTokenID]["/pool"] = append(slices.Clone(onPool), "Permissions.Modify")
+	if c := checkMap(pf.Run(ctx)); c["mint-scope"].Status != CheckFail || c["privileges:kubemint"].Status != CheckOK ||
+		!strings.Contains(c["mint-scope"].Message, "the portal token holds Permissions.Modify on /pool: ") {
+		t.Errorf("the mint role on /pool: %+v, %+v", c["mint-scope"], c["privileges:kubemint"])
+	}
+	f.perms[pve.DefaultPlatformTokenID]["/pool"] = onPool
 
 	capi["/pool/"+pve.SeedPool] = []string{"VM.Audit"}
 	f.perms[pve.DefaultPlatformTokenID]["/pool/"+pve.SeedPool] = []string{"VM.Audit"}
@@ -183,6 +219,10 @@ func TestPreflight(t *testing.T) {
 		if c := got[id]; c.Status != CheckFail || !strings.Contains(c.Message, want) {
 			t.Errorf("%s: want a failure naming %q, got %+v", id, want, c)
 		}
+	}
+	// The script's address as the API serves it: /api/v1 and the boot store, without which it answers 400.
+	if m := got["privileges:kubemint"].Message; !strings.Contains(m, "GET /api/v1/admin/setup/proxmox-script?managedServices=true&bootStorage="+s.Boot+",") {
+		t.Errorf("privileges:kubemint does not say where the script is: %s", m)
 	}
 	// Both name the row to remove and the command, and never a row the script writes (the token's own on the ISO store).
 	if m := got["token-scope"].Message; !strings.Contains(m, "pveum acl delete /pool --tokens 'capmox@pve!capi' --roles ProxCloudCAPI") || strings.Contains(m, "delete /storage") {

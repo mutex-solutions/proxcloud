@@ -41,6 +41,26 @@ Files: `deploy/platform/platform-bom.yaml`, `deploy/platform/charts-mirror.yaml`
 `installer/playbooks/templates/argocd-helmchart.yml.j2`,
 `installer/playbooks/templates/apps-operators.yml.j2`, `docs/ci-release.md`, `docs/managed-services.md`,
 `docs/api.md`, `docs/adr/0009-managed-services-platform-lifecycle.md`, `CHANGELOG.md`.
+## 2026-11-16: The portal mints tokens for its two service users only
+
+**What changed:** no container and no relationship, so no diagram. The Proxmox rows behind
+"Portal API to Proxmox: mint the per-cluster token" are narrower. `User.Modify` moved out of
+`ProxCloudKubeMint` into a role of its own, `ProxCloudKubeToken`, granted on
+`/access/groups/proxcloud-kube` (a new group holding `capmox@pve` and `csi@pve`) instead of
+`/access/groups`; `ProxCloudKubeMint` keeps `Permissions.Modify` on `/storage`,
+`/sdn/zones` and `/nodes` and leaves `/pool`, where the portal writes the cluster token's
+rows with its own `ProxCloudPlatform` rights. The setup script and installer stage 10 write
+the group and the row and remove the old rows; the preflight gains the row `mint-scope` and
+the connection test a warning of the same name (`pve.KubeMintForbidden`). The row in
+[c2-containers.md](c2-containers.md) "Services cluster to Proxmox" says so.
+
+**Why:** PVE takes `User.Modify` on `/access/groups` for every user of the cluster. The lab
+drill of 2026-11-16 (PVE 9.2.26) showed the portal token creating an API token for
+`root@pam`, which ADR 0009 A8 had not described or accepted. On a group's path the right
+covers that group's members only. `Permissions.Modify` on `/pool` served no product call
+and let a stolen token write any role on every pool.
+
+**Views updated:** none (one relationship row of C2, text only).
 
 ## 2026-11-16: Correction to the PR 15 (P3) entry: nothing upgrades the platform in place
 

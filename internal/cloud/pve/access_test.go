@@ -217,6 +217,28 @@ func TestManagedACLsGrantThePrivilegeTables(t *testing.T) {
 			}
 		}
 	}
+	// The mint grant: User.Modify on the group of the portal's service users and nowhere else, nothing that lets
+	// the portal token write itself a row under /access, and no Permissions.Modify on /pool (the cluster token's rows
+	// on a pool pass on Pool.Allocate and the privileges KubeMintPrivileges checks there). On /access/groups PVE takes
+	// User.Modify for every user of the cluster, root@pam included (lab, PVE 9.2.26: POST
+	// /access/users/root@pam/token/x answered 200).
+	for _, chk := range KubeMintForbidden {
+		have := effective(acls, DefaultPlatformTokenID, chk.Path)
+		for _, p := range chk.Privs {
+			if have[p] {
+				t.Errorf("the portal token holds %s on %s", p, chk.Path)
+			}
+		}
+	}
+	for _, a := range ManagedACLs(DefaultPlatformTokenID, boot, iso, imp) {
+		group := a.Path == "/access/groups/"+KubeMintGroup
+		if slices.Contains(roles[a.Role], "User.Modify") != group || group && (a.Role != KubeTokenRole || len(roles[a.Role]) != 1) {
+			t.Errorf("User.Modify belongs on /access/groups/%s alone, alone in its role: %+v", KubeMintGroup, a)
+		}
+	}
+	if !slices.Equal(KubeMintGroupMembers, []string{"capmox@pve", "csi@pve"}) {
+		t.Errorf("the portal may mint for %v, want its two service users alone", KubeMintGroupMembers)
+	}
 	// Nothing where a token must hold nothing: the portal on both platform pools, the CSI token on the seed's pool,
 	// the platform tokens on a tenant pool and on another store. The seed's pool fences the seed VM only: its disk is on
 	// boot, where CSIPrivileges itself wants Datastore.Allocate, and PVE lets that open every volume on the store.
@@ -230,9 +252,9 @@ func TestManagedACLsGrantThePrivilegeTables(t *testing.T) {
 			t.Errorf("%s holds %v on %s, want nothing", c.tokenID, slices.Sorted(maps.Keys(have)), c.path)
 		}
 	}
-	// A stolen portal token can mint a token for capmox@pve or csi@pve with a /pool row of its own and grant the user
-	// /pool too (ProxCloudKubeMint). The users' own rows on the platform pools still cap such a token there; the
-	// existing capi token keeps exactly its role.
+	// A site that still holds ProxCloudKubeMint on /pool: a stolen portal token can mint a token for capmox@pve or
+	// csi@pve with a /pool row of its own and grant the user /pool too. The users' own rows on the platform pools
+	// still cap such a token there; the existing capi token keeps exactly its role.
 	rogue := rows(ManagedACL{"/pool", PlatformRole, true, capiUser, "capmox@pve!x"}, ManagedACL{"/pool", PlatformRole, true, csiUser, "csi@pve!x"})
 	for _, c := range []struct{ tokenID, pool, atMost string }{
 		{"capmox@pve!x", SystemPool, roleCAPI}, {"capmox@pve!x", SeedPool, roleCAPI},
@@ -251,5 +273,24 @@ func TestManagedACLsGrantThePrivilegeTables(t *testing.T) {
 		if have := effective(rogue, CAPITokenID, "/pool/"+pool); len(have) != len(ManagedRoles[0].Privs) {
 			t.Errorf("after a /pool grant %s holds %v on /pool/%s, want %s", CAPITokenID, slices.Sorted(maps.Keys(have)), pool, roleCAPI)
 		}
+	}
+}
+
+// HeldPrivileges names what a token holds of a list, per path: the opposite of MissingPrivileges.
+func TestHeldPrivileges(t *testing.T) {
+	perms := map[string]string{"/access/groups": `"User.Modify":1,"Permissions.Modify":1,"Sys.Audit":1`, "/access": `"Sys.Audit":1`, "/": ``}
+	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/access/permissions": func(w http.ResponseWriter, r *http.Request) {
+			p := r.URL.Query().Get("path")
+			fmt.Fprintf(w, `{"data":{%q:{%s}}}`, p, perms[p])
+		},
+	})
+	got, err := c.HeldPrivileges(context.Background(), KubeMintForbidden)
+	if want := []string{"User.Modify, Permissions.Modify on /access/groups"}; err != nil || !slices.Equal(got, want) {
+		t.Errorf("an old site: %q, %v; want %q", got, err, want)
+	}
+	perms["/access/groups"] = `"Sys.Audit":1`
+	if got, err := c.HeldPrivileges(context.Background(), KubeMintForbidden); err != nil || len(got) != 0 {
+		t.Errorf("a narrowed site: %q, %v; want nothing", got, err)
 	}
 }

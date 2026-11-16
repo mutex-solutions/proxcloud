@@ -24,7 +24,7 @@ const (
 )
 
 // Check is one row of the preflight. The ids are part of the API (docs/api.md): flags, spec, network, isolation,
-// credentials, privileges:capi, privileges:csi, privileges:kubemint, pool-fence, token-scope, iso-store-visibility,
+// credentials, privileges:capi, privileges:csi, privileges:kubemint, mint-scope, pool-fence, token-scope, iso-store-visibility,
 // boot-iso-grant, boot-iso, placement, images. A run's first stage fails preflight_failed with the failed rows as its items, or
 // isolation_not_enforced when isolation is the only one.
 type Check struct {
@@ -161,13 +161,26 @@ func (p Preflight) Run(ctx context.Context) []Check {
 			return
 		}
 		for i := range missing {
-			missing[i] = who + " lacks " + missing[i] + " (run the managed-services script again: GET /admin/setup/proxmox-script?managedServices=true)"
+			missing[i] = who + " lacks " + missing[i] + " (run the managed-services script again: GET /api/v1/admin/setup/proxmox-script?managedServices=true&bootStorage=" + s.Storage.Boot + ", or step 2 of the Managed services page)"
 		}
 		row(id, missing, who+" holds what it needs.")
 	}
 	privs("privileges:capi", p.CAPI, pve.CAPITokenID, pve.CAPIPrivileges(s.Storage.Boot, s.Storage.ISO))
 	privs("privileges:csi", p.CSI, pve.CSITokenID, pve.CSIPrivileges(s.Storage.Boot))
 	privs("privileges:kubemint", p.Portal.C, "the portal token", pve.KubeMintPrivileges(p.ProviderImport))
+
+	// The mint grant reaches the users of pve.KubeMintGroup alone. On /access/groups itself (where sites set up before
+	// the group hold it) PVE lets the token create an API token for every user of the cluster, root@pam included.
+	// And only them: a service user outside the group fails every cluster create and release.
+	if held, err := p.Portal.C.HeldPrivileges(ctx, pve.KubeMintForbidden); err != nil {
+		row("mint-scope", readErr("the permissions of the portal token", err), "")
+	} else if len(held) > 0 {
+		row("mint-scope", []string{"the portal token holds " + strings.Join(held, "; ") + ": " + pve.KubeMintNarrowing}, "")
+	} else if outside, err := p.Portal.C.KubeMintGroupProblems(ctx); err != nil {
+		row("mint-scope", readErr("the users the portal token creates tokens for", err), "")
+	} else {
+		row("mint-scope", outside, "The portal token may create tokens for the users of the group "+pve.KubeMintGroup+" alone, and both are in it.")
+	}
 
 	// The fence: the portal token holds nothing on either platform pool, the CSI token nothing on the seed's.
 	var fence []string
