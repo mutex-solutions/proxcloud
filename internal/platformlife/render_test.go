@@ -724,3 +724,20 @@ func TestSeedUserDataParses(t *testing.T) {
 		}
 	}
 }
+
+// The kamaji chart ships in crds/ the three CRDs that kamaji-crds renders, and ArgoCD renders crds/ unless the source
+// says skipCrds: without it two self-healing Applications own the same CRDs and take them from each other at every
+// sync. Only kamaji-crds may render them.
+func TestOnlyKamajiCRDsRendersTheKamajiCRDs(t *testing.T) {
+	apps, err := Applications(embedded(t), renderInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range apps {
+		name := a["metadata"].(map[string]any)["name"].(string)
+		skip, has := a["spec"].(map[string]any)["source"].(map[string]any)["helm"].(map[string]any)["skipCrds"]
+		if want := name == ClusterName+"-kamaji"; has != want || (want && skip != true) {
+			t.Errorf("%s: helm.skipCrds = %v (set: %t), want set only on %s-kamaji", name, skip, has, ClusterName)
+		}
+	}
+}

@@ -848,6 +848,7 @@ applications:
         chart: kamaji
         helm:
           releaseName: kamaji
+          skipCrds: true
           valuesObject:
             defaultDatastoreName: default
             image:

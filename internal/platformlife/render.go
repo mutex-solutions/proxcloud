@@ -296,6 +296,9 @@ func Applications(b *BOM, in RenderInput) ([]map[string]any, error) {
 		if len(values) > 0 {
 			helm["valuesObject"] = values
 		}
+		if p.skipCRDs {
+			helm["skipCrds"] = true
+		}
 		server := destination(c.Cluster, in)
 		sync := map[string]any{
 			"automated": map[string]any{"prune": !c.Stateful, "selfHeal": true},
@@ -355,12 +358,14 @@ func labels(b *BOM, in RenderInput, component string) map[string]any {
 }
 
 // part is what the run adds to a component: values on top of the BOM's, the group a namespace-wide placement pins
-// ("" = none: the namespace exists already, another chart owns it, or a DaemonSet in it runs on every group), and
-// ignoreDifferences.
+// ("" = none: the namespace exists already, another chart owns it, or a DaemonSet in it runs on every group),
+// ignoreDifferences, and skipCRDs for a chart whose crds/ directory another component renders (ArgoCD renders crds/
+// unless told not to, and two Applications that own one CRD take it from each other at every self-heal).
 type part struct {
-	values map[string]any
-	pin    string
-	ignore []any
+	values   map[string]any
+	pin      string
+	ignore   []any
+	skipCRDs bool
 }
 
 // componentPart holds what each chart needs from a site, after services-platform.sh (installer stage 50). A component
@@ -425,7 +430,8 @@ func componentPart(b *BOM, c Component, in RenderInput) (part, error) {
 	case "workload/kamaji":
 		v := placementValues(group)
 		v["kamaji-etcd"], v["defaultDatastoreName"] = map[string]any{"deploy": false}, defaultDatastore
-		return part{values: v, pin: group}, nil
+		// The chart's crds/ holds the CRDs kamaji-crds renders; helm install skips existing ones, ArgoCD does not.
+		return part{values: v, pin: group, skipCRDs: true}, nil
 	case "workload/platform":
 		return part{
 			values: map[string]any{"platform": map[string]any{"enabled": true, "chartRepository": b.TenantCharts.Kubernetes.Repo,
