@@ -139,8 +139,18 @@ func TestPreflight(t *testing.T) {
 	// The mint role is checked on the provider's import store, not on the one of the settings ("local").
 	delete(f.perms[pve.DefaultPlatformTokenID], "/storage/nas-templates")
 	pf.Site.Blocked = nil
-	pf.CSI = nil
 	pf.Blocked = func(context.Context, string) (bool, error) { return true, nil }
+	// Each token is asked about each of the three paths: the CSI token on /storage, the CAPI token on /vms.
+	f.perms[pve.CSITokenID]["/storage"] = []string{"Datastore.Audit"}
+	f.perms[pve.CAPITokenID]["/vms"] = []string{"VM.Audit"}
+	scope := checkMap(pf.Run(ctx))["token-scope"]
+	for _, want := range []string{pve.CAPITokenID + " holds 2 privileges on /pool", pve.CAPITokenID + " holds 1 privileges on /vms", pve.CSITokenID + " holds 1 privileges on /storage"} {
+		if scope.Status != CheckFail || !strings.Contains(scope.Message, want) {
+			t.Errorf("token-scope: want a failure naming %q, got %+v", want, scope)
+		}
+	}
+	delete(f.perms[pve.CAPITokenID], "/vms")
+	pf.CSI = nil
 	got := checkMap(pf.Run(ctx))
 	for id, want := range map[string]string{
 		"privileges:capi":      "on /pool/" + pve.SeedPool,

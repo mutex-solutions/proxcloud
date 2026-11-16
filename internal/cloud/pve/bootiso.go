@@ -91,8 +91,10 @@ func (c *Client) ListACL(ctx context.Context) ([]ACLEntry, error) {
 // TokenACLRemoval says how to take from token what it holds on paths: one "pveum acl delete" per row of acls that
 // grants it there (a row on the path itself, or on a parent with propagate; NoAccess rows grant nothing). acls is
 // what the caller's token may read (ListACL: the paths it may modify, so a row on "/" is usually not in it); with no
-// row found it gives the two commands that find and remove one, and what to do when they list none: a token without
-// privilege separation has its user's rights (the user holds /pool and /storage), and no token row to remove.
+// row found it gives the command that lists the token's rows, which of them is the one to remove, and what to do when
+// none is: a token without privilege separation has its user's rights (the user holds /pool and /storage), and no
+// token row to remove. The list is never empty on a site the script set up (it writes the token's rows on the platform
+// pools and stores), so the advice goes by the path of a row, not by whether one is listed.
 func TokenACLRemoval(acls []ACLEntry, token string, paths ...string) string {
 	var cmds []string
 	for _, a := range acls {
@@ -107,8 +109,9 @@ func TokenACLRemoval(acls []ACLEntry, token string, paths ...string) string {
 	}
 	if len(cmds) == 0 {
 		user, name, _ := strings.Cut(token, "!")
-		return fmt.Sprintf("find the row as root on a node with: pveum acl list | grep -F '%s'; remove it with: pveum acl delete <path> --tokens '%s' --roles <role>. If no row is listed, the token is not privilege separated and holds its user's rights: pveum user token modify '%s' '%s' --privsep 1, then run the script again",
-			token, token, user, name)
+		on := strings.Join(paths, ", ")
+		return fmt.Sprintf("list the token's rows as root on a node with: pveum acl list | grep -F '%[1]s'; the row to remove is one on %[2]s itself, or on a parent of it (/ included) with propagate 1, whose role is not NoAccess: pveum acl delete <path> --tokens '%[1]s' --roles <role>. If none of the listed rows is such a row, remove none: the token is not privilege separated and holds its user's rights: pveum user token modify '%[3]s' '%[4]s' --privsep 1, then run the script again",
+			token, on, user, name)
 	}
 	slices.Sort(cmds)
 	return "as root on a node: " + strings.Join(slices.Compact(cmds), "; ")
