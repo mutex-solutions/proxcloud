@@ -64,7 +64,7 @@ func Live(ctx context.Context, in *Installation, sec *Secrets) LiveState {
 		out.Code = CodeSeedAPIUnreachable
 		out.Error = fmt.Sprintf("The seed's API at %s does not answer. The record still says ready: nothing stores this state. The platform cluster and "+
 			"what runs on it keep running, but an apply or a Remove waits on the seed and then fails. Check that seed VM %d runs on %s and open its console "+
-			"(qm terminal %d): the guide's section on a seed whose API is gone has the steps.", st.APIServer, st.VMID, st.Node, st.VMID)
+			"(qm terminal %d): the guide's section 'When the seed does not answer' has the steps.", st.APIServer, st.VMID, st.Node, st.VMID)
 	}
 	for _, a := range apps {
 		lc := LiveComponent{Name: str(a, "metadata", "labels", "proxcloud.io/component"), Cluster: ClusterWorkload,

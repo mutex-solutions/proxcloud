@@ -299,7 +299,7 @@ on("GET /admin/platform/installations/:id", ({ params, query }) => {
   if (query.get("live") !== "1") return { data: view(in_) }
   if (in_.status.phase !== "ready") return { data: { ...view(in_), live: { phase: in_.status.phase, components: [] } } }
   if (preset === "unread") throw new ApiError(500, 500, "The installation's secrets could not be read")
-  if (preset === "silent") return { data: { ...view(in_), live: { phase: "degraded", components: [], code: "seed_api_unreachable", error: "The seed's API at https://10.90.0.5:6443 does not answer. The record still says ready: nothing stores this state. The platform cluster and what runs on it keep running, but an apply or a Remove waits on the seed and then fails. Check that seed VM 9100 runs on pve1 and open its console (qm terminal 9100): the guide's section on a seed whose API is gone has the steps." } } }
+  if (preset === "silent") return { data: { ...view(in_), live: { phase: "degraded", components: [], code: "seed_api_unreachable", error: "The seed's API at https://10.90.0.5:6443 does not answer. The record still says ready: nothing stores this state. The platform cluster and what runs on it keep running, but an apply or a Remove waits on the seed and then fails. Check that seed VM 9100 runs on pve1 and open its console (qm terminal 9100): the guide's section 'When the seed does not answer' has the steps." } } }
   const components = bom.components.map((c) => ({ name: c.name, cluster: c.cluster, sync: "Synced", health: "Healthy" }))
   if (preset === "degraded") Object.assign(components[2], { sync: "OutOfSync", health: "Progressing" })
   return { data: { ...view(in_), live: { phase: preset === "degraded" ? "degraded" : "ready", components } } }

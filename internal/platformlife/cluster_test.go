@@ -1223,7 +1223,8 @@ func TestLive(t *testing.T) {
 	st.APIServer, st.VMID, st.Node = "https://127.0.0.1:1", 102, "pve1" // nothing listens on port 1
 	silent.Status.Seed = &st
 	if got := Live(context.Background(), &silent, sec); got.Phase != PhaseDegraded || got.Code != CodeSeedAPIUnreachable || len(got.Components) != 0 ||
-		!strings.Contains(got.Error, "does not answer") || !strings.Contains(got.Error, "seed VM 102 runs on pve1") || !strings.Contains(got.Error, "qm terminal 102") {
+		!strings.Contains(got.Error, "does not answer") || !strings.Contains(got.Error, "seed VM 102 runs on pve1") || !strings.Contains(got.Error, "qm terminal 102") ||
+		!strings.Contains(got.Error, "'When the seed does not answer'") { // the section's real title in both guides
 		t.Fatalf("seed silent: %+v", got)
 	}
 	if _, stored, _ := p.state.snapshot(); stored.Status.Phase != PhaseReady || p.seed.writeCount() != 0 {
