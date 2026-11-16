@@ -400,6 +400,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Managed services: the defects of the first lab attempt (M0, a Proxmox cluster shared by two portals).** The
+  provider sync now writes a provider's isolation rules whether or not it has a project
+  (`(*pve.Service).ReconcileProviderIsolation`, once per provider and cycle, under the SDN lock, never for a
+  `cidrPool` that overlaps a management network). Before, only a project's sync or its first tenant network wrote
+  them, while the preflight's "no rule yet" pass ends as soon as any tenant network exists on the cluster: on a
+  cluster where another portal had tenant networks, a portal with no project failed `isolation` with
+  `0 in place, N wanted; the next sync rewrites them` and no sync ever did. The pass itself is unchanged (a vnet does
+  not say which portal made it), and the messages and the guide now say what writes the rules and that one covering
+  network in `blockedCidrs` works as well as the listed ranges. New preflight row `token-scope`: it fails when
+  `capmox@pve!capi` or `csi@pve!csi` holds any privilege on `/pool`, `/storage` or `/vms` as a whole (rows of an older
+  setup, which the script never removes; the guide's section 10 claimed they could not exist and nothing read them).
+  It and `iso-store-visibility` now name the `pveum acl delete` command for each granting row the portal token can
+  read, and the `pveum acl list` recipe otherwise. `proxcloud-up.sh` accepts a build of main as its version
+  (`--version dev-<sha>`, `upgrade dev-<sha>`, 7 to 40 hex digits) with a warning that it is not for production, and
+  allows `--managed-services` on it; before, such a build could neither be installed nor upgraded to, and an `.env`
+  naming one stopped every later command. `--scheduler` stays refused on a dev build, and every other tag stays
+  invalid. The guide no longer says that existing token secrets are in the installer's `generated/` directory: only
+  a `split` mode site has `token-capi` and `token-csi` there. Not verified on a lab.
+
 - **Managed services (ADR 0009): what the API accepts and what the page advises now match what a run can do.** The
   API refuses an installation whose import store is its boot store (the portal token's `PVEDatastoreAdmin` on the
   import store would reach the platform's disks behind its `NoAccess` on the platform pools), and refuses

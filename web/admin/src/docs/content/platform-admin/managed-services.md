@@ -42,6 +42,9 @@ Paste the two secrets and press **Store the secrets**. They are stored encrypted
 
 Reads Proxmox with the stored tokens and changes nothing. Each failed check comes with what to do. **Install** runs the same checks first, so you cannot skip them.
 
+- **Isolation.** The message lists the smallest address ranges missing from **Networks tenants must not reach**; one network that covers them works as well, as long as the load balancer range stays outside it. The firewall rules are then written by a provider sync, which the row's button **Run a provider sync, then check again** starts. No project or tenant network is needed for that, also when another ProxCloud uses the same Proxmox cluster.
+- **Token scope** and **ISO store visibility.** One of the two tokens holds a permission from an older setup that reaches more than the platform. The message gives the `pveum acl delete` command to run as root on one node; then press **Check** again.
+
 ## Step 4: Review and install
 
 Shows the release, its components, what is created and how many cores and how much memory each node needs. Compare that with the free memory of your nodes: the page does not read it.

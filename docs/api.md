@@ -383,11 +383,14 @@ are several, `errors.details.problems`.
 - `POST /installations/{id}/preflight`: read-only, not audited; `{ok, checks}`
   with rows `flags`, `spec`, `network`, `isolation`, `credentials`,
   `privileges:capi`, `privileges:csi`, `privileges:kubemint`, `pool-fence`,
-  `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement` and
+  `token-scope`, `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement` and
   `images`. `isolation` fails, naming the CIDRs to add to `blockedCidrs`, when
   the seed, the API VIP or the node range is outside the blocked and management
   networks, and when the cluster firewall's isolation rules are not the ones the
-  sync writes; with no tenant network yet it passes. A row that cannot be read fails.
+  sync writes (a provider sync writes them with or without a project); with no
+  tenant network on the whole Proxmox cluster yet it passes. `token-scope` fails
+  when `capmox@pve!capi` or `csi@pve!csi` holds a privilege on `/pool`, `/storage`
+  or `/vms`, and names the `pveum acl delete` command. A row that cannot be read fails.
 - `GET /installations/{id}/plan`: the installed BOM against this release's
   (`installed`, `target`, `changes`, `blocking`); a version change not listed in
   `upgradeFrom` and the removal of a stateful component block, and an installed

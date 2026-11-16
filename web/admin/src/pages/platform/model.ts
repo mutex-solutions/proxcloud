@@ -265,7 +265,7 @@ export function validate(f: Form): Problem[] {
 
 const RERUN = "Run the identities script again (step 2), then press Check."
 // The field is "Networks tenants must not reach" on the provider's page; the Check step links there and has the sync button.
-const BLOCKED = "Add the networks named in the message to “Networks tenants must not reach” on the provider's page under Cloud providers"
+const BLOCKED = "Add the networks named in the message, or one network that covers them, to “Networks tenants must not reach” on the provider's page under Cloud providers"
 const ISOLATION = `${BLOCKED}. Then press Check in step 3: its isolation row runs the provider sync that writes the rules. Check too that the datacenter firewall is on.`
 
 // One row of the preflight (POST …/preflight) → what fixes it.
@@ -273,11 +273,12 @@ const CHECK_ACTION: Record<string, string> = {
   flags: "Turn the switches on with ./proxcloud-up.sh install --managed-services, and save a GitHub token under Integrations.",
   spec: "Correct the settings in step 1 and save.",
   network: "Correct the platform network in step 1 and save.",
-  isolation: `${BLOCKED}, then run a provider sync. Check too that the datacenter firewall is on.`,
+  isolation: `${BLOCKED}, then run a provider sync: it writes the rules, with or without a project. Check too that the datacenter firewall is on.`,
   credentials: "Paste both token secrets in step 2.",
   privileges: RERUN,
   "pool-fence": "A token reaches a platform pool it must not, usually because its NoAccess row there is missing. Run the identities script again (step 2), then press Check. Only if it still fails, remove the permission granted to that token on the pool itself in Proxmox (Datacenter, Permissions). Do not remove its permissions on /pool.",
-  "iso-store-visibility": `${CAPI_TOKEN} must see exactly one ISO store. Remove its permission on the others, or name the right ISO store in step 1 and run the script again.`,
+  "token-scope": "A platform token holds a permission that reaches every tenant, left by an older setup. Run the pveum acl delete command of the message as root on one Proxmox node, then press Check. Do not remove the token's permissions on the platform pools or on the boot and ISO stores.",
+  "iso-store-visibility": `${CAPI_TOKEN} must see exactly one ISO store. Run the pveum acl delete commands of the message as root on one Proxmox node, or name the right ISO store in step 1 and run the script again. Then press Check.`,
   "boot-iso-grant": RERUN,
   "boot-iso": "Name a store that is local to each node and takes ISO files as the ISO store in step 1.",
   placement: "Every node used needs the import store and the boot store. Change the nodes or the stores in step 1.",
