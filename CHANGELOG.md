@@ -433,9 +433,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   address as its InternalIP; kube-vip's lease is 60 s with a renew deadline of 40 s and a retry period of 5 s
   (`vip_leaseduration`, `vip_renewdeadline`, `vip_retryperiod`; were 15, 10, 2), where an etcd write of 19.5 s made
   it give up the API address five times. kube-vip's client still cuts each request at 10 s, so the 40 s buy more
-  tries, not one write of 40 s: a stall of about half a minute is survived. The tag
-  `proxmox-kamaji-cluster-v0.1.12` is not cut and the BOM still names 0.1.11, so no managed-services platform gets
-  the chart change yet. The installer does: **a re-run of stage 50 on an existing split-mode site replaces the
+  tries, not one write of 40 s: a stall of about half a minute is survived. The chart is published
+  (tag `proxmox-kamaji-cluster-v0.1.12`) and the BOM pins 0.1.12 by digest, for the platform cluster and for new
+  tenant clusters (`tenantCharts.kubernetes`; the installer already registered providers with the source version),
+  so a new managed-services install gets the chart change. A platform installed from the previous BOM does not: the
+  BOM is recorded by content, an apply on it is refused with `bom_unsupported`, and the way to 0.1.12 is Remove and
+  a new install. On an installer-built site **a re-run of stage 50 on an existing split-mode site replaces the
   services cluster's control plane machine** (Cluster API rolls a changed kubeadm configuration; one spare address
   and room for a second control plane VM are needed, and the API address can be away for up to a minute, see
   `docs/install.md`). Neither has run on a cluster. A Remove whose seed VM is gone and that has no cluster recorded
