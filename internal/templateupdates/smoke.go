@@ -521,6 +521,16 @@ func expectedOS(slug string) (id, version string) {
 	return "", ""
 }
 
+// hasCloudInitDrive tells whether a VM config has a Proxmox cloud-init drive on any slot.
+func hasCloudInitDrive(cfg pve.VMConfig) bool {
+	for k := range cfg {
+		if s := cfg.Str(k); strings.Contains(s, "cloudinit") && strings.Contains(s, "media=cdrom") {
+			return true
+		}
+	}
+	return false
+}
+
 // test runs the clone → boot → checks sequence. A *smokeFail is a check result; any other error is
 // infrastructure (retried).
 func (x *SmokeExecutor) test(ctx context.Context, f Fence, jobID string, p SmokePayload, r *SmokeReceipt) (SmokeChecks, error) {
@@ -587,7 +597,7 @@ func (x *SmokeExecutor) test(ctx context.Context, f Fence, jobID string, p Smoke
 		}
 		break
 	}
-	exists, own, _, err := x.owned(ctx, jobID, p, r.VMID)
+	exists, own, ccfg, err := x.owned(ctx, jobID, p, r.VMID)
 	if err != nil {
 		return checks, err
 	}
@@ -607,6 +617,13 @@ func (x *SmokeExecutor) test(ctx context.Context, f Fence, jobID string, p Smoke
 	}
 	if p.Network.Nameserver != "" {
 		params["nameserver"] = p.Network.Nameserver
+	}
+	// A template without a Proxmox cloud-init drive is a valid node template (CAPMOX brings its own ISO, and stage 7
+	// of the platform tells an operator to delete a drive on another slot than ide0), but the settings above reach the
+	// guest only through that drive: without it cloud-init finds no datasource and ends "disabled". The clone is this
+	// job's own VM, so it gets the drive an import of this variant would have.
+	if !hasCloudInitDrive(ccfg) {
+		params[CloudInitSlot(p.importPayload())] = p.DiskStorage + ":cloudinit"
 	}
 	if err := x.guard(ctx, f); err != nil {
 		return checks, err
