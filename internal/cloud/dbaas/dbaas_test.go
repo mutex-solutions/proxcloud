@@ -1171,3 +1171,29 @@ func TestValidateParameters(t *testing.T) {
 		t.Error("restart flag")
 	}
 }
+
+// A size below 1 on a provider without a maximum is not "1..1": that reads as if only 1 were allowed.
+func TestSpecValidateLimitText(t *testing.T) {
+	cfg := testConfig()
+	cfg.Limits = Limits{}
+	s := testSpec(EnginePostgreSQL, "17")
+	s.CPU = 0
+	if err := s.Validate(cfg); err == nil || err.Error() != "database: cpu must be a whole number, at least 1" {
+		t.Fatalf("no maximum: %v", err)
+	}
+	s.CPU = 64
+	if err := s.Validate(cfg); err != nil {
+		t.Fatalf("no maximum, 64 CPUs: %v", err)
+	}
+	cfg.Limits.MaxCPU = 8
+	if err := s.Validate(cfg); err == nil || err.Error() != "database: cpu must be a whole number from 1 to 8" {
+		t.Fatalf("maximum 8: %v", err)
+	}
+	// A size that may be 0 (the autoscale storage ceiling: 0 turns the disk leg off) read "0..0" without a maximum.
+	if got := LimitText("maxStorageGiB", 0, 0); got != "maxStorageGiB must be a whole number, at least 0" {
+		t.Fatalf("minimum 0, no maximum: %s", got)
+	}
+	if got := LimitText("maxStorageGiB", 0, 500); got != "maxStorageGiB must be a whole number from 0 to 500" {
+		t.Fatalf("minimum 0, maximum 500: %s", got)
+	}
+}

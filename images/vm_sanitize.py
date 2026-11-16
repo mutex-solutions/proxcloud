@@ -349,10 +349,35 @@ def journal(g, device, enabled):
     require(re.fullmatch(r"/dev/sda[1-9][0-9]?", device) is not None)
     # Trusted APPLIANCE tool, with target filesystems unmounted; NOT guestfs.command/sh.
     # tune2fs(features=...) does not exist in Bookworm's Python API. Probe debug sh first.
-    feature = "has_journal" if enabled else "^has_journal"
+    # orphan_file goes in the SAME tune2fs call as the journal, and stays off: only tune2fs's own removal frees the
+    # orphan file inode and zeroes s_orphan_file_inum. Dropping the journal alone leaves e2fsck (1.47.0 and 1.47.2)
+    # to clear the feature bit and keep the field, and Linux >= 6.16 then refuses to look up whatever file is
+    # later given that inode. Without the feature the removal is a no-op.
+    feature = "has_journal" if enabled else "^orphan_file,^has_journal"
     g.debug("sh", ["/usr/sbin/tune2fs -O " + feature + " " + device])
-    require(("has_journal" in g.tune2fs_l(device)["Filesystem features"].split()) is enabled)
+    features = g.tune2fs_l(device)["Filesystem features"].split()
+    require(("has_journal" in features) is enabled and "orphan_file" not in features)
     g.e2fsck(device, correct=True)
+
+
+def ext4_orphan_file(superblock):
+    """(orphan_file feature set, s_orphan_file_inum) of an ext4 superblock: the 1024 bytes at device offset 1024."""
+    require(len(superblock) == 1024 and superblock[0x38:0x3a] == b"\x53\xef")
+    compat = int.from_bytes(superblock[0x5c:0x60], "little")
+    return bool(compat & 0x1000), int.from_bytes(superblock[0x280:0x284], "little")
+
+
+def ext4_clean(g, device):
+    """Refuse an UNMOUNTED ext4 partition whose superblock names an orphan file inode without the orphan_file
+    feature, or whose read-only `e2fsck -fn` is not clean. The field check is the one that sees the defect:
+    e2fsck reports nothing while the inode is still free."""
+    require(re.fullmatch(r"/dev/sda[1-9][0-9]?", device) is not None)
+    feature, inum = ext4_orphan_file(g.pread_device(device, 1024, 1024))
+    require(feature or inum == 0)
+    # Trusted APPLIANCE tool, as in journal(). guestfs e2fsck() has no -n; the marker is the whole verdict, so
+    # the refusal does not depend on how debug sh reports a non-zero exit.
+    out = g.debug("sh", ["/usr/sbin/e2fsck -fn " + device + " >/dev/null 2>&1 && echo ext4-clean || echo ext4-unclean"])
+    require(out.strip() == "ext4-clean")
 
 
 def sanitize(g, selected):
@@ -411,6 +436,7 @@ def reset_and_zero(g, mounts, final_check):
     g.umount_all()
     for device in ext4:
         journal(g, device, True)
+        ext4_clean(g, device)
     mount_all(g, mounts)
     final_check()
     g.sync()

@@ -1664,7 +1664,7 @@ class FakeGuest:
                       "/etc/shadow": "root:*:1:0:99999:7:::\nubuntu:!:1:0:99999:7:::\nbuilder:!:1:0:99999:7:::\n",
                       "/home/ubuntu/.ssh/authorized_keys": "ssh-ed25519 %s proxcloud-export-coldboot\n" % self.KEY,
                       "/etc/ssh/ssh_host_ed25519_key.pub": "ssh-ed25519 AAAAhostkey root@clone\n",
-                      "/proc/swaps": "Filename Type Size Used Priority\n"}
+                      "/proc/swaps": "Filename Type Size Used Priority\n", coldboot_guest.APPARMOR_STACK: "0\n"}
         self.dirs = {"/var/lib/snapd/device/private-keys-v1": ["newkey"]}
         self.snaps = 3  # Installed snaps: a node image has some, a native cloud image has none.
 
@@ -1783,6 +1783,8 @@ class GuestScriptTests(unittest.TestCase):
                                    tool("/usr/bin/kubectl", rc=1)],
             "crictl_talks_to_containerd": [tool("/usr/local/bin/crictl", "RuntimeName:  cri-o\n"), tool("/usr/local/bin/crictl", rc=1)],
         }
+        # Ubuntu 26.04's default: containers get a stacked label and cannot signal their own processes (Launchpad 2172640).
+        defects["container_signals_not_stacked"] = [edit(coldboot_guest.APPARMOR_STACK, "0", "1")]
         self.assertEqual(set(defects), set(coldboot_guest.COMMON + coldboot_guest.K8S))  # Every check has a failing case.
         os_defects = {
             "apt_metadata_available": [tool("/usr/bin/apt-cache", rc=100),

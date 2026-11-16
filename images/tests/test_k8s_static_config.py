@@ -67,6 +67,11 @@ class StaticPreparationTests(unittest.TestCase):
                 after = json.loads((capi / "packer/proxmox/packer.json").read_text())
                 expected = before["provisioners"][:-1]
                 expected[2]["pause_before"] = "90s"  # Existing reconnect grace, not a shutdown delay.
+                # Ubuntu 26.04 only: the node gets 24.04's value of the AppArmor sysctl back (Launchpad 2172640), written
+                # with the builder's sudo grant, which the final provisioner removes.
+                stack = {"type": "shell", "inline_shebang": "/bin/sh -eu", "inline": config.APPARMOR_STACK_LINES}
+                expected += [stack] if os_slug == "ubuntu-2604" else []
+                self.assertIn("'kernel.apparmor_restrict_unprivileged_unconfined = 0' | sudo -n tee /etc/sysctl.d/90-proxcloud-apparmor-stack.conf", stack["inline"][0])
                 self.assertEqual(after["provisioners"][:-1], expected)  # Reboot + goss are not waived.
                 final = after["provisioners"][-1]
                 self.assertEqual(final["script"], str(run / "cleanup.sh"))
@@ -127,7 +132,8 @@ class StaticPreparationTests(unittest.TestCase):
             self.assertIn("  network: " + json.dumps(net), userdata)
             self.assertNotIn("$ENCRYPTED_SSH_PASSWORD", userdata)
             self.assertEqual(net["ethernets"]["build"]["match"]["macaddress"], b["network_adapters"][0]["mac_address"])
-            self.assertEqual([p["type"] for p in doc["provisioners"]], ["ansible", "shell", "ansible", "goss", "shell"])
+            self.assertEqual([p["type"] for p in doc["provisioners"]], ["ansible", "shell", "ansible", "goss", "shell", "shell"])
+            self.assertEqual(doc["provisioners"][-2]["inline"], config.APPARMOR_STACK_LINES)
             self.assertEqual(doc["provisioners"][2]["pause_before"], "90s")
             self.assertEqual(doc["provisioners"][-1]["script"], str(run / "cleanup.sh"))
             self.assertNotIn("inline", doc["provisioners"][-1])
@@ -188,7 +194,8 @@ class StaticPreparationTests(unittest.TestCase):
             before[2]["pause_before"] = "90s"  # Existing reconnect grace, as in static mode.
             config.prepare(capi, run, {"K8S_VERSION": "1.35.10"})
             after = json.loads((capi / "packer/proxmox/packer.json").read_text())["provisioners"]
-            self.assertEqual(after[:-2] + after[-1:], before)  # Nothing upstream is waived or reordered.
+            self.assertEqual(after[:-3] + after[-1:], before)  # Nothing upstream is waived or reordered.
+            self.assertEqual(after[-3]["inline"], config.APPARMOR_STACK_LINES)  # The default OS is 26.04.
             self.assertFalse((run / "cleanup.sh").exists())
             guard = after[-2]
             self.assertEqual((guard["type"], guard["inline_shebang"], len(guard["inline"])), ("shell", "/bin/sh -eu", 4))

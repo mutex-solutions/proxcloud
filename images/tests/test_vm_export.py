@@ -991,6 +991,24 @@ class NativeProbeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             postscan_probe.check_os(vm_sanitize, g, "ubuntu-2404")
 
+    def test_postscan_gates_every_ext4_partition_before_any_mount(self):
+        self.assertIs(postscan_probe.expected("os", "ubuntu-2604")["ext4_orphan_file_inum_consistent_fsck_clean"], True)
+        self.assertIs(postscan_probe.expected("kubernetes", "1.37.2")["ext4_orphan_file_inum_consistent_fsck_clean"], True)
+        source = (IMAGES / "vm_export" / "postscan_probe.py").read_text()
+        self.assertIn("        g.launch()\n        check_ext4(vs, g)\n        if variant ==", source)
+        g = fakes.FakeSnapdGuestFS("ubuntu-2604")
+        postscan_probe.check_ext4(vm_sanitize, g)
+        self.assertEqual(g.calls, [("fsck-n", "/dev/sda1"), ("fsck-n", "/dev/sda13")])
+        for change in (lambda g: setattr(g, "orphan_inum", 12), lambda g: setattr(g, "fsck_clean", False)):
+            g = fakes.FakeSnapdGuestFS("ubuntu-2604")
+            change(g)
+            with self.assertRaises(ValueError):
+                postscan_probe.check_ext4(vm_sanitize, g)
+        g = fakes.FakeSnapdGuestFS("ubuntu-2604")
+        g.filesystems = {"/dev/sda15": "vfat"}
+        with self.assertRaises(AssertionError):
+            postscan_probe.check_ext4(vm_sanitize, g)
+
 
 if __name__ == "__main__":
     unittest.main()

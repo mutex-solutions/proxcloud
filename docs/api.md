@@ -383,10 +383,18 @@ are several, `errors.details.problems`.
   `PROXCLOUD_ENCRYPTION_DEFAULT_KEY` the route answers `409 no_encryption_key`.
   No route returns a secret: an installation shows `credentials.{capi,csi}.tokenId`.
 - `POST /installations/{id}/preflight`: read-only, not audited; `{ok, checks}`
-  with rows `flags`, `spec`, `network`, `isolation`, `credentials`,
+  with rows `flags`, `spec`, `network`, `isolation`, `tenant-network`, `credentials`,
   `privileges:capi`, `privileges:csi`, `privileges:kubemint`, `mint-scope`, `pool-fence`,
   `token-scope`, `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement` and
-  `images`. `isolation` fails, naming the CIDRs to add to `blockedCidrs`, when
+  `images`. A row's `status` is `ok`, `fail` or `warn`; `ok` in the answer is
+  false only when a row failed. `tenant-network` never fails. It reads the provider's default
+  zone in Proxmox: `warn` when that zone has DHCP, when it does not exist yet and is
+  configured as a `simple` zone (ProxCloud creates one with DHCP), or when the zones
+  could not be read; a tenant Kubernetes cluster create on a network of such a zone is
+  refused with a `400`, except on a Kubernetes provider with shared workers
+  (`cluster.shared`), which uses no tenant network. It is `ok` for a zone without
+  DHCP, and absent when the provider names no zone.
+  `isolation` fails, naming the CIDRs to add to `blockedCidrs`, when
   the seed, the API VIP or the node range is outside the blocked and management
   networks, and when the cluster firewall's isolation rules are not the ones the
   sync writes (a provider sync writes them without a project only for a provider
@@ -413,19 +421,24 @@ are several, `errors.details.problems`.
   upgrades between BOMs yet).
 
 - `GET /installations/{id}?live=1`: the installation with `live`
-  (`phase`, `components[] {name, cluster, sync, health}`, `error`), read from
-  the seed's ArgoCD for this request and never stored. `live.phase` is
-  `degraded` when the stored phase is `ready` and the seed does not answer,
-  lists no Application, or one is not Synced and Healthy.
+  (`phase`, `components[] {name, cluster, sync, health}`, `error`, `code`),
+  read from the seed's ArgoCD for this request and never stored. `live.phase`
+  is `degraded` when the stored phase is `ready` and the seed does not answer,
+  lists no Application, or one is not Synced and Healthy. When the seed could
+  not be read, `live.code` is `seed_api_unreachable` and `live.error` says
+  whether its API does not answer or refuses the stored credential, with the
+  seed's address, VMID and node. The stored phase stays `ready`: a seed that
+  went down shows only here.
 - `POST /installations/{id}/runs` `{kind: apply|remove, confirm}`: `202 {runId}`. A run
   and its durable job (`platform.run/v1`, key `platform-run-<runId>`) are
   written in one transaction; `409 run_active` while another run of the
   installation is not finished, `409 bom_unsupported` when the installed BOM is
   not one this release carries. Without the runner (it starts only when
   `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true` too) the route answers
-  `409 platform_disabled`; the reads below still work. `confirm` belongs to a
-  remove and must be `remove <installation name>` (`400 invalid_confirmation`
-  otherwise). With it, a remove whose seed VM is gone deletes the VMs of pool
+  `409 platform_disabled`; the reads below still work. A plain remove is
+  `{"kind":"remove"}`. `confirm` is optional, belongs to a remove only and asks
+  for more: when it is sent it must be `remove <installation name>`
+  (`400 invalid_confirmation` otherwise, also on an apply). With it, a remove whose seed VM is gone deletes the VMs of pool
   `proxcloud-system` tagged `pc-platform-<id>` and the recorded volumes, and a
   remove whose workload cluster does not answer goes on without checking for
   tenants. Without it the first fails `seed_lost` and the second is retried,
@@ -433,9 +446,20 @@ are several, `errors.details.problems`.
   earlier one finished the cluster part and deleted the seed VM needs no
   confirmation.
 - `GET /installations/{id}/runs[/{runId}]`: the newest runs, or one, with
-  their stages (`state`, `retries`, `deadline`, `items`, `code`, `message`,
-  `receipt`). A run whose job ran out of attempts reads `failed` with code
-  `job_dead`; a cancel not honoured yet reads `cancelling`.
+  their stages (`state`, `retries`, `refused`, `deadline`, `items`, `code`,
+  `message`, `receipt`). A run whose job ran out of attempts reads `failed` with code
+  `job_dead`; a cancel not honoured yet reads `cancelling`. A run that fails
+  before its stages run again (`portal_changed`, a provider that is gone) sets
+  the stage it stood at `failed` with the run's code. `items` are
+  `{id, state, message}`: the checks of stage 1, the Applications of stages 6
+  and 9, the node templates (`template-<vmid>`: `ok` or `not checked`) and
+  machines of stage 7, and in a remove what was deleted, left or not checked
+  (`tenants`, one item per machine, `cluster`, `volume-<name>`, `volumes`,
+  `vm-<vmid>`, `cds`, `secrets`). A stage keeps its items when it is done.
+  A Kubernetes `401` or `403` from the seed or the platform cluster is counted
+  in `retries` and tried again, because an API server answers so while it
+  starts; `refused` is how many looks on end ended so (absent when none), and
+  the fifth fails the stage with its code and the server's text.
 - `POST /installations/{id}/runs/{runId}/cancel`: the runner stops at its next
   claim or write; the run ends `cancelled` and the installation `failed`.
   Nothing is deleted.
@@ -455,7 +479,14 @@ are several, `errors.details.problems`.
   without a ready seed. A rotation that stops before the new token is stored
   deletes the Secret it created. A `502` means the rotation did not finish:
   `status.seed.tokenSecret` names the stored credential, and a second call,
-  or stage 6 of the next apply, deletes every other token Secret.
+  or stage 6 of the next apply, deletes every other token Secret. A rotation
+  that finished writes one audit entry of its own, action `ROTATE_CREDENTIAL`
+  on the installation, with `fromSecret` and `toSecret` (the two Secret
+  names) and never a token; the generic `CREATE` entry of an admin `POST` is
+  not written for this route. A rotation that answered `502` after the new
+  credential was stored writes the same entry with `outcome: FAILURE` and both
+  names (older token Secrets may still be on the seed); a `502` that stored
+  nothing, and every refusal, writes none.
 
 An apply runs `validate`, `images`, `seed-vm`, `seed-api`, `seed-identity`,
 `seed-platform`, `cluster`, `workload-access`, `workload-platform`, `register`

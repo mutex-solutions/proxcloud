@@ -46,6 +46,17 @@ published digest), then imported as a **new** template VM in pool `pc-templates`
 `pc-ghcr-<os>-…`. Existing templates are never changed or removed: remove old ones yourself when no
 longer needed.
 
+## Known issue: Ubuntu 26.04 images exported before the fix
+
+The first Ubuntu 26.04 OS and Kubernetes node images have a filesystem defect: the root filesystem of a VM
+made from one can become read-only at a reboot. The affected versions are listed by digest in
+`docs/public-vm-sanitization.md` of the repository. Ubuntu 24.04 images are not affected.
+
+- Do not publish such a template to tenants. Import the re-exported image once it is listed here.
+- A VM already made from one: test and repair it as described in `docs/template-updates.md` of the
+  repository (section *Known issue*).
+- Do not reboot a VM that already shows the ext4 error or a read-only root: shut it down and repair it first.
+
 ## Smoke test, publish, withdraw
 
 The **Imported templates** tab shows each imported template's state: *Staged*, *Smoke running*,
@@ -59,6 +70,9 @@ The **Imported templates** tab shows each imported template's state: *Staged*, *
   are there), then deletes the copy. The provider needs a smoke network: set `config.templateSmoke`
   (for example `{"bridge":"vmbr0","vlan":29,"ip":"192.0.2.50/24","gateway":"192.0.2.1"}`, or just a
   bridge for DHCP) on the Proxmox provider. Without it the smoke test cannot run and the row says so.
+  A Kubernetes node template whose Proxmox cloud-init drive is on another slot than `ide0` fails the
+  smoke test (`template_mismatch`) before anything is copied: cluster machines made from it would never
+  join. Run the `qm set <vmid> --delete <slot>` command of the message on that node, then smoke-test again.
 - **Publish** — only after the template's latest smoke test passed. Confirm the digest. An OS template
   then joins the catalog, and the newest published version is what new servers get; older versions stay.
   A Kubernetes node image never appears in the OS catalog: publishing marks it ready and the row shows

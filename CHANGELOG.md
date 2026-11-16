@@ -412,6 +412,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Defect in the published Ubuntu 26.04 VM images: the root filesystem can go read-only at a reboot.** Every
+  `proxcloud-vm-ubuntu-2604` and `proxcloud-vm-ubuntu-2604-k8s` image exported before this fix has an ext4
+  superblock that names inode 12 as the orphan file while the `orphan_file` feature is off; once a VM stores a file
+  in inode 12, Linux 6.16 and newer answer its lookup with `EFSCORRUPTED` after the next reboot (measured on a lab
+  seed VM). The export sanitizer removed only the journal and left e2fsck to drop the feature, which keeps the
+  field; it now removes `orphan_file` with the journal (`images/vm_sanitize.py`). The sanitize stage and the
+  read-only postscan of the final export refuse any ext4 partition with such a superblock or with an unclean
+  `e2fsck -fn`. The six published tags (listed in `docs/public-vm-sanitization.md`) stay affected, and
+  `deploy/platform/platform-bom.yaml` still pins two of them as seed and Kubernetes node image: the re-export and
+  the re-pin must land before `0.8.0` is tagged. Ubuntu 24.04 images are not affected. A VM that has logged the
+  error must not be rebooted: its boot-time `e2fsck -p` can clear the file in inode 12 and stop in the initramfs
+  (measured on a scratch image only); shut it down and repair it offline. Test and repair:
+  `docs/template-updates.md`.
+
+- **Managed services: what the review of the L7, L11 and seed-reboot fixes found.** A Kubernetes node template that
+  still has its Proxmox cloud-init drive on another slot than `ide0` (imported before the drive moved) booted and
+  passed its smoke test, so it could be published to tenant clusters, whose machines then never join: the smoke test
+  now fails it `template_mismatch` before it clones, with the `qm set <vmid> --delete <slot>` command; a version
+  already published from such a template stays published and the template must be corrected by hand. The check row
+  `tenant-network` reads the provider's default zone in Proxmox instead of its configured kind (a `simple` zone made
+  without DHCP warned, a live zone with DHCP under another kind read `ok`), no longer says every create is refused,
+  and names the provider with shared workers, which is not affected. An `UPGRADE` of a tenant cluster on a provider
+  with no version is refused (`version is not offered by this provider`); it passed any next-minor version and kept
+  the old node image. A seed credential rotation that answered `502` after the new credential was stored writes its
+  `ROTATE_CREDENTIAL` entry with outcome `FAILURE`. `live.error` names the guide's section by its title, "When the
+  seed does not answer". A negative autoscale storage ceiling answers `maxStorageGiB must be a whole number, at least
+  0` where it said `0..0`. Docs: the AppArmor sysctl of Ubuntu 26.04 node images is cited to containerd issue 14485
+  and pull request 14487 (merged to main on 2026-11-16, in no release yet, 2.3 backport 14590), Launchpad 2172640
+  stays the reference for the symptom only, and the kernel change is said to be intentional; the recovery section
+  says that a failed apply sets the installation to `failed` and hides the seed's live read until a Retry passes;
+  the link to the smoke test section resolves. Unit-tested; nothing of it was run on a lab.
+
+- **Managed services: findings of the first end-to-end, credential and seed-reboot lab checks** (L7, L11, L10).
+  A node template without a Proxmox cloud-init drive, which is what stage 7 tells an operator to make of a template
+  with the drive on another slot than `ide0`, could never pass its smoke test (`cloudinit_failed`, cloud-init
+  `disabled`), so its Kubernetes version could never be published: the smoke test now gives its own clone the
+  drive when it has none, in the slot an import of that variant uses, and stage 7's message says the template
+  needs none. A cluster create on a Kubernetes provider that offers no version is refused before anything is
+  reserved or minted (it passed the version check with any version). The platform check has a row
+  `tenant-network` that warns, without failing, when the provider's default zone is a `simple` zone, on which
+  every tenant cluster create answers 400; the page no longer says "Every check passed" over a warning. The
+  database size refusals say `cpu must be a whole number, at least 1` where they said `cpu must be 1..1` for a
+  provider without a maximum. A seed credential rotation writes its own audit entry (`ROTATE_CREDENTIAL`, the two
+  Secret names, never a token); it read `CREATE`. A ready installation whose seed cannot be read says which of
+  the two it is (the API does not answer, or it refuses the credential) with the seed's address, VMID and node
+  and `live.code: seed_api_unreachable`, and the guide has a section for it: what keeps running, what Apply,
+  Retry and Remove do meanwhile, what to check, the filesystem repair (not run on a lab) and the path without a
+  backup. The guide also says that the old seed token works for some seconds after a rotation and that a
+  break-glass kubeconfig outlives one. Kubernetes node images of Ubuntu 26.04 are built with
+  `kernel.apparmor_restrict_unprivileged_unconfined = 0`: with Ubuntu's default a container's processes cannot
+  signal each other on kernels from 7.0.0-42 (Launchpad 2172640) and no PostgreSQL database comes up; the
+  export's cold-boot check refuses a Kubernetes image without it. **The BOM still names the node image built
+  before this change**: a new one must be built, published and shown on a lab before a BOM names it. Not
+  changed: the seed image, and anything about the seed's filesystem error after a reboot, whose cause is not
+  known.
+
+- **Managed services: a seed that restarts no longer ends the run, and what the first finished lab run found**
+  (M0, attempt 5). The seed's k3s restarted under the disk load of stage 7's clones; for some seconds its API
+  answered `403 … RBAC: [clusterrole … "cluster-admin" not found …]`, which the run took for a refusal and ended
+  `seed_api_unreachable` with nothing wrong. A starting API server also answers a bare `401`, a `403` without that
+  list and an admission plugin's `403 … not yet ready to handle request`, and no text (nor `/readyz`, which answers
+  an unknown token `401` too) tells them from a real refusal. So every Kubernetes `401` and `403` from the seed or
+  the platform cluster is now a passing error at first: counted, tried again, and final at the fifth look on end
+  that is refused (3 min 45 s or more; the stage's new field `refused` counts them), with the same code and the
+  server's text. A revoked token, a deleted role or binding and an expired bootstrap token in stage 5 still fail the
+  run, after those looks instead of at once, and never only at a stage's time limit. Stage 5 waits for a service
+  account not yet reported as cluster-admin until its time limit. Reporting: a
+  run ended before its stages (`portal_changed`) sets the stage it stood at `failed` and logs that stage, not
+  `validate`; a Remove lists what it deleted, left and did not check (`tenants`, each machine, `cluster`, volumes,
+  the seed VM, the secrets), and the list stays on the finished run; a machine without a VM reads `no VM`, not
+  `VM 0`; a node template that passed stage 7's check has an item `ok`; a finished Application's item no longer
+  carries the text of an earlier failed attempt. Cluster chart `proxmox-kamaji-cluster` 0.1.12 (kubeadm mode only;
+  tenant output unchanged; the installer's `services-cluster.yml.j2` moves with it): the control plane's kubelet
+  gets the machine's own address as `node-ip`, written by the prepare script, where the node registered the kube-vip
+  address as its InternalIP; kube-vip's lease is 60 s with a renew deadline of 40 s and a retry period of 5 s
+  (`vip_leaseduration`, `vip_renewdeadline`, `vip_retryperiod`; were 15, 10, 2), where an etcd write of 19.5 s made
+  it give up the API address five times. kube-vip's client still cuts each request at 10 s, so the 40 s buy more
+  tries, not one write of 40 s: a stall of about half a minute is survived. The chart is published
+  (tag `proxmox-kamaji-cluster-v0.1.12`) and the BOM pins 0.1.12 by digest, for the platform cluster and for new
+  tenant clusters (`tenantCharts.kubernetes`; the installer already registered providers with the source version),
+  so a new managed-services install gets the chart change. A platform installed from the previous BOM does not: the
+  BOM is recorded by content, an apply on it is refused with `bom_unsupported`, and the way to 0.1.12 is Remove and
+  a new install. On an installer-built site **a re-run of stage 50 on an existing split-mode site replaces the
+  services cluster's control plane machine** (Cluster API rolls a changed kubeadm configuration; one spare address
+  and room for a second control plane VM are needed, and the API address can be away for up to a minute, see
+  `docs/install.md`). Neither has run on a cluster. A Remove whose seed VM is gone and that has no cluster recorded
+  no longer says that an earlier Remove deleted one; the console's advice for `seed_api_unreachable` and
+  `workload_api_unreachable` covers a refused credential. The guide says that a
+  plain Remove's API body is `{"kind":"remove"}` and `confirm` is the option's field, and names the disk load of
+  stage 7's parallel clones.
+
 - **Managed services: stage 7 could not see a machine that failed, a sync hook that failed passed for done, and a
   Remove could wait 45 minutes or leave things behind** (static audit and the third lab attempt, before the first run
   reaches stage 7). Stage 7 read a Machine's `Failed` phase and failure message, which Cluster API v1.14 no longer

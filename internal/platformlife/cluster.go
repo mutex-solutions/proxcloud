@@ -378,6 +378,9 @@ func (x *acq) waves(ctx context.Context, seed, target *kamajik8s.Client, apps []
 				}
 			}
 			detail = strings.TrimSuffix(detail, "; ")
+			if ok {
+				detail = "" // what ArgoCD still shows of an earlier attempt (a condition it has not cleared) is no news
+			}
 			if !ok {
 				pending = append(pending, a.name()+" ("+state+")")
 				msg, err := x.resync(ctx, seed, a, live, hook, appCode, detail)
@@ -503,7 +506,7 @@ func (x *acq) cluster(ctx context.Context) error {
 	if err := x.needCAPI(); err != nil {
 		return err
 	}
-	unread, err := x.nodeTemplates(ctx)
+	templates, err := x.nodeTemplates(ctx)
 	if err != nil {
 		return err
 	}
@@ -632,7 +635,7 @@ func (x *acq) cluster(ctx context.Context) error {
 	for _, pm := range infra {
 		conds[str(pm, "metadata", "name")] = cond(pm, vmProvisioned)
 	}
-	items := unread
+	items := templates
 	var failed error
 	running, machineNote := 0, ""
 	for _, m := range machines {
@@ -646,7 +649,7 @@ func (x *acq) cluster(ctx context.Context) error {
 		if msg == "" && capmoxGaveUp(c) {
 			msg = step
 		}
-		item := StageItem{ID: name, State: phase, Message: fmt.Sprintf("VM %d", vmids[name])}
+		item := StageItem{ID: name, State: phase, Message: vmText(vmids[name])}
 		if phase == "Running" {
 			running++
 		} else if msg == "" {
@@ -663,7 +666,7 @@ func (x *acq) cluster(ctx context.Context) error {
 			if text != "" {
 				item.Message = clip(item.Message + ": " + text)
 				if text != str(c, "reason") { // a step alone is in the item only
-					machineNote += fmt.Sprintf(" %s (VM %d): %s", name, vmids[name], text)
+					machineNote += fmt.Sprintf(" %s (%s): %s", name, vmText(vmids[name]), text)
 				}
 			}
 		}
@@ -680,7 +683,7 @@ func (x *acq) cluster(ctx context.Context) error {
 					vmids[name], vmids[name], str(m, "spec", "infrastructureRef", "name"))
 			}
 			if failed == nil {
-				failed = permanent(code, "Machine %s (VM %d) failed: %s. CAPMOX does not try this machine again: %s", name, vmids[name], clip(msg), advice)
+				failed = permanent(code, "Machine %s (%s) failed: %s. CAPMOX does not try this machine again: %s", name, vmText(vmids[name]), clip(msg), advice)
 			}
 		}
 		items = append(items, item)
@@ -725,10 +728,14 @@ func (x *acq) cluster(ctx context.Context) error {
 // no other drive, so a clone of such a template starts with two media labelled cidata, and cloud-init's NoCloud source
 // takes the first of the devices sorted downwards, the later drive: Proxmox's own, with no kubeadm data and no
 // address. The machine then never joins and the stage would wait out its hour. A drive on ide0 is replaced by CAPMOX's.
+// The advice is to delete the drive, not to move it: a template without one is what CAPMOX needs, and the other reader
+// of a node template, the template-updates smoke test, gives its clone a drive when the template has none
+// (templateupdates.SmokeExecutor.test), so the corrected template can still be tested and published.
 //
 // A template the portal token may not read (an operator's own, in nodeImage mode templates) is not a reason to stop:
-// the stage goes on and lists it as an item, not checked.
-func (x *acq) nodeTemplates(ctx context.Context) (unread []StageItem, err error) {
+// the stage goes on and lists it as an item, not checked. A template that passed is an item too (ok), so the stage
+// shows that it looked; one that Proxmox no longer knows has none.
+func (x *acq) nodeTemplates(ctx context.Context) (items []StageItem, err error) {
 	templates := x.renderInput().Templates
 	for _, node := range slices.Sorted(maps.Keys(templates)) {
 		cfg, err := x.portal.GetVMConfig(ctx, node, templates[node])
@@ -736,7 +743,7 @@ func (x *acq) nodeTemplates(ctx context.Context) (unread []StageItem, err error)
 		if pve.IsNotFound(err) {
 			continue // CAPMOX reports a template that is gone on the machine
 		} else if errors.As(err, &ae) && (ae.Status == 401 || ae.Status == 403) {
-			unread = append(unread, StageItem{ID: fmt.Sprintf("template-%d", templates[node]), State: "not checked", Message: fmt.Sprintf("The portal token may not read "+
+			items = append(items, StageItem{ID: fmt.Sprintf("template-%d", templates[node]), State: "not checked", Message: fmt.Sprintf("The portal token may not read "+
 				"the config of node template %d on %s, so its cloud-init drive was not checked: a Proxmox cloud-init drive must be on ide0 or absent.", templates[node], node)})
 			continue
 		} else if err != nil {
@@ -746,11 +753,14 @@ func (x *acq) nodeTemplates(ctx context.Context) (unread []StageItem, err error)
 			if s := cfg.Str(slot); slot != "ide0" && strings.Contains(s, "cloudinit") && strings.Contains(s, "media=cdrom") {
 				return nil, permanent(CodeMachineFailed, "Node template %d on %s has a Proxmox cloud-init drive on %s. Cluster API puts its own on ide0, and a machine "+
 					"with both boots from the wrong one and never joins. On %s run: qm set %d --delete %s (templates imported by this release have the drive "+
-					"on ide0), then Retry.", templates[node], node, slot, node, templates[node], slot)
+					"on ide0), then Retry. The template needs no drive of its own: its smoke test in Template updates adds one to its test VM.",
+					templates[node], node, slot, node, templates[node], slot)
 			}
 		}
+		items = append(items, StageItem{ID: fmt.Sprintf("template-%d", templates[node]), State: CheckOK,
+			Message: fmt.Sprintf("Node template %d on %s has no Proxmox cloud-init drive on another slot than ide0.", templates[node], node)})
 	}
-	return unread, nil
+	return items, nil
 }
 
 // pveAuthFailure tells a message that carries Proxmox's refusal of a token: "401 authentication failure" from the
@@ -758,6 +768,14 @@ func (x *acq) nodeTemplates(ctx context.Context) (unread []StageItem, err error)
 func pveAuthFailure(msg string) bool {
 	low := strings.ToLower(msg)
 	return strings.Contains(low, "authentication failure") || strings.Contains(low, "not authorized") || strings.Contains(low, "401 unauthorized")
+}
+
+// vmText names a machine's VM: a Machine has no VMID until CAPMOX has cloned it.
+func vmText(vmid int) string {
+	if vmid == 0 {
+		return "no VM"
+	}
+	return fmt.Sprintf("VM %d", vmid)
 }
 
 // machines lists the workload cluster's Machines on the seed with the VMID of each, read from its ProxmoxMachine, and

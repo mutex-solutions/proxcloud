@@ -277,13 +277,13 @@ func (s DatabaseSpec) Validate(c Config) error {
 		}
 	}
 	if s.CPU < 1 || (c.Limits.MaxCPU > 0 && s.CPU > c.Limits.MaxCPU) {
-		return fmt.Errorf("database: cpu must be 1..%d", max(c.Limits.MaxCPU, 1))
+		return fmt.Errorf("database: %s", LimitText("cpu", 1, c.Limits.MaxCPU))
 	}
 	if s.MemoryGiB < 1 || (c.Limits.MaxMemoryGiB > 0 && s.MemoryGiB > c.Limits.MaxMemoryGiB) {
-		return fmt.Errorf("database: memoryGiB must be 1..%d", max(c.Limits.MaxMemoryGiB, 1))
+		return fmt.Errorf("database: %s", LimitText("memoryGiB", 1, c.Limits.MaxMemoryGiB))
 	}
 	if s.StorageGiB < 1 || (c.Limits.MaxStorageGiB > 0 && s.StorageGiB > c.Limits.MaxStorageGiB) {
-		return fmt.Errorf("database: storageGiB must be 1..%d", max(c.Limits.MaxStorageGiB, 1))
+		return fmt.Errorf("database: %s", LimitText("storageGiB", 1, c.Limits.MaxStorageGiB))
 	}
 	if s.StorageClass != "" && (CapacityClass(s.StorageClass) || !slices.Contains(c.StorageClasses, s.StorageClass)) {
 		return fmt.Errorf("database: storage class %q is not offered by this provider", s.StorageClass)
@@ -294,6 +294,15 @@ func (s DatabaseSpec) Validate(c Config) error {
 		}
 	}
 	return nil
+}
+
+// LimitText is the refusal for a whole-number size outside its range: "at least <min>" when the provider sets no
+// maximum (0), the range when it does. The minimum is 1, or 0 for a size that may be left off.
+func LimitText(field string, minV, maxV int) string {
+	if maxV <= 0 {
+		return fmt.Sprintf("%s must be a whole number, at least %d", field, minV)
+	}
+	return fmt.Sprintf("%s must be a whole number from %d to %d", field, minV, maxV)
 }
 
 // BackupConfig is the platform's backup object store, configured once per provider. Customers

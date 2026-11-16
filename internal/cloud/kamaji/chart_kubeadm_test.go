@@ -4,6 +4,7 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -145,6 +146,43 @@ func TestChartKubeadmControlPlaneMatchesTheInstaller(t *testing.T) {
 		if got["node-labels"] != "topology.kubernetes.io/region=az1,topology.kubernetes.io/zone=pve1" {
 			t.Errorf("%s node-labels = %v", phase, got["node-labels"])
 		}
+		// The machine's own address, not the kube-vip one: a placeholder the prepare script fills in on the machine.
+		if got["node-ip"] != "__NODE_IP__" {
+			t.Errorf("%s node-ip = %v, want the placeholder the prepare script replaces", phase, got["node-ip"])
+		}
+	}
+	if n := strings.Count(j2, `{name: node-ip, value: "__NODE_IP__"}`); n != 2 {
+		t.Errorf("%s names the node-ip placeholder %d times, want it in the control plane's init and join", installerServicesCluster, n)
+	}
+	// The files block is equal on both sides (above), so the chart's is read for what both must hold.
+	var vip, prepare string
+	files, _ := spec["files"].([]any)
+	for _, f := range files {
+		switch fm, _ := f.(map[string]any); digStr(fm, "path") {
+		case "/etc/kubernetes/manifests/kube-vip.yaml":
+			vip = digStr(fm, "content")
+		case "/etc/kube-vip-prepare.sh":
+			prepare = digStr(fm, "content")
+		}
+	}
+	for _, want := range []string{`sed -i "s/__NODE_IP__/$ip/"`, "/run/kubeadm/kubeadm.yaml", "/run/kubeadm/kubeadm-join-config.yaml", "ip -4 -o route get"} {
+		if !strings.Contains(prepare, want) {
+			t.Errorf("the prepare script does not fill in the node-ip (%q is missing):\n%s", want, prepare)
+		}
+	}
+	// Cluster API hands the script to cloud-init as a Jinja template: an expression in it would be rendered away.
+	if strings.Contains(prepare, "{{") || strings.Contains(prepare, "{%") || strings.Contains(prepare, "{#") {
+		t.Errorf("the prepare script holds a Jinja expression:\n%s", prepare)
+	}
+	// kube-vip tries a renewal again for 40 s (a lab measured a write of 19.5 s; with a renew deadline of 10 s
+	// kube-vip dropped the API address five times), within client-go's rule lease > renew deadline > retry period.
+	// Its client cuts each request at 10 s, so this covers a stall, not a write of 40 s.
+	lease := map[string]int{}
+	for _, m := range regexp.MustCompile(`\{name: (vip_\w+), value: "(\d+)"\}`).FindAllStringSubmatch(vip, -1) {
+		lease[m[1]], _ = strconv.Atoi(m[2])
+	}
+	if d, r, p := lease["vip_leaseduration"], lease["vip_renewdeadline"], lease["vip_retryperiod"]; r < 30 || d <= r || p < 1 || 2*p >= r {
+		t.Errorf("kube-vip lease duration/renew deadline/retry period = %d/%d/%d s", d, r, p)
 	}
 
 	// certSANs: the j2's composition (endpoint first, then the extra names) with the chart's inputs.

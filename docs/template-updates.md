@@ -341,6 +341,8 @@ Steps (each PVE mutation right after a successful fence check; the template itse
 
 1. Re-prove the template: member of `pc-templates` on the node (read from `/pools`), a template, named
    `TemplateName(payload)`, tagged `pc-src-<digest prefix>`; else FAIL `template_mismatch`. A
+   Kubernetes node template with a Proxmox cloud-init drive on another slot than `ide0` is FAIL
+   `template_mismatch` too, with the command that removes the drive (below); nothing is cloned. A
    withdrawn digest is FAIL `digest_withdrawn`. The template's **config digest** is recorded in the
    receipt with the clone's VMID: a PASS vouches for exactly that configuration.
 2. **Clone** (full, VMID recorded in the receipt *before* the call, lowest free id ≥ 9200) into pool
@@ -350,7 +352,13 @@ Steps (each PVE mutation right after a successful fence check; the template itse
    template's copied tags), `net0` on the smoke bridge/VLAN, `ipconfig0`, an **ephemeral ed25519
    SSH key** generated in memory for this attempt (only its SHA-256 fingerprint is recorded; the
    private key is never stored, logged or sent anywhere — nothing ever logs in with it), no password
-   (`cipassword` deleted) and no custom cloud-init snippets (`cicustom` deleted), `agent=1`.
+   (`cipassword` deleted) and no custom cloud-init snippets (`cicustom` deleted), `agent=1`. When the
+   clone has **no Proxmox cloud-init drive**, the same write adds one on the template's disk storage,
+   in the slot an import of that variant uses (`ide0` for a Kubernetes node image, `ide2` for an OS
+   image): these settings reach the guest only through that drive, and without it cloud-init ends
+   `disabled`. A node template without the drive is a valid one (below, and stage 7 of managed
+   services tells an operator to remove a drive that is not on `ide0`). A clone that has a drive
+   (`ide0` on a node image, any slot on an OS image) keeps it and gets no second one. The template itself is never changed.
 4. **Grow** `scsi0` by +8 GiB, then **start**.
 5. Guest agent **ping**, then **`guest-get-osinfo`** within 5 minutes; the reported `ID`/`VERSION_ID`
    must match the artifact (`debian-13` → `debian`/`13`, `ubuntu-2604` → `ubuntu`/`26.04`).
@@ -460,8 +468,15 @@ source takes the later device, Proxmox's own drive, and the machine gets no kube
 used pipeline templates). Correct such a template once, on its node, before a cluster uses it:
 `qm config <vmid> | grep cloudinit`, and when that names `ide2`: `qm set <vmid> --delete ide2`. Managed
 services refuses such a template in stage 7 with the same command
-([managed-services.md](managed-services.md#6-failure-codes), `machine_failed`); a tenant cluster's
-provider has no such check.
+([managed-services.md](managed-services.md#6-failure-codes), `machine_failed`). A tenant cluster's
+provider has no such check of its own: the smoke test is the gate, see the end of this paragraph. A template corrected that way has no cloud-init drive at all. CAPMOX
+needs none, and the smoke test adds one to its own clone (step 3 of the smoke test), so the template
+can still be tested and published. Until 2026-11-16 the smoke test did not, and such a template
+always failed `cloudinit_failed` with `cloud-init ended "disabled"`. The smoke test also
+checks the slot: a node template that still has its drive on another slot than `ide0` is FAIL
+`template_mismatch` with the same `qm set <vmid> --delete <slot>` command, before anything is cloned,
+so it cannot be published to tenant clusters. A version published **before this check** from such a
+template stays published: correct the template as above (the publish does not need to be repeated).
 
 **Kubernetes node images.** The kamaji provider's `config.cluster.versions` names template VMIDs
 explicitly, so withdrawing does **not** stop new workers from cloning a withdrawn image. The result
@@ -782,6 +797,73 @@ predates `VM.GuestAgent.Unrestricted` adds it as described in
 [proxmox-permissions.md](proxmox-permissions.md#proxcloudplatform) (`pveum role modify ProxCloudPlatform
 --append 1 --privs "VM.GuestAgent.Unrestricted …"`); the smoke network's bridge needs `SDN.Use` as for
 any NIC ([proxmox-permissions.md](proxmox-permissions.md#pveum-commands)).
+
+## Known issue: Ubuntu 26.04 images exported before the orphan-file fix
+
+Every `proxcloud-vm-ubuntu-2604` and `proxcloud-vm-ubuntu-2604-k8s` artifact exported before the fix has a
+stale field in its ext4 superblock (cause, pipeline fix and the list of affected tags and digests:
+[public-vm-sanitization.md](public-vm-sanitization.md#known-issue-stale-orphan-file-inode-in-ubuntu-2604-images-published-before-the-fix)).
+A VM made from one can get `EXT4-fs error ... ext4_lookup ... EFSCORRUPTED` and a read-only root at a
+reboot, once inode 12 holds a file. Affected: every template imported from one of the listed digests (the
+**Imported templates** tab shows the digest; the name `pc-ghcr-ubuntu-2604-*` alone does not tell, fixed
+images get the same name) and every server or Kubernetes node cloned from one. `proxcloud-vm-ubuntu-2404`
+images are not affected.
+
+**Do not reboot a VM that has logged the error** (`dmesg` shows the line above, or the root is read-only).
+Shut it down and repair it offline first. Its filesystem is marked as having errors, so the next boot runs
+`e2fsck -p` on it. On a scratch image in that state `e2fsck -p` cleared the file in inode 12, left the field
+in place and exited 4 (`UNEXPECTED INCONSISTENCY; RUN fsck MANUALLY`); on Ubuntu that exit status on the root
+stops the boot in the initramfs shell. The offline repair below still applies after that, but the file that
+was in inode 12 is gone. Not measured on a real VM, and the image's fstab was not read.
+
+**Templates: do not repair in place.** Do not publish an affected template to tenants, and replace it by
+importing the re-exported image once one is published. A repair of the template disk was not tested, the
+partition device nodes of a template zvol did not exist on the lab host, and a linked clone is made from the
+template's base snapshot, which a repair of the live disk does not change (PVE behaviour, not verified here).
+Until the template is replaced, repair each VM made from it before its second boot.
+
+**Test**, as root inside the guest (reads only). The same reads were checked against image files; the loop
+was not run inside a guest:
+
+```sh
+for d in $(findmnt -rn -t ext4 -o SOURCE | sort -u); do
+  f=$(dd if=$d bs=1 skip=1116 count=4 2>/dev/null | od -An -tx4 | tr -d ' ')
+  i=$(dd if=$d bs=1 skip=1664 count=4 2>/dev/null | od -An -tu4 | tr -d ' ')
+  if [ $((0x$f & 0x1000)) -eq 0 ] && [ "$i" != 0 ]; then echo "AFFECTED $d s_orphan_file_inum=$i"; else echo "ok $d"; fi
+done
+```
+
+**Repair** of a VM disk, only on an UNMOUNTED filesystem: shut the VM down and run it on the PVE host, or
+from a rescue system, once for **every** partition the test reported as AFFECTED. For ZFS the partition of
+`/dev/sda1` is `/dev/zvol/<pool>/vm-<id>-disk-0-part1`; the OS image also has `/boot` on `-part13`, the
+Kubernetes node image has one ext4 partition.
+
+```sh
+D=/dev/XXX
+e2fsck -E journal_only -p "$D"
+printf 'ssv orphan_file_inum 0\nclose -a\n' > /tmp/orphan-fix.cmd
+debugfs -w -f /tmp/orphan-fix.cmd "$D"
+[ "$(dd if="$D" bs=1 skip=1664 count=4 2>/dev/null | od -An -tu4 | tr -d ' ')" = 0 ] && e2fsck -f -p "$D"
+```
+
+- The order matters. `e2fsck -E journal_only` replays the journal and checks nothing else. A VM whose root
+  went read-only could not finish its journal, and without the replay the full check replays it first, which
+  puts the old superblock back, and then clears the file in inode 12.
+- `close -a` writes the field to the backup superblocks too. Without it they keep 12, and a later
+  `e2fsck -b <backup>` brings the field back and deletes the file.
+- `debugfs` exits 0 even when `ssv` failed, so the last line reads the field back and runs the full check
+  only when it is 0. If `e2fsck -f -p` does not run, stop: the field is still set.
+- `e2fsck -f -p` exit status 0 or 1 is success (1: it corrected something); 4 or more is not.
+- Tested only on scratch image files with e2fsprogs 1.47.2, with a file in inode 12, in four states: clean,
+  journal not replayed, marked with errors, and both. Each time the field became 0 in the primary and the
+  backup superblocks, the file kept its content and `e2fsck -fn` was clean afterwards.
+- **Not tested**: a real VM disk, a zvol, a journal left by a real kernel after the error (the scratch
+  journal was written with `debugfs`), e2fsprogs 1.47.0 for the journal and `close -a` steps, `/boot`.
+- **Do not** run the repair on a mounted filesystem: `debugfs -w` also rewrites group descriptors.
+- **Do not** run `e2fsck -y`/`-p` (other than `-E journal_only`) before the field is zero: on the scratch
+  image it deleted the file in inode 12 and left the field in place. `tune2fs -O orphan_file` destroys that
+  file too.
+- There is no online repair. A root filesystem already read-only needs the offline path.
 
 ## 7. Open items
 

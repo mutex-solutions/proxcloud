@@ -4,6 +4,83 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-16: P3, the platform BOM pins cluster chart 0.1.12
+
+**What changed:** `deploy/platform/platform-bom.yaml` names `proxmox-kamaji-cluster` 0.1.12 with the digest ghcr.io
+serves (`sha256:e44ba2cb...`), for the platform cluster (`pc-platform`) and for new tenant clusters
+(`tenantCharts.kubernetes`). No container, relation or boundary changed.
+
+**Why:** the chart was published from its tag, so a new managed-services install can get the kubelet `node-ip` and
+the longer kube-vip lease. The tenant pin moves with it: 0.1.12 renders tenant clusters as 0.1.11 does, the
+installer already registers providers with the chart's source version, and one version of the chart per BOM keeps
+the published package list of the release to one entry.
+
+**Diagrams:** none changed; the row of the cluster chart in `c2-containers.md` no longer says 0.1.12 is not tagged.
+
+**Not verified:** chart 0.1.12 on a cluster. A platform installed from the previous BOM is refused
+(`bom_unsupported`): Remove and install again.
+## 2026-11-16: P3, review of the L7, L11 and seed-reboot fixes
+
+**What changed:** no container, relation or boundary. The smoke test refuses a Kubernetes node template with a
+Proxmox cloud-init drive on another slot than `ide0` before it clones (`template_mismatch`); the preflight row
+`tenant-network` reads the default zone's `dhcp` field in Proxmox (one more read with the portal token) and falls
+back to the configured kind only for a zone not made yet; a tenant cluster upgrade to a version the provider does
+not offer is refused in the image rotation, an empty version set included; a seed credential rotation that failed
+after the store committed writes its audit entry with outcome `FAILURE`; the shared database limit text takes a
+minimum.
+
+**Why:** the smoke test is the only gate before a node image reaches tenant clusters, and their provider has no
+slot check; the row claimed more than the create path does (shared workers, a simple zone without DHCP, a live zone
+with DHCP); the upgrade kept the hole the create had; the one rotation outcome that leaves old tokens alive had no
+audit entry.
+
+**Diagrams:** none changed.
+
+**Not verified:** all of it on a lab.
+
+## 2026-11-16: P3, findings of the L7, L11 and seed-reboot lab checks
+
+**What changed:** no container, relation or boundary. The template-updates smoke test adds a Proxmox cloud-init
+drive to its own clone when the template has none; a Kubernetes cluster create is refused while its provider offers
+no version; the platform preflight has a warning row `tenant-network` (a `simple` default zone); the seed
+credential rotation writes its own audit entry (`ROTATE_CREDENTIAL`) and the audit middleware skips that route; the
+live read of a ready installation carries `code: seed_api_unreachable` and a message that names the seed's VM; the
+database size refusals read "at least 1". Image build: a Kubernetes node image of Ubuntu 26.04 gets
+`kernel.apparmor_restrict_unprivileged_unconfined = 0`, and the export's cold-boot check requires it.
+
+**Why:** stage 7 tells an operator to delete a node template's cloud-init drive when it is not on `ide0`, and the
+smoke test then failed on cloud-init `disabled`, so the version could never be published; a provider registered
+with no version let a create through to the network check; nothing told the operator that tenant clusters cannot
+use a zone with DHCP; the rotation's audit row read `CREATE`; a seed whose API was gone left the installation
+`ready` with one fixed sentence and no recovery path in the guide; and on the BOM's node image (kernel 7.0.0-43)
+AppArmor denies signals between the processes of one container, so no PostgreSQL database starts (Launchpad
+2172640).
+
+**Diagrams:** none changed.
+
+**Not verified:** all of it on a lab. The node image is not rebuilt and the BOM still names the one of 2026-11-14;
+the sysctl is the workaround of containerd issue 14485 and pull request 14487 (the Launchpad report did not test
+it) and has not run on our nodes. The cause of the seed's ext4
+error after one reboot is not known and nothing was changed for it.
+
+## 2026-11-16: P3, findings of the first finished lab run (M0): start-up refusals are passing errors
+
+**What changed:** how the platform runner (`internal/platformlife`) reads an answer of a cluster. A Kubernetes
+`401` or `403` from the seed or the platform cluster is a passing error at first and a refusal at the fifth look
+on end that ends so (`Stage.Refused` counts them); it was a refusal at once. A run ended before its stages sets the stage it stood at `failed`. A Remove's stages keep
+items for what was deleted, left and not checked. Chart `proxmox-kamaji-cluster` 0.1.12, kubeadm mode only: the
+control plane's kubelet gets `node-ip` from its prepare script, and kube-vip's lease is 60/40/5 s; the installer's
+`services-cluster.yml.j2` carries the same. No container, relation or boundary changed.
+
+**Why:** an API server refuses a good credential for some seconds after it starts (401, an RBAC 403 with or
+without its `not found` list, an admission plugin's `not yet ready`), no text or `/readyz` tells that from a revoked
+token, and a real refusal must not wait for a stage's 60 minutes; the seed's k3s restarts when its disk is slow; the run of attempt 5 ended `seed_api_unreachable` on such an answer and needed a Retry.
+
+**Diagrams:** none changed; the row of the cluster chart in `c2-containers.md` names 0.1.12.
+
+**Not verified:** chart 0.1.12 on a cluster (not tagged and not in the BOM at the time of this entry); the changed runner against a seed that
+restarts on a lab.
+
 ## 2026-11-16: PR #282 (P3): the BOM and stage 40 take the third-party charts from the chart mirror
 
 **What changed:** which registries the platform's clusters reach for charts. The BOM

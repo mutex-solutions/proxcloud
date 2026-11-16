@@ -12,6 +12,9 @@ import hashlib
 import json
 import os
 import re
+import shlex
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -36,6 +39,7 @@ class FakeGuestFS:
         self.filesystems = {"/dev/sda1": "ext4", "/dev/sda13": "ext4", "/dev/sda14": "unknown", "/dev/sda15": "vfat"}
         self.features = {dev: "has_journal extents" for dev in ("/dev/sda1", "/dev/sda13")}
         self.mounted = set()
+        self.orphan_inum, self.fsck_clean = 0, True
         self.guid = s.BIOS_GUID
         for path in ("/boot/efi", "/etc/cloud/cloud.cfg.d", "/etc/netplan", "/etc/network/interfaces.d",
                      "/etc/systemd/network", "/etc/NetworkManager/system-connections", "/etc/ssh",
@@ -118,12 +122,23 @@ class FakeGuestFS:
         self.mounted.clear()
     def debug(self, subcmd, extraargs):
         assert not self.mounted and subcmd == "sh" and len(extraargs) == 1
-        match = re.fullmatch(r"/usr/sbin/tune2fs -O (\^?has_journal) (/dev/sda[1-9][0-9]?)", extraargs[0])
+        match = re.fullmatch(r"/usr/sbin/e2fsck -fn (/dev/sda[1-9][0-9]?) >/dev/null 2>&1 && echo ext4-clean \|\| echo ext4-unclean", extraargs[0])
+        if match is not None:
+            self.calls.append(("fsck-n", match.group(1)))
+            return "ext4-clean\n" if self.fsck_clean else "ext4-unclean\n"
+        match = re.fullmatch(r"/usr/sbin/tune2fs -O (\^orphan_file,\^has_journal|has_journal) (/dev/sda[1-9][0-9]?)", extraargs[0])
         assert match is not None
         feature, device = match.groups()
         self.features[device] = "extents" if feature.startswith("^") else "has_journal extents"
         self.calls.append(("journal", device, not feature.startswith("^")))
         return ""
+    def pread_device(self, device, count, offset):
+        assert (count, offset) == (1024, 1024) and not self.mounted and "has_journal" in self.features[device]
+        block = bytearray(1024)
+        block[0x38:0x3a] = b"\x53\xef"
+        block[0x5c:0x60] = (0x3c).to_bytes(4, "little")
+        block[0x280:0x284] = self.orphan_inum.to_bytes(4, "little")
+        return bytes(block)
     def tune2fs_l(self, device): return {"Filesystem features": self.features[device]}
     def e2fsck(self, device, *, correct=None):
         assert correct is True and not self.mounted
@@ -177,6 +192,28 @@ class SanitizeTests(unittest.TestCase):
                                  ("journal", "/dev/sda1", True), ("journal", "/dev/sda13", True)])
         self.assertFalse(g.mounted)
         self.assertTrue(all("has_journal" in features for features in g.features.values()))
+        # The gate reads each superblock and runs e2fsck -fn right after that partition's journal is back.
+        tail = [call for call in g.calls if call[0] in ("journal", "fsck-n")][-4:]
+        self.assertEqual(tail, [("journal", "/dev/sda1", True), ("fsck-n", "/dev/sda1"),
+                                ("journal", "/dev/sda13", True), ("fsck-n", "/dev/sda13")])
+
+    def test_stale_orphan_file_inum_or_unclean_fsck_refuses(self):
+        for change in (lambda g: setattr(g, "orphan_inum", 12), lambda g: setattr(g, "fsck_clean", False)):
+            g = FakeGuestFS()
+            change(g)
+            with self.assertRaises(ValueError): s.sanitize(g, "ubuntu-2604")
+        with self.assertRaises(ValueError): s.ext4_clean(FakeGuestFS(), "/dev/sda1;arbitrary")
+
+    def test_superblock_parser_needs_no_tools(self):
+        def block(compat, inum, magic=b"\x53\xef"):
+            raw = bytearray(1024)
+            raw[0x38:0x3a], raw[0x5c:0x60], raw[0x280:0x284] = magic, compat.to_bytes(4, "little"), inum.to_bytes(4, "little")
+            return bytes(raw)
+        self.assertEqual(s.ext4_orphan_file(block(0x3c, 12)), (False, 12))  # The published Ubuntu 26.04 images.
+        self.assertEqual(s.ext4_orphan_file(block(0x103c, 12)), (True, 12))  # The upstream cloud image.
+        self.assertEqual(s.ext4_orphan_file(block(0x3c, 0)), (False, 0))
+        for bad in (block(0x3c, 0, b"\x00\x00"), block(0x3c, 0)[:1023], b""):
+            with self.assertRaises(ValueError): s.ext4_orphan_file(bad)
 
     def test_symlink_ancestors_and_critical_leaf_refused_leaf_cleanup_unlinks(self):
         g = FakeGuestFS()
@@ -285,6 +322,82 @@ SNAPD_RESET = (b'{"data":{"auth":{"device":{"brand":"canonical","model":"generic
                b'"seeded":true,"patch-level":6},"changes":{},"tasks":{},"last-change-id":0,"last-task-id":0,'
                b'"last-lane-id":0}')
 SERIAL = "/var/lib/snapd/assertions/asserts-v0/serial"
+
+
+class FileGuest:
+    """The two appliance calls of ext4_clean, served from an image FILE by the host e2fsprogs (no root, no loop)."""
+    def __init__(self, path, e2fsck):
+        self.path, self.e2fsck = path, e2fsck
+
+    def pread_device(self, device, count, offset):
+        with open(self.path, "rb") as stream:
+            stream.seek(offset)
+            return stream.read(count)
+
+    def debug(self, subcmd, extraargs):
+        assert subcmd == "sh" and extraargs[0].startswith("/usr/sbin/e2fsck -fn /dev/sda1 ")
+        line = extraargs[0].replace("/usr/sbin/e2fsck", shlex.quote(self.e2fsck)).replace("/dev/sda1", shlex.quote(self.path))
+        done = subprocess.run(["/bin/sh", "-c", line], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, timeout=120)
+        if done.returncode:
+            raise RuntimeError("debug: ")  # As the appliance does on a non-zero exit.
+        return done.stdout.decode()
+
+
+class RealExt4GateTests(unittest.TestCase):
+    """ext4_clean against real ext4 image files. The sanitizer's journal steps are replayed with the host tools."""
+    def setUp(self):
+        path = os.pathsep.join((os.environ.get("PATH", ""), "/usr/sbin", "/sbin"))
+        self.tools = {name: shutil.which(name, path=path) for name in ("mkfs.ext4", "tune2fs", "e2fsck", "debugfs")}
+        missing = sorted(name for name, found in self.tools.items() if not found)
+        if missing:
+            self.skipTest("e2fsprogs tools not installed (%s): the real ext4 gate test did not run" % ", ".join(missing))
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.image = os.path.join(self.dir.name, "fs.img")
+
+    def run_tool(self, name, *args, ok=(0,)):
+        done = subprocess.run([self.tools[name], *args, self.image], stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+        self.assertIn(done.returncode, ok, done.stdout.decode(errors="replace"))
+
+    def mkfs(self):
+        with open(self.image, "wb") as stream:
+            stream.truncate(32 << 20)
+        done = subprocess.run([self.tools["mkfs.ext4"], "-q", "-F", "-O", "orphan_file", self.image],
+                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+        if done.returncode:
+            self.skipTest("mkfs.ext4 here cannot make an orphan_file filesystem (e2fsprogs older than 1.47): "
+                          "the real ext4 gate test did not run")
+
+    def journal_cycle(self, off):
+        self.run_tool("tune2fs", "-O", off)
+        self.run_tool("e2fsck", "-f", "-p", ok=(0, 1))  # guestfs e2fsck(correct=True) accepts 1 too.
+        self.run_tool("tune2fs", "-O", "has_journal")
+        self.run_tool("e2fsck", "-f", "-p", ok=(0, 1))
+
+    def superblock(self):
+        return s.ext4_orphan_file(FileGuest(self.image, None).pread_device("/dev/sda1", 1024, 1024))
+
+    def test_journal_only_removal_leaves_the_stale_field_and_the_gate_refuses(self):
+        self.mkfs()
+        feature, inum = self.superblock()
+        self.assertTrue(feature and inum)
+        self.journal_cycle("^has_journal")  # What journal() ran before the fix.
+        self.assertEqual(self.superblock(), (False, inum))
+        self.run_tool("e2fsck", "-f", "-n")  # e2fsck alone sees nothing while the inode is free.
+        with self.assertRaises(ValueError):
+            s.ext4_clean(FileGuest(self.image, self.tools["e2fsck"]), "/dev/sda1")
+
+    def test_removal_with_the_journal_zeroes_the_field_and_the_gate_passes(self):
+        self.mkfs()
+        self.journal_cycle("^orphan_file,^has_journal")  # What journal() runs now.
+        self.assertEqual(self.superblock(), (False, 0))
+        guest = FileGuest(self.image, self.tools["e2fsck"])
+        s.ext4_clean(guest, "/dev/sda1")
+        self.run_tool("debugfs", "-w", "-R", "clri <2>")  # A consistent superblock on a damaged filesystem.
+        self.assertEqual(self.superblock(), (False, 0))
+        with self.assertRaises(ValueError):
+            s.ext4_clean(guest, "/dev/sda1")
 
 
 class FakeK8sGuestFS(FakeGuestFS):
