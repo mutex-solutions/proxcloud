@@ -333,8 +333,12 @@ root. etcd snapshots to an object store can follow if a site needs them.
 
 ### A8. Risks accepted for the first milestone
 
-**Change.** Managed Kubernetes keeps `ProxCloudKubeMint` (`User.Modify Permissions.Modify`)
-for the portal token on `/access/groups`, `/pool`, `/storage`, `/sdn/zones` and `/nodes`.
+**Change.** Managed Kubernetes keeps `ProxCloudKubeMint` (`Permissions.Modify`) for the
+portal token on `/pool`, `/storage`, `/sdn/zones` and `/nodes`, and `ProxCloudKubeToken`
+(`User.Modify`) on `/access/groups/proxcloud-kube`, a group that holds `capmox@pve` and
+`csi@pve` and no one else. *(Corrected on 2026-11-16: this said `ProxCloudKubeMint`
+(`User.Modify Permissions.Modify`) on `/access/groups`, `/pool`, `/storage`, `/sdn/zones`
+and `/nodes`; see "Correction" below.)*
 The portal token itself has NoAccess on both platform pools, but a stolen portal token can
 grant a role on `/pool` to a principal it can mint a token for, and that grant reaches the
 platform pools for every principal without a row of its own there. The first milestone
@@ -350,6 +354,37 @@ The `csi@pve!csi` row on `/storage/<boot>` keeps `Datastore.Allocate` on the sto
 holds the seed's disk, so the CSI token can reach that disk
 ([A2](#a2-seed-vm-from-a-native-template-in-its-own-pool), "Limit"). That is accepted for
 the first milestone too.
+
+**Correction (2026-11-16).** The risk accepted above was described as a role on `/pool`
+for "a principal it can mint a token for". The grant reached further than that sentence
+says. PVE takes `User.Modify` on `/access/groups` itself for every user of the cluster,
+whatever its groups, and only on `/access/groups/<group>` for the members of one group
+(`PVE::RPCEnvironment`, the `userid-group` check). The lab drill of 2026-11-16
+(`pve-manager/9.2.26`) confirmed it: with the grant as written here the portal token
+created an API token for `root@pam` (`POST /access/users/root@pam/token/…`, HTTP 200),
+privilege separated and without an ACL row, and the same for `capmox@pve` and
+`proxcloud@pve`. A token without privilege separation, which for `root@pam` is full root,
+was not tried; by the PVE source the same grant allowed it before `libpve-access-control`
+9.2.1 (2026-11-13) and is refused from that version on. Minting for `root@pam` was neither
+described nor accepted here, so the owner decided on 2026-11-16 to close it before the
+release:
+
+- `User.Modify` moves to its own role on `/access/groups/proxcloud-kube`. The portal token
+  creates and deletes tokens for `capmox@pve` and `csi@pve` only; for `root@pam`, its own
+  user and every other user PVE answers 403, and it cannot add a user to the group.
+- `ProxCloudKubeMint` loses `User.Modify`, and its row under `/access` is gone, so the
+  token holds no `Permissions.Modify` there.
+- The setup script and installer stage 10 remove exactly the rows the earlier versions
+  wrote on `/access/groups`; the preflight (`mint-scope`), the connection test and stage 10
+  report a site that still holds them.
+
+What stays accepted for the first milestone, unchanged: `Permissions.Modify` on `/pool`,
+`/storage`, `/sdn/zones` and `/nodes`, with which a stolen portal token writes any role
+there for itself or for a token it minted under `capmox@pve` or `csi@pve` (such a
+`capmox@pve` token reaches `ProxCloudCAPI` on both platform pools, the user's own rows
+being its ceiling), and the power to delete or expire the tokens of those two users and to
+disable them. The grant on the group has not run on a lab yet;
+`docs/proxmox-permissions.md` has the drill results and what is still to measure.
 
 **Why.** The structural fix, scoping the mint grant to a parent pool of the tenant pools
 (nested pools in PVE), renames every tenant pool and is a change of its own. Sites whose
@@ -415,6 +450,9 @@ above.
 - A chart changed upstream behind the same version is caught by CI, not by ArgoCD, until
   the mirror exists.
 - The mint-grant escalation stays open in the first milestone, documented and measured.
+  *(Corrected on 2026-11-16: on `/pool`, `/storage`, `/sdn/zones` and `/nodes`. Minting a
+  token for a user other than `capmox@pve` and `csi@pve` is closed, see
+  [A8](#a8-risks-accepted-for-the-first-milestone).)*
 - The CSI token can reach the seed's disk through the shared boot store in the first
   milestone, documented.
 

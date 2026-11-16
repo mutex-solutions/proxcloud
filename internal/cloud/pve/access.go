@@ -207,8 +207,13 @@ var PlatformACLs = []PlatformACL{
 const (
 	SeedPool     = "proxcloud-seed" // the seed VM alone; the portal and the CSI tokens get NoAccess there
 	KubeMintRole = "ProxCloudKubeMint"
-	CAPITokenID  = capiUser + "!capi"
-	CSITokenID   = csiUser + "!csi"
+	// KubeTokenRole is User.Modify alone, granted on /access/groups/KubeMintGroup and nowhere else. PVE lets the
+	// holder of User.Modify on /access/groups create a token for every user of the cluster, root@pam included
+	// (PVE::RPCEnvironment, "userid-group"); on a group's path, for the members of that group only.
+	KubeTokenRole = "ProxCloudKubeToken"
+	KubeMintGroup = "proxcloud-kube"
+	CAPITokenID   = capiUser + "!capi"
+	CSITokenID    = csiUser + "!csi"
 )
 
 // vmConfig is stage 10's {{ vm_config }}.
@@ -225,8 +230,14 @@ var ManagedRoles = []ManagedRole{
 	{roleCAPI, slices.Concat([]string{"Sys.Audit", "Pool.Audit", "VM.Allocate", "VM.Audit", "VM.Clone"}, vmConfig,
 		[]string{"VM.GuestAgent.Audit", "VM.Migrate", "VM.PowerMgmt", "Datastore.AllocateSpace", "Datastore.Audit", "SDN.Use"})},
 	{roleCSI, []string{"VM.Audit", "VM.Config.Disk", "Datastore.Allocate", "Datastore.AllocateSpace", "Datastore.Audit"}},
-	{KubeMintRole, []string{"User.Modify", "Permissions.Modify"}},
+	{KubeMintRole, []string{"Permissions.Modify"}},
+	{KubeTokenRole, []string{"User.Modify"}},
 }
+
+// KubeMintGroupMembers are the users of KubeMintGroup, the only ones the portal token may create and delete tokens
+// for: capmox@pve for the tenant clusters' tokens, csi@pve for the csi@pve!<id> tokens of clusters from before the CSI
+// gateway, which a release or a move still deletes. Never the portal's own user, nor any user that is not the product's.
+var KubeMintGroupMembers = []string{capiUser, csiUser}
 
 // ManagedACL is one ACL row of the managed services, in stage 10's shape: Role on Path for User and for Token, ""
 // for no row of that one. A privilege-separated token holds the intersection of its user's rights and its own.
@@ -266,9 +277,10 @@ func ManagedACLs(portalTokenID, boot, iso, importStorage string) []ManagedACL {
 		{"/pool/" + SeedPool, "NoAccess", true, csiUser, ""},
 		{"/storage", roleCSI, true, csiUser, ""},
 		{"/storage/" + boot, roleCSI, false, "", CSITokenID},
-		// The portal mints and grants the tenant clusters' tokens. An ACL on a path replaces what its parent passes
-		// down, so /sdn/zones repeats the platform role.
-		{"/access/groups", KubeMintRole, true, portal, portalTokenID},
+		// The portal mints and grants the tenant clusters' tokens: tokens for the members of KubeMintGroup alone
+		// (never a row on /access/groups itself: KubeTokenRole), ACL writes on the paths below. An ACL on a path
+		// replaces what its parent passes down, so /sdn/zones repeats the platform role.
+		{"/access/groups/" + KubeMintGroup, KubeTokenRole, false, portal, portalTokenID},
 		{"/pool", KubeMintRole, true, portal, portalTokenID},
 		{"/storage", KubeMintRole, true, portal, portalTokenID},
 		{"/sdn/zones", KubeMintRole, true, portal, portalTokenID},
@@ -308,11 +320,12 @@ func CSIPrivileges(boot string) []PrivCheck {
 }
 
 // KubeMintPrivileges is what the portal token must hold, per ACL path, to mint the tenant clusters' tokens
-// (MintClusterTokens): a token create wants User.Modify, an ACL write Permissions.Modify on its path. importStorage
-// as for ManagedACLs: its own row shadows /storage, so it is checked apart.
+// (MintClusterTokens): a token create wants User.Modify on a group of the token's user, an ACL write
+// Permissions.Modify on its path. importStorage as for ManagedACLs: its own row shadows /storage, so it is checked
+// apart.
 func KubeMintPrivileges(importStorage string) []PrivCheck {
 	checks := []PrivCheck{
-		{Path: "/access/groups", Privs: ManagedRoles[2].Privs},
+		{Path: "/access/groups/" + KubeMintGroup, Privs: ManagedRoles[3].Privs},
 		{Path: "/pool", Privs: ManagedRoles[2].Privs},
 		{Path: "/storage", Privs: ManagedRoles[2].Privs},
 		{Path: "/sdn/zones", Privs: ManagedRoles[2].Privs},
@@ -323,6 +336,21 @@ func KubeMintPrivileges(importStorage string) []PrivCheck {
 	}
 	return checks
 }
+
+// KubeMintForbidden is what the portal token must hold nowhere, per ACL path (HeldPrivileges): User.Modify on
+// /access/groups reaches every user of the cluster, and Permissions.Modify on any of the three lets the token write
+// itself that row. Sites set up before KubeMintGroup hold ProxCloudKubeMint on /access/groups.
+var KubeMintForbidden = []PrivCheck{
+	{Path: "/", Privs: []string{"User.Modify", "Permissions.Modify"}},
+	{Path: "/access", Privs: []string{"User.Modify", "Permissions.Modify"}},
+	{Path: "/access/groups", Privs: []string{"User.Modify", "Permissions.Modify"}},
+}
+
+// KubeMintNarrowing is what to tell the operator of a site where HeldPrivileges(KubeMintForbidden) names something.
+const KubeMintNarrowing = "with it a stolen portal token can create an API token for any user of the cluster, root@pam included. " +
+	"Run the managed-services script again as root on a node (GET /admin/setup/proxmox-script?managedServices=true; an installer site: make upgrade, stage 10): " +
+	"it grants " + KubeTokenRole + " on /access/groups/" + KubeMintGroup + " instead and removes the " + KubeMintRole + " rows on /access/groups. " +
+	"If this still fails afterwards, another row grants it: pveum acl list | grep -F '<the portal user>', then pveum acl delete <path> --users|--tokens '<id>' --roles <role> for a row on /, /access or /access/groups (docs/proxmox-permissions.md)"
 
 // PlatformRolePrivileges is the privilege list of PlatformRole: everything PlatformPrivileges asks for, once.
 func PlatformRolePrivileges() []string {
@@ -356,6 +384,15 @@ func (c *Client) Permissions(ctx context.Context, path string) (map[string]bool,
 // MissingPrivileges checks each path and returns one line per path that lacks
 // privileges, e.g. "SDN.Allocate, SDN.Use on /sdn". Empty means all present.
 func (c *Client) MissingPrivileges(ctx context.Context, checks []PrivCheck) ([]string, error) {
+	return c.privileges(ctx, checks, false)
+}
+
+// HeldPrivileges is the opposite: one line per path where the token holds any of the privileges named.
+func (c *Client) HeldPrivileges(ctx context.Context, checks []PrivCheck) ([]string, error) {
+	return c.privileges(ctx, checks, true)
+}
+
+func (c *Client) privileges(ctx context.Context, checks []PrivCheck, held bool) ([]string, error) {
 	var out []string
 	for _, chk := range checks {
 		have, err := c.Permissions(ctx, chk.Path)
@@ -364,7 +401,7 @@ func (c *Client) MissingPrivileges(ctx context.Context, checks []PrivCheck) ([]s
 		}
 		var miss []string
 		for _, p := range chk.Privs {
-			if !have[p] {
+			if have[p] == held {
 				miss = append(miss, p)
 			}
 		}

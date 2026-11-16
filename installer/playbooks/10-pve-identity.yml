@@ -47,7 +47,12 @@
     # mode=split: what the services cluster and the per-cluster tokens of tenant clusters hang off.
     # Unexercised on a lab so far: see "Managed Kubernetes" in docs/proxmox-permissions.md.
     split_roles:
-      ProxCloudKubeMint: "User.Modify Permissions.Modify"
+      ProxCloudKubeMint: "Permissions.Modify"
+      ProxCloudKubeToken: "User.Modify"
+    # The only users the portal token may create and delete tokens for (pve.KubeMintGroupMembers). Its User.Modify sits
+    # on this group's path: on /access/groups itself PVE lets the holder mint a token for every user, root@pam included.
+    mint_group: proxcloud-kube
+    mint_group_users: [capmox@pve, csi@pve]
     # The same rows as pve.ManagedACLs (internal/cloud/pve/access.go), which the managed-services script of the console
     # writes, without its proxcloud-seed rows and with the two of the CSI gateway; a test keeps them equal.
     split_acls:
@@ -76,7 +81,7 @@
       # ownership itself, so it holds ProxCloudCSI on all of /pool and /storage.
       - {path: /pool, role: ProxCloudCSI, propagate: 1, user: csi@pve, token: csi@pve!gateway}
       - {path: /storage, role: ProxCloudCSI, propagate: 1, user: csi@pve, token: csi@pve!gateway}
-      - {path: /access/groups, role: ProxCloudKubeMint, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
+      - {path: /access/groups/proxcloud-kube, role: ProxCloudKubeToken, propagate: 0, user: proxcloud@pve, token: proxcloud@pve!platform}
       - {path: /pool, role: ProxCloudKubeMint, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
       - {path: /storage, role: ProxCloudKubeMint, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
       - {path: /sdn/zones, role: ProxCloudKubeMint, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
@@ -125,7 +130,7 @@
     - name: Read what exists
       check_mode: false
       ansible.builtin.uri: {url: "{{ pc_api }}/{{ item }}"}
-      loop: [access/roles, "access/users?full=1", pools, access/acl]
+      loop: [access/roles, "access/users?full=1", pools, access/acl, access/groups]
       register: pc_id
 
     - name: Index what exists
@@ -179,6 +184,30 @@
       changed_when: true
       loop: "{{ users | dict2items }}"
       loop_control: {label: "{{ item.key }}"}
+
+    - name: Create the group of the users the portal mints tokens for
+      when:
+        - pc.mode == 'split'
+        - mint_group not in (pc_id.results[4].json.data | map(attribute='groupid') | list)
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/access/groups"
+        method: POST
+        body_format: form-urlencoded
+        body: {groupid: "{{ mint_group }}", comment: "ProxCloud: users the portal mints cluster tokens for"}
+      changed_when: true
+
+    # Its own step: a user that exists is not created again, and append keeps the groups an operator gave it.
+    - name: Put a user in that group
+      when:
+        - pc.mode == 'split'
+        - mint_group not in (pc_id.results[1].json.data | selectattr('userid', 'eq', item) | map(attribute='groups', default='') | join(',') | split(','))
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/access/users/{{ item }}"
+        method: PUT
+        body_format: form-urlencoded
+        body: {groups: "{{ mint_group }}", append: 1}
+      changed_when: true
+      loop: "{{ mint_group_users }}"
 
     - name: Create a token
       when: item.value.token not in (have_users[item.key] | default([], true) | map(attribute='tokenid') | list)
@@ -268,6 +297,45 @@
       changed_when: true
       loop: "{{ pc_id.results[3].json.data | pc_acl_missing(acls + nas_acls + (split_acls + nas_mint_acls if pc.mode == 'split' else []) + (sandbox_acls + sandbox_iso_user_acls if pc_sandbox_on else []) + (sandbox_entry_acls if pc_entry_on else [])) }}"
       loop_control: {label: "{{ item.path }} {{ item.roles }}"}
+
+    # Older installs put the mint role on /access/groups, where its User.Modify let the portal token create a token for
+    # every user of the cluster, root@pam included. Taken off after the grant on the group above, so minting never
+    # stops; the role itself lost User.Modify in "Align a role's privileges". Exactly the installer's own two rows.
+    - name: Take the portal's mint role off /access/groups
+      when:
+        - pc.mode == 'split'
+        - item.path == '/access/groups'
+        - item.roleid == 'ProxCloudKubeMint'
+        - item.ugid in ['proxcloud@pve', 'proxcloud@pve!platform']
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/access/acl"
+        method: PUT
+        body_format: form-urlencoded
+        body: "{{ {'path': item.path, 'roles': item.roleid, 'delete': 1} | combine({('tokens' if item.type == 'token' else 'users'): item.ugid}) }}"
+      changed_when: true
+      loop: "{{ pc_id.results[3].json.data }}"
+      loop_control: {label: "{{ item.path }} {{ item.ugid }} {{ item.roleid }}"}
+
+    # Asked of PVE (user ∩ token, inheritance from / and /access, groups), not worked out from the rows.
+    - name: Read what the portal token may do on /access/groups
+      when: pc.mode == 'split'
+      check_mode: false
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/access/permissions?{{ {'userid': 'proxcloud@pve!platform', 'path': '/access/groups'} | urlencode }}"
+      register: pc_mint_reach
+
+    - name: Check the portal token cannot mint a token for every user
+      when: pc.mode == 'split'
+      vars:
+        have: "{{ (pc_mint_reach.json.data.values() | first | default({})).keys() | select('in', ['User.Modify', 'Permissions.Modify']) | sort }}"
+      ansible.builtin.assert:
+        that: have == [] or ansible_check_mode
+        fail_msg: >-
+          proxcloud@pve!platform holds [{{ have | join(', ') }}] on /access/groups: with it a stolen portal token can create
+          an API token for any user of the cluster, root@pam included. Another row grants it: pveum acl list | grep -F proxcloud@pve,
+          then pveum acl delete <path> --users|--tokens <id> --roles <role> for a row on /, /access or /access/groups
+          (docs/proxmox-permissions.md).
+        success_msg: "proxcloud@pve!platform holds neither User.Modify nor Permissions.Modify on /access/groups"
 
     # Older installs gave the services token /storage (propagate) and the ISO role on the NAS template store, so it
     # saw every iso store. Taken off after the grants above, so the token never lacks its boot or ISO store.

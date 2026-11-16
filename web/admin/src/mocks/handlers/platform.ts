@@ -215,6 +215,7 @@ function checks(in_: Doc): Doc[] {
     row("credentials", both, "Both platform tokens are stored.", `No secret is stored for ${[!sec.capi && "capmox@pve!capi", !sec.csi && "csi@pve!csi"].filter(Boolean).join(" and ")}.`),
     ...["capi", "csi"].map((t) => row(`privileges:${t}`, both, `The ${t} token holds its privileges.`, `The ${t} token could not be checked: no secret is stored.`)),
     row("privileges:kubemint", true, "The portal token holds the ProxCloudKubeMint privileges.", ""),
+    row("mint-scope", true, "The portal token may create tokens for the users of the group proxcloud-kube alone.", ""),
     row("pool-fence", true, "Neither the portal token nor csi@pve!csi reaches the seed's pool, and the portal token does not reach proxcloud-system.", ""),
     row("token-scope", true, "Neither platform token holds anything on /pool, /storage or /vms as a whole.", ""),
     row("iso-store-visibility", both, `capmox@pve!capi sees one ISO store, ${iso}.`, "The ISO stores capmox@pve!capi sees could not be read: no secret is stored."),

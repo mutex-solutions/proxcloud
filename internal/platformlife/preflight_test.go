@@ -126,8 +126,8 @@ func TestPreflight(t *testing.T) {
 	if !OK(checks) {
 		t.Fatalf("a set-up site: %+v", checks)
 	}
-	if got := len(checks); got != 15 {
-		t.Errorf("%d rows, want 15: %+v", got, checks)
+	if got := len(checks); got != 16 {
+		t.Errorf("%d rows, want 16: %+v", got, checks)
 	}
 	if c := checkMap(checks)["isolation"]; !strings.Contains(c.Message, "first tenant network") {
 		t.Errorf("no tenant network yet: %+v", c)
@@ -149,6 +149,16 @@ func TestPreflight(t *testing.T) {
 		t.Errorf("an enabled provider on a cluster with another portal's tenant network: %+v", c)
 	}
 	f.vnets = ""
+
+	// A site an earlier script set up: the mint role on /access/groups, which reaches every user. Minting works there
+	// (the group's path inherits it), so only this row tells the operator.
+	f.perms[pve.DefaultPlatformTokenID]["/access/groups"] = []string{"User.Modify", "Permissions.Modify"}
+	if c := checkMap(pf.Run(ctx)); c["mint-scope"].Status != CheckFail || c["privileges:kubemint"].Status != CheckOK ||
+		!strings.Contains(c["mint-scope"].Message, "the portal token holds User.Modify, Permissions.Modify on /access/groups") ||
+		!strings.Contains(c["mint-scope"].Message, "root@pam included. Run the managed-services script again") {
+		t.Errorf("the mint role on /access/groups: %+v, %+v", c["mint-scope"], c["privileges:kubemint"])
+	}
+	delete(f.perms[pve.DefaultPlatformTokenID], "/access/groups")
 
 	capi["/pool/"+pve.SeedPool] = []string{"VM.Audit"}
 	f.perms[pve.DefaultPlatformTokenID]["/pool/"+pve.SeedPool] = []string{"VM.Audit"}

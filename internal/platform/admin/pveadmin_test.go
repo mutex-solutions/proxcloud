@@ -72,6 +72,8 @@ func TestTokenChecks(t *testing.T) {
 			full[p] = true
 		}
 	}
+	mint := without(full, "") // a copy
+	mint["User.Modify"] = true
 	tests := []struct {
 		name    string
 		tokenID string
@@ -84,6 +86,7 @@ func TestTokenChecks(t *testing.T) {
 		{"root token", "root@pam!x", 200, full, nil, []string{"belongs to root@pam"}},
 		{"missing privilege", "proxcloud@pve!platform", 200, without(full, "VM.Audit"), nil, []string{"Token lacks VM.Audit on /pool"}},
 		{"permissions unreadable", "proxcloud@pve!platform", 500, nil, nil, []string{"Could not read the token's permissions"}},
+		{"mint grant on all of /access/groups", "proxcloud@pve!platform", 200, mint, nil, []string{"Token holds User.Modify on /; User.Modify on /access; User.Modify on /access/groups: with it a stolen portal token can create an API token for any user"}},
 		{"sdn rights shadowed on zones", "proxcloud@pve!platform", 200, full, map[string]bool{"User.Modify": true}, []string{"Token lacks SDN.Allocate, SDN.Audit, SDN.Use on /sdn/zones"}},
 	}
 	for _, tt := range tests {

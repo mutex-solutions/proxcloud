@@ -31,8 +31,10 @@ func PlatformSetupScript(tokenID string, gpu bool, importStorage string) (string
 }
 
 // ManagedSetupScript is PlatformSetupScript plus what managed services need: ManagedRoles, the pool SeedPool, the
-// users capmox@pve and csi@pve with their tokens capi and csi, ManagedACLs (the three stores as there), and the
-// effective rights of both tokens on both platform pools. Safe to run again, as PlatformSetupScript.
+// users capmox@pve and csi@pve with their tokens capi and csi, the group KubeMintGroup with both users in it,
+// ManagedACLs (the three stores as there), and the effective rights of both tokens on both platform pools. Safe to run
+// again, as PlatformSetupScript, with one exception to "removes none": it takes the mint role's rows off
+// /access/groups and User.Modify out of that role, which an earlier version of this script wrote.
 func ManagedSetupScript(tokenID string, gpu bool, importStorage, bootStorage, isoStorage string) (string, error) {
 	for _, s := range [][2]string{{"bootStorage", bootStorage}, {"isoStorage", isoStorage}} {
 		if !setupStorageID.MatchString(s[1]) {
@@ -108,6 +110,12 @@ func setupScript(tokenID string, gpu bool, importStorage string, managed []Manag
 			line("pveum user token add %s %s --privsep 1 || echo %s", q(user), q(name),
 				q("The token "+t.id+" exists already: its secret was printed when it was created."))
 		}
+		line("# the only users the portal token may create and delete tokens for. Its grant sits on this group, never on")
+		line("# /access/groups, which reaches every user of the cluster (root@pam too)")
+		line("pveum group add %s --comment %s 2>/dev/null || true", q(KubeMintGroup), q("ProxCloud: users the portal mints cluster tokens for"))
+		for _, u := range KubeMintGroupMembers {
+			line("pveum user modify %s --groups %s --append 1", q(u), q(KubeMintGroup))
+		}
 		for _, a := range managed {
 			if a.User == m[1] && a.Token == tokenID {
 				grant(a.Path, a.Role, a.Propagate)
@@ -123,6 +131,11 @@ func setupScript(tokenID string, gpu bool, importStorage string, managed []Manag
 				}
 			}
 		}
+		line("# a site set up before the group: the mint role sat on /access/groups and held User.Modify. These remove exactly")
+		line("# those rows and that privilege, after the grant on the group above, and change nothing on a new site")
+		line(`pveum acl delete '/access/groups' --users "$PC_USER" --roles %s`, q(KubeMintRole))
+		line(`pveum acl delete '/access/groups' --tokens "$PC_TOKEN" --roles %s`, q(KubeMintRole))
+		line("pveum role modify %s --privs %s", q(KubeMintRole), q(strings.Join(ManagedRoles[2].Privs, " ")))
 		line("# what the platform tokens hold on the platform pools: the CAPI token ProxCloudCAPI on both, the CSI token nothing on the")
 		line(`# seed VM (its disks on the boot store stay open to the CSI token: docs/proxmox-permissions.md, "What the seed pool does not fence")`)
 		for _, id := range []string{CAPITokenID, CSITokenID} {

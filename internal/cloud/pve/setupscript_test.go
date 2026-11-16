@@ -146,6 +146,39 @@ func TestManagedSetupScriptImportStorage(t *testing.T) {
 	}
 }
 
+// The portal's right to create tokens sits on the group of its two service users, and a site an earlier script set
+// up loses exactly the rows and the privilege that script wrote, after the new grant so minting never stops.
+func TestManagedSetupScriptNarrowsTheMintGrant(t *testing.T) {
+	script, err := ManagedSetupScript("portal@pve!site-a", false, "", "local-lvm", "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"pveum group add 'proxcloud-kube' --comment 'ProxCloud: users the portal mints cluster tokens for' 2>/dev/null || true",
+		"pveum user modify 'capmox@pve' --groups 'proxcloud-kube' --append 1",
+		"pveum user modify 'csi@pve' --groups 'proxcloud-kube' --append 1",
+		"grant '/access/groups/proxcloud-kube' 'ProxCloudKubeToken' 0",
+		`pveum acl delete '/access/groups' --users "$PC_USER" --roles 'ProxCloudKubeMint'`,
+		`pveum acl delete '/access/groups' --tokens "$PC_TOKEN" --roles 'ProxCloudKubeMint'`,
+		"pveum role modify 'ProxCloudKubeMint' --privs 'Permissions.Modify'",
+	}
+	at := 0
+	for _, l := range strings.Split(script, "\n") {
+		if at < len(want) && l == want[at] {
+			at++
+		}
+		if strings.HasPrefix(l, "grant '/access/groups' ") || strings.HasPrefix(l, "grant '/access' ") || strings.Contains(l, "User.Modify Permissions.Modify") {
+			t.Errorf("the script still grants on all of /access/groups: %s", l)
+		}
+		if strings.Contains(l, "pveum user modify") && !slices.Contains(want, l) || strings.Contains(l, "acl delete") && !slices.Contains(want, l) {
+			t.Errorf("an unexpected membership or removal: %s", l)
+		}
+	}
+	if at != len(want) {
+		t.Errorf("the script lacks, in this order, %q:\n%s", want[at], script)
+	}
+}
+
 // A root shell runs the answer: nothing but a plain id gets into it.
 func TestPlatformSetupScriptRejectsInjection(t *testing.T) {
 	for _, tokenID := range []string{
@@ -250,7 +283,9 @@ func TestManagedIdentityMatchesInstaller(t *testing.T) {
 				Path, Role, User, Token string
 				Propagate               int
 			} `yaml:"split_acls"`
-			NASMintACLs string `yaml:"nas_mint_acls"`
+			NASMintACLs    string   `yaml:"nas_mint_acls"`
+			MintGroup      string   `yaml:"mint_group"`
+			MintGroupUsers []string `yaml:"mint_group_users"`
 		} `yaml:"vars"`
 	}
 	if err := yaml.Unmarshal(raw, &plays); err != nil || len(plays) != 1 {
@@ -269,6 +304,10 @@ func TestManagedIdentityMatchesInstaller(t *testing.T) {
 		if !ok || !slices.Equal(installer, portal) {
 			t.Errorf("%s privileges differ:\ninstaller %q\nportal    %q", r.Name, installer, portal)
 		}
+	}
+
+	if v.MintGroup != KubeMintGroup || !slices.Equal(v.MintGroupUsers, KubeMintGroupMembers) {
+		t.Errorf("stage 10 mints for %q %v, the portal for %q %v", v.MintGroup, v.MintGroupUsers, KubeMintGroup, KubeMintGroupMembers)
 	}
 
 	const boot, iso, imp = "boot-store", "iso-store", "import-store"

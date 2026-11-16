@@ -430,8 +430,8 @@ func checkDatacenterFirewall(ctx context.Context, cc *pve.Client) *httpx.HTTPErr
 	return nil
 }
 
-// tokenChecks reports a root@pam token and, per ACL path, every ProxCloudPlatform privilege
-// the token lacks. Warnings only: an operator may grant less on purpose (no GPUs,
+// tokenChecks reports a root@pam token, per ACL path every ProxCloudPlatform privilege
+// the token lacks, and a token that can create API tokens for every user (pve.KubeMintForbidden). Warnings only: an operator may grant less on purpose (no GPUs,
 // no EVPN) and the test must still pass.
 func tokenChecks(ctx context.Context, cc *pve.Client, tokenID string) []PVECheck {
 	out := []PVECheck{{ID: "token", Status: checkOK, Message: "Proxmox accepts the token " + tokenID + "."}}
@@ -448,6 +448,10 @@ func tokenChecks(ctx context.Context, cc *pve.Client, tokenID string) []PVECheck
 			c.Status, c.Message = checkWarn, "Token lacks "+missing[0]+" (see docs/proxmox-permissions.md)"
 		}
 		out = append(out, c)
+	}
+	// Unreadable here means unreadable above, which returned.
+	if held, _ := cc.HeldPrivileges(ctx, pve.KubeMintForbidden); len(held) > 0 {
+		out = append(out, PVECheck{ID: "mint-scope", Status: checkWarn, Message: "Token holds " + strings.Join(held, "; ") + ": " + pve.KubeMintNarrowing})
 	}
 	return out
 }

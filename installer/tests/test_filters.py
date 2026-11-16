@@ -125,6 +125,10 @@ stage = open(os.path.join(os.path.dirname(__file__), "..", "playbooks", "10-pve-
 for path in ("/pool", "/storage", "/sdn/zones"):
     for role in ("ProxCloudKubeMint", "ProxCloudPlatform"):
         assert f"{{path: {path}, role: {role}, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}}" in stage, (path, role)
+# The portal creates tokens for the members of one group only. On /access/groups itself PVE takes User.Modify for
+# every user of the cluster, root@pam included, so no row sits there and the role on the other paths lacks it.
+assert "path: /access/groups," not in stage and "/access/groups/proxcloud-kube, role: ProxCloudKubeToken, propagate: 0, user: proxcloud@pve" in stage
+assert 'ProxCloudKubeMint: "Permissions.Modify"' in stage and "mint_group_users: [capmox@pve, csi@pve]" in stage
 
 # SigV4 against the worked example the Go verifier also accepts (pkg/auth/sigv4_test.go signs the same way).
 h = api.sigv4_headers("POST", "http://10.0.0.1:8080/api/v1/admin/service?b=1&a=2", b'{"x":1}', "pkA", "skB", "20261107T010203Z")

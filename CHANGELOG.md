@@ -549,6 +549,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The portal token can create API tokens for `capmox@pve` and `csi@pve` only, no longer for every Proxmox user**
+  (`internal/cloud/pve/access.go`, the managed-services setup script, installer stage 10). The mint grant of managed
+  Kubernetes put `User.Modify` on `/access/groups`, where Proxmox VE takes it for every user of the cluster: on the
+  lab (2026-11-16, `pve-manager/9.2.26`) the portal token created a privilege-separated API token for `root@pam`. A
+  token without privilege separation (full root) was not tried; by the PVE source the same grant allowed it before
+  `libpve-access-control` 9.2.1. `User.Modify` now sits in a role of its own, `ProxCloudKubeToken`, on
+  `/access/groups/proxcloud-kube`, a new group that holds the two service users; `ProxCloudKubeMint` keeps
+  `Permissions.Modify` on `/pool`, `/storage`, `/sdn/zones` and `/nodes` and has no row under `/access`.
+  **Existing sites must act:** run the managed-services script again as root on a node, or `make upgrade` on an
+  installer site in split mode. Both write the new grant first and then remove exactly the old rows and the old
+  privilege, so cluster creates and deletes keep working. Until then the new preflight row `mint-scope` fails and
+  Test connection warns (`mint-scope`), with what to run; stage 10 asserts the result. Afterwards list the tokens of
+  `root@pam` and of the other administrator accounts for ones nobody on your side created. Still open and accepted
+  for M1 (ADR 0009 A8, corrected): `Permissions.Modify` on those four paths, and the portal token's power to delete
+  the tokens of the two service users. The grant on the group has not run on a Proxmox cluster yet; the tests are
+  the generated script against the docs, the rows against stage 10, the effective rights worked out from the rows,
+  and the two checks against a fake API (`docs/proxmox-permissions.md`, "The mint grant in M1").
+
 - **ArgoCD's `default` project is locked on installer-built services clusters**
   (`installer/playbooks/files/argocd-default-project.yaml`, applied by stage 50's guardrails step in
   `services-platform.sh`): empty `sourceRepos`, `destinations` and `clusterResourceWhitelist`. ArgoCD creates
