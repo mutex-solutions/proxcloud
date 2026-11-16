@@ -250,6 +250,8 @@ The services subnet must be reachable from tenant networks (it holds the API end
 
 **What ran where:** `50-services-cluster.yml`'s template and `files/services-platform.sh` ran on a lab through hand-written drivers, against a site already installed in `allinone`. Preflight in split mode and stage 60's registration ran on that lab against that cluster, and a project attached to both providers. The playbook itself and stage 10's split grants have not run end to end on a clean site.
 
+A re-run of stage 50 from a release that changed the control plane's kubeadm configuration in `services-cluster.yml.j2` (the release with kube-vip's 60 s lease and the kubelet's `node-ip` does) **replaces the services cluster's control plane machine**: Cluster API joins a second control plane VM and then deletes the first. That needs one spare address in the services network's range and room for one more control plane VM on its node while it lasts, and the API address can be away for up to a minute when the old machine's kube-vip does not release it. This roll has not run on a lab.
+
 Stage 50 cannot change the machines of a running cluster: a `ProxmoxMachineTemplate` is immutable, so a changed size, template or pool in `proxcloud.services` fails the apply. Moving an `allinone` site with a hand-built services cluster onto this stage means rebuilding that cluster.
 
 ## Sandbox cluster (split mode)

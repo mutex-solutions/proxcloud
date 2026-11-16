@@ -12,8 +12,10 @@ kube-vip keeps the address by a lease it renews on the API server (vip_leasedura
 vip_retryperiod, in seconds; kube-vip v0.8.9 pkg/kubevip/config_envvar.go, defaults 15, 10 and 2). When one renewal
 does not finish within the renew deadline it takes the address off the interface and exits ("lost leadership,
 restarting kube-vip", pkg/cluster/clusterLeaderElection.go), and every client of the API loses its connection. With one
-control plane machine nobody else can take the lease, so the values are 60, 40 and 5: an etcd that takes up to 40
-seconds over one write (a lab measured 19.5) keeps the address. The same machine takes its own lease again at once
+control plane machine nobody else can take the lease, so the values are 60, 40 and 5: client-go tries the renewal again
+for 40 seconds. kube-vip's client cuts every request at 10 seconds (pkg/k8s/client.go, defaultTimeout), so the address is
+kept when one try in those 40 seconds gets through in under 10 (a lab measured one write of 19.5: the next try can pass),
+not through an etcd whose every write takes longer. The same machine takes its own lease again at once
 after a restart; another machine (a rollout) waits up to 60 seconds for a holder that did not release it.
 
 The kubelet's node-ip is the machine's own address, which only the machine knows (CAPMOX's cloud-init metadata has the

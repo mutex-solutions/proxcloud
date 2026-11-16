@@ -174,8 +174,9 @@ func TestChartKubeadmControlPlaneMatchesTheInstaller(t *testing.T) {
 	if strings.Contains(prepare, "{{") || strings.Contains(prepare, "{%") || strings.Contains(prepare, "{#") {
 		t.Errorf("the prepare script holds a Jinja expression:\n%s", prepare)
 	}
-	// kube-vip's lease outlasts a slow etcd write (a lab measured 19.5 s; with a renew deadline of 10 s kube-vip
-	// dropped the API address five times), within client-go's rule lease > renew deadline > retry period.
+	// kube-vip tries a renewal again for 40 s (a lab measured a write of 19.5 s; with a renew deadline of 10 s
+	// kube-vip dropped the API address five times), within client-go's rule lease > renew deadline > retry period.
+	// Its client cuts each request at 10 s, so this covers a stall, not a write of 40 s.
 	lease := map[string]int{}
 	for _, m := range regexp.MustCompile(`\{name: (vip_\w+), value: "(\d+)"\}`).FindAllStringSubmatch(vip, -1) {
 		lease[m[1]], _ = strconv.Atoi(m[2])

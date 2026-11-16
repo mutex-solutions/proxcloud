@@ -44,8 +44,10 @@ Four charts live here:
   cluster, and no tenant add-ons, CSI controller or Gateway API carriers. Tenant clusters keep
   the default `kamaji`, whose output is unchanged. 0.1.12 changes kubeadm mode only: the control
   plane's kubelet gets the machine's own address as `node-ip` (it registered the kube-vip
-  address), and kube-vip's lease is 60 s with a renew deadline of 40 s, so a slow etcd write no
-  longer costs the API address.
+  address), and kube-vip's lease is 60 s with a renew deadline of 40 s, so it tries a renewal
+  again for 40 s before it gives up the API address. Each request is still cut at 10 s by
+  kube-vip's client: a stall of about half a minute is survived, a write that takes over 10 s at
+  every try is not.
 
 ## Publishing
 
