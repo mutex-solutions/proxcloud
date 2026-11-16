@@ -551,9 +551,31 @@ class ScriptDryRunTests(unittest.TestCase):
                 self.assertNotEqual(refused.returncode, 0)
                 self.assertIn("invalid version", refused.stderr)
                 self.assertIn("invalid version", install.run("upgrade", bad, "--dry-run").stderr)
+        # Nor under the operator's locale: there [0-9a-f] and [0-9] also match letters and digits outside ASCII.
+        # (Where en_US.UTF-8 is not installed bash falls back to C and these pass either way.)
+        for bad in ("dev-ééééééé", "dev-àbcdef1", "v0.٨.0"):
+            with self.subTest(version=bad):
+                refused = Install(self).install(*BASE, "--tls", "internal", "--version", bad,
+                                                env={"LC_ALL": "en_US.UTF-8"})
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertIn("invalid version", refused.stderr)
+        # Back to a release: the managed-services floor still holds (the dev .env has them on), a release
+        # that has the platform API is accepted without the pre-release warning.
+        refused = install.run("upgrade", "v0.7.0", "--dry-run")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("managed services need ProxCloud v0.8.0", refused.stderr)
+        self.assertNotIn("+ docker", refused.stdout)
+        for release in ("v0.8.0", "v0.8.0-rc.1"):
+            with self.subTest(version=release):
+                upgrade = install.run("upgrade", release, "--dry-run")
+                self.assertEqual(upgrade.returncode, 0, upgrade.stderr)
+                self.assertNotIn("pre-release", upgrade.stderr)
         # The scheduler stays refused: a dev build cannot be placed after v0.6.0, whose API serves the
         # unauthenticated job triggers with the scheduler on.
         refused = Install(self).install(*BASE, "--tls", "internal", "--version", "dev-f6a9a11", "--scheduler")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("the job scheduler is not offered on a pre-release build", refused.stderr)
+        refused = install.install(*BASE, "--tls", "internal", "--scheduler")
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn("the job scheduler is not offered on a pre-release build", refused.stderr)
         scheduled = Install(self)

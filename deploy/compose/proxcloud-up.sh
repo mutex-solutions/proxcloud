@@ -3,6 +3,9 @@
 # Operator guide: README.md next to this file.
 set -euo pipefail
 umask 077
+# Every check of an argument below is a bracket range ([0-9a-f], [a-z0-9]): in a UTF-8 locale those also match
+# letters and digits outside ASCII (dev-éééééééé passed as a version), in C they are ASCII alone.
+export LC_ALL=C
 
 # Release pin of the proxcloud-{api,web,admin} images. Kept equal to the chart appVersion by
 # .github/scripts/tests/test_release_policy.py.
