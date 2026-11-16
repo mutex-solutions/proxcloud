@@ -59,6 +59,9 @@ The **Imported templates** tab shows each imported template's state: *Staged*, *
   are there), then deletes the copy. The provider needs a smoke network: set `config.templateSmoke`
   (for example `{"bridge":"vmbr0","vlan":29,"ip":"192.0.2.50/24","gateway":"192.0.2.1"}`, or just a
   bridge for DHCP) on the Proxmox provider. Without it the smoke test cannot run and the row says so.
+  A Kubernetes node template whose Proxmox cloud-init drive is on another slot than `ide0` fails the
+  smoke test (`template_mismatch`) before anything is copied: cluster machines made from it would never
+  join. Run the `qm set <vmid> --delete <slot>` command of the message on that node, then smoke-test again.
 - **Publish** — only after the template's latest smoke test passed. Confirm the digest. An OS template
   then joins the catalog, and the newest published version is what new servers get; older versions stay.
   A Kubernetes node image never appears in the OS catalog: publishing marks it ready and the row shows

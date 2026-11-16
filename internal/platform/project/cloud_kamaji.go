@@ -56,7 +56,7 @@ func (h *Handler) kamajiCreate(w http.ResponseWriter, r *http.Request, u *user.U
 		h.fail(w, httpx.BadRequest(err.Error()))
 		return
 	}
-	if err := spec.Validate(ks.Config().Defaults); err != nil {
+	if err := spec.ValidateCreate(ks.Config().Defaults); err != nil {
 		h.fail(w, httpx.BadRequest(err.Error()))
 		return
 	}
@@ -161,12 +161,6 @@ func (h *Handler) kamajiAction(w http.ResponseWriter, r *http.Request, proj *Pro
 		if version == "" {
 			h.fail(w, httpx.BadRequest("version is required"))
 			return true
-		}
-		if len(d.Versions) > 0 {
-			if _, ok := d.Versions[version]; !ok {
-				h.fail(w, httpx.BadRequest("version is not offered by this provider"))
-				return true
-			}
 		}
 		err := ks.PatchClusterValues(r.Context(), cr.ExternalID, func(values map[string]any) error {
 			current, _ := values["kubernetesVersion"].(string)
@@ -356,10 +350,13 @@ func prevGroupIndex(values map[string]any) (flavor, image, variant map[string]st
 }
 
 // rotateNodeGroupImages re-points every rendered group at the target version's image of its OWN
-// variant — the UPGRADE leg. Refused when a variant carries no image for the target; a missing
-// DEFAULT image keeps the group's current one (the matrix may have dropped an old version, and
-// UPGRADE already validated the target is offered).
+// variant — the UPGRADE leg. Refused when the provider does not offer the target version (an empty
+// version set offers none, as at create: kamaji.ClusterSpec.ValidateCreate) or a variant carries no
+// image for it.
 func rotateNodeGroupImages(values map[string]any, d kamaji.ClusterDefaults, version string) error {
+	if _, ok := d.Versions[version]; !ok {
+		return httpx.BadRequest("version is not offered by this provider")
+	}
 	groups, _ := values["nodeGroups"].([]any)
 	for _, raw := range groups {
 		g, ok := raw.(map[string]any)

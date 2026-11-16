@@ -728,6 +728,9 @@ func (x *acq) cluster(ctx context.Context) error {
 // no other drive, so a clone of such a template starts with two media labelled cidata, and cloud-init's NoCloud source
 // takes the first of the devices sorted downwards, the later drive: Proxmox's own, with no kubeadm data and no
 // address. The machine then never joins and the stage would wait out its hour. A drive on ide0 is replaced by CAPMOX's.
+// The advice is to delete the drive, not to move it: a template without one is what CAPMOX needs, and the other reader
+// of a node template, the template-updates smoke test, gives its clone a drive when the template has none
+// (templateupdates.SmokeExecutor.test), so the corrected template can still be tested and published.
 //
 // A template the portal token may not read (an operator's own, in nodeImage mode templates) is not a reason to stop:
 // the stage goes on and lists it as an item, not checked. A template that passed is an item too (ok), so the stage
@@ -750,7 +753,8 @@ func (x *acq) nodeTemplates(ctx context.Context) (items []StageItem, err error) 
 			if s := cfg.Str(slot); slot != "ide0" && strings.Contains(s, "cloudinit") && strings.Contains(s, "media=cdrom") {
 				return nil, permanent(CodeMachineFailed, "Node template %d on %s has a Proxmox cloud-init drive on %s. Cluster API puts its own on ide0, and a machine "+
 					"with both boots from the wrong one and never joins. On %s run: qm set %d --delete %s (templates imported by this release have the drive "+
-					"on ide0), then Retry.", templates[node], node, slot, node, templates[node], slot)
+					"on ide0), then Retry. The template needs no drive of its own: its smoke test in Template updates adds one to its test VM.",
+					templates[node], node, slot, node, templates[node], slot)
 			}
 		}
 		items = append(items, StageItem{ID: fmt.Sprintf("template-%d", templates[node]), State: CheckOK,

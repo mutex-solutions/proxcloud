@@ -341,6 +341,8 @@ Steps (each PVE mutation right after a successful fence check; the template itse
 
 1. Re-prove the template: member of `pc-templates` on the node (read from `/pools`), a template, named
    `TemplateName(payload)`, tagged `pc-src-<digest prefix>`; else FAIL `template_mismatch`. A
+   Kubernetes node template with a Proxmox cloud-init drive on another slot than `ide0` is FAIL
+   `template_mismatch` too, with the command that removes the drive (below); nothing is cloned. A
    withdrawn digest is FAIL `digest_withdrawn`. The template's **config digest** is recorded in the
    receipt with the clone's VMID: a PASS vouches for exactly that configuration.
 2. **Clone** (full, VMID recorded in the receipt *before* the call, lowest free id ≥ 9200) into pool
@@ -350,7 +352,13 @@ Steps (each PVE mutation right after a successful fence check; the template itse
    template's copied tags), `net0` on the smoke bridge/VLAN, `ipconfig0`, an **ephemeral ed25519
    SSH key** generated in memory for this attempt (only its SHA-256 fingerprint is recorded; the
    private key is never stored, logged or sent anywhere — nothing ever logs in with it), no password
-   (`cipassword` deleted) and no custom cloud-init snippets (`cicustom` deleted), `agent=1`.
+   (`cipassword` deleted) and no custom cloud-init snippets (`cicustom` deleted), `agent=1`. When the
+   clone has **no Proxmox cloud-init drive**, the same write adds one on the template's disk storage,
+   in the slot an import of that variant uses (`ide0` for a Kubernetes node image, `ide2` for an OS
+   image): these settings reach the guest only through that drive, and without it cloud-init ends
+   `disabled`. A node template without the drive is a valid one (below, and stage 7 of managed
+   services tells an operator to remove a drive that is not on `ide0`). A clone that has a drive
+   (`ide0` on a node image, any slot on an OS image) keeps it and gets no second one. The template itself is never changed.
 4. **Grow** `scsi0` by +8 GiB, then **start**.
 5. Guest agent **ping**, then **`guest-get-osinfo`** within 5 minutes; the reported `ID`/`VERSION_ID`
    must match the artifact (`debian-13` → `debian`/`13`, `ubuntu-2604` → `ubuntu`/`26.04`).
@@ -460,8 +468,15 @@ source takes the later device, Proxmox's own drive, and the machine gets no kube
 used pipeline templates). Correct such a template once, on its node, before a cluster uses it:
 `qm config <vmid> | grep cloudinit`, and when that names `ide2`: `qm set <vmid> --delete ide2`. Managed
 services refuses such a template in stage 7 with the same command
-([managed-services.md](managed-services.md#6-failure-codes), `machine_failed`); a tenant cluster's
-provider has no such check.
+([managed-services.md](managed-services.md#6-failure-codes), `machine_failed`). A tenant cluster's
+provider has no such check of its own: the smoke test is the gate, see the end of this paragraph. A template corrected that way has no cloud-init drive at all. CAPMOX
+needs none, and the smoke test adds one to its own clone (step 3 of the smoke test), so the template
+can still be tested and published. Until 2026-11-16 the smoke test did not, and such a template
+always failed `cloudinit_failed` with `cloud-init ended "disabled"`. The smoke test also
+checks the slot: a node template that still has its drive on another slot than `ide0` is FAIL
+`template_mismatch` with the same `qm set <vmid> --delete <slot>` command, before anything is cloned,
+so it cannot be published to tenant clusters. A version published **before this check** from such a
+template stays published: correct the template as above (the publish does not need to be repeated).
 
 **Kubernetes node images.** The kamaji provider's `config.cluster.versions` names template VMIDs
 explicitly, so withdrawing does **not** stop new workers from cloning a withdrawn image. The result

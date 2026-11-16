@@ -1272,3 +1272,18 @@ func TestAbandonCluster(t *testing.T) {
 		t.Fatal("marker left after a clean release")
 	}
 }
+
+// A provider that offers no version (how the platform install registers it, before a node image is published) creates
+// no cluster: nothing reaches the management cluster, and the refusal says what the operator must do.
+func TestCreateRefusedWithoutVersions(t *testing.T) {
+	cfg := testCfg()
+	cfg.Defaults.Versions = map[string]string{}
+	api := newFakeAPI()
+	_, err := NewWithAPI(api, cfg, "svc-1").CreateCluster(context.Background(), testSpec(), ClusterSecrets{Cloud: map[string]string{"token": "t"}, CSIManifest: "m"})
+	if err == nil || !strings.Contains(err.Error(), "offers no Kubernetes version") || !strings.Contains(err.Error(), "Template updates") {
+		t.Fatalf("create with no version offered: %v", err)
+	}
+	if len(api.apps) != 0 || len(api.secrets) != 0 {
+		t.Fatalf("something was written: %v %v", api.apps, api.secrets)
+	}
+}

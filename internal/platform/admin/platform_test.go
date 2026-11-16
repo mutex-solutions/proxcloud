@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/rbac"
 	"github.com/mutex-solutions/proxcloud/internal/platformlife"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
@@ -129,6 +130,47 @@ func TestBreakGlassEventHasNoToken(t *testing.T) {
 	if len(ev.ResourceMetadata) != 2 || len(ev.Changes) != 0 || strings.Contains(strings.ToLower(string(raw)), "kubeconfig\":") ||
 		strings.Contains(string(raw), "eyJ") {
 		t.Fatalf("the entry carries more than actor and expiry: %s", raw)
+	}
+}
+
+// The seed credential rotation writes its own entry, ROTATE_CREDENTIAL with the two Secret names and nothing else, and
+// the audit middleware leaves the route alone: its row read CREATE on the installation.
+func TestSeedRotateEventNamesTheSecrets(t *testing.T) {
+	path := "/api/v1/admin/platform/installations/pi-1/seed-credential/rotate"
+	if !auditSkip(path) {
+		t.Fatal("the middleware would add a CREATE row")
+	}
+	r := httptest.NewRequest("POST", path, nil)
+	r = r.WithContext(httpx.WithRC(r.Context(), &httpx.RequestContext{Sub: "operator-1"}))
+	ev := seedRotateEvent(r, &platformlife.Installation{ID: "pi-1", Name: "lab"}, "proxcloud-portal-token-g1", "proxcloud-portal-token-g2")
+	raw, _ := json.Marshal(ev)
+	for _, want := range []string{"operator-1", "pi-1", ActionRotateCredential, `"fromSecret":"proxcloud-portal-token-g1"`, `"toSecret":"proxcloud-portal-token-g2"`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("no %s in %s", want, raw)
+		}
+	}
+	if ev.Action != "ROTATE_CREDENTIAL" || ev.ResourceType != "PLATFORM_INSTALLATION" || len(ev.ResourceMetadata) != 3 || len(ev.Changes) != 0 ||
+		strings.Contains(string(raw), "eyJ") {
+		t.Fatalf("the entry is not the rotation's own, or carries more than the names: %s", raw)
+	}
+}
+
+// A rotation that answered 502 after the new credential was stored is audited too, as a failure with both names: the
+// stored cluster-admin credential changed and older token Secrets may still work. One that stored nothing writes none.
+func TestSeedRotateUnfinishedEvent(t *testing.T) {
+	r := httptest.NewRequest("POST", "/api/v1/admin/platform/installations/pi-1/seed-credential/rotate", nil)
+	r = r.WithContext(httpx.WithRC(r.Context(), &httpx.RequestContext{Sub: "operator-1"}))
+	inst := func(secret string) *platformlife.Installation {
+		return &platformlife.Installation{ID: "pi-1", Name: "lab", Status: platformlife.Status{Seed: &platformlife.SeedStatus{TokenSecret: secret}}}
+	}
+	if _, ok := seedRotateUnfinishedEvent(r, inst("proxcloud-portal-token-g1"), inst("proxcloud-portal-token-g1")); ok {
+		t.Fatal("nothing was stored: no entry")
+	}
+	ev, ok := seedRotateUnfinishedEvent(r, inst("proxcloud-portal-token-g1"), inst("proxcloud-portal-token-g2"))
+	raw, _ := json.Marshal(ev)
+	if !ok || ev.Action != ActionRotateCredential || ev.Outcome != audit.OutcomeFailure || ev.ErrorMessage == "" ||
+		ev.ResourceMetadata["fromSecret"] != "proxcloud-portal-token-g1" || ev.ResourceMetadata["toSecret"] != "proxcloud-portal-token-g2" || strings.Contains(string(raw), "eyJ") {
+		t.Fatalf("the entry of an unfinished rotation: ok=%v %s", ok, raw)
 	}
 }
 

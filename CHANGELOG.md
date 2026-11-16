@@ -412,6 +412,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Managed services: what the review of the L7, L11 and seed-reboot fixes found.** A Kubernetes node template that
+  still has its Proxmox cloud-init drive on another slot than `ide0` (imported before the drive moved) booted and
+  passed its smoke test, so it could be published to tenant clusters, whose machines then never join: the smoke test
+  now fails it `template_mismatch` before it clones, with the `qm set <vmid> --delete <slot>` command; a version
+  already published from such a template stays published and the template must be corrected by hand. The check row
+  `tenant-network` reads the provider's default zone in Proxmox instead of its configured kind (a `simple` zone made
+  without DHCP warned, a live zone with DHCP under another kind read `ok`), no longer says every create is refused,
+  and names the provider with shared workers, which is not affected. An `UPGRADE` of a tenant cluster on a provider
+  with no version is refused (`version is not offered by this provider`); it passed any next-minor version and kept
+  the old node image. A seed credential rotation that answered `502` after the new credential was stored writes its
+  `ROTATE_CREDENTIAL` entry with outcome `FAILURE`. `live.error` names the guide's section by its title, "When the
+  seed does not answer". A negative autoscale storage ceiling answers `maxStorageGiB must be a whole number, at least
+  0` where it said `0..0`. Docs: the AppArmor sysctl of Ubuntu 26.04 node images is cited to containerd issue 14485
+  and pull request 14487 (merged to main on 2026-11-16, in no release yet, 2.3 backport 14590), Launchpad 2172640
+  stays the reference for the symptom only, and the kernel change is said to be intentional; the recovery section
+  says that a failed apply sets the installation to `failed` and hides the seed's live read until a Retry passes;
+  the link to the smoke test section resolves. Unit-tested; nothing of it was run on a lab.
+
+- **Managed services: findings of the first end-to-end, credential and seed-reboot lab checks** (L7, L11, L10).
+  A node template without a Proxmox cloud-init drive, which is what stage 7 tells an operator to make of a template
+  with the drive on another slot than `ide0`, could never pass its smoke test (`cloudinit_failed`, cloud-init
+  `disabled`), so its Kubernetes version could never be published: the smoke test now gives its own clone the
+  drive when it has none, in the slot an import of that variant uses, and stage 7's message says the template
+  needs none. A cluster create on a Kubernetes provider that offers no version is refused before anything is
+  reserved or minted (it passed the version check with any version). The platform check has a row
+  `tenant-network` that warns, without failing, when the provider's default zone is a `simple` zone, on which
+  every tenant cluster create answers 400; the page no longer says "Every check passed" over a warning. The
+  database size refusals say `cpu must be a whole number, at least 1` where they said `cpu must be 1..1` for a
+  provider without a maximum. A seed credential rotation writes its own audit entry (`ROTATE_CREDENTIAL`, the two
+  Secret names, never a token); it read `CREATE`. A ready installation whose seed cannot be read says which of
+  the two it is (the API does not answer, or it refuses the credential) with the seed's address, VMID and node
+  and `live.code: seed_api_unreachable`, and the guide has a section for it: what keeps running, what Apply,
+  Retry and Remove do meanwhile, what to check, the filesystem repair (not run on a lab) and the path without a
+  backup. The guide also says that the old seed token works for some seconds after a rotation and that a
+  break-glass kubeconfig outlives one. Kubernetes node images of Ubuntu 26.04 are built with
+  `kernel.apparmor_restrict_unprivileged_unconfined = 0`: with Ubuntu's default a container's processes cannot
+  signal each other on kernels from 7.0.0-42 (Launchpad 2172640) and no PostgreSQL database comes up; the
+  export's cold-boot check refuses a Kubernetes image without it. **The BOM still names the node image built
+  before this change**: a new one must be built, published and shown on a lab before a BOM names it. Not
+  changed: the seed image, and anything about the seed's filesystem error after a reboot, whose cause is not
+  known.
+
 - **Managed services: a seed that restarts no longer ends the run, and what the first finished lab run found**
   (M0, attempt 5). The seed's k3s restarted under the disk load of stage 7's clones; for some seconds its API
   answered `403 … RBAC: [clusterrole … "cluster-admin" not found …]`, which the run took for a refusal and ended

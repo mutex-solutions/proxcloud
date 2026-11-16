@@ -306,7 +306,15 @@ function Ready({ installation, live, loading, error }: { installation: Installat
       state={live?.phase ?? installation.status.phase}
       description={`Release ${installation.status.bom?.release ?? "unknown"}. The components below are read from the seed each time this page loads.`}
     >
-      {live?.error ? <Alert variant="destructive"><AlertTitle>The seed did not answer</AlertTitle><AlertDescription>{live.error}</AlertDescription></Alert> : null}
+      {live?.error ? (
+        <Alert variant="destructive">
+          <AlertTitle>The seed could not be read</AlertTitle>
+          <AlertDescription>
+            <p>{live.error}</p>
+            <Link to="/docs/platform-admin/managed-services" className={LINK}>When the seed does not answer: what to check and how to recover</Link>
+          </AlertDescription>
+        </Alert>
+      ) : null}
       <ErrorNote title="The live state could not be read" error={error} />
       {loading ? <Skeleton className="h-24" /> : !live ? (
         <div className="grid gap-1 text-sm">

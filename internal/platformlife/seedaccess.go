@@ -24,7 +24,10 @@ const PhaseDegraded = "degraded"
 type LiveState struct {
 	Phase      string          `json:"phase"`
 	Components []LiveComponent `json:"components"`
-	Error      string          `json:"error,omitempty"`
+	// Error says why the seed could not be read and what the operator does first; Code is then seed_api_unreachable,
+	// the code a run fails with on the same seed. Both are derived like the phase and never stored.
+	Error string `json:"error,omitempty"`
+	Code  string `json:"code,omitempty"`
 }
 
 // LiveComponent is one Application's sync and health as ArgoCD reports them.
@@ -43,7 +46,8 @@ func storedSeed(in *Installation, sec *Secrets) (*kamajik8s.Client, error) {
 }
 
 // Live reads the installation's Applications on the seed. A ready installation is degraded when the seed does not
-// answer, lists no Application, or one is not Synced and Healthy.
+// answer, lists no Application, or one is not Synced and Healthy. A seed that could not be read has a code and a
+// message that tells a silent API (the VM is down, or runs without its Kubernetes) from one that refuses the credential.
 func Live(ctx context.Context, in *Installation, sec *Secrets) LiveState {
 	out := LiveState{Phase: in.Status.Phase, Components: []LiveComponent{}}
 	c, err := storedSeed(in, sec)
@@ -52,8 +56,15 @@ func Live(ctx context.Context, in *Installation, sec *Secrets) LiveState {
 	}
 	apps, err := c.ListApplications(ctx, argoNamespace, "proxcloud.io/platform-installation="+in.ID)
 	bad := len(apps) == 0
-	if err != nil {
-		out.Error = "The seed's API did not answer or refused the stored credential."
+	if st := in.Status.Seed; err != nil && startingUp(err) {
+		out.Code = CodeSeedAPIUnreachable
+		out.Error = fmt.Sprintf("The seed's API at %s answers but refuses the stored credential. A seed that has just started does so for some seconds: load "+
+			"this page again. If it stays, look on the console of seed VM %d on %s whether its Kubernetes keeps restarting.", st.APIServer, st.VMID, st.Node)
+	} else if err != nil {
+		out.Code = CodeSeedAPIUnreachable
+		out.Error = fmt.Sprintf("The seed's API at %s does not answer. The record still says ready: nothing stores this state. The platform cluster and "+
+			"what runs on it keep running, but an apply or a Remove waits on the seed and then fails. Check that seed VM %d runs on %s and open its console "+
+			"(qm terminal %d): the guide's section 'When the seed does not answer' has the steps.", st.APIServer, st.VMID, st.Node, st.VMID)
 	}
 	for _, a := range apps {
 		lc := LiveComponent{Name: str(a, "metadata", "labels", "proxcloud.io/component"), Cluster: ClusterWorkload,
