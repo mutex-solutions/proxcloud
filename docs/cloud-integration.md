@@ -540,8 +540,9 @@ point (`proxmox.go` header):
   cloud-init, so an image without cloud-init gets no address there.
 - A network in a `vlan` zone is a bare VLAN: Proxmox holds no gateway address there and does
   no DHCP and no SNAT. The subnet is written without a DHCP range and without SNAT, the network
-  answers `dhcp: false` and `snat: false`, and a create, `ADD_SUBNET` or `SET_SNAT` that asks
-  for `enableDhcp: true` or `snat: true` is refused with a `400`. The `gateway` it shows (the
+  answers `dhcp: false` and `snat: false` (also one made before this rule, whatever its subnet
+  still says), and a create with `enableDhcp: true` or `snat: true`, or an `ADD_SUBNET` or
+  `SET_SNAT` with `snat: true`, is refused with a `400`. The `gateway` it shows (the
   subnet's first address) is the address the site's router must hold on that VLAN: servers get
   it as their default route, and outbound access is that router's decision.
 

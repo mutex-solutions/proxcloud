@@ -85,8 +85,9 @@ reading [section 3](#3-proxmox-identities): they share the pool `proxcloud-syste
 | The datacenter firewall | On, with the provider's isolation rules written by a provider sync once the installation is saved: the Check verifies that tenant traffic to the seed, the API address and the node range is dropped. |
 
 The page also warns when the job scheduler is off: tenant clusters and databases then update their
-status only when a provider sync runs, and no project can be deleted (a delete is refused with a
-`409` that says so, [Compose README](../deploy/compose/README.md#optional-features)). It does not
+status only when a provider sync runs, and no project is deleted: "Delete now" is refused with a
+`409` that says so, and a delete with the grace period is accepted but stays scheduled until the
+scheduler runs ([Compose README](../deploy/compose/README.md#optional-features)). It does not
 block an install.
 
 The images a run imports (stage 2) are not smoke-tested automatically: the tests would clone beside

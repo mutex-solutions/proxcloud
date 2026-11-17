@@ -24,16 +24,20 @@ it on the way:
 
 | Tenant network | Address the load balancer sees | What `allowedCidrs` can hold |
 |---|---|---|
-| SNAT on (the default in an EVPN or `simple` zone) | the Proxmox node's own address, the one of the node the VM runs on | only node addresses. The tenant subnet never matches: with it alone every connection is dropped |
+| SNAT on, `simple` zone | the Proxmox node's own address, the one of the node the VM runs on (measured) | only node addresses. The tenant subnet never matches: with it alone every connection is dropped |
+| SNAT on, EVPN zone (the default zone kind) | the address of the zone's exit node, whatever node the VM runs on (not measured; it follows from where EVPN does its SNAT) | only exit node addresses. The tenant subnet never matches |
 | SNAT off, or a VLAN zone, and the site routes the tenant subnet to the pool without NAT | the VM's address | the tenant's subnet, or single addresses of it |
 | a site router that itself NATs tenants | that router's address | only that address, shared by every tenant behind it |
 
-With SNAT, allowing a node's address is not isolation: **every tenant whose VM runs on that node
-arrives with the same address and passes the filter**, a VM that moves to another node is cut
-off, and no page or API tells a tenant the node addresses. What then separates tenants is the
-database's password and TLS only. (Measured on a lab: the tenant subnet was refused and the node's
-`/32` let the VM in. That a second tenant behind the same node passes follows from the SNAT rule
-and was not measured.) The same holds for NAS exports
+With SNAT, allowing a node's address is not isolation: **every tenant behind the same NAT address
+arrives with it and passes the filter**. In a `simple` zone that is every tenant whose VM runs on
+the same node, and a VM that moves to another node is cut off. In an EVPN zone it is every tenant
+that leaves through the same exit node, wherever its VM runs, so with one exit node it is every
+tenant, and moving a VM changes nothing. No page or API tells a tenant these addresses. What then
+separates tenants is the database's password and TLS only. (Measured on a lab, in a `simple` zone
+only: the tenant subnet was refused and the node's `/32` let the VM in. That a second tenant
+behind the same address passes follows from the SNAT rule and was not measured; nothing was
+measured in an EVPN zone.) The same holds for NAS exports
 ([managed-k8s.md](managed-k8s.md)).
 
 What a site must do, one of:
@@ -41,8 +45,11 @@ What a site must do, one of:
 - **Route, do not NAT.** Give tenant subnets a route to the load balancer pool without source
   NAT (SNAT off on the networks that use databases, or a VLAN zone, and on the services side a
   route back to the tenant ranges), and tell tenants to put their own subnet in `allowedCidrs`.
-  The provider's isolation rules still keep tenants away from each other and from the rest of the
-  services network.
+  With SNAT off in an EVPN or `simple` zone the Proxmox nodes still route the traffic, so the
+  provider's isolation rules still keep tenants away from each other and from the rest of the
+  services network. In a VLAN zone the site's router does the routing, so it must keep tenants
+  apart and away from the rest of the services network itself; ProxCloud's firewall rules do not
+  see that traffic (not run on a lab).
 - **Accept it.** Keep SNAT, give tenants the node addresses to allow, and treat `allowedCidrs` as
   a filter against the outside only: a database is then reachable, at the network level, by every
   tenant of the installation, and its password and TLS are the boundary.

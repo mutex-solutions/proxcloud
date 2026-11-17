@@ -890,7 +890,7 @@ debugfs -w -f /tmp/orphan-fix.cmd "$D"
 - `debugfs` exits 0 even when `ssv` failed, so the last line reads the field back and runs the full check
   only when it is 0. If `e2fsck -f -p` does not run, stop: the field is still set.
 - `e2fsck -f -p` exit status 0 or 1 is success (1: it corrected something); 4 or more is not.
-- Tested only on scratch image files with e2fsprogs 1.47.2, with a file in inode 12, in four states: clean,
+- Tested on scratch image files with e2fsprogs 1.47.2, with a file in inode 12, in four states: clean,
   journal not replayed, marked with errors, and both. Each time the field became 0 in the primary and the
   backup superblocks, the file kept its content and `e2fsck -fn` was clean afterwards.
 - Run once on a real VM on a lab, on 2026-11-17: the seed VM of a managed-services installation, on a zvol,

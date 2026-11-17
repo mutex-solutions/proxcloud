@@ -20,7 +20,7 @@ Tenant Kubernetes clusters also need a network zone without DHCP: the Proxmox pr
 
 In a VLAN zone Proxmox provides no gateway, no DHCP and no SNAT: your own router must hold the first address of each tenant subnet on its VLAN and route it to the load balancer range. Without it a cluster's workers never join.
 
-The page also warns when the job scheduler is off: tenant clusters and databases then update their status only when a provider sync runs, and a project cannot be deleted (the delete is refused and says so).
+The page also warns when the job scheduler is off: tenant clusters and databases then update their status only when a provider sync runs, and no project is deleted: "Delete now" is refused and says so, and a delete with the grace period is accepted but stays scheduled until the scheduler runs.
 
 No check of step 3 reads the following, so look before the first run:
 
