@@ -68,7 +68,9 @@ export default function NetworksPage() {
       apiFetch(`/project/${pid}/cloud`, {
         method: "POST",
         cloud: scope,
-        body: { type: "NETWORK", data: { name, snat, ...(cidr.trim() ? { cidr: cidr.trim() } : {}) } },
+        // snat is sent only to turn it off: a ticked box takes the provider's default, which is off where the networks
+        // are VLANs of the site (the API refuses snat: true there).
+        body: { type: "NETWORK", data: { name, ...(snat ? {} : { snat: false }), ...(cidr.trim() ? { cidr: cidr.trim() } : {}) } },
       }),
     onSuccess: () => {
       toast.success(`Network "${name}" created`)
@@ -252,6 +254,10 @@ export default function NetworksPage() {
               <Checkbox id="net-snat" checked={snat} onCheckedChange={(v) => setSnat(v === true)} />
               <Label htmlFor="net-snat">Outbound internet access (SNAT)</Label>
             </div>
+            <p className="text-xs text-muted-foreground">
+              Where your operator's own router serves the networks (VLANs), there is no SNAT and no DHCP: the router
+              decides on outbound access, and the network's details show it as off.
+            </p>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)}>

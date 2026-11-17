@@ -135,3 +135,49 @@ func TestSeedReferenceAliasesAndAllSlots(t *testing.T) {
 		}
 	}
 }
+
+// F51: the portal token may list its stores (Datastore.Audit) but not read one's definition (GET /storage/<store>
+// needs Datastore.Allocate and answers 403). The backing identity comes from the list, and equals the one the single
+// read gives a token that may use it.
+func TestSeedBackingFromTheStorageList(t *testing.T) {
+	def := map[string]any{"type": "cephfs", "shared": 1, "content": "iso", "path": "/mnt/pve/cephfs"}
+	serve := func(list, single bool) *Client {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api2/json/storage", func(w http.ResponseWriter, r *http.Request) {
+			if !list {
+				http.Error(w, "denied", 403)
+				return
+			}
+			row := map[string]any{"storage": "cephfs", "digest": "abc"}
+			for k, v := range def {
+				row[k] = v
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"storage": "local", "type": "dir"}, row}})
+		})
+		mux.HandleFunc("/api2/json/storage/cephfs", func(w http.ResponseWriter, r *http.Request) {
+			if !single {
+				http.Error(w, "Permission check failed (/storage/cephfs, Datastore.Allocate)", 403)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": def})
+		})
+		srv := httptest.NewServer(mux)
+		t.Cleanup(srv.Close)
+		c, err := New(Config{APIURL: srv.URL, TokenID: "portal@pve!t", Secret: "not-printed"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	fromList, err := serve(true, false).seedBacking(context.Background(), "n1", "cephfs")
+	if err != nil || fromList == "" {
+		t.Fatalf("list only: %q %v", fromList, err)
+	}
+	fromSingle, err := serve(false, true).seedBacking(context.Background(), "n1", "cephfs")
+	if err != nil || fromSingle != fromList {
+		t.Fatalf("single %q, list %q, %v", fromSingle, fromList, err)
+	}
+	if _, err := serve(false, false).seedBacking(context.Background(), "n1", "cephfs"); err == nil {
+		t.Fatal("no readable definition must be an error")
+	}
+}

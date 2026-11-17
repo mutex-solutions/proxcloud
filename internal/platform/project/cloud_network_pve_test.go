@@ -153,3 +153,26 @@ func TestLiveClusterOn(t *testing.T) {
 		t.Errorf("no live cluster holds these: got %q", got)
 	}
 }
+
+// F49: a VLAN zone has no DHCP and no SNAT: both default to off there, and asking for either is a 400.
+func TestPVENetFlags(t *testing.T) {
+	for _, tt := range []struct {
+		kind       string
+		data       map[string]any
+		dhcp, snat bool
+		status     int
+	}{
+		{"simple", map[string]any{}, true, true, 0},
+		{"evpn", map[string]any{"snat": false}, true, false, 0},
+		{"", map[string]any{}, true, true, 0},
+		{"vlan", map[string]any{}, false, false, 0},
+		{"vlan", map[string]any{"snat": false, "enableDhcp": false}, false, false, 0},
+		{"vlan", map[string]any{"snat": true}, false, false, http.StatusBadRequest},
+		{"vlan", map[string]any{"enableDhcp": true}, false, false, http.StatusBadRequest},
+	} {
+		dhcp, snat, herr := pveNetFlags(tt.kind, tt.data)
+		if (herr == nil) != (tt.status == 0) || herr != nil && herr.Status != tt.status || dhcp != tt.dhcp || snat != tt.snat {
+			t.Errorf("%s %v: dhcp %v snat %v err %v", tt.kind, tt.data, dhcp, snat, herr)
+		}
+	}
+}

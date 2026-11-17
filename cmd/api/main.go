@@ -273,6 +273,9 @@ func run() error {
 		}
 	}()
 	projectSvc := project.NewService(projectRepo, orgRepo, billingRepo, users, platformconfig.NewRepo(pg))
+	// A delete-now only flags the project; the deletion job tears it down, and it runs only on the scheduler's timer or
+	// from its debug trigger. With both off a delete-now is refused (409) instead of leaving the project stuck.
+	projectSvc.SetNoDeletionJob(!cfg.Jobs.SchedulerEnabled && !cfg.Jobs.DebugTriggers)
 	// Wire the org member→project propagation now that the project service exists (org can't import
 	// project — set via a setter).
 	orgH.SetProjectMemberAdder(projectSvc)
@@ -1191,7 +1194,7 @@ func run() error {
 					return b != nil, err
 				}}, nil
 			},
-			// Every finished import gets its automatic smoke test.
+			// Every finished import gets its automatic smoke test, except a platform run's (AutoSmoke).
 			OnImported: func(ctx context.Context, id string) {
 				err := tuSvc.AutoSmoke(ctx, id, func(ctx context.Context, serviceID, node string) (templateupdates.SmokeNetwork, error) {
 					es, err := esSvc.Get(ctx, serviceID)

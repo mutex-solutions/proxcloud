@@ -232,8 +232,12 @@ func (s *Service) CreateNetwork(ctx context.Context, req CreateNetworkReq) (*Net
 	if gw == "" {
 		gw = firstHost(ipnet)
 	}
-	sub := SubnetOpts{CIDR: req.CIDR, Gateway: gw, SNAT: req.SNAT}
-	if req.DHCP {
+	// A VLAN zone is a bare layer 2 segment: Proxmox holds no gateway address there, runs no DHCP and does no SNAT, so
+	// neither is written. The gateway stays on the subnet as the address the site's router must hold: servers and
+	// cluster nodes get it as their default route.
+	routed := req.Zone.Kind != "vlan"
+	sub := SubnetOpts{CIDR: req.CIDR, Gateway: gw, SNAT: req.SNAT && routed}
+	if req.DHCP && routed {
 		start, end := dhcpRange(ipnet, gw)
 		sub.DHCPStart, sub.DHCPEnd = start, end
 	}
