@@ -74,6 +74,37 @@ test("an advance posts the confirmed digest once, and a refused publish stops th
   expect(posts[0].body).toEqual({ serviceId: "svc-proxmox-01", package: "proxcloud-vm-k8s-1-37", digest, confirmDigest: digest })
 })
 
+test("an advance that published and then could not go on shows both, and is not repeated", async ({ page }) => {
+  const dialog = await start(page, {
+    [`GET ${PATH}`]: { digest, next: "advance", complete: false, nodesMissing: [], nodes: [{ node: "pve1", state: "ready_to_publish", vmid: 9210 }, { node: "pve2", state: "missing" }] },
+    [`POST ${PATH}`]: {
+      digest, kubernetesVersion: "1.37.2", next: "advance", complete: false, nodesMissing: [], versionsLine: '"1.37.2": "pve1=9210"',
+      nodes: [{ node: "pve1", state: "published", vmid: 9210 }, { node: "pve2", state: "missing" }],
+      actions: ["published pve1/9210"], error: { code: "rate_limited", message: "github rate limit exceeded" },
+    },
+  })
+  await expect(dialog.getByRole("alert").filter({ hasText: "Stopped" })).toContainText("github rate limit exceeded (rate_limited)")
+  await expect(dialog.getByRole("status")).toContainText("Stopped: the next step could not be started.")
+  await expect(dialog.getByRole("button", { name: "Try again" })).toBeVisible()
+  expect(await calls(page, "POST", PATH)).toHaveLength(1)
+})
+
+test("a node that is down keeps the report open and is named before the versions line", async ({ page }) => {
+  const dialog = await start(page, {
+    [`GET ${PATH}`]: {
+      digest, kubernetesVersion: "1.37.2", next: "done", complete: false, nodesMissing: [], versionsLine: '"1.37.2": "pve1=9210,pve2=9211"',
+      nodes: [
+        { node: "pve1", state: "published", vmid: 9210 }, { node: "pve2", state: "published", vmid: 9211 },
+        { node: "pve3", state: "skipped", vmid: 9212, code: "node_down", message: "The template's node is down; its copy cannot be read" },
+      ],
+    },
+  })
+  await expect(dialog.getByRole("row").filter({ hasText: "pve3" })).toContainText("node_down")
+  await expect(dialog.getByRole("alert")).toContainText("This version does not cover every node yet")
+  await expect(dialog.getByRole("alert")).toContainText("Nodes pve3 are down: a copy they hold cannot be read and is not in the line.")
+  await expect(dialog.getByRole("status")).toContainText("Nothing more to do.")
+})
+
 test("a provider that refuses is shown, not retried", async ({ page }) => {
   const dialog = await start(page, { [`GET ${PATH}`]: { apiError: { status: 409, message: "This artifact digest was withdrawn and can never be imported or published again" } } })
   await expect(dialog.getByRole("alert")).toContainText("This artifact digest was withdrawn")

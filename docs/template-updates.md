@@ -469,8 +469,13 @@ One advance, in this order:
      When the import finishes the automatic smoke test starts by itself.
 
 Nothing runs in the background. The dialog reads the report every 15 s and advances again while `next` is `advance`;
-closing it pauses, and opening it again continues from the state on the provider. When a publish was refused the dialog
-stops and shows the reason; **Try again** repeats it.
+closing it pauses, and opening it again continues from the state on the provider. When a publish was refused, or an
+advance answered an error, the dialog stops and shows the reason; **Try again** repeats it.
+
+An advance that fails before it changed anything answers the error (for example 429 while GitHub rate-limits the
+import). One that already published a node in step 1 and then cannot start its job in step 2 answers 200 with the
+report and `error: {code, message}`: the publish is in `actions` and in the audit log, no job is started, and `next`
+is `advance`.
 
 | Node state | Meaning |
 |---|---|
@@ -485,19 +490,22 @@ stops and shows the reason; **Try again** repeats it.
 | `import_failed` | The import failed (`code` as stored). Not repeated: start it again with **Import…** |
 | `missing` | No copy; waits its turn for an import |
 | `present_unmanaged` | A template with this artifact's source tag that the portal did not import is on the node. Nothing is imported over it |
-| `skipped` | The node is not online, its storages are not active, the provider has no `importStorage`, the default profile names no storage for it, an earlier import blocks a new one, or the copy is tagged withdrawn (`message` says which) |
+| `skipped` | The node is not online (`code` `node_down`, also when it holds a copy that cannot be read while it is down), its storages are not active, the provider has no `importStorage`, the default profile names no storage for it, an earlier import blocks a new one, or the copy is tagged withdrawn (`message` says which) |
 
 The report also carries:
 
 - `versionsLine`: the `config.cluster.versions` entry of the published copies, newest per node (as after a Publish).
   It is still display only: the operator copies it into the Kubernetes provider.
 - `nodesMissing`: nodes that publish a node image of another Kubernetes version and none of this one.
-- `complete`: every node is `published` or `skipped` and `nodesMissing` is empty. While it is false the dialog warns
+- `complete`: every node is `published` or `skipped` for a reason other than being down, and `nodesMissing` is empty.
+  A node that is down is left out of `versionsLine` even when it holds a published copy, so the report is not
+  complete until it is back (or removed from the cluster). While it is false the dialog warns
   before the line: a line that covers fewer nodes moves a cluster's workers off the missing nodes at its next node
   group change or upgrade, and ArgoCD deletes the workers of a dropped node at once
   ([managed-k8s.md](managed-k8s.md#9-how-a-cluster-lands-on-proxmox)).
 - `next`: `advance`, `wait` (a job of the provider is running) or `done`.
 - `actions`: what this call did (`published pve2/9211`, `smoke test queued pve3/9212`, `import queued pve4`).
+- `error`: only on an advance that acted and then could not go on (above).
 
 It never withdraws or removes tags, never imports where a copy of the digest exists, never repeats a failed import or
 smoke test, never bypasses a publish gate, and never starts a second job of a provider. A node whose import or smoke

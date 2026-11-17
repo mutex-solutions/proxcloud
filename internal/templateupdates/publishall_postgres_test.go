@@ -22,6 +22,7 @@ type publishAllFixture struct {
 	s   *Service
 	db  *pgdoc.DB
 	pv  *smokePVE
+	reg *fakeRegistry
 	p   VMPayload
 	in  PublishAllInput
 	net error // what SmokeNet answers
@@ -42,7 +43,7 @@ func publishAllSetup(t *testing.T) *publishAllFixture {
 	if err := s.Smokes.Ensure(ctx); err != nil {
 		t.Fatal(err)
 	}
-	f := &publishAllFixture{t: t, s: s, db: db, pv: newSmokePVE(), p: p}
+	f := &publishAllFixture{t: t, s: s, db: db, pv: newSmokePVE(), reg: reg, p: p}
 	f.in = PublishAllInput{ServiceID: p.ServiceID, Package: p.Package, Digest: p.Digest, ConfirmDigest: p.Digest, ImportStorage: "nas-import",
 		DiskStorage: func(string) string { return "local-zfs" },
 		SmokeNet: func(context.Context, string, string) (SmokeNetwork, error) {
@@ -241,5 +242,92 @@ func TestPGPublishAllRefusals(t *testing.T) {
 	f.s.VMEnabled = false
 	if _, err := f.s.PublishAll(ctx, lifecycleFake{f.pv}, f.in, "admin", false); !errors.Is(err, errVMDisabled) {
 		t.Fatalf("flag off: %v", err)
+	}
+}
+
+// downNodePVE reads the cluster as Proxmox shows it while a node is down: the VM rows of that node are
+// still listed, and nothing in them but the VMID and the node counts (pve.markNodeDown).
+type downNodePVE struct {
+	lifecycleFake
+	down string
+}
+
+func (d downNodePVE) ClusterResources(ctx context.Context, kind string) ([]pve.ClusterResource, error) {
+	rows, err := d.lifecycleFake.ClusterResources(ctx, kind)
+	for i, r := range rows {
+		if r.Node == d.down {
+			rows[i] = pve.ClusterResource{Type: "qemu", VMID: r.VMID, Node: r.Node, Status: "unknown", NodeDown: true}
+		}
+	}
+	return rows, err
+}
+
+// A node that is down while it holds a published copy: the versions line cannot name it, so the report
+// is not complete and the dialog warns before the line is copied. A line without that node would have
+// each cluster's workers there pruned at its next edit.
+func TestPGPublishAllNodeDown(t *testing.T) {
+	f := publishAllSetup(t)
+	f.in.Nodes, f.in.Options = f.in.Nodes[:4], f.in.Options[:4]
+	f.imported("pve1", 9210, true)
+	f.imported("pve2", 9211, true)
+	f.imported("pve3", 9212, true)
+	f.in.Nodes[2].Status, f.in.Nodes[3].Status = "offline", "offline" // pve3 holds a copy, pve4 holds none
+	rep, err := f.s.PublishAll(context.Background(), downNodePVE{lifecycleFake{f.pv}, "pve3"}, f.in, "admin", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := states(rep); got != "pve1=published pve2=published pve3=skipped pve4=skipped" {
+		t.Fatalf("states: %s", got)
+	}
+	if rep.Nodes[2].Code != NodeDownCode || rep.Nodes[3].Code != NodeDownCode || rep.Nodes[2].VMID != 9212 {
+		t.Fatalf("down nodes: %+v", rep.Nodes[2:])
+	}
+	if rep.Complete || rep.Next != "done" || rep.VersionsLine != `"1.35.10": "pve1=9210,pve2=9211"` || f.jobs() != 0 {
+		t.Fatalf("a line without the down node must not be complete: %+v jobs=%d", rep, f.jobs())
+	}
+	// The node is back: the same call is complete and the line has it.
+	f.in.Nodes, f.in.Options = f.in.Nodes[:3], f.in.Options[:3]
+	f.in.Nodes[2].Status = "online"
+	if rep = f.run(true); !rep.Complete || rep.VersionsLine != `"1.35.10": "pve1=9210,pve2=9211,pve3=9212"` {
+		t.Fatalf("node back: %+v", rep)
+	}
+	// A node skipped for its storage, not for being down, does not hold the report open.
+	f.in.Nodes = append(f.in.Nodes, pve.Node{Node: "pve6", Status: "online"})
+	if rep = f.run(true); !rep.Complete || rep.Nodes[3].State != NodeSkipped || rep.Nodes[3].Code != "" {
+		t.Fatalf("storage skip: %+v", rep)
+	}
+}
+
+// An advance that published a node and then could not start the next import (GitHub rate limit): the
+// call answers with the report, so the publish is shown and audited, and no job is started. With
+// nothing done first, the same failure is the call's error.
+func TestPGPublishAllKeepsWhatItDid(t *testing.T) {
+	f := publishAllSetup(t)
+	f.in.Nodes, f.in.Options = f.in.Nodes[:3], f.in.Options[:3]
+	ready := f.imported("pve1", 9210, false)
+	f.smoked(ready, "pve1", 9210, SmokePass, "")
+	f.reg.listErr = &RateLimitError{Limit: 60, Resource: "core"}
+	rep, err := f.s.PublishAll(context.Background(), lifecycleFake{f.pv}, f.in, "admin", true)
+	if err != nil {
+		t.Fatalf("the publish of pve1 is lost behind the error of the import: %v", err)
+	}
+	if got := states(rep); got != "pve1=published pve2=missing pve3=missing" {
+		t.Fatalf("states: %s", got)
+	}
+	if len(rep.Actions) != 1 || rep.Actions[0] != "published pve1/9210" || !isPublished(f.pv.vms[9210].cfg.Str("tags"), "kubernetes") {
+		t.Fatalf("actions %v", rep.Actions)
+	}
+	if rep.Error == nil || rep.Error.Code != "rate_limited" || !strings.Contains(rep.Error.Message, "rate limit") || rep.Next != "advance" || rep.Complete || f.jobs() != 0 {
+		t.Fatalf("error %+v next=%s complete=%v jobs=%d", rep.Error, rep.Next, rep.Complete, f.jobs())
+	}
+	// The second call has nothing to publish first: the failure is its answer, as for a first import.
+	var rl *RateLimitError
+	if rep, err = f.s.PublishAll(context.Background(), lifecycleFake{f.pv}, f.in, "admin", true); !errors.As(err, &rl) || rep != nil {
+		t.Fatalf("nothing done, registry failing: %+v, %v", rep, err)
+	}
+	// The registry answers again: one import starts.
+	f.reg.listErr = nil
+	if rep = f.run(true); states(rep) != "pve1=published pve2=import_queued pve3=missing" || rep.Error != nil || f.jobs() != 1 {
+		t.Fatalf("after the limit: %s %+v jobs=%d", states(rep), rep.Error, f.jobs())
 	}
 }

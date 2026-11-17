@@ -250,15 +250,25 @@ or smoke test.
 ```json
 {"digest": "sha256:…", "kubernetesVersion": "1.35.10",
  "nodes": [{"node": "pve1", "state": "published", "vmid": 9210},
-           {"node": "pve2", "state": "smoke_running", "vmid": 9211},
+           {"node": "pve2", "state": "smoke_queued", "vmid": 9211},
            {"node": "pve3", "state": "missing"},
-           {"node": "pve4", "state": "skipped", "message": "The node is not online"}],
+           {"node": "pve4", "state": "skipped", "code": "node_down", "message": "The node is not online"}],
  "versionsLine": "\"1.35.10\": \"pve1=9210\"", "complete": false, "nodesMissing": [], "next": "wait",
  "actions": ["published pve1/9210", "smoke test queued pve2/9211"]}
 ```
 
-`409` with `code` `busy` (another advance of that provider runs), `digest_withdrawn`, `vm_updates_disabled` or
-`provider_missing`; `400` `confirm_digest`; `502` `pve_unreadable`. The states and the rules:
+`complete` is false while a node is down (`code` `node_down`): its copy cannot be read and is not in `versionsLine`.
+
+Errors, each with a `code` in `details`: `409` `busy` (another advance of that provider runs), `digest_withdrawn`,
+`vm_updates_disabled`, `provider_missing`, `provider_disabled` or `provider_incomplete`; `400` `confirm_digest` (the
+POST without a package or with a `confirmDigest` that is not the digest; a malformed digest); `502` `pve_unreadable`
+(the provider's nodes, VMs or storage could not be read; nothing was changed); `503` `pve_unwired`. An advance that
+has to start an import can also answer what the import does, without a `code`: `429` (GitHub rate limit), `502`
+(GitHub), `409` (the integration is not configured) or `400` (the artifact is refused).
+
+When an advance has already published a node and then cannot start its next job, it answers `200` with the report,
+`actions`, and `"error": {"code", "message"}` (`rate_limited`, a lifecycle code, or `next_step_failed`), so what it
+did is shown and audited; `next` is then `advance`. The states and the rules:
 [template-updates.md](template-updates.md#publish-on-all-nodes).
 
 ### Platform setup — `/api/v1/admin/setup`

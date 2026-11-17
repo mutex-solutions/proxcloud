@@ -19,7 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every 15 s); closing it pauses. A failed import or smoke test is not repeated, nothing is withdrawn, a node without
   the provider's import storage or the default profile's storage is skipped with the reason, and a failed node keeps
   its older published copy. The report carries the `config.cluster.versions` line, which the operator still copies
-  by hand, and warns while it covers fewer nodes than publish another Kubernetes version. Not verified on a lab.
+  by hand, and warns while it covers fewer nodes than publish another Kubernetes version or while a node is down
+  (its copy cannot be read). An advance that published a node and then cannot start the next import still answers
+  the report, with the error in it, so the publish is shown and audited. Not verified on a lab.
 
 - **Managed Kubernetes: node group replicas are placed by free capacity** (cluster chart `proxmox-kamaji-cluster`
   0.1.13, `docs/managed-k8s.md`). On a site without shared storage a node group is one MachineDeployment per node

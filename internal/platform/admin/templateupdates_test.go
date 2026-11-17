@@ -243,6 +243,9 @@ func TestTemplateUpdatesPublishAllGates(t *testing.T) {
 	} {
 		if w := tuDo(r, "POST", "/admin/template-updates/publish-all", body, op); w.Code != http.StatusBadRequest {
 			t.Errorf("%s: %d %s", body, w.Code, w.Body.String())
+		} else if strict := strings.Contains(body, `"node"`); !strict && !strings.Contains(w.Body.String(), `"code":"confirm_digest"`) {
+			// The same code the report read gives for a malformed digest (docs/api.md).
+			t.Errorf("%s: the refusal carries no code: %s", body, w.Body.String())
 		}
 	}
 	// Confirmed, but no provider is wired: refused, nothing called.

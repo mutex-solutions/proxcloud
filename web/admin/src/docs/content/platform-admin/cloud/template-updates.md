@@ -65,7 +65,10 @@ What it does not do:
   **Run smoke** yourself.
 - A node is skipped when it is offline, or when the provider's import storage or the default storage profile's
   storage is not active on it.
-- When a publish is refused the dialog stops and shows why. **Try again** repeats it.
+- When a publish is refused, or the next import cannot be started (for example GitHub rate-limits it), the dialog
+  stops and shows why. What it already published stays published and is in the audit log. **Try again** repeats it.
+- A node that is down is skipped, and the dialog warns before the version map line while one is: a copy on that node
+  cannot be read and is not in the line. Wait until the node is back before you copy the line.
 - Nothing is withdrawn, and the Kubernetes provider is not changed. Copy the **version map** line into the
   Kubernetes provider's versions yourself.
 

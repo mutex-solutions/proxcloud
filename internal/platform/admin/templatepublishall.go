@@ -42,7 +42,7 @@ func (h *Handler) templateUpdatesPublishAll(w http.ResponseWriter, r *http.Reque
 	}
 	if req.Package == "" || req.Digest == "" || req.ConfirmDigest != req.Digest {
 		// Refused before any provider or GitHub call.
-		httpx.WriteError(w, httpx.BadRequest("Give the package and confirm the exact digest to publish"))
+		templateUpdatesErr(w, &templateupdates.LifecycleError{Status: http.StatusBadRequest, Code: "confirm_digest", Message: "Give the package and confirm the exact digest to publish"})
 		return
 	}
 	h.publishAll(w, r, req, true)
@@ -62,7 +62,7 @@ func (h *Handler) publishAll(w http.ResponseWriter, r *http.Request, req publish
 	}
 	opts, err := h.placementOptions(ctx, es)
 	if err != nil {
-		templateUpdatesErr(w, err)
+		templateUpdatesErr(w, &templateupdates.LifecycleError{Status: http.StatusBadGateway, Code: "pve_unreadable", Message: "The provider's storage could not be read; nothing was changed"})
 		return
 	}
 	profile := es.PVEStorageProfiles()[es.PVEDefaultStorageProfile()]
@@ -80,7 +80,7 @@ func (h *Handler) publishAll(w http.ResponseWriter, r *http.Request, req publish
 	}
 	if act && len(rep.Actions) > 0 {
 		audit.RecordSnapshots(ctx, nil, map[string]any{"action": "publish-all", "serviceId": es.ID, "package": req.Package, "digest": req.Digest,
-			"did": rep.Actions, "versionsLine": rep.VersionsLine, "complete": rep.Complete, "nodesMissing": rep.NodesMissing})
+			"did": rep.Actions, "versionsLine": rep.VersionsLine, "complete": rep.Complete, "nodesMissing": rep.NodesMissing, "error": rep.Error})
 	}
 	httpx.OK(w, rep)
 }

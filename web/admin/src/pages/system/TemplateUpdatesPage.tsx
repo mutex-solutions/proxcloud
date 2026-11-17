@@ -572,6 +572,8 @@ type PublishAllNode = { node: string; state: string; vmid?: number; code?: strin
 export type PublishAllReport = {
   digest: string; kubernetesVersion?: string; nodes: PublishAllNode[]; versionsLine?: string
   complete: boolean; nodesMissing: string[]; next: "advance" | "wait" | "done"; actions?: string[]
+  // An advance that acted and then could not start its next job.
+  error?: { code: string; message: string }
 }
 const NODE_STATE: Record<string, { label: string; variant: "default" | "secondary" | "outline" | "destructive" }> = {
   published: { label: "Published", variant: "default" },
@@ -600,8 +602,10 @@ function PublishAllDialog({ line, onClose }: { line: VMLine; onClose: () => void
   const [serviceId, setServiceId] = useState("")
   const [confirm, setConfirm] = useState("")
   const [started, setStarted] = useState(false)
-  // halted: a publish was refused. It is not repeated every 15 s; the operator reads why and tries again.
+  // halted: a publish was refused or an advance failed. It is not repeated every 15 s; the operator reads why and
+  // tries again. stepError is the failure of an advance that had already published a node: the report came with it.
   const [halted, setHalted] = useState(false)
+  const [stepError, setStepError] = useState("")
   const fromPost = useRef(false)
   const qc = useQueryClient()
   const key = ["tu-publish-all", serviceId, latest.digest]
@@ -623,7 +627,8 @@ function PublishAllDialog({ line, onClose }: { line: VMLine; onClose: () => void
     onSuccess: (r) => {
       fromPost.current = true
       qc.setQueryData(key, r)
-      if (r.nodes.some((n) => n.state === "publish_failed")) setHalted(true)
+      setStepError(r.error ? `${r.error.message} (${r.error.code})` : "")
+      if (r.error || r.nodes.some((n) => n.state === "publish_failed")) setHalted(true)
     },
     onError: () => setHalted(true),
   })
@@ -635,7 +640,8 @@ function PublishAllDialog({ line, onClose }: { line: VMLine; onClose: () => void
   }, [started, halted, isPending, next, stamp, mutate])
 
   const r = report.data
-  const err = advance.error ?? report.error
+  const err = advance.error ?? report.error ?? (stepError ? new Error(stepError) : null)
+  const down = (r?.nodes ?? []).filter((n) => n.code === "node_down").map((n) => n.node)
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-2xl">
@@ -693,7 +699,7 @@ function PublishAllDialog({ line, onClose }: { line: VMLine; onClose: () => void
               </Table>
               {r && (
                 <p className="text-xs text-muted-foreground" role="status">
-                  {halted ? "Stopped: a publish was refused." : r.next === "done" ? "Nothing more to do." : r.next === "wait" ? "Waiting for the running job; checked every 15 s." : "Advancing…"}
+                  {halted ? (stepError || advance.error ? "Stopped: the next step could not be started." : "Stopped: a publish was refused.") : r.next === "done" ? "Nothing more to do." : r.next === "wait" ? "Waiting for the running job; checked every 15 s." : "Advancing…"}
                 </p>
               )}
               {r && !r.complete && r.versionsLine && (
@@ -701,6 +707,7 @@ function PublishAllDialog({ line, onClose }: { line: VMLine; onClose: () => void
                   <AlertTitle>This version does not cover every node yet</AlertTitle>
                   <AlertDescription>
                     {r.nodesMissing.length > 0 && <>Nodes {r.nodesMissing.join(", ")} publish another Kubernetes version and not this one. </>}
+                    {down.length > 0 && <>Nodes {down.join(", ")} are down: a copy they hold cannot be read and is not in the line. </>}
                     A version line that covers fewer nodes moves a cluster's workers off the missing nodes at its next node group change or
                     upgrade: the workers on a missing node are deleted at once. Copy the line only when that is intended.
                   </AlertDescription>
@@ -724,7 +731,7 @@ function PublishAllDialog({ line, onClose }: { line: VMLine; onClose: () => void
           {!started ? (
             <Button disabled={!serviceId || confirm.trim() !== latest.digest} onClick={() => setStarted(true)}>Start</Button>
           ) : halted ? (
-            <Button onClick={() => { advance.reset(); setHalted(false); void report.refetch() }}>Try again</Button>
+            <Button onClick={() => { advance.reset(); setStepError(""); setHalted(false); void report.refetch() }}>Try again</Button>
           ) : null}
         </DialogFooter>
       </DialogContent>

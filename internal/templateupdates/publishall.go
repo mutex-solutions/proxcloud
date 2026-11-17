@@ -78,15 +78,47 @@ type PublishAllReport struct {
 	// VersionsLine (Kubernetes node image) is the config.cluster.versions entry of the published
 	// copies, newest per node. It is display only: the operator copies it into the provider.
 	VersionsLine string `json:"versionsLine,omitempty"`
-	// Complete: every node is published or skipped, and NodesMissing is empty.
+	// Complete: every node is published or skipped for a reason other than being down, and NodesMissing is
+	// empty. A node that is down may hold a published copy the versions line cannot show.
 	Complete bool `json:"complete"`
 	// NodesMissing hold a published node image of another Kubernetes version and none of this one:
 	// a versions line without them moves a cluster's workers off those nodes.
 	NodesMissing []string `json:"nodesMissing"`
-	// Next: advance (calling again does something), wait (a job of the provider runs), done.
+	// Next: advance (calling again does something, also after an Error), wait (a job of the provider runs),
+	// done.
 	Next string `json:"next"`
 	// Actions is what this call changed (empty for a read).
 	Actions []string `json:"actions,omitempty"`
+	// Error is why an advance that had already changed something (Actions) could not start its next job.
+	// The call still answers with the report, so what it did is shown and audited.
+	Error *PublishAllError `json:"error,omitempty"`
+}
+
+// PublishAllError is the step of an advance that failed after an earlier one of the same call acted.
+type PublishAllError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// NodeDownCode marks a node that was skipped because it is not online.
+const NodeDownCode = "node_down"
+
+// stop records err on the report of an advance that already acted. With nothing done yet the error is
+// the call's answer, as before.
+func (r *PublishAllReport) stop(err error) error {
+	if len(r.Actions) == 0 {
+		return err
+	}
+	r.Error = &PublishAllError{Code: "next_step_failed", Message: err.Error()}
+	var le *LifecycleError
+	var rl *RateLimitError
+	switch {
+	case errors.As(err, &le):
+		r.Error.Code = le.Code
+	case errors.As(err, &rl):
+		r.Error.Code = "rate_limited"
+	}
+	return nil
 }
 
 // PublishAll reports the digest's state per node and, with act, advances it one step.
@@ -158,9 +190,12 @@ func (s *Service) PublishAll(ctx context.Context, pv LifecyclePVE, in PublishAll
 	}
 	busy, err := s.providerBusy(ctx, in.ServiceID)
 	if err != nil {
-		return nil, err
+		// What step 1 published is reported and audited; no job is started on an unknown queue.
+		if err = out.stop(err); err != nil {
+			return nil, err
+		}
 	}
-	if act && !busy {
+	if act && !busy && out.Error == nil {
 		// 2. One mover: a smoke test of an import that has none, else the next import.
 		for i := range out.Nodes {
 			n := &out.Nodes[i]
@@ -191,7 +226,11 @@ func (s *Service) PublishAll(ctx context.Context, pv LifecyclePVE, in PublishAll
 				continue
 			}
 			if err != nil {
-				return nil, err // the artifact or the registry, not this node
+				// The artifact or the registry, not this node: no other node is tried.
+				if err = out.stop(err); err != nil {
+					return nil, err
+				}
+				break
 			}
 			payload = &rec.Payload
 			n.State, n.importID, busy = NodeImportQueued, rec.ID, true
@@ -207,7 +246,7 @@ func (s *Service) PublishAll(ctx context.Context, pv LifecyclePVE, in PublishAll
 		case out.Next == "" && (waits || n.State == NodeSmokeRunning || n.State == NodeSmokeQueued || n.State == NodeImporting || n.State == NodeImportQueued):
 			out.Next = "wait"
 		}
-		out.Complete = out.Complete && (n.State == NodePublished || n.State == NodeSkipped)
+		out.Complete = out.Complete && (n.State == NodePublished || n.State == NodeSkipped && n.Code != NodeDownCode)
 	}
 	if out.Next == "" {
 		out.Next = "done"
@@ -268,7 +307,7 @@ func (s *Service) publishAllNode(ctx context.Context, node pve.Node, recs []Rece
 		case StateTemplateMissing:
 			n.State, n.Message = NodeSkipped, "The template an earlier import made here is gone, and that import still blocks a new one"
 		case StateProviderUnreadable:
-			n.State, n.Message = NodeSkipped, "The template's node is down"
+			n.State, n.Code, n.Message = NodeSkipped, NodeDownCode, "The template's node is down; its copy cannot be read"
 		default: // withdrawn copies
 			n.State, n.Message = NodeSkipped, "This copy is tagged withdrawn"
 		}
@@ -296,7 +335,7 @@ func (s *Service) publishAllNode(ctx context.Context, node pve.Node, recs []Rece
 	}
 	switch {
 	case node.Status != "online":
-		n.State, n.Message = NodeSkipped, "The node is not online"
+		n.State, n.Code, n.Message = NodeSkipped, NodeDownCode, "The node is not online"
 	case in.ImportStorage == "":
 		n.State, n.Message = NodeSkipped, "The provider has no import storage (importStorage)"
 	case disk == "":
