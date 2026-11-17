@@ -50,3 +50,16 @@ test("a healthy cluster shows no reason and no attention", async ({ page }) => {
   await expect(page.getByText("Needs attention")).toHaveCount(0)
   await expect(page.getByText("Working on it")).toHaveCount(0)
 })
+
+// Placement: a group scaled below the number of hosts it runs on empties a host.
+test("the node group dialog warns when a scale-down empties a host", async ({ page }) => {
+  await page.goto(`${base}/res-pc-c-healthy`)
+  await page.getByRole("button", { name: "Edit node groups" }).click()
+  const dialog = page.getByRole("dialog")
+  await expect(dialog.getByRole("alert")).toHaveCount(0)
+  await dialog.getByLabel("Nodes").fill("2")
+  await expect(dialog.getByRole("alert")).toContainText("Node group “workers” runs on 3 hosts. With 2 nodes, every worker on at least one host is removed.")
+  // Scaling up, or staying at one worker per host, warns about nothing.
+  await dialog.getByLabel("Nodes").fill("5")
+  await expect(dialog.getByRole("alert")).toHaveCount(0)
+})

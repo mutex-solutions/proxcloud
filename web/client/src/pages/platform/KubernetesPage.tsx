@@ -52,6 +52,8 @@ type NodeGroupRow = {
   rootDisk: string // GiB — nodes always boot from a volume, see DEFAULT_ROOT_DISK_GIB
   labels: string // "k=v,k2=v2"
   taints: string // "key=val:NoSchedule,…"
+  // How many hosts run this group's workers now (existing groups only; never sent).
+  hostsInUse?: number
 }
 // LIST_FLAVORS rows come back in the same shape CreateServerPage consumes: the Proxmox flavor
 // catalog entry nested under `data`, with its id mirrored as `externalId`.
@@ -310,6 +312,15 @@ function groupValid(g: NodeGroupRow): boolean {
 // dataGroupsToRows prefills the edit dialog from the cached cluster payload (snake_case sync shape).
 // Every field the editor can send has to come back here — SET_NODE_GROUPS is a full replace, so a
 // field displayed empty but actually set would be silently wiped on save.
+// groupHostsInUse — on how many hosts a node group's workers run: its placement when the platform
+// stored one, else the even split over the hosts that hold its image.
+function groupHostsInUse(g: Cluster): number {
+  const placed = Object.values((g.placement as Record<string, number>) ?? {}).filter((n) => Number(n) > 0).length
+  if (placed) return placed
+  const hosts = String(g.image_id ?? "").split(",").filter((p) => p.includes("=")).length
+  return Math.min(hosts, Number(g.count ?? 0))
+}
+
 function dataGroupsToRows(c: Cluster): NodeGroupRow[] {
   const groups = (c.node_groups as Cluster[]) ?? []
   if (!groups.length) return [{ ...emptyGroup }]
@@ -326,6 +337,7 @@ function dataGroupsToRows(c: Cluster): NodeGroupRow[] {
       .map(([k, v]) => `${k}=${v}`)
       .join(","),
     taints: ((g.taints as string[]) ?? []).map(String).join(","),
+    hostsInUse: groupHostsInUse(g),
   }))
 }
 
@@ -1843,6 +1855,13 @@ function EditNodeGroupsDialog({
   const [groups, setGroups] = useState<NodeGroupRow[]>(initial)
   const [pending, setPending] = useState(false)
   const valid = groups.length > 0 && groups.every(groupValid)
+  // A group scaled below the number of hosts it runs on loses every worker on at least one of
+  // them, and a volume on a host's local storage cannot follow its pod to another host.
+  const emptied = groups.filter((g) => {
+    const was = initial.find((x) => x.name === g.name)?.hostsInUse ?? 0
+    const now = Number(g.count)
+    return was > 1 && Number.isFinite(now) && now >= 1 && now < was
+  })
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl">
@@ -1854,6 +1873,13 @@ function EditNodeGroupsDialog({
           </DialogDescription>
         </DialogHeader>
         <NodeGroupsEditor groups={groups} setGroups={setGroups} flavors={flavors} variants={variants} />
+        {emptied.map((g) => (
+          <p key={g.name} role="alert" className="rounded-lg border border-amber-500/50 bg-amber-500/5 p-3 text-sm">
+            Node group “{g.name}” runs on {initial.find((x) => x.name === g.name)?.hostsInUse} hosts. With {g.count}{" "}
+            {Number(g.count) === 1 ? "node" : "nodes"}, every worker on at least one host is removed. A volume on that
+            host's local storage stays there, and a pod that uses it cannot start on another host.
+          </p>
+        ))}
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
           <Button

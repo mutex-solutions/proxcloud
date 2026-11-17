@@ -182,7 +182,11 @@ export function seedCloudResources(): CloudResource[] {
   return [
     ...servers,
 
-    k8s("pc-c-healthy", "prod", { status: "READY", node_groups: [group("workers", 2, 2)] }),
+    // Three workers placed on three hosts: scaling to two empties one host.
+    k8s("pc-c-healthy", "prod", {
+      status: "READY",
+      node_groups: [{ ...group("workers", 3, 3), image_id: "pve1=9201,pve2=9202,pve3=9203", placement: { pve1: 1, pve2: 1, pve3: 1 } }],
+    }),
     k8s("pc-c-stuck", "staging", {
       status: "PROGRESSING",
       node_groups: [

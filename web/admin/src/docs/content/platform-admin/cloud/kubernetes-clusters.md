@@ -28,3 +28,22 @@ Needs attention clears by itself when the cluster recovers; nothing is deleted o
 ## If the dialog says the service account cannot read Machines
 
 The provider's ClusterRole on the management cluster predates this view. Re-apply `deploy/mgmt-cluster/rbac.yaml` (an install made by **Managed services** gets it with platform chart `proxcloud-platform` 0.1.2). Until then tenants see the status as before, without reasons.
+
+## Where a node group's workers go
+
+A node image exists per Proxmox node (the provider's **Kubernetes versions**, `node=vmid,node=vmid`), and a worker is cloned on the node of its template. On a site without shared storage, publish the image on every node that should run workers: **Template updates** has **Publish on all nodes** for that.
+
+From cluster chart 0.1.13 ProxCloud decides how many workers of a group each node runs, instead of the chart's even split:
+
+- a new worker goes to a node that holds the image, has the cluster's storage with room for the disk (your storage headroom), stays under your CPU overcommit and has the memory free;
+- among those, the node with the fewest workers of that group, then the most free memory;
+- running workers never move; a scale-down removes a stuck worker first and empties a node last;
+- workers that are decided and not cloned yet count, so two creates in a row do not take the same free node;
+- a request that does not fit is refused with how many workers fit, and nothing is created.
+
+Things to know:
+
+- **Existing clusters keep the even split** until you set the provider's chart version to 0.1.13 and **Bump** each cluster. After the bump nothing moves until the cluster's node groups change.
+- **A version published on fewer nodes moves workers.** At a cluster's next upgrade or node group edit, the workers on a node that no longer holds the image are deleted at once and rebuilt on the other nodes. Room for them is checked first.
+- **One storage name per cluster.** A node where the cluster's worker storage is not active gets no worker.
+- **Local volumes are not followed.** A tenant who scales a group below the number of nodes it runs on is warned in the console; ProxCloud does not read PersistentVolumes.
