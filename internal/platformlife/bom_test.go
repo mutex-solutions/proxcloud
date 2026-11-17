@@ -182,6 +182,11 @@ func TestValidate(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			b := embedded(t)
+			// The pending and 0.0.0+ cases are rules of a -dev release, whatever the embedded BOM is at this commit
+			// (it has no -dev at a release commit). The first case validates the file as it is.
+			if tc.name != "the embedded BOM" {
+				b.Release = "0.9.0-dev"
+			}
 			tc.mutate(t, b)
 			err := b.Validate()
 			if len(tc.want) == 0 {

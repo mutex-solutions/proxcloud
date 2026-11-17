@@ -8,11 +8,12 @@ are in [ADR 0009](adr/0009-managed-services-platform-lifecycle.md); the routes a
 
 > ## Status
 >
-> **Nothing on this page is verified on a lab.** The code is on main and covered by unit tests,
+> **Most of this page is not verified on a lab.** The code is covered by unit tests,
 > renderer goldens, runner tests against a fake Proxmox and a fake Kubernetes API, and a mocked
-> console. No run of the managed path has finished against a real Proxmox VE cluster yet: see
-> [Not verified on a lab yet](#not-verified-on-a-lab-yet). It is off by default, and the release that
-> carries it (v0.8.0) is not cut: see [Not implemented yet](#not-implemented-yet).
+> console. The install finished on one lab Proxmox VE cluster, on builds of main; what was run
+> there and what was not is in [Not verified on a lab yet](#not-verified-on-a-lab-yet). It is off
+> by default. v0.8.0 is the first release that carries it; no run was made on its published
+> images: see [Not implemented yet](#not-implemented-yet).
 
 Code: `internal/platformlife` (the installation model, the preflight, the runner and its stages, the
 renderers), `internal/platform/admin/platform.go` (the routes), `internal/cloud/pve/access.go` and
@@ -990,9 +991,9 @@ and ADR 0009, A2 and A8.
   Proxmox API without verifying its certificate; ArgoCD pulls charts by version, and their digests
   are compared in CI, not at pull time.
 
-## Known issue: no PostgreSQL database on this release's node image
+## Known issue: no PostgreSQL database on a node image built before 2026-11-16
 
-The BOM's node image (`ubuntu-2604-k8s-1.35.10`, built 2026-11-14) runs Ubuntu 26.04 with kernel
+The node image an earlier BOM named (`ubuntu-2604-k8s-1.35.10`, built 2026-11-14) runs Ubuntu 26.04 with kernel
 7.0.0-43. Ubuntu 26.04 sets `kernel.apparmor_restrict_unprivileged_unconfined=1`, and since kernel
 7.0.0-42 a container's processes then run under a stacked AppArmor label
 (`cri-containerd.apparmor.d//&unconfined`) to which containerd's own profile allows no signal: the
@@ -1008,8 +1009,9 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 - **The fix in the image.** A node image built from this release on sets that sysctl to `0`, the
   value of Ubuntu 24.04, in `/etc/sysctl.d/90-proxcloud-apparmor-stack.conf`; containers stay
   confined by containerd's profile. The export's cold-boot check refuses a Kubernetes image without
-  it. **The BOM of this release still names the image without the fix**: a new image must be built
-  and published by CI, shown on a lab to bring a database up, and named by a later BOM. The setting
+  it. **The BOM of v0.8.0 names an image with the fix**
+  (`ubuntu-2604-k8s-1.35.10-20261116181221-72f0eaa3d0d4`; the file was read from the published
+  disk). A database that comes up on it is not recorded from a lab. The setting
   and the cold-boot check go away again when the image carries a containerd release with the
   stacked-label rules: pull request 14487 was merged to containerd's main branch on 2026-11-16 and is
   in no release yet; the backport for 2.3 is pull request 14590, still open.
@@ -1026,8 +1028,9 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 
 ## Not implemented yet
 
-- **No released version.** The BOM is `0.8.0-dev`. `--managed-services` needs v0.8.0, which is not
-  tagged, so no released image reads `PROXCLOUD_PLATFORM_ENABLED`. For a test before the release,
+- **No release before v0.8.0.** The BOM is `0.8.0`. `--managed-services` needs v0.8.0 or later: no
+  earlier released image reads `PROXCLOUD_PLATFORM_ENABLED`, and the images of v0.8.0 exist once
+  its tag's workflows have succeeded. For a test ahead of a release,
   `proxcloud-up.sh` takes a build of main as its version (`--version dev-<sha>`, `upgrade dev-<sha>`;
   CI publishes one per push to main) and prints that it is not for production
   ([deploy/compose/README.md](../deploy/compose/README.md)).
@@ -1108,7 +1111,7 @@ observed, except the figures this guide marks as seen on a lab:
 | L4 | The first kubeadm join of the BOM's node image, group labels and taints, kube-vip. With it: that a machine cloned from a template with its cloud-init drive on `ide0` starts from CAPMOX's ISO (`qm config <vmid>` shows one cloud-init medium, on `ide0`; in the machine `grep 'Using data from' /var/log/cloud-init.log`), and the texts of CAPMOX's conditions as stage 7 shows them |
 | L5 | Placement of Kamaji and etcd on the `kamaji` group; the locked `default` project |
 | L6 | The seed ArgoCD reaching the cluster with its token; a public OCI chart pulled without credentials |
-| L7 | End to end: a tenant cluster and a tenant database, and the database egress fence. Run once, partly: the two project attaches, the placement of a database on the `dbaas` group and the first tenant network passed; no tenant cluster was created (no published node image, a `simple` default zone) and no database became healthy. A later round (2026-11-17, main cb2f052) created a tenant cluster on a network of a VLAN default zone, with a router for that VLAN set up outside the product: three workers were Ready 12 minutes after the create ([the node image's known issue](#known-issue-no-postgresql-database-on-this-releases-node-image)) |
+| L7 | End to end: a tenant cluster and a tenant database, and the database egress fence. Run once, partly: the two project attaches, the placement of a database on the `dbaas` group and the first tenant network passed; no tenant cluster was created (no published node image, a `simple` default zone) and no database became healthy. A later round (2026-11-17, main cb2f052) created a tenant cluster on a network of a VLAN default zone, with a router for that VLAN set up outside the product: three workers were Ready 12 minutes after the create ([the node image's known issue](#known-issue-no-postgresql-database-on-a-node-image-built-before-2026-11-16)) |
 | L8 | Resume after an API restart in stages 2, 3, 7 and 9; cancel and Retry. Run once on 2026-11-17, on a ready platform only: an API restart in stage 7 of an apply that had nothing new to write resumed by itself (61 seconds later, before the job was released at a clean stop), and a cancel between the two waves of stage 6 followed by **Retry** passed. Run once more the same day with the clean-stop release in place: a restart 33 ms into stage 8 of such an apply was given back at once and went on 0.9 seconds after the stop signal, attempts 1 of 20, nothing created twice ([section 5](#5-the-stages-of-a-run)). Not run: a restart in stages 2, 3 and 9 of a real install, and a stop with a slow call in flight |
 | L9 | Failure drills: `seed_not_booted`, `machine_failed`, a removed grant, a template deleted by hand |
 | L10 | Seed reboot, the backup job and a restore, Remove, and Remove with the seed gone. One clean reboot was run and **failed**: the seed's root filesystem came up in ext4 `emergency_ro` and its API never answered again. The cause was the image's stale ext4 superblock field, and the documented repair brought the seed back on 2026-11-17 ([When the seed does not answer](#when-the-seed-does-not-answer)); on a seed built from the fixed image two clean reboots then passed (same address and MAC, the pinned CA still valid, all components Synced and Healthy). One `vzdump` by hand with `--mode snapshot` passed, and one with `--compress zstd` (2.39 GiB in 1 minute 45 seconds); the scheduled job was not created and `--prune-backups` was not run. The restore was first refused by Proxmox over the protected seed; with the sequence of [step 5](#when-the-seed-does-not-answer) it was run once on 2026-11-17 and passed: a healthy seed restored over itself from a three-minute-old archive, Cluster API wrote nothing, the tenant cluster was not touched. Not run: an archive older than a credential rotation or a machine change, `qm stop` on a dead guest, `--unique`, a boot store other than ZFS, an archive of the scheduled job. Remove of a ready platform and Remove from a failed stage 7 passed |

@@ -128,8 +128,8 @@ class ReleaseContractTests(unittest.TestCase):
     def test_chart_images_and_installer_pin_exact_same_stable_release(self):
         chart = read_yaml("deploy/charts/proxcloud/Chart.yaml")
         versions = read_yaml("installer/playbooks/group_vars/all/versions.yml")["pc_versions"]
-        self.assertEqual(chart["version"], "0.7.0")
-        self.assertEqual(chart["appVersion"], "v0.7.0")
+        self.assertEqual(chart["version"], "0.8.0")
+        self.assertEqual(chart["appVersion"], "v0.8.0")
         self.assertEqual(versions["proxcloud"], chart["appVersion"])
         pinned = policy.release_policy(versions["proxcloud"])
         self.assertEqual(pinned["version"], chart["version"])
