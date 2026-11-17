@@ -175,6 +175,42 @@ gone. A secret younger than the 30-minute grace window is never touched. Project
 teardown also removes the `pc-*` namespace of a project that never had a cluster,
 once nothing is pending and no Application of the project is left.
 
+**How long a deleted cluster's Proxmox token lives.** The same sweep revokes the
+cluster's `capmox@pve!<clusterId>` token (and a `csi@pve!<clusterId>` an older
+cluster may hold), frees its addresses and deletes its RWX dataset. The delete
+itself cannot: CAPMOX deletes the workers with that token, the cascade runs in
+ArgoCD after the delete has answered `202`, and the portal sees it finished only
+when a sweep looks (no Application, no TenantControlPlane, no MachineDeployment).
+The 30 minutes are counted from the cluster's **creation** (its marker Secret),
+not from the delete: a sweep that finds a marker with no Application cannot tell
+a finished delete from a create that has not applied its Application yet, and
+would revoke the token of a cluster being made. So:
+
+- **With the job scheduler** (a provider sync every 15 minutes): the token of a
+  cluster older than 30 minutes is revoked at the first sync after its cascade
+  finished, so up to 15 minutes after that. A cluster deleted in its first 30
+  minutes keeps its token until the first sync after the marker is 30 minutes
+  old.
+- **Without the scheduler** (the Compose install's default): nothing revokes
+  the token until an operator starts a provider sync
+  (`POST /api/v1/admin/job/external-service/sync`), and
+  for a cluster deleted in its first 30 minutes a sync after that age. Start
+  one after a cluster delete.
+
+Until then the token is listed in Proxmox with its ACL rows (`ProxCloudCAPI` on
+the project pool, the boot store, the vnet and `/nodes`). Its secret lives only
+in a Secret of the cluster's namespace on the management cluster, which the
+cascade deletes, so what is left is a credential nobody holds, not one in use.
+Seen on a lab (2026-11-17, no scheduler): a token still listed 3 minutes after
+the delete was revoked one second after an operator's sync; the token of a
+cluster deleted 22 minutes after its creation survived two syncs and went at
+the first one after the marker was 30 minutes old. Proxmox stops honouring the
+token's ACL rows at the revoke, but leaves their lines in `/etc/pve/user.cfg`
+until that file is next written; until then every `pveum`, `qm` and `pvesh`
+call on a node prints `user config - ignore invalid acl token
+'capmox@pve!<clusterId>'`, once per row. It is harmless, and `pveum acl list`
+shows the rows gone at once.
+
 ```sh
 # namespaces ProxCloud owns, with what's left inside them
 kubectl get ns -l app.kubernetes.io/managed-by=proxcloud
@@ -197,8 +233,13 @@ cluster is not there yet. While a node group is unsettled (a MachineDeployment w
   that is not retried.
 
 `cluster.attention = {code, since}` is the same for the whole cluster: `control_plane_stalled` or
-`provider_access_refused`. Both fields are absent on a settled cluster. Attention is not a terminal state: it is
-computed again at every sync and goes away when the cluster recovers. The consoles show an amber **Needs attention**
+`provider_access_refused`. It carries control-plane and provider codes only: **a worker that stalls is reported on
+its node group's `progress.attention`, never on `cluster.attention`**, so a client that wants "this cluster needs
+attention" reads both (seen on a lab: a worker that could not join set `node_groups[0].progress.attention` after
+its 15 minutes, and the cluster had no `attention` key). Both fields are absent on a settled cluster. Attention is
+not a terminal state: it is computed again at every sync and goes away when the cluster recovers. It is evaluated
+only at a provider sync, so with the scheduler's 15-minute sync it can show up to one interval after the bound has
+passed, and on an install without the scheduler only when an operator starts a sync. The consoles show an amber **Needs attention**
 chip on the list and the cluster page, and read a cluster that needs attention once a minute instead of every 15 s.
 
 The source is what Cluster API and CAPMOX report on the management cluster: `Machine`
@@ -228,7 +269,7 @@ for a running machine, the last change of `NodeReady`):
 |---|---|
 | Not made yet (counted from the newest of the MachineDeployment's creation, ArgoCD's last finished sync and the last change of the cluster's values, which the portal stamps on the Application as `proxcloud.io/values-changed-at`: right after a scale-up the last sync is still the one before it) | 15 min |
 | Pending | 15 min; never while the control plane is not Ready |
-| Provisioning | 30 min, plus 5 min for each further machine of the cluster in Provisioning, at most 90 min. CAPMOX clones all machines at once, so on slow disks each one takes longer |
+| Provisioning | 30 min, plus 5 min for each further machine of the cluster in Provisioning, at most 90 min. CAPMOX clones all machines at once, so on slow disks each one takes longer ([section 9](#9-how-a-cluster-lands-on-proxmox)) |
 | Provisioned, no node | 15 min |
 | Running, node not Ready | 20 min (the first node waits for the CNI) |
 
@@ -310,6 +351,13 @@ API could pin a group to nodes and template VMIDs of its choice; the console nev
 (six nodes, each with a local ZFS pool), the image must exist on every node that should run workers
 (`config.cluster.versions`: `"1.35.10": "pve1=9210,pve2=9211,..."`; [template-updates.md](template-updates.md#publish-on-all-nodes) has
 one action that publishes a version on all nodes, one node at a time), and a worker's disk is on the node that runs it.
+
+**All new workers are cloned at the same time.** A create or a scale-up makes one MachineDeployment per node that
+gets replicas, and Cluster API starts the clones of all new workers together; ProxCloud does not queue them. On slow
+shared storage that load is felt by other VMs. On a lab with ZFS on slow disks, three clones started in the same
+second took 6 to 7 minutes each against 3.5 minutes for one alone, the load average reached 31 on one node, and the
+controllers of another Kubernetes cluster on the same hosts restarted (its etcd waited up to 5 seconds for a
+write). Create large node groups in steps where the storage is slow.
 
 How many replicas each node runs depends on the cluster's chart version:
 
