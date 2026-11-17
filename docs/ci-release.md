@@ -181,9 +181,10 @@ was the only thing the gate still refused: no pin is `pending` and no version is
 `0.0.0+` since the BOM takes its third-party charts from
 [the chart mirror](#chart-mirror) (checked on 2026-11-17 on that commit:
 `--release` prints `all pins match`). A commit whose BOM is `-dev` cannot be
-tagged, as `vX.Y.Z` or as `vX.Y.Z-rc.N`. While the BOM on `main` has no `-dev`,
-this part of the gate passes for any tag cut from it: the gate does not compare
-the BOM's release with the tag (below).
+tagged, as `vX.Y.Z` or as `vX.Y.Z-rc.N`. After the `v0.8.0` tag the BOM on `main`
+was set to `0.9.0-dev`, so `main` cannot be tagged again until the next release
+commit drops `-dev`. The gate does not compare the BOM's release with the tag
+(below): a commit whose BOM has no `-dev` passes this part for any tag.
 
 Not verified:
 

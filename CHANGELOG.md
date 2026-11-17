@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The platform BOM on `main` is `0.9.0-dev`** (`deploy/platform/platform-bom.yaml`). The `v0.8.0` release commit
+  left it at `0.8.0`, and the release gate refuses only `-dev`, so any `v*` tag cut from `main` would have passed
+  that part of the gate. A platform installed by `v0.8.0` is refused by a `dev-<sha>` build of `main`
+  (`bom_unsupported`), as between any two BOMs.
+
 ## [0.8.0] - 2026-11-17
 
 A feature release on top of `v0.7.0`: the managed-services platform (P3, ADR 0009). The platform is off
