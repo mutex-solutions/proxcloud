@@ -187,6 +187,41 @@ func TestKamajiPlaceGroups(t *testing.T) {
 	}
 }
 
+// F58: the provider's token has NoAccess on the platform's pools, so the snapshot's VM list lacks their VMs. The
+// node rows show the memory in use, and the placement goes by the larger of the two.
+func TestKamajiPlacementCountsHiddenVMs(t *testing.T) {
+	const three = "pve1=9201,pve2=9202,pve3=9203"
+	// 32 GiB nodes. In use: pve1 30 GiB (full), pve2 20 GiB (one 8 GiB worker fits), pve3 8 GiB (three fit).
+	site := func() *kamajiCapacity {
+		c := placeSite(32, 32, 32)
+		for i, used := range []int64{30, 20, 8} {
+			c.nodes[i].Mem = used * placeGiB
+		}
+		return c
+	}
+	place := func(count int, prev []kamaji.GroupPlacement) ([]map[string]int, *httpx.HTTPError) {
+		return kamajiPlaceGroups(prev, []kamaji.GroupPlacement{placeGroup("workers", count, three, nil)},
+			func() (*kamajiCapacity, *httpx.HTTPError) { return site(), nil }, nil, nil)
+	}
+	out, herr := place(4, nil)
+	if herr != nil || out[0]["pve1"] != 0 || out[0]["pve2"] != 1 || out[0]["pve3"] != 3 {
+		t.Errorf("four workers: %v %v; want none on the full node, 1 on pve2, 3 on pve3", out, herr)
+	}
+	_, herr = place(8, nil)
+	if herr == nil || herr.Status != http.StatusConflict || !strings.Contains(herr.Msg, "only 4 of 8 new workers fit") {
+		t.Errorf("eight workers: %v; want 409 only 4 of 8", herr)
+	}
+	// Workers that run stay where they are, on the full node too; only the new one is placed.
+	out, herr = place(3, []kamaji.GroupPlacement{placeGroup("workers", 2, three, map[string]int{"pve1": 2})})
+	if herr != nil || out[0]["pve1"] != 2 || out[0]["pve2"]+out[0]["pve3"] != 1 {
+		t.Errorf("scale-up next to a full node: %v %v", out, herr)
+	}
+	// The scale-down order reads the same memory: pve1 has the least free.
+	if free := site().freeMem(); free["pve1"] != 2*placeGiB || free["pve3"] != 24*placeGiB {
+		t.Errorf("free memory: %v", free)
+	}
+}
+
 // Back-to-back creates: the first cluster's workers are decided and not cloned yet, so Proxmox shows the node free.
 func TestKamajiPendingWorkers(t *testing.T) {
 	disk := 40
@@ -335,6 +370,17 @@ func TestKamajiValuePatches(t *testing.T) {
 	}
 	if g := group(values); g.Count != 5 || g.Placement != nil || len(reads) != 0 {
 		t.Errorf("0.1.12 scale-up: %+v, reads %v; want no machinePlacement and no read", g, reads)
+	}
+	// F59: want() names no rootVolumeGiB. With a provider default the shape check passes and the default is stored;
+	// without one it is refused, as at create.
+	if err := validateNodeGroupShapes(want(5), d.RootVolumeGiB); err != nil {
+		t.Errorf("group without rootVolumeGiB, provider default %d: %v", d.RootVolumeGiB, err)
+	}
+	if g := group(values); g.DiskGiB != d.RootVolumeGiB {
+		t.Errorf("root disk stored: %d GiB, want the provider default %d", g.DiskGiB, d.RootVolumeGiB)
+	}
+	if err := validateNodeGroupShapes(want(5), 0); err == nil || !strings.Contains(err.Error(), "rootVolumeGiB is required") {
+		t.Errorf("group without rootVolumeGiB, no provider default: %v", err)
 	}
 	values = live(nil)
 	if err := kamajiUpgradeValues(values, "0.1.12", v136, d, placer()); err != nil {

@@ -5,6 +5,10 @@ package pve
 // (template/profile locality), free GPU slots, CPU capacity under the overcommit ceiling,
 // RAM for the flavor, free space on the profile's storage. Rank: most free RAM wins. One
 // node = degenerate correct.
+//
+// Memory per node is CommittedMem: the larger of the configured memory of the VMs the token sees and the node's own
+// used memory, so VMs the token may not audit (another pool with NoAccess, another portal's) still take room.
+// CPU has no such second source: the vCPUs of VMs the token cannot audit are not counted.
 
 import (
 	"fmt"
@@ -42,17 +46,47 @@ type SchedReq struct {
 	Members map[string]int
 }
 
-// PickNode chooses the target node. vms is the cluster-wide qemu rows (ALL pools —
+// CommittedMem is the memory taken on each node. /cluster/resources leaves out every VM the token may not audit
+// (VM.Audit), so the sum of the rows alone reads a node that carries such VMs as free. The node row of /nodes
+// (Sys.Audit, which the token has) gives the memory really in use, hidden VMs included. Per node:
+//
+//	max(Σ configured memory of the VMs Proxmox has, the node's used memory) + Σ memory of the rows without a VMID
+//
+// Rows without a VMID are VMs that are decided and not made yet (pending workers, the picks of PlaceReplicas): the
+// node's used memory cannot hold them, so they come on top. Stopped VMs count, templates and holders do not.
+// ponytail: max, not a sum. A hidden VM is counted with what it uses now, not its configured size, and not at all
+// while the visible VMs' configured sizes exceed the node's real use. Exact needs the hidden VMs' sizes, which this
+// token cannot read.
+func CommittedMem(nodes []Node, vms []ClusterResource) map[string]int64 {
+	have, planned := map[string]int64{}, map[string]int64{}
+	for _, r := range vms {
+		if r.Type != "qemu" || r.Template == 1 || isHolder(r.Tags) {
+			continue
+		}
+		if r.VMID == 0 {
+			planned[r.Node] += r.MaxMem
+		} else {
+			have[r.Node] += r.MaxMem
+		}
+	}
+	out := map[string]int64{}
+	for _, n := range nodes {
+		out[n.Node] = max(have[n.Node], n.Mem) + planned[n.Node]
+	}
+	return out
+}
+
+// PickNode chooses the target node. vms is the cluster-wide qemu rows (ALL pools the token may audit —
 // capacity is global); nodes the /nodes list.
 func PickNode(nodes []Node, vms []ClusterResource, req SchedReq) (string, error) {
 	oc := req.OvercommitCPU
 	if oc <= 0 {
 		oc = 4
 	}
-	// Committed resources per node: Σ cores and Σ mem of every non-template VM.
+	// Committed resources per node: Σ cores of every non-template VM, and CommittedMem.
 	// Stopped VMs still count — they can start any time and PVE reserves nothing.
 	usedCPU := map[string]float64{}
-	usedMem := map[string]int64{}
+	usedMem := CommittedMem(nodes, vms)
 	members := map[string]int{}
 	for node, n := range req.Members {
 		members[node] = n
@@ -62,7 +96,6 @@ func PickNode(nodes []Node, vms []ClusterResource, req SchedReq) (string, error)
 			continue
 		}
 		usedCPU[r.Node] += r.MaxCPU
-		usedMem[r.Node] += r.MaxMem
 		if req.SpreadGroup != "" && r.Pool == req.SpreadPool && TagValue(r.Tags, tagSpreadPref) == req.SpreadGroup {
 			members[r.Node]++
 		}

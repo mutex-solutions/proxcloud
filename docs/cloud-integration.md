@@ -300,7 +300,10 @@ by sync and the charge loop.
   (`SecureVM`).
 - **Scheduler** (`scheduler.go`, `PickNode`) — capacity-ranked node choice with
   CPU overcommit, storage-profile node restriction, free space on the profile's
-  storage (minus headroom) and free GPU slots.
+  storage (minus headroom) and free GPU slots. Memory taken on a node is the
+  larger of the configured memory of the VMs the token may audit and the node's
+  own used memory (`CommittedMem`), so VMs hidden from the token still take
+  room; their vCPUs are not counted.
 - **Storage capabilities** (`capability.go`, `volume.go`) — `DetectStorage`,
   `StorageHasRoom`, `TemplateShared`; see
   [Storage capabilities and placement](#storage-capabilities-and-placement).

@@ -466,6 +466,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Placement counts the memory of VMs the provider's token cannot see (F58)** (`internal/cloud/pve/scheduler.go`
+  `CommittedMem`, `docs/managed-k8s.md` section 9). The node choice for a server and for Kubernetes workers summed
+  the configured memory of the VMs `GET /cluster/resources` returns, and Proxmox leaves out every VM the token may
+  not audit. On a managed-services install those are the platform's own machines (the token has `NoAccess` on
+  `proxcloud-seed` and `proxcloud-system` by design), so their nodes read as free: on the lab a worker went to the
+  fullest node and a refusal said "2 of 8" 8 GiB workers fit where none did. Memory taken on a node is now the
+  larger of that sum and the node's own used memory (`mem` of `GET /nodes`, already read, `PVEAuditor` on `/nodes`,
+  no new permission), plus the workers decided and not built yet and the picks of the request. The scale-down
+  order reads the same figure. Running workers do not move. Known limits, in the guide: a hidden VM counts with
+  what it uses now, not its configured size, and its vCPUs are not counted (the installation record is not read
+  by the placement). The guide no longer says every VM's configured size is counted. Unit tests only; not run on a
+  lab.
+
+- **`SET_NODE_GROUPS` takes a node group without `rootVolumeGiB` when the provider has a default (F59)**
+  (`internal/platform/project/cloud_kamaji.go`). The shape check ran with empty provider defaults, so it answered
+  `400 rootVolumeGiB is required (no provider default configured)` for a group the create accepts, before the
+  default was ever filled in. It now gets the provider's default root disk size. Without a default it still
+  answers 400. Not run on a lab.
+
+- **Managed Kubernetes guide: which worker a scale-down removes (O4)** (`docs/managed-k8s.md` section 9).
+  ProxCloud decides how many replicas each node loses; which machine of that node goes is Cluster API's choice,
+  and on the lab it was the older one. The guide said so nowhere. The chart is unchanged.
+
 - **Seed backup and restore, findings of the lab run (F52 to F55)** (`docs/managed-services.md`, the Managed services
   page, ADR 0009 A7, `internal/platformlife/runner.go`). The guide said only "restore the seed VM from your backup",
   and Proxmox refuses a restore over the protected seed: it now gives the sequence (shut down, protection off,

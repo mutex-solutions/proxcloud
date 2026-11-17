@@ -37,7 +37,8 @@ From cluster chart 0.1.13 ProxCloud decides how many workers of a group each nod
 
 - a new worker goes to a node that holds the image (the template is still on that node), has the cluster's storage with room for the disk (your storage headroom), stays under your CPU overcommit and has the memory free;
 - among those, the node with the fewest workers of that group, then the most free memory;
-- running workers never move; a scale-down removes a stuck worker first and empties a node last;
+- memory taken on a node is the larger of the configured memory of the VMs ProxCloud's token can see (running or stopped) and the memory the node itself reports as used, so VMs it cannot see (the platform's own machines on a managed-services install) still take room. Their CPU is not counted;
+- running workers never move to another node; a scale-down removes a stuck worker first and empties a node last. Which worker of a node is removed is Cluster API's choice, and it can be the older one;
 - workers that are decided and not cloned yet count, with their memory, CPU and root disk, so two creates in a row do not take the same free node or overfill a node's storage;
 - a request that does not fit is refused with how many workers fit, and nothing is created.
 
