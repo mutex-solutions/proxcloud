@@ -369,8 +369,8 @@ function Ready({ installation, live, loading, error }: { installation: Installat
           </li>
           <li className="min-w-0">
             Back up the seed VM. Run this as root on one node, with your backup store:
-            <CopyBlock text={`pvesh create /cluster/backup --vmid ${vmid ?? "<seed VMID>"} --storage <backup store> --schedule daily --mode snapshot`} label="backup command" />
-            Use a backup store that is not the boot, ISO or import store of the settings: the backup holds the seed's credentials.
+            <CopyBlock text={`pvesh create /cluster/backup --vmid ${vmid ?? "<seed VMID>"} --storage <backup store> --schedule daily --mode snapshot --compress zstd --prune-backups keep-daily=7`} label="backup command" />
+            Use a backup store that is not the boot, ISO or import store of the settings, and that no API token other than your own can read: the backup holds the seed's credentials.
             This page cannot see whether a backup job exists.
           </li>
           <li>Attach the two providers to projects on their pages under Cloud providers, and add price rules for clusters and databases.</li>
