@@ -43,6 +43,32 @@ func TestRetypeRefusedWhileMoving(t *testing.T) {
 	}
 }
 
+// An attach to another server marks the row as moving and clears the mark when it fails. During a retype's copy it
+// would clear the retype's mark (PVE refuses the attach on its lock), so it must not reach PVE either.
+func TestAttachRefusedWhileMoving(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("reached PVE: %s %s", r.Method, r.URL.Path)
+		http.Error(w, "no", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	ps, err := pve.NewService(pve.Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{pveFor: func(*externalservice.ExternalService) (*pve.Service, error) { return ps, nil }}
+	since := time.Now().UTC().Add(-time.Minute)
+	cr := &cloud.CloudResource{Type: cloud.TypeVolume, ExternalID: "local-zfs:vm-101-disk-1", MovingSince: &since,
+		Data: map[string]any{"volume": map[string]any{"vmid": 101, "slot": "unused0"}}}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/", nil)
+	if !h.pveVolumeAction(w, r, nil, &Project{ID: "p1"}, &externalservice.ExternalService{ID: "svc"}, cr, "ATTACH", map[string]any{"serverId": "102"}) {
+		t.Fatal("ATTACH not handled")
+	}
+	if w.Code != http.StatusConflict {
+		t.Fatalf("attach during a move: %d, want 409", w.Code)
+	}
+}
+
 // h.cloud is deliberately nil: reaching MarkMoving (even if a follow cleared it
 // later) would panic. An immediate snapshot refusal must never write that mark.
 func TestRetypeSnapshotsRefuseBeforeMarkMoving(t *testing.T) {

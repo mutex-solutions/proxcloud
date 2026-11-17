@@ -287,10 +287,13 @@ func TestFencedEntrypointsRefusePending(t *testing.T) {
 			_, e := s.CreateDetachedVolume(context.Background(), "p1", "pve1", "nas", 1, 0)
 			return e
 		},
-		"add":             func(s *Service) error { _, e := s.AddVolume(context.Background(), "p1", "101", 1, "nas", 0); return e },
-		"extend":          func(s *Service) error { return s.ExtendVolume(context.Background(), "p1", 101, "disk", 2, 10) },
-		"detach":          func(s *Service) error { return s.DetachVolume(context.Background(), "p1", 101, "disk") },
-		"attach":          func(s *Service) error { return s.AttachVolume(context.Background(), "p1", 101, "disk", "102") },
+		"add":    func(s *Service) error { _, e := s.AddVolume(context.Background(), "p1", "101", 1, "nas", 0); return e },
+		"extend": func(s *Service) error { return s.ExtendVolume(context.Background(), "p1", 101, "disk", 2, 10) },
+		"detach": func(s *Service) error { return s.DetachVolume(context.Background(), "p1", 101, "disk") },
+		"attach": func(s *Service) error {
+			_, err := s.AttachVolume(context.Background(), "p1", 101, "disk", "102")
+			return err
+		},
 		"delete volume":   func(s *Service) error { return s.DeleteVolume(context.Background(), "p1", 101, "disk") },
 		"retype":          func(s *Service) error { return s.RetypeVolume(context.Background(), "p1", 101, "disk", "nas", 0) },
 		"delete server":   func(s *Service) error { return s.DeleteServer(context.Background(), "p1", "101") },

@@ -367,7 +367,11 @@ active / total / avail. A node outside the storage's `nodes` list is ignored and
 - **Volumes.** Add-volume checks free space on the server's node (409, nothing
   written). A detached disk attaches only to a server on its VM's node: PVE's disk
   reassign requires both VMs on one node, even on shared storage (else 409);
-  `LIST_ATTACH_TARGETS` returns the eligible servers. `RETYPE` moves the disk with `move_disk ... delete=1`
+  `LIST_ATTACH_TARGETS` returns the eligible servers. An attach to another server gives the disk a new
+  volid; its VOLUME row follows it and keeps its id, the name the tenant gave it, its creation date and its
+  bill item (before v0.8.1 the row was archived and a new one made: the volume lost its name and its charge
+  was split). An attach during a retype's copy is 409. A cross-node attach that fails halfway can leave the
+  disk on its carrier under a new name; that row is a new one. `RETYPE` moves the disk with `move_disk ... delete=1`
   to another profile's storage on the same node (409 if same storage, inactive, no
   `images`, no room, or a boot disk onto a profile that refuses boot disks).
   `DELETE` destroys a detached disk and is 409 for an attached one. A server
@@ -457,6 +461,13 @@ the same key. `network-config` is rendered from `ipconfigN` and is absent for pl
   a disk between VMs on one node and storage; the old disk is parked as `unusedN` until the new one is in,
   and put back on any failure. The disk donor VM is named like an image build for the seconds it exists:
   sync and billing skip it. 409 with snapshots on the server, or when the image needs a bigger disk.
+  The new boot disk is a new volume with a row of its own, and the row of the destroyed one is archived in
+  the same request, also when the rebuild fails after the swap. The same reconcile of the project's VOLUME
+  rows ends a resize, a snapshot rollback and a restore, so the rows equal the disks without waiting for
+  the scheduled sync (before v0.8.1 a rebuild left the old row: the disk was counted twice in the quota
+  and billed twice on a site that runs no scheduler). When the reconcile cannot prove what is gone (a node
+  that does not answer), it archives nothing that time and only updates the rows it can read. Not verified on
+  a lab: the tests run against a fake Proxmox API and a real database.
 - **Snapshots** (`LIST_/CREATE_/ROLLBACK_/DELETE_SNAPSHOT {name}`): PVE VM snapshots, disk only. 409 when an
   attached disk is on storage without snapshots (capacity class by design). ZFS rolls back to the newest
   snapshot only, so an older one is 409 rather than a failed task. A running server restarts after a rollback.
