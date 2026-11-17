@@ -1,6 +1,8 @@
 package kamaji
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -184,6 +186,9 @@ func NodeGroupValues(d ClusterDefaults, version string, groups []NodeGroup) []an
 		g["machineCores"] = ng.Cores
 		g["machineMemoryMiB"] = ng.MemoryMiB
 		g["machineTags"] = anySlice(ng.Tags)
+		if len(ng.Placement) > 0 {
+			g["machinePlacement"] = placementValue(ng.Placement)
+		}
 		if len(ng.Labels) > 0 {
 			labels := map[string]any{}
 			for k, v := range ng.Labels {
@@ -231,6 +236,9 @@ func NodeGroupsFromValues(values map[string]any) []map[string]any {
 		}
 		if v, ok := ng["machineCount"]; ok {
 			g["count"] = v
+		}
+		if p, ok := ng["machinePlacement"].(map[string]any); ok && len(p) > 0 {
+			g["placement"] = p
 		}
 		if labels, ok := ng["nodeLabels"].(map[string]any); ok && len(labels) > 0 {
 			g["labels"] = labels
@@ -291,3 +299,109 @@ func taintToString(obj map[string]any) string {
 
 // ValidTaintEffects are the effects the kubelet accepts.
 var ValidTaintEffects = map[string]bool{"NoSchedule": true, "PreferNoSchedule": true, "NoExecute": true}
+
+// GroupPlacement is what placing a node group needs to know of it, read off rendered values.
+type GroupPlacement struct {
+	Name      string
+	Flavor    string
+	Count     int
+	Image     string         // "<node>=<vmid>,..."
+	Placement map[string]int // stored machinePlacement; nil when the group has none
+	Cores     int
+	MemoryMiB int
+	DiskGiB   int
+}
+
+// GroupPlacements reads the node groups of chart values (live Application values, or NodeGroupValues' output under
+// "nodeGroups").
+func GroupPlacements(values map[string]any) []GroupPlacement {
+	raw, _ := values["nodeGroups"].([]any)
+	out := make([]GroupPlacement, 0, len(raw))
+	for _, item := range raw {
+		ng, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		g := GroupPlacement{Name: digStr(ng, "name"), Flavor: digStr(ng, "machineFlavor"), Image: digStr(ng, "machineImageId")}
+		g.Count, _ = intAt(ng, "machineCount")
+		g.Cores, _ = intAt(ng, "machineCores")
+		g.MemoryMiB, _ = intAt(ng, "machineMemoryMiB")
+		g.DiskGiB, _ = intAt(ng, "machineRootVolume", "diskSize")
+		if p, ok := ng["machinePlacement"].(map[string]any); ok && len(p) > 0 {
+			g.Placement = map[string]int{}
+			for node := range p {
+				g.Placement[node], _ = intAt(p, node)
+			}
+		}
+		out = append(out, g)
+	}
+	return out
+}
+
+// Nodes are the PVE nodes that hold the group's image, in the image string's order.
+func (g GroupPlacement) Nodes() []string { return ImageNodes(g.Image) }
+
+// Baseline is where the group's machines are now: the stored placement, else the chart's even split.
+func (g GroupPlacement) Baseline() map[string]int {
+	if len(g.Placement) > 0 {
+		return g.Placement
+	}
+	return EvenSplit(g.Count, g.Nodes())
+}
+
+// ImageNodes lists the nodes of an image string "<node>=<vmid>,<node>=<vmid>".
+func ImageNodes(image string) []string {
+	var out []string
+	for _, pin := range strings.Split(image, ",") {
+		if node, _, ok := strings.Cut(strings.TrimSpace(pin), "="); ok && node != "" {
+			out = append(out, node)
+		}
+	}
+	return out
+}
+
+// EvenSplit is the chart's split of count machines over nodes when a group has no machinePlacement: count/n each, the
+// first count%n nodes one more (templates/node-groups.yaml; TestEvenSplitMatchesChart renders both).
+func EvenSplit(count int, nodes []string) map[string]int {
+	out := map[string]int{}
+	for i, node := range nodes {
+		out[node] = count / len(nodes)
+		if i < count%len(nodes) {
+			out[node]++
+		}
+	}
+	return out
+}
+
+// SetPlacement writes a group's machinePlacement into its rendered values. It refuses what the chart would: an empty
+// map, a node the image string does not name, a sum that is not the count. A bad map must never reach ArgoCD, which
+// prunes: it would delete workers.
+func SetPlacement(group map[string]any, placement map[string]int) error {
+	name := digStr(group, "name")
+	count, _ := intAt(group, "machineCount")
+	nodes := ImageNodes(digStr(group, "machineImageId"))
+	sum := 0
+	for node, n := range placement {
+		if !slices.Contains(nodes, node) || n < 0 {
+			return fmt.Errorf("kamaji: node group %q: placement on %q (%d) does not fit image nodes %v", name, node, n, nodes)
+		}
+		sum += n
+	}
+	if len(placement) == 0 || sum != count {
+		return fmt.Errorf("kamaji: node group %q: placement %v places %d machines, the group has %d", name, placement, sum, count)
+	}
+	group["machinePlacement"] = placementValue(placement)
+	return nil
+}
+
+// placementValue is a placement as chart values. Nodes with no replica are left out: the chart reads an absent node
+// as 0.
+func placementValue(placement map[string]int) map[string]any {
+	out := map[string]any{}
+	for node, n := range placement {
+		if n > 0 {
+			out[node] = n
+		}
+	}
+	return out
+}

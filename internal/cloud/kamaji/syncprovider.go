@@ -54,7 +54,7 @@ func (p *ClusterSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, 
 		if err != nil {
 			return nil, err
 		}
-		mds, err := s.api.ListMachineDeployments(ctx, ns, "cluster.x-k8s.io/cluster-name="+id)
+		mds, err := s.api.ListMachineDeployments(ctx, ns, labelClusterName+"="+id)
 		if err != nil {
 			return nil, err
 		}
