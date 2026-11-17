@@ -164,8 +164,38 @@ export function seedCloudResources(): CloudResource[] {
     network: { id: "net-public-ext", name: "public", status: "ACTIVE", shared: true, "router:external": true, subnets: [] },
   }, { externalId: "net-public-ext" })
 
+  // Managed Kubernetes: one healthy cluster, and one whose provisioning stopped half-way: a worker
+  // that never joined, a machine the host had no room for, and a group still inside its bound.
+  const minutesAgo = (n: number) => new Date(Date.now() - n * 60000).toISOString()
+  const k8s = (id: string, name: string, c: Record<string, any>) =>
+    res("KUBERNETES_CLUSTER", name, {
+      cluster: {
+        id, name, version: "1.35.10", chart_version: "0.1.13", sync_status: "Synced", endpoint: "10.20.0.5:6443",
+        cp_status: "Ready", cp_replicas: 1, created_at: minutesAgo(90), storage_classes: ["proxmox-csi"], rwx: false, ...c,
+      },
+    }, { id: `res-${id}`, externalId: id, serviceId: "svc-k8s-1", region: "RegionOne" })
+  const group = (name: string, count: number, ready: number, progress?: Record<string, any>) => ({
+    name, flavor_id: "flv-medium", count, replicas: count, ready_replicas: ready, phase: ready >= count ? "Running" : "ScalingUp",
+    ...(progress ? { progress } : {}),
+  })
+
   return [
     ...servers,
+
+    k8s("pc-c-healthy", "prod", { status: "READY", node_groups: [group("workers", 2, 2)] }),
+    k8s("pc-c-stuck", "staging", {
+      status: "PROGRESSING",
+      node_groups: [
+        group("workers", 2, 1, { code: "not_joined", since: minutesAgo(42), machines: 1, attention: true }),
+        group("batch", 3, 0, { code: "no_capacity", since: minutesAgo(8), machines: 2, attention: true }),
+        group("build", 1, 0, { code: "creating_vm", since: minutesAgo(3), machines: 1, attention: false }),
+      ],
+    }),
+    k8s("pc-c-nocp", "sandbox", {
+      status: "PROGRESSING", endpoint: undefined, cp_status: "Provisioning", created_at: minutesAgo(25),
+      attention: { code: "control_plane_stalled", since: minutesAgo(25) },
+      node_groups: [group("workers", 1, 0, { code: "waiting_control_plane", since: minutesAgo(25), machines: 1, attention: false })],
+    }),
 
     res("SERVER_GROUP", "web-anti-affinity", {
       serverGroup: { name: "web-anti-affinity", policy: "anti-affinity", policies: ["anti-affinity"], members: [] },

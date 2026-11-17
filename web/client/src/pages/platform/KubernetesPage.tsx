@@ -10,7 +10,7 @@ import { useNavigate, useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { ColumnDef } from "@tanstack/react-table"
 import { toast } from "sonner"
-import { ArrowLeft, Boxes, CheckCircle2, Circle, Download, Loader2, MoreHorizontal, Plus, RefreshCw, Settings2, Trash2 } from "lucide-react"
+import { AlertTriangle, ArrowLeft, Boxes, CheckCircle2, Circle, Download, Loader2, MoreHorizontal, Plus, RefreshCw, Settings2, Trash2 } from "lucide-react"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { DataTable, sortableHeader } from "@/components/data-table"
 import { EmptyState } from "@/components/empty-state"
@@ -143,6 +143,52 @@ function cluster(r: CloudResource): Cluster {
 function clusterBusy(c: Cluster): boolean {
   const status = String(c.status ?? "")
   return status === "PENDING" || status === "PROGRESSING" || String(c.sync_status ?? "") === "Progressing"
+}
+
+// Why a node group or the control plane is not there yet: the reason codes the status sync stores
+// (docs/managed-k8s.md, "Provisioning status"). The texts live here; the API carries codes only.
+type Progress = { code?: string; since?: string; machines?: number; attention?: boolean }
+const PROGRESS_TEXT: Record<string, string> = {
+  provider_access_refused: "The platform cannot reach the virtualization provider. Contact the operator.",
+  no_capacity:
+    "The host has no free capacity for this machine, and it is not retried. Reduce the count or pick a smaller flavor; to retry, reduce the count by one and raise it again.",
+  vm_create_failed:
+    "Creating the virtual machine failed and is not retried. Reduce the count by one and raise it again, or delete and recreate the cluster.",
+  vm_create_retrying: "Creating the virtual machine failed; retrying automatically.",
+  waiting_control_plane: "Waiting for the control plane.",
+  creating_vm: "Creating the virtual machine.",
+  starting_vm: "Starting the virtual machine.",
+  not_joined:
+    "The machine runs but has not joined the cluster. Check that the cluster's network has a router or gateway and reaches the cluster endpoint, then reduce the count by one and raise it again.",
+  node_not_ready: "The node joined but is not Ready. Check it with kubectl.",
+  provisioning: "Preparing the machine.",
+  control_plane_stalled: "The control plane is taking longer than expected. Wait, delete and recreate, or contact the operator.",
+}
+const progressText = (code?: string) => PROGRESS_TEXT[code ?? ""] ?? PROGRESS_TEXT.provisioning
+function sinceText(since?: string): string {
+  const t = since ? Date.parse(since) : NaN
+  if (Number.isNaN(t)) return ""
+  const min = Math.max(0, Math.round((Date.now() - t) / 60000))
+  return min < 120 ? `since ${min} min` : `since ${Math.round(min / 60)} h`
+}
+const groupProgress = (g: Cluster) => g.progress as Progress | undefined
+// Needs attention: the control plane or a node group made no progress for a bounded time, or
+// hit an error that is not retried. Not a terminal state: the sync clears it when it recovers.
+function clusterAttention(c: Cluster): boolean {
+  return !!c.attention || ((c.node_groups as Cluster[]) ?? []).some((g) => groupProgress(g)?.attention)
+}
+function AttentionBadge() {
+  return (
+    <Badge variant="outline" className="whitespace-nowrap border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-400">
+      <AlertTriangle className="size-3" /> Needs attention
+    </Badge>
+  )
+}
+// Poll while the platform works on a cluster. One that needs attention is waiting for a person,
+// so it is read once a minute instead of every 15 s (see clusterBusy).
+function clusterPollMs(clusters: Cluster[]): number | false {
+  if (clusters.some((c) => clusterBusy(c) && !clusterAttention(c))) return 15000
+  return clusters.some(clusterAttention) ? 60000 : false
 }
 
 // Stable key for a location picker — the API array order is not stable, so never key by index.
@@ -349,7 +395,7 @@ function useKubernetesData(pid: string) {
     // While anything is provisioning/rolling, poll — the list is a live read-through off the
     // management cluster, so each tick reflects real progress. Quiet (and broken-but-stable)
     // clusters stop the polling.
-    refetchInterval: (query) => ((query.state.data ?? []).some((r) => clusterBusy(cluster(r))) ? 15000 : false),
+    refetchInterval: (query) => clusterPollMs((query.state.data ?? []).map(cluster)),
   })
   const flavors = useQuery({
     queryKey: ["bulk-action", pid, "LIST_FLAVORS", computeScope?.serviceId],
@@ -509,7 +555,12 @@ export default function KubernetesPage() {
         id: "status",
         accessorFn: (r) => (cluster(r).status as string) ?? "",
         header: sortableHeader("Status"),
-        cell: ({ getValue }) => <StatusBadge status={getValue() || undefined} />,
+        cell: ({ getValue, row }) => (
+          <span className="flex flex-wrap items-center gap-1.5">
+            <StatusBadge status={getValue() || undefined} />
+            {clusterAttention(cluster(row.original)) ? <AttentionBadge /> : null}
+          </span>
+        ),
       },
       {
         id: "endpoint",
@@ -1152,11 +1203,13 @@ function ClusterDetail({
   const groups = (c.node_groups as Cluster[]) ?? []
   const syncStatus = (c.sync_status as string) || ""
   const busy = clusterBusy(c)
+  const attention = clusterAttention(c)
+  const cpAttention = c.attention as Progress | undefined
 
   // The cluster's worker VMs — regular SERVER resources whose names are prefixed with the
   // cluster id (CAPI machine names: <clusterID>-<group>-<hash>-<suffix>). AWS-style: list them
   // right here, click through to the server's own page.
-  const serversQ = useCloudList(pid, "SERVER", "", busy ? 15000 : false)
+  const serversQ = useCloudList(pid, "SERVER", "", clusterPollMs([c]))
   const instances = useMemo(() => {
     const prefix = (resource.externalId || "") + "-"
     if (prefix === "-") return []
@@ -1178,24 +1231,33 @@ function ClusterDetail({
   // Recomputed per render on purpose — the inputs are tiny and re-derived from the query row.
   const progressSteps = (() => {
     const endpointUp = !!(c.endpoint as string)
-    const steps: { label: string; detail: string; done: boolean }[] = [
+    const steps: { label: string; detail: string; done: boolean; attention?: boolean }[] = [
       {
         label: "Control plane",
-        detail: endpointUp ? "API server is up" : "starting the hosted API server (~2 min)",
-        done: endpointUp,
+        detail: cpAttention
+          ? `${progressText(cpAttention.code)} (${sinceText(cpAttention.since)})`
+          : endpointUp ? "API server is up" : "starting the hosted API server (~2 min)",
+        done: endpointUp && !cpAttention,
+        attention: !!cpAttention,
       },
     ]
     for (const g of groups) {
       const desired = g.autoscale ? Number(g.min ?? 1) : Number(g.count ?? g.replicas ?? 1)
       const ready = Number(g.ready_replicas ?? 0)
       const phase = String(g.phase ?? "")
+      const p = groupProgress(g)
+      const settled = phase === "Running" && ready >= desired && !p
+      // With a reason from the sync, say it; a sync that cannot read the machines keeps the old line.
+      const why = p
+        ? `${(p.machines ?? 0) > 1 ? `${p.machines} machines: ` : ""}${progressText(p.code)} (${sinceText(p.since)})`
+        : "building VMs, joining the cluster"
       steps.push({
         label: `Node group “${(g.name as string) || "?"}”`,
-        detail:
-          phase === "Running" && ready >= desired
-            ? `${ready} node${ready === 1 ? "" : "s"} ready`
-            : `${ready}/${desired} nodes ready${phase ? ` · ${phase}` : ""} — building VMs, joining the cluster`,
-        done: phase === "Running" && ready >= desired,
+        detail: settled
+          ? `${ready} node${ready === 1 ? "" : "s"} ready`
+          : `${ready}/${desired} nodes ready${phase ? ` · ${phase}` : ""} — ${why}`,
+        done: settled,
+        attention: !!p?.attention,
       })
     }
     steps.push({
@@ -1302,7 +1364,10 @@ function ClusterDetail({
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <div className="rounded-lg border bg-card p-3">
               <div className="text-xs text-muted-foreground">Status</div>
-              <StatusBadge status={(c.status as string) || undefined} />
+              <div className="flex flex-wrap items-center gap-1.5">
+                <StatusBadge status={(c.status as string) || undefined} />
+                {attention ? <AttentionBadge /> : null}
+              </div>
             </div>
             <div className="rounded-lg border bg-card p-3">
               <div className="text-xs text-muted-foreground">Version</div>
@@ -1382,12 +1447,24 @@ function ClusterDetail({
             </div>
           )}
 
-          {busy && (
-            <div className="rounded-xl border bg-card p-4">
+          {(busy || attention) && (
+            <div className={attention ? "rounded-xl border border-amber-500/50 bg-amber-500/5 p-4" : "rounded-xl border bg-card p-4"}>
               <div className="mb-3 flex items-center gap-2">
-                <Loader2 className="size-4 animate-spin text-muted-foreground" />
-                <span className="text-sm font-medium">Working on it — this page refreshes itself</span>
+                {attention ? (
+                  <AlertTriangle className="size-4 text-amber-600" />
+                ) : (
+                  <Loader2 className="size-4 animate-spin text-muted-foreground" />
+                )}
+                <span className="text-sm font-medium">
+                  {attention ? "Needs attention — provisioning is not making progress" : "Working on it — this page refreshes itself"}
+                </span>
               </div>
+              {attention && (
+                <p className="mb-3 text-sm text-muted-foreground">
+                  This clears by itself when the cluster recovers. You can wait, change the node group as its line says,
+                  delete and recreate the cluster, or contact the operator.
+                </p>
+              )}
               <ul className="grid gap-2">
                 {progressSteps.map((s, i) => {
                   const firstPending = progressSteps.findIndex((x) => !x.done)
@@ -1395,6 +1472,8 @@ function ClusterDetail({
                     <li key={i} className="flex items-start gap-2 text-sm">
                       {s.done ? (
                         <CheckCircle2 className="mt-0.5 size-4 text-emerald-600" />
+                      ) : s.attention ? (
+                        <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-600" />
                       ) : i === firstPending ? (
                         <Loader2 className="mt-0.5 size-4 animate-spin text-muted-foreground" />
                       ) : (
@@ -1451,12 +1530,13 @@ function ClusterDetail({
                   <TableHead>Desired</TableHead>
                   <TableHead>Ready</TableHead>
                   <TableHead>Phase</TableHead>
+                  <TableHead>Status</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {groups.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={5} className="text-center text-sm text-muted-foreground">
+                    <TableCell colSpan={6} className="text-center text-sm text-muted-foreground">
                       No node groups reported yet.
                     </TableCell>
                   </TableRow>
@@ -1470,6 +1550,16 @@ function ClusterDetail({
                       </TableCell>
                       <TableCell className="font-mono text-sm">{g.ready_replicas ?? "—"}</TableCell>
                       <TableCell className="text-sm">{(g.phase as string) || "—"}</TableCell>
+                      <TableCell className="max-w-md text-sm">
+                        {groupProgress(g) ? (
+                          <span className="flex flex-col items-start gap-1">
+                            {groupProgress(g)?.attention ? <AttentionBadge /> : null}
+                            <span className="text-muted-foreground">{progressText(groupProgress(g)?.code)}</span>
+                          </span>
+                        ) : (
+                          "—"
+                        )}
+                      </TableCell>
                     </TableRow>
                   ))
                 )}
