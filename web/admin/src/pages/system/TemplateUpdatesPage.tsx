@@ -571,7 +571,7 @@ function VMUpdateDialog({ line, onClose, onQueued }: { line: VMLine; onClose: ()
 type PublishAllNode = { node: string; state: string; vmid?: number; code?: string; message?: string }
 export type PublishAllReport = {
   digest: string; kubernetesVersion?: string; nodes: PublishAllNode[]; versionsLine?: string
-  complete: boolean; nodesMissing: string[]; next: "advance" | "wait" | "done"; actions?: string[]
+  complete: boolean; nodesMissing: string[]; next: "advance" | "wait" | "blocked" | "done"; actions?: string[]
   // An advance that acted and then could not start its next job.
   error?: { code: string; message: string }
 }
@@ -699,7 +699,7 @@ function PublishAllDialog({ line, onClose }: { line: VMLine; onClose: () => void
               </Table>
               {r && (
                 <p className="text-xs text-muted-foreground" role="status">
-                  {halted ? (stepError || advance.error ? "Stopped: the next step could not be started." : "Stopped: a publish was refused.") : r.next === "done" ? "Nothing more to do." : r.next === "wait" ? "Waiting for the running job; checked every 15 s." : "Advancing…"}
+                  {halted ? (stepError || advance.error ? "Stopped: the next step could not be started." : "Stopped: a publish was refused.") : r.next === "blocked" ? "Blocked: a step failed on a node and is not repeated here. Its Detail says what to do; the state is read again every 15 s and the dialog goes on when it changed." : r.next === "done" ? "Nothing more to do." : r.next === "wait" ? "Waiting for the running job; checked every 15 s." : "Advancing…"}
                 </p>
               )}
               {r && !r.complete && r.versionsLine && (

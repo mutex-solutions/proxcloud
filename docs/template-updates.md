@@ -485,7 +485,7 @@ is `advance`.
 | `smoke_running`, `smoke_queued` | A smoke test of the copy is queued or running (`smoke_queued`: this advance queued it) |
 | `staged` | Imported; waits its turn for a smoke test |
 | `smoke_not_started` | The smoke test could not be queued (`code`, e.g. `smoke_network_unset`). Fix the cause and run it from **Imported templates** |
-| `smoke_failed` | The smoke test failed (`code` as stored). Not repeated |
+| `smoke_failed` | The smoke test failed (`code` as stored). Not repeated, however old the failure is and whatever caused it: run the copy's smoke test again from its row under **Imported templates** (`POST /admin/template-updates/templates/{importId}/smoke`). When it passes the node reads `ready_to_publish` and the next advance publishes it. The node's `message` ends with this hint |
 | `importing`, `import_queued` | An import is queued or running (`import_queued`: this advance queued it) |
 | `import_failed` | The import failed (`code` as stored). Not repeated: start it again with **Import…** |
 | `missing` | No copy; waits its turn for an import |
@@ -503,7 +503,14 @@ The report also carries:
   before the line: a line that covers fewer nodes moves a cluster's workers off the missing nodes at its next node
   group change or upgrade, and ArgoCD deletes the workers of a dropped node at once
   ([managed-k8s.md](managed-k8s.md#9-how-a-cluster-lands-on-proxmox)).
-- `next`: `advance`, `wait` (a job of the provider is running) or `done`.
+- `next`: `advance`, `wait` (a job of the provider is running), `blocked` or `done`. `blocked`: nothing runs and a
+  node is `smoke_failed`, `smoke_not_started`, `import_failed` or `publish_failed`. An advance never repeats those
+  steps, so posting again changes nothing; each such node's `message` says what to do, and the dialog says
+  "Blocked" instead of "Nothing more to do". It keeps reading every 15 s and goes on by itself once the copy's own
+  smoke test has passed. Before, such a report read `done` with `complete: false` (seen on a lab: two copies with an
+  eight-hour-old failed smoke test stopped the action, and each had to be smoke-tested from its row). There is no
+  automatic retry. `done` with `complete: false` is left for what no step of the operator in this dialog changes: a
+  node that is down, a skipped node, a copy the portal did not import, a node that publishes another version.
 - `actions`: what this call did (`published pve2/9211`, `smoke test queued pve3/9212`, `import queued pve4`).
 - `error`: only on an advance that acted and then could not go on (above).
 
@@ -978,7 +985,11 @@ debugfs -w -f /tmp/orphan-fix.cmd "$D"
 
 ## 7. Open items
 
-- **Publish on all nodes is not lab-verified**: its tests run on PostgreSQL with a fake Proxmox. It has no background
+- **Publish on all nodes is partly lab-verified** (2026-11-17, main cb2f052): two advances each published one node
+  whose smoke test had passed, the report and the versions line were right, and the smoke clone upgraded no package.
+  Not run on a lab: an import started by it, a smoke test started by it, and so its one-job-at-a-time rule (both
+  copies there carried a failed smoke test, which it does not repeat, and were smoke-tested from their rows, one
+  after the other by hand); the `blocked` answer; the dialog. Its tests run on PostgreSQL with a fake Proxmox. It has no background
   driver: an operator who closes the dialog pauses it. It does not write `config.cluster.versions`. The one-job rule
   reads the import and smoke receipts of the provider, so a job started by hand in the moment between the check and
   the enqueue can still overlap; the provider's own smoke lock keeps two smoke tests apart in every case.
