@@ -37,6 +37,7 @@ type vmInventoryWire struct {
 	// Sys.Audit on / (not propagated) and /nodes, the platform role on /pool, nothing
 	// on /access or /vms, NoAccess on the fenced pools.
 	documented bool
+	nextids    int
 }
 
 // held reports whether a guest holds the VMID anywhere in the cluster, seen or not.
@@ -67,10 +68,10 @@ func (f *vmInventoryWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/api2/json")
 	write := func(v any) { _ = json.NewEncoder(w).Encode(map[string]any{"data": v}) }
-	gone := f.mode == "empty" || f.mode == "denied" || f.mode == "masked" || f.mode == "hidden" || f.mode == "partial-nodes" || f.mode == "pool-unaudited"
+	gone := f.mode == "empty" || f.mode == "denied" || f.mode == "masked" || f.mode == "hidden" || f.mode == "partial-nodes" || f.mode == "pool-unaudited" || f.mode == "taken-during-proof" || f.mode == "nextid-null"
 	template := f.mode == "template"
 	// The VMID is held by a VM of another project's pool: the same VM moved there, or another one.
-	elsewhere := f.mode == "moved-elsewhere" || f.mode == "reused-elsewhere"
+	elsewhere := f.mode == "moved-elsewhere" || f.mode == "reused-elsewhere" || f.mode == "moved-no-smbios"
 	switch {
 	case strings.HasSuffix(path, "/agent/network-get-interfaces"):
 		switch f.mode {
@@ -128,7 +129,13 @@ func (f *vmInventoryWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case path == "/cluster/nextid":
 		// PVE reads the whole guest list here, whatever the token may audit.
 		id, _ := strconv.Atoi(r.URL.Query().Get("vmid"))
-		if f.held(id) {
+		f.nextids++
+		if f.mode == "nextid-null" { // a 2xx that does not echo the id proves nothing
+			write(nil)
+			return
+		}
+		// taken-during-proof: free at the first question, taken by an unseen guest before the second.
+		if f.held(id) && !(f.mode == "taken-during-proof" && f.nextids == 1) {
 			w.WriteHeader(400)
 			_ = json.NewEncoder(w).Encode(map[string]any{"errors": map[string]string{"vmid": fmt.Sprintf("VM %d already exists", id)}})
 			return
@@ -310,6 +317,9 @@ func (f *vmInventoryWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if f.mode == "ip-object" {
 			cfg["ipconfig0"] = map[string]any{"ip": "192.0.2.1"}
 		}
+		if f.mode == "moved-no-smbios" {
+			delete(cfg, "smbios1")
+		}
 		if f.mode == "restore-cut-down" {
 			delete(cfg, "scsi0")
 			delete(cfg, "net0")
@@ -475,18 +485,40 @@ func TestVMInventoryRetiresOnDocumentedGrants(t *testing.T) {
 	}
 	// The VM exists outside what the token sees of its pool: the pool lost VM.Audit,
 	// the VM is hidden, or it was moved to another pool. The row stays and the
-	// warning names the path or the VM.
-	for mode, path := range map[string]string{"pool-unaudited": "VM.Audit on /pool/pc-p", "hidden": "VM.Audit on /vms/101", "moved-elsewhere": "(101): VM exists outside the expected pool"} {
-		t.Run(mode, func(t *testing.T) {
+	// warning names the path or the VM. So does a row that cannot be told from the
+	// holder (no stored UUID, or a holder without one), a VMID an unseen guest takes
+	// between the two questions, and a /cluster/nextid answer that is not the id.
+	const outside = "(101): VM exists outside the expected pool"
+	for _, tc := range []struct{ name, mode, want string }{
+		{"pool-unaudited", "pool-unaudited", "VM.Audit on /pool/pc-p"},
+		{"hidden", "hidden", "VM.Audit on /vms/101"},
+		{"moved-elsewhere", "moved-elsewhere", outside},
+		{"moved-elsewhere/row-without-uuid", "moved-elsewhere", outside},
+		{"reused-elsewhere/row-without-uuid", "reused-elsewhere", outside},
+		{"moved-elsewhere/holder-without-uuid", "moved-no-smbios", outside},
+		{"taken-during-proof", "taken-during-proof", "VM.Audit on /vms/101"},
+		{"nextid-null", "nextid-null", "cannot read whether the VMID is free"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			db := freshPG(t)
 			repo := cloud.NewRepo(db)
 			old := vmCached(t, db, cloud.TypeServer)
-			s := vmTestService(t, &vmInventoryWire{mode: mode, documented: true})
+			if strings.HasSuffix(tc.name, "row-without-uuid") {
+				delete(old.Data, "pveUUID")
+				if _, err := db.C("cloudResource").SetByID(ctx, old.ID, pgdoc.M{"data": old.Data}, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f := &vmInventoryWire{mode: tc.mode, documented: true}
+			s := vmTestService(t, f)
 			st, err := providers.Reconcile(ctx, vmProvider(s, cloud.TypeServer), repo, "s", time.Now().UTC())
 			var unknown *cloud.InventoryUntrustedError
-			if !errors.As(err, &unknown) || st != (providers.ReconcileStats{}) || !strings.Contains(err.Error(), path) {
-				t.Fatalf("stats%+v err%v, want the path %q", st, err, path)
+			if !errors.As(err, &unknown) || st != (providers.ReconcileStats{}) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("stats%+v err%v, want %q", st, err, tc.want)
+			}
+			if tc.mode == "taken-during-proof" && f.nextids != 2 {
+				t.Fatalf("the VMID was asked for %d times, want before and after the re-reads", f.nextids)
 			}
 			exactVMRow(t, repo, old)
 		})

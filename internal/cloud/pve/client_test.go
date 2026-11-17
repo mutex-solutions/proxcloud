@@ -171,6 +171,12 @@ func TestVMIDFree(t *testing.T) {
 			w.WriteHeader(400)
 			fmt.Fprint(w, `{"errors":{"vmid":"value must have a minimum value of 100"},"data":null}`)
 		},
+		// A 2xx that does not echo the id is not "free": a proxy or a changed endpoint.
+		"9214": func(w http.ResponseWriter) { fmt.Fprint(w, `{"data":null}`) },
+		"9215": func(w http.ResponseWriter) { fmt.Fprint(w, `{}`) },
+		"9216": func(w http.ResponseWriter) { fmt.Fprint(w, `{"data":"100"}`) },
+		"9217": func(w http.ResponseWriter) { fmt.Fprint(w, `{"data":{"vmid":9217}}`) },
+		"9218": func(w http.ResponseWriter) { fmt.Fprint(w, `{"data":9218}`) },
 	}
 	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
 		"GET /api2/json/cluster/nextid": func(w http.ResponseWriter, r *http.Request) {
@@ -181,13 +187,13 @@ func TestVMIDFree(t *testing.T) {
 			w.WriteHeader(500)
 		},
 	})
-	for vmid, want := range map[int]bool{9210: true, 9211: false} {
+	for vmid, want := range map[int]bool{9210: true, 9211: false, 9218: true} {
 		if free, err := c.VMIDFree(context.Background(), vmid); err != nil || free != want {
 			t.Errorf("VMIDFree(%d) = %v, %v", vmid, free, err)
 		}
 	}
-	for _, vmid := range []int{9212, 9213} {
-		if _, err := c.VMIDFree(context.Background(), vmid); err == nil {
+	for _, vmid := range []int{9212, 9213, 9214, 9215, 9216, 9217} {
+		if free, err := c.VMIDFree(context.Background(), vmid); err == nil || free {
 			t.Errorf("VMIDFree(%d): no error", vmid)
 		}
 	}
