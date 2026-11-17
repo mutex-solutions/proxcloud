@@ -16,7 +16,11 @@ provider with `chartVersion` 0.1.13, the first chart on which node group replica
 its provider service account can read Machines, ProxmoxMachines and ProxmoxClusters, which the provisioning reasons
 need. With the values of the platform cluster, 0.1.13 renders the same objects as 0.1.12.
 
-**Diagrams:** none changed; the row of the cluster chart in `c2-containers.md` names 0.1.13 as the pinned version.
+**Diagrams:** `c2-containers.md`: the `platchart` node of the delivery diagram no longer says "nothing applies it
+yet", and the row of chart `proxcloud-platform` names the BOM components that apply it (`capi`, `capi-tenant`,
+`platform`) and 0.1.2 as published and pinned, instead of "not published". Both were stale since the BOM first
+pinned the chart. The row of the cluster chart names 0.1.13 as the pinned version. No node or edge was added or
+removed.
 
 **Not verified:** either chart on a cluster. A platform installed from the previous BOM is refused
 (`bom_unsupported`): Remove and install again. Kept as it is, its Kubernetes provider stays on `chartVersion`
