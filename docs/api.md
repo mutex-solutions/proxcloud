@@ -217,6 +217,14 @@ management-cluster RBAC predates them.
 bounded time or an error that is not retried; it clears by itself. `status` is unchanged by either. The codes, their
 texts and the bounds: [managed-k8s.md](managed-k8s.md#provisioning-status-reason-and-needs-attention).
 
+Managed Kubernetes placement: on a cluster whose chart is 0.1.13 or later, `node_groups[i].placement` (`{"pve1": 2,
+"pve3": 1}`) says how many replicas of the group each Proxmox node runs. It is decided by the server at create,
+`SET_NODE_GROUPS` and `UPGRADE`, and is never read from a request; neither is a node group's `imageId`, which is
+ignored from v0.8.0 (the image comes from the provider's version matrix and the group's `imageVariant`). The node
+names are the ones `image_id` already carried. Create, `SET_NODE_GROUPS` and `UPGRADE` can answer `409` when the new
+workers do not fit or the cluster's storage is on no node that holds the image, and `503` when Proxmox cannot be read:
+[managed-k8s.md](managed-k8s.md#9-how-a-cluster-lands-on-proxmox).
+
 `GET /api/v1/admin/service/{id}/k8s-clusters/{clusterId}/machines` (`admin:service:read`) is the operator's detail,
 read live from the management cluster:
 

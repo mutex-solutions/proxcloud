@@ -299,8 +299,78 @@ What the create path resolves (`internal/platform/project/cloud_kamaji_create.go
 
 **Node images.** `config.cluster.versions` maps a version to its template per PVE node, as printed by
 `images/k8s-node-template.sh`: `{"1.35.10": "pve1=9210,pve2=9211"}`. PVE clones to local storage only on the
-template's node, so a node group has one MachineDeployment per entry, its replicas split evenly, the first entries
-taking the remainder. The zone label comes from that pin, so no cloud controller manager is needed.
+template's node, so a node group has one MachineDeployment per entry. The zone label comes from that pin, so no
+cloud controller manager is needed. The image is the provider's: a node group in a request names an `imageVariant`
+at most, and an `imageId` in a request is ignored (before v0.8.0 it went into the values as it came, so a caller of the
+API could pin a group to nodes and template VMIDs of its choice; the console never sent it).
+
+**Sites without shared storage: where a node group's replicas go.** On a site where every node has its own pool
+(six nodes, each with a local ZFS pool), the image must exist on every node that should run workers
+(`config.cluster.versions`: `"1.35.10": "pve1=9210,pve2=9211,..."`; [template-updates.md](template-updates.md) has
+one action that publishes a version on all nodes), and a worker's disk is on the node that runs it.
+
+How many replicas each node runs depends on the cluster's chart version:
+
+- **Chart 0.1.12 and older:** the chart splits `machineCount` evenly over the image string's entries, the first
+  entries taking the remainder, blind to what is free. A full node still gets its share and its machines hang
+  (`no_capacity` under "Provisioning status").
+- **Chart 0.1.13 and later:** ProxCloud decides and stores the split per group (`machinePlacement: {<node>:
+  <replicas>}` in the Application's values; `node_groups[i].placement` in the API). The chart renders exactly that.
+
+The placement rule (`kamajiPlaceGroups`, `pve.PlaceReplicas`, `pve.RemoveReplicas`):
+
+1. **Baseline.** Where the group's workers are now: its stored placement, else the even split of its current count.
+   A re-render never moves a running worker; only the difference is placed or removed. An edit that changes no count
+   writes the baseline as it is and asks Proxmox nothing (so the first edit of a cluster moved to 0.1.13 stores the
+   even split it already runs).
+2. **Scale-up and create** place each new replica one at a time on a node that
+   - holds the image (an entry of the image string) and is online,
+   - has the cluster's worker storage active (`proxmox.storage` in the values, fixed at create),
+   - has room on that storage for the root disk with the provider's storage headroom (`storageHeadroomPct`),
+   - stays under `maxcpu × overcommitCPU` with the flavor's vCPUs,
+   - has the flavor's memory free after the memory kept for protected VMs.
+
+   Among those the node with the fewest replicas of this group wins, then the one with the most free memory, then by
+   name: a group is spread when several nodes fit. Every pick counts at once, for the next replica and for the next
+   group of the same request. Memory and CPU count every VM's configured size, running or stopped, like the server
+   scheduler. On shared storage a disk is taken from every node's view of the pool.
+3. **Workers not built yet count.** A clone takes minutes. The workers of every cluster of this Kubernetes provider
+   that are decided and that Proxmox does not have yet (placement less the VMs tagged `pc-k8s-<clusterId>` per node)
+   count as VMs of that cluster's largest group. Decisions on one Proxmox provider run one at a time (a lock from the
+   snapshot to the Application that records the decision), so two creates in a row do not both take the last free node.
+4. **Scale-down** removes each replica from the node whose MachineDeployment has the most replicas that are not ready
+   (a stuck machine goes before a healthy one), then the node with the most replicas of the group, then the one with
+   the least free memory, then by name. It reads no capacity.
+5. **The image string changes** (an UPGRADE to a version published on other nodes, or the operator edited
+   `config.cluster.versions` and the next node group edit picks it up): replicas on nodes that still hold the image
+   stay, a new node starts at 0, and the replicas of a node that no longer holds it are placed as new ones, by rule 2.
+
+Refusals are all or nothing and happen before anything is reserved, minted or written:
+
+| Answer | When |
+|---|---|
+| `409 Node group "G": only K of N new workers fit (flavor F: X vCPU, Y MB, Z GiB disk). Reduce the count, choose a smaller flavor, or contact the operator.` | Not every new replica has a node |
+| `409 Node group "G": no node that holds this version's image has the cluster's storage. Contact the operator.` | The cluster's storage is active on none of the image's nodes |
+| `503 proxmox cluster unavailable` | Nodes, VMs or storage could not be read |
+| `409 Another cluster change is being placed on this provider. Try again in a moment.` | The lock was held for 30 s |
+
+What it does not do:
+
+- **Local volumes at scale-down.** Removing a group's last replica on a node leaves the PersistentVolumes on that
+  node's storage behind: their pods cannot start elsewhere. The order above empties a node last, the console warns
+  when a group is scaled below the number of hosts it runs on, and PersistentVolumes are not read.
+- **A node dropped from the image string is pruned at once.** The Application prunes, so that node's
+  MachineDeployment and its workers are deleted when the edit syncs, not surge-first; their replacements are being
+  built on other nodes at the same time. Room for them is checked before the edit is written. Publishing a version
+  on fewer nodes than the current one therefore moves workers at each cluster's next upgrade or node group edit.
+- **Nodes whose storage has another name.** One storage name per cluster: a node where it is not active gets no
+  replica.
+- **No capacity check** for a flavor changed in place (every worker of the group is replaced where it is) or for the
+  one surge machine of a rolling upgrade. "Provisioning status" shows the result.
+- **Existing clusters are untouched** until an operator sets the provider's `chartVersion` to 0.1.13 and bumps each
+  cluster (**Bump** on the provider page, or the tenant's *Apply platform update*). A cluster on an older chart gets
+  no `machinePlacement` and no check, exactly as before. After the bump its render is the same until its node groups
+  change.
 
 **Reaching the platform.** Workers sit on a tenant vnet with no route to the management network. The API-server
 endpoint is an address on the services subnet, which tenants reach over their normal egress: MetalLB.

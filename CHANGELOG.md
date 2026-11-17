@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Managed Kubernetes: node group replicas are placed by free capacity** (cluster chart `proxmox-kamaji-cluster`
+  0.1.13, `docs/managed-k8s.md`). On a site without shared storage a node group is one MachineDeployment per node
+  that holds the image, and the chart split the count evenly, so a full node still got its share and its machines
+  hung. ProxCloud now decides the split and stores it (`machinePlacement`): a new replica goes to a node that holds
+  the image, has the cluster's storage with room for the disk (storage headroom), stays under the CPU overcommit and
+  has the memory free; among those the node with the fewest replicas of the group, then the most free memory. It is
+  decided at create, scale-up and upgrade, and is stable: running workers never move, only the difference is placed
+  or removed. Workers that are decided and not cloned yet count, and decisions on one Proxmox provider run one at a
+  time. Scale-down takes a stuck replica first and empties a node last. A request that does not fit answers 409
+  with how many fit, before anything is reserved. The console warns when a group is scaled below the number of
+  hosts it runs on (volumes on a host's local storage stay there). A cluster on chart 0.1.12 or older is unchanged;
+  one moved to 0.1.13 renders the same objects until its node groups change. Existing sites get it only after the
+  operator sets the provider's `chartVersion` to 0.1.13 and bumps each cluster. Chart 0.1.13 is not published yet,
+  and the platform BOM still pins 0.1.12. Not verified on a lab.
+
 - **Managed Kubernetes: why a cluster is not there yet, and "needs attention"** (`internal/cloud/kamaji/progress.go`,
   `docs/managed-k8s.md`). A cluster whose provisioning broke half-way used to read PROGRESSING for ever with no
   reason. The status sync now reads what Cluster API and CAPMOX report per worker (Machine, ProxmoxMachine) and on
@@ -683,6 +698,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   until the store is changed; where the provider's `importStorage` is that store, the provider must change too.
 
 ### Security
+
+- **Managed Kubernetes: a node group's `imageId` is no longer taken from a request.** It went into the cluster's
+  values as it came, so a caller of the API could pin a group's workers to Proxmox nodes and template VMIDs of its
+  choice, published or not. The image now always comes from the provider's version matrix and the group's
+  `imageVariant`. The console never sent the field; an API client that did gets the provider's image instead.
 
 - **The portal token can create API tokens for `capmox@pve` and `csi@pve` only, no longer for every Proxmox user,
   and holds no `Permissions.Modify` on `/pool`**

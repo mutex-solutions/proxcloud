@@ -4,6 +4,20 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-17: managed Kubernetes, node group replicas placed by free capacity
+
+**What changed:** cluster chart `proxmox-kamaji-cluster` 0.1.13 reads a per-group `machinePlacement`; the kamaji
+create and node group paths (`internal/platform/project/cloud_kamaji_placement.go`) decide it from a snapshot of the
+Proxmox provider (nodes, VMs, storage per node) with the server scheduler's inputs (`pve.PickNode`), under one lock
+per compute provider. No container, relation or boundary changed: the project handlers already read the Proxmox API
+for a server create and wrote the cluster's Application.
+
+**Why:** on sites without shared storage the chart's even split put replicas on full nodes, where they hung.
+
+**Diagrams:** none changed.
+
+**Not verified:** on a lab. Chart 0.1.13 is not published; the BOM pins 0.1.12.
+
 ## 2026-11-17: managed Kubernetes, provisioning reason and "needs attention"
 
 **What changed:** the kamaji status sync (`internal/cloud/kamaji/progress.go`) reads three more kinds on the
