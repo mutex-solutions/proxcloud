@@ -110,6 +110,9 @@ func run() error {
 		"durableJobs", "postgres-primary")
 
 	ctx := context.Background()
+	// stopPlatformRuns cancels the platform runner at the stop signal, before the servers drain: its run gives its job
+	// back while the container's stop grace period still lasts.
+	stopPlatformRuns := func() {}
 
 	// PostgreSQL: the primary datastore.
 	pg, err := pgdoc.Connect(ctx, cfg.DB.URL)
@@ -1041,6 +1044,7 @@ func run() error {
 			prDone := make(chan struct{})
 			go func() { defer close(prDone); prRunner.Run(prCtx) }()
 			defer func() { stopPR(); <-prDone }()
+			stopPlatformRuns = stopPR
 			log.Warn("managed services: platform runner ENABLED")
 		}
 	}
@@ -1484,6 +1488,7 @@ func run() error {
 	case sig := <-stop:
 		log.Info("shutting down", "signal", sig.String())
 	}
+	stopPlatformRuns()
 
 	sctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
