@@ -42,16 +42,12 @@ type kamajiCapacity struct {
 	headroom   float64
 }
 
-// freeMem is each node's memory after what its VMs are given, for the scale-down order.
+// freeMem is each node's memory after what is taken on it (pve.CommittedMem), for the scale-down order.
 func (c *kamajiCapacity) freeMem() map[string]int64 {
 	out := map[string]int64{}
+	used := pve.CommittedMem(c.nodes, c.vms)
 	for _, n := range c.nodes {
-		out[n.Node] = n.MaxMem
-	}
-	for _, r := range c.vms {
-		if r.Type == "qemu" && r.Template != 1 {
-			out[r.Node] -= r.MaxMem
-		}
+		out[n.Node] = n.MaxMem - used[n.Node]
 	}
 	return out
 }
@@ -232,6 +228,8 @@ func kamajiPlaceCreate(d kamaji.ClusterDefaults, spec *kamaji.ClusterSpec, snaps
 
 // kamajiSnapshot reads the compute provider for a placement: nodes, VMs, the state of storage on each node, the
 // memory kept for failover, and the workers of every cluster of ks that are decided and not built yet.
+// The VM list holds only what the provider's token may audit; the nodes' used memory (pve.CommittedMem) covers the
+// rest, the platform's own machines on a managed-services install among them. Their vCPUs are not counted.
 // ponytail: the pending workers of ONE Kubernetes provider. Two providers on one Proxmox cluster do not see each
 // other's pending clones; list every kamaji service of the compute provider if a site runs that.
 func (h *Handler) kamajiSnapshot(ctx context.Context, ks *kamaji.Service, compute *externalservice.ExternalService, storage string) (*kamajiCapacity, *httpx.HTTPError) {

@@ -335,8 +335,27 @@ The placement rule (`kamajiPlaceGroups`, `pve.PlaceReplicas`, `pve.RemoveReplica
 
    Among those the node with the fewest replicas of this group wins, then the one with the most free memory, then by
    name: a group is spread when several nodes fit. Every pick counts at once, for the next replica and for the next
-   group of the same request. Memory and CPU count every VM's configured size, running or stopped, like the server
-   scheduler. On shared storage a disk is taken from every node's view of the pool.
+   group of the same request. On shared storage a disk is taken from every node's view of the pool.
+
+   What counts as taken on a node, the same for the server scheduler (`pve.PickNode`, `pve.CommittedMem`):
+   - **Memory:** the larger of (a) the configured memory of every running VM the provider's token may audit and
+     (b) the node's own used memory (`mem` of the node's row in `GET /nodes`, which the token reads with
+     `PVEAuditor` on `/nodes`). On top of that comes the configured memory of every VM the token may audit that
+     does not run (stopped, or cloned and not booted yet: it takes nothing of (b)), of the workers that are decided
+     and not built yet (rule 3) and of the picks of this request. (b) is there for the VMs the token may not audit: Proxmox leaves them out of
+     `GET /cluster/resources`, and on a managed-services install those are the platform's own machines (pools
+     `proxcloud-seed` and `proxcloud-system` carry `NoAccess` for this token by design), on any site also VMs that
+     belong to nobody ProxCloud knows.
+   - **CPU:** the vCPUs of every VM the token may audit, running or stopped, against `maxcpu × overcommitCPU`.
+   - **Known limits.** A VM the token may not audit counts with the memory it uses now, not its configured size,
+     and not while it is stopped; it does not count at all on a node where the running visible VMs' configured
+     memory is already above the node's used memory (the larger of the two is taken, they are not added). The
+     other way round, on a node whose used memory is the larger figure, a running visible VM counts only with
+     what it uses now: several creates in a row can still overfill a node that carries hidden VMs, once the
+     earlier VMs have booted and use less than their size. A hidden VM's vCPUs are never counted. The node's used
+     memory is Proxmox's figure, so it includes the host itself, LXC containers and, on ZFS, the ARC: such a node
+     reads less free than the sum of its VMs says, on every site. Cap the ARC (`zfs_arc_max`) if it takes room
+     you want placed.
 3. **Workers not built yet count.** A clone takes minutes. The workers of every cluster of this Kubernetes provider
    that are decided and that Proxmox does not have yet (placement less the VMs tagged `pc-k8s-<clusterId>` per node)
    count as VMs of that cluster's largest group: its memory and CPU on the node, and its root disk on the cluster's
@@ -347,7 +366,10 @@ The placement rule (`kamajiPlaceGroups`, `pve.PlaceReplicas`, `pve.RemoveReplica
    (a stuck machine goes before a healthy one), then the node with the most replicas of the group, then the one with
    the least free memory, then by name. Nothing is checked, so it never fails on Proxmox: the nodes' free memory is
    read for the order only, and when Proxmox does not answer (or the MachineDeployments cannot be read) that
-   criterion is skipped.
+   criterion is skipped. Free memory is counted as in rule 2. ProxCloud decides only how many replicas each node
+   loses: **which machine of that node goes is Cluster API's choice** (the MachineDeployment's deletion order,
+   `Random` by default; the chart does not set it). On the lab a scale-down removed the older, original worker
+   of the node and kept the one added last. "A running worker never moves" holds per node, not per machine.
 5. **The image string changes** (an UPGRADE to a version published on other nodes, or the operator edited
    `config.cluster.versions` and the next node group edit picks it up): replicas on nodes that still hold the image
    stay, a new node starts at 0, and the replicas of a node that no longer holds it are placed as new ones, by rule 2.

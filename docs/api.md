@@ -224,6 +224,10 @@ ignored from v0.8.0 (the image comes from the provider's version matrix and the 
 names are the ones `image_id` already carried. Create, `SET_NODE_GROUPS` and `UPGRADE` can answer `409` when the new
 workers do not fit or the cluster's storage is on no node that holds the image, and `503` when Proxmox cannot be read:
 [managed-k8s.md](managed-k8s.md#9-how-a-cluster-lands-on-proxmox).
+A node group of `SET_NODE_GROUPS` has the shape of a node group at create: `rootVolumeGiB` may be left out when the
+Kubernetes provider has a default root disk size (`config.cluster.rootVolumeGiB`), and a new group then gets the
+larger of that default and the flavor's disk. A group that already runs keeps the root disk size it has when the
+field is left out. Without a provider default a group without it answers `400`, at create too.
 
 `GET /api/v1/admin/service/{id}/k8s-clusters/{clusterId}/machines` (`admin:service:read`) is the operator's detail,
 read live from the management cluster:

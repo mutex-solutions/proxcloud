@@ -197,7 +197,7 @@ func (h *Handler) kamajiAction(w http.ResponseWriter, r *http.Request, proj *Pro
 			return true
 		}
 		d := ks.Config().Defaults
-		if err := validateNodeGroupShapes(groups); err != nil {
+		if err := validateNodeGroupShapes(groups, d.RootVolumeGiB); err != nil {
 			h.fail(w, httpx.BadRequest(err.Error()))
 			return true
 		}
@@ -313,10 +313,12 @@ func (h *Handler) kamajiAction(w http.ResponseWriter, r *http.Request, proj *Pro
 
 // validateNodeGroupShapes re-runs the create-time node-group SHAPE rules for SET_NODE_GROUPS
 // (name/flavor required, count/min/max sanity) — allowlist enforcement happens inside the
-// values patch where the cluster's current groups are known.
-func validateNodeGroupShapes(groups []kamaji.NodeGroup) error {
+// values patch where the cluster's current groups are known. Of the provider's defaults only the
+// root disk size is passed: a group without rootVolumeGiB is valid when the provider has one, as
+// at create. The versions stay out, so the image variant is resolved by the values patch.
+func validateNodeGroupShapes(groups []kamaji.NodeGroup, defaultRootVolumeGiB int) error {
 	spec := kamaji.ClusterSpec{ID: "x", ProjectID: "x", Version: "x", NodeGroups: groups}
-	return spec.Validate(kamaji.ClusterDefaults{})
+	return spec.Validate(kamaji.ClusterDefaults{RootVolumeGiB: defaultRootVolumeGiB})
 }
 
 // prevGroupIndex indexes the live values' nodeGroups by name → flavor / imageId / imageVariant.

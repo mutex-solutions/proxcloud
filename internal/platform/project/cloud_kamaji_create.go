@@ -68,6 +68,18 @@ func (h *Handler) kamajiGroupFlavor(ctx context.Context, ng *kamaji.NodeGroup, p
 	return fl, nil
 }
 
+// kamajiRootGiB is the root disk of a group that names none: the size the group of that name already runs, else def.
+// A node group edit that leaves the field out must not change the machine spec, or every worker of the group is
+// replaced.
+func kamajiRootGiB(name string, prev []kamaji.NodeGroup, def int) int {
+	for _, p := range prev {
+		if p.Name == name && p.RootVolumeGiB > 0 {
+			return p.RootVolumeGiB
+		}
+	}
+	return def
+}
+
 // kamajiHydrateGroups fills what the client does not choose: VM size and tags from the flavor. Run on
 // create and on every node group change, because the values carry them. prev is what the cluster runs now.
 func (h *Handler) kamajiHydrateGroups(ctx context.Context, compute *externalservice.ExternalService, d kamaji.ClusterDefaults, clusterID string, groups, prev []kamaji.NodeGroup) error {
@@ -85,7 +97,7 @@ func (h *Handler) kamajiHydrateGroups(ctx context.Context, compute *externalserv
 		}
 		ng.Cores, ng.MemoryMiB = fl.VCPUs, fl.RAMMb
 		if ng.RootVolumeGiB == 0 {
-			ng.RootVolumeGiB = max(d.RootVolumeGiB, fl.DiskGb)
+			ng.RootVolumeGiB = kamajiRootGiB(ng.Name, prev, max(d.RootVolumeGiB, fl.DiskGb))
 		}
 		tags := []string{pve.TagManaged, pve.FlavorTag(fl.Slug), "pc-k8s-" + clusterID}
 		p := fl.StorageProfile
