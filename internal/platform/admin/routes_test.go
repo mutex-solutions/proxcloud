@@ -103,3 +103,11 @@ func TestProjectGPUCapacityVisibleRoute(t *testing.T) {
 		t.Fatal("PUT /admin/project/{id}/gpu-capacity-visible route is not registered")
 	}
 }
+
+func TestKamajiClusterMachinesRoute(t *testing.T) {
+	router := chi.NewRouter()
+	(&Handler{}).Routes(router)
+	if !router.Match(chi.NewRouteContext(), http.MethodGet, "/admin/service/svc-1/k8s-clusters/pc-c-1/machines") {
+		t.Fatal("GET /admin/service/{id}/k8s-clusters/{clusterId}/machines route is not registered")
+	}
+}
