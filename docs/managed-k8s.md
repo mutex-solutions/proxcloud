@@ -306,8 +306,8 @@ API could pin a group to nodes and template VMIDs of its choice; the console nev
 
 **Sites without shared storage: where a node group's replicas go.** On a site where every node has its own pool
 (six nodes, each with a local ZFS pool), the image must exist on every node that should run workers
-(`config.cluster.versions`: `"1.35.10": "pve1=9210,pve2=9211,..."`; [template-updates.md](template-updates.md) has
-one action that publishes a version on all nodes), and a worker's disk is on the node that runs it.
+(`config.cluster.versions`: `"1.35.10": "pve1=9210,pve2=9211,..."`; [template-updates.md](template-updates.md#publish-on-all-nodes) has
+one action that publishes a version on all nodes, one node at a time), and a worker's disk is on the node that runs it.
 
 How many replicas each node runs depends on the cluster's chart version:
 

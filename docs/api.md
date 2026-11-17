@@ -241,6 +241,26 @@ read live from the management cluster:
 characters. `404` for a cluster that is not this provider's; `502` with "re-apply deploy/mgmt-cluster/rbac.yaml" when
 the service account may not read Machines.
 
+Publishing a node image on every node: `GET /api/v1/admin/template-updates/publish-all?serviceId=…&digest=sha256:…`
+(`admin:service:read`) reports one artifact's state on every node of a Proxmox provider, and
+`POST /api/v1/admin/template-updates/publish-all` with `{"serviceId","package","digest","confirmDigest"}`
+(`admin:service:manage`) advances it one step: it publishes what passed its smoke test and starts at most one import
+or smoke test.
+
+```json
+{"digest": "sha256:…", "kubernetesVersion": "1.35.10",
+ "nodes": [{"node": "pve1", "state": "published", "vmid": 9210},
+           {"node": "pve2", "state": "smoke_running", "vmid": 9211},
+           {"node": "pve3", "state": "missing"},
+           {"node": "pve4", "state": "skipped", "message": "The node is not online"}],
+ "versionsLine": "\"1.35.10\": \"pve1=9210\"", "complete": false, "nodesMissing": [], "next": "wait",
+ "actions": ["published pve1/9210", "smoke test queued pve2/9211"]}
+```
+
+`409` with `code` `busy` (another advance of that provider runs), `digest_withdrawn`, `vm_updates_disabled` or
+`provider_missing`; `400` `confirm_digest`; `502` `pve_unreadable`. The states and the rules:
+[template-updates.md](template-updates.md#publish-on-all-nodes).
+
 ### Platform setup — `/api/v1/admin/setup`
 
 Operator console surface for bringing a new install to its first tenant.

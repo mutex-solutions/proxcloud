@@ -213,137 +213,136 @@ func (s *Service) States(ctx context.Context, rows map[string]ProviderRows) ([]T
 	}
 	out := []TemplateState{}
 	for _, rec := range recs {
-		p := rec.Payload
-		st := TemplateState{ID: rec.ID, Package: p.Package, Tag: p.Tag, Digest: p.Digest, OS: p.OS, Variant: p.Variant, K8sVersion: p.KubernetesVersion,
-			Build: p.BuildVersion, Slug: slugOf(p), ServiceID: p.ServiceID, Node: p.Node, VMID: rec.VMID, Smoke: rec.Smoke,
-			ImportStep: rec.Step, ImportedAt: rec.CreatedAt, RequestedBy: rec.RequestedBy}
-		if b, ok := blocked[p.Digest]; ok {
-			b := b
-			st.Withdrawal = &b
-		}
-		switch {
-		case rec.TemplateGone:
-			// Its VMID may now hold a re-import of the same artifact: never shown as that template.
-			st.State = StateTemplateMissing
-			out = append(out, st)
-			continue
-		case rec.Step == StepFailed:
-			st.State = StateImportFailed
-			out = append(out, st)
-			continue
-		case rec.Step != StepSucceeded && rec.Step != StepTemplated:
-			if state, _ := s.JobState(ctx, rec.ID); state == "dead" {
-				st.State = StateImportFailed
-			} else {
-				st.State = StateImporting
-			}
-			out = append(out, st)
-			continue
-		}
-		pr, ok := rows[p.ServiceID]
-		if !ok || pr.Rows == nil {
-			st.State = StateProviderUnreadable
-			st.Warnings = append(st.Warnings, "the provider's cluster could not be read")
-			// A blocklisted digest whose copy here could not be checked: Withdraw may finish it.
-			st.Actions.Withdraw = st.Withdrawal != nil && s.VMEnabled
-			out = append(out, st)
-			continue
-		}
-		var row *pve.ClusterResource
-		for i := range pr.Rows {
-			r := &pr.Rows[i]
-			if r.VMID == rec.VMID && r.Node == p.Node && (copyOf(*r, p) || r.NodeDown) {
-				row = r
-			}
-		}
-		if row == nil {
-			st.State = StateTemplateMissing
-			out = append(out, st)
-			continue
-		}
-		if row.NodeDown {
-			st.State = StateProviderUnreadable
-			st.Warnings = append(st.Warnings, "the template's node is down")
-			st.Actions.Withdraw = st.Withdrawal != nil && s.VMEnabled
-			out = append(out, st)
-			continue
-		}
-		st.Tags = row.Tags
-		blocked := st.Withdrawal != nil
-		tagged := hasTagValue(row.Tags, pve.TagTemplateWithdrawn)
-		published := isPublished(row.Tags, p.Variant)
-		// Published versions of the line on the provider and which one is the default (newest
-		// pc-v- per node, the DiscoverTemplates rule; ties to the higher VMID).
-		def := lineDefault(pr.Rows, p, p.Node)
-		for _, r := range pr.Rows {
-			if servesLine(r, p) {
-				st.LineCount++
-			}
-		}
-		smokeRunning := rec.Smoke != nil && rec.Smoke.JobID != "" && rec.Smoke.Result == "" && rec.Smoke.Step != SmokeFinished
-		if smokeRunning {
-			// A smoke job that died before recording a result is not running (the dead-job pass
-			// records FAIL job_dead once it removed the test VM; a new smoke may start meanwhile).
-			if state, _ := s.JobState(ctx, rec.Smoke.JobID); state == "dead" {
-				smokeRunning = false
-			}
-		}
-		switch {
-		case tagged && blocked:
-			st.State = StateWithdrawn
-		case blocked:
-			// The digest is withdrawn but THIS copy is not tagged yet (published or staged).
-			st.State = StateWithdrawIncomplete
-			st.Warnings = append(st.Warnings, "the digest is withdrawn but this copy is not: withdraw again to finish it")
-		case tagged:
-			st.State = StateWithdrawn
-			st.Warnings = append(st.Warnings, "tagged pc-tu-withdrawn but its digest is not on the blocklist: withdraw records it")
-		case published && def == rec.VMID:
-			st.State = StatePublishedDefault
-		case published:
-			st.State = StatePublishedOlder
-		case smokeRunning:
-			st.State = StateSmokeRunning
-		case rec.Smoke != nil && rec.Smoke.Result == SmokePass:
-			st.State = StateReady
-		case rec.Smoke != nil && rec.Smoke.Result == SmokeFail:
-			st.State = StateSmokeFailed
-		default:
-			st.State = StateStaged
-		}
-		done := tagged && blocked
-		st.Actions = TemplateActions{
-			Smoke:    !blocked && !tagged && !smokeRunning && s.VMEnabled,
-			Publish:  !blocked && !tagged && !published && rec.Smoke != nil && rec.Smoke.Result == SmokePass && s.VMEnabled,
-			Withdraw: !done && s.VMEnabled,
-		}
-		if !done {
-			// The guards Withdraw evaluates, across every provider holding a copy of the artifact.
-			ids := make([]string, 0, len(rows))
-			for id := range rows {
-				ids = append(ids, id)
-			}
-			sort.Strings(ids)
-			for _, svc := range ids {
-				if rows[svc].Rows == nil {
-					continue
-				}
-				pl := planWithdraw(rows[svc].Rows, p)
-				if pl.lastOnProvider {
-					st.Actions.LastPublished = true
-					st.Actions.LastOnProviders = append(st.Actions.LastOnProviders, svc)
-				}
-				for _, n := range pl.nodesLosingLast {
-					st.Actions.NodesLosingLast = append(st.Actions.NodesLosingLast, svc+"/"+n)
-				}
-			}
-		}
-		if p.Variant == "kubernetes" && published && !tagged {
-			st.VersionsMap = fmt.Sprintf("%q: %q", p.KubernetesVersion, versionsMapValue(pr.Rows, p))
-		}
-		out = append(out, st)
+		out = append(out, s.stateOf(ctx, rec, rows, blocked))
 	}
 	return out, nil
+}
+
+// stateOf is one import's lifecycle state (States per receipt; PublishAll per node).
+func (s *Service) stateOf(ctx context.Context, rec Receipt, rows map[string]ProviderRows, blockedSet map[string]BlockedDigest) TemplateState {
+	p := rec.Payload
+	st := TemplateState{ID: rec.ID, Package: p.Package, Tag: p.Tag, Digest: p.Digest, OS: p.OS, Variant: p.Variant, K8sVersion: p.KubernetesVersion,
+		Build: p.BuildVersion, Slug: slugOf(p), ServiceID: p.ServiceID, Node: p.Node, VMID: rec.VMID, Smoke: rec.Smoke,
+		ImportStep: rec.Step, ImportedAt: rec.CreatedAt, RequestedBy: rec.RequestedBy}
+	if b, ok := blockedSet[p.Digest]; ok {
+		b := b
+		st.Withdrawal = &b
+	}
+	switch {
+	case rec.TemplateGone:
+		// Its VMID may now hold a re-import of the same artifact: never shown as that template.
+		st.State = StateTemplateMissing
+		return st
+	case rec.Step == StepFailed:
+		st.State = StateImportFailed
+		return st
+	case rec.Step != StepSucceeded && rec.Step != StepTemplated:
+		if state, _ := s.JobState(ctx, rec.ID); state == "dead" {
+			st.State = StateImportFailed
+		} else {
+			st.State = StateImporting
+		}
+		return st
+	}
+	pr, ok := rows[p.ServiceID]
+	if !ok || pr.Rows == nil {
+		st.State = StateProviderUnreadable
+		st.Warnings = append(st.Warnings, "the provider's cluster could not be read")
+		// A blocklisted digest whose copy here could not be checked: Withdraw may finish it.
+		st.Actions.Withdraw = st.Withdrawal != nil && s.VMEnabled
+		return st
+	}
+	var row *pve.ClusterResource
+	for i := range pr.Rows {
+		r := &pr.Rows[i]
+		if r.VMID == rec.VMID && r.Node == p.Node && (copyOf(*r, p) || r.NodeDown) {
+			row = r
+		}
+	}
+	if row == nil {
+		st.State = StateTemplateMissing
+		return st
+	}
+	if row.NodeDown {
+		st.State = StateProviderUnreadable
+		st.Warnings = append(st.Warnings, "the template's node is down")
+		st.Actions.Withdraw = st.Withdrawal != nil && s.VMEnabled
+		return st
+	}
+	st.Tags = row.Tags
+	blocked := st.Withdrawal != nil
+	tagged := hasTagValue(row.Tags, pve.TagTemplateWithdrawn)
+	published := isPublished(row.Tags, p.Variant)
+	// Published versions of the line on the provider and which one is the default (newest
+	// pc-v- per node, the DiscoverTemplates rule; ties to the higher VMID).
+	def := lineDefault(pr.Rows, p, p.Node)
+	for _, r := range pr.Rows {
+		if servesLine(r, p) {
+			st.LineCount++
+		}
+	}
+	smokeRunning := rec.Smoke != nil && rec.Smoke.JobID != "" && rec.Smoke.Result == "" && rec.Smoke.Step != SmokeFinished
+	if smokeRunning {
+		// A smoke job that died before recording a result is not running (the dead-job pass
+		// records FAIL job_dead once it removed the test VM; a new smoke may start meanwhile).
+		if state, _ := s.JobState(ctx, rec.Smoke.JobID); state == "dead" {
+			smokeRunning = false
+		}
+	}
+	switch {
+	case tagged && blocked:
+		st.State = StateWithdrawn
+	case blocked:
+		// The digest is withdrawn but THIS copy is not tagged yet (published or staged).
+		st.State = StateWithdrawIncomplete
+		st.Warnings = append(st.Warnings, "the digest is withdrawn but this copy is not: withdraw again to finish it")
+	case tagged:
+		st.State = StateWithdrawn
+		st.Warnings = append(st.Warnings, "tagged pc-tu-withdrawn but its digest is not on the blocklist: withdraw records it")
+	case published && def == rec.VMID:
+		st.State = StatePublishedDefault
+	case published:
+		st.State = StatePublishedOlder
+	case smokeRunning:
+		st.State = StateSmokeRunning
+	case rec.Smoke != nil && rec.Smoke.Result == SmokePass:
+		st.State = StateReady
+	case rec.Smoke != nil && rec.Smoke.Result == SmokeFail:
+		st.State = StateSmokeFailed
+	default:
+		st.State = StateStaged
+	}
+	done := tagged && blocked
+	st.Actions = TemplateActions{
+		Smoke:    !blocked && !tagged && !smokeRunning && s.VMEnabled,
+		Publish:  !blocked && !tagged && !published && rec.Smoke != nil && rec.Smoke.Result == SmokePass && s.VMEnabled,
+		Withdraw: !done && s.VMEnabled,
+	}
+	if !done {
+		// The guards Withdraw evaluates, across every provider holding a copy of the artifact.
+		ids := make([]string, 0, len(rows))
+		for id := range rows {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, svc := range ids {
+			if rows[svc].Rows == nil {
+				continue
+			}
+			pl := planWithdraw(rows[svc].Rows, p)
+			if pl.lastOnProvider {
+				st.Actions.LastPublished = true
+				st.Actions.LastOnProviders = append(st.Actions.LastOnProviders, svc)
+			}
+			for _, n := range pl.nodesLosingLast {
+				st.Actions.NodesLosingLast = append(st.Actions.NodesLosingLast, svc+"/"+n)
+			}
+		}
+	}
+	if p.Variant == "kubernetes" && published && !tagged {
+		st.VersionsMap = fmt.Sprintf("%q: %q", p.KubernetesVersion, versionsMapValue(pr.Rows, p))
+	}
+	return st
 }
 
 // lineDefault is the VMID new VMs of p's line get on node (0 = none published there).

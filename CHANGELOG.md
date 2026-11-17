@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Template updates: publish a version on all nodes** (`docs/template-updates.md`, admin console System > Template
+  updates). A site without shared storage needs a copy of a Kubernetes node image on every node, and each copy had to
+  be imported, smoke-tested and published by hand. **Publish on all nodes…** on a version's row does it for every node
+  of one Proxmox provider: `GET /admin/template-updates/publish-all` (`admin:service:read`) reports the state per
+  node, `POST` (`admin:service:manage`, audited) advances one step. A step publishes every node whose smoke test
+  passed, through the existing publish with all its gates, then starts at most one import or one smoke test, and
+  only when no import and no smoke test of that provider is queued or running. The open dialog drives it (it reads
+  every 15 s); closing it pauses. A failed import or smoke test is not repeated, nothing is withdrawn, a node without
+  the provider's import storage or the default profile's storage is skipped with the reason, and a failed node keeps
+  its older published copy. The report carries the `config.cluster.versions` line, which the operator still copies
+  by hand, and warns while it covers fewer nodes than publish another Kubernetes version. Not verified on a lab.
+
 - **Managed Kubernetes: node group replicas are placed by free capacity** (cluster chart `proxmox-kamaji-cluster`
   0.1.13, `docs/managed-k8s.md`). On a site without shared storage a node group is one MachineDeployment per node
   that holds the image, and the chart split the count evenly, so a full node still got its share and its machines

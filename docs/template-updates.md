@@ -442,6 +442,68 @@ overwriting), then reads the tags back:
 
 Idempotent: an already published template answers `unchanged: true` and writes nothing.
 
+### Publish on all nodes
+
+A site without shared storage needs its own copy of a Kubernetes node image on every node: workers are cloned only on
+the node that holds the template ([managed-k8s.md](managed-k8s.md#9-how-a-cluster-lands-on-proxmox)). **Publish on all
+nodes…** on a row of the **VM templates** tab brings one artifact digest to published on every node of one Proxmox
+provider. It works for any VM template; the versions line and the missing-node warning are for Kubernetes node images.
+
+- `GET /admin/template-updates/publish-all?serviceId=…&digest=sha256:…` (`admin:service:read`) is the report and
+  changes nothing.
+- `POST /admin/template-updates/publish-all` `{"serviceId","package","digest","confirmDigest"}`
+  (`admin:service:manage`, audited with what it did) is **one advance** and answers the same report. Two advances of
+  one provider never run at once (a PostgreSQL advisory lock; the second answers 409 `busy`).
+
+One advance, in this order:
+
+1. **Publish** every node whose latest smoke test passed, through the Publish above with all its gates. A refusal on
+   one node is reported for that node (`publish_failed` with the code) and the other nodes go on.
+2. **Start at most one job**, and only when no import and no smoke test of that provider is queued or running, of this
+   artifact or any other (several clones at once overload a small cluster):
+   - a smoke test of the first imported node that has none, on the provider's smoke network. A network that is unset
+     or refused for that node is recorded on the import, as the automatic smoke test does, and reported as
+     `smoke_not_started`; the next candidate is tried;
+   - else an import on the first node without a copy. It goes to the provider's `importStorage` and to the default
+     storage profile's storage for that node, and both must be active on the node (the rule of the import dialog).
+     When the import finishes the automatic smoke test starts by itself.
+
+Nothing runs in the background. The dialog reads the report every 15 s and advances again while `next` is `advance`;
+closing it pauses, and opening it again continues from the state on the provider. When a publish was refused the dialog
+stops and shows the reason; **Try again** repeats it.
+
+| Node state | Meaning |
+|---|---|
+| `published` | The copy on this node is published |
+| `ready_to_publish` | Its smoke test passed; the next advance publishes it |
+| `publish_failed` | Publish refused (`code`: `template_changed_since_smoke`, `pve_tag_write_failed`, …) |
+| `smoke_running`, `smoke_queued` | A smoke test of the copy is queued or running (`smoke_queued`: this advance queued it) |
+| `staged` | Imported; waits its turn for a smoke test |
+| `smoke_not_started` | The smoke test could not be queued (`code`, e.g. `smoke_network_unset`). Fix the cause and run it from **Imported templates** |
+| `smoke_failed` | The smoke test failed (`code` as stored). Not repeated |
+| `importing`, `import_queued` | An import is queued or running (`import_queued`: this advance queued it) |
+| `import_failed` | The import failed (`code` as stored). Not repeated: start it again with **Import…** |
+| `missing` | No copy; waits its turn for an import |
+| `present_unmanaged` | A template with this artifact's source tag that the portal did not import is on the node. Nothing is imported over it |
+| `skipped` | The node is not online, its storages are not active, the provider has no `importStorage`, the default profile names no storage for it, an earlier import blocks a new one, or the copy is tagged withdrawn (`message` says which) |
+
+The report also carries:
+
+- `versionsLine`: the `config.cluster.versions` entry of the published copies, newest per node (as after a Publish).
+  It is still display only: the operator copies it into the Kubernetes provider.
+- `nodesMissing`: nodes that publish a node image of another Kubernetes version and none of this one.
+- `complete`: every node is `published` or `skipped` and `nodesMissing` is empty. While it is false the dialog warns
+  before the line: a line that covers fewer nodes moves a cluster's workers off the missing nodes at its next node
+  group change or upgrade, and ArgoCD deletes the workers of a dropped node at once
+  ([managed-k8s.md](managed-k8s.md#9-how-a-cluster-lands-on-proxmox)).
+- `next`: `advance`, `wait` (a job of the provider is running) or `done`.
+- `actions`: what this call did (`published pve2/9211`, `smoke test queued pve3/9212`, `import queued pve4`).
+
+It never withdraws or removes tags, never imports where a copy of the digest exists, never repeats a failed import or
+smoke test, never bypasses a publish gate, and never starts a second job of a provider. A node whose import or smoke
+test failed keeps whatever older copy it has published, and stays in the line with it. A withdrawn digest is refused
+(409 `digest_withdrawn`), and so is the whole action while `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED` is off.
+
 ### Withdraw
 
 `POST /admin/template-updates/templates/{importId}/withdraw`
@@ -801,8 +863,8 @@ hand-over = first install: nothing to read.
 
 | Action | Permission | Built-in roles |
 |---|---|---|
-| See the page, discovery, placement, history, template states, blocklist | `admin:service:read` | SUPER_ADMIN, ADMIN, SUPPORT |
-| Start a VM import, run a smoke test, publish, withdraw | `admin:service:manage` | SUPER_ADMIN, ADMIN |
+| See the page, discovery, placement, history, template states, blocklist, the publish-on-all-nodes report | `admin:service:read` | SUPER_ADMIN, ADMIN, SUPPORT |
+| Start a VM import, run a smoke test, publish, publish on all nodes, withdraw | `admin:service:manage` | SUPER_ADMIN, ADMIN |
 | Start a sandbox mirror or rollback, delete a sandbox pin | `admin:service:manage` | SUPER_ADMIN, ADMIN |
 | Sandbox state, pin list (installer stage 55) | `admin:service:read` | SUPER_ADMIN, ADMIN, SUPPORT |
 | Save the GitHub integration | `admin:integration:manage` | SUPER_ADMIN, ADMIN |
@@ -907,6 +969,11 @@ debugfs -w -f /tmp/orphan-fix.cmd "$D"
 - There is no online repair. A root filesystem already read-only needs the offline path.
 
 ## 7. Open items
+
+- **Publish on all nodes is not lab-verified**: its tests run on PostgreSQL with a fake Proxmox. It has no background
+  driver: an operator who closes the dialog pauses it. It does not write `config.cluster.versions`. The one-job rule
+  reads the import and smoke receipts of the provider, so a job started by hand in the moment between the check and
+  the enqueue can still overlap; the provider's own smoke lock keeps two smoke tests apart in every case.
 
 - **Sandbox mirror not cluster-verified**: no sandbox cluster, Zot, GHCR or PAT was used. Verify on the
   lab: the Zot rule set (`mirror` creates `library/sandbox-x:tag`, cannot push an existing tag, cannot
