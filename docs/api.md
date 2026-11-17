@@ -268,8 +268,9 @@ or smoke test.
 
 `complete` is false while a node is down (`code` `node_down`): its copy cannot be read and is not in `versionsLine`.
 `next` is `advance` (post again), `wait` (a job of the provider runs), `blocked` or `done`. `blocked` means a step
-failed on a node and an advance never repeats it (`smoke_failed`, `smoke_not_started`, `import_failed`,
-`publish_failed`): the node's `message` says what to do, and posting again changes nothing until that is done.
+failed on a node: the node's `message` says what to do. An advance never repeats a smoke test or an import
+(`smoke_failed`, `smoke_not_started`, `import_failed`), so posting again changes nothing until that is done. A
+`publish_failed` is this post's own refused publish, and the next post tries that publish again.
 
 Errors, each with a `code` in `details`: `409` `busy` (another advance of that provider runs), `digest_withdrawn`,
 `vm_updates_disabled`, `provider_missing`, `provider_disabled` or `provider_incomplete`; `400` `confirm_digest` (the

@@ -26,6 +26,9 @@ from a full strict mapping before sampled enrichment can be carried forward.
 A would-disappear decision (a cached row whose VM is not in the project pool any
 more) requires that **no guest in the whole cluster holds the row's VMID**:
 `GET /cluster/nextid?vmid=<id>` with the same configured provider credential.
+Only the answer Proxmox gives for a free id counts, a 2xx whose `data` is that
+id; null, an empty body or another value keeps the row, like any refusal other
+than `VM <id> already exists`.
 Proxmox answers it from the cluster's guest list for any authenticated user,
 whatever the token may audit. It needs no grant and a filtered page cannot fool
 it: a VM that was moved out of the project pool, is hidden by an ACL, or sits in
@@ -64,10 +67,24 @@ A held VMID keeps the row, and the warning says which:
 In the last case the token cannot tell its own VM from a foreign one, so the row
 stays, and one such row stops that project's SERVER sync and what follows it
 (volumes, networks, isolation rules) before anything is changed, at every run,
-until the guest that holds the number is gone. When the old VM is known to be
-gone, delete the server through the API: the delete looks the VM up among the
-guests the token sees, finds none, deletes nothing in Proxmox and removes the
-row (read from the code, not run on a lab).
+until the guest that holds the number is gone. The sync's warning for it ends
+with the cause above; it no longer says to repair token permissions, because
+here there is nothing to repair: do not add a `/vms` ACL and do not remove a
+fence row for it.
+
+When the old VM is known to be gone, delete the server through the API
+(`DELETE /api/v1/project/{id}/cloud/{resourceId}`). Read from the code, not run
+on a lab: every step of that delete (backups, protection, kept volumes, stop,
+destroy) looks the VM up by VMID in the project pool among the guests the token
+sees, finds none and does nothing in Proxmox; the handler then drops the
+server's seed token and CD, gives back the addresses recorded for that server
+id, archives the VOLUME rows that name it and archives the row. The same route
+serves the row of a managed cluster's worker (the lab's stale row was one): a
+worker's row is an ordinary SERVER row of the project and the route has no
+check on it. Only a load balancer's VM row is refused (409: delete the load
+balancer). If the guest that took the number is one the token sees in another
+pool, the delete is refused instead (`vm <id> is not in project pool`), and
+that case is the `VM exists outside the expected pool` one above.
 
 No new grants are installed. A root/seed-reader result cannot substitute for the
 configured credential. Native explicit DELETE continues its existing positive

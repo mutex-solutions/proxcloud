@@ -504,8 +504,10 @@ The report also carries:
   group change or upgrade, and ArgoCD deletes the workers of a dropped node at once
   ([managed-k8s.md](managed-k8s.md#9-how-a-cluster-lands-on-proxmox)).
 - `next`: `advance`, `wait` (a job of the provider is running), `blocked` or `done`. `blocked`: nothing runs and a
-  node is `smoke_failed`, `smoke_not_started`, `import_failed` or `publish_failed`. An advance never repeats those
-  steps, so posting again changes nothing; each such node's `message` says what to do, and the dialog says
+  node is `smoke_failed`, `smoke_not_started`, `import_failed` or `publish_failed`. Each such node's `message` says
+  what to do. An advance never repeats a smoke test or an import, so for the first three posting again changes
+  nothing; `publish_failed` is the refusal of the publish that post just tried, and the next post tries it again
+  (the dialog does not post by itself while `blocked`). The dialog says
   "Blocked" instead of "Nothing more to do". It keeps reading every 15 s and goes on by itself once the copy's own
   smoke test has passed. Before, such a report read `done` with `complete: false` (seen on a lab: two copies with an
   eight-hour-old failed smoke test stopped the action, and each had to be smoke-tested from its row). There is no

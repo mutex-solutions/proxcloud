@@ -85,7 +85,8 @@ type PublishAllReport struct {
 	// a versions line without them moves a cluster's workers off those nodes.
 	NodesMissing []string `json:"nodesMissing"`
 	// Next: advance (calling again does something, also after an Error), wait (a job of the provider runs),
-	// blocked (a step failed on a node and is never repeated here: that node's Message says what to do), done.
+	// blocked (a step failed on a node, that node's Message says what to do; a smoke test or an import is never
+	// repeated here, a refused publish is tried again by the next call), done.
 	Next string `json:"next"`
 	// Actions is what this call changed (empty for a read).
 	Actions []string `json:"actions,omitempty"`
@@ -254,7 +255,8 @@ func (s *Service) PublishAll(ctx context.Context, pv LifecyclePVE, in PublishAll
 	if out.Next == "" {
 		out.Next = "done"
 		for _, n := range out.Nodes {
-			// "done" with complete false read as finished. These four are never repeated by an advance.
+			// "done" with complete false read as finished. A smoke test or an import is never repeated by an
+			// advance; a publish that was refused just now is, by the next one.
 			if n.State == NodeSmokeFailed || n.State == NodeSmokeNotStarted || n.State == NodeImportFailed || n.State == NodePublishFailed {
 				out.Next = "blocked"
 			}

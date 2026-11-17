@@ -9,7 +9,7 @@ and rules: [README.md](README.md#maintenance-rule).
 **What changed:** the proof before a cached SERVER, VOLUME or IMAGE row is retired
 (`internal/cloud/pve/vm_inventory.go`). `vmGone` replaces the ACL proof and the by-id config reads: the row's VMID
 is free in the whole cluster (`GET /cluster/nextid?vmid=`), or the VM that holds it is one the token reads in
-another pool under another SMBIOS UUID. `completeVMVisibility` (self `Sys.Audit` on `/access`, the full ACL tree,
+another pool under another SMBIOS UUID. "Free" is only a 2xx that carries the asked id (`Client.VMIDFree`). `completeVMVisibility` (self `Sys.Audit` on `/access`, the full ACL tree,
 propagated `VM.Audit` on `/vms`, `/pool` and every ACL path under them) is now called by the public address
 release only. `cloud.InventoryUntrustedError` prints its cause, so the sync's warning names the path or the VMID.
 "Publish on all nodes" answers `next: blocked` where it answered `done` on a failed step. No container, component,

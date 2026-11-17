@@ -503,7 +503,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the token lost `VM.Audit` on the project pool, else `/vms/<id>`). No grant changes; do not add a `/vms` ACL.
   Known limit: when a guest the token cannot see takes the VMID of a deleted VM before the next sync (on a
   managed-services install, a machine of the platform), the token cannot tell it from its own VM, the row stays
-  and that project's sync stops at it until the guest is gone or the server is deleted through the API. The
+  and that project's sync stops at it until the guest is gone or the server is deleted through the API (traced
+  in the code for a plain server and for a cluster worker's row, which takes the same route; not run). For that
+  case the warning no longer ends with "repair token permissions": the error carries the cause and the guide
+  says there is no grant to repair. `Client.VMIDFree` now counts as free only a 2xx whose `data` is the id that
+  was asked; null, an empty body or another value is an error and keeps the row (it was "any 2xx", and it is the
+  only evidence of absence here; the template updates' check before an import is removed uses it too). The
   automatic release of a retired server's public address still asks for the view of every guest and so still never
   happens on these grants (unchanged; `docs/vm-inventory-safety.md`). Integration tests against a fake Proxmox API
   that answers as the documented token is answered; not run on a lab.
@@ -514,7 +519,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "Nothing more to do". On the lab two copies with an eight-hour-old failed smoke test, whose cause was long fixed,
   stopped it that way. `next` is now `blocked` in that state, the `smoke_failed` node's `message` says to run the
   copy's smoke test again from its row under Imported templates, and the dialog says "Blocked" and goes on by
-  itself once the test has passed. Nothing is retried automatically. Clients that only know `done` must treat
+  itself once the test has passed. Nothing is retried automatically; a refused publish (`publish_failed`) is
+  tried again by the next post, a smoke test or an import never is. Clients that only know `done` must treat
   `blocked` as "stop posting". Tests on PostgreSQL with a fake Proxmox; not run on a lab, the dialog not opened.
 
 - **Guides corrected from lab round C (2026-11-17, main cb2f052).**
