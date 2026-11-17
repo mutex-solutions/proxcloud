@@ -7,6 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-17
+
+A feature release on top of `v0.7.0`: the managed-services platform (P3, ADR 0009). The platform is off
+by default.
+
+- **Managed services from the operator console** (System → Managed services, `/platform`). The page and
+  its API (`/api/v1/admin/platform/installations`) install, repair and remove a platform on your Proxmox VE
+  cluster as a durable job: a seed VM, a platform Kubernetes cluster, Kamaji, CloudNativePG and the two
+  providers. What a run applies comes from a bill of materials that ships in the release
+  (`deploy/platform/platform-bom.yaml`, `0.8.0`): every chart, image and download with an exact version and
+  a digest, compared with the registries in CI and again on the release tag. On the Docker Compose install
+  the switch is `./proxcloud-up.sh install --managed-services` (it implies `--template-updates`). There is
+  no upgrade from one BOM to another yet (`bom_unsupported`). Operator guide:
+  [docs/managed-services.md](docs/managed-services.md).
+- **Managed Kubernetes on Kamaji**: node group replicas are placed by free capacity on sites without
+  shared storage (cluster chart `proxmox-kamaji-cluster` 0.1.13), and a cluster that is not there yet says
+  why, per node group, with a "needs attention" state (`docs/managed-k8s.md`).
+- **Managed databases** on the platform cluster: placement on the `dbaas` node group and an egress fence
+  (`docs/managed-dbaas.md`). No tenant database is recorded healthy on a lab; see what was verified, below.
+- **Chart mirror**: the nine third-party charts of the BOM are served from
+  `ghcr.io/mutex-solutions/charts-mirror` by a CI flow of their own (`docs/ci-release.md`, "Chart mirror").
+- **Template updates: publish a version on all nodes**, for sites that keep a copy of a Kubernetes node
+  image on every node (`docs/template-updates.md`).
+- **Fixed Ubuntu 26.04 VM images.** Every `proxcloud-vm-ubuntu-2604` and `proxcloud-vm-ubuntu-2604-k8s`
+  image exported before the fix can come up with a read-only root filesystem after a reboot (a stale
+  ext4 orphan-file field). The four images were exported again with the fix; the Kubernetes node images
+  also set the AppArmor sysctl a PostgreSQL container needs on kernel 7.0.0-42 and newer. The affected tags
+  stay in the registry (Fixed).
+- **Security:** the portal token can create Proxmox API tokens for `capmox@pve` and `csi@pve` only (it
+  could for every user of the cluster, `root@pam` included), a node group's `imageId` is no longer taken
+  from a request, and ArgoCD's `default` project is locked on installer-built services clusters
+  (Security).
+
+Upgrading from `v0.7.0`. Read the entries named here before the upgrade; the exact steps are in the
+guides they link.
+
+- **Docker Compose host:** check out the tag and run `./proxcloud-up.sh upgrade v0.8.0`
+  (`deploy/compose/README.md`, "Upgrade"). Managed services stay off unless you install with
+  `--managed-services`.
+- **Ubuntu 26.04 templates imported before the fix** (the **Imported templates** tab shows the digest;
+  the affected tags and digests are listed in `docs/public-vm-sanitization.md`): import the fixed tag,
+  publish it, then withdraw the affected one. Servers and Kubernetes nodes already cloned from an affected
+  template keep the defect: test and repair them as `docs/template-updates.md` says ("Known issue: Ubuntu
+  26.04 images exported before the orphan-file fix"), and do not reboot a VM that has logged the error.
+  Ubuntu 24.04 images are not affected.
+- **Sites with managed Kubernetes** (the mint grant, on a `v0.7.0` site only where it was set up: an
+  installer site in split mode, or one that ran the managed-services script of a build of `main`): run
+  `make upgrade` on the installer site, or the managed-services script again as root on a node, once per
+  portal token. Until then the preflight row `mint-scope` fails and Test connection warns. Managed
+  Kubernetes now needs `libpve-access-control` 9.2.1 or later on every node, which the product does not
+  check (Security; `docs/proxmox-permissions.md`, "An existing site").
+- **Installer-built services clusters:** the next run of stage 50 (`make install`) locks ArgoCD's
+  `default` project and first stops on any Application still in it (Security). Stage 10 adds narrower rows
+  for the CAPMOX and CSI tokens and leaves the broad ones for the operator to remove (Changed).
+- **Behaviour changes:** an `imageId` sent for a node group is ignored (Security); a tenant network in a VLAN zone is written and answered without DHCP and SNAT,
+  and asking for either is a `400`; a project's "Delete now" answers `409` while the job scheduler is off;
+  an `UPGRADE` of a tenant cluster on a provider that offers no version is refused (Fixed).
+- **A platform installed from a `dev-<sha>` build of `main`** is refused by this release
+  (`bom_unsupported`): keep the build that installed it, or Remove and install again
+  (`docs/managed-services.md`, "Not implemented yet").
+
+Verified on a lab: the managed path ran on builds of `main` on one lab Proxmox VE cluster, the last
+round on 2026-11-17 (`cb2f052`). The install finished twice, the second time in one run without a Retry
+on cluster chart 0.1.13 and platform chart 0.1.2. Remove of a ready platform and Remove from a failed
+stage 7 passed. A tenant cluster on a network of a VLAN zone had three workers Ready 12 minutes after the
+create, and a scale-up and scale-down placed and removed one replica. Publish on all nodes published two
+nodes. On a seed built from the fixed image two clean reboots passed, and one restore of the seed over
+itself passed. A seed credential rotation was measured. An API restart in stages 7 and 8 of an apply with
+nothing new to write resumed, and a cancel followed by Retry passed. The record, row by row, is in the
+operator guide, section [Not verified on a lab yet](docs/managed-services.md#not-verified-on-a-lab-yet).
+
+**Not** verified: anything on the published artifacts of this release (the lab used builds of `main`;
+`--managed-services` on a Compose host against a published release was not run). The lab checks L0 to
+L11 of the design are not recorded as passed. No tenant database became healthy on the lab's first
+end-to-end run, and none is recorded healthy since, on the fixed node image either. Also not run: an API
+restart in stages 2, 3 and 9 of a real install, the failure drills, the scheduled seed backup job and its
+pruning, a restore from an archive older than a credential rotation, the mint grant on the group and its
+migration on a Proxmox cluster, an upgrade of a tenant cluster, the console dialogs of publish on all
+nodes, an installer or Helm install of this release, and an install on a single-node Proxmox cluster.
+Everything `v0.5.0` to `v0.7.0` say is not verified still holds.
+
+The entries below were written when each change merged, and a later entry corrects an earlier one. Where an entry says the BOM stays `0.8.0-dev`, holds a `pending` digest or
+a `0.0.0+` version, or names chart 0.1.11, 0.1.12 or `proxcloud-platform` 0.1.0 or 0.1.1, that was the
+state at that merge: this release's BOM is `0.8.0`, has no `pending` digest, and pins
+`proxmox-kamaji-cluster` 0.1.13 and `proxcloud-platform` 0.1.2. Where one says a switch or a function is
+inert because nothing reads or calls it yet (`PROXCLOUD_PLATFORM_ENABLED`, `MarkTemplateGone`, the
+renderers), the later entries add the caller. Where one says nothing was installed from the fixed images
+on a lab yet, lab round C (2026-11-17) did so.
+
 ### Added
 
 - **Template updates: publish a version on all nodes** (`docs/template-updates.md`, admin console System > Template

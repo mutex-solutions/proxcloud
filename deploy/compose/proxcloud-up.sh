@@ -9,7 +9,7 @@ export LC_ALL=C
 
 # Release pin of the proxcloud-{api,web,admin} images. Kept equal to the chart appVersion by
 # .github/scripts/tests/test_release_policy.py.
-DEFAULT_VERSION="v0.7.0"
+DEFAULT_VERSION="v0.8.0"
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 cd "$DIR"
@@ -138,7 +138,7 @@ check_scheduler_release() { # VERSION
 
 # The platform API (PROXCLOUD_PLATFORM_ENABLED and the Managed services page) arrives in v0.8.0:
 # an older API ignores the switch, so it would read as on while nothing can run. A dev build is allowed: it is how
-# managed services are tested before v0.8.0 is cut, and a build of main older than the platform API only ignores
+# managed services are tested ahead of a release, and a build of main older than the platform API only ignores
 # the switch.
 check_managed_release() { # VERSION
   ! is_dev_version "$1" || return 0
