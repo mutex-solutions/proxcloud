@@ -95,6 +95,33 @@ The images a run imports (stage 2) are not smoke-tested automatically: the tests
 the build. Start the smoke test of an image from Template updates when the run has ended, before you
 publish it ([template updates](template-updates.md)).
 
+### VM id 9999 and the CSI volumes
+
+proxmox-csi names every volume it creates `vm-9999-pvc-<uuid>`: 9999 is the plugin's default
+`controllerVmID`, and neither the platform cluster nor a tenant cluster changes it. The platform's own
+volumes carry these names (Kamaji etcd, the registry, every managed database), and so do the volumes
+of tenant Kubernetes clusters. No VM 9999 is needed for this, and ProxCloud creates none. But to
+Proxmox a disk named `vm-9999-…` belongs to VM 9999, whether that VM's config names the disk or not.
+
+When a guest of your own has the id 9999 (on the first production site it was the owner's template),
+the Check warns with the row `csi-vmid`, and so does **Test connection** on the provider's page. The
+install goes on: the platform works either way. What must never be done on such a site:
+
+- **Never destroy VM 9999 with "Destroy unreferenced disks owned by guest" ticked**
+  (`qm destroy 9999 --destroy-unreferenced-disks 1`). Proxmox then also destroys the disks with a
+  matching VM id on all enabled storages, which are the CSI volumes.
+- Before you remove or move VM 9999 for any other reason, read `qm config 9999`: it must name no
+  `vm-9999-pvc-` disk. A disk rescan (`qm disk rescan`) lists disks named after a VM as that VM's
+  unused disks, and a plain destroy removes the unused disks of the config too.
+
+The safe way is to leave VM 9999 as it is. This release does not change the id the plugin uses.
+Not tried on a lab: the two commands above against a VM 9999 with CSI volumes present, and the two
+warnings against a real cluster (their tests use a fake Proxmox API). What the commands do is stated
+from the `qm` manual (`--destroy-unreferenced-disks`: "destroy additionally all disks not referenced in
+the config but with a matching VMID from all enabled storages"; `qm disk rescan`: "update disk sizes
+and unused disk images"). The warning was added after the production acceptance of v0.8.0 found the
+owner's template on that id.
+
 ### What no check reads
 
 The checks of step 3 do not see the following. Each one shows only in stage 4, 7 or 9, so look
@@ -297,6 +324,7 @@ the settings (`409 rev_conflict`: the page reads them again).
 | `network` | The platform network overlaps a tenant, sandbox or public network, a seed API source is a tenant network, the load balancer range is inside a blocked or management network, or a node did not report its networks | Correct the network in step 1 |
 | `isolation` | The seed, the API address or part of the node range is in no blocked or management network, or the cluster firewall's isolation rules are not the ones a sync writes | Add the CIDRs the message names to **Networks tenants must not reach** on the provider's page (`blockedCidrs`). The message lists the smallest ranges that are missing; one network that covers them does the same (`10.90.0.0/26` for a seed on `.5`, an API address on `.10` and nodes on `.20` to `.60`), as long as the load balancer range stays outside it. Then **Run a provider sync, then check again**: with the installation saved (step 1), the sync writes the provider's rules whether or not it has a project. Check that the datacenter firewall is on. Five messages name a cause no sync of a provider without a project repairs: `cidrPool … overlaps the management network …` (choose another `cidrPool`), `rules … are for another pool`, `rules … drop … to …, which this provider's cidrPool, blockedCidrs and sandboxCidrs do not`, `rules … have an ACCEPT …` or `have no ACCEPT …` and `rules … are not this provider's set …, and a project's rules for cidrPool … are in place` (another portal or provider shares the rules: give this provider its own `poolPrefix`; the provider's own older rules: delete them under Datacenter > Firewall and sync). ([More](#the-isolation-check-and-the-provider-sync)) |
 | `tenant-network` | Never. It reads the provider's default zone in Proxmox and **warns** when the zone has DHCP, when it does not exist yet and is configured as a `simple` zone (ProxCloud creates one with DHCP), or when the zones could not be read: a tenant Kubernetes cluster create on a network of such a zone is refused with a `400` (not on a Kubernetes provider with shared workers, `cluster.shared`, which uses no tenant network). The row is `ok` for a zone without DHCP and absent when the provider names no zone | Nothing for the install or for databases. Before tenants create clusters: give the provider an EVPN or a VLAN zone as its default zone (Cloud providers, `config.network.zones` and `defaultZone`) |
+| `csi-vmid` | Never. It **warns** when a guest of the cluster has VM id 9999, the id proxmox-csi names its volumes after, or when that could not be read | Nothing for the install. Never destroy VM 9999 with "Destroy unreferenced disks owned by guest" ([VM id 9999 and the CSI volumes](#vm-id-9999-and-the-csi-volumes)) |
 | `credentials` | A token secret is not stored | Paste it in step 2 |
 | `privileges:capi`, `privileges:csi`, `privileges:kubemint` | The CAPI token, the CSI token or the portal token lacks a privilege on a path; the message names both | Run the script again. `privileges:kubemint` on `/storage/<store>`: that is the provider's `importStorage`; when the settings name another import store the script does not write that row ([what to do](#when-the-providers-import-store-is-the-boot-store)) |
 | `mint-scope` | The portal token holds `User.Modify` or `Permissions.Modify` on `/`, `/access` or `/access/groups` (a stolen portal token can then create an API token for any user of the cluster, `root@pam` included) or `Permissions.Modify` on `/pool` (it can then write any role on every pool). A site set up before the group `proxcloud-kube` holds `ProxCloudKubeMint` on `/access/groups` and `/pool`. Or: `capmox@pve` or `csi@pve` is not in the group `proxcloud-kube`, and Proxmox refuses every token create or delete for it | Run the script again: it grants `ProxCloudKubeToken` on `/access/groups/proxcloud-kube`, puts both users in the group and removes the old rows ([the commands](proxmox-permissions.md#an-existing-site)). If it still fails on a privilege, another row grants it: `pveum acl list \| grep -F '<the portal user>'` on a node, then `pveum acl delete <path> --users <user> --roles <role>` (or `--tokens`) for a row on `/`, `/access`, `/access/groups` or `/pool` with a role other than `ProxCloudPlatform`. For a user outside the group the message gives the line: `pveum user modify <user> --groups proxcloud-kube --append 1` |

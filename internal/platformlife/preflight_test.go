@@ -23,6 +23,7 @@ type preflightPVE struct {
 	outside string // a service user that is not in the group proxcloud-kube: PVE refuses to show it to the portal token
 	vnets   string // the cluster's vnets, [] when empty
 	zones   string // the cluster's SDN zones, [] when empty; "!" answers 403
+	vm9999  bool   // a guest holds the id proxmox-csi names its volumes after
 }
 
 func (f *preflightPVE) client(t *testing.T, url, token string) *pve.Client {
@@ -70,6 +71,12 @@ func (f *preflightPVE) serve(w http.ResponseWriter, r *http.Request) {
 		data["/cluster/sdn/zones"] = f.zones
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/api2/json")
+	if path == "/cluster/nextid" && f.vm9999 {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"data":null,"errors":{"vmid":"VM 9999 already exists"}}`)
+		return
+	}
+	data["/cluster/nextid"] = `"` + r.URL.Query().Get("vmid") + `"`
 	body, ok := data[path]
 	if path == "/access/permissions" {
 		p := r.URL.Query().Get("path")
@@ -140,9 +147,21 @@ func TestPreflight(t *testing.T) {
 	if !OK(checks) {
 		t.Fatalf("a set-up site: %+v", checks)
 	}
-	if got := len(checks); got != 16 {
-		t.Errorf("%d rows, want 16: %+v", got, checks)
+	if got := len(checks); got != 17 {
+		t.Errorf("%d rows, want 17: %+v", got, checks)
 	}
+	if c := checkMap(checks)["csi-vmid"]; c.Status != CheckOK {
+		t.Errorf("VM id 9999 free: %+v", c)
+	}
+	// The owner's own template on VM id 9999 (production acceptance, A2): the CSI volumes are named as its disks. A
+	// warning that says what must never be done, and the preflight still passes.
+	f.vm9999 = true
+	held := pf.Run(ctx)
+	if c := checkMap(held)["csi-vmid"]; c.Status != CheckWarn || !strings.Contains(c.Message, "vm-9999-pvc-") ||
+		!strings.Contains(c.Message, "Never destroy VM 9999") || !strings.Contains(c.Message, "--destroy-unreferenced-disks 1") || !OK(held) {
+		t.Errorf("VM id 9999 in use: %+v ok=%v", c, OK(held))
+	}
+	f.vm9999 = false
 	if c := checkMap(checks)["isolation"]; !strings.Contains(c.Message, "first tenant network") {
 		t.Errorf("no tenant network yet: %+v", c)
 	}
