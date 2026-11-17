@@ -18,7 +18,7 @@ A network can only be deleted once no server has an interface on it.
 
 ## Reaching the internet
 
-**Outbound** traffic uses the subnet's internet/SNAT setting where the operator offers it. A static address alone does not prove working gateway, DNS or firewall egress; contact the operator if the subnet has no working outbound route.
+**Outbound** traffic uses the subnet's internet/SNAT setting where the operator offers it. A static address alone does not prove working gateway, DNS or firewall egress; contact the operator if the subnet has no working outbound route. Where the operator's own router serves the networks (VLANs), a network has no SNAT and no DHCP setting: it shows both as off, and outbound access is the router's.
 
 **Inbound** traffic needs a **public IP**: a server gets a second network interface on one of the public networks your operator has set up, with one public address from that network's pool. The address is pinned to the server by its firewall, so the server can't use any other address on that network. Your operator decides which public networks your project may use.
 

@@ -232,8 +232,12 @@ func (s *Service) CreateNetwork(ctx context.Context, req CreateNetworkReq) (*Net
 	if gw == "" {
 		gw = firstHost(ipnet)
 	}
-	sub := SubnetOpts{CIDR: req.CIDR, Gateway: gw, SNAT: req.SNAT}
-	if req.DHCP {
+	// A VLAN zone is a bare layer 2 segment: Proxmox holds no gateway address there, runs no DHCP and does no SNAT, so
+	// neither is written. The gateway stays on the subnet as the address the site's router must hold: servers and
+	// cluster nodes get it as their default route.
+	routed := req.Zone.Kind != "vlan"
+	sub := SubnetOpts{CIDR: req.CIDR, Gateway: gw, SNAT: req.SNAT && routed}
+	if req.DHCP && routed {
 		start, end := dhcpRange(ipnet, gw)
 		sub.DHCPStart, sub.DHCPEnd = start, end
 	}
@@ -1101,12 +1105,23 @@ func (p *NetworkSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, 
 	}
 	now := nowUTC()
 	var out []cloud.CloudResource
+	var zoneType map[string]string // read once, at the project's first vnet
 	for _, v := range vnets {
 		pid, name, ok := aliasProject(v.Alias)
 		if !ok || pid != p.projectID {
 			continue
 		}
-		detail, err := p.subnetDetail(ctx, v.Vnet)
+		if zoneType == nil {
+			zones, err := p.svc.C.ListSDNZones(ctx)
+			if err != nil {
+				return nil, networkInventoryError("", "cannot list zones", err)
+			}
+			zoneType = map[string]string{}
+			for _, z := range zones {
+				zoneType[z.Zone] = z.Type
+			}
+		}
+		detail, err := p.subnetDetail(ctx, v.Vnet, zoneType[v.Zone] == "vlan")
 		if err != nil {
 			return nil, err
 		}
@@ -1124,26 +1139,29 @@ func (p *NetworkSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, 
 
 // subnetDetail reads a vnet's subnets into the data.network sub-shape. The top-level
 // cidr/gateway/snat describe the first subnet, subnetDetails all of them.
-func (p *NetworkSyncProvider) subnetDetail(ctx context.Context, vnet string) (map[string]any, error) {
+func (p *NetworkSyncProvider) subnetDetail(ctx context.Context, vnet string, vlan bool) (map[string]any, error) {
 	subs, err := p.svc.C.ListSDNSubnets(ctx, vnet)
 	if err != nil {
 		return nil, networkInventoryError(vnet, "cannot read subnets", err)
 	}
-	return SubnetDetail(subs), nil
+	return SubnetDetail(subs, vlan), nil
 }
 
-// SubnetDetail renders a vnet's subnets for data.network.
-func SubnetDetail(subs []SDNSubnet) map[string]any {
+// SubnetDetail renders a vnet's subnets for data.network. vlan: the vnet is in a VLAN zone, where Proxmox does no SNAT
+// and runs no DHCP whatever the subnet says (one written before CreateNetwork left both out still says both), so the
+// answer is false for both.
+func SubnetDetail(subs []SDNSubnet, vlan bool) map[string]any {
 	det := map[string]any{}
 	slices.SortFunc(subs, func(a, b SDNSubnet) int { return cmp.Compare(a.CIDR, b.CIDR) })
 	cidrs := make([]any, 0, len(subs))
 	rows := make([]any, 0, len(subs))
 	for i, sub := range subs {
 		cidrs = append(cidrs, sub.CIDR)
-		rows = append(rows, map[string]any{"cidr": sub.CIDR, "gateway": sub.Gateway, "snat": sub.SNAT == 1})
+		snat := !vlan && sub.SNAT == 1
+		rows = append(rows, map[string]any{"cidr": sub.CIDR, "gateway": sub.Gateway, "snat": snat})
 		if i == 0 {
 			det["cidr"], det["gateway"] = sub.CIDR, sub.Gateway
-			det["snat"], det["dhcp"] = sub.SNAT == 1, len(sub.DHCPRange) > 0
+			det["snat"], det["dhcp"] = snat, !vlan && len(sub.DHCPRange) > 0
 		}
 	}
 	det["subnets"], det["subnetDetails"] = cidrs, rows

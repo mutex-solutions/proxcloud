@@ -104,9 +104,22 @@ func (c *Client) proveSeedVisibility(ctx context.Context) (string, error) {
 // seedBacking hashes the complete physical storage definition, not just its
 // friendly ID. New/unknown properties fail closed on a changed definition.
 func (c *Client) seedBacking(ctx context.Context, node, store string) (string, error) {
+	// The definition comes from the GET /storage list: it shows a store to a token with Datastore.Audit on it, while
+	// GET /storage/<store> needs Datastore.Allocate and answers 403 for the portal token (F51). Both carry the same
+	// fields per store. The single read stays for a token the list shows nothing to.
 	var def map[string]any
-	if err := c.seedRead(ctx, "/storage/"+url.PathEscape(store), nil, &def); err != nil {
-		return "", err
+	var defs []map[string]any
+	if err := c.seedRead(ctx, "/storage", nil, &defs); err == nil {
+		for _, d := range defs {
+			if d["storage"] == store {
+				def = d
+			}
+		}
+	}
+	if def == nil {
+		if err := c.seedRead(ctx, "/storage/"+url.PathEscape(store), nil, &def); err != nil {
+			return "", err
+		}
 	}
 	if len(def) == 0 || def["type"] == nil {
 		return "", fmt.Errorf("seed storage identity is unavailable")

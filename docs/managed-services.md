@@ -80,11 +80,19 @@ reading [section 3](#3-proxmox-identities): they share the pool `proxcloud-syste
 | Storage | A boot store that takes VM disks on every node used; an ISO store that is local to each node and takes ISOs (default `local`); an import store with `import` content on every node an image goes to (default: the provider's `importStorage`). The import store must not be the boot store: the portal token holds `PVEDatastoreAdmin` on the import store, which reaches every disk on it ([section 10](#10-security-boundaries)). The API refuses settings that name the same store for both; the form says so before it saves when you type the same store in both fields. An empty import store takes the provider's `importStorage`, so it is refused too when that is the boot store. The import store of the settings and the provider's `importStorage` must be one store: the script of step 2 is written for the store of the settings, and the `privileges:kubemint` check reads the provider's ([when the provider's import store is the boot store](#when-the-providers-import-store-is-the-boot-store)). |
 | Capacity | The smallest machine is 2 cores, 4 GiB of memory and a 20 GiB disk. The smallest layout (seed, control plane, one machine per group) is five VMs. The review step adds up cores and memory per node; it does not read what is free. |
 | Root on one node | Once, to run the identities script. |
+| A router for a VLAN tenant zone | Only when the provider's tenant zone is a `vlan` zone. Proxmox gives a VLAN no gateway, no DHCP and no SNAT: a tenant network there is a bare layer 2 segment, and ProxCloud writes and reports it so (`dhcp: false`, `snat: false`; asking for either is a `400`). The site's own router must hold the first address of each tenant subnet (the `gateway` the network shows; servers and cluster workers get it as their default route) on that VLAN, route it to the load balancer range and to whatever else tenants may reach, and keep tenants apart. Without it a worker on such a network never reaches its control plane and the cluster stays `PROGRESSING`. An EVPN zone needs none of this. |
 | A tenant network zone without DHCP | Only for tenant Kubernetes clusters, not for the install or for databases: a cluster's nodes get fixed addresses, so its network must be in an EVPN or a VLAN zone. With a provider whose default zone (`config.network.defaultZone`) is a `simple` zone that ProxCloud created, which it does with DHCP, a cluster create on its networks answers `400 Worker nodes need a network without DHCP (an EVPN or VLAN zone)`. The Check reads the zone in Proxmox, warns (`tenant-network`) when it has DHCP, and the install goes on; change the provider's default zone before you offer clusters ([managed-k8s.md](managed-k8s.md)). Not affected: a Kubernetes provider with shared workers (`cluster.shared`), which uses no tenant network, and a `simple` zone an operator made without DHCP. |
 | The datacenter firewall | On, with the provider's isolation rules written by a provider sync once the installation is saved: the Check verifies that tenant traffic to the seed, the API address and the node range is dropped. |
 
 The page also warns when the job scheduler is off: tenant clusters and databases then update their
-status only when a provider sync runs. It does not block an install.
+status only when a provider sync runs, and no project is deleted: "Delete now" is refused with a
+`409` that says so, and a delete with the grace period is accepted but stays scheduled until the
+scheduler runs ([Compose README](../deploy/compose/README.md#optional-features)). It does not
+block an install.
+
+The images a run imports (stage 2) are not smoke-tested automatically: the tests would clone beside
+the build. Start the smoke test of an image from Template updates when the run has ended, before you
+publish it ([template updates](template-updates.md)).
 
 ### What no check reads
 
@@ -689,14 +697,50 @@ finish.
    settings): `qm guest exec <vmid> -- systemctl is-active k3s`, `qm guest exec <vmid> -- journalctl -u k3s -n 50 --no-pager`
    and `qm guest exec <vmid> -- grep ' / ' /proc/mounts`.
 4. A root filesystem line that ends in `emergency_ro` (or reads `ro`) means ext4 found an error and
-   takes no more writes: k3s cannot start, and `mount -o remount,rw` does not clear it. This was seen
-   on a lab after one clean `qm reboot` of the seed; why the filesystem was inconsistent is not
-   known. Then, before anything else, keep the evidence and a way back: snapshot the seed's disk on
-   its store (on ZFS `zfs snapshot <pool>/vm-<vmid>-disk-0@before-fsck`). Shut the VM down
-   (`qm shutdown <vmid>`), check the root filesystem from the node (`e2fsck -f` on the first
-   partition of that disk; on ZFS `/dev/zvol/<pool>/vm-<vmid>-disk-0-part1`), start the VM, then
-   **Retry** when an apply was started meanwhile and the installation reads `failed`, or reload the
-   page until it reads the seed again when none was. **This repair has not been run on a lab.**
+   takes no more writes: k3s cannot start, and `mount -o remount,rw` does not clear it. The known
+   cause is the image: a seed built from an Ubuntu 26.04 image exported before 2026-11-16 has a
+   stale field in its ext4 superblock, and its root goes read-only at a reboot
+   ([template updates, known issue](template-updates.md#known-issue-ubuntu-2604-images-exported-before-the-orphan-file-fix)).
+   **Do not run a plain `e2fsck -f`, `-p` or `-y` on it**: before the field is zero the check
+   deletes the file in inode 12 and leaves the field, so the fault comes back. The repair is the one
+   of that section, on the Proxmox node, with the VM shut down. On ZFS the seed's partitions are
+   `/dev/zvol/<pool>/vm-<vmid>-disk-0-part1` (root) and `-part13` (`/boot`); both are ext4.
+   1. Test from the node (reads only; `AFFECTED` names a partition to repair):
+
+      ```sh
+      for d in /dev/zvol/<pool>/vm-<vmid>-disk-0-part1 /dev/zvol/<pool>/vm-<vmid>-disk-0-part13; do
+        f=$(dd if=$d bs=1 skip=1116 count=4 2>/dev/null | od -An -tx4 | tr -d ' ')
+        i=$(dd if=$d bs=1 skip=1664 count=4 2>/dev/null | od -An -tu4 | tr -d ' ')
+        if [ $((0x$f & 0x1000)) -eq 0 ] && [ "$i" != 0 ]; then echo "AFFECTED $d s_orphan_file_inum=$i"; else echo "ok $d"; fi
+      done
+      ```
+
+   2. Keep a way back: `zfs snapshot <pool>/vm-<vmid>-disk-0@before-repair`. Then
+      `qm shutdown <vmid>` and wait until `qm status <vmid>` reads `stopped`.
+   3. For each `AFFECTED` partition, these three commands in this order (why, and what each exit
+      status means: the linked section):
+
+      ```sh
+      D=/dev/zvol/<pool>/vm-<vmid>-disk-0-part1     # then again with -part13
+      e2fsck -E journal_only -p "$D"
+      printf 'ssv orphan_file_inum 0\nclose -a\n' > /tmp/orphan-fix.cmd
+      debugfs -w -f /tmp/orphan-fix.cmd "$D"
+      [ "$(dd if="$D" bs=1 skip=1664 count=4 2>/dev/null | od -An -tu4 | tr -d ' ')" = 0 ] && e2fsck -f -p "$D"
+      ```
+
+      If the last `e2fsck` does not run, or exits 4 or more, stop: do not start the VM.
+   4. Start the VM afterwards: `qm start <vmid>`. The seed's API answers again within about a
+      minute (`curl -k https://<seed address>:6443/readyz` reads `401`). Then **Retry** when an
+      apply or a Remove was started meanwhile and the installation reads `failed`, or reload the
+      page until it reads the seed again when none was. The snapshot goes with the seed's disk at a
+      Remove; delete it yourself (`zfs destroy <pool>/vm-<vmid>-disk-0@before-repair`) once the
+      seed has run for a while.
+
+   Run once on a lab, on 2026-11-17, on a seed on ZFS with e2fsprogs 1.47.2: both partitions were
+   affected, every step exited 0, the file in inode 12 was kept, the seed's API answered 41 seconds
+   after the start and all components read Synced and Healthy. Not run: a store other than ZFS
+   (the partition devices are then the store's: an LVM volume needs `kpartx -a` first), and a root
+   that reads `ro` for another reason, where the test prints `ok` and this repair does not apply.
 5. If the seed cannot be repaired: restore the seed VM from your backup (also not run on a lab),
    then **Apply this release**.
 6. Without a backup the seed cannot be brought back: an apply never rebuilds a ready seed, because a
@@ -916,7 +960,7 @@ observed, except the figures this guide marks as seen on a lab:
 | L7 | End to end: a tenant cluster and a tenant database, and the database egress fence. Run once, partly: the two project attaches, the placement of a database on the `dbaas` group and the first tenant network passed; no tenant cluster was created (no published node image, a `simple` default zone) and no database became healthy ([the node image's known issue](#known-issue-no-postgresql-database-on-this-releases-node-image)) |
 | L8 | Resume after an API restart in stages 2, 3, 7 and 9; cancel and Retry |
 | L9 | Failure drills: `seed_not_booted`, `machine_failed`, a removed grant, a template deleted by hand |
-| L10 | Seed reboot, the backup job and a restore, Remove, and Remove with the seed gone. One clean reboot was run and **failed**: the seed's root filesystem came up in ext4 `emergency_ro` and its API never answered again; the cause is not known ([When the seed does not answer](#when-the-seed-does-not-answer)). Remove from a failed stage 7 passed |
+| L10 | Seed reboot, the backup job and a restore, Remove, and Remove with the seed gone. One clean reboot was run and **failed**: the seed's root filesystem came up in ext4 `emergency_ro` and its API never answered again. The cause was the image's stale ext4 superblock field, and the documented repair brought the seed back on 2026-11-17 ([When the seed does not answer](#when-the-seed-does-not-answer)). Remove from a failed stage 7 passed |
 | L11 | Seed credential rotation and the expiry of the break-glass kubeconfig. The rotation and that a break-glass kubeconfig outlives it were measured; the `401` after the hour was not |
 
 Also not run: the identities script on a site that already has the installer's tokens, a token

@@ -980,6 +980,20 @@ func TestRemoveCluster(t *testing.T) {
 	if len(p.pve.writes) != 0 {
 		t.Fatalf("Proxmox written while machines are left: %v", p.pve.writes)
 	}
+	// CAPMOX deletes a ProxmoxMachine before its Machine goes: the VMID seen at the first look stays (F45).
+	p.seed.mu.Lock()
+	for k := range p.seed.objs {
+		if strings.Contains(k, "/proxmoxmachines/") {
+			delete(p.seed.objs, k)
+		}
+	}
+	p.seed.mu.Unlock()
+	if end := p.once(); end != "defer:waiting_remove_cluster" {
+		t.Fatalf("end %s", end)
+	}
+	if s := p.stage(StageRemoveCluster); !strings.Contains(s.Message, "pc-platform-kamaji-pve2-x (VM 132)") || item(s, "pc-platform-kamaji-pve2-x").Message != "VM 132" {
+		t.Fatalf("the VMID was lost with the ProxmoxMachine: %+v", s)
+	}
 	p.seed.mu.Lock()
 	for k := range p.seed.objs {
 		if strings.HasPrefix(k, capiNS+"machines/") {
@@ -1227,10 +1241,20 @@ func TestLive(t *testing.T) {
 		!strings.Contains(got.Error, "'When the seed does not answer'") { // the section's real title in both guides
 		t.Fatalf("seed silent: %+v", got)
 	}
+	if !strings.Contains(got0(Live(context.Background(), &silent, sec)), "still says ready") {
+		t.Fatal("a ready record is named as such")
+	}
+	// A failed record is not called ready (F43).
+	silent.Status.Phase = PhaseFailed
+	if e := got0(Live(context.Background(), &silent, sec)); strings.Contains(e, "says ready") || !strings.Contains(e, "The record says failed.") {
+		t.Fatalf("failed record: %s", e)
+	}
 	if _, stored, _ := p.state.snapshot(); stored.Status.Phase != PhaseReady || p.seed.writeCount() != 0 {
 		t.Fatalf("stored phase %s, writes %v", stored.Status.Phase, p.seed.writes)
 	}
 }
+
+func got0(l LiveState) string { return l.Error }
 
 // An API server that has just started refuses a good credential for some seconds: a 401, a 403 with the RBAC
 // authorizer's list of roles it has not read yet (the seed's k3s restarted under disk load in a lab run, and stage 7's

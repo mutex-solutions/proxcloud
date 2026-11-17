@@ -439,12 +439,35 @@ func (h *Handler) DropStaleSeeds(ctx context.Context, ps *pve.Service, es *exter
 	if err != nil {
 		return err
 	}
-	for _, a := range artifacts {
+	for _, a := range seedCleanupCandidates(artifacts, rows, stale) {
 		if err := ps.DeleteSeedVolume(ctx, a.Node, a.Volume); err != nil {
 			slog.Warn("seed artifact cleanup pending", "artifact", a.ID, "reason", err)
 		}
 	}
 	return nil
+}
+
+// seedCleanupCandidates leaves out the artifact a server the portal still has is seeded from: the current CD of a seed
+// row that is neither retired nor stale. It is attached and in use, not a cleanup backlog, and asking for its deletion
+// at every sync only marks it pending and logs a warning for a healthy server (F51).
+func seedCleanupCandidates(artifacts []pve.SeedArtifact, rows, stale []ServerSeed) []pve.SeedArtifact {
+	gone := map[string]bool{}
+	for i := range stale {
+		gone[stale[i].ID] = true
+	}
+	live := map[string]bool{}
+	for i := range rows {
+		if !rows[i].Retired && !gone[rows[i].ID] && rows[i].ISO != "" {
+			live[rows[i].ISO] = true
+		}
+	}
+	var out []pve.SeedArtifact
+	for _, a := range artifacts {
+		if !live[a.Volume] {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // pveReleaseProjectSeeds is the project-teardown variant.

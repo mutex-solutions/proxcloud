@@ -7,6 +7,8 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"regexp"
 	"slices"
@@ -137,8 +139,42 @@ func TestCreateNetworkStagesVnetAndSubnet(t *testing.T) {
 	}
 }
 
+// F49: a VLAN zone has no DHCP and no SNAT of Proxmox's, so the subnet is written with neither, whatever was asked;
+// the gateway stays as the address the site's router holds.
+func TestCreateNetworkVLANZoneWritesNoDHCPNoSNAT(t *testing.T) {
+	for kind, want := range map[string]string{"vlan": "", "simple": "start-address=10.100.0.10,end-address=10.100.0.254"} {
+		var sub url.Values
+		mux := http.NewServeMux()
+		mux.HandleFunc("GET /api2/json/cluster/sdn/vnets", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"data":[]}`) })
+		mux.HandleFunc("POST /api2/json/cluster/sdn/vnets", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"data":null}`) })
+		mux.HandleFunc("POST /api2/json/cluster/sdn/vnets/{vnet}/subnets", func(w http.ResponseWriter, r *http.Request) {
+			r.ParseForm()
+			sub = r.PostForm
+			fmt.Fprint(w, `{"data":null}`)
+		})
+		ts := httptest.NewServer(mux)
+		defer ts.Close()
+		c, err := New(Config{APIURL: ts.URL, TokenID: "test@pve!test", Secret: "fake"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := (&Service{C: c, ServiceID: "svc", PoolPrefix: "pc-"}).CreateNetwork(context.Background(), CreateNetworkReq{
+			ProjectID: "p1", Name: "web", Zone: ZoneConfig{Key: "z", Kind: kind, VlanMin: 3900, VlanMax: 3999}, CIDR: "10.100.0.0/24", DHCP: true, SNAT: true,
+		})
+		if err != nil || res.Gateway != "10.100.0.1" || sub.Get("gateway") != "10.100.0.1" {
+			t.Fatalf("%s: %+v %v, subnet %v", kind, res, err, sub)
+		}
+		if sub.Get("dhcp-range") != want || (sub.Get("snat") == "1") != (kind != "vlan") {
+			t.Fatalf("%s: subnet form %v", kind, sub)
+		}
+	}
+}
+
 func TestNetworkSyncProviderFiltersByAlias(t *testing.T) {
 	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/cluster/sdn/zones": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":[{"zone":"overlay","type":"evpn"}]}`)
+		},
 		"GET /api2/json/cluster/sdn/vnets": func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"data":[
 				{"vnet":"vaaa11","zone":"overlay","alias":"st:p1:web"},
@@ -742,5 +778,36 @@ func TestTeardownProjectNetworks(t *testing.T) {
 	}
 	if staged, err := srv.TeardownProjectNetworks(context.Background(), "p9"); err != nil || staged {
 		t.Fatalf("no vnets: staged=%v err=%v, want nothing staged", staged, err)
+	}
+}
+
+// F49: a subnet written with SNAT and a DHCP range before VLAN zones stopped getting them is still answered as what
+// Proxmox does there: neither. The same subnet in a routed zone keeps both.
+func TestNetworkSyncProviderAnswersVLANZoneWithoutDHCPAndSNAT(t *testing.T) {
+	routes := map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/cluster/sdn/zones": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":[{"zone":"pcm1","type":"vlan"},{"zone":"pcm0","type":"simple"}]}`)
+		},
+		"GET /api2/json/cluster/sdn/vnets": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":[{"vnet":"vlan1","zone":"pcm1","alias":"st:p1:old"},{"vnet":"simp1","zone":"pcm0","alias":"st:p1:web"}]}`)
+		},
+	}
+	for _, vnet := range []string{"vlan1", "simp1"} {
+		routes["GET /api2/json/cluster/sdn/vnets/"+vnet+"/subnets"] = func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":[{"cidr":"10.121.0.0/24","gateway":"10.121.0.1","snat":1,"dhcp-range":[{"start-address":"10.121.0.10","end-address":"10.121.0.254"}]}]}`)
+		}
+	}
+	_, c := fakePVE(t, routes)
+	rs, err := (&Service{C: c, ServiceID: "svc", PoolPrefix: "pc-"}).NetworkSyncProvider("pve", "p1").List(context.Background())
+	if err != nil || len(rs) != 2 {
+		t.Fatalf("rows %+v, err %v", rs, err)
+	}
+	for _, r := range rs {
+		n := r.Data["network"].(map[string]any)
+		row := n["subnetDetails"].([]any)[0].(map[string]any)
+		want := r.ExternalID != "vlan1"
+		if n["snat"] != want || n["dhcp"] != want || row["snat"] != want || n["gateway"] != "10.121.0.1" {
+			t.Fatalf("%s: network %v", r.ExternalID, n)
+		}
 	}
 }

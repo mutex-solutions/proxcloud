@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"time"
 
@@ -181,8 +182,14 @@ func (r *SeedArtifactRepo) Prepare(ctx context.Context, c *Client, a SeedArtifac
 	}
 	// Insufficient identity read must not break a formerly working create.
 	// Missing identity only removes automatic cleanup authority, never journaling.
-	a.Cluster, _ = c.seedClusterIdentity(ctx)
-	a.Backing, _ = c.seedBacking(ctx, a.Node, storage)
+	// The reason is logged: without both the artifact can never be cleaned up automatically.
+	var cerr, berr error
+	a.Cluster, cerr = c.seedClusterIdentity(ctx)
+	a.Backing, berr = c.seedBacking(ctx, a.Node, storage)
+	if cerr != nil || berr != nil {
+		slog.Warn("seed artifact: the cluster or storage identity could not be read; this artifact will need a cleanup by hand",
+			"artifact", a.ID, "storage", storage, "cluster", cerr, "backing", berr)
+	}
 	a.CreatedAt = time.Now().UTC()
 	a.State = "prepared"
 	_, err = r.col.InsertOne(ctx, &a)

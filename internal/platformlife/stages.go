@@ -94,7 +94,7 @@ func (x *acq) images(ctx context.Context) error {
 		return classify(CodeImageImportFailed, err)
 	}
 	opts := templateupdates.PlacementOptions(caps, sp.Storage.Import)
-	actor := "platform-run:" + x.run.ID
+	actor := templateupdates.PlatformRunActor + x.run.ID
 	items, templates, ours := []StageItem{}, map[string]int{}, []string{}
 	for _, w := range wants {
 		if !templateupdates.PlacementAllowed(opts, w.node, sp.Storage.Import, sp.Storage.Boot) {

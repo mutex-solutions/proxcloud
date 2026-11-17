@@ -95,9 +95,14 @@ func (s *Service) AutoSmoke(ctx context.Context, id string, netFor func(ctx cont
 	if err != nil || rec == nil {
 		return err
 	}
-	net, err := netFor(ctx, rec.Payload.ServiceID, rec.Payload.Node)
-	if err == nil {
-		_, err = s.EnqueueSmoke(ctx, id, net, "system:auto-smoke", true)
+	// A platform run's imports get no automatic test: each is a full clone on the disks the run is building its seed and
+	// cluster on (F48). The reason is recorded on the import like any other, and the manual test stays.
+	err = errPlatformImport
+	if !PlatformRunImport(rec.RequestedBy) {
+		var net SmokeNetwork
+		if net, err = netFor(ctx, rec.Payload.ServiceID, rec.Payload.Node); err == nil {
+			_, err = s.EnqueueSmoke(ctx, id, net, "system:auto-smoke", true)
+		}
 	}
 	if err != nil {
 		code, msg := "smoke_not_started", "The automatic smoke test could not be queued; run it from Template updates"
@@ -109,10 +114,24 @@ func (s *Service) AutoSmoke(ctx context.Context, id string, netFor func(ctx cont
 		if serr != nil {
 			return serr
 		}
+		if err == errPlatformImport {
+			return nil
+		}
 		return err
 	}
 	return nil
 }
+
+// PlatformRunActor prefixes the requester of an import a platform run made (internal/platformlife, stage 2).
+const PlatformRunActor = "platform-run:"
+
+// PlatformRunImport reports whether requestedBy names a platform run.
+func PlatformRunImport(requestedBy string) bool {
+	return strings.HasPrefix(requestedBy, PlatformRunActor)
+}
+
+var errPlatformImport = &LifecycleError{Status: 409, Code: "smoke_not_started", Message: "A platform run made this import. " +
+	"Its smoke test is not started automatically, so that it does not run beside the build: start it from Template updates"}
 
 // ── state for the page ────────────────────────────────────────────────────────────────────────
 

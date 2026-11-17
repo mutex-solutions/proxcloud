@@ -238,7 +238,10 @@ succeeded | failed`.
   The description records the artifact reference, tag and disk sha256. A job that landed its final
   write on the pre-lifecycle version (publish-at-import tags) is accepted as finished when it resumes.
 - **Automatic smoke test**: when the job succeeds the runner queues the template's smoke test (§4).
-  Without a smoke network on the provider the import records `smoke_network_unset` instead.
+  Without a smoke network on the provider the import records `smoke_network_unset` instead. An import
+  a managed-services platform run made (requested by `platform-run:<run id>`) gets none: each test is a
+  full clone on the disks the run is building its seed and cluster on. The import records
+  `smoke_not_started`, and the test is started by hand from Template updates before a Publish.
 - Retries: 3 attempts with backoff; permanent failures (`digest_mismatch`, `pve_checksum_refused`,
   `pve_import_refused`, `pve_forbidden`, `ownership_lost`, `invalid_payload`, …) dead-letter at once.
 - **Dead jobs are cleaned up**: a job can die without running its cleanup (e.g. its last attempt's
@@ -317,7 +320,7 @@ withdrawn digests.
 ### Smoke test (`templateupdate.smoke/v1`)
 
 `POST /admin/template-updates/templates/{importId}/smoke` (`admin:service:manage`), and automatically
-after every successful import. A durable **external** job on the same fenced runner as imports
+after every successful import except those of a platform run (above). A durable **external** job on the same fenced runner as imports
 (lease renewal, `Checkpoint` before every PVE mutation, `Fail` with fixed codes, `ClaimDead` dead-job
 pass); a smoke already queued/running for the template is returned instead of a second one. Payload =
 exactly one template (service, node, template VMID, digest) plus the smoke network frozen at enqueue.
@@ -352,7 +355,11 @@ Steps (each PVE mutation right after a successful fence check; the template itse
    template's copied tags), `net0` on the smoke bridge/VLAN, `ipconfig0`, an **ephemeral ed25519
    SSH key** generated in memory for this attempt (only its SHA-256 fingerprint is recorded; the
    private key is never stored, logged or sent anywhere — nothing ever logs in with it), no password
-   (`cipassword` deleted) and no custom cloud-init snippets (`cicustom` deleted), `agent=1`. When the
+   (`cipassword` deleted) and no custom cloud-init snippets (`cicustom` deleted), `agent=1`, and
+   `ciupgrade=0`: the test VM does not upgrade its packages at first boot (Proxmox's default is on), so
+   the smoke network needs no route to a package mirror and the verdict is about the image as
+   published. The option exists since Proxmox VE 8.0, below the supported 9.2; a Proxmox that refuses
+   it gets the write without it and the record a warning. When the
    clone has **no Proxmox cloud-init drive**, the same write adds one on the template's disk storage,
    in the slot an import of that variant uses (`ide0` for a Kubernetes node image, `ide2` for an OS
    image): these settings reach the guest only through that drive, and without it cloud-init ends
@@ -364,14 +371,28 @@ Steps (each PVE mutation right after a successful fence check; the template itse
    must match the artifact (`debian-13` → `debian`/`13`, `ubuntu-2604` → `ubuntu`/`26.04`).
 6. **cloud-init done**: `guest-exec` of `/usr/bin/cloud-init status --format json` (output bounded to
    64 KiB, plain `cloud-init status` as fallback for older cloud-init), polled for up to 10 minutes:
-   `done` passes (`degraded done` passes with a warning), `error`/`disabled` fail.
+   `done` passes (`degraded done` passes with a warning), `error`/`disabled` fail. On a failure the
+   errors of `/run/cloud-init/result.json` are read through the agent before the test VM is destroyed
+   and added to the record's message (printable characters only, at most 300).
 7. **Root disk grew**: the `/` filesystem size from `guest-get-fsinfo` (fallback `df -B1` through the
    agent) must exceed the template's whole disk size — only cloud-init's growpart can make it so.
 8. Kubernetes node image only: `containerd` and `kubelet` present and `kubelet --version` =
    `Kubernetes v<artifact version>` (no join, no kubeadm).
 9. Record **PASS**/**FAIL** with a fixed reason code, `startedAt`/`finishedAt`, the observed values
    (OS name, cloud-init status, root fs bytes, kubelet version) — then **stop and destroy** the test
-   VM, and only then mark the receipt `finished` (`cleanedAt`).
+   VM, and only then mark the receipt `finished` (`cleanedAt`). A destroy task that ends with
+   warnings has removed the VM and may have kept a disk (ZFS: `dataset is busy`): the volumes the test
+   VM's config named are looked up on their store, freed again up to three times (at once, then twice
+   one minute apart), and what still stays is a warning on the record that names each volume and the
+   command (`pvesm free <volume>`). Only those exact volumes are freed, never another volume that
+   carries the same VMID, and none once a VM holds that VMID again. The names are saved on the record
+   before the destroy, so an attempt that finds the VM already gone (the destroy outlasted its wait,
+   or the API restarted) checks them too. Listing needs `Datastore.Audit` and freeing
+   `Datastore.Allocate` on the store. **The portal token as documented above holds only
+   `Datastore.AllocateSpace` there, so on such an install nothing is freed**: the first free is
+   refused, there is no retry, and the warning says so; remove the volume by hand, or grant the
+   token `Datastore.Allocate` on the template disk storage (in Proxmox that right opens every volume
+   on the store). Without `Datastore.Audit` nothing is checked unless the task itself warned.
 
 FAIL codes: `template_mismatch`, `digest_withdrawn`, `clone_failed`, `configure_failed`,
 `resize_failed`, `start_failed`, `agent_timeout`, `osinfo_failed`, `osinfo_mismatch`,
@@ -836,7 +857,9 @@ template's base snapshot, which a repair of the live disk does not change (PVE b
 Until the template is replaced, repair each VM made from it before its second boot.
 
 **Test**, as root inside the guest (reads only). The same reads were checked against image files; the loop
-was not run inside a guest:
+was not run inside a guest. From the PVE host the same two reads work on the partitions of the VM's disk, also
+while the VM runs: replace the `findmnt` list by the partition devices, on ZFS
+`/dev/zvol/<pool>/vm-<id>-disk-0-part1 /dev/zvol/<pool>/vm-<id>-disk-0-part13` (run so on a lab on 2026-11-17):
 
 ```sh
 for d in $(findmnt -rn -t ext4 -o SOURCE | sort -u); do
@@ -867,11 +890,16 @@ debugfs -w -f /tmp/orphan-fix.cmd "$D"
 - `debugfs` exits 0 even when `ssv` failed, so the last line reads the field back and runs the full check
   only when it is 0. If `e2fsck -f -p` does not run, stop: the field is still set.
 - `e2fsck -f -p` exit status 0 or 1 is success (1: it corrected something); 4 or more is not.
-- Tested only on scratch image files with e2fsprogs 1.47.2, with a file in inode 12, in four states: clean,
+- Tested on scratch image files with e2fsprogs 1.47.2, with a file in inode 12, in four states: clean,
   journal not replayed, marked with errors, and both. Each time the field became 0 in the primary and the
   backup superblocks, the file kept its content and `e2fsck -fn` was clean afterwards.
-- **Not tested**: a real VM disk, a zvol, a journal left by a real kernel after the error (the scratch
-  journal was written with `debugfs`), e2fsprogs 1.47.0 for the journal and `close -a` steps, `/boot`.
+- Run once on a real VM on a lab, on 2026-11-17: the seed VM of a managed-services installation, on a zvol,
+  root (`-part1`, read-only after the error, its journal left by the guest's kernel) and `/boot` (`-part13`),
+  e2fsprogs 1.47.2. Every command exited 0, the file in inode 12 kept its content, and the VM booted with
+  both filesystems read-write.
+- **Not tested**: e2fsprogs 1.47.0 for the journal and `close -a` steps, a disk on a store other than ZFS,
+  the Kubernetes node image on a real VM.
+- **Start the VM afterwards** (`qm start <id>`); nothing does it for you.
 - **Do not** run the repair on a mounted filesystem: `debugfs -w` also rewrites group descriptors.
 - **Do not** run `e2fsck -y`/`-p` (other than `-E journal_only`) before the field is zero: on the scratch
   image it deleted the file in inode 12 and left the field in place. `tune2fs -O orphan_file` destroys that

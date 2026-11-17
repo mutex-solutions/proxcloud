@@ -1020,7 +1020,9 @@ function DatabaseFormDialog({
               placeholder="192.0.2.0/24, 198.51.100.7/32"
             />
             <p className="text-xs text-muted-foreground">
-              Restricts which source addresses may reach the endpoint. Empty = no restriction.
+              Restricts which source addresses may reach the endpoint. Empty = no restriction. A server on a network
+              with outbound internet access (SNAT) arrives with an address of the operator's hosts, not its own: ask your operator
+              which addresses to allow. Such an address is shared with other customers, so keep the password secret.
             </p>
           </div>
         </div>

@@ -23,7 +23,17 @@ type Service struct {
 	billing     *billing.Repo
 	users       *user.Repo
 	platformcfg *platformconfig.Repo // project-provisioning-quota (default config); nil-safe
+	// noDeletionJob: nothing in this installation runs the deletion job (SetNoDeletionJob), so DeleteNow refuses.
+	noDeletionJob bool
 }
+
+// SetNoDeletionJob tells the service that the deletion job never runs here (cmd/api: the job scheduler is off and so
+// are the debug triggers). DeleteNow then refuses instead of leaving the project DELETE_IN_PROGRESS for good.
+func (s *Service) SetNoDeletionJob(off bool) { s.noDeletionJob = off }
+
+var errNoDeletionJob = httpx.NewError(http.StatusConflict, http.StatusConflict, "This installation cannot delete a project yet: the job that "+
+	"deletes a project and its cloud resources runs only with the job scheduler, and the scheduler is off. Nothing was changed. "+
+	"The operator turns it on with PROXCLOUD_JOBS_SCHEDULER_ENABLED=true (--scheduler on a Compose install)")
 
 func NewService(repo *Repo, orgRepo *org.Repo, b *billing.Repo, users *user.Repo, platformcfg *platformconfig.Repo) *Service {
 	return &Service{repo: repo, orgRepo: orgRepo, billing: b, users: users, platformcfg: platformcfg}
@@ -315,6 +325,11 @@ func (s *Service) EnableIfDisabled(ctx context.Context, p *Project, byOperator b
 // DeleteNow flags the project for immediate deletion: the deletion job's next sweep (every
 // minute) tears it down, with the grace window already over.
 func (s *Service) DeleteNow(ctx context.Context, id string) (*Project, error) {
+	// The flag below is all a delete-now does; the teardown is the deletion job's. Without that job the project would
+	// stay DELETE_IN_PROGRESS for good, could not be cancelled, and would hold its organization (F42).
+	if s.noDeletionJob {
+		return nil, errNoDeletionJob
+	}
 	p, err := s.GetProjectByID(ctx, id)
 	if err != nil {
 		return nil, err

@@ -73,6 +73,8 @@ func TestNetworkInventoryLossPreservesRowsAndExports(t *testing.T) {
 						privs = map[string]int{} // specific NoAccess shadows the still-good namespace
 					}
 					write(map[string]any{r.URL.Query().Get("path"): privs})
+				case path == "/cluster/sdn/zones":
+					write([]any{map[string]any{"zone": "overlay", "type": "evpn"}}) // the sync reads zone kinds once
 				case path == "/cluster/sdn/vnets":
 					list := []any{live("v1"), live("v2")}
 					if phase == "deleted" {
