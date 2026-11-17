@@ -6,7 +6,7 @@ The **Network** group in the sidebar holds what connects your servers to each ot
 
 Start under **Network → Networks**, where you create the private networks your servers attach to. A project with no network yet needs one before its first server can be launched, and a server can only be launched onto a network your project owns.
 
-Each network is a virtual network on the Proxmox VE cluster with an IPv4 subnet (more can be added, see below). Leave the range empty and ProxCloud picks a free one from the range your operator reserved for tenant networks, or ask for a specific CIDR inside that range. Address delivery depends on the zone: PVE DHCP is available on simple zones; VLAN/EVPN networks use platform-allocated static addresses passed through cloud-init instead. You do not need to add a competing DHCP server. Outbound NAT (SNAT) is a separate subnet setting and depends on the operator's routing and egress configuration.
+Each network is a virtual network on the Proxmox VE cluster with an IPv4 subnet (more can be added, see below). Leave the range empty and ProxCloud picks a free one from the range your operator reserved for tenant networks, or ask for a specific CIDR inside that range. Address delivery depends on the zone your operator set up: where the zone runs a DHCP server (some simple zones), servers get their address over DHCP; everywhere else (VLAN and EVPN zones, simple zones without DHCP) ProxCloud assigns each server a fixed address and passes it through cloud-init, and the network's details show DHCP as off. You do not need to add a competing DHCP server. Outbound NAT (SNAT) is a separate subnet setting and depends on the operator's routing and egress configuration.
 
 ![The Create network dialog](/docs-img/create-network.png)
 

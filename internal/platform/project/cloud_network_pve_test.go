@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
@@ -155,24 +156,35 @@ func TestLiveClusterOn(t *testing.T) {
 }
 
 // F49: a VLAN zone has no DHCP and no SNAT: both default to off there, and asking for either is a 400.
+// F2 (v0.8.0 acceptance): the same for DHCP in every zone without a DHCP server. The zone's kind alone does not say
+// (a simple zone made by hand without one answered dhcp true), the live zone does.
 func TestPVENetFlags(t *testing.T) {
 	for _, tt := range []struct {
 		kind       string
+		zoneDHCP   bool
 		data       map[string]any
 		dhcp, snat bool
 		status     int
 	}{
-		{"simple", map[string]any{}, true, true, 0},
-		{"evpn", map[string]any{"snat": false}, true, false, 0},
-		{"", map[string]any{}, true, true, 0},
-		{"vlan", map[string]any{}, false, false, 0},
-		{"vlan", map[string]any{"snat": false, "enableDhcp": false}, false, false, 0},
-		{"vlan", map[string]any{"snat": true}, false, false, http.StatusBadRequest},
-		{"vlan", map[string]any{"enableDhcp": true}, false, false, http.StatusBadRequest},
+		{"simple", true, map[string]any{}, true, true, 0},
+		{"simple", true, map[string]any{"enableDhcp": false}, false, true, 0},
+		{"simple", false, map[string]any{}, false, true, 0},
+		{"simple", false, map[string]any{"enableDhcp": false, "snat": false}, false, false, 0},
+		{"simple", false, map[string]any{"enableDhcp": true}, false, false, http.StatusBadRequest},
+		{"evpn", false, map[string]any{"snat": false}, false, false, 0},
+		{"evpn", false, map[string]any{"enableDhcp": true}, false, false, http.StatusBadRequest},
+		{"", false, map[string]any{}, false, true, 0},
+		{"vlan", false, map[string]any{}, false, false, 0},
+		{"vlan", false, map[string]any{"snat": false, "enableDhcp": false}, false, false, 0},
+		{"vlan", false, map[string]any{"snat": true}, false, false, http.StatusBadRequest},
+		{"vlan", false, map[string]any{"enableDhcp": true}, false, false, http.StatusBadRequest},
 	} {
-		dhcp, snat, herr := pveNetFlags(tt.kind, tt.data)
+		dhcp, snat, herr := pveNetFlags(tt.kind, tt.zoneDHCP, tt.data)
 		if (herr == nil) != (tt.status == 0) || herr != nil && herr.Status != tt.status || dhcp != tt.dhcp || snat != tt.snat {
-			t.Errorf("%s %v: dhcp %v snat %v err %v", tt.kind, tt.data, dhcp, snat, herr)
+			t.Errorf("%s zoneDHCP=%v %v: dhcp %v snat %v err %v", tt.kind, tt.zoneDHCP, tt.data, dhcp, snat, herr)
 		}
+	}
+	if _, _, herr := pveNetFlags("simple", false, map[string]any{"enableDhcp": true}); herr == nil || !strings.Contains(herr.Error(), "no DHCP server") {
+		t.Errorf("the refusal must say why: %v", herr)
 	}
 }

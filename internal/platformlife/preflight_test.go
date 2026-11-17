@@ -23,6 +23,8 @@ type preflightPVE struct {
 	outside string // a service user that is not in the group proxcloud-kube: PVE refuses to show it to the portal token
 	vnets   string // the cluster's vnets, [] when empty
 	zones   string // the cluster's SDN zones, [] when empty; "!" answers 403
+	// machines are the VMs of pool proxcloud-system, VMID → {config JSON, status}; the seed's pool is empty.
+	machines map[int][2]string
 }
 
 func (f *preflightPVE) client(t *testing.T, url, token string) *pve.Client {
@@ -69,6 +71,14 @@ func (f *preflightPVE) serve(w http.ResponseWriter, r *http.Request) {
 	if f.zones != "" {
 		data["/cluster/sdn/zones"] = f.zones
 	}
+	var members []string
+	for id, m := range f.machines {
+		members = append(members, fmt.Sprintf(`{"id":"qemu/%d","type":"qemu","vmid":%d,"node":"pve1"}`, id, id))
+		data[fmt.Sprintf("/nodes/pve1/qemu/%d/config", id)] = m[0]
+		data[fmt.Sprintf("/nodes/pve1/qemu/%d/status/current", id)] = `{"status":"` + m[1] + `"}`
+	}
+	data["/pools/"+pve.SeedPool] = `{"members":[]}`
+	data["/pools/"+pve.SystemPool] = `{"members":[` + strings.Join(members, ",") + `]}`
 	path := strings.TrimPrefix(r.URL.Path, "/api2/json")
 	body, ok := data[path]
 	if path == "/access/permissions" {
@@ -149,6 +159,28 @@ func TestPreflight(t *testing.T) {
 	if len(f.writes) != 0 {
 		t.Fatalf("the preflight wrote to PVE: %v", f.writes)
 	}
+	// The machines row: absent above (no VM yet). After a node reboot the machines without onboot are stopped: a
+	// warning that names each with what to do, and the preflight still passes. Another installation's VM is not ours.
+	tags := `"tags":"proxcloud;pc-platform;pc-platform-` + in.ID + `"`
+	f.machines = map[int][2]string{
+		107: {`{"name":"pc-platform-cp-1",` + tags + `}`, "stopped"},
+		108: {`{"name":"pc-platform-kamaji-1","onboot":1,` + tags + `}`, "running"},
+		109: {`{"name":"other","tags":"pc-platform-other"}`, "stopped"},
+	}
+	down := pf.Run(ctx)
+	if c := checkMap(down)["machines"]; c.Status != CheckWarn || !OK(down) || !strings.Contains(c.Message, "VM 107 (pc-platform-cp-1) on pve1 is stopped") ||
+		!strings.Contains(c.Message, "qm start 107") || !strings.Contains(c.Message, "qm set 107 --onboot 1") || strings.Contains(c.Message, "108") || strings.Contains(c.Message, "109") {
+		t.Errorf("a stopped machine without onboot: %+v ok=%v", c, OK(down))
+	}
+	f.machines[107] = [2]string{`{"name":"pc-platform-cp-1","onboot":1,` + tags + `}`, "running"}
+	if c := checkMap(pf.Run(ctx))["machines"]; c.Status != CheckOK || !strings.Contains(c.Message, "2 VMs") {
+		t.Errorf("every machine runs and has onboot: %+v", c)
+	}
+	f.machines[107] = [2]string{"!", "running"}
+	if c := checkMap(pf.Run(ctx))["machines"]; c.Status != CheckWarn || !strings.Contains(c.Message, "Could not read") {
+		t.Errorf("a machine that cannot be read: %+v", c)
+	}
+	f.machines = nil
 	// A simple default zone: tenant clusters cannot be created on it. A warning, and the preflight still passes.
 	pf.Site.DefaultZone, pf.Site.DefaultZoneKind = "pcm0", "simple"
 	warned := pf.Run(ctx)
@@ -158,6 +190,12 @@ func TestPreflight(t *testing.T) {
 	if c := checkMap(warned)["tenant-network"]; !strings.Contains(c.Message, "cluster.shared") || strings.Contains(c.Message, "every cluster create") {
 		t.Errorf("the warning must name the shared-workers exception and not claim every create: %+v", c)
 	}
+	// "dhcp": false in the zone's config: ProxCloud makes it without DHCP, so nothing to warn about.
+	pf.Site.DefaultZoneNoDHCP = true
+	if c := checkMap(pf.Run(ctx))["tenant-network"]; c.Status != CheckOK || !strings.Contains(c.Message, "created without DHCP") {
+		t.Errorf("a simple default zone configured without DHCP, not made yet: %+v", c)
+	}
+	pf.Site.DefaultZoneNoDHCP = false
 	// The create reads the live zone's dhcp field, and an existing zone is never changed: so does the row.
 	f.zones = `[{"zone":"pcm0","type":"simple"}]`
 	if c := checkMap(pf.Run(ctx))["tenant-network"]; c.Status != CheckOK {
@@ -290,6 +328,9 @@ func TestSiteOfDefaultZone(t *testing.T) {
 	}
 	if s := SiteOf(es(map[string]any{"defaultZone": "overlay", "zones": map[string]any{"overlay": map[string]any{}, "s": map[string]any{"kind": "simple"}}})); s.DefaultZoneKind != "evpn" {
 		t.Errorf("a default zone without a kind is EVPN: %+v", s)
+	}
+	if s := SiteOf(es(map[string]any{"zones": map[string]any{"pc": map[string]any{"kind": "simple", "dhcp": false}}})); !s.DefaultZoneNoDHCP {
+		t.Errorf("a simple zone with dhcp false: %+v", s)
 	}
 	if s := SiteOf(es(nil)); s.DefaultZone != "" || s.DefaultZoneKind != "" {
 		t.Errorf("no zone: %+v", s)

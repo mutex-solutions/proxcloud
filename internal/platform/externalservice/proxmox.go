@@ -24,7 +24,8 @@ package externalservice
 //	        "overlay": {"kind": "evpn", "controller": "proxcloud", "asn": 65000,
 //	                    "peers": ["10.0.0.1"], "exitNodes": ["pve1"], "mtu": 1450},
 //	        "vlan":    {"kind": "vlan", "bridge": "vmbr0", "vlanMin": 100, "vlanMax": 199},
-//	        "simple":  {"kind": "simple"}      // 1-node fallback; DHCP+SNAT need PVE ≥ 8.1
+//	        "simple":  {"kind": "simple"}      // 1-node fallback; DHCP+SNAT need PVE ≥ 8.1. "dhcp": false makes
+//	                                           // the zone without DHCP (tenant clusters, load balancers)
 //	      },
 //	      "publicNetworks": [{"id": "vmbr1", "name": "Internet",  // admin-designated inbound bridges, never
 //	                          "cidr": "203.0.113.0/24",          // the management bridge; the IP pool
@@ -375,6 +376,7 @@ func (e *ExternalService) PVENetworkConfig() PVENetwork {
 				ExitNodes:  strList(z["exitNodes"]),
 				VRFVxlan:   intOf(z["vrfVxlan"]),
 				MTU:        intOf(z["mtu"]),
+				NoDHCP:     z["dhcp"] == false,
 			}
 		}
 	}
@@ -469,6 +471,9 @@ func pveNetworkProblems(raw any) (out []string) {
 		kind, isStr := z["kind"].(string)
 		if (z["kind"] != nil && !isStr) || !slices.Contains([]string{"", "evpn", "overlay", "vlan", "simple"}, kind) {
 			add("config.network.zones.%s.kind must be evpn, vlan or simple, not %v", key, z["kind"])
+		}
+		if _, isBool := z["dhcp"].(bool); z["dhcp"] != nil && (!isBool || kind != "simple") {
+			add("config.network.zones.%s.dhcp is for a simple zone and must be true or false (false: ProxCloud makes the zone without Proxmox's DHCP server), not %v", key, z["dhcp"])
 		}
 		if bridge, _ := z["bridge"].(string); kind == "vlan" && bridge == "" {
 			add("config.network.zones.%s is a vlan zone and needs a bridge", key)

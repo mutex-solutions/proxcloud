@@ -422,7 +422,9 @@ sequenceDiagram
 | `lockSDN`, `withSDNLock` | `cloud_network_pve.go:38`, `:54` | Platform-wide `sdn-apply` lock (PostgreSQL); busy returns 409, a crashed holder expires after 3 minutes |
 | `pvePickCIDR` | `cloud_network_pve.go:255` | Requested CIDR must sit inside `cidrPool`, be `/29` or larger and overlap nothing; blank picks the first free `/24` |
 | `Service.SubnetCIDRs` | `internal/cloud/pve/network.go:298` | Every subnet on the cluster (all zones, all projects, foreign vnets), read under the lock |
-| `Service.CreateNetwork` | `network.go:161` | Stages vnet `v<5 base36>` with alias `st:<projectId>:<name>`, then its subnet (gateway, DHCP range, SNAT) |
+| `Service.CreateNetwork` | `network.go` | Stages vnet `v<5 base36>` with alias `st:<projectId>:<name>`, then its subnet (gateway, SNAT, and a DHCP range only when the caller asks: the create handler asks only in a zone with a DHCP server) |
+| `Service.ZoneDHCP`, `pveNetFlags` | `network.go`, `cloud_network_pve.go` | Whether Proxmox hands out addresses in a zone: the live zone's `dhcp` field, or for a zone not made yet what `EnsureZone` will give it (a simple zone, unless `ZoneConfig.NoDHCP`). The create defaults `enableDhcp` from it and refuses `true` with a `400` where it is false |
+| `SubnetDetail`, `Service.NetworkDetail` | `network.go` | The one derivation of a NETWORK row's `cidr`, `gateway`, `snat`, `dhcp` and `subnetDetails`, used by the sync and after a subnet action: `dhcp` is true only when the first subnet has a DHCP range and the live zone runs a DHCP server |
 | `Service.VnetStaticPoolFor`, `staticHostRange`, `dhcpRange` | `internal/cloud/pve/network.go` | Platform-assigned IPv4 hosts are independent of PVE DHCP sizing. `/29` and `/30` static pools use usable hosts; `/28` and larger retain network+10. Network/broadcast and gateway endpoints are excluded; `pickPublicIP` skips a gateway inside the span and allocated addresses. Malformed, IPv6 and `/31`–`/32` static subnets fail without returning empty range endpoints. DHCP keeps its `/28` minimum. |
 | `ZoneIDFor` | `network.go:341` | Per-project EVPN zone id: `p` + 7 base36 chars of `sha256(projectId)` (8 chars, the PVE limit) |
 | `Service.EnsureProjectZone` | `network.go:353` | Stages the project zone from the default EVPN zone template; next free VRF VNI (from 10000); refuses an id collision with another owner |
@@ -509,7 +511,7 @@ one vnet is switched and needs no rule. There is deliberately no blanket
 `DROP source=<cidrPool>`: it would also drop egress to the internet through SNAT.
 
 Addresses: PVE offers DHCP on simple zones only (`dhcp` on an EVPN zone is refused). On a
-zone without DHCP the platform allocates the server's `net0` address when it clones the VM
+zone without DHCP (EVPN, VLAN, a simple zone without `dhcp`) the platform allocates the server's `net0` address when it clones the VM
 (`VnetStaticPoolFor`, `staticHostRange`, `PublicIPRepo.Allocate`, a row on NIC `net0`), writes it to `ipconfig0`,
 and pins `ipfilter-net0` to that `/32`. A valid `192.0.2.0/29` with gateway `.1` allocates `.2`–`.6`;
 large subnets retain the network+10 reservation (an upper `/25` starts at `.138`, not `.10`).
