@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -54,10 +55,41 @@ type smokePVE struct {
 	stopHook         func()
 	cloneHook        func(id int)
 	baseDiskBytes    int64
+	noCiupgrade      bool              // a Proxmox VE before 8.0: a config write with ciupgrade is refused
+	lastConfig       map[string]string // the params of the last accepted config write
+	ciErrors         []string          // /run/cloud-init/result.json v1.errors
+	destroyWarns     bool              // the destroy task ends WARNINGS and keeps the VM's volumes
+	volumes          map[string]bool   // volumes on the stores without a VM ("store:name")
+	busy             int               // this many volume deletes fail ("dataset is busy")
+}
+
+func (f *smokePVE) StorageContents(_ context.Context, node, storage, content string, vmid int) ([]pve.StorageContent, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.read()
+	var out []pve.StorageContent
+	for v := range f.volumes {
+		if strings.HasPrefix(v, storage+":") && strings.Contains(v, fmt.Sprintf("vm-%d-", vmid)) {
+			out = append(out, pve.StorageContent{VolID: v, VMID: vmid})
+		}
+	}
+	return out, nil
+}
+
+func (f *smokePVE) DeleteStorageVolume(_ context.Context, node, storage, vol string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mut("free " + storage + ":" + vol)
+	if f.busy > 0 {
+		f.busy--
+		return errors.New("pve: task failed: zfs error: dataset is busy")
+	}
+	delete(f.volumes, storage+":"+vol)
+	return nil
 }
 
 func newSmokePVE() *smokePVE {
-	return &smokePVE{vms: map[int]*smokeVM{}, ciStatus: "done", baseDiskBytes: 20 << 30}
+	return &smokePVE{vms: map[int]*smokeVM{}, volumes: map[string]bool{}, ciStatus: "done", baseDiskBytes: 20 << 30}
 }
 
 func (f *smokePVE) mut(s string) {
@@ -153,6 +185,10 @@ func (f *smokePVE) SetVMConfig(_ context.Context, node string, vmid int, params 
 	if !ok {
 		return "", &pve.APIError{Status: 500, Message: "does not exist"}
 	}
+	if _, has := params["ciupgrade"]; has && f.noCiupgrade {
+		return "", &pve.APIError{Status: 400, Message: "Parameter verification failed. ciupgrade: property is not defined in schema and the schema does not allow additional properties"}
+	}
+	f.lastConfig = maps.Clone(params)
 	for k, v := range params {
 		if k != "digest" {
 			vm.cfg[k] = v
@@ -206,7 +242,14 @@ func (f *smokePVE) DeleteVM(_ context.Context, node string, vmid int) (pve.UPID,
 	if f.deleteFails {
 		return "", errors.New("pve: DELETE: connection reset")
 	}
+	vm := f.vms[vmid]
 	delete(f.vms, vmid)
+	if f.destroyWarns && vm != nil {
+		for _, v := range ownVolumes(vm.cfg, vmid) {
+			f.volumes[v] = true
+		}
+		return "UPID:warn", nil
+	}
 	return "UPID:destroy", nil
 }
 
@@ -251,6 +294,9 @@ func (f *smokePVE) WaitTask(_ context.Context, up pve.UPID) error {
 	f.mu.Unlock()
 	if up == "UPID:fail" {
 		return errors.New("pve: task UPID:fail failed: boom")
+	}
+	if up == "UPID:warn" {
+		return errors.New("pve: task UPID:warn failed: WARNINGS: 2")
 	}
 	return nil
 }
@@ -317,6 +363,9 @@ func (f *smokePVE) GuestRun(_ context.Context, node string, vmid int, _ time.Dur
 			return 0, "not json", "", nil
 		}
 		b, _ := json.Marshal(map[string]any{"status": f.ciStatus, "extended_status": f.ciStatus})
+		return 0, string(b), "", nil
+	case "/bin/cat":
+		b, _ := json.Marshal(map[string]any{"v1": map[string]any{"datasource": "DataSourceNoCloud", "errors": f.ciErrors}})
 		return 0, string(b), "", nil
 	case "/usr/bin/df":
 		if f.noFSSize {
@@ -1219,5 +1268,92 @@ func TestSmokeCloneEndingBetweenTheChecksIsNotGone(t *testing.T) {
 	}
 	if _, ok := pv.vms[9301]; ok {
 		t.Fatal("the clone of this job survived")
+	}
+}
+
+// F46: the test VM does not upgrade its packages at first boot, so the smoke network needs no package mirror; a
+// Proxmox VE that refuses the option gets the write without it and a warning.
+func TestSmokeCloneSkipsPackageUpgrade(t *testing.T) {
+	x, pv, rec, p := smokeSetup(t, "os")
+	if err := x.Run(context.Background(), smokeJob, p, &testFence{epoch: 1, budget: -1}); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := rec.LoadSmoke(context.Background(), smokeJob); r.Result != SmokePass || len(r.Warnings) != 0 || pv.lastConfig["ciupgrade"] != "0" {
+		t.Fatalf("receipt %+v, config %v", r, pv.lastConfig)
+	}
+	x, pv, rec, p = smokeSetup(t, "os")
+	pv.noCiupgrade = true
+	if err := x.Run(context.Background(), smokeJob, p, &testFence{epoch: 1, budget: -1}); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := rec.LoadSmoke(context.Background(), smokeJob)
+	if _, has := pv.lastConfig["ciupgrade"]; has || r.Result != SmokePass || len(r.Warnings) != 1 || !strings.Contains(r.Warnings[0], "ciupgrade") || pv.lastConfig["sshkeys"] == "" {
+		t.Fatalf("receipt %+v, config %v", r, pv.lastConfig)
+	}
+}
+
+// F46: a cloud-init that ends in error leaves its reason on the record, read before the test VM is destroyed.
+func TestSmokeCloudInitErrorKeepsTheReason(t *testing.T) {
+	x, pv, rec, p := smokeSetup(t, "os")
+	pv.ciStatus = "error"
+	pv.ciErrors = []string{"('package_update_upgrade_install', ProcessExecutionError(\"apt-get update\"))\n\x1b[31m", strings.Repeat("x", 500)}
+	if err := x.Run(context.Background(), smokeJob, p, &testFence{epoch: 1, budget: -1}); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := rec.LoadSmoke(context.Background(), smokeJob)
+	if r.Code != SmokeCloudInitFailed || !strings.Contains(r.Message, "package_update_upgrade_install") || strings.ContainsAny(r.Message, "\n\x1b") || len(r.Message) > 400 {
+		t.Fatalf("message %q", r.Message)
+	}
+	if left := testVMsLeft(pv); len(left) != 0 {
+		t.Fatalf("test VM left: %v", left)
+	}
+	// No result file to read: the fixed message.
+	x, pv, rec, p = smokeSetup(t, "os")
+	pv.ciStatus = "error"
+	if err := x.Run(context.Background(), smokeJob, p, &testFence{epoch: 1, budget: -1}); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := rec.LoadSmoke(context.Background(), smokeJob); r.Message != `cloud-init ended "error" (exit 0)` {
+		t.Fatalf("message %q", r.Message)
+	}
+}
+
+// F47: a destroy task that ends WARNINGS removed the VM and kept a disk. The disk is freed again; one that stays is a
+// warning on the record, and a volume the VM's config never named is not touched.
+func TestSmokeDestroyWarningsLeaveNoVolume(t *testing.T) {
+	setup := func() (*SmokeExecutor, *smokePVE, *memSmokes, SmokePayload) {
+		x, pv, rec, p := smokeSetup(t, "os")
+		pv.destroyWarns = true
+		pv.cloneHook = func(id int) {
+			pv.mu.Lock()
+			defer pv.mu.Unlock()
+			pv.vms[id].cfg["scsi0"] = fmt.Sprintf("local-zfs:vm-%d-disk-1,size=20G", id)
+			pv.volumes[fmt.Sprintf("local-zfs:vm-%d-disk-0", id)] = true // an older VM's, never this one's
+		}
+		return x, pv, rec, p
+	}
+	x, pv, rec, p := setup()
+	pv.busy = 1
+	if err := x.Run(context.Background(), smokeJob, p, &testFence{epoch: 1, budget: -1}); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := rec.LoadSmoke(context.Background(), smokeJob)
+	if r.Result != SmokePass || r.Step != SmokeFinished || len(r.Warnings) != 0 || len(pv.volumes) != 1 || !pv.volumes["local-zfs:vm-9201-disk-0"] {
+		t.Fatalf("receipt %+v, volumes %v, calls %v", r, pv.volumes, pv.calls)
+	}
+	x, pv, rec, p = setup()
+	pv.busy = 99
+	if err := x.Run(context.Background(), smokeJob, p, &testFence{epoch: 1, budget: -1}); err != nil {
+		t.Fatal(err)
+	}
+	r, _ = rec.LoadSmoke(context.Background(), smokeJob)
+	if r.Result != SmokePass || r.Step != SmokeFinished || len(r.Warnings) != 1 || !strings.Contains(r.Warnings[0], "local-zfs:vm-9201-disk-1") ||
+		strings.Contains(r.Warnings[0], "disk-0") || !strings.Contains(r.Warnings[0], "pvesm free") {
+		t.Fatalf("receipt %+v, calls %v", r, pv.calls)
+	}
+	for _, c := range pv.calls {
+		if strings.HasPrefix(c, "free ") && c != "free local-zfs:vm-9201-disk-1" {
+			t.Fatalf("freed a volume that was not the test VM's: %v", pv.calls)
+		}
 	}
 }
