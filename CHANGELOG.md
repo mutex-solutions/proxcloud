@@ -471,6 +471,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   An API that stops cleanly during a platform run gives the job back at once, so the next start resumes without
   waiting out the one-minute lease and without spending an attempt (covered by a test, not by a lab run).
 
+- **Seed restore and clean stop, review findings** (`docs/managed-services.md`, the Managed services page,
+  `cmd/api/main.go`). The guide now says that a seed backup taken before **Replace the seed credential** cannot be
+  restored from (the restored seed refuses the stored credential and none can be made; read from the code, not tried
+  on a lab): back up by hand after every rotation and take only an archive newer than the last `ROTATE_CREDENTIAL`
+  entry. The restore sequence keeps a copy of the seed's firewall file and puts it back when the restore lost it. The
+  check of who can read the archive goes through every token of every user, since ACL rows on pools, users and
+  groups also give rights. The API cancels a platform run at the stop signal, before its servers drain, so the job
+  is given back within the container's stop grace period more often; the guide names that condition. Not run on a
+  lab: the restore, and the clean stop.
+
 - **Findings of the managed-services lab run (F42 to F51).** A project's "Delete now" is refused with a `409` while
   the job scheduler is off, instead of leaving the project `DELETE_IN_PROGRESS` for good with an organization that can
   not be deleted (the teardown is a scheduler job; `deploy/compose/README.md`). A tenant network in a VLAN zone is

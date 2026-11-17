@@ -457,8 +457,12 @@ A Remove has three stages: Delete the platform cluster (`remove-cluster`, 45 min
   loads, never stored) when the seed does not answer, lists no Application, or one is not Synced and
   Healthy.
 - If the API stops, the next start resumes the run. An API that is stopped cleanly (`docker compose
-  restart api`, a pod that is terminated) gives the run's job back as it stops: the next start takes
-  it at once and no attempt is spent. That release is covered by a test, not by a lab run. After a
+  restart api`, a pod that is terminated) cancels the run at the stop signal, before it drains its
+  requests, and gives the run's job back as soon as the call the stage has in flight returns: the
+  next start takes it at once and no attempt is spent. This holds only when that happens within the
+  container's stop grace period (10 seconds by default under Compose, after which Docker kills the
+  process); otherwise the stop is as a crash. The release is covered by a test, not by a lab run,
+  and how often the 10 seconds are exceeded was not measured. After a
   crash, or when the release did not reach the database, the run resumes when the job's one-minute
   lease has run out, so up to a minute later, and an attempt is spent (seen on a lab before the
   release existed: a clean restart in stage 7 resumed by itself 61 seconds later, attempts 2 of 20,
@@ -612,7 +616,7 @@ and are not deleted by this; delete those clusters from the projects first where
 | Credential | Where it is | Rotation |
 |---|---|---|
 | `capmox@pve!capi`, `csi@pve!csi` | Encrypted in `platformSecret`; the first also in a Secret on the seed, the second in a Secret on the cluster | Create a new token secret in Proxmox (remove the token, run the script again), paste it in step 2, then **Apply this release**: stages 7 and 8 write the Secrets again. Not verified on a lab |
-| The seed credential (a service account token, cluster-admin on the seed) | Encrypted in `platformSecret` | **Replace the seed credential**: creates the next token Secret (`proxcloud-portal-token-g<n>`), checks it, stores it, then deletes the older ones, which ends their tokens. Refused during a run. If it stops halfway, press it again; the next apply also removes token Secrets nothing stores. The audit log gets one entry, `ROTATE_CREDENTIAL` on the installation, with the names of the token Secret before and after (`fromSecret`, `toSecret`) and never a token. A rotation that stopped after it had stored the new credential gets that entry with outcome `FAILURE`. The old token does not end at that instant: the seed's API server remembers a token it has checked for some seconds (measured on a lab: the old token still answered 6 to 7 seconds after the rotation had returned) |
+| The seed credential (a service account token, cluster-admin on the seed) | Encrypted in `platformSecret` | **Replace the seed credential**: creates the next token Secret (`proxcloud-portal-token-g<n>`), checks it, stores it, then deletes the older ones, which ends their tokens. Refused during a run. If it stops halfway, press it again; the next apply also removes token Secrets nothing stores. The audit log gets one entry, `ROTATE_CREDENTIAL` on the installation, with the names of the token Secret before and after (`fromSecret`, `toSecret`) and never a token. A rotation that stopped after it had stored the new credential gets that entry with outcome `FAILURE`. The old token does not end at that instant: the seed's API server remembers a token it has checked for some seconds (measured on a lab: the old token still answered 6 to 7 seconds after the rotation had returned). **A seed backup taken before a rotation is of no use after it**: the archive holds only the older token Secret, a seed restored from it refuses the stored credential, and ProxCloud cannot make a new one on a ready seed (the bootstrap token is gone). So run a backup by hand right after every rotation, as root on the seed's node: `vzdump <seed VMID> --storage <backup store> --mode snapshot --compress zstd` ([step 5](#when-the-seed-does-not-answer)) |
 | The cluster's admin kubeconfig | On the seed only (Cluster API keeps it). A run reads it into memory | Not stored by ProxCloud |
 | The seed ArgoCD's token for the cluster | In the seed's cluster Secret only; valid one year | Renewed by any apply when under 90 days are left. The page shows the expiry and warns under 30 days |
 | The providers' kubeconfig (service account `proxcloud` on the cluster) | In the two provider rows' encrypted secret | Written again by every apply |
@@ -653,14 +657,20 @@ read an archive when it holds `Datastore.Allocate` on the store, or `Datastore.A
 the store together with `VM.Backup` on the seed VM. So check both, as root on one node:
 
 ```sh
-pveum acl list | grep -E ' (/|/storage|/storage/<backup store>) '    # rows on the store and on its parents
+pveum user list                                  # every user
+pveum user token list <user>                     # every token of that user
 pveum user token permissions <user> <token name> --path /storage/<backup store>
 pveum user token permissions <user> <token name> --path /vms/<seed VMID>
 ```
 
-The first lists who holds a row on the store's path or on a parent of it (a row on `/` or
-`/storage` with propagate 1 reaches the store). Run the other two for every token the first one
-names and for the portal token and the `csi@pve` and `capmox@pve` tokens. On the lab the portal
+Run the last two for every token of every user, the portal token and the `csi@pve` and
+`capmox@pve` tokens among them. They print the rights the token really has on that path, whatever
+gives them. Reading the ACL rows of the store instead (`pveum acl list`) misses some: a row on
+`/`, `/storage` or `/vms` with propagate 1 reaches the store or the seed, so does a row on
+`/pool/<pool>` when the store or the seed VM is a member of that pool, and a row that names a user
+or a group also holds for every token of that user (or of the group's members) made without
+privilege separation. The two permission commands were run on the lab for single tokens; going
+through every token of every user was not. On the lab the portal
 token held `Datastore.AllocateSpace` on the backup store, and only the `NoAccess` row on
 `proxcloud-seed` kept `VM.Backup` on the seed from it: do not remove that row. These checks cover API rights
 only: on a file store (a directory, NFS, CIFS) the archive is also a file, which every user of the
@@ -779,16 +789,32 @@ finish.
 5. If the seed cannot be repaired: restore the seed VM from your backup, over the same VMID. Stage 3
    sets protection on the seed, and Proxmox refuses a restore over a protected VM
    (`unable to restore VM <vmid> - - protection mode enabled`), so the protection comes off first.
+
+   **Choose the archive first: it must be newer than the last replacement of the seed credential.**
+   **Replace the seed credential** makes a new token Secret on the seed, stores its token and deletes
+   the older Secrets. An archive from before holds only the older Secret, whose token ProxCloud no
+   longer stores: the restored seed answers the stored credential with `401`, **Apply this release**
+   fails `seed_api_unreachable` after five refusals, and nothing makes a new credential on a seed
+   that had become ready (stage 5 uses the bootstrap token only while no credential is stored, and
+   that token expired 3 hours after the seed was built). `qmrestore --force` has by then replaced
+   the disk of the old seed, and what is left is step 6. This is read from the code, not tried on a
+   lab. So compare the archive's time (`pvesm list <backup store> --vmid <vmid>`) with the last
+   `ROTATE_CREDENTIAL` entry of the installation in the audit log, whatever its outcome, and take
+   only an archive that is newer. The newest archives may hold the fault you restore for; when no
+   archive is both newer than that entry and sound, do not restore over the seed: step 6 applies.
+
    As root on the seed's node:
 
    ```sh
    qm config <vmid> | grep -E '^(net0|protection):'    # keep the output: the MAC to compare with
+   cp /etc/pve/firewall/<vmid>.fw /root/<vmid>.fw.before-restore
    qm shutdown <vmid>                                    # qm stop <vmid> when the guest does not answer: its disk is replaced
    qm set <vmid> --protection 0
    qmrestore <archive> <vmid> --force 1 --storage <boot store>
    qm config <vmid> | grep -E '^(net0|protection):'
-   cat /etc/pve/firewall/<vmid>.fw
-   qm set <vmid> --protection 1                          # only when the line above shows no "protection: 1"
+   diff /root/<vmid>.fw.before-restore /etc/pve/firewall/<vmid>.fw \
+     || cp /root/<vmid>.fw.before-restore /etc/pve/firewall/<vmid>.fw    # missing or changed: put the saved one back
+   qm set <vmid> --protection 1                          # only when the config shows no "protection: 1"
    qm start <vmid>
    ```
 
@@ -799,7 +825,10 @@ finish.
      of `net0`. `--unique` gives `net0` a new MAC; another VMID is a VM ProxCloud does not know.
    - **Check before the start**: `net0` carries the same MAC as before, the config reads
      `protection: 1` (set it back if the archive did not carry it), and `/etc/pve/firewall/<vmid>.fw`
-     is there with policy DROP and a rule for 6443. An apply writes the firewall rules again; it
+     is there with policy DROP and a rule for 6443. If the file is missing or differs from the copy
+     saved before the restore, copy the saved one back
+     (`cp /root/<vmid>.fw.before-restore /etc/pve/firewall/<vmid>.fw`) before `qm start`: without it
+     the seed's API on 6443 is open to its network until an apply writes the rules again. An apply
      does not set the protection again (stage 3 sets it when it attaches the first-boot CD only).
    - Then wait until `curl -k https://<seed address>:6443/readyz` reads `401`, and press
      **Apply this release**.
@@ -809,8 +838,9 @@ finish.
    and the content of the config and of the firewall file were unchanged (Proxmox takes and removes
    a `create` lock in the config before it refuses), and the seed started and answered again. The
    archive of that lab carried the firewall file and a config with `protection: 1` and the same
-   MAC. Not known: whether the restored VM keeps them and its address, and how Cluster API and
-   the stored seed credential take a seed whose state is as old as the backup.
+   MAC. Not known: whether the restored VM keeps them and its address, and how Cluster API
+   takes a seed whose state is as old as the backup. Known from the code, as above: the stored seed
+   credential is refused by a seed restored from an archive older than its last replacement.
 6. Without a backup the seed cannot be brought back: an apply never rebuilds a ready seed, because a
    new one would know nothing of the cluster's machines. What is left is the path of a lost seed:
    delete the tenant clusters and databases you can from their projects, delete the seed VM in
