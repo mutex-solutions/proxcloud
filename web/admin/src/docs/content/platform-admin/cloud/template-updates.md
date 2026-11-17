@@ -52,7 +52,13 @@ The first Ubuntu 26.04 OS and Kubernetes node images have a filesystem defect: t
 made from one can become read-only at a reboot. The affected versions are listed by digest in
 `docs/public-vm-sanitization.md` of the repository. Ubuntu 24.04 images are not affected.
 
-- Do not publish such a template to tenants. Import the re-exported image once it is listed here.
+- Do not publish such a template to tenants. The fixed images are published: for Ubuntu 26.04 the tag
+  `ubuntu-2604-os-20261116170652-72f0eaa3d0d4`, for Kubernetes nodes
+  `ubuntu-2604-k8s-1.35.10-20261116181221-72f0eaa3d0d4`,
+  `ubuntu-2604-k8s-1.36.6-20261116194043-72f0eaa3d0d4` and
+  `ubuntu-2604-k8s-1.37.2-20261116210716-72f0eaa3d0d4`.
+- Import the fixed tag, wait for its smoke test, publish it, then withdraw each affected digest you had
+  imported. Withdrawing changes no VM that already exists.
 - A VM already made from one: test and repair it as described in `docs/template-updates.md` of the
   repository (section *Known issue*).
 - Do not reboot a VM that already shows the ext4 error or a read-only root: shut it down and repair it first.

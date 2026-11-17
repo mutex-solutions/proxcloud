@@ -226,7 +226,9 @@ The QCOW2 is for a reviewed hypervisor import, **not `docker run`**. The byte ve
 
 ## Published images
 
-Every image below was exported, published, attested and verified by one run of the export workflow on `main`. The first four are 20 GiB templates built before the [smaller disk sizes](<template-build-disk.md>); the others are 5, 6 and 8 GiB ones, and portals up to `v0.5.2` skip them. `gh attestation verify` with the flags [above](#how-anyone-verifies-an-image) was repeated from a workstation for each digest and passed.
+Every image below was exported, published, attested and verified by one run of the export workflow on `main`. The first four are 20 GiB templates built before the [smaller disk sizes](<template-build-disk.md>); the others are 5, 6 and 8 GiB ones, and portals up to `v0.5.2` skip them. `gh attestation verify` with the flags [above](#how-anyone-verifies-an-image) was repeated from a workstation for each digest of the first eight rows and passed; for the four rows of 2026-11-16 it was not repeated, their export runs are green, which includes that command.
+
+The four rows of 2026-11-16 are the exports from commit `72f0eaa` with the [orphan-file fix](<public-vm-sanitization.md#known-issue-stale-orphan-file-inode-in-ubuntu-2604-images-published-before-the-fix>) and, in the node images, the AppArmor sysctl. Every earlier Ubuntu 26.04 row is an affected image of that known issue: use the rows of 2026-11-16 instead. `deploy/platform/platform-bom.yaml` pins the 1.35.10 node image and the native OS image of 2026-11-16.
 
 | Image | Digest | Tag | Run |
 | --- | --- | --- | --- |
@@ -238,6 +240,10 @@ Every image below was exported, published, attested and verified by one run of t
 | Kubernetes 1.37.2 node (Ubuntu 26.04), 8 GiB | `ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2604-k8s@sha256:1317d15301ae81ac1a49b9d450a55b68da396ea1b0165784a3bef928364171c9` | `ubuntu-2604-k8s-1.37.2-20261114171227-948be2705e12` | [43619815627](https://github.com/mutex-solutions/proxcloud/actions/runs/43619815627) |
 | Ubuntu 24.04 (native OS), 5 GiB | `ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2404@sha256:e31caeb71edea7bbb8d0957682bccf69dd3fd6be7037887412bb2e98ac00c499` | `ubuntu-2404-os-20261115015316-948be2705e12` | [43665067865](https://github.com/mutex-solutions/proxcloud/actions/runs/43665067865) |
 | Ubuntu 26.04 (native OS), 6 GiB | `ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2604@sha256:babd2a90dfdf4a8f62335e86efa06f82316126bb08a7f494d9869343055c5b97` | `ubuntu-2604-os-20261115023741-49992b8b28b2` | [43668656274](https://github.com/mutex-solutions/proxcloud/actions/runs/43668656274) |
+| Ubuntu 26.04 (native OS), 6 GiB, 2026-11-16 | `ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2604@sha256:d598846a2422cc84b9334972493a26f3fa62144e0324a062f306db8d5d6ea8db` | `ubuntu-2604-os-20261116170652-72f0eaa3d0d4` | [43914832750](https://github.com/mutex-solutions/proxcloud/actions/runs/43914832750) |
+| Kubernetes 1.35.10 node (Ubuntu 26.04), 8 GiB, 2026-11-16 | `ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2604-k8s@sha256:62de43787103a74e433203fbbf9bd85806011e673371591397bd30bedda03ea9` | `ubuntu-2604-k8s-1.35.10-20261116181221-72f0eaa3d0d4` | [43926310813](https://github.com/mutex-solutions/proxcloud/actions/runs/43926310813) |
+| Kubernetes 1.36.6 node (Ubuntu 26.04), 8 GiB, 2026-11-16 | `ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2604-k8s@sha256:53740d320b09de54fc3bae4a4ed68068a3ca9c7a45cf97e632dc771f5a3d738a` | `ubuntu-2604-k8s-1.36.6-20261116194043-72f0eaa3d0d4` | [43941788743](https://github.com/mutex-solutions/proxcloud/actions/runs/43941788743) |
+| Kubernetes 1.37.2 node (Ubuntu 26.04), 8 GiB, 2026-11-16 | `ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2604-k8s@sha256:bfed11a6831cff9e1dfeab20664796ff1ea73cf8ca5b3baa2153d6907e956210` | `ubuntu-2604-k8s-1.37.2-20261116210716-72f0eaa3d0d4` | [43956749668](https://github.com/mutex-solutions/proxcloud/actions/runs/43956749668) |
 
 The manifest and disk hashes for `vm_artifact.py verify`:
 
@@ -251,6 +257,10 @@ The manifest and disk hashes for `vm_artifact.py verify`:
 | Kubernetes 1.37.2 node (Ubuntu 26.04), 8 GiB | `67433d7e5e8fdd931af6f42c3bae167cab1a72f4fa2ef034d6434c0247f1e7b0` | `3d2326b55a1a528202b0d4c652d502e2b35b77c5e9f8c295726f9285abf9266d` |
 | Ubuntu 24.04 (native OS), 5 GiB | `46ea9966e945c47ec56a0c6fea3ba48d03f633aed0d8c340e81869adfb2c87b6` | `4d676ff6d9f70b86589909cad29bcf6bd1e1c4cd33a84a8d33883fc777dcb074` |
 | Ubuntu 26.04 (native OS), 6 GiB | `42f2ecd83122996b90437ff4bf2d411661666450530b8ed3c92a0e5bd149dc92` | `147be04f4bb1732ec8b5af5958926e01342d09693df6f5f8ff369558df3a49e6` |
+| Ubuntu 26.04 (native OS), 6 GiB, 2026-11-16 | `a62c3a08283f4ec3bc9101eb0a3f381da28054d22c37cdfb38008c7accf65b87` | `8200fb9e1e1e69eb2e77c455d0e7fd0453540dccf8754abd5781a940e58b4382` |
+| Kubernetes 1.35.10 node (Ubuntu 26.04), 8 GiB, 2026-11-16 | `06d94fd34a8af8fab2956068d804e4a2bbec7be373e58755d8b136b718789171` | `d15261bf4de104e5232c232345fab81e7c1c8ddbef23aedac18abf39bdb8c580` |
+| Kubernetes 1.36.6 node (Ubuntu 26.04), 8 GiB, 2026-11-16 | `07899d2dcdb5b4af01ad12c30fe05b6f8d65a89bda9f40d3e54556deb54ed995` | `b68835895135fc97ec4bd117e0bd12b7b7155a746d42326a9f9ce51b3c7fe080` |
+| Kubernetes 1.37.2 node (Ubuntu 26.04), 8 GiB, 2026-11-16 | `853677eb4f606919f998643fd77dc87f7ee0d6ee474197db56ac88011311add8` | `bad11cba43943601fd7f6766aef94dd9e4d0c27d001e7b7bd800a7ce9ee2070a` |
 
 Publication is not node acceptance: no kubeadm join, NodeReady or portal import of these digests is claimed.
 

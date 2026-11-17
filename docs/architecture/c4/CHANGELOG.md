@@ -4,6 +4,23 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-17: P3, the platform BOM pins the re-exported Ubuntu 26.04 images
+
+**What changed:** `deploy/platform/platform-bom.yaml` names the Kubernetes 1.35.10 node image
+`ubuntu-2604-k8s-1.35.10-20261116181221-72f0eaa3d0d4` (`sha256:62de4378...`) and the seed image
+`ubuntu-2604-os-20261116170652-72f0eaa3d0d4` (`sha256:d598846a...`), both as ghcr.io serves them. The published
+images table, the known-issue texts and the affected-tag table (now all ten tags) follow. No container, relation or
+boundary changed.
+
+**Why:** the images pinned before have the stale ext4 orphan-file field (a root that goes read-only at a reboot), and
+the earlier node image lacks the AppArmor sysctl without which no PostgreSQL database starts. Both fixes are in the
+images exported from `72f0eaa`.
+
+**Diagrams:** none changed.
+
+**Not verified:** a platform installed from these images on a lab; a VM booted from them outside the export's cold
+boot. A platform installed from the previous BOM is refused (`bom_unsupported`) and runs on affected images: repair
+its VMs, or Remove and install again.
 ## 2026-11-16: P3, the platform BOM pins cluster chart 0.1.12
 
 **What changed:** `deploy/platform/platform-bom.yaml` names `proxmox-kamaji-cluster` 0.1.12 with the digest ghcr.io
