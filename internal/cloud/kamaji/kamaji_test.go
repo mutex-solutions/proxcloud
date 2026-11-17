@@ -438,11 +438,17 @@ type fakeAPI struct {
 	mds        []map[string]any
 	crs        map[string][]map[string]any // plural → objects (ListCRs)
 	crsErr     error
+	crsErrFor  map[string]error // plural → error of that kind only
+	listed     []string         // plurals ListCRs was asked for, in order
 	deleted    []string
 	annotated  map[string]map[string]string // ns/name → annotations
 }
 
 func (f *fakeAPI) ListCRs(_ context.Context, _, _, plural, _, _ string) ([]map[string]any, error) {
+	f.listed = append(f.listed, plural)
+	if err := f.crsErrFor[plural]; err != nil {
+		return nil, err
+	}
 	return f.crs[plural], f.crsErr
 }
 
@@ -598,8 +604,16 @@ func (f *fakeAPI) ListTenantControlPlanes(_ context.Context, ns, labelSelector s
 	}
 	return out, nil
 }
-func (f *fakeAPI) ListMachineDeployments(_ context.Context, _, _ string) ([]map[string]any, error) {
-	return f.mds, nil
+
+// ListMachineDeployments honours the cluster-name selector for objects that carry the label (older fixtures do not).
+func (f *fakeAPI) ListMachineDeployments(_ context.Context, _, selector string) ([]map[string]any, error) {
+	var out []map[string]any
+	for _, md := range f.mds {
+		if digStr(md, "metadata", "labels", labelClusterName) == "" || matchSelector(md, selector) {
+			out = append(out, md)
+		}
+	}
+	return out, nil
 }
 func (f *fakeAPI) ListPersistentVolumes(_ context.Context) ([]map[string]any, error) { return nil, nil }
 

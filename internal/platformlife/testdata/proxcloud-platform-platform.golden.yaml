@@ -235,6 +235,15 @@ rules:
       - cluster.x-k8s.io
     resources:
       - machinedeployments
+      - machines
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - infrastructure.cluster.x-k8s.io
+    resources:
+      - proxmoxmachines
+      - proxmoxclusters
     verbs:
       - get
       - list

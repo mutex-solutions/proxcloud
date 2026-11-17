@@ -36,6 +36,8 @@ func (p *ClusterSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, 
 	}
 	ns := NamespaceFor(p.projectID)
 	out := make([]cloud.CloudResource, 0, len(apps))
+	// The Machines of the namespace, read at most once and only when a cluster has something to explain.
+	var objs *progressObjs
 	for _, app := range apps {
 		id := digStr(app, "metadata", "name")
 		if id == "" {
@@ -57,7 +59,20 @@ func (p *ClusterSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, 
 			return nil, err
 		}
 		data := clusterData(app, tcp, mds)
-		if c := data["cluster"].(map[string]any); settledButProgressing(app, c) {
+		c := data["cluster"].(map[string]any)
+		if needsProgress(c, mds) {
+			if objs == nil {
+				read, err := s.readProgress(ctx, ns)
+				if err != nil {
+					return nil, err
+				}
+				objs = &read
+			}
+			if objs.ok {
+				addProgress(c, app, mds, *objs, time.Now())
+			}
+		}
+		if settledButProgressing(app, c) {
 			// A failed read keeps Argo's Progressing: the next sync tries again.
 			if parts, err := s.addonParts(ctx, ns); err == nil && readyPastResourceSet(app, parts, time.Now()) {
 				c["status"] = "READY"
