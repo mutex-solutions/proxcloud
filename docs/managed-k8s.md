@@ -324,7 +324,8 @@ The placement rule (`kamajiPlaceGroups`, `pve.PlaceReplicas`, `pve.RemoveReplica
    writes the baseline as it is and asks Proxmox nothing (so the first edit of a cluster moved to 0.1.13 stores the
    even split it already runs).
 2. **Scale-up and create** place each new replica one at a time on a node that
-   - holds the image (an entry of the image string) and is online,
+   - holds the image (an entry of the image string, whose template VMID Proxmox still shows on that node) and is
+     online,
    - has the cluster's worker storage active (`proxmox.storage` in the values, fixed at create),
    - has room on that storage for the root disk with the provider's storage headroom (`storageHeadroomPct`),
    - stays under `maxcpu × overcommitCPU` with the flavor's vCPUs,
@@ -336,11 +337,15 @@ The placement rule (`kamajiPlaceGroups`, `pve.PlaceReplicas`, `pve.RemoveReplica
    scheduler. On shared storage a disk is taken from every node's view of the pool.
 3. **Workers not built yet count.** A clone takes minutes. The workers of every cluster of this Kubernetes provider
    that are decided and that Proxmox does not have yet (placement less the VMs tagged `pc-k8s-<clusterId>` per node)
-   count as VMs of that cluster's largest group. Decisions on one Proxmox provider run one at a time (a lock from the
+   count as VMs of that cluster's largest group: its memory and CPU on the node, and its root disk on the cluster's
+   worker storage (off that node's pool, or off every node's view of a shared one), which Proxmox still shows free.
+   Decisions on one Proxmox provider run one at a time (a lock from the
    snapshot to the Application that records the decision), so two creates in a row do not both take the last free node.
 4. **Scale-down** removes each replica from the node whose MachineDeployment has the most replicas that are not ready
    (a stuck machine goes before a healthy one), then the node with the most replicas of the group, then the one with
-   the least free memory, then by name. It reads no capacity.
+   the least free memory, then by name. Nothing is checked, so it never fails on Proxmox: the nodes' free memory is
+   read for the order only, and when Proxmox does not answer (or the MachineDeployments cannot be read) that
+   criterion is skipped.
 5. **The image string changes** (an UPGRADE to a version published on other nodes, or the operator edited
    `config.cluster.versions` and the next node group edit picks it up): replicas on nodes that still hold the image
    stay, a new node starts at 0, and the replicas of a node that no longer holds it are placed as new ones, by rule 2.
@@ -351,6 +356,7 @@ Refusals are all or nothing and happen before anything is reserved, minted or wr
 |---|---|
 | `409 Node group "G": only K of N new workers fit (flavor F: X vCPU, Y MB, Z GiB disk). Reduce the count, choose a smaller flavor, or contact the operator.` | Not every new replica has a node |
 | `409 Node group "G": no node that holds this version's image has the cluster's storage. Contact the operator.` | The cluster's storage is active on none of the image's nodes |
+| `409 Node group "G": no node still holds this version's image. Contact the operator.` | The template of the image string is gone from every node that has the cluster's storage (removed or moved after the provider's versions were set) |
 | `503 proxmox cluster unavailable` | Nodes, VMs or storage could not be read |
 | `409 Another cluster change is being placed on this provider. Try again in a moment.` | The lock was held for 30 s |
 

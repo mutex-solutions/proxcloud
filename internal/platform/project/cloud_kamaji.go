@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"slices"
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
@@ -180,27 +179,9 @@ func (h *Handler) kamajiAction(w http.ResponseWriter, r *http.Request, proj *Pro
 			}
 			defer release()
 		}
+		placer := h.kamajiPlacer(r.Context(), ks, compute, computeErr, proj, cr.ExternalID)
 		err := ks.PatchClusterChartValues(r.Context(), cr.ExternalID, func(values map[string]any, chartVersion string) error {
-			current, _ := values["kubernetesVersion"].(string)
-			// One minor at a time, never backwards (plan §3.4) — validated against the live
-			// values, not the cache, so a stale sync can't let a bad jump through.
-			if err := kamaji.ValidateUpgradePath(current, version); err != nil {
-				return httpx.BadRequest(err.Error())
-			}
-			values["kubernetesVersion"] = version
-			prevPlaced := kamaji.GroupPlacements(values)
-			// Node images follow the curated version→image matrix: rotate every group to the new
-			// version's image (a MachineDeployment template rotation = CAPI rolling replace). A
-			// group with an image VARIANT stays on that variant — resolved against the target
-			// version, and the upgrade is refused when the variant has no image there, because
-			// silently rolling a GPU pool onto the plain image is a broken pool with extra steps.
-			if err := rotateNodeGroupImages(values, d, version); err != nil {
-				return err
-			}
-			// The target version's image may sit on other nodes: workers on a node that has none are placed again
-			// by capacity; the rest stay where they are.
-			rendered, _ := values["nodeGroups"].([]any)
-			return h.kamajiPlaceEdit(r.Context(), ks, compute, computeErr, proj, cr.ExternalID, chartVersion, prevPlaced, values, rendered)
+			return kamajiUpgradeValues(values, chartVersion, version, d, placer)
 		})
 		if err != nil {
 			h.fail(w, err)
@@ -241,34 +222,9 @@ func (h *Handler) kamajiAction(w http.ResponseWriter, r *http.Request, proj *Pro
 			return true
 		}
 		defer release()
+		placer := h.kamajiPlacer(r.Context(), ks, compute, nil, proj, cr.ExternalID)
 		err = ks.PatchClusterChartValues(r.Context(), cr.ExternalID, func(values map[string]any, chartVersion string) error {
-			version, _ := values["kubernetesVersion"].(string)
-			prevFlavor, prevImage, prevVariant := prevGroupIndex(values)
-			prevPlaced := kamaji.GroupPlacements(values)
-			// Flavor allowlist applies to NEW or flavor-CHANGED groups only — an admin narrowing
-			// the allowlist must not brick resizes of groups that already run a since-removed
-			// flavor.
-			if len(d.Flavors) > 0 {
-				for _, ng := range groups {
-					if prevFlavor[ng.Name] == ng.FlavorID {
-						continue
-					}
-					if !slices.Contains(d.Flavors, ng.FlavorID) {
-						return httpx.BadRequest(fmt.Sprintf("node group %q: flavor %q is not offered by this provider", ng.Name, ng.FlavorID))
-					}
-				}
-			}
-			rendered := kamaji.NodeGroupValues(d, version, groups)
-			if err := applyNodeGroupImages(rendered, prevImage, prevVariant, version); err != nil {
-				return err
-			}
-			// Placement is decided here, from the live values and not the cached row: existing workers stay where
-			// they are, only the difference is placed or removed.
-			if err := h.kamajiPlaceEdit(r.Context(), ks, compute, nil, proj, cr.ExternalID, chartVersion, prevPlaced, values, rendered); err != nil {
-				return err
-			}
-			values["nodeGroups"] = rendered
-			return nil
+			return kamajiSetGroupsValues(values, chartVersion, groups, d, placer)
 		})
 		if err != nil {
 			h.fail(w, err)

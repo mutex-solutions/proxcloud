@@ -35,15 +35,16 @@ A node image exists per Proxmox node (the provider's **Kubernetes versions**, `n
 
 From cluster chart 0.1.13 ProxCloud decides how many workers of a group each node runs, instead of the chart's even split:
 
-- a new worker goes to a node that holds the image, has the cluster's storage with room for the disk (your storage headroom), stays under your CPU overcommit and has the memory free;
+- a new worker goes to a node that holds the image (the template is still on that node), has the cluster's storage with room for the disk (your storage headroom), stays under your CPU overcommit and has the memory free;
 - among those, the node with the fewest workers of that group, then the most free memory;
 - running workers never move; a scale-down removes a stuck worker first and empties a node last;
-- workers that are decided and not cloned yet count, so two creates in a row do not take the same free node;
+- workers that are decided and not cloned yet count, with their memory, CPU and root disk, so two creates in a row do not take the same free node or overfill a node's storage;
 - a request that does not fit is refused with how many workers fit, and nothing is created.
 
 Things to know:
 
 - **Existing clusters keep the even split** until you set the provider's chart version to 0.1.13 and **Bump** each cluster. After the bump nothing moves until the cluster's node groups change.
 - **A version published on fewer nodes moves workers.** At a cluster's next upgrade or node group edit, the workers on a node that no longer holds the image are deleted at once and rebuilt on the other nodes. Room for them is checked first.
+- **A template that is gone.** A node whose template was removed gets no new worker even while **Kubernetes versions** still names it; when no node holds the image the request is refused with *no node still holds this version's image*. Correct the versions line.
 - **One storage name per cluster.** A node where the cluster's worker storage is not active gets no worker.
 - **Local volumes are not followed.** A tenant who scales a group below the number of nodes it runs on is warned in the console; ProxCloud does not read PersistentVolumes.

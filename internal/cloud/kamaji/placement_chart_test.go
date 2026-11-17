@@ -154,6 +154,13 @@ func TestSetPlacement(t *testing.T) {
 	}
 }
 
+func TestImageTemplates(t *testing.T) {
+	got := ImageTemplates("pve1=9201, pve2=9202,pve3=,=9204,pve5=abc,bare")
+	if len(got) != 2 || got["pve1"] != 9201 || got["pve2"] != 9202 {
+		t.Errorf("ImageTemplates = %v, want pve1 and pve2 only", got)
+	}
+}
+
 func TestChartHasPlacement(t *testing.T) {
 	for v, want := range map[string]bool{"0.1.12": false, "0.1.13": true, "0.1.13-rc1": true, "0.2.0": true, "": false, "latest": false} {
 		if ChartHasPlacement(v) != want {
@@ -203,5 +210,22 @@ func TestPlacementReads(t *testing.T) {
 	unready, err := svc.UnreadyReplicas(ctx, spec.ProjectID, spec.ID)
 	if err != nil || unready["workers"]["pve1"] != 0 || unready["workers"]["pve2"] != 2 {
 		t.Errorf("UnreadyReplicas = %v, %v", unready, err)
+	}
+	// A group whose name is the start of another's, and node names with a dash: the group comes from the label and the
+	// node is what follows "<cluster>-<group>-".
+	unreadyMD := func(group, node string, want, ready float64) map[string]any {
+		return map[string]any{"metadata": map[string]any{"name": spec.ID + "-" + group + "-" + node, "labels": map[string]any{labelNodeGroup: group}},
+			"spec": map[string]any{"replicas": want}, "status": map[string]any{"readyReplicas": ready}}
+	}
+	api.mds = []map[string]any{
+		unreadyMD("work", "pve1", 3, 2), unreadyMD("work", "gpu-pve1", 1, 1),
+		unreadyMD("work-gpu", "pve1", 2, 0), unreadyMD("work-gpu", "gpu-pve1", 4, 1),
+		// Not the chart's name for its group: left out, never guessed.
+		{"metadata": map[string]any{"name": "other-work-pve9", "labels": map[string]any{labelNodeGroup: "work"}}, "spec": map[string]any{"replicas": float64(5)}},
+	}
+	unready, err = svc.UnreadyReplicas(ctx, spec.ProjectID, spec.ID)
+	work, gpu := unready["work"], unready["work-gpu"]
+	if err != nil || len(unready) != 2 || len(work) != 2 || work["pve1"] != 1 || work["gpu-pve1"] != 0 || len(gpu) != 2 || gpu["pve1"] != 2 || gpu["gpu-pve1"] != 3 {
+		t.Errorf("UnreadyReplicas with prefix names = %v, %v", unready, err)
 	}
 }

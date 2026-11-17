@@ -3,6 +3,7 @@ package kamaji
 import (
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -355,6 +356,18 @@ func ImageNodes(image string) []string {
 	for _, pin := range strings.Split(image, ",") {
 		if node, _, ok := strings.Cut(strings.TrimSpace(pin), "="); ok && node != "" {
 			out = append(out, node)
+		}
+	}
+	return out
+}
+
+// ImageTemplates reads an image string as node → template VMID. A pin whose VMID is not a number is left out.
+func ImageTemplates(image string) map[string]int {
+	out := map[string]int{}
+	for _, pin := range strings.Split(image, ",") {
+		node, id, _ := strings.Cut(strings.TrimSpace(pin), "=")
+		if vmid, err := strconv.Atoi(strings.TrimSpace(id)); err == nil && node != "" {
+			out[node] = vmid
 		}
 	}
 	return out

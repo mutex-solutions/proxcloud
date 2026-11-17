@@ -25,10 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0.1.13, `docs/managed-k8s.md`). On a site without shared storage a node group is one MachineDeployment per node
   that holds the image, and the chart split the count evenly, so a full node still got its share and its machines
   hung. ProxCloud now decides the split and stores it (`machinePlacement`): a new replica goes to a node that holds
-  the image, has the cluster's storage with room for the disk (storage headroom), stays under the CPU overcommit and
+  the image (its template is still on that node), has the cluster's storage with room for the disk (storage
+  headroom), stays under the CPU overcommit and
   has the memory free; among those the node with the fewest replicas of the group, then the most free memory. It is
   decided at create, scale-up and upgrade, and is stable: running workers never move, only the difference is placed
-  or removed. Workers that are decided and not cloned yet count, and decisions on one Proxmox provider run one at a
+  or removed. Workers that are decided and not cloned yet count (memory, CPU and root disk), and decisions on one Proxmox provider run one at a
   time. Scale-down takes a stuck replica first and empties a node last. A request that does not fit answers 409
   with how many fit, before anything is reserved. The console warns when a group is scaled below the number of
   hosts it runs on (volumes on a host's local storage stay there). A cluster on chart 0.1.12 or older is unchanged;
