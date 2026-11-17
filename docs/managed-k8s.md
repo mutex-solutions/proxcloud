@@ -190,6 +190,73 @@ kubectl get tenantcontrolplanes,machinedeployments -n pc-<projectId>
   the ordinary instance rules; never add k8s rules for them.
 - Example rules live in `deploy/seed/price-plan-seed.json`.
 
+### Provisioning status: reason and "needs attention"
+
+`cluster.status` stays what ArgoCD reports (PENDING, PROGRESSING, READY, DEGRADED). Next to it the sync says why a
+cluster is not there yet. While a node group is unsettled (a MachineDeployment whose `replicas`, `readyReplicas` or
+`upToDateReplicas` differ from what it asks for, or a Machine that is not Running with a Ready node), its entry in
+`cluster.node_groups` carries `progress = {code, since, machines, attention}`:
+
+- `code`: the reason of the group's worst machine (one that needs attention now, then the least advanced, then the
+  oldest). The table below has the codes.
+- `since`: when the group last made progress (RFC 3339).
+- `machines`: how many machines share the code.
+- `attention`: the group made no progress for longer than the bound of its least advanced machine, or the code is one
+  that is not retried.
+
+`cluster.attention = {code, since}` is the same for the whole cluster: `control_plane_stalled` or
+`provider_access_refused`. Both fields are absent on a settled cluster. Attention is not a terminal state: it is
+computed again at every sync and goes away when the cluster recovers. The consoles show an amber **Needs attention**
+chip on the list and the cluster page, and read a cluster that needs attention once a minute instead of every 15 s.
+
+The source is what Cluster API and CAPMOX report on the management cluster: `Machine`
+(`cluster.x-k8s.io/v1beta2`), `ProxmoxMachine` and `ProxmoxCluster`
+(`infrastructure.cluster.x-k8s.io/v1alpha2`). They are read once per project sync, and only when a cluster has
+something to explain. Only the code and the time are stored: an upstream message names PVE nodes, VMIDs and storage
+paths and never reaches a tenant. The first match in this order wins:
+
+| Code | When | The tenant reads | Attention |
+|---|---|---|---|
+| `provider_access_refused` | A ProxmoxCluster or ProxmoxMachine condition that is not True carries Proxmox's refusal of the token ("authentication failure", "not authorized", "401 unauthorized"), or the ProxmoxCluster has no `ProxmoxAvailable` condition 10 min after it was made (CAPMOX reports only after it opened the Proxmox API) | The platform cannot reach the virtualization provider. Contact the operator. | at once |
+| `no_capacity` | The Machine's failure message or the ProxmoxMachine's condition says CAPMOX could not reserve memory on the node (`cannot reserve ... of memory on node`, reason `VMProvisionFailed` at CAPMOX v0.9.2) | The host has no free capacity for this machine, and it is not retried. Reduce the count or pick a smaller flavor; to retry, reduce the count by one and raise it again. | at once |
+| `vm_create_failed` | Reason `VMProvisionFailed` or `TaskFailed`, phase `Failed`, or a failure message on the Machine: CAPMOX skips the machine from then on | Creating the virtual machine failed and is not retried. Reduce the count by one and raise it again, or delete and recreate the cluster. | at once |
+| `vm_create_retrying` | Reason `CloningFailed` or `PoweringOnFailed` | Creating the virtual machine failed; retrying automatically. | by bound |
+| `node_not_ready` | Phase Running, `NodeReady` not True | The node joined but is not Ready. Check it with kubectl. | 20 min |
+| `waiting_control_plane` | Phase Pending and the control plane is not Ready | Waiting for the control plane. | never |
+| `creating_vm` | Reason `Cloning`, `WaitingForDiskReconciliation`, `WaitingForStaticIPAllocation`, `WaitingForBootstrapDataReconciliation`, or no ProxmoxMachine condition yet | Creating the virtual machine. | by bound |
+| `starting_vm` | Reason `WaitingForVMPowerUp`, `WaitingForCloudInit`, `WaitingForBootstrapReady`, `WaitingForClusterAPIMachineAddresses` | Starting the virtual machine. | by bound |
+| `not_joined` | Phase Provisioned, or `NodeHealthy` with reason `NodeDoesNotExist` | The machine runs but has not joined the cluster. Check that the cluster's network has a router or gateway and reaches the cluster endpoint, then reduce the count by one and raise it again. | 15 min |
+| `provisioning` | Anything else, and a machine that Cluster API has not made yet | Preparing the machine. | by bound |
+| `control_plane_stalled` | No endpoint, or the control plane has no status or is `Provisioning`, 15 min after the create | The control plane is taking longer than expected. Wait, delete and recreate, or contact the operator. | n/a |
+
+The bounds, counted from the group's last progress (the newest of its machines' creation, `status.lastUpdated` and,
+for a running machine, the last change of `NodeReady`):
+
+| State of the least advanced machine | Bound |
+|---|---|
+| Not made yet (counted from the MachineDeployment's creation and ArgoCD's last finished sync) | 15 min |
+| Pending | 15 min; never while the control plane is not Ready |
+| Provisioning | 30 min, plus 5 min for each further machine of the cluster in Provisioning, at most 90 min. CAPMOX clones all machines at once, so on slow disks each one takes longer |
+| Provisioned, no node | 15 min |
+| Running, node not Ready | 20 min (the first node waits for the CNI) |
+
+A machine that is being deleted (a scale-down, the old half of a rollout) counts neither as progress nor as a stall.
+Not covered: a control plane stuck in a later upgrade and a machine stuck in Deleting have no clock; ArgoCD sync
+errors and MachineHealthCheck are not read; the admin cluster list has no attention badge.
+
+**Operator detail.** Admin console, the Kubernetes provider's page, **Managed clusters**, **Machines** on a cluster's
+row (`GET /api/v1/admin/service/{id}/k8s-clusters/{clusterId}/machines`, permission `admin:service:read`): every
+worker Machine read live, with its phase, VMID and PVE node, addresses, the same code and attention, and the
+conditions with their upstream reason and message. Credentials are cut out of the messages (among them
+`PVEAPIToken=user@realm!id=<secret>`) and each is clipped to 400 characters.
+
+**RBAC.** The sync needs `get` and `list` on `machines.cluster.x-k8s.io` and on `proxmoxmachines` and
+`proxmoxclusters.infrastructure.cluster.x-k8s.io`. `deploy/mgmt-cluster/rbac.yaml` and chart `proxcloud-platform`
+0.1.2 grant them. On an install with the older ClusterRole nothing breaks: the sync leaves `progress` and `attention`
+out (a 403 or 404 on the read), and the Machines dialog answers "The ProxCloud service account cannot read Machines:
+re-apply deploy/mgmt-cluster/rbac.yaml". Any other error on the read fails that project's sync, so the cached row
+keeps its last state instead of losing the flag.
+
 ## 5. Troubleshooting
 
 Start from the ArgoCD Application — it aggregates everything the chart rendered:
@@ -210,6 +277,7 @@ kubectl get application <cluster-id> -n argocd -o jsonpath='{.status.health}{"\n
 | Tenant `LoadBalancer` Service `<pending>` for up to 15 minutes after create | The MetalLB pool arrives by ClusterResourceSet, which retries until the chart's CRDs and MetalLB's webhook answer, with CAPI's growing backoff between tries: on the lab it applied 8 minutes after the cluster was Available. The Application reads `Progressing` until then; the portal shows the cluster READY once the control plane, every node group and the sync are done and the ClusterResourceSet is the one part left, for up to 30 minutes after create. A cluster still `PROGRESSING` past that: `kubectl get clusterresourceset -n pc-<projectId>` and its `ResourcesApplied` condition. |
 | Application `OutOfSync` / `SyncFailed` | `argocd app get <cluster-id>` sync error. "not permitted in project proxcloud-k8s" → the chart needs a cluster-scoped resource; add exactly that group/kind to `deploy/mgmt-cluster/appproject.yaml`. Chart pull errors → registry or pin problem (§1.4). |
 | Application Healthy but cluster unusable | Health checks not loaded or wrong: verify the `argocd-health.yaml` keys exist in `argocd-cm` and the application controller was restarted. |
+| Cluster shows **Needs attention** | The reason is on the cluster page per node group; the table under "Provisioning status" in §3 has every code. The operator's detail is **Machines** on the provider page. `not_joined` on the lab of 2026-11-17 was a cluster network without a router: the VM ran, and its kubelet never reached the API endpoint. |
 | Cluster stuck `PROGRESSING`, no endpoint | `kubectl get tcp -n pc-<projectId>` → TenantControlPlane status. Pending CP pods → management-cluster capacity or DataStore. |
 | Delete hangs | The Application keeps its finalizer while the cascade runs; inspect what is left in the tree (`argocd app get`). Remove the finalizer by hand only if you accept orphaning the rendered objects, then clean up per §3. |
 | Orphaned namespaces/secrets | §3 orphan-finalization check. |

@@ -200,6 +200,39 @@ answers `409` with the reason in `errors.details`:
 | `scheduled_for_deletion` / `deletion_in_progress` / `deleted` | The project is on its way out. |
 | `not_enabled` | Any other case where the project is not ENABLED. |
 
+Managed Kubernetes status: a `KUBERNETES_CLUSTER` resource's `data.cluster` carries, next to `status`, two optional
+fields that say why a cluster is not there yet. Both are absent on a settled cluster, and on an install whose
+management-cluster RBAC predates them.
+
+```json
+{"cluster": {"status": "PROGRESSING",
+  "attention": {"code": "control_plane_stalled", "since": "2026-11-17T09:12:00Z"},
+  "node_groups": [{"name": "workers", "count": 2, "ready_replicas": 1, "phase": "ScalingUp",
+    "progress": {"code": "not_joined", "since": "2026-11-17T09:20:00Z", "machines": 1, "attention": true}}]}}
+```
+
+`progress.code` is one of `provider_access_refused`, `no_capacity`, `vm_create_failed`, `vm_create_retrying`,
+`waiting_control_plane`, `creating_vm`, `starting_vm`, `not_joined`, `node_not_ready`, `provisioning`;
+`attention.code` is `control_plane_stalled` or `provider_access_refused`. `attention: true` means no progress for a
+bounded time or an error that is not retried; it clears by itself. `status` is unchanged by either. The codes, their
+texts and the bounds: [managed-k8s.md](managed-k8s.md#provisioning-status-reason-and-needs-attention).
+
+`GET /api/v1/admin/service/{id}/k8s-clusters/{clusterId}/machines` (`admin:service:read`) is the operator's detail,
+read live from the management cluster:
+
+```json
+{"proxmoxCluster": {"conditions": [{"type": "ProxmoxAvailable", "status": "True"}]},
+ "machines": [{"name": "pc-c-1-workers-pve2-x7k2p-9d4tq", "nodeGroup": "workers", "phase": "Provisioned",
+   "lastUpdated": "2026-11-17T09:20:00Z", "nodeRef": "", "vmid": 142, "proxmoxNode": "pve2",
+   "addresses": ["10.20.0.12"], "code": "not_joined", "attention": true, "failureMessage": "",
+   "conditions": [{"type": "NodeHealthy", "status": "Unknown", "reason": "NodeDoesNotExist",
+     "message": "Waiting for a Node with spec.providerID proxmox://142 to exist", "lastTransitionTime": "2026-11-17T09:20:00Z"}]}]}
+```
+
+`conditions` joins the Machine's and its ProxmoxMachine's. Messages have credentials cut out and are clipped to 400
+characters. `404` for a cluster that is not this provider's; `502` with "re-apply deploy/mgmt-cluster/rbac.yaml" when
+the service account may not read Machines.
+
 ### Platform setup — `/api/v1/admin/setup`
 
 Operator console surface for bringing a new install to its first tenant.

@@ -4,6 +4,22 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-17: managed Kubernetes, provisioning reason and "needs attention"
+
+**What changed:** the kamaji status sync (`internal/cloud/kamaji/progress.go`) reads three more kinds on the
+management cluster, `Machine`, `ProxmoxMachine` and `ProxmoxCluster`, and stores a reason code per unsettled node
+group and a cluster-level attention entry in the cached `KUBERNETES_CLUSTER` row. One admin route reads the same
+objects live (`GET /admin/service/{id}/k8s-clusters/{clusterId}/machines`). The provider ClusterRole
+(`deploy/mgmt-cluster/rbac.yaml`, chart `proxcloud-platform` 0.1.2) gains `get` and `list` on them. No container or
+boundary changed: the relation ProxCloud API to the management cluster's Kubernetes API reads more kinds.
+
+**Why:** a cluster whose worker never joined read PROGRESSING for ever with no reason (lab, 2026-11-17).
+
+**Diagrams:** none changed; the read is on the existing "reads cluster status" relation of C2 and C3.
+
+**Not verified:** on a lab. The CAPMOX reasons and the insufficient-memory message were read from its source at
+v0.9.2.
+
 ## 2026-11-17: P3, the platform BOM pins the re-exported Ubuntu 26.04 images
 
 **What changed:** `deploy/platform/platform-bom.yaml` names the Kubernetes 1.35.10 node image

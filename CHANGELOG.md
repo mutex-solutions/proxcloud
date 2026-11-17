@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Managed Kubernetes: why a cluster is not there yet, and "needs attention"** (`internal/cloud/kamaji/progress.go`,
+  `docs/managed-k8s.md`). A cluster whose provisioning broke half-way used to read PROGRESSING for ever with no
+  reason. The status sync now reads what Cluster API and CAPMOX report per worker (Machine, ProxmoxMachine) and on
+  the provider access (ProxmoxCluster) and stores, per unsettled node group, `progress = {code, since, machines,
+  attention}`, and for the cluster `attention = {code, since}`. Eleven reason codes (a machine that never joined, a
+  clone that is retried, one CAPMOX gave up on, no capacity on the host, a refused token, a control plane that never
+  came up, and the plain steps); the tenant gets a fixed text per code and what to do, never the upstream message.
+  A group or control plane without progress for a bounded time (15 to 90 min by state) needs attention, shown as an
+  amber chip on the list and the cluster page; it is recomputed at every sync and clears by itself, and
+  `cluster.status` is unchanged. The node group table has a Status column. Operators get the full detail in the
+  admin console (**Machines** on a cluster's row of the Kubernetes provider page;
+  `GET /admin/service/{id}/k8s-clusters/{clusterId}/machines`, `admin:service:read`), with credentials cut out of
+  the upstream messages. The sync needs read access to `machines`, `proxmoxmachines` and `proxmoxclusters`:
+  `deploy/mgmt-cluster/rbac.yaml` and chart `proxcloud-platform` 0.1.2 grant it. An existing install must re-apply
+  `rbac.yaml` (or take the platform chart 0.1.2); until then the new fields are absent and nothing else changes.
+  Not verified on a lab.
+
 - **Operator documentation for managed services from the console** (`docs/managed-services.md`, ADR 0009): when to
   use this path and when the installer's split mode, the prerequisites, the Proxmox identities script (what it
   creates, the fixed token ids, what happens when a token exists), the four setup steps with every check, the eleven
