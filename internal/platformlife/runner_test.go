@@ -465,6 +465,37 @@ func TestLeaseThatCannotBeRenewedStopsTheRun(t *testing.T) {
 	}
 }
 
+// A process that stops during a run gives the job back at once and without an attempt (a Defer), so the next start
+// does not wait out the lease. When the lease is lost by then, the store refuses and nothing is given back.
+func TestCleanStopReleasesTheJob(t *testing.T) {
+	for name, lost := range map[string]bool{"lease held": false, "lease lost": true} {
+		e := newEnv(t, RunApply)
+		parent, stop := context.WithCancel(context.Background())
+		e.r.Preflight = func(ctx context.Context, _ *Installation) ([]Check, error) {
+			if lost {
+				e.jobs.mu.Lock()
+				e.jobs.lost = true
+				e.jobs.mu.Unlock()
+			}
+			stop()
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		e.r.defaults()
+		e.r.perform(parent, e.job)
+		want := "defer:shutdown"
+		if lost {
+			want = ""
+		}
+		if end := e.jobs.last(); end != want {
+			t.Fatalf("%s: end %q, want %q", name, end, want)
+		}
+		if run, in, _ := e.state.snapshot(); Terminal(run.State) || in.Status.Phase == PhaseFailed {
+			t.Fatalf("%s: run %s, phase %s", name, run.State, in.Status.Phase)
+		}
+	}
+}
+
 // A passed absolute deadline fails the stage with the code of its last observation (or <stage>_timeout).
 func TestDeadline(t *testing.T) {
 	e := newEnv(t, RunApply)
