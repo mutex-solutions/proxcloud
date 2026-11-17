@@ -563,7 +563,19 @@ func (s *Service) PatchClusterChartValues(ctx context.Context, clusterID string,
 		if values == nil {
 			return fmt.Errorf("kamaji: cluster %s: application carries no values", clusterID)
 		}
-		return mutate(values, digStr(app, "spec", "source", "targetRevision"))
+		if err := mutate(values, digStr(app, "spec", "source", "targetRevision")); err != nil {
+			return err
+		}
+		// When the values last changed: the status sync counts a machine that is not made yet from here, not from
+		// ArgoCD's previous sync (progress.go).
+		meta, _ := app["metadata"].(map[string]any)
+		ann, _ := meta["annotations"].(map[string]any)
+		if ann == nil {
+			ann = map[string]any{}
+			meta["annotations"] = ann
+		}
+		ann[AnnotationChangedAt] = time.Now().UTC().Format(time.RFC3339)
+		return nil
 	})
 }
 

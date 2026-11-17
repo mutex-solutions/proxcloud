@@ -1131,6 +1131,13 @@ func TestPatchClusterValuesUpgrade(t *testing.T) {
 	if fins, _ := dig(app, "metadata", "finalizers").([]any); len(fins) == 0 {
 		t.Error("patch dropped the resources-finalizer")
 	}
+	// Every patch says when it was made (the status sync's clock for machines not made yet) and keeps the name.
+	if at := parseTime(digStr(app, "metadata", "annotations", AnnotationChangedAt)); time.Since(at) > time.Minute {
+		t.Errorf("patch did not stamp %s: %v", AnnotationChangedAt, dig(app, "metadata", "annotations"))
+	}
+	if digStr(app, "metadata", "annotations", AnnotationDisplayName) != spec.DisplayName {
+		t.Errorf("patch dropped the display name: %v", dig(app, "metadata", "annotations"))
+	}
 
 	if err := svc.PatchClusterValues(ctx, "pc-c-none", func(map[string]any) error { return nil }); err == nil {
 		t.Error("absent cluster: want error")

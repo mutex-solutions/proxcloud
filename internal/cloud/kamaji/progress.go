@@ -89,7 +89,7 @@ func pveAuthFailure(msg string) bool {
 // reserve <n>B of memory on node <node>: <n>B available memory left" and ends the machine (VMProvisionFailed).
 func noCapacity(msg string) bool {
 	low := strings.ToLower(msg)
-	return strings.Contains(low, "cannot reserve") || strings.Contains(low, "insufficient")
+	return strings.Contains(low, "cannot reserve") || strings.Contains(low, "insufficient memory")
 }
 
 func condOf(obj map[string]any, typ string) map[string]any {
@@ -154,7 +154,8 @@ func classifyMachine(m, pm map[string]any, cpReady bool) MachineState {
 		}
 	}
 	switch {
-	case noCapacity(failure) || (vmFalse && noCapacity(vmMsg)):
+	// Only the terminal refusal: a clone CAPMOX retries (CloningFailed) may also say "insufficient".
+	case noCapacity(failure) || (vmFalse && reason == "VMProvisionFailed" && noCapacity(vmMsg)):
 		st.Code, st.Immediate = CodeNoCapacity, true
 	case (vmFalse && (reason == "VMProvisionFailed" || reason == "TaskFailed")) || phase == "Failed" || failure != "":
 		st.Code, st.Immediate = CodeVMCreateFailed, true
@@ -405,10 +406,13 @@ func addProgress(c, app map[string]any, mds []map[string]any, objs progressObjs,
 		group := digStr(m, "metadata", "labels", labelNodeGroup)
 		states[group] = append(states[group], classifyMachine(m, objs.infra[digStr(m, "spec", "infrastructureRef", "name")], cpReady))
 	}
+	// The clock of a machine that is not made yet. Right after an edit ArgoCD's last sync is still the one before it
+	// (or absent while the new one runs), so the time of the edit counts too: a scale-up is not stalled at once.
 	synced := parseTime(digStr(app, "status", "operationState", "finishedAt"))
 	if synced.IsZero() {
 		synced = parseTime(digStr(app, "metadata", "creationTimestamp"))
 	}
+	synced = latest(synced, parseTime(digStr(app, "metadata", "annotations", AnnotationChangedAt)))
 	byGroup := map[string][]map[string]any{}
 	for _, md := range mds {
 		name := digStr(md, "metadata", "labels", labelNodeGroup)

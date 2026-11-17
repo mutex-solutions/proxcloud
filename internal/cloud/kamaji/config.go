@@ -111,6 +111,9 @@ const (
 	LabelManagedBy        = "app.kubernetes.io/managed-by"
 	ManagedByValue        = "proxcloud"
 	AnnotationDisplayName = "proxcloud.io/display-name"
+	// AnnotationChangedAt is when proxcloud last changed the Application's values (RFC3339), stamped by every
+	// values patch.
+	AnnotationChangedAt = "proxcloud.io/values-changed-at"
 )
 
 // labelNodeGroup is what the chart stamps on a group's MachineDeployments.

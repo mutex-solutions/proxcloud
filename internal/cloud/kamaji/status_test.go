@@ -143,6 +143,8 @@ func TestClassifyMachine(t *testing.T) {
 		{"a task failed", machine("c", "w", "m", "Provisioning", 5), pmachine("m", "False", "TaskFailed", "qmstart failed"), true, CodeVMCreateFailed, true},
 		{"no memory on the node", machine("c", "w", "m", "Provisioning", 5),
 			pmachine("m", "False", "VMProvisionFailed", "cannot reserve 8589934592B of memory on node pve3: 1024B available memory left"), true, CodeNoCapacity, true},
+		{"a retried clone that says insufficient is not the terminal refusal", machine("c", "w", "m", "Provisioning", 5),
+			pmachine("m", "False", "CloningFailed", "500 insufficient space on storage local-lvm"), true, CodeVMCreateRetrying, false},
 		{"refused token", machine("c", "w", "m", "Provisioning", 5), pmachine("m", "False", "CloningFailed", "401 authentication failure"), true, CodeProviderAccessRefused, true},
 		{"waits for the control plane", machine("c", "w", "m", "Pending", 60), nil, false, CodeWaitingControlPlane, false},
 		{"pending with a control plane", machine("c", "w", "m", "Pending", 5), nil, true, CodeCreatingVM, false},
@@ -232,6 +234,49 @@ func TestGroupProgress(t *testing.T) {
 	p = groupProgress(append(states(true, machine("c", "w", "a", "Pending", 1)), gaveUp), nil, 2, time.Time{}, 1, progressNow)
 	if p["code"] != CodeVMCreateFailed || p["attention"] != true || p["machines"] != 1 {
 		t.Errorf("give-up: %v", p)
+	}
+}
+
+// A scale-up or a new group on an old cluster: the values already ask for more, ArgoCD's last sync is the one before
+// the edit, and every machine and MachineDeployment is old. The missing machine counts from the edit.
+func TestScaleUpIsNotStalledAtOnce(t *testing.T) {
+	old := 48 * 60
+	run := func(editedAgo int) map[string]any {
+		c := map[string]any{"id": "c", "endpoint": "10.0.0.5:6443", "cp_status": "Ready", "node_groups": []any{
+			map[string]any{"name": "workers", "count": float64(3)}, map[string]any{"name": "new", "count": float64(2)}}}
+		app := map[string]any{
+			"metadata": map[string]any{"creationTimestamp": ago(old), "annotations": map[string]any{}},
+			"status":   map[string]any{"operationState": map[string]any{"finishedAt": ago(old)}},
+		}
+		if editedAgo >= 0 {
+			app["metadata"].(map[string]any)["annotations"] = map[string]any{AnnotationChangedAt: ago(editedAgo)}
+		}
+		mdOld := md("c", "workers", 2, 2, 2)
+		mdOld["metadata"].(map[string]any)["creationTimestamp"] = ago(old)
+		objs := progressObjs{ok: true, machines: []map[string]any{
+			machine("c", "workers", "a", "Running", old, condition("NodeReady", "True", "NodeReady", old)),
+			machine("c", "workers", "b", "Running", old, condition("NodeReady", "True", "NodeReady", old)),
+		}}
+		addProgress(c, app, []map[string]any{mdOld}, objs, progressNow)
+		return c
+	}
+	progress := func(c map[string]any, i int) map[string]any {
+		p, _ := c["node_groups"].([]any)[i].(map[string]any)["progress"].(map[string]any)
+		return p
+	}
+	c := run(1)
+	for i, machines := range []int{1, 2} {
+		if p := progress(c, i); p["code"] != CodeProvisioning || p["machines"] != machines || p["attention"] != false || p["since"] != ago(1) {
+			t.Errorf("group %d one minute after the edit: %v", i, p)
+		}
+	}
+	// The edit is the clock, so a machine that is still not there 20 min later does need attention.
+	if p := progress(run(20), 0); p["attention"] != true || p["since"] != ago(20) {
+		t.Errorf("20 min after the edit: %v", p)
+	}
+	// An Application no patch has stamped keeps ArgoCD's last sync as its clock.
+	if p := progress(run(-1), 0); p["attention"] != true {
+		t.Errorf("no stamp: %v", p)
 	}
 }
 

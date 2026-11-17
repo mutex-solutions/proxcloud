@@ -182,14 +182,6 @@ kubectl get applications.argoproj.io -n argocd -l app.kubernetes.io/managed-by=p
 kubectl get tenantcontrolplanes,machinedeployments -n pc-<projectId>
 ```
 
-## 4. Billing
-
-- `kubernetes_cluster` — the flat control-plane fee: a price-plan rule on
-  attribute `existence` (e.g. `0.10`/hour), charged once the API endpoint exists
-  (`internal/cloud/billingresource/kubernetescluster.go`). Worker VMs bill through
-  the ordinary instance rules; never add k8s rules for them.
-- Example rules live in `deploy/seed/price-plan-seed.json`.
-
 ### Provisioning status: reason and "needs attention"
 
 `cluster.status` stays what ArgoCD reports (PENDING, PROGRESSING, READY, DEGRADED). Next to it the sync says why a
@@ -218,7 +210,7 @@ paths and never reaches a tenant. The first match in this order wins:
 | Code | When | The tenant reads | Attention |
 |---|---|---|---|
 | `provider_access_refused` | A ProxmoxCluster or ProxmoxMachine condition that is not True carries Proxmox's refusal of the token ("authentication failure", "not authorized", "401 unauthorized"), or the ProxmoxCluster has no `ProxmoxAvailable` condition 10 min after it was made (CAPMOX reports only after it opened the Proxmox API) | The platform cannot reach the virtualization provider. Contact the operator. | at once |
-| `no_capacity` | The Machine's failure message or the ProxmoxMachine's condition says CAPMOX could not reserve memory on the node (`cannot reserve ... of memory on node`, reason `VMProvisionFailed` at CAPMOX v0.9.2) | The host has no free capacity for this machine, and it is not retried. Reduce the count or pick a smaller flavor; to retry, reduce the count by one and raise it again. | at once |
+| `no_capacity` | The Machine's failure message or the ProxmoxMachine's condition says CAPMOX could not reserve memory on the node (`cannot reserve ... of memory on node`, reason `VMProvisionFailed` at CAPMOX v0.9.2; a condition counts only with that reason, so a clone that is retried is `vm_create_retrying` whatever its message says) | The host has no free capacity for this machine, and it is not retried. Reduce the count or pick a smaller flavor; to retry, reduce the count by one and raise it again. | at once |
 | `vm_create_failed` | Reason `VMProvisionFailed` or `TaskFailed`, phase `Failed`, or a failure message on the Machine: CAPMOX skips the machine from then on | Creating the virtual machine failed and is not retried. Reduce the count by one and raise it again, or delete and recreate the cluster. | at once |
 | `vm_create_retrying` | Reason `CloningFailed` or `PoweringOnFailed` | Creating the virtual machine failed; retrying automatically. | by bound |
 | `node_not_ready` | Phase Running, `NodeReady` not True | The node joined but is not Ready. Check it with kubectl. | 20 min |
@@ -234,7 +226,7 @@ for a running machine, the last change of `NodeReady`):
 
 | State of the least advanced machine | Bound |
 |---|---|
-| Not made yet (counted from the MachineDeployment's creation and ArgoCD's last finished sync) | 15 min |
+| Not made yet (counted from the newest of the MachineDeployment's creation, ArgoCD's last finished sync and the last change of the cluster's values, which the portal stamps on the Application as `proxcloud.io/values-changed-at`: right after a scale-up the last sync is still the one before it) | 15 min |
 | Pending | 15 min; never while the control plane is not Ready |
 | Provisioning | 30 min, plus 5 min for each further machine of the cluster in Provisioning, at most 90 min. CAPMOX clones all machines at once, so on slow disks each one takes longer |
 | Provisioned, no node | 15 min |
@@ -256,6 +248,14 @@ conditions with their upstream reason and message. Credentials are cut out of th
 out (a 403 or 404 on the read), and the Machines dialog answers "The ProxCloud service account cannot read Machines:
 re-apply deploy/mgmt-cluster/rbac.yaml". Any other error on the read fails that project's sync, so the cached row
 keeps its last state instead of losing the flag.
+
+## 4. Billing
+
+- `kubernetes_cluster` — the flat control-plane fee: a price-plan rule on
+  attribute `existence` (e.g. `0.10`/hour), charged once the API endpoint exists
+  (`internal/cloud/billingresource/kubernetescluster.go`). Worker VMs bill through
+  the ordinary instance rules; never add k8s rules for them.
+- Example rules live in `deploy/seed/price-plan-seed.json`.
 
 ## 5. Troubleshooting
 
