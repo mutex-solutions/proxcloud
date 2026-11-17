@@ -227,6 +227,16 @@ func TestPreflight(t *testing.T) {
 	// The mint role is checked on the provider's import store, not on the one of the settings ("local").
 	delete(f.perms[pve.DefaultPlatformTokenID], "/storage/nas-templates")
 	pf.Site.Blocked = nil
+	// The blocklist is asked about the images of the installed BOM, not of this build's own.
+	old := newerBuild(t)
+	in.Status.BOM = &BOMRef{Release: old.Release, SHA256: old.SHA256}
+	var asked []string
+	pf.Blocked = func(_ context.Context, digest string) (bool, error) { asked = append(asked, digest); return false, nil }
+	pf.Run(ctx)
+	if !slices.Equal(asked, []string{old.Seed.Image.Digest, old.Kubernetes.NodeImage.Digest}) {
+		t.Errorf("blocklist asked about %v", asked)
+	}
+	in.Status.BOM = nil
 	pf.Blocked = func(context.Context, string) (bool, error) { return true, nil }
 	// Each token is asked about each of the three paths: the CSI token on /storage, the CAPI token on /vms.
 	f.perms[pve.CSITokenID]["/storage"] = []string{"Datastore.Audit"}

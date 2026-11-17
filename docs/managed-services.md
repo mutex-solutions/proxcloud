@@ -394,7 +394,8 @@ run; the saved installation is enough for it, no project or tenant network is ne
 
 ### Step 4: Review and install
 
-Shows the release and its components (`GET /platform/bom`), what is created (one seed VM, one
+Shows the release and its components (`GET /platform/bom`; for a platform that stays on the
+release that installed it, that release's: `GET /platform/bom?sha256=<installed>`), what is created (one seed VM, one
 control plane and the worker machines, the two providers), the cores and memory per node, and for an
 installed platform the plan (`GET …/plan`). **Install** (later **Apply this release**) starts a run
 (`POST …/runs {kind: apply}`). You can leave the page; the run goes on.
@@ -508,7 +509,7 @@ stage is still trying.
 | `workload_api_unreachable` | 8 to 10, Remove | The cluster's API does not answer from the API's host, or its kubeconfig or CA on the seed is not usable, or it refused the admin kubeconfig or the request with a `401` or `403` at five looks on end (as for `seed_api_unreachable`) | Add a route from the ProxCloud host to the API address, **Retry**. At Remove: restore the route and **Remove again**, or tick the option for a cluster that does not answer |
 | `nodes_timeout` | 9 | Not every node is Ready with its group label after the first wave | **Retry** |
 | `provider_conflict` | 10 | A provider with the same name exists that is not this installation's, two rows carry its marker, or the provider validation refused the row | Correct or rename that provider under Cloud providers, **Retry** |
-| `bom_unsupported` | start, plan | The installed BOM is not the one this release carries | No release upgrades between BOMs ([Not implemented yet](#not-implemented-yet)). Go back to the ProxCloud release that installed the platform. Or, if no tenant cluster or database must be kept: delete them all (Remove refuses with `tenants_exist` otherwise), remove managed services, which deletes the platform cluster, and install again |
+| `bom_unsupported` | start, plan | The installed BOM is not one this release carries: its own, or that of an earlier release from 0.8.0 on. A platform installed by a build of `main` (`dev-<sha>`) gets this after an upgrade | No release upgrades between BOMs ([Not implemented yet](#not-implemented-yet)). Go back to the ProxCloud release that installed the platform. Or, if no tenant cluster or database must be kept: delete them all (Remove refuses with `tenants_exist` otherwise), remove managed services, which deletes the platform cluster, and install again |
 | `portal_changed` | any | ProxCloud was upgraded during the run and no longer carries the run's BOM. The stage the run stood at reads `failed` with this code | **Retry** |
 | `job_dead` | any | The run's job ran out of attempts | **Retry**, or **Remove again** |
 | `platform_disabled` | start | The switch, or template updates, is off | `--managed-services` |
@@ -1040,18 +1041,35 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
   and `kamaji-crds` as version `26.11.2-edge`, packaged from the upstream tag of that name. CI
   compares the digests; ArgoCD does not, so a version replaced in the mirror between two checks
   would be installed.
-- **No upgrade between BOMs.** A release carries one BOM. An apply on an installed platform runs
-  with the installed BOM, which must be the one the release carries: it repairs, applies changed
-  settings and renews the seed ArgoCD's token. After a ProxCloud upgrade that changes the BOM,
-  `POST …/runs` answers `409 bom_unsupported` and the plan is blocked, until a release carries the
-  previous BOMs. Provider (Cluster API) upgrades are refused as `capi_init_failed`.
+- **No upgrade between BOMs.** An installed platform stays on the BOM that installed it. A release
+  carries its own BOM and, from the release after v0.8.0 on, the BOM of each earlier release back
+  to `0.8.0` (`deploy/platform/previous/`, byte for byte the file of that release's tag). After a
+  ProxCloud upgrade the platform a release installed keeps working: the reads and the Check, an
+  apply (**Apply this release**) and Remove. The apply runs with the installed BOM and takes every
+  pin from it, the images, k3s, the charts and their digests, the Cluster API providers and the
+  charts the two providers name: it repairs, applies changed settings and renews the seed ArgoCD's
+  token, and it moves no component to the version of the newer release. Step 4 says so ("The
+  platform stays on release 0.8.0"), lists the contents of the installed release, and the plan
+  names the release the build would install as `newer`. Moving an installed platform to a newer
+  BOM is a later release. Provider (Cluster API) upgrades are refused as `capi_init_failed`.
+  - **Not verified on a lab.** No apply was run with a build that carries a previous BOM against a
+    platform that v0.8.0 installed. What tests show: the file under `previous/` has the sha256 that
+    a v0.8.0 platform records (`8eb87498…6600c6`), what the renderers of this build make of the
+    0.8.0 BOM is byte for byte what v0.8.0 rendered from it (the goldens of the tag), and a run on
+    fakes takes its images, Applications and provider bodies from the 0.8.0 BOM.
+  - The pins come from the installed BOM; the code that renders them is the running release's. A
+    release that changes a renderer changes what the next apply writes to an installed platform.
+    `TestRenderGoldenOfPreviousBOMs` shows such a change as a diff in review.
+  - A provider that the apply registers again gets the tenant chart versions of the installed
+    BOM, not those of the newer release.
   Two consequences to know before an install is finished on a build that is not a release:
   - The installed BOM is recorded by the sha256 of the BOM file as that build carries it, in
     stage 11 only. Any later change of the file, a digest filled in for an entry that said
-    `pending` or a comment, is another BOM. A platform installed on a `-dev` build is therefore
-    refused (`bom_unsupported`) by every later build whose BOM file differs: keep the build that
-    installed it, or Remove and install again. Finish an install you want to keep only on a build
-    whose BOM has no `pending` digest.
+    `pending` or a comment, is another BOM. Only the BOMs of releases are kept as previous ones. A
+    platform installed on a `-dev` build (a `dev-<sha>` build of `main`, `0.8.0-dev` or
+    `0.9.0-dev`) is therefore refused (`bom_unsupported`) by every later build whose BOM file
+    differs, a release included: keep the build that installed it, or Remove and install again.
+    Finish an install you want to keep only on a release.
   - An installation that never finished has no recorded BOM. **Retry** after a ProxCloud upgrade
     runs with the new build's BOM on whatever the failed run left on the seed and the cluster,
     without the comparison an installed platform gets. Nothing checks that step from one BOM to the

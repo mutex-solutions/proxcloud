@@ -325,7 +325,7 @@ func (p Preflight) Run(ctx context.Context) []Check {
 
 	if p.Blocked != nil {
 		var blocked []string
-		if bom, err := Current(); err != nil {
+		if bom, err := bomOf(p.Installation); err != nil {
 			blocked = []string{err.Error()}
 		} else {
 			for _, im := range []struct {

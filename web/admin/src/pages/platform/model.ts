@@ -51,7 +51,8 @@ export type BOM = {
 }
 export type Plan = {
   installed?: { release: string; sha256: string } | null
-  target: { release: string; sha256: string }
+  target: { release: string; sha256: string } // what an apply runs with
+  newer?: { release: string; sha256: string } | null // this ProxCloud's own release, when the platform stays on an earlier one
   changes?: { cluster?: string; name: string; from?: string; to?: string; blocking?: string }[]
   blocking?: string[]
 }
@@ -308,7 +309,7 @@ const CODE_ACTION: Record<string, string> = {
   machine_failed: "Correct what the message names. The machine is not tried again on its own: download the seed kubeconfig, run the kubectl delete machine command of the message, then Retry. If the message says a VM's name does not match, do not delete the machine. If it names a node template, run its qm set command on that node, then Retry.",
   capmox_auth_failed: `Proxmox refused ${CAPI_TOKEN}, or the seed cannot reach the Proxmox API URL of the settings. Check the URL as the platform network reaches it and paste the token secret again, then Retry.`,
   workload_api_unreachable: "Add a route from the ProxCloud host to the API address, then Retry. When the message says the cluster's API refuses the credential: it does so for some seconds after it starts; if the run failed on it, Retry.",
-  bom_unsupported: "The platform was installed by another ProxCloud release, and no release upgrades an installed platform yet. Go back to the ProxCloud release that installed it. Or, if no tenant cluster or database must be kept, delete them all, then remove managed services and install again: Remove deletes the platform cluster.",
+  bom_unsupported: "The platform was installed by a ProxCloud whose platform release this one does not carry (a development build, or a release from before 0.8.0), and no release upgrades an installed platform yet. Go back to the ProxCloud that installed it. Or, if no tenant cluster or database must be kept, delete them all, then remove managed services and install again: Remove deletes the platform cluster.",
   provider_conflict: "A provider row of this installation was refused. Read the message, correct that provider under Cloud providers, then Retry.",
   machine_delete_stuck: "Delete the VM named in the message in Proxmox, then start Remove again.",
   tenants_exist: "Tenant clusters or databases still run on the platform. Delete them, then start Remove again.",

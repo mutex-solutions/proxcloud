@@ -34,7 +34,7 @@ var (
 	ErrBadConfirm   = errors.New(`confirm must be "remove <installation name>", and only a remove takes it`)
 	ErrRunNotFound  = errors.New("no run with that id")
 	ErrRunFinished  = errors.New("this run has finished")
-	ErrBOMNotHere   = errors.New(CodeBOMUnsupported + ": the installed BOM is not the one this release embeds, and no release upgrades between BOMs yet; run the ProxCloud release that installed the platform, or delete every tenant cluster and database, then remove managed services and install again")
+	ErrBOMNotHere   = errors.New(CodeBOMUnsupported + ": the installed BOM is not one this release embeds, and no release upgrades between BOMs yet; run the ProxCloud release that installed the platform, or delete every tenant cluster and database, then remove managed services and install again")
 	errInvalidInput = errors.New("platform run: invalid job payload")
 )
 
@@ -60,7 +60,8 @@ func stageIDs(kind string) []string {
 
 // StartRun records a run of kind and enqueues its job (key platform-run-<runId>) in one transaction under the
 // installation's run lock: ErrRunActive while another run is unfinished. A run whose job died is finished first, as
-// failed/job_dead. An apply targets the installed BOM, or this release's for a new installation. confirm is the typed
+// failed/job_dead. An apply targets the installed BOM (the current one or a previous one this build embeds), or this release's for a new
+// installation. confirm is the typed
 // confirmation of a Remove ("remove <name>", or empty): see Run.Confirmed.
 func (s *Store) StartRun(ctx context.Context, jobs *durablejobs.Store, installationID, kind, actor, confirm string) (*Run, error) {
 	if kind != RunApply && kind != RunRemove {
@@ -104,7 +105,7 @@ func (s *Store) StartRun(ctx context.Context, jobs *durablejobs.Store, installat
 			}
 		}
 		if kind == RunApply && in.Status.BOM != nil {
-			if _, ok := embeddedBOM(in.Status.BOM.SHA256); !ok {
+			if _, ok := Lookup(in.Status.BOM.SHA256); !ok {
 				return ErrBOMNotHere
 			}
 			run.BOM = *in.Status.BOM
