@@ -418,7 +418,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   written and answered without DHCP and SNAT, which Proxmox does not do there, and asking for either is a `400`; the
   guides say that the site's router is its gateway. The template smoke test sets `ciupgrade=0` on its clone, so it no
   longer needs a package mirror on the smoke network; keeps cloud-init's own error in the record when it fails; and
-  frees a disk a destroy task with warnings left behind, or names it in a warning. The images a platform run imports
+  names a disk a destroy task left behind in a warning (it is freed only where the portal token holds
+  `Datastore.Allocate` on the store, which the documented rights do not include; also when the attempt that started
+  the destroy did not see it end). The images a platform run imports
   are no longer smoke-tested automatically beside the build (start the test by hand before a Publish). The seed ISO of
   a live server no longer logs `seed artifact cleanup pending` at every sync: the store's identity is read from the
   storage list the portal token may read, and an attached seed is not a cleanup candidate. A finished Remove keeps the

@@ -61,6 +61,10 @@ type smokePVE struct {
 	destroyWarns     bool              // the destroy task ends WARNINGS and keeps the VM's volumes
 	volumes          map[string]bool   // volumes on the stores without a VM ("store:name")
 	busy             int               // this many volume deletes fail ("dataset is busy")
+	freeDenied       bool              // a volume delete is refused with 403 (no Datastore.Allocate)
+	freeHook         func()            // runs at each volume delete, before it
+	freeAt           []time.Time       // when each volume delete was asked
+	destroySlow      bool              // the destroy removes the VM and keeps its volumes; its task outlasts the wait
 }
 
 func (f *smokePVE) StorageContents(_ context.Context, node, storage, content string, vmid int) ([]pve.StorageContent, error) {
@@ -80,6 +84,13 @@ func (f *smokePVE) DeleteStorageVolume(_ context.Context, node, storage, vol str
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.mut("free " + storage + ":" + vol)
+	f.freeAt = append(f.freeAt, time.Now())
+	if f.freeHook != nil {
+		f.freeHook()
+	}
+	if f.freeDenied {
+		return &pve.APIError{Status: 403, Message: "Permission check failed (/storage/" + storage + ", Datastore.Allocate)"}
+	}
 	if f.busy > 0 {
 		f.busy--
 		return errors.New("pve: task failed: zfs error: dataset is busy")
@@ -244,9 +255,12 @@ func (f *smokePVE) DeleteVM(_ context.Context, node string, vmid int) (pve.UPID,
 	}
 	vm := f.vms[vmid]
 	delete(f.vms, vmid)
-	if f.destroyWarns && vm != nil {
+	if (f.destroyWarns || f.destroySlow) && vm != nil {
 		for _, v := range ownVolumes(vm.cfg, vmid) {
 			f.volumes[v] = true
+		}
+		if f.destroySlow {
+			return "UPID:slow", nil
 		}
 		return "UPID:warn", nil
 	}
@@ -294,6 +308,9 @@ func (f *smokePVE) WaitTask(_ context.Context, up pve.UPID) error {
 	f.mu.Unlock()
 	if up == "UPID:fail" {
 		return errors.New("pve: task UPID:fail failed: boom")
+	}
+	if up == "UPID:slow" {
+		return context.DeadlineExceeded
 	}
 	if up == "UPID:warn" {
 		return errors.New("pve: task UPID:warn failed: WARNINGS: 2")
@@ -438,7 +455,7 @@ func smokeSetup(t *testing.T, variant string) (*SmokeExecutor, *smokePVE, *memSm
 	pv.vms[101] = &smokeVM{node: "pve1", running: true, cfg: pve.VMConfig{"name": "tenant", "pool": "pc-tenant1", "tags": "proxcloud"}}
 	pv.vms[102] = &smokeVM{node: "pve1", running: true, cfg: pve.VMConfig{"name": SmokeVMName(smokeJob), "pool": "pc-tenant1", "tags": "proxcloud;" + SmokeOwnerTag(smokeJob)}}
 	rec := &memSmokes{m: map[string]SmokeReceipt{smokeJob: {ID: smokeJob, ImportID: testJob, Payload: p, Step: SmokeQueued}}}
-	x := &SmokeExecutor{PVE: pv, Receipts: rec, Poll: time.Millisecond, BootTimeout: 50 * time.Millisecond, CloudInitTimeout: 50 * time.Millisecond}
+	x := &SmokeExecutor{PVE: pv, Receipts: rec, Poll: time.Millisecond, FreeWait: 2 * time.Millisecond, BootTimeout: 50 * time.Millisecond, CloudInitTimeout: 50 * time.Millisecond}
 	return x, pv, rec, p
 }
 
@@ -1355,5 +1372,95 @@ func TestSmokeDestroyWarningsLeaveNoVolume(t *testing.T) {
 		if strings.HasPrefix(c, "free ") && c != "free local-zfs:vm-9201-disk-1" {
 			t.Fatalf("freed a volume that was not the test VM's: %v", pv.calls)
 		}
+	}
+}
+
+// leftDiskSetup: the destroy of the test VM (9201) keeps its disk local-zfs:vm-9201-disk-1.
+func leftDiskSetup(t *testing.T) (*SmokeExecutor, *smokePVE, *memSmokes, SmokePayload) {
+	x, pv, rec, p := smokeSetup(t, "os")
+	pv.destroyWarns = true
+	pv.cloneHook = func(id int) {
+		pv.mu.Lock()
+		defer pv.mu.Unlock()
+		pv.vms[id].cfg["scsi0"] = fmt.Sprintf("local-zfs:vm-%d-disk-1,size=20G", id)
+	}
+	return x, pv, rec, p
+}
+
+func frees(pv *smokePVE) (n int) {
+	for _, c := range pv.calls {
+		if strings.HasPrefix(c, "free ") {
+			n++
+		}
+	}
+	return n
+}
+
+// The second free of a kept volume waits FreeWait, not one poll interval.
+func TestSmokeFreeLeftWaitsBetweenTries(t *testing.T) {
+	x, pv, rec, p := leftDiskSetup(t)
+	x.FreeWait, pv.busy = 60*time.Millisecond, 1
+	if err := x.Run(context.Background(), smokeJob, p, &testFence{epoch: 1, budget: -1}); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := rec.LoadSmoke(context.Background(), smokeJob)
+	if len(pv.freeAt) != 2 || len(r.Warnings) != 0 || len(pv.volumes) != 0 {
+		t.Fatalf("frees %v, receipt %+v, volumes %v", pv.freeAt, r, pv.volumes)
+	}
+	if gap := pv.freeAt[1].Sub(pv.freeAt[0]); gap < x.FreeWait {
+		t.Fatalf("the second free came after %s, want at least %s", gap, x.FreeWait)
+	}
+}
+
+// A token without Datastore.Allocate: one refused free, no retries, and the warning says which right is missing.
+func TestSmokeFreeLeftForbiddenStopsAndSaysWhy(t *testing.T) {
+	x, pv, rec, p := leftDiskSetup(t)
+	pv.freeDenied = true
+	if err := x.Run(context.Background(), smokeJob, p, &testFence{epoch: 1, budget: -1}); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := rec.LoadSmoke(context.Background(), smokeJob)
+	if frees(pv) != 1 || r.Step != SmokeFinished || len(r.Warnings) != 1 || !strings.Contains(r.Warnings[0], "local-zfs:vm-9201-disk-1") ||
+		!strings.Contains(r.Warnings[0], "Datastore.Allocate") || len(r.Volumes) != 0 {
+		t.Fatalf("receipt %+v, calls %v", r, pv.calls)
+	}
+}
+
+// A destroy whose task outlasts the wait: the next attempt finds the VM gone and still frees the disk it saved.
+func TestSmokeInterruptedDestroyStillFreesVolumes(t *testing.T) {
+	x, pv, rec, p := leftDiskSetup(t)
+	pv.destroyWarns, pv.destroySlow = false, true
+	if err := x.Run(context.Background(), smokeJob, p, &testFence{epoch: 1, budget: -1}); err == nil {
+		t.Fatal("the first attempt must fail: its destroy task did not end")
+	}
+	r, _ := rec.LoadSmoke(context.Background(), smokeJob)
+	if r.Result != SmokePass || len(r.Volumes) != 1 || r.Volumes[0] != "local-zfs:vm-9201-disk-1" || !pv.volumes["local-zfs:vm-9201-disk-1"] {
+		t.Fatalf("receipt %+v, volumes %v", r, pv.volumes)
+	}
+	if err := x.Run(context.Background(), smokeJob, p, &testFence{epoch: 2, budget: -1}); err != nil {
+		t.Fatal(err)
+	}
+	r, _ = rec.LoadSmoke(context.Background(), smokeJob)
+	if r.Step != SmokeFinished || len(r.Volumes) != 0 || len(r.Warnings) != 0 || len(pv.volumes) != 0 {
+		t.Fatalf("receipt %+v, volumes %v, calls %v", r, pv.volumes, pv.calls)
+	}
+}
+
+// Another runner takes the freed VMID during the retries: a volume of that name may be the new VM's, so no more frees.
+func TestSmokeFreeLeftStopsWhenTheVMIDIsReused(t *testing.T) {
+	x, pv, rec, p := leftDiskSetup(t)
+	pv.busy = 1
+	pv.freeHook = func() { // called with pv.mu held
+		pv.vms[9201] = &smokeVM{node: "pve1", cfg: pve.VMConfig{"name": "tu-build-other", "pool": pve.TemplatePool}}
+	}
+	if err := x.Run(context.Background(), smokeJob, p, &testFence{epoch: 1, budget: -1}); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := rec.LoadSmoke(context.Background(), smokeJob)
+	if frees(pv) != 1 || len(r.Warnings) != 1 || !strings.Contains(r.Warnings[0], "local-zfs:vm-9201-disk-1") || !pv.volumes["local-zfs:vm-9201-disk-1"] {
+		t.Fatalf("receipt %+v, volumes %v, calls %v", r, pv.volumes, pv.calls)
+	}
+	if _, still := pv.vms[9201]; !still {
+		t.Fatalf("the VM that took the VMID was touched: %v", pv.calls)
 	}
 }

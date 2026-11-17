@@ -286,6 +286,9 @@ type SmokeReceipt struct {
 	Step        SmokeStep    `json:"step"`
 	Epoch       int64        `json:"epoch"`
 	VMID        int          `json:"vmid,omitempty"` // the test VM
+	// Volumes are the test VM's own volumes, saved before its destroy: an attempt that finds the VM gone and this list
+	// still set checks the stores for them. Emptied once they are gone or named in a warning.
+	Volumes []string `json:"volumes,omitempty"`
 	// KeyFingerprint is the SHA-256 fingerprint of the ephemeral SSH key the test VM got (the key
 	// itself lived only in memory).
 	KeyFingerprint string `json:"keyFingerprint,omitempty"`
@@ -363,6 +366,8 @@ type SmokeExecutor struct {
 	Blocked func(ctx context.Context, digest string) (bool, error)
 	// Bounds (defaults: clone task 30m, boot 5m, cloud-init 10m, guest command 60s, poll 5s).
 	TaskWait, BootTimeout, CloudInitTimeout, ExecTimeout, Poll time.Duration
+	// FreeWait is the pause before a kept volume is freed again (default 1m).
+	FreeWait time.Duration
 	// GrowGiB is how much the test VM's root disk is grown (default 8 GiB).
 	GrowGiB int
 	now     func() time.Time
@@ -371,6 +376,9 @@ type SmokeExecutor struct {
 func (x *SmokeExecutor) defaults() {
 	if x.TaskWait <= 0 {
 		x.TaskWait = 30 * time.Minute
+	}
+	if x.FreeWait <= 0 {
+		x.FreeWait = time.Minute
 	}
 	if x.BootTimeout <= 0 {
 		x.BootTimeout = 5 * time.Minute
@@ -451,7 +459,7 @@ func (x *SmokeExecutor) Run(ctx context.Context, jobID string, p SmokePayload, f
 	// A new acquisition never trusts an earlier attempt's test VM (its SSH key is gone with that
 	// process, and its state is unknown): remove it and start over.
 	if r.VMID > 0 {
-		if err := x.destroyOwned(ctx, f, jobID, p, r.VMID); err != nil && !noteLeft(r, err) {
+		if err := x.destroyOwned(ctx, f, jobID, p, r.VMID, r); err != nil && !noteLeft(r, err) {
 			return err
 		}
 		if err := x.checkpoint(ctx, f, r, SmokeQueued, func(n *SmokeReceipt) { n.VMID = 0 }); err != nil {
@@ -468,7 +476,7 @@ func (x *SmokeExecutor) Run(ctx context.Context, jobID string, p SmokePayload, f
 		if errors.As(err, &perm) {
 			return // the runner's terminal path records the result, then cleans up
 		}
-		if cerr := x.destroyOwned(context.WithoutCancel(ctx), f, jobID, p, r.VMID); cerr == nil || noteLeft(r, cerr) {
+		if cerr := x.destroyOwned(context.WithoutCancel(ctx), f, jobID, p, r.VMID, r); cerr == nil || noteLeft(r, cerr) {
 			_ = x.checkpoint(context.WithoutCancel(ctx), f, r, SmokeQueued, func(n *SmokeReceipt) { n.VMID = 0 })
 		}
 	}()
@@ -498,7 +506,7 @@ func (x *SmokeExecutor) finishCleanup(ctx context.Context, f Fence, jobID string
 	if r.VMID > 0 {
 		// Volumes Proxmox kept are a warning on the record (the last checkpoint below saves it), not a retry: the VM is
 		// gone and another attempt could not prove whose they are.
-		if err := x.destroyOwned(ctx, f, jobID, p, r.VMID); err != nil && !noteLeft(r, err) {
+		if err := x.destroyOwned(ctx, f, jobID, p, r.VMID, r); err != nil && !noteLeft(r, err) {
 			return err
 		}
 	}
@@ -1043,9 +1051,26 @@ func smokeMine(cfg pve.VMConfig, jobID string) bool {
 }
 
 // destroyOwned stops and destroys vmid only after re-reading that it is this job's test VM, each
-// mutation right after a successful fence check. A VM that is not ours is never touched.
-func (x *SmokeExecutor) destroyOwned(ctx context.Context, f Fence, jobID string, p SmokePayload, vmid int) error {
+// mutation right after a successful fence check. A VM that is not ours is never touched. r is the receipt when vmid
+// is its test VM (nil for a swept leftover): the VM's volumes are saved on it before the destroy, so an attempt that
+// finds the VM gone (the destroy outlasted its wait, or the process ended) still checks the stores for them.
+func (x *SmokeExecutor) destroyOwned(ctx context.Context, f Fence, jobID string, p SmokePayload, vmid int, r *SmokeReceipt) error {
+	if r != nil && r.VMID != vmid {
+		r = nil
+	}
+	// freed runs the volume check and forgets the saved list once the volumes are gone or reported.
+	freed := func(vols []string, warned bool) error {
+		err := x.freeLeft(ctx, f, jobID, p, vmid, vols, warned)
+		var left *leftVolumes
+		if r != nil && (err == nil || errors.As(err, &left)) {
+			r.Volumes = nil // saved by the caller's next checkpoint
+		}
+		return err
+	}
 	exists, own, cfg, err := x.owned(ctx, jobID, p, vmid)
+	if err == nil && !exists && r != nil && len(r.Volumes) > 0 {
+		return freed(r.Volumes, true)
+	}
 	if err != nil || !exists || !own {
 		return err
 	}
@@ -1072,6 +1097,11 @@ func (x *SmokeExecutor) destroyOwned(ctx context.Context, f Fence, jobID string,
 		return err
 	}
 	vols := ownVolumes(cfg, vmid)
+	if r != nil && len(vols) > 0 {
+		if err := x.checkpoint(ctx, f, r, r.Step, func(n *SmokeReceipt) { n.Volumes = vols }); err != nil {
+			return err
+		}
+	}
 	if err := x.guard(ctx, f); err != nil {
 		return err
 	}
@@ -1089,7 +1119,7 @@ func (x *SmokeExecutor) destroyOwned(ctx context.Context, f Fence, jobID string,
 	} else if exists {
 		return errors.New("the test VM is still there after its destroy task")
 	}
-	return x.freeLeft(ctx, f, p.Node, vmid, vols, warned)
+	return freed(vols, warned)
 }
 
 var diskKeyRE = regexp.MustCompile(`^(scsi|virtio|ide|sata|efidisk|tpmstate|unused)\d+$`)
@@ -1113,11 +1143,12 @@ type leftVolumes struct {
 	node string
 	vmid int
 	vols []string
+	note string // why they could not be freed, when known
 }
 
 func (e *leftVolumes) Error() string {
 	return fmt.Sprintf("Proxmox removed test VM %d but these volumes of it are left or could not be checked: %s. On %s look with `pvesm list <store> --vmid %d` "+
-		"and remove each with `pvesm free <volume>`", e.vmid, strings.Join(e.vols, ", "), e.node, e.vmid)
+		"and remove each with `pvesm free <volume>`%s", e.vmid, strings.Join(e.vols, ", "), e.node, e.vmid, e.note)
 }
 
 // noteLeft puts a leftVolumes error on the receipt as a warning (saved by the caller's next checkpoint) and reports
@@ -1132,9 +1163,11 @@ func noteLeft(r *SmokeReceipt, err error) bool {
 }
 
 // freeLeft looks on the stores for volumes of the test VM just destroyed (vols, read from its config before the
-// destroy), frees what is still listed and reports what stays. Only those exact volumes are ever freed. A store this
-// token cannot list is taken as clean unless the destroy task itself warned.
-func (x *SmokeExecutor) freeLeft(ctx context.Context, f Fence, node string, vmid int, vols []string, warned bool) error {
+// destroy), frees what is still listed and reports what stays. Only those exact volumes are ever freed, and only while
+// no VM holds the VMID: a new VM there would own a volume of the same name. A store this token cannot list is taken as
+// clean unless the destroy task itself warned.
+func (x *SmokeExecutor) freeLeft(ctx context.Context, f Fence, jobID string, p SmokePayload, vmid int, vols []string, warned bool) error {
+	node := p.Node
 	for try := 0; len(vols) > 0; try++ {
 		var left []string
 		seen := map[string]bool{}
@@ -1160,17 +1193,25 @@ func (x *SmokeExecutor) freeLeft(ctx context.Context, f Fence, node string, vmid
 		if try == 3 {
 			return &leftVolumes{node: node, vmid: vmid, vols: left}
 		}
-		if try > 0 { // "dataset is busy" passes moments after the VM's process ended
-			if err := x.sleep(ctx, x.now().Add(time.Minute)); err != nil {
+		if try > 0 { // "dataset is busy" passes some time after the VM's process ended
+			for deadline := x.now().Add(x.FreeWait); x.sleep(ctx, deadline) == nil; {
+			}
+			if ctx.Err() != nil {
 				return &leftVolumes{node: node, vmid: vmid, vols: left}
 			}
 		}
 		for _, v := range left {
+			if exists, _, _, err := x.owned(ctx, jobID, p, vmid); err != nil || exists {
+				return &leftVolumes{node: node, vmid: vmid, vols: left, note: fmt.Sprintf(" (not freed here: VM %d exists again or could not be read, and a volume of that name may now be its own)", vmid)}
+			}
 			if err := x.guard(ctx, f); err != nil {
 				return err
 			}
 			store, name, _ := strings.Cut(v, ":")
-			_ = x.PVE.DeleteStorageVolume(ctx, node, store, name) // the next listing says whether it went
+			// Any other error: the next listing says whether the volume went.
+			if err := x.PVE.DeleteStorageVolume(ctx, node, store, name); pve.IsForbidden(err) {
+				return &leftVolumes{node: node, vmid: vmid, vols: left, note: " (the API token may not free them: that takes Datastore.Allocate on the store)"}
+			}
 		}
 	}
 	return nil
@@ -1194,7 +1235,7 @@ func (x *SmokeExecutor) sweep(ctx context.Context, f Fence, jobID string, p Smok
 			continue
 		}
 		var left *leftVolumes
-		if err := x.destroyOwned(ctx, f, jobID, p, m.VMID); errors.Is(err, ErrStopped) {
+		if err := x.destroyOwned(ctx, f, jobID, p, m.VMID, nil); errors.Is(err, ErrStopped) {
 			return append(warns, stoppedWarn)
 		} else if errors.As(err, &left) {
 			warns = append(warns, left.Error())
@@ -1212,7 +1253,7 @@ func (x *SmokeExecutor) Cleanup(ctx context.Context, f Fence, jobID string, p Sm
 	var warns []string
 	if r != nil && r.VMID > 0 {
 		var left *leftVolumes
-		if err := x.destroyOwned(ctx, f, jobID, p, r.VMID); errors.Is(err, ErrStopped) {
+		if err := x.destroyOwned(ctx, f, jobID, p, r.VMID, r); errors.Is(err, ErrStopped) {
 			return append(warns, stoppedWarn)
 		} else if errors.As(err, &left) {
 			warns = append(warns, left.Error())

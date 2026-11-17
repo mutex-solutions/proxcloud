@@ -382,11 +382,17 @@ Steps (each PVE mutation right after a successful fence check; the template itse
    (OS name, cloud-init status, root fs bytes, kubelet version) — then **stop and destroy** the test
    VM, and only then mark the receipt `finished` (`cleanedAt`). A destroy task that ends with
    warnings has removed the VM and may have kept a disk (ZFS: `dataset is busy`): the volumes the test
-   VM's config named are looked up on their store, freed again up to three times, and what still stays
-   is a warning on the record that names each volume and the command (`pvesm free <volume>`). Only
-   those exact volumes are freed, never another volume that carries the same VMID. Listing needs
-   `Datastore.Audit` and freeing `Datastore.Allocate` on the store; without the first nothing is
-   checked unless the task itself warned, without the second the warning is all there is.
+   VM's config named are looked up on their store, freed again up to three times (at once, then twice
+   one minute apart), and what still stays is a warning on the record that names each volume and the
+   command (`pvesm free <volume>`). Only those exact volumes are freed, never another volume that
+   carries the same VMID, and none once a VM holds that VMID again. The names are saved on the record
+   before the destroy, so an attempt that finds the VM already gone (the destroy outlasted its wait,
+   or the API restarted) checks them too. Listing needs `Datastore.Audit` and freeing
+   `Datastore.Allocate` on the store. **The portal token as documented above holds only
+   `Datastore.AllocateSpace` there, so on such an install nothing is freed**: the first free is
+   refused, there is no retry, and the warning says so; remove the volume by hand, or grant the
+   token `Datastore.Allocate` on the template disk storage (in Proxmox that right opens every volume
+   on the store). Without `Datastore.Audit` nothing is checked unless the task itself warned.
 
 FAIL codes: `template_mismatch`, `digest_withdrawn`, `clone_failed`, `configure_failed`,
 `resize_failed`, `start_failed`, `agent_timeout`, `osinfo_failed`, `osinfo_mismatch`,
