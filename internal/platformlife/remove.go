@@ -161,8 +161,13 @@ func (x *acq) removeCluster(ctx context.Context) error {
 		var items []StageItem
 		for _, m := range machines {
 			name := str(m, "metadata", "name")
-			left = append(left, fmt.Sprintf("%s (%s)", name, vmText(vmids[name])))
-			items = append(items, StageItem{ID: name, State: "deleting", Message: vmText(vmids[name])})
+			vm := vmText(vmids[name])
+			// CAPMOX deletes the ProxmoxMachine before Cluster API lets go of the Machine: a VMID seen at an earlier look stays.
+			if i := slices.IndexFunc(x.run.Stages[x.si].Items, func(c StageItem) bool { return c.ID == name && c.State == "deleting" }); vmids[name] == 0 && i >= 0 {
+				vm = x.run.Stages[x.si].Items[i].Message
+			}
+			left = append(left, fmt.Sprintf("%s (%s)", name, vm))
+			items = append(items, StageItem{ID: name, State: "deleting", Message: vm})
 		}
 		if err := x.note(ctx, items...); err != nil {
 			return err
