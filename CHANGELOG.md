@@ -54,8 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   admin console (**Machines** on a cluster's row of the Kubernetes provider page;
   `GET /admin/service/{id}/k8s-clusters/{clusterId}/machines`, `admin:service:read`), with credentials cut out of
   the upstream messages. The sync needs read access to `machines`, `proxmoxmachines` and `proxmoxclusters`:
-  `deploy/mgmt-cluster/rbac.yaml` and chart `proxcloud-platform` 0.1.2 grant it. An existing install must re-apply
-  `rbac.yaml` (or take the platform chart 0.1.2); until then the new fields are absent and nothing else changes.
+  `deploy/mgmt-cluster/rbac.yaml` and chart `proxcloud-platform` 0.1.2 grant it. An installer-built site must re-apply
+  `rbac.yaml`; until then the new fields are absent and nothing else changes.
   Chart 0.1.2 is published (tag `proxcloud-platform-v0.1.2`) and the platform BOM pins it by digest for `capi`,
   `capi-tenant` and `platform`, so a new managed-services install gets the access. No entry has `upgradeFrom`: no
   release upgrades between BOMs, so a platform installed from the previous BOM is refused (`bom_unsupported`) and

@@ -246,7 +246,9 @@ conditions with their upstream reason and message. Credentials are cut out of th
 `proxmoxclusters.infrastructure.cluster.x-k8s.io`. `deploy/mgmt-cluster/rbac.yaml` and chart `proxcloud-platform`
 0.1.2 grant them (the platform BOM pins 0.1.2, so a new managed-services install has them). On an install with the older ClusterRole nothing breaks: the sync leaves `progress` and `attention`
 out (a 403 or 404 on the read), and the Machines dialog answers "The ProxCloud service account cannot read Machines:
-re-apply deploy/mgmt-cluster/rbac.yaml". Any other error on the read fails that project's sync, so the cached row
+re-apply deploy/mgmt-cluster/rbac.yaml". That advice holds on an installer-built site; on a managed-services platform
+installed from an earlier BOM the `platform` Application reverts a hand-applied ClusterRole (self-heal), and the access
+comes with Remove and a new install ([managed-services.md](managed-services.md)). Any other error on the read fails that project's sync, so the cached row
 keeps its last state instead of losing the flag.
 
 ## 4. Billing
