@@ -58,7 +58,7 @@ func TestPublishedPackagesArePinned(t *testing.T) {
 	if strings.HasSuffix(b.Images.Clusterctl, "/proxcloud-clusterctl:v1.14.4-1@pending") {
 		t.Errorf("images.clusterctl %s is pending", b.Images.Clusterctl)
 	}
-	published := map[string]string{"proxmox-kamaji-cluster": "0.1.12", "database-cluster": "0.5.1", "proxcloud-platform": "0.1.1"}
+	published := map[string]string{"proxmox-kamaji-cluster": "0.1.13", "database-cluster": "0.5.1", "proxcloud-platform": "0.1.2"}
 	charts := []Chart{b.TenantCharts.Kubernetes, b.TenantCharts.Database}
 	for _, c := range b.Components {
 		charts = append(charts, c.Chart)

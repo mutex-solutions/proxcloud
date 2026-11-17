@@ -244,7 +244,7 @@ conditions with their upstream reason and message. Credentials are cut out of th
 
 **RBAC.** The sync needs `get` and `list` on `machines.cluster.x-k8s.io` and on `proxmoxmachines` and
 `proxmoxclusters.infrastructure.cluster.x-k8s.io`. `deploy/mgmt-cluster/rbac.yaml` and chart `proxcloud-platform`
-0.1.2 grant them. On an install with the older ClusterRole nothing breaks: the sync leaves `progress` and `attention`
+0.1.2 grant them (the platform BOM pins 0.1.2, so a new managed-services install has them). On an install with the older ClusterRole nothing breaks: the sync leaves `progress` and `attention`
 out (a 403 or 404 on the read), and the Machines dialog answers "The ProxCloud service account cannot read Machines:
 re-apply deploy/mgmt-cluster/rbac.yaml". Any other error on the read fails that project's sync, so the cached row
 keeps its last state instead of losing the flag.
@@ -376,7 +376,10 @@ What it does not do:
 - **Existing clusters are untouched** until an operator sets the provider's `chartVersion` to 0.1.13 and bumps each
   cluster (**Bump** on the provider page, or the tenant's *Apply platform update*). A cluster on an older chart gets
   no `machinePlacement` and no check, exactly as before. After the bump its render is the same until its node groups
-  change.
+  change. Chart 0.1.13 is published and the platform BOM pins it: a managed-services platform installed from this
+  release registers its Kubernetes provider with `chartVersion` 0.1.13, and an installer-built site registers the
+  chart's source version. A platform installed from an earlier BOM keeps the `chartVersion` it was registered with
+  (an apply on it is refused, `bom_unsupported`); the operator sets it on the provider.
 
 **Reaching the platform.** Workers sit on a tenant vnet with no route to the management network. The API-server
 endpoint is an address on the services subnet, which tenants reach over their normal egress: MetalLB.

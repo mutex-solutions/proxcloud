@@ -74,8 +74,8 @@ pullable; see [release readiness](../../docs/release-readiness.md).
 
 For `database-cluster`, `proxmox-kamaji-cluster` and `proxcloud-platform`, bump `version:` in `Chart.yaml`
 in the PR that changes the chart, merge, then have a maintainer deliberately cut
-the matching tag. The current source versions are database `0.5.1` and Kubernetes
-`0.1.12` (both published and pinned by the platform BOM; `0.1.12` changes kubeadm mode only);
+the matching tag. The current source versions are database `0.5.1`, Kubernetes
+`0.1.13` and platform `0.1.2` (all three published and pinned by the platform BOM);
 they are independent of the app's `0.7.0`. Publishing is idempotent — an
 already-published version is skipped, so a reused version does not update an old
 artifact. These are release operations, not commands to run during normal setup.

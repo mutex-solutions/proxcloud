@@ -37,7 +37,7 @@ capi:
   seed:     {core: "cluster-api:v1.14.4", bootstrap: "kubeadm:v1.14.4", controlPlane: "kubeadm:v1.14.4", infrastructure: "proxmox:v0.9.2", ipam: "in-cluster:v1.1.1"}
   workload: {core: "cluster-api:v1.14.4", bootstrap: "kubeadm:v1.14.4", controlPlane: "kamaji:v0.22.0", infrastructure: "proxmox:v0.9.2", ipam: "in-cluster:v1.1.1", addon: "helm:v0.6.4"}
 tenantCharts:                      # what the providers pin for new tenant clusters and databases
-  kubernetes: {repo: ghcr.io/mutex-solutions/charts, name: proxmox-kamaji-cluster, version: 0.1.12, digest: "sha256:e44ba2cb55070d2da7b9eeff5c433b726c1d7c42eb5a0507018ff128c025e8a7"}
+  kubernetes: {repo: ghcr.io/mutex-solutions/charts, name: proxmox-kamaji-cluster, version: 0.1.13, digest: "sha256:ee05c59f8c91974511334df92b1808fcaf657a7e8a3a5f4a629e1b32853b46b7"}
   database:   {repo: ghcr.io/mutex-solutions/charts, name: database-cluster, version: 0.5.1, digest: "sha256:44e34154ce4b734ea511ea6eb9a05fea937428c4ad229b5d2c9270994bde5aa6"}
 # Per component: cluster seed | workload; wave: applied and health-gated in ascending order per cluster (also the
 # upgrade order); install: application (default) | helmchart (the seed's ArgoCD only, the bootstrap exception);
@@ -66,12 +66,12 @@ components:
     cluster: seed
     wave: 2
     namespace: proxcloud-system
-    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.1, digest: "sha256:97e2544fabb3bfda0f0d76182607836acfb19964dfff480eba95909335107aeb"}
+    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.2, digest: "sha256:765e6f48a2a5843fac6dc49a6d758b802d77a95bcc2b1139b05fc23fd86407ba"}
   - name: pc-platform              # the workload cluster
     cluster: seed
     wave: 3
     namespace: pc-platform
-    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxmox-kamaji-cluster, version: 0.1.12, digest: "sha256:e44ba2cb55070d2da7b9eeff5c433b726c1d7c42eb5a0507018ff128c025e8a7"}
+    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxmox-kamaji-cluster, version: 0.1.13, digest: "sha256:ee05c59f8c91974511334df92b1808fcaf657a7e8a3a5f4a629e1b32853b46b7"}
     stateful: true
   - name: cilium
     cluster: workload
@@ -114,7 +114,7 @@ components:
     cluster: workload
     wave: 2
     namespace: proxcloud-system
-    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.1, digest: "sha256:97e2544fabb3bfda0f0d76182607836acfb19964dfff480eba95909335107aeb"}
+    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.2, digest: "sha256:765e6f48a2a5843fac6dc49a6d758b802d77a95bcc2b1139b05fc23fd86407ba"}
     group: system
   - name: kamaji-crds
     cluster: workload
@@ -139,4 +139,4 @@ components:
     cluster: workload
     wave: 3
     namespace: proxcloud-system
-    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.1, digest: "sha256:97e2544fabb3bfda0f0d76182607836acfb19964dfff480eba95909335107aeb"}
+    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.2, digest: "sha256:765e6f48a2a5843fac6dc49a6d758b802d77a95bcc2b1139b05fc23fd86407ba"}
