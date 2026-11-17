@@ -214,7 +214,12 @@ management-cluster RBAC predates them.
 `progress.code` is one of `provider_access_refused`, `no_capacity`, `vm_create_failed`, `vm_create_retrying`,
 `waiting_control_plane`, `creating_vm`, `starting_vm`, `not_joined`, `node_not_ready`, `provisioning`;
 `attention.code` is `control_plane_stalled` or `provider_access_refused`. `attention: true` means no progress for a
-bounded time or an error that is not retried; it clears by itself. `status` is unchanged by either. The codes, their
+bounded time or an error that is not retried; it clears by itself. `status` is unchanged by either.
+`cluster.attention` carries control-plane and provider codes only. A worker that stalls is reported on
+`node_groups[].progress.attention` and leaves `cluster.attention` absent, so a client that asks "does this cluster
+need attention" reads both: `cluster.attention` is present, or any `node_groups[].progress.attention` is true.
+Both are evaluated at a provider sync, not when the resource is read: with the default 15-minute sync a flag can
+show up to one interval after its bound has passed. The codes, their
 texts and the bounds: [managed-k8s.md](managed-k8s.md#provisioning-status-reason-and-needs-attention).
 
 Managed Kubernetes placement: on a cluster whose chart is 0.1.13 or later, `node_groups[i].placement` (`{"pve1": 2,
@@ -262,6 +267,10 @@ or smoke test.
 ```
 
 `complete` is false while a node is down (`code` `node_down`): its copy cannot be read and is not in `versionsLine`.
+`next` is `advance` (post again), `wait` (a job of the provider runs), `blocked` or `done`. `blocked` means a step
+failed on a node: the node's `message` says what to do. An advance never repeats a smoke test or an import
+(`smoke_failed`, `smoke_not_started`, `import_failed`), so posting again changes nothing until that is done. A
+`publish_failed` is this post's own refused publish, and the next post tries that publish again.
 
 Errors, each with a `code` in `details`: `409` `busy` (another advance of that provider runs), `digest_withdrawn`,
 `vm_updates_disabled`, `provider_missing`, `provider_disabled` or `provider_incomplete`; `400` `confirm_digest` (the

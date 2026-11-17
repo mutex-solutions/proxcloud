@@ -39,7 +39,20 @@ accepted as evidence. A token lacking this existing audit/read evidence retains
 rows with a warning; portal-requested explicit deletion remains available. An
 operator can repair intended read privileges deliberately, never via auto-grant.
 
-If a sync warns **provider visibility unverified / cached inventory preserved**:
+**SERVER, VOLUME and IMAGE rows need no such visibility.** The grants on this page give the portal token no ACL on
+`/vms` or `/access` and `NoAccess` on the fenced pools, so it can never show that it sees every guest. A cached row
+whose VM is no longer in its project pool is retired when `GET /cluster/nextid?vmid=<id>` says the VMID is free:
+Proxmox answers that from the cluster's whole guest list for any authenticated user, so no grant is needed and a VM
+the token cannot see still counts. A VMID that a VM of another project took (the token reads it, under another
+SMBIOS UUID) counts as free too. Before v0.8.0 the sync asked for propagated `VM.Audit` on `/vms`, `/pool` and
+every ACL path under them and for `Sys.Audit` on `/access`, which these grants never satisfy: no row was ever
+retired and the warning below came at every sync (lab finding F60). When the warning names a SERVER or VOLUME row
+now, a guest still holds that row's VMID and the token does not see it in the project pool; the text names the path
+(`/pool/<pool>` when the token lost `VM.Audit` on the project pool, else `/vms/<id>`).
+[vm-inventory-safety.md](vm-inventory-safety.md) has the rule and the repair. Do not add a `/vms` ACL or remove a
+fence row for it.
+
+If a sync warns **provider visibility unverified / cached inventory preserved** for a NETWORK row:
 
 1. Keep the cached NETWORK rows and share exports. Do not manually delete them to
    silence the warning; they preserve ownership, billing history and NAS access.
@@ -201,7 +214,9 @@ An ACL on a path replaces what the parent passes down for that user or token. Th
 
 `Permissions.Modify` is a big right: a stolen portal token can grant itself anything on those paths. `User.Modify` is granted on the group's path and never on `/access/groups`: there PVE takes it for every user of the cluster, `root@pam` included ([the mint grant](#the-mint-grant-in-m1)). Without these grants a cluster create fails with PVE's `Permission check failed`, or the provider runs in `sharedWorkers` mode (docs/managed-k8s.md). This list ran on a real cluster (PVE 9.2) with no other grant: create, scale-out, delete, a refused create. That run predates the group: its `User.Modify` sat on `/access/groups`, and the grant on `/access/groups/proxcloud-kube` has not run on a cluster yet. It also held `ProxCloudKubeMint` on `/pool`; a create without that row has not run on a cluster yet either. Without `User.Modify`, `POST /access/users/{user}/token/{name}` answers 403 even for the token's own user, and `PUT /access/acl` wants `Permissions.Modify` on `/sdn/zones/...` and `/nodes`, and `Permissions.Modify` or `Datastore.Allocate` on `/storage/...`; on `/pool/<pool>` it wants `Permissions.Modify`, or `Pool.Allocate` and every privilege of the role written.
 
-PVE stops honouring a deleted token's ACL entries at once, but leaves them in `user.cfg` until the next write of that file. Until then `pveum` prints `ignore invalid acl token`, which is harmless; token names are never reused.
+**When the token is revoked.** Not by the delete: CAPMOX needs the token to delete the workers. The provider sync's sweep revokes it once the cascade has finished and the cluster's marker is older than 30 minutes, counted from the cluster's creation (the guard for a create that has not applied its Application yet). With the job scheduler that is at most one sync interval (15 minutes) after the cascade, or after the marker's 30 minutes for a cluster deleted younger than that. Without the scheduler the token and its ACL rows stay until an operator starts a provider sync ([managed-k8s.md](managed-k8s.md#deletion-and-orphan-finalization), seen on a lab). The token's secret is only in a Secret that the cascade deletes.
+
+PVE stops honouring a deleted token's ACL entries at once, but leaves them in `user.cfg` until the next write of that file. Until then every `pveum`, `qm` and `pvesh` call prints `user config - ignore invalid acl token '<token>'`, once per row, which is harmless (`pveum acl list` shows the rows gone at once); token names are never reused.
 
 ## ProxCloudCSI
 

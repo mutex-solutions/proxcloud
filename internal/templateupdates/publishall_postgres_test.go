@@ -140,7 +140,7 @@ func TestPGPublishAllMixedNodes(t *testing.T) {
 	if rep.Next != "advance" || rep.Complete || len(rep.Actions) != 0 || f.jobs() != 0 || f.pv.mutations != 0 {
 		t.Fatalf("a read acted: %+v jobs=%d mutations=%d", rep, f.jobs(), f.pv.mutations)
 	}
-	if rep.Nodes[4].Code != "cloud_init_failed" || !strings.Contains(rep.Nodes[5].Message, "not both active") {
+	if rep.Nodes[4].Code != "cloud_init_failed" || !strings.Contains(rep.Nodes[4].Message, "Imported templates") || !strings.Contains(rep.Nodes[5].Message, "not both active") {
 		t.Fatalf("reasons: %+v", rep.Nodes)
 	}
 
@@ -212,7 +212,7 @@ func TestPGPublishAllSmokeNetworkUnset(t *testing.T) {
 		t.Fatal(err)
 	}
 	rep = f.run(true)
-	if rep.Nodes[0].State != NodeSmokeNotStarted || rep.Nodes[1].State != NodeImportFailed || f.jobs() != 1 || rep.Next != "done" {
+	if rep.Nodes[0].State != NodeSmokeNotStarted || rep.Nodes[1].State != NodeImportFailed || f.jobs() != 1 || rep.Next != "blocked" {
 		t.Fatalf("a failed step was repeated: %s jobs=%d next=%s", states(rep), f.jobs(), rep.Next)
 	}
 }

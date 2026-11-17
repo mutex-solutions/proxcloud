@@ -21,7 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its older published copy. The report carries the `config.cluster.versions` line, which the operator still copies
   by hand, and warns while it covers fewer nodes than publish another Kubernetes version or while a node is down
   (its copy cannot be read). An advance that published a node and then cannot start the next import still answers
-  the report, with the error in it, so the publish is shown and audited. Not verified on a lab.
+  the report, with the error in it, so the publish is shown and audited. Lab round C (2026-11-17, main cb2f052):
+  two advances published two nodes, one at a time, each once its copy's smoke test had passed; the report and the
+  versions line were right; nothing was imported; the smoke clone upgraded no package. Not verified on a lab: an
+  import started by it, a smoke test started by it and so its one-job-at-a-time rule under contention (both copies
+  carried a failed smoke test, which it does not repeat, and were smoke-tested from their rows by hand, one after
+  the other), and the console dialog.
 
 - **Managed Kubernetes: node group replicas are placed by free capacity** (cluster chart `proxmox-kamaji-cluster`
   0.1.13, `docs/managed-k8s.md`). On a site without shared storage a node group is one MachineDeployment per node
@@ -39,7 +44,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operator sets the provider's `chartVersion` to 0.1.13 and bumps each cluster. Chart 0.1.13 is published (tag
   `proxmox-kamaji-cluster-v0.1.13`) and the platform BOM pins it by digest, for the platform cluster (whose render
   is the same as with 0.1.12) and for new tenant clusters: a managed-services platform installed from this BOM
-  registers its Kubernetes provider with `chartVersion` 0.1.13. Not verified on a lab.
+  registers its Kubernetes provider with `chartVersion` 0.1.13. Lab round C (2026-11-17, main cb2f052, a fresh
+  install from this BOM): the placement was stored and rendered (one MachineDeployment per node with the decided
+  replicas), three workers were Ready 12 minutes after the create, a scale-up to four and back to three placed and
+  removed one replica and left the other nodes' workers alone, and a node group and a second cluster that did not
+  fit were refused with 409 and the count that fits, with nothing minted or written. The round also found that the
+  free memory was read without the platform's own VMs (F58, under Fixed). Not verified on a lab: an upgrade, a
+  cluster moved from chart 0.1.12, and the console pages.
 
 - **Managed Kubernetes: why a cluster is not there yet, and "needs attention"** (`internal/cloud/kamaji/progress.go`,
   `docs/managed-k8s.md`). A cluster whose provisioning broke half-way used to read PROGRESSING for ever with no
@@ -61,7 +72,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   release upgrades between BOMs, so a platform installed from the previous BOM is refused (`bom_unsupported`) and
   keeps charts 0.1.12 and 0.1.1 until a Remove and a new install. On it the operator can set the Kubernetes
   provider's `chartVersion` to 0.1.13 by hand; the ClusterRole is kept by the platform's ArgoCD Application
-  (self-heal), so re-applying `rbac.yaml` is no way to the access there. Not verified on a lab.
+  (self-heal), so re-applying `rbac.yaml` is no way to the access there. Lab round C (2026-11-17, main cb2f052):
+  the codes `provisioning`, `creating_vm`, `starting_vm`, `node_not_ready` and `not_joined` showed in the
+  documented order; a worker on a network without a router read `not_joined` and its node group's
+  `progress.attention` turned true at the first sync after the 15-minute bound, with `cluster.attention` absent as
+  defined; the admin machines route gave the conditions with no secret and nothing of another cluster. Not verified
+  on a lab: attention clearing by recovery (that cluster was deleted), the other codes, `cluster.attention`, and
+  the console pages (chip, Status column, Machines dialog).
 
 - **Operator documentation for managed services from the console** (`docs/managed-services.md`, ADR 0009): when to
   use this path and when the installer's split mode, the prerequisites, the Proxmox identities script (what it
@@ -466,6 +483,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The provider sync retires the rows of servers and volumes that are gone, on the documented Proxmox grants
+  (F60)** (`internal/cloud/pve/vm_inventory.go`, `docs/vm-inventory-safety.md`, `docs/proxmox-permissions.md`).
+  Before a cached SERVER or VOLUME row was retired, the sync asked the provider's token to show that it sees every
+  guest of the cluster: `Sys.Audit` on `/access`, propagated `VM.Audit` on `/vms`, `/pool` and every ACL path under
+  them. The documented grants have none of that by design (no ACL on `/vms` or `/access`; `NoAccess` on the fenced
+  pools of managed services), so the proof failed at every sync on every such install: the log read `provider
+  visibility unverified; cached inventory preserved`, no row was ever retired, and the project's server list was
+  not updated at all. On the lab the worker of a deleted cluster stayed ACTIVE in the tenant's list and counted in
+  the project while its VMID already belonged to another machine. The proof is now what it was after: the VM of
+  the row is gone. A row whose VM is no longer in its project pool is retired when `GET /cluster/nextid?vmid=`
+  says no guest in the cluster holds the VMID (Proxmox answers that from its whole guest list, whatever the token
+  may audit), or when the token reads the VM that holds it in another pool and its SMBIOS UUID is not the row's
+  (Proxmox hands out the lowest free VMID, so a VM of another project takes the number). A row whose VMID now
+  belongs to another VM of the same pool is replaced from the VM the token read. The guard against inventory loss
+  is kept and no longer depends on an ACL: a VMID held by a guest the token cannot see (a VM moved out of the
+  project pool, hidden by an ACL, in a pool the token has `NoAccess` on) keeps the row, and so does one the token
+  sees elsewhere with the row's UUID. The warning now carries the cause and names the path (`/pool/<pool>` when
+  the token lost `VM.Audit` on the project pool, else `/vms/<id>`). No grant changes; do not add a `/vms` ACL.
+  Known limit: when a guest the token cannot see takes the VMID of a deleted VM before the next sync (on a
+  managed-services install, a machine of the platform), the token cannot tell it from its own VM, the row stays
+  and that project's sync stops at it until the guest is gone or the server is deleted through the API (traced
+  in the code for a plain server and for a cluster worker's row, which takes the same route; not run). For that
+  case the warning no longer ends with "repair token permissions": the error carries the cause and the guide
+  says there is no grant to repair. `Client.VMIDFree` now counts as free only a 2xx whose `data` is the id that
+  was asked; null, an empty body or another value is an error and keeps the row (it was "any 2xx", and it is the
+  only evidence of absence here; the template updates' check before an import is removed uses it too). The
+  automatic release of a retired server's public address still asks for the view of every guest and so still never
+  happens on these grants (unchanged; `docs/vm-inventory-safety.md`). Integration tests against a fake Proxmox API
+  that answers as the documented token is answered; not run on a lab.
+
+- **Publish on all nodes says when it is blocked (O3)** (`internal/templateupdates/publishall.go`,
+  `docs/template-updates.md`, `docs/api.md`). A copy whose smoke test had failed, or whose import or publish had
+  failed, ended the action with `next: done` and `complete: false`: an advance changed nothing and the dialog read
+  "Nothing more to do". On the lab two copies with an eight-hour-old failed smoke test, whose cause was long fixed,
+  stopped it that way. `next` is now `blocked` in that state, the `smoke_failed` node's `message` says to run the
+  copy's smoke test again from its row under Imported templates, and the dialog says "Blocked" and goes on by
+  itself once the test has passed. Nothing is retried automatically; a refused publish (`publish_failed`) is
+  tried again by the next post, a smoke test or an import never is. Clients that only know `done` must treat
+  `blocked` as "stop posting". Tests on PostgreSQL with a fake Proxmox; not run on a lab, the dialog not opened.
+
+- **Guides corrected from lab round C (2026-11-17, main cb2f052).**
+  `docs/managed-k8s.md` and `docs/proxmox-permissions.md` now say how long a deleted cluster's Proxmox token lives
+  (F57): the sync's sweep revokes it, not the delete, because CAPMOX deletes the workers with it; with the
+  scheduler that is up to one 15-minute sync after the cascade, and for a cluster deleted in its first 30 minutes
+  the first sync after its marker is 30 minutes old (the guard for a create that has not applied its Application
+  yet counts from the creation); without the scheduler the token and its ACL rows stay until an operator starts a
+  provider sync. The code is unchanged: the delete answers before the cascade runs and nothing but the sweep sees
+  it finish. They also say that Proxmox prints `ignore invalid acl token` on every CLI call after a revoke until
+  `user.cfg` is next written, which is harmless (O1). `docs/api.md` and `docs/managed-k8s.md` say that a stalled
+  worker is reported on `node_groups[].progress.attention` and never on `cluster.attention`, that a client reads
+  both, and that attention is evaluated at a provider sync, so up to one interval late (O5). `docs/managed-k8s.md`
+  says that a create or a scale-up clones all new workers at the same time and what that did to other VMs on slow
+  storage. `docs/managed-services.md`: the seed restore sequence and the clean-stop release were both run on the
+  lab and passed, so the guide no longer says they were not; it states what was run (a healthy seed restored over
+  itself from a three-minute-old zstd archive; a restart 33 ms into stage 8 of a re-check apply) and what was not
+  (an archive older than a credential rotation or a machine change, `qm stop` on a dead guest, `--unique`, a boot
+  store other than ZFS, the scheduled backup job and its pruning, a stop with a slow call in flight). The restore
+  steps gain a pool membership check, the `vmgenid` line that changes, the times to expect, what keeps working,
+  the saved firewall copy to delete, and the audit-log check's blind spot for a rotation made before the
+  `ROTATE_CREDENTIAL` entry existed. The backup section cites the measured zstd backup (2.39 GiB in 1 minute 45
+  seconds) and warns, where it tells the operator to back the seed up, that the archive holds the seed's secrets
+  and that `vzdump` wrote it with mode 644 on the lab's shared export.
+
 - **Placement counts the memory of VMs the provider's token cannot see (F58)** (`internal/cloud/pve/scheduler.go`
   `CommittedMem`, `docs/managed-k8s.md` section 9). The node choice for a server and for Kubernetes workers summed
   the configured memory of the VMs `GET /cluster/resources` returns, and Proxmox leaves out every VM the token may
@@ -832,6 +912,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider, to a named project, then run it again. Checked with `ansible-playbook --syntax-check`, the offline test
   (which runs the listing against a stub `kubectl`) and the console e2e spec only; not applied to a running
   cluster.
+
+### Known issues
+
+- **Seed ISOs of servers created before this release are never swept (O2).** A server's seed ISO
+  (`pcseed-v1-<...>.iso` on the provider's seed store) is deleted with its server only when its record carries the
+  cluster and storage identity, which is recorded for servers created on v0.8.0 or later
+  (`internal/cloud/pve/seed.go`). For a server created on an earlier release the record has none: when that server
+  is deleted, the API logs `seed cleanup pending ... original cluster/storage identity was not available; operator
+  inspection required`, and the ISO stays on the store for good (seen on a lab after an upgrade). It holds the
+  server's user data. Clean it up by hand once its server is deleted, as root on a node: list the seed ISOs
+  (`pvesm list <seed store> --content iso | grep pcseed-v1-`); one that is older than a day and that no VM's config
+  names any more (`grep -l <file name> /etc/pve/nodes/*/qemu-server/*.conf` prints nothing) is such a leftover:
+  `pvesm free <volume>`. Not verified on a lab: the hand cleanup, that a server created on this release gets the
+  identity, and the sweep that follows.
 
 ## [0.7.0] - 2026-11-15
 

@@ -4,6 +4,28 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-17: VM inventory, retirement no longer needs a view of every guest
+
+**What changed:** the proof before a cached SERVER, VOLUME or IMAGE row is retired
+(`internal/cloud/pve/vm_inventory.go`). `vmGone` replaces the ACL proof and the by-id config reads: the row's VMID
+is free in the whole cluster (`GET /cluster/nextid?vmid=`), or the VM that holds it is one the token reads in
+another pool under another SMBIOS UUID. "Free" is only a 2xx that carries the asked id (`Client.VMIDFree`). `completeVMVisibility` (self `Sys.Audit` on `/access`, the full ACL tree,
+propagated `VM.Audit` on `/vms`, `/pool` and every ACL path under them) is now called by the public address
+release only. `cloud.InventoryUntrustedError` prints its cause, so the sync's warning names the path or the VMID.
+"Publish on all nodes" answers `next: blocked` where it answered `done` on a failed step. No container, component,
+relation or boundary changed, and no Proxmox permission: `/cluster/nextid` is open to any authenticated user and
+was already called by the template updates.
+
+**Why:** the documented grants give the provider's token no ACL on `/vms` or `/access` and `NoAccess` on the
+fenced pools, so the ACL proof never passed and no row was ever retired (lab finding F60). What the proof has to
+show is that the VM is gone, and Proxmox answers that without any right to see other guests.
+
+**Diagrams:** none changed. `c4-code.md`: the VM inventory table has `vmGone` and what `completeVMVisibility` is
+still for.
+
+**Not verified:** on a lab. A VMID taken by a guest the token cannot see keeps the old row and stops that
+project's sync until the guest is gone. The address release still never passes on the documented grants.
+
 ## 2026-11-17: scheduler, memory of VMs the token cannot audit
 
 **What changed:** `pve.CommittedMem` (`internal/cloud/pve/scheduler.go`) is the memory taken on a node: the larger

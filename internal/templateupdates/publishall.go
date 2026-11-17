@@ -85,7 +85,8 @@ type PublishAllReport struct {
 	// a versions line without them moves a cluster's workers off those nodes.
 	NodesMissing []string `json:"nodesMissing"`
 	// Next: advance (calling again does something, also after an Error), wait (a job of the provider runs),
-	// done.
+	// blocked (a step failed on a node, that node's Message says what to do; a smoke test or an import is never
+	// repeated here, a refused publish is tried again by the next call), done.
 	Next string `json:"next"`
 	// Actions is what this call changed (empty for a read).
 	Actions []string `json:"actions,omitempty"`
@@ -99,6 +100,9 @@ type PublishAllError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
 }
+
+// smokeFailedHint ends the message of a smoke_failed node: the one step that helps is on another tab.
+const smokeFailedHint = ". Not repeated here: run this copy's smoke test again from its row under Imported templates; when it passes, the next advance publishes it"
 
 // NodeDownCode marks a node that was skipped because it is not online.
 const NodeDownCode = "node_down"
@@ -250,6 +254,13 @@ func (s *Service) PublishAll(ctx context.Context, pv LifecyclePVE, in PublishAll
 	}
 	if out.Next == "" {
 		out.Next = "done"
+		for _, n := range out.Nodes {
+			// "done" with complete false read as finished. A smoke test or an import is never repeated by an
+			// advance; a publish that was refused just now is, by the next one.
+			if n.State == NodeSmokeFailed || n.State == NodeSmokeNotStarted || n.State == NodeImportFailed || n.State == NodePublishFailed {
+				out.Next = "blocked"
+			}
+		}
 	}
 	if payload != nil && payload.Variant == "kubernetes" && rows != nil {
 		out.KubernetesVersion = payload.KubernetesVersion
@@ -295,7 +306,7 @@ func (s *Service) publishAllNode(ctx context.Context, node pve.Node, recs []Rece
 		case StateSmokeRunning:
 			n.State = NodeSmokeRunning
 		case StateSmokeFailed:
-			n.State, n.Code, n.Message = NodeSmokeFailed, best.Smoke.Code, best.Smoke.Message
+			n.State, n.Code, n.Message = NodeSmokeFailed, best.Smoke.Code, best.Smoke.Message+smokeFailedHint
 		case StateImporting:
 			n.State = NodeImporting
 		case StateStaged:

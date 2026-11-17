@@ -461,8 +461,12 @@ A Remove has three stages: Delete the platform cluster (`remove-cluster`, 45 min
   requests, and gives the run's job back as soon as the call the stage has in flight returns: the
   next start takes it at once and no attempt is spent. This holds only when that happens within the
   container's stop grace period (10 seconds by default under Compose, after which Docker kills the
-  process); otherwise the stop is as a crash. The release is covered by a test, not by a lab run,
-  and how often the 10 seconds are exceeded was not measured. After a
+  process); otherwise the stop is as a crash. The release was run once on a lab (2026-11-17, main
+  cb2f052): `docker compose restart api` 33 ms into stage 8 of an apply on a ready platform, which
+  had nothing new to write. The job was given back 24 ms after the stop signal, the new process
+  went on with stage 8 0.9 seconds after the signal, the run succeeded with attempts 1 of 20, and
+  nothing was created twice. Not run: a stop while a slow call is in flight, so how often the 10
+  seconds are exceeded is not measured, and a stop in stages 2, 3 and 9 of a real install. After a
   crash, or when the release did not reach the database, the run resumes when the job's one-minute
   lease has run out, so up to a minute later, and an attempt is spent (seen on a lab before the
   release existed: a clean restart in stage 7 resumed by itself 61 seconds later, attempts 2 of 20,
@@ -616,7 +620,7 @@ and are not deleted by this; delete those clusters from the projects first where
 | Credential | Where it is | Rotation |
 |---|---|---|
 | `capmox@pve!capi`, `csi@pve!csi` | Encrypted in `platformSecret`; the first also in a Secret on the seed, the second in a Secret on the cluster | Create a new token secret in Proxmox (remove the token, run the script again), paste it in step 2, then **Apply this release**: stages 7 and 8 write the Secrets again. Not verified on a lab |
-| The seed credential (a service account token, cluster-admin on the seed) | Encrypted in `platformSecret` | **Replace the seed credential**: creates the next token Secret (`proxcloud-portal-token-g<n>`), checks it, stores it, then deletes the older ones, which ends their tokens. Refused during a run. If it stops halfway, press it again; the next apply also removes token Secrets nothing stores. The audit log gets one entry, `ROTATE_CREDENTIAL` on the installation, with the names of the token Secret before and after (`fromSecret`, `toSecret`) and never a token. A rotation that stopped after it had stored the new credential gets that entry with outcome `FAILURE`. The old token does not end at that instant: the seed's API server remembers a token it has checked for some seconds (measured on a lab: the old token still answered 6 to 7 seconds after the rotation had returned). **A seed backup taken before a rotation is of no use after it**: the archive holds only the older token Secret, a seed restored from it refuses the stored credential, and ProxCloud cannot make a new one on a ready seed (the bootstrap token is gone). So run a backup by hand right after every rotation, as root on the seed's node: `vzdump <seed VMID> --storage <backup store> --mode snapshot --compress zstd` ([step 5](#when-the-seed-does-not-answer)) |
+| The seed credential (a service account token, cluster-admin on the seed) | Encrypted in `platformSecret` | **Replace the seed credential**: creates the next token Secret (`proxcloud-portal-token-g<n>`), checks it, stores it, then deletes the older ones, which ends their tokens. Refused during a run. If it stops halfway, press it again; the next apply also removes token Secrets nothing stores. The audit log gets one entry, `ROTATE_CREDENTIAL` on the installation, with the names of the token Secret before and after (`fromSecret`, `toSecret`) and never a token. A rotation that stopped after it had stored the new credential gets that entry with outcome `FAILURE`. The old token does not end at that instant: the seed's API server remembers a token it has checked for some seconds (measured on a lab: the old token still answered 6 to 7 seconds after the rotation had returned). **A seed backup taken before a rotation is of no use after it**: the archive holds only the older token Secret, a seed restored from it refuses the stored credential, and ProxCloud cannot make a new one on a ready seed (the bootstrap token is gone). So run a backup by hand right after every rotation, as root on the seed's node: `vzdump <seed VMID> --storage <backup store> --mode snapshot --compress zstd` ([step 5](#when-the-seed-does-not-answer)). That archive holds the seed's secrets: read the warning under **Seed backup** below before you choose the store |
 | The cluster's admin kubeconfig | On the seed only (Cluster API keeps it). A run reads it into memory | Not stored by ProxCloud |
 | The seed ArgoCD's token for the cluster | In the seed's cluster Secret only; valid one year | Renewed by any apply when under 90 days are left. The page shows the expiry and warns under 30 days |
 | The providers' kubeconfig (service account `proxcloud` on the cluster) | In the two provider rows' encrypted secret | Written again by every apply |
@@ -646,12 +650,21 @@ pvesh create /cluster/backup --vmid <seed VMID> --storage <backup store> --sched
 
 `--compress zstd` and `--prune-backups keep-daily=7` are there because a job without them writes
 one uncompressed archive a day and removes none, on a store that has no retention of its own
-(measured on a lab, one `vzdump` by hand with `--mode snapshot` only: 2 minutes 17 seconds and a
-5.73 GiB archive for a seed that used 3.8 GiB, the seed stayed up). Change the seven days to your
-own rule. Not run on a lab: the scheduled job itself, and a backup with these two options.
+(measured on a lab, one `vzdump` by hand each time, for a seed that used 3.8 GiB of its 20 GiB
+disk: with `--mode snapshot` only, 2 minutes 17 seconds and a 5.73 GiB archive; with `--mode
+snapshot --compress zstd`, 1 minute 45 seconds and a 2.39 GiB archive; the seed stayed up both
+times). Change the seven days to your own rule. Not run on a lab: the scheduled job itself and
+`--prune-backups`.
 
-**The archive holds the seed's secrets**: its cluster-admin token and the secret of
-`capmox@pve!capi`. Choose a backup store that is not the boot, ISO or import store of the settings,
+> **Warning: the archive holds the seed's secrets.** Every archive of the seed carries its
+> cluster-admin token and the token secret of `capmox@pve!capi`. The backup store must not be
+> world-readable, and it must not be a shared export that other tenants or VMs can mount. `vzdump`
+> does not protect the file: on the lab it wrote the archive with its default mode, 644, on an NFS
+> export open to a whole subnet, so every user of the nodes and every client of that export could
+> read it. Check the mode of the files and who can mount the store before the first backup, and
+> again after a backup by hand. Nothing in ProxCloud checks the store you choose.
+
+Choose a backup store that is not the boot, ISO or import store of the settings,
 and whose archives no API token other than your own (the operator's) can read. Proxmox lets a token
 read an archive when it holds `Datastore.Allocate` on the store, or `Datastore.AllocateSpace` on
 the store together with `VM.Backup` on the seed VM. So check both, as root on one node:
@@ -686,8 +699,9 @@ import store is `local` too, the backup is within reach of ProxCloud's own token
 `PVEDatastoreAdmin` on the ISO store and the portal token on the import store. That is the limit ADR
 0009 A2 accepts for this milestone.
 
-A restore from such a backup has not been run: on the lab Proxmox refused it over the protected seed.
-The sequence that lifts the protection is step 5 of
+A restore from such a backup was run once on a lab (2026-11-17): the 2.39 GiB zstd archive above,
+restored over the seed it was taken from three minutes earlier, in 2 minutes 8 seconds. The
+sequence, what was seen and what was not run are in step 5 of
 [When the seed does not answer](#when-the-seed-does-not-answer). Without a backup, a lost seed means Remove with the
 option for a missing seed and a new install, which deletes the cluster's machines and volumes. The
 same holds for a seed whose VM runs but whose Kubernetes cannot be repaired
@@ -800,7 +814,12 @@ finish.
    the disk of the old seed, and what is left is step 6. This is read from the code, not tried on a
    lab. So compare the archive's time (`pvesm list <backup store> --vmid <vmid>`) with the last
    `ROTATE_CREDENTIAL` entry of the installation in the audit log, whatever its outcome, and take
-   only an archive that is newer. The newest archives may hold the fault you restore for; when no
+   only an archive that is newer. The audit log misses a rotation made on a `dev-` build of main from
+   before pull request #288 (no release has that older behaviour): there the rotation is logged as
+   `CREATE` on the installation, not as `ROTATE_CREDENTIAL`. On an installation that ran such a
+   build, also compare the generation in `status.seed.tokenSecret`
+   (`proxcloud-portal-token-g<n>`) with the one the installation had when the archive was made.
+   The newest archives may hold the fault you restore for; when no
    archive is both newer than that entry and sound, do not restore over the seed: step 6 applies.
 
    As root on the seed's node:
@@ -815,6 +834,7 @@ finish.
    diff /root/<vmid>.fw.before-restore /etc/pve/firewall/<vmid>.fw \
      || cp /root/<vmid>.fw.before-restore /etc/pve/firewall/<vmid>.fw    # missing or changed: put the saved one back
    qm set <vmid> --protection 1                          # only when the config shows no "protection: 1"
+   pvesh get /pools/proxcloud-seed                       # the seed VM must still be a member
    qm start <vmid>
    ```
 
@@ -830,17 +850,43 @@ finish.
      (`cp /root/<vmid>.fw.before-restore /etc/pve/firewall/<vmid>.fw`) before `qm start`: without it
      the seed's API on 6443 is open to its network until an apply writes the rules again. An apply
      does not set the protection again (stage 3 sets it when it attaches the first-boot CD only).
+     The VM must also still be a member of the seed pool (`proxcloud-seed`): the `NoAccess` rows
+     that keep the portal token and the `csi@pve` tokens from the seed and from its backups hold
+     through that membership. On the lab Proxmox kept it over `--force`; if it is gone, put the VM
+     back (`pveum pool modify proxcloud-seed --vms <vmid>`, not run on a lab) before the start.
+   - **One config line changes and is harmless**: `vmgenid`. Proxmox gives a restored VM a new
+     generation id, so a `diff` of the whole config before and after shows that line and no other.
+     k3s, ArgoCD and Cluster API came back with it.
    - Then wait until `curl -k https://<seed address>:6443/readyz` reads `401`, and press
      **Apply this release**.
+   - **Times to expect**, from the lab (a 20 GiB disk on ZFS on slow disks, the 2.39 GiB zstd
+     archive on NFS): `qm shutdown` 14 seconds, `qmrestore` 2 minutes 8 seconds, `401` 45 seconds
+     after `qm start`; the seed's API was away 3 minutes 32 seconds in all. The installation's live
+     view read all 14 components Synced and Healthy 41 seconds after the `401`, and the apply took
+     6 seconds. `qmrestore` also prints the rescan of every other store of the node; return code 0
+     is the signal.
+   - **What keeps working**: the platform cluster's API and the tenant clusters' APIs answered
+     throughout. A break-glass kubeconfig issued before the backup was made still works on the
+     restored seed until its hour is over (the same service account and signing key).
+   - **Afterwards** delete `/root/<vmid>.fw.before-restore`: nothing removes it. It holds no secret.
 
-   **This restore has not been run on a lab.** Only the refusal was seen (2026-11-17): with the VM
-   shut down and still protected, `qmrestore … --force 1` ended with the message above, the disk
-   and the content of the config and of the firewall file were unchanged (Proxmox takes and removes
-   a `create` lock in the config before it refuses), and the seed started and answered again. The
-   archive of that lab carried the firewall file and a config with `protection: 1` and the same
-   MAC. Not known: whether the restored VM keeps them and its address, and how Cluster API
-   takes a seed whose state is as old as the backup. Known from the code, as above: the stored seed
-   credential is refused by a seed restored from an archive older than its last replacement.
+   **Run once on a lab (2026-11-17, main cb2f052)**: a healthy seed restored over itself from an
+   archive made three minutes earlier (`vzdump --mode snapshot --compress zstd` by hand), with no
+   credential rotation and no machine change in between. Every step went as written above. The
+   restored VM kept its MAC and address, `protection: 1` (it came back from the archive, so the
+   `qm set --protection 1` was not needed), its firewall file (Proxmox wrote it from the archive,
+   equal to the saved copy, so the `cp` did not run) and its pool. The stored seed credential
+   worked, and Cluster API found its state equal to the cluster and wrote nothing: the four
+   Machines kept their resourceVersions, no machine was replaced, no VM was cloned or deleted. The
+   platform cluster and a tenant cluster with three workers were not touched (no pod restarted
+   there), and **Apply this release** then succeeded. Seen before the sequence existed: with the
+   VM shut down and still protected, `qmrestore … --force 1` ended with the message above and
+   changed nothing.
+
+   **Not run**: an archive older than a credential rotation (the `401` path above is read from the
+   code) or older than a machine change (Cluster API meeting machines it does not know, or missing
+   ones it does); `qm stop` on a guest that does not answer; `--unique`; a boot store other than
+   ZFS; an archive made by the scheduled backup job, with or without pruning.
 6. Without a backup the seed cannot be brought back: an apply never rebuilds a ready seed, because a
    new one would know nothing of the cluster's machines. What is left is the path of a lost seed:
    delete the tenant clusters and databases you can from their projects, delete the seed VM in
@@ -1046,9 +1092,10 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 ## Not verified on a lab yet
 
 The milestone run (M0) finished once on a lab Proxmox VE cluster: attempt 5, with one **Retry**, on
-the code before the changes it led to. Those changes have not run on a lab: a cluster's `401` and
-`403` tried again for five looks, the items of a Remove, and cluster chart 0.1.12 (`node-ip`,
-kube-vip's lease). The lab checks L0 to L11 of the design are not recorded as passed. Until they
+the code before the changes it led to. A later round (2026-11-17, main cb2f052) removed that
+platform and installed again in one run without a Retry, on cluster chart 0.1.13 and platform chart
+0.1.2; the Remove listed every deleted machine with its VMID. Not run on a lab: a cluster's `401`
+and `403` tried again for five looks. The lab checks L0 to L11 of the design are not recorded as passed. Until they
 are recorded here, treat every behaviour above as what the code and its tests say, not as
 observed, except the figures this guide marks as seen on a lab:
 
@@ -1061,10 +1108,10 @@ observed, except the figures this guide marks as seen on a lab:
 | L4 | The first kubeadm join of the BOM's node image, group labels and taints, kube-vip. With it: that a machine cloned from a template with its cloud-init drive on `ide0` starts from CAPMOX's ISO (`qm config <vmid>` shows one cloud-init medium, on `ide0`; in the machine `grep 'Using data from' /var/log/cloud-init.log`), and the texts of CAPMOX's conditions as stage 7 shows them |
 | L5 | Placement of Kamaji and etcd on the `kamaji` group; the locked `default` project |
 | L6 | The seed ArgoCD reaching the cluster with its token; a public OCI chart pulled without credentials |
-| L7 | End to end: a tenant cluster and a tenant database, and the database egress fence. Run once, partly: the two project attaches, the placement of a database on the `dbaas` group and the first tenant network passed; no tenant cluster was created (no published node image, a `simple` default zone) and no database became healthy ([the node image's known issue](#known-issue-no-postgresql-database-on-this-releases-node-image)) |
-| L8 | Resume after an API restart in stages 2, 3, 7 and 9; cancel and Retry. Run once on 2026-11-17, on a ready platform only: an API restart in stage 7 of an apply that had nothing new to write resumed by itself (61 seconds later, before the job was released at a clean stop), and a cancel between the two waves of stage 6 followed by **Retry** passed. Not run: a restart in stages 2, 3 and 9 of a real install |
+| L7 | End to end: a tenant cluster and a tenant database, and the database egress fence. Run once, partly: the two project attaches, the placement of a database on the `dbaas` group and the first tenant network passed; no tenant cluster was created (no published node image, a `simple` default zone) and no database became healthy. A later round (2026-11-17, main cb2f052) created a tenant cluster on a network of a VLAN default zone, with a router for that VLAN set up outside the product: three workers were Ready 12 minutes after the create ([the node image's known issue](#known-issue-no-postgresql-database-on-this-releases-node-image)) |
+| L8 | Resume after an API restart in stages 2, 3, 7 and 9; cancel and Retry. Run once on 2026-11-17, on a ready platform only: an API restart in stage 7 of an apply that had nothing new to write resumed by itself (61 seconds later, before the job was released at a clean stop), and a cancel between the two waves of stage 6 followed by **Retry** passed. Run once more the same day with the clean-stop release in place: a restart 33 ms into stage 8 of such an apply was given back at once and went on 0.9 seconds after the stop signal, attempts 1 of 20, nothing created twice ([section 5](#5-the-stages-of-a-run)). Not run: a restart in stages 2, 3 and 9 of a real install, and a stop with a slow call in flight |
 | L9 | Failure drills: `seed_not_booted`, `machine_failed`, a removed grant, a template deleted by hand |
-| L10 | Seed reboot, the backup job and a restore, Remove, and Remove with the seed gone. One clean reboot was run and **failed**: the seed's root filesystem came up in ext4 `emergency_ro` and its API never answered again. The cause was the image's stale ext4 superblock field, and the documented repair brought the seed back on 2026-11-17 ([When the seed does not answer](#when-the-seed-does-not-answer)); on a seed built from the fixed image two clean reboots then passed (same address and MAC, the pinned CA still valid, all components Synced and Healthy). One `vzdump` by hand with `--mode snapshot` passed; the scheduled job was not created and `--compress` and `--prune-backups` were not run. The restore was **not run**: Proxmox refused it over the protected seed. Remove from a failed stage 7 passed |
+| L10 | Seed reboot, the backup job and a restore, Remove, and Remove with the seed gone. One clean reboot was run and **failed**: the seed's root filesystem came up in ext4 `emergency_ro` and its API never answered again. The cause was the image's stale ext4 superblock field, and the documented repair brought the seed back on 2026-11-17 ([When the seed does not answer](#when-the-seed-does-not-answer)); on a seed built from the fixed image two clean reboots then passed (same address and MAC, the pinned CA still valid, all components Synced and Healthy). One `vzdump` by hand with `--mode snapshot` passed, and one with `--compress zstd` (2.39 GiB in 1 minute 45 seconds); the scheduled job was not created and `--prune-backups` was not run. The restore was first refused by Proxmox over the protected seed; with the sequence of [step 5](#when-the-seed-does-not-answer) it was run once on 2026-11-17 and passed: a healthy seed restored over itself from a three-minute-old archive, Cluster API wrote nothing, the tenant cluster was not touched. Not run: an archive older than a credential rotation or a machine change, `qm stop` on a dead guest, `--unique`, a boot store other than ZFS, an archive of the scheduled job. Remove of a ready platform and Remove from a failed stage 7 passed |
 | L11 | Seed credential rotation and the expiry of the break-glass kubeconfig. The rotation and that a break-glass kubeconfig outlives it were measured; the `401` after the hour was not |
 
 Also not run: the identities script on a site that already has the installer's tokens, a token

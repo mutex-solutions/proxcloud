@@ -3,7 +3,9 @@ package pve
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -116,14 +118,24 @@ func (c *Client) NextID(ctx context.Context) (int, error) {
 
 // VMIDFree reports whether no guest in the cluster holds vmid. /cluster/nextid?vmid= reads the cluster's
 // whole guest list, so unlike /cluster/resources it also sees guests this token has no VM.Audit on; any
-// user may call it. PVE answers 400 "VM <id> already exists" for a held id; any other refusal is an error.
+// user may call it. PVE answers 400 "VM <id> already exists" for a held id and echoes a free id back.
+// Any other refusal, and any 2xx that does not carry that id (null, an empty body, another number), is an
+// error: callers delete on "free", so only the documented answer may count as one.
 func (c *Client) VMIDFree(ctx context.Context, vmid int) (bool, error) {
-	err := c.get(ctx, "/cluster/nextid", formVals{"vmid": strconv.Itoa(vmid)}.values(), nil)
+	var raw json.RawMessage
+	err := c.get(ctx, "/cluster/nextid", formVals{"vmid": strconv.Itoa(vmid)}.values(), &raw)
 	var ae *APIError
 	if errors.As(err, &ae) && ae.Status == http.StatusBadRequest && strings.Contains(ae.Errors["vmid"], "already exists") {
 		return false, nil
 	}
-	return err == nil, err
+	if err != nil {
+		return false, err
+	}
+	// PVE sends the id as a JSON string; a number is accepted too.
+	if got := strings.Trim(string(raw), `"`); got != strconv.Itoa(vmid) {
+		return false, fmt.Errorf("/cluster/nextid?vmid=%d answered %q, not the id", vmid, raw)
+	}
+	return true, nil
 }
 
 // ManagementBridges maps each bridge that carries a node's own IP — the node
