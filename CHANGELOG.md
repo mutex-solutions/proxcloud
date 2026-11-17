@@ -472,18 +472,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not audit. On a managed-services install those are the platform's own machines (the token has `NoAccess` on
   `proxcloud-seed` and `proxcloud-system` by design), so their nodes read as free: on the lab a worker went to the
   fullest node and a refusal said "2 of 8" 8 GiB workers fit where none did. Memory taken on a node is now the
-  larger of that sum and the node's own used memory (`mem` of `GET /nodes`, already read, `PVEAuditor` on `/nodes`,
-  no new permission), plus the workers decided and not built yet and the picks of the request. The scale-down
-  order reads the same figure. Running workers do not move. Known limits, in the guide: a hidden VM counts with
-  what it uses now, not its configured size, and its vCPUs are not counted (the installation record is not read
-  by the placement). The guide no longer says every VM's configured size is counted. Unit tests only; not run on a
-  lab.
+  larger of the configured memory of its running visible VMs and the node's own used memory (`mem` of `GET /nodes`,
+  already read, `PVEAuditor` on `/nodes`, no new permission), plus the configured memory of every visible VM that
+  does not run (stopped, or cloned and not booted), the workers decided and not built yet and the picks of the
+  request. The scale-down order reads the same figure. Running workers do not move.
+  **This changes the free memory of every site, not only managed-services installs:** wherever a node's used
+  memory is above the configured memory of its running visible VMs (the host itself, the ZFS ARC, LXC containers,
+  VMs of another owner), the node now reads less free than before. A 64 GiB ZFS node with a 32 GiB ARC and 16 GiB
+  of running VMs read 48 GiB free and now reads about 30, so a server create, a failover target choice or a worker
+  placement that passed can answer `409`. The figure is never below what was computed before. Operator's remedy
+  for the ARC: cap it (`zfs_arc_max`). Known limits, in the guide: a hidden VM counts with what it uses now, not
+  its configured size, and its vCPUs are not counted (the installation record is not read by the placement); and
+  on a node with hidden VMs a running visible VM that uses less than its configured memory counts with what it
+  uses, so several creates in a row can still overfill such a node once the earlier VMs have booted. The guide no
+  longer says every VM's configured size is counted. Unit tests only, one of them against a fake Proxmox API; not
+  run on a lab.
 
 - **`SET_NODE_GROUPS` takes a node group without `rootVolumeGiB` when the provider has a default (F59)**
   (`internal/platform/project/cloud_kamaji.go`). The shape check ran with empty provider defaults, so it answered
   `400 rootVolumeGiB is required (no provider default configured)` for a group the create accepts, before the
   default was ever filled in. It now gets the provider's default root disk size. Without a default it still
-  answers 400. Not run on a lab.
+  answers 400. Because that request now passes, a group that already runs and is sent without `rootVolumeGiB` keeps
+  the root disk size it has (`kamajiRootGiB`, from the cached cluster row) instead of falling back to the default:
+  another size would change the machine spec and replace the group's workers. Unit tests; not run on a lab, and
+  the worker replacement itself was not observed.
 
 - **Managed Kubernetes guide: which worker a scale-down removes (O4)** (`docs/managed-k8s.md` section 9).
   ProxCloud decides how many replicas each node loses; which machine of that node goes is Cluster API's choice,

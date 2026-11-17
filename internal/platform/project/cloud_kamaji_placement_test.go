@@ -1,13 +1,17 @@
 package project
 
 import (
+	"context"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
@@ -222,6 +226,40 @@ func TestKamajiPlacementCountsHiddenVMs(t *testing.T) {
 	}
 }
 
+// The scale-down order reads Proxmox itself: `mem` of GET /nodes must reach the figure, with a VM list that lacks the
+// VMs of the pools the token may not audit.
+func TestKamajiFreeMemReadsNodeUse(t *testing.T) {
+	var fail bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case fail:
+			http.Error(w, "down", http.StatusInternalServerError)
+		case r.URL.Path == "/api2/json/nodes":
+			// pve1 carries the hidden VMs: 28 of 32 GiB in use.
+			fmt.Fprintf(w, `{"data":[{"node":"pve1","status":"online","maxcpu":16,"maxmem":%d,"mem":%d},{"node":"pve2","status":"online","maxcpu":16,"maxmem":%d,"mem":%d}]}`,
+				32*placeGiB, 28*placeGiB, 32*placeGiB, 2*placeGiB)
+		case r.URL.Path == "/api2/json/cluster/resources":
+			fmt.Fprintf(w, `{"data":[{"type":"qemu","node":"pve2","vmid":101,"status":"running","maxcpu":2,"maxmem":%d}]}`, 8*placeGiB)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	ps, err := pve.NewService(pve.Config{APIURL: srv.URL + "/api2/json", TokenID: "t", Secret: "s"}, "svc", "pc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{pveFor: func(*externalservice.ExternalService) (*pve.Service, error) { return ps, nil }}
+	p := h.kamajiPlacer(context.Background(), nil, nil, nil, &Project{}, "c1")
+	if free := p.freeMem(); free["pve1"] != 4*placeGiB || free["pve2"] != 24*placeGiB {
+		t.Errorf("free memory: %v; want 4 GiB on pve1 (node use) and 24 GiB on pve2 (the VM's size)", free)
+	}
+	fail = true
+	if free := p.freeMem(); free != nil {
+		t.Errorf("Proxmox down: %v, want nil so the scale-down goes on without it", free)
+	}
+}
+
 // Back-to-back creates: the first cluster's workers are decided and not cloned yet, so Proxmox shows the node free.
 func TestKamajiPendingWorkers(t *testing.T) {
 	disk := 40
@@ -376,8 +414,12 @@ func TestKamajiValuePatches(t *testing.T) {
 	if err := validateNodeGroupShapes(want(5), d.RootVolumeGiB); err != nil {
 		t.Errorf("group without rootVolumeGiB, provider default %d: %v", d.RootVolumeGiB, err)
 	}
-	if g := group(values); g.DiskGiB != d.RootVolumeGiB {
-		t.Errorf("root disk stored: %d GiB, want the provider default %d", g.DiskGiB, d.RootVolumeGiB)
+	// A group that already runs keeps its size when the edit names none: another size would replace its workers.
+	runs := []kamaji.NodeGroup{{Name: "workers", RootVolumeGiB: 80}, {Name: "old", RootVolumeGiB: 0}}
+	for name, wantGiB := range map[string]int{"workers": 80, "old": 40, "new": 40} {
+		if got := kamajiRootGiB(name, runs, d.RootVolumeGiB); got != wantGiB {
+			t.Errorf("root disk of group %q without rootVolumeGiB: %d GiB, want %d", name, got, wantGiB)
+		}
 	}
 	if err := validateNodeGroupShapes(want(5), 0); err == nil || !strings.Contains(err.Error(), "rootVolumeGiB is required") {
 		t.Errorf("group without rootVolumeGiB, no provider default: %v", err)

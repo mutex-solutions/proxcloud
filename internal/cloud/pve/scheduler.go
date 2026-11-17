@@ -6,8 +6,9 @@ package pve
 // RAM for the flavor, free space on the profile's storage. Rank: most free RAM wins. One
 // node = degenerate correct.
 //
-// Memory per node is CommittedMem: the larger of the configured memory of the VMs the token sees and the node's own
-// used memory, so VMs the token may not audit (another pool with NoAccess, another portal's) still take room.
+// Memory per node is CommittedMem: the larger of the configured memory of the running VMs the token sees and the
+// node's own used memory, plus the VMs that do not run, so VMs the token may not audit (another pool with NoAccess,
+// another portal's) still take room.
 // CPU has no such second source: the vCPUs of VMs the token cannot audit are not counted.
 
 import (
@@ -50,28 +51,30 @@ type SchedReq struct {
 // (VM.Audit), so the sum of the rows alone reads a node that carries such VMs as free. The node row of /nodes
 // (Sys.Audit, which the token has) gives the memory really in use, hidden VMs included. Per node:
 //
-//	max(Σ configured memory of the VMs Proxmox has, the node's used memory) + Σ memory of the rows without a VMID
+//	max(Σ configured memory of the running VMs, the node's used memory) + Σ configured memory of every other row
 //
-// Rows without a VMID are VMs that are decided and not made yet (pending workers, the picks of PlaceReplicas): the
-// node's used memory cannot hold them, so they come on top. Stopped VMs count, templates and holders do not.
-// ponytail: max, not a sum. A hidden VM is counted with what it uses now, not its configured size, and not at all
-// while the visible VMs' configured sizes exceed the node's real use. Exact needs the hidden VMs' sizes, which this
-// token cannot read.
+// A row that is not running takes nothing of the node's used memory yet, so it comes on top: a stopped VM, a clone
+// that has not booted, and the rows without a VMID (VMs that are decided and not made yet: pending workers, the
+// picks of PlaceReplicas). Templates and holders do not count.
+// ponytail: max, not a sum, for the running rows. A hidden VM is counted with what it uses now, not its configured
+// size, and not at all while the running visible VMs' configured sizes exceed the node's real use; and on a node
+// with hidden VMs a running visible VM that uses less than its size counts with what it uses. Exact needs the
+// hidden VMs' sizes, which this token cannot read.
 func CommittedMem(nodes []Node, vms []ClusterResource) map[string]int64 {
-	have, planned := map[string]int64{}, map[string]int64{}
+	running, rest := map[string]int64{}, map[string]int64{}
 	for _, r := range vms {
 		if r.Type != "qemu" || r.Template == 1 || isHolder(r.Tags) {
 			continue
 		}
-		if r.VMID == 0 {
-			planned[r.Node] += r.MaxMem
+		if r.Status == "running" {
+			running[r.Node] += r.MaxMem
 		} else {
-			have[r.Node] += r.MaxMem
+			rest[r.Node] += r.MaxMem
 		}
 	}
 	out := map[string]int64{}
 	for _, n := range nodes {
-		out[n.Node] = max(have[n.Node], n.Mem) + planned[n.Node]
+		out[n.Node] = max(running[n.Node], n.Mem) + rest[n.Node]
 	}
 	return out
 }

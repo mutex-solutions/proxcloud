@@ -234,7 +234,7 @@ func TestPickNodeCountsMemoryOfHiddenVMs(t *testing.T) {
 		{Node: "pve1", Status: "online", MaxCPU: 16, MaxMem: 32 * gib, Mem: 28 * gib},
 		{Node: "pve2", Status: "online", MaxCPU: 16, MaxMem: 32 * gib, Mem: 2 * gib},
 	}
-	vms := []ClusterResource{{Type: "qemu", Node: "pve2", VMID: 101, MaxCPU: 2, MaxMem: 8 * gib}}
+	vms := []ClusterResource{{Type: "qemu", Node: "pve2", VMID: 101, Status: "stopped", MaxCPU: 2, MaxMem: 8 * gib}}
 	req := SchedReq{VCPUs: 2, RAMMb: 8192}
 	if got, err := PickNode(nodes, vms, req); err != nil || got != "pve2" {
 		t.Errorf("got %q, %v; want pve2: pve1 looks empty in the VM list and is full", got, err)
@@ -242,14 +242,35 @@ func TestPickNodeCountsMemoryOfHiddenVMs(t *testing.T) {
 	if got, err := PickNode(nodes[:1], nil, req); err == nil {
 		t.Errorf("8 GiB placed on %q with 4 GiB free", got)
 	}
+	// A VM that does not run takes nothing of the node's used memory, so it comes on top of it.
 	used := CommittedMem(nodes, vms)
-	if used["pve1"] != 28*gib || used["pve2"] != 8*gib {
-		t.Errorf("committed: %v; want the node's use on pve1 and the configured sum on pve2", used)
+	if used["pve1"] != 28*gib || used["pve2"] != 10*gib {
+		t.Errorf("committed: %v; want the node's use on pve1, and its use plus the stopped VM on pve2", used)
 	}
 	// Each pick comes on top of the node's use: the node cannot show a VM that does not exist yet.
-	// pve1 has room for none, pve2 for three (32 - 8 = 24 GiB).
+	// pve1 has room for none, pve2 for two (32 - 10 = 22 GiB).
 	placed, _, fit := PlaceReplicas(nodes, vms, req, nil, 5, false)
-	if fit != 3 || placed["pve1"] != 0 || placed["pve2"] != 3 {
-		t.Errorf("placed %v, %d fit; want 3 on pve2 and none on pve1", placed, fit)
+	if fit != 2 || placed["pve1"] != 0 || placed["pve2"] != 2 {
+		t.Errorf("placed %v, %d fit; want 2 on pve2 and none on pve1", placed, fit)
+	}
+
+	// The clone exists and has not booted: it has a VMID now, and must still count in full. 20 GiB of hidden use
+	// and three 8 GiB workers leave a 32 GiB node no room for a fourth.
+	node := []Node{{Node: "pve1", Status: "online", MaxCPU: 16, MaxMem: 32 * gib, Mem: 20 * gib}}
+	workers := func(status string) []ClusterResource {
+		var out []ClusterResource
+		for i := 0; i < 3; i++ {
+			out = append(out, ClusterResource{Type: "qemu", Node: "pve1", VMID: 200 + i, Status: status, MaxCPU: 2, MaxMem: 8 * gib})
+		}
+		return out
+	}
+	if got, err := PickNode(node, workers("stopped"), req); err == nil {
+		t.Errorf("fourth worker placed on %q: 20 GiB in use and 24 GiB of workers that have not booted", got)
+	}
+	// The limit that stays: once they run and use 1 GiB each, the node reads 23 GiB in use, the larger figure is
+	// their 24 GiB, and the hidden 20 GiB is not counted.
+	node[0].Mem = 23 * gib
+	if used := CommittedMem(node, workers("running")); used["pve1"] != 24*gib {
+		t.Errorf("committed with running workers: %d GiB, want 24", used["pve1"]>>30)
 	}
 }

@@ -7,8 +7,8 @@ and rules: [README.md](README.md#maintenance-rule).
 ## 2026-11-17: scheduler, memory of VMs the token cannot audit
 
 **What changed:** `pve.CommittedMem` (`internal/cloud/pve/scheduler.go`) is the memory taken on a node: the larger
-of the configured memory of the VMs in the token's VM list and the node's used memory from `GET /nodes`, plus the
-VMs that are decided and not made yet. `pve.PickNode` (servers, failover targets, Kubernetes workers through
+of the configured memory of the running VMs in the token's VM list and the node's used memory from `GET /nodes`,
+plus the VMs of that list that do not run and the VMs that are decided and not made yet. `pve.PickNode` (servers, failover targets, Kubernetes workers through
 `pve.PlaceReplicas`) and the scale-down order of the kamaji placement read it. No container, component, relation
 or boundary changed, and no Proxmox permission: both reads were already made.
 
@@ -17,7 +17,8 @@ machines, so their nodes read as free (lab finding F58).
 
 **Diagrams:** none changed. `c3-components.md`: the Scheduler row names `CommittedMem`.
 
-**Not verified:** on a lab. The vCPUs of VMs the token cannot audit are still not counted.
+**Not verified:** on a lab. The vCPUs of VMs the token cannot audit are still not counted. On a node with such
+VMs a running visible VM counts with the memory it uses, not its size.
 
 ## 2026-11-17: P3, the platform BOM pins cluster chart 0.1.13 and platform chart 0.1.2
 

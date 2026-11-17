@@ -386,7 +386,7 @@ func (s ClusterSpec) Validate(d ClusterDefaults) error {
 			return fmt.Errorf("cluster: node group %q: duplicate name", ng.Name)
 		}
 		seen[ng.Name] = true
-		// Variant must resolve for the cluster's version (skipped when d is empty — the
+		// Variant must resolve for the cluster's version (skipped when d has no versions — the
 		// SET_NODE_GROUPS shape check — where the values patch resolves images with fallback).
 		if ng.ImageVariant != "" && len(d.Versions) > 0 && d.ImageFor(s.Version, ng.ImageVariant) == "" {
 			return fmt.Errorf("cluster: node group %q: image variant %q is not offered for version %s", ng.Name, ng.ImageVariant, s.Version)
