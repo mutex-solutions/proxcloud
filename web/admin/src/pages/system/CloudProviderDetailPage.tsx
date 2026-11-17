@@ -482,9 +482,18 @@ type ClusterMachines = {
   }[]
 }
 
-// The conditions that are not True: what is wrong, with the upstream reason and message.
+// Cluster API conditions that say something is going on: False is their healthy state (Paused=False/NotPaused,
+// Deleting=False/NotDeleting), so they are a finding only when True.
+const NEGATIVE_CONDITIONS = new Set(["Paused", "Deleting", "Updating", "ScalingUp", "ScalingDown", "RollingOut", "Remediating"])
+
+// conditionOpen: does this condition report something wrong or unfinished?
+function conditionOpen(c: MachineCondition) {
+  return NEGATIVE_CONDITIONS.has(c.type) ? c.status === "True" : c.status !== "True"
+}
+
+// The open conditions: what is wrong, with the upstream reason and message.
 function OpenConditions({ conditions }: { conditions?: MachineCondition[] }) {
-  const open = (conditions ?? []).filter((c) => c.status !== "True" && (c.reason || c.message))
+  const open = (conditions ?? []).filter((c) => conditionOpen(c) && (c.reason || c.message))
   if (open.length === 0) return <span className="text-muted-foreground">—</span>
   return (
     <ul className="grid gap-1">
@@ -504,7 +513,7 @@ function OpenConditions({ conditions }: { conditions?: MachineCondition[] }) {
 function ClusterMachinesDialog({ serviceId, cluster, onClose }: { serviceId: string; cluster: { id: string; name?: string }; onClose: () => void }) {
   const q = useAdminGet<ClusterMachines>(`/admin/service/${serviceId}/k8s-clusters/${cluster.id}/machines`)
   const machines = q.data?.machines ?? []
-  const provider = (q.data?.proxmoxCluster?.conditions ?? []).filter((c) => c.status !== "True")
+  const provider = (q.data?.proxmoxCluster?.conditions ?? []).filter(conditionOpen)
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-4xl">

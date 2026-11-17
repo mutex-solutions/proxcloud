@@ -1461,7 +1461,8 @@ function ClusterDetail({
 
           {(busy || attention) && (
             <div className={attention ? "rounded-xl border border-amber-500/50 bg-amber-500/5 p-4" : "rounded-xl border bg-card p-4"}>
-              <div className="mb-3 flex items-center gap-2">
+              {/* A live region: the background poll turns "Working on it" into "Needs attention", and back. */}
+              <div role="status" className="mb-3 flex items-center gap-2">
                 {attention ? (
                   <AlertTriangle className="size-4 text-amber-600" />
                 ) : (
@@ -1492,6 +1493,7 @@ function ClusterDetail({
                         <Circle className="mt-0.5 size-4 text-muted-foreground/40" />
                       )}
                       <span>
+                        {s.attention && <span className="sr-only">Needs attention: </span>}
                         {s.label}
                         <span className="text-muted-foreground"> — {s.detail}</span>
                       </span>
@@ -1562,7 +1564,7 @@ function ClusterDetail({
                       </TableCell>
                       <TableCell className="font-mono text-sm">{g.ready_replicas ?? "—"}</TableCell>
                       <TableCell className="text-sm">{(g.phase as string) || "—"}</TableCell>
-                      <TableCell className="max-w-md text-sm">
+                      <TableCell className="max-w-md whitespace-normal text-sm">
                         {groupProgress(g) ? (
                           <span className="flex flex-col items-start gap-1">
                             {groupProgress(g)?.attention ? <AttentionBadge /> : null}

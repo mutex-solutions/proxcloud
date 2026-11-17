@@ -16,11 +16,14 @@ test("the list marks the clusters that need attention, and only those", async ({
 test("a stuck cluster says why per node group and what the tenant can do", async ({ page }) => {
   await page.goto(`${base}/res-pc-c-stuck`)
   await expect(page.getByText("Needs attention — provisioning is not making progress")).toBeVisible()
+  // The page polls: the change to "Needs attention" is announced, and a step's state is not carried by its icon alone.
+  await expect(page.getByRole("status").filter({ hasText: "Needs attention — provisioning is not making progress" })).toBeVisible()
   await expect(page.getByText(/delete and recreate the cluster, or contact the operator/).first()).toBeVisible()
 
   // The worker that was built and never joined: the lab case of 2026-11-17.
   const workers = page.getByRole("listitem").filter({ hasText: "Node group “workers”" })
   await expect(workers).toContainText("1/2 nodes ready")
+  await expect(workers).toContainText("Needs attention: Node group “workers”")
   await expect(workers).toContainText("The machine runs but has not joined the cluster")
   await expect(workers).toContainText(/since 4\d min/)
   // Two machines the host had no room for.
@@ -29,6 +32,7 @@ test("a stuck cluster says why per node group and what the tenant can do", async
   // A group inside its bound is progress, not attention.
   const build = page.getByRole("listitem").filter({ hasText: "Node group “build”" })
   await expect(build).toContainText("Creating the virtual machine.")
+  await expect(build).not.toContainText("Needs attention:")
 
   const table = page.getByRole("table").filter({ hasText: "Node group" }).first()
   await expect(table.getByRole("columnheader", { name: "Status" })).toBeVisible()

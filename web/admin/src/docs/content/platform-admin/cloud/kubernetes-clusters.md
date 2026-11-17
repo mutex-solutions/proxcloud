@@ -10,9 +10,9 @@ A tenant sees a short reason per node group while a cluster is built, and an amb
 
 - its phase, its VMID and Proxmox node, and its addresses;
 - the same reason code the tenant gets, and whether it needs attention;
-- every condition that is not True, with the reason and message Cluster API and the Proxmox provider (CAPMOX) report. Credentials are cut out of the messages.
+- every condition that reports a finding, with the reason and message Cluster API and the Proxmox provider (CAPMOX) report: one that is not True, or for `Paused`, `Deleting`, `Updating`, `ScalingUp`, `ScalingDown`, `RollingOut` and `Remediating` (False when all is well) one that is True. Credentials are cut out of the messages.
 
-A box above the table appears when the cluster's access to Proxmox itself is refused or unreachable.
+A box above the table appears when the cluster's access to Proxmox itself is refused or unreachable, or the cluster is paused.
 
 | Code | Usual cause | What to do |
 |---|---|---|

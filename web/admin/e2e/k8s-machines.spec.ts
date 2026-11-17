@@ -12,11 +12,16 @@ const svc = {
 }
 const clusters = { providerChartVersion: "0.1.13", clusters: [{ id: "pc-c-stuck", name: "staging", projectId: "prj-1", chartVersion: "0.1.13" }] }
 const machines = {
-  proxmoxCluster: { conditions: [{ type: "ProxmoxAvailable", status: "True" }] },
+  // A healthy v1beta2 object also carries conditions whose healthy state is False.
+  proxmoxCluster: { conditions: [{ type: "ProxmoxAvailable", status: "True" }, { type: "Paused", status: "False", reason: "NotPaused" }] },
   machines: [
     {
       name: "pc-c-stuck-workers-pve1-abcde-1", nodeGroup: "workers", phase: "Running", nodeRef: "pc-c-stuck-workers-pve1-abcde-1",
-      vmid: 141, proxmoxNode: "pve1", addresses: ["10.20.0.11"], attention: false, conditions: [{ type: "NodeReady", status: "True" }],
+      vmid: 141, proxmoxNode: "pve1", addresses: ["10.20.0.11"], attention: false,
+      conditions: [
+        { type: "NodeReady", status: "True" }, { type: "Paused", status: "False", reason: "NotPaused" },
+        { type: "Deleting", status: "False", reason: "NotDeleting" }, { type: "Updating", status: "False", reason: "NotUpdating" },
+      ],
     },
     {
       name: "pc-c-stuck-workers-pve2-fghij-2", nodeGroup: "workers", phase: "Provisioned", vmid: 142, proxmoxNode: "pve2",
@@ -51,6 +56,9 @@ test("the Machines dialog shows each worker with the provider's own reason", asy
   const row = (name: string) => dialog.getByRole("row").filter({ hasText: name })
   await expect(row("workers-pve1")).toContainText("ready")
   await expect(row("workers-pve1").getByText("Needs attention")).toHaveCount(0)
+  // Paused=False, Deleting=False and Updating=False are the healthy state: no detail, and no provider warning.
+  await expect(row("workers-pve1").getByRole("cell").last()).toHaveText("—")
+  await expect(dialog.getByText("Proxmox access of this cluster")).toHaveCount(0)
   await expect(row("workers-pve2")).toContainText("not_joined")
   await expect(row("workers-pve2")).toContainText("142 @ pve2")
   await expect(row("workers-pve2")).toContainText("Waiting for a Node with spec.providerID proxmox://142 to exist")
@@ -61,4 +69,19 @@ test("the Machines dialog shows each worker with the provider's own reason", asy
 test("an install whose RBAC is older says which file to apply", async ({ page }) => {
   await open(page, { apiError: { status: 502, message: "The ProxCloud service account cannot read Machines: re-apply deploy/mgmt-cluster/rbac.yaml" } })
   await expect(page.getByRole("dialog").getByRole("alert")).toContainText("re-apply deploy/mgmt-cluster/rbac.yaml")
+})
+
+test("a paused cluster and a refused token show as the provider's finding", async ({ page }) => {
+  await open(page, {
+    proxmoxCluster: { conditions: [
+      { type: "ProxmoxAvailable", status: "False", reason: "ProxmoxUnreachable", message: "401 authentication failure" },
+      { type: "Paused", status: "True", reason: "Paused", message: "Cluster spec.paused is set to true" },
+      { type: "Deleting", status: "False", reason: "NotDeleting" },
+    ] },
+    machines: [],
+  })
+  const box = page.getByRole("dialog").getByText("Proxmox access of this cluster").locator("..")
+  await expect(box).toContainText("401 authentication failure")
+  await expect(box).toContainText("Cluster spec.paused is set to true")
+  await expect(box).not.toContainText("NotDeleting")
 })
