@@ -412,6 +412,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Findings of the managed-services lab run (F42 to F51).** A project's "Delete now" is refused with a `409` while
+  the job scheduler is off, instead of leaving the project `DELETE_IN_PROGRESS` for good with an organization that can
+  not be deleted (the teardown is a scheduler job; `deploy/compose/README.md`). A tenant network in a VLAN zone is
+  written and answered without DHCP and SNAT, which Proxmox does not do there, and asking for either is a `400`; the
+  guides say that the site's router is its gateway. The template smoke test sets `ciupgrade=0` on its clone, so it no
+  longer needs a package mirror on the smoke network; keeps cloud-init's own error in the record when it fails; and
+  frees a disk a destroy task with warnings left behind, or names it in a warning. The images a platform run imports
+  are no longer smoke-tested automatically beside the build (start the test by hand before a Publish). The seed ISO of
+  a live server no longer logs `seed artifact cleanup pending` at every sync: the store's identity is read from the
+  storage list the portal token may read, and an attached seed is not a cleanup candidate. A finished Remove keeps the
+  VMID of each machine it deleted, and the live read no longer says "the record still says ready" of a failed
+  installation. Guides: the seed's read-only root is repaired by the documented orphan-file sequence, not a plain
+  `e2fsck -f` (`docs/managed-services.md`, run on a lab), and `docs/managed-dbaas.md` says what `allowedCidrs` can
+  isolate when tenant networks use SNAT (a node's address admits every tenant behind that node).
+
 - **Defect in the published Ubuntu 26.04 VM images: the root filesystem can go read-only at a reboot.** Every
   `proxcloud-vm-ubuntu-2604` and `proxcloud-vm-ubuntu-2604-k8s` image exported before this fix has an ext4
   superblock that names inode 12 as the orphan file while the `orphan_file` feature is off; once a VM stores a file

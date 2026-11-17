@@ -235,7 +235,13 @@ template's node, so a node group has one MachineDeployment per entry, its replic
 taking the remainder. The zone label comes from that pin, so no cloud controller manager is needed.
 
 **Reaching the platform.** Workers sit on a tenant vnet with no route to the management network. The API-server
-endpoint is an address on the services subnet, which tenants reach over their normal egress: MetalLB. Nothing in a
+endpoint is an address on the services subnet, which tenants reach over their normal egress: MetalLB.
+In an EVPN zone that egress is the zone's (Proxmox holds the gateway and does the SNAT). In a **VLAN zone**
+Proxmox holds no gateway and does no DHCP or SNAT: the network is a bare VLAN (the API writes and answers
+`dhcp: false`, `snat: false`), and the site must provide a router that holds the subnet's first address (the
+`gateway` the network shows, which every worker gets as its default route) and routes to the services subnet.
+Without that router a worker boots, never reaches its control plane, and the cluster stays `PROGRESSING` with
+no ready node. Nothing in a
 tenant reaches the PVE API: proxmox-csi's controller runs on the services cluster and calls the CSI gateway.
 
 Earlier releases gave tenant workers a `pve-api` Service on the services subnet that forwarded to the PVE nodes

@@ -18,7 +18,9 @@ Reading the page needs read access to services; every button needs the permissio
 
 Tenant Kubernetes clusters also need a network zone without DHCP: the Proxmox provider's default zone must be an EVPN or a VLAN zone. On a zone with DHCP (a simple zone that ProxCloud created) the install works and databases work, but a cluster a tenant creates on its networks is refused. A Kubernetes provider with shared workers uses no tenant network and is not affected. Step 3 warns about it.
 
-The page also warns when the job scheduler is off: tenant clusters and databases then update their status only when a provider sync runs.
+In a VLAN zone Proxmox provides no gateway, no DHCP and no SNAT: your own router must hold the first address of each tenant subnet on its VLAN and route it to the load balancer range. Without it a cluster's workers never join.
+
+The page also warns when the job scheduler is off: tenant clusters and databases then update their status only when a provider sync runs, and a project cannot be deleted (the delete is refused and says so).
 
 No check of step 3 reads the following, so look before the first run:
 
@@ -138,7 +140,7 @@ The platform cluster, tenant clusters and databases keep running without the see
 
 1. In Proxmox, check that the seed VM runs. **Apply this release** starts a stopped seed; it never rebuilds one.
 2. On the seed's node, as root: `qm guest exec <vmid> -- systemctl is-active k3s` and `qm guest exec <vmid> -- grep ' / ' /proc/mounts`.
-3. If the line for `/` ends in `emergency_ro`, the seed's disk has a filesystem error and takes no writes. Snapshot the disk, shut the VM down, check the filesystem from the node (`e2fsck -f` on the disk's first partition) and start the VM. Then press **Retry** if an apply was started meanwhile and failed, or reload the page if none was. This repair has not been run on a lab.
+3. If the line for `/` ends in `emergency_ro`, the seed's disk takes no writes. The known cause is a defect of the Ubuntu 26.04 images exported before 2026-11-16. Do not run a plain `e2fsck -f` on it: that deletes a file and leaves the fault. Snapshot the disk, shut the VM down and run the three-command repair of the operator guide (docs/managed-services.md, "When the seed does not answer", step 4) on the root partition and on `/boot`, then start the VM. Then press **Retry** if an apply was started meanwhile and failed, or reload the page if none was. This repair was run on a lab on 2026-11-17 and brought the seed back.
 4. If that does not help, restore the seed VM from your backup, then **Apply this release**.
 5. Without a backup the seed cannot be brought back. Delete the seed VM in Proxmox, then use **Remove managed services** with the extra option and install again. This deletes the platform cluster with every tenant control plane and database on it.
 

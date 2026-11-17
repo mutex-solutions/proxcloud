@@ -68,6 +68,20 @@ Each domain registers its own `Routes()` under `/api/v1` (see `AppRouter` in
 | `streaming` | SSE real-time event stream (`/events/{projectId}`) |
 | `callbacks`, `payments`, `webhooks` | Inbound webhooks (public whitelist) |
 
+Deleting a project: `DELETE /api/v1/project/{id}/now` (and the operator's
+`DELETE /api/v1/admin/project/{id}/now`) only flags the project; the deletion job
+of the scheduler tears its cloud resources down and removes it. While the scheduler
+is off (`PROXCLOUD_JOBS_SCHEDULER_ENABLED`, and no debug triggers) the call answers
+`409` and changes nothing, instead of leaving the project `DELETE_IN_PROGRESS`.
+
+Networks on a Proxmox provider: `POST /api/v1/project/{id}/cloud` with
+`{type: NETWORK, data: {name, cidr?, enableDhcp?, snat?}}`. Both flags default to
+`true`, except in a `vlan` zone, where Proxmox does no DHCP and no SNAT: they
+default to `false`, the answer says `dhcp: false` and `snat: false`, and `true`
+for either is a `400` (so are the actions `ADD_SUBNET` and `SET_SNAT` with
+`snat: true`). The `gateway` of such a network is the address the site's router
+holds.
+
 Project public-network policy: `GET /api/v1/project/{id}/public-networks` lists
 the external (public) networks the project is allowed to use, and
 `PUT /api/v1/admin/project/{id}/public-networks` (operator console surface) sets

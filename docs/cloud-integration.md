@@ -538,6 +538,12 @@ point (`proxmox.go` header):
 - PVE offers DHCP on simple zones only, and a simple zone stays on one node. On EVPN and
   VLAN zones the platform allocates each server's `net0` address and sets it through
   cloud-init, so an image without cloud-init gets no address there.
+- A network in a `vlan` zone is a bare VLAN: Proxmox holds no gateway address there and does
+  no DHCP and no SNAT. The subnet is written without a DHCP range and without SNAT, the network
+  answers `dhcp: false` and `snat: false`, and a create, `ADD_SUBNET` or `SET_SNAT` that asks
+  for `enableDhcp: true` or `snat: true` is refused with a `400`. The `gateway` it shows (the
+  subnet's first address) is the address the site's router must hold on that VLAN: servers get
+  it as their default route, and outbound access is that router's decision.
 
 Getting tenancy wrong over-bills a customer for resources that are not theirs,
 or worse, exposes them.

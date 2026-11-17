@@ -14,9 +14,41 @@ No tenant network is involved. The chart's `<id>-lb` LoadBalancer Service gets i
 **MetalLB**, out of the provider's `config.database.lbAddressPool` (annotation
 `metallb.universe.tf/address-pool` on every tenant-facing LB Service: `<id>-lb`, the PostgreSQL
 `<id>-ro-lb`, the OpenSearch `<id>-dash-lb`, and the Strimzi bootstrap + per-broker Services of
-Kafka). The pool is a routable services subnet that tenants reach over their normal egress;
-isolation is the client's `allowedCidrs`, rendered as `loadBalancerSourceRanges`. Leave the
-pool empty and MetalLB picks from any auto-assign pool.
+Kafka). The pool is a routable services subnet that tenants reach over their normal egress.
+The only network filter in front of a database is the client's `allowedCidrs`, rendered as
+`loadBalancerSourceRanges`. Leave the pool empty and MetalLB picks from any auto-assign pool.
+
+**What `allowedCidrs` can and cannot isolate.** The filter sees the source address a connection
+arrives with at the load balancer, which is the tenant's own address only when nothing translates
+it on the way:
+
+| Tenant network | Address the load balancer sees | What `allowedCidrs` can hold |
+|---|---|---|
+| SNAT on (the default in an EVPN or `simple` zone) | the Proxmox node's own address, the one of the node the VM runs on | only node addresses. The tenant subnet never matches: with it alone every connection is dropped |
+| SNAT off, or a VLAN zone, and the site routes the tenant subnet to the pool without NAT | the VM's address | the tenant's subnet, or single addresses of it |
+| a site router that itself NATs tenants | that router's address | only that address, shared by every tenant behind it |
+
+With SNAT, allowing a node's address is not isolation: **every tenant whose VM runs on that node
+arrives with the same address and passes the filter**, a VM that moves to another node is cut
+off, and no page or API tells a tenant the node addresses. What then separates tenants is the
+database's password and TLS only. (Measured on a lab: the tenant subnet was refused and the node's
+`/32` let the VM in. That a second tenant behind the same node passes follows from the SNAT rule
+and was not measured.) The same holds for NAS exports
+([managed-k8s.md](managed-k8s.md)).
+
+What a site must do, one of:
+
+- **Route, do not NAT.** Give tenant subnets a route to the load balancer pool without source
+  NAT (SNAT off on the networks that use databases, or a VLAN zone, and on the services side a
+  route back to the tenant ranges), and tell tenants to put their own subnet in `allowedCidrs`.
+  The provider's isolation rules still keep tenants away from each other and from the rest of the
+  services network.
+- **Accept it.** Keep SNAT, give tenants the node addresses to allow, and treat `allowedCidrs` as
+  a filter against the outside only: a database is then reachable, at the network level, by every
+  tenant of the installation, and its password and TLS are the boundary.
+
+ProxCloud does not check which of the two a site runs, and accepts any `allowedCidrs`. The routed
+setup was not run on a lab.
 
 A database's replicas spread across `topology.kubernetes.io/zone` as a **hard** anti-affinity
 whenever `instances > 1` (CNPG `podAntiAffinityType: required`, the equivalent required

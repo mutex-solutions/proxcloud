@@ -69,7 +69,10 @@ The **Imported templates** tab shows each imported template's state: *Staged*, *
 *Smoke failed* (with the reason), *Ready to publish*, *Published (default)*, *Published (older)* or
 *Withdrawn*.
 
-- **Smoke test** — starts by itself when an import finishes, or with **Run smoke**. It boots a
+- **Smoke test** — starts by itself when an import finishes, or with **Run smoke**. The images a
+  managed-services install imports are the exception: their test does not start by itself (it would
+  run beside the build), so press **Run smoke** before you publish one. The test VM does not upgrade
+  its packages, so the smoke network needs no route to a package mirror. It boots a
   throwaway copy of the template in pool `pc-templates` on the provider's smoke network, with fresh
   cloud-init (a one-time SSH key nobody keeps, no password), waits for the guest agent, checks that
   cloud-init finished and the disk grew (and, for a Kubernetes node image, that kubelet and containerd
