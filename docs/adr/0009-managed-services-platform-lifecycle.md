@@ -318,9 +318,13 @@ CI, not at pull time.
 ### A7. Seed backup by a PVE backup job
 
 **Change.** The seed is backed up as a whole VM by a Proxmox VE backup job to the site's
-backup storage. The console prints the one root command that creates the job and shows
-attention until a backup job covers the seed. Restoring the seed means restoring that VM
-backup. This replaces "the seed's etcd is snapshotted to the NAS on a schedule" and
+backup storage. The console prints the one root command that creates the job and says
+that it cannot see whether a job exists. *(Corrected on 2026-11-17: this said "and shows
+attention until a backup job covers the seed"; the page reads no backup jobs from Proxmox,
+so it shows no attention for a missing one.)* Restoring the seed means restoring that VM
+backup, over the same VMID, after the protection the seed carries is taken off: Proxmox
+refuses a restore over a protected VM (seen on a lab on 2026-11-17; the restore itself has
+not been run). This replaces "the seed's etcd is snapshotted to the NAS on a schedule" and
 "restored on a fresh VM from the node template".
 
 **Why.** k3s sends etcd snapshots off the VM only to S3-compatible storage, which would make
@@ -463,7 +467,9 @@ above.
 
 - Every site runs Cluster API twice, on the seed and on each workload cluster, both from the
   same clusterctl image.
-- The operator creates the seed's backup job; the console warns until it exists.
+- The operator creates the seed's backup job; the console prints the command and cannot see
+  whether the job exists. *(Corrected on 2026-11-17: this said "the console warns until it
+  exists".)*
 - A chart changed upstream behind the same version is caught by CI, not by ArgoCD, until
   the mirror exists.
 - The mint-grant escalation stays open in the first milestone, documented and measured.

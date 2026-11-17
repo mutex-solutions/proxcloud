@@ -466,6 +466,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Seed backup and restore, findings of the lab run (F52 to F55)** (`docs/managed-services.md`, the Managed services
+  page, ADR 0009 A7, `internal/platformlife/runner.go`). The guide said only "restore the seed VM from your backup",
+  and Proxmox refuses a restore over the protected seed: it now gives the sequence (shut down, protection off,
+  `qmrestore` over the same VMID without `--unique`, check protection, MAC and firewall file, start, apply). The
+  restore itself has not been run on a lab, only the refusal was seen. The printed backup job gets
+  `--compress zstd --prune-backups keep-daily=7` (it wrote one uncompressed archive a day and removed none). The
+  advice on the backup store is now "no API token other than the operator's may read the archive", with the checks
+  for `Datastore.Allocate` and for `Datastore.AllocateSpace` with `VM.Backup`, and says that on a file store the
+  archive is also a readable file. ADR 0009 A7 no longer says the console shows attention until a backup job exists.
+  An API that stops cleanly during a platform run gives the job back at once, so the next start resumes without
+  waiting out the one-minute lease and without spending an attempt (covered by a test, not by a lab run).
+
+- **Seed restore and clean stop, review findings** (`docs/managed-services.md`, the Managed services page,
+  `cmd/api/main.go`). The guide now says that a seed backup taken before **Replace the seed credential** cannot be
+  restored from (the restored seed refuses the stored credential and none can be made; read from the code, not tried
+  on a lab): back up by hand after every rotation and take only an archive newer than the last `ROTATE_CREDENTIAL`
+  entry. The restore sequence keeps a copy of the seed's firewall file and puts it back when the restore lost it. The
+  check of who can read the archive goes through every token of every user, since ACL rows on pools, users and
+  groups also give rights. The API cancels a platform run at the stop signal, before its servers drain, so the job
+  is given back within the container's stop grace period more often; the guide names that condition. Not run on a
+  lab: the restore, and the clean stop.
+
 - **Findings of the managed-services lab run (F42 to F51).** A project's "Delete now" is refused with a `409` while
   the job scheduler is off, instead of leaving the project `DELETE_IN_PROGRESS` for good with an organization that can
   not be deleted (the teardown is a scheduler job; `deploy/compose/README.md`). A tenant network in a VLAN zone is

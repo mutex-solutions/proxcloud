@@ -206,7 +206,7 @@ test("a run ends ready: live components, providers, seed credential and the brea
   await expect(components.getByRole("row").filter({ hasText: "kamaji" })).toContainText("Healthy")
   await expect(page.getByRole("link", { name: "lab Kubernetes" })).toHaveAttribute("href", /\/system\/cloud-providers\/svc-/)
   await expect(page.getByRole("link", { name: "lab Databases" })).toBeVisible()
-  await expect(page.getByLabel("backup command", { exact: true })).toContainText("pvesh create /cluster/backup --vmid 9100")
+  await expect(page.getByLabel("backup command", { exact: true })).toContainText("pvesh create /cluster/backup --vmid 9100 --storage <backup store> --schedule daily --mode snapshot --compress zstd --prune-backups keep-daily=7")
   await expect(page.getByText(/a backup store that is not the boot, ISO or import store of the settings/)).toBeVisible()
   await expect(page.getByText("Tenant databases are not backed up.")).toBeVisible()
   await expect(page.getByText("Tenant Kubernetes clusters get no block volumes on a one-host install.")).toBeVisible()
