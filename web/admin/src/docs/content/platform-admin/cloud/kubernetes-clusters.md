@@ -27,7 +27,7 @@ Needs attention clears by itself when the cluster recovers; nothing is deleted o
 
 ## If the dialog says the service account cannot read Machines
 
-The provider's ClusterRole on the management cluster predates this view. Re-apply `deploy/mgmt-cluster/rbac.yaml` (an install made by **Managed services** gets it with platform chart `proxcloud-platform` 0.1.2). Until then tenants see the status as before, without reasons.
+The provider's ClusterRole on the management cluster predates this view. On an installer-built site re-apply `deploy/mgmt-cluster/rbac.yaml`. A platform installed by **Managed services** from this release has the access (platform chart `proxcloud-platform` 0.1.2); one installed from an earlier release keeps the old ClusterRole (its `platform` Application reverts a hand-applied one) until Remove and a new install. Until then tenants see the status as before, without reasons.
 
 ## Where a node group's workers go
 

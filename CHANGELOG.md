@@ -36,8 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with how many fit, before anything is reserved. The console warns when a group is scaled below the number of
   hosts it runs on (volumes on a host's local storage stay there). A cluster on chart 0.1.12 or older is unchanged;
   one moved to 0.1.13 renders the same objects until its node groups change. Existing sites get it only after the
-  operator sets the provider's `chartVersion` to 0.1.13 and bumps each cluster. Chart 0.1.13 is not published yet,
-  and the platform BOM still pins 0.1.12. Not verified on a lab.
+  operator sets the provider's `chartVersion` to 0.1.13 and bumps each cluster. Chart 0.1.13 is published (tag
+  `proxmox-kamaji-cluster-v0.1.13`) and the platform BOM pins it by digest, for the platform cluster (whose render
+  is the same as with 0.1.12) and for new tenant clusters: a managed-services platform installed from this BOM
+  registers its Kubernetes provider with `chartVersion` 0.1.13. Not verified on a lab.
 
 - **Managed Kubernetes: why a cluster is not there yet, and "needs attention"** (`internal/cloud/kamaji/progress.go`,
   `docs/managed-k8s.md`). A cluster whose provisioning broke half-way used to read PROGRESSING for ever with no
@@ -52,9 +54,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   admin console (**Machines** on a cluster's row of the Kubernetes provider page;
   `GET /admin/service/{id}/k8s-clusters/{clusterId}/machines`, `admin:service:read`), with credentials cut out of
   the upstream messages. The sync needs read access to `machines`, `proxmoxmachines` and `proxmoxclusters`:
-  `deploy/mgmt-cluster/rbac.yaml` and chart `proxcloud-platform` 0.1.2 grant it. An existing install must re-apply
-  `rbac.yaml` (or take the platform chart 0.1.2); until then the new fields are absent and nothing else changes.
-  Not verified on a lab.
+  `deploy/mgmt-cluster/rbac.yaml` and chart `proxcloud-platform` 0.1.2 grant it. An installer-built site must re-apply
+  `rbac.yaml`; until then the new fields are absent and nothing else changes.
+  Chart 0.1.2 is published (tag `proxcloud-platform-v0.1.2`) and the platform BOM pins it by digest for `capi`,
+  `capi-tenant` and `platform`, so a new managed-services install gets the access. No entry has `upgradeFrom`: no
+  release upgrades between BOMs, so a platform installed from the previous BOM is refused (`bom_unsupported`) and
+  keeps charts 0.1.12 and 0.1.1 until a Remove and a new install. On it the operator can set the Kubernetes
+  provider's `chartVersion` to 0.1.13 by hand; the ClusterRole is kept by the platform's ArgoCD Application
+  (self-heal), so re-applying `rbac.yaml` is no way to the access there. Not verified on a lab.
 
 - **Operator documentation for managed services from the console** (`docs/managed-services.md`, ADR 0009): when to
   use this path and when the installer's split mode, the prerequisites, the Proxmox identities script (what it
