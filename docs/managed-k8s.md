@@ -182,6 +182,73 @@ kubectl get applications.argoproj.io -n argocd -l app.kubernetes.io/managed-by=p
 kubectl get tenantcontrolplanes,machinedeployments -n pc-<projectId>
 ```
 
+### Provisioning status: reason and "needs attention"
+
+`cluster.status` stays what ArgoCD reports (PENDING, PROGRESSING, READY, DEGRADED). Next to it the sync says why a
+cluster is not there yet. While a node group is unsettled (a MachineDeployment whose `replicas`, `readyReplicas` or
+`upToDateReplicas` differ from what it asks for, or a Machine that is not Running with a Ready node), its entry in
+`cluster.node_groups` carries `progress = {code, since, machines, attention}`:
+
+- `code`: the reason of the group's worst machine (one that needs attention now, then the least advanced, then the
+  oldest). The table below has the codes.
+- `since`: when the group last made progress (RFC 3339).
+- `machines`: how many machines share the code.
+- `attention`: the group made no progress for longer than the bound of its least advanced machine, or the code is one
+  that is not retried.
+
+`cluster.attention = {code, since}` is the same for the whole cluster: `control_plane_stalled` or
+`provider_access_refused`. Both fields are absent on a settled cluster. Attention is not a terminal state: it is
+computed again at every sync and goes away when the cluster recovers. The consoles show an amber **Needs attention**
+chip on the list and the cluster page, and read a cluster that needs attention once a minute instead of every 15 s.
+
+The source is what Cluster API and CAPMOX report on the management cluster: `Machine`
+(`cluster.x-k8s.io/v1beta2`), `ProxmoxMachine` and `ProxmoxCluster`
+(`infrastructure.cluster.x-k8s.io/v1alpha2`). They are read once per project sync, and only when a cluster has
+something to explain. Only the code and the time are stored: an upstream message names PVE nodes, VMIDs and storage
+paths and never reaches a tenant. The first match in this order wins:
+
+| Code | When | The tenant reads | Attention |
+|---|---|---|---|
+| `provider_access_refused` | A ProxmoxCluster or ProxmoxMachine condition that is not True carries Proxmox's refusal of the token ("authentication failure", "not authorized", "401 unauthorized"), or the ProxmoxCluster has no `ProxmoxAvailable` condition 10 min after it was made (CAPMOX reports only after it opened the Proxmox API) | The platform cannot reach the virtualization provider. Contact the operator. | at once |
+| `no_capacity` | The Machine's failure message or the ProxmoxMachine's condition says CAPMOX could not reserve memory on the node (`cannot reserve ... of memory on node`, reason `VMProvisionFailed` at CAPMOX v0.9.2; a condition counts only with that reason, so a clone that is retried is `vm_create_retrying` whatever its message says) | The host has no free capacity for this machine, and it is not retried. Reduce the count or pick a smaller flavor; to retry, reduce the count by one and raise it again. | at once |
+| `vm_create_failed` | Reason `VMProvisionFailed` or `TaskFailed`, phase `Failed`, or a failure message on the Machine: CAPMOX skips the machine from then on | Creating the virtual machine failed and is not retried. Reduce the count by one and raise it again, or delete and recreate the cluster. | at once |
+| `vm_create_retrying` | Reason `CloningFailed` or `PoweringOnFailed` | Creating the virtual machine failed; retrying automatically. | by bound |
+| `node_not_ready` | Phase Running, `NodeReady` not True | The node joined but is not Ready. Check it with kubectl. | 20 min |
+| `waiting_control_plane` | Phase Pending and the control plane is not Ready | Waiting for the control plane. | never |
+| `creating_vm` | Reason `Cloning`, `WaitingForDiskReconciliation`, `WaitingForStaticIPAllocation`, `WaitingForBootstrapDataReconciliation`, or no ProxmoxMachine condition yet | Creating the virtual machine. | by bound |
+| `starting_vm` | Reason `WaitingForVMPowerUp`, `WaitingForCloudInit`, `WaitingForBootstrapReady`, `WaitingForClusterAPIMachineAddresses` | Starting the virtual machine. | by bound |
+| `not_joined` | Phase Provisioned, or `NodeHealthy` with reason `NodeDoesNotExist` | The machine runs but has not joined the cluster. Check that the cluster's network has a router or gateway and reaches the cluster endpoint, then reduce the count by one and raise it again. | 15 min |
+| `provisioning` | Anything else, and a machine that Cluster API has not made yet | Preparing the machine. | by bound |
+| `control_plane_stalled` | No endpoint, or the control plane has no status or is `Provisioning`, 15 min after the create | The control plane is taking longer than expected. Wait, delete and recreate, or contact the operator. | n/a |
+
+The bounds, counted from the group's last progress (the newest of its machines' creation, `status.lastUpdated` and,
+for a running machine, the last change of `NodeReady`):
+
+| State of the least advanced machine | Bound |
+|---|---|
+| Not made yet (counted from the newest of the MachineDeployment's creation, ArgoCD's last finished sync and the last change of the cluster's values, which the portal stamps on the Application as `proxcloud.io/values-changed-at`: right after a scale-up the last sync is still the one before it) | 15 min |
+| Pending | 15 min; never while the control plane is not Ready |
+| Provisioning | 30 min, plus 5 min for each further machine of the cluster in Provisioning, at most 90 min. CAPMOX clones all machines at once, so on slow disks each one takes longer |
+| Provisioned, no node | 15 min |
+| Running, node not Ready | 20 min (the first node waits for the CNI) |
+
+A machine that is being deleted (a scale-down, the old half of a rollout) counts neither as progress nor as a stall.
+Not covered: a control plane stuck in a later upgrade and a machine stuck in Deleting have no clock; ArgoCD sync
+errors and MachineHealthCheck are not read; the admin cluster list has no attention badge.
+
+**Operator detail.** Admin console, the Kubernetes provider's page, **Managed clusters**, **Machines** on a cluster's
+row (`GET /api/v1/admin/service/{id}/k8s-clusters/{clusterId}/machines`, permission `admin:service:read`): every
+worker Machine read live, with its phase, VMID and PVE node, addresses, the same code and attention, and the
+conditions with their upstream reason and message. Credentials are cut out of the messages (among them
+`PVEAPIToken=user@realm!id=<secret>`) and each is clipped to 400 characters.
+
+**RBAC.** The sync needs `get` and `list` on `machines.cluster.x-k8s.io` and on `proxmoxmachines` and
+`proxmoxclusters.infrastructure.cluster.x-k8s.io`. `deploy/mgmt-cluster/rbac.yaml` and chart `proxcloud-platform`
+0.1.2 grant them. On an install with the older ClusterRole nothing breaks: the sync leaves `progress` and `attention`
+out (a 403 or 404 on the read), and the Machines dialog answers "The ProxCloud service account cannot read Machines:
+re-apply deploy/mgmt-cluster/rbac.yaml". Any other error on the read fails that project's sync, so the cached row
+keeps its last state instead of losing the flag.
+
 ## 4. Billing
 
 - `kubernetes_cluster` — the flat control-plane fee: a price-plan rule on
@@ -210,6 +277,7 @@ kubectl get application <cluster-id> -n argocd -o jsonpath='{.status.health}{"\n
 | Tenant `LoadBalancer` Service `<pending>` for up to 15 minutes after create | The MetalLB pool arrives by ClusterResourceSet, which retries until the chart's CRDs and MetalLB's webhook answer, with CAPI's growing backoff between tries: on the lab it applied 8 minutes after the cluster was Available. The Application reads `Progressing` until then; the portal shows the cluster READY once the control plane, every node group and the sync are done and the ClusterResourceSet is the one part left, for up to 30 minutes after create. A cluster still `PROGRESSING` past that: `kubectl get clusterresourceset -n pc-<projectId>` and its `ResourcesApplied` condition. |
 | Application `OutOfSync` / `SyncFailed` | `argocd app get <cluster-id>` sync error. "not permitted in project proxcloud-k8s" → the chart needs a cluster-scoped resource; add exactly that group/kind to `deploy/mgmt-cluster/appproject.yaml`. Chart pull errors → registry or pin problem (§1.4). |
 | Application Healthy but cluster unusable | Health checks not loaded or wrong: verify the `argocd-health.yaml` keys exist in `argocd-cm` and the application controller was restarted. |
+| Cluster shows **Needs attention** | The reason is on the cluster page per node group; the table under "Provisioning status" in §3 has every code. The operator's detail is **Machines** on the provider page. `not_joined` on the lab of 2026-11-17 was a cluster network without a router: the VM ran, and its kubelet never reached the API endpoint. |
 | Cluster stuck `PROGRESSING`, no endpoint | `kubectl get tcp -n pc-<projectId>` → TenantControlPlane status. Pending CP pods → management-cluster capacity or DataStore. |
 | Delete hangs | The Application keeps its finalizer while the cascade runs; inspect what is left in the tree (`argocd app get`). Remove the finalizer by hand only if you accept orphaning the rendered objects, then clean up per §3. |
 | Orphaned namespaces/secrets | §3 orphan-finalization check. |
@@ -231,8 +299,84 @@ What the create path resolves (`internal/platform/project/cloud_kamaji_create.go
 
 **Node images.** `config.cluster.versions` maps a version to its template per PVE node, as printed by
 `images/k8s-node-template.sh`: `{"1.35.10": "pve1=9210,pve2=9211"}`. PVE clones to local storage only on the
-template's node, so a node group has one MachineDeployment per entry, its replicas split evenly, the first entries
-taking the remainder. The zone label comes from that pin, so no cloud controller manager is needed.
+template's node, so a node group has one MachineDeployment per entry. The zone label comes from that pin, so no
+cloud controller manager is needed. The image is the provider's: a node group in a request names an `imageVariant`
+at most, and an `imageId` in a request is ignored (before v0.8.0 it went into the values as it came, so a caller of the
+API could pin a group to nodes and template VMIDs of its choice; the console never sent it).
+
+**Sites without shared storage: where a node group's replicas go.** On a site where every node has its own pool
+(six nodes, each with a local ZFS pool), the image must exist on every node that should run workers
+(`config.cluster.versions`: `"1.35.10": "pve1=9210,pve2=9211,..."`; [template-updates.md](template-updates.md#publish-on-all-nodes) has
+one action that publishes a version on all nodes, one node at a time), and a worker's disk is on the node that runs it.
+
+How many replicas each node runs depends on the cluster's chart version:
+
+- **Chart 0.1.12 and older:** the chart splits `machineCount` evenly over the image string's entries, the first
+  entries taking the remainder, blind to what is free. A full node still gets its share and its machines hang
+  (`no_capacity` under "Provisioning status").
+- **Chart 0.1.13 and later:** ProxCloud decides and stores the split per group (`machinePlacement: {<node>:
+  <replicas>}` in the Application's values; `node_groups[i].placement` in the API). The chart renders exactly that.
+
+The placement rule (`kamajiPlaceGroups`, `pve.PlaceReplicas`, `pve.RemoveReplicas`):
+
+1. **Baseline.** Where the group's workers are now: its stored placement, else the even split of its current count.
+   A re-render never moves a running worker; only the difference is placed or removed. An edit that changes no count
+   writes the baseline as it is and asks Proxmox nothing (so the first edit of a cluster moved to 0.1.13 stores the
+   even split it already runs).
+2. **Scale-up and create** place each new replica one at a time on a node that
+   - holds the image (an entry of the image string, whose template VMID Proxmox still shows on that node) and is
+     online,
+   - has the cluster's worker storage active (`proxmox.storage` in the values, fixed at create),
+   - has room on that storage for the root disk with the provider's storage headroom (`storageHeadroomPct`),
+   - stays under `maxcpu × overcommitCPU` with the flavor's vCPUs,
+   - has the flavor's memory free after the memory kept for protected VMs.
+
+   Among those the node with the fewest replicas of this group wins, then the one with the most free memory, then by
+   name: a group is spread when several nodes fit. Every pick counts at once, for the next replica and for the next
+   group of the same request. Memory and CPU count every VM's configured size, running or stopped, like the server
+   scheduler. On shared storage a disk is taken from every node's view of the pool.
+3. **Workers not built yet count.** A clone takes minutes. The workers of every cluster of this Kubernetes provider
+   that are decided and that Proxmox does not have yet (placement less the VMs tagged `pc-k8s-<clusterId>` per node)
+   count as VMs of that cluster's largest group: its memory and CPU on the node, and its root disk on the cluster's
+   worker storage (off that node's pool, or off every node's view of a shared one), which Proxmox still shows free.
+   Decisions on one Proxmox provider run one at a time (a lock from the
+   snapshot to the Application that records the decision), so two creates in a row do not both take the last free node.
+4. **Scale-down** removes each replica from the node whose MachineDeployment has the most replicas that are not ready
+   (a stuck machine goes before a healthy one), then the node with the most replicas of the group, then the one with
+   the least free memory, then by name. Nothing is checked, so it never fails on Proxmox: the nodes' free memory is
+   read for the order only, and when Proxmox does not answer (or the MachineDeployments cannot be read) that
+   criterion is skipped.
+5. **The image string changes** (an UPGRADE to a version published on other nodes, or the operator edited
+   `config.cluster.versions` and the next node group edit picks it up): replicas on nodes that still hold the image
+   stay, a new node starts at 0, and the replicas of a node that no longer holds it are placed as new ones, by rule 2.
+
+Refusals are all or nothing and happen before anything is reserved, minted or written:
+
+| Answer | When |
+|---|---|
+| `409 Node group "G": only K of N new workers fit (flavor F: X vCPU, Y MB, Z GiB disk). Reduce the count, choose a smaller flavor, or contact the operator.` | Not every new replica has a node |
+| `409 Node group "G": no node that holds this version's image has the cluster's storage. Contact the operator.` | The cluster's storage is active on none of the image's nodes |
+| `409 Node group "G": no node still holds this version's image. Contact the operator.` | The template of the image string is gone from every node that has the cluster's storage (removed or moved after the provider's versions were set) |
+| `503 proxmox cluster unavailable` | Nodes, VMs or storage could not be read |
+| `409 Another cluster change is being placed on this provider. Try again in a moment.` | The lock was held for 30 s |
+
+What it does not do:
+
+- **Local volumes at scale-down.** Removing a group's last replica on a node leaves the PersistentVolumes on that
+  node's storage behind: their pods cannot start elsewhere. The order above empties a node last, the console warns
+  when a group is scaled below the number of hosts it runs on, and PersistentVolumes are not read.
+- **A node dropped from the image string is pruned at once.** The Application prunes, so that node's
+  MachineDeployment and its workers are deleted when the edit syncs, not surge-first; their replacements are being
+  built on other nodes at the same time. Room for them is checked before the edit is written. Publishing a version
+  on fewer nodes than the current one therefore moves workers at each cluster's next upgrade or node group edit.
+- **Nodes whose storage has another name.** One storage name per cluster: a node where it is not active gets no
+  replica.
+- **No capacity check** for a flavor changed in place (every worker of the group is replaced where it is) or for the
+  one surge machine of a rolling upgrade. "Provisioning status" shows the result.
+- **Existing clusters are untouched** until an operator sets the provider's `chartVersion` to 0.1.13 and bumps each
+  cluster (**Bump** on the provider page, or the tenant's *Apply platform update*). A cluster on an older chart gets
+  no `machinePlacement` and no check, exactly as before. After the bump its render is the same until its node groups
+  change.
 
 **Reaching the platform.** Workers sit on a tenant vnet with no route to the management network. The API-server
 endpoint is an address on the services subnet, which tenants reach over their normal egress: MetalLB.

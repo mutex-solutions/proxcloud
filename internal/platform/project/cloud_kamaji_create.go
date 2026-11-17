@@ -205,6 +205,15 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 	if storage == "" {
 		return sec, httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable, "The Proxmox provider has no storage profile for boot disks")
 	}
+	// Where each group's workers go, by what is free on the nodes that hold the image. Before anything is reserved
+	// or minted: a cluster that does not fit leaves nothing behind.
+	if kamaji.ChartHasPlacement(ks.Config().ChartVersion) {
+		if perr := kamajiPlaceCreate(d, spec, func() (*kamajiCapacity, *httpx.HTTPError) {
+			return h.kamajiSnapshot(ctx, ks, compute, storage)
+		}); perr != nil {
+			return sec, perr
+		}
+	}
 	gatewayCSI, err := h.kamajiGatewayCSI(ks.Config(), compute)
 	if err != nil {
 		return sec, err

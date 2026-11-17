@@ -88,6 +88,14 @@ export const locations: Location[] = [
     serviceName: "ProxCloud DBaaS",
   },
   {
+    serviceId: "svc-k8s-1",
+    region: "RegionOne",
+    displayName: "Hanoi Kubernetes",
+    resourceTypes: ["KUBERNETES_CLUSTER"],
+    provider: "kamaji",
+    serviceName: "ProxCloud Kubernetes",
+  },
+  {
     serviceId: "svc-sandbox-1",
     region: "RegionOne",
     displayName: "Hanoi Sandboxes",

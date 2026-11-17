@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"slices"
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
@@ -76,6 +75,15 @@ func (h *Handler) kamajiCreate(w http.ResponseWriter, r *http.Request, u *user.U
 	}
 	// Detached like the other PVE write paths: a browser leaving mid-create must not strand tokens.
 	ctx := context.WithoutCancel(r.Context())
+	// One placement at a time per compute provider, held until the Application records this one (kamajiPlaceLock).
+	if compute, cerr := h.kamajiCompute(ctx, proj, ks.Config().Defaults); cerr == nil && kamaji.ChartHasPlacement(ks.Config().ChartVersion) {
+		release, lerr := h.kamajiPlaceLock(ctx, compute.ID)
+		if lerr != nil {
+			h.fail(w, lerr)
+			return
+		}
+		defer release()
+	}
 	sec, err := h.kamajiProvisionCluster(ctx, proj, ks, &spec)
 	if err != nil {
 		h.fail(w, err)
@@ -162,23 +170,18 @@ func (h *Handler) kamajiAction(w http.ResponseWriter, r *http.Request, proj *Pro
 			h.fail(w, httpx.BadRequest("version is required"))
 			return true
 		}
-		err := ks.PatchClusterValues(r.Context(), cr.ExternalID, func(values map[string]any) error {
-			current, _ := values["kubernetesVersion"].(string)
-			// One minor at a time, never backwards (plan §3.4) — validated against the live
-			// values, not the cache, so a stale sync can't let a bad jump through.
-			if err := kamaji.ValidateUpgradePath(current, version); err != nil {
-				return httpx.BadRequest(err.Error())
+		compute, computeErr := h.kamajiCompute(r.Context(), proj, d)
+		if computeErr == nil {
+			release, lerr := h.kamajiPlaceLock(r.Context(), compute.ID)
+			if lerr != nil {
+				h.fail(w, lerr)
+				return true
 			}
-			values["kubernetesVersion"] = version
-			// Node images follow the curated version→image matrix: rotate every group to the new
-			// version's image (a MachineDeployment template rotation = CAPI rolling replace). A
-			// group with an image VARIANT stays on that variant — resolved against the target
-			// version, and the upgrade is refused when the variant has no image there, because
-			// silently rolling a GPU pool onto the plain image is a broken pool with extra steps.
-			if err := rotateNodeGroupImages(values, d, version); err != nil {
-				return err
-			}
-			return nil
+			defer release()
+		}
+		placer := h.kamajiPlacer(r.Context(), ks, compute, computeErr, proj, cr.ExternalID)
+		err := ks.PatchClusterChartValues(r.Context(), cr.ExternalID, func(values map[string]any, chartVersion string) error {
+			return kamajiUpgradeValues(values, chartVersion, version, d, placer)
 		})
 		if err != nil {
 			h.fail(w, err)
@@ -213,28 +216,15 @@ func (h *Handler) kamajiAction(w http.ResponseWriter, r *http.Request, proj *Pro
 			h.fail(w, err)
 			return true
 		}
-		err = ks.PatchClusterValues(r.Context(), cr.ExternalID, func(values map[string]any) error {
-			version, _ := values["kubernetesVersion"].(string)
-			prevFlavor, prevImage, prevVariant := prevGroupIndex(values)
-			// Flavor allowlist applies to NEW or flavor-CHANGED groups only — an admin narrowing
-			// the allowlist must not brick resizes of groups that already run a since-removed
-			// flavor.
-			if len(d.Flavors) > 0 {
-				for _, ng := range groups {
-					if prevFlavor[ng.Name] == ng.FlavorID {
-						continue
-					}
-					if !slices.Contains(d.Flavors, ng.FlavorID) {
-						return httpx.BadRequest(fmt.Sprintf("node group %q: flavor %q is not offered by this provider", ng.Name, ng.FlavorID))
-					}
-				}
-			}
-			rendered := kamaji.NodeGroupValues(d, version, groups)
-			if err := applyNodeGroupImages(rendered, prevImage, prevVariant, version); err != nil {
-				return err
-			}
-			values["nodeGroups"] = rendered
-			return nil
+		release, lerr := h.kamajiPlaceLock(r.Context(), compute.ID)
+		if lerr != nil {
+			h.fail(w, lerr)
+			return true
+		}
+		defer release()
+		placer := h.kamajiPlacer(r.Context(), ks, compute, nil, proj, cr.ExternalID)
+		err = ks.PatchClusterChartValues(r.Context(), cr.ExternalID, func(values map[string]any, chartVersion string) error {
+			return kamajiSetGroupsValues(values, chartVersion, groups, d, placer)
 		})
 		if err != nil {
 			h.fail(w, err)
@@ -554,6 +544,12 @@ func kamajiNodeGroups(v any) ([]kamaji.NodeGroup, error) {
 	var groups []kamaji.NodeGroup
 	if err := json.Unmarshal(raw, &groups); err != nil {
 		return nil, fmt.Errorf("nodeGroups: %w", err)
+	}
+	// The node image is the operator's choice (the provider's version matrix), never the request's: an image string
+	// names the PVE nodes and template VMIDs a group is built from, so a tenant could pin its workers to a node of
+	// its choice or boot a template nobody published.
+	for i := range groups {
+		groups[i].ImageID = ""
 	}
 	return groups, nil
 }

@@ -16,6 +16,7 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -380,6 +381,7 @@ function KamajiClustersCard({ id }: { id: string }) {
   const pin = q.data?.providerChartVersion ?? ""
   const clusters = q.data?.clusters ?? []
   const behind = clusters.filter((c) => pin && c.chartVersion !== pin)
+  const [machinesOf, setMachinesOf] = useState<{ id: string; name?: string } | null>(null)
   const invalidate = () => void qc.invalidateQueries({ queryKey: ["admin-get", `/admin/service/${id}/k8s-clusters`] })
 
   const bumpOne = useMutation({
@@ -451,7 +453,8 @@ function KamajiClustersCard({ id }: { id: string }) {
                     {c.chartVersion || "—"}
                     {pin && c.chartVersion === pin ? <span className="ml-2 text-xs text-muted-foreground">current</span> : null}
                   </TableCell>
-                  <TableCell className="text-right">
+                  <TableCell className="space-x-2 text-right">
+                    <Button size="sm" variant="ghost" onClick={() => setMachinesOf(c)}>Machines</Button>
                     {pin && c.chartVersion !== pin ? (
                       <Button size="sm" variant="outline" onClick={() => bumpOne.mutate(c.id)} disabled={bumpOne.isPending}>
                         Bump to {pin}
@@ -464,7 +467,116 @@ function KamajiClustersCard({ id }: { id: string }) {
           </TableBody>
         </Table>
       </CardContent>
+      {machinesOf && <ClusterMachinesDialog serviceId={id} cluster={machinesOf} onClose={() => setMachinesOf(null)} />}
     </Card>
+  )
+}
+
+type MachineCondition = { type: string; status: string; reason?: string; message?: string; lastTransitionTime?: string }
+type ClusterMachines = {
+  proxmoxCluster?: { conditions?: MachineCondition[] }
+  machines?: {
+    name: string; nodeGroup?: string; phase?: string; lastUpdated?: string; nodeRef?: string; vmid?: number
+    proxmoxNode?: string; addresses?: string[]; code?: string; attention?: boolean; deleting?: boolean
+    failureMessage?: string; conditions?: MachineCondition[]
+  }[]
+}
+
+// Cluster API conditions that say something is going on: False is their healthy state (Paused=False/NotPaused,
+// Deleting=False/NotDeleting), so they are a finding only when True.
+const NEGATIVE_CONDITIONS = new Set(["Paused", "Deleting", "Updating", "ScalingUp", "ScalingDown", "RollingOut", "Remediating"])
+
+// conditionOpen: does this condition report something wrong or unfinished?
+function conditionOpen(c: MachineCondition) {
+  return NEGATIVE_CONDITIONS.has(c.type) ? c.status === "True" : c.status !== "True"
+}
+
+// The open conditions: what is wrong, with the upstream reason and message.
+function OpenConditions({ conditions }: { conditions?: MachineCondition[] }) {
+  const open = (conditions ?? []).filter((c) => conditionOpen(c) && (c.reason || c.message))
+  if (open.length === 0) return <span className="text-muted-foreground">—</span>
+  return (
+    <ul className="grid gap-1">
+      {open.map((c, i) => (
+        <li key={i} className="text-xs">
+          <span className="font-mono">{c.type}</span>
+          {c.reason ? <span className="text-muted-foreground"> · {c.reason}</span> : null}
+          {c.message ? <div className="break-words text-muted-foreground">{c.message}</div> : null}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+// ClusterMachinesDialog — the operator's view of what a tenant sees as "needs attention": every worker
+// Machine of one cluster with what Cluster API and CAPMOX report, read live from the management cluster.
+function ClusterMachinesDialog({ serviceId, cluster, onClose }: { serviceId: string; cluster: { id: string; name?: string }; onClose: () => void }) {
+  const q = useAdminGet<ClusterMachines>(`/admin/service/${serviceId}/k8s-clusters/${cluster.id}/machines`)
+  const machines = q.data?.machines ?? []
+  const provider = (q.data?.proxmoxCluster?.conditions ?? []).filter(conditionOpen)
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-4xl">
+        <DialogHeader>
+          <DialogTitle>Machines of {cluster.name || cluster.id}</DialogTitle>
+          <DialogDescription>
+            What Cluster API and the Proxmox provider report for each worker. The tenant sees the reason code only.
+          </DialogDescription>
+        </DialogHeader>
+        {q.isLoading ? (
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        ) : q.isError ? (
+          <p role="alert" className="text-sm text-destructive">{(q.error as Error).message}</p>
+        ) : (
+          <div className="grid gap-4">
+            {provider.length > 0 && (
+              <div className="rounded-lg border border-amber-500/50 bg-amber-500/5 p-3 text-sm">
+                <div className="mb-1 font-medium">Proxmox access of this cluster</div>
+                <OpenConditions conditions={provider} />
+              </div>
+            )}
+            <Table>
+              <TableHeader>
+                <TableRow className="hover:bg-transparent">
+                  <TableHead>Machine</TableHead>
+                  <TableHead>Phase</TableHead>
+                  <TableHead>VM</TableHead>
+                  <TableHead>Reason</TableHead>
+                  <TableHead>Detail</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {machines.length === 0 ? (
+                  <TableRow><TableCell colSpan={5} className="text-center text-sm text-muted-foreground">No machines yet.</TableCell></TableRow>
+                ) : (
+                  machines.map((m) => (
+                    <TableRow key={m.name} className="align-top">
+                      <TableCell>
+                        <div className="font-mono text-xs">{m.name}</div>
+                        <div className="text-xs text-muted-foreground">{m.nodeGroup || "—"}{m.nodeRef ? ` · node ${m.nodeRef}` : ""}</div>
+                      </TableCell>
+                      <TableCell className="text-sm">{m.deleting ? "Deleting" : m.phase || "—"}</TableCell>
+                      <TableCell className="font-mono text-xs">
+                        {m.vmid ? `${m.vmid}${m.proxmoxNode ? ` @ ${m.proxmoxNode}` : ""}` : "—"}
+                        {(m.addresses ?? []).length > 0 ? <div className="text-muted-foreground">{m.addresses?.join(", ")}</div> : null}
+                      </TableCell>
+                      <TableCell className="text-sm">
+                        {m.code ? <span className="font-mono text-xs">{m.code}</span> : "ready"}
+                        {m.attention ? <Badge variant="outline" className="ml-2 border-amber-500/50 text-amber-700 dark:text-amber-400">Needs attention</Badge> : null}
+                      </TableCell>
+                      <TableCell className="max-w-sm">
+                        {m.failureMessage ? <div className="break-words text-xs text-destructive">{m.failureMessage}</div> : null}
+                        <OpenConditions conditions={m.conditions} />
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
   )
 }
 

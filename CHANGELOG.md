@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Template updates: publish a version on all nodes** (`docs/template-updates.md`, admin console System > Template
+  updates). A site without shared storage needs a copy of a Kubernetes node image on every node, and each copy had to
+  be imported, smoke-tested and published by hand. **Publish on all nodes…** on a version's row does it for every node
+  of one Proxmox provider: `GET /admin/template-updates/publish-all` (`admin:service:read`) reports the state per
+  node, `POST` (`admin:service:manage`, audited) advances one step. A step publishes every node whose smoke test
+  passed, through the existing publish with all its gates, then starts at most one import or one smoke test, and
+  only when no import and no smoke test of that provider is queued or running. The open dialog drives it (it reads
+  every 15 s); closing it pauses. A failed import or smoke test is not repeated, nothing is withdrawn, a node without
+  the provider's import storage or the default profile's storage is skipped with the reason, and a failed node keeps
+  its older published copy. The report carries the `config.cluster.versions` line, which the operator still copies
+  by hand, and warns while it covers fewer nodes than publish another Kubernetes version or while a node is down
+  (its copy cannot be read). An advance that published a node and then cannot start the next import still answers
+  the report, with the error in it, so the publish is shown and audited. Not verified on a lab.
+
+- **Managed Kubernetes: node group replicas are placed by free capacity** (cluster chart `proxmox-kamaji-cluster`
+  0.1.13, `docs/managed-k8s.md`). On a site without shared storage a node group is one MachineDeployment per node
+  that holds the image, and the chart split the count evenly, so a full node still got its share and its machines
+  hung. ProxCloud now decides the split and stores it (`machinePlacement`): a new replica goes to a node that holds
+  the image (its template is still on that node), has the cluster's storage with room for the disk (storage
+  headroom), stays under the CPU overcommit and
+  has the memory free; among those the node with the fewest replicas of the group, then the most free memory. It is
+  decided at create, scale-up and upgrade, and is stable: running workers never move, only the difference is placed
+  or removed. Workers that are decided and not cloned yet count (memory, CPU and root disk), and decisions on one Proxmox provider run one at a
+  time. Scale-down takes a stuck replica first and empties a node last. A request that does not fit answers 409
+  with how many fit, before anything is reserved. The console warns when a group is scaled below the number of
+  hosts it runs on (volumes on a host's local storage stay there). A cluster on chart 0.1.12 or older is unchanged;
+  one moved to 0.1.13 renders the same objects until its node groups change. Existing sites get it only after the
+  operator sets the provider's `chartVersion` to 0.1.13 and bumps each cluster. Chart 0.1.13 is not published yet,
+  and the platform BOM still pins 0.1.12. Not verified on a lab.
+
+- **Managed Kubernetes: why a cluster is not there yet, and "needs attention"** (`internal/cloud/kamaji/progress.go`,
+  `docs/managed-k8s.md`). A cluster whose provisioning broke half-way used to read PROGRESSING for ever with no
+  reason. The status sync now reads what Cluster API and CAPMOX report per worker (Machine, ProxmoxMachine) and on
+  the provider access (ProxmoxCluster) and stores, per unsettled node group, `progress = {code, since, machines,
+  attention}`, and for the cluster `attention = {code, since}`. Eleven reason codes (a machine that never joined, a
+  clone that is retried, one CAPMOX gave up on, no capacity on the host, a refused token, a control plane that never
+  came up, and the plain steps); the tenant gets a fixed text per code and what to do, never the upstream message.
+  A group or control plane without progress for a bounded time (15 to 90 min by state) needs attention, shown as an
+  amber chip on the list and the cluster page; it is recomputed at every sync and clears by itself, and
+  `cluster.status` is unchanged. The node group table has a Status column. Operators get the full detail in the
+  admin console (**Machines** on a cluster's row of the Kubernetes provider page;
+  `GET /admin/service/{id}/k8s-clusters/{clusterId}/machines`, `admin:service:read`), with credentials cut out of
+  the upstream messages. The sync needs read access to `machines`, `proxmoxmachines` and `proxmoxclusters`:
+  `deploy/mgmt-cluster/rbac.yaml` and chart `proxcloud-platform` 0.1.2 grant it. An existing install must re-apply
+  `rbac.yaml` (or take the platform chart 0.1.2); until then the new fields are absent and nothing else changes.
+  Not verified on a lab.
+
 - **Operator documentation for managed services from the console** (`docs/managed-services.md`, ADR 0009): when to
   use this path and when the installer's split mode, the prerequisites, the Proxmox identities script (what it
   creates, the fixed token ids, what happens when a token exists), the four setup steps with every check, the eleven
@@ -666,6 +713,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   until the store is changed; where the provider's `importStorage` is that store, the provider must change too.
 
 ### Security
+
+- **Managed Kubernetes: a node group's `imageId` is no longer taken from a request.** It went into the cluster's
+  values as it came, so a caller of the API could pin a group's workers to Proxmox nodes and template VMIDs of its
+  choice, published or not. The image now always comes from the provider's version matrix and the group's
+  `imageVariant`. The console never sent the field; an API client that did gets the provider's image instead.
 
 - **The portal token can create API tokens for `capmox@pve` and `csi@pve` only, no longer for every Proxmox user,
   and holds no `Permissions.Modify` on `/pool`**

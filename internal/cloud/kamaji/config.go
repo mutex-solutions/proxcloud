@@ -42,7 +42,18 @@ const GatewayChartVersion = "0.1.7"
 // ChartHasGatewayCSI reports whether chart version v ("x.y.z", optionally "-pre"/"+build", which counts as x.y.z so a
 // drill can tag one) renders that controller. Anything else, a pinned 0.1.5 or a malformed pin, does not: a cluster on
 // it would get the tenant controller at 0 replicas and no controller here.
-func ChartHasGatewayCSI(v string) bool {
+func ChartHasGatewayCSI(v string) bool { return chartAtLeast(v, GatewayChartVersion) }
+
+// PlacementChartVersion is the first cluster chart that reads a node group's machinePlacement. An older chart ignores
+// the key and splits evenly, so a placement written to a cluster pinned below it would take effect, and move running
+// workers, only at that cluster's next platform update: the portal writes none there.
+const PlacementChartVersion = "0.1.13"
+
+// ChartHasPlacement reports whether chart version v places a node group by machinePlacement.
+func ChartHasPlacement(v string) bool { return chartAtLeast(v, PlacementChartVersion) }
+
+// chartAtLeast compares chart versions "x.y.z" ("-pre" and "+build" count as x.y.z). A malformed v is below any.
+func chartAtLeast(v, min string) bool {
 	parse := func(s string) (out [3]int, ok bool) {
 		s = strings.TrimPrefix(s, "v")
 		if i := strings.IndexAny(s, "-+"); i >= 0 {
@@ -62,7 +73,7 @@ func ChartHasGatewayCSI(v string) bool {
 		return out, true
 	}
 	have, ok := parse(v)
-	want, _ := parse(GatewayChartVersion)
+	want, _ := parse(min)
 	return ok && slices.Compare(have[:], want[:]) >= 0
 }
 
@@ -100,6 +111,9 @@ const (
 	LabelManagedBy        = "app.kubernetes.io/managed-by"
 	ManagedByValue        = "proxcloud"
 	AnnotationDisplayName = "proxcloud.io/display-name"
+	// AnnotationChangedAt is when proxcloud last changed the Application's values (RFC3339), stamped by every
+	// values patch.
+	AnnotationChangedAt = "proxcloud.io/values-changed-at"
 )
 
 // labelNodeGroup is what the chart stamps on a group's MachineDeployments.
@@ -313,6 +327,9 @@ type NodeGroup struct {
 	Cores     int      `json:"-"`
 	MemoryMiB int      `json:"-"`
 	Tags      []string `json:"-"`
+	// Placement is how many replicas each PVE node runs, decided by the portal from the nodes' free capacity. Never
+	// taken from a request. Empty: the chart splits evenly.
+	Placement map[string]int `json:"-"`
 }
 
 // ValidateCreate is Validate for a cluster about to be made: a provider that offers no version has no node image for

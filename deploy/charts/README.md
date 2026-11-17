@@ -47,7 +47,11 @@ Four charts live here:
   address), and kube-vip's lease is 60 s with a renew deadline of 40 s, so it tries a renewal
   again for 40 s before it gives up the API address. Each request is still cut at 10 s by
   kube-vip's client: a stall of about half a minute is survived, a write that takes over 10 s at
-  every try is not.
+  every try is not. 0.1.13 reads a node group's `machinePlacement` (`<node>: <replicas>`), which
+  the portal writes from each node's free memory, CPU and storage; a group without the key is
+  split evenly as before, so an existing cluster renders the same objects until its node groups
+  change. A map whose sum is not `machineCount`, or that names a node without an image, fails the
+  render.
 
 ## Publishing
 

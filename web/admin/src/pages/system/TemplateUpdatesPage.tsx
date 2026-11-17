@@ -2,7 +2,7 @@
 // Backed by /admin/template-updates (docs/template-updates.md). Every GitHub call uses the token of
 // the GitHub integration; without it the page asks for one instead of listing anonymously.
 
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { Link } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
@@ -209,6 +209,7 @@ export default function TemplateUpdatesPage() {
   })
   const [sbxTarget, setSbxTarget] = useState<{ row: SandboxRow; serviceId: string } | null>(null)
   const [sbxRollback, setSbxRollback] = useState<SandboxImageState | null>(null)
+  const [publishAll, setPublishAll] = useState<VMLine | null>(null)
 
   return (
     <>
@@ -245,7 +246,7 @@ export default function TemplateUpdatesPage() {
             </Alert>
           ))}
           <TabsContent value="vm">
-            <VMTab rows={disc.data?.vm} loading={disc.isLoading} canManage={canManage} enabled={!!status.data?.vmUpdatesEnabled} onUpdate={setTarget} />
+            <VMTab rows={disc.data?.vm} loading={disc.isLoading} canManage={canManage} enabled={!!status.data?.vmUpdatesEnabled} onUpdate={setTarget} onPublishAll={setPublishAll} />
           </TabsContent>
           <TabsContent value="imported">
             <ImportedTab data={templates.data} loading={templates.isLoading} canManage={canManage} onAction={(kind, t) => setAction({ kind, t })} />
@@ -285,6 +286,15 @@ export default function TemplateUpdatesPage() {
             void qc.invalidateQueries({ queryKey: ["tu-templates"] })
           }}
         />
+      )}
+
+      {publishAll && (
+        <PublishAllDialog line={publishAll} onClose={() => {
+          setPublishAll(null)
+          void qc.invalidateQueries({ queryKey: ["tu-templates"] })
+          void qc.invalidateQueries({ queryKey: ["tu-discovery"] })
+          void qc.invalidateQueries({ queryKey: ["tu-history"] })
+        }} />
       )}
 
       {action && (
@@ -350,8 +360,8 @@ function GitHubCard({ status, loading }: { status?: Status; loading: boolean }) 
   )
 }
 
-function VMTab({ rows, loading, canManage, enabled, onUpdate }: {
-  rows?: VMLine[]; loading: boolean; canManage: boolean; enabled: boolean; onUpdate: (l: VMLine) => void
+function VMTab({ rows, loading, canManage, enabled, onUpdate, onPublishAll }: {
+  rows?: VMLine[]; loading: boolean; canManage: boolean; enabled: boolean; onUpdate: (l: VMLine) => void; onPublishAll: (l: VMLine) => void
 }) {
   return (
     <Card>
@@ -413,12 +423,19 @@ function VMTab({ rows, loading, canManage, enabled, onUpdate }: {
                   <TableCell>
                     {r.latestWithdrawn ? <Badge variant="destructive">Withdrawn</Badge> : r.updateAvailable ? <Badge>Update available</Badge> : r.latest ? <Badge variant="secondary">Up to date</Badge> : null}
                   </TableCell>
-                  <TableCell className="text-right">
+                  <TableCell className="space-x-1 whitespace-nowrap text-right">
                     {r.latest && (
                       <Button size="sm" variant={r.updateAvailable ? "default" : "outline"} disabled={!canManage || !enabled || !!r.latestWithdrawn}
                         title={r.latestWithdrawn ? "This digest was withdrawn and can never be imported again" : !enabled ? "Not enabled on this site" : !canManage ? "Needs admin:service:manage" : undefined}
                         onClick={() => onUpdate(r)}>
                         Import…
+                      </Button>
+                    )}
+                    {r.latest && (
+                      <Button size="sm" variant="outline" disabled={!canManage || !enabled || !!r.latestWithdrawn}
+                        title={r.latestWithdrawn ? "This digest was withdrawn" : !enabled ? "Not enabled on this site" : !canManage ? "Needs admin:service:manage" : "Import, smoke-test and publish this version on every node, one node at a time"}
+                        onClick={() => onPublishAll(r)}>
+                        Publish on all nodes…
                       </Button>
                     )}
                   </TableCell>
@@ -543,6 +560,179 @@ function VMUpdateDialog({ line, onClose, onQueued }: { line: VMLine; onClose: ()
           <Button disabled={!ready || submit.isPending} onClick={() => submit.mutate()}>
             {submit.isPending ? "Queuing…" : "Import as new template"}
           </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ── Publish on all nodes ──────────────────────────────────────────────────────────────────────
+
+type PublishAllNode = { node: string; state: string; vmid?: number; code?: string; message?: string }
+export type PublishAllReport = {
+  digest: string; kubernetesVersion?: string; nodes: PublishAllNode[]; versionsLine?: string
+  complete: boolean; nodesMissing: string[]; next: "advance" | "wait" | "done"; actions?: string[]
+  // An advance that acted and then could not start its next job.
+  error?: { code: string; message: string }
+}
+const NODE_STATE: Record<string, { label: string; variant: "default" | "secondary" | "outline" | "destructive" }> = {
+  published: { label: "Published", variant: "default" },
+  ready_to_publish: { label: "Smoke test passed", variant: "secondary" },
+  publish_failed: { label: "Publish refused", variant: "destructive" },
+  smoke_running: { label: "Smoke test running", variant: "outline" },
+  smoke_queued: { label: "Smoke test queued", variant: "outline" },
+  staged: { label: "Imported, waits its turn", variant: "outline" },
+  smoke_not_started: { label: "Smoke test not started", variant: "destructive" },
+  smoke_failed: { label: "Smoke test failed", variant: "destructive" },
+  importing: { label: "Importing", variant: "outline" },
+  import_queued: { label: "Import queued", variant: "outline" },
+  import_failed: { label: "Import failed", variant: "destructive" },
+  missing: { label: "Not imported, waits its turn", variant: "outline" },
+  present_unmanaged: { label: "Copy not made by the portal", variant: "secondary" },
+  skipped: { label: "Skipped", variant: "secondary" },
+}
+
+// PublishAllDialog drives one digest to published on every node of a provider. The server does one step per POST
+// (publish what passed, then start at most one import or smoke test); the dialog reads the report every 15 s and
+// posts again while the report says "advance". Closing it pauses: nothing runs in the background.
+function PublishAllDialog({ line, onClose }: { line: VMLine; onClose: () => void }) {
+  const latest = line.latest!
+  const providers = useQuery({ queryKey: ["tu-providers"], queryFn: () => apiFetch<Provider[]>("/admin/service") })
+  const pve = useMemo(() => (providers.data ?? []).filter((p) => p.config?.provider === "proxmox" && p.status !== "DISABLED"), [providers.data])
+  const [serviceId, setServiceId] = useState("")
+  const [confirm, setConfirm] = useState("")
+  const [started, setStarted] = useState(false)
+  // halted: a publish was refused or an advance failed. It is not repeated every 15 s; the operator reads why and
+  // tries again. stepError is the failure of an advance that had already published a node: the report came with it.
+  const [halted, setHalted] = useState(false)
+  const [stepError, setStepError] = useState("")
+  const fromPost = useRef(false)
+  const qc = useQueryClient()
+  const key = ["tu-publish-all", serviceId, latest.digest]
+  const report = useQuery({
+    queryKey: key,
+    queryFn: async () => {
+      const r = await apiFetch<PublishAllReport>(`${BASE}/publish-all?serviceId=${encodeURIComponent(serviceId)}&digest=${encodeURIComponent(latest.digest)}`)
+      fromPost.current = false
+      return r
+    },
+    enabled: started,
+    refetchInterval: 15_000,
+    retry: false,
+  })
+  const advance = useMutation({
+    mutationFn: () => apiFetch<PublishAllReport>(`${BASE}/publish-all`, {
+      method: "POST", body: { serviceId, package: latest.package, digest: latest.digest, confirmDigest: confirm.trim() },
+    }),
+    onSuccess: (r) => {
+      fromPost.current = true
+      qc.setQueryData(key, r)
+      setStepError(r.error ? `${r.error.message} (${r.error.code})` : "")
+      if (r.error || r.nodes.some((n) => n.state === "publish_failed")) setHalted(true)
+    },
+    onError: () => setHalted(true),
+  })
+  const { mutate, isPending } = advance
+  const next = report.data?.next
+  const stamp = report.dataUpdatedAt
+  useEffect(() => {
+    if (started && !halted && !isPending && next === "advance" && !fromPost.current) mutate()
+  }, [started, halted, isPending, next, stamp, mutate])
+
+  const r = report.data
+  const err = advance.error ?? report.error ?? (stepError ? new Error(stepError) : null)
+  const down = (r?.nodes ?? []).filter((n) => n.code === "node_down").map((n) => n.node)
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Publish {latest.tag} on all nodes</DialogTitle>
+          <DialogDescription>
+            Every node gets its own copy: imported, smoke-tested, then published. One import or one smoke test of the provider runs at
+            a time. A failed import or smoke test is not repeated, and nothing is withdrawn. Keep this dialog open: closing it pauses.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3 text-sm">
+          {!started ? (
+            <>
+              <div className="space-y-1">
+                <Label>Proxmox provider</Label>
+                <Select value={serviceId} onValueChange={setServiceId}>
+                  <SelectTrigger aria-label="Proxmox provider"><SelectValue placeholder="Pick a provider" /></SelectTrigger>
+                  <SelectContent>{pve.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}</SelectContent>
+                </Select>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Imports go to the provider's import storage and to the default storage profile's storage of each node. A node without both is skipped.
+              </p>
+              <div className="space-y-1">
+                <Label htmlFor="tu-pa-confirm">Type or paste the exact digest to confirm</Label>
+                <Input id="tu-pa-confirm" className="font-mono text-xs" placeholder={latest.digest} value={confirm} onChange={(e) => setConfirm(e.target.value)} />
+              </div>
+            </>
+          ) : (
+            <>
+              {err && (
+                <Alert variant="destructive">
+                  <AlertTitle>Stopped</AlertTitle>
+                  <AlertDescription>{err instanceof Error ? err.message : String(err)}</AlertDescription>
+                </Alert>
+              )}
+              <Table aria-label="Nodes">
+                <TableHeader>
+                  <TableRow><TableHead>Node</TableHead><TableHead>State</TableHead><TableHead>Detail</TableHead></TableRow>
+                </TableHeader>
+                <TableBody>
+                  {!r ? (
+                    <TableRow><TableCell colSpan={3} className="text-center text-muted-foreground">{report.isLoading ? "Reading the provider…" : "No report"}</TableCell></TableRow>
+                  ) : r.nodes.map((n) => {
+                    const st = NODE_STATE[n.state] ?? { label: n.state, variant: "outline" as const }
+                    return (
+                      <TableRow key={n.node}>
+                        <TableCell className="font-mono text-xs">{n.node}{n.vmid ? ` · VM ${n.vmid}` : ""}</TableCell>
+                        <TableCell><Badge variant={st.variant}>{st.label}</Badge></TableCell>
+                        <TableCell className="text-xs text-muted-foreground">{n.code ? <span className="font-mono">{n.code} </span> : null}{n.message}</TableCell>
+                      </TableRow>
+                    )
+                  })}
+                </TableBody>
+              </Table>
+              {r && (
+                <p className="text-xs text-muted-foreground" role="status">
+                  {halted ? (stepError || advance.error ? "Stopped: the next step could not be started." : "Stopped: a publish was refused.") : r.next === "done" ? "Nothing more to do." : r.next === "wait" ? "Waiting for the running job; checked every 15 s." : "Advancing…"}
+                </p>
+              )}
+              {r && !r.complete && r.versionsLine && (
+                <Alert>
+                  <AlertTitle>This version does not cover every node yet</AlertTitle>
+                  <AlertDescription>
+                    {r.nodesMissing.length > 0 && <>Nodes {r.nodesMissing.join(", ")} publish another Kubernetes version and not this one. </>}
+                    {down.length > 0 && <>Nodes {down.join(", ")} are down: a copy they hold cannot be read and is not in the line. </>}
+                    A version line that covers fewer nodes moves a cluster's workers off the missing nodes at its next node group change or
+                    upgrade: the workers on a missing node are deleted at once. Copy the line only when that is intended.
+                  </AlertDescription>
+                </Alert>
+              )}
+              {r?.versionsLine && (
+                <div className="text-xs">
+                  Kubernetes version map:{" "}
+                  <Button size="sm" variant="link" className="h-auto p-0 font-mono text-xs" onClick={() => {
+                    void navigator.clipboard?.writeText(r.versionsLine!)
+                    toast.success("Version-map line copied")
+                  }}>{r.versionsLine}</Button>
+                  <div className="text-muted-foreground">Nothing is written to the Kubernetes provider: paste the line into its versions.</div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Close</Button>
+          {!started ? (
+            <Button disabled={!serviceId || confirm.trim() !== latest.digest} onClick={() => setStarted(true)}>Start</Button>
+          ) : halted ? (
+            <Button onClick={() => { advance.reset(); setStepError(""); setHalted(false); void report.refetch() }}>Try again</Button>
+          ) : null}
         </DialogFooter>
       </DialogContent>
     </Dialog>

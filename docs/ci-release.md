@@ -65,7 +65,10 @@ images use the raw tag and Docker tags cannot contain `+`.
 Managed charts use their own metadata versions and reject a mismatching tag.
 `database-cluster` `0.5.1` and `proxmox-kamaji-cluster` `0.1.12` (both published and
 pinned by the platform BOM) need separate
-publication checks/tags; the app tag does not publish them or move existing
+publication checks/tags. `proxmox-kamaji-cluster` `0.1.13` (placement by free capacity) and
+`proxcloud-platform` `0.1.2` (read access to Machines) are in the repository and not published:
+the BOM keeps `0.1.12` and `0.1.1` until their tags `proxmox-kamaji-cluster-v0.1.13` and
+`proxcloud-platform-v0.1.2` have published them and a change pins both digests; the app tag does not publish them or move existing
 provider pins or managed data. Re-publishing an already existing chart version is
 skipped; it does not replace old contents. See the
 [chart overview](../deploy/charts/README.md).

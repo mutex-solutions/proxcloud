@@ -552,13 +552,78 @@ func (s *Service) PatchClusterApp(ctx context.Context, clusterID string, mutate 
 // PatchClusterValues mutates the Application's helm values in place (UPGRADE, SET_NODE_GROUPS…):
 // same chart pin, same full re-apply.
 func (s *Service) PatchClusterValues(ctx context.Context, clusterID string, mutate func(values map[string]any) error) error {
+	return s.PatchClusterChartValues(ctx, clusterID, func(values map[string]any, _ string) error { return mutate(values) })
+}
+
+// PatchClusterChartValues is PatchClusterValues for a change that depends on the chart version the cluster is pinned
+// to (its own targetRevision, not the provider's pin for new clusters): what a chart does not read must not be written.
+func (s *Service) PatchClusterChartValues(ctx context.Context, clusterID string, mutate func(values map[string]any, chartVersion string) error) error {
 	return s.PatchClusterApp(ctx, clusterID, func(app map[string]any) error {
 		values, _ := dig(app, "spec", "source", "helm", "valuesObject").(map[string]any)
 		if values == nil {
 			return fmt.Errorf("kamaji: cluster %s: application carries no values", clusterID)
 		}
-		return mutate(values)
+		if err := mutate(values, digStr(app, "spec", "source", "targetRevision")); err != nil {
+			return err
+		}
+		// When the values last changed: the status sync counts a machine that is not made yet from here, not from
+		// ArgoCD's previous sync (progress.go).
+		meta, _ := app["metadata"].(map[string]any)
+		ann, _ := meta["annotations"].(map[string]any)
+		if ann == nil {
+			ann = map[string]any{}
+			meta["annotations"] = ann
+		}
+		ann[AnnotationChangedAt] = time.Now().UTC().Format(time.RFC3339)
+		return nil
 	})
+}
+
+// ClusterValues is one managed cluster's id and live chart values.
+type ClusterValues struct {
+	ID     string
+	Values map[string]any
+}
+
+// ListClusterValues lists the chart values of every cluster of this provider that is not being deleted: what each
+// one asks Proxmox for, whether its workers exist yet or not.
+func (s *Service) ListClusterValues(ctx context.Context) ([]ClusterValues, error) {
+	apps, err := s.api.ListApplications(ctx, s.cfg.ArgoNamespace, LabelService+"="+s.serviceID+","+LabelManagedBy+"="+ManagedByValue)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ClusterValues, 0, len(apps))
+	for _, app := range apps {
+		values, _ := dig(app, "spec", "source", "helm", "valuesObject").(map[string]any)
+		if id := digStr(app, "metadata", "name"); id != "" && values != nil && dig(app, "metadata", "deletionTimestamp") == nil {
+			out = append(out, ClusterValues{ID: id, Values: values})
+		}
+	}
+	return out, nil
+}
+
+// UnreadyReplicas counts, per node group and PVE node, the replicas a cluster's MachineDeployments ask for and do
+// not have ready. The chart names a MachineDeployment <cluster>-<group>-<node>.
+func (s *Service) UnreadyReplicas(ctx context.Context, projectID, clusterID string) (map[string]map[string]int, error) {
+	mds, err := s.api.ListMachineDeployments(ctx, NamespaceFor(projectID), labelClusterName+"="+clusterID)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]map[string]int{}
+	for _, md := range mds {
+		group := digStr(md, "metadata", "labels", labelNodeGroup)
+		node, ok := strings.CutPrefix(digStr(md, "metadata", "name"), clusterID+"-"+group+"-")
+		if group == "" || !ok {
+			continue
+		}
+		want, _ := intAt(md, "spec", "replicas")
+		ready, _ := intAt(md, "status", "readyReplicas")
+		if out[group] == nil {
+			out[group] = map[string]int{}
+		}
+		out[group][node] = max(want-ready, 0)
+	}
+	return out, nil
 }
 
 // SetChartVersion re-pins the cluster's Application onto a chart version (the "platform

@@ -200,6 +200,77 @@ answers `409` with the reason in `errors.details`:
 | `scheduled_for_deletion` / `deletion_in_progress` / `deleted` | The project is on its way out. |
 | `not_enabled` | Any other case where the project is not ENABLED. |
 
+Managed Kubernetes status: a `KUBERNETES_CLUSTER` resource's `data.cluster` carries, next to `status`, two optional
+fields that say why a cluster is not there yet. Both are absent on a settled cluster, and on an install whose
+management-cluster RBAC predates them.
+
+```json
+{"cluster": {"status": "PROGRESSING",
+  "attention": {"code": "control_plane_stalled", "since": "2026-11-17T09:12:00Z"},
+  "node_groups": [{"name": "workers", "count": 2, "ready_replicas": 1, "phase": "ScalingUp",
+    "progress": {"code": "not_joined", "since": "2026-11-17T09:20:00Z", "machines": 1, "attention": true}}]}}
+```
+
+`progress.code` is one of `provider_access_refused`, `no_capacity`, `vm_create_failed`, `vm_create_retrying`,
+`waiting_control_plane`, `creating_vm`, `starting_vm`, `not_joined`, `node_not_ready`, `provisioning`;
+`attention.code` is `control_plane_stalled` or `provider_access_refused`. `attention: true` means no progress for a
+bounded time or an error that is not retried; it clears by itself. `status` is unchanged by either. The codes, their
+texts and the bounds: [managed-k8s.md](managed-k8s.md#provisioning-status-reason-and-needs-attention).
+
+Managed Kubernetes placement: on a cluster whose chart is 0.1.13 or later, `node_groups[i].placement` (`{"pve1": 2,
+"pve3": 1}`) says how many replicas of the group each Proxmox node runs. It is decided by the server at create,
+`SET_NODE_GROUPS` and `UPGRADE`, and is never read from a request; neither is a node group's `imageId`, which is
+ignored from v0.8.0 (the image comes from the provider's version matrix and the group's `imageVariant`). The node
+names are the ones `image_id` already carried. Create, `SET_NODE_GROUPS` and `UPGRADE` can answer `409` when the new
+workers do not fit or the cluster's storage is on no node that holds the image, and `503` when Proxmox cannot be read:
+[managed-k8s.md](managed-k8s.md#9-how-a-cluster-lands-on-proxmox).
+
+`GET /api/v1/admin/service/{id}/k8s-clusters/{clusterId}/machines` (`admin:service:read`) is the operator's detail,
+read live from the management cluster:
+
+```json
+{"proxmoxCluster": {"conditions": [{"type": "ProxmoxAvailable", "status": "True"}]},
+ "machines": [{"name": "pc-c-1-workers-pve2-x7k2p-9d4tq", "nodeGroup": "workers", "phase": "Provisioned",
+   "lastUpdated": "2026-11-17T09:20:00Z", "nodeRef": "", "vmid": 142, "proxmoxNode": "pve2",
+   "addresses": ["10.20.0.12"], "code": "not_joined", "attention": true, "failureMessage": "",
+   "conditions": [{"type": "NodeHealthy", "status": "Unknown", "reason": "NodeDoesNotExist",
+     "message": "Waiting for a Node with spec.providerID proxmox://142 to exist", "lastTransitionTime": "2026-11-17T09:20:00Z"}]}]}
+```
+
+`conditions` joins the Machine's and its ProxmoxMachine's. Messages have credentials cut out and are clipped to 400
+characters. `404` for a cluster that is not this provider's; `502` with "re-apply deploy/mgmt-cluster/rbac.yaml" when
+the service account may not read Machines.
+
+Publishing a node image on every node: `GET /api/v1/admin/template-updates/publish-all?serviceId=…&digest=sha256:…`
+(`admin:service:read`) reports one artifact's state on every node of a Proxmox provider, and
+`POST /api/v1/admin/template-updates/publish-all` with `{"serviceId","package","digest","confirmDigest"}`
+(`admin:service:manage`) advances it one step: it publishes what passed its smoke test and starts at most one import
+or smoke test.
+
+```json
+{"digest": "sha256:…", "kubernetesVersion": "1.35.10",
+ "nodes": [{"node": "pve1", "state": "published", "vmid": 9210},
+           {"node": "pve2", "state": "smoke_queued", "vmid": 9211},
+           {"node": "pve3", "state": "missing"},
+           {"node": "pve4", "state": "skipped", "code": "node_down", "message": "The node is not online"}],
+ "versionsLine": "\"1.35.10\": \"pve1=9210\"", "complete": false, "nodesMissing": [], "next": "wait",
+ "actions": ["published pve1/9210", "smoke test queued pve2/9211"]}
+```
+
+`complete` is false while a node is down (`code` `node_down`): its copy cannot be read and is not in `versionsLine`.
+
+Errors, each with a `code` in `details`: `409` `busy` (another advance of that provider runs), `digest_withdrawn`,
+`vm_updates_disabled`, `provider_missing`, `provider_disabled` or `provider_incomplete`; `400` `confirm_digest` (the
+POST without a package or with a `confirmDigest` that is not the digest; a malformed digest); `502` `pve_unreadable`
+(the provider's nodes, VMs or storage could not be read; nothing was changed); `503` `pve_unwired`. An advance that
+has to start an import can also answer what the import does, without a `code`: `429` (GitHub rate limit), `502`
+(GitHub), `409` (the integration is not configured) or `400` (the artifact is refused).
+
+When an advance has already published a node and then cannot start its next job, it answers `200` with the report,
+`actions`, and `"error": {"code", "message"}` (`rate_limited`, a lifecycle code, or `next_step_failed`), so what it
+did is shown and audited; `next` is then `advance`. The states and the rules:
+[template-updates.md](template-updates.md#publish-on-all-nodes).
+
 ### Platform setup — `/api/v1/admin/setup`
 
 Operator console surface for bringing a new install to its first tenant.

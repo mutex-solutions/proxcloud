@@ -202,6 +202,16 @@ func servesLine(r pve.ClusterResource, p VMPayload) bool {
 	return hasTagValue(r.Tags, pve.TagTemplatePub) && pve.TagValue(r.Tags, pve.TagTemplateImage) == p.OS
 }
 
+// servesAnyK8s reports whether a cluster row is a published Kubernetes node image of that OS, of any
+// Kubernetes version (imported or built by the pipeline).
+func servesAnyK8s(r pve.ClusterResource, os string) bool {
+	if r.Type != "qemu" || r.Template != 1 || r.NodeDown || r.Pool != pve.TemplatePool || hasTagValue(r.Tags, pve.TagTemplateWithdrawn) {
+		return false
+	}
+	return hasTagValue(r.Tags, TagK8sPublished) && strings.HasPrefix(r.Name, "pc-ghcr-"+os+"-") ||
+		hasTagValue(r.Tags, "pc-k8s") && hasTagValue(r.Tags, "pc-k8s-os-"+os)
+}
+
 // copyOf reports whether a cluster row is a finished import of p's artifact (any node).
 func copyOf(r pve.ClusterResource, p VMPayload) bool {
 	return r.Type == "qemu" && r.Template == 1 && r.Pool == pve.TemplatePool && r.Name == TemplateName(p) &&

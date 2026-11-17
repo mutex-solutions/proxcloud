@@ -133,7 +133,10 @@ are not evidence of publication or installation. The releases `v0.5.1`, `v0.5.2`
 2. Verify app/chart/installer BOM alignment with that exact version. Keep managed
    charts independent: `database-cluster` `0.5.1` and `proxmox-kamaji-cluster`
    `0.1.12` (published and pinned by the platform BOM) need their
-   own tag/publication checks. Do not move existing provider
+   own tag/publication checks. The repository holds `proxmox-kamaji-cluster` `0.1.13` and
+   `proxcloud-platform` `0.1.2`, which are not published: each needs its own tag
+   (`proxmox-kamaji-cluster-v0.1.13`, `proxcloud-platform-v0.1.2`) and then its digest in the
+   platform BOM before an app release names it. Do not move existing provider
    pins or managed data as a consequence of the app release.
 3. Verify the release-policy tests on the selected commit. The Release job accepts
    strict stable/RC tags from the environment: RCs use
