@@ -158,7 +158,7 @@ export default function SecurityGroupsPage() {
         <EmptyState
           icon={Shield}
           title="No security groups yet"
-          hint="Create a security group and add ingress/egress rules to control traffic."
+          hint="Create a security group and add rules to allow inbound traffic to your servers."
           action={
             <Button onClick={() => setCreateOpen(true)}>
               <Plus className="size-4" /> Create security group

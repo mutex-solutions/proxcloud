@@ -15,7 +15,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { apiFetch } from "@/lib/api"
+import { ApiError, apiFetch } from "@/lib/api"
 import { useCloudResource, useCloudScope, useProjectId } from "@/lib/hooks"
 
 // Raw rule shape (LIST_RULES returns the group's security_group_rules verbatim).
@@ -120,7 +120,14 @@ export default function SecurityGroupDetailPage() {
       setRuleToDelete(null)
       refreshRules()
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: (e: Error) => {
+      toast.error(e.message)
+      // 409: the rule list changed since this page loaded it, so the id no longer names the rule. Show the current list.
+      if (e instanceof ApiError && e.status === 409) {
+        setRuleToDelete(null)
+        refreshRules()
+      }
+    },
   })
 
   if (isLoading || !group) {
@@ -172,6 +179,7 @@ export default function SecurityGroupDetailPage() {
           <Table>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
+                <TableHead>Direction</TableHead>
                 <TableHead>Protocol</TableHead>
                 <TableHead>Port range</TableHead>
                 <TableHead>Remote</TableHead>
@@ -181,10 +189,11 @@ export default function SecurityGroupDetailPage() {
             <TableBody>
               {rules.data.result.map((rule, i) => (
                 <TableRow key={rule.id ?? i}>
-                  <TableCell className="text-sm uppercase">{rule.protocol ?? "any"}</TableCell>
+                  <TableCell className="text-sm capitalize">{rule.direction || "ingress"}</TableCell>
+                  <TableCell className="text-sm uppercase">{rule.protocol || "any"}</TableCell>
                   <TableCell className="font-mono text-sm">{portRange(rule)}</TableCell>
                   <TableCell className="font-mono text-sm">
-                    {rule.remote_ip_prefix ?? rule.remote_group_id ?? "any"}
+                    {rule.remote_ip_prefix || rule.remote_group_id || "any"}
                   </TableCell>
                   <TableCell className="text-right">
                     <Button variant="ghost" size="icon-sm" onClick={() => setRuleToDelete(rule)} aria-label="Delete rule">
@@ -195,6 +204,11 @@ export default function SecurityGroupDetailPage() {
               ))}
             </TableBody>
           </Table>
+          {rules.data.result.some((rule) => rule.direction === "egress") ? (
+            <p className="border-t px-4 py-3 text-sm text-muted-foreground">
+              Outbound traffic is always allowed. An egress rule is stored but restricts nothing.
+            </p>
+          ) : null}
         </div>
       )}
 
@@ -263,7 +277,7 @@ export default function SecurityGroupDetailPage() {
           <DialogHeader>
             <DialogTitle>Delete rule</DialogTitle>
             <DialogDescription>
-              Delete this {ruleToDelete?.direction ?? ""} rule ({ruleToDelete?.protocol ?? "any"},{" "}
+              Delete this {ruleToDelete?.direction || "ingress"} rule ({ruleToDelete?.protocol || "any"},{" "}
               {ruleToDelete ? portRange(ruleToDelete) : ""})? This cannot be undone.
             </DialogDescription>
           </DialogHeader>
