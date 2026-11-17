@@ -43,6 +43,7 @@ type fakeJobs struct {
 	renewErr    error // what Renew answers while the lease is not lost
 	onLose      func()
 	ends        []string // complete | defer:<code> | fail:<code> | retry:<code>
+	defers      int      // calls of Defer, refused ones too
 }
 
 func (f *fakeJobs) ClaimKinds(context.Context, time.Duration, []string) (*durablejobs.Job, error) {
@@ -91,6 +92,9 @@ func (f *fakeJobs) Fail(_ context.Context, _ *durablejobs.Job, _ time.Duration, 
 	return f.end("fail:" + code)
 }
 func (f *fakeJobs) Defer(_ context.Context, _ *durablejobs.Job, _ time.Duration, code string) error {
+	f.mu.Lock()
+	f.defers++
+	f.mu.Unlock()
 	return f.end("defer:" + code)
 }
 func (f *fakeJobs) last() string {
