@@ -33,6 +33,21 @@ type vmInventoryWire struct {
 	mutations       int
 	aclReads        int
 	protectionReads int
+	// documented gives the token exactly the grants of docs/proxmox-permissions.md:
+	// Sys.Audit on / (not propagated) and /nodes, the platform role on /pool, nothing
+	// on /access or /vms, NoAccess on the fenced pools.
+	documented bool
+}
+
+// held reports whether a guest holds the VMID anywhere in the cluster, seen or not.
+func (f *vmInventoryWire) held(id int) bool {
+	switch id {
+	case 101:
+		return f.mode != "empty" && f.mode != "partial-nodes" && f.mode != "foreign-ip"
+	case 102:
+		return f.mode == "partial" || f.mode == "partial-protected" || f.mode == "foreign-ip"
+	}
+	return false
 }
 
 func vmWireRow(id int, template bool) map[string]any {
@@ -52,8 +67,10 @@ func (f *vmInventoryWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/api2/json")
 	write := func(v any) { _ = json.NewEncoder(w).Encode(map[string]any{"data": v}) }
-	gone := f.mode == "empty" || f.mode == "denied" || f.mode == "masked" || f.mode == "hidden" || f.mode == "partial-nodes"
+	gone := f.mode == "empty" || f.mode == "denied" || f.mode == "masked" || f.mode == "hidden" || f.mode == "partial-nodes" || f.mode == "pool-unaudited"
 	template := f.mode == "template"
+	// The VMID is held by a VM of another project's pool: the same VM moved there, or another one.
+	elsewhere := f.mode == "moved-elsewhere" || f.mode == "reused-elsewhere"
 	switch {
 	case strings.HasSuffix(path, "/agent/network-get-interfaces"):
 		switch f.mode {
@@ -108,6 +125,15 @@ func (f *vmInventoryWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			write([]any{})
 		}
 		return
+	case path == "/cluster/nextid":
+		// PVE reads the whole guest list here, whatever the token may audit.
+		id, _ := strconv.Atoi(r.URL.Query().Get("vmid"))
+		if f.held(id) {
+			w.WriteHeader(400)
+			_ = json.NewEncoder(w).Encode(map[string]any{"errors": map[string]string{"vmid": fmt.Sprintf("VM %d already exists", id)}})
+			return
+		}
+		write(strconv.Itoa(id))
 	case path == "/cluster/resources":
 		if r.URL.Query().Get("type") == "node" {
 			write([]any{map[string]any{"type": "node", "node": "n1", "status": "online"}})
@@ -132,6 +158,9 @@ func (f *vmInventoryWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		row := vmWireRow(101, template)
+		if elsewhere {
+			row["pool"] = "pc-other"
+		}
 		if f.mode == "page-template-null" {
 			row["template"] = nil
 		}
@@ -172,7 +201,7 @@ func (f *vmInventoryWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		members := []any{}
-		if !gone && f.mode != "foreign-ip" {
+		if !gone && f.mode != "foreign-ip" && !elsewhere {
 			id := 101
 			if f.mode == "partial" || f.mode == "partial-protected" {
 				id = 102
@@ -196,6 +225,22 @@ func (f *vmInventoryWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if f.mode == "hidden" && p == "/vms/101" {
 			privs = map[string]int{}
 		}
+		if f.documented {
+			privs = map[string]int{}
+			switch {
+			case p == "/":
+				privs["Sys.Audit"] = 0
+			case strings.HasPrefix(p, "/nodes"):
+				privs["Sys.Audit"] = 1
+			case p == "/pool" || p == "/pool/pc-p":
+				privs["Pool.Audit"] = 1
+				if f.mode != "pool-unaudited" {
+					privs["VM.Audit"] = 1
+				}
+			case p == "/vms/101" && !gone:
+				privs["VM.Audit"] = 0 // through the pool: PVE does not propagate it
+			}
+		}
 		write(map[string]any{p: privs})
 	case path == "/access/acl":
 		f.aclReads++
@@ -203,12 +248,18 @@ func (f *vmInventoryWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if f.mode == "hidden" {
 			rows = append(rows, map[string]any{"path": "/vms/101", "type": "token", "ugid": "portal@pve!inventory", "roleid": "NoAccess", "propagate": 1})
 		}
+		if f.documented {
+			for _, pool := range []string{"proxcloud-seed", "proxcloud-system"} {
+				rows = append(rows, map[string]any{"path": "/pool/" + pool, "type": "token", "ugid": "portal@pve!inventory", "roleid": "NoAccess", "propagate": 1})
+			}
+		}
 		write(rows)
 	case strings.HasSuffix(path, "/config"):
 		parts := strings.Split(path, "/")
 		id, _ := strconv.Atoi(parts[4])
 		if gone || f.mode == "foreign-ip" && id == 101 {
-			if f.mode == "denied" {
+			if f.mode == "denied" || f.documented { // no right on a VMID outside the token's pools, held or free
+
 				w.WriteHeader(403)
 				return
 			}
@@ -226,7 +277,7 @@ func (f *vmInventoryWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.mutate()
 		}
 		uuid := "11111111-1111-4111-8111-111111111111"
-		if f.mode == "reuse" {
+		if f.mode == "reuse" || f.mode == "reused-elsewhere" {
 			uuid = "22222222-2222-4222-8222-222222222222"
 		}
 		t := 0
@@ -393,6 +444,52 @@ func TestVMInventoryKnownRefreshWithoutGlobalReaderAndAuthorityDeletion(t *testi
 	st, err = providers.Reconcile(ctx, vmProvider(s, cloud.TypeServer), repo, "s", time.Now().UTC())
 	if err != nil || st.Deleted != 1 {
 		t.Fatalf("authoritative deletion: %+v %v", st, err)
+	}
+}
+
+// F60: the documented grants have no ACL on /vms, no Sys.Audit on /access and
+// NoAccess on the fenced pools. A row whose VMID is free in the whole cluster
+// retires on them; a VMID that a guest the token cannot see still holds does not.
+func TestVMInventoryRetiresOnDocumentedGrants(t *testing.T) {
+	for _, mode := range []string{"empty", "reuse", "reused-elsewhere", "template"} {
+		for _, typ := range []string{cloud.TypeServer, cloud.TypeVolume} {
+			t.Run(mode+"/"+typ, func(t *testing.T) {
+				ctx := context.Background()
+				db := freshPG(t)
+				repo := cloud.NewRepo(db)
+				if mode == "template" && typ == cloud.TypeVolume {
+					t.Skip("a template keeps its disk")
+				}
+				old := vmCached(t, db, typ)
+				f := &vmInventoryWire{mode: mode, documented: true}
+				s := vmTestService(t, f)
+				st, err := providers.Reconcile(ctx, vmProvider(s, typ), repo, "s", time.Now().UTC())
+				if err != nil || st.Deleted != 1 || f.aclReads != 0 || f.mutations != 0 {
+					t.Fatalf("stats%+v err%v ACL reads%d writes%d", st, err, f.aclReads, f.mutations)
+				}
+				if got, _ := repo.FindByID(ctx, old.ID); got != nil {
+					t.Fatal("the row of a VM that is gone stayed")
+				}
+			})
+		}
+	}
+	// The VM exists outside what the token sees of its pool: the pool lost VM.Audit,
+	// the VM is hidden, or it was moved to another pool. The row stays and the
+	// warning names the path or the VM.
+	for mode, path := range map[string]string{"pool-unaudited": "VM.Audit on /pool/pc-p", "hidden": "VM.Audit on /vms/101", "moved-elsewhere": "(101): VM exists outside the expected pool"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			db := freshPG(t)
+			repo := cloud.NewRepo(db)
+			old := vmCached(t, db, cloud.TypeServer)
+			s := vmTestService(t, &vmInventoryWire{mode: mode, documented: true})
+			st, err := providers.Reconcile(ctx, vmProvider(s, cloud.TypeServer), repo, "s", time.Now().UTC())
+			var unknown *cloud.InventoryUntrustedError
+			if !errors.As(err, &unknown) || st != (providers.ReconcileStats{}) || !strings.Contains(err.Error(), path) {
+				t.Fatalf("stats%+v err%v, want the path %q", st, err, path)
+			}
+			exactVMRow(t, repo, old)
+		})
 	}
 }
 func TestVMInventoryWholeRowCASAndProtectedVolumes(t *testing.T) {
