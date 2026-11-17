@@ -127,7 +127,7 @@ before the first run:
   (lease 60 s, renew deadline 40 s, retry 5 s). Its client cuts every request at 10 seconds, so
   the address is kept when one try in those 40 seconds gets through in under 10: a stall of about
   half a minute is survived, an etcd whose every write takes over 10 seconds is not. The BOM of
-  this release names 0.1.12; chart 0.1.11 gave up after 10.
+  this release names 0.1.13, which keeps this; chart 0.1.11 gave up after 10.
 - **The MTU of the platform network.** Cilium tunnels pod traffic between the machines at the
   machines' MTU. When the bridge's real path MTU between two nodes is below 1500 (the bridge is
   itself carried by an overlay), set the settings' MTU to it.
@@ -1018,15 +1018,21 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
   change of that field the API accepts after a run succeeded. Nothing in the installer writes an installation record,
   and a site with an installer-built services cluster is not shown on the page.
 - **The cluster chart's fixes of 0.1.12 reach a new install only.** The BOM names
-  `proxmox-kamaji-cluster` 0.1.12, for the platform cluster and for new tenant clusters (whose
-  output did not change). A platform cluster built from the BOM that named 0.1.11 has a control
+  `proxmox-kamaji-cluster` 0.1.13, for the platform cluster (which it renders as 0.1.12 does) and
+  for new tenant clusters (whose node group replicas it places by free capacity,
+  [managed-k8s.md](managed-k8s.md#9-how-a-cluster-lands-on-proxmox)). A platform cluster built from the BOM that named 0.1.11 has a control
   plane node that registers the API address as its InternalIP (its kubelet has no `node-ip`;
   nothing failed on it with one control plane machine) and a kube-vip that gives up the API address
   when a lease renewal takes over 10 seconds. Chart 0.1.12 gives the kubelet the machine's own
   address and kube-vip a renew deadline of 40 seconds (several tries of at most 10 seconds each,
   see [What no check reads](#what-no-check-reads)). No release upgrades between BOMs: an apply on
-  the earlier platform is refused (`bom_unsupported`), and it gets 0.1.12 by Remove and a new
-  install.
+  the earlier platform is refused (`bom_unsupported`), and it gets the fixes by Remove and a new
+  install. The same holds for a platform built from the BOM that named 0.1.12 and
+  `proxcloud-platform` 0.1.1: its Kubernetes provider keeps `chartVersion` 0.1.12 (no placement by
+  free capacity) until the operator sets it to 0.1.13 on the provider's page, and its provider
+  service account cannot read Machines (no provisioning reason) until a Remove and a new install:
+  the `platform` Application keeps the ClusterRole of chart 0.1.1 (self-heal), so re-applying
+  `deploy/mgmt-cluster/rbac.yaml` there does not last.
 - **`layout: separate`** (one cluster for Kubernetes, one for databases) is refused by the API.
 - **No VLAN** on the platform network, and no IPv6.
 - **One control plane machine.** The settings take no control plane count.

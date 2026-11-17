@@ -4,6 +4,29 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-17: P3, the platform BOM pins cluster chart 0.1.13 and platform chart 0.1.2
+
+**What changed:** `deploy/platform/platform-bom.yaml` names `proxmox-kamaji-cluster` 0.1.13 (`sha256:ee05c59f...`)
+for the platform cluster (`pc-platform`) and for new tenant clusters (`tenantCharts.kubernetes`), and
+`proxcloud-platform` 0.1.2 (`sha256:765e6f48...`) for `capi`, `capi-tenant` and `platform`, both with the digest
+ghcr.io serves. No entry has `upgradeFrom`. No container, relation or boundary changed.
+
+**Why:** both charts were published from their tags. A new managed-services install registers its Kubernetes
+provider with `chartVersion` 0.1.13, the first chart on which node group replicas are placed by free capacity, and
+its provider service account can read Machines, ProxmoxMachines and ProxmoxClusters, which the provisioning reasons
+need. With the values of the platform cluster, 0.1.13 renders the same objects as 0.1.12.
+
+**Diagrams:** `c2-containers.md`: the `platchart` node of the delivery diagram no longer says "nothing applies it
+yet", and the row of chart `proxcloud-platform` names the BOM components that apply it (`capi`, `capi-tenant`,
+`platform`) and 0.1.2 as published and pinned, instead of "not published". Both were stale since the BOM first
+pinned the chart. The row of the cluster chart names 0.1.13 as the pinned version. No node or edge was added or
+removed.
+
+**Not verified:** either chart on a cluster. A platform installed from the previous BOM is refused
+(`bom_unsupported`): Remove and install again. Kept as it is, its Kubernetes provider stays on `chartVersion`
+0.1.12 until the operator sets it, and its provider ClusterRole stays the one of chart 0.1.1 (the `platform`
+Application self-heals it), so its clusters show no provisioning reason.
+
 ## 2026-11-17: managed Kubernetes, node group replicas placed by free capacity
 
 **What changed:** cluster chart `proxmox-kamaji-cluster` 0.1.13 reads a per-group `machinePlacement`; the kamaji
@@ -16,7 +39,8 @@ for a server create and wrote the cluster's Application.
 
 **Diagrams:** none changed.
 
-**Not verified:** on a lab. Chart 0.1.13 is not published; the BOM pins 0.1.12.
+**Not verified:** on a lab. Chart 0.1.13 was not published at the time of this entry; the BOM pins it since the
+entry above.
 
 ## 2026-11-17: managed Kubernetes, provisioning reason and "needs attention"
 
