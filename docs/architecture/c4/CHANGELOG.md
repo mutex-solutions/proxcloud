@@ -4,6 +4,54 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-18: customer console, three read actions on the cloud action route
+
+**What changed:** `internal/platform/project` answers `GET_SERVERS` on a NETWORK (`pveNetworkServers`, over
+`pve.Service.VnetVMs`), `GET_CONSOLE_STATE` on a SERVER, and the bulk action `LIST_SHARE_WARNINGS` on a share
+provider (`shareReachWarnings`), which reads the project's Proxmox providers. The customer console's shell
+(`web/client/src/components/layout/AppShell.tsx`) applies the menu's service and feature check to routes. No
+container or component was added or removed.
+
+**Why:** the customer console defects of the production acceptance (D1, D9, D13, D15).
+
+**Diagrams:** none changed.
+
+**Not verified:** on a lab.
+
+## 2026-11-18: a deleted tenant cluster is released by a durable job
+
+**What changed:** a new durable job kind `kamaji.release/v1` (`internal/durablejobs/store.go`) and its runner
+`project.KamajiReleaseRunner` (`internal/platform/project/cloud_kamaji_release.go`), started by `cmd/api/main.go`
+with or without the job scheduler. A cluster delete and a project teardown queue one job per cluster; the runner
+waits for the delete cascade (`kamaji.Service.FinalizeCluster`) and then runs the release the sync job's sweep
+runs (`KamajiReleaseCluster`: the cluster's Proxmox token, addresses, dataset, Secrets). The sweep and the job
+share `finalizeNamespace`, which now also waits for the cluster's Machines; the release refuses while a VM of the
+cluster is left in the project's pool. No container was added; the Managed Kubernetes component gained the runner.
+
+**Why:** the token of a deleted cluster stayed valid until a provider sync, which on an install without the
+scheduler means until an operator started one (lab finding F57).
+
+**Diagrams:** none changed. `c3-components.md`: the Managed Kubernetes row names the release job.
+
+**Not verified:** on a lab.
+
+## 2026-11-18: the managed-services Check reads the tenant-to-platform layout
+
+**What changed:** `platformlife.Preflight` has a row `tenant-path` (`tenantPath` in
+`internal/platformlife/preflight.go`). It reads, with the portal token, the SDN zones and vnets, the subnets of
+the platform bridge when it is a vnet of a `simple` zone, and `/nodes/{node}/network` of the nodes that hold
+platform machines (`pve.Client.IfaceAddress`); `pve.SDNZone` carries `exitnodes` and `platformlife.Site` the
+exit nodes of the provider's default zone. The row is a warning or ok, never a failure, and writes nothing.
+
+**Why:** on a node that translates tenant traffic and hosts a platform machine without routing the platform
+network, tenant connections to the platform are dropped (production acceptance of v0.8.0). The Check now says
+so before a tenant finds it. It reads the layout only; no component opens the path.
+
+**Diagrams:** none changed. No container, component or relation is added: the preflight already reads the
+Proxmox API with the portal token.
+
+**Not verified:** on a lab.
+
 ## 2026-11-18: audit, a refused cloud create is an event; the mint Check reads child paths
 
 **What changed:** the create dispatcher of `internal/platform/project` (`cloudCreate`, `cloudCreateFailed`) writes
