@@ -3,6 +3,8 @@ package externalservice
 import (
 	"strings"
 	"testing"
+
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 )
 
 func TestKamajiConfig(t *testing.T) {
@@ -93,6 +95,26 @@ func TestIntOfTakesTheInstallersStrings(t *testing.T) {
 
 // The tenant-side controller's keys are named whatever their value, false or empty included: a config that still
 // carries one is refused rather than silently doing nothing.
+// The automatic replacement of a worker that never joined is on with a default timeout when the provider says
+// nothing, and 0 turns it off: an absent key and a 0 are different answers.
+func TestKamajiConfigWorkerRepair(t *testing.T) {
+	for name, tc := range map[string]struct {
+		cluster        map[string]any
+		timeout, guard int
+	}{
+		"absent":         {map[string]any{}, kamaji.DefaultNodeStartupTimeoutSeconds, 0},
+		"off":            {map[string]any{"nodeStartupTimeoutSeconds": float64(0)}, 0, 0},
+		"set":            {map[string]any{"nodeStartupTimeoutSeconds": float64(900), "repairMaxUnhealthy": float64(2)}, 900, 2},
+		"from ansible":   {map[string]any{"nodeStartupTimeoutSeconds": "2700"}, 2700, 0},
+		"negative = off": {map[string]any{"nodeStartupTimeoutSeconds": float64(-1)}, 0, 0},
+	} {
+		d := (&ExternalService{Config: map[string]any{"cluster": tc.cluster}}).KamajiConfig().Defaults
+		if d.NodeStartupTimeoutSeconds != tc.timeout || d.RepairMaxUnhealthy != tc.guard {
+			t.Errorf("%s: timeout %d guard %d", name, d.NodeStartupTimeoutSeconds, d.RepairMaxUnhealthy)
+		}
+	}
+}
+
 func TestKamajiRemovedKeys(t *testing.T) {
 	for _, c := range []struct {
 		cluster map[string]any

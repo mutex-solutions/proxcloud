@@ -128,9 +128,11 @@ var breakGlassRead = []any{
 }
 
 // breakGlassArgo is what it may do in ArgoCD's namespace on top: forward a port to a pod (kubectl port-forward of
-// svc/argocd-server) and read the one Secret with the initial admin password.
+// svc/argocd-server) and read the one Secret with the initial admin password. Both verbs on pods/portforward: the
+// API server authorizes a WebSocket port-forward (an HTTP GET, kubectl's first try since 1.31) as get and a SPDY one
+// (a POST) as create. The Service and its pods, which kubectl reads first, are in breakGlassRead.
 var breakGlassArgo = []any{
-	map[string]any{"apiGroups": []any{""}, "resources": []any{"pods/portforward"}, "verbs": []any{"create"}},
+	map[string]any{"apiGroups": []any{""}, "resources": []any{"pods/portforward"}, "verbs": []any{"get", "create"}},
 	map[string]any{"apiGroups": []any{""}, "resources": []any{"secrets"}, "resourceNames": []any{argoAdminSecret}, "verbs": []any{"get"}},
 }
 

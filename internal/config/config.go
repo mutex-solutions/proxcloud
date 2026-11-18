@@ -121,6 +121,9 @@ type Config struct {
 		// credentials, preflight, plan and runs. Its runner starts only with TemplateUpdatesVM on too. OFF by default until
 		// the in-platform path has run on a lab.
 		PlatformEnabled bool
+		// PlatformSkipRolloutGate turns off the check an upgrade run of the platform makes before the cluster chart of
+		// the target BOM syncs (platformlife.Runner.SkipRolloutGate). OFF by default: the check runs.
+		PlatformSkipRolloutGate bool
 	}
 	// Billing selects which engine charges bills, and — when that is an external service — how to
 	// reach it.
@@ -260,6 +263,7 @@ func Load() (*Config, error) {
 	c.Jobs.TemplateUpdatesVM = boolEnv("PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED") || k.Bool("proxcloud.template-updates.vm-enabled")
 	c.Jobs.TemplateUpdatesSandbox = boolEnv("PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED") || k.Bool("proxcloud.template-updates.sandbox-enabled")
 	c.Jobs.PlatformEnabled = boolEnv("PROXCLOUD_PLATFORM_ENABLED") || k.Bool("proxcloud.platform.enabled")
+	c.Jobs.PlatformSkipRolloutGate = boolEnv("PROXCLOUD_PLATFORM_SKIP_ROLLOUT_GATE")
 	c.Jobs.WorkerConcurrency = 2
 	if raw := os.Getenv("PROXCLOUD_JOBS_WORKER_CONCURRENCY"); raw != "" {
 		value, err := strconv.Atoi(raw)

@@ -7,7 +7,134 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-None of the entries below is verified on a lab yet: each one says so, and what its tests do show.
+### Changed
+
+- **The platform BOM on `main` is `0.9.0-dev` again, and the build carries the BOM of `0.8.2`**
+  (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.8.2.yaml`). The `v0.8.2` release commit left
+  the BOM at `0.8.2`, and the release gate refuses only `-dev`. A platform installed by `v0.8.2` stays on its BOM
+  after an upgrade, as one installed by `v0.8.0` or `v0.8.1` does; a platform installed by a `dev-<sha>` build of
+  `main` is still refused by a later build (`bom_unsupported`).
+
+## [0.8.2] - 2026-11-18
+
+A patch release on top of `v0.8.1`. It adds no feature of its own size: it tells an operator about the
+site layout the first production site ran into, closes a gap that left a credential behind, and fixes
+what the production acceptance of `v0.8.0` found in the two consoles.
+
+- **A warning for the site layout that drops tenant traffic to the platform.** On a site where one
+  Proxmox node both translates tenant traffic and hosts the platform's machines, tenant Kubernetes
+  workers never join and tenants cannot reach managed databases. The Check has a row `tenant-path`
+  that warns, and the guide has the rule, the two supported layouts and what to do with workers that
+  did not join. The product does not repair the layout (Added, Changed, Known issues).
+- **A deleted tenant cluster's Proxmox token is released without waiting for a provider sync.** The
+  token and its ACL rows stayed until a sync, and on an install without the scheduler until an
+  operator started one. A job now revokes them minutes after the delete, on every install (Fixed).
+- **The operator's Ready card** shows the platform's addresses, says what a tenant cannot use yet,
+  downloads a kubeconfig of the platform cluster that works for one hour, and prints the commands
+  that open the two ArgoCD instances (Added, Fixed).
+- **Customer console fixes from the first production acceptance**: a network's Servers and Subnets
+  tabs, a snapshot delete after a rollback, backups, the role form, the image list of Rebuild, pages
+  the menu hides, a warning in the Create share dialog, the serial console, and the Kubernetes create
+  form (Fixed, Changed).
+- **Sandbox template image pins** and **dependency updates** of the operator console's build
+  (Changed).
+
+The platform BOM of this release is `0.8.2`. It pins what `0.8.0` and `0.8.1` pin: only the `release`
+line differs, and no chart, image or download changes. The release carries the BOMs of `0.8.0` and
+`0.8.1` for the platforms those releases installed.
+
+Upgrading from `v0.8.1`. From `v0.8.0`, read the section of `v0.8.1` as well: its steps still apply.
+
+- **Docker Compose host:** check out the tag and run `./proxcloud-up.sh upgrade v0.8.2`
+  (`deploy/compose/README.md`, "Upgrade"). The script takes its backup first; nothing else is run by hand.
+- **An installed platform stays on its BOM** (0.8.0 or 0.8.1). Step 4 of the Managed services page
+  says that the platform stays on its release and shows the 0.8.2 BOM as a newer release that is not
+  available to an installed platform yet. That is the intended state: nothing has to be installed
+  again, and this release needs no **Apply this release**. A platform installed from a `dev-<sha>`
+  build of `main` is still refused (`bom_unsupported`).
+- **Sites with managed services: run the Check after the upgrade** (System → Managed services) and
+  read the new row `tenant-path`. A warning does not fail the Check and changes nothing by itself.
+  Where it warns, read "The path from tenants to the platform" in
+  `docs/managed-services.md` before tenants create clusters or databases (Added).
+- **Tenant clusters deleted before the upgrade** have no release job: their Proxmox token goes with
+  the provider sync, as before. On an install without the scheduler start one sync after the upgrade
+  (`POST /api/v1/admin/job/external-service/sync`) if clusters were deleted on `v0.8.1` (Fixed).
+- **A platform kubeconfig is a new download**, valid for one hour; the seed kubeconfig is unchanged.
+  Each download writes the break-glass account and its roles on the platform cluster again (Added).
+- **Scripts:** no answer was taken away. `CREATE_BACKUP` on a server now answers the new archive's
+  id, and `GET_SERVERS` on a network answers a list where it was refused (Fixed).
+
+Verified on a lab, on 2026-11-18, on one lab Proxmox VE cluster, over the platform that the published
+images of `v0.8.0` had installed for the round of `v0.8.1`. The portal was upgraded with
+`./proxcloud-up.sh upgrade` to the build `dev-03bc9f3` of `main`. That build is this release without
+the sandbox template image pins (they are in no image), without the fix of the port-forward rule
+(below, H1), and without its changelog and its release commit. On that build:
+
+- **The platform kept working.** `status.bom` stayed the 0.8.0 one, the 14 Applications were Synced
+  and Healthy, the plan had 0 changes and no blocker and named the build's own BOM as newer, both
+  previous BOMs (0.8.0, 0.8.1) were answered by their hash, and the Check passed with 20 rows, the
+  19 of `v0.8.1` and `tenant-path`.
+- **The `tenant-path` row**, in two cases: `ok` for a VLAN default zone, and a warning for a `simple`
+  default zone, with the nodes, the platform network and the two layouts in its text. The warning did
+  not fail the Check. The row reads the configuration: no path was measured.
+- **The token release job**, for a plain delete of a tenant cluster whose one worker had joined: with
+  the scheduler off and no provider sync, the job revoked the cluster's token and its seven ACL rows
+  2 minutes 53 seconds after the delete, 23 to 38 seconds after the cascade had ended, at its first
+  attempt. The ACL list was then equal to the one before the create; the cluster's namespace, its
+  address and its disk were gone as well.
+- **The Ready card's data and the platform kubeconfig**, at the API and with `kubectl` 1.35.10: the
+  four addresses and the two provider rows against the installation; a kubeconfig with a token of
+  `kube-system/proxcloud-break-glass` whose claims give it one hour; the audit row `BREAK_GLASS` with
+  `operation: platform-kubeconfig` and no token in it; `403` for a tenant and `401` without a token;
+  the reads the guide's table names, and a refusal for Secrets, `pods/exec`, a delete, a patch of an
+  Application and a port-forward outside `argocd`. Both ArgoCD commands worked on the platform
+  cluster and on the seed: the password was read and the forwarded port answered `200`.
+- **Customer console fixes, two of them, at the API:** `GET_SERVERS` on a network answered `200` with
+  an empty list (D1), and a new network's row held `subnetDetails` in the create answer and in the
+  read that followed, without a sync (D2).
+
+Outside the lab: one production site was upgraded to the released `v0.8.1` on 2026-11-18. Its
+installed platform stayed on its BOM: the plan had 0 changes, the apply succeeded and set `onboot` on
+the platform's machines.
+
+**Not** verified on a lab:
+
+- **Anything on the published artifacts of this release.** The lab ran a build of `main` whose BOM was
+  `0.9.0-dev`, on a platform installed by `v0.8.0`. A platform installed by `v0.8.1` or by this
+  release, an apply on this release, and an installer or Helm install of it were not run.
+- **The fix of the port-forward rule (H1).** The lab build still had the old rule: `kubectl` was
+  refused on its first request and fell back without a word, which is how the defect was found. That
+  a port-forward opens on its first request with the new rule rests on a test against a fake cluster.
+- **Every customer console fix that needs a tenant server.** The lab node that holds the OS image had
+  no capacity for one (the create answered `409`), so none of these ran: a snapshot delete after a
+  rollback (D8), the id that `CREATE_BACKUP` answers (D12), the serial console that ends its session
+  and the console that opens on the Serial tab (D13, `GET_CONSOLE_STATE`), the image list of Rebuild
+  (D14), and a Servers tab with a server in it. Not run either: the share warning (D9, the lab has no
+  share provider), the role form (D10), a hidden page opened by its URL (D15), the Subnets tab for a
+  network made before this release, the backup confirm dialog and the Kubernetes create form's
+  defaults (the lab provider offers one version, so "lowest" and "newest" are the same). No page of
+  the customer console was opened on the lab.
+- **The `tenant-path` row beyond the two cases above:** `ok` because the node routes the platform
+  network, `ok` because the platform's machines are on other nodes, an EVPN zone, the warning for a
+  Proxmox that could not be read, and the row against a path that is in fact closed. The node leg of
+  the guide was run by hand on one production site only, and the layout with a platform network
+  routed by the node was run nowhere.
+- **The release job beyond a plain delete:** a cascade that hangs (the job `dead` after 24 hours),
+  `release_failed` with the management cluster or Proxmox down, a project teardown, an API restart
+  while the job is pending, a VM `<clusterId>-…` left in the pool, and a cluster with a
+  `csi@pve!<clusterId>` token or an RWX dataset.
+- **The Ready card in a browser**, a user with the support role, the `409`, `502` and `503` answers of
+  the kubeconfig route, the line "Offers no Kubernetes version yet" (the lab provider has a version),
+  the token after its hour, and a login to either ArgoCD.
+- **The new text for a worker that has not joined**, the operator console after its dependency
+  updates (it serves; no page was opened), and the sandbox template images of the new pins (nothing
+  was built or started from them).
+- Everything `v0.8.0` and `v0.8.1` say is not verified still holds, except what is listed as verified
+  here.
+
+The entries below were written when each change merged, before the lab round. Where one ends with "Not
+verified on a lab", the lists above say what has been run since and what has not. Where one says the
+BOM on `main` is `0.9.0-dev`, that was the state at that merge: this release's BOM is `0.8.2`.
 
 ### Added
 
@@ -23,6 +150,22 @@ None of the entries below is verified on a lab yet: each one says so, and what i
   for an existing site was run by hand on one production site and is lost at a reboot; the layout with a
   platform network routed by the node was run nowhere. Not verified on a lab: the row is tested against a fake
   Proxmox API only.
+- **The ready card of Managed services shows where the platform is and how to open ArgoCD.** For an installed
+  platform the page lists the seed API address, the platform cluster API address, the load balancer range and the
+  node range, and prints the `kubectl` commands that open the two ArgoCD instances (a port-forward and the read of
+  `argocd-initial-admin-secret`); no ArgoCD gets an address in this release. **Download platform kubeconfig**
+  (`GET …/platform-kubeconfig`, `admin:service:manage`, audited as `BREAK_GLASS` with `operation:
+  platform-kubeconfig`) saves a kubeconfig of the platform cluster that works for one hour: a token of the service
+  account `kube-system/proxcloud-break-glass`, which the route writes on the cluster. It reads the cluster without
+  its Secrets, forwards a port in `argocd` and reads ArgoCD's initial admin password; it is never the admin
+  certificate Cluster API keeps on the seed. Through ArgoCD its holder can still change the cluster
+  ([docs/managed-services.md](docs/managed-services.md#after-the-install)). Not verified on a lab: the tests use a
+  fake seed and a fake cluster, and the ArgoCD Service and Secret names are the chart's defaults.
+- **The ready card says what a tenant cannot use yet.** A green install registers the Kubernetes provider with no
+  version and both providers attached to no project, so every tenant cluster create was refused while the page
+  looked finished. The card now says "Offers no Kubernetes version yet" and "New projects do not get this
+  provider", each with a link to where it is put right. Nothing is published or attached for you. Not verified on
+  a lab.
 
 ### Changed
 
@@ -42,6 +185,11 @@ None of the entries below is verified on a lab yet: each one says so, and what i
   says that Enter brings the login prompt. **The Kubernetes create form starts on the lowest version offered, with
   high availability off**; it preselected the newest version and three control planes. A provider marks no default
   version. Not verified on a lab.
+- **The sandbox template images are pinned to their builds of 2026-11-16** (`deploy/templates/images.yaml`,
+  commit `c8b3364` of the image sources): the twelve `sandbox-*` images, each by tag and digest. The file is in no
+  image of the portal. Not verified on a lab.
+- **Dependency updates of the operator console's build**: `@tailwindcss/vite` 4.3.5 and `@vitejs/plugin-react`
+  6.3.0 (`web/admin`). Not verified on a lab: the console was built and served, no page was opened.
 
 ### Fixed
 
@@ -69,6 +217,62 @@ None of the entries below is verified on a lab yet: each one says so, and what i
   (`LIST_SHARE_WARNINGS`). A serial console session ends on the page when its server was stopped or restarted
   (`GET_CONSOLE_STATE`, asked every 10 s). Not verified on a lab: the API tests use a fake Proxmox, the console was
   run against its mock app ([docs/cloud-integration.md](docs/cloud-integration.md)).
+- **The platform kubeconfig's port-forward is no longer refused on its first request** (lab finding H1). The
+  break-glass Role in `argocd` allowed only `create` on `pods/portforward`. The API server authorizes a WebSocket
+  port-forward, which `kubectl` tries first since 1.31, as `get`: `kubectl` 1.35 was refused (one 403 in the
+  cluster's audit trail per port-forward), fell back to SPDY without a word and worked; a client without that
+  fallback would have been refused. The Role now allows `get` and `create`. The route writes the Role at every
+  call, so an installed platform cluster gets the rule with the next download of the kubeconfig. The seed
+  kubeconfig is cluster-admin and was not affected. The refusal and the fallback were seen on the lab
+  (2026-11-18, `kubectl` 1.35.10); the fix is not verified on a lab: the test pins the Role's rules on a fake
+  cluster ([docs/managed-services.md](docs/managed-services.md#after-the-install)). The guide of the cluster
+  release job now says that only a failed look (`release_failed`) writes the line `kamaji: release of a deleted
+  cluster, will retry`; a look that finds the cascade still running (`cascade_running`) logs nothing
+  ([docs/managed-k8s.md](docs/managed-k8s.md#deletion-and-orphan-finalization)).
+
+### Known issues
+
+- **A standalone volume can lose its name at create (G1).** A volume created without a server gets a
+  small holder VM. When Proxmox lists that VM later than about 12 seconds after its create, the create
+  answers `200` with a row that has no `id`, the volume is missing from the tenant's list until the next
+  provider sync, and the sync then names it after its disk (`vm-<vmid>-disk-0`): the name the tenant
+  gave is lost. Seen once on a lab under load; a second create kept its name. The disk and its size are
+  right, and on the lab the volume was deleted through the API once it was listed. The same code is in
+  `v0.8.0` and `v0.8.1` (`internal/platform/project/cloud_writes_pve.go`, the read-back after the
+  create gives up and answers a row that is never stored). Not fixed in this release.
+- **Managed Kubernetes: workers do not join where one node both translates tenant traffic and hosts the
+  platform machines.** A tenant cluster's workers and a tenant's database clients open TCP connections
+  to the platform network. On a Proxmox node that translates the tenant's traffic (a `simple` tenant
+  zone, or an exit node of an EVPN zone) and also runs the platform machine that owns the address,
+  while the platform network is reached over the site's router, those connections are dropped: the
+  control plane becomes ready and no worker joins. A one-node site is this case; a VLAN tenant zone is
+  not. The product still does not repair it. This release warns (the Check row `tenant-path`, which
+  reads the layout and opens no connection, so `ok` is not proof) and documents the two layouts that
+  work, one of them a change on the node itself, by hand and lost at a reboot
+  ([docs/managed-services.md](docs/managed-services.md#the-path-from-tenants-to-the-platform)). A
+  platform network that the node routes, set up by the product, is planned for `v0.9.0`. Found on a
+  production site on `v0.8.0`; not reproduced on a lab.
+- **A node group cannot be scaled to 0, so a worker that never joined is replaced by scaling up, then
+  down.** `kubeadm join` runs once, at a worker's first boot: a worker that timed out stays "not
+  joined" after its cause is repaired, and a count below one is refused. The tenant raises the group's
+  count by one and reduces it again once the new worker is ready, once per dead worker; this needs
+  quota for one more worker. On the production site the scale-down removed the machine without a node
+  both times; which machine goes is Cluster API's choice, and only that order was run.
+- **"Needs attention" stays on such a node group until a new machine is healthy.** Repairing the cause
+  does not clear it, because the dead worker does not join again. It is computed at a provider sync:
+  on an install without the scheduler it shows, and goes away, only when an operator starts a sync.
+- **Seed ISOs of servers created before `v0.8.0` are never swept (O2).** A server's seed ISO
+  (`pcseed-v1-<...>.iso` on the provider's seed store) is deleted with its server only when its record carries the
+  cluster and storage identity, which is recorded for servers created on v0.8.0 or later
+  (`internal/cloud/pve/seed.go`). For a server created on an earlier release the record has none: when that server
+  is deleted, the API logs `seed cleanup pending ... original cluster/storage identity was not available; operator
+  inspection required`, and the ISO stays on the store for good (seen on a lab after an upgrade, and again in the
+  lab round of `v0.8.1`). It holds the
+  server's user data. Clean it up by hand once its server is deleted, as root on a node: list the seed ISOs
+  (`pvesm list <seed store> --content iso | grep pcseed-v1-`); one that is older than a day and that no VM's config
+  names any more (`grep -l <file name> /etc/pve/nodes/*/qemu-server/*.conf` prints nothing) is such a leftover:
+  `pvesm free <volume>`. Not verified on a lab: the hand cleanup, that a server created on v0.8.0 or later gets the
+  identity, and the sweep that follows.
 
 ## [0.8.1] - 2026-11-18
 

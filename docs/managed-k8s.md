@@ -106,9 +106,12 @@ Seed-file twin of the form: `deploy/seed/external-service-dev.json`
 | DNS zone | `config.cluster.dnsZone` | Optional. API FQDN = `<clusterId>.<zone>`. Cluster ids (`pc-c-<8hex>`) never change, and a cluster made before this format keeps the id it has; nothing reads the prefix. |
 | Version → image matrix | `config.cluster.versions` | Curated map `k8s version → node image id`: the only versions offered to customers. Textarea grammar: `1.35.4=<image-id>` per line. |
 | Image variants | `config.cluster.imageVariants` | Alternative node-image builds of the same version, e.g. a GPU build. Grammar: `1.35.4@nvidia=<image-id>`. |
+| Worker firewall for new clusters | `config.cluster.workerFirewall` | Optional, API only, default `false`. `true`: every new cluster's workers go behind the Proxmox VM firewall. **Not verified on a lab**; see [Worker firewall](#worker-firewall). |
 | RWX dataset size | `config.cluster.rwxGiB` | Optional, API or installer (`services.kamaji.rwx_gib`). See [section 9](#9-how-a-cluster-lands-on-proxmox). |
 | Block volumes for tenants | — | Through the CSI gateway only, with no credential in the tenant ([section 9](#9-how-a-cluster-lands-on-proxmox)). `csiSharedStores` and `pveCsiUrl` were removed: the API answers 400 to a `cluster` block that still has one, and the form drops them on save. |
 | Flavors allowlist | `config.cluster.flavors` | Flavor ids offered for node groups. Empty = no restriction. |
+| Node startup timeout | `config.cluster.nodeStartupTimeoutSeconds` | API only (the form keeps the key). Seconds a worker may run without a Node before Cluster API replaces it; absent = 1800, `0` = never. Read by cluster chart 0.1.14 and later. See [A worker that does not join](#a-worker-that-does-not-join). |
+| Repair guard | `config.cluster.repairMaxUnhealthy` | API only. Machines of a node group that may be without a Node while one is still replaced; absent = 1. A number, never a percentage. |
 | Namespace placement | `config.namespacePlacement` | Optional, API only: `{nodeSelector, tolerations}`. A `pc-*` namespace gets the `scheduler.alpha.kubernetes.io/node-selector` and `…/defaultTolerations` annotations and the label `proxcloud.io/platform-role: kamaji`, so the API server puts new tenant control-plane pods there on that node group. They are stamped when the namespace is next ensured: a project's first attach to the provider, or a new cluster create. Nothing in the sync ensures a namespace again, so a project attached before the key was set keeps its namespace as it is until then, and pods already running are not moved. Needs the `PodNodeSelector` and `PodTolerationRestriction` admission plugins on the management cluster's API server; without them the annotations do nothing. Absent: nothing is stamped. A selector that is not label keys and values, or a toleration the API server would refuse, is refused when the provider is built: the API server checks the annotation on every pod create, so it would refuse every pod there. |
 
 **Changing a setting later.** The installer's `services.kamaji.*` keys take effect only when stage 60 first registers the provider: it skips a provider
@@ -200,9 +203,11 @@ management cluster, and no VM whose name starts with `<clusterId>-` in the
 project's pool on Proxmox (CAPMOX names a VM after its Machine). While any of
 these is left, or the management cluster or Proxmox does not answer, nothing
 of the cluster is released (the look at the pool comes before every release
-step, the CSI one included) and the job looks again later (`cascade_running`
-or `release_failed` as the job's last result; the reason is in the API log,
-line `kamaji: release of a deleted cluster, will retry`). On a management
+step, the CSI one included) and the job looks again later. Its last result
+is then `cascade_running` (something of the cluster is left; nothing is
+logged for it) or `release_failed` (a look or a release step failed; only
+this one writes a line to the API log, with the reason:
+`kamaji: release of a deleted cluster, will retry`). On a management
 cluster whose ClusterRole is older than the Machines grant
 ([Provisioning status](#provisioning-status-reason-and-needs-attention), "RBAC") the
 Machines cannot be listed; the other checks decide there.
@@ -225,9 +230,17 @@ had reserved.
 the first look after the cascade, so seconds to a few minutes after the last
 worker is gone, on every install. A lab delete on 2026-11-17 had its worker VM
 gone 45 seconds after the delete; in a job's first minute the looks are about
-15 seconds apart. **This timing is not verified on a lab**:
-the job is covered by tests with a fake management cluster and a fake Proxmox
-on PostgreSQL. Should the job not have run (an API from before v0.8.2, a job
+15 seconds apart. Seen on a lab once (2026-11-18, the build `dev-03bc9f3` of
+`main`, no scheduler, no provider sync): after a plain delete of a joined
+one-worker cluster the job's looks read `cascade_running` until the Application
+was gone, 135 to 150 seconds after the delete, and its next look, 2 minutes 53
+seconds after the delete and 23 to 38 seconds after the cascade ended, revoked
+the token; its seven ACL rows were gone with it. Not run on a lab: a cascade
+that hangs (the job `dead` after 24 hours), `release_failed`, a project
+teardown, an API restart while the job is pending, a VM `<clusterId>-…` left
+in the pool, and a cluster with a `csi@pve!<clusterId>` token or an RWX
+dataset; those are covered by tests with a fake management cluster and a fake
+Proxmox on PostgreSQL. Should the job not have run (an API from before v0.8.2, a job
 that could not be queued, a job that gave up), the sweep's timing applies: with
 the scheduler the first provider sync after the cascade and after the marker's
 30 minutes; without the scheduler (the Compose install's default) not until an
@@ -265,12 +278,15 @@ cluster is not there yet. While a node group is unsettled (a MachineDeployment w
 `upToDateReplicas` differ from what it asks for, or a Machine that is not Running with a Ready node), its entry in
 `cluster.node_groups` carries `progress = {code, since, machines, attention}`:
 
-- `code`: the reason of the group's worst machine (one that needs attention now, then the least advanced, then the
-  oldest). The table below has the codes.
-- `since`: when the group last made progress (RFC 3339).
+- `code`: the reason of the group's worst machine (one whose code is not retried, then one that is past its bound,
+  then the least advanced, then the oldest). The table below has the codes.
+- `since`: when that machine last made progress (RFC 3339).
 - `machines`: how many machines share the code.
-- `attention`: the group made no progress for longer than the bound of its least advanced machine, or the code is one
-  that is not retried.
+- `attention`: that machine made no progress for longer than its bound, or its code is one that is not retried.
+  Each machine is measured from its own last progress: a group needs attention as soon as one of its machines
+  does, whatever the others do. Up to v0.8.2 the clock was the newest progress of any machine of the group, so a
+  new worker that joined cleared the attention of two that had not joined for hours, for 15 minutes (seen on a
+  production site on 2026-11-18). The operator's Machines view applied the per-machine rule already; both now agree.
 
 `cluster.attention = {code, since}` is the same for the whole cluster: `control_plane_stalled` or
 `provider_access_refused`. It carries control-plane and provider codes only: **a worker that stalls is reported on
@@ -298,14 +314,14 @@ paths and never reaches a tenant. The first match in this order wins:
 | `waiting_control_plane` | Phase Pending and the control plane is not Ready | Waiting for the control plane. | never |
 | `creating_vm` | Reason `Cloning`, `WaitingForDiskReconciliation`, `WaitingForStaticIPAllocation`, `WaitingForBootstrapDataReconciliation`, or no ProxmoxMachine condition yet | Creating the virtual machine. | by bound |
 | `starting_vm` | Reason `WaitingForVMPowerUp`, `WaitingForCloudInit`, `WaitingForBootstrapReady`, `WaitingForClusterAPIMachineAddresses` | Starting the virtual machine. | by bound |
-| `not_joined` | Phase Provisioned, or `NodeHealthy` with reason `NodeDoesNotExist` | Inside the bound: "The machine runs but has not joined the cluster yet." With attention: "The machine runs but has not joined the cluster: most likely it could not reach the cluster's endpoint. Contact the operator, who can check the path from your network to the endpoint. A machine that failed to join does not try again: once the cause is repaired, reduce the count by one and raise it again. A group of one cannot go to zero: raise it by one, wait until the new machine is ready, then reduce it by one." Nothing reads the machine's join error, so the cause is the likely one, not a finding. The tenant cannot see or repair that path, so the text no longer asks them to check it ([Reaching the platform](#9-how-a-cluster-lands-on-proxmox)) | 15 min |
+| `not_joined` | Phase Provisioned, or `NodeHealthy` with reason `NodeDoesNotExist` | Inside the bound: "The machine runs but has not joined the cluster yet." With attention: "The machine runs but has not joined the cluster: most likely it could not reach the cluster's endpoint. Contact the operator, who can read the join error of the machine and check the path from your network to the endpoint. A machine that failed to join does not try again by itself: once the cause is repaired, use Replace on that machine in the list of instances below, which makes a new machine in its place and keeps the node count." The tenant gets the likely cause, not a finding: the machine's own join error goes to the operator only ([A worker that does not join](#a-worker-that-does-not-join)). The tenant cannot see or repair that path, so the text does not ask them to check it ([Reaching the platform](#9-how-a-cluster-lands-on-proxmox)) | 15 min |
 | `provisioning` | Anything else, and a machine that Cluster API has not made yet | Preparing the machine. | by bound |
 | `control_plane_stalled` | No endpoint, or the control plane has no status or is `Provisioning`, 15 min after the create | The control plane is taking longer than expected. Wait, delete and recreate, or contact the operator. | n/a |
 
-The bounds, counted from the group's last progress (the newest of its machines' creation, `status.lastUpdated` and,
-for a running machine, the last change of `NodeReady`):
+The bounds, counted for each machine from its own last progress (the newest of its creation, `status.lastUpdated`
+and, for a running machine, the last change of `NodeReady`):
 
-| State of the least advanced machine | Bound |
+| State of the machine | Bound |
 |---|---|
 | Not made yet (counted from the newest of the MachineDeployment's creation, ArgoCD's last finished sync and the last change of the cluster's values, which the portal stamps on the Application as `proxcloud.io/values-changed-at`: right after a scale-up the last sync is still the one before it) | 15 min |
 | Pending | 15 min; never while the control plane is not Ready |
@@ -313,15 +329,145 @@ for a running machine, the last change of `NodeReady`):
 | Provisioned, no node | 15 min |
 | Running, node not Ready | 20 min (the first node waits for the CNI) |
 
-A machine that is being deleted (a scale-down, the old half of a rollout) counts neither as progress nor as a stall.
-Not covered: a control plane stuck in a later upgrade and a machine stuck in Deleting have no clock; ArgoCD sync
-errors and MachineHealthCheck are not read; the admin cluster list has no attention badge.
+A machine that is being deleted (a scale-down, the old half of a rollout, a replacement) counts neither as progress
+nor as a stall. Not covered: a control plane stuck in a later upgrade and a machine stuck in Deleting have no clock;
+ArgoCD sync errors are not read; the status sync does not read the MachineHealthChecks (the operator's Machines view
+does); the admin cluster list has no attention badge.
+
+**READY after a change of a node group.** On a production site (2026-11-18) the row read PROGRESSING for 1 min 46 s
+to 2 min 21 s after a node group had settled (ready = count, no `progress`), three times out of three. The portal
+adds no delay of its own there: `cluster.status` is the health ArgoCD keeps on the Application, read at every list
+of the page and passed on as it is (the one exception is the ClusterResourceSet case of
+[troubleshooting](#7-troubleshooting), within 30 minutes of the create), and Cluster API sets a MachineDeployment's
+phase to Running as soon as it has its replicas (read in Cluster API v1.14.4,
+`core/reconcilers/machinedeployment/machinedeployment_status.go`). **The cause is not determined.** Not read:
+which part of the Application ArgoCD still called Progressing in that window, and whether ArgoCD's health was only
+waiting for its next refresh. To decide it on a lab, read during the window
+`kubectl -n argocd get application <clusterId> -o jsonpath='{.status.health}{"\n"}{.status.reconciledAt}'`, then
+`kubectl -n argocd annotate application <clusterId> argocd.argoproj.io/refresh=normal` and read again: Healthy
+right after the refresh means ArgoCD's health was stale and the portal can ask for that refresh itself; still
+Progressing means a part of the Application is, and `argocd app get <clusterId>` names it.
+
+A likely cause, **from memory of ArgoCD 3 and not re-read in its source or measured**: ArgoCD 3 ignores updates of a
+tracked resource that change only its status, so the Application's health is recomputed at the periodic reconcile
+(120 s plus up to 60 s of jitter by default) and not when the MachineDeployment's status changes. That fits the 1
+min 46 s to 2 min 21 s seen. If the read above shows a stale health, there are two fixes, neither made here: the
+status sync sets `argocd.argoproj.io/refresh=normal` on the Application when the cluster's own objects are settled
+and ArgoCD still says Progressing; or `deploy/mgmt-cluster/argocd-health.yaml` gets a
+`resource.customizations.ignoreResourceUpdates` override for `cluster.x-k8s.io/MachineDeployment` that does not
+ignore its status.
+
+### A worker that does not join
+
+A worker's first boot runs `kubeadm join` once. When it fails (no route to the cluster's endpoint, a wrong image)
+the VM keeps running, CAPMOX reports it provisioned, and Cluster API waits for a Node for ever: the chart skips
+CAPMOX's cloud-init check, which needs root in every guest and would only mark the machine failed, not repair it.
+On a production site (2026-11-18) two workers stayed like that for hours, and replacing them took two
+"raise the count, wait, lower the count" cycles, because a group cannot go to 0. Three things act on such a
+machine. **None of them was run on a lab.**
+
+**1. Automatic replacement (cluster chart 0.1.14 and later).** For each node group of two or more machines the
+chart renders a `MachineHealthCheck` (`<clusterId>-<group>`). A Machine of the group that has no Node after the
+startup timeout is deleted by Cluster API, and its MachineDeployment makes a new one: a new clone on the same
+Proxmox node and a new join.
+
+- The timeout is the Kubernetes provider's `config.cluster.nodeStartupTimeoutSeconds`, 1800 when the key is absent;
+  `0` turns the replacement off (no MachineHealthCheck is rendered). Cluster API counts from the newest of: the
+  Machine's creation, the cluster's infrastructure ready, the control plane initialized, the machine's VM ready.
+  Until the VM is ready the clock runs from the creation, so **a value below the slowest clone of the site deletes
+  machines that are still being cloned, in a loop**. 1800 s is the bound after which this page already calls a
+  single cloning machine stalled; it was not measured on a lab.
+- The guard is a number of machines, `config.cluster.repairMaxUnhealthy`, 1 when absent, never a percentage (Cluster
+  API rounds a percentage down: 40 % of one or two machines is 0, and nothing would ever be replaced; the chart
+  refuses one). Machines are replaced only while at most that many of the group are **not healthy**, and Cluster
+  API counts every machine without a Node as not healthy, the ones that are still starting too (read in Cluster API
+  v1.14.4, `machinehealthcheck_controller.go`: "the number of not started or unhealthy machines"). So a scale-up by
+  several machines holds the replacement back until the others have joined.
+- **What it does not repair.** When more machines of a group than the guard are without a Node, nothing is
+  replaced. The chart caps the guard at the group's count minus one, so this always holds when every machine of a
+  group failed: that is a cause of the site (the image, the path to the endpoint), a new clone fails the same way,
+  and the loop of clones stops here instead of running for ever. The production case, two of two, is this one. For
+  the same reason **a group of one machine gets no MachineHealthCheck at all**. Use the replace action below once
+  the cause is repaired.
+- **What it does not stop.** A cause that hits fewer machines than the guard, for as long as it lasts: each such
+  machine is replaced again after every timeout. The operator's Machines view shows the count of healthy machines
+  per group, and young machines in a group that never settles are that loop.
+- It checks no Node condition: a node that joined and went NotReady, and a node whose Proxmox host reboots, are
+  never replaced by it (start at boot is the tool for a reboot). A Machine whose Node object was deleted is
+  replaced; that is Cluster API's own rule for every MachineHealthCheck.
+- New clusters get the block when the provider's `chartVersion` is 0.1.14 or later. An existing cluster gets it
+  when it is moved onto such a chart (**Bump** on the provider's page, or the tenant's platform update); **it acts
+  at once on a machine that is already past the timeout**, within the guard. A cluster on an older chart renders
+  as before, and what its values hold is not touched.
+- **The provider's two keys are the setting of every cluster on chart 0.1.14 or later.** The portal writes them
+  into a cluster's values at every change it makes to that cluster (a bump, a platform update, a node group edit,
+  an upgrade, an add-on change), replaces a block the cluster already has, and removes it when the provider says
+  `0`. A change of the provider's keys does not reach a cluster by itself: on the provider's page, **Apply
+  settings** on the row of a cluster that is already on the provider's chart writes it now
+  (`POST /api/v1/admin/service/{id}/k8s-clusters/{clusterId}/bump-chart`; **Bump all** skips such clusters). This
+  is the way to stop a loop of clones on one cluster: raise the timeout or set `0` on the provider, then Apply
+  settings on that cluster. A block edited by hand in the ArgoCD Application is overwritten at the portal's next
+  change of the cluster. There is no per-cluster setting.
+- The MachineHealthCheck is left out of the Application's health (`argocd.argoproj.io/ignore-healthcheck`): its
+  own health in ArgoCD is "as many healthy as expected", which would be false whenever a machine is still starting
+  (ArgoCD's health script for the kind is quoted from memory here, not re-read).
+
+**2. Replace one machine.** Tenant console, the cluster's page, **Replace** next to a node group's status for each
+machine of the group that needs attention, and on every row of the instance list (action `REPLACE_MACHINE` with
+`{machine, confirm}`); admin console, **Machines** on the cluster's row, **Replace**
+(`POST /api/v1/admin/service/{id}/k8s-clusters/{clusterId}/machines/{machine}/replace`, body `{"confirm": true}` or
+none, permission `admin:service:manage`). The portal deletes that Machine and Cluster API makes a new one.
+
+- The node group's count and placement are not changed, so nothing is checked against the quota and none is needed:
+  the new machine takes the place of the old one, on the same Proxmox node (a MachineDeployment is pinned to its
+  node). For a moment both VMs exist; CAPMOX checks the node's free memory before it clones, so on a node with no
+  room for one more machine of the flavor the new machine can end in `no_capacity`. Replace it again once the old
+  VM is gone.
+- A machine that has a Node is drained by Cluster API before its VM is deleted. What is on the node's own disk is
+  lost; volumes stay.
+- A machine that is the last Ready node of its node group is refused with `409` and
+  `details.reason = "last_ready_node"`; the consoles then ask once more and send `confirm`. A machine without a
+  Node needs no confirmation.
+- It works on any chart version. It needs `delete` on `machines.cluster.x-k8s.io` for the portal's service account
+  (RBAC below); without it the action answers `502`: a tenant is told to contact the operator, the operator's
+  route says what to apply (`deploy/mgmt-cluster/rbac.yaml`, or platform chart 0.1.3).
+- The instance list holds the project's synced servers whose name starts with the cluster's id. A machine has no
+  row there when its VM was never made (`vm_create_failed`, `no_capacity`), on a provider with shared workers, and
+  **when no sync has listed the VM yet**: on the production site, with the job scheduler off, the two workers that
+  never joined were never in the list. So the node group's `progress` carries `machineNames`, the names of at most
+  five machines of the group that need attention, and the console puts **Replace** next to each in the table of
+  node groups. The names are those of the last provider sync, like the rest of `progress`: a name that is gone
+  since answers `404`, and the next sync corrects the list. A group with more than five such machines shows five;
+  the others appear as these are replaced, and the operator's view lists every Machine.
+
+**3. The join error, for the operator.** For each machine in `not_joined` past its bound (at most five per
+request), the operator's Machines view reads two files of the worker through the Proxmox guest agent and shows
+them under the machine: the `errors` of `/run/cloud-init/result.json` and the last 40 lines (at most 6000 bytes) of
+`/var/log/cloud-init-output.log`, where kubeadm's own error is.
+
+- It is read live at each request and never stored. Before it leaves the API the text loses kubeadm's bootstrap
+  token (`abcdef.0123456789abcdef`, also after `--token` and `token:`), the CA hash (`sha256:<64 hex>`), any
+  other run of 32 or more hex characters (a certificate key), JSON web tokens, Proxmox API tokens, PEM blocks,
+  the `*-data` values of a kubeconfig, any run of 64 or more base64 characters, and the credential forms every
+  upstream message loses. A tenant never gets any of it: the tenant's page says "contact
+  the operator".
+- The call is `GET /nodes/{node}/qemu/{vmid}/agent/file-read` with the portal's token of the Proxmox provider that
+  hosts the workers (the cluster's Secret records it). Proxmox VE 9 asks `VM.GuestAgent.FileRead` or
+  `VM.GuestAgent.Unrestricted` for it; the portal's role holds the second on `/pool` since it sets guest passwords,
+  so **no privilege was added** ([proxmox-permissions.md](proxmox-permissions.md)). It reads these two paths of a
+  managed worker only, never a tenant's server. The read runs for whoever may open the Machines view, that is
+  with `admin:service:read`: an operator who may not change a provider still makes the portal read these two files
+  inside a tenant's worker, and sees their masked text.
+- When nothing can be read the view says why in general words (the token is refused, the guest agent does not
+  answer, Proxmox did not answer in time), not with Proxmox's message.
 
 **Operator detail.** Admin console, the Kubernetes provider's page, **Managed clusters**, **Machines** on a cluster's
 row (`GET /api/v1/admin/service/{id}/k8s-clusters/{clusterId}/machines`, permission `admin:service:read`): every
 worker Machine read live, with its phase, VMID and PVE node, addresses, the same code and attention, and the
 conditions with their upstream reason and message. Credentials are cut out of the messages (among them
-`PVEAPIToken=user@realm!id=<secret>`) and each is clipped to 400 characters.
+`PVEAPIToken=user@realm!id=<secret>`) and each is clipped to 400 characters. The view also carries each node
+group's MachineHealthCheck (`healthChecks`: timeout, guard, expected and healthy machines), the join error of a
+machine that did not join, and **Replace** per machine ([A worker that does not join](#a-worker-that-does-not-join)).
 
 **RBAC.** The sync needs `get` and `list` on `machines.cluster.x-k8s.io` and on `proxmoxmachines` and
 `proxmoxclusters.infrastructure.cluster.x-k8s.io`. `deploy/mgmt-cluster/rbac.yaml` and chart `proxcloud-platform`
@@ -331,6 +477,20 @@ re-apply deploy/mgmt-cluster/rbac.yaml". That advice holds on an installer-built
 installed from an earlier BOM the `platform` Application reverts a hand-applied ClusterRole (self-heal), and the access
 comes with Remove and a new install ([managed-services.md](managed-services.md)). Any other error on the read fails that project's sync, so the cached row
 keeps its last state instead of losing the flag.
+
+Replacing a machine needs `delete` on `machines.cluster.x-k8s.io`, and the Machines view reads
+`machinehealthchecks.cluster.x-k8s.io` (`get`, `list`). `deploy/mgmt-cluster/rbac.yaml` and chart
+`proxcloud-platform` 0.1.3 grant both. **Chart 0.1.3 is not published and the platform BOM still pins 0.1.2**: until
+the BOM names 0.1.3, a managed-services platform has neither, the replace action answers `502` there, and the
+Machines view shows no health check (the rest of the view works). An installer-built site gets them by applying
+`deploy/mgmt-cluster/rbac.yaml` again. `delete` on Machines is the portal's one write on Cluster API objects.
+**The grant is cluster-wide**: the ClusterRole lets the portal's service account delete any Machine in any
+namespace of the management cluster, also a control-plane Machine of a kubeadm cluster whose Cluster API objects
+are on that cluster (whether the platform cluster's own objects are within its reach was not checked). Only the
+portal's code confines it: it deletes a Machine only in the namespace of a project, of a cluster whose Application
+carries this provider's label, with that cluster's name label and a node group label, which control-plane Machines
+do not have. A deleted worker Machine is made again by its MachineSet, so the action does not lower a node group's
+count; it does take a node away until the new one is Ready.
 
 ## 4. Billing
 
@@ -502,11 +662,11 @@ address runs on that same node, the worker's TCP connection is dropped on the no
 platform network: a one-node site with a `simple` tenant zone and the platform network on a VLAN behind the site's
 router is this case (found on the first production site, v0.8.0). The workers then run, stay `not_joined`, and
 cloud-init's `kubeadm join` has timed out on `https://<endpoint>:6443`. kubeadm runs once: after the path is
-repaired such workers must be replaced (the tenant reduces the node group's count by one and raises it again, once per worker; a group cannot go to zero, so a group of one is raised first). The rule, its
+repaired such workers must be replaced: **Replace** on each machine, by the tenant or the operator, and for a group of two or more with one such machine Cluster API does it by itself after the startup timeout ([A worker that does not join](#a-worker-that-does-not-join)). The rule, its
 table, the Check row `tenant-path` that warns of the layout, and the two supported layouts (a platform network routed
 by the node on a new one-node site; a leg of the node on an existing one, run by hand on one production site and
 not lab-verified) are in [managed-services.md](managed-services.md#the-path-from-tenants-to-the-platform). Nothing
-in the product opens the path as a test, and the worker's join error is not shown in the console yet.
+in the product opens the path as a test. The worker's join error is shown to the operator in the admin console's Machines view.
 In an EVPN zone that egress is the zone's (Proxmox holds the gateway and does the SNAT). In a **VLAN zone**
 Proxmox holds no gateway and does no DHCP or SNAT: the network is a bare VLAN (the API writes and answers
 `dhcp: false`, `snat: false`), and the site must provide a router that holds the subnet's first address (the
@@ -715,6 +875,177 @@ isolation between every tenant behind that NAT (see "TrueNAS file shares" in `cl
 drop tenant traffic to the nodes' management network, so a NAS with only an address there cannot be mounted at all:
 `mountHost` must be an address tenants can reach.
 Full-tier sites (ceph-csi CephFS) are not built yet.
+
+### Worker firewall
+
+**Status: code and tests only. Nothing in this section was run on a lab or on a site.** The lab tests that decide it
+are listed at the end. Until they pass, leave `config.cluster.workerFirewall` off and protect clusters one at a time.
+
+Without it a worker VM has no Proxmox firewall: CAPMOX clones it with a NIC that carries no `firewall=1` and no
+`<vmid>.fw` exists. Every port of a worker (kubelet, NodePorts) is open to the project's networks and a worker can
+send with any address of its vnet. Only the cluster isolation rules stand between it and other tenants.
+
+With it a worker gets what a server gets (`pve/firewallsvc.go` `SecureVM`), adapted (`pve/workerfw.go`):
+
+| Setting on the worker VM | Value | Why |
+|---|---|---|
+| VM firewall `enable`, NIC `firewall` | `1`, `1` on every NIC | PVE filters a NIC only with both, and with the datacenter firewall on |
+| `policy_in` | `DROP` | default-deny inbound; the security group below opens what is needed |
+| `policy_out` | `ACCEPT` | egress stays open, as for servers: a worker opens every connection to its control plane itself |
+| `macfilter` | `1` | a worker sends with its NIC's MAC only. MetalLB layer 2 answers ARP with that MAC, so it passes |
+| `ipfilter`, set `ipfilter-net0` | `1`; the cluster's 16 worker and 8 MetalLB addresses | see "IP filter" below |
+| `dhcp` | `0` | CAPMOX gives static addresses |
+| VM rules | one reference to the cluster's security group | nothing else is added, nothing a template brought is removed |
+
+**The cluster's security group.** One ordinary security group of the project per cluster, display name
+`k8s-<clusterId>`, made by the portal. It is also the switch: a cluster whose group exists is protected. Tenants see
+it under Network → Security groups and on the cluster page, and may change its rules; removing a rule the cluster
+needs breaks the cluster. A group that exists is never rewritten. What a tenant cannot do with it:
+
+- create a group whose name starts with `k8s-` (400);
+- delete the group of a cluster the project has (409; it goes with the cluster);
+- attach a group named `k8s-…` to a server, by the attach action or at create (409): the cluster's release and
+  **Remove the worker firewall** delete the group, and the server would lose those openings;
+- attach any group to a worker row, or detach the cluster's group from it (409 *This server is a worker node of a
+  Kubernetes cluster…*): another group would open the worker, or stay behind on a VM that CAPMOX replaces.
+
+**A group named `k8s-…` from before 0.9.0.** The names were free in 0.8.x. Such a group is a cluster's only when the
+rest of its name is the id of a Kubernetes cluster the same project has; the sync and the delete refusal look at
+nothing else. So a tenant's `k8s-ingress` switches nothing on, keeps its rules and its servers, can be detached and
+deleted, and can no longer be attached to another server (the 409 above goes by the name alone). A group a tenant
+attached to a worker row under 0.8.x can be detached from it. If a tenant's old group has exactly the name
+`k8s-<id of one of their clusters>`, it is that cluster's group: the first sync after the upgrade puts the firewall
+on that cluster's workers with the tenant's rules. A cluster id ends in eight random hex digits, so this needs a
+tenant who named a group after their cluster on purpose; look for such groups before the upgrade if in doubt.
+
+What the group holds when it is made. Every rule is an inbound ACCEPT. "Workers" is the cluster's 16 reserved worker
+addresses as the fewest CIDRs; "pool" is the Proxmox provider's `network.cidrPool`, of which the isolation rules
+already drop every other tenant's part.
+
+| # | Protocol, port | Source | Destination | For | Read from |
+|---|---|---|---|---|---|
+| 1 | UDP 8472 | workers | | Cilium VXLAN: all pod-to-pod traffic between nodes | chart `addons.yaml`: `routingMode: tunnel`, `tunnelProtocol: vxlan`; Cilium's default VXLAN port |
+| 2 | TCP 4240 | workers | | Cilium health checks between nodes | Cilium system requirements (`cilium-health`) |
+| 3 | ICMP | workers | | Cilium health pings | same |
+| 4 | TCP 10250 | workers | | kubelet: `logs`, `exec` and metrics arrive from the konnectivity agent or metrics-server on another worker | see "Control plane" below |
+| 5 | TCP 7946, UDP 7946 | workers | | MetalLB speakers' memberlist | MetalLB layer 2 (`speaker`), chart: MetalLB in every cluster |
+| 6 | any | any | the 8 MetalLB addresses | LoadBalancer Services | chart: pool `tenant` = `proxmox.metallb.addresses` |
+| 7 | TCP and UDP 30000 to 32767 | pool | | NodePort Services and `healthCheckNodePort`, from the project's own networks | Kubernetes default `--service-node-port-range` |
+
+Not opened: the kubelet (10250) from anything but the cluster's workers, SSH, and every other port. A tenant who runs
+a `hostNetwork` service that other nodes or servers must reach (a node exporter on 9100, for example) adds a rule for
+it. Rules 1 to 5 are the same ports the sandbox workers' firewall opens between workers (`pve/sandboxfw.go`), which
+runs on a lab with the same chart; rules 6 and 7 are new here.
+
+**Control plane.** Nothing is opened from the control plane, because it never opens a connection to a worker. A
+tenant control plane is Kamaji pods on the platform cluster. The kubelet and kube-proxy connect to the API address
+(6443), and the konnectivity agent on each worker dials the konnectivity server (8132) and keeps that connection: the
+API server's calls to kubelets, pods and webhooks come back through it. All of that is egress from the worker, which
+is open, and PVE's firewall is stateful, so replies need no rule. The agent that carries a call may sit on another
+worker than the kubelet it calls, which is rule 4. This is read from the sandbox pass (`sandboxfw.go`: "exec and logs
+ride konnectivity, so nothing comes in for them") and Kamaji's defaults, not measured on a tenant cluster.
+
+**IP filter.** `proxmox-firewall` applies the set to ARP as well as IP: a frame leaves only when its source address
+(or ARP sender address) is in the set, and an ARP request comes in only when the address it asks for is in the set.
+MetalLB layer 2 makes whichever worker holds a Service answer ARP for that Service's address, so **the cluster's
+MetalLB addresses must be in every worker's set, or LoadBalancer Services stop answering.** They are: the set is the
+cluster's whole reservation (`k8s:<clusterId>` in the address store), 16 worker addresses and 8 MetalLB addresses. So
+a worker can send as another worker of its own cluster, or as one of its MetalLB addresses, and as nothing else on
+the vnet (one exception: a tenant who attaches a public network to a worker row has `ipfilter-net0` rewritten by that
+action, `cloud_network_pve.go`, until the next sync puts the cluster's set back). It is not pinned to its own /32 as a server is: the portal does not hand a worker its address (CAPMOX's
+address pool does), and the Node object, which names it, is the tenant's to write. Pod traffic is not affected: with
+VXLAN the outer source is the node address and traffic leaving the cluster is masqueraded to it.
+
+**How the firewall gets onto a worker.** CAPMOX has no field for the NIC flag: the function that builds a machine's
+NIC string takes model, bridge, MAC, MTU and VLAN tag and has no `firewall` parameter (read in its source,
+`internal/service/vmservice/utils.go`; it rewrites `net0` only while the machine is being cloned and is not running).
+So the chart cannot ask for it and no chart change is part of this. The portal writes it after the clone, as it does for sandbox workers:
+
+1. The provider sync (every 15 minutes, `syncjob` → `project.ReconcileWorkerFirewalls`) looks for security groups
+   named `k8s-<clusterId>` whose project has that cluster and, for each, at the project pool's VMs tagged
+   `pc-k8s-<clusterId>`.
+2. A worker that is **running** is brought in: IP filter set, group reference, options, and last `firewall=1` on the
+   NIC. Until that flag is on PVE applies none of the rest, so a running worker is never filtered by half a firewall.
+   A worker that is not running yet is left for the next pass, because CAPMOX rewrites `net0` until the first start.
+3. A cluster without reserved addresses in the store is skipped: an empty filter would cut every worker off.
+
+**The window.** A new or replaced worker therefore runs without the firewall from its first boot until the next
+provider sync: up to 15 minutes, as open as every worker is today. It cannot be closed from the chart (no CAPMOX
+field) and the portal is not told when CAPMOX starts a VM. A provider sync started by hand closes it at once.
+
+**New clusters** (`config.cluster.workerFirewall: true` on the Kubernetes provider): the create makes the group
+before the Application, and the sync brings each worker in as above. Not with `sharedWorkers`. Set it through the API
+like `rwxGiB` (the form keeps keys it has no field for).
+
+**Existing clusters are never changed by an upgrade or a sync.** The operator protects one cluster at a time:
+**System → Cloud providers → the Kubernetes provider → Managed clusters → Firewall → Protect this cluster's workers**,
+or
+
+```sh
+curl -s -X POST -H "$AUTH" "$API/admin/service/<kubernetesProviderId>/k8s-clusters/<clusterId>/worker-firewall"
+curl -s        -H "$AUTH" "$API/admin/service/<kubernetesProviderId>/k8s-clusters/<clusterId>/worker-firewall"   # state, writes nothing
+curl -s -X DELETE -H "$AUTH" "$API/admin/service/<kubernetesProviderId>/k8s-clusters/<clusterId>/worker-firewall" # take it off
+```
+
+Protect does this, in order:
+
+1. Refuses, having written nothing, when the datacenter firewall is off, when the cluster has no reserved addresses in
+   the store, when a MetalLB address in the cluster's values is not one of them, or when any Node reports an
+   `InternalIP` that is not one of the reserved worker addresses (the filter would cut that node off).
+2. Makes the group, then writes the firewall on every running worker.
+3. Waits 15 seconds for the nodes' firewall to load, then watches for up to 40 seconds that every Node that was Ready
+   renews its Lease in `kube-node-lease` (a kubelet does every 10 seconds; the node controller reads the same Lease to
+   call a node Ready).
+4. If a write failed or a Lease did not move, it switches the VM firewall off on every worker (`enable=0`, which
+   stops all filtering), deletes the group and answers 409 with what happened. The request takes up to a minute.
+
+**A Protect that is cut short.** The request runs for 55 seconds plus the Proxmox calls. A proxy in front of the API
+with a shorter timeout (60 seconds is a common default) answers an error while the action goes on to its end: open
+the dialog again, or `GET` the state, to see how it ended. If the API process itself stops during the watch, nothing
+finishes it: the group and the firewall stay, unverified, and no later sync or Protect takes them off (a second
+Protect sees a protected cluster and never goes back). The same holds when the way back in step 4 failed; the 409
+says so. In both cases look at the nodes, and use **Remove the worker firewall** if one is not Ready.
+
+Protect, Remove and the sync's pass run one at a time (a lock in the API process), so a sync cannot write on a worker
+while a Protect is going back. With more than one API replica that lock does not reach the other replicas; the
+Docker Compose install runs one.
+
+**Remove** switches the VM firewall off on every worker (`enable=0`), takes the group reference off each and deletes
+the group. It refuses with 409, having written nothing, when a worker VM is on a Proxmox node that is down (its
+firewall cannot be written, and it would come back dropping everything with a reference to a group that is gone:
+remove the firewall when the node is back or the worker has been replaced), and when another server of the project
+references the group (possible only for a group from before 0.9.0; detach it there first). A write that fails
+part-way leaves the group, so the cluster stays protected and the next sync puts the firewall back on every worker:
+run Remove again.
+
+What the watch proves and what it does not: it proves each worker still reaches its API server with its own address
+through the filter, which is what keeps a Node Ready. It does not prove traffic between pods on different nodes or to
+LoadBalancer addresses; check a workload after protecting, and use **Remove the worker firewall** if something is
+wrong. On a cluster that is already protected, Protect only brings in workers that are not yet behind the firewall
+and never takes the firewall off the others.
+
+**Delete.** The cluster's release deletes the group after the workers are gone. A group that a server of the project
+still references is left to the tenant as an ordinary group. A group delete that Proxmox refuses does not hold back
+the cluster's token and addresses: those are released, and the release is run again for the group.
+
+**Lab tests owed** (two or more nodes, PVE 9.2 with `proxmox-firewall`; none was run):
+
+1. Protect a running cluster with a workload under a `curl` loop from another pod and from outside: seconds lost while
+   `firewall=1` is set on a live NIC and while the firewall first loads, with connections that were open before.
+2. From a second VM on the tenant network: kubelet port 10250 of a worker is closed; a NodePort and a LoadBalancer
+   address answer.
+3. A worker cannot send with an address outside the cluster's reservation (`arping`/`hping` with a spoofed source).
+4. A LoadBalancer Service keeps answering after its address moves to another worker (drain the announcing node).
+5. `kubectl logs`, `exec`, `top` (metrics-server) and an admission webhook on another node than its caller work.
+6. Replace a worker (scale down by one and up): the new VM gets the firewall at the next sync and the cluster stays
+   Ready; measure the window.
+7. `workerFirewall: true`, new cluster: it reaches Ready with every add-on, and the group exists before the first VM.
+8. Does CAPMOX keep `firewall=1` on `net0` over its own reconciles of a running machine, and how long does the
+   node's firewall take to pick up a new VM firewall (the 15 seconds above are a guess)?
+9. Remove: traffic that was dropped passes again at once.
+10. What PVE answers to the delete of a security group that a VM's firewall still references, and what
+    `proxmox-firewall` does with a reference to a group that is gone. The code avoids both (it refuses the attach and
+    checks before it deletes); the answer says how bad a miss would be.
 
 **A create that fails.** Quota is checked first, so a create over it takes nothing. The marker secret is written before the create takes anything else. A failure releases the addresses, tokens and dataset at once, and if that release fails too (NAS or PVE down), the marker stays and the sweep retries it after the grace window. A release only reaches the NAS named by the cluster's share row, so a broken NAS holding nothing of the cluster blocks nothing. The exception is a cluster on a shared worker pool: its addresses are on every export of the project, so they stay reserved until the NAS takes them off.
 

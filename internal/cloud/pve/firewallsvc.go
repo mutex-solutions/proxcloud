@@ -166,12 +166,19 @@ func (s *Service) AttachSecurityGroup(ctx context.Context, projectID, serverExtI
 	if g == nil {
 		return fmt.Errorf("pve: group %s not found", groupID)
 	}
+	if _, name, _ := aliasProject(g.Comment); IsWorkerGroupName(name) {
+		return errWorkerGroupOnServer(name)
+	}
 	vm, err := s.ResolveVM(ctx, projectID, serverExtID)
 	if err != nil {
 		return err
 	}
 	if vm == nil {
 		return fmt.Errorf("pve: server %s not found", serverExtID)
+	}
+	// A worker's firewall is the platform's: another group would open it, or stay behind on a VM CAPMOX replaces.
+	if IsWorkerVM(vm.Tags) {
+		return errWorkerGroups()
 	}
 	if err := s.C.AddVMGroupRule(ctx, vm.Node, vm.VMID, groupID); err != nil {
 		return err
@@ -468,6 +475,19 @@ func (s *Service) DetachSecurityGroup(ctx context.Context, projectID, serverExtI
 	if vm == nil {
 		return fmt.Errorf("pve: server %s not found", serverExtID)
 	}
+	// A worker keeps its cluster's group. Any other group on it is from before attaching was refused, and may go.
+	if IsWorkerVM(vm.Tags) {
+		g, err := s.ownedGroup(ctx, projectID, groupID)
+		if err != nil {
+			return err
+		}
+		if g == nil {
+			return errWorkerGroups()
+		}
+		if _, name, _ := aliasProject(g.Comment); IsWorkerGroupName(name) {
+			return errWorkerGroups()
+		}
+	}
 	base := qemuPath(vm.Node, vm.VMID) + "/firewall"
 	var rules []FirewallRule
 	if err := s.C.get(ctx, base+"/rules", nil, &rules); err != nil {
@@ -509,14 +529,24 @@ func (s *Service) VMSecurityGroups(ctx context.Context, projectID, serverExtID s
 // SecurityGroupInUse names a pool VM whose firewall references the group ("" = none). PVE
 // deletes a referenced group without complaint and leaves a dangling rule on the VM.
 func (s *Service) SecurityGroupInUse(ctx context.Context, projectID, groupID string) (string, error) {
+	return s.groupUser(ctx, projectID, groupID, "")
+}
+
+// groupUser is SecurityGroupInUse. With exceptCluster it is the platform asking before it deletes that cluster's
+// group: the cluster's workers do not count, and a VM that cannot be read does not hold the delete back (attaching
+// such a group to a server is refused, so only a group older than that refusal can be on one).
+func (s *Service) groupUser(ctx context.Context, projectID, groupID, exceptCluster string) (string, error) {
 	vms, templates, unread, err := s.poolVMs(ctx, projectID)
 	if err != nil {
 		return "", err
 	}
-	if len(unread) > 0 {
+	if len(unread) > 0 && exceptCluster == "" {
 		return "", errUnreadVMs()
 	}
 	for _, vm := range append(vms, templates...) {
+		if exceptCluster != "" && HasTag(vm.Tags, WorkerTagPrefix+exceptCluster) {
+			continue
+		}
 		var rules []FirewallRule
 		if err := s.C.get(ctx, vmFirewallPath(vm.Node, vm.VMID)+"/rules", nil, &rules); err != nil {
 			return "", err

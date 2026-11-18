@@ -124,6 +124,7 @@ func platformErr(w http.ResponseWriter, status int, code, msg string, details ma
 // platformStoreErr answers an error of the store or of a change; false when err is nil.
 func platformStoreErr(w http.ResponseWriter, err error) bool {
 	var inv *invalidInstallation
+	var refused *platformlife.UpgradeRefused
 	switch {
 	case err == nil:
 		return false
@@ -153,6 +154,10 @@ func platformStoreErr(w http.ResponseWriter, err error) bool {
 		platformErr(w, http.StatusConflict, "run_finished", err.Error(), nil)
 	case errors.Is(err, platformlife.ErrBOMNotHere):
 		platformErr(w, http.StatusConflict, platformlife.CodeBOMUnsupported, err.Error(), nil)
+	case errors.Is(err, platformlife.ErrBadTarget):
+		platformErr(w, http.StatusBadRequest, "invalid_target", err.Error(), nil)
+	case errors.As(err, &refused):
+		platformErr(w, http.StatusConflict, platformlife.CodeUpgradeRefused, err.Error(), map[string]any{"reasons": refused.Reasons})
 	default:
 		httpx.WriteError(w, err)
 	}
@@ -537,8 +542,9 @@ func (h *Handler) platformPlan(w http.ResponseWriter, r *http.Request) {
 	if platformStoreErr(w, err) {
 		return
 	}
-	plan, err := platformlife.PlanFor(in.Status.BOM)
-	if httpx.WriteError(w, err) {
+	// ?target=<sha256>: the BOM to plan the move to (default: this build's own).
+	plan, err := platformlife.PlanFor(in, r.URL.Query().Get("target"))
+	if platformStoreErr(w, err) {
 		return
 	}
 	httpx.OK(w, plan)
@@ -556,12 +562,15 @@ func (h *Handler) platformRunStart(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Kind    string `json:"kind"`
-		Confirm string `json:"confirm"` // "remove <name>": lets a remove go on with the seed gone or the workload silent
+		Confirm string `json:"confirm"` // "remove <name>": lets a remove go on with the seed gone or the workload silent; "upgrade <name> to <release>" with targetBom
+		// TargetBOM makes an apply an upgrade: the sha256 of this build's BOM, which the platform is moved to (GET …/plan
+		// says whether it is allowed and what to type). Without it an apply stays on the installed BOM.
+		TargetBOM string `json:"targetBom"`
 	}
 	if !decodeStrictLimited(w, r, &req, 1<<10) {
 		return
 	}
-	run, err := h.platform.StartRun(r.Context(), h.platformJobs, chi.URLParam(r, "id"), req.Kind, adminActor(r), req.Confirm)
+	run, err := h.platform.StartRun(r.Context(), h.platformJobs, chi.URLParam(r, "id"), req.Kind, adminActor(r), req.Confirm, req.TargetBOM)
 	if platformStoreErr(w, err) {
 		return
 	}

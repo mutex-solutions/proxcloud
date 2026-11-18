@@ -13,6 +13,8 @@
 #   ListMachineDeployments           machinedeployments.cluster.x-k8s.io: get/list
 #   ListCRs (provisioning status)    machines.cluster.x-k8s.io, proxmoxmachines and proxmoxclusters
 #                                    (infrastructure.cluster.x-k8s.io): get/list
+#   ListCRs (operator machines view) machinehealthchecks.cluster.x-k8s.io: get/list
+#   DeleteCR (replace a worker)      machines.cluster.x-k8s.io: delete
 #   ListCRs (cluster add-on status)  helmchartproxies, clusterresourcesets
 #                                    (addons.cluster.x-k8s.io): get/list
 #   ListPersistentVolumes            persistentvolumes: list (CSI gateway migration)
@@ -67,8 +69,15 @@ rules:
   # Read-only: why a cluster is not there yet. The sync and the admin console read what Cluster API and CAPMOX report
   # on each worker (Machine, ProxmoxMachine) and on the provider access (ProxmoxCluster).
   - apiGroups: ["cluster.x-k8s.io"]
-    resources: ["machinedeployments", "machines"]
+    resources: ["machinedeployments", "machines", "machinehealthchecks"]
     verbs: ["get", "list"]
+  # The one write on Cluster API: replacing a worker deletes its Machine, and the MachineSet makes a new one.
+  # Cluster-wide: this lets the account delete ANY Machine in any namespace, a control-plane Machine of a kubeadm
+  # cluster too. Only the portal's code confines it to a worker Machine of a cluster it manages (namespace of the
+  # project, the provider's label on the Application, the cluster-name and node-group labels on the Machine).
+  - apiGroups: ["cluster.x-k8s.io"]
+    resources: ["machines"]
+    verbs: ["delete"]
   - apiGroups: ["infrastructure.cluster.x-k8s.io"]
     resources: ["proxmoxmachines", "proxmoxclusters"]
     verbs: ["get", "list"]

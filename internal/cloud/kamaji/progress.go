@@ -3,11 +3,13 @@ package kamaji
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
+	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
 // progress.go tells a tenant why a cluster is not there yet. The status sync reads what Cluster API (Machine) and
@@ -69,6 +71,7 @@ const (
 
 // MachineState is one machine's place in the build.
 type MachineState struct {
+	Name      string // the Machine's name, "" for a machine that is not made yet
 	Code      string
 	Rank      int
 	Immediate bool      // needs attention now: CAPMOX gave up, no capacity, a refused token
@@ -77,6 +80,12 @@ type MachineState struct {
 }
 
 func (m MachineState) ready() bool { return m.Rank == rankReady }
+
+// stalled: the machine needs attention, at once or because it made no progress within its own bound. provisioning
+// counts the cluster's machines in Provisioning (stallBound).
+func (m MachineState) stalled(provisioning int, now time.Time) bool {
+	return m.Immediate || (!m.ready() && !m.Waiting && !m.Since.IsZero() && now.Sub(m.Since) > stallBound(m.Rank, provisioning))
+}
 
 // pveAuthFailure tells a message that carries Proxmox's refusal of a token: "401 authentication failure" from the
 // API, "not authorized to access endpoint" from the client CAPMOX uses. A bare 401 is not enough: VMIDs are numbers.
@@ -129,7 +138,7 @@ func machineFailure(m map[string]any) string {
 // match wins; a message only ever selects a code.
 func classifyMachine(m, pm map[string]any, cpReady bool) MachineState {
 	phase := digStr(m, "status", "phase")
-	st := MachineState{Rank: rankPending, Since: latest(parseTime(digStr(m, "metadata", "creationTimestamp")), parseTime(digStr(m, "status", "lastUpdated")))}
+	st := MachineState{Name: digStr(m, "metadata", "name"), Rank: rankPending, Since: latest(parseTime(digStr(m, "metadata", "creationTimestamp")), parseTime(digStr(m, "status", "lastUpdated")))}
 	switch phase {
 	case phaseProvisioning:
 		st.Rank = rankProvisioning
@@ -222,6 +231,9 @@ func mdUnsettled(md map[string]any) bool {
 	return ok && upToDate != want
 }
 
+// progressMachineNames caps machineNames of one progress entry.
+const progressMachineNames = 5
+
 // groupProgress is one node group's progress entry, nil when the group is settled. states are its non-deleting
 // machines, mds its MachineDeployments, desired its count in the values, appSyncedAt when ArgoCD last finished a sync
 // (the clock of machines not made yet), provisioning the cluster's machines in Provisioning.
@@ -238,6 +250,7 @@ func groupProgress(states []MachineState, mds []map[string]any, desired int, app
 	if !unsettled {
 		return nil
 	}
+	// since, the group's last progress over every machine, is the clock of a machine that is not made yet only.
 	if missing := desired - len(states); missing > 0 {
 		since = latest(since, appSyncedAt)
 		for _, md := range mds {
@@ -247,15 +260,27 @@ func groupProgress(states []MachineState, mds []map[string]any, desired int, app
 			states = append(states, MachineState{Code: CodeProvisioning, Rank: rankMissing, Since: since})
 		}
 	}
-	// The worst machine speaks for the group: one that needs attention now, then the least advanced, then the oldest.
+	// The worst machine speaks for the group: one that needs attention now, then one that is stalled, then the least
+	// advanced, then the oldest. Each machine is measured from its own last progress: a sibling that is ready or still
+	// on its way does not hide a machine that is past its bound (a new worker used to clear the attention of two that
+	// had not joined for hours).
+	order := func(st *MachineState) int {
+		switch {
+		case st.Immediate:
+			return 0
+		case st.stalled(provisioning, now):
+			return 1
+		}
+		return 2
+	}
 	var worst *MachineState
 	for i := range states {
 		st := &states[i]
 		if st.ready() {
 			continue
 		}
-		if worst == nil || (st.Immediate && !worst.Immediate) ||
-			(st.Immediate == worst.Immediate && (st.Rank < worst.Rank || (st.Rank == worst.Rank && st.Since.Before(worst.Since)))) {
+		if worst == nil || order(st) < order(worst) ||
+			(order(st) == order(worst) && (st.Rank < worst.Rank || (st.Rank == worst.Rank && st.Since.Before(worst.Since)))) {
 			worst = st
 		}
 	}
@@ -264,15 +289,23 @@ func groupProgress(states []MachineState, mds []map[string]any, desired int, app
 		return nil
 	}
 	n := 0
+	// The machines a tenant can replace from this line: the ones that need attention. The instance list cannot be the
+	// only place, it is built from the project's synced servers and a worker that never joined may not be among them.
+	names := []string{}
 	for _, st := range states {
 		if !st.ready() && st.Code == worst.Code {
 			n++
 		}
+		if st.Name != "" && len(names) < progressMachineNames && st.stalled(provisioning, now) {
+			names = append(names, st.Name)
+		}
 	}
-	attention := worst.Immediate || (!worst.Waiting && !since.IsZero() && now.Sub(since) > stallBound(worst.Rank, provisioning))
-	out := map[string]any{"code": worst.Code, "machines": n, "attention": attention}
-	if !since.IsZero() {
-		out["since"] = since.UTC().Format(time.RFC3339)
+	out := map[string]any{"code": worst.Code, "machines": n, "attention": worst.stalled(provisioning, now)}
+	if len(names) > 0 {
+		out["machineNames"] = names
+	}
+	if !worst.Since.IsZero() {
+		out["since"] = worst.Since.UTC().Format(time.RFC3339)
 	}
 	return out
 }
@@ -454,8 +487,31 @@ type MachineDetail struct {
 	Code           string      `json:"code,omitempty"`
 	Attention      bool        `json:"attention"`
 	Deleting       bool        `json:"deleting,omitempty"`
+	Ready          bool        `json:"ready"`
 	FailureMessage string      `json:"failureMessage,omitempty"`
 	Conditions     []Condition `json:"conditions"`
+	// JoinError is what the guest says about a join that failed. The operator route fills it, for a machine in
+	// not_joined past its bound only; it is read live and never stored.
+	JoinError *JoinError `json:"joinError,omitempty"`
+}
+
+// JoinError is cloud-init's own account of a worker that did not join, read through the guest agent and masked.
+type JoinError struct {
+	Errors    []string `json:"errors"`              // the errors of /run/cloud-init/result.json
+	LogTail   string   `json:"logTail,omitempty"`   // the end of /var/log/cloud-init-output.log
+	ReadError string   `json:"readError,omitempty"` // why nothing could be read
+}
+
+// HealthCheck is one node group's MachineHealthCheck as Cluster API reports it.
+type HealthCheck struct {
+	NodeGroup                 string `json:"nodeGroup"`
+	NodeStartupTimeoutSeconds int    `json:"nodeStartupTimeoutSeconds"`
+	MaxUnhealthy              int    `json:"maxUnhealthy"`
+	ExpectedMachines          int    `json:"expectedMachines"`
+	CurrentHealthy            int    `json:"currentHealthy"`
+	// RemediationsAllowed is how many more machines Cluster API may replace now. 0 with unhealthy machines: the
+	// guard holds, nothing is replaced.
+	RemediationsAllowed int `json:"remediationsAllowed"`
 }
 
 // ClusterMachines is the operator detail of one cluster.
@@ -464,6 +520,11 @@ type ClusterMachines struct {
 		Conditions []Condition `json:"conditions"`
 	} `json:"proxmoxCluster"`
 	Machines []MachineDetail `json:"machines"`
+	// HealthChecks are the cluster's MachineHealthChecks, empty for a cluster without (chart below 0.1.14, the repair
+	// turned off, or a service account that may not read them).
+	HealthChecks []HealthCheck `json:"healthChecks"`
+	// ComputeServiceID is the Proxmox provider that hosts the workers ("" when the cluster's secret names none).
+	ComputeServiceID string `json:"-"`
 }
 
 func conditionsOf(objs ...map[string]any) []Condition {
@@ -491,10 +552,30 @@ func (s *Service) ClusterMachines(ctx context.Context, clusterID string, now tim
 		return nil, ErrClusterNotFound
 	}
 	ns := NamespaceFor(digStr(app, "metadata", "labels", LabelProject))
-	out := &ClusterMachines{Machines: []MachineDetail{}}
+	out := &ClusterMachines{Machines: []MachineDetail{}, HealthChecks: []HealthCheck{}}
 	machines, err := s.api.ListCRs(ctx, capiGroup, capiVersion, "machines", ns, "")
 	if err != nil {
 		return nil, err
+	}
+	// Best effort: an install whose ClusterRole is older than the MachineHealthCheck answers 403, and the rest of the
+	// page is worth more than this line.
+	if checks, err := s.api.ListCRs(ctx, capiGroup, capiVersion, "machinehealthchecks", ns, labelClusterName+"="+clusterID); err == nil {
+		for _, hc := range checks {
+			h := HealthCheck{NodeGroup: digStr(hc, "metadata", "labels", labelNodeGroup)}
+			h.NodeStartupTimeoutSeconds, _ = intAt(hc, "spec", "checks", "nodeStartupTimeoutSeconds")
+			h.MaxUnhealthy, _ = intAt(hc, "spec", "remediation", "triggerIf", "unhealthyLessThanOrEqualTo")
+			h.ExpectedMachines, _ = intAt(hc, "status", "expectedMachines")
+			h.CurrentHealthy, _ = intAt(hc, "status", "currentHealthy")
+			h.RemediationsAllowed, _ = intAt(hc, "status", "remediationsAllowed")
+			out.HealthChecks = append(out.HealthChecks, h)
+		}
+	}
+	if secrets, err := s.api.ListSecrets(ctx, ns, ""); err == nil {
+		for _, sec := range secrets {
+			if digStr(sec, "metadata", "name") == CloudSecretName(clusterID) {
+				out.ComputeServiceID = digStr(sec, "metadata", "annotations", annotationComputeService)
+			}
+		}
 	}
 	infra, err := s.api.ListCRs(ctx, infraGroup, infraVersion, "proxmoxmachines", ns, "")
 	if err != nil {
@@ -549,7 +630,8 @@ func (s *Service) ClusterMachines(ctx context.Context, clusterID string, now tim
 		}
 		if !d.Deleting {
 			d.Code = st.Code
-			d.Attention = st.Immediate || (!st.ready() && !st.Waiting && now.Sub(st.Since) > stallBound(st.Rank, provisioning))
+			d.Ready = st.ready()
+			d.Attention = st.stalled(provisioning, now)
 		}
 		out.Machines = append(out.Machines, d)
 	}
@@ -558,3 +640,85 @@ func (s *Service) ClusterMachines(ctx context.Context, clusterID string, now tim
 
 // ErrClusterNotFound: no cluster of this provider has that id.
 var ErrClusterNotFound = errors.New("kamaji: cluster not found")
+
+// What ReplaceMachine refuses.
+var (
+	// ErrMachineNotFound: the cluster has no worker Machine of that name.
+	ErrMachineNotFound = errors.New("kamaji: machine not found")
+	// ErrMachineDeleting: the Machine is already on its way out.
+	ErrMachineDeleting = errors.New("kamaji: machine is already being removed")
+	// ErrLastReadyNode: the Machine is the only Ready node of its group, and the caller did not confirm.
+	ErrLastReadyNode = errors.New("kamaji: machine is the last ready node of its node group")
+)
+
+// ReplaceMachineError turns what ReplaceMachine refuses into the answer of both consoles' routes; any other error
+// (and nil) comes back as it is.
+func ReplaceMachineError(err error) error {
+	var ae *kamajik8s.APIError
+	switch {
+	case errors.Is(err, ErrClusterNotFound):
+		return httpx.NotFound("cluster not found")
+	case errors.Is(err, ErrMachineNotFound):
+		return httpx.NotFound("This cluster has no worker machine of that name")
+	case errors.Is(err, ErrMachineDeleting):
+		return httpx.NewError(http.StatusConflict, http.StatusConflict, "This machine is already being removed")
+	case errors.Is(err, ErrLastReadyNode):
+		return httpx.NewError(http.StatusConflict, http.StatusConflict,
+			"This machine is the last Ready node of its node group: its pods have nowhere to run in the group until the new node is Ready. Confirm to replace it anyway.").
+			WithDetails(map[string]any{"reason": "last_ready_node"})
+	case errors.As(err, &ae) && ae.Status == http.StatusForbidden:
+		// An install older than this action: its ClusterRole has no delete on Machines. The cause is for the operator.
+		return httpx.NewError(http.StatusBadGateway, http.StatusBadGateway,
+			"The platform cannot replace machines yet: its access to the management cluster is older than this action. Contact the operator.").
+			WithCause(fmt.Errorf("the ProxCloud service account cannot delete Machines: re-apply deploy/mgmt-cluster/rbac.yaml, or update the managed-services platform to proxcloud-platform chart 0.1.3 or later: %w", err))
+	}
+	return err
+}
+
+// ReplaceMachine deletes one worker Machine of a cluster, so that its MachineSet makes a new one: a new clone on the
+// same Proxmox node (the MachineDeployment is pinned to it) and a new kubeadm join. The node group's count and
+// placement are not touched, so the quota is not either. Cluster API drains a Machine that has a Node before it
+// deletes the VM. A Machine that is the last Ready node of its group is only replaced with confirm: its pods have
+// nowhere to go in that group until the new node is Ready.
+func (s *Service) ReplaceMachine(ctx context.Context, clusterID, machine string, confirm bool) error {
+	app, err := s.api.GetApplication(ctx, s.cfg.ArgoNamespace, clusterID)
+	if err != nil {
+		return err
+	}
+	if app == nil || !managedBy(app) || digStr(app, "metadata", "labels", LabelService) != s.serviceID {
+		return ErrClusterNotFound
+	}
+	ns := NamespaceFor(digStr(app, "metadata", "labels", LabelProject))
+	machines, err := s.api.ListCRs(ctx, capiGroup, capiVersion, "machines", ns, labelClusterName+"="+clusterID)
+	if err != nil {
+		return err
+	}
+	var target map[string]any
+	for _, m := range machines {
+		// The cluster label is compared again: the selector is the API server's word, the delete below is ours.
+		if digStr(m, "metadata", "name") == machine && digStr(m, "metadata", "labels", labelClusterName) == clusterID &&
+			digStr(m, "metadata", "labels", labelNodeGroup) != "" {
+			target = m
+		}
+	}
+	switch {
+	case target == nil:
+		return ErrMachineNotFound
+	case dig(target, "metadata", "deletionTimestamp") != nil:
+		return ErrMachineDeleting
+	}
+	if !confirm && classifyMachine(target, nil, true).ready() {
+		group, others := digStr(target, "metadata", "labels", labelNodeGroup), 0
+		for _, m := range machines {
+			if digStr(m, "metadata", "name") != machine && digStr(m, "metadata", "labels", labelClusterName) == clusterID &&
+				digStr(m, "metadata", "labels", labelNodeGroup) == group &&
+				dig(m, "metadata", "deletionTimestamp") == nil && classifyMachine(m, nil, true).ready() {
+				others++
+			}
+		}
+		if others == 0 {
+			return ErrLastReadyNode
+		}
+	}
+	return s.api.DeleteCR(ctx, capiGroup, capiVersion, "machines", ns, machine)
+}

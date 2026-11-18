@@ -1,8 +1,8 @@
 // Request capture for specs against the mock app. The app calls src/mocks in-process, not over the network, so
 // page.route sees nothing: recordCalls replaces the mock handler with one that records every call and passes it on
 // to the fixture handlers. A "METHOD /path" key in overrides answers {data: value} instead; a key with the query string
-// ("GET /path?a=1") wins over the one without, and a value {apiError: {status, message}} fails the call with that
-// ApiError. Install it after the first page load (main.tsx installs the mock then); earlier calls are not recorded.
+// ("GET /path?a=1") wins over the one without, and a value {apiError: {status, message, details?}} fails the call with
+// that ApiError. Install it after the first page load (main.tsx installs the mock then); earlier calls are not recorded.
 import type { Page } from "@playwright/test"
 
 export type MockCall = { method: string; path: string; body?: any }
@@ -19,8 +19,8 @@ export async function recordCalls(page: Page, overrides: Record<string, unknown>
       w.__calls.push({ method, path, body: opts.body })
       const key = `${method} ${path}` in ov ? `${method} ${path}` : `${method} ${path.split("?")[0]}`
       if (!(key in ov)) return dispatch(path, opts)
-      const fail = (ov[key] as { apiError?: { status: number; message: string } } | null)?.apiError
-      return fail ? Promise.reject(new ApiError(fail.status, fail.status, fail.message)) : Promise.resolve({ data: ov[key] })
+      const fail = (ov[key] as { apiError?: { status: number; message: string; details?: Record<string, unknown> } } | null)?.apiError
+      return fail ? Promise.reject(new ApiError(fail.status, fail.status, fail.message, fail.details)) : Promise.resolve({ data: ov[key] })
     })
   }, overrides)
 }

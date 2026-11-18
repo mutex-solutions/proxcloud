@@ -7,15 +7,15 @@
 # manifest, which the mirror copies alone.
 images:
   python: docker.io/library/python:3.12-slim@sha256:05a994d2344eb364cc186910f4fc8786a38215f39f00d0acc25bff33a08f4177
-  amp: ghcr.io/mutex-solutions/sandbox-amp:20261112-9d00563@sha256:f41ca6949e6ba38b7bde6d2293608963293edeb67f9ac9f2f3aea0b4d1c4e8ca
-  base: ghcr.io/mutex-solutions/sandbox-base:20261112-9d00563@sha256:0cddb6eb4d7ef2fad552ce3b2b80d48dc85ac6c105bc1a0fe03084e1b171bb0b
-  browser: ghcr.io/mutex-solutions/sandbox-browser:20261112-9d00563@sha256:9303ae5dc02d1bc6faa8cef3b3151c0d0cbdf56ba5021e80f4d85acabf926839
-  claude: ghcr.io/mutex-solutions/sandbox-claude:20261112-9d00563@sha256:eea9410c648a8242824e0512397b2c70c7c07df29c20d41a87ce0593d5d3a8ae
-  code-interpreter: ghcr.io/mutex-solutions/sandbox-code-interpreter:20261112-9d00563@sha256:4f55050bf13866e0ff31b41d20e54bc11955cace66299ff939acfbc1e75639ea
-  code-interpreter-gpu: ghcr.io/mutex-solutions/sandbox-code-interpreter-gpu:20261112-9d00563@sha256:1f6288984671103ab14730f8bac181d903098554846c6e21e6d388bd793f2679
-  codex: ghcr.io/mutex-solutions/sandbox-codex:20261112-9d00563@sha256:e760ec3b23e1efd7e12895fc91f737b380a7fdead92ae9a2b559fd6944d9c477
-  desktop: ghcr.io/mutex-solutions/sandbox-desktop:20261112-9d00563@sha256:f2f0548b61d9ca68c980635b4f1aa484f538f31a21d1cd49af623743d81105bc
-  gemini: ghcr.io/mutex-solutions/sandbox-gemini:20261112-9d00563@sha256:626a0f22ba839f6438e51026e53bf5e78c3f3d2638634b0609e8ed87db3f0d8d
-  mcp-gateway: ghcr.io/mutex-solutions/sandbox-mcp-gateway:20261112-9d00563@sha256:c8756cf3408b0c65422f77f232787e193c18d62a967987c83ac566b72b9dff17
-  node: ghcr.io/mutex-solutions/sandbox-node:20261112-9d00563@sha256:640455d31e2c7938873b1ed4e3e772023f0ac677100bac96eef3aca0724f958b
-  opencode: ghcr.io/mutex-solutions/sandbox-opencode:20261112-9d00563@sha256:18af37d30a13fccd945aaeaa9b31ca024b88cb15a1df3f25f2f76169fddbdec0
+  amp: ghcr.io/mutex-solutions/sandbox-amp:20261116-c8b3364@sha256:1cfce7835241ad7429050b456e2691d490f169fff73b9fb2760640c2fce5cd1a
+  base: ghcr.io/mutex-solutions/sandbox-base:20261116-c8b3364@sha256:e275a3c71601b75b214cc3d6219ba17e6e1d1e49ffc3f72152bbabf6d21dd937
+  browser: ghcr.io/mutex-solutions/sandbox-browser:20261116-c8b3364@sha256:985b40ea44629dc0ed82657b26e02ae3c2077186d475314c743d2513240f1b3b
+  claude: ghcr.io/mutex-solutions/sandbox-claude:20261116-c8b3364@sha256:86cbb51a4f8732f4e94c89e1e1466a6c31a6a779157714b665f5c5469eda9dbd
+  code-interpreter: ghcr.io/mutex-solutions/sandbox-code-interpreter:20261116-c8b3364@sha256:71bcba0a529745b13e4a076a347c9900d926e321fc0f89c1b8c1013ba718b6a6
+  code-interpreter-gpu: ghcr.io/mutex-solutions/sandbox-code-interpreter-gpu:20261116-c8b3364@sha256:f9a6125038e8d61fa6dafa8aecde23f567e165cb258276f7dfa619ab9c19e3c7
+  codex: ghcr.io/mutex-solutions/sandbox-codex:20261116-c8b3364@sha256:a51d9293443f0cabec22362d63d157657b893be106412be5744206da04a6ae8c
+  desktop: ghcr.io/mutex-solutions/sandbox-desktop:20261116-c8b3364@sha256:8c6e33c08134274b3ffc573abb58030796ea7b90d9d684a1eb70bc37d7f541d3
+  gemini: ghcr.io/mutex-solutions/sandbox-gemini:20261116-c8b3364@sha256:28c41195c38edc1398e5074346a622769a2e04ed7936f522b61c1f0266d15373
+  mcp-gateway: ghcr.io/mutex-solutions/sandbox-mcp-gateway:20261116-c8b3364@sha256:d59fb35de57891df4172422671133bdc00b744523c77b50eedb0c0e8629e1b19
+  node: ghcr.io/mutex-solutions/sandbox-node:20261116-c8b3364@sha256:e9b6ff55b37d258dafe0c5e970f898e6c1121e15c13d6f496d5ca3e082ba442b
+  opencode: ghcr.io/mutex-solutions/sandbox-opencode:20261116-c8b3364@sha256:c259f0015493f318fed46be6e0f20aaf0489ee9b42983c565a8e09c5061c7644

@@ -59,6 +59,31 @@ const VLANChartVersion = "0.1.14"
 // ChartHasVLAN reports whether chart version v tags the machines' NIC with proxmox.network.vlan.
 func ChartHasVLAN(v string) bool { return chartAtLeast(v, VLANChartVersion) }
 
+// MachineHealthCheckChartVersion is the first cluster chart that reads machineHealthCheck: one MachineHealthCheck per
+// node group, which replaces a worker that registered no Node within the startup timeout. An older chart ignores
+// the key, so none is written for a cluster pinned below it.
+const MachineHealthCheckChartVersion = "0.1.14"
+
+// ChartHasMachineHealthCheck reports whether chart version v renders the node groups' MachineHealthChecks.
+func ChartHasMachineHealthCheck(v string) bool {
+	return chartAtLeast(v, MachineHealthCheckChartVersion)
+}
+
+// DefaultNodeStartupTimeoutSeconds is the startup timeout of a provider that names none: the bound after which the
+// status sync already calls a single cloning machine stalled (boundProvisioning). Not measured on a lab: Cluster
+// API counts from the Machine's creation until its VM is ready, so a site whose clones take longer needs a larger
+// config.cluster.nodeStartupTimeoutSeconds, or 0.
+const DefaultNodeStartupTimeoutSeconds = 1800
+
+// MachineHealthCheckValues is the chart's machineHealthCheck block for a cluster on chartVersion, nil when the chart
+// does not read it or the provider turned the repair off.
+func (d ClusterDefaults) MachineHealthCheckValues(chartVersion string) map[string]any {
+	if !ChartHasMachineHealthCheck(chartVersion) || d.NodeStartupTimeoutSeconds <= 0 {
+		return nil
+	}
+	return map[string]any{"nodeStartupTimeoutSeconds": d.NodeStartupTimeoutSeconds, "maxUnhealthy": max(d.RepairMaxUnhealthy, 1)}
+}
+
 // chartAtLeast compares chart versions "x.y.z" ("-pre" and "+build" count as x.y.z). A malformed v is below any.
 func chartAtLeast(v, min string) bool {
 	parse := func(s string) (out [3]int, ok bool) {
@@ -182,6 +207,17 @@ type ClusterDefaults struct {
 	// ProxmoxServiceID names the compute provider whose PVE cluster hosts the workers. Empty: the
 	// project's only proxmox service.
 	ProxmoxServiceID string
+	// NodeStartupTimeoutSeconds is how long a worker may run without registering a Node before Cluster API replaces
+	// it (chart machineHealthCheck, from MachineHealthCheckChartVersion). 0: no automatic replacement. The provider
+	// parser fills DefaultNodeStartupTimeoutSeconds when config.cluster.nodeStartupTimeoutSeconds is absent.
+	NodeStartupTimeoutSeconds int
+	// RepairMaxUnhealthy is the guard of that replacement, a number of machines per node group (never a percentage):
+	// with more unhealthy machines than this nothing is replaced. 0 counts as 1.
+	RepairMaxUnhealthy int
+	// WorkerFirewall puts the workers of every NEW cluster behind the Proxmox VM firewall with a security group of
+	// their own (config.cluster.workerFirewall, docs/managed-k8s.md "Worker firewall"). Off by default: not verified
+	// on a lab. An existing cluster is protected by the operator, one at a time. Nothing with Shared.
+	WorkerFirewall bool
 	// Shared, when set, puts every cluster's workers on one provider-run placement and credential
 	// instead of the project's pool and vnet with tokens minted per cluster. For a site whose portal
 	// token may not mint tokens. Workers then neither sync nor bill, and tenants share a network.

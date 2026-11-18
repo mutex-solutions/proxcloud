@@ -130,6 +130,23 @@ nodeGroups:
     # machineLabels: {node-restriction.kubernetes.io/key: value}  # CAPI sets these on the Node; the kubelet cannot
     # taints: [{key: k, value: v, effect: NoSchedule}]
 
+# -- Automatic replacement of a worker that never joined (from chart 0.1.14). One MachineHealthCheck per node group.
+# It has no Node-condition check: a node that joined and went NotReady is never replaced by it.
+machineHealthCheck:
+  # -- Seconds a Machine may exist without a Node before Cluster API deletes it, and the MachineDeployment makes a new
+  # one (a new clone and a new kubeadm join). 0: no MachineHealthCheck is rendered. Cluster API counts from the latest
+  # of: Machine created, cluster infrastructure ready, control plane initialized, the machine's VM ready. Until the VM
+  # is ready the clock runs from the creation, so a value below the slowest clone of the site deletes machines that
+  # are still being cloned.
+  nodeStartupTimeoutSeconds: 0
+  # -- The guard, per node group: machines are replaced only while at most this many of the group are unhealthy. A
+  # whole number, 1 or more. A percentage is refused: Cluster API rounds it down, so 40% of one or two machines is 0
+  # and nothing would ever be replaced. More unhealthy machines than this (every worker failed for a cause of the
+  # site): nothing is replaced, the machines stay. Fewer or as many: each is replaced again after every timeout for
+  # as long as the cause lasts; the guard does not stop that. The chart caps it at machineCount - 1, so that a group
+  # whose machines are all unhealthy is never replaced in a loop: a group of one machine gets no MachineHealthCheck.
+  maxUnhealthy: 1
+
 # -- Platform SANDBOX cluster only: bandwidth manager + host-owned CNI chain.
 # Requires SB10 node-setup to install the chain before workload networking works.
 # Leave false for ordinary tenant Kubernetes clusters.

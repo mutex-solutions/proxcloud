@@ -109,22 +109,29 @@ func (e *ExternalService) KamajiConfig() kamaji.Config {
 		ChartName:     str(argo["chartName"]),
 		ChartVersion:  str(argo["chartVersion"]),
 		Defaults: kamaji.ClusterDefaults{
-			DataStoreName: str(cl["dataStoreName"]),
-			DNSZone:       str(cl["dnsZone"]),
-			Versions:      versions,
-			ImageVariants: variants,
-			Flavors:       flavors,
-			RootVolumeGiB: intOf(cl["rootVolumeGiB"]),
-			RWXGiB:        intOf(cl["rwxGiB"]),
-			AllowedCIDRs:  strList(cl["allowedCidrs"]),
-			PVEAPIURL:     str(cl["pveApiUrl"]),
-			DNSServers:    strList(cl["dnsServers"]),
-			NodeGroupMTU:  intOf(cl["workerMtu"]),
+			DataStoreName:  str(cl["dataStoreName"]),
+			DNSZone:        str(cl["dnsZone"]),
+			Versions:       versions,
+			ImageVariants:  variants,
+			Flavors:        flavors,
+			RootVolumeGiB:  intOf(cl["rootVolumeGiB"]),
+			RWXGiB:         intOf(cl["rwxGiB"]),
+			AllowedCIDRs:   strList(cl["allowedCidrs"]),
+			PVEAPIURL:      str(cl["pveApiUrl"]),
+			DNSServers:     strList(cl["dnsServers"]),
+			NodeGroupMTU:   intOf(cl["workerMtu"]),
+			WorkerFirewall: cl["workerFirewall"] == true,
 
 			ProxmoxServiceID: str(cl["proxmoxServiceId"]),
 		},
 		NamespacePlacement: namespacePlacement(e.Config),
 	}
+	// The automatic replacement of a worker that never joined: on by default, 0 turns it off.
+	cfg.Defaults.NodeStartupTimeoutSeconds = kamaji.DefaultNodeStartupTimeoutSeconds
+	if v, ok := cl["nodeStartupTimeoutSeconds"]; ok {
+		cfg.Defaults.NodeStartupTimeoutSeconds = max(intOf(v), 0)
+	}
+	cfg.Defaults.RepairMaxUnhealthy = intOf(cl["repairMaxUnhealthy"])
 	if sw, ok := cl["sharedWorkers"].(map[string]any); ok && str(sw["bridge"]) != "" {
 		sec := e.secretMap()
 		cfg.Defaults.Shared = &kamaji.SharedWorkers{

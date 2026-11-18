@@ -13,7 +13,7 @@ are in [ADR 0009](adr/0009-managed-services-platform-lifecycle.md); the routes a
 > console. The install finished on one lab Proxmox VE cluster, on builds of main; what was run
 > there and what was not is in [Not verified on a lab yet](#not-verified-on-a-lab-yet). It is off
 > by default. v0.8.0 is the first release that carries it; one install was made on its published
-> images (a lab, 2026-11-18), none on those of v0.8.1: see [Not implemented yet](#not-implemented-yet).
+> images (a lab, 2026-11-18), none on those of v0.8.1 or v0.8.2: see [Not implemented yet](#not-implemented-yet).
 
 Code: `internal/platformlife` (the installation model, the preflight, the runner and its stages, the
 renderers), `internal/platform/admin/platform.go` (the routes), `internal/cloud/pve/access.go` and
@@ -680,7 +680,7 @@ the settings (`409 rev_conflict`: the page reads them again).
 | `boot-iso-grant` | `capmox@pve` may not upload and delete on the ISO store | Run the script again |
 | `boot-iso` | The ISO store is shared, takes no ISOs, or is not the only ISO store of the boot storage | Name a node-local ISO store |
 | `placement` | A node an image goes to lacks the import store with `import` content or the boot store | Change the nodes or the stores |
-| `images` | A BOM image is on the template update blocklist | A new installation: install a newer ProxCloud release. An installed platform stays on its release and its images, and no release moves it to other images yet (see "No upgrade between BOMs"): the message says which case applies, and an apply that must import that image stays blocked |
+| `images` | A BOM image is on the template update blocklist | A new installation: install a newer ProxCloud release. An installed platform stays on its release and its images, and no release moves it to other images yet (see [Upgrade between BOMs](#upgrade-between-boms): a BOM with other images is refused): the message says which case applies, and an apply that must import that image stays blocked |
 
 A check that cannot be read fails. A warning fails nothing: the page then says "No check failed" with the
 number of warnings and not "Every check passed", the answer's `ok` stays `true`, and a run's first stage
@@ -774,10 +774,18 @@ control plane and the worker machines, the two providers), the cores and memory 
 installed platform the plan (`GET …/plan`). **Install** (later **Apply this release**) starts a run
 (`POST …/runs {kind: apply}`). You can leave the page; the run goes on.
 
+For a platform on another release than this ProxCloud's, the step also shows the move to this
+release: **Upgrade to release X** with every change and what it does, or "The platform stays on
+release Y" with the reasons, or "The upgrade to release X has not finished"
+([Upgrade between BOMs](#upgrade-between-boms)).
+
 ### After the install
 
-A ready installation shows one card. Nothing on it is verified on a lab; the tests behind it use a
-fake seed and a fake cluster.
+A ready installation shows one card. What it shows was read on a lab once (2026-11-18, the build
+`dev-03bc9f3` of main on a platform installed by v0.8.0), at the API and with `kubectl` 1.35.10: the
+four addresses and the two provider rows against the installation, the platform kubeconfig and the
+two ArgoCD commands on both clusters. The page itself was not opened in a browser on the lab, and
+the row "Offers no Kubernetes version yet" was not seen (the lab's provider offers one).
 
 **Endpoints.** Four addresses, all on the platform network:
 
@@ -827,8 +835,10 @@ The first command prints the password of user `admin`; the second runs until you
 `http://localhost:8080` (or `:8081`). The Secret `argocd-initial-admin-secret` is the one ArgoCD
 writes at its first start; ProxCloud sets no password. If someone deleted it or changed the
 password in ArgoCD, the first command no longer gives a password that works, and ProxCloud cannot
-recover one. That the chart of this release (argo-cd 10.14.0) names the Service `argocd-server`
-with port 80 and writes that Secret is read from the chart's defaults, not seen on a lab.
+recover one. Seen on a lab (2026-11-18), on the platform cluster and on the seed: the chart of this release
+(argo-cd 10.14.0) names the Service `argocd-server` with ports 80 and 443 and writes that Secret,
+the first command gave a password of 16 characters, and with the second `http://localhost:8080/`
+answered `200` (ArgoCD v3.6.1). No login to either ArgoCD was made.
 
 `admin` in an ArgoCD can deploy anything to the cluster it runs on, and the platform cluster's hosts
 every tenant control plane. Use it to look and to sync again. What you change by hand on a
@@ -852,6 +862,9 @@ One run per installation at a time. The page reads the run every 3 seconds.
 | 9 | Install the platform components (`workload-platform`) | The cluster's components wave by wave, each wave only when the one before is Synced and Healthy with its sync `Succeeded` (as in stage 6). After the first wave (Cilium) every node must be Ready with its group label. The platform's own volumes are recorded for Remove at every look of the stage, so also when it fails inside `kamaji-etcd`'s wave. | 20 min per wave |
 | 10 | Create the two providers (`register`) | Creates the Kubernetes and Databases providers, or updates the ones this installation created before, with a kubeconfig of the cluster's `proxcloud-system/proxcloud` service account. | 5 min |
 | 11 | Finish (`done`) | Records the components and the BOM as installed. The phase becomes `ready`. | 5 min |
+
+An upgrade (an apply that moves the platform to this release's BOM) is the same eleven stages with the
+target BOM, two more waits and one more check: [Upgrade between BOMs](#upgrade-between-boms).
 
 A Remove has three stages: Delete the platform cluster (`remove-cluster`, 45 min), Delete the seed
 (`remove-seed`, 30 min), Forget the stored secrets (`remove-secrets`, 5 min).
@@ -927,7 +940,7 @@ stage is still trying.
 | `credentials_missing` | 3 to 5, 7, 8, Remove | A token secret is not stored (the message names which) | Paste it in step 2, then **Retry** or **Remove again** |
 | `image_import_failed` | 2 | Proxmox could not be read; a node lacks the import or boot store; an import failed or was refused. Also: an import is finished but the VM at its VMID is not a template in `pc-templates` on its node (moved to another pool or node, or out of the portal token's view), so the stage can neither use it nor call it deleted; the message names the VM | Open Template updates to see the import, then **Retry**. If it keeps failing, install a newer release. For a template that was moved: put it back in `pc-templates` on its node, or delete it so that it is imported again, then **Retry** |
 | `image_import_stalled` | 2 | No import moved for an hour | Open Template updates to see the import, then **Retry**. If it keeps failing, install a newer release |
-| `image_blocked` | 2 | A BOM image is on the template update blocklist | A new installation: install a newer ProxCloud release. An installed platform stays on its release and its images, and no release moves it to other images yet (see "No upgrade between BOMs"): the message says which case applies, and an apply that must import that image stays blocked |
+| `image_blocked` | 2 | A BOM image is on the template update blocklist | A new installation: install a newer ProxCloud release. An installed platform stays on its release and its images, and no release moves it to other images yet (see [Upgrade between BOMs](#upgrade-between-boms): a BOM with other images is refused): the message says which case applies, and an apply that must import that image stays blocked |
 | `seed_clone_failed` | 3, Remove | The clone task failed or was refused; stage 2 recorded no seed template; the VM stays locked. Also, with nothing being cloned: Proxmox could not be read with the CAPI token while looking at the seed VM or the pool `proxcloud-seed` (unreachable, or the token is refused), in stage 3 on a ready seed or in `remove-cluster` and `remove-seed` | Fix the storage or the node the message names, **Retry**. For a read that failed: check that `capmox@pve!capi` still exists and the stored secret is current, then **Retry** or **Remove again** |
 | `platform_network_refused` | 3, Remove | Mode `routed` only: Proxmox refused the zone, the vnet, the subnet or the SDN Apply (the message carries its error); a vnet of the settings' name exists and is not the installation's; the name is an interface of a node; the installation already made a vnet under another name; the zone `pcplat` exists as another kind; the vnet has a subnet that is not the settings'. While another network change of the site holds the SDN lock the stage waits | Correct what the message names in Proxmox (Datacenter, SDN), or name another vnet in step 1 (a draft can be changed), then **Retry** |
 | `seed_config_refused` | 3, Remove | Proxmox refused a config change, the read of the VM's config after it, the CD upload, a firewall rule or the start (the message carries Proxmox's own error); the CD could not be rendered or built (`The seed's CD could not be rendered` or `… built`: for example Proxmox reports the seed's `net0` without a MAC address); at Remove, the VM is locked or carries another installation's tag | Fix what Proxmox's error names: the bridge, the boot or ISO store, the node, or a right of `capmox@pve!capi` (then run the script again), and **Retry**; it builds a new seed VM. A CD that could not be rendered or built is a defect, not a setting: nothing was stored and no CD was uploaded, Retry will not pass, report the message. A VM with another installation's tag is not deleted: look at it in Proxmox |
@@ -945,7 +958,10 @@ stage is still trying.
 | `workload_api_unreachable` | 8 to 10, Remove | The cluster's API does not answer from the API's host, or its kubeconfig or CA on the seed is not usable, or it refused the admin kubeconfig or the request with a `401` or `403` at five looks on end (as for `seed_api_unreachable`) | Add a route from the ProxCloud host to the API address, **Retry**. At Remove: restore the route and **Remove again**, or tick the option for a cluster that does not answer |
 | `nodes_timeout` | 9 | Not every node is Ready with its group label after the first wave | **Retry** |
 | `provider_conflict` | 10 | A provider with the same name exists that is not this installation's, two rows carry its marker, or the provider validation refused the row | Correct or rename that provider under Cloud providers, **Retry** |
-| `bom_unsupported` | start, plan | The installed BOM is not one this release carries: its own, or that of an earlier release from 0.8.0 on. A platform installed by a build of `main` (`dev-<sha>`) gets this after an upgrade | No release upgrades between BOMs ([Not implemented yet](#not-implemented-yet)). Go back to the ProxCloud release that installed the platform. Or, if no tenant cluster or database must be kept: delete them all (Remove refuses with `tenants_exist` otherwise), remove managed services, which deletes the platform cluster, and install again |
+| `bom_unsupported` | start, plan | The installed BOM is not one this release carries: its own, or that of an earlier release from 0.8.0 on. A platform installed by a build of `main` (`dev-<sha>`) gets this after an upgrade | A platform moves only between BOMs a release carries ([Upgrade between BOMs](#upgrade-between-boms)). Go back to the ProxCloud release that installed the platform. Or, if no tenant cluster or database must be kept: delete them all (Remove refuses with `tenants_exist` otherwise), remove managed services, which deletes the platform cluster, and install again |
+| `upgrade_refused` | start | An apply names this release's BOM as its target (`targetBom`) and the two BOMs differ in something this release does not move, or the target is a `-dev` BOM. `409`, no run is made; `details.reasons` has one line per entry, the same lines as the plan | Nothing is wrong with the platform: it stays on its BOM, and **Apply this release** keeps working. The move needs a later release ([Upgrade between BOMs](#upgrade-between-boms)) |
+| `unexpected_rollout` | 7 | An upgrade run only. The cluster chart of the target BOM would create a machine or bootstrap template, or change the control plane: Cluster API would replace machines. Nothing of the cluster was synced; the Application `pc-platform` is left at the new chart version without automated sync | If machine sizes, nodes or node groups were changed in the settings together with the upgrade, put them back, save, **Retry**. Otherwise the release is at fault: see [Upgrade between BOMs](#upgrade-between-boms), "When the upgrade cannot finish" |
+| `tenants_unhealthy` | 9 | An upgrade run only. After a wave, a tenant cluster or database that was healthy when the run reached stage 9 is not: its Application on the platform cluster's ArgoCD is not Healthy, or its TenantControlPlane is not Ready. The message names them. The stage waits for them up to the wave's 20 minutes | Look at the tenant the message names. **Retry** goes on from the same wave and waits for it again: the list of tenants that were down before is taken once per upgrade (`status.tenantsDownBefore`), not per run, so a tenant a wave broke holds every run until it is healthy or deleted |
 | `portal_changed` | any | ProxCloud was upgraded during the run and no longer carries the run's BOM. The stage the run stood at reads `failed` with this code | **Retry** |
 | `job_dead` | any | The run's job ran out of attempts | **Retry**, or **Remove again** |
 | `platform_disabled` | start | The switch, or template updates, is off | `--managed-services` |
@@ -967,6 +983,9 @@ stage 5) is deleted and built again as the next generation, with a new CA and a 
 became ready is never deleted or rebuilt by an apply: a stage 5 that failed after storing the
 credential, for example with `seed_cd_not_deleted`, keeps the seed, and Retry goes on with the
 bootstrap objects and the CD.
+
+A **Retry** after a failed upgrade goes on to the upgrade's target, never back to the BOM the
+platform left ([Upgrade between BOMs](#upgrade-between-boms)).
 
 **Cancel the run** sets a flag the runner reads at its next claim and before every write: usually
 within about 15 seconds, and up to 5 minutes while a stage pauses after repeated errors. A Proxmox
@@ -1095,7 +1114,7 @@ What the token may do:
 | Where | What | Why |
 |---|---|---|
 | The whole cluster (ClusterRole) | `get`, `list`, `watch` on namespaces, nodes, pods and their logs, services, endpoints, events, config maps, volumes and claims, service accounts, quotas, and on every resource of the API groups of workloads, networking, storage, CRDs, metrics, ArgoCD, Kamaji, Cluster API (without its bootstrap group), CloudNativePG, MetalLB, Cilium and cert-manager | The read steps of this guide and of [managed-k8s.md](managed-k8s.md): Applications, tenant control planes, machines, pods |
-| Namespace `argocd` (Role) | `create` on `pods/portforward`; `get` on the Secret `argocd-initial-admin-secret` | The two ArgoCD commands |
+| Namespace `argocd` (Role) | `get` and `create` on `pods/portforward` (a WebSocket port-forward is authorized as `get`, a SPDY one as `create`); `get` on the Secret `argocd-initial-admin-secret` | The two ArgoCD commands. The Service and the pods that `kubectl port-forward svc/…` looks up first are read through the ClusterRole |
 
 It reads no other Secret (a tenant cluster's admin kubeconfig and the providers' token are Secrets),
 no join token of Cluster API's bootstrap group, and it changes, deletes and executes nothing. The
@@ -1390,8 +1409,9 @@ qm set <vmid> --onboot 1
 
 What this does not do, and what to do then:
 
-- **A machine Cluster API replaced** (a changed node group, a rollout) is a new VM without
-  `onboot` until the next apply. The Check's `machines` row names every such VM.
+- **A machine Cluster API replaced** (a changed node group, a rollout, a replaced worker) is a new
+  VM without `onboot` until the next apply, when its node image template has none. The Check's
+  `machines` row names every such VM. See "Start at boot from the template" below.
 - **A stopped machine is not started by ProxCloud.** The `machines` row names it with its node;
   start it in Proxmox or with `qm start <vmid>`. Start the control plane machine before the
   others if you start them by hand.
@@ -1401,7 +1421,27 @@ What this does not do, and what to do then:
   the rest, as root: `qm set <vmid> --startup order=1` on the seed, `order=2` on the control
   plane machine, `order=3` on the others. A replaced machine loses it.
 - **Tenant clusters' machines** are not touched by this: their VMs are made by the platform's
-  CAPMOX in tenant pools and have no `onboot`. After a node reboot start them in Proxmox.
+  CAPMOX in tenant pools. They have `onboot` only when their node image template has it (next
+  paragraph); the others must be started in Proxmox after a node reboot.
+
+**Start at boot from the template.** From v0.9.0 a Kubernetes node image that **Template updates**
+imports gets `onboot: 1` on the template itself. A Proxmox clone copies every option of its source
+except the disks, MACs and snapshot fields it rewrites, and CAPMOX v0.9.2 has no field for `onboot`
+and writes it nowhere (both read in code: `PVE/API2/Qemu.pm` on Proxmox VE 9.2, CAPMOX's
+`internal/service/vmservice`). So every machine cloned from such a template has it from its first
+boot: tenant workers, platform machines, and the replacement of either, with no call per VM. Stage
+7's pass above stays as the backstop for machines made from older templates. What it does not
+cover:
+
+- A template imported before v0.9.0, or built by the installer's image pipeline
+  (`images/build.py`), has no `onboot`; machines cloned from it get none. To add it, as root on the
+  node: `qm set <template vmid> --onboot 1`. Machines that exist already keep what they have
+  (`qm set <vmid> --onboot 1` on each, or for platform machines the next apply).
+- A tenant worker that is stopped stays stopped until its node boots: nothing starts it.
+- **Not tried on a lab:** that a clone made by CAPMOX carries the option, that Proxmox accepts
+  `onboot` on a template, and that it skips a template when it starts the VMs of a booting node
+  (it should: a template cannot be started). The template-updates smoke test sets `onboot: 0` on
+  its own clone, as before.
 
 Seen on a lab (2026-11-18, a platform installed by v0.8.0, then the build `dev-751a190` of main): the
 `machines` row warned for the four machines without `onboot`, the apply set it with the CAPI token,
@@ -1504,6 +1544,166 @@ and ADR 0009, A2 and A8.
   Proxmox API without verifying its certificate; ArgoCD pulls charts by version, and their digests
   are compared in CI, not at pull time.
 
+## Upgrade between BOMs
+
+Nothing in this section has run on a lab or on a production site. It says what the code and its
+tests do; [the lab tests it still owes](#what-the-upgrade-still-owes-a-lab) are listed at its end.
+
+A ProxCloud upgrade does not change an installed platform. The platform stays on the BOM that
+installed it, and **Apply this release** keeps running with that BOM. Moving the platform to the BOM
+of the ProxCloud release that now runs is a separate run, an **upgrade**, which the operator starts.
+
+### What this release moves, and what it refuses
+
+The plan in step 4 (`GET …/plan`, `upgrade`) compares the installed BOM with this release's and
+lists every difference. The upgrade is allowed when every difference is one of these:
+
+| Entry | Kind | What the run does |
+|---|---|---|
+| `release` | record only | Nothing is synced. The record and the label `proxcloud.io/bom-release` of the platform's objects name the new release |
+| `tenantCharts.kubernetes`, `tenantCharts.database` | record only | Stage 10 writes the chart on the two providers. New tenant clusters and databases get it; an existing one keeps its chart until its own chart upgrade |
+| seed `capi`, platform cluster `capi-tenant` (chart `proxcloud-platform`) | chart | ArgoCD syncs the chart and runs its clusterctl hook, which finds every provider at its version and changes nothing |
+| platform cluster `platform` (chart `proxcloud-platform`) | chart | ArgoCD syncs provider RBAC, tenant AppProjects and the MetalLB pool |
+| seed `pc-platform` (chart `proxmox-kamaji-cluster`) | chart | ArgoCD syncs the platform cluster's Cluster API objects, after the check that no machine is replaced (below) |
+
+A chart of the product moves only to a version whose BOM entry lists the installed version in
+`upgradeFrom`: the release checked that pair ([ci-release.md](ci-release.md#what-a-release-checks-about-its-bom-pairs)).
+
+Every other difference refuses the whole upgrade, each with its own line in the plan and in the
+`409 upgrade_refused` of a run. All lines begin with "not supported by this release":
+
+| Entry | Why it is refused |
+|---|---|
+| `kubernetes.version` | Every machine of the platform cluster is replaced: the Kubernetes upgrade of a later release |
+| `kubernetes.nodeImage` | A new node image replaces every machine |
+| `seed.image` | Only a rebuilt seed would boot it, and a ready seed is never rebuilt |
+| `seed.k3s` (version or a checksum) | No stage upgrades k3s on a running seed |
+| `images.kubeVip` | It is in the control plane's machine spec: the control plane machine would be replaced |
+| `images.clusterctl`, `capi.seed.*`, `capi.workload.*` | The Cluster API providers are upgraded (`clusterctl upgrade`) only by a later release |
+| A third-party chart: `argocd`, `cert-manager`, `cilium`, `metallb`, `cnpg`, `proxmox-csi`, `kamaji-crds`, `kamaji`, `kamaji-etcd` | Not in this release. Each restarts something tenants use (the CNI, the load balancer speaker, every database's operator, every tenant control plane's datastore), and none of those restarts has been measured |
+| A chart of the product at a version that does not list the installed one in `upgradeFrom`, or the same version with another digest | The release did not check that move |
+| A component added or removed, or changed in its wave, install mode, namespace, node group, chart source or values | A run moves only a chart version |
+| The target's `release` ends in `-dev` | No later build carries a development BOM, so the platform could afterwards be applied by that one build alone |
+
+So a release that changes a machine or bootstrap template (a NIC option on the machines, kube-vip,
+a kubelet argument) reaches new installs only, and an installed platform stays on its BOM until a
+release rolls machines. The release notes of such a release must say so.
+
+### Before you start
+
+- Take a backup of the seed VM (`vzdump`, [Credentials and the seed backup](#8-credentials-and-the-seed-backup))
+  and a dump of the portal database. The seed holds the Cluster API state of every machine of the
+  platform cluster. Restoring both after a failed upgrade has not been tried.
+- Do not change machine sizes, nodes or node groups in the same step: apply such a change before
+  the upgrade or after it. Together with the upgrade it is refused in stage 7 (`unexpected_rollout`).
+- Every tenant cluster and database keeps running. Tenants that are unhealthy before the upgrade
+  do not stop it.
+
+### Starting it
+
+Step 4 shows **Upgrade to release X** with the table of changes when the upgrade is allowed, and
+the reasons when it is not. The button asks for the phrase `upgrade <installation name> to
+<release>`. By API: `POST …/runs {"kind":"apply","targetBom":"<sha256 of this release's BOM>",
+"confirm":"upgrade <name> to <release>"}` ([api.md](api.md)).
+
+### What the run does
+
+The eleven stages of an apply, rendered from the target BOM:
+
+- **Stages 1 to 5** find the images and the seed as they are: both BOMs name the same images.
+- **Stage 6** applies the seed's ArgoCD HelmChart again (the same chart version, the new release
+  label), then the seed's waves. `capi` at its new version passes when ArgoCD reports it Synced and
+  Healthy against the new version with its sync `Succeeded`, and the clusterctl inventory equals
+  the BOM.
+- **Stage 7** makes the rollout check before it lets the cluster chart sync. The names of the
+  machine and bootstrap templates carry a hash of their spec, so a chart that renders another
+  template makes a new one and Cluster API replaces every machine that used the old one; a changed
+  KubeadmControlPlane replaces the control plane machine. The stage therefore applies the
+  Application `pc-platform` with the new chart version and **without** automated sync, waits until
+  ArgoCD has compared the cluster with it, and reads the comparison (`status.resources`): a
+  `ProxmoxMachineTemplate` or `KubeadmConfigTemplate` that is not Synced (and is not one ArgoCD
+  would only prune, an old template), or a `KubeadmControlPlane` that is not Synced, fails the run
+  with `unexpected_rollout`. Nothing was synced then. Otherwise the stage applies the Application
+  as always, automated, waits until the last sync is of the new version, and goes on as in any apply.
+  There is no sync to wait for when the new chart renders every object as it is and the Application
+  is out of sync only for what it would prune (the machine templates of an earlier size: it never
+  prunes them): ArgoCD starts no sync for that, so the stage passes when the comparison is of the
+  new version and nothing but such objects is out of sync. That ArgoCD starts no sync then is read
+  from its source, not seen on a lab.
+- **Stage 8** is unchanged.
+- **Stage 9** notes which tenants are unhealthy before its first wave (once per upgrade, in
+  `status.tenantsDownBefore`; a Retry keeps the note), then applies the waves. After
+  each wave it waits until every component of the wave is Synced and Healthy against the new
+  version, and until every tenant that was healthy at the start is healthy again: the tenant
+  Applications on the platform cluster's ArgoCD must be Healthy and every TenantControlPlane Ready
+  (`tenants_unhealthy` while not).
+- **Stage 10** writes the tenant charts of the target BOM on the two providers.
+- **Stage 11** records every component and sets `status.bom` to the target.
+
+### What the record says meanwhile
+
+| Field | During the upgrade | After the last stage |
+|---|---|---|
+| `status.bom` | The BOM the platform left: "last fully applied" | The target |
+| `status.targetBom` | The target, from the start of the first run | Absent |
+| `status.tenantsDownBefore` | From the first time a run reaches stage 9: the tenants that were not healthy then | Absent |
+| `status.components[]` | Each component at the version it runs: it moves when its wave (stage 7 for `pc-platform`) has passed | Every component at the target's version |
+| The run's `bom`, `fromBom` | The target, and the BOM the platform left | The same |
+
+The page shows it in the run card ("This run upgrades the platform from release A to release B")
+and, after a run that did not succeed, in step 4 ("The upgrade to release B has not finished").
+
+### Failure, Retry, Cancel and Remove
+
+- A failed or cancelled upgrade run keeps `status.targetBom`. Every later apply, **Retry** and
+  **Apply this release** alike, continues to the target without a new confirmation. No apply goes
+  back to the BOM the platform left: an apply that names it as `targetBom` is `409 upgrade_refused`.
+  Before this release a Retry would have run with the installed BOM again and written the old
+  chart versions over the components already moved.
+- Nothing is rolled back, by the run or by ArgoCD. The components whose wave passed stay at the new
+  version, the others at the old one, and `status.components` says which.
+- A tenant that a wave broke holds the upgrade in every run, a Retry included, until it is healthy
+  again. A tenant that breaks for a reason of its own during the upgrade holds it in the same way:
+  the run cannot tell the two apart. Repair it, or delete it; nothing in this release lets an
+  upgrade pass an unhealthy tenant that was healthy at its start.
+- A Cancel while stage 7 waits for ArgoCD's comparison leaves the Application `pc-platform` at the
+  new chart version without automated sync and self-heal, as `unexpected_rollout` does. The next
+  apply makes the check again and switches them back on.
+- **Remove** works as always, and forgets the upgrade with the rest of the status.
+
+**When the upgrade cannot finish.** `unexpected_rollout` without a change of the settings means the
+release shipped a cluster chart that replaces machines, which its CI check should have refused. The
+platform cluster runs as before, with the seed's `capi` chart already at the new version. Install
+the ProxCloud release that corrects the chart and start the upgrade to its BOM: an upgrade to this
+release's BOM is accepted over an unfinished target when both the installed BOM and the unfinished
+target may move to it (each component stands at one of the two). Step 4 then shows two boxes: "The
+upgrade to release X has not finished", and **Upgrade to release Z instead** with its own typed
+phrase (the plan's `replacement`; by API the same `POST …/runs` with `targetBom` and `confirm` as
+for any upgrade). **Apply this release** and **Retry** still continue to release X and fail at the
+same check; only the second box leaves it. Until the corrected release is installed the platform
+cannot be applied.
+
+The check reads what ArgoCD reports and has not run against a real ArgoCD. If on a site it fails
+for a cluster chart that provably changes no template (compare `kubectl -n pc-platform get
+proxmoxmachinetemplates,kubeadmconfigtemplates` with `helm template` of the new chart), the API's
+environment variable `PROXCLOUD_PLATFORM_SKIP_ROLLOUT_GATE=true` (`PLATFORM_SKIP_ROLLOUT_GATE` in
+the Compose `.env`) turns it off. With it off a chart that does change a template replaces every
+machine of the platform cluster at once, control plane and all node groups together.
+
+### What the upgrade still owes a lab
+
+Lab only; none of it has run. Each drill build must carry the BOM of the build before it
+([ci-release.md](ci-release.md#upgrade-drill-builds)).
+
+| Test | What it would show |
+|---|---|
+| U1 Record-only move: install from a release (v0.8.0, v0.8.1 or v0.8.2) with one tenant cluster and one database under a write loop; upgrade to a drill build whose BOM differs in `release` alone | Every stage done in seconds, no Application revision changed, `status.bom` moved; whether k3s's helm controller runs a Job for the seed ArgoCD when only the HelmChart's label changes |
+| U2 Own-chart move: a drill build that bumps `proxcloud-platform` (and, when one exists that changes no template, `proxmox-kamaji-cluster`), with a probe of the tenant API and the database address once a second | The gaps, if any; that the clusterctl hook changes nothing; that `status.components` moves per wave |
+| U3 The rollout check against the real ArgoCD: a drill build whose cluster chart changes a machine template value | That ArgoCD lists the new template as not Synced before any sync, that the run fails `unexpected_rollout` with no machine replaced, and that an unchanged chart leaves the KubeadmControlPlane Synced. On a platform that once changed a machine size (old templates left, the Application OutOfSync for them alone), a drill build whose cluster chart version is new and renders identically: that ArgoCD starts no sync and stage 7 passes all the same. Also that the result of the last sync carries its source (`status.operationState.syncResult.source`), which stage 7 waits on when the Application stays OutOfSync |
+| U4 Failure and Retry: a drill build with a wrong chart digest for `platform`, so workload wave 3 fails; then the corrected build | No Application goes back to the old revision; with the corrected build step 4 shows **Upgrade to release Z instead**, and the later build's BOM is accepted over the unfinished target |
+| U5 The tenant wait: stop a tenant control plane's pod during stage 9 | The run waits with `tenants_unhealthy` and goes on when it is Ready. Then let the wait run out (the run fails) and Retry with the tenant still down: the new run waits again |
+| U6 Restore: after U4's failure, restore the seed's `vzdump` and the portal database dump | Whether that returns the platform to the BOM it left |
+
 ## Known issue: no PostgreSQL database on a node image built before 2026-11-16
 
 The node image an earlier BOM named (`ubuntu-2604-k8s-1.35.10`, built 2026-11-14) runs Ubuntu 26.04 with kernel
@@ -1541,7 +1741,7 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 
 ## Not implemented yet
 
-- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1` (`main` carries a `-dev` one between releases, now `0.9.0-dev`). `--managed-services` needs v0.8.0 or later: no
+- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2` (`main` carries a `-dev` one between releases, now `0.9.0-dev`). `--managed-services` needs v0.8.0 or later: no
   earlier released image reads `PROXCLOUD_PLATFORM_ENABLED`, and the images of v0.8.0 exist once
   its tag's workflows have succeeded. For a test ahead of a release,
   `proxcloud-up.sh` takes a build of main as its version (`--version dev-<sha>`, `upgrade dev-<sha>`;
@@ -1553,24 +1753,30 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
   and `kamaji-crds` as version `26.11.2-edge`, packaged from the upstream tag of that name. CI
   compares the digests; ArgoCD does not, so a version replaced in the mirror between two checks
   would be installed.
-- **No upgrade between BOMs.** An installed platform stays on the BOM that installed it. A release
+- **An upgrade between BOMs moves the product's own charts only**
+  ([Upgrade between BOMs](#upgrade-between-boms)). Until an operator starts one, an installed
+  platform stays on the BOM that installed it. A release
   carries its own BOM and, from the release after v0.8.0 on, the BOM of each earlier release back
   to `0.8.0` (`deploy/platform/previous/`, byte for byte the file of that release's tag). After a
   ProxCloud upgrade the platform a release installed keeps working: the reads and the Check, an
   apply (**Apply this release**) and Remove. The apply runs with the installed BOM and takes every
   pin from it, the images, k3s, the charts and their digests, the Cluster API providers and the
   charts the two providers name: it repairs, applies changed settings and renews the seed ArgoCD's
-  token, and it moves no component to the version of the newer release. Step 4 says so ("The
-  platform stays on release 0.8.0"), lists the contents of the installed release, and the plan
-  names the release the build would install as `newer`. Moving an installed platform to a newer
-  BOM is a later release. Provider (Cluster API) upgrades are refused as `capi_init_failed`.
+  token, and it moves no component to the version of the newer release. Step 4 lists the contents
+  of the installed release and the plan of the move to the newer one, allowed or refused.
+  A BOM that changes the Kubernetes version, an image, k3s, a Cluster API provider or a third-party
+  chart is refused: those moves are a later release. Provider (Cluster API) upgrades are refused as
+  `capi_init_failed` where a run meets one.
   - **Seen on a lab once** (2026-11-18): a platform installed by the released v0.8.0, then the
     portal upgraded to the build `dev-751a190` of main. The plan had no change and named that
     build's BOM as `newer`, the Check passed, **Apply this release** succeeded in 6.6 seconds,
     `status.bom` stayed the 0.8.0 one and no Application of the seed was synced again. That
     build's own BOM pinned the same versions as 0.8.0, so the lab does not show an apply that
     keeps older pins while the build carries other ones, and the build was not the release
-    v0.8.1 itself. What tests show: the file under `previous/` has the sha256 that
+    v0.8.1 itself. The same platform was read the same day on the build `dev-03bc9f3` of main,
+    which carries the BOMs of 0.8.0 and 0.8.1 as previous ones: the plan had no change, named
+    that build's own BOM as `newer` (not 0.8.1), `status.bom` stayed the 0.8.0 one and both
+    previous BOMs were answered by their hash; no apply was run there. What tests show: the file under `previous/` has the sha256 that
     a v0.8.0 platform records (`8eb87498…6600c6`), what the renderers of this build make of the
     0.8.0 BOM is byte for byte what v0.8.0 rendered from it (the goldens of the tag), and a run on
     fakes takes its images, Applications and provider bodies from the 0.8.0 BOM.
@@ -1609,9 +1815,9 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
   nothing failed on it with one control plane machine) and a kube-vip that gives up the API address
   when a lease renewal takes over 10 seconds. Chart 0.1.12 gives the kubelet the machine's own
   address and kube-vip a renew deadline of 40 seconds (several tries of at most 10 seconds each,
-  see [What no check reads](#what-no-check-reads)). No release upgrades between BOMs: an apply on
-  the earlier platform is refused (`bom_unsupported`), and it gets the fixes by Remove and a new
-  install. The same holds for a platform built from the BOM that named 0.1.12 and
+  see [What no check reads](#what-no-check-reads)). Those BOMs were of builds of main, which no
+  release carries: an apply on the earlier platform is refused (`bom_unsupported`), and it gets the
+  fixes by Remove and a new install. The same holds for a platform built from the BOM that named 0.1.12 and
   `proxcloud-platform` 0.1.1: its Kubernetes provider keeps `chartVersion` 0.1.12 (no placement by
   free capacity) until the operator sets it to 0.1.13 on the provider's page, and its provider
   service account cannot read Machines (no provisioning reason) until a Remove and a new install:
@@ -1639,7 +1845,8 @@ platform and installed again in one run without a Retry, on cluster chart 0.1.13
 0.1.2; the Remove listed every deleted machine with its VMID. Not run on a lab: a cluster's `401`
 and `403` tried again for five looks. The lab checks L0 to L11 of the design are not recorded as passed. Until they
 are recorded here, treat every behaviour above as what the code and its tests say, not as
-observed, except the figures this guide marks as seen on a lab:
+observed, except the figures this guide marks as seen on a lab. The upgrade between BOMs has its
+own list ([What the upgrade still owes a lab](#what-the-upgrade-still-owes-a-lab)); none of it has run:
 
 | Check | What it would show |
 |---|---|
@@ -1656,11 +1863,21 @@ observed, except the figures this guide marks as seen on a lab:
 | L10 | Seed reboot, the backup job and a restore, Remove, and Remove with the seed gone. One clean reboot was run and **failed**: the seed's root filesystem came up in ext4 `emergency_ro` and its API never answered again. The cause was the image's stale ext4 superblock field, and the documented repair brought the seed back on 2026-11-17 ([When the seed does not answer](#when-the-seed-does-not-answer)); on a seed built from the fixed image two clean reboots then passed (same address and MAC, the pinned CA still valid, all components Synced and Healthy). One `vzdump` by hand with `--mode snapshot` passed, and one with `--compress zstd` (2.39 GiB in 1 minute 45 seconds); the scheduled job was not created and `--prune-backups` was not run. The restore was first refused by Proxmox over the protected seed; with the sequence of [step 5](#when-the-seed-does-not-answer) it was run once on 2026-11-17 and passed: a healthy seed restored over itself from a three-minute-old archive, Cluster API wrote nothing, the tenant cluster was not touched. Not run: an archive older than a credential rotation or a machine change, `qm stop` on a dead guest, `--unique`, a boot store other than ZFS, an archive of the scheduled job. Remove of a ready platform and Remove from a failed stage 7 passed |
 | L11 | Seed credential rotation and the expiry of the break-glass kubeconfig. The rotation and that a break-glass kubeconfig outlives it were measured; the `401` after the hour was not |
 
-Not run on a lab either, anything of [After the install](#after-the-install): the platform
-kubeconfig against a real cluster (that the token is granted for one hour, that the two roles admit
-exactly what the table says, that a `401` follows the hour), the two ArgoCD commands, and the name
-and port of the `argocd-server` Service and the Secret `argocd-initial-admin-secret` of chart
-argo-cd 10.14.0.
+[After the install](#after-the-install) was run on a lab once (2026-11-18, the build `dev-03bc9f3`
+of main, `kubectl` 1.35.10), at the API and with `kubectl`: the platform kubeconfig against the
+real cluster (a token of `kube-system/proxcloud-break-glass` whose claims give it one hour, no
+client certificate), the audit row `BREAK_GLASS` with `operation: platform-kubeconfig` and no
+token in it, `403` for a tenant and `401` without a token, what the token may do (the reads of the
+table; refused on spot checks: Secrets in any namespace, `argocd-secret`, `pods/exec`, a delete, a
+patch of an Application, Cluster API's bootstrap group, a port-forward outside `argocd`), the two
+ArgoCD commands on the platform cluster and on the seed, and the name and ports of the
+`argocd-server` Service and the Secret `argocd-initial-admin-secret` of chart argo-cd 10.14.0.
+On that build the Role allowed only `create` on `pods/portforward`: `kubectl` was refused on its
+first request (a WebSocket `GET`) and fell back to SPDY without a word. The Role has `get` and
+`create` since; that a port-forward now opens on its first request is not run on a lab. Also not
+run: the `401` after the hour, the card in a browser, a user with the support role, the `409`,
+`502` and `503` answers of the route, the row "Offers no Kubernetes version yet", and a login to
+either ArgoCD.
 
 Also not run: `onboot` set by stage 7 and a reboot of a node with it
 ([After a Proxmox node reboots](#after-a-proxmox-node-reboots)), the `machines` row against a real
@@ -1670,7 +1887,13 @@ secret rotation, an install on a Proxmox cluster with a single node, and `--mana
 Compose host against a published release.
 
 The row `tenant-path` and its guide ([The path from tenants to the platform](#the-path-from-tenants-to-the-platform))
-are not verified on a lab: the row's tests use a fake Proxmox API, the mechanism is stated from
+were run on a lab in part (2026-11-18, the build `dev-03bc9f3` of main): the row read `ok` for a
+VLAN default zone and warned for a `simple` default zone, with the texts of the code, and a warning
+did not fail the Check. That is a read of the configuration; no path was measured (on that lab the
+platform gateway is on a router, so the warning was the layout's, not a seen drop). Not run on a
+lab: the two other `ok` cases (the node routes the platform network; the platform's machines are
+on other nodes), an EVPN zone, the warning for a Proxmox that could not be read, and the row
+against a path that is in fact closed. The mechanism is stated from
 source and fits what the production site showed, the node leg was run by hand on that one site at
 runtime only, and the layout with a platform network routed by the node was run nowhere.
 

@@ -82,11 +82,15 @@ type Runner struct {
 	Disable  func(ctx context.Context, installationID string) error
 	// SDNLock takes the site's SDN apply lock (the one a tenant network change takes) for the routed platform network;
 	// acquired=false when another change holds it. Nil in tests: no lock.
-	SDNLock  func(ctx context.Context) (release func(), acquired bool, err error)
-	Log      *slog.Logger
-	Poll     time.Duration
-	Lease    time.Duration // one minute when zero, renewed every third
-	SeedPort string        // the seed API's port, 6443 when empty
+	SDNLock func(ctx context.Context) (release func(), acquired bool, err error)
+	Log     *slog.Logger
+	// SkipRolloutGate turns off the check an upgrade run makes before it lets the cluster chart of the target BOM sync
+	// (rolloutGate; PROXCLOUD_PLATFORM_SKIP_ROLLOUT_GATE). The check reads ArgoCD's comparison and has not run on a
+	// lab: the switch is for a site where ArgoCD reports it otherwise than the check expects.
+	SkipRolloutGate bool
+	Poll            time.Duration
+	Lease           time.Duration // one minute when zero, renewed every third
+	SeedPort        string        // the seed API's port, 6443 when empty
 }
 
 // Run polls until ctx ends.
@@ -235,6 +239,7 @@ type acq struct {
 	es           *externalservice.ExternalService
 	hidden       []string // secrets this acquisition read from a cluster: no message may carry them
 	bom          *BOM
+	from         *BOM // on an upgrade run, the BOM the platform is moved from
 	portal, capi *pve.Client
 	si           int // the stage being run
 }
@@ -325,6 +330,14 @@ func (x *acq) execute(ctx context.Context) end {
 				run.BOM.Release+": Retry starts a new run.")
 		}
 		x.bom = b.BOM
+		if run.FromBOM != nil {
+			f, ok := Lookup(run.FromBOM.SHA256)
+			if !ok {
+				return x.finish(ctx, RunFailed, CodePortalChanged, "ProxCloud was upgraded during the run and no longer embeds the BOM "+
+					run.FromBOM.Release+" the platform is moved from: Retry starts a new run.")
+			}
+			x.from = f.BOM
+		}
 	}
 	es, err := x.r.Provider(ctx, in.ServiceID)
 	if err != nil {

@@ -8,6 +8,7 @@ import { toast } from "sonner"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -17,7 +18,7 @@ import { cn } from "@/lib/utils"
 import { CheckRows, CopyBlock, ErrorNote, LINK, StepCard, errMsg, fetchText, useClusterInfo } from "@/pages/setup/common"
 import {
   CAPI_TOKEN, CSI_TOKEN, GROUPS, PLATFORM_KEY, GROUP_USE, TOKEN_SECRET, checkAction, emptyForm, errCode, errProblems, formToSpec, isConflict, labProfile, specToForm, validate,
-  type BOM, type Check, type Form, type Installation, type MachineForm, type Plan, type Problem, type TenantProbe,
+  type BOM, type Check, type Form, type Installation, type MachineForm, type Plan, type Problem, type TenantProbe, type Upgrade,
 } from "./model"
 
 const base = (id: string) => `/admin/platform/installations/${id}`
@@ -499,8 +500,100 @@ export function CheckStep({ installation, canManage, dirty }: { installation: In
 
 const short = (digest?: string) => (digest ? digest.replace(/^sha256:/, "").slice(0, 12) : "–")
 
-export function ReviewStep({ installation, canManage, dirty, onInstall, installing, error }: {
-  installation: Installation; canManage: boolean; dirty: boolean; onInstall: () => void; installing: boolean; error: unknown
+// The move of an installed platform to this ProxCloud's release, as the plan gives it: allowed with every change and
+// what it does, refused with each reason, or started and not finished. Starting it asks for the typed confirmation.
+// With `replaces` it is the move offered in place of an unfinished upgrade toward that release.
+function UpgradePlan({ installation, upgrade, replaces, canManage, dirty, pending, onUpgrade }: {
+  installation: Installation; upgrade: Upgrade; replaces?: string; canManage: boolean; dirty: boolean; pending: boolean; onUpgrade: (targetBom: string, confirm: string) => void
+}) {
+  const id = replaces ? "pf-upgrade-instead" : "pf-upgrade"
+  const [asking, setAsking] = useState(false)
+  const [typed, setTyped] = useState("")
+  const { from, to } = upgrade
+  const offered = upgrade.allowed && !upgrade.inProgress
+  return (
+    <section aria-labelledby={id} className="grid gap-2 rounded-md border p-3 text-sm">
+      <h3 id={id} className="font-semibold">
+        {upgrade.inProgress ? `The upgrade to release ${to.release} has not finished` : offered ? `Upgrade to release ${to.release}${replaces ? " instead" : ""}` : replaces ? `Release ${to.release} cannot take the place of the unfinished upgrade` : `The platform stays on release ${from.release}`}
+      </h3>
+      {upgrade.inProgress ? (
+        <p>
+          A run toward release <span className="font-mono">{to.release}</span> started and has not succeeded yet. Apply this release continues to it. Nothing goes back
+          to release <span className="font-mono">{from.release}</span>, which the record names until a run has succeeded.
+        </p>
+      ) : replaces ? (
+        <>
+          <p>
+            This ProxCloud carries the platform release <span className="font-mono">{to.release}</span>{offered ? " and can move the platform to it in place of" : ". It does not move the platform to it in place of"} the
+            unfinished upgrade to release <span className="font-mono">{replaces}</span>{offered ? ": use it when that upgrade cannot finish." : "."} Apply this release and Retry continue to release <span className="font-mono">{replaces}</span>.
+          </p>
+          {offered ? null : <ul aria-label="Why the upgrade is refused" className="list-disc pl-5">{upgrade.blocking.map((b) => <li key={b}>{b}</li>)}</ul>}
+        </>
+      ) : offered ? (
+        <p>
+          This ProxCloud carries the platform release <span className="font-mono">{to.release}</span> and can move the platform to it. Tenant clusters and databases keep running.
+          Apply this release does not upgrade: it runs with the installed release <span className="font-mono">{from.release}</span>.
+        </p>
+      ) : (
+        <>
+          <p>
+            This ProxCloud carries the platform release <span className="font-mono">{to.release}</span> and does not move this platform to it. Apply this release runs with the
+            installed release <span className="font-mono">{from.release}</span>, whose contents are listed above: it repairs what is missing, applies changed sizes and counts, and renews the credentials.
+          </p>
+          <ul aria-label="Why the upgrade is refused" className="list-disc pl-5">{upgrade.blocking.map((b) => <li key={b}>{b}</li>)}</ul>
+        </>
+      )}
+      {upgrade.changes.length ? (
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs">
+            <caption className="sr-only">What differs between release {from.release} and release {to.release}</caption>
+            <thead><tr className="border-b"><th scope="col" className="py-1 pr-3">Entry</th><th scope="col" className="pr-3">From</th><th scope="col" className="pr-3">To</th><th scope="col" className="pr-3">Kind</th><th scope="col">What the run does</th></tr></thead>
+            <tbody>
+              {upgrade.changes.map((ch) => (
+                <tr key={(ch.cluster ?? "") + ch.name} className="border-b align-top last:border-0">
+                  <td className="py-1 pr-3 font-mono">{ch.cluster ? `${ch.cluster === "seed" ? "seed" : "platform cluster"}: ` : ""}{ch.name}</td>
+                  <td className="pr-3 font-mono break-all">{ch.from || "–"}</td>
+                  <td className="pr-3 font-mono break-all">{ch.to || "–"}</td>
+                  <td className="pr-3">{ch.class}{ch.stage ? ` (stage ${ch.stage}${ch.wave !== undefined ? `, wave ${ch.wave}` : ""})` : ""}</td>
+                  <td>{ch.blocking ?? ch.impact}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+      {offered ? (
+        <div className="flex flex-wrap items-center gap-3">
+          <Button variant="outline" disabled={!canManage || pending || dirty} onClick={() => { setTyped(""); setAsking(true) }}>Upgrade to release {to.release}</Button>
+          <Link to="/docs/platform-admin/managed-services" className={LINK}>What an upgrade does</Link>
+        </div>
+      ) : null}
+      <Dialog open={asking} onOpenChange={(o) => !o && setAsking(false)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Upgrade “{installation.name}” to release {to.release}</DialogTitle>
+            <DialogDescription>
+              The run applies the changes of the plan in the order of its stages and waits after each step until the platform's components and the tenants that
+              were healthy before are healthy again. If it fails, Retry continues to release {to.release}: the platform does not go back to release {from.release}.
+              Take a backup of the seed VM and a dump of the portal database first; the guide's section “Credentials and the seed backup” has the commands.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-1.5">
+            <Label htmlFor={id + "-confirm"}>Type <span className="font-mono">{upgrade.confirm}</span> to confirm</Label>
+            <Input id={id + "-confirm"} className="font-mono" autoComplete="off" value={typed} onChange={(e) => setTyped(e.target.value)} />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAsking(false)}>Not now</Button>
+            <Button disabled={typed !== upgrade.confirm || pending} onClick={() => { setAsking(false); onUpgrade(to.sha256, typed) }}>{pending ? "Starting…" : "Upgrade"}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </section>
+  )
+}
+
+export function ReviewStep({ installation, canManage, dirty, onInstall, onUpgrade, installing, error }: {
+  installation: Installation; canManage: boolean; dirty: boolean; onInstall: () => void; onUpgrade: (targetBom: string, confirm: string) => void; installing: boolean; error: unknown
 }) {
   // Keyed on the last run too: a run changes what is installed, and the API leaves `rev` alone then.
   const plan = useQuery({ queryKey: [...PLATFORM_KEY, "plan", installation.id, installation.rev, installation.lastRunId], queryFn: () => apiFetch<Plan>(`${base(installation.id)}/plan`), retry: false })
@@ -589,14 +682,11 @@ export function ReviewStep({ installation, canManage, dirty, onInstall, installi
           ) : <p className="text-muted-foreground">No component changes version.</p>}
         </div>
       ) : null}
-      {plan.data?.newer ? (
-        <Alert>
-          <AlertTitle>The platform stays on release {plan.data.target.release}</AlertTitle>
-          <AlertDescription>
-            This ProxCloud carries the newer platform release <span className="font-mono">{plan.data.newer.release}</span>, and moving an installed platform to it is not available yet.
-            Apply this release runs with the installed release <span className="font-mono">{plan.data.target.release}</span>, whose contents are listed above: it repairs what is missing, applies changed sizes and counts, and renews the credentials.
-          </AlertDescription>
-        </Alert>
+      {plan.data?.upgrade ? (
+        <UpgradePlan installation={installation} upgrade={plan.data.upgrade} canManage={canManage} dirty={dirty} pending={installing} onUpgrade={onUpgrade} />
+      ) : null}
+      {plan.data?.upgrade && plan.data.replacement ? (
+        <UpgradePlan installation={installation} upgrade={plan.data.replacement} replaces={plan.data.upgrade.to.release} canManage={canManage} dirty={dirty} pending={installing} onUpgrade={onUpgrade} />
       ) : null}
       {blocking.length ? (
         <Alert variant="destructive">

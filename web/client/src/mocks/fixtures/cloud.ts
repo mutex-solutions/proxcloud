@@ -194,7 +194,8 @@ export function seedCloudResources(): CloudResource[] {
     k8s("pc-c-stuck", "staging", {
       status: "PROGRESSING",
       node_groups: [
-        group("workers", 2, 1, { code: "not_joined", since: minutesAgo(42), machines: 1, attention: true }),
+        // The machine has no row among the project's servers: the production case (no sync had listed it).
+        group("workers", 2, 1, { code: "not_joined", since: minutesAgo(42), machines: 1, attention: true, machineNames: ["pc-c-stuck-workers-pve2-fghij-stuck"] }),
         group("batch", 3, 0, { code: "no_capacity", since: minutesAgo(8), machines: 2, attention: true }),
         group("build", 1, 0, { code: "creating_vm", since: minutesAgo(3), machines: 1, attention: false }),
         group("edge", 1, 0, { code: "not_joined", since: minutesAgo(4), machines: 1, attention: false }),
@@ -254,6 +255,16 @@ export function seedCloudResources(): CloudResource[] {
     res("ROUTER", "edge-router", {
       router: { id: "rtr-1", name: "edge-router", status: "ACTIVE", external_gateway_info: { network_id: "net-public-ext" } },
       routerName: "edge-router",
+    }),
+
+    // The workers of cluster "prod" (pc-c-healthy) are behind the Proxmox firewall: their group is named after it.
+    res("SECURITY_GROUP", "k8s-pc-c-healthy", {
+      securityGroup: {
+        id: "sg-k8s", name: "k8s-pc-c-healthy", description: "",
+        security_group_rules: [
+          { id: "sg-k8s-0-aaaa", direction: "ingress", protocol: "udp", port_range: "8472", remote_ip_prefix: "10.100.0.232/29", description: "workers: Cilium VXLAN (pod network)" },
+        ],
+      },
     }),
 
     res("SECURITY_GROUP", "web-ingress", {

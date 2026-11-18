@@ -1,0 +1,69 @@
+{
+  "from": {
+    "release": "0.8.1",
+    "sha256": "a635bd88d3c39baf5519344088a6fed8dad8cb2b3c2d324655753e8ec55719b3"
+  },
+  "to": {
+    "release": "0.9.0",
+    "sha256": ""
+  },
+  "allowed": true,
+  "confirm": "upgrade lab to 0.9.0",
+  "changes": [
+    {
+      "name": "release",
+      "from": "0.8.1",
+      "to": "0.9.0",
+      "class": "record only",
+      "impact": "Nothing is synced for it: the platform's record and the labels of its objects name the new release."
+    },
+    {
+      "name": "tenantCharts.kubernetes",
+      "from": "ghcr.io/mutex-solutions/charts/proxmox-kamaji-cluster:0.1.13@sha256:ee05c59f8c91974511334df92b1808fcaf657a7e8a3a5f4a629e1b32853b46b7",
+      "to": "ghcr.io/mutex-solutions/charts/proxmox-kamaji-cluster:0.1.14@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "class": "record only",
+      "impact": "The run writes the chart on the provider: new tenants get it. An existing tenant keeps its chart until its own chart upgrade."
+    },
+    {
+      "cluster": "seed",
+      "name": "capi",
+      "from": "0.1.2",
+      "to": "0.1.3",
+      "class": "chart",
+      "stage": "seed-platform",
+      "wave": 2,
+      "impact": "ArgoCD syncs the chart and runs its clusterctl hook again, which finds every provider at its version and changes nothing. No pod of a tenant restarts."
+    },
+    {
+      "cluster": "seed",
+      "name": "pc-platform",
+      "from": "0.1.13",
+      "to": "0.1.14",
+      "class": "chart",
+      "stage": "cluster",
+      "wave": 3,
+      "impact": "ArgoCD syncs the platform cluster's Cluster API objects. Before the sync the run checks that no machine or bootstrap template is new and that the control plane is unchanged, and fails with unexpected_rollout otherwise: no machine is replaced."
+    },
+    {
+      "cluster": "workload",
+      "name": "capi-tenant",
+      "from": "0.1.2",
+      "to": "0.1.3",
+      "class": "chart",
+      "stage": "workload-platform",
+      "wave": 2,
+      "impact": "ArgoCD syncs the chart and runs its clusterctl hook again, which finds every provider at its version and changes nothing. No pod of a tenant restarts."
+    },
+    {
+      "cluster": "workload",
+      "name": "platform",
+      "from": "0.1.2",
+      "to": "0.1.3",
+      "class": "chart",
+      "stage": "workload-platform",
+      "wave": 3,
+      "impact": "ArgoCD syncs the chart's objects. No pod of a tenant restarts."
+    }
+  ],
+  "blocking": []
+}

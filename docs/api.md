@@ -259,8 +259,12 @@ management-cluster RBAC predates them.
 {"cluster": {"status": "PROGRESSING",
   "attention": {"code": "control_plane_stalled", "since": "2026-11-17T09:12:00Z"},
   "node_groups": [{"name": "workers", "count": 2, "ready_replicas": 1, "phase": "ScalingUp",
-    "progress": {"code": "not_joined", "since": "2026-11-17T09:20:00Z", "machines": 1, "attention": true}}]}}
+    "progress": {"code": "not_joined", "since": "2026-11-17T09:20:00Z", "machines": 1, "attention": true,
+      "machineNames": ["pc-c-1-workers-pve2-x7k2p-9d4tq"]}}]}}
 ```
+
+`progress.machineNames` lists at most five machines of the group that need attention, by the name `REPLACE_MACHINE`
+takes; it is absent when none does or none is made yet.
 
 `progress.code` is one of `provider_access_refused`, `no_capacity`, `vm_create_failed`, `vm_create_retrying`,
 `waiting_control_plane`, `creating_vm`, `starting_vm`, `not_joined`, `node_not_ready`, `provisioning`;
@@ -285,6 +289,20 @@ Kubernetes provider has a default root disk size (`config.cluster.rootVolumeGiB`
 larger of that default and the flavor's disk. A group that already runs keeps the root disk size it has when the
 field is left out. Without a provider default a group without it answers `400`, at create too.
 
+`/api/v1/admin/service/{id}/k8s-clusters/{clusterId}/worker-firewall` is the Proxmox VM firewall of one cluster's
+workers ([managed-k8s.md](managed-k8s.md#worker-firewall); not verified on a lab). `GET` (`admin:service:read`) reports
+and writes nothing; `POST` protects the workers and answers after it has watched the nodes, up to a minute, or `409`
+with the reason when it refused or took the firewall off again; `DELETE` removes the firewall and the cluster's
+security group, or answers `409` and changes nothing when a worker is on a node that is down or another server uses
+the group (both need the provider manage permission). A `POST` cut short by a proxy timeout goes on to its end: read
+the state with `GET`. `verified` is true only in the answer of the `POST` that put the firewall on and watched the
+nodes; it is false on every `GET` and on a `POST` to a cluster that was already protected.
+
+```json
+{"clusterId": "pc-c-0a1b2c3d", "protected": true, "group": "g1a2b3c4", "groupName": "k8s-pc-c-0a1b2c3d", "enforced": true,
+ "verified": true, "workers": [{"vmid": 141, "name": "pc-c-0a1b2c3d-workers-pve1-abcde-1", "node": "pve1", "status": "running", "secured": true}]}
+```
+
 `GET /api/v1/admin/service/{id}/k8s-clusters/{clusterId}/machines` (`admin:service:read`) is the operator's detail,
 read live from the management cluster:
 
@@ -292,14 +310,40 @@ read live from the management cluster:
 {"proxmoxCluster": {"conditions": [{"type": "ProxmoxAvailable", "status": "True"}]},
  "machines": [{"name": "pc-c-1-workers-pve2-x7k2p-9d4tq", "nodeGroup": "workers", "phase": "Provisioned",
    "lastUpdated": "2026-11-17T09:20:00Z", "nodeRef": "", "vmid": 142, "proxmoxNode": "pve2",
-   "addresses": ["10.20.0.12"], "code": "not_joined", "attention": true, "failureMessage": "",
+   "addresses": ["10.20.0.12"], "code": "not_joined", "attention": true, "ready": false, "failureMessage": "",
    "conditions": [{"type": "NodeHealthy", "status": "Unknown", "reason": "NodeDoesNotExist",
-     "message": "Waiting for a Node with spec.providerID proxmox://142 to exist", "lastTransitionTime": "2026-11-17T09:20:00Z"}]}]}
+     "message": "Waiting for a Node with spec.providerID proxmox://142 to exist", "lastTransitionTime": "2026-11-17T09:20:00Z"}],
+   "joinError": {"errors": ["('scripts_user', RuntimeError('Runparts: 1 failures (runcmd) in 1 attempted'))"],
+     "logTail": "+ kubeadm join 192.168.140.101:6443 --token [MASKED] ...\ndial tcp 192.168.140.101:6443: i/o timeout"}}],
+ "healthChecks": [{"nodeGroup": "workers", "nodeStartupTimeoutSeconds": 1800, "maxUnhealthy": 1,
+   "expectedMachines": 2, "currentHealthy": 1, "remediationsAllowed": 0}]}
 ```
 
 `conditions` joins the Machine's and its ProxmoxMachine's. Messages have credentials cut out and are clipped to 400
 characters. `404` for a cluster that is not this provider's; `502` with "re-apply deploy/mgmt-cluster/rbac.yaml" when
 the service account may not read Machines.
+
+`joinError` is present only for a machine with `code` `not_joined` and `attention` true, on at most five machines
+of one answer: what cloud-init in the worker says, read at this request through the Proxmox guest agent
+(`errors` of `/run/cloud-init/result.json`, `logTail` the last 40 lines of `/var/log/cloud-init-output.log`) and
+never stored. kubeadm bootstrap tokens, CA hashes, certificate keys and other credentials are replaced by
+`[MASKED]` or `[REDACTED]`. The read permission is enough for it: a caller with `admin:service:read` makes the portal
+read these two files in the worker. `readError` instead says in general words why nothing could be read. `healthChecks` are
+the node groups' MachineHealthChecks (cluster chart 0.1.14 and later), `[]` when there is none or the service
+account may not read them. No tenant route carries either field.
+
+`POST /api/v1/admin/service/{id}/k8s-clusters/{clusterId}/machines/{machine}/replace` (`admin:service:manage`),
+body none or `{"confirm": true}`: deletes that worker Machine, so that Cluster API makes a new one on the same
+Proxmox node; the node group's count, placement and the project's quota are not touched. `200`
+`{"result": "REPLACING"}`. `409` with `details.reason` `last_ready_node` when the machine is the only Ready node of
+its node group and `confirm` is not true; `409` when it is already being removed; `404` for a machine that is not a
+worker of this cluster; `502` when the service account may not delete Machines, with what to apply
+(`deploy/mgmt-cluster/rbac.yaml`, or platform chart 0.1.3). A tenant has the same as the
+cluster action `REPLACE_MACHINE` with `{"machine": "<name>", "confirm": false}` on
+`POST /api/v1/project/{pid}/cloud/{id}/action`, with the same answers (`{"result": "REPLACING"}`; the `502` there says to contact the operator); the machine's
+name is the name of its server in the project, and `node_groups[].progress.machineNames` has the names of the
+machines that need attention. [managed-k8s.md](managed-k8s.md#a-worker-that-does-not-join) has the
+limits.
 
 Publishing a node image on every node: `GET /api/v1/admin/template-updates/publish-all?serviceId=…&digest=sha256:…`
 (`admin:service:read`) reports one artifact's state on every node of a Proxmox provider, and
@@ -601,16 +645,42 @@ are several, `errors.details.problems`.
   could not be done: nothing is known). `targets[]` are `{address, port, expect: open|closed, result:
   open|refused|none}`; `left[]` names what the cleanup could not remove, with the command. One probe tests one node
   ([managed-services.md](managed-services.md#the-path-from-tenants-to-the-platform)). Not verified on a lab.
-- `GET /installations/{id}/plan`: what an apply does (`installed`, `target`,
-  `newer`, `changes`, `blocking`). `target` is the BOM the apply runs with: this
-  release's for a new installation, the installed one for an installed platform,
-  which stays on its BOM, so `changes` is empty. `newer` is this release's own
-  BOM (`release`, `sha256`) when the platform stays on the BOM of an earlier
-  release; absent otherwise. No release moves an installed platform to a newer
-  BOM yet. An installed BOM this release does not carry (its own and those of
-  earlier releases from 0.8.0 on; not one of a build of `main`) blocks with
-  `bom_unsupported`. A version change not listed in `upgradeFrom` and the removal
-  of a stateful component block; no plan produces either today.
+- `GET /installations/{id}/plan[?target=<sha256>]`: what an apply does
+  (`installed`, `target`, `newer`, `changes`, `blocking`, `upgrade`). `target` is
+  the BOM an apply without `targetBom` runs with: this release's for a new
+  installation (`changes` then lists every component), the installed one for an
+  installed platform (`changes` is empty), and the target of an upgrade that has
+  started. `newer` is this release's own BOM (`release`, `sha256`) when the
+  installed platform is on another one. An installed BOM this release does not
+  carry (its own and those of earlier releases from 0.8.0 on; not one of a build
+  of `main`) blocks with `bom_unsupported`.
+  `upgrade` is the plan of the move to this release's BOM; it is absent when the
+  platform is on it. `?target=` names the BOM to plan for and takes the same
+  values as `targetBom` below (`400 invalid_target` otherwise).
+  While an upgrade toward the BOM of an earlier release is in progress,
+  `upgrade` is that move and `replacement`, of the same shape, is the move to
+  this release's BOM in its place (with its own `allowed`, `blocking` and
+  `confirm`); it is absent otherwise.
+  `upgrade` is `{from, to, allowed, inProgress, confirm, changes, blocking}`:
+  - `changes[]` lists every difference of the two BOMs:
+    `{cluster, name, from, to, class, stage, wave, impact, blocking}`. `class` is
+    `chart` (the run syncs a new chart version in `stage`, at `wave`),
+    `record only` (nothing of the platform is synced for it) or `refused`.
+    `impact` says what the change restarts or rolls; a refused change has
+    `blocking`, its reason, instead.
+  - `allowed` is false when one change is refused or the target is a `-dev` BOM,
+    with each reason in `blocking`. This release moves a platform only when the
+    BOMs differ in `release`, `tenantCharts` and the versions of the product's
+    own charts (`proxcloud-platform` as `capi`, `capi-tenant` and `platform`;
+    `proxmox-kamaji-cluster` as `pc-platform`), each new version listing the old
+    one in `upgradeFrom`. Everything else is refused: `kubernetes.version`,
+    `kubernetes.nodeImage`, `seed.image`, `seed.k3s`, `images.kubeVip`,
+    `images.clusterctl`, every `capi.*` provider, every third-party chart, and a
+    component that is added, removed or changed in anything but its chart
+    version.
+  - `confirm` is the phrase a run that starts the upgrade must carry, present
+    when it is allowed and not started. `inProgress` is true once a run toward
+    `to` has started and none has succeeded (`status.targetBom`).
 
 - `GET /installations/{id}?live=1`: the installation with `live`
   (`phase`, `components[] {name, cluster, sync, health}`, `error`, `code`),
@@ -621,17 +691,31 @@ are several, `errors.details.problems`.
   whether its API does not answer or refuses the stored credential, with the
   seed's address, VMID and node. The stored phase stays `ready`: a seed that
   went down shows only here.
-- `POST /installations/{id}/runs` `{kind: apply|remove, confirm}`: `202 {runId}`. A run
+- `POST /installations/{id}/runs` `{kind: apply|remove, confirm, targetBom}`: `202 {runId}`. A run
   and its durable job (`platform.run/v1`, key `platform-run-<runId>`) are
   written in one transaction; `409 run_active` while another run of the
   installation is not finished, `409 bom_unsupported` when the installed BOM is
   not one this release carries. An apply on an installed platform runs with
-  the installed BOM (the run's `bom`), also when this release's own is another. Without the runner (it starts only when
+  the installed BOM (the run's `bom`), also when this release's own is another.
+  `targetBom` makes an apply an upgrade. It is the sha256 of this release's own
+  BOM (`400 invalid_target` for any other value, and on a remove), and `confirm`
+  must then be the plan's `upgrade.confirm`, `upgrade <installation name> to
+  <release>` (`400 invalid_confirmation`). A move the plan does not allow is
+  `409 upgrade_refused` with `details.reasons`, the plan's `upgrade.blocking`.
+  The run's `bom` is the target and `fromBom` the installed BOM; the installation
+  records the target as `status.targetBom`. From then until a run succeeds,
+  every apply (Retry) continues to that target without `targetBom` or `confirm`,
+  and the installed BOM as `targetBom` is `409 upgrade_refused`: nothing goes
+  back. `status.bom` names the BOM the platform left until the last stage of a
+  run has passed; `status.components` say per component what has moved. A later
+  release may replace a target that was not reached: its own BOM as `targetBom`
+  is accepted when both the installed BOM and the unfinished target may move to
+  it. Without the runner (it starts only when
   `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true` too) the route answers
   `409 platform_disabled`; the reads below still work. A plain remove is
   `{"kind":"remove"}`. `confirm` is optional, belongs to a remove only and asks
   for more: when it is sent it must be `remove <installation name>`
-  (`400 invalid_confirmation` otherwise, also on an apply). With it, a remove whose seed VM is gone deletes the VMs of pool
+  (`400 invalid_confirmation` otherwise, also on an apply without `targetBom`). With it, a remove whose seed VM is gone deletes the VMs of pool
   `proxcloud-system` tagged `pc-platform-<id>` and the recorded volumes, and a
   remove whose workload cluster does not answer goes on without checking for
   tenants. Without it the first fails `seed_lost` and the second is retried,
@@ -649,6 +733,9 @@ are several, `errors.details.problems`.
   machines of stage 7, and in a remove what was deleted, left or not checked
   (`tenants`, one item per machine, `cluster`, `volume-<name>`, `volumes`,
   `vm-<vmid>`, `cds`, `secrets`). A stage keeps its items when it is done.
+  An upgrade run has `fromBom`; its codes `unexpected_rollout` (stage 7) and
+  `tenants_unhealthy` (stage 9) are in
+  [managed-services.md](managed-services.md#upgrade-between-boms).
   A Kubernetes `401` or `403` from the seed or the platform cluster is counted
   in `retries` and tried again, because an API server answers so while it
   starts; `refused` is how many looks on end ended so (absent when none), and

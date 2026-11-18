@@ -137,6 +137,8 @@ func TestKubernetesDeleteReleasesTheTokenWithoutASync(t *testing.T) {
 			fmt.Fprint(w, `{"data":[{"type":"qemu","vmid":124,"node":"pve1","name":"pc-c-a-workers-pve1-x7k2p","pool":"pc-p1","status":"running"}]}`)
 		case r.Method == http.MethodGet && path == "/cluster/resources":
 			fmt.Fprint(w, `{"data":[{"type":"qemu","vmid":125,"node":"pve1","name":"web","pool":"pc-p1","status":"running"}]}`)
+		case r.Method == http.MethodGet && path == "/cluster/firewall/groups": // the release looks for the workers' security group
+			fmt.Fprint(w, `{"data":[]}`)
 		case r.Method == http.MethodDelete && strings.Contains(path, "/token/"):
 			revoked = append(revoked, path)
 			fmt.Fprint(w, `{"data":null}`)
@@ -357,6 +359,8 @@ func TestFailedCreateReleasesWithANodeDown(t *testing.T) {
 			fmt.Fprint(w, `{"data":[{"type":"node","node":"pve1","status":"online"},{"type":"node","node":"pve2","status":"offline"}]}`)
 		case r.Method == http.MethodGet && path == "/cluster/resources":
 			fmt.Fprintf(w, `{"data":[{"type":"qemu","vmid":130,"node":"pve2","pool":"pc-%s","status":"unknown"}]}`, f.projectID)
+		case r.Method == http.MethodGet && path == "/cluster/firewall/groups": // the release looks for the workers' security group
+			fmt.Fprint(w, `{"data":[]}`)
 		case r.Method == http.MethodDelete && strings.Contains(path, "/token/"):
 			revoked = append(revoked, path)
 			fmt.Fprint(w, `{"data":null}`)

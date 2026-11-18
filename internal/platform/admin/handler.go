@@ -85,6 +85,8 @@ type Handler struct {
 	kamajiFor func(es *externalservice.ExternalService) (*kamaji.Service, error)
 	// csiMigrate moves a cluster onto the CSI gateway (nil → 501).
 	csiMigrate CSIMigrator
+	// workerFirewall reads and switches a cluster's worker firewall (nil → 501).
+	workerFirewall WorkerFirewall
 	// pveFlavors is the Proxmox flavor catalog (nil in tests → the surface 503s).
 	pveFlavors *pveflavor.Repo
 	pay        *billing.PayService // bill record-payment (nil → 501)

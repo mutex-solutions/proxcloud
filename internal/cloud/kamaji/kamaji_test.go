@@ -452,6 +452,11 @@ func (f *fakeAPI) ListCRs(_ context.Context, _, _, plural, _, _ string) ([]map[s
 	return f.crs[plural], f.crsErr
 }
 
+func (f *fakeAPI) DeleteCR(_ context.Context, _, _, plural, ns, name string) error {
+	f.deleted = append(f.deleted, plural+":"+ns+"/"+name)
+	return nil
+}
+
 func newFakeAPI() *fakeAPI {
 	return &fakeAPI{
 		namespaces: map[string]map[string]string{},

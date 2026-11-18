@@ -189,9 +189,14 @@ func (h *Handler) kamajiClusterBumpAll(w http.ResponseWriter, r *http.Request) {
 // token= rule needs a word boundary before "token", which "PVEAPIToken" does not have.
 var pveTokenInText = regexp.MustCompile(`(?i)(PVEAPIToken=[^=\s]+=)\S+`)
 
+// machineText takes the credentials out of an upstream text.
+func machineText(msg string) string {
+	return pveTokenInText.ReplaceAllString(sandbox.RedactBuildText(msg), "${1}[REDACTED]")
+}
+
 // machineMessage is an upstream condition message made fit for the operator's screen: credentials out, 400 runes.
 func machineMessage(msg string) string {
-	msg = pveTokenInText.ReplaceAllString(sandbox.RedactBuildText(msg), "${1}[REDACTED]")
+	msg = machineText(msg)
 	if r := []rune(msg); len(r) > 400 {
 		msg = string(r[:400]) + "…"
 	}
@@ -199,7 +204,9 @@ func machineMessage(msg string) string {
 }
 
 // kamajiClusterMachines is the operator's view of what a tenant sees as a reason code: every worker Machine of ONE
-// cluster with the conditions Cluster API and CAPMOX report, read live. ADMIN_SERVICE_READ.
+// cluster with the conditions Cluster API and CAPMOX report, read live, and the node groups' MachineHealthChecks. A
+// machine that did not join within its bound also carries joinError: what cloud-init in the guest says, read through
+// the guest agent and masked (kamajimachines.go). ADMIN_SERVICE_READ.
 func (h *Handler) kamajiClusterMachines(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:service:read") {
 		return
@@ -231,5 +238,40 @@ func (h *Handler) kamajiClusterMachines(w http.ResponseWriter, r *http.Request) 
 		out.Machines[i].FailureMessage = machineMessage(out.Machines[i].FailureMessage)
 		redact(out.Machines[i].Conditions)
 	}
+	h.addJoinErrors(r.Context(), ks, out)
 	httpx.OK(w, out)
+}
+
+// WorkerFirewall reads (GET), puts on (POST) or takes off (DELETE) the VM firewall of one cluster's workers
+// (project.Handler.ClusterWorkerFirewall, ProtectClusterWorkers, UnprotectClusterWorkers).
+type WorkerFirewall func(ctx context.Context, ks *kamaji.Service, clusterID, method string) (any, error)
+
+// SetWorkerFirewall wires kamajiClusterWorkerFirewall (nil = 501).
+func (h *Handler) SetWorkerFirewall(f WorkerFirewall) { h.workerFirewall = f }
+
+// kamajiClusterWorkerFirewall is the operator's switch for the Proxmox VM firewall of ONE cluster's workers
+// (docs/managed-k8s.md, "Worker firewall"). GET reports and writes nothing (ADMIN_SERVICE_READ). POST is "Protect this
+// cluster's workers": it answers after it has watched the nodes, up to a minute. DELETE removes the firewall and the
+// cluster's security group. Both ADMIN_SERVICE_MANAGE.
+func (h *Handler) kamajiClusterWorkerFirewall(w http.ResponseWriter, r *http.Request) {
+	perm := externalServiceManagePerm
+	if r.Method == http.MethodGet {
+		perm = "admin:service:read"
+	}
+	if !h.require(w, r, perm) {
+		return
+	}
+	_, ks, ok := h.kamajiService(w, r)
+	if !ok {
+		return
+	}
+	if h.workerFirewall == nil {
+		httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented, "the worker firewall is not configured"))
+		return
+	}
+	rep, err := h.workerFirewall(r.Context(), ks, chi.URLParam(r, "clusterId"), r.Method)
+	if writeClusterErr(w, err) {
+		return
+	}
+	httpx.OK(w, rep)
 }

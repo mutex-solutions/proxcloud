@@ -18,9 +18,26 @@ unlike nodeLabels (its own --node-labels), so a workload may trust them to pick 
 
 skipCloudInitStatus: CAPMOX reads cloud-init's status with agent exec, which PVE 9 only allows with
 VM.GuestAgent.Unrestricted, root in every guest of the pool. The Node joining is the real signal anyway.
+
+machineHealthCheck (from chart 0.1.14): with the check skipped a failed kubeadm join is invisible to Cluster API and
+kubeadm runs once, so a worker that did not join stays for ever. nodeStartupTimeoutSeconds above 0 renders one
+MachineHealthCheck per node group (over all its MachineDeployments) that replaces a Machine without a Node after
+that time, while at most maxUnhealthy of the group are unhealthy. The guard is capped at machineCount - 1: when every
+machine of a group is unhealthy the cause is the site's (image, route to the endpoint), a new clone fails the same
+way, and nothing is replaced. So a group of one gets no MachineHealthCheck. values.yaml states what the guard does
+not do. ArgoCD is told to leave the object out of the Application's health: its own health is "as many healthy as
+expected", which is false while any machine is still starting.
 */ -}}
 {{- $root := . }}
 {{- $net := .Values.proxmox.network }}
+{{- $mhc := .Values.machineHealthCheck | default dict }}
+{{- $startup := $mhc.nodeStartupTimeoutSeconds | default 0 }}
+{{- if not (regexMatch "^[0-9]+$" (toString $startup)) }}
+{{- fail (printf "machineHealthCheck.nodeStartupTimeoutSeconds %q: a whole number of seconds, 0 for no health check" (toString $startup)) }}
+{{- end }}
+{{- if and (gt (int $startup) 0) (not (regexMatch "^[1-9][0-9]*$" (toString $mhc.maxUnhealthy))) }}
+{{- fail (printf "machineHealthCheck.maxUnhealthy %q: a whole number, 1 or more (a percentage is rounded down to 0 for a small group)" (toString $mhc.maxUnhealthy)) }}
+{{- end }}
 {{- range $ng := .Values.nodeGroups }}
 {{- if not (regexMatch "^[a-z][a-z0-9-]+[a-z0-9]$" $ng.name) }}
 {{- fail (printf "node group name %q: lower-case letters, digits and dashes, 3+ characters" $ng.name) }}
@@ -130,5 +147,30 @@ spec:
         apiGroup: infrastructure.cluster.x-k8s.io
         kind: ProxmoxMachineTemplate
         name: {{ $mtName }}
+{{- end }}
+{{- $guard := 0 }}
+{{- if gt (int $startup) 0 }}{{- $guard = min (int $mhc.maxUnhealthy) (sub $count 1) }}{{- end }}
+{{- if gt (int $guard) 0 }}
+---
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: MachineHealthCheck
+metadata:
+  name: {{ printf "%s-%s" $root.Release.Name $ng.name }}
+  annotations:
+    argocd.argoproj.io/ignore-healthcheck: "true"
+  labels:
+    cluster.x-k8s.io/cluster-name: {{ $root.Release.Name }}
+    proxcloud.io/node-group: {{ $ng.name }}
+spec:
+  clusterName: {{ $root.Release.Name }}
+  selector:
+    matchLabels:
+      cluster.x-k8s.io/cluster-name: {{ $root.Release.Name }}
+      proxcloud.io/node-group: {{ $ng.name }}
+  checks:
+    nodeStartupTimeoutSeconds: {{ int $startup }}
+  remediation:
+    triggerIf:
+      unhealthyLessThanOrEqualTo: {{ int $guard }}
 {{- end }}
 {{- end }}
