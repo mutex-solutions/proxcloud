@@ -5,8 +5,8 @@ already been published. As of **2026-11-18**, GHCR has public development images
 the `v0.4.0-rc.1` prerelease (tag 2026-11-11, images and app chart `0.4.0-rc.1`)
 and the first stable release `v0.4.0` (tag 2026-11-12, images and app chart
 `0.4.0`), then the stable `v0.5.0` (tag 2026-11-13), the patches `v0.5.1` and `v0.5.2` and the stable `v0.6.0` (tags 2026-11-14),
-the `v0.7.0-rc.1` prerelease and the stable `v0.7.0` (tags 2026-11-15), and the stable `v0.8.0` (tag 2026-11-17). The next release is the patch
-`v0.8.1`; pushing its tag runs the app image/chart publication and GitHub Release
+the `v0.7.0-rc.1` prerelease and the stable `v0.7.0` (tags 2026-11-15), the stable `v0.8.0` (tag 2026-11-17) and the patch `v0.8.1` (tag 2026-11-18). The next release is the patch
+`v0.8.2`; pushing its tag runs the app image/chart publication and GitHub Release
 creation.
 This source change does none of those operations, and installation from released
 artifacts and later controlled PVE template canaries remain separate steps. Read
@@ -53,7 +53,7 @@ The configured destination for app Helm publication is
 `0.4.0` stable charts).
 On an app release tag, the workflow sets chart version to the tag without `v` and
 appVersion to the full tag, matching the image tags. The release contract is app
-chart `0.8.1`, appVersion/image tag and installer BOM `v0.8.1`, platform BOM `release: 0.8.1`, and the same tag as
+chart `0.8.2`, appVersion/image tag and installer BOM `v0.8.2`, platform BOM `release: 0.8.2`, and the same tag as
 `DEFAULT_VERSION` of the Docker Compose install (`deploy/compose/proxcloud-up.sh`).
 Keep `images.build: true` until the exact chart and images are published and
 verified; use `false` explicitly for released-artifact evaluation after that.
@@ -188,8 +188,13 @@ commit dropped `-dev`: the release commit of `v0.8.1` sets it to `0.8.1` (checke
 2026-11-18 on that commit: `--release` prints `all pins match`, on the BOM and on the
 previous BOM `0.8.0`). The pull request after that release commit set the BOM on
 `main` to `0.9.0-dev` again and added `deploy/platform/previous/0.8.1.yaml`
-([Previous BOMs](#previous-boms)), so `main` cannot be tagged until the next release
-commit drops `-dev`. The gate does not compare the BOM's release with the tag
+([Previous BOMs](#previous-boms)), so `main` could not be tagged until the next release
+commit dropped `-dev`: the release commit of `v0.8.2` sets it to `0.8.2` (checked on
+2026-11-18 on that commit: `--release` prints `all pins match`, on the BOM and on the
+previous BOMs `0.8.0` and `0.8.1`). The pull request after that release commit set the
+BOM on `main` to `0.9.0-dev` again and added `deploy/platform/previous/0.8.2.yaml`, so
+`main` cannot be tagged until the next release commit drops `-dev`. The gate does not
+compare the BOM's release with the tag
 (below): a commit whose BOM has no `-dev` passes this part for any tag.
 
 Not verified:
@@ -261,7 +266,7 @@ that no later build carries, so its platform is refused after an upgrade
 been removed yet; when one is, the platforms of that release are refused again,
 so it needs a release note.
 
-The previous BOMs are `0.8.0` and `0.8.1`. `0.8.0` was added by hand from its tag
+The previous BOMs are `0.8.0`, `0.8.1` and `0.8.2`. `0.8.0` was added by hand from its tag
 (sha256 `8eb874987d3bbaf55f309295ee241ec320c0cf9e0805b3bd1812ef908b6600c6`, the
 value a platform installed by v0.8.0 records). `0.8.1` is the first one the
 procedure above added (sha256
@@ -271,14 +276,30 @@ on, before the tag existed, and its goldens equal those of that commit and
 differ from the 0.8.0 ones in the release label only. `bom_verify.py --release`
 printed `all pins match` on both on 2026-11-18.
 
-Not verified: that the tag `v0.8.1` is on that commit (compare
-`git show v0.8.1:deploy/platform/platform-bom.yaml | sha256sum` with the hash
-above once the tag exists), and an apply on a platform that `v0.8.1` installed.
+The tag `v0.8.1` is on that commit: `git show v0.8.1:deploy/platform/platform-bom.yaml | sha256sum`
+gives the hash above (checked on 2026-11-18).
+
+`0.8.2` was added the same way (sha256
+`a10baf0bef4f33ebff26cb87315259a6cf886c8ffe00b79dc24e2bed4ed6540b`): it was
+copied from the release commit of `v0.8.2` (`ed4b94ec`), which the tag is put
+on, before the tag existed, and its goldens equal those of that commit and
+differ from the 0.8.1 ones in the release label only. `bom_verify.py --release`
+printed `all pins match` on the three previous BOMs on 2026-11-18.
+
+Not verified: that the tag `v0.8.2` is on that commit (compare
+`git show v0.8.2:deploy/platform/platform-bom.yaml | sha256sum` with the hash
+above once the tag exists), an apply on a platform that `v0.8.1` or `v0.8.2`
+installed, and an install by `v0.8.1` or `v0.8.2`.
 One apply with a
 previous BOM was run on a lab (2026-11-18, a platform installed by the released
 `v0.8.0`, on the build `dev-751a190` of `main`): it succeeded and `status.bom`
 stayed the 0.8.0 one. That build's own BOM pinned the same versions as 0.8.0, so
 an apply that keeps older pins against a BOM with other pins is not shown.
+The same platform was read on the build `dev-03bc9f3` of `main` the same day,
+which carries two previous BOMs (`0.8.0`, `0.8.1`): the plan had no change and
+named the build's own BOM as `newer`, `status.bom` stayed the 0.8.0 one, and
+`GET /admin/platform/bom?sha256=` answered both previous BOMs by their hash. No
+apply was run on that build.
 
 
 ## What a release checks about its BOM pairs

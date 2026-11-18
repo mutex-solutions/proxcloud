@@ -1,29 +1,29 @@
 # Current support boundaries and first-release readiness
 
-Status snapshot: **2026-11-18**, preparing the patch release `v0.8.1` on top of `v0.8.0`
-(tag 2026-11-17). This is an evidence summary, not a release announcement or a production SLA.
+Status snapshot: **2026-11-18**, preparing the patch release `v0.8.2` on top of `v0.8.1`
+(tag 2026-11-18). This is an evidence summary, not a release announcement or a production SLA.
 `v0.4.0-rc.1` (tag 2026-11-11) was published as a non-latest prerelease, `v0.4.0` (tag 2026-11-12)
 as the first stable release, `v0.5.0` (tag 2026-11-13) as the second, the patches `v0.5.1` and `v0.5.2` and the
-stable `v0.6.0` (tags 2026-11-14), and `v0.7.0-rc.1` as a non-latest prerelease and the stable `v0.7.0` (tags 2026-11-15), and the stable `v0.8.0` (tag 2026-11-17). Pushing the `v0.8.1` tag
-publishes the stable images, app chart and GitHub Release. `v0.5.1` to `v0.8.1` have no breaking API change against
+stable `v0.6.0` (tags 2026-11-14), and `v0.7.0-rc.1` as a non-latest prerelease and the stable `v0.7.0` (tags 2026-11-15), the stable `v0.8.0` (tag 2026-11-17) and the patch `v0.8.1` (tag 2026-11-18). Pushing the `v0.8.2` tag
+publishes the stable images, app chart and GitHub Release. `v0.5.1` to `v0.8.2` have no breaking API change against
 `v0.5.0` (`v0.6.0` changes the VM image size contract; `v0.7.0` stops serving the management port job triggers with
 only the scheduler on and refuses a new problem in a Proxmox provider's network block on save; `v0.8.0` ignores a
 node group's `imageId`, answers a VLAN-zone tenant network without DHCP and SNAT, and changes the Proxmox grant
 that mints cluster tokens, which existing managed Kubernetes sites must migrate; `v0.8.1` deletes a security
 group rule by `ruleId` only, refuses rule fields it cannot store and `enableDhcp: true` in a zone without a DHCP
-server; see the changelog);
+server; `v0.8.2` adds answers and takes none away; see the changelog);
 `v0.5.0` contains breaking API changes against `v0.4.0`; see the [changelog](../CHANGELOG.md). This source change publishes
 nothing and performs no live acceptance; the [lab acceptance of Platform setup](#platform-setup-lab-acceptance)
 was run on `v0.7.0-rc.1`, and the [managed services lab rounds](#managed-services-lab-rounds) on builds of
-`main` before `v0.8.0` and, for `v0.8.1`, on the released `v0.8.0` followed by a build of `main`. Check GitHub's Releases/Actions pages before choosing a deployment
+`main` before `v0.8.0` and, for `v0.8.1` and `v0.8.2`, on the released `v0.8.0` followed by a build of `main`. Check GitHub's Releases/Actions pages before choosing a deployment
 commit.
 
 ## What is available now
 
 - Source on `main`, public development container images on GHCR, the
   `v0.4.0-rc.1` and `v0.7.0-rc.1` prereleases and the stable releases `v0.4.0`, `v0.5.0`, `v0.5.1`, `v0.5.2`,
-  `v0.6.0`, `v0.7.0` and `v0.8.0` (images and app charts `0.4.0-rc.1`, `0.7.0-rc.1`, `0.4.0`, `0.5.0`, `0.5.1`, `0.5.2`, `0.6.0`, `0.7.0` and `0.8.0`). The
-  app chart `0.8.1`, appVersion and installer BOM `v0.8.1` and the platform BOM `0.8.1` name the current stable release; its tag publishes those artifacts.
+  `v0.6.0`, `v0.7.0`, `v0.8.0` and `v0.8.1` (images and app charts `0.4.0-rc.1`, `0.7.0-rc.1`, `0.4.0`, `0.5.0`, `0.5.1`, `0.5.2`, `0.6.0`, `0.7.0`, `0.8.0` and `0.8.1`). The
+  app chart `0.8.2`, appVersion and installer BOM `v0.8.2` and the platform BOM `0.8.2` name the current stable release; its tag publishes those artifacts.
   Verify they are pullable before using `images.build: false`; a source pin is not proof that a registry artifact exists.
 - The installer defaults to `images.build: true`, building the API and two
   consoles plus app chart from the checkout. A source/local-registry installation
@@ -112,7 +112,20 @@ without the release commit and the changelog. The platform stayed on the 0.8.0 B
 Check was green with its two new rows, and **Apply this release** succeeded in 6.6 seconds without touching the
 seed's Applications. The fixes of `v0.8.1` were then run one by one; what passed and what was not run (volume
 attach, detach and rebuild among them) is in the changelog section of `v0.8.1`. Nothing was run on the published
-artifacts of `v0.8.1` itself.
+artifacts of `v0.8.1` itself on the lab.
+
+For `v0.8.2` the same lab platform (installed by the released `v0.8.0`) was used on 2026-11-18. The portal was
+upgraded to the build `dev-03bc9f3` of `main`, which is the code of `v0.8.2` without the sandbox template image
+pins (they are in no image), the fix of the break-glass port-forward rule, the changelog and the release commit.
+The platform stayed on the 0.8.0 BOM with no change in the plan, and the Check passed with its new row
+`tenant-path`. The row was read in its ok case (a VLAN zone) and its warning case (a `simple` zone); a joined
+one-worker tenant cluster was deleted and its Proxmox token and ACL rows were revoked by the release job 2
+minutes 53 seconds later without a provider sync; the platform kubeconfig and both ArgoCD commands of the
+ready card worked. Of the customer console fixes only two were run, at the API: the lab node that holds the OS
+image had no capacity for a tenant server. What passed and what was not run is in the changelog section of
+`v0.8.2`. Nothing was run on the published artifacts of `v0.8.2` itself. Outside the lab, one production site
+was upgraded to the released `v0.8.1` on 2026-11-18: its installed platform stayed on its BOM (a plan with no
+change, an apply that succeeded, `onboot` set on the platform's machines).
 
 ## Intentional safety holds and operational defaults
 
@@ -150,7 +163,7 @@ The owner decided on 2026-11-12 to release `v0.4.0` as stable, and on 2026-11-13
 that the next release is the stable `v0.5.0`, each with a narrowly scoped core and
 explicitly held features; neither need claim every managed service. Those decisions
 are not evidence of publication or installation. The releases `v0.5.1`, `v0.5.2` and `v0.6.0` (2026-11-14),
-`v0.7.0` (2026-11-15), `v0.8.0` (2026-11-17) and `v0.8.1` follow the same gate. For every release:
+`v0.7.0` (2026-11-15), `v0.8.0` (2026-11-17), `v0.8.1` (2026-11-18) and `v0.8.2` follow the same gate. For every release:
 
 1. Review the exact release commit for the release and its supported core surface
    and explicit experimental/held features. The version is not published until
@@ -171,7 +184,7 @@ are not evidence of publication or installation. The releases `v0.5.1`, `v0.5.2`
    completion or a deployment. Keep the default `images.build: true` meanwhile.
 5. After publication, install the exact released chart/images with
    `images.build: false` on a clean evaluation site (not performed for `v0.4.0`,
-   and not yet performed for `v0.5.0` to `v0.8.1` when this was prepared; a portal-only Docker Compose
+   and not yet performed for `v0.5.0` to `v0.8.2` when this was prepared; a portal-only Docker Compose
    site is running `v0.5.2` on a homelab, and the [Platform setup lab acceptance](#platform-setup-lab-acceptance)
    used a Docker Compose install of `v0.7.0-rc.1`; neither is this acceptance). The installer
    accepts valid SemVer with **base version >= 0.4.0**, including prereleases; this local guard

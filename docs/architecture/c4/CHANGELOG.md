@@ -4,6 +4,25 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-18: a break-glass kubeconfig of the platform cluster
+
+**What changed:** `GET …/platform-kubeconfig` (`internal/platform/admin/platform.go`, `breakGlass`, shared with
+`…/seed-kubeconfig`) and `platformlife.PlatformKubeconfig` (`internal/platformlife/seedaccess.go`). Outside a run
+the API now also talks to the platform cluster: it reads the cluster's admin kubeconfig and CA from the seed into
+memory, writes the service account `kube-system/proxcloud-break-glass`, a read-only ClusterRole and a Role in
+`argocd` with their bindings, and returns a one-hour TokenRequest token of that account. The admin kubeconfig is
+not stored and not returned; a token granted for longer than the hour is refused. The audit entry is
+`BREAK_GLASS` with `operation: platform-kubeconfig`. The console's ready card reads the provider rows
+(`GET /admin/service`) to show a Kubernetes provider without a version. No container or component was added or
+removed.
+
+**Why:** an installed platform showed no address and no way into either ArgoCD, and the one kubeconfig on offer
+was cluster-admin on the seed (design package P4 item 1, decision 19; the provider gap of decision 51).
+
+**Diagrams:** none changed. `c3-components.md`: the Platform runs row names the route and both kubeconfigs.
+
+**Not verified:** on a lab.
+
 ## 2026-11-18: customer console, three read actions on the cloud action route
 
 **What changed:** `internal/platform/project` answers `GET_SERVERS` on a NETWORK (`pveNetworkServers`, over
