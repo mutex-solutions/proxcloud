@@ -32,8 +32,9 @@ type ProjectMember = { userId?: string; sub: string; firstName?: string; lastNam
 type OrgRole = { id: string; name: string; builtIn: boolean }
 
 // GET /project-invites/project/{pid} → the pending invitations the caller may see: all of them for a project
-// admin, their own otherwise. inviteUrl is present only when the site sends no mail (mailConfigured false).
-type PendingInvite = { id: string; email: string; expiresAt?: string; mine?: boolean; mailConfigured?: boolean; inviteUrl?: string }
+// admin, their own otherwise. Each carries its link: mailConfigured says only whether a mail was handed to a
+// gateway, not that it arrived.
+type PendingInvite = { id: string; email: string; expiresAt?: string; mailConfigured?: boolean; inviteUrl?: string }
 type PendingInvites = { mailConfigured: boolean; invites: PendingInvite[] }
 
 const NO_MAIL =
@@ -44,7 +45,15 @@ function CopyLink({ url }: { url: string }) {
     <Button
       variant="outline"
       size="sm"
-      onClick={() => void navigator.clipboard.writeText(url).then(() => toast.success("Invitation link copied"))}
+      onClick={async () => {
+        // navigator.clipboard is absent on a plain-http site and writeText can be refused: show the link instead.
+        try {
+          await navigator.clipboard.writeText(url)
+          toast.success("Invitation link copied")
+        } catch {
+          toast.error(`Couldn't copy the link. Select and copy it: ${url}`, { duration: 30000 })
+        }
+      }}
     >
       <Copy className="size-4" /> Copy link
     </Button>
@@ -122,7 +131,7 @@ export default function MembersPage() {
       apiFetch<PendingInvite | undefined>(`/project-invites/invite`, { method: "POST", body: { email: email.trim(), projectId: pid } }),
     onSuccess: (inv) => {
       void qc.invalidateQueries({ queryKey: ["project-invites", pid] })
-      if (inv?.inviteUrl) {
+      if (inv?.inviteUrl && !inv.mailConfigured) {
         setCreated(inv) // no mail went out: saying "sent" would be the old dead end
         return
       }

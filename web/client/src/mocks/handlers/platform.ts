@@ -123,20 +123,19 @@ on("GET /project-invites/:token", ({ params }) => ({
 }))
 on("POST /project-invites/accept/:token", () => ({ data: {} }))
 on("POST /project-invites/decline/:token", () => ({ data: {} }))
-// Pending invitations as their inviter sees them. prj-staging is a site without mail: the answer carries the link.
-type MockInvite = { id: string; email: string; projectId: string; expiresAt: string; mine: boolean; token: string }
+// Pending invitations as their inviter sees them, each with its link. prj-staging is a site without mail.
+type MockInvite = { id: string; email: string; projectId: string; expiresAt: string; token: string }
 const invites: MockInvite[] = [
-  { id: "inv-1", email: "pending@example.com", projectId: PID, expiresAt: new Date(Date.now() + 20 * 3600_000).toISOString(), mine: true, token: "tok-pending" },
+  { id: "inv-1", email: "pending@example.com", projectId: PID, expiresAt: new Date(Date.now() + 20 * 3600_000).toISOString(), token: "tok-pending" },
 ]
 const inviteView = (inv: MockInvite) => {
-  const mailConfigured = inv.projectId !== "prj-staging"
   const { token, ...row } = inv
-  return { ...row, mailConfigured, ...(mailConfigured ? {} : { inviteUrl: `${window.location.origin}/join-project?invite-token=${token}` }) }
+  return { ...row, mailConfigured: inv.projectId !== "prj-staging", inviteUrl: `${window.location.origin}/join-project?invite-token=${token}` }
 }
 on("POST /project-invites/invite", ({ opts }) => {
   const body = opts.body as { email?: string; projectId?: string }
   const id = db.nextId("inv")
-  const inv = { id, email: body.email ?? "", projectId: body.projectId ?? PID, expiresAt: new Date(Date.now() + 86400_000).toISOString(), mine: true, token: `tok-${id}` }
+  const inv = { id, email: body.email ?? "", projectId: body.projectId ?? PID, expiresAt: new Date(Date.now() + 86400_000).toISOString(), token: `tok-${id}` }
   invites.push(inv)
   return { data: inviteView(inv) }
 })

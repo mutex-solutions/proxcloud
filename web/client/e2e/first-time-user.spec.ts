@@ -11,9 +11,9 @@ test("D11: a pending invitation is listed and can be revoked", async ({ page }) 
   await page.goto(`${SITE}/org/members`)
   const pending = page.getByTestId("pending-invites")
   await expect(pending.getByRole("cell", { name: "pending@example.com", exact: true })).toBeVisible()
-  // Mail is configured here: the mail carries the link, the page does not.
+  // Mail is configured here, and the link is still offered: a mail that was sent has not always arrived.
   await expect(page.getByTestId("no-mail-notice")).toHaveCount(0)
-  await expect(pending.getByRole("button", { name: "Copy link" })).toHaveCount(0)
+  await expect(pending.getByRole("button", { name: "Copy link" })).toBeVisible()
 
   await pending.getByRole("button", { name: "Revoke the invitation of pending@example.com" }).click()
   await page.getByRole("dialog").getByRole("button", { name: "Revoke invitation" }).click()
@@ -68,6 +68,23 @@ test("UX 1: the server page says how to get in, by what the site offers", async 
 
   await page.goto(`${SITE}/servers/res-server-001`)
   await expect(page.getByTestId("server-access")).not.toContainText("no public network")
+})
+
+test("UX 1: a failed public network lookup is not shown as a site without a public network", async ({ page }) => {
+  await page.addInitScript(() => {
+    ;(globalThis as { __mockLatency?: (call: string) => number | undefined }).__mockLatency = (call) => {
+      if (call.startsWith("GET /project/prj-staging/public-networks")) throw new Error("lookup failed")
+      return undefined
+    }
+  })
+  await page.goto(`${BARE}/servers/res-server-001`)
+  await expect(page.getByRole("button", { name: /more actions/i })).toBeVisible()
+  // The lookup is tried twice (one retry) before the page gives up on it.
+  await expect
+    .poll(() => page.evaluate(() => ((globalThis as { __mockCalls?: string[] }).__mockCalls ?? []).filter((c) => c.includes("/public-networks")).length))
+    .toBeGreaterThanOrEqual(2)
+  await page.waitForTimeout(500)
+  await expect(page.getByTestId("server-access")).toHaveCount(0)
 })
 
 test("UX 10: hard reboot is offered and asks first", async ({ page }) => {

@@ -1097,8 +1097,9 @@ function ServerAccess({
   const addrs = (server.data?.server?.addresses ?? {}) as Record<string, Array<{ addr?: string }>>
   const publicIp = (addrs.public ?? []).map((a) => a.addr).find(Boolean)
   const privateIp = serverIPs(server).find((ip) => ip !== publicIp)
-  if (networks.isLoading) return null
-  const offered = canAttach && (networks.data?.length ?? 0) > 0
+  // Loading or failed: "this site gives no public network" would be a guess.
+  if (!networks.data) return null
+  const offered = canAttach && networks.data.length > 0
   const consoleWay = canSetPassword
     ? "From your browser: More actions → Set password, then More actions → Console (the Serial tab; press Enter for the login prompt)."
     : "From your browser: More actions → Console, with a password set when the server was created."

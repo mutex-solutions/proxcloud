@@ -8,7 +8,7 @@ Projects are meant to be shared. Anyone with the right permissions can invite a 
 2. In the invite area, type the teammate's **email address**.
 3. Click **Send invite**. ProxCloud mails them a personal invitation link.
 
-An invitation is valid for 24 hours. Until it is accepted it is listed under **Pending invitations** on the same page, with **Revoke**: a revoked invitation's link stops working, and you can invite the person again. A project owner or admin sees every pending invitation of the project; anyone else sees the ones they sent.
+An invitation is valid for 24 hours. Until it is accepted it is listed under **Pending invitations** on the same page, with **Revoke**: a revoked invitation's link stops working, and you can invite the person again. A project owner or admin sees every pending invitation of the project; anyone else sees the ones they sent. Each pending invitation also has **Copy link**: if the email does not arrive, send the link yourself.
 
 ### When your site sends no email
 
