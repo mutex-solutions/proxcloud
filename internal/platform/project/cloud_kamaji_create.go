@@ -415,12 +415,14 @@ func KamajiReleaseCluster(services serviceGetter, shares shareRowFinder, pveFor 
 		if csi != nil {
 			csiErr = csi(ctx, clusterID)
 		}
-		return errors.Join(csiErr, func() error {
+		// The workers are gone (kamajiWorkersGone), so they no longer reference their security group. Like the CSI
+		// step, a group that cannot be deleted keeps the marker and holds nothing else back.
+		var groupErr error
+		if ps != nil {
+			groupErr = ps.DeleteWorkerGroup(ctx, projectID, clusterID)
+		}
+		return errors.Join(csiErr, groupErr, func() error {
 			if ps != nil {
-				// The workers are gone (kamajiWorkersGone), so nothing references their security group any more.
-				if err := ps.DeleteWorkerGroup(ctx, projectID, clusterID); err != nil {
-					return err
-				}
 				if err := ps.C.RevokeClusterTokens(ctx, clusterID); err != nil {
 					return err
 				}

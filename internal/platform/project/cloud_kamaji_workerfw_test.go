@@ -11,9 +11,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
@@ -237,5 +239,55 @@ func TestProtectClusterWorkers(t *testing.T) {
 	rep, err = protectClusterWorkers(ctx, ps, &tenantNodes{address: "10.100.0.232"}, f, addrs)
 	if err != nil || rep.Verified || !rep.Protected || len(fake.writes) != 0 {
 		t.Fatalf("second protect: %+v %v, wrote %v", rep, err, fake.writes)
+	}
+}
+
+// The addresses the chart gave MetalLB are load balancer addresses, the rest of the reservation is for workers: the
+// group opens the first to anyone and the kubelet only to the second.
+func TestSplitClusterAddresses(t *testing.T) {
+	f := splitClusterAddresses([]string{"10.100.0.232", "10.100.0.233", "10.100.0.248", "10.100.0.249"}, []string{"10.100.0.248/32", "10.100.0.249/32"})
+	if !slices.Equal(f.Workers, []string{"10.100.0.232", "10.100.0.233"}) || !slices.Equal(f.LoadBalancers, []string{"10.100.0.248", "10.100.0.249"}) {
+		t.Fatalf("workers %v, load balancers %v", f.Workers, f.LoadBalancers)
+	}
+}
+
+// sharedWorkers puts the workers in the operator's pool, on a network tenants share: no project owns a group for
+// them, so the worker firewall refuses before it looks anything up.
+func TestWorkerFirewallRefusesSharedWorkers(t *testing.T) {
+	ks := kamaji.NewWithAPI(nil, kamaji.Config{Defaults: kamaji.ClusterDefaults{Shared: &kamaji.SharedWorkers{}}}, "k8s")
+	_, _, _, err := (&Handler{}).workerFirewallTarget(context.Background(), ks, "pc-c-a")
+	var he *httpx.HTTPError
+	if !errors.As(err, &he) || he.Status != http.StatusConflict || !strings.Contains(he.Msg, "sharedWorkers") {
+		t.Fatalf("sharedWorkers: %v", err)
+	}
+}
+
+// The provider sync's pass waits for a Protect or a Remove that is under way: it must not write DROP on a worker
+// between a failed Protect's way back and the delete of the group.
+func TestWorkerFirewallSyncWaitsForProtect(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		fmt.Fprint(w, `{"data":[]}`)
+	}))
+	defer srv.Close()
+	ps, err := pve.NewService(pve.Config{APIURL: srv.URL, TokenID: "proxcloud@pve!platform", Secret: "s"}, "pve", "pc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerFirewallMu.Lock() // a Protect is watching the nodes
+	done := make(chan error, 1)
+	go func() { done <- (&Handler{}).ReconcileWorkerFirewalls(context.Background(), ps, nil) }()
+	select {
+	case <-done:
+		t.Fatal("the pass ran while a Protect held the lock")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if calls.Load() != 0 {
+		t.Fatal("the pass reached Proxmox while a Protect held the lock")
+	}
+	workerFirewallMu.Unlock()
+	if err := <-done; err != nil || calls.Load() == 0 {
+		t.Fatalf("the pass after the Protect: %v, %d calls", err, calls.Load())
 	}
 }

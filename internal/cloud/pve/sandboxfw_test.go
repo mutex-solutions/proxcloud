@@ -220,6 +220,7 @@ type fakeVM struct {
 	name, pool string
 	tags       string // semicolon-separated, as PVE lists them
 	status     string // "" = running
+	node       string // "" = pve1; any other node is down
 	cfg        VMConfig
 	opts       map[string]any
 	rules      []FirewallRule
@@ -291,14 +292,25 @@ func (f *sandboxFake) serve(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(p, "/cluster/sdn/vnets/") && seg[len(seg)-1] == "subnets":
 		cidr := map[string]string{"pcsbx": "10.110.0.0/24", "vtenant": "10.100.0.0/24"}[seg[3]]
 		reply(w, []map[string]any{{"cidr": cidr}})
+	case p == "/cluster/resources" && r.Form.Get("type") == "node":
+		out := []map[string]any{{"type": "node", "node": "pve1", "status": "online"}}
+		for _, vm := range f.vms {
+			if vm.node != "" {
+				out = append(out, map[string]any{"type": "node", "node": vm.node, "status": "offline"})
+			}
+		}
+		reply(w, out)
 	case p == "/cluster/resources":
 		var out []map[string]any
 		for id, vm := range f.vms {
-			status := vm.status
+			status, node := vm.status, vm.node
 			if status == "" {
 				status = "running"
 			}
-			out = append(out, map[string]any{"type": "qemu", "vmid": id, "node": "pve1", "name": vm.name, "pool": vm.pool, "status": status, "tags": vm.tags})
+			if node == "" {
+				node = "pve1"
+			}
+			out = append(out, map[string]any{"type": "qemu", "vmid": id, "node": node, "name": vm.name, "pool": vm.pool, "status": status, "tags": vm.tags})
 		}
 		reply(w, out)
 	case p == "/nodes":
@@ -376,7 +388,7 @@ func (f *sandboxFake) serve(w http.ResponseWriter, r *http.Request) {
 			reply(w, nil)
 		case strings.HasPrefix(rest, "firewall/rules/"):
 			pos, _ := strconv.Atoi(seg[len(seg)-1])
-			if r.Form.Get("digest") != fmt.Sprint(len(vm.rules)) {
+			if d := r.Form.Get("digest"); d != "" && d != fmt.Sprint(len(vm.rules)) { // optional, as on PVE
 				w.WriteHeader(500)
 				fmt.Fprint(w, `{"errors":{"digest":"detected modified configuration"}}`)
 				return

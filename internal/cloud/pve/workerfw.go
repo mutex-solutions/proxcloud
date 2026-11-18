@@ -34,7 +34,14 @@ func WorkerGroupName(clusterID string) string { return workerGroupPrefix + clust
 // IsWorkerGroupName reports a security group name reserved for a cluster's workers.
 func IsWorkerGroupName(name string) bool { return strings.HasPrefix(name, workerGroupPrefix) }
 
-// IsWorkerVM reports a VM that CAPMOX made as a worker of some cluster.
+// WorkerGroupCluster is the cluster id a group name of that form stands for. A project may hold a group of that form
+// that is no cluster's: one a tenant made before the names were reserved.
+func WorkerGroupCluster(name string) (string, bool) {
+	return strings.CutPrefix(name, workerGroupPrefix)
+}
+
+// IsWorkerVM reports a VM that carries a pc-k8s- tag: a worker CAPMOX made. The Kubernetes image templates carry
+// such tags too (pc-k8s-<version>); they are not servers, so no caller asks about one.
 func IsWorkerVM(tags string) bool {
 	return slices.ContainsFunc(strings.Split(tags, ";"), func(t string) bool { return strings.HasPrefix(t, WorkerTagPrefix) })
 }
@@ -42,6 +49,29 @@ func IsWorkerVM(tags string) bool {
 // errWorkerGroups refuses a security group change on a worker row: its one group is the cluster's.
 func errWorkerGroups() error {
 	return &ConflictError{Msg: "This server is a worker node of a Kubernetes cluster. Its firewall is the cluster's security group: change the rules of that group instead"}
+}
+
+// errWorkerGroupOnServer refuses a cluster group on an ordinary server: the cluster's release and "Remove the worker
+// firewall" delete the group, and the server would lose those openings without a word.
+func errWorkerGroupOnServer(name string) error {
+	return conflictf("Security group %s is for the worker nodes of a Kubernetes cluster and is deleted with their firewall. Use another security group for a server", name)
+}
+
+// refuseWorkerGroups refuses when one of the project's groups ids carries a name reserved for a cluster.
+func (s *Service) refuseWorkerGroups(ctx context.Context, projectID string, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	groups, err := s.C.ListFirewallGroups(ctx)
+	if err != nil {
+		return err
+	}
+	for _, g := range groups {
+		if pid, name, ok := aliasProject(g.Comment); ok && pid == projectID && IsWorkerGroupName(name) && slices.Contains(ids, g.Group) {
+			return errWorkerGroupOnServer(name)
+		}
+	}
+	return nil
 }
 
 // workerFirewallOptions: default-deny ingress, open egress, anti-spoofing. No DHCP: CAPMOX gives static addresses.
@@ -161,9 +191,14 @@ func (s *Service) EnsureWorkerGroup(ctx context.Context, f WorkerFirewall) (stri
 }
 
 // DeleteWorkerGroup removes a cluster's group once its workers are gone (the cluster's release). No group: nothing.
+// A group a server or image of the project still references is left: with the cluster gone it is an ordinary group,
+// which the tenant can detach and delete. (Attaching one is refused, so this is a group older than that refusal.)
 func (s *Service) DeleteWorkerGroup(ctx context.Context, projectID, clusterID string) error {
 	id, err := s.WorkerGroup(ctx, projectID, clusterID)
 	if err != nil || id == "" {
+		return err
+	}
+	if user, err := s.groupUser(ctx, projectID, id, clusterID); err != nil || user != "" {
 		return err
 	}
 	return s.DeleteSecurityGroup(ctx, projectID, id)
@@ -217,7 +252,7 @@ func (s *Service) secureWorkers(ctx context.Context, workers []ClusterResource, 
 	var errs []error
 	for _, vm := range workers {
 		st := WorkerState{VMID: vm.VMID, Name: vm.Name, Node: vm.Node, Status: vm.Status}
-		if group != "" && vm.Status == "running" && !vm.NodeDown {
+		if group != "" && vm.Status == "running" { // a worker on a node that is down reads "unknown" (markNodeDown)
 			changed, err := s.secureWorker(ctx, vm.Node, vm.VMID, group, addrs, apply)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("pve worker firewall: VM %d (%s): %w", vm.VMID, vm.Name, err))
@@ -314,8 +349,12 @@ func (s *Service) secureWorker(ctx context.Context, node string, vmid int, group
 
 // UnsecureClusterWorkers takes the firewall off every worker of the cluster and deletes its group: the way back
 // from SecureClusterWorkers. The VM firewall is switched off first, which stops all filtering at once; the NIC flag
-// and the IP filter set stay and do nothing without it. A worker that cannot be changed keeps the group, and with it
-// the cluster stays protected.
+// and the IP filter set stay and do nothing without it.
+//
+// It refuses before it writes when it could not finish: a worker on a node that is down cannot be written (it would
+// come back dropping everything, with a reference to a group that is gone), and a group another server of the project
+// references cannot be deleted from under it. A write that fails part-way keeps the group, so the cluster stays
+// protected and the next sync puts the firewall back on every worker.
 func (s *Service) UnsecureClusterWorkers(ctx context.Context, projectID, clusterID string) error {
 	group, err := s.WorkerGroup(ctx, projectID, clusterID)
 	if err != nil || group == "" {
@@ -325,7 +364,18 @@ func (s *Service) UnsecureClusterWorkers(ctx context.Context, projectID, cluster
 	if err != nil {
 		return err
 	}
-	for _, vm := range workersOf(vms, s.PoolFor(projectID), clusterID) {
+	workers := workersOf(vms, s.PoolFor(projectID), clusterID)
+	for _, vm := range workers {
+		if vm.NodeDown {
+			return conflictf("Worker VM %d is on node %s, which is down, so its firewall cannot be changed. Nothing was changed: try again when the node is back", vm.VMID, vm.Node)
+		}
+	}
+	if user, err := s.groupUser(ctx, projectID, group, clusterID); err != nil {
+		return err
+	} else if user != "" {
+		return conflictf("The cluster's security group is also used by server %s. Nothing was changed: detach it from that server first", user)
+	}
+	for _, vm := range workers {
 		if err := s.C.SetVMFirewallOptions(ctx, vm.Node, vm.VMID, map[string]string{"enable": "0"}); err != nil {
 			return fmt.Errorf("pve worker firewall: VM %d (%s): %w", vm.VMID, vm.Name, err)
 		}

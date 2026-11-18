@@ -175,6 +175,86 @@ func TestWorkerFirewallSecure(t *testing.T) {
 	}
 }
 
+// A cluster's group is deleted with the cluster and by "Remove the worker firewall", so it never goes on an ordinary
+// server: not by attach, not at create. A group of that form already on a server (attached before this refusal) is
+// not deleted from under it.
+func TestWorkerGroupStaysOffServers(t *testing.T) {
+	ctx := context.Background()
+	fake, s := newSandboxFake(t)
+	f := testWorkerFirewall()
+	web := fake.addVM(203, "web", "pc-p1", "virtio=BC:24:11:00:00:03,bridge=vtenant")
+	web.tags = "proxcloud"
+	group, err := s.EnsureWorkerGroup(ctx, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.writes = nil
+	var ce *ConflictError
+	if err := s.AttachSecurityGroup(ctx, "p1", "203", group); !errors.As(err, &ce) || !strings.Contains(ce.Msg, "Kubernetes cluster") {
+		t.Fatalf("attach of a cluster group to a server: %v", err)
+	}
+	if _, err := s.CreateServer(ctx, CreateServerReq{ProjectID: "p1", Name: "web2", SecurityGroups: []string{group}}); !errors.As(err, &ce) {
+		t.Fatalf("create of a server with a cluster group: %v", err)
+	}
+	if len(fake.writes) != 0 || len(web.rules) != 0 {
+		t.Fatalf("a refused group writes nothing: %v", fake.writes)
+	}
+	// Another project's group of that name is not this project's business; a plain group still passes.
+	if err := s.refuseWorkerGroups(ctx, "p2", []string{group}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The server references the group all the same.
+	web.rules = []FirewallRule{{Type: "group", Action: group, Enable: 1}}
+	if err := s.UnsecureClusterWorkers(ctx, "p1", f.ClusterID); !errors.As(err, &ce) || !strings.Contains(ce.Msg, "web") {
+		t.Fatalf("remove while a server uses the group: %v", err)
+	}
+	if err := s.DeleteWorkerGroup(ctx, "p1", f.ClusterID); err != nil {
+		t.Fatalf("the release leaves a referenced group and goes on: %v", err)
+	}
+	if len(fake.writes) != 0 || len(fake.groups) != 1 {
+		t.Fatalf("a referenced group must stay: wrote %v, groups %v", fake.writes, fake.groups)
+	}
+	web.rules = nil
+	if err := s.DeleteWorkerGroup(ctx, "p1", f.ClusterID); err != nil || len(fake.groups) != 0 {
+		t.Fatalf("an unreferenced group goes with the cluster: %v, groups %v", err, fake.groups)
+	}
+}
+
+// A worker on a node that is down is not written by the pass, and holds back Remove before anything is written: it
+// would come back dropping everything with a reference to a group that is gone.
+func TestWorkerFirewallNodeDown(t *testing.T) {
+	ctx := context.Background()
+	fake, s := newSandboxFake(t)
+	f := testWorkerFirewall()
+	addrs := workerAddrs(f)
+	tag := "proxcloud;" + WorkerTagPrefix + f.ClusterID
+	up := fake.addVM(201, f.ClusterID+"-default-pve1-abc", "pc-p1", "virtio=BC:24:11:00:00:01,bridge=vtenant")
+	up.tags = tag
+	down := fake.addVM(202, f.ClusterID+"-default-pve2-def", "pc-p1", "virtio=BC:24:11:00:00:02,bridge=vtenant")
+	down.tags, down.node = tag, "pve2"
+	group, err := s.EnsureWorkerGroup(ctx, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	states, err := s.SecureClusterWorkers(ctx, "p1", f.ClusterID, group, addrs)
+	if err != nil || len(states) != 2 || !states[0].Secured || states[1].Secured || len(down.rules) != 0 || len(down.opts) != 0 {
+		t.Fatalf("the pass skips the worker it cannot reach: %+v %v", states, err)
+	}
+	fake.writes = nil
+	var ce *ConflictError
+	if err := s.UnsecureClusterWorkers(ctx, "p1", f.ClusterID); !errors.As(err, &ce) || !strings.Contains(ce.Msg, "pve2") {
+		t.Fatalf("remove with a worker on a down node: %v", err)
+	}
+	if len(fake.writes) != 0 || up.opts["enable"] != "1" {
+		t.Fatalf("a refused remove writes nothing: %v", fake.writes)
+	}
+	down.node = ""
+	if err := s.UnsecureClusterWorkers(ctx, "p1", f.ClusterID); err != nil || len(fake.groups) != 0 {
+		t.Fatalf("remove once the node is back: %v", err)
+	}
+}
+
 // A tenant cannot attach a group to a worker row, or take the cluster's group off it.
 func TestWorkerRefusesSecurityGroupChanges(t *testing.T) {
 	ctx := context.Background()
@@ -190,17 +270,30 @@ func TestWorkerRefusesSecurityGroupChanges(t *testing.T) {
 	if err := s.AttachSecurityGroup(ctx, "p1", "201", id); !errors.As(err, &ce) || !strings.Contains(ce.Msg, "worker node") {
 		t.Fatalf("attach: %v", err)
 	}
-	if err := s.DetachSecurityGroup(ctx, "p1", "201", id); !errors.As(err, &ce) {
-		t.Fatalf("detach: %v", err)
+	own, err := s.EnsureWorkerGroup(ctx, WorkerFirewall{ProjectID: "p1", ClusterID: "pc-c-0a1b2c3d", Workers: []string{"10.100.0.10"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.rules = []FirewallRule{{Type: "group", Action: own, Enable: 1}, {Type: "group", Action: id, Enable: 1}}
+	fake.writes = nil
+	if err := s.DetachSecurityGroup(ctx, "p1", "201", own); !errors.As(err, &ce) {
+		t.Fatalf("detach of the cluster's group: %v", err)
 	}
 	if len(fake.writes) != 0 {
 		t.Fatalf("a refused change writes nothing: %v", fake.writes)
+	}
+	// A group attached before attaching was refused can still be taken off.
+	if err := s.DetachSecurityGroup(ctx, "p1", "201", id); err != nil || len(w.rules) != 1 || w.rules[0].Action != own {
+		t.Fatalf("detach of an older group from a worker: %v, rules %+v", err, w.rules)
 	}
 }
 
 func TestWorkerNames(t *testing.T) {
 	if !IsWorkerGroupName("k8s-pc-c-0a1b2c3d") || IsWorkerGroupName("web-k8s-") || IsWorkerGroupName("default") {
 		t.Fatal("only names starting with k8s- are reserved for clusters")
+	}
+	if id, ok := WorkerGroupCluster("k8s-pc-c-0a1b2c3d"); !ok || id != "pc-c-0a1b2c3d" {
+		t.Fatalf("cluster of a group name: %q %v", id, ok)
 	}
 	if !IsWorkerVM("proxcloud;fl-small;pc-k8s-pc-c-0a1b2c3d") || IsWorkerVM("proxcloud;fl-small") || IsWorkerVM("") {
 		t.Fatal("a worker is a VM with a pc-k8s-<cluster> tag")

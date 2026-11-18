@@ -12,8 +12,10 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
@@ -29,6 +31,28 @@ var (
 	workerFirewallWatch  = 40 * time.Second
 	workerFirewallPoll   = 5 * time.Second
 )
+
+// workerFirewallMu serializes Protect, Remove and the provider sync's pass. Without it a pass that listed a new group
+// could write DROP on a worker after a failed Protect had taken the firewall off and deleted the group, and a pass
+// that got in before Protect's own write would leave Protect nothing to verify.
+// ponytail: one lock for every provider, in this process. A Protect holds it for up to a minute, which a 15-minute
+// sync can wait for. More than one API replica needs a database lock (as the SDN apply has) instead.
+var workerFirewallMu sync.Mutex
+
+// isClusterGroup reports the security group of one of the project's Kubernetes clusters: the name has the reserved
+// form and the project has that cluster. A tenant's own group of that form (made before the names were reserved) is
+// not one.
+func (h *Handler) isClusterGroup(ctx context.Context, projectID, name string) (bool, error) {
+	id, ok := pve.WorkerGroupCluster(name)
+	if !ok {
+		return false, nil
+	}
+	clusters, err := h.cloud.FindByProjectAndType(ctx, projectID, cloud.TypeKubernetesCluster)
+	if err != nil {
+		return false, err
+	}
+	return slices.ContainsFunc(clusters, func(c cloud.CloudResource) bool { return c.ExternalID == id }), nil
+}
 
 // WorkerFirewallReport is the operator's view of one cluster's worker firewall.
 type WorkerFirewallReport struct {
@@ -95,16 +119,24 @@ func (h *Handler) workerFirewallTarget(ctx context.Context, ks *kamaji.Service, 
 	if err != nil {
 		return nil, f, nil, err
 	}
-	f = pve.WorkerFirewall{ProjectID: proj.ID, ClusterID: clusterID, CIDRPool: compute.PVENetworkConfig().CIDRPool}
-	for _, lb := range info.LoadBalancers {
+	f = splitClusterAddresses(addrs, info.LoadBalancers)
+	f.ProjectID, f.ClusterID, f.CIDRPool = proj.ID, clusterID, compute.PVENetworkConfig().CIDRPool
+	return ps, f, addrs, nil
+}
+
+// splitClusterAddresses tells a cluster's reserved addresses apart: the ones its chart gave MetalLB ("<address>/32")
+// are load balancer addresses, the rest are for workers.
+func splitClusterAddresses(reserved, metallb []string) pve.WorkerFirewall {
+	var f pve.WorkerFirewall
+	for _, lb := range metallb {
 		f.LoadBalancers = append(f.LoadBalancers, strings.TrimSuffix(lb, "/32"))
 	}
-	for _, a := range addrs {
+	for _, a := range reserved {
 		if !slices.Contains(f.LoadBalancers, a) {
 			f.Workers = append(f.Workers, a)
 		}
 	}
-	return ps, f, addrs, nil
+	return f
 }
 
 // ClusterWorkerFirewall reports a cluster's worker firewall and writes nothing.
@@ -157,6 +189,8 @@ func (h *Handler) ProtectClusterWorkers(ctx context.Context, ks *kamaji.Service,
 	if err != nil {
 		return nil, err
 	}
+	workerFirewallMu.Lock()
+	defer workerFirewallMu.Unlock()
 	return protectClusterWorkers(ctx, ps, tenant, f, addrs)
 }
 
@@ -239,15 +273,24 @@ func (h *Handler) UnprotectClusterWorkers(ctx context.Context, ks *kamaji.Servic
 	if err != nil {
 		return nil, err
 	}
+	workerFirewallMu.Lock()
+	defer workerFirewallMu.Unlock()
 	if err := ps.UnsecureClusterWorkers(ctx, f.ProjectID, clusterID); err != nil {
-		return nil, upstreamErr(computeBackend, err)
+		return nil, pveVolumeErr(err) // a refusal (a node down, the group on another server) keeps its 409 and its words
 	}
 	return workerFirewallReport(ctx, ps, f, addrs)
 }
 
-// ReconcileWorkerFirewalls is the provider sync's pass over one Proxmox provider (pve.ReconcileWorkerFirewalls).
+// ReconcileWorkerFirewalls is the provider sync's pass over one Proxmox provider (pve.ReconcileWorkerFirewalls). It
+// acts on a group only for a Kubernetes cluster the group's project has: a tenant's own group named k8s-<something>
+// switches nothing on.
 func (h *Handler) ReconcileWorkerFirewalls(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error {
-	return ps.ReconcileWorkerFirewalls(ctx, func(ctx context.Context, _, clusterID string) ([]string, error) {
+	workerFirewallMu.Lock()
+	defer workerFirewallMu.Unlock()
+	return ps.ReconcileWorkerFirewalls(ctx, func(ctx context.Context, projectID, clusterID string) ([]string, error) {
+		if held, err := h.isClusterGroup(ctx, projectID, pve.WorkerGroupName(clusterID)); err != nil || !held {
+			return nil, err
+		}
 		return h.clusterAddresses(ctx, es.ID, clusterID)
 	})
 }

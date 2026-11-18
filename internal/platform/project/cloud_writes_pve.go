@@ -754,7 +754,12 @@ func (h *Handler) pveDeleteResource(ctx context.Context, es *externalservice.Ext
 		if sg, _ := cr.Data["securityGroup"].(map[string]any); strAny(sg["name"]) == pve.DefaultSecurityGroupName {
 			return httpx.NewError(http.StatusConflict, http.StatusConflict, "The default security group cannot be deleted")
 		}
-		if sg, _ := cr.Data["securityGroup"].(map[string]any); pve.IsWorkerGroupName(strAny(sg["name"])) {
+		// Only the group of a cluster the project has: a group of that form from before the names were reserved is
+		// the tenant's own.
+		sg, _ := cr.Data["securityGroup"].(map[string]any)
+		if held, err := h.isClusterGroup(ctx, proj.ID, strAny(sg["name"])); err != nil {
+			return err
+		} else if held {
 			return httpx.NewError(http.StatusConflict, http.StatusConflict, "This security group belongs to a Kubernetes cluster and is deleted with it")
 		}
 		inUse, err := ps.SecurityGroupInUse(ctx, proj.ID, cr.ExternalID)
