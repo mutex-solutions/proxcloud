@@ -181,8 +181,8 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
     <StepCard n={1} title="Settings" description="What gets built and where. Saving keeps a draft: nothing is created on Proxmox until you press Install.">
       {installed ? (
         <p className="text-sm text-muted-foreground">
-          The name, the network, the seed's node and address and the API address were fixed by the first successful install. To change
-          them, remove the installation and install again.
+          The name, the network, the seed's node and address, the API address and the control plane's node were fixed by the first
+          successful install. To change them, remove the installation and install again.
         </p>
       ) : null}
       <datalist id="pf-nodes">{nodes.map((n) => <option key={n} value={n} />)}</datalist>
@@ -307,7 +307,7 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
 
       <H3>Control plane</H3>
       <div className="grid gap-4 sm:grid-cols-2">
-        <Field id="cpNode" label="Control plane node" list="pf-nodes" value={form.cpNode} onChange={set("cpNode")} disabled={!canManage} problems={problems} placeholder="pve1"
+        <Field id="cpNode" label="Control plane node" list="pf-nodes" value={form.cpNode} onChange={set("cpNode")} disabled={fixed} problems={problems} placeholder="pve1"
           hint="Every control plane machine of the platform cluster runs on this node." />
         <Sizes id="cp" what="Control plane" value={form.cp} onChange={(m) => setForm({ ...form, cp: m })} problems={problems} disabled={!canManage} />
         <div className="grid content-start gap-1.5 sm:col-span-2">

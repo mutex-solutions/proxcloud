@@ -742,8 +742,17 @@ only it can read (overlap with `cidrPool`, sandbox and public networks, and that
 a tenant network).
 
 Fixed after the first successful install (`409 fixed_fields`): the name, the network, the seed's node
-and address, the API address and the set of node groups. Sizes, counts, the nodes of a group, the
-ranges, the stores, the SSH keys and the API sources can change; **Apply this release** applies them.
+and address, the API address, the control plane's node and the set of node groups. Sizes, counts, the
+nodes of a group, the ranges, the stores, the SSH keys and the API sources can change; **Apply this
+release** applies them.
+
+The control plane's node is fixed because every control plane machine is on it: another node means
+each of them made anew on that node, which no lab has run. To move it, remove the installation and
+install again. A group's nodes are not fixed. A node you add gets machines of the group. A node you
+take away loses its machines of the group at the next apply: a volume on a store that is local to
+that node stays there, and a pod that uses it does not start on another node. The API cannot refuse
+that safely, because it does not record on which nodes a run built machines; it changes a group's
+nodes only when the request names them. Not run on a lab.
 The provider of an installation never changes. No route deletes a draft.
 
 A save is refused during a run (`409 run_active`), and when someone else saved since the page read
@@ -767,7 +776,12 @@ has always started from. Disk sizes are left as they are (30 GiB for the seed an
 plane, 40 GiB for a group machine).
 
 The API takes the same choice as `preset` (`homelab`, `standard`, `custom`) next to `spec` on a
-create or an update. It fills only what the spec leaves out: a value the caller gives always stays,
+create, or on an update of an installation that is not installed yet. On an installed platform the
+API refuses `homelab` and `standard` (`409 fixed_fields`), as the page switches them off, and a
+spec that leaves out the control plane or the node groups keeps the stored ones: nothing is filled
+from a preset or a default on a platform that runs. Up to this fix the API took a preset there and
+put its node, sizes and counts where the spec named none (found on a lab on 2026-11-19; the fix is
+covered by tests, not run on a lab). On a draft a preset fills only what the spec leaves out: a value the caller gives always stays,
 a node nobody names is the seed's, and the answer carries the whole spec. `standard` through the API
 asks for three control plane machines where the installation's release builds them and for one
 where it does not; it does not read the node's memory, so the Check row `capacity` then says

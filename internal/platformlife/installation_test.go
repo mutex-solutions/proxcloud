@@ -3,6 +3,7 @@ package platformlife
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -239,11 +240,42 @@ func TestFixedChanges(t *testing.T) {
 		{[]string{"spec.clusters[0].name", "spec.clusters[0].endpoint"}, func(n *Installation) {
 			n.Spec.Clusters[0].Name, n.Spec.Clusters[0].Endpoint = "pc-other", "10.200.200.21"
 		}},
+		{[]string{"spec.clusters[0].controlPlane.node"}, func(n *Installation) { n.Spec.Clusters[0].ControlPlane.Node = "pve2" }},
 		{[]string{"spec.clusters[0].nodeGroups"}, func(n *Installation) { n.Spec.Clusters[0].NodeGroups[2].Name = "sandbox" }},
 		{[]string{"spec.clusters"}, func(n *Installation) { n.Spec.Clusters = nil }},
 	} {
 		if f := FixedChanges(old, next(tc.mut)); !slices.Equal(f, tc.want) {
 			t.Errorf("after the first run: got %v, want %v", f, tc.want)
 		}
+	}
+}
+
+// A spec for an installed platform keeps the stored machines where it names none (missing = keep), and takes a
+// machine it names as sent.
+func TestKeepMachines(t *testing.T) {
+	old := validInstallation(t)
+	old.Spec.Clusters[0].ControlPlane.Replicas = 3
+	// No controlPlane and no nodeGroups: both stay as stored; what the cluster does name is the request's.
+	next := validInstallation(t).Spec
+	next.Clusters[0].ControlPlane, next.Clusters[0].NodeGroups, next.Clusters[0].MetalLBRange = Machine{}, nil, "10.200.200.200-10.200.200.230"
+	KeepMachines(&old.Spec, &next)
+	if c := next.Clusters[0]; !reflect.DeepEqual(c.ControlPlane, old.Spec.Clusters[0].ControlPlane) || !reflect.DeepEqual(c.NodeGroups, old.Spec.Clusters[0].NodeGroups) ||
+		c.MetalLBRange != "10.200.200.200-10.200.200.230" {
+		t.Errorf("a spec without machines: %+v", c)
+	}
+	// A machine the spec names is not filled from the stored one, field by field: it is checked as sent.
+	next = validInstallation(t).Spec
+	next.Clusters[0].ControlPlane = Machine{Node: "pve1", Cores: 4}
+	next.Clusters[0].NodeGroups = next.Clusters[0].NodeGroups[:1]
+	KeepMachines(&old.Spec, &next)
+	if c := next.Clusters[0]; !reflect.DeepEqual(c.ControlPlane, Machine{Node: "pve1", Cores: 4}) || len(c.NodeGroups) != 1 {
+		t.Errorf("a spec that names machines: %+v", c)
+	}
+	// No cluster at all keeps the stored clusters.
+	next = validInstallation(t).Spec
+	next.Clusters = nil
+	KeepMachines(&old.Spec, &next)
+	if !reflect.DeepEqual(next.Clusters, old.Spec.Clusters) {
+		t.Errorf("a spec without clusters: %+v", next.Clusters)
 	}
 }

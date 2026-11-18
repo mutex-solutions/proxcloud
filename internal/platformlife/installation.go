@@ -707,8 +707,8 @@ func (in *Installation) Unfenced(fenced []string) []string {
 func (in *Installation) Installed() bool { return in.Status.BOM != nil }
 
 // FixedChanges names the fields next changes that may not change: the provider always; once a run succeeded also the
-// path (but for installer, which Validate refuses: such a record can only be corrected), the layout, the name, the network, the seed's mode, pool, node and address, and each cluster's name, endpoint
-// and node groups. Before that nothing was built, so a draft can be corrected (no route deletes one).
+// path (but for installer, which Validate refuses: such a record can only be corrected), the layout, the name, the network, the seed's mode, pool, node and address, and each cluster's name, endpoint,
+// control plane node and node groups. Before that nothing was built, so a draft can be corrected (no route deletes one).
 func FixedChanges(old, next *Installation) []string {
 	var out []string
 	same := func(field string, a, b any) {
@@ -745,6 +745,10 @@ func FixedChanges(old, next *Installation) []string {
 		f := fmt.Sprintf("spec.clusters[%d]", i)
 		same(f+".name", c.Name, n.Name)
 		same(f+".endpoint", c.Endpoint, n.Endpoint)
+		// Every control plane machine is on this node: another node means each of them made anew there, which no
+		// lab has run. A group's nodes are not fixed: a node is added to scale out, and the status does not record
+		// which nodes a run built on, so a refusal would also hold a node that was saved by mistake and never built.
+		same(f+".controlPlane.node", c.ControlPlane.Node, n.ControlPlane.Node)
 		groups := func(gs []NodeGroup) (names []string) {
 			for _, g := range gs {
 				names = append(names, g.Name)
@@ -754,6 +758,27 @@ func FixedChanges(old, next *Installation) []string {
 		same(f+".nodeGroups", groups(c.NodeGroups), groups(n.NodeGroups))
 	}
 	return out
+}
+
+// KeepMachines makes a spec sent for an installed platform keep the stored machines where it names none: no cluster at
+// all keeps the stored clusters, a cluster without controlPlane keeps the stored control plane, a cluster without
+// nodeGroups keeps the stored groups. Missing means keep, never a default: on a platform that runs, a default would
+// move, resize or recount machines that the caller did not name (lab round of 2026-11-19, finding P1). A machine the
+// spec does name is taken as sent, and checked as before.
+func KeepMachines(old, next *Spec) {
+	if len(next.Clusters) == 0 {
+		next.Clusters = slices.Clone(old.Clusters)
+		return
+	}
+	for i := range min(len(old.Clusters), len(next.Clusters)) {
+		c, o := &next.Clusters[i], old.Clusters[i]
+		if reflect.DeepEqual(c.ControlPlane, Machine{}) {
+			c.ControlPlane = o.ControlPlane
+		}
+		if len(c.NodeGroups) == 0 {
+			c.NodeGroups = slices.Clone(o.NodeGroups)
+		}
+	}
 }
 
 // ControlPlaneShrink is why next may not be saved over old, or "": a control plane a run built with 3 machines does

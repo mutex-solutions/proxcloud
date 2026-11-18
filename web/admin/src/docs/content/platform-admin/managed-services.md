@@ -49,7 +49,7 @@ Saving keeps a draft. Nothing is created on Proxmox until you press **Install**,
 
 The page checks the addresses as you save: everything inside the network, no overlaps, and a machine range that is large enough. ProxCloud then checks what only it knows, for example that the network does not overlap the address pool of tenant networks.
 
-After the first successful install these are fixed: the name, the network, the seed's node and address, and the API address. To change them, remove the installation and install again.
+After the first successful install these are fixed: the name, the network, the seed's node and address, the API address and the control plane's node. To change them, remove the installation and install again.
 
 ## Step 2: Proxmox identities
 

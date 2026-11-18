@@ -198,6 +198,9 @@ type tokenView struct {
 }
 
 func (h *Handler) platformView(r *http.Request, in *platformlife.Installation) (*installationView, error) {
+	// Answered as a save would store it: an installation saved before v0.9.0 has no controlPlane.replicas, which
+	// means 1, and the answer names it (docs/api.md). The stored document is not written.
+	in.Normalize()
 	v := &installationView{Installation: in}
 	if !h.jobsScheduler {
 		v.SchedulerNote = platformlife.SchedulerOffNote
@@ -261,7 +264,9 @@ func (h *Handler) platformGet(w http.ResponseWriter, r *http.Request) {
 
 // installationRequest is the body of a create and of an update. serviceId, provisionedBy and layout may be left out of
 // an update; rev is the one the update read. preset (homelab, standard or custom) fills what the spec leaves out
-// (platformlife.ApplyPreset) before the checks and is not stored: the answer carries the whole spec.
+// (platformlife.ApplyPreset) before the checks and is not stored: the answer carries the whole spec. On an installed
+// platform a preset other than custom is refused (409 fixed_fields) and what the spec leaves out of its machines keeps
+// the stored values (platformlife.KeepMachines).
 type installationRequest struct {
 	Name          string            `json:"name"`
 	Preset        string            `json:"preset"`
@@ -375,6 +380,16 @@ func (h *Handler) platformUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		if h.esSvc == nil {
 			return nil, serviceNotFoundErr(next.ServiceID)
+		}
+		if old.Installed() {
+			// A preset fills a draft. On a platform that runs it would put its own node, sizes and counts where the
+			// spec names none, and the next apply would replace every machine.
+			if req.Preset != "" && req.Preset != platformlife.PresetCustom {
+				why := "A preset fills the settings of a platform that is not installed yet. This platform is installed: leave preset out and send the settings to change. " +
+					"A spec that names no control plane or no node groups keeps the stored ones."
+				return nil, &invalidInstallation{status: http.StatusConflict, code: "fixed_fields", msg: why, problems: []string{"preset"}}
+			}
+			platformlife.KeepMachines(&old.Spec, &next.Spec)
 		}
 		if err := h.checked(r, &next, req.Preset); err != nil {
 			return nil, err

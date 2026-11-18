@@ -624,12 +624,14 @@ provider (`internal/platformlife`, collection `platformInstallation`, one per
 are several, `errors.details.problems`.
 
 - `GET|POST /installations`: list; create `{name, serviceId, provisionedBy?,
-  layout?, preset?, spec}` in phase `draft`. `preset` (`homelab`, `standard` or `custom`; also on the PUT) fills what
+  layout?, preset?, spec}` in phase `draft`. `preset` (`homelab`, `standard` or `custom`; also on the PUT of an
+  installation that is not installed yet) fills what
   `spec` leaves out before the checks and is not stored: sizes, counts, the three node groups, the control plane's
   node (the seed's) and its count (`standard`: 3 where the installation's release builds three, else 1), and for
   `homelab` with every machine of the spec on one node and no bridge named a `routed` network on the vnet
   `pcplat0` ([the table](managed-services.md#presets-and-the-control-plane-count)). An unknown preset is a
-  `400 invalid_installation`. `spec` has `pveApiUrl`, `storage {boot,
+  `400 invalid_installation`. On an installed platform a preset other than `custom` is a `409 fixed_fields`
+  (below). `spec` has `pveApiUrl`, `storage {boot,
   iso, import}` (import defaults to the provider's `importStorage`), `network
   {mode, bridge, vlan, prefix, gateway, dns[], mtu}` (`mode`: `bridge`, also what a spec without it means, or
   `routed`, where `bridge` names a vnet the install makes and every machine is on one node; `vlan`: 1 to 4094, mode
@@ -662,7 +664,12 @@ are several, `errors.details.problems`.
   always; once a run succeeded also `provisionedBy` (but a stored `installer`
   may become `portal`), `layout`, `name`,
   `spec.network`, the seed's mode, pool, node and address, and the cluster's
-  name, endpoint and node groups. A control plane count below the one a run built (`status.clusters[].controlPlaneReplicas`,
+  name, endpoint, `controlPlane.node` and node groups (their names: a group's `nodes`, count and size can change).
+  Once a run succeeded a `preset` other than `custom` is the same `409 fixed_fields` (`problems`: `preset`), with
+  every spec, and nothing is stored: a preset fills a draft. On such a platform a spec that leaves out
+  `clusters`, a cluster's `controlPlane` or its `nodeGroups` keeps the stored ones (missing means keep, never
+  a default); a `controlPlane` or a group that is sent is taken as sent and checked whole.
+  A control plane count below the one a run built (`status.clusters[].controlPlaneReplicas`,
   written by stage 7 before it hands a count above one to the cluster; absent means one) is the same
   `409 fixed_fields`, with the reason as its message: 3 to 1. From 1 to 3 is saved, and a 3 no run built goes back to
   1. A count above one on an installation whose BOM names a cluster chart older than 0.1.14 is a
