@@ -75,7 +75,7 @@ reading [section 3](#3-proxmox-identities): they share the pool `proxcloud-syste
 | An encryption key | `PROXCLOUD_ENCRYPTION_DEFAULT_KEY`. Without it the token secrets cannot be stored (`409 no_encryption_key`). The Compose install generates one. |
 | A Proxmox provider | Saved, with its connection checks passing (Platform setup, steps 1 and 2). One installation per Proxmox provider; the page shows the installation of the first one. |
 | A GitHub integration | System → Integrations. Template updates finds and downloads the two images through it. |
-| Permissions | `admin:service:read` to read the page, `admin:service:manage` for every button, the Check and the seed kubeconfig download included. |
+| Permissions | `admin:service:read` to read the page, `admin:service:manage` for every button, the Check and the two kubeconfig downloads included. |
 | A platform network | One bridge that exists on every node used, untagged (no VLAN), with a free IPv4 network from /8 to /29, a gateway and one to three DNS servers. It must not overlap the provider's tenant address pool (`cidrPool`), a sandbox network or a public network. |
 | Routes | The API (on Compose: the API container) reaches the Proxmox API, the seed address on 6443 and the cluster's API address on 6443. The seed and the cluster machines reach the Proxmox API URL you enter, `github.com` and `raw.githubusercontent.com` (at first boot the seed downloads the k3s binary from the first and the k3s install script from the second, both checked by sha256; GitHub redirects a release download to another host of its own, which must be reachable too and is not named in the BOM) and the registries of the BOM (`ghcr.io`, which serves every chart: ours and the third-party ones of the chart mirror, `ghcr.io/mutex-solutions/charts-mirror`; and the image registries those charts pull from). Tenant networks must reach the load balancer range and nothing else of the platform network. |
 | Storage | A boot store that takes VM disks on every node used; an ISO store that is local to each node and takes ISOs (default `local`); an import store with `import` content on every node an image goes to (default: the provider's `importStorage`). The import store must not be the boot store: the portal token holds `PVEDatastoreAdmin` on the import store, which reaches every disk on it ([section 10](#10-security-boundaries)). The API refuses settings that name the same store for both; the form says so before it saves when you type the same store in both fields. An empty import store takes the provider's `importStorage`, so it is refused too when that is the boot store. The import store of the settings and the provider's `importStorage` must be one store: the script of step 2 is written for the store of the settings, and the `privileges:kubemint` check reads the provider's ([when the provider's import store is the boot store](#when-the-providers-import-store-is-the-boot-store)). |
@@ -433,6 +433,67 @@ control plane and the worker machines, the two providers), the cores and memory 
 installed platform the plan (`GET …/plan`). **Install** (later **Apply this release**) starts a run
 (`POST …/runs {kind: apply}`). You can leave the page; the run goes on.
 
+### After the install
+
+A ready installation shows one card. Nothing on it is verified on a lab; the tests behind it use a
+fake seed and a fake cluster.
+
+**Endpoints.** Four addresses, all on the platform network:
+
+| Row | From | What answers there |
+|---|---|---|
+| Seed API | `status.seed.apiServer` | The seed's k3s, `https://<seed address>:6443`. The seed's firewall lets in only the seed API sources of the settings |
+| Platform cluster API | `status.clusters[0].endpoint` | The cluster's API, `https://<API address>:6443` (kube-vip) |
+| Load balancer range (MetalLB) | `spec.clusters[0].metallbRange` | The addresses of pool `services`: tenant database endpoints. Tenants reach them |
+| Node range | `spec.clusters[0].nodeRange` | The platform's machines |
+
+**Providers.** The two rows stage 10 registered, each with a link, and what a tenant cannot use
+yet. The page reads this from the provider rows (`GET /admin/service`):
+
+- *The Kubernetes provider offers no version.* The install registers it with an empty
+  `config.cluster.versions`, so every cluster create is refused with "this provider offers no
+  Kubernetes version yet". ProxCloud does not fill it in. Do two things: publish a Kubernetes node
+  image in **Template updates**, then enter the line it prints for the image
+  (`<version>=<node image id>`, [managed-k8s.md](managed-k8s.md)) on the provider's **Connection** tab. The row turns to "Offers Kubernetes <versions>" once one is set.
+- *Neither provider is attached to a project.* Both are created with
+  `attachToNewProjects: false`. On each provider's **Projects** tab, turn the policy on for new
+  projects and attach the existing ones. The card shows the policy only: whether an existing project
+  is attached it does not read.
+
+**Platform cluster access.** **Download platform kubeconfig** (`GET …/platform-kubeconfig`) saves
+`<name>-platform.kubeconfig`. It is described under
+[Credentials](#8-credentials-and-the-seed-backup): one hour, read access without Secrets, and the
+way into the cluster's ArgoCD.
+
+**Open ArgoCD.** There are two ArgoCD instances and v0.8.x gives neither an address: no Service of
+type LoadBalancer, no ingress, no URL (planned for v0.10.0, for the platform cluster's only). Both
+serve plain HTTP inside their cluster, so the way in is a port-forward from a machine that has
+`kubectl` and reaches the API address of the cluster. The card prints the commands with the
+installation's file names:
+
+| ArgoCD | What it holds | Kubeconfig | Local port |
+|---|---|---|---|
+| On the platform cluster | One Application per tenant cluster and tenant database | **Download platform kubeconfig** | 8080 |
+| On the seed | The platform's own components, the cluster itself included | **Download seed kubeconfig** | 8081 |
+
+```sh
+export KUBECONFIG=./<name>-platform.kubeconfig     # or ./<name>-seed.kubeconfig
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d; echo
+kubectl -n argocd port-forward svc/argocd-server 8080:80      # 8081:80 for the seed
+```
+
+The first command prints the password of user `admin`; the second runs until you stop it. Then open
+`http://localhost:8080` (or `:8081`). The Secret `argocd-initial-admin-secret` is the one ArgoCD
+writes at its first start; ProxCloud sets no password. If someone deleted it or changed the
+password in ArgoCD, the first command no longer gives a password that works, and ProxCloud cannot
+recover one. That the chart of this release (argo-cd 10.14.0) names the Service `argocd-server`
+with port 80 and writes that Secret is read from the chart's defaults, not seen on a lab.
+
+`admin` in an ArgoCD can deploy anything to the cluster it runs on, and the platform cluster's hosts
+every tenant control plane. Use it to look and to sync again. What you change by hand on a
+platform component, the next **Apply this release** writes back; a tenant Application is written
+again by the provider's next sync.
+
 ## 5. The stages of a run
 
 One run per installation at a time. The page reads the run every 3 seconds.
@@ -656,7 +717,8 @@ and are not deleted by this; delete those clusters from the projects first where
 |---|---|---|
 | `capmox@pve!capi`, `csi@pve!csi` | Encrypted in `platformSecret`; the first also in a Secret on the seed, the second in a Secret on the cluster | Create a new token secret in Proxmox (remove the token, run the script again), paste it in step 2, then **Apply this release**: stages 7 and 8 write the Secrets again. Not verified on a lab |
 | The seed credential (a service account token, cluster-admin on the seed) | Encrypted in `platformSecret` | **Replace the seed credential**: creates the next token Secret (`proxcloud-portal-token-g<n>`), checks it, stores it, then deletes the older ones, which ends their tokens. Refused during a run. If it stops halfway, press it again; the next apply also removes token Secrets nothing stores. The audit log gets one entry, `ROTATE_CREDENTIAL` on the installation, with the names of the token Secret before and after (`fromSecret`, `toSecret`) and never a token. A rotation that stopped after it had stored the new credential gets that entry with outcome `FAILURE`. The old token does not end at that instant: the seed's API server remembers a token it has checked for some seconds (measured on a lab: the old token still answered 6 to 7 seconds after the rotation had returned). **A seed backup taken before a rotation is of no use after it**: the archive holds only the older token Secret, a seed restored from it refuses the stored credential, and ProxCloud cannot make a new one on a ready seed (the bootstrap token is gone). So run a backup by hand right after every rotation, as root on the seed's node: `vzdump <seed VMID> --storage <backup store> --mode snapshot --compress zstd` ([step 5](#when-the-seed-does-not-answer)). That archive holds the seed's secrets: read the warning under **Seed backup** below before you choose the store |
-| The cluster's admin kubeconfig | On the seed only (Cluster API keeps it). A run reads it into memory | Not stored by ProxCloud |
+| The cluster's admin kubeconfig | On the seed only (Cluster API keeps it). A run reads it into memory, and so does a platform kubeconfig download, which never hands it out | Not stored by ProxCloud |
+| Service account `kube-system/proxcloud-break-glass` on the cluster, with ClusterRole and ClusterRoleBinding `proxcloud-break-glass` and Role and RoleBinding `proxcloud-break-glass` in `argocd` | On the cluster. It has no token Secret; written by the first platform kubeconfig download and again by each one | Deleting the service account ends every token issued for it. The next download creates it again |
 | The seed ArgoCD's token for the cluster | In the seed's cluster Secret only; valid one year | Renewed by any apply when under 90 days are left. The page shows the expiry and warns under 30 days |
 | The providers' kubeconfig (service account `proxcloud` on the cluster) | In the two provider rows' encrypted secret | Written again by every apply |
 | The seed's CA key, k3s token, bootstrap token | On the CD until stage 5 deletes it; the CA key is never stored by ProxCloud, the bootstrap token expires after 3 hours | None |
@@ -673,6 +735,37 @@ deletes the stored credential's token Secrets, not a token issued this way (meas
 kubeconfig downloaded before a rotation kept working after it). So rotating does not help when such a
 file has leaked: it stays valid until its hour is over, and ProxCloud offers nothing that ends it
 earlier. Treat the file as a root credential for one hour.
+
+**Platform kubeconfig.** **Download platform kubeconfig** on the ready card
+(`GET …/platform-kubeconfig`) is the same for the platform cluster, with less in it. ProxCloud reads
+the cluster's admin kubeconfig from the seed into memory (a long-lived client certificate that Cluster
+API issues; it is never handed out), writes the service account
+`kube-system/proxcloud-break-glass` with its roles on the cluster, asks the cluster for a one-hour
+token of that account and wraps the token in a kubeconfig. If the cluster grants a longer life than
+the hour, nothing is handed out (`502`). Same permission, same audit entry (`BREAK_GLASS`, with
+`operation: platform-kubeconfig`; the seed's has `seed-kubeconfig`), same refusal without the audit
+log, same JSON answer.
+
+What the token may do:
+
+| Where | What | Why |
+|---|---|---|
+| The whole cluster (ClusterRole) | `get`, `list`, `watch` on namespaces, nodes, pods and their logs, services, endpoints, events, config maps, volumes and claims, service accounts, quotas, and on every resource of the API groups of workloads, networking, storage, CRDs, metrics, ArgoCD, Kamaji, Cluster API (without its bootstrap group), CloudNativePG, MetalLB, Cilium and cert-manager | The read steps of this guide and of [managed-k8s.md](managed-k8s.md): Applications, tenant control planes, machines, pods |
+| Namespace `argocd` (Role) | `create` on `pods/portforward`; `get` on the Secret `argocd-initial-admin-secret` | The two ArgoCD commands |
+
+It reads no other Secret (a tenant cluster's admin kubeconfig and the providers' token are Secrets),
+no join token of Cluster API's bootstrap group, and it changes, deletes and executes nothing. The
+repair steps of the guides that write (`kubectl patch application`, `kubectl delete secret`) are
+left out on purpose: they need the admin kubeconfig, which the seed kubeconfig reads
+(`kubectl -n pc-platform get secret pc-platform-kubeconfig -o jsonpath='{.data.value}' | base64 -d`).
+
+This is a limit on `kubectl`, not on the holder. The file opens the cluster's ArgoCD as `admin`, and
+ArgoCD's own service accounts can change everything on the cluster. So whoever holds the file can,
+through ArgoCD, do what a cluster admin can, for as long as the admin password is unchanged, which
+is longer than the hour. Keep the file like an admin credential. To end a token before its hour,
+delete the service account with the admin kubeconfig
+(`kubectl -n kube-system delete serviceaccount proxcloud-break-glass`); the ArgoCD password is
+changed in ArgoCD. Neither was run on a lab.
 
 **Seed backup.** The seed holds what cannot be rebuilt from ProxCloud's database: the Cluster API
 state of the cluster's machines and the cluster's CA and admin kubeconfig. Nothing backs it up for
@@ -774,7 +867,8 @@ finish.
   the stored phase is `ready` (`?live=1` itself still reads the seed and carries `live.code`, with
   `live.phase: failed`). Nothing else changed. After the seed is repaired, **Retry** brings the
   installation back to `ready`; reloading the page does not.
-- **Download seed kubeconfig** and **Replace the seed credential** answer `502`.
+- **Download seed kubeconfig**, **Download platform kubeconfig** (it reaches the cluster through the
+  seed) and **Replace the seed credential** answer `502`.
 - **Remove managed services**: the seed VM exists, so the run asks Cluster API on it to delete the
   cluster, retries, and fails `seed_api_unreachable`. The option for a missing seed does not apply
   while the VM exists.
@@ -1206,6 +1300,12 @@ observed, except the figures this guide marks as seen on a lab:
 | L9 | Failure drills: `seed_not_booted`, `machine_failed`, a removed grant, a template deleted by hand |
 | L10 | Seed reboot, the backup job and a restore, Remove, and Remove with the seed gone. One clean reboot was run and **failed**: the seed's root filesystem came up in ext4 `emergency_ro` and its API never answered again. The cause was the image's stale ext4 superblock field, and the documented repair brought the seed back on 2026-11-17 ([When the seed does not answer](#when-the-seed-does-not-answer)); on a seed built from the fixed image two clean reboots then passed (same address and MAC, the pinned CA still valid, all components Synced and Healthy). One `vzdump` by hand with `--mode snapshot` passed, and one with `--compress zstd` (2.39 GiB in 1 minute 45 seconds); the scheduled job was not created and `--prune-backups` was not run. The restore was first refused by Proxmox over the protected seed; with the sequence of [step 5](#when-the-seed-does-not-answer) it was run once on 2026-11-17 and passed: a healthy seed restored over itself from a three-minute-old archive, Cluster API wrote nothing, the tenant cluster was not touched. Not run: an archive older than a credential rotation or a machine change, `qm stop` on a dead guest, `--unique`, a boot store other than ZFS, an archive of the scheduled job. Remove of a ready platform and Remove from a failed stage 7 passed |
 | L11 | Seed credential rotation and the expiry of the break-glass kubeconfig. The rotation and that a break-glass kubeconfig outlives it were measured; the `401` after the hour was not |
+
+Not run on a lab either, anything of [After the install](#after-the-install): the platform
+kubeconfig against a real cluster (that the token is granted for one hour, that the two roles admit
+exactly what the table says, that a `401` follows the hour), the two ArgoCD commands, and the name
+and port of the `argocd-server` Service and the Secret `argocd-initial-admin-secret` of chart
+argo-cd 10.14.0.
 
 Also not run: `onboot` set by stage 7 and a reboot of a node with it
 ([After a Proxmox node reboots](#after-a-proxmox-node-reboots)), the `machines` row against a real

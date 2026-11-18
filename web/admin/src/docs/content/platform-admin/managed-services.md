@@ -118,11 +118,18 @@ The failed stage shows a code, a message and what to do.
 
 ## When it is ready
 
-The page shows each component with its live state, read from the seed, and the two providers. They are created held back: new projects get them only after you attach them. Then:
+The page shows each component with its live state, read from the seed. Below that:
 
-1. Publish a Kubernetes node image for tenants in **Template updates** and enter its version on the Kubernetes provider. Until then tenants cannot create a cluster.
+- **Endpoints.** The address of the seed's API, the address of the platform cluster's API, the load balancer range and the range of the machines. All are on the platform network; the seed's API answers only for the seed API sources of the settings.
+- **Providers.** The two providers with a link each, and what tenants cannot use yet. The install sets no Kubernetes version on the Kubernetes provider, so the row says "Offers no Kubernetes version yet" until you enter one. Both providers are created held back: the row says so until you turn on the policy for new projects on the provider's **Projects** tab. Projects that existed before are attached on that tab too; the page does not read whether they are.
+- **Platform cluster access.** **Download platform kubeconfig** saves a kubeconfig that works for one hour. With `kubectl` it reads the cluster, without its Secrets, and changes nothing. It also opens the cluster's ArgoCD, whose admin can change everything on the cluster, so keep the file like an admin credential. The download is written to the audit log.
+- **Open ArgoCD.** There are two, one on the platform cluster (every tenant cluster and database) and one on the seed (the platform's own components). This release gives neither an address. The page prints two commands for each: one prints the password of user `admin`, the other forwards a local port; then open `http://localhost:8080` (platform cluster) or `http://localhost:8081` (seed). Run them on a machine that has `kubectl` and reaches the API address shown under Endpoints. The platform cluster's needs the platform kubeconfig, the seed's the seed kubeconfig. What you change by hand on a component, the next **Apply this release** writes back.
+
+Then:
+
+1. Publish a Kubernetes node image for tenants in **Template updates** and enter the line it prints for the image (`<version>=<node image id>`) on the Kubernetes provider's **Connection** tab. Until then tenants cannot create a cluster.
 2. Add a backup job for the seed VM. The page prints the command: a daily snapshot, compressed, of which seven are kept. The backup holds the seed's credentials: use a backup store that is not the boot, ISO or import store of the settings, and that no API token other than your own can read. The operator guide (docs/managed-services.md, "Credentials and the seed backup") gives the checks. The page cannot see whether a job exists.
-3. Attach the providers to projects, and add price rules for clusters and databases.
+3. Attach the providers to projects on each provider's **Projects** tab, and add price rules for clusters and databases.
 
 **Apply this release** in step 4 runs the stages again with the saved settings: it repairs what is missing, applies changed sizes and counts, and renews the seed's access to the platform cluster. A platform stays on the platform release that installed it. This release cannot yet move an installed platform to the components of a newer ProxCloud release: after a ProxCloud upgrade the review says that the platform stays on its release, lists that release's contents, and **Apply this release** runs with them. A platform installed by a development build is not kept this way: after an upgrade its run is refused with `bom_unsupported`.
 
