@@ -1214,8 +1214,9 @@ qm set <vmid> --onboot 1
 
 What this does not do, and what to do then:
 
-- **A machine Cluster API replaced** (a changed node group, a rollout) is a new VM without
-  `onboot` until the next apply. The Check's `machines` row names every such VM.
+- **A machine Cluster API replaced** (a changed node group, a rollout, a replaced worker) is a new
+  VM without `onboot` until the next apply, when its node image template has none. The Check's
+  `machines` row names every such VM. See "Start at boot from the template" below.
 - **A stopped machine is not started by ProxCloud.** The `machines` row names it with its node;
   start it in Proxmox or with `qm start <vmid>`. Start the control plane machine before the
   others if you start them by hand.
@@ -1225,7 +1226,27 @@ What this does not do, and what to do then:
   the rest, as root: `qm set <vmid> --startup order=1` on the seed, `order=2` on the control
   plane machine, `order=3` on the others. A replaced machine loses it.
 - **Tenant clusters' machines** are not touched by this: their VMs are made by the platform's
-  CAPMOX in tenant pools and have no `onboot`. After a node reboot start them in Proxmox.
+  CAPMOX in tenant pools. They have `onboot` only when their node image template has it (next
+  paragraph); the others must be started in Proxmox after a node reboot.
+
+**Start at boot from the template.** From v0.9.0 a Kubernetes node image that **Template updates**
+imports gets `onboot: 1` on the template itself. A Proxmox clone copies every option of its source
+except the disks, MACs and snapshot fields it rewrites, and CAPMOX v0.9.2 has no field for `onboot`
+and writes it nowhere (both read in code: `PVE/API2/Qemu.pm` on Proxmox VE 9.2, CAPMOX's
+`internal/service/vmservice`). So every machine cloned from such a template has it from its first
+boot: tenant workers, platform machines, and the replacement of either, with no call per VM. Stage
+7's pass above stays as the backstop for machines made from older templates. What it does not
+cover:
+
+- A template imported before v0.9.0, or built by the installer's image pipeline
+  (`images/build.py`), has no `onboot`; machines cloned from it get none. To add it, as root on the
+  node: `qm set <template vmid> --onboot 1`. Machines that exist already keep what they have
+  (`qm set <vmid> --onboot 1` on each, or for platform machines the next apply).
+- A tenant worker that is stopped stays stopped until its node boots: nothing starts it.
+- **Not tried on a lab:** that a clone made by CAPMOX carries the option, that Proxmox accepts
+  `onboot` on a template, and that it skips a template when it starts the VMs of a booting node
+  (it should: a template cannot be started). The template-updates smoke test sets `onboot: 0` on
+  its own clone, as before.
 
 Seen on a lab (2026-11-18, a platform installed by v0.8.0, then the build `dev-751a190` of main): the
 `machines` row warned for the four machines without `onboot`, the apply set it with the CAPI token,

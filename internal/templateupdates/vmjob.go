@@ -670,13 +670,21 @@ func (x *Executor) createAndImport(ctx context.Context, jobID string, p VMPayloa
 	if err := x.guard(ctx, f); err != nil {
 		return err
 	}
-	up, err := x.PVE.SetVMConfig(ctx, p.Node, vmid, map[string]string{
+	cfg := map[string]string{
 		"ostype": "l26", "cores": "2", "memory": "2048", "cpu": "host", "agent": "1",
 		"scsihw": "virtio-scsi-single", "serial0": "socket", "vga": "serial0", "boot": "order=scsi0",
 		"tags":           pve.TagManaged + ";" + OwnerTag(jobID),
 		"scsi0":          fmt.Sprintf("%s:0,discard=on,import-from=%s", p.DiskStorage, upload),
 		CloudInitSlot(p): p.DiskStorage + ":cloudinit",
-	})
+	}
+	// A Kubernetes node image starts with its Proxmox node: a clone copies the option from its template and CAPMOX
+	// has no field for it and never writes it, so every machine made from this template (a tenant worker, a platform
+	// machine, the replacement of either) comes back after a node reboot with no call per VM. A native OS template
+	// gets none: whether a tenant's server starts at boot is the tenant's setting.
+	if p.Variant == "kubernetes" {
+		cfg["onboot"] = "1"
+	}
+	up, err := x.PVE.SetVMConfig(ctx, p.Node, vmid, cfg)
 	if err != nil {
 		var ae *pve.APIError
 		if errors.As(err, &ae) && ae.Status == 400 {

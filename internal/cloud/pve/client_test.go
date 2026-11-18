@@ -398,3 +398,18 @@ func TestMissingPrivileges(t *testing.T) {
 		t.Fatalf("missing = %q, want %q", got, want)
 	}
 }
+
+func TestGuestReadFile(t *testing.T) {
+	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/nodes/pve1/qemu/112/agent/file-read": func(w http.ResponseWriter, r *http.Request) {
+			if got := r.URL.Query().Get("file"); got != "/run/cloud-init/result.json" {
+				t.Errorf("file = %q", got)
+			}
+			fmt.Fprint(w, `{"data":{"content":"{\"v1\":{}}\n","truncated":1}}`)
+		},
+	})
+	content, truncated, err := c.GuestReadFile(context.Background(), "pve1", 112, "/run/cloud-init/result.json")
+	if err != nil || content != "{\"v1\":{}}\n" || !truncated {
+		t.Fatalf("content %q truncated %v err %v", content, truncated, err)
+	}
+}

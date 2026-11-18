@@ -38,6 +38,7 @@ type K8sAPI interface {
 	ListTenantControlPlanes(ctx context.Context, ns, labelSelector string) ([]map[string]any, error)
 	ListMachineDeployments(ctx context.Context, ns, labelSelector string) ([]map[string]any, error)
 	ListCRs(ctx context.Context, group, version, plural, ns, labelSelector string) ([]map[string]any, error)
+	DeleteCR(ctx context.Context, group, version, plural, ns, name string) error
 	ListPersistentVolumes(ctx context.Context) ([]map[string]any, error)
 }
 
@@ -581,6 +582,17 @@ func (s *Service) PatchClusterApp(ctx context.Context, clusterID string, mutate 
 	}
 	if err := mutate(app); err != nil {
 		return err
+	}
+	// The provider's repair setting is the cluster's, at every change: a cluster that arrives on a chart with the
+	// MachineHealthCheck gets it, and a provider that changes the timeout or turns the repair off (0) reaches the
+	// clusters that already carry a block. A chart that does not read the block is left as it is.
+	if values, _ := dig(app, "spec", "source", "helm", "valuesObject").(map[string]any); values != nil &&
+		ChartHasMachineHealthCheck(digStr(app, "spec", "source", "targetRevision")) {
+		if mhc := s.cfg.Defaults.MachineHealthCheckValues(digStr(app, "spec", "source", "targetRevision")); mhc != nil {
+			values["machineHealthCheck"] = mhc
+		} else {
+			delete(values, "machineHealthCheck")
+		}
 	}
 	// Re-apply the WHOLE spec plus the metadata proxcloud stamped at create — NOT a partial patch.
 	// The Application was created via server-side apply by this same field manager, so a partial

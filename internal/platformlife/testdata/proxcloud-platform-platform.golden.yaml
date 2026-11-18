@@ -236,9 +236,16 @@ rules:
     resources:
       - machinedeployments
       - machines
+      - machinehealthchecks
     verbs:
       - get
       - list
+  - apiGroups:
+      - cluster.x-k8s.io
+    resources:
+      - machines
+    verbs:
+      - delete
   - apiGroups:
       - infrastructure.cluster.x-k8s.io
     resources:

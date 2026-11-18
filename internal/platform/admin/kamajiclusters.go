@@ -189,9 +189,14 @@ func (h *Handler) kamajiClusterBumpAll(w http.ResponseWriter, r *http.Request) {
 // token= rule needs a word boundary before "token", which "PVEAPIToken" does not have.
 var pveTokenInText = regexp.MustCompile(`(?i)(PVEAPIToken=[^=\s]+=)\S+`)
 
+// machineText takes the credentials out of an upstream text.
+func machineText(msg string) string {
+	return pveTokenInText.ReplaceAllString(sandbox.RedactBuildText(msg), "${1}[REDACTED]")
+}
+
 // machineMessage is an upstream condition message made fit for the operator's screen: credentials out, 400 runes.
 func machineMessage(msg string) string {
-	msg = pveTokenInText.ReplaceAllString(sandbox.RedactBuildText(msg), "${1}[REDACTED]")
+	msg = machineText(msg)
 	if r := []rune(msg); len(r) > 400 {
 		msg = string(r[:400]) + "…"
 	}
@@ -199,7 +204,9 @@ func machineMessage(msg string) string {
 }
 
 // kamajiClusterMachines is the operator's view of what a tenant sees as a reason code: every worker Machine of ONE
-// cluster with the conditions Cluster API and CAPMOX report, read live. ADMIN_SERVICE_READ.
+// cluster with the conditions Cluster API and CAPMOX report, read live, and the node groups' MachineHealthChecks. A
+// machine that did not join within its bound also carries joinError: what cloud-init in the guest says, read through
+// the guest agent and masked (kamajimachines.go). ADMIN_SERVICE_READ.
 func (h *Handler) kamajiClusterMachines(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:service:read") {
 		return
@@ -231,6 +238,7 @@ func (h *Handler) kamajiClusterMachines(w http.ResponseWriter, r *http.Request) 
 		out.Machines[i].FailureMessage = machineMessage(out.Machines[i].FailureMessage)
 		redact(out.Machines[i].Conditions)
 	}
+	h.addJoinErrors(r.Context(), ks, out)
 	httpx.OK(w, out)
 }
 

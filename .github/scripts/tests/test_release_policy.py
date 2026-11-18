@@ -148,7 +148,7 @@ class ReleaseContractTests(unittest.TestCase):
 
     def test_managed_chart_versions_stay_independent(self):
         self.assertEqual(read_yaml("deploy/charts/database-cluster/Chart.yaml")["version"], "0.5.1")
-        self.assertEqual(read_yaml("deploy/charts/proxmox-kamaji-cluster/Chart.yaml")["version"], "0.1.13")
+        self.assertEqual(read_yaml("deploy/charts/proxmox-kamaji-cluster/Chart.yaml")["version"], "0.1.14")
 
     def test_chart_goldens_render_with_the_helm_that_made_them(self):
         # The goldens compare helm template output byte for byte; an unpinned setup-helm takes the latest Helm.

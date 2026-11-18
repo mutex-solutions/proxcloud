@@ -126,6 +126,12 @@ func (e *ExternalService) KamajiConfig() kamaji.Config {
 		},
 		NamespacePlacement: namespacePlacement(e.Config),
 	}
+	// The automatic replacement of a worker that never joined: on by default, 0 turns it off.
+	cfg.Defaults.NodeStartupTimeoutSeconds = kamaji.DefaultNodeStartupTimeoutSeconds
+	if v, ok := cl["nodeStartupTimeoutSeconds"]; ok {
+		cfg.Defaults.NodeStartupTimeoutSeconds = max(intOf(v), 0)
+	}
+	cfg.Defaults.RepairMaxUnhealthy = intOf(cl["repairMaxUnhealthy"])
 	if sw, ok := cl["sharedWorkers"].(map[string]any); ok && str(sw["bridge"]) != "" {
 		sec := e.secretMap()
 		cfg.Defaults.Shared = &kamaji.SharedWorkers{

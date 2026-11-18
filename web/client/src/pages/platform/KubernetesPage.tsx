@@ -30,7 +30,7 @@ import {
 } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { apiFetch, type CloudScope } from "@/lib/api"
+import { ApiError, apiFetch, type CloudScope } from "@/lib/api"
 import { timeAgo } from "@/lib/format"
 import {
   useCloudList, useLocations, useProject, useProjectGpuCapacity, useProjectId, useProjectQuota, useProjectServices,
@@ -149,7 +149,8 @@ function clusterBusy(c: Cluster): boolean {
 
 // Why a node group or the control plane is not there yet: the reason codes the status sync stores
 // (docs/managed-k8s.md, "Provisioning status"). The texts live here; the API carries codes only.
-type Progress = { code?: string; since?: string; machines?: number; attention?: boolean }
+// machineNames: the machines of the group that need attention (at most five), the ones Replace is offered on.
+type Progress = { code?: string; since?: string; machines?: number; attention?: boolean; machineNames?: string[] }
 const PROGRESS_TEXT: Record<string, string> = {
   provider_access_refused: "The platform cannot reach the virtualization provider. Contact the operator.",
   no_capacity:
@@ -168,7 +169,7 @@ const PROGRESS_TEXT: Record<string, string> = {
 // After its bound a machine that has not joined will not join: kubeadm runs once. The cause is not read (the code is
 // the Machine's phase), so the text names the likely one: the endpoint, on a path the tenant can neither see nor repair.
 const NOT_JOINED_ATTENTION =
-  "The machine runs but has not joined the cluster: most likely it could not reach the cluster's endpoint. Contact the operator, who can check the path from your network to the endpoint. A machine that failed to join does not try again: once the cause is repaired, reduce the count by one and raise it again. A group of one cannot go to zero: raise it by one, wait until the new machine is ready, then reduce it by one."
+  "The machine runs but has not joined the cluster: most likely it could not reach the cluster's endpoint. Contact the operator, who can read the join error of the machine and check the path from your network to the endpoint. A machine that failed to join does not try again by itself: once the cause is repaired, use Replace on that machine, next to this node group's status in the table of node groups or in the list of instances below. It makes a new machine in its place and keeps the node count."
 const progressText = (p?: Progress) =>
   p?.code === "not_joined" && p.attention ? NOT_JOINED_ATTENTION : (PROGRESS_TEXT[p?.code ?? ""] ?? PROGRESS_TEXT.provisioning)
 function sinceText(since?: string): string {
@@ -1303,6 +1304,8 @@ function ClusterDetail({
   const [platformOpen, setPlatformOpen] = useState(false)
   const [upgradeOpen, setUpgradeOpen] = useState(false)
   const [rotateOpen, setRotateOpen] = useState(false)
+  // The worker to replace, and whether the server said it is the last Ready node of its group (then it asks again).
+  const [replaceOf, setReplaceOf] = useState<{ name: string; lastReady: boolean } | null>(null)
   const [editOpen, setEditOpen] = useState(false)
   const [oidcEditOpen, setOidcEditOpen] = useState(false)
   const [addonsOpen, setAddonsOpen] = useState(false)
@@ -1369,6 +1372,23 @@ function ClusterDetail({
       setRotateOpen(false)
     },
     onError: (e: Error) => toast.error(e.message),
+  })
+
+  const replace = useMutation({
+    mutationFn: (m: { name: string; lastReady: boolean }) => act("REPLACE_MACHINE", { machine: m.name, confirm: m.lastReady }),
+    onSuccess: () => {
+      toast.success("Replacing the node: a new machine is being created in its place")
+      setReplaceOf(null)
+      void serversQ.refetch()
+    },
+    onError: (e: Error, m) => {
+      // The last Ready node of a group: the server asks first. The dialog stays open with the warning.
+      if (e instanceof ApiError && (e.details as { reason?: string } | undefined)?.reason === "last_ready_node") {
+        setReplaceOf({ name: m.name, lastReady: true })
+        return
+      }
+      toast.error(e.message)
+    },
   })
 
   const upgrade = useMutation({
@@ -1590,6 +1610,16 @@ function ClusterDetail({
                           <span className="flex flex-col items-start gap-1">
                             {groupProgress(g)?.attention ? <AttentionBadge /> : null}
                             <span className="text-muted-foreground">{progressText(groupProgress(g))}</span>
+                            {/* The machines that need attention, by name: a worker that never joined may have no row
+                                in the instance list below (it is built from the project's synced servers). */}
+                            {(groupProgress(g)?.machineNames ?? []).map((name) => (
+                              <span key={name} className="flex flex-wrap items-center gap-2">
+                                <span className="font-mono text-xs">{name}</span>
+                                <Button size="sm" variant="outline" aria-label={`Replace machine ${name}`} onClick={() => setReplaceOf({ name, lastReady: false })}>
+                                  Replace
+                                </Button>
+                              </span>
+                            ))}
                           </span>
                         ) : (
                           "—"
@@ -1611,12 +1641,13 @@ function ClusterDetail({
                   <TableHead>Node group</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>IPs</TableHead>
+                  <TableHead><span className="sr-only">Actions</span></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {instances.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={4} className="text-center text-sm text-muted-foreground">
+                    <TableCell colSpan={5} className="text-center text-sm text-muted-foreground">
                       {serversQ.isLoading ? "Loading instances…" : "No worker instances yet."}
                     </TableCell>
                   </TableRow>
@@ -1631,6 +1662,19 @@ function ClusterDetail({
                       <TableCell className="text-sm">{it.group}</TableCell>
                       <TableCell><StatusBadge status={it.status || undefined} /></TableCell>
                       <TableCell className="font-mono text-xs">{it.ips || "—"}</TableCell>
+                      <TableCell className="text-right">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          aria-label={`Replace ${it.name}`}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setReplaceOf({ name: it.name, lastReady: false })
+                          }}
+                        >
+                          Replace
+                        </Button>
+                      </TableCell>
                     </TableRow>
                   ))
                 )}
@@ -1765,6 +1809,32 @@ function ClusterDetail({
                   {upgrade.isPending ? "Starting…" : "Upgrade"}
                 </Button>
               )}
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Replace one worker: the way out for a machine that failed its one join */}
+        <Dialog open={!!replaceOf} onOpenChange={(o) => !o && setReplaceOf(null)}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Replace this node</DialogTitle>
+              <DialogDescription>
+                Deletes the machine <span className="font-mono">{replaceOf?.name}</span> and creates a new one in its
+                place, on the same host. The node count and your quota stay as they are. A node that joined is drained
+                first; what is on its own disk is lost, persistent volumes are kept.
+              </DialogDescription>
+            </DialogHeader>
+            {replaceOf?.lastReady ? (
+              <p role="alert" className="rounded-lg border border-amber-500/50 bg-amber-500/5 p-3 text-sm">
+                This is the last Ready node of its node group. Its pods have nowhere to run in the group until the new
+                node is Ready, which takes several minutes.
+              </p>
+            ) : null}
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setReplaceOf(null)}>Cancel</Button>
+              <Button variant="destructive" onClick={() => replaceOf && replace.mutate(replaceOf)} disabled={replace.isPending}>
+                {replace.isPending ? "Replacing…" : replaceOf?.lastReady ? "Replace anyway" : "Replace"}
+              </Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>

@@ -229,3 +229,78 @@ func TestPlacementReads(t *testing.T) {
 		t.Errorf("UnreadyReplicas with prefix names = %v, %v", unready, err)
 	}
 }
+
+// healthChecks renders the chart and returns each MachineHealthCheck's startup timeout and guard by name.
+func healthChecks(t *testing.T, out string) map[string][2]int {
+	t.Helper()
+	got := map[string][2]int{}
+	for _, doc := range strings.Split(out, "\n---") {
+		var obj struct {
+			Kind     string
+			Metadata struct {
+				Name        string
+				Annotations map[string]string
+			}
+			Spec struct {
+				ClusterName string `yaml:"clusterName"`
+				Selector    struct {
+					MatchLabels map[string]string `yaml:"matchLabels"`
+				}
+				Checks struct {
+					NodeStartupTimeoutSeconds int `yaml:"nodeStartupTimeoutSeconds"`
+				}
+				Remediation struct {
+					TriggerIf struct {
+						UnhealthyLessThanOrEqualTo any `yaml:"unhealthyLessThanOrEqualTo"`
+					} `yaml:"triggerIf"`
+				}
+			}
+		}
+		if err := yaml.Unmarshal([]byte(doc), &obj); err != nil || obj.Kind != "MachineHealthCheck" {
+			continue
+		}
+		guard, ok := obj.Spec.Remediation.TriggerIf.UnhealthyLessThanOrEqualTo.(int)
+		if !ok {
+			t.Errorf("%s: the guard %v is not a number", obj.Metadata.Name, obj.Spec.Remediation.TriggerIf.UnhealthyLessThanOrEqualTo)
+		}
+		group := strings.TrimPrefix(obj.Metadata.Name, "c-")
+		if obj.Spec.ClusterName != "c" || obj.Spec.Selector.MatchLabels[labelNodeGroup] != group || obj.Spec.Selector.MatchLabels[labelClusterName] != "c" {
+			t.Errorf("%s selects %v of cluster %q", obj.Metadata.Name, obj.Spec.Selector.MatchLabels, obj.Spec.ClusterName)
+		}
+		if obj.Metadata.Annotations["argocd.argoproj.io/ignore-healthcheck"] != "true" {
+			t.Errorf("%s counts in the Application's health", obj.Metadata.Name)
+		}
+		got[obj.Metadata.Name] = [2]int{obj.Spec.Checks.NodeStartupTimeoutSeconds, guard}
+	}
+	return got
+}
+
+// A worker that never registers a Node is replaced by a MachineHealthCheck per node group. The guard is a number,
+// capped below the group's size: a group whose machines all failed (the production case: 2 of 2) is left alone, and a
+// group of one has no check at all. The chart's default renders none, as chart 0.1.13 does.
+func TestChartMachineHealthCheck(t *testing.T) {
+	groups := fmt.Sprintf(placementGroup, "one", "pve1=9201", 1) + fmt.Sprintf(placementGroup, "two", "pve1=9201,pve2=9202", 2) +
+		fmt.Sprintf(placementGroup, "five", "pve1=9201", 5)
+	if got := healthChecks(t, helmTemplate(t, "c", "pc-p1", placementValues(groups))); len(got) != 0 {
+		t.Errorf("default values render %v", got)
+	}
+	mhc := func(body string) string { return placementValues(groups) + "machineHealthCheck:\n" + body }
+	got := healthChecks(t, helmTemplate(t, "c", "pc-p1", mhc("  nodeStartupTimeoutSeconds: 1800\n")))
+	if want := map[string][2]int{"c-two": {1800, 1}, "c-five": {1800, 1}}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("guard 1: %v, want %v", got, want)
+	}
+	got = healthChecks(t, helmTemplate(t, "c", "pc-p1", mhc("  nodeStartupTimeoutSeconds: 900\n  maxUnhealthy: 3\n")))
+	if want := map[string][2]int{"c-two": {900, 1}, "c-five": {900, 3}}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("guard 3: %v, want %v", got, want)
+	}
+	for _, bad := range []string{"  nodeStartupTimeoutSeconds: 900\n  maxUnhealthy: \"40%\"\n", "  nodeStartupTimeoutSeconds: 900\n  maxUnhealthy: 0\n",
+		"  nodeStartupTimeoutSeconds: -5\n", "  nodeStartupTimeoutSeconds: 15m\n"} {
+		f := filepath.Join(t.TempDir(), "values.yaml")
+		if err := os.WriteFile(f, []byte(mhc(bad)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := exec.Command("helm", "template", "c", "../../../deploy/charts/proxmox-kamaji-cluster", "-f", f).CombinedOutput(); err == nil || !strings.Contains(string(out), "machineHealthCheck.") {
+			t.Errorf("%q rendered: %v\n%.300s", bad, err, out)
+		}
+	}
+}

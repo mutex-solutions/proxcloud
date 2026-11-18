@@ -1,4 +1,5 @@
 // Cloud resource endpoints: generic list/create/delete + the action verbs.
+import { ApiError } from "@/lib/api"
 import { on } from "../router"
 import { db } from "../db"
 import {
@@ -186,6 +187,14 @@ on("POST /project/:pid/cloud/:resourceId/action", ({ params, opts }) => {
         return ok("UPDATING")
       case "RESTART": return ok()
     }
+  }
+
+  // Managed Kubernetes: the last Ready node of a group is only replaced when confirmed.
+  if (r?.type === "KUBERNETES_CLUSTER" && action === "REPLACE_MACHINE") {
+    if (String(data?.machine ?? "").endsWith("-ready") && !data?.confirm) {
+      throw new ApiError(409, 409, "This machine is the last Ready node of its node group: its pods have nowhere to run in the group until the new node is Ready. Confirm to replace it anyway.", { reason: "last_ready_node" })
+    }
+    return ok("REPLACING")
   }
 
   switch (action) {

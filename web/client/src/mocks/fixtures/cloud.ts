@@ -194,7 +194,8 @@ export function seedCloudResources(): CloudResource[] {
     k8s("pc-c-stuck", "staging", {
       status: "PROGRESSING",
       node_groups: [
-        group("workers", 2, 1, { code: "not_joined", since: minutesAgo(42), machines: 1, attention: true }),
+        // The machine has no row among the project's servers: the production case (no sync had listed it).
+        group("workers", 2, 1, { code: "not_joined", since: minutesAgo(42), machines: 1, attention: true, machineNames: ["pc-c-stuck-workers-pve2-fghij-stuck"] }),
         group("batch", 3, 0, { code: "no_capacity", since: minutesAgo(8), machines: 2, attention: true }),
         group("build", 1, 0, { code: "creating_vm", since: minutesAgo(3), machines: 1, attention: false }),
         group("edge", 1, 0, { code: "not_joined", since: minutesAgo(4), machines: 1, attention: false }),

@@ -25,7 +25,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { apiFetch } from "@/lib/api"
+import { ApiError, apiFetch } from "@/lib/api"
 import { useAdminGet } from "@/lib/hooks"
 import { parseSNATSources, SNAT_SOURCES_HELP, type CloudProvider } from "./CloudProvidersPage"
 import { ProviderProjectsTab } from "./ProviderProjectsTab"
@@ -426,7 +426,9 @@ function KamajiClustersCard({ id }: { id: string }) {
           Provider pin: <span className="font-mono">{pin || "—"}</span>. Re-pinning re-renders the
           chart for that cluster — platform components restart with a rolling update, and when the
           node template changed between chart versions the nodes rotate too (surge-first).
-          Customers can also apply this themselves from the cluster page.
+          Customers can also apply this themselves from the cluster page. The provider's worker repair setting
+          (startup timeout, guard, or off) is written into a cluster's values at every change of that cluster;
+          Apply settings writes it now for a cluster that is already on the pin.
         </p>
         <Table>
           <TableHeader>
@@ -460,6 +462,10 @@ function KamajiClustersCard({ id }: { id: string }) {
                     {pin && c.chartVersion !== pin ? (
                       <Button size="sm" variant="outline" onClick={() => bumpOne.mutate(c.id)} disabled={bumpOne.isPending}>
                         Bump to {pin}
+                      </Button>
+                    ) : pin ? (
+                      <Button size="sm" variant="ghost" aria-label={`Apply the provider's settings to ${c.name || c.id}`} onClick={() => bumpOne.mutate(c.id)} disabled={bumpOne.isPending}>
+                        Apply settings
                       </Button>
                     ) : null}
                   </TableCell>
@@ -578,8 +584,14 @@ type ClusterMachines = {
   proxmoxCluster?: { conditions?: MachineCondition[] }
   machines?: {
     name: string; nodeGroup?: string; phase?: string; lastUpdated?: string; nodeRef?: string; vmid?: number
-    proxmoxNode?: string; addresses?: string[]; code?: string; attention?: boolean; deleting?: boolean
+    proxmoxNode?: string; addresses?: string[]; code?: string; attention?: boolean; deleting?: boolean; ready?: boolean
     failureMessage?: string; conditions?: MachineCondition[]
+    // What cloud-init in the guest says about a join that failed: read live through the guest agent, masked.
+    joinError?: { errors?: string[]; logTail?: string; readError?: string }
+  }[]
+  healthChecks?: {
+    nodeGroup: string; nodeStartupTimeoutSeconds: number; maxUnhealthy: number
+    expectedMachines: number; currentHealthy: number; remediationsAllowed: number
   }[]
 }
 
@@ -615,6 +627,25 @@ function ClusterMachinesDialog({ serviceId, cluster, onClose }: { serviceId: str
   const q = useAdminGet<ClusterMachines>(`/admin/service/${serviceId}/k8s-clusters/${cluster.id}/machines`)
   const machines = q.data?.machines ?? []
   const provider = (q.data?.proxmoxCluster?.conditions ?? []).filter(conditionOpen)
+  const checks = q.data?.healthChecks ?? []
+  // The machine to replace, and whether the server said it is the last Ready node of its group (then it asks again).
+  const [replaceOf, setReplaceOf] = useState<{ name: string; lastReady: boolean } | null>(null)
+  const replace = useMutation({
+    mutationFn: (m: { name: string; lastReady: boolean }) =>
+      apiFetch(`/admin/service/${serviceId}/k8s-clusters/${cluster.id}/machines/${encodeURIComponent(m.name)}/replace`, { method: "POST", body: { confirm: m.lastReady } }),
+    onSuccess: () => {
+      toast.success("Replacing the machine: Cluster API creates a new one in its place")
+      setReplaceOf(null)
+      void q.refetch()
+    },
+    onError: (e: Error, m) => {
+      if (e instanceof ApiError && e.details?.reason === "last_ready_node") {
+        setReplaceOf({ name: m.name, lastReady: true })
+        return
+      }
+      toast.error(e.message)
+    },
+  })
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-4xl">
@@ -636,6 +667,30 @@ function ClusterMachinesDialog({ serviceId, cluster, onClose }: { serviceId: str
                 <OpenConditions conditions={provider} />
               </div>
             )}
+            <div className="rounded-lg border p-3 text-sm">
+              <div className="mb-1 font-medium">Automatic repair</div>
+              {checks.length === 0 ? (
+                <p className="text-muted-foreground">
+                  No node group of this cluster has a health check: a worker that does not join stays until it is replaced
+                  here. A group gets one from cluster chart 0.1.14, with two or more machines, unless the provider turned it off.
+                </p>
+              ) : (
+                <ul className="grid gap-1">
+                  {checks.map((hc) => (
+                    <li key={hc.nodeGroup}>
+                      <span className="font-mono text-xs">{hc.nodeGroup}</span>: {hc.currentHealthy} of {hc.expectedMachines} machines healthy.{" "}
+                      <span className="text-muted-foreground">
+                        A machine without a Node after {Math.round(hc.nodeStartupTimeoutSeconds / 60)} min is replaced while at most {hc.maxUnhealthy} of
+                        the group {hc.maxUnhealthy === 1 ? "is" : "are"} not healthy.{" "}
+                        {hc.expectedMachines - hc.currentHealthy > hc.maxUnhealthy
+                          ? "More are not healthy now, so nothing is replaced: find the cause, then replace the machines here."
+                          : null}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
             <Table>
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
@@ -644,11 +699,12 @@ function ClusterMachinesDialog({ serviceId, cluster, onClose }: { serviceId: str
                   <TableHead>VM</TableHead>
                   <TableHead>Reason</TableHead>
                   <TableHead>Detail</TableHead>
+                  <TableHead><span className="sr-only">Actions</span></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {machines.length === 0 ? (
-                  <TableRow><TableCell colSpan={5} className="text-center text-sm text-muted-foreground">No machines yet.</TableCell></TableRow>
+                  <TableRow><TableCell colSpan={6} className="text-center text-sm text-muted-foreground">No machines yet.</TableCell></TableRow>
                 ) : (
                   machines.map((m) => (
                     <TableRow key={m.name} className="align-top">
@@ -668,12 +724,49 @@ function ClusterMachinesDialog({ serviceId, cluster, onClose }: { serviceId: str
                       <TableCell className="max-w-sm">
                         {m.failureMessage ? <div className="break-words text-xs text-destructive">{m.failureMessage}</div> : null}
                         <OpenConditions conditions={m.conditions} />
+                        {m.joinError ? (
+                          <div className="mt-2 grid gap-1 text-xs">
+                            <div className="font-medium">Join error, as the machine reports it</div>
+                            {m.joinError.readError ? <div className="text-muted-foreground">{m.joinError.readError}</div> : null}
+                            {(m.joinError.errors ?? []).map((e, i) => <div key={i} className="break-words text-destructive">{e}</div>)}
+                            {m.joinError.logTail ? (
+                              <pre aria-label={`End of the cloud-init log of ${m.name}`} tabIndex={0} className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 font-mono">{m.joinError.logTail}</pre>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        {m.deleting ? null : (
+                          <Button size="sm" variant="outline" aria-label={`Replace ${m.name}`} onClick={() => setReplaceOf({ name: m.name, lastReady: false })}>
+                            Replace
+                          </Button>
+                        )}
                       </TableCell>
                     </TableRow>
                   ))
                 )}
               </TableBody>
             </Table>
+            {replaceOf ? (
+              <div role="alertdialog" aria-label="Replace this machine" className="rounded-lg border border-amber-500/50 bg-amber-500/5 p-3 text-sm">
+                <p>
+                  Replace <span className="font-mono text-xs">{replaceOf.name}</span>? Cluster API deletes this machine and its VM and
+                  creates a new one on the same Proxmox node, which joins again. The node group's count and the project's quota do not change.
+                  A machine that has a Node is drained first.
+                </p>
+                {replaceOf.lastReady ? (
+                  <p className="mt-2 font-medium">
+                    This is the last Ready node of its node group: its pods have nowhere to run in the group until the new node is Ready.
+                  </p>
+                ) : null}
+                <div className="mt-3 flex gap-2">
+                  <Button size="sm" variant="destructive" onClick={() => replace.mutate(replaceOf)} disabled={replace.isPending}>
+                    {replace.isPending ? "Replacing…" : replaceOf.lastReady ? "Replace anyway" : "Replace machine"}
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => setReplaceOf(null)}>Cancel</Button>
+                </div>
+              </div>
+            ) : null}
           </div>
         )}
       </DialogContent>
