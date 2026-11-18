@@ -186,9 +186,10 @@ tagged, as `vX.Y.Z` or as `vX.Y.Z-rc.N`. After the `v0.8.0` tag the BOM on `main
 was set to `0.9.0-dev`, so `main` could not be tagged again until the next release
 commit dropped `-dev`: the release commit of `v0.8.1` sets it to `0.8.1` (checked on
 2026-11-18 on that commit: `--release` prints `all pins match`, on the BOM and on the
-previous BOM `0.8.0`), and the pull request after the `v0.8.1` tag sets it back to a
-`-dev` release and adds `deploy/platform/previous/0.8.1.yaml`
-([Previous BOMs](#previous-boms)). The gate does not compare the BOM's release with the tag
+previous BOM `0.8.0`). The pull request after that release commit set the BOM on
+`main` to `0.9.0-dev` again and added `deploy/platform/previous/0.8.1.yaml`
+([Previous BOMs](#previous-boms)), so `main` cannot be tagged until the next release
+commit drops `-dev`. The gate does not compare the BOM's release with the tag
 (below): a commit whose BOM has no `-dev` passes this part for any tag.
 
 Not verified:
@@ -260,11 +261,20 @@ that no later build carries, so its platform is refused after an upgrade
 been removed yet; when one is, the platforms of that release are refused again,
 so it needs a release note.
 
-Not verified: `v0.8.0` is the only previous BOM, added by hand from its tag
+The previous BOMs are `0.8.0` and `0.8.1`. `0.8.0` was added by hand from its tag
 (sha256 `8eb874987d3bbaf55f309295ee241ec320c0cf9e0805b3bd1812ef908b6600c6`, the
-value a platform installed by v0.8.0 records; `bom_verify.py --release` on it
-printed `all pins match` on 2026-11-18). The procedure above has not been run
-at a release: `v0.8.1` is the first release it follows. One apply with a
+value a platform installed by v0.8.0 records). `0.8.1` is the first one the
+procedure above added (sha256
+`a635bd88d3c39baf5519344088a6fed8dad8cb2b3c2d324655753e8ec55719b3`): it was
+copied from the release commit of `v0.8.1` (`aad9fb46`), which the tag is put
+on, before the tag existed, and its goldens equal those of that commit and
+differ from the 0.8.0 ones in the release label only. `bom_verify.py --release`
+printed `all pins match` on both on 2026-11-18.
+
+Not verified: that the tag `v0.8.1` is on that commit (compare
+`git show v0.8.1:deploy/platform/platform-bom.yaml | sha256sum` with the hash
+above once the tag exists), and an apply on a platform that `v0.8.1` installed.
+One apply with a
 previous BOM was run on a lab (2026-11-18, a platform installed by the released
 `v0.8.0`, on the build `dev-751a190` of `main`): it succeeded and `status.bom`
 stayed the 0.8.0 one. That build's own BOM pinned the same versions as 0.8.0, so
