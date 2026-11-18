@@ -382,6 +382,7 @@ func TestBOMImagesArePublished(t *testing.T) {
 var previousSHA256 = map[string]string{
 	"0.8.0": "8eb874987d3bbaf55f309295ee241ec320c0cf9e0805b3bd1812ef908b6600c6",
 	"0.8.1": "a635bd88d3c39baf5519344088a6fed8dad8cb2b3c2d324655753e8ec55719b3",
+	"0.8.2": "a10baf0bef4f33ebff26cb87315259a6cf886c8ffe00b79dc24e2bed4ed6540b",
 }
 
 // A previous BOM is the file of its tag, byte for byte: an installed platform names it by this sha256, so a changed
