@@ -5,8 +5,8 @@ already been published. As of **2026-11-18**, GHCR has public development images
 the `v0.4.0-rc.1` prerelease (tag 2026-11-11, images and app chart `0.4.0-rc.1`)
 and the first stable release `v0.4.0` (tag 2026-11-12, images and app chart
 `0.4.0`), then the stable `v0.5.0` (tag 2026-11-13), the patches `v0.5.1` and `v0.5.2` and the stable `v0.6.0` (tags 2026-11-14),
-the `v0.7.0-rc.1` prerelease and the stable `v0.7.0` (tags 2026-11-15), and the stable `v0.8.0` (tag 2026-11-17). The next release is the patch
-`v0.8.1`; pushing its tag runs the app image/chart publication and GitHub Release
+the `v0.7.0-rc.1` prerelease and the stable `v0.7.0` (tags 2026-11-15), the stable `v0.8.0` (tag 2026-11-17) and the patch `v0.8.1` (tag 2026-11-18). The next release is the patch
+`v0.8.2`; pushing its tag runs the app image/chart publication and GitHub Release
 creation.
 This source change does none of those operations, and installation from released
 artifacts and later controlled PVE template canaries remain separate steps. Read
@@ -53,7 +53,7 @@ The configured destination for app Helm publication is
 `0.4.0` stable charts).
 On an app release tag, the workflow sets chart version to the tag without `v` and
 appVersion to the full tag, matching the image tags. The release contract is app
-chart `0.8.1`, appVersion/image tag and installer BOM `v0.8.1`, platform BOM `release: 0.8.1`, and the same tag as
+chart `0.8.2`, appVersion/image tag and installer BOM `v0.8.2`, platform BOM `release: 0.8.2`, and the same tag as
 `DEFAULT_VERSION` of the Docker Compose install (`deploy/compose/proxcloud-up.sh`).
 Keep `images.build: true` until the exact chart and images are published and
 verified; use `false` explicitly for released-artifact evaluation after that.
@@ -188,8 +188,13 @@ commit dropped `-dev`: the release commit of `v0.8.1` sets it to `0.8.1` (checke
 2026-11-18 on that commit: `--release` prints `all pins match`, on the BOM and on the
 previous BOM `0.8.0`). The pull request after that release commit set the BOM on
 `main` to `0.9.0-dev` again and added `deploy/platform/previous/0.8.1.yaml`
-([Previous BOMs](#previous-boms)), so `main` cannot be tagged until the next release
-commit drops `-dev`. The gate does not compare the BOM's release with the tag
+([Previous BOMs](#previous-boms)), so `main` could not be tagged until the next release
+commit dropped `-dev`: the release commit of `v0.8.2` sets it to `0.8.2` (checked on
+2026-11-18 on that commit: `--release` prints `all pins match`, on the BOM and on the
+previous BOMs `0.8.0` and `0.8.1`). The pull request after that release commit set the
+BOM on `main` to `0.9.0-dev` again and added `deploy/platform/previous/0.8.2.yaml`, so
+`main` cannot be tagged until the next release commit drops `-dev`. The gate does not
+compare the BOM's release with the tag
 (below): a commit whose BOM has no `-dev` passes this part for any tag.
 
 Not verified:
@@ -261,7 +266,7 @@ that no later build carries, so its platform is refused after an upgrade
 been removed yet; when one is, the platforms of that release are refused again,
 so it needs a release note.
 
-The previous BOMs are `0.8.0` and `0.8.1`. `0.8.0` was added by hand from its tag
+The previous BOMs are `0.8.0`, `0.8.1` and `0.8.2`. `0.8.0` was added by hand from its tag
 (sha256 `8eb874987d3bbaf55f309295ee241ec320c0cf9e0805b3bd1812ef908b6600c6`, the
 value a platform installed by v0.8.0 records). `0.8.1` is the first one the
 procedure above added (sha256
@@ -271,14 +276,116 @@ on, before the tag existed, and its goldens equal those of that commit and
 differ from the 0.8.0 ones in the release label only. `bom_verify.py --release`
 printed `all pins match` on both on 2026-11-18.
 
-Not verified: that the tag `v0.8.1` is on that commit (compare
-`git show v0.8.1:deploy/platform/platform-bom.yaml | sha256sum` with the hash
-above once the tag exists), and an apply on a platform that `v0.8.1` installed.
+The tag `v0.8.1` is on that commit: `git show v0.8.1:deploy/platform/platform-bom.yaml | sha256sum`
+gives the hash above (checked on 2026-11-18).
+
+`0.8.2` was added the same way (sha256
+`a10baf0bef4f33ebff26cb87315259a6cf886c8ffe00b79dc24e2bed4ed6540b`): it was
+copied from the release commit of `v0.8.2` (`ed4b94ec`), which the tag is put
+on, before the tag existed, and its goldens equal those of that commit and
+differ from the 0.8.1 ones in the release label only. `bom_verify.py --release`
+printed `all pins match` on the three previous BOMs on 2026-11-18.
+
+Not verified: that the tag `v0.8.2` is on that commit (compare
+`git show v0.8.2:deploy/platform/platform-bom.yaml | sha256sum` with the hash
+above once the tag exists), an apply on a platform that `v0.8.1` or `v0.8.2`
+installed, and an install by `v0.8.1` or `v0.8.2`.
 One apply with a
 previous BOM was run on a lab (2026-11-18, a platform installed by the released
 `v0.8.0`, on the build `dev-751a190` of `main`): it succeeded and `status.bom`
 stayed the 0.8.0 one. That build's own BOM pinned the same versions as 0.8.0, so
 an apply that keeps older pins against a BOM with other pins is not shown.
+The same platform was read on the build `dev-03bc9f3` of `main` the same day,
+which carries two previous BOMs (`0.8.0`, `0.8.1`): the plan had no change and
+named the build's own BOM as `newer`, `status.bom` stayed the 0.8.0 one, and
+`GET /admin/platform/bom?sha256=` answered both previous BOMs by their hash. No
+apply was run on that build.
+
+
+## What a release checks about its BOM pairs
+
+An installed platform can be moved from the BOM of an earlier release to this
+one's ([managed-services.md](managed-services.md#upgrade-between-boms)). A BOM
+pair is a previous BOM under `deploy/platform/previous/` and the BOM of the
+commit. `platformlife.Classify` decides per pair whether the move is allowed:
+only the release line, the tenant charts and the versions of the product's own
+charts may differ. `go test ./internal/platformlife` holds the rest:
+
+- **`upgradeFrom` is a statement the release makes.** A component of the
+  product's own charts whose version changes is moved only when its BOM entry
+  lists the old version in `upgradeFrom`. Add the old version when, and only
+  when, the checks below pass for it. Without it the pair is refused and the
+  platforms of that release stay on their BOM, which is safe.
+- **No machine rollout (`TestUpgradeRollsNoMachine`).** For every pair the
+  classifier allows, the test renders the cluster chart of the previous BOM with
+  the values that release rendered
+  (`testdata/previous/<release>/render-cluster-values.golden.yaml`) and the
+  cluster chart of this BOM with this build's values
+  (`testdata/render-cluster-values.golden.yaml`), and compares the whole
+  KubeadmControlPlane and every machine and bootstrap template as rendered,
+  metadata included, and every MachineDeployment's machine template. It is as
+  strict as the run's own check before the sync, which fails on any of these
+  objects ArgoCD does not report Synced: a new label or annotation on the
+  KubeadmControlPlane counts, though it replaces no machine. A difference means
+  Cluster API would replace machines, or every upgrade run would fail
+  `unexpected_rollout`: do not list
+  the old version in `upgradeFrom` of `pc-platform`. The values come from Go
+  (`ClusterValues`), so a renderer change is caught as well as a chart change. A
+  chart version that is not the one in the tree is pulled from the registry
+  (`helm pull`): the test needs `helm` and, for such a pair, the network; in CI
+  it fails without them, elsewhere it is skipped.
+- **The plan as the operator reads it (`TestUpgradePlanGolden`).** Goldens under
+  `testdata/upgrade/0.8.1-to-<case>/plan.golden.json`: 0.8.1 to a next release
+  with the own charts bumped (allowed), with a third-party chart or a node image
+  bumped next to them (refused). They are fixtures, built from the 0.8.1 BOM, and
+  do not move with the BOM on `main`. `TestClassifyRefuses` has one case per kind
+  of refused entry.
+- **A `-dev` BOM is never a target.** The BOM on `main` is refused as a target
+  until the release commit drops `-dev`.
+
+What a release must do when it changes a pin, before its tag:
+
+1. A change of `proxcloud-platform` or `proxmox-kamaji-cluster`: bump the chart,
+   tag it, set the pin and its digest, and decide `upgradeFrom` by the checks
+   above. A chart that changes a machine or bootstrap template must not list the
+   old version: the release notes then say that installed platforms stay on
+   their BOM.
+2. Any other pin (an image, k3s, a provider, a third-party chart, the Kubernetes
+   version): every platform of an earlier release is refused the move. Say so in
+   the release notes; the platforms keep working on their BOM.
+3. Read the plan the release gives a platform of each earlier release: on a
+   build of the release commit, `GET …/plan` of such an installation, or
+   `PlanFor` in a test.
+
+Not checked: that a chart of `proxcloud-platform` whose version changes is safe
+to sync over the old one (its templates are RBAC, AppProjects, a MetalLB pool
+and the clusterctl hook; review the diff). Nothing here has run on a lab.
+
+### Upgrade drill builds
+
+A lab drill of an upgrade needs two builds whose BOMs form an allowed pair, and
+the second must carry the first's BOM. Development BOMs do not work for either
+side: a platform installed by a `-dev` build is on a BOM no other build carries
+(`bom_unsupported`), and a `-dev` BOM is refused as a target. So a drill build
+is made like a release, on a throwaway branch that is never merged:
+
+1. Install the lab platform from a release (v0.8.0, v0.8.1 or v0.8.2), or from the
+   drill build before this one.
+2. On the branch, set `release:` in `deploy/platform/platform-bom.yaml` to a
+   version without `-dev` that no release will use, for example
+   `0.9.0-drill.1`, and make the BOM change to drill (none for a record-only
+   move). Every digest must be real: a release BOM takes no `pending`.
+3. For the build after it (`0.9.0-drill.2`), copy the BOM file of the first
+   drill build byte for byte to `deploy/platform/previous/0.9.0-drill.1.yaml`,
+   add its sha256 to `previousSHA256` in `internal/platformlife/bom_test.go` and
+   write its goldens, as for a release ([Previous BOMs](#previous-boms)). A
+   build that lacks the file refuses the platform with `bom_unsupported`.
+4. Build the images from the branch and run them on the lab only.
+
+Not determined: whether the image workflows publish a build for such a branch
+(`docker.yml` publishes `dev-<sha>` for pushes to `main`), and whether
+`bom-verify` accepts a `-drill` release name. Build the images by hand on the
+lab if they do not.
 
 ## Chart mirror
 

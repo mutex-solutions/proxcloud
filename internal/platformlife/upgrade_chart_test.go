@@ -1,0 +1,103 @@
+package platformlife
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"slices"
+	"testing"
+)
+
+// machineFacts renders the cluster chart with a values golden and answers what decides whether Cluster API replaces
+// a machine, and whether the run's check before the sync (rolloutGate) lets the chart through: the whole
+// KubeadmControlPlane and every machine and bootstrap template as rendered, metadata included (the check fails on any
+// of them that ArgoCD does not report Synced, a label or an annotation too), and every MachineDeployment's machine
+// template. It must stay at least as strict as rolloutGate: a pair that passes here and fails there leaves every
+// upgraded platform with an unfinished upgrade.
+func machineFacts(t *testing.T, helm, chart, values string) map[string]any {
+	t.Helper()
+	out, err := exec.Command(helm, "template", ClusterName, chart, "-n", ClusterName, "-f", values).CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template %s -f %s: %v\n%s", chart, values, err, out)
+	}
+	facts := map[string]any{}
+	var templates []string
+	for _, o := range yamlObjects(t, out) {
+		kind, _ := o["kind"].(string)
+		name, _ := o["metadata"].(map[string]any)["name"].(string)
+		spec, _ := o["spec"].(map[string]any)
+		switch kind {
+		case "KubeadmControlPlane":
+			facts[kind+" "+name] = o
+		case "MachineDeployment":
+			facts[kind+" "+name] = spec["template"]
+		case "ProxmoxMachineTemplate", "KubeadmConfigTemplate":
+			templates = append(templates, kind+" "+name)
+			facts[kind+" "+name] = o
+		}
+	}
+	if len(templates) == 0 || len(facts) < len(templates)+2 {
+		t.Fatalf("%s renders no control plane, machine deployment or template", chart)
+	}
+	return facts
+}
+
+// clusterChart is a directory with the cluster chart at the version a BOM pins: the chart in this tree when that is
+// its version, else the published one, pulled from the registry.
+func clusterChart(t *testing.T, helm string, c Chart) string {
+	t.Helper()
+	const local = "../../deploy/charts/proxmox-kamaji-cluster"
+	if out, err := exec.Command(helm, "show", "chart", local).Output(); err == nil {
+		if objs := yamlObjects(t, out); len(objs) == 1 && objs[0]["version"] == c.Version {
+			return local
+		}
+	}
+	dir := t.TempDir()
+	if out, err := exec.Command(helm, "pull", "oci://"+c.Repo+"/"+c.Name, "--version", c.Version, "--untar", "-d", dir).CombinedOutput(); err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatalf("helm pull %s %s: %v\n%s", c.Name, c.Version, err, out)
+		}
+		t.Skipf("chart %s %s is not the one in this tree and could not be pulled: %v", c.Name, c.Version, err)
+	}
+	return filepath.Join(dir, c.Name)
+}
+
+// The check a release makes of its BOM pairs (docs/ci-release.md, "What a release checks about its BOM pairs"): for
+// every previous BOM the classifier lets a platform move from, the cluster chart of this build's BOM, rendered with
+// the values this build renders for it, replaces no machine of a platform that the previous release rendered with its
+// chart and its values (the goldens of TestRenderGoldenOfPreviousBOMs). The values come from Go, not only from the
+// BOM, so a renderer change is caught here as well as a chart change. A pair that fails must not be allowed: the new
+// chart version must not list the old one in upgradeFrom, and the platform then stays on its BOM until a release
+// rolls machines.
+func TestUpgradeRollsNoMachine(t *testing.T) {
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatal("helm is required in CI, or this test proves nothing")
+		}
+		t.Skip("helm not installed")
+	}
+	cur := embedded(t)
+	prev, err := Previous()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := machineFacts(t, helm, clusterChart(t, helm, comp(t, cur, ClusterSeed, ClusterName).Chart), "testdata/render-cluster-values.golden.yaml")
+	checked := 0
+	for _, b := range prev {
+		if slices.ContainsFunc(Classify(b.BOM, cur), func(c PlanChange) bool { return c.Blocking != "" }) {
+			t.Logf("%s: no upgrade from it to %s, so nothing to compare", b.Release, cur.Release)
+			continue
+		}
+		checked++
+		got := machineFacts(t, helm, clusterChart(t, helm, comp(t, b.BOM, ClusterSeed, ClusterName).Chart), filepath.Join("testdata", "previous", b.Release, "render-cluster-values.golden.yaml"))
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("an upgrade from %s to %s would replace machines, or fail the run's rollout check: the cluster chart renders another control plane, machine template or bootstrap template (metadata included).\n"+
+				"%s: %v\n%s: %v", b.Release, cur.Release, b.Release, got, cur.Release, want)
+		}
+	}
+	// Today every previous BOM differs from main's in the release line alone. When a BOM change refuses them all, the
+	// check has nothing left to say, which is correct; it must not go unnoticed while pairs are allowed.
+	t.Logf("%d of %d previous BOMs compared", checked, len(prev))
+}

@@ -4,7 +4,9 @@ package integration
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/durablejobs"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
@@ -510,6 +513,64 @@ func TestPlatformRunOnAPreviousBOM(t *testing.T) {
 	}
 	call(http.MethodGet, "/admin/platform/bom?sha256="+strings.Repeat("1", 64), "", http.StatusNotFound)
 	call(http.MethodPost, dev+"/runs", `{"kind":"remove"}`, http.StatusAccepted)
+
+	// The move to this build's BOM. A development BOM (main's) is no target: the plan says so and the run is refused
+	// with the same reasons. Another BOM than this build's is not a target at all.
+	up := installed("svc-pve-3", "0.8.0", sha080)
+	id := strings.TrimPrefix(up, "/admin/platform/installations/")
+	apply := fmt.Sprintf(`{"kind":"apply","targetBom":%q,"confirm":"upgrade lab to 0.9.0"}`, cur.SHA256)
+	if strings.HasSuffix(cur.Release, "-dev") {
+		upgrade, _ := call(http.MethodGet, up+"/plan", "", http.StatusOK)["data"].(map[string]any)["upgrade"].(map[string]any)
+		if upgrade["allowed"] != false || !strings.Contains(fmt.Sprint(upgrade["blocking"]), "development BOM") {
+			t.Fatalf("the plan of a move to a development BOM: %v", upgrade)
+		}
+		if a := fmt.Sprint(call(http.MethodPost, up+"/runs", apply, http.StatusConflict)); !strings.Contains(a, platformlife.CodeUpgradeRefused) || !strings.Contains(a, "development BOM") {
+			t.Fatalf("an upgrade to a development BOM: %v", a)
+		}
+	}
+	call(http.MethodGet, up+"/plan?target="+strings.Repeat("3", 64), "", http.StatusBadRequest)
+	call(http.MethodPost, up+"/runs", fmt.Sprintf(`{"kind":"apply","targetBom":%q}`, strings.Repeat("3", 64)), http.StatusBadRequest)
+
+	// The same build as a release: 0.8.0 and main differ in the release line alone, so the move is allowed. It wants
+	// the typed confirmation, records the target on the installation and where it comes from on the run.
+	release := cur.Release
+	cur.Release = "0.9.0"
+	defer func() { cur.Release = release }()
+	upgrade, _ := call(http.MethodGet, up+"/plan?target="+cur.SHA256, "", http.StatusOK)["data"].(map[string]any)["upgrade"].(map[string]any)
+	if upgrade["allowed"] != true || upgrade["confirm"] != "upgrade lab to 0.9.0" || len(upgrade["changes"].([]any)) != 1 {
+		t.Fatalf("the plan of the move: %v", upgrade)
+	}
+	call(http.MethodPost, up+"/runs", fmt.Sprintf(`{"kind":"apply","targetBom":%q}`, cur.SHA256), http.StatusBadRequest)
+	from, to := platformlife.BOMRef{Release: "0.8.0", SHA256: sha080}, platformlife.BOMRef{Release: "0.9.0", SHA256: cur.SHA256}
+	fail := func(runID any) {
+		t.Helper()
+		if err := store.Mutate(ctx, runID.(string), func(r *platformlife.Run, in *platformlife.Installation, _ *platformlife.Secrets) error {
+			r.State, in.Status.Phase = platformlife.RunFailed, platformlife.PhaseFailed
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data = call(http.MethodPost, up+"/runs", apply, http.StatusAccepted)["data"].(map[string]any)
+	run, _ := store.Run(ctx, data["runId"].(string))
+	in, _ := store.Get(ctx, id)
+	if run.BOM != to || run.FromBOM == nil || *run.FromBOM != from || !run.Confirmed || in.Status.TargetBOM == nil || *in.Status.TargetBOM != to || *in.Status.BOM != from {
+		t.Fatalf("the upgrade's run %+v, status %+v", run, in.Status)
+	}
+	// It failed. Retry is an apply without a target: it continues to the target. The way back is refused.
+	fail(data["runId"])
+	data = call(http.MethodPost, up+"/runs", `{"kind":"apply"}`, http.StatusAccepted)["data"].(map[string]any)
+	if run, _ := store.Run(ctx, data["runId"].(string)); run.BOM != to || run.FromBOM == nil || *run.FromBOM != from {
+		t.Fatalf("Retry of a failed upgrade runs with %+v", run)
+	}
+	fail(data["runId"])
+	if a := fmt.Sprint(call(http.MethodPost, up+"/runs", fmt.Sprintf(`{"kind":"apply","targetBom":%q}`, sha080), http.StatusConflict)); !strings.Contains(a, platformlife.CodeUpgradeRefused) {
+		t.Fatalf("back to the installed BOM: %v", a)
+	}
+	plan = call(http.MethodGet, up+"/plan", "", http.StatusOK)["data"].(map[string]any)
+	if target, _ := plan["target"].(map[string]any); target["sha256"] != cur.SHA256 || plan["upgrade"].(map[string]any)["inProgress"] != true {
+		t.Fatalf("the plan of a started upgrade: %v", plan)
+	}
 }
 
 // TestPlatformRunMutate: the runner's write seals the secrets, deletes a secrets document left empty, and keeps the
@@ -529,7 +590,7 @@ func TestPlatformRunMutate(t *testing.T) {
 	if err := store.Create(ctx, in); err != nil {
 		t.Fatal(err)
 	}
-	run, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "")
+	run, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -585,13 +646,13 @@ func TestPlatformRunMutate(t *testing.T) {
 		t.Fatalf("stored %+v, raw %v", got.Status.Seed, raw)
 	}
 	// The typed confirmation belongs to a remove and must name the installation.
-	if _, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "remove lab"); !errors.Is(err, platformlife.ErrBadConfirm) {
+	if _, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "remove lab", ""); !errors.Is(err, platformlife.ErrBadConfirm) {
 		t.Fatalf("confirm on an apply: %v", err)
 	}
-	if _, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunRemove, "admin-sub", "remove other"); !errors.Is(err, platformlife.ErrBadConfirm) {
+	if _, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunRemove, "admin-sub", "remove other", ""); !errors.Is(err, platformlife.ErrBadConfirm) {
 		t.Fatalf("a wrong confirmation: %v", err)
 	}
-	if r, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunRemove, "admin-sub", "remove lab"); err != nil || !r.Confirmed {
+	if r, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunRemove, "admin-sub", "remove lab", ""); err != nil || !r.Confirmed {
 		t.Fatalf("confirmed remove: %+v %v", r, err)
 	}
 }
@@ -701,5 +762,173 @@ func TestPlatformRegisterAndDisable(t *testing.T) {
 	}
 	if row(id)["status"] != "DISABLED" || row(first)["status"] != "PUBLIC" || row("svc-foreign")["status"] != "PUBLIC" || !sealed(row(id), "kubeconfig-two-0123456789") {
 		t.Fatalf("after Disable: %v %v %v", row(id), row(first), row("svc-foreign"))
+	}
+}
+
+// TestPlatformClusterKubeconfig drives GET …/platform-kubeconfig against PostgreSQL with the seed and the platform
+// cluster on fakes: SUPPORT is refused before anything is asked of a cluster; ADMIN gets a kubeconfig whose token is the
+// one-hour token of the break-glass account, not the admin credential the seed holds; the audit log gets one
+// BREAK_GLASS row with the operation and the same expiry and no token; a cluster that grants a longer life, or an
+// installation without a cluster, gets no kubeconfig and no row; neither does a call whose audit row cannot be written.
+func TestPlatformClusterKubeconfig(t *testing.T) {
+	ctx := context.Background()
+	db := freshPG(t)
+	const seedToken, adminToken, minted = "planted-seed-token-0123456789", "planted-admin-credential-0123456789", "minted-break-glass-token-0123456789"
+	pemOf := func(s *httptest.Server) string {
+		return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: s.Certificate().Raw}))
+	}
+	var mu sync.Mutex
+	var wlCalls []string
+	life := time.Hour
+	wl := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.Header.Get("Authorization") != "Bearer "+adminToken {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		wlCalls = append(wlCalls, r.Method+" "+r.URL.Path)
+		if strings.HasSuffix(r.URL.Path, "/token") {
+			var req struct {
+				Spec struct {
+					ExpirationSeconds int64 `json:"expirationSeconds"`
+				} `json:"spec"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if req.Spec.ExpirationSeconds != 3600 {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			fmt.Fprintf(w, `{"status":{"token":%q,"expirationTimestamp":%q}}`, minted, time.Now().Add(life).UTC().Format(time.RFC3339))
+			return
+		}
+		w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(wl.Close)
+	adminKubeconfig, err := kamajik8s.BuildKubeconfig("pc-platform", wl.URL, []byte(pemOf(wl)), adminToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasCluster := true
+	seed := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+		switch {
+		case r.Header.Get("Authorization") != "Bearer "+seedToken || r.Method != http.MethodGet:
+			w.WriteHeader(http.StatusUnauthorized)
+		case !hasCluster:
+			w.WriteHeader(http.StatusNotFound)
+		case r.URL.Path == "/api/v1/namespaces/pc-platform/secrets/pc-platform-kubeconfig":
+			fmt.Fprintf(w, `{"data":{"value":%q}}`, b64(adminKubeconfig))
+		case r.URL.Path == "/api/v1/namespaces/pc-platform/secrets/pc-platform-ca":
+			fmt.Fprintf(w, `{"data":{"tls.crt":%q}}`, b64(pemOf(wl)))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(seed.Close)
+
+	mustInsert(t, db, "adminPermission", pgdoc.M{"_id": "support-sub", "role": "SUPPORT"})
+	mustInsert(t, db, "adminPermission", pgdoc.M{"_id": "admin-sub", "role": "ADMIN"})
+	jobs := durablejobs.New(db)
+	if err := jobs.Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	store := platformlife.NewStore(db, textcrypt.New("test-key"))
+	if err := store.Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	in := &platformlife.Installation{Name: "lab", ServiceID: "svc-pve"}
+	if err := store.Create(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Mutate(ctx, run.ID, func(_ *platformlife.Run, in *platformlife.Installation, sec *platformlife.Secrets) error {
+		in.Status.Seed = &platformlife.SeedStatus{VMID: 120, APIServer: seed.URL, CACert: pemOf(seed)}
+		sec.SeedKubeconfig = &platformlife.SeedKubeconfig{Server: seed.URL, CA: pemOf(seed), Token: seedToken}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := admin.NewHandler(admin.NewRepo(db), nil, nil, nil, nil, nil, nil, nil, audit.NewService(audit.NewRepo(db), slog.Default()),
+		externalservice.NewService(externalservice.NewRepo(db), textcrypt.New("test-key")), "", "", "")
+	h.SetPlatform(store)
+	router := chi.NewRouter()
+	h.Routes(router)
+	get := func(sub string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/admin/platform/installations/"+in.ID+"/platform-kubeconfig", nil)
+		req = req.WithContext(httpx.WithRC(req.Context(), &httpx.RequestContext{Sub: sub}))
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		return w
+	}
+	rows := func() []pgdoc.M {
+		var events []pgdoc.M
+		if err := db.C("auditEvent").Find(ctx, pgdoc.M{"action": admin.ActionBreakGlass}, &events); err != nil {
+			t.Fatal(err)
+		}
+		return events
+	}
+
+	if w := get("support-sub"); w.Code != http.StatusForbidden || len(wlCalls) != 0 || len(rows()) != 0 {
+		t.Fatalf("SUPPORT: %d %s, platform cluster calls %v", w.Code, w.Body.String(), wlCalls)
+	}
+
+	w := get("admin-sub")
+	var a struct {
+		Data struct {
+			Kubeconfig string    `json:"kubeconfig"`
+			ExpiresAt  time.Time `json:"expiresAt"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &a); err != nil || w.Code != http.StatusOK || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("ADMIN: %d %q %s", w.Code, w.Header().Get("Cache-Control"), w.Body.String())
+	}
+	if left := time.Until(a.Data.ExpiresAt); left > time.Hour || left < 59*time.Minute {
+		t.Fatalf("expires in %s, want one hour", left)
+	}
+	if kc := a.Data.Kubeconfig; !strings.Contains(kc, "token: "+minted) || !strings.Contains(kc, wl.URL) ||
+		strings.Contains(w.Body.String(), adminToken) || strings.Contains(w.Body.String(), seedToken) {
+		t.Fatalf("the kubeconfig is not the break-glass account's on the platform cluster: %s", w.Body.String())
+	}
+	if last := wlCalls[len(wlCalls)-1]; last != "POST /api/v1/namespaces/kube-system/serviceaccounts/proxcloud-break-glass/token" {
+		t.Fatalf("the token is not the break-glass account's: %v", wlCalls)
+	}
+	events := rows()
+	raw, _ := json.Marshal(events)
+	if len(events) != 1 || !strings.Contains(string(raw), `"operation":"platform-kubeconfig"`) || !strings.Contains(string(raw), "admin-sub") ||
+		!strings.Contains(string(raw), in.ID) || !strings.Contains(string(raw), `"expiresAt":"`+a.Data.ExpiresAt.UTC().Format(time.RFC3339)+`"`) ||
+		strings.Contains(string(raw), minted) || strings.Contains(string(raw), adminToken) {
+		t.Fatalf("audit rows: %s", raw)
+	}
+
+	// A platform cluster that grants a day: 502, no kubeconfig, no new row.
+	mu.Lock()
+	life = 24 * time.Hour
+	mu.Unlock()
+	if w := get("admin-sub"); w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), platformlife.CodeWorkloadUnreachable) ||
+		strings.Contains(w.Body.String(), minted) || len(rows()) != 1 {
+		t.Fatalf("a 24 hour token: %d %s", w.Code, w.Body.String())
+	}
+	// No cluster on the seed: 409 no_cluster.
+	mu.Lock()
+	hasCluster = false
+	mu.Unlock()
+	if w := get("admin-sub"); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "no_cluster") || len(rows()) != 1 {
+		t.Fatalf("no cluster: %d %s", w.Code, w.Body.String())
+	}
+	// An audit entry that cannot be written: the token was asked for, and the kubeconfig still stays in.
+	mu.Lock()
+	life, hasCluster = time.Hour, true
+	mu.Unlock()
+	if _, err := db.Pool.Exec(ctx, `CREATE FUNCTION audit_test_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected audit failure'; END $$; CREATE TRIGGER audit_test_fail BEFORE INSERT ON "auditEvent" FOR EACH ROW EXECUTE FUNCTION audit_test_fail()`); err != nil {
+		t.Fatal(err)
+	}
+	if w := get("admin-sub"); w.Code < 500 || strings.Contains(w.Body.String(), minted) || strings.Contains(w.Body.String(), `"kubeconfig"`) || len(rows()) != 1 {
+		t.Fatalf("audit insert fails: %d %s", w.Code, w.Body.String())
 	}
 }

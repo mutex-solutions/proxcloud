@@ -201,9 +201,11 @@ management cluster, and no VM whose name starts with `<clusterId>-` in the
 project's pool on Proxmox (CAPMOX names a VM after its Machine). While any of
 these is left, or the management cluster or Proxmox does not answer, nothing
 of the cluster is released (the look at the pool comes before every release
-step, the CSI one included) and the job looks again later (`cascade_running`
-or `release_failed` as the job's last result; the reason is in the API log,
-line `kamaji: release of a deleted cluster, will retry`). On a management
+step, the CSI one included) and the job looks again later. Its last result
+is then `cascade_running` (something of the cluster is left; nothing is
+logged for it) or `release_failed` (a look or a release step failed; only
+this one writes a line to the API log, with the reason:
+`kamaji: release of a deleted cluster, will retry`). On a management
 cluster whose ClusterRole is older than the Machines grant
 ([Provisioning status](#provisioning-status-reason-and-needs-attention), "RBAC") the
 Machines cannot be listed; the other checks decide there.
@@ -226,9 +228,17 @@ had reserved.
 the first look after the cascade, so seconds to a few minutes after the last
 worker is gone, on every install. A lab delete on 2026-11-17 had its worker VM
 gone 45 seconds after the delete; in a job's first minute the looks are about
-15 seconds apart. **This timing is not verified on a lab**:
-the job is covered by tests with a fake management cluster and a fake Proxmox
-on PostgreSQL. Should the job not have run (an API from before v0.8.2, a job
+15 seconds apart. Seen on a lab once (2026-11-18, the build `dev-03bc9f3` of
+`main`, no scheduler, no provider sync): after a plain delete of a joined
+one-worker cluster the job's looks read `cascade_running` until the Application
+was gone, 135 to 150 seconds after the delete, and its next look, 2 minutes 53
+seconds after the delete and 23 to 38 seconds after the cascade ended, revoked
+the token; its seven ACL rows were gone with it. Not run on a lab: a cascade
+that hangs (the job `dead` after 24 hours), `release_failed`, a project
+teardown, an API restart while the job is pending, a VM `<clusterId>-…` left
+in the pool, and a cluster with a `csi@pve!<clusterId>` token or an RWX
+dataset; those are covered by tests with a fake management cluster and a fake
+Proxmox on PostgreSQL. Should the job not have run (an API from before v0.8.2, a job
 that could not be queued, a job that gave up), the sweep's timing applies: with
 the scheduler the first provider sync after the cascade and after the marker's
 30 minutes; without the scheduler (the Compose install's default) not until an
