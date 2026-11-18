@@ -113,14 +113,15 @@ func (c *Client) CloneVM(ctx context.Context, node string, vmid int, o CloneOpts
 	return c.postTask(ctx, qemuPath(node, vmid)+"/clone", form)
 }
 
-// DeleteVM destroys a VM. purge removes it from backup jobs + HA; destroyDisks
-// removes owned-but-unreferenced disks too (both default on for platform-owned VMs).
+// DeleteVM destroys a VM. purge removes it from backup jobs + HA; destroy-unreferenced-disks
+// removes owned-but-unreferenced disks too (both on for platform-owned VMs). Not for a VM that got
+// CSIControllerVMID: every proxmox-csi volume of the cluster is named as that id's and would go with it.
 func (c *Client) DeleteVM(ctx context.Context, node string, vmid int) (UPID, error) {
-	form := formVals{
-		"purge":                      "1",
-		"destroy-unreferenced-disks": "1",
-	}.values()
-	return c.deleteTask(ctx, qemuPath(node, vmid), form)
+	form := formVals{"purge": "1"}
+	if vmid != CSIControllerVMID {
+		form["destroy-unreferenced-disks"] = "1"
+	}
+	return c.deleteTask(ctx, qemuPath(node, vmid), form.values())
 }
 
 // VMStatus is GET /nodes/{node}/qemu/{vmid}/status/current.

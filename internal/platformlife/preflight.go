@@ -24,7 +24,7 @@ const (
 )
 
 // Check is one row of the preflight. The ids are part of the API (docs/api.md): flags, spec, network, isolation,
-// tenant-network (a warning or ok, never a failure; absent when the provider names no zone), credentials,
+// tenant-network (a warning or ok, never a failure; absent when the provider names no zone), csi-vmid (a warning or ok, never a failure), credentials,
 // machines (a warning or ok, never a failure; absent while the installation has no VM), privileges:capi, privileges:csi, privileges:kubemint, mint-scope, pool-fence, token-scope, iso-store-visibility,
 // boot-iso-grant, boot-iso, placement, images. A run's first stage fails preflight_failed with the failed rows as its items, or
 // isolation_not_enforced when isolation is the only one.
@@ -172,6 +172,13 @@ func (p Preflight) Run(ctx context.Context) []Check {
 		default:
 			row("tenant-network", nil, "The provider's default zone "+site.DefaultZone+" ("+site.DefaultZoneKind+") does not exist yet and is created without DHCP: a tenant cluster can use its networks.")
 		}
+	}
+
+	// A warning, never a failure: see pve.CSIVMIDCheck.
+	if msg, free, _ := p.Portal.C.CSIVMIDCheck(ctx); free {
+		row("csi-vmid", nil, msg)
+	} else {
+		out = append(out, Check{ID: "csi-vmid", Status: CheckWarn, Message: msg})
 	}
 
 	var creds []string

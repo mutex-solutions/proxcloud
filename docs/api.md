@@ -188,6 +188,7 @@ several findings puts one on each line of `message`. Rows after `connect` or
 | `mint-scope` | Only when it applies: the token holds `User.Modify` or `Permissions.Modify` on `/`, `/access` or `/access/groups` (it could create an API token for any user, `root@pam` included) or `Permissions.Modify` on `/pool` (it could write any role on every pool). The message says what to run | `warn` |
 | `store-reach` | Stored provider: tenant networks cannot reach the network stores | `warn` |
 | `boot-iso` | Stored provider: the Kubernetes bootstrap ISO store is usable | `warn` |
+| `csi-vmid` | No guest has VM id 9999, the id proxmox-csi names its volumes after (`vm-9999-pvc-<uuid>`). In use: the message says never to destroy that VM with "Destroy unreferenced disks owned by guest", and it is in `warnings` too. An id that could not be read is a `warn` row only | `warn` |
 | `version` | Proxmox VE 9.2 or later | `fail` |
 | `template-pool` | The pool `pc-templates` exists. When it does not, the first template import creates it (`Pool.Allocate` on `/pool`); `pveum pool add pc-templates` is only for a token without that privilege | `warn` |
 | `import-store` | Some storage takes `import` content. Stored provider with `importStorage`: that storage exists, takes it, and the token can delete files there | `warn` |
@@ -447,7 +448,7 @@ makes the step `todo`, and a step is `blocked` only when it cannot start.
   `warn` is `attention`, `fail` is `todo`); the nodes with an active `import`
   store; the published OS images; and the imported templates by lifecycle
   state. `zone`, `cidr-pool`, `frr`, `public-networks` and `store-reach` go to
-  `network`, `storage-profile`, `import-store` and `boot-iso` to `storage`,
+  `network`, `storage-profile`, `import-store`, `boot-iso` and `csi-vmid` to `storage`,
   every other row to `connect`. A row that asks what a database item asks
   takes that item's place and id: `zone` the item `zone`, `cidr-pool` the item `cidrPool`,
   `storage-profile` the item `defaultProfile`. A cluster that does not answer
@@ -535,11 +536,12 @@ are several, `errors.details.problems`.
   `PROXCLOUD_ENCRYPTION_DEFAULT_KEY` the route answers `409 no_encryption_key`.
   No route returns a secret: an installation shows `credentials.{capi,csi}.tokenId`.
 - `POST /installations/{id}/preflight`: read-only, not audited; `{ok, checks}`
-  with rows `flags`, `spec`, `network`, `isolation`, `tenant-network`, `credentials`, `machines`,
+  with rows `flags`, `spec`, `network`, `isolation`, `tenant-network`, `csi-vmid`, `credentials`, `machines`,
   `privileges:capi`, `privileges:csi`, `privileges:kubemint`, `mint-scope`, `pool-fence`,
   `token-scope`, `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement` and
   `images`. A row's `status` is `ok`, `fail` or `warn`; `ok` in the answer is
-  false only when a row failed. `tenant-network` never fails. It reads the provider's default
+  false only when a row failed. `csi-vmid` never fails: it warns when a guest has VM id 9999
+  (see the connection test's row of that id). `tenant-network` never fails. It reads the provider's default
   zone in Proxmox: `warn` when that zone has DHCP, when it does not exist yet and is
   configured as a `simple` zone without `"dhcp": false` (ProxCloud then creates it with DHCP), or when the zones
   could not be read; a tenant Kubernetes cluster create on a network of such a zone is

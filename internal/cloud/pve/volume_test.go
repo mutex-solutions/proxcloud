@@ -176,7 +176,7 @@ func TestAttachVolumeCrossNode(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			writes := map[string][]url.Values{}
 			s := volCluster(t, tt.cfg, writes)
-			err := s.AttachVolume(context.Background(), "p1", 101, tt.vol, tt.target)
+			_, err := s.AttachVolume(context.Background(), "p1", 101, tt.vol, tt.target)
 			var ce *ConflictError
 			if tt.wantConflict {
 				if !errors.As(err, &ce) || len(writes["move"]) != 0 {
@@ -198,8 +198,9 @@ func TestAttachVolumeCrossNode(t *testing.T) {
 func TestAttachVolumeSharedAcrossNodes(t *testing.T) {
 	writes := map[string][]url.Values{}
 	s := volCluster(t, cfgSharedUnused, writes)
-	if err := s.AttachVolume(context.Background(), "p1", 101, "nas:101/vm-101-disk-1.raw", "103"); err != nil {
-		t.Fatal(err)
+	// The slot it answers is where the caller finds the disk again: the reassign gave it a new volid.
+	if slot, err := s.AttachVolume(context.Background(), "p1", 101, "nas:101/vm-101-disk-1.raw", "103"); err != nil || slot != "scsi1" {
+		t.Fatalf("slot = %q, err = %v", slot, err)
 	}
 	if f := writes["move"]; len(f) != 1 || f[0].Get("target-vmid") != "900" || f[0].Get("target-disk") != "unused0" {
 		t.Fatalf("move onto the holder = %v", f)
