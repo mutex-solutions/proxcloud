@@ -26,7 +26,8 @@ test("a stuck cluster says why per node group and what the tenant can do", async
   await expect(workers).toContainText("Needs attention: Node group “workers”")
   await expect(workers).toContainText("The machine runs but has not joined the cluster")
   // Past its bound the tenant is sent to the operator, not to a network check they cannot make.
-  await expect(workers).toContainText("Contact the operator, who can check the path from your network to the endpoint")
+  await expect(workers).toContainText("most likely it could not reach the cluster's endpoint. Contact the operator, who can check the path from your network to the endpoint")
+  await expect(workers).toContainText("A group of one cannot go to zero")
   await expect(workers).not.toContainText("has a router or gateway")
   await expect(workers).toContainText(/since 4\d min/)
   // Two machines the host had no room for.
@@ -36,6 +37,10 @@ test("a stuck cluster says why per node group and what the tenant can do", async
   const build = page.getByRole("listitem").filter({ hasText: "Node group “build”" })
   await expect(build).toContainText("Creating the virtual machine.")
   await expect(build).not.toContainText("Needs attention:")
+  // Not joined inside its bound is a normal step: no diagnosis and nothing to do.
+  const edge = page.getByRole("listitem").filter({ hasText: "Node group “edge”" })
+  await expect(edge).toContainText("The machine runs but has not joined the cluster yet.")
+  await expect(edge).not.toContainText("Contact the operator")
 
   const table = page.getByRole("table").filter({ hasText: "Node group" }).first()
   await expect(table.getByRole("columnheader", { name: "Status" })).toBeVisible()

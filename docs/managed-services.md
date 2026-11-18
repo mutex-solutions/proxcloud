@@ -178,7 +178,13 @@ captures; it was not reproduced on a lab, and the hook that drops was not captur
 
 **Workers that did not join must be replaced.** `kubeadm join` runs once, at the first boot. A
 worker that timed out stays "not joined" after the path is repaired. Replace it: the tenant
-reduces the node group's count by one and raises it again (to zero and back for all of them).
+reduces the node group's count by one and raises it again. A count below one is refused, so a
+group cannot go to zero and back: it is one such cycle per dead worker, and a group of one is
+raised by one first and reduced once the new worker is ready (this needs quota for one more
+worker). On the production site two dead workers of a group of two were replaced by 2 → 3 → 2,
+twice: both times the scale-down removed a machine without a node, never a ready worker. Which
+machine goes is Cluster API's choice ([managed-k8s.md](managed-k8s.md), scale-down); only that
+order was run.
 
 **What the Check reads.** The row `tenant-path` reads the provider's default zone in Proxmox (its
 kind, the nodes a `simple` zone is limited to, an EVPN zone's exit nodes; for a zone that does not
@@ -189,11 +195,19 @@ node's saved network configuration holds the platform gateway on that bridge. It
 node that translates also hosts a platform machine and does not route the platform network, and
 when Proxmox could not be read. It never fails, because it opens no connection: an `ok` row is not
 proof that the path is open, and a warning stays after you added a node leg by hand (the row does
-not see runtime addresses). A probe that opens the path from a VM is not in this release.
+not see runtime addresses). It also warns on a node that routes the platform VLAN on a VLAN
+interface of its own (the gateway on `vmbr0.140`, say): the row does not read that interface, and
+by the rule above that layout should work (not tested). A probe that opens the path from a VM is
+not in this release.
 
 **A new one-node site: let the node route the platform network.** Make the platform network a
-vnet of a `simple` SDN zone with one subnet whose gateway is the platform gateway (Datacenter →
-SDN in Proxmox, then Apply), and enter the vnet as the platform bridge in step 1. Proxmox puts
+vnet of a `simple` SDN zone with one subnet whose gateway is the platform gateway and with SNAT
+ticked (Datacenter → SDN in Proxmox, then Apply), and enter the vnet as the platform bridge in
+step 1. SNAT is for the platform machines' own way out: the node translates what they send
+through its uplink, so the answers from the internet (image pulls during the install) come back
+to the node. Without SNAT the site's router must have the route below; a route on the ProxCloud
+host alone then leaves the platform machines without a return path from the internet and the
+install fails at its image pulls. Proxmox puts
 the gateway address on the node, so a tenant's packet is routed inside the node and is not
 translated on the way (the zone's SNAT rule only matches what leaves through the node's uplink).
 Consequences:
@@ -201,8 +215,9 @@ Consequences:
 - The platform sees a tenant's real address. A database's `allowedCidrs` then hold tenant subnets,
   not the node's address ([managed-dbaas.md](managed-dbaas.md)).
 - Everything outside the node (the ProxCloud host, your workstation) needs a route "platform
-  network via the node's address", on the site's router or on the host itself: without it the API
-  container reaches neither the seed nor the cluster's API address, and the run fails.
+  network via the node's address", on the site's router or, with SNAT on the subnet, on the host
+  itself: without it the API container reaches neither the seed nor the cluster's API address,
+  and the run fails.
 - It is a layout for **one node only**: a vnet of a `simple` zone is a separate network on each
   node, and the platform bridge must be one layer-2 segment
   ([What no check reads](#what-no-check-reads)).

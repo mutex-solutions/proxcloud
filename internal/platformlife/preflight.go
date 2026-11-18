@@ -195,9 +195,7 @@ func (p Preflight) Run(ctx context.Context) []Check {
 		default:
 			row("tenant-network", nil, "The provider's default zone "+site.DefaultZone+" ("+site.DefaultZoneKind+") does not exist yet and is created without DHCP: a tenant cluster can use its networks.")
 		}
-		if c := p.tenantPath(ctx, site, zones, err); c.ID != "" {
-			out = append(out, c)
-		}
+		out = append(out, p.tenantPath(ctx, site, zones, err))
 	}
 
 	// A warning, never a failure: see pve.CSIVMIDCheck.
@@ -451,14 +449,11 @@ func (p Preflight) tenantPath(ctx context.Context, site Site, zones []pve.SDNZon
 		}
 	}
 	plat = slices.DeleteFunc(slices.Compact(slices.Sorted(slices.Values(plat))), func(s string) bool { return s == "" })
-	if len(plat) == 0 {
-		return Check{}
-	}
 	if zonesErr != nil {
 		return unknown("the SDN zones", zonesErr)
 	}
 	nodeList := func(s string) []string {
-		return slices.DeleteFunc(strings.Split(s, ","), func(s string) bool { return strings.TrimSpace(s) == "" })
+		return strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' })
 	}
 	zoneType := func(zone string) string {
 		if i := slices.IndexFunc(zones, func(z pve.SDNZone) bool { return z.Zone == zone }); i >= 0 {
@@ -510,7 +505,7 @@ func (p Preflight) tenantPath(ctx context.Context, site Site, zones []pve.SDNZon
 			}
 			bridge = "a vnet of the simple zone " + vnets[i].Zone + " with no subnet whose gateway is " + n.Gateway
 		case "vlan":
-			bridge = "a vnet of the VLAN zone " + vnets[i].Zone + ", on which Proxmox puts no address"
+			bridge = "a vnet of the VLAN zone " + vnets[i].Zone + ", on which Proxmox puts no address (a gateway the node holds on a VLAN interface of its own is not read)"
 		default:
 			bridge = "a vnet of the zone " + vnets[i].Zone + ", which this row cannot tell to be routed by the node"
 		}
@@ -533,7 +528,7 @@ func (p Preflight) tenantPath(ctx context.Context, site Site, zones []pve.SDNZon
 	}
 	nodes := strings.Join(shared, ", ")
 	return Check{ID: "tenant-path", Status: CheckWarn, Message: "Tenants may not reach the platform network " + n.Prefix + " from " + nodes + ". " + how +
-		". Platform machines are placed on " + nodes + " too, and the platform network is not routed by the node itself: its bridge " + n.Bridge + " is " + bridge +
+		". Platform machines are placed on " + nodes + " too, and this row finds nothing that makes the node itself route the platform network: its bridge " + n.Bridge + " is " + bridge +
 		". A tenant's TCP connection to a platform address on the same node then leaves the node translated, comes back into it through " + n.Bridge +
 		", and the node's connection tracking drops it. Tenant Kubernetes workers then never join their cluster (they stay \"not joined\") and tenants cannot reach managed databases. " +
 		"The install and the platform's own machines are not affected.\n" +

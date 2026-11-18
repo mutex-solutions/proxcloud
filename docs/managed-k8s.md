@@ -258,7 +258,7 @@ paths and never reaches a tenant. The first match in this order wins:
 | `waiting_control_plane` | Phase Pending and the control plane is not Ready | Waiting for the control plane. | never |
 | `creating_vm` | Reason `Cloning`, `WaitingForDiskReconciliation`, `WaitingForStaticIPAllocation`, `WaitingForBootstrapDataReconciliation`, or no ProxmoxMachine condition yet | Creating the virtual machine. | by bound |
 | `starting_vm` | Reason `WaitingForVMPowerUp`, `WaitingForCloudInit`, `WaitingForBootstrapReady`, `WaitingForClusterAPIMachineAddresses` | Starting the virtual machine. | by bound |
-| `not_joined` | Phase Provisioned, or `NodeHealthy` with reason `NodeDoesNotExist` | Inside the bound: "The machine runs but has not joined the cluster yet." With attention: "The machine runs but has not joined the cluster: it could not reach the cluster's endpoint. Contact the operator, who can check the path from your network to the endpoint. A machine that failed to join does not try again: once the path is repaired, reduce the count by one and raise it again." The tenant cannot see or repair that path, so the text no longer asks them to check it ([Reaching the platform](#9-how-a-cluster-lands-on-proxmox)) | 15 min |
+| `not_joined` | Phase Provisioned, or `NodeHealthy` with reason `NodeDoesNotExist` | Inside the bound: "The machine runs but has not joined the cluster yet." With attention: "The machine runs but has not joined the cluster: most likely it could not reach the cluster's endpoint. Contact the operator, who can check the path from your network to the endpoint. A machine that failed to join does not try again: once the cause is repaired, reduce the count by one and raise it again. A group of one cannot go to zero: raise it by one, wait until the new machine is ready, then reduce it by one." Nothing reads the machine's join error, so the cause is the likely one, not a finding. The tenant cannot see or repair that path, so the text no longer asks them to check it ([Reaching the platform](#9-how-a-cluster-lands-on-proxmox)) | 15 min |
 | `provisioning` | Anything else, and a machine that Cluster API has not made yet | Preparing the machine. | by bound |
 | `control_plane_stalled` | No endpoint, or the control plane has no status or is `Provisioning`, 15 min after the create | The control plane is taking longer than expected. Wait, delete and recreate, or contact the operator. | n/a |
 
@@ -462,7 +462,7 @@ address runs on that same node, the worker's TCP connection is dropped on the no
 platform network: a one-node site with a `simple` tenant zone and the platform network on a VLAN behind the site's
 router is this case (found on the first production site, v0.8.0). The workers then run, stay `not_joined`, and
 cloud-init's `kubeadm join` has timed out on `https://<endpoint>:6443`. kubeadm runs once: after the path is
-repaired such workers must be replaced (the tenant reduces the node group's count and raises it again). The rule, its
+repaired such workers must be replaced (the tenant reduces the node group's count by one and raises it again, once per worker; a group cannot go to zero, so a group of one is raised first). The rule, its
 table, the Check row `tenant-path` that warns of the layout, and the two supported layouts (a platform network routed
 by the node on a new one-node site; a leg of the node on an existing one, run by hand on one production site and
 not lab-verified) are in [managed-services.md](managed-services.md#the-path-from-tenants-to-the-platform). Nothing

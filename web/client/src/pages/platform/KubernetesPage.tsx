@@ -165,10 +165,10 @@ const PROGRESS_TEXT: Record<string, string> = {
   provisioning: "Preparing the machine.",
   control_plane_stalled: "The control plane is taking longer than expected. Wait, delete and recreate, or contact the operator.",
 }
-// After its bound a machine that has not joined will not join: it could not reach the endpoint, on a path the tenant
-// can neither see nor repair, and kubeadm runs once.
+// After its bound a machine that has not joined will not join: kubeadm runs once. The cause is not read (the code is
+// the Machine's phase), so the text names the likely one: the endpoint, on a path the tenant can neither see nor repair.
 const NOT_JOINED_ATTENTION =
-  "The machine runs but has not joined the cluster: it could not reach the cluster's endpoint. Contact the operator, who can check the path from your network to the endpoint. A machine that failed to join does not try again: once the path is repaired, reduce the count by one and raise it again."
+  "The machine runs but has not joined the cluster: most likely it could not reach the cluster's endpoint. Contact the operator, who can check the path from your network to the endpoint. A machine that failed to join does not try again: once the cause is repaired, reduce the count by one and raise it again. A group of one cannot go to zero: raise it by one, wait until the new machine is ready, then reduce it by one."
 const progressText = (p?: Progress) =>
   p?.code === "not_joined" && p.attention ? NOT_JOINED_ATTENTION : (PROGRESS_TEXT[p?.code ?? ""] ?? PROGRESS_TEXT.provisioning)
 function sinceText(since?: string): string {

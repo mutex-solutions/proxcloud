@@ -31,6 +31,7 @@ func TestPreflightTenantPath(t *testing.T) {
 		zones, vnets  string
 		bridge        string            // the platform bridge; vmbr1 when empty
 		nodes         []string          // the platform machines' nodes; pve1 when nil
+		cp            string            // the control plane's node, when the node groups (nodes) are elsewhere
 		extra         map[string]string // further answers of the fake
 		status, wants string            // wants: parts of the message, split at "|"
 	}{
@@ -51,6 +52,17 @@ func TestPreflightTenantPath(t *testing.T) {
 		{name: "simple zone, plain bridge with the gateway on the node", site: simpleSite,
 			zones: "[" + simple + "]", status: CheckOK, wants: "routed by the node itself",
 			extra: map[string]string{"/nodes/pve1/network": `[{"iface":"vmbr0","address":"192.0.2.11","gateway":"192.0.2.1","cidr":"192.0.2.11/24"},{"iface":"vmbr1","address":"10.200.200.1"}]`}},
+		// An address that is not the gateway routes nothing: the platform machines answer through their gateway.
+		{name: "simple zone, plain bridge with another address on the node", site: simpleSite,
+			zones: "[" + simple + "]", status: CheckWarn, wants: "does not hold the gateway 10.200.200.1",
+			extra: map[string]string{"/nodes/pve1/network": `[{"iface":"vmbr1","address":"10.200.200.2"}]`}},
+		// Each node that shares is read: one that holds the gateway does not clear the other.
+		{name: "simple zone, plain bridge, the gateway on one of two nodes", site: simpleSite,
+			zones: "[" + simple + "]", nodes: []string{"pve1", "pve2"}, status: CheckWarn, wants: "from pve2. |Platform machines are placed on pve2 too",
+			extra: map[string]string{"/nodes/pve1/network": `[{"iface":"vmbr1","address":"10.200.200.1"}]`, "/nodes/pve2/network": `[{"iface":"vmbr1","address":"10.200.200.3"}]`}},
+		// An upgraded site: the zone was made by hand as simple and its config entry names no kind, which reads evpn.
+		{name: "a live simple zone the provider's config reads as evpn", site: Site{DefaultZone: "pcm0", DefaultZoneKind: "evpn"},
+			zones: "[" + simple + "]", status: CheckWarn, wants: "pcm0 is a simple zone"},
 		{name: "a simple zone that does not exist yet", site: simpleSite, zones: "[]", status: CheckWarn, wants: "from pve1"},
 		// The lab: the node translates nothing, the site's router does.
 		{name: "VLAN tenant zone", site: Site{DefaultZone: "lan", DefaultZoneKind: "vlan"},
@@ -58,9 +70,9 @@ func TestPreflightTenantPath(t *testing.T) {
 		// Several nodes: it breaks only where a platform machine shares a node with what translates.
 		{name: "simple zone on other nodes than the platform machines", site: simpleSite,
 			zones: `[{"zone":"pcm0","type":"simple","nodes":"pve2,pve3"}]`, status: CheckOK, wants: "platform machines are on other nodes (pve1)"},
-		{name: "several nodes, a platform machine on one a tenant runs on", site: simpleSite,
-			zones: `[{"zone":"pcm0","type":"simple","nodes":"pve2,pve3"},` + lan + `]`, vnets: platVlan, bridge: "plat140", nodes: []string{"pve1", "pve2"},
-			status: CheckWarn, wants: "from pve2. |Platform machines are placed on pve2 too"},
+		{name: "several nodes, the control plane alone on one a tenant runs on", site: simpleSite,
+			zones: `[{"zone":"pcm0","type":"simple","nodes":"pve2, pve3"},` + lan + `]`, vnets: platVlan, bridge: "plat140", cp: "pve3",
+			status: CheckWarn, wants: "from pve3. |Platform machines are placed on pve3 too"},
 		{name: "EVPN, a platform machine on an exit node", site: evpnSite,
 			zones: `[{"zone":"ev","type":"evpn","exitnodes":"pve1"},` + lan + `]`, vnets: platVlan, bridge: "plat140", status: CheckWarn,
 			wants: "its exit nodes (pve1) translate"},
@@ -84,6 +96,9 @@ func TestPreflightTenantPath(t *testing.T) {
 			nodes = []string{"pve1"}
 		}
 		in.Spec.Clusters[0].ControlPlane.Node = nodes[0]
+		if tc.cp != "" {
+			in.Spec.Clusters[0].ControlPlane.Node = tc.cp
+		}
 		for i := range in.Spec.Clusters[0].NodeGroups {
 			in.Spec.Clusters[0].NodeGroups[i].Nodes = nodes
 		}
