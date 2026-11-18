@@ -232,6 +232,63 @@ test("a run ends ready: live components, providers, seed credential and the brea
   expect(await page.content()).not.toContain("mock-break-glass-token")
 })
 
+test("the ready card: endpoints, the providers' gap, the platform kubeconfig and the two ArgoCD commands", async ({ page }) => {
+  await open(page, "ready")
+  await recordCalls(page)
+
+  const endpoints = page.getByRole("list", { name: "Endpoints" })
+  await expect(endpoints.getByRole("listitem").filter({ hasText: "Seed API" })).toContainText("https://10.90.0.5:6443")
+  await expect(endpoints.getByRole("listitem").filter({ hasText: "Platform cluster API" })).toContainText("https://10.90.0.10:6443")
+  await expect(endpoints.getByRole("listitem").filter({ hasText: "Load balancer range (MetalLB)" })).toContainText("10.90.0.100-10.90.0.150")
+  await expect(endpoints.getByRole("listitem").filter({ hasText: "Node range" })).toContainText("10.90.0.20-10.90.0.60")
+
+  // A green install leaves the Kubernetes provider with no version and both providers attached to no project: the
+  // card says so and links to where each is put right.
+  const providers = page.getByRole("list", { name: "Providers" })
+  const k8s = providers.getByRole("listitem").filter({ hasText: "lab Kubernetes" })
+  await expect(k8s).toContainText("Offers no Kubernetes version yet, so no tenant can create a cluster.")
+  await expect(k8s.getByRole("link", { name: "Publish a Kubernetes node image" })).toHaveAttribute("href", "/system/template-updates")
+  await expect(k8s.getByRole("link", { name: "enter its version on the provider's Connection tab" })).toHaveAttribute("href", /\/system\/cloud-providers\/svc-/)
+  await expect(k8s.getByRole("link", { name: "Attach it on the provider's Projects tab" })).toHaveAttribute("href", /\/system\/cloud-providers\/svc-/)
+  const dbs = providers.getByRole("listitem").filter({ hasText: "lab Databases" })
+  await expect(dbs).toContainText("New projects do not get this provider")
+  await expect(dbs).not.toContainText("Kubernetes version")
+
+  // ArgoCD has no address: the exact commands, one pair for each cluster, each with its own kubeconfig file and port.
+  await expect(page.getByLabel("platform ArgoCD commands", { exact: true })).toHaveText(
+    "export KUBECONFIG=./lab-platform.kubeconfig\nkubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d; echo\nkubectl -n argocd port-forward svc/argocd-server 8080:80")
+  await expect(page.getByLabel("seed ArgoCD commands", { exact: true })).toHaveText(
+    "export KUBECONFIG=./lab-seed.kubeconfig\nkubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d; echo\nkubectl -n argocd port-forward svc/argocd-server 8081:80")
+  await expectAccessible(page)
+
+  // The platform kubeconfig is a file of its own route, and like the seed's it is never in the page.
+  const [download] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "Download platform kubeconfig" }).click()])
+  expect(download.suggestedFilename()).toBe("lab-platform.kubeconfig")
+  const file = await readFile(await download.path(), "utf8")
+  expect(file).toContain("token: mock-platform-break-glass-token")
+  expect(file).toContain("server: https://10.90.0.10:6443")
+  await expect(page.getByText(/Downloaded\. It works until/)).toBeVisible()
+  expect(await page.content()).not.toContain("mock-platform-break-glass-token")
+  expect(await calls(page, "GET", /\/platform-kubeconfig$/)).toHaveLength(1)
+  expect(await calls(page, "GET", /\/seed-kubeconfig$/)).toHaveLength(0)
+})
+
+// The providers are read again when a run ends (it registers them), and a provider row the operator completed before
+// (a version, the attach policy) is adopted as it is: the card then has nothing to warn about.
+test("the ready card stops warning once the Kubernetes provider has a version and is attached", async ({ page }) => {
+  test.setTimeout(60_000)
+  await open(page, "running")
+  await mock(page, `
+    const { db } = await import("/src/mocks/db.ts")
+    db.services.push({ id: "svc-k8s-kept", name: "lab Kubernetes", type: "CLOUD", status: "ACTIVE", config: {
+      provider: "kamaji", platformInstallationId: mockPlatform.installations[0].id, attachToNewProjects: true, cluster: { versions: { "1.35.10": "9000" } } } })`)
+  const k8s = page.getByRole("list", { name: "Providers" }).getByRole("listitem").filter({ hasText: "lab Kubernetes" })
+  await expect(k8s).toContainText("Offers Kubernetes 1.35.10.", { timeout: 20_000 })
+  await expect(k8s).toContainText("New projects get this provider.")
+  await expect(k8s).not.toContainText("no Kubernetes version")
+  await expect(page.getByRole("list", { name: "Providers" }).getByRole("listitem").filter({ hasText: "lab Databases" })).toContainText("New projects do not get this provider")
+})
+
 test("Remove asks for the typed name and sends the confirmation only for the forced path", async ({ page }) => {
   test.setTimeout(60_000)
   await open(page, "ready")
@@ -552,7 +609,7 @@ test("an admin without admin:service:manage reads the page and changes nothing",
   })
   await open(page, "ready")
   await expect(page.getByText("Changing anything needs the permission admin:service:manage.")).toBeVisible()
-  for (const name of ["Save settings", "Store the secrets", "Check", "Apply this release", "Download seed kubeconfig", "Replace the seed credential", "Remove managed services"]) {
+  for (const name of ["Save settings", "Store the secrets", "Check", "Apply this release", "Download platform kubeconfig", "Download seed kubeconfig", "Replace the seed credential", "Remove managed services"]) {
     await expect(page.getByRole("button", { name, exact: true })).toBeDisabled()
   }
 })

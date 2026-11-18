@@ -23,7 +23,7 @@ export type Installation = {
   status: {
     phase: string
     bom?: { release: string; sha256: string }
-    seed?: { vmid?: number; node?: string; cdVolume?: string; tokenSecret?: string; readyAt?: string }
+    seed?: { vmid?: number; node?: string; apiServer?: string; cdVolume?: string; tokenSecret?: string; readyAt?: string }
     clusters?: { name: string; endpoint?: string; kubernetesVersion?: string; argocdTokenExpiresAt?: string }[]
     components?: { name: string; cluster: string; version: string }[]
     providers?: { kubernetes?: string; database?: string }
