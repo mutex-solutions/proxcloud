@@ -837,6 +837,9 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 	if h.pveSecurityGroupAction(w, r, u, proj, es, cr, action, data) {
 		return true
 	}
+	if h.pveNetworkServers(w, r, proj, es, cr, action) {
+		return true
+	}
 	if h.pveSubnetAction(w, r, u, proj, es, cr, action, data) {
 		return true
 	}
@@ -1015,6 +1018,27 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 		// The PVE VNC ticket doubles as the RFB password — the FE passes it as the
 		// noVNC credential (`password` in the result).
 		h.emitPVEConsole(w, r, u, proj, cr, es.ID, cr.ExternalID, action, backendURL, kind, ticketUser, ticket)
+		return true
+
+	case "GET_CONSOLE_STATE":
+		// What the console page cannot learn from its socket. serialDisplay: the VM's display is its serial port (vga
+		// serial0, as cloud images have it), so the graphical console shows one line and the serial one is the console.
+		// status and uptime: a session opened before the VM was stopped or started again is dead, and on production the
+		// socket of such a session stayed open (D13 of the acceptance).
+		vm, verr := ps.ResolveVM(ctx, proj.ID, cr.ExternalID)
+		if verr != nil || vm == nil || vm.NodeDown || vm.StatusErr != nil {
+			h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, "The server cannot be read right now"))
+			return true
+		}
+		st, serr := ps.C.GetVMStatus(ctx, vm.Node, vm.VMID)
+		cfg, cerr := ps.C.GetVMConfig(ctx, vm.Node, vm.VMID)
+		if serr != nil || cerr != nil {
+			h.fail(w, pveVolumeErr(errors.Join(serr, cerr)))
+			return true
+		}
+		httpx.OK(w, map[string]any{"result": map[string]any{
+			"status": vm.Status, "uptime": st.Uptime, "serialDisplay": strings.HasPrefix(cfg.Str("vga"), "serial"),
+		}})
 		return true
 
 	case "SHOW_CONSOLE_OUTPUT":

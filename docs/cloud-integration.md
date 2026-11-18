@@ -484,6 +484,20 @@ the same key. `network-config` is rendered from `ipconfigN` and is absent for pl
   `qm disk rescan --vmid <id>` on the node, which lists it as an unused disk of the server; the next sync
   then makes a new row for it, without the name the tenant gave it. Not tried on a lab.
   Replication's `__*` snapshots are hidden and refused.
+  `DELETE_SNAPSHOT` asks Proxmox up to three times when the delete task ends on `can't lock file ... got timeout`
+  (v0.8.2). On the production acceptance of v0.8.0 a delete sent 4 s after a rollback had answered failed that way:
+  Proxmox waits 10 s for the VM's config lock and something still held it. The rollback request already waits for the
+  rollback task and for the start task, so what held the lock was not found in the code; it has to be read off a
+  node (`qm` tasks and `/var/lock/qemu-server/lock-<vmid>.conf` right after a rollback). With Proxmox's own wait the
+  delete now waits up to about 30 s and then answers 409 busy as before. Tested against a fake Proxmox API only.
+- **Console state** (`GET_CONSOLE_STATE` on a SERVER, v0.8.2): `{status, uptime, serialDisplay}` from the VM's
+  status and config. `serialDisplay` is true when `vga` is a serial port, as cloud images and imported images have
+  it: the console page then opens on its Serial tab. The page also asks every 10 s while a serial session is open
+  and ends the session when the VM is stopped or has been up for less time than the session: on the same
+  acceptance the socket of a session stayed open after the server restarted. Why the socket did not close was not
+  found (the proxy closes the browser's side when Proxmox closes its side); not tried on a lab.
+- **Backup id**: `CREATE_BACKUP` answers `{id}`, the new archive's volid, from v0.8.2. vzdump reports none, so it is
+  the newest archive of this server and project on the store after the task; before, the id was empty.
 - **Backups** (`LIST_/CREATE_/RESTORE_/DELETE_BACKUP {id}`, offered when `config.backupStorage` names a shared store
   with `backup` content: NFS, CephFS or PBS): vzdump in snapshot mode, zstd, with the store's retention left out so it
   cannot remove a tenant's archive. `notes-template` stamps each archive with the project, and every action lists the
@@ -538,7 +552,13 @@ the same key. `network-config` is rendered from `ipconfigN` and is absent for pl
   holds several subnets, from the same `cidrPool` with the same overlap check, and the project's isolation
   ACCEPT covers them all. A server picks one with `networkInterfaces[0].subnet`. A subnet with an allocated
   address cannot be removed, and a network keeps one. There is no router resource: the zone's VRF routes
-  between all of a project's vnets, and the isolation rules are what keeps other projects out.
+  between all of a project's vnets, and the isolation rules are what keeps other projects out. A network's row
+  holds `subnetDetails` (cidr, gateway, snat per subnet) from its create on (v0.8.2; before, only the sync wrote it,
+  and on a site without the scheduler the console's Subnets tab of a new network stayed empty).
+- **Servers on a network** (`GET_SERVERS` on a NETWORK, v0.8.2): the project's SERVER rows whose VM has a NIC on the
+  vnet. It reads the config of every VM in the project's pool, as the network delete guard does, because a SERVER
+  row holds addresses and not the network of each NIC; 409 while a host of the project's servers is down. Tested
+  against a fake Proxmox API and a real database, not on a lab.
 
 ### Tenancy: the pool is the boundary, the platform DB decides the rest
 
@@ -1208,7 +1228,12 @@ a client's root wrote before that stay owned by root with their modes, so client
 no longer change them. An operator who wants them writable changes their owner on the NAS. The NAS tells tenants apart by source address, so a client needs a path to the NAS that keeps
 its address. A public NIC has one when the NAS is routable from the public network. A private subnet that leaves
 through SNAT arrives with a node's address, and the tenant isolation rules drop traffic from the pool to the nodes'
-management network: on a NAS placed there, private subnets cannot mount.
+management network: on a NAS placed there, private subnets cannot mount. From v0.8.2 the customer console says so
+before a share is made: the bulk action `LIST_SHARE_WARNINGS` on the share provider answers a list of sentences,
+one when the file server's address (`config.mountHost`, or the host of `apiUrl`) is inside a management network of
+the nodes or inside `network.blockedCidrs` of a Proxmox provider of the project, and the Create share dialog shows
+it. A provider that cannot be read warns of nothing. The share can still be created. Tested against a fake Proxmox
+API, not on a lab.
 
 **A NAT between tenants and the NAS.** When a NAT rewrites tenant traffic on its way to the NAS, the NAS sees the NAT's
 address, which no export lists, so the mount fails. `config.snatSources` (default: none, off) lists those addresses,

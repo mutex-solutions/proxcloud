@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"slices"
 	"sort"
@@ -95,6 +96,59 @@ func (h *Handler) shareAddressSources(ctx context.Context, p *Project) (computes
 		}
 	}
 	return computes, sharedPools, nil
+}
+
+// shareReachWarnings says, before a share is made, that the project's private networks cannot mount it: the file
+// server's address is inside a network a compute provider of the project drops tenant traffic to, which is its nodes'
+// management networks and network.blockedCidrs (pve.ReconcileIsolation). A provider that cannot be read warns of
+// nothing: the create still works, and the mount then says so.
+func (h *Handler) shareReachWarnings(ctx context.Context, p *Project, nas *externalservice.ExternalService) []string {
+	out := []string{}
+	host := nas.TrueNASMountHost()
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip4", host)
+	if err != nil || h.pveFor == nil {
+		return out
+	}
+	computes, _, err := h.shareAddressSources(ctx, p)
+	if err != nil {
+		return out
+	}
+	for _, svcID := range computes {
+		es, err := h.esSvc.Get(ctx, svcID)
+		if err != nil || es == nil {
+			continue
+		}
+		blocked := es.PVENetworkConfig().BlockedCIDRs
+		if ps, err := h.pveFor(es); err == nil && ps != nil {
+			if mgmt, _, err := ps.C.ManagementCIDRs(ctx); err == nil {
+				blocked = append(mgmt, blocked...)
+			}
+		}
+		if shareHostBlocked(ips, blocked) {
+			return append(out, "Servers on this project's private networks cannot reach the file server "+host+
+				": it is on a network this site keeps tenant networks out of. A share made here can be mounted only from a server with a public IP that has a route to it. Ask your operator.")
+		}
+	}
+	return out
+}
+
+// shareHostBlocked: one of the file server's addresses is inside a blocked network (a CIDR or a single address).
+func shareHostBlocked(ips []net.IP, blocked []string) bool {
+	for _, b := range blocked {
+		if !strings.Contains(b, "/") {
+			b += "/32"
+		}
+		_, n, err := net.ParseCIDR(b)
+		if err != nil {
+			continue
+		}
+		for _, ip := range ips {
+			if n.Contains(ip) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // onExport says whether an export can list this address itself (shareNetworks).

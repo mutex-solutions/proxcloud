@@ -1092,25 +1092,34 @@ func (s *Service) VnetStaticPoolFor(ctx context.Context, vnet, within string) (c
 
 // VnetInUse reports whether any pool VM NIC sits on the vnet (delete guard).
 func (s *Service) VnetInUse(ctx context.Context, projectID, vnetID string) (bool, error) {
+	ids, err := s.VnetVMs(ctx, projectID, vnetID)
+	return len(ids) > 0, err
+}
+
+// VnetVMs lists the pool VMs with a NIC on the vnet, by vmid as a row's ExternalID has it. It refuses when a VM of
+// the project cannot be read: that one may sit on the vnet too.
+func (s *Service) VnetVMs(ctx context.Context, projectID, vnetID string) ([]string, error) {
 	vms, _, unread, err := s.poolVMs(ctx, projectID)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	if len(unread) > 0 {
-		return false, errUnreadVMs()
+		return nil, errUnreadVMs()
 	}
+	ids := []string{}
 	for _, vm := range vms {
 		cfg, err := s.C.GetVMConfig(ctx, vm.Node, vm.VMID)
 		if err != nil {
-			return false, err
+			return nil, err
 		}
-		for key := range cfg {
-			if strings.HasPrefix(key, "net") && strings.Contains(cfg.Str(key), "bridge="+vnetID) {
-				return true, nil
+		for _, key := range nicKeys(cfg) {
+			if nicBridge(cfg.Str(key)) == vnetID {
+				ids = append(ids, strconv.Itoa(vm.VMID))
+				break
 			}
 		}
 	}
-	return false, nil
+	return ids, nil
 }
 
 // --- NETWORK sync provider ---
