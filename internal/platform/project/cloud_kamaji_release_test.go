@@ -121,7 +121,7 @@ func (noShares) FindByProjectAndType(context.Context, string, string) ([]cloud.C
 // (AbandonCluster runs this same release) must not leave its token and addresses until the node is back.
 func TestKamajiReleaseKeepsTheTokenWhileAWorkerIsLeft(t *testing.T) {
 	var vms string
-	var revoked []string
+	var revoked, groupsDeleted []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/api2/json")
 		switch {
@@ -129,6 +129,13 @@ func TestKamajiReleaseKeepsTheTokenWhileAWorkerIsLeft(t *testing.T) {
 			fmt.Fprint(w, `{"data":[{"type":"node","node":"pve1","status":"online"},{"type":"node","node":"pve2","status":"offline"}]}`)
 		case r.Method == http.MethodGet && path == "/cluster/resources":
 			fmt.Fprintf(w, `{"data":[%s]}`, vms)
+		case r.Method == http.MethodGet && path == "/cluster/firewall/groups":
+			fmt.Fprint(w, `{"data":[{"group":"gworkers","comment":"st:p1:k8s-pc-c-a"},{"group":"gother","comment":"st:p1:k8s-pc-c-ab"}]}`)
+		case r.Method == http.MethodGet && path == "/cluster/firewall/groups/gworkers":
+			fmt.Fprint(w, `{"data":[]}`)
+		case r.Method == http.MethodDelete && strings.HasPrefix(path, "/cluster/firewall/groups/"):
+			groupsDeleted = append(groupsDeleted, path)
+			fmt.Fprint(w, `{"data":null}`)
 		case r.Method == http.MethodDelete && strings.Contains(path, "/token/"):
 			revoked = append(revoked, path)
 			fmt.Fprint(w, `{"data":null}`)
@@ -144,8 +151,8 @@ func TestKamajiReleaseKeepsTheTokenWhileAWorkerIsLeft(t *testing.T) {
 	ctx := context.Background()
 
 	vms = `{"type":"qemu","vmid":124,"node":"pve1","name":"pc-c-a-workers-pve1-x7k2p","pool":"pc-p1","status":"running"}`
-	if err := release(ctx, "pve", "p1", "pc-c-a"); err == nil || len(revoked) != 0 || csi != 0 {
-		t.Fatalf("a worker of the cluster: err %v, revoked %v, %d CSI releases: want everything kept", err, revoked, csi)
+	if err := release(ctx, "pve", "p1", "pc-c-a"); err == nil || len(revoked) != 0 || csi != 0 || len(groupsDeleted) != 0 {
+		t.Fatalf("a worker of the cluster: err %v, revoked %v, %d CSI releases, groups %v: want everything kept", err, revoked, csi, groupsDeleted)
 	}
 	// The tenant's own VM, another cluster's worker in the same pool, this cluster's name in another project's pool, a
 	// VM of the tenant on a dead node.
@@ -158,5 +165,9 @@ func TestKamajiReleaseKeepsTheTokenWhileAWorkerIsLeft(t *testing.T) {
 	}
 	if len(revoked) != 2 || !strings.HasSuffix(revoked[0], "/access/users/capmox@pve/token/pc-c-a") || csi != 1 {
 		t.Fatalf("revoked = %v, %d CSI releases", revoked, csi)
+	}
+	// The workers' security group goes with the cluster, and only this cluster's.
+	if len(groupsDeleted) != 1 || groupsDeleted[0] != "/cluster/firewall/groups/gworkers" {
+		t.Fatalf("groups deleted = %v", groupsDeleted)
 	}
 }

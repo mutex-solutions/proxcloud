@@ -218,6 +218,8 @@ type sandboxFake struct {
 
 type fakeVM struct {
 	name, pool string
+	tags       string // semicolon-separated, as PVE lists them
+	status     string // "" = running
 	cfg        VMConfig
 	opts       map[string]any
 	rules      []FirewallRule
@@ -292,7 +294,11 @@ func (f *sandboxFake) serve(w http.ResponseWriter, r *http.Request) {
 	case p == "/cluster/resources":
 		var out []map[string]any
 		for id, vm := range f.vms {
-			out = append(out, map[string]any{"type": "qemu", "vmid": id, "node": "pve1", "name": vm.name, "pool": vm.pool, "status": "running"})
+			status := vm.status
+			if status == "" {
+				status = "running"
+			}
+			out = append(out, map[string]any{"type": "qemu", "vmid": id, "node": "pve1", "name": vm.name, "pool": vm.pool, "status": status, "tags": vm.tags})
 		}
 		reply(w, out)
 	case p == "/nodes":

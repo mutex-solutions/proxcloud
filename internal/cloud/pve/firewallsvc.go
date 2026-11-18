@@ -173,6 +173,10 @@ func (s *Service) AttachSecurityGroup(ctx context.Context, projectID, serverExtI
 	if vm == nil {
 		return fmt.Errorf("pve: server %s not found", serverExtID)
 	}
+	// A worker's firewall is the platform's: another group would open it, or stay behind on a VM CAPMOX replaces.
+	if IsWorkerVM(vm.Tags) {
+		return errWorkerGroups()
+	}
 	if err := s.C.AddVMGroupRule(ctx, vm.Node, vm.VMID, groupID); err != nil {
 		return err
 	}
@@ -467,6 +471,9 @@ func (s *Service) DetachSecurityGroup(ctx context.Context, projectID, serverExtI
 	}
 	if vm == nil {
 		return fmt.Errorf("pve: server %s not found", serverExtID)
+	}
+	if IsWorkerVM(vm.Tags) {
+		return errWorkerGroups()
 	}
 	base := qemuPath(vm.Node, vm.VMID) + "/firewall"
 	var rules []FirewallRule

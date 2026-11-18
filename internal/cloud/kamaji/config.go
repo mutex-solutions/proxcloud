@@ -175,6 +175,10 @@ type ClusterDefaults struct {
 	// ProxmoxServiceID names the compute provider whose PVE cluster hosts the workers. Empty: the
 	// project's only proxmox service.
 	ProxmoxServiceID string
+	// WorkerFirewall puts the workers of every NEW cluster behind the Proxmox VM firewall with a security group of
+	// their own (config.cluster.workerFirewall, docs/managed-k8s.md "Worker firewall"). Off by default: not verified
+	// on a lab. An existing cluster is protected by the operator, one at a time. Nothing with Shared.
+	WorkerFirewall bool
 	// Shared, when set, puts every cluster's workers on one provider-run placement and credential
 	// instead of the project's pool and vnet with tokens minted per cluster. For a site whose portal
 	// token may not mint tokens. Workers then neither sync nor bill, and tenants share a network.

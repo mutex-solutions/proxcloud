@@ -126,3 +126,37 @@ func (s *Service) SwitchCSIGateway(ctx context.Context, projectID, clusterID, ch
 		return nil
 	})
 }
+
+// ClusterNetwork is what a cluster's Application says about its workers' place on Proxmox.
+type ClusterNetwork struct {
+	ProjectID     string
+	Pool          string
+	Workers       []string // the worker addresses reserved for the cluster
+	LoadBalancers []string // its MetalLB addresses, as the chart takes them ("<address>/32")
+}
+
+// ClusterNetwork reads the cluster's Application. A cluster this provider does not manage, or one being deleted, is
+// an error.
+func (s *Service) ClusterNetwork(ctx context.Context, clusterID string) (*ClusterNetwork, error) {
+	csi, err := s.ClusterCSI(ctx, clusterID)
+	if err != nil {
+		return nil, err
+	}
+	app, err := s.api.GetApplication(ctx, s.cfg.ArgoNamespace, clusterID)
+	if err != nil {
+		return nil, err
+	}
+	out := &ClusterNetwork{ProjectID: csi.ProjectID, Pool: csi.Pool}
+	strs := func(path ...string) []string {
+		var list []string
+		raw, _ := dig(app, append([]string{"spec", "source", "helm", "valuesObject", "proxmox"}, path...)...).([]any)
+		for _, v := range raw {
+			if a, _ := v.(string); a != "" {
+				list = append(list, a)
+			}
+		}
+		return list
+	}
+	out.Workers, out.LoadBalancers = strs("network", "addresses"), strs("metallb", "addresses")
+	return out, nil
+}

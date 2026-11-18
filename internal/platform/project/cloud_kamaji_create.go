@@ -283,6 +283,18 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 		in.LBAddresses = append(in.LBAddresses, ip+"/32") // MetalLB takes no bare address
 	}
 	spec.Infra = in
+	// The workers' security group goes first: the provider sync puts each worker behind it once CAPMOX has started
+	// it. A failed create deletes it with the rest (KamajiReleaseCluster).
+	if d.WorkerFirewall && d.Shared == nil {
+		wf := pve.WorkerFirewall{ProjectID: proj.ID, ClusterID: spec.ID, Workers: in.Addresses, CIDRPool: compute.PVENetworkConfig().CIDRPool}
+		for _, lb := range in.LBAddresses {
+			wf.LoadBalancers = append(wf.LoadBalancers, strings.TrimSuffix(lb, "/32"))
+		}
+		if _, werr := ps.EnsureWorkerGroup(ctx, wf); werr != nil {
+			err = upstreamErr(computeBackend, werr)
+			return sec, err
+		}
+	}
 
 	apiURL := d.PVEAPIURL
 	if apiURL == "" {
@@ -405,6 +417,10 @@ func KamajiReleaseCluster(services serviceGetter, shares shareRowFinder, pveFor 
 		}
 		return errors.Join(csiErr, func() error {
 			if ps != nil {
+				// The workers are gone (kamajiWorkersGone), so nothing references their security group any more.
+				if err := ps.DeleteWorkerGroup(ctx, projectID, clusterID); err != nil {
+					return err
+				}
 				if err := ps.C.RevokeClusterTokens(ctx, clusterID); err != nil {
 					return err
 				}
