@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: Require full source checkout
         shell: bash
         run: |
@@ -57,7 +57,7 @@ jobs:
       packages: write       # ghcr
       pull-requests: write  # the pin pull request
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: Require full source checkout
         shell: bash
         run: |

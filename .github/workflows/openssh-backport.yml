@@ -26,7 +26,7 @@ jobs:
       SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
       DEBIAN_BASE: debian:trixie-slim@sha256:7378260c0a098d27ac206225db5e7d92b8c7c84ea7afccc86eeb513756bbd392
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false

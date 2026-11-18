@@ -24,7 +24,7 @@ jobs:
       DEBIAN_BASE: debian:trixie-slim@sha256:7378260c0a098d27ac206225db5e7d92b8c7c84ea7afccc86eeb513756bbd392
       MIT_KEYRING_SHA256: 967d7d0f24d9ca3bbb61d4bee737ead5bfa9f9a3debe317bf28ae9360d2e50c2
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
