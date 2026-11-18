@@ -206,6 +206,17 @@ sequenceDiagram
   periodic sweep (`syncjob.sweepDbaasOrphans`) then reaps the marker, auth, backup-credential and customer-user secrets and
   GCs the emptied namespace. Project teardown also removes the namespace of a project that never had a database, once nothing is pending and no Application of the project is left.
 
+### Where a database's disk is, and VM id 9999
+
+On the managed platform a database's volume is a proxmox-csi disk named `vm-9999-pvc-<uuid>` on the
+platform's boot store, attached to the node VM its pod runs on. To Proxmox a disk with that name
+belongs to VM 9999, though ProxCloud creates no such VM. If a guest of your own has the id 9999,
+**never destroy it with "Destroy unreferenced disks owned by guest" ticked**
+(`qm destroy 9999 --destroy-unreferenced-disks 1`): Proxmox removes every disk named `vm-9999-…`,
+which are the databases' volumes (and Kamaji's etcd). The managed-services Check (`csi-vmid`) and the
+provider's Test connection warn on such a site; see
+[managed-services.md](managed-services.md#vm-id-9999-and-the-csi-volumes). Not tried on a lab.
+
 ## Backups and restore
 
 Backups are optional per provider: `config.database.backup` names **any S3 endpoint** (RustFS

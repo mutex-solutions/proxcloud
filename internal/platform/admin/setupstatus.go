@@ -116,6 +116,7 @@ var checkSteps = map[string]struct{ step, replaces string }{
 	"storage-profile": {stepStorage, "defaultProfile"},
 	"import-store":    {stepStorage, ""},
 	"boot-iso":        {stepStorage, ""},
+	"csi-vmid":        {stepStorage, ""},
 }
 
 var checkStates = map[string]string{checkOK: stateDone, checkWarn: stateAttention, checkFail: stateTodo}

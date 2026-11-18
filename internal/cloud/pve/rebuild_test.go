@@ -98,8 +98,8 @@ func TestRebuildServer(t *testing.T) {
 		var writes []url.Values
 		var stopped []string
 		s := rebuildCluster(t, current, false, &writes, &stopped)
-		if err := s.RebuildServer(context.Background(), req); err != nil {
-			t.Fatal(err)
+		if gone, err := s.RebuildServer(context.Background(), req); err != nil || gone != "local-zfs:vm-101-disk-0" {
+			t.Fatalf("destroyed %q, err %v: want the old boot disk", gone, err)
 		}
 		last := writes[len(writes)-1]
 		if !strings.Contains(last.Get("tags"), "img-new") || strings.Contains(last.Get("tags"), "img-old") {
@@ -114,7 +114,7 @@ func TestRebuildServer(t *testing.T) {
 		var writes []url.Values
 		var stopped []string
 		s := rebuildClusterQMP(t, "paused", current, false, &writes, &stopped)
-		if err := s.RebuildServer(context.Background(), req); err != nil {
+		if _, err := s.RebuildServer(context.Background(), req); err != nil {
 			t.Fatal(err)
 		}
 		if len(stopped) == 0 || stopped[0] != "101" {
@@ -126,8 +126,8 @@ func TestRebuildServer(t *testing.T) {
 		var writes []url.Values
 		var stopped []string
 		s := rebuildCluster(t, current, true, &writes, &stopped)
-		if err := s.RebuildServer(context.Background(), req); err == nil {
-			t.Fatal("want the move's error")
+		if gone, err := s.RebuildServer(context.Background(), req); err == nil || gone != "" {
+			t.Fatalf("destroyed %q, err %v: want the move's error and no disk destroyed", gone, err)
 		}
 		last := writes[len(writes)-1]
 		if last.Get("scsi0") != "local-zfs:vm-101-disk-0,discard=on,size=8G" {
@@ -143,7 +143,7 @@ func TestRebuildServer(t *testing.T) {
 		var stopped []string
 		s := rebuildCluster(t, current+`,{"name":"s1"}`, false, &writes, &stopped)
 		var ce *ConflictError
-		if err := s.RebuildServer(context.Background(), req); !errors.As(err, &ce) {
+		if _, err := s.RebuildServer(context.Background(), req); !errors.As(err, &ce) {
 			t.Fatalf("want a conflict, got %v", err)
 		}
 		if len(writes) != 0 || len(stopped) != 0 {
@@ -205,6 +205,25 @@ func TestSubnetHolds(t *testing.T) {
 	} {
 		if got := SubnetHolds(c.cidr, c.within); got != c.want {
 			t.Fatalf("SubnetHolds(%s, %s) = %v", c.cidr, c.within, got)
+		}
+	}
+}
+
+// proxmox-csi names every volume vm-9999-pvc-<uuid>: to Proxmox they are unreferenced disks of VM 9999. A product VM
+// that ever got that id must be destroyed without the flag that removes them.
+func TestDeleteVMKeepsCSIVolumes(t *testing.T) {
+	for vmid, want := range map[int]string{101: "1", CSIControllerVMID: ""} {
+		_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
+			fmt.Sprintf("DELETE /api2/json/nodes/pve1/qemu/%d", vmid): func(w http.ResponseWriter, r *http.Request) {
+				_ = r.ParseForm()
+				if got := r.Form.Get("destroy-unreferenced-disks"); got != want || r.Form.Get("purge") != "1" {
+					t.Errorf("vm %d: destroy-unreferenced-disks=%q purge=%q, want %q and 1", vmid, got, r.Form.Get("purge"), want)
+				}
+				fmt.Fprint(w, `{"data":"UPID:pve1:0:0:0:qmdestroy:1:u:"}`)
+			},
+		})
+		if _, err := c.DeleteVM(context.Background(), "pve1", vmid); err != nil {
+			t.Fatal(err)
 		}
 	}
 }

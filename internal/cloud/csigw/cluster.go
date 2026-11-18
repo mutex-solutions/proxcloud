@@ -17,7 +17,7 @@ import (
 )
 
 // ControllerVMID is the plugin's default features.controllerVmID: every disk a cluster creates is vm-9999-pvc-….
-const ControllerVMID = 9999
+const ControllerVMID = pve.CSIControllerVMID
 
 // Endpoint is the gateway as the clusters' controllers reach it: its URL (https://host:port) and the PEM CA its
 // certificate is checked against.

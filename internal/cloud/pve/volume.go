@@ -334,22 +334,24 @@ func (s *Service) DetachVolume(ctx context.Context, projectID string, vmid int, 
 // both VMs on the same node, even on shared storage (qemu-server move_vm_disk: "Both VMs need
 // to be on the same node"), so a disk on shared storage first rides a holder to the target's node
 // (carryToNode) and a target on another node is refused for any other disk (ConflictError).
-func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, volID string, targetServerExtID string) error {
+// It answers the slot the disk now has on its server: a reassign gives the disk a new volid, so the
+// slot is how the caller finds it again.
+func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, volID string, targetServerExtID string) (string, error) {
 	ctx, release, err := s.beginHolders(ctx, projectID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer release() // deferred first, so the holder drops below run under the lock
 	vm, slot, err := s.volumeSlot(ctx, projectID, vmid, volID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !strings.HasPrefix(slot, "unused") {
-		return conflictf("The disk is already attached")
+		return "", conflictf("The disk is already attached")
 	}
 	if isHolder(vm.Tags) {
 		if targetServerExtID == "" || targetServerExtID == strconv.Itoa(vmid) {
-			return conflictf("Choose a server to attach this volume to")
+			return "", conflictf("Choose a server to attach this volume to")
 		}
 		defer s.dropEmptyHolder(context.WithoutCancel(ctx), vm)
 	}
@@ -357,7 +359,7 @@ func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, 
 	if targetServerExtID == "" || targetServerExtID == strconv.Itoa(vmid) {
 		cfg, err := s.C.GetVMConfig(ctx, vm.Node, vm.VMID)
 		if err != nil {
-			return err
+			return "", err
 		}
 		free := ""
 		for i := 1; i < 30; i++ {
@@ -368,40 +370,40 @@ func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, 
 			}
 		}
 		if free == "" {
-			return conflictf("This server has no free disk slot")
+			return "", conflictf("This server has no free disk slot")
 		}
-		return s.holderConfig(ctx, projectID, vm, map[string]string{free: volID})
+		return free, s.holderConfig(ctx, projectID, vm, map[string]string{free: volID})
 	}
 	// Another VM: disk reassign. Ownership of the target is re-verified too.
 	target, err := s.ResolveVM(ctx, projectID, targetServerExtID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if target == nil {
-		return conflictf("Server %s not found", targetServerExtID)
+		return "", conflictf("Server %s not found", targetServerExtID)
 	}
 	if err := refuseAppliance(target); err != nil {
-		return err
+		return "", err
 	}
 	if err := s.refuseUnreplicable(ctx, target, slotStorage(volID)); err != nil {
-		return err
+		return "", err
 	}
 	if target.Node != vm.Node {
 		caps, err := s.C.DetectStorage(ctx)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if !caps[slotStorage(volID)].Shared {
-			return conflictf("Server %s runs on node %s and this volume on node %s; a volume on local storage can only move to a server on the same node. "+
+			return "", conflictf("Server %s runs on node %s and this volume on node %s; a volume on local storage can only move to a server on the same node. "+
 				"Attach it to a server on %s", target.Name, target.Node, vm.Node, vm.Node)
 		}
 		if !caps[slotStorage(volID)].Nodes[target.Node].Active {
-			return conflictf("Server %s runs on node %s, where storage %s is not available", target.Name, target.Node, slotStorage(volID))
+			return "", conflictf("Server %s runs on node %s, where storage %s is not available", target.Name, target.Node, slotStorage(volID))
 		}
 	}
 	tcfg, err := s.C.GetVMConfig(ctx, target.Node, target.VMID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	free := ""
 	for i := 1; i < 30; i++ {
@@ -412,15 +414,15 @@ func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, 
 		}
 	}
 	if free == "" {
-		return conflictf("Server %s has no free disk slot", target.Name)
+		return "", conflictf("Server %s has no free disk slot", target.Name)
 	}
 	if target.Node != vm.Node {
 		if vm, slot, err = s.carryToNode(ctx, projectID, vm, slot, target.Node); err != nil {
-			return err
+			return "", err
 		}
 		defer s.dropEmptyHolder(context.WithoutCancel(ctx), vm)
 	}
-	return s.holderMove(ctx, projectID, vm, target, slot, free)
+	return free, s.holderMove(ctx, projectID, vm, target, slot, free)
 }
 
 // carryToNode brings a detached disk on shared storage to another node: onto a new holder on the disk's node, then the
