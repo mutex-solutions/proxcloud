@@ -293,7 +293,8 @@ func ManagedACLs(portalTokenID, boot, iso, importStorage string) []ManagedACL {
 	}
 	if importStorage != "" {
 		// The PVEDatastoreAdmin row there replaces what /storage passes down, and a tenant cluster's ISO or boot store
-		// may be that store: without the mint role the portal could not write the cluster token's row on it.
+		// may be that store: without the mint role the portal could not write the cluster token's row on it. A row the
+		// site wrote itself on another store does the same: the script reads the ACL for those (kubeMintShadowRows).
 		acls = append(acls, ManagedACL{"/storage/" + importStorage, KubeMintRole, false, portal, portalTokenID})
 	}
 	return acls
@@ -326,20 +327,47 @@ func CSIPrivileges(boot string) []PrivCheck {
 // (MintClusterTokens): a token create wants User.Modify on a group of the token's user, an ACL write
 // Permissions.Modify on its path, or on a pool Pool.Allocate and every privilege of the role written (ProxCloudCAPI;
 // PVETemplateUser is VM.Audit and VM.Clone, both in it). /pool stands in for the tenant pools, as in
-// PlatformPrivileges. importStorage as for ManagedACLs: its own row shadows /storage, so it is checked apart.
-func KubeMintPrivileges(importStorage string) []PrivCheck {
+// PlatformPrivileges, and /sdn/zones/<zone> for the zone's vnets.
+//
+// The paths are the ones a mint writes, not their parents alone: an ACL row of the portal's user or token on a path
+// replaces what the parent passes down, so a site with its own row on a store reads complete on /storage and is
+// refused on the store (403 "Permission check failed (/storage/<store>, Permissions.Modify|Datastore.Allocate)").
+// stores are the stores a tenant cluster's token gets a row on: the boot stores, the ISO store, and the import store,
+// whose row ManagedACLs writes itself. zones are the zones of the tenants' networks. The parents stay in the list for
+// what a provider names later.
+func KubeMintPrivileges(stores, zones []string) []PrivCheck {
+	mint := ManagedRoles[2].Privs
 	checks := []PrivCheck{
 		{Path: "/access/groups/" + KubeMintGroup, Privs: ManagedRoles[3].Privs},
 		{Path: "/pool", Privs: slices.Concat([]string{"Pool.Allocate"}, ManagedRoles[0].Privs)},
-		{Path: "/storage", Privs: ManagedRoles[2].Privs},
-		{Path: "/sdn/zones", Privs: ManagedRoles[2].Privs},
-		{Path: "/nodes", Privs: ManagedRoles[2].Privs},
+		{Path: "/pool/" + TemplatePool, Privs: []string{"Pool.Allocate", "VM.Audit", "VM.Clone"}},
+		{Path: "/storage", Privs: mint},
+		{Path: "/sdn/zones", Privs: mint},
+		{Path: "/sdn/zones/localnetwork", Privs: mint},
+		{Path: "/nodes", Privs: mint},
 	}
-	if importStorage != "" {
-		checks = append(checks, PrivCheck{Path: "/storage/" + importStorage, Privs: ManagedRoles[2].Privs})
+	seen := map[string]bool{}
+	for _, c := range checks {
+		seen[c.Path] = true
 	}
+	add := func(parent string, names []string) {
+		for _, n := range names {
+			if path := parent + n; n != "" && !seen[path] {
+				seen[path] = true
+				checks = append(checks, PrivCheck{Path: path, Privs: mint})
+			}
+		}
+	}
+	add("/storage/", stores)
+	add("/sdn/zones/", zones)
 	return checks
 }
+
+// KubeMintShadowed is what the Check adds to a missing mint privilege on a single store or zone: why the parent's
+// grant does not reach it, and what the script does about it.
+const KubeMintShadowed = "A tenant cluster's token gets its ACL row on this path, and a cluster create that needs it is refused (409) until this is fixed. " +
+	"The cause is an ACL row of the portal's user or token on this very path: in Proxmox it replaces the " + KubeMintRole + " role the parent path passes down. " +
+	"The script finds every such row and writes " + KubeMintRole + " next to it, for the user or token that holds the row."
 
 // KubeMintForbidden is what the portal token must hold nowhere, per ACL path (HeldPrivileges): User.Modify on
 // /access/groups reaches every user of the cluster, and Permissions.Modify on any of the three lets the token write

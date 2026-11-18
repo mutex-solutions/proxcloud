@@ -186,6 +186,34 @@ class IdentityMigration(unittest.TestCase):
         self.assertEqual(pve.roles["ProxCloudKubeMint"], {"Permissions.Modify"})
         self.assertNotIn("NOT FINISHED", r.stdout)
 
+    def test_a_row_on_a_single_store_or_zone_gets_the_mint_role(self):
+        """Production, 2026-11-17: older rows of the portal on single stores hid the mint role /storage passes down, and
+        PVE refused every tenant cluster's token its row there."""
+        pve = PVE()
+        self.assertEqual(stage10(pve, self.site).returncode, 0)
+        row = lambda path, ugid, role, prop: {"path": path, "type": "token" if "!" in ugid else "user", "ugid": ugid, "roleid": role, "propagate": prop}  # noqa: E731
+        pve.acl += [row("/storage/nvme-u2", PORTAL, "ProxCloudPlatform", 1), row("/storage/nvme-u2", TOKEN, "ProxCloudPlatform", 1),
+                    row("/storage/nvme", PORTAL, "PVEAuditor", 0),  # the user alone: the token has no row of its own there
+                    row("/sdn/zones/lan", PORTAL, "ProxCloudPlatform", 0), row("/sdn/zones/lan", TOKEN, "ProxCloudPlatform", 0)]
+        self.assertNotIn("Permissions.Modify", pve.privs(TOKEN, "/storage/nvme-u2"))  # the defect
+        self.assertNotIn("Permissions.Modify", pve.privs(TOKEN, "/storage/nvme"))
+        before = len(pve.acl)
+        r = stage10(pve, self.site)
+        self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+        for path in ("/storage/nvme-u2", "/storage/nvme", "/sdn/zones/lan", "/storage/other", "/sdn/zones/pc/vnet1"):
+            self.assertIn("Permissions.Modify", pve.privs(TOKEN, path), path)
+        # Nothing the rows gave is lost, and nothing is added where no row hid the role.
+        self.assertIn("Datastore.AllocateSpace", pve.privs(TOKEN, "/storage/nvme-u2"))
+        self.assertIn("SDN.Use", pve.privs(TOKEN, "/sdn/zones/lan/vnet1"))  # still from /sdn/zones: the zone's rows do not propagate
+        added = sorted((x["path"], x["ugid"], x["propagate"]) for x in pve.acl[before:])
+        self.assertEqual(added, [("/sdn/zones/lan", PORTAL, 0), ("/sdn/zones/lan", TOKEN, 0), ("/storage/nvme", PORTAL, 0),
+                                 ("/storage/nvme-u2", PORTAL, 1), ("/storage/nvme-u2", TOKEN, 1)])
+        self.assertTrue(all(x["roleid"] == "ProxCloudKubeMint" for x in pve.acl[before:]))
+        # A second run writes nothing more.
+        r = stage10(pve, self.site)
+        self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+        self.assertEqual(len(pve.acl), before + 5)
+
     def test_a_run_that_stops_half_way_leaves_minting_on(self):
         pve = PVE()
         self.assertEqual(stage10(pve, self.site).returncode, 0)

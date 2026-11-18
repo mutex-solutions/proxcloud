@@ -303,6 +303,31 @@
       loop: "{{ pc_id.results[3].json.data | pc_acl_missing(acls + nas_acls + (split_acls + nas_mint_acls if pc.mode == 'split' else []) + (sandbox_acls + sandbox_iso_user_acls if pc_sandbox_on else []) + (sandbox_entry_acls if pc_entry_on else [])) }}"
       loop_control: {label: "{{ item.path }} {{ item.roles }}"}
 
+    # A row of the portal's user or token on a single store or zone replaces what /storage and /sdn/zones pass down
+    # there, the mint role too, and PVE then refuses a tenant cluster's token its row on that path: every cluster create
+    # on such a store failed on a production site (2026-11-17). The mint role goes next to each such row, for the one
+    # that holds it alone (a row for the other would replace what that one inherits), propagated when any of its rows on
+    # the path is. The managed-services script has the same rule (kubeMintShadowRows, internal/cloud/pve/setupscript.go).
+    # The rows are those read at the start of this stage; the one stage 10 writes itself has nas_mint_acls.
+    - name: Repeat the mint role next to the portal's own rows on a store or a zone
+      vars:
+        pc_same: "{{ pc_id.results[3].json.data | selectattr('path', 'eq', item.path) | selectattr('ugid', 'eq', item.ugid) | list }}"
+        pc_want: "{{ pc_same | rejectattr('roleid', 'eq', 'ProxCloudKubeMint') | map(attribute='propagate') | map('int') | max }}"
+      when:
+        - pc.mode == 'split'
+        - item.roleid != 'ProxCloudKubeMint'
+        - (item.type == 'user' and item.ugid == 'proxcloud@pve') or (item.type == 'token' and item.ugid == 'proxcloud@pve!platform')
+        - item.path is match('/storage/[^/]+$') or item.path is match('/sdn/zones/.')
+        - (pc_same | selectattr('roleid', 'eq', 'ProxCloudKubeMint') | map(attribute='propagate') | map('int') | list) != [pc_want | int]
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/access/acl"
+        method: PUT
+        body_format: form-urlencoded
+        body: "{{ {'path': item.path, 'roles': 'ProxCloudKubeMint', 'propagate': pc_want | int} | combine({('tokens' if item.type == 'token' else 'users'): item.ugid}) }}"
+      changed_when: true
+      loop: "{{ pc_id.results[3].json.data }}"
+      loop_control: {label: "{{ item.path }} {{ item.ugid }} {{ item.roleid }}"}
+
     # Older installs put the mint role on /access/groups, where its User.Modify let the portal token create a token for
     # every user of the cluster, root@pam included, and on /pool, where its Permissions.Modify let it write any role on
     # every pool (pve.KubeMintOldPaths). Taken off after the grant on the group above, so minting never stops, and
