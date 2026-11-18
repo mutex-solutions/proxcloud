@@ -203,6 +203,16 @@ and 0.1.2.
 - **Customer console: the create server form explains which security group applies when none is ticked.** Not
   verified on a lab.
 
+### Fixed
+
+- **The `desktop` sandbox template build no longer fails when Launchpad is briefly unavailable.** The image takes
+  Firefox ESR from `ppa:mozillateam/ppa`, and one HTTP 503 from Launchpad (its API during `add-apt-repository`,
+  the PPA index, or the package download) failed the build; in the `security-scan` workflow that stopped the
+  template builder, so `desktop` and every template after it were reported missing and the security gate failed.
+  The PPA step is now retried up to five times with a growing pause, and `apt-get update` fails on an index it
+  could not fetch instead of leaving a later "no installation candidate". A build that succeeds installs the
+  same packages as before.
+
 ## [0.8.2] - 2026-11-18
 
 A patch release on top of `v0.8.1`. It adds no feature of its own size: it tells an operator about the

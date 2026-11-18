@@ -6,14 +6,21 @@ FROM docker.io/library/ubuntu@sha256:8a2321a92b438238f93b4346fff61bc4259c99fdd4d
 ENV DEBIAN_FRONTEND=noninteractive DEBIAN_PRIORITY=high \
     PIP_DEFAULT_TIMEOUT=100 PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1
 USER root
+# Launchpad answers 503 for minutes at a time (its API in add-apt-repository, the PPA index and
+# the package pool), so the PPA step is retried as a whole; "Error-Mode=any" makes a failed index
+# fetch fail apt-get update instead of surfacing later as "no installation candidate".
 RUN apt-get update && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends \
       xserver-xorg x11-xserver-utils xvfb x11-utils xauth xfce4 xfce4-goodies util-linux sudo \
       curl git wget python3-pip xdotool scrot ffmpeg x11vnc net-tools netcat x11-apps libreoffice \
       xpdf gedit xpaint tint2 galculator pcmanfm software-properties-common apt-transport-https \
       libgtk-3-bin dbus-x11 ca-certificates gnupg gpg-agent \
- && add-apt-repository -y ppa:mozillateam/ppa \
- && apt-get update && apt-get install -y --no-install-recommends firefox-esr \
+ && for i in 1 2 3 4 5; do \
+      add-apt-repository -y ppa:mozillateam/ppa \
+      && apt-get update -o APT::Update::Error-Mode=any \
+      && apt-get install -y --no-install-recommends firefox-esr && break; \
+      [ "$i" -lt 5 ] || exit 1; echo "Launchpad PPA step failed (attempt $i of 5), retrying" >&2; sleep $((i * 30)); \
+    done \
  && rm -rf /var/lib/apt/lists/* \
  && pip install --no-cache-dir numpy \
  && git clone --depth 1 --branch e2b-desktop https://github.com/e2b-dev/noVNC.git /opt/noVNC \
