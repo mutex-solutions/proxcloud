@@ -230,6 +230,22 @@ with cluster chart 0.1.13 and platform chart 0.1.2, until an operator upgrades i
 
 ### Fixed
 
+- **The `mcp-gateway` sandbox template installs its npm MCP servers from a committed lockfile.** The image named
+  the eleven servers at exact versions but had no lock, so every build took the newest release of each transitive
+  dependency. In `security-scan` run 44327069354 the registry listed `@supabase/storage-js` 2.119.1 (a dependency
+  of `desktop-commander`) and answered 404 for its tarball, which npm does not retry: the build failed.
+  `deploy/templates/mcp-gateway/package.json` and `package-lock.json` are now in the repository and the image
+  runs `npm ci`. The lock is the one inside the published image `20261116-c8b3364` (the digest in
+  `images.yaml`), so the image gets the packages it had (`storage-js` 2.119.0): a build on a workstation installed the
+  same 1726 packages at the same versions as the published image, and every package server answered the
+  build's MCP check. npm retries network errors and 5xx answers twice by default; the build now asks for five.
+  To change a server, edit `package.json` and regenerate the lock (the command is in the Dockerfile). Not run
+  in CI or on a lab yet.
+- **A failed sandbox template build says which template failed.** `deploy/templates/build.sh` stops at the first
+  template that fails, and the `security-scan` report listed that one and every template after it together as
+  `missing`. The script now ends with `build.sh: FAILED: <name> (exit <n>); NOT BUILT: <names>` in the build
+  log, and `template-status.json` and the job log name `failed` and `not_built` apart (`missing` is unchanged).
+  The exit status and the failing gate are the same as before.
 - **The `desktop` sandbox template build no longer fails when Launchpad is briefly unavailable.** The image takes
   Firefox ESR from `ppa:mozillateam/ppa`, and one HTTP 503 from Launchpad (its API during `add-apt-repository`,
   the PPA index, or the package download) failed the build; in the `security-scan` workflow that stopped the

@@ -18,9 +18,21 @@ names=("$@")
 out=$( [ "$PUSH" = 1 ] && echo "--push" || echo "--load" )
 declare -A built
 
+# The loop stops at the first target that fails (set -e). Say which one failed and which were never tried, so a
+# report of "missing" images is not read as that many failures. The exit status stays that of the failure.
+cur= i=0
+report() {
+  local rc=$? rest=("${names[@]:$i}")
+  [ "$rc" -ne 0 ] && [ -n "$cur" ] || return 0
+  [ "${rest[0]:-}" != "$cur" ] || rest=("${rest[@]:1}")
+  echo "build.sh: FAILED: $cur (exit $rc); NOT BUILT: ${rest[*]:-none}" >&2
+}
+trap report EXIT
+
 build() { # name dockerfile-dir extra-args...
   local name=$1 dir=$2 ref meta
   shift 2
+  cur=$name
   ref="$REGISTRY/sandbox-$name:$TAG"
   meta=$(mktemp)
   docker buildx build --platform linux/amd64 $out --metadata-file "$meta" -f "$dir/Dockerfile" -t "$ref" "$@" . >&2
@@ -32,6 +44,7 @@ build() { # name dockerfile-dir extra-args...
   fi
   rm -f "$meta"
   built[$name]="$ref"
+  cur=
   echo "$name $ref"
 }
 
@@ -49,4 +62,5 @@ for n in "${names[@]}"; do
     mcp-gateway) need_base; build mcp-gateway mcp-gateway --build-arg "BASE=${built[base]}" --build-context src=../.. ;;
     *) echo "unknown template $n" >&2; exit 2 ;;
   esac
+  i=$((i + 1))
 done

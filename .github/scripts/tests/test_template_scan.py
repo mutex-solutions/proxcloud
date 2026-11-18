@@ -2,6 +2,7 @@
 
 import importlib.util
 import io
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -10,6 +11,7 @@ from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scan_template_images.py"
+BUILD = Path(__file__).resolve().parents[3] / "deploy/templates/build.sh"
 SPEC = importlib.util.spec_from_file_location("scan_template_images", SCRIPT)
 SCAN = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SCAN)
@@ -91,6 +93,44 @@ class TemplateTests(unittest.TestCase):
             self.assertEqual(run.call_args.kwargs["timeout"], 15)
             with self.assertRaises(TimeoutError):
                 SCAN.run_command(["fixture"], 104, 600)
+
+    def test_missing_is_split_into_the_failed_target_and_those_not_built(self):
+        missing = set(SCAN.NAMES) - {"base"}
+        failed, not_built = SCAN.split_missing(missing, 1)
+        self.assertEqual(failed, "mcp-gateway")
+        self.assertEqual(not_built, list(SCAN.NAMES[2:]))
+        self.assertEqual(SCAN.split_missing(set(), 0), (None, []))
+        self.assertEqual(SCAN.split_missing(missing, None), (None, []))
+        self.assertEqual(SCAN.split_missing(missing, -9), (None, []))
+
+    def run_builder(self, names, fail):
+        """build.sh with a stub docker on PATH that fails for one image name."""
+        with tempfile.TemporaryDirectory() as directory:
+            stub = Path(directory) / "docker"
+            stub.write_text('#!/bin/sh\ncase " $* " in *"/sandbox-$FAIL:"*) exit 7;; esac\n', encoding="utf-8")
+            stub.chmod(0o755)
+            env = dict(os.environ, PATH=directory + os.pathsep + os.environ["PATH"], FAIL=fail,
+                       PUSH="0", REGISTRY="security-scan.local", TAG=SHA)
+            return subprocess.run([str(BUILD), *names], env=env, capture_output=True, text=True, timeout=60)
+
+    def test_builder_names_the_failed_target_and_those_not_built(self):
+        done = self.run_builder(SCAN.NAMES, "mcp-gateway")
+        self.assertEqual(done.returncode, 7)
+        self.assertEqual(done.stdout, "base " + SCAN.expected_refs(SHA)["base"] + "\n")
+        self.assertIn("build.sh: FAILED: mcp-gateway (exit 7); NOT BUILT: " + " ".join(SCAN.NAMES[2:]) + "\n",
+                      done.stderr)
+        # A dependency that is not in the list: base fails while codex is the target.
+        done = self.run_builder(("codex", "node"), "base")
+        self.assertEqual(done.returncode, 7)
+        self.assertIn("build.sh: FAILED: base (exit 7); NOT BUILT: codex node\n", done.stderr)
+        done = self.run_builder(("node", "browser"), "browser")
+        self.assertIn("build.sh: FAILED: browser (exit 7); NOT BUILT: none\n", done.stderr)
+
+    def test_builder_reports_nothing_when_every_target_builds(self):
+        done = self.run_builder(SCAN.NAMES, "none")
+        self.assertEqual(done.returncode, 0)
+        self.assertEqual(len(done.stdout.splitlines()), len(SCAN.NAMES))
+        self.assertNotIn("FAILED", done.stderr)
 
 
 if __name__ == "__main__":
