@@ -280,6 +280,88 @@ previous BOM was run on a lab (2026-11-18, a platform installed by the released
 stayed the 0.8.0 one. That build's own BOM pinned the same versions as 0.8.0, so
 an apply that keeps older pins against a BOM with other pins is not shown.
 
+
+## What a release checks about its BOM pairs
+
+An installed platform can be moved from the BOM of an earlier release to this
+one's ([managed-services.md](managed-services.md#upgrade-between-boms)). A BOM
+pair is a previous BOM under `deploy/platform/previous/` and the BOM of the
+commit. `platformlife.Classify` decides per pair whether the move is allowed:
+only the release line, the tenant charts and the versions of the product's own
+charts may differ. `go test ./internal/platformlife` holds the rest:
+
+- **`upgradeFrom` is a statement the release makes.** A component of the
+  product's own charts whose version changes is moved only when its BOM entry
+  lists the old version in `upgradeFrom`. Add the old version when, and only
+  when, the checks below pass for it. Without it the pair is refused and the
+  platforms of that release stay on their BOM, which is safe.
+- **No machine rollout (`TestUpgradeRollsNoMachine`).** For every pair the
+  classifier allows, the test renders the cluster chart of the previous BOM with
+  the values that release rendered
+  (`testdata/previous/<release>/render-cluster-values.golden.yaml`) and the
+  cluster chart of this BOM with this build's values
+  (`testdata/render-cluster-values.golden.yaml`), and compares the
+  KubeadmControlPlane's spec, the names of every machine and bootstrap template
+  (each carries a hash of its spec) and every MachineDeployment's machine
+  template. A difference means Cluster API would replace machines: do not list
+  the old version in `upgradeFrom` of `pc-platform`. The values come from Go
+  (`ClusterValues`), so a renderer change is caught as well as a chart change. A
+  chart version that is not the one in the tree is pulled from the registry
+  (`helm pull`): the test needs `helm` and, for such a pair, the network; in CI
+  it fails without them, elsewhere it is skipped.
+- **The plan as the operator reads it (`TestUpgradePlanGolden`).** Goldens under
+  `testdata/upgrade/0.8.1-to-<case>/plan.golden.json`: 0.8.1 to a next release
+  with the own charts bumped (allowed), with a third-party chart or a node image
+  bumped next to them (refused). They are fixtures, built from the 0.8.1 BOM, and
+  do not move with the BOM on `main`. `TestClassifyRefuses` has one case per kind
+  of refused entry.
+- **A `-dev` BOM is never a target.** The BOM on `main` is refused as a target
+  until the release commit drops `-dev`.
+
+What a release must do when it changes a pin, before its tag:
+
+1. A change of `proxcloud-platform` or `proxmox-kamaji-cluster`: bump the chart,
+   tag it, set the pin and its digest, and decide `upgradeFrom` by the checks
+   above. A chart that changes a machine or bootstrap template must not list the
+   old version: the release notes then say that installed platforms stay on
+   their BOM.
+2. Any other pin (an image, k3s, a provider, a third-party chart, the Kubernetes
+   version): every platform of an earlier release is refused the move. Say so in
+   the release notes; the platforms keep working on their BOM.
+3. Read the plan the release gives a platform of each earlier release: on a
+   build of the release commit, `GET …/plan` of such an installation, or
+   `PlanFor` in a test.
+
+Not checked: that a chart of `proxcloud-platform` whose version changes is safe
+to sync over the old one (its templates are RBAC, AppProjects, a MetalLB pool
+and the clusterctl hook; review the diff). Nothing here has run on a lab.
+
+### Upgrade drill builds
+
+A lab drill of an upgrade needs two builds whose BOMs form an allowed pair, and
+the second must carry the first's BOM. Development BOMs do not work for either
+side: a platform installed by a `-dev` build is on a BOM no other build carries
+(`bom_unsupported`), and a `-dev` BOM is refused as a target. So a drill build
+is made like a release, on a throwaway branch that is never merged:
+
+1. Install the lab platform from a release (v0.8.0 or v0.8.1), or from the
+   drill build before this one.
+2. On the branch, set `release:` in `deploy/platform/platform-bom.yaml` to a
+   version without `-dev` that no release will use, for example
+   `0.9.0-drill.1`, and make the BOM change to drill (none for a record-only
+   move). Every digest must be real: a release BOM takes no `pending`.
+3. For the build after it (`0.9.0-drill.2`), copy the BOM file of the first
+   drill build byte for byte to `deploy/platform/previous/0.9.0-drill.1.yaml`,
+   add its sha256 to `previousSHA256` in `internal/platformlife/bom_test.go` and
+   write its goldens, as for a release ([Previous BOMs](#previous-boms)). A
+   build that lacks the file refuses the platform with `bom_unsupported`.
+4. Build the images from the branch and run them on the lab only.
+
+Not determined: whether the image workflows publish a build for such a branch
+(`docker.yml` publishes `dev-<sha>` for pushes to `main`), and whether
+`bom-verify` accepts a `-drill` release name. Build the images by hand on the
+lab if they do not.
+
 ## Chart mirror
 
 The platform's third-party charts are republished, public, under
