@@ -1228,6 +1228,10 @@ function ClusterDetail({
   // The cluster's worker VMs — regular SERVER resources whose names are prefixed with the
   // cluster id (CAPI machine names: <clusterID>-<group>-<hash>-<suffix>). AWS-style: list them
   // right here, click through to the server's own page.
+  // The security group of the workers, when the operator put them behind the Proxmox firewall: an ordinary group of
+  // the project named k8s-<cluster id>.
+  const groupsQ = useCloudList(pid, "SECURITY_GROUP")
+  const workerGroup = (groupsQ.data ?? []).find((g) => resource.externalId && g.data?.securityGroup?.name === `k8s-${resource.externalId}`)
   const serversQ = useCloudList(pid, "SERVER", "", clusterPollMs([c]))
   const instances = useMemo(() => {
     const prefix = (resource.externalId || "") + "-"
@@ -1540,6 +1544,16 @@ function ClusterDetail({
                 {c.rwx ? " · ReadWriteMany from a NAS share" : " · no ReadWriteMany: a RWX claim stays Pending"}
               </p>
             )
+          )}
+
+          {workerGroup && (
+            <p className="text-xs text-muted-foreground">
+              Worker firewall: inbound traffic to the nodes is dropped except what security group{" "}
+              <Button variant="link" className="h-auto p-0 font-mono text-xs" onClick={() => navigate(`/p/${pid}/security-groups/${workerGroup.id}`)}>
+                {workerGroup.data?.securityGroup?.name as string}
+              </Button>{" "}
+              allows. Its rules are yours to change; removing one the cluster needs breaks the cluster.
+            </p>
           )}
 
           <div className="overflow-hidden rounded-xl border bg-card">
