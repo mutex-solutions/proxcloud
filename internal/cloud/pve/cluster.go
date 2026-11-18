@@ -154,8 +154,9 @@ func (c *Client) CSIVMIDCheck(ctx context.Context) (msg string, free, known bool
 		return "Could not read whether VM id " + id + " is in use: " + err.Error() + ". proxmox-csi names its volumes vm-" + id +
 			"-pvc-<uuid>; if a guest has that id, never destroy it with \"Destroy unreferenced disks owned by guest\" (docs/managed-services.md).", false, false
 	case !free:
-		return "VM id " + id + " is in use on this cluster. proxmox-csi names every volume it creates vm-" + id + "-pvc-<uuid>: the platform's own " +
-			"(Kamaji etcd, the registry, managed databases) and the volumes of tenant Kubernetes clusters. To Proxmox these are disks of VM " + id +
+		return "VM id " + id + " is in use on this cluster. proxmox-csi names every volume it creates vm-" + id + "-pvc-<uuid>: on a site with managed " +
+			"services or tenant Kubernetes, the platform's own (Kamaji etcd, the registry, managed databases) and the volumes of tenant clusters. " +
+			"To Proxmox these are disks of VM " + id +
 			". Never destroy VM " + id + " with \"Destroy unreferenced disks owned by guest\" ticked (qm destroy " + id +
 			" --destroy-unreferenced-disks 1): that removes these volumes with it. Keep the VM as it is, and read docs/managed-services.md before you remove or move it.", false, true
 	}

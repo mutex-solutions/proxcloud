@@ -114,7 +114,11 @@ install goes on: the platform works either way. What must never be done on such 
   `vm-9999-pvc-` disk. A disk rescan (`qm disk rescan`) lists disks named after a VM as that VM's
   unused disks, and a plain destroy removes the unused disks of the config too.
 
-The safe way is to leave VM 9999 as it is. This release does not change the id the plugin uses.
+The safe way is to leave VM 9999 as it is, and to give no new guest that id. This release does not change
+the id the plugin uses. ProxCloud asks Proxmox for the lowest free id when it creates a VM, so on a
+cluster with many guests, or with a datacenter `next-id` range that reaches 9999, a server of a tenant
+can get it. Its own delete of a VM sets `destroy-unreferenced-disks`, except for a VM with id 9999:
+that one is destroyed without the flag, so the CSI volumes stay.
 Not tried on a lab: the two commands above against a VM 9999 with CSI volumes present, and the two
 warnings against a real cluster (their tests use a fake Proxmox API). What the commands do is stated
 from the `qm` manual (`--destroy-unreferenced-disks`: "destroy additionally all disks not referenced in

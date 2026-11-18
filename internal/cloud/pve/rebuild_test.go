@@ -208,3 +208,22 @@ func TestSubnetHolds(t *testing.T) {
 		}
 	}
 }
+
+// proxmox-csi names every volume vm-9999-pvc-<uuid>: to Proxmox they are unreferenced disks of VM 9999. A product VM
+// that ever got that id must be destroyed without the flag that removes them.
+func TestDeleteVMKeepsCSIVolumes(t *testing.T) {
+	for vmid, want := range map[int]string{101: "1", CSIControllerVMID: ""} {
+		_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
+			fmt.Sprintf("DELETE /api2/json/nodes/pve1/qemu/%d", vmid): func(w http.ResponseWriter, r *http.Request) {
+				_ = r.ParseForm()
+				if got := r.Form.Get("destroy-unreferenced-disks"); got != want || r.Form.Get("purge") != "1" {
+					t.Errorf("vm %d: destroy-unreferenced-disks=%q purge=%q, want %q and 1", vmid, got, r.Form.Get("purge"), want)
+				}
+				fmt.Fprint(w, `{"data":"UPID:pve1:0:0:0:qmdestroy:1:u:"}`)
+			},
+		})
+		if _, err := c.DeleteVM(context.Background(), "pve1", vmid); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
