@@ -826,8 +826,17 @@ func TestImageFailures(t *testing.T) {
 
 	e = imageEnv(t)
 	e.imports.enqueueErr = templateupdates.ErrBlocklisted
-	if end := e.once(); end != "fail:"+CodeImageBlocked {
-		t.Fatalf("blocklisted: %s", end)
+	if end := e.once(); end != "fail:"+CodeImageBlocked || !strings.Contains(e.stage(StageImages).Message, "install a newer ProxCloud release") {
+		t.Fatalf("blocklisted: %s %q", end, e.stage(StageImages).Message)
+	}
+	// An installed platform keeps its BOM across upgrades: the message does not send the operator to a newer release.
+	e = imageEnv(t)
+	e.imports.enqueueErr = templateupdates.ErrBlocklisted
+	e.mutate(func(_ *Run, in *Installation, _ *Secrets) {
+		in.Status.BOM = &BOMRef{Release: cur.Release, SHA256: cur.SHA256}
+	})
+	if end := e.once(); end != "fail:"+CodeImageBlocked || !strings.Contains(e.stage(StageImages).Message, "stays on release "+cur.Release) {
+		t.Fatalf("blocklisted, installed: %s %q", end, e.stage(StageImages).Message)
 	}
 
 	// Only a refusal is permanent: a request or an artifact that fails validation, or no proof that a template is gone.

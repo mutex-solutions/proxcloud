@@ -36,6 +36,26 @@ func TestPlanFor(t *testing.T) {
 	}
 }
 
+// A platform v0.8.0 installed, on a build whose own BOM is another one: an apply stays on the installed BOM, so nothing
+// changes and nothing blocks, and the plan names the BOM this build would install as newer.
+func TestPlanForAPreviousBOM(t *testing.T) {
+	old := newerBuild(t)
+	cur, _ := Current()
+	ref := BOMRef{Release: old.Release, SHA256: old.SHA256}
+	p, err := PlanFor(&ref)
+	if err != nil || len(p.Changes) != 0 || len(p.Blocking) != 0 || p.Target != ref || p.Newer == nil ||
+		*p.Newer != (BOMRef{Release: "9.9.9-dev", SHA256: cur.SHA256}) {
+		t.Fatalf("plan %+v newer %+v: %v", p, p.Newer, err)
+	}
+	if same, _ := PlanFor(&BOMRef{Release: cur.Release, SHA256: cur.SHA256}); same.Newer != nil || same.Target.SHA256 != cur.SHA256 {
+		t.Fatalf("installed = current names no newer BOM: %+v", same)
+	}
+	// A build of main between releases is not a previous BOM: 0.8.0-dev stays refused.
+	if dev, _ := PlanFor(&BOMRef{Release: "0.8.0-dev", SHA256: strings.Repeat("1", 64)}); len(dev.Blocking) != 1 || dev.Newer != nil {
+		t.Fatalf("a -dev BOM: %+v", dev)
+	}
+}
+
 // Diff: a version change needs upgradeFrom, a stateful component is never removed, pins are listed.
 func TestDiff(t *testing.T) {
 	from, to := embedded(t), embedded(t)
