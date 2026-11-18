@@ -110,6 +110,41 @@ address from that network's pool, pinned by the VM firewall's ipfilter
 project's allow-list. Attaching again while the NIC is plugged answers 409 and
 leaves it alone; an address held by a NIC that never got plugged is plugged.
 
+Security group rules on a Proxmox provider: actions on
+`POST /api/v1/project/{id}/cloud/{resourceId}/action`, where the resource is a
+`SECURITY_GROUP` (`internal/platform/project/cloud_writes_pve.go`). A group is an
+allow list for inbound traffic. Nothing here is lab-verified on PVE 9.2 in this
+form; the tests run against a fake Proxmox.
+
+- `LIST_RULES`: the rules, from the cache row. Each has `id`, `direction`
+  (`ingress` or `egress`), `protocol`, `port_range` (`22` or `8000:8100`),
+  `remote_ip_prefix` (the source of an ingress rule, the destination of an egress
+  rule), `description` and `pos`. The `id` is
+  `<group>-<position>-<fingerprint of the rule's content>`: it names that rule at
+  that position and stops matching when the rule moves or changes.
+- `ADD_RULE`, data `direction` (`ingress`, the default, or `egress`), `protocol`
+  (`tcp`, `udp`, `sctp`, `icmp`, `gre`, `esp`, `ah`; absent or empty for any),
+  `portRangeMin` and `portRangeMax` (whole numbers from 1 to 65535, destination
+  ports; they need `tcp`, `udp` or `sctp`), `remoteIpPrefix` (a CIDR without host
+  bits, or one address; absent for anywhere), `description`. Every rule is an
+  allow rule. Any other key is a `400` that names it (`remoteGroupId`, `action`,
+  `log`, `priority` and the rest: the provider cannot honour them, and dropping
+  one would store a wider rule than asked), and so is a value that fails the
+  checks above. What only Proxmox refuses comes back as a `400` with its text.
+  An egress rule is stored with the CIDR as its destination and **restricts
+  nothing**, because every server's outbound policy is ACCEPT: the answer then
+  carries `result.warning` saying so.
+- `DELETE_RULE`, data `ruleId` (the `id` from `LIST_RULES`). Without `ruleId` the
+  answer is `400`; `pos` is no longer taken, because a position names whatever
+  rule sits there now. When no rule of the group has that id any more (a rule was
+  added or deleted since the list was read, or the id is of the shape
+  `<group>-<position>` that v0.8.0 listed) the answer is `409`, nothing is
+  deleted and the cache row is refreshed: list the rules again and repeat the
+  delete with the current id. The delete also sends Proxmox the digest of the
+  rule list it was checked against, so a change between the check and the delete
+  is refused by Proxmox and answered `409` too.
+- There is no rule update: `UPDATE_RULE` is a `400`. Delete and add.
+
 Proxmox connection test: `POST /api/v1/admin/service/proxmox/auth`
 (`admin:service:read`) tests a connection and stores nothing. The body takes
 `apiUrl`, `apiUrls` (other nodes or a VIP to fail over to), `tokenId`,

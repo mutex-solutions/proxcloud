@@ -28,7 +28,17 @@ To spread inbound traffic across several servers behind one address, use a [load
 
 ## Firewalling with security groups
 
-**Network → Security groups** are the firewalls around your servers. Each group is a set of allow rules for inbound and outbound traffic; attach one or more to a server to control which ports and sources can reach it. Every project starts with a default group. A common first rule is allowing SSH (port 22) from your own address.
+**Network → Security groups** are the firewalls around your servers. Each group is a list of rules that allow **inbound** traffic: a protocol, a destination port or port range, and the source address range. Attach one or more groups to a server; inbound traffic that no rule allows is dropped, and replies to connections the server opened need no rule. Every project starts with a default group. A common first rule is allowing SSH (port 22) from your own address.
+
+What a security group does not do:
+
+- **It does not filter outbound traffic.** A server may open any outbound connection. The API accepts a rule with direction `egress` and the console lists it as such, but it restricts nothing; the API's answer says so.
+- **There are no deny rules, no rule order, no logging and no rule that names another group as the source.** The API refuses a rule that asks for one of these instead of storing a wider rule than you asked for.
+- **A rule cannot be edited.** Delete it and add it again.
+
+A rule's fields are checked before it is stored: the protocol is `tcp`, `udp`, `sctp`, `icmp`, `gre`, `esp` or `ah` (empty for any); a port range needs `tcp`, `udp` or `sctp` and ports from 1 to 65535; the remote is a CIDR such as `203.0.113.0/24` or a single address (empty for anywhere).
+
+If someone else changes the group while you have its page open, deleting a rule from your page answers that the rules have changed and reloads the list; delete the rule again from the current list. Nothing is deleted by the refused attempt.
 
 ![A security group with an SSH rule](/docs-img/security-group-rules.png)
 

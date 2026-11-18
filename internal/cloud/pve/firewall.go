@@ -81,9 +81,11 @@ func ruleForm(r FirewallRule) url.Values {
 	}.values()
 }
 
-// DeleteFirewallRule removes the rule at pos.
-func (c *Client) DeleteFirewallRule(ctx context.Context, group string, pos int) error {
-	return c.delete(ctx, "/cluster/firewall/groups/"+url.PathEscape(group)+"/"+itoa0(pos), nil, nil)
+// DeleteFirewallRule removes the rule at pos. A position names a rule only for the list it was read from: pass that
+// list's digest and PVE refuses the delete when the group changed since ("" = no check, for a caller that empties
+// the whole group).
+func (c *Client) DeleteFirewallRule(ctx context.Context, group string, pos int, digest string) error {
+	return c.delete(ctx, "/cluster/firewall/groups/"+url.PathEscape(group)+"/"+itoa0(pos), formVals{"digest": digest}.values(), nil)
 }
 
 // itoa0 is itoa that keeps "0" (rule positions are 0-based).
