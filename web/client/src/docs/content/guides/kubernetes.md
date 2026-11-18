@@ -25,7 +25,7 @@ A new cluster reads **Pending**, then **Progressing**, then **Ready**. While it 
 
 ## Replace a node
 
-**Replace** on a row of the cluster's instance list deletes that server and creates a new one in its place, which joins the cluster again. Use it for a server that did not join, after the operator repaired the cause, or for a node you want rebuilt.
+**Replace** deletes one server of the cluster and creates a new one in its place. The button is on every row of the cluster's instance list, and next to a node group's status for each server of the group that needs attention (such a server is not always in the instance list). The new server joins the cluster again. Use it for a server that did not join, after the operator repaired the cause, or for a node you want rebuilt.
 
 - The node count of the group and your quota stay as they are, and the new server runs on the same host.
 - A node that had joined is drained first. What is on its own disk is lost; persistent volumes are kept.

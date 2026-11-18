@@ -425,7 +425,9 @@ function KamajiClustersCard({ id }: { id: string }) {
           Provider pin: <span className="font-mono">{pin || "—"}</span>. Re-pinning re-renders the
           chart for that cluster — platform components restart with a rolling update, and when the
           node template changed between chart versions the nodes rotate too (surge-first).
-          Customers can also apply this themselves from the cluster page.
+          Customers can also apply this themselves from the cluster page. The provider's worker repair setting
+          (startup timeout, guard, or off) is written into a cluster's values at every change of that cluster;
+          Apply settings writes it now for a cluster that is already on the pin.
         </p>
         <Table>
           <TableHeader>
@@ -458,6 +460,10 @@ function KamajiClustersCard({ id }: { id: string }) {
                     {pin && c.chartVersion !== pin ? (
                       <Button size="sm" variant="outline" onClick={() => bumpOne.mutate(c.id)} disabled={bumpOne.isPending}>
                         Bump to {pin}
+                      </Button>
+                    ) : pin ? (
+                      <Button size="sm" variant="ghost" aria-label={`Apply the provider's settings to ${c.name || c.id}`} onClick={() => bumpOne.mutate(c.id)} disabled={bumpOne.isPending}>
+                        Apply settings
                       </Button>
                     ) : null}
                   </TableCell>

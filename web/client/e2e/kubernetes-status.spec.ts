@@ -27,7 +27,7 @@ test("a stuck cluster says why per node group and what the tenant can do", async
   await expect(workers).toContainText("The machine runs but has not joined the cluster")
   // Past its bound the tenant is sent to the operator, not to a network check they cannot make.
   await expect(workers).toContainText("most likely it could not reach the cluster's endpoint. Contact the operator, who can read the join error of the machine and check the path from your network to the endpoint")
-  await expect(workers).toContainText("use Replace on that machine in the list of instances below")
+  await expect(workers).toContainText("use Replace on that machine, next to this node group's status in the table of node groups or in the list of instances below")
   await expect(workers).not.toContainText("reduce the count by one")
   await expect(workers).not.toContainText("has a router or gateway")
   await expect(workers).toContainText(/since 4\d min/)
@@ -47,6 +47,39 @@ test("a stuck cluster says why per node group and what the tenant can do", async
   await expect(table.getByRole("columnheader", { name: "Status" })).toBeVisible()
   await expect(table.getByRole("row").filter({ hasText: "workers" }).getByText("Needs attention")).toBeVisible()
   await expect(table.getByRole("row").filter({ hasText: "build" }).getByText("Needs attention")).toHaveCount(0)
+})
+
+// Production (2026-11-18): the two workers that never joined were never among the project's servers, so the instance
+// list had no row to press Replace on. The node group's own line names the machines that need attention.
+test("a machine that never joined is replaced from its node group's line when the instance list is empty", async ({ page }) => {
+  await page.goto(base)
+  await expect(page.getByRole("row").filter({ hasText: "staging" })).toBeVisible()
+  await page.evaluate(async () => {
+    const apiPath = "/src/lib/api.ts", routerPath = "/src/mocks/router.ts"
+    const { setMockHandler } = await import(/* @vite-ignore */ apiPath)
+    const { dispatch } = await import(/* @vite-ignore */ routerPath)
+    const w = window as unknown as { __actions: unknown[] }
+    w.__actions = []
+    setMockHandler(async (path: string, opts: { method?: string; body?: { action?: string } }) => {
+      if (path.endsWith("/action") && opts.body?.action === "REPLACE_MACHINE") w.__actions.push(opts.body)
+      return dispatch(path, opts)
+    })
+  })
+  await page.getByRole("row").filter({ hasText: "staging" }).click()
+  await expect(page.getByText("No worker instances yet.")).toBeVisible()
+  const groups = page.getByRole("table").filter({ hasText: "Node group" }).first()
+  const row = groups.getByRole("row").filter({ hasText: "workers" })
+  await expect(row).toContainText("pc-c-stuck-workers-pve2-fghij-stuck")
+  // Only a group with a machine past its bound names one: nothing to replace on a group that is still on its way.
+  await expect(groups.getByRole("row").filter({ hasText: "edge" }).getByRole("button")).toHaveCount(0)
+  await row.getByRole("button", { name: "Replace machine pc-c-stuck-workers-pve2-fghij-stuck" }).click()
+  const dialog = page.getByRole("dialog")
+  await expect(dialog).toContainText("pc-c-stuck-workers-pve2-fghij-stuck")
+  await dialog.getByRole("button", { name: "Replace", exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  expect(await page.evaluate(() => (window as unknown as { __actions: never[] }).__actions)).toEqual([
+    { action: "REPLACE_MACHINE", data: { machine: "pc-c-stuck-workers-pve2-fghij-stuck", confirm: false } },
+  ])
 })
 
 // Production finding R1: two workers that never joined took two scale-up and scale-down cycles to replace, because a

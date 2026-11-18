@@ -143,3 +143,13 @@ test("a paused cluster and a refused token show as the provider's finding", asyn
   await expect(box).toContainText("Cluster spec.paused is set to true")
   await expect(box).not.toContainText("NotDeleting")
 })
+
+// The provider's repair setting (timeout, guard, off) reaches a cluster at its next change. A cluster already on the
+// provider's chart has no bump to wait for: Apply settings writes it now, through the same route.
+test("a cluster on the provider's chart can take the provider's settings without a bump", async ({ page }) => {
+  await open(page, machines, { "POST /admin/service/svc-k8s-01/k8s-clusters/pc-c-stuck/bump-chart": { chartVersion: "0.1.13" } })
+  await page.keyboard.press("Escape")
+  await expect(page.getByRole("button", { name: "Bump to 0.1.13" })).toHaveCount(0)
+  await page.getByRole("button", { name: "Apply the provider's settings to staging" }).click()
+  await expect.poll(() => calls(page, "POST", "/admin/service/svc-k8s-01/k8s-clusters/pc-c-stuck/bump-chart")).toHaveLength(1)
+})

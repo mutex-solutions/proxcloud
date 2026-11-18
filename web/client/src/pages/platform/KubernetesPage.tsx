@@ -149,7 +149,8 @@ function clusterBusy(c: Cluster): boolean {
 
 // Why a node group or the control plane is not there yet: the reason codes the status sync stores
 // (docs/managed-k8s.md, "Provisioning status"). The texts live here; the API carries codes only.
-type Progress = { code?: string; since?: string; machines?: number; attention?: boolean }
+// machineNames: the machines of the group that need attention (at most five), the ones Replace is offered on.
+type Progress = { code?: string; since?: string; machines?: number; attention?: boolean; machineNames?: string[] }
 const PROGRESS_TEXT: Record<string, string> = {
   provider_access_refused: "The platform cannot reach the virtualization provider. Contact the operator.",
   no_capacity:
@@ -168,7 +169,7 @@ const PROGRESS_TEXT: Record<string, string> = {
 // After its bound a machine that has not joined will not join: kubeadm runs once. The cause is not read (the code is
 // the Machine's phase), so the text names the likely one: the endpoint, on a path the tenant can neither see nor repair.
 const NOT_JOINED_ATTENTION =
-  "The machine runs but has not joined the cluster: most likely it could not reach the cluster's endpoint. Contact the operator, who can read the join error of the machine and check the path from your network to the endpoint. A machine that failed to join does not try again by itself: once the cause is repaired, use Replace on that machine in the list of instances below, which makes a new machine in its place and keeps the node count."
+  "The machine runs but has not joined the cluster: most likely it could not reach the cluster's endpoint. Contact the operator, who can read the join error of the machine and check the path from your network to the endpoint. A machine that failed to join does not try again by itself: once the cause is repaired, use Replace on that machine, next to this node group's status in the table of node groups or in the list of instances below. It makes a new machine in its place and keeps the node count."
 const progressText = (p?: Progress) =>
   p?.code === "not_joined" && p.attention ? NOT_JOINED_ATTENTION : (PROGRESS_TEXT[p?.code ?? ""] ?? PROGRESS_TEXT.provisioning)
 function sinceText(since?: string): string {
@@ -1595,6 +1596,16 @@ function ClusterDetail({
                           <span className="flex flex-col items-start gap-1">
                             {groupProgress(g)?.attention ? <AttentionBadge /> : null}
                             <span className="text-muted-foreground">{progressText(groupProgress(g))}</span>
+                            {/* The machines that need attention, by name: a worker that never joined may have no row
+                                in the instance list below (it is built from the project's synced servers). */}
+                            {(groupProgress(g)?.machineNames ?? []).map((name) => (
+                              <span key={name} className="flex flex-wrap items-center gap-2">
+                                <span className="font-mono text-xs">{name}</span>
+                                <Button size="sm" variant="outline" aria-label={`Replace machine ${name}`} onClick={() => setReplaceOf({ name, lastReady: false })}>
+                                  Replace
+                                </Button>
+                              </span>
+                            ))}
                           </span>
                         ) : (
                           "—"
