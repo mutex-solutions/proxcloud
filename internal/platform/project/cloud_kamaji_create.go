@@ -249,7 +249,7 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 			return sec, upstreamErr(computeBackend, serr)
 		}
 		if !static {
-			return sec, httpx.BadRequest("Worker nodes need a network without DHCP (an EVPN or VLAN zone)")
+			return sec, httpx.BadRequest("Worker nodes need a network without DHCP (an EVPN or VLAN zone, or a simple zone without a DHCP server)")
 		}
 		_, ipnet, perr := net.ParseCIDR(cidr)
 		if perr != nil {

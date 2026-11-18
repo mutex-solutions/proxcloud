@@ -427,6 +427,91 @@ func TestPlatformRunStartCancelAndReplay(t *testing.T) {
 	}
 }
 
+// A platform the release v0.8.0 installed, on this build: the plan stays on the installed BOM and names this build's
+// own as newer, and an apply starts with the 0.8.0 BOM. A platform a build of main installed (a BOM no release
+// embeds) is still refused with bom_unsupported, and can still be removed.
+func TestPlatformRunOnAPreviousBOM(t *testing.T) {
+	ctx := context.Background()
+	db := freshPG(t)
+	enc := textcrypt.New("test-key")
+	jobs := durablejobs.New(db)
+	if err := jobs.Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	store := platformlife.NewStore(db, enc)
+	if err := store.Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mustInsert(t, db, "adminPermission", pgdoc.M{"_id": "admin-sub", "role": "ADMIN"})
+	h := admin.NewHandler(admin.NewRepo(db), nil, nil, nil, nil, nil, nil, nil, audit.NewService(audit.NewRepo(db), slog.Default()),
+		externalservice.NewService(externalservice.NewRepo(db), enc), "", "", "")
+	h.SetPlatform(store)
+	h.SetDurableJobs(jobs, nil, func(*durablejobs.Job) error { return nil })
+	h.SetPlatformRuns(jobs)
+	router := chi.NewRouter()
+	h.Routes(router)
+	call := func(method, path, body string, want int) map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req = req.WithContext(httpx.WithRC(req.Context(), &httpx.RequestContext{Sub: "admin-sub"}))
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != want {
+			t.Fatalf("%s %s: %d %s, want %d", method, path, w.Code, w.Body.String(), want)
+		}
+		var out map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		return out
+	}
+	installed := func(service, release, sha string) string {
+		t.Helper()
+		in := &platformlife.Installation{Name: "lab", ServiceID: service}
+		if err := store.Create(ctx, in); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.C(platformlife.InstallationCollection).SetByID(ctx, in.ID, pgdoc.M{"status": pgdoc.M{"phase": "ready",
+			"bom": pgdoc.M{"release": release, "sha256": sha}}}, nil); err != nil {
+			t.Fatal(err)
+		}
+		return "/admin/platform/installations/" + in.ID
+	}
+	cur, err := platformlife.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sha080 = "8eb874987d3bbaf55f309295ee241ec320c0cf9e0805b3bd1812ef908b6600c6" // status.bom of a platform v0.8.0 installed
+	if cur.SHA256 == sha080 {
+		t.Fatal("this build's own BOM is the 0.8.0 one")
+	}
+
+	one := installed("svc-pve", "0.8.0", sha080)
+	plan := call(http.MethodGet, one+"/plan", "", http.StatusOK)["data"].(map[string]any)
+	target, _ := plan["target"].(map[string]any)
+	newer, _ := plan["newer"].(map[string]any)
+	if target["sha256"] != sha080 || newer["sha256"] != cur.SHA256 || newer["release"] != cur.Release ||
+		len(plan["changes"].([]any)) != 0 || len(plan["blocking"].([]any)) != 0 {
+		t.Fatalf("plan of a 0.8.0 platform: %v", plan)
+	}
+	if b := call(http.MethodGet, "/admin/platform/bom?sha256="+sha080, "", http.StatusOK)["data"].(map[string]any); b["release"] != "0.8.0" {
+		t.Fatalf("the installed BOM: %v", b["release"])
+	}
+	data := call(http.MethodPost, one+"/runs", `{"kind":"apply"}`, http.StatusAccepted)["data"].(map[string]any)
+	if run, err := store.Run(ctx, data["runId"].(string)); err != nil || run.BOM != (platformlife.BOMRef{Release: "0.8.0", SHA256: sha080}) {
+		t.Fatalf("the apply does not run with the installed BOM: %+v %v", run, err)
+	}
+
+	dev := installed("svc-pve-2", "0.8.0-dev", strings.Repeat("1", 64))
+	plan = call(http.MethodGet, dev+"/plan", "", http.StatusOK)["data"].(map[string]any)
+	if blocking := fmt.Sprint(plan["blocking"]); !strings.Contains(blocking, platformlife.CodeBOMUnsupported) || plan["newer"] != nil {
+		t.Fatalf("plan of a platform a build of main installed: %v", plan)
+	}
+	if a := call(http.MethodPost, dev+"/runs", `{"kind":"apply"}`, http.StatusConflict); !strings.Contains(fmt.Sprint(a), platformlife.CodeBOMUnsupported) {
+		t.Fatalf("apply on an unknown BOM: %v", a)
+	}
+	call(http.MethodGet, "/admin/platform/bom?sha256="+strings.Repeat("1", 64), "", http.StatusNotFound)
+	call(http.MethodPost, dev+"/runs", `{"kind":"remove"}`, http.StatusAccepted)
+}
+
 // TestPlatformRunMutate: the runner's write seals the secrets, deletes a secrets document left empty, and keeps the
 // run and the installation together.
 func TestPlatformRunMutate(t *testing.T) {

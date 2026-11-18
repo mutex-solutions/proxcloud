@@ -156,8 +156,21 @@ func TestApplyBuildsThePlatform(t *testing.T) {
 	p.seed.put(capiNS+"machinedeployments/pc-platform-kamaji-pve9", meta("pc-platform-kamaji-pve9",
 		map[string]any{"cluster.x-k8s.io/cluster-name": ClusterName, "proxcloud.io/node-group": "kamaji"}))
 	p.seed.put(capiNS+"machinedeployments/tenant-md", meta("tenant-md", map[string]any{"cluster.x-k8s.io/cluster-name": "other"}))
+	// The machines as CAPMOX leaves them, without onboot; one that has it already, and another installation's VM.
+	tags := "proxcloud;pc-platform;pc-platform-" + inID
+	p.pve.vms[201] = &fakeVM{system: true, running: true, cfg: map[string]any{"name": "pc-platform-cp-1", "tags": tags}}
+	p.pve.vms[202] = &fakeVM{system: true, running: true, cfg: map[string]any{"name": "pc-platform-kamaji-pve2-1", "tags": tags, "onboot": 1}}
+	p.pve.vms[203] = &fakeVM{system: true, running: true, cfg: map[string]any{"name": "pc-platform-cp-9", "tags": "proxcloud;pc-platform;pc-platform-other"}}
 	if end := p.until(30); end != "complete" {
 		t.Fatalf("end %s: %+v\n%s", end, p.stage(stageWorkloadPlatform), p.logs)
+	}
+	// Stage 7 ends by setting onboot on this installation's machines that lack it, and on no other VM: after a node
+	// reboot Proxmox starts only those (v0.8.0 set it on the seed alone).
+	if got := p.pve.vms[201].cfg["onboot"]; got != "1" {
+		t.Errorf("machine 201 has onboot %v after stage 7", got)
+	}
+	if p.pve.writeCount("POST /nodes/pve1/qemu/202/config") != 0 || p.pve.writeCount("POST /nodes/pve1/qemu/203/config") != 0 {
+		t.Errorf("a machine that has onboot, or another installation's VM, was written: %v", p.pve.writes)
 	}
 	run, in, _ := p.state.snapshot()
 	cur, _ := Current()
@@ -289,6 +302,80 @@ func TestWaveStallDeadline(t *testing.T) {
 	})
 	if end := p.once(); end != "fail:"+CodeComponentUnhealthy {
 		t.Fatalf("after the deadline: %s", end)
+	}
+}
+
+// A platform v0.8.0 installed, applied again on a build whose own BOM differs in every pin: the images, the
+// Applications, the providers and the recorded status all come from the 0.8.0 BOM, and the platform stays on it.
+func TestApplyStaysOnTheInstalledBOM(t *testing.T) {
+	old := newerBuild(t)
+	ref := BOMRef{Release: old.Release, SHA256: old.SHA256}
+	onOld := func(run *Run, in *Installation, _ *Secrets) { run.BOM, in.Status.BOM = ref, &ref }
+
+	e := imageEnv(t)
+	e.mutate(onOld)
+	e.once()
+	if len(e.imports.enqueued) != 4 {
+		t.Fatalf("imports %+v", e.imports.enqueued)
+	}
+	for _, req := range e.imports.enqueued {
+		if req.Digest != old.Seed.Image.Digest && req.Digest != old.Kubernetes.NodeImage.Digest {
+			t.Fatalf("an image that is not of the installed BOM: %+v", req)
+		}
+	}
+
+	p := newPlatform(t, RunApply)
+	p.mutate(onOld)
+	p.upTo(stageSeedPlatform)
+	if end := p.until(30); end != "complete" {
+		t.Fatalf("end %s: %+v\n%s", end, p.stage(stageWorkloadPlatform), p.logs)
+	}
+	run, in, _ := p.state.snapshot()
+	if run.State != RunSucceeded || in.Status.BOM == nil || *in.Status.BOM != ref || len(in.Status.Components) != len(old.Components) {
+		t.Fatalf("run %s, status %+v", run.State, in.Status)
+	}
+	for i, c := range old.Components {
+		if got := in.Status.Components[i]; got.Version != c.Chart.Version || got.Digest != c.Chart.Digest {
+			t.Errorf("component %s recorded as %+v, the installed BOM has %s", c.Name, got, c.Chart.Version)
+		}
+		app := p.seed.obj(appsPath + "pc-platform-" + c.Name)
+		if c.Name == "proxcloud-platform" || app == nil {
+			continue
+		}
+		if str(app, "metadata", "labels", "proxcloud.io/bom-release") != "0.8.0" || str(app, "spec", "source", "targetRevision") != c.Chart.Version {
+			t.Errorf("Application of %s is not from the installed BOM: %v", c.Name, app["metadata"])
+		}
+	}
+	cilium := comp(t, old.BOM, ClusterWorkload, "cilium")
+	if app := p.seed.obj(appsPath + "pc-platform-cilium"); str(app, "spec", "source", "targetRevision") != cilium.Chart.Version ||
+		str(app, "spec", "destination", "namespace") != cilium.Namespace {
+		t.Fatalf("cilium: %v", app)
+	}
+	if len(p.registers) != 2 || str(p.registers[0], "config", "argocd", "chartVersion") != old.TenantCharts.Kubernetes.Version {
+		t.Fatalf("providers registered: %d, the Kubernetes chart %s", len(p.registers), str(p.registers[0], "config", "argocd", "chartVersion"))
+	}
+}
+
+// Remove of a platform v0.8.0 installed reads the platform's volumes by the namespaces of the installed BOM.
+func TestRemoveReadsTheInstalledBOM(t *testing.T) {
+	old := newerBuild(t)
+	p := removal(t)
+	p.mutate(func(_ *Run, in *Installation, _ *Secrets) {
+		in.Status.BOM = &BOMRef{Release: old.Release, SHA256: old.SHA256}
+	})
+	p.once()
+	if _, in, _ := p.state.snapshot(); len(in.Status.Volumes) != 1 || in.Status.Volumes[0].Handle != "lab/pve1/local-lvm/vm-9999-pvc-etcd" {
+		t.Fatalf("volumes %+v: %+v", in.Status.Volumes, p.stage(StageRemoveCluster))
+	}
+	p.seed.mu.Lock()
+	for k := range p.seed.objs {
+		if strings.HasPrefix(k, capiNS+"machines/") {
+			delete(p.seed.objs, k)
+		}
+	}
+	p.seed.mu.Unlock()
+	if end := p.until(8); end != "complete" || !slices.Equal(p.pve.disks, []string{"vm-9999-pvc-tenant"}) {
+		t.Fatalf("end %s, volumes left %v", end, p.pve.disks)
 	}
 }
 

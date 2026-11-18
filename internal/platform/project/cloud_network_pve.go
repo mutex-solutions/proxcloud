@@ -74,10 +74,12 @@ func (h *Handler) withSDNLock(ctx context.Context, w http.ResponseWriter, fn fun
 
 // pveNetFlags reads enableDhcp and snat of a network or subnet request for a zone of this kind. Both default to on,
 // except in a VLAN zone: Proxmox runs no DHCP and does no SNAT on a bare VLAN (the site's router serves it), so both are
-// off there and asking for either is a 400 rather than an answer that says yes and a network that does not.
-func pveNetFlags(zoneKind string, data map[string]any) (dhcp, snat bool, herr *httpx.HTTPError) {
+// off there and asking for either is a 400 rather than an answer that says yes and a network that does not. The same
+// for DHCP in any zone without a DHCP server (zoneDHCP, pve.ZoneDHCP: an EVPN zone, a simple zone made without it):
+// Proxmox hands out no address there and the platform assigns them.
+func pveNetFlags(zoneKind string, zoneDHCP bool, data map[string]any) (dhcp, snat bool, herr *httpx.HTTPError) {
 	vlan := zoneKind == "vlan"
-	dhcp, snat = !vlan, !vlan
+	dhcp, snat = zoneDHCP && !vlan, !vlan
 	if v, ok := data["enableDhcp"].(bool); ok {
 		dhcp = v
 	}
@@ -87,6 +89,10 @@ func pveNetFlags(zoneKind string, data map[string]any) (dhcp, snat bool, herr *h
 	if vlan && (dhcp || snat) {
 		return false, false, httpx.BadRequest("This provider's networks are VLANs of the site: Proxmox gives them no DHCP and no outbound NAT (SNAT). " +
 			"Leave enableDhcp and snat out or send false; addresses are static and the site's router is the gateway")
+	}
+	if dhcp && !zoneDHCP {
+		return false, false, httpx.BadRequest("This provider's network zone has no DHCP server in Proxmox, so a network there cannot have DHCP. " +
+			"Leave enableDhcp out or send false; servers get a fixed address that the platform assigns")
 	}
 	return dhcp, snat, nil
 }
@@ -121,11 +127,17 @@ func (h *Handler) pveCreateNetwork(w http.ResponseWriter, r *http.Request, u *us
 		return
 	}
 	requested := strAny(data["cidr"])
-	kind := zone.Kind
+	live := zone
 	if netCfg.Isolation == pve.IsolationEVPN {
-		kind = "evpn" // the network goes into the project's own EVPN zone, whatever the default zone is
+		// the network goes into the project's own EVPN zone, whatever the default zone is
+		live = pve.ZoneConfig{Key: pve.ZoneIDFor(proj.ID), Kind: "evpn"}
 	}
-	dhcp, snat, herr := pveNetFlags(kind, data)
+	zoneDHCP, err := ps.ZoneDHCP(ctx, live)
+	if err != nil {
+		h.fail(w, pveVolumeErr(err))
+		return
+	}
+	dhcp, snat, herr := pveNetFlags(live.Kind, zoneDHCP, data)
 	if herr != nil {
 		h.fail(w, herr)
 		return
@@ -597,8 +609,7 @@ func (h *Handler) pveSubnetAction(w http.ResponseWriter, r *http.Request, u *use
 	// The network's zone decides what a subnet can have (pveNetFlags). A project's EVPN zone is not among the provider's
 	// zones: kind "", so SNAT as before.
 	net, _ := cr.Data["network"].(map[string]any)
-	vlan := netCfg.Zones[strAny(net["zone"])].Kind == "vlan"
-	_, snat, herr := pveNetFlags(netCfg.Zones[strAny(net["zone"])].Kind, map[string]any{"snat": data["snat"]})
+	_, snat, herr := pveNetFlags(netCfg.Zones[strAny(net["zone"])].Kind, false, map[string]any{"snat": data["snat"]})
 	if herr != nil && action != "REMOVE_SUBNET" {
 		h.fail(w, herr)
 		return true
@@ -630,7 +641,7 @@ func (h *Handler) pveSubnetAction(w http.ResponseWriter, r *http.Request, u *use
 				if err := ps.ApplyAndWait(ctx); err != nil {
 					return err
 				}
-				return h.pveRefreshSubnetRow(ctx, ps, cr, vlan)
+				return h.pveRefreshSubnetRow(ctx, ps, cr)
 			})
 		case "SET_SNAT":
 			if err := ps.SetSubnetSNAT(ctx, proj.ID, cr.ExternalID, cidr, snat); err != nil {
@@ -645,7 +656,7 @@ func (h *Handler) pveSubnetAction(w http.ResponseWriter, r *http.Request, u *use
 		return true
 	}
 	if action != "REMOVE_SUBNET" {
-		if err := h.pveRefreshSubnetRow(ctx, ps, cr, vlan); err != nil {
+		if err := h.pveRefreshSubnetRow(ctx, ps, cr); err != nil {
 			slog.Error("pve network: refresh subnets", "network", cr.ExternalID, "err", err)
 		}
 	}
@@ -654,17 +665,17 @@ func (h *Handler) pveSubnetAction(w http.ResponseWriter, r *http.Request, u *use
 	return true
 }
 
-// pveRefreshSubnetRow rereads a NETWORK row's subnets off the SDN. vlan: the network is in a VLAN zone (SubnetDetail).
-func (h *Handler) pveRefreshSubnetRow(ctx context.Context, ps *pve.Service, cr *cloud.CloudResource, vlan bool) error {
+// pveRefreshSubnetRow rereads a NETWORK row's subnets off the SDN, with what its zone makes of them (pve.SubnetDetail).
+func (h *Handler) pveRefreshSubnetRow(ctx context.Context, ps *pve.Service, cr *cloud.CloudResource) error {
 	net, _ := cr.Data["network"].(map[string]any)
 	if net == nil {
 		return nil
 	}
-	subs, err := ps.C.ListSDNSubnets(ctx, cr.ExternalID)
+	detail, err := ps.NetworkDetail(ctx, cr.ExternalID)
 	if err != nil {
 		return err
 	}
-	for k, v := range pve.SubnetDetail(subs, vlan) {
+	for k, v := range detail {
 		net[k] = v
 	}
 	saved, err := h.cloud.Insert(ctx, cr)

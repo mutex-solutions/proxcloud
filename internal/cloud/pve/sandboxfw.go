@@ -639,7 +639,7 @@ func (s *Service) ensureSandboxGeneration(ctx context.Context, g sandboxGen, inU
 
 func (s *Service) deleteGroup(ctx context.Context, group string, rules int) error {
 	for range rules {
-		if err := s.C.DeleteFirewallRule(ctx, group, 0); err != nil {
+		if err := s.C.DeleteFirewallRule(ctx, group, 0, ""); err != nil {
 			return err
 		}
 	}

@@ -17,7 +17,8 @@ name: docker
 #
 # On a `v*` tag the `bom-verify` job first runs .github/scripts/bom_verify.py --release: no image is built or
 # pushed, and no GitHub Release is created, when the platform BOM is still `-dev`, holds a `pending` digest or a
-# `0.0.0+` version, or pins a digest the registry no longer serves.
+# `0.0.0+` version, or pins a digest the registry no longer serves. The previous BOMs the images embed
+# (deploy/platform/previous/) are compared the same way.
 #
 # Auth is the built-in GITHUB_TOKEN (packages: write / contents: write) — no
 # external secrets.
@@ -87,6 +88,13 @@ jobs:
       - name: Release gate - the BOM is pinned and every pin matches the registries
         if: github.ref_type == 'tag'
         run: python3 .github/scripts/bom_verify.py --release
+      - name: Release gate - every pin of the previous BOMs is still served
+        if: github.ref_type == 'tag'
+        run: |
+          for bom in deploy/platform/previous/*.yaml; do
+            echo "== $bom"
+            python3 .github/scripts/bom_verify.py --release --bom "$bom"
+          done
 
   build:
     needs: [changes, bom-verify]

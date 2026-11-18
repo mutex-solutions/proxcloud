@@ -473,8 +473,10 @@ type Site struct {
 	Public   []string // the public networks' CIDRs
 	Mgmt     []string // the nodes' management networks (live; nil when not read)
 	// DefaultZone is the zone a tenant network is made in (config.network.defaultZone) and DefaultZoneKind its kind
-	// (evpn, vlan or simple); both empty when the provider names no zone.
+	// (evpn, vlan or simple); both empty when the provider names no zone. DefaultZoneNoDHCP: the zone's config says
+	// dhcp: false (pve.ZoneConfig.NoDHCP).
 	DefaultZone, DefaultZoneKind string
+	DefaultZoneNoDHCP            bool
 }
 
 // SiteProblems checks an installation against its site: the platform network overlaps neither the tenant pool nor a

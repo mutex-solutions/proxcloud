@@ -8,6 +8,8 @@ package pve
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"slices"
 	"strconv"
@@ -77,7 +79,7 @@ func (s *Service) DeleteSecurityGroup(ctx context.Context, projectID, groupID st
 		return err
 	}
 	for i := len(rules) - 1; i >= 0; i-- {
-		if err := s.C.DeleteFirewallRule(ctx, groupID, rules[i].Pos); err != nil {
+		if err := s.C.DeleteFirewallRule(ctx, groupID, rules[i].Pos, ""); err != nil {
 			return err
 		}
 	}
@@ -113,8 +115,21 @@ func (s *Service) SGAddRule(ctx context.Context, projectID, groupID string, r Fi
 	return s.C.AddFirewallRule(ctx, groupID, r)
 }
 
-// SGDeleteRule removes the rule at pos of an owned group.
-func (s *Service) SGDeleteRule(ctx context.Context, projectID, groupID string, pos int) error {
+// SecurityGroupRuleID is the id a rule is listed and deleted by: "<group>-<pos>-<fingerprint of its content>". A
+// position alone names whatever rule sits there now (a new rule lands at 0 and shifts the rest), so an id read from
+// an older list stops matching once the rule moved or changed.
+func SecurityGroupRuleID(group string, r FirewallRule) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{r.Type, r.Action, r.Proto, r.Source, r.Dest, r.DPort, r.SPort, r.Comment}, "\x00")))
+	return group + "-" + strconv.Itoa(r.Pos) + "-" + hex.EncodeToString(sum[:4])
+}
+
+// sgRuleChanged is the refusal of a delete whose rule is not in the group as the caller listed it.
+func sgRuleChanged() error {
+	return &ConflictError{Msg: "The rules of this security group have changed. Refresh the list and try again"}
+}
+
+// SGDeleteRule removes the rule of an owned group that is listed under ruleID now; a ConflictError when none is.
+func (s *Service) SGDeleteRule(ctx context.Context, projectID, groupID, ruleID string) error {
 	g, err := s.ownedGroup(ctx, projectID, groupID)
 	if err != nil {
 		return err
@@ -122,7 +137,23 @@ func (s *Service) SGDeleteRule(ctx context.Context, projectID, groupID string, p
 	if g == nil {
 		return fmt.Errorf("pve: group %s not found", groupID)
 	}
-	return s.C.DeleteFirewallRule(ctx, groupID, pos)
+	rules, err := s.C.ListFirewallRules(ctx, groupID)
+	if err != nil {
+		return err
+	}
+	for _, r := range rules {
+		if SecurityGroupRuleID(groupID, r) != ruleID {
+			continue
+		}
+		// The digest closes the gap between this read and the delete. PVE's refusal text is from its source
+		// (assert_if_modified), not from a lab run.
+		err := s.C.DeleteFirewallRule(ctx, groupID, r.Pos, r.Digest)
+		if err != nil && strings.Contains(err.Error(), "detected modified configuration") {
+			return sgRuleChanged()
+		}
+		return err
+	}
+	return sgRuleChanged()
 }
 
 // AttachSecurityGroup references an owned group from a pool VM's firewall and
@@ -236,7 +267,7 @@ func nicBridge(val string) string {
 // vmFirewallOptions is what every platform VM runs with: anti-spoof (ipfilter +
 // macfilter); ingress closed except what a security group opens (default-deny
 // ingress); egress open (open egress) — so
-// group "out" rules stay informational; DHCP allowed so the SDN dnsmasq lease
+// group "out" rules restrict nothing; DHCP allowed so the SDN dnsmasq lease
 // survives the DROP policy. dhcp=1 alone is not enough: proxmox-firewall checks the
 // ipfilter set first, so SecureVM adds 0.0.0.0 to it for DISCOVER (lab-verified).
 var vmFirewallOptions = map[string]string{
@@ -545,12 +576,17 @@ func (p *SecurityGroupSyncProvider) List(ctx context.Context) ([]cloud.CloudReso
 		rules := []any{}
 		if rs, err := p.svc.C.ListFirewallRules(ctx, g.Group); err == nil {
 			for _, r := range rs {
+				// The remote of an inbound rule is where traffic comes from, of an outbound rule where it goes.
+				remote := r.Source
+				if r.Type == "out" {
+					remote = r.Dest
+				}
 				rules = append(rules, map[string]any{
-					"id":               g.Group + "-" + strconv.Itoa(r.Pos),
+					"id":               SecurityGroupRuleID(g.Group, r),
 					"direction":        map[string]string{"in": "ingress", "out": "egress"}[r.Type],
 					"protocol":         r.Proto,
 					"port_range":       r.DPort,
-					"remote_ip_prefix": r.Source,
+					"remote_ip_prefix": remote,
 					"description":      r.Comment,
 					"pos":              r.Pos,
 				})
