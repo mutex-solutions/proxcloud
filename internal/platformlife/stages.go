@@ -794,9 +794,6 @@ func asTransient(err error) error {
 func (x *acq) removeSeed(ctx context.Context) error {
 	st := x.in.Status.Seed
 	if x.capi == nil {
-		if st == nil && !x.in.Spec.Network.Routed() {
-			return errSkipped
-		}
 		if st != nil {
 			return permanent(CodeCredentialsMissing, "The token %s is not stored, so the seed VM %d cannot be deleted: paste it, then Remove again.", pve.CAPITokenID, st.VMID)
 		}
@@ -804,6 +801,9 @@ func (x *acq) removeSeed(ctx context.Context) error {
 		net, err := x.removeNetwork(ctx)
 		if err != nil {
 			return err
+		}
+		if net == nil {
+			return errSkipped
 		}
 		return x.note(ctx, *net)
 	}

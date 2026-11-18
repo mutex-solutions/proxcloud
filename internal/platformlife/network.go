@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 )
@@ -36,10 +37,28 @@ func (r *Runner) sdnLocked(ctx context.Context, fn func() error) (busy bool, err
 	return false, fn()
 }
 
+// ifaceTaken refuses a vnet name that an interface of a node already holds (vmbr1, bond0, eno1: the vnet id's pattern
+// admits them). An SDN apply would write a second stanza for that interface, which can detach a live bridge from its
+// uplink. Whether Proxmox itself refuses such a vnet id is not known (no lab test), so nothing here depends on it.
+func ifaceTaken(ctx context.Context, c *pve.Client, vnet string) (string, error) {
+	nodes, err := c.NodesWithIface(ctx, vnet)
+	if err != nil || len(nodes) == 0 {
+		return "", err
+	}
+	return fmt.Sprintf("The name %s is an interface of %s: a vnet of that name would take the interface over. Name a vnet no node has (pcplat0), or use mode bridge to install on %s.",
+		vnet, strings.Join(nodes, ", "), vnet), nil
+}
+
 // ensureNetwork is the first step of stage 3 for a routed network: the zone (limited to the one node), the vnet and
-// the subnet, applied. It writes nothing when all three exist and none of them is pending, and never touches a vnet
-// that is not this installation's. An SDN apply is cluster-wide: it also applies what anyone else has staged, as a
-// tenant network's apply does.
+// the subnet, applied. It writes nothing when all three exist and are applied, and never touches a vnet that is not
+// this installation's. An SDN apply is cluster-wide: it also applies what anyone else has staged, as a tenant
+// network's apply does.
+//
+// Applied means: the seed's node lists the vnet among its bridges, which is what the seed's NIC needs. The lists of
+// zones and vnets are no proof: Proxmox reports an object's pending state only when asked with pending=1 (not checked
+// on a lab), so a run that stopped between the create and the apply would look finished. When the node's bridges
+// cannot say (the read fails, or the token does not see the vnet there) SDN is applied once more, which changes
+// nothing that is applied already.
 func (x *acq) ensureNetwork(ctx context.Context) error {
 	n := x.in.Spec.Network
 	if !n.Routed() {
@@ -55,6 +74,21 @@ func (x *acq) ensureNetwork(ctx context.Context) error {
 		return permanent(CodePlatformNetwork, "Proxmox already has a vnet %s (zone %s, alias %q) that this installation did not make: name another vnet in the settings, or use mode bridge to install on it.",
 			n.Bridge, vnets[vi].Zone, vnets[vi].Alias)
 	}
+	// A vnet this installation made under another name (the settings were renamed after a failed install) holds the
+	// subnet: a second vnet could not have it.
+	if oi := slices.IndexFunc(vnets, func(v pve.SDNVnet) bool { return v.Alias == networkAlias(x.in.ID) && v.Vnet != n.Bridge }); oi >= 0 {
+		return permanent(CodePlatformNetwork, "This installation already made the vnet %s, and the settings now name %s: name %s again, or Remove the installation, which deletes that vnet.",
+			vnets[oi].Vnet, n.Bridge, vnets[oi].Vnet)
+	}
+	if vi < 0 {
+		taken, err := ifaceTaken(ctx, c, n.Bridge)
+		if err != nil {
+			return classify(CodePlatformNetwork, err)
+		}
+		if taken != "" {
+			return permanent(CodePlatformNetwork, "%s", taken)
+		}
+	}
 	zones, err := c.ListSDNZones(ctx)
 	if err != nil {
 		return classify(CodePlatformNetwork, err)
@@ -63,10 +97,7 @@ func (x *acq) ensureNetwork(ctx context.Context) error {
 	if zi >= 0 && zones[zi].Type != "simple" {
 		return permanent(CodePlatformNetwork, "The SDN zone %s exists and is a %s zone: a routed platform network needs it as a simple zone. Remove or rename that zone.", RoutedZone, zones[zi].Type)
 	}
-	// Pending: one of the installation's own objects is staged and not applied (a run that stopped before its apply).
-	// What someone else staged is not a reason to apply.
-	pending := zi >= 0 && zones[zi].State != "" || vi >= 0 && vnets[vi].State != ""
-	var subnet bool
+	var subnet, applied bool
 	if vi >= 0 {
 		subs, err := c.ListSDNSubnets(ctx, n.Bridge)
 		if err != nil {
@@ -74,12 +105,15 @@ func (x *acq) ensureNetwork(ctx context.Context) error {
 		}
 		si := slices.IndexFunc(subs, func(s pve.SDNSubnet) bool { return s.CIDR == n.Prefix && s.Gateway == n.Gateway })
 		subnet = si >= 0
-		pending = pending || subnet && subs[si].State != ""
 		if !subnet && len(subs) > 0 {
 			return permanent(CodePlatformNetwork, "The vnet %s has a subnet that is not %s with gateway %s: delete it in Proxmox (Datacenter, SDN), then Retry.", n.Bridge, n.Prefix, n.Gateway)
 		}
 	}
-	if zi >= 0 && vi >= 0 && subnet && !pending {
+	if zi >= 0 && vi >= 0 && subnet {
+		bridges, _ := c.NodeBridges(ctx)
+		applied = slices.ContainsFunc(bridges, func(b pve.NodeBridge) bool { return b.Node == x.in.Spec.Seed.Node && b.Iface == n.Bridge })
+	}
+	if applied {
 		return nil
 	}
 	if err := x.check(ctx); err != nil {
@@ -112,43 +146,56 @@ func (x *acq) ensureNetwork(ctx context.Context) error {
 	return nil
 }
 
-// removeNetwork deletes the vnet and subnet of a routed platform network, and the zone when no vnet is left in it. It
-// answers the item a Remove shows. A vnet that is not this installation's stays.
+// removeNetwork deletes every vnet that carries this installation's alias, with its subnets, and the zone pcplat when
+// no other vnet is left in it. It looks for the alias whatever the settings say now: a draft whose install failed
+// after stage 3 may have been renamed or switched to mode bridge since, and its vnet must not stay. It answers the
+// item a Remove shows; nil when the network is not routed and nothing of this installation's is found.
 func (x *acq) removeNetwork(ctx context.Context) (*StageItem, error) {
 	n := x.in.Spec.Network
-	if !n.Routed() {
-		return nil, nil
-	}
 	item := func(state, msg string) *StageItem { return &StageItem{ID: "network", State: state, Message: msg} }
 	c := x.portal
 	vnets, err := c.ListSDNVnets(ctx)
 	if err != nil {
+		if !n.Routed() {
+			return nil, nil // a bridge network made no vnet; a site without SDN rights for this read removes as before
+		}
 		return nil, classify(CodePlatformNetwork, err)
 	}
-	vi := slices.IndexFunc(vnets, func(v pve.SDNVnet) bool { return v.Vnet == n.Bridge })
-	if vi < 0 {
+	var mine []string
+	for _, v := range vnets {
+		if v.Alias == networkAlias(x.in.ID) {
+			mine = append(mine, v.Vnet)
+		}
+	}
+	if len(mine) == 0 {
+		if !n.Routed() {
+			return nil, nil
+		}
+		if vi := slices.IndexFunc(vnets, func(v pve.SDNVnet) bool { return v.Vnet == n.Bridge }); vi >= 0 {
+			return item("left", fmt.Sprintf("The vnet %s is not this installation's (alias %q): not deleted.", n.Bridge, vnets[vi].Alias)), nil
+		}
 		return item("gone", fmt.Sprintf("Proxmox has no vnet %s.", n.Bridge)), nil
 	}
-	if vnets[vi].Alias != networkAlias(x.in.ID) {
-		return item("left", fmt.Sprintf("The vnet %s is not this installation's (alias %q): not deleted.", n.Bridge, vnets[vi].Alias)), nil
-	}
-	zone := vnets[vi].Zone
-	last := !slices.ContainsFunc(vnets, func(v pve.SDNVnet) bool { return v.Zone == zone && v.Vnet != n.Bridge })
+	// The zone goes when it is the one ProxCloud made and no vnet but this installation's is in it.
+	dropZone := !slices.ContainsFunc(vnets, func(v pve.SDNVnet) bool { return v.Zone == RoutedZone && !slices.Contains(mine, v.Vnet) }) &&
+		slices.ContainsFunc(vnets, func(v pve.SDNVnet) bool { return v.Zone == RoutedZone && slices.Contains(mine, v.Vnet) })
 	busy, err := x.r.sdnLocked(ctx, func() error {
-		subs, err := c.ListSDNSubnets(ctx, n.Bridge)
-		if err != nil {
-			return err
-		}
-		for _, s := range subs {
-			if err := c.DeleteSDNSubnet(ctx, n.Bridge, s.Subnet); err != nil {
+		for _, vnet := range mine {
+			subs, err := c.ListSDNSubnets(ctx, vnet)
+			if err != nil {
+				return err
+			}
+			for _, s := range subs {
+				if err := c.DeleteSDNSubnet(ctx, vnet, s.Subnet); err != nil {
+					return err
+				}
+			}
+			if err := c.DeleteSDNVnet(ctx, vnet); err != nil {
 				return err
 			}
 		}
-		if err := c.DeleteSDNVnet(ctx, n.Bridge); err != nil {
-			return err
-		}
-		if last && zone == RoutedZone {
-			if err := c.DeleteSDNZone(ctx, zone); err != nil {
+		if dropZone {
+			if err := c.DeleteSDNZone(ctx, RoutedZone); err != nil {
 				return err
 			}
 		}
@@ -160,5 +207,5 @@ func (x *acq) removeNetwork(ctx context.Context) (*StageItem, error) {
 	if err != nil {
 		return nil, classify(CodePlatformNetwork, err)
 	}
-	return item("gone", fmt.Sprintf("The vnet %s and its subnet %s were deleted, and SDN was applied.", n.Bridge, n.Prefix)), nil
+	return item("gone", fmt.Sprintf("The vnet %s and its subnets were deleted, and SDN was applied.", strings.Join(mine, ", "))), nil
 }

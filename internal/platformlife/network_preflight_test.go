@@ -91,6 +91,11 @@ func TestPreflightNetworkModes(t *testing.T) {
 	want("routed", rows["network"], CheckOK, `needs the route "10.200.200.0/24 via the address of pve1"`)
 	want("routed", rows["privileges:capi"], CheckOK)
 	want("routed", rows["tenant-path"], CheckOK, "is of mode routed", "the node pve1 holds", "Test the tenant path")
+	// A name an interface of a node holds is not free, whatever the vnet list says.
+	rows = run(func(in *Installation) { routed(in); in.Spec.Network.Bridge = "vmbr1" }, &preflightPVE{})
+	want("routed, an interface's name", rows["bridge"], CheckFail, "The name vmbr1 is an interface of pve1")
+	rows = run(routed, &preflightPVE{extra: map[string]string{"/nodes/pve1/network": `[{"iface":"vmbr0","address":"192.0.2.11","gateway":"192.0.2.1","cidr":"192.0.2.11/24"},{"iface":"bond0","address":"10.200.200.7"}]`}})
+	want("routed, a range a node is in", rows["network"], CheckFail, "overlaps the node address 10.200.200.7")
 	rows = run(routed, &preflightPVE{})
 	want("routed without the right on the vnet", rows["privileges:capi"], CheckFail, "SDN.Use on /sdn/zones/pcplat/pcplat0")
 	// The vnet once made, and a vnet of that name that is someone else's.

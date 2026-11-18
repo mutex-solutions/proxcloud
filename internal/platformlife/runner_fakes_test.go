@@ -235,7 +235,9 @@ type fakePVE struct {
 	templates []pve.ClusterResource  // /cluster/resources?type=vm
 	tmplCfg   map[int]map[string]any // the config of node templates, on any node (none: Proxmox knows no such VM)
 	tmplDeny  map[int]bool           // node templates whose config the token may not read
-	// SDN: zones, vnets and each vnet's subnets. A created object is "new" until PUT /cluster/sdn applies it.
+	// SDN: zones, vnets and each vnet's subnets. A created object is "new" until PUT /cluster/sdn applies it; as
+	// Proxmox is understood to do, a list names that state only when asked with pending=1, and the node lists a vnet
+	// among its bridges only once it is applied.
 	zones   []pve.SDNZone
 	vnets   []pve.SDNVnet
 	subnets map[string][]pve.SDNSubnet
@@ -243,10 +245,27 @@ type fakePVE struct {
 	keepVM  bool      // a VM delete is refused
 }
 
-// sdn answers the /cluster/sdn routes; false when path is not one.
+// sdn answers the /cluster/sdn routes and the node's network lists; false when path is not one.
 func (f *fakePVE) sdn(r *http.Request, path string, data func(any)) bool {
 	p := strings.Split(strings.TrimPrefix(path, "/cluster/sdn"), "/")[1:]
+	pending := r.Form.Get("pending") == "1"
 	switch {
+	case path == "/cluster/status":
+		data([]map[string]any{{"type": "node", "name": "pve1", "ip": "192.0.2.11"}})
+		return true
+	case path == "/nodes/pve1/network":
+		ifaces := []map[string]any{{"iface": "vmbr0", "type": "bridge", "address": "192.0.2.11", "gateway": "192.0.2.1", "cidr": "192.0.2.11/24"}, {"iface": "vmbr1", "type": "bridge"}}
+		if r.Form.Get("type") == "any_bridge" {
+			for _, v := range f.vnets {
+				if v.State == "" {
+					ifaces = append(ifaces, map[string]any{"iface": v.Vnet, "type": "vnet"})
+				}
+			}
+		} else {
+			ifaces = append(ifaces, map[string]any{"iface": "eno1", "type": "eth"})
+		}
+		data(ifaces)
+		return true
 	case !strings.HasPrefix(path, "/cluster/sdn"):
 		return false
 	case len(p) == 0 && r.Method == http.MethodPut:
@@ -258,7 +277,13 @@ func (f *fakePVE) sdn(r *http.Request, path string, data func(any)) bool {
 		}
 		data(f.upid("srvreload", 0))
 	case len(p) == 1 && p[0] == "zones" && r.Method == http.MethodGet:
-		data(append([]pve.SDNZone{}, f.zones...))
+		zones := append([]pve.SDNZone{}, f.zones...)
+		for i := range zones {
+			if !pending {
+				zones[i].State = ""
+			}
+		}
+		data(zones)
 	case len(p) == 1 && p[0] == "zones":
 		f.zones = append(f.zones, pve.SDNZone{Zone: r.Form.Get("zone"), Type: r.Form.Get("type"), Nodes: r.Form.Get("nodes"), State: "new"})
 		data(nil)
@@ -266,7 +291,13 @@ func (f *fakePVE) sdn(r *http.Request, path string, data func(any)) bool {
 		f.zones = slices.DeleteFunc(f.zones, func(z pve.SDNZone) bool { return z.Zone == p[1] })
 		data(nil)
 	case len(p) == 1 && p[0] == "vnets" && r.Method == http.MethodGet:
-		data(append([]pve.SDNVnet{}, f.vnets...))
+		vnets := append([]pve.SDNVnet{}, f.vnets...)
+		for i := range vnets {
+			if !pending {
+				vnets[i].State = ""
+			}
+		}
+		data(vnets)
 	case len(p) == 1 && p[0] == "vnets":
 		f.vnets = append(f.vnets, pve.SDNVnet{Vnet: r.Form.Get("vnet"), Zone: r.Form.Get("zone"), Alias: r.Form.Get("alias"), State: "new"})
 		data(nil)

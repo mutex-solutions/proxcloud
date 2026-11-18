@@ -514,6 +514,8 @@ type Site struct {
 	Sandbox  []string
 	Public   []string // the public networks' CIDRs
 	Mgmt     []string // the nodes' management networks (live; nil when not read)
+	// NodeAddrs: every address the nodes hold, as /32 (live; read for a routed network only).
+	NodeAddrs []string
 	// DefaultZone is the zone a tenant network is made in (config.network.defaultZone) and DefaultZoneKind its kind
 	// (evpn, vlan or simple); both empty when the provider names no zone. DefaultZoneNoDHCP: the zone's config says
 	// dhcp: false (pve.ZoneConfig.NoDHCP).
@@ -548,6 +550,21 @@ func (in *Installation) SiteProblems(site Site) []string {
 					out = append(out, fmt.Sprintf("spec.seed.apiSources %s overlaps %s %s: tenants must not reach the seed", s, what, p))
 				}
 			}
+		}
+	}
+	if in.Spec.Network.Routed() {
+		// The node routes this network and holds its gateway: inside a network the node is already in, the node's own
+		// traffic to that network would go to the vnet. The gateway itself is the node's once the vnet is made.
+		for _, c := range append(slices.Clone(site.Mgmt), site.NodeAddrs...) {
+			p, err := netip.ParsePrefix(strings.TrimSpace(c))
+			if err != nil || !p.Overlaps(prefix) || p.IsSingleIP() && p.Addr().String() == in.Spec.Network.Gateway {
+				continue
+			}
+			what := "the node network " + p.Masked().String()
+			if p.IsSingleIP() {
+				what = "the node address " + p.Addr().String()
+			}
+			out = append(out, fmt.Sprintf("the routed platform network %s overlaps %s: a routed network must be a range no Proxmox node is in", prefix, what))
 		}
 	}
 	fenced := append(slices.Clone(site.Blocked), site.Mgmt...)

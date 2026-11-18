@@ -198,7 +198,13 @@ func TestTenantProbeRefusals(t *testing.T) {
 	e := newProbeEnv(t)
 	e.saved = &TenantProbe{ID: inID, State: ProbeRunning, StartedAt: time.Now().Add(-time.Hour)}
 	e.pve.vms[115] = &fakeVM{cfg: map[string]any{"name": ProbeVMName(inID)}}
-	e.pve.templates = append(e.pve.templates, pve.ClusterResource{Type: "qemu", Node: "pve1", VMID: 115, Name: ProbeVMName(inID), Pool: pve.TemplatePool})
+	e.pve.templates = append(e.pve.templates, pve.ClusterResource{Type: "qemu", Node: "pve1", VMID: 115, Name: ProbeVMName(inID), Pool: pve.TemplatePool, Tags: "proxcloud;pc-probe"})
+	var order []string
+	e.pve.onWrite = func(w string) {
+		if w == "DELETE /nodes/pve1/qemu/115" || strings.HasSuffix(w, "/clone") {
+			order = append(order, w)
+		}
+	}
 	e.pve.vnets = []pve.SDNVnet{{Vnet: "vold1", Zone: "pcm0", Alias: "st:pc-probe-" + inID + ":tenant-path-probe"}, {Vnet: "vten1", Zone: "pcm0", Alias: "st:p1:net"}}
 	p, err := e.run("pve1")
 	if err != nil || p.State != ProbePassed {
@@ -206,6 +212,124 @@ func TestTenantProbeRefusals(t *testing.T) {
 	}
 	if e.pve.vms[115] != nil || len(e.pve.vnets) != 1 || e.pve.vnets[0].Vnet != "vten1" {
 		t.Errorf("the dead probe's VM or network is left, or a tenant's network went: %v %+v", e.pve.vms, e.pve.vnets)
+	}
+	// Before this test makes anything, not only when it ends.
+	if !slices.Equal(order, []string{"DELETE /nodes/pve1/qemu/115", "POST /nodes/pve1/qemu/9200/clone"}) {
+		t.Errorf("the leftover goes before the clone: %v", order)
+	}
+}
+
+// The cleanup destroys only what is the probe's: a VM with the probe's name in pool pc-templates that is no template
+// and carries the tag pc-probe. A template, a VM of another pool and an untagged VM of that name stay; the untagged
+// one is named, because it may be a clone whose run died before it was tagged.
+func TestTenantProbeCleanupGuards(t *testing.T) {
+	e := newProbeEnv(t)
+	name := ProbeVMName(inID)
+	for id, r := range map[int]pve.ClusterResource{
+		201: {Template: 1, Pool: pve.TemplatePool, Tags: "proxcloud;pc-probe"},
+		202: {Pool: "tp-someone", Tags: "proxcloud;pc-probe"},
+		203: {Pool: pve.TemplatePool, Tags: "proxcloud"},
+		204: {Pool: pve.TemplatePool, Tags: "proxcloud;pc-probe"},
+	} {
+		r.Type, r.Node, r.VMID, r.Name = "qemu", "pve1", id, name
+		e.pve.vms[id] = &fakeVM{cfg: map[string]any{"name": "kept"}} // the row below is what the cleanup reads
+		e.pve.templates = append(e.pve.templates, r)
+	}
+	left := e.x.cleanup(context.Background(), inID, 0)
+	if len(left) != 1 || !strings.Contains(left[0], "VM 203") || !strings.Contains(left[0], "not the tag pc-probe") {
+		t.Errorf("left %v", left)
+	}
+	if e.pve.vms[201] == nil || e.pve.vms[202] == nil || e.pve.vms[203] == nil || e.pve.vms[204] != nil {
+		t.Errorf("only VM 204 is the probe's: %v, writes %v", e.pve.vms, e.pve.writes)
+	}
+	// The VM this run cloned is its own before the first config write tags it.
+	if left := e.x.cleanup(context.Background(), inID, 203); len(left) != 0 || e.pve.vms[203] != nil {
+		t.Errorf("own clone: left %v, VMs %v", left, e.pve.vms)
+	}
+}
+
+// The test has a limit: a guest agent that never answers ends it as an error, and the VM and network still go.
+func TestTenantProbeDeadline(t *testing.T) {
+	e := newProbeEnv(t)
+	e.pve.agent, e.x.Deadline = false, 50*time.Millisecond
+	p, err := e.run("pve1")
+	if err != nil || p.State != ProbeError || !strings.Contains(p.Message, "did not finish in 50ms") || !strings.Contains(p.Message, "guest agent") {
+		t.Fatalf("probe %+v %v", p, err)
+	}
+	e.nothingLeft("deadline")
+}
+
+// A panic inside the test does not leave the goroutine (it would end the API process): it is the probe's error, and
+// the cleanup still runs.
+func TestTenantProbeSurvivesAPanic(t *testing.T) {
+	e := newProbeEnv(t)
+	save := e.x.Save
+	e.x.Save = func(ctx context.Context, p *TenantProbe) error {
+		if p.Step == "waiting for the test VM's guest agent and address" {
+			panic("boom")
+		}
+		return save(ctx, p)
+	}
+	p, err := e.run("pve1")
+	if err != nil || p.State != ProbeError || !strings.Contains(p.Message, "internal error: boom") {
+		t.Fatalf("probe %+v %v", p, err)
+	}
+	e.nothingLeft("panic")
+}
+
+// A probe recorded as running for longer than a probe can run was cut off by an API restart: readers get an error
+// that names what may be left, and the stored document is not touched.
+func TestTenantProbeCutOffView(t *testing.T) {
+	now := time.Now()
+	live := &TenantProbe{ID: inID, State: ProbeRunning, StartedAt: now.Add(-probeDeadline), Step: "cloning the test VM"}
+	if live.View(now) != live {
+		t.Error("a probe inside its time is shown as it is")
+	}
+	dead := &TenantProbe{ID: inID, State: ProbeRunning, StartedAt: now.Add(-probeDeadline - probeCleanup), Step: "cloning the test VM"}
+	v := dead.View(now)
+	if v.State != ProbeError || v.Step != "" || !strings.Contains(v.Message, "restarted while it ran") || len(v.Left) != 1 ||
+		!strings.Contains(v.Left[0], ProbeVMName(inID)) || !strings.Contains(v.Left[0], "st:pc-probe-"+inID+":tenant-path-probe") {
+		t.Errorf("view %+v", v)
+	}
+	if dead.State != ProbeRunning {
+		t.Error("the stored probe was changed")
+	}
+	done := &TenantProbe{ID: inID, State: ProbePassed, StartedAt: now.Add(-time.Hour)}
+	if done.View(now) != done {
+		t.Error("a finished probe is shown as it is")
+	}
+}
+
+// A tenant cluster's API is the target when one answers: a managed database may drop the test network by its
+// allow-list. When only a database answers and the VM cannot open it, the verdict says what else that can mean.
+func TestTenantProbePrefersClusterAPIs(t *testing.T) {
+	e := newProbeEnv(t)
+	e.listen = append(e.listen, "10.200.200.201:5432")
+	p, err := e.run("pve1")
+	if err != nil || p.State != ProbePassed || len(p.Targets) != 2 || p.Targets[0].Port != 6443 || p.Targets[1].Expect != "closed" {
+		t.Fatalf("with both: %+v %v", p, err)
+	}
+	e = newProbeEnv(t)
+	e.listen, e.guest = []string{"10.200.200.201:5432"}, map[string]string{"10.200.200.201:5432": "none", "10.200.200.20:6443": "none"}
+	p, err = e.run("pve1")
+	if err != nil || p.State != ProbeFailed || !strings.Contains(p.Message, "allowedCidrs") || !strings.Contains(p.Message, "does not prove the path closed") {
+		t.Fatalf("a database only: %+v %v", p, err)
+	}
+	// A cluster API that does not open is the closed path, without that caveat.
+	e = newProbeEnv(t)
+	e.guest["10.200.200.200:6443"] = "none"
+	if p, _ = e.run("pve1"); strings.Contains(p.Message, "allowedCidrs") {
+		t.Errorf("a closed cluster API: %s", p.Message)
+	}
+}
+
+// What Proxmox or the guest says goes into the stored probe clipped, as a stage's error does.
+func TestTenantProbeClipsErrors(t *testing.T) {
+	e := newProbeEnv(t)
+	e.pve.failOnce["POST /nodes/pve1/qemu/9200/clone"] = `{"errors":{"storage":"` + strings.Repeat("x", 5000) + `"}}`
+	p, err := e.run("pve1")
+	if err != nil || p.State != ProbeError || len(p.Message) > 700 {
+		t.Fatalf("message of %d bytes: %v", len(p.Message), err)
 	}
 }
 
@@ -280,7 +404,8 @@ func (f *fakePVE) probeRoutes(w http.ResponseWriter, r *http.Request, path strin
 		rows := slices.Clone(f.templates)
 		for id, vm := range f.vms {
 			if name, _ := vm.cfg["name"].(string); name == ProbeVMName(inID) && !slices.ContainsFunc(rows, func(r pve.ClusterResource) bool { return r.VMID == id }) {
-				rows = append(rows, pve.ClusterResource{Type: "qemu", Node: "pve1", VMID: id, Name: name, Pool: pve.TemplatePool})
+				tags, _ := vm.cfg["tags"].(string)
+				rows = append(rows, pve.ClusterResource{Type: "qemu", Node: "pve1", VMID: id, Name: name, Pool: pve.TemplatePool, Tags: tags})
 			}
 		}
 		rows = slices.DeleteFunc(rows, func(r pve.ClusterResource) bool { return r.Template != 1 && f.vms[r.VMID] == nil })

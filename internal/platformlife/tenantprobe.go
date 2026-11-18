@@ -43,6 +43,7 @@ const (
 	probeHosts    = 32              // addresses of the load balancer range the ProxCloud host looks at
 	probeNetName  = "tenant-path-probe"
 	probeMaxOpen  = 8 // listeners the VM connects to
+	probeTag      = "pc-probe"
 )
 
 // probePorts are what tenants reach in the load balancer range: a tenant cluster's API and a managed database.
@@ -66,6 +67,26 @@ type TenantProbe struct {
 	Message     string        `json:"message"`
 	// Left is what the cleanup could not remove, with what to do by hand. Empty when nothing is left.
 	Left []string `json:"left,omitempty"`
+}
+
+// CutOff reports a probe recorded as running for longer than a probe can run: its process died (an API restart), and
+// nothing will ever finish it.
+func (p *TenantProbe) CutOff(now time.Time) bool {
+	return p.State == ProbeRunning && now.Sub(p.StartedAt) >= probeDeadline+probeCleanup
+}
+
+// View is the probe as a reader must see it: a probe that was cut off is an error that names what it may have left,
+// not a test that runs for ever. The stored document is not changed; the next test replaces it.
+func (p *TenantProbe) View(now time.Time) *TenantProbe {
+	if !p.CutOff(now) {
+		return p
+	}
+	v := *p
+	v.State, v.Step = ProbeError, ""
+	v.Message = fmt.Sprintf("The test started at %s did not end: the API was restarted while it ran, so nothing is known about the path. Test again: the next test first removes what this one left.", p.StartedAt.Format(time.RFC3339))
+	v.Left = []string{fmt.Sprintf("Possibly a VM named %s with the tag %s in pool %s, and an SDN vnet with the alias %s. The next test removes both; to remove them by hand, destroy the VM, delete the vnet under Datacenter, SDN, VNets and apply.",
+		ProbeVMName(p.ID), probeTag, pve.TemplatePool, pve.OwnershipAlias(probeProject(p.ID), probeNetName))}
+	return &v
 }
 
 // ProbeTarget is one address the VM connects to. Expect open: the ProxCloud host opened it, so a tenant must too.
@@ -105,6 +126,8 @@ type TenantProber struct {
 	// Dial opens one TCP connection from the ProxCloud host; a net.Dialer with a 2 second timeout when nil.
 	Dial func(ctx context.Context, address string) error
 	Poll time.Duration // between two looks at the guest agent; 3 seconds when zero
+	// Deadline is the test's limit, from the first write to the verdict; probeDeadline when zero (tests shorten it).
+	Deadline time.Duration
 }
 
 func (x *TenantProber) defaults() {
@@ -119,6 +142,9 @@ func (x *TenantProber) defaults() {
 	}
 	if x.Poll <= 0 {
 		x.Poll = 3 * time.Second
+	}
+	if x.Deadline <= 0 {
+		x.Deadline = probeDeadline
 	}
 }
 
@@ -181,7 +207,7 @@ func (x *TenantProber) Start(ctx context.Context, in *Installation, node, actor 
 	}
 	if last, err := x.Load(ctx, in.ID); err != nil {
 		return nil, err
-	} else if last != nil && last.State == ProbeRunning && time.Since(last.StartedAt) < probeDeadline+probeCleanup {
+	} else if last != nil && last.State == ProbeRunning && !last.CutOff(time.Now()) {
 		return nil, refuse("probe_running", "A test of the tenant path started at %s is still running on %s.", last.StartedAt.Format(time.RFC3339), last.Node)
 	}
 	rows, err := x.Portal.C.ClusterResources(ctx, "vm")
@@ -240,6 +266,12 @@ func (x *TenantProber) listeners(ctx context.Context, in *Installation) []ProbeT
 	slices.SortFunc(out, func(a, b ProbeTarget) int {
 		return strings.Compare(a.Address+strconv.Itoa(a.Port), b.Address+strconv.Itoa(b.Port))
 	})
+	// A tenant cluster's API has no allow-list in front of it; a managed database may have one (allowedCidrs) that admits
+	// the ProxCloud host and not the test network, and would then read as a closed path. So databases are targets only
+	// when no cluster API answers.
+	if slices.ContainsFunc(out, func(t ProbeTarget) bool { return t.Port == 6443 }) {
+		out = slices.DeleteFunc(out, func(t ProbeTarget) bool { return t.Port != 6443 })
+	}
 	if len(out) > probeMaxOpen {
 		out = out[:probeMaxOpen]
 	}
@@ -253,18 +285,18 @@ func (x *TenantProber) listeners(ctx context.Context, in *Installation) []ProbeT
 // that outlives the request.
 func (x *TenantProber) Run(ctx context.Context, p *TenantProbe) {
 	x.defaults()
-	work, cancel := context.WithTimeout(ctx, probeDeadline)
-	err := x.test(work, p)
+	work, cancel := context.WithTimeout(ctx, x.Deadline)
+	err := x.guarded(work, p)
 	cancel()
 	clean, cancel := context.WithTimeout(context.WithoutCancel(ctx), probeCleanup)
 	defer cancel()
-	p.Left = x.cleanup(clean, p.ID)
+	p.Left = x.cleanup(clean, p.ID, p.VMID)
 	now, step := time.Now().UTC(), p.Step
 	p.FinishedAt, p.Step = &now, ""
 	if err != nil {
-		p.State, p.Message = ProbeError, "The test could not be done, so nothing is known about the path: "+err.Error()
+		p.State, p.Message = ProbeError, "The test could not be done, so nothing is known about the path: "+clip(err.Error())
 		if errors.Is(err, context.DeadlineExceeded) {
-			p.Message = fmt.Sprintf("The test did not finish in %s (last step: %s), so nothing is known about the path: %s", probeDeadline, step, err.Error())
+			p.Message = fmt.Sprintf("The test did not finish in %s (last step: %s), so nothing is known about the path: %s", x.Deadline, step, clip(err.Error()))
 		}
 	} else {
 		p.State, p.Message = verdict(p)
@@ -275,15 +307,28 @@ func (x *TenantProber) Run(ctx context.Context, p *TenantProbe) {
 	_ = x.Save(clean, p)
 }
 
+// guarded runs test and turns a panic into its error: Run is called on a goroutine of the API process, where a panic
+// would end the process, and the cleanup must still run.
+func (x *TenantProber) guarded(ctx context.Context, p *TenantProbe) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("the test stopped on an internal error: %v", r)
+		}
+	}()
+	return x.test(ctx, p)
+}
+
 // verdict reads the targets: every listener must open (or refuse) from the tenant network, and the platform's API
 // address must not answer.
 func verdict(p *TenantProbe) (state, msg string) {
 	var closed, leaked, opened []string
+	var closedAPI bool // a tenant cluster's API (6443) did not open: no allow-list is in front of it
 	for _, t := range p.Targets {
 		at := net.JoinHostPort(t.Address, strconv.Itoa(t.Port))
 		switch {
 		case t.Expect == "open" && t.Result == "none":
 			closed = append(closed, at)
+			closedAPI = closedAPI || t.Port != 5432
 		case t.Expect == "open":
 			opened = append(opened, at)
 		case t.Result != "none":
@@ -296,6 +341,11 @@ func verdict(p *TenantProbe) (state, msg string) {
 		msg = fmt.Sprintf("The path is closed: from %s no connection opened to %s, which the ProxCloud host opens.", from, strings.Join(closed, ", "))
 		if len(opened) > 0 {
 			msg += " It did open " + strings.Join(opened, ", ") + ": the result depends on which node holds each address."
+		}
+		if !closedAPI {
+			// Only databases did not answer, and a database drops what its allow-list does not admit.
+			return ProbeFailed, msg + " Only port 5432 was tried and did not answer. A managed database with allowedCidrs that admit the ProxCloud host but not " + p.Source +
+				" drops the connection in the same way, so this result alone does not prove the path closed: check the database's allowedCidrs, or test again when a tenant cluster exists (port 6443 has no allow-list). If the path is closed, tenant Kubernetes workers on this node never join and tenants cannot reach managed databases: " + tenantPathGuide + "."
 		}
 		return ProbeFailed, msg + " Tenant Kubernetes workers on this node never join and tenants cannot reach managed databases: " + tenantPathGuide + "."
 	case len(leaked) > 0:
@@ -335,7 +385,7 @@ func (x *TenantProber) test(ctx context.Context, p *TenantProbe) error {
 	if err := x.step(ctx, p, "removing what an earlier test left"); err != nil {
 		return err
 	}
-	if left := x.cleanup(ctx, p.ID); len(left) > 0 {
+	if left := x.cleanup(ctx, p.ID, 0); len(left) > 0 {
 		return fmt.Errorf("an earlier test left something that could not be removed: %s", strings.Join(left, "; "))
 	}
 	if err := x.step(ctx, p, "making the test network"); err != nil {
@@ -410,7 +460,7 @@ func (x *TenantProber) test(ctx context.Context, p *TenantProbe) error {
 		return err
 	}
 	params := map[string]string{
-		"tags": pve.TagManaged + ";pc-probe", "description": "ProxCloud test of the tenant path. Removed when the test ends.",
+		"tags": pve.TagManaged + ";" + probeTag, "description": "ProxCloud test of the tenant path. Removed when the test ends.",
 		"agent": "1", "onboot": "0", "ciupgrade": "0", "net0": "virtio,bridge=" + netw.Vnet, "ipconfig0": ipconfig,
 	}
 	if !hasCloudInit(cfg) {
@@ -461,7 +511,7 @@ func (x *TenantProber) test(ctx context.Context, p *TenantProbe) error {
 	for i, t := range p.Targets {
 		res := results[net.JoinHostPort(t.Address, strconv.Itoa(t.Port))]
 		if res != "open" && res != "refused" && res != "none" {
-			return fmt.Errorf("the connect test in VM %d gave no result for %s:%d (%s)", vmid, t.Address, t.Port, strings.TrimSpace(stderr))
+			return fmt.Errorf("the connect test in VM %d gave no result for %s:%d (%s)", vmid, t.Address, t.Port, clip(strings.TrimSpace(stderr)))
 		}
 		p.Targets[i].Result = res
 	}
@@ -524,14 +574,24 @@ func probeCIDR(pool string, used []string) (string, error) {
 
 // cleanup removes the installation's probe VM and probe network, whoever made them (this probe or one that crashed),
 // and answers what it could not remove. The next probe runs it first, so nothing a crash left stays for long.
-func (x *TenantProber) cleanup(ctx context.Context, id string) (left []string) {
+//
+// A VM is the probe's when it has the probe's name, is in pool pc-templates, is no template and carries the tag
+// pc-probe, or is the VM this run cloned (own: a clone has its template's tags until the first config write). A VM
+// with the name and without the tag is not destroyed and is reported: it is a clone whose run died before it was
+// tagged, or someone else's.
+func (x *TenantProber) cleanup(ctx context.Context, id string, own int) (left []string) {
 	c := x.Portal.C
 	rows, err := c.ClusterResources(ctx, "vm")
 	if err != nil {
-		left = append(left, "The VMs could not be listed ("+err.Error()+"): look for a VM named "+ProbeVMName(id)+" in pool "+pve.TemplatePool+" and destroy it.")
+		left = append(left, "The VMs could not be listed ("+clip(err.Error())+"): look for a VM named "+ProbeVMName(id)+" in pool "+pve.TemplatePool+" and destroy it.")
 	}
 	for _, r := range rows {
 		if r.Name != ProbeVMName(id) || r.Pool != pve.TemplatePool || r.Template == 1 {
+			continue
+		}
+		if r.VMID != own && !pve.HasTag(r.Tags, probeTag) {
+			left = append(left, fmt.Sprintf("VM %d (%s) on %s has the test VM's name but not the tag %s, so it was not destroyed. If it is a leftover of a test: as root on %s: qm stop %d; qm destroy %d --purge",
+				r.VMID, r.Name, r.Node, probeTag, r.Node, r.VMID, r.VMID))
 			continue
 		}
 		if up, err := c.StopVM(ctx, r.Node, r.VMID); err == nil {
@@ -542,12 +602,12 @@ func (x *TenantProber) cleanup(ctx context.Context, id string) (left []string) {
 			err = c.WaitTask(ctx, up)
 		}
 		if err != nil {
-			left = append(left, fmt.Sprintf("VM %d (%s) on %s: %v. As root on %s: qm stop %d; qm destroy %d --purge", r.VMID, r.Name, r.Node, err, r.Node, r.VMID, r.VMID))
+			left = append(left, fmt.Sprintf("VM %d (%s) on %s: %v. As root on %s: qm stop %d; qm destroy %d --purge", r.VMID, r.Name, r.Node, clip(err.Error()), r.Node, r.VMID, r.VMID))
 		}
 	}
 	vnets, err := c.ListSDNVnets(ctx)
 	if err != nil {
-		return append(left, "The SDN vnets could not be listed ("+err.Error()+"): look for a vnet with the alias "+pve.OwnershipAlias(probeProject(id), probeNetName)+" and delete it.")
+		return append(left, "The SDN vnets could not be listed ("+clip(err.Error())+"): look for a vnet with the alias "+pve.OwnershipAlias(probeProject(id), probeNetName)+" and delete it.")
 	}
 	mine := slices.DeleteFunc(vnets, func(v pve.SDNVnet) bool { return v.Alias != pve.OwnershipAlias(probeProject(id), probeNetName) })
 	if len(mine) == 0 {
@@ -566,7 +626,7 @@ func (x *TenantProber) cleanup(ctx context.Context, id string) (left []string) {
 		}
 		return x.Portal.ApplyAndWait(ctx)
 	}); err != nil {
-		left = append(left, fmt.Sprintf("The test network (vnet %s, alias %s): %v. Delete the vnet under Datacenter, SDN, VNets and apply.", mine[0].Vnet, mine[0].Alias, err))
+		left = append(left, fmt.Sprintf("The test network (vnet %s, alias %s): %v. Delete the vnet under Datacenter, SDN, VNets and apply.", mine[0].Vnet, mine[0].Alias, clip(err.Error())))
 	}
 	return left
 }

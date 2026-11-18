@@ -144,6 +144,13 @@ func (p Preflight) Run(ctx context.Context) []Check {
 	mgmt, complete, err := p.Portal.C.ManagementCIDRs(ctx)
 	site := p.Site
 	site.Mgmt = mgmt
+	if s.Network.Routed() && err == nil && complete {
+		// A routed network is one the node itself routes: it must not be a network the node is already in.
+		var all bool
+		if site.NodeAddrs, all, err = p.Portal.C.NodeAddresses(ctx); err == nil {
+			complete = all
+		}
+	}
 	var unread []string
 	switch {
 	case err != nil:
@@ -478,6 +485,11 @@ func (p Preflight) bridge(ctx context.Context) Check {
 		i := slices.IndexFunc(vnets, func(v pve.SDNVnet) bool { return v.Vnet == n.Bridge })
 		switch {
 		case i < 0:
+			if taken, err := ifaceTaken(ctx, p.Portal.C, n.Bridge); err != nil {
+				return miss("Could not read the nodes' interfaces, so whether the name " + n.Bridge + " is free is not known: " + err.Error())
+			} else if taken != "" {
+				return miss(taken)
+			}
 			return ok("No vnet " + n.Bridge + " exists yet: the install makes it in the simple zone " + RoutedZone + " on " + in.Spec.Seed.Node + ", with the subnet " + n.Prefix +
 				", the gateway " + n.Gateway + " on the node and SNAT, and applies SDN.")
 		case vnets[i].Alias != networkAlias(in.ID):

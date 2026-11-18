@@ -1,6 +1,7 @@
 package platformlife
 
 import (
+	"context"
 	"slices"
 	"strings"
 	"testing"
@@ -191,6 +192,147 @@ func TestRemoveSeedDeletesTheRoutedNetwork(t *testing.T) {
 			}
 		} else if len(e.pve.vnets) != 1 || e.pve.writeCount("PUT /cluster/sdn") != 0 || it == nil || it.State != "left" {
 			t.Errorf("foreign: vnets %v item %+v writes %v", e.pve.vnets, it, e.pve.writes)
+		}
+	}
+}
+
+// A run that stopped between the creates and the apply (the apply failed, or the API restarted) left a zone, a vnet
+// and a subnet that Proxmox lists like applied ones. The next attempt applies them before the seed goes on the vnet,
+// and creates nothing twice.
+func TestSeedVMAppliesAnInterruptedNetwork(t *testing.T) {
+	e := newEnv(t, RunApply)
+	e.only(StageSeedVM)
+	e.mutate(func(_ *Run, in *Installation, _ *Secrets) { routed(in) })
+	e.pve.failOnce["PUT /cluster/sdn"] = `{"errors":{"sdn":"reload failed"}}`
+	var order []string
+	e.pve.onWrite = func(w string) {
+		if w == "PUT /cluster/sdn" || strings.HasSuffix(w, "/clone") {
+			order = append(order, w)
+		}
+	}
+	if end := e.once(); end != "defer:retry_seed_vm" {
+		t.Fatalf("the failed apply: %s; logs %s", end, e.logs)
+	}
+	if len(e.pve.vnets) != 1 || e.pve.vnets[0].State != "new" || len(e.pve.vms) != 0 {
+		t.Fatalf("after the failed apply: vnets %+v, VMs %v", e.pve.vnets, e.pve.vms)
+	}
+	if end := e.until(5); end != "complete" {
+		t.Fatalf("end %s; logs %s", end, e.logs)
+	}
+	if !slices.Equal(order, []string{"PUT /cluster/sdn", "PUT /cluster/sdn", "POST /nodes/pve1/qemu/9100/clone"}) {
+		t.Errorf("the retry applies before the clone: %v", order)
+	}
+	if e.pve.vnets[0].State != "" || e.pve.writeCount("POST /cluster/sdn/zones") != 1 || e.pve.writeCount("POST /cluster/sdn/vnets") != 2 {
+		t.Errorf("vnets %+v, writes %v", e.pve.vnets, e.pve.writes) // POST …/vnets counts the vnet and its subnet
+	}
+}
+
+// A vnet name that an interface of a node holds is refused before anything is written: the vnet id's pattern admits
+// vmbr1 and eno1, and an SDN apply would take the interface over.
+func TestSeedVMRefusesAnInterfaceName(t *testing.T) {
+	for _, name := range []string{"vmbr1", "eno1"} {
+		e := newEnv(t, RunApply)
+		e.only(StageSeedVM)
+		e.mutate(func(_ *Run, in *Installation, _ *Secrets) { routed(in); in.Spec.Network.Bridge = name })
+		if end := e.until(3); !strings.HasPrefix(end, "fail") {
+			t.Fatalf("%s: end %s", name, end)
+		}
+		if run, _, _ := e.state.snapshot(); run.Code != CodePlatformNetwork || !strings.Contains(run.Message, "The name "+name+" is an interface of pve1") {
+			t.Errorf("%s: run %s %q", name, run.Code, run.Message)
+		}
+		if n := e.pve.writeCount(""); n != 0 {
+			t.Errorf("%s: writes to Proxmox: %v", name, e.pve.writes)
+		}
+	}
+}
+
+// While another network change holds the site's SDN lock the stage waits and writes nothing; and a vnet this
+// installation made under another name is not joined by a second one.
+func TestSeedVMRoutedNetworkWaitsAndKeepsOneVnet(t *testing.T) {
+	e := newEnv(t, RunApply)
+	e.only(StageSeedVM)
+	e.mutate(func(_ *Run, in *Installation, _ *Secrets) { routed(in) })
+	e.r.SDNLock = func(context.Context) (func(), bool, error) { return nil, false, nil }
+	if end := e.once(); !strings.HasPrefix(end, "defer:") {
+		t.Fatalf("a held lock: %s", end)
+	}
+	if s := e.stage(StageSeedVM); !strings.Contains(s.Message, "Another network change is being applied") || e.pve.writeCount("") != 0 {
+		t.Errorf("stage %q, writes %v", s.Message, e.pve.writes)
+	}
+
+	e = newEnv(t, RunApply)
+	e.only(StageSeedVM)
+	e.mutate(func(_ *Run, in *Installation, _ *Secrets) { routed(in) })
+	e.pve.vnets = []pve.SDNVnet{{Vnet: "first0", Zone: RoutedZone, Alias: "proxcloud-platform:" + inID}}
+	if end := e.until(3); !strings.HasPrefix(end, "fail") {
+		t.Fatalf("end %s", end)
+	}
+	if run, _, _ := e.state.snapshot(); !strings.Contains(run.Message, "already made the vnet first0") || e.pve.writeCount("") != 0 {
+		t.Errorf("run %q, writes %v", run.Message, e.pve.writes)
+	}
+}
+
+// Remove finds the installation's vnet by its alias, not by the settings: a draft whose install failed after stage 3
+// and was then switched to mode bridge (or renamed) leaves no vnet. The zone stays while someone else's vnet is in
+// it, and no CAPI token is needed when no seed was ever recorded.
+func TestRemoveFindsTheNetworkByAlias(t *testing.T) {
+	for name, token := range map[string]bool{"with the CAPI token": true, "without it": false} {
+		e := newEnv(t, RunRemove)
+		e.only(StageRemoveSeed)
+		e.mutate(func(_ *Run, in *Installation, sec *Secrets) { // the settings name the bridge vmbr1 now
+			if !token {
+				sec.CAPI = nil
+			}
+		})
+		e.pve.zones = []pve.SDNZone{{Zone: RoutedZone, Type: "simple"}}
+		e.pve.vnets = []pve.SDNVnet{{Vnet: "first0", Zone: RoutedZone, Alias: "proxcloud-platform:" + inID}, {Vnet: "other0", Zone: RoutedZone, Alias: "someone else's"}}
+		e.pve.subnets = map[string][]pve.SDNSubnet{"first0": {{Subnet: "z-10.200.200.0-24", CIDR: "10.200.200.0/24"}}}
+		if end := e.until(5); end != "complete" {
+			t.Fatalf("%s: end %s; logs %s", name, end, e.logs)
+		}
+		it := item(e.stage(StageRemoveSeed), "network")
+		if len(e.pve.vnets) != 1 || e.pve.vnets[0].Vnet != "other0" || len(e.pve.zones) != 1 || len(e.pve.subnets["first0"]) != 0 || it == nil || it.State != "gone" {
+			t.Errorf("%s: vnets %+v zones %+v item %+v", name, e.pve.vnets, e.pve.zones, it)
+		}
+	}
+	// A bridge network that made nothing writes nothing to SDN.
+	e := newEnv(t, RunRemove)
+	e.only(StageRemoveSeed)
+	e.pve.vnets = []pve.SDNVnet{{Vnet: "other0", Zone: "lan", Alias: "someone else's"}}
+	if end := e.until(5); end != "complete" || len(e.pve.vnets) != 1 || e.pve.writeCount("PUT /cluster/sdn") != 0 || item(e.stage(StageRemoveSeed), "network") != nil {
+		t.Errorf("a bridge network: end %s, writes %v", end, e.pve.writes)
+	}
+	// Nor is there anything to do without a token, a seed or a vnet: the stage is skipped, as before the field.
+	e = newEnv(t, RunRemove)
+	e.only(StageRemoveSeed)
+	e.mutate(func(_ *Run, _ *Installation, sec *Secrets) { sec.CAPI = nil })
+	if end := e.until(5); end != "complete" || e.stage(StageRemoveSeed).State != StageSkipped || e.pve.writeCount("") != 0 {
+		t.Errorf("nothing to remove: end %s, stage %+v, writes %v", end, e.stage(StageRemoveSeed), e.pve.writes)
+	}
+}
+
+// A routed network is one the node routes: it must not be a range a node is already in. The gateway is the node's own
+// address once the vnet is made, and a bridge network may be the node's network.
+func TestSiteProblemsRoutedNetworkApartFromTheNodes(t *testing.T) {
+	const want = "a routed network must be a range no Proxmox node is in"
+	for name, tc := range map[string]struct {
+		site   Site
+		routed bool
+		bad    bool
+	}{
+		"apart":                    {Site{Mgmt: []string{"192.0.2.11/24"}, NodeAddrs: []string{"192.0.2.11/32"}}, true, false},
+		"a node's network":         {Site{Mgmt: []string{"10.200.0.5/16"}}, true, true},
+		"a node's other address":   {Site{NodeAddrs: []string{"10.200.200.7/32"}}, true, true},
+		"the gateway, once made":   {Site{NodeAddrs: []string{"10.200.200.1/32"}}, true, false},
+		"a bridge on that network": {Site{NodeAddrs: []string{"10.200.200.7/32"}}, false, false},
+	} {
+		in := validInstallation(t)
+		if tc.routed {
+			routed(in)
+		}
+		got := strings.Join(in.SiteProblems(tc.site), "\n")
+		if strings.Contains(got, want) != tc.bad {
+			t.Errorf("%s: %q", name, got)
 		}
 	}
 }

@@ -424,7 +424,8 @@ func (h *Handler) platformTenantProbe(w http.ResponseWriter, r *http.Request) {
 		platformErr(w, http.StatusNotFound, "no_probe", "The tenant path of this installation was not tested yet.", nil)
 		return
 	}
-	httpx.OK(w, p)
+	// A probe cut off by an API restart reads as an error, so the page stops waiting for it.
+	httpx.OK(w, p.View(time.Now()))
 }
 
 // platformTenantProbeStart starts "Test the tenant path" (platformlife.TenantProber) and answers at once with the
