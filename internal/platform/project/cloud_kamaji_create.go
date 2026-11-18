@@ -402,6 +402,12 @@ func kamajiReleaseInfra(services serviceGetter, shares shareRowFinder, pveFor fu
 			if err != nil {
 				return err
 			}
+			// CAPMOX deletes the workers with this token. The caller saw the cluster's objects gone from the
+			// management cluster; a worker still in the pool (a finalizer removed by hand, a ClusterRole too old to
+			// list Machines) holds the release, and with it the addresses that worker uses.
+			if err := kamajiWorkersGone(ctx, ps, projectID, clusterID); err != nil {
+				return err
+			}
 			if err := ps.C.RevokeClusterTokens(ctx, clusterID); err != nil {
 				return err
 			}
@@ -414,6 +420,23 @@ func kamajiReleaseInfra(services serviceGetter, shares shareRowFinder, pveFor fu
 		}
 		return nil
 	}
+}
+
+// kamajiWorkersGone refuses while a VM of the cluster is left in the project's pool. CAPMOX names a VM after its
+// Machine, and the chart starts every Machine name with the cluster id. A VM on a node that is down has no name in
+// Proxmox's list, so it holds the release too.
+func kamajiWorkersGone(ctx context.Context, ps *pve.Service, projectID, clusterID string) error {
+	rows, err := ps.C.ClusterResources(ctx, "vm")
+	if err != nil {
+		return err
+	}
+	pool := ps.PoolFor(projectID)
+	for _, r := range rows {
+		if r.Pool == pool && (r.NodeDown || strings.HasPrefix(r.Name, clusterID+"-")) {
+			return fmt.Errorf("kamaji: cluster %s: VM %d in pool %s may still be a worker, its token stays", clusterID, r.VMID, pool)
+		}
+	}
+	return nil
 }
 
 type serviceGetter interface {

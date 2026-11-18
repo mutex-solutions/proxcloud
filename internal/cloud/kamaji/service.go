@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -200,8 +201,8 @@ func (s *Service) AbandonCluster(ctx context.Context, projectID, clusterID, comp
 // DeleteCluster removes the cluster: Application delete only (the resources-finalizer cascades
 // the rendered chart). The cloud credentials secret deliberately STAYS — the infrastructure
 // provider authenticates with it to delete the worker VMs during the cascade, so removing it here
-// would strand those cloud resources with stuck finalizers. FinalizeOrphans (sync-driven) reaps
-// the secret and GCs the namespace once the cascade has finished.
+// would strand those cloud resources with stuck finalizers. FinalizeCluster (the release job the delete
+// queues) or, as the backstop, the sync's sweep reaps the secret and GCs the namespace once the cascade has finished.
 // Idempotent (absent objects are success). Ownership-guarded: an Application without the
 // managed-by marker is NOT ours (a pre-proxcloud cluster or foreign app that happens to share the
 // name) — refuse rather than cascade-delete it.
@@ -230,7 +231,32 @@ func (s *Service) FinalizeOrphans(ctx context.Context, projectID string) (int, e
 	if err != nil {
 		return 0, err
 	}
-	return s.finalizeNamespace(ctx, ns, projectID, secrets)
+	pending, _, err := s.finalizeNamespace(ctx, ns, projectID, secrets, "")
+	return pending, err
+}
+
+// FinalizeCluster finishes ONE cluster whose delete was accepted (the release job, project.KamajiReleaseRunner): the
+// sweep's checks and release for that cluster alone, without the creation grace. The grace guards a create that has
+// not applied its Application yet; a delete is accepted only for a cluster whose Application was applied, so here an
+// absent Application means the cascade is over. done: nothing of the cluster is left to release (now, or because the
+// sweep was first). Not done with no error: the cascade is still running. An error (the management cluster does not
+// answer, the release failed) releases nothing further and is safe to retry.
+func (s *Service) FinalizeCluster(ctx context.Context, projectID, clusterID string) (done bool, err error) {
+	ns := NamespaceFor(projectID)
+	secrets, err := s.api.ListSecrets(ctx, ns, LabelProject+"="+projectID+","+LabelManagedBy+"="+ManagedByValue)
+	if err != nil {
+		return false, err
+	}
+	held := false
+	for _, sec := range secrets {
+		name := digStr(sec, "metadata", "name")
+		held = held || name == MarkerSecretName(clusterID) || name == CloudSecretName(clusterID)
+	}
+	if !held {
+		return true, nil
+	}
+	_, reaped, err := s.finalizeNamespace(ctx, ns, projectID, secrets, clusterID)
+	return reaped > 0, err
 }
 
 // FinalizeAllOrphans is the service-level orphan sweep, run once per sync cycle: it scans EVERY
@@ -254,7 +280,7 @@ func (s *Service) FinalizeAllOrphans(ctx context.Context) (int, error) {
 	var errs []error
 	for ns, secs := range byNS {
 		projectID := digStr(secs[0], "metadata", "labels", LabelProject)
-		p, err := s.finalizeNamespace(ctx, ns, projectID, secs)
+		p, _, err := s.finalizeNamespace(ctx, ns, projectID, secs, "")
 		pending += p
 		if err != nil {
 			errs = append(errs, err)
@@ -270,9 +296,11 @@ func (s *Service) FinalizeAllOrphans(ctx context.Context) (int, error) {
 // authenticates with this secret; reaping early would strand cloud resources). The namespace is
 // GC'd only on a pass that actually reaped something and verified nothing lives there anymore —
 // an idle project's bootstrap namespace is never touched.
-func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, secrets []map[string]any) (int, error) {
+//
+// only, when set, is FinalizeCluster's cluster: it skips the grace window, and every other cluster of the namespace is
+// left to the sweep and counted as pending, which keeps the namespace.
+func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, secrets []map[string]any, only string) (pending, reaped int, err error) {
 	var errs []error
-	pending, reaped := 0, 0
 	marked := map[string]bool{}
 	for _, sec := range secrets {
 		if cid, ok := strings.CutSuffix(digStr(sec, "metadata", "name"), markerSuffix); ok {
@@ -289,7 +317,11 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 				continue
 			}
 		}
-		if created, err := time.Parse(time.RFC3339, digStr(sec, "metadata", "creationTimestamp")); err == nil {
+		if only != "" && cid != only {
+			pending++
+			continue
+		}
+		if created, err := time.Parse(time.RFC3339, digStr(sec, "metadata", "creationTimestamp")); err == nil && only == "" {
 			if time.Since(created) < s.finalizeGrace {
 				// Possibly mid-create — the Application may not be applied yet. Counts as
 				// pending: teardown reads pending as "the cascade may still need the tenant".
@@ -299,11 +331,13 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 		}
 		app, err := s.api.GetApplication(ctx, s.cfg.ArgoNamespace, cid)
 		if err != nil {
-			return pending, err
+			return pending, reaped, err
 		}
 		if app != nil {
 			if dig(app, "metadata", "deletionTimestamp") != nil {
 				pending++ // delete cascade in flight
+			} else if only != "" {
+				pending++ // the release job never takes a cluster for live: it waits
 			} else if compute := digStr(sec, "metadata", "annotations", annotationComputeService); s.onClusterLive != nil && compute != "" {
 				if err := s.onClusterLive(ctx, compute, projectID, cid); err != nil {
 					slog.Warn("kamaji: live cluster hook", "cluster", cid, "err", err) // the sweep and teardown go on
@@ -313,13 +347,27 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 		}
 		tcp, err := s.findTCP(ctx, ns, cid)
 		if err != nil {
-			return pending, err
+			return pending, reaped, err
 		}
 		mds, err := s.api.ListMachineDeployments(ctx, ns, "cluster.x-k8s.io/cluster-name="+cid)
 		if err != nil {
-			return pending, err
+			return pending, reaped, err
 		}
 		if tcp != nil || len(mds) > 0 {
+			pending++
+			continue
+		}
+		// A Machine outlives its MachineDeployment while CAPMOX deletes the VM, with the token the release revokes.
+		machines, err := s.api.ListCRs(ctx, capiGroup, capiVersion, "machines", ns, labelClusterName+"="+cid)
+		var ae *kamajik8s.APIError
+		if errors.As(err, &ae) && (ae.Status == http.StatusForbidden || ae.Status == http.StatusNotFound) {
+			// The ClusterRole of an older install (readProgress): the release's own look at the pool decides.
+			machines, err = nil, nil
+		}
+		if err != nil {
+			return pending, reaped, err
+		}
+		if len(machines) > 0 {
 			pending++
 			continue
 		}
@@ -365,7 +413,7 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 			}
 		}
 	}
-	return pending, errors.Join(errs...)
+	return pending, reaped, errors.Join(errs...)
 }
 
 // RemoveProjectNamespace deletes the namespace of a project being torn down, which its bootstrap made whether or not it
