@@ -23,6 +23,22 @@ None of the entries below is verified on a lab yet: each one says so, and what i
   for an existing site was run by hand on one production site and is lost at a reboot; the layout with a
   platform network routed by the node was run nowhere. Not verified on a lab: the row is tested against a fake
   Proxmox API only.
+- **The ready card of Managed services shows where the platform is and how to open ArgoCD.** For an installed
+  platform the page lists the seed API address, the platform cluster API address, the load balancer range and the
+  node range, and prints the `kubectl` commands that open the two ArgoCD instances (a port-forward and the read of
+  `argocd-initial-admin-secret`); no ArgoCD gets an address in this release. **Download platform kubeconfig**
+  (`GET …/platform-kubeconfig`, `admin:service:manage`, audited as `BREAK_GLASS` with `operation:
+  platform-kubeconfig`) saves a kubeconfig of the platform cluster that works for one hour: a token of the service
+  account `kube-system/proxcloud-break-glass`, which the route writes on the cluster. It reads the cluster without
+  its Secrets, forwards a port in `argocd` and reads ArgoCD's initial admin password; it is never the admin
+  certificate Cluster API keeps on the seed. Through ArgoCD its holder can still change the cluster
+  ([docs/managed-services.md](docs/managed-services.md#after-the-install)). Not verified on a lab: the tests use a
+  fake seed and a fake cluster, and the ArgoCD Service and Secret names are the chart's defaults.
+- **The ready card says what a tenant cannot use yet.** A green install registers the Kubernetes provider with no
+  version and both providers attached to no project, so every tenant cluster create was refused while the page
+  looked finished. The card now says "Offers no Kubernetes version yet" and "New projects do not get this
+  provider", each with a link to where it is put right. Nothing is published or attached for you. Not verified on
+  a lab.
 
 ### Changed
 
