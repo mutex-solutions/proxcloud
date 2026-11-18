@@ -251,6 +251,12 @@ function RunCard({ run, installation, canManage, dirty, focus, onRetry, retrying
       state={run.state}
       description={`Started ${fmtDateTime(run.startedAt ?? run.createdAt)}${run.requestedBy ? ` by ${run.requestedBy}` : ""}${run.finishedAt ? `, ended ${fmtDateTime(run.finishedAt)}` : ""}.`}
     >
+      {run.fromBom && run.bom ? (
+        <p className="text-sm">
+          This run upgrades the platform from release <span className="font-mono">{run.fromBom.release}</span> to release <span className="font-mono">{run.bom.release}</span>.
+          The record names release {run.fromBom.release} until the last stage is done{ended ? `; Retry continues to release ${run.bom.release}` : ""}.
+        </p>
+      ) : null}
       {active ? <p className="text-sm text-muted-foreground">This page reads the run every few seconds. You can leave it: the run goes on.</p> : null}
       <ol aria-label="Stages">
         {(run.stages ?? []).map((s, i) => <StageRow key={s.id} stage={s} n={i + 1} kind={run.kind} />)}
@@ -542,7 +548,7 @@ export default function PlatformPage() {
   const liveState = phase === "ready" ? live.data?.live : undefined
 
   const start = useMutation({
-    mutationFn: (body: { kind: "apply" | "remove"; confirm?: string }) => apiFetch<{ runId: string }>(`${base(stored!.id)}/runs`, { method: "POST", body }),
+    mutationFn: (body: { kind: "apply" | "remove"; confirm?: string; targetBom?: string }) => apiFetch<{ runId: string }>(`${base(stored!.id)}/runs`, { method: "POST", body }),
     onSuccess: (r) => {
       setRemoving(false)
       setStarted(r.runId)
@@ -599,7 +605,7 @@ export default function PlatformPage() {
               <>
                 <IdentitiesStep installation={stored} tokenId={provider?.config?.tokenId} canManage={canManage} />
                 <CheckStep installation={stored} canManage={canManage} dirty={dirty} />
-                <ReviewStep installation={stored} canManage={canManage} dirty={dirty} onInstall={apply} installing={start.isPending} error={showRun ? null : startError} />
+                <ReviewStep installation={stored} canManage={canManage} dirty={dirty} onInstall={apply} onUpgrade={(targetBom, confirm) => start.mutate({ kind: "apply", targetBom, confirm })} installing={start.isPending} error={showRun ? null : startError} />
               </>
             ) : (
               <p className="text-sm text-muted-foreground">Steps 2 to 4 (Proxmox identities, Check, Review and install) open once the settings are saved.</p>

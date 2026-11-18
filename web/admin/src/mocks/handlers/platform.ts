@@ -5,7 +5,8 @@
 // field the API's structs do not have. `?mock-platform=<preset>` in the URL starts the page in one state:
 // disabled | draft | isolation (the isolation check fails until a provider sync) | norunner (runs answer 409) |
 // running | waiting (stage 4 is trying again) | failed | dead (the run's job died: the stored phase stays applying) |
-// ready | previous (ready, installed by the release before this one: the plan names a newer release) | degraded (one component out of sync) | simplezone (the check warns: no tenant cluster on a simple zone) | silent (the seed does not answer) | unread (the live read fails) | removing
+// ready | previous (ready, installed by the release before this one: the plan names a newer release and why this one does not move the platform to it) |
+// upgrade (the same, and the move is allowed: the plan lists it, the run wants the typed confirmation) | degraded (one component out of sync) | simplezone (the check warns: no tenant cluster on a simple zone) | silent (the seed does not answer) | unread (the live read fails) | removing
 // (none: enabled, nothing saved).
 import { ApiError } from "@/lib/api"
 import { on } from "../router"
@@ -171,6 +172,10 @@ function tick(run: Doc): Doc {
     } else {
       end("succeeded", "ready")
       ready(in_)
+      if (run.fromBom) { // an upgrade ends here: the record moves to the target
+        in_.status.bom = run.bom
+        delete in_.status.targetBom
+      }
     }
   }
   return run
@@ -263,10 +268,10 @@ if (preset && preset !== "disabled") {
     tick(newRun(in_, "apply", Date.now() - 3.5 * STAGE_MS)).dead = true
     in_.status.seed = { vmid: 9100, node: "pve1", generation: 1, cdVolume: "local:iso/pc-seed-pi-00000001.iso" }
   }
-  if (["ready", "previous", "degraded", "silent", "unread", "removing"].includes(preset)) {
+  if (["ready", "previous", "upgrade", "degraded", "silent", "unread", "removing"].includes(preset)) {
     mockPlatform.applies = 1
     tick(newRun(in_, "apply", Date.now() - 3_600_000))
-    if (preset === "previous") in_.status.bom = { release: previous.release, sha256: previous.sha256 }
+    if (preset === "previous" || preset === "upgrade") in_.status.bom = { release: previous.release, sha256: previous.sha256 }
     if (preset === "removing") newRun(in_, "remove", Date.now() - 0.5 * STAGE_MS)
   }
 }
@@ -361,20 +366,48 @@ on("POST /admin/platform/installations/:id/preflight", ({ params }) => {
 on("GET /admin/platform/installations/:id/plan", ({ params }) => {
   const in_ = find(params.id)
   const installed = in_.status.bom ?? null
-  if (installed?.sha256 === previous.sha256) return { data: { installed, target: installed, newer: bomRef, changes: [], blocking: [] } }
+  if (installed?.sha256 === previous.sha256) {
+    const pending = in_.status.targetBom
+    return { data: { installed, target: pending ?? installed, newer: bomRef, changes: [], blocking: [], upgrade: upgradePlan(in_) } }
+  }
   return { data: { installed, target: bomRef, changes: [], blocking: [] } }
 })
+
+// The plan of the move from the previous release to this one, as platformlife.Classify answers it: the preset
+// "upgrade" differs in the product's own charts alone, "previous" also in a third-party chart, which refuses it.
+function upgradePlan(in_: Doc) {
+  const release = { name: "release", from: previous.release, to: bom.release, class: "record only", impact: "Nothing is synced for it: the platform's record and the labels of its objects name the new release." }
+  const chart = { cluster: "workload", name: "platform", from: "0.1.2", to: "0.1.3", class: "chart", stage: "workload-platform", wave: 3, impact: "ArgoCD syncs the chart's objects. No pod of a tenant restarts." }
+  const cilium = { cluster: "workload", name: "cilium", from: "1.18.15", to: "1.18.16", class: "refused", blocking: "not supported by this release: a third-party chart is upgraded only by a later release (this one moves the product's own charts)" }
+  const refused = preset !== "upgrade"
+  const inProgress = !!in_.status.targetBom
+  return {
+    from: { release: previous.release, sha256: previous.sha256 }, to: bomRef, allowed: !refused, ...(inProgress ? { inProgress } : {}),
+    ...(refused || inProgress ? {} : { confirm: `upgrade ${in_.name} to ${bom.release}` }),
+    changes: refused ? [release, chart, cilium] : [release, chart],
+    blocking: refused ? [`workload/cilium: ${cilium.blocking}`] : [],
+  }
+}
 
 on("POST /admin/platform/installations/:id/runs", ({ params, opts }) => {
   const in_ = find(params.id)
   if (preset === "norunner") throw fail(409, "platform_disabled", "Runs need the platform runner: set PROXCLOUD_PLATFORM_ENABLED=true and PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true")
   const b = (opts.body ?? {}) as Doc
-  strict(b, { kind: true, confirm: true })
+  strict(b, { kind: true, confirm: true, targetBom: true })
   if (b.kind !== "apply" && b.kind !== "remove") throw fail(400, "invalid_kind", "kind is apply or remove")
-  if (b.confirm && (b.kind !== "remove" || b.confirm !== `remove ${in_.name}`)) throw fail(400, "invalid_confirmation", `confirm must be "remove ${in_.name}"`)
+  // An apply that names this release as its target is an upgrade: allowed as the plan says, with the plan's phrase.
+  const up = b.kind === "apply" && b.targetBom && !in_.status.targetBom ? upgradePlan(in_) : null
+  if (b.targetBom && (b.kind !== "apply" || b.targetBom !== bom.sha256)) throw fail(400, "invalid_target", "targetBom must be the sha256 of this build's own BOM")
+  if (up && !up.allowed) throw fail(409, "upgrade_refused", `upgrade_refused: ${up.blocking.join("; ")}`, { reasons: up.blocking })
+  if (up ? b.confirm !== up.confirm : b.confirm && (b.kind !== "remove" || b.confirm !== `remove ${in_.name}`)) throw fail(400, "invalid_confirmation", `confirm must be "remove ${in_.name}" on a remove, or the plan's phrase on an upgrade`)
   settleDead(in_) // a run whose job died is finished first
   if (activeRun(in_.id)) throw fail(409, "run_active", "a run of this installation is not finished")
-  return { data: { runId: newRun(in_, b.kind).id } }
+  const run = newRun(in_, b.kind)
+  // An upgrade, started or continued: the run goes from the installed release to the target, which the record keeps
+  // until the run has succeeded (tick).
+  if (up) in_.status.targetBom = bomRef
+  if (b.kind === "apply" && in_.status.targetBom) run.fromBom = in_.status.bom
+  return { data: { runId: run.id } }
 })
 
 const publicRun = (run: Doc) => {

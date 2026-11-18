@@ -42,7 +42,9 @@ export type Stage = {
 export type Run = {
   id: string; kind: "apply" | "remove"; state: string; code?: string; message?: string; stages?: Stage[]
   requestedBy?: string; createdAt: string; startedAt?: string; finishedAt?: string
+  bom?: BOMRef; fromBom?: BOMRef // fromBom: the run is an upgrade from that release to bom
 }
+export type BOMRef = { release: string; sha256: string }
 export type BOM = {
   release: string; sha256: string
   kubernetes: { version: string; nodeImage: { package: string; tag: string; digest: string } }
@@ -53,8 +55,18 @@ export type Plan = {
   installed?: { release: string; sha256: string } | null
   target: { release: string; sha256: string } // what an apply runs with
   newer?: { release: string; sha256: string } | null // this ProxCloud's own release, when the platform stays on an earlier one
-  changes?: { cluster?: string; name: string; from?: string; to?: string; blocking?: string }[]
+  changes?: PlanChange[]
   blocking?: string[]
+  upgrade?: Upgrade | null // the move to this ProxCloud's release, or the one in progress
+}
+export type PlanChange = {
+  cluster?: string; name: string; from?: string; to?: string; blocking?: string
+  class?: "chart" | "record only" | "refused"; stage?: string; wave?: number; impact?: string
+}
+export type Upgrade = {
+  from: BOMRef; to: BOMRef; allowed: boolean; inProgress?: boolean
+  confirm?: string // what to type to start it
+  changes: PlanChange[]; blocking: string[]
 }
 
 // The react-query key every read of this page starts with: one invalidation re-reads them all.
@@ -309,7 +321,10 @@ const CODE_ACTION: Record<string, string> = {
   machine_failed: "Correct what the message names. The machine is not tried again on its own: download the seed kubeconfig, run the kubectl delete machine command of the message, then Retry. If the message says a VM's name does not match, do not delete the machine. If it names a node template, run its qm set command on that node, then Retry.",
   capmox_auth_failed: `Proxmox refused ${CAPI_TOKEN}, or the seed cannot reach the Proxmox API URL of the settings. Check the URL as the platform network reaches it and paste the token secret again, then Retry.`,
   workload_api_unreachable: "Add a route from the ProxCloud host to the API address, then Retry. When the message says the cluster's API refuses the credential: it does so for some seconds after it starts; if the run failed on it, Retry.",
-  bom_unsupported: "The platform was installed by a ProxCloud whose platform release this one does not carry (a development build, or a release from before 0.8.0), and no release upgrades an installed platform yet. Go back to the ProxCloud that installed it. Or, if no tenant cluster or database must be kept, delete them all, then remove managed services and install again: Remove deletes the platform cluster.",
+  bom_unsupported: "The platform was installed by a ProxCloud whose platform release this one does not carry (a development build, or a release from before 0.8.0), and a platform moves only between releases this ProxCloud carries. Go back to the ProxCloud that installed it. Or, if no tenant cluster or database must be kept, delete them all, then remove managed services and install again: Remove deletes the platform cluster.",
+  upgrade_refused: "This ProxCloud cannot move the platform to its own platform release: step 4 lists why. The platform stays on its release, and Apply this release keeps working.",
+  unexpected_rollout: "The upgrade would replace machines of the platform cluster, so nothing of it was synced. If machine sizes, nodes or node groups were changed together with the upgrade, put them back, save, then Retry. Otherwise install the ProxCloud release that corrects it and start the upgrade to that release.",
+  tenants_unhealthy: "A tenant cluster or database that was healthy before the upgrade is not. Look at the one the message names. Retry goes on from the same step once it is healthy.",
   provider_conflict: "A provider row of this installation was refused. Read the message, correct that provider under Cloud providers, then Retry.",
   machine_delete_stuck: "Delete the VM named in the message in Proxmox, then start Remove again.",
   tenants_exist: "Tenant clusters or databases still run on the platform. Delete them, then start Remove again.",

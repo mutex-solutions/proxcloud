@@ -110,7 +110,10 @@ The failed stage shows a code, a message and what to do.
 | `capmox_auth_failed` | Proxmox refused the token, or the seed cannot reach the Proxmox API URL of the settings. Check the URL as the platform network reaches it and paste the token secret again, then **Retry**. The message names the log that says which. |
 | `workload_api_unreachable` | Add a route from the ProxCloud host to the API address, then **Retry**. When the message says the cluster's API refuses the credential: it does so for some seconds after it starts; if the run failed on it, **Retry**. During a removal: restore the route and **Remove again**, or tick the option for a cluster that does not answer when it is beyond repair. |
 | `provider_conflict` | Correct the provider named in the message under **Cloud providers**, then **Retry**. |
-| `bom_unsupported` | The platform was installed by a ProxCloud whose platform release this one does not carry (a development build, or a release from before 0.8.0), and no release upgrades an installed platform yet. Go back to the ProxCloud that installed it. Or, if no tenant cluster or database must be kept, delete them all, then remove managed services and install again: **Remove** deletes the platform cluster. |
+| `upgrade_refused` | The upgrade to this ProxCloud's platform release is not possible: step 4 lists why. The platform stays on its release and **Apply this release** keeps working. |
+| `unexpected_rollout` | An upgrade would replace machines of the platform cluster. Nothing was synced. If you changed machine sizes or node groups together with the upgrade, put them back and **Retry**; otherwise see the operator guide, "Upgrade between BOMs". |
+| `tenants_unhealthy` | During an upgrade a tenant cluster or database that was healthy before is not. Look at the one the message names; **Retry** goes on once it is healthy. |
+| `bom_unsupported` | The platform was installed by a ProxCloud whose platform release this one does not carry (a development build, or a release from before 0.8.0), and a platform moves only between releases this ProxCloud carries. Go back to the ProxCloud that installed it. Or, if no tenant cluster or database must be kept, delete them all, then remove managed services and install again: **Remove** deletes the platform cluster. |
 | `credentials_missing` | Paste both token secrets in step 2, then **Retry**, or **Remove again** for a removal. |
 | `stage_unavailable` | The run was recorded by another ProxCloud release. No action in this release. |
 | `tenants_exist` | Delete the tenant clusters and databases, then **Remove** again. |
@@ -125,7 +128,17 @@ The page shows each component with its live state, read from the seed, and the t
 2. Add a backup job for the seed VM. The page prints the command: a daily snapshot, compressed, of which seven are kept. The backup holds the seed's credentials: use a backup store that is not the boot, ISO or import store of the settings, and that no API token other than your own can read. The operator guide (docs/managed-services.md, "Credentials and the seed backup") gives the checks. The page cannot see whether a job exists.
 3. Attach the providers to projects, and add price rules for clusters and databases.
 
-**Apply this release** in step 4 runs the stages again with the saved settings: it repairs what is missing, applies changed sizes and counts, and renews the seed's access to the platform cluster. A platform stays on the platform release that installed it. This release cannot yet move an installed platform to the components of a newer ProxCloud release: after a ProxCloud upgrade the review says that the platform stays on its release, lists that release's contents, and **Apply this release** runs with them. A platform installed by a development build is not kept this way: after an upgrade its run is refused with `bom_unsupported`.
+**Apply this release** in step 4 runs the stages again with the saved settings: it repairs what is missing, applies changed sizes and counts, and renews the seed's access to the platform cluster. A platform stays on the platform release that installed it until you upgrade it: after a ProxCloud upgrade the review lists that release's contents, and **Apply this release** runs with them. A platform installed by a development build is not kept this way: after an upgrade its run is refused with `bom_unsupported`.
+
+## Upgrading to a newer platform release
+
+After a ProxCloud upgrade, step 4 compares the installed platform release with the one this ProxCloud carries and shows one of three things. None of it has run on a lab yet.
+
+- **Upgrade to release X**, with a table of what differs and what the run does for each entry. This release moves a platform only when the two releases differ in ProxCloud's own charts. Tenant clusters and databases keep running. The button asks you to type `upgrade <name> to <release>`. Take a backup of the seed VM and a dump of the portal database first, and do not change machine sizes or node groups in the same step.
+- **The platform stays on release Y**, with the reasons. A release that changes the Kubernetes version, an image, k3s, a Cluster API provider or a third-party chart cannot be moved to yet. Nothing is wrong with the platform, and **Apply this release** keeps working.
+- **The upgrade to release X has not finished**: a run toward it started and did not succeed. **Retry** and **Apply this release** both continue to release X. Nothing goes back to release Y, which the record names until a run has succeeded.
+
+The run has the same stages as an install. It adds a check before the platform cluster's chart is synced (it fails with `unexpected_rollout` instead of replacing machines) and, between the steps of stage 9, a wait until the tenants that were healthy before are healthy again (`tenants_unhealthy` while they are not). The operator guide (docs/managed-services.md, "Upgrade between BOMs") has the details and what to do when an upgrade cannot finish.
 
 ## Seed access and removal
 
