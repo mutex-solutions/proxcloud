@@ -21,7 +21,7 @@ artifacts and later controlled PVE template canaries remain separate steps. Read
 | `docker.yml` | PRs to `main`, `main` pushes, `v*` tags, manual dispatch | Job `bom-verify` runs first; on a tag it is the [platform BOM release gate](#platform-bom-verification-and-release-gate) and the builds wait for it. PRs build five images without pushing. Image-relevant `main` pushes publish `dev-<7-char-sha>`; docs/chart-only changes can skip. Tags publish exact image tags; manual dispatch pushes `dev-<sha>` or `dev-<suffix>`. Hosted runner. |
 | `helm.yml` | Chart-path PRs to `main`; app or managed-chart tags | PR lint/render only. App `v*` publishes `proxcloud`; `database-cluster-v*`, `proxmox-kamaji-cluster-v*` and `proxcloud-platform-v*` publish their independent charts. Hosted runner; no publication on ordinary merge. |
 | `charts-mirror.yml` | PRs to `main` that touch the mirror manifest, the BOM, the script or its tests; `charts-mirror-v*` tags | PR runs the script's tests and a dry run with a read-only token: every third-party chart of the BOM is fetched, verified against its pin and packaged, nothing is pushed. A tag on a commit of `main` pushes each chart version that [the chart mirror](#chart-mirror) definitely does not serve yet to `ghcr.io/mutex-solutions/charts-mirror`, does not push over a served version, and records the digests. That is a rule of the script, not of the registry; see [limits of the gate](#limits-of-the-gate). Hosted runner. |
-| `bom-verify.yml` | PRs to `main` that touch `deploy/platform/**` or the script; weekly schedule; manual dispatch | Compares every pin of the platform BOM with its registry by anonymous pull. Read-only token, no secret, nothing is pushed. Hosted runner. |
+| `bom-verify.yml` | PRs to `main` that touch `deploy/platform/**` or the script; weekly schedule; manual dispatch | Compares every pin of the platform BOM, and of each [previous BOM](#previous-boms), with its registry by anonymous pull. Read-only token, no secret, nothing is pushed. Hosted runner. |
 | `sandbox-templates.yml` | Selected source pushes/PRs, schedule, manual dispatch | PR read-only build; trusted runs push built-in images, then `main` opens a digest-pin PR. Not cluster deployment. Hosted runner. |
 | `vm-export-tools.yml` | Tool-image recipe pushes/PRs, manual dispatch on `main` | PR builds, smokes and scans the VM export tool image with a read-only token. `main` then pushes it to GHCR under one tag it never replaces and records the digest; `capsule.py` pins one reviewed digest and the export job pulls it. Hosted runner. |
 | `clusterctl.yml` | Image-recipe PRs to `main`; `proxcloud-clusterctl-v*` tags | PR builds and scans `proxcloud-clusterctl` (clusterctl and kubectl built from the upstream source of their release tags with patched `golang.org/x/net` and `golang.org/x/text`, baked provider manifests) with a read-only token. A tag that equals the image's version label and points at a commit of `main` pushes it once to GHCR under that version, refusing an existing tag, and records the digest. Hosted runner. |
@@ -172,6 +172,7 @@ Where it runs:
   image and creates no GitHub Release. Off a tag the job only runs the script's
   offline unit tests; it exists on every event because a skipped job would skip
   the builds that need it.
+  On a tag the job also checks each [previous BOM](#previous-boms).
 - `helm.yml`, job `publish`, on every `v*` tag with `--release`, as a step
   before the registry login. A published chart version is never replaced, so a
   tag that fails the gate must not publish the `proxcloud` chart either.
@@ -201,6 +202,65 @@ Not verified:
   `index.yaml` by indentation, not with a YAML library.
 - Whether a pinned version is still the wanted one. The check proves a pin is
   still served, not that it is current.
+
+## Previous BOMs
+
+A platform records the BOM that installed it by the sha256 of the BOM file, and
+an apply on it runs with that BOM. A release therefore carries, next to its own
+BOM, the BOM of each earlier release back to `0.8.0`, as
+`deploy/platform/previous/<release>.yaml` (`deploy/embed.go`,
+`platformlife.Previous`). Without the file of a release, the next release
+refuses every apply on the platforms that release installed
+(`bom_unsupported`). A release's own `release:` line makes its BOM another file
+than the one before it, so this holds for a patch release that changes no pin
+too.
+
+After each release tag `vX.Y.Z`, in the pull request that sets the BOM on `main`
+back to `-dev`:
+
+1. Copy the BOM of the tag, byte for byte:
+   `git show vX.Y.Z:deploy/platform/platform-bom.yaml > deploy/platform/previous/X.Y.Z.yaml`.
+   Do not edit it afterwards, comments included: the hash is the key.
+2. Add its hash (`sha256sum deploy/platform/previous/X.Y.Z.yaml`) to
+   `previousSHA256` in `internal/platformlife/bom_test.go`.
+3. Write its goldens:
+   `go test ./internal/platformlife -run TestRenderGoldenOfPreviousBOMs -update`.
+   Each new file under `testdata/previous/X.Y.Z/` must equal the file of the
+   same name under `internal/platformlife/testdata/` at the tag (`git show
+   vX.Y.Z:internal/platformlife/testdata/<name> | cmp - <new file>`). A
+   difference means a renderer changed since the tag and this build would
+   change that platform at its next apply.
+
+What holds the procedure:
+
+- `TestEveryReleaseHasItsPreviousBOM` fails when `CHANGELOG.md` lists a release
+  from 0.8.0 on, other than the one the current BOM names, without its file. It
+  reads the changelog, not the tags: a release without a changelog section is
+  not seen.
+- `TestPreviousBOMsAreUnchanged` compares each file with its recorded hash and
+  fails on a release it has no hash for, a `-dev` one included. The script test
+  `test_the_previous_boms_parse_and_are_releases` checks that no previous BOM is
+  a `-dev` one and that each file is named after its release.
+- `bom-verify.yml` (pull requests that touch `deploy/platform/**`, weekly) and
+  the `bom-verify` job of `docker.yml` on a `v*` tag run `bom_verify.py
+  --release --bom` on each previous BOM: an apply on an installed platform pulls
+  by these pins, so a release whose images carry a previous BOM with a pin that
+  is no longer served is not built. `helm.yml` checks the current BOM only. A
+  chart version that a previous BOM pins must stay in the
+  [chart mirror](#chart-mirror) and a VM image it pins must stay published,
+  also after `charts-mirror.yaml` and the current BOM moved on.
+
+Only releases are kept. A `dev-<sha>` build of `main` installs with a `-dev` BOM
+that no later build carries, so its platform is refused after an upgrade
+([managed-services.md](managed-services.md#not-implemented-yet)). No file has
+been removed yet; when one is, the platforms of that release are refused again,
+so it needs a release note.
+
+Not verified: `v0.8.0` is the only previous BOM, added by hand from its tag
+(sha256 `8eb874987d3bbaf55f309295ee241ec320c0cf9e0805b3bd1812ef908b6600c6`, the
+value a platform installed by v0.8.0 records; `bom_verify.py --release` on it
+printed `all pins match` on 2026-11-18). The procedure above has not been run
+at a release, and no apply with a previous BOM has been run on a lab.
 
 ## Chart mirror
 

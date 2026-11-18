@@ -227,7 +227,21 @@ func TestPreflight(t *testing.T) {
 	// The mint role is checked on the provider's import store, not on the one of the settings ("local").
 	delete(f.perms[pve.DefaultPlatformTokenID], "/storage/nas-templates")
 	pf.Site.Blocked = nil
+	// The blocklist is asked about the images of the installed BOM, not of this build's own.
+	old := newerBuild(t)
+	in.Status.BOM = &BOMRef{Release: old.Release, SHA256: old.SHA256}
+	var asked []string
+	pf.Blocked = func(_ context.Context, digest string) (bool, error) { asked = append(asked, digest); return false, nil }
+	pf.Run(ctx)
+	if !slices.Equal(asked, []string{old.Seed.Image.Digest, old.Kubernetes.NodeImage.Digest}) {
+		t.Errorf("blocklist asked about %v", asked)
+	}
+	// A blocked image of an installed platform: no release changes its images, and the message says so.
 	pf.Blocked = func(context.Context, string) (bool, error) { return true, nil }
+	if c := checkMap(pf.Run(ctx))["images"]; !strings.Contains(c.Message, "stays on release "+old.Release) || strings.Contains(c.Message, "install a newer") {
+		t.Errorf("images of an installed platform: %+v", c)
+	}
+	in.Status.BOM = nil
 	// Each token is asked about each of the three paths: the CSI token on /storage, the CAPI token on /vms.
 	f.perms[pve.CSITokenID]["/storage"] = []string{"Datastore.Audit"}
 	f.perms[pve.CAPITokenID]["/vms"] = []string{"VM.Audit"}
@@ -248,7 +262,7 @@ func TestPreflight(t *testing.T) {
 		"token-scope":          pve.CAPITokenID + " holds 2 privileges on /pool",
 		"isolation":            "add 10.200.200.10/32, 10.200.200.20/32, 10.200.200.30/31",
 		"credentials":          pve.CSITokenID + " is not stored",
-		"images":               "is on the blocklist",
+		"images":               "is on the blocklist: install a newer ProxCloud release",
 	} {
 		if c := got[id]; c.Status != CheckFail || !strings.Contains(c.Message, want) {
 			t.Errorf("%s: want a failure naming %q, got %+v", id, want, c)

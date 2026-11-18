@@ -184,7 +184,7 @@ func (x *acq) image(ctx context.Context, node string, img VMImage, rows []pve.Cl
 	var refusal *templateupdates.LifecycleError
 	switch {
 	case errors.Is(err, templateupdates.ErrBlocklisted):
-		return "", 0, permanent(CodeImageBlocked, "%s %s is on the template update blocklist: install a newer ProxCloud release.", img.Package, img.Digest)
+		return "", 0, permanent(CodeImageBlocked, "%s %s is on the template update blocklist: %s.", img.Package, img.Digest, blockedAdvice(x.in))
 	case errors.Is(err, templateupdates.ErrDuplicate):
 		return string(templateupdates.StepQueued), 0, nil
 	case errors.As(err, &refusal) || errors.Is(err, templateupdates.ErrRefused):

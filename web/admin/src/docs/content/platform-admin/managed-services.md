@@ -94,7 +94,7 @@ The failed stage shows a code, a message and what to do.
 |---|---|
 | `preflight_failed` | Open the failed checks of the stage. Run the script again or correct the settings, then **Check**. |
 | `isolation_not_enforced` | Add the networks named in the message to **Networks tenants must not reach** on the provider's page under **Cloud providers**. Then press **Check**: its isolation row links to that page and has the button **Run a provider sync, then check again**. Check too that the datacenter firewall is on. |
-| `image_import_failed`, `image_import_stalled`, `image_blocked` | Open **Template updates** to see the import. A blocked image needs a newer ProxCloud release. |
+| `image_import_failed`, `image_import_stalled`, `image_blocked` | Open **Template updates** to see the import. A blocked image needs a newer ProxCloud release on a new installation; an installed platform stays on its release's images, and no release changes them yet. |
 | `seed_clone_failed` | Fix the storage or the node named in the message, then **Retry**. |
 | `seed_config_refused` | The message carries Proxmox's own error: fix the bridge, the store, the node or the token right it names, then **Retry**. A CD that could not be rendered or built is a defect: report the message. |
 | `seed_not_booted` | Open the seed VM's console in Proxmox. **Retry** builds a new seed. |
@@ -108,7 +108,7 @@ The failed stage shows a code, a message and what to do.
 | `capmox_auth_failed` | Proxmox refused the token, or the seed cannot reach the Proxmox API URL of the settings. Check the URL as the platform network reaches it and paste the token secret again, then **Retry**. The message names the log that says which. |
 | `workload_api_unreachable` | Add a route from the ProxCloud host to the API address, then **Retry**. When the message says the cluster's API refuses the credential: it does so for some seconds after it starts; if the run failed on it, **Retry**. During a removal: restore the route and **Remove again**, or tick the option for a cluster that does not answer when it is beyond repair. |
 | `provider_conflict` | Correct the provider named in the message under **Cloud providers**, then **Retry**. |
-| `bom_unsupported` | The platform was installed by another ProxCloud release, and no release upgrades an installed platform yet. Go back to the ProxCloud release that installed it. Or, if no tenant cluster or database must be kept, delete them all, then remove managed services and install again: **Remove** deletes the platform cluster. |
+| `bom_unsupported` | The platform was installed by a ProxCloud whose platform release this one does not carry (a development build, or a release from before 0.8.0), and no release upgrades an installed platform yet. Go back to the ProxCloud that installed it. Or, if no tenant cluster or database must be kept, delete them all, then remove managed services and install again: **Remove** deletes the platform cluster. |
 | `credentials_missing` | Paste both token secrets in step 2, then **Retry**, or **Remove again** for a removal. |
 | `stage_unavailable` | The run was recorded by another ProxCloud release. No action in this release. |
 | `tenants_exist` | Delete the tenant clusters and databases, then **Remove** again. |
@@ -123,7 +123,7 @@ The page shows each component with its live state, read from the seed, and the t
 2. Add a backup job for the seed VM. The page prints the command: a daily snapshot, compressed, of which seven are kept. The backup holds the seed's credentials: use a backup store that is not the boot, ISO or import store of the settings, and that no API token other than your own can read. The operator guide (docs/managed-services.md, "Credentials and the seed backup") gives the checks. The page cannot see whether a job exists.
 3. Attach the providers to projects, and add price rules for clusters and databases.
 
-**Apply this release** in step 4 runs the stages again with the saved settings: it repairs what is missing, applies changed sizes and counts, and renews the seed's access to the platform cluster. This release cannot yet move an installed platform to the components of a newer ProxCloud release: after such an upgrade the review says so and the run is refused with `bom_unsupported`.
+**Apply this release** in step 4 runs the stages again with the saved settings: it repairs what is missing, applies changed sizes and counts, and renews the seed's access to the platform cluster. A platform stays on the platform release that installed it. This release cannot yet move an installed platform to the components of a newer ProxCloud release: after a ProxCloud upgrade the review says that the platform stays on its release, lists that release's contents, and **Apply this release** runs with them. A platform installed by a development build is not kept this way: after an upgrade its run is refused with `bom_unsupported`.
 
 ## Seed access and removal
 

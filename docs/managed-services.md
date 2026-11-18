@@ -306,7 +306,7 @@ the settings (`409 rev_conflict`: the page reads them again).
 | `boot-iso-grant` | `capmox@pve` may not upload and delete on the ISO store | Run the script again |
 | `boot-iso` | The ISO store is shared, takes no ISOs, or is not the only ISO store of the boot storage | Name a node-local ISO store |
 | `placement` | A node an image goes to lacks the import store with `import` content or the boot store | Change the nodes or the stores |
-| `images` | A BOM image is on the template update blocklist | Install a newer ProxCloud release |
+| `images` | A BOM image is on the template update blocklist | A new installation: install a newer ProxCloud release. An installed platform stays on its release and its images, and no release moves it to other images yet (see "No upgrade between BOMs"): the message says which case applies, and an apply that must import that image stays blocked |
 
 A check that cannot be read fails. A warning fails nothing: the page then says "No check failed" with the
 number of warnings and not "Every check passed", the answer's `ok` stays `true`, and a run's first stage
@@ -394,7 +394,8 @@ run; the saved installation is enough for it, no project or tenant network is ne
 
 ### Step 4: Review and install
 
-Shows the release and its components (`GET /platform/bom`), what is created (one seed VM, one
+Shows the release and its components (`GET /platform/bom`; for a platform that stays on the
+release that installed it, that release's: `GET /platform/bom?sha256=<installed>`), what is created (one seed VM, one
 control plane and the worker machines, the two providers), the cores and memory per node, and for an
 installed platform the plan (`GET …/plan`). **Install** (later **Apply this release**) starts a run
 (`POST …/runs {kind: apply}`). You can leave the page; the run goes on.
@@ -491,7 +492,7 @@ stage is still trying.
 | `credentials_missing` | 3 to 5, 7, 8, Remove | A token secret is not stored (the message names which) | Paste it in step 2, then **Retry** or **Remove again** |
 | `image_import_failed` | 2 | Proxmox could not be read; a node lacks the import or boot store; an import failed or was refused. Also: an import is finished but the VM at its VMID is not a template in `pc-templates` on its node (moved to another pool or node, or out of the portal token's view), so the stage can neither use it nor call it deleted; the message names the VM | Open Template updates to see the import, then **Retry**. If it keeps failing, install a newer release. For a template that was moved: put it back in `pc-templates` on its node, or delete it so that it is imported again, then **Retry** |
 | `image_import_stalled` | 2 | No import moved for an hour | Open Template updates to see the import, then **Retry**. If it keeps failing, install a newer release |
-| `image_blocked` | 2 | A BOM image is on the template update blocklist | Install a newer ProxCloud release |
+| `image_blocked` | 2 | A BOM image is on the template update blocklist | A new installation: install a newer ProxCloud release. An installed platform stays on its release and its images, and no release moves it to other images yet (see "No upgrade between BOMs"): the message says which case applies, and an apply that must import that image stays blocked |
 | `seed_clone_failed` | 3, Remove | The clone task failed or was refused; stage 2 recorded no seed template; the VM stays locked. Also, with nothing being cloned: Proxmox could not be read with the CAPI token while looking at the seed VM or the pool `proxcloud-seed` (unreachable, or the token is refused), in stage 3 on a ready seed or in `remove-cluster` and `remove-seed` | Fix the storage or the node the message names, **Retry**. For a read that failed: check that `capmox@pve!capi` still exists and the stored secret is current, then **Retry** or **Remove again** |
 | `seed_config_refused` | 3, Remove | Proxmox refused a config change, the read of the VM's config after it, the CD upload, a firewall rule or the start (the message carries Proxmox's own error); the CD could not be rendered or built (`The seed's CD could not be rendered` or `… built`: for example Proxmox reports the seed's `net0` without a MAC address); at Remove, the VM is locked or carries another installation's tag | Fix what Proxmox's error names: the bridge, the boot or ISO store, the node, or a right of `capmox@pve!capi` (then run the script again), and **Retry**; it builds a new seed VM. A CD that could not be rendered or built is a defect, not a setting: nothing was stored and no CD was uploaded, Retry will not pass, report the message. A VM with another installation's tag is not deleted: look at it in Proxmox |
 | `seed_not_booted` | 4 | The seed's guest agent did not answer in time: the VM did not boot, or its first boot failed (for example the k3s binary or its install script could not be downloaded, or one failed its checksum) | Open the seed VM's console in Proxmox. **Retry** builds a new seed |
@@ -508,7 +509,7 @@ stage is still trying.
 | `workload_api_unreachable` | 8 to 10, Remove | The cluster's API does not answer from the API's host, or its kubeconfig or CA on the seed is not usable, or it refused the admin kubeconfig or the request with a `401` or `403` at five looks on end (as for `seed_api_unreachable`) | Add a route from the ProxCloud host to the API address, **Retry**. At Remove: restore the route and **Remove again**, or tick the option for a cluster that does not answer |
 | `nodes_timeout` | 9 | Not every node is Ready with its group label after the first wave | **Retry** |
 | `provider_conflict` | 10 | A provider with the same name exists that is not this installation's, two rows carry its marker, or the provider validation refused the row | Correct or rename that provider under Cloud providers, **Retry** |
-| `bom_unsupported` | start, plan | The installed BOM is not the one this release carries | No release upgrades between BOMs ([Not implemented yet](#not-implemented-yet)). Go back to the ProxCloud release that installed the platform. Or, if no tenant cluster or database must be kept: delete them all (Remove refuses with `tenants_exist` otherwise), remove managed services, which deletes the platform cluster, and install again |
+| `bom_unsupported` | start, plan | The installed BOM is not one this release carries: its own, or that of an earlier release from 0.8.0 on. A platform installed by a build of `main` (`dev-<sha>`) gets this after an upgrade | No release upgrades between BOMs ([Not implemented yet](#not-implemented-yet)). Go back to the ProxCloud release that installed the platform. Or, if no tenant cluster or database must be kept: delete them all (Remove refuses with `tenants_exist` otherwise), remove managed services, which deletes the platform cluster, and install again |
 | `portal_changed` | any | ProxCloud was upgraded during the run and no longer carries the run's BOM. The stage the run stood at reads `failed` with this code | **Retry** |
 | `job_dead` | any | The run's job ran out of attempts | **Retry**, or **Remove again** |
 | `platform_disabled` | start | The switch, or template updates, is off | `--managed-services` |
@@ -1040,18 +1041,35 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
   and `kamaji-crds` as version `26.11.2-edge`, packaged from the upstream tag of that name. CI
   compares the digests; ArgoCD does not, so a version replaced in the mirror between two checks
   would be installed.
-- **No upgrade between BOMs.** A release carries one BOM. An apply on an installed platform runs
-  with the installed BOM, which must be the one the release carries: it repairs, applies changed
-  settings and renews the seed ArgoCD's token. After a ProxCloud upgrade that changes the BOM,
-  `POST …/runs` answers `409 bom_unsupported` and the plan is blocked, until a release carries the
-  previous BOMs. Provider (Cluster API) upgrades are refused as `capi_init_failed`.
+- **No upgrade between BOMs.** An installed platform stays on the BOM that installed it. A release
+  carries its own BOM and, from the release after v0.8.0 on, the BOM of each earlier release back
+  to `0.8.0` (`deploy/platform/previous/`, byte for byte the file of that release's tag). After a
+  ProxCloud upgrade the platform a release installed keeps working: the reads and the Check, an
+  apply (**Apply this release**) and Remove. The apply runs with the installed BOM and takes every
+  pin from it, the images, k3s, the charts and their digests, the Cluster API providers and the
+  charts the two providers name: it repairs, applies changed settings and renews the seed ArgoCD's
+  token, and it moves no component to the version of the newer release. Step 4 says so ("The
+  platform stays on release 0.8.0"), lists the contents of the installed release, and the plan
+  names the release the build would install as `newer`. Moving an installed platform to a newer
+  BOM is a later release. Provider (Cluster API) upgrades are refused as `capi_init_failed`.
+  - **Not verified on a lab.** No apply was run with a build that carries a previous BOM against a
+    platform that v0.8.0 installed. What tests show: the file under `previous/` has the sha256 that
+    a v0.8.0 platform records (`8eb87498…6600c6`), what the renderers of this build make of the
+    0.8.0 BOM is byte for byte what v0.8.0 rendered from it (the goldens of the tag), and a run on
+    fakes takes its images, Applications and provider bodies from the 0.8.0 BOM.
+  - The pins come from the installed BOM; the code that renders them is the running release's. A
+    release that changes a renderer changes what the next apply writes to an installed platform.
+    `TestRenderGoldenOfPreviousBOMs` shows such a change as a diff in review.
+  - A provider that the apply registers again gets the tenant chart versions of the installed
+    BOM, not those of the newer release.
   Two consequences to know before an install is finished on a build that is not a release:
   - The installed BOM is recorded by the sha256 of the BOM file as that build carries it, in
     stage 11 only. Any later change of the file, a digest filled in for an entry that said
-    `pending` or a comment, is another BOM. A platform installed on a `-dev` build is therefore
-    refused (`bom_unsupported`) by every later build whose BOM file differs: keep the build that
-    installed it, or Remove and install again. Finish an install you want to keep only on a build
-    whose BOM has no `pending` digest.
+    `pending` or a comment, is another BOM. Only the BOMs of releases are kept as previous ones. A
+    platform installed on a `-dev` build (a `dev-<sha>` build of `main`, `0.8.0-dev` or
+    `0.9.0-dev`) is therefore refused (`bom_unsupported`) by every later build whose BOM file
+    differs, a release included: keep the build that installed it, or Remove and install again.
+    Finish an install you want to keep only on a release.
   - An installation that never finished has no recorded BOM. **Retry** after a ProxCloud upgrade
     runs with the new build's BOM on whatever the failed run left on the seed and the cluster,
     without the comparison an installed platform gets. Nothing checks that step from one BOM to the

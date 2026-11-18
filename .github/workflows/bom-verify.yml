@@ -1,7 +1,8 @@
 name: bom-verify
 
-# Compares every pin of deploy/platform/platform-bom.yaml with what the registries serve
-# (.github/scripts/bom_verify.py: OCI manifest digests, chart index digests, sha256 of the k3s downloads).
+# Compares every pin of deploy/platform/platform-bom.yaml, and of each previous BOM under deploy/platform/previous/,
+# with what the registries serve (.github/scripts/bom_verify.py: OCI manifest digests, chart index digests, sha256 of
+# the k3s downloads).
 #   pull request touching the BOM or the script -> the script's unit tests, then the comparison
 #   weekly                                      -> the comparison on main: a tag or an index entry that was moved
 #                                                  upstream shows within a week, without waiting for a BOM change
@@ -40,3 +41,11 @@ jobs:
         run: python3 -m unittest discover -s .github/scripts/tests -p test_bom_verify.py -v
       - name: Compare the BOM with the registries
         run: python3 .github/scripts/bom_verify.py
+      # The BOMs of earlier releases, which this build embeds for the platforms they installed (docs/ci-release.md,
+      # "Previous BOMs"): an apply on such a platform pulls by these pins, so they must still be served.
+      - name: Compare the previous BOMs with the registries
+        run: |
+          for bom in deploy/platform/previous/*.yaml; do
+            echo "== $bom"
+            python3 .github/scripts/bom_verify.py --release --bom "$bom"
+          done

@@ -433,6 +433,10 @@ release with their sha256, the Cluster API providers, the tenant charts, and
 every component with its cluster, wave, namespace, node group and chart
 (`repo`, `name`, `version`, `digest`). `sha256` is the hash of the file, the
 key a run records it by. It needs `admin:service:read` and changes nothing.
+With `?sha256=<hash>` it answers the BOM with that hash that the release
+carries, its own or the one of an earlier release from 0.8.0 on
+(`deploy/platform/previous/`), which a platform that release installed stays
+on; `404 bom_unsupported` when the release carries none with that hash.
 
 The file pins exact versions only. A digest is the chart's OCI manifest
 digest, or for an `https://` repository the `digest` of that version in its
@@ -512,11 +516,16 @@ are several, `errors.details.problems`.
   when `capmox@pve!capi` or `csi@pve!csi` holds a privilege on `/pool`, `/storage`
   or `/vms`, and names the `pveum acl delete` command, or which row of
   `pveum acl list` is the one to remove. A row that cannot be read fails.
-- `GET /installations/{id}/plan`: the installed BOM against this release's
-  (`installed`, `target`, `changes`, `blocking`); a version change not listed in
-  `upgradeFrom` and the removal of a stateful component block, and an installed
-  BOM this release does not carry blocks with `bom_unsupported` (no release
-  upgrades between BOMs yet).
+- `GET /installations/{id}/plan`: what an apply does (`installed`, `target`,
+  `newer`, `changes`, `blocking`). `target` is the BOM the apply runs with: this
+  release's for a new installation, the installed one for an installed platform,
+  which stays on its BOM, so `changes` is empty. `newer` is this release's own
+  BOM (`release`, `sha256`) when the platform stays on the BOM of an earlier
+  release; absent otherwise. No release moves an installed platform to a newer
+  BOM yet. An installed BOM this release does not carry (its own and those of
+  earlier releases from 0.8.0 on; not one of a build of `main`) blocks with
+  `bom_unsupported`. A version change not listed in `upgradeFrom` and the removal
+  of a stateful component block; no plan produces either today.
 
 - `GET /installations/{id}?live=1`: the installation with `live`
   (`phase`, `components[] {name, cluster, sync, health}`, `error`, `code`),
@@ -531,7 +540,8 @@ are several, `errors.details.problems`.
   and its durable job (`platform.run/v1`, key `platform-run-<runId>`) are
   written in one transaction; `409 run_active` while another run of the
   installation is not finished, `409 bom_unsupported` when the installed BOM is
-  not one this release carries. Without the runner (it starts only when
+  not one this release carries. An apply on an installed platform runs with
+  the installed BOM (the run's `bom`), also when this release's own is another. Without the runner (it starts only when
   `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true` too) the route answers
   `409 platform_disabled`; the reads below still work. A plain remove is
   `{"kind":"remove"}`. `confirm` is optional, belongs to a remove only and asks
