@@ -8,9 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 None of the entries below is verified on a lab yet: each one says so. The chart changes among them reach no
-platform and no cluster until the tag `proxmox-kamaji-cluster-v0.1.14` is cut, once, for the health check and
-the VLAN tag together, and the platform BOM pins it (`tenantCharts.kubernetes`, the component `pc-platform`);
-the same holds for `proxcloud-platform-v0.1.3`. The BOM on `main` still pins 0.1.13 and 0.1.2.
+platform and no cluster until the tag `proxmox-kamaji-cluster-v0.1.14` is cut, once, for the health check, the
+VLAN tag and the control plane count together, and the platform BOM pins it (`tenantCharts.kubernetes`, the
+component `pc-platform`); the same holds for `proxcloud-platform-v0.1.3`. The BOM on `main` still pins 0.1.13
+and 0.1.2.
 
 ### Added
 
@@ -69,6 +70,79 @@ the same holds for `proxcloud-platform-v0.1.3`. The BOM on `main` still pins 0.1
   `proxmox.network.vlan`. Without the values the render is what 0.1.13 gave. Not published: the tag is owed. Not
   verified on a lab: the chart tests render with Helm only.
 
+- **Managed services: one root command per installation.** Step 2 shows a command for the installation
+  (`GET /api/v1/admin/setup/proxmox-script?installation=<id>`) that prints no secret and ends with one
+  `PC-ENROLL:` line carrying the secrets of the tokens it made; paste that line into the page
+  (`PUT …/credentials` with `enroll`; the two by-hand fields stay under a fold). The command stops, before it
+  changes anything, on a `capmox@pve!capi` or `csi@pve!csi` that was not made for the installation and whose
+  secret ProxCloud does not hold, and prints the command that removes it; it never removes a token itself. A
+  stored secret counts only while it still opens the token. A replayed or older line is refused
+  (`409 enrollment_replayed`), and so is a line from a node whose clock is more than five minutes ahead
+  (`400 enrollment_clock_ahead`). Not verified on a lab: the command was not run on a Proxmox node.
+- **Managed services: the install writes the cluster firewall rule that lets the seed and the platform machines
+  reach the Proxmox API** (comment `proxcloud:pve-api:<installation id>`), at every apply too, and Remove
+  deletes it. Not verified on a lab.
+- **Managed services: Check rows `boot-store` and `pve-api-rule`.** Not verified on a lab.
+- **Managed services: a green install is usable by a tenant.** Up to v0.8.2 a platform that read ready refused
+  every tenant cluster create, because the install registered the Kubernetes provider with no version and
+  attached neither provider to a project. Not verified on a lab.
+  - Stage 10 of every apply offers the BOM's Kubernetes version on the Kubernetes provider once a node image of
+    it is published on every node the platform cluster uses. A version the provider already names is never
+    overwritten or removed, and a version is offered once: one you delete from the provider afterwards is not
+    added again by an apply. On a site that stays on a 0.8.x BOM, the first apply after the upgrade adds the
+    BOM's version when its image is published on the platform's nodes and the provider does not name it, also
+    when that image was published only to test it.
+    `POST /api/v1/admin/platform/installations/{id}/kubernetes-version` does the same on demand
+    (`409 node_image_unpublished` names the nodes).
+  - The install still does not publish the node image it imports: a copy is published only after its smoke test
+    passed. The ready card lists each node's copy and has one button, **Test, publish and offer Kubernetes
+    <version>**, that runs "Publish on all nodes" for the image and then offers the version. It needs the
+    provider's smoke-test network (`config.templateSmoke`).
+  - New setting `spec.tenants.attach` (`all`, `new`, `none`; step 1 of the page): who gets managed Kubernetes
+    and databases. Preselected `new` on a site that has projects and `all` on a site with none. A run applies a
+    changed choice once, with the attach policy and a bulk attach of every project, both audited; saving `all`
+    needs `admin:project:update` besides `admin:service:manage`. An installation saved before v0.9.0 has no
+    setting, which means `none`: nothing changes for it.
+  - The Check (row `scheduler`, a warning) and the ready card say what tenants miss while the job scheduler is
+    off (project delete, refresh of resource state, charges) with the command that turns it on. Nothing turns it
+    on.
+- **Customer console: a first Kubernetes cluster without leaving the form.** The form selects the project's
+  network when exactly one can hold the nodes, offers **Create a network for this cluster** when the project has
+  none, and marks networks listed with DHCP; the API refuses a network in a zone with DHCP. Not verified on a
+  lab.
+- **Managed services: presets.** Step 1 starts from **Homelab** (one node or a small site: one control plane
+  machine, one small machine per group), **Standard** (three control plane machines on one node where the
+  platform's BOM builds three, else one; two machines per group) or **Custom**. A preset fills the form of a new
+  installation and every field stays editable; it is switched off on an installed platform. The API takes
+  `preset` on a create or update and stores the filled spec, not the preset. Not verified on a lab.
+- **Managed services: one or three control plane machines** for the platform cluster
+  (`spec.clusters[].controlPlane.replicas`), all on one Proxmox node. Three keep the platform's API up when one
+  control plane VM is lost or replaced; they do not protect against the loss of the node or its disk. From 1 to
+  3 is an apply on an installed platform; once a run has built three, 3 to 1 is refused. Three need cluster
+  chart 0.1.14 in the platform's BOM, which the BOM on `main` does not pin yet: until then the save refuses 3.
+  Not verified on a lab.
+- **Managed services: the Check row `capacity`.** It compares, per node, the memory of the machines and of the
+  spare machines a rolling update makes with what can be reserved on the node, counted as the machines are
+  counted when they are cloned. Before the first install it fails without room for the machines and the control
+  plane's spare, and warns without room for the groups' spares; on an installed platform it warns. Not verified
+  on a lab.
+- **Cluster chart `proxmox-kamaji-cluster` 0.1.14:** `controlPlane.kubeadm.replicas` (1 or 3) and
+  `controlPlane.kubeadm.vipLease`, in the same unpublished 0.1.14 as the health check and the VLAN tag. Without
+  the values the control plane renders as 0.1.13 gave it. Not published: the tag is owed. Not verified on a lab.
+- **Customer console, Members: a list of pending project invitations with Revoke.** Each pending invitation has
+  Copy link. On a site that sends no email the page says so and the invite dialog shows the link instead of
+  "sent"; the invitee can also sign in with the invited address and find the invitation on the start page. API:
+  `GET /project-invites/project/{projectId}`, `DELETE /project-invites/project/{projectId}/{inviteId}`;
+  `POST /project-invites/invite` answers with the invitation. Not verified on a lab.
+- **Security group rules can be edited** (`UPDATE_RULE`: the changed rule is added, then the old one removed). A
+  rule made in Proxmox with settings the form does not have is not edited (409). The rule form has a protocol
+  list and a description, and states that rules are ingress only. Not verified on a lab.
+- **Customer console, servers: Hard reboot under More actions.** A "How to reach this server" card, and a notice
+  on the create form, when the project has no public network. Not verified on a lab.
+- **Customer console: the load balancers page lists what the operator must enable** (public network, public
+  address quota, appliance image) instead of failing at create (`LIST_LOAD_BALANCER_WARNINGS`). The file shares
+  page shows the reach warning on the page. Not verified on a lab.
+
 ### Changed
 
 - **Security groups: a name starting with `k8s-` is reserved for Kubernetes clusters.** Creating one answers
@@ -98,6 +172,26 @@ the same holds for `proxcloud-platform-v0.1.3`. The BOM on `main` still pins 0.1
   the BOM at `0.8.2`, and the release gate refuses only `-dev`. A platform installed by `v0.8.2` stays on its BOM
   after an upgrade, as one installed by `v0.8.0` or `v0.8.1` does; a platform installed by a `dev-<sha>` build of
   `main` is still refused by a later build (`bom_unsupported`).
+
+- **Managed services: saving the settings adds the seed's address, the API address and the node range to the
+  provider's blocked networks** and says what it added; the next provider sync writes the firewall rules. A
+  later save takes off the entries an earlier save added and the settings no longer need (a corrected address or
+  range), never an entry you wrote; a Remove takes none off. Not verified on a lab.
+- **Managed services: saving the settings sets `"dhcp": false` on the provider's default tenant zone** when it
+  is a `simple` zone whose config says nothing about DHCP and Proxmox does not have it yet, so the zone is
+  created without a DHCP server, which tenant Kubernetes clusters need. A zone that exists is never changed; a
+  config that says `"dhcp": true` stays. Not verified on a lab.
+- **Managed services: the `credentials`, `isolation`, `tenant-network` and `flags` checks name the one action
+  that fixes them.** Not verified on a lab.
+- **Managed services: the review step** shows each node's free memory next to what the settings place on it. Not
+  verified on a lab.
+- **Managed services: "Use the lab profile" is replaced by the Homelab preset.** Not verified on a lab.
+- **Managed services: the API refuses `spec.sandbox`** (the place for the sandbox service's placement, built in
+  a later release) and `controlPlane.nodes` other than the control plane's one node. Not verified on a lab.
+- **Customer console: Create network says it is waiting for the network to be applied on the nodes.** Not
+  verified on a lab.
+- **Customer console: the create server form explains which security group applies when none is ticked.** Not
+  verified on a lab.
 
 ## [0.8.2] - 2026-11-18
 
