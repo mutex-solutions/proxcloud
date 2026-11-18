@@ -80,6 +80,9 @@ type Runner struct {
 	// provider rows DISABLED (Remove). The admin handler implements both.
 	Register func(ctx context.Context, body map[string]any) (string, error)
 	Disable  func(ctx context.Context, installationID string) error
+	// SDNLock takes the site's SDN apply lock (the one a tenant network change takes) for the routed platform network;
+	// acquired=false when another change holds it. Nil in tests: no lock.
+	SDNLock  func(ctx context.Context) (release func(), acquired bool, err error)
 	Log      *slog.Logger
 	Poll     time.Duration
 	Lease    time.Duration // one minute when zero, renewed every third

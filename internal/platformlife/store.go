@@ -20,6 +20,7 @@ const (
 	InstallationCollection = "platformInstallation"
 	SecretCollection       = "platformSecret"
 	RunCollection          = "platformRun"
+	ProbeCollection        = "platformTenantProbe"
 )
 
 var (
@@ -67,11 +68,27 @@ func NewStore(db *pgdoc.DB, enc *textcrypt.Encryptor) *Store { return &Store{DB:
 func (s *Store) installations() *pgdoc.Store { return s.DB.C(InstallationCollection) }
 func (s *Store) secrets() *pgdoc.Store       { return s.DB.C(SecretCollection) }
 func (s *Store) runs() *pgdoc.Store          { return s.DB.C(RunCollection) }
+func (s *Store) probes() *pgdoc.Store        { return s.DB.C(ProbeCollection) }
+
+// Probe is the installation's last tenant path test, nil when none was run.
+func (s *Store) Probe(ctx context.Context, id string) (*TenantProbe, error) {
+	var p TenantProbe
+	found, err := s.probes().Get(ctx, id, &p)
+	if err != nil || !found {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// SaveProbe replaces the installation's tenant path test.
+func (s *Store) SaveProbe(ctx context.Context, p *TenantProbe) error {
+	return s.probes().Upsert(ctx, p.ID, p)
+}
 
 // Ensure creates the tables and indexes at startup (writes run inside transactions, where pgdoc cannot auto-create a
 // table). serviceId is unique: one installation per provider.
 func (s *Store) Ensure(ctx context.Context) error {
-	for _, c := range []*pgdoc.Store{s.installations(), s.secrets(), s.runs()} {
+	for _, c := range []*pgdoc.Store{s.installations(), s.secrets(), s.runs(), s.probes()} {
 		if err := c.Ensure(ctx); err != nil {
 			return err
 		}

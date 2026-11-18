@@ -160,7 +160,7 @@ func (x *acq) renderInput() RenderInput {
 	}
 	in := RenderInput{ID: x.in.ID, Name: x.in.Name, Region: region, RegionName: str(x.es.Config, "regions", region, "displayName"),
 		PVEAPIURL: sp.PVEAPIURL, BootStorage: sp.Storage.Boot, SeedAddress: sp.Seed.Address, SSHKeys: sp.Seed.SSHKeys, Templates: templates, WorkerMTU: mtu,
-		Network: RenderNetwork{Bridge: sp.Network.Bridge, Gateway: sp.Network.Gateway, Prefix: prefix.Bits(), DNS: sp.Network.DNS, MTU: sp.Network.MTU},
+		Network: RenderNetwork{Bridge: sp.Network.Bridge, VLAN: sp.Network.VLAN, Gateway: sp.Network.Gateway, Prefix: prefix.Bits(), DNS: sp.Network.DNS, MTU: sp.Network.MTU},
 		Cluster: RenderCluster{Endpoint: c.Endpoint, NodeRange: []string{c.NodeRange}, MetalLBRange: c.MetalLBRange,
 			ControlPlane: RenderMachine{Node: c.ControlPlane.Node, Cores: c.ControlPlane.Cores, MemoryMiB: c.ControlPlane.MemoryMiB, DiskGiB: c.ControlPlane.DiskGiB}}}
 	for _, g := range c.NodeGroups {

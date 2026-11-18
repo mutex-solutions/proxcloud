@@ -1019,6 +1019,10 @@ func run() error {
 			return fmt.Errorf("platform store: %w", err)
 		}
 		adminH.SetPlatform(platformStore)
+		sdnLock := func(ctx context.Context) (func(), bool, error) {
+			return lock.New(pg).Wait(ctx, project.SDNApplyLockName, project.SDNApplyMaxFor, 30*time.Second)
+		}
+		adminH.SetPlatformSDNLock(sdnLock)
 		// The sync writes a provider's isolation rules without a project only where an installation is saved.
 		syncJob.WithPlatformInstallations(platformStore.HasInstallation)
 		if cfg.Jobs.TemplateUpdatesVM {
@@ -1027,6 +1031,7 @@ func run() error {
 				Jobs: jobStore, State: platformStore, Log: log, Preflight: adminH.PlatformPreflight,
 				Imports:  platformlife.TemplateUpdates{Service: tuSvc},
 				Register: adminH.PlatformRegister, Disable: adminH.PlatformDisable,
+				SDNLock: sdnLock,
 				Provider: func(ctx context.Context, id string) (*externalservice.ExternalService, error) {
 					es, err := esSvc.Get(ctx, id)
 					if errors.Is(err, externalservice.ErrNotFound) {

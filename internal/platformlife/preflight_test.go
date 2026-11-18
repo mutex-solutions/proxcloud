@@ -48,7 +48,7 @@ func (f *preflightPVE) serve(w http.ResponseWriter, r *http.Request) {
 	token = token[:strings.LastIndex(token, "=")]
 	data := map[string]string{
 		"/cluster/status":           `[{"type":"node","name":"pve1","ip":"192.0.2.11"}]`,
-		"/nodes/pve1/network":       `[{"iface":"vmbr0","address":"192.0.2.11","gateway":"192.0.2.1","cidr":"192.0.2.11/24"}]`,
+		"/nodes/pve1/network":       `[{"iface":"vmbr0","address":"192.0.2.11","gateway":"192.0.2.1","cidr":"192.0.2.11/24"},{"iface":"vmbr1","type":"bridge"}]`,
 		"/cluster/firewall/options": `{"enable":1}`,
 		"/cluster/firewall/rules":   `[]`,
 		"/cluster/sdn/vnets":        `[]`,
@@ -164,8 +164,8 @@ func TestPreflight(t *testing.T) {
 	if !OK(checks) {
 		t.Fatalf("a set-up site: %+v", checks)
 	}
-	if got := len(checks); got != 17 {
-		t.Errorf("%d rows, want 17: %+v", got, checks)
+	if got := len(checks); got != 18 {
+		t.Errorf("%d rows, want 18: %+v", got, checks)
 	}
 	if c := checkMap(checks)["csi-vmid"]; c.Status != CheckOK {
 		t.Errorf("VM id 9999 free: %+v", c)
