@@ -259,8 +259,12 @@ management-cluster RBAC predates them.
 {"cluster": {"status": "PROGRESSING",
   "attention": {"code": "control_plane_stalled", "since": "2026-11-17T09:12:00Z"},
   "node_groups": [{"name": "workers", "count": 2, "ready_replicas": 1, "phase": "ScalingUp",
-    "progress": {"code": "not_joined", "since": "2026-11-17T09:20:00Z", "machines": 1, "attention": true}}]}}
+    "progress": {"code": "not_joined", "since": "2026-11-17T09:20:00Z", "machines": 1, "attention": true,
+      "machineNames": ["pc-c-1-workers-pve2-x7k2p-9d4tq"]}}]}}
 ```
+
+`progress.machineNames` lists at most five machines of the group that need attention, by the name `REPLACE_MACHINE`
+takes; it is absent when none does or none is made yet.
 
 `progress.code` is one of `provider_access_refused`, `no_capacity`, `vm_create_failed`, `vm_create_retrying`,
 `waiting_control_plane`, `creating_vm`, `starting_vm`, `not_joined`, `node_not_ready`, `provisioning`;
@@ -309,7 +313,8 @@ the service account may not read Machines.
 of one answer: what cloud-init in the worker says, read at this request through the Proxmox guest agent
 (`errors` of `/run/cloud-init/result.json`, `logTail` the last 40 lines of `/var/log/cloud-init-output.log`) and
 never stored. kubeadm bootstrap tokens, CA hashes, certificate keys and other credentials are replaced by
-`[MASKED]` or `[REDACTED]`. `readError` instead says in general words why nothing could be read. `healthChecks` are
+`[MASKED]` or `[REDACTED]`. The read permission is enough for it: a caller with `admin:service:read` makes the portal
+read these two files in the worker. `readError` instead says in general words why nothing could be read. `healthChecks` are
 the node groups' MachineHealthChecks (cluster chart 0.1.14 and later), `[]` when there is none or the service
 account may not read them. No tenant route carries either field.
 
@@ -318,10 +323,12 @@ body none or `{"confirm": true}`: deletes that worker Machine, so that Cluster A
 Proxmox node; the node group's count, placement and the project's quota are not touched. `200`
 `{"result": "REPLACING"}`. `409` with `details.reason` `last_ready_node` when the machine is the only Ready node of
 its node group and `confirm` is not true; `409` when it is already being removed; `404` for a machine that is not a
-worker of this cluster; `502` when the service account may not delete Machines. A tenant has the same as the
+worker of this cluster; `502` when the service account may not delete Machines, with what to apply
+(`deploy/mgmt-cluster/rbac.yaml`, or platform chart 0.1.3). A tenant has the same as the
 cluster action `REPLACE_MACHINE` with `{"machine": "<name>", "confirm": false}` on
-`POST /api/v1/project/{pid}/cloud/{id}/action`, with the same answers (`{"result": "REPLACING"}`); the machine's
-name is the name of its server in the project. [managed-k8s.md](managed-k8s.md#a-worker-that-does-not-join) has the
+`POST /api/v1/project/{pid}/cloud/{id}/action`, with the same answers (`{"result": "REPLACING"}`; the `502` there says to contact the operator); the machine's
+name is the name of its server in the project, and `node_groups[].progress.machineNames` has the names of the
+machines that need attention. [managed-k8s.md](managed-k8s.md#a-worker-that-does-not-join) has the
 limits.
 
 Publishing a node image on every node: `GET /api/v1/admin/template-updates/publish-all?serviceId=…&digest=sha256:…`

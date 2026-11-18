@@ -337,6 +337,15 @@ waiting for its next refresh. To decide it on a lab, read during the window
 right after the refresh means ArgoCD's health was stale and the portal can ask for that refresh itself; still
 Progressing means a part of the Application is, and `argocd app get <clusterId>` names it.
 
+A likely cause, **from memory of ArgoCD 3 and not re-read in its source or measured**: ArgoCD 3 ignores updates of a
+tracked resource that change only its status, so the Application's health is recomputed at the periodic reconcile
+(120 s plus up to 60 s of jitter by default) and not when the MachineDeployment's status changes. That fits the 1
+min 46 s to 2 min 21 s seen. If the read above shows a stale health, there are two fixes, neither made here: the
+status sync sets `argocd.argoproj.io/refresh=normal` on the Application when the cluster's own objects are settled
+and ArgoCD still says Progressing; or `deploy/mgmt-cluster/argocd-health.yaml` gets a
+`resource.customizations.ignoreResourceUpdates` override for `cluster.x-k8s.io/MachineDeployment` that does not
+ignore its status.
+
 ### A worker that does not join
 
 A worker's first boot runs `kubeadm join` once. When it fails (no route to the cluster's endpoint, a wrong image)
@@ -376,15 +385,25 @@ Proxmox node and a new join.
   never replaced by it (start at boot is the tool for a reboot). A Machine whose Node object was deleted is
   replaced; that is Cluster API's own rule for every MachineHealthCheck.
 - New clusters get the block when the provider's `chartVersion` is 0.1.14 or later. An existing cluster gets it
-  when it is moved onto such a chart (**Bump** on the provider's page, or the tenant's platform update), unless
-  its values already carry one; **it acts at once on a machine that is already past the timeout**, within the
-  guard. A cluster on an older chart renders as before.
+  when it is moved onto such a chart (**Bump** on the provider's page, or the tenant's platform update); **it acts
+  at once on a machine that is already past the timeout**, within the guard. A cluster on an older chart renders
+  as before, and what its values hold is not touched.
+- **The provider's two keys are the setting of every cluster on chart 0.1.14 or later.** The portal writes them
+  into a cluster's values at every change it makes to that cluster (a bump, a platform update, a node group edit,
+  an upgrade, an add-on change), replaces a block the cluster already has, and removes it when the provider says
+  `0`. A change of the provider's keys does not reach a cluster by itself: on the provider's page, **Apply
+  settings** on the row of a cluster that is already on the provider's chart writes it now
+  (`POST /api/v1/admin/service/{id}/k8s-clusters/{clusterId}/bump-chart`; **Bump all** skips such clusters). This
+  is the way to stop a loop of clones on one cluster: raise the timeout or set `0` on the provider, then Apply
+  settings on that cluster. A block edited by hand in the ArgoCD Application is overwritten at the portal's next
+  change of the cluster. There is no per-cluster setting.
 - The MachineHealthCheck is left out of the Application's health (`argocd.argoproj.io/ignore-healthcheck`): its
   own health in ArgoCD is "as many healthy as expected", which would be false whenever a machine is still starting
   (ArgoCD's health script for the kind is quoted from memory here, not re-read).
 
-**2. Replace one machine.** Tenant console, the cluster's page, **Replace** on a row of the instance list
-(action `REPLACE_MACHINE` with `{machine, confirm}`); admin console, **Machines** on the cluster's row, **Replace**
+**2. Replace one machine.** Tenant console, the cluster's page, **Replace** next to a node group's status for each
+machine of the group that needs attention, and on every row of the instance list (action `REPLACE_MACHINE` with
+`{machine, confirm}`); admin console, **Machines** on the cluster's row, **Replace**
 (`POST /api/v1/admin/service/{id}/k8s-clusters/{clusterId}/machines/{machine}/replace`, body `{"confirm": true}` or
 none, permission `admin:service:manage`). The portal deletes that Machine and Cluster API makes a new one.
 
@@ -399,10 +418,16 @@ none, permission `admin:service:manage`). The portal deletes that Machine and Cl
   `details.reason = "last_ready_node"`; the consoles then ask once more and send `confirm`. A machine without a
   Node needs no confirmation.
 - It works on any chart version. It needs `delete` on `machines.cluster.x-k8s.io` for the portal's service account
-  (RBAC below); without it the action answers `502` and tells a tenant to contact the operator.
-- The tenant's button is on the instance list, which holds the cluster's VMs: a machine whose VM was never made
-  (`vm_create_failed`, `no_capacity`) has no row there, and on a provider with shared workers the list is empty.
-  The operator's view lists every Machine.
+  (RBAC below); without it the action answers `502`: a tenant is told to contact the operator, the operator's
+  route says what to apply (`deploy/mgmt-cluster/rbac.yaml`, or platform chart 0.1.3).
+- The instance list holds the project's synced servers whose name starts with the cluster's id. A machine has no
+  row there when its VM was never made (`vm_create_failed`, `no_capacity`), on a provider with shared workers, and
+  **when no sync has listed the VM yet**: on the production site, with the job scheduler off, the two workers that
+  never joined were never in the list. So the node group's `progress` carries `machineNames`, the names of at most
+  five machines of the group that need attention, and the console puts **Replace** next to each in the table of
+  node groups. The names are those of the last provider sync, like the rest of `progress`: a name that is gone
+  since answers `404`, and the next sync corrects the list. A group with more than five such machines shows five;
+  the others appear as these are replaced, and the operator's view lists every Machine.
 
 **3. The join error, for the operator.** For each machine in `not_joined` past its bound (at most five per
 request), the operator's Machines view reads two files of the worker through the Proxmox guest agent and shows
@@ -411,14 +436,17 @@ them under the machine: the `errors` of `/run/cloud-init/result.json` and the la
 
 - It is read live at each request and never stored. Before it leaves the API the text loses kubeadm's bootstrap
   token (`abcdef.0123456789abcdef`, also after `--token` and `token:`), the CA hash (`sha256:<64 hex>`), any
-  other run of 32 or more hex characters (a certificate key), JSON web tokens, Proxmox API tokens, and the
-  credential forms every upstream message loses. A tenant never gets any of it: the tenant's page says "contact
+  other run of 32 or more hex characters (a certificate key), JSON web tokens, Proxmox API tokens, PEM blocks,
+  the `*-data` values of a kubeconfig, any run of 64 or more base64 characters, and the credential forms every
+  upstream message loses. A tenant never gets any of it: the tenant's page says "contact
   the operator".
 - The call is `GET /nodes/{node}/qemu/{vmid}/agent/file-read` with the portal's token of the Proxmox provider that
   hosts the workers (the cluster's Secret records it). Proxmox VE 9 asks `VM.GuestAgent.FileRead` or
   `VM.GuestAgent.Unrestricted` for it; the portal's role holds the second on `/pool` since it sets guest passwords,
   so **no privilege was added** ([proxmox-permissions.md](proxmox-permissions.md)). It reads these two paths of a
-  managed worker only, never a tenant's server.
+  managed worker only, never a tenant's server. The read runs for whoever may open the Machines view, that is
+  with `admin:service:read`: an operator who may not change a provider still makes the portal read these two files
+  inside a tenant's worker, and sees their masked text.
 - When nothing can be read the view says why in general words (the token is refused, the guest agent does not
   answer, Proxmox did not answer in time), not with Proxmox's message.
 
@@ -444,8 +472,14 @@ Replacing a machine needs `delete` on `machines.cluster.x-k8s.io`, and the Machi
 `proxcloud-platform` 0.1.3 grant both. **Chart 0.1.3 is not published and the platform BOM still pins 0.1.2**: until
 the BOM names 0.1.3, a managed-services platform has neither, the replace action answers `502` there, and the
 Machines view shows no health check (the rest of the view works). An installer-built site gets them by applying
-`deploy/mgmt-cluster/rbac.yaml` again. `delete` on Machines is the portal's one write on Cluster API objects; a
-deleted Machine is always made again by its MachineSet, so it cannot shrink a cluster.
+`deploy/mgmt-cluster/rbac.yaml` again. `delete` on Machines is the portal's one write on Cluster API objects.
+**The grant is cluster-wide**: the ClusterRole lets the portal's service account delete any Machine in any
+namespace of the management cluster, also a control-plane Machine of a kubeadm cluster whose Cluster API objects
+are on that cluster (whether the platform cluster's own objects are within its reach was not checked). Only the
+portal's code confines it: it deletes a Machine only in the namespace of a project, of a cluster whose Application
+carries this provider's label, with that cluster's name label and a node group label, which control-plane Machines
+do not have. A deleted worker Machine is made again by its MachineSet, so the action does not lower a node group's
+count; it does take a node away until the new one is Ready.
 
 ## 4. Billing
 

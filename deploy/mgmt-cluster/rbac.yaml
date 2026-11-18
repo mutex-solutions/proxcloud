@@ -71,8 +71,10 @@ rules:
   - apiGroups: ["cluster.x-k8s.io"]
     resources: ["machinedeployments", "machines", "machinehealthchecks"]
     verbs: ["get", "list"]
-  # The one write on Cluster API: replacing a worker deletes its Machine, and the MachineSet makes a new one. A
-  # deleted Machine is always replaced by its owner, so this cannot shrink a cluster.
+  # The one write on Cluster API: replacing a worker deletes its Machine, and the MachineSet makes a new one.
+  # Cluster-wide: this lets the account delete ANY Machine in any namespace, a control-plane Machine of a kubeadm
+  # cluster too. Only the portal's code confines it to a worker Machine of a cluster it manages (namespace of the
+  # project, the provider's label on the Application, the cluster-name and node-group labels on the Machine).
   - apiGroups: ["cluster.x-k8s.io"]
     resources: ["machines"]
     verbs: ["delete"]
