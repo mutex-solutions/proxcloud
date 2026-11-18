@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The platform BOM on `main` is `0.9.0-dev` again, and the build carries the BOM of `0.8.2`**
+  (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.8.2.yaml`). The `v0.8.2` release commit left
+  the BOM at `0.8.2`, and the release gate refuses only `-dev`. A platform installed by `v0.8.2` stays on its BOM
+  after an upgrade, as one installed by `v0.8.0` or `v0.8.1` does; a platform installed by a `dev-<sha>` build of
+  `main` is still refused by a later build (`bom_unsupported`).
+
 ## [0.8.2] - 2026-11-18
 
 A patch release on top of `v0.8.1`. It adds no feature of its own size: it tells an operator about the
