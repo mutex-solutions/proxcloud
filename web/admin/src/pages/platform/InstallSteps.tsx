@@ -193,15 +193,17 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
       <fieldset className="grid content-start gap-1.5" aria-describedby={problems.some((p) => p.field === "networkMode") ? "networkMode-error" : undefined}>
         <legend className="mb-1.5 text-sm font-medium">Where the network comes from</legend>
         <label className="flex items-start gap-2 text-sm">
-          <input type="radio" name="pf-network-mode" className="mt-1" checked={form.networkMode === "bridge"} disabled={fixed} onChange={() => setForm({ ...form, networkMode: "bridge" })} />
+          <input type="radio" name="pf-network-mode" className="mt-1" checked={form.networkMode === "bridge"} disabled={fixed} onChange={() => setForm({ ...form, networkMode: "bridge", bridge: "" })} />
           <span>An existing bridge. It exists on every node used, and your router routes the network. A VLAN tag is optional: with one, no bridge or vnet of its own is needed for the VLAN.</span>
         </label>
         <label className="flex items-start gap-2 text-sm">
-          <input type="radio" name="pf-network-mode" className="mt-1" checked={form.networkMode === "routed"} disabled={fixed} onChange={() => setForm({ ...form, networkMode: "routed", vlan: "" })} />
+          <input type="radio" name="pf-network-mode" className="mt-1" checked={form.networkMode === "routed"} disabled={fixed} onChange={() => setForm({ ...form, networkMode: "routed", vlan: "", bridge: "" })} />
           <span>Routed by the node (one Proxmox node only). ProxCloud makes the network as an SDN vnet whose gateway the node holds, with SNAT. Tenant traffic to the platform then never leaves the node. Everything outside the node needs a route to this network through the node's address. Not verified on a lab.</span>
         </label>
         {problems.filter((p) => p.field === "networkMode").map((p) => <p key={p.message} id="networkMode-error" className="text-xs text-destructive">{p.message}</p>)}
       </fieldset>
+      {/* The name means another thing in each mode (a bridge that exists, a vnet that must not), so a switch empties it:
+          a bridge's name carried into "routed" would ask Proxmox for a vnet named like a live interface. */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {form.networkMode === "routed" ? (
           <Field id="bridge" label="Vnet name" value={form.bridge} onChange={set("bridge")} disabled={fixed} problems={problems} placeholder="pcplat0"

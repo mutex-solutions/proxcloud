@@ -593,6 +593,8 @@ test("the network is an existing bridge, with an optional VLAN tag, or a vnet th
   // Routed: the bridge field names the vnet, and the tag has no meaning.
   await page.getByRole("radio", { name: /Routed by the node/ }).check()
   await expect(page.getByLabel("VLAN tag (optional)", { exact: true })).toHaveCount(0)
+  // The bridge's name does not become the vnet's: a vnet named like a live interface would take it over.
+  await expect(page.getByLabel("Vnet name", { exact: true })).toHaveValue("")
   await page.getByLabel("Vnet name", { exact: true }).fill("Platform-Net")
   await expect(page.getByText(/Vnet name: a lower-case letter/).first()).toBeVisible()
   await page.getByLabel("Vnet name", { exact: true }).fill("pcplat0")
@@ -608,6 +610,7 @@ test("the network is an existing bridge, with an optional VLAN tag, or a vnet th
 
   // Back to a bridge with a tag, in the saved draft.
   await page.getByRole("radio", { name: /An existing bridge/ }).check()
+  await expect(page.getByLabel("Bridge", { exact: true })).toHaveValue("")
   await page.getByLabel("Bridge", { exact: true }).fill("vmbr1")
   await page.getByLabel("VLAN tag (optional)", { exact: true }).fill("140")
   await page.getByRole("button", { name: "Save settings" }).click()
