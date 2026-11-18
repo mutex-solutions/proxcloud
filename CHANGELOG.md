@@ -7,12 +7,153 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+None of the entries below is verified on a lab yet: each one says so, and what its tests do show.
+
+### Added
+
+- **A `simple` tenant zone without DHCP from the provider's config**: `"dhcp": false` on a zone of
+  `config.network.zones` (`internal/platform/externalservice/proxmox.go`, `docs/managed-services.md`,
+  "Prerequisites"). ProxCloud then creates the zone without Proxmox's DHCP server, so tenant Kubernetes clusters
+  and load balancers can use its networks on a site without EVPN or VLANs. It applies to a zone that does not
+  exist yet; an existing zone is never changed, and the default (a `simple` zone with DHCP) is the same. Not
+  verified on a lab.
+- **A warning when VM id 9999 is in use on the Proxmox cluster.** proxmox-csi names every volume
+  `vm-9999-pvc-<uuid>`, the platform's own and the tenant clusters', and Proxmox counts a disk with that
+  name as VM 9999's. On a site where a guest has that id, destroying it with "Destroy unreferenced disks
+  owned by guest" would remove these volumes (acceptance audit, A2). The managed-services Check and the
+  provider's Test connection have a row `csi-vmid` that says so; it never fails, and the id the plugin
+  uses is unchanged ([docs/managed-services.md](docs/managed-services.md#vm-id-9999-and-the-csi-volumes)).
+  Not verified on a lab.
+- **A cloud resource create that is refused or fails leaves an audit event** (`CLOUD_RESOURCE_CREATE`, outcome
+  `FAILURE`), for every resource type. `errorMessage` is what the caller was answered. `internalReason` is the
+  backend's own error and is returned by the operator's audit routes alone; the operator's Audit page shows both.
+  The type is recorded only when it has the form of a type name, and the name, the answer and the reason are cut.
+  Not verified on a lab: the tests use a fake Proxmox, and the two new lines of the Audit page were built and
+  smoke-tested, not looked at in a browser.
+
 ### Changed
 
 - **The platform BOM on `main` is `0.9.0-dev`** (`deploy/platform/platform-bom.yaml`). The `v0.8.0` release commit
   left it at `0.8.0`, and the release gate refuses only `-dev`, so any `v*` tag cut from `main` would have passed
-  that part of the gate. A platform installed by `v0.8.0` is refused by a `dev-<sha>` build of `main`
-  (`bom_unsupported`), as between any two BOMs.
+  that part of the gate.
+- **`ADD_RULE` on a security group refuses what it cannot store.** `remoteGroupId`, `action`, `log`, `priority` and
+  any other key the rule does not have were accepted and dropped, so a deny rule was stored as an allow rule and a
+  rule for a remote group as a rule for every source, each with a 200. They are a `400` now that names the key. The
+  protocol (`tcp`, `udp`, `sctp`, `icmp`, `gre`, `esp`, `ah`, or none), the ports (1 to 65535, with `tcp`, `udp` or
+  `sctp` only) and the remote (a CIDR or one address) are checked before Proxmox is called, with a message per
+  field; a port sent as text was stored as "every port". Not verified on a lab: the tests use a fake Proxmox, and
+  that Proxmox accepts each protocol name of the list on a group rule was not tried.
+- **Security groups no longer promise outbound rules.** A server's outbound traffic is always allowed, so an egress
+  rule restricts nothing. The API still stores one and now says so in the answer (`result.warning`); the console
+  and the networks guide say the same. Egress filtering is not in this release. Not verified on a lab.
+- **`enableDhcp: true` on a network of an EVPN zone is now a `400`** (`POST /project/{id}/cloud`, type
+  `NETWORK`; `internal/platform/project/cloud_network_pve.go`, `docs/api.md`). Up to `v0.8.0` the request was
+  accepted and the network answered `dhcp: true`, though Proxmox runs no DHCP server in an EVPN zone and the
+  platform assigns the addresses. It is refused like the same request in a VLAN zone or a `simple` zone
+  without DHCP; leave the field out or send `false`. Neither console sends it. Not verified on a lab.
+- **CI compares the previous BOMs with the registries too.** `bom-verify.yml` (pull requests on `deploy/platform/**`,
+  weekly) and the release gate of `docker.yml` run `bom_verify.py --release` on each file under
+  `deploy/platform/previous/`, so a release is not built with a previous BOM whose pin is no longer served.
+  `docs/ci-release.md`, "Previous BOMs", has the step that follows each release tag. Not verified: that procedure
+  has not been run at a release.
+
+### Fixed
+
+- **A platform installed by v0.8.0 keeps working after a ProxCloud upgrade.** A platform records the bill of
+  materials that installed it by the sha256 of the BOM file, and a release carried one BOM only. The file holds the
+  release number, so every later release, a patch included, was another BOM: the plan was blocked and **Apply this
+  release** answered `409 bom_unsupported`. A release now also carries the BOM of each earlier release back to
+  `0.8.0` (`deploy/platform/previous/`, byte for byte the file of the tag), and an installed platform stays on the
+  BOM that installed it: the Check, an apply (repair, changed sizes and counts, credential renewal) and Remove run
+  with that BOM's pins. Step 4 of System → Managed services says that the platform stays on its release, lists that
+  release's contents and names the newer one; `GET …/plan` has `newer` for it, and `target` is now the BOM the apply
+  runs with. `GET /admin/platform/bom?sha256=` answers a carried BOM by hash. Moving an installed platform to a
+  newer BOM is not in this release, so the message for a platform image on the template update blocklist no longer
+  sends an installed platform to a newer release: it says that the platform stays on its release's images. A
+  platform installed by a build of `main` (`dev-<sha>`) is still refused: only the BOMs of releases are kept. Not
+  verified on a lab: tests show that the embedded file has the hash a v0.8.0 platform records and that this release
+  renders the 0.8.0 BOM as v0.8.0 did; no apply was run against a platform that v0.8.0 installed.
+- **A network in a zone without a DHCP server no longer answers `dhcp: true` (F2)**
+  (`internal/platform/project/cloud_network_pve.go`, `internal/cloud/pve/network.go`, `docs/api.md`,
+  `docs/cloud-integration.md`). The network create took the flag from the zone's configured kind and wrote a
+  DHCP range on the subnet, and the sync took it from the subnet alone. On a `simple` zone made without DHCP,
+  and on every EVPN zone, a tenant read "DHCP on" where Proxmox hands out no address. The create now reads the
+  zone in Proxmox: where it runs no DHCP server the network answers `dhcp: false`, no range is written, and
+  `enableDhcp: true` is refused with a `400` that says why. The sync and the subnet actions answer from the
+  subnet and the zone together, so the next sync corrects existing rows. The DHCP range on subnets written
+  before stays: it does nothing without a DHCP server in the zone, and removing it would need an SDN apply.
+  Load balancers and tenant Kubernetes clusters already decided from the zone and work on such a network. Not
+  verified on a lab.
+- **The platform's machines start again with their Proxmox node**
+  (`internal/platformlife/cluster.go`, `internal/platformlife/preflight.go`, `docs/managed-services.md`,
+  "After a Proxmox node reboots"). Only the seed had `onboot`, so after a reboot of a node the platform
+  cluster's machines stayed stopped, and with them every tenant control plane and database. Stage 7 of every
+  install and apply now sets `onboot` on each VM of the platform that lacks it, with the CAPI token, and the
+  Check has a row `machines` that warns for a VM that is stopped or has no `onboot`, with the command, and names
+  a VM it could not read without hiding the others. A platform installed by `v0.8.0` gets it at its first apply;
+  until then `qm set <vmid> --onboot 1`. No start order is set (Proxmox takes `Sys.Modify` on `/` for it, which
+  the token does not hold; the guide has the command), tenant clusters' machines are not covered, and a stopped
+  VM is still started by hand. No chart, BOM or role change. Not verified on a lab.
+- **Deleting a security group rule could delete another rule.** A rule was deleted by its position, and a new rule
+  takes position 0 and moves the others down: a delete from a page loaded before someone added a rule removed a
+  different rule, and `DELETE_RULE` with neither `pos` nor `ruleId` removed the first rule. A listed rule's `id` now
+  holds a fingerprint of the rule next to its position, `DELETE_RULE` takes only `ruleId`, and the delete carries the
+  digest of the rule list to Proxmox. When the id no longer names a rule the answer is `409`, nothing is deleted, and
+  the console reloads the list; without `ruleId` the answer is `400`. A script that sends `pos`, or an id of the old
+  shape `<group>-<position>`, has to list the rules and send the `id` (`docs/api.md`, security group rules). Not
+  verified on a lab: the tests use a fake Proxmox; that the rule list of a group carries a digest and that Proxmox
+  checks it on the delete was not tried, and the console's `409` path has no automated test.
+- **An egress security group rule stored its remote CIDR as the rule's source.** It is the destination now, and the
+  console's rule table has a Direction column. A rule written before keeps the CIDR in the source and is listed with
+  remote "any": delete it and add it again. Such a rule had and has no effect, see Changed. Not verified on a lab.
+- **The rule table of a security group showed an empty cell** for "any protocol" and "any remote". Not verified on
+  a lab: the page was built and opened by the smoke test only.
+- **A rebuilt server no longer keeps the row of its old boot volume.** A rebuild gives the server a new
+  boot disk and destroys the old one, but the old volume's row stayed until the scheduled sync ran, and
+  for good on a site that runs no scheduler: the volume list showed the disk twice and the quota counted
+  it twice (production acceptance of v0.8.0, D3). Rebuild, restore from backup and
+  snapshot rollback now reconcile the project's volume rows in the same request, so a row whose disk is
+  gone is archived, and a resize refreshes the boot volume's size at once. The reconcile does not run
+  while another server of the project is locked, offline or unreadable; a rebuild then still archives
+  the row of the disk it destroyed. A rollback to a snapshot older than an attached volume now archives
+  that volume's row at once (the disk stays on the store). Not verified on a lab.
+- **A volume keeps its name, id and bill item when it is attached to another server.** Proxmox gives the
+  disk a new id on such an attach, and the portal archived the volume's row and made a new one: a volume
+  named "t-vol1" showed as "t-srv2-scsi1", created "just now", and its charge was split over two bill
+  items (D4). The row now follows the disk, as it does for a change of volume type, also when the attach
+  answered an error after the disk had moved. An attach while a change of type is still copying answers
+  `409`. Not verified on a lab.
+- **Deleting a server that has VM id 9999 no longer destroys the CSI volumes.** The portal deletes a VM
+  with "destroy unreferenced disks", and Proxmox counts every `vm-9999-pvc-<uuid>` volume as an
+  unreferenced disk of VM 9999. A server can get that id (Proxmox hands out the lowest free one), so
+  the flag is now left out for it. Not verified on a lab.
+- **Managed Kubernetes: a cluster create no longer fails on a site with ACL rows of its own on single stores.**
+  In Proxmox a row on a path replaces what its parents pass down. On a site where the portal's user or token
+  held a row on a store (an older setup wrote `ProxCloudPlatform` on single stores), the mint role on `/storage`
+  did not reach that store, Proxmox refused the cluster token's row there, and every tenant cluster create
+  answered `502`, while the Check was green. The managed-services script and installer stage 10 now write
+  `ProxCloudKubeMint` next to each such row on a store, a zone or a vnet, for the user or token that holds
+  the row; the Check row `privileges:kubemint` reads the paths a mint writes (the template pool, `/nodes`,
+  `/sdn/zones/localnetwork`, each zone of the provider, the ISO store, the import store and the boot stores of
+  the storage profiles) and names the path that fails. **To take it: run the script again as root on a node
+  (step 2 of the Managed services page), or `make upgrade` on an installer site in split mode. Until then, on a
+  site with such rows, `privileges:kubemint` fails where it passed on v0.8.0, and an install or apply run of the
+  managed services stops at its first stage (`preflight_failed`).** Each added row
+  is `Permissions.Modify` on that store or zone for the portal token: what `/storage` gives on every other
+  store ([docs/proxmox-permissions.md](docs/proxmox-permissions.md#a-row-of-the-portals-own-on-a-store-or-a-zone)).
+  Not verified on a lab: nothing of it ran on a Proxmox cluster; the script's new lines ran with a fake `pveum`.
+- **Managed Kubernetes: a create that Proxmox refuses for a permission says so.** It answers `409 Could not mint
+  the cluster's Proxmox tokens: the operator must fix a permission of the portal on Proxmox first…` where it
+  answered `502 The compute backend is unavailable. Try again later.` The guide named a text that did not exist
+  ([docs/managed-k8s.md](docs/managed-k8s.md#5-troubleshooting)). Not verified on a lab.
+- **The API log is JSON on every line.** Lines written through the default logger, the `backend request failed`
+  errors among them, were plain text, so a filter on `level` did not see them. That line now carries the request
+  id of the answer (`X-Request-Id`). Not verified on a lab or on a site.
+
+### Security
+
+- **A security group rule's remote must be a CIDR or an address.** The value was passed to Proxmox as written, so a
+  tenant could name a cluster IP set or alias as the source of a rule. Not verified on a lab.
 
 ## [0.8.0] - 2026-11-17
 

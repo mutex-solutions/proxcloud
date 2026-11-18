@@ -4,6 +4,82 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-18: audit, a refused cloud create is an event; the mint Check reads child paths
+
+**What changed:** the create dispatcher of `internal/platform/project` (`cloudCreate`, `cloudCreateFailed`) writes
+`CLOUD_RESOURCE_CREATE` with outcome `FAILURE` for a create of any resource type that is refused or fails. Until
+now an audit event followed a successful mutation only. `audit.AuditEvent` has `internalReason`, and
+`audit.Filter.Operator` decides whether a query returns it: the admin readers set it, the organization and account
+readers do not. `httpx.HTTPError` carries a `Cause`, which `httpx.WriteError` logs with the request id
+(`httpx.LogCause`) and never writes to the caller; `upstreamErr` no longer logs by itself, and a handler that
+answers such an error another way calls `httpx.LogCause` (the admin CSI migration).
+`pve.KubeMintPrivileges(stores, zones)` reads the paths a mint writes (`platformlife.MintScopeOf` names them from
+the provider), and the managed-services script and installer stage 10 write the mint role next to the portal's own
+rows on a store, a zone or a vnet. No container or component was added or removed; the responsibility of the Audit
+component grew by the failure event.
+
+**Why:** on a production site every tenant Kubernetes create failed on a store whose own ACL row hid the mint
+role, with a generic 502, a green Check and no audit event (acceptance findings F1, F3, A1).
+
+**Diagrams:** none changed. `c3-components.md`: the Audit row names the failure event.
+
+**Not verified:** on a lab.
+
+## 2026-11-18: volume rows follow an attach and are reconciled after a disk is replaced
+
+**What changed:** `Handler.ReconcileVolumeRows` (`internal/platform/project/cloud_writes_pve.go`) runs
+`providers.Reconcile` on the project's VOLUME rows at the end of `REBUILD`, `RESTORE_BACKUP` and
+`ROLLBACK_SNAPSHOT`, where an add-and-update sync ran or none at all; `RESIZE` gains the add-and-update sync.
+When the reconcile cannot run, `REBUILD` archives the row of the boot disk `pve.Service.RebuildServer` reports
+as destroyed. `Handler.AttachVolumeRow` has the row of a volume follow its disk onto another server
+(`MarkMoving`, `ChangeExternalID`, then the disk's fresh data), as a retype's does; `pve.Service.AttachVolume`
+answers the slot the disk landed in. The connection test and the managed-services preflight have a row `csi-vmid`
+(`pve.Client.CSIVMIDCheck`, a read of `/cluster/nextid`), and `pve.Client.DeleteVM` leaves
+`destroy-unreferenced-disks` out for VM id 9999. No container, component, relation or boundary changed, and no
+Proxmox permission.
+
+**Why:** on a site without the scheduled sync a rebuild left the row of the destroyed boot disk (quota counted
+twice, production acceptance D3), an attach replaced the volume's row and lost the tenant's name and the
+bill item (D4), and nothing said that a guest on VM id 9999 owns the names of the CSI volumes (A2).
+
+**Diagrams:** none changed. `c2-containers.md`: the volume paragraph says that an attach follows and which
+actions reconcile.
+
+**Not verified:** on a lab.
+
+## 2026-11-18: network DHCP flag from the live zone; onboot on the platform's machines
+
+**What changed:** `pve.ZoneDHCP` and `pve.SubnetDetail(subnets, zone)` (`internal/cloud/pve/network.go`): a
+NETWORK row's `dhcp` is true only when its subnet has a DHCP range and the zone, as Proxmox has it, runs a DHCP
+server. The create (`pveNetFlags`), the sync and the subnet actions (`Service.NetworkDetail`) use it;
+`ZoneConfig.NoDHCP` (`config.network.zones.<id>.dhcp: false`) makes `EnsureZone` create a simple zone without
+DHCP. Platform runs: stage 7 ends with `startAtBoot`, which sets `onboot` on the installation's VMs with the CAPI
+token, and the preflight has a row `machines`. No container, component, relation or boundary changed, and no
+Proxmox permission: the CAPI token already holds `VM.Config.Options` on both platform pools.
+
+**Why:** a network in a simple zone without DHCP answered `dhcp: true` (acceptance finding F2), and after a node
+reboot only the seed started.
+
+**Diagrams:** none changed. `c4-code.md`: the network table has `ZoneDHCP`, `pveNetFlags`, `SubnetDetail` and
+`NetworkDetail`. `c3-components.md`: the Platform runs row names `startAtBoot` and the `machines` row.
+
+**Not verified:** on a lab.
+
+## 2026-11-18: P3, a release carries the BOMs of earlier releases
+
+**What changed:** the component "Platform BOM and renderers" also holds the BOMs of earlier releases from 0.8.0
+on (`deploy/platform/previous/<release>.yaml`, `platformlife.Previous`, `Lookup`), found by the sha256 an
+installation records. Plan, preflight, apply and remove read the BOM that installed the platform and not the one
+of the running release. No container, relation or boundary changed.
+
+**Why:** an installed platform stays on the BOM that installed it; before, a release carried one BOM and refused
+the platforms of every other release (`bom_unsupported`).
+
+**Diagrams:** none changed. `c3-components.md`: the row "Platform BOM and renderers" names the previous BOMs,
+`Previous` and `Lookup`.
+
+**Not verified:** on a lab. No apply was run against a platform that v0.8.0 installed.
+
 ## 2026-11-17: VM inventory, retirement no longer needs a view of every guest
 
 **What changed:** the proof before a cached SERVER, VOLUME or IMAGE row is retired
