@@ -208,8 +208,15 @@ class ReleaseContractTests(unittest.TestCase):
         validate = next(step for step in steps if step.get("id") == "policy")
         self.assertEqual(validate["env"]["GITHUB_REF_NAME"], "${{ github.ref_name }}")
         self.assertEqual(validate["run"], 'python3 .github/scripts/release_policy.py >> "$GITHUB_OUTPUT"')
-        notes = next(step for step in steps if step.get("name") == "Assemble release notes from CHANGELOG")
+        notes = next(step for step in steps if step.get("name") == "Assemble release notes")
         create = next(step for step in steps if step.get("name") == "Create GitHub Release")
+        # docs/releases/v<version>.md is the body when the tag has it (refused when empty
+        # or too long); the CHANGELOG.md section is the fallback.
+        self.assertIn('notes="docs/releases/v${version}.md"', notes["run"])
+        self.assertIn('-gt 120000', notes["run"])
+        self.assertLess(notes["run"].index('cp "$notes" /tmp/notes.md'), notes["run"].index("CHANGELOG.md > /tmp/notes.md"))
+        self.assertIn("--notes-file /tmp/notes.md", create["run"])
+        self.assertIn("--generate-notes", create["run"])
         self.assertLess(steps.index(validate), steps.index(notes))
         self.assertLess(steps.index(validate), steps.index(create))
         self.assertEqual(notes["env"]["RELEASE_VERSION"], "${{ steps.policy.outputs.version }}")
@@ -224,6 +231,7 @@ class ReleaseContractTests(unittest.TestCase):
         test_steps = read_yaml(".github/workflows/test.yml")["jobs"]["installer"]["steps"]
         installer = next(step for step in test_steps if step.get("name") == "Check the installer")
         self.assertIn(".venv/bin/python ../.github/scripts/tests/test_release_policy.py", installer["run"])
+        self.assertIn(".venv/bin/python ../.github/scripts/tests/test_release_notes.py", installer["run"])
 
 
 if __name__ == "__main__":
