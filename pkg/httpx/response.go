@@ -71,15 +71,22 @@ func WriteError(w http.ResponseWriter, err error) bool {
 	}
 	var he *HTTPError
 	if errors.As(err, &he) {
-		if he.Cause != nil {
-			slog.Error("backend request failed", "err", he.Cause, "status", he.Status, "answer", he.Msg, "reqid", w.Header().Get(RequestIDHeader))
-		}
+		LogCause(w, he)
 		write(w, he.Status, Response[any]{Errors: &APIError{Code: he.Code, Message: he.Msg, Details: he.Details}})
 		return true
 	}
 	slog.Error("internal error", "err", err, "reqid", w.Header().Get(RequestIDHeader))
 	Err(w, http.StatusInternalServerError, http.StatusInternalServerError, "internal.error")
 	return true
+}
+
+// LogCause logs the Cause of he, when it has one, against the request id of w ("backend request failed"). WriteError
+// calls it; a handler that writes the answer of an HTTPError some other way (httpx.Raw, with a report next to the
+// error) must call it too, or why the backend failed is recorded nowhere.
+func LogCause(w http.ResponseWriter, he *HTTPError) {
+	if he.Cause != nil {
+		slog.Error("backend request failed", "err", he.Cause, "status", he.Status, "answer", he.Msg, "reqid", w.Header().Get(RequestIDHeader))
+	}
 }
 
 // Response is the CustomHttpResponse<T> envelope. NOTE: `errors` is a single

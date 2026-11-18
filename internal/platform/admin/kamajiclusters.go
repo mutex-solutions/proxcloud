@@ -131,15 +131,23 @@ func (h *Handler) kamajiClusterCSIGateway(w http.ResponseWriter, r *http.Request
 		}
 	}
 	rep, err := h.csiMigrate(r.Context(), es, ks, chi.URLParam(r, "clusterId"), q.Get("dryRun") == "true", q.Get("force") == "true", detached)
-	var he *httpx.HTTPError
-	if err != nil && rep != nil && errors.As(err, &he) {
-		httpx.Raw(w, he.Status, map[string]any{"data": rep, "errors": httpx.APIError{Code: he.Code, Message: he.Msg}})
-		return
-	}
-	if writeClusterErr(w, err) {
+	if writeReportErr(w, rep, err) || writeClusterErr(w, err) {
 		return
 	}
 	httpx.OK(w, rep)
+}
+
+// writeReportErr answers a typed error that comes with a report (a migration that stopped half way): both, at the
+// error's status. That is not httpx.WriteError, so why the backend failed is logged here (httpx.LogCause): after a
+// partial migration the log is the only place that says which step stopped it.
+func writeReportErr(w http.ResponseWriter, rep any, err error) bool {
+	var he *httpx.HTTPError
+	if rep == nil || !errors.As(err, &he) {
+		return false
+	}
+	httpx.LogCause(w, he)
+	httpx.Raw(w, he.Status, map[string]any{"data": rep, "errors": httpx.APIError{Code: he.Code, Message: he.Msg}})
+	return true
 }
 
 // kamajiClusterBumpAll re-pins EVERY managed cluster onto the provider's current chartVersion.

@@ -37,7 +37,8 @@ func zoneErr(err error) error {
 
 // upstreamErr tells the tenant only that a backend failed: the raw error names the backend's internal address, which
 // tenants must not learn. Why goes with the answer as its Cause: httpx.WriteError logs it against the request id
-// ("backend request failed"), and a refused create's audit event keeps it for the operator.
+// ("backend request failed"), and a refused create's audit event keeps it for the operator. A handler that answers
+// the error without httpx.WriteError calls httpx.LogCause itself (the admin CSI migration).
 func upstreamErr(what string, err error) *httpx.HTTPError {
 	if errors.Is(err, pve.ErrNotInProject) {
 		return httpx.NewError(http.StatusNotFound, http.StatusNotFound, "Server not found")
