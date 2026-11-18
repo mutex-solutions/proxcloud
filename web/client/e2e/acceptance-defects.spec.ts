@@ -45,15 +45,33 @@ test("D14: Rebuild offers the project's own images, as Create does", async ({ pa
 })
 
 test("D15: a page the menu hides is not reachable by its URL", async ({ page }) => {
+  // The menu's answer is slow, as on a real site: a hidden page must wait for it and not start its own requests.
+  await page.addInitScript(() => {
+    ;(globalThis as { __mockLatency?: (call: string) => number | undefined }).__mockLatency = (call) =>
+      call.startsWith("GET /init/") ? 1500 : undefined
+  })
   for (const [path, label] of [["snapshots", "Snapshots"], ["s3-keys", "S3 access keys"]]) {
     await page.goto(`/p/prj-staging/${path}`)
     await expect(page.getByText(`${label} is not available in this project`)).toBeVisible()
     await expect(page.getByRole("link", { name: label, exact: true })).toHaveCount(0)
+    // The hidden page never mounted: on production its requests went out and answered 400. The mock records every
+    // call the app makes (src/mocks/router.ts).
+    const calls = await page.evaluate(() => (globalThis as { __mockCalls?: string[] }).__mockCalls ?? [])
+    expect(calls).toContain("GET /init/prj-staging")
+    expect(calls.filter((c) => /\/s3-(keys|credentials)|\/resource\?type=/.test(c))).toEqual([])
   }
   // The same pages on a site that serves them.
   await page.goto(`${P}/snapshots`)
   await expect(page.getByRole("heading", { name: /snapshots/i }).first()).toBeVisible()
   await expect(page.getByText("is not available in this project")).toHaveCount(0)
+})
+
+test("D2: the Subnets tab shows the subnet of a network made before the row held subnetDetails", async ({ page }) => {
+  await page.goto(`${P}/networks/res-network-001`)
+  await page.getByRole("tab", { name: "Subnets" }).click()
+  await expect(page.getByRole("cell", { name: "10.0.0.0/24", exact: true })).toBeVisible()
+  await expect(page.getByRole("cell", { name: "10.0.0.1", exact: true })).toBeVisible()
+  await expect(page.getByRole("checkbox", { name: "Outbound internet for 10.0.0.0/24" })).toBeChecked()
 })
 
 test("D9: the share dialog warns when the project's networks cannot reach the file server", async ({ page }) => {

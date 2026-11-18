@@ -36,6 +36,8 @@ type consolePVE struct {
 	mu     sync.Mutex
 	routes map[string]func(w http.ResponseWriter, r *http.Request)
 	writes []string
+	// nasMountHost is the address the project's file server is mounted from; empty: its API host, 192.0.2.100.
+	nasMountHost string
 }
 
 func (f *consolePVE) service(t *testing.T) *pve.Service {
@@ -122,8 +124,11 @@ func consoleSite(t *testing.T, f *consolePVE, pveConfig pgdoc.M) (repo *cloud.Re
 		mustInsert(t, db, coll, doc)
 	}
 	// The file server sits on the nodes' management network (192.0.2.0/24 in the fake).
-	mustInsert(t, db, "externalService", pgdoc.M{"_id": "nas", "name": "nas", "type": externalservice.TypeCloud, "status": externalservice.StatusPublic,
-		"config": pgdoc.M{"provider": "truenas", "apiUrl": "https://192.0.2.100", "parentDataset": "tank/pc"}})
+	nasConfig := pgdoc.M{"provider": "truenas", "apiUrl": "https://192.0.2.100", "parentDataset": "tank/pc"}
+	if f.nasMountHost != "" {
+		nasConfig["mountHost"] = f.nasMountHost
+	}
+	mustInsert(t, db, "externalService", pgdoc.M{"_id": "nas", "name": "nas", "type": externalservice.TypeCloud, "status": externalservice.StatusPublic, "config": nasConfig})
 	ids = map[string]string{}
 	for _, row := range []cloud.CloudResource{
 		{Type: cloud.TypeServer, ExternalID: "101", Data: map[string]any{"server": map[string]any{"name": "web"}}},
@@ -207,16 +212,19 @@ func TestCustomerConsoleAcceptanceDefects(t *testing.T) {
 
 	// D8: a snapshot delete 4 s after a rollback and its restart were done failed on production with the node task
 	// "can't lock file ... got timeout" (PVE waits 10 s for the VM's config lock), which the API answers as 409 busy.
-	// The delete asks again, three times in all.
+	// The delete asks again, three times in all, and only for that failure: any other one is answered at once.
 	t.Run("D8 a snapshot delete waits for the config lock", func(t *testing.T) {
+		const lockTimeout = "can't lock file '/var/lock/qemu-server/lock-101.conf' - got timeout"
 		for _, tt := range []struct {
 			name   string
-			locked int // how many delete tasks end on the lock timeout
+			failed int    // how many delete tasks end on exit
+			exit   string // the failed tasks' exit status
 			code   int
 			tries  int
 		}{
-			{"lock free on the third try", 2, http.StatusOK, 3},
-			{"lock held throughout", 9, http.StatusConflict, 3},
+			{"lock free on the third try", 2, lockTimeout, http.StatusOK, 3},
+			{"lock held throughout", 9, lockTimeout, http.StatusConflict, 3},
+			{"another failure is not asked again", 9, "VM is locked (snapshot-delete)", http.StatusConflict, 1},
 		} {
 			t.Run(tt.name, func(t *testing.T) {
 				f := &consolePVE{}
@@ -227,9 +235,9 @@ func TestCustomerConsoleAcceptanceDefects(t *testing.T) {
 						fmt.Fprintf(w, `{"data":"UPID:pve1:0:0:0:qmdelsnapshot:101:u:%d:"}`, deletes)
 					},
 				}
-				for n := 1; n <= tt.locked; n++ {
+				for n := 1; n <= tt.failed; n++ {
 					f.routes[fmt.Sprintf("GET /nodes/pve1/tasks/UPID:pve1:0:0:0:qmdelsnapshot:101:u:%d:/status", n)] = func(w http.ResponseWriter, _ *http.Request) {
-						fmt.Fprint(w, `{"data":{"status":"stopped","exitstatus":"can't lock file '/var/lock/qemu-server/lock-101.conf' - got timeout"}}`)
+						_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"status": "stopped", "exitstatus": tt.exit}})
 					}
 				}
 				_, ids, call := consoleSite(t, f, pgdoc.M{})
@@ -268,13 +276,29 @@ func TestCustomerConsoleAcceptanceDefects(t *testing.T) {
 	})
 
 	// D9: a share made on a file server inside a network the compute provider keeps tenants out of cannot be mounted
-	// from the project's networks. The create dialog asks first; 192.0.2.100 is on the node's management network.
+	// from the project's networks. The create dialog asks first. The node's management network is 192.0.2.0/24; a file
+	// server outside it and outside network.blockedCidrs is reachable, and the dialog says nothing.
 	t.Run("D9 the share provider says when tenant networks cannot reach it", func(t *testing.T) {
-		_, _, call := consoleSite(t, &consolePVE{}, pgdoc.M{})
-		code, data := call("/cloud/action", `{"action":"LIST_SHARE_WARNINGS"}`, "x-service-id", "nas")
-		warnings, _ := data["result"].([]any)
-		if code != http.StatusOK || len(warnings) != 1 || !strings.Contains(fmt.Sprint(warnings[0]), "192.0.2.100") {
-			t.Fatalf("LIST_SHARE_WARNINGS: %d %v", code, data)
+		for _, tt := range []struct {
+			name, mountHost string
+			blocked         []string
+			warned          string // the host the one warning names; empty: no warning
+		}{
+			{"on the nodes' management network", "", nil, "192.0.2.100"},
+			{"inside network.blockedCidrs", "198.51.100.20", []string{"198.51.100.0/24"}, "198.51.100.20"},
+			{"reachable", "198.51.100.20", nil, ""},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				_, _, call := consoleSite(t, &consolePVE{nasMountHost: tt.mountHost}, pgdoc.M{"network": pgdoc.M{"blockedCidrs": tt.blocked}})
+				code, data := call("/cloud/action", `{"action":"LIST_SHARE_WARNINGS"}`, "x-service-id", "nas")
+				warnings, ok := data["result"].([]any)
+				if code != http.StatusOK || !ok {
+					t.Fatalf("LIST_SHARE_WARNINGS: %d %v", code, data)
+				}
+				if tt.warned == "" && len(warnings) != 0 || tt.warned != "" && (len(warnings) != 1 || !strings.Contains(fmt.Sprint(warnings[0]), tt.warned)) {
+					t.Fatalf("warnings %v, want one naming %q", warnings, tt.warned)
+				}
+			})
 		}
 	})
 
