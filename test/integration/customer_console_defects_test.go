@@ -302,6 +302,39 @@ func TestCustomerConsoleAcceptanceDefects(t *testing.T) {
 		}
 	})
 
+	// UX 3: load balancers were in the menu of a site that cannot make one, and the create refused one thing at a
+	// time. The page asks first: no public network for the project, no public address left, no appliance image.
+	t.Run("the compute provider says what a load balancer lacks on this site", func(t *testing.T) {
+		public := []any{pgdoc.M{"id": "vmbr1", "name": "Internet", "cidr": "203.0.113.0/24", "gateway": "203.0.113.1"}}
+		image := pgdoc.M{"debian-13": pgdoc.M{"vmid": 9000, "node": "pve1"}}
+		for _, tt := range []struct {
+			name   string
+			config pgdoc.M
+			want   []string // one substring per warning, in order
+		}{
+			{"nothing set up", pgdoc.M{}, []string{"No public network is available", "debian-13, is not in this site's image catalog"}},
+			{"public address quota 0", pgdoc.M{"network": pgdoc.M{"publicNetworks": public}, "templates": image,
+				"provisioning": pgdoc.M{"quota": pgdoc.M{"floatingIps": 0}}}, []string{"cannot take another (Quota exceeded for floatingIps"}},
+			{"another image named, absent", pgdoc.M{"network": pgdoc.M{"publicNetworks": public}, "templates": image, "lbImage": "debian-12"},
+				[]string{"debian-12, is not in this site's image catalog"}},
+			{"ready", pgdoc.M{"network": pgdoc.M{"publicNetworks": public}, "templates": image}, nil},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				_, _, call := consoleSite(t, &consolePVE{}, tt.config)
+				code, data := call("/cloud/action", `{"action":"LIST_LOAD_BALANCER_WARNINGS"}`, "x-service-id", "svc")
+				warnings, ok := data["result"].([]any)
+				if code != http.StatusOK || !ok || len(warnings) != len(tt.want) {
+					t.Fatalf("LIST_LOAD_BALANCER_WARNINGS: %d %v, want %d warnings", code, data, len(tt.want))
+				}
+				for i, want := range tt.want {
+					if !strings.Contains(fmt.Sprint(warnings[i]), want) {
+						t.Errorf("warning %d = %q, want it to hold %q", i, warnings[i], want)
+					}
+				}
+			})
+		}
+	})
+
 	// D13 and the console's first tab: the page asks what its socket cannot tell it. VM 101 shows its display on the
 	// serial port (vga serial0), VM 102 does not.
 	t.Run("GET_CONSOLE_STATE says where the display is and since when the server runs", func(t *testing.T) {

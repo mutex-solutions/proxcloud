@@ -1228,6 +1228,10 @@ func (h *Handler) pveBulkAction(w http.ResponseWriter, r *http.Request, proj *Pr
 		}
 		httpx.OK(w, map[string]any{"result": out})
 		return true
+
+	case "LIST_LOAD_BALANCER_WARNINGS":
+		httpx.OK(w, map[string]any{"result": h.lbSiteWarnings(ctx, proj, es)})
+		return true
 	}
 	return false
 }
@@ -1979,6 +1983,34 @@ func (h *Handler) pveSecurityGroupAction(w http.ResponseWriter, r *http.Request,
 		}
 		httpx.OK(w, map[string]any{"result": result})
 		return true
+	case "UPDATE_RULE":
+		// The edit of a rule: the new rule is checked as ADD_RULE checks it, then takes the place of the one
+		// listed under ruleId (pve.SGReplaceRule: add, then delete).
+		ruleID := strAny(data["ruleId"])
+		if ruleID == "" {
+			h.fail(w, httpx.BadRequest("UPDATE_RULE needs ruleId: the id of the rule as LIST_RULES returns it"))
+			return true
+		}
+		fields := maps.Clone(data)
+		delete(fields, "ruleId")
+		rule, herr := sgRuleFromPayload(fields)
+		if herr != nil {
+			h.fail(w, herr)
+			return true
+		}
+		if err := ps.SGReplaceRule(ctx, proj.ID, cr.ExternalID, ruleID, rule); err != nil {
+			h.pveSyncSecurityGroups(ctx, es, proj) // the rule may have been added: the client's refresh shows what is there
+			h.fail(w, sgRuleErr(err))
+			return true
+		}
+		h.pveSyncSecurityGroups(ctx, es, proj)
+		h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
+		result := map[string]any{}
+		if rule.Type == "out" {
+			result["warning"] = sgEgressWarning
+		}
+		httpx.OK(w, map[string]any{"result": result})
+		return true
 	case "DELETE_RULE":
 		// A position names whatever rule sits there now, so only the listed id is taken: with no id the old
 		// code deleted rule 0.
@@ -2020,7 +2052,7 @@ func sgRuleFromPayload(data map[string]any) (pve.FirewallRule, *httpx.HTTPError)
 	var unknown []string
 	for k, v := range data {
 		// INVOKEACTION carries the action's own name inside data.
-		if slices.Contains(sgRuleFields, k) || (k == "action" && strings.EqualFold(strAny(v), "ADD_RULE")) {
+		if slices.Contains(sgRuleFields, k) || (k == "action" && (strings.EqualFold(strAny(v), "ADD_RULE") || strings.EqualFold(strAny(v), "UPDATE_RULE"))) {
 			continue
 		}
 		unknown = append(unknown, k)

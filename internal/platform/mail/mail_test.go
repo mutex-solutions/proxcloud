@@ -149,3 +149,26 @@ func TestSendTemplateWithAttachments(t *testing.T) {
 		t.Fatalf("plain send = %+v", cm.last)
 	}
 }
+
+// Configured is what lets a caller say "no mail went out": only a real gateway counts, not the
+// no-op one an unconfigured site resolves to.
+func TestServiceConfigured(t *testing.T) {
+	with := func(m Mailer) *Service {
+		return NewService(nil, func(context.Context) (Mailer, string) { return m, "" }, "", nil)
+	}
+	var none *Service
+	for name, c := range map[string]struct {
+		s    *Service
+		want bool
+	}{
+		"nil service": {none, false},
+		"no resolver": {NewService(nil, nil, "", nil), false},
+		"nil mailer":  {with(nil), false},
+		"noop mailer": {with(NoopMailer{}), false},
+		"smtp":        {with(NewSMTPMailer(Config{Host: "smtp.example.invalid", From: "a@example.invalid"})), true},
+	} {
+		if got := c.s.Configured(context.Background()); got != c.want {
+			t.Errorf("%s: Configured = %v, want %v", name, got, c.want)
+		}
+	}
+}

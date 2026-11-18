@@ -51,6 +51,8 @@ func TestRoutes_inviteCreate(t *testing.T) {
 		{http.MethodGet, "/project-invites/tok1"},
 		{http.MethodPost, "/project-invites/accept/tok1"},
 		{http.MethodPost, "/project-invites/decline/tok1"},
+		{http.MethodGet, "/project-invites/project/p1"},
+		{http.MethodDelete, "/project-invites/project/p1/inv1"},
 	} {
 		rctx := chi.NewRouteContext()
 		if !r.Match(rctx, tc.method, tc.path) {

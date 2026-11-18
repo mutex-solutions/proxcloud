@@ -324,3 +324,70 @@ func TestSecurityGroupDeleteRuleNamesTheRule(t *testing.T) {
 		}
 	}
 }
+
+// UX 5 of the production acceptance: a rule could only be deleted and added again by hand. UPDATE_RULE does both in
+// one action, the new rule first, and checks the new rule as ADD_RULE does, so an edit cannot store what an add
+// refuses. A stale id changes nothing; a group that changes between the two steps keeps both rules and says so.
+func TestSecurityGroupUpdateRuleReplacesTheRule(t *testing.T) {
+	g := newSGRig(t)
+	for _, port := range []string{"22", "80"} {
+		if code, body := g.act("ADD_RULE", `{"protocol":"tcp","portRangeMin":`+port+`}`); code != http.StatusOK {
+			t.Fatalf("add %s: %d %s", port, code, body)
+		}
+	}
+	ssh := g.list()[1]
+
+	for _, tt := range []struct{ data, want string }{
+		{`{"protocol":"tcp","portRangeMin":2222}`, "ruleId"},
+		{`{"ruleId":"` + ssh.ID + `","protocol":"tcp","portRangeMin":22,"action":"DROP"}`, "Unsupported rule field: action"},
+		{`{"ruleId":"` + ssh.ID + `","protocol":"icmp","portRangeMin":22}`, "A port range needs protocol"},
+	} {
+		if code, body := g.act("UPDATE_RULE", tt.data); code != http.StatusBadRequest || !strings.Contains(body, tt.want) {
+			t.Errorf("UPDATE_RULE %s: %d %s, want 400 with %q", tt.data, code, body, tt.want)
+		}
+	}
+	if code, body := g.act("UPDATE_RULE", `{"ruleId":"gaaa-9-deadbeef","protocol":"tcp","portRangeMin":2222}`); code != http.StatusConflict {
+		t.Fatalf("stale id: %d %s, want 409", code, body)
+	}
+	if len(g.fake.added) != 2 || len(g.fake.deleted) != 0 {
+		t.Fatalf("a refused edit wrote to Proxmox: added %v deleted %v", g.fake.added, g.fake.deleted)
+	}
+
+	// The edit: tcp/22 from anywhere becomes tcp/2222 from one network, with a description.
+	if code, body := g.act("UPDATE_RULE", `{"ruleId":"`+ssh.ID+`","direction":"ingress","protocol":"tcp","portRangeMin":2222,"remoteIpPrefix":"203.0.113.0/24","description":"ssh, office"}`); code != http.StatusOK {
+		t.Fatalf("edit: %d %s", code, body)
+	}
+	if len(g.fake.deleted) != 1 || g.fake.deleted[0] != "2 tcp/22" {
+		t.Fatalf("deleted %v, want tcp/22 after the add moved it to position 2", g.fake.deleted)
+	}
+	rules := g.list()
+	if len(rules) != 2 || rules[0].PortRange != "2222" || rules[0].Remote != "203.0.113.0/24" || rules[1].PortRange != "80" {
+		t.Fatalf("after the edit: %+v", rules)
+	}
+	if got := g.fake.added[2].Get("comment"); got != "ssh, office" {
+		t.Errorf("description sent as comment %q", got)
+	}
+
+	// An edit that changes nothing writes nothing.
+	if code, body := g.act("UPDATE_RULE", `{"ruleId":"`+rules[0].ID+`","protocol":"tcp","portRangeMin":2222,"remoteIpPrefix":"203.0.113.0/24","description":"ssh, office"}`); code != http.StatusOK {
+		t.Fatalf("unchanged edit: %d %s", code, body)
+	}
+	if len(g.fake.added) != 3 || len(g.fake.deleted) != 1 {
+		t.Fatalf("an unchanged edit wrote: added %d deleted %d", len(g.fake.added), len(g.fake.deleted))
+	}
+
+	// Another writer gets in between the add and the delete: both rules stay, the answer says so, and the list
+	// the client reloads shows them.
+	g.fake.onDelete = func() { g.fake.add(url.Values{"type": {"in"}, "action": {"ACCEPT"}, "proto": {"icmp"}}) }
+	code, body := g.act("UPDATE_RULE", `{"ruleId":"`+rules[1].ID+`","protocol":"tcp","portRangeMin":8080}`)
+	if code != http.StatusConflict || !strings.Contains(body, "the old one is still there") {
+		t.Fatalf("raced edit: %d %s, want 409 saying the old rule stays", code, body)
+	}
+	ports := map[string]bool{}
+	for _, r := range g.list() {
+		ports[r.PortRange] = true
+	}
+	if !ports["80"] || !ports["8080"] {
+		t.Fatalf("after the raced edit both rules must be listed: %v", ports)
+	}
+}

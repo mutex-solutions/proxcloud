@@ -143,7 +143,62 @@ form; the tests run against a fake Proxmox.
   delete with the current id. The delete also sends Proxmox the digest of the
   rule list it was checked against, so a change between the check and the delete
   is refused by Proxmox and answered `409` too.
-- There is no rule update: `UPDATE_RULE` is a `400`. Delete and add.
+- `UPDATE_RULE`, data `ruleId` (the `id` from `LIST_RULES`) and the fields of
+  `ADD_RULE`: the edit of a rule, as a delete and an add in one action. The new
+  rule passes the same checks as in `ADD_RULE`, so an edit cannot store what an
+  add refuses. Proxmox has no call that swaps a group rule for another, so the
+  API adds the new rule first and then deletes the old one: there is no moment
+  without either, and a refused add leaves the old rule as it was. A `ruleId`
+  that no rule has any more is a `409` and nothing is written. When the group
+  changes between the add and the delete the answer is a `409` whose message
+  says that the new rule was added and the old one is still there; the cache row
+  is refreshed, so the list shows both. An edit that changes nothing writes
+  nothing. Not verified on a lab.
+
+Load balancer readiness: `POST /api/v1/project/{id}/cloud/action` with
+`{"action":"LIST_LOAD_BALANCER_WARNINGS"}` on a Proxmox service answers
+`result`: a list of sentences, one for each thing the site lacks for a load
+balancer and only the operator can change: no public network available to the
+project, no public address left in the project's quota (`floatingIps`), the
+appliance image (`config.lbImage`, default `debian-13`) not in the image
+catalog. An empty list means the create is not refused for one of these. A
+catalog that cannot be read is not reported as a missing image. The console
+shows the list on the load balancers page and disables Create while it is not
+empty. `LIST_SHARE_WARNINGS` on a TrueNAS service is the same question for file
+shares; the console shows its answer on the file shares page and in the create
+dialog, and leaves Create enabled.
+
+Project invitations (`/api/v1/project-invites`, customer realm):
+
+| Call | Who | Answer |
+|---|---|---|
+| `POST /invite` `{email, projectId}` | `project:manage_members` on the project | `202` with the invitation: `id`, `email`, `projectId`, `expiresAt` (24 hours), `mine`, `mailConfigured`, and `inviteUrl` when `mailConfigured` is false |
+| `GET /project/{projectId}` | a project admin sees every pending invitation of the project; another member of the project sees the ones they sent | `{mailConfigured, invites: [...]}`, each invitation as above |
+| `DELETE /project/{projectId}/{inviteId}` | the same rule as the list | `200`; the link stops working and a queued mail is cancelled. An id the caller may not see is a `404`, as an id that does not exist |
+| `GET /mine` | the invitee | the pending invitations of the caller's verified email |
+| `GET /{token}`, `POST /accept/{token}`, `POST /decline/{token}` | the invitee | accept and decline need an account whose email the identity provider has verified as the invited one |
+
+A caller who is neither a project admin nor a member of the project gets the
+`404` of a project that does not exist on the list and the revoke.
+`mailConfigured` is true only when an invitation mail really leaves the site: a
+mail gateway is set (the SMTP integration or `PROXCLOUD_MAIL_SMTP_HOST` with
+`PROXCLOUD_MAIL_FROM`) and the durable invite outbox is off (it queues, and no
+dispatcher sends from it). When it is false no mail was sent, and `inviteUrl` is
+how the invitation reaches the invitee: the inviter copies it. The link alone
+does not let anyone join: accept matches the caller's verified email to the
+invited one. An invitee can also sign in with the invited address without the
+link; the console then shows the invitation on its start page (`GET /mine`). On
+a site without mail the identity provider cannot send a verification mail
+either, so the operator marks the address as verified in Keycloak
+(Users, the user, "Email verified") for an account that registered itself.
+An invitation made before v0.9.0 has no inviter stored: only a project admin
+sees it.
+
+Server power actions: `START`, `STOP`, `REBOOT` (asks the guest to restart) and
+`HARDREBOOT` (resets the VM without the guest's help, for a guest that hangs;
+the console offers it under More actions). `SHOW_CONSOLE_OUTPUT` answers an
+empty string on Proxmox: the Proxmox API has no call that returns a VM's past
+serial output, so there is no console log tail. Use the serial console.
 
 Proxmox connection test: `POST /api/v1/admin/service/proxmox/auth`
 (`admin:service:read`) tests a connection and stores nothing. The body takes

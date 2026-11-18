@@ -156,6 +156,63 @@ func (s *Service) SGDeleteRule(ctx context.Context, projectID, groupID, ruleID s
 	return sgRuleChanged()
 }
 
+// sameGroupRule: two rules say the same thing, wherever they sit in the group (every field SecurityGroupRuleID
+// fingerprints).
+func sameGroupRule(a, b FirewallRule) bool {
+	a.Pos, a.Digest, a.Enable = 0, "", 0
+	b.Pos, b.Digest, b.Enable = 0, "", 0
+	return a == b
+}
+
+// SGReplaceRule puts r where the rule listed under ruleID is: the edit of a rule. PVE has no call that swaps a
+// group rule for another with a check on what it replaces, so this adds the new rule and then deletes the old one.
+// In that order there is no moment without either: deleting first would cut the traffic the rule allows, and
+// lose the rule if the add were refused. A group that changed between the two steps keeps both rules, and the
+// ConflictError says so.
+func (s *Service) SGReplaceRule(ctx context.Context, projectID, groupID, ruleID string, r FirewallRule) error {
+	g, err := s.ownedGroup(ctx, projectID, groupID)
+	if err != nil {
+		return err
+	}
+	if g == nil {
+		return fmt.Errorf("pve: group %s not found", groupID)
+	}
+	rules, err := s.C.ListFirewallRules(ctx, groupID)
+	if err != nil {
+		return err
+	}
+	var old *FirewallRule
+	for i := range rules {
+		if SecurityGroupRuleID(groupID, rules[i]) == ruleID {
+			old = &rules[i]
+		}
+	}
+	if old == nil {
+		return sgRuleChanged()
+	}
+	if sameGroupRule(*old, r) {
+		return nil
+	}
+	if err := s.C.AddFirewallRule(ctx, groupID, r); err != nil {
+		return err
+	}
+	kept := &ConflictError{Msg: "The new rule was added, but the old one is still there: the rules of this security group changed meanwhile. Refresh the list and delete the old rule"}
+	// The add moved the old rule, and its digest is of the list before the add: read again.
+	if rules, err = s.C.ListFirewallRules(ctx, groupID); err != nil {
+		return kept
+	}
+	for _, cur := range rules {
+		if !sameGroupRule(cur, *old) {
+			continue
+		}
+		if err := s.C.DeleteFirewallRule(ctx, groupID, cur.Pos, cur.Digest); err != nil {
+			return kept
+		}
+		return nil
+	}
+	return kept
+}
+
 // AttachSecurityGroup references an owned group from a pool VM's firewall and
 // switches the VM firewall + its NICs' firewall flag on.
 func (s *Service) AttachSecurityGroup(ctx context.Context, projectID, serverExtID, groupID string) error {
