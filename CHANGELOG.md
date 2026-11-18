@@ -7,7 +7,117 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-None of the entries below is verified on a lab yet: each one says so, and what its tests do show.
+## [0.8.1] - 2026-11-18
+
+A patch release on top of `v0.8.0`. It adds no feature of its own size: it makes a site that runs
+`v0.8.0` safe to upgrade, now and later, and fixes what the first production site and the acceptance
+of `v0.8.0` found.
+
+- **A platform installed by `v0.8.0` keeps working after this and every later upgrade.** `v0.8.0`
+  carried one bill of materials (BOM), so any later release, a patch included, would have refused every
+  apply on an installed platform (`409 bom_unsupported`). From this release on a release carries the BOM
+  of each earlier release back to `0.8.0`, and an installed platform stays on the BOM that installed it
+  (Fixed).
+- **Tenant Kubernetes create on a site whose portal user or token has ACL rows of its own on single
+  stores.** Every create answered `502` there while the Check was green. The managed-services script
+  writes the missing rows, the Check names the path that fails, and a refused create answers `409` with
+  the reason, leaves an audit event and a JSON log line (Fixed, Added).
+- **The DHCP flag of a tenant network** says what Proxmox does: `dhcp: false` in a zone that runs no
+  DHCP server, and `enableDhcp: true` there is a `400` (Fixed, Changed).
+- **The platform's machines start with their Proxmox node**: `onboot` on every VM of the platform, and
+  a Check row `machines` (Fixed).
+- **Security group rules**: a delete could remove another rule, `ADD_RULE` stored a deny rule as an
+  allow rule, an egress rule kept its CIDR in the wrong field, and a rule's remote could name a cluster
+  IP set (Fixed, Changed, Security).
+- **Volume rows**: a rebuilt server no longer keeps the row of its old boot disk, a volume keeps its
+  name, id and bill item when it moves to another server, and a server with VM id 9999 can be deleted
+  without destroying the CSI volumes (Fixed, Added).
+
+The platform BOM of this release is `0.8.1`. It pins what `0.8.0` pins: only the `release` line
+differs, and no chart, image or download changes.
+
+Upgrading from `v0.8.0`. Read the entries named here before the upgrade.
+
+- **Docker Compose host:** check out the tag and run `./proxcloud-up.sh upgrade v0.8.1`
+  (`deploy/compose/README.md`, "Upgrade"). The script takes its backup first; nothing else is run by hand.
+- **Sites with managed services: run the Check after the upgrade** (System → Managed services). Where
+  the row `privileges:kubemint` fails, run the managed-services script again as root on a Proxmox node
+  (step 2 of the Managed services page), once per portal token, or `make upgrade` on an installer site
+  in split mode. The row names the path that lacks the right. It fails on a site where the portal's
+  user or token holds an ACL row of its own on a store, a zone or a vnet, and it passed there on
+  `v0.8.0`; until the script has run, tenant cluster creates answer `409` and an install or apply of
+  the managed services stops at its first stage (`preflight_failed`) (Fixed).
+- **An installed platform stays on the 0.8.0 BOM.** Step 4 of the Managed services page says that the
+  platform stays on release 0.8.0 and shows the 0.8.1 BOM as a newer release that is not available to
+  an installed platform yet. That is the intended state, not an error: nothing has to be installed
+  again, and **Apply this release** runs with the 0.8.0 BOM. A platform installed from a `dev-<sha>`
+  build of `main` is still refused (`bom_unsupported`).
+- **Press Apply this release once** on an installed platform, at a time of your choice: it sets
+  `onboot` on the platform's machines, which `v0.8.0` set on the seed alone. Until then the Check row
+  `machines` warns and names each VM with the command (`qm set <vmid> --onboot 1`). A stopped machine
+  is not started by it (Fixed).
+- **Scripts that call the security group actions:** `DELETE_RULE` takes `ruleId` only, as
+  `LIST_RULES` returns it; `pos` and an id of the shape `<group>-<position>` answer `400` or `409`.
+  `ADD_RULE` answers `400` for a field it cannot store (`remoteGroupId`, `action`, `log`, `priority`).
+  An egress rule written before this release is listed with remote "any": delete it and add it again
+  (Fixed, Changed).
+- **Scripts that create networks:** `enableDhcp: true` is a `400` in an EVPN zone and in a `simple`
+  zone without a DHCP server. Existing rows are corrected by the next provider sync (Fixed, Changed).
+- **Log collectors:** every line of the API log is JSON now; a parser that expected plain text lines
+  for `backend request failed` has to change (Fixed).
+- **A guest with VM id 9999** on the Proxmox cluster gets a warning in the Check and in Test
+  connection (`csi-vmid`): read it before destroying that guest (Added).
+
+Verified on a lab, on 2026-11-18, on one lab Proxmox VE cluster. The portal ran the published images
+of `v0.8.0` and installed a platform from the 0.8.0 BOM in one run without a Retry (37 minutes 45
+seconds). The portal was then upgraded with `./proxcloud-up.sh upgrade` to the build `dev-751a190` of
+`main`, which is this release without its release commit and its changelog. On that build:
+
+- **The platform kept working.** The plan had 0 changes and no blocker and named the build's own BOM
+  as newer; the Check was green with the two new rows (`csi-vmid` ok, `machines` a warning); **Apply
+  this release** succeeded in 6.6 seconds without a retry; `status.bom` was unchanged (0.8.0, the
+  sha256 of the tag's file); the seed's 14 Applications were not synced again. The 0.8.0 BOM was
+  answered by its hash, and the BOM of an earlier `dev` build was refused.
+- **Tenant Kubernetes create on per-store ACL rows.** With a stand-in row on the boot store the Check
+  failed on `privileges:kubemint` and named the store and the script; the tenant's create answered
+  `409` with the new text; the audit had a `FAILURE` event with the Proxmox reason for the operator and
+  without it for the tenant; the API log had one JSON line with the request id; nothing was left on
+  Proxmox.
+- **The DHCP flag**, on a network of a VLAN zone and of a `simple` zone made without DHCP: both
+  answered `dhcp: false`, no DHCP range was written, and `enableDhcp: true` was a `400` in both.
+- **`onboot`** on the four running machines of the platform that `v0.8.0` had installed: the apply set
+  it with the CAPI token, it was still there 23 minutes later, and the `machines` row then read ok.
+- **Security group rules**, at the API: the egress warning and the CIDR as destination in Proxmox,
+  `400` for `remoteGroupId` and `action`, `409` for a stale id and for the id shape of `v0.8.0`, `400`
+  without `ruleId`, and a delete by the current id that removed that rule only. Proxmox took the digest
+  of the rule list on the delete.
+- **Volumes**, in part: the `csi-vmid` row read ok, and a standalone volume was created and deleted
+  (see Known issues for what its first create showed).
+
+**Not** verified on a lab:
+
+- **Anything on the published artifacts of this release.** The lab ran a build of `main` whose BOM was
+  `0.9.0-dev`. That BOM and the 0.8.1 one pin the same versions as 0.8.0, so the lab does not show an
+  apply that keeps older pins while the release carries other ones.
+- **Volume attach, detach and rebuild.** The lab node that holds the image had no capacity for a tenant
+  server, so none of these ran: that a volume keeps its name, id and bill item on an attach to another
+  server, that a rebuild archives the row of the old boot disk, and the delete of a server with VM id
+  9999. The warning case of `csi-vmid` was not provoked. These fixes rest on their tests alone.
+- **A stopped platform machine**, a machine the token cannot read, a node reboot with `onboot` in
+  place, and an install on this release from the start.
+- **The production shape of the ACL fix**: an older `ProxCloudPlatform` row on a store, a row held
+  through a group, and the script's new lines that repair them (they ran against a fake `pveum`).
+- An EVPN zone's `enableDhcp: true`, a rule-list digest that is stale at Proxmox, the console pages of
+  every change above, and an installer or Helm install of this release.
+- Everything `v0.8.0` says is not verified still holds, except what is listed as verified here.
+
+On the lab, the install's stage 7 (three node clones at the same time) restarted containers of another
+Kubernetes cluster whose VMs share the nodes' disks; all recovered. This is the behaviour of `v0.8.0`
+and is unchanged.
+
+The entries below were written when each change merged, before the lab round. Where one ends with "Not
+verified on a lab", the lists above say what has been run since and what has not. Where one says the
+BOM on `main` is `0.9.0-dev`, that was the state at that merge: this release's BOM is `0.8.1`.
 
 ### Added
 
@@ -154,6 +264,39 @@ None of the entries below is verified on a lab yet: each one says so, and what i
 
 - **A security group rule's remote must be a CIDR or an address.** The value was passed to Proxmox as written, so a
   tenant could name a cluster IP set or alias as the source of a rule. Not verified on a lab.
+
+### Known issues
+
+- **A standalone volume can lose its name at create (G1).** A volume created without a server gets a
+  small holder VM. When Proxmox lists that VM later than about 12 seconds after its create, the create
+  answers `200` with a row that has no `id`, the volume is missing from the tenant's list until the next
+  provider sync, and the sync then names it after its disk (`vm-<vmid>-disk-0`): the name the tenant
+  gave is lost. Seen once on a lab under load; a second create kept its name. The disk and its size are
+  right, and on the lab the volume was deleted through the API once it was listed. The same code is in
+  `v0.8.0` (`internal/platform/project/cloud_writes_pve.go`, the read-back after the create gives up
+  and answers a row that is never stored). Not fixed in this release.
+- **Managed Kubernetes: workers do not join where one node both translates tenant traffic and hosts the
+  platform machines.** A tenant cluster's workers and a tenant's database clients open TCP connections
+  to the platform network. On a Proxmox node that translates the tenant's traffic (a `simple` tenant
+  zone, or an exit node of an EVPN zone) and also runs the platform machine that owns the address,
+  while the platform network is reached over the site's router, those connections are dropped: the
+  control plane becomes ready and no worker joins. A one-node site is this case; a VLAN tenant zone is
+  not. It was found on a production site on `v0.8.0` and is the same in this release, where managed
+  Kubernetes works on such a site only after a change on the node itself, outside the product. This
+  release neither detects nor repairs it: `v0.8.2` adds a Check warning and the description with the
+  node-side steps to [docs/managed-services.md](docs/managed-services.md). Not reproduced on a lab.
+- **Seed ISOs of servers created before `v0.8.0` are never swept (O2).** A server's seed ISO
+  (`pcseed-v1-<...>.iso` on the provider's seed store) is deleted with its server only when its record carries the
+  cluster and storage identity, which is recorded for servers created on v0.8.0 or later
+  (`internal/cloud/pve/seed.go`). For a server created on an earlier release the record has none: when that server
+  is deleted, the API logs `seed cleanup pending ... original cluster/storage identity was not available; operator
+  inspection required`, and the ISO stays on the store for good (seen on a lab after an upgrade, and again in the
+  lab round of this release). It holds the
+  server's user data. Clean it up by hand once its server is deleted, as root on a node: list the seed ISOs
+  (`pvesm list <seed store> --content iso | grep pcseed-v1-`); one that is older than a day and that no VM's config
+  names any more (`grep -l <file name> /etc/pve/nodes/*/qemu-server/*.conf` prints nothing) is such a leftover:
+  `pvesm free <volume>`. Not verified on a lab: the hand cleanup, that a server created on v0.8.0 or later gets the
+  identity, and the sweep that follows.
 
 ## [0.8.0] - 2026-11-17
 

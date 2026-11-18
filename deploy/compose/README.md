@@ -216,9 +216,9 @@ feature off. The last lines of `install` (also with `--dry-run`) say what is on.
   token secrets and presses Install. The steps, the stages of the job, every failure code, Remove and
   the limits of this stack are in [managed-services.md](../../docs/managed-services.md).
 
-  No release before v0.8.0 reads `PROXCLOUD_PLATFORM_ENABLED`. Not verified: a platform built
-  from this stack on the published images of a release (the lab runs used `dev-<sha>` builds of
-  main, [managed-services.md](../../docs/managed-services.md#not-verified-on-a-lab-yet)).
+  No release before v0.8.0 reads `PROXCLOUD_PLATFORM_ENABLED`. A platform was built from this stack
+  on the published images of v0.8.0 once, on a lab (2026-11-18); not on those of v0.8.1 (the other
+  lab runs used `dev-<sha>` builds of main, [managed-services.md](../../docs/managed-services.md#not-verified-on-a-lab-yet)).
 
   **Testing ahead of a release.** `--version dev-<sha>` and `upgrade dev-<sha>` take a build of main
   (CI publishes the images `dev-<first 7 characters of the commit>` on every push to main that
