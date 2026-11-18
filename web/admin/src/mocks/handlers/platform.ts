@@ -34,6 +34,7 @@ export const mockPlatform = {
   runs: [] as Doc[],
   applies: 0,
   synced: false, // a provider sync ran (handlers/setup.ts): the isolation preset's check passes after it
+  probes: {} as Record<string, Doc>, // the last tenant path test per installation; it ends two reads after its start
 }
 
 const fail = (status: number, code: string, message: string, details: Doc = {}) => new ApiError(status, status, message, { code, ...details })
@@ -57,7 +58,7 @@ const INSTALLATION: Shape = {
   name: true, serviceId: true, provisionedBy: true, layout: true, rev: true,
   spec: {
     pveApiUrl: true, storage: { boot: true, iso: true, import: true },
-    network: { bridge: true, prefix: true, gateway: true, dns: true, mtu: true },
+    network: { mode: true, bridge: true, vlan: true, prefix: true, gateway: true, dns: true, mtu: true },
     seed: { mode: true, pool: true, node: true, address: true, cores: true, memoryMiB: true, diskGiB: true, sshKeys: true, apiSources: true },
     clusters: [{ name: true, roles: true, endpoint: true, nodeRange: true, metallbRange: true, controlPlane: MACHINE,
       nodeGroups: [{ name: true, nodes: true, count: true, cores: true, memoryMiB: true, diskGiB: true }] }],
@@ -356,6 +357,30 @@ on("PUT /admin/platform/installations/:id/credentials", ({ params, opts }) => {
 on("POST /admin/platform/installations/:id/preflight", ({ params }) => {
   const rows = checks(find(params.id))
   return { data: { ok: rows.every((c) => c.status !== "fail"), checks: rows } }
+})
+
+// "Test the tenant path": refused before the first install, then running for two reads and passed.
+on("POST /admin/platform/installations/:id/tenant-path-probe", ({ params, opts }) => {
+  const in_ = find(params.id)
+  const b = (opts.body ?? {}) as Doc
+  strict(b, { node: true })
+  if (!in_.status.bom) throw fail(409, "not_installed", "The platform is not installed yet, so nothing listens on the platform network and the path cannot be tested. Install first; until then the Check row tenant-path reads the layout.")
+  const c = in_.spec.clusters[0]
+  const lb = String(c.metallbRange).split("-")[0]
+  const probe = { id: in_.id, state: "running", node: b.node || c.controlPlane.node, template: 9200, startedAt: now(), step: "cloning the test VM", reads: 0,
+    targets: [{ address: lb, port: 6443, expect: "open" }, { address: c.endpoint, port: 6443, expect: "closed" }], message: "The test is running." }
+  mockPlatform.probes[in_.id] = probe
+  return { data: { ...probe } }
+})
+on("GET /admin/platform/installations/:id/tenant-path-probe", ({ params }) => {
+  const p = mockPlatform.probes[find(params.id).id]
+  if (!p) throw fail(404, "no_probe", "The tenant path of this installation was not tested yet.")
+  if (p.state === "running" && ++p.reads >= 2) {
+    Object.assign(p, { state: "passed", step: "", finishedAt: now(), vmid: 131, source: "10.100.255.242",
+      targets: p.targets.map((t: Doc) => ({ ...t, result: t.expect === "open" ? "open" : "none" })),
+      message: `The path is open: from a tenant network on ${p.node} (address 10.100.255.242, translated by the node as a tenant's is) a connection opened to ${p.targets[0].address}:6443, and the platform's own API address did not answer, as the isolation rules want. This holds for ${p.node}; a tenant on another node takes another path.` })
+  }
+  return { data: { ...p } }
 })
 
 on("GET /admin/platform/installations/:id/plan", ({ params }) => {

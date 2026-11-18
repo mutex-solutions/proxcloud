@@ -578,3 +578,65 @@ test("an admin without admin:service:manage reads the page and changes nothing",
     await expect(page.getByRole("button", { name, exact: true })).toBeDisabled()
   }
 })
+
+test("the network is an existing bridge, with an optional VLAN tag, or a vnet the install makes", async ({ page }) => {
+  await open(page)
+  await recordCalls(page)
+  await fillSettings(page)
+  // An existing bridge is the default, and a spec without a tag names neither a mode nor a VLAN.
+  await expect(page.getByRole("radio", { name: /An existing bridge/ })).toBeChecked()
+  await page.getByLabel("VLAN tag (optional)", { exact: true }).fill("4095")
+  await page.getByRole("button", { name: "Save draft" }).click()
+  await expect(page.getByText("VLAN tag: 1 to 4094, or empty.").first()).toBeVisible()
+  expect(await calls(page, "POST", "/admin/platform/installations")).toHaveLength(0)
+
+  // Routed: the bridge field names the vnet, and the tag has no meaning.
+  await page.getByRole("radio", { name: /Routed by the node/ }).check()
+  await expect(page.getByLabel("VLAN tag (optional)", { exact: true })).toHaveCount(0)
+  await page.getByLabel("Vnet name", { exact: true }).fill("Platform-Net")
+  await expect(page.getByText(/Vnet name: a lower-case letter/).first()).toBeVisible()
+  await page.getByLabel("Vnet name", { exact: true }).fill("pcplat0")
+  await page.getByLabel("Seed node", { exact: true }).fill("pve2")
+  await expect(page.getByText(/A routed network is a layout for one Proxmox node, and the settings place machines on pve1, pve2/).first()).toBeVisible()
+  await expectAccessible(page)
+  await page.getByLabel("Seed node", { exact: true }).fill("pve1")
+  await page.getByRole("button", { name: "Save draft" }).click()
+  await expect(page.getByText("2. Proxmox identities")).toBeVisible()
+  const [created] = await calls(page, "POST", "/admin/platform/installations")
+  expect(created.body.spec.network).toEqual({ mode: "routed", bridge: "pcplat0", prefix: "10.90.0.0/24", gateway: "10.90.0.1", dns: ["10.90.0.1"] })
+  await expect(page.getByRole("radio", { name: /Routed by the node/ })).toBeChecked()
+
+  // Back to a bridge with a tag, in the saved draft.
+  await page.getByRole("radio", { name: /An existing bridge/ }).check()
+  await page.getByLabel("Bridge", { exact: true }).fill("vmbr1")
+  await page.getByLabel("VLAN tag (optional)", { exact: true }).fill("140")
+  await page.getByRole("button", { name: "Save settings" }).click()
+  await expect.poll(async () => (await calls(page, "PUT", /\/installations\/pi-/)).length).toBe(1)
+  const [saved] = await calls(page, "PUT", /\/installations\/pi-/)
+  expect(saved.body.spec.network).toEqual({ bridge: "vmbr1", vlan: 140, prefix: "10.90.0.0/24", gateway: "10.90.0.1", dns: ["10.90.0.1"] })
+})
+
+test("the tenant path is tested on demand, on an installed platform only", async ({ page }) => {
+  await open(page, "draft")
+  await expect(page.getByRole("button", { name: "Check", exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Test the tenant path" })).toHaveCount(0)
+
+  await open(page, "ready")
+  await recordCalls(page)
+  const test_ = page.getByRole("region", { name: "Test of the tenant path" })
+  await expect(test_).toContainText("It costs one VM clone and two SDN applies")
+  // Check does not start it.
+  await page.getByRole("button", { name: "Check", exact: true }).click()
+  await expect(page.getByRole("status").filter({ hasText: /check/i }).first()).toBeVisible()
+  expect(await calls(page, "POST", /\/tenant-path-probe$/)).toHaveLength(0)
+
+  await test_.getByRole("button", { name: "Test the tenant path" }).click()
+  await expect(test_.getByRole("status")).toContainText("Running on pve1")
+  await expect(test_.getByRole("button", { name: "Testing…" })).toBeDisabled()
+  await expect(test_.getByRole("status")).toContainText("The path is open", { timeout: 15_000 })
+  await expect(test_.getByRole("list", { name: "Connections of the last test" })).toContainText("the platform's own API address: tenants must not reach it")
+  const [started] = await calls(page, "POST", /\/tenant-path-probe$/)
+  expect(started.body).toEqual({ node: "pve1" })
+  await expectAccessible(page)
+  await shot(page, "tenant-path-test")
+})
