@@ -200,9 +200,11 @@ management cluster, and no VM whose name starts with `<clusterId>-` in the
 project's pool on Proxmox (CAPMOX names a VM after its Machine). While any of
 these is left, or the management cluster or Proxmox does not answer, nothing
 of the cluster is released (the look at the pool comes before every release
-step, the CSI one included) and the job looks again later (`cascade_running`
-or `release_failed` as the job's last result; the reason is in the API log,
-line `kamaji: release of a deleted cluster, will retry`). On a management
+step, the CSI one included) and the job looks again later. Its last result
+is then `cascade_running` (something of the cluster is left; nothing is
+logged for it) or `release_failed` (a look or a release step failed; only
+this one writes a line to the API log, with the reason:
+`kamaji: release of a deleted cluster, will retry`). On a management
 cluster whose ClusterRole is older than the Machines grant
 ([Provisioning status](#provisioning-status-reason-and-needs-attention), "RBAC") the
 Machines cannot be listed; the other checks decide there.

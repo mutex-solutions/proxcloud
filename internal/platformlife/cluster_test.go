@@ -1320,7 +1320,7 @@ func TestPlatformKubeconfig(t *testing.T) {
 		}
 	}
 	argo, _ := json.Marshal(p.wl.obj(rbac + "namespaces/argocd/roles/proxcloud-break-glass")["rules"])
-	if string(argo) != `[{"apiGroups":[""],"resources":["pods/portforward"],"verbs":["create"]},`+
+	if string(argo) != `[{"apiGroups":[""],"resources":["pods/portforward"],"verbs":["get","create"]},`+
 		`{"apiGroups":[""],"resourceNames":["argocd-initial-admin-secret"],"resources":["secrets"],"verbs":["get"]}]` {
 		t.Fatalf("the Role in argocd: %s", argo)
 	}
