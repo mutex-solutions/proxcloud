@@ -75,12 +75,27 @@ is off (`PROXCLOUD_JOBS_SCHEDULER_ENABLED`, and no debug triggers) the call answ
 `409` and changes nothing, instead of leaving the project `DELETE_IN_PROGRESS`.
 
 Networks on a Proxmox provider: `POST /api/v1/project/{id}/cloud` with
-`{type: NETWORK, data: {name, cidr?, enableDhcp?, snat?}}`. Both flags default to
-`true`, except in a `vlan` zone, where Proxmox does no DHCP and no SNAT: they
-default to `false`, the answer says `dhcp: false` and `snat: false`, and `true`
-for either is a `400` (so are the actions `ADD_SUBNET` and `SET_SNAT` with
-`snat: true`). The `gateway` of such a network is the address the site's router
-holds.
+`{type: NETWORK, data: {name, cidr?, enableDhcp?, snat?}}`. `snat` defaults to
+`true`, except in a `vlan` zone, where Proxmox does no DHCP and no SNAT: both
+flags default to `false` there, the answer says `dhcp: false` and `snat: false`,
+and `true` for either is a `400` (so are the actions `ADD_SUBNET` and `SET_SNAT`
+with `snat: true`). The `gateway` of such a network is the address the site's
+router holds.
+
+`enableDhcp` follows the zone as Proxmox has it, read at the create: it defaults
+to `true` only where the zone runs a DHCP server (a `simple` zone with
+`dhcp: dnsmasq`, which is how ProxCloud creates one unless its config says
+`"dhcp": false`). In every other zone (EVPN, VLAN, a `simple` zone without a
+DHCP server) it defaults to `false`, no DHCP range is written on the subnet, and
+`enableDhcp: true` is a `400` that says the zone has no DHCP server; servers
+there get a fixed address the platform assigns. The `dhcp` a network answers, at
+the create, after a subnet action and at every sync, is `true` only when its
+subnet has a DHCP range and its zone runs a DHCP server. Up to v0.8.0 it
+followed the zone's configured kind and the subnet alone, so a network in a
+`simple` zone made without DHCP, or in an EVPN zone, answered `dhcp: true`; a
+sync corrects such a row. The DHCP range those subnets still carry is left in
+place: it does nothing without a DHCP server in the zone, and removing it would
+take an SDN apply on a running site.
 
 Project public-network policy: `GET /api/v1/project/{id}/public-networks` lists
 the external (public) networks the project is allowed to use, and
@@ -485,17 +500,22 @@ are several, `errors.details.problems`.
   `PROXCLOUD_ENCRYPTION_DEFAULT_KEY` the route answers `409 no_encryption_key`.
   No route returns a secret: an installation shows `credentials.{capi,csi}.tokenId`.
 - `POST /installations/{id}/preflight`: read-only, not audited; `{ok, checks}`
-  with rows `flags`, `spec`, `network`, `isolation`, `tenant-network`, `credentials`,
+  with rows `flags`, `spec`, `network`, `isolation`, `tenant-network`, `credentials`, `machines`,
   `privileges:capi`, `privileges:csi`, `privileges:kubemint`, `mint-scope`, `pool-fence`,
   `token-scope`, `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement` and
   `images`. A row's `status` is `ok`, `fail` or `warn`; `ok` in the answer is
   false only when a row failed. `tenant-network` never fails. It reads the provider's default
   zone in Proxmox: `warn` when that zone has DHCP, when it does not exist yet and is
-  configured as a `simple` zone (ProxCloud creates one with DHCP), or when the zones
+  configured as a `simple` zone without `"dhcp": false` (ProxCloud then creates it with DHCP), or when the zones
   could not be read; a tenant Kubernetes cluster create on a network of such a zone is
   refused with a `400`, except on a Kubernetes provider with shared workers
   (`cluster.shared`), which uses no tenant network. It is `ok` for a zone without
   DHCP, and absent when the provider names no zone.
+  `machines` never fails either, and is absent while the installation has no VM. It reads, with the CAPI
+  token, the VMs of the pools `proxcloud-seed` and `proxcloud-system` that carry the installation's tag:
+  `warn` with one line per VM that is stopped (start it in Proxmox, `qm start <vmid>`) or that has no
+  `onboot` (the next apply sets it, or `qm set <vmid> --onboot 1`) or that the token could not read (the
+  other VMs are still listed), or when the pools could not be read.
   `isolation` fails, naming the CIDRs to add to `blockedCidrs`, when
   the seed, the API VIP or the node range is outside the blocked and management
   networks, and when the cluster firewall's isolation rules are not the ones the

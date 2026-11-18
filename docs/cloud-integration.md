@@ -539,8 +539,15 @@ point (`proxmox.go` header):
   `proxcloud.io/unsecured` taint off a worker once that is in place:
   [managed-sandbox.md §2](managed-sandbox.md#2-layer-1-the-vm-firewall-on-the-workers-sb2b).
 - PVE offers DHCP on simple zones only, and a simple zone stays on one node. On EVPN and
-  VLAN zones the platform allocates each server's `net0` address and sets it through
-  cloud-init, so an image without cloud-init gets no address there.
+  VLAN zones, and on a simple zone without a DHCP server, the platform allocates each server's
+  `net0` address and sets it through cloud-init, so an image without cloud-init gets no address
+  there. What decides is the zone as Proxmox has it (its `dhcp` field), not its kind in the
+  provider's config: the network create reads it, writes a DHCP range only where the zone runs a
+  DHCP server, answers `dhcp: false` elsewhere and refuses `enableDhcp: true` there with a `400`;
+  the sync answers the same from the subnet and the zone ([api.md](api.md)). ProxCloud creates a
+  missing simple zone with DHCP, or without when its config says `"dhcp": false`; a zone that
+  exists is never changed. Tenant Kubernetes clusters and load balancers need a network without
+  DHCP.
 - A network in a `vlan` zone is a bare VLAN: Proxmox holds no gateway address there and does
   no DHCP and no SNAT. The subnet is written without a DHCP range and without SNAT, the network
   answers `dhcp: false` and `snat: false` (also one made before this rule, whatever its subnet

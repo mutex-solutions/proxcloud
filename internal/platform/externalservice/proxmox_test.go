@@ -496,6 +496,9 @@ func TestValidatePVENetwork(t *testing.T) {
 		{"two zones, no defaultZone", `{"zones":{"a":{"kind":"simple"},"b":{"kind":"simple"}}}`, "config.network.defaultZone must name one"},
 		{"a zone per project from a simple zone", `{"defaultZone":"s","zones":{"s":{"kind":"simple"}},"isolation":"evpn-per-project"}`,
 			"evpn-per-project copies every project's zone from the default zone, which must then be an evpn zone; s is simple"},
+		{"a simple zone made without DHCP", `{"zones":{"s":{"kind":"simple","dhcp":false}}}`, ""},
+		{"dhcp that is not a boolean", `{"zones":{"s":{"kind":"simple","dhcp":"no"}}}`, "config.network.zones.s.dhcp is for a simple zone and must be true or false"},
+		{"dhcp on a vlan zone", `{"zones":{"v":{"kind":"vlan","bridge":"vmbr0","vlanMin":100,"vlanMax":199,"dhcp":false}}}`, "config.network.zones.v.dhcp is for a simple zone"},
 		{"a zone per project from a vlan zone", `{"defaultZone":"v","zones":{"v":{"kind":"vlan","bridge":"vmbr0","vlanMin":100,"vlanMax":199}},"isolation":"evpn-per-project"}`, "v is vlan"},
 	}
 	for _, tt := range tests {
