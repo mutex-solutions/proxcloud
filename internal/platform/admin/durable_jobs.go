@@ -76,6 +76,11 @@ func (h *Handler) durableReplay(w http.ResponseWriter, r *http.Request) {
 		httpx.Err(w, 409, 409, "A managed-services run is not replayed: use Retry on the Managed services page")
 		return
 	}
+	// A cluster release is never replayed: the provider sync's sweep does the same work.
+	if kind == durablejobs.KamajiRelease {
+		httpx.Err(w, 409, 409, "A cluster release is not replayed: start a provider sync, its sweep releases the cluster")
+		return
+	}
 	// A smoke test is never replayed: its result is per run (a new one is queued from the page).
 	if kind == durablejobs.TemplateUpdateSmoke {
 		httpx.Err(w, 409, 409, "A smoke test is not replayed: run a new smoke test from Template updates")

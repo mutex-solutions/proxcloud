@@ -20,10 +20,12 @@ type SDNZone struct {
 	MTU      int    `json:"mtu"`
 	VRFVxlan int    `json:"vrf-vxlan"` // evpn: the zone's VRF VNI (unique per zone)
 	Nodes    string `json:"nodes"`
-	IPAM     string `json:"ipam"`
-	DHCP     string `json:"dhcp"`
-	Pending  any    `json:"pending"` // set when the zone has uncommitted changes
-	State    string `json:"state"`   // "new" | "deleted" | "changed" when pending
+	// ExitNodes (evpn): the nodes that route the zone to the outside and, for a subnet with snat, translate it.
+	ExitNodes string `json:"exitnodes"`
+	IPAM      string `json:"ipam"`
+	DHCP      string `json:"dhcp"`
+	Pending   any    `json:"pending"` // set when the zone has uncommitted changes
+	State     string `json:"state"`   // "new" | "deleted" | "changed" when pending
 }
 
 func (c *Client) ListSDNZones(ctx context.Context) ([]SDNZone, error) {

@@ -977,6 +977,15 @@ func run() error {
 	paDone := make(chan struct{})
 	go func() { defer close(paDone); paRunner.Run(paCtx) }()
 	defer func() { stopPA(); <-paDone }()
+	// A deleted tenant Kubernetes cluster is released (Proxmox token, addresses, dataset) by a job its delete queues,
+	// once the delete cascade is over. Always on, like the job worker: the provider sync's sweep, which needs the
+	// scheduler or an operator, is only the backstop (docs/managed-k8s.md, "Deletion and orphan finalization").
+	projectH.SetKamajiReleaseJobs(jobStore)
+	krRunner := &project.KamajiReleaseRunner{Jobs: jobStore, Finalize: projectH.KamajiFinalizeCluster, Log: log}
+	krCtx, stopKR := context.WithCancel(ctx)
+	krDone := make(chan struct{})
+	go func() { defer close(krDone); krRunner.Run(krCtx) }()
+	defer func() { stopKR(); <-krDone }()
 	// GHCR template updates (docs/template-updates.md): discovery always; the VM import runner only
 	// when PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true. Every GitHub call uses the GitHub
 	// integration's token (decrypted per call, never logged).
