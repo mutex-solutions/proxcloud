@@ -24,7 +24,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/nyaruka/phonenumbers v1.8.1
 	github.com/robfig/cron/v3 v3.0.1
-	github.com/shopspring/decimal v1.4.0
+	github.com/shopspring/decimal v1.6.0
 	github.com/stripe/stripe-go/v82 v82.5.1
 	github.com/testcontainers/testcontainers-go v0.45.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.45.0
