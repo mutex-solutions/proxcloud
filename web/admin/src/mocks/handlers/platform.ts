@@ -6,7 +6,8 @@
 // disabled | draft | isolation (the isolation check fails until a provider sync) | norunner (runs answer 409) |
 // running | waiting (stage 4 is trying again) | failed | dead (the run's job died: the stored phase stays applying) |
 // ready | previous (ready, installed by the release before this one: the plan names a newer release and why this one does not move the platform to it) |
-// upgrade (the same, and the move is allowed: the plan lists it, the run wants the typed confirmation) | degraded (one component out of sync) | simplezone (the check warns: no tenant cluster on a simple zone) | silent (the seed does not answer) | unread (the live read fails) | removing
+// upgrade (the same, and the move is allowed: the plan lists it, the run wants the typed confirmation) |
+// replace (the same, with an unfinished upgrade toward the release of an earlier ProxCloud: the plan also offers the move to this one's in its place) | degraded (one component out of sync) | simplezone (the check warns: no tenant cluster on a simple zone) | silent (the seed does not answer) | unread (the live read fails) | removing
 // (none: enabled, nothing saved).
 import { ApiError } from "@/lib/api"
 import { on } from "../router"
@@ -268,10 +269,11 @@ if (preset && preset !== "disabled") {
     tick(newRun(in_, "apply", Date.now() - 3.5 * STAGE_MS)).dead = true
     in_.status.seed = { vmid: 9100, node: "pve1", generation: 1, cdVolume: "local:iso/pc-seed-pi-00000001.iso" }
   }
-  if (["ready", "previous", "upgrade", "degraded", "silent", "unread", "removing"].includes(preset)) {
+  if (["ready", "previous", "upgrade", "replace", "degraded", "silent", "unread", "removing"].includes(preset)) {
     mockPlatform.applies = 1
     tick(newRun(in_, "apply", Date.now() - 3_600_000))
-    if (preset === "previous" || preset === "upgrade") in_.status.bom = { release: previous.release, sha256: previous.sha256 }
+    if (["previous", "upgrade", "replace"].includes(preset)) in_.status.bom = { release: previous.release, sha256: previous.sha256 }
+    if (preset === "replace") in_.status.targetBom = { release: "0.6.5", sha256: "5".repeat(64) }
     if (preset === "removing") newRun(in_, "remove", Date.now() - 0.5 * STAGE_MS)
   }
 }
@@ -368,21 +370,24 @@ on("GET /admin/platform/installations/:id/plan", ({ params }) => {
   const installed = in_.status.bom ?? null
   if (installed?.sha256 === previous.sha256) {
     const pending = in_.status.targetBom
-    return { data: { installed, target: pending ?? installed, newer: bomRef, changes: [], blocking: [], upgrade: upgradePlan(in_) } }
+    return { data: { installed, target: pending ?? installed, newer: bomRef, changes: [], blocking: [], upgrade: upgradePlan(in_), ...(stale(in_) ? { replacement: upgradePlan(in_, true) } : {}) } }
   }
   return { data: { installed, target: bomRef, changes: [], blocking: [] } }
 })
 
 // The plan of the move from the previous release to this one, as platformlife.Classify answers it: the preset
 // "upgrade" differs in the product's own charts alone, "previous" also in a third-party chart, which refuses it.
-function upgradePlan(in_: Doc) {
+// stale: an upgrade toward another release than this one's has started and not finished. With `replace` the plan is
+// the move to this release in its place.
+const stale = (in_: Doc) => !!in_.status.targetBom && in_.status.targetBom.sha256 !== bom.sha256
+function upgradePlan(in_: Doc, replace = false) {
   const release = { name: "release", from: previous.release, to: bom.release, class: "record only", impact: "Nothing is synced for it: the platform's record and the labels of its objects name the new release." }
   const chart = { cluster: "workload", name: "platform", from: "0.1.2", to: "0.1.3", class: "chart", stage: "workload-platform", wave: 3, impact: "ArgoCD syncs the chart's objects. No pod of a tenant restarts." }
   const cilium = { cluster: "workload", name: "cilium", from: "1.18.15", to: "1.18.16", class: "refused", blocking: "not supported by this release: a third-party chart is upgraded only by a later release (this one moves the product's own charts)" }
-  const refused = preset !== "upgrade"
-  const inProgress = !!in_.status.targetBom
+  const refused = preset !== "upgrade" && preset !== "replace"
+  const inProgress = !!in_.status.targetBom && !replace
   return {
-    from: { release: previous.release, sha256: previous.sha256 }, to: bomRef, allowed: !refused, ...(inProgress ? { inProgress } : {}),
+    from: { release: previous.release, sha256: previous.sha256 }, to: inProgress ? in_.status.targetBom : bomRef, allowed: !refused, ...(inProgress ? { inProgress } : {}),
     ...(refused || inProgress ? {} : { confirm: `upgrade ${in_.name} to ${bom.release}` }),
     changes: refused ? [release, chart, cilium] : [release, chart],
     blocking: refused ? [`workload/cilium: ${cilium.blocking}`] : [],
@@ -396,7 +401,7 @@ on("POST /admin/platform/installations/:id/runs", ({ params, opts }) => {
   strict(b, { kind: true, confirm: true, targetBom: true })
   if (b.kind !== "apply" && b.kind !== "remove") throw fail(400, "invalid_kind", "kind is apply or remove")
   // An apply that names this release as its target is an upgrade: allowed as the plan says, with the plan's phrase.
-  const up = b.kind === "apply" && b.targetBom && !in_.status.targetBom ? upgradePlan(in_) : null
+  const up = b.kind === "apply" && b.targetBom && (!in_.status.targetBom || stale(in_)) ? upgradePlan(in_, stale(in_)) : null
   if (b.targetBom && (b.kind !== "apply" || b.targetBom !== bom.sha256)) throw fail(400, "invalid_target", "targetBom must be the sha256 of this build's own BOM")
   if (up && !up.allowed) throw fail(409, "upgrade_refused", `upgrade_refused: ${up.blocking.join("; ")}`, { reasons: up.blocking })
   if (up ? b.confirm !== up.confirm : b.confirm && (b.kind !== "remove" || b.confirm !== `remove ${in_.name}`)) throw fail(400, "invalid_confirmation", `confirm must be "remove ${in_.name}" on a remove, or the plan's phrase on an upgrade`)

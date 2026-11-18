@@ -372,6 +372,21 @@ test("an upgrade the plan allows: the changes, the typed confirmation, the run a
   await expect(page.getByRole("heading", { name: /Upgrade to release|has not finished|stays on release/ })).toHaveCount(0)
 })
 
+test("an unfinished upgrade toward an earlier ProxCloud's release: the review offers the move to this one's in its place", async ({ page }) => {
+  await open(page, "replace")
+  await recordCalls(page)
+  await expect(page.getByRole("heading", { name: "The upgrade to release 0.6.5 has not finished" })).toBeVisible()
+  await expect(page.getByRole("heading", { name: "Upgrade to release 0.7.0 instead" })).toBeVisible()
+  await expect(page.getByText(/in place of the unfinished upgrade to release 0\.6\.5/)).toBeVisible()
+  await expectAccessible(page)
+  await page.getByRole("button", { name: "Upgrade to release 0.7.0" }).click()
+  const dialog = page.getByRole("dialog", { name: /Upgrade “lab” to release 0\.7\.0/ })
+  await dialog.getByLabel(/to confirm/).fill("upgrade lab to 0.7.0")
+  await dialog.getByRole("button", { name: "Upgrade", exact: true }).click()
+  await expect(page.getByText(/This run upgrades the platform from release 0\.6\.0 to release 0\.7\.0/)).toBeVisible()
+  expect((await calls(page, "POST", /\/runs$/)).map((c) => c.body)).toEqual([{ kind: "apply", targetBom: expect.stringMatching(/^[0-9a-f]{64}$/), confirm: "upgrade lab to 0.7.0" }])
+})
+
 test("a re-apply from ready that fails shows Failed in the header", async ({ page }) => {
   await open(page, "ready")
   await expect(headerState(page)).toHaveText("Ready")

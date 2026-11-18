@@ -410,23 +410,33 @@ const short = (digest?: string) => (digest ? digest.replace(/^sha256:/, "").slic
 
 // The move of an installed platform to this ProxCloud's release, as the plan gives it: allowed with every change and
 // what it does, refused with each reason, or started and not finished. Starting it asks for the typed confirmation.
-function UpgradePlan({ installation, upgrade, canManage, dirty, pending, onUpgrade }: {
-  installation: Installation; upgrade: Upgrade; canManage: boolean; dirty: boolean; pending: boolean; onUpgrade: (targetBom: string, confirm: string) => void
+// With `replaces` it is the move offered in place of an unfinished upgrade toward that release.
+function UpgradePlan({ installation, upgrade, replaces, canManage, dirty, pending, onUpgrade }: {
+  installation: Installation; upgrade: Upgrade; replaces?: string; canManage: boolean; dirty: boolean; pending: boolean; onUpgrade: (targetBom: string, confirm: string) => void
 }) {
+  const id = replaces ? "pf-upgrade-instead" : "pf-upgrade"
   const [asking, setAsking] = useState(false)
   const [typed, setTyped] = useState("")
   const { from, to } = upgrade
   const offered = upgrade.allowed && !upgrade.inProgress
   return (
-    <section aria-labelledby="pf-upgrade" className="grid gap-2 rounded-md border p-3 text-sm">
-      <h3 id="pf-upgrade" className="font-semibold">
-        {upgrade.inProgress ? `The upgrade to release ${to.release} has not finished` : offered ? `Upgrade to release ${to.release}` : `The platform stays on release ${from.release}`}
+    <section aria-labelledby={id} className="grid gap-2 rounded-md border p-3 text-sm">
+      <h3 id={id} className="font-semibold">
+        {upgrade.inProgress ? `The upgrade to release ${to.release} has not finished` : offered ? `Upgrade to release ${to.release}${replaces ? " instead" : ""}` : replaces ? `Release ${to.release} cannot take the place of the unfinished upgrade` : `The platform stays on release ${from.release}`}
       </h3>
       {upgrade.inProgress ? (
         <p>
           A run toward release <span className="font-mono">{to.release}</span> started and has not succeeded yet. Apply this release continues to it. Nothing goes back
           to release <span className="font-mono">{from.release}</span>, which the record names until a run has succeeded.
         </p>
+      ) : replaces ? (
+        <>
+          <p>
+            This ProxCloud carries the platform release <span className="font-mono">{to.release}</span>{offered ? " and can move the platform to it in place of" : ". It does not move the platform to it in place of"} the
+            unfinished upgrade to release <span className="font-mono">{replaces}</span>{offered ? ": use it when that upgrade cannot finish." : "."} Apply this release and Retry continue to release <span className="font-mono">{replaces}</span>.
+          </p>
+          {offered ? null : <ul aria-label="Why the upgrade is refused" className="list-disc pl-5">{upgrade.blocking.map((b) => <li key={b}>{b}</li>)}</ul>}
+        </>
       ) : offered ? (
         <p>
           This ProxCloud carries the platform release <span className="font-mono">{to.release}</span> and can move the platform to it. Tenant clusters and databases keep running.
@@ -477,8 +487,8 @@ function UpgradePlan({ installation, upgrade, canManage, dirty, pending, onUpgra
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-1.5">
-            <Label htmlFor="upgrade-confirm">Type <span className="font-mono">{upgrade.confirm}</span> to confirm</Label>
-            <Input id="upgrade-confirm" className="font-mono" autoComplete="off" value={typed} onChange={(e) => setTyped(e.target.value)} />
+            <Label htmlFor={id + "-confirm"}>Type <span className="font-mono">{upgrade.confirm}</span> to confirm</Label>
+            <Input id={id + "-confirm"} className="font-mono" autoComplete="off" value={typed} onChange={(e) => setTyped(e.target.value)} />
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setAsking(false)}>Not now</Button>
@@ -582,6 +592,9 @@ export function ReviewStep({ installation, canManage, dirty, onInstall, onUpgrad
       ) : null}
       {plan.data?.upgrade ? (
         <UpgradePlan installation={installation} upgrade={plan.data.upgrade} canManage={canManage} dirty={dirty} pending={installing} onUpgrade={onUpgrade} />
+      ) : null}
+      {plan.data?.upgrade && plan.data.replacement ? (
+        <UpgradePlan installation={installation} upgrade={plan.data.replacement} replaces={plan.data.upgrade.to.release} canManage={canManage} dirty={dirty} pending={installing} onUpgrade={onUpgrade} />
       ) : null}
       {blocking.length ? (
         <Alert variant="destructive">

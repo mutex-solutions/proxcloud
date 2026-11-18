@@ -58,6 +58,7 @@ export type Plan = {
   changes?: PlanChange[]
   blocking?: string[]
   upgrade?: Upgrade | null // the move to this ProxCloud's release, or the one in progress
+  replacement?: Upgrade | null // next to an upgrade in progress toward an earlier ProxCloud's release: the move to this one's in its place
 }
 export type PlanChange = {
   cluster?: string; name: string; from?: string; to?: string; blocking?: string
@@ -323,8 +324,8 @@ const CODE_ACTION: Record<string, string> = {
   workload_api_unreachable: "Add a route from the ProxCloud host to the API address, then Retry. When the message says the cluster's API refuses the credential: it does so for some seconds after it starts; if the run failed on it, Retry.",
   bom_unsupported: "The platform was installed by a ProxCloud whose platform release this one does not carry (a development build, or a release from before 0.8.0), and a platform moves only between releases this ProxCloud carries. Go back to the ProxCloud that installed it. Or, if no tenant cluster or database must be kept, delete them all, then remove managed services and install again: Remove deletes the platform cluster.",
   upgrade_refused: "This ProxCloud cannot move the platform to its own platform release: step 4 lists why. The platform stays on its release, and Apply this release keeps working.",
-  unexpected_rollout: "The upgrade would replace machines of the platform cluster, so nothing of it was synced. If machine sizes, nodes or node groups were changed together with the upgrade, put them back, save, then Retry. Otherwise install the ProxCloud release that corrects it and start the upgrade to that release.",
-  tenants_unhealthy: "A tenant cluster or database that was healthy before the upgrade is not. Look at the one the message names. Retry goes on from the same step once it is healthy.",
+  unexpected_rollout: "The upgrade would replace machines of the platform cluster, so nothing of it was synced. If machine sizes, nodes or node groups were changed together with the upgrade, put them back, save, then Retry. Otherwise install the ProxCloud release that corrects it: step 4 then offers the upgrade to that release in place of this one.",
+  tenants_unhealthy: "A tenant cluster or database that was healthy before the upgrade is not. Look at the one the message names. Retry goes on from the same step and waits for it again: the upgrade does not go on until it is healthy or deleted.",
   provider_conflict: "A provider row of this installation was refused. Read the message, correct that provider under Cloud providers, then Retry.",
   machine_delete_stuck: "Delete the VM named in the message in Proxmox, then start Remove again.",
   tenants_exist: "Tenant clusters or databases still run on the platform. Delete them, then start Remove again.",
