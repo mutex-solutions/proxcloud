@@ -389,6 +389,9 @@ func allowedWhileDisabled(action string, data map[string]any) bool {
 	return false
 }
 
+// cloudTypeName is the form of every cloud resource type (cloud.Type*): capitals and underscores, at most 40 bytes.
+var cloudTypeName = regexp.MustCompile(`^[A-Z][A-Z_]{0,39}$`)
+
 // createRecorder is the writer of one cloud create: it keeps the status answered and the error behind the answer
 // (httpx.WriteError tells it), for cloudCreateFailed.
 type createRecorder struct {
@@ -409,7 +412,20 @@ func (h *Handler) cloudCreateFailed(u *user.User, p *Project, rec *createRecorde
 	}
 	var req providers.CreateRequest
 	_ = json.Unmarshal(body, &req)
+	// Both come from a request that was refused, perhaps for what they are: a type that is not the name of one is
+	// left out, and the name is cut, as are the answer (it may quote the request) and the reason, so that a refused
+	// create cannot store what it likes in the audit log.
+	if !cloudTypeName.MatchString(req.Type) {
+		req.Type = ""
+	}
+	cut := func(s string, n int) string {
+		if len(s) > n {
+			s = strings.ToValidUTF8(s[:n], "")
+		}
+		return s
+	}
 	ev := newCloudResourceEvent(u, p, "CLOUD_RESOURCE_CREATE", "", &cloud.CloudResource{Type: req.Type, Data: req.Data})
+	ev.ResourceDisplayName = cut(ev.ResourceDisplayName, 255)
 	delete(ev.ResourceMetadata, "cacheId")
 	ev.ResourceMetadata["httpStatus"] = status
 	ev.Outcome, ev.ErrorMessage = audit.OutcomeFailure, http.StatusText(status)
@@ -423,6 +439,7 @@ func (h *Handler) cloudCreateFailed(u *user.User, p *Project, rec *createRecorde
 	case rec.err != nil:
 		ev.ErrorMessage, ev.InternalReason = "internal.error", rec.err.Error()
 	}
+	ev.ErrorMessage, ev.InternalReason = cut(ev.ErrorMessage, 1000), cut(ev.InternalReason, 2000)
 	h.audit.LogAsync(ev)
 }
 
@@ -456,18 +473,14 @@ func (h *Handler) cloudCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A SANDBOX create that names no service goes to the project's sandbox service (the default
-	// resolution prefers Proxmox, which cannot create sandboxes). Peeks the type only; the body is
-	// restored for the legs below.
+	// resolution prefers Proxmox, which cannot create sandboxes). Peeks the type only, in the head read above.
 	if r.Header.Get("x-service-id") == "" && r.URL.Query().Get("serviceId") == "" {
-		if body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)); err == nil {
-			r.Body = io.NopCloser(bytes.NewReader(body))
-			var peek struct {
-				Type string `json:"type"`
-			}
-			if json.Unmarshal(body, &peek) == nil && peek.Type == cloud.TypeSandbox {
-				if id := h.sandboxServiceOf(r.Context(), proj); id != "" {
-					svcID = id
-				}
+		var peek struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(head, &peek) == nil && peek.Type == cloud.TypeSandbox {
+			if id := h.sandboxServiceOf(r.Context(), proj); id != "" {
+				svcID = id
 			}
 		}
 	}

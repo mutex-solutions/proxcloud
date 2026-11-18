@@ -56,6 +56,7 @@ func TestKubernetesCreateRefusedMint(t *testing.T) {
 	const refusal = "Permission check failed (/storage/nvme-u2, Permissions.Modify|Datastore.Allocate)"
 	var mu sync.Mutex
 	var minted, revoked int
+	aclStatus := "403 " + refusal // what the fake answers the ACL write on the boot store
 	proxmox := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -86,7 +87,7 @@ func TestKubernetesCreateRefusedMint(t *testing.T) {
 		case r.Method == http.MethodPut && path == "/access/acl" && r.Form.Get("path") == "/storage/nvme-u2":
 			// PVE's refusal is the status line.
 			conn, _, _ := w.(http.Hijacker).Hijack()
-			fmt.Fprintf(conn, "HTTP/1.1 403 %s\r\nContent-Length: 13\r\nConnection: close\r\n\r\n{\"data\":null}", refusal)
+			fmt.Fprintf(conn, "HTTP/1.1 %s\r\nContent-Length: 13\r\nConnection: close\r\n\r\n{\"data\":null}", aclStatus)
 			_ = conn.Close()
 		case r.Method == http.MethodPut && path == "/access/acl":
 			fmt.Fprint(w, `{"data":null}`)
@@ -218,6 +219,22 @@ func TestKubernetesCreateRefusedMint(t *testing.T) {
 		t.Errorf("the organization's audit shows the backend's reason: %s", raw)
 	}
 
+	// A backend that fails otherwise stays a 502 that names nothing, and why still reaches the operator's event
+	// (upstreamErr carries the cause).
+	mu.Lock()
+	aclStatus = "501 pve-storage-is-broken"
+	mu.Unlock()
+	code, body = create("k8s", `{"type":"KUBERNETES_CLUSTER","data":{"name":"demo-two","version":"1.35.10","ha":false,
+		"nodeGroups":[{"name":"workers","flavorId":"s2-medium","count":2,"rootVolumeGiB":30}],"networkId":"v1"}}`)
+	if code != http.StatusBadGateway || strings.Contains(body, "pve-storage-is-broken") {
+		t.Fatalf("a failed mint answered %d %s, want 502 without the backend's words", code, body)
+	}
+	for _, e := range events(audit.Filter{ProjectID: "p1", ResourceType: cloud.TypeKubernetesCluster, Operator: true}, 2) {
+		if e.ResourceDisplayName == "demo-two" && (!strings.Contains(e.InternalReason, "pve-storage-is-broken") || !strings.Contains(e.ErrorMessage, "unavailable")) {
+			t.Errorf("the 502's event holds errorMessage %q and internalReason %q", e.ErrorMessage, e.InternalReason)
+		}
+	}
+
 	// Every resource type, and a refusal as well as a backend failure: a server with no image is a 400.
 	if code, body := create("pve", `{"type":"SERVER","data":{"name":"web"}}`); code/100 != 4 {
 		t.Fatalf("a server without an image: %d %s", code, body)
@@ -225,5 +242,16 @@ func TestKubernetesCreateRefusedMint(t *testing.T) {
 	srv := events(audit.Filter{ProjectID: "p1", ResourceType: cloud.TypeServer, Operator: true}, 1)[0]
 	if srv.ResourceDisplayName != "web" || srv.ErrorMessage == "" || srv.InternalReason != "" {
 		t.Errorf("a refused server create: %+v", srv)
+	}
+
+	// The type and the name come from the refused request: a type that is not the name of one is not stored, and
+	// the name and the answer that quotes the type are cut, so a member cannot fill the audit log through creates that fail.
+	long := strings.Repeat("x", 4000)
+	if code, body := create("pve", `{"type":"`+long+`","data":{"name":"`+long+`é"}}`); code/100 != 4 {
+		t.Fatalf("a create of an unknown type: %d %s", code, body)
+	}
+	odd := events(audit.Filter{ProjectID: "p1", ResourceType: "CLOUD_RESOURCE", Operator: true}, 1)[0]
+	if raw, _ := json.Marshal(odd); len(odd.ResourceDisplayName) != 255 || len(raw) > 2500 || odd.ResourceMetadata["resourceType"] != "" {
+		t.Errorf("the event of a create with a 4000 byte type and name is %d bytes, name %d: %s", len(raw), len(odd.ResourceDisplayName), raw)
 	}
 }
