@@ -590,6 +590,10 @@ are several, `errors.details.problems`.
   `upgrade` is the plan of the move to this release's BOM; it is absent when the
   platform is on it. `?target=` names the BOM to plan for and takes the same
   values as `targetBom` below (`400 invalid_target` otherwise).
+  While an upgrade toward the BOM of an earlier release is in progress,
+  `upgrade` is that move and `replacement`, of the same shape, is the move to
+  this release's BOM in its place (with its own `allowed`, `blocking` and
+  `confirm`); it is absent otherwise.
   `upgrade` is `{from, to, allowed, inProgress, confirm, changes, blocking}`:
   - `changes[]` lists every difference of the two BOMs:
     `{cluster, name, from, to, class, stage, wave, impact, blocking}`. `class` is

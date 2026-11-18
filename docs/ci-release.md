@@ -300,10 +300,14 @@ charts may differ. `go test ./internal/platformlife` holds the rest:
   the values that release rendered
   (`testdata/previous/<release>/render-cluster-values.golden.yaml`) and the
   cluster chart of this BOM with this build's values
-  (`testdata/render-cluster-values.golden.yaml`), and compares the
-  KubeadmControlPlane's spec, the names of every machine and bootstrap template
-  (each carries a hash of its spec) and every MachineDeployment's machine
-  template. A difference means Cluster API would replace machines: do not list
+  (`testdata/render-cluster-values.golden.yaml`), and compares the whole
+  KubeadmControlPlane and every machine and bootstrap template as rendered,
+  metadata included, and every MachineDeployment's machine template. It is as
+  strict as the run's own check before the sync, which fails on any of these
+  objects ArgoCD does not report Synced: a new label or annotation on the
+  KubeadmControlPlane counts, though it replaces no machine. A difference means
+  Cluster API would replace machines, or every upgrade run would fail
+  `unexpected_rollout`: do not list
   the old version in `upgradeFrom` of `pc-platform`. The values come from Go
   (`ClusterValues`), so a renderer change is caught as well as a chart change. A
   chart version that is not the one in the tree is pulled from the registry

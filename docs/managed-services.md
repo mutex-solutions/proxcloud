@@ -763,7 +763,7 @@ stage is still trying.
 | `bom_unsupported` | start, plan | The installed BOM is not one this release carries: its own, or that of an earlier release from 0.8.0 on. A platform installed by a build of `main` (`dev-<sha>`) gets this after an upgrade | A platform moves only between BOMs a release carries ([Upgrade between BOMs](#upgrade-between-boms)). Go back to the ProxCloud release that installed the platform. Or, if no tenant cluster or database must be kept: delete them all (Remove refuses with `tenants_exist` otherwise), remove managed services, which deletes the platform cluster, and install again |
 | `upgrade_refused` | start | An apply names this release's BOM as its target (`targetBom`) and the two BOMs differ in something this release does not move, or the target is a `-dev` BOM. `409`, no run is made; `details.reasons` has one line per entry, the same lines as the plan | Nothing is wrong with the platform: it stays on its BOM, and **Apply this release** keeps working. The move needs a later release ([Upgrade between BOMs](#upgrade-between-boms)) |
 | `unexpected_rollout` | 7 | An upgrade run only. The cluster chart of the target BOM would create a machine or bootstrap template, or change the control plane: Cluster API would replace machines. Nothing of the cluster was synced; the Application `pc-platform` is left at the new chart version without automated sync | If machine sizes, nodes or node groups were changed in the settings together with the upgrade, put them back, save, **Retry**. Otherwise the release is at fault: see [Upgrade between BOMs](#upgrade-between-boms), "When the upgrade cannot finish" |
-| `tenants_unhealthy` | 9 | An upgrade run only. After a wave, a tenant cluster or database that was healthy when the run reached stage 9 is not: its Application on the platform cluster's ArgoCD is not Healthy, or its TenantControlPlane is not Ready. The message names them. The stage waits for them up to the wave's 20 minutes | Look at the tenant the message names. When it is healthy again, **Retry** goes on from the same wave |
+| `tenants_unhealthy` | 9 | An upgrade run only. After a wave, a tenant cluster or database that was healthy when the run reached stage 9 is not: its Application on the platform cluster's ArgoCD is not Healthy, or its TenantControlPlane is not Ready. The message names them. The stage waits for them up to the wave's 20 minutes | Look at the tenant the message names. **Retry** goes on from the same wave and waits for it again: the list of tenants that were down before is taken once per upgrade (`status.tenantsDownBefore`), not per run, so a tenant a wave broke holds every run until it is healthy or deleted |
 | `portal_changed` | any | ProxCloud was upgraded during the run and no longer carries the run's BOM. The stage the run stood at reads `failed` with this code | **Retry** |
 | `job_dead` | any | The run's job ran out of attempts | **Retry**, or **Remove again** |
 | `platform_disabled` | start | The switch, or template updates, is off | `--managed-services` |
@@ -1404,8 +1404,14 @@ The eleven stages of an apply, rendered from the target BOM:
   would only prune, an old template), or a `KubeadmControlPlane` that is not Synced, fails the run
   with `unexpected_rollout`. Nothing was synced then. Otherwise the stage applies the Application
   as always, automated, waits until the last sync is of the new version, and goes on as in any apply.
+  There is no sync to wait for when the new chart renders every object as it is and the Application
+  is out of sync only for what it would prune (the machine templates of an earlier size: it never
+  prunes them): ArgoCD starts no sync for that, so the stage passes when the comparison is of the
+  new version and nothing but such objects is out of sync. That ArgoCD starts no sync then is read
+  from its source, not seen on a lab.
 - **Stage 8** is unchanged.
-- **Stage 9** notes which tenants are unhealthy before its first wave, then applies the waves. After
+- **Stage 9** notes which tenants are unhealthy before its first wave (once per upgrade, in
+  `status.tenantsDownBefore`; a Retry keeps the note), then applies the waves. After
   each wave it waits until every component of the wave is Synced and Healthy against the new
   version, and until every tenant that was healthy at the start is healthy again: the tenant
   Applications on the platform cluster's ArgoCD must be Healthy and every TenantControlPlane Ready
@@ -1419,6 +1425,7 @@ The eleven stages of an apply, rendered from the target BOM:
 |---|---|---|
 | `status.bom` | The BOM the platform left: "last fully applied" | The target |
 | `status.targetBom` | The target, from the start of the first run | Absent |
+| `status.tenantsDownBefore` | From the first time a run reaches stage 9: the tenants that were not healthy then | Absent |
 | `status.components[]` | Each component at the version it runs: it moves when its wave (stage 7 for `pc-platform`) has passed | Every component at the target's version |
 | The run's `bom`, `fromBom` | The target, and the BOM the platform left | The same |
 
@@ -1434,6 +1441,13 @@ and, after a run that did not succeed, in step 4 ("The upgrade to release B has 
   chart versions over the components already moved.
 - Nothing is rolled back, by the run or by ArgoCD. The components whose wave passed stay at the new
   version, the others at the old one, and `status.components` says which.
+- A tenant that a wave broke holds the upgrade in every run, a Retry included, until it is healthy
+  again. A tenant that breaks for a reason of its own during the upgrade holds it in the same way:
+  the run cannot tell the two apart. Repair it, or delete it; nothing in this release lets an
+  upgrade pass an unhealthy tenant that was healthy at its start.
+- A Cancel while stage 7 waits for ArgoCD's comparison leaves the Application `pc-platform` at the
+  new chart version without automated sync and self-heal, as `unexpected_rollout` does. The next
+  apply makes the check again and switches them back on.
 - **Remove** works as always, and forgets the upgrade with the rest of the status.
 
 **When the upgrade cannot finish.** `unexpected_rollout` without a change of the settings means the
@@ -1441,8 +1455,12 @@ release shipped a cluster chart that replaces machines, which its CI check shoul
 platform cluster runs as before, with the seed's `capi` chart already at the new version. Install
 the ProxCloud release that corrects the chart and start the upgrade to its BOM: an upgrade to this
 release's BOM is accepted over an unfinished target when both the installed BOM and the unfinished
-target may move to it (each component stands at one of the two). Until then the platform cannot be
-applied: every apply continues to the target and fails at the same check.
+target may move to it (each component stands at one of the two). Step 4 then shows two boxes: "The
+upgrade to release X has not finished", and **Upgrade to release Z instead** with its own typed
+phrase (the plan's `replacement`; by API the same `POST …/runs` with `targetBom` and `confirm` as
+for any upgrade). **Apply this release** and **Retry** still continue to release X and fail at the
+same check; only the second box leaves it. Until the corrected release is installed the platform
+cannot be applied.
 
 The check reads what ArgoCD reports and has not run against a real ArgoCD. If on a site it fails
 for a cluster chart that provably changes no template (compare `kubectl -n pc-platform get
@@ -1460,9 +1478,9 @@ Lab only; none of it has run. Each drill build must carry the BOM of the build b
 |---|---|
 | U1 Record-only move: install from a release (v0.8.0 or v0.8.1) with one tenant cluster and one database under a write loop; upgrade to a drill build whose BOM differs in `release` alone | Every stage done in seconds, no Application revision changed, `status.bom` moved; whether k3s's helm controller runs a Job for the seed ArgoCD when only the HelmChart's label changes |
 | U2 Own-chart move: a drill build that bumps `proxcloud-platform` (and, when one exists that changes no template, `proxmox-kamaji-cluster`), with a probe of the tenant API and the database address once a second | The gaps, if any; that the clusterctl hook changes nothing; that `status.components` moves per wave |
-| U3 The rollout check against the real ArgoCD: a drill build whose cluster chart changes a machine template value | That ArgoCD lists the new template as not Synced before any sync, that the run fails `unexpected_rollout` with no machine replaced, and that an unchanged chart leaves the KubeadmControlPlane Synced. Also that the result of the last sync carries its source (`status.operationState.syncResult.source`), which stage 7 waits on when the Application stays OutOfSync |
-| U4 Failure and Retry: a drill build with a wrong chart digest for `platform`, so workload wave 3 fails; then the corrected build | No Application goes back to the old revision; the later build's BOM is accepted over the unfinished target |
-| U5 The tenant wait: stop a tenant control plane's pod during stage 9 | The run waits with `tenants_unhealthy` and goes on when it is Ready |
+| U3 The rollout check against the real ArgoCD: a drill build whose cluster chart changes a machine template value | That ArgoCD lists the new template as not Synced before any sync, that the run fails `unexpected_rollout` with no machine replaced, and that an unchanged chart leaves the KubeadmControlPlane Synced. On a platform that once changed a machine size (old templates left, the Application OutOfSync for them alone), a drill build whose cluster chart version is new and renders identically: that ArgoCD starts no sync and stage 7 passes all the same. Also that the result of the last sync carries its source (`status.operationState.syncResult.source`), which stage 7 waits on when the Application stays OutOfSync |
+| U4 Failure and Retry: a drill build with a wrong chart digest for `platform`, so workload wave 3 fails; then the corrected build | No Application goes back to the old revision; with the corrected build step 4 shows **Upgrade to release Z instead**, and the later build's BOM is accepted over the unfinished target |
+| U5 The tenant wait: stop a tenant control plane's pod during stage 9 | The run waits with `tenants_unhealthy` and goes on when it is Ready. Then let the wait run out (the run fails) and Retry with the tenant still down: the new run waits again |
 | U6 Restore: after U4's failure, restore the seed's `vzdump` and the portal database dump | Whether that returns the platform to the BOM it left |
 
 ## Known issue: no PostgreSQL database on a node image built before 2026-11-16
