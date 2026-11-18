@@ -27,7 +27,7 @@ var (
 // gpu adds the GPUOnly ACLs. importStorage adds what image import needs on that store, where the portal deletes the
 // files it uploaded (docs/proxmox-permissions.md).
 func PlatformSetupScript(tokenID string, gpu bool, importStorage string) (string, error) {
-	return setupScript(tokenID, gpu, importStorage, nil)
+	return setupScript(tokenID, gpu, importStorage, nil, nil)
 }
 
 // ManagedSetupScript is PlatformSetupScript plus what managed services need: ManagedRoles, the pool SeedPool, the
@@ -43,8 +43,52 @@ func ManagedSetupScript(tokenID string, gpu bool, importStorage, bootStorage, is
 			return "", fmt.Errorf("%s must be a storage id: a letter, then letters, digits, dot, dash and underscore", s[0])
 		}
 	}
-	return setupScript(tokenID, gpu, importStorage, ManagedACLs(tokenID, bootStorage, isoStorage, importStorage))
+	return setupScript(tokenID, gpu, importStorage, ManagedACLs(tokenID, bootStorage, isoStorage, importStorage), nil)
 }
+
+// Enrollment makes the managed-services script the root command of one installation (EnrollScript).
+type Enrollment struct {
+	InstallationID string
+	// HaveCAPI, HaveCSI: the portal holds that token's secret, so the token on the cluster is this installation's
+	// whatever its comment says (a site set up before tokens were marked).
+	HaveCAPI, HaveCSI bool
+}
+
+// EnrollPrefix starts the line the root command prints and the operator pastes into the console.
+const EnrollPrefix = "PC-ENROLL:"
+
+var enrollInstallationID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// EnrollScript is ManagedSetupScript as the one root action of installation e, with three differences:
+//   - it marks the tokens capmox@pve!capi and csi@pve!csi as the installation's (their comment), and stops before it
+//     changes anything when one exists that is neither marked so nor known to the portal (e.HaveCAPI, e.HaveCSI): a
+//     fixed token id that something else may use. It never deletes or changes such a token; it prints the command the
+//     operator may run after checking;
+//   - it prints no token secret. The secrets of the tokens it made go into one line, EnrollPrefix plus base64 of
+//     "1:<installation>:<unix time>:<capi secret>:<csi secret>" (a token that was kept has an empty field), printed
+//     last, also when a later step fails;
+//   - a token it kept whose secret the portal does not hold is named with the command that removes it: Proxmox shows
+//     a secret once.
+//
+// Nothing of this was run on a Proxmox node: that pveum user token add takes --output-format json and --comment, and
+// that pveum user token list prints the comment, is read from the pveum manual.
+func EnrollScript(tokenID string, gpu bool, importStorage, bootStorage, isoStorage string, e Enrollment) (string, error) {
+	if !enrollInstallationID.MatchString(e.InstallationID) {
+		return "", fmt.Errorf("installation must be an installation id")
+	}
+	for _, s := range [][2]string{{"bootStorage", bootStorage}, {"isoStorage", isoStorage}} {
+		if !setupStorageID.MatchString(s[1]) {
+			return "", fmt.Errorf("%s must be a storage id: a letter, then letters, digits, dot, dash and underscore", s[0])
+		}
+	}
+	return setupScript(tokenID, gpu, importStorage, ManagedACLs(tokenID, bootStorage, isoStorage, importStorage), &e)
+}
+
+// tokenState is the Perl that reads `pveum user token list <user>` as JSON and prints what the token $ARGV[0] is:
+// absent, ours (its comment is $ARGV[1]) or foreign. No list (the user does not exist) is absent.
+const tokenState = `my ($n, $m) = @ARGV; my $l = eval { decode_json(join "", <STDIN>) }; ` +
+	`for (@{ ref $l eq "ARRAY" ? $l : [] }) { next unless $_->{tokenid} eq $n; ` +
+	`print((defined $_->{comment} && $_->{comment} eq $m) ? "ours" : "foreign"); exit } print "absent"`
 
 // kubeMintShadowRows is the Perl that reads `pveum acl list` as JSON and prints, for the portal user ($ARGV[0]) and
 // token ($ARGV[1]), one line "--users|--tokens <id> <propagate> <path>" per store (/storage/<store>), zone
@@ -62,7 +106,7 @@ const kubeMintShadowRows = `my ($u, $t) = @ARGV; my %p; ` +
 	`$p{"$f $_->{ugid}"}{$_->{path}} ||= $_->{propagate} ? 1 : 0 } ` +
 	`for my $k (sort keys %p) { print "$k $p{$k}{$_} $_\n" for sort keys %{ $p{$k} } }`
 
-func setupScript(tokenID string, gpu bool, importStorage string, managed []ManagedACL) (string, error) {
+func setupScript(tokenID string, gpu bool, importStorage string, managed []ManagedACL, enroll *Enrollment) (string, error) {
 	m := setupTokenID.FindStringSubmatch(tokenID)
 	if m == nil {
 		return "", fmt.Errorf("tokenId must be user@realm!name, of letters, digits, dot, dash and underscore")
@@ -81,6 +125,40 @@ func setupScript(tokenID string, gpu bool, importStorage string, managed []Manag
 	line("PC_TOKEN_NAME=%s", q(m[2]))
 	line("PC_TOKEN=%s", q(tokenID))
 	line("")
+	// The platform tokens, in the order of the enrollment line's fields.
+	platformTokens := []struct {
+		id, comment, v string
+		have           bool
+	}{{CAPITokenID, "ProxCloud CAPI", "PC_CAPI", enroll != nil && enroll.HaveCAPI}, {CSITokenID, "ProxCloud CSI", "PC_CSI", enroll != nil && enroll.HaveCSI}}
+	if enroll != nil {
+		line("# the two platform tokens have fixed ids. One that exists and was not made for this installation may be in use by")
+		line("# something else: this command never deletes or changes it, and stops here, before it changes anything")
+		line("PC_INSTALL=%s", q(enroll.InstallationID))
+		line("PC_MARK=%s", q("proxcloud:"+enroll.InstallationID))
+		line("pc_state() { # user token-name: absent, ours (the comment is PC_MARK) or foreign")
+		line(`  pveum user token list "$1" --output-format json 2>/dev/null | perl -MJSON::PP -e %s "$2" "$PC_MARK"`, q(tokenState))
+		line("}")
+		line("PC_STOP=''")
+		for _, t := range platformTokens {
+			user, name, _ := strings.Cut(t.id, "!")
+			line(`%s=$(pc_state %s %s)`, t.v, q(user), q(name))
+			if t.have {
+				continue // the portal holds its secret: it is this installation's, and is marked below
+			}
+			line(`if [ "$%s" = foreign ]; then`, t.v)
+			line("  echo %s", q("STOP: the token "+t.id+" exists on this cluster and was not made for this ProxCloud installation ("+enroll.InstallationID+")."))
+			line("  echo %s", q("Something else may use it, so this command does not touch it. Look at what it may do (pveum acl list | grep "+user+")"))
+			line("  echo %s", q("and at who uses it. When nothing does, remove it and run this command again:"))
+			line("  echo %s", q("  pveum user token remove "+user+" "+name))
+			line("  PC_STOP=1")
+			line("fi")
+		}
+		line(`if [ -n "$PC_STOP" ]; then`)
+		line("  echo %s", q("Nothing was changed."))
+		line("  exit 1")
+		line("fi")
+		line("")
+	}
 	line("# role: created empty when missing, then the privileges are appended (a re-run adds new ones, removes none)")
 	line("pveum role add %s 2>/dev/null || true", q(PlatformRole))
 	line("pveum role modify %s --append 1 --privs %s", q(PlatformRole), q(strings.Join(PlatformRolePrivileges(), " ")))
@@ -116,15 +194,58 @@ func setupScript(tokenID string, gpu bool, importStorage string, managed []Manag
 	if managed != nil {
 		line("")
 		line("# managed services: roles, the seed pool, the users and tokens of CAPMOX and proxmox-csi on the platform, and")
-		line("# their ACLs; the portal token may then mint the tokens of tenant clusters. Both secrets are printed once: store them")
+		if enroll == nil {
+			line("# their ACLs; the portal token may then mint the tokens of tenant clusters. Both secrets are printed once: store them")
+		} else {
+			line("# their ACLs; the portal token may then mint the tokens of tenant clusters. No secret is printed: the secrets of the")
+			line("# tokens made here go into the one PC-ENROLL line at the end")
+		}
 		for _, r := range ManagedRoles {
 			line("pveum role add %s 2>/dev/null || true", q(r.Name))
 			line("pveum role modify %s --append 1 --privs %s", q(r.Name), q(strings.Join(r.Privs, " ")))
 		}
 		line("pveum pool add %s --comment %s 2>/dev/null || true", q(SeedPool), q("ProxCloud seed cluster (not tenant)"))
-		for _, t := range []struct{ id, comment string }{{CAPITokenID, "ProxCloud CAPI"}, {CSITokenID, "ProxCloud CSI"}} {
+		if enroll != nil {
+			line("pc_token() { # user token-name state: prints the secret of a token made now; a token of an earlier setup is marked")
+			line(`  case "$3" in`)
+			line(`  absent) pveum user token add "$1" "$2" --privsep 1 --comment "$PC_MARK" --output-format json | perl -MJSON::PP -e %s ;;`,
+				q(`print decode_json(join "", <STDIN>)->{value}`))
+			line(`  foreign) pveum user token modify "$1" "$2" --comment "$PC_MARK" >/dev/null ;;`)
+			line("  esac")
+			line("}")
+		}
+		if enroll != nil {
+			line("PC_CAPI_SECRET=''")
+			line("PC_CSI_SECRET=''")
+			line("pc_enroll() { # said last, when this subshell ends, also when a step fails after a token was made: a secret is shown once")
+			line(`  if [ -n "$PC_CAPI_SECRET$PC_CSI_SECRET" ]; then`)
+			line("    echo")
+			line("    echo %s", q("Paste this one line into step 2 of the Managed services page. It carries the new token secrets: treat it as a password."))
+			line(`    printf '%s%%s\n' "$(printf '1:%%s:%%s:%%s:%%s' "$PC_INSTALL" "$(date +%%s)" "$PC_CAPI_SECRET" "$PC_CSI_SECRET" | base64 -w0)"`, EnrollPrefix)
+			line("  else")
+			line("    echo %s", q("No token was made, so there is no line to paste."))
+			line("  fi")
+			for _, t := range platformTokens {
+				if t.have {
+					continue
+				}
+				user, name, _ := strings.Cut(t.id, "!")
+				line(`  if [ "$%s" = ours ]; then`, t.v)
+				line("    echo %s", q("The token "+t.id+" was made for this installation by an earlier run, and ProxCloud does not hold its secret."))
+				line("    echo %s", q("Proxmox shows a secret once. Remove the token and run this command again:"))
+				line("    echo %s", q("  pveum user token remove "+user+" "+name))
+				line("  fi")
+			}
+			line("}")
+			line("trap pc_enroll EXIT")
+		}
+		for _, t := range platformTokens {
 			user, name, _ := strings.Cut(t.id, "!")
 			line("pveum user add %s --comment %s 2>/dev/null || true", q(user), q(t.comment))
+			if enroll != nil {
+				line(`%[1]s_SECRET=$(pc_token %[2]s %[3]s "$%[1]s")`, t.v, q(user), q(name))
+				continue
+			}
 			line("pveum user token add %s %s --privsep 1 || echo %s", q(user), q(name),
 				q("The token "+t.id+" exists already: its secret was printed when it was created."))
 		}
@@ -176,7 +297,11 @@ func setupScript(tokenID string, gpu bool, importStorage string, managed []Manag
 		line(`  echo %s`, q("token for any user of the cluster, root@pam included. A row no portal uses: pveum acl delete /access/groups --users <user>"))
 		line(`  echo %s`, q("(or --tokens <token id>, in single quotes) --roles "+KubeMintRole+", then this script again."))
 		line("}")
-		line(`[ -z "$PC_LEFT" ] || trap pc_left EXIT`)
+		if enroll == nil {
+			line(`[ -z "$PC_LEFT" ] || trap pc_left EXIT`)
+		} else {
+			line(`[ -z "$PC_LEFT" ] || trap 'pc_left; pc_enroll' EXIT`)
+		}
 		line("# what the platform tokens hold on the platform pools: the CAPI token ProxCloudCAPI on both, the CSI token nothing on the")
 		line(`# seed VM (its disks on the boot store stay open to the CSI token: docs/proxmox-permissions.md, "What the seed pool does not fence")`)
 		for _, id := range []string{CAPITokenID, CSITokenID} {

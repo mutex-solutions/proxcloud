@@ -32,7 +32,7 @@ const preset = typeof window === "undefined" ? "" : (new URLSearchParams(window.
 export const mockPlatform = {
   enabled: preset !== "disabled",
   installations: [] as Doc[],
-  secrets: {} as Record<string, { capi?: boolean; csi?: boolean }>, // which secrets are stored; never their values
+  secrets: {} as Record<string, { capi?: boolean; csi?: boolean; enrolledAt?: number }>, // which secrets are stored (and when the last enrollment line was printed); never their values
   runs: [] as Doc[],
   applies: 0,
   synced: false, // a provider sync ran (handlers/setup.ts): the isolation preset's check passes after it
@@ -222,7 +222,7 @@ function checks(in_: Doc): Doc[] {
     row("isolation", preset !== "isolation" || mockPlatform.synced, "The platform addresses are blocked networks; the cluster firewall rules are written by the next provider sync (with this installation saved it needs no project), or with the first tenant network.",
       "The seed address 10.90.0.5 and the API address 10.90.0.10 are not among the provider's blocked networks: add 10.90.0.5/32 and 10.90.0.10/32."),
     ...(preset === "simplezone" ? [{ id: "tenant-network", status: "warn", message: "The provider's default zone pcm0 has DHCP in Proxmox. A tenant Kubernetes cluster needs a network without DHCP, so a cluster create on a network of this zone is refused (400, \"Worker nodes need a network without DHCP\") until the default zone is an EVPN or a VLAN zone (config.network.zones and defaultZone, under Cloud providers). A Kubernetes provider with shared workers (cluster.shared) uses no tenant network and is not affected. The install and managed databases do not need it." }] : []),
-    row("credentials", both, "Both platform tokens are stored.", `No secret is stored for ${[!sec.capi && "capmox@pve!capi", !sec.csi && "csi@pve!csi"].filter(Boolean).join(" and ")}.`),
+    row("credentials", both, "Both platform tokens are stored.", `No secret is stored for ${[!sec.capi && "capmox@pve!capi", !sec.csi && "csi@pve!csi"].filter(Boolean).join(" and ")}: run the root command of step 2 on a node and paste the PC-ENROLL line it prints.`),
     ...["capi", "csi"].map((t) => row(`privileges:${t}`, both, `The ${t} token holds its privileges.`, `The ${t} token could not be checked: no secret is stored.`)),
     row("privileges:kubemint", true, "The portal token holds the ProxCloudKubeMint privileges.", ""),
     row("mint-scope", true, "The portal token may create tokens for the users of the group proxcloud-kube alone, and both are in it.", ""),
@@ -232,6 +232,8 @@ function checks(in_: Doc): Doc[] {
     row("boot-iso-grant", true, `capmox@pve may upload and delete bootstrap ISOs on ${iso}.`, ""),
     row("boot-iso", true, `${iso} is node-local, takes ISOs, and is the only ISO store of the boot storage.`, ""),
     row("placement", true, "Every node an image goes to has the import and the boot store.", ""),
+    row("boot-store", true, `The boot store ${in_.spec.storage.boot} exists and takes disk images.${both ? " It holds no disk of a VM that is not the platform's." : " Whether it also holds other VMs' disks is read once the token csi@pve!csi is stored."}`, ""),
+    row("pve-api-rule", true, in_.status.bom ? "The cluster firewall lets the seed and the node range reach the Proxmox API." : "Install writes the cluster firewall rule that lets the seed and the node range reach the Proxmox API, before the seed is made. Nothing to do by hand.", ""),
     row("images", true, "Neither BOM image is on the blocklist.", ""),
   ]
 }
@@ -300,13 +302,15 @@ on("POST /admin/platform/installations", ({ opts }) => {
   if (mockPlatform.installations.some((i) => i.serviceId === b.serviceId)) throw fail(409, "installation_exists", "this provider already has an installation")
   // What the API fills in: the seed's mode and pool, the cluster's name and roles, the node image mode, and the import
   // store of the provider when none is named.
-  return { data: view(create(b.name, {
+  const made = create(b.name, {
     ...b.spec,
     storage: { ...b.spec.storage, import: importOf(b.serviceId, b.spec) },
     seed: { mode: "vm", pool: "proxcloud-seed", ...b.spec.seed },
     clusters: (b.spec.clusters ?? []).map((c: Doc) => ({ name: "pc-platform", roles: ["kamaji", "dbaas"], ...c })),
     nodeImage: { mode: "bom" },
-  })) }
+  })
+  // What the first save writes into the provider (the API adds the exact CIDRs of the node range too; the mock names two).
+  return { data: { ...view(made), siteChanges: { blockedCidrs: [`${made.spec.seed.address}/32`, `${made.spec.clusters[0].endpoint}/32`] } } }
 })
 
 on("GET /admin/platform/installations/:id", ({ params, query }) => {
@@ -342,20 +346,40 @@ on("PUT /admin/platform/installations/:id", ({ params, opts }) => {
     ].filter(Boolean) as string[]
     if (fixed.length) throw fail(409, "fixed_fields", `These fields cannot change once the platform was installed (serviceId never): ${fixed.join(", ")}`, { problems: fixed })
   }
+  // A changed seed address: its old /32, which an earlier save added, goes and the new one comes (the API does the
+  // same for the API address and the node range).
+  const [was, is] = [in_.spec.seed.address, b.spec.seed?.address]
   Object.assign(in_, { name: b.name, spec: structuredClone(b.spec), rev: in_.rev + 1, updatedAt: now() })
-  return { data: view(in_) }
+  return { data: was === is ? view(in_) : { ...view(in_), siteChanges: { blockedCidrs: [`${is}/32`], blockedCidrsRemoved: [`${was}/32`] } } }
 })
 
 on("PUT /admin/platform/installations/:id/credentials", ({ params, opts }) => {
   const in_ = find(params.id)
   const b = (opts.body ?? {}) as Doc
-  strict(b, { capi: TOKEN, csi: TOKEN })
+  strict(b, { capi: TOKEN, csi: TOKEN, enroll: true })
+  const sec = (mockPlatform.secrets[in_.id] ??= {})
+  if (b.enroll) { // platformlife.ParseEnrollLine and Store.SaveEnrollment
+    const no = (code: string, status: number, message: string) => fail(status, code, message)
+    const malformed = no("invalid_enrollment", 400, "this is not the PC-ENROLL line the root command of step 2 prints: copy the whole line, from PC-ENROLL: to its end")
+    if (b.capi || b.csi) throw fail(400, "invalid_credentials", "The credentials are not valid", { problems: ["enroll goes without capi and csi"] })
+    if (!String(b.enroll).startsWith("PC-ENROLL:")) throw malformed
+    let f: string[]
+    try { f = atob(String(b.enroll).slice(10)).split(":") } catch { throw malformed }
+    const isSecret = (v: string) => /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(v)
+    if (f.length !== 5 || f[0] !== "1" || !(Number(f[2]) > 0) || (!f[3] && !f[4]) || [f[3], f[4]].some((v) => v && !isSecret(v))) throw malformed
+    if (f[1] !== in_.id) throw no("invalid_enrollment", 400, "this PC-ENROLL line is of another installation: run the root command shown in step 2 of this installation")
+    if (Number(f[2]) > Date.now() / 1000 + 300) throw no("enrollment_clock_ahead", 400, "this PC-ENROLL line was printed by a node whose clock is ahead of the portal's by more than 5 minutes: nothing was changed. Set the node's clock (timedatectl shows it; chrony keeps it), then run the root command of step 2 again")
+    if (Number(f[2]) <= (sec.enrolledAt ?? 0)) throw no("enrollment_replayed", 409, "this PC-ENROLL line was stored already, or a newer one was: nothing was changed. For new secrets run the root command of step 2 again")
+    sec.enrolledAt = Number(f[2])
+    if (f[3]) sec.capi = true
+    if (f[4]) sec.csi = true
+    return { data: view(in_) }
+  }
   const uuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
   const problems = [["capi", "capmox@pve!capi"], ["csi", "csi@pve!csi"]].flatMap(([k, want]) =>
     !b[k] ? [] : b[k].tokenId !== want ? [`tokenId must be ${want}`] : !uuid.test(b[k].secret ?? "") ? [`the secret of ${want} is not a PVE token secret (a UUID)`] : [])
   if (!b.capi && !b.csi) problems.push("give capi, csi or both")
   if (problems.length) throw fail(400, "invalid_credentials", "The credentials are not valid", { problems })
-  const sec = (mockPlatform.secrets[in_.id] ??= {})
   if (b.capi) sec.capi = true
   if (b.csi) sec.csi = true
   return { data: view(in_) } // the answer names the stored token ids, never a secret

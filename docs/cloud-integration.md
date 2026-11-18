@@ -141,6 +141,7 @@ The shape is documented in the header of `proxmox.go`:
                           "gateway": "203.0.113.1", "ranges": ["…"], "exclude": ["…"]}],
       "cidrPool": "10.100.0.0/16",                       // required; tenant CIDRs never overlap
       "blockedCidrs": ["192.0.2.0/24"],                  // tenants cannot reach these; node management networks are always added
+      "platformBlockedCidrs": [],                        // written by ProxCloud, not by you: the entries of blockedCidrs a save of the managed-services installation added (managed-services.md)
       "sandboxCidrs": ["198.51.100.0/24"],               // sandbox cluster workers: fenced off tenants and the blocked networks, both ways
       "isolation": "shared",                             // or "evpn-per-project"
       "evpnController": "proxcloud"

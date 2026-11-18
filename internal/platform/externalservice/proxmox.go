@@ -289,6 +289,9 @@ type PVENetwork struct {
 	Zones        map[string]pve.ZoneConfig
 	CIDRPool     string
 	BlockedCIDRs []string // networks tenants must not reach, on top of the nodes' management networks
+	// PlatformCIDRs are the entries of BlockedCIDRs a save of the provider's managed-services installation added
+	// (config.network.platformBlockedCidrs): only these does a later save or a Remove take off again.
+	PlatformCIDRs []string
 	// SandboxCIDRs are the sandbox cluster's worker networks (config.network.sandboxCidrs): tenants may
 	// not reach them, and they may reach neither tenants nor the blocked networks.
 	SandboxCIDRs   []string
@@ -350,6 +353,7 @@ func (e *ExternalService) PVENetworkConfig() PVENetwork {
 		DefaultZone:    str(n["defaultZone"]),
 		CIDRPool:       str(n["cidrPool"]),
 		BlockedCIDRs:   strList(n["blockedCidrs"]),
+		PlatformCIDRs:  strList(n["platformBlockedCidrs"]),
 		SandboxCIDRs:   strList(n["sandboxCidrs"]),
 		Zones:          map[string]pve.ZoneConfig{},
 		Isolation:      pve.IsolationShared,

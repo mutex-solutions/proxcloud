@@ -98,7 +98,7 @@ sync/refresh afterward. Unrelated projects with a single owner are not blocked.
 | Privilege | Why |
 |---|---|
 | `Sys.Audit` | cluster status, node PCI scan, datacenter firewall options (the preflight) |
-| `Sys.Modify` | cluster firewall security groups and tenant isolation rules (`/cluster/firewall/groups` and `/rules` check `Sys.Modify` on `/`) |
+| `Sys.Modify` | cluster firewall security groups and tenant isolation rules (`/cluster/firewall/groups` and `/rules` check `Sys.Modify` on `/`); with managed services also the one rule that lets an installation's seed and node range reach the Proxmox API (comment `proxcloud:pve-api:<installation id>`, written by the install and every apply, deleted by Remove). No privilege was added for it |
 | `Sys.Console` | HA resources and rules of protected servers (`/cluster/ha/*` checks it on `/`) |
 | `Pool.Allocate`, `Pool.Audit` | create, read, fill and delete project pools |
 | `VM.Allocate`, `VM.Clone` | clone templates into a project pool, delete VMs, convert snapshots to images |

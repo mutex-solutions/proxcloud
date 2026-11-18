@@ -46,9 +46,15 @@ After the first successful install these are fixed: the name, the network, the s
 
 ## Step 2: Proxmox identities
 
-Copy the script and run it as root on one node. It adds two users with one token each, a pool for the seed, and their permissions. It prints each token secret once.
+Copy the command and paste it into a root shell on one node. It adds two users with one token each, a pool for the seed, and their permissions. It prints no secret: its last line starts with `PC-ENROLL:` and carries the secrets of the tokens it made.
 
-Paste the two secrets and press **Store the secrets**. They are stored encrypted and are never shown again; to replace one, paste a new one. If you change the boot store or the ISO store, run the script again.
+Paste that line into **The PC-ENROLL line the command printed** and press **Store the secrets**. The page checks the line first: the whole line, and of this installation. The secrets are stored encrypted and are never shown again. A line that was stored before is refused; for new secrets run the command again. A line from a node whose clock is more than five minutes ahead is refused too: set the node's clock, then run the command again. Treat the line as a password.
+
+If one of the two tokens exists already and was not made for this installation, the command stops before it changes anything and prints the command that removes the token. Something else may use that token, so check first; ProxCloud never removes it. The same happens when a secret is stored but no longer opens its token, because the token was removed and made again.
+
+If you change the boot store or the ISO store, run the command again. **Enter the two secrets by hand instead** is for a token made another way.
+
+Saving the settings in step 1 also adds the installation's own addresses to the provider's blocked networks, and sets a default tenant zone that does not exist yet to be created without DHCP. When you correct an address or a range, the next save takes the entries of the old one off again; entries you wrote yourself are never removed. The page says what it changed. The install itself writes the firewall rule that lets the platform reach the Proxmox API.
 
 ## Step 3: Check
 
@@ -117,7 +123,7 @@ The failed stage shows a code, a message and what to do.
 | `unexpected_rollout` | An upgrade would replace machines of the platform cluster. Nothing was synced. If you changed machine sizes or node groups together with the upgrade, put them back and **Retry**; otherwise install the ProxCloud release that corrects it: step 4 then shows **Upgrade to release X instead**. |
 | `tenants_unhealthy` | During an upgrade a tenant cluster or database that was healthy before is not. Look at the one the message names. **Retry** waits for it again: the upgrade goes on only when it is healthy or deleted. |
 | `bom_unsupported` | The platform was installed by a ProxCloud whose platform release this one does not carry (a development build, or a release from before 0.8.0), and a platform moves only between releases this ProxCloud carries. Go back to the ProxCloud that installed it. Or, if no tenant cluster or database must be kept, delete them all, then remove managed services and install again: **Remove** deletes the platform cluster. |
-| `credentials_missing` | Paste both token secrets in step 2, then **Retry**, or **Remove again** for a removal. |
+| `credentials_missing` | Run the root command of step 2 and paste the `PC-ENROLL` line it prints, then **Retry**, or **Remove again** for a removal. |
 | `stage_unavailable` | The run was recorded by another ProxCloud release. No action in this release. |
 | `tenants_exist` | Delete the tenant clusters and databases, then **Remove** again. |
 | `machine_delete_stuck`, `volume_delete_failed` | Delete the VM or fix the storage named in the message, then **Remove** again. |

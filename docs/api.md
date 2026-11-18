@@ -217,7 +217,17 @@ token and ACLs. Query: `tokenId` (default `proxcloud@pve!platform`), `gpu`
 of managed services: the CAPI and CSI users and tokens, pool `proxcloud-seed`,
 their roles and ACLs, with `bootStorage` (required) and `isoStorage` (default
 `local`), and with `importStorage` the mint role on that store too; either store
-without `managedServices=true` is a `400`. A value that is not a plain id is a
+without `managedServices=true` is a `400`. `installation=<id>` answers the root
+command of that managed-services installation instead: the stores are the
+installation's, `tokenId` defaults to its provider's, and the command marks the
+two platform tokens with the comment `proxcloud:<id>`, stops before any change
+on one that exists without that comment and whose secret the portal does not
+hold (a stored secret counts only when one read with it succeeds: a `401` from
+Proxmox means not held, and a Proxmox that does not answer is a `502` with no
+command), prints no secret, and ends with one line `PC-ENROLL:…` that carries the
+secrets of the tokens it made (see the credentials route). It goes without
+`managedServices` and the three storage parameters (`400`); an unknown id is a
+`404`. A value that is not a plain id is a
 `400`. The script and what it does are in
 [proxmox-permissions.md](proxmox-permissions.md#portal-token-script) and
 [Managed services](proxmox-permissions.md#managed-services).
@@ -574,18 +584,42 @@ are several, `errors.details.problems`.
   may become `portal`), `layout`, `name`,
   `spec.network`, the seed's mode, pool, node and address, and the cluster's
   name, endpoint and node groups. A draft can be corrected; no route deletes
-  one.
+  one. The answer of a POST or PUT may carry `siteChanges`: what the save wrote
+  into the provider's `config.network`, so that nobody has to. `blockedCidrs`
+  are the CIDRs added to the provider's `blockedCidrs` (the seed's address, the
+  API address and the node range, as far as no entry covered them; never the
+  MetalLB range). They are recorded in `config.network.platformBlockedCidrs`,
+  and `blockedCidrsRemoved` are the recorded entries a later save took off
+  because the settings no longer need them; an entry the operator wrote is
+  never removed, and a Remove takes nothing off. `zoneWithoutDhcp` names the default
+  tenant zone whose config now says `"dhcp": false`: a `simple` zone whose
+  config said nothing about DHCP and that Proxmox does not have yet (a zone
+  that exists is never changed). `problem` says what could not be done. The
+  audit event of the save carries both under `providerNetwork`.
 - `PUT /installations/{id}/credentials`: `{capi: {tokenId, secret}, csi:
   {tokenId, secret}}`, either or both, write-only. The ids must be
   `capmox@pve!capi` and `csi@pve!csi` (the managed-services script's), the
   secrets UUIDs. They are sealed with the data key in `platformSecret`; without
   `PROXCLOUD_ENCRYPTION_DEFAULT_KEY` the route answers `409 no_encryption_key`.
   No route returns a secret: an installation shows `credentials.{capi,csi}.tokenId`.
+  The other body is `{enroll: "PC-ENROLL:…"}`, alone: the line the root command
+  printed, base64 of `1:<installation id>:<unix time>:<capi secret>:<csi secret>`
+  (a token the command kept has an empty field). A line that is not one, or of
+  another installation, is a `400 invalid_enrollment`; a line whose time is more
+  than five minutes ahead of the portal's clock is a `400
+  enrollment_clock_ahead`; a line stored before, or
+  printed no later than the one stored last, is a `409 enrollment_replayed` and
+  changes nothing. No answer quotes the line.
 - `POST /installations/{id}/preflight`: read-only, not audited; `{ok, checks}`
   with rows `flags`, `spec`, `network`, `bridge`, `isolation`, `tenant-network`, `tenant-path`, `csi-vmid`, `credentials`, `machines`,
   `privileges:capi`, `privileges:csi`, `privileges:kubemint`, `mint-scope`, `pool-fence`,
-  `token-scope`, `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement` and
-  `images`. A row's `status` is `ok`, `fail` or `warn`; `ok` in the answer is
+  `token-scope`, `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement`, `boot-store`,
+  `pve-api-rule` and `images`. `boot-store` fails when Proxmox has no storage of
+  the boot store's name or it takes no disk images, and warns when the store also
+  holds disks of VMs that are not the platform's (listed with the CSI token, once both tokens are stored).
+  `pve-api-rule` never fails: `ok` before the first install and when the cluster
+  firewall holds the installation's rule (comment `proxcloud:pve-api:<id>`), `warn`
+  when an installed platform's rule is missing. A row's `status` is `ok`, `fail` or `warn`; `ok` in the answer is
   false only when a row failed. `csi-vmid` never fails: it warns when a guest has VM id 9999
   (see the connection test's row of that id). `tenant-network` never fails. It reads the provider's default
   zone in Proxmox: `warn` when that zone has DHCP, when it does not exist yet and is
@@ -606,7 +640,8 @@ are several, `errors.details.problems`.
   `warn` with one line per VM that is stopped (start it in Proxmox, `qm start <vmid>`) or that has no
   `onboot` (the next apply sets it, or `qm set <vmid> --onboot 1`) or that the token could not read (the
   other VMs are still listed), or when the pools could not be read.
-  `isolation` fails, naming the CIDRs to add to `blockedCidrs`, when
+  `isolation` fails, naming the CIDRs missing from `blockedCidrs` (a save of
+  the installation adds them), when
   the seed, the API VIP or the node range is outside the blocked and management
   networks, and when the cluster firewall's isolation rules are not the ones the
   sync writes (a provider sync writes them without a project only for a provider

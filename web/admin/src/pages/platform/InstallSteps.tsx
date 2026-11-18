@@ -17,11 +17,12 @@ import { apiFetch } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { CheckRows, CopyBlock, ErrorNote, LINK, StepCard, errMsg, fetchText, useClusterInfo } from "@/pages/setup/common"
 import {
-  CAPI_TOKEN, CSI_TOKEN, GROUPS, PLATFORM_KEY, GROUP_USE, TOKEN_SECRET, checkAction, emptyForm, errCode, errProblems, formToSpec, isConflict, labProfile, specToForm, validate,
+  CAPI_TOKEN, CSI_TOKEN, ENROLL_PREFIX, GROUPS, PLATFORM_KEY, GROUP_USE, TOKEN_SECRET, checkAction, enrollProblem, emptyForm, errCode, errProblems, formToSpec, isConflict, labProfile, specToForm, validate,
   type BOM, type Check, type Form, type Installation, type MachineForm, type Plan, type Problem, type TenantProbe, type Upgrade,
 } from "./model"
 
 const base = (id: string) => `/admin/platform/installations/${id}`
+const SITE_KEY = ["platform-site-changes"]
 
 // ── Step 1: Settings ──────────────────────────────────────────────────────────
 
@@ -128,8 +129,9 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
     mutationFn: () => installation
       ? apiFetch<Installation>(base(installation.id), { method: "PUT", body: { name: form.name, spec: formToSpec(form, installation.spec), rev: installation.rev } })
       : apiFetch<Installation>("/admin/platform/installations", { method: "POST", body: { name: form.name, serviceId, layout: "shared", spec: formToSpec(form) } }),
-    onSuccess: () => {
+    onSuccess: (saved) => {
       toast.success("Settings saved")
+      qc.setQueryData(SITE_KEY, saved.siteChanges ?? null)
       onDirty(false)
       onConflict(false)
       return qc.invalidateQueries({ queryKey: PLATFORM_KEY })
@@ -142,6 +144,9 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
     },
   })
   const refused = errProblems(save.error)
+  // What the last save changed on the provider, so that nobody has to (blocked networks, the tenant zone). Kept in
+  // the query cache, not in state: the page mounts this step anew after every save.
+  const site = useQuery<Installation["siteChanges"] | null>({ queryKey: SITE_KEY, queryFn: () => null, enabled: false, staleTime: Infinity }).data
 
   return (
     <StepCard n={1} title="Settings" description="What gets built and where. Saving keeps a draft: nothing is created on Proxmox until you press Install.">
@@ -289,6 +294,19 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
           </AlertDescription>
         </Alert>
       ) : null}
+      {site ? (
+        <Alert role="status">
+          <AlertTitle>The save also changed the provider</AlertTitle>
+          <AlertDescription>
+            <ul className="list-disc pl-5">
+              {site.blockedCidrs?.length ? <li>Added to its blocked networks, so that tenants cannot reach the seed, the API address and the node range: <span className="font-mono">{site.blockedCidrs.join(", ")}</span>. The next provider sync writes the firewall rules (step 3 has the button).</li> : null}
+              {site.blockedCidrsRemoved?.length ? <li>Taken off its blocked networks, because the settings no longer need them (an earlier save had added them): <span className="font-mono">{site.blockedCidrsRemoved.join(", ")}</span>. If a provider sync already wrote firewall rules for them, the next sync rewrites the rules on a provider with a project; on one without, the Check row <span className="font-mono">isolation</span> names the rules to delete by hand.</li> : null}
+              {site.zoneWithoutDhcp ? <li>The default tenant zone <span className="font-mono">{site.zoneWithoutDhcp}</span> does not exist in Proxmox yet and is now set to be created without DHCP, which tenant Kubernetes clusters need.</li> : null}
+              {site.problem ? <li>{site.problem}</li> : null}
+            </ul>
+          </AlertDescription>
+        </Alert>
+      ) : null}
       <div className="flex flex-wrap items-center gap-3">
         <Button
           disabled={!canManage || save.isPending || !serviceId || locked}
@@ -309,67 +327,94 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
 
 export function IdentitiesStep({ installation, tokenId, canManage }: { installation: Installation; tokenId?: string; canManage: boolean }) {
   const qc = useQueryClient()
-  const { boot, iso, import: imp } = installation.spec.storage
-  const qs = new URLSearchParams({ managedServices: "true", bootStorage: boot, isoStorage: iso })
+  const { boot, iso } = installation.spec.storage
+  const held = { capi: !!installation.credentials?.capi, csi: !!installation.credentials?.csi }
+  const qs = new URLSearchParams({ installation: installation.id })
   if (tokenId) qs.set("tokenId", tokenId)
-  if (imp) qs.set("importStorage", imp)
+  // The command is made for this installation's stores and for the secrets already stored: both are part of the key.
   const script = useQuery({
-    queryKey: ["platform-script", qs.toString()],
+    queryKey: ["platform-script", qs.toString(), boot, iso, installation.spec.storage.import, held.capi, held.csi],
     queryFn: () => fetchText(`/admin/setup/proxmox-script?${qs}`),
     placeholderData: keepPreviousData,
     retry: false,
   })
-  // The secrets live in these two inputs only until they are sent: no answer carries them and nothing reads them back.
+  // The secrets live in these inputs only until they are sent: no answer carries them and nothing reads them back.
+  const [line, setLine] = useState("")
   const [capi, setCapi] = useState("")
   const [csi, setCsi] = useState("")
+  const lineProblem = line.trim() ? enrollProblem(line, installation.id) : null
   const bad = (v: string) => v.trim() !== "" && !TOKEN_SECRET.test(v.trim())
   const save = useMutation({
-    mutationFn: () => apiFetch(`${base(installation.id)}/credentials`, {
-      method: "PUT",
-      body: {
-        ...(capi.trim() ? { capi: { tokenId: CAPI_TOKEN, secret: capi.trim() } } : {}),
-        ...(csi.trim() ? { csi: { tokenId: CSI_TOKEN, secret: csi.trim() } } : {}),
-      },
-    }),
+    mutationFn: (body: Record<string, unknown>) => apiFetch(`${base(installation.id)}/credentials`, { method: "PUT", body }),
     onSuccess: () => {
+      setLine("")
       setCapi("")
       setCsi("")
       toast.success("Token secrets stored")
       return qc.invalidateQueries({ queryKey: PLATFORM_KEY })
     },
   })
-  const secret = (id: string, token: string, value: string, set: (v: string) => void, stored: boolean) => (
+  const secret = (id: string, token: string, value: string, set: (v: string) => void) => (
     <div className="grid content-start gap-1.5">
       <Label htmlFor={id}>Secret of <span className="font-mono">{token}</span></Label>
       <Input id={id} type="password" className="font-mono" autoComplete="new-password" data-1p-ignore data-lpignore="true" spellCheck={false} value={value} onChange={(e) => set(e.target.value)} disabled={!canManage}
         placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" aria-invalid={bad(value) || undefined} aria-describedby={`${id}-state`} />
       <p id={`${id}-state`} className="text-xs text-muted-foreground">
-        {bad(value) ? <span className="text-destructive">Not a Proxmox token secret: it looks like xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx. </span> : null}
-        {stored ? "Stored. It is never shown again; paste a new one to replace it." : "Not stored yet."}
+        {bad(value) ? <span className="text-destructive">Not a Proxmox token secret: it looks like xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.</span> : null}
       </p>
     </div>
   )
   return (
-    <StepCard n={2} title="Proxmox identities" description="Done by hand: ProxCloud holds no root password for Proxmox and asks for none.">
+    <StepCard n={2} title="Proxmox identities" description="One command as root on one node: ProxCloud holds no root password for Proxmox and asks for none.">
       <p className="text-sm text-muted-foreground">
-        Run this as root on one node. It adds two users with one token each (<code>{CAPI_TOKEN}</code> builds the machines,{" "}
+        Paste this into a root shell on one node. It adds two users with one token each (<code>{CAPI_TOKEN}</code> builds the machines,{" "}
         <code>{CSI_TOKEN}</code> manages their volumes), the pool <code>proxcloud-seed</code> and their permissions, and can be run again.
         It is made for the boot store <code>{boot}</code> and the ISO store <code>{iso}</code>: after changing either in step 1, run it again.
-        It prints each token secret once. GPU permissions stay with the script of Platform setup.
+        It prints no secret. Its last line starts with <code>{ENROLL_PREFIX}</code> and carries the secrets of the tokens it made: paste that line below.
+        When one of the two tokens exists already and is not this installation's, the command stops before it changes anything and prints
+        the command that removes the token, for you to run once you know nothing else uses it. GPU permissions stay with the script of Platform setup.
       </p>
       {script.isLoading ? <Skeleton className="h-40" /> : null}
-      <ErrorNote title="The script could not be generated" error={script.error} />
-      {script.data && !script.error ? <CopyBlock text={script.data} label="identities script" /> : null}
-      <div className="grid gap-4 sm:grid-cols-2">
-        {secret("capi-secret", CAPI_TOKEN, capi, setCapi, !!installation.credentials?.capi)}
-        {secret("csi-secret", CSI_TOKEN, csi, setCsi, !!installation.credentials?.csi)}
+      <ErrorNote title="The command could not be generated" error={script.error} />
+      {script.data && !script.error ? <CopyBlock text={script.data} label="root command" /> : null}
+      <ul aria-label="Stored token secrets" className="text-sm">
+        {([[CAPI_TOKEN, held.capi], [CSI_TOKEN, held.csi]] as const).map(([token, stored]) => (
+          <li key={token}><span className="font-mono">{token}</span>: {stored ? "stored. It is never shown again." : "not stored yet."}</li>
+        ))}
+      </ul>
+      <div className="grid gap-1.5">
+        <Label htmlFor="enroll-line">The PC-ENROLL line the command printed</Label>
+        <Input id="enroll-line" type="password" className="font-mono" autoComplete="new-password" data-1p-ignore data-lpignore="true" spellCheck={false} value={line}
+          onChange={(e) => setLine(e.target.value)} disabled={!canManage} placeholder={`${ENROLL_PREFIX}…`} aria-invalid={!!lineProblem || undefined} aria-describedby="enroll-line-state" />
+        <p id="enroll-line-state" className="text-xs text-muted-foreground">
+          {lineProblem ? <span className="text-destructive">{lineProblem}</span> : "The line is a password: it is sent once and not kept on this page."}
+        </p>
       </div>
       <ErrorNote title="The secrets were not stored" error={save.error} />
       <div>
-        <Button disabled={!canManage || save.isPending || (!capi.trim() && !csi.trim()) || bad(capi) || bad(csi)} onClick={() => save.mutate()}>
+        <Button disabled={!canManage || save.isPending || !line.trim() || !!lineProblem} onClick={() => save.mutate({ enroll: line.replace(/\s+/g, "") })}>
           {save.isPending ? "Storing…" : "Store the secrets"}
         </Button>
       </div>
+      <details className="text-sm">
+        <summary className="cursor-pointer text-muted-foreground">Enter the two secrets by hand instead</summary>
+        <div className="mt-3 grid gap-3">
+          <p className="text-muted-foreground">For a token made another way (<code>pveum user token add</code> prints its secret once).</p>
+          <div className="grid gap-4 sm:grid-cols-2">
+            {secret("capi-secret", CAPI_TOKEN, capi, setCapi)}
+            {secret("csi-secret", CSI_TOKEN, csi, setCsi)}
+          </div>
+          <div>
+            <Button variant="outline" disabled={!canManage || save.isPending || (!capi.trim() && !csi.trim()) || bad(capi) || bad(csi)}
+              onClick={() => save.mutate({
+                ...(capi.trim() ? { capi: { tokenId: CAPI_TOKEN, secret: capi.trim() } } : {}),
+                ...(csi.trim() ? { csi: { tokenId: CSI_TOKEN, secret: csi.trim() } } : {}),
+              })}>
+              Store these secrets
+            </Button>
+          </div>
+        </div>
+      </details>
     </StepCard>
   )
 }
