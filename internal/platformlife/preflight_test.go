@@ -47,11 +47,12 @@ func (f *preflightPVE) serve(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "PVEAPIToken=")
 	token = token[:strings.LastIndex(token, "=")]
 	data := map[string]string{
-		"/cluster/status":           `[{"type":"node","name":"pve1","ip":"192.0.2.11"}]`,
-		"/nodes/pve1/network":       `[{"iface":"vmbr0","address":"192.0.2.11","gateway":"192.0.2.1","cidr":"192.0.2.11/24"},{"iface":"vmbr1","type":"bridge"}]`,
-		"/cluster/firewall/options": `{"enable":1}`,
-		"/cluster/firewall/rules":   `[]`,
-		"/cluster/sdn/vnets":        `[]`,
+		"/cluster/status":                       `[{"type":"node","name":"pve1","ip":"192.0.2.11"}]`,
+		"/nodes/pve1/network":                   `[{"iface":"vmbr0","address":"192.0.2.11","gateway":"192.0.2.1","cidr":"192.0.2.11/24"},{"iface":"vmbr1","type":"bridge"}]`,
+		"/cluster/firewall/options":             `{"enable":1}`,
+		"/cluster/firewall/rules":               `[]`,
+		"/nodes/pve1/storage/local-lvm/content": `[]`,
+		"/cluster/sdn/vnets":                    `[]`,
 		"/storage": `[{"storage":"local","type":"dir","content":"iso,import"},{"storage":"local-lvm","type":"lvmthin","content":"images"},
 			{"storage":"nas-iso","type":"nfs","content":"iso","shared":1}]`,
 		"/cluster/resources": `[{"type":"storage","storage":"local","node":"pve1","status":"available"},
@@ -164,8 +165,13 @@ func TestPreflight(t *testing.T) {
 	if !OK(checks) {
 		t.Fatalf("a set-up site: %+v", checks)
 	}
-	if got := len(checks); got != 18 {
-		t.Errorf("%d rows, want 18: %+v", got, checks)
+	if got := len(checks); got != 20 {
+		t.Errorf("%d rows, want 20: %+v", got, checks)
+	}
+	for _, c := range checks {
+		if c.Status != CheckOK {
+			t.Errorf("a set-up site: row %s is %s: %s", c.ID, c.Status, c.Message)
+		}
 	}
 	// The scheduler is the operator's call: a warning with the command while it is off, no row while it is on.
 	pf.SchedulerOff = true
@@ -336,8 +342,8 @@ func TestPreflight(t *testing.T) {
 		"pool-fence":           "the portal token holds 1 privileges on /pool/" + pve.SeedPool,
 		"iso-store-visibility": "[local, nas-iso]",
 		"token-scope":          pve.CAPITokenID + " holds 2 privileges on /pool",
-		"isolation":            "add 10.200.200.10/32, 10.200.200.20/32, 10.200.200.30/31",
-		"credentials":          pve.CSITokenID + " is not stored",
+		"isolation":            "10.200.200.10/32, 10.200.200.20/32, 10.200.200.30/31, 10.200.200.32/28, 10.200.200.48/31 are not in the provider's blockedCidrs. Saving the settings adds them",
+		"credentials":          pve.CSITokenID + " is not stored: run the root command of step 2",
 		"images":               "is on the blocklist: install a newer ProxCloud release",
 	} {
 		if c := got[id]; c.Status != CheckFail || !strings.Contains(c.Message, want) {
@@ -416,5 +422,79 @@ func TestSiteOfDefaultZone(t *testing.T) {
 	}
 	if s := SiteOf(es(nil)); s.DefaultZone != "" || s.DefaultZoneKind != "" {
 		t.Errorf("no zone: %+v", s)
+	}
+}
+
+// The boot store row: a store Proxmox does not have and one without disk images fail with the command; disks of VMs
+// that are neither the platform's machines nor ProxCloud templates nor CSI volumes warn and name the VMs; the rule row
+// never fails and says who writes the rule.
+func TestPreflightBootStoreAndAPIRule(t *testing.T) {
+	in := validInstallation(t)
+	in.Spec.Storage.Import = "local"
+	for i := range in.Spec.Clusters[0].NodeGroups {
+		in.Spec.Clusters[0].NodeGroups[i].Nodes = []string{"pve1"}
+	}
+	tags := `"tags":"pc-platform-` + in.ID + `"`
+	f := &preflightPVE{seed: 106, machines: map[int][2]string{106: {`{"name":"seed","onboot":1,` + tags + `}`, "running"}}, extra: map[string]string{
+		"/pools/" + pve.TemplatePool: `{"members":[{"id":"qemu/9100","type":"qemu","vmid":9100,"node":"pve1"}]}`,
+		"/nodes/pve1/storage/local-lvm/content": `[{"volid":"local-lvm:vm-106-disk-0","vmid":106},{"volid":"local-lvm:base-9100-disk-0","vmid":9100},
+			{"volid":"local-lvm:vm-9999-pvc-1f","vmid":9999}]`,
+	}}
+	srv := httptest.NewServer(http.HandlerFunc(f.serve))
+	t.Cleanup(srv.Close)
+	pf := Preflight{Installation: in, Site: Site{CIDRPool: "10.100.0.0/16"},
+		Portal: &pve.Service{C: f.client(t, srv.URL, pve.DefaultPlatformTokenID)},
+		CAPI:   f.client(t, srv.URL, pve.CAPITokenID), CSI: f.client(t, srv.URL, pve.CSITokenID)}
+	ctx := context.Background()
+	row := func(id string) Check { return checkMap(pf.Run(ctx))[id] }
+
+	if c := row("boot-store"); c.Status != CheckOK || !strings.Contains(c.Message, "no disk of a VM that is not the platform's") {
+		t.Errorf("the platform's own disks: %+v", c)
+	}
+	f.extra["/nodes/pve1/storage/local-lvm/content"] = `[{"volid":"local-lvm:vm-106-disk-0","vmid":106},{"volid":"local-lvm:vm-101-disk-0","vmid":101},
+		{"volid":"local-lvm:vm-101-disk-1","vmid":101},{"volid":"local-lvm:vm-300-disk-0","vmid":300}]`
+	if c := row("boot-store"); c.Status != CheckWarn || !strings.Contains(c.Message, "2 other VMs (VM 101, 300)") || !strings.Contains(c.Message, "Datastore.Allocate") ||
+		!strings.Contains(c.Message, "pvesm add zfspool") {
+		t.Errorf("foreign disks: %+v", c)
+	}
+	f.extra["/nodes/pve1/storage/local-lvm/content"] = "!"
+	if c := row("boot-store"); c.Status != CheckWarn || !strings.Contains(c.Message, "could not be listed") {
+		t.Errorf("a list that is refused: %+v", c)
+	}
+	// Without either token nothing is listed: without the CAPI token the platform's own machines would be "others".
+	for _, without := range []**pve.Client{&pf.CAPI, &pf.CSI} {
+		keep := *without
+		*without = nil
+		if c := row("boot-store"); c.Status != CheckOK || !strings.Contains(c.Message, "once the tokens "+pve.CAPITokenID+" and "+pve.CSITokenID+" are stored") {
+			t.Errorf("a token is not stored: %+v", c)
+		}
+		*without = keep
+	}
+	pf.CSI = nil
+	f.extra["/storage"] = `[{"storage":"local","type":"dir","content":"iso,import"},{"storage":"local-lvm","type":"lvmthin","content":"rootdir"}]`
+	if c := row("boot-store"); c.Status != CheckFail || !strings.Contains(c.Message, "pvesm set local-lvm --content rootdir,images") {
+		t.Errorf("no images content: %+v", c)
+	}
+	f.extra["/storage"] = `[{"storage":"local","type":"dir","content":"iso,import"}]`
+	if c := row("boot-store"); c.Status != CheckFail || !strings.Contains(c.Message, "Proxmox has no storage local-lvm") {
+		t.Errorf("a store that does not exist: %+v", c)
+	}
+
+	if c := row("pve-api-rule"); c.Status != CheckOK || !strings.Contains(c.Message, "Install writes the cluster firewall rule") || !strings.Contains(c.Message, "Nothing to do by hand") {
+		t.Errorf("before the install: %+v", c)
+	}
+	in.Status.BOM = &BOMRef{Release: "x"}
+	if c := row("pve-api-rule"); c.Status != CheckWarn || !strings.Contains(c.Message, "Press Apply") {
+		t.Errorf("installed, rule missing: %+v", c)
+	}
+	src, dest, port := in.APIAccess()
+	b, _ := json.Marshal([]pve.FirewallRule{pve.APIAccessRule(in.ID, src, dest, port)})
+	f.extra["/cluster/firewall/rules"] = string(b)
+	f.extra["/cluster/firewall/options"] = `{"enable":0}`
+	if c := row("pve-api-rule"); c.Status != CheckOK || !strings.Contains(c.Message, "lets the seed and the node range reach") || !strings.Contains(c.Message, "datacenter firewall is off") {
+		t.Errorf("rule present: %+v", c)
+	}
+	if len(f.writes) != 0 {
+		t.Fatalf("the preflight wrote to PVE: %v", f.writes)
 	}
 }

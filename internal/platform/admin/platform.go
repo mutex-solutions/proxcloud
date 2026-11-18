@@ -188,6 +188,8 @@ type installationView struct {
 	Live *platformlife.LiveState `json:"live,omitempty"`
 	// SchedulerNote is platformlife.SchedulerOffNote while the job scheduler is off, else absent.
 	SchedulerNote string `json:"schedulerNote,omitempty"`
+	// SiteChanges is in the answer of a save only: what the save wrote into the provider's network config.
+	SiteChanges *siteChanges `json:"siteChanges,omitempty"`
 }
 
 type tokenView struct {
@@ -267,6 +269,21 @@ type installationRequest struct {
 	Rev           int64             `json:"rev"`
 }
 
+// siteDefaults is platformSiteDefaults for a saved installation, with its audit record.
+func (h *Handler) siteDefaults(r *http.Request, in *platformlife.Installation, before map[string]any) *siteChanges {
+	var ch *siteChanges
+	// The save is stored: its audit record is written whether or not the provider can be read.
+	if es, err := h.esSvc.Get(r.Context(), in.ServiceID); err == nil && es != nil {
+		ch = h.platformSiteDefaults(r.Context(), in, es)
+	}
+	after := asSnapshot(in)
+	if ch != nil && (len(ch.BlockedCIDRs) > 0 || len(ch.BlockedCIDRsRemoved) > 0 || ch.ZoneWithoutDHCP != "") {
+		after["providerNetwork"] = map[string]any{"blockedCidrsAdded": ch.BlockedCIDRs, "blockedCidrsRemoved": ch.BlockedCIDRsRemoved, "zoneWithoutDhcp": ch.ZoneWithoutDHCP}
+	}
+	audit.RecordSnapshots(r.Context(), before, after)
+	return ch
+}
+
 // checked normalizes in and checks it on its own and against its provider's networks.
 func (h *Handler) checked(r *http.Request, in *platformlife.Installation) error {
 	es, err := h.esSvc.Get(r.Context(), in.ServiceID)
@@ -326,7 +343,7 @@ func (h *Handler) platformCreate(w http.ResponseWriter, r *http.Request) {
 	if platformStoreErr(w, h.checked(r, in)) || platformStoreErr(w, h.platform.Create(r.Context(), in)) {
 		return
 	}
-	httpx.OK(w, &installationView{Installation: in})
+	httpx.OK(w, &installationView{Installation: in, SiteChanges: h.siteDefaults(r, in, asSnapshot(in))})
 }
 
 func (h *Handler) platformUpdate(w http.ResponseWriter, r *http.Request) {
@@ -364,11 +381,12 @@ func (h *Handler) platformUpdate(w http.ResponseWriter, r *http.Request) {
 	if platformStoreErr(w, err) {
 		return
 	}
-	audit.RecordSnapshots(r.Context(), asSnapshot(before), asSnapshot(after))
+	changes := h.siteDefaults(r, after, asSnapshot(before))
 	v, err := h.platformView(r, after)
 	if httpx.WriteError(w, err) {
 		return
 	}
+	v.SiteChanges = changes
 	httpx.OK(w, v)
 }
 
@@ -386,15 +404,54 @@ var pveTokenSecret = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA
 // platformCredentials stores the CAPI and the CSI token. Each is optional; the token ids are the ones the
 // managed-services script creates, whose ACL rows and fences the preflight checks. The body is never echoed, logged or
 // audited beyond the middleware's event (actor, installation id).
+// enroll is the other way in, and goes alone: the PC-ENROLL line the root command of step 2 printed
+// (platformlife.ParseEnrollLine). A line that is not one, or is of another installation, is a 400 invalid_enrollment;
+// a line printed more than five minutes ahead of the portal's clock is a 400 enrollment_clock_ahead; a line stored
+// before, or older than the one stored, is a 409 enrollment_replayed. No answer quotes the line.
 func (h *Handler) platformCredentials(w http.ResponseWriter, r *http.Request) {
 	if !h.platformGate(w, r, externalServiceManagePerm) {
 		return
 	}
 	var req struct {
-		CAPI *platformlife.TokenCredential `json:"capi"`
-		CSI  *platformlife.TokenCredential `json:"csi"`
+		CAPI   *platformlife.TokenCredential `json:"capi"`
+		CSI    *platformlife.TokenCredential `json:"csi"`
+		Enroll string                        `json:"enroll"`
 	}
 	if !decodeStrictLimited(w, r, &req, 4<<10) {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if req.Enroll != "" {
+		if req.CAPI != nil || req.CSI != nil {
+			platformErr(w, http.StatusBadRequest, "invalid_credentials", "The credentials are not valid", map[string]any{"problems": []string{"enroll goes without capi and csi"}})
+			return
+		}
+		in, err := h.platform.Get(r.Context(), id)
+		if platformStoreErr(w, err) {
+			return
+		}
+		e, err := platformlife.ParseEnrollLine(req.Enroll, in.ID)
+		if err == nil {
+			err = h.platform.SaveEnrollment(r.Context(), id, e)
+		}
+		switch {
+		case errors.Is(err, platformlife.ErrEnrollAhead):
+			platformErr(w, http.StatusBadRequest, "enrollment_clock_ahead", err.Error(), nil)
+			return
+		case errors.Is(err, platformlife.ErrEnrollReplayed):
+			platformErr(w, http.StatusConflict, "enrollment_replayed", err.Error(), nil)
+			return
+		case errors.Is(err, platformlife.ErrEnrollMalformed), errors.Is(err, platformlife.ErrEnrollOther):
+			platformErr(w, http.StatusBadRequest, "invalid_enrollment", err.Error(), nil)
+			return
+		case platformStoreErr(w, err):
+			return
+		}
+		v, err := h.platformView(r, in)
+		if httpx.WriteError(w, err) {
+			return
+		}
+		httpx.OK(w, v)
 		return
 	}
 	var problems []string
@@ -417,7 +474,6 @@ func (h *Handler) platformCredentials(w http.ResponseWriter, r *http.Request) {
 		platformErr(w, http.StatusBadRequest, "invalid_credentials", "The credentials are not valid", map[string]any{"problems": problems})
 		return
 	}
-	id := chi.URLParam(r, "id")
 	in, err := h.platform.Get(r.Context(), id)
 	if platformStoreErr(w, err) || platformStoreErr(w, h.platform.SaveCredentials(r.Context(), id, req.CAPI, req.CSI)) {
 		return

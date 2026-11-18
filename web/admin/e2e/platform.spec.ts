@@ -120,36 +120,81 @@ test("from an empty form to a failed run, then Retry and Cancel", async ({ page 
   expect(created.body.spec.clusters[0].nodeGroups.map((g: { name: string; count: number }) => [g.name, g.count])).toEqual([["system", 1], ["kamaji", 1], ["dbaas", 1]])
   await shot(page, "draft")
 
-  // The script is the managed one for the saved stores.
-  await expect(page.getByLabel("identities script", { exact: true })).toContainText("pveum user token add 'capmox@pve' 'capi'")
-  expect((await calls(page, "GET", "/admin/setup/proxmox-script")).at(-1)!.path).toMatch(/managedServices=true&bootStorage=local-zfs&isoStorage=local/)
-  expect((await calls(page, "GET", "/admin/setup/proxmox-script")).at(-1)!.path).toMatch(/importStorage=/) // the API filled the provider's import store
+  // The first save says what it wrote into the provider, so that nobody adds the blocked networks by hand.
+  await expect(page.getByRole("status").filter({ hasText: "The save also changed the provider" })).toContainText("10.90.0.5/32")
+  // A corrected address: the entry the earlier save added for the old one is taken off, and the page says so.
+  for (const [address, gone] of [["10.90.0.6", "10.90.0.5/32"], ["10.90.0.5", "10.90.0.6/32"]]) {
+    await expect(page.getByRole("button", { name: "Save settings" })).toBeEnabled() // the save before it is done: the form was read again
+    await page.getByLabel("Seed address", { exact: true }).fill(address)
+    await page.getByRole("button", { name: "Save settings" }).click()
+    await expect(page.getByRole("status").filter({ hasText: "The save also changed the provider" })).toContainText(`need them (an earlier save had added them): ${gone}`)
+  }
+
+  // One command as root for this installation: its stores come from the settings, and it prints no secret.
+  const id = "pi-00000001" // the mock numbers its installations
+  await expect(page.getByLabel("root command", { exact: true })).toContainText(`PC_INSTALL='${id}'`)
+  await expect(page.getByLabel("root command", { exact: true })).toContainText("STOP: the token capmox@pve!capi exists on this cluster")
+  await expect(page.getByLabel("root command", { exact: true })).toContainText("'/storage/local-zfs'")
+  expect((await calls(page, "GET", "/admin/setup/proxmox-script")).at(-1)!.path).toMatch(new RegExp(`installation=${id}`))
+  expect((await calls(page, "GET", "/admin/setup/proxmox-script")).at(-1)!.path).not.toMatch(/bootStorage|managedServices/)
 
   // Check fails until both secrets are stored, and says what to do.
   await page.getByRole("button", { name: "Check", exact: true }).click()
   await expect(page.getByRole("status").filter({ hasText: "checks failed" })).toBeVisible()
-  await expect(page.getByRole("list", { name: "What to do for each failed check" })).toContainText("Paste both token secrets in step 2.")
+  await expect(page.getByRole("list", { name: "What to do for each failed check" })).toContainText("Run the root command of step 2 on a node and paste the PC-ENROLL line it prints.")
   await expectAccessible(page)
   await shot(page, "check-failed")
 
-  // The two secrets are write-only: sent once, then gone from the page.
-  const capi = page.getByLabel("Secret of capmox@pve!capi")
-  await expect(capi).toHaveAttribute("type", "password")
-  await expect(capi).toHaveAttribute("autocomplete", "new-password") // not a login: no password manager offer
-  await capi.fill("not-a-secret")
-  await expect(page.getByText(/Not a Proxmox token secret/)).toBeVisible()
-  await expect(page.getByRole("button", { name: "Store the secrets" })).toBeDisabled()
-  await capi.fill(CAPI_SECRET)
-  await page.getByLabel("Secret of csi@pve!csi").fill(CSI_SECRET)
-  await page.getByRole("button", { name: "Store the secrets" }).click()
-  await expect(page.getByText("Stored. It is never shown again; paste a new one to replace it.")).toHaveCount(2)
-  await expect(capi).toHaveValue("")
-  await expect(page.getByLabel("Secret of csi@pve!csi")).toHaveValue("")
+  // The command's last line carries both secrets. The page checks it before it is sent: a bare secret, a line cut
+  // short and a line of another installation are refused with what is wrong, and nothing is sent.
+  const enroll = (inst: string, at: number, capi = CAPI_SECRET, csi = CSI_SECRET) => `PC-ENROLL:${Buffer.from(`1:${inst}:${at}:${capi}:${csi}`).toString("base64")}`
+  const line = page.getByLabel("The PC-ENROLL line the command printed")
+  const store = page.getByRole("button", { name: "Store the secrets", exact: true })
+  await expect(line).toHaveAttribute("type", "password")
+  await expect(line).toHaveAttribute("autocomplete", "new-password") // not a login: no password manager offer
+  await expect(store).toBeDisabled()
+  for (const [bad, says] of [
+    [CAPI_SECRET, /not the PC-ENROLL line the command prints/],
+    [enroll(id, 1795000000).slice(0, -40), /not the PC-ENROLL line the command prints/],
+    [enroll("pi-ffffffff", 1795000000), /of another installation/],
+  ] as const) {
+    await line.fill(bad)
+    await expect(page.locator("#enroll-line-state")).toHaveText(says)
+    await expect(store).toBeDisabled()
+  }
+  // As a terminal wraps it: white space inside the line is dropped.
+  const good = enroll(id, 1795000000)
+  await line.fill(`${good.slice(0, 50)} ${good.slice(50)}`)
+  await store.click()
+  await expect(page.getByRole("list", { name: "Stored token secrets" })).toContainText("capmox@pve!capi: stored. It is never shown again.")
+  await expect(page.getByRole("list", { name: "Stored token secrets" })).toContainText("csi@pve!csi: stored. It is never shown again.")
+  await expect(line).toHaveValue("")
   const [stored] = await calls(page, "PUT", /\/credentials$/)
-  expect(stored.body).toEqual({ capi: { tokenId: "capmox@pve!capi", secret: CAPI_SECRET }, csi: { tokenId: "csi@pve!csi", secret: CSI_SECRET } })
+  expect(stored.body).toEqual({ enroll: good })
   expect(await page.content()).not.toContain(CAPI_SECRET)
   expect(await page.content()).not.toContain(CSI_SECRET)
-  expect(await page.evaluate(() => JSON.stringify([{ ...localStorage }, { ...sessionStorage }]))).not.toContain(CAPI_SECRET)
+  expect(await page.content()).not.toContain(good)
+  expect(await page.evaluate(() => JSON.stringify([{ ...localStorage }, { ...sessionStorage }]))).not.toContain(good)
+  // With both secrets stored the command no longer stops on these tokens: they are this installation's.
+  await expect(page.getByLabel("root command", { exact: true })).not.toContainText("STOP: the token")
+
+  // The same line again is a replay: the API refuses it and the stored secrets stay.
+  await line.fill(good)
+  await store.click()
+  await expect(page.getByRole("alert").filter({ hasText: "The secrets were not stored" })).toContainText("was stored already")
+
+  // By hand, for a token made another way: the two fields are write-only as well.
+  await page.getByText("Enter the two secrets by hand instead").click()
+  const capi = page.getByLabel("Secret of capmox@pve!capi")
+  await expect(capi).toHaveAttribute("type", "password")
+  await capi.fill("not-a-secret")
+  await expect(page.getByText(/Not a Proxmox token secret/)).toBeVisible()
+  await expect(page.getByRole("button", { name: "Store these secrets" })).toBeDisabled()
+  await capi.fill(CAPI_SECRET)
+  await page.getByRole("button", { name: "Store these secrets" }).click()
+  await expect(capi).toHaveValue("")
+  expect((await calls(page, "PUT", /\/credentials$/)).at(-1)!.body).toEqual({ capi: { tokenId: "capmox@pve!capi", secret: CAPI_SECRET } })
+  expect(await page.content()).not.toContain(CAPI_SECRET)
 
   await page.getByRole("button", { name: "Check again" }).click()
   await expect(page.getByRole("status").filter({ hasText: "No check failed. 1 warning does not stop the install" })).toBeVisible() // the scheduler row: the mock runs without it
