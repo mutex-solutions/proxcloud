@@ -83,6 +83,10 @@ proxmox:
     dnsServers: ["192.0.2.53"]
     # -- 0 = the guest default. EVPN vnets need the vnet MTU here.
     mtu: 0
+    # -- From chart 0.1.14. A VLAN id (1 to 4094) for every machine's NIC on the bridge (CAPMOX networkDevices[].vlan,
+    # Proxmox tag=<n>); 0 or absent = untagged, which renders what 0.1.13 rendered. The token then needs SDN.Use on
+    # /sdn/zones/localnetwork/<bridge>/<vlan>. It is part of the machine template: changing it replaces every machine.
+    vlan: 0
   csi:
     # -- Secret with the manifest of the tenant-side proxmox-csi config (type addons.cluster.x-k8s.io/resource-set).
     configSecretName: example-csi-config

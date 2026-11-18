@@ -241,3 +241,44 @@ func TestChartKubeadmRequiresMachineImageAndTags(t *testing.T) {
 		})
 	}
 }
+
+// proxmox.network.vlan (chart 0.1.14) becomes networkDevices[].vlan of the control plane's and of every node group's
+// machine template, which CAPMOX writes as tag=<n> on the NIC. Without the value no template names a VLAN, so a
+// cluster rendered by 0.1.13 keeps its templates (their names hash the machine spec).
+func TestChartKubeadmVLAN(t *testing.T) {
+	devices := func(vlan int) (out []map[string]any) {
+		var values map[string]any
+		if err := yaml.Unmarshal([]byte(kubeadmTestValues), &values); err != nil {
+			t.Fatal(err)
+		}
+		if vlan != 0 {
+			dig(values, "proxmox", "network").(map[string]any)["vlan"] = vlan
+		}
+		raw, err := gatewayRenderRawChart(t, "pc-platform", values)
+		if err != nil {
+			t.Fatalf("render: %v\n%s", err, raw)
+		}
+		for _, doc := range strings.Split(raw, "\n---") {
+			var obj map[string]any
+			if err := yaml.Unmarshal([]byte(doc), &obj); err != nil || obj["kind"] != "ProxmoxMachineTemplate" {
+				continue
+			}
+			out = append(out, dig(obj, "spec", "template", "spec", "network").(map[string]any)["networkDevices"].([]any)[0].(map[string]any))
+		}
+		return out
+	}
+	tagged := devices(140)
+	if len(tagged) != 4 { // the control plane, system on pve1 and pve2, kamaji on pve2
+		t.Fatalf("%d machine templates, want 4", len(tagged))
+	}
+	for _, d := range tagged {
+		if d["vlan"] != 140 || d["bridge"] != "vmbr0" {
+			t.Errorf("device %v: want vlan 140 on vmbr0", d)
+		}
+	}
+	for _, d := range devices(0) {
+		if _, ok := d["vlan"]; ok {
+			t.Errorf("device %v names a VLAN without the value", d)
+		}
+	}
+}

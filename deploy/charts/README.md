@@ -51,7 +51,11 @@ Four charts live here:
   the portal writes from each node's free memory, CPU and storage; a group without the key is
   split evenly as before, so an existing cluster renders the same objects until its node groups
   change. A map whose sum is not `machineCount`, or that names a node without an image, fails the
-  render.
+  render. 0.1.14 reads `proxmox.network.vlan` (1 to 4094): the control plane's and every node
+  group's machine template gets `networkDevices[].vlan`, which the Cluster API provider writes as
+  `tag=<n>` on the NIC. Without the value the render is what 0.1.13 gave, so an existing cluster
+  keeps its machine templates. The portal writes it only for a platform network with a VLAN tag
+  ([managed-services.md](../../docs/managed-services.md#the-platform-network-bridge-vlan-tag-or-routed)).
 
 ## Publishing
 
@@ -75,7 +79,9 @@ pullable; see [release readiness](../../docs/release-readiness.md).
 For `database-cluster`, `proxmox-kamaji-cluster` and `proxcloud-platform`, bump `version:` in `Chart.yaml`
 in the PR that changes the chart, merge, then have a maintainer deliberately cut
 the matching tag. The current source versions are database `0.5.1`, Kubernetes
-`0.1.13` and platform `0.1.2` (all three published and pinned by the platform BOM);
+`0.1.14` and platform `0.1.2`. Database `0.5.1`, Kubernetes `0.1.13` and platform `0.1.2` are
+published and pinned by the platform BOM; Kubernetes `0.1.14` (the VLAN tag) is not published
+yet, and the BOM stays on `0.1.13` until its tag is cut;
 they are independent of the app's `0.8.1`. Publishing is idempotent — an
 already-published version is skipped, so a reused version does not update an old
 artifact. These are release operations, not commands to run during normal setup.

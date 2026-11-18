@@ -63,6 +63,7 @@ VM.GuestAgent.Unrestricted, root in every guest of the pool. The Node joining is
 {{- $machine := dict "sourceNode" $node "templateID" (int $vmid) "allowedNodes" (list $node) "storage" $root.Values.proxmox.storage "format" "raw" "full" true "pool" $root.Values.proxmox.pool "checks" (dict "skipCloudInitStatus" true) "tags" $ng.machineTags "numSockets" 1 "numCores" (int $ng.machineCores) "memoryMiB" (int $ng.machineMemoryMiB) "disks" (dict "bootVolume" (dict "disk" "scsi0" "sizeGb" (int $ng.machineRootVolume.diskSize))) }}
 {{- $device := dict "name" "net0" "bridge" $net.bridge "model" "virtio" }}
 {{- if $net.mtu }}{{- $_ := set $device "linkMtu" (int $net.mtu) }}{{- $_ := set $device "mtu" 1 }}{{- end }}
+{{- if $net.vlan }}{{- $_ := set $device "vlan" (int $net.vlan) }}{{- end }}
 {{- $_ := set $machine "network" (dict "networkDevices" (list $device)) }}
 {{- $mtName := printf "%s-%s" $base (toJson $machine | sha256sum | trunc 8) }}
 {{- $labels := dict "proxcloud.io/node-group" $ng.name "topology.kubernetes.io/region" $root.Values.proxmox.region "topology.kubernetes.io/zone" $node }}
