@@ -289,6 +289,20 @@ Kubernetes provider has a default root disk size (`config.cluster.rootVolumeGiB`
 larger of that default and the flavor's disk. A group that already runs keeps the root disk size it has when the
 field is left out. Without a provider default a group without it answers `400`, at create too.
 
+`/api/v1/admin/service/{id}/k8s-clusters/{clusterId}/worker-firewall` is the Proxmox VM firewall of one cluster's
+workers ([managed-k8s.md](managed-k8s.md#worker-firewall); not verified on a lab). `GET` (`admin:service:read`) reports
+and writes nothing; `POST` protects the workers and answers after it has watched the nodes, up to a minute, or `409`
+with the reason when it refused or took the firewall off again; `DELETE` removes the firewall and the cluster's
+security group, or answers `409` and changes nothing when a worker is on a node that is down or another server uses
+the group (both need the provider manage permission). A `POST` cut short by a proxy timeout goes on to its end: read
+the state with `GET`. `verified` is true only in the answer of the `POST` that put the firewall on and watched the
+nodes; it is false on every `GET` and on a `POST` to a cluster that was already protected.
+
+```json
+{"clusterId": "pc-c-0a1b2c3d", "protected": true, "group": "g1a2b3c4", "groupName": "k8s-pc-c-0a1b2c3d", "enforced": true,
+ "verified": true, "workers": [{"vmid": 141, "name": "pc-c-0a1b2c3d-workers-pve1-abcde-1", "node": "pve1", "status": "running", "secured": true}]}
+```
+
 `GET /api/v1/admin/service/{id}/k8s-clusters/{clusterId}/machines` (`admin:service:read`) is the operator's detail,
 read live from the management cluster:
 
@@ -608,16 +622,42 @@ are several, `errors.details.problems`.
   when `capmox@pve!capi` or `csi@pve!csi` holds a privilege on `/pool`, `/storage`
   or `/vms`, and names the `pveum acl delete` command, or which row of
   `pveum acl list` is the one to remove. A row that cannot be read fails.
-- `GET /installations/{id}/plan`: what an apply does (`installed`, `target`,
-  `newer`, `changes`, `blocking`). `target` is the BOM the apply runs with: this
-  release's for a new installation, the installed one for an installed platform,
-  which stays on its BOM, so `changes` is empty. `newer` is this release's own
-  BOM (`release`, `sha256`) when the platform stays on the BOM of an earlier
-  release; absent otherwise. No release moves an installed platform to a newer
-  BOM yet. An installed BOM this release does not carry (its own and those of
-  earlier releases from 0.8.0 on; not one of a build of `main`) blocks with
-  `bom_unsupported`. A version change not listed in `upgradeFrom` and the removal
-  of a stateful component block; no plan produces either today.
+- `GET /installations/{id}/plan[?target=<sha256>]`: what an apply does
+  (`installed`, `target`, `newer`, `changes`, `blocking`, `upgrade`). `target` is
+  the BOM an apply without `targetBom` runs with: this release's for a new
+  installation (`changes` then lists every component), the installed one for an
+  installed platform (`changes` is empty), and the target of an upgrade that has
+  started. `newer` is this release's own BOM (`release`, `sha256`) when the
+  installed platform is on another one. An installed BOM this release does not
+  carry (its own and those of earlier releases from 0.8.0 on; not one of a build
+  of `main`) blocks with `bom_unsupported`.
+  `upgrade` is the plan of the move to this release's BOM; it is absent when the
+  platform is on it. `?target=` names the BOM to plan for and takes the same
+  values as `targetBom` below (`400 invalid_target` otherwise).
+  While an upgrade toward the BOM of an earlier release is in progress,
+  `upgrade` is that move and `replacement`, of the same shape, is the move to
+  this release's BOM in its place (with its own `allowed`, `blocking` and
+  `confirm`); it is absent otherwise.
+  `upgrade` is `{from, to, allowed, inProgress, confirm, changes, blocking}`:
+  - `changes[]` lists every difference of the two BOMs:
+    `{cluster, name, from, to, class, stage, wave, impact, blocking}`. `class` is
+    `chart` (the run syncs a new chart version in `stage`, at `wave`),
+    `record only` (nothing of the platform is synced for it) or `refused`.
+    `impact` says what the change restarts or rolls; a refused change has
+    `blocking`, its reason, instead.
+  - `allowed` is false when one change is refused or the target is a `-dev` BOM,
+    with each reason in `blocking`. This release moves a platform only when the
+    BOMs differ in `release`, `tenantCharts` and the versions of the product's
+    own charts (`proxcloud-platform` as `capi`, `capi-tenant` and `platform`;
+    `proxmox-kamaji-cluster` as `pc-platform`), each new version listing the old
+    one in `upgradeFrom`. Everything else is refused: `kubernetes.version`,
+    `kubernetes.nodeImage`, `seed.image`, `seed.k3s`, `images.kubeVip`,
+    `images.clusterctl`, every `capi.*` provider, every third-party chart, and a
+    component that is added, removed or changed in anything but its chart
+    version.
+  - `confirm` is the phrase a run that starts the upgrade must carry, present
+    when it is allowed and not started. `inProgress` is true once a run toward
+    `to` has started and none has succeeded (`status.targetBom`).
 
 - `GET /installations/{id}?live=1`: the installation with `live`
   (`phase`, `components[] {name, cluster, sync, health}`, `error`, `code`),
@@ -628,17 +668,31 @@ are several, `errors.details.problems`.
   whether its API does not answer or refuses the stored credential, with the
   seed's address, VMID and node. The stored phase stays `ready`: a seed that
   went down shows only here.
-- `POST /installations/{id}/runs` `{kind: apply|remove, confirm}`: `202 {runId}`. A run
+- `POST /installations/{id}/runs` `{kind: apply|remove, confirm, targetBom}`: `202 {runId}`. A run
   and its durable job (`platform.run/v1`, key `platform-run-<runId>`) are
   written in one transaction; `409 run_active` while another run of the
   installation is not finished, `409 bom_unsupported` when the installed BOM is
   not one this release carries. An apply on an installed platform runs with
-  the installed BOM (the run's `bom`), also when this release's own is another. Without the runner (it starts only when
+  the installed BOM (the run's `bom`), also when this release's own is another.
+  `targetBom` makes an apply an upgrade. It is the sha256 of this release's own
+  BOM (`400 invalid_target` for any other value, and on a remove), and `confirm`
+  must then be the plan's `upgrade.confirm`, `upgrade <installation name> to
+  <release>` (`400 invalid_confirmation`). A move the plan does not allow is
+  `409 upgrade_refused` with `details.reasons`, the plan's `upgrade.blocking`.
+  The run's `bom` is the target and `fromBom` the installed BOM; the installation
+  records the target as `status.targetBom`. From then until a run succeeds,
+  every apply (Retry) continues to that target without `targetBom` or `confirm`,
+  and the installed BOM as `targetBom` is `409 upgrade_refused`: nothing goes
+  back. `status.bom` names the BOM the platform left until the last stage of a
+  run has passed; `status.components` say per component what has moved. A later
+  release may replace a target that was not reached: its own BOM as `targetBom`
+  is accepted when both the installed BOM and the unfinished target may move to
+  it. Without the runner (it starts only when
   `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true` too) the route answers
   `409 platform_disabled`; the reads below still work. A plain remove is
   `{"kind":"remove"}`. `confirm` is optional, belongs to a remove only and asks
   for more: when it is sent it must be `remove <installation name>`
-  (`400 invalid_confirmation` otherwise, also on an apply). With it, a remove whose seed VM is gone deletes the VMs of pool
+  (`400 invalid_confirmation` otherwise, also on an apply without `targetBom`). With it, a remove whose seed VM is gone deletes the VMs of pool
   `proxcloud-system` tagged `pc-platform-<id>` and the recorded volumes, and a
   remove whose workload cluster does not answer goes on without checking for
   tenants. Without it the first fails `seed_lost` and the second is retried,
@@ -656,6 +710,9 @@ are several, `errors.details.problems`.
   machines of stage 7, and in a remove what was deleted, left or not checked
   (`tenants`, one item per machine, `cluster`, `volume-<name>`, `volumes`,
   `vm-<vmid>`, `cds`, `secrets`). A stage keeps its items when it is done.
+  An upgrade run has `fromBom`; its codes `unexpected_rollout` (stage 7) and
+  `tenants_unhealthy` (stage 9) are in
+  [managed-services.md](managed-services.md#upgrade-between-boms).
   A Kubernetes `401` or `403` from the seed or the platform cluster is counted
   in `retries` and tried again, because an API server answers so while it
   starts; `refused` is how many looks on end ended so (absent when none), and
@@ -671,7 +728,26 @@ are several, `errors.details.problems`.
   and the expiry, never the token, and is written before the answer; `409
   no_seed` without a ready seed, `502` when the seed issues no token, `503`
   when the API has no audit service (no token is asked for). The answer
-  carries `Cache-Control: no-store`.
+  carries `Cache-Control: no-store`. The entry's `operation` is
+  `seed-kubeconfig`.
+- `GET /installations/{id}/platform-kubeconfig` (`admin:service:manage`,
+  although a GET): `{kubeconfig, expiresAt}`, a kubeconfig of the platform
+  cluster with a one-hour token of its service account
+  `kube-system/proxcloud-break-glass`. The route reads the cluster's admin
+  kubeconfig and CA from the seed, writes that account, a ClusterRole and a
+  Role in `argocd` with their bindings on the cluster (all named
+  `proxcloud-break-glass`; written again by each call), and asks the cluster
+  for the token. The admin kubeconfig is never returned. The token reads the
+  cluster without its Secrets and may forward a port in `argocd` and read
+  `argocd-initial-admin-secret` there; it changes nothing
+  ([managed-services.md](managed-services.md#8-credentials-and-the-seed-backup)
+  has the rules and what they do not limit). Nothing stores it. Audit entry,
+  order, `no-store` and `503` as for `seed-kubeconfig`, with `operation:
+  platform-kubeconfig`. `409 no_seed` without a ready seed; `409 no_cluster`
+  when the seed holds no admin kubeconfig or CA of the cluster yet; `502
+  seed_api_unreachable` when the seed does not answer; `502
+  workload_api_unreachable` when the cluster refuses a write or the token, or
+  grants the token for longer than the hour.
 - `POST /installations/{id}/seed-credential/rotate`: creates the service
   account's next token Secret (`proxcloud-portal-token-g<n+1>`), checks that
   its token is cluster-admin, stores it, then deletes the older token Secrets,

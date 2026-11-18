@@ -207,6 +207,10 @@ type ClusterDefaults struct {
 	// RepairMaxUnhealthy is the guard of that replacement, a number of machines per node group (never a percentage):
 	// with more unhealthy machines than this nothing is replaced. 0 counts as 1.
 	RepairMaxUnhealthy int
+	// WorkerFirewall puts the workers of every NEW cluster behind the Proxmox VM firewall with a security group of
+	// their own (config.cluster.workerFirewall, docs/managed-k8s.md "Worker firewall"). Off by default: not verified
+	// on a lab. An existing cluster is protected by the operator, one at a time. Nothing with Shared.
+	WorkerFirewall bool
 	// Shared, when set, puts every cluster's workers on one provider-run placement and credential
 	// instead of the project's pool and vnet with tokens minted per cluster. For a site whose portal
 	// token may not mint tokens. Workers then neither sync nor bill, and tenants share a network.

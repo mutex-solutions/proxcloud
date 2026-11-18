@@ -558,6 +558,15 @@ func run() error {
 		}
 		return rep, err
 	})
+	adminH.SetWorkerFirewall(func(ctx context.Context, ks *kamaji.Service, clusterID, method string) (any, error) {
+		switch method {
+		case http.MethodPost:
+			return projectH.ProtectClusterWorkers(ctx, ks, clusterID)
+		case http.MethodDelete:
+			return projectH.UnprotectClusterWorkers(ctx, ks, clusterID)
+		}
+		return projectH.ClusterWorkerFirewall(ctx, ks, clusterID)
+	})
 	adminH.SetDbaas(func(es *externalservice.ExternalService) (*dbaas.Service, error) {
 		return dbaas.New(es.DbaasConfig(), es.ID)
 	})
@@ -654,6 +663,7 @@ func run() error {
 		WithShareAccess(projectH.ReconcileShareAccess).
 		WithStaleSeeds(projectH.DropStaleSeeds).
 		WithLoadBalancers(projectH.ReconcileLoadBalancers).
+		WithWorkerFirewalls(projectH.ReconcileWorkerFirewalls).
 		WithCSIVolumes(func(region, projectID string, es *externalservice.ExternalService) providers.Provider {
 			return &csigw.VolumeRows{Reg: csiStore, ServiceID: es.ID, Project: projectID, Region: region, GW: gwPVE,
 				ProfileOf: es.PVEVolumeProfileFunc()}
@@ -1024,7 +1034,7 @@ func run() error {
 		if cfg.Jobs.TemplateUpdatesVM {
 			adminH.SetPlatformRuns(jobStore)
 			prRunner := &platformlife.Runner{
-				Jobs: jobStore, State: platformStore, Log: log, Preflight: adminH.PlatformPreflight,
+				Jobs: jobStore, State: platformStore, Log: log, Preflight: adminH.PlatformPreflight, SkipRolloutGate: cfg.Jobs.PlatformSkipRolloutGate,
 				Imports:  platformlife.TemplateUpdates{Service: tuSvc},
 				Register: adminH.PlatformRegister, Disable: adminH.PlatformDisable,
 				Provider: func(ctx context.Context, id string) (*externalservice.ExternalService, error) {

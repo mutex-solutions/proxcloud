@@ -1,7 +1,8 @@
 package platformlife
 
 // seedaccess.go — what the routes do on a ready seed outside a run (design §3.5, §5): the live read of the
-// components, the one-hour break-glass kubeconfig, and the rotation of the stored service-account credential.
+// components, the one-hour break-glass kubeconfigs of the seed and of the platform cluster, and the rotation of the
+// stored service-account credential.
 
 import (
 	"context"
@@ -97,6 +98,96 @@ func BreakGlassKubeconfig(ctx context.Context, in *Installation, sec *Secrets) (
 		return "", time.Time{}, err
 	}
 	kc, err := kamajik8s.BuildKubeconfig("pc-seed", in.Status.Seed.APIServer, []byte(in.Status.Seed.CACert), token)
+	return kc, expires, err
+}
+
+// ErrNoCluster: the seed holds no admin kubeconfig or CA of the platform cluster (stage 7 has not built it).
+var ErrNoCluster = errors.New("this installation has no platform cluster yet")
+
+// ErrWorkloadAPI wraps what the platform cluster's own API answered, to tell it from a failure of the seed.
+var ErrWorkloadAPI = errors.New("the platform cluster's API failed")
+
+// The platform cluster's break-glass identity: a service account that holds no token Secret, a ClusterRole that reads
+// and a Role in ArgoCD's namespace. Written by PlatformKubeconfig, deleted with the cluster.
+const (
+	BreakGlassNamespace = "kube-system"
+	BreakGlassAccount   = "proxcloud-break-glass"
+	argoAdminSecret     = "argocd-initial-admin-secret" // written by argocd-server at its first start
+)
+
+// breakGlassRead is what the platform kubeconfig may get, list and watch on the whole cluster: what the guides'
+// read steps look at (nodes, pods and their logs, events, Applications, tenant control planes, machines, databases,
+// address pools, volumes). No Secret, and not bootstrap.cluster.x-k8s.io, whose objects carry join tokens.
+var breakGlassRead = []any{
+	map[string]any{"apiGroups": []any{""}, "verbs": []any{"get", "list", "watch"}, "resources": []any{"namespaces", "nodes", "pods", "pods/log",
+		"services", "endpoints", "events", "configmaps", "persistentvolumes", "persistentvolumeclaims", "serviceaccounts", "resourcequotas"}},
+	map[string]any{"verbs": []any{"get", "list", "watch"}, "resources": []any{"*"}, "apiGroups": []any{"apps", "batch", "networking.k8s.io",
+		"discovery.k8s.io", "events.k8s.io", "storage.k8s.io", "apiextensions.k8s.io", "metrics.k8s.io", "argoproj.io", "kamaji.clastix.io",
+		"cluster.x-k8s.io", "infrastructure.cluster.x-k8s.io", "controlplane.cluster.x-k8s.io", "ipam.cluster.x-k8s.io", "addons.cluster.x-k8s.io",
+		"postgresql.cnpg.io", "metallb.io", "cilium.io", "cert-manager.io"}},
+}
+
+// breakGlassArgo is what it may do in ArgoCD's namespace on top: forward a port to a pod (kubectl port-forward of
+// svc/argocd-server) and read the one Secret with the initial admin password. Both verbs on pods/portforward: the
+// API server authorizes a WebSocket port-forward (an HTTP GET, kubectl's first try since 1.31) as get and a SPDY one
+// (a POST) as create. The Service and its pods, which kubectl reads first, are in breakGlassRead.
+var breakGlassArgo = []any{
+	map[string]any{"apiGroups": []any{""}, "resources": []any{"pods/portforward"}, "verbs": []any{"get", "create"}},
+	map[string]any{"apiGroups": []any{""}, "resources": []any{"secrets"}, "resourceNames": []any{argoAdminSecret}, "verbs": []any{"get"}},
+}
+
+// PlatformKubeconfig is the break-glass kubeconfig of the platform cluster: a one-hour TokenRequest token of
+// kube-system/proxcloud-break-glass, never the admin certificate Cluster API keeps on the seed. That certificate is
+// only read into memory here, to write the account with its two roles (each call writes them again, so a changed
+// rule set reaches an installed cluster without a run) and to ask for the token. A token the cluster grants for
+// longer than the hour is not handed out. Nothing stores the token; the caller audits who asked and the expiry.
+func PlatformKubeconfig(ctx context.Context, in *Installation, sec *Secrets) (string, time.Time, error) {
+	seed, err := storedSeed(in, sec)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	admin, err := seed.GetSecretData(ctx, ClusterName, kubeconfigSecret)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	ca, err := seed.GetSecretData(ctx, ClusterName, ClusterName+"-ca")
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	if len(admin["value"]) == 0 || len(ca["tls.crt"]) == 0 {
+		return "", time.Time{}, ErrNoCluster
+	}
+	wl, err := kamajik8s.New(string(admin["value"]))
+	if err != nil { // the parse error could quote the kubeconfig
+		return "", time.Time{}, ErrNoCluster
+	}
+	managed := func(obj map[string]any) map[string]any {
+		obj["metadata"].(map[string]any)["labels"] = map[string]any{"app.kubernetes.io/managed-by": ManagedBy}
+		return obj
+	}
+	subjects := []any{map[string]any{"kind": "ServiceAccount", "name": BreakGlassAccount, "namespace": BreakGlassNamespace}}
+	err = errors.Join(
+		wl.ApplyCore(ctx, "serviceaccounts", managed(object("v1", "ServiceAccount", BreakGlassNamespace, BreakGlassAccount))),
+		wl.ApplyClusterScoped(ctx, rbacGroup, "v1", "clusterroles", with(managed(object(rbacGroup+"/v1", "ClusterRole", "", BreakGlassAccount)),
+			map[string]any{"rules": breakGlassRead})),
+		wl.ApplyClusterScoped(ctx, rbacGroup, "v1", "clusterrolebindings", with(managed(object(rbacGroup+"/v1", "ClusterRoleBinding", "", BreakGlassAccount)),
+			map[string]any{"roleRef": map[string]any{"apiGroup": rbacGroup, "kind": "ClusterRole", "name": BreakGlassAccount}, "subjects": subjects})),
+		wl.ApplyCR(ctx, rbacGroup, "v1", "roles", with(managed(object(rbacGroup+"/v1", "Role", argoNamespace, BreakGlassAccount)),
+			map[string]any{"rules": breakGlassArgo})),
+		wl.ApplyCR(ctx, rbacGroup, "v1", "rolebindings", with(managed(object(rbacGroup+"/v1", "RoleBinding", argoNamespace, BreakGlassAccount)),
+			map[string]any{"roleRef": map[string]any{"apiGroup": rbacGroup, "kind": "Role", "name": BreakGlassAccount}, "subjects": subjects})),
+	)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("%w: %v", ErrWorkloadAPI, err)
+	}
+	token, expires, err := wl.CreateServiceAccountToken(ctx, BreakGlassNamespace, BreakGlassAccount, time.Hour)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("%w: %v", ErrWorkloadAPI, err)
+	}
+	if time.Until(expires) > time.Hour+time.Minute {
+		return "", time.Time{}, fmt.Errorf("%w: it granted a token until %s, longer than the hour asked for", ErrWorkloadAPI, expires.UTC().Format(time.RFC3339))
+	}
+	kc, err := kamajik8s.BuildKubeconfig(ClusterName, wl.Server(), ca["tls.crt"], token)
 	return kc, expires, err
 }
 

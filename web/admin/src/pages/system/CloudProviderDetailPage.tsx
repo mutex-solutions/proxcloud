@@ -382,6 +382,7 @@ function KamajiClustersCard({ id }: { id: string }) {
   const clusters = q.data?.clusters ?? []
   const behind = clusters.filter((c) => pin && c.chartVersion !== pin)
   const [machinesOf, setMachinesOf] = useState<{ id: string; name?: string } | null>(null)
+  const [firewallOf, setFirewallOf] = useState<{ id: string; name?: string } | null>(null)
   const invalidate = () => void qc.invalidateQueries({ queryKey: ["admin-get", `/admin/service/${id}/k8s-clusters`] })
 
   const bumpOne = useMutation({
@@ -457,6 +458,7 @@ function KamajiClustersCard({ id }: { id: string }) {
                   </TableCell>
                   <TableCell className="space-x-2 text-right">
                     <Button size="sm" variant="ghost" onClick={() => setMachinesOf(c)}>Machines</Button>
+                    <Button size="sm" variant="ghost" onClick={() => setFirewallOf(c)}>Firewall</Button>
                     {pin && c.chartVersion !== pin ? (
                       <Button size="sm" variant="outline" onClick={() => bumpOne.mutate(c.id)} disabled={bumpOne.isPending}>
                         Bump to {pin}
@@ -474,7 +476,106 @@ function KamajiClustersCard({ id }: { id: string }) {
         </Table>
       </CardContent>
       {machinesOf && <ClusterMachinesDialog serviceId={id} cluster={machinesOf} onClose={() => setMachinesOf(null)} />}
+      {firewallOf && <WorkerFirewallDialog serviceId={id} cluster={firewallOf} onClose={() => setFirewallOf(null)} />}
     </Card>
+  )
+}
+
+type WorkerFirewall = {
+  clusterId: string; protected: boolean; group?: string; groupName: string; enforced: boolean; verified?: boolean
+  workers?: { vmid: number; name: string; node: string; status: string; secured: boolean }[]
+}
+
+// WorkerFirewallDialog — the Proxmox VM firewall of one cluster's workers: whether the cluster is protected, each
+// worker VM, and the two operator actions. Protect answers only after the portal has watched the nodes.
+function WorkerFirewallDialog({ serviceId, cluster, onClose }: { serviceId: string; cluster: { id: string; name?: string }; onClose: () => void }) {
+  const qc = useQueryClient()
+  const path = `/admin/service/${serviceId}/k8s-clusters/${cluster.id}/worker-firewall`
+  const q = useAdminGet<WorkerFirewall>(path)
+  const change = useMutation({
+    mutationFn: (method: "POST" | "DELETE") => apiFetch<WorkerFirewall>(path, { method }),
+    onSuccess: (d) => {
+      toast.success(d?.protected ? "The workers are behind the firewall" : "The worker firewall was removed")
+      qc.setQueryData(["admin-get", path], d)
+    },
+    onError: () => void qc.invalidateQueries({ queryKey: ["admin-get", path] }),
+  })
+  const fw = q.data
+  const workers = fw?.workers ?? []
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Worker firewall of {cluster.name || cluster.id}</DialogTitle>
+          <DialogDescription>
+            The Proxmox VM firewall on the worker VMs: inbound traffic is dropped except what the cluster's security
+            group allows, and a worker can only send from the cluster's own addresses. Not verified on a lab yet.
+          </DialogDescription>
+        </DialogHeader>
+        {q.isLoading ? (
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        ) : q.isError ? (
+          <p role="alert" className="text-sm text-destructive">{(q.error as Error).message}</p>
+        ) : fw ? (
+          <div className="grid gap-4">
+            <p className="text-sm">
+              {fw.protected ? (
+                <>Protected. Security group <span className="font-mono">{fw.groupName}</span> in the cluster's project; the provider sync brings new workers behind it.</>
+              ) : (
+                <>Not protected: every port of a worker is open to the project's networks.</>
+              )}
+            </p>
+            {!fw.enforced && (
+              <p role="alert" className="rounded-lg border border-amber-500/50 bg-amber-500/5 p-3 text-sm">
+                The datacenter firewall of this Proxmox cluster is off: no VM firewall is enforced.
+              </p>
+            )}
+            {change.isError && <p role="alert" className="text-sm text-destructive">{(change.error as Error).message}</p>}
+            <Table>
+              <TableHeader>
+                <TableRow className="hover:bg-transparent">
+                  <TableHead>Worker VM</TableHead>
+                  <TableHead>State</TableHead>
+                  <TableHead>Firewall</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {workers.length === 0 ? (
+                  <TableRow><TableCell colSpan={3} className="text-center text-sm text-muted-foreground">No worker VMs yet.</TableCell></TableRow>
+                ) : (
+                  workers.map((w) => (
+                    <TableRow key={w.vmid}>
+                      <TableCell>
+                        <div className="font-mono text-xs">{w.name}</div>
+                        <div className="text-xs text-muted-foreground">{w.vmid} @ {w.node}</div>
+                      </TableCell>
+                      <TableCell className="text-sm">{w.status}</TableCell>
+                      <TableCell className="text-sm">{w.secured ? "In place" : fw.protected ? "Not yet" : "Off"}</TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {change.isPending && (
+                <span className="mr-auto text-sm text-muted-foreground">
+                  Working. Protect watches the nodes for up to a minute before it answers. If this ends in a timeout, open Firewall
+                  again: a firewall left on without the check stays on, and Remove the worker firewall takes it off.
+                </span>
+              )}
+              {fw.protected && (
+                <Button size="sm" variant="outline" onClick={() => change.mutate("DELETE")} disabled={change.isPending}>
+                  Remove the worker firewall
+                </Button>
+              )}
+              <Button size="sm" onClick={() => change.mutate("POST")} disabled={change.isPending || !fw.enforced}>
+                {fw.protected ? "Apply again" : "Protect this cluster's workers"}
+              </Button>
+            </div>
+          </div>
+        ) : null}
+      </DialogContent>
+    </Dialog>
   )
 }
 

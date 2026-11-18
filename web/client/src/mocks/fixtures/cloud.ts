@@ -257,6 +257,16 @@ export function seedCloudResources(): CloudResource[] {
       routerName: "edge-router",
     }),
 
+    // The workers of cluster "prod" (pc-c-healthy) are behind the Proxmox firewall: their group is named after it.
+    res("SECURITY_GROUP", "k8s-pc-c-healthy", {
+      securityGroup: {
+        id: "sg-k8s", name: "k8s-pc-c-healthy", description: "",
+        security_group_rules: [
+          { id: "sg-k8s-0-aaaa", direction: "ingress", protocol: "udp", port_range: "8472", remote_ip_prefix: "10.100.0.232/29", description: "workers: Cilium VXLAN (pod network)" },
+        ],
+      },
+    }),
+
     res("SECURITY_GROUP", "web-ingress", {
       securityGroup: {
         id: "sg-1",

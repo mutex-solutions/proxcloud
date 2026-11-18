@@ -150,6 +150,18 @@ test("a healthy cluster shows no reason and no attention", async ({ page }) => {
   await expect(page.getByText("Working on it")).toHaveCount(0)
 })
 
+// Workers behind the Proxmox firewall: the cluster page names their security group and links to it.
+test("a cluster whose workers are behind the firewall shows their security group", async ({ page }) => {
+  await page.goto(`${base}/res-pc-c-healthy`)
+  await expect(page.getByText("Worker firewall: inbound traffic to the nodes is dropped")).toBeVisible()
+  await page.getByRole("button", { name: "k8s-pc-c-healthy" }).click()
+  await expect(page).toHaveURL(/\/security-groups\//)
+  // A cluster without the group says nothing about a firewall.
+  await page.goto(`${base}/res-pc-c-stuck`)
+  await expect(page.getByText("Needs attention — provisioning is not making progress")).toBeVisible()
+  await expect(page.getByText("Worker firewall")).toHaveCount(0)
+})
+
 // Placement: a group scaled below the number of hosts it runs on empties a host.
 test("the node group dialog warns when a scale-down empties a host", async ({ page }) => {
   await page.goto(`${base}/res-pc-c-healthy`)

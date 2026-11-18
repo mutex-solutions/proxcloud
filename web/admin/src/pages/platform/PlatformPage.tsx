@@ -251,6 +251,12 @@ function RunCard({ run, installation, canManage, dirty, focus, onRetry, retrying
       state={run.state}
       description={`Started ${fmtDateTime(run.startedAt ?? run.createdAt)}${run.requestedBy ? ` by ${run.requestedBy}` : ""}${run.finishedAt ? `, ended ${fmtDateTime(run.finishedAt)}` : ""}.`}
     >
+      {run.fromBom && run.bom ? (
+        <p className="text-sm">
+          This run upgrades the platform from release <span className="font-mono">{run.fromBom.release}</span> to release <span className="font-mono">{run.bom.release}</span>.
+          The record names release {run.fromBom.release} until the last stage is done{ended ? `; Retry continues to release ${run.bom.release}` : ""}.
+        </p>
+      ) : null}
       {active ? <p className="text-sm text-muted-foreground">This page reads the run every few seconds. You can leave it: the run goes on.</p> : null}
       <ol aria-label="Stages">
         {(run.stages ?? []).map((s, i) => <StageRow key={s.id} stage={s} n={i + 1} kind={run.kind} />)}
@@ -292,11 +298,77 @@ function RunCard({ run, installation, canManage, dirty, focus, onRetry, retrying
 
 // ── Ready ─────────────────────────────────────────────────────────────────────
 
+// A break-glass kubeconfig goes from the answer straight into a file: it is not kept in page state and never rendered.
+const kubeconfigFile = (installation: Installation, which: "seed" | "platform") => `${installation.name}-${which}.kubeconfig`
+function useKubeconfig(installation: Installation, which: "seed" | "platform") {
+  return useMutation({
+    mutationFn: async () => {
+      const { kubeconfig, expiresAt } = await apiFetch<{ kubeconfig: string; expiresAt: string }>(`${base(installation.id)}/${which}-kubeconfig`)
+      const url = URL.createObjectURL(new Blob([kubeconfig], { type: "application/yaml" }))
+      const a = document.createElement("a")
+      a.href = url
+      a.download = kubeconfigFile(installation, which)
+      a.click()
+      URL.revokeObjectURL(url)
+      return expiresAt
+    },
+    onSuccess: (expiresAt) => toast.success(`Downloaded. It works until ${fmtDateTime(expiresAt)}.`),
+  })
+}
+
+// The two commands that open one ArgoCD: no release before v0.10.0 gives either an address of its own.
+const argoCommands = (file: string, port: number) =>
+  `export KUBECONFIG=./${file}\nkubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d; echo\nkubectl -n argocd port-forward svc/argocd-server ${port}:80`
+
+type ProviderRow = { id: string; name: string; config?: Record<string, any> }
+
+// One registered provider with what a tenant still cannot use of it. row is the provider as /admin/service lists it;
+// without one (the list is being read, or the row is gone) only the link is shown.
+function ProviderItem({ id, label, kind, row }: { id: string; label: string; kind: "kubernetes" | "database"; row?: ProviderRow }) {
+  const to = `/system/cloud-providers/${id}`
+  const versions = Object.keys(row?.config?.cluster?.versions ?? {})
+  return (
+    <li className="grid gap-1">
+      <Link to={to} className="underline underline-offset-4">{label}</Link>
+      {row && kind === "kubernetes" ? (
+        versions.length ? <span><State state="ok" className="mr-2" />Offers Kubernetes {versions.join(", ")}.</span> : (
+          <span>
+            <State state="warn" className="mr-2" />
+            Offers no Kubernetes version yet, so no tenant can create a cluster. The install does not set one.{" "}
+            <Link to="/system/template-updates" className="underline underline-offset-4">Publish a Kubernetes node image</Link>, then{" "}
+            <Link to={to} className="underline underline-offset-4">enter its version on the provider's Connection tab</Link>.
+          </span>
+        )
+      ) : null}
+      {row ? (
+        row.config?.attachToNewProjects === false ? (
+          <span>
+            <State state="warn" className="mr-2" />
+            New projects do not get this provider, and the install attached it to no project.{" "}
+            <Link to={to} className="underline underline-offset-4">Attach it on the provider's Projects tab</Link>.
+          </span>
+        ) : <span><State state="ok" className="mr-2" />New projects get this provider. Projects that existed before are attached on its Projects tab.</span>
+      ) : null}
+    </li>
+  )
+}
+
 // live is the seed's answer of this page load; without one (it is being read, or the read failed) the card falls back
 // to what the last run recorded.
-function Ready({ installation, live, loading, error }: { installation: Installation; live?: Installation["live"]; loading: boolean; error: unknown }) {
+function Ready({ installation, live, loading, error, canManage, providers }: {
+  installation: Installation; live?: Installation["live"]; loading: boolean; error: unknown; canManage: boolean; providers: ProviderRow[]
+}) {
   const recorded = installation.status.components ?? []
   const p = installation.status.providers
+  const cluster = installation.spec.clusters[0]
+  const endpoint = installation.status.clusters?.[0]?.endpoint ?? cluster?.endpoint
+  const endpoints = [
+    ["Seed API", installation.status.seed?.apiServer],
+    ["Platform cluster API", endpoint ? `https://${endpoint}:6443` : undefined],
+    ["Load balancer range (MetalLB)", cluster?.metallbRange],
+    ["Node range", cluster?.nodeRange],
+  ]
+  const download = useKubeconfig(installation, "platform")
   const expires = installation.status.clusters?.[0]?.argocdTokenExpiresAt
   const days = expires ? Math.floor((new Date(expires).getTime() - Date.now()) / 86_400_000) : undefined
   const vmid = installation.status.seed?.vmid
@@ -343,13 +415,54 @@ function Ready({ installation, live, loading, error }: { installation: Installat
       ) : !live.error ? <p className="text-sm">The seed lists no component of this installation.</p> : null}
 
       <div className="grid gap-1 text-sm">
+        <h3 className="font-semibold">Endpoints</h3>
+        <p className="text-muted-foreground">
+          Addresses of the platform network. They answer only from where that network is reachable, and the seed's API only for the seed API sources of the settings.
+        </p>
+        <ul aria-label="Endpoints">
+          {endpoints.map(([label, value]) => (
+            <li key={label} className="flex flex-col border-b py-1.5 last:border-b-0 sm:flex-row sm:gap-3">
+              <span className="sm:w-64">{label}</span>
+              <span className="min-w-0 flex-1 font-mono break-all">{value ?? "not recorded"}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      <div className="grid gap-1 text-sm">
         <h3 className="font-semibold">Providers</h3>
-        <p className="text-muted-foreground">Created held back: new projects get them only after you attach them.</p>
-        <ul className="grid list-disc gap-2 pl-5">
-          {p?.kubernetes ? <li><Link to={`/system/cloud-providers/${p.kubernetes}`} className="underline underline-offset-4">{installation.name} Kubernetes</Link></li> : null}
-          {p?.database ? <li><Link to={`/system/cloud-providers/${p.database}`} className="underline underline-offset-4">{installation.name} Databases</Link></li> : null}
+        <p className="text-muted-foreground">What the install registered for tenants. Both are created held back.</p>
+        <ul aria-label="Providers" className="grid list-disc gap-3 pl-5">
+          {p?.kubernetes ? <ProviderItem id={p.kubernetes} label={`${installation.name} Kubernetes`} kind="kubernetes" row={providers.find((s) => s.id === p.kubernetes)} /> : null}
+          {p?.database ? <ProviderItem id={p.database} label={`${installation.name} Databases`} kind="database" row={providers.find((s) => s.id === p.database)} /> : null}
           {!p?.kubernetes && !p?.database ? <li>No provider is recorded for this installation.</li> : null}
         </ul>
+      </div>
+
+      <div className="grid gap-1.5 text-sm">
+        <h3 className="font-semibold">Platform cluster access</h3>
+        <div><Button variant="outline" disabled={!canManage || download.isPending} onClick={() => download.mutate()}>{download.isPending ? "Asking the platform cluster…" : "Download platform kubeconfig"}</Button></div>
+        <p className="text-muted-foreground">
+          Works for one hour. With kubectl it reads the cluster, without its Secrets, and changes nothing; it also opens the cluster's
+          ArgoCD below, whose admin can change everything on the cluster. So keep the file like an admin credential. The download is
+          written to the audit log; the file is shown nowhere.
+        </p>
+        <ErrorNote title="No kubeconfig was issued" error={download.error} />
+      </div>
+
+      <div className="grid min-w-0 gap-2 text-sm">
+        <h3 className="font-semibold">Open ArgoCD</h3>
+        <p>
+          There are two, and this release gives neither an address. Each opens through a port-forward, from a machine with kubectl that reaches
+          the API address above. The first command prints the password of user <span className="font-mono">admin</span>; the second runs until you stop it.
+        </p>
+        <p>On the platform cluster, the ArgoCD that holds every tenant cluster and database. Use the platform kubeconfig, then open <span className="font-mono">http://localhost:8080</span>:</p>
+        <CopyBlock text={argoCommands(kubeconfigFile(installation, "platform"), 8080)} label="platform ArgoCD commands" />
+        <p>On the seed, the ArgoCD that holds the platform's own components. Use the seed kubeconfig from “Seed access and removal” below, then open <span className="font-mono">http://localhost:8081</span>:</p>
+        <CopyBlock text={argoCommands(kubeconfigFile(installation, "seed"), 8081)} label="seed ArgoCD commands" />
+        <p className="text-muted-foreground">
+          Look, and sync again what is out of sync. What you change by hand on a component, the next “Apply this release” writes back.
+        </p>
       </div>
 
       {expires ? (
@@ -436,20 +549,7 @@ function SeedAccess({ installation, canManage, active, locked, onRemove }: {
   installation: Installation; canManage: boolean; active: boolean; locked: boolean; onRemove: () => void
 }) {
   const qc = useQueryClient()
-  // The kubeconfig goes from the answer straight into a file: it is not kept in page state and never rendered.
-  const download = useMutation({
-    mutationFn: async () => {
-      const { kubeconfig, expiresAt } = await apiFetch<{ kubeconfig: string; expiresAt: string }>(`${base(installation.id)}/seed-kubeconfig`)
-      const url = URL.createObjectURL(new Blob([kubeconfig], { type: "application/yaml" }))
-      const a = document.createElement("a")
-      a.href = url
-      a.download = `${installation.name}-seed.kubeconfig`
-      a.click()
-      URL.revokeObjectURL(url)
-      return expiresAt
-    },
-    onSuccess: (expiresAt) => toast.success(`Downloaded. It works until ${fmtDateTime(expiresAt)}.`),
-  })
+  const download = useKubeconfig(installation, "seed")
   const rotate = useMutation({
     mutationFn: () => apiFetch(`${base(installation.id)}/seed-credential/rotate`, { method: "POST", body: {} }),
     onSuccess: () => {
@@ -524,11 +624,13 @@ export default function PlatformPage() {
   const held = phase === "applying" || phase === "removing"
   const active = run.data ? runActive(run.data) : held
   const locked = active || held
-  // The installation is read again once when its run ends, for the phase and the status the run left.
+  // The installation and the providers are read again once when its run ends, for the phase and the status the run left.
   const runEnded = !!run.data && !runActive(run.data)
   const runId = run.data?.id
   useEffect(() => {
-    if (runEnded) void qc.invalidateQueries({ queryKey: [...PLATFORM_KEY, "installations"] })
+    if (!runEnded) return
+    void qc.invalidateQueries({ queryKey: [...PLATFORM_KEY, "installations"] })
+    void qc.invalidateQueries({ queryKey: ["admin-list", "/admin/service"] }) // the run registered or disabled the two providers
   }, [qc, runEnded, runId])
 
   // Keyed on the last run: the API changes `rev` only when the settings are saved, never with a run.
@@ -542,7 +644,7 @@ export default function PlatformPage() {
   const liveState = phase === "ready" ? live.data?.live : undefined
 
   const start = useMutation({
-    mutationFn: (body: { kind: "apply" | "remove"; confirm?: string }) => apiFetch<{ runId: string }>(`${base(stored!.id)}/runs`, { method: "POST", body }),
+    mutationFn: (body: { kind: "apply" | "remove"; confirm?: string; targetBom?: string }) => apiFetch<{ runId: string }>(`${base(stored!.id)}/runs`, { method: "POST", body }),
     onSuccess: (r) => {
       setRemoving(false)
       setStarted(r.runId)
@@ -578,7 +680,7 @@ export default function PlatformPage() {
           <Alert><AlertTitle>You can read this page</AlertTitle><AlertDescription>Changing anything needs the permission admin:service:manage.</AlertDescription></Alert>
         ) : null}
         <p className="sr-only" role="status" aria-atomic="true">{announcement(run.data)}</p>
-        {ready && stored ? <Ready installation={stored} live={liveState} loading={live.isLoading} error={live.error} /> : null}
+        {ready && stored ? <Ready installation={stored} live={liveState} loading={live.isLoading} error={live.error} canManage={canManage} providers={services.data?.data ?? []} /> : null}
         {phase === "removed" && stored ? (
           <Section title={`Managed services “${stored.name}” were removed`} state="removed">
             <p className="text-sm">The two tokens are yours to end. Run this as root on one Proxmox node:</p>
@@ -599,7 +701,7 @@ export default function PlatformPage() {
               <>
                 <IdentitiesStep installation={stored} tokenId={provider?.config?.tokenId} canManage={canManage} />
                 <CheckStep installation={stored} canManage={canManage} dirty={dirty} />
-                <ReviewStep installation={stored} canManage={canManage} dirty={dirty} onInstall={apply} installing={start.isPending} error={showRun ? null : startError} />
+                <ReviewStep installation={stored} canManage={canManage} dirty={dirty} onInstall={apply} onUpgrade={(targetBom, confirm) => start.mutate({ kind: "apply", targetBom, confirm })} installing={start.isPending} error={showRun ? null : startError} />
               </>
             ) : (
               <p className="text-sm text-muted-foreground">Steps 2 to 4 (Proxmox identities, Check, Review and install) open once the settings are saved.</p>

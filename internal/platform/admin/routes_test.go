@@ -111,3 +111,16 @@ func TestKamajiClusterMachinesRoute(t *testing.T) {
 		t.Fatal("GET /admin/service/{id}/k8s-clusters/{clusterId}/machines route is not registered")
 	}
 }
+
+func TestKamajiWorkerFirewallRoutes(t *testing.T) {
+	router := chi.NewRouter()
+	(&Handler{}).Routes(router)
+	for _, m := range []string{http.MethodGet, http.MethodPost, http.MethodDelete} {
+		if !router.Match(chi.NewRouteContext(), m, "/admin/service/svc-1/k8s-clusters/pc-c-1/worker-firewall") {
+			t.Fatalf("%s /admin/service/{id}/k8s-clusters/{clusterId}/worker-firewall route is not registered", m)
+		}
+	}
+	if router.Match(chi.NewRouteContext(), http.MethodPut, "/admin/service/svc-1/k8s-clusters/pc-c-1/worker-firewall") {
+		t.Fatal("negative control matched")
+	}
+}

@@ -38,6 +38,9 @@ func (h *Handler) routeCloudAdmin(r chi.Router) {
 	r.Get("/service/{id}/k8s-clusters/{clusterId}/machines", h.kamajiClusterMachines)
 	r.Post("/service/{id}/k8s-clusters/{clusterId}/machines/{machine}/replace", h.kamajiClusterMachineReplace)
 	r.Post("/service/{id}/k8s-clusters/{clusterId}/csi-gateway", h.kamajiClusterCSIGateway)
+	r.Get("/service/{id}/k8s-clusters/{clusterId}/worker-firewall", h.kamajiClusterWorkerFirewall)
+	r.Post("/service/{id}/k8s-clusters/{clusterId}/worker-firewall", h.kamajiClusterWorkerFirewall)
+	r.Delete("/service/{id}/k8s-clusters/{clusterId}/worker-firewall", h.kamajiClusterWorkerFirewall)
 	// Dbaas chart-pin surface — same shape for managed databases.
 	r.Get("/service/{id}/db-clusters", h.dbaasClusterPins)
 	r.Post("/service/{id}/db-clusters/bump-chart", h.dbaasClusterBumpAll)
