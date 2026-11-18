@@ -8,11 +8,19 @@ Projects are meant to be shared. Anyone with the right permissions can invite a 
 2. In the invite area, type the teammate's **email address**.
 3. Click **Send invite**. ProxCloud mails them a personal invitation link.
 
+An invitation is valid for 24 hours. Until it is accepted it is listed under **Pending invitations** on the same page, with **Revoke**: a revoked invitation's link stops working, and you can invite the person again. A project owner or admin sees every pending invitation of the project; anyone else sees the ones they sent. Each pending invitation also has **Copy link**: if the email does not arrive, send the link yourself.
+
+### When your site sends no email
+
+Whether mail is set up is the operator's choice. On a site without it the Members page says so, and **Send invite** does not claim to have sent anything: the dialog shows the invitation link with **Copy link**, and the link stays available in **Pending invitations**. Send it to your teammate yourself. They can also do without the link: once they sign in with the invited email address, the invitation is waiting on their start page.
+
+The link alone does not let anyone into the project. Accepting needs an account with the invited email address, and that address must be verified. On a site without mail the sign-in service cannot send a verification mail either, so ask your operator to mark the address as verified if the invitation does not show up after sign-in.
+
 If the person is already part of your organization, skip the email round-trip: use **Add member** to attach an existing organization member straight to the current project. Pick the member, assign a role, and click **Add to project**.
 
 ## Accepting an invitation
 
-The invitation email carries a deep link into the portal (`/join-project?invite-token=…`). When the recipient opens it:
+The invitation email, or the link you copied, is a deep link into the portal (`/join-project?invite-token=…`). When the recipient opens it:
 
 1. They sign in — or register first if they don't yet have an account. Registration uses the exact email the invite went to.
 2. The portal presents the invitation with the project's name and two buttons: **Accept invite** or **Decline**.

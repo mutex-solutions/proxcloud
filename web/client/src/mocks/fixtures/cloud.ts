@@ -273,8 +273,8 @@ export function seedCloudResources(): CloudResource[] {
         name: "web-ingress",
         description: "HTTP/HTTPS from anywhere",
         security_group_rules: [
-          { id: "sgr-1", direction: "ingress", ethertype: "IPv4", protocol: "tcp", port_range_min: 80, port_range_max: 80, remote_ip_prefix: "0.0.0.0/0" },
-          { id: "sgr-2", direction: "ingress", ethertype: "IPv4", protocol: "tcp", port_range_min: 443, port_range_max: 443, remote_ip_prefix: "0.0.0.0/0" },
+          { id: "sgr-1", direction: "ingress", protocol: "tcp", port_range: "80", remote_ip_prefix: "0.0.0.0/0", description: "" },
+          { id: "sgr-2", direction: "ingress", protocol: "tcp", port_range: "443", remote_ip_prefix: "0.0.0.0/0", description: "HTTPS" },
         ],
       },
     }),

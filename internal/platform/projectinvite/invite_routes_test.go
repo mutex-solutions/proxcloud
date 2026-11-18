@@ -51,6 +51,8 @@ func TestRoutes_inviteCreate(t *testing.T) {
 		{http.MethodGet, "/project-invites/tok1"},
 		{http.MethodPost, "/project-invites/accept/tok1"},
 		{http.MethodPost, "/project-invites/decline/tok1"},
+		{http.MethodGet, "/project-invites/project/p1"},
+		{http.MethodDelete, "/project-invites/project/p1/inv1"},
 	} {
 		rctx := chi.NewRouteContext()
 		if !r.Match(rctx, tc.method, tc.path) {
@@ -83,5 +85,45 @@ func TestCallerEmail(t *testing.T) {
 	}
 	if invs, err := r.ByEmail(context.Background(), ""); invs != nil || err != nil {
 		t.Errorf("ByEmail(\"\") = %v, %v; want nil, nil", invs, err)
+	}
+}
+
+type stubMail struct{ configured bool }
+
+func (stubMail) SendTemplate(context.Context, string, []string, map[string]any) error { return nil }
+func (m stubMail) Configured(context.Context) bool                                    { return m.configured }
+
+type stubOutbox struct{ InviteOutbox }
+
+// mailConfigured words the console's answer ("sent" or "copy the link"). The durable outbox only queues (no
+// dispatcher sends from it), so with it on no mail leaves the site even when a gateway is set.
+func TestMailDelivers(t *testing.T) {
+	ctx := context.Background()
+	h := &Handler{}
+	if h.mailDelivers(ctx) {
+		t.Error("no notifier: nothing is sent")
+	}
+	h.notifier = stubMail{}
+	if h.mailDelivers(ctx) {
+		t.Error("no gateway: nothing is sent")
+	}
+	h.notifier = stubMail{configured: true}
+	if !h.mailDelivers(ctx) {
+		t.Error("a gateway and no outbox: the mail is sent")
+	}
+	h.SetInviteOutbox(stubOutbox{})
+	if h.mailDelivers(ctx) {
+		t.Error("the outbox only queues: nothing is sent")
+	}
+}
+
+// The link is in every answer, with a gateway or without: a gateway does not mean the mail arrived.
+func TestInviteViewAlwaysCarriesTheLink(t *testing.T) {
+	h := &Handler{uiBaseURL: "https://console.example.invalid"}
+	for _, mail := range []bool{false, true} {
+		v := h.inviteView(map[string]any{"_id": "i1", "email": "a@example.invalid", "token": "tok"}, mail)
+		if v["inviteUrl"] != "https://console.example.invalid/join-project?invite-token=tok" || v["mailConfigured"] != mail {
+			t.Errorf("mail=%v: %v", mail, v)
+		}
 	}
 }

@@ -40,8 +40,9 @@ type inviteCanceler interface {
 func (r *Repo) SetInviteCanceler(c inviteCanceler) { r.canceler = c }
 func (h *Handler) SetInviteOutbox(q InviteOutbox)  { h.outbox = q }
 
-func (h *Handler) createDurableInvite(ctx context.Context, email string, proj *project.Project) (string, error) {
+func (h *Handler) createDurableInvite(ctx context.Context, email, invitedBy string, proj *project.Project) (pgdoc.M, error) {
 	id, token := pgdoc.NewID(), uuid.NewString()
+	var doc pgdoc.M
 	err := h.repo.invites.DB().WithTx(ctx, func(tc context.Context) error {
 		db := h.repo.invites.DB()
 		tx, err := db.Tx(tc)
@@ -62,7 +63,7 @@ func (h *Handler) createDurableInvite(ctx context.Context, email string, proj *p
 			return err
 		}
 		expiry := now.Add(24 * time.Hour)
-		doc := pgdoc.M{"_id": id, "email": email, "projectId": proj.ID, "token": token, "date": now, "expiresAt": expiry}
+		doc = pgdoc.M{"_id": id, "email": email, "projectId": proj.ID, "token": token, "date": now, "expiresAt": expiry, "invitedBy": invitedBy}
 		if _, err = h.repo.invites.InsertOne(tc, doc); err != nil {
 			return errors.New("project invite persistence failed")
 		}
@@ -82,16 +83,17 @@ func (h *Handler) createDurableInvite(ctx context.Context, email string, proj *p
 		return nil
 	})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return id, nil
+	return doc, nil
 }
 
 // deleteInvites owns the delete+cancel transaction. A single bounded decision
 // advisory lock also covers inserts (including legacy ones), so ALL matching
 // rows at this decision are removed, not an arbitrary capped first page. Core
 // workers lock outbox only and never call back into invites: invite -> outbox.
-func (r *Repo) deleteInvites(ctx context.Context, email, projectID string, expiredOnly bool) error {
+// onlyID narrows an email+project delete to one row (a revoke); "" takes them all.
+func (r *Repo) deleteInvites(ctx context.Context, email, projectID, onlyID string, expiredOnly bool) error {
 	if err := pgdoc.RejectInheritedTransaction(ctx); err != nil {
 		return err
 	}
@@ -114,7 +116,7 @@ func (r *Repo) deleteInvites(ctx context.Context, email, projectID string, expir
 		for {
 			rows, err := tx.Query(tc, `SELECT id,doc FROM "projectInvite" WHERE id>$1
 			 AND (($4 AND pgdoc_ts(doc->>'expiresAt')<=clock_timestamp()) OR
-			 (NOT $4 AND doc->>'email'=$2 AND doc->>'projectId'=$3)) ORDER BY id LIMIT 128 FOR UPDATE`, after, email, projectID, expiredOnly)
+			 (NOT $4 AND doc->>'email'=$2 AND doc->>'projectId'=$3 AND ($5='' OR id=$5))) ORDER BY id LIMIT 128 FOR UPDATE`, after, email, projectID, expiredOnly, onlyID)
 			if err != nil {
 				return errors.New("project invite cleanup unavailable")
 			}

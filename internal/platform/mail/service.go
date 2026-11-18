@@ -43,6 +43,18 @@ func NewService(render RenderFunc, resolve Resolver, business string, log *slog.
 	return &Service{render: render, resolve: resolve, business: business, log: log}
 }
 
+// Configured reports whether a mail gateway is set, in the SMTP integration or the PROXCLOUD_MAIL_*
+// environment. Without one SendTemplate sends nothing and returns nil, so a caller that must tell
+// its user "no mail went out" asks here.
+func (s *Service) Configured(ctx context.Context) bool {
+	if s == nil || s.resolve == nil {
+		return false
+	}
+	mailer, _ := s.resolve(ctx)
+	_, noop := mailer.(NoopMailer)
+	return mailer != nil && !noop
+}
+
 // SendTemplate renders the template (key+vars), wraps it in the branded shell, and sends to the
 // recipients. No-op when the service/resolver is nil, no gateway is configured, or the template is
 // missing/disabled.

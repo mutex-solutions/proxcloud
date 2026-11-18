@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -154,6 +155,83 @@ func (s *Service) SGDeleteRule(ctx context.Context, projectID, groupID, ruleID s
 		return err
 	}
 	return sgRuleChanged()
+}
+
+// sameGroupRule: two rules say the same thing, wherever they sit in the group (every field SecurityGroupRuleID
+// fingerprints).
+func sameGroupRule(a, b FirewallRule) bool {
+	a.Pos, a.Digest, a.Enable = 0, "", 0
+	b.Pos, b.Digest, b.Enable = 0, "", 0
+	return a == b
+}
+
+// apiDPort is a destination port as the API writes one: none, "n" or "n:m".
+var apiDPort = regexp.MustCompile(`^(\d+(:\d+)?)?$`)
+
+// madeOutsideAPI: the rule says something a rule of the API cannot (the API writes ACCEPT rules with a protocol,
+// one port or range, and a remote on the far side). An operator made it in Proxmox, and an edit through the API
+// would drop that part: a DROP becomes an ACCEPT, "80,443" becomes every port.
+func madeOutsideAPI(r FirewallRule) bool {
+	wrongSide := (r.Type == "in" && r.Dest != "") || (r.Type == "out" && r.Source != "")
+	return (r.Type != "in" && r.Type != "out") || r.Action != "ACCEPT" || r.SPort != "" || r.Macro != "" ||
+		r.ICMPType != "" || wrongSide || !apiDPort.MatchString(r.DPort)
+}
+
+// SGReplaceRule puts r where the rule listed under ruleID is: the edit of a rule. PVE has no call that swaps a
+// group rule for another with a check on what it replaces, so this adds the new rule and then deletes the old one.
+// In that order there is no moment without either: deleting first would cut the traffic the rule allows, and
+// lose the rule if the add were refused. A group that changed between the two steps keeps both rules, and the
+// ConflictError says so.
+func (s *Service) SGReplaceRule(ctx context.Context, projectID, groupID, ruleID string, r FirewallRule) error {
+	g, err := s.ownedGroup(ctx, projectID, groupID)
+	if err != nil {
+		return err
+	}
+	if g == nil {
+		return fmt.Errorf("pve: group %s not found", groupID)
+	}
+	rules, err := s.C.ListFirewallRules(ctx, groupID)
+	if err != nil {
+		return err
+	}
+	var old *FirewallRule
+	for i := range rules {
+		if SecurityGroupRuleID(groupID, rules[i]) == ruleID {
+			old = &rules[i]
+		}
+	}
+	if old == nil {
+		return sgRuleChanged()
+	}
+	if madeOutsideAPI(*old) {
+		return &ConflictError{Msg: "This rule was made outside ProxCloud and holds settings an edit here would lose. Delete it and add a new rule instead"}
+	}
+	if sameGroupRule(*old, r) {
+		return nil
+	}
+	if err := s.C.AddFirewallRule(ctx, groupID, r); err != nil {
+		return err
+	}
+	kept := func(why string) error {
+		return &ConflictError{Msg: "The new rule was added, but the old one is still there: " + why + ". Refresh the list and delete the old rule"}
+	}
+	// The add moved the old rule, and its digest is of the list before the add: read again.
+	if rules, err = s.C.ListFirewallRules(ctx, groupID); err != nil {
+		return kept("the old rule could not be removed")
+	}
+	for _, cur := range rules {
+		if !sameGroupRule(cur, *old) {
+			continue
+		}
+		if err := s.C.DeleteFirewallRule(ctx, groupID, cur.Pos, cur.Digest); err != nil {
+			if strings.Contains(err.Error(), "detected modified configuration") {
+				break
+			}
+			return kept("the old rule could not be removed")
+		}
+		return nil
+	}
+	return kept("the rules of this security group changed meanwhile")
 }
 
 // AttachSecurityGroup references an owned group from a pool VM's firewall and

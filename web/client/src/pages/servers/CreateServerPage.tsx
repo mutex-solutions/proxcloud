@@ -23,7 +23,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { apiFetch, type CloudScope } from "@/lib/api"
 import {
   useCloudList, useFlavorCategories, useImageGroups, useLocations, useProject, useProjectGpuCapacity, useProjectId,
-  useProjectQuota, useUIMenu,
+  useProjectQuota, usePublicNetworks, useUIMenu,
 } from "@/lib/hooks"
 import type { FlavorCategory, ImageGrouping } from "@/lib/hooks"
 import { projectImages as ownProjectImages } from "./serverFields"
@@ -160,6 +160,9 @@ export default function CreateServerPage() {
   const init = useUIMenu(pid)
   const features = new Set(scope ? (init.data?.features?.[scope.serviceId] ?? []) : [])
   const userDataSupported = features.has("userData")
+  // No public network for this project: nothing outside its networks can open SSH to the server, so a key pair
+  // alone leaves no way in from the user's own machine. Unknown while loading: say nothing then.
+  const noPublicNetwork = usePublicNetworks(pid, scope).data?.length === 0
 
   const images = useBulkAction<TemplateImage>(pid, scope, "PUBLIC_IMAGES")
   const flavors = useBulkAction<Flavor>(pid, scope, "LIST_FLAVORS")
@@ -911,6 +914,19 @@ export default function CreateServerPage() {
                 )}
               </div>
 
+              {noPublicNetwork && (
+                <Alert data-testid="no-public-network">
+                  <CircleAlert aria-hidden="true" />
+                  <AlertTitle>This site gives this project no public network</AlertTitle>
+                  <AlertDescription>
+                    {loginMethod === "key"
+                      ? "Nothing outside your project's networks can open SSH to this server, so a key pair alone only lets you in from another server on the same network. To log in from your browser, choose Password here, or after the server is created use More actions → Set password and then Console (the Serial tab)."
+                      : "Nothing outside your project's networks can open SSH to this server. Log in with this password in Console (the Serial tab), or over SSH from another server on the same network."}{" "}
+                    A public address needs a public network, which your operator adds.
+                  </AlertDescription>
+                </Alert>
+              )}
+
               {userDataSupported && (
                 <div className="grid gap-2">
                   <Label htmlFor="user-data">User data (cloud-init, optional)</Label>
@@ -990,6 +1006,12 @@ export default function CreateServerPage() {
 
               <div className="grid gap-2">
                 <Label>Security groups</Label>
+                <p className="text-xs text-muted-foreground" data-testid="default-group-hint">
+                  A security group is the server's firewall for inbound traffic. With none ticked, the group{" "}
+                  <span className="font-mono">default</span> applies: unless you changed it, it allows traffic only from
+                  this project's own networks, so nothing from outside reaches the server until a group allows it (for
+                  example TCP 22 for SSH).
+                </p>
                 {secgroups.isLoading ? (
                   <Skeleton className="h-9" />
                 ) : !secgroups.data?.length ? (
