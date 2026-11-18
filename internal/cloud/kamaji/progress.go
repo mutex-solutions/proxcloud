@@ -71,6 +71,7 @@ const (
 
 // MachineState is one machine's place in the build.
 type MachineState struct {
+	Name      string // the Machine's name, "" for a machine that is not made yet
 	Code      string
 	Rank      int
 	Immediate bool      // needs attention now: CAPMOX gave up, no capacity, a refused token
@@ -137,7 +138,7 @@ func machineFailure(m map[string]any) string {
 // match wins; a message only ever selects a code.
 func classifyMachine(m, pm map[string]any, cpReady bool) MachineState {
 	phase := digStr(m, "status", "phase")
-	st := MachineState{Rank: rankPending, Since: latest(parseTime(digStr(m, "metadata", "creationTimestamp")), parseTime(digStr(m, "status", "lastUpdated")))}
+	st := MachineState{Name: digStr(m, "metadata", "name"), Rank: rankPending, Since: latest(parseTime(digStr(m, "metadata", "creationTimestamp")), parseTime(digStr(m, "status", "lastUpdated")))}
 	switch phase {
 	case phaseProvisioning:
 		st.Rank = rankProvisioning
@@ -230,6 +231,9 @@ func mdUnsettled(md map[string]any) bool {
 	return ok && upToDate != want
 }
 
+// progressMachineNames caps machineNames of one progress entry.
+const progressMachineNames = 5
+
 // groupProgress is one node group's progress entry, nil when the group is settled. states are its non-deleting
 // machines, mds its MachineDeployments, desired its count in the values, appSyncedAt when ArgoCD last finished a sync
 // (the clock of machines not made yet), provisioning the cluster's machines in Provisioning.
@@ -285,12 +289,21 @@ func groupProgress(states []MachineState, mds []map[string]any, desired int, app
 		return nil
 	}
 	n := 0
+	// The machines a tenant can replace from this line: the ones that need attention. The instance list cannot be the
+	// only place, it is built from the project's synced servers and a worker that never joined may not be among them.
+	names := []string{}
 	for _, st := range states {
 		if !st.ready() && st.Code == worst.Code {
 			n++
 		}
+		if st.Name != "" && len(names) < progressMachineNames && st.stalled(provisioning, now) {
+			names = append(names, st.Name)
+		}
 	}
 	out := map[string]any{"code": worst.Code, "machines": n, "attention": worst.stalled(provisioning, now)}
+	if len(names) > 0 {
+		out["machineNames"] = names
+	}
 	if !worst.Since.IsZero() {
 		out["since"] = worst.Since.UTC().Format(time.RFC3339)
 	}

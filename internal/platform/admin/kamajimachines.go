@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
@@ -37,13 +38,17 @@ const (
 // joinSecrets are the credentials a failed join can print: the bootstrap token (it lets a machine join the cluster
 // for as long as it is valid), the hash of the cluster CA that goes with it, a certificate key, a service account or
 // bootstrap JWT. Order matters: the flag and key forms take the whole value before the bare forms see its parts.
+// A join log should hold no key material, but the text comes from a guest: a PEM block (to its end, or to the end of
+// the text), the *-data keys of a kubeconfig, and any run of base64 as long as one PEM line go too.
 var joinSecrets = []*regexp.Regexp{
+	regexp.MustCompile(`(?s)()-----BEGIN [A-Z0-9 ]+-----.*?(?:-----END [A-Z0-9 ]+-----|\z)`),
 	regexp.MustCompile(`(?i)(--(?:token|tls-bootstrap-token|discovery-token|discovery-token-ca-cert-hash|certificate-key)[= ]+)\S+`),
-	regexp.MustCompile(`(?i)((?:token|tlsBootstrapToken|caCertHashes|certificateKey|certificate-key|password|passwd|secret)"?\s*[:=]\s*(?:-\s*)?"?)[^\s",]+`),
+	regexp.MustCompile(`(?i)((?:token|tlsBootstrapToken|caCertHashes|certificateKey|certificate-key|password|passwd|secret|[a-z-]+-data)"?\s*[:=]\s*(?:-\s*)?"?)[^\s",]+`),
 	regexp.MustCompile(`()\b[a-z0-9]{6}\.[a-z0-9]{16}\b`),
 	regexp.MustCompile(`()\bsha256:[A-Fa-f0-9]{64}\b`),
 	regexp.MustCompile(`()\b[A-Fa-f0-9]{32,}\b`),
 	regexp.MustCompile(`()\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`),
+	regexp.MustCompile(`()[A-Za-z0-9+/]{64,}={0,2}`),
 }
 
 // maskJoinText takes the credentials out of a text read from a worker: the kubeadm forms above, then what every
@@ -75,10 +80,15 @@ func joinError(ctx context.Context, read func(ctx context.Context, path string) 
 	log, logErr := read(ctx, cloudInitOutputPath)
 	if logErr == nil {
 		if len(log) > joinLogTailBytes {
+			// The first line (or, in a log of one line, the first word) is cut in two: a half token would not match the
+			// masks, and half a rune is not text.
 			log = log[len(log)-joinLogTailBytes:]
 			if i := strings.IndexByte(log, '\n'); i >= 0 {
-				log = log[i+1:] // the first line is cut in two: a half token would not match the masks
+				log = log[i+1:]
+			} else {
+				log = log[strings.IndexAny(log, " \t")+1:]
 			}
+			log = strings.ToValidUTF8(log, "")
 		}
 		lines := strings.Split(strings.TrimRight(maskJoinText(log), "\n"), "\n")
 		if len(lines) > joinLogTailLines {
@@ -168,6 +178,13 @@ func (h *Handler) kamajiClusterMachineReplace(w http.ResponseWriter, r *http.Req
 		return
 	}
 	err := ks.ReplaceMachine(r.Context(), chi.URLParam(r, "clusterId"), chi.URLParam(r, "machine"), body.Confirm)
+	var ae *kamajik8s.APIError
+	if errors.As(err, &ae) && ae.Status == http.StatusForbidden {
+		// An install older than this action. The caller is the operator: say what to apply (the tenant's route says
+		// "contact the operator").
+		err = httpx.NewError(http.StatusBadGateway, http.StatusBadGateway,
+			"The ProxCloud service account cannot delete Machines: re-apply deploy/mgmt-cluster/rbac.yaml, or update the managed-services platform to the proxcloud-platform chart 0.1.3 or later")
+	}
 	if writeClusterErr(w, kamaji.ReplaceMachineError(err)) {
 		return
 	}

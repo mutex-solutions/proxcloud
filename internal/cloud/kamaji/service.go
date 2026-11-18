@@ -583,6 +583,17 @@ func (s *Service) PatchClusterApp(ctx context.Context, clusterID string, mutate 
 	if err := mutate(app); err != nil {
 		return err
 	}
+	// The provider's repair setting is the cluster's, at every change: a cluster that arrives on a chart with the
+	// MachineHealthCheck gets it, and a provider that changes the timeout or turns the repair off (0) reaches the
+	// clusters that already carry a block. A chart that does not read the block is left as it is.
+	if values, _ := dig(app, "spec", "source", "helm", "valuesObject").(map[string]any); values != nil &&
+		ChartHasMachineHealthCheck(digStr(app, "spec", "source", "targetRevision")) {
+		if mhc := s.cfg.Defaults.MachineHealthCheckValues(digStr(app, "spec", "source", "targetRevision")); mhc != nil {
+			values["machineHealthCheck"] = mhc
+		} else {
+			delete(values, "machineHealthCheck")
+		}
+	}
 	// Re-apply the WHOLE spec plus the metadata proxcloud stamped at create — NOT a partial patch.
 	// The Application was created via server-side apply by this same field manager, so a partial
 	// apply is an ownership retraction: every owned field absent from the patch is REMOVED, and
@@ -701,13 +712,6 @@ func (s *Service) SetChartVersion(ctx context.Context, clusterID, version string
 			return err
 		}
 		src["targetRevision"] = version
-		// A cluster that arrives on a chart with the MachineHealthCheck gets the provider's repair setting, unless
-		// its values already carry one. It acts at once on a machine that is already past the timeout.
-		if values, _ := dig(src, "helm", "valuesObject").(map[string]any); values != nil && values["machineHealthCheck"] == nil {
-			if mhc := s.cfg.Defaults.MachineHealthCheckValues(version); mhc != nil {
-				values["machineHealthCheck"] = mhc
-			}
-		}
 		return nil
 	})
 }

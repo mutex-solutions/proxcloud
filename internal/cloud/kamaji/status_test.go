@@ -423,10 +423,26 @@ func TestStuckMachinesKeepAttentionBesideAHealthyOne(t *testing.T) {
 		if p["code"] != CodeNotJoined || p["machines"] != 2 || p["attention"] != true || p["since"] != ago(209) {
 			t.Errorf("sibling %s: %v", name, p)
 		}
+		// The names of the machines that need attention, and only those: what the tenant's Replace is offered on when
+		// the instance list has no row for them (production: the workers that never joined were never in it).
+		if fmt.Sprint(p["machineNames"]) != "[a b]" {
+			t.Errorf("sibling %s: machineNames %v", name, p["machineNames"])
+		}
+	}
+	many := []MachineState{}
+	for i := 0; i < progressMachineNames+2; i++ {
+		many = append(many, stuck(fmt.Sprint("m", i)))
+	}
+	if p := groupProgress(many, mds, len(many), time.Time{}, 0, progressNow); len(p["machineNames"].([]string)) != progressMachineNames {
+		t.Errorf("machineNames is not capped: %v", p["machineNames"])
+	}
+	// A machine that is not made yet has no name to replace.
+	if p := groupProgress(nil, mds, 2, progressNow.Add(-3*time.Hour), 0, progressNow); p["attention"] != true || p["machineNames"] != nil {
+		t.Errorf("no machine made: %v", p)
 	}
 	// Nothing stalled: the least advanced machine speaks, as before.
 	p := groupProgress([]MachineState{fresh("Provisioned"), fresh("Provisioning")}, mds, 2, time.Time{}, 1, progressNow)
-	if p["code"] != CodeCreatingVM && p["code"] != CodeProvisioning || p["attention"] != false {
+	if p["code"] != CodeCreatingVM && p["code"] != CodeProvisioning || p["attention"] != false || p["machineNames"] != nil {
 		t.Errorf("two machines on their way: %v", p)
 	}
 }
@@ -449,7 +465,8 @@ func TestReplaceMachine(t *testing.T) {
 		return machine(cluster, group, name, "Running", 60, condition("NodeReady", "True", "NodeReady", 60))
 	}
 	stuck := machine("pc-c-1", "workers", "stuck", "Provisioned", 200)
-	deleting := machine("pc-c-1", "workers", "leaving", "Deleting", 1)
+	// Ready in every field but on its way out: only its deletionTimestamp says it will not hold the group's pods.
+	deleting := readyM("pc-c-1", "workers", "leaving")
 	deleting["metadata"].(map[string]any)["deletionTimestamp"] = ago(1)
 	controlPlane := machine("pc-c-1", "", "cp-0", "Running", 60)
 	api, svc := replaceSetup(t, stuck, readyM("pc-c-1", "workers", "only-ready"), deleting, controlPlane,
@@ -522,7 +539,7 @@ func TestClusterMachinesHealthChecks(t *testing.T) {
 }
 
 // The machineHealthCheck block is written only for a chart that reads it, at create and when a cluster is moved onto
-// such a chart; a provider can turn it off, and a block a cluster already has is kept.
+// such a chart; after that it follows the provider's setting at every change of the cluster.
 func TestMachineHealthCheckValues(t *testing.T) {
 	cfg := testCfg()
 	cfg.Defaults.NodeStartupTimeoutSeconds = 1800
@@ -564,10 +581,20 @@ func TestMachineHealthCheckValues(t *testing.T) {
 	if want := map[string]any{"nodeStartupTimeoutSeconds": 1800, "maxUnhealthy": 2}; fmt.Sprint(values()) != fmt.Sprint(want) {
 		t.Errorf("bumped: %v, want %v", values(), want)
 	}
-	// The cluster's own block survives a later bump under another provider setting.
-	cfg.Defaults.NodeStartupTimeoutSeconds = 600
-	if err := NewWithAPI(api, cfg, "svc-1").SetChartVersion(ctx, spec.ID, "0.1.15"); err != nil || fmt.Sprint(values()) != fmt.Sprint(map[string]any{"nodeStartupTimeoutSeconds": 1800, "maxUnhealthy": 2}) {
-		t.Errorf("second bump: %v, %v", err, values())
+	// The provider's setting is the cluster's: a new timeout reaches a cluster that already has the block, at a bump
+	// onto the version it is on and at any other change of the cluster, and 0 takes the block away.
+	cfg.Defaults.NodeStartupTimeoutSeconds = 3600
+	if err := NewWithAPI(api, cfg, "svc-1").SetChartVersion(ctx, spec.ID, "0.1.14"); err != nil || fmt.Sprint(values()) != fmt.Sprint(map[string]any{"nodeStartupTimeoutSeconds": 3600, "maxUnhealthy": 2}) {
+		t.Errorf("same-version bump under a new timeout: %v, %v", err, values())
+	}
+	cfg.Defaults.NodeStartupTimeoutSeconds = 0
+	if err := NewWithAPI(api, cfg, "svc-1").PatchClusterValues(ctx, spec.ID, func(map[string]any) error { return nil }); err != nil || values() != nil {
+		t.Errorf("turned off, after a values patch: %v, %v", err, values())
+	}
+	// A chart that does not read the block: what the values carry is not touched.
+	api.apps["argocd/"+spec.ID]["spec"].(map[string]any)["source"].(map[string]any)["helm"].(map[string]any)["valuesObject"].(map[string]any)["machineHealthCheck"] = "kept"
+	if err := NewWithAPI(api, cfg, "svc-1").SetChartVersion(ctx, spec.ID, "0.1.13"); err != nil || values() != "kept" {
+		t.Errorf("chart 0.1.13: %v, %v", err, values())
 	}
 }
 

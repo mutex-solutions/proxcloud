@@ -24,6 +24,12 @@ const joinLog = `Cloud-init v. 25.1 running 'modules:final'
 certificateKey: 9f8e7d6c5b4a39281f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988
 Authorization: Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6IngifQ.eyJpc3MiOiJrdWJlcm5ldGVzIn0.c2lnbmF0dXJl
 PVEAPIToken=capmox@pve!pc-c-1=11111111-2222-3333-4444-555555555555
+client-key-data: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQpNSUlFcEFJQkFBS0NBUUVB
+-----BEGIN RSA PRIVATE KEY-----
+MIIEpAIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun
+shortlastline0gun==
+-----END RSA PRIVATE KEY-----
+MIIEpAIBAAKCAQEAxyzTAILofAKeyWhoseBEGINlineWasCutOffAbove0123456
 [preflight] Running pre-flight checks
 error execution phase preflight: couldn't validate the identity of the API Server: Get "https://192.168.140.101:6443/api/v1/namespaces/kube-public/configmaps/cluster-info?timeout=10s": dial tcp 192.168.140.101:6443: i/o timeout
 To see the stack trace of this error execute with --v=5 or higher
@@ -32,7 +38,8 @@ To see the stack trace of this error execute with --v=5 or higher
 func TestMaskJoinText(t *testing.T) {
 	got := maskJoinText(joinLog)
 	for _, secret := range []string{"abcdef.0123456789abcdef", "ghijkl.0123456789abcdef", "1f2e3d4c5b6a7988", "9f8e7d6c5b4a3928",
-		"eyJhbGciOiJSUzI1NiIsImtpZCI6IngifQ", "c2lnbmF0dXJl", "11111111-2222-3333-4444-555555555555"} {
+		"eyJhbGciOiJSUzI1NiIsImtpZCI6IngifQ", "c2lnbmF0dXJl", "11111111-2222-3333-4444-555555555555",
+		"LS0tLS1CRUdJTiBSU0Eg", "MIIEpAIBAAKCAQEAu1SU", "shortlastline0gun", "PRIVATE KEY", "MIIEpAIBAAKCAQEAxyzT"} {
 		if strings.Contains(got, secret) {
 			t.Errorf("%q survived the mask:\n%s", secret, got)
 		}
@@ -69,6 +76,11 @@ func TestJoinError(t *testing.T) {
 	}
 	if !strings.Contains(je.LogTail, "i/o timeout") || strings.Contains(je.LogTail, "abcdef.0123456789abcdef") || strings.Contains(je.LogTail, "1f2e3d4c") {
 		t.Errorf("tail:\n%s", je.LogTail)
+	}
+	// A log of one long line: the cut does not leave half a word (it could be half a token) or half a rune.
+	oneLine := "token abcdef." + strings.Repeat("é", joinLogTailBytes) + " then the error"
+	if je := joinError(ctx, files(map[string]string{cloudInitOutputPath: oneLine}, gone)); je.LogTail != "then the error" {
+		t.Errorf("one long line: %q", je.LogTail)
 	}
 	// The log alone is an answer.
 	if je := joinError(ctx, files(map[string]string{cloudInitOutputPath: "kubeadm: i/o timeout\n"}, gone)); je.ReadError != "" || je.LogTail != "kubeadm: i/o timeout" || len(je.Errors) != 0 {
