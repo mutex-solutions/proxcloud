@@ -43,13 +43,15 @@ The action refuses, and changes nothing, when the datacenter firewall is off or 
 
 What it does not check: traffic between pods on different nodes, and LoadBalancer Services. Look at a workload afterwards.
 
-**Remove the worker firewall** switches the firewall off on every worker and deletes the group.
+**Remove the worker firewall** switches the firewall off on every worker and deletes the group. It refuses, and changes nothing, while a worker VM is on a Proxmox node that is down: try again when the node is back or the worker has been replaced.
+
+If Protect is cut short (the page shows an error after a minute because a proxy gave up, or the API restarted), open **Firewall** again to see the state. A firewall that stayed on without the check is not taken off by anything: look at the cluster's nodes, and use **Remove the worker firewall** if one is not Ready.
 
 Things to know:
 
 - **A new or replaced worker is open until the next provider sync**, up to 15 minutes. The sync brings every running worker of a protected cluster behind the firewall. Start a sync by hand to close the gap at once.
 - **New clusters** are protected from their creation only with `config.cluster.workerFirewall: true` on the Kubernetes provider (API only, off by default). Existing clusters are never changed by an upgrade or by the sync.
-- **Tenants cannot attach their own security group to a worker**, detach the cluster's, delete it, or create a group whose name starts with `k8s-`.
+- **Tenants cannot attach their own security group to a worker**, detach the cluster's, delete it, attach it to a server, or create a group whose name starts with `k8s-`. A group a tenant named `k8s-…` before 0.9.0 stays theirs unless the rest of the name is the id of one of their clusters.
 - Not offered with shared workers.
 
 The full table, the reasoning and the lab tests still owed are in `docs/managed-k8s.md`, "Worker firewall".

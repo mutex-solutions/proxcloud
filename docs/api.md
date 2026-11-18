@@ -289,7 +289,10 @@ field is left out. Without a provider default a group without it answers `400`, 
 workers ([managed-k8s.md](managed-k8s.md#worker-firewall); not verified on a lab). `GET` (`admin:service:read`) reports
 and writes nothing; `POST` protects the workers and answers after it has watched the nodes, up to a minute, or `409`
 with the reason when it refused or took the firewall off again; `DELETE` removes the firewall and the cluster's
-security group (both need the provider manage permission).
+security group, or answers `409` and changes nothing when a worker is on a node that is down or another server uses
+the group (both need the provider manage permission). A `POST` cut short by a proxy timeout goes on to its end: read
+the state with `GET`. `verified` is true only in the answer of the `POST` that put the firewall on and watched the
+nodes; it is false on every `GET` and on a `POST` to a cluster that was already protected.
 
 ```json
 {"clusterId": "pc-c-0a1b2c3d", "protected": true, "group": "g1a2b3c4", "groupName": "k8s-pc-c-0a1b2c3d", "enforced": true,

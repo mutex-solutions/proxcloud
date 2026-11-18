@@ -741,10 +741,23 @@ With it a worker gets what a server gets (`pve/firewallsvc.go` `SecureVM`), adap
 **The cluster's security group.** One ordinary security group of the project per cluster, display name
 `k8s-<clusterId>`, made by the portal. It is also the switch: a cluster whose group exists is protected. Tenants see
 it under Network → Security groups and on the cluster page, and may change its rules; removing a rule the cluster
-needs breaks the cluster. A group that exists is never rewritten. Tenants cannot create a group whose name starts
-with `k8s-` (400), cannot delete one (409; it goes with the cluster), and cannot attach a group to a worker row or
-detach one from it (409 *This server is a worker node of a Kubernetes cluster…*): another group would open the
-worker, or stay behind on a VM that CAPMOX replaces.
+needs breaks the cluster. A group that exists is never rewritten. What a tenant cannot do with it:
+
+- create a group whose name starts with `k8s-` (400);
+- delete the group of a cluster the project has (409; it goes with the cluster);
+- attach a group named `k8s-…` to a server, by the attach action or at create (409): the cluster's release and
+  **Remove the worker firewall** delete the group, and the server would lose those openings;
+- attach any group to a worker row, or detach the cluster's group from it (409 *This server is a worker node of a
+  Kubernetes cluster…*): another group would open the worker, or stay behind on a VM that CAPMOX replaces.
+
+**A group named `k8s-…` from before 0.9.0.** The names were free in 0.8.x. Such a group is a cluster's only when the
+rest of its name is the id of a Kubernetes cluster the same project has; the sync and the delete refusal look at
+nothing else. So a tenant's `k8s-ingress` switches nothing on, keeps its rules and its servers, can be detached and
+deleted, and can no longer be attached to another server (the 409 above goes by the name alone). A group a tenant
+attached to a worker row under 0.8.x can be detached from it. If a tenant's old group has exactly the name
+`k8s-<id of one of their clusters>`, it is that cluster's group: the first sync after the upgrade puts the firewall
+on that cluster's workers with the tenant's rules. A cluster id ends in eight random hex digits, so this needs a
+tenant who named a group after their cluster on purpose; look for such groups before the upgrade if in doubt.
 
 What the group holds when it is made. Every rule is an inbound ACCEPT. "Workers" is the cluster's 16 reserved worker
 addresses as the fewest CIDRs; "pool" is the Proxmox provider's `network.cidrPool`, of which the isolation rules
@@ -779,7 +792,8 @@ MetalLB layer 2 makes whichever worker holds a Service answer ARP for that Servi
 MetalLB addresses must be in every worker's set, or LoadBalancer Services stop answering.** They are: the set is the
 cluster's whole reservation (`k8s:<clusterId>` in the address store), 16 worker addresses and 8 MetalLB addresses. So
 a worker can send as another worker of its own cluster, or as one of its MetalLB addresses, and as nothing else on
-the vnet. It is not pinned to its own /32 as a server is: the portal does not hand a worker its address (CAPMOX's
+the vnet (one exception: a tenant who attaches a public network to a worker row has `ipfilter-net0` rewritten by that
+action, `cloud_network_pve.go`, until the next sync puts the cluster's set back). It is not pinned to its own /32 as a server is: the portal does not hand a worker its address (CAPMOX's
 address pool does), and the Node object, which names it, is the tenant's to write. Pod traffic is not affected: with
 VXLAN the outer source is the node address and traffic leaving the cluster is masqueraded to it.
 
@@ -789,7 +803,8 @@ NIC string takes model, bridge, MAC, MTU and VLAN tag and has no `firewall` para
 So the chart cannot ask for it and no chart change is part of this. The portal writes it after the clone, as it does for sandbox workers:
 
 1. The provider sync (every 15 minutes, `syncjob` → `project.ReconcileWorkerFirewalls`) looks for security groups
-   named `k8s-<clusterId>` and, for each, at the project pool's VMs tagged `pc-k8s-<clusterId>`.
+   named `k8s-<clusterId>` whose project has that cluster and, for each, at the project pool's VMs tagged
+   `pc-k8s-<clusterId>`.
 2. A worker that is **running** is brought in: IP filter set, group reference, options, and last `firewall=1` on the
    NIC. Until that flag is on PVE applies none of the rest, so a running worker is never filtered by half a firewall.
    A worker that is not running yet is left for the next pass, because CAPMOX rewrites `net0` until the first start.
@@ -825,13 +840,34 @@ Protect does this, in order:
 4. If a write failed or a Lease did not move, it switches the VM firewall off on every worker (`enable=0`, which
    stops all filtering), deletes the group and answers 409 with what happened. The request takes up to a minute.
 
+**A Protect that is cut short.** The request runs for 55 seconds plus the Proxmox calls. A proxy in front of the API
+with a shorter timeout (60 seconds is a common default) answers an error while the action goes on to its end: open
+the dialog again, or `GET` the state, to see how it ended. If the API process itself stops during the watch, nothing
+finishes it: the group and the firewall stay, unverified, and no later sync or Protect takes them off (a second
+Protect sees a protected cluster and never goes back). The same holds when the way back in step 4 failed; the 409
+says so. In both cases look at the nodes, and use **Remove the worker firewall** if one is not Ready.
+
+Protect, Remove and the sync's pass run one at a time (a lock in the API process), so a sync cannot write on a worker
+while a Protect is going back. With more than one API replica that lock does not reach the other replicas; the
+Docker Compose install runs one.
+
+**Remove** switches the VM firewall off on every worker (`enable=0`), takes the group reference off each and deletes
+the group. It refuses with 409, having written nothing, when a worker VM is on a Proxmox node that is down (its
+firewall cannot be written, and it would come back dropping everything with a reference to a group that is gone:
+remove the firewall when the node is back or the worker has been replaced), and when another server of the project
+references the group (possible only for a group from before 0.9.0; detach it there first). A write that fails
+part-way leaves the group, so the cluster stays protected and the next sync puts the firewall back on every worker:
+run Remove again.
+
 What the watch proves and what it does not: it proves each worker still reaches its API server with its own address
 through the filter, which is what keeps a Node Ready. It does not prove traffic between pods on different nodes or to
 LoadBalancer addresses; check a workload after protecting, and use **Remove the worker firewall** if something is
 wrong. On a cluster that is already protected, Protect only brings in workers that are not yet behind the firewall
 and never takes the firewall off the others.
 
-**Delete.** The cluster's release deletes the group after the workers are gone.
+**Delete.** The cluster's release deletes the group after the workers are gone. A group that a server of the project
+still references is left to the tenant as an ordinary group. A group delete that Proxmox refuses does not hold back
+the cluster's token and addresses: those are released, and the release is run again for the group.
 
 **Lab tests owed** (two or more nodes, PVE 9.2 with `proxmox-firewall`; none was run):
 
@@ -848,6 +884,9 @@ and never takes the firewall off the others.
 8. Does CAPMOX keep `firewall=1` on `net0` over its own reconciles of a running machine, and how long does the
    node's firewall take to pick up a new VM firewall (the 15 seconds above are a guess)?
 9. Remove: traffic that was dropped passes again at once.
+10. What PVE answers to the delete of a security group that a VM's firewall still references, and what
+    `proxmox-firewall` does with a reference to a group that is gone. The code avoids both (it refuses the attach and
+    checks before it deletes); the answer says how bad a miss would be.
 
 **A create that fails.** Quota is checked first, so a create over it takes nothing. The marker secret is written before the create takes anything else. A failure releases the addresses, tokens and dataset at once, and if that release fails too (NAS or PVE down), the marker stays and the sweep retries it after the grace window. A release only reaches the NAS named by the cluster's share row, so a broken NAS holding nothing of the cluster blocks nothing. The exception is a cluster on a shared worker pool: its addresses are on every export of the project, so they stay reserved until the NAS takes them off.
 

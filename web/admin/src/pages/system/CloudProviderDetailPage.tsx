@@ -552,7 +552,10 @@ function WorkerFirewallDialog({ serviceId, cluster, onClose }: { serviceId: stri
             </Table>
             <div className="flex flex-wrap items-center justify-end gap-2">
               {change.isPending && (
-                <span className="mr-auto text-sm text-muted-foreground">Working. Protect watches the nodes for up to a minute before it answers.</span>
+                <span className="mr-auto text-sm text-muted-foreground">
+                  Working. Protect watches the nodes for up to a minute before it answers. If this ends in a timeout, open Firewall
+                  again: a firewall left on without the check stays on, and Remove the worker firewall takes it off.
+                </span>
               )}
               {fw.protected && (
                 <Button size="sm" variant="outline" onClick={() => change.mutate("DELETE")} disabled={change.isPending}>

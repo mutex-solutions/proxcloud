@@ -48,7 +48,7 @@ With it, inbound traffic to a node is dropped unless a rule of that group allows
 
 - The rules are yours to change. Add one when something outside the cluster must reach a port on a node directly, for example a `hostNetwork` service. Removing one of the rules the cluster started with can break the cluster.
 - The kubelet port of a node is not reachable from your other servers.
-- You cannot attach another security group to a node, detach or delete this one, or create a group whose name starts with `k8s-`. The group is deleted with the cluster.
+- You cannot attach another security group to a node, detach or delete this one, attach it to a server, or create a group whose name starts with `k8s-`. The group is deleted with the cluster.
 - A node that was just added or replaced gets the firewall within about 15 minutes.
 
 A cluster page without that line has no firewall around its nodes: every port of a node is reachable from your project's own networks, and from nowhere else.
