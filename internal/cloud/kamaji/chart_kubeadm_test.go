@@ -282,3 +282,71 @@ func TestChartKubeadmVLAN(t *testing.T) {
 		}
 	}
 }
+
+// controlPlane.kubeadm.replicas (chart 0.1.14) is the KubeadmControlPlane's replica count, 1 or 3, with one machine
+// template on one node. The count is not in the template's name, so 1 to 3 adds machines and replaces none; the
+// default is the golden's 1. vipLease reaches kube-vip's three lease variables.
+func TestChartKubeadmReplicas(t *testing.T) {
+	render := func(set func(cp map[string]any)) (string, error) {
+		var values map[string]any
+		if err := yaml.Unmarshal([]byte(kubeadmTestValues), &values); err != nil {
+			t.Fatal(err)
+		}
+		set(dig(values, "controlPlane", "kubeadm").(map[string]any))
+		return gatewayRenderRawChart(t, "pc-platform", values)
+	}
+	control := func(raw string) (replicas any, template, vip string) {
+		docs := gatewayChartDocuments(t, raw)
+		kcp := gatewayFindChartDocument(t, docs, "KubeadmControlPlane", "pc-platform-cp")
+		for _, f := range dig(kcp, "spec", "kubeadmConfigSpec", "files").([]any) {
+			if f := f.(map[string]any); f["path"] == "/etc/kubernetes/manifests/kube-vip.yaml" {
+				vip = f["content"].(string)
+			}
+		}
+		return dig(kcp, "spec", "replicas"), digStr(kcp, "spec", "machineTemplate", "spec", "infrastructureRef", "name"), vip
+	}
+	one, err := render(func(map[string]any) {})
+	if err != nil {
+		t.Fatalf("render: %v\n%s", err, one)
+	}
+	three, err := render(func(cp map[string]any) { cp["replicas"] = 3 })
+	if err != nil {
+		t.Fatalf("render with 3: %v\n%s", err, three)
+	}
+	n1, tpl1, vip1 := control(one)
+	n3, tpl3, vip3 := control(three)
+	if n1 != 1 || n3 != 3 {
+		t.Errorf("replicas %v and %v, want 1 and 3", n1, n3)
+	}
+	if tpl1 == "" || tpl1 != tpl3 || vip1 != vip3 {
+		t.Errorf("3 replicas change the machine template (%s, %s) or kube-vip: every machine would be replaced", tpl1, tpl3)
+	}
+	if strings.Count(three, "kind: ProxmoxMachineTemplate") != strings.Count(one, "kind: ProxmoxMachineTemplate") {
+		t.Error("3 replicas render another number of machine templates")
+	}
+	for _, bad := range []int{0, 2, 5} {
+		out, err := render(func(cp map[string]any) { cp["replicas"] = bad })
+		// 0 is "not set": the chart's default.
+		if bad == 0 {
+			if n, _, _ := control(out); err != nil || n != 1 {
+				t.Errorf("replicas 0: %v, %v", n, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(out, "is not 1 or 3") {
+			t.Errorf("replicas %d must fail the render, got err=%v\n%s", bad, err, out)
+		}
+	}
+	leased, err := render(func(cp map[string]any) {
+		cp["vipLease"] = map[string]any{"duration": 15, "renewDeadline": 10, "retryPeriod": 2}
+	})
+	if err != nil {
+		t.Fatalf("render with a lease: %v\n%s", err, leased)
+	}
+	_, _, vip := control(leased)
+	for _, want := range []string{`{name: vip_leaseduration, value: "15"}`, `{name: vip_renewdeadline, value: "10"}`, `{name: vip_retryperiod, value: "2"}`} {
+		if !strings.Contains(vip, want) {
+			t.Errorf("kube-vip lacks %s:\n%s", want, vip)
+		}
+	}
+}
