@@ -477,6 +477,9 @@ type Site struct {
 	// dhcp: false (pve.ZoneConfig.NoDHCP).
 	DefaultZone, DefaultZoneKind string
 	DefaultZoneNoDHCP            bool
+	// DefaultZoneExitNodes: the exit nodes the config names for an EVPN default zone (pve.ZoneConfig.ExitNodes); the
+	// tenant-path row reads them for a zone that does not exist yet.
+	DefaultZoneExitNodes []string
 }
 
 // SiteProblems checks an installation against its site: the platform network overlaps neither the tenant pool nor a

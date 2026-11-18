@@ -12,8 +12,8 @@ are in [ADR 0009](adr/0009-managed-services-platform-lifecycle.md); the routes a
 > renderer goldens, runner tests against a fake Proxmox and a fake Kubernetes API, and a mocked
 > console. The install finished on one lab Proxmox VE cluster, on builds of main; what was run
 > there and what was not is in [Not verified on a lab yet](#not-verified-on-a-lab-yet). It is off
-> by default. v0.8.0 is the first release that carries it; no run was made on its published
-> images: see [Not implemented yet](#not-implemented-yet).
+> by default. v0.8.0 is the first release that carries it; one install was made on its published
+> images (a lab, 2026-11-18), none on those of v0.8.1: see [Not implemented yet](#not-implemented-yet).
 
 Code: `internal/platformlife` (the installation model, the preflight, the runner and its stages, the
 renderers), `internal/platform/admin/platform.go` (the routes), `internal/cloud/pve/access.go` and
@@ -82,6 +82,7 @@ reading [section 3](#3-proxmox-identities): they share the pool `proxcloud-syste
 | Capacity | The smallest machine is 2 cores, 4 GiB of memory and a 20 GiB disk. The smallest layout (seed, control plane, one machine per group) is five VMs. The review step adds up cores and memory per node; it does not read what is free. |
 | Root on one node | Once, to run the identities script. |
 | A router for a VLAN tenant zone | Only when the provider's tenant zone is a `vlan` zone. Proxmox gives a VLAN no gateway, no DHCP and no SNAT: a tenant network there is a bare layer 2 segment, and ProxCloud writes and reports it so (`dhcp: false`, `snat: false`; asking for either is a `400`). The site's own router must hold the first address of each tenant subnet (the `gateway` the network shows; servers and cluster workers get it as their default route) on that VLAN, route it to the load balancer range and to whatever else tenants may reach, and keep tenants apart. Without it a worker on such a network never reaches its control plane and the cluster stays `PROGRESSING`. An EVPN zone needs none of this. |
+| A path from tenants to the platform network | Tenant cluster workers and database clients open TCP connections to the platform network. On a node that translates tenant traffic (a `simple` tenant zone, or an exit node of an EVPN zone) and also runs a platform machine, that connection is dropped unless the node itself routes the platform network. A one-node site with a `simple` tenant zone and the platform network on a VLAN behind the site's router is this case. The Check warns (`tenant-path`) and the install goes on: [The path from tenants to the platform](#the-path-from-tenants-to-the-platform). |
 | A tenant network zone without DHCP | Only for tenant Kubernetes clusters, not for the install or for databases: a cluster's nodes get fixed addresses, so its network must be in an EVPN or a VLAN zone, or in a `simple` zone without a DHCP server. With a provider whose default zone (`config.network.defaultZone`) is a `simple` zone that ProxCloud created with DHCP, which is its default, a cluster create on its networks answers `400 Worker nodes need a network without DHCP (an EVPN or VLAN zone, or a simple zone without a DHCP server)`. The Check reads the zone in Proxmox, warns (`tenant-network`) when it has DHCP, and the install goes on; change the provider's default zone before you offer clusters ([managed-k8s.md](managed-k8s.md)). Not affected: a Kubernetes provider with shared workers (`cluster.shared`), which uses no tenant network, and a `simple` zone without DHCP. Such a zone is made in one of two ways: by hand in Proxmox before the first tenant network (a zone that exists is used as it is), or by ProxCloud when the zone's config says so, `"zones": {"<id>": {"kind": "simple", "dhcp": false}}` (from v0.8.1; it applies to a zone that does not exist yet, and an existing zone is never changed). Networks of such a zone answer `dhcp: false` and get no DHCP range; servers, cluster nodes and load balancers there get addresses the platform assigns. The key is refused on a zone of another kind (`400`, naming the key). The setup wizard keeps a zone's other keys when you change its kind there, so take `"dhcp"` out of the zone's config (Cloud providers) before you change such a zone to VLAN or EVPN. The key is not verified on a lab. |
 | The datacenter firewall | On, with the provider's isolation rules written by a provider sync once the installation is saved: the Check verifies that tenant traffic to the seed, the API address and the node range is dropped. |
 
@@ -125,6 +126,153 @@ from the `qm` manual (`--destroy-unreferenced-disks`: "destroy additionally all 
 the config but with a matching VMID from all enabled storages"; `qm disk rescan`: "update disk sizes
 and unused disk images"). The warning was added after the production acceptance of v0.8.0 found the
 owner's template on that id.
+
+### The path from tenants to the platform
+
+Tenants open connections to the platform network: a tenant cluster's workers to their API address
+(port 6443 on an address of the load balancer range), a tenant's servers to a managed database. On
+one layout that path is closed for TCP although every range and firewall rule is right, and
+nothing but the Check row `tenant-path` says so before a tenant finds it. Found on the first
+production site (v0.8.0, 2026-11-18, one node): the control plane was ready in under a minute and
+no worker ever joined.
+
+**The rule.** A tenant's TCP connection to a platform address is dropped when both hold:
+
+1. a Proxmox node translates it (SNAT). In a `simple` zone that is the node the tenant's VM runs
+   on, for a network with outbound internet. In an EVPN zone it is an exit node. In a VLAN zone no
+   node translates: the site's router does.
+2. the translated packet enters the same node again through a bridge, because the platform machine
+   that owns the destination address runs on that node and the way from the node to the platform
+   network goes over something else (the site's router).
+
+The node's connection tracking for bridges then sees the returning packet as a second connection
+with the same reply as the first, and drops it. The Proxmox nftables firewall (`nftables: 1` in the
+host firewall options) turns that tracking on for every bridge of the node, with or without
+`firewall=1` on a NIC. A connection from the node itself or from the LAN passes; a tenant's TCP
+connection never does (by the source UDP is not dropped; not tested). On the production site the
+counters `insert_failed` and `drop` of `conntrack -S` grew by the same number with every attempt.
+For the older iptables firewall Proxmox's SDN writes a rule of its own for this case; whether a
+node on that firewall is free of the problem was not tested.
+
+| Tenant zone | The platform machine that owns the address is on | Result |
+|---|---|---|
+| `simple`, one node, platform network a VLAN behind the site's router | the same node | **broken** (seen on the production site) |
+| `simple`, several nodes | the tenant VM's node | **broken**. On another node it works, but the API address and a load balancer address move between the platform machines' nodes, so after a failover it breaks for other tenants |
+| EVPN with SNAT on an exit node | the exit node | broken by the same rule; on another node it works. Not tested |
+| VLAN zone, the site's router translates | any node | works: the node translates nothing (lab: workers joined on a VLAN zone) |
+| any zone, the platform network routed by the node itself (the node holds its gateway) | the same node | works: the packet never leaves the node. Not tested |
+
+The mechanism is stated from the kernel and Proxmox sources and fits the production counters and
+captures; it was not reproduced on a lab, and the hook that drops was not captured.
+
+**What you see when it is wrong.**
+
+- A tenant cluster's control plane becomes ready and its endpoint answers from your workstation.
+  The workers' VMs run and the node group stays at "The machine runs but has not joined the
+  cluster" (`not_joined`); after 15 minutes it needs attention.
+- On such a worker (console, or the guest agent), cloud-init's `kubeadm join` ended with a timeout
+  on the API address, `https://<address>:6443`. From a tenant server on the same node
+  `curl -k -m 5 https://<address>:6443/healthz` times out; the same command on the node answers.
+- A tenant server cannot open a managed database's port, while the database reads healthy.
+- On the node, `conntrack -S` shows `insert_failed` and `drop` growing during each attempt.
+
+**Workers that did not join must be replaced.** `kubeadm join` runs once, at the first boot. A
+worker that timed out stays "not joined" after the path is repaired. Replace it: the tenant
+reduces the node group's count by one and raises it again. A count below one is refused, so a
+group cannot go to zero and back: it is one such cycle per dead worker, and a group of one is
+raised by one first and reduced once the new worker is ready (this needs quota for one more
+worker). On the production site two dead workers of a group of two were replaced by 2 → 3 → 2,
+twice: both times the scale-down removed a machine without a node, never a ready worker. Which
+machine goes is Cluster API's choice ([managed-k8s.md](managed-k8s.md), scale-down); only that
+order was run.
+
+**What the Check reads.** The row `tenant-path` reads the provider's default zone in Proxmox (its
+kind, the nodes a `simple` zone is limited to, an EVPN zone's exit nodes; for a zone that does not
+exist yet, what the provider's config says), the nodes the settings place the platform's control
+plane and node groups on, and whether such a node routes the platform network itself: the platform
+bridge is a vnet of a `simple` zone with a subnet whose gateway is the platform gateway, or the
+node's saved network configuration holds the platform gateway on that bridge. It **warns** when a
+node that translates also hosts a platform machine and does not route the platform network, and
+when Proxmox could not be read. It never fails, because it opens no connection: an `ok` row is not
+proof that the path is open, and a warning stays after you added a node leg by hand (the row does
+not see runtime addresses). It also warns on a node that routes the platform VLAN on a VLAN
+interface of its own (the gateway on `vmbr0.140`, say): the row does not read that interface, and
+by the rule above that layout should work (not tested). A probe that opens the path from a VM is
+not in this release.
+
+**A new one-node site: let the node route the platform network.** Make the platform network a
+vnet of a `simple` SDN zone with one subnet whose gateway is the platform gateway and with SNAT
+ticked (Datacenter → SDN in Proxmox, then Apply), and enter the vnet as the platform bridge in
+step 1. SNAT is for the platform machines' own way out: the node translates what they send
+through its uplink, so the answers from the internet (image pulls during the install) come back
+to the node. Without SNAT the site's router must have the route below; a route on the ProxCloud
+host alone then leaves the platform machines without a return path from the internet and the
+install fails at its image pulls. Proxmox puts
+the gateway address on the node, so a tenant's packet is routed inside the node and is not
+translated on the way (the zone's SNAT rule only matches what leaves through the node's uplink).
+Consequences:
+
+- The platform sees a tenant's real address. A database's `allowedCidrs` then hold tenant subnets,
+  not the node's address ([managed-dbaas.md](managed-dbaas.md)).
+- Everything outside the node (the ProxCloud host, your workstation) needs a route "platform
+  network via the node's address", on the site's router or, with SNAT on the subnet, on the host
+  itself: without it the API container reaches neither the seed nor the cluster's API address,
+  and the run fails.
+- It is a layout for **one node only**: a vnet of a `simple` zone is a separate network on each
+  node, and the platform bridge must be one layer-2 segment
+  ([What no check reads](#what-no-check-reads)).
+
+ProxCloud does not create this network in this release. The layout is not run anywhere yet: not on
+a lab, not on a production site.
+
+**An existing site with the platform network on a VLAN: a leg of the node.** Give the node an
+address of its own on the platform bridge and send tenant traffic for the platform network out
+through it, so that the packet no longer passes the router and never enters the node a second
+time. The address must be on the bridge device itself: by the source a veth pair plugged into the
+bridge fails in the same way (not tested). The
+commands below were run by hand, as root, on the one production site, at runtime, and the path
+opened (a tenant server got an HTTP answer from the API address, `insert_failed` stopped growing,
+the node's own route was unchanged). They are **not lab-verified**. Replace the four values: the
+platform bridge (`plat140`), the platform network (`192.168.140.0/24`), a free address in it for
+the node (`192.168.140.2`) and the provider's tenant pool, `cidrPool` (`10.100.0.0/16`). `140` is
+a free routing table number, `1400` and `1401` free rule priorities.
+
+```sh
+# read first
+ip -br addr show plat140; ip rule; ip route show table 140; sysctl net.ipv4.conf.all.rp_filter
+arping -c 2 -I plat140 192.168.140.2        # expect no answer: the address is free
+# apply
+ip addr add 192.168.140.2/24 dev plat140 noprefixroute
+ip route add 192.168.140.0/24 dev plat140 src 192.168.140.2 table 140
+ip rule add pref 1400 from 10.100.0.0/16 to 192.168.140.0/24 lookup 140
+ip rule add pref 1401 from 192.168.140.2 to 192.168.140.0/24 lookup 140
+iptables -t nat -I POSTROUTING 1 -s 10.100.0.0/16 -d 192.168.140.0/24 -o plat140 -j SNAT --to-source 192.168.140.2
+# verify
+ip route get <a platform address>                  # unchanged: still through the router, the node's own path
+ip route get <a platform address> from <a tenant server's address> iif <its vnet>    # "dev plat140 table 140"
+conntrack -S | head -3                             # insert_failed no longer grows during the next line
+# from a tenant server: curl -k -m 5 https://<the cluster's API address>:6443/healthz   -> an HTTP answer
+# undo
+iptables -t nat -D POSTROUTING -s 10.100.0.0/16 -d 192.168.140.0/24 -o plat140 -j SNAT --to-source 192.168.140.2
+ip rule del pref 1401; ip rule del pref 1400
+ip route flush table 140
+ip addr del 192.168.140.2/24 dev plat140
+```
+
+- The rules select tenant sources only and the main routing table gets no route, so the node's
+  own traffic, the LAN and your other VMs keep their paths. If a line is lost, the path is closed
+  for tenants again and nothing else changes.
+- The platform now sees the leg's address as the source of every tenant: a database's
+  `allowedCidrs` must hold it (`192.168.140.2/32`), where they held the node's address before.
+- **It does not last.** The lines are lost at a reboot of the node, and whether they survive an
+  SDN Apply is not known: run the verify lines after each. A persistent form (a file of its own in
+  `/etc/network/interfaces.d/`) is not tested and therefore not given here.
+- On several nodes each node that hosts a platform machine needs its own leg and address. Not run.
+- Then replace the workers that did not join (above).
+
+For every other site (several nodes, tenants and platform machines on the same nodes) the layout
+without a node in the path is the VLAN tenant zone with your own router (the row above). Not
+decided and not tested: a connection-tracking zone for the platform bridge instead of the leg.
 
 ### What no check reads
 
@@ -328,6 +476,7 @@ the settings (`409 rev_conflict`: the page reads them again).
 | `network` | The platform network overlaps a tenant, sandbox or public network, a seed API source is a tenant network, the load balancer range is inside a blocked or management network, or a node did not report its networks | Correct the network in step 1 |
 | `isolation` | The seed, the API address or part of the node range is in no blocked or management network, or the cluster firewall's isolation rules are not the ones a sync writes | Add the CIDRs the message names to **Networks tenants must not reach** on the provider's page (`blockedCidrs`). The message lists the smallest ranges that are missing; one network that covers them does the same (`10.90.0.0/26` for a seed on `.5`, an API address on `.10` and nodes on `.20` to `.60`), as long as the load balancer range stays outside it. Then **Run a provider sync, then check again**: with the installation saved (step 1), the sync writes the provider's rules whether or not it has a project. Check that the datacenter firewall is on. Five messages name a cause no sync of a provider without a project repairs: `cidrPool … overlaps the management network …` (choose another `cidrPool`), `rules … are for another pool`, `rules … drop … to …, which this provider's cidrPool, blockedCidrs and sandboxCidrs do not`, `rules … have an ACCEPT …` or `have no ACCEPT …` and `rules … are not this provider's set …, and a project's rules for cidrPool … are in place` (another portal or provider shares the rules: give this provider its own `poolPrefix`; the provider's own older rules: delete them under Datacenter > Firewall and sync). ([More](#the-isolation-check-and-the-provider-sync)) |
 | `tenant-network` | Never. It reads the provider's default zone in Proxmox and **warns** when the zone has DHCP, when it does not exist yet and is configured as a `simple` zone without `"dhcp": false` (ProxCloud then creates it with DHCP), or when the zones could not be read: a tenant Kubernetes cluster create on a network of such a zone is refused with a `400` (not on a Kubernetes provider with shared workers, `cluster.shared`, which uses no tenant network). The row is `ok` for a zone without DHCP and absent when the provider names no zone | Nothing for the install or for databases. Before tenants create clusters: give the provider an EVPN or a VLAN zone as its default zone, or a `simple` zone without DHCP (Cloud providers, `config.network.zones` and `defaultZone`; [Prerequisites](#2-prerequisites)) |
+| `tenant-path` | Never, and absent when the provider names no zone. It reads the layout and **warns** when a node that translates tenant traffic (a `simple` default zone: the node of the tenant's VM; an EVPN default zone: its exit nodes) also hosts a platform machine and does not route the platform network itself, or when Proxmox could not be read: a tenant's TCP connection to the platform network is then dropped on that node, tenant Kubernetes workers never join and tenants cannot reach managed databases. It opens no connection: `ok` is not proof, and a leg added on a node by hand is not seen | Nothing for the install. Before tenants create clusters or databases: one of the two layouts of [The path from tenants to the platform](#the-path-from-tenants-to-the-platform) |
 | `csi-vmid` | Never. It **warns** when a guest of the cluster has VM id 9999, the id proxmox-csi names its volumes after, or when that could not be read | Nothing for the install. Never destroy VM 9999 with "Destroy unreferenced disks owned by guest" ([VM id 9999 and the CSI volumes](#vm-id-9999-and-the-csi-volumes)) |
 | `credentials` | A token secret is not stored | Paste it in step 2 |
 | `machines` | Never, and absent while the installation has no VM. It reads the installation's VMs with the CAPI token and **warns** with one line per VM that is stopped or that does not start when its node boots (`onboot` off) or that the token could not read (the others are still listed, and an apply still sets `onboot` on them), or when the pools could not be read | A stopped VM: start it in Proxmox, or `qm start <vmid>` as root on its node ([After a Proxmox node reboots](#after-a-proxmox-node-reboots)). `onboot` off: **Apply this release** sets it at the end of stage 7, or `qm set <vmid> --onboot 1` |
@@ -965,9 +1114,11 @@ What this does not do, and what to do then:
 - **Tenant clusters' machines** are not touched by this: their VMs are made by the platform's
   CAPMOX in tenant pools and have no `onboot`. After a node reboot start them in Proxmox.
 
-Not verified on a lab: none of this section was run on a lab. In particular it is not known
-whether CAPMOX v0.9.2 rewrites or keeps a VM option it did not set (`onboot`), and no node was
-rebooted with it in place. The privileges (`VM.Config.Options` for `onboot`, and `Sys.Modify` on `/`
+Seen on a lab (2026-11-18, a platform installed by v0.8.0, then the build `dev-751a190` of main): the
+`machines` row warned for the four machines without `onboot`, the apply set it with the CAPI token,
+CAPMOX v0.9.2 had not taken it back 23 minutes later, and the row then read ok. Not verified on a
+lab: a stopped machine, a machine the token cannot read, an install on this release from the start,
+and a node reboot with `onboot` in place. The privileges (`VM.Config.Options` for `onboot`, and `Sys.Modify` on `/`
 besides for `startup`) are read from Proxmox VE's API code (qemu-server, `PVE/API2/Qemu.pm`), and the seed's own `onboot` has been set with the same
 token and role since the first install. That Proxmox starts VMs without a start order by VMID is from
 its documentation as remembered, and was not checked in its code or on a node.
@@ -1101,7 +1252,7 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 
 ## Not implemented yet
 
-- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0` (`main` carries `0.9.0-dev`). `--managed-services` needs v0.8.0 or later: no
+- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1` (`main` carries a `-dev` one between releases, now `0.9.0-dev`). `--managed-services` needs v0.8.0 or later: no
   earlier released image reads `PROXCLOUD_PLATFORM_ENABLED`, and the images of v0.8.0 exist once
   its tag's workflows have succeeded. For a test ahead of a release,
   `proxcloud-up.sh` takes a build of main as its version (`--version dev-<sha>`, `upgrade dev-<sha>`;
@@ -1124,8 +1275,13 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
   platform stays on release 0.8.0"), lists the contents of the installed release, and the plan
   names the release the build would install as `newer`. Moving an installed platform to a newer
   BOM is a later release. Provider (Cluster API) upgrades are refused as `capi_init_failed`.
-  - **Not verified on a lab.** No apply was run with a build that carries a previous BOM against a
-    platform that v0.8.0 installed. What tests show: the file under `previous/` has the sha256 that
+  - **Seen on a lab once** (2026-11-18): a platform installed by the released v0.8.0, then the
+    portal upgraded to the build `dev-751a190` of main. The plan had no change and named that
+    build's BOM as `newer`, the Check passed, **Apply this release** succeeded in 6.6 seconds,
+    `status.bom` stayed the 0.8.0 one and no Application of the seed was synced again. That
+    build's own BOM pinned the same versions as 0.8.0, so the lab does not show an apply that
+    keeps older pins while the build carries other ones, and the build was not the release
+    v0.8.1 itself. What tests show: the file under `previous/` has the sha256 that
     a v0.8.0 platform records (`8eb87498…6600c6`), what the renderers of this build make of the
     0.8.0 BOM is byte for byte what v0.8.0 rendered from it (the goldens of the tag), and a run on
     fakes takes its images, Applications and provider bodies from the 0.8.0 BOM.
@@ -1213,3 +1369,8 @@ cluster, a `simple` zone created from `"dhcp": false`, a tenant cluster or a loa
 network of a `simple` zone without DHCP, the identities script on a site that already has the installer's tokens, a token
 secret rotation, an install on a Proxmox cluster with a single node, and `--managed-services` on a
 Compose host against a published release.
+
+The row `tenant-path` and its guide ([The path from tenants to the platform](#the-path-from-tenants-to-the-platform))
+are not verified on a lab: the row's tests use a fake Proxmox API, the mechanism is stated from
+source and fits what the production site showed, the node leg was run by hand on that one site at
+runtime only, and the layout with a platform network routed by the node was run nowhere.
