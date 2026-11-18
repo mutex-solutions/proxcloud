@@ -66,8 +66,9 @@ Managed charts use their own metadata versions and reject a mismatching tag.
 `database-cluster` `0.5.1`, `proxmox-kamaji-cluster` `0.1.13` (placement by free capacity) and
 `proxcloud-platform` `0.1.2` (read access to Machines), all three published from their own tags
 and pinned by digest in the platform BOM (the source is at `proxmox-kamaji-cluster` `0.1.14`, the
-MachineHealthCheck of a node group, and `proxcloud-platform` `0.1.3`, replacing a Machine: neither
-is tagged or pinned yet), need separate
+MachineHealthCheck of a node group and the VLAN tag of the platform network, and
+`proxcloud-platform` `0.1.3`, replacing a Machine: neither is tagged, and neither is pinned until
+its tag is cut), need separate
 publication checks/tags; the app tag does not publish them or move existing
 provider pins or managed data. Re-publishing an already existing chart version is
 skipped; it does not replace old contents. See the

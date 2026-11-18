@@ -554,7 +554,9 @@ are several, `errors.details.problems`.
 - `GET|POST /installations`: list; create `{name, serviceId, provisionedBy?,
   layout?, spec}` in phase `draft`. `spec` has `pveApiUrl`, `storage {boot,
   iso, import}` (import defaults to the provider's `importStorage`), `network
-  {bridge, prefix, gateway, dns[], mtu}`, `seed {mode, pool, node, address,
+  {mode, bridge, vlan, prefix, gateway, dns[], mtu}` (`mode`: `bridge`, also what a spec without it means, or
+  `routed`, where `bridge` names a vnet the install makes and every machine is on one node; `vlan`: 1 to 4094, mode
+  `bridge` only, and only with a BOM whose cluster chart is 0.1.14 or newer), `seed {mode, pool, node, address,
   cores, memoryMiB, diskGiB, sshKeys[], apiSources[]}`, one cluster `{name,
   roles, endpoint, nodeRange, metallbRange, controlPlane, nodeGroups[]}` with
   exactly the groups `system`, `kamaji` and `dbaas`, and `nodeImage {mode,
@@ -580,7 +582,7 @@ are several, `errors.details.problems`.
   `PROXCLOUD_ENCRYPTION_DEFAULT_KEY` the route answers `409 no_encryption_key`.
   No route returns a secret: an installation shows `credentials.{capi,csi}.tokenId`.
 - `POST /installations/{id}/preflight`: read-only, not audited; `{ok, checks}`
-  with rows `flags`, `spec`, `network`, `isolation`, `tenant-network`, `tenant-path`, `csi-vmid`, `credentials`, `machines`,
+  with rows `flags`, `spec`, `network`, `bridge`, `isolation`, `tenant-network`, `tenant-path`, `csi-vmid`, `credentials`, `machines`,
   `privileges:capi`, `privileges:csi`, `privileges:kubemint`, `mint-scope`, `pool-fence`,
   `token-scope`, `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement` and
   `images`. A row's `status` is `ok`, `fail` or `warn`; `ok` in the answer is
@@ -592,11 +594,13 @@ are several, `errors.details.problems`.
   refused with a `400`, except on a Kubernetes provider with shared workers
   (`cluster.shared`), which uses no tenant network. It is `ok` for a zone without
   DHCP, and absent when the provider names no zone.
+  `bridge` fails when a node the settings use has no bridge or vnet of that name, or (mode `routed`) when a vnet of
+  that name exists and is not the installation's; on an installed platform the same finding is `warn`.
   `tenant-path` never fails either and is absent in the same case. It reads the layout (the default zone's kind,
   the nodes it translates tenant traffic on, the nodes of the platform machines, and whether such a node holds the
   platform gateway on the platform bridge) and is `warn` when a node that translates also hosts a platform machine
-  without routing the platform network, or when Proxmox could not be read. It opens no connection, so `ok` does not
-  prove that tenants reach the platform ([managed-services.md](managed-services.md#the-path-from-tenants-to-the-platform)).
+  without routing the platform network, or when Proxmox could not be read; `ok` for mode `routed`. It opens no
+  connection, so `ok` does not prove that tenants reach the platform; `…/tenant-path-probe` below does ([managed-services.md](managed-services.md#the-path-from-tenants-to-the-platform)).
   `machines` never fails either, and is absent while the installation has no VM. It reads, with the CAPI
   token, the VMs of the pools `proxcloud-seed` and `proxcloud-system` that carry the installation's tag:
   `warn` with one line per VM that is stopped (start it in Proxmox, `qm start <vmid>`) or that has no
@@ -622,6 +626,25 @@ are several, `errors.details.problems`.
   when `capmox@pve!capi` or `csi@pve!csi` holds a privilege on `/pool`, `/storage`
   or `/vms`, and names the `pveum acl delete` command, or which row of
   `pveum acl list` is the one to remove. A row that cannot be read fails.
+- `POST /installations/{id}/tenant-path-probe` `{node?}`: starts the tenant path test and answers `202` with the
+  probe in state `running`; `GET` on the same path (`admin:service:read`) answers the installation's last probe
+  (`404 no_probe` before the first). The one check that writes to Proxmox, so it is audited like every installation
+  write and never part of the preflight: a throwaway network in the provider's default tenant zone (a free /28 from
+  the end of `cidrPool`, with SNAT), a throwaway VM `pc-probe-<id>` cloned from a published Ubuntu or Debian template
+  on `node` (default: the control plane's node; it must host a platform machine) into `pc-templates`, TCP connections
+  through the guest agent, then both removed, on every path, with an 8 minute limit. A probe still `running` 12 minutes
+  after its start was cut off by an API restart: `GET` answers it as `error` with what it may have left, and a new
+  start is taken. Refused with `409` and a code
+  before anything is created: `not_installed`, `no_tenant_zone`, `vlan_zone` (the default zone is a VLAN zone: no node translates there),
+  `invalid_node`, `probe_running`, `run_active`,
+  `no_os_template` (none on that node), `no_target` (from the ProxCloud host nothing answers on port 6443 or 5432 of
+  the first 32 addresses of the load balancer range; when a 6443 answers, 5432 listeners are not targets). The probe: `{id, state, node, template, requestedBy,
+  startedAt, finishedAt, step, vmid, vnet, source, targets[], message, left[]}`. `state` is `running`, `passed`
+  (every target opened or was refused, and the platform's own API address did not answer), `failed` (a target the
+  host opens gave no answer from the tenant network, or the platform's API address answered) or `error` (the test
+  could not be done: nothing is known). `targets[]` are `{address, port, expect: open|closed, result:
+  open|refused|none}`; `left[]` names what the cleanup could not remove, with the command. One probe tests one node
+  ([managed-services.md](managed-services.md#the-path-from-tenants-to-the-platform)). Not verified on a lab.
 - `GET /installations/{id}/plan[?target=<sha256>]`: what an apply does
   (`installed`, `target`, `newer`, `changes`, `blocking`, `upgrade`). `target` is
   the BOM an apply without `targetBom` runs with: this release's for a new

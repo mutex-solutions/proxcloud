@@ -276,6 +276,10 @@ func (x *acq) seedVM(ctx context.Context) error {
 	if x.sec.SeedKubeconfig != nil {
 		return x.readySeed(ctx)
 	}
+	// A routed platform network is made before the first VM is put on it. An installed platform never comes here.
+	if err := x.ensureNetwork(ctx); err != nil {
+		return err
+	}
 	if x.receipt().VMID == 0 {
 		gen := 1
 		if st := x.in.Status.Seed; st != nil && st.Generation > 0 {
@@ -438,7 +442,7 @@ func (x *acq) uploadCD(ctx context.Context, rc StageReceipt, vm vmState) error {
 	if err := x.pveTask(ctx, CodeSeedConfigRefused, func() (pve.UPID, error) {
 		return x.capi.SetVMConfig(ctx, vm.node, rc.VMID, map[string]string{"cores": strconv.Itoa(sp.Seed.Cores),
 			"memory": strconv.Itoa(sp.Seed.MemoryMiB), "agent": "1", "onboot": "1",
-			"tags": "proxcloud;pc-platform;pc-platform-" + x.in.ID, "net0": withNet0(vm.cfg.Str("net0"), sp.Network.Bridge, sp.Network.MTU)})
+			"tags": "proxcloud;pc-platform;pc-platform-" + x.in.ID, "net0": withNet0(vm.cfg.Str("net0"), sp.Network.Bridge, sp.Network.VLAN, sp.Network.MTU)})
 	}); err != nil {
 		return err
 	}
@@ -462,7 +466,7 @@ func (x *acq) uploadCD(ctx context.Context, rc StageReceipt, vm vmState) error {
 	}
 	prefix, _ := netip.ParsePrefix(sp.Network.Prefix)
 	files, err := SeedFiles(x.bom, RenderInput{ID: x.in.ID, SeedAddress: sp.Seed.Address, SSHKeys: sp.Seed.SSHKeys,
-		Network: RenderNetwork{Bridge: sp.Network.Bridge, Gateway: sp.Network.Gateway, Prefix: prefix.Bits(), DNS: sp.Network.DNS, MTU: sp.Network.MTU}},
+		Network: RenderNetwork{Bridge: sp.Network.Bridge, VLAN: sp.Network.VLAN, Gateway: sp.Network.Gateway, Prefix: prefix.Bits(), DNS: sp.Network.DNS, MTU: sp.Network.MTU}},
 		SeedBoot{Generation: rc.Generation, Net0: set.Str("net0"), Secrets: secrets, Now: now})
 	if err != nil {
 		return permanent(CodeSeedConfigRefused, "The seed's CD could not be rendered: %s", clip(err.Error()))
@@ -790,10 +794,18 @@ func asTransient(err error) error {
 func (x *acq) removeSeed(ctx context.Context) error {
 	st := x.in.Status.Seed
 	if x.capi == nil {
-		if st == nil {
+		if st != nil {
+			return permanent(CodeCredentialsMissing, "The token %s is not stored, so the seed VM %d cannot be deleted: paste it, then Remove again.", pve.CAPITokenID, st.VMID)
+		}
+		// No seed was ever recorded: only a routed network may be left, and the portal token removes it.
+		net, err := x.removeNetwork(ctx)
+		if err != nil {
+			return err
+		}
+		if net == nil {
 			return errSkipped
 		}
-		return permanent(CodeCredentialsMissing, "The token %s is not stored, so the seed VM %d cannot be deleted: paste it, then Remove again.", pve.CAPITokenID, st.VMID)
+		return x.note(ctx, *net)
 	}
 	node := x.in.Spec.Seed.Node
 	if st != nil {
@@ -819,6 +831,14 @@ func (x *acq) removeSeed(ctx context.Context) error {
 			seed.State, seed.Message = "left", fmt.Sprintf("The VM at %d is not this installation's seed (%s): not deleted.", st.VMID, SeedVMName(x.in.ID, st.Generation))
 		}
 		items = append(items, seed)
+	}
+	// After the last VM on it: the platform machines went in the stage before.
+	net, err := x.removeNetwork(ctx)
+	if err != nil {
+		return err
+	}
+	if net != nil {
+		items = append(items, *net)
 	}
 	return x.note(ctx, items...)
 }
@@ -981,8 +1001,9 @@ func mentions(cfg pve.VMConfig, file string) bool {
 	return false
 }
 
-// withNet0 is the clone's net0 with its model and MAC kept, on bridge with the VM firewall on (no VLAN in M1).
-func withNet0(old, bridge string, mtu int) string {
+// withNet0 is the clone's net0 with its model and MAC kept, on bridge with the VM firewall on, tagged with vlan when
+// that is set (Proxmox then checks SDN.Use on /sdn/zones/localnetwork/<bridge>/<vlan>: pve.NICPath).
+func withNet0(old, bridge string, vlan, mtu int) string {
 	var keep []string
 	for _, p := range strings.Split(old, ",") {
 		if k, _, _ := strings.Cut(p, "="); p != "" && k != "bridge" && k != "firewall" && k != "mtu" && k != "tag" {
@@ -993,6 +1014,9 @@ func withNet0(old, bridge string, mtu int) string {
 		keep = []string{"virtio"}
 	}
 	keep = append(keep, "bridge="+bridge, "firewall=1")
+	if vlan > 0 {
+		keep = append(keep, "tag="+strconv.Itoa(vlan))
+	}
 	if mtu > 0 {
 		keep = append(keep, "mtu="+strconv.Itoa(mtu))
 	}

@@ -80,7 +80,10 @@ type Runner struct {
 	// provider rows DISABLED (Remove). The admin handler implements both.
 	Register func(ctx context.Context, body map[string]any) (string, error)
 	Disable  func(ctx context.Context, installationID string) error
-	Log      *slog.Logger
+	// SDNLock takes the site's SDN apply lock (the one a tenant network change takes) for the routed platform network;
+	// acquired=false when another change holds it. Nil in tests: no lock.
+	SDNLock func(ctx context.Context) (release func(), acquired bool, err error)
+	Log     *slog.Logger
 	// SkipRolloutGate turns off the check an upgrade run makes before it lets the cluster chart of the target BOM sync
 	// (rolloutGate; PROXCLOUD_PLATFORM_SKIP_ROLLOUT_GATE). The check reads ArgoCD's comparison and has not run on a
 	// lab: the switch is for a site where ArgoCD reports it otherwise than the check expects.

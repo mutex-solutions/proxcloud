@@ -63,6 +63,8 @@ var platformRoutes = []struct{ method, path, perm string }{
 	{"PUT", "/admin/platform/installations/pi-1", externalServiceManagePerm},
 	{"PUT", "/admin/platform/installations/pi-1/credentials", externalServiceManagePerm},
 	{"POST", "/admin/platform/installations/pi-1/preflight", externalServiceManagePerm},
+	{"GET", "/admin/platform/installations/pi-1/tenant-path-probe", serviceReadPerm},
+	{"POST", "/admin/platform/installations/pi-1/tenant-path-probe", externalServiceManagePerm}, // clones a VM, makes a network
 	{"GET", "/admin/platform/installations/pi-1/plan", serviceReadPerm},
 	{"POST", "/admin/platform/installations/pi-1/runs", externalServiceManagePerm},
 	{"GET", "/admin/platform/installations/pi-1/runs", serviceReadPerm},
@@ -108,7 +110,7 @@ func TestPlatformAuditSkip(t *testing.T) {
 		t.Fatal("preflight audited")
 	}
 	for _, p := range []string{"/api/v1/admin/platform/installations", "/api/v1/admin/platform/installations/pi-1",
-		"/api/v1/admin/platform/installations/pi-1/credentials"} {
+		"/api/v1/admin/platform/installations/pi-1/credentials", "/api/v1/admin/platform/installations/pi-1/tenant-path-probe"} {
 		if auditSkip(p) || pathResourceType(p) != "PLATFORM_INSTALLATION" {
 			t.Fatalf("%s: skipped or typed %s", p, pathResourceType(p))
 		}

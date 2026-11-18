@@ -9,7 +9,8 @@ export type NodeGroup = { name: string; nodes: string[]; count: number; cores: n
 export type Spec = {
   pveApiUrl: string
   storage: { boot: string; iso: string; import: string }
-  network: { bridge: string; prefix: string; gateway: string; dns: string[]; mtu?: number }
+  // mode: "bridge" (also what a spec without one means) or "routed" (ProxCloud makes the vnet named bridge). vlan: bridge mode only.
+  network: { mode?: string; bridge: string; vlan?: number; prefix: string; gateway: string; dns: string[]; mtu?: number }
   seed: { mode?: string; pool?: string; node: string; address: string; cores: number; memoryMiB: number; diskGiB: number; sshKeys?: string[]; apiSources: string[] }
   clusters: { name?: string; roles?: string[]; endpoint: string; nodeRange: string; metallbRange: string; controlPlane: Machine; nodeGroups: NodeGroup[] }[]
   nodeImage?: { mode?: string; templates?: Record<string, number> }
@@ -34,6 +35,12 @@ export type Installation = {
   live?: { phase: string; components: { name: string; cluster: string; sync: string; health: string }[]; error?: string; code?: string }
 }
 export type Check = { id: string; status: "ok" | "warn" | "fail"; message: string }
+// The last "Test the tenant path" of an installation (GET or POST …/tenant-path-probe; internal/platformlife/tenantprobe.go).
+export type TenantProbe = {
+  id: string; state: "running" | "passed" | "failed" | "error"; node: string; step?: string; startedAt: string; finishedAt?: string
+  vmid?: number; source?: string; message: string; left?: string[]
+  targets?: { address: string; port: number; expect: "open" | "closed"; result?: "open" | "refused" | "none" }[]
+}
 export type StageItem = { id: string; state: string; message?: string }
 export type Stage = {
   id: string; state: string; retries: number; startedAt?: string; deadline?: string; finishedAt?: string
@@ -97,7 +104,7 @@ export type GroupForm = MachineForm & { nodes: string[]; count: string }
 export type Form = {
   name: string; pveApiUrl: string
   boot: string; iso: string; import: string
-  bridge: string; prefix: string; gateway: string; dns: string; mtu: string
+  networkMode: "bridge" | "routed"; bridge: string; vlan: string; prefix: string; gateway: string; dns: string; mtu: string
   seedNode: string; seedAddress: string; seed: MachineForm; sshKeys: string; apiSources: string
   endpoint: string; nodeRange: string; metallbRange: string
   cpNode: string; cp: MachineForm
@@ -107,7 +114,7 @@ export type Form = {
 const group = (cores: string, mem: string): GroupForm => ({ nodes: [], count: "1", cores, memoryGiB: mem, diskGiB: "40" })
 export const emptyForm: Form = {
   name: "", pveApiUrl: "", boot: "", iso: "local", import: "",
-  bridge: "", prefix: "", gateway: "", dns: "", mtu: "",
+  networkMode: "bridge", bridge: "", vlan: "", prefix: "", gateway: "", dns: "", mtu: "",
   seedNode: "", seedAddress: "", seed: { cores: "2", memoryGiB: "6", diskGiB: "30" }, sshKeys: "", apiSources: "",
   endpoint: "", nodeRange: "", metallbRange: "",
   cpNode: "", cp: { cores: "2", memoryGiB: "4", diskGiB: "30" },
@@ -132,11 +139,14 @@ const machineForm = (m: { cores: number; memoryMiB: number; diskGiB: number }): 
 // keeps the values of a stored spec the form does not show.
 export function formToSpec(f: Form, prev?: Spec): Spec {
   const mtu = f.mtu.trim() ? num(f.mtu) : undefined
+  // The mode is sent only when routed, and the tag only with a bridge: a spec stored before either field stays as it is.
+  const routed = f.networkMode === "routed"
+  const vlan = !routed && f.vlan.trim() ? num(f.vlan) : undefined
   return {
     ...prev,
     pveApiUrl: f.pveApiUrl.trim(),
     storage: { boot: f.boot.trim(), iso: f.iso.trim(), import: f.import.trim() },
-    network: { bridge: f.bridge.trim(), prefix: f.prefix.trim(), gateway: f.gateway.trim(), dns: words(f.dns), ...(mtu ? { mtu } : {}) },
+    network: { ...(routed ? { mode: "routed" } : {}), bridge: f.bridge.trim(), ...(vlan ? { vlan } : {}), prefix: f.prefix.trim(), gateway: f.gateway.trim(), dns: words(f.dns), ...(mtu ? { mtu } : {}) },
     seed: { ...prev?.seed, node: f.seedNode.trim(), address: f.seedAddress.trim(), ...machine(f.seed), sshKeys: lines(f.sshKeys), apiSources: words(f.apiSources) },
     clusters: [{
       ...prev?.clusters?.[0],
@@ -154,7 +164,8 @@ export function specToForm(name: string, s: Spec): Form {
   return {
     name, pveApiUrl: s.pveApiUrl ?? "",
     boot: s.storage?.boot ?? "", iso: s.storage?.iso ?? "", import: s.storage?.import ?? "",
-    bridge: s.network?.bridge ?? "", prefix: s.network?.prefix ?? "", gateway: s.network?.gateway ?? "",
+    networkMode: s.network?.mode === "routed" ? "routed" : "bridge", bridge: s.network?.bridge ?? "", vlan: s.network?.vlan ? String(s.network.vlan) : "",
+    prefix: s.network?.prefix ?? "", gateway: s.network?.gateway ?? "",
     dns: (s.network?.dns ?? []).join(", "), mtu: s.network?.mtu ? String(s.network.mtu) : "",
     seedNode: s.seed?.node ?? "", seedAddress: s.seed?.address ?? "", seed: s.seed ? machineForm(s.seed) : emptyForm.seed,
     sshKeys: (s.seed?.sshKeys ?? []).join("\n"), apiSources: (s.seed?.apiSources ?? []).join(", "),
@@ -170,6 +181,7 @@ const NAME = /^[a-z0-9]([-a-z0-9]{0,38}[a-z0-9])?$/
 const NODE = /^[A-Za-z0-9]([-A-Za-z0-9]{0,61}[A-Za-z0-9])?$/
 const STORAGE = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/
 const BRIDGE = /^[A-Za-z][A-Za-z0-9_.-]{0,14}$/
+const VNET = /^[a-z][a-z0-9]{0,7}$/ // a Proxmox SDN vnet id
 export const TOKEN_SECRET = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
 
 // An IPv4 address as a number, or NaN.
@@ -204,7 +216,14 @@ export function validate(f: Form): Problem[] {
   }
   // The portal token's role on the import store reaches every disk on it, so it must not be the boot store.
   if (f.import.trim() && f.import.trim() === f.boot.trim()) bad("import", "Import store: a store other than the boot store.")
-  if (!BRIDGE.test(f.bridge.trim())) bad("bridge", "Bridge: an interface name such as vmbr1.")
+  if (f.networkMode === "routed") {
+    if (!VNET.test(f.bridge.trim())) bad("bridge", "Vnet name: a lower-case letter, then letters and digits, at most 8, such as pcplat0.")
+    const placed = new Set([f.seedNode.trim(), f.cpNode.trim(), ...GROUPS.flatMap((g) => f.groups[g].nodes)].filter(Boolean))
+    if (placed.size > 1) bad("networkMode", `A routed network is a layout for one Proxmox node, and the settings place machines on ${[...placed].sort().join(", ")}: put the seed, the control plane and every group on one node, or use an existing bridge.`)
+  } else {
+    if (!BRIDGE.test(f.bridge.trim())) bad("bridge", "Bridge: an interface name such as vmbr1.")
+    if (f.vlan.trim() && !(num(f.vlan) >= 1 && num(f.vlan) <= 4094)) bad("vlan", "VLAN tag: 1 to 4094, or empty.")
+  }
 
   const machineOK = (field: string, label: string, m: MachineForm) => {
     const c = num(m.cores), mem = num(m.memoryGiB), d = num(m.diskGiB)
@@ -287,6 +306,7 @@ const CHECK_ACTION: Record<string, string> = {
   flags: "Turn the switches on with ./proxcloud-up.sh install --managed-services, and save a GitHub token under Integrations.",
   spec: "Correct the settings in step 1 and save.",
   network: "Correct the platform network in step 1 and save.",
+  bridge: "Name a bridge or vnet that exists on every node the settings use, or change the nodes, in step 1. For a routed network, name a vnet Proxmox does not have yet.",
   isolation: `${BLOCKED}, then run a provider sync: for a provider with a saved installation it writes the rules, with or without a project. Check too that the datacenter firewall is on. No sync helps when the message says that the tenant address pool overlaps a management network (choose another pool on the provider's page), or that the rules in place are for another pool, drop a network this provider does not name, accept other sandbox endpoints than this provider's, or are not this provider's set while a project's rules for the pool are in place (another ProxCloud or provider on this Proxmox cluster uses the same pool prefix: give this provider its own; if the rules are this provider's own older ones, delete them in Proxmox under Datacenter, Firewall, then sync).`,
   credentials: "Paste both token secrets in step 2.",
   privileges: RERUN,
@@ -310,6 +330,7 @@ const CODE_ACTION: Record<string, string> = {
   image_import_stalled: "Open Template updates to see the import, then Retry. If it keeps failing, install a newer ProxCloud release.",
   image_blocked: "This image is blocked. For a new installation, install a newer ProxCloud release. An installed platform stays on its release's images: no release changes them yet.",
   seed_clone_failed: "Fix the storage or the node named in the message, then Retry.",
+  platform_network_refused: "The routed platform network could not be made or removed. The message carries the error from Proxmox, or names the vnet or zone that is in the way: correct it in Proxmox (Datacenter, SDN) or name another vnet in step 1, then Retry.",
   seed_config_refused: "The message carries the error from Proxmox: fix the bridge, the store, the node or the token right it names, then Retry. If the message says the seed's CD could not be rendered or built, Retry will not pass: report the message.",
   seed_not_booted: "Open the seed VM's console in Proxmox. Retry builds a new seed when this one never became ready.",
   seed_api_unreachable: "Add a route from the ProxCloud host to the platform network, or correct the seed API sources. Retry writes the seed's firewall rules again first. When the message says the cluster's API refuses the credential: it does so for some seconds after it starts; if the run failed on it, look on the seed VM's console whether its Kubernetes keeps restarting, then Retry.",

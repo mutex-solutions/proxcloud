@@ -18,7 +18,7 @@ import { cn } from "@/lib/utils"
 import { CheckRows, CopyBlock, ErrorNote, LINK, StepCard, errMsg, fetchText, useClusterInfo } from "@/pages/setup/common"
 import {
   CAPI_TOKEN, CSI_TOKEN, GROUPS, PLATFORM_KEY, GROUP_USE, TOKEN_SECRET, checkAction, emptyForm, errCode, errProblems, formToSpec, isConflict, labProfile, specToForm, validate,
-  type BOM, type Check, type Form, type Installation, type MachineForm, type Plan, type Problem, type Upgrade,
+  type BOM, type Check, type Form, type Installation, type MachineForm, type Plan, type Problem, type TenantProbe, type Upgrade,
 } from "./model"
 
 const base = (id: string) => `/admin/platform/installations/${id}`
@@ -188,11 +188,34 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
 
       <H3>Platform network</H3>
       <p className="text-sm text-muted-foreground">
-        A network of its own for the seed and the platform cluster, untagged on one bridge. Tenants must not reach the seed, the API
+        A network of its own for the seed and the platform cluster. Tenants must not reach the seed, the API
         address or the node range; they do reach the load balancer range.
       </p>
+      <fieldset className="grid content-start gap-1.5" aria-describedby={problems.some((p) => p.field === "networkMode") ? "networkMode-error" : undefined}>
+        <legend className="mb-1.5 text-sm font-medium">Where the network comes from</legend>
+        <label className="flex items-start gap-2 text-sm">
+          <input type="radio" name="pf-network-mode" className="mt-1" checked={form.networkMode === "bridge"} disabled={fixed} onChange={() => setForm({ ...form, networkMode: "bridge", bridge: "" })} />
+          <span>An existing bridge. It exists on every node used, and your router routes the network. A VLAN tag is optional: with one, no bridge or vnet of its own is needed for the VLAN.</span>
+        </label>
+        <label className="flex items-start gap-2 text-sm">
+          <input type="radio" name="pf-network-mode" className="mt-1" checked={form.networkMode === "routed"} disabled={fixed} onChange={() => setForm({ ...form, networkMode: "routed", vlan: "", bridge: "" })} />
+          <span>Routed by the node (one Proxmox node only). ProxCloud makes the network as an SDN vnet whose gateway the node holds, with SNAT. Tenant traffic to the platform then never leaves the node. Everything outside the node needs a route to this network through the node's address. Not verified on a lab.</span>
+        </label>
+        {problems.filter((p) => p.field === "networkMode").map((p) => <p key={p.message} id="networkMode-error" className="text-xs text-destructive">{p.message}</p>)}
+      </fieldset>
+      {/* The name means another thing in each mode (a bridge that exists, a vnet that must not), so a switch empties it:
+          a bridge's name carried into "routed" would ask Proxmox for a vnet named like a live interface. */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <Field id="bridge" label="Bridge" list="pf-bridges" value={form.bridge} onChange={set("bridge")} disabled={fixed} problems={problems} placeholder="vmbr1" />
+        {form.networkMode === "routed" ? (
+          <Field id="bridge" label="Vnet name" value={form.bridge} onChange={set("bridge")} disabled={fixed} problems={problems} placeholder="pcplat0"
+            hint="A name Proxmox does not have yet: the install makes the vnet." />
+        ) : (
+          <>
+            <Field id="bridge" label="Bridge" list="pf-bridges" value={form.bridge} onChange={set("bridge")} disabled={fixed} problems={problems} placeholder="vmbr1" />
+            <Field id="vlan" label="VLAN tag (optional)" inputMode="numeric" value={form.vlan} onChange={set("vlan")} disabled={fixed} problems={problems} placeholder="140"
+              hint="1 to 4094. Every machine's NIC on the bridge gets this tag." />
+          </>
+        )}
         <Field id="prefix" label="Network" value={form.prefix} onChange={set("prefix")} disabled={fixed} problems={problems} placeholder="10.90.0.0/24" />
         <Field id="gateway" label="Gateway" value={form.gateway} onChange={set("gateway")} disabled={fixed} problems={problems} placeholder="10.90.0.1" />
         <Field id="dns" label="DNS servers" value={form.dns} onChange={set("dns")} disabled={fixed} problems={problems} placeholder="10.90.0.1" hint="One to three, separated by commas." />
@@ -353,6 +376,74 @@ export function IdentitiesStep({ installation, tokenId, canManage }: { installat
 
 // ── Step 3: Check ─────────────────────────────────────────────────────────────
 
+const PROBE_RESULT = { open: "opened", refused: "answered (refused)", none: "no answer" } as const
+
+// "Test the tenant path": the one check that opens a connection, and the only one that writes to Proxmox (a throwaway
+// network and VM, removed again). It runs when the button is pressed, never with Check, and only on an installed platform.
+function TenantPathTest({ installation, canManage }: { installation: Installation; canManage: boolean }) {
+  const qc = useQueryClient()
+  const key = [...PLATFORM_KEY, "tenant-path-probe", installation.id]
+  const c = installation.spec.clusters[0]
+  const nodes = [...new Set([c.controlPlane.node, ...c.nodeGroups.flatMap((g) => g.nodes)])].sort()
+  const [node, setNode] = useState(c.controlPlane.node)
+  const probe = useQuery({
+    queryKey: key,
+    queryFn: () => apiFetch<TenantProbe>(`${base(installation.id)}/tenant-path-probe`).catch((e) => { if (errCode(e) === "no_probe") return null; throw e }),
+    refetchInterval: (q) => (q.state.data?.state === "running" ? 3000 : false),
+    retry: false,
+  })
+  const start = useMutation({
+    mutationFn: () => apiFetch<TenantProbe>(`${base(installation.id)}/tenant-path-probe`, { method: "POST", body: { node } }),
+    onSuccess: (p) => qc.setQueryData(key, p),
+  })
+  const p = probe.data
+  const running = p?.state === "running"
+  return (
+    <section aria-label="Test of the tenant path" className="grid gap-2 rounded-lg border p-3 text-sm">
+      <h3 className="font-semibold">Test the tenant path</h3>
+      <p className="text-muted-foreground">
+        The checks above read the configuration. This test opens a connection: it makes a small network in the tenant zone and a small VM on the
+        chosen node, connects from it to what listens in the load balancer range, and removes both again. It costs one VM clone and two SDN applies,
+        takes a few minutes, and needs a tenant cluster or database to connect to and a published Ubuntu or Debian template on the node.
+      </p>
+      <div className="flex flex-wrap items-end gap-3">
+        <div className="grid gap-1.5">
+          <Label htmlFor="probe-node">Node to test from</Label>
+          <select id="probe-node" className="h-9 rounded-md border bg-background px-2 font-mono text-sm" value={node} onChange={(e) => setNode(e.target.value)} disabled={!canManage || running || start.isPending}>
+            {nodes.map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </div>
+        <Button variant="outline" disabled={!canManage || running || start.isPending} onClick={() => start.mutate()}>
+          {running || start.isPending ? "Testing…" : "Test the tenant path"}
+        </Button>
+      </div>
+      <ErrorNote title="The test did not start" error={start.error} />
+      <ErrorNote title="The last test could not be read" error={probe.error} />
+      {p ? (
+        <div className="grid gap-1.5" role="status">
+          <p>
+            <span className="mr-2 font-mono text-xs text-muted-foreground">{p.state}</span>
+            {running ? `Running on ${p.node}: ${p.step || "starting"}.` : p.message}
+          </p>
+          {!running && p.targets?.length ? (
+            <ul aria-label="Connections of the last test" className="list-disc pl-5 text-muted-foreground">
+              {p.targets.map((t) => (
+                <li key={`${t.address}:${t.port}`}>
+                  <span className="font-mono">{t.address}:{t.port}</span> {t.result ? PROBE_RESULT[t.result] : "not tried"}
+                  {t.expect === "closed" ? " (the platform's own API address: tenants must not reach it)" : ""}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {p.left?.length ? (
+            <Alert variant="destructive"><AlertTitle>The cleanup left something behind</AlertTitle><AlertDescription><ul className="list-disc pl-5">{p.left.map((l) => <li key={l}>{l}</li>)}</ul></AlertDescription></Alert>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
 export function CheckStep({ installation, canManage, dirty }: { installation: Installation; canManage: boolean; dirty: boolean }) {
   const check = useMutation({
     mutationFn: () => apiFetch<{ ok: boolean; checks: Check[] }>(`${base(installation.id)}/preflight`, { method: "POST", body: {} }),
@@ -379,6 +470,7 @@ export function CheckStep({ installation, canManage, dirty }: { installation: In
         </p>
       ) : null}
       <CheckRows checks={check.data?.checks} />
+      {installation.status.bom ? <TenantPathTest installation={installation} canManage={canManage} /> : null}
       {failed.length ? (
         <div className="grid gap-2">
           <h3 className="text-sm font-semibold">What to do</h3>

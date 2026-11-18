@@ -56,6 +56,11 @@ Four charts live here:
   registered no Node in that time, while at most `maxUnhealthy` machines of the group (a number,
   capped at the group's count minus one) are not healthy. The default is 0: no object, and the
   same render as 0.1.13 ([managed-k8s.md](../../docs/managed-k8s.md#a-worker-that-does-not-join)).
+  The same 0.1.14 reads `proxmox.network.vlan` (1 to 4094): the control plane's and every node
+  group's machine template gets `networkDevices[].vlan`, which the Cluster API provider writes as
+  `tag=<n>` on the NIC. Without the value the render is what 0.1.13 gave, so an existing cluster
+  keeps its machine templates. The portal writes it only for a platform network with a VLAN tag
+  ([managed-services.md](../../docs/managed-services.md#the-platform-network-bridge-vlan-tag-or-routed)).
 
 ## Publishing
 
@@ -80,8 +85,9 @@ For `database-cluster`, `proxmox-kamaji-cluster` and `proxcloud-platform`, bump 
 in the PR that changes the chart, merge, then have a maintainer deliberately cut
 the matching tag. The current source versions are database `0.5.1` (published and pinned by
 the platform BOM), Kubernetes `0.1.14` and platform `0.1.3` (neither published: the BOM still
-pins `0.1.13` and `0.1.2`, which are; platform `0.1.3` adds `delete` on Machines and read access
-to MachineHealthChecks for the provider's service account);
+pins `0.1.13` and `0.1.2`, which are, and stays on them until the tags are cut; Kubernetes
+`0.1.14` adds the node groups' MachineHealthCheck and the VLAN tag; platform `0.1.3` adds `delete`
+on Machines and read access to MachineHealthChecks for the provider's service account);
 they are independent of the app's `0.8.2`. Publishing is idempotent — an
 already-published version is skipped, so a reused version does not update an old
 artifact. These are release operations, not commands to run during normal setup.

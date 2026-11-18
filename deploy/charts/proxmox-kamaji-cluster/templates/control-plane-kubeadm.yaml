@@ -41,6 +41,7 @@ pod in it, whatever chart created the pod.
 {{- $machine := dict "sourceNode" $node "templateID" (int (index $kv 1)) "allowedNodes" (list $node) "storage" .Values.proxmox.storage "format" "raw" "full" true "pool" .Values.proxmox.pool "checks" (dict "skipCloudInitStatus" true) "tags" $cp.machineTags "numSockets" 1 "numCores" (int $cp.machineCores) "memoryMiB" (int $cp.machineMemoryMiB) "disks" (dict "bootVolume" (dict "disk" "scsi0" "sizeGb" (int $cp.machineRootVolume.diskSize))) }}
 {{- $device := dict "name" "net0" "bridge" $net.bridge "model" "virtio" }}
 {{- if $net.mtu }}{{- $_ := set $device "linkMtu" (int $net.mtu) }}{{- $_ := set $device "mtu" 1 }}{{- end }}
+{{- if $net.vlan }}{{- $_ := set $device "vlan" (int $net.vlan) }}{{- end }}
 {{- $_ := set $machine "network" (dict "networkDevices" (list $device)) }}
 {{- $mtName := printf "%s-cp-%s-%s" .Release.Name $node (toJson $machine | sha256sum | trunc 8) }}
 {{- $kubelet := list (dict "name" "provider-id" "value" "proxmox://'{{ ds.meta_data.instance_id }}'") (dict "name" "node-ip" "value" "__NODE_IP__") (dict "name" "node-labels" "value" (printf "topology.kubernetes.io/region=%s,topology.kubernetes.io/zone=%s" .Values.proxmox.region $node)) }}

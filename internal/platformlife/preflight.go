@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/templateupdates"
@@ -23,7 +24,8 @@ const (
 	CheckFail = "fail"
 )
 
-// Check is one row of the preflight. The ids are part of the API (docs/api.md): flags, spec, network, isolation,
+// Check is one row of the preflight. The ids are part of the API (docs/api.md): flags, spec, network, bridge (a failure before the
+// first install, a warning after it), isolation,
 // tenant-network and tenant-path (a warning or ok, never a failure; absent when the provider names no zone), csi-vmid (a warning or ok, never a failure), credentials,
 // machines (a warning or ok, never a failure; absent while the installation has no VM), privileges:capi, privileges:csi, privileges:kubemint, mint-scope, pool-fence, token-scope, iso-store-visibility,
 // boot-iso-grant, boot-iso, placement, images. A run's first stage fails preflight_failed with the failed rows as its items, or
@@ -132,11 +134,23 @@ func (p Preflight) Run(ctx context.Context) []Check {
 	if err := in.Validate(); err != nil {
 		spec = strings.Split(err.Error(), "\n")
 	}
+	// What the record alone cannot say: whether the cluster chart of this installation's BOM tags a NIC.
+	if bom, err := bomOf(in); err == nil && s.Network.VLAN > 0 && !kamaji.ChartHasVLAN(ClusterChartVersion(bom)) {
+		spec = append(spec, fmt.Sprintf("spec.network.vlan %d: the platform's BOM (release %s) names cluster chart %s, which cannot tag a NIC; a VLAN tag needs chart %s or newer, so use a bridge or vnet that carries the VLAN untagged",
+			s.Network.VLAN, bom.Release, ClusterChartVersion(bom), kamaji.VLANChartVersion))
+	}
 	row("spec", spec, "The installation is complete and consistent.")
 
 	mgmt, complete, err := p.Portal.C.ManagementCIDRs(ctx)
 	site := p.Site
 	site.Mgmt = mgmt
+	if s.Network.Routed() && err == nil && complete {
+		// A routed network is one the node itself routes: it must not be a network the node is already in.
+		var all bool
+		if site.NodeAddrs, all, err = p.Portal.C.NodeAddresses(ctx); err == nil {
+			complete = all
+		}
+	}
 	var unread []string
 	switch {
 	case err != nil:
@@ -148,7 +162,12 @@ func (p Preflight) Run(ctx context.Context) []Check {
 		row("network", unread, "")
 		row("isolation", unread, "")
 	} else {
-		row("network", in.SiteProblems(site), "The platform network is apart from every tenant, sandbox and public network, and tenants can reach the MetalLB range.")
+		passed := "The platform network is apart from every tenant, sandbox and public network, and tenants can reach the MetalLB range."
+		if s.Network.Routed() {
+			passed += " It is routed by the node " + s.Seed.Node + ": everything outside that node (the ProxCloud host, your workstation) needs the route \"" +
+				s.Network.Prefix + " via the address of " + s.Seed.Node + "\" to reach the seed and the API address. No check reads that route."
+		}
+		row("network", in.SiteProblems(site), passed)
 		// Layer 0 drops tenant traffic to the management and blocked networks only.
 		if unf := in.Unfenced(append(slices.Clone(site.Blocked), mgmt...)); len(unf) > 0 {
 			row("isolation", []string{"Tenants could reach the seed, the API VIP or the node range: add " + strings.Join(unf, ", ") +
@@ -168,6 +187,8 @@ func (p Preflight) Run(ctx context.Context) []Check {
 			}
 		}
 	}
+
+	out = append(out, p.bridge(ctx))
 
 	// A warning, never a failure: the platform installs and databases run on any zone. But a tenant cluster's nodes get
 	// fixed addresses, and a cluster create on a network whose zone has DHCP is refused. The create reads the live
@@ -256,7 +277,13 @@ func (p Preflight) Run(ctx context.Context) []Check {
 		}
 		row(id, missing, who+" holds what it needs.")
 	}
-	privs("privileges:capi", p.CAPI, pve.CAPITokenID, pve.CAPIPrivileges(s.Storage.Boot, s.Storage.ISO))
+	capi := pve.CAPIPrivileges(s.Storage.Boot, s.Storage.ISO)
+	// The path Proxmox checks for a NIC of this network, not /sdn/zones alone: a row of the token's own below it
+	// replaces what /sdn/zones passes down.
+	if path := p.nicPath(ctx); path != "" {
+		capi = append(capi, pve.PrivCheck{Path: path, Privs: []string{"SDN.Use"}})
+	}
+	privs("privileges:capi", p.CAPI, pve.CAPITokenID, capi)
 	privs("privileges:csi", p.CSI, pve.CSITokenID, pve.CSIPrivileges(s.Storage.Boot))
 	// The paths a mint writes, not their parents alone: a store or zone with a row of its own reads complete on the
 	// parent and refuses the cluster token's row (production, 2026-11-17: every tenant cluster create failed on it).
@@ -416,6 +443,86 @@ func (p Preflight) Run(ctx context.Context) []Check {
 	return out
 }
 
+// nicPath is the ACL path Proxmox checks SDN.Use on when a NIC is put on the platform network, where that is not
+// /sdn/zones/<zone>/<bridge> of an existing bridge (which the row read before this field existed does not name): the
+// vnet of a routed network, and the tag of a VLAN (/sdn/zones/localnetwork/<bridge>/<tag>, or the vnet's zone when
+// the bridge is a vnet; a vnet list that cannot be read counts as none). "" otherwise.
+func (p Preflight) nicPath(ctx context.Context) string {
+	n := p.Installation.Spec.Network
+	switch {
+	case n.Routed():
+		return "/sdn/zones/" + RoutedZone + "/" + n.Bridge
+	case n.VLAN > 0:
+		zone := "localnetwork"
+		vnets, _ := p.Portal.C.ListSDNVnets(ctx)
+		if i := slices.IndexFunc(vnets, func(v pve.SDNVnet) bool { return v.Vnet == n.Bridge }); i >= 0 {
+			zone = vnets[i].Zone
+		}
+		return fmt.Sprintf("/sdn/zones/%s/%s/%d", zone, n.Bridge, n.VLAN)
+	}
+	return ""
+}
+
+// bridge is the bridge row. Mode bridge: every node a machine is placed on has the bridge (a Linux or OVS bridge, or
+// an SDN vnet). Mode routed: the vnet's name is free, or the vnet is this installation's. Before the first install a
+// miss fails; after it the network is fixed and the machines run on it, so a miss can only be a read that went wrong:
+// a warning, so that no apply of an installed platform stops on it.
+func (p Preflight) bridge(ctx context.Context) Check {
+	in := p.Installation
+	n := in.Spec.Network
+	miss := func(msg string) Check {
+		if in.Installed() {
+			return Check{ID: "bridge", Status: CheckWarn, Message: msg}
+		}
+		return Check{ID: "bridge", Status: CheckFail, Message: msg}
+	}
+	ok := func(msg string) Check { return Check{ID: "bridge", Status: CheckOK, Message: msg} }
+	if n.Routed() {
+		vnets, err := p.Portal.C.ListSDNVnets(ctx)
+		if err != nil {
+			return miss("Could not read the SDN vnets: " + err.Error())
+		}
+		i := slices.IndexFunc(vnets, func(v pve.SDNVnet) bool { return v.Vnet == n.Bridge })
+		switch {
+		case i < 0:
+			if taken, err := ifaceTaken(ctx, p.Portal.C, n.Bridge); err != nil {
+				return miss("Could not read the nodes' interfaces, so whether the name " + n.Bridge + " is free is not known: " + err.Error())
+			} else if taken != "" {
+				return miss(taken)
+			}
+			return ok("No vnet " + n.Bridge + " exists yet: the install makes it in the simple zone " + RoutedZone + " on " + in.Spec.Seed.Node + ", with the subnet " + n.Prefix +
+				", the gateway " + n.Gateway + " on the node and SNAT, and applies SDN.")
+		case vnets[i].Alias != networkAlias(in.ID):
+			return miss("Proxmox already has a vnet " + n.Bridge + " (zone " + vnets[i].Zone + ") that this installation did not make: name another vnet, or use mode bridge to install on it.")
+		}
+		return ok("The vnet " + n.Bridge + " of zone " + vnets[i].Zone + " is this installation's.")
+	}
+	nodes := []string{in.Spec.Seed.Node}
+	for _, c := range in.Spec.Clusters {
+		nodes = append(nodes, c.ControlPlane.Node)
+		for _, g := range c.NodeGroups {
+			nodes = append(nodes, g.Nodes...)
+		}
+	}
+	nodes = slices.DeleteFunc(slices.Compact(slices.Sorted(slices.Values(nodes))), func(s string) bool { return s == "" })
+	bridges, err := p.Portal.C.NodeBridges(ctx)
+	if err != nil {
+		return miss("Could not read the nodes' bridges: " + err.Error())
+	}
+	without := slices.DeleteFunc(slices.Clone(nodes), func(node string) bool {
+		return slices.ContainsFunc(bridges, func(b pve.NodeBridge) bool { return b.Node == node && b.Iface == n.Bridge })
+	})
+	if len(without) > 0 {
+		return miss("No bridge or vnet " + n.Bridge + " was found on " + strings.Join(without, ", ") +
+			" (or the node did not report its networks): the settings place machines there. Correct the bridge or the nodes; an SDN vnet must be applied (Datacenter, SDN, Apply).")
+	}
+	msg := "The bridge " + n.Bridge + " exists on " + strings.Join(nodes, ", ") + "."
+	if n.VLAN > 0 {
+		msg += fmt.Sprintf(" Every NIC on it is tagged with VLAN %d: the site's switches and router must carry and route that VLAN, which no check reads.", n.VLAN)
+	}
+	return ok(msg)
+}
+
 // tenantPathGuide is where the tenant-path row sends the operator.
 const tenantPathGuide = `docs/managed-services.md, "The path from tenants to the platform"`
 
@@ -433,7 +540,8 @@ const tenantPathGuide = `docs/managed-services.md, "The path from tenants to the
 // platform bridge (a vnet of a simple zone with that gateway on a subnet, or the node's own interface). It opens no
 // connection, so it cannot prove the path, and it does not see an address added on a node at runtime.
 func (p Preflight) tenantPath(ctx context.Context, site Site, zones []pve.SDNZone, zonesErr error) Check {
-	const limit = " This row reads the configuration only: it opens no connection, and it does not see an address or a rule added on a node by hand."
+	const limit = " This row reads the configuration only: it opens no connection, and it does not see an address or a rule added on a node by hand. " +
+		"\"Test the tenant path\" opens one from a tenant network, once the platform is installed (POST …/tenant-path-probe)."
 	n := p.Installation.Spec.Network
 	ok := func(msg string) Check { return Check{ID: "tenant-path", Status: CheckOK, Message: msg + limit} }
 	unknown := func(what string, err error) Check {
@@ -490,6 +598,11 @@ func (p Preflight) tenantPath(ctx context.Context, site Site, zones []pve.SDNZon
 	vnets, err := p.Portal.C.ListSDNVnets(ctx)
 	if err != nil {
 		return unknown("the SDN vnets", err)
+	}
+	// A routed network that the install has yet to make: the node will hold its gateway.
+	if n.Routed() && !slices.ContainsFunc(vnets, func(v pve.SDNVnet) bool { return v.Vnet == n.Bridge }) {
+		return ok("The platform network " + n.Prefix + " is of mode routed: the install makes it as a vnet whose gateway " + n.Gateway + " the node " +
+			strings.Join(shared, ", ") + " holds, so tenant traffic to it never leaves the node. " + how + ".")
 	}
 	routed := "The platform network " + n.Prefix + " is routed by the node itself (it holds the gateway " + n.Gateway + " on " + n.Bridge + "), so tenant traffic to it never leaves the node. " + how + "."
 	var bridge string // what the platform bridge is, when the node does not route it

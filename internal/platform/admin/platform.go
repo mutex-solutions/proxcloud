@@ -36,6 +36,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -54,6 +55,11 @@ func (h *Handler) SetPlatform(s *platformlife.Store) { h.platform = s }
 // SetPlatformRuns lets POST …/runs enqueue on jobs; cmd/api calls it only where the platform runner runs.
 func (h *Handler) SetPlatformRuns(jobs *durablejobs.Store) { h.platformJobs = jobs }
 
+// SetPlatformSDNLock wires the site's SDN apply lock for the tenant path test's throwaway network.
+func (h *Handler) SetPlatformSDNLock(l func(ctx context.Context) (release func(), acquired bool, err error)) {
+	h.platformSDNLock = l
+}
+
 func (h *Handler) routePlatform(r chi.Router) {
 	r.Get("/platform/bom", h.platformBOM)
 	r.Get("/platform/installations", h.platformList)
@@ -62,6 +68,8 @@ func (h *Handler) routePlatform(r chi.Router) {
 	r.Put("/platform/installations/{id}", h.platformUpdate)
 	r.Put("/platform/installations/{id}/credentials", h.platformCredentials)
 	r.Post("/platform/installations/{id}/preflight", h.platformPreflight)
+	r.Get("/platform/installations/{id}/tenant-path-probe", h.platformTenantProbe)
+	r.Post("/platform/installations/{id}/tenant-path-probe", h.platformTenantProbeStart)
 	r.Get("/platform/installations/{id}/plan", h.platformPlan)
 	r.Post("/platform/installations/{id}/runs", h.platformRunStart)
 	r.Get("/platform/installations/{id}/runs", h.platformRuns)
@@ -406,6 +414,78 @@ func (h *Handler) platformPreflight(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.OK(w, map[string]any{"ok": platformlife.OK(checks), "checks": checks})
+}
+
+// platformTenantProbe answers the installation's last tenant path test (404 no_probe when none was run).
+func (h *Handler) platformTenantProbe(w http.ResponseWriter, r *http.Request) {
+	if !h.platformGate(w, r, serviceReadPerm) {
+		return
+	}
+	p, err := h.platform.Probe(r.Context(), chi.URLParam(r, "id"))
+	if httpx.WriteError(w, err) {
+		return
+	}
+	if p == nil {
+		platformErr(w, http.StatusNotFound, "no_probe", "The tenant path of this installation was not tested yet.", nil)
+		return
+	}
+	// A probe cut off by an API restart reads as an error, so the page stops waiting for it.
+	httpx.OK(w, p.View(time.Now()))
+}
+
+// platformTenantProbeStart starts "Test the tenant path" (platformlife.TenantProber) and answers at once with the
+// probe as running; GET reads how it ends. It writes to Proxmox (a throwaway network and VM), so the admin audit
+// middleware records it like every installation write, and it is refused during a run of the installation. A refusal (409, with its code) comes before anything is created.
+func (h *Handler) platformTenantProbeStart(w http.ResponseWriter, r *http.Request) {
+	if !h.platformGate(w, r, externalServiceManagePerm) {
+		return
+	}
+	var req struct {
+		Node string `json:"node"`
+	}
+	if r.ContentLength != 0 && !decodeStrictLimited(w, r, &req, 1<<10) {
+		return
+	}
+	ctx := r.Context()
+	in, err := h.platform.Get(ctx, chi.URLParam(r, "id"))
+	if platformStoreErr(w, err) {
+		return
+	}
+	if run, err := h.platform.ActiveRun(ctx, in.ID); httpx.WriteError(w, err) {
+		return
+	} else if run != nil {
+		platformStoreErr(w, platformlife.ErrRunActive)
+		return
+	}
+	if h.esSvc == nil || h.pveFor == nil {
+		httpx.WriteError(w, serviceNotFoundErr(in.ServiceID))
+		return
+	}
+	es, err := h.esSvc.Get(ctx, in.ServiceID)
+	if err != nil || es == nil {
+		httpx.WriteError(w, serviceNotFoundErr(in.ServiceID))
+		return
+	}
+	portal, err := h.pveFor(es)
+	if err != nil {
+		httpx.WriteError(w, httpx.BadRequest("Proxmox connection failed: "+err.Error()))
+		return
+	}
+	prober := &platformlife.TenantProber{Portal: portal, Net: es.PVENetworkConfig(), SDNLock: h.platformSDNLock, Load: h.platform.Probe, Save: h.platform.SaveProbe}
+	p, err := prober.Start(ctx, in, req.Node, adminActor(r))
+	var refused *platformlife.ProbeRefused
+	if errors.As(err, &refused) {
+		platformErr(w, http.StatusConflict, refused.Code, refused.Message, nil)
+		return
+	}
+	if httpx.WriteError(w, err) {
+		return
+	}
+	// The probe outlives the request: its cleanup must run whatever the client does.
+	started := *p
+	started.Targets = slices.Clone(p.Targets) // Run writes each target's result
+	go prober.Run(context.WithoutCancel(ctx), p)
+	httpx.Raw(w, http.StatusAccepted, httpx.Response[platformlife.TenantProbe]{Data: &started})
 }
 
 // PlatformPreflight runs the read-only checks of an installation against its provider; a run's first stage calls it.

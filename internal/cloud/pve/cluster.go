@@ -223,6 +223,33 @@ func (c *Client) IfaceAddress(ctx context.Context, node, iface string) (string, 
 	return "", nil
 }
 
+// NodesWithIface lists, sorted, the nodes whose saved network configuration (/nodes/{node}/network, every type:
+// bridges, bonds, VLANs, physical ports) has an interface named iface. An SDN vnet is not in that list. A node that
+// cannot answer is an error: the caller is about to give the name to something new.
+func (c *Client) NodesWithIface(ctx context.Context, iface string) ([]string, error) {
+	nodeIP, err := c.clusterNodeIPs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for node := range nodeIP {
+		var ifaces []struct {
+			Iface string `json:"iface"`
+		}
+		if err := c.get(ctx, "/nodes/"+url.PathEscape(node)+"/network", nil, &ifaces); err != nil {
+			return nil, fmt.Errorf("the networks of %s: %w", node, err)
+		}
+		for _, i := range ifaces {
+			if i.Iface == iface {
+				out = append(out, node)
+				break
+			}
+		}
+	}
+	slices.Sort(out)
+	return out, nil
+}
+
 // NodeAddresses lists every IPv4 address the nodes hold, as /32: the /cluster/status address and the address of every
 // interface in /nodes/{node}/network (uplinks, bonds and VLANs too, not only bridges with a gateway). What a node
 // cannot answer for is left out and complete comes back false, as in ManagementCIDRs.

@@ -17,6 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/mutex-solutions/proxcloud/deploy"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 )
 
@@ -37,9 +38,10 @@ type RenderInput struct {
 	WorkerMTU   int            // the tenant vnets' MTU: the Kubernetes provider's workerMtu (0 = the guest default)
 }
 
-// RenderNetwork is the untagged platform network the seed and the workload VMs share.
+// RenderNetwork is the platform network the seed and the workload VMs share. VLAN tags every NIC on Bridge (0 = none).
 type RenderNetwork struct {
 	Bridge, Gateway string
+	VLAN            int
 	Prefix          int
 	DNS             []string
 	MTU             int
@@ -131,6 +133,16 @@ func placementValues(group string) map[string]any {
 	return map[string]any{"nodeSelector": nodeSelector, "tolerations": tolerations}
 }
 
+// ClusterChartVersion is the version of the chart b builds the workload cluster from ("" when b names none).
+func ClusterChartVersion(b *BOM) string {
+	for _, c := range b.Components {
+		if c.Cluster == ClusterSeed && c.Name == ClusterName {
+			return c.Chart.Version
+		}
+	}
+	return ""
+}
+
 // ClusterValues are the proxmox-kamaji-cluster values of the workload cluster: controlPlane.kind kubeadm, one control
 // plane VM, the node groups in pool proxcloud-system, each group labelled and every group but system tainted.
 func ClusterValues(b *BOM, in RenderInput) (map[string]any, error) {
@@ -174,6 +186,18 @@ func ClusterValues(b *BOM, in RenderInput) (map[string]any, error) {
 	for i, r := range in.Cluster.NodeRange {
 		nodeRange[i] = r
 	}
+	network := map[string]any{
+		"bridge": in.Network.Bridge, "gateway": in.Network.Gateway, "prefix": in.Network.Prefix,
+		"addresses": nodeRange, "dnsServers": dns, "mtu": in.Network.MTU,
+	}
+	// The key is written only with a tag, so a platform without one renders as before under every BOM. An older chart
+	// ignores the key and would put the machines on the bridge untagged: refused, not rendered.
+	if in.Network.VLAN > 0 {
+		if v := ClusterChartVersion(b); !kamaji.ChartHasVLAN(v) {
+			return nil, fmt.Errorf("platform: the BOM of release %s names cluster chart %s, which cannot tag a NIC: a VLAN tag needs chart %s or newer", b.Release, v, kamaji.VLANChartVersion)
+		}
+		network["vlan"] = in.Network.VLAN
+	}
 	return map[string]any{
 		"kubernetesVersion":          b.Kubernetes.Version,
 		"cloudCredentialsSecretName": PVECredentialsSecretName,
@@ -186,10 +210,7 @@ func ClusterValues(b *BOM, in RenderInput) (map[string]any, error) {
 		}},
 		"proxmox": map[string]any{
 			"region": in.Region, "pool": "proxcloud-system", "storage": in.BootStorage,
-			"network": map[string]any{
-				"bridge": in.Network.Bridge, "gateway": in.Network.Gateway, "prefix": in.Network.Prefix,
-				"addresses": nodeRange, "dnsServers": dns, "mtu": in.Network.MTU,
-			},
+			"network": network,
 		},
 		"nodeGroups": groups,
 	}, nil

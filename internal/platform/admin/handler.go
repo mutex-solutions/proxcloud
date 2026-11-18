@@ -127,6 +127,8 @@ type Handler struct {
 	// platform is the managed-services platform store (SetPlatform, PROXCLOUD_PLATFORM_ENABLED; nil → its
 	// installation routes answer 404).
 	platform *platformlife.Store
+	// platformSDNLock is the SDN apply lock the tenant path test takes (SetPlatformSDNLock; nil in tests).
+	platformSDNLock func(ctx context.Context) (release func(), acquired bool, err error)
 	// platformJobs is the durable job store runs are enqueued on (SetPlatformRuns: only when the runner runs; nil →
 	// POST …/runs answers 409 platform_disabled).
 	platformJobs *durablejobs.Store

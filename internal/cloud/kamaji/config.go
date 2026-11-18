@@ -52,6 +52,13 @@ const PlacementChartVersion = "0.1.13"
 // ChartHasPlacement reports whether chart version v places a node group by machinePlacement.
 func ChartHasPlacement(v string) bool { return chartAtLeast(v, PlacementChartVersion) }
 
+// VLANChartVersion is the first cluster chart that reads proxmox.network.vlan (CAPMOX networkDevices[].vlan). An older
+// chart ignores the key and leaves the machines untagged on the bridge.
+const VLANChartVersion = "0.1.14"
+
+// ChartHasVLAN reports whether chart version v tags the machines' NIC with proxmox.network.vlan.
+func ChartHasVLAN(v string) bool { return chartAtLeast(v, VLANChartVersion) }
+
 // MachineHealthCheckChartVersion is the first cluster chart that reads machineHealthCheck: one MachineHealthCheck per
 // node group, which replaces a worker that registered no Node within the startup timeout. An older chart ignores
 // the key, so none is written for a cluster pinned below it.

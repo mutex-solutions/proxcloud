@@ -53,10 +53,16 @@ type Storage struct {
 	Import string `json:"import"`
 }
 
-// Network is the platform network, untagged on one bridge (no VLAN in M1, as in the installer).
+// Network is the platform network the seed and the platform machines share. Mode bridge (also what a stored spec
+// without a mode means): Bridge exists on every node used, and VLAN, when set, tags every NIC on it (the seed's net0,
+// CAPMOX's networkDevices[].vlan), so a VLAN needs no bridge or vnet of its own. Mode routed: Bridge names a vnet
+// ProxCloud makes in the simple SDN zone RoutedZone, with one subnet Prefix whose gateway the node holds and SNAT on
+// (network.go); every machine is then on one Proxmox node.
 type Network struct {
+	Mode    string   `json:"mode,omitempty"` // bridge (also "") | routed
 	Bridge  string   `json:"bridge"`
-	Prefix  string   `json:"prefix"` // IPv4 CIDR
+	VLAN    int      `json:"vlan,omitempty"` // 1 to 4094, mode bridge only; 0 = untagged
+	Prefix  string   `json:"prefix"`         // IPv4 CIDR
 	Gateway string   `json:"gateway"`
 	DNS     []string `json:"dns"`
 	MTU     int      `json:"mtu,omitempty"`
@@ -205,6 +211,11 @@ const (
 	ImageBOM       = "bom"
 	ImageTemplates = "templates"
 
+	NetworkBridge = "bridge"
+	NetworkRouted = "routed"
+	// RoutedZone is the simple SDN zone of a routed platform network. One per Proxmox cluster, as one installation is.
+	RoutedZone = "pcplat"
+
 	RoleKamaji = "kamaji"
 	RoleDBaaS  = "dbaas"
 
@@ -232,7 +243,11 @@ var (
 	nodeRE    = regexp.MustCompile(`^[A-Za-z0-9]([-A-Za-z0-9]{0,61}[A-Za-z0-9])?$`)
 	storageRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9._-]{0,63}$`)
 	bridgeRE  = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.-]{0,14}$`)
+	vnetRE    = regexp.MustCompile(`^[a-z][a-z0-9]{0,7}$`) // a Proxmox SDN vnet id
 )
+
+// Routed reports mode routed: ProxCloud makes the platform network and the node routes it.
+func (n Network) Routed() bool { return n.Mode == NetworkRouted }
 
 // Normalize fills the defaults of a new or updated installation: shared layout, a portal-built seed in pool
 // proxcloud-seed, one cluster pc-platform that runs both services, and the BOM's node image.
@@ -306,8 +321,35 @@ func (in *Installation) Validate() error {
 	}
 
 	n := s.Network
-	if !bridgeRE.MatchString(n.Bridge) {
-		bad("spec.network.bridge %q is not an interface name", n.Bridge)
+	switch n.Mode {
+	case "", NetworkBridge:
+		if !bridgeRE.MatchString(n.Bridge) {
+			bad("spec.network.bridge %q is not an interface name", n.Bridge)
+		}
+		if n.VLAN < 0 || n.VLAN > 4094 {
+			bad("spec.network.vlan %d is outside 1 to 4094", n.VLAN)
+		}
+	case NetworkRouted:
+		if !vnetRE.MatchString(n.Bridge) {
+			bad("spec.network.bridge %q: with mode routed it names the vnet ProxCloud makes: a lower-case letter, then letters and digits, at most 8", n.Bridge)
+		}
+		if n.VLAN != 0 {
+			bad("spec.network.vlan goes with mode bridge: a routed network is a vnet of its own, without a tag")
+		}
+		// A vnet of a simple zone is a separate network on each node.
+		nodes := []string{s.Seed.Node}
+		for _, c := range s.Clusters {
+			nodes = append(nodes, c.ControlPlane.Node)
+			for _, g := range c.NodeGroups {
+				nodes = append(nodes, g.Nodes...)
+			}
+		}
+		if nodes = slices.Compact(slices.Sorted(slices.Values(nodes))); len(nodes) > 1 {
+			bad("spec.network.mode routed is a layout for one Proxmox node, and the settings place machines on %s: put the seed, the control plane and every node group on one node, or use mode bridge",
+				strings.Join(nodes, ", "))
+		}
+	default:
+		bad("spec.network.mode %q is neither bridge nor routed", n.Mode)
 	}
 	prefix, err := netip.ParsePrefix(n.Prefix)
 	if err != nil || !prefix.Addr().Is4() || prefix != prefix.Masked() || prefix.Bits() < 8 || prefix.Bits() > 29 {
@@ -480,6 +522,8 @@ type Site struct {
 	Sandbox  []string
 	Public   []string // the public networks' CIDRs
 	Mgmt     []string // the nodes' management networks (live; nil when not read)
+	// NodeAddrs: every address the nodes hold, as /32 (live; read for a routed network only).
+	NodeAddrs []string
 	// DefaultZone is the zone a tenant network is made in (config.network.defaultZone) and DefaultZoneKind its kind
 	// (evpn, vlan or simple); both empty when the provider names no zone. DefaultZoneNoDHCP: the zone's config says
 	// dhcp: false (pve.ZoneConfig.NoDHCP).
@@ -514,6 +558,21 @@ func (in *Installation) SiteProblems(site Site) []string {
 					out = append(out, fmt.Sprintf("spec.seed.apiSources %s overlaps %s %s: tenants must not reach the seed", s, what, p))
 				}
 			}
+		}
+	}
+	if in.Spec.Network.Routed() {
+		// The node routes this network and holds its gateway: inside a network the node is already in, the node's own
+		// traffic to that network would go to the vnet. The gateway itself is the node's once the vnet is made.
+		for _, c := range append(slices.Clone(site.Mgmt), site.NodeAddrs...) {
+			p, err := netip.ParsePrefix(strings.TrimSpace(c))
+			if err != nil || !p.Overlaps(prefix) || p.IsSingleIP() && p.Addr().String() == in.Spec.Network.Gateway {
+				continue
+			}
+			what := "the node network " + p.Masked().String()
+			if p.IsSingleIP() {
+				what = "the node address " + p.Addr().String()
+			}
+			out = append(out, fmt.Sprintf("the routed platform network %s overlaps %s: a routed network must be a range no Proxmox node is in", prefix, what))
 		}
 	}
 	fenced := append(slices.Clone(site.Blocked), site.Mgmt...)
@@ -605,7 +664,14 @@ func FixedChanges(old, next *Installation) []string {
 	}
 	same("layout", old.Layout, next.Layout)
 	same("name", old.Name, next.Name)
-	same("spec.network", old.Spec.Network, next.Spec.Network)
+	// A spec stored before the mode existed has none, and means bridge.
+	mode := func(n Network) Network {
+		if n.Mode == "" {
+			n.Mode = NetworkBridge
+		}
+		return n
+	}
+	same("spec.network", mode(old.Spec.Network), mode(next.Spec.Network))
 	same("spec.seed.mode", old.Spec.Seed.Mode, next.Spec.Seed.Mode)
 	same("spec.seed.pool", old.Spec.Seed.Pool, next.Spec.Seed.Pool)
 	same("spec.seed.node", old.Spec.Seed.Node, next.Spec.Seed.Node)
