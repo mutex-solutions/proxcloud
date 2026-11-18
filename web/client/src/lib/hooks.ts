@@ -227,6 +227,16 @@ export function useCloudFeatures(pid: string): Set<CloudFeature> {
   return new Set(scope ? (data?.features?.[scope.serviceId] ?? []) : [])
 }
 
+// The public networks the operator has made available to this project (GET /project/{pid}/public-networks). None
+// means nothing outside the project's networks can reach a server: no SSH from the internet, no load balancer.
+export function usePublicNetworks(pid: string, scope: CloudScope | undefined) {
+  return useQuery({
+    queryKey: ["public-networks", pid, scope?.serviceId],
+    queryFn: () => apiFetch<Array<{ id: string; name?: string }>>(`/project/${pid}/public-networks`, { cloud: scope }),
+    enabled: !!pid && !!scope,
+  })
+}
+
 // Platform feature flags — GET /features (billing, search, ...).
 export function useFeatures() {
   return useQuery({

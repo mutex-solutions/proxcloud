@@ -3,11 +3,12 @@ import { Link, useNavigate, useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { ColumnDef } from "@tanstack/react-table"
 import { toast } from "sonner"
-import { ArrowLeft, Plus, RefreshCw, Scale, Trash2 } from "lucide-react"
+import { ArrowLeft, Plus, RefreshCw, Scale, Trash2, TriangleAlert } from "lucide-react"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { DataTable, sortableHeader } from "@/components/data-table"
 import { EmptyState } from "@/components/empty-state"
 import { StatusBadge } from "@/components/status-badge"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import {
@@ -49,6 +50,18 @@ export default function LoadBalancersPage() {
   const list = useCloudList(pid, "LOAD_BALANCER", "", 15000)
   const rows = useMemo(() => (list.data ?? []) as CloudResource[], [list.data])
   const [open, setOpen] = useState(false)
+  // What this site lacks for a load balancer (no public network for the project, no address left, no appliance
+  // image). Only the operator can change these, so the page says so here instead of failing at create.
+  const warnings = useQuery({
+    queryKey: ["lb-warnings", pid, scope?.serviceId],
+    queryFn: () =>
+      apiFetch<{ result?: string[] }>(`/project/${pid}/cloud/action`, {
+        method: "POST", cloud: scope, body: { action: "LIST_LOAD_BALANCER_WARNINGS" },
+      }),
+    enabled: !!pid && !!scope,
+    select: (d) => (Array.isArray(d?.result) ? d.result.filter((w): w is string => typeof w === "string") : []),
+  })
+  const blocked = (warnings.data?.length ?? 0) > 0
 
   const columns = useMemo<ColumnDef<CloudResource, any>[]>(() => [
     {
@@ -78,16 +91,27 @@ export default function LoadBalancersPage() {
             <Button variant="outline" size="sm" onClick={() => void list.refetch()} disabled={list.isFetching} aria-label="Refresh">
               <RefreshCw className={list.isFetching ? "size-4 animate-spin" : "size-4"} />
             </Button>
-            <Button size="sm" onClick={() => setOpen(true)}><Plus className="size-4" /> Create load balancer</Button>
+            <Button size="sm" onClick={() => setOpen(true)} disabled={blocked}><Plus className="size-4" /> Create load balancer</Button>
           </>
         }
       />
+      {blocked && (
+        <Alert className="mb-4" data-testid="lb-site-warning">
+          <TriangleAlert aria-hidden="true" />
+          <AlertTitle>A load balancer cannot be created on this site yet</AlertTitle>
+          <AlertDescription>
+            <ul className="list-disc pl-4">
+              {warnings.data?.map((w) => <li key={w}>{w}</li>)}
+            </ul>
+          </AlertDescription>
+        </Alert>
+      )}
       {!list.isLoading && !list.error && !rows.length ? (
         <EmptyState
           icon={Scale}
           title="No load balancers yet"
           hint="Create one, then add listeners and the servers behind them."
-          action={<Button onClick={() => setOpen(true)}><Plus className="size-4" /> Create load balancer</Button>}
+          action={<Button onClick={() => setOpen(true)} disabled={blocked}><Plus className="size-4" /> Create load balancer</Button>}
         />
       ) : (
         <DataTable columns={columns} data={rows} isLoading={list.isLoading} error={list.error as Error | null} pagination={false} onRowClick={(r) => navigate(`/p/${pid}/load-balancers/${r.id}`)} />

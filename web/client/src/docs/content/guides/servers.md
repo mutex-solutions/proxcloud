@@ -16,7 +16,12 @@ A server's page exposes the lifecycle controls:
 
 - **Reboot** — asks the guest OS to restart cleanly.
 - **Stop / Start** — power the server off and on. A stopped server keeps its disks and network attachments.
-- From **More actions**: **Rename**, **Resize** (move to another flavor), **Console (VNC)** for a browser console, and **Delete**.
+- From **More actions**: **Rename**, **Resize** (move to another flavor), **Console (VNC)** for a browser console, **Hard reboot**, and **Delete**.
+- **Hard reboot** resets the server without asking the guest, like a reset button: use it when the guest hangs and **Reboot** does nothing. Data the guest had not written to disk is lost.
+
+There is no console log: Proxmox keeps no record of what a server printed on its serial port, so the product has nothing to show after the fact. Open the console to see what the server prints now.
+
+The **Overview** tab has a card, **How to reach this server**. It says what applies on your site: the SSH command when the server has a public address; where to attach one when the site offers a public network; and, when the site offers none, that nothing outside your networks can reach the server and how to log in anyway (**Set password**, then the **Serial** console, or SSH from another server on the same network).
 
 The console page has two tabs. **Serial** is a text terminal on the server's serial port, and **Graphical (VNC)** is its screen. A server made from a cloud image shows its screen on the serial port, so the page opens on **Serial** for it and the graphical tab only shows one line saying so. A serial port replays nothing: press **Enter** to get the login prompt. Logging in there needs a password (**More actions → Set password**); a key pair alone is for SSH. When the server is stopped or started again, an open serial session ends: the page says **Disconnected** within about ten seconds and offers **Reconnect**.
 

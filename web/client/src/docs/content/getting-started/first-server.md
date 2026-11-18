@@ -48,6 +48,15 @@ Open the server's **Network** tab and, in the **Public IP** card, pick a public 
 
 The same is available through the API: the server action `ATTACH_PUBLIC_NETWORK` (`POST /api/v1/project/{id}/cloud/{serverId}/action`, data `networkId` = one of the networks listed by `GET /api/v1/project/{id}/public-networks`) and `DETACH_PUBLIC_NETWORK`.
 
+### If your site has no public network
+
+Not every site offers one. The create form and the server's **Overview** tab ("How to reach this server") say what yours offers. Without a public network nothing outside your project's networks can open SSH to the server, whether you chose a key pair or a password. You still get in two ways:
+
+- **From your browser.** Open **More actions → Set password**, set a password for the image's default user, then open **More actions → Console (VNC)**, the **Serial** tab, and press **Enter** for the login prompt. A key pair cannot be used there.
+- **From another server on the same network**, with `ssh <user>@<private address>` and your key.
+
+A public address needs a public network, which your operator adds to the site and allows for your project.
+
 Once the server has a public address:
 
 1. Make sure one of its security groups allows SSH (port 22) from your address.
