@@ -20,7 +20,7 @@ export type PVECheck = { id: string; status: "ok" | "warn" | "fail"; message: st
 export type NodeBridge = { node: string; iface: string; type: string; cidr?: string; management: boolean }
 export type PVEAuthResult = {
   version?: string
-  nodes?: { node: string; status: string }[]
+  nodes?: { node: string; status: string; maxmem?: number; mem?: number }[] // maxmem, mem: bytes in the node and in use
   storages?: { storage: string; type: string; content?: string }[]
   warnings?: string[]
   checks?: PVECheck[]

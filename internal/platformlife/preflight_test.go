@@ -53,6 +53,7 @@ func (f *preflightPVE) serve(w http.ResponseWriter, r *http.Request) {
 		"/cluster/firewall/rules":               `[]`,
 		"/nodes/pve1/storage/local-lvm/content": `[]`,
 		"/cluster/sdn/vnets":                    `[]`,
+		"/nodes":                                `[{"node":"pve1","status":"online","maxmem":68719476736,"mem":1073741824}]`,
 		"/storage": `[{"storage":"local","type":"dir","content":"iso,import"},{"storage":"local-lvm","type":"lvmthin","content":"images"},
 			{"storage":"nas-iso","type":"nfs","content":"iso","shared":1}]`,
 		"/cluster/resources": `[{"type":"storage","storage":"local","node":"pve1","status":"available"},
@@ -165,8 +166,8 @@ func TestPreflight(t *testing.T) {
 	if !OK(checks) {
 		t.Fatalf("a set-up site: %+v", checks)
 	}
-	if got := len(checks); got != 20 {
-		t.Errorf("%d rows, want 20: %+v", got, checks)
+	if got := len(checks); got != 21 {
+		t.Errorf("%d rows, want 21: %+v", got, checks)
 	}
 	for _, c := range checks {
 		if c.Status != CheckOK {

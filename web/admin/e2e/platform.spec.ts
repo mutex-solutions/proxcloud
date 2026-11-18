@@ -46,7 +46,7 @@ async function fillSettings(page: Page) {
   const fill = (label: string, value: string) => page.getByLabel(label, { exact: true }).fill(value)
   await fill("Name", "lab")
   for (const g of ["system", "kamaji", "dbaas"]) await page.getByRole("checkbox", { name: `Group ${g}: node pve1` }).check()
-  await page.getByRole("button", { name: "Use the lab profile" }).click()
+  await page.getByRole("radio", { name: /^Homelab/ }).check()
   await fill("Bridge", "vmbr1")
   await fill("Network", "10.90.0.0/24")
   await fill("Gateway", "10.90.0.1")
@@ -200,7 +200,7 @@ test("from an empty form to a failed run, then Retry and Cancel", async ({ page 
   await expect(page.getByRole("status").filter({ hasText: "No check failed. 1 warning does not stop the install" })).toBeVisible() // the scheduler row: the mock runs without it
 
   // Review, then Install: the first run of the mock fails at the seed's API.
-  await expect(page.getByText("1 control plane and 3 worker machines in the pool")).toBeVisible()
+  await expect(page.getByText("1 control plane machine and 3 worker machines in the pool")).toBeVisible()
   await expect(page.getByRole("list", { name: "Cores and memory per node" })).toContainText("pve1: 10 cores and 20 GiB of memory")
   await page.getByRole("button", { name: "Install", exact: true }).click()
   const stages = page.getByRole("list", { name: "Stages" })
@@ -806,4 +806,201 @@ test("the tenant path is tested on demand, on an installed platform only", async
   expect(started.body).toEqual({ node: "pve1" })
   await expectAccessible(page)
   await shot(page, "tenant-path-test")
+})
+
+// The addresses and stores every preset test types in; a preset fills the nodes, counts and sizes.
+// Both token secrets, typed by hand (the PC-ENROLL line has its own test).
+async function storeSecrets(page: Page) {
+  await page.getByText("Enter the two secrets by hand instead").click()
+  await page.getByLabel("Secret of capmox@pve!capi").fill(CAPI_SECRET)
+  await page.getByLabel("Secret of csi@pve!csi").fill(CSI_SECRET)
+  await page.getByRole("button", { name: "Store these secrets" }).click()
+  const stored = page.getByRole("list", { name: "Stored token secrets" })
+  await expect(stored).toContainText("capmox@pve!capi: stored. It is never shown again.")
+  await expect(stored).toContainText("csi@pve!csi: stored. It is never shown again.")
+}
+
+async function fillAddresses(page: Page, bridge = "vmbr1") {
+  const fill = (label: string, value: string) => page.getByLabel(label, { exact: true }).fill(value)
+  await fill("Name", "lab")
+  if (bridge) await fill("Bridge", bridge)
+  for (const [label, v] of [["Network", "10.90.0.0/24"], ["Gateway", "10.90.0.1"], ["DNS servers", "10.90.0.1"], ["API address", "10.90.0.10"], ["Node range", "10.90.0.20-10.90.0.60"],
+    ["Load balancer range", "10.90.0.100-10.90.0.150"], ["Proxmox API URL", "https://10.90.0.2:8006"], ["Seed address", "10.90.0.5"], ["Seed API sources", "192.0.2.10/32"], ["Boot store", "local-zfs"]]) await fill(label, v)
+}
+const sizes = (g: { name: string; nodes: string[]; count: number; cores: number; memoryMiB: number }) => [g.name, g.nodes, g.count, g.cores, g.memoryMiB]
+
+test("the Homelab preset: one control plane machine and one small machine per group on one node", async ({ page }) => {
+  await open(page)
+  await recordCalls(page)
+  await expect(page.getByRole("checkbox", { name: "Group system: node pve1" })).toBeVisible() // the nodes are read
+  await expect(page.getByRole("radio", { name: /^Custom/ })).toBeChecked()
+  await page.getByRole("radio", { name: /^Homelab/ }).check()
+  // Filled in, and still the form's own fields: the nodes, the counts, the sizes, the count of the control plane.
+  await expect(page.getByLabel("Seed node", { exact: true })).toHaveValue("pve1")
+  await expect(page.getByLabel("Control plane node", { exact: true })).toHaveValue("pve1")
+  await expect(page.getByLabel("Control plane machines", { exact: true })).toHaveValue("1")
+  await expect(page.getByLabel("Group dbaas: machines")).toHaveValue("1")
+  await expect(page.getByLabel("Group dbaas: Memory (GiB)")).toHaveValue("4")
+  // The site has two nodes, so the network stays an existing bridge.
+  await expect(page.getByRole("radio", { name: /An existing bridge/ })).toBeChecked()
+  await fillAddresses(page)
+  await expectAccessible(page)
+  await page.getByRole("button", { name: "Save draft" }).click()
+  await expect(page.getByText("2. Proxmox identities")).toBeVisible()
+  const [created] = await calls(page, "POST", "/admin/platform/installations")
+  expect(created.body.preset).toBeUndefined() // the form sends the fields, not the choice
+  expect(created.body.spec.clusters[0].controlPlane).toEqual({ node: "pve1", cores: 2, memoryMiB: 4096, diskGiB: 30 })
+  expect(created.body.spec.clusters[0].nodeGroups.map(sizes)).toEqual([["system", ["pve1"], 1, 2, 4096], ["kamaji", ["pve1"], 1, 2, 4096], ["dbaas", ["pve1"], 1, 2, 4096]])
+  expect(created.body.spec.network.mode).toBeUndefined()
+  // The review counts the machines and their spares against what the node has free.
+  await expect(page.getByText("1 control plane machine and 3 worker machines in the pool")).toBeVisible()
+  await expect(page.getByRole("list", { name: "Cores and memory per node" })).toContainText("pve1: 10 cores and 20 GiB of memory; 24 GiB with the one more machine an update of the control plane makes, 36 GiB with one more of each group as well. The node has 112 GiB free of 128 GiB.")
+})
+
+test("the Standard preset: three control plane machines on one node, two machines per group over two nodes", async ({ page }) => {
+  await open(page)
+  await recordCalls(page)
+  await expect(page.getByRole("checkbox", { name: "Group system: node pve1" })).toBeVisible()
+  await page.getByRole("radio", { name: /^Standard/ }).check()
+  await expect(page.getByLabel("Control plane machines", { exact: true })).toHaveValue("3")
+  await expect(page.getByText(/do not survive the loss of that node or of its disk/)).toBeVisible()
+  await expect(page.getByRole("list", { name: "What the preset changed" })).toHaveCount(0)
+  await fillAddresses(page)
+  // Everything stays editable: one group gets a third machine.
+  await page.getByLabel("Group kamaji: machines").fill("3")
+  await page.getByRole("button", { name: "Save draft" }).click()
+  await expect(page.getByText("2. Proxmox identities")).toBeVisible()
+  const [created] = await calls(page, "POST", "/admin/platform/installations")
+  expect(created.body.spec.seed).toMatchObject({ node: "pve1", cores: 2, memoryMiB: 6144 })
+  expect(created.body.spec.clusters[0].controlPlane).toEqual({ node: "pve1", replicas: 3, cores: 2, memoryMiB: 4096, diskGiB: 30 })
+  expect(created.body.spec.clusters[0].nodeGroups.map(sizes)).toEqual([["system", ["pve1", "pve2"], 2, 4, 8192], ["kamaji", ["pve2", "pve1"], 3, 4, 8192], ["dbaas", ["pve1", "pve2"], 2, 4, 8192]])
+  // pve1: seed 6, control plane 3 x 4, system 8, kamaji 8, dbaas 8 = 42 GiB running; 46 with the control plane's spare, 70 with the three groups' too.
+  await expect(page.getByText("3 control plane machines on pve1 and 7 worker machines in the pool")).toBeVisible()
+  const load = page.getByRole("list", { name: "Cores and memory per node" })
+  await expect(load).toContainText("pve1: 20 cores and 42 GiB of memory; 46 GiB with the one more machine an update of the control plane makes, 70 GiB with one more of each group as well. The node has 112 GiB free of 128 GiB.")
+  await expect(load).toContainText("pve2: 16 cores and 32 GiB of memory; 32 GiB with the one more machine an update of the control plane makes, 56 GiB with one more of each group as well.")
+  // With both secrets stored the Check has its capacity row.
+  await storeSecrets(page)
+  await page.getByRole("button", { name: "Check", exact: true }).click()
+  await expect(page.getByRole("status").filter({ hasText: "No check failed. 1 warning does not stop the install" })).toBeVisible() // the scheduler row: the mock runs without it
+  await expect(page.getByText("Every node has the memory for its machines and their spares during an update.")).toBeVisible()
+})
+
+test("on one small node: Standard keeps one control plane machine, Homelab makes a network the node routes and passes the Check, and the page says what does not fit", async ({ page }) => {
+  await open(page, "onenode")
+  await recordCalls(page)
+  await expect(page.getByRole("checkbox", { name: "Group system: node pve1" })).toBeVisible()
+  // Standard: three control plane machines would need more than the node has free, and the page says so.
+  await page.getByRole("radio", { name: /^Standard/ }).check()
+  await expect(page.getByLabel("Control plane machines", { exact: true })).toHaveValue("1")
+  await expect(page.getByRole("list", { name: "What the preset changed" })).toContainText("One control plane machine, not three: with three, pve1 would need 70 GiB of memory and has 24 GiB free.")
+  await expect(page.getByLabel("Group system: machines")).toHaveValue("2")
+  // Homelab on a site with one node: the routed network, with its vnet named.
+  await page.getByRole("radio", { name: /^Homelab/ }).check()
+  await expect(page.getByRole("list", { name: "What the preset changed" })).toHaveCount(0)
+  await expect(page.getByRole("radio", { name: /Routed by the node/ })).toBeChecked()
+  await expect(page.getByLabel("Vnet name", { exact: true })).toHaveValue("pcplat0")
+  await fillAddresses(page, "")
+  await page.getByRole("button", { name: "Save draft" }).click()
+  await expect(page.getByText("2. Proxmox identities")).toBeVisible()
+  const [created] = await calls(page, "POST", "/admin/platform/installations")
+  expect(created.body.spec.network).toEqual({ mode: "routed", bridge: "pcplat0", prefix: "10.90.0.0/24", gateway: "10.90.0.1", dns: ["10.90.0.1"] })
+  // 24 GiB with the control plane's spare on a node with 24 free: the smallest preset installs on the smallest site.
+  // The groups' spares (36 GiB) do not fit, which the review says and the Check warns about.
+  const load = page.getByRole("list", { name: "Cores and memory per node" })
+  await expect(load).toContainText("24 GiB with the one more machine an update of the control plane makes, 36 GiB with one more of each group as well. The node has 24 GiB free of 32 GiB. That holds the install")
+  await expect(load.getByText("That is not enough.")).toHaveCount(0)
+  await storeSecrets(page)
+  await page.getByRole("button", { name: "Check", exact: true }).click()
+  await expect(page.getByRole("status").filter({ hasText: "No check failed. 2 warnings do not stop the install" })).toBeVisible() // the capacity row and the scheduler row
+  await expect(page.getByText("Node pve1 holds the machines (24 GiB of 24 GiB), and not the spare machine of every group on it as well (12 GiB more)")).toBeVisible()
+  // One machine more in a group no longer fits: the review says it, and the Check refuses it.
+  await page.getByLabel("Group system: machines").fill("2")
+  await page.getByRole("button", { name: "Save settings" }).click()
+  await expect(load).toContainText("28 GiB with the one more machine an update of the control plane makes, 40 GiB with one more of each group as well. The node has 24 GiB free of 32 GiB. That is not enough.")
+  await page.getByRole("button", { name: "Check again", exact: true }).click()
+  await expect(page.getByRole("status").filter({ hasText: "1 of " })).toContainText("checks failed")
+  await expect(page.getByText("Node pve1: the settings place 28 GiB of memory there, and 24 GiB can be reserved.")).toBeVisible()
+  await expect(page.getByRole("list", { name: "What to do for each failed check" })).toContainText("one control plane machine in place of three")
+  await expectAccessible(page)
+})
+
+test("Custom fills nothing, and a release that builds one control plane machine does not offer three", async ({ page }) => {
+  await open(page)
+  await expect(page.getByRole("checkbox", { name: "Group system: node pve1" })).toBeVisible()
+  await page.getByLabel("Group system: machines").fill("5")
+  await page.getByRole("radio", { name: /^Standard/ }).check()
+  await page.getByRole("radio", { name: /^Custom/ }).check()
+  await expect(page.getByLabel("Group system: machines")).toHaveValue("2") // Custom changes nothing: Standard's fill stays
+  await expect(page.getByLabel("Control plane machines", { exact: true })).toHaveValue("3")
+
+  // A release whose cluster chart builds one machine: Standard fills one and says why.
+  await open(page, "onechart")
+  await expect(page.getByRole("checkbox", { name: "Group system: node pve1" })).toBeVisible()
+  await page.getByRole("radio", { name: /^Standard/ }).check()
+  await expect(page.getByLabel("Control plane machines", { exact: true })).toHaveValue("1")
+  await expect(page.getByRole("list", { name: "What the preset changed" })).toContainText("the release this install runs with builds one")
+
+  // A platform installed by the release before this one, whose cluster chart builds one machine.
+  await open(page, "previous")
+  const count = page.getByLabel("Control plane machines", { exact: true })
+  await expect(count).toHaveValue("1")
+  await expect(page.getByText(/This release builds one: three need a release whose cluster chart is 0\.1\.14 or newer\./)).toBeVisible()
+  await expect(count.getByRole("option", { name: "3, on this one node" })).toBeDisabled()
+  // Installed: a preset would resize and replace every machine, so none is offered.
+  for (const name of [/^Homelab/, /^Standard/, /^Custom/]) await expect(page.getByRole("radio", { name })).toBeDisabled()
+  await expect(page.getByText("A preset is a start for a new installation.")).toBeVisible()
+  // The API refuses three for this platform at the save, for a client that sends it anyway.
+  const answer = await page.evaluate(async (paths) => {
+    const { dispatch } = await import(/* @vite-ignore */ paths.router)
+    const { mockPlatform } = await import(/* @vite-ignore */ paths.state)
+    const in_ = mockPlatform.installations[0]
+    const spec = structuredClone(in_.spec)
+    spec.clusters[0].controlPlane.replicas = 3
+    return dispatch(`/admin/platform/installations/${in_.id}`, { method: "PUT", body: { name: in_.name, rev: in_.rev, spec } })
+      .then(() => "ok", (e: { status: number; message: string }) => `${e.status} ${e.message}`)
+  }, MOCK)
+  expect(answer).toMatch(/^400 /)
+})
+
+test("an installed control plane grows from one machine to three, and does not go back once a run built three", async ({ page }) => {
+  await open(page, "ready")
+  await recordCalls(page)
+  const count = page.getByLabel("Control plane machines", { exact: true })
+  const puts = async () => (await calls(page, "PUT", /\/installations\/pi-/)).map((c) => c.body.spec.clusters[0].controlPlane.replicas ?? 1)
+  await expect(count).toHaveValue("1")
+  await count.selectOption("3")
+  await page.getByRole("button", { name: "Save settings" }).click()
+  await expect.poll(puts).toEqual([3])
+  await expect(page.getByText("3 control plane machines on pve1 and 3 worker machines in the pool")).toBeVisible()
+  // Saved and not applied: the platform still has one machine, so the count goes back to one.
+  await expect(count.getByRole("option", { name: "1", exact: true })).toBeEnabled()
+  await expect(page.getByText("so it stays at three.")).toHaveCount(0)
+  await count.selectOption("1")
+  await page.getByRole("button", { name: "Save settings" }).click()
+  await expect.poll(puts).toEqual([3, 1])
+  await expect(page.getByText("1 control plane machine and 3 worker machines in the pool")).toBeVisible()
+  // An apply hands three to the cluster and records it in the status before the sync. The mock has no apply of a
+  // settings change, so the record is set here; the next save reads it.
+  await page.evaluate(async (paths) => {
+    const { mockPlatform } = await import(/* @vite-ignore */ paths.state)
+    mockPlatform.installations[0].status.clusters[0].controlPlaneReplicas = 3
+  }, MOCK)
+  await count.selectOption("3")
+  await page.getByRole("button", { name: "Save settings" }).click()
+  await expect.poll(puts).toEqual([3, 1, 3])
+  await expect(page.getByText("3 control plane machines on pve1 and 3 worker machines in the pool")).toBeVisible() // the save is done
+  await expect(count.getByRole("option", { name: "1", exact: true })).toBeDisabled()
+  await expect(page.getByText("A run built this platform with three, so it stays at three.")).toBeVisible()
+  // The API's own refusal, for a client that sends it anyway.
+  const answer = await page.evaluate(async (paths) => {
+    const { dispatch } = await import(/* @vite-ignore */ paths.router)
+    const { mockPlatform } = await import(/* @vite-ignore */ paths.state)
+    const in_ = mockPlatform.installations[0]
+    const spec = structuredClone(in_.spec)
+    spec.clusters[0].controlPlane.replicas = 1
+    return dispatch(`/admin/platform/installations/${in_.id}`, { method: "PUT", body: { name: in_.name, rev: in_.rev, spec } })
+      .then(() => "ok", (e: { status: number; message: string }) => `${e.status} ${e.message}`)
+  }, MOCK)
+  expect(answer).toMatch(/^409 .*does not go from 3 machines to 1 in this release/)
 })
