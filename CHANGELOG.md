@@ -7,8 +7,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+None of the entries below is verified on a lab yet: each one says so. The chart changes among them reach no
+platform and no cluster until the tag `proxmox-kamaji-cluster-v0.1.14` is cut, once, for the health check and
+the VLAN tag together, and the platform BOM pins it (`tenantCharts.kubernetes`, the component `pc-platform`);
+the same holds for `proxcloud-platform-v0.1.3`. The BOM on `main` still pins 0.1.13 and 0.1.2.
+
+### Added
+
+- **Managed services: an installed platform can be upgraded to the platform release of the running ProxCloud**,
+  when the two releases differ in ProxCloud's own charts alone. Step 4 of Managed services shows the plan and
+  asks for a typed confirmation (`POST …/runs` with `targetBom` and `confirm`). A release that changes the
+  Kubernetes version, an image, k3s, a Cluster API provider or a third-party chart is refused with a reason per
+  entry (`upgrade_refused`), and so is a `-dev` target. `GET …/plan` answers `upgrade`: every difference of the
+  two BOMs with its class, stage, wave and effect; and `replacement`, the move to this release in place of an
+  unfinished upgrade toward an earlier one. New failure codes `upgrade_refused`, `unexpected_rollout` and
+  `tenants_unhealthy`. `PROXCLOUD_PLATFORM_SKIP_ROLLOUT_GATE` (`PLATFORM_SKIP_ROLLOUT_GATE` in Compose) is off
+  by default. Not verified on a lab: the tests run on fakes, and the lab tests owed are in
+  [docs/managed-services.md](docs/managed-services.md).
+- **Managed Kubernetes: a cluster's workers can be put behind the Proxmox VM firewall.** Inbound traffic to a
+  worker is dropped except what the cluster's security group `k8s-<clusterId>` allows (pod network, health
+  checks, kubelet and MetalLB between the cluster's workers; LoadBalancer addresses; NodePorts from the
+  project's networks), and a worker can only send from the cluster's own addresses. Off for existing clusters:
+  the operator protects one cluster at a time (Managed clusters, Firewall;
+  `/admin/service/{id}/k8s-clusters/{clusterId}/worker-firewall`), and the action takes the firewall off again
+  when a node stops reporting. New clusters get it with `config.cluster.workerFirewall: true` on the Kubernetes
+  provider, off by default. A new or replaced worker is covered at the next provider sync, up to 15 minutes
+  later. Needs no chart. Not verified on a lab: nothing was run against Proxmox or a cluster
+  ([docs/managed-k8s.md](docs/managed-k8s.md), "Worker firewall").
+- **Managed Kubernetes: Replace for one worker node**, in the customer console (cluster page: next to a node
+  group's status for each machine that needs attention, and on the instance list; action `REPLACE_MACHINE`) and
+  the operator console (Machines dialog;
+  `POST /admin/service/{id}/k8s-clusters/{clusterId}/machines/{machine}/replace`). The node count, placement and
+  quota do not change; the last Ready node of a group asks for a confirmation. On a managed-services platform it
+  answers 502 until the BOM pins `proxcloud-platform` 0.1.3. Not verified on a lab.
+- **Managed Kubernetes: a worker that registers no node is replaced by Cluster API** after
+  `config.cluster.nodeStartupTimeoutSeconds` (1800 by default, `0` = off), in node groups of two or more
+  machines, while at most `config.cluster.repairMaxUnhealthy` (1) machines of the group are not healthy. Needs
+  cluster chart 0.1.14, which is not published: until the BOM pins it no cluster gets a health check. The
+  provider's two keys apply to every cluster on that chart: they are written at each change of a cluster, and
+  **Apply settings** on the provider's page writes them to one cluster at once. Not verified on a lab.
+- **Operator console: the Machines dialog shows the join error a worker reports** (cloud-init result and log
+  tail, credentials masked, nothing stored) and each node group's automatic repair state. Not verified on a lab.
+- **A Kubernetes node image imported by Template updates starts its clones with their Proxmox node** (`onboot`
+  on the template). Not verified on a lab.
+- **Managed services: the platform network has a mode, and a VLAN tag.** `spec.network.mode` is `bridge` (an
+  existing bridge, the default; an installation saved before the field means `bridge`) or `routed`: on a site
+  with one Proxmox node ProxCloud makes the network at the install, as an SDN vnet whose gateway the node holds,
+  with SNAT, so that tenant traffic to the platform never leaves the node. Everything outside the node then
+  needs a route to the platform network through the node's address. With mode `bridge`, `spec.network.vlan`
+  (1 to 4094) tags every machine's NIC, so a VLAN needs no bridge or vnet of its own; it needs a platform BOM
+  whose cluster chart is 0.1.14 or newer, which the BOM on `main` is not yet, and is refused until then. The
+  network stays fixed after the first install. New Check row `bridge`; new failure code
+  `platform_network_refused`. Not verified on a lab: every test uses a fake Proxmox API.
+- **Managed services: "Test the tenant path".** A button in step 3 of an installed platform
+  (`POST …/installations/{id}/tenant-path-probe`) that opens a TCP connection from a throwaway VM on a throwaway
+  tenant network to what listens in the load balancer range, on the node you choose, and removes both again. It
+  costs one VM clone and two SDN applies and never runs with Check. It needs a tenant cluster or database to
+  connect to and a published Ubuntu or Debian template on that node. Not verified on a lab.
+- **Cluster chart `proxmox-kamaji-cluster` 0.1.14:** a `MachineHealthCheck` per node group of two or more
+  machines (`machineHealthCheck.nodeStartupTimeoutSeconds`, `0` by default: none is rendered) and
+  `proxmox.network.vlan`. Without the values the render is what 0.1.13 gave. Not published: the tag is owed. Not
+  verified on a lab: the chart tests render with Helm only.
+
 ### Changed
 
+- **Security groups: a name starting with `k8s-` is reserved for Kubernetes clusters.** Creating one answers
+  400, attaching one to a server 409, and deleting the group of a cluster the project has 409. A group with such
+  a name from an earlier version stays the tenant's unless the rest of its name is the id of one of the
+  project's clusters, and can no longer be attached to another server. A security group can no longer be
+  attached to a worker node of a Kubernetes cluster, and the cluster's own group cannot be detached from it
+  (409). Not verified on a lab.
+- **Managed services: a Retry after a failed upgrade continues to the upgrade's target.** `status.bom` names the
+  BOM the platform left until a run has succeeded; `status.targetBom` names the target, and
+  `status.tenantsDownBefore` the tenants that were unhealthy when the upgrade reached stage 9. `POST …/runs`
+  refuses `confirm` on an apply unless it starts an upgrade; the `invalid_confirmation` and `bom_unsupported`
+  messages changed. Not verified on a lab.
+- **Managed Kubernetes: "Needs attention" of a node group is measured per machine**: a healthy or starting
+  worker no longer clears it for machines that are stuck. `node_groups[].progress` carries `machineNames`: at
+  most five machines of the group that need attention. The tenant's text for a worker that did not join points
+  to Replace instead of lowering and raising the count. Not verified on a lab.
+- **The Kubernetes provider's service account may delete Machines** (cluster-wide; the portal deletes worker
+  Machines of its own clusters only) **and read MachineHealthChecks** (`deploy/mgmt-cluster/rbac.yaml`, chart
+  `proxcloud-platform` 0.1.3, not published: the tag is owed). Not verified on a lab.
+- **Managed services: the Check row `tenant-path` is `ok` for a platform network of mode `routed`**, and
+  `privileges:capi` reads `SDN.Use` on the path of the machines' NIC for a VLAN tag or a routed network. The
+  guide gives the node leg for an existing VLAN site in a persistent form, as commands, marked as not
+  lab-verified ([docs/managed-services.md](docs/managed-services.md)). Not verified on a lab.
 - **The platform BOM on `main` is `0.9.0-dev` again, and the build carries the BOM of `0.8.2`**
   (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.8.2.yaml`). The `v0.8.2` release commit left
   the BOM at `0.8.2`, and the release gate refuses only `-dev`. A platform installed by `v0.8.2` stays on its BOM

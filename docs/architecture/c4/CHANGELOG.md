@@ -4,6 +4,87 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-18: the platform run makes SDN objects; a test of the tenant path
+
+**What changed:** `internal/platformlife` gains two responsibilities. (1) For a platform network of mode `routed`
+the run itself makes Proxmox SDN objects (`network.go`): stage 3 creates the simple zone `pcplat`, a vnet and a
+subnet and applies SDN, with the portal token, under the site's `sdn-apply` lock that tenant network changes take
+(`Runner.SDNLock`, wired in `cmd/api/main.go`); `remove-seed` deletes them. Until now a run only read SDN. (2) The
+tenant path test (`tenantprobe.go`, `platformlife.TenantProber`, routes
+`GET|POST /admin/platform/installations/{id}/tenant-path-probe` in `internal/platform/admin/platform.go`, new
+collection `platformTenantProbe`): outside a run and outside the preflight, it creates a throwaway tenant network
+(`pve.Service.CreateNetwork`, the tenants' own call) and a throwaway VM in `pc-templates`, runs a command through
+the QEMU guest agent, dials the load balancer range from the API process, and removes both. The preflight has a
+row `bridge` and reads the NIC's ACL path. `proxmox-kamaji-cluster` 0.1.14 reads `proxmox.network.vlan`.
+
+**Why:** on the one-node production site of v0.8.0 a tenant's connection to the platform network was dropped on
+the node, and v0.8.2 could only warn (the `tenant-path` row); nothing opened the path or tested it. The platform
+VLAN of that install needed a hand-made vnet.
+
+**Diagrams:** none changed. No container or relation is added: the API already talks to Proxmox with the portal
+token and to PostgreSQL. New inside the existing relations: the API process opens TCP connections to the
+platform's load balancer range (it already reaches the seed and the cluster API on that network), and the portal
+token writes SDN objects for the platform, not only for tenants. `c3-components.md`: the rows "Platform
+installations" and "Platform runs".
+
+**Not verified:** on a lab. Chart 0.1.14 is not published.
+
+## 2026-11-18: worker repair in Managed Kubernetes
+
+**What changed:** the Managed Kubernetes component gains worker repair. It writes the cluster chart's
+`machineHealthCheck` values from the provider's setting (`ClusterDefaults.MachineHealthCheckValues`), deletes one
+worker Machine on request (`kamaji.Service.ReplaceMachine`, the portal's one write on Cluster API objects; tenant
+action `REPLACE_MACHINE` and `POST /admin/service/{id}/k8s-clusters/{clusterId}/machines/{machine}/replace`), and
+measures each machine from its own progress. The operator's Machines view reads a failed worker's cloud-init
+result through the Proxmox guest agent with the portal token: a new relation, admin handlers to the Proxmox API
+for `agent/file-read`. The Helm chart `proxmox-kamaji-cluster` 0.1.14 renders a `MachineHealthCheck` per node
+group of two or more machines; `proxcloud-platform` 0.1.3 and `deploy/mgmt-cluster/rbac.yaml` let the provider's
+service account delete Machines and read MachineHealthChecks.
+
+**Why:** in the production acceptance of 2026-11-18 two workers ran and never joined; nothing told the operator
+why without a shell on the node, nothing retried, replacing them took raise-and-lower cycles and quota for one
+more worker, and a new worker that joined cleared "needs attention" of the two that were stuck.
+
+**Diagrams:** none changed. `c2-containers.md`: the row of the Helm chart `proxmox-kamaji-cluster` names 0.1.14.
+`c3-components.md`: the Managed Kubernetes row names worker repair.
+
+**Not verified:** on a lab. Neither chart version is published.
+
+## 2026-11-18: tenant Kubernetes workers behind the VM firewall
+
+**What changed:** `internal/cloud/pve` has a new `workerfw.go`, the VM firewall of a tenant Kubernetes cluster's
+workers: a security group of the project per cluster, `k8s-<clusterId>`, which is also the switch, default-deny
+inbound, and an IP filter on the cluster's reserved addresses. Each cycle of the sync job also brings the running
+workers of protected clusters behind the VM firewall (`project.ReconcileWorkerFirewalls`). The admin API has
+`/admin/service/{id}/k8s-clusters/{clusterId}/worker-firewall` (GET, POST, DELETE). No container or component was
+added or removed.
+
+**Why:** the cluster chart's NIC has no firewall flag and nothing secured the workers, so inside a project every
+port of a worker (kubelet, NodePorts) was open and a worker could send with any address of its vnet; confirmed on
+the production site.
+
+**Diagrams:** none changed. `c3-components.md`: the rows "Networks and isolation" and "Sync job".
+
+**Not verified:** on a lab.
+
+## 2026-11-18: an upgrade run moves a platform between release BOMs
+
+**What changed:** in "Platform installations" the plan (`internal/platformlife/plan.go`) now classifies the
+differences of two BOMs (`Classify`: `chart`, `record only`, `refused`) and decides, with the start of a run
+(`move`), which BOM an apply runs with; next to an unfinished upgrade it carries `replacement`. In "Platform runs"
+there is an upgrade run: a target BOM on `POST …/runs`, `status.targetBom`, the rollout check before the cluster
+chart's sync (stage 7), the wait for the tenants (stage 9) and the record per wave. No container or component was
+added or removed.
+
+**Why:** an apply had no way to name another BOM and the plan diffed the installed BOM against itself; a Retry
+after a failed move would have written the old chart versions over components already moved; stage 7 passed
+before Cluster API started a rollout.
+
+**Diagrams:** none changed. `c3-components.md`: the rows "Platform BOM and renderers", "Platform installations"
+and "Platform runs".
+
+**Not verified:** on a lab.
+
 ## 2026-11-18: a break-glass kubeconfig of the platform cluster
 
 **What changed:** `GET …/platform-kubeconfig` (`internal/platform/admin/platform.go`, `breakGlass`, shared with
