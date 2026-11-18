@@ -2,7 +2,7 @@ import { useMemo, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { ColumnDef } from "@tanstack/react-table"
 import { toast } from "sonner"
-import { Mail, MoreHorizontal, Trash2, UserPlus, Users } from "lucide-react"
+import { Copy, Mail, MoreHorizontal, Trash2, UserPlus, Users } from "lucide-react"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { DataTable, sortableHeader } from "@/components/data-table"
 import { EmptyState } from "@/components/empty-state"
@@ -18,7 +18,9 @@ import { Label } from "@/components/ui/label"
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { apiFetch } from "@/lib/api"
+import { fmtDateTime } from "@/lib/format"
 import { useProject, useProjectId } from "@/lib/hooks"
 import type { Organization } from "@/lib/types"
 
@@ -28,6 +30,35 @@ type Member = { sub: string; firstName?: string; lastName?: string; email?: stri
 type ProjectMember = { userId?: string; sub: string; firstName?: string; lastName?: string; email?: string; role?: string }
 
 type OrgRole = { id: string; name: string; builtIn: boolean }
+
+// GET /project-invites/project/{pid} → the pending invitations the caller may see: all of them for a project
+// admin, their own otherwise. Each carries its link: mailConfigured says only whether a mail was handed to a
+// gateway, not that it arrived.
+type PendingInvite = { id: string; email: string; expiresAt?: string; mailConfigured?: boolean; inviteUrl?: string }
+type PendingInvites = { mailConfigured: boolean; invites: PendingInvite[] }
+
+const NO_MAIL =
+  "This site sends no email. Copy the invitation link and send it to your teammate yourself. They can also sign in with the invited address: the invitation is then waiting on their start page."
+
+function CopyLink({ url }: { url: string }) {
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      onClick={async () => {
+        // navigator.clipboard is absent on a plain-http site and writeText can be refused: show the link instead.
+        try {
+          await navigator.clipboard.writeText(url)
+          toast.success("Invitation link copied")
+        } catch {
+          toast.error(`Couldn't copy the link. Select and copy it: ${url}`, { duration: 30000 })
+        }
+      }}
+    >
+      <Copy className="size-4" /> Copy link
+    </Button>
+  )
+}
 
 // Resolve the org that owns this project (fall back to the first org the user belongs to).
 export function useOrg(pid: string) {
@@ -70,8 +101,18 @@ export default function MembersPage() {
     enabled: !!pid,
   })
 
+  // Pending invitations of THIS project. A caller who may not see the project's invitations gets none.
+  const pending = useQuery({
+    queryKey: ["project-invites", pid],
+    queryFn: () => apiFetch<PendingInvites>(`/project-invites/project/${pid}`),
+    enabled: !!pid,
+  })
+
   const [inviteOpen, setInviteOpen] = useState(false)
   const [email, setEmail] = useState("")
+  // The invitation just made on a site without mail: the dialog stays open to hand over its link.
+  const [created, setCreated] = useState<PendingInvite | null>(null)
+  const [revoking, setRevoking] = useState<PendingInvite | null>(null)
   const [addOpen, setAddOpen] = useState(false)
   const [addEmail, setAddEmail] = useState("")
   const [addRole, setAddRole] = useState("MEMBER")
@@ -85,15 +126,39 @@ export default function MembersPage() {
   const invalidateProject = () => void qc.invalidateQueries({ queryKey: ["project-members", pid] })
 
   const invite = useMutation({
-    // POST /project-invites/invite {email, projectId} → 202 (mail + audit).
-    mutationFn: () => apiFetch(`/project-invites/invite`, { method: "POST", body: { email: email.trim(), projectId: pid } }),
-    onSuccess: () => {
+    // POST /project-invites/invite {email, projectId} → 202 with the invitation (mail + audit).
+    mutationFn: () =>
+      apiFetch<PendingInvite | undefined>(`/project-invites/invite`, { method: "POST", body: { email: email.trim(), projectId: pid } }),
+    onSuccess: (inv) => {
+      void qc.invalidateQueries({ queryKey: ["project-invites", pid] })
+      if (inv?.inviteUrl && !inv.mailConfigured) {
+        setCreated(inv) // no mail went out: saying "sent" would be the old dead end
+        return
+      }
       toast.success(`Invitation sent to ${email.trim()}`)
       setInviteOpen(false)
       setEmail("")
     },
     onError: (e: Error) => toast.error(e.message),
   })
+
+  const revoke = useMutation({
+    // DELETE /project-invites/project/{pid}/{inviteId}: the link stops working.
+    mutationFn: (id: string) => apiFetch(`/project-invites/project/${pid}/${id}`, { method: "DELETE" }),
+    onSuccess: () => {
+      toast.success("Invitation revoked")
+      setRevoking(null)
+      void qc.invalidateQueries({ queryKey: ["project-invites", pid] })
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+  const closeInvite = (open: boolean) => {
+    setInviteOpen(open)
+    if (!open) {
+      setCreated(null)
+      setEmail("")
+    }
+  }
 
   const addMember = useMutation({
     // POST /organizations/{id}/member {email, role} — the user must already exist;
@@ -393,32 +458,121 @@ export default function MembersPage() {
         )}
       </div>
 
+      {/* Pending invitations of this project: what "Invite by email" made and nobody has accepted yet. */}
+      <div className="mt-8" data-testid="pending-invites">
+        <div className="mb-3">
+          <h2 className="font-display text-lg font-semibold">Pending invitations</h2>
+          <p className="text-sm text-muted-foreground">
+            Invitations to this project that are not accepted yet. An invitation expires 24 hours after it is made.
+          </p>
+        </div>
+        {pending.data && !pending.data.mailConfigured ? (
+          <p className="mb-3 rounded-md border bg-muted/50 px-3 py-2 text-sm" data-testid="no-mail-notice">
+            {NO_MAIL}
+          </p>
+        ) : null}
+        {pending.isLoading ? null : pending.error ? (
+          <p className="text-sm text-muted-foreground">{(pending.error as Error).message}</p>
+        ) : !pending.data?.invites?.length ? (
+          <p className="rounded-xl border border-dashed p-6 text-center text-sm text-muted-foreground">No pending invitations.</p>
+        ) : (
+          <div className="overflow-hidden rounded-xl border bg-card">
+            <Table>
+              <TableHeader>
+                <TableRow className="hover:bg-transparent">
+                  <TableHead>Email</TableHead>
+                  <TableHead>Expires</TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {pending.data.invites.map((inv) => (
+                  <TableRow key={inv.id}>
+                    <TableCell className="text-sm">{inv.email}</TableCell>
+                    <TableCell className="text-sm text-muted-foreground">{fmtDateTime(inv.expiresAt)}</TableCell>
+                    <TableCell>
+                      <div className="flex justify-end gap-2">
+                        {inv.inviteUrl ? <CopyLink url={inv.inviteUrl} /> : null}
+                        <Button variant="outline" size="sm" onClick={() => setRevoking(inv)} aria-label={`Revoke the invitation of ${inv.email}`}>
+                          <Trash2 className="size-4" /> Revoke
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+      </div>
+
       {/* Invite by email (project invite — works for people without an account yet). */}
-      <Dialog open={inviteOpen} onOpenChange={setInviteOpen}>
+      <Dialog open={inviteOpen} onOpenChange={closeInvite}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Invite by email</DialogTitle>
             <DialogDescription>
-              Send an email invitation to join this project. The invite expires in 24 hours.
+              Invite someone to join this project. They accept after signing in with this email address, which their
+              account must have verified. The invite expires in 24 hours.
             </DialogDescription>
           </DialogHeader>
-          <div>
-            <Label className="mb-1.5 block" htmlFor="invite-email">Email</Label>
-            <Input
-              id="invite-email"
-              type="email"
-              autoComplete="email"
-              placeholder="teammate@example.com"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-            />
-          </div>
+          {created ? (
+            <div className="grid gap-3" data-testid="invite-link">
+              <p className="text-sm">
+                The invitation for <span className="font-medium">{created.email}</span> is made, but no email was sent.{" "}
+                {NO_MAIL}
+              </p>
+              <div className="flex items-center gap-2 rounded-md bg-muted p-2 font-mono text-xs break-all">
+                <span className="flex-1">{created.inviteUrl}</span>
+              </div>
+            </div>
+          ) : (
+            <div>
+              <Label className="mb-1.5 block" htmlFor="invite-email">Email</Label>
+              <Input
+                id="invite-email"
+                type="email"
+                autoComplete="email"
+                placeholder="teammate@example.com"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+              />
+            </div>
+          )}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setInviteOpen(false)}>
+            {created ? (
+              <>
+                {created.inviteUrl ? <CopyLink url={created.inviteUrl} /> : null}
+                <Button onClick={() => closeInvite(false)}>Done</Button>
+              </>
+            ) : (
+              <>
+                <Button variant="outline" onClick={() => closeInvite(false)}>
+                  Cancel
+                </Button>
+                <Button onClick={() => invite.mutate()} disabled={!email.trim() || invite.isPending}>
+                  {invite.isPending ? "Inviting…" : "Send invite"}
+                </Button>
+              </>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!revoking} onOpenChange={(o) => !o && setRevoking(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Revoke invitation</DialogTitle>
+            <DialogDescription>
+              Revoke the invitation of {revoking?.email}? Its link stops working. You can invite them again.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRevoking(null)}>
               Cancel
             </Button>
-            <Button onClick={() => invite.mutate()} disabled={!email.trim() || invite.isPending}>
-              {invite.isPending ? "Sending…" : "Send invite"}
+            <Button variant="destructive" onClick={() => revoking && revoke.mutate(revoking.id)} disabled={revoke.isPending}>
+              {revoke.isPending ? "Revoking…" : "Revoke invitation"}
             </Button>
           </DialogFooter>
         </DialogContent>

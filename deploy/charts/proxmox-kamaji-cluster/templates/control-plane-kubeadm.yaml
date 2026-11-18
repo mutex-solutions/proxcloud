@@ -1,19 +1,27 @@
 {{- /*
 kubeadm mode (controlPlane.kind kubeadm): the platform's own workload cluster of managed services, never a tenant's. Its
-control plane is one CAPMOX VM, as installer stage 50 builds the services cluster
+control plane is one CAPMOX VM or three, as installer stage 50 builds the services cluster with one
 (installer/playbooks/templates/services-cluster.yml.j2, which internal/cloud/kamaji/chart_kubeadm_test.go compares with
 this file): kube-vip as a static pod holds controlPlane.kubeadm.endpoint, the ProxmoxCluster's endpoint (cluster.yaml).
 
-One replica: the machine template is pinned to one PVE node (a clone to local storage stays on its template's node), so
-more replicas would share that node. Its name carries a hash of its spec, as in node-groups.yaml, so a changed flavor or
-image rolls the control plane instead of failing on an immutable template.
+controlPlane.kubeadm.replicas is 1 or 3 (from chart 0.1.14; before, always 1). The machine template is pinned to one
+PVE node (a clone to local storage stays on its template's node, and CAPMOX v0.9.2 has one template for the whole
+control plane), so three replicas share that node and its store: they survive the loss of one control plane VM and a
+rollout without an API gap, not the loss of the node or of its disk. The template's name carries a hash of its spec, as
+in node-groups.yaml, so a changed flavor or image rolls the control plane instead of failing on an immutable template;
+the replica count is not in it, so going from 1 to 3 adds two machines and replaces none. A rollout makes one machine
+more before it removes one (Cluster API's maxSurge 1), so the node needs memory for replicas + 1: CAPMOX refuses a
+clone that does not fit by its count of configured memory, and never tries that machine again.
 
 kube-vip keeps the address by a lease it renews on the API server (vip_leaseduration, vip_renewdeadline and
 vip_retryperiod, in seconds; kube-vip v0.8.9 pkg/kubevip/config_envvar.go, defaults 15, 10 and 2). When one renewal
 does not finish within the renew deadline it takes the address off the interface and exits ("lost leadership,
 restarting kube-vip", pkg/cluster/clusterLeaderElection.go), and every client of the API loses its connection. With one
 control plane machine nobody else can take the lease, so the values are 60, 40 and 5: client-go tries the renewal again
-for 40 seconds. kube-vip's client cuts every request at 10 seconds (pkg/k8s/client.go, defaultTimeout), so the address is
+for 40 seconds (controlPlane.kubeadm.vipLease holds the three values; changing one rolls the control plane). With three
+machines another one can take the lease, and a holder that dies without releasing it leaves the address unheld for up
+to the lease duration: which values suit three members on one store was not measured, so the defaults stay those of
+one. kube-vip's client cuts every request at 10 seconds (pkg/k8s/client.go, defaultTimeout), so the address is
 kept when one try in those 40 seconds gets through in under 10 (a lab measured one write of 19.5: the next try can pass),
 not through an etcd whose every write takes longer. The same machine takes its own lease again at once
 after a restart; another machine (a rollout) waits up to 60 seconds for a holder that did not release it.
@@ -37,6 +45,11 @@ pod in it, whatever chart created the pod.
 {{- if not $cp.machineTags }}
 {{- fail "controlPlane.kubeadm.machineTags is required" }}
 {{- end }}
+{{- $replicas := int ($cp.replicas | default 1) }}
+{{- if not (has $replicas (list 1 3)) }}
+{{- fail (printf "controlPlane.kubeadm.replicas %d is not 1 or 3" $replicas) }}
+{{- end }}
+{{- $lease := $cp.vipLease | default dict }}
 {{- $node := index $kv 0 }}
 {{- $machine := dict "sourceNode" $node "templateID" (int (index $kv 1)) "allowedNodes" (list $node) "storage" .Values.proxmox.storage "format" "raw" "full" true "pool" .Values.proxmox.pool "checks" (dict "skipCloudInitStatus" true) "tags" $cp.machineTags "numSockets" 1 "numCores" (int $cp.machineCores) "memoryMiB" (int $cp.machineMemoryMiB) "disks" (dict "bootVolume" (dict "disk" "scsi0" "sizeGb" (int $cp.machineRootVolume.diskSize))) }}
 {{- $device := dict "name" "net0" "bridge" $net.bridge "model" "virtio" }}
@@ -61,7 +74,7 @@ kind: KubeadmControlPlane
 metadata:
   name: {{ .Release.Name }}-cp
 spec:
-  replicas: 1
+  replicas: {{ $replicas }}
   version: {{ printf "v%s" (.Values.kubernetesVersion | trimPrefix "v") | quote }}
   machineTemplate:
     spec:
@@ -91,9 +104,9 @@ spec:
               - {name: port, value: "6443"}
               - {name: vip_arp, value: "true"}
               - {name: vip_leaderelection, value: "true"}
-              - {name: vip_leaseduration, value: "60"}
-              - {name: vip_renewdeadline, value: "40"}
-              - {name: vip_retryperiod, value: "5"}
+              - {name: vip_leaseduration, value: {{ $lease.duration | default 60 | toString | quote }}}
+              - {name: vip_renewdeadline, value: {{ $lease.renewDeadline | default 40 | toString | quote }}}
+              - {name: vip_retryperiod, value: {{ $lease.retryPeriod | default 5 | toString | quote }}}
               image: {{ required "controlPlane.kubeadm.kubeVipImage is required" $cp.kubeVipImage }}
               imagePullPolicy: IfNotPresent
               name: kube-vip

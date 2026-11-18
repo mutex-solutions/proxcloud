@@ -7,7 +7,9 @@
 // running | waiting (stage 4 is trying again) | failed | dead (the run's job died: the stored phase stays applying) |
 // ready | previous (ready, installed by the release before this one: the plan names a newer release and why this one does not move the platform to it) |
 // upgrade (the same, and the move is allowed: the plan lists it, the run wants the typed confirmation) |
-// replace (the same, with an unfinished upgrade toward the release of an earlier ProxCloud: the plan also offers the move to this one's in its place) | degraded (one component out of sync) | simplezone (the check warns: no tenant cluster on a simple zone) | silent (the seed does not answer) | unread (the live read fails) | removing
+// replace (the same, with an unfinished upgrade toward the release of an earlier ProxCloud: the plan also offers the move to this one's in its place) |
+// onenode (nothing saved, and the provider has one node, pve1, with 32 GiB of which 24 are free: the presets on a small site) |
+// onechart (nothing saved, and this release's cluster chart builds one control plane machine) | degraded (one component out of sync) | simplezone (the check warns: no tenant cluster on a simple zone) | silent (the seed does not answer) | unread (the live read fails) | removing
 // (none: enabled, nothing saved).
 import { ApiError } from "@/lib/api"
 import { on } from "../router"
@@ -59,10 +61,11 @@ function strict(v: unknown, shape: Shape, at = "") {
     else if (want !== true) strict(x, want, `${at}${k}.`)
   }
 }
-const MACHINE: Shape = { node: true, cores: true, memoryMiB: true, diskGiB: true }
+const MACHINE: Shape = { node: true, nodes: true, replicas: true, cores: true, memoryMiB: true, diskGiB: true }
 const INSTALLATION: Shape = {
-  name: true, serviceId: true, provisionedBy: true, layout: true, rev: true,
+  name: true, preset: true, serviceId: true, provisionedBy: true, layout: true, rev: true,
   spec: {
+    sandbox: { placement: true },
     pveApiUrl: true, storage: { boot: true, iso: true, import: true },
     network: { mode: true, bridge: true, vlan: true, prefix: true, gateway: true, dns: true, mtu: true },
     seed: { mode: true, pool: true, node: true, address: true, cores: true, memoryMiB: true, diskGiB: true, sshKeys: true, apiSources: true },
@@ -81,7 +84,7 @@ export const mockSpec: Doc = {
   seed: { mode: "vm", pool: "proxcloud-seed", node: "pve1", address: "10.90.0.5", cores: 2, memoryMiB: 4096, diskGiB: 30, apiSources: ["192.0.2.10/32"] },
   clusters: [{
     name: "pc-platform", roles: ["kamaji", "dbaas"], endpoint: "10.90.0.10", nodeRange: "10.90.0.20-10.90.0.60", metallbRange: "10.90.0.100-10.90.0.150",
-    controlPlane: { node: "pve1", cores: 2, memoryMiB: 4096, diskGiB: 30 },
+    controlPlane: { node: "pve1", replicas: 1, cores: 2, memoryMiB: 4096, diskGiB: 30 },
     nodeGroups: ["system", "kamaji", "dbaas"].map((name) => ({ name, nodes: ["pve1"], count: 1, cores: 2, memoryMiB: 4096, diskGiB: 40 })),
   }],
   nodeImage: { mode: "bom" },
@@ -98,11 +101,17 @@ const bom = {
     { name: "proxmox-csi", cluster: "workload", wave: 1, group: "all", chart: { version: "0.3.12", digest: "sha256:44dd55ee66ff77008899aabbccddeeff0011223344556677889900aabb1122cc" } },
     { name: "kamaji", cluster: "workload", wave: 2, group: "kamaji", chart: { version: "1.0.0", digest: "sha256:55ee66ff77008899aabbccddeeff0011223344556677889900aabb1122cc33dd" } },
     { name: "cloudnative-pg", cluster: "workload", wave: 2, group: "dbaas", chart: { version: "0.26.0", digest: "sha256:66ff77008899aabbccddeeff0011223344556677889900aabb1122cc33dd44ee" } },
+    // The cluster chart, last so that the rows above keep their places: 0.1.14 builds one or three control plane machines.
+    { name: "pc-platform", cluster: "seed", wave: 3, group: "", chart: { version: "0.1.14", digest: "sha256:77008899aabbccddeeff0011223344556677889900aabb1122cc33dd44ee55ff" } },
   ],
 }
 const bomRef = { release: bom.release, sha256: bom.sha256 }
 // The preset "previous": the release that installed the platform, which this one carries as a previous BOM.
-const previous = { ...bom, release: "0.6.0", sha256: "1e0d9c8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d" }
+// Its cluster chart is the one before 0.1.14: it builds one control plane machine.
+const previous = { ...bom, release: "0.6.0", sha256: "1e0d9c8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d",
+  components: bom.components.map((c) => (c.name === "pc-platform" ? { ...c, chart: { ...c.chart, version: "0.1.13" } } : c)) }
+if (preset === "onechart") bom.components = previous.components
+if (preset === "onenode") db.proxmoxAuthResult.nodes = [{ node: "pve1", status: "online", maxmem: 32 * 2 ** 30, mem: 8 * 2 ** 30 }]
 
 const SCHEDULER_NOTE = "The job scheduler is off. Until it is on, a tenant cannot delete a project, the state of clusters, databases and servers is refreshed only when an operator runs a provider sync, and no usage is charged or billed. Turn it on where ProxCloud is installed: ./proxcloud-up.sh install --scheduler on a Compose install, PROXCLOUD_JOBS_SCHEDULER_ENABLED=true for the API elsewhere. It starts charging usage on a timer, so set the prices first."
 
@@ -220,10 +229,37 @@ function ready(in_: Doc) {
   offerVersion(in_, k8s)
   Object.assign(in_.status, {
     phase: "ready", bom: bomRef,
-    clusters: [{ name: "pc-platform", namespace: "pc-platform", endpoint: in_.spec.clusters[0].endpoint, kubernetesVersion: bom.kubernetes.version, argocdTokenExpiresAt: new Date(Date.now() + 365 * 86_400_000).toISOString() }],
+    clusters: [{ name: "pc-platform", namespace: "pc-platform", endpoint: in_.spec.clusters[0].endpoint, kubernetesVersion: bom.kubernetes.version, ...(in_.spec.clusters[0].controlPlane.replicas > 1 ? { controlPlaneReplicas: in_.spec.clusters[0].controlPlane.replicas } : {}), argocdTokenExpiresAt: new Date(Date.now() + 365 * 86_400_000).toISOString() }],
     components: bom.components.map((c) => ({ name: c.name, cluster: c.cluster, version: c.chart.version, managed: true })),
     providers: { kubernetes: k8s, database: dbs },
   })
+}
+
+// The capacity row (internal/platformlife/capacity.go), with the nodes' free memory in place of the scheduler's count:
+// a node without room for its machines and the control plane's one more of an update fails the row before the first
+// install and warns after it; one without room for the groups' spare machines as well warns. Absent while the CAPI
+// token is not stored.
+function capacity(in_: Doc, stored: boolean): Doc[] {
+  if (!stored) return []
+  const planned: Record<string, number> = {}, spare: Record<string, number> = {}
+  const add = (node: string, n: number, mib: number) => { planned[node] = (planned[node] ?? 0) + n * mib }
+  const c = in_.spec.clusters[0]
+  add(in_.spec.seed.node, 1, in_.spec.seed.memoryMiB)
+  add(c.controlPlane.node, (c.controlPlane.replicas || 1) + 1, c.controlPlane.memoryMiB)
+  for (const g of c.nodeGroups) g.nodes.forEach((n: string, i: number) => {
+    add(n, Math.floor(g.count / g.nodes.length) + (i < g.count % g.nodes.length ? 1 : 0), g.memoryMiB)
+    spare[n] = (spare[n] ?? 0) + g.memoryMiB
+  })
+  const short: string[] = [], tight: string[] = []
+  for (const [node, mib] of Object.entries(planned).sort()) {
+    const at = (db.proxmoxAuthResult.nodes as Doc[]).find((n) => n.node === node)
+    const room = at ? Math.floor((at.maxmem - at.mem) / 2 ** 20) : 0
+    if (mib > room) short.push(`Node ${node}: the settings place ${mib / 1024} GiB of memory there, and ${room / 1024} GiB can be reserved.`)
+    else if (mib + (spare[node] ?? 0) > room) tight.push(`Node ${node} holds the machines (${mib / 1024} GiB of ${room / 1024} GiB), and not the spare machine of every group on it as well (${(spare[node] ?? 0) / 1024} GiB more): a change that replaces a group's machines there needs that room, or the new machine is refused and not tried again.`)
+  }
+  if (!short.length && tight.length) return [{ id: "capacity", status: "warn", message: tight.join("\n") }]
+  if (!short.length) return [{ id: "capacity", status: "ok", message: "Every node has the memory for its machines and their spares during an update." }]
+  return [{ id: "capacity", status: in_.status.bom ? "warn" : "fail", message: `${short.join("\n")}\nA machine that does not fit is refused and not tried again, at the install or at the first update of the control plane.` }]
 }
 
 // offerVersion is platformlife.NodeImageLine and OfferVersion over the mock's publish-all state: the BOM's version is
@@ -257,6 +293,7 @@ function checks(in_: Doc): Doc[] {
     row("isolation", preset !== "isolation" || mockPlatform.synced, "The platform addresses are blocked networks; the cluster firewall rules are written by the next provider sync (with this installation saved it needs no project), or with the first tenant network.",
       "The seed address 10.90.0.5 and the API address 10.90.0.10 are not among the provider's blocked networks: add 10.90.0.5/32 and 10.90.0.10/32."),
     ...(preset === "simplezone" ? [{ id: "tenant-network", status: "warn", message: "The provider's default zone pcm0 has DHCP in Proxmox. A tenant Kubernetes cluster needs a network without DHCP, so a cluster create on a network of this zone is refused (400, \"Worker nodes need a network without DHCP\") until the default zone is an EVPN or a VLAN zone (config.network.zones and defaultZone, under Cloud providers). A Kubernetes provider with shared workers (cluster.shared) uses no tenant network and is not affected. The install and managed databases do not need it." }] : []),
+    ...capacity(in_, both),
     row("credentials", both, "Both platform tokens are stored.", `No secret is stored for ${[!sec.capi && "capmox@pve!capi", !sec.csi && "csi@pve!csi"].filter(Boolean).join(" and ")}: run the root command of step 2 on a node and paste the PC-ENROLL line it prints.`),
     ...["capi", "csi"].map((t) => row(`privileges:${t}`, both, `The ${t} token holds its privileges.`, `The ${t} token could not be checked: no secret is stored.`)),
     row("privileges:kubemint", true, "The portal token holds the ProxCloudKubeMint privileges.", ""),
@@ -284,6 +321,10 @@ function refuse(name: string, spec: Doc, serviceId: string) {
   if (imp === spec?.storage?.boot) problems.push(`spec.storage.import "${imp}" is the boot store: use another store with import content, the one the provider's importStorage names (an empty spec.storage.import takes it)`)
   if (spec?.seed?.mode === "existing") problems.push("spec.seed.mode existing comes in a later release; use vm")
   if (!/^[a-z0-9]([-a-z0-9]{0,38}[a-z0-9])?$/.test(name ?? "")) problems.push(`name "${name}": lower-case letters, digits and dashes, at most 40`)
+  const cp = spec?.clusters?.[0]?.controlPlane ?? {}
+  if (![undefined, 0, 1, 3].includes(cp.replicas)) problems.push(`spec.clusters[0].controlPlane.replicas ${cp.replicas}: 1 or 3 (etcd needs an odd number of members, and this release builds no more than 3)`)
+  if (cp.nodes?.length && JSON.stringify(cp.nodes) !== JSON.stringify([cp.node])) problems.push("spec.clusters[0].controlPlane.nodes: every control plane machine goes to one Proxmox node, controlPlane.node. Machines on several nodes need the node image template and the control plane disks on shared storage (CAPMOX v0.9.2 clones one template, and Proxmox moves a clone to another node only from and to shared storage), and this release does not build that: leave controlPlane.nodes out")
+  if (spec?.sandbox) problems.push("spec.sandbox: the sandbox service on the platform comes in a later release; leave spec.sandbox out")
   if (String(spec?.network?.prefix ?? "").startsWith("10.100.")) problems.push(`the platform network ${spec.network.prefix} overlaps cidrPool 10.100.0.0/16`)
   if (problems.length) throw fail(400, "invalid_installation", "The installation is not valid", { problems })
 }
@@ -296,7 +337,7 @@ function create(name: string, spec: Doc): Doc {
   return in_
 }
 
-if (preset && preset !== "disabled") {
+if (preset && !["disabled", "onenode", "onechart"].includes(preset)) {
   const in_ = create("lab", mockSpec)
   if (preset !== "draft") mockPlatform.secrets[in_.id] = { capi: true, csi: true }
   if (preset === "running") { mockPlatform.applies = 1; newRun(in_, "apply", Date.now() - 6.5 * STAGE_MS) }
@@ -341,7 +382,7 @@ on("POST /admin/platform/installations", ({ opts }) => {
     ...b.spec,
     storage: { ...b.spec.storage, import: importOf(b.serviceId, b.spec) },
     seed: { mode: "vm", pool: "proxcloud-seed", ...b.spec.seed },
-    clusters: (b.spec.clusters ?? []).map((c: Doc) => ({ name: "pc-platform", roles: ["kamaji", "dbaas"], ...c })),
+    clusters: (b.spec.clusters ?? []).map((c: Doc) => ({ name: "pc-platform", roles: ["kamaji", "dbaas"], ...c, controlPlane: { ...c.controlPlane, replicas: c.controlPlane?.replicas || 1 } })),
     nodeImage: { mode: "bom" },
   })
   // What the first save writes into the provider (the API adds the exact CIDRs of the node range too; the mock names two).
@@ -367,6 +408,11 @@ on("PUT /admin/platform/installations/:id", ({ params, opts }) => {
   if (b.rev !== in_.rev) throw fail(409, "rev_conflict", "the installation changed since it was read: read it again")
   if (activeRun(in_.id)) throw fail(409, "run_active", "a run of this installation is not finished: wait for it or cancel it")
   refuse(b.name, b.spec, in_.serviceId)
+  // ControlPlaneCountProblems in internal/platformlife/installation.go: the previous release's chart builds one.
+  if ((b.spec.clusters?.[0]?.controlPlane?.replicas || 1) > 1 && in_.status.bom?.sha256 === previous.sha256) {
+    const why = `spec.clusters: 3 control plane machines: the platform's BOM (release ${previous.release}) names a cluster chart which builds one; more need chart 0.1.14 or newer, so keep 1 until the platform is on a release that has it`
+    throw fail(400, "invalid_installation", "The installation is not valid", { problems: [why] })
+  }
   if (in_.status.bom) { // FixedChanges in internal/platformlife/installation.go
     const same = (a: unknown, c: unknown) => JSON.stringify(a) === JSON.stringify(c)
     const [old, next] = [in_.spec.clusters[0], b.spec.clusters?.[0] ?? {}]
@@ -380,6 +426,13 @@ on("PUT /admin/platform/installations/:id", ({ params, opts }) => {
       !same((next.nodeGroups ?? []).map((g: Doc) => g.name), old.nodeGroups.map((g: Doc) => g.name)) && "spec.clusters[0].nodeGroups",
     ].filter(Boolean) as string[]
     if (fixed.length) throw fail(409, "fixed_fields", `These fields cannot change once the platform was installed (serviceId never): ${fixed.join(", ")}`, { problems: fixed })
+  }
+  { // ControlPlaneShrink in internal/platformlife/installation.go: against what a run built, not the stored spec
+    const [had, wants] = [in_.status.clusters?.[0]?.controlPlaneReplicas || 1, b.spec.clusters?.[0]?.controlPlane?.replicas || 1]
+    if (wants < had) {
+      const why = `spec.clusters[0].controlPlane.replicas: a run built this control plane with ${had} machines, and it does not go from ${had} machines to ${wants} in this release. Taking etcd members out leaves two for a while, where one slow or lost member stops the platform's API, and no lab has run that step. Keep ${had}; to get a platform with one, remove the installation and install again.`
+      throw fail(409, "fixed_fields", why, { problems: [why] })
+    }
   }
   // A changed seed address: its old /32, which an earlier save added, goes and the new one comes (the API does the
   // same for the API address and the node range).

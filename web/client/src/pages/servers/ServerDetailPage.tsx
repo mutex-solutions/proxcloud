@@ -38,14 +38,15 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { apiFetch, type CloudScope } from "@/lib/api"
 import { isValidServerName, SERVER_NAME_RULE } from "@/lib/server-name"
 import { fmtDateTime, timeAgo } from "@/lib/format"
-import { useCloudFeatures, useCloudList, useCloudResource, useCloudScope, useProjectId } from "@/lib/hooks"
+import { useCloudFeatures, useCloudList, useCloudResource, useCloudScope, useProjectId, usePublicNetworks } from "@/lib/hooks"
 import type { CloudResource } from "@/lib/types"
 import { ServerProtection } from "./ServerProtection"
 import { ServerDeleteVolumes } from "./ServersPage"
 import { projectImages, serverFlavor, serverIPs, serverName, serverStatus } from "./serverFields"
 
 const ACTION_LABELS: Record<string, string> = {
-  START: "Start", STOP: "Stop", SOFTREBOOT: "Reboot", RESIZE: "Resize", RENAME: "Rename", REBUILD: "Rebuild",
+  START: "Start", STOP: "Stop", SOFTREBOOT: "Reboot", HARDREBOOT: "Hard reboot", RESIZE: "Resize", RENAME: "Rename",
+  REBUILD: "Rebuild",
 }
 
 type PendingAction = { action: string; title: string; label: string; destructive?: boolean } | null
@@ -293,6 +294,20 @@ export function ServerDetailPage() {
                   </DropdownMenuItem>
                 )}
                 <DropdownMenuItem onClick={openConsole}>Console (VNC)</DropdownMenuItem>
+                {/* For a guest that hangs: Reboot asks the guest to restart and waits for it; this resets the VM. */}
+                <DropdownMenuItem
+                  disabled={status !== "ACTIVE"}
+                  onClick={() =>
+                    setPending({
+                      action: "HARDREBOOT",
+                      title: "Hard reboot server",
+                      label: "reset this server without shutting the guest down (like the reset button: unsaved data in the guest is lost)",
+                      destructive: true,
+                    })
+                  }
+                >
+                  Hard reboot
+                </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem variant="destructive" onClick={() => setDialog("delete")}>
                   <Trash2 className="size-4" /> Delete
@@ -368,6 +383,7 @@ export function ServerDetailPage() {
               </dl>
             </CardContent>
           </Card>
+          <ServerAccess pid={pid} server={server} scope={scope} canAttach={features.has("publicIp")} canSetPassword={features.has("serverPassword")} />
         </TabsContent>
 
         <TabsContent value="network" className="mt-4">
@@ -1072,17 +1088,62 @@ function EventsTab({ pid, resourceId, scope }: { pid: string; resourceId: string
   )
 }
 
+// ── How to get into this server, by what the site offers. A key-only server on a site without a public network
+// could not be reached at all and nothing said so (UX 1 of the production acceptance). ──
+function ServerAccess({
+  pid, server, scope, canAttach, canSetPassword,
+}: { pid: string; server: CloudResource; scope?: CloudScope; canAttach: boolean; canSetPassword: boolean }) {
+  const networks = usePublicNetworks(pid, scope)
+  const addrs = (server.data?.server?.addresses ?? {}) as Record<string, Array<{ addr?: string }>>
+  const publicIp = (addrs.public ?? []).map((a) => a.addr).find(Boolean)
+  const privateIp = serverIPs(server).find((ip) => ip !== publicIp)
+  // Loading or failed: "this site gives no public network" would be a guess.
+  if (!networks.data) return null
+  const offered = canAttach && networks.data.length > 0
+  const consoleWay = canSetPassword
+    ? "From your browser: More actions → Set password, then More actions → Console (the Serial tab; press Enter for the login prompt)."
+    : "From your browser: More actions → Console, with a password set when the server was created."
+  return (
+    <Card className="mt-4" data-testid="server-access">
+      <CardHeader>
+        <CardTitle className="text-base">How to reach this server</CardTitle>
+      </CardHeader>
+      <CardContent className="grid gap-2 text-sm">
+        {publicIp ? (
+          <p>
+            Over SSH from the internet: <span className="font-mono">ssh &lt;user&gt;@{publicIp}</span>, when one of its
+            security groups allows TCP 22 from your address. The user is the image's default (for example{" "}
+            <span className="font-mono">ubuntu</span>).
+          </p>
+        ) : offered ? (
+          <p>
+            This server has no public address, so nothing outside your project's networks can open SSH to it. Attach one
+            on the Network tab (Public IP), then reboot the server.
+          </p>
+        ) : (
+          <p>
+            This site gives this project no public network, so nothing outside your project's networks can open SSH to
+            this server, with a key pair or without. A public address needs a public network, which your operator adds.
+          </p>
+        )}
+        {!publicIp && (
+          <p className="text-muted-foreground">
+            From another server on the same network: <span className="font-mono">ssh &lt;user&gt;@{privateIp ?? "<private address>"}</span>.
+          </p>
+        )}
+        <p className="text-muted-foreground">{consoleWay}</p>
+      </CardContent>
+    </Card>
+  )
+}
+
 // ── Public IP: a second NIC on an operator-designated public network with one address from its pool.
 // It reaches the guest at the next boot (rebootRequired). ──
 function PublicIpCard({
   pid, resourceId, server, scope,
 }: { pid: string; resourceId: string; server: CloudResource; scope?: CloudScope }) {
   const qc = useQueryClient()
-  const networks = useQuery({
-    queryKey: ["public-networks", pid, scope?.serviceId],
-    queryFn: () => apiFetch<Array<{ id: string; name?: string }>>(`/project/${pid}/public-networks`, { cloud: scope }),
-    enabled: !!pid && !!scope,
-  })
+  const networks = usePublicNetworks(pid, scope)
   const [networkId, setNetworkId] = useState("")
   const [reboot, setReboot] = useState(false)
   const addrs = (server.data?.server?.addresses ?? {}) as Record<string, Array<{ addr?: string }>>

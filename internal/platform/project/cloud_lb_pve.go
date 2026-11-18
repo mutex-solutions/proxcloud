@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -114,6 +115,37 @@ func (h *Handler) lbSave(ctx context.Context, cr *cloud.CloudResource, lb *loadB
 	}
 	_, err := h.cloud.Update(ctx, cr)
 	return err
+}
+
+// lbSiteWarnings says, before a load balancer is asked for, what this site lacks for one: each line is something
+// the create refuses, and only the operator can change. The page shows them instead of letting the user find out one
+// refusal at a time (UX 3 of the production acceptance). A catalog that cannot be read warns of nothing.
+func (h *Handler) lbSiteWarnings(ctx context.Context, proj *Project, es *externalservice.ExternalService) []string {
+	out := []string{}
+	hasPublic := slices.ContainsFunc(es.PVENetworkConfig().PublicNetworks, func(pn externalservice.PVEPublicNetwork) bool {
+		return publicNetworkAllowed(proj, pn.ID)
+	})
+	if !hasPublic {
+		out = append(out, "No public network is available to this project, and a load balancer takes its public address from one. Ask your operator to add a public network to the provider and to allow it for this project.")
+	} else if herr := h.enforcePVEQuota(ctx, proj, es, pveQuotaDemand{FloatingIPs: 1}); herr != nil {
+		out = append(out, "A load balancer takes one public address, and this project cannot take another ("+herr.Msg+"). Release an address or ask your operator to raise the public address quota.")
+	}
+	if h.pveFor == nil {
+		return out
+	}
+	ps, err := h.pveFor(es)
+	if err != nil {
+		return out
+	}
+	found, err := ps.C.Templates(ctx)
+	if err != nil {
+		return out
+	}
+	image := es.PVELoadBalancerImage()
+	if !slices.ContainsFunc(es.PVEImageCatalog(found), func(t externalservice.PVETemplate) bool { return t.Slug == image }) {
+		out = append(out, "The image a load balancer runs on, "+image+", is not in this site's image catalog. Ask your operator to add it, or to name another Debian family image in the provider setting lbImage.")
+	}
+	return out
 }
 
 func (h *Handler) pveCreateLoadBalancer(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, data map[string]any) {

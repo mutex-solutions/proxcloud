@@ -259,12 +259,18 @@ export default function NetworksPage() {
               decides on outbound access, and the network's details show it as off.
             </p>
           </div>
+          {create.isPending && (
+            <p className="text-sm text-muted-foreground" role="status" data-testid="network-create-progress">
+              Creating the network and applying it on every node of the site. This usually takes up to 20 seconds, and
+              the network is usable as soon as it is done. Keep this dialog open.
+            </p>
+          )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)}>
               Cancel
             </Button>
             <Button onClick={() => create.mutate()} disabled={!name || create.isPending}>
-              {create.isPending ? "Creating…" : "Create network"}
+              {create.isPending ? "Applying…" : "Create network"}
             </Button>
           </DialogFooter>
         </DialogContent>

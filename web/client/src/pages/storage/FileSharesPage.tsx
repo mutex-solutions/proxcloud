@@ -50,7 +50,8 @@ export default function FileSharesPage() {
   const rows = data ?? []
 
   const [createOpen, setCreateOpen] = useState(false)
-  // Asked when the dialog opens: the API knows whether this project's networks can reach the file server at all.
+  // The API knows whether this project's networks can reach the file server at all. Shown on the page and again in
+  // the create dialog: a share can still be made (a server with a public IP may have a route), so nothing is disabled.
   const warnings = useQuery({
     queryKey: ["share-warnings", pid, scope.serviceId],
     queryFn: () =>
@@ -59,7 +60,7 @@ export default function FileSharesPage() {
         cloud: scope,
         body: { action: "LIST_SHARE_WARNINGS" },
       }),
-    enabled: createOpen && !!pid && !!scope.serviceId,
+    enabled: !!pid && !!scope.serviceId,
     select: (d) => (Array.isArray(d?.result) ? d.result.filter((w): w is string => typeof w === "string") : []),
   })
   const [form, setForm] = useState({ name: "", protocol: "NFS", sizeGb: "10" })
@@ -180,6 +181,12 @@ export default function FileSharesPage() {
           </>
         }
       />
+      {warnings.data?.map((w) => (
+        <Alert key={w} className="mb-4" data-testid="share-site-warning">
+          <TriangleAlert aria-hidden="true" />
+          <AlertDescription>{w}</AlertDescription>
+        </Alert>
+      ))}
       {rows.length === 0 && !isLoading ? (
         <EmptyState icon={FolderTree} title="No file shares" hint="Create a share and mount it from your servers." />
       ) : (

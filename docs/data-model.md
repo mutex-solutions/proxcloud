@@ -400,6 +400,7 @@ on lookup, and each invite is `+24h`.
 | `projectId` | string FK → `project` | |
 | `token` | string | lookup token (UUID) |
 | `expiresAt` | time | expiry (lazy-purged) |
+| `invitedBy` | string → `users.sub` | who sent it (from v0.9.0): besides a project admin, the one who may list and revoke it. Absent on older rows |
 
 ---
 

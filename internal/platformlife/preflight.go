@@ -28,7 +28,7 @@ const (
 // Check is one row of the preflight. The ids are part of the API (docs/api.md): flags, scheduler (a warning, present only while the job scheduler is off), spec, network, bridge (a failure before the
 // first install, a warning after it), isolation,
 // tenant-network and tenant-path (a warning or ok, never a failure; absent when the provider names no zone), csi-vmid (a warning or ok, never a failure), credentials,
-// machines (a warning or ok, never a failure; absent while the installation has no VM), privileges:capi, privileges:csi, privileges:kubemint, mint-scope, pool-fence, token-scope, iso-store-visibility,
+// machines (a warning or ok, never a failure; absent while the installation has no VM), capacity (a failure before the first install, a warning after it or when it cannot be read; absent while the CAPI token is not stored), privileges:capi, privileges:csi, privileges:kubemint, mint-scope, pool-fence, token-scope, iso-store-visibility,
 // boot-iso-grant, boot-iso, placement, boot-store (a failure when the store is missing or takes no disk image, a warning
 // when it holds other VMs' disks), pve-api-rule (a warning or ok, never a failure), images. A run's first stage fails preflight_failed with the failed rows as its items, or
 // isolation_not_enforced when isolation is the only one.
@@ -146,6 +146,7 @@ func (p Preflight) Run(ctx context.Context) []Check {
 		spec = append(spec, fmt.Sprintf("spec.network.vlan %d: the platform's BOM (release %s) names cluster chart %s, which cannot tag a NIC; a VLAN tag needs chart %s or newer, so use a bridge or vnet that carries the VLAN untagged",
 			s.Network.VLAN, bom.Release, ClusterChartVersion(bom), kamaji.VLANChartVersion))
 	}
+	spec = append(spec, in.ControlPlaneCountProblems()...)
 	row("spec", spec, "The installation is complete and consistent.")
 
 	mgmt, complete, err := p.Portal.C.ManagementCIDRs(ctx)
@@ -268,6 +269,10 @@ func (p Preflight) Run(ctx context.Context) []Check {
 		case len(vms) > 0:
 			row("machines", nil, fmt.Sprintf("The platform's %d VMs run and start when their node boots.", len(vms)))
 		}
+	}
+
+	if p.CAPI != nil {
+		out = append(out, p.capacity(ctx))
 	}
 
 	privs := func(id string, c *pve.Client, who string, checks []pve.PrivCheck) {

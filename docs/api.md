@@ -143,7 +143,69 @@ form; the tests run against a fake Proxmox.
   delete with the current id. The delete also sends Proxmox the digest of the
   rule list it was checked against, so a change between the check and the delete
   is refused by Proxmox and answered `409` too.
-- There is no rule update: `UPDATE_RULE` is a `400`. Delete and add.
+- `UPDATE_RULE`, data `ruleId` (the `id` from `LIST_RULES`) and the fields of
+  `ADD_RULE`: the edit of a rule, as a delete and an add in one action. The new
+  rule passes the same checks as in `ADD_RULE`, so an edit cannot store what an
+  add refuses. Proxmox has no call that swaps a group rule for another, so the
+  API adds the new rule first and then deletes the old one: there is no moment
+  without either, and a refused add leaves the old rule as it was. A `ruleId`
+  that no rule has any more is a `409` and nothing is written. When the group
+  changes between the add and the delete the answer is a `409` whose message
+  says that the new rule was added and the old one is still there; the cache row
+  is refreshed, so the list shows both. An edit that changes nothing writes
+  nothing. A rule made in Proxmox that holds what `ADD_RULE` cannot express (an
+  action other than ACCEPT, a source port, a port list, a macro, an ICMP type,
+  a remote on the near side) is not edited: the answer is a `409` that says to
+  delete it and add a new one, because the edit would drop those settings. Not
+  verified on a lab.
+
+Load balancer readiness: `POST /api/v1/project/{id}/cloud/action` with
+`{"action":"LIST_LOAD_BALANCER_WARNINGS"}` on a Proxmox service answers
+`result`: a list of sentences, one for each thing the site lacks for a load
+balancer and only the operator can change: no public network available to the
+project, no public address left in the project's quota (`floatingIps`), the
+appliance image (`config.lbImage`, default `debian-13`) not in the image
+catalog. An empty list means the create is not refused for one of these. A
+catalog that cannot be read is not reported as a missing image. The console
+shows the list on the load balancers page and disables Create while it is not
+empty. `LIST_SHARE_WARNINGS` on a TrueNAS service is the same question for file
+shares; the console shows its answer on the file shares page and in the create
+dialog, and leaves Create enabled.
+
+Project invitations (`/api/v1/project-invites`, customer realm):
+
+| Call | Who | Answer |
+|---|---|---|
+| `POST /invite` `{email, projectId}` | `project:manage_members` on the project | `202` with the invitation: `id`, `email`, `projectId`, `expiresAt` (24 hours), `mailConfigured`, `inviteUrl` |
+| `GET /project/{projectId}` | a project admin sees every pending invitation of the project; another member of the project sees the ones they sent | `{mailConfigured, invites: [...]}`, each invitation as above |
+| `DELETE /project/{projectId}/{inviteId}` | the same rule as the list | `200`; the link stops working and a queued mail is cancelled. An id the caller may not see is a `404`, as an id that does not exist |
+| `GET /mine` | the invitee | the pending invitations of the caller's verified email |
+| `GET /{token}`, `POST /accept/{token}`, `POST /decline/{token}` | the invitee | accept and decline need an account whose email the identity provider has verified as the invited one |
+
+A caller who is neither a project admin nor a member of the project gets the
+`404` of a project that does not exist on the list and the revoke.
+`mailConfigured` is true when the invitation mail is handed to a mail gateway: a
+gateway is set (the SMTP integration or `PROXCLOUD_MAIL_SMTP_HOST` with
+`PROXCLOUD_MAIL_FROM`) and the durable invite outbox is off (it queues, and no
+dispatcher sends from it). When it is false no mail was sent, and `inviteUrl` is
+how the invitation reaches the invitee: the inviter copies it. `inviteUrl` is in
+every answer, also when `mailConfigured` is true: the send is best effort, so a
+set gateway does not mean the mail arrived (a wrong password, a disabled
+template, an invitation made before the gateway was set). The link alone
+does not let anyone join: accept matches the caller's verified email to the
+invited one. An invitee can also sign in with the invited address without the
+link; the console then shows the invitation on its start page (`GET /mine`). On
+a site without mail the identity provider cannot send a verification mail
+either, so the operator marks the address as verified in Keycloak
+(Users, the user, "Email verified") for an account that registered itself.
+An invitation made before v0.9.0 has no inviter stored: only a project admin
+sees it.
+
+Server power actions: `START`, `STOP`, `REBOOT` (asks the guest to restart) and
+`HARDREBOOT` (resets the VM without the guest's help, for a guest that hangs;
+the console offers it under More actions). `SHOW_CONSOLE_OUTPUT` answers an
+empty string on Proxmox: the Proxmox API has no call that returns a VM's past
+serial output, so there is no console log tail. Use the serial console.
 
 Proxmox connection test: `POST /api/v1/admin/service/proxmox/auth`
 (`admin:service:read`) tests a connection and stores nothing. The body takes
@@ -562,7 +624,12 @@ provider (`internal/platformlife`, collection `platformInstallation`, one per
 are several, `errors.details.problems`.
 
 - `GET|POST /installations`: list; create `{name, serviceId, provisionedBy?,
-  layout?, spec}` in phase `draft`. `spec` has `pveApiUrl`, `storage {boot,
+  layout?, preset?, spec}` in phase `draft`. `preset` (`homelab`, `standard` or `custom`; also on the PUT) fills what
+  `spec` leaves out before the checks and is not stored: sizes, counts, the three node groups, the control plane's
+  node (the seed's) and its count (`standard`: 3 where the installation's release builds three, else 1), and for
+  `homelab` with every machine of the spec on one node and no bridge named a `routed` network on the vnet
+  `pcplat0` ([the table](managed-services.md#presets-and-the-control-plane-count)). An unknown preset is a
+  `400 invalid_installation`. `spec` has `pveApiUrl`, `storage {boot,
   iso, import}` (import defaults to the provider's `importStorage`), `network
   {mode, bridge, vlan, prefix, gateway, dns[], mtu}` (`mode`: `bridge`, also what a spec without it means, or
   `routed`, where `bridge` names a vnet the install makes and every machine is on one node; `vlan`: 1 to 4094, mode
@@ -584,14 +651,22 @@ are several, `errors.details.problems`.
   equal to `storage.boot` (the portal token's role on the import store would
   reach the platform's disks), also when the empty `import` took that store
   from the provider. `layout: separate`, `provisionedBy: installer`
-  and `seed.mode: existing` are refused until a later release.
+  and `seed.mode: existing` are refused until a later release. `controlPlane` is `{node, replicas, cores, memoryMiB,
+  diskGiB}`: `replicas` is 1 or 3 (a spec without it means 1, and the answer names it), all machines on `node`; 3
+  need a BOM whose cluster chart is 0.1.14 or newer (the preflight's `spec` row). `controlPlane.nodes` (machines on
+  several nodes) is refused unless it is `[node]`, and `spec.sandbox {placement: shared|separate}`, the place for the
+  sandbox service's placement, is refused until the release that builds it.
 - `GET|PUT /installations/{id}`: the PUT replaces `name` and `spec` and names
   the `rev` it read (`409 rev_conflict` otherwise). It is refused during a run
   (`409 run_active`) and for a fixed field (`409 fixed_fields`): `serviceId`
   always; once a run succeeded also `provisionedBy` (but a stored `installer`
   may become `portal`), `layout`, `name`,
   `spec.network`, the seed's mode, pool, node and address, and the cluster's
-  name, endpoint and node groups. A draft can be corrected; no route deletes
+  name, endpoint and node groups. A control plane count below the one a run built (`status.clusters[].controlPlaneReplicas`,
+  written by stage 7 before it hands a count above one to the cluster; absent means one) is the same
+  `409 fixed_fields`, with the reason as its message: 3 to 1. From 1 to 3 is saved, and a 3 no run built goes back to
+  1. A count above one on an installation whose BOM names a cluster chart older than 0.1.14 is a
+  `400 invalid_installation`; `controlPlane.nodes` equal to `[node]` is accepted and not stored. A draft can be corrected; no route deletes
   one. The answer of a POST or PUT may carry `siteChanges`: what the save wrote
   into the provider's `config.network`, so that nobody has to. `blockedCidrs`
   are the CIDRs added to the provider's `blockedCidrs` (the seed's address, the
@@ -620,7 +695,7 @@ are several, `errors.details.problems`.
   changes nothing. No answer quotes the line.
 - `POST /installations/{id}/preflight`: read-only, not audited; `{ok, checks}`
   with rows `flags`, `scheduler` (a `warn` that says what tenants miss and the command that turns the job scheduler
-  on; absent while it runs), `spec`, `network`, `bridge`, `isolation`, `tenant-network`, `tenant-path`, `csi-vmid`, `credentials`, `machines`,
+  on; absent while it runs), `spec`, `network`, `bridge`, `isolation`, `tenant-network`, `tenant-path`, `csi-vmid`, `credentials`, `machines`, `capacity`,
   `privileges:capi`, `privileges:csi`, `privileges:kubemint`, `mint-scope`, `pool-fence`,
   `token-scope`, `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement`, `boot-store`,
   `pve-api-rule` and `images`. `boot-store` fails when Proxmox has no storage of
@@ -637,6 +712,10 @@ are several, `errors.details.problems`.
   refused with a `400`, except on a Kubernetes provider with shared workers
   (`cluster.shared`), which uses no tenant network. It is `ok` for a zone without
   DHCP, and absent when the provider names no zone.
+  `capacity` is absent while the CAPI token is not stored. It fails before the first install when a node's memory,
+  less the configured memory of the other VMs and containers on it as the CAPI token lists them, is smaller than what
+  the settings place there with one spare machine for the control plane. It is `warn` when that fits and one spare
+  machine per group and node on top does not, on an installed platform, and when the nodes could not be read.
   `bridge` fails when a node the settings use has no bridge or vnet of that name, or (mode `routed`) when a vnet of
   that name exists and is not the installation's; on an installed platform the same finding is `warn`.
   `tenant-path` never fails either and is absent in the same case. It reads the layout (the default zone's kind,

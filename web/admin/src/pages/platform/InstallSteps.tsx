@@ -18,8 +18,8 @@ import { useAdminList } from "@/lib/hooks"
 import { cn } from "@/lib/utils"
 import { CheckRows, CopyBlock, ErrorNote, LINK, StepCard, errMsg, fetchText, useClusterInfo } from "@/pages/setup/common"
 import {
-  CAPI_TOKEN, CSI_TOKEN, ENROLL_PREFIX, GROUPS, PLATFORM_KEY, GROUP_USE, TOKEN_SECRET, attachDefault, checkAction, enrollProblem, emptyForm, errCode, errProblems, formToSpec, isConflict, labProfile, specToForm, validate,
-  type BOM, type Check, type Form, type Installation, type MachineForm, type Plan, type Problem, type TenantProbe, type Upgrade,
+  CAPI_TOKEN, CSI_TOKEN, ENROLL_PREFIX, GROUPS, PLATFORM_KEY, GROUP_USE, PRESETS, TOKEN_SECRET, applyPreset, attachDefault, bomBuildsThree, checkAction, enrollProblem, emptyForm, errCode, errProblems, formToSpec, gib, isConflict, plannedMemory, specToForm, validate,
+  type BOM, type Check, type Form, type Installation, type MachineForm, type Plan, type Preset, type Problem, type SiteNode, type TenantProbe, type Upgrade,
 } from "./model"
 import { AttachChoice } from "./Tenants"
 
@@ -101,6 +101,13 @@ function NodePicker({ id, group, nodes, value, onChange, problems, disabled }: {
   )
 }
 
+// The nodes of the provider with their memory in MiB, as the connection test reads it: free is what Proxmox reports as
+// not in use now (0 and 0 for a node that did not report it).
+function useSiteNodes(serviceId: string): SiteNode[] {
+  const cluster = useClusterInfo(serviceId)
+  return (cluster.data?.nodes ?? []).map((n) => ({ node: n.node, maxMiB: Math.floor((n.maxmem ?? 0) / 2 ** 20), freeMiB: Math.floor(Math.max(0, (n.maxmem ?? 0) - (n.mem ?? 0)) / 2 ** 20) }))
+}
+
 const H3 = ({ children }: { children: React.ReactNode }) => <h3 className="border-b pb-1 text-sm font-semibold">{children}</h3>
 
 // The page mounts this form anew (by key) when the stored settings changed, so it always starts from what is stored.
@@ -126,6 +133,21 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
   const all = validate(form)
   const problems = shown ? all : []
   const nodes = (cluster.data?.nodes ?? []).map((n) => n.node)
+  const siteNodes = useSiteNodes(serviceId)
+  // The release an install or apply runs with: the installed one for a platform that stays on it, else this ProxCloud's.
+  const bomSha = installation?.status.bom?.sha256 ?? ""
+  const bom = useQuery({ queryKey: ["platform-bom", bomSha], queryFn: () => apiFetch<BOM>(`/admin/platform/bom${bomSha ? `?sha256=${bomSha}` : ""}`), retry: false, staleTime: 300_000 })
+  const three = bomBuildsThree(bom.data)
+  const [preset, setPreset] = useState<Preset>("custom")
+  const [notes, setNotes] = useState<string[]>([])
+  const pick = (p: Preset) => {
+    const filled = applyPreset(p, form, { nodes: siteNodes, three })
+    setPreset(p)
+    setNotes(filled.notes)
+    setForm(filled.form)
+  }
+  // A control plane a run built with three machines stays three; a 3 that was saved and never applied goes back.
+  const wasThree = (installation?.status.clusters?.[0]?.controlPlaneReplicas ?? 1) > 1
   // A new installation's attach choice defaults by whether the site already has projects (undefined: not counted).
   const projectList = useAdminList("/admin/project", !installation)
   const projects = projectList.data?.data?.length
@@ -167,6 +189,24 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
       <datalist id="pf-stores">{(cluster.data?.storages ?? []).map((s) => <option key={s.storage} value={s.storage} />)}</datalist>
       <datalist id="pf-bridges">{[...new Set((cluster.data?.bridges ?? []).filter((b) => !b.management).map((b) => b.iface))].map((b) => <option key={b} value={b} />)}</datalist>
 
+      <fieldset className="grid gap-2" aria-describedby="pf-preset-hint">
+        <legend className="mb-1.5 text-sm font-semibold">Start from</legend>
+        <div className="grid gap-2 sm:grid-cols-3">
+          {PRESETS.map((p) => (
+            <label key={p.id} className={cn("flex items-start gap-2 rounded-lg border p-3 text-sm", preset === p.id && "border-foreground")}>
+              <input type="radio" name="pf-preset" className="mt-1" checked={preset === p.id} disabled={fixed} onChange={() => pick(p.id)} />
+              <span><span className="font-medium">{p.title}</span><span className="block text-muted-foreground">{p.text}</span></span>
+            </label>
+          ))}
+        </div>
+        <p id="pf-preset-hint" className="text-xs text-muted-foreground">
+          {installed
+            ? "A preset is a start for a new installation. This platform is installed, and a preset would resize and replace its machines, so change the fields below one by one."
+            : "A choice fills in the nodes, counts and sizes below and nothing else. Every field stays yours to change, and what is saved is the fields, not the choice."}
+        </p>
+        {notes.length ? <ul aria-label="What the preset changed" className="list-disc pl-5 text-sm">{notes.map((n) => <li key={n}>{n}</li>)}</ul> : null}
+      </fieldset>
+
       <H3>Layout</H3>
       <div className="grid gap-4 sm:grid-cols-2">
         <Field id="name" label="Name" value={form.name} onChange={set("name")} disabled={fixed} problems={problems} placeholder="lab"
@@ -183,8 +223,7 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
 
       <H3>Node groups</H3>
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm text-muted-foreground">Three groups of worker machines. The machines of a group are spread over the nodes you choose.</p>
-        <Button variant="outline" size="sm" disabled={!canManage} onClick={() => setForm(labProfile(form))}>Use the lab profile</Button>
+        <p className="text-sm text-muted-foreground">Three groups of worker machines. The machines of a group are spread over the nodes you choose. Counts, sizes and nodes can change later.</p>
       </div>
       {GROUPS.map((g) => {
         const gf = form.groups[g]
@@ -269,8 +308,24 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
       <H3>Control plane</H3>
       <div className="grid gap-4 sm:grid-cols-2">
         <Field id="cpNode" label="Control plane node" list="pf-nodes" value={form.cpNode} onChange={set("cpNode")} disabled={!canManage} problems={problems} placeholder="pve1"
-          hint="One machine runs the platform cluster's control plane." />
+          hint="Every control plane machine of the platform cluster runs on this node." />
         <Sizes id="cp" what="Control plane" value={form.cp} onChange={(m) => setForm({ ...form, cp: m })} problems={problems} disabled={!canManage} />
+        <div className="grid content-start gap-1.5 sm:col-span-2">
+          <Label htmlFor="cpReplicas">Control plane machines</Label>
+          <select id="cpReplicas" className="h-9 w-40 rounded-md border bg-background px-2 text-sm" value={form.cpReplicas} disabled={!canManage} aria-describedby="cpReplicas-hint"
+            onChange={(e) => setForm({ ...form, cpReplicas: e.target.value })}>
+            <option value="1" disabled={wasThree}>1</option>
+            <option value="3" disabled={!three && form.cpReplicas !== "3"}>3, on this one node</option>
+          </select>
+          <p id="cpReplicas-hint" className="text-xs text-muted-foreground">
+            This is the platform cluster's own control plane, not a tenant's. Three machines keep its API up when one of their VMs is lost or replaced during an update.
+            They share one Proxmox node and one store, so they do not survive the loss of that node or of its disk, and three etcd members write more to that store than one.
+            The node needs memory for one machine more than the count: an update makes the new machine before it removes an old one, and a machine that does not fit is refused for good.
+            From 1 to 3 can be done later, with Apply; once an apply has built three, back to 1 cannot. Machines on several nodes are not built in this release. Not verified on a lab.
+            {bom.data && !three ? " This release builds one: three need a release whose cluster chart is 0.1.14 or newer." : ""}
+            {wasThree ? " A run built this platform with three, so it stays at three." : ""}
+          </p>
+        </div>
       </div>
 
       <H3>Storage</H3>
@@ -659,17 +714,11 @@ export function ReviewStep({ installation, canManage, dirty, onInstall, onUpgrad
   const s = installation.spec
   const c = s.clusters[0]
   const workers = c.nodeGroups.reduce((n, g) => n + g.count, 0)
-  // Cores and memory per Proxmox node: the seed, the control plane, and each group's machines spread over its nodes.
-  const load: Record<string, { cores: number; mem: number }> = {}
-  const add = (node: string, cores: number, mem: number) => {
-    load[node] = { cores: (load[node]?.cores ?? 0) + cores, mem: (load[node]?.mem ?? 0) + mem }
-  }
-  add(s.seed.node, s.seed.cores, s.seed.memoryMiB)
-  add(c.controlPlane.node, c.controlPlane.cores, c.controlPlane.memoryMiB)
-  for (const g of c.nodeGroups) g.nodes.forEach((n, i) => {
-    const count = Math.floor(g.count / g.nodes.length) + (i < g.count % g.nodes.length ? 1 : 0)
-    add(n, count * g.cores, count * g.memoryMiB)
-  })
+  const controlPlanes = c.controlPlane.replicas ?? 1
+  // Cores and memory per Proxmox node: the seed, the control plane machines, and each group's machines spread over
+  // its nodes; and the same with the spare machines of a rolling update.
+  const load = plannedMemory(specToForm(installation.name, s))
+  const siteNodes = useSiteNodes(installation.serviceId)
   const blocking = plan.data?.blocking ?? []
   const installed = !!installation.status.bom
   return (
@@ -704,18 +753,32 @@ export function ReviewStep({ installation, canManage, dirty, onInstall, onUpgrad
         <h3 className="font-semibold">What is created</h3>
         <ul className="list-disc pl-5">
           <li>1 seed VM on {s.seed.node}, in the pool <code>{s.seed.pool || "proxcloud-seed"}</code>;</li>
-          <li>1 control plane and {workers} worker machines in the pool <code>proxcloud-system</code>;</li>
+          <li>{controlPlanes === 1 ? "1 control plane machine" : `${controlPlanes} control plane machines on ${c.controlPlane.node}`} and {workers} worker machines in the pool <code>proxcloud-system</code>;</li>
           <li>the providers “{installation.name} Kubernetes” and “{installation.name} Databases”, held back from new projects until you attach them.</li>
         </ul>
       </div>
       <div className="grid gap-1 text-sm">
         <h3 className="font-semibold">What it takes on each node</h3>
         <ul aria-label="Cores and memory per node" className="list-disc pl-5">
-          {Object.entries(load).sort().map(([node, l]) => (
-            <li key={node}><span className="font-mono">{node}</span>: {l.cores} cores and {l.mem / 1024} GiB of memory</li>
-          ))}
+          {Object.entries(load).sort().map(([node, l]) => {
+            const at = siteNodes.find((n) => n.node === node)
+            const read = !!at && at.maxMiB > 0
+            return (
+              <li key={node}>
+                <span className="font-mono">{node}</span>: {l.cores} cores and {gib(l.run)} of memory; {gib(l.need)} with the one more machine an update of the control plane makes, {gib(l.spare)} with one more of each group as well.{" "}
+                {!read ? "The node's memory was not read." : installed ? `The node has ${gib(at.maxMiB)}, ${gib(at.freeMiB)} of it free now, with this platform's machines running.`
+                  : `The node has ${gib(at.freeMiB)} free of ${gib(at.maxMiB)}.`}
+                {read && !installed && l.need > at.freeMiB ? <span className="font-medium text-destructive"> That is not enough.</span>
+                  : read && !installed && l.spare > at.freeMiB ? " That holds the install; a later change that replaces a group's machines needs the larger figure." : null}
+              </li>
+            )
+          })}
         </ul>
-        <p className="text-muted-foreground">Compare it with the free memory of each node in Proxmox: this page does not read it.</p>
+        <p className="text-muted-foreground">
+          Free is what Proxmox reports as not in use now. The Check's row <span className="font-mono">capacity</span> decides: it counts the configured memory of every VM
+          and container on the node, running or not, as the machines are counted when they are cloned. A rolling update makes one spare machine for the control plane and one for
+          each group on each of its nodes before it removes the old ones. The row fails without room for the control plane's, and warns without room for the groups'.
+        </p>
       </div>
       {!installed ? (
         <p className="text-sm text-muted-foreground">

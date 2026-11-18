@@ -51,6 +51,10 @@ type FirewallRule struct {
 	Enable  int    `json:"enable"`
 	Comment string `json:"comment"`
 	Digest  string `json:"digest,omitempty"`
+
+	// Read only: a rule made in Proxmox may carry them, one made through the API never does.
+	Macro    string `json:"macro,omitempty"`
+	ICMPType string `json:"icmp-type,omitempty"`
 }
 
 func (c *Client) ListFirewallRules(ctx context.Context, group string) ([]FirewallRule, error) {

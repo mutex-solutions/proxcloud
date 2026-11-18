@@ -59,6 +59,15 @@ const VLANChartVersion = "0.1.14"
 // ChartHasVLAN reports whether chart version v tags the machines' NIC with proxmox.network.vlan.
 func ChartHasVLAN(v string) bool { return chartAtLeast(v, VLANChartVersion) }
 
+// ControlPlaneReplicasChartVersion is the first cluster chart that reads controlPlane.kubeadm.replicas. An older chart
+// writes one control plane machine whatever the value says.
+const ControlPlaneReplicasChartVersion = "0.1.14"
+
+// ChartHasControlPlaneReplicas reports whether chart version v builds a kubeadm control plane of more than one machine.
+func ChartHasControlPlaneReplicas(v string) bool {
+	return chartAtLeast(v, ControlPlaneReplicasChartVersion)
+}
+
 // MachineHealthCheckChartVersion is the first cluster chart that reads machineHealthCheck: one MachineHealthCheck per
 // node group, which replaces a worker that registered no Node within the startup timeout. An older chart ignores
 // the key, so none is written for a cluster pinned below it.

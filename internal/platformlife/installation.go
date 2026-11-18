@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 )
 
@@ -25,7 +26,7 @@ type Installation struct {
 	Name          string    `json:"name"` // prefixes the providers: "<name> Kubernetes", "<name> Databases"
 	ServiceID     string    `json:"serviceId"`
 	ProvisionedBy string    `json:"provisionedBy"` // portal | installer (M2: refused by Validate)
-	Layout        string    `json:"layout"`        // shared (separate is refused in M1)
+	Layout        string    `json:"layout"`        // of kamaji and dbaas: shared (separate is refused, not built). The sandbox's placement is Spec.Sandbox
 	Spec          Spec      `json:"spec"`
 	Status        Status    `json:"status"`
 	LastRunID     string    `json:"lastRunId,omitempty"`
@@ -44,6 +45,16 @@ type Spec struct {
 	Clusters  []ClusterSpec `json:"clusters"`
 	NodeImage NodeImage     `json:"nodeImage"`
 	Tenants   Tenants       `json:"tenants,omitzero"`
+	// Sandbox is where the sandbox service will run, a choice the install offers once that service ships: placement
+	// shared (a node group of the platform cluster, the homelab choice) or separate (a cluster of its own). No release
+	// builds it yet, so Validate refuses the block; a spec without it means "no sandbox service" and keeps meaning that,
+	// which makes the later release an addition for every stored record.
+	Sandbox *SandboxSpec `json:"sandbox,omitempty"`
+}
+
+// SandboxSpec is the placement of the sandbox service (see Spec.Sandbox).
+type SandboxSpec struct {
+	Placement string `json:"placement"` // shared | separate
 }
 
 // Storage: boot holds every platform disk and is the std StorageClass; iso is the node-local store of bootstrap ISOs;
@@ -94,13 +105,22 @@ type ClusterSpec struct {
 	NodeGroups   []NodeGroup `json:"nodeGroups"`
 }
 
-// Machine is one VM's placement and size.
+// Machine is the control plane: the size of one of its machines, their count and their Proxmox node. Replicas is 1 or
+// 3 (a stored spec without it means 1) and may grow from 1 to 3 on an installed platform, not shrink. Every machine is
+// on Node: the cluster chart pins the control plane's one machine template to a node, and CAPMOX v0.9.2 clones to
+// another node only when the template and the new disk are on shared storage. Nodes is the place for that spread; this
+// release takes it only empty or as [Node].
 type Machine struct {
-	Node      string `json:"node"`
-	Cores     int    `json:"cores"`
-	MemoryMiB int    `json:"memoryMiB"`
-	DiskGiB   int    `json:"diskGiB"`
+	Node      string   `json:"node"`
+	Nodes     []string `json:"nodes,omitempty"`
+	Replicas  int      `json:"replicas,omitempty"`
+	Cores     int      `json:"cores"`
+	MemoryMiB int      `json:"memoryMiB"`
+	DiskGiB   int      `json:"diskGiB"`
 }
+
+// Count is the number of control plane machines: Replicas, and 1 for a spec stored before the field.
+func (m Machine) Count() int { return max(m.Replicas, 1) }
 
 // NodeGroup is one MachineDeployment per PVE node; Count is split across Nodes as the chart splits machineCount.
 type NodeGroup struct {
@@ -165,12 +185,16 @@ type SeedStatus struct {
 
 // ClusterStatus is one workload cluster as the job built it. KubeconfigSecret is a Secret name on the seed.
 type ClusterStatus struct {
-	Name                 string         `json:"name"`
-	Namespace            string         `json:"namespace,omitempty"`
-	Endpoint             string         `json:"endpoint,omitempty"`
-	KubernetesVersion    string         `json:"kubernetesVersion,omitempty"`
-	KubeconfigSecret     string         `json:"kubeconfigSecret,omitempty"`
-	ManagedBy            string         `json:"managedBy,omitempty"` // application | raw
+	Name              string `json:"name"`
+	Namespace         string `json:"namespace,omitempty"`
+	Endpoint          string `json:"endpoint,omitempty"`
+	KubernetesVersion string `json:"kubernetesVersion,omitempty"`
+	KubeconfigSecret  string `json:"kubeconfigSecret,omitempty"`
+	ManagedBy         string `json:"managedBy,omitempty"` // application | raw
+	// ControlPlaneReplicas is the largest control plane count above one a run handed to the cluster's Application,
+	// written before that sync; absent means one. ControlPlaneShrink reads it: the stored spec says what is asked for,
+	// not what was built.
+	ControlPlaneReplicas int            `json:"controlPlaneReplicas,omitempty"`
 	Templates            map[string]int `json:"templates,omitempty"`
 	ArgoCDTokenExpiresAt *time.Time     `json:"argocdTokenExpiresAt,omitempty"`
 }
@@ -224,6 +248,9 @@ const (
 	// RoutedZone is the simple SDN zone of a routed platform network. One per Proxmox cluster, as one installation is.
 	RoutedZone = "pcplat"
 
+	SandboxShared   = "shared"
+	SandboxSeparate = "separate"
+
 	RoleKamaji = "kamaji"
 	RoleDBaaS  = "dbaas"
 
@@ -258,7 +285,8 @@ var (
 func (n Network) Routed() bool { return n.Mode == NetworkRouted }
 
 // Normalize fills the defaults of a new or updated installation: shared layout, a portal-built seed in pool
-// proxcloud-seed, one cluster pc-platform that runs both services, and the BOM's node image.
+// proxcloud-seed, one cluster pc-platform that runs both services with one control plane machine, and the BOM's node
+// image.
 func (in *Installation) Normalize() {
 	if in.ProvisionedBy == "" {
 		in.ProvisionedBy = ByPortal
@@ -282,6 +310,11 @@ func (in *Installation) Normalize() {
 		}
 		if len(s.Clusters[i].Roles) == 0 {
 			s.Clusters[i].Roles = []string{RoleKamaji, RoleDBaaS}
+		}
+		cp := &s.Clusters[i].ControlPlane
+		cp.Replicas = cp.Count()
+		if slices.Equal(cp.Nodes, []string{cp.Node}) {
+			cp.Nodes = nil // says what node says: not stored
 		}
 	}
 }
@@ -312,6 +345,14 @@ func (in *Installation) Validate() error {
 		bad("layout %q is not shared", in.Layout)
 	}
 	s := in.Spec
+	if s.Sandbox != nil {
+		switch s.Sandbox.Placement {
+		case SandboxShared, SandboxSeparate:
+			bad("spec.sandbox: the sandbox service on the platform comes in a later release; leave spec.sandbox out")
+		default:
+			bad("spec.sandbox.placement %q is neither shared nor separate", s.Sandbox.Placement)
+		}
+	}
 	if u, err := url.Parse(s.PVEAPIURL); err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		bad("spec.pveApiUrl %q is not an https:// URL with a host", s.PVEAPIURL)
 	}
@@ -476,8 +517,14 @@ func (in *Installation) Validate() error {
 			bad("%s.controlPlane.node %q is not a node name", f, cp.Node)
 		}
 		machine(f+".controlPlane", cp.Cores, cp.MemoryMiB, cp.DiskGiB)
+		if cp.Replicas != 0 && cp.Replicas != 1 && cp.Replicas != 3 {
+			bad("%s.controlPlane.replicas %d: 1 or 3 (etcd needs an odd number of members, and this release builds no more than 3)", f, cp.Replicas)
+		}
+		if len(cp.Nodes) > 0 && !slices.Equal(cp.Nodes, []string{cp.Node}) {
+			bad("%s.controlPlane.nodes: every control plane machine goes to one Proxmox node, controlPlane.node. Machines on several nodes need the node image template and the control plane disks on shared storage (CAPMOX v0.9.2 clones one template, and Proxmox moves a clone to another node only from and to shared storage), and this release does not build that: leave controlPlane.nodes out", f)
+		}
 		var names []string
-		machines, surge := 2, 0 // the control plane and its rolling surge
+		machines, surge := cp.Count()+1, 0 // the control plane machines and the one more a rolling update makes
 		for gi, g := range c.NodeGroups {
 			gf := fmt.Sprintf("%s.nodeGroups[%d]", f, gi)
 			names = append(names, g.Name)
@@ -503,7 +550,7 @@ func (in *Installation) Validate() error {
 			bad("%s.nodeGroups: exactly the groups %s, once each", f, strings.Join(NodeGroupNames, ", "))
 		}
 		if nodesOK && nodes.size() < uint64(machines+surge) {
-			bad("%s.nodeRange holds %d addresses; %d machines and %d rolling surges need %d", f, nodes.size(), machines, surge, machines+surge)
+			bad("%s.nodeRange holds %d addresses; %d machines (%d of the control plane and its one more during an update) and %d rolling surges need %d", f, nodes.size(), machines, cp.Count(), surge, machines+surge)
 		}
 
 		switch s.NodeImage.Mode {
@@ -705,6 +752,49 @@ func FixedChanges(old, next *Installation) []string {
 			return names
 		}
 		same(f+".nodeGroups", groups(c.NodeGroups), groups(n.NodeGroups))
+	}
+	return out
+}
+
+// ControlPlaneShrink is why next may not be saved over old, or "": a control plane a run built with 3 machines does
+// not go to 1. Cluster API would take two etcd members out one after the other; with two members left, one slow or
+// lost member stops etcd, and all three are on one node and one store. No lab has run it, and nothing here repairs a
+// control plane that stopped half way. What counts is what a run handed to the cluster (Status.Clusters), not the
+// stored spec: a 3 that was saved and never applied goes back to 1. From 1 to 3 is an apply that adds two machines.
+func ControlPlaneShrink(old, next *Installation) string {
+	for i, c := range old.Status.Clusters {
+		built := max(c.ControlPlaneReplicas, 1)
+		if i < len(next.Spec.Clusters) && next.Spec.Clusters[i].ControlPlane.Count() < built {
+			return fmt.Sprintf("spec.clusters[%d].controlPlane.replicas: a run built this control plane with %d machines, and it does not go from %d machines to %d in this release. "+
+				"Taking etcd members out leaves two for a while, where one slow or lost member stops the platform's API, and no lab has run that step. "+
+				"Keep %d; to get a platform with one, remove the installation and install again.",
+				i, built, built, next.Spec.Clusters[i].ControlPlane.Count(), built)
+		}
+	}
+	return ""
+}
+
+// BuildsThree reports whether the cluster chart of the installation's BOM (the installed one, else this release's)
+// builds more than one control plane machine.
+func (in *Installation) BuildsThree() bool {
+	bom, err := bomOf(in)
+	return err == nil && kamaji.ChartHasControlPlaneReplicas(ClusterChartVersion(bom))
+}
+
+// ControlPlaneCountProblems is why the installation's BOM cannot build the control plane count of the spec, or nil.
+// The record alone cannot say it, so Validate does not: the save and the Check's spec row both ask here. Without it a
+// saved 3 would fail every apply and upgrade of a platform whose chart builds one.
+func (in *Installation) ControlPlaneCountProblems() []string {
+	bom, err := bomOf(in)
+	if err != nil || kamaji.ChartHasControlPlaneReplicas(ClusterChartVersion(bom)) {
+		return nil
+	}
+	var out []string
+	for _, c := range in.Spec.Clusters {
+		if n := c.ControlPlane.Count(); n > 1 {
+			out = append(out, fmt.Sprintf("spec.clusters: %d control plane machines: the platform's BOM (release %s) names cluster chart %s, which builds one; more need chart %s or newer, so keep 1 until the platform is on a release that has it",
+				n, bom.Release, ClusterChartVersion(bom), kamaji.ControlPlaneReplicasChartVersion))
+		}
 	}
 	return out
 }

@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -36,7 +37,7 @@ func (r *Repo) purgeExpired(ctx context.Context) error {
 	if err := r.invites.Ensure(ctx); err != nil {
 		return err
 	}
-	return r.deleteInvites(ctx, "", "", true)
+	return r.deleteInvites(ctx, "", "", "", true)
 }
 
 // ByEmailAndToken finds an invite by email + token. nil when none, and for a blank
@@ -71,12 +72,31 @@ func (r *Repo) ByEmail(ctx context.Context, email string) ([]pgdoc.M, error) {
 	return docs, nil
 }
 
+// ByProject lists the pending (non-expired) invites of a project.
+func (r *Repo) ByProject(ctx context.Context, projectID string) ([]pgdoc.M, error) {
+	if err := r.purgeExpired(ctx); err != nil {
+		return nil, err
+	}
+	var docs []pgdoc.M
+	if err := r.invites.Find(ctx, pgdoc.M{"projectId": projectID}, &docs); err != nil {
+		return nil, err
+	}
+	return docs, nil
+}
+
 // DeleteByEmailAndProjectID removes all invites for an email+project (accept-invite cleanup).
 func (r *Repo) DeleteByEmailAndProjectID(ctx context.Context, email, projectID string) error {
 	if err := r.invites.Ensure(ctx); err != nil {
 		return err
 	}
-	return r.deleteInvites(ctx, email, projectID, false)
+	return r.deleteInvites(ctx, email, projectID, "", false)
+}
+
+// Revoke removes one invite of a project and cancels its queued mail, as an accept or a decline does.
+func (r *Repo) Revoke(ctx context.Context, inv pgdoc.M) error {
+	email, _ := inv["email"].(string)
+	projectID, _ := inv["projectId"].(string)
+	return r.deleteInvites(ctx, email, projectID, inviteDocID(inv), false)
 }
 
 // Create inserts a new invite doc, returning its generated id.
@@ -182,6 +202,8 @@ func (h *Handler) auditInvite(u *user.User, action, inviteID, projectID, project
 
 func (h *Handler) Routes(r chi.Router) {
 	r.Post("/project-invites/invite", h.invite)
+	r.Get("/project-invites/project/{projectId}", h.listForProject)
+	r.Delete("/project-invites/project/{projectId}/{inviteId}", h.revoke)
 	r.Get("/project-invites/mine", h.mine) // static — precedes /{token}
 	r.Get("/project-invites/{token}", h.get)
 	r.Post("/project-invites/accept/{token}", h.accept)
@@ -192,7 +214,9 @@ func (h *Handler) Routes(r chi.Router) {
 // project-by-id 404, already-a-member 400 ("User is already added to project"), then save
 // {email, projectId, token: UUID, expiresAt: +24h}, send the "send_invite_to_project" mail with
 // the join-project deep link, and audit INVITE (resourceMetadata.invitedEmail). The caller must
-// hold project:manage_members on the target project (requireInvitePermission). 202 Accepted.
+// hold project:manage_members on the target project (requireInvitePermission). 202 Accepted, with
+// the invitation as the list route shows it, link included: on a site that sends no mail that is
+// the only place the inviter gets the link from.
 func (h *Handler) invite(w http.ResponseWriter, r *http.Request) {
 	u, err := h.users.Require(r.Context(), httpx.RC(r.Context()).Sub)
 	if err != nil {
@@ -215,47 +239,171 @@ func (h *Handler) invite(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, err)
 		return
 	}
-	if err := h.InviteToProject(r.Context(), u, req.Email, req.ProjectID); err != nil {
+	inv, err := h.createInvite(r.Context(), u, req.Email, req.ProjectID)
+	if err != nil {
 		httpx.WriteError(w, err)
 		return
 	}
-	httpx.Accepted(w)
+	view := h.inviteView(inv, h.mailDelivers(r.Context()))
+	httpx.Raw(w, http.StatusAccepted, httpx.Response[map[string]any]{Data: &view})
+}
+
+// mailDelivers reports whether an invitation mail really leaves the site. The durable outbox only
+// queues: no dispatcher is registered (cmd/api/main.go), so with it on nothing is sent.
+func (h *Handler) mailDelivers(ctx context.Context) bool {
+	if h.outbox != nil {
+		return false
+	}
+	c, ok := h.notifier.(interface{ Configured(context.Context) bool })
+	return ok && c.Configured(ctx)
+}
+
+// inviteView is an invitation as its inviter or a project admin sees it, always with its link.
+// mailConfigured only words the answer ("sent" or "copy the link"): a configured gateway does not mean the mail arrived (a failed send, a disabled template, an invite
+// made before the gateway was set), and the link is then the only way left. It is not enough to
+// join: accept also needs an account whose address the identity provider has verified as the
+// invited one, and that account finds the invitation without the link (/project-invites/mine).
+func (h *Handler) inviteView(inv pgdoc.M, mailDelivers bool) map[string]any {
+	out := map[string]any{
+		"id": inviteDocID(inv), "email": inv["email"], "projectId": inv["projectId"],
+		"expiresAt": inv["expiresAt"], "mailConfigured": mailDelivers,
+	}
+	if token, _ := inv["token"].(string); token != "" {
+		out["inviteUrl"] = h.uiBaseURL + "/join-project?invite-token=" + token
+	}
+	return out
+}
+
+// inviteAccess resolves the project of the list and revoke routes and says how much the caller may
+// see: every invitation with project:manage_members, only their own as another member of the
+// project. Anyone else gets the 404 of a project that does not exist.
+func (h *Handler) inviteAccess(ctx context.Context, sub, projectID string) (proj *project.Project, all bool, err error) {
+	if proj, err = h.projectSvc.GetProjectByID(ctx, projectID); err != nil {
+		return nil, false, err
+	}
+	if h.requireInvitePermission(ctx, sub, proj) == nil {
+		return proj, true, nil
+	}
+	if !proj.IsMember(sub) {
+		return nil, false, httpx.NotFound(fmt.Sprintf("The project with id %s was not found. ", projectID))
+	}
+	return proj, false, nil
+}
+
+// visibleInvites are the project's pending invitations the caller may list and revoke.
+func (h *Handler) visibleInvites(ctx context.Context, sub, projectID string) (*project.Project, []pgdoc.M, error) {
+	proj, all, err := h.inviteAccess(ctx, sub, projectID)
+	if err != nil {
+		return nil, nil, err
+	}
+	invs, err := h.repo.ByProject(ctx, proj.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if all {
+		return proj, invs, nil
+	}
+	own := invs[:0]
+	for _, inv := range invs {
+		if by, _ := inv["invitedBy"].(string); by == sub {
+			own = append(own, inv)
+		}
+	}
+	return proj, own, nil
+}
+
+// listForProject answers the pending invitations of a project: {mailConfigured, invites}.
+func (h *Handler) listForProject(w http.ResponseWriter, r *http.Request) {
+	u, err := h.users.Require(r.Context(), httpx.RC(r.Context()).Sub)
+	if err != nil {
+		httpx.WriteError(w, err)
+		return
+	}
+	_, invs, err := h.visibleInvites(r.Context(), u.Sub, chi.URLParam(r, "projectId"))
+	if err != nil {
+		httpx.WriteError(w, err)
+		return
+	}
+	mailDelivers := h.mailDelivers(r.Context())
+	out := make([]map[string]any, 0, len(invs))
+	for _, inv := range invs {
+		out = append(out, h.inviteView(inv, mailDelivers))
+	}
+	httpx.OK(w, map[string]any{"mailConfigured": mailDelivers, "invites": out})
+}
+
+// revoke deletes one pending invitation: its link stops working and a queued mail is cancelled.
+// An id the caller may not see answers 404, as an id that does not exist.
+func (h *Handler) revoke(w http.ResponseWriter, r *http.Request) {
+	u, err := h.users.Require(r.Context(), httpx.RC(r.Context()).Sub)
+	if err != nil {
+		httpx.WriteError(w, err)
+		return
+	}
+	proj, invs, err := h.visibleInvites(r.Context(), u.Sub, chi.URLParam(r, "projectId"))
+	if err != nil {
+		httpx.WriteError(w, err)
+		return
+	}
+	for _, inv := range invs {
+		if inviteDocID(inv) != chi.URLParam(r, "inviteId") {
+			continue
+		}
+		if err := h.repo.Revoke(r.Context(), inv); err != nil {
+			httpx.WriteError(w, err)
+			return
+		}
+		h.auditInvite(u, audit.ActionDelete, inviteDocID(inv), proj.ID, proj.Name, map[string]any{"invitedEmail": inv["email"]})
+		httpx.Empty(w)
+		return
+	}
+	httpx.WriteError(w, httpx.NotFound("Project invite not found"))
 }
 
 // InviteToProject is the service leg of invite — shared
 // by the HTTP handler above and the admin user-create projectIds loop.
 // Returns *httpx.HTTPError on project-404 / already-a-member-400.
 func (h *Handler) InviteToProject(ctx context.Context, u *user.User, email, projectID string) error {
+	_, err := h.createInvite(ctx, u, email, projectID)
+	return err
+}
+
+// createInvite stores the invite, hands its mail to the outbox or the notifier, and audits it. It
+// returns the stored document. invitedBy is who may list and revoke it besides a project admin.
+func (h *Handler) createInvite(ctx context.Context, u *user.User, email, projectID string) (pgdoc.M, error) {
 	if err := pgdoc.RejectInheritedTransaction(ctx); err != nil {
-		return err
+		return nil, err
 	}
 	proj, err := h.projectSvc.GetProjectByID(ctx, projectID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// An existing user who is already a project member → 400.
 	if invited, _ := h.users.FindVerifiedByEmail(ctx, email); invited != nil && proj.IsMember(invited.Sub) {
-		return httpx.BadRequest("User is already added to project")
+		return nil, httpx.BadRequest("User is already added to project")
 	}
 	if h.outbox != nil {
-		id, err := h.createDurableInvite(ctx, email, proj)
+		doc, err := h.createDurableInvite(ctx, email, u.Sub, proj)
 		if err != nil {
-			return err // never fall back to the best-effort notifier
+			return nil, err // never fall back to the best-effort notifier
 		}
-		h.auditInvite(u, audit.ActionInvite, id, proj.ID, proj.Name, map[string]any{"invitedEmail": email})
-		return nil
+		h.auditInvite(u, audit.ActionInvite, inviteDocID(doc), proj.ID, proj.Name, map[string]any{"invitedEmail": email})
+		return doc, nil
 	}
 	token := uuid.NewString()
-	inviteID, err := h.repo.Create(ctx, pgdoc.M{
+	doc := pgdoc.M{
 		"email":        email,
 		"projectId":    proj.ID,
 		"token":        token,
 		"expiresAt":    time.Now().UTC().Add(24 * time.Hour),
 		"deliveryMode": "legacy",
-	})
-	if err != nil {
-		return err
+		"invitedBy":    u.Sub,
 	}
+	inviteID, err := h.repo.Create(ctx, doc)
+	if err != nil {
+		return nil, err
+	}
+	doc["_id"] = inviteID
 	// Send the project-invitation mail → messageKey send_invite_to_project (best-effort).
 	if h.notifier != nil && email != "" {
 		_ = h.notifier.SendTemplate(ctx, "send_invite_to_project", []string{email}, map[string]any{
@@ -266,7 +414,7 @@ func (h *Handler) InviteToProject(ctx context.Context, u *user.User, email, proj
 		})
 	}
 	h.auditInvite(u, audit.ActionInvite, inviteID, proj.ID, proj.Name, map[string]any{"invitedEmail": email})
-	return nil
+	return doc, nil
 }
 
 // accept resolves the caller's invite by email+token, adds

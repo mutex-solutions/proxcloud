@@ -56,7 +56,9 @@ type RenderCluster struct {
 	NodeRange    []string // first-last ranges CAPI IPAM gives the VMs
 	MetalLBRange string   // first-last, pool services
 	ControlPlane RenderMachine
-	NodeGroups   []RenderNodeGroup
+	// ControlPlaneReplicas is the number of control plane machines, all on ControlPlane.Node; 0 and 1 are one machine.
+	ControlPlaneReplicas int
+	NodeGroups           []RenderNodeGroup
 }
 
 // RenderMachine is the size of a VM and its PVE node.
@@ -146,8 +148,8 @@ func ClusterChartVersion(b *BOM) string {
 	return ""
 }
 
-// ClusterValues are the proxmox-kamaji-cluster values of the workload cluster: controlPlane.kind kubeadm, one control
-// plane VM, the node groups in pool proxcloud-system, each group labelled and every group but system tainted.
+// ClusterValues are the proxmox-kamaji-cluster values of the workload cluster: controlPlane.kind kubeadm, its control
+// plane VMs on one node, the node groups in pool proxcloud-system, each group labelled and every group but system tainted.
 func ClusterValues(b *BOM, in RenderInput) (map[string]any, error) {
 	pins := func(nodes []string) (string, error) {
 		out := make([]string, 0, len(nodes))
@@ -201,16 +203,25 @@ func ClusterValues(b *BOM, in RenderInput) (map[string]any, error) {
 		}
 		network["vlan"] = in.Network.VLAN
 	}
+	kubeadm := map[string]any{
+		"endpoint": in.Cluster.Endpoint, "kubeVipImage": b.Images.KubeVip, "machineImageId": cpPin,
+		"machineCores": cp.Cores, "machineMemoryMiB": cp.MemoryMiB, "machineRootVolume": map[string]any{"diskSize": cp.DiskGiB},
+		"machineTags": machineTags(in.ID),
+	}
+	// As the tag: the key is written only for more than one machine, so a platform with one renders as before under
+	// every BOM, and an older chart, which would build one machine and say nothing, is refused.
+	if n := in.Cluster.ControlPlaneReplicas; n > 1 {
+		if v := ClusterChartVersion(b); !kamaji.ChartHasControlPlaneReplicas(v) {
+			return nil, fmt.Errorf("platform: the BOM of release %s names cluster chart %s, which builds one control plane machine: %d need chart %s or newer", b.Release, v, n, kamaji.ControlPlaneReplicasChartVersion)
+		}
+		kubeadm["replicas"] = n
+	}
 	return map[string]any{
 		"kubernetesVersion":          b.Kubernetes.Version,
 		"cloudCredentialsSecretName": PVECredentialsSecretName,
 		// The installer's services cluster ranges (services-cluster.yml.j2).
 		"clusterNetwork": map[string]any{"pods": "10.244.0.0/16", "services": "10.96.0.0/16"},
-		"controlPlane": map[string]any{"kind": "kubeadm", "kubeadm": map[string]any{
-			"endpoint": in.Cluster.Endpoint, "kubeVipImage": b.Images.KubeVip, "machineImageId": cpPin,
-			"machineCores": cp.Cores, "machineMemoryMiB": cp.MemoryMiB, "machineRootVolume": map[string]any{"diskSize": cp.DiskGiB},
-			"machineTags": machineTags(in.ID),
-		}},
+		"controlPlane":   map[string]any{"kind": "kubeadm", "kubeadm": kubeadm},
 		"proxmox": map[string]any{
 			"region": in.Region, "pool": "proxcloud-system", "storage": in.BootStorage,
 			"network": network,

@@ -15,7 +15,8 @@ const dbPorts: Record<string, number> = { postgresql: 5432, mysql: 3306, mariadb
 // --- Listing ----------------------------------------------------------------
 
 on("GET /project/:pid/resource-types", () => ({ data: locations }))
-on("GET /project/:pid/public-networks", () => ({ data: publicNetworks }))
+// prj-staging is a site that serves less (handlers/platform.ts): its operator gave the project no public network.
+on("GET /project/:pid/public-networks", ({ params }) => ({ data: params.pid === "prj-staging" ? [] : publicNetworks }))
 on("GET /project/:pid/quota-usage", ({ params, opts }) => {
   const projectQuota = params.pid === "prj-staging"
     ? {
@@ -109,9 +110,17 @@ on("DELETE /project/:pid/cloud/:resourceId", ({ params }) => {
 
 // --- Collection-level actions ------------------------------------------------
 
-on("POST /project/:pid/cloud/action", ({ opts }) => {
+on("POST /project/:pid/cloud/action", ({ params, opts }) => {
   const action = (opts.body as { action?: string })?.action
   switch (action) {
+    // What the site lacks for a load balancer: nothing on prj-aurora, a public network and the image on prj-staging.
+    case "LIST_LOAD_BALANCER_WARNINGS":
+      return ok(params.pid === "prj-staging"
+        ? [
+            "No public network is available to this project, and a load balancer takes its public address from one. Ask your operator to add a public network to the provider and to allow it for this project.",
+            "The image a load balancer runs on, debian-13, is not in this site's image catalog. Ask your operator to add it, or to name another Debian family image in the provider setting lbImage.",
+          ]
+        : [])
     case "LIST_FLAVORS": return ok(flavors)
     case "PUBLIC_IMAGES": return ok(publicImages)
     case "LIST_VOLUME_TYPES": return ok(volumeTypes)
@@ -201,7 +210,7 @@ on("POST /project/:pid/cloud/:resourceId/action", ({ params, opts }) => {
     // Compute lifecycle
     case "START": setServerStatus("ACTIVE"); return ok()
     case "STOP": setServerStatus("SHUTOFF"); return ok()
-    case "SOFTREBOOT": setServerStatus("ACTIVE"); return ok()
+    case "SOFTREBOOT": case "HARDREBOOT": setServerStatus("ACTIVE"); return ok()
     case "RESCUE": setServerStatus("RESCUE"); return ok("mock-rescue-password")
     case "UNRESCUE": setServerStatus("ACTIVE"); return ok()
     case "RESIZE": setServerStatus("VERIFY_RESIZE"); return ok()
@@ -249,7 +258,21 @@ on("POST /project/:pid/cloud/:resourceId/action", ({ params, opts }) => {
     case "ADD_INTERFACE": case "DELETE_INTERFACE":
     case "ADD_EXTERNAL_GATEWAY": case "DELETE_EXTERNAL_GATEWAY": return ok()
     case "LIST_RULES": return ok(r?.data?.securityGroup?.security_group_rules ?? [])
-    case "ADD_RULE": case "DELETE_RULE": return ok()
+    // Rules as Proxmox keeps them: a new rule lands first. UPDATE_RULE is the API's add-then-delete.
+    case "ADD_RULE": case "UPDATE_RULE": case "DELETE_RULE": {
+      const sg = r?.data?.securityGroup
+      if (!sg) return ok()
+      const rules = ((sg.security_group_rules ?? []) as Array<Record<string, unknown>>).filter((x) => action === "ADD_RULE" || x.id !== data?.ruleId)
+      if (action !== "DELETE_RULE") {
+        rules.unshift({
+          id: db.nextId("sgr"), direction: data?.direction ?? "ingress", protocol: data?.protocol ?? "",
+          port_range: [data?.portRangeMin, data?.portRangeMax].filter(Boolean).join(":"),
+          remote_ip_prefix: data?.remoteIpPrefix ?? "", description: data?.description ?? "",
+        })
+      }
+      sg.security_group_rules = rules
+      return ok({})
+    }
 
     default:
       console.warn(`[mock] unknown resource action ${action}`)

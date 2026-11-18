@@ -38,6 +38,8 @@ type consolePVE struct {
 	writes []string
 	// nasMountHost is the address the project's file server is mounted from; empty: its API host, 192.0.2.100.
 	nasMountHost string
+	// projectPublicNetworks is the project's allow-list of public networks; nil: every one the provider has.
+	projectPublicNetworks []string
 }
 
 func (f *consolePVE) service(t *testing.T) *pve.Service {
@@ -109,17 +111,21 @@ func consoleSite(t *testing.T, f *consolePVE, pveConfig pgdoc.M) (repo *cloud.Re
 	router := chi.NewRouter()
 	h.Routes(router)
 	pveConfig["provider"] = "proxmox"
+	projectDoc := pgdoc.M{"_id": "p1", "name": "p", "status": project.StatusEnabled, "organizationId": "o1",
+		"memberships": []pgdoc.M{{"sub": sub, "role": project.RoleOwner}},
+		"services": []any{
+			pgdoc.M{"serviceId": "svc", "provider": "proxmox", "region": "r", "pool": "pc-p1"},
+			pgdoc.M{"serviceId": "nas", "provider": "truenas", "region": "r"},
+		}}
+	if f.projectPublicNetworks != nil {
+		projectDoc["publicNetworkIds"] = f.projectPublicNetworks
+	}
 	for coll, doc := range map[string]pgdoc.M{
 		"users":                {"sub": sub, "email": "o@example.org"},
 		"organization":         {"_id": "o1", "name": "o"},
 		"organization_members": {"organizationId": "o1", "sub": sub, "roles": []string{"OWNER"}},
 		"externalService":      {"_id": "svc", "name": "pve", "type": externalservice.TypeCloud, "status": externalservice.StatusPublic, "config": pveConfig},
-		"project": {"_id": "p1", "name": "p", "status": project.StatusEnabled, "organizationId": "o1",
-			"memberships": []pgdoc.M{{"sub": sub, "role": project.RoleOwner}},
-			"services": []any{
-				pgdoc.M{"serviceId": "svc", "provider": "proxmox", "region": "r", "pool": "pc-p1"},
-				pgdoc.M{"serviceId": "nas", "provider": "truenas", "region": "r"},
-			}},
+		"project":              projectDoc,
 	} {
 		mustInsert(t, db, coll, doc)
 	}
@@ -297,6 +303,45 @@ func TestCustomerConsoleAcceptanceDefects(t *testing.T) {
 				}
 				if tt.warned == "" && len(warnings) != 0 || tt.warned != "" && (len(warnings) != 1 || !strings.Contains(fmt.Sprint(warnings[0]), tt.warned)) {
 					t.Fatalf("warnings %v, want one naming %q", warnings, tt.warned)
+				}
+			})
+		}
+	})
+
+	// UX 3: load balancers were in the menu of a site that cannot make one, and the create refused one thing at a
+	// time. The page asks first: no public network for the project, no public address left, no appliance image.
+	t.Run("the compute provider says what a load balancer lacks on this site", func(t *testing.T) {
+		public := []any{pgdoc.M{"id": "vmbr1", "name": "Internet", "cidr": "203.0.113.0/24", "gateway": "203.0.113.1"}}
+		image := pgdoc.M{"debian-13": pgdoc.M{"vmid": 9000, "node": "pve1"}}
+		for _, tt := range []struct {
+			name   string
+			config pgdoc.M
+			want   []string // one substring per warning, in order
+		}{
+			{"nothing set up", pgdoc.M{}, []string{"No public network is available", "debian-13, is not in this site's image catalog"}},
+			{"public address quota 0", pgdoc.M{"network": pgdoc.M{"publicNetworks": public}, "templates": image,
+				"provisioning": pgdoc.M{"quota": pgdoc.M{"floatingIps": 0}}}, []string{"cannot take another (Quota exceeded for floatingIps"}},
+			{"another image named, absent", pgdoc.M{"network": pgdoc.M{"publicNetworks": public}, "templates": image, "lbImage": "debian-12"},
+				[]string{"debian-12, is not in this site's image catalog"}},
+			{"a public network the project is not allowed", pgdoc.M{"network": pgdoc.M{"publicNetworks": public}, "templates": image},
+				[]string{"No public network is available"}},
+			{"ready", pgdoc.M{"network": pgdoc.M{"publicNetworks": public}, "templates": image}, nil},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				f := &consolePVE{}
+				if strings.Contains(tt.name, "not allowed") {
+					f.projectPublicNetworks = []string{"vmbr9"}
+				}
+				_, _, call := consoleSite(t, f, tt.config)
+				code, data := call("/cloud/action", `{"action":"LIST_LOAD_BALANCER_WARNINGS"}`, "x-service-id", "svc")
+				warnings, ok := data["result"].([]any)
+				if code != http.StatusOK || !ok || len(warnings) != len(tt.want) {
+					t.Fatalf("LIST_LOAD_BALANCER_WARNINGS: %d %v, want %d warnings", code, data, len(tt.want))
+				}
+				for i, want := range tt.want {
+					if !strings.Contains(fmt.Sprint(warnings[i]), want) {
+						t.Errorf("warning %d = %q, want it to hold %q", i, warnings[i], want)
+					}
 				}
 			})
 		}

@@ -41,7 +41,7 @@ kamajiControlPlane:
 
 controlPlane:
   # -- kamaji: a tenant cluster, its control plane hosted by Kamaji (kamajiControlPlane above). kubeadm: the platform's
-  # own workload cluster of managed services (docs/adr/0009), its control plane on one CAPMOX VM with kube-vip, as
+  # own workload cluster of managed services (docs/adr/0009), its control plane on one or three CAPMOX VMs with kube-vip, as
   # installer stage 50 builds the services cluster. kubeadm renders no CAAPH add-ons, no services-side CSI controller
   # and no Gateway API carriers: the platform installs its components as ArgoCD Applications.
   kind: kamaji
@@ -53,7 +53,14 @@ controlPlane:
     certSANs: []
     # -- Default = installer versions.yml kube_vip (a test keeps them equal). A digest-pinned reference works too.
     kubeVipImage: ghcr.io/kube-vip/kube-vip:v0.8.9
-    # -- <pve node>=<template vmid>, one entry: the control-plane VM is cloned on that node. Required, no default.
+    # -- From chart 0.1.14. Control plane machines: 1 or 3, all on the node of machineImageId. Three survive the loss
+    # of one control plane VM, not of the node or its disk. The node needs memory for replicas + 1 (a rollout makes
+    # one more first). 1 to 3 adds two machines; do not go back from 3 to 1.
+    replicas: 1
+    # -- From chart 0.1.14. kube-vip's lease on the API address, in seconds (vip_leaseduration, vip_renewdeadline,
+    # vip_retryperiod). The defaults were chosen for one machine; changing a value rolls the control plane.
+    vipLease: {duration: 60, renewDeadline: 40, retryPeriod: 5}
+    # -- <pve node>=<template vmid>, one entry: the control-plane VMs are cloned on that node. Required, no default.
     machineImageId: ""
     machineCores: 2
     machineMemoryMiB: 4096

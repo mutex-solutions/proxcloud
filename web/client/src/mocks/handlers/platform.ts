@@ -123,7 +123,31 @@ on("GET /project-invites/:token", ({ params }) => ({
 }))
 on("POST /project-invites/accept/:token", () => ({ data: {} }))
 on("POST /project-invites/decline/:token", () => ({ data: {} }))
-on("POST /project-invites/invite", () => ({ data: {} }))
+// Pending invitations as their inviter sees them, each with its link. prj-staging is a site without mail.
+type MockInvite = { id: string; email: string; projectId: string; expiresAt: string; token: string }
+const invites: MockInvite[] = [
+  { id: "inv-1", email: "pending@example.com", projectId: PID, expiresAt: new Date(Date.now() + 20 * 3600_000).toISOString(), token: "tok-pending" },
+]
+const inviteView = (inv: MockInvite) => {
+  const { token, ...row } = inv
+  return { ...row, mailConfigured: inv.projectId !== "prj-staging", inviteUrl: `${window.location.origin}/join-project?invite-token=${token}` }
+}
+on("POST /project-invites/invite", ({ opts }) => {
+  const body = opts.body as { email?: string; projectId?: string }
+  const id = db.nextId("inv")
+  const inv = { id, email: body.email ?? "", projectId: body.projectId ?? PID, expiresAt: new Date(Date.now() + 86400_000).toISOString(), token: `tok-${id}` }
+  invites.push(inv)
+  return { data: inviteView(inv) }
+})
+on("GET /project-invites/project/:pid", ({ params }) => ({
+  data: { mailConfigured: params.pid !== "prj-staging", invites: invites.filter((i) => i.projectId === params.pid).map(inviteView) },
+}))
+on("DELETE /project-invites/project/:pid/:inviteId", ({ params }) => {
+  const i = invites.findIndex((x) => x.projectId === params.pid && x.id === params.inviteId)
+  if (i < 0) throw new ApiError(404, 404, "Project invite not found")
+  invites.splice(i, 1)
+  return { data: {} }
+})
 
 // uiMenu + an admin Custom Menu item so /p/:pid/more/status-page renders the
 // embedded-iframe chrome in dev (same-origin docs page stands in for the
@@ -135,8 +159,8 @@ on("GET /init/:pid", ({ params }) => ({
     ...uiMenu,
     features: {
       "svc-proxmox-1": params.pid === "prj-staging"
-        ? ["serverSnapshots", "volumeRetype"]
-        : ["serverSnapshots", "volumeRetype", "volumeSnapshots", "subnets", "serverBackups", "serverRebuild"],
+        ? ["serverSnapshots", "volumeRetype", "serverPassword"]
+        : ["serverSnapshots", "volumeRetype", "volumeSnapshots", "subnets", "serverBackups", "serverRebuild", "serverPassword", "publicIp"],
     },
     menu: {
       ...uiMenu.menu,

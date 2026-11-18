@@ -10,6 +10,8 @@ A load balancer runs on its own small VM in your project, so it costs what a ser
 
 Under **Network → Load balancers**, press **Create load balancer** and pick a name, the network your servers are on, a public network and a size. The network must be one whose addresses the platform assigns, which is the usual kind.
 
+A load balancer needs three things from the site that only your operator can provide: a public network allowed for your project, a free public address in your quota, and the image the load balancer runs on. When one is missing, the page says which and **Create load balancer** is disabled, so you do not find out by a failed create. File shares have a similar notice when your project's networks cannot reach the file server.
+
 The status reads `build` for a minute or two while the VM boots and installs what it needs, then `active`.
 
 ## Add listeners, pools and servers
