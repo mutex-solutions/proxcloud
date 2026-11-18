@@ -471,7 +471,7 @@ machine that did not join, and **Replace** per machine ([A worker that does not 
 
 **RBAC.** The sync needs `get` and `list` on `machines.cluster.x-k8s.io` and on `proxmoxmachines` and
 `proxmoxclusters.infrastructure.cluster.x-k8s.io`. `deploy/mgmt-cluster/rbac.yaml` and chart `proxcloud-platform`
-0.1.2 grant them (the platform BOM pins 0.1.2, so a new managed-services install has them). On an install with the older ClusterRole nothing breaks: the sync leaves `progress` and `attention`
+0.1.2 and later grant them (the platform BOM pins 0.1.3, so a new managed-services install has them). On an install with the older ClusterRole nothing breaks: the sync leaves `progress` and `attention`
 out (a 403 or 404 on the read), and the Machines dialog answers "The ProxCloud service account cannot read Machines:
 re-apply deploy/mgmt-cluster/rbac.yaml". That advice holds on an installer-built site; on a managed-services platform
 installed from an earlier BOM the `platform` Application reverts a hand-applied ClusterRole (self-heal), and the access

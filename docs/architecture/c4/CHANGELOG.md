@@ -15,8 +15,8 @@ ghcr.io serves. Each of the four components has `upgradeFrom` with the version i
 **Why:** both charts were published from their tags; the control plane count, the VLAN tag, the node groups'
 MachineHealthCheck and the `delete` on Machines reach a platform only through the BOM.
 
-**Diagrams:** none changed. `c2-containers.md`: the row of chart `proxmox-kamaji-cluster` says which version is
-published and pinned.
+**Diagrams:** none changed. `c2-containers.md`: the rows of charts `proxmox-kamaji-cluster` and
+`proxcloud-platform` say which version is published and pinned.
 
 **Not verified:** on a lab.
 
