@@ -188,3 +188,45 @@ func TestPVENetFlags(t *testing.T) {
 		t.Errorf("the refusal must say why: %v", herr)
 	}
 }
+
+// F2 at the handler: the create asks the live zone the network goes into, before the SDN lock. A simple zone made by
+// hand without a DHCP server, and a project's own EVPN zone (not the provider's default zone, whatever that one has),
+// refuse enableDhcp with a 400 that says why, and nothing is written. The handler has no SDN lock here, so a request
+// that passes the zone check ends in a 503.
+func TestPVECreateNetworkAsksTheLiveZoneForDHCP(t *testing.T) {
+	for _, tt := range []struct {
+		name, zones string
+		network     map[string]any
+		status      int
+	}{
+		{"simple zone without a DHCP server", `{"zone":"pc","type":"simple"}`,
+			map[string]any{"defaultZone": "pc", "zones": map[string]any{"pc": map[string]any{"kind": "simple"}}}, http.StatusBadRequest},
+		{"simple zone with one", `{"zone":"pc","type":"simple","dhcp":"dnsmasq"}`,
+			map[string]any{"defaultZone": "pc", "zones": map[string]any{"pc": map[string]any{"kind": "simple"}}}, http.StatusServiceUnavailable},
+		{"the project's EVPN zone, not the default zone", `{"zone":"pc","type":"evpn","dhcp":"dnsmasq"}`,
+			map[string]any{"defaultZone": "pc", "isolation": pve.IsolationEVPN, "zones": map[string]any{"pc": map[string]any{"kind": "evpn"}}}, http.StatusBadRequest},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/api2/json/cluster/sdn/zones" {
+					t.Errorf("reached PVE: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				fmt.Fprint(w, `{"data":[`+tt.zones+`]}`)
+			}))
+			defer srv.Close()
+			ps, err := pve.NewService(pve.Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := &Handler{pveFor: func(*externalservice.ExternalService) (*pve.Service, error) { return ps, nil }}
+			es := &externalservice.ExternalService{ID: "svc", Config: map[string]any{"network": tt.network}}
+			w := httptest.NewRecorder()
+			h.pveCreateNetwork(w, httptest.NewRequest(http.MethodPost, "/", nil), nil, &Project{ID: "p1"}, es, map[string]any{"name": "web", "enableDhcp": true})
+			if w.Code != tt.status || (tt.status == http.StatusBadRequest) != strings.Contains(w.Body.String(), "no DHCP server") {
+				t.Fatalf("status %d, want %d: %s", w.Code, tt.status, w.Body.String())
+			}
+		})
+	}
+}

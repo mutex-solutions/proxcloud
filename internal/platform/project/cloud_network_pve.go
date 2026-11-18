@@ -193,8 +193,6 @@ func (h *Handler) pveCreateNetwork(w http.ResponseWriter, r *http.Request, u *us
 		Data: pve.NetworkData(result.Vnet, name, zone.Key, map[string]any{
 			"cidr": result.CIDR, "gateway": result.Gateway, "snat": snat, "dhcp": dhcp,
 			"subnets": []any{result.CIDR},
-			// As the sync writes it (pve.SubnetDetail): the console's Subnets tab reads this, with or without a sync.
-			"subnetDetails": []any{map[string]any{"cidr": result.CIDR, "gateway": result.Gateway, "snat": snat}},
 		}),
 		CreatedAt: &now, UpdatedAt: &now,
 		Info: &cloud.Info{CreatedAt: &now, UpdatedAt: &now},

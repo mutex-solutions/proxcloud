@@ -95,8 +95,7 @@ followed the zone's configured kind and the subnet alone, so a network in a
 `simple` zone made without DHCP, or in an EVPN zone, answered `dhcp: true`; a
 sync corrects such a row. The DHCP range those subnets still carry is left in
 place: it does nothing without a DHCP server in the zone, and removing it would
-take an SDN apply on a running site. The create answer carries `subnetDetails`
-(one row per subnet: `cidr`, `gateway`, `snat`) as a synced row does.
+take an SDN apply on a running site.
 
 Project public-network policy: `GET /api/v1/project/{id}/public-networks` lists
 the external (public) networks the project is allowed to use, and
@@ -511,7 +510,8 @@ are several, `errors.details.problems`.
   `machines` never fails either, and is absent while the installation has no VM. It reads, with the CAPI
   token, the VMs of the pools `proxcloud-seed` and `proxcloud-system` that carry the installation's tag:
   `warn` with one line per VM that is stopped (start it in Proxmox, `qm start <vmid>`) or that has no
-  `onboot` (the next apply sets it, or `qm set <vmid> --onboot 1`), or when they could not be read.
+  `onboot` (the next apply sets it, or `qm set <vmid> --onboot 1`) or that the token could not read (the
+  other VMs are still listed), or when the pools could not be read.
   `isolation` fails, naming the CIDRs to add to `blockedCidrs`, when
   the seed, the API VIP or the node range is outside the blocked and management
   networks, and when the cluster firewall's isolation rules are not the ones the
