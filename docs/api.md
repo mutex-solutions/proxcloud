@@ -292,14 +292,37 @@ read live from the management cluster:
 {"proxmoxCluster": {"conditions": [{"type": "ProxmoxAvailable", "status": "True"}]},
  "machines": [{"name": "pc-c-1-workers-pve2-x7k2p-9d4tq", "nodeGroup": "workers", "phase": "Provisioned",
    "lastUpdated": "2026-11-17T09:20:00Z", "nodeRef": "", "vmid": 142, "proxmoxNode": "pve2",
-   "addresses": ["10.20.0.12"], "code": "not_joined", "attention": true, "failureMessage": "",
+   "addresses": ["10.20.0.12"], "code": "not_joined", "attention": true, "ready": false, "failureMessage": "",
    "conditions": [{"type": "NodeHealthy", "status": "Unknown", "reason": "NodeDoesNotExist",
-     "message": "Waiting for a Node with spec.providerID proxmox://142 to exist", "lastTransitionTime": "2026-11-17T09:20:00Z"}]}]}
+     "message": "Waiting for a Node with spec.providerID proxmox://142 to exist", "lastTransitionTime": "2026-11-17T09:20:00Z"}],
+   "joinError": {"errors": ["('scripts_user', RuntimeError('Runparts: 1 failures (runcmd) in 1 attempted'))"],
+     "logTail": "+ kubeadm join 192.168.140.101:6443 --token [MASKED] ...\ndial tcp 192.168.140.101:6443: i/o timeout"}}],
+ "healthChecks": [{"nodeGroup": "workers", "nodeStartupTimeoutSeconds": 1800, "maxUnhealthy": 1,
+   "expectedMachines": 2, "currentHealthy": 1, "remediationsAllowed": 0}]}
 ```
 
 `conditions` joins the Machine's and its ProxmoxMachine's. Messages have credentials cut out and are clipped to 400
 characters. `404` for a cluster that is not this provider's; `502` with "re-apply deploy/mgmt-cluster/rbac.yaml" when
 the service account may not read Machines.
+
+`joinError` is present only for a machine with `code` `not_joined` and `attention` true, on at most five machines
+of one answer: what cloud-init in the worker says, read at this request through the Proxmox guest agent
+(`errors` of `/run/cloud-init/result.json`, `logTail` the last 40 lines of `/var/log/cloud-init-output.log`) and
+never stored. kubeadm bootstrap tokens, CA hashes, certificate keys and other credentials are replaced by
+`[MASKED]` or `[REDACTED]`. `readError` instead says in general words why nothing could be read. `healthChecks` are
+the node groups' MachineHealthChecks (cluster chart 0.1.14 and later), `[]` when there is none or the service
+account may not read them. No tenant route carries either field.
+
+`POST /api/v1/admin/service/{id}/k8s-clusters/{clusterId}/machines/{machine}/replace` (`admin:service:manage`),
+body none or `{"confirm": true}`: deletes that worker Machine, so that Cluster API makes a new one on the same
+Proxmox node; the node group's count, placement and the project's quota are not touched. `200`
+`{"result": "REPLACING"}`. `409` with `details.reason` `last_ready_node` when the machine is the only Ready node of
+its node group and `confirm` is not true; `409` when it is already being removed; `404` for a machine that is not a
+worker of this cluster; `502` when the service account may not delete Machines. A tenant has the same as the
+cluster action `REPLACE_MACHINE` with `{"machine": "<name>", "confirm": false}` on
+`POST /api/v1/project/{pid}/cloud/{id}/action`, with the same answers (`{"result": "REPLACING"}`); the machine's
+name is the name of its server in the project. [managed-k8s.md](managed-k8s.md#a-worker-that-does-not-join) has the
+limits.
 
 Publishing a node image on every node: `GET /api/v1/admin/template-updates/publish-all?serviceId=…&digest=sha256:…`
 (`admin:service:read`) reports one artifact's state on every node of a Proxmox provider, and
