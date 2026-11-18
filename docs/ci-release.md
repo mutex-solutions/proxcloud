@@ -369,7 +369,7 @@ side: a platform installed by a `-dev` build is on a BOM no other build carries
 (`bom_unsupported`), and a `-dev` BOM is refused as a target. So a drill build
 is made like a release, on a throwaway branch that is never merged:
 
-1. Install the lab platform from a release (v0.8.0 or v0.8.1), or from the
+1. Install the lab platform from a release (v0.8.0, v0.8.1 or v0.8.2), or from the
    drill build before this one.
 2. On the branch, set `release:` in `deploy/platform/platform-bom.yaml` to a
    version without `-dev` that no release will use, for example
