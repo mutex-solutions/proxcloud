@@ -231,7 +231,8 @@ jobs:
             flag { print }
           ' CHANGELOG.md > /tmp/notes.md || true
           if [ -s /tmp/notes.md ]; then
-            echo "no $notes: using the CHANGELOG.md section for $version as the release body"
+            # A stable release is meant to have the file: test_release_notes.py fails without it.
+            echo "::warning::no $notes: the hard-wrapped CHANGELOG.md section for $version is the release body"
           else
             echo "no $notes and no CHANGELOG.md section for $version: notes will be auto-generated only"
             : > /tmp/notes.md

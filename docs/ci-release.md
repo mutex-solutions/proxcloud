@@ -715,8 +715,10 @@ Not verified:
 
 The body of a GitHub Release is `docs/releases/vX.Y.Z.md` when the tag has that
 file (`docker.yml`, job `release`, step "Assemble release notes"). Without the
-file the step falls back to the `## [X.Y.Z]` section of `CHANGELOG.md`, as every
-release up to `v0.8.2` did. An empty file, or one over 120000 characters, fails
+file the step prints a warning and falls back to the `## [X.Y.Z]` section of
+`CHANGELOG.md`, as every release up to `v0.8.2` did; the script test below fails
+when a changelog section from `0.8.0` on has no file, so only an rc tag takes
+that path. An empty file, or one over 120000 characters, fails
 the step, and no Release is created. GitHub's generated commit and pull request
 list (`--generate-notes`) follows the body either way.
 
@@ -737,10 +739,12 @@ not. Write the file in the release pull request, with the changelog section:
 10. Links are absolute and name the release's tag, since a Release body has no relative base: `https://github.com/mutex-solutions/proxcloud/blob/vX.Y.Z/docs/...`. End with a line that links the changelog section and the guides.
 
 `.github/scripts/tests/test_release_notes.py` (in `test.yml`, job `installer`)
-checks every `docs/releases/v*.md`: its version has a section in `CHANGELOG.md`,
+fails when a `## [X.Y.Z]` section of `CHANGELOG.md` from `0.8.0` on has no file,
+and checks every `docs/releases/v*.md`: its version has a section in `CHANGELOG.md`,
 it has Highlights and Upgrade, no line continues the paragraph or list item
-before it, and every `blob/<tag>/<path>` link names the file's own tag and a path
-that exists in the tree. It does not check that an anchor exists, that the path
+before it, every link is absolute, a link into this repository is a `blob/` or a
+`releases/tag/` one, and every `blob/<tag>/<path>` link names the file's own tag
+and a path that exists in the tree. It does not check that an anchor exists, that the path
 exists at the tag (the tag is cut later), or that the text agrees with the
 changelog: review does.
 

@@ -101,13 +101,13 @@ the same holds for `proxcloud-platform-v0.1.3`. The BOM on `main` still pins 0.1
 - **The body of a GitHub Release is `docs/releases/vX.Y.Z.md`, written for a reader, when the tag has that file.**
   The Release pages of `v0.8.0` to `v0.8.2` showed their changelog section, whose wrapped lines a Release body
   renders as line breaks and which has no headings. The release job (`docker.yml`) now takes the file, refuses an
-  empty one or one over 120000 characters, and falls back to the changelog section when there is none;
-  `--generate-notes` is unchanged. The file has the sections Highlights, Upgrade, What changed, Verified on a lab,
+  empty one or one over 120000 characters, and falls back to the changelog section, with a warning, when there is
+  none; `--generate-notes` is unchanged. The file has the sections Highlights, Upgrade, What changed, Verified on a lab,
   Not verified and Known issues, one paragraph or list item per line, and links at the release's tag; the rules and
   the command that renders it are in [docs/ci-release.md](docs/ci-release.md#release-notes). This changelog stays
   the complete record. `docs/releases/` has the files of `v0.8.0`, `v0.8.1` and `v0.8.2`; their published Release
-  pages are not changed by this. A script test (`test_release_notes.py`, in `test.yml`) checks every file. Not
-  verified: the release job has not run on a tag with such a file; its step was run by hand on a copy of the tree.
+  pages are not changed by this. A script test (`test_release_notes.py`, in `test.yml`) checks every file, and fails
+  when a changelog section from `0.8.0` on has no file or a link is relative. Not verified: the release job has not run on a tag with such a file; its step was run by hand on a copy of the tree.
 
 ## [0.8.2] - 2026-11-18
 
