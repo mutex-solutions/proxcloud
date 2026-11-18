@@ -83,7 +83,10 @@ type AuditEvent struct {
 	ProjectID           string           `json:"projectId,omitempty"`
 	Outcome             string           `json:"outcome,omitempty"`
 	ErrorMessage        string           `json:"errorMessage,omitempty"`
-	Archived            bool             `json:"archived"`
+	// InternalReason is why a FAILURE happened, for the operator: a backend's own words, with its addresses and
+	// paths. A query returns it to an operator's filter alone (Filter.Operator).
+	InternalReason string `json:"internalReason,omitempty"`
+	Archived       bool   `json:"archived"`
 }
 
 // ClientUserEvent presets a CLIENT_AREA event with a USER actor. The caller fills

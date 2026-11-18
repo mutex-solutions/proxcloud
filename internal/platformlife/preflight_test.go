@@ -140,14 +140,15 @@ func TestPreflight(t *testing.T) {
 	f := &preflightPVE{perms: map[string]map[string][]string{
 		pve.CAPITokenID:            capi,
 		pve.CSITokenID:             grant(pve.CSIPrivileges(s.Boot)),
-		pve.DefaultPlatformTokenID: grant(pve.KubeMintPrivileges("nas-templates")),
+		pve.DefaultPlatformTokenID: grant(pve.KubeMintPrivileges([]string{"nas-templates", "nvme-u2"}, []string{"pc"})),
 	}}
 	srv := httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(srv.Close)
 	pf := Preflight{
 		Installation:      in,
 		Site:              Site{CIDRPool: "10.100.0.0/16", Blocked: []string{"10.200.200.0/25"}},
-		ProviderImport:    "nas-templates",
+		MintStores:        []string{"nas-templates", "nvme-u2"},
+		MintZones:         []string{"pc"},
 		Portal:            &pve.Service{C: f.client(t, srv.URL, pve.DefaultPlatformTokenID), ServiceID: "svc-pve"},
 		CAPI:              f.client(t, srv.URL, pve.CAPITokenID),
 		CSI:               f.client(t, srv.URL, pve.CSITokenID),
@@ -333,6 +334,16 @@ func TestPreflight(t *testing.T) {
 			t.Errorf("%s: want a failure naming %q, got %+v", id, want, c)
 		}
 	}
+	// A single store reads apart from /storage, and the row says, once, why the grant on /storage does not reach it.
+	// Two such lines, to see that it is once.
+	delete(f.perms[pve.DefaultPlatformTokenID], "/storage/nvme-u2")
+	if m := checkMap(pf.Run(ctx))["privileges:kubemint"].Message; strings.Count(m, pve.KubeMintShadowed) != 1 || strings.Count(m, " lacks ") != 2 {
+		t.Errorf("privileges:kubemint with two stores of their own: %s", m)
+	}
+	f.perms[pve.DefaultPlatformTokenID]["/storage/nvme-u2"] = pve.ManagedRoles[2].Privs
+	if m := got["privileges:kubemint"].Message; !strings.Contains(m, pve.KubeMintShadowed) || strings.Contains(m, "on /storage (") {
+		t.Errorf("privileges:kubemint does not explain the store's own row: %s", m)
+	}
 	// The script's address as the API serves it: /api/v1 and the boot store, without which it answers 400.
 	if m := got["privileges:kubemint"].Message; !strings.Contains(m, "GET /api/v1/admin/setup/proxmox-script?managedServices=true&bootStorage="+s.Boot+",") {
 		t.Errorf("privileges:kubemint does not say where the script is: %s", m)
@@ -356,6 +367,26 @@ func TestPreflight(t *testing.T) {
 	if c.Status != CheckFail || !strings.Contains(c.Message, "[local, local-lvm]") || !strings.Contains(c.Message, "boot-iso") ||
 		strings.Contains(c.Message, "pveum acl") {
 		t.Errorf("a boot store that takes ISO images: %+v", c)
+	}
+}
+
+// MintScopeOf: the stores of every profile a boot disk may sit on, on every node, with the ISO and import stores, and
+// the provider's zones. A capacity profile holds no boot disk, so no cluster token gets a row on its store.
+func TestMintScopeOf(t *testing.T) {
+	es := &externalservice.ExternalService{Config: map[string]any{
+		"importStorage": "nas-templates",
+		"storageProfiles": map[string]any{
+			"fast":    map[string]any{"storages": map[string]any{"*": "nvme-u2", "pve2": "nvme"}},
+			"archive": map[string]any{"bootDisk": false, "storages": map[string]any{"*": "truenas"}},
+		},
+		"network": map[string]any{"zones": map[string]any{"pc": map[string]any{}, "lan": map[string]any{"kind": "simple"}}},
+	}}
+	stores, zones := MintScopeOf(es)
+	if want := []string{"local", "nas-templates", "nvme", "nvme-u2"}; !slices.Equal(stores, want) {
+		t.Errorf("stores %v, want %v", stores, want)
+	}
+	if want := []string{"lan", "pc"}; !slices.Equal(zones, want) {
+		t.Errorf("zones %v, want %v", zones, want)
 	}
 }
 

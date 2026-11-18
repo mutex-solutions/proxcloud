@@ -762,7 +762,7 @@ The single per-deployment config the UI bootstraps from. The active doc has
 | `hiddenServices` | string[] | service slugs (e.g. `kubernetes`, `database`, `object-store`) dropped from every tenant's `/init` menu; providers keep syncing |
 
 ### `auditEvent`
-The audit log; written asynchronously after a successful mutation.
+The audit log; written asynchronously after a successful mutation, and after a cloud resource create that was refused or failed (`CLOUD_RESOURCE_CREATE`, outcome `FAILURE`).
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -775,7 +775,8 @@ The audit log; written asynchronously after a successful mutation.
 | `changes` | array | `{field, oldValue, newValue}` diffs |
 | `actor` | object | `{type, id, displayName, ipAddress, userAgent}` |
 | `organizationId`, `projectId` | string FK | scope |
-| `outcome`, `errorMessage` | string | `SUCCESS` / `FAILURE` |
+| `outcome`, `errorMessage` | string | `SUCCESS` / `FAILURE`; for a failed create `errorMessage` is what the caller was answered |
+| `internalReason` | string | why a `FAILURE` happened, in the backend's own words (addresses, paths). Returned by the operator's audit routes alone: the organization and account readers never get it (`audit.Filter.Operator`) |
 | `archived` | bool | always written |
 
 ### `order`

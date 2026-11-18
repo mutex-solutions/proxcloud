@@ -39,6 +39,8 @@ type AuditRow = {
     changes?: PropertyChange[]
     actor?: { type?: string; id?: string; displayName?: string }
     outcome?: string
+    errorMessage?: string
+    internalReason?: string
   }
   organization?: { id?: string; name?: string }
   project?: { id?: string; name?: string }
@@ -190,6 +192,9 @@ export default function AuditPage() {
                       </TableCell>
                       <TableCell>
                         <StatusBadge status={e.outcome} />
+                        {/* What the caller was answered, then the backend's own words, which only this page gets. */}
+                        {e.errorMessage && <p className="max-w-md text-xs text-muted-foreground">{e.errorMessage}</p>}
+                        {e.internalReason && <p className="max-w-md break-words font-mono text-xs text-muted-foreground">{e.internalReason}</p>}
                         {e.resourceType === "SANDBOX_ABUSE" && <p className="text-xs text-muted-foreground">{String(e.resourceMetadata?.status ?? e.resourceMetadata?.action ?? "alert")}</p>}
                       </TableCell>
                       <TableCell>

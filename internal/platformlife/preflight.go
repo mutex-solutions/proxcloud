@@ -39,7 +39,8 @@ type Preflight struct {
 	Installation      *Installation
 	Site              Site
 	Allow             []string     // the provider's sandbox endpoints (es.PVESandboxEndpoints), part of the isolation rules
-	ProviderImport    string       // the provider's importStorage, whose own ACL row needs the mint role too (pve.ManagedACLs)
+	MintStores        []string     // the stores a tenant cluster's token gets a row on (MintScopeOf)
+	MintZones         []string     // the zones of the tenants' networks (MintScopeOf)
 	Portal            *pve.Service // the portal token
 	ProviderDisabled  bool         // the provider's status is DISABLED: a provider sync skips it, so none writes its isolation rules
 	CAPI, CSI         *pve.Client  // the platform tokens; nil when not stored
@@ -64,6 +65,27 @@ func SiteOf(es *externalservice.ExternalService) Site {
 		site.DefaultZone, site.DefaultZoneKind, site.DefaultZoneNoDHCP = n.DefaultZone, z.Type(), z.NoDHCP
 	}
 	return site
+}
+
+// MintScopeOf names what pve.KubeMintPrivileges reads on a Proxmox provider beside the parents: the store of every
+// storage profile that can hold a boot disk, on every node (a tenant cluster boots from one of them, by the node its
+// image is on: kamajiStorage), the ISO store, the import store, and every zone the provider names. Sorted, each once.
+func MintScopeOf(es *externalservice.ExternalService) (stores, zones []string) {
+	stores = []string{es.PVEBootISOStorage(), es.PVEImportStorage()}
+	for _, p := range es.PVEStorageProfiles() {
+		if p.BootDisk() {
+			for _, s := range p.Storages {
+				stores = append(stores, s)
+			}
+		}
+	}
+	for z := range es.PVENetworkConfig().Zones {
+		zones = append(zones, z)
+	}
+	slices.Sort(stores)
+	slices.Sort(zones)
+	stores = slices.DeleteFunc(slices.Compact(stores), func(s string) bool { return s == "" })
+	return stores, zones
 }
 
 // TokenClient is the provider's PVE connection with tok in place of the portal token (as PVECSIGatewayConfig does).
@@ -234,7 +256,14 @@ func (p Preflight) Run(ctx context.Context) []Check {
 	}
 	privs("privileges:capi", p.CAPI, pve.CAPITokenID, pve.CAPIPrivileges(s.Storage.Boot, s.Storage.ISO))
 	privs("privileges:csi", p.CSI, pve.CSITokenID, pve.CSIPrivileges(s.Storage.Boot))
-	privs("privileges:kubemint", p.Portal.C, "the portal token", pve.KubeMintPrivileges(p.ProviderImport))
+	// The paths a mint writes, not their parents alone: a store or zone with a row of its own reads complete on the
+	// parent and refuses the cluster token's row (production, 2026-11-17: every tenant cluster create failed on it).
+	privs("privileges:kubemint", p.Portal.C, "the portal token", pve.KubeMintPrivileges(p.MintStores, p.MintZones))
+	// Once for the row, when a line names a single store or zone: why the parent's grant does not reach it, and which
+	// of these lines the script does not fix.
+	if c := &out[len(out)-1]; c.ID == "privileges:kubemint" && c.Status == CheckFail && (strings.Contains(c.Message, " on /storage/") || strings.Contains(c.Message, " on /sdn/zones/")) {
+		c.Message += "\n" + pve.KubeMintShadowed
+	}
 
 	// The mint grant reaches the users of pve.KubeMintGroup alone. On /access/groups itself (where sites set up before
 	// the group hold it) PVE lets the token create an API token for every user of the cluster, root@pam included.

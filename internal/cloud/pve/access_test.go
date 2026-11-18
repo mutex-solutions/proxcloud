@@ -200,13 +200,17 @@ func TestManagedACLsGrantThePrivilegeTables(t *testing.T) {
 	}
 	// The CSI gateway's rows of an installer site, which the seed's NoAccess on csi@pve must cap too.
 	acls := rows(ManagedACL{"/pool", roleCSI, true, csiUser, "csi@pve!gateway"}, ManagedACL{"/storage", roleCSI, true, csiUser, "csi@pve!gateway"})
-	if !slices.ContainsFunc(KubeMintPrivileges(imp), func(c PrivCheck) bool { return c.Path == "/storage/"+imp }) {
-		t.Errorf("KubeMintPrivileges does not check /storage/%s, where its own row shadows /storage", imp)
+	// Every path a mint writes for a cluster on these stores and this zone is read, not its parent alone.
+	mint := KubeMintPrivileges([]string{boot, iso, imp}, []string{"pc"})
+	for _, path := range []string{"/pool/" + TemplatePool, "/storage/" + boot, "/storage/" + imp, "/nodes", "/sdn/zones/localnetwork", "/sdn/zones/pc"} {
+		if n := len(slices.DeleteFunc(slices.Clone(mint), func(c PrivCheck) bool { return c.Path != path })); n != 1 {
+			t.Errorf("KubeMintPrivileges reads %s %d times, want once: its own row shadows its parent", path, n)
+		}
 	}
 	for tokenID, checks := range map[string][]PrivCheck{
 		CAPITokenID:            CAPIPrivileges(boot, iso),
 		CSITokenID:             CSIPrivileges(boot),
-		DefaultPlatformTokenID: KubeMintPrivileges(imp),
+		DefaultPlatformTokenID: mint,
 	} {
 		for _, chk := range checks {
 			have := effective(acls, tokenID, chk.Path)

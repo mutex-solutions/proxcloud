@@ -1936,6 +1936,8 @@ func serve(s *http.Server, name string, log *slog.Logger, errCh chan<- error) {
 	}
 }
 
+// newLogger is the process's JSON log, and slog's default too: most packages log through slog.Error and its siblings,
+// which without this write plain text lines that a filter on the JSON "level" field never sees.
 func newLogger(level string) *slog.Logger {
 	lvl := slog.LevelInfo
 	switch level {
@@ -1946,7 +1948,9 @@ func newLogger(level string) *slog.Logger {
 	case "ERROR":
 		lvl = slog.LevelError
 	}
-	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
+	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
+	slog.SetDefault(log)
+	return log
 }
 
 // originsOf returns the scheme://host origin of each non-empty base URL (path/query stripped),

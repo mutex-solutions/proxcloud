@@ -545,7 +545,10 @@ Full catalog + cron expressions in **[jobs-scheduling.md](jobs-scheduling.md)**.
 ### Audit (`internal/platform/audit`)
 
 Handlers emit audit events **after** a successful mutation through an async writer
-(`LogAsync`), so auditing never blocks or fails the request. The `auditEvent`
+(`LogAsync`), so auditing never blocks or fails the request. One failure path is audited too:
+a cloud resource create (`POST /project/{id}/cloud`, every resource type) that is refused or
+fails writes `CLOUD_RESOURCE_CREATE` with outcome `FAILURE`, the answer the caller got and,
+for the operator's reader alone, the backend's own reason (`internalReason`). The `auditEvent`
 table is queried by the client org/account audit-log endpoints with cursor
 pagination.
 
