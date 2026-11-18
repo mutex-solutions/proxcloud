@@ -33,7 +33,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { ApiError, apiFetch, type CloudScope } from "@/lib/api"
 import { timeAgo } from "@/lib/format"
 import {
-  useCloudList, useLocations, useProject, useProjectGpuCapacity, useProjectId, useProjectQuota, useProjectServices,
+  useCloudList, useCloudScope, useLocations, useProject, useProjectGpuCapacity, useProjectId, useProjectQuota, useProjectServices,
 } from "@/lib/hooks"
 import { gpuCapacityViolations, serverQuotaViolations } from "@/lib/quota"
 import type { CloudResource, Location } from "@/lib/types"
@@ -82,6 +82,7 @@ type FlavorOption = {
 type NetworkOption = {
   id: string
   name: string
+  dhcp: boolean // the network hands out addresses by DHCP: a cluster's nodes get fixed ones, so it cannot hold them
 }
 
 type OidcDraft = {
@@ -515,10 +516,19 @@ export default function KubernetesPage() {
       .filter(isPrivateNetwork)
       .map((r): NetworkOption => {
         const id = ((r.data?.network as Record<string, unknown> | undefined)?.id as string) || r.externalId || ""
-        return { id, name: networkName(r) }
+        return { id, name: networkName(r), dhcp: (r.data?.network as Record<string, unknown> | undefined)?.dhcp === true }
       })
       .filter((n) => !!n.id)
   }, [networksQ.data])
+
+  // A project that has no network yet gets one from inside the form, made as the Networks page makes it with its
+  // defaults (the next free range, the provider's default for outbound internet).
+  const qc = useQueryClient()
+  const networkScope = useCloudScope(pid)
+  const createNetwork = async (name: string) => {
+    await apiFetch(`/project/${pid}/cloud`, { method: "POST", cloud: networkScope, body: { type: "NETWORK", data: { name } } })
+    await qc.invalidateQueries({ queryKey: ["cloud", pid, "NETWORK"] })
+  }
 
   const [createOpen, setCreateOpen] = useState(false)
   const [toDelete, setToDelete] = useState<CloudResource | null>(null)
@@ -679,6 +689,8 @@ export default function KubernetesPage() {
           flavors={createFlavorOptions}
          
           networks={networkOptions}
+          networksLoading={networksQ.isLoading}
+          onCreateNetwork={createNetwork}
           locations={kLocs}
           locKey={createLoc ? locKeyOf(createLoc) : ""}
           onLocKey={setCreateLocKey}
@@ -822,7 +834,7 @@ export function KubernetesClusterDetailPage() {
 
 // ── create/edit form ─────────────────────────────────────────────────────────
 function ClusterFormDialog({
-  title, submitLabel, versions, platformVersion, variantsForVersion, flavors, networks, locations, locKey, onLocKey, onClose, onSubmit,
+  title, submitLabel, versions, platformVersion, variantsForVersion, flavors, networks, networksLoading, onCreateNetwork, locations, locKey, onLocKey, onClose, onSubmit,
 }: {
   title: string
   submitLabel: string
@@ -831,6 +843,8 @@ function ClusterFormDialog({
   variantsForVersion: (version: string) => string[]
   flavors: FlavorOption[]
   networks: NetworkOption[]
+  networksLoading?: boolean
+  onCreateNetwork?: (name: string) => Promise<void>
   locations: Location[]
   locKey: string
   onLocKey: (key: string) => void
@@ -853,8 +867,22 @@ function ClusterFormDialog({
   const [oidcOpen, setOidcOpen] = useState(false)
   const [oidc, setOidc] = useState<OidcDraft>({ ...emptyOidc })
   const [allowedCidrs, setAllowedCidrs] = useState("")
-  const [networkId, setNetworkId] = useState("")
+  // The one network that can hold the nodes is the default, so a project with a single network needs no pick.
+  const usable = networks.filter((n) => !n.dhcp)
+  const [networkSel, setNetworkId] = useState("")
+  const networkId = usable.some((n) => n.id === networkSel) ? networkSel : usable.length === 1 ? usable[0].id : ""
   const [pending, setPending] = useState(false)
+  const [makingNetwork, setMakingNetwork] = useState(false)
+  const makeNetwork = async () => {
+    setMakingNetwork(true)
+    try {
+      await onCreateNetwork?.(`${name.trim() || "kubernetes"}-net`)
+    } catch (e) {
+      toast.error((e as Error).message)
+    } finally {
+      setMakingNetwork(false)
+    }
+  }
 
   const valid =
     !!name.trim() && !!version && groups.length > 0 && groups.every(groupValid) && (!addons.nginxGatewayFabric || gatewayAvailable)
@@ -1003,13 +1031,27 @@ function ClusterFormDialog({
               </SelectTrigger>
               <SelectContent>
                 {networks.map((n) => (
-                  <SelectItem key={n.id} value={n.id}>{n.name}</SelectItem>
+                  <SelectItem key={n.id} value={n.id} disabled={n.dhcp}>{n.name}{n.dhcp ? " (has DHCP: not for cluster nodes)" : ""}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">
               Worker nodes run on this network and reserve 24 of its addresses. It needs a way to the internet.
             </p>
+            {!networksLoading && networks.length === 0 && onCreateNetwork ? (
+              <div className="flex flex-wrap items-center gap-3 text-sm">
+                <span>This project has no network yet.</span>
+                <Button type="button" variant="outline" size="sm" disabled={makingNetwork} onClick={() => void makeNetwork()}>
+                  {makingNetwork ? "Creating…" : "Create a network for this cluster"}
+                </Button>
+              </div>
+            ) : null}
+            {networks.length > 0 && usable.length === 0 ? (
+              <p className="text-sm" role="status">
+                Every network of this project hands out addresses by DHCP, and a cluster's nodes need fixed ones. A new network would be
+                the same here: ask the operator of this site for networks without DHCP.
+              </p>
+            ) : null}
           </div>
 
           <div className="grid gap-2">

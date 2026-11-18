@@ -6,6 +6,14 @@
 
 The create form starts on the lowest Kubernetes version your operator offers, with **High availability** (three control-plane replicas instead of one) off. Pick a newer version or turn high availability on yourself; ask your operator which versions they have run on this site.
 
+A first cluster needs two things from you: a **name** and, for its node group, a **flavor** (the size of each worker). The rest has a default:
+
+- **Network.** The worker nodes run on one of your project's networks and get fixed addresses there, 24 of them reserved. When your project has exactly one network that can hold them, the form has it selected. When it has none, **Create a network for this cluster** makes one with the defaults of **Network → Networks** and selects it. A network that hands out addresses by DHCP cannot hold a cluster's nodes and is listed as not selectable; when every network of your project is such a network, a new one would be the same, and only your operator can change that.
+- **Node group.** One group named `workers` with one node. Flavors that exceed your quota cannot be picked.
+- **Add-ons, allowed API CIDRs and OIDC** are optional.
+
+The network needs a way to the internet (the default of a new network), and the nodes must reach the cluster's own API address, which your operator provides.
+
 ## Status while a cluster is built
 
 A new cluster reads **Pending**, then **Progressing**, then **Ready**. While it is being built, the cluster page shows a checklist: the control plane, one line per node group and the configuration sync. Each node group line says how many nodes are ready and what the platform is doing for the others:
