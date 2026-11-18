@@ -76,13 +76,13 @@ reading [section 3](#3-proxmox-identities): they share the pool `proxcloud-syste
 | A Proxmox provider | Saved, with its connection checks passing (Platform setup, steps 1 and 2). One installation per Proxmox provider; the page shows the installation of the first one. |
 | A GitHub integration | System → Integrations. Template updates finds and downloads the two images through it. |
 | Permissions | `admin:service:read` to read the page, `admin:service:manage` for every button, the Check and the two kubeconfig downloads included. |
-| A platform network | One bridge that exists on every node used, untagged (no VLAN), with a free IPv4 network from /8 to /29, a gateway and one to three DNS servers. It must not overlap the provider's tenant address pool (`cidrPool`), a sandbox network or a public network. |
+| A platform network | A free IPv4 network from /8 to /29, a gateway and one to three DNS servers. It must not overlap the provider's tenant address pool (`cidrPool`), a sandbox network or a public network. Either an existing bridge on every node used, with an optional VLAN tag on the machines' NICs (mode `bridge`), or, on a one-node site, a network ProxCloud makes and the node routes (mode `routed`): [The platform network: bridge, VLAN tag or routed](#the-platform-network-bridge-vlan-tag-or-routed). |
 | Routes | The API (on Compose: the API container) reaches the Proxmox API, the seed address on 6443 and the cluster's API address on 6443. The seed and the cluster machines reach the Proxmox API URL you enter, `github.com` and `raw.githubusercontent.com` (at first boot the seed downloads the k3s binary from the first and the k3s install script from the second, both checked by sha256; GitHub redirects a release download to another host of its own, which must be reachable too and is not named in the BOM) and the registries of the BOM (`ghcr.io`, which serves every chart: ours and the third-party ones of the chart mirror, `ghcr.io/mutex-solutions/charts-mirror`; and the image registries those charts pull from). Tenant networks must reach the load balancer range and nothing else of the platform network. |
 | Storage | A boot store that takes VM disks on every node used; an ISO store that is local to each node and takes ISOs (default `local`); an import store with `import` content on every node an image goes to (default: the provider's `importStorage`). The import store must not be the boot store: the portal token holds `PVEDatastoreAdmin` on the import store, which reaches every disk on it ([section 10](#10-security-boundaries)). The API refuses settings that name the same store for both; the form says so before it saves when you type the same store in both fields. An empty import store takes the provider's `importStorage`, so it is refused too when that is the boot store. The import store of the settings and the provider's `importStorage` must be one store: the script of step 2 is written for the store of the settings, and the `privileges:kubemint` check reads the provider's ([when the provider's import store is the boot store](#when-the-providers-import-store-is-the-boot-store)). |
 | Capacity | The smallest machine is 2 cores, 4 GiB of memory and a 20 GiB disk. The smallest layout (seed, control plane, one machine per group) is five VMs. The review step adds up cores and memory per node; it does not read what is free. |
 | Root on one node | Once, to run the identities script. |
 | A router for a VLAN tenant zone | Only when the provider's tenant zone is a `vlan` zone. Proxmox gives a VLAN no gateway, no DHCP and no SNAT: a tenant network there is a bare layer 2 segment, and ProxCloud writes and reports it so (`dhcp: false`, `snat: false`; asking for either is a `400`). The site's own router must hold the first address of each tenant subnet (the `gateway` the network shows; servers and cluster workers get it as their default route) on that VLAN, route it to the load balancer range and to whatever else tenants may reach, and keep tenants apart. Without it a worker on such a network never reaches its control plane and the cluster stays `PROGRESSING`. An EVPN zone needs none of this. |
-| A path from tenants to the platform network | Tenant cluster workers and database clients open TCP connections to the platform network. On a node that translates tenant traffic (a `simple` tenant zone, or an exit node of an EVPN zone) and also runs a platform machine, that connection is dropped unless the node itself routes the platform network. A one-node site with a `simple` tenant zone and the platform network on a VLAN behind the site's router is this case. The Check warns (`tenant-path`) and the install goes on: [The path from tenants to the platform](#the-path-from-tenants-to-the-platform). |
+| A path from tenants to the platform network | Tenant cluster workers and database clients open TCP connections to the platform network. On a node that translates tenant traffic (a `simple` tenant zone, or an exit node of an EVPN zone) and also runs a platform machine, that connection is dropped unless the node itself routes the platform network. A one-node site with a `simple` tenant zone and the platform network on a VLAN behind the site's router is this case; a platform network of mode `routed` is not. The Check warns (`tenant-path`) and the install goes on, and **Test the tenant path** opens the path from a tenant network once the platform is installed: [The path from tenants to the platform](#the-path-from-tenants-to-the-platform). |
 | A tenant network zone without DHCP | Only for tenant Kubernetes clusters, not for the install or for databases: a cluster's nodes get fixed addresses, so its network must be in an EVPN or a VLAN zone, or in a `simple` zone without a DHCP server. With a provider whose default zone (`config.network.defaultZone`) is a `simple` zone that ProxCloud created with DHCP, which is its default, a cluster create on its networks answers `400 Worker nodes need a network without DHCP (an EVPN or VLAN zone, or a simple zone without a DHCP server)`. The Check reads the zone in Proxmox, warns (`tenant-network`) when it has DHCP, and the install goes on; change the provider's default zone before you offer clusters ([managed-k8s.md](managed-k8s.md)). Not affected: a Kubernetes provider with shared workers (`cluster.shared`), which uses no tenant network, and a `simple` zone without DHCP. Such a zone is made in one of two ways: by hand in Proxmox before the first tenant network (a zone that exists is used as it is), or by ProxCloud when the zone's config says so, `"zones": {"<id>": {"kind": "simple", "dhcp": false}}` (from v0.8.1; it applies to a zone that does not exist yet, and an existing zone is never changed). Networks of such a zone answer `dhcp: false` and get no DHCP range; servers, cluster nodes and load balancers there get addresses the platform assigns. The key is refused on a zone of another kind (`400`, naming the key). The setup wizard keeps a zone's other keys when you change its kind there, so take `"dhcp"` out of the zone's config (Cloud providers) before you change such a zone to VLAN or EVPN. The key is not verified on a lab. |
 | The datacenter firewall | On, with the provider's isolation rules written by a provider sync once the installation is saved: the Check verifies that tenant traffic to the seed, the API address and the node range is dropped. |
 
@@ -197,13 +197,60 @@ when Proxmox could not be read. It never fails, because it opens no connection: 
 proof that the path is open, and a warning stays after you added a node leg by hand (the row does
 not see runtime addresses). It also warns on a node that routes the platform VLAN on a VLAN
 interface of its own (the gateway on `vmbr0.140`, say): the row does not read that interface, and
-by the rule above that layout should work (not tested). A probe that opens the path from a VM is
-not in this release.
+by the rule above that layout should work (not tested). For a platform network of mode `routed`
+the row is `ok`: before the install because the install makes the network with the gateway on the
+node, after it because the row finds that vnet and its subnet.
 
-**A new one-node site: let the node route the platform network.** Make the platform network a
-vnet of a `simple` SDN zone with one subnet whose gateway is the platform gateway and with SNAT
-ticked (Datacenter → SDN in Proxmox, then Apply), and enter the vnet as the platform bridge in
-step 1. SNAT is for the platform machines' own way out: the node translates what they send
+**Test the tenant path.** The row reads; this test connects. It is a button in step 3 of an
+installed platform (`POST …/installations/{id}/tenant-path-probe`), never part of **Check**,
+because it writes to Proxmox and costs one VM clone and two SDN applies (each a network reload on
+every node). What it does, with the portal token:
+
+1. From the ProxCloud host it tries port 6443 and 5432 on the first 32 addresses of the load
+   balancer range: a tenant cluster's API, a managed database. What opens is a target. With no
+   target it stops (`409 no_target`) and creates nothing: make one database or cluster first.
+2. It makes a network `tenant-path-probe` in the provider's default tenant zone, a free /28 from
+   the end of `cidrPool`, with SNAT, as a tenant's network with outbound internet has it (in a
+   VLAN zone Proxmox writes no SNAT, as for tenants).
+3. On the node you choose (the control plane's node when you choose none; it must host a platform
+   machine) it clones a published Ubuntu or Debian template of the catalog into the pool
+   `pc-templates` as `pc-probe-<installation id>`, puts it on that network (with a fixed address,
+   or by DHCP where the zone has a DHCP server, as a tenant's server gets its address) and
+   starts it. Without such a template on that node it stops before step 2
+   (`409 no_os_template`): publish one under Template updates. With the scheduler off nothing is
+   published by itself.
+4. Through the guest agent it opens one TCP connection to each target (at most 8) and one to the
+   platform cluster's own API address, each with a 5 second limit.
+5. It stops and destroys the VM, deletes the network and applies SDN: after a pass, after a
+   failure, and after its 8 minute limit. What it could not remove is listed with the command to
+   run. The next test first removes what an earlier one left (a ProxCloud restart in the middle of
+   a test leaves the VM and the network until then).
+
+The result, read with `GET` on the same path:
+
+| State | Meaning |
+|---|---|
+| `passed` | Every target opened from the tenant network (a refused connection counts: the address answered), and the platform's own API address did not answer, as the isolation rules want |
+| `failed` | A target the ProxCloud host opens did not answer from the tenant network: the path is closed on that node. Or the platform's own API address answered: tenants reach what the isolation rules should keep from them (see the Check row `isolation`) |
+| `error` | The test could not be done (the clone failed, the guest agent never answered, the limit passed): nothing is known about the path |
+
+One test covers one node. The path depends on the pair of nodes (where the tenant's VM runs,
+where the platform machine that holds the address runs), so on a site with several nodes test
+each node that hosts a platform machine, and again after a load balancer address moved. The test
+is refused during a run of the installation (`409 run_active`), while another test runs
+(`409 probe_running`), before the first install (`409 not_installed`: nothing listens yet), and
+when the provider's default zone is a VLAN zone (`409 vlan_zone`: no node translates there, and a
+test network would need its own VLAN and gateway on your router; test from a tenant's server).
+**Not verified on a lab:** the test's tests use a fake Proxmox API. Its first lab run is the
+reproduction of the production finding (`run-1` lab test "reproduce": expected `failed` from the
+node that holds the address with a `simple` tenant zone, `passed` from another node).
+
+**A new one-node site: let the node route the platform network.** Choose **Routed by the node**
+in step 1 (`spec.network.mode: routed`) and ProxCloud makes the network at the install:
+[The platform network: bridge, VLAN tag or routed](#the-platform-network-bridge-vlan-tag-or-routed).
+The same network made by hand also works with mode `bridge`: a vnet of a `simple` SDN zone with
+one subnet whose gateway is the platform gateway and with SNAT ticked (Datacenter → SDN in
+Proxmox, then Apply), entered as the platform bridge. SNAT is for the platform machines' own way out: the node translates what they send
 through its uplink, so the answers from the internet (image pulls during the install) come back
 to the node. Without SNAT the site's router must have the route below; a route on the ProxCloud
 host alone then leaves the platform machines without a return path from the internet and the
@@ -222,8 +269,7 @@ Consequences:
   node, and the platform bridge must be one layer-2 segment
   ([What no check reads](#what-no-check-reads)).
 
-ProxCloud does not create this network in this release. The layout is not run anywhere yet: not on
-a lab, not on a production site.
+The layout is not run anywhere yet: not on a lab, not on a production site.
 
 **An existing site with the platform network on a VLAN: a leg of the node.** Give the node an
 address of its own on the platform bridge and send tenant traffic for the platform network out
@@ -265,14 +311,139 @@ ip addr del 192.168.140.2/24 dev plat140
 - The platform now sees the leg's address as the source of every tenant: a database's
   `allowedCidrs` must hold it (`192.168.140.2/32`), where they held the node's address before.
 - **It does not last.** The lines are lost at a reboot of the node, and whether they survive an
-  SDN Apply is not known: run the verify lines after each. A persistent form (a file of its own in
-  `/etc/network/interfaces.d/`) is not tested and therefore not given here.
+  SDN Apply is not known: run the verify lines after each. The persistent form is below, and is
+  not verified.
 - On several nodes each node that hosts a platform machine needs its own leg and address. Not run.
 - Then replace the workers that did not join (above).
+
+**The leg in a persistent form. NOT lab-verified: do not rely on it before you tested it.**
+ProxCloud does not write this file and no script of its own does: these are commands for you, as
+root on the node, with the same four values as above. The file is one of your own in
+`/etc/network/interfaces.d/` (the default `/etc/network/interfaces` of Proxmox reads that
+directory; check that yours has the line `source /etc/network/interfaces.d/*`). It adds
+`post-up` lines to the platform bridge, each written so that running it twice changes nothing.
+
+```sh
+cat > /etc/network/interfaces.d/pc-tenant-leg <<'LEG'
+iface plat140
+    post-up ip addr replace 192.168.140.2/24 dev plat140 noprefixroute
+    post-up ip route replace 192.168.140.0/24 dev plat140 src 192.168.140.2 table 140
+    post-up ip rule del pref 1400 2>/dev/null; ip rule add pref 1400 from 10.100.0.0/16 to 192.168.140.0/24 lookup 140
+    post-up ip rule del pref 1401 2>/dev/null; ip rule add pref 1401 from 192.168.140.2 to 192.168.140.0/24 lookup 140
+    post-up iptables -t nat -C POSTROUTING -s 10.100.0.0/16 -d 192.168.140.0/24 -o plat140 -j SNAT --to-source 192.168.140.2 2>/dev/null || iptables -t nat -I POSTROUTING 1 -s 10.100.0.0/16 -d 192.168.140.0/24 -o plat140 -j SNAT --to-source 192.168.140.2
+LEG
+ifreload -a
+# verify, now and after every SDN Apply and reboot
+ip -br addr show plat140; ip rule | grep -c 'lookup 140'      # the address; exactly 2 rules
+iptables -t nat -S POSTROUTING | grep -c -- '--to-source 192.168.140.2'    # exactly 1
+# undo: delete the file, then the undo block of the runtime commands above
+rm /etc/network/interfaces.d/pc-tenant-leg
+```
+
+What is not known about this form, and what would settle it (a lab, on a throwaway VLAN vnet, never
+on the bridge that carries a running platform):
+
+- Whether ifupdown2 accepts a second `iface` stanza for an interface that Proxmox's SDN defines in
+  `/etc/network/interfaces.d/sdn`, and merges the two. If it does not, the same five `post-up`
+  lines go on an interface of your own (a `dummy` interface with `auto` and `iface … inet manual`,
+  as the installer's `/etc/network/interfaces.d/proxcloud-sandbox-snat` does); that form does not
+  fix the order at boot (the bridge must exist before the lines run).
+- Whether a reload (`ifreload -a`, which every SDN Apply runs) removes an address it does not find
+  in the configuration before `post-up` puts it back, which would cut tenant connections for a
+  moment at each Apply.
+- That no rule is doubled: run `pvesh set /cluster/sdn` twice and repeat the verify lines. Proxmox's
+  own SDN rules are doubled at every Apply on a lab node (seen there), which is why each line above
+  tests before it adds.
+- The order at boot, and `rp_filter` in strict mode (rule 1401 is there for it; the production
+  value was not read).
+
+Until those are settled the runtime commands, run again after each reboot and checked after each
+SDN Apply, are the form that was seen to work on the one production site.
 
 For every other site (several nodes, tenants and platform machines on the same nodes) the layout
 without a node in the path is the VLAN tenant zone with your own router (the row above). Not
 decided and not tested: a connection-tracking zone for the platform bridge instead of the leg.
+
+### The platform network: bridge, VLAN tag or routed
+
+`spec.network.mode` says where the platform network comes from. It is part of the network block,
+which is fixed after the first successful install. A settings record saved before the field
+existed has no mode and means `bridge`, exactly as before.
+
+**`bridge` (the default): an existing bridge.** The bridge (a Linux or OVS bridge, or an SDN vnet
+you made) exists on every node the settings place a machine on, is one layer-2 segment across
+them, and your router routes the network. The Check row `bridge` looks for it on each of those
+nodes.
+
+**A VLAN tag on a bridge (`spec.network.vlan`, 1 to 4094, mode `bridge` only).** Every NIC on
+the bridge is tagged: the seed's (`tag=<n>` in its `net0`) and every platform machine's
+(`networkDevices[].vlan` of the Cluster API provider, which Proxmox also writes as `tag=<n>`). So
+a VLAN needs no bridge or vnet of its own, no SDN object and no SDN Apply; your switches and
+router must carry and route the VLAN, which no check reads.
+
+- It needs cluster chart `proxmox-kamaji-cluster` 0.1.14 or newer, the first that reads the tag.
+  The platform's BOM names the chart: with an older one the Check row `spec` fails and says so,
+  and nothing is rendered untagged. **The BOM of this build names 0.1.13** (0.1.14 is not
+  published yet), so a tag is refused until a release whose BOM names 0.1.14.
+- For a tagged NIC Proxmox checks `SDN.Use` on `/sdn/zones/localnetwork/<bridge>/<tag>` (on
+  `/sdn/zones/<zone>/<vnet>/<tag>` when the bridge is a vnet). The identities script grants the
+  CAPI token its role on `/sdn/zones` with propagate, which reaches that path; the Check row
+  `privileges:capi` reads the tag's own path, because a row of the token's own below `/sdn/zones`
+  would replace what is passed down.
+- An installed platform cannot get a tag: the network is fixed, and the tag is part of every
+  machine's template.
+- Not verified on a lab: the whole tag path (the privilege was read in Proxmox's code, not tried),
+  and a tag on a bridge that is not VLAN-aware.
+
+**`routed`: a network ProxCloud makes and the node routes. One Proxmox node only.** The bridge
+field names a vnet that does not exist yet (a lower-case letter, then letters and digits, at most
+8). At the start of stage 3 the run makes, with the portal token and under the lock that
+serializes every SDN change of the site:
+
+| Object | What |
+|---|---|
+| SDN zone `pcplat` | `simple`, without a DHCP server, limited to the seed's node. Made once; a zone of that id of another kind stops the run |
+| vnet `<bridge>` | In that zone, with the alias `proxcloud-platform:<installation id>`. A vnet of that name with another alias is never used or changed: the Check row `bridge` and the run refuse it (`platform_network_refused`) |
+| subnet `<network>` | With the gateway of the settings, which Proxmox puts on the node, and **SNAT on** |
+| SDN Apply | Once, before the seed is cloned. An Apply reloads the network configuration on every node of the cluster |
+
+Why this layout: a tenant's packet to the platform is routed inside the node and never translated
+on the way, so the rule of [The path from tenants to the platform](#the-path-from-tenants-to-the-platform)
+does not apply, and the platform sees the tenant's real address.
+
+- **SNAT is on, and that is not a setting.** It is the platform machines' way out: the node
+  translates what they send through its uplink, so image pulls work without a route on your
+  router. It only matches traffic that leaves through the uplink: not tenants' traffic to the
+  platform, not the machines' calls to the Proxmox API on the node. A connection from a platform
+  machine to an address that your router sends back into the same node through a bridge would meet
+  the rule of the section above (not tested; nothing the platform does needs such a connection).
+- **The route your site needs.** Everything outside the node reaches the platform network only
+  through the node: the ProxCloud host (the seed's API, the cluster's API address, the load
+  balancer range) and your workstation. Add the route "the platform network via the node's
+  address" on your router, or on the ProxCloud host and each workstation
+  (`ip route add 10.90.0.0/24 via <the node's address>`). No check can read it before the seed
+  exists: without it stage 4 ends with `seed_api_unreachable`. Incoming connections are not
+  translated, so the seed's API sources (`apiSources`) name the ProxCloud host's own address, as
+  for a bridge.
+- **The Proxmox API URL** is the node's own address, `https://<node address>:8006`, as for a
+  bridge. A platform machine's call to it is delivered on the node itself. With the datacenter
+  firewall on, the node must still accept port 8006 from the platform network
+  ([What no check reads](#what-no-check-reads)).
+- **The isolation rules are the same.** The seed, the API address and the node range must be in
+  the provider's blocked networks and the load balancer range outside them; the cluster firewall
+  drops tenant traffic to the blocked ones as it is forwarded between the vnets.
+- **Several nodes.** A vnet of a `simple` zone is a separate network on each node, so the API
+  refuses mode `routed` unless the seed, the control plane and every node group are on one node
+  (`400 invalid_installation`), and it stays refused when you later add a node to a group: a
+  platform installed in this mode stays on its node. A site that wants the platform on several
+  nodes uses mode `bridge` (for tenants there: the VLAN tenant zone with your own router, or a leg
+  per node).
+- **Remove** deletes the subnet and the vnet after the seed, and the zone when no other vnet is in
+  it, and applies SDN. A vnet that is not the installation's stays.
+
+Mode `routed` is **not verified on a lab**: its tests use a fake Proxmox API. Not known until it
+ran: that Proxmox forwards between a tenant vnet and this vnet with the nftables firewall on, that
+the seed boots and pulls through the SNAT, and that a tenant cluster's workers join.
 
 ### What no check reads
 
@@ -439,7 +610,7 @@ Saving keeps a draft (`POST` or `PUT /installations`). Nothing is created on Pro
 | Name | Lower-case letters, digits and dashes, at most 40. The two providers are named after it. |
 | Proxmox API URL | `https://` with a host: the Proxmox API as machines on the platform network reach it. CAPMOX and the tenant clusters' providers use it. |
 | Boot store, ISO store, import store | Storage ids. The ISO store defaults to `local`; an empty import store takes the provider's `importStorage`. The import store may not be the boot store; if the provider's `importStorage` is, an empty field is refused as well ([what to do](#when-the-providers-import-store-is-the-boot-store)). |
-| Network | Bridge, IPv4 network (/8 to /29), gateway, one to three DNS servers, optional MTU (1280 to 9000). |
+| Network | Where it comes from: an existing bridge (`mode: bridge`, the default; with an optional VLAN tag, 1 to 4094) or a vnet the install makes and the node routes (`mode: routed`, one node only; the bridge field then names the new vnet). Then the IPv4 network (/8 to /29), gateway, one to three DNS servers, optional MTU (1280 to 9000). [The three forms](#the-platform-network-bridge-vlan-tag-or-routed). |
 | Seed | Node, address, cores, memory and disk; up to 8 SSH public keys (optional, for emergencies: ProxCloud never uses SSH); 1 to 16 IPv4 networks that may reach the seed's API (`apiSources`), at least the address ProxCloud reaches it from. |
 | API address | The cluster's API endpoint, held by kube-vip on the control plane machine. |
 | Node range | `first-last`: the addresses Cluster API gives the machines. It must hold every machine, one more for the control plane's rolling update, and one more per group and node. |
@@ -472,15 +643,16 @@ the settings (`409 rev_conflict`: the page reads them again).
 | Check | Fails when | What to do |
 |---|---|---|
 | `flags` | Template updates are off, or no GitHub integration is saved | `--managed-services`; save a GitHub token |
-| `spec` | The saved settings break a rule, for example an import store that is the boot store | Correct step 1 and save |
+| `spec` | The saved settings break a rule, for example an import store that is the boot store. Or they name a VLAN tag and the platform's BOM names a cluster chart older than 0.1.14, which cannot tag a NIC | Correct step 1 and save. For the tag: a bridge or vnet that carries the VLAN untagged, until a release whose BOM names chart 0.1.14 |
+| `bridge` | Mode `bridge`: a node the settings place a machine on has no bridge or vnet of that name, or did not report its networks. Mode `routed`: Proxmox already has a vnet of that name that the installation did not make. On an installed platform (the network is fixed and the machines run on it) the same finding is a **warning**, so that no apply stops on a read that went wrong | Correct the bridge or the nodes in step 1; apply a vnet you made (Datacenter, SDN, Apply). Mode `routed`: name another vnet |
 | `network` | The platform network overlaps a tenant, sandbox or public network, a seed API source is a tenant network, the load balancer range is inside a blocked or management network, or a node did not report its networks | Correct the network in step 1 |
 | `isolation` | The seed, the API address or part of the node range is in no blocked or management network, or the cluster firewall's isolation rules are not the ones a sync writes | Add the CIDRs the message names to **Networks tenants must not reach** on the provider's page (`blockedCidrs`). The message lists the smallest ranges that are missing; one network that covers them does the same (`10.90.0.0/26` for a seed on `.5`, an API address on `.10` and nodes on `.20` to `.60`), as long as the load balancer range stays outside it. Then **Run a provider sync, then check again**: with the installation saved (step 1), the sync writes the provider's rules whether or not it has a project. Check that the datacenter firewall is on. Five messages name a cause no sync of a provider without a project repairs: `cidrPool … overlaps the management network …` (choose another `cidrPool`), `rules … are for another pool`, `rules … drop … to …, which this provider's cidrPool, blockedCidrs and sandboxCidrs do not`, `rules … have an ACCEPT …` or `have no ACCEPT …` and `rules … are not this provider's set …, and a project's rules for cidrPool … are in place` (another portal or provider shares the rules: give this provider its own `poolPrefix`; the provider's own older rules: delete them under Datacenter > Firewall and sync). ([More](#the-isolation-check-and-the-provider-sync)) |
 | `tenant-network` | Never. It reads the provider's default zone in Proxmox and **warns** when the zone has DHCP, when it does not exist yet and is configured as a `simple` zone without `"dhcp": false` (ProxCloud then creates it with DHCP), or when the zones could not be read: a tenant Kubernetes cluster create on a network of such a zone is refused with a `400` (not on a Kubernetes provider with shared workers, `cluster.shared`, which uses no tenant network). The row is `ok` for a zone without DHCP and absent when the provider names no zone | Nothing for the install or for databases. Before tenants create clusters: give the provider an EVPN or a VLAN zone as its default zone, or a `simple` zone without DHCP (Cloud providers, `config.network.zones` and `defaultZone`; [Prerequisites](#2-prerequisites)) |
-| `tenant-path` | Never, and absent when the provider names no zone. It reads the layout and **warns** when a node that translates tenant traffic (a `simple` default zone: the node of the tenant's VM; an EVPN default zone: its exit nodes) also hosts a platform machine and does not route the platform network itself, or when Proxmox could not be read: a tenant's TCP connection to the platform network is then dropped on that node, tenant Kubernetes workers never join and tenants cannot reach managed databases. It opens no connection: `ok` is not proof, and a leg added on a node by hand is not seen | Nothing for the install. Before tenants create clusters or databases: one of the two layouts of [The path from tenants to the platform](#the-path-from-tenants-to-the-platform) |
+| `tenant-path` | Never, and absent when the provider names no zone. It reads the layout and **warns** when a node that translates tenant traffic (a `simple` default zone: the node of the tenant's VM; an EVPN default zone: its exit nodes) also hosts a platform machine and does not route the platform network itself, or when Proxmox could not be read: a tenant's TCP connection to the platform network is then dropped on that node, tenant Kubernetes workers never join and tenants cannot reach managed databases. It opens no connection: `ok` is not proof, and a leg added on a node by hand is not seen. It is `ok` for a platform network of mode `routed`. **Test the tenant path** below the rows opens the path on an installed platform | Nothing for the install. Before tenants create clusters or databases: one of the two layouts of [The path from tenants to the platform](#the-path-from-tenants-to-the-platform) |
 | `csi-vmid` | Never. It **warns** when a guest of the cluster has VM id 9999, the id proxmox-csi names its volumes after, or when that could not be read | Nothing for the install. Never destroy VM 9999 with "Destroy unreferenced disks owned by guest" ([VM id 9999 and the CSI volumes](#vm-id-9999-and-the-csi-volumes)) |
 | `credentials` | A token secret is not stored | Paste it in step 2 |
 | `machines` | Never, and absent while the installation has no VM. It reads the installation's VMs with the CAPI token and **warns** with one line per VM that is stopped or that does not start when its node boots (`onboot` off) or that the token could not read (the others are still listed, and an apply still sets `onboot` on them), or when the pools could not be read | A stopped VM: start it in Proxmox, or `qm start <vmid>` as root on its node ([After a Proxmox node reboots](#after-a-proxmox-node-reboots)). `onboot` off: **Apply this release** sets it at the end of stage 7, or `qm set <vmid> --onboot 1` |
-| `privileges:capi`, `privileges:csi`, `privileges:kubemint` | The CAPI token, the CSI token or the portal token lacks a privilege on a path; the message names both | Run the script again. `privileges:kubemint` reads every path a tenant cluster's token gets a row on, not `/storage` and `/sdn/zones` alone: a line on `/storage/<store>` or `/sdn/zones/<zone>` means a row of the portal's own on that path hides the mint role, and the script adds the role next to each such row ([why, and what the row gives](proxmox-permissions.md#a-row-of-the-portals-own-on-a-store-or-a-zone)); until then a cluster create that uses the path answers `409`, and, as for every failed row, an install or apply run stops at its first stage (`preflight_failed`). A site that had such rows before v0.8.1 passed this row then and fails it after the upgrade: run the script again before the next run. A row the portal's user holds through a group is not found by the script; the same section gives the row to add. On the provider's `importStorage`, when the settings name another import store, the script does not write that row ([what to do](#when-the-providers-import-store-is-the-boot-store)) |
+| `privileges:capi`, `privileges:csi`, `privileges:kubemint` | The CAPI token, the CSI token or the portal token lacks a privilege on a path; the message names both. For a VLAN tag or a routed network `privileges:capi` also reads `SDN.Use` on the path of the machines' NIC (`/sdn/zones/localnetwork/<bridge>/<tag>`, `/sdn/zones/pcplat/<vnet>`) | Run the script again. `privileges:kubemint` reads every path a tenant cluster's token gets a row on, not `/storage` and `/sdn/zones` alone: a line on `/storage/<store>` or `/sdn/zones/<zone>` means a row of the portal's own on that path hides the mint role, and the script adds the role next to each such row ([why, and what the row gives](proxmox-permissions.md#a-row-of-the-portals-own-on-a-store-or-a-zone)); until then a cluster create that uses the path answers `409`, and, as for every failed row, an install or apply run stops at its first stage (`preflight_failed`). A site that had such rows before v0.8.1 passed this row then and fails it after the upgrade: run the script again before the next run. A row the portal's user holds through a group is not found by the script; the same section gives the row to add. On the provider's `importStorage`, when the settings name another import store, the script does not write that row ([what to do](#when-the-providers-import-store-is-the-boot-store)) |
 | `mint-scope` | The portal token holds `User.Modify` or `Permissions.Modify` on `/`, `/access` or `/access/groups` (a stolen portal token can then create an API token for any user of the cluster, `root@pam` included) or `Permissions.Modify` on `/pool` (it can then write any role on every pool). A site set up before the group `proxcloud-kube` holds `ProxCloudKubeMint` on `/access/groups` and `/pool`. Or: `capmox@pve` or `csi@pve` is not in the group `proxcloud-kube`, and Proxmox refuses every token create or delete for it | Run the script again: it grants `ProxCloudKubeToken` on `/access/groups/proxcloud-kube`, puts both users in the group and removes the old rows ([the commands](proxmox-permissions.md#an-existing-site)). If it still fails on a privilege, another row grants it: `pveum acl list \| grep -F '<the portal user>'` on a node, then `pveum acl delete <path> --users <user> --roles <role>` (or `--tokens`) for a row on `/`, `/access`, `/access/groups` or `/pool` with a role other than `ProxCloudPlatform`. For a user outside the group the message gives the line: `pveum user modify <user> --groups proxcloud-kube --append 1` |
 | `token-scope` | `capmox@pve!capi` or `csi@pve!csi` holds a privilege on `/pool`, `/storage` or `/vms` as a whole, which reaches every tenant's VMs or disks. The script writes no such row; an older setup may have, and the script removes none | Run the `pveum acl delete` command the message gives, as root on one node, then check again. When the portal token cannot read the row (one on `/`, for example) the message gives `pveum acl list` to find it: the row to remove is one on the named path itself, or on a parent of it (`/` included) with propagate 1, with a role other than `NoAccess`. The list is not empty on a site the script set up, and its rows on the platform pools and stores and on `/` without propagate stay. When no listed row is such a row, remove none: the token was made without privilege separation and holds its user's rights (the users keep `/pool` and `/storage`): run `pveum user token modify <user> <token name> --privsep 1` (`capmox@pve capi`, `csi@pve csi`), then the script again. Leave the tokens' rows on the platform pools and on the boot and ISO stores |
 | `pool-fence` | The portal token holds a privilege on `proxcloud-system` or `proxcloud-seed`, or the CSI token on `proxcloud-seed` | Run the script again with the provider's token id: it writes the `NoAccess` rows on both pools, and a missing row is the usual cause (the portal token's `/pool` rows pass down to them). Only if the check still fails, remove the row granted to that user or token on `/pool/proxcloud-system` or `/pool/proxcloud-seed` itself. Do not remove its `/pool` rows: every tenant operation needs them |
@@ -737,6 +909,7 @@ stage is still trying.
 | `image_import_stalled` | 2 | No import moved for an hour | Open Template updates to see the import, then **Retry**. If it keeps failing, install a newer release |
 | `image_blocked` | 2 | A BOM image is on the template update blocklist | A new installation: install a newer ProxCloud release. An installed platform stays on its release and its images, and no release moves it to other images yet (see "No upgrade between BOMs"): the message says which case applies, and an apply that must import that image stays blocked |
 | `seed_clone_failed` | 3, Remove | The clone task failed or was refused; stage 2 recorded no seed template; the VM stays locked. Also, with nothing being cloned: Proxmox could not be read with the CAPI token while looking at the seed VM or the pool `proxcloud-seed` (unreachable, or the token is refused), in stage 3 on a ready seed or in `remove-cluster` and `remove-seed` | Fix the storage or the node the message names, **Retry**. For a read that failed: check that `capmox@pve!capi` still exists and the stored secret is current, then **Retry** or **Remove again** |
+| `platform_network_refused` | 3, Remove | Mode `routed` only: Proxmox refused the zone, the vnet, the subnet or the SDN Apply (the message carries its error); a vnet of the settings' name exists and is not the installation's; the zone `pcplat` exists as another kind; the vnet has a subnet that is not the settings'. While another network change of the site holds the SDN lock the stage waits | Correct what the message names in Proxmox (Datacenter, SDN), or name another vnet in step 1 (a draft can be changed), then **Retry** |
 | `seed_config_refused` | 3, Remove | Proxmox refused a config change, the read of the VM's config after it, the CD upload, a firewall rule or the start (the message carries Proxmox's own error); the CD could not be rendered or built (`The seed's CD could not be rendered` or `… built`: for example Proxmox reports the seed's `net0` without a MAC address); at Remove, the VM is locked or carries another installation's tag | Fix what Proxmox's error names: the bridge, the boot or ISO store, the node, or a right of `capmox@pve!capi` (then run the script again), and **Retry**; it builds a new seed VM. A CD that could not be rendered or built is a defect, not a setting: nothing was stored and no CD was uploaded, Retry will not pass, report the message. A VM with another installation's tag is not deleted: look at it in Proxmox |
 | `seed_not_booted` | 4 | The seed's guest agent did not answer in time: the VM did not boot, or its first boot failed (for example the k3s binary or its install script could not be downloaded, or one failed its checksum) | Open the seed VM's console in Proxmox. **Retry** builds a new seed |
 | `seed_api_unreachable` | 4, 6 to 10, Remove, seed access, the page of a ready installation (`live.code`) | The seed is booted but its API does not answer from the API's host; or a seed call failed later (stages 8 to 10 read the cluster's admin kubeconfig from the seed); or the seed's API refused the stored credential or the request with a `401` or a `403` at five looks on end (a seed that restarts answers so for some seconds, with `Unauthorized`, `RBAC: … not found`, a plain `forbidden` or `not yet ready to handle request`, which the run waits out) | Add a route from the ProxCloud host to the platform network, or correct the seed API sources and save. **Retry** writes the seed's firewall rules again first. For a credential the seed keeps refusing: look on the seed VM's console whether k3s runs or keeps restarting (`systemctl status k3s`; a slow disk does that, see [What no check reads](#what-no-check-reads)), then **Retry**. For a ready installation whose seed stopped answering: [When the seed does not answer](#when-the-seed-does-not-answer) |
@@ -805,7 +978,9 @@ The run:
 4. deletes the platform's own volumes with the CSI token, by the exact handles recorded in stage 9
    (read again from the cluster when it answers);
 5. deletes the seed VM (only when its VMID, pool and name are this installation's and no tag names
-   another one) and every `pcplat-<id>-*` CD;
+   another one) and every `pcplat-<id>-*` CD; for a platform network of mode `routed`, then the
+   subnet and the vnet (only a vnet with this installation's alias) and the zone `pcplat` when no
+   other vnet is in it, with one SDN Apply;
 6. wipes the stored secrets and the recorded status.
 
 Afterwards the page prints the two `pveum user token remove` commands; ending the tokens is yours to
@@ -1423,7 +1598,11 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
   the `platform` Application keeps the ClusterRole of chart 0.1.1 (self-heal), so re-applying
   `deploy/mgmt-cluster/rbac.yaml` there does not last.
 - **`layout: separate`** (one cluster for Kubernetes, one for databases) is refused by the API.
-- **No VLAN** on the platform network, and no IPv6.
+- **No IPv6** on the platform network, and one platform network per installation. A VLAN tag needs
+  a BOM that names cluster chart 0.1.14, which this build's does not
+  ([the three forms](#the-platform-network-bridge-vlan-tag-or-routed)).
+- **No automated node leg** for an existing VLAN site: the commands are in
+  [The path from tenants to the platform](#the-path-from-tenants-to-the-platform), by hand.
 - **One control plane machine.** The settings take no control plane count.
 - **No sandbox node group.**
 - **One installation on the page.** The API keeps one per Proxmox provider; the page shows the first.
@@ -1474,3 +1653,11 @@ The row `tenant-path` and its guide ([The path from tenants to the platform](#th
 are not verified on a lab: the row's tests use a fake Proxmox API, the mechanism is stated from
 source and fits what the production site showed, the node leg was run by hand on that one site at
 runtime only, and the layout with a platform network routed by the node was run nowhere.
+
+The network modes are not verified on a lab either
+([The platform network: bridge, VLAN tag or routed](#the-platform-network-bridge-vlan-tag-or-routed)):
+mode `routed` (the zone, vnet and subnet the run makes, the install through its SNAT, forwarding
+from a tenant vnet, Remove), the VLAN tag (the seed's NIC, the machines' NICs with chart 0.1.14,
+the privilege on the tag's path, a bridge that is not VLAN-aware), the rows `bridge` and
+`privileges:capi` against a real cluster, **Test the tenant path** (every step of it), and the
+persistent form of the node leg.

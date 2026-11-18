@@ -159,8 +159,15 @@ Privileges: `Sys.Audit Pool.Audit VM.Allocate VM.Audit VM.Clone VM.Config.CDROM 
 | `/pool/proxcloud-seed` | `ProxCloudCAPI` | 1 (managed services only) |
 | `/pool/pc-templates` | `PVETemplateUser` (built-in) | 1 |
 | `/sdn/zones/<zone>/<vnet>` | `ProxCloudCAPI` | 0 |
+| `/sdn/zones/localnetwork/<bridge>/<tag>` | `SDN.Use` (in `ProxCloudCAPI`) | only for a NIC with a VLAN tag on a node bridge |
 | `/storage/<disk storage>` | `ProxCloudCAPI` | 0 |
 | `/storage/<cloud-init ISO storage>` | `PVEDatastoreAdmin` (built-in) | 0 |
+
+A NIC with a VLAN tag (managed services with `spec.network.vlan`) is checked by Proxmox on the tag's own path
+(`PVE::GuestHelpers`, read in the code of pve-manager 9.2, not tried). The managed-services script grants the `capi`
+token `ProxCloudCAPI` on `/sdn/zones` with propagate, which reaches that path and the vnet of a routed platform
+network (`/sdn/zones/pcplat/<vnet>`); the Check row `privileges:capi` reads the exact path, because a row of the
+token's own below `/sdn/zones` would replace what is passed down.
 
 This is the minimum for the services cluster alone. What stage 10 grants in split mode (`split_acls`) is wider for the
 user, because the per-cluster tokens minted under `capmox@pve` need it (below): `ProxCloudCAPI` on all of `/pool`,
