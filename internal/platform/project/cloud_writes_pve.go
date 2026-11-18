@@ -879,7 +879,7 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 			return true
 		}
 		h.pveRefreshServerRow(ctx, ps, proj, cr)
-		h.ReconcileVolumeRows(ctx, ps, es, proj) // a larger flavor grew the boot disk: its row holds the size the quota counts
+		h.pveSyncVolumes(ctx, es, proj) // a larger flavor grew the boot disk: its row holds the size the quota counts
 		h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
 		httpx.OK(w, map[string]any{"result": *cr})
 		return true
@@ -958,12 +958,20 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 				}
 			}
 		}
-		err := ps.RebuildServer(ctx, req)
+		destroyed, err := ps.RebuildServer(ctx, req)
 		// The boot disk is a new one with a new volid, and the old one is destroyed: its row must go, or the quota and
 		// the bill count the disk twice and the next disk PVE names like the old one takes the row over. Also after
 		// a failure: one past the swap (seed, start) has replaced the disk all the same.
 		h.pveRefreshServerRow(ctx, ps, proj, cr)
-		h.ReconcileVolumeRows(ctx, ps, es, proj)
+		if !h.ReconcileVolumeRows(ctx, ps, es, proj) && destroyed != "" {
+			// The reconcile needs every VM of the project readable, and another server under a backup is not. This
+			// row needs no proof: the rebuild destroyed its disk itself. The new disk's row waits for the next sync.
+			if old, ferr := h.cloud.FindByServiceIDAndExternalID(ctx, es.ID, destroyed); ferr != nil || old == nil || old.Type != cloud.TypeVolume || old.ProjectID != proj.ID {
+				slog.Warn("rebuild: the destroyed boot disk's row", "project", proj.ID, "volume", destroyed, "err", ferr)
+			} else if aerr := h.cloud.DeleteAndArchive(ctx, old, time.Now().UTC()); aerr != nil {
+				slog.Error("rebuild: archive the destroyed boot disk's row", "project", proj.ID, "volume", destroyed, "err", aerr)
+			}
+		}
 		if err != nil {
 			h.fail(w, pveVolumeErr(err))
 			return true
@@ -1424,19 +1432,24 @@ func (h *Handler) pveSyncVolumes(ctx context.Context, es *externalservice.Extern
 	}
 }
 
-// ReconcileVolumeRows makes the project's VOLUME rows equal its disks, after an action that replaced, removed or
-// resized one (rebuild, restore, rollback, resize, a move to another server). pveSyncVolumes only adds and updates:
-// the row of a disk that is gone would stay, counted in the quota and billed, until the next scheduled sync (never
-// on a site that runs none), and the next disk PVE gives the same volid would take it over with its id and date.
-// A reconcile that cannot run (a VM that cannot be read) leaves the update of what can be read.
-func (h *Handler) ReconcileVolumeRows(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, proj *Project) {
+// ReconcileVolumeRows makes the project's VOLUME rows equal its disks, after an action that replaced or removed one
+// (rebuild, restore, rollback, a move to another server). pveSyncVolumes only adds and updates: the row of a disk
+// that is gone would stay, counted in the quota and billed, until the next scheduled sync (never on a site that runs
+// none), and the next disk PVE gives the same volid would take it over with its id and date.
+// It reports whether the reconcile ran. It cannot while any VM of the project is locked, offline or unreadable: the
+// list of disks fails as a whole (ListReadable too, it reads the same inventory), so no row is archived, added or
+// updated in that request. The add-and-update below only helps when the list was read and the proof or a write
+// failed after it.
+func (h *Handler) ReconcileVolumeRows(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, proj *Project) bool {
 	prov := ps.VolumeSyncProvider(h.pveRegion(proj, es), proj.ID, es.PVEVolumeProfileFunc())
-	if _, err := providers.Reconcile(ctx, prov, h.cloud, es.ID, time.Now().UTC()); err != nil {
+	_, err := providers.Reconcile(ctx, prov, h.cloud, es.ID, time.Now().UTC())
+	if err != nil {
 		slog.Warn("volume rows: reconcile", "project", proj.ID, "err", err)
 		if rows, err := prov.ListReadable(ctx); err == nil {
 			h.pveUpsertRows(ctx, es, rows)
 		}
 	}
+	return err == nil
 }
 
 // AttachVolumeRow attaches the detached disk of cr (on server or holder vmid) to target, "" or vmid itself for the
@@ -1444,8 +1457,10 @@ func (h *Handler) ReconcileVolumeRows(ctx context.Context, ps *pve.Service, es *
 // tenant's volume: the row keeps its id, and with it its name (pve.VolumeLabel), its creation date, its history and
 // its bill item (billingresource keys a volume on the row's id), as a retype's does. Archiving it and letting the
 // sync insert a row for the new volid lost the name and split the charge. The mark keeps a sync that sees the old
-// volid gone from archiving the row before the follow. A failed attach across nodes can leave the disk on a carrier
-// under a new name: the row does not follow there, the caller's reconcile replaces it.
+// volid gone from archiving the row before the follow. An attach that answers an error after the disk moved (a task
+// wait that ran out while PVE finished) is followed too, and is a success, as a retype's is. A failed attach across
+// nodes can leave the disk on a carrier under a new name: the row does not follow there, the caller's reconcile
+// replaces it.
 func (h *Handler) AttachVolumeRow(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource, vmid int, target string) error {
 	if target == "" || target == strconv.Itoa(vmid) {
 		_, err := ps.AttachVolume(ctx, proj.ID, vmid, cr.ExternalID, target) // the volid stays
@@ -1455,16 +1470,20 @@ func (h *Handler) AttachVolumeRow(ctx context.Context, ps *pve.Service, es *exte
 	if err := h.cloud.MarkMoving(ctx, cr, &now); err != nil {
 		return err
 	}
+	storage, _, _ := strings.Cut(cr.ExternalID, ":") // a reassign keeps the storage
 	slot, err := ps.AttachVolume(ctx, proj.ID, vmid, cr.ExternalID, target)
-	if err != nil {
+	if slot == "" { // refused before the move
 		if cerr := h.cloud.MarkMoving(ctx, cr, nil); cerr != nil {
 			slog.Error("attach: clear the move mark", "project", proj.ID, "volume", cr.ExternalID, "err", cerr)
 		}
 		return err
 	}
 	tvmid, _ := strconv.Atoi(target)
-	h.pveFollowVolume(ctx, ps, es, proj, cr, tvmid, slot, "")
-	return nil
+	if h.pveFollowVolume(ctx, ps, es, proj, cr, tvmid, slot, storage) && err != nil {
+		slog.Warn("attach: the disk is on its new server, despite", "project", proj.ID, "volume", cr.ExternalID, "err", err)
+		err = nil
+	}
+	return err
 }
 
 // RetypeVolumeRow moves the disk in slot of server vmid onto storage, then has cr (marked moving) follow it. It runs

@@ -214,8 +214,9 @@ the row then follows the disk and keeps its id. The wait and the follow outlive 
 request, and a sync leaves a row alone that took its new volid after the sync listed. A retype of a row still marked moving answers 409.
 An attach to another server follows the same way: the reassign gives the disk a new volid, and the row
 keeps its id, its name and its bill item (an attach of a row still marked moving answers 409). A rebuild,
-a resize, a snapshot rollback and a restore end with a reconcile of the project's volume rows, which
-archives the row of a disk that is gone. A detached volume can be deleted on its
+a snapshot rollback and a restore end with a reconcile of the project's volume rows, which
+archives the row of a disk that is gone; when it cannot run (a VM of the project locked or unreadable), a
+rebuild still archives the row of the boot disk it destroyed. A detached volume can be deleted on its
 own. PVE has no name for a disk: the name a tenant gives a volume is the row's
 (`data.volume.label`), and a sync carries it over. A profile's class is the lowest effective class
 of its storages (admin override, else detected); a capacity-class profile never

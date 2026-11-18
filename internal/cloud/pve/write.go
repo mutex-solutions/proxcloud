@@ -859,33 +859,35 @@ type RebuildReq struct {
 // is parked as unusedN while the new one moves in and only removed once it did, and any failure until
 // then puts it back. PVE moves a disk between VMs only on one node and storage, so the copy lands on
 // the storage the old disk is on. A boot disk with snapshots cannot be moved away from: 409.
-func (s *Service) RebuildServer(ctx context.Context, req RebuildReq) error {
+// It answers the volid of the old boot disk once that disk is destroyed, also next to an error of a later step, and ""
+// while the old disk still exists: the caller's proof that the volume's row can go.
+func (s *Service) RebuildServer(ctx context.Context, req RebuildReq) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, createTimeout)
 	defer cancel()
 	vm, err := s.ResolveVM(ctx, req.ProjectID, req.ServerID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if vm == nil {
-		return fmt.Errorf("pve: vm %s not found", req.ServerID)
+		return "", fmt.Errorf("pve: vm %s not found", req.ServerID)
 	}
 	node := vm.Node
 	snaps, err := s.C.ListSnapshots(ctx, node, vm.VMID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	for _, sn := range snaps {
 		if sn.Name != "current" {
-			return conflictf("Delete the snapshots of server %s before rebuilding it", vm.Name)
+			return "", conflictf("Delete the snapshots of server %s before rebuilding it", vm.Name)
 		}
 	}
 	cfg, err := s.C.GetVMConfig(ctx, node, vm.VMID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	slot := s.bootDiskSlot(ctx, node, vm.VMID)
 	if slot == "" {
-		return conflictf("Server %s has no boot disk", vm.Name)
+		return "", conflictf("Server %s has no boot disk", vm.Name)
 	}
 	oldVal := cfg.Str(slot)
 	oldVol, _, _ := strings.Cut(oldVal, ",")
@@ -902,12 +904,12 @@ func (s *Service) RebuildServer(ctx context.Context, req RebuildReq) error {
 		Name: imageBuildPrefix + "rebuild-" + req.ServerID, Pool: s.PoolFor(req.ProjectID), Target: nodeIfOther(node, req.TemplateNode), Storage: storage, Full: true,
 	})
 	if err != nil {
-		return fmt.Errorf("pve rebuild: clone: %w", err)
+		return "", fmt.Errorf("pve rebuild: clone: %w", err)
 	}
 	defer s.destroyBestEffort(context.WithoutCancel(ctx), node, tmpID)
 	tmpSlot := s.bootDiskSlot(ctx, node, tmpID)
 	if tmpSlot == "" {
-		return conflictf("Image %s has no boot disk", req.ImageSlug)
+		return "", conflictf("Image %s has no boot disk", req.ImageSlug)
 	}
 
 	if vm.PoweredOn() {
@@ -916,10 +918,10 @@ func (s *Service) RebuildServer(ctx context.Context, req RebuildReq) error {
 			err = s.C.WaitTask(ctx, up)
 		}
 		if err != nil {
-			return fmt.Errorf("pve rebuild: stop: %w", err)
+			return "", fmt.Errorf("pve rebuild: stop: %w", err)
 		}
 		if err := s.waitStopped(ctx, vm); err != nil {
-			return err
+			return "", err
 		}
 	}
 	// Removing a disk from its slot parks it as unusedN.
@@ -928,7 +930,7 @@ func (s *Service) RebuildServer(ctx context.Context, req RebuildReq) error {
 		err = s.C.WaitTask(ctx, up)
 	}
 	if err != nil {
-		return fmt.Errorf("pve rebuild: detach: %w", err)
+		return "", fmt.Errorf("pve rebuild: detach: %w", err)
 	}
 	restore := func() {
 		rctx := context.WithoutCancel(ctx)
@@ -947,12 +949,12 @@ func (s *Service) RebuildServer(ctx context.Context, req RebuildReq) error {
 	}
 	if err != nil {
 		restore()
-		return fmt.Errorf("pve rebuild: move disk: %w", err)
+		return "", fmt.Errorf("pve rebuild: move disk: %w", err)
 	}
 
 	cfg, err = s.C.GetVMConfig(ctx, node, vm.VMID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	var del []string
 	for _, d := range ParseDisks(cfg) {
@@ -972,7 +974,11 @@ func (s *Service) RebuildServer(ctx context.Context, req RebuildReq) error {
 		err = s.C.WaitTask(ctx, up)
 	}
 	if err != nil {
-		return fmt.Errorf("pve rebuild: finish: %w", err)
+		return "", fmt.Errorf("pve rebuild: finish: %w", err)
+	}
+	destroyed := "" // from here the old disk is gone, whatever fails next
+	if len(del) > 0 {
+		destroyed = oldVol
 	}
 	if oldGiB > 0 {
 		if up, rerr := s.C.ResizeDisk(ctx, node, vm.VMID, slot, fmt.Sprintf("%dG", oldGiB)); rerr == nil {
@@ -981,7 +987,7 @@ func (s *Service) RebuildServer(ctx context.Context, req RebuildReq) error {
 	}
 	if req.Reseed != nil {
 		if err := req.Reseed(ctx, node, vm.VMID); err != nil {
-			return fmt.Errorf("pve rebuild: seed: %w", err)
+			return destroyed, fmt.Errorf("pve rebuild: seed: %w", err)
 		}
 	}
 	up, err = s.C.StartVM(ctx, node, vm.VMID)
@@ -989,10 +995,10 @@ func (s *Service) RebuildServer(ctx context.Context, req RebuildReq) error {
 		err = s.C.WaitTask(ctx, up)
 	}
 	if err != nil {
-		return fmt.Errorf("pve rebuild: start: %w", err)
+		return destroyed, fmt.Errorf("pve rebuild: start: %w", err)
 	}
 	s.waitUnderHA(ctx, vm, "START")
-	return nil
+	return destroyed, nil
 }
 
 func nodeIfOther(node, templateNode string) string {
