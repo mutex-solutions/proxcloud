@@ -264,7 +264,7 @@ type installationRequest struct {
 
 // checked fills in from preset, normalizes it and checks it on its own and against its provider's networks.
 func (h *Handler) checked(r *http.Request, in *platformlife.Installation, preset string) error {
-	if err := platformlife.ApplyPreset(preset, &in.Spec); err != nil {
+	if err := platformlife.ApplyPreset(preset, &in.Spec, in.BuildsThree()); err != nil {
 		return &invalidInstallation{status: http.StatusBadRequest, code: "invalid_installation", msg: "The installation is not valid", problems: []string{err.Error()}}
 	}
 	es, err := h.esSvc.Get(r.Context(), in.ServiceID)
@@ -280,6 +280,7 @@ func (h *Handler) checked(r *http.Request, in *platformlife.Installation, preset
 	if err := in.Validate(); err != nil {
 		problems = strings.Split(err.Error(), "\n")
 	}
+	problems = append(problems, in.ControlPlaneCountProblems()...)
 	problems = append(problems, in.SiteProblems(platformlife.SiteOf(es))...)
 	if len(problems) > 0 {
 		return &invalidInstallation{status: http.StatusBadRequest, code: "invalid_installation", msg: "The installation is not valid", problems: problems}

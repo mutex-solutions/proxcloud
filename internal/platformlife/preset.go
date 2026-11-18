@@ -41,11 +41,12 @@ func (z presetSize) fill(cores, mem, disk *int) {
 }
 
 // ApplyPreset fills what s leaves out with the preset's values; a value s gives always stays. "" and custom fill
-// nothing. A node nobody names is the seed's: the control plane's, then each group's. Homelab also makes the platform
+// nothing. three says whether the installation's release builds three control plane machines (Installation.BuildsThree):
+// where it does not, standard fills one, as the console's form does. A node nobody names is the seed's: the control plane's, then each group's. Homelab also makes the platform
 // network one the node routes (mode routed, vnet pcplat0) when the spec names no mode, no bridge and no tag and every
 // machine is on one node: on one node an existing bridge behind a router breaks the path from tenants to the platform
 // (docs/managed-services.md, "The path from tenants to the platform").
-func ApplyPreset(preset string, s *Spec) error {
+func ApplyPreset(preset string, s *Spec, three bool) error {
 	if preset == "" || preset == PresetCustom {
 		return nil
 	}
@@ -66,6 +67,9 @@ func ApplyPreset(preset string, s *Spec) error {
 		}
 		if cp.Replicas == 0 {
 			cp.Replicas = p.replicas
+			if !three {
+				cp.Replicas = 1
+			}
 		}
 		p.controlPlane.fill(&cp.Cores, &cp.MemoryMiB, &cp.DiskGiB)
 		oneNode = oneNode && cp.Node == s.Seed.Node

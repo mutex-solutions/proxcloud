@@ -23,6 +23,10 @@ func TestValidateControlPlaneCount(t *testing.T) {
 	if got := in.Spec.Clusters[0].ControlPlane.Replicas; got != 1 {
 		t.Fatalf("Normalize left replicas at %d, want 1", got)
 	}
+	in.Spec.Clusters[0].ControlPlane.Nodes = []string{"pve1"}
+	if in.Normalize(); in.Spec.Clusters[0].ControlPlane.Nodes != nil {
+		t.Errorf("Normalize kept controlPlane.nodes %v, which says what node says", in.Spec.Clusters[0].ControlPlane.Nodes)
+	}
 	stored := validInstallation(t) // a record from before the field
 	stored.Spec.Clusters[0].ControlPlane.Replicas = 0
 	if err := stored.Validate(); err != nil || stored.Spec.Clusters[0].ControlPlane.Count() != 1 {
@@ -59,14 +63,18 @@ func TestValidateControlPlaneCount(t *testing.T) {
 	}
 }
 
-// An installed control plane grows from 1 to 3 and does not shrink; a draft changes freely, and the count is not one
-// of the fixed fields.
+// A control plane a run built with three machines does not shrink; what was only saved does. The rule reads what a
+// run handed to the cluster, not the stored spec, and the count is not one of the fixed fields.
 func TestControlPlaneShrink(t *testing.T) {
-	with := func(n int, installed bool) *Installation {
+	with := func(n, built int, installed bool) *Installation {
 		in := validInstallation(t)
 		in.Spec.Clusters[0].ControlPlane.Replicas = n
 		if installed {
 			in.Status.BOM = &BOMRef{Release: "0.9.0", SHA256: "x"}
+			in.Status.Clusters = []ClusterStatus{{Name: ClusterName}}
+		}
+		if built > 0 {
+			in.Status.Clusters = []ClusterStatus{{Name: ClusterName, ControlPlaneReplicas: built}}
 		}
 		return in
 	}
@@ -75,12 +83,14 @@ func TestControlPlaneShrink(t *testing.T) {
 		old, next *Installation
 		want      string
 	}{
-		{"1 to 3, installed", with(1, true), with(3, false), ""},
-		{"stored without the field to 3", with(0, true), with(3, false), ""},
-		{"3 to 3", with(3, true), with(3, false), ""},
-		{"3 to 1, a draft", with(3, false), with(1, false), ""},
-		{"3 to 1, installed", with(3, true), with(1, false), "does not go from 3 machines to 1"},
-		{"3 to none, installed", with(3, true), with(0, false), "etcd"},
+		{"1 to 3, installed", with(1, 0, true), with(3, 0, false), ""},
+		{"stored without the field to 3", with(0, 0, true), with(3, 0, false), ""},
+		{"3 to 3, built", with(3, 3, true), with(3, 0, false), ""},
+		{"3 to 1, a draft", with(3, 0, false), with(1, 0, false), ""},
+		{"3 saved on an installed platform and never applied, back to 1", with(3, 0, true), with(1, 0, false), ""},
+		{"3 to 1, built", with(3, 3, true), with(1, 0, false), "does not go from 3 machines to 1"},
+		{"3 to none, built", with(3, 3, true), with(0, 0, false), "etcd"},
+		{"3 to 1, half built by a first install that failed", with(3, 3, false), with(1, 0, false), "a run built this control plane with 3 machines"},
 	} {
 		got := ControlPlaneShrink(tc.old, tc.next)
 		if tc.want == "" && got != "" || tc.want != "" && !strings.Contains(got, tc.want) {
@@ -88,6 +98,46 @@ func TestControlPlaneShrink(t *testing.T) {
 		}
 		if f := FixedChanges(tc.old, tc.next); slices.ContainsFunc(f, func(s string) bool { return strings.Contains(s, "controlPlane") }) {
 			t.Errorf("%s: the count is a fixed field: %v", tc.name, f)
+		}
+	}
+}
+
+// A count above one is a problem of the save, not only of the Check, where the installation's BOM names a chart that
+// builds one machine: a saved 3 would fail every apply and upgrade of that platform.
+func TestControlPlaneCountProblems(t *testing.T) {
+	prev, err := Previous()
+	if err != nil || len(prev) == 0 {
+		t.Fatalf("previous BOMs: %d, %v", len(prev), err)
+	}
+	in := validInstallation(t)
+	in.Status.BOM = &BOMRef{Release: prev[0].Release, SHA256: prev[0].SHA256}
+	if got := in.ControlPlaneCountProblems(); got != nil || in.BuildsThree() {
+		t.Errorf("one machine on a previous BOM: %v, builds three %t", got, in.BuildsThree())
+	}
+	in.Spec.Clusters[0].ControlPlane.Replicas = 3
+	if got := in.ControlPlaneCountProblems(); len(got) != 1 || !strings.Contains(got[0], "which builds one") || !strings.Contains(got[0], "0.1.14") {
+		t.Errorf("three on a previous BOM: %v", got)
+	}
+	in.Status.BOM = nil
+	withClusterChart(t, "0.1.14")
+	if got := in.ControlPlaneCountProblems(); got != nil || !in.BuildsThree() {
+		t.Errorf("three on a BOM with chart 0.1.14: %v, builds three %t", got, in.BuildsThree())
+	}
+}
+
+// withClusterChart sets the cluster chart version of this release's embedded BOM for the test.
+func withClusterChart(t *testing.T, version string) {
+	t.Helper()
+	cur, err := Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := *cur.BOM
+	t.Cleanup(func() { *cur.BOM = saved })
+	cur.Components = slices.Clone(cur.Components)
+	for i := range cur.Components {
+		if cur.Components[i].Name == ClusterName {
+			cur.Components[i].Chart.Version = version
 		}
 	}
 }
@@ -107,7 +157,7 @@ func TestApplyPreset(t *testing.T) {
 	}
 	apply := func(preset string, in *Installation) ClusterSpec {
 		t.Helper()
-		if err := ApplyPreset(preset, &in.Spec); err != nil {
+		if err := ApplyPreset(preset, &in.Spec, true); err != nil {
 			t.Fatalf("%s: %v", preset, err)
 		}
 		in.Normalize()
@@ -146,6 +196,12 @@ func TestApplyPreset(t *testing.T) {
 	if c := apply(PresetHomelab, in); c.NodeGroups[0].Count != 2 || in.Spec.Network.Mode != "" || len(c.NodeGroups) != 3 {
 		t.Errorf("homelab on two nodes: one machine per node, no routed network: %+v %+v", c.NodeGroups, in.Spec.Network)
 	}
+	// No bridge named and a group on another node: not every machine is on one node, so no network is chosen (the
+	// spec is then not complete, so Validate is not asked).
+	in = bare(func(s *Spec) { s.Clusters[0].NodeGroups = []NodeGroup{{Name: "dbaas", Nodes: []string{"pve2"}}} })
+	if err := ApplyPreset(PresetHomelab, &in.Spec, true); err != nil || in.Spec.Network.Mode != "" || in.Spec.Network.Bridge != "" {
+		t.Errorf("homelab with a group on another node chose a network: %+v %v", in.Spec.Network, err)
+	}
 
 	// Standard: three control plane machines, two machines per group, or one per node when a group has more nodes.
 	in = bare(func(s *Spec) {
@@ -164,6 +220,14 @@ func TestApplyPreset(t *testing.T) {
 		t.Errorf("standard groups (count, cores): %v, want %v", counts, want)
 	}
 
+	// Under a release whose chart builds one control plane machine, standard fills one; a count the caller gives stays.
+	for given, want := range map[int]int{0: 1, 3: 3} {
+		in = bare(func(s *Spec) { s.Network.Bridge, s.Clusters[0].ControlPlane.Replicas = "vmbr1", given })
+		if err := ApplyPreset(PresetStandard, &in.Spec, false); err != nil || in.Spec.Clusters[0].ControlPlane.Replicas != want || in.Spec.Clusters[0].NodeGroups[0].Count != 2 {
+			t.Errorf("standard where the release builds one, %d given: %+v %v", given, in.Spec.Clusters[0], err)
+		}
+	}
+
 	// What the caller gives stays; custom and no preset fill nothing; an unknown preset is refused.
 	in = bare(func(s *Spec) {
 		s.Network.Bridge = "vmbr1"
@@ -174,11 +238,11 @@ func TestApplyPreset(t *testing.T) {
 	}
 	for _, preset := range []string{"", PresetCustom} {
 		in, before := bare(func(*Spec) {}), bare(func(*Spec) {})
-		if err := ApplyPreset(preset, &in.Spec); err != nil || !reflect.DeepEqual(in, before) {
+		if err := ApplyPreset(preset, &in.Spec, true); err != nil || !reflect.DeepEqual(in, before) {
 			t.Errorf("preset %q changed the spec: %v", preset, err)
 		}
 	}
-	if err := ApplyPreset("production", &bare(func(*Spec) {}).Spec); err == nil || !strings.Contains(err.Error(), "homelab, standard or custom") {
+	if err := ApplyPreset("production", &bare(func(*Spec) {}).Spec, true); err == nil || !strings.Contains(err.Error(), "homelab, standard or custom") {
 		t.Errorf("an unknown preset: %v", err)
 	}
 }
@@ -287,19 +351,28 @@ func chartBuildsReplicas(t *testing.T) bool {
 	return err == nil
 }
 
-// The memory the settings place on each node: the seed, count + 1 control plane machines, and each group's share of
-// its machines plus one per node, the first nodes taking the remainder as the chart splits machineCount.
+// The memory the settings place on each node: the seed, count + 1 control plane machines and each group's share of
+// its machines, the first nodes taking the remainder as the chart splits machineCount; and, apart, one more machine of
+// each group on each of its nodes.
 func TestPlannedMemory(t *testing.T) {
 	in := validInstallation(t) // 4 GiB machines: seed and control plane on pve1, one group machine on each node
-	if got, want := in.PlannedMemoryMiB(), map[string]int{"pve1": 4096 * 5, "pve2": 4096 * 2, "pve3": 4096 * 2}; !reflect.DeepEqual(got, want) {
-		t.Errorf("one control plane: %v, want %v", got, want)
+	need, spare := in.PlannedMemoryMiB()
+	if want := map[string]int{"pve1": 4096 * 4, "pve2": 4096, "pve3": 4096}; !reflect.DeepEqual(need, want) {
+		t.Errorf("one control plane: %v, want %v", need, want)
+	}
+	if want := map[string]int{"pve1": 4096, "pve2": 4096, "pve3": 4096}; !reflect.DeepEqual(spare, want) {
+		t.Errorf("one control plane, spares: %v, want %v", spare, want)
 	}
 	c := &in.Spec.Clusters[0]
 	c.ControlPlane.Replicas = 3
 	c.NodeGroups[2] = NodeGroup{Name: "dbaas", Nodes: []string{"pve3", "pve2"}, Count: 3, Cores: 2, MemoryMiB: 8192, DiskGiB: 30}
-	// pve1: seed 4, control plane (3+1)*4, system (1+1)*4. pve2: kamaji (1+1)*4, dbaas (1+1)*8. pve3: dbaas (2+1)*8.
-	if got, want := in.PlannedMemoryMiB(), map[string]int{"pve1": 4096 * 7, "pve2": 4096*2 + 8192*2, "pve3": 8192 * 3}; !reflect.DeepEqual(got, want) {
-		t.Errorf("three control planes: %v, want %v", got, want)
+	// pve1: seed 4, control plane (3+1)*4, system 4. pve2: kamaji 4, dbaas 8. pve3: dbaas 2*8.
+	need, spare = in.PlannedMemoryMiB()
+	if want := map[string]int{"pve1": 4096 * 6, "pve2": 4096 + 8192, "pve3": 8192 * 2}; !reflect.DeepEqual(need, want) {
+		t.Errorf("three control planes: %v, want %v", need, want)
+	}
+	if want := map[string]int{"pve1": 4096, "pve2": 4096 + 8192, "pve3": 8192}; !reflect.DeepEqual(spare, want) {
+		t.Errorf("three control planes, spares: %v, want %v", spare, want)
 	}
 }
 
@@ -350,24 +423,32 @@ func TestPreflightCapacity(t *testing.T) {
 		{"type":"qemu","node":"pve1","vmid":103,"status":"running","tags":"pc-platform;pc-platform-pi-0a1b2c3d;proxcloud","maxmem":` + strconv.Itoa(4*gi) + `},
 		{"type":"qemu","node":"pve2","vmid":300,"status":"running","maxmem":` + strconv.Itoa(64*gi) + `}]`
 
-	// One control plane: seed 4, control plane 2*4, three groups 2*4 each = 36 GiB. 48 in the node less 12 = 36: fits.
+	// One control plane: seed 4, control plane 2*4, three groups of one = 24 GiB, and 12 more for the groups' spares.
+	// 48 in the node less 12 = 36: all of it fits.
 	want("one, exactly", run(func(*Installation) {}, node(48), others)["capacity"], CheckOK, "pve1: 36 GiB of 36 GiB")
-	// Three: 36 + 2*4 = 44 GiB.
-	rows := run(three, node(48), others)
-	want("three on a node with room for one", rows["capacity"], CheckFail,
-		"Node pve1: the settings place 44 GiB of memory there, and 36 GiB can be reserved (48 GiB in the node, less 12 GiB configured for the other VMs and containers on it).",
-		"refused and not tried again", "one for the control plane")
+	// 36 in the node less 12 = 24: the machines and the control plane's spare fit, the groups' spares do not. The
+	// smallest preset on a small node installs, with a warning.
+	want("one, without room for the groups' spares", run(func(*Installation) {}, node(36), others)["capacity"], CheckWarn,
+		"Node pve1 holds the machines (24 GiB of 24 GiB), and not the spare machine of every group on it as well (12 GiB more)")
+	want("one, without room for the control plane's spare", run(func(*Installation) {}, node(35), others)["capacity"], CheckFail,
+		"Node pve1: the settings place 24 GiB of memory there, and 23 GiB can be reserved")
+	// Three: 24 + 2*4 = 32 GiB.
+	rows := run(three, node(43), others)
+	want("three on a node with room for three, not four", rows["capacity"], CheckFail,
+		"Node pve1: the settings place 32 GiB of memory there, and 31 GiB can be reserved (43 GiB in the node, less 12 GiB configured for the other VMs and containers on it).",
+		"refused and not tried again", "rolling update of the control plane")
 	if chartBuildsReplicas(t) {
 		want("three under this BOM", rows["spec"], CheckOK)
 	}
-	want("three with room for four", run(three, node(56), others)["capacity"], CheckOK, "pve1: 44 GiB of 44 GiB")
+	want("three with room for four", run(three, node(44), others)["capacity"], CheckWarn, "Node pve1 holds the machines (32 GiB of 32 GiB)")
+	want("three with room for four and the groups' spares", run(three, node(56), others)["capacity"], CheckOK, "pve1: 44 GiB of 44 GiB")
 	// An installed platform is not stopped by the row, and neither is a site whose nodes cannot be read.
 	cur, err := Current()
 	if err != nil {
 		t.Fatal(err)
 	}
 	installed := func(in *Installation) { three(in); in.Status.BOM = &BOMRef{Release: cur.Release, SHA256: cur.SHA256} }
-	want("installed", run(installed, node(48), others)["capacity"], CheckWarn, "Node pve1: the settings place 44 GiB")
+	want("installed", run(installed, node(43), others)["capacity"], CheckWarn, "Node pve1: the settings place 32 GiB")
 	want("no node list", run(three, "!", others)["capacity"], CheckWarn, "Could not read the nodes' memory with capmox@pve!capi")
 	want("a node that reports nothing", run(three, `[{"node":"pve1","status":"offline"}]`, others)["capacity"], CheckWarn, "Node pve1 did not report its memory")
 
@@ -395,24 +476,20 @@ func TestClusterStageWaitsForThreeControlPlanes(t *testing.T) {
 		if end, s := p.once(), p.stage(stageCluster); !strings.HasPrefix(end, "fail:") || !strings.Contains(s.Message, "which builds one control plane machine: 3 need chart 0.1.14 or newer") {
 			t.Fatalf("three under a chart that builds one: end %s, message %q", end, s.Message)
 		}
-	}
-	cur, err := Current()
-	if err != nil {
-		t.Fatal(err)
-	}
-	saved := *cur.BOM
-	t.Cleanup(func() { *cur.BOM = saved })
-	cur.Components = slices.Clone(cur.Components)
-	for i := range cur.Components {
-		if cur.Components[i].Name == ClusterName {
-			cur.Components[i].Chart.Version = "0.1.14"
+		if _, in, _ := p.state.snapshot(); len(in.Status.Clusters) == 1 && in.Status.Clusters[0].ControlPlaneReplicas != 0 || ControlPlaneShrink(in, validInstallation(t)) != "" {
+			t.Errorf("a run that built nothing recorded three, so the count could not go back to one: %+v", in.Status.Clusters)
 		}
 	}
+	withClusterChart(t, "0.1.14")
 	p := newPlatform(t, RunApply)
 	p.only(stageCluster)
 	p.mutate(three)
 	if end, s := p.once(), p.stage(stageCluster); end != "defer:waiting_cluster" || !strings.Contains(s.Message, "4 of 6 machines are Running (4 exist)") {
 		t.Fatalf("one control plane machine of three: end %s, message %q", end, s.Message)
+	}
+	// Recorded as soon as the count went to the cluster, while two machines are still missing: from here it stays three.
+	if _, in, _ := p.state.snapshot(); len(in.Status.Clusters) != 1 || in.Status.Clusters[0].ControlPlaneReplicas != 3 || !strings.Contains(ControlPlaneShrink(in, validInstallation(t)), "does not go from 3 machines to 1") {
+		t.Errorf("the status does not say three were handed to the cluster: %+v", in.Status.Clusters)
 	}
 	values := dig(p.seed.obj(appsPath+ClusterName), "spec", "source", "helm", "valuesObject", "controlPlane", "kubeadm", "replicas")
 	if values != 3 && values != int64(3) && values != float64(3) {

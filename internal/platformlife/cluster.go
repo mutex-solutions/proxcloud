@@ -733,8 +733,12 @@ func (x *acq) cluster(ctx context.Context) error {
 	// The status names the cluster before anything builds it, so a Remove after a failed run knows to delete it.
 	want := ClusterStatus{Name: ClusterName, Namespace: ClusterName, Endpoint: c.Endpoint, KubernetesVersion: x.bom.Kubernetes.Version,
 		KubeconfigSecret: kubeconfigSecret, ManagedBy: "application", Templates: in.Templates}
+	if n := c.ControlPlane.Count(); n > 1 {
+		want.ControlPlaneReplicas = n // before the sync: a control plane half way to three is one of three
+	}
 	if cur := x.in.Status.Clusters; len(cur) == 1 {
 		want.ArgoCDTokenExpiresAt = cur[0].ArgoCDTokenExpiresAt
+		want.ControlPlaneReplicas = max(want.ControlPlaneReplicas, cur[0].ControlPlaneReplicas)
 	}
 	if !reflect.DeepEqual(x.in.Status.Clusters, []ClusterStatus{want}) {
 		if err := x.save(ctx, func(_ *Run, in *Installation, _ *Secrets) { in.Status.Clusters = []ClusterStatus{want} }); err != nil {

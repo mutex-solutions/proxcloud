@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 )
 
@@ -176,12 +177,16 @@ type SeedStatus struct {
 
 // ClusterStatus is one workload cluster as the job built it. KubeconfigSecret is a Secret name on the seed.
 type ClusterStatus struct {
-	Name                 string         `json:"name"`
-	Namespace            string         `json:"namespace,omitempty"`
-	Endpoint             string         `json:"endpoint,omitempty"`
-	KubernetesVersion    string         `json:"kubernetesVersion,omitempty"`
-	KubeconfigSecret     string         `json:"kubeconfigSecret,omitempty"`
-	ManagedBy            string         `json:"managedBy,omitempty"` // application | raw
+	Name              string `json:"name"`
+	Namespace         string `json:"namespace,omitempty"`
+	Endpoint          string `json:"endpoint,omitempty"`
+	KubernetesVersion string `json:"kubernetesVersion,omitempty"`
+	KubeconfigSecret  string `json:"kubeconfigSecret,omitempty"`
+	ManagedBy         string `json:"managedBy,omitempty"` // application | raw
+	// ControlPlaneReplicas is the largest control plane count above one a run handed to the cluster's Application,
+	// written before that sync; absent means one. ControlPlaneShrink reads it: the stored spec says what is asked for,
+	// not what was built.
+	ControlPlaneReplicas int            `json:"controlPlaneReplicas,omitempty"`
 	Templates            map[string]int `json:"templates,omitempty"`
 	ArgoCDTokenExpiresAt *time.Time     `json:"argocdTokenExpiresAt,omitempty"`
 }
@@ -298,7 +303,11 @@ func (in *Installation) Normalize() {
 		if len(s.Clusters[i].Roles) == 0 {
 			s.Clusters[i].Roles = []string{RoleKamaji, RoleDBaaS}
 		}
-		s.Clusters[i].ControlPlane.Replicas = s.Clusters[i].ControlPlane.Count()
+		cp := &s.Clusters[i].ControlPlane
+		cp.Replicas = cp.Count()
+		if slices.Equal(cp.Nodes, []string{cp.Node}) {
+			cp.Nodes = nil // says what node says: not stored
+		}
 	}
 }
 
@@ -733,23 +742,47 @@ func FixedChanges(old, next *Installation) []string {
 	return out
 }
 
-// ControlPlaneShrink is why next may not be saved over old, or "": an installed platform's control plane does not go
-// from 3 machines to 1. Cluster API would take two etcd members out one after the other; with two members left, one
-// slow or lost member stops etcd, and all three are on one node and one store. No lab has run it, and nothing here
-// repairs a control plane that stopped half way. From 1 to 3 is an apply that adds two machines.
+// ControlPlaneShrink is why next may not be saved over old, or "": a control plane a run built with 3 machines does
+// not go to 1. Cluster API would take two etcd members out one after the other; with two members left, one slow or
+// lost member stops etcd, and all three are on one node and one store. No lab has run it, and nothing here repairs a
+// control plane that stopped half way. What counts is what a run handed to the cluster (Status.Clusters), not the
+// stored spec: a 3 that was saved and never applied goes back to 1. From 1 to 3 is an apply that adds two machines.
 func ControlPlaneShrink(old, next *Installation) string {
-	if !old.Installed() {
-		return ""
-	}
-	for i, c := range old.Spec.Clusters {
-		if i < len(next.Spec.Clusters) && next.Spec.Clusters[i].ControlPlane.Count() < c.ControlPlane.Count() {
-			return fmt.Sprintf("spec.clusters[%d].controlPlane.replicas: an installed control plane does not go from %d machines to %d in this release. "+
+	for i, c := range old.Status.Clusters {
+		built := max(c.ControlPlaneReplicas, 1)
+		if i < len(next.Spec.Clusters) && next.Spec.Clusters[i].ControlPlane.Count() < built {
+			return fmt.Sprintf("spec.clusters[%d].controlPlane.replicas: a run built this control plane with %d machines, and it does not go from %d machines to %d in this release. "+
 				"Taking etcd members out leaves two for a while, where one slow or lost member stops the platform's API, and no lab has run that step. "+
 				"Keep %d; to get a platform with one, remove the installation and install again.",
-				i, c.ControlPlane.Count(), next.Spec.Clusters[i].ControlPlane.Count(), c.ControlPlane.Count())
+				i, built, built, next.Spec.Clusters[i].ControlPlane.Count(), built)
 		}
 	}
 	return ""
+}
+
+// BuildsThree reports whether the cluster chart of the installation's BOM (the installed one, else this release's)
+// builds more than one control plane machine.
+func (in *Installation) BuildsThree() bool {
+	bom, err := bomOf(in)
+	return err == nil && kamaji.ChartHasControlPlaneReplicas(ClusterChartVersion(bom))
+}
+
+// ControlPlaneCountProblems is why the installation's BOM cannot build the control plane count of the spec, or nil.
+// The record alone cannot say it, so Validate does not: the save and the Check's spec row both ask here. Without it a
+// saved 3 would fail every apply and upgrade of a platform whose chart builds one.
+func (in *Installation) ControlPlaneCountProblems() []string {
+	bom, err := bomOf(in)
+	if err != nil || kamaji.ChartHasControlPlaneReplicas(ClusterChartVersion(bom)) {
+		return nil
+	}
+	var out []string
+	for _, c := range in.Spec.Clusters {
+		if n := c.ControlPlane.Count(); n > 1 {
+			out = append(out, fmt.Sprintf("spec.clusters: %d control plane machines: the platform's BOM (release %s) names cluster chart %s, which builds one; more need chart %s or newer, so keep 1 until the platform is on a release that has it",
+				n, bom.Release, ClusterChartVersion(bom), kamaji.ControlPlaneReplicasChartVersion))
+		}
+	}
+	return out
 }
 
 // addrRange is an inclusive IPv4 range.

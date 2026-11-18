@@ -139,14 +139,7 @@ func (p Preflight) Run(ctx context.Context) []Check {
 		spec = append(spec, fmt.Sprintf("spec.network.vlan %d: the platform's BOM (release %s) names cluster chart %s, which cannot tag a NIC; a VLAN tag needs chart %s or newer, so use a bridge or vnet that carries the VLAN untagged",
 			s.Network.VLAN, bom.Release, ClusterChartVersion(bom), kamaji.VLANChartVersion))
 	}
-	if bom, err := bomOf(in); err == nil {
-		for _, c := range s.Clusters {
-			if n := c.ControlPlane.Count(); n > 1 && !kamaji.ChartHasControlPlaneReplicas(ClusterChartVersion(bom)) {
-				spec = append(spec, fmt.Sprintf("spec.clusters: %d control plane machines: the platform's BOM (release %s) names cluster chart %s, which builds one; more need chart %s or newer, so keep 1 until the platform is on a release that has it",
-					n, bom.Release, ClusterChartVersion(bom), kamaji.ControlPlaneReplicasChartVersion))
-			}
-		}
-	}
+	spec = append(spec, in.ControlPlaneCountProblems()...)
 	row("spec", spec, "The installation is complete and consistent.")
 
 	mgmt, complete, err := p.Portal.C.ManagementCIDRs(ctx)

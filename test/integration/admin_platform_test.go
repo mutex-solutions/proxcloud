@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/durablejobs"
@@ -163,6 +165,12 @@ func TestAdminPlatformInstallations(t *testing.T) {
 	if a := call("admin-sub", http.MethodPost, base, presetBody("custom"), http.StatusBadRequest); code(a) != "invalid_installation" {
 		t.Fatalf("custom fills nothing, so the same body is not complete: %+v", a)
 	}
+	// Standard asks for three control plane machines only where the release builds them: a count the preset filled in
+	// is never the reason a body is refused (this one names no bridge, which is).
+	if a := call("admin-sub", http.MethodPost, base, presetBody("standard"), http.StatusBadRequest); code(a) != "invalid_installation" ||
+		strings.Contains(strings.Join(anyStrings(a.Errors.Details["problems"]), ","), "control plane machines") {
+		t.Fatalf("the standard preset without a bridge: %+v", a)
+	}
 	var home platformlife.Installation
 	if err := json.Unmarshal(call("admin-sub", http.MethodPost, base, presetBody("homelab"), http.StatusOK).Data, &home); err != nil {
 		t.Fatal(err)
@@ -250,26 +258,53 @@ func TestAdminPlatformInstallations(t *testing.T) {
 		t.Fatalf("network after install: %+v", a)
 	}
 	call("admin-sub", http.MethodPut, one, platformBody("10.200.200.1", 6, 2), http.StatusOK)
-	// The control plane count of an installed platform: 1 to 3 is saved (an apply adds the machines), 3 to 1 is not.
+	// The control plane count of an installed platform. Where the platform's release builds one machine, 3 is refused
+	// at the save: stored, it would fail every apply and upgrade.
 	replicas := func(n int, rev int64) string {
 		return strings.Replace(platformBody("10.200.200.1", 6, rev), `"controlPlane":{`, fmt.Sprintf(`"controlPlane":{"replicas":%d,`, n), 1)
+	}
+	cur, err := platformlife.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !kamaji.ChartHasControlPlaneReplicas(platformlife.ClusterChartVersion(cur.BOM)) {
+		if a := call("admin-sub", http.MethodPut, one, replicas(3, 3), http.StatusBadRequest); code(a) != "invalid_installation" ||
+			!strings.Contains(strings.Join(anyStrings(a.Errors.Details["problems"]), ","), "which builds one") {
+			t.Fatalf("3 under a release that builds one: %+v", a)
+		}
+	}
+	// With a release that builds three: 1 to 3 is saved, and goes back to 1 for as long as no run built three.
+	savedBOM := *cur.BOM
+	defer func() { *cur.BOM = savedBOM }()
+	cur.Components = slices.Clone(cur.Components)
+	for i := range cur.Components {
+		if cur.Components[i].Name == platformlife.ClusterName {
+			cur.Components[i].Chart.Version = kamaji.ControlPlaneReplicasChartVersion
+		}
 	}
 	if a := call("admin-sub", http.MethodPut, one, replicas(3, 3), http.StatusOK); !strings.Contains(string(a.Data), `"replicas":3`) {
 		t.Fatalf("1 to 3 after install: %s", a.Data)
 	}
-	if a := call("admin-sub", http.MethodPut, one, replicas(1, 4), http.StatusConflict); code(a) != "fixed_fields" ||
+	call("admin-sub", http.MethodPut, one, replicas(1, 4), http.StatusOK)
+	call("admin-sub", http.MethodPut, one, replicas(3, 5), http.StatusOK)
+	// A run handed three to the cluster (stage 7 records it before the sync): from here 3 to 1 is refused.
+	if _, err := db.C(platformlife.InstallationCollection).SetByID(ctx, in.ID, pgdoc.M{"status": pgdoc.M{"phase": "ready",
+		"bom": pgdoc.M{"release": "0.7.0-dev", "sha256": "x"}, "clusters": []pgdoc.M{{"name": platformlife.ClusterName, "controlPlaneReplicas": 3}}}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if a := call("admin-sub", http.MethodPut, one, replicas(1, 6), http.StatusConflict); code(a) != "fixed_fields" ||
 		!strings.Contains(strings.Join(anyStrings(a.Errors.Details["problems"]), ","), "does not go from 3 machines to 1") {
-		t.Fatalf("3 to 1 after install: %+v", a)
+		t.Fatalf("3 to 1 after a run built three: %+v", a)
 	}
 	// A body without the count keeps meaning one machine, so it is the same refusal, not a silent shrink.
-	if a := call("admin-sub", http.MethodPut, one, platformBody("10.200.200.1", 6, 4), http.StatusConflict); code(a) != "fixed_fields" {
+	if a := call("admin-sub", http.MethodPut, one, platformBody("10.200.200.1", 6, 6), http.StatusConflict); code(a) != "fixed_fields" {
 		t.Fatalf("3 to a body without the count: %+v", a)
 	}
-	call("admin-sub", http.MethodPut, one, replicas(3, 4), http.StatusOK)
+	call("admin-sub", http.MethodPut, one, replicas(3, 6), http.StatusOK)
 	if err := store.SaveRun(ctx, &platformlife.Run{ID: "pr-1", InstallationID: in.ID, Kind: platformlife.RunApply, State: platformlife.RunRunning}); err != nil {
 		t.Fatal(err)
 	}
-	if a := call("admin-sub", http.MethodPut, one, platformBody("10.200.200.1", 8, 5), http.StatusConflict); code(a) != "run_active" {
+	if a := call("admin-sub", http.MethodPut, one, platformBody("10.200.200.1", 8, 7), http.StatusConflict); code(a) != "run_active" {
 		t.Fatalf("during a run: %+v", a)
 	}
 
@@ -291,11 +326,11 @@ func TestAdminPlatformInstallations(t *testing.T) {
 		if err := db.C("auditEvent").Find(ctx, pgdoc.M{"resourceType": "PLATFORM_INSTALLATION"}, &events); err != nil {
 			t.Fatal(err)
 		}
-		if len(events) >= 7 || time.Now().After(deadline) {
+		if len(events) >= 9 || time.Now().After(deadline) {
 			break
 		}
 	}
-	if len(events) != 7 { // two creates (the second from a preset), credentials, four updates; the preflight and every refusal are not audited
+	if len(events) != 9 { // two creates (the second from a preset), credentials, six updates; the preflight and every refusal are not audited
 		t.Fatalf("%d audit events, want 7: %v", len(events), events)
 	}
 	dump, _ := json.Marshal(map[string]any{"responses": bodies, "stored": raw, "audit": events})
