@@ -564,6 +564,9 @@ are several, `errors.details.problems`.
   exist and every new one), `new` (new projects only) or `none`. A spec without it means `none`, as before v0.9.0,
   and stays valid. Stage 10 of a run applies a choice once, when it differs from `status.tenantsAttach` (the one
   applied last): the attach policy of both providers, and for `all` one bulk attach of every project per provider.
+  A create or a PUT whose spec says `all` also needs `admin:project:update` (`403` otherwise), as the bulk attach
+  does. `status.kubernetesOffered` lists the Kubernetes versions that were offered on the Kubernetes provider: a run
+  offers a version once.
   An installation is answered with `schedulerNote` while the job scheduler is off: the text of the Check row
   `scheduler`. A spec that breaks a rule, or overlaps the provider's
   `cidrPool`, `sandboxCidrs` or public networks, or puts the MetalLB range in
@@ -800,8 +803,9 @@ are several, `errors.details.problems`.
   when the provider already names that version (its line is kept, whatever it is), `versions` is the provider's map
   afterwards. `409 node_image_unpublished` with `details.version` and `details.missingNodes` when a node lacks a
   published copy; `409 no_provider` before the first install; `409 bom_unsupported` when this release does not carry
-  the installed BOM; `502 pve_unreadable` when Proxmox did not list its templates. Stage 10 of every apply does the
-  same. A change is in the audit log with the provider's versions before and after. Not verified on a lab
+  the installed BOM; `502 pve_unreadable` when Proxmox did not list its templates. An answered call records the
+  version in `status.kubernetesOffered`. Stage 10 of an apply does the same for a version not recorded there, so a
+  version removed from the provider afterwards is offered again by this route only. A change is in the audit log with the provider's versions before and after. Not verified on a lab
   ([managed-services.md](managed-services.md#what-a-tenant-can-use-after-the-install)).
 
 An apply runs `validate`, `images`, `seed-vm`, `seed-api`, `seed-identity`,

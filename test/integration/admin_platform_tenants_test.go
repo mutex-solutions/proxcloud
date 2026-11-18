@@ -21,6 +21,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platformlife"
+	"github.com/mutex-solutions/proxcloud/internal/providerattach"
 	"github.com/mutex-solutions/proxcloud/internal/templateupdates"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 	"github.com/mutex-solutions/proxcloud/pkg/textcrypt"
@@ -30,6 +31,9 @@ import (
 // is refused; an installation without a provider answers 409 no_provider; while the node image is only staged the
 // answer is 409 node_image_unpublished with the node and the provider row is untouched; once it is published the
 // BOM's version is written with its line and audited; a second call and a version the operator set change nothing.
+// A Proxmox that does not answer is 502 pve_unreadable with nothing changed. An offer is recorded in
+// status.kubernetesOffered, which keeps a later apply from adding the version again. The installation is answered
+// with schedulerNote only while the job scheduler is off.
 func TestPlatformOfferKubernetesVersion(t *testing.T) {
 	ctx := context.Background()
 	db := freshPG(t)
@@ -40,7 +44,12 @@ func TestPlatformOfferKubernetesVersion(t *testing.T) {
 	version := cur.Kubernetes.Version
 	tag, _ := templateupdates.ParseTag(cur.Kubernetes.NodeImage.Tag)
 	tags := templateupdates.TagImport + ";" + templateupdates.TagStaged
+	pveDown := false
 	fakePVE := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if pveDown {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		if r.Method != http.MethodGet || strings.TrimPrefix(r.URL.Path, "/api2/json") != "/cluster/resources" {
 			t.Errorf("unexpected Proxmox call %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusInternalServerError)
@@ -119,6 +128,39 @@ func TestPlatformOfferKubernetesVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Proxmox does not answer: nothing is changed.
+	pveDown = true
+	call("admin-sub", http.StatusBadGateway, "pve_unreadable")
+	pveDown = false
+	if v := versions(); len(v) != 1 {
+		t.Fatalf("an unreadable Proxmox changed the provider: %v", v)
+	}
+
+	// The job scheduler: the note is on the installation while it is off, and gone once it is on.
+	note := func() string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/admin/platform/installations/"+in.ID, nil)
+		req = req.WithContext(httpx.WithRC(req.Context(), &httpx.RequestContext{Sub: "admin-sub"}))
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		var a struct {
+			Data struct {
+				SchedulerNote string `json:"schedulerNote"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &a); err != nil || w.Code != http.StatusOK {
+			t.Fatalf("get: %d %s", w.Code, w.Body.String())
+		}
+		return a.Data.SchedulerNote
+	}
+	if note() != platformlife.SchedulerOffNote {
+		t.Fatalf("scheduler off: note %q", note())
+	}
+	h.SetJobsScheduler(true)
+	if note() != "" {
+		t.Fatalf("scheduler on: note %q", note())
+	}
+
 	// Staged: nothing is offered, and the answer names the node.
 	if d := call("admin-sub", http.StatusConflict, "node_image_unpublished"); fmt.Sprint(d["missingNodes"]) != "[pve1]" || d["version"] != version {
 		t.Fatalf("staged: %v", d)
@@ -135,6 +177,9 @@ func TestPlatformOfferKubernetesVersion(t *testing.T) {
 	}
 	if v := versions(); v[version] != "pve1=9212" || v["1.34.2"] != "pve1=9300" {
 		t.Fatalf("versions after the offer: %v", v)
+	}
+	if got, err := store.Get(ctx, in.ID); err != nil || fmt.Sprint(got.Status.KubernetesOffered) != "["+version+"]" || got.Status.Providers == nil {
+		t.Fatalf("status after the offer: %+v, %v", got, err)
 	}
 	// Again, and against a line the operator wrote for that version: nothing changes.
 	row, _ := repo.FindDoc(ctx, "externalService", "svc-k8s")
@@ -154,7 +199,8 @@ func TestPlatformOfferKubernetesVersion(t *testing.T) {
 // turns the attach policy on and attaches nobody; "all" also starts one bulk attach of every project, which attaches
 // the ones that lack the provider; a second "all" finds none left and starts no run; "none" turns the policy off and
 // detaches nobody; a disabled provider takes the policy and reports that the projects wait. Each change is audited
-// with the run's requester and the installation.
+// with the run's requester and the installation; a run without a requester is audited as the system. More projects
+// than one bulk attach takes start no run.
 func TestPlatformAttachChoice(t *testing.T) {
 	ctx := context.Background()
 	rig := newAttachRig(t)
@@ -235,5 +281,37 @@ func TestPlatformAttachChoice(t *testing.T) {
 	}
 	if counts[audit.ActionUpdate] != 3 || counts[admin.ActionBulkAttach] != 1 {
 		t.Fatalf("audit events: %v", counts)
+	}
+
+	// A run nobody requested: the change is the system's, with the run in the metadata.
+	if done, _, err := rig.adminH.PlatformAttach(ctx, "pi-1", "svc-s3", platformlife.AttachNone, templateupdates.PlatformRunActor+"pr-1"); err != nil || !done {
+		t.Fatalf("none by a run: %v %v", done, err)
+	}
+	var system *audit.AuditEvent
+	for deadline := time.Now().Add(10 * time.Second); system == nil && time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+		events, err := rig.auditRepo.QueryAll(ctx, audit.Filter{ResourceID: "svc-s3"}, 20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, ev := range events {
+			if ev.Actor != nil && ev.Actor.Type == audit.ActorSystem {
+				system = &events[i]
+			}
+		}
+	}
+	if system == nil || system.ResourceMetadata["requestedBy"] != templateupdates.PlatformRunActor+"pr-1" || system.ResourceMetadata["platformInstallationId"] != "pi-1" {
+		t.Fatalf("no system event for a run without a requester: %+v", system)
+	}
+
+	// More projects than one run attaches: the policy is written, no run starts, and the note says to split it.
+	if _, err := rig.db.Pool.Exec(ctx, `UPDATE "externalService" SET doc=jsonb_set(doc,'{status}','"PUBLIC"') WHERE id='svc-s3'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rig.db.Pool.Exec(ctx, `INSERT INTO "project" (id, doc) SELECT 'many-'||g, jsonb_build_object('name', 'many-'||g, 'organizationId', 'org-1',
+		'status', 'ACTIVE', 'services', '[]'::jsonb) FROM generate_series(1, $1::int) g`, providerattach.MaxRunProjects); err != nil {
+		t.Fatal(err)
+	}
+	if note := attach(platformlife.AttachAll, false); !strings.Contains(note, fmt.Sprintf("at most %d", providerattach.MaxRunProjects)) || !policy() || runs() != 1 {
+		t.Fatalf("over the cap: %q, policy %v, %d runs", note, policy(), runs())
 	}
 }

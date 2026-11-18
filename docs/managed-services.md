@@ -841,6 +841,17 @@ smoke-tested, because the tests would clone beside the build. That gate is kept.
 - A version the provider already names is yours. It is never overwritten and never removed, whatever
   it names, and other versions stay as they are. To change the line of a version you set, edit it on
   the provider's **Connection** tab.
+- A run offers a version **once**. The installation records each version that was offered
+  (`status.kubernetesOffered`), by a run or by `POST …/kubernetes-version`. When you delete that
+  version from the provider afterwards, to stop offering it for new clusters while its template
+  stays for the clusters that exist, an apply leaves it deleted; the stage's item says that the
+  version was offered before. To offer it again, call `POST …/kubernetes-version` or copy the line
+  from **Publish on all nodes** into the provider.
+- *When you upgrade ProxCloud on a site that stays on a 0.8.x BOM:* the first apply after the
+  upgrade adds the BOM's Kubernetes version to the provider when the provider does not name it and
+  a node image of it is published on every node the platform cluster uses. That includes an image
+  you published only to test it. Withdraw such a copy before the apply, or delete the version from
+  the provider after it: it is then not added again.
 - While no copy is published, the ready card says so under the Kubernetes provider, lists each node
   with the state of its copy (not imported, imported and waiting, smoke test running or failed and
   why, published), and offers one button, **Test, publish and offer Kubernetes <version>**. It runs
@@ -869,12 +880,20 @@ the installation in its metadata:
 
 A choice is applied **once**: stage 10 acts only when the setting differs from the one it applied
 last (`status.tenantsAttach`). So an apply never attaches again a project you detached, and never
-turns back on a policy you turned off; to have a run act again, change the setting. A run never
+turns back on a policy you turned off; to have a run act again, change the setting. The choice is
+recorded only when **both** providers took it. When one did and the other could not (a warning, see
+below), the next apply applies it to both again: with `all`, a project you detached from the first
+provider in between is attached again by that apply.
+
+Saving `all` needs the permission `admin:project:update` besides `admin:service:manage`, as the bulk
+attach on the provider's **Projects** tab does (`403` otherwise); the built-in roles ADMIN and
+SUPER_ADMIN hold both. A run that has no requester is in the audit log as the system, with the run
+in the entry's metadata (`requestedBy`). A run never
 detaches a project: `none` after `all` turns the policy off and leaves every project attached. An
 installation from before v0.9.0 has no setting, and its providers stay exactly as they are. When a
-provider is disabled, or a bulk attach of more than 5000 projects would be needed, the stage's item
-`attach:<provider id>` says so as a warning, the run still ends ready, and the next apply tries
-again. The card says which choice the settings hold and whether it is applied yet.
+provider is disabled, a bulk attach of more than 5000 projects would be needed, or the attach fails
+(the database, the start of the bulk attach), the stage's item `attach:<provider id>` says so as a
+warning, the providers stay registered, the run still ends ready, and the next apply tries again. The card says which choice the settings hold and whether it is applied yet.
 
 **The job scheduler.** One line under the providers says what tenants miss while it is off, with the
 command ([Prerequisites](#2-prerequisites)).
@@ -883,11 +902,16 @@ command ([Prerequisites](#2-prerequisites)).
 offered, the customer console's cluster form needs a name and a flavor. The rest has defaults:
 
 - *Network.* A cluster's nodes need a network of the project without DHCP. The form preselects the
-  project's network when exactly one can hold the nodes, offers **Create a network for this
+  project's network when exactly one is not listed with DHCP, offers **Create a network for this
   cluster** when the project has none (the network the Networks page makes with its defaults), and
-  shows networks with DHCP as not selectable. When every network of the project has DHCP it says
-  that a new one would be the same and sends the tenant to the operator: the zone is yours to change
-  (the Check row `tenant-network`).
+  marks networks listed with DHCP; they stay selectable. The mark is the form's guess: it reads the
+  stored network (the zone's DHCP and a DHCP range on the subnet together, as of the last sync),
+  while the API decides on the zone alone and refuses with "Worker nodes need a network without
+  DHCP". So in a zone with DHCP a network made without a range is not marked and its create is
+  refused, and the form cannot tell before it makes a network whether the zone has DHCP: when the
+  network it made comes back with DHCP it says so and names it, so that the tenant can delete it.
+  When every network of the project has DHCP it says that a new one would be the same and sends the
+  tenant to the operator: the zone is yours to change (the Check row `tenant-network`).
 - *Not fixed by this release:* a flavor must exist in the catalog and fit the project's quota (the
   form disables the ones that do not); a price rule for clusters must exist or usage is billed as
   zero; the worker root disk is the provider's `rootVolumeGiB` (30); on a Compose install a tenant
@@ -1940,9 +1964,10 @@ own list ([What the upgrade still owes a lab](#what-the-upgrade-still-owes-a-lab
 | Check | What it would show |
 |---|---|
 | U1 (v0.9.0) | A green install is usable: on a fresh install the ready card's button smoke-tests and publishes the node image on the platform's nodes and the Kubernetes provider then offers the BOM's version; a tenant of an attached project creates a cluster with a name and a flavor. Shows whether a node image template that already serves the platform's own machines passes the smoke test unchanged, and how long the test takes beside a running platform |
-| U2 (v0.9.0) | An apply after U1 leaves a version line the operator edited as it is, and offers nothing twice |
+| U2 (v0.9.0) | An apply after U1 leaves a version line the operator edited as it is, and offers nothing twice: a version deleted from the provider after U1 stays deleted, and `POST …/kubernetes-version` brings it back |
 | U3 (v0.9.0) | `spec.tenants.attach`: `all` on a site with projects attaches each one (Kubernetes and databases in the tenant menu) and the audit log names the run's author; `new` attaches a project created afterwards and no earlier one; an apply after a hand detach does not attach again |
 | U4 (v0.9.0) | The customer console's cluster form on a project without a network: **Create a network for this cluster** makes one the cluster create accepts, in a `simple` zone without DHCP |
+| U5 (v0.9.0) | The same form in a `simple` zone **with** DHCP: a network made with DHCP off is not marked and its cluster create is refused with "Worker nodes need a network without DHCP"; on a project without a network the form's button makes a network that comes back with DHCP, and the form names it; a network marked with DHCP whose flag is stale (the zone's DHCP was turned off, the scheduler is off) can still be picked and its create is accepted |
 | L0 | The API container routes to the platform network |
 | L1 | The script, the checks and the mint drill ([proxmox-permissions.md](proxmox-permissions.md#the-mint-grant-in-m1)) |
 | L2 | The seed: its CA, the bootstrap token, the CD gone after stage 5, cloud-init off |

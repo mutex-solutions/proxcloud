@@ -289,12 +289,32 @@ func (h *Handler) checked(r *http.Request, in *platformlife.Installation) error 
 	return nil
 }
 
+// installationPerms are the permissions a create or an update of an installation with this spec needs beyond
+// externalServiceManagePerm. tenants.attach "all" makes the next run attach both providers to every project, which by
+// hand needs projectUpdatePerm too (providerattach.go): the spec must not be a way around that key.
+func installationPerms(spec platformlife.Spec) []string {
+	if spec.Tenants.AttachChoice() == platformlife.AttachAll {
+		return []string{projectUpdatePerm}
+	}
+	return nil
+}
+
+// installationGate checks installationPerms; false = the 403 went out.
+func (h *Handler) installationGate(w http.ResponseWriter, r *http.Request, spec platformlife.Spec) bool {
+	_, granted, _ := h.adminContext(r)
+	if missing := missingPerm(granted, installationPerms(spec)); missing != "" {
+		httpx.WriteError(w, httpx.Forbidden("Attaching the providers to all projects (spec.tenants.attach: all) needs the permission: "+missing))
+		return false
+	}
+	return true
+}
+
 func (h *Handler) platformCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.platformGate(w, r, externalServiceManagePerm) {
 		return
 	}
 	var req installationRequest
-	if !decodeStrictLimited(w, r, &req, 64<<10) {
+	if !decodeStrictLimited(w, r, &req, 64<<10) || !h.installationGate(w, r, req.Spec) {
 		return
 	}
 	if h.esSvc == nil {
@@ -314,7 +334,7 @@ func (h *Handler) platformUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req installationRequest
-	if !decodeStrictLimited(w, r, &req, 64<<10) {
+	if !decodeStrictLimited(w, r, &req, 64<<10) || !h.installationGate(w, r, req.Spec) {
 		return
 	}
 	before, after, err := h.platform.Update(r.Context(), chi.URLParam(r, "id"), req.Rev, func(old platformlife.Installation) (*platformlife.Installation, error) {

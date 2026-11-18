@@ -7,7 +7,8 @@ package platformlife
 // copy whose smoke test passed. So the register stage, every apply and POST …/kubernetes-version offer the BOM's
 // Kubernetes version only once a node image of it is published on every node the platform cluster uses, with the line
 // "Publish on all nodes" shows for copying. A version the provider already names is the operator's and is never
-// written again.
+// written again. A run offers a version once (status.kubernetesOffered): when the operator removed it from the provider
+// since, an apply leaves it removed and only the route offers it again.
 //
 // The attachment. spec.tenants.attach says who gets the two providers; the register stage applies a choice once, when
 // it differs from the one it applied last (status.tenantsAttach).
@@ -80,6 +81,15 @@ func NodeImageLine(b *BOM, in *Installation, rows []pve.ClusterResource) (line s
 		return "", missing
 	}
 	return line, missing
+}
+
+// NodesText names the nodes NodeImageLine found missing for a message; none (an installation with no machine and no
+// published image anywhere) reads "any node".
+func NodesText(missing []string) string {
+	if len(missing) == 0 {
+		return "any node"
+	}
+	return strings.Join(missing, ", ")
 }
 
 // OfferVersion writes version with its node image line into a Kubernetes provider row's config.cluster.versions and

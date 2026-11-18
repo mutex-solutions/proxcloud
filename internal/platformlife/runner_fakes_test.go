@@ -233,6 +233,7 @@ type fakePVE struct {
 	disks     []string               // volumes on local-lvm (the names after "local-lvm:")
 	writers   []string               // the token id of each recorded request, parallel to writes
 	templates []pve.ClusterResource  // /cluster/resources?type=vm
+	noVMList  bool                   // /cluster/resources?type=vm answers 500
 	tmplCfg   map[int]map[string]any // the config of node templates, on any node (none: Proxmox knows no such VM)
 	tmplDeny  map[int]bool           // node templates whose config the token may not read
 	// SDN: zones, vnets and each vnet's subnets. A created object is "new" until PUT /cluster/sdn applies it; as
@@ -463,6 +464,9 @@ func (f *fakePVE) serve(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		data(rows)
+	case path == "/cluster/resources" && f.noVMList:
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"errors":{"type":"cluster not ready"}}`)
 	case path == "/cluster/resources":
 		data(f.templates)
 	case path == "/nodes":

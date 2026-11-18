@@ -82,7 +82,9 @@ type FlavorOption = {
 type NetworkOption = {
   id: string
   name: string
-  dhcp: boolean // the network hands out addresses by DHCP: a cluster's nodes get fixed ones, so it cannot hold them
+  // The network is listed with DHCP, and a cluster's nodes get fixed addresses. This is the form's guess from the stored
+  // row (zone DHCP and a subnet range together, possibly stale); the server decides, on the zone alone.
+  dhcp: boolean
 }
 
 type OidcDraft = {
@@ -867,16 +869,20 @@ function ClusterFormDialog({
   const [oidcOpen, setOidcOpen] = useState(false)
   const [oidc, setOidc] = useState<OidcDraft>({ ...emptyOidc })
   const [allowedCidrs, setAllowedCidrs] = useState("")
-  // The one network that can hold the nodes is the default, so a project with a single network needs no pick.
+  // The one network not listed with DHCP is the default, so a project with a single network needs no pick. A network
+  // listed with DHCP is marked, not disabled: the flag is the form's guess and the server decides.
   const usable = networks.filter((n) => !n.dhcp)
   const [networkSel, setNetworkId] = useState("")
-  const networkId = usable.some((n) => n.id === networkSel) ? networkSel : usable.length === 1 ? usable[0].id : ""
+  const networkId = networks.some((n) => n.id === networkSel) ? networkSel : usable.length === 1 ? usable[0].id : ""
+  const [madeNetwork, setMadeNetwork] = useState("")
   const [pending, setPending] = useState(false)
   const [makingNetwork, setMakingNetwork] = useState(false)
   const makeNetwork = async () => {
     setMakingNetwork(true)
     try {
-      await onCreateNetwork?.(`${name.trim() || "kubernetes"}-net`)
+      const made = `${name.trim() || "kubernetes"}-net`
+      await onCreateNetwork?.(made)
+      setMadeNetwork(made)
     } catch (e) {
       toast.error((e as Error).message)
     } finally {
@@ -1031,12 +1037,13 @@ function ClusterFormDialog({
               </SelectTrigger>
               <SelectContent>
                 {networks.map((n) => (
-                  <SelectItem key={n.id} value={n.id} disabled={n.dhcp}>{n.name}{n.dhcp ? " (has DHCP: not for cluster nodes)" : ""}</SelectItem>
+                  <SelectItem key={n.id} value={n.id}>{n.name}{n.dhcp ? " (has DHCP: the create may be refused)" : ""}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">
-              Worker nodes run on this network and reserve 24 of its addresses. It needs a way to the internet.
+              Worker nodes run on this network and reserve 24 of its addresses. It needs a way to the internet, and it must
+              not hand out addresses by DHCP: the create is refused when it does.
             </p>
             {!networksLoading && networks.length === 0 && onCreateNetwork ? (
               <div className="flex flex-wrap items-center gap-3 text-sm">
@@ -1048,8 +1055,11 @@ function ClusterFormDialog({
             ) : null}
             {networks.length > 0 && usable.length === 0 ? (
               <p className="text-sm" role="status">
-                Every network of this project hands out addresses by DHCP, and a cluster's nodes need fixed ones. A new network would be
-                the same here: ask the operator of this site for networks without DHCP.
+                Every network of this project hands out addresses by DHCP, and a cluster's nodes need fixed ones.{" "}
+                {networks.some((n) => n.dhcp && n.name === madeNetwork)
+                  ? `That includes ${madeNetwork}, made just now: this site gives new networks DHCP. Delete it under Network → Networks if you do not need it. `
+                  : ""}
+                A new network would be the same here: ask the operator of this site for networks without DHCP.
               </p>
             ) : null}
           </div>

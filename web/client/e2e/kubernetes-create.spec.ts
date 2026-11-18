@@ -20,7 +20,12 @@ async function open(page: Page, setup = "") {
     w.__creates = []
     setMockHandler(async (path: string, opts: { method?: string; body?: { type?: string } }) => {
       if (path.endsWith("/cloud") && opts.method === "POST") w.__creates.push(opts.body)
-      return dispatch(path, opts)
+      const answer = await dispatch(path, opts)
+      // A site whose zone has DHCP: every network made there comes back with it.
+      if ((w as { __dhcpSite?: boolean }).__dhcpSite && path.endsWith("/cloud") && opts.method === "POST" && opts.body?.type === "NETWORK") {
+        for (const r of db.cloud) if (r.type === "NETWORK") r.data.network = { ...r.data.network, dhcp: true }
+      }
+      return answer
     })
   }, setup)
   await page.evaluate((u) => {
@@ -66,10 +71,21 @@ test("a project without a network makes one from the form", async ({ page }) => 
   expect(sent[1].data.networkId).toBeTruthy()
 })
 
-test("a network with DHCP cannot be picked, and the form says who can change that", async ({ page }) => {
+test("a network with DHCP is marked and not preselected, and the form says who can change that", async ({ page }) => {
   const dialog = await open(page, `for (const r of db.cloud) if (r.type === "NETWORK" && r.name === "net-private") r.data.network.dhcp = true`)
   await expect(dialog.getByRole("status").filter({ hasText: "Every network of this project hands out addresses by DHCP" })).toContainText("ask the operator of this site")
   await expect(dialog.getByRole("button", { name: "Create a network for this cluster" })).toHaveCount(0)
   await dialog.getByRole("combobox", { name: "Network" }).click()
-  await expect(page.getByRole("option", { name: /net-private \(has DHCP: not for cluster nodes\)/ })).toHaveAttribute("data-disabled", "")
+  // Marked, not disabled: the flag is the form's guess and the server decides.
+  await expect(page.getByRole("option", { name: /net-private \(has DHCP: the create may be refused\)/ })).not.toHaveAttribute("data-disabled")
+})
+
+test("a network the form made that turns out to have DHCP is named, so that the tenant can delete it", async ({ page }) => {
+  const dialog = await open(page, `db.cloud = db.cloud.filter((r) => r.type !== "NETWORK"); window.__dhcpSite = true`)
+  await nameAndFlavor(page)
+  await dialog.getByRole("button", { name: "Create a network for this cluster" }).click()
+  const note = dialog.getByRole("status").filter({ hasText: "Every network of this project hands out addresses by DHCP" })
+  await expect(note).toContainText("That includes first-net, made just now")
+  await expect(note).toContainText("ask the operator of this site")
+  await expect(dialog.getByRole("combobox", { name: "Network" })).not.toContainText("first-net")
 })

@@ -98,43 +98,66 @@ func TestAdoptProviderOffersVersion(t *testing.T) {
 }
 
 // Stage 10 offers the BOM's Kubernetes version when its node image is published on the cluster's nodes, and says on
-// its item which nodes lack it when it is not.
+// its item which nodes lack it when it is not. A Proxmox that does not list its templates is a warning on the item:
+// the providers are registered without the version and the run goes on. A version is offered once: a run that finds
+// it in status.kubernetesOffered leaves the provider's versions alone, so one the operator removed stays removed.
 func TestRegisterOffersPublishedVersion(t *testing.T) {
 	cur, _ := Current()
+	v := cur.Kubernetes.Version
 	for _, tc := range []struct {
-		name      string
-		published bool
-		state     string
-	}{{"published", true, "done"}, {"staged", false, "warn"}} {
+		name                 string
+		published, before    bool
+		unreadable           bool
+		state, line, message string
+		recorded             bool
+	}{
+		{name: "published", published: true, state: "done", line: "pve1=9101,pve2=9102,pve3=9103", message: "is offered", recorded: true},
+		{name: "staged", state: "warn", message: "pve1, pve2, pve3"},
+		{name: "unreadable", published: true, unreadable: true, state: "warn", message: "did not list its templates"},
+		{name: "offered before", published: true, before: true, state: "done", message: "offers a version once", recorded: true},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := newPlatform(t, RunApply)
 			p.only(stageRegister)
 			for i, n := range []string{"pve1", "pve2", "pve3"} {
 				p.pve.templates = append(p.pve.templates, nodeImage(t, n, 9101+i, tc.published))
 			}
+			p.pve.noVMList = tc.unreadable
+			if tc.before {
+				p.mutate(func(_ *Run, in *Installation, _ *Secrets) { in.Status.KubernetesOffered = []string{v} })
+			}
 			if end := p.once(); end != "complete" {
 				t.Fatalf("end %s %+v", end, p.stage(stageRegister))
 			}
-			got := str(p.registers[0], "config", "cluster", "versions", cur.Kubernetes.Version)
+			_, in, _ := p.state.snapshot()
+			if len(p.registers) != 2 || in.Status.Providers == nil {
+				t.Fatalf("%d providers registered, status %+v", len(p.registers), in.Status.Providers)
+			}
+			got := str(p.registers[0], "config", "cluster", "versions", v)
 			it := item(p.stage(stageRegister), "kubernetes-version")
-			if it == nil || it.State != tc.state {
-				t.Fatalf("item %+v", it)
+			if it == nil || it.State != tc.state || !strings.Contains(it.Message, tc.message) || got != tc.line {
+				t.Fatalf("offered %q, item %+v", got, it)
 			}
-			if tc.published && got != "pve1=9101,pve2=9102,pve3=9103" {
-				t.Fatalf("offered %q", got)
-			}
-			if !tc.published && (got != "" || !strings.Contains(it.Message, "pve1, pve2, pve3")) {
-				t.Fatalf("offered %q, item %q", got, it.Message)
+			if want := map[bool][]string{true: {v}}[tc.recorded]; !reflect.DeepEqual(in.Status.KubernetesOffered, want) {
+				t.Fatalf("status.kubernetesOffered %v, want %v", in.Status.KubernetesOffered, want)
 			}
 		})
 	}
 }
 
+// An installation with no machine and no published image names no node: the message still reads as a sentence.
+func TestNodesText(t *testing.T) {
+	if NodesText(nil) != "any node" || NodesText([]string{"pve1", "pve2"}) != "pve1, pve2" {
+		t.Fatalf("%q, %q", NodesText(nil), NodesText([]string{"pve1", "pve2"}))
+	}
+}
+
 // Stage 10 applies spec.tenants.attach to both providers once: not without a choice, not again when it was applied,
-// and again at the next run when a provider could not take it.
+// and again at the next run when a provider could not take it. An attach that fails (failed names the provider) is a
+// warning on that provider's item: the other provider is still tried, both stay registered and the run completes.
 func TestRegisterAppliesAttachChoice(t *testing.T) {
 	type call struct{ service, choice, actor string }
-	run := func(t *testing.T, spec, applied string, done bool) ([]call, string, Stage) {
+	run := func(t *testing.T, spec, applied string, done bool, failed string) ([]call, string, Stage) {
 		t.Helper()
 		p := newPlatform(t, RunApply)
 		p.only(stageRegister)
@@ -144,7 +167,10 @@ func TestRegisterAppliesAttachChoice(t *testing.T) {
 				t.Errorf("installation %q", installation)
 			}
 			calls = append(calls, call{service, choice, actor})
-			return done, "note " + service, nil
+			if service == failed {
+				return true, "", fmt.Errorf("the database is away")
+			}
+			return done || (failed == "" && service == "svc-kamaji" && spec == "all" && applied == "none"), "note " + service, nil
 		}
 		p.mutate(func(r *Run, in *Installation, _ *Secrets) {
 			r.RequestedBy, in.Spec.Tenants.Attach, in.Status.TenantsAttach = "admin-1", spec, applied
@@ -153,6 +179,9 @@ func TestRegisterAppliesAttachChoice(t *testing.T) {
 			t.Fatalf("end %s %+v", end, p.stage(stageRegister))
 		}
 		_, in, _ := p.state.snapshot()
+		if in.Status.Providers == nil || in.Status.Providers.Kubernetes != "svc-kamaji" || in.Status.Providers.Database != "svc-dbaas" {
+			t.Fatalf("providers not recorded: %+v", in.Status.Providers)
+		}
 		return calls, in.Status.TenantsAttach, p.stage(stageRegister)
 	}
 	both := func(choice string) []call {
@@ -161,24 +190,43 @@ func TestRegisterAppliesAttachChoice(t *testing.T) {
 	for _, tc := range []struct {
 		spec, applied string
 		done          bool
+		failed        string
 		calls         []call
 		recorded      string
 	}{
-		{"", "", true, nil, ""},                                     // an install from before the choice: nothing is touched
-		{AttachNone, "", true, nil, ""},                             // none is what a new provider row already is
-		{AttachAll, "", true, both(AttachAll), AttachAll},           // a first install
-		{AttachNew, "", true, both(AttachNew), AttachNew},           //
-		{AttachAll, AttachAll, true, nil, AttachAll},                // an apply after it: projects detached since stay detached
-		{AttachNone, AttachAll, true, both(AttachNone), AttachNone}, // the operator took the choice back
-		{AttachAll, AttachNew, false, both(AttachAll), AttachNew},   // a provider could not take it: tried again next run
+		{"", "", true, "", nil, ""},                                            // an install from before the choice: nothing is touched
+		{AttachNone, "", true, "", nil, ""},                                    // none is what a new provider row already is
+		{AttachAll, "", true, "", both(AttachAll), AttachAll},                  // a first install
+		{AttachNew, "", true, "", both(AttachNew), AttachNew},                  //
+		{AttachAll, AttachAll, true, "", nil, AttachAll},                       // an apply after it: projects detached since stay detached
+		{AttachNone, AttachAll, true, "", both(AttachNone), AttachNone},        // the operator took the choice back
+		{AttachAll, AttachNew, false, "", both(AttachAll), AttachNew},          // a provider could not take it: tried again next run
+		{AttachAll, AttachNone, false, "", both(AttachAll), AttachNone},        // one took it, the other did not: not recorded, both again next run
+		{AttachAll, AttachNew, true, "svc-kamaji", both(AttachAll), AttachNew}, // an attach error: a warning, the other provider is still tried
 	} {
-		t.Run(fmt.Sprintf("%s after %s done=%v", tc.spec, tc.applied, tc.done), func(t *testing.T) {
-			calls, recorded, stage := run(t, tc.spec, tc.applied, tc.done)
+		t.Run(fmt.Sprintf("%s after %s done=%v failed=%s", tc.spec, tc.applied, tc.done, tc.failed), func(t *testing.T) {
+			calls, recorded, stage := run(t, tc.spec, tc.applied, tc.done, tc.failed)
 			if !reflect.DeepEqual(calls, tc.calls) || recorded != tc.recorded {
 				t.Fatalf("calls %v, recorded %q", calls, recorded)
 			}
-			if it := item(stage, "attach:svc-kamaji"); len(tc.calls) > 0 && (it == nil || it.Message != "note svc-kamaji" || (it.State == "done") != tc.done) {
-				t.Fatalf("item %+v", it)
+			if len(tc.calls) == 0 {
+				return
+			}
+			k8s, db := item(stage, "attach:svc-kamaji"), item(stage, "attach:svc-dbaas")
+			if k8s == nil || db == nil {
+				t.Fatalf("items %+v", stage.Items)
+			}
+			switch {
+			case tc.failed != "":
+				if k8s.State != "warn" || !strings.Contains(k8s.Message, "the database is away") || !strings.Contains(k8s.Message, "next apply") || db.State != "done" {
+					t.Fatalf("items %+v, %+v", k8s, db)
+				}
+			case tc.applied == AttachNone: // the partial case: the Kubernetes provider took it
+				if k8s.State != "done" || db.State != "warn" {
+					t.Fatalf("items %+v, %+v", k8s, db)
+				}
+			case k8s.Message != "note svc-kamaji" || (k8s.State == "done") != tc.done:
+				t.Fatalf("item %+v", k8s)
 			}
 		})
 	}

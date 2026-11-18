@@ -25,6 +25,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platformlife"
 	"github.com/mutex-solutions/proxcloud/internal/providerattach"
+	"github.com/mutex-solutions/proxcloud/internal/templateupdates"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
@@ -73,7 +74,7 @@ func (h *Handler) platformOfferVersion(w http.ResponseWriter, r *http.Request) {
 	line, missing := platformlife.NodeImageLine(bom.BOM, in, rows)
 	if line == "" {
 		platformErr(w, http.StatusConflict, "node_image_unpublished", fmt.Sprintf("No node image of Kubernetes %s is published on %s. "+
-			"Publish %s there (Template updates, Publish on all nodes), then offer the version again.", version, strings.Join(missing, ", "), bom.Kubernetes.NodeImage.Tag),
+			"Publish %s there (Template updates, Publish on all nodes), then offer the version again.", version, platformlife.NodesText(missing), bom.Kubernetes.NodeImage.Tag),
 			map[string]any{"version": version, "missingNodes": missing})
 		return
 	}
@@ -97,7 +98,11 @@ func (h *Handler) platformOfferVersion(w http.ResponseWriter, r *http.Request) {
 			err = h.repo.ReplaceDoc(ctx, externalServiceCollection, id, row)
 		}
 		after = providerVersions(row)
-		return err
+		if err != nil {
+			return err
+		}
+		// A run offers a version once: with this, an apply does not add again a version removed after this call.
+		return h.platform.MarkKubernetesOffered(ctx, in.ID, version)
 	})
 	if httpx.WriteError(w, err) {
 		return
@@ -193,9 +198,13 @@ func (h *Handler) PlatformAttach(ctx context.Context, installationID, serviceID,
 // platformAttachEvent is the audit entry of a change PlatformAttach made for a run.
 func platformAttachEvent(actor string, es *externalservice.ExternalService, action, installationID, choice string) audit.AuditEvent {
 	ev := audit.AdminEvent(actor, actor)
+	ev.ResourceMetadata = map[string]any{"platformInstallationId": installationID, "attach": choice}
+	if strings.HasPrefix(actor, templateupdates.PlatformRunActor) { // a run without a requester: the system's change, not an admin's
+		ev = audit.SystemEvent()
+		ev.ResourceMetadata = map[string]any{"platformInstallationId": installationID, "attach": choice, "requestedBy": actor}
+	}
 	ev.EventContext = audit.ContextPlatform
 	ev.Action, ev.ResourceType, ev.ResourceID, ev.ResourceDisplayName = action, "EXTERNAL_SERVICE", es.ID, es.Name
-	ev.ResourceMetadata = map[string]any{"platformInstallationId": installationID, "attach": choice}
 	ev.Outcome = audit.OutcomeSuccess
 	return ev
 }

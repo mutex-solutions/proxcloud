@@ -138,6 +138,10 @@ type Status struct {
 	// TenantsAttach is the spec.tenants.attach the register stage applied last ("" = none was): a run acts on the
 	// choice only when it differs, so an apply never undoes what the operator changed on a provider since.
 	TenantsAttach string `json:"tenantsAttach,omitempty"`
+	// KubernetesOffered are the Kubernetes versions a run or POST …/kubernetes-version offered on the Kubernetes
+	// provider (or found there). A run offers a version once: one the operator removed from the provider since is not
+	// added again by an apply, only by the route.
+	KubernetesOffered []string `json:"kubernetesOffered,omitempty"`
 }
 
 // BOMRef names an embedded BOM by release and file sha256.
