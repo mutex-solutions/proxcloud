@@ -18,11 +18,13 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/client"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/providers"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/paging"
 	"github.com/mutex-solutions/proxcloud/internal/platform/rbac"
@@ -387,6 +389,43 @@ func allowedWhileDisabled(action string, data map[string]any) bool {
 	return false
 }
 
+// createRecorder is the writer of one cloud create: it keeps the status answered and the error behind the answer
+// (httpx.WriteError tells it), for cloudCreateFailed.
+type createRecorder struct {
+	middleware.WrapResponseWriter
+	err error
+}
+
+func (c *createRecorder) Failed(err error) { c.err = err }
+
+// cloudCreateFailed writes the audit event of a create that was refused or failed, whatever the resource type: without
+// it only a create that worked leaves a trace, and an operator cannot see that a tenant was turned away, nor why. body
+// is the request, read for the type and the name alone (the rest may hold secrets). errorMessage is what the tenant
+// was answered; internalReason is the backend's own error, which only an operator's query returns (audit.Filter).
+func (h *Handler) cloudCreateFailed(u *user.User, p *Project, rec *createRecorder, body []byte) {
+	status := rec.Status()
+	if status < http.StatusBadRequest {
+		return
+	}
+	var req providers.CreateRequest
+	_ = json.Unmarshal(body, &req)
+	ev := newCloudResourceEvent(u, p, "CLOUD_RESOURCE_CREATE", "", &cloud.CloudResource{Type: req.Type, Data: req.Data})
+	delete(ev.ResourceMetadata, "cacheId")
+	ev.ResourceMetadata["httpStatus"] = status
+	ev.Outcome, ev.ErrorMessage = audit.OutcomeFailure, http.StatusText(status)
+	var he *httpx.HTTPError
+	switch {
+	case errors.As(rec.err, &he):
+		ev.ErrorMessage = he.Msg
+		if he.Cause != nil {
+			ev.InternalReason = he.Cause.Error()
+		}
+	case rec.err != nil:
+		ev.ErrorMessage, ev.InternalReason = "internal.error", rec.err.Error()
+	}
+	h.audit.LogAsync(ev)
+}
+
 func (h *Handler) cloudCreate(w http.ResponseWriter, r *http.Request) {
 	u, ok := h.principal(w, r)
 	if !ok {
@@ -396,6 +435,13 @@ func (h *Handler) cloudCreate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// From here on a create that does not succeed leaves a FAILURE audit event (cloudCreateFailed). The first MiB of
+	// the body is kept for its type and name; a longer body still reaches the legs below whole.
+	head, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(head), r.Body))
+	rec := &createRecorder{WrapResponseWriter: middleware.NewWrapResponseWriter(w, r.ProtoMajor)}
+	defer func() { h.cloudCreateFailed(u, proj, rec, head) }()
+	w = rec
 	if err := refuseNewUsage(proj); err != nil {
 		h.fail(w, err)
 		return
