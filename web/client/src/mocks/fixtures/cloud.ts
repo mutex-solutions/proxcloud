@@ -193,6 +193,7 @@ export function seedCloudResources(): CloudResource[] {
         group("workers", 2, 1, { code: "not_joined", since: minutesAgo(42), machines: 1, attention: true }),
         group("batch", 3, 0, { code: "no_capacity", since: minutesAgo(8), machines: 2, attention: true }),
         group("build", 1, 0, { code: "creating_vm", since: minutesAgo(3), machines: 1, attention: false }),
+        group("edge", 1, 0, { code: "not_joined", since: minutesAgo(4), machines: 1, attention: false }),
       ],
     }),
     k8s("pc-c-nocp", "sandbox", {
