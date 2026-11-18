@@ -711,6 +711,51 @@ Not verified:
 - The Helm download itself beyond its size and sha256, which were taken from
   `get.helm.sh` on 2026-11-16.
 
+## Release notes
+
+The body of a GitHub Release is `docs/releases/vX.Y.Z.md` when the tag has that
+file (`docker.yml`, job `release`, step "Assemble release notes"). Without the
+file the step falls back to the `## [X.Y.Z]` section of `CHANGELOG.md`, as every
+release up to `v0.8.2` did. An empty file, or one over 120000 characters, fails
+the step, and no Release is created. GitHub's generated commit and pull request
+list (`--generate-notes`) follows the body either way.
+
+`CHANGELOG.md` stays the complete record: every entry, with its detail, its
+file names and what was and was not verified. The release notes are the page a
+person reads in five minutes, and must say nothing the changelog section does
+not. Write the file in the release pull request, with the changelog section:
+
+1. Start with one or two sentences that say what the release is. No `#` title: the Release page has one.
+2. Then `##` sections, in this order, each only when it has content: Highlights, Upgrade, What changed, Verified on a lab, Not verified, Known issues. Highlights and Upgrade are required.
+3. Highlights: three to seven bullets, a bold lead of two to five words, then the effect a user sees. No implementation detail.
+4. Upgrade: numbered steps with the commands in fenced code blocks, and a table "If you run ... / Do ..." for steps that depend on the site.
+5. What changed: `###` groups by area (Operator console, Customer console, Managed services, Kubernetes, Networking, Security, Installer), bullets of one or two short sentences, with a link to the guide for the detail.
+6. Known issues: for each, what happens, who is affected and what to do.
+7. Never drop an upgrade step, a known issue or a "not verified" statement to make the page shorter.
+8. No hard line wraps: one paragraph or one list item is one source line. A Release body renders every newline as a line break, which is what made the changelog sections hard to read there.
+9. Plain words, sentences of about 30 words at most, code and field names in backticks, no finding ids and no `file:line`.
+10. Links are absolute and name the release's tag, since a Release body has no relative base: `https://github.com/mutex-solutions/proxcloud/blob/vX.Y.Z/docs/...`. End with a line that links the changelog section and the guides.
+
+`.github/scripts/tests/test_release_notes.py` (in `test.yml`, job `installer`)
+checks every `docs/releases/v*.md`: its version has a section in `CHANGELOG.md`,
+it has Highlights and Upgrade, no line continues the paragraph or list item
+before it, and every `blob/<tag>/<path>` link names the file's own tag and a path
+that exists in the tree. It does not check that an anchor exists, that the path
+exists at the tag (the tag is cut later), or that the text agrees with the
+changelog: review does.
+
+To see what the Release page will show, render the file as GitHub renders a
+Release body and read the HTML (no `<br>` inside a paragraph or a list item):
+
+```sh
+gh api -X POST /markdown -f mode=gfm -f context=mutex-solutions/proxcloud -F text=@docs/releases/vX.Y.Z.md
+```
+
+The Releases `v0.8.0`, `v0.8.1` and `v0.8.2` were created from their changelog
+sections. Their files are in `docs/releases/`, written afterwards; a published
+Release is changed by hand (`gh release edit vX.Y.Z --notes-file docs/releases/vX.Y.Z.md`
+replaces the whole body, the generated list included), not by a workflow.
+
 ## Current release-gate limitations
 
 The workflows currently **do not** provide a single atomic release gate:

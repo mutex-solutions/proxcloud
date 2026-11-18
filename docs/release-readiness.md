@@ -178,6 +178,9 @@ are not evidence of publication or installation. The releases `v0.5.1`, `v0.5.2`
    strict stable/RC tags from the environment: RCs use
    `--prerelease --latest=false`, stable releases use `--latest`. Notes and release
    creation use only the validated tag/version and fixed policy flags.
+   The release pull request holds `docs/releases/vX.Y.Z.md`, the Release body,
+   next to the complete `CHANGELOG.md` section
+   ([release notes](ci-release.md#release-notes)).
 4. Require successful tests for the exact release commit and verify **all** image
    and chart publication jobs, package visibility and anonymous pulls. The current
    image and Helm workflows are independent; image completion alone is not chart

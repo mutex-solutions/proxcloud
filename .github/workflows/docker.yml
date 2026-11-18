@@ -197,12 +197,31 @@ jobs:
           GITHUB_REF_NAME: ${{ github.ref_name }}
         run: python3 .github/scripts/release_policy.py >> "$GITHUB_OUTPUT"
 
-      - name: Assemble release notes from CHANGELOG
+      - name: Assemble release notes
         env:
           RELEASE_VERSION: ${{ steps.policy.outputs.version }}
         run: |
           set -euo pipefail
           version="$RELEASE_VERSION"
+          notes="docs/releases/v${version}.md"
+          # The release notes written for people (docs/ci-release.md, "Release notes") are
+          # the body when the tag has them. A Release body keeps every newline as a line
+          # break, which is why the hard-wrapped CHANGELOG.md section is only the fallback.
+          if [ -f "$notes" ]; then
+            if ! grep -q '[^[:space:]]' "$notes"; then
+              echo "::error file=$notes::the release notes file is empty"
+              exit 1
+            fi
+            # GitHub refuses a body over 125000 characters, and --generate-notes adds to it.
+            chars="$(LC_ALL=C.UTF-8 wc -m < "$notes")"
+            if [ "$chars" -gt 120000 ]; then
+              echo "::error file=$notes::$chars characters; a Release body takes at most 120000 here"
+              exit 1
+            fi
+            cp "$notes" /tmp/notes.md
+            echo "using $notes as the release body"
+            exit 0
+          fi
           # Pull the "## [<version>] …" section out of CHANGELOG.md (empty if absent).
           # Literal index() matching avoids awk's bracket-regex escaping pitfalls; the
           # section ends at the next "## " header or the trailing "[link]:" definitions.
@@ -212,9 +231,9 @@ jobs:
             flag { print }
           ' CHANGELOG.md > /tmp/notes.md || true
           if [ -s /tmp/notes.md ]; then
-            echo "using the CHANGELOG.md section for $version as the release body"
+            echo "no $notes: using the CHANGELOG.md section for $version as the release body"
           else
-            echo "no CHANGELOG.md section for $version — notes will be auto-generated only"
+            echo "no $notes and no CHANGELOG.md section for $version: notes will be auto-generated only"
             : > /tmp/notes.md
           fi
 
@@ -232,7 +251,7 @@ jobs:
             echo "release $RELEASE_TAG already exists — nothing to do."
             exit 0
           fi
-          # The CHANGELOG body (if any) is pre-pended to GitHub's auto-generated
+          # The body (if any) is pre-pended to GitHub's auto-generated
           # commit/PR notes (--generate-notes).
           gh release create "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
