@@ -23,7 +23,8 @@ import { hasPermission } from "@/lib/permissions"
 import { cn } from "@/lib/utils"
 import { CopyBlock, ErrorNote, LINK, errMsg, setupStatusQuery } from "@/pages/setup/common"
 import { CheckStep, IdentitiesStep, ReviewStep, SettingsStep } from "./InstallSteps"
-import { PLATFORM_KEY, STAGE_TITLE, codeAction, errCode, isConflict, runActive, type Installation, type Run, type Stage } from "./model"
+import { ATTACH_LABEL, PLATFORM_KEY, STAGE_TITLE, codeAction, errCode, isConflict, runActive, type Installation, type Run, type Stage } from "./model"
+import { KubernetesVersion } from "./Tenants"
 
 const POLL_MS = 3000
 const INSTALL_SWITCH = "./proxcloud-up.sh install --managed-services"
@@ -324,30 +325,38 @@ type ProviderRow = { id: string; name: string; config?: Record<string, any> }
 
 // One registered provider with what a tenant still cannot use of it. row is the provider as /admin/service lists it;
 // without one (the list is being read, or the row is gone) only the link is shown.
-function ProviderItem({ id, label, kind, row }: { id: string; label: string; kind: "kubernetes" | "database"; row?: ProviderRow }) {
+function ProviderItem({ id, label, kind, row, installation, canManage }: {
+  id: string; label: string; kind: "kubernetes" | "database"; row?: ProviderRow; installation: Installation; canManage: boolean
+}) {
   const to = `/system/cloud-providers/${id}`
   const versions = Object.keys(row?.config?.cluster?.versions ?? {})
+  const applied = installation.status.tenantsAttach
   return (
     <li className="grid gap-1">
       <Link to={to} className="underline underline-offset-4">{label}</Link>
       {row && kind === "kubernetes" ? (
         versions.length ? <span><State state="ok" className="mr-2" />Offers Kubernetes {versions.join(", ")}.</span> : (
-          <span>
-            <State state="warn" className="mr-2" />
-            Offers no Kubernetes version yet, so no tenant can create a cluster. The install does not set one.{" "}
-            <Link to="/system/template-updates" className="underline underline-offset-4">Publish a Kubernetes node image</Link>, then{" "}
-            <Link to={to} className="underline underline-offset-4">enter its version on the provider's Connection tab</Link>.
-          </span>
+          <>
+            <span><State state="warn" className="mr-2" />Offers no Kubernetes version yet, so no tenant can create a cluster.</span>
+            <KubernetesVersion installation={installation} canManage={canManage} />
+          </>
         )
       ) : null}
       {row ? (
         row.config?.attachToNewProjects === false ? (
           <span>
             <State state="warn" className="mr-2" />
-            New projects do not get this provider, and the install attached it to no project.{" "}
-            <Link to={to} className="underline underline-offset-4">Attach it on the provider's Projects tab</Link>.
+            New projects do not get this provider{applied === "all" || applied === "new" ? "" : ", and the install attached it to no project"}.{" "}
+            Choose who gets it in step 1 below and press “Apply this release”, or{" "}
+            <Link to={to} className="underline underline-offset-4">attach it on the provider's Projects tab</Link>.
           </span>
-        ) : <span><State state="ok" className="mr-2" />New projects get this provider. Projects that existed before are attached on its Projects tab.</span>
+        ) : (
+          <span>
+            <State state="ok" className="mr-2" />New projects get this provider.{" "}
+            {applied === "all" ? "The last run that applied the settings also started attaching every project that existed; its progress is on the provider's Projects tab."
+              : "Projects that existed before are attached on its Projects tab."}
+          </span>
+        )
       ) : null}
     </li>
   )
@@ -372,6 +381,7 @@ function Ready({ installation, live, loading, error, canManage, providers }: {
   const expires = installation.status.clusters?.[0]?.argocdTokenExpiresAt
   const days = expires ? Math.floor((new Date(expires).getTime() - Date.now()) / 86_400_000) : undefined
   const vmid = installation.status.seed?.vmid
+  const choice = installation.spec.tenants?.attach ?? "none"
   return (
     <Section
       title={`Managed services “${installation.name}”`}
@@ -431,12 +441,16 @@ function Ready({ installation, live, loading, error, canManage, providers }: {
 
       <div className="grid gap-1 text-sm">
         <h3 className="font-semibold">Providers</h3>
-        <p className="text-muted-foreground">What the install registered for tenants. Both are created held back.</p>
+        <p className="text-muted-foreground">
+          What the install registered for tenants, and what a tenant can use of it now. The settings say who gets them: {ATTACH_LABEL[choice].toLowerCase()}
+          {choice !== (installation.status.tenantsAttach ?? "none") ? ". That is not applied yet: press “Apply this release” below." : "."}
+        </p>
         <ul aria-label="Providers" className="grid list-disc gap-3 pl-5">
-          {p?.kubernetes ? <ProviderItem id={p.kubernetes} label={`${installation.name} Kubernetes`} kind="kubernetes" row={providers.find((s) => s.id === p.kubernetes)} /> : null}
-          {p?.database ? <ProviderItem id={p.database} label={`${installation.name} Databases`} kind="database" row={providers.find((s) => s.id === p.database)} /> : null}
+          {p?.kubernetes ? <ProviderItem id={p.kubernetes} label={`${installation.name} Kubernetes`} kind="kubernetes" row={providers.find((s) => s.id === p.kubernetes)} installation={installation} canManage={canManage} /> : null}
+          {p?.database ? <ProviderItem id={p.database} label={`${installation.name} Databases`} kind="database" row={providers.find((s) => s.id === p.database)} installation={installation} canManage={canManage} /> : null}
           {!p?.kubernetes && !p?.database ? <li>No provider is recorded for this installation.</li> : null}
         </ul>
+        {installation.schedulerNote ? <p aria-label="Job scheduler"><State state="warn" className="mr-2" />{installation.schedulerNote}</p> : null}
       </div>
 
       <div className="grid gap-1.5 text-sm">
@@ -476,17 +490,13 @@ function Ready({ installation, live, loading, error, canManage, providers }: {
       <div className="grid gap-2 text-sm">
         <h3 className="font-semibold">Next steps</h3>
         <ol className="grid list-decimal grid-cols-1 gap-2 pl-5">
-          <li>
-            Publish a Kubernetes node image for tenants in <Link to="/system/template-updates" className="underline underline-offset-4">Template updates</Link>,
-            then enter its version on the Kubernetes provider. Until then tenants cannot create a cluster.
-          </li>
           <li className="min-w-0">
             Back up the seed VM. Run this as root on one node, with your backup store:
             <CopyBlock text={`pvesh create /cluster/backup --vmid ${vmid ?? "<seed VMID>"} --storage <backup store> --schedule daily --mode snapshot --compress zstd --prune-backups keep-daily=7`} label="backup command" />
             Use a backup store that is not the boot, ISO or import store of the settings, and that no API token other than your own can read: the backup holds the seed's credentials.
             This page cannot see whether a backup job exists.
           </li>
-          <li>Attach the two providers to projects on their pages under Cloud providers, and add price rules for clusters and databases.</li>
+          <li>Add price rules for clusters and databases: usage that matches no rule is billed as zero.</li>
         </ol>
       </div>
       <Alert>

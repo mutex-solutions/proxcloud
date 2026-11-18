@@ -44,6 +44,7 @@ type Spec struct {
 	Seed      SeedSpec      `json:"seed"`
 	Clusters  []ClusterSpec `json:"clusters"`
 	NodeImage NodeImage     `json:"nodeImage"`
+	Tenants   Tenants       `json:"tenants,omitzero"`
 	// Sandbox is where the sandbox service will run, a choice the install offers once that service ships: placement
 	// shared (a node group of the platform cluster, the homelab choice) or separate (a cluster of its own). No release
 	// builds it yet, so Validate refuses the block; a spec without it means "no sandbox service" and keeps meaning that,
@@ -154,6 +155,13 @@ type Status struct {
 	Components        []ComponentStatus `json:"components,omitempty"`
 	Volumes           []Volume          `json:"volumes,omitempty"`
 	Providers         *ProviderIDs      `json:"providers,omitempty"`
+	// TenantsAttach is the spec.tenants.attach the register stage applied last ("" = none was): a run acts on the
+	// choice only when it differs, so an apply never undoes what the operator changed on a provider since.
+	TenantsAttach string `json:"tenantsAttach,omitempty"`
+	// KubernetesOffered are the Kubernetes versions a run or POST …/kubernetes-version offered on the Kubernetes
+	// provider (or found there). A run offers a version once: one the operator removed from the provider since is not
+	// added again by an apply, only by the route.
+	KubernetesOffered []string `json:"kubernetesOffered,omitempty"`
 }
 
 // BOMRef names an embedded BOM by release and file sha256.
@@ -359,6 +367,12 @@ func (in *Installation) Validate() error {
 	// store from the provider, and the preflight checks the mint role on the provider's store: the message names it.
 	if s.Storage.Import != "" && s.Storage.Import == s.Storage.Boot {
 		bad("spec.storage.import %q is the boot store: use another store with import content, the one the provider's importStorage names (an empty spec.storage.import takes it)", s.Storage.Import)
+	}
+
+	switch s.Tenants.Attach {
+	case "", AttachAll, AttachNew, AttachNone:
+	default:
+		bad("spec.tenants.attach %q is not all, new or none", s.Tenants.Attach)
 	}
 
 	n := s.Network

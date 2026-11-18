@@ -120,39 +120,84 @@ test("from an empty form to a failed run, then Retry and Cancel", async ({ page 
   expect(created.body.spec.clusters[0].nodeGroups.map((g: { name: string; count: number }) => [g.name, g.count])).toEqual([["system", 1], ["kamaji", 1], ["dbaas", 1]])
   await shot(page, "draft")
 
-  // The script is the managed one for the saved stores.
-  await expect(page.getByLabel("identities script", { exact: true })).toContainText("pveum user token add 'capmox@pve' 'capi'")
-  expect((await calls(page, "GET", "/admin/setup/proxmox-script")).at(-1)!.path).toMatch(/managedServices=true&bootStorage=local-zfs&isoStorage=local/)
-  expect((await calls(page, "GET", "/admin/setup/proxmox-script")).at(-1)!.path).toMatch(/importStorage=/) // the API filled the provider's import store
+  // The first save says what it wrote into the provider, so that nobody adds the blocked networks by hand.
+  await expect(page.getByRole("status").filter({ hasText: "The save also changed the provider" })).toContainText("10.90.0.5/32")
+  // A corrected address: the entry the earlier save added for the old one is taken off, and the page says so.
+  for (const [address, gone] of [["10.90.0.6", "10.90.0.5/32"], ["10.90.0.5", "10.90.0.6/32"]]) {
+    await expect(page.getByRole("button", { name: "Save settings" })).toBeEnabled() // the save before it is done: the form was read again
+    await page.getByLabel("Seed address", { exact: true }).fill(address)
+    await page.getByRole("button", { name: "Save settings" }).click()
+    await expect(page.getByRole("status").filter({ hasText: "The save also changed the provider" })).toContainText(`need them (an earlier save had added them): ${gone}`)
+  }
+
+  // One command as root for this installation: its stores come from the settings, and it prints no secret.
+  const id = "pi-00000001" // the mock numbers its installations
+  await expect(page.getByLabel("root command", { exact: true })).toContainText(`PC_INSTALL='${id}'`)
+  await expect(page.getByLabel("root command", { exact: true })).toContainText("STOP: the token capmox@pve!capi exists on this cluster")
+  await expect(page.getByLabel("root command", { exact: true })).toContainText("'/storage/local-zfs'")
+  expect((await calls(page, "GET", "/admin/setup/proxmox-script")).at(-1)!.path).toMatch(new RegExp(`installation=${id}`))
+  expect((await calls(page, "GET", "/admin/setup/proxmox-script")).at(-1)!.path).not.toMatch(/bootStorage|managedServices/)
 
   // Check fails until both secrets are stored, and says what to do.
   await page.getByRole("button", { name: "Check", exact: true }).click()
   await expect(page.getByRole("status").filter({ hasText: "checks failed" })).toBeVisible()
-  await expect(page.getByRole("list", { name: "What to do for each failed check" })).toContainText("Paste both token secrets in step 2.")
+  await expect(page.getByRole("list", { name: "What to do for each failed check" })).toContainText("Run the root command of step 2 on a node and paste the PC-ENROLL line it prints.")
   await expectAccessible(page)
   await shot(page, "check-failed")
 
-  // The two secrets are write-only: sent once, then gone from the page.
-  const capi = page.getByLabel("Secret of capmox@pve!capi")
-  await expect(capi).toHaveAttribute("type", "password")
-  await expect(capi).toHaveAttribute("autocomplete", "new-password") // not a login: no password manager offer
-  await capi.fill("not-a-secret")
-  await expect(page.getByText(/Not a Proxmox token secret/)).toBeVisible()
-  await expect(page.getByRole("button", { name: "Store the secrets" })).toBeDisabled()
-  await capi.fill(CAPI_SECRET)
-  await page.getByLabel("Secret of csi@pve!csi").fill(CSI_SECRET)
-  await page.getByRole("button", { name: "Store the secrets" }).click()
-  await expect(page.getByText("Stored. It is never shown again; paste a new one to replace it.")).toHaveCount(2)
-  await expect(capi).toHaveValue("")
-  await expect(page.getByLabel("Secret of csi@pve!csi")).toHaveValue("")
+  // The command's last line carries both secrets. The page checks it before it is sent: a bare secret, a line cut
+  // short and a line of another installation are refused with what is wrong, and nothing is sent.
+  const enroll = (inst: string, at: number, capi = CAPI_SECRET, csi = CSI_SECRET) => `PC-ENROLL:${Buffer.from(`1:${inst}:${at}:${capi}:${csi}`).toString("base64")}`
+  const line = page.getByLabel("The PC-ENROLL line the command printed")
+  const store = page.getByRole("button", { name: "Store the secrets", exact: true })
+  await expect(line).toHaveAttribute("type", "password")
+  await expect(line).toHaveAttribute("autocomplete", "new-password") // not a login: no password manager offer
+  await expect(store).toBeDisabled()
+  for (const [bad, says] of [
+    [CAPI_SECRET, /not the PC-ENROLL line the command prints/],
+    [enroll(id, 1795000000).slice(0, -40), /not the PC-ENROLL line the command prints/],
+    [enroll("pi-ffffffff", 1795000000), /of another installation/],
+  ] as const) {
+    await line.fill(bad)
+    await expect(page.locator("#enroll-line-state")).toHaveText(says)
+    await expect(store).toBeDisabled()
+  }
+  // As a terminal wraps it: white space inside the line is dropped.
+  const good = enroll(id, 1795000000)
+  await line.fill(`${good.slice(0, 50)} ${good.slice(50)}`)
+  await store.click()
+  await expect(page.getByRole("list", { name: "Stored token secrets" })).toContainText("capmox@pve!capi: stored. It is never shown again.")
+  await expect(page.getByRole("list", { name: "Stored token secrets" })).toContainText("csi@pve!csi: stored. It is never shown again.")
+  await expect(line).toHaveValue("")
   const [stored] = await calls(page, "PUT", /\/credentials$/)
-  expect(stored.body).toEqual({ capi: { tokenId: "capmox@pve!capi", secret: CAPI_SECRET }, csi: { tokenId: "csi@pve!csi", secret: CSI_SECRET } })
+  expect(stored.body).toEqual({ enroll: good })
   expect(await page.content()).not.toContain(CAPI_SECRET)
   expect(await page.content()).not.toContain(CSI_SECRET)
-  expect(await page.evaluate(() => JSON.stringify([{ ...localStorage }, { ...sessionStorage }]))).not.toContain(CAPI_SECRET)
+  expect(await page.content()).not.toContain(good)
+  expect(await page.evaluate(() => JSON.stringify([{ ...localStorage }, { ...sessionStorage }]))).not.toContain(good)
+  // With both secrets stored the command no longer stops on these tokens: they are this installation's.
+  await expect(page.getByLabel("root command", { exact: true })).not.toContainText("STOP: the token")
+
+  // The same line again is a replay: the API refuses it and the stored secrets stay.
+  await line.fill(good)
+  await store.click()
+  await expect(page.getByRole("alert").filter({ hasText: "The secrets were not stored" })).toContainText("was stored already")
+
+  // By hand, for a token made another way: the two fields are write-only as well.
+  await page.getByText("Enter the two secrets by hand instead").click()
+  const capi = page.getByLabel("Secret of capmox@pve!capi")
+  await expect(capi).toHaveAttribute("type", "password")
+  await capi.fill("not-a-secret")
+  await expect(page.getByText(/Not a Proxmox token secret/)).toBeVisible()
+  await expect(page.getByRole("button", { name: "Store these secrets" })).toBeDisabled()
+  await capi.fill(CAPI_SECRET)
+  await page.getByRole("button", { name: "Store these secrets" }).click()
+  await expect(capi).toHaveValue("")
+  expect((await calls(page, "PUT", /\/credentials$/)).at(-1)!.body).toEqual({ capi: { tokenId: "capmox@pve!capi", secret: CAPI_SECRET } })
+  expect(await page.content()).not.toContain(CAPI_SECRET)
 
   await page.getByRole("button", { name: "Check again" }).click()
-  await expect(page.getByRole("status").filter({ hasText: "Every check passed." })).toBeVisible()
+  await expect(page.getByRole("status").filter({ hasText: "No check failed. 1 warning does not stop the install" })).toBeVisible() // the scheduler row: the mock runs without it
 
   // Review, then Install: the first run of the mock fails at the seed's API.
   await expect(page.getByText("1 control plane machine and 3 worker machines in the pool")).toBeVisible()
@@ -247,12 +292,15 @@ test("the ready card: endpoints, the providers' gap, the platform kubeconfig and
   const providers = page.getByRole("list", { name: "Providers" })
   const k8s = providers.getByRole("listitem").filter({ hasText: "lab Kubernetes" })
   await expect(k8s).toContainText("Offers no Kubernetes version yet, so no tenant can create a cluster.")
-  await expect(k8s.getByRole("link", { name: "Publish a Kubernetes node image" })).toHaveAttribute("href", "/system/template-updates")
-  await expect(k8s.getByRole("link", { name: "enter its version on the provider's Connection tab" })).toHaveAttribute("href", /\/system\/cloud-providers\/svc-/)
-  await expect(k8s.getByRole("link", { name: "Attach it on the provider's Projects tab" })).toHaveAttribute("href", /\/system\/cloud-providers\/svc-/)
+  await expect(k8s).toContainText("The install imported the node image of Kubernetes v1.33.4 and did not publish it for tenants")
+  await expect(k8s.getByRole("link", { name: "Or do each step in Template updates" })).toHaveAttribute("href", "/system/template-updates")
+  await expect(k8s.getByRole("link", { name: "attach it on the provider's Projects tab" })).toHaveAttribute("href", /\/system\/cloud-providers\/svc-/)
   const dbs = providers.getByRole("listitem").filter({ hasText: "lab Databases" })
-  await expect(dbs).toContainText("New projects do not get this provider")
+  await expect(dbs).toContainText("New projects do not get this provider, and the install attached it to no project")
   await expect(dbs).not.toContainText("Kubernetes version")
+  // One row says what tenants miss without the job scheduler, with the command; nothing turns it on from here.
+  await expect(page.getByLabel("Job scheduler", { exact: true })).toContainText("a tenant cannot delete a project")
+  await expect(page.getByLabel("Job scheduler", { exact: true })).toContainText("./proxcloud-up.sh install --scheduler")
 
   // ArgoCD has no address: the exact commands, one pair for each cluster, each with its own kubeconfig file and port.
   await expect(page.getByLabel("platform ArgoCD commands", { exact: true })).toHaveText(
@@ -287,6 +335,69 @@ test("the ready card stops warning once the Kubernetes provider has a version an
   await expect(k8s).toContainText("New projects get this provider.")
   await expect(k8s).not.toContainText("no Kubernetes version")
   await expect(page.getByRole("list", { name: "Providers" }).getByRole("listitem").filter({ hasText: "lab Databases" })).toContainText("New projects do not get this provider")
+})
+
+// A green install is usable with one button: the node image the install imported is smoke-tested and published on
+// each node, and only then is its Kubernetes version added to the provider. Until then the card names each node.
+test("the ready card publishes the install's node image and offers its Kubernetes version", async ({ page }) => {
+  await open(page, "ready")
+  await recordCalls(page)
+  const k8s = page.getByRole("list", { name: "Providers" }).getByRole("listitem").filter({ hasText: "lab Kubernetes" })
+  const nodes = k8s.getByRole("list", { name: "Node image per node" })
+  await expect(nodes.getByRole("listitem").filter({ hasText: "pve1" })).toContainText("Not imported, waits its turn")
+  await expect(nodes.getByRole("listitem").filter({ hasText: "pve2" })).toContainText("Not imported, waits its turn")
+  // Asked before anything is published, the API offers nothing and names the nodes.
+  const refused = await page.evaluate(async (paths) => {
+    const { dispatch } = await import(/* @vite-ignore */ paths.router)
+    const { mockPlatform } = await import(/* @vite-ignore */ paths.state)
+    return dispatch(`/admin/platform/installations/${mockPlatform.installations[0].id}/kubernetes-version`, { method: "POST", body: {} })
+      .then(() => "ok", (e: { status: number; details?: { code?: string; missingNodes?: string[] } }) => `${e.status} ${e.details?.code} ${e.details?.missingNodes}`)
+  }, MOCK)
+  expect(refused).toBe("409 node_image_unpublished pve1,pve2")
+
+  await k8s.getByRole("button", { name: "Test, publish and offer Kubernetes v1.33.4" }).click()
+  await expect(k8s).toContainText("Offers Kubernetes v1.33.4.", { timeout: 20_000 })
+  await expect(page.getByText("Tenants can now create clusters with Kubernetes v1.33.4")).toBeVisible()
+  await expect(k8s).not.toContainText("no Kubernetes version")
+  const advances = await calls(page, "POST", "/admin/template-updates/publish-all")
+  expect(advances.length).toBeGreaterThan(0)
+  expect(await calls(page, "POST", /\/kubernetes-version$/)).toHaveLength(1)
+})
+
+// The choice of who gets the two providers: preselected by whether the site has projects, sent with the settings,
+// applied by the run, and shown on the card as pending when it was changed after the install.
+test("the settings choose who gets the providers, and a run applies the choice", async ({ page }) => {
+  test.setTimeout(90_000)
+  await open(page)
+  await recordCalls(page)
+  // The mock site has projects: it is live with tenants, so nothing changes for the projects that exist.
+  await expect(page.getByRole("radio", { name: /^New projects only/ })).toBeChecked()
+  await expect(page.getByText(/so “New projects only” is preselected/)).toBeVisible()
+  await fillSettings(page)
+  await page.getByRole("radio", { name: /^All projects/ }).check()
+  await page.getByRole("button", { name: "Save draft" }).click()
+  await expect(page.getByText("Settings saved")).toBeVisible()
+  const [created] = await calls(page, "POST", "/admin/platform/installations")
+  expect((created.body as { spec: { tenants?: { attach?: string } } }).spec.tenants).toEqual({ attach: "all" })
+  await expect(page.getByRole("radio", { name: /^All projects/ })).toBeChecked()
+
+  // A stored installation without the key means none, and a save that leaves it alone does not add it.
+  await open(page, "ready")
+  await recordCalls(page)
+  await expect(page.getByRole("radio", { name: /^None: I attach the providers later/ })).toBeChecked()
+  const providers = page.getByRole("list", { name: "Providers" })
+  await expect(providers.getByRole("listitem").filter({ hasText: "lab Databases" })).toContainText("New projects do not get this provider")
+  await page.getByRole("radio", { name: /^New projects only/ }).check()
+  await page.getByRole("button", { name: "Save settings" }).click()
+  await expect(page.getByText("Settings saved")).toBeVisible()
+  const [saved] = await calls(page, "PUT", /\/admin\/platform\/installations\/pi-[0-9a-f]+$/)
+  expect((saved.body as { spec: { tenants?: { attach?: string } } }).spec.tenants).toEqual({ attach: "new" })
+  await expect(page.getByText("That is not applied yet: press “Apply this release” below.")).toBeVisible()
+
+  await page.getByRole("button", { name: "Apply this release" }).click()
+  await expect(providers.getByRole("listitem").filter({ hasText: "lab Databases" })).toContainText("New projects get this provider.", { timeout: 40_000 })
+  await expect(providers.getByRole("listitem").filter({ hasText: "lab Kubernetes" })).toContainText("New projects get this provider.")
+  await expect(page.getByText("That is not applied yet")).toHaveCount(0)
 })
 
 test("Remove asks for the typed name and sends the confirmation only for the forced path", async ({ page }) => {
@@ -491,7 +602,7 @@ test("a failed isolation check names the field, links to the provider and runs t
   await expect(todo.getByRole("link", { name: "Open the provider's page" })).toHaveAttribute("href", "/system/cloud-providers/svc-proxmox-01")
   await expectAccessible(page)
   await todo.getByRole("button", { name: "Run a provider sync, then check again" }).click()
-  await expect(page.getByRole("status").filter({ hasText: "Every check passed." })).toBeVisible()
+  await expect(page.getByRole("status").filter({ hasText: "No check failed. 1 warning does not stop the install" })).toBeVisible() // the scheduler row: the mock runs without it
   expect(await calls(page, "POST", "/admin/job/external-service/sync")).toHaveLength(1)
   expect(await calls(page, "POST", /\/preflight$/)).toHaveLength(2)
 })
@@ -499,8 +610,11 @@ test("a failed isolation check names the field, links to the provider and runs t
 test("a warning of the check does not read as a pass and does not stop the install", async ({ page }) => {
   await open(page, "simplezone")
   await page.getByRole("button", { name: "Check", exact: true }).click()
-  await expect(page.getByRole("status").filter({ hasText: "No check failed. 1 warning does not stop the install" })).toBeVisible()
+  await expect(page.getByRole("status").filter({ hasText: "No check failed. 2 warnings do not stop the install" })).toBeVisible()
   await expect(page.getByRole("list", { name: "Connection checks" })).toContainText("a cluster create on a network of this zone is refused")
+  // The other warning: what tenants miss while the job scheduler is off, with the command that turns it on.
+  await expect(page.getByRole("list", { name: "Connection checks" })).toContainText("a tenant cannot delete a project")
+  await expect(page.getByRole("list", { name: "Connection checks" })).toContainText("./proxcloud-up.sh install --scheduler")
   await expect(page.getByRole("list", { name: "What to do for each failed check" })).toHaveCount(0)
   await expect(page.getByRole("button", { name: "Install", exact: true })).toBeEnabled()
 })
@@ -695,6 +809,17 @@ test("the tenant path is tested on demand, on an installed platform only", async
 })
 
 // The addresses and stores every preset test types in; a preset fills the nodes, counts and sizes.
+// Both token secrets, typed by hand (the PC-ENROLL line has its own test).
+async function storeSecrets(page: Page) {
+  await page.getByText("Enter the two secrets by hand instead").click()
+  await page.getByLabel("Secret of capmox@pve!capi").fill(CAPI_SECRET)
+  await page.getByLabel("Secret of csi@pve!csi").fill(CSI_SECRET)
+  await page.getByRole("button", { name: "Store these secrets" }).click()
+  const stored = page.getByRole("list", { name: "Stored token secrets" })
+  await expect(stored).toContainText("capmox@pve!capi: stored. It is never shown again.")
+  await expect(stored).toContainText("csi@pve!csi: stored. It is never shown again.")
+}
+
 async function fillAddresses(page: Page, bridge = "vmbr1") {
   const fill = (label: string, value: string) => page.getByLabel(label, { exact: true }).fill(value)
   await fill("Name", "lab")
@@ -755,12 +880,9 @@ test("the Standard preset: three control plane machines on one node, two machine
   await expect(load).toContainText("pve1: 20 cores and 42 GiB of memory; 46 GiB with the one more machine an update of the control plane makes, 70 GiB with one more of each group as well. The node has 112 GiB free of 128 GiB.")
   await expect(load).toContainText("pve2: 16 cores and 32 GiB of memory; 32 GiB with the one more machine an update of the control plane makes, 56 GiB with one more of each group as well.")
   // With both secrets stored the Check has its capacity row.
-  await page.getByLabel("Secret of capmox@pve!capi").fill(CAPI_SECRET)
-  await page.getByLabel("Secret of csi@pve!csi").fill(CSI_SECRET)
-  await page.getByRole("button", { name: "Store the secrets" }).click()
-  await expect(page.getByText("Stored. It is never shown again; paste a new one to replace it.")).toHaveCount(2)
+  await storeSecrets(page)
   await page.getByRole("button", { name: "Check", exact: true }).click()
-  await expect(page.getByRole("status").filter({ hasText: "Every check passed." })).toBeVisible()
+  await expect(page.getByRole("status").filter({ hasText: "No check failed. 1 warning does not stop the install" })).toBeVisible() // the scheduler row: the mock runs without it
   await expect(page.getByText("Every node has the memory for its machines and their spares during an update.")).toBeVisible()
 })
 
@@ -788,12 +910,9 @@ test("on one small node: Standard keeps one control plane machine, Homelab makes
   const load = page.getByRole("list", { name: "Cores and memory per node" })
   await expect(load).toContainText("24 GiB with the one more machine an update of the control plane makes, 36 GiB with one more of each group as well. The node has 24 GiB free of 32 GiB. That holds the install")
   await expect(load.getByText("That is not enough.")).toHaveCount(0)
-  await page.getByLabel("Secret of capmox@pve!capi").fill(CAPI_SECRET)
-  await page.getByLabel("Secret of csi@pve!csi").fill(CSI_SECRET)
-  await page.getByRole("button", { name: "Store the secrets" }).click()
-  await expect(page.getByText("Stored. It is never shown again; paste a new one to replace it.")).toHaveCount(2)
+  await storeSecrets(page)
   await page.getByRole("button", { name: "Check", exact: true }).click()
-  await expect(page.getByRole("status").filter({ hasText: "No check failed. 1 warning does not stop the install" })).toBeVisible()
+  await expect(page.getByRole("status").filter({ hasText: "No check failed. 2 warnings do not stop the install" })).toBeVisible() // the capacity row and the scheduler row
   await expect(page.getByText("Node pve1 holds the machines (24 GiB of 24 GiB), and not the spare machine of every group on it as well (12 GiB more)")).toBeVisible()
   // One machine more in a group no longer fits: the review says it, and the Check refuses it.
   await page.getByLabel("Group system: machines").fill("2")

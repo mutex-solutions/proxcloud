@@ -35,6 +35,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/rbac"
+	"github.com/mutex-solutions/proxcloud/internal/platformlife"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
@@ -379,7 +380,11 @@ func importContentProblems(defs []pve.StorageDef, importStorage string) []string
 // proxmoxSetupScript answers GET /admin/setup/proxmox-script as text: the script an operator runs as root on a node to
 // create the portal token's identity (pve.PlatformSetupScript). Query: tokenId (default proxcloud@pve!platform), gpu
 // (default false) and importStorage (default none); managedServices=true answers pve.ManagedSetupScript, with
-// bootStorage (required) and isoStorage (default local). The portal holds no root credential and asks for none, so it
+// bootStorage (required) and isoStorage (default local). installation=<id> answers the root command of that
+// managed-services installation instead (pve.EnrollScript): the stores are the installation's, tokenId defaults to
+// its provider's, and the command marks the two platform tokens, stops on one it did not make and whose secret the
+// portal does not hold, and hands the new secrets back in one PC-ENROLL line (PUT …/credentials with enroll); it goes
+// without managedServices and the three storage parameters. The portal holds no root credential and asks for none, so it
 // cannot run this itself. A value that is not a plain id is a 400: the answer is run by a root shell.
 func (h *Handler) proxmoxSetupScript(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:service:read") {
@@ -409,6 +414,51 @@ func (h *Handler) proxmoxSetupScript(w http.ResponseWriter, r *http.Request) {
 	var script string
 	var err error
 	switch boot, iso := q.Get("bootStorage"), q.Get("isoStorage"); {
+	case q.Get("installation") != "":
+		// The root command of one installation: its stores, and which token secrets the portal holds already.
+		if boot != "" || iso != "" || q.Get("importStorage") != "" || q.Has("managedServices") {
+			httpx.WriteError(w, httpx.BadRequest("installation goes without managedServices, bootStorage, isoStorage and importStorage: the installation's settings name the stores"))
+			return
+		}
+		if h.platform == nil {
+			httpx.WriteError(w, httpx.BadRequest("installation needs managed services (PROXCLOUD_PLATFORM_ENABLED=true)"))
+			return
+		}
+		in, gerr := h.platform.Get(r.Context(), q.Get("installation"))
+		if platformStoreErr(w, gerr) {
+			return
+		}
+		sec, serr := h.platform.Secrets(r.Context(), in.ID)
+		if httpx.WriteError(w, serr) {
+			return
+		}
+		if h.esSvc == nil {
+			httpx.WriteError(w, serviceNotFoundErr(in.ServiceID))
+			return
+		}
+		es, eerr := h.esSvc.Get(r.Context(), in.ServiceID)
+		if eerr != nil || es == nil {
+			httpx.WriteError(w, serviceNotFoundErr(in.ServiceID))
+			return
+		}
+		if q.Get("tokenId") == "" && es.PVEConfig().TokenID != "" { // the token the installation's provider is connected with
+			tokenID = es.PVEConfig().TokenID
+		}
+		if sec == nil {
+			sec = &platformlife.Secrets{}
+		}
+		e := pve.Enrollment{InstallationID: in.ID}
+		for _, t := range []struct {
+			tok  *platformlife.TokenCredential
+			have *bool
+		}{{sec.CAPI, &e.HaveCAPI}, {sec.CSI, &e.HaveCSI}} {
+			if *t.have, err = tokenOpens(r.Context(), es, t.tok); err != nil {
+				httpx.WriteError(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, "Proxmox did not say whether the stored secret of "+t.tok.TokenID+
+					" still opens that token, so the root command cannot tell whose token it is: "+err.Error()+". Try again when Proxmox answers."))
+				return
+			}
+		}
+		script, err = pve.EnrollScript(tokenID, gpu, in.Spec.Storage.Import, in.Spec.Storage.Boot, in.Spec.Storage.ISO, e)
 	case managed:
 		if iso == "" {
 			iso = pve.DefaultBootISOStorage
@@ -426,6 +476,28 @@ func (h *Handler) proxmoxSetupScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	fmt.Fprint(w, script)
+}
+
+// tokenOpens reports whether the stored secret still opens its token on the cluster: one read with it. Proxmox
+// answering 401 means it does not (the token was removed, or removed and made again for something else), and the root
+// command must then stop on that token instead of marking it and writing its ACLs. Any other failure is an error: a
+// Proxmox that does not answer must not turn the installation's own token into one the command tells root to remove.
+func tokenOpens(ctx context.Context, es *externalservice.ExternalService, tok *platformlife.TokenCredential) (bool, error) {
+	if tok == nil {
+		return false, nil
+	}
+	c, err := platformlife.TokenClient(es, tok)
+	if err != nil {
+		return false, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, err = c.Version(ctx)
+	var ae *pve.APIError
+	if errors.As(err, &ae) && ae.Status == http.StatusUnauthorized {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // checkDatacenterFirewall rejects a cluster whose datacenter firewall is off or cannot be read.

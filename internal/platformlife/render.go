@@ -36,6 +36,9 @@ type RenderInput struct {
 	Cluster     RenderCluster
 	Templates   map[string]int // the node image's template VMID per PVE node (stage 2)
 	WorkerMTU   int            // the tenant vnets' MTU: the Kubernetes provider's workerMtu (0 = the guest default)
+	// NodeImageLine is the Kubernetes provider's versions value for the BOM's Kubernetes version (NodeImageLine);
+	// "" = no node image is published on every node, and the provider is registered with no version of the run's.
+	NodeImageLine string
 }
 
 // RenderNetwork is the platform network the seed and the workload VMs share. VLAN tags every NIC on Bridge (0 = none).
@@ -577,7 +580,8 @@ func CSIConfigSecret(b *BOM, in RenderInput, csi PVEToken) (map[string]any, erro
 }
 
 // ProviderBodies are the POST /admin/service bodies stage 10 registers, stage 60's loop with the design's changes
-// (§4.2): the BOM's tenant charts, no node image versions yet, namespace placement on the group, the database egress
+// (§4.2): the BOM's tenant charts, the BOM's Kubernetes version when its node image is published (in.NodeImageLine;
+// none otherwise), namespace placement on the group, the database egress
 // fence, no backup store, PostgreSQL replicas 3 only with three dbaas nodes, held back from new projects, and the
 // marker that adopts a row at the next run. kubeconfig is the workload's proxcloud service account (provider secret).
 func ProviderBodies(b *BOM, in RenderInput, kubeconfig string) (kubernetes, database map[string]any) {
@@ -597,6 +601,10 @@ func ProviderBodies(b *BOM, in RenderInput, kubeconfig string) (kubernetes, data
 	if len(dbNodes) >= 3 {
 		replicas = []any{1, 3}
 	}
+	versions := map[string]any{}
+	if in.NodeImageLine != "" {
+		versions[b.Kubernetes.Version] = in.NodeImageLine
+	}
 	kubernetes = map[string]any{
 		"name": in.Name + " Kubernetes", "type": "CLOUD", "status": "PUBLIC",
 		"config": map[string]any{
@@ -604,7 +612,7 @@ func ProviderBodies(b *BOM, in RenderInput, kubeconfig string) (kubernetes, data
 			"services": map[string]any{"kubernetes": map[string]any{in.Region: true}},
 			"argocd":   argo("proxcloud-k8s", b.TenantCharts.Kubernetes),
 			"cluster": map[string]any{
-				"dataStoreName": defaultDatastore, "versions": map[string]any{}, "rootVolumeGiB": 30,
+				"dataStoreName": defaultDatastore, "versions": versions, "rootVolumeGiB": 30,
 				"workerMtu": in.WorkerMTU, "rwxGiB": 0, "pveApiUrl": in.PVEAPIURL,
 			},
 			"namespacePlacement":     placementValues("kamaji"),

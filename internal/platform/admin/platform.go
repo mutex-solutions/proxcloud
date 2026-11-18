@@ -21,6 +21,8 @@ package admin
 //	                                                      reads, and opens its ArgoCD                        (service:manage)
 //	POST /admin/platform/installations/{id}/seed-credential/rotate  a new stored seed credential; refused
 //	                                                      during a run                                       (service:manage)
+//	POST /admin/platform/installations/{id}/kubernetes-version  offer the BOM's Kubernetes version to tenants
+//	                                                      once its node image is published (platformtenants.go) (service:manage)
 //
 // The installation routes answer 404 platform_disabled unless PROXCLOUD_PLATFORM_ENABLED is on (SetPlatform); a run
 // also needs the runner (SetPlatformRuns, with PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED), else 409 platform_disabled. No
@@ -79,6 +81,7 @@ func (h *Handler) routePlatform(r chi.Router) {
 	r.Get("/platform/installations/{id}/seed-kubeconfig", h.platformSeedKubeconfig)
 	r.Get("/platform/installations/{id}/platform-kubeconfig", h.platformClusterKubeconfig)
 	r.Post("/platform/installations/{id}/seed-credential/rotate", h.platformSeedRotate)
+	r.Post("/platform/installations/{id}/kubernetes-version", h.platformOfferVersion)
 }
 
 func (h *Handler) platformBOM(w http.ResponseWriter, r *http.Request) {
@@ -184,6 +187,10 @@ type installationView struct {
 	} `json:"credentials"`
 	// Live is set with ?live=1 only: read from the seed at request time, never stored.
 	Live *platformlife.LiveState `json:"live,omitempty"`
+	// SchedulerNote is platformlife.SchedulerOffNote while the job scheduler is off, else absent.
+	SchedulerNote string `json:"schedulerNote,omitempty"`
+	// SiteChanges is in the answer of a save only: what the save wrote into the provider's network config.
+	SiteChanges *siteChanges `json:"siteChanges,omitempty"`
 }
 
 type tokenView struct {
@@ -192,6 +199,9 @@ type tokenView struct {
 
 func (h *Handler) platformView(r *http.Request, in *platformlife.Installation) (*installationView, error) {
 	v := &installationView{Installation: in}
+	if !h.jobsScheduler {
+		v.SchedulerNote = platformlife.SchedulerOffNote
+	}
 	sec, err := h.platform.Secrets(r.Context(), in.ID)
 	if err != nil || sec == nil {
 		return v, err
@@ -262,6 +272,21 @@ type installationRequest struct {
 	Rev           int64             `json:"rev"`
 }
 
+// siteDefaults is platformSiteDefaults for a saved installation, with its audit record.
+func (h *Handler) siteDefaults(r *http.Request, in *platformlife.Installation, before map[string]any) *siteChanges {
+	var ch *siteChanges
+	// The save is stored: its audit record is written whether or not the provider can be read.
+	if es, err := h.esSvc.Get(r.Context(), in.ServiceID); err == nil && es != nil {
+		ch = h.platformSiteDefaults(r.Context(), in, es)
+	}
+	after := asSnapshot(in)
+	if ch != nil && (len(ch.BlockedCIDRs) > 0 || len(ch.BlockedCIDRsRemoved) > 0 || ch.ZoneWithoutDHCP != "") {
+		after["providerNetwork"] = map[string]any{"blockedCidrsAdded": ch.BlockedCIDRs, "blockedCidrsRemoved": ch.BlockedCIDRsRemoved, "zoneWithoutDhcp": ch.ZoneWithoutDHCP}
+	}
+	audit.RecordSnapshots(r.Context(), before, after)
+	return ch
+}
+
 // checked fills in from preset, normalizes it and checks it on its own and against its provider's networks.
 func (h *Handler) checked(r *http.Request, in *platformlife.Installation, preset string) error {
 	if err := platformlife.ApplyPreset(preset, &in.Spec, in.BuildsThree()); err != nil {
@@ -288,12 +313,32 @@ func (h *Handler) checked(r *http.Request, in *platformlife.Installation, preset
 	return nil
 }
 
+// installationPerms are the permissions a create or an update of an installation with this spec needs beyond
+// externalServiceManagePerm. tenants.attach "all" makes the next run attach both providers to every project, which by
+// hand needs projectUpdatePerm too (providerattach.go): the spec must not be a way around that key.
+func installationPerms(spec platformlife.Spec) []string {
+	if spec.Tenants.AttachChoice() == platformlife.AttachAll {
+		return []string{projectUpdatePerm}
+	}
+	return nil
+}
+
+// installationGate checks installationPerms; false = the 403 went out.
+func (h *Handler) installationGate(w http.ResponseWriter, r *http.Request, spec platformlife.Spec) bool {
+	_, granted, _ := h.adminContext(r)
+	if missing := missingPerm(granted, installationPerms(spec)); missing != "" {
+		httpx.WriteError(w, httpx.Forbidden("Attaching the providers to all projects (spec.tenants.attach: all) needs the permission: "+missing))
+		return false
+	}
+	return true
+}
+
 func (h *Handler) platformCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.platformGate(w, r, externalServiceManagePerm) {
 		return
 	}
 	var req installationRequest
-	if !decodeStrictLimited(w, r, &req, 64<<10) {
+	if !decodeStrictLimited(w, r, &req, 64<<10) || !h.installationGate(w, r, req.Spec) {
 		return
 	}
 	if h.esSvc == nil {
@@ -305,7 +350,7 @@ func (h *Handler) platformCreate(w http.ResponseWriter, r *http.Request) {
 	if platformStoreErr(w, h.checked(r, in, req.Preset)) || platformStoreErr(w, h.platform.Create(r.Context(), in)) {
 		return
 	}
-	httpx.OK(w, &installationView{Installation: in})
+	httpx.OK(w, &installationView{Installation: in, SiteChanges: h.siteDefaults(r, in, asSnapshot(in))})
 }
 
 func (h *Handler) platformUpdate(w http.ResponseWriter, r *http.Request) {
@@ -313,7 +358,7 @@ func (h *Handler) platformUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req installationRequest
-	if !decodeStrictLimited(w, r, &req, 64<<10) {
+	if !decodeStrictLimited(w, r, &req, 64<<10) || !h.installationGate(w, r, req.Spec) {
 		return
 	}
 	before, after, err := h.platform.Update(r.Context(), chi.URLParam(r, "id"), req.Rev, func(old platformlife.Installation) (*platformlife.Installation, error) {
@@ -346,11 +391,12 @@ func (h *Handler) platformUpdate(w http.ResponseWriter, r *http.Request) {
 	if platformStoreErr(w, err) {
 		return
 	}
-	audit.RecordSnapshots(r.Context(), asSnapshot(before), asSnapshot(after))
+	changes := h.siteDefaults(r, after, asSnapshot(before))
 	v, err := h.platformView(r, after)
 	if httpx.WriteError(w, err) {
 		return
 	}
+	v.SiteChanges = changes
 	httpx.OK(w, v)
 }
 
@@ -368,15 +414,54 @@ var pveTokenSecret = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA
 // platformCredentials stores the CAPI and the CSI token. Each is optional; the token ids are the ones the
 // managed-services script creates, whose ACL rows and fences the preflight checks. The body is never echoed, logged or
 // audited beyond the middleware's event (actor, installation id).
+// enroll is the other way in, and goes alone: the PC-ENROLL line the root command of step 2 printed
+// (platformlife.ParseEnrollLine). A line that is not one, or is of another installation, is a 400 invalid_enrollment;
+// a line printed more than five minutes ahead of the portal's clock is a 400 enrollment_clock_ahead; a line stored
+// before, or older than the one stored, is a 409 enrollment_replayed. No answer quotes the line.
 func (h *Handler) platformCredentials(w http.ResponseWriter, r *http.Request) {
 	if !h.platformGate(w, r, externalServiceManagePerm) {
 		return
 	}
 	var req struct {
-		CAPI *platformlife.TokenCredential `json:"capi"`
-		CSI  *platformlife.TokenCredential `json:"csi"`
+		CAPI   *platformlife.TokenCredential `json:"capi"`
+		CSI    *platformlife.TokenCredential `json:"csi"`
+		Enroll string                        `json:"enroll"`
 	}
 	if !decodeStrictLimited(w, r, &req, 4<<10) {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if req.Enroll != "" {
+		if req.CAPI != nil || req.CSI != nil {
+			platformErr(w, http.StatusBadRequest, "invalid_credentials", "The credentials are not valid", map[string]any{"problems": []string{"enroll goes without capi and csi"}})
+			return
+		}
+		in, err := h.platform.Get(r.Context(), id)
+		if platformStoreErr(w, err) {
+			return
+		}
+		e, err := platformlife.ParseEnrollLine(req.Enroll, in.ID)
+		if err == nil {
+			err = h.platform.SaveEnrollment(r.Context(), id, e)
+		}
+		switch {
+		case errors.Is(err, platformlife.ErrEnrollAhead):
+			platformErr(w, http.StatusBadRequest, "enrollment_clock_ahead", err.Error(), nil)
+			return
+		case errors.Is(err, platformlife.ErrEnrollReplayed):
+			platformErr(w, http.StatusConflict, "enrollment_replayed", err.Error(), nil)
+			return
+		case errors.Is(err, platformlife.ErrEnrollMalformed), errors.Is(err, platformlife.ErrEnrollOther):
+			platformErr(w, http.StatusBadRequest, "invalid_enrollment", err.Error(), nil)
+			return
+		case platformStoreErr(w, err):
+			return
+		}
+		v, err := h.platformView(r, in)
+		if httpx.WriteError(w, err) {
+			return
+		}
+		httpx.OK(w, v)
 		return
 	}
 	var problems []string
@@ -399,7 +484,6 @@ func (h *Handler) platformCredentials(w http.ResponseWriter, r *http.Request) {
 		platformErr(w, http.StatusBadRequest, "invalid_credentials", "The credentials are not valid", map[string]any{"problems": problems})
 		return
 	}
-	id := chi.URLParam(r, "id")
 	in, err := h.platform.Get(r.Context(), id)
 	if platformStoreErr(w, err) || platformStoreErr(w, h.platform.SaveCredentials(r.Context(), id, req.CAPI, req.CSI)) {
 		return
@@ -523,7 +607,7 @@ func (h *Handler) PlatformPreflight(ctx context.Context, in *platformlife.Instal
 	}
 	pf := platformlife.Preflight{Installation: in, Site: platformlife.SiteOf(es), Allow: es.PVESandboxEndpoints(),
 		Portal: portal, ProviderDisabled: es.IsDisabled(),
-		TemplateUpdatesVM: h.templateUpdates != nil && h.templateUpdates.VMEnabled}
+		TemplateUpdatesVM: h.templateUpdates != nil && h.templateUpdates.VMEnabled, SchedulerOff: !h.jobsScheduler}
 	pf.MintStores, pf.MintZones = platformlife.MintScopeOf(es)
 	if pf.CAPI, err = platformlife.TokenClient(es, sec.CAPI); err != nil {
 		return nil, err

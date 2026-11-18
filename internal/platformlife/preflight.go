@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
@@ -24,11 +25,12 @@ const (
 	CheckFail = "fail"
 )
 
-// Check is one row of the preflight. The ids are part of the API (docs/api.md): flags, spec, network, bridge (a failure before the
+// Check is one row of the preflight. The ids are part of the API (docs/api.md): flags, scheduler (a warning, present only while the job scheduler is off), spec, network, bridge (a failure before the
 // first install, a warning after it), isolation,
 // tenant-network and tenant-path (a warning or ok, never a failure; absent when the provider names no zone), csi-vmid (a warning or ok, never a failure), credentials,
 // machines (a warning or ok, never a failure; absent while the installation has no VM), capacity (a failure before the first install, a warning after it or when it cannot be read; absent while the CAPI token is not stored), privileges:capi, privileges:csi, privileges:kubemint, mint-scope, pool-fence, token-scope, iso-store-visibility,
-// boot-iso-grant, boot-iso, placement, images. A run's first stage fails preflight_failed with the failed rows as its items, or
+// boot-iso-grant, boot-iso, placement, boot-store (a failure when the store is missing or takes no disk image, a warning
+// when it holds other VMs' disks), pve-api-rule (a warning or ok, never a failure), images. A run's first stage fails preflight_failed with the failed rows as its items, or
 // isolation_not_enforced when isolation is the only one.
 type Check struct {
 	ID      string `json:"id"`
@@ -48,6 +50,8 @@ type Preflight struct {
 	CAPI, CSI         *pve.Client  // the platform tokens; nil when not stored
 	TemplateUpdatesVM bool         // PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED
 	GitHub            bool         // a GitHub integration is saved
+	// SchedulerOff: the job scheduler does not run (PROXCLOUD_JOBS_SCHEDULER_ENABLED): row scheduler, a warning.
+	SchedulerOff bool
 	// Blocked reports a digest on the template update blocklist (templateupdates.Receipts.Blocked).
 	Blocked func(ctx context.Context, digest string) (bool, error)
 }
@@ -126,9 +130,12 @@ func (p Preflight) Run(ctx context.Context) []Check {
 		flags = append(flags, "PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED is off: the platform images are imported through Template updates (proxcloud-up.sh install --managed-services).")
 	}
 	if !p.GitHub {
-		flags = append(flags, "No GitHub integration is saved: Template updates finds the platform images through it.")
+		flags = append(flags, "No GitHub integration is saved: Template updates finds the platform images through it. Save one under Integrations, GitHub.")
 	}
 	row("flags", flags, "Managed services and VM template updates are on, and a GitHub integration is saved.")
+	if p.SchedulerOff { // the operator's call (it starts charging), so never a failure
+		out = append(out, Check{ID: "scheduler", Status: CheckWarn, Message: SchedulerOffNote})
+	}
 
 	var spec []string
 	if err := in.Validate(); err != nil {
@@ -171,8 +178,8 @@ func (p Preflight) Run(ctx context.Context) []Check {
 		row("network", in.SiteProblems(site), passed)
 		// Layer 0 drops tenant traffic to the management and blocked networks only.
 		if unf := in.Unfenced(append(slices.Clone(site.Blocked), mgmt...)); len(unf) > 0 {
-			row("isolation", []string{"Tenants could reach the seed, the API VIP or the node range: add " + strings.Join(unf, ", ") +
-				" (or one network that covers them) to the provider's blockedCidrs, then run a provider sync so the cluster firewall drops them (with this installation saved it needs no project)."}, "")
+			row("isolation", []string{"Tenants could reach the seed, the API VIP or the node range: " + strings.Join(unf, ", ") +
+				" are not in the provider's blockedCidrs. Saving the settings adds them (step 1, Save settings; or by hand under Cloud providers, config.network.blockedCidrs); then run a provider sync so the cluster firewall drops them (with this installation saved it needs no project)."}, "")
 		} else {
 			switch err := p.Portal.CheckIsolation(ctx, site.CIDRPool, site.Blocked, site.Sandbox, p.Allow...); {
 			case errors.Is(err, pve.ErrIsolationPending) && p.ProviderDisabled:
@@ -199,7 +206,7 @@ func (p Preflight) Run(ctx context.Context) []Check {
 	if site.DefaultZone != "" {
 		const remedy = " A tenant Kubernetes cluster needs a network without DHCP, so a cluster create on a network of this zone is refused " +
 			"(400, \"Worker nodes need a network without DHCP\") until the default zone is an EVPN or a VLAN zone, or a simple zone without DHCP " +
-			"(config.network.zones and defaultZone, under Cloud providers; \"dhcp\": false on a simple zone that does not exist yet makes it without). A Kubernetes provider with shared workers (cluster.shared) uses no tenant network and is not affected. " +
+			"(config.network.zones and defaultZone, under Cloud providers; \"dhcp\": false on a simple zone that does not exist yet makes it without, and saving these settings writes that for a default zone whose config says nothing about DHCP). A zone that exists is never changed. A Kubernetes provider with shared workers (cluster.shared) uses no tenant network and is not affected. " +
 			"The install and managed databases do not need it."
 		zones, err := p.Portal.C.ListSDNZones(ctx)
 		i := slices.IndexFunc(zones, func(z pve.SDNZone) bool { return z.Zone == site.DefaultZone })
@@ -211,7 +218,7 @@ func (p Preflight) Run(ctx context.Context) []Check {
 			out = append(out, Check{ID: "tenant-network", Status: CheckWarn, Message: "The provider's default zone " + site.DefaultZone + " has DHCP in Proxmox." + remedy})
 		case i < 0 && site.DefaultZoneKind == "simple" && !site.DefaultZoneNoDHCP:
 			out = append(out, Check{ID: "tenant-network", Status: CheckWarn, Message: "The provider's default zone " + site.DefaultZone +
-				" is a simple zone that does not exist yet, and ProxCloud creates a simple zone with DHCP unless its config says \"dhcp\": false." + remedy})
+				" is a simple zone that does not exist yet, and its config does not say \"dhcp\": false, so ProxCloud would create it with DHCP. Press Save settings in step 1: the save writes \"dhcp\": false for it." + remedy})
 		case i >= 0:
 			row("tenant-network", nil, "The provider's default zone "+site.DefaultZone+" has no DHCP in Proxmox: a tenant cluster can use its networks.")
 		default:
@@ -229,10 +236,10 @@ func (p Preflight) Run(ctx context.Context) []Check {
 
 	var creds []string
 	if p.CAPI == nil {
-		creds = append(creds, "The token "+pve.CAPITokenID+" is not stored: paste its secret (PUT …/credentials).")
+		creds = append(creds, "The token "+pve.CAPITokenID+" is not stored: "+enrollRemedy)
 	}
 	if p.CSI == nil {
-		creds = append(creds, "The token "+pve.CSITokenID+" is not stored: paste its secret (PUT …/credentials).")
+		creds = append(creds, "The token "+pve.CSITokenID+" is not stored: "+enrollRemedy)
 	}
 	row("credentials", creds, "Both platform tokens are stored.")
 
@@ -360,6 +367,7 @@ func (p Preflight) Run(ctx context.Context) []Check {
 	}
 
 	defs, err := p.Portal.C.ListStorage(ctx)
+	defsErr := err
 	if p.CAPI != nil {
 		var vis []string
 		if err != nil {
@@ -422,6 +430,7 @@ func (p Preflight) Run(ctx context.Context) []Check {
 		}
 		row("placement", place, "Every node an image goes to has the import and the boot store.")
 	}
+	out = append(out, p.bootStore(ctx, defs, defsErr), p.apiRule(ctx))
 
 	if p.Blocked != nil {
 		var blocked []string
@@ -446,6 +455,112 @@ func (p Preflight) Run(ctx context.Context) []Check {
 		row("images", blocked, "Neither BOM image is on the blocklist.")
 	}
 	return out
+}
+
+// enrollRemedy is the one action that stores a platform token.
+const enrollRemedy = "run the root command of step 2 on a node and paste the PC-ENROLL line it prints (PUT …/credentials with enroll); a token that exists already is named by that command with what to do."
+
+// bootStore is the boot-store row. A failure: Proxmox has no such store, or it takes no disk image. A warning: the
+// store also holds disks of VMs that are not this platform's. proxmox-csi's token holds Datastore.Allocate on the
+// whole boot store, and its secret is readable inside the platform cluster, so whoever reads it there reaches every
+// disk on the store (docs/proxmox-permissions.md). The disks are listed with that token, the only one that sees them
+// all: the portal token sees a disk only through its VM. Not counted: this installation's machines, the templates of
+// the template pool (pve.TemplatePool), and CSI volumes (vm-<id>-pvc-*).
+func (p Preflight) bootStore(ctx context.Context, defs []pve.StorageDef, defsErr error) Check {
+	in := p.Installation
+	boot := in.Spec.Storage.Boot
+	c := Check{ID: "boot-store", Status: CheckOK}
+	if defsErr != nil {
+		c.Status, c.Message = CheckFail, "Could not read the storages: "+defsErr.Error()
+		return c
+	}
+	i := slices.IndexFunc(defs, func(d pve.StorageDef) bool { return d.Storage == boot })
+	switch {
+	case i < 0:
+		c.Status, c.Message = CheckFail, "Proxmox has no storage "+boot+": name an existing one as the boot store in step 1 (pvesm status lists them), or add it (Datacenter, Storage, Add)."
+		return c
+	case !slices.Contains(strings.Split(defs[i].Content, ","), "images"):
+		c.Status, c.Message = CheckFail, "The boot store "+boot+" does not take disk images, as root on a node: pvesm set "+boot+" --content "+strings.Trim(defs[i].Content+",images", ",")
+		return c
+	}
+	c.Message = "The boot store " + boot + " exists and takes disk images."
+	if p.CSI == nil || p.CAPI == nil { // without the CAPI token the platform's own machines would count as others
+		c.Message += " Whether it also holds other VMs' disks is read once the tokens " + pve.CAPITokenID + " and " + pve.CSITokenID + " are stored."
+		return c
+	}
+	own := map[int]bool{}
+	vms, _ := platformVMs(ctx, p.CAPI, in.ID)
+	for _, vm := range vms {
+		own[vm.vmid] = true
+	}
+	if pool, err := p.Portal.C.GetPool(ctx, pve.TemplatePool); err == nil && pool != nil {
+		for _, m := range pool.Members {
+			own[m.VMID] = true
+		}
+	}
+	nodes := []string{in.Spec.Seed.Node}
+	for _, cl := range in.Spec.Clusters {
+		nodes = append(nodes, cl.ControlPlane.Node)
+		for _, g := range cl.NodeGroups {
+			nodes = append(nodes, g.Nodes...)
+		}
+	}
+	var foreign []int
+	for _, node := range slices.Compact(slices.Sorted(slices.Values(nodes))) {
+		vols, err := p.CSI.StorageContents(ctx, node, boot, "images", 0)
+		if err != nil {
+			c.Status, c.Message = CheckWarn, c.Message+" Its content on "+node+" could not be listed with "+pve.CSITokenID+", so whether it also holds other VMs' disks is not known: "+err.Error()
+			return c
+		}
+		for _, v := range vols {
+			if v.VMID > 0 && !own[v.VMID] && !strings.Contains(v.VolID, "-pvc-") {
+				foreign = append(foreign, v.VMID)
+			}
+		}
+	}
+	if foreign = slices.Compact(slices.Sorted(slices.Values(foreign))); len(foreign) == 0 {
+		c.Message += " It holds no disk of a VM that is not the platform's."
+		return c
+	}
+	ids := make([]string, len(foreign))
+	for i, id := range foreign {
+		ids[i] = strconv.Itoa(id)
+	}
+	c.Status = CheckWarn
+	c.Message += " It also holds disks of " + strconv.Itoa(len(foreign)) + " other VMs (VM " + strings.Join(ids, ", ") + "): tenant servers, or VMs of your own. " +
+		pve.CSITokenID + " holds Datastore.Allocate on the whole store and its secret is readable inside the platform cluster, so whoever reads it there can read and delete those disks. " +
+		"A store of its own for the platform avoids that; on ZFS, as root on the node: zfs create <pool>/pcplat && pvesm add zfspool pcplat --pool <pool>/pcplat --content images,rootdir --sparse 1; " +
+		"then name it as the boot store in step 1 and run the root command of step 2 again. The install works without it."
+	return c
+}
+
+// apiRule is the pve-api-rule row: a warning or ok, never a failure, since the next install or apply writes the rule
+// (a failure would stop the run that repairs it). The seed and the platform machines open the Proxmox API; with the
+// datacenter firewall on, a node drops them unless the cluster firewall holds this installation's rule (APIAccess).
+func (p Preflight) apiRule(ctx context.Context) Check {
+	in := p.Installation
+	sources, dest, port := in.APIAccess()
+	to := dest
+	if to == "" {
+		to = "the nodes"
+	}
+	rule := "ACCEPT tcp " + port + " from " + strings.Join(sources, ", ") + " to " + to + ", comment " + pve.APIAccessComment(in.ID)
+	has, err := p.Portal.HasAPIAccess(ctx, in.ID, sources, dest, port)
+	off := ""
+	if on, err := p.Portal.C.DatacenterFirewallEnabled(ctx); err == nil && !on {
+		off = " The datacenter firewall is off, so no rule is enforced now; the rule is for the day it is turned on."
+	}
+	switch {
+	case err != nil:
+		return Check{ID: "pve-api-rule", Status: CheckWarn, Message: "Could not read the cluster firewall rules, so whether the platform network may reach the Proxmox API is not known: " + err.Error() +
+			". The install and every apply write the rule (" + rule + ")."}
+	case has:
+		return Check{ID: "pve-api-rule", Status: CheckOK, Message: "The cluster firewall lets the seed and the node range reach the Proxmox API (" + rule + ")." + off}
+	case !in.Installed():
+		return Check{ID: "pve-api-rule", Status: CheckOK, Message: "Install writes the cluster firewall rule that lets the seed and the node range reach the Proxmox API (" + rule + "), before the seed is made. Nothing to do by hand." + off}
+	}
+	return Check{ID: "pve-api-rule", Status: CheckWarn, Message: "The cluster firewall rule that lets the seed and the node range reach the Proxmox API is missing or was changed (" + rule +
+		"): the platform's machines may not reach Proxmox. Press Apply: it writes the rule again." + off}
 }
 
 // nicPath is the ACL path Proxmox checks SDN.Use on when a NIC is put on the platform network, where that is not

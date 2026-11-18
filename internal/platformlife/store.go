@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
@@ -40,7 +41,10 @@ type Secrets struct {
 	K3sToken       string           `json:"k3sToken,omitempty"`
 	SeedKubeconfig *SeedKubeconfig  `json:"seedKubeconfig,omitempty"`
 	BootstrapToken string           `json:"bootstrapToken,omitempty"` // wiped once the seed's identity is stored
-	UpdatedAt      time.Time        `json:"updatedAt"`
+	// EnrolledAt is the time (of the node's clock) the last stored enrollment line was printed: a line that is not
+	// newer is a replay and is refused (SaveEnrollment). 0 = no line was stored.
+	EnrolledAt int64     `json:"enrolledAt,omitempty"`
+	UpdatedAt  time.Time `json:"updatedAt"`
 }
 
 // TokenCredential is a PVE API token: its id is not secret, its secret is.
@@ -178,10 +182,38 @@ func (s *Store) Update(ctx context.Context, id string, rev int64, change func(ol
 	return before, after, err
 }
 
+// MarkKubernetesOffered adds version to status.kubernetesOffered. The caller holds the installation's run lock
+// ("platform-run:"+id) in a transaction, as a run's writes do; like them it leaves rev alone.
+func (s *Store) MarkKubernetesOffered(ctx context.Context, id, version string) error {
+	var in Installation
+	found, err := s.installations().GetForUpdate(ctx, id, &in)
+	if err != nil || !found || slices.Contains(in.Status.KubernetesOffered, version) {
+		return err
+	}
+	in.Status.KubernetesOffered = append(in.Status.KubernetesOffered, version)
+	_, err = s.installations().Replace(ctx, id, &in)
+	return err
+}
+
 // SaveCredentials replaces the CAPI and the CSI token of an installation; a nil one is kept. Nothing is stored
 // without a data key: the textcrypt encryptor would keep the secret in plain text. Every write of platformSecret
 // rewrites the whole document, so each takes the installation's run lock before it reads.
 func (s *Store) SaveCredentials(ctx context.Context, id string, capi, csi *TokenCredential) error {
+	return s.saveCredentials(ctx, id, capi, csi, 0)
+}
+
+// SaveEnrollment stores the tokens of a pasted enrollment line as SaveCredentials does, once: a line printed no later
+// than the last one stored is ErrEnrollReplayed and changes nothing, so an old line cannot put back the secret of a
+// token that was made again since. A line from a node whose clock is ahead is ErrEnrollAhead: stored, it would make
+// every line printed after the clock was set right a replay.
+func (s *Store) SaveEnrollment(ctx context.Context, id string, e *Enrollment) error {
+	if e.Ahead(time.Now()) {
+		return ErrEnrollAhead
+	}
+	return s.saveCredentials(ctx, id, e.CAPI, e.CSI, e.Issued)
+}
+
+func (s *Store) saveCredentials(ctx context.Context, id string, capi, csi *TokenCredential, issued int64) error {
 	if !s.enc.HasKey() {
 		return ErrNoEncryptionKey
 	}
@@ -195,6 +227,12 @@ func (s *Store) SaveCredentials(ctx context.Context, id string, capi, csi *Token
 		}
 		if sec == nil {
 			sec = &Secrets{ID: id}
+		}
+		if issued != 0 {
+			if issued <= sec.EnrolledAt {
+				return ErrEnrollReplayed
+			}
+			sec.EnrolledAt = issued
 		}
 		if capi != nil {
 			sec.CAPI = capi

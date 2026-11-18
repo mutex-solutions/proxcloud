@@ -20,7 +20,11 @@ Tenant Kubernetes clusters also need a network zone without DHCP: the Proxmox pr
 
 In a VLAN zone Proxmox provides no gateway, no DHCP and no SNAT: your own router must hold the first address of each tenant subnet on its VLAN and route it to the load balancer range. Without it a cluster's workers never join.
 
-The page also warns when the job scheduler is off: tenant clusters and databases then update their status only when a provider sync runs, and no project is deleted: "Delete now" is refused and says so, and a delete with the grace period is accepted but stays scheduled until the scheduler runs.
+The page also warns when the job scheduler is off, here, in step 3 (the row `scheduler`) and on the ready card. Until it is on, no project is deleted ("Delete now" is refused and says so, and a delete with the grace period is accepted but stays scheduled), tenant clusters, databases and servers update their state only when you run a provider sync, and no usage is charged or billed. It does not stop the install, and the page does not turn it on: it also starts charging usage on a timer, so set prices first. On the one-host install, run this on the host:
+
+```sh
+./proxcloud-up.sh install --scheduler
+```
 
 No check of step 3 reads the following, so look before the first run:
 
@@ -41,6 +45,7 @@ Saving keeps a draft. Nothing is created on Proxmox until you press **Install**,
 - **Seed.** Its node, address and size, and the networks that may reach its API: at least the address ProxCloud reaches it from. SSH keys are optional and for emergencies only.
 - **Control plane.** Its node, its size and the number of machines: 1 or 3. This is the platform cluster's own control plane, not a tenant's. Three machines keep its API up when one of their VMs is lost or is replaced during an update. They all run on the one node you name and on one store, so they do not protect against the loss of that node or of its disk, and three write more to that store than one. The node needs memory for one machine more than the count, because an update makes the new machine before it removes an old one; a machine that does not fit is refused and not tried again, and the **Capacity** check tells you before the install. You can go from 1 to 3 later (save, then **Apply this release**); a 3 you saved and did not apply goes back to 1, and once an apply has built three, back to 1 is not possible without removing the installation. Machines on several nodes are not built in this release. Three need a platform release whose cluster chart is 0.1.14 or newer; the field says so when the release is older. Not verified on a lab.
 - **Storage.** One boot store; one ISO store that is local to each node; optionally the store images are downloaded to, which must not be the boot store. Left empty it is the provider's import store; if that is the boot store the save is refused, and both the provider and this field must name another store.
+- **Tenants.** Who gets managed Kubernetes and databases: **all projects** (the ones that exist and every new one), **new projects only**, or **none** (you attach the providers later, on each provider's **Projects** tab). On a site that already has projects, "new projects only" is preselected, so that nothing changes for the tenants who are there; on a site with none, "all projects". The install applies the choice, and you can change it later: a changed choice is applied once, by the next **Install** or **Apply this release**. A run never detaches a project, and it does not repeat a choice it has applied, so what you change on a provider afterwards stays. Choosing **all projects** needs the permission to update projects besides the one to manage providers. When one provider could not take the choice, the run still ends ready with a warning, and the next apply applies the choice to both providers again.
 
 The page checks the addresses as you save: everything inside the network, no overlaps, and a machine range that is large enough. ProxCloud then checks what only it knows, for example that the network does not overlap the address pool of tenant networks.
 
@@ -48,9 +53,15 @@ After the first successful install these are fixed: the name, the network, the s
 
 ## Step 2: Proxmox identities
 
-Copy the script and run it as root on one node. It adds two users with one token each, a pool for the seed, and their permissions. It prints each token secret once.
+Copy the command and paste it into a root shell on one node. It adds two users with one token each, a pool for the seed, and their permissions. It prints no secret: its last line starts with `PC-ENROLL:` and carries the secrets of the tokens it made.
 
-Paste the two secrets and press **Store the secrets**. They are stored encrypted and are never shown again; to replace one, paste a new one. If you change the boot store or the ISO store, run the script again.
+Paste that line into **The PC-ENROLL line the command printed** and press **Store the secrets**. The page checks the line first: the whole line, and of this installation. The secrets are stored encrypted and are never shown again. A line that was stored before is refused; for new secrets run the command again. A line from a node whose clock is more than five minutes ahead is refused too: set the node's clock, then run the command again. Treat the line as a password.
+
+If one of the two tokens exists already and was not made for this installation, the command stops before it changes anything and prints the command that removes the token. Something else may use that token, so check first; ProxCloud never removes it. The same happens when a secret is stored but no longer opens its token, because the token was removed and made again.
+
+If you change the boot store or the ISO store, run the command again. **Enter the two secrets by hand instead** is for a token made another way.
+
+Saving the settings in step 1 also adds the installation's own addresses to the provider's blocked networks, and sets a default tenant zone that does not exist yet to be created without DHCP. When you correct an address or a range, the next save takes the entries of the old one off again; entries you wrote yourself are never removed. The page says what it changed. The install itself writes the firewall rule that lets the platform reach the Proxmox API.
 
 ## Step 3: Check
 
@@ -120,7 +131,7 @@ The failed stage shows a code, a message and what to do.
 | `unexpected_rollout` | An upgrade would replace machines of the platform cluster. Nothing was synced. If you changed machine sizes or node groups together with the upgrade, put them back and **Retry**; otherwise install the ProxCloud release that corrects it: step 4 then shows **Upgrade to release X instead**. |
 | `tenants_unhealthy` | During an upgrade a tenant cluster or database that was healthy before is not. Look at the one the message names. **Retry** waits for it again: the upgrade goes on only when it is healthy or deleted. |
 | `bom_unsupported` | The platform was installed by a ProxCloud whose platform release this one does not carry (a development build, or a release from before 0.8.0), and a platform moves only between releases this ProxCloud carries. Go back to the ProxCloud that installed it. Or, if no tenant cluster or database must be kept, delete them all, then remove managed services and install again: **Remove** deletes the platform cluster. |
-| `credentials_missing` | Paste both token secrets in step 2, then **Retry**, or **Remove again** for a removal. |
+| `credentials_missing` | Run the root command of step 2 and paste the `PC-ENROLL` line it prints, then **Retry**, or **Remove again** for a removal. |
 | `stage_unavailable` | The run was recorded by another ProxCloud release. No action in this release. |
 | `tenants_exist` | Delete the tenant clusters and databases, then **Remove** again. |
 | `machine_delete_stuck`, `volume_delete_failed` | Delete the VM or fix the storage named in the message, then **Remove** again. |
@@ -131,15 +142,18 @@ The failed stage shows a code, a message and what to do.
 The page shows each component with its live state, read from the seed. Below that:
 
 - **Endpoints.** The address of the seed's API, the address of the platform cluster's API, the load balancer range and the range of the machines. All are on the platform network; the seed's API answers only for the seed API sources of the settings.
-- **Providers.** The two providers with a link each, and what tenants cannot use yet. The install sets no Kubernetes version on the Kubernetes provider, so the row says "Offers no Kubernetes version yet" until you enter one. Both providers are created held back: the row says so until you turn on the policy for new projects on the provider's **Projects** tab. Projects that existed before are attached on that tab too; the page does not read whether they are.
+- **Providers.** The two providers with a link each, and what tenants cannot use yet.
+  - *The Kubernetes version.* The install imports the node image of its Kubernetes version and does not publish it for tenants: a copy is published only after its smoke test passed, and the tests do not run beside the install. Until then the row says "Offers no Kubernetes version yet", lists each node with the state of its copy, and has one button, **Test, publish and offer Kubernetes <version>**. It smoke-tests the image on each node, one at a time, publishes the copies that pass, and then adds the version to the provider. Keep the page open: leaving it pauses, and the button goes on from where it stopped. It stops at the first step that fails and shows why. The smoke test needs the smoke-test network of the Proxmox provider; without one the node's line says so. A version you entered on the provider yourself is never overwritten or removed. **Apply this release** also adds the version once the image is published, one time: when you delete the version from the provider afterwards, a later apply leaves it deleted. After a ProxCloud upgrade the first apply adds the version of the installed release when its image is published on the platform's nodes and the provider does not name it, also when you published that image only to test it.
+  - *Who gets the providers.* The row says whether new projects get the provider, and the line above the list which choice the settings hold and whether it is applied yet. To change it, choose in step 1 and press **Apply this release**, or use the provider's **Projects** tab. The page does not read whether each existing project is attached; the Projects tab does.
+  - *The job scheduler.* One line says what tenants miss while it is off, with the command.
 - **Platform cluster access.** **Download platform kubeconfig** saves a kubeconfig that works for one hour. With `kubectl` it reads the cluster, without its Secrets, and changes nothing. It also opens the cluster's ArgoCD, whose admin can change everything on the cluster, so keep the file like an admin credential. The download is written to the audit log.
 - **Open ArgoCD.** There are two, one on the platform cluster (every tenant cluster and database) and one on the seed (the platform's own components). This release gives neither an address. The page prints two commands for each: one prints the password of user `admin`, the other forwards a local port; then open `http://localhost:8080` (platform cluster) or `http://localhost:8081` (seed). Run them on a machine that has `kubectl` and reaches the API address shown under Endpoints. The platform cluster's needs the platform kubeconfig, the seed's the seed kubeconfig. What you change by hand on a component, the next **Apply this release** writes back.
 
 Then:
 
-1. Publish a Kubernetes node image for tenants in **Template updates** and enter the line it prints for the image (`<version>=<node image id>`) on the Kubernetes provider's **Connection** tab. Until then tenants cannot create a cluster.
+1. Offer a Kubernetes version: press **Test, publish and offer Kubernetes <version>** under the Kubernetes provider on the ready card. Until then tenants cannot create a cluster.
 2. Add a backup job for the seed VM. The page prints the command: a daily snapshot, compressed, of which seven are kept. The backup holds the seed's credentials: use a backup store that is not the boot, ISO or import store of the settings, and that no API token other than your own can read. The operator guide (docs/managed-services.md, "Credentials and the seed backup") gives the checks. The page cannot see whether a job exists.
-3. Attach the providers to projects on each provider's **Projects** tab, and add price rules for clusters and databases.
+3. Add price rules for clusters and databases: usage that matches no rule is billed as zero.
 
 **Apply this release** in step 4 runs the stages again with the saved settings: it repairs what is missing, applies changed sizes and counts, and renews the seed's access to the platform cluster. A platform stays on the platform release that installed it until you upgrade it: after a ProxCloud upgrade the review lists that release's contents, and **Apply this release** runs with them. A platform installed by a development build is not kept this way: after an upgrade its run is refused with `bom_unsupported`.
 
