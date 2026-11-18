@@ -711,7 +711,7 @@ func TestPlatformRegisterAndDisable(t *testing.T) {
 // cluster on fakes: SUPPORT is refused before anything is asked of a cluster; ADMIN gets a kubeconfig whose token is the
 // one-hour token of the break-glass account, not the admin credential the seed holds; the audit log gets one
 // BREAK_GLASS row with the operation and the same expiry and no token; a cluster that grants a longer life, or an
-// installation without a cluster, gets no kubeconfig and no row.
+// installation without a cluster, gets no kubeconfig and no row; neither does a call whose audit row cannot be written.
 func TestPlatformClusterKubeconfig(t *testing.T) {
 	ctx := context.Background()
 	db := freshPG(t)
@@ -862,5 +862,15 @@ func TestPlatformClusterKubeconfig(t *testing.T) {
 	mu.Unlock()
 	if w := get("admin-sub"); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "no_cluster") || len(rows()) != 1 {
 		t.Fatalf("no cluster: %d %s", w.Code, w.Body.String())
+	}
+	// An audit entry that cannot be written: the token was asked for, and the kubeconfig still stays in.
+	mu.Lock()
+	life, hasCluster = time.Hour, true
+	mu.Unlock()
+	if _, err := db.Pool.Exec(ctx, `CREATE FUNCTION audit_test_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected audit failure'; END $$; CREATE TRIGGER audit_test_fail BEFORE INSERT ON "auditEvent" FOR EACH ROW EXECUTE FUNCTION audit_test_fail()`); err != nil {
+		t.Fatal(err)
+	}
+	if w := get("admin-sub"); w.Code < 500 || strings.Contains(w.Body.String(), minted) || strings.Contains(w.Body.String(), `"kubeconfig"`) || len(rows()) != 1 {
+		t.Fatalf("audit insert fails: %d %s", w.Code, w.Body.String())
 	}
 }
