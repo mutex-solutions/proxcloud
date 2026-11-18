@@ -430,6 +430,10 @@ func TestExecutorHappyPathCreatesNewTemplate(t *testing.T) {
 	if vm.cfg.Str("ide2") != "local-zfs:cloudinit" || vm.cfg.Str("ide0") != "" {
 		t.Fatalf("an OS image's cloud-init drive: ide2 %q, ide0 %q", vm.cfg.Str("ide2"), vm.cfg.Str("ide0"))
 	}
+	// Whether a tenant's server starts with its node is the tenant's setting: a native OS template carries none.
+	if _, set := vm.cfg["onboot"]; set {
+		t.Fatalf("an OS template got onboot %q", vm.cfg.Str("onboot"))
+	}
 	if pv.checkSum != "sha256:"+strings.TrimPrefix(p.DiskDigest, "sha256:") {
 		t.Fatalf("PVE was not asked to verify sha256: %q", pv.checkSum)
 	}
@@ -444,6 +448,25 @@ func TestExecutorHappyPathCreatesNewTemplate(t *testing.T) {
 	}
 	if len(pv.files) != 0 {
 		t.Fatalf("upload left behind: %v", pv.files)
+	}
+}
+
+// A Kubernetes node image is imported with onboot: a clone copies it, so workers and platform machines made from the
+// template, and their replacements, start again with their Proxmox node.
+func TestExecutorKubernetesTemplateStartsAtBoot(t *testing.T) {
+	x, pv, _, rec, p := setup(t)
+	p.Package, p.Variant, p.KubernetesVersion = "proxcloud-vm-ubuntu-2604-k8s", "kubernetes", "1.35.10"
+	p.OS, p.Tag, p.BuildVersion = "ubuntu-2604", "ubuntu-2604-k8s-1.35.10-20261112010203-cccccccccccc", "20261112010203"
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	rec.m[testJob] = Receipt{ID: testJob, Kind: "vm", Payload: p, Step: StepQueued}
+	if err := x.Run(context.Background(), testJob, p, &testFence{epoch: 1, budget: -1}); err != nil {
+		t.Fatal(err)
+	}
+	vm := pv.vms[9201]
+	if !vm.template || vm.cfg.Str("onboot") != "1" || vm.cfg.Str("ide0") != "local-zfs:cloudinit" {
+		t.Fatalf("node image template: template %v, onboot %q, ide0 %q", vm.template, vm.cfg.Str("onboot"), vm.cfg.Str("ide0"))
 	}
 }
 
