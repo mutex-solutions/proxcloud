@@ -162,7 +162,8 @@ func (x *acq) renderInput() RenderInput {
 		PVEAPIURL: sp.PVEAPIURL, BootStorage: sp.Storage.Boot, SeedAddress: sp.Seed.Address, SSHKeys: sp.Seed.SSHKeys, Templates: templates, WorkerMTU: mtu,
 		Network: RenderNetwork{Bridge: sp.Network.Bridge, VLAN: sp.Network.VLAN, Gateway: sp.Network.Gateway, Prefix: prefix.Bits(), DNS: sp.Network.DNS, MTU: sp.Network.MTU},
 		Cluster: RenderCluster{Endpoint: c.Endpoint, NodeRange: []string{c.NodeRange}, MetalLBRange: c.MetalLBRange,
-			ControlPlane: RenderMachine{Node: c.ControlPlane.Node, Cores: c.ControlPlane.Cores, MemoryMiB: c.ControlPlane.MemoryMiB, DiskGiB: c.ControlPlane.DiskGiB}}}
+			ControlPlane:         RenderMachine{Node: c.ControlPlane.Node, Cores: c.ControlPlane.Cores, MemoryMiB: c.ControlPlane.MemoryMiB, DiskGiB: c.ControlPlane.DiskGiB},
+			ControlPlaneReplicas: c.ControlPlane.Count()}}
 	for _, g := range c.NodeGroups {
 		in.Cluster.NodeGroups = append(in.Cluster.NodeGroups, RenderNodeGroup{Name: g.Name, Nodes: g.Nodes, Count: g.Count, Cores: g.Cores, MemoryMiB: g.MemoryMiB, DiskGiB: g.DiskGiB})
 	}
@@ -922,7 +923,7 @@ func (x *acq) cluster(ctx context.Context) error {
 	if err != nil {
 		return classify(CodeSeedAPIUnreachable, err)
 	}
-	total := 1
+	total := c.ControlPlane.Count()
 	for _, g := range c.NodeGroups {
 		total += g.Count
 	}

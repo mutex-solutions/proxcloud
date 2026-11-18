@@ -4,7 +4,8 @@ package admin
 //
 //	GET  /admin/platform/bom                              the BOM this release embeds, with its sha256      (service:read)
 //	GET  /admin/platform/installations                    every installation                                (service:read)
-//	POST /admin/platform/installations                    a new one, in phase draft                         (service:manage)
+//	POST /admin/platform/installations                    a new one, in phase draft; "preset" fills what the
+//	                                                      spec leaves out                                   (service:manage)
 //	GET  /admin/platform/installations/{id}               one                                               (service:read)
 //	PUT  /admin/platform/installations/{id}               replace name and spec; refused during a run, on a
 //	                                                      stale rev and for fixed fields                    (service:manage)
@@ -249,9 +250,11 @@ func (h *Handler) platformGet(w http.ResponseWriter, r *http.Request) {
 }
 
 // installationRequest is the body of a create and of an update. serviceId, provisionedBy and layout may be left out of
-// an update; rev is the one the update read.
+// an update; rev is the one the update read. preset (homelab, standard or custom) fills what the spec leaves out
+// (platformlife.ApplyPreset) before the checks and is not stored: the answer carries the whole spec.
 type installationRequest struct {
 	Name          string            `json:"name"`
+	Preset        string            `json:"preset"`
 	ServiceID     string            `json:"serviceId"`
 	ProvisionedBy string            `json:"provisionedBy"`
 	Layout        string            `json:"layout"`
@@ -259,8 +262,11 @@ type installationRequest struct {
 	Rev           int64             `json:"rev"`
 }
 
-// checked normalizes in and checks it on its own and against its provider's networks.
-func (h *Handler) checked(r *http.Request, in *platformlife.Installation) error {
+// checked fills in from preset, normalizes it and checks it on its own and against its provider's networks.
+func (h *Handler) checked(r *http.Request, in *platformlife.Installation, preset string) error {
+	if err := platformlife.ApplyPreset(preset, &in.Spec); err != nil {
+		return &invalidInstallation{status: http.StatusBadRequest, code: "invalid_installation", msg: "The installation is not valid", problems: []string{err.Error()}}
+	}
 	es, err := h.esSvc.Get(r.Context(), in.ServiceID)
 	if err != nil || es == nil || !es.IsProxmox() {
 		return &invalidInstallation{status: http.StatusBadRequest, code: "invalid_installation", msg: "serviceId must name a Proxmox provider",
@@ -295,7 +301,7 @@ func (h *Handler) platformCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	in := &platformlife.Installation{Name: req.Name, ServiceID: req.ServiceID, ProvisionedBy: req.ProvisionedBy, Layout: req.Layout,
 		Spec: req.Spec, CreatedBy: adminActor(r)}
-	if platformStoreErr(w, h.checked(r, in)) || platformStoreErr(w, h.platform.Create(r.Context(), in)) {
+	if platformStoreErr(w, h.checked(r, in, req.Preset)) || platformStoreErr(w, h.platform.Create(r.Context(), in)) {
 		return
 	}
 	httpx.OK(w, &installationView{Installation: in})
@@ -324,8 +330,11 @@ func (h *Handler) platformUpdate(w http.ResponseWriter, r *http.Request) {
 		if h.esSvc == nil {
 			return nil, serviceNotFoundErr(next.ServiceID)
 		}
-		if err := h.checked(r, &next); err != nil {
+		if err := h.checked(r, &next, req.Preset); err != nil {
 			return nil, err
+		}
+		if why := platformlife.ControlPlaneShrink(&old, &next); why != "" {
+			return nil, &invalidInstallation{status: http.StatusConflict, code: "fixed_fields", msg: why, problems: []string{why}}
 		}
 		if fixed := platformlife.FixedChanges(&old, &next); len(fixed) > 0 {
 			return nil, &invalidInstallation{status: http.StatusConflict, code: "fixed_fields",

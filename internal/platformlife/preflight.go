@@ -27,7 +27,7 @@ const (
 // Check is one row of the preflight. The ids are part of the API (docs/api.md): flags, spec, network, bridge (a failure before the
 // first install, a warning after it), isolation,
 // tenant-network and tenant-path (a warning or ok, never a failure; absent when the provider names no zone), csi-vmid (a warning or ok, never a failure), credentials,
-// machines (a warning or ok, never a failure; absent while the installation has no VM), privileges:capi, privileges:csi, privileges:kubemint, mint-scope, pool-fence, token-scope, iso-store-visibility,
+// machines (a warning or ok, never a failure; absent while the installation has no VM), capacity (a failure before the first install, a warning after it or when it cannot be read; absent while the CAPI token is not stored), privileges:capi, privileges:csi, privileges:kubemint, mint-scope, pool-fence, token-scope, iso-store-visibility,
 // boot-iso-grant, boot-iso, placement, images. A run's first stage fails preflight_failed with the failed rows as its items, or
 // isolation_not_enforced when isolation is the only one.
 type Check struct {
@@ -138,6 +138,14 @@ func (p Preflight) Run(ctx context.Context) []Check {
 	if bom, err := bomOf(in); err == nil && s.Network.VLAN > 0 && !kamaji.ChartHasVLAN(ClusterChartVersion(bom)) {
 		spec = append(spec, fmt.Sprintf("spec.network.vlan %d: the platform's BOM (release %s) names cluster chart %s, which cannot tag a NIC; a VLAN tag needs chart %s or newer, so use a bridge or vnet that carries the VLAN untagged",
 			s.Network.VLAN, bom.Release, ClusterChartVersion(bom), kamaji.VLANChartVersion))
+	}
+	if bom, err := bomOf(in); err == nil {
+		for _, c := range s.Clusters {
+			if n := c.ControlPlane.Count(); n > 1 && !kamaji.ChartHasControlPlaneReplicas(ClusterChartVersion(bom)) {
+				spec = append(spec, fmt.Sprintf("spec.clusters: %d control plane machines: the platform's BOM (release %s) names cluster chart %s, which builds one; more need chart %s or newer, so keep 1 until the platform is on a release that has it",
+					n, bom.Release, ClusterChartVersion(bom), kamaji.ControlPlaneReplicasChartVersion))
+			}
+		}
 	}
 	row("spec", spec, "The installation is complete and consistent.")
 
@@ -261,6 +269,10 @@ func (p Preflight) Run(ctx context.Context) []Check {
 		case len(vms) > 0:
 			row("machines", nil, fmt.Sprintf("The platform's %d VMs run and start when their node boots.", len(vms)))
 		}
+	}
+
+	if p.CAPI != nil {
+		out = append(out, p.capacity(ctx))
 	}
 
 	privs := func(id string, c *pve.Client, who string, checks []pve.PrivCheck) {

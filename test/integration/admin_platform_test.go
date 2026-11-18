@@ -146,6 +146,31 @@ func TestAdminPlatformInstallations(t *testing.T) {
 	if a := call("admin-sub", http.MethodPost, base, platformBody("10.9.9.1", 2, 0), http.StatusBadRequest); code(a) != "invalid_installation" {
 		t.Fatalf("a gateway outside the network: %+v", a)
 	}
+	// A preset fills what the body leaves out, and the stored spec names all of it: on a second provider, a body with
+	// the addresses and one node becomes the homelab layout on a network that node routes.
+	mustInsert(t, db, "externalService", pgdoc.M{"_id": "svc-home", "name": "home", "type": "CLOUD", "status": "PUBLIC", "config": pgdoc.M{
+		"provider": "proxmox", "region": "home", "apiUrl": fakePVE.URL, "tokenId": "proxcloud@pve!platform", "importStorage": "nas-templates",
+		"network": pgdoc.M{"cidrPool": "10.100.0.0/16"}}, "secret": pgdoc.M{"tokenSecret": enc.Encrypt(portalToken)}})
+	presetBody := func(preset string) string {
+		return `{"name":"home","serviceId":"svc-home","preset":"` + preset + `","spec":{"pveApiUrl":"https://10.90.0.2:8006","storage":{"boot":"local-lvm","iso":"local"},
+			"network":{"prefix":"10.90.0.0/24","gateway":"10.90.0.1","dns":["10.90.0.1"]},"seed":{"node":"pve1","address":"10.90.0.5","apiSources":["192.168.33.0/24"]},
+			"clusters":[{"endpoint":"10.90.0.10","nodeRange":"10.90.0.20-10.90.0.60","metallbRange":"10.90.0.100-10.90.0.150"}]}}`
+	}
+	if a := call("admin-sub", http.MethodPost, base, presetBody("production"), http.StatusBadRequest); code(a) != "invalid_installation" ||
+		!strings.Contains(strings.Join(anyStrings(a.Errors.Details["problems"]), ","), "homelab, standard or custom") {
+		t.Fatalf("an unknown preset: %+v", a)
+	}
+	if a := call("admin-sub", http.MethodPost, base, presetBody("custom"), http.StatusBadRequest); code(a) != "invalid_installation" {
+		t.Fatalf("custom fills nothing, so the same body is not complete: %+v", a)
+	}
+	var home platformlife.Installation
+	if err := json.Unmarshal(call("admin-sub", http.MethodPost, base, presetBody("homelab"), http.StatusOK).Data, &home); err != nil {
+		t.Fatal(err)
+	}
+	if hc := home.Spec.Clusters[0]; home.Spec.Network.Mode != platformlife.NetworkRouted || home.Spec.Network.Bridge != "pcplat0" || home.Spec.Seed.MemoryMiB != 4096 ||
+		hc.ControlPlane.Replicas != 1 || hc.ControlPlane.Node != "pve1" || len(hc.NodeGroups) != 3 || hc.NodeGroups[0].Count != 1 || hc.NodeGroups[0].Nodes[0] != "pve1" {
+		t.Fatalf("the homelab preset: %+v", home.Spec)
+	}
 	// Reads: service:read.
 	call("support-sub", http.MethodGet, base, "", http.StatusOK)
 	call("support-sub", http.MethodGet, one, "", http.StatusOK)
@@ -225,10 +250,26 @@ func TestAdminPlatformInstallations(t *testing.T) {
 		t.Fatalf("network after install: %+v", a)
 	}
 	call("admin-sub", http.MethodPut, one, platformBody("10.200.200.1", 6, 2), http.StatusOK)
+	// The control plane count of an installed platform: 1 to 3 is saved (an apply adds the machines), 3 to 1 is not.
+	replicas := func(n int, rev int64) string {
+		return strings.Replace(platformBody("10.200.200.1", 6, rev), `"controlPlane":{`, fmt.Sprintf(`"controlPlane":{"replicas":%d,`, n), 1)
+	}
+	if a := call("admin-sub", http.MethodPut, one, replicas(3, 3), http.StatusOK); !strings.Contains(string(a.Data), `"replicas":3`) {
+		t.Fatalf("1 to 3 after install: %s", a.Data)
+	}
+	if a := call("admin-sub", http.MethodPut, one, replicas(1, 4), http.StatusConflict); code(a) != "fixed_fields" ||
+		!strings.Contains(strings.Join(anyStrings(a.Errors.Details["problems"]), ","), "does not go from 3 machines to 1") {
+		t.Fatalf("3 to 1 after install: %+v", a)
+	}
+	// A body without the count keeps meaning one machine, so it is the same refusal, not a silent shrink.
+	if a := call("admin-sub", http.MethodPut, one, platformBody("10.200.200.1", 6, 4), http.StatusConflict); code(a) != "fixed_fields" {
+		t.Fatalf("3 to a body without the count: %+v", a)
+	}
+	call("admin-sub", http.MethodPut, one, replicas(3, 4), http.StatusOK)
 	if err := store.SaveRun(ctx, &platformlife.Run{ID: "pr-1", InstallationID: in.ID, Kind: platformlife.RunApply, State: platformlife.RunRunning}); err != nil {
 		t.Fatal(err)
 	}
-	if a := call("admin-sub", http.MethodPut, one, platformBody("10.200.200.1", 8, 3), http.StatusConflict); code(a) != "run_active" {
+	if a := call("admin-sub", http.MethodPut, one, platformBody("10.200.200.1", 8, 5), http.StatusConflict); code(a) != "run_active" {
 		t.Fatalf("during a run: %+v", a)
 	}
 
@@ -241,18 +282,21 @@ func TestAdminPlatformInstallations(t *testing.T) {
 		}
 		raw = append(raw, docs...)
 	}
+	if stored, _ := json.Marshal(raw); strings.Contains(string(stored), "homelab") || !strings.Contains(string(stored), "pcplat0") {
+		t.Fatalf("a stored installation names its preset, or lacks what the preset filled: %s", stored)
+	}
 	var events []pgdoc.M
 	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(100 * time.Millisecond) { // the middleware writes asynchronously
 		events = nil
 		if err := db.C("auditEvent").Find(ctx, pgdoc.M{"resourceType": "PLATFORM_INSTALLATION"}, &events); err != nil {
 			t.Fatal(err)
 		}
-		if len(events) >= 4 || time.Now().After(deadline) {
+		if len(events) >= 7 || time.Now().After(deadline) {
 			break
 		}
 	}
-	if len(events) != 4 { // create, credentials, two updates; the preflight and every refusal are not audited
-		t.Fatalf("%d audit events, want 4: %v", len(events), events)
+	if len(events) != 7 { // two creates (the second from a preset), credentials, four updates; the preflight and every refusal are not audited
+		t.Fatalf("%d audit events, want 7: %v", len(events), events)
 	}
 	dump, _ := json.Marshal(map[string]any{"responses": bodies, "stored": raw, "audit": events})
 	for _, s := range []string{plantedCAPI, plantedCSI, portalToken} {

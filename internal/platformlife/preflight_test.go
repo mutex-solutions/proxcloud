@@ -52,6 +52,7 @@ func (f *preflightPVE) serve(w http.ResponseWriter, r *http.Request) {
 		"/cluster/firewall/options": `{"enable":1}`,
 		"/cluster/firewall/rules":   `[]`,
 		"/cluster/sdn/vnets":        `[]`,
+		"/nodes":                    `[{"node":"pve1","status":"online","maxmem":68719476736,"mem":1073741824}]`,
 		"/storage": `[{"storage":"local","type":"dir","content":"iso,import"},{"storage":"local-lvm","type":"lvmthin","content":"images"},
 			{"storage":"nas-iso","type":"nfs","content":"iso","shared":1}]`,
 		"/cluster/resources": `[{"type":"storage","storage":"local","node":"pve1","status":"available"},
@@ -164,8 +165,8 @@ func TestPreflight(t *testing.T) {
 	if !OK(checks) {
 		t.Fatalf("a set-up site: %+v", checks)
 	}
-	if got := len(checks); got != 18 {
-		t.Errorf("%d rows, want 18: %+v", got, checks)
+	if got := len(checks); got != 19 {
+		t.Errorf("%d rows, want 19: %+v", got, checks)
 	}
 	if c := checkMap(checks)["csi-vmid"]; c.Status != CheckOK {
 		t.Errorf("VM id 9999 free: %+v", c)
