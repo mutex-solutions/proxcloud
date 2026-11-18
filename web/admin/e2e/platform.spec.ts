@@ -270,6 +270,16 @@ test("Remove asks for the typed name and sends the confirmation only for the for
   await shot(page, "removed")
 })
 
+test("a platform installed by the release before stays on it: the review says so and lists its contents", async ({ page }) => {
+  await open(page, "previous")
+  await expect(page.getByText("The platform stays on release 0.6.0")).toBeVisible()
+  await expect(page.getByText(/carries the newer platform release 0\.7\.0, and moving an installed platform to it is not available yet/)).toBeVisible()
+  await expect(page.getByText(/^Release 0\.6\.0 with Kubernetes/)).toBeVisible()
+  await expect(page.getByText("Changes from the installed release 0.6.0")).toBeVisible()
+  await expect(page.getByRole("button", { name: "Apply this release" })).toBeEnabled()
+  await expectAccessible(page)
+})
+
 test("a re-apply from ready that fails shows Failed in the header", async ({ page }) => {
   await open(page, "ready")
   await expect(headerState(page)).toHaveText("Ready")

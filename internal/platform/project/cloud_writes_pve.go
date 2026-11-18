@@ -22,7 +22,9 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"net/netip"
 	"path"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1573,8 +1575,8 @@ func pveVolumeErr(err error) *httpx.HTTPError {
 	return upstreamErr(computeBackend, err)
 }
 
-// sgRuleErr: the rule's fields come from the tenant and PVE is what validates them, so its 400 names what to fix and
-// holds no address.
+// sgRuleErr: the rule's fields come from the tenant; sgRuleFromPayload checks them first, and what only PVE refuses
+// comes back as its 400, which names what to fix and holds no address.
 func sgRuleErr(err error) *httpx.HTTPError {
 	var ae *pve.APIError
 	if !errors.As(err, &ae) || ae.Status != http.StatusBadRequest || len(ae.Errors) == 0 {
@@ -1923,17 +1925,10 @@ func (h *Handler) pveSecurityGroupAction(w http.ResponseWriter, r *http.Request,
 		httpx.OK(w, map[string]any{"result": rules})
 		return true
 	case "ADD_RULE":
-		dir := strAny(data["direction"])
-		ruleType := "in"
-		if dir == "egress" {
-			ruleType = "out"
-		}
-		rule := pve.FirewallRule{
-			Type: ruleType, Action: "ACCEPT",
-			Proto:   strAny(data["protocol"]),
-			Source:  strAny(data["remoteIpPrefix"]),
-			DPort:   portRange(data),
-			Comment: strAny(data["description"]),
+		rule, herr := sgRuleFromPayload(data)
+		if herr != nil {
+			h.fail(w, herr)
+			return true
 		}
 		if err := ps.SGAddRule(ctx, proj.ID, cr.ExternalID, rule); err != nil {
 			h.fail(w, sgRuleErr(err))
@@ -1941,19 +1936,25 @@ func (h *Handler) pveSecurityGroupAction(w http.ResponseWriter, r *http.Request,
 		}
 		h.pveSyncSecurityGroups(ctx, es, proj)
 		h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
-		httpx.OK(w, map[string]any{"result": map[string]any{}})
+		result := map[string]any{}
+		if rule.Type == "out" {
+			result["warning"] = sgEgressWarning
+		}
+		httpx.OK(w, map[string]any{"result": result})
 		return true
 	case "DELETE_RULE":
-		pos := intAny(data["pos"])
-		if pos == 0 {
-			// The FE names rules "<group>-<pos>" (the sync id shape).
-			if id := strAny(data["ruleId"]); id != "" {
-				if i := strings.LastIndexByte(id, '-'); i >= 0 {
-					pos, _ = strconv.Atoi(id[i+1:])
-				}
-			}
+		// A position names whatever rule sits there now, so only the listed id is taken: with no id the old
+		// code deleted rule 0.
+		ruleID := strAny(data["ruleId"])
+		if ruleID == "" {
+			h.fail(w, httpx.BadRequest("DELETE_RULE needs ruleId: the id of the rule as LIST_RULES returns it"))
+			return true
 		}
-		if err := ps.SGDeleteRule(ctx, proj.ID, cr.ExternalID, pos); err != nil {
+		if err := ps.SGDeleteRule(ctx, proj.ID, cr.ExternalID, ruleID); err != nil {
+			var changed *pve.ConflictError
+			if errors.As(err, &changed) {
+				h.pveSyncSecurityGroups(ctx, es, proj) // so the client's refresh lists the rules as they are
+			}
 			h.fail(w, pveVolumeErr(err))
 			return true
 		}
@@ -1965,17 +1966,107 @@ func (h *Handler) pveSecurityGroupAction(w http.ResponseWriter, r *http.Request,
 	return false
 }
 
-// portRange renders the API's portRangeMin/Max into the PVE dport syntax.
-func portRange(data map[string]any) string {
-	lo, hi := intAny(data["portRangeMin"]), intAny(data["portRangeMax"])
-	switch {
-	case lo == 0 && hi == 0:
-		return ""
-	case hi == 0 || lo == hi:
-		return strconv.Itoa(lo)
-	default:
-		return fmt.Sprintf("%d:%d", lo, hi)
+// sgEgressWarning rides the answer of an egress ADD_RULE: every server runs with policy_out=ACCEPT
+// (pve.vmFirewallOptions), so the rule is stored and filters nothing.
+const sgEgressWarning = "Outbound traffic is always allowed: an egress rule is stored but restricts nothing"
+
+// sgRuleFields are the ADD_RULE keys a Proxmox security group rule can honour.
+var sgRuleFields = []string{"direction", "protocol", "portRangeMin", "portRangeMax", "remoteIpPrefix", "description"}
+
+// sgProtocols are the accepted protocols; true = the protocol has ports.
+var sgProtocols = map[string]bool{"tcp": true, "udp": true, "sctp": true, "icmp": false, "gre": false, "esp": false, "ah": false}
+
+// sgRuleFromPayload validates ADD_RULE data and maps it to the PVE rule. Every key it cannot honour is refused:
+// dropping one (remoteGroupId, action, log, priority) stored a wider rule than asked, e.g. a DROP as an ALLOW.
+func sgRuleFromPayload(data map[string]any) (pve.FirewallRule, *httpx.HTTPError) {
+	var rule pve.FirewallRule
+	var unknown []string
+	for k, v := range data {
+		// INVOKEACTION carries the action's own name inside data.
+		if slices.Contains(sgRuleFields, k) || (k == "action" && strings.EqualFold(strAny(v), "ADD_RULE")) {
+			continue
+		}
+		unknown = append(unknown, k)
 	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		return rule, httpx.BadRequest("Unsupported rule field: " + strings.Join(unknown, ", ") + ". A rule takes " + strings.Join(sgRuleFields, ", "))
+	}
+	text := map[string]string{}
+	for _, k := range []string{"direction", "protocol", "remoteIpPrefix", "description"} {
+		if v := data[k]; v != nil {
+			s, ok := v.(string)
+			if !ok {
+				return rule, httpx.BadRequest(k + " must be a string")
+			}
+			text[k] = strings.TrimSpace(s)
+		}
+	}
+	rule = pve.FirewallRule{Type: "in", Action: "ACCEPT", Proto: strings.ToLower(text["protocol"]), Comment: text["description"]}
+	switch text["direction"] {
+	case "", "ingress":
+	case "egress":
+		rule.Type = "out"
+	default:
+		return rule, httpx.BadRequest("direction must be ingress or egress")
+	}
+	hasPorts, known := sgProtocols[rule.Proto]
+	if rule.Proto != "" && !known {
+		return rule, httpx.BadRequest("protocol must be one of tcp, udp, sctp, icmp, gre, esp, ah, or empty for any")
+	}
+	lo, herr := sgPort(data, "portRangeMin")
+	if herr != nil {
+		return rule, herr
+	}
+	hi, herr := sgPort(data, "portRangeMax")
+	if herr != nil {
+		return rule, herr
+	}
+	switch {
+	case lo == 0 && hi != 0:
+		return rule, httpx.BadRequest("portRangeMax needs portRangeMin")
+	case hi != 0 && hi < lo:
+		return rule, httpx.BadRequest("portRangeMax must not be below portRangeMin")
+	case lo != 0 && !hasPorts:
+		return rule, httpx.BadRequest("A port range needs protocol tcp, udp or sctp")
+	case lo != 0 && (hi == 0 || hi == lo):
+		rule.DPort = strconv.Itoa(lo)
+	case lo != 0:
+		rule.DPort = fmt.Sprintf("%d:%d", lo, hi)
+	}
+	if cidr := text["remoteIpPrefix"]; cidr != "" {
+		if p, err := netip.ParsePrefix(cidr); err == nil {
+			if p.Masked() != p {
+				return rule, httpx.BadRequest("remoteIpPrefix " + cidr + " has host bits set: use " + p.Masked().String())
+			}
+		} else if a, err := netip.ParseAddr(cidr); err != nil || a.Zone() != "" {
+			return rule, httpx.BadRequest("remoteIpPrefix must be a CIDR such as 203.0.113.0/24 or a single address")
+		}
+		// The remote of an inbound rule is its source, of an outbound rule its destination.
+		if rule.Type == "out" {
+			rule.Dest = cidr
+		} else {
+			rule.Source = cidr
+		}
+	}
+	return rule, nil
+}
+
+// sgPort reads a port of ADD_RULE data: 0 when absent, 400 unless a whole number from 1 to 65535 (anything else
+// read as "no port" would store a rule for every port).
+func sgPort(data map[string]any, key string) (int, *httpx.HTTPError) {
+	v := data[key]
+	if v == nil {
+		return 0, nil
+	}
+	n := intAny(v)
+	if f, ok := v.(float64); ok && f != float64(n) {
+		n = 0
+	}
+	if n < 1 || n > 65535 {
+		return 0, httpx.BadRequest(key + " must be a whole number from 1 to 65535")
+	}
+	return n, nil
 }
 
 // pveSyncSecurityGroups reconciles the project's SG rows inline (best-effort).

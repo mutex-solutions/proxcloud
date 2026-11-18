@@ -8,6 +8,8 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -372,4 +374,89 @@ func TestBOMImagesArePublished(t *testing.T) {
 			t.Errorf("docs/vm-artifact-publishing.md does not list %s", ref)
 		}
 	}
+}
+
+// previousSHA256 is the sha256 of every previous BOM this build embeds, as its release published it. The one of 0.8.0
+// is the sha256 of deploy/platform/platform-bom.yaml at the tag v0.8.0 (git show v0.8.0:deploy/platform/platform-bom.yaml
+// | sha256sum), which is what a platform installed by v0.8.0 recorded in status.bom.
+var previousSHA256 = map[string]string{
+	"0.8.0": "8eb874987d3bbaf55f309295ee241ec320c0cf9e0805b3bd1812ef908b6600c6",
+}
+
+// A previous BOM is the file of its tag, byte for byte: an installed platform names it by this sha256, so a changed
+// byte (a comment too) would refuse every apply on that platform with bom_unsupported.
+func TestPreviousBOMsAreUnchanged(t *testing.T) {
+	prev, err := Previous()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prev) != len(previousSHA256) {
+		t.Errorf("%d previous BOMs are embedded, previousSHA256 lists %d", len(prev), len(previousSHA256))
+	}
+	cur, _ := Current()
+	for _, b := range prev {
+		if want := previousSHA256[b.Release]; b.SHA256 != want {
+			t.Errorf("deploy/platform/previous/%s.yaml has sha256 %s, its release published %q", b.Release, b.SHA256, want)
+		}
+		if got, ok := Lookup(b.SHA256); !ok || got.BOM != b.BOM || b.SHA256 == cur.SHA256 {
+			t.Errorf("Lookup does not find the previous BOM %s, or it is the current one", b.Release)
+		}
+	}
+	if _, ok := Lookup(strings.Repeat("0", 64)); ok {
+		t.Error("Lookup found a BOM nobody embedded")
+	}
+}
+
+// Every release from v0.8.0 on (the first with a platform) that CHANGELOG.md lists has its BOM under
+// deploy/platform/previous/, except the release this BOM is: the change that follows a release adds the file
+// (docs/ci-release.md, "Previous BOMs"). Without it the next release would refuse the platforms of that one.
+func TestEveryReleaseHasItsPreviousBOM(t *testing.T) {
+	changelog, err := os.ReadFile("../../CHANGELOG.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur, _ := Current()
+	releases := regexp.MustCompile(`(?m)^## \[(\d+)\.(\d+)\.(\d+)\]`).FindAllStringSubmatch(string(changelog), -1)
+	if len(releases) == 0 {
+		t.Fatal("CHANGELOG.md lists no release")
+	}
+	for _, m := range releases {
+		major, _ := strconv.Atoi(m[1])
+		minor, _ := strconv.Atoi(m[2])
+		release := m[1] + "." + m[2] + "." + m[3]
+		if (major == 0 && minor < 8) || release == cur.Release {
+			continue
+		}
+		if previousSHA256[release] == "" {
+			t.Errorf("release %s has no deploy/platform/previous/%s.yaml", release, release)
+		}
+	}
+}
+
+// newerBuild makes the build under test one whose own BOM differs from 0.8.0's in every kind of pin a run reads (the
+// BOM on main may differ by its release line only), and answers the embedded 0.8.0 BOM.
+func newerBuild(t *testing.T) Embedded {
+	t.Helper()
+	cur, err := Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := *cur.BOM
+	t.Cleanup(func() { *cur.BOM = saved })
+	cur.Release = "9.9.9-dev"
+	cur.Seed.Image.Digest = "sha256:" + strings.Repeat("a", 64)
+	cur.Kubernetes.NodeImage.Digest = "sha256:" + strings.Repeat("b", 64)
+	cur.TenantCharts.Kubernetes.Version, cur.TenantCharts.Database.Version = "9.9.9", "9.9.9"
+	cur.Components = slices.Clone(saved.Components)
+	for i := range cur.Components {
+		cur.Components[i].Chart.Version = "9.9.9"
+		if cur.Components[i].Cluster == ClusterWorkload {
+			cur.Components[i].Namespace = "moved"
+		}
+	}
+	old, ok := Lookup(previousSHA256["0.8.0"])
+	if !ok {
+		t.Fatal("this build does not embed the 0.8.0 BOM")
+	}
+	return old
 }
