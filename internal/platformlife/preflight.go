@@ -474,16 +474,14 @@ func (p Preflight) bootStore(ctx context.Context, defs []pve.StorageDef, defsErr
 		return c
 	}
 	c.Message = "The boot store " + boot + " exists and takes disk images."
-	if p.CSI == nil {
-		c.Message += " Whether it also holds other VMs' disks is read once the token " + pve.CSITokenID + " is stored."
+	if p.CSI == nil || p.CAPI == nil { // without the CAPI token the platform's own machines would count as others
+		c.Message += " Whether it also holds other VMs' disks is read once the tokens " + pve.CAPITokenID + " and " + pve.CSITokenID + " are stored."
 		return c
 	}
 	own := map[int]bool{}
-	if p.CAPI != nil {
-		vms, _ := platformVMs(ctx, p.CAPI, in.ID)
-		for _, vm := range vms {
-			own[vm.vmid] = true
-		}
+	vms, _ := platformVMs(ctx, p.CAPI, in.ID)
+	for _, vm := range vms {
+		own[vm.vmid] = true
 	}
 	if pool, err := p.Portal.C.GetPool(ctx, pve.TemplatePool); err == nil && pool != nil {
 		for _, m := range pool.Members {

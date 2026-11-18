@@ -20,6 +20,12 @@ import (
 // APIAccess is what the rule names: as sources the seed's address and every cluster's node range as CIDRs (never the
 // MetalLB range: nothing there calls Proxmox), as destination the host of spec.pveApiUrl when it is an address ("" for
 // a name, which the firewall cannot hold), and the URL's port.
+//
+// The sources are whole node ranges because every machine of a cluster is a platform machine today. A sandbox node
+// group on the platform cluster (the shared sandbox layout, a later release) must not reach the Proxmox API: it will
+// take its addresses from an optional range of its own on the node group, and that range is then left out of these
+// sources and fenced as a sandbox network, not as a platform one (Unfenced). An optional field, so a saved
+// installation reads as before.
 func (in *Installation) APIAccess() (sources []string, dest, port string) {
 	prefix, _ := netip.ParsePrefix(in.Spec.Network.Prefix)
 	if a, err := netip.ParseAddr(in.Spec.Seed.Address); err == nil {

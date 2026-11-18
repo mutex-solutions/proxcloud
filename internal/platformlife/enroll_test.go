@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 )
@@ -47,6 +48,7 @@ func TestParseEnrollLine(t *testing.T) {
 		"a field too many":  enrollLineOf("1:pi-0a1b2c3d:1795000000:" + capi + ":" + csi + ":x"),
 		"no time":           enrollLineOf("1:pi-0a1b2c3d::" + capi + ":" + csi),
 		"a negative time":   enrollLineOf("1:pi-0a1b2c3d:-5:" + capi + ":" + csi),
+		"a zero time":       enrollLineOf("1:pi-0a1b2c3d:0:" + capi + ":" + csi),
 		"no installation":   enrollLineOf("1::1795000000:" + capi + ":" + csi),
 		"no secret at all":  enrollLineOf("1:pi-0a1b2c3d:1795000000::"),
 		"not a secret":      enrollLineOf("1:pi-0a1b2c3d:1795000000:hunter2:" + csi),
@@ -59,6 +61,23 @@ func TestParseEnrollLine(t *testing.T) {
 		}
 		if err != nil && (strings.Contains(err.Error(), capi) || strings.Contains(err.Error(), csi)) {
 			t.Errorf("%s: the error quotes a secret: %v", name, err)
+		}
+	}
+}
+
+// A line printed by a node whose clock is ahead is refused: stored, its time would make every line printed after the
+// clock was set right a replay. A few minutes of drift pass.
+func TestEnrollmentAhead(t *testing.T) {
+	now := time.Unix(1795000000, 0)
+	for issued, want := range map[int64]bool{
+		1795000000 - 86400:     false,
+		1795000000 + 4*60:      false,
+		1795000000 + 5*60:      false,
+		1795000000 + 5*60 + 1:  true,
+		1795000000 + 365*86400: true, // a wrong year
+	} {
+		if got := (&Enrollment{Issued: issued}).Ahead(now); got != want {
+			t.Errorf("issued %d against %d: ahead %v, want %v", issued, now.Unix(), got, want)
 		}
 	}
 }

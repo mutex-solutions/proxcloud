@@ -455,10 +455,16 @@ func TestPreflightBootStoreAndAPIRule(t *testing.T) {
 	if c := row("boot-store"); c.Status != CheckWarn || !strings.Contains(c.Message, "could not be listed") {
 		t.Errorf("a list that is refused: %+v", c)
 	}
-	pf.CSI = nil
-	if c := row("boot-store"); c.Status != CheckOK || !strings.Contains(c.Message, "once the token "+pve.CSITokenID+" is stored") {
-		t.Errorf("no CSI token: %+v", c)
+	// Without either token nothing is listed: without the CAPI token the platform's own machines would be "others".
+	for _, without := range []**pve.Client{&pf.CAPI, &pf.CSI} {
+		keep := *without
+		*without = nil
+		if c := row("boot-store"); c.Status != CheckOK || !strings.Contains(c.Message, "once the tokens "+pve.CAPITokenID+" and "+pve.CSITokenID+" are stored") {
+			t.Errorf("a token is not stored: %+v", c)
+		}
+		*without = keep
 	}
+	pf.CSI = nil
 	f.extra["/storage"] = `[{"storage":"local","type":"dir","content":"iso,import"},{"storage":"local-lvm","type":"lvmthin","content":"rootdir"}]`
 	if c := row("boot-store"); c.Status != CheckFail || !strings.Contains(c.Message, "pvesm set local-lvm --content rootdir,images") {
 		t.Errorf("no images content: %+v", c)

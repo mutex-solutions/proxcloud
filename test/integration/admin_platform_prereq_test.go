@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -28,13 +29,22 @@ import (
 )
 
 // prereqSite is a Proxmox provider with the given network config, the installation routes over PostgreSQL, and a fake
-// Proxmox that answers the SDN zones from *zones ("" answers 500).
+// Proxmox that answers the SDN zones from *zones ("" answers 500), and /version by the token that asks: 401 for a
+// secret that starts with dead (a token made again since), 500 for one that starts with bad0, else 200.
 func prereqSite(t *testing.T, network pgdoc.M, zones *string) (call func(method, path, body string, want int) (json.RawMessage, string, string), svc *externalservice.Service, store *platformlife.Store) {
 	t.Helper()
 	db := freshPG(t)
 	fakePVE := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Errorf("a save wrote to Proxmox: %s %s", r.Method, r.URL.Path)
+		}
+		if auth := r.Header.Get("Authorization"); strings.HasSuffix(r.URL.Path, "/version") && !strings.Contains(auth, "=bad0") {
+			if strings.Contains(auth, "=dead") {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			fmt.Fprint(w, `{"data":{"version":"9.0"}}`)
+			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/cluster/sdn/zones") && *zones != "" {
 			fmt.Fprintf(w, `{"data":%s}`, *zones)
@@ -90,6 +100,7 @@ type savedView struct {
 	Rev         int64
 	SiteChanges *struct {
 		BlockedCIDRs    []string `json:"blockedCidrs"`
+		Removed         []string `json:"blockedCidrsRemoved"`
 		ZoneWithoutDHCP string   `json:"zoneWithoutDhcp"`
 		Problem         string
 	}
@@ -138,6 +149,20 @@ func TestPlatformSaveFillsTheBlockedNetworks(t *testing.T) {
 	_ = json.Unmarshal(data, &v)
 	if es, _ = svc.Get(context.Background(), "svc-pve"); v.SiteChanges != nil || len(es.PVENetworkConfig().BlockedCIDRs) != len(n.BlockedCIDRs) {
 		t.Fatalf("second save: %+v, blocked %v", v.SiteChanges, es.PVENetworkConfig().BlockedCIDRs)
+	}
+	// A changed setting (here a shorter node range, as after a mistyped one): the entries the first save added and
+	// the settings no longer need are taken off, the operator's stay, and the save says so.
+	v = savedView{}
+	data, _, _ = call(http.MethodPut, base+"/"+in.ID, strings.Replace(platformBody("10.200.200.1", 2, 2), "10.200.200.30-10.200.200.49", "10.200.200.30-10.200.200.37", 1), http.StatusOK)
+	_ = json.Unmarshal(data, &v)
+	es, _ = svc.Get(context.Background(), "svc-pve")
+	if n = es.PVENetworkConfig(); v.SiteChanges == nil || !slices.Equal(v.SiteChanges.BlockedCIDRs, []string{"10.200.200.32/30", "10.200.200.36/31"}) ||
+		!slices.Equal(v.SiteChanges.Removed, []string{"10.200.200.32/28", "10.200.200.48/31"}) ||
+		!slices.Equal(n.BlockedCIDRs, []string{"192.168.50.0/24", "10.200.200.10/32", "10.200.200.20/32", "10.200.200.30/31", "10.200.200.32/30", "10.200.200.36/31"}) {
+		t.Fatalf("after the shorter node range: %+v, blocked %v", v.SiteChanges, n.BlockedCIDRs)
+	}
+	if want := []string{"10.200.200.20/32", "10.200.200.30/31", "10.200.200.32/30", "10.200.200.36/31"}; !slices.Equal(n.PlatformCIDRs, want) {
+		t.Fatalf("the record of what the saves added: %v", n.PlatformCIDRs)
 	}
 }
 
@@ -257,4 +282,24 @@ func TestPlatformEnrollLine(t *testing.T) {
 	}
 	script("installation="+in.ID+"&bootStorage=other", http.StatusBadRequest)
 	script("installation=pi-ffffffff", http.StatusNotFound)
+
+	// A line from a node whose clock is ahead is refused and stores nothing: stored, it would make every later line
+	// a replay once the clock is right.
+	now := time.Now().Unix()
+	_, code, raw := call(http.MethodPut, creds, line(in.ID, now+3600, plantedCAPI, plantedCSI), http.StatusBadRequest)
+	if a, b := secrets(); code != "enrollment_clock_ahead" || !strings.Contains(raw, "clock is ahead") || a != plantedCAPI || b != newerCSI || strings.Contains(raw, plantedCSI) {
+		t.Fatalf("a line from the future: %s, stored %s %s, %s", code, a, b, raw)
+	}
+	// A stored secret that no longer opens its token (the token was removed and made again for something else): the
+	// root command stops on that token as on any it did not make, and still keeps the other.
+	call(http.MethodPut, creds, line(in.ID, now, "dead0000-0000-4000-8000-000000000001", ""), http.StatusOK)
+	s = script("installation="+in.ID, http.StatusOK)
+	if !strings.Contains(s, "STOP: the token "+pve.CAPITokenID) || strings.Contains(s, "STOP: the token "+pve.CSITokenID) {
+		t.Errorf("the root command with a CAPI secret Proxmox refuses:\n%s", s)
+	}
+	// Proxmox does not answer: no command, since a guess either way is wrong.
+	call(http.MethodPut, creds, line(in.ID, now+1, "", "bad00000-0000-4000-8000-000000000002"), http.StatusOK)
+	if s = script("installation="+in.ID, http.StatusBadGateway); !strings.Contains(s, pve.CSITokenID) || strings.Contains(s, "bad00000") {
+		t.Errorf("the answer when Proxmox cannot be asked: %s", s)
+	}
 }

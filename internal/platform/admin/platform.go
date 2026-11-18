@@ -263,14 +263,14 @@ type installationRequest struct {
 
 // siteDefaults is platformSiteDefaults for a saved installation, with its audit record.
 func (h *Handler) siteDefaults(r *http.Request, in *platformlife.Installation, before map[string]any) *siteChanges {
-	es, err := h.esSvc.Get(r.Context(), in.ServiceID)
-	if err != nil || es == nil {
-		return nil
+	var ch *siteChanges
+	// The save is stored: its audit record is written whether or not the provider can be read.
+	if es, err := h.esSvc.Get(r.Context(), in.ServiceID); err == nil && es != nil {
+		ch = h.platformSiteDefaults(r.Context(), in, es)
 	}
-	ch := h.platformSiteDefaults(r.Context(), in, es)
 	after := asSnapshot(in)
-	if ch != nil && (len(ch.BlockedCIDRs) > 0 || ch.ZoneWithoutDHCP != "") {
-		after["providerNetwork"] = map[string]any{"blockedCidrsAdded": ch.BlockedCIDRs, "zoneWithoutDhcp": ch.ZoneWithoutDHCP}
+	if ch != nil && (len(ch.BlockedCIDRs) > 0 || len(ch.BlockedCIDRsRemoved) > 0 || ch.ZoneWithoutDHCP != "") {
+		after["providerNetwork"] = map[string]any{"blockedCidrsAdded": ch.BlockedCIDRs, "blockedCidrsRemoved": ch.BlockedCIDRsRemoved, "zoneWithoutDhcp": ch.ZoneWithoutDHCP}
 	}
 	audit.RecordSnapshots(r.Context(), before, after)
 	return ch
@@ -378,7 +378,8 @@ var pveTokenSecret = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA
 // audited beyond the middleware's event (actor, installation id).
 // enroll is the other way in, and goes alone: the PC-ENROLL line the root command of step 2 printed
 // (platformlife.ParseEnrollLine). A line that is not one, or is of another installation, is a 400 invalid_enrollment;
-// a line stored before, or older than the one stored, is a 409 enrollment_replayed. No answer quotes the line.
+// a line printed more than five minutes ahead of the portal's clock is a 400 enrollment_clock_ahead; a line stored
+// before, or older than the one stored, is a 409 enrollment_replayed. No answer quotes the line.
 func (h *Handler) platformCredentials(w http.ResponseWriter, r *http.Request) {
 	if !h.platformGate(w, r, externalServiceManagePerm) {
 		return
@@ -406,6 +407,9 @@ func (h *Handler) platformCredentials(w http.ResponseWriter, r *http.Request) {
 			err = h.platform.SaveEnrollment(r.Context(), id, e)
 		}
 		switch {
+		case errors.Is(err, platformlife.ErrEnrollAhead):
+			platformErr(w, http.StatusBadRequest, "enrollment_clock_ahead", err.Error(), nil)
+			return
 		case errors.Is(err, platformlife.ErrEnrollReplayed):
 			platformErr(w, http.StatusConflict, "enrollment_replayed", err.Error(), nil)
 			return

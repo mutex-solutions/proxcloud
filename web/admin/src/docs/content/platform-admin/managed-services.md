@@ -48,13 +48,13 @@ After the first successful install these are fixed: the name, the network, the s
 
 Copy the command and paste it into a root shell on one node. It adds two users with one token each, a pool for the seed, and their permissions. It prints no secret: its last line starts with `PC-ENROLL:` and carries the secrets of the tokens it made.
 
-Paste that line into **The PC-ENROLL line the command printed** and press **Store the secrets**. The page checks the line first: the whole line, and of this installation. The secrets are stored encrypted and are never shown again. A line that was stored before is refused; for new secrets run the command again. Treat the line as a password.
+Paste that line into **The PC-ENROLL line the command printed** and press **Store the secrets**. The page checks the line first: the whole line, and of this installation. The secrets are stored encrypted and are never shown again. A line that was stored before is refused; for new secrets run the command again. A line from a node whose clock is more than five minutes ahead is refused too: set the node's clock, then run the command again. Treat the line as a password.
 
-If one of the two tokens exists already and was not made for this installation, the command stops before it changes anything and prints the command that removes the token. Something else may use that token, so check first; ProxCloud never removes it.
+If one of the two tokens exists already and was not made for this installation, the command stops before it changes anything and prints the command that removes the token. Something else may use that token, so check first; ProxCloud never removes it. The same happens when a secret is stored but no longer opens its token, because the token was removed and made again.
 
 If you change the boot store or the ISO store, run the command again. **Enter the two secrets by hand instead** is for a token made another way.
 
-Saving the settings in step 1 also adds the installation's own addresses to the provider's blocked networks, and sets a default tenant zone that does not exist yet to be created without DHCP. The page says what it changed. The install itself writes the firewall rule that lets the platform reach the Proxmox API.
+Saving the settings in step 1 also adds the installation's own addresses to the provider's blocked networks, and sets a default tenant zone that does not exist yet to be created without DHCP. When you correct an address or a range, the next save takes the entries of the old one off again; entries you wrote yourself are never removed. The page says what it changed. The install itself writes the firewall rule that lets the platform reach the Proxmox API.
 
 ## Step 3: Check
 

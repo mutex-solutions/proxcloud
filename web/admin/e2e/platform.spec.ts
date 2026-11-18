@@ -122,6 +122,13 @@ test("from an empty form to a failed run, then Retry and Cancel", async ({ page 
 
   // The first save says what it wrote into the provider, so that nobody adds the blocked networks by hand.
   await expect(page.getByRole("status").filter({ hasText: "The save also changed the provider" })).toContainText("10.90.0.5/32")
+  // A corrected address: the entry the earlier save added for the old one is taken off, and the page says so.
+  for (const [address, gone] of [["10.90.0.6", "10.90.0.5/32"], ["10.90.0.5", "10.90.0.6/32"]]) {
+    await expect(page.getByRole("button", { name: "Save settings" })).toBeEnabled() // the save before it is done: the form was read again
+    await page.getByLabel("Seed address", { exact: true }).fill(address)
+    await page.getByRole("button", { name: "Save settings" }).click()
+    await expect(page.getByRole("status").filter({ hasText: "The save also changed the provider" })).toContainText(`need them (an earlier save had added them): ${gone}`)
+  }
 
   // One command as root for this installation: its stores come from the settings, and it prints no secret.
   const id = "pi-00000001" // the mock numbers its installations

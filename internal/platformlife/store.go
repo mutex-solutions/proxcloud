@@ -190,8 +190,12 @@ func (s *Store) SaveCredentials(ctx context.Context, id string, capi, csi *Token
 
 // SaveEnrollment stores the tokens of a pasted enrollment line as SaveCredentials does, once: a line printed no later
 // than the last one stored is ErrEnrollReplayed and changes nothing, so an old line cannot put back the secret of a
-// token that was made again since.
+// token that was made again since. A line from a node whose clock is ahead is ErrEnrollAhead: stored, it would make
+// every line printed after the clock was set right a replay.
 func (s *Store) SaveEnrollment(ctx context.Context, id string, e *Enrollment) error {
+	if e.Ahead(time.Now()) {
+		return ErrEnrollAhead
+	}
 	return s.saveCredentials(ctx, id, e.CAPI, e.CSI, e.Issued)
 }
 

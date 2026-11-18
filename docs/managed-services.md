@@ -586,6 +586,13 @@ It never deletes or changes such a token: removing it is your decision and your 
 whose secret ProxCloud already holds (a site set up before tokens were marked, or with the secrets
 entered by hand) is the installation's: the command adds the comment to it and goes on.
 
+"Holds" means that the stored secret opens the token now. When the page asks for the command,
+ProxCloud makes one read (`GET /version`) with each stored secret. Proxmox answering `401` means the
+token was removed, or removed and made again for something else: the command then stops on it as on
+any token it did not make. When Proxmox does not answer, or answers anything else, no command is
+given (`502`), because a guess either way is wrong: try again. That Proxmox answers `401` to the
+old secret of a token made again under the same id is assumed, not tried on a lab.
+
 **It prints no secret.** The secrets of the tokens it made go into one line, printed last, also
 when a later step of the command fails:
 
@@ -604,6 +611,7 @@ checks again:
 | Answer | When |
 |---|---|
 | `400 invalid_enrollment` | Not such a line (cut short, a bare secret, another version), or a line of another installation. The answer does not quote the line |
+| `400 enrollment_clock_ahead` | The node printed the line with a clock more than five minutes ahead of the portal's. Nothing is stored: stored, that time would make every line printed after the clock was set right a replay. Set the node's clock (`timedatectl`), then run the command again |
 | `409 enrollment_replayed` | The line was stored before, or a newer one was: nothing changes. This is what keeps an old line from putting back the secret of a token that was made again since. "Newer" is the time the node printed the line, so two nodes whose clocks differ by more than the time between two runs can refuse a good line: run the command again |
 
 Running the command again changes no token and prints "No token was made, so there is no line to
@@ -623,7 +631,7 @@ portal token already holds ([proxmox-permissions.md](proxmox-permissions.md)). N
 | What | When | Privilege | Detail |
 |---|---|---|---|
 | The cluster firewall rule for the Proxmox API | Stage 3 of an install, before the seed is cloned, and every apply; **Remove** deletes it | `Sys.Modify` on `/` (as for the isolation rules) | One rule: `in ACCEPT tcp`, source the seed's address and the node range (as CIDRs; not the load balancer range), destination the host of the Proxmox API URL of the settings when it is an address (no destination for a name), the URL's port, comment `proxcloud:pve-api:<installation id>`. A rule with that comment that differs (the settings changed, or it was disabled by hand) is replaced; no other rule is read or touched, and the `management` IP set is not used. It is written with the datacenter firewall on or off. It is written in mode `routed` too: the node holds the gateway of the vnet, but the firewall's default management set is the network of the node's own address only (read in the Proxmox documentation, not tried) |
-| The provider's blocked networks | Every save of the settings | none on Proxmox: it is the provider's own config. The next provider sync writes the `DROP` rules with `Sys.Modify` | The seed's address, the API address and the node range, as the exact CIDRs that no entry of `blockedCidrs` covers yet; never the load balancer range. Entries are only added: one that a changed setting no longer needs stays. The answer of the save names what was added (`siteChanges.blockedCidrs`), the page shows it, and the audit event of the save carries it |
+| The provider's blocked networks | Every save of the settings | none on Proxmox: it is the provider's own config. The next provider sync writes the `DROP` rules with `Sys.Modify` | The seed's address, the API address and the node range, as the exact CIDRs that no entry of `blockedCidrs` covers yet; never the load balancer range. What a save added is recorded beside the list (`config.network.platformBlockedCidrs`), and a later save takes off exactly the recorded entries that the settings no longer need (a corrected address or range), never an entry you wrote. The answer of the save names what was added and what was taken off (`siteChanges.blockedCidrs`, `blockedCidrsRemoved`), the page shows both, and the audit event of the save carries them. Three limits. A provider sync writes a narrower set of `DROP` rules only on a provider with a project; on one without, rules already written for a removed entry stay, and the `isolation` row names them for deletion by hand ([The isolation check and the provider sync](#the-isolation-check-and-the-provider-sync)). **Remove** takes nothing off: the record stays, and the next install needs the same addresses fenced. And the save compares with `blockedCidrs` only, not with the nodes' management networks, which it does not read: an address that a management network already covers gets an entry all the same (harmless; a site that passes the `network` row cannot have its load balancer range there) |
 | A new tenant zone without DHCP | Every save of the settings | none at the save; `SDN.Allocate` when the zone is made, as before | When the provider's default zone is a `simple` zone, its config says nothing about DHCP and Proxmox has no such zone yet, the zone's config gets `"dhcp": false`, so the first tenant network creates the zone without a DHCP server. A zone that exists is never changed, and a config that says `"dhcp": true` stays. When the zones cannot be read nothing is written and the answer says so (`siteChanges.problem`) |
 
 **When `capmox@pve!capi` or `csi@pve!csi` already exists** and the script is the one without an
@@ -751,7 +759,7 @@ line (`PC-ENROLL:…`) into the page and press **Store the secrets**
 | `boot-iso-grant` | `capmox@pve` may not upload and delete on the ISO store | Run the script again |
 | `boot-iso` | The ISO store is shared, takes no ISOs, or is not the only ISO store of the boot storage | Name a node-local ISO store |
 | `placement` | A node an image goes to lacks the import store with `import` content or the boot store | Change the nodes or the stores |
-| `boot-store` | Proxmox has no storage of the boot store's name, or it takes no disk images. It **warns** when the store also holds disks of VMs that are not the platform's (tenant servers, or VMs of your own), or when its content could not be listed: `csi@pve!csi` holds `Datastore.Allocate` on the whole boot store and its secret is readable inside the platform cluster ([section 10](#10-security-boundaries)). The disks are listed with the CSI token, the only one that sees them all, so before that token is stored the row says the disks are not read yet. Not counted: the installation's own machines, the templates of the pool `pc-templates`, CSI volumes (`vm-<id>-pvc-*`) | A missing store: name an existing one in step 1 (`pvesm status`). No disk images: `pvesm set <store> --content <its content>,images`, which the message spells out. The warning: a store of its own for the platform, on ZFS `zfs create <pool>/pcplat && pvesm add zfspool pcplat --pool <pool>/pcplat --content images,rootdir --sparse 1`, then name it in step 1 and run the root command of step 2 again. The install works without it |
+| `boot-store` | Proxmox has no storage of the boot store's name, or it takes no disk images. It **warns** when the store also holds disks of VMs that are not the platform's (tenant servers, or VMs of your own), or when its content could not be listed: `csi@pve!csi` holds `Datastore.Allocate` on the whole boot store and its secret is readable inside the platform cluster ([section 10](#10-security-boundaries)). The disks are listed with the CSI token, the only one that sees them all, and the platform's own machines are told apart with the CAPI token, so before both tokens are stored the row says the disks are not read yet. Not counted: the installation's own machines, the templates of the pool `pc-templates`, CSI volumes (`vm-<id>-pvc-*`) | A missing store: name an existing one in step 1 (`pvesm status`). No disk images: `pvesm set <store> --content <its content>,images`, which the message spells out. The warning: a store of its own for the platform, on ZFS `zfs create <pool>/pcplat && pvesm add zfspool pcplat --pool <pool>/pcplat --content images,rootdir --sparse 1`, then name it in step 1 and run the root command of step 2 again. The install works without it |
 | `pve-api-rule` | Never. `ok` before the first install (the install writes the rule) and when the rule is in place; it **warns** on an installed platform whose rule is missing, changed or disabled, or when the cluster firewall rules could not be read. The message spells the rule out and says when the datacenter firewall is off | Nothing before the install. Installed: **Apply this release** writes the rule again |
 | `images` | A BOM image is on the template update blocklist | A new installation: install a newer ProxCloud release. An installed platform stays on its release and its images, and no release moves it to other images yet (see [Upgrade between BOMs](#upgrade-between-boms): a BOM with other images is refused): the message says which case applies, and an apply that must import that image stays blocked |
 
@@ -1100,7 +1108,8 @@ do. Remove leaves in place: the tokens, users, roles, ACL rows and pools of the 
 provider rows, disabled; the image templates in `pc-templates`; and the installation record in phase
 `removed`, from which the same steps install again (both secrets must be pasted again).
 
-A Remove deletes no rule of the cluster firewall. The provider's `proxcloud:isolation` or
+A Remove deletes no rule of the cluster firewall, except the installation's own rule for the Proxmox
+API, and takes none of the blocked networks a save added off the provider. The provider's `proxcloud:isolation` or
 `proxcloud:isolation/<poolPrefix>` rules stay, and because the installation record stays, the
 provider sync keeps maintaining them without a project, as before the Remove
 ([The isolation check and the provider sync](#the-isolation-check-and-the-provider-sync)); no
@@ -1903,7 +1912,14 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 - **No automated node leg** for an existing VLAN site: the commands are in
   [The path from tenants to the platform](#the-path-from-tenants-to-the-platform), by hand.
 - **One control plane machine.** The settings take no control plane count.
-- **No sandbox node group.**
+- **No sandbox node group**, and no sandbox cluster made by the install. Both layouts of a later
+  release fit the saved settings without a change of format. Separate: one more entry in
+  `spec.clusters[]`; the API rule's sources, the blocked networks and the boot-store nodes are
+  already computed over every cluster. Shared (a node group on the platform cluster): the group
+  gets an optional address range of its own, because sandbox nodes must not reach the Proxmox API;
+  that range is then left out of the API rule's sources and fenced as a sandbox network. Until
+  then the rule's source is the whole node range, which is right while every machine in it is a
+  platform machine.
 - **One installation on the page.** The API keeps one per Proxmox provider; the page shows the first.
 - **No route deletes a draft or an installation record.**
 - **No block volumes for tenant clusters and no database backups** on Compose
@@ -1925,8 +1941,12 @@ verify on a lab:
    text of [The root command of an installation](#the-root-command-of-an-installation) and
    `pveum acl list` is as before. Remove the token with the printed command, paste again: it goes on.
 3. **A site with tokens of v0.8.x** (no comment, secrets stored in ProxCloud): the command adds the
-   comment and prints no line; the platform keeps working.
-4. **The pasted line twice**, and an older line after a newer one: `409 enrollment_replayed`.
+   comment and prints no line; the platform keeps working. Then remove `capmox@pve!capi` and make
+   it again by hand: the page's command now has the stop text for it (Proxmox answered `401` to the
+   stored secret).
+4. **The pasted line twice**, and an older line after a newer one: `409 enrollment_replayed`. A
+   line printed with the node's clock set an hour ahead: `400 enrollment_clock_ahead`, and after
+   the clock is set right the next line is stored.
 5. **The API rule, datacenter firewall on.** Install with the platform network on a VLAN other than
    the nodes': stage 3 lists the rule, `nft list ruleset` shows the accept, the seed reaches the
    Proxmox API (stage 6 and 7 pass). Whether Proxmox takes a comma list of CIDRs as the source and
@@ -1937,6 +1957,9 @@ verify on a lab:
 7. **Blocked networks.** Save a draft on a provider whose `blockedCidrs` is empty: the page lists
    what was added, a provider sync writes the `DROP` rules, the `isolation` row is `ok`, and a tenant
    server cannot open the seed, while it reaches a load balancer address.
+   Then correct the seed address and save: the page lists the old entry as taken off, and on a
+   provider with a project the next sync rewrites the rules; on one without, the `isolation` row
+   names the rules to delete by hand.
 8. **The tenant zone.** A provider whose default zone is a `simple` zone that Proxmox does not
    have: save the settings, create a tenant network, and `pvesh get /cluster/sdn/zones/<zone>` shows
    no `dhcp`; a tenant cluster on it becomes Ready. With a zone that exists with DHCP: nothing

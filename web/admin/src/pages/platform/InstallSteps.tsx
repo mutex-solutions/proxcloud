@@ -300,6 +300,7 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
           <AlertDescription>
             <ul className="list-disc pl-5">
               {site.blockedCidrs?.length ? <li>Added to its blocked networks, so that tenants cannot reach the seed, the API address and the node range: <span className="font-mono">{site.blockedCidrs.join(", ")}</span>. The next provider sync writes the firewall rules (step 3 has the button).</li> : null}
+              {site.blockedCidrsRemoved?.length ? <li>Taken off its blocked networks, because the settings no longer need them (an earlier save had added them): <span className="font-mono">{site.blockedCidrsRemoved.join(", ")}</span>. If a provider sync already wrote firewall rules for them, the next sync rewrites the rules on a provider with a project; on one without, the Check row <span className="font-mono">isolation</span> names the rules to delete by hand.</li> : null}
               {site.zoneWithoutDhcp ? <li>The default tenant zone <span className="font-mono">{site.zoneWithoutDhcp}</span> does not exist in Proxmox yet and is now set to be created without DHCP, which tenant Kubernetes clusters need.</li> : null}
               {site.problem ? <li>{site.problem}</li> : null}
             </ul>

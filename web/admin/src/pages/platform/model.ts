@@ -33,7 +33,7 @@ export type Installation = {
   rev: number
   credentials: { capi?: { tokenId: string }; csi?: { tokenId: string } }
   // In the answer of a save only: what the save wrote into the provider's network settings.
-  siteChanges?: { blockedCidrs?: string[]; zoneWithoutDhcp?: string; problem?: string }
+  siteChanges?: { blockedCidrs?: string[]; blockedCidrsRemoved?: string[]; zoneWithoutDhcp?: string; problem?: string }
   live?: { phase: string; components: { name: string; cluster: string; sync: string; health: string }[]; error?: string; code?: string }
 }
 export type Check = { id: string; status: "ok" | "warn" | "fail"; message: string }

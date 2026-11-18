@@ -35,6 +35,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/rbac"
+	"github.com/mutex-solutions/proxcloud/internal/platformlife"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
@@ -431,12 +432,32 @@ func (h *Handler) proxmoxSetupScript(w http.ResponseWriter, r *http.Request) {
 		if httpx.WriteError(w, serr) {
 			return
 		}
-		if q.Get("tokenId") == "" && h.esSvc != nil { // the token the installation's provider is connected with
-			if es, eerr := h.esSvc.Get(r.Context(), in.ServiceID); eerr == nil && es != nil && es.PVEConfig().TokenID != "" {
-				tokenID = es.PVEConfig().TokenID
+		if h.esSvc == nil {
+			httpx.WriteError(w, serviceNotFoundErr(in.ServiceID))
+			return
+		}
+		es, eerr := h.esSvc.Get(r.Context(), in.ServiceID)
+		if eerr != nil || es == nil {
+			httpx.WriteError(w, serviceNotFoundErr(in.ServiceID))
+			return
+		}
+		if q.Get("tokenId") == "" && es.PVEConfig().TokenID != "" { // the token the installation's provider is connected with
+			tokenID = es.PVEConfig().TokenID
+		}
+		if sec == nil {
+			sec = &platformlife.Secrets{}
+		}
+		e := pve.Enrollment{InstallationID: in.ID}
+		for _, t := range []struct {
+			tok  *platformlife.TokenCredential
+			have *bool
+		}{{sec.CAPI, &e.HaveCAPI}, {sec.CSI, &e.HaveCSI}} {
+			if *t.have, err = tokenOpens(r.Context(), es, t.tok); err != nil {
+				httpx.WriteError(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, "Proxmox did not say whether the stored secret of "+t.tok.TokenID+
+					" still opens that token, so the root command cannot tell whose token it is: "+err.Error()+". Try again when Proxmox answers."))
+				return
 			}
 		}
-		e := pve.Enrollment{InstallationID: in.ID, HaveCAPI: sec != nil && sec.CAPI != nil, HaveCSI: sec != nil && sec.CSI != nil}
 		script, err = pve.EnrollScript(tokenID, gpu, in.Spec.Storage.Import, in.Spec.Storage.Boot, in.Spec.Storage.ISO, e)
 	case managed:
 		if iso == "" {
@@ -455,6 +476,28 @@ func (h *Handler) proxmoxSetupScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	fmt.Fprint(w, script)
+}
+
+// tokenOpens reports whether the stored secret still opens its token on the cluster: one read with it. Proxmox
+// answering 401 means it does not (the token was removed, or removed and made again for something else), and the root
+// command must then stop on that token instead of marking it and writing its ACLs. Any other failure is an error: a
+// Proxmox that does not answer must not turn the installation's own token into one the command tells root to remove.
+func tokenOpens(ctx context.Context, es *externalservice.ExternalService, tok *platformlife.TokenCredential) (bool, error) {
+	if tok == nil {
+		return false, nil
+	}
+	c, err := platformlife.TokenClient(es, tok)
+	if err != nil {
+		return false, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, err = c.Version(ctx)
+	var ae *pve.APIError
+	if errors.As(err, &ae) && ae.Status == http.StatusUnauthorized {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // checkDatacenterFirewall rejects a cluster whose datacenter firewall is off or cannot be read.

@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
@@ -21,6 +22,9 @@ var (
 	ErrEnrollMalformed = errors.New("this is not the PC-ENROLL line the root command of step 2 prints: copy the whole line, from PC-ENROLL: to its end")
 	ErrEnrollOther     = errors.New("this PC-ENROLL line is of another installation: run the root command shown in step 2 of this installation")
 	// ErrEnrollReplayed: the line, or a newer one, was stored before. The secrets stored are the newer ones.
+	// ErrEnrollAhead: the node's clock is ahead of the portal's. Storing such a line would refuse every later one as
+	// a replay once the clock is right again.
+	ErrEnrollAhead    = errors.New("this PC-ENROLL line was printed by a node whose clock is ahead of the portal's by more than 5 minutes: nothing was changed. Set the node's clock (timedatectl shows it; chrony keeps it), then run the root command of step 2 again")
 	ErrEnrollReplayed = errors.New("this PC-ENROLL line was stored already, or a newer one was: nothing was changed. For new secrets run the root command of step 2 again")
 )
 
@@ -80,6 +84,12 @@ func ParseEnrollLine(line, installationID string) (*Enrollment, error) {
 	}
 	return e, nil
 }
+
+// enrollAhead is how far ahead of the portal's clock the node's may be.
+const enrollAhead = 5 * time.Minute
+
+// Ahead reports whether the line was printed later than now allows (ErrEnrollAhead).
+func (e *Enrollment) Ahead(now time.Time) bool { return e.Issued > now.Add(enrollAhead).Unix() }
 
 // String keeps a secret out of any log or error that prints an Enrollment.
 func (e Enrollment) String() string { return fmt.Sprintf("enrollment issued %d", e.Issued) }

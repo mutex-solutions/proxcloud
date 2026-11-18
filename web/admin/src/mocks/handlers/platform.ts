@@ -346,8 +346,11 @@ on("PUT /admin/platform/installations/:id", ({ params, opts }) => {
     ].filter(Boolean) as string[]
     if (fixed.length) throw fail(409, "fixed_fields", `These fields cannot change once the platform was installed (serviceId never): ${fixed.join(", ")}`, { problems: fixed })
   }
+  // A changed seed address: its old /32, which an earlier save added, goes and the new one comes (the API does the
+  // same for the API address and the node range).
+  const [was, is] = [in_.spec.seed.address, b.spec.seed?.address]
   Object.assign(in_, { name: b.name, spec: structuredClone(b.spec), rev: in_.rev + 1, updatedAt: now() })
-  return { data: view(in_) }
+  return { data: was === is ? view(in_) : { ...view(in_), siteChanges: { blockedCidrs: [`${is}/32`], blockedCidrsRemoved: [`${was}/32`] } } }
 })
 
 on("PUT /admin/platform/installations/:id/credentials", ({ params, opts }) => {
@@ -365,6 +368,7 @@ on("PUT /admin/platform/installations/:id/credentials", ({ params, opts }) => {
     const isSecret = (v: string) => /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(v)
     if (f.length !== 5 || f[0] !== "1" || !(Number(f[2]) > 0) || (!f[3] && !f[4]) || [f[3], f[4]].some((v) => v && !isSecret(v))) throw malformed
     if (f[1] !== in_.id) throw no("invalid_enrollment", 400, "this PC-ENROLL line is of another installation: run the root command shown in step 2 of this installation")
+    if (Number(f[2]) > Date.now() / 1000 + 300) throw no("enrollment_clock_ahead", 400, "this PC-ENROLL line was printed by a node whose clock is ahead of the portal's by more than 5 minutes: nothing was changed. Set the node's clock (timedatectl shows it; chrony keeps it), then run the root command of step 2 again")
     if (Number(f[2]) <= (sec.enrolledAt ?? 0)) throw no("enrollment_replayed", 409, "this PC-ENROLL line was stored already, or a newer one was: nothing was changed. For new secrets run the root command of step 2 again")
     sec.enrolledAt = Number(f[2])
     if (f[3]) sec.capi = true

@@ -222,7 +222,9 @@ command of that managed-services installation instead: the stores are the
 installation's, `tokenId` defaults to its provider's, and the command marks the
 two platform tokens with the comment `proxcloud:<id>`, stops before any change
 on one that exists without that comment and whose secret the portal does not
-hold, prints no secret, and ends with one line `PC-ENROLL:…` that carries the
+hold (a stored secret counts only when one read with it succeeds: a `401` from
+Proxmox means not held, and a Proxmox that does not answer is a `502` with no
+command), prints no secret, and ends with one line `PC-ENROLL:…` that carries the
 secrets of the tokens it made (see the credentials route). It goes without
 `managedServices` and the three storage parameters (`400`); an unknown id is a
 `404`. A value that is not a plain id is a
@@ -586,7 +588,10 @@ are several, `errors.details.problems`.
   into the provider's `config.network`, so that nobody has to. `blockedCidrs`
   are the CIDRs added to the provider's `blockedCidrs` (the seed's address, the
   API address and the node range, as far as no entry covered them; never the
-  MetalLB range; entries are only added). `zoneWithoutDhcp` names the default
+  MetalLB range). They are recorded in `config.network.platformBlockedCidrs`,
+  and `blockedCidrsRemoved` are the recorded entries a later save took off
+  because the settings no longer need them; an entry the operator wrote is
+  never removed, and a Remove takes nothing off. `zoneWithoutDhcp` names the default
   tenant zone whose config now says `"dhcp": false`: a `simple` zone whose
   config said nothing about DHCP and that Proxmox does not have yet (a zone
   that exists is never changed). `problem` says what could not be done. The
@@ -600,7 +605,9 @@ are several, `errors.details.problems`.
   The other body is `{enroll: "PC-ENROLL:…"}`, alone: the line the root command
   printed, base64 of `1:<installation id>:<unix time>:<capi secret>:<csi secret>`
   (a token the command kept has an empty field). A line that is not one, or of
-  another installation, is a `400 invalid_enrollment`; a line stored before, or
+  another installation, is a `400 invalid_enrollment`; a line whose time is more
+  than five minutes ahead of the portal's clock is a `400
+  enrollment_clock_ahead`; a line stored before, or
   printed no later than the one stored last, is a `409 enrollment_replayed` and
   changes nothing. No answer quotes the line.
 - `POST /installations/{id}/preflight`: read-only, not audited; `{ok, checks}`
@@ -609,7 +616,7 @@ are several, `errors.details.problems`.
   `token-scope`, `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement`, `boot-store`,
   `pve-api-rule` and `images`. `boot-store` fails when Proxmox has no storage of
   the boot store's name or it takes no disk images, and warns when the store also
-  holds disks of VMs that are not the platform's (listed with the CSI token).
+  holds disks of VMs that are not the platform's (listed with the CSI token, once both tokens are stored).
   `pve-api-rule` never fails: `ok` before the first install and when the cluster
   firewall holds the installation's rule (comment `proxcloud:pve-api:<id>`), `warn`
   when an installed platform's rule is missing. A row's `status` is `ok`, `fail` or `warn`; `ok` in the answer is
