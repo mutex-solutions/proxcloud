@@ -138,12 +138,13 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
   const [preset, setPreset] = useState<Preset>("custom")
   const [notes, setNotes] = useState<string[]>([])
   const pick = (p: Preset) => {
-    const filled = applyPreset(p, form, { nodes: siteNodes, three, fixed: installed })
+    const filled = applyPreset(p, form, { nodes: siteNodes, three })
     setPreset(p)
     setNotes(filled.notes)
     setForm(filled.form)
   }
-  const wasThree = installed && stored.cpReplicas === "3" // an installed control plane of three stays three
+  // A control plane a run built with three machines stays three; a 3 that was saved and never applied goes back.
+  const wasThree = (installation?.status.clusters?.[0]?.controlPlaneReplicas ?? 1) > 1
 
   const save = useMutation({
     mutationFn: () => installation
@@ -181,13 +182,15 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
         <div className="grid gap-2 sm:grid-cols-3">
           {PRESETS.map((p) => (
             <label key={p.id} className={cn("flex items-start gap-2 rounded-lg border p-3 text-sm", preset === p.id && "border-foreground")}>
-              <input type="radio" name="pf-preset" className="mt-1" checked={preset === p.id} disabled={!canManage} onChange={() => pick(p.id)} />
+              <input type="radio" name="pf-preset" className="mt-1" checked={preset === p.id} disabled={fixed} onChange={() => pick(p.id)} />
               <span><span className="font-medium">{p.title}</span><span className="block text-muted-foreground">{p.text}</span></span>
             </label>
           ))}
         </div>
         <p id="pf-preset-hint" className="text-xs text-muted-foreground">
-          A choice fills in the nodes, counts and sizes below and nothing else. Every field stays yours to change, and what is saved is the fields, not the choice.
+          {installed
+            ? "A preset is a start for a new installation. This platform is installed, and a preset would resize and replace its machines, so change the fields below one by one."
+            : "A choice fills in the nodes, counts and sizes below and nothing else. Every field stays yours to change, and what is saved is the fields, not the choice."}
         </p>
         {notes.length ? <ul aria-label="What the preset changed" className="list-disc pl-5 text-sm">{notes.map((n) => <li key={n}>{n}</li>)}</ul> : null}
       </fieldset>
@@ -303,9 +306,9 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
             This is the platform cluster's own control plane, not a tenant's. Three machines keep its API up when one of their VMs is lost or replaced during an update.
             They share one Proxmox node and one store, so they do not survive the loss of that node or of its disk, and three etcd members write more to that store than one.
             The node needs memory for one machine more than the count: an update makes the new machine before it removes an old one, and a machine that does not fit is refused for good.
-            From 1 to 3 can be done later, with Apply; from 3 back to 1 cannot. Machines on several nodes are not built in this release. Not verified on a lab.
+            From 1 to 3 can be done later, with Apply; once an apply has built three, back to 1 cannot. Machines on several nodes are not built in this release. Not verified on a lab.
             {bom.data && !three ? " This release builds one: three need a release whose cluster chart is 0.1.14 or newer." : ""}
-            {wasThree ? " This platform has three, so it stays at three." : ""}
+            {wasThree ? " A run built this platform with three, so it stays at three." : ""}
           </p>
         </div>
       </div>
@@ -707,10 +710,11 @@ export function ReviewStep({ installation, canManage, dirty, onInstall, onUpgrad
             const read = !!at && at.maxMiB > 0
             return (
               <li key={node}>
-                <span className="font-mono">{node}</span>: {l.cores} cores and {gib(l.run)} of memory; {gib(l.spare)} with the spare machines of an update.{" "}
+                <span className="font-mono">{node}</span>: {l.cores} cores and {gib(l.run)} of memory; {gib(l.need)} with the one more machine an update of the control plane makes, {gib(l.spare)} with one more of each group as well.{" "}
                 {!read ? "The node's memory was not read." : installed ? `The node has ${gib(at.maxMiB)}, ${gib(at.freeMiB)} of it free now, with this platform's machines running.`
                   : `The node has ${gib(at.freeMiB)} free of ${gib(at.maxMiB)}.`}
-                {read && !installed && l.spare > at.freeMiB ? <span className="font-medium text-destructive"> That is not enough.</span> : null}
+                {read && !installed && l.need > at.freeMiB ? <span className="font-medium text-destructive"> That is not enough.</span>
+                  : read && !installed && l.spare > at.freeMiB ? " That holds the install; a later change that replaces a group's machines needs the larger figure." : null}
               </li>
             )
           })}
@@ -718,7 +722,7 @@ export function ReviewStep({ installation, canManage, dirty, onInstall, onUpgrad
         <p className="text-muted-foreground">
           Free is what Proxmox reports as not in use now. The Check's row <span className="font-mono">capacity</span> decides: it counts the configured memory of every VM
           and container on the node, running or not, as the machines are counted when they are cloned. A rolling update makes one spare machine for the control plane and one for
-          each group on each of its nodes before it removes the old ones.
+          each group on each of its nodes before it removes the old ones. The row fails without room for the control plane's, and warns without room for the groups'.
         </p>
       </div>
       {!installed ? (

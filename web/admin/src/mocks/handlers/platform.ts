@@ -8,7 +8,8 @@
 // ready | previous (ready, installed by the release before this one: the plan names a newer release and why this one does not move the platform to it) |
 // upgrade (the same, and the move is allowed: the plan lists it, the run wants the typed confirmation) |
 // replace (the same, with an unfinished upgrade toward the release of an earlier ProxCloud: the plan also offers the move to this one's in its place) |
-// onenode (nothing saved, and the provider has one node, pve1, with 32 GiB of which 24 are free: the presets on a small site) | degraded (one component out of sync) | simplezone (the check warns: no tenant cluster on a simple zone) | silent (the seed does not answer) | unread (the live read fails) | removing
+// onenode (nothing saved, and the provider has one node, pve1, with 32 GiB of which 24 are free: the presets on a small site) |
+// onechart (nothing saved, and this release's cluster chart builds one control plane machine) | degraded (one component out of sync) | simplezone (the check warns: no tenant cluster on a simple zone) | silent (the seed does not answer) | unread (the live read fails) | removing
 // (none: enabled, nothing saved).
 import { ApiError } from "@/lib/api"
 import { on } from "../router"
@@ -104,6 +105,7 @@ const bomRef = { release: bom.release, sha256: bom.sha256 }
 // Its cluster chart is the one before 0.1.14: it builds one control plane machine.
 const previous = { ...bom, release: "0.6.0", sha256: "1e0d9c8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d",
   components: bom.components.map((c) => (c.name === "pc-platform" ? { ...c, chart: { ...c.chart, version: "0.1.13" } } : c)) }
+if (preset === "onechart") bom.components = previous.components
 if (preset === "onenode") db.proxmoxAuthResult.nodes = [{ node: "pve1", status: "online", maxmem: 32 * 2 ** 30, mem: 8 * 2 ** 30 }]
 
 const find = (id: string) => {
@@ -211,30 +213,37 @@ function ready(in_: Doc) {
   seedStatus(in_)
   Object.assign(in_.status, {
     phase: "ready", bom: bomRef,
-    clusters: [{ name: "pc-platform", namespace: "pc-platform", endpoint: in_.spec.clusters[0].endpoint, kubernetesVersion: bom.kubernetes.version, argocdTokenExpiresAt: new Date(Date.now() + 365 * 86_400_000).toISOString() }],
+    clusters: [{ name: "pc-platform", namespace: "pc-platform", endpoint: in_.spec.clusters[0].endpoint, kubernetesVersion: bom.kubernetes.version, ...(in_.spec.clusters[0].controlPlane.replicas > 1 ? { controlPlaneReplicas: in_.spec.clusters[0].controlPlane.replicas } : {}), argocdTokenExpiresAt: new Date(Date.now() + 365 * 86_400_000).toISOString() }],
     components: bom.components.map((c) => ({ name: c.name, cluster: c.cluster, version: c.chart.version, managed: true })),
     providers: { kubernetes: provider("kamaji", "Kubernetes"), database: provider("dbaas", "Databases") },
   })
 }
 
 // The capacity row (internal/platformlife/capacity.go), with the nodes' free memory in place of the scheduler's count:
-// each node holds its machines and the spare ones of an update, or the row fails before the first install and warns
-// after it. Absent while the CAPI token is not stored.
+// a node without room for its machines and the control plane's one more of an update fails the row before the first
+// install and warns after it; one without room for the groups' spare machines as well warns. Absent while the CAPI
+// token is not stored.
 function capacity(in_: Doc, stored: boolean): Doc[] {
   if (!stored) return []
-  const planned: Record<string, number> = {}
+  const planned: Record<string, number> = {}, spare: Record<string, number> = {}
   const add = (node: string, n: number, mib: number) => { planned[node] = (planned[node] ?? 0) + n * mib }
   const c = in_.spec.clusters[0]
   add(in_.spec.seed.node, 1, in_.spec.seed.memoryMiB)
   add(c.controlPlane.node, (c.controlPlane.replicas || 1) + 1, c.controlPlane.memoryMiB)
-  for (const g of c.nodeGroups) g.nodes.forEach((n: string, i: number) => add(n, Math.floor(g.count / g.nodes.length) + (i < g.count % g.nodes.length ? 1 : 0) + 1, g.memoryMiB))
-  const short = Object.entries(planned).sort().flatMap(([node, mib]) => {
+  for (const g of c.nodeGroups) g.nodes.forEach((n: string, i: number) => {
+    add(n, Math.floor(g.count / g.nodes.length) + (i < g.count % g.nodes.length ? 1 : 0), g.memoryMiB)
+    spare[n] = (spare[n] ?? 0) + g.memoryMiB
+  })
+  const short: string[] = [], tight: string[] = []
+  for (const [node, mib] of Object.entries(planned).sort()) {
     const at = (db.proxmoxAuthResult.nodes as Doc[]).find((n) => n.node === node)
     const room = at ? Math.floor((at.maxmem - at.mem) / 2 ** 20) : 0
-    return mib > room ? [`Node ${node}: the settings place ${mib / 1024} GiB of memory there, and ${room / 1024} GiB can be reserved.`] : []
-  })
+    if (mib > room) short.push(`Node ${node}: the settings place ${mib / 1024} GiB of memory there, and ${room / 1024} GiB can be reserved.`)
+    else if (mib + (spare[node] ?? 0) > room) tight.push(`Node ${node} holds the machines (${mib / 1024} GiB of ${room / 1024} GiB), and not the spare machine of every group on it as well (${(spare[node] ?? 0) / 1024} GiB more): a change that replaces a group's machines there needs that room, or the new machine is refused and not tried again.`)
+  }
+  if (!short.length && tight.length) return [{ id: "capacity", status: "warn", message: tight.join("\n") }]
   if (!short.length) return [{ id: "capacity", status: "ok", message: "Every node has the memory for its machines and their spares during an update." }]
-  return [{ id: "capacity", status: in_.status.bom ? "warn" : "fail", message: `${short.join("\n")}\nA machine that does not fit is refused and not tried again, at the install or at the first update that replaces machines.` }]
+  return [{ id: "capacity", status: in_.status.bom ? "warn" : "fail", message: `${short.join("\n")}\nA machine that does not fit is refused and not tried again, at the install or at the first update of the control plane.` }]
 }
 
 function checks(in_: Doc): Doc[] {
@@ -291,7 +300,7 @@ function create(name: string, spec: Doc): Doc {
   return in_
 }
 
-if (preset && preset !== "disabled" && preset !== "onenode") {
+if (preset && !["disabled", "onenode", "onechart"].includes(preset)) {
   const in_ = create("lab", mockSpec)
   if (preset !== "draft") mockPlatform.secrets[in_.id] = { capi: true, csi: true }
   if (preset === "running") { mockPlatform.applies = 1; newRun(in_, "apply", Date.now() - 6.5 * STAGE_MS) }
@@ -360,6 +369,11 @@ on("PUT /admin/platform/installations/:id", ({ params, opts }) => {
   if (b.rev !== in_.rev) throw fail(409, "rev_conflict", "the installation changed since it was read: read it again")
   if (activeRun(in_.id)) throw fail(409, "run_active", "a run of this installation is not finished: wait for it or cancel it")
   refuse(b.name, b.spec, in_.serviceId)
+  // ControlPlaneCountProblems in internal/platformlife/installation.go: the previous release's chart builds one.
+  if ((b.spec.clusters?.[0]?.controlPlane?.replicas || 1) > 1 && in_.status.bom?.sha256 === previous.sha256) {
+    const why = `spec.clusters: 3 control plane machines: the platform's BOM (release ${previous.release}) names a cluster chart which builds one; more need chart 0.1.14 or newer, so keep 1 until the platform is on a release that has it`
+    throw fail(400, "invalid_installation", "The installation is not valid", { problems: [why] })
+  }
   if (in_.status.bom) { // FixedChanges in internal/platformlife/installation.go
     const same = (a: unknown, c: unknown) => JSON.stringify(a) === JSON.stringify(c)
     const [old, next] = [in_.spec.clusters[0], b.spec.clusters?.[0] ?? {}]
@@ -373,10 +387,11 @@ on("PUT /admin/platform/installations/:id", ({ params, opts }) => {
       !same((next.nodeGroups ?? []).map((g: Doc) => g.name), old.nodeGroups.map((g: Doc) => g.name)) && "spec.clusters[0].nodeGroups",
     ].filter(Boolean) as string[]
     if (fixed.length) throw fail(409, "fixed_fields", `These fields cannot change once the platform was installed (serviceId never): ${fixed.join(", ")}`, { problems: fixed })
-    // ControlPlaneShrink in internal/platformlife/installation.go
-    const [had, wants] = [old.controlPlane.replicas || 1, next.controlPlane?.replicas || 1]
+  }
+  { // ControlPlaneShrink in internal/platformlife/installation.go: against what a run built, not the stored spec
+    const [had, wants] = [in_.status.clusters?.[0]?.controlPlaneReplicas || 1, b.spec.clusters?.[0]?.controlPlane?.replicas || 1]
     if (wants < had) {
-      const why = `spec.clusters[0].controlPlane.replicas: an installed control plane does not go from ${had} machines to ${wants} in this release. Taking etcd members out leaves two for a while, where one slow or lost member stops the platform's API, and no lab has run that step. Keep ${had}; to get a platform with one, remove the installation and install again.`
+      const why = `spec.clusters[0].controlPlane.replicas: a run built this control plane with ${had} machines, and it does not go from ${had} machines to ${wants} in this release. Taking etcd members out leaves two for a while, where one slow or lost member stops the platform's API, and no lab has run that step. Keep ${had}; to get a platform with one, remove the installation and install again.`
       throw fail(409, "fixed_fields", why, { problems: [why] })
     }
   }

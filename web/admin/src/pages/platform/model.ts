@@ -26,7 +26,8 @@ export type Installation = {
     phase: string
     bom?: { release: string; sha256: string }
     seed?: { vmid?: number; node?: string; apiServer?: string; cdVolume?: string; tokenSecret?: string; readyAt?: string }
-    clusters?: { name: string; endpoint?: string; kubernetesVersion?: string; argocdTokenExpiresAt?: string }[]
+    // controlPlaneReplicas: the count above one a run handed to the cluster; absent means one
+    clusters?: { name: string; endpoint?: string; kubernetesVersion?: string; argocdTokenExpiresAt?: string; controlPlaneReplicas?: number }[]
     components?: { name: string; cluster: string; version: string }[]
     providers?: { kubernetes?: string; database?: string }
   }
@@ -144,10 +145,11 @@ export const PRESETS: { id: Preset; title: string; text: string }[] = [
 // What a preset reads of the site: its nodes with their memory in MiB as Proxmox reports it (0 when not read), and
 // whether the release can build three control plane machines.
 export type SiteNode = { node: string; maxMiB: number; freeMiB: number }
-export type Site = { nodes: SiteNode[]; three: boolean; fixed: boolean } // fixed: installed, so the network and the seed's node stay
+export type Site = { nodes: SiteNode[]; three: boolean }
 
 // A preset fills counts, sizes and nodes into the form and leaves every address, name and store alone; each field
-// stays editable afterwards. notes say what it could not do as its name promises.
+// stays editable afterwards. It is for a new installation: the page does not offer it on an installed platform, where
+// it would resize and replace every machine. notes say what it could not do as its name promises.
 export function applyPreset(preset: Preset, f: Form, site: Site): { form: Form; notes: string[] } {
   if (preset === "custom") return { form: f, notes: [] }
   const notes: string[] = []
@@ -163,12 +165,12 @@ export function applyPreset(preset: Preset, f: Form, site: Site): { form: Form; 
     return [g, { ...f.groups[g], ...size, nodes, count: home ? "1" : "2" }]
   }))
   let form: Form = {
-    ...f, seedNode: site.fixed ? f.seedNode : seedNode, cpNode: seedNode, cpReplicas: home ? "1" : "3",
+    ...f, seedNode, cpNode: seedNode, cpReplicas: home ? "1" : "3",
     seed: { ...f.seed, cores: "2", memoryGiB: home ? "4" : "6" }, cp: { ...f.cp, cores: "2", memoryGiB: "4" }, groups,
   }
   if (!home) {
     const node = site.nodes.find((n) => n.node === seedNode)
-    const need = plannedMemory(form)[seedNode]?.spare ?? 0
+    const need = plannedMemory(form)[seedNode]?.need ?? 0
     if (!site.three) {
       form = { ...form, cpReplicas: "1" }
       notes.push("One control plane machine, not three: the release this install runs with builds one. Three come with a release whose cluster chart is 0.1.14 or newer.")
@@ -177,27 +179,28 @@ export function applyPreset(preset: Preset, f: Form, site: Site): { form: Form; 
       notes.push(`One control plane machine, not three: with three, ${seedNode} would need ${gib(need)} of memory and has ${gib(node.freeMiB)} free.`)
     }
   }
-  // One node, a new installation and no bridge named yet: the network the node routes (the tenant path on one node).
-  if (home && !site.fixed && names.length === 1 && !f.bridge.trim()) form = { ...form, networkMode: "routed", bridge: "pcplat0", vlan: "" }
+  // One node and no bridge named yet: the network the node routes (the tenant path on one node).
+  if (home && names.length === 1 && !f.bridge.trim()) form = { ...form, networkMode: "routed", bridge: "pcplat0", vlan: "" }
   return { form, notes }
 }
 
-// The memory in MiB the form places on each node: `run` is what the machines take, `spare` adds the machines a
-// rolling update makes on top (one for the control plane, one for each group on each of its nodes), which is what the
-// Check's capacity row counts (Installation.PlannedMemoryMiB). cores are those of the machines that run.
-export function plannedMemory(f: Form): Record<string, { cores: number; run: number; spare: number }> {
-  const out: Record<string, { cores: number; run: number; spare: number }> = {}
-  const add = (node: string, n: number, extra: number, m: MachineForm) => {
+// The memory in MiB the form places on each node, as the Check's capacity row counts it (Installation.PlannedMemoryMiB):
+// `run` is what the machines take; `need` adds the one more machine a rolling update of the control plane makes, which
+// the row fails on; `spare` adds one more machine of each group on each of its nodes as well, which the row warns on.
+// cores are those of the machines that run.
+export function plannedMemory(f: Form): Record<string, { cores: number; run: number; need: number; spare: number }> {
+  const out: Record<string, { cores: number; run: number; need: number; spare: number }> = {}
+  const add = (node: string, n: number, m: MachineForm, controlPlane = false, group = false) => {
     const cores = num(m.cores) || 0, mem = (num(m.memoryGiB) || 0) * 1024
     if (!node.trim()) return
-    const at = (out[node.trim()] ??= { cores: 0, run: 0, spare: 0 })
-    at.cores += n * cores; at.run += n * mem; at.spare += (n + extra) * mem
+    const at = (out[node.trim()] ??= { cores: 0, run: 0, need: 0, spare: 0 })
+    at.cores += n * cores; at.run += n * mem; at.need += (n + (controlPlane ? 1 : 0)) * mem; at.spare += (n + (controlPlane || group ? 1 : 0)) * mem
   }
-  add(f.seedNode, 1, 0, f.seed)
-  add(f.cpNode, num(f.cpReplicas) || 1, 1, f.cp)
+  add(f.seedNode, 1, f.seed)
+  add(f.cpNode, num(f.cpReplicas) || 1, f.cp, true)
   for (const g of GROUPS) {
     const gf = f.groups[g], count = num(gf.count) || 0
-    gf.nodes.forEach((n, i) => add(n, Math.floor(count / gf.nodes.length) + (i < count % gf.nodes.length ? 1 : 0), 1, gf))
+    gf.nodes.forEach((n, i) => add(n, Math.floor(count / gf.nodes.length) + (i < count % gf.nodes.length ? 1 : 0), gf, false, true))
   }
   return out
 }
@@ -394,7 +397,7 @@ const CHECK_ACTION: Record<string, string> = {
   "boot-iso-grant": RERUN,
   "boot-iso": "Name a store that is local to each node and takes ISO files as the ISO store in step 1.",
   placement: "Every node used needs the import store and the boot store. Change the nodes or the stores in step 1.",
-  capacity: "A node has less memory than the settings place on it, counted with the spare machines of an update. In step 1 use smaller or fewer machines, one control plane machine in place of three, or other nodes; or free memory on the node in Proxmox (a stopped VM counts with its configured memory). Then save and press Check.",
+  capacity: "A node has less memory than the settings place on it, counted with the one more machine an update of the control plane makes. In step 1 use smaller or fewer machines, one control plane machine in place of three, or other nodes; or free memory on the node in Proxmox (a stopped VM counts with its configured memory). Then save and press Check.",
   images: "A platform image is blocked. For a new installation, install a newer ProxCloud release. An installed platform stays on its release's images: no release changes them yet.",
 }
 export const checkAction = (id: string) => CHECK_ACTION[id.split(":")[0]] ?? "Read the message, correct it, then press Check."
