@@ -153,7 +153,11 @@ form; the tests run against a fake Proxmox.
   changes between the add and the delete the answer is a `409` whose message
   says that the new rule was added and the old one is still there; the cache row
   is refreshed, so the list shows both. An edit that changes nothing writes
-  nothing. Not verified on a lab.
+  nothing. A rule made in Proxmox that holds what `ADD_RULE` cannot express (an
+  action other than ACCEPT, a source port, a port list, a macro, an ICMP type,
+  a remote on the near side) is not edited: the answer is a `409` that says to
+  delete it and add a new one, because the edit would drop those settings. Not
+  verified on a lab.
 
 Load balancer readiness: `POST /api/v1/project/{id}/cloud/action` with
 `{"action":"LIST_LOAD_BALANCER_WARNINGS"}` on a Proxmox service answers
@@ -172,7 +176,7 @@ Project invitations (`/api/v1/project-invites`, customer realm):
 
 | Call | Who | Answer |
 |---|---|---|
-| `POST /invite` `{email, projectId}` | `project:manage_members` on the project | `202` with the invitation: `id`, `email`, `projectId`, `expiresAt` (24 hours), `mine`, `mailConfigured`, and `inviteUrl` when `mailConfigured` is false |
+| `POST /invite` `{email, projectId}` | `project:manage_members` on the project | `202` with the invitation: `id`, `email`, `projectId`, `expiresAt` (24 hours), `mailConfigured`, `inviteUrl` |
 | `GET /project/{projectId}` | a project admin sees every pending invitation of the project; another member of the project sees the ones they sent | `{mailConfigured, invites: [...]}`, each invitation as above |
 | `DELETE /project/{projectId}/{inviteId}` | the same rule as the list | `200`; the link stops working and a queued mail is cancelled. An id the caller may not see is a `404`, as an id that does not exist |
 | `GET /mine` | the invitee | the pending invitations of the caller's verified email |
@@ -180,11 +184,14 @@ Project invitations (`/api/v1/project-invites`, customer realm):
 
 A caller who is neither a project admin nor a member of the project gets the
 `404` of a project that does not exist on the list and the revoke.
-`mailConfigured` is true only when an invitation mail really leaves the site: a
-mail gateway is set (the SMTP integration or `PROXCLOUD_MAIL_SMTP_HOST` with
+`mailConfigured` is true when the invitation mail is handed to a mail gateway: a
+gateway is set (the SMTP integration or `PROXCLOUD_MAIL_SMTP_HOST` with
 `PROXCLOUD_MAIL_FROM`) and the durable invite outbox is off (it queues, and no
 dispatcher sends from it). When it is false no mail was sent, and `inviteUrl` is
-how the invitation reaches the invitee: the inviter copies it. The link alone
+how the invitation reaches the invitee: the inviter copies it. `inviteUrl` is in
+every answer, also when `mailConfigured` is true: the send is best effort, so a
+set gateway does not mean the mail arrived (a wrong password, a disabled
+template, an invitation made before the gateway was set). The link alone
 does not let anyone join: accept matches the caller's verified email to the
 invited one. An invitee can also sign in with the invited address without the
 link; the console then shows the invitation on its start page (`GET /mine`). On

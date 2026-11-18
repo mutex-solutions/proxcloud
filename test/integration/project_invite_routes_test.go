@@ -37,7 +37,6 @@ func (m *inviteRouteMail) Configured(context.Context) bool { return m.configured
 type inviteRow struct {
 	ID             string `json:"id"`
 	Email          string `json:"email"`
-	Mine           bool   `json:"mine"`
 	MailConfigured bool   `json:"mailConfigured"`
 	InviteURL      string `json:"inviteUrl"`
 }
@@ -117,7 +116,7 @@ func TestProjectInviteListAndRevoke(t *testing.T) {
 	if code := call("alice", http.MethodPost, "/project-invites/invite", `{"email":"new@example.invalid","projectId":"`+p.ID+`"}`, &created); code != http.StatusAccepted {
 		t.Fatalf("invite = %d", code)
 	}
-	if created.ID == "" || created.MailConfigured || !created.Mine || !strings.HasPrefix(created.InviteURL, "https://console.example.invalid/join-project?invite-token=") {
+	if created.ID == "" || created.MailConfigured || !strings.HasPrefix(created.InviteURL, "https://console.example.invalid/join-project?invite-token=") {
 		t.Fatalf("invite answer = %+v", created)
 	}
 	token := strings.TrimPrefix(created.InviteURL, "https://console.example.invalid/join-project?invite-token=")
@@ -134,7 +133,7 @@ func TestProjectInviteListAndRevoke(t *testing.T) {
 	}
 	// A plain member sees what he sent, and cannot revoke another's by its id.
 	rows, _, code = list("bob")
-	if code != http.StatusOK || len(rows) != 1 || rows[0].Email != "bobs@example.invalid" || !rows[0].Mine || rows[0].InviteURL == "" {
+	if code != http.StatusOK || len(rows) != 1 || rows[0].Email != "bobs@example.invalid" || rows[0].InviteURL == "" {
 		t.Fatalf("member list = %d %+v", code, rows)
 	}
 	bobs := rows[0].ID
@@ -152,9 +151,24 @@ func TestProjectInviteListAndRevoke(t *testing.T) {
 		t.Fatalf("the invite must survive the refused revokes: %v %v", inv, err)
 	}
 
-	// The inviter revokes his own; the admin revokes hers. A revoked link is dead, and the other invite stays.
+	// The inviter revokes his own; the admin revokes hers. A revoked link is dead, and the other invite stays:
+	// also the admin's invitation of the very address bob invited.
+	if _, err := repo.Create(ctx, pgdoc.M{"email": "bobs@example.invalid", "projectId": p.ID, "token": "tok-alice", "invitedBy": "alice",
+		"expiresAt": time.Now().UTC().Add(time.Hour), "deliveryMode": "legacy"}); err != nil {
+		t.Fatal(err)
+	}
 	if code := call("bob", http.MethodDelete, "/project-invites/project/"+p.ID+"/"+bobs, "", nil); code != http.StatusOK {
 		t.Fatalf("inviter revoke = %d", code)
+	}
+	if inv, err := repo.ByEmailAndToken(ctx, "bobs@example.invalid", "tok-bob"); err != nil || inv != nil {
+		t.Fatalf("revoked invite still resolves: %v %v", inv, err)
+	}
+	same, err := repo.ByEmailAndToken(ctx, "bobs@example.invalid", "tok-alice")
+	if err != nil || same == nil {
+		t.Fatalf("revoking one invitation removed another of the same address: %v %v", same, err)
+	}
+	if err := repo.Revoke(ctx, same); err != nil {
+		t.Fatal(err)
 	}
 	if rows, _, _ := list("alice"); len(rows) != 1 || rows[0].ID != created.ID {
 		t.Fatalf("after the member's revoke = %+v", rows)
@@ -169,16 +183,17 @@ func TestProjectInviteListAndRevoke(t *testing.T) {
 		t.Fatalf("second revoke = %d, want 404", code)
 	}
 
-	// With a mail gateway the mail carries the link, so the API does not hand it out.
+	// With a mail gateway the answer says so and still carries the link: a gateway does not mean the mail
+	// arrived (wrong password, disabled template), and the list is then the only place left to get it from.
 	mail.configured = true
 	created = inviteRow{}
 	if code := call("alice", http.MethodPost, "/project-invites/invite", `{"email":"mailed@example.invalid","projectId":"`+p.ID+`"}`, &created); code != http.StatusAccepted {
 		t.Fatalf("invite = %d", code)
 	}
-	if !created.MailConfigured || created.InviteURL != "" || mail.sent != 2 {
+	if !created.MailConfigured || created.InviteURL == "" || mail.sent != 2 {
 		t.Fatalf("invite with mail = %+v sent=%d", created, mail.sent)
 	}
-	if rows, mailConfigured, _ := list("alice"); len(rows) != 1 || !mailConfigured || rows[0].InviteURL != "" {
+	if rows, mailConfigured, _ := list("alice"); len(rows) != 1 || !mailConfigured || rows[0].InviteURL != created.InviteURL {
 		t.Fatalf("list with mail = %+v mail=%v", rows, mailConfigured)
 	}
 }

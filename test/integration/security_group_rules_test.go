@@ -391,3 +391,32 @@ func TestSecurityGroupUpdateRuleReplacesTheRule(t *testing.T) {
 		t.Fatalf("after the raced edit both rules must be listed: %v", ports)
 	}
 }
+
+// A rule an operator made in Proxmox can say what a rule of the API cannot: another action, a source port, a macro,
+// a port list. The list shows it as a plain allow rule, and an edit would store only what the form holds: a DROP
+// would become an ACCEPT, "80,443" every port. The edit is refused, and nothing is written.
+func TestSecurityGroupUpdateRuleRefusesARuleMadeOutside(t *testing.T) {
+	for name, made := range map[string]url.Values{
+		"drop":        {"type": {"in"}, "action": {"DROP"}, "proto": {"tcp"}, "dport": {"22"}},
+		"source port": {"type": {"in"}, "action": {"ACCEPT"}, "proto": {"tcp"}, "dport": {"22"}, "sport": {"1024:65535"}},
+		"port list":   {"type": {"in"}, "action": {"ACCEPT"}, "proto": {"tcp"}, "dport": {"80,443"}},
+		"macro":       {"type": {"in"}, "action": {"ACCEPT"}, "macro": {"SSH"}},
+		"icmp type":   {"type": {"in"}, "action": {"ACCEPT"}, "proto": {"icmp"}, "icmp-type": {"echo-request"}},
+		"dest on in":  {"type": {"in"}, "action": {"ACCEPT"}, "proto": {"tcp"}, "dport": {"22"}, "dest": {"10.0.0.5"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := newSGRig(t)
+			g.fake.add(made)
+			// The id as LIST_RULES gives it once the group is read again (the fake's write does not sync the row).
+			id := pve.SecurityGroupRuleID("gaaa", pve.FirewallRule{Type: made.Get("type"), Action: made.Get("action"), Proto: made.Get("proto"),
+				Source: made.Get("source"), Dest: made.Get("dest"), DPort: made.Get("dport"), SPort: made.Get("sport")})
+			code, body := g.act("UPDATE_RULE", `{"ruleId":"`+id+`","protocol":"tcp","description":"mine now"}`)
+			if code != http.StatusConflict || !strings.Contains(body, "made outside ProxCloud") {
+				t.Fatalf("edit: %d %s, want 409 naming a rule made outside", code, body)
+			}
+			if len(g.fake.added) != 0 || len(g.fake.deleted) != 0 {
+				t.Fatalf("a refused edit wrote to Proxmox: added %v deleted %v", g.fake.added, g.fake.deleted)
+			}
+		})
+	}
+}

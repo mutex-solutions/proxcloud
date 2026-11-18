@@ -215,8 +215,8 @@ func (h *Handler) Routes(r chi.Router) {
 // {email, projectId, token: UUID, expiresAt: +24h}, send the "send_invite_to_project" mail with
 // the join-project deep link, and audit INVITE (resourceMetadata.invitedEmail). The caller must
 // hold project:manage_members on the target project (requireInvitePermission). 202 Accepted, with
-// the invitation as the list route shows it: on a site that sends no mail that is the only place
-// the inviter gets the link from.
+// the invitation as the list route shows it, link included: on a site that sends no mail that is
+// the only place the inviter gets the link from.
 func (h *Handler) invite(w http.ResponseWriter, r *http.Request) {
 	u, err := h.users.Require(r.Context(), httpx.RC(r.Context()).Sub)
 	if err != nil {
@@ -244,7 +244,7 @@ func (h *Handler) invite(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, err)
 		return
 	}
-	view := h.inviteView(inv, u.Sub, h.mailDelivers(r.Context()))
+	view := h.inviteView(inv, h.mailDelivers(r.Context()))
 	httpx.Raw(w, http.StatusAccepted, httpx.Response[map[string]any]{Data: &view})
 }
 
@@ -258,16 +258,17 @@ func (h *Handler) mailDelivers(ctx context.Context) bool {
 	return ok && c.Configured(ctx)
 }
 
-// inviteView is an invitation as its inviter or a project admin sees it. The link is given only
-// when no mail carries it. It is not enough to join: accept also needs an account whose address
-// the identity provider has verified as the invited one.
-func (h *Handler) inviteView(inv pgdoc.M, sub string, mailDelivers bool) map[string]any {
-	by, _ := inv["invitedBy"].(string)
+// inviteView is an invitation as its inviter or a project admin sees it, always with its link.
+// mailConfigured only words the answer ("sent" or "copy the link"): a configured gateway does not mean the mail arrived (a failed send, a disabled template, an invite
+// made before the gateway was set), and the link is then the only way left. It is not enough to
+// join: accept also needs an account whose address the identity provider has verified as the
+// invited one, and that account finds the invitation without the link (/project-invites/mine).
+func (h *Handler) inviteView(inv pgdoc.M, mailDelivers bool) map[string]any {
 	out := map[string]any{
 		"id": inviteDocID(inv), "email": inv["email"], "projectId": inv["projectId"],
-		"expiresAt": inv["expiresAt"], "mine": by != "" && by == sub, "mailConfigured": mailDelivers,
+		"expiresAt": inv["expiresAt"], "mailConfigured": mailDelivers,
 	}
-	if token, _ := inv["token"].(string); token != "" && !mailDelivers {
+	if token, _ := inv["token"].(string); token != "" {
 		out["inviteUrl"] = h.uiBaseURL + "/join-project?invite-token=" + token
 	}
 	return out
@@ -326,7 +327,7 @@ func (h *Handler) listForProject(w http.ResponseWriter, r *http.Request) {
 	mailDelivers := h.mailDelivers(r.Context())
 	out := make([]map[string]any, 0, len(invs))
 	for _, inv := range invs {
-		out = append(out, h.inviteView(inv, u.Sub, mailDelivers))
+		out = append(out, h.inviteView(inv, mailDelivers))
 	}
 	httpx.OK(w, map[string]any{"mailConfigured": mailDelivers, "invites": out})
 }
