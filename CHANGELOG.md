@@ -7,13 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+None of the entries below is verified on a lab yet: each one says so, and what its tests do show.
+
+### Added
+
+- **A warning when tenants cannot reach the platform network.** On a site where a Proxmox node translates
+  tenant traffic (a `simple` tenant zone, or an exit node of an EVPN zone) and also runs the platform machine
+  that owns the destination address, a tenant's TCP connection to the platform network is dropped on that node
+  unless the node itself routes the platform network: tenant Kubernetes workers run and never join, and tenants
+  cannot reach managed databases (production acceptance of v0.8.0, a one-node site with the platform network
+  on a VLAN). The managed-services Check has a row `tenant-path` that reads the layout and warns; it never
+  fails and opens no connection, so `ok` is not proof. The guide has the rule, the two supported layouts and
+  what to do with workers that did not join
+  ([docs/managed-services.md](docs/managed-services.md#the-path-from-tenants-to-the-platform)). The node leg
+  for an existing site was run by hand on one production site and is lost at a reboot; the layout with a
+  platform network routed by the node was run nowhere. Not verified on a lab: the row is tested against a fake
+  Proxmox API only.
+
 ### Changed
 
 - **The platform BOM on `main` is `0.9.0-dev` again, and the build carries the BOM of `0.8.1`**
   (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.8.1.yaml`). The `v0.8.1` release commit left
   the BOM at `0.8.1`, and the release gate refuses only `-dev`. A platform installed by `v0.8.1` stays on its BOM
   after an upgrade, as one installed by `v0.8.0` does; a platform installed by a `dev-<sha>` build of `main` is
-  still refused by a later build (`bom_unsupported`).
+  still refused by a later build (`bom_unsupported`). Not verified on a lab.
+- **A worker that has not joined sends the tenant to the operator.** Past its 15 minutes the node group's line
+  in the customer console read "Check that the cluster's network has a router or gateway and reaches the
+  cluster endpoint", which a tenant cannot check. It now says that the machine most likely could not reach the
+  cluster's endpoint (the product does not read the join error), to contact the operator, and that the machine
+  is replaced by reducing the count by one and raising it again once the cause is repaired (a group of one is
+  raised first: a count below one is refused); inside the bound it reads "has not joined the cluster yet"
+  (`web/client/src/pages/platform/KubernetesPage.tsx`, `docs/managed-k8s.md`). Not verified on a lab.
+- **The server console opens on the Serial tab** when the server's display is its serial port (cloud images), and
+  says that Enter brings the login prompt. **The Kubernetes create form starts on the lowest version offered, with
+  high availability off**; it preselected the newest version and three control planes. A provider marks no default
+  version. Not verified on a lab.
+
+### Fixed
+
+- **A deleted tenant Kubernetes cluster's Proxmox token is revoked without a provider sync** (lab finding F57).
+  The token `capmox@pve!<clusterId>` and its ACL rows stayed until a provider sync ran after the cluster's
+  30-minute marker grace, and on an install without the job scheduler (the Compose default) until an operator
+  started a sync. The delete, and a project teardown, now queue a durable job (`kamaji.release/v1`) that the API
+  runs with or without the scheduler. Its first look at the cluster comes within seconds of the delete, the next
+  ones 15 seconds apart, growing to 5 minutes, and at the first look that finds the cascade over it revokes the
+  token and releases the cluster's addresses, dataset and Secrets. After 24 hours it gives up (`dead`,
+  `cascade_not_finished`) and the sync's sweep, which stays as the backstop, does the release. The job and the
+  sweep now also wait for the cluster's Machines, and neither revokes while a VM named `<clusterId>-…` is left in
+  the project's pool or while the management cluster or Proxmox does not answer: CAPMOX deletes the workers with
+  that token ([docs/managed-k8s.md](docs/managed-k8s.md#deletion-and-orphan-finalization)). Not verified on a
+  lab: the tests use a fake management cluster and a fake Proxmox on PostgreSQL.
+- **Customer console, the defects of the production acceptance (D1, D2, D8 to D10, D12 to D15).** A network's
+  **Servers** tab lists the servers with a NIC on it (`GET_SERVERS` was refused on Proxmox), and its **Subnets** tab
+  shows a network's subnet on a site without the scheduled sync (the create writes `subnetDetails`; for a network
+  made before, the tab reads the row's own `cidr`, `gateway` and `snat`). A snapshot
+  delete right after a rollback asks Proxmox up to three times for the VM's config lock before it answers 409; what
+  holds that lock after a rollback was not found. `CREATE_BACKUP` answers the new archive's id, and the console asks
+  before it starts a backup. The role form shows a name the server accepts and states the rule. Rebuild offers the
+  project's own images, like Create. A page the menu hides (volume snapshots, S3 access keys) no longer opens by its
+  URL. The Create share dialog warns when the file server is inside a network the site keeps tenant networks out of
+  (`LIST_SHARE_WARNINGS`). A serial console session ends on the page when its server was stopped or restarted
+  (`GET_CONSOLE_STATE`, asked every 10 s). Not verified on a lab: the API tests use a fake Proxmox, the console was
+  run against its mock app ([docs/cloud-integration.md](docs/cloud-integration.md)).
 
 ## [0.8.1] - 2026-11-18
 
