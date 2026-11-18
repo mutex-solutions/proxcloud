@@ -641,7 +641,26 @@ are several, `errors.details.problems`.
   and the expiry, never the token, and is written before the answer; `409
   no_seed` without a ready seed, `502` when the seed issues no token, `503`
   when the API has no audit service (no token is asked for). The answer
-  carries `Cache-Control: no-store`.
+  carries `Cache-Control: no-store`. The entry's `operation` is
+  `seed-kubeconfig`.
+- `GET /installations/{id}/platform-kubeconfig` (`admin:service:manage`,
+  although a GET): `{kubeconfig, expiresAt}`, a kubeconfig of the platform
+  cluster with a one-hour token of its service account
+  `kube-system/proxcloud-break-glass`. The route reads the cluster's admin
+  kubeconfig and CA from the seed, writes that account, a ClusterRole and a
+  Role in `argocd` with their bindings on the cluster (all named
+  `proxcloud-break-glass`; written again by each call), and asks the cluster
+  for the token. The admin kubeconfig is never returned. The token reads the
+  cluster without its Secrets and may forward a port in `argocd` and read
+  `argocd-initial-admin-secret` there; it changes nothing
+  ([managed-services.md](managed-services.md#8-credentials-and-the-seed-backup)
+  has the rules and what they do not limit). Nothing stores it. Audit entry,
+  order, `no-store` and `503` as for `seed-kubeconfig`, with `operation:
+  platform-kubeconfig`. `409 no_seed` without a ready seed; `409 no_cluster`
+  when the seed holds no admin kubeconfig or CA of the cluster yet; `502
+  seed_api_unreachable` when the seed does not answer; `502
+  workload_api_unreachable` when the cluster refuses a write or the token, or
+  grants the token for longer than the hour.
 - `POST /installations/{id}/seed-credential/rotate`: creates the service
   account's next token Secret (`proxcloud-portal-token-g<n+1>`), checks that
   its token is cluster-admin, stores it, then deletes the older token Secrets,

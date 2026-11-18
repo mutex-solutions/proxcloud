@@ -1286,6 +1286,71 @@ func TestBreakGlassKubeconfig(t *testing.T) {
 	}
 }
 
+// The platform kubeconfig carries a one-hour TokenRequest token of the break-glass account on the platform cluster,
+// its API address and its CA, and never the admin kubeconfig's credential. The account reads no Secret but ArgoCD's
+// initial admin password and changes nothing but a port-forward. Nothing is stored, and nothing is written to the seed.
+func TestPlatformKubeconfig(t *testing.T) {
+	p := newPlatform(t, RunApply)
+	_, in, sec := p.state.snapshot()
+	before := string(p.state.in) + string(p.state.sec)
+	kc, expires, err := PlatformKubeconfig(context.Background(), in, sec)
+	if err != nil || len(p.wl.tokens) != 1 || p.wl.ttls[0] != 3600 || !strings.Contains(kc, "token: "+p.wl.tokens[0]) || !strings.Contains(kc, p.wl.url) ||
+		strings.Contains(kc, wlAdmin) || strings.Contains(kc, p.seed.url) || time.Until(expires) > time.Hour || time.Until(expires) < 59*time.Minute {
+		t.Fatalf("kubeconfig: %v, ttls %v, expires %v\n%s", err, p.wl.ttls, expires, kc)
+	}
+	if c, err := kamajik8s.New(kc); err != nil || c.Server() != p.wl.url {
+		t.Fatalf("the kubeconfig does not parse: %v", err)
+	}
+	rbac := "/apis/rbac.authorization.k8s.io/v1/"
+	if !slices.Equal(p.wl.writes, []string{
+		"PATCH /api/v1/namespaces/kube-system/serviceaccounts/proxcloud-break-glass",
+		"PATCH " + rbac + "clusterroles/proxcloud-break-glass", "PATCH " + rbac + "clusterrolebindings/proxcloud-break-glass",
+		"PATCH " + rbac + "namespaces/argocd/roles/proxcloud-break-glass", "PATCH " + rbac + "namespaces/argocd/rolebindings/proxcloud-break-glass",
+		"POST /api/v1/namespaces/kube-system/serviceaccounts/proxcloud-break-glass/token",
+	}) || len(p.seed.writes) != 0 || len(p.seed.tokens) != 0 || string(p.state.in)+string(p.state.sec) != before {
+		t.Fatalf("writes: platform cluster %v, seed %v", p.wl.writes, p.seed.writes)
+	}
+	// The rules: cluster-wide only reads, and no rule there names secrets or a wildcard that would hold them.
+	for _, rule := range p.wl.obj(rbac + "clusterroles/proxcloud-break-glass")["rules"].([]any) {
+		r := rule.(map[string]any)
+		groups, resources := fmt.Sprint(r["apiGroups"]), fmt.Sprint(r["resources"])
+		if fmt.Sprint(r["verbs"]) != "[get list watch]" || strings.Contains(groups, "*") || strings.Contains(groups, "bootstrap") ||
+			strings.Contains(resources, "secrets") || (strings.Contains(resources, "*") && slices.Contains(r["apiGroups"].([]any), any(""))) {
+			t.Fatalf("cluster-wide rule %v", r)
+		}
+	}
+	argo, _ := json.Marshal(p.wl.obj(rbac + "namespaces/argocd/roles/proxcloud-break-glass")["rules"])
+	if string(argo) != `[{"apiGroups":[""],"resources":["pods/portforward"],"verbs":["create"]},`+
+		`{"apiGroups":[""],"resourceNames":["argocd-initial-admin-secret"],"resources":["secrets"],"verbs":["get"]}]` {
+		t.Fatalf("the Role in argocd: %s", argo)
+	}
+	for _, b := range []string{rbac + "clusterrolebindings/proxcloud-break-glass", rbac + "namespaces/argocd/rolebindings/proxcloud-break-glass"} {
+		if got := p.wl.obj(b); str(got, "roleRef", "name") != "proxcloud-break-glass" || fmt.Sprint(got["subjects"]) != "[map[kind:ServiceAccount name:proxcloud-break-glass namespace:kube-system]]" {
+			t.Fatalf("%s: %v", b, got)
+		}
+	}
+
+	// A cluster that grants more than the hour: no kubeconfig.
+	p.wl.grant = 24 * time.Hour
+	if kc, _, err := PlatformKubeconfig(context.Background(), in, sec); !errors.Is(err, ErrWorkloadAPI) || kc != "" {
+		t.Fatalf("a 24 hour token was handed out: %v", err)
+	}
+	p.wl.grant = 0
+	// The platform cluster refuses: its error, told from the seed's, and without the admin credential in it.
+	p.wl.deny = []denial{{403, "forbidden"}}
+	if _, _, err := PlatformKubeconfig(context.Background(), in, sec); !errors.Is(err, ErrWorkloadAPI) || strings.Contains(fmt.Sprint(err), wlAdmin) {
+		t.Fatalf("a refusing platform cluster: %v", err)
+	}
+	// No cluster on the seed yet, and no seed.
+	p.seed.put(seedNS+"pc-platform/secrets/pc-platform-kubeconfig", map[string]any{"data": map[string]any{}})
+	if _, _, err := PlatformKubeconfig(context.Background(), in, sec); !errors.Is(err, ErrNoCluster) {
+		t.Fatalf("no admin kubeconfig on the seed: %v", err)
+	}
+	if _, _, err := PlatformKubeconfig(context.Background(), &Installation{}, nil); !errors.Is(err, ErrNoSeed) {
+		t.Fatalf("no seed: %v", err)
+	}
+}
+
 // The live read derives degraded from ArgoCD and stores nothing.
 func TestLive(t *testing.T) {
 	p := newPlatform(t, RunApply)

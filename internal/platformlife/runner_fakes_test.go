@@ -557,6 +557,7 @@ type fakeSeed struct {
 	writes   []string // every request of the service account that is not a GET or an access review
 	tokens   []string // TokenRequest tokens, with ttls the seconds each was asked for
 	ttls     []float64
+	grant    time.Duration // when set, the life every TokenRequest token gets instead of the one asked for
 	uids     int
 }
 
@@ -832,8 +833,11 @@ func (f *fakeSeed) object(w http.ResponseWriter, r *http.Request) {
 		token := fmt.Sprintf("requested-token-%d-0123456789", len(f.tokens)+1)
 		secs, _ := dig(body, "spec", "expirationSeconds").(float64)
 		f.tokens, f.ttls = append(f.tokens, token), append(f.ttls, secs)
-		answer(map[string]any{"status": map[string]any{"token": token,
-			"expirationTimestamp": time.Now().Add(time.Duration(secs) * time.Second).UTC().Format(time.RFC3339)}})
+		life := time.Duration(secs) * time.Second
+		if f.grant > 0 {
+			life = f.grant
+		}
+		answer(map[string]any{"status": map[string]any{"token": token, "expirationTimestamp": time.Now().Add(life).UTC().Format(time.RFC3339)}})
 	case r.Method == http.MethodPatch && r.Header.Get("Content-Type") == "application/merge-patch+json":
 		cur := f.objs[path]
 		if cur == nil {

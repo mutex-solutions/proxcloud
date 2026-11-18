@@ -189,7 +189,7 @@ function ready(in_: Doc) {
   const provider = (kind: string, label: string) => {
     let svc = db.services.find((s) => s.config?.platformInstallationId === in_.id && s.config?.provider === kind)
     if (!svc) {
-      svc = { id: db.nextId("svc"), name: `${in_.name} ${label}`, type: "CLOUD", status: "ACTIVE", config: { provider: kind, platformInstallationId: in_.id, attachToNewProjects: false } }
+      svc = { id: db.nextId("svc"), name: `${in_.name} ${label}`, type: "CLOUD", status: "ACTIVE", config: { provider: kind, platformInstallationId: in_.id, attachToNewProjects: false, ...(kind === "kamaji" ? { cluster: { versions: {} } } : {}) } }
       db.services.push(svc)
     }
     return svc.id as string
@@ -406,6 +406,16 @@ on("GET /admin/platform/installations/:id/seed-kubeconfig", ({ params }) => {
   const in_ = find(params.id)
   if (!in_.status.seed?.readyAt) throw fail(409, "no_seed", "the installation has no ready seed")
   const kubeconfig = `apiVersion: v1\nkind: Config\nclusters:\n- name: pc-seed\n  cluster:\n    server: ${in_.status.seed.apiServer}\nusers:\n- name: pc-seed\n  user:\n    token: mock-break-glass-token\n`
+  return { data: { kubeconfig, expiresAt: new Date(Date.now() + 3_600_000).toISOString() } }
+})
+
+// As the API: a token of the break-glass account on the platform cluster, never the admin kubeconfig the seed holds.
+on("GET /admin/platform/installations/:id/platform-kubeconfig", ({ params }) => {
+  const in_ = find(params.id)
+  if (!in_.status.seed?.readyAt) throw fail(409, "no_seed", "this installation has no ready seed")
+  const endpoint = in_.status.clusters?.[0]?.endpoint
+  if (!endpoint) throw fail(409, "no_cluster", "this installation has no platform cluster yet")
+  const kubeconfig = `apiVersion: v1\nkind: Config\nclusters:\n- name: pc-platform\n  cluster:\n    server: https://${endpoint}:6443\nusers:\n- name: pc-platform\n  user:\n    token: mock-platform-break-glass-token\n`
   return { data: { kubeconfig, expiresAt: new Date(Date.now() + 3_600_000).toISOString() } }
 })
 
