@@ -554,7 +554,9 @@ the same key. `network-config` is rendered from `ipconfigN` and is absent for pl
   address cannot be removed, and a network keeps one. There is no router resource: the zone's VRF routes
   between all of a project's vnets, and the isolation rules are what keeps other projects out. A network's row
   holds `subnetDetails` (cidr, gateway, snat per subnet) from its create on (v0.8.2; before, only the sync wrote it,
-  and on a site without the scheduler the console's Subnets tab of a new network stayed empty).
+  and on a site without the scheduler the console's Subnets tab of a new network stayed empty). A network made
+  before v0.8.2 gets `subnetDetails` at the next sync or subnet action; until then the console's Subnets tab shows
+  the row's own `cidr`, `gateway` and `snat`, the one subnet it was created with.
 - **Servers on a network** (`GET_SERVERS` on a NETWORK, v0.8.2): the project's SERVER rows whose VM has a NIC on the
   vnet. It reads the config of every VM in the project's pool, as the network delete guard does, because a SERVER
   row holds addresses and not the network of each NIC; 409 while a host of the project's servers is down. Tested

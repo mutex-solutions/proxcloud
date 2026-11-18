@@ -157,8 +157,12 @@ export function seedCloudResources(): CloudResource[] {
   // externalId mirrors the real API (like volumes above): the cache row's
   // externalId IS the network id — subnet.network_id and router
   // external_gateway_info.network_id join against it.
+  // A row as v0.8.0 and v0.8.1 wrote it at create: the one subnet's cidr, gateway and snat, and no subnetDetails.
   const networkPrivate = res("NETWORK", "net-private", {
-    network: { id: "net-priv-1", name: "net-private", status: "ACTIVE", shared: false, "router:external": false, subnets: ["sub-priv-1"] },
+    network: {
+      id: "net-priv-1", name: "net-private", status: "ACTIVE", shared: false, "router:external": false, subnets: ["sub-priv-1"],
+      cidr: "10.0.0.0/24", gateway: "10.0.0.1", snat: true,
+    },
   }, { externalId: "net-priv-1" })
   const networkPublic = res("NETWORK", "public", {
     network: { id: "net-public-ext", name: "public", status: "ACTIVE", shared: true, "router:external": true, subnets: [] },
