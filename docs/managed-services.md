@@ -80,11 +80,11 @@ reading [section 3](#3-proxmox-identities): they share the pool `proxcloud-syste
 | Routes | The API (on Compose: the API container) reaches the Proxmox API, the seed address on 6443 and the cluster's API address on 6443. The seed and the cluster machines reach the Proxmox API URL you enter, `github.com` and `raw.githubusercontent.com` (at first boot the seed downloads the k3s binary from the first and the k3s install script from the second, both checked by sha256; GitHub redirects a release download to another host of its own, which must be reachable too and is not named in the BOM) and the registries of the BOM (`ghcr.io`, which serves every chart: ours and the third-party ones of the chart mirror, `ghcr.io/mutex-solutions/charts-mirror`; and the image registries those charts pull from). Tenant networks must reach the load balancer range and nothing else of the platform network. |
 | Storage | A boot store that takes VM disks on every node used; an ISO store that is local to each node and takes ISOs (default `local`); an import store with `import` content on every node an image goes to (default: the provider's `importStorage`). The import store must not be the boot store: the portal token holds `PVEDatastoreAdmin` on the import store, which reaches every disk on it ([section 10](#10-security-boundaries)). The API refuses settings that name the same store for both; the form says so before it saves when you type the same store in both fields. An empty import store takes the provider's `importStorage`, so it is refused too when that is the boot store. The import store of the settings and the provider's `importStorage` must be one store: the script of step 2 is written for the store of the settings, and the `privileges:kubemint` check reads the provider's ([when the provider's import store is the boot store](#when-the-providers-import-store-is-the-boot-store)). |
 | Capacity | The smallest machine is 2 cores, 4 GiB of memory and a 20 GiB disk. The smallest layout (seed, control plane, one machine per group) is five VMs. The review step adds up cores and memory per node; it does not read what is free. |
-| Root on one node | Once, to run the identities script. |
+| Root on one node | Once, for one pasted command: [the root command of step 2](#the-root-command-of-an-installation). It makes what only root can (roles, users, tokens, ACL rows, pools) and hands the two token secrets back in one line. The cluster firewall rule for the Proxmox API, the blocked networks and a new tenant zone without DHCP are no longer root steps: the install and the save of the settings do them with the portal token ([What ProxCloud does with the portal token](#what-proxcloud-does-with-the-portal-token)). |
 | A router for a VLAN tenant zone | Only when the provider's tenant zone is a `vlan` zone. Proxmox gives a VLAN no gateway, no DHCP and no SNAT: a tenant network there is a bare layer 2 segment, and ProxCloud writes and reports it so (`dhcp: false`, `snat: false`; asking for either is a `400`). The site's own router must hold the first address of each tenant subnet (the `gateway` the network shows; servers and cluster workers get it as their default route) on that VLAN, route it to the load balancer range and to whatever else tenants may reach, and keep tenants apart. Without it a worker on such a network never reaches its control plane and the cluster stays `PROGRESSING`. An EVPN zone needs none of this. |
 | A path from tenants to the platform network | Tenant cluster workers and database clients open TCP connections to the platform network. On a node that translates tenant traffic (a `simple` tenant zone, or an exit node of an EVPN zone) and also runs a platform machine, that connection is dropped unless the node itself routes the platform network. A one-node site with a `simple` tenant zone and the platform network on a VLAN behind the site's router is this case; a platform network of mode `routed` is not. The Check warns (`tenant-path`) and the install goes on, and **Test the tenant path** opens the path from a tenant network once the platform is installed: [The path from tenants to the platform](#the-path-from-tenants-to-the-platform). |
 | A tenant network zone without DHCP | Only for tenant Kubernetes clusters, not for the install or for databases: a cluster's nodes get fixed addresses, so its network must be in an EVPN or a VLAN zone, or in a `simple` zone without a DHCP server. With a provider whose default zone (`config.network.defaultZone`) is a `simple` zone that ProxCloud created with DHCP, which is its default, a cluster create on its networks answers `400 Worker nodes need a network without DHCP (an EVPN or VLAN zone, or a simple zone without a DHCP server)`. The Check reads the zone in Proxmox, warns (`tenant-network`) when it has DHCP, and the install goes on; change the provider's default zone before you offer clusters ([managed-k8s.md](managed-k8s.md)). Not affected: a Kubernetes provider with shared workers (`cluster.shared`), which uses no tenant network, and a `simple` zone without DHCP. Such a zone is made in one of two ways: by hand in Proxmox before the first tenant network (a zone that exists is used as it is), or by ProxCloud when the zone's config says so, `"zones": {"<id>": {"kind": "simple", "dhcp": false}}` (from v0.8.1; it applies to a zone that does not exist yet, and an existing zone is never changed). Networks of such a zone answer `dhcp: false` and get no DHCP range; servers, cluster nodes and load balancers there get addresses the platform assigns. The key is refused on a zone of another kind (`400`, naming the key). The setup wizard keeps a zone's other keys when you change its kind there, so take `"dhcp"` out of the zone's config (Cloud providers) before you change such a zone to VLAN or EVPN. The key is not verified on a lab. |
-| The datacenter firewall | On, with the provider's isolation rules written by a provider sync once the installation is saved: the Check verifies that tenant traffic to the seed, the API address and the node range is dropped. |
+| The datacenter firewall | On, with the provider's isolation rules written by a provider sync once the installation is saved: the Check verifies that tenant traffic to the seed, the API address and the node range is dropped. Saving the settings adds those addresses to the provider's blocked networks. With the firewall on, a node drops what does not come from its own network, so the seed and the platform machines need a rule to reach the Proxmox API: the install writes it (`pve-api-rule`). |
 
 The page also warns when the job scheduler is off: tenant clusters and databases then update their
 status only when a provider sync runs, and no project is deleted: "Delete now" is refused with a
@@ -512,19 +512,21 @@ Go live never waits for it.
 ## 3. Proxmox identities
 
 The portal token cannot create users or roles or grant itself the rows below, and it must hold
-nothing on the seed's pool; ProxCloud asks for no root password. Step 2 of the page shows a script to
-run as root on one node:
+nothing on the seed's pool; ProxCloud asks for no root password. Step 2 of the page shows one command
+to paste into a root shell on one node:
 
 ```
-GET /api/v1/admin/setup/proxmox-script?managedServices=true&bootStorage=<store>&isoStorage=<store>[&tokenId=<portal token>][&importStorage=<store>]
+GET /api/v1/admin/setup/proxmox-script?installation=<installation id>[&tokenId=<portal token>]
 ```
 
 It is the [portal token script](proxmox-permissions.md#portal-token-script) followed by the
-managed-services block. The page fills in the stores of the saved settings and the provider's token
-id, and leaves `gpu` out. Because the provider is saved, the portal token exists already: the first
-lines of the output report it as existing, which is expected. Do not remove it; the saved provider
-uses its secret. Only the two secrets printed for `capmox@pve!capi` and `csi@pve!csi` are pasted in
-step 2. The block:
+managed-services block, made for the stores of the saved settings and the provider's token id, without
+`gpu`. Because the provider is saved, the portal token exists already: the first lines of the output
+report it as existing, which is expected. Do not remove it; the saved provider uses its secret.
+What the command does with the two platform tokens is in
+[The root command of an installation](#the-root-command-of-an-installation). The same script without
+an installation (`?managedServices=true&bootStorage=<store>&isoStorage=<store>`) is unchanged: it
+prints each secret once and marks no token. The block:
 
 - creates the roles `ProxCloudCAPI`, `ProxCloudCSI`, `ProxCloudKubeMint` and `ProxCloudKubeToken` when
   missing and appends their privileges (a re-run adds privileges and removes none, with one
@@ -558,7 +560,74 @@ step 2. The block:
 they are sealed with the encryption key in the collection `platformSecret`, no route returns them,
 and an installation shows only which ids are stored. To replace one, paste a new one.
 
-**When `capmox@pve!capi` or `csi@pve!csi` already exists**, `pveum user token add` fails, the script prints
+### The root command of an installation
+
+The command of step 2 (`?installation=<id>`) differs from the script above in three ways. None of
+them was run on a Proxmox node ([Not verified on a lab yet](#not-verified-on-a-lab-yet)).
+
+**It marks the two tokens.** A token it makes gets the comment `proxcloud:<installation id>`
+(`pveum user token add … --comment`).
+
+**It stops on a token that is not the installation's.** The ids `capmox@pve!capi` and `csi@pve!csi`
+are fixed, so a token of that id may be there already and may be in use by something else (the first
+production site had a `capmox@pve!capi` of an older Cluster API setup). Before it changes anything
+the command reads both tokens. One that exists, does not carry this installation's comment, and
+whose secret ProxCloud does not hold, stops it:
+
+```
+STOP: the token capmox@pve!capi exists on this cluster and was not made for this ProxCloud installation (pi-0a1b2c3d).
+Something else may use it, so this command does not touch it. Look at what it may do (pveum acl list | grep capmox@pve)
+and at who uses it. When nothing does, remove it and run this command again:
+  pveum user token remove capmox@pve capi
+Nothing was changed.
+```
+
+It never deletes or changes such a token: removing it is your decision and your command. A token
+whose secret ProxCloud already holds (a site set up before tokens were marked, or with the secrets
+entered by hand) is the installation's: the command adds the comment to it and goes on.
+
+**It prints no secret.** The secrets of the tokens it made go into one line, printed last, also
+when a later step of the command fails:
+
+```
+Paste this one line into step 2 of the Managed services page. It carries the new token secrets: treat it as a password.
+PC-ENROLL:MTpwaS0wYTFiMmMzZDoxNzk1MDAwMDAwOjExMTExMTExLTEx…
+```
+
+The line is `PC-ENROLL:` plus base64 of `1:<installation id>:<unix time on the node>:<capi secret>:<csi secret>`;
+a token the command kept has an empty field. base64 is an encoding, not encryption: whoever reads
+the line reads the secrets. Paste it into **The PC-ENROLL line the command printed** and press
+**Store the secrets** (`PUT …/credentials` with `{"enroll": "<line>"}`). The page checks the line
+before it sends it (the whole line, of this installation, two token secrets or one), and the API
+checks again:
+
+| Answer | When |
+|---|---|
+| `400 invalid_enrollment` | Not such a line (cut short, a bare secret, another version), or a line of another installation. The answer does not quote the line |
+| `409 enrollment_replayed` | The line was stored before, or a newer one was: nothing changes. This is what keeps an old line from putting back the secret of a token that was made again since. "Newer" is the time the node printed the line, so two nodes whose clocks differ by more than the time between two runs can refuse a good line: run the command again |
+
+Running the command again changes no token and prints "No token was made, so there is no line to
+paste". A token it made earlier whose secret ProxCloud does not hold (the line was lost) is named with
+the command that removes it: Proxmox shows a secret once. The two fields under **Enter the two
+secrets by hand instead** remain for a token made another way.
+
+The next step, not built: a command that sends the secrets to the portal itself
+(`curl … | sh` with a short-lived single-use code). It needs a route without a session, a code store,
+and a node that reaches the portal's URL over TLS; the pasted line needs none of them.
+
+### What ProxCloud does with the portal token
+
+Three hand steps of the first production install are done by the product, each with a privilege the
+portal token already holds ([proxmox-permissions.md](proxmox-permissions.md)). No new privilege.
+
+| What | When | Privilege | Detail |
+|---|---|---|---|
+| The cluster firewall rule for the Proxmox API | Stage 3 of an install, before the seed is cloned, and every apply; **Remove** deletes it | `Sys.Modify` on `/` (as for the isolation rules) | One rule: `in ACCEPT tcp`, source the seed's address and the node range (as CIDRs; not the load balancer range), destination the host of the Proxmox API URL of the settings when it is an address (no destination for a name), the URL's port, comment `proxcloud:pve-api:<installation id>`. A rule with that comment that differs (the settings changed, or it was disabled by hand) is replaced; no other rule is read or touched, and the `management` IP set is not used. It is written with the datacenter firewall on or off. It is written in mode `routed` too: the node holds the gateway of the vnet, but the firewall's default management set is the network of the node's own address only (read in the Proxmox documentation, not tried) |
+| The provider's blocked networks | Every save of the settings | none on Proxmox: it is the provider's own config. The next provider sync writes the `DROP` rules with `Sys.Modify` | The seed's address, the API address and the node range, as the exact CIDRs that no entry of `blockedCidrs` covers yet; never the load balancer range. Entries are only added: one that a changed setting no longer needs stays. The answer of the save names what was added (`siteChanges.blockedCidrs`), the page shows it, and the audit event of the save carries it |
+| A new tenant zone without DHCP | Every save of the settings | none at the save; `SDN.Allocate` when the zone is made, as before | When the provider's default zone is a `simple` zone, its config says nothing about DHCP and Proxmox has no such zone yet, the zone's config gets `"dhcp": false`, so the first tenant network creates the zone without a DHCP server. A zone that exists is never changed, and a config that says `"dhcp": true` stays. When the zones cannot be read nothing is written and the answer says so (`siteChanges.problem`) |
+
+**When `capmox@pve!capi` or `csi@pve!csi` already exists** and the script is the one without an
+installation, `pveum user token add` fails, the script prints
 `The token … exists already: its secret was printed when it was created.` and goes on with the
 ACL rows. Proxmox does not show a secret again. Either paste the secret you kept, or remove that
 token (never the portal token) and run the script again:
@@ -653,7 +722,9 @@ the settings (`409 rev_conflict`: the page reads them again).
 
 ### Step 2: Proxmox identities
 
-[Section 3](#3-proxmox-identities). Paste the two secrets and press **Store the secrets**.
+[Section 3](#3-proxmox-identities). Paste the command into a root shell on one node, then paste its last
+line (`PC-ENROLL:…`) into the page and press **Store the secrets**
+([The root command of an installation](#the-root-command-of-an-installation)).
 
 ### Step 3: Check
 
@@ -666,11 +737,11 @@ the settings (`409 rev_conflict`: the page reads them again).
 | `spec` | The saved settings break a rule, for example an import store that is the boot store. Or they name a VLAN tag and the platform's BOM names a cluster chart older than 0.1.14, which cannot tag a NIC | Correct step 1 and save. For the tag: a bridge or vnet that carries the VLAN untagged, until a release whose BOM names chart 0.1.14 |
 | `bridge` | Mode `bridge`: a node the settings place a machine on has no bridge or vnet of that name, or did not report its networks. Mode `routed`: Proxmox already has a vnet of that name that the installation did not make, or a node has an interface of that name, or a node's interfaces could not be read. On an installed platform (the network is fixed and the machines run on it) the same finding is a **warning**, so that no apply stops on a read that went wrong | Correct the bridge or the nodes in step 1; apply a vnet you made (Datacenter, SDN, Apply). Mode `routed`: name another vnet |
 | `network` | The platform network overlaps a tenant, sandbox or public network, a seed API source is a tenant network, the load balancer range is inside a blocked or management network, or a node did not report its networks | Correct the network in step 1 |
-| `isolation` | The seed, the API address or part of the node range is in no blocked or management network, or the cluster firewall's isolation rules are not the ones a sync writes | Add the CIDRs the message names to **Networks tenants must not reach** on the provider's page (`blockedCidrs`). The message lists the smallest ranges that are missing; one network that covers them does the same (`10.90.0.0/26` for a seed on `.5`, an API address on `.10` and nodes on `.20` to `.60`), as long as the load balancer range stays outside it. Then **Run a provider sync, then check again**: with the installation saved (step 1), the sync writes the provider's rules whether or not it has a project. Check that the datacenter firewall is on. Five messages name a cause no sync of a provider without a project repairs: `cidrPool … overlaps the management network …` (choose another `cidrPool`), `rules … are for another pool`, `rules … drop … to …, which this provider's cidrPool, blockedCidrs and sandboxCidrs do not`, `rules … have an ACCEPT …` or `have no ACCEPT …` and `rules … are not this provider's set …, and a project's rules for cidrPool … are in place` (another portal or provider shares the rules: give this provider its own `poolPrefix`; the provider's own older rules: delete them under Datacenter > Firewall and sync). ([More](#the-isolation-check-and-the-provider-sync)) |
+| `isolation` | The seed, the API address or part of the node range is in no blocked or management network, or the cluster firewall's isolation rules are not the ones a sync writes | Press **Save settings** in step 1: the save adds the CIDRs the message names to the provider's blocked networks. By hand: add them to **Networks tenants must not reach** on the provider's page (`blockedCidrs`). The message lists the smallest ranges that are missing; one network that covers them does the same (`10.90.0.0/26` for a seed on `.5`, an API address on `.10` and nodes on `.20` to `.60`), as long as the load balancer range stays outside it. Then **Run a provider sync, then check again**: with the installation saved (step 1), the sync writes the provider's rules whether or not it has a project. Check that the datacenter firewall is on. Five messages name a cause no sync of a provider without a project repairs: `cidrPool … overlaps the management network …` (choose another `cidrPool`), `rules … are for another pool`, `rules … drop … to …, which this provider's cidrPool, blockedCidrs and sandboxCidrs do not`, `rules … have an ACCEPT …` or `have no ACCEPT …` and `rules … are not this provider's set …, and a project's rules for cidrPool … are in place` (another portal or provider shares the rules: give this provider its own `poolPrefix`; the provider's own older rules: delete them under Datacenter > Firewall and sync). ([More](#the-isolation-check-and-the-provider-sync)) |
 | `tenant-network` | Never. It reads the provider's default zone in Proxmox and **warns** when the zone has DHCP, when it does not exist yet and is configured as a `simple` zone without `"dhcp": false` (ProxCloud then creates it with DHCP), or when the zones could not be read: a tenant Kubernetes cluster create on a network of such a zone is refused with a `400` (not on a Kubernetes provider with shared workers, `cluster.shared`, which uses no tenant network). The row is `ok` for a zone without DHCP and absent when the provider names no zone | Nothing for the install or for databases. Before tenants create clusters: give the provider an EVPN or a VLAN zone as its default zone, or a `simple` zone without DHCP (Cloud providers, `config.network.zones` and `defaultZone`; [Prerequisites](#2-prerequisites)) |
 | `tenant-path` | Never, and absent when the provider names no zone. It reads the layout and **warns** when a node that translates tenant traffic (a `simple` default zone: the node of the tenant's VM; an EVPN default zone: its exit nodes) also hosts a platform machine and does not route the platform network itself, or when Proxmox could not be read: a tenant's TCP connection to the platform network is then dropped on that node, tenant Kubernetes workers never join and tenants cannot reach managed databases. It opens no connection: `ok` is not proof, and a leg added on a node by hand is not seen. It is `ok` for a platform network of mode `routed`. **Test the tenant path** below the rows opens the path on an installed platform | Nothing for the install. Before tenants create clusters or databases: one of the two layouts of [The path from tenants to the platform](#the-path-from-tenants-to-the-platform) |
 | `csi-vmid` | Never. It **warns** when a guest of the cluster has VM id 9999, the id proxmox-csi names its volumes after, or when that could not be read | Nothing for the install. Never destroy VM 9999 with "Destroy unreferenced disks owned by guest" ([VM id 9999 and the CSI volumes](#vm-id-9999-and-the-csi-volumes)) |
-| `credentials` | A token secret is not stored | Paste it in step 2 |
+| `credentials` | A token secret is not stored | Run the root command of step 2 on a node and paste the `PC-ENROLL` line it prints |
 | `machines` | Never, and absent while the installation has no VM. It reads the installation's VMs with the CAPI token and **warns** with one line per VM that is stopped or that does not start when its node boots (`onboot` off) or that the token could not read (the others are still listed, and an apply still sets `onboot` on them), or when the pools could not be read | A stopped VM: start it in Proxmox, or `qm start <vmid>` as root on its node ([After a Proxmox node reboots](#after-a-proxmox-node-reboots)). `onboot` off: **Apply this release** sets it at the end of stage 7, or `qm set <vmid> --onboot 1` |
 | `privileges:capi`, `privileges:csi`, `privileges:kubemint` | The CAPI token, the CSI token or the portal token lacks a privilege on a path; the message names both. For a VLAN tag or a routed network `privileges:capi` also reads `SDN.Use` on the path of the machines' NIC (`/sdn/zones/localnetwork/<bridge>/<tag>`, `/sdn/zones/pcplat/<vnet>`) | Run the script again. `privileges:kubemint` reads every path a tenant cluster's token gets a row on, not `/storage` and `/sdn/zones` alone: a line on `/storage/<store>` or `/sdn/zones/<zone>` means a row of the portal's own on that path hides the mint role, and the script adds the role next to each such row ([why, and what the row gives](proxmox-permissions.md#a-row-of-the-portals-own-on-a-store-or-a-zone)); until then a cluster create that uses the path answers `409`, and, as for every failed row, an install or apply run stops at its first stage (`preflight_failed`). A site that had such rows before v0.8.1 passed this row then and fails it after the upgrade: run the script again before the next run. A row the portal's user holds through a group is not found by the script; the same section gives the row to add. On the provider's `importStorage`, when the settings name another import store, the script does not write that row ([what to do](#when-the-providers-import-store-is-the-boot-store)) |
 | `mint-scope` | The portal token holds `User.Modify` or `Permissions.Modify` on `/`, `/access` or `/access/groups` (a stolen portal token can then create an API token for any user of the cluster, `root@pam` included) or `Permissions.Modify` on `/pool` (it can then write any role on every pool). A site set up before the group `proxcloud-kube` holds `ProxCloudKubeMint` on `/access/groups` and `/pool`. Or: `capmox@pve` or `csi@pve` is not in the group `proxcloud-kube`, and Proxmox refuses every token create or delete for it | Run the script again: it grants `ProxCloudKubeToken` on `/access/groups/proxcloud-kube`, puts both users in the group and removes the old rows ([the commands](proxmox-permissions.md#an-existing-site)). If it still fails on a privilege, another row grants it: `pveum acl list \| grep -F '<the portal user>'` on a node, then `pveum acl delete <path> --users <user> --roles <role>` (or `--tokens`) for a row on `/`, `/access`, `/access/groups` or `/pool` with a role other than `ProxCloudPlatform`. For a user outside the group the message gives the line: `pveum user modify <user> --groups proxcloud-kube --append 1` |
@@ -680,6 +751,8 @@ the settings (`409 rev_conflict`: the page reads them again).
 | `boot-iso-grant` | `capmox@pve` may not upload and delete on the ISO store | Run the script again |
 | `boot-iso` | The ISO store is shared, takes no ISOs, or is not the only ISO store of the boot storage | Name a node-local ISO store |
 | `placement` | A node an image goes to lacks the import store with `import` content or the boot store | Change the nodes or the stores |
+| `boot-store` | Proxmox has no storage of the boot store's name, or it takes no disk images. It **warns** when the store also holds disks of VMs that are not the platform's (tenant servers, or VMs of your own), or when its content could not be listed: `csi@pve!csi` holds `Datastore.Allocate` on the whole boot store and its secret is readable inside the platform cluster ([section 10](#10-security-boundaries)). The disks are listed with the CSI token, the only one that sees them all, so before that token is stored the row says the disks are not read yet. Not counted: the installation's own machines, the templates of the pool `pc-templates`, CSI volumes (`vm-<id>-pvc-*`) | A missing store: name an existing one in step 1 (`pvesm status`). No disk images: `pvesm set <store> --content <its content>,images`, which the message spells out. The warning: a store of its own for the platform, on ZFS `zfs create <pool>/pcplat && pvesm add zfspool pcplat --pool <pool>/pcplat --content images,rootdir --sparse 1`, then name it in step 1 and run the root command of step 2 again. The install works without it |
+| `pve-api-rule` | Never. `ok` before the first install (the install writes the rule) and when the rule is in place; it **warns** on an installed platform whose rule is missing, changed or disabled, or when the cluster firewall rules could not be read. The message spells the rule out and says when the datacenter firewall is off | Nothing before the install. Installed: **Apply this release** writes the rule again |
 | `images` | A BOM image is on the template update blocklist | A new installation: install a newer ProxCloud release. An installed platform stays on its release and its images, and no release moves it to other images yet (see [Upgrade between BOMs](#upgrade-between-boms): a BOM with other images is refused): the message says which case applies, and an apply that must import that image stays blocked |
 
 A check that cannot be read fails. A warning fails nothing: the page then says "No check failed" with the
@@ -1838,6 +1911,38 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 - **No per-namespace RBAC for the providers' service account** on the shared cluster.
 
 ## Not verified on a lab yet
+
+Of the prerequisites of v0.9.0 nothing was run on a Proxmox node; the tests run the root command
+against a `pveum` that records its arguments, and the firewall rule against a fake Proxmox API. To
+verify on a lab:
+
+1. **The root command on an empty lab.** Paste it once: both tokens are made with the comment
+   `proxcloud:<id>`, no secret is on the screen, the last line is `PC-ENROLL:…`, and the page stores
+   it. This is where `pveum user token add --output-format json --comment` and
+   `pveum user token list --output-format json` (the comment in its output) are first seen to behave
+   as the command assumes. Paste the command again: no token changes, no line.
+2. **A foreign token.** Make `capmox@pve!capi` by hand, then paste the command: it stops with the
+   text of [The root command of an installation](#the-root-command-of-an-installation) and
+   `pveum acl list` is as before. Remove the token with the printed command, paste again: it goes on.
+3. **A site with tokens of v0.8.x** (no comment, secrets stored in ProxCloud): the command adds the
+   comment and prints no line; the platform keeps working.
+4. **The pasted line twice**, and an older line after a newer one: `409 enrollment_replayed`.
+5. **The API rule, datacenter firewall on.** Install with the platform network on a VLAN other than
+   the nodes': stage 3 lists the rule, `nft list ruleset` shows the accept, the seed reaches the
+   Proxmox API (stage 6 and 7 pass). Whether Proxmox takes a comma list of CIDRs as the source and
+   returns it as written (the rule would otherwise be rewritten at every apply) is read here. Delete
+   the rule by hand, **Apply**: it is back. **Remove**: it is gone, and no other rule changed.
+6. **The API rule in mode `routed`**, datacenter firewall on: the same, which settles whether the
+   rule is needed there at all (it is written either way).
+7. **Blocked networks.** Save a draft on a provider whose `blockedCidrs` is empty: the page lists
+   what was added, a provider sync writes the `DROP` rules, the `isolation` row is `ok`, and a tenant
+   server cannot open the seed, while it reaches a load balancer address.
+8. **The tenant zone.** A provider whose default zone is a `simple` zone that Proxmox does not
+   have: save the settings, create a tenant network, and `pvesh get /cluster/sdn/zones/<zone>` shows
+   no `dhcp`; a tenant cluster on it becomes Ready. With a zone that exists with DHCP: nothing
+   changes and `tenant-network` warns.
+9. **The boot store row.** A boot store that also holds a VM of your own: the row warns and names
+   the VM; on a store of its own it is `ok`.
 
 The milestone run (M0) finished once on a lab Proxmox VE cluster: attempt 5, with one **Retry**, on
 the code before the changes it led to. A later round (2026-11-17, main cb2f052) removed that

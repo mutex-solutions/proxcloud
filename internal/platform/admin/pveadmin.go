@@ -379,7 +379,11 @@ func importContentProblems(defs []pve.StorageDef, importStorage string) []string
 // proxmoxSetupScript answers GET /admin/setup/proxmox-script as text: the script an operator runs as root on a node to
 // create the portal token's identity (pve.PlatformSetupScript). Query: tokenId (default proxcloud@pve!platform), gpu
 // (default false) and importStorage (default none); managedServices=true answers pve.ManagedSetupScript, with
-// bootStorage (required) and isoStorage (default local). The portal holds no root credential and asks for none, so it
+// bootStorage (required) and isoStorage (default local). installation=<id> answers the root command of that
+// managed-services installation instead (pve.EnrollScript): the stores are the installation's, tokenId defaults to
+// its provider's, and the command marks the two platform tokens, stops on one it did not make and whose secret the
+// portal does not hold, and hands the new secrets back in one PC-ENROLL line (PUT …/credentials with enroll); it goes
+// without managedServices and the three storage parameters. The portal holds no root credential and asks for none, so it
 // cannot run this itself. A value that is not a plain id is a 400: the answer is run by a root shell.
 func (h *Handler) proxmoxSetupScript(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:service:read") {
@@ -409,6 +413,31 @@ func (h *Handler) proxmoxSetupScript(w http.ResponseWriter, r *http.Request) {
 	var script string
 	var err error
 	switch boot, iso := q.Get("bootStorage"), q.Get("isoStorage"); {
+	case q.Get("installation") != "":
+		// The root command of one installation: its stores, and which token secrets the portal holds already.
+		if boot != "" || iso != "" || q.Get("importStorage") != "" || q.Has("managedServices") {
+			httpx.WriteError(w, httpx.BadRequest("installation goes without managedServices, bootStorage, isoStorage and importStorage: the installation's settings name the stores"))
+			return
+		}
+		if h.platform == nil {
+			httpx.WriteError(w, httpx.BadRequest("installation needs managed services (PROXCLOUD_PLATFORM_ENABLED=true)"))
+			return
+		}
+		in, gerr := h.platform.Get(r.Context(), q.Get("installation"))
+		if platformStoreErr(w, gerr) {
+			return
+		}
+		sec, serr := h.platform.Secrets(r.Context(), in.ID)
+		if httpx.WriteError(w, serr) {
+			return
+		}
+		if q.Get("tokenId") == "" && h.esSvc != nil { // the token the installation's provider is connected with
+			if es, eerr := h.esSvc.Get(r.Context(), in.ServiceID); eerr == nil && es != nil && es.PVEConfig().TokenID != "" {
+				tokenID = es.PVEConfig().TokenID
+			}
+		}
+		e := pve.Enrollment{InstallationID: in.ID, HaveCAPI: sec != nil && sec.CAPI != nil, HaveCSI: sec != nil && sec.CSI != nil}
+		script, err = pve.EnrollScript(tokenID, gpu, in.Spec.Storage.Import, in.Spec.Storage.Boot, in.Spec.Storage.ISO, e)
 	case managed:
 		if iso == "" {
 			iso = pve.DefaultBootISOStorage

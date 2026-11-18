@@ -436,7 +436,7 @@ func TestCancelBetweenExternalCalls(t *testing.T) {
 			e.mutate(func(run *Run, _ *Installation, _ *Secrets) { run.CancelRequested = true })
 		}
 	}
-	if end := e.once(); end != "complete" || !slices.Equal(e.pve.writes, []string{"POST /nodes/pve1/qemu/9100/clone"}) {
+	if end := e.once(); end != "complete" || !slices.Equal(e.pve.writes, []string{"POST /cluster/firewall/rules", "POST /nodes/pve1/qemu/9100/clone"}) {
 		t.Fatalf("end %s, writes %v", end, e.pve.writes)
 	}
 	run, in, _ := e.state.snapshot()

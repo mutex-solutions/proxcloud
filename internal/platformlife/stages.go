@@ -273,11 +273,18 @@ func (x *acq) seedVM(ctx context.Context) error {
 	if err := x.needCAPI(); err != nil {
 		return err
 	}
+	// At every apply, and below before the seed is cloned: the rule that lets the platform network reach the Proxmox API.
 	if x.sec.SeedKubeconfig != nil {
+		if err := x.ensureAPIAccess(ctx); err != nil {
+			return err
+		}
 		return x.readySeed(ctx)
 	}
 	// A routed platform network is made before the first VM is put on it. An installed platform never comes here.
 	if err := x.ensureNetwork(ctx); err != nil {
+		return err
+	}
+	if err := x.ensureAPIAccess(ctx); err != nil {
 		return err
 	}
 	if x.receipt().VMID == 0 {
@@ -798,14 +805,20 @@ func (x *acq) removeSeed(ctx context.Context) error {
 			return permanent(CodeCredentialsMissing, "The token %s is not stored, so the seed VM %d cannot be deleted: paste it, then Remove again.", pve.CAPITokenID, st.VMID)
 		}
 		// No seed was ever recorded: only a routed network may be left, and the portal token removes it.
-		net, err := x.removeNetwork(ctx)
-		if err != nil {
-			return err
+		var items []StageItem
+		for _, remove := range []func(context.Context) (*StageItem, error){x.removeAPIAccess, x.removeNetwork} {
+			it, err := remove(ctx)
+			if err != nil {
+				return err
+			}
+			if it != nil {
+				items = append(items, *it)
+			}
 		}
-		if net == nil {
+		if len(items) == 0 {
 			return errSkipped
 		}
-		return x.note(ctx, *net)
+		return x.note(ctx, items...)
 	}
 	node := x.in.Spec.Seed.Node
 	if st != nil {
@@ -832,13 +845,15 @@ func (x *acq) removeSeed(ctx context.Context) error {
 		}
 		items = append(items, seed)
 	}
-	// After the last VM on it: the platform machines went in the stage before.
-	net, err := x.removeNetwork(ctx)
-	if err != nil {
-		return err
-	}
-	if net != nil {
-		items = append(items, *net)
+	// After the last VM that used them: the platform machines went in the stage before.
+	for _, remove := range []func(context.Context) (*StageItem, error){x.removeAPIAccess, x.removeNetwork} {
+		it, err := remove(ctx)
+		if err != nil {
+			return err
+		}
+		if it != nil {
+			items = append(items, *it)
+		}
 	}
 	return x.note(ctx, items...)
 }
