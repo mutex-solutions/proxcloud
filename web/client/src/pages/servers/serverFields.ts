@@ -26,3 +26,12 @@ export function serverFlavor(r: CloudResource): string {
   if (name && vcpus && ram) return `${name} · ${vcpus} vCPU · ${Math.round(ram / 1024)} GB`
   return name ?? "—"
 }
+
+// The project's own images (made from a server or imported) in the shape of the public catalog's entries: a server is
+// created from one, and rebuilt from one, by its template id. Create and Rebuild offer the same images through this.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function projectImages(rows: CloudResource[] | undefined): Array<Record<string, any>> {
+  return (rows ?? [])
+    .filter((r) => r.externalId)
+    .map((r) => ({ ...(r.data?.image as Record<string, unknown>), id: r.externalId }))
+}

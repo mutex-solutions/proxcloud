@@ -5,7 +5,8 @@ import {
   ExternalLink, Gift, PiggyBank, Search as SearchIcon, Server, Settings, Shield, SquareTerminal, Sun, UserCircle, Users, Wallet, FolderTree, Globe } from "lucide-react"
 import { useEffect, useState } from "react"
 import { useAuth } from "@/lib/auth"
-import { useCloudFeatures, useFeatures, useProjects, useProjectInit, useUIMenu, type CloudFeature } from "@/lib/hooks"
+import { useCloudFeatures, useFeatures, useLocations, useProjects, useProjectInit, useUIMenu, type CloudFeature } from "@/lib/hooks"
+import { EmptyState } from "@/components/empty-state"
 import { useTheme, type ThemePref } from "@/lib/theme"
 import { Button } from "@/components/ui/button"
 import {
@@ -107,12 +108,26 @@ function navGroups(pid: string): Group[] {
 // provider Services toggles) + /features flags. While either query is loading,
 // nothing is filtered out (avoids a nav flash); once loaded, a service absent
 // or disabled hides its items, an absent feature hides feature-gated items.
-function useGatedNavGroups(pid: string): Group[] {
-  const { data: init } = useUIMenu(pid)
+// The menu and the routes (pageHidden) share this one check, so a page the menu hides cannot be opened by its URL.
+function useNavGate(pid: string) {
+  const init = useUIMenu(pid)
+  const locations = useLocations(pid)
   const { data: features } = useFeatures()
   const cloudFeatures = useCloudFeatures(pid)
-  const items = init?.menu?.items
+  const items = init.data?.menu?.items
   const featureSet = features ? new Set(features) : undefined
+  const allows = (it: Item) => {
+    if (it.service && items && !(items[it.service]?.enabled === true)) return false
+    if (it.feature && featureSet && !featureSet.has(it.feature)) return false
+    if (it.cloudFeature && !cloudFeatures.has(it.cloudFeature)) return false
+    return true
+  }
+  // Until /init and the locations have answered, the provider's features are unknown: a route waits, the menu does not.
+  return { items, allows, pending: init.isPending || locations.isPending }
+}
+
+function useGatedNavGroups(pid: string): Group[] {
+  const { items, allows } = useNavGate(pid)
   // Admin Custom Menu items (newMenuItem:true) render as a trailing "More" group.
   const more: Group[] = []
   if (items) {
@@ -131,17 +146,21 @@ function useGatedNavGroups(pid: string): Group[] {
     }
   }
   return navGroups(pid)
-    .map((g) => ({
-      ...g,
-      items: g.items.filter((it) => {
-        if (it.service && items && !(items[it.service]?.enabled === true)) return false
-        if (it.feature && featureSet && !featureSet.has(it.feature)) return false
-        if (it.cloudFeature && !cloudFeatures.has(it.cloudFeature)) return false
-        return true
-      }),
-    }))
+    .map((g) => ({ ...g, items: g.items.filter(allows) }))
     .filter((g) => g.items.length > 0)
     .concat(more)
+}
+
+// The menu item a path belongs to, the page itself or one below it (a bucket, a cluster), when the menu hides it.
+// "pending" while the gates are still loading: the page must not start its requests before the answer.
+function usePageHidden(pid: string, pathname: string): Item | "pending" | undefined {
+  const { allows, pending } = useNavGate(pid)
+  const item = navGroups(pid)
+    .flatMap((g) => g.items)
+    .find((it) => pathname === it.to || pathname.startsWith(it.to + "/"))
+  if (!item || !(item.service || item.feature || item.cloudFeature)) return undefined
+  if (pending) return "pending"
+  return allows(item) ? undefined : item
 }
 
 const THEME_OPTIONS: Array<{ value: ThemePref; label: string; icon: React.ComponentType<{ className?: string }> }> = [
@@ -183,6 +202,7 @@ export function AppShell() {
   const { data: projects } = useProjects()
   const current = projects?.find((p) => p.id === pid)
   const gatedGroups = useGatedNavGroups(pid)
+  const hidden = usePageHidden(pid, location.pathname)
   const [searchOpen, setSearchOpen] = useState(false)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -341,7 +361,14 @@ export function AppShell() {
         <main className="flex-1 px-4 py-6 md:px-6">
           <div className="mx-auto w-full max-w-6xl">
             <ProjectStatusNotice pid={pid} init={init} />
-            <Outlet />
+            {hidden === "pending" ? null : hidden ? (
+              <EmptyState
+                title={`${hidden.label} is not available in this project`}
+                hint="Your operator has not enabled it for this project's location."
+              />
+            ) : (
+              <Outlet />
+            )}
           </div>
         </main>
       </SidebarInset>

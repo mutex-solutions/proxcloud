@@ -781,6 +781,11 @@ func (h *Handler) cloudBulkAction(w http.ResponseWriter, r *http.Request) {
 		httpx.OK(w, map[string]any{"result": []any{}})
 		return
 	}
+	// truenas: what the create dialog should say before a share is made (D9 of the production acceptance).
+	if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsTrueNAS() && req.Action == "LIST_SHARE_WARNINGS" {
+		httpx.OK(w, map[string]any{"result": h.shareReachWarnings(r.Context(), proj, es)})
+		return
+	}
 	// Non-proxmox providers (ceph-s3/kamaji/dbaas) serve no catalog bulk actions.
 	var result any = []any{}
 	httpx.OK(w, map[string]any{"result": result})

@@ -34,6 +34,12 @@ export async function dispatch(path: string, opts: ReqOpts): Promise<Envelope<un
   const method = (opts.method ?? (opts.body !== undefined || opts.form || opts.rawBody !== undefined ? "POST" : "GET")).toUpperCase()
   const [pathname, search = ""] = path.split("?", 2)
   const segs = pathname.split("/").filter(Boolean)
+  // For a spec that must show a page sent no request while another was still unanswered
+  // (e2e/acceptance-defects.spec.ts): every call since the page loaded, and a latency the spec sets per call.
+  const hooks = globalThis as { __mockCalls?: string[]; __mockLatency?: (call: string) => number | undefined }
+  const call = `${method} ${path}`
+  ;(hooks.__mockCalls ??= []).push(call)
+  const latency = hooks.__mockLatency?.(call) ?? LATENCY_MS
 
   for (const r of routes) {
     if (r.method !== method || r.segments.length !== segs.length) continue
@@ -48,13 +54,13 @@ export async function dispatch(path: string, opts: ReqOpts): Promise<Envelope<un
       }
     }
     if (!ok) continue
-    await sleep(LATENCY_MS)
+    await sleep(latency)
     return r.handler({ params, query: new URLSearchParams(search), opts, method, path: pathname })
   }
 
   // Unhandled endpoint: warn loudly (so gaps are found during dev) and return
   // an empty envelope — pages render their empty states instead of crashing.
   console.warn(`[mock] no handler for ${method} ${pathname} — returning empty data`)
-  await sleep(LATENCY_MS)
+  await sleep(latency)
   return { data: undefined }
 }
