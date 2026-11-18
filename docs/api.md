@@ -552,7 +552,11 @@ provider (`internal/platformlife`, collection `platformInstallation`, one per
 are several, `errors.details.problems`.
 
 - `GET|POST /installations`: list; create `{name, serviceId, provisionedBy?,
-  layout?, spec}` in phase `draft`. `spec` has `pveApiUrl`, `storage {boot,
+  layout?, preset?, spec}` in phase `draft`. `preset` (`homelab`, `standard` or `custom`; also on the PUT) fills what
+  `spec` leaves out before the checks and is not stored: sizes, counts, the three node groups, the control plane's
+  node (the seed's) and its count, and for `homelab` on one node with no bridge named a `routed` network on the vnet
+  `pcplat0` ([the table](managed-services.md#presets-and-the-control-plane-count)). An unknown preset is a
+  `400 invalid_installation`. `spec` has `pveApiUrl`, `storage {boot,
   iso, import}` (import defaults to the provider's `importStorage`), `network
   {mode, bridge, vlan, prefix, gateway, dns[], mtu}` (`mode`: `bridge`, also what a spec without it means, or
   `routed`, where `bridge` names a vnet the install makes and every machine is on one node; `vlan`: 1 to 4094, mode
@@ -566,14 +570,19 @@ are several, `errors.details.problems`.
   equal to `storage.boot` (the portal token's role on the import store would
   reach the platform's disks), also when the empty `import` took that store
   from the provider. `layout: separate`, `provisionedBy: installer`
-  and `seed.mode: existing` are refused until a later release.
+  and `seed.mode: existing` are refused until a later release. `controlPlane` is `{node, replicas, cores, memoryMiB,
+  diskGiB}`: `replicas` is 1 or 3 (a spec without it means 1, and the answer names it), all machines on `node`; 3
+  need a BOM whose cluster chart is 0.1.14 or newer (the preflight's `spec` row). `controlPlane.nodes` (machines on
+  several nodes) is refused unless it is `[node]`, and `spec.sandbox {placement: shared|separate}`, the place for the
+  sandbox service's placement, is refused until the release that builds it.
 - `GET|PUT /installations/{id}`: the PUT replaces `name` and `spec` and names
   the `rev` it read (`409 rev_conflict` otherwise). It is refused during a run
   (`409 run_active`) and for a fixed field (`409 fixed_fields`): `serviceId`
   always; once a run succeeded also `provisionedBy` (but a stored `installer`
   may become `portal`), `layout`, `name`,
   `spec.network`, the seed's mode, pool, node and address, and the cluster's
-  name, endpoint and node groups. A draft can be corrected; no route deletes
+  name, endpoint and node groups. A control plane count that goes down on an installed platform (3 to 1) is the same
+  `409 fixed_fields`, with the reason as its message; from 1 to 3 is saved. A draft can be corrected; no route deletes
   one.
 - `PUT /installations/{id}/credentials`: `{capi: {tokenId, secret}, csi:
   {tokenId, secret}}`, either or both, write-only. The ids must be
@@ -582,7 +591,7 @@ are several, `errors.details.problems`.
   `PROXCLOUD_ENCRYPTION_DEFAULT_KEY` the route answers `409 no_encryption_key`.
   No route returns a secret: an installation shows `credentials.{capi,csi}.tokenId`.
 - `POST /installations/{id}/preflight`: read-only, not audited; `{ok, checks}`
-  with rows `flags`, `spec`, `network`, `bridge`, `isolation`, `tenant-network`, `tenant-path`, `csi-vmid`, `credentials`, `machines`,
+  with rows `flags`, `spec`, `network`, `bridge`, `isolation`, `tenant-network`, `tenant-path`, `csi-vmid`, `credentials`, `machines`, `capacity`,
   `privileges:capi`, `privileges:csi`, `privileges:kubemint`, `mint-scope`, `pool-fence`,
   `token-scope`, `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement` and
   `images`. A row's `status` is `ok`, `fail` or `warn`; `ok` in the answer is
@@ -594,6 +603,10 @@ are several, `errors.details.problems`.
   refused with a `400`, except on a Kubernetes provider with shared workers
   (`cluster.shared`), which uses no tenant network. It is `ok` for a zone without
   DHCP, and absent when the provider names no zone.
+  `capacity` is absent while the CAPI token is not stored. It fails before the first install when a node's memory,
+  less the configured memory of the other VMs and containers on it as the CAPI token lists them, is smaller than what
+  the settings place there with one spare machine for the control plane and one per group and node; on an installed
+  platform, and when the nodes could not be read, it is `warn`.
   `bridge` fails when a node the settings use has no bridge or vnet of that name, or (mode `routed`) when a vnet of
   that name exists and is not the installation's; on an installed platform the same finding is `warn`.
   `tenant-path` never fails either and is absent in the same case. It reads the layout (the default zone's kind,
