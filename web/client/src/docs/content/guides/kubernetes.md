@@ -16,12 +16,23 @@ A new cluster reads **Pending**, then **Progressing**, then **Ready**. While it 
 | Preparing the machine. / Creating the virtual machine. / Starting the virtual machine. | The normal steps. With many nodes on slow disks this takes a while. | Wait. |
 | Creating the virtual machine failed; retrying automatically. | A step failed and is tried again. | Wait. |
 | The machine runs but has not joined the cluster yet. | The server is up and its node has not registered. In the first minutes this is a normal step. | Wait. |
-| The machine runs but has not joined the cluster: most likely it could not reach the cluster's endpoint. | After 15 minutes with **Needs attention**: the server did not join and does not try again. The likely cause is that it did not reach the cluster's endpoint; the console does not read the server's own error. The path between your network and the endpoint is the operator's; you cannot check it. | Contact the operator. Once the cause is repaired, reduce the group's count by one and raise it again: that replaces the server. A group cannot go to zero: with one server, raise the count by one, wait until the new server is ready, then reduce it by one. |
+| The machine runs but has not joined the cluster: most likely it could not reach the cluster's endpoint. | After 15 minutes with **Needs attention**: the server did not join and does not try again by itself. The likely cause is that it did not reach the cluster's endpoint. The path between your network and the endpoint is the operator's; you cannot check it, and the server's own error is shown to the operator only. | Contact the operator. Once the cause is repaired, use **Replace** on that server in the cluster's instance list ([Replace a node](#replace-a-node)). |
 | The node joined but is not Ready. | The node registered and reports not Ready. | Check it with `kubectl describe node`. |
 | The host has no free capacity for this machine, and it is not retried. | The host that should run the server is full. | Reduce the count or pick a smaller flavor. To retry, reduce the count by one and raise it again. |
 | Creating the virtual machine failed and is not retried. | The platform gave up on this server. | Reduce the count by one and raise it again, or delete and recreate the cluster. |
 | The platform cannot reach the virtualization provider. | A problem on the operator's side. | Contact the operator. |
 | The control plane is taking longer than expected. | The hosted API server did not come up in 15 minutes. | Wait, delete and recreate, or contact the operator. |
+
+## Replace a node
+
+**Replace** on a row of the cluster's instance list deletes that server and creates a new one in its place, which joins the cluster again. Use it for a server that did not join, after the operator repaired the cause, or for a node you want rebuilt.
+
+- The node count of the group and your quota stay as they are, and the new server runs on the same host.
+- A node that had joined is drained first. What is on its own disk is lost; persistent volumes are kept.
+- For the last Ready node of a node group the console asks a second time: its pods have nowhere to run in that group until the new node is Ready, which takes several minutes.
+- A machine whose server was never created has no row in the list: reduce the group's count by one and raise it again, or contact the operator.
+
+On a site that has it turned on, the platform also replaces a server that did not join by itself, after about 30 minutes, in a node group of two or more servers. It does not when several servers of a group failed together: that points to a cause only the operator can repair.
 
 ## Needs attention
 
