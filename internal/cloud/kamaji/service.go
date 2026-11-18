@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -336,8 +337,6 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 		if app != nil {
 			if dig(app, "metadata", "deletionTimestamp") != nil {
 				pending++ // delete cascade in flight
-			} else if only != "" {
-				pending++ // the release job never takes a cluster for live: it waits
 			} else if compute := digStr(sec, "metadata", "annotations", annotationComputeService); s.onClusterLive != nil && compute != "" {
 				if err := s.onClusterLive(ctx, compute, projectID, cid); err != nil {
 					slog.Warn("kamaji: live cluster hook", "cluster", cid, "err", err) // the sweep and teardown go on
@@ -408,8 +407,18 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 		if err != nil {
 			errs = append(errs, err)
 		} else if len(apps) == 0 {
-			if err := s.gcNamespace(ctx, ns); err != nil {
+			// The release above may have taken minutes (disks, a dataset): a create that wrote its marker meanwhile,
+			// with no Application yet, is not in the caller's snapshot either.
+			now, err := s.api.ListSecrets(ctx, ns, LabelProject+"="+projectID+","+LabelManagedBy+"="+ManagedByValue)
+			if err != nil {
 				errs = append(errs, err)
+			} else if !slices.ContainsFunc(now, func(sec map[string]any) bool {
+				name := digStr(sec, "metadata", "name")
+				return strings.HasSuffix(name, markerSuffix) || strings.HasSuffix(name, cloudSecretSuffix)
+			}) {
+				if err := s.gcNamespace(ctx, ns); err != nil {
+					errs = append(errs, err)
+				}
 			}
 		}
 	}

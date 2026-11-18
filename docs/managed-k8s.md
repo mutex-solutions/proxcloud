@@ -178,10 +178,11 @@ Two things do the release, with the same checks and the same steps:
 1. **The release job** (`kamaji.release/v1`, `project.KamajiReleaseRunner`). The
    delete, and a project teardown, queue one durable job per cluster
    ([durable-jobs.md](durable-jobs.md)). Its runner is part of the API process
-   and runs with or without the job scheduler. It looks at the cluster 15
-   seconds after the delete and then at growing intervals, a quarter of the
-   job's age, at most every 5 minutes, and releases the cluster at the first look
-   that finds the cascade over. After 24 hours without that it gives up: the job
+   and runs with or without the job scheduler. Its first look at the cluster
+   comes within about 5 seconds of the delete (the runner's poll), the next
+   ones 15 seconds apart and then at growing intervals, a quarter of the job's
+   age, at most every 5 minutes. It releases the cluster at the first look that
+   finds the cascade over. After 24 hours without that it gives up: the job
    is `dead` with `cascade_not_finished` in `GET /api/v1/admin/durable-jobs`, and
    the sweep is what is left. A dead release job is not replayed (`409`).
 2. **The sweep** (`syncjob.sweepKamajiOrphans`), the backstop: once per provider
@@ -196,21 +197,35 @@ Two things do the release, with the same checks and the same steps:
 **When the cascade counts as over.** All of: no Application, no
 TenantControlPlane, no MachineDeployment and no Machine of the cluster on the
 management cluster, and no VM whose name starts with `<clusterId>-` in the
-project's pool on Proxmox (CAPMOX names a VM after its Machine). A VM of the
-pool on a node that is down has no name in Proxmox's list, so it holds the
-release as well until the node is back or the VM is gone. While any of these
-is left, or the management cluster or Proxmox does not answer, nothing is
-revoked and the job looks again later (`cascade_running` or `release_failed` as
-the job's last result; the reason is in the API log, line `kamaji: release of a
-deleted cluster, will retry`). On a management cluster whose ClusterRole is
-older than the Machines grant ([Provisioning status](#provisioning-status-reason-and-needs-attention), "RBAC") the
+project's pool on Proxmox (CAPMOX names a VM after its Machine). While any of
+these is left, or the management cluster or Proxmox does not answer, nothing
+of the cluster is released (the look at the pool comes before every release
+step, the CSI one included) and the job looks again later (`cascade_running`
+or `release_failed` as the job's last result; the reason is in the API log,
+line `kamaji: release of a deleted cluster, will retry`). On a management
+cluster whose ClusterRole is older than the Machines grant
+([Provisioning status](#provisioning-status-reason-and-needs-attention), "RBAC") the
 Machines cannot be listed; the other checks decide there.
+
+A node that is down does not hold a release. A VM on it has no name in
+Proxmox's list after about five minutes, so the look at the pool cannot tell a
+worker from any other VM of the project, and it does not try: a worker on a
+dead node keeps its Machine, and the Machine holds the release. The one case
+this leaves open is a management cluster with the older ClusterRole and a
+worker on a node that is down for more than those minutes: the token is
+revoked while that VM exists, CAPMOX cannot delete it afterwards, and an
+operator removes the VM and the stuck Machine by hand. Apply
+`deploy/mgmt-cluster/rbac.yaml` to close it.
+
+A create that fails runs the same release at once (`AbandonCluster`), with the
+same look at the pool, for the token it had just minted and the addresses it
+had reserved.
 
 **How long a deleted cluster's Proxmox token lives.** With the release job: until
 the first look after the cascade, so seconds to a few minutes after the last
 worker is gone, on every install. A lab delete on 2026-11-17 had its worker VM
-gone 45 seconds after the delete; in a job's first minute the looks are 15
-seconds apart. **This timing is not verified on a lab**:
+gone 45 seconds after the delete; in a job's first minute the looks are about
+15 seconds apart. **This timing is not verified on a lab**:
 the job is covered by tests with a fake management cluster and a fake Proxmox
 on PostgreSQL. Should the job not have run (an API from before v0.8.2, a job
 that could not be queued, a job that gave up), the sweep's timing applies: with

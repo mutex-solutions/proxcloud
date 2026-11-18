@@ -59,6 +59,8 @@ func TestKamajiReleaseRunner(t *testing.T) {
 		"cascade running":         {payload, time.Minute, false, nil, "defer cascade_running", 1},
 		"cascade finished":        {payload, time.Minute, true, nil, "complete", 1},
 		"management cluster down": {payload, time.Minute, false, down, "defer release_failed", 1},
+		// Released, but something after it failed (the namespace): the next look ends the job.
+		"released with an error": {payload, time.Minute, true, down, "defer release_failed", 1},
 		// The last look still counts: a cascade that ended in the job's last minutes is released.
 		"finished at the end of its life": {payload, kamajiReleaseLifetime + time.Hour, true, nil, "complete", 1},
 		"gave up":                         {payload, kamajiReleaseLifetime + time.Hour, false, nil, "fail cascade_not_finished permanent=true", 1},
@@ -114,8 +116,9 @@ func (noShares) FindByProjectAndType(context.Context, string, string) ([]cloud.C
 	return nil, nil
 }
 
-// CAPMOX deletes the workers with the cluster's token, so the release keeps the token while a VM of the cluster, or
-// one it cannot tell apart, is left in the project's pool.
+// CAPMOX deletes the workers with the cluster's token, so the release keeps the token, and everything else, while a VM
+// of the cluster is left in the project's pool. A VM on a dead node is not that: it has no name, and a failed create
+// (AbandonCluster runs this same release) must not leave its token and addresses until the node is back.
 func TestKamajiReleaseKeepsTheTokenWhileAWorkerIsLeft(t *testing.T) {
 	var vms string
 	var revoked []string
@@ -134,28 +137,26 @@ func TestKamajiReleaseKeepsTheTokenWhileAWorkerIsLeft(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
+	csi := 0
 	release := KamajiReleaseCluster(oneService{}, noShares{}, func(*externalservice.ExternalService) (*pve.Service, error) {
 		return pve.NewService(pve.Config{APIURL: srv.URL, TokenID: "proxcloud@pve!platform", Secret: "s"}, "pve", "pc-")
-	}, nil, false, nil)
+	}, nil, false, func(context.Context, string) error { csi++; return nil })
 	ctx := context.Background()
 
-	for name, rows := range map[string]string{
-		"a worker of the cluster": `{"type":"qemu","vmid":124,"node":"pve1","name":"pc-c-a-workers-pve1-x7k2p","pool":"pc-p1","status":"running"}`,
-		"a VM on a dead node":     `{"type":"qemu","vmid":130,"node":"pve2","pool":"pc-p1","status":"unknown"}`,
-	} {
-		vms = rows
-		if err := release(ctx, "pve", "p1", "pc-c-a"); err == nil || len(revoked) != 0 {
-			t.Fatalf("%s: err %v, revoked %v: want the token kept", name, err, revoked)
-		}
+	vms = `{"type":"qemu","vmid":124,"node":"pve1","name":"pc-c-a-workers-pve1-x7k2p","pool":"pc-p1","status":"running"}`
+	if err := release(ctx, "pve", "p1", "pc-c-a"); err == nil || len(revoked) != 0 || csi != 0 {
+		t.Fatalf("a worker of the cluster: err %v, revoked %v, %d CSI releases: want everything kept", err, revoked, csi)
 	}
-	// The tenant's own VM, another cluster's worker in the same pool, this cluster's name in another project's pool.
+	// The tenant's own VM, another cluster's worker in the same pool, this cluster's name in another project's pool, a
+	// VM of the tenant on a dead node.
 	vms = `{"type":"qemu","vmid":125,"node":"pve1","name":"web","pool":"pc-p1","status":"running"},
 		{"type":"qemu","vmid":126,"node":"pve1","name":"pc-c-ab-workers-pve1-aaaaa","pool":"pc-p1","status":"running"},
-		{"type":"qemu","vmid":127,"node":"pve1","name":"pc-c-a-workers-pve1-bbbbb","pool":"pc-p2","status":"running"}`
+		{"type":"qemu","vmid":127,"node":"pve1","name":"pc-c-a-workers-pve1-bbbbb","pool":"pc-p2","status":"running"},
+		{"type":"qemu","vmid":130,"node":"pve2","pool":"pc-p1","status":"unknown"}`
 	if err := release(ctx, "pve", "p1", "pc-c-a"); err != nil {
 		t.Fatal(err)
 	}
-	if len(revoked) != 2 || !strings.HasSuffix(revoked[0], "/access/users/capmox@pve/token/pc-c-a") {
-		t.Fatalf("revoked = %v", revoked)
+	if len(revoked) != 2 || !strings.HasSuffix(revoked[0], "/access/users/capmox@pve/token/pc-c-a") || csi != 1 {
+		t.Fatalf("revoked = %v, %d CSI releases", revoked, csi)
 	}
 }

@@ -301,6 +301,14 @@ func TestKubernetesDeleteReleasesTheTokenWithoutASync(t *testing.T) {
 		t.Fatalf("already released: %s, %d tokens revoked", state, revokes())
 	}
 
+	// The provider was removed: no management cluster is left to ask, and the job ends.
+	if _, err := jobs.Enqueue(ctx, durablejobs.KamajiRelease, "k8s/pc-c-e", []byte(`{"serviceId":"removed","projectId":"p1","clusterId":"pc-c-e"}`), 20); err != nil {
+		t.Fatal(err)
+	}
+	if state, _ := look("pc-c-e"); state != "succeeded" || revokes() != 2 {
+		t.Fatalf("provider removed: %s, %d tokens revoked", state, revokes())
+	}
+
 	// A project teardown deletes its clusters the same way, and queues the same job.
 	kube.mu.Lock()
 	kube.apps["pc-c-d"], kube.markers["pc-c-d"] = false, true
@@ -332,5 +340,45 @@ func TestKubernetesDeleteReleasesTheTokenWithoutASync(t *testing.T) {
 	}
 	if state, code := look("pc-c-c"); state != "dead" || code != "cascade_not_finished" || revokes() != before {
 		t.Fatalf("past its lifetime: %s %s, %d tokens revoked", state, code, revokes())
+	}
+}
+
+// A failed create releases what it took at once (kamaji.Service.AbandonCluster), through the same release as a
+// finished delete. A node that is down, holding some VM of the project, must not keep the new token and addresses.
+func TestFailedCreateReleasesWithANodeDown(t *testing.T) {
+	ctx := context.Background()
+	f := newShareAccessFixture(t)
+	f.reserve(t, "vmbrw", "10.89.0.99", "pc-c-a")
+	var revoked []string
+	proxmox := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/api2/json")
+		switch {
+		case r.Method == http.MethodGet && path == "/cluster/resources" && r.URL.Query().Get("type") == "node":
+			fmt.Fprint(w, `{"data":[{"type":"node","node":"pve1","status":"online"},{"type":"node","node":"pve2","status":"offline"}]}`)
+		case r.Method == http.MethodGet && path == "/cluster/resources":
+			fmt.Fprintf(w, `{"data":[{"type":"qemu","vmid":130,"node":"pve2","pool":"pc-%s","status":"unknown"}]}`, f.projectID)
+		case r.Method == http.MethodDelete && strings.Contains(path, "/token/"):
+			revoked = append(revoked, path)
+			fmt.Fprint(w, `{"data":null}`)
+		default:
+			t.Errorf("the fake Proxmox has no answer for %s %s", r.Method, path)
+			http.Error(w, "no fake", http.StatusNotImplemented)
+		}
+	}))
+	t.Cleanup(proxmox.Close)
+	kube := &cascadeKube{markers: map[string]bool{"pc-c-a": true}}
+	ks := kamaji.NewWithAPI(kube, kamaji.Config{}, "svc-k8s")
+	ks.OnClusterGone(project.KamajiReleaseCluster(externalservice.NewService(externalservice.NewRepo(f.db), textcrypt.New("k")), cloud.NewRepo(f.db),
+		func(*externalservice.ExternalService) (*pve.Service, error) {
+			return pve.NewService(pve.Config{APIURL: proxmox.URL, TokenID: pve.DefaultPlatformTokenID, Secret: "s"}, "svc-pve", "pc-")
+		}, f.ips, false, nil))
+	if err := ks.AbandonCluster(ctx, f.projectID, "pc-c-a", "svc-pve"); err != nil {
+		t.Fatal(err)
+	}
+	if len(revoked) != 2 || !strings.HasSuffix(revoked[0], "/access/users/capmox@pve/token/pc-c-a") {
+		t.Fatalf("revoked = %v, want the cluster's tokens", revoked)
+	}
+	if n := f.clusterRows(t, "vmbrw"); n != 0 || len(kube.markers) != 0 {
+		t.Fatalf("%d address rows and %d markers left", n, len(kube.markers))
 	}
 }

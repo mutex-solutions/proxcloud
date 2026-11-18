@@ -1435,4 +1435,21 @@ func TestFinalizeCluster(t *testing.T) {
 			t.Fatal("the namespace of a cluster being created was removed")
 		}
 	})
+	// A release takes time (disks, a dataset). A create of the same project that writes its marker meanwhile is not
+	// in the list the job read, and must keep its namespace.
+	t.Run("a create during the release", func(t *testing.T) {
+		api, svc, spec, _ := setup(t)
+		svc.OnClusterGone(func(context.Context, string, string, string) error {
+			return svc.RecordCluster(ctx, "p1", "pc-c-other001", "cs1")
+		})
+		if err := svc.DeleteCluster(ctx, "p1", spec.ID); err != nil {
+			t.Fatal(err)
+		}
+		if done, err := svc.FinalizeCluster(ctx, "p1", spec.ID); !done || err != nil {
+			t.Fatalf("done %v, err %v", done, err)
+		}
+		if _, ok := api.namespaces["pc-p1"]; !ok {
+			t.Fatal("the namespace of a cluster being created was removed")
+		}
+	})
 }

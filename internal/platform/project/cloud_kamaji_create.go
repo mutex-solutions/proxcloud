@@ -375,56 +375,56 @@ func kamajiRWXShare(clusterID string) string { return "k8s-" + clusterID }
 
 // KamajiReleaseCluster runs after a cluster's delete cascade has finished, and after a failed create
 // (kamaji.OnClusterGone). An error keeps the marker, so the sweep retries: only a provider that is really gone
-// counts as nothing to release on. csi, when set, goes first: it revokes the cluster's gateway credential and deletes the
-// disks of its volumes (csigw.Store.ReleaseCluster).
+// counts as nothing to release on. The look at the pool goes first, and while it holds nothing is released. Then csi,
+// when set: it revokes the cluster's gateway credential and deletes the disks of its volumes
+// (csigw.Store.ReleaseCluster).
 func KamajiReleaseCluster(services serviceGetter, shares shareRowFinder, pveFor func(*externalservice.ExternalService) (*pve.Service, error), ips *PublicIPRepo, shared bool, csi func(ctx context.Context, clusterID string) error) func(ctx context.Context, computeID, projectID, clusterID string) error {
-	rest := kamajiReleaseInfra(services, shares, pveFor, ips, shared)
-	return func(ctx context.Context, computeID, projectID, clusterID string) error {
-		// A CSI step that fails (a disk in use, a provider that lost its gateway token) keeps the marker, but does not
-		// hold back the tokens, addresses and dataset: each part is safe to run again.
-		var csiErr error
-		if csi != nil {
-			csiErr = csi(ctx, clusterID)
-		}
-		return errors.Join(csiErr, rest(ctx, computeID, projectID, clusterID))
-	}
-}
-
-func kamajiReleaseInfra(services serviceGetter, shares shareRowFinder, pveFor func(*externalservice.ExternalService) (*pve.Service, error), ips *PublicIPRepo, shared bool) func(ctx context.Context, computeID, projectID, clusterID string) error {
 	return func(ctx context.Context, computeID, projectID, clusterID string) error {
 		es, err := services.Get(ctx, computeID)
 		if err != nil && !errors.Is(err, externalservice.ErrNotFound) {
 			return err
 		}
 		// sharedWorkers mints nothing, and its portal token may not touch tokens at all.
+		var ps *pve.Service
 		if err == nil && pveFor != nil && !shared {
-			ps, err := pveFor(es)
-			if err != nil {
+			if ps, err = pveFor(es); err != nil {
 				return err
 			}
-			// CAPMOX deletes the workers with this token. The caller saw the cluster's objects gone from the
+			// CAPMOX deletes the workers with the cluster's token. The caller saw the cluster's objects gone from the
 			// management cluster; a worker still in the pool (a finalizer removed by hand, a ClusterRole too old to
-			// list Machines) holds the release, and with it the addresses that worker uses.
+			// list Machines) holds the release, and with it the addresses and disks that worker uses.
 			if err := kamajiWorkersGone(ctx, ps, projectID, clusterID); err != nil {
 				return err
 			}
-			if err := ps.C.RevokeClusterTokens(ctx, clusterID); err != nil {
+		}
+		// A CSI step that fails (a disk in use, a provider that lost its gateway token) keeps the marker, but does not
+		// hold back the tokens, addresses and dataset: each part is safe to run again.
+		var csiErr error
+		if csi != nil {
+			csiErr = csi(ctx, clusterID)
+		}
+		return errors.Join(csiErr, func() error {
+			if ps != nil {
+				if err := ps.C.RevokeClusterTokens(ctx, clusterID); err != nil {
+					return err
+				}
+			}
+			if err := kamajiDeleteDataset(ctx, services, shares, projectID, clusterID); err != nil {
 				return err
 			}
-		}
-		if err := kamajiDeleteDataset(ctx, services, shares, projectID, clusterID); err != nil {
-			return err
-		}
-		if ips != nil {
-			return ips.ReleaseServer(ctx, computeID, kamajiReservation(clusterID))
-		}
-		return nil
+			if ips != nil {
+				return ips.ReleaseServer(ctx, computeID, kamajiReservation(clusterID))
+			}
+			return nil
+		}())
 	}
 }
 
 // kamajiWorkersGone refuses while a VM of the cluster is left in the project's pool. CAPMOX names a VM after its
 // Machine, and the chart starts every Machine name with the cluster id. A VM on a node that is down has no name in
-// Proxmox's list, so it holds the release too.
+// Proxmox's list after about five minutes and does not hold the release: it may be any VM of the tenant, a worker on
+// a dead node keeps its Machine, which holds the release before this is asked, and a failed create (AbandonCluster)
+// must release what it took whatever the nodes do.
 func kamajiWorkersGone(ctx context.Context, ps *pve.Service, projectID, clusterID string) error {
 	rows, err := ps.C.ClusterResources(ctx, "vm")
 	if err != nil {
@@ -432,7 +432,7 @@ func kamajiWorkersGone(ctx context.Context, ps *pve.Service, projectID, clusterI
 	}
 	pool := ps.PoolFor(projectID)
 	for _, r := range rows {
-		if r.Pool == pool && (r.NodeDown || strings.HasPrefix(r.Name, clusterID+"-")) {
+		if r.Pool == pool && strings.HasPrefix(r.Name, clusterID+"-") {
 			return fmt.Errorf("kamaji: cluster %s: VM %d in pool %s may still be a worker, its token stays", clusterID, r.VMID, pool)
 		}
 	}
