@@ -7,11 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-None of the entries below is verified on a lab yet: each one says so. The chart changes among them reach no
-platform and no cluster until the tag `proxmox-kamaji-cluster-v0.1.14` is cut, once, for the health check, the
-VLAN tag and the control plane count together, and the platform BOM pins it (`tenantCharts.kubernetes`, the
-component `pc-platform`); the same holds for `proxcloud-platform-v0.1.3`. The BOM on `main` still pins 0.1.13
-and 0.1.2.
+None of the entries below is verified on a lab yet: each one says so. The chart changes among them are
+published: the tag `proxmox-kamaji-cluster-v0.1.14` was cut once, for the health check, the VLAN tag and the
+control plane count together, and `proxcloud-platform-v0.1.3` with it, and the platform BOM pins both by digest
+(the entry under Changed). A new install on this BOM has them. A platform installed by 0.8.x stays on its BOM,
+with cluster chart 0.1.13 and platform chart 0.1.2, until an operator upgrades it.
 
 ### Added
 
@@ -40,11 +40,14 @@ and 0.1.2.
   the operator console (Machines dialog;
   `POST /admin/service/{id}/k8s-clusters/{clusterId}/machines/{machine}/replace`). The node count, placement and
   quota do not change; the last Ready node of a group asks for a confirmation. On a managed-services platform it
-  answers 502 until the BOM pins `proxcloud-platform` 0.1.3. Not verified on a lab.
+  needs chart `proxcloud-platform` 0.1.3, which this BOM pins: a platform on a 0.8.x BOM answers 502 until it
+  is upgraded to this release's BOM. Not verified on a lab.
 - **Managed Kubernetes: a worker that registers no node is replaced by Cluster API** after
   `config.cluster.nodeStartupTimeoutSeconds` (1800 by default, `0` = off), in node groups of two or more
   machines, while at most `config.cluster.repairMaxUnhealthy` (1) machines of the group are not healthy. Needs
-  cluster chart 0.1.14, which is not published: until the BOM pins it no cluster gets a health check. The
+  cluster chart 0.1.14, which this BOM pins for new tenant clusters: a platform installed from it registers its
+  Kubernetes provider with 0.1.14. A provider that names an older chart version gives no health check until the
+  operator sets 0.1.14 there, and an existing cluster gets it with its bump. The
   provider's two keys apply to every cluster on that chart: they are written at each change of a cluster, and
   **Apply settings** on the provider's page writes them to one cluster at once. Not verified on a lab.
 - **Operator console: the Machines dialog shows the join error a worker reports** (cloud-init result and log
@@ -57,7 +60,8 @@ and 0.1.2.
   with SNAT, so that tenant traffic to the platform never leaves the node. Everything outside the node then
   needs a route to the platform network through the node's address. With mode `bridge`, `spec.network.vlan`
   (1 to 4094) tags every machine's NIC, so a VLAN needs no bridge or vnet of its own; it needs a platform BOM
-  whose cluster chart is 0.1.14 or newer, which the BOM on `main` is not yet, and is refused until then. The
+  whose cluster chart is 0.1.14 or newer, which this BOM is, and is refused on an installation whose BOM names
+  an older chart. The
   network stays fixed after the first install. New Check row `bridge`; new failure code
   `platform_network_refused`. Not verified on a lab: every test uses a fake Proxmox API.
 - **Managed services: "Test the tenant path".** A button in step 3 of an installed platform
@@ -67,7 +71,8 @@ and 0.1.2.
   connect to and a published Ubuntu or Debian template on that node. Not verified on a lab.
 - **Cluster chart `proxmox-kamaji-cluster` 0.1.14:** a `MachineHealthCheck` per node group of two or more
   machines (`machineHealthCheck.nodeStartupTimeoutSeconds`, `0` by default: none is rendered) and
-  `proxmox.network.vlan`. Without the values the render is what 0.1.13 gave. Not published: the tag is owed. Not
+  `proxmox.network.vlan`. Without the values the render is what 0.1.13 gave. Published (tag
+  `proxmox-kamaji-cluster-v0.1.14`) and pinned by the platform BOM. Not
   verified on a lab: the chart tests render with Helm only.
 
 - **Managed services: one root command per installation.** Step 2 shows a command for the installation
@@ -119,7 +124,9 @@ and 0.1.2.
   (`spec.clusters[].controlPlane.replicas`), all on one Proxmox node. Three keep the platform's API up when one
   control plane VM is lost or replaced; they do not protect against the loss of the node or its disk. From 1 to
   3 is an apply on an installed platform; once a run has built three, 3 to 1 is refused. Three need cluster
-  chart 0.1.14 in the platform's BOM, which the BOM on `main` does not pin yet: until then the save refuses 3.
+  chart 0.1.14 in the platform's BOM, which this BOM pins: a new install can choose 3. The save refuses 3 on an
+  installation whose BOM names an older chart, so on a platform installed by 0.8.x until it is upgraded to this
+  release's BOM.
   Not verified on a lab.
 - **Managed services: the Check row `capacity`.** It compares, per node, the memory of the machines and of the
   spare machines a rolling update makes with what can be reserved on the node, counted as the machines are
@@ -127,8 +134,9 @@ and 0.1.2.
   plane's spare, and warns without room for the groups' spares; on an installed platform it warns. Not verified
   on a lab.
 - **Cluster chart `proxmox-kamaji-cluster` 0.1.14:** `controlPlane.kubeadm.replicas` (1 or 3) and
-  `controlPlane.kubeadm.vipLease`, in the same unpublished 0.1.14 as the health check and the VLAN tag. Without
-  the values the control plane renders as 0.1.13 gave it. Not published: the tag is owed. Not verified on a lab.
+  `controlPlane.kubeadm.vipLease`, in the same 0.1.14 as the health check and the VLAN tag. Without
+  the values the control plane renders as 0.1.13 gave it. Published and pinned by the platform BOM. Not verified
+  on a lab.
 - **Customer console, Members: a list of pending project invitations with Revoke.** Each pending invitation has
   Copy link. On a site that sends no email the page says so and the invite dialog shows the link instead of
   "sent"; the invitee can also sign in with the invited address and find the invitation on the start page. API:
@@ -145,6 +153,23 @@ and 0.1.2.
 
 ### Changed
 
+- **The platform BOM pins cluster chart `proxmox-kamaji-cluster` 0.1.14 and platform chart `proxcloud-platform`
+  0.1.3**, both published from their tags, by the digest ghcr.io serves: 0.1.14 for the platform cluster
+  (`pc-platform`) and for `tenantCharts.kubernetes`, 0.1.3 for `capi`, `capi-tenant` and `platform`.
+  - A new install on this BOM can have three control plane machines and a VLAN tag, registers its Kubernetes
+    provider with chart 0.1.14 (the health check for new clusters) and gives the provider's service account the
+    `delete` on Machines that Replace needs.
+  - Each of the four components lists the version it replaces in `upgradeFrom` (0.1.13, 0.1.2), so the BOMs of
+    0.8.0, 0.8.1 and 0.8.2 may move to this one. For `pc-platform` the release check
+    (`TestUpgradeRollsNoMachine`) renders chart 0.1.13 with the values each of those releases rendered and chart
+    0.1.14 with this build's values, and finds the same control plane, machine templates and bootstrap templates:
+    the move replaces no machine. Platform chart 0.1.3 differs from 0.1.2 in the provider's ClusterRole alone
+    (the `delete` on Machines, the read of MachineHealthChecks).
+  - A platform installed by 0.8.x is not changed by the upgrade of ProxCloud: it stays on its BOM, where the
+    save refuses 3 and a VLAN tag and Replace answers 502, until an operator starts the upgrade in step 4 of
+    Managed services. The plan then lists the four charts as `chart` and the release and
+    `tenantCharts.kubernetes` as `record only`, and refuses nothing once this BOM is a release's; a build of
+    `main` (`0.9.0-dev`) stays refused as a target. The upgrade was not run on a lab.
 - **Security groups: a name starting with `k8s-` is reserved for Kubernetes clusters.** Creating one answers
   400, attaching one to a server 409, and deleting the group of a cluster the project has 409. A group with such
   a name from an earlier version stays the tenant's unless the rest of its name is the id of one of the
@@ -162,7 +187,7 @@ and 0.1.2.
   to Replace instead of lowering and raising the count. Not verified on a lab.
 - **The Kubernetes provider's service account may delete Machines** (cluster-wide; the portal deletes worker
   Machines of its own clusters only) **and read MachineHealthChecks** (`deploy/mgmt-cluster/rbac.yaml`, chart
-  `proxcloud-platform` 0.1.3, not published: the tag is owed). Not verified on a lab.
+  `proxcloud-platform` 0.1.3, published and pinned by the platform BOM). Not verified on a lab.
 - **Managed services: the Check row `tenant-path` is `ok` for a platform network of mode `routed`**, and
   `privileges:capi` reads `SDN.Use` on the path of the machines' NIC for a VLAN tag or a routed network. The
   guide gives the node leg for an existing VLAN site in a persistent form, as commands, marked as not

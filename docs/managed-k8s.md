@@ -471,7 +471,7 @@ machine that did not join, and **Replace** per machine ([A worker that does not 
 
 **RBAC.** The sync needs `get` and `list` on `machines.cluster.x-k8s.io` and on `proxmoxmachines` and
 `proxmoxclusters.infrastructure.cluster.x-k8s.io`. `deploy/mgmt-cluster/rbac.yaml` and chart `proxcloud-platform`
-0.1.2 grant them (the platform BOM pins 0.1.2, so a new managed-services install has them). On an install with the older ClusterRole nothing breaks: the sync leaves `progress` and `attention`
+0.1.2 and later grant them (the platform BOM pins 0.1.3, so a new managed-services install has them). On an install with the older ClusterRole nothing breaks: the sync leaves `progress` and `attention`
 out (a 403 or 404 on the read), and the Machines dialog answers "The ProxCloud service account cannot read Machines:
 re-apply deploy/mgmt-cluster/rbac.yaml". That advice holds on an installer-built site; on a managed-services platform
 installed from an earlier BOM the `platform` Application reverts a hand-applied ClusterRole (self-heal), and the access
@@ -480,8 +480,10 @@ keeps its last state instead of losing the flag.
 
 Replacing a machine needs `delete` on `machines.cluster.x-k8s.io`, and the Machines view reads
 `machinehealthchecks.cluster.x-k8s.io` (`get`, `list`). `deploy/mgmt-cluster/rbac.yaml` and chart
-`proxcloud-platform` 0.1.3 grant both. **Chart 0.1.3 is not published and the platform BOM still pins 0.1.2**: until
-the BOM names 0.1.3, a managed-services platform has neither, the replace action answers `502` there, and the
+`proxcloud-platform` 0.1.3 grant both. Chart 0.1.3 is published and the platform BOM pins it: a managed-services
+platform installed from this release has both. **A platform on an earlier BOM (0.8.x) keeps chart 0.1.2** until it is
+upgraded to this release's BOM ([managed-services.md](managed-services.md#upgrade-between-boms)): it has neither, the
+replace action answers `502` there, and the
 Machines view shows no health check (the rest of the view works). An installer-built site gets them by applying
 `deploy/mgmt-cluster/rbac.yaml` again. `delete` on Machines is the portal's one write on Cluster API objects.
 **The grant is cluster-wide**: the ClusterRole lets the portal's service account delete any Machine in any
@@ -649,10 +651,11 @@ What it does not do:
 - **Existing clusters are untouched** until an operator sets the provider's `chartVersion` to 0.1.13 and bumps each
   cluster (**Bump** on the provider page, or the tenant's *Apply platform update*). A cluster on an older chart gets
   no `machinePlacement` and no check, exactly as before. After the bump its render is the same until its node groups
-  change. Chart 0.1.13 is published and the platform BOM pins it: a managed-services platform installed from this
-  release registers its Kubernetes provider with `chartVersion` 0.1.13, and an installer-built site registers the
-  chart's source version. A platform installed from an earlier BOM keeps the `chartVersion` it was registered with
-  (an apply on it is refused, `bom_unsupported`); the operator sets it on the provider.
+  change. The platform BOM pins chart 0.1.14, which keeps the placement of 0.1.13: a managed-services platform
+  installed from this release registers its Kubernetes provider with `chartVersion` 0.1.14, and an installer-built
+  site registers the chart's source version. A platform installed from an earlier BOM keeps the `chartVersion` it
+  was registered with until the operator sets it on the provider, or until an upgrade to this release's BOM writes
+  the new one (an apply on a platform of a BOM this build does not carry is refused, `bom_unsupported`).
 
 **Reaching the platform.** Workers sit on a tenant vnet with no route to the management network. The API-server
 endpoint is an address on the services subnet, which tenants reach over their normal egress: MetalLB.

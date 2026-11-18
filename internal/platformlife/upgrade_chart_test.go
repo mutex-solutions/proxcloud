@@ -97,7 +97,8 @@ func TestUpgradeRollsNoMachine(t *testing.T) {
 				"%s: %v\n%s: %v", b.Release, cur.Release, b.Release, got, cur.Release, want)
 		}
 	}
-	// Today every previous BOM differs from main's in the release line alone. When a BOM change refuses them all, the
-	// check has nothing left to say, which is correct; it must not go unnoticed while pairs are allowed.
+	// Today every previous BOM differs from main's in the release line and the product's own charts. When a BOM change
+	// refuses them all, the check has nothing left to say, which is correct; it must not go unnoticed while pairs are
+	// allowed.
 	t.Logf("%d of %d previous BOMs compared", checked, len(prev))
 }
