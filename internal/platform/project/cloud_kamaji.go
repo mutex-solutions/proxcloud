@@ -141,6 +141,8 @@ func (h *Handler) kamajiDelete(ctx context.Context, es *externalservice.External
 //     one minor at a time, never backwards
 //   - SET_NODE_GROUPS {nodeGroups} → replaces the nodeGroups value (add/remove/resize/labels/taints)
 //   - SET_OIDC {oidc}         → replaces the customer OIDC block; empty issuerUrl disables
+//   - REPLACE_MACHINE {machine, confirm} → deletes one worker Machine; Cluster API makes a new one. confirm is
+//     needed for the last Ready node of a group
 func (h *Handler) kamajiAction(w http.ResponseWriter, r *http.Request, proj *Project, es *externalservice.ExternalService, cr *cloud.CloudResource, action string, data map[string]any) bool {
 	if !es.IsKamaji() || cr.Type != cloud.TypeKubernetesCluster {
 		return false
@@ -291,6 +293,22 @@ func (h *Handler) kamajiAction(w http.ResponseWriter, r *http.Request, proj *Pro
 			return true
 		}
 		httpx.OK(w, map[string]any{"result": "UPDATING"})
+		return true
+
+	case "REPLACE_MACHINE":
+		// One worker is deleted and Cluster API makes a new one in its place: the way out for a machine that failed its
+		// one join. The count, the placement and so the quota stay as they are.
+		machine := strAny(data["machine"])
+		if machine == "" {
+			h.fail(w, httpx.BadRequest("machine: the name of the node to replace is required"))
+			return true
+		}
+		confirm, _ := data["confirm"].(bool)
+		if err := ks.ReplaceMachine(r.Context(), cr.ExternalID, machine, confirm); err != nil {
+			h.fail(w, kamaji.ReplaceMachineError(err))
+			return true
+		}
+		httpx.OK(w, map[string]any{"result": "REPLACING"})
 		return true
 
 	case "APPLY_PLATFORM_UPDATE":

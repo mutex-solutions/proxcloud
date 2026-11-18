@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
+	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
 // Argo holds the Application at Progressing for minutes after CAPI says Available, because the
@@ -398,5 +400,206 @@ func TestSyncProviderProgress(t *testing.T) {
 	api.mds[0] = md("pc-c-stuck", "workers", 1, 1, 1)
 	if _, err := list(svc); err != nil || len(api.listed) != 0 {
 		t.Errorf("settled project: err %v, read %v", err, api.listed)
+	}
+}
+
+// Production finding R2: two workers had not joined for hours; a third, new one joined, and "needs attention" went
+// away for 15 minutes. Every machine is measured from its own last progress, so neither a ready sibling nor one that
+// is still starting hides the stuck ones.
+func TestStuckMachinesKeepAttentionBesideAHealthyOne(t *testing.T) {
+	stuck := func(name string) MachineState {
+		return classifyMachine(machine("c", "w", name, "Provisioned", 209), pmachine(name, "True", "", ""), true)
+	}
+	fresh := func(phase string, conds ...map[string]any) MachineState {
+		return classifyMachine(machine("c", "w", "new", phase, 1, conds...), pmachine("new", "True", "", ""), true)
+	}
+	mds := []map[string]any{md("c", "w", 3, 3, 1)}
+	for name, sibling := range map[string]MachineState{
+		"ready":           fresh("Running", condition("NodeReady", "True", "NodeReady", 1)),
+		"joined, not yet": fresh("Running", condition("NodeReady", "False", "NodeNotReady", 1)),
+		"still starting":  fresh("Provisioning"),
+	} {
+		p := groupProgress([]MachineState{stuck("a"), stuck("b"), sibling}, mds, 3, time.Time{}, 0, progressNow)
+		if p["code"] != CodeNotJoined || p["machines"] != 2 || p["attention"] != true || p["since"] != ago(209) {
+			t.Errorf("sibling %s: %v", name, p)
+		}
+	}
+	// Nothing stalled: the least advanced machine speaks, as before.
+	p := groupProgress([]MachineState{fresh("Provisioned"), fresh("Provisioning")}, mds, 2, time.Time{}, 1, progressNow)
+	if p["code"] != CodeCreatingVM && p["code"] != CodeProvisioning || p["attention"] != false {
+		t.Errorf("two machines on their way: %v", p)
+	}
+}
+
+func replaceSetup(t *testing.T, machines ...map[string]any) (*fakeAPI, *Service) {
+	t.Helper()
+	api := newFakeAPI()
+	svc := NewWithAPI(api, testCfg(), "svc-1")
+	api.apps["argocd/pc-c-1"] = map[string]any{"metadata": map[string]any{"name": "pc-c-1",
+		"labels": map[string]any{LabelProject: "p1", LabelService: "svc-1", LabelManagedBy: ManagedByValue}}}
+	api.crs = map[string][]map[string]any{"machines": machines}
+	return api, svc
+}
+
+// The replace action deletes exactly the named worker Machine of the cluster, and asks before it takes the last
+// Ready node of a group.
+func TestReplaceMachine(t *testing.T) {
+	ctx := context.Background()
+	readyM := func(cluster, group, name string) map[string]any {
+		return machine(cluster, group, name, "Running", 60, condition("NodeReady", "True", "NodeReady", 60))
+	}
+	stuck := machine("pc-c-1", "workers", "stuck", "Provisioned", 200)
+	deleting := machine("pc-c-1", "workers", "leaving", "Deleting", 1)
+	deleting["metadata"].(map[string]any)["deletionTimestamp"] = ago(1)
+	controlPlane := machine("pc-c-1", "", "cp-0", "Running", 60)
+	api, svc := replaceSetup(t, stuck, readyM("pc-c-1", "workers", "only-ready"), deleting, controlPlane,
+		readyM("pc-c-other", "workers", "foreign"), readyM("pc-c-1", "gpu", "gpu-a"), readyM("pc-c-1", "gpu", "gpu-b"))
+
+	// A machine without a Node needs no confirmation, whatever the group has left.
+	if err := svc.ReplaceMachine(ctx, "pc-c-1", "stuck", false); err != nil {
+		t.Fatalf("stuck machine: %v", err)
+	}
+	if len(api.deleted) != 1 || api.deleted[0] != "machines:pc-p1/stuck" {
+		t.Fatalf("deleted = %v", api.deleted)
+	}
+	// The last Ready node of its group: refused, then done with confirm. The deleting sibling does not count as Ready.
+	if err := svc.ReplaceMachine(ctx, "pc-c-1", "only-ready", false); !errors.Is(err, ErrLastReadyNode) {
+		t.Errorf("last ready node: %v", err)
+	}
+	if err := svc.ReplaceMachine(ctx, "pc-c-1", "only-ready", true); err != nil {
+		t.Errorf("last ready node, confirmed: %v", err)
+	}
+	// One of two Ready nodes needs none.
+	if err := svc.ReplaceMachine(ctx, "pc-c-1", "gpu-a", false); err != nil {
+		t.Errorf("one of two ready: %v", err)
+	}
+	for name, want := range map[string]error{"leaving": ErrMachineDeleting, "foreign": ErrMachineNotFound, "cp-0": ErrMachineNotFound, "nope": ErrMachineNotFound} {
+		if err := svc.ReplaceMachine(ctx, "pc-c-1", name, true); !errors.Is(err, want) {
+			t.Errorf("%s: %v, want %v", name, err, want)
+		}
+	}
+	if err := svc.ReplaceMachine(ctx, "pc-c-none", "stuck", true); !errors.Is(err, ErrClusterNotFound) {
+		t.Errorf("unknown cluster: %v", err)
+	}
+	// Another provider's cluster of the same name is not ours to touch.
+	api.apps["argocd/pc-c-1"]["metadata"].(map[string]any)["labels"].(map[string]any)[LabelService] = "svc-2"
+	if err := svc.ReplaceMachine(ctx, "pc-c-1", "gpu-b", true); !errors.Is(err, ErrClusterNotFound) {
+		t.Errorf("another provider's cluster: %v", err)
+	}
+	if want := []string{"machines:pc-p1/stuck", "machines:pc-p1/only-ready", "machines:pc-p1/gpu-a"}; fmt.Sprint(api.deleted) != fmt.Sprint(want) {
+		t.Errorf("deleted = %v, want %v", api.deleted, want)
+	}
+}
+
+// The operator's machines view carries each node group's MachineHealthCheck and the provider that hosts the workers.
+func TestClusterMachinesHealthChecks(t *testing.T) {
+	api, svc := replaceSetup(t, machine("pc-c-1", "workers", "stuck", "Provisioned", 200))
+	api.crs["proxmoxmachines"] = []map[string]any{pmachine("stuck", "True", "", "")}
+	api.crs["machinehealthchecks"] = []map[string]any{{
+		"metadata": map[string]any{"name": "pc-c-1-workers", "labels": map[string]any{labelClusterName: "pc-c-1", labelNodeGroup: "workers"}},
+		"spec": map[string]any{"checks": map[string]any{"nodeStartupTimeoutSeconds": float64(1800)},
+			"remediation": map[string]any{"triggerIf": map[string]any{"unhealthyLessThanOrEqualTo": float64(1)}}},
+		"status": map[string]any{"expectedMachines": float64(2), "currentHealthy": float64(0), "remediationsAllowed": float64(0)},
+	}}
+	if err := api.ApplySecret(context.Background(), "pc-p1", CloudSecretName("pc-c-1"), nil, nil, map[string]string{annotationComputeService: "pve-1"}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := svc.ClusterMachines(context.Background(), "pc-c-1", progressNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []HealthCheck{{NodeGroup: "workers", NodeStartupTimeoutSeconds: 1800, MaxUnhealthy: 1, ExpectedMachines: 2}}; fmt.Sprint(out.HealthChecks) != fmt.Sprint(want) {
+		t.Errorf("health checks = %+v", out.HealthChecks)
+	}
+	if out.ComputeServiceID != "pve-1" || len(out.Machines) != 1 || out.Machines[0].Code != CodeNotJoined || !out.Machines[0].Attention || out.Machines[0].Ready {
+		t.Errorf("compute %q, machines %+v", out.ComputeServiceID, out.Machines)
+	}
+	// An install whose role cannot read them yet still gets its machines.
+	api.crsErrFor = map[string]error{"machinehealthchecks": &kamajik8s.APIError{Status: 403, Message: "forbidden"}}
+	if out, err := svc.ClusterMachines(context.Background(), "pc-c-1", progressNow); err != nil || len(out.HealthChecks) != 0 || len(out.Machines) != 1 {
+		t.Errorf("forbidden health checks: %v %+v", err, out)
+	}
+}
+
+// The machineHealthCheck block is written only for a chart that reads it, at create and when a cluster is moved onto
+// such a chart; a provider can turn it off, and a block a cluster already has is kept.
+func TestMachineHealthCheckValues(t *testing.T) {
+	cfg := testCfg()
+	cfg.Defaults.NodeStartupTimeoutSeconds = 1800
+	cfg.ChartVersion = "0.1.13"
+	if v := BuildValues(cfg, testSpec())["machineHealthCheck"]; v != nil {
+		t.Errorf("chart 0.1.13 got %v", v)
+	}
+	cfg.ChartVersion = MachineHealthCheckChartVersion
+	want := map[string]any{"nodeStartupTimeoutSeconds": 1800, "maxUnhealthy": 1}
+	if v := BuildValues(cfg, testSpec())["machineHealthCheck"]; fmt.Sprint(v) != fmt.Sprint(want) {
+		t.Errorf("chart %s got %v, want %v", cfg.ChartVersion, v, want)
+	}
+	off := cfg
+	off.Defaults.NodeStartupTimeoutSeconds = 0
+	if v := BuildValues(off, testSpec())["machineHealthCheck"]; v != nil {
+		t.Errorf("turned off, got %v", v)
+	}
+
+	// A cluster made on 0.1.13 and bumped.
+	old := cfg
+	old.ChartVersion = "0.1.13"
+	cfg.Defaults.RepairMaxUnhealthy = 2
+	api := newFakeAPI()
+	ctx := context.Background()
+	spec := testSpec()
+	if _, err := NewWithAPI(api, old, "svc-1").CreateCluster(ctx, spec, ClusterSecrets{Cloud: map[string]string{"token": "t"}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithAPI(api, cfg, "svc-1")
+	values := func() any {
+		return dig(api.apps["argocd/"+spec.ID], "spec", "source", "helm", "valuesObject", "machineHealthCheck")
+	}
+	if err := svc.SetChartVersion(ctx, spec.ID, "0.1.13"); err != nil || values() != nil {
+		t.Fatalf("re-pin on 0.1.13: %v, %v", err, values())
+	}
+	if err := svc.SetChartVersion(ctx, spec.ID, "0.1.14"); err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]any{"nodeStartupTimeoutSeconds": 1800, "maxUnhealthy": 2}; fmt.Sprint(values()) != fmt.Sprint(want) {
+		t.Errorf("bumped: %v, want %v", values(), want)
+	}
+	// The cluster's own block survives a later bump under another provider setting.
+	cfg.Defaults.NodeStartupTimeoutSeconds = 600
+	if err := NewWithAPI(api, cfg, "svc-1").SetChartVersion(ctx, spec.ID, "0.1.15"); err != nil || fmt.Sprint(values()) != fmt.Sprint(map[string]any{"nodeStartupTimeoutSeconds": 1800, "maxUnhealthy": 2}) {
+		t.Errorf("second bump: %v, %v", err, values())
+	}
+}
+
+// Both consoles get the same answers for what the replace action refuses; the last Ready node carries the reason a
+// console asks its second question on, and a tenant never reads the RBAC file name.
+func TestReplaceMachineError(t *testing.T) {
+	status := func(err error) (int, any, string) {
+		var he *httpx.HTTPError
+		if !errors.As(ReplaceMachineError(err), &he) {
+			return 0, nil, ""
+		}
+		return he.Status, he.Details, he.Msg
+	}
+	for name, tc := range map[string]struct {
+		err  error
+		want int
+	}{
+		"machine": {ErrMachineNotFound, 404}, "cluster": {ErrClusterNotFound, 404}, "deleting": {ErrMachineDeleting, 409},
+		"last ready": {ErrLastReadyNode, 409}, "rbac": {&kamajik8s.APIError{Status: 403, Message: "machines is forbidden"}, 502},
+	} {
+		if got, _, _ := status(tc.err); got != tc.want {
+			t.Errorf("%s: status %d, want %d", name, got, tc.want)
+		}
+	}
+	if _, details, _ := status(ErrLastReadyNode); fmt.Sprint(details) != "map[reason:last_ready_node]" {
+		t.Errorf("last ready node details: %v", details)
+	}
+	if _, _, msg := status(&kamajik8s.APIError{Status: 403, Message: "machines is forbidden"}); strings.Contains(msg, "rbac.yaml") || strings.Contains(msg, "forbidden") {
+		t.Errorf("the tenant's message names the operator's file: %s", msg)
+	}
+	plain := errors.New("dial tcp: connection refused")
+	if ReplaceMachineError(plain) != plain || ReplaceMachineError(nil) != nil {
+		t.Error("any other error, and nil, must come back as they are")
 	}
 }

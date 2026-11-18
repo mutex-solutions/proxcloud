@@ -66,6 +66,10 @@ func BuildValues(cfg Config, spec ClusterSpec) map[string]any {
 	}
 
 	values["nodeGroups"] = NodeGroupValues(d, spec.Version, spec.NodeGroups)
+	// A worker that never joins is replaced (kubeadm runs once): only on a chart that reads the block.
+	if mhc := d.MachineHealthCheckValues(cfg.ChartVersion); mhc != nil {
+		values["machineHealthCheck"] = mhc
+	}
 
 	// The addons block: the customer's curated toggles (ClusterAddons, one
 	// `addons.<name>.enabled` per pick). No cloud credential ever enters the workload cluster (D7).

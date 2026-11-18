@@ -3,6 +3,11 @@ package pve
 // agent.go — running things inside a guest through the qemu guest agent. This is root in the guest:
 // PVE 9 asks VM.GuestAgent.Unrestricted for exec and file-write, so the platform only does it on
 // VMs it owns (a load balancer's appliance), never on a tenant's server.
+//
+// GuestReadFile is the one read: the operator's view of a managed Kubernetes worker that did not join reads two
+// cloud-init files of that worker with it (internal/platform/admin). PVE 9 takes VM.GuestAgent.FileRead or
+// VM.GuestAgent.Unrestricted for file-read; the portal token holds the second on /pool (PlatformPrivileges), so no
+// privilege is added. It is never called for a tenant's own server.
 
 import (
 	"context"
@@ -67,6 +72,25 @@ func (c *Client) GuestRun(ctx context.Context, node string, vmid int, timeout ti
 // GuestWriteFile writes a file in the guest (PVE base64-encodes it and caps it near 45 KiB).
 func (c *Client) GuestWriteFile(ctx context.Context, node string, vmid int, path, content string) error {
 	return c.post(ctx, qemuPath(node, vmid)+"/agent/file-write", url.Values{"file": {path}, "content": {content}}, nil)
+}
+
+// GuestReadFile reads a file in the guest (GET .../agent/file-read). truncated: PVE stopped at its own limit (16 MiB)
+// before the end of the file.
+func (c *Client) GuestReadFile(ctx context.Context, node string, vmid int, path string) (content string, truncated bool, err error) {
+	var out struct {
+		Content   string `json:"content"`
+		Truncated any    `json:"truncated"` // 0/1 or a boolean, by version
+	}
+	if err := c.get(ctx, qemuPath(node, vmid)+"/agent/file-read", url.Values{"file": {path}}, &out); err != nil {
+		return "", false, err
+	}
+	switch v := out.Truncated.(type) {
+	case bool:
+		truncated = v
+	case float64:
+		truncated = v != 0
+	}
+	return out.Content, truncated, nil
 }
 
 // AgentPing asks the guest agent to answer (POST .../agent/ping): an error until the agent runs.

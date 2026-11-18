@@ -38,6 +38,7 @@ type K8sAPI interface {
 	ListTenantControlPlanes(ctx context.Context, ns, labelSelector string) ([]map[string]any, error)
 	ListMachineDeployments(ctx context.Context, ns, labelSelector string) ([]map[string]any, error)
 	ListCRs(ctx context.Context, group, version, plural, ns, labelSelector string) ([]map[string]any, error)
+	DeleteCR(ctx context.Context, group, version, plural, ns, name string) error
 	ListPersistentVolumes(ctx context.Context) ([]map[string]any, error)
 }
 
@@ -700,6 +701,13 @@ func (s *Service) SetChartVersion(ctx context.Context, clusterID, version string
 			return err
 		}
 		src["targetRevision"] = version
+		// A cluster that arrives on a chart with the MachineHealthCheck gets the provider's repair setting, unless
+		// its values already carry one. It acts at once on a machine that is already past the timeout.
+		if values, _ := dig(src, "helm", "valuesObject").(map[string]any); values != nil && values["machineHealthCheck"] == nil {
+			if mhc := s.cfg.Defaults.MachineHealthCheckValues(version); mhc != nil {
+				values["machineHealthCheck"] = mhc
+			}
+		}
 		return nil
 	})
 }
