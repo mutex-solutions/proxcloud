@@ -723,15 +723,18 @@ func (x *acq) cluster(ctx context.Context) error {
 	return x.startAtBoot(ctx)
 }
 
-// platformVM is one VM of an installation as the CAPI token reads it.
+// platformVM is one VM of an installation as the CAPI token reads it. err: its config or status could not be read,
+// so nothing else about it is known (not even whether it is this installation's).
 type platformVM struct {
 	node, name      string
 	vmid            int
 	running, onboot bool
+	err             error
 }
 
 // platformVMs are the installation's VMs: the members of the seed's pool and of proxcloud-system that carry its tag
-// (stage 3 tags the seed, CAPMOX the machines: machineTags), in VMID order.
+// (stage 3 tags the seed, CAPMOX the machines: machineTags), in VMID order. A member that cannot be read is in the
+// answer with its err and does not hide the others.
 func platformVMs(ctx context.Context, capi *pve.Client, id string) ([]platformVM, error) {
 	var out []platformVM
 	for _, name := range []string{pve.SeedPool, pve.SystemPool} {
@@ -746,14 +749,16 @@ func platformVMs(ctx context.Context, capi *pve.Client, id string) ([]platformVM
 			}
 			cfg, err := capi.GetVMConfig(ctx, m.Node, m.VMID)
 			if err != nil {
-				return nil, err
+				out = append(out, platformVM{node: m.Node, vmid: m.VMID, err: err})
+				continue
 			}
 			if !slices.Contains(vmTags(cfg), "pc-platform-"+id) {
 				continue
 			}
 			st, err := capi.GetVMStatus(ctx, m.Node, m.VMID)
 			if err != nil {
-				return nil, err
+				out = append(out, platformVM{node: m.Node, name: cfg.Str("name"), vmid: m.VMID, err: err})
+				continue
 			}
 			out = append(out, platformVM{node: m.Node, name: cfg.Str("name"), vmid: m.VMID, running: st.Status == "running", onboot: cfg.Int("onboot") == 1})
 		}
@@ -775,6 +780,10 @@ func (x *acq) startAtBoot(ctx context.Context) error {
 		return nil
 	}
 	for _, vm := range vms {
+		if vm.err != nil {
+			x.r.Log.Warn("platform: start at boot not checked", "installation", x.in.ID, "vmid", vm.vmid, "err", vm.err)
+			continue
+		}
 		if vm.onboot {
 			continue
 		}

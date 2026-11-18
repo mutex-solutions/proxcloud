@@ -23,8 +23,10 @@ type preflightPVE struct {
 	outside string // a service user that is not in the group proxcloud-kube: PVE refuses to show it to the portal token
 	vnets   string // the cluster's vnets, [] when empty
 	zones   string // the cluster's SDN zones, [] when empty; "!" answers 403
-	// machines are the VMs of pool proxcloud-system, VMID → {config JSON, status}; the seed's pool is empty.
+	// machines are the VMs of pool proxcloud-system, VMID → {config JSON, status}; the one with VMID seed is in the
+	// seed's pool instead.
 	machines map[int][2]string
+	seed     int
 }
 
 func (f *preflightPVE) client(t *testing.T, url, token string) *pve.Client {
@@ -71,14 +73,14 @@ func (f *preflightPVE) serve(w http.ResponseWriter, r *http.Request) {
 	if f.zones != "" {
 		data["/cluster/sdn/zones"] = f.zones
 	}
-	var members []string
+	members := map[bool][]string{}
 	for id, m := range f.machines {
-		members = append(members, fmt.Sprintf(`{"id":"qemu/%d","type":"qemu","vmid":%d,"node":"pve1"}`, id, id))
+		members[id == f.seed] = append(members[id == f.seed], fmt.Sprintf(`{"id":"qemu/%d","type":"qemu","vmid":%d,"node":"pve1"}`, id, id))
 		data[fmt.Sprintf("/nodes/pve1/qemu/%d/config", id)] = m[0]
 		data[fmt.Sprintf("/nodes/pve1/qemu/%d/status/current", id)] = `{"status":"` + m[1] + `"}`
 	}
-	data["/pools/"+pve.SeedPool] = `{"members":[]}`
-	data["/pools/"+pve.SystemPool] = `{"members":[` + strings.Join(members, ",") + `]}`
+	data["/pools/"+pve.SeedPool] = `{"members":[` + strings.Join(members[true], ",") + `]}`
+	data["/pools/"+pve.SystemPool] = `{"members":[` + strings.Join(members[false], ",") + `]}`
 	path := strings.TrimPrefix(r.URL.Path, "/api2/json")
 	body, ok := data[path]
 	if path == "/access/permissions" {
@@ -162,25 +164,31 @@ func TestPreflight(t *testing.T) {
 	// The machines row: absent above (no VM yet). After a node reboot the machines without onboot are stopped: a
 	// warning that names each with what to do, and the preflight still passes. Another installation's VM is not ours.
 	tags := `"tags":"proxcloud;pc-platform;pc-platform-` + in.ID + `"`
+	f.seed = 106
 	f.machines = map[int][2]string{
+		106: {`{"name":"pc-platform-seed","onboot":1,` + tags + `}`, "stopped"},
 		107: {`{"name":"pc-platform-cp-1",` + tags + `}`, "stopped"},
 		108: {`{"name":"pc-platform-kamaji-1","onboot":1,` + tags + `}`, "running"},
 		109: {`{"name":"other","tags":"pc-platform-other"}`, "stopped"},
 	}
 	down := pf.Run(ctx)
 	if c := checkMap(down)["machines"]; c.Status != CheckWarn || !OK(down) || !strings.Contains(c.Message, "VM 107 (pc-platform-cp-1) on pve1 is stopped") ||
-		!strings.Contains(c.Message, "qm start 107") || !strings.Contains(c.Message, "qm set 107 --onboot 1") || strings.Contains(c.Message, "108") || strings.Contains(c.Message, "109") {
-		t.Errorf("a stopped machine without onboot: %+v ok=%v", c, OK(down))
+		!strings.Contains(c.Message, "qm start 107") || !strings.Contains(c.Message, "qm set 107 --onboot 1") || strings.Contains(c.Message, "108") || strings.Contains(c.Message, "109") ||
+		!strings.Contains(c.Message, "VM 106 (pc-platform-seed) on pve1 is stopped") || strings.Contains(c.Message, "qm set 106") {
+		t.Errorf("a stopped machine without onboot, and the stopped seed in its own pool: %+v ok=%v", c, OK(down))
 	}
+	f.machines[106] = [2]string{`{"name":"pc-platform-seed","onboot":1,` + tags + `}`, "running"}
 	f.machines[107] = [2]string{`{"name":"pc-platform-cp-1","onboot":1,` + tags + `}`, "running"}
-	if c := checkMap(pf.Run(ctx))["machines"]; c.Status != CheckOK || !strings.Contains(c.Message, "2 VMs") {
+	if c := checkMap(pf.Run(ctx))["machines"]; c.Status != CheckOK || !strings.Contains(c.Message, "3 VMs") {
 		t.Errorf("every machine runs and has onboot: %+v", c)
 	}
+	// One VM that cannot be read is named and does not hide the others (the apply still sets onboot on those).
 	f.machines[107] = [2]string{"!", "running"}
-	if c := checkMap(pf.Run(ctx))["machines"]; c.Status != CheckWarn || !strings.Contains(c.Message, "Could not read") {
+	f.machines[108] = [2]string{`{"name":"pc-platform-kamaji-1",` + tags + `}`, "running"}
+	if c := checkMap(pf.Run(ctx))["machines"]; c.Status != CheckWarn || !strings.Contains(c.Message, "VM 107 on pve1 could not be read") || !strings.Contains(c.Message, "qm set 108 --onboot 1") {
 		t.Errorf("a machine that cannot be read: %+v", c)
 	}
-	f.machines = nil
+	f.machines, f.seed = nil, 0
 	// A simple default zone: tenant clusters cannot be created on it. A warning, and the preflight still passes.
 	pf.Site.DefaultZone, pf.Site.DefaultZoneKind = "pcm0", "simple"
 	warned := pf.Run(ctx)

@@ -189,6 +189,10 @@ func (p Preflight) Run(ctx context.Context) []Check {
 		vms, err := platformVMs(ctx, p.CAPI, in.ID)
 		var bad []string
 		for _, vm := range vms {
+			if vm.err != nil {
+				bad = append(bad, fmt.Sprintf("VM %d on %s could not be read with %s, so whether it runs and starts when its node boots is not known: %v", vm.vmid, vm.node, pve.CAPITokenID, vm.err))
+				continue
+			}
 			if !vm.running {
 				bad = append(bad, fmt.Sprintf("VM %d (%s) on %s is stopped: start it in Proxmox, or as root on %s: qm start %d", vm.vmid, vm.name, vm.node, vm.node, vm.vmid))
 			}
