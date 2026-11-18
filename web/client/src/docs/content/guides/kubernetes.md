@@ -39,3 +39,16 @@ The workers of a node group run on the hosts that hold the node image. When you 
 - When you lower a count, a worker that never became ready is removed first; otherwise the host with the most workers of the group gives one up.
 - Each worker's node carries the label `topology.kubernetes.io/zone` with its host, so you can spread or pin pods with it.
 - On a site whose storage is local to each host, a volume lives on the host of the worker that created it. If you scale a group below the number of hosts it runs on, every worker on at least one host is removed, and pods that use a volume on that host cannot start elsewhere. The **Edit node groups** dialog warns you before you apply such a change.
+
+## Firewall around the nodes
+
+Your operator can put a cluster's nodes behind the platform firewall. The cluster page then shows a line **Worker firewall** with a security group named `k8s-<cluster id>`, which you also find under **Network → Security groups**.
+
+With it, inbound traffic to a node is dropped unless a rule of that group allows it. The group starts with what the cluster needs between its own nodes (the pod network, health checks, the kubelet, MetalLB), your LoadBalancer addresses from anywhere, and NodePorts (30000 to 32767) from your project's networks. Outbound traffic is not filtered.
+
+- The rules are yours to change. Add one when something outside the cluster must reach a port on a node directly, for example a `hostNetwork` service. Removing one of the rules the cluster started with can break the cluster.
+- The kubelet port of a node is not reachable from your other servers.
+- You cannot attach another security group to a node, detach or delete this one, or create a group whose name starts with `k8s-`. The group is deleted with the cluster.
+- A node that was just added or replaced gets the firewall within about 15 minutes.
+
+A cluster page without that line has no firewall around its nodes: every port of a node is reachable from your project's own networks, and from nowhere else.

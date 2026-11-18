@@ -29,6 +29,31 @@ Needs attention clears by itself when the cluster recovers; nothing is deleted o
 
 The provider's ClusterRole on the management cluster predates this view. On an installer-built site re-apply `deploy/mgmt-cluster/rbac.yaml`. A platform installed by **Managed services** from this release has the access (platform chart `proxcloud-platform` 0.1.2); one installed from an earlier release keeps the old ClusterRole (its `platform` Application reverts a hand-applied one) until Remove and a new install. Until then tenants see the status as before, without reasons.
 
+## Worker firewall
+
+**Not verified on a lab yet.** Protect one cluster at a time and check a workload after each.
+
+A worker VM is cloned by the Proxmox provider of Cluster API, which cannot switch the Proxmox firewall on for it. Without the firewall every port of a worker, the kubelet included, is open to the project's own networks, and a worker can send with any address of its network. Other tenants are kept out by the isolation rules either way.
+
+**Firewall** on a cluster's row shows whether the cluster is protected and, per worker VM, whether its firewall is in place.
+
+**Protect this cluster's workers** puts every running worker behind the Proxmox VM firewall: inbound traffic is dropped except what the cluster's security group allows, outbound stays open, and a worker may only send from the cluster's own worker and load balancer addresses. The security group is an ordinary group of the tenant's project named `k8s-<cluster id>`. It opens, between the cluster's workers, the pod network (UDP 8472), Cilium health (TCP 4240, ICMP), the kubelet (TCP 10250) and MetalLB (7946); from anywhere, the cluster's LoadBalancer addresses; from the project's networks, NodePorts (30000 to 32767). The tenant may change its rules.
+
+The action refuses, and changes nothing, when the datacenter firewall is off or when a node's address is not one of the addresses reserved for the cluster. After writing, it watches for up to a minute that every node that was Ready still reports to its API server. If one does not, it takes the firewall off again and says so. The request answers only then.
+
+What it does not check: traffic between pods on different nodes, and LoadBalancer Services. Look at a workload afterwards.
+
+**Remove the worker firewall** switches the firewall off on every worker and deletes the group.
+
+Things to know:
+
+- **A new or replaced worker is open until the next provider sync**, up to 15 minutes. The sync brings every running worker of a protected cluster behind the firewall. Start a sync by hand to close the gap at once.
+- **New clusters** are protected from their creation only with `config.cluster.workerFirewall: true` on the Kubernetes provider (API only, off by default). Existing clusters are never changed by an upgrade or by the sync.
+- **Tenants cannot attach their own security group to a worker**, detach the cluster's, delete it, or create a group whose name starts with `k8s-`.
+- Not offered with shared workers.
+
+The full table, the reasoning and the lab tests still owed are in `docs/managed-k8s.md`, "Worker firewall".
+
 ## Where a node group's workers go
 
 A node image exists per Proxmox node (the provider's **Kubernetes versions**, `node=vmid,node=vmid`), and a worker is cloned on the node of its template. On a site without shared storage, publish the image on every node that should run workers: **Template updates** has **Publish on all nodes** for that.
