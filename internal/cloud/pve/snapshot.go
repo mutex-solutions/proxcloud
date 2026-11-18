@@ -162,12 +162,23 @@ func (s *Service) DeleteServerSnapshot(ctx context.Context, projectID, externalI
 	if isPlatformSnapshot(name) {
 		return conflictf("Snapshot %s belongs to the platform", name)
 	}
-	up, err := s.C.DeleteSnapshot(ctx, vm.Node, vm.VMID, name)
-	if err != nil {
-		return err
+	// PVE waits 10 s for the VM's config lock and then fails the task with "can't lock file ... got timeout", before
+	// it changed anything. Right after a rollback the lock is still held for longer than that (production, PVE 9:
+	// the delete asked 4 s after the rollback and its restart were done failed that way), so ask again: with PVE's own
+	// wait that is up to 30 s for the lock.
+	for attempt := 1; ; attempt++ {
+		up, err := s.C.DeleteSnapshot(ctx, vm.Node, vm.VMID, name)
+		if err == nil {
+			err = s.C.WaitTask(ctx, up)
+		}
+		if err == nil || attempt == snapshotLockAttempts || !strings.Contains(err.Error(), "can't lock file") {
+			return err
+		}
 	}
-	return s.C.WaitTask(ctx, up)
 }
+
+// snapshotLockAttempts is how often a snapshot delete asks for a VM's config lock before it reports the VM busy.
+const snapshotLockAttempts = 3
 
 // StampSnapshots adds a VM's tenant snapshots to its row for billing, each with its own start time so a new one
 // is not charged back to when the VM was created. PVE reports no per-snapshot usage on any storage (a volume's

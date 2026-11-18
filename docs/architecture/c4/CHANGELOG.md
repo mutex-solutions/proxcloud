@@ -4,6 +4,239 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-18: customer console, three read actions on the cloud action route
+
+**What changed:** `internal/platform/project` answers `GET_SERVERS` on a NETWORK (`pveNetworkServers`, over
+`pve.Service.VnetVMs`), `GET_CONSOLE_STATE` on a SERVER, and the bulk action `LIST_SHARE_WARNINGS` on a share
+provider (`shareReachWarnings`), which reads the project's Proxmox providers. The customer console's shell
+(`web/client/src/components/layout/AppShell.tsx`) applies the menu's service and feature check to routes. No
+container or component was added or removed.
+
+**Why:** the customer console defects of the production acceptance (D1, D9, D13, D15).
+
+**Diagrams:** none changed.
+
+**Not verified:** on a lab.
+
+## 2026-11-18: a deleted tenant cluster is released by a durable job
+
+**What changed:** a new durable job kind `kamaji.release/v1` (`internal/durablejobs/store.go`) and its runner
+`project.KamajiReleaseRunner` (`internal/platform/project/cloud_kamaji_release.go`), started by `cmd/api/main.go`
+with or without the job scheduler. A cluster delete and a project teardown queue one job per cluster; the runner
+waits for the delete cascade (`kamaji.Service.FinalizeCluster`) and then runs the release the sync job's sweep
+runs (`KamajiReleaseCluster`: the cluster's Proxmox token, addresses, dataset, Secrets). The sweep and the job
+share `finalizeNamespace`, which now also waits for the cluster's Machines; the release refuses while a VM of the
+cluster is left in the project's pool. No container was added; the Managed Kubernetes component gained the runner.
+
+**Why:** the token of a deleted cluster stayed valid until a provider sync, which on an install without the
+scheduler means until an operator started one (lab finding F57).
+
+**Diagrams:** none changed. `c3-components.md`: the Managed Kubernetes row names the release job.
+
+**Not verified:** on a lab.
+
+## 2026-11-18: the managed-services Check reads the tenant-to-platform layout
+
+**What changed:** `platformlife.Preflight` has a row `tenant-path` (`tenantPath` in
+`internal/platformlife/preflight.go`). It reads, with the portal token, the SDN zones and vnets, the subnets of
+the platform bridge when it is a vnet of a `simple` zone, and `/nodes/{node}/network` of the nodes that hold
+platform machines (`pve.Client.IfaceAddress`); `pve.SDNZone` carries `exitnodes` and `platformlife.Site` the
+exit nodes of the provider's default zone. The row is a warning or ok, never a failure, and writes nothing.
+
+**Why:** on a node that translates tenant traffic and hosts a platform machine without routing the platform
+network, tenant connections to the platform are dropped (production acceptance of v0.8.0). The Check now says
+so before a tenant finds it. It reads the layout only; no component opens the path.
+
+**Diagrams:** none changed. No container, component or relation is added: the preflight already reads the
+Proxmox API with the portal token.
+
+**Not verified:** on a lab.
+
+## 2026-11-18: audit, a refused cloud create is an event; the mint Check reads child paths
+
+**What changed:** the create dispatcher of `internal/platform/project` (`cloudCreate`, `cloudCreateFailed`) writes
+`CLOUD_RESOURCE_CREATE` with outcome `FAILURE` for a create of any resource type that is refused or fails. Until
+now an audit event followed a successful mutation only. `audit.AuditEvent` has `internalReason`, and
+`audit.Filter.Operator` decides whether a query returns it: the admin readers set it, the organization and account
+readers do not. `httpx.HTTPError` carries a `Cause`, which `httpx.WriteError` logs with the request id
+(`httpx.LogCause`) and never writes to the caller; `upstreamErr` no longer logs by itself, and a handler that
+answers such an error another way calls `httpx.LogCause` (the admin CSI migration).
+`pve.KubeMintPrivileges(stores, zones)` reads the paths a mint writes (`platformlife.MintScopeOf` names them from
+the provider), and the managed-services script and installer stage 10 write the mint role next to the portal's own
+rows on a store, a zone or a vnet. No container or component was added or removed; the responsibility of the Audit
+component grew by the failure event.
+
+**Why:** on a production site every tenant Kubernetes create failed on a store whose own ACL row hid the mint
+role, with a generic 502, a green Check and no audit event (acceptance findings F1, F3, A1).
+
+**Diagrams:** none changed. `c3-components.md`: the Audit row names the failure event.
+
+**Not verified:** on a lab.
+
+## 2026-11-18: volume rows follow an attach and are reconciled after a disk is replaced
+
+**What changed:** `Handler.ReconcileVolumeRows` (`internal/platform/project/cloud_writes_pve.go`) runs
+`providers.Reconcile` on the project's VOLUME rows at the end of `REBUILD`, `RESTORE_BACKUP` and
+`ROLLBACK_SNAPSHOT`, where an add-and-update sync ran or none at all; `RESIZE` gains the add-and-update sync.
+When the reconcile cannot run, `REBUILD` archives the row of the boot disk `pve.Service.RebuildServer` reports
+as destroyed. `Handler.AttachVolumeRow` has the row of a volume follow its disk onto another server
+(`MarkMoving`, `ChangeExternalID`, then the disk's fresh data), as a retype's does; `pve.Service.AttachVolume`
+answers the slot the disk landed in. The connection test and the managed-services preflight have a row `csi-vmid`
+(`pve.Client.CSIVMIDCheck`, a read of `/cluster/nextid`), and `pve.Client.DeleteVM` leaves
+`destroy-unreferenced-disks` out for VM id 9999. No container, component, relation or boundary changed, and no
+Proxmox permission.
+
+**Why:** on a site without the scheduled sync a rebuild left the row of the destroyed boot disk (quota counted
+twice, production acceptance D3), an attach replaced the volume's row and lost the tenant's name and the
+bill item (D4), and nothing said that a guest on VM id 9999 owns the names of the CSI volumes (A2).
+
+**Diagrams:** none changed. `c2-containers.md`: the volume paragraph says that an attach follows and which
+actions reconcile.
+
+**Not verified:** on a lab.
+
+## 2026-11-18: network DHCP flag from the live zone; onboot on the platform's machines
+
+**What changed:** `pve.ZoneDHCP` and `pve.SubnetDetail(subnets, zone)` (`internal/cloud/pve/network.go`): a
+NETWORK row's `dhcp` is true only when its subnet has a DHCP range and the zone, as Proxmox has it, runs a DHCP
+server. The create (`pveNetFlags`), the sync and the subnet actions (`Service.NetworkDetail`) use it;
+`ZoneConfig.NoDHCP` (`config.network.zones.<id>.dhcp: false`) makes `EnsureZone` create a simple zone without
+DHCP. Platform runs: stage 7 ends with `startAtBoot`, which sets `onboot` on the installation's VMs with the CAPI
+token, and the preflight has a row `machines`. No container, component, relation or boundary changed, and no
+Proxmox permission: the CAPI token already holds `VM.Config.Options` on both platform pools.
+
+**Why:** a network in a simple zone without DHCP answered `dhcp: true` (acceptance finding F2), and after a node
+reboot only the seed started.
+
+**Diagrams:** none changed. `c4-code.md`: the network table has `ZoneDHCP`, `pveNetFlags`, `SubnetDetail` and
+`NetworkDetail`. `c3-components.md`: the Platform runs row names `startAtBoot` and the `machines` row.
+
+**Not verified:** on a lab.
+
+## 2026-11-18: P3, a release carries the BOMs of earlier releases
+
+**What changed:** the component "Platform BOM and renderers" also holds the BOMs of earlier releases from 0.8.0
+on (`deploy/platform/previous/<release>.yaml`, `platformlife.Previous`, `Lookup`), found by the sha256 an
+installation records. Plan, preflight, apply and remove read the BOM that installed the platform and not the one
+of the running release. No container, relation or boundary changed.
+
+**Why:** an installed platform stays on the BOM that installed it; before, a release carried one BOM and refused
+the platforms of every other release (`bom_unsupported`).
+
+**Diagrams:** none changed. `c3-components.md`: the row "Platform BOM and renderers" names the previous BOMs,
+`Previous` and `Lookup`.
+
+**Not verified:** on a lab. No apply was run against a platform that v0.8.0 installed.
+
+## 2026-11-17: VM inventory, retirement no longer needs a view of every guest
+
+**What changed:** the proof before a cached SERVER, VOLUME or IMAGE row is retired
+(`internal/cloud/pve/vm_inventory.go`). `vmGone` replaces the ACL proof and the by-id config reads: the row's VMID
+is free in the whole cluster (`GET /cluster/nextid?vmid=`), or the VM that holds it is one the token reads in
+another pool under another SMBIOS UUID. "Free" is only a 2xx that carries the asked id (`Client.VMIDFree`). `completeVMVisibility` (self `Sys.Audit` on `/access`, the full ACL tree,
+propagated `VM.Audit` on `/vms`, `/pool` and every ACL path under them) is now called by the public address
+release only. `cloud.InventoryUntrustedError` prints its cause, so the sync's warning names the path or the VMID.
+"Publish on all nodes" answers `next: blocked` where it answered `done` on a failed step. No container, component,
+relation or boundary changed, and no Proxmox permission: `/cluster/nextid` is open to any authenticated user and
+was already called by the template updates.
+
+**Why:** the documented grants give the provider's token no ACL on `/vms` or `/access` and `NoAccess` on the
+fenced pools, so the ACL proof never passed and no row was ever retired (lab finding F60). What the proof has to
+show is that the VM is gone, and Proxmox answers that without any right to see other guests.
+
+**Diagrams:** none changed. `c4-code.md`: the VM inventory table has `vmGone` and what `completeVMVisibility` is
+still for.
+
+**Not verified:** on a lab. A VMID taken by a guest the token cannot see keeps the old row and stops that
+project's sync until the guest is gone. The address release still never passes on the documented grants.
+
+## 2026-11-17: scheduler, memory of VMs the token cannot audit
+
+**What changed:** `pve.CommittedMem` (`internal/cloud/pve/scheduler.go`) is the memory taken on a node: the larger
+of the configured memory of the running VMs in the token's VM list and the node's used memory from `GET /nodes`,
+plus the VMs of that list that do not run and the VMs that are decided and not made yet. `pve.PickNode` (servers, failover targets, Kubernetes workers through
+`pve.PlaceReplicas`) and the scale-down order of the kamaji placement read it. No container, component, relation
+or boundary changed, and no Proxmox permission: both reads were already made.
+
+**Why:** the VM list lacks every VM the token may not audit, on a managed-services install the platform's own
+machines, so their nodes read as free (lab finding F58).
+
+**Diagrams:** none changed. `c3-components.md`: the Scheduler row names `CommittedMem`.
+
+**Not verified:** on a lab. The vCPUs of VMs the token cannot audit are still not counted. On a node with such
+VMs a running visible VM counts with the memory it uses, not its size.
+
+## 2026-11-17: P3, the platform BOM pins cluster chart 0.1.13 and platform chart 0.1.2
+
+**What changed:** `deploy/platform/platform-bom.yaml` names `proxmox-kamaji-cluster` 0.1.13 (`sha256:ee05c59f...`)
+for the platform cluster (`pc-platform`) and for new tenant clusters (`tenantCharts.kubernetes`), and
+`proxcloud-platform` 0.1.2 (`sha256:765e6f48...`) for `capi`, `capi-tenant` and `platform`, both with the digest
+ghcr.io serves. No entry has `upgradeFrom`. No container, relation or boundary changed.
+
+**Why:** both charts were published from their tags. A new managed-services install registers its Kubernetes
+provider with `chartVersion` 0.1.13, the first chart on which node group replicas are placed by free capacity, and
+its provider service account can read Machines, ProxmoxMachines and ProxmoxClusters, which the provisioning reasons
+need. With the values of the platform cluster, 0.1.13 renders the same objects as 0.1.12.
+
+**Diagrams:** `c2-containers.md`: the `platchart` node of the delivery diagram no longer says "nothing applies it
+yet", and the row of chart `proxcloud-platform` names the BOM components that apply it (`capi`, `capi-tenant`,
+`platform`) and 0.1.2 as published and pinned, instead of "not published". Both were stale since the BOM first
+pinned the chart. The row of the cluster chart names 0.1.13 as the pinned version. No node or edge was added or
+removed.
+
+**Not verified:** either chart on a cluster. A platform installed from the previous BOM is refused
+(`bom_unsupported`): Remove and install again. Kept as it is, its Kubernetes provider stays on `chartVersion`
+0.1.12 until the operator sets it, and its provider ClusterRole stays the one of chart 0.1.1 (the `platform`
+Application self-heals it), so its clusters show no provisioning reason.
+
+## 2026-11-17: managed Kubernetes, node group replicas placed by free capacity
+
+**What changed:** cluster chart `proxmox-kamaji-cluster` 0.1.13 reads a per-group `machinePlacement`; the kamaji
+create and node group paths (`internal/platform/project/cloud_kamaji_placement.go`) decide it from a snapshot of the
+Proxmox provider (nodes, VMs, storage per node) with the server scheduler's inputs (`pve.PickNode`), under one lock
+per compute provider. No container, relation or boundary changed: the project handlers already read the Proxmox API
+for a server create and wrote the cluster's Application.
+
+**Why:** on sites without shared storage the chart's even split put replicas on full nodes, where they hung.
+
+**Diagrams:** none changed.
+
+**Not verified:** on a lab. Chart 0.1.13 was not published at the time of this entry; the BOM pins it since the
+entry above.
+
+## 2026-11-17: managed Kubernetes, provisioning reason and "needs attention"
+
+**What changed:** the kamaji status sync (`internal/cloud/kamaji/progress.go`) reads three more kinds on the
+management cluster, `Machine`, `ProxmoxMachine` and `ProxmoxCluster`, and stores a reason code per unsettled node
+group and a cluster-level attention entry in the cached `KUBERNETES_CLUSTER` row. One admin route reads the same
+objects live (`GET /admin/service/{id}/k8s-clusters/{clusterId}/machines`). The provider ClusterRole
+(`deploy/mgmt-cluster/rbac.yaml`, chart `proxcloud-platform` 0.1.2) gains `get` and `list` on them. No container or
+boundary changed: the relation ProxCloud API to the management cluster's Kubernetes API reads more kinds.
+
+**Why:** a cluster whose worker never joined read PROGRESSING for ever with no reason (lab, 2026-11-17).
+
+**Diagrams:** none changed; the read is on the existing "reads cluster status" relation of C2 and C3.
+
+**Not verified:** on a lab. The CAPMOX reasons and the insufficient-memory message were read from its source at
+v0.9.2.
+
+## 2026-11-17: P3, the platform BOM pins the re-exported Ubuntu 26.04 images
+
+**What changed:** `deploy/platform/platform-bom.yaml` names the Kubernetes 1.35.10 node image
+`ubuntu-2604-k8s-1.35.10-20261116181221-72f0eaa3d0d4` (`sha256:62de4378...`) and the seed image
+`ubuntu-2604-os-20261116170652-72f0eaa3d0d4` (`sha256:d598846a...`), both as ghcr.io serves them. The published
+images table, the known-issue texts and the affected-tag table (now all ten tags) follow. No container, relation or
+boundary changed.
+
+**Why:** the images pinned before have the stale ext4 orphan-file field (a root that goes read-only at a reboot), and
+the earlier node image lacks the AppArmor sysctl without which no PostgreSQL database starts. Both fixes are in the
+images exported from `72f0eaa`.
+
+**Diagrams:** none changed.
+
+**Not verified:** a platform installed from these images on a lab; a VM booted from them outside the export's cold
+boot. A platform installed from the previous BOM is refused (`bom_unsupported`) and runs on affected images: repair
+its VMs, or Remove and install again.
 ## 2026-11-16: P3, the platform BOM pins cluster chart 0.1.12
 
 **What changed:** `deploy/platform/platform-bom.yaml` names `proxmox-kamaji-cluster` 0.1.12 with the digest ghcr.io

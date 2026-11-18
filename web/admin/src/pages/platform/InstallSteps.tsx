@@ -410,9 +410,12 @@ const short = (digest?: string) => (digest ? digest.replace(/^sha256:/, "").slic
 export function ReviewStep({ installation, canManage, dirty, onInstall, installing, error }: {
   installation: Installation; canManage: boolean; dirty: boolean; onInstall: () => void; installing: boolean; error: unknown
 }) {
-  const bom = useQuery({ queryKey: ["platform-bom"], queryFn: () => apiFetch<BOM>("/admin/platform/bom"), retry: false, staleTime: 300_000 })
   // Keyed on the last run too: a run changes what is installed, and the API leaves `rev` alone then.
   const plan = useQuery({ queryKey: [...PLATFORM_KEY, "plan", installation.id, installation.rev, installation.lastRunId], queryFn: () => apiFetch<Plan>(`${base(installation.id)}/plan`), retry: false })
+  // The contents an apply runs with (the plan's target): the installed release for a platform that stays on an earlier
+  // one, else this ProxCloud's own.
+  const target = plan.data?.target.sha256 ?? ""
+  const bom = useQuery({ queryKey: ["platform-bom", target], queryFn: () => apiFetch<BOM>(`/admin/platform/bom${target ? `?sha256=${target}` : ""}`), enabled: !plan.isPending, retry: false, staleTime: 300_000 })
   const s = installation.spec
   const c = s.clusters[0]
   const workers = c.nodeGroups.reduce((n, g) => n + g.count, 0)
@@ -493,6 +496,15 @@ export function ReviewStep({ installation, canManage, dirty, onInstall, installi
             </ul>
           ) : <p className="text-muted-foreground">No component changes version.</p>}
         </div>
+      ) : null}
+      {plan.data?.newer ? (
+        <Alert>
+          <AlertTitle>The platform stays on release {plan.data.target.release}</AlertTitle>
+          <AlertDescription>
+            This ProxCloud carries the newer platform release <span className="font-mono">{plan.data.newer.release}</span>, and moving an installed platform to it is not available yet.
+            Apply this release runs with the installed release <span className="font-mono">{plan.data.target.release}</span>, whose contents are listed above: it repairs what is missing, applies changed sizes and counts, and renews the credentials.
+          </AlertDescription>
+        </Alert>
       ) : null}
       {blocking.length ? (
         <Alert variant="destructive">

@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
-	"github.com/mutex-solutions/proxcloud/internal/cloud/providers"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
@@ -60,7 +59,14 @@ func (h *Handler) pveBackupAction(w http.ResponseWriter, r *http.Request, u *use
 			h.fail(w, upstreamErr(computeBackend, cerr))
 			return true
 		}
-		err = ps.CreateServerBackup(ctx, proj.ID, cr.ExternalID, store, caps[store], es.PVEStorageHeadroomPct())
+		if err = ps.CreateServerBackup(ctx, proj.ID, cr.ExternalID, store, caps[store], es.PVEStorageHeadroomPct()); err == nil {
+			// The answer names the new archive: vzdump reports no volid, and the newest of this server's is the one.
+			if backups, lerr := ps.ListServerBackups(ctx, proj.ID, cr.ExternalID, store); lerr != nil {
+				slog.Error("backup: read the new archive's id", "project", proj.ID, "server", cr.ExternalID, "err", lerr)
+			} else if len(backups) > 0 {
+				id = backups[0].ID
+			}
+		}
 	case "RESTORE_BACKUP":
 		archivedAt, err = ps.RestoreServerBackup(ctx, proj.ID, cr.ExternalID, store, id, h.pveRestoreGuard(proj, es, cr))
 	case "DELETE_BACKUP":
@@ -69,10 +75,7 @@ func (h *Handler) pveBackupAction(w http.ResponseWriter, r *http.Request, u *use
 	if err != nil {
 		if action == "RESTORE_BACKUP" {
 			// A reconcile, not only a refresh: a failed restore destroyed the disks, and their rows must stop billing.
-			prov := ps.VolumeSyncProvider(h.pveRegion(proj, es), proj.ID, es.PVEVolumeProfileFunc())
-			if _, rerr := providers.Reconcile(ctx, prov, h.cloud, es.ID, time.Now().UTC()); rerr != nil {
-				slog.Warn("restore: refresh rows", "project", proj.ID, "err", rerr)
-			}
+			h.ReconcileVolumeRows(ctx, ps, es, proj)
 			h.pveRefreshServerRow(ctx, ps, proj, cr)
 		}
 		var quota *httpx.HTTPError
@@ -84,8 +87,9 @@ func (h *Handler) pveBackupAction(w http.ResponseWriter, r *http.Request, u *use
 		return true
 	}
 	if action == "RESTORE_BACKUP" {
-		// The disks are new volumes, whatever the archive named them.
-		h.pveSyncVolumes(ctx, es, proj)
+		// The disks are new volumes, whatever the archive named them: a row whose volid the restore did not bring back
+		// must go, as after a failed one.
+		h.ReconcileVolumeRows(ctx, ps, es, proj)
 		h.pveDateRestoredVolumes(ctx, es, proj, cr.ExternalID, archivedAt)
 	}
 	h.pveRefreshServerRow(ctx, ps, proj, cr)

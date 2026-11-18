@@ -47,7 +47,11 @@ Four charts live here:
   address), and kube-vip's lease is 60 s with a renew deadline of 40 s, so it tries a renewal
   again for 40 s before it gives up the API address. Each request is still cut at 10 s by
   kube-vip's client: a stall of about half a minute is survived, a write that takes over 10 s at
-  every try is not.
+  every try is not. 0.1.13 reads a node group's `machinePlacement` (`<node>: <replicas>`), which
+  the portal writes from each node's free memory, CPU and storage; a group without the key is
+  split evenly as before, so an existing cluster renders the same objects until its node groups
+  change. A map whose sum is not `machineCount`, or that names a node without an image, fails the
+  render.
 
 ## Publishing
 
@@ -62,7 +66,7 @@ own cadence). All four go to `oci://ghcr.io/mutex-solutions/charts`.
 | `proxmox-kamaji-cluster` | `proxmox-kamaji-cluster-vX.Y.Z` | `Chart.yaml` — the tag must match or the job fails |
 | `proxcloud-platform` | `proxcloud-platform-vX.Y.Z` | `Chart.yaml` — the tag must match or the job fails |
 
-The app chart/BOM selects the stable release `v0.7.0` (after the first stable
+The app chart/BOM selects the stable release `v0.8.1` (after the first stable
 `v0.4.0`); its tag publishes the app chart and images. Local
 rendering and a source pin are not proof that pull URLs exist. Use the
 source-build path until the required release images and chart are verified
@@ -70,9 +74,9 @@ pullable; see [release readiness](../../docs/release-readiness.md).
 
 For `database-cluster`, `proxmox-kamaji-cluster` and `proxcloud-platform`, bump `version:` in `Chart.yaml`
 in the PR that changes the chart, merge, then have a maintainer deliberately cut
-the matching tag. The current source versions are database `0.5.1` and Kubernetes
-`0.1.12` (both published and pinned by the platform BOM; `0.1.12` changes kubeadm mode only);
-they are independent of the app's `0.7.0`. Publishing is idempotent — an
+the matching tag. The current source versions are database `0.5.1`, Kubernetes
+`0.1.13` and platform `0.1.2` (all three published and pinned by the platform BOM);
+they are independent of the app's `0.8.1`. Publishing is idempotent — an
 already-published version is skipped, so a reused version does not update an old
 artifact. These are release operations, not commands to run during normal setup.
 See [CI/release operations](../../docs/ci-release.md) for full verification.

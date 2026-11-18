@@ -367,9 +367,10 @@ func fakeCluster(t *testing.T, over map[string]string, lacks ...string) pve.Conf
 			fmt.Fprintf(w, `{"data":{%q:{%s}}}`, r.URL.Query().Get("path"), strings.Join(ps, ","))
 		case !ok:
 			w.WriteHeader(http.StatusInternalServerError)
-		case strings.HasPrefix(body, "!"):
-			status, _ := strconv.Atoi(body[1:])
+		case strings.HasPrefix(body, "!"): // "!403", or "!400{…}" with the body PVE sends along
+			status, _ := strconv.Atoi(body[1:4])
 			w.WriteHeader(status)
+			fmt.Fprint(w, body[4:])
 		default:
 			fmt.Fprint(w, body)
 		}
@@ -466,6 +467,34 @@ func TestPVEConnectionTest(t *testing.T) {
 			t.Fatalf("warnings = %q, want %q", out.Warnings, want)
 		}
 	})
+}
+
+// proxmox-csi names its volumes vm-9999-pvc-…, so a guest on VM id 9999 owns them in Proxmox's eyes (production
+// acceptance, A2). In use: a row and a warning of the plain test, with what must never be done. Unreadable: a row only.
+func TestPVEConnectionTestCSIVMID(t *testing.T) {
+	for _, tt := range []struct {
+		name, nextid, status string
+		warned               bool
+	}{
+		{"free", `{"data":"9999"}`, checkOK, false},
+		{"in use", `!400{"data":null,"errors":{"vmid":"VM 9999 already exists"}}`, checkWarn, true},
+		{"unreadable", "!403", checkWarn, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			over := map[string]string{"/cluster/nextid": tt.nextid}
+			out, herr := pveConnectionTest(context.Background(), fakeCluster(t, over), nil, true, true)
+			if c := checkRow(out.Checks, "csi-vmid"); herr != nil || c == nil || c.Status != tt.status {
+				t.Fatalf("row = %+v, err = %+v, want status %s", c, herr, tt.status)
+			}
+			out, herr = pveConnectionTest(context.Background(), fakeCluster(t, over), nil, false, true)
+			if herr != nil || len(out.Warnings) > 1 || (len(out.Warnings) == 1) != tt.warned {
+				t.Fatalf("warnings = %q, err = %+v", out.Warnings, herr)
+			}
+			if tt.warned && (!strings.Contains(out.Warnings[0], "Never destroy VM 9999") || !strings.Contains(out.Warnings[0], "--destroy-unreferenced-disks 1")) {
+				t.Fatalf("the warning must say what never to do: %q", out.Warnings[0])
+			}
+		})
+	}
 }
 
 // A stored provider adds its own checks; each finding is a warning and a row.

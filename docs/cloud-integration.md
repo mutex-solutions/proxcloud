@@ -300,7 +300,10 @@ by sync and the charge loop.
   (`SecureVM`).
 - **Scheduler** (`scheduler.go`, `PickNode`) — capacity-ranked node choice with
   CPU overcommit, storage-profile node restriction, free space on the profile's
-  storage (minus headroom) and free GPU slots.
+  storage (minus headroom) and free GPU slots. Memory taken on a node is the
+  larger of the configured memory of the running VMs the token may audit and the
+  node's own used memory, plus the VMs that do not run (`CommittedMem`), so VMs
+  hidden from the token still take room; their vCPUs are not counted.
 - **Storage capabilities** (`capability.go`, `volume.go`) — `DetectStorage`,
   `StorageHasRoom`, `TemplateShared`; see
   [Storage capabilities and placement](#storage-capabilities-and-placement).
@@ -364,7 +367,12 @@ active / total / avail. A node outside the storage's `nodes` list is ignored and
 - **Volumes.** Add-volume checks free space on the server's node (409, nothing
   written). A detached disk attaches only to a server on its VM's node: PVE's disk
   reassign requires both VMs on one node, even on shared storage (else 409);
-  `LIST_ATTACH_TARGETS` returns the eligible servers. `RETYPE` moves the disk with `move_disk ... delete=1`
+  `LIST_ATTACH_TARGETS` returns the eligible servers. An attach to another server gives the disk a new
+  volid; its VOLUME row follows it and keeps its id, the name the tenant gave it, its creation date and its
+  bill item (before v0.8.1 the row was archived and a new one made: the volume lost its name and its charge
+  was split). An attach that answers an error after the disk moved (a task wait that ran out) is followed
+  too and is a success. An attach during a retype's copy is 409. A cross-node attach that fails halfway can
+  leave the disk on its carrier under a new name; that row is a new one. `RETYPE` moves the disk with `move_disk ... delete=1`
   to another profile's storage on the same node (409 if same storage, inactive, no
   `images`, no room, or a boot disk onto a profile that refuses boot disks).
   `DELETE` destroys a detached disk and is 409 for an attached one. A server
@@ -454,10 +462,42 @@ the same key. `network-config` is rendered from `ipconfigN` and is absent for pl
   a disk between VMs on one node and storage; the old disk is parked as `unusedN` until the new one is in,
   and put back on any failure. The disk donor VM is named like an image build for the seconds it exists:
   sync and billing skip it. 409 with snapshots on the server, or when the image needs a bigger disk.
+  The new boot disk is a new volume with a row of its own, and the row of the destroyed one is archived in
+  the same request, also when the rebuild fails after the swap. The same reconcile of the project's VOLUME
+  rows ends a snapshot rollback and a restore, so the rows equal the disks without waiting for the
+  scheduled sync (before v0.8.1 a rebuild left the old row, and on a site that runs no scheduler the quota
+  counted the disk twice for good). A resize refreshes the rows (it adds and updates, nothing is gone).
+  The reconcile needs every VM of the project readable. While one of them is locked (a backup, a snapshot,
+  a migration), offline or unreadable, it does not run: no row is archived, added or updated in that
+  request. A rebuild then still archives the row of the boot disk it destroyed, since it removed that disk
+  itself, but the new boot disk has no row until the next sync; after a rollback or a restore the rows stay
+  as they were. On a site without the scheduler they stay so until the next such action in the project or
+  one provider sync. Not verified on a lab: the tests run against a fake Proxmox API and a real database,
+  and whether the reconcile's proof passes on a real cluster in the seconds after a rebuild changed the
+  server's tags is the first thing to check there (rebuild, then count the volume rows).
 - **Snapshots** (`LIST_/CREATE_/ROLLBACK_/DELETE_SNAPSHOT {name}`): PVE VM snapshots, disk only. 409 when an
   attached disk is on storage without snapshots (capacity class by design). ZFS rolls back to the newest
   snapshot only, so an older one is 409 rather than a failed task. A running server restarts after a rollback.
+  A rollback brings the snapshot's config back: a data volume attached after the snapshot is no longer in
+  the server's config, and from v0.8.1 its VOLUME row is archived in the same request (before, by the next
+  scheduled sync). The disk stays on the store, unseen and unbilled. To get it back the operator runs
+  `qm disk rescan --vmid <id>` on the node, which lists it as an unused disk of the server; the next sync
+  then makes a new row for it, without the name the tenant gave it. Not tried on a lab.
   Replication's `__*` snapshots are hidden and refused.
+  `DELETE_SNAPSHOT` asks Proxmox up to three times when the delete task ends on `can't lock file ... got timeout`
+  (v0.8.2). On the production acceptance of v0.8.0 a delete sent 4 s after a rollback had answered failed that way:
+  Proxmox waits 10 s for the VM's config lock and something still held it. The rollback request already waits for the
+  rollback task and for the start task, so what held the lock was not found in the code; it has to be read off a
+  node (`qm` tasks and `/var/lock/qemu-server/lock-<vmid>.conf` right after a rollback). With Proxmox's own wait the
+  delete now waits up to about 30 s and then answers 409 busy as before. Tested against a fake Proxmox API only.
+- **Console state** (`GET_CONSOLE_STATE` on a SERVER, v0.8.2): `{status, uptime, serialDisplay}` from the VM's
+  status and config. `serialDisplay` is true when `vga` is a serial port, as cloud images and imported images have
+  it: the console page then opens on its Serial tab. The page also asks every 10 s while a serial session is open
+  and ends the session when the VM is stopped or has been up for less time than the session: on the same
+  acceptance the socket of a session stayed open after the server restarted. Why the socket did not close was not
+  found (the proxy closes the browser's side when Proxmox closes its side); not tried on a lab.
+- **Backup id**: `CREATE_BACKUP` answers `{id}`, the new archive's volid, from v0.8.2. vzdump reports none, so it is
+  the newest archive of this server and project on the store after the task; before, the id was empty.
 - **Backups** (`LIST_/CREATE_/RESTORE_/DELETE_BACKUP {id}`, offered when `config.backupStorage` names a shared store
   with `backup` content: NFS, CephFS or PBS): vzdump in snapshot mode, zstd, with the store's retention left out so it
   cannot remove a tenant's archive. `notes-template` stamps each archive with the project, and every action lists the
@@ -512,7 +552,15 @@ the same key. `network-config` is rendered from `ipconfigN` and is absent for pl
   holds several subnets, from the same `cidrPool` with the same overlap check, and the project's isolation
   ACCEPT covers them all. A server picks one with `networkInterfaces[0].subnet`. A subnet with an allocated
   address cannot be removed, and a network keeps one. There is no router resource: the zone's VRF routes
-  between all of a project's vnets, and the isolation rules are what keeps other projects out.
+  between all of a project's vnets, and the isolation rules are what keeps other projects out. A network's row
+  holds `subnetDetails` (cidr, gateway, snat per subnet) from its create on (v0.8.2; before, only the sync wrote it,
+  and on a site without the scheduler the console's Subnets tab of a new network stayed empty). A network made
+  before v0.8.2 gets `subnetDetails` at the next sync or subnet action; until then the console's Subnets tab shows
+  the row's own `cidr`, `gateway` and `snat`, the one subnet it was created with.
+- **Servers on a network** (`GET_SERVERS` on a NETWORK, v0.8.2): the project's SERVER rows whose VM has a NIC on the
+  vnet. It reads the config of every VM in the project's pool, as the network delete guard does, because a SERVER
+  row holds addresses and not the network of each NIC; 409 while a host of the project's servers is down. Tested
+  against a fake Proxmox API and a real database, not on a lab.
 
 ### Tenancy: the pool is the boundary, the platform DB decides the rest
 
@@ -536,8 +584,22 @@ point (`proxmox.go` header):
   `proxcloud.io/unsecured` taint off a worker once that is in place:
   [managed-sandbox.md §2](managed-sandbox.md#2-layer-1-the-vm-firewall-on-the-workers-sb2b).
 - PVE offers DHCP on simple zones only, and a simple zone stays on one node. On EVPN and
-  VLAN zones the platform allocates each server's `net0` address and sets it through
-  cloud-init, so an image without cloud-init gets no address there.
+  VLAN zones, and on a simple zone without a DHCP server, the platform allocates each server's
+  `net0` address and sets it through cloud-init, so an image without cloud-init gets no address
+  there. What decides is the zone as Proxmox has it (its `dhcp` field), not its kind in the
+  provider's config: the network create reads it, writes a DHCP range only where the zone runs a
+  DHCP server, answers `dhcp: false` elsewhere and refuses `enableDhcp: true` there with a `400`;
+  the sync answers the same from the subnet and the zone ([api.md](api.md)). ProxCloud creates a
+  missing simple zone with DHCP, or without when its config says `"dhcp": false`; a zone that
+  exists is never changed. Tenant Kubernetes clusters and load balancers need a network without
+  DHCP.
+- A network in a `vlan` zone is a bare VLAN: Proxmox holds no gateway address there and does
+  no DHCP and no SNAT. The subnet is written without a DHCP range and without SNAT, the network
+  answers `dhcp: false` and `snat: false` (also one made before this rule, whatever its subnet
+  still says), and a create with `enableDhcp: true` or `snat: true`, or an `ADD_SUBNET` or
+  `SET_SNAT` with `snat: true`, is refused with a `400`. The `gateway` it shows (the
+  subnet's first address) is the address the site's router must hold on that VLAN: servers get
+  it as their default route, and outbound access is that router's decision.
 
 Getting tenancy wrong over-bills a customer for resources that are not theirs,
 or worse, exposes them.
@@ -1168,7 +1230,12 @@ a client's root wrote before that stay owned by root with their modes, so client
 no longer change them. An operator who wants them writable changes their owner on the NAS. The NAS tells tenants apart by source address, so a client needs a path to the NAS that keeps
 its address. A public NIC has one when the NAS is routable from the public network. A private subnet that leaves
 through SNAT arrives with a node's address, and the tenant isolation rules drop traffic from the pool to the nodes'
-management network: on a NAS placed there, private subnets cannot mount.
+management network: on a NAS placed there, private subnets cannot mount. From v0.8.2 the customer console says so
+before a share is made: the bulk action `LIST_SHARE_WARNINGS` on the share provider answers a list of sentences,
+one when the file server's address (`config.mountHost`, or the host of `apiUrl`) is inside a management network of
+the nodes or inside `network.blockedCidrs` of a Proxmox provider of the project, and the Create share dialog shows
+it. A provider that cannot be read warns of nothing. The share can still be created. Tested against a fake Proxmox
+API, not on a lab.
 
 **A NAT between tenants and the NAS.** When a NAT rewrites tenant traffic on its way to the NAS, the NAS sees the NAT's
 address, which no export lists, so the mount fails. `config.snatSources` (default: none, off) lists those addresses,

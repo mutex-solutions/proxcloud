@@ -27,6 +27,7 @@ func auditFilterFromQuery(q url.Values) audit.Filter {
 		Search:           q.Get("search"),
 		From:             audit.ParseInstant(q.Get("from")),
 		To:               audit.ParseInstant(q.Get("to")),
+		Operator:         true,
 	}
 }
 

@@ -7,7 +7,521 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+None of the entries below is verified on a lab yet: each one says so, and what its tests do show.
+
 ### Added
+
+- **A warning when tenants cannot reach the platform network.** On a site where a Proxmox node translates
+  tenant traffic (a `simple` tenant zone, or an exit node of an EVPN zone) and also runs the platform machine
+  that owns the destination address, a tenant's TCP connection to the platform network is dropped on that node
+  unless the node itself routes the platform network: tenant Kubernetes workers run and never join, and tenants
+  cannot reach managed databases (production acceptance of v0.8.0, a one-node site with the platform network
+  on a VLAN). The managed-services Check has a row `tenant-path` that reads the layout and warns; it never
+  fails and opens no connection, so `ok` is not proof. The guide has the rule, the two supported layouts and
+  what to do with workers that did not join
+  ([docs/managed-services.md](docs/managed-services.md#the-path-from-tenants-to-the-platform)). The node leg
+  for an existing site was run by hand on one production site and is lost at a reboot; the layout with a
+  platform network routed by the node was run nowhere. Not verified on a lab: the row is tested against a fake
+  Proxmox API only.
+
+### Changed
+
+- **The platform BOM on `main` is `0.9.0-dev` again, and the build carries the BOM of `0.8.1`**
+  (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.8.1.yaml`). The `v0.8.1` release commit left
+  the BOM at `0.8.1`, and the release gate refuses only `-dev`. A platform installed by `v0.8.1` stays on its BOM
+  after an upgrade, as one installed by `v0.8.0` does; a platform installed by a `dev-<sha>` build of `main` is
+  still refused by a later build (`bom_unsupported`). Not verified on a lab.
+- **A worker that has not joined sends the tenant to the operator.** Past its 15 minutes the node group's line
+  in the customer console read "Check that the cluster's network has a router or gateway and reaches the
+  cluster endpoint", which a tenant cannot check. It now says that the machine most likely could not reach the
+  cluster's endpoint (the product does not read the join error), to contact the operator, and that the machine
+  is replaced by reducing the count by one and raising it again once the cause is repaired (a group of one is
+  raised first: a count below one is refused); inside the bound it reads "has not joined the cluster yet"
+  (`web/client/src/pages/platform/KubernetesPage.tsx`, `docs/managed-k8s.md`). Not verified on a lab.
+- **The server console opens on the Serial tab** when the server's display is its serial port (cloud images), and
+  says that Enter brings the login prompt. **The Kubernetes create form starts on the lowest version offered, with
+  high availability off**; it preselected the newest version and three control planes. A provider marks no default
+  version. Not verified on a lab.
+
+### Fixed
+
+- **A deleted tenant Kubernetes cluster's Proxmox token is revoked without a provider sync** (lab finding F57).
+  The token `capmox@pve!<clusterId>` and its ACL rows stayed until a provider sync ran after the cluster's
+  30-minute marker grace, and on an install without the job scheduler (the Compose default) until an operator
+  started a sync. The delete, and a project teardown, now queue a durable job (`kamaji.release/v1`) that the API
+  runs with or without the scheduler. Its first look at the cluster comes within seconds of the delete, the next
+  ones 15 seconds apart, growing to 5 minutes, and at the first look that finds the cascade over it revokes the
+  token and releases the cluster's addresses, dataset and Secrets. After 24 hours it gives up (`dead`,
+  `cascade_not_finished`) and the sync's sweep, which stays as the backstop, does the release. The job and the
+  sweep now also wait for the cluster's Machines, and neither revokes while a VM named `<clusterId>-…` is left in
+  the project's pool or while the management cluster or Proxmox does not answer: CAPMOX deletes the workers with
+  that token ([docs/managed-k8s.md](docs/managed-k8s.md#deletion-and-orphan-finalization)). Not verified on a
+  lab: the tests use a fake management cluster and a fake Proxmox on PostgreSQL.
+- **Customer console, the defects of the production acceptance (D1, D2, D8 to D10, D12 to D15).** A network's
+  **Servers** tab lists the servers with a NIC on it (`GET_SERVERS` was refused on Proxmox), and its **Subnets** tab
+  shows a network's subnet on a site without the scheduled sync (the create writes `subnetDetails`; for a network
+  made before, the tab reads the row's own `cidr`, `gateway` and `snat`). A snapshot
+  delete right after a rollback asks Proxmox up to three times for the VM's config lock before it answers 409; what
+  holds that lock after a rollback was not found. `CREATE_BACKUP` answers the new archive's id, and the console asks
+  before it starts a backup. The role form shows a name the server accepts and states the rule. Rebuild offers the
+  project's own images, like Create. A page the menu hides (volume snapshots, S3 access keys) no longer opens by its
+  URL. The Create share dialog warns when the file server is inside a network the site keeps tenant networks out of
+  (`LIST_SHARE_WARNINGS`). A serial console session ends on the page when its server was stopped or restarted
+  (`GET_CONSOLE_STATE`, asked every 10 s). Not verified on a lab: the API tests use a fake Proxmox, the console was
+  run against its mock app ([docs/cloud-integration.md](docs/cloud-integration.md)).
+
+## [0.8.1] - 2026-11-18
+
+A patch release on top of `v0.8.0`. It adds no feature of its own size: it makes a site that runs
+`v0.8.0` safe to upgrade, now and later, and fixes what the first production site and the acceptance
+of `v0.8.0` found.
+
+- **A platform installed by `v0.8.0` keeps working after this and every later upgrade.** `v0.8.0`
+  carried one bill of materials (BOM), so any later release, a patch included, would have refused every
+  apply on an installed platform (`409 bom_unsupported`). From this release on a release carries the BOM
+  of each earlier release back to `0.8.0`, and an installed platform stays on the BOM that installed it
+  (Fixed).
+- **Tenant Kubernetes create on a site whose portal user or token has ACL rows of its own on single
+  stores.** Every create answered `502` there while the Check was green. The managed-services script
+  writes the missing rows, the Check names the path that fails, and a refused create answers `409` with
+  the reason, leaves an audit event and a JSON log line (Fixed, Added).
+- **The DHCP flag of a tenant network** says what Proxmox does: `dhcp: false` in a zone that runs no
+  DHCP server, and `enableDhcp: true` there is a `400` (Fixed, Changed).
+- **The platform's machines start with their Proxmox node**: `onboot` on every VM of the platform, and
+  a Check row `machines` (Fixed).
+- **Security group rules**: a delete could remove another rule, `ADD_RULE` stored a deny rule as an
+  allow rule, an egress rule kept its CIDR in the wrong field, and a rule's remote could name a cluster
+  IP set (Fixed, Changed, Security).
+- **Volume rows**: a rebuilt server no longer keeps the row of its old boot disk, a volume keeps its
+  name, id and bill item when it moves to another server, and a server with VM id 9999 can be deleted
+  without destroying the CSI volumes (Fixed, Added).
+
+The platform BOM of this release is `0.8.1`. It pins what `0.8.0` pins: only the `release` line
+differs, and no chart, image or download changes.
+
+Upgrading from `v0.8.0`. Read the entries named here before the upgrade.
+
+- **Docker Compose host:** check out the tag and run `./proxcloud-up.sh upgrade v0.8.1`
+  (`deploy/compose/README.md`, "Upgrade"). The script takes its backup first; nothing else is run by hand.
+- **Sites with managed services: run the Check after the upgrade** (System → Managed services). Where
+  the row `privileges:kubemint` fails, run the managed-services script again as root on a Proxmox node
+  (step 2 of the Managed services page), once per portal token, or `make upgrade` on an installer site
+  in split mode. The row names the path that lacks the right. It fails on a site where the portal's
+  user or token holds an ACL row of its own on a store, a zone or a vnet, and it passed there on
+  `v0.8.0`; until the script has run, tenant cluster creates answer `409` and an install or apply of
+  the managed services stops at its first stage (`preflight_failed`) (Fixed).
+- **An installed platform stays on the 0.8.0 BOM.** Step 4 of the Managed services page says that the
+  platform stays on release 0.8.0 and shows the 0.8.1 BOM as a newer release that is not available to
+  an installed platform yet. That is the intended state, not an error: nothing has to be installed
+  again, and **Apply this release** runs with the 0.8.0 BOM. A platform installed from a `dev-<sha>`
+  build of `main` is still refused (`bom_unsupported`).
+- **Press Apply this release once** on an installed platform, at a time of your choice: it sets
+  `onboot` on the platform's machines, which `v0.8.0` set on the seed alone. Until then the Check row
+  `machines` warns and names each VM with the command (`qm set <vmid> --onboot 1`). A stopped machine
+  is not started by it (Fixed).
+- **Scripts that call the security group actions:** `DELETE_RULE` takes `ruleId` only, as
+  `LIST_RULES` returns it; `pos` and an id of the shape `<group>-<position>` answer `400` or `409`.
+  `ADD_RULE` answers `400` for a field it cannot store (`remoteGroupId`, `action`, `log`, `priority`).
+  An egress rule written before this release is listed with remote "any": delete it and add it again
+  (Fixed, Changed).
+- **Scripts that create networks:** `enableDhcp: true` is a `400` in an EVPN zone and in a `simple`
+  zone without a DHCP server. Existing rows are corrected by the next provider sync (Fixed, Changed).
+- **Log collectors:** every line of the API log is JSON now; a parser that expected plain text lines
+  for `backend request failed` has to change (Fixed).
+- **A guest with VM id 9999** on the Proxmox cluster gets a warning in the Check and in Test
+  connection (`csi-vmid`): read it before destroying that guest (Added).
+
+Verified on a lab, on 2026-11-18, on one lab Proxmox VE cluster. The portal ran the published images
+of `v0.8.0` and installed a platform from the 0.8.0 BOM in one run without a Retry (37 minutes 45
+seconds). The portal was then upgraded with `./proxcloud-up.sh upgrade` to the build `dev-751a190` of
+`main`, which is this release without its release commit and its changelog. On that build:
+
+- **The platform kept working.** The plan had 0 changes and no blocker and named the build's own BOM
+  as newer; the Check was green with the two new rows (`csi-vmid` ok, `machines` a warning); **Apply
+  this release** succeeded in 6.6 seconds without a retry; `status.bom` was unchanged (0.8.0, the
+  sha256 of the tag's file); the seed's 14 Applications were not synced again. The 0.8.0 BOM was
+  answered by its hash, and the BOM of an earlier `dev` build was refused.
+- **Tenant Kubernetes create on per-store ACL rows.** With a stand-in row on the boot store the Check
+  failed on `privileges:kubemint` and named the store and the script; the tenant's create answered
+  `409` with the new text; the audit had a `FAILURE` event with the Proxmox reason for the operator and
+  without it for the tenant; the API log had one JSON line with the request id; nothing was left on
+  Proxmox.
+- **The DHCP flag**, on a network of a VLAN zone and of a `simple` zone made without DHCP: both
+  answered `dhcp: false`, no DHCP range was written, and `enableDhcp: true` was a `400` in both.
+- **`onboot`** on the four running machines of the platform that `v0.8.0` had installed: the apply set
+  it with the CAPI token, it was still there 23 minutes later, and the `machines` row then read ok.
+- **Security group rules**, at the API: the egress warning and the CIDR as destination in Proxmox,
+  `400` for `remoteGroupId` and `action`, `409` for a stale id and for the id shape of `v0.8.0`, `400`
+  without `ruleId`, and a delete by the current id that removed that rule only. Proxmox took the digest
+  of the rule list on the delete.
+- **Volumes**, in part: the `csi-vmid` row read ok, and a standalone volume was created and deleted
+  (see Known issues for what its first create showed).
+
+**Not** verified on a lab:
+
+- **Anything on the published artifacts of this release.** The lab ran a build of `main` whose BOM was
+  `0.9.0-dev`. That BOM and the 0.8.1 one pin the same versions as 0.8.0, so the lab does not show an
+  apply that keeps older pins while the release carries other ones.
+- **Volume attach, detach and rebuild.** The lab node that holds the image had no capacity for a tenant
+  server, so none of these ran: that a volume keeps its name, id and bill item on an attach to another
+  server, that a rebuild archives the row of the old boot disk, and the delete of a server with VM id
+  9999. The warning case of `csi-vmid` was not provoked. These fixes rest on their tests alone.
+- **A stopped platform machine**, a machine the token cannot read, a node reboot with `onboot` in
+  place, and an install on this release from the start.
+- **The production shape of the ACL fix**: an older `ProxCloudPlatform` row on a store, a row held
+  through a group, and the script's new lines that repair them (they ran against a fake `pveum`).
+- An EVPN zone's `enableDhcp: true`, a rule-list digest that is stale at Proxmox, the console pages of
+  every change above, and an installer or Helm install of this release.
+- Everything `v0.8.0` says is not verified still holds, except what is listed as verified here.
+
+On the lab, the install's stage 7 (three node clones at the same time) restarted containers of another
+Kubernetes cluster whose VMs share the nodes' disks; all recovered. This is the behaviour of `v0.8.0`
+and is unchanged.
+
+The entries below were written when each change merged, before the lab round. Where one ends with "Not
+verified on a lab", the lists above say what has been run since and what has not. Where one says the
+BOM on `main` is `0.9.0-dev`, that was the state at that merge: this release's BOM is `0.8.1`.
+
+### Added
+
+- **A `simple` tenant zone without DHCP from the provider's config**: `"dhcp": false` on a zone of
+  `config.network.zones` (`internal/platform/externalservice/proxmox.go`, `docs/managed-services.md`,
+  "Prerequisites"). ProxCloud then creates the zone without Proxmox's DHCP server, so tenant Kubernetes clusters
+  and load balancers can use its networks on a site without EVPN or VLANs. It applies to a zone that does not
+  exist yet; an existing zone is never changed, and the default (a `simple` zone with DHCP) is the same. Not
+  verified on a lab.
+- **A warning when VM id 9999 is in use on the Proxmox cluster.** proxmox-csi names every volume
+  `vm-9999-pvc-<uuid>`, the platform's own and the tenant clusters', and Proxmox counts a disk with that
+  name as VM 9999's. On a site where a guest has that id, destroying it with "Destroy unreferenced disks
+  owned by guest" would remove these volumes (acceptance audit, A2). The managed-services Check and the
+  provider's Test connection have a row `csi-vmid` that says so; it never fails, and the id the plugin
+  uses is unchanged ([docs/managed-services.md](docs/managed-services.md#vm-id-9999-and-the-csi-volumes)).
+  Not verified on a lab.
+- **A cloud resource create that is refused or fails leaves an audit event** (`CLOUD_RESOURCE_CREATE`, outcome
+  `FAILURE`), for every resource type. `errorMessage` is what the caller was answered. `internalReason` is the
+  backend's own error and is returned by the operator's audit routes alone; the operator's Audit page shows both.
+  The type is recorded only when it has the form of a type name, and the name, the answer and the reason are cut.
+  Not verified on a lab: the tests use a fake Proxmox, and the two new lines of the Audit page were built and
+  smoke-tested, not looked at in a browser.
+
+### Changed
+
+- **The platform BOM on `main` is `0.9.0-dev`** (`deploy/platform/platform-bom.yaml`). The `v0.8.0` release commit
+  left it at `0.8.0`, and the release gate refuses only `-dev`, so any `v*` tag cut from `main` would have passed
+  that part of the gate.
+- **`ADD_RULE` on a security group refuses what it cannot store.** `remoteGroupId`, `action`, `log`, `priority` and
+  any other key the rule does not have were accepted and dropped, so a deny rule was stored as an allow rule and a
+  rule for a remote group as a rule for every source, each with a 200. They are a `400` now that names the key. The
+  protocol (`tcp`, `udp`, `sctp`, `icmp`, `gre`, `esp`, `ah`, or none), the ports (1 to 65535, with `tcp`, `udp` or
+  `sctp` only) and the remote (a CIDR or one address) are checked before Proxmox is called, with a message per
+  field; a port sent as text was stored as "every port". Not verified on a lab: the tests use a fake Proxmox, and
+  that Proxmox accepts each protocol name of the list on a group rule was not tried.
+- **Security groups no longer promise outbound rules.** A server's outbound traffic is always allowed, so an egress
+  rule restricts nothing. The API still stores one and now says so in the answer (`result.warning`); the console
+  and the networks guide say the same. Egress filtering is not in this release. Not verified on a lab.
+- **`enableDhcp: true` on a network of an EVPN zone is now a `400`** (`POST /project/{id}/cloud`, type
+  `NETWORK`; `internal/platform/project/cloud_network_pve.go`, `docs/api.md`). Up to `v0.8.0` the request was
+  accepted and the network answered `dhcp: true`, though Proxmox runs no DHCP server in an EVPN zone and the
+  platform assigns the addresses. It is refused like the same request in a VLAN zone or a `simple` zone
+  without DHCP; leave the field out or send `false`. Neither console sends it. Not verified on a lab.
+- **CI compares the previous BOMs with the registries too.** `bom-verify.yml` (pull requests on `deploy/platform/**`,
+  weekly) and the release gate of `docker.yml` run `bom_verify.py --release` on each file under
+  `deploy/platform/previous/`, so a release is not built with a previous BOM whose pin is no longer served.
+  `docs/ci-release.md`, "Previous BOMs", has the step that follows each release tag. Not verified: that procedure
+  has not been run at a release.
+
+### Fixed
+
+- **A platform installed by v0.8.0 keeps working after a ProxCloud upgrade.** A platform records the bill of
+  materials that installed it by the sha256 of the BOM file, and a release carried one BOM only. The file holds the
+  release number, so every later release, a patch included, was another BOM: the plan was blocked and **Apply this
+  release** answered `409 bom_unsupported`. A release now also carries the BOM of each earlier release back to
+  `0.8.0` (`deploy/platform/previous/`, byte for byte the file of the tag), and an installed platform stays on the
+  BOM that installed it: the Check, an apply (repair, changed sizes and counts, credential renewal) and Remove run
+  with that BOM's pins. Step 4 of System → Managed services says that the platform stays on its release, lists that
+  release's contents and names the newer one; `GET …/plan` has `newer` for it, and `target` is now the BOM the apply
+  runs with. `GET /admin/platform/bom?sha256=` answers a carried BOM by hash. Moving an installed platform to a
+  newer BOM is not in this release, so the message for a platform image on the template update blocklist no longer
+  sends an installed platform to a newer release: it says that the platform stays on its release's images. A
+  platform installed by a build of `main` (`dev-<sha>`) is still refused: only the BOMs of releases are kept. Not
+  verified on a lab: tests show that the embedded file has the hash a v0.8.0 platform records and that this release
+  renders the 0.8.0 BOM as v0.8.0 did; no apply was run against a platform that v0.8.0 installed.
+- **A network in a zone without a DHCP server no longer answers `dhcp: true` (F2)**
+  (`internal/platform/project/cloud_network_pve.go`, `internal/cloud/pve/network.go`, `docs/api.md`,
+  `docs/cloud-integration.md`). The network create took the flag from the zone's configured kind and wrote a
+  DHCP range on the subnet, and the sync took it from the subnet alone. On a `simple` zone made without DHCP,
+  and on every EVPN zone, a tenant read "DHCP on" where Proxmox hands out no address. The create now reads the
+  zone in Proxmox: where it runs no DHCP server the network answers `dhcp: false`, no range is written, and
+  `enableDhcp: true` is refused with a `400` that says why. The sync and the subnet actions answer from the
+  subnet and the zone together, so the next sync corrects existing rows. The DHCP range on subnets written
+  before stays: it does nothing without a DHCP server in the zone, and removing it would need an SDN apply.
+  Load balancers and tenant Kubernetes clusters already decided from the zone and work on such a network. Not
+  verified on a lab.
+- **The platform's machines start again with their Proxmox node**
+  (`internal/platformlife/cluster.go`, `internal/platformlife/preflight.go`, `docs/managed-services.md`,
+  "After a Proxmox node reboots"). Only the seed had `onboot`, so after a reboot of a node the platform
+  cluster's machines stayed stopped, and with them every tenant control plane and database. Stage 7 of every
+  install and apply now sets `onboot` on each VM of the platform that lacks it, with the CAPI token, and the
+  Check has a row `machines` that warns for a VM that is stopped or has no `onboot`, with the command, and names
+  a VM it could not read without hiding the others. A platform installed by `v0.8.0` gets it at its first apply;
+  until then `qm set <vmid> --onboot 1`. No start order is set (Proxmox takes `Sys.Modify` on `/` for it, which
+  the token does not hold; the guide has the command), tenant clusters' machines are not covered, and a stopped
+  VM is still started by hand. No chart, BOM or role change. Not verified on a lab.
+- **Deleting a security group rule could delete another rule.** A rule was deleted by its position, and a new rule
+  takes position 0 and moves the others down: a delete from a page loaded before someone added a rule removed a
+  different rule, and `DELETE_RULE` with neither `pos` nor `ruleId` removed the first rule. A listed rule's `id` now
+  holds a fingerprint of the rule next to its position, `DELETE_RULE` takes only `ruleId`, and the delete carries the
+  digest of the rule list to Proxmox. When the id no longer names a rule the answer is `409`, nothing is deleted, and
+  the console reloads the list; without `ruleId` the answer is `400`. A script that sends `pos`, or an id of the old
+  shape `<group>-<position>`, has to list the rules and send the `id` (`docs/api.md`, security group rules). Not
+  verified on a lab: the tests use a fake Proxmox; that the rule list of a group carries a digest and that Proxmox
+  checks it on the delete was not tried, and the console's `409` path has no automated test.
+- **An egress security group rule stored its remote CIDR as the rule's source.** It is the destination now, and the
+  console's rule table has a Direction column. A rule written before keeps the CIDR in the source and is listed with
+  remote "any": delete it and add it again. Such a rule had and has no effect, see Changed. Not verified on a lab.
+- **The rule table of a security group showed an empty cell** for "any protocol" and "any remote". Not verified on
+  a lab: the page was built and opened by the smoke test only.
+- **A rebuilt server no longer keeps the row of its old boot volume.** A rebuild gives the server a new
+  boot disk and destroys the old one, but the old volume's row stayed until the scheduled sync ran, and
+  for good on a site that runs no scheduler: the volume list showed the disk twice and the quota counted
+  it twice (production acceptance of v0.8.0, D3). Rebuild, restore from backup and
+  snapshot rollback now reconcile the project's volume rows in the same request, so a row whose disk is
+  gone is archived, and a resize refreshes the boot volume's size at once. The reconcile does not run
+  while another server of the project is locked, offline or unreadable; a rebuild then still archives
+  the row of the disk it destroyed. A rollback to a snapshot older than an attached volume now archives
+  that volume's row at once (the disk stays on the store). Not verified on a lab.
+- **A volume keeps its name, id and bill item when it is attached to another server.** Proxmox gives the
+  disk a new id on such an attach, and the portal archived the volume's row and made a new one: a volume
+  named "t-vol1" showed as "t-srv2-scsi1", created "just now", and its charge was split over two bill
+  items (D4). The row now follows the disk, as it does for a change of volume type, also when the attach
+  answered an error after the disk had moved. An attach while a change of type is still copying answers
+  `409`. Not verified on a lab.
+- **Deleting a server that has VM id 9999 no longer destroys the CSI volumes.** The portal deletes a VM
+  with "destroy unreferenced disks", and Proxmox counts every `vm-9999-pvc-<uuid>` volume as an
+  unreferenced disk of VM 9999. A server can get that id (Proxmox hands out the lowest free one), so
+  the flag is now left out for it. Not verified on a lab.
+- **Managed Kubernetes: a cluster create no longer fails on a site with ACL rows of its own on single stores.**
+  In Proxmox a row on a path replaces what its parents pass down. On a site where the portal's user or token
+  held a row on a store (an older setup wrote `ProxCloudPlatform` on single stores), the mint role on `/storage`
+  did not reach that store, Proxmox refused the cluster token's row there, and every tenant cluster create
+  answered `502`, while the Check was green. The managed-services script and installer stage 10 now write
+  `ProxCloudKubeMint` next to each such row on a store, a zone or a vnet, for the user or token that holds
+  the row; the Check row `privileges:kubemint` reads the paths a mint writes (the template pool, `/nodes`,
+  `/sdn/zones/localnetwork`, each zone of the provider, the ISO store, the import store and the boot stores of
+  the storage profiles) and names the path that fails. **To take it: run the script again as root on a node
+  (step 2 of the Managed services page), or `make upgrade` on an installer site in split mode. Until then, on a
+  site with such rows, `privileges:kubemint` fails where it passed on v0.8.0, and an install or apply run of the
+  managed services stops at its first stage (`preflight_failed`).** Each added row
+  is `Permissions.Modify` on that store or zone for the portal token: what `/storage` gives on every other
+  store ([docs/proxmox-permissions.md](docs/proxmox-permissions.md#a-row-of-the-portals-own-on-a-store-or-a-zone)).
+  Not verified on a lab: nothing of it ran on a Proxmox cluster; the script's new lines ran with a fake `pveum`.
+- **Managed Kubernetes: a create that Proxmox refuses for a permission says so.** It answers `409 Could not mint
+  the cluster's Proxmox tokens: the operator must fix a permission of the portal on Proxmox first…` where it
+  answered `502 The compute backend is unavailable. Try again later.` The guide named a text that did not exist
+  ([docs/managed-k8s.md](docs/managed-k8s.md#5-troubleshooting)). Not verified on a lab.
+- **The API log is JSON on every line.** Lines written through the default logger, the `backend request failed`
+  errors among them, were plain text, so a filter on `level` did not see them. That line now carries the request
+  id of the answer (`X-Request-Id`). Not verified on a lab or on a site.
+
+### Security
+
+- **A security group rule's remote must be a CIDR or an address.** The value was passed to Proxmox as written, so a
+  tenant could name a cluster IP set or alias as the source of a rule. Not verified on a lab.
+
+### Known issues
+
+- **A standalone volume can lose its name at create (G1).** A volume created without a server gets a
+  small holder VM. When Proxmox lists that VM later than about 12 seconds after its create, the create
+  answers `200` with a row that has no `id`, the volume is missing from the tenant's list until the next
+  provider sync, and the sync then names it after its disk (`vm-<vmid>-disk-0`): the name the tenant
+  gave is lost. Seen once on a lab under load; a second create kept its name. The disk and its size are
+  right, and on the lab the volume was deleted through the API once it was listed. The same code is in
+  `v0.8.0` (`internal/platform/project/cloud_writes_pve.go`, the read-back after the create gives up
+  and answers a row that is never stored). Not fixed in this release.
+- **Managed Kubernetes: workers do not join where one node both translates tenant traffic and hosts the
+  platform machines.** A tenant cluster's workers and a tenant's database clients open TCP connections
+  to the platform network. On a Proxmox node that translates the tenant's traffic (a `simple` tenant
+  zone, or an exit node of an EVPN zone) and also runs the platform machine that owns the address,
+  while the platform network is reached over the site's router, those connections are dropped: the
+  control plane becomes ready and no worker joins. A one-node site is this case; a VLAN tenant zone is
+  not. It was found on a production site on `v0.8.0` and is the same in this release, where managed
+  Kubernetes works on such a site only after a change on the node itself, outside the product. This
+  release neither detects nor repairs it: `v0.8.2` adds a Check warning and the description with the
+  node-side steps to [docs/managed-services.md](docs/managed-services.md). Not reproduced on a lab.
+- **Seed ISOs of servers created before `v0.8.0` are never swept (O2).** A server's seed ISO
+  (`pcseed-v1-<...>.iso` on the provider's seed store) is deleted with its server only when its record carries the
+  cluster and storage identity, which is recorded for servers created on v0.8.0 or later
+  (`internal/cloud/pve/seed.go`). For a server created on an earlier release the record has none: when that server
+  is deleted, the API logs `seed cleanup pending ... original cluster/storage identity was not available; operator
+  inspection required`, and the ISO stays on the store for good (seen on a lab after an upgrade, and again in the
+  lab round of this release). It holds the
+  server's user data. Clean it up by hand once its server is deleted, as root on a node: list the seed ISOs
+  (`pvesm list <seed store> --content iso | grep pcseed-v1-`); one that is older than a day and that no VM's config
+  names any more (`grep -l <file name> /etc/pve/nodes/*/qemu-server/*.conf` prints nothing) is such a leftover:
+  `pvesm free <volume>`. Not verified on a lab: the hand cleanup, that a server created on v0.8.0 or later gets the
+  identity, and the sweep that follows.
+
+## [0.8.0] - 2026-11-17
+
+A feature release on top of `v0.7.0`: the managed-services platform (P3, ADR 0009). The platform is off
+by default.
+
+- **Managed services from the operator console** (System → Managed services, `/platform`). The page and
+  its API (`/api/v1/admin/platform/installations`) install, repair and remove a platform on your Proxmox VE
+  cluster as a durable job: a seed VM, a platform Kubernetes cluster, Kamaji, CloudNativePG and the two
+  providers. What a run applies comes from a bill of materials that ships in the release
+  (`deploy/platform/platform-bom.yaml`, `0.8.0`): every chart, image and download with an exact version and
+  a digest, compared with the registries in CI and again on the release tag. On the Docker Compose install
+  the switch is `./proxcloud-up.sh install --managed-services` (it implies `--template-updates`). There is
+  no upgrade from one BOM to another yet (`bom_unsupported`). Operator guide:
+  [docs/managed-services.md](docs/managed-services.md).
+- **Managed Kubernetes on Kamaji**: node group replicas are placed by free capacity on sites without
+  shared storage (cluster chart `proxmox-kamaji-cluster` 0.1.13), and a cluster that is not there yet says
+  why, per node group, with a "needs attention" state (`docs/managed-k8s.md`).
+- **Managed databases** on the platform cluster: placement on the `dbaas` node group and an egress fence
+  (`docs/managed-dbaas.md`). No tenant database is recorded healthy on a lab; see what was verified, below.
+- **Chart mirror**: the nine third-party charts of the BOM are served from
+  `ghcr.io/mutex-solutions/charts-mirror` by a CI flow of their own (`docs/ci-release.md`, "Chart mirror").
+- **Template updates: publish a version on all nodes**, for sites that keep a copy of a Kubernetes node
+  image on every node (`docs/template-updates.md`).
+- **Fixed Ubuntu 26.04 VM images.** Every `proxcloud-vm-ubuntu-2604` and `proxcloud-vm-ubuntu-2604-k8s`
+  image exported before the fix can come up with a read-only root filesystem after a reboot (a stale
+  ext4 orphan-file field). The four images were exported again with the fix; the Kubernetes node images
+  also set the AppArmor sysctl a PostgreSQL container needs on kernel 7.0.0-42 and newer. The affected tags
+  stay in the registry (Fixed).
+- **Security:** the portal token can create Proxmox API tokens for `capmox@pve` and `csi@pve` only (it
+  could for every user of the cluster, `root@pam` included), a node group's `imageId` is no longer taken
+  from a request, and ArgoCD's `default` project is locked on installer-built services clusters
+  (Security).
+
+Upgrading from `v0.7.0`. Read the entries named here before the upgrade; the exact steps are in the
+guides they link.
+
+- **Docker Compose host:** check out the tag and run `./proxcloud-up.sh upgrade v0.8.0`
+  (`deploy/compose/README.md`, "Upgrade"). Managed services stay off unless you install with
+  `--managed-services`.
+- **Ubuntu 26.04 templates imported before the fix** (the **Imported templates** tab shows the digest;
+  the affected tags and digests are listed in `docs/public-vm-sanitization.md`): import the fixed tag,
+  publish it, then withdraw the affected one. Servers and Kubernetes nodes already cloned from an affected
+  template keep the defect: test and repair them as `docs/template-updates.md` says ("Known issue: Ubuntu
+  26.04 images exported before the orphan-file fix"), and do not reboot a VM that has logged the error.
+  Ubuntu 24.04 images are not affected.
+- **Sites with managed Kubernetes** (the mint grant, on a `v0.7.0` site only where it was set up: an
+  installer site in split mode, or one that ran the managed-services script of a build of `main`): run
+  `make upgrade` on the installer site, or the managed-services script again as root on a node, once per
+  portal token. Until then the preflight row `mint-scope` fails and Test connection warns. Managed
+  Kubernetes now needs `libpve-access-control` 9.2.1 or later on every node, which the product does not
+  check (Security; `docs/proxmox-permissions.md`, "An existing site").
+- **Installer-built services clusters:** the next run of stage 50 (`make install`) locks ArgoCD's
+  `default` project and first stops on any Application still in it (Security). Stage 10 adds narrower rows
+  for the CAPMOX and CSI tokens and leaves the broad ones for the operator to remove (Changed).
+- **Behaviour changes:** an `imageId` sent for a node group is ignored (Security); a tenant network in a VLAN zone is written and answered without DHCP and SNAT,
+  and asking for either is a `400`; a project's "Delete now" answers `409` while the job scheduler is off;
+  an `UPGRADE` of a tenant cluster on a provider that offers no version is refused (Fixed).
+- **A platform installed from a `dev-<sha>` build of `main`** is refused by this release
+  (`bom_unsupported`): keep the build that installed it, or Remove and install again
+  (`docs/managed-services.md`, "Not implemented yet").
+
+Verified on a lab: the managed path ran on builds of `main` on one lab Proxmox VE cluster, the last
+round on 2026-11-17 (`cb2f052`). The install finished twice, the second time in one run without a Retry
+on cluster chart 0.1.13 and platform chart 0.1.2. Remove of a ready platform and Remove from a failed
+stage 7 passed. A tenant cluster on a network of a VLAN zone had three workers Ready 12 minutes after the
+create, and a scale-up and scale-down placed and removed one replica. Publish on all nodes published two
+nodes. On a seed built from the fixed image two clean reboots passed, and one restore of the seed over
+itself passed. A seed credential rotation was measured. An API restart in stages 7 and 8 of an apply with
+nothing new to write resumed, and a cancel followed by Retry passed. The record, row by row, is in the
+operator guide, section [Not verified on a lab yet](docs/managed-services.md#not-verified-on-a-lab-yet).
+
+**Not** verified: anything on the published artifacts of this release (the lab used builds of `main`;
+`--managed-services` on a Compose host against a published release was not run). The lab checks L0 to
+L11 of the design are not recorded as passed. No tenant database became healthy on the lab's first
+end-to-end run, and none is recorded healthy since, on the fixed node image either. Also not run: an API
+restart in stages 2, 3 and 9 of a real install, the failure drills, the scheduled seed backup job and its
+pruning, a restore from an archive older than a credential rotation, the mint grant on the group and its
+migration on a Proxmox cluster, an upgrade of a tenant cluster, the console dialogs of publish on all
+nodes, an installer or Helm install of this release, and an install on a single-node Proxmox cluster.
+Everything `v0.5.0` to `v0.7.0` say is not verified still holds.
+
+The entries below were written when each change merged, and a later entry corrects an earlier one. Where an entry says the BOM stays `0.8.0-dev`, holds a `pending` digest or
+a `0.0.0+` version, or names chart 0.1.11, 0.1.12 or `proxcloud-platform` 0.1.0 or 0.1.1, that was the
+state at that merge: this release's BOM is `0.8.0`, has no `pending` digest, and pins
+`proxmox-kamaji-cluster` 0.1.13 and `proxcloud-platform` 0.1.2. Where one says a switch or a function is
+inert because nothing reads or calls it yet (`PROXCLOUD_PLATFORM_ENABLED`, `MarkTemplateGone`, the
+renderers), the later entries add the caller. Where one says nothing was installed from the fixed images
+on a lab yet, lab round C (2026-11-17) did so.
+
+### Added
+
+- **Template updates: publish a version on all nodes** (`docs/template-updates.md`, admin console System > Template
+  updates). A site without shared storage needs a copy of a Kubernetes node image on every node, and each copy had to
+  be imported, smoke-tested and published by hand. **Publish on all nodes…** on a version's row does it for every node
+  of one Proxmox provider: `GET /admin/template-updates/publish-all` (`admin:service:read`) reports the state per
+  node, `POST` (`admin:service:manage`, audited) advances one step. A step publishes every node whose smoke test
+  passed, through the existing publish with all its gates, then starts at most one import or one smoke test, and
+  only when no import and no smoke test of that provider is queued or running. The open dialog drives it (it reads
+  every 15 s); closing it pauses. A failed import or smoke test is not repeated, nothing is withdrawn, a node without
+  the provider's import storage or the default profile's storage is skipped with the reason, and a failed node keeps
+  its older published copy. The report carries the `config.cluster.versions` line, which the operator still copies
+  by hand, and warns while it covers fewer nodes than publish another Kubernetes version or while a node is down
+  (its copy cannot be read). An advance that published a node and then cannot start the next import still answers
+  the report, with the error in it, so the publish is shown and audited. Lab round C (2026-11-17, main cb2f052):
+  two advances published two nodes, one at a time, each once its copy's smoke test had passed; the report and the
+  versions line were right; nothing was imported; the smoke clone upgraded no package. Not verified on a lab: an
+  import started by it, a smoke test started by it and so its one-job-at-a-time rule under contention (both copies
+  carried a failed smoke test, which it does not repeat, and were smoke-tested from their rows by hand, one after
+  the other), and the console dialog.
+
+- **Managed Kubernetes: node group replicas are placed by free capacity** (cluster chart `proxmox-kamaji-cluster`
+  0.1.13, `docs/managed-k8s.md`). On a site without shared storage a node group is one MachineDeployment per node
+  that holds the image, and the chart split the count evenly, so a full node still got its share and its machines
+  hung. ProxCloud now decides the split and stores it (`machinePlacement`): a new replica goes to a node that holds
+  the image (its template is still on that node), has the cluster's storage with room for the disk (storage
+  headroom), stays under the CPU overcommit and
+  has the memory free; among those the node with the fewest replicas of the group, then the most free memory. It is
+  decided at create, scale-up and upgrade, and is stable: running workers never move, only the difference is placed
+  or removed. Workers that are decided and not cloned yet count (memory, CPU and root disk), and decisions on one Proxmox provider run one at a
+  time. Scale-down takes a stuck replica first and empties a node last. A request that does not fit answers 409
+  with how many fit, before anything is reserved. The console warns when a group is scaled below the number of
+  hosts it runs on (volumes on a host's local storage stay there). A cluster on chart 0.1.12 or older is unchanged;
+  one moved to 0.1.13 renders the same objects until its node groups change. Existing sites get it only after the
+  operator sets the provider's `chartVersion` to 0.1.13 and bumps each cluster. Chart 0.1.13 is published (tag
+  `proxmox-kamaji-cluster-v0.1.13`) and the platform BOM pins it by digest, for the platform cluster (whose render
+  is the same as with 0.1.12) and for new tenant clusters: a managed-services platform installed from this BOM
+  registers its Kubernetes provider with `chartVersion` 0.1.13. Lab round C (2026-11-17, main cb2f052, a fresh
+  install from this BOM): the placement was stored and rendered (one MachineDeployment per node with the decided
+  replicas), three workers were Ready 12 minutes after the create, a scale-up to four and back to three placed and
+  removed one replica and left the other nodes' workers alone, and a node group and a second cluster that did not
+  fit were refused with 409 and the count that fits, with nothing minted or written. The round also found that the
+  free memory was read without the platform's own VMs (F58, under Fixed). Not verified on a lab: an upgrade, a
+  cluster moved from chart 0.1.12, and the console pages.
+
+- **Managed Kubernetes: why a cluster is not there yet, and "needs attention"** (`internal/cloud/kamaji/progress.go`,
+  `docs/managed-k8s.md`). A cluster whose provisioning broke half-way used to read PROGRESSING for ever with no
+  reason. The status sync now reads what Cluster API and CAPMOX report per worker (Machine, ProxmoxMachine) and on
+  the provider access (ProxmoxCluster) and stores, per unsettled node group, `progress = {code, since, machines,
+  attention}`, and for the cluster `attention = {code, since}`. Eleven reason codes (a machine that never joined, a
+  clone that is retried, one CAPMOX gave up on, no capacity on the host, a refused token, a control plane that never
+  came up, and the plain steps); the tenant gets a fixed text per code and what to do, never the upstream message.
+  A group or control plane without progress for a bounded time (15 to 90 min by state) needs attention, shown as an
+  amber chip on the list and the cluster page; it is recomputed at every sync and clears by itself, and
+  `cluster.status` is unchanged. The node group table has a Status column. Operators get the full detail in the
+  admin console (**Machines** on a cluster's row of the Kubernetes provider page;
+  `GET /admin/service/{id}/k8s-clusters/{clusterId}/machines`, `admin:service:read`), with credentials cut out of
+  the upstream messages. The sync needs read access to `machines`, `proxmoxmachines` and `proxmoxclusters`:
+  `deploy/mgmt-cluster/rbac.yaml` and chart `proxcloud-platform` 0.1.2 grant it. An installer-built site must re-apply
+  `rbac.yaml`; until then the new fields are absent and nothing else changes.
+  Chart 0.1.2 is published (tag `proxcloud-platform-v0.1.2`) and the platform BOM pins it by digest for `capi`,
+  `capi-tenant` and `platform`, so a new managed-services install gets the access. No entry has `upgradeFrom`: no
+  release upgrades between BOMs, so a platform installed from the previous BOM is refused (`bom_unsupported`) and
+  keeps charts 0.1.12 and 0.1.1 until a Remove and a new install. On it the operator can set the Kubernetes
+  provider's `chartVersion` to 0.1.13 by hand; the ClusterRole is kept by the platform's ArgoCD Application
+  (self-heal), so re-applying `rbac.yaml` is no way to the access there. Lab round C (2026-11-17, main cb2f052):
+  the codes `provisioning`, `creating_vm`, `starting_vm`, `node_not_ready` and `not_joined` showed in the
+  documented order; a worker on a network without a router read `not_joined` and its node group's
+  `progress.attention` turned true at the first sync after the 15-minute bound, with `cluster.attention` absent as
+  defined; the admin machines route gave the conditions with no secret and nothing of another cluster. Not verified
+  on a lab: attention clearing by recovery (that cluster was deleted), the other codes, `cluster.attention`, and
+  the console pages (chip, Status column, Machines dialog).
 
 - **Operator documentation for managed services from the console** (`docs/managed-services.md`, ADR 0009): when to
   use this path and when the installer's split mode, the prerequisites, the Proxmox identities script (what it
@@ -412,6 +926,144 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The provider sync retires the rows of servers and volumes that are gone, on the documented Proxmox grants
+  (F60)** (`internal/cloud/pve/vm_inventory.go`, `docs/vm-inventory-safety.md`, `docs/proxmox-permissions.md`).
+  Before a cached SERVER or VOLUME row was retired, the sync asked the provider's token to show that it sees every
+  guest of the cluster: `Sys.Audit` on `/access`, propagated `VM.Audit` on `/vms`, `/pool` and every ACL path under
+  them. The documented grants have none of that by design (no ACL on `/vms` or `/access`; `NoAccess` on the fenced
+  pools of managed services), so the proof failed at every sync on every such install: the log read `provider
+  visibility unverified; cached inventory preserved`, no row was ever retired, and the project's server list was
+  not updated at all. On the lab the worker of a deleted cluster stayed ACTIVE in the tenant's list and counted in
+  the project while its VMID already belonged to another machine. The proof is now what it was after: the VM of
+  the row is gone. A row whose VM is no longer in its project pool is retired when `GET /cluster/nextid?vmid=`
+  says no guest in the cluster holds the VMID (Proxmox answers that from its whole guest list, whatever the token
+  may audit), or when the token reads the VM that holds it in another pool and its SMBIOS UUID is not the row's
+  (Proxmox hands out the lowest free VMID, so a VM of another project takes the number). A row whose VMID now
+  belongs to another VM of the same pool is replaced from the VM the token read. The guard against inventory loss
+  is kept and no longer depends on an ACL: a VMID held by a guest the token cannot see (a VM moved out of the
+  project pool, hidden by an ACL, in a pool the token has `NoAccess` on) keeps the row, and so does one the token
+  sees elsewhere with the row's UUID. The warning now carries the cause and names the path (`/pool/<pool>` when
+  the token lost `VM.Audit` on the project pool, else `/vms/<id>`). No grant changes; do not add a `/vms` ACL.
+  Known limit: when a guest the token cannot see takes the VMID of a deleted VM before the next sync (on a
+  managed-services install, a machine of the platform), the token cannot tell it from its own VM, the row stays
+  and that project's sync stops at it until the guest is gone or the server is deleted through the API (traced
+  in the code for a plain server and for a cluster worker's row, which takes the same route; not run). For that
+  case the warning no longer ends with "repair token permissions": the error carries the cause and the guide
+  says there is no grant to repair. `Client.VMIDFree` now counts as free only a 2xx whose `data` is the id that
+  was asked; null, an empty body or another value is an error and keeps the row (it was "any 2xx", and it is the
+  only evidence of absence here; the template updates' check before an import is removed uses it too). The
+  automatic release of a retired server's public address still asks for the view of every guest and so still never
+  happens on these grants (unchanged; `docs/vm-inventory-safety.md`). Integration tests against a fake Proxmox API
+  that answers as the documented token is answered; not run on a lab.
+
+- **Publish on all nodes says when it is blocked (O3)** (`internal/templateupdates/publishall.go`,
+  `docs/template-updates.md`, `docs/api.md`). A copy whose smoke test had failed, or whose import or publish had
+  failed, ended the action with `next: done` and `complete: false`: an advance changed nothing and the dialog read
+  "Nothing more to do". On the lab two copies with an eight-hour-old failed smoke test, whose cause was long fixed,
+  stopped it that way. `next` is now `blocked` in that state, the `smoke_failed` node's `message` says to run the
+  copy's smoke test again from its row under Imported templates, and the dialog says "Blocked" and goes on by
+  itself once the test has passed. Nothing is retried automatically; a refused publish (`publish_failed`) is
+  tried again by the next post, a smoke test or an import never is. Clients that only know `done` must treat
+  `blocked` as "stop posting". Tests on PostgreSQL with a fake Proxmox; not run on a lab, the dialog not opened.
+
+- **Guides corrected from lab round C (2026-11-17, main cb2f052).**
+  `docs/managed-k8s.md` and `docs/proxmox-permissions.md` now say how long a deleted cluster's Proxmox token lives
+  (F57): the sync's sweep revokes it, not the delete, because CAPMOX deletes the workers with it; with the
+  scheduler that is up to one 15-minute sync after the cascade, and for a cluster deleted in its first 30 minutes
+  the first sync after its marker is 30 minutes old (the guard for a create that has not applied its Application
+  yet counts from the creation); without the scheduler the token and its ACL rows stay until an operator starts a
+  provider sync. The code is unchanged: the delete answers before the cascade runs and nothing but the sweep sees
+  it finish. They also say that Proxmox prints `ignore invalid acl token` on every CLI call after a revoke until
+  `user.cfg` is next written, which is harmless (O1). `docs/api.md` and `docs/managed-k8s.md` say that a stalled
+  worker is reported on `node_groups[].progress.attention` and never on `cluster.attention`, that a client reads
+  both, and that attention is evaluated at a provider sync, so up to one interval late (O5). `docs/managed-k8s.md`
+  says that a create or a scale-up clones all new workers at the same time and what that did to other VMs on slow
+  storage. `docs/managed-services.md`: the seed restore sequence and the clean-stop release were both run on the
+  lab and passed, so the guide no longer says they were not; it states what was run (a healthy seed restored over
+  itself from a three-minute-old zstd archive; a restart 33 ms into stage 8 of a re-check apply) and what was not
+  (an archive older than a credential rotation or a machine change, `qm stop` on a dead guest, `--unique`, a boot
+  store other than ZFS, the scheduled backup job and its pruning, a stop with a slow call in flight). The restore
+  steps gain a pool membership check, the `vmgenid` line that changes, the times to expect, what keeps working,
+  the saved firewall copy to delete, and the audit-log check's blind spot for a rotation made before the
+  `ROTATE_CREDENTIAL` entry existed. The backup section cites the measured zstd backup (2.39 GiB in 1 minute 45
+  seconds) and warns, where it tells the operator to back the seed up, that the archive holds the seed's secrets
+  and that `vzdump` wrote it with mode 644 on the lab's shared export.
+
+- **Placement counts the memory of VMs the provider's token cannot see (F58)** (`internal/cloud/pve/scheduler.go`
+  `CommittedMem`, `docs/managed-k8s.md` section 9). The node choice for a server and for Kubernetes workers summed
+  the configured memory of the VMs `GET /cluster/resources` returns, and Proxmox leaves out every VM the token may
+  not audit. On a managed-services install those are the platform's own machines (the token has `NoAccess` on
+  `proxcloud-seed` and `proxcloud-system` by design), so their nodes read as free: on the lab a worker went to the
+  fullest node and a refusal said "2 of 8" 8 GiB workers fit where none did. Memory taken on a node is now the
+  larger of the configured memory of its running visible VMs and the node's own used memory (`mem` of `GET /nodes`,
+  already read, `PVEAuditor` on `/nodes`, no new permission), plus the configured memory of every visible VM that
+  does not run (stopped, or cloned and not booted), the workers decided and not built yet and the picks of the
+  request. The scale-down order reads the same figure. Running workers do not move.
+  **This changes the free memory of every site, not only managed-services installs:** wherever a node's used
+  memory is above the configured memory of its running visible VMs (the host itself, the ZFS ARC, LXC containers,
+  VMs of another owner), the node now reads less free than before. A 64 GiB ZFS node with a 32 GiB ARC and 16 GiB
+  of running VMs read 48 GiB free and now reads about 30, so a server create, a failover target choice or a worker
+  placement that passed can answer `409`. The figure is never below what was computed before. Operator's remedy
+  for the ARC: cap it (`zfs_arc_max`). Known limits, in the guide: a hidden VM counts with what it uses now, not
+  its configured size, and its vCPUs are not counted (the installation record is not read by the placement); and
+  on a node with hidden VMs a running visible VM that uses less than its configured memory counts with what it
+  uses, so several creates in a row can still overfill such a node once the earlier VMs have booted. The guide no
+  longer says every VM's configured size is counted. Unit tests only, one of them against a fake Proxmox API; not
+  run on a lab.
+
+- **`SET_NODE_GROUPS` takes a node group without `rootVolumeGiB` when the provider has a default (F59)**
+  (`internal/platform/project/cloud_kamaji.go`). The shape check ran with empty provider defaults, so it answered
+  `400 rootVolumeGiB is required (no provider default configured)` for a group the create accepts, before the
+  default was ever filled in. It now gets the provider's default root disk size. Without a default it still
+  answers 400. Because that request now passes, a group that already runs and is sent without `rootVolumeGiB` keeps
+  the root disk size it has (`kamajiRootGiB`, from the cached cluster row) instead of falling back to the default:
+  another size would change the machine spec and replace the group's workers. Unit tests; not run on a lab, and
+  the worker replacement itself was not observed.
+
+- **Managed Kubernetes guide: which worker a scale-down removes (O4)** (`docs/managed-k8s.md` section 9).
+  ProxCloud decides how many replicas each node loses; which machine of that node goes is Cluster API's choice,
+  and on the lab it was the older one. The guide said so nowhere. The chart is unchanged.
+
+- **Seed backup and restore, findings of the lab run (F52 to F55)** (`docs/managed-services.md`, the Managed services
+  page, ADR 0009 A7, `internal/platformlife/runner.go`). The guide said only "restore the seed VM from your backup",
+  and Proxmox refuses a restore over the protected seed: it now gives the sequence (shut down, protection off,
+  `qmrestore` over the same VMID without `--unique`, check protection, MAC and firewall file, start, apply). The
+  restore itself has not been run on a lab, only the refusal was seen. The printed backup job gets
+  `--compress zstd --prune-backups keep-daily=7` (it wrote one uncompressed archive a day and removed none). The
+  advice on the backup store is now "no API token other than the operator's may read the archive", with the checks
+  for `Datastore.Allocate` and for `Datastore.AllocateSpace` with `VM.Backup`, and says that on a file store the
+  archive is also a readable file. ADR 0009 A7 no longer says the console shows attention until a backup job exists.
+  An API that stops cleanly during a platform run gives the job back at once, so the next start resumes without
+  waiting out the one-minute lease and without spending an attempt (covered by a test, not by a lab run).
+
+- **Seed restore and clean stop, review findings** (`docs/managed-services.md`, the Managed services page,
+  `cmd/api/main.go`). The guide now says that a seed backup taken before **Replace the seed credential** cannot be
+  restored from (the restored seed refuses the stored credential and none can be made; read from the code, not tried
+  on a lab): back up by hand after every rotation and take only an archive newer than the last `ROTATE_CREDENTIAL`
+  entry. The restore sequence keeps a copy of the seed's firewall file and puts it back when the restore lost it. The
+  check of who can read the archive goes through every token of every user, since ACL rows on pools, users and
+  groups also give rights. The API cancels a platform run at the stop signal, before its servers drain, so the job
+  is given back within the container's stop grace period more often; the guide names that condition. Not run on a
+  lab: the restore, and the clean stop.
+
+- **Findings of the managed-services lab run (F42 to F51).** A project's "Delete now" is refused with a `409` while
+  the job scheduler is off, instead of leaving the project `DELETE_IN_PROGRESS` for good with an organization that can
+  not be deleted (the teardown is a scheduler job; `deploy/compose/README.md`). A tenant network in a VLAN zone is
+  written and answered without DHCP and SNAT, which Proxmox does not do there (also one made before this release), and asking for either is a `400`; the
+  guides say that the site's router is its gateway. The template smoke test sets `ciupgrade=0` on its clone, so it no
+  longer needs a package mirror on the smoke network; keeps cloud-init's own error in the record when it fails; and
+  names a disk a destroy task left behind in a warning (it is freed only where the portal token holds
+  `Datastore.Allocate` on the store, which the documented rights do not include; also when the attempt that started
+  the destroy did not see it end). The images a platform run imports
+  are no longer smoke-tested automatically beside the build (start the test by hand before a Publish). The seed ISO of
+  a live server no longer logs `seed artifact cleanup pending` at every sync: the store's identity is read from the
+  storage list the portal token may read, and an attached seed is not a cleanup candidate. A finished Remove keeps the
+  VMID of each machine it deleted, and the live read no longer says "the record still says ready" of a failed
+  installation. Guides: the seed's read-only root is repaired by the documented orphan-file sequence, not a plain
+  `e2fsck -f` (`docs/managed-services.md`, run on a lab), and `docs/managed-dbaas.md` says what `allowedCidrs` can
+  isolate when tenant networks use SNAT (a node's address admits every tenant behind it: the VM's node in a `simple`
+  zone, the exit node in an EVPN zone).
+
 - **Defect in the published Ubuntu 26.04 VM images: the root filesystem can go read-only at a reboot.** Every
   `proxcloud-vm-ubuntu-2604` and `proxcloud-vm-ubuntu-2604-k8s` image exported before this fix has an ext4
   superblock that names inode 12 as the orphan file while the `orphan_file` feature is off; once a VM stores a file
@@ -419,9 +1071,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   seed VM). The export sanitizer removed only the journal and left e2fsck to drop the feature, which keeps the
   field; it now removes `orphan_file` with the journal (`images/vm_sanitize.py`). The sanitize stage and the
   read-only postscan of the final export refuse any ext4 partition with such a superblock or with an unclean
-  `e2fsck -fn`. The six published tags (listed in `docs/public-vm-sanitization.md`) stay affected, and
-  `deploy/platform/platform-bom.yaml` still pins two of them as seed and Kubernetes node image: the re-export and
-  the re-pin must land before `0.8.0` is tagged. Ubuntu 24.04 images are not affected. A VM that has logged the
+  `e2fsck -fn`. The ten tags published before the fix (listed in `docs/public-vm-sanitization.md`) stay in the
+  registry and stay affected. The four images were exported again on 2026-11-16 from commit `72f0eaa`:
+  `ubuntu-2604-os-20261116170652-72f0eaa3d0d4`,
+  `ubuntu-2604-k8s-1.35.10-20261116181221-72f0eaa3d0d4`,
+  `ubuntu-2604-k8s-1.36.6-20261116194043-72f0eaa3d0d4` and
+  `ubuntu-2604-k8s-1.37.2-20261116210716-72f0eaa3d0d4`; on each published disk the field is 0 and
+  `e2fsck -fn` is clean. `deploy/platform/platform-bom.yaml` now pins the first two as seed and Kubernetes node
+  image. On an existing portal: import the fixed tag, publish it, then withdraw the affected digests; VMs already
+  cloned from an affected template still need the test and repair. A managed-services platform installed from
+  the earlier BOM runs on affected images and is not upgraded by this one (`bom_unsupported`): repair its VMs,
+  or remove it and install again. Ubuntu 24.04 images are not affected. A VM that has logged the
   error must not be rebooted: its boot-time `e2fsck -p` can clear the file in inode 12 and stop in the initramfs
   (measured on a scratch image only); shut it down and repair it offline. Test and repair:
   `docs/template-updates.md`.
@@ -463,10 +1123,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   break-glass kubeconfig outlives one. Kubernetes node images of Ubuntu 26.04 are built with
   `kernel.apparmor_restrict_unprivileged_unconfined = 0`: with Ubuntu's default a container's processes cannot
   signal each other on kernels from 7.0.0-42 (Launchpad 2172640) and no PostgreSQL database comes up; the
-  export's cold-boot check refuses a Kubernetes image without it. **The BOM still names the node image built
-  before this change**: a new one must be built, published and shown on a lab before a BOM names it. Not
-  changed: the seed image, and anything about the seed's filesystem error after a reboot, whose cause is not
-  known.
+  export's cold-boot check refuses a Kubernetes image without it. The node images with the setting are published
+  (`ubuntu-2604-k8s-1.35.10-20261116181221-72f0eaa3d0d4`, and the 1.36.6 and 1.37.2 images of the same day), and the
+  BOM names the 1.35.10 one; the file was read from each published disk, and no platform was installed from
+  them on a lab yet. The seed image keeps Ubuntu's default for this setting. The seed's filesystem error after
+  a reboot is the orphan-file defect of the entry above.
 
 - **Managed services: a seed that restarts no longer ends the run, and what the first finished lab run found**
   (M0, attempt 5). The seed's k3s restarted under the disk load of stage 7's clones; for some seconds its API
@@ -640,6 +1301,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Managed Kubernetes: a node group's `imageId` is no longer taken from a request.** It went into the cluster's
+  values as it came, so a caller of the API could pin a group's workers to Proxmox nodes and template VMIDs of its
+  choice, published or not. The image now always comes from the provider's version matrix and the group's
+  `imageVariant`. The console never sent the field; an API client that did gets the provider's image instead.
+
 - **The portal token can create API tokens for `capmox@pve` and `csi@pve` only, no longer for every Proxmox user,
   and holds no `Permissions.Modify` on `/pool`**
   (`internal/cloud/pve/access.go`, the managed-services setup script, installer stage 10). The mint grant of managed
@@ -689,6 +1355,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider, to a named project, then run it again. Checked with `ansible-playbook --syntax-check`, the offline test
   (which runs the listing against a stub `kubectl`) and the console e2e spec only; not applied to a running
   cluster.
+
+### Known issues
+
+- **Seed ISOs of servers created before this release are never swept (O2).** A server's seed ISO
+  (`pcseed-v1-<...>.iso` on the provider's seed store) is deleted with its server only when its record carries the
+  cluster and storage identity, which is recorded for servers created on v0.8.0 or later
+  (`internal/cloud/pve/seed.go`). For a server created on an earlier release the record has none: when that server
+  is deleted, the API logs `seed cleanup pending ... original cluster/storage identity was not available; operator
+  inspection required`, and the ISO stays on the store for good (seen on a lab after an upgrade). It holds the
+  server's user data. Clean it up by hand once its server is deleted, as root on a node: list the seed ISOs
+  (`pvesm list <seed store> --content iso | grep pcseed-v1-`); one that is older than a day and that no VM's config
+  names any more (`grep -l <file name> /etc/pve/nodes/*/qemu-server/*.conf` prints nothing) is such a leftover:
+  `pvesm free <volume>`. Not verified on a lab: the hand cleanup, that a server created on this release gets the
+  identity, and the sweep that follows.
 
 ## [0.7.0] - 2026-11-15
 

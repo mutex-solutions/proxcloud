@@ -128,8 +128,8 @@ class ReleaseContractTests(unittest.TestCase):
     def test_chart_images_and_installer_pin_exact_same_stable_release(self):
         chart = read_yaml("deploy/charts/proxcloud/Chart.yaml")
         versions = read_yaml("installer/playbooks/group_vars/all/versions.yml")["pc_versions"]
-        self.assertEqual(chart["version"], "0.7.0")
-        self.assertEqual(chart["appVersion"], "v0.7.0")
+        self.assertEqual(chart["version"], "0.8.1")
+        self.assertEqual(chart["appVersion"], "v0.8.1")
         self.assertEqual(versions["proxcloud"], chart["appVersion"])
         pinned = policy.release_policy(versions["proxcloud"])
         self.assertEqual(pinned["version"], chart["version"])
@@ -148,7 +148,7 @@ class ReleaseContractTests(unittest.TestCase):
 
     def test_managed_chart_versions_stay_independent(self):
         self.assertEqual(read_yaml("deploy/charts/database-cluster/Chart.yaml")["version"], "0.5.1")
-        self.assertEqual(read_yaml("deploy/charts/proxmox-kamaji-cluster/Chart.yaml")["version"], "0.1.12")
+        self.assertEqual(read_yaml("deploy/charts/proxmox-kamaji-cluster/Chart.yaml")["version"], "0.1.13")
 
     def test_chart_goldens_render_with_the_helm_that_made_them(self):
         # The goldens compare helm template output byte for byte; an unpinned setup-helm takes the latest Helm.
@@ -186,6 +186,10 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(gate["permissions"], {"contents": "read"})
         step = next(s for s in gate["steps"] if s.get("run") == "python3 .github/scripts/bom_verify.py --release")
         self.assertEqual(step["if"], "github.ref_type == 'tag'")
+        # The BOMs of earlier releases, which the images embed for the platforms those releases installed.
+        previous = next(s for s in gate["steps"] if "deploy/platform/previous/*.yaml" in s.get("run", ""))
+        self.assertEqual(previous["if"], "github.ref_type == 'tag'")
+        self.assertIn('bom_verify.py --release --bom "$bom"', previous["run"])
         self.assertIn("bom-verify", jobs["build"]["needs"])
         self.assertEqual(jobs["release"]["needs"], "build")
         self.assertNotIn("secrets.", str(gate))

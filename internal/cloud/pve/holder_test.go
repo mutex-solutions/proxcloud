@@ -79,7 +79,7 @@ func TestCarrierKeptUnlessTheMoveStopped(t *testing.T) {
 				routes[moveStatus] = tt.poll
 			}
 			s := volCluster(t, cfgSharedUnused, writes, routes)
-			if err := s.AttachVolume(context.Background(), "p1", 101, sharedDisk, "103"); err == nil {
+			if _, err := s.AttachVolume(context.Background(), "p1", 101, sharedDisk, "103"); err == nil {
 				t.Fatal("want the attach to fail")
 			}
 			if len(writes["drop"]) != tt.wantDrop {
@@ -117,7 +117,7 @@ func TestNewHolderRemovesTheVMOnFailure(t *testing.T) {
 			fmt.Fprintf(w, `{"data":%q}`, volUPID)
 		},
 	})
-	if err := s.AttachVolume(context.Background(), "p1", 101, sharedDisk, "103"); err == nil {
+	if _, err := s.AttachVolume(context.Background(), "p1", 101, sharedDisk, "103"); err == nil {
 		t.Fatal("want the attach to fail")
 	}
 	if deletes != 1 {
@@ -222,7 +222,8 @@ func TestHolderOperationsTakeTheLock(t *testing.T) {
 		run       func(*Service) error
 	}{
 		{"attach", cfgSharedUnused, func(s *Service) error {
-			return s.AttachVolume(context.Background(), "p1", 101, sharedDisk, "103")
+			_, err := s.AttachVolume(context.Background(), "p1", 101, sharedDisk, "103")
+			return err
 		}},
 		{"delete", cfgLocalUnused, func(s *Service) error {
 			return s.DeleteVolume(context.Background(), "p1", 101, "local-zfs:vm-101-disk-1")

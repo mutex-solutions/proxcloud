@@ -11,7 +11,11 @@ type InventoryUntrustedError struct {
 }
 
 func (e *InventoryUntrustedError) Error() string {
-	return fmt.Sprintf("untrusted %s inventory (%s): %s; keeping cached inventory, restore provider visibility and retry", e.Type, e.ExternalID, e.Reason)
+	reason := e.Reason
+	if e.Err != nil { // the cause names the path or VMID the proof failed on
+		reason += ": " + e.Err.Error()
+	}
+	return fmt.Sprintf("untrusted %s inventory (%s): %s; keeping cached inventory, restore provider visibility and retry", e.Type, e.ExternalID, reason)
 }
 
 func (e *InventoryUntrustedError) Unwrap() error { return e.Err }

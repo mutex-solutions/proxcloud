@@ -1,8 +1,9 @@
 import { useMemo, useState } from "react"
-import { useMutation, useQueryClient } from "@tanstack/react-query"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { ColumnDef } from "@tanstack/react-table"
 import { toast } from "sonner"
-import { Copy, FolderTree, KeyRound, Maximize2, Plus, RefreshCw, ShieldCheck, Trash2 } from "lucide-react"
+import { Copy, FolderTree, KeyRound, Maximize2, Plus, RefreshCw, ShieldCheck, Trash2, TriangleAlert } from "lucide-react"
+import { Alert, AlertDescription } from "@/components/ui/alert"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { DataTable, sortableHeader } from "@/components/data-table"
 import { EmptyState } from "@/components/empty-state"
@@ -49,6 +50,18 @@ export default function FileSharesPage() {
   const rows = data ?? []
 
   const [createOpen, setCreateOpen] = useState(false)
+  // Asked when the dialog opens: the API knows whether this project's networks can reach the file server at all.
+  const warnings = useQuery({
+    queryKey: ["share-warnings", pid, scope.serviceId],
+    queryFn: () =>
+      apiFetch<{ result?: string[] }>(`/project/${pid}/cloud/action`, {
+        method: "POST",
+        cloud: scope,
+        body: { action: "LIST_SHARE_WARNINGS" },
+      }),
+    enabled: createOpen && !!pid && !!scope.serviceId,
+    select: (d) => (Array.isArray(d?.result) ? d.result.filter((w): w is string => typeof w === "string") : []),
+  })
   const [form, setForm] = useState({ name: "", protocol: "NFS", sizeGb: "10" })
   const [details, setDetails] = useState<CloudResource | null>(null)
   const [password, setPassword] = useState<string | null>(null)
@@ -183,6 +196,12 @@ export default function FileSharesPage() {
               NFS share.
             </DialogDescription>
           </DialogHeader>
+          {warnings.data?.map((w) => (
+            <Alert key={w} variant="destructive" data-testid="share-warning">
+              <TriangleAlert aria-hidden="true" />
+              <AlertDescription>{w}</AlertDescription>
+            </Alert>
+          ))}
           <div className="grid gap-3">
             <div className="grid gap-1">
               <Label htmlFor="sh-name">Name</Label>

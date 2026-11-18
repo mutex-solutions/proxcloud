@@ -117,16 +117,8 @@ func (x *acq) removeCluster(ctx context.Context) error {
 	}
 	// The workload answers: its volumes are read again, against the BOM that named its namespaces (the installed
 	// one, else this release's). Otherwise the recorded ones stand.
-	var bom *BOM
-	if cur, err := Current(); err == nil {
-		bom = cur.BOM
-	}
-	if ref := x.in.Status.BOM; ref != nil {
-		if b, ok := embeddedBOM(ref.SHA256); ok {
-			bom = b
-		}
-	}
-	if wl != nil && bom != nil {
+	bom, err := bomOf(x.in)
+	if wl != nil && err == nil {
 		if vols, err := platformVolumes(ctx, bom, wl); err == nil && !slices.Equal(vols, x.in.Status.Volumes) {
 			if err := x.record(ctx, func(_ *Run, in *Installation, _ *Secrets) { in.Status.Volumes = vols }); err != nil {
 				return err
@@ -161,8 +153,13 @@ func (x *acq) removeCluster(ctx context.Context) error {
 		var items []StageItem
 		for _, m := range machines {
 			name := str(m, "metadata", "name")
-			left = append(left, fmt.Sprintf("%s (%s)", name, vmText(vmids[name])))
-			items = append(items, StageItem{ID: name, State: "deleting", Message: vmText(vmids[name])})
+			vm := vmText(vmids[name])
+			// CAPMOX deletes the ProxmoxMachine before Cluster API lets go of the Machine: a VMID seen at an earlier look stays.
+			if i := slices.IndexFunc(x.run.Stages[x.si].Items, func(c StageItem) bool { return c.ID == name && c.State == "deleting" }); vmids[name] == 0 && i >= 0 {
+				vm = x.run.Stages[x.si].Items[i].Message
+			}
+			left = append(left, fmt.Sprintf("%s (%s)", name, vm))
+			items = append(items, StageItem{ID: name, State: "deleting", Message: vm})
 		}
 		if err := x.note(ctx, items...); err != nil {
 			return err

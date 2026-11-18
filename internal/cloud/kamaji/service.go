@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -200,8 +202,8 @@ func (s *Service) AbandonCluster(ctx context.Context, projectID, clusterID, comp
 // DeleteCluster removes the cluster: Application delete only (the resources-finalizer cascades
 // the rendered chart). The cloud credentials secret deliberately STAYS — the infrastructure
 // provider authenticates with it to delete the worker VMs during the cascade, so removing it here
-// would strand those cloud resources with stuck finalizers. FinalizeOrphans (sync-driven) reaps
-// the secret and GCs the namespace once the cascade has finished.
+// would strand those cloud resources with stuck finalizers. FinalizeCluster (the release job the delete
+// queues) or, as the backstop, the sync's sweep reaps the secret and GCs the namespace once the cascade has finished.
 // Idempotent (absent objects are success). Ownership-guarded: an Application without the
 // managed-by marker is NOT ours (a pre-proxcloud cluster or foreign app that happens to share the
 // name) — refuse rather than cascade-delete it.
@@ -230,7 +232,32 @@ func (s *Service) FinalizeOrphans(ctx context.Context, projectID string) (int, e
 	if err != nil {
 		return 0, err
 	}
-	return s.finalizeNamespace(ctx, ns, projectID, secrets)
+	pending, _, err := s.finalizeNamespace(ctx, ns, projectID, secrets, "")
+	return pending, err
+}
+
+// FinalizeCluster finishes ONE cluster whose delete was accepted (the release job, project.KamajiReleaseRunner): the
+// sweep's checks and release for that cluster alone, without the creation grace. The grace guards a create that has
+// not applied its Application yet; a delete is accepted only for a cluster whose Application was applied, so here an
+// absent Application means the cascade is over. done: nothing of the cluster is left to release (now, or because the
+// sweep was first). Not done with no error: the cascade is still running. An error (the management cluster does not
+// answer, the release failed) releases nothing further and is safe to retry.
+func (s *Service) FinalizeCluster(ctx context.Context, projectID, clusterID string) (done bool, err error) {
+	ns := NamespaceFor(projectID)
+	secrets, err := s.api.ListSecrets(ctx, ns, LabelProject+"="+projectID+","+LabelManagedBy+"="+ManagedByValue)
+	if err != nil {
+		return false, err
+	}
+	held := false
+	for _, sec := range secrets {
+		name := digStr(sec, "metadata", "name")
+		held = held || name == MarkerSecretName(clusterID) || name == CloudSecretName(clusterID)
+	}
+	if !held {
+		return true, nil
+	}
+	_, reaped, err := s.finalizeNamespace(ctx, ns, projectID, secrets, clusterID)
+	return reaped > 0, err
 }
 
 // FinalizeAllOrphans is the service-level orphan sweep, run once per sync cycle: it scans EVERY
@@ -254,7 +281,7 @@ func (s *Service) FinalizeAllOrphans(ctx context.Context) (int, error) {
 	var errs []error
 	for ns, secs := range byNS {
 		projectID := digStr(secs[0], "metadata", "labels", LabelProject)
-		p, err := s.finalizeNamespace(ctx, ns, projectID, secs)
+		p, _, err := s.finalizeNamespace(ctx, ns, projectID, secs, "")
 		pending += p
 		if err != nil {
 			errs = append(errs, err)
@@ -270,9 +297,11 @@ func (s *Service) FinalizeAllOrphans(ctx context.Context) (int, error) {
 // authenticates with this secret; reaping early would strand cloud resources). The namespace is
 // GC'd only on a pass that actually reaped something and verified nothing lives there anymore —
 // an idle project's bootstrap namespace is never touched.
-func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, secrets []map[string]any) (int, error) {
+//
+// only, when set, is FinalizeCluster's cluster: it skips the grace window, and every other cluster of the namespace is
+// left to the sweep and counted as pending, which keeps the namespace.
+func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, secrets []map[string]any, only string) (pending, reaped int, err error) {
 	var errs []error
-	pending, reaped := 0, 0
 	marked := map[string]bool{}
 	for _, sec := range secrets {
 		if cid, ok := strings.CutSuffix(digStr(sec, "metadata", "name"), markerSuffix); ok {
@@ -289,7 +318,11 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 				continue
 			}
 		}
-		if created, err := time.Parse(time.RFC3339, digStr(sec, "metadata", "creationTimestamp")); err == nil {
+		if only != "" && cid != only {
+			pending++
+			continue
+		}
+		if created, err := time.Parse(time.RFC3339, digStr(sec, "metadata", "creationTimestamp")); err == nil && only == "" {
 			if time.Since(created) < s.finalizeGrace {
 				// Possibly mid-create — the Application may not be applied yet. Counts as
 				// pending: teardown reads pending as "the cascade may still need the tenant".
@@ -299,7 +332,7 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 		}
 		app, err := s.api.GetApplication(ctx, s.cfg.ArgoNamespace, cid)
 		if err != nil {
-			return pending, err
+			return pending, reaped, err
 		}
 		if app != nil {
 			if dig(app, "metadata", "deletionTimestamp") != nil {
@@ -313,13 +346,27 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 		}
 		tcp, err := s.findTCP(ctx, ns, cid)
 		if err != nil {
-			return pending, err
+			return pending, reaped, err
 		}
 		mds, err := s.api.ListMachineDeployments(ctx, ns, "cluster.x-k8s.io/cluster-name="+cid)
 		if err != nil {
-			return pending, err
+			return pending, reaped, err
 		}
 		if tcp != nil || len(mds) > 0 {
+			pending++
+			continue
+		}
+		// A Machine outlives its MachineDeployment while CAPMOX deletes the VM, with the token the release revokes.
+		machines, err := s.api.ListCRs(ctx, capiGroup, capiVersion, "machines", ns, labelClusterName+"="+cid)
+		var ae *kamajik8s.APIError
+		if errors.As(err, &ae) && (ae.Status == http.StatusForbidden || ae.Status == http.StatusNotFound) {
+			// The ClusterRole of an older install (readProgress): the release's own look at the pool decides.
+			machines, err = nil, nil
+		}
+		if err != nil {
+			return pending, reaped, err
+		}
+		if len(machines) > 0 {
 			pending++
 			continue
 		}
@@ -360,12 +407,22 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 		if err != nil {
 			errs = append(errs, err)
 		} else if len(apps) == 0 {
-			if err := s.gcNamespace(ctx, ns); err != nil {
+			// The release above may have taken minutes (disks, a dataset): a create that wrote its marker meanwhile,
+			// with no Application yet, is not in the caller's snapshot either.
+			now, err := s.api.ListSecrets(ctx, ns, LabelProject+"="+projectID+","+LabelManagedBy+"="+ManagedByValue)
+			if err != nil {
 				errs = append(errs, err)
+			} else if !slices.ContainsFunc(now, func(sec map[string]any) bool {
+				name := digStr(sec, "metadata", "name")
+				return strings.HasSuffix(name, markerSuffix) || strings.HasSuffix(name, cloudSecretSuffix)
+			}) {
+				if err := s.gcNamespace(ctx, ns); err != nil {
+					errs = append(errs, err)
+				}
 			}
 		}
 	}
-	return pending, errors.Join(errs...)
+	return pending, reaped, errors.Join(errs...)
 }
 
 // RemoveProjectNamespace deletes the namespace of a project being torn down, which its bootstrap made whether or not it
@@ -552,13 +609,78 @@ func (s *Service) PatchClusterApp(ctx context.Context, clusterID string, mutate 
 // PatchClusterValues mutates the Application's helm values in place (UPGRADE, SET_NODE_GROUPS…):
 // same chart pin, same full re-apply.
 func (s *Service) PatchClusterValues(ctx context.Context, clusterID string, mutate func(values map[string]any) error) error {
+	return s.PatchClusterChartValues(ctx, clusterID, func(values map[string]any, _ string) error { return mutate(values) })
+}
+
+// PatchClusterChartValues is PatchClusterValues for a change that depends on the chart version the cluster is pinned
+// to (its own targetRevision, not the provider's pin for new clusters): what a chart does not read must not be written.
+func (s *Service) PatchClusterChartValues(ctx context.Context, clusterID string, mutate func(values map[string]any, chartVersion string) error) error {
 	return s.PatchClusterApp(ctx, clusterID, func(app map[string]any) error {
 		values, _ := dig(app, "spec", "source", "helm", "valuesObject").(map[string]any)
 		if values == nil {
 			return fmt.Errorf("kamaji: cluster %s: application carries no values", clusterID)
 		}
-		return mutate(values)
+		if err := mutate(values, digStr(app, "spec", "source", "targetRevision")); err != nil {
+			return err
+		}
+		// When the values last changed: the status sync counts a machine that is not made yet from here, not from
+		// ArgoCD's previous sync (progress.go).
+		meta, _ := app["metadata"].(map[string]any)
+		ann, _ := meta["annotations"].(map[string]any)
+		if ann == nil {
+			ann = map[string]any{}
+			meta["annotations"] = ann
+		}
+		ann[AnnotationChangedAt] = time.Now().UTC().Format(time.RFC3339)
+		return nil
 	})
+}
+
+// ClusterValues is one managed cluster's id and live chart values.
+type ClusterValues struct {
+	ID     string
+	Values map[string]any
+}
+
+// ListClusterValues lists the chart values of every cluster of this provider that is not being deleted: what each
+// one asks Proxmox for, whether its workers exist yet or not.
+func (s *Service) ListClusterValues(ctx context.Context) ([]ClusterValues, error) {
+	apps, err := s.api.ListApplications(ctx, s.cfg.ArgoNamespace, LabelService+"="+s.serviceID+","+LabelManagedBy+"="+ManagedByValue)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ClusterValues, 0, len(apps))
+	for _, app := range apps {
+		values, _ := dig(app, "spec", "source", "helm", "valuesObject").(map[string]any)
+		if id := digStr(app, "metadata", "name"); id != "" && values != nil && dig(app, "metadata", "deletionTimestamp") == nil {
+			out = append(out, ClusterValues{ID: id, Values: values})
+		}
+	}
+	return out, nil
+}
+
+// UnreadyReplicas counts, per node group and PVE node, the replicas a cluster's MachineDeployments ask for and do
+// not have ready. The chart names a MachineDeployment <cluster>-<group>-<node>.
+func (s *Service) UnreadyReplicas(ctx context.Context, projectID, clusterID string) (map[string]map[string]int, error) {
+	mds, err := s.api.ListMachineDeployments(ctx, NamespaceFor(projectID), labelClusterName+"="+clusterID)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]map[string]int{}
+	for _, md := range mds {
+		group := digStr(md, "metadata", "labels", labelNodeGroup)
+		node, ok := strings.CutPrefix(digStr(md, "metadata", "name"), clusterID+"-"+group+"-")
+		if group == "" || !ok {
+			continue
+		}
+		want, _ := intAt(md, "spec", "replicas")
+		ready, _ := intAt(md, "status", "readyReplicas")
+		if out[group] == nil {
+			out[group] = map[string]int{}
+		}
+		out[group][node] = max(want-ready, 0)
+	}
+	return out, nil
 }
 
 // SetChartVersion re-pins the cluster's Application onto a chart version (the "platform

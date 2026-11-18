@@ -88,12 +88,28 @@ export const locations: Location[] = [
     serviceName: "ProxCloud DBaaS",
   },
   {
+    serviceId: "svc-k8s-1",
+    region: "RegionOne",
+    displayName: "Hanoi Kubernetes",
+    resourceTypes: ["KUBERNETES_CLUSTER"],
+    provider: "kamaji",
+    serviceName: "ProxCloud Kubernetes",
+  },
+  {
     serviceId: "svc-sandbox-1",
     region: "RegionOne",
     displayName: "Hanoi Sandboxes",
     resourceTypes: ["SANDBOX"],
     provider: "sandbox",
     serviceName: "ProxCloud Sandboxes",
+  },
+  {
+    serviceId: "svc-nas-1",
+    region: "RegionOne",
+    displayName: "Hanoi File Shares",
+    resourceTypes: ["SHARE"],
+    provider: "truenas",
+    serviceName: "ProxCloud File Shares",
   },
 ]
 
@@ -109,6 +125,9 @@ export const uiMenu = {
       network: { enabled: true },
       database: { enabled: true },
       sandbox: { enabled: true },
+      kubernetes: { enabled: true },
+      dns: { enabled: true },
+      shares: { enabled: true },
     },
   },
 }

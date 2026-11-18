@@ -90,6 +90,18 @@ import or sandbox mirror is replayed only when its receipt shows it died mid-fli
 `Store.ClaimDead` re-acquires dead jobs for cleanup only for the kinds with a dead-job
 pass (`ClaimDeadKinds`: import, smoke, sandbox — not the bulk attach).
 
+`kamaji.release/v1` releases one deleted tenant Kubernetes cluster
+(docs/managed-k8s.md, "Deletion and orphan finalization"). The cluster's delete queues
+it, key `<provider id>/<cluster id>`. Its runner (`project.KamajiReleaseRunner`, always
+on) looks whether the delete cascade is over and, when it is, revokes the cluster's
+Proxmox token and releases its addresses, dataset and Secrets. A look that finds the
+cascade running, or cannot ask, returns the job to `pending` through `Store.Defer`
+(last result `cascade_running` or `release_failed`) without spending an attempt. It
+keeps no receipts and does not renew its lease: one look is bounded to three quarters
+of a 5-minute lease and every step may run twice. After 24 hours the job is `dead`
+(`cascade_not_finished`) and is not replayed (`409`): the provider sync's sweep does
+the same release.
+
 ## Status, selftest and replay
 
 - `GET /api/v1/admin/durable-jobs`: `admin:bill:read`; primary authorization first,

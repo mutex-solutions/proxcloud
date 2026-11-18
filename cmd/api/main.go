@@ -110,6 +110,9 @@ func run() error {
 		"durableJobs", "postgres-primary")
 
 	ctx := context.Background()
+	// stopPlatformRuns cancels the platform runner at the stop signal, before the servers drain: its run gives its job
+	// back while the container's stop grace period still lasts.
+	stopPlatformRuns := func() {}
 
 	// PostgreSQL: the primary datastore.
 	pg, err := pgdoc.Connect(ctx, cfg.DB.URL)
@@ -273,6 +276,9 @@ func run() error {
 		}
 	}()
 	projectSvc := project.NewService(projectRepo, orgRepo, billingRepo, users, platformconfig.NewRepo(pg))
+	// A delete-now only flags the project; the deletion job tears it down, and it runs only on the scheduler's timer or
+	// from its debug trigger. With both off a delete-now is refused (409) instead of leaving the project stuck.
+	projectSvc.SetNoDeletionJob(!cfg.Jobs.SchedulerEnabled && !cfg.Jobs.DebugTriggers)
 	// Wire the org member→project propagation now that the project service exists (org can't import
 	// project — set via a setter).
 	orgH.SetProjectMemberAdder(projectSvc)
@@ -971,6 +977,15 @@ func run() error {
 	paDone := make(chan struct{})
 	go func() { defer close(paDone); paRunner.Run(paCtx) }()
 	defer func() { stopPA(); <-paDone }()
+	// A deleted tenant Kubernetes cluster is released (Proxmox token, addresses, dataset) by a job its delete queues,
+	// once the delete cascade is over. Always on, like the job worker: the provider sync's sweep, which needs the
+	// scheduler or an operator, is only the backstop (docs/managed-k8s.md, "Deletion and orphan finalization").
+	projectH.SetKamajiReleaseJobs(jobStore)
+	krRunner := &project.KamajiReleaseRunner{Jobs: jobStore, Finalize: projectH.KamajiFinalizeCluster, Log: log}
+	krCtx, stopKR := context.WithCancel(ctx)
+	krDone := make(chan struct{})
+	go func() { defer close(krDone); krRunner.Run(krCtx) }()
+	defer func() { stopKR(); <-krDone }()
 	// GHCR template updates (docs/template-updates.md): discovery always; the VM import runner only
 	// when PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true. Every GitHub call uses the GitHub
 	// integration's token (decrypted per call, never logged).
@@ -1038,6 +1053,7 @@ func run() error {
 			prDone := make(chan struct{})
 			go func() { defer close(prDone); prRunner.Run(prCtx) }()
 			defer func() { stopPR(); <-prDone }()
+			stopPlatformRuns = stopPR
 			log.Warn("managed services: platform runner ENABLED")
 		}
 	}
@@ -1191,7 +1207,7 @@ func run() error {
 					return b != nil, err
 				}}, nil
 			},
-			// Every finished import gets its automatic smoke test.
+			// Every finished import gets its automatic smoke test, except a platform run's (AutoSmoke).
 			OnImported: func(ctx context.Context, id string) {
 				err := tuSvc.AutoSmoke(ctx, id, func(ctx context.Context, serviceID, node string) (templateupdates.SmokeNetwork, error) {
 					es, err := esSvc.Get(ctx, serviceID)
@@ -1481,6 +1497,7 @@ func run() error {
 	case sig := <-stop:
 		log.Info("shutting down", "signal", sig.String())
 	}
+	stopPlatformRuns()
 
 	sctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -1928,6 +1945,8 @@ func serve(s *http.Server, name string, log *slog.Logger, errCh chan<- error) {
 	}
 }
 
+// newLogger is the process's JSON log, and slog's default too: most packages log through slog.Error and its siblings,
+// which without this write plain text lines that a filter on the JSON "level" field never sees.
 func newLogger(level string) *slog.Logger {
 	lvl := slog.LevelInfo
 	switch level {
@@ -1938,7 +1957,9 @@ func newLogger(level string) *slog.Logger {
 	case "ERROR":
 		lvl = slog.LevelError
 	}
-	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
+	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
+	slog.SetDefault(log)
+	return log
 }
 
 // originsOf returns the scheme://host origin of each non-empty base URL (path/query stripped),

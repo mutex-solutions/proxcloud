@@ -142,7 +142,7 @@ const (
 	endDefer
 	endFail  // permanent
 	endRetry // a database error: the job is retried and spends an attempt
-	endStop  // the lease is lost or the process stops: the next acquisition resumes
+	endStop  // the lease is lost or the process stops: the next acquisition resumes (at once after a clean stop)
 )
 
 func (r *Runner) perform(parent context.Context, j *durablejobs.Job) {
@@ -153,7 +153,17 @@ func (r *Runner) perform(parent context.Context, j *durablejobs.Job) {
 	x := &acq{r: r, j: j, lost: lost}
 	e := x.execute(work)
 	if e.kind == endStop || lost() || parent.Err() != nil {
-		r.Log.Warn("platform run: stopped; the next acquisition resumes", "job", j.ID, "run", x.runID)
+		// A process that stops while it still holds the lease gives the job back at once, without an attempt: no
+		// call of this acquisition is in flight any more (execute has returned), and Defer is fenced by owner, epoch
+		// and lease like every other end, so it is refused when another runner holds the job. Without it the next
+		// acquisition waits out the lease. A lost lease is never given back.
+		released := false
+		if parent.Err() != nil && !lost() {
+			ctx, done := context.WithTimeout(context.WithoutCancel(parent), 10*time.Second)
+			released = r.Jobs.Defer(ctx, j, 0, "shutdown") == nil
+			done()
+		}
+		r.Log.Warn("platform run: stopped; the next acquisition resumes", "job", j.ID, "run", x.runID, "released", released)
 		return
 	}
 	ctx, done := context.WithTimeout(context.WithoutCancel(parent), 10*time.Second)
@@ -306,11 +316,12 @@ func (x *acq) execute(ctx context.Context) end {
 		return x.finish(ctx, RunCancelled, "", "")
 	}
 	if run.Kind == RunApply {
-		var ok bool
-		if x.bom, ok = embeddedBOM(run.BOM.SHA256); !ok {
+		b, ok := Lookup(run.BOM.SHA256)
+		if !ok {
 			return x.finish(ctx, RunFailed, CodePortalChanged, "ProxCloud was upgraded during the run and no longer embeds its BOM "+
 				run.BOM.Release+": Retry starts a new run.")
 		}
+		x.bom = b.BOM
 	}
 	es, err := x.r.Provider(ctx, in.ServiceID)
 	if err != nil {

@@ -35,6 +35,19 @@ type Filter struct {
 	From             *time.Time
 	To               *time.Time
 	Search           string
+	// Operator keeps AuditEvent.InternalReason in the answer. Not a criterion: the organization and account readers
+	// leave it false, so a reader added later does not show a tenant a backend's error.
+	Operator bool
+}
+
+// redact takes out of docs what f's reader must not see.
+func (f Filter) redact(docs []AuditEvent) {
+	if f.Operator {
+		return
+	}
+	for i := range docs {
+		docs[i].InternalReason = ""
+	}
 }
 
 func (f Filter) criteria() pgdoc.M {
@@ -105,6 +118,7 @@ func (r *Repo) Query(ctx context.Context, f Filter, after, before string, limit 
 			docs = docs[len(docs)-limit:] // keep the `limit` closest to the cursor
 		}
 		reverse(docs)
+		f.redact(docs)
 		var prev, next *string
 		if hasMore && len(docs) > 0 {
 			prev = &docs[0].ID
@@ -130,6 +144,7 @@ func (r *Repo) Query(ctx context.Context, f Filter, after, before string, limit 
 	if after != "" && len(docs) > 0 {
 		prev = &docs[0].ID
 	}
+	f.redact(docs)
 	return docs, next, prev, nil
 }
 
@@ -140,6 +155,7 @@ func (r *Repo) QueryAll(ctx context.Context, f Filter, limit int) ([]AuditEvent,
 	if err := r.col.Find(ctx, f.criteria(), &out, pgdoc.Sort(pgdoc.Desc("_id")), pgdoc.Limit(int64(limit))); err != nil {
 		return nil, err
 	}
+	f.redact(out)
 	return out, nil
 }
 

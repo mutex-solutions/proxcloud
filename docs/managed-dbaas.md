@@ -14,9 +14,48 @@ No tenant network is involved. The chart's `<id>-lb` LoadBalancer Service gets i
 **MetalLB**, out of the provider's `config.database.lbAddressPool` (annotation
 `metallb.universe.tf/address-pool` on every tenant-facing LB Service: `<id>-lb`, the PostgreSQL
 `<id>-ro-lb`, the OpenSearch `<id>-dash-lb`, and the Strimzi bootstrap + per-broker Services of
-Kafka). The pool is a routable services subnet that tenants reach over their normal egress;
-isolation is the client's `allowedCidrs`, rendered as `loadBalancerSourceRanges`. Leave the
-pool empty and MetalLB picks from any auto-assign pool.
+Kafka). The pool is a routable services subnet that tenants reach over their normal egress.
+The only network filter in front of a database is the client's `allowedCidrs`, rendered as
+`loadBalancerSourceRanges`. Leave the pool empty and MetalLB picks from any auto-assign pool.
+
+**What `allowedCidrs` can and cannot isolate.** The filter sees the source address a connection
+arrives with at the load balancer, which is the tenant's own address only when nothing translates
+it on the way:
+
+| Tenant network | Address the load balancer sees | What `allowedCidrs` can hold |
+|---|---|---|
+| SNAT on, `simple` zone | the Proxmox node's own address, the one of the node the VM runs on (measured) | only node addresses. The tenant subnet never matches: with it alone every connection is dropped |
+| SNAT on, EVPN zone (the default zone kind) | the address of the zone's exit node, whatever node the VM runs on (not measured; it follows from where EVPN does its SNAT) | only exit node addresses. The tenant subnet never matches |
+| SNAT off, or a VLAN zone, and the site routes the tenant subnet to the pool without NAT | the VM's address | the tenant's subnet, or single addresses of it |
+| a site router that itself NATs tenants | that router's address | only that address, shared by every tenant behind it |
+
+With SNAT, allowing a node's address is not isolation: **every tenant behind the same NAT address
+arrives with it and passes the filter**. In a `simple` zone that is every tenant whose VM runs on
+the same node, and a VM that moves to another node is cut off. In an EVPN zone it is every tenant
+that leaves through the same exit node, wherever its VM runs, so with one exit node it is every
+tenant, and moving a VM changes nothing. No page or API tells a tenant these addresses. What then
+separates tenants is the database's password and TLS only. (Measured on a lab, in a `simple` zone
+only: the tenant subnet was refused and the node's `/32` let the VM in. That a second tenant
+behind the same address passes follows from the SNAT rule and was not measured; nothing was
+measured in an EVPN zone.) The same holds for NAS exports
+([managed-k8s.md](managed-k8s.md)).
+
+What a site must do, one of:
+
+- **Route, do not NAT.** Give tenant subnets a route to the load balancer pool without source
+  NAT (SNAT off on the networks that use databases, or a VLAN zone, and on the services side a
+  route back to the tenant ranges), and tell tenants to put their own subnet in `allowedCidrs`.
+  With SNAT off in an EVPN or `simple` zone the Proxmox nodes still route the traffic, so the
+  provider's isolation rules still keep tenants away from each other and from the rest of the
+  services network. In a VLAN zone the site's router does the routing, so it must keep tenants
+  apart and away from the rest of the services network itself; ProxCloud's firewall rules do not
+  see that traffic (not run on a lab).
+- **Accept it.** Keep SNAT, give tenants the node addresses to allow, and treat `allowedCidrs` as
+  a filter against the outside only: a database is then reachable, at the network level, by every
+  tenant of the installation, and its password and TLS are the boundary.
+
+ProxCloud does not check which of the two a site runs, and accepts any `allowedCidrs`. The routed
+setup was not run on a lab.
 
 A database's replicas spread across `topology.kubernetes.io/zone` as a **hard** anti-affinity
 whenever `instances > 1` (CNPG `podAntiAffinityType: required`, the equivalent required
@@ -166,6 +205,17 @@ sequenceDiagram
 - **Delete** — Application delete only; the ArgoCD resources-finalizer cascades the chart. The
   periodic sweep (`syncjob.sweepDbaasOrphans`) then reaps the marker, auth, backup-credential and customer-user secrets and
   GCs the emptied namespace. Project teardown also removes the namespace of a project that never had a database, once nothing is pending and no Application of the project is left.
+
+### Where a database's disk is, and VM id 9999
+
+On the managed platform a database's volume is a proxmox-csi disk named `vm-9999-pvc-<uuid>` on the
+platform's boot store, attached to the node VM its pod runs on. To Proxmox a disk with that name
+belongs to VM 9999, though ProxCloud creates no such VM. If a guest of your own has the id 9999,
+**never destroy it with "Destroy unreferenced disks owned by guest" ticked**
+(`qm destroy 9999 --destroy-unreferenced-disks 1`): Proxmox removes every disk named `vm-9999-…`,
+which are the databases' volumes (and Kamaji's etcd). The managed-services Check (`csi-vmid`) and the
+provider's Test connection warn on such a site; see
+[managed-services.md](managed-services.md#vm-id-9999-and-the-csi-volumes). Not tried on a lab.
 
 ## Backups and restore
 

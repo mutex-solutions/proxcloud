@@ -179,12 +179,15 @@ function NetworkServers({ pid, resourceId }: { pid: string; resourceId: string }
 
 // SubnetsTab: a network's subnets live on its own row (data.network.subnetDetails). Routing between
 // them and between the project's networks is the zone's job; a tenant only decides on outbound SNAT.
+// A row made before v0.8.2 that no sync or subnet action has rewritten has no subnetDetails, only the cidr, gateway
+// and snat of the one subnet it was created with.
 type SubnetRow = { cidr: string; gateway?: string; snat?: boolean }
 
 function SubnetsTab({ pid, network }: { pid: string; network: CloudResource }) {
   const scope = useCloudScope(pid)
   const qc = useQueryClient()
-  const rows = ((network.data?.network?.subnetDetails ?? []) as SubnetRow[])
+  const net = network.data?.network
+  const rows = (net?.subnetDetails ?? (net?.cidr ? [{ cidr: net.cidr, gateway: net.gateway, snat: net.snat }] : [])) as SubnetRow[]
   const [addOpen, setAddOpen] = useState(false)
   const [cidr, setCidr] = useState("")
   const [toDelete, setToDelete] = useState<string | null>(null)

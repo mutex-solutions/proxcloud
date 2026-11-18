@@ -410,7 +410,7 @@ func (j *Job) syncProxmoxService(ctx context.Context, p *project.Project, es *ex
 			var untrusted *cloud.InventoryUntrustedError
 			if errors.As(err, &untrusted) {
 				markInventoryFailure(ctx, es.ID, p.ID)
-				j.log.Warn("syncjob: provider visibility unverified; cached inventory preserved, repair token permissions", "project", p.ID, "serviceId", es.ID, "region", region, "type", prov.Type(), "err", err)
+				j.log.Warn("syncjob: provider visibility unverified; cached inventory preserved, the error names the cause (docs/vm-inventory-safety.md)", "project", p.ID, "serviceId", es.ID, "region", region, "type", prov.Type(), "err", err)
 			} else {
 				j.log.Error("syncjob: reconcile pve", "project", p.ID, "serviceId", es.ID, "region", region, "type", prov.Type(), "err", err)
 			}

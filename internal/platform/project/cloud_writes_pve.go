@@ -22,7 +22,9 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"net/netip"
 	"path"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -835,6 +837,9 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 	if h.pveSecurityGroupAction(w, r, u, proj, es, cr, action, data) {
 		return true
 	}
+	if h.pveNetworkServers(w, r, proj, es, cr, action) {
+		return true
+	}
 	if h.pveSubnetAction(w, r, u, proj, es, cr, action, data) {
 		return true
 	}
@@ -879,6 +884,7 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 			return true
 		}
 		h.pveRefreshServerRow(ctx, ps, proj, cr)
+		h.pveSyncVolumes(ctx, es, proj) // a larger flavor grew the boot disk: its row holds the size the quota counts
 		h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
 		httpx.OK(w, map[string]any{"result": *cr})
 		return true
@@ -957,12 +963,24 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 				}
 			}
 		}
-		if err := ps.RebuildServer(ctx, req); err != nil {
+		destroyed, err := ps.RebuildServer(ctx, req)
+		// The boot disk is a new one with a new volid, and the old one is destroyed: its row must go, or the quota and
+		// the bill count the disk twice and the next disk PVE names like the old one takes the row over. Also after
+		// a failure: one past the swap (seed, start) has replaced the disk all the same.
+		h.pveRefreshServerRow(ctx, ps, proj, cr)
+		if !h.ReconcileVolumeRows(ctx, ps, es, proj) && destroyed != "" {
+			// The reconcile needs every VM of the project readable, and another server under a backup is not. This
+			// row needs no proof: the rebuild destroyed its disk itself. The new disk's row waits for the next sync.
+			if old, ferr := h.cloud.FindByServiceIDAndExternalID(ctx, es.ID, destroyed); ferr != nil || old == nil || old.Type != cloud.TypeVolume || old.ProjectID != proj.ID {
+				slog.Warn("rebuild: the destroyed boot disk's row", "project", proj.ID, "volume", destroyed, "err", ferr)
+			} else if aerr := h.cloud.DeleteAndArchive(ctx, old, time.Now().UTC()); aerr != nil {
+				slog.Error("rebuild: archive the destroyed boot disk's row", "project", proj.ID, "volume", destroyed, "err", aerr)
+			}
+		}
+		if err != nil {
 			h.fail(w, pveVolumeErr(err))
 			return true
 		}
-		h.pveRefreshServerRow(ctx, ps, proj, cr)
-		h.pveSyncVolumes(ctx, es, proj)
 		h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
 		httpx.OK(w, map[string]any{"result": *cr})
 		return true
@@ -1000,6 +1018,27 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 		// The PVE VNC ticket doubles as the RFB password — the FE passes it as the
 		// noVNC credential (`password` in the result).
 		h.emitPVEConsole(w, r, u, proj, cr, es.ID, cr.ExternalID, action, backendURL, kind, ticketUser, ticket)
+		return true
+
+	case "GET_CONSOLE_STATE":
+		// What the console page cannot learn from its socket. serialDisplay: the VM's display is its serial port (vga
+		// serial0, as cloud images have it), so the graphical console shows one line and the serial one is the console.
+		// status and uptime: a session opened before the VM was stopped or started again is dead, and on production the
+		// socket of such a session stayed open (D13 of the acceptance).
+		vm, verr := ps.ResolveVM(ctx, proj.ID, cr.ExternalID)
+		if verr != nil || vm == nil || vm.NodeDown || vm.StatusErr != nil {
+			h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, "The server cannot be read right now"))
+			return true
+		}
+		st, serr := ps.C.GetVMStatus(ctx, vm.Node, vm.VMID)
+		cfg, cerr := ps.C.GetVMConfig(ctx, vm.Node, vm.VMID)
+		if serr != nil || cerr != nil {
+			h.fail(w, pveVolumeErr(errors.Join(serr, cerr)))
+			return true
+		}
+		httpx.OK(w, map[string]any{"result": map[string]any{
+			"status": vm.Status, "uptime": st.Uptime, "serialDisplay": strings.HasPrefix(cfg.Str("vga"), "serial"),
+		}})
 		return true
 
 	case "SHOW_CONSOLE_OUTPUT":
@@ -1419,6 +1458,60 @@ func (h *Handler) pveSyncVolumes(ctx context.Context, es *externalservice.Extern
 	}
 }
 
+// ReconcileVolumeRows makes the project's VOLUME rows equal its disks, after an action that replaced or removed one
+// (rebuild, restore, rollback, a move to another server). pveSyncVolumes only adds and updates: the row of a disk
+// that is gone would stay, counted in the quota and billed, until the next scheduled sync (never on a site that runs
+// none), and the next disk PVE gives the same volid would take it over with its id and date.
+// It reports whether the reconcile ran. It cannot while any VM of the project is locked, offline or unreadable: the
+// list of disks fails as a whole (ListReadable too, it reads the same inventory), so no row is archived, added or
+// updated in that request. The add-and-update below only helps when the list was read and the proof or a write
+// failed after it.
+func (h *Handler) ReconcileVolumeRows(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, proj *Project) bool {
+	prov := ps.VolumeSyncProvider(h.pveRegion(proj, es), proj.ID, es.PVEVolumeProfileFunc())
+	_, err := providers.Reconcile(ctx, prov, h.cloud, es.ID, time.Now().UTC())
+	if err != nil {
+		slog.Warn("volume rows: reconcile", "project", proj.ID, "err", err)
+		if rows, err := prov.ListReadable(ctx); err == nil {
+			h.pveUpsertRows(ctx, es, rows)
+		}
+	}
+	return err == nil
+}
+
+// AttachVolumeRow attaches the detached disk of cr (on server or holder vmid) to target, "" or vmid itself for the
+// same server, and has the row follow the disk. A move to another server gives the disk a new volid. It is still the
+// tenant's volume: the row keeps its id, and with it its name (pve.VolumeLabel), its creation date, its history and
+// its bill item (billingresource keys a volume on the row's id), as a retype's does. Archiving it and letting the
+// sync insert a row for the new volid lost the name and split the charge. The mark keeps a sync that sees the old
+// volid gone from archiving the row before the follow. An attach that answers an error after the disk moved (a task
+// wait that ran out while PVE finished) is followed too, and is a success, as a retype's is. A failed attach across
+// nodes can leave the disk on a carrier under a new name: the row does not follow there, the caller's reconcile
+// replaces it.
+func (h *Handler) AttachVolumeRow(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource, vmid int, target string) error {
+	if target == "" || target == strconv.Itoa(vmid) {
+		_, err := ps.AttachVolume(ctx, proj.ID, vmid, cr.ExternalID, target) // the volid stays
+		return err
+	}
+	now := time.Now().UTC()
+	if err := h.cloud.MarkMoving(ctx, cr, &now); err != nil {
+		return err
+	}
+	storage, _, _ := strings.Cut(cr.ExternalID, ":") // a reassign keeps the storage
+	slot, err := ps.AttachVolume(ctx, proj.ID, vmid, cr.ExternalID, target)
+	if slot == "" { // refused before the move
+		if cerr := h.cloud.MarkMoving(ctx, cr, nil); cerr != nil {
+			slog.Error("attach: clear the move mark", "project", proj.ID, "volume", cr.ExternalID, "err", cerr)
+		}
+		return err
+	}
+	tvmid, _ := strconv.Atoi(target)
+	if h.pveFollowVolume(ctx, ps, es, proj, cr, tvmid, slot, storage) && err != nil {
+		slog.Warn("attach: the disk is on its new server, despite", "project", proj.ID, "volume", cr.ExternalID, "err", err)
+		err = nil
+	}
+	return err
+}
+
 // RetypeVolumeRow moves the disk in slot of server vmid onto storage, then has cr (marked moving) follow it. It runs
 // whatever ctx says: the ingress cuts a request after 60 s while the copy goes on, and a follow and mark clear on the
 // cut request failed, so every sync kept the old row and added one for the new volid, both billed for up to
@@ -1428,17 +1521,18 @@ func (h *Handler) RetypeVolumeRow(ctx context.Context, ps *pve.Service, es *exte
 	wctx, cancel := context.WithTimeout(ctx, cloud.MoveKeepFor) // past it the mark keeps nothing anyway
 	err := ps.RetypeVolume(wctx, proj.ID, vmid, cr.ExternalID, storage, es.PVEStorageHeadroomPct())
 	cancel()
-	if h.pveFollowRetypedVolume(ctx, ps, es, proj, cr, vmid, slot, storage) && err != nil {
+	if h.pveFollowVolume(ctx, ps, es, proj, cr, vmid, slot, storage) && err != nil {
 		slog.Warn("retype: the disk is on its new storage, despite", "project", proj.ID, "volume", cr.ExternalID, "err", err)
 		err = nil
 	}
 	return err
 }
 
-// pveFollowRetypedVolume points the row at the disk's new volid, if the disk in its slot has one, and ends the move
-// mark (cr.MovingSince). It reports whether the slot holds a new volid on storage. A failure only costs what the retype
-// cost before: the sync finds a new disk, and the bill shows two.
-func (h *Handler) pveFollowRetypedVolume(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource, vmid int, slot, storage string) (moved bool) {
+// pveFollowVolume points the row at the new volid of a disk the portal moved (a retype, an attach to another server),
+// if the disk in slot of server vmid has one, and ends the move mark (cr.MovingSince). It reports whether the slot
+// holds a new volid on storage. A failure only costs what the move cost before: the sync finds a new disk, and the
+// bill shows two.
+func (h *Handler) pveFollowVolume(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource, vmid int, slot, storage string) (moved bool) {
 	rows, err := ps.VolumeSyncProvider(h.pveRegion(proj, es), proj.ID, es.PVEVolumeProfileFunc()).ListReadable(ctx)
 	if err == nil {
 		err = fmt.Errorf("no disk in slot %s of server %d", slot, vmid)
@@ -1453,16 +1547,20 @@ func (h *Handler) pveFollowRetypedVolume(ctx context.Context, ps *pve.Service, e
 			}
 			moved = strings.HasPrefix(rows[i].ExternalID, storage+":")
 			if err = h.cloud.ChangeExternalID(ctx, cr, rows[i].ExternalID); err == nil {
+				// What the row says of the disk follows at once. On another server the disk has that VM's identity,
+				// and a reconcile that still found the old one on the row would take the disk for a new one on a
+				// reused volid (VolumeSyncProvider.Superseded) and replace the row after all.
+				h.pveUpsertRows(ctx, es, rows[i:i+1])
 				return moved
 			}
 			break
 		}
 	}
 	if err != nil {
-		slog.Error("retype: keep the volume's row", "project", proj.ID, "volume", cr.ExternalID, "err", err)
+		slog.Error("volume move: keep the volume's row", "project", proj.ID, "volume", cr.ExternalID, "err", err)
 	}
 	if cerr := h.cloud.MarkMoving(ctx, cr, nil); cerr != nil {
-		slog.Error("retype: clear the move mark", "project", proj.ID, "volume", cr.ExternalID, "err", cerr)
+		slog.Error("volume move: clear the move mark", "project", proj.ID, "volume", cr.ExternalID, "err", cerr)
 	}
 	return moved
 }
@@ -1501,8 +1599,8 @@ func pveVolumeErr(err error) *httpx.HTTPError {
 	return upstreamErr(computeBackend, err)
 }
 
-// sgRuleErr: the rule's fields come from the tenant and PVE is what validates them, so its 400 names what to fix and
-// holds no address.
+// sgRuleErr: the rule's fields come from the tenant; sgRuleFromPayload checks them first, and what only PVE refuses
+// comes back as its 400, which names what to fix and holds no address.
 func sgRuleErr(err error) *httpx.HTTPError {
 	var ae *pve.APIError
 	if !errors.As(err, &ae) || ae.Status != http.StatusBadRequest || len(ae.Errors) == 0 {
@@ -1558,18 +1656,20 @@ func (h *Handler) pveVolumeAction(w http.ResponseWriter, r *http.Request, u *use
 	case "DETACH":
 		aerr = ps.DetachVolume(ctx, proj.ID, vmid, cr.ExternalID)
 	case "ATTACH":
+		// Its failure path clears the move mark, which would be a running retype's.
+		if cr.Moving(time.Now().UTC()) {
+			h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, "This volume is still moving. Try again when it is done"))
+			return true
+		}
 		target := strAny(data["serverId"])
 		if target != "" {
 			if scr, err := h.cloud.FindByID(ctx, target); err == nil && scr != nil && scr.Type == cloud.TypeServer && scr.ProjectID == proj.ID {
 				target = scr.ExternalID
 			}
 		}
-		aerr = ps.AttachVolume(ctx, proj.ID, vmid, cr.ExternalID, target)
-		if aerr == nil && target != "" && target != strconv.Itoa(vmid) {
-			// Moving a disk to another server renames it: the sync below adds the new row.
-			_ = h.cloud.DeleteAndArchive(ctx, cr, time.Now().UTC())
-			renamed = true
-		}
+		aerr = h.AttachVolumeRow(ctx, ps, es, proj, cr, vmid, target)
+		// Moving a disk to another server renames it, and the row has followed: the reconcile below refreshes it.
+		renamed = aerr == nil && target != "" && target != strconv.Itoa(vmid)
 	case "LIST_ATTACH_TARGETS":
 		vms, err := ps.AttachTargets(ctx, proj.ID, vmid, cr.ExternalID)
 		if err != nil {
@@ -1637,22 +1737,16 @@ func (h *Handler) pveVolumeAction(w http.ResponseWriter, r *http.Request, u *use
 	default:
 		return false
 	}
-	reconcile := func() error {
-		prov := ps.VolumeSyncProvider(h.pveRegion(proj, es), proj.ID, es.PVEVolumeProfileFunc())
-		_, err := providers.Reconcile(ctx, prov, h.cloud, es.ID, time.Now().UTC())
-		if err != nil {
-			slog.Warn("volume action: refresh rows", "project", proj.ID, "err", err)
-		}
-		return err
-	}
 	if aerr != nil {
 		// A failed cross-node attach can leave the disk on a holder under a new name, so the old row must go too.
-		_ = reconcile()
+		h.ReconcileVolumeRows(ctx, ps, es, proj)
 		h.fail(w, pveVolumeErr(aerr))
 		return true
 	}
 	// A sync during a move can have recorded the disk under its name on the carrier, which only a reconcile removes.
-	if !renamed || reconcile() != nil {
+	if renamed {
+		h.ReconcileVolumeRows(ctx, ps, es, proj)
+	} else {
 		h.pveSyncVolumes(ctx, es, proj)
 	}
 	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
@@ -1855,17 +1949,10 @@ func (h *Handler) pveSecurityGroupAction(w http.ResponseWriter, r *http.Request,
 		httpx.OK(w, map[string]any{"result": rules})
 		return true
 	case "ADD_RULE":
-		dir := strAny(data["direction"])
-		ruleType := "in"
-		if dir == "egress" {
-			ruleType = "out"
-		}
-		rule := pve.FirewallRule{
-			Type: ruleType, Action: "ACCEPT",
-			Proto:   strAny(data["protocol"]),
-			Source:  strAny(data["remoteIpPrefix"]),
-			DPort:   portRange(data),
-			Comment: strAny(data["description"]),
+		rule, herr := sgRuleFromPayload(data)
+		if herr != nil {
+			h.fail(w, herr)
+			return true
 		}
 		if err := ps.SGAddRule(ctx, proj.ID, cr.ExternalID, rule); err != nil {
 			h.fail(w, sgRuleErr(err))
@@ -1873,19 +1960,25 @@ func (h *Handler) pveSecurityGroupAction(w http.ResponseWriter, r *http.Request,
 		}
 		h.pveSyncSecurityGroups(ctx, es, proj)
 		h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
-		httpx.OK(w, map[string]any{"result": map[string]any{}})
+		result := map[string]any{}
+		if rule.Type == "out" {
+			result["warning"] = sgEgressWarning
+		}
+		httpx.OK(w, map[string]any{"result": result})
 		return true
 	case "DELETE_RULE":
-		pos := intAny(data["pos"])
-		if pos == 0 {
-			// The FE names rules "<group>-<pos>" (the sync id shape).
-			if id := strAny(data["ruleId"]); id != "" {
-				if i := strings.LastIndexByte(id, '-'); i >= 0 {
-					pos, _ = strconv.Atoi(id[i+1:])
-				}
-			}
+		// A position names whatever rule sits there now, so only the listed id is taken: with no id the old
+		// code deleted rule 0.
+		ruleID := strAny(data["ruleId"])
+		if ruleID == "" {
+			h.fail(w, httpx.BadRequest("DELETE_RULE needs ruleId: the id of the rule as LIST_RULES returns it"))
+			return true
 		}
-		if err := ps.SGDeleteRule(ctx, proj.ID, cr.ExternalID, pos); err != nil {
+		if err := ps.SGDeleteRule(ctx, proj.ID, cr.ExternalID, ruleID); err != nil {
+			var changed *pve.ConflictError
+			if errors.As(err, &changed) {
+				h.pveSyncSecurityGroups(ctx, es, proj) // so the client's refresh lists the rules as they are
+			}
 			h.fail(w, pveVolumeErr(err))
 			return true
 		}
@@ -1897,17 +1990,107 @@ func (h *Handler) pveSecurityGroupAction(w http.ResponseWriter, r *http.Request,
 	return false
 }
 
-// portRange renders the API's portRangeMin/Max into the PVE dport syntax.
-func portRange(data map[string]any) string {
-	lo, hi := intAny(data["portRangeMin"]), intAny(data["portRangeMax"])
-	switch {
-	case lo == 0 && hi == 0:
-		return ""
-	case hi == 0 || lo == hi:
-		return strconv.Itoa(lo)
-	default:
-		return fmt.Sprintf("%d:%d", lo, hi)
+// sgEgressWarning rides the answer of an egress ADD_RULE: every server runs with policy_out=ACCEPT
+// (pve.vmFirewallOptions), so the rule is stored and filters nothing.
+const sgEgressWarning = "Outbound traffic is always allowed: an egress rule is stored but restricts nothing"
+
+// sgRuleFields are the ADD_RULE keys a Proxmox security group rule can honour.
+var sgRuleFields = []string{"direction", "protocol", "portRangeMin", "portRangeMax", "remoteIpPrefix", "description"}
+
+// sgProtocols are the accepted protocols; true = the protocol has ports.
+var sgProtocols = map[string]bool{"tcp": true, "udp": true, "sctp": true, "icmp": false, "gre": false, "esp": false, "ah": false}
+
+// sgRuleFromPayload validates ADD_RULE data and maps it to the PVE rule. Every key it cannot honour is refused:
+// dropping one (remoteGroupId, action, log, priority) stored a wider rule than asked, e.g. a DROP as an ALLOW.
+func sgRuleFromPayload(data map[string]any) (pve.FirewallRule, *httpx.HTTPError) {
+	var rule pve.FirewallRule
+	var unknown []string
+	for k, v := range data {
+		// INVOKEACTION carries the action's own name inside data.
+		if slices.Contains(sgRuleFields, k) || (k == "action" && strings.EqualFold(strAny(v), "ADD_RULE")) {
+			continue
+		}
+		unknown = append(unknown, k)
 	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		return rule, httpx.BadRequest("Unsupported rule field: " + strings.Join(unknown, ", ") + ". A rule takes " + strings.Join(sgRuleFields, ", "))
+	}
+	text := map[string]string{}
+	for _, k := range []string{"direction", "protocol", "remoteIpPrefix", "description"} {
+		if v := data[k]; v != nil {
+			s, ok := v.(string)
+			if !ok {
+				return rule, httpx.BadRequest(k + " must be a string")
+			}
+			text[k] = strings.TrimSpace(s)
+		}
+	}
+	rule = pve.FirewallRule{Type: "in", Action: "ACCEPT", Proto: strings.ToLower(text["protocol"]), Comment: text["description"]}
+	switch text["direction"] {
+	case "", "ingress":
+	case "egress":
+		rule.Type = "out"
+	default:
+		return rule, httpx.BadRequest("direction must be ingress or egress")
+	}
+	hasPorts, known := sgProtocols[rule.Proto]
+	if rule.Proto != "" && !known {
+		return rule, httpx.BadRequest("protocol must be one of tcp, udp, sctp, icmp, gre, esp, ah, or empty for any")
+	}
+	lo, herr := sgPort(data, "portRangeMin")
+	if herr != nil {
+		return rule, herr
+	}
+	hi, herr := sgPort(data, "portRangeMax")
+	if herr != nil {
+		return rule, herr
+	}
+	switch {
+	case lo == 0 && hi != 0:
+		return rule, httpx.BadRequest("portRangeMax needs portRangeMin")
+	case hi != 0 && hi < lo:
+		return rule, httpx.BadRequest("portRangeMax must not be below portRangeMin")
+	case lo != 0 && !hasPorts:
+		return rule, httpx.BadRequest("A port range needs protocol tcp, udp or sctp")
+	case lo != 0 && (hi == 0 || hi == lo):
+		rule.DPort = strconv.Itoa(lo)
+	case lo != 0:
+		rule.DPort = fmt.Sprintf("%d:%d", lo, hi)
+	}
+	if cidr := text["remoteIpPrefix"]; cidr != "" {
+		if p, err := netip.ParsePrefix(cidr); err == nil {
+			if p.Masked() != p {
+				return rule, httpx.BadRequest("remoteIpPrefix " + cidr + " has host bits set: use " + p.Masked().String())
+			}
+		} else if a, err := netip.ParseAddr(cidr); err != nil || a.Zone() != "" {
+			return rule, httpx.BadRequest("remoteIpPrefix must be a CIDR such as 203.0.113.0/24 or a single address")
+		}
+		// The remote of an inbound rule is its source, of an outbound rule its destination.
+		if rule.Type == "out" {
+			rule.Dest = cidr
+		} else {
+			rule.Source = cidr
+		}
+	}
+	return rule, nil
+}
+
+// sgPort reads a port of ADD_RULE data: 0 when absent, 400 unless a whole number from 1 to 65535 (anything else
+// read as "no port" would store a rule for every port).
+func sgPort(data map[string]any, key string) (int, *httpx.HTTPError) {
+	v := data[key]
+	if v == nil {
+		return 0, nil
+	}
+	n := intAny(v)
+	if f, ok := v.(float64); ok && f != float64(n) {
+		n = 0
+	}
+	if n < 1 || n > 65535 {
+		return 0, httpx.BadRequest(key + " must be a whole number from 1 to 65535")
+	}
+	return n, nil
 }
 
 // pveSyncSecurityGroups reconciles the project's SG rows inline (best-effort).

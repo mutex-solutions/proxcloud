@@ -166,14 +166,90 @@ sequenceDiagram
 ### Deletion and orphan finalization
 
 Delete removes the Application; the resources finalizer makes ArgoCD cascade the
-delete through everything the chart rendered. Cleanup of the per-cluster
-secrets and, when the project's last cluster is gone, the `pc-*` namespace is
-**sync-driven**: `syncjob.sweepKamajiOrphans` runs once per sync cycle as a
-service-level sweep, after the cascade completes. It scans the management cluster
-itself, so it also reaps leftovers of projects whose ProxCloud record is already
-gone. A secret younger than the 30-minute grace window is never touched. Project
-teardown also removes the `pc-*` namespace of a project that never had a cluster,
-once nothing is pending and no Application of the project is left.
+delete through everything the chart rendered. The delete answers `202` before
+that cascade has run. What must outlive the cascade is released after it: the
+cluster's Proxmox token `capmox@pve!<clusterId>` (and a `csi@pve!<clusterId>`
+an older cluster may hold), its addresses, its RWX dataset, its per-cluster
+Secrets and, when the project's last cluster is gone, the `pc-*` namespace. The
+delete itself cannot do that: CAPMOX deletes the workers with that token.
+
+Two things do the release, with the same checks and the same steps:
+
+1. **The release job** (`kamaji.release/v1`, `project.KamajiReleaseRunner`). The
+   delete, and a project teardown, queue one durable job per cluster
+   ([durable-jobs.md](durable-jobs.md)). Its runner is part of the API process
+   and runs with or without the job scheduler. Its first look at the cluster
+   comes within about 5 seconds of the delete (the runner's poll), the next
+   ones 15 seconds apart and then at growing intervals, a quarter of the job's
+   age, at most every 5 minutes. It releases the cluster at the first look that
+   finds the cascade over. After 24 hours without that it gives up: the job
+   is `dead` with `cascade_not_finished` in `GET /api/v1/admin/durable-jobs`, and
+   the sweep is what is left. A dead release job is not replayed (`409`).
+2. **The sweep** (`syncjob.sweepKamajiOrphans`), the backstop: once per provider
+   sync, for every marker Secret of the provider on the management cluster. It
+   also reaps leftovers of projects whose ProxCloud record is already gone, and
+   of a create that died halfway. It never touches a marker younger than 30
+   minutes, counted from the cluster's **creation**: a sweep that finds a marker
+   with no Application cannot tell a finished delete from a create that has not
+   applied its Application yet. The job has no such wait, because a delete is
+   accepted only for a cluster whose Application was applied.
+
+**When the cascade counts as over.** All of: no Application, no
+TenantControlPlane, no MachineDeployment and no Machine of the cluster on the
+management cluster, and no VM whose name starts with `<clusterId>-` in the
+project's pool on Proxmox (CAPMOX names a VM after its Machine). While any of
+these is left, or the management cluster or Proxmox does not answer, nothing
+of the cluster is released (the look at the pool comes before every release
+step, the CSI one included) and the job looks again later (`cascade_running`
+or `release_failed` as the job's last result; the reason is in the API log,
+line `kamaji: release of a deleted cluster, will retry`). On a management
+cluster whose ClusterRole is older than the Machines grant
+([Provisioning status](#provisioning-status-reason-and-needs-attention), "RBAC") the
+Machines cannot be listed; the other checks decide there.
+
+A node that is down does not hold a release. A VM on it has no name in
+Proxmox's list after about five minutes, so the look at the pool cannot tell a
+worker from any other VM of the project, and it does not try: a worker on a
+dead node keeps its Machine, and the Machine holds the release. The one case
+this leaves open is a management cluster with the older ClusterRole and a
+worker on a node that is down for more than those minutes: the token is
+revoked while that VM exists, CAPMOX cannot delete it afterwards, and an
+operator removes the VM and the stuck Machine by hand. Apply
+`deploy/mgmt-cluster/rbac.yaml` to close it.
+
+A create that fails runs the same release at once (`AbandonCluster`), with the
+same look at the pool, for the token it had just minted and the addresses it
+had reserved.
+
+**How long a deleted cluster's Proxmox token lives.** With the release job: until
+the first look after the cascade, so seconds to a few minutes after the last
+worker is gone, on every install. A lab delete on 2026-11-17 had its worker VM
+gone 45 seconds after the delete; in a job's first minute the looks are about
+15 seconds apart. **This timing is not verified on a lab**:
+the job is covered by tests with a fake management cluster and a fake Proxmox
+on PostgreSQL. Should the job not have run (an API from before v0.8.2, a job
+that could not be queued, a job that gave up), the sweep's timing applies: with
+the scheduler the first provider sync after the cascade and after the marker's
+30 minutes; without the scheduler (the Compose install's default) not until an
+operator starts a provider sync
+(`POST /api/v1/admin/job/external-service/sync`). That older timing was seen on
+a lab (2026-11-17, v0.8.0, no scheduler): a token still listed 3 minutes after
+the delete went one second after an operator's sync, and the token of a cluster
+deleted 22 minutes after its creation survived two syncs.
+
+Until the release the token is listed in Proxmox with its ACL rows
+(`ProxCloudCAPI` on the project pool, the boot store, the vnet and `/nodes`).
+Its secret lives only in a Secret of the cluster's namespace on the management
+cluster, which the cascade deletes, so what is left is a credential nobody
+holds, not one in use. Proxmox stops honouring the
+token's ACL rows at the revoke, but leaves their lines in `/etc/pve/user.cfg`
+until that file is next written; until then every `pveum`, `qm` and `pvesh`
+call on a node prints `user config - ignore invalid acl token
+'capmox@pve!<clusterId>'`, once per row. It is harmless, and `pveum acl list`
+shows the rows gone at once.
+
+Project teardown also removes the `pc-*` namespace of a project that never had a
+cluster, once nothing is pending and no Application of the project is left.
 
 ```sh
 # namespaces ProxCloud owns, with what's left inside them
@@ -181,6 +257,80 @@ kubectl get ns -l app.kubernetes.io/managed-by=proxcloud
 kubectl get applications.argoproj.io -n argocd -l app.kubernetes.io/managed-by=proxcloud
 kubectl get tenantcontrolplanes,machinedeployments -n pc-<projectId>
 ```
+
+### Provisioning status: reason and "needs attention"
+
+`cluster.status` stays what ArgoCD reports (PENDING, PROGRESSING, READY, DEGRADED). Next to it the sync says why a
+cluster is not there yet. While a node group is unsettled (a MachineDeployment whose `replicas`, `readyReplicas` or
+`upToDateReplicas` differ from what it asks for, or a Machine that is not Running with a Ready node), its entry in
+`cluster.node_groups` carries `progress = {code, since, machines, attention}`:
+
+- `code`: the reason of the group's worst machine (one that needs attention now, then the least advanced, then the
+  oldest). The table below has the codes.
+- `since`: when the group last made progress (RFC 3339).
+- `machines`: how many machines share the code.
+- `attention`: the group made no progress for longer than the bound of its least advanced machine, or the code is one
+  that is not retried.
+
+`cluster.attention = {code, since}` is the same for the whole cluster: `control_plane_stalled` or
+`provider_access_refused`. It carries control-plane and provider codes only: **a worker that stalls is reported on
+its node group's `progress.attention`, never on `cluster.attention`**, so a client that wants "this cluster needs
+attention" reads both (seen on a lab: a worker that could not join set `node_groups[0].progress.attention` after
+its 15 minutes, and the cluster had no `attention` key). Both fields are absent on a settled cluster. Attention is
+not a terminal state: it is computed again at every sync and goes away when the cluster recovers. It is evaluated
+only at a provider sync, so with the scheduler's 15-minute sync it can show up to one interval after the bound has
+passed, and on an install without the scheduler only when an operator starts a sync. The consoles show an amber **Needs attention**
+chip on the list and the cluster page, and read a cluster that needs attention once a minute instead of every 15 s.
+
+The source is what Cluster API and CAPMOX report on the management cluster: `Machine`
+(`cluster.x-k8s.io/v1beta2`), `ProxmoxMachine` and `ProxmoxCluster`
+(`infrastructure.cluster.x-k8s.io/v1alpha2`). They are read once per project sync, and only when a cluster has
+something to explain. Only the code and the time are stored: an upstream message names PVE nodes, VMIDs and storage
+paths and never reaches a tenant. The first match in this order wins:
+
+| Code | When | The tenant reads | Attention |
+|---|---|---|---|
+| `provider_access_refused` | A ProxmoxCluster or ProxmoxMachine condition that is not True carries Proxmox's refusal of the token ("authentication failure", "not authorized", "401 unauthorized"), or the ProxmoxCluster has no `ProxmoxAvailable` condition 10 min after it was made (CAPMOX reports only after it opened the Proxmox API) | The platform cannot reach the virtualization provider. Contact the operator. | at once |
+| `no_capacity` | The Machine's failure message or the ProxmoxMachine's condition says CAPMOX could not reserve memory on the node (`cannot reserve ... of memory on node`, reason `VMProvisionFailed` at CAPMOX v0.9.2; a condition counts only with that reason, so a clone that is retried is `vm_create_retrying` whatever its message says) | The host has no free capacity for this machine, and it is not retried. Reduce the count or pick a smaller flavor; to retry, reduce the count by one and raise it again. | at once |
+| `vm_create_failed` | Reason `VMProvisionFailed` or `TaskFailed`, phase `Failed`, or a failure message on the Machine: CAPMOX skips the machine from then on | Creating the virtual machine failed and is not retried. Reduce the count by one and raise it again, or delete and recreate the cluster. | at once |
+| `vm_create_retrying` | Reason `CloningFailed` or `PoweringOnFailed` | Creating the virtual machine failed; retrying automatically. | by bound |
+| `node_not_ready` | Phase Running, `NodeReady` not True | The node joined but is not Ready. Check it with kubectl. | 20 min |
+| `waiting_control_plane` | Phase Pending and the control plane is not Ready | Waiting for the control plane. | never |
+| `creating_vm` | Reason `Cloning`, `WaitingForDiskReconciliation`, `WaitingForStaticIPAllocation`, `WaitingForBootstrapDataReconciliation`, or no ProxmoxMachine condition yet | Creating the virtual machine. | by bound |
+| `starting_vm` | Reason `WaitingForVMPowerUp`, `WaitingForCloudInit`, `WaitingForBootstrapReady`, `WaitingForClusterAPIMachineAddresses` | Starting the virtual machine. | by bound |
+| `not_joined` | Phase Provisioned, or `NodeHealthy` with reason `NodeDoesNotExist` | Inside the bound: "The machine runs but has not joined the cluster yet." With attention: "The machine runs but has not joined the cluster: most likely it could not reach the cluster's endpoint. Contact the operator, who can check the path from your network to the endpoint. A machine that failed to join does not try again: once the cause is repaired, reduce the count by one and raise it again. A group of one cannot go to zero: raise it by one, wait until the new machine is ready, then reduce it by one." Nothing reads the machine's join error, so the cause is the likely one, not a finding. The tenant cannot see or repair that path, so the text no longer asks them to check it ([Reaching the platform](#9-how-a-cluster-lands-on-proxmox)) | 15 min |
+| `provisioning` | Anything else, and a machine that Cluster API has not made yet | Preparing the machine. | by bound |
+| `control_plane_stalled` | No endpoint, or the control plane has no status or is `Provisioning`, 15 min after the create | The control plane is taking longer than expected. Wait, delete and recreate, or contact the operator. | n/a |
+
+The bounds, counted from the group's last progress (the newest of its machines' creation, `status.lastUpdated` and,
+for a running machine, the last change of `NodeReady`):
+
+| State of the least advanced machine | Bound |
+|---|---|
+| Not made yet (counted from the newest of the MachineDeployment's creation, ArgoCD's last finished sync and the last change of the cluster's values, which the portal stamps on the Application as `proxcloud.io/values-changed-at`: right after a scale-up the last sync is still the one before it) | 15 min |
+| Pending | 15 min; never while the control plane is not Ready |
+| Provisioning | 30 min, plus 5 min for each further machine of the cluster in Provisioning, at most 90 min. CAPMOX clones all machines at once, so on slow disks each one takes longer ([section 9](#9-how-a-cluster-lands-on-proxmox)) |
+| Provisioned, no node | 15 min |
+| Running, node not Ready | 20 min (the first node waits for the CNI) |
+
+A machine that is being deleted (a scale-down, the old half of a rollout) counts neither as progress nor as a stall.
+Not covered: a control plane stuck in a later upgrade and a machine stuck in Deleting have no clock; ArgoCD sync
+errors and MachineHealthCheck are not read; the admin cluster list has no attention badge.
+
+**Operator detail.** Admin console, the Kubernetes provider's page, **Managed clusters**, **Machines** on a cluster's
+row (`GET /api/v1/admin/service/{id}/k8s-clusters/{clusterId}/machines`, permission `admin:service:read`): every
+worker Machine read live, with its phase, VMID and PVE node, addresses, the same code and attention, and the
+conditions with their upstream reason and message. Credentials are cut out of the messages (among them
+`PVEAPIToken=user@realm!id=<secret>`) and each is clipped to 400 characters.
+
+**RBAC.** The sync needs `get` and `list` on `machines.cluster.x-k8s.io` and on `proxmoxmachines` and
+`proxmoxclusters.infrastructure.cluster.x-k8s.io`. `deploy/mgmt-cluster/rbac.yaml` and chart `proxcloud-platform`
+0.1.2 grant them (the platform BOM pins 0.1.2, so a new managed-services install has them). On an install with the older ClusterRole nothing breaks: the sync leaves `progress` and `attention`
+out (a 403 or 404 on the read), and the Machines dialog answers "The ProxCloud service account cannot read Machines:
+re-apply deploy/mgmt-cluster/rbac.yaml". That advice holds on an installer-built site; on a managed-services platform
+installed from an earlier BOM the `platform` Application reverts a hand-applied ClusterRole (self-heal), and the access
+comes with Remove and a new install ([managed-services.md](managed-services.md)). Any other error on the read fails that project's sync, so the cached row
+keeps its last state instead of losing the flag.
 
 ## 4. Billing
 
@@ -204,12 +354,14 @@ kubectl get application <cluster-id> -n argocd -o jsonpath='{.status.health}{"\n
 
 | Symptom | Look at |
 |---|---|
-| Create fails with `Could not mint the cluster's Proxmox tokens` | The portal token lacks a grant: [proxmox-permissions.md](proxmox-permissions.md#managed-kubernetes). The message names the path. |
+| Create answers `409 Could not mint the cluster's Proxmox tokens: the operator must fix a permission of the portal on Proxmox first. Nothing was created, and trying again does not help until then.` | Proxmox refused the portal token an ACL row for the cluster's token (a 403). The tenant's message names no path on purpose. The path is in Proxmox's own words, `Permission check failed (<path>, <privileges>)`, in two places: the operator's **Audit** page, on the `CLOUD_RESOURCE_CREATE` event with outcome `FAILURE` (`internalReason`), and the API log line `backend request failed` with the same request id as the answer's `X-Request-Id`. The usual cause is an ACL row of the portal's own on that store or zone, which hides the mint role its parent passes down: run the managed-services script again, then the Check ([proxmox-permissions.md](proxmox-permissions.md#a-row-of-the-portals-own-on-a-store-or-a-zone)). Until v0.8.0 this was a `502 The compute backend is unavailable` with no audit event. |
+| Create answers `502 The compute backend is unavailable. Try again later.` | Proxmox did not answer, or failed for another reason than a permission. The reason is in the same two places. |
 | Machines stuck, CAPMOX logs `not authorized to access endpoint` | PVE refused the cluster's token. The PVE access log (`/var/log/pveproxy/access.log`) names the call. `GET /cluster/status` answering 403 is normal and ignored. A refused clone is checked against the template's NICs too. |
 | `error waiting for agent` for a few minutes | Normal while the clone boots. |
 | Tenant `LoadBalancer` Service `<pending>` for up to 15 minutes after create | The MetalLB pool arrives by ClusterResourceSet, which retries until the chart's CRDs and MetalLB's webhook answer, with CAPI's growing backoff between tries: on the lab it applied 8 minutes after the cluster was Available. The Application reads `Progressing` until then; the portal shows the cluster READY once the control plane, every node group and the sync are done and the ClusterResourceSet is the one part left, for up to 30 minutes after create. A cluster still `PROGRESSING` past that: `kubectl get clusterresourceset -n pc-<projectId>` and its `ResourcesApplied` condition. |
 | Application `OutOfSync` / `SyncFailed` | `argocd app get <cluster-id>` sync error. "not permitted in project proxcloud-k8s" → the chart needs a cluster-scoped resource; add exactly that group/kind to `deploy/mgmt-cluster/appproject.yaml`. Chart pull errors → registry or pin problem (§1.4). |
 | Application Healthy but cluster unusable | Health checks not loaded or wrong: verify the `argocd-health.yaml` keys exist in `argocd-cm` and the application controller was restarted. |
+| Cluster shows **Needs attention** | The reason is on the cluster page per node group; the table under "Provisioning status" in §3 has every code. The operator's detail is **Machines** on the provider page. `not_joined` on the lab of 2026-11-17 was a cluster network without a router: the VM ran, and its kubelet never reached the API endpoint. |
 | Cluster stuck `PROGRESSING`, no endpoint | `kubectl get tcp -n pc-<projectId>` → TenantControlPlane status. Pending CP pods → management-cluster capacity or DataStore. |
 | Delete hangs | The Application keeps its finalizer while the cascade runs; inspect what is left in the tree (`argocd app get`). Remove the finalizer by hand only if you accept orphaning the rendered objects, then clean up per §3. |
 | Orphaned namespaces/secrets | §3 orphan-finalization check. |
@@ -223,7 +375,7 @@ What the create path resolves (`internal/platform/project/cloud_kamaji_create.go
 |---|---|---|
 | Workers' pool | the project's pool | they sync and bill as servers of their flavor (`fl-`, `sp-` tags) |
 | Version | the customer's pick, a key of `config.cluster.versions` | a provider with no version (how managed services registers it, before a node image is published) refuses every create: `400 cluster: this provider offers no Kubernetes version yet…`, before addresses are reserved or tokens minted. An `UPGRADE` to a version that is not a key of `config.cluster.versions` answers `400 version is not offered by this provider`, on a provider with no version too, and changes nothing |
-| Network | the customer's pick, one of the project's networks | the zone must have no DHCP (EVPN, VLAN). ProxCloud creates a `simple` zone with DHCP, so on a Proxmox provider whose default zone is such a zone a create answers `400 Worker nodes need a network without DHCP (an EVPN or VLAN zone)`; the managed-services Check reads the zone in Proxmox and warns about it (`tenant-network`). With shared workers (`cluster.shared`) no tenant network is used and this row does not apply |
+| Network | the customer's pick, one of the project's networks | the zone must have no DHCP server (EVPN, VLAN, or a `simple` zone without one). ProxCloud creates a `simple` zone with DHCP unless its config says `"dhcp": false` ([managed-services.md](managed-services.md#2-prerequisites)), so on a Proxmox provider whose default zone is a zone with DHCP a create answers `400 Worker nodes need a network without DHCP (an EVPN or VLAN zone, or a simple zone without a DHCP server)`; the managed-services Check reads the zone in Proxmox and warns about it (`tenant-network`). With shared workers (`cluster.shared`) no tenant network is used and this row does not apply |
 | Quota | the project's limits, like servers | every worker counts against `servers`, `vcpus`, `ramMb` and `diskGb`; a create or node group edit over them answers 409 and takes nothing |
 | Addresses | 16 for workers, 8 for tenant LoadBalancers, reserved from the top of the subnet | hence at most 15 workers: a rolling replacement needs a spare |
 | Credentials | `capmox@pve!<id>` (management side); no CSI token, block volumes use the CSI gateway's | minted at create, revoked after the delete cascade (with a `csi@pve!<id>` an older cluster may still hold) |
@@ -231,11 +383,136 @@ What the create path resolves (`internal/platform/project/cloud_kamaji_create.go
 
 **Node images.** `config.cluster.versions` maps a version to its template per PVE node, as printed by
 `images/k8s-node-template.sh`: `{"1.35.10": "pve1=9210,pve2=9211"}`. PVE clones to local storage only on the
-template's node, so a node group has one MachineDeployment per entry, its replicas split evenly, the first entries
-taking the remainder. The zone label comes from that pin, so no cloud controller manager is needed.
+template's node, so a node group has one MachineDeployment per entry. The zone label comes from that pin, so no
+cloud controller manager is needed. The image is the provider's: a node group in a request names an `imageVariant`
+at most, and an `imageId` in a request is ignored (before v0.8.0 it went into the values as it came, so a caller of the
+API could pin a group to nodes and template VMIDs of its choice; the console never sent it).
+
+**Sites without shared storage: where a node group's replicas go.** On a site where every node has its own pool
+(six nodes, each with a local ZFS pool), the image must exist on every node that should run workers
+(`config.cluster.versions`: `"1.35.10": "pve1=9210,pve2=9211,..."`; [template-updates.md](template-updates.md#publish-on-all-nodes) has
+one action that publishes a version on all nodes, one node at a time), and a worker's disk is on the node that runs it.
+
+**All new workers are cloned at the same time.** A create or a scale-up makes one MachineDeployment per node that
+gets replicas, and Cluster API starts the clones of all new workers together; ProxCloud does not queue them. On slow
+shared storage that load is felt by other VMs. On a lab with ZFS on slow disks, three clones started in the same
+second took 6 to 7 minutes each against 3.5 minutes for one alone, the load average reached 31 on one node, and the
+controllers of another Kubernetes cluster on the same hosts restarted (its etcd waited up to 5 seconds for a
+write). Create large node groups in steps where the storage is slow.
+
+How many replicas each node runs depends on the cluster's chart version:
+
+- **Chart 0.1.12 and older:** the chart splits `machineCount` evenly over the image string's entries, the first
+  entries taking the remainder, blind to what is free. A full node still gets its share and its machines hang
+  (`no_capacity` under "Provisioning status").
+- **Chart 0.1.13 and later:** ProxCloud decides and stores the split per group (`machinePlacement: {<node>:
+  <replicas>}` in the Application's values; `node_groups[i].placement` in the API). The chart renders exactly that.
+
+The placement rule (`kamajiPlaceGroups`, `pve.PlaceReplicas`, `pve.RemoveReplicas`):
+
+1. **Baseline.** Where the group's workers are now: its stored placement, else the even split of its current count.
+   A re-render never moves a running worker; only the difference is placed or removed. An edit that changes no count
+   writes the baseline as it is and asks Proxmox nothing (so the first edit of a cluster moved to 0.1.13 stores the
+   even split it already runs).
+2. **Scale-up and create** place each new replica one at a time on a node that
+   - holds the image (an entry of the image string, whose template VMID Proxmox still shows on that node) and is
+     online,
+   - has the cluster's worker storage active (`proxmox.storage` in the values, fixed at create),
+   - has room on that storage for the root disk with the provider's storage headroom (`storageHeadroomPct`),
+   - stays under `maxcpu × overcommitCPU` with the flavor's vCPUs,
+   - has the flavor's memory free after the memory kept for protected VMs.
+
+   Among those the node with the fewest replicas of this group wins, then the one with the most free memory, then by
+   name: a group is spread when several nodes fit. Every pick counts at once, for the next replica and for the next
+   group of the same request. On shared storage a disk is taken from every node's view of the pool.
+
+   What counts as taken on a node, the same for the server scheduler (`pve.PickNode`, `pve.CommittedMem`):
+   - **Memory:** the larger of (a) the configured memory of every running VM the provider's token may audit and
+     (b) the node's own used memory (`mem` of the node's row in `GET /nodes`, which the token reads with
+     `PVEAuditor` on `/nodes`). On top of that comes the configured memory of every VM the token may audit that
+     does not run (stopped, or cloned and not booted yet: it takes nothing of (b)), of the workers that are decided
+     and not built yet (rule 3) and of the picks of this request. (b) is there for the VMs the token may not audit: Proxmox leaves them out of
+     `GET /cluster/resources`, and on a managed-services install those are the platform's own machines (pools
+     `proxcloud-seed` and `proxcloud-system` carry `NoAccess` for this token by design), on any site also VMs that
+     belong to nobody ProxCloud knows.
+   - **CPU:** the vCPUs of every VM the token may audit, running or stopped, against `maxcpu × overcommitCPU`.
+   - **Known limits.** A VM the token may not audit counts with the memory it uses now, not its configured size,
+     and not while it is stopped; it does not count at all on a node where the running visible VMs' configured
+     memory is already above the node's used memory (the larger of the two is taken, they are not added). The
+     other way round, on a node whose used memory is the larger figure, a running visible VM counts only with
+     what it uses now: several creates in a row can still overfill a node that carries hidden VMs, once the
+     earlier VMs have booted and use less than their size. A hidden VM's vCPUs are never counted. The node's used
+     memory is Proxmox's figure, so it includes the host itself, LXC containers and, on ZFS, the ARC: such a node
+     reads less free than the sum of its VMs says, on every site. Cap the ARC (`zfs_arc_max`) if it takes room
+     you want placed.
+3. **Workers not built yet count.** A clone takes minutes. The workers of every cluster of this Kubernetes provider
+   that are decided and that Proxmox does not have yet (placement less the VMs tagged `pc-k8s-<clusterId>` per node)
+   count as VMs of that cluster's largest group: its memory and CPU on the node, and its root disk on the cluster's
+   worker storage (off that node's pool, or off every node's view of a shared one), which Proxmox still shows free.
+   Decisions on one Proxmox provider run one at a time (a lock from the
+   snapshot to the Application that records the decision), so two creates in a row do not both take the last free node.
+4. **Scale-down** removes each replica from the node whose MachineDeployment has the most replicas that are not ready
+   (a stuck machine goes before a healthy one), then the node with the most replicas of the group, then the one with
+   the least free memory, then by name. Nothing is checked, so it never fails on Proxmox: the nodes' free memory is
+   read for the order only, and when Proxmox does not answer (or the MachineDeployments cannot be read) that
+   criterion is skipped. Free memory is counted as in rule 2. ProxCloud decides only how many replicas each node
+   loses: **which machine of that node goes is Cluster API's choice** (the MachineDeployment's deletion order,
+   `Random` by default; the chart does not set it). On the lab a scale-down removed the older, original worker
+   of the node and kept the one added last. "A running worker never moves" holds per node, not per machine.
+5. **The image string changes** (an UPGRADE to a version published on other nodes, or the operator edited
+   `config.cluster.versions` and the next node group edit picks it up): replicas on nodes that still hold the image
+   stay, a new node starts at 0, and the replicas of a node that no longer holds it are placed as new ones, by rule 2.
+
+Refusals are all or nothing and happen before anything is reserved, minted or written:
+
+| Answer | When |
+|---|---|
+| `409 Node group "G": only K of N new workers fit (flavor F: X vCPU, Y MB, Z GiB disk). Reduce the count, choose a smaller flavor, or contact the operator.` | Not every new replica has a node |
+| `409 Node group "G": no node that holds this version's image has the cluster's storage. Contact the operator.` | The cluster's storage is active on none of the image's nodes |
+| `409 Node group "G": no node still holds this version's image. Contact the operator.` | The template of the image string is gone from every node that has the cluster's storage (removed or moved after the provider's versions were set) |
+| `503 proxmox cluster unavailable` | Nodes, VMs or storage could not be read |
+| `409 Another cluster change is being placed on this provider. Try again in a moment.` | The lock was held for 30 s |
+
+What it does not do:
+
+- **Local volumes at scale-down.** Removing a group's last replica on a node leaves the PersistentVolumes on that
+  node's storage behind: their pods cannot start elsewhere. The order above empties a node last, the console warns
+  when a group is scaled below the number of hosts it runs on, and PersistentVolumes are not read.
+- **A node dropped from the image string is pruned at once.** The Application prunes, so that node's
+  MachineDeployment and its workers are deleted when the edit syncs, not surge-first; their replacements are being
+  built on other nodes at the same time. Room for them is checked before the edit is written. Publishing a version
+  on fewer nodes than the current one therefore moves workers at each cluster's next upgrade or node group edit.
+- **Nodes whose storage has another name.** One storage name per cluster: a node where it is not active gets no
+  replica.
+- **No capacity check** for a flavor changed in place (every worker of the group is replaced where it is) or for the
+  one surge machine of a rolling upgrade. "Provisioning status" shows the result.
+- **Existing clusters are untouched** until an operator sets the provider's `chartVersion` to 0.1.13 and bumps each
+  cluster (**Bump** on the provider page, or the tenant's *Apply platform update*). A cluster on an older chart gets
+  no `machinePlacement` and no check, exactly as before. After the bump its render is the same until its node groups
+  change. Chart 0.1.13 is published and the platform BOM pins it: a managed-services platform installed from this
+  release registers its Kubernetes provider with `chartVersion` 0.1.13, and an installer-built site registers the
+  chart's source version. A platform installed from an earlier BOM keeps the `chartVersion` it was registered with
+  (an apply on it is refused, `bom_unsupported`); the operator sets it on the provider.
 
 **Reaching the platform.** Workers sit on a tenant vnet with no route to the management network. The API-server
-endpoint is an address on the services subnet, which tenants reach over their normal egress: MetalLB. Nothing in a
+endpoint is an address on the services subnet, which tenants reach over their normal egress: MetalLB.
+That egress is not enough on every layout. When a Proxmox node translates the worker's traffic (SNAT: in a
+`simple` zone the worker's own node, in an EVPN zone an exit node) and the platform machine that holds the endpoint
+address runs on that same node, the worker's TCP connection is dropped on the node unless the node itself routes the
+platform network: a one-node site with a `simple` tenant zone and the platform network on a VLAN behind the site's
+router is this case (found on the first production site, v0.8.0). The workers then run, stay `not_joined`, and
+cloud-init's `kubeadm join` has timed out on `https://<endpoint>:6443`. kubeadm runs once: after the path is
+repaired such workers must be replaced (the tenant reduces the node group's count by one and raises it again, once per worker; a group cannot go to zero, so a group of one is raised first). The rule, its
+table, the Check row `tenant-path` that warns of the layout, and the two supported layouts (a platform network routed
+by the node on a new one-node site; a leg of the node on an existing one, run by hand on one production site and
+not lab-verified) are in [managed-services.md](managed-services.md#the-path-from-tenants-to-the-platform). Nothing
+in the product opens the path as a test, and the worker's join error is not shown in the console yet.
+In an EVPN zone that egress is the zone's (Proxmox holds the gateway and does the SNAT). In a **VLAN zone**
+Proxmox holds no gateway and does no DHCP or SNAT: the network is a bare VLAN (the API writes and answers
+`dhcp: false`, `snat: false`), and the site must provide a router that holds the subnet's first address (the
+`gateway` the network shows, which every worker gets as its default route) and routes to the services subnet.
+Without that router a worker boots, never reaches its control plane, and the cluster stays `PROGRESSING` with
+no ready node. Nothing in a
 tenant reaches the PVE API: proxmox-csi's controller runs on the services cluster and calls the CSI gateway.
 
 Earlier releases gave tenant workers a `pve-api` Service on the services subnet that forwarded to the PVE nodes

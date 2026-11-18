@@ -16,6 +16,8 @@ package admin
 //	GET  /admin/platform/installations/{id}/runs[/{runId}] the newest runs, or one, with their stages       (service:read)
 //	POST /admin/platform/installations/{id}/runs/{runId}/cancel                                             (service:manage)
 //	GET  /admin/platform/installations/{id}/seed-kubeconfig a one-hour cluster-admin kubeconfig of the seed  (service:manage)
+//	GET  /admin/platform/installations/{id}/platform-kubeconfig a one-hour kubeconfig of the platform cluster that
+//	                                                      reads, and opens its ArgoCD                        (service:manage)
 //	POST /admin/platform/installations/{id}/seed-credential/rotate  a new stored seed credential; refused
 //	                                                      during a run                                       (service:manage)
 //
@@ -23,8 +25,9 @@ package admin
 // also needs the runner (SetPlatformRuns, with PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED), else 409 platform_disabled. No
 // route returns a credential: an installation shows only which token ids are stored, a run only fixed text and codes.
 // The preflight changes nothing, so the audit middleware skips it; it needs service:manage because it uses the stored
-// platform tokens. The one exception to "no credential" is seed-kubeconfig, the break-glass download: it needs
-// service:manage although it is a GET, and it writes its own audit entry (actor and expiry, never the token).
+// platform tokens. The exceptions to "no credential" are seed-kubeconfig and platform-kubeconfig, the break-glass
+// downloads: they need service:manage although they are GETs, and each writes its own audit entry (actor, which of the
+// two and the expiry, never the token).
 
 import (
 	"context"
@@ -65,11 +68,21 @@ func (h *Handler) routePlatform(r chi.Router) {
 	r.Get("/platform/installations/{id}/runs/{runId}", h.platformRun)
 	r.Post("/platform/installations/{id}/runs/{runId}/cancel", h.platformRunCancel)
 	r.Get("/platform/installations/{id}/seed-kubeconfig", h.platformSeedKubeconfig)
+	r.Get("/platform/installations/{id}/platform-kubeconfig", h.platformClusterKubeconfig)
 	r.Post("/platform/installations/{id}/seed-credential/rotate", h.platformSeedRotate)
 }
 
 func (h *Handler) platformBOM(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, serviceReadPerm) {
+		return
+	}
+	if sha := r.URL.Query().Get("sha256"); sha != "" {
+		bom, ok := platformlife.Lookup(sha)
+		if !ok {
+			platformErr(w, http.StatusNotFound, platformlife.CodeBOMUnsupported, "This release does not embed a BOM with that sha256.", nil)
+			return
+		}
+		httpx.OK(w, bom)
 		return
 	}
 	bom, err := platformlife.Current()
@@ -122,6 +135,8 @@ func platformStoreErr(w http.ResponseWriter, err error) bool {
 		platformErr(w, http.StatusBadRequest, "invalid_confirmation", err.Error(), nil)
 	case errors.Is(err, platformlife.ErrNoSeed):
 		platformErr(w, http.StatusConflict, "no_seed", err.Error(), nil)
+	case errors.Is(err, platformlife.ErrNoCluster):
+		platformErr(w, http.StatusConflict, "no_cluster", err.Error(), nil)
 	case errors.Is(err, platformlife.ErrBadKind):
 		platformErr(w, http.StatusBadRequest, "invalid_kind", err.Error(), nil)
 	case errors.Is(err, platformlife.ErrRunNotFound):
@@ -412,8 +427,9 @@ func (h *Handler) PlatformPreflight(ctx context.Context, in *platformlife.Instal
 		sec = &platformlife.Secrets{}
 	}
 	pf := platformlife.Preflight{Installation: in, Site: platformlife.SiteOf(es), Allow: es.PVESandboxEndpoints(),
-		ProviderImport: es.PVEImportStorage(), Portal: portal, ProviderDisabled: es.IsDisabled(),
+		Portal: portal, ProviderDisabled: es.IsDisabled(),
 		TemplateUpdatesVM: h.templateUpdates != nil && h.templateUpdates.VMEnabled}
+	pf.MintStores, pf.MintZones = platformlife.MintScopeOf(es)
 	if pf.CAPI, err = platformlife.TokenClient(es, sec.CAPI); err != nil {
 		return nil, err
 	}
@@ -524,16 +540,17 @@ func (h *Handler) platformRunCancel(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, v)
 }
 
-// ActionBreakGlass is the audit action of a seed kubeconfig download.
+// ActionBreakGlass is the audit action of a kubeconfig download, the seed's or the platform cluster's.
 const ActionBreakGlass = "BREAK_GLASS"
 
 // ActionRotateCredential is the audit action of a seed credential rotation.
 const ActionRotateCredential = "ROTATE_CREDENTIAL"
 
-// breakGlassEvent is the audit entry of a seed kubeconfig download: who, which installation and when the token
-// expires. It is built without the token or the kubeconfig, so it cannot carry them.
-func breakGlassEvent(r *http.Request, in *platformlife.Installation, expires time.Time) audit.AuditEvent {
-	return seedEvent(r, in, ActionBreakGlass, map[string]any{"operation": "seed-kubeconfig", "expiresAt": expires.UTC().Format(time.RFC3339)})
+// breakGlassEvent is the audit entry of a kubeconfig download: who, which installation, which of the two kubeconfigs
+// (operation seed-kubeconfig or platform-kubeconfig) and when the token expires. It is built without the token or the
+// kubeconfig, so it cannot carry them.
+func breakGlassEvent(r *http.Request, in *platformlife.Installation, operation string, expires time.Time) audit.AuditEvent {
+	return seedEvent(r, in, ActionBreakGlass, map[string]any{"operation": operation, "expiresAt": expires.UTC().Format(time.RFC3339)})
 }
 
 // seedRotateEvent is the audit entry of a seed credential rotation: who, which installation, and the names of the
@@ -569,15 +586,29 @@ func seedEvent(r *http.Request, in *platformlife.Installation, action string, me
 }
 
 // platformSeedKubeconfig hands the operator a kubeconfig of the seed with a one-hour token of the portal's
-// service account (cluster-admin). The entry is audited before the kubeconfig goes out; one that cannot be written
-// keeps it in, and without an audit service no token is asked for. No cache may keep the answer.
+// service account (cluster-admin).
 func (h *Handler) platformSeedKubeconfig(w http.ResponseWriter, r *http.Request) {
+	h.breakGlass(w, r, "seed-kubeconfig", platformlife.BreakGlassKubeconfig)
+}
+
+// platformClusterKubeconfig hands the operator a kubeconfig of the platform cluster with a one-hour token of its
+// break-glass service account: it reads (no Secret), forwards a port to ArgoCD and reads ArgoCD's initial admin
+// password (platformlife.PlatformKubeconfig).
+func (h *Handler) platformClusterKubeconfig(w http.ResponseWriter, r *http.Request) {
+	h.breakGlass(w, r, "platform-kubeconfig", platformlife.PlatformKubeconfig)
+}
+
+// breakGlass answers one of the two kubeconfig downloads. The entry is audited before the kubeconfig goes out; one
+// that cannot be written keeps it in, and without an audit service no token is asked for. No cache may keep the
+// answer. A failure is answered with fixed text: the clusters' own words stay in.
+func (h *Handler) breakGlass(w http.ResponseWriter, r *http.Request, operation string,
+	mint func(context.Context, *platformlife.Installation, *platformlife.Secrets) (string, time.Time, error)) {
 	if !h.platformGate(w, r, externalServiceManagePerm) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	if h.audit == nil {
-		httpx.WriteError(w, httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable, "The audit log is not available, so no seed kubeconfig is issued"))
+		httpx.WriteError(w, httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable, "The audit log is not available, so no kubeconfig is issued"))
 		return
 	}
 	in, err := h.platform.Get(r.Context(), chi.URLParam(r, "id"))
@@ -588,15 +619,19 @@ func (h *Handler) platformSeedKubeconfig(w http.ResponseWriter, r *http.Request)
 	if httpx.WriteError(w, err) {
 		return
 	}
-	kubeconfig, expires, err := platformlife.BreakGlassKubeconfig(r.Context(), in, sec)
-	if errors.Is(err, platformlife.ErrNoSeed) {
+	kubeconfig, expires, err := mint(r.Context(), in, sec)
+	switch {
+	case errors.Is(err, platformlife.ErrNoSeed), errors.Is(err, platformlife.ErrNoCluster):
 		platformStoreErr(w, err)
 		return
-	} else if err != nil {
+	case errors.Is(err, platformlife.ErrWorkloadAPI):
+		platformErr(w, http.StatusBadGateway, platformlife.CodeWorkloadUnreachable, "The platform cluster did not issue a one-hour token", nil)
+		return
+	case err != nil:
 		platformErr(w, http.StatusBadGateway, platformlife.CodeSeedAPIUnreachable, "The seed did not issue a token", nil)
 		return
 	}
-	if err := h.audit.Log(r.Context(), breakGlassEvent(r, in, expires)); httpx.WriteError(w, err) {
+	if err := h.audit.Log(r.Context(), breakGlassEvent(r, in, operation, expires)); httpx.WriteError(w, err) {
 		return
 	}
 	httpx.OK(w, map[string]any{"kubeconfig": kubeconfig, "expiresAt": expires.UTC()})

@@ -4,7 +4,9 @@ package integration
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/durablejobs"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
@@ -70,6 +73,11 @@ func TestAdminPlatformInstallations(t *testing.T) {
 		mu.Lock()
 		auths = append(auths, r.Header.Get("Authorization"))
 		mu.Unlock()
+		// Every token holds nothing anywhere: the privilege rows name each path they read.
+		if strings.HasSuffix(r.URL.Path, "/access/permissions") {
+			fmt.Fprintf(w, `{"data":{%q:{}}}`, r.URL.Query().Get("path"))
+			return
+		}
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{"errors":{"fake":"nothing here"}}`))
 	}))
@@ -77,7 +85,8 @@ func TestAdminPlatformInstallations(t *testing.T) {
 	enc := textcrypt.New("test-key")
 	mustInsert(t, db, "externalService", pgdoc.M{"_id": "svc-pve", "name": "lab", "type": "CLOUD", "status": "PUBLIC", "config": pgdoc.M{
 		"provider": "proxmox", "region": "lab", "apiUrl": fakePVE.URL, "tokenId": "proxcloud@pve!platform", "importStorage": "nas-templates",
-		"network": pgdoc.M{"cidrPool": "10.100.0.0/16", "blockedCidrs": []string{"10.200.200.0/25"}}},
+		"storageProfiles": pgdoc.M{"fast": pgdoc.M{"storages": pgdoc.M{"*": "nvme-u2"}}, "archive": pgdoc.M{"bootDisk": false, "storages": pgdoc.M{"*": "truenas"}}},
+		"network":         pgdoc.M{"cidrPool": "10.100.0.0/16", "blockedCidrs": []string{"10.200.200.0/25"}}},
 		"secret": pgdoc.M{"tokenSecret": enc.Encrypt(portalToken)}})
 	mustInsert(t, db, "adminPermission", pgdoc.M{"_id": "support-sub", "role": "SUPPORT"})
 	mustInsert(t, db, "adminPermission", pgdoc.M{"_id": "admin-sub", "role": "ADMIN"})
@@ -171,6 +180,26 @@ func TestAdminPlatformInstallations(t *testing.T) {
 	_ = json.Unmarshal(call("admin-sub", http.MethodPost, one+"/preflight", "", http.StatusOK).Data, &pf)
 	if pf.OK || len(pf.Checks) == 0 {
 		t.Fatalf("preflight against a refusing PVE: %+v", pf)
+	}
+	// The mint role is read on the provider's own stores and zones, not on /storage alone: a boot store with a row of
+	// the portal's own reads complete on the parent (production, 2026-11-17). A capacity store gets no cluster row.
+	mintRows := 0
+	for _, c := range pf.Checks {
+		if c.ID != "privileges:kubemint" {
+			continue
+		}
+		mintRows++
+		for _, path := range []string{" on /storage/nvme-u2 ", " on /storage/nas-templates ", " on /sdn/zones/localnetwork "} {
+			if !strings.Contains(c.Message, path) {
+				t.Errorf("privileges:kubemint does not read%s: %s", path, c.Message)
+			}
+		}
+		if strings.Contains(c.Message, "truenas") || !strings.Contains(c.Message, pve.KubeMintShadowed) {
+			t.Errorf("privileges:kubemint: %s", c.Message)
+		}
+	}
+	if mintRows != 1 {
+		t.Errorf("%d privileges:kubemint rows", mintRows)
 	}
 	mu.Lock()
 	sent := strings.Join(auths, "\n")
@@ -401,6 +430,91 @@ func TestPlatformRunStartCancelAndReplay(t *testing.T) {
 	}
 }
 
+// A platform the release v0.8.0 installed, on this build: the plan stays on the installed BOM and names this build's
+// own as newer, and an apply starts with the 0.8.0 BOM. A platform a build of main installed (a BOM no release
+// embeds) is still refused with bom_unsupported, and can still be removed.
+func TestPlatformRunOnAPreviousBOM(t *testing.T) {
+	ctx := context.Background()
+	db := freshPG(t)
+	enc := textcrypt.New("test-key")
+	jobs := durablejobs.New(db)
+	if err := jobs.Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	store := platformlife.NewStore(db, enc)
+	if err := store.Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mustInsert(t, db, "adminPermission", pgdoc.M{"_id": "admin-sub", "role": "ADMIN"})
+	h := admin.NewHandler(admin.NewRepo(db), nil, nil, nil, nil, nil, nil, nil, audit.NewService(audit.NewRepo(db), slog.Default()),
+		externalservice.NewService(externalservice.NewRepo(db), enc), "", "", "")
+	h.SetPlatform(store)
+	h.SetDurableJobs(jobs, nil, func(*durablejobs.Job) error { return nil })
+	h.SetPlatformRuns(jobs)
+	router := chi.NewRouter()
+	h.Routes(router)
+	call := func(method, path, body string, want int) map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req = req.WithContext(httpx.WithRC(req.Context(), &httpx.RequestContext{Sub: "admin-sub"}))
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != want {
+			t.Fatalf("%s %s: %d %s, want %d", method, path, w.Code, w.Body.String(), want)
+		}
+		var out map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		return out
+	}
+	installed := func(service, release, sha string) string {
+		t.Helper()
+		in := &platformlife.Installation{Name: "lab", ServiceID: service}
+		if err := store.Create(ctx, in); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.C(platformlife.InstallationCollection).SetByID(ctx, in.ID, pgdoc.M{"status": pgdoc.M{"phase": "ready",
+			"bom": pgdoc.M{"release": release, "sha256": sha}}}, nil); err != nil {
+			t.Fatal(err)
+		}
+		return "/admin/platform/installations/" + in.ID
+	}
+	cur, err := platformlife.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sha080 = "8eb874987d3bbaf55f309295ee241ec320c0cf9e0805b3bd1812ef908b6600c6" // status.bom of a platform v0.8.0 installed
+	if cur.SHA256 == sha080 {
+		t.Fatal("this build's own BOM is the 0.8.0 one")
+	}
+
+	one := installed("svc-pve", "0.8.0", sha080)
+	plan := call(http.MethodGet, one+"/plan", "", http.StatusOK)["data"].(map[string]any)
+	target, _ := plan["target"].(map[string]any)
+	newer, _ := plan["newer"].(map[string]any)
+	if target["sha256"] != sha080 || newer["sha256"] != cur.SHA256 || newer["release"] != cur.Release ||
+		len(plan["changes"].([]any)) != 0 || len(plan["blocking"].([]any)) != 0 {
+		t.Fatalf("plan of a 0.8.0 platform: %v", plan)
+	}
+	if b := call(http.MethodGet, "/admin/platform/bom?sha256="+sha080, "", http.StatusOK)["data"].(map[string]any); b["release"] != "0.8.0" {
+		t.Fatalf("the installed BOM: %v", b["release"])
+	}
+	data := call(http.MethodPost, one+"/runs", `{"kind":"apply"}`, http.StatusAccepted)["data"].(map[string]any)
+	if run, err := store.Run(ctx, data["runId"].(string)); err != nil || run.BOM != (platformlife.BOMRef{Release: "0.8.0", SHA256: sha080}) {
+		t.Fatalf("the apply does not run with the installed BOM: %+v %v", run, err)
+	}
+
+	dev := installed("svc-pve-2", "0.8.0-dev", strings.Repeat("1", 64))
+	plan = call(http.MethodGet, dev+"/plan", "", http.StatusOK)["data"].(map[string]any)
+	if blocking := fmt.Sprint(plan["blocking"]); !strings.Contains(blocking, platformlife.CodeBOMUnsupported) || plan["newer"] != nil {
+		t.Fatalf("plan of a platform a build of main installed: %v", plan)
+	}
+	if a := call(http.MethodPost, dev+"/runs", `{"kind":"apply"}`, http.StatusConflict); !strings.Contains(fmt.Sprint(a), platformlife.CodeBOMUnsupported) {
+		t.Fatalf("apply on an unknown BOM: %v", a)
+	}
+	call(http.MethodGet, "/admin/platform/bom?sha256="+strings.Repeat("1", 64), "", http.StatusNotFound)
+	call(http.MethodPost, dev+"/runs", `{"kind":"remove"}`, http.StatusAccepted)
+}
+
 // TestPlatformRunMutate: the runner's write seals the secrets, deletes a secrets document left empty, and keeps the
 // run and the installation together.
 func TestPlatformRunMutate(t *testing.T) {
@@ -590,5 +704,173 @@ func TestPlatformRegisterAndDisable(t *testing.T) {
 	}
 	if row(id)["status"] != "DISABLED" || row(first)["status"] != "PUBLIC" || row("svc-foreign")["status"] != "PUBLIC" || !sealed(row(id), "kubeconfig-two-0123456789") {
 		t.Fatalf("after Disable: %v %v %v", row(id), row(first), row("svc-foreign"))
+	}
+}
+
+// TestPlatformClusterKubeconfig drives GET …/platform-kubeconfig against PostgreSQL with the seed and the platform
+// cluster on fakes: SUPPORT is refused before anything is asked of a cluster; ADMIN gets a kubeconfig whose token is the
+// one-hour token of the break-glass account, not the admin credential the seed holds; the audit log gets one
+// BREAK_GLASS row with the operation and the same expiry and no token; a cluster that grants a longer life, or an
+// installation without a cluster, gets no kubeconfig and no row; neither does a call whose audit row cannot be written.
+func TestPlatformClusterKubeconfig(t *testing.T) {
+	ctx := context.Background()
+	db := freshPG(t)
+	const seedToken, adminToken, minted = "planted-seed-token-0123456789", "planted-admin-credential-0123456789", "minted-break-glass-token-0123456789"
+	pemOf := func(s *httptest.Server) string {
+		return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: s.Certificate().Raw}))
+	}
+	var mu sync.Mutex
+	var wlCalls []string
+	life := time.Hour
+	wl := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.Header.Get("Authorization") != "Bearer "+adminToken {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		wlCalls = append(wlCalls, r.Method+" "+r.URL.Path)
+		if strings.HasSuffix(r.URL.Path, "/token") {
+			var req struct {
+				Spec struct {
+					ExpirationSeconds int64 `json:"expirationSeconds"`
+				} `json:"spec"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if req.Spec.ExpirationSeconds != 3600 {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			fmt.Fprintf(w, `{"status":{"token":%q,"expirationTimestamp":%q}}`, minted, time.Now().Add(life).UTC().Format(time.RFC3339))
+			return
+		}
+		w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(wl.Close)
+	adminKubeconfig, err := kamajik8s.BuildKubeconfig("pc-platform", wl.URL, []byte(pemOf(wl)), adminToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasCluster := true
+	seed := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+		switch {
+		case r.Header.Get("Authorization") != "Bearer "+seedToken || r.Method != http.MethodGet:
+			w.WriteHeader(http.StatusUnauthorized)
+		case !hasCluster:
+			w.WriteHeader(http.StatusNotFound)
+		case r.URL.Path == "/api/v1/namespaces/pc-platform/secrets/pc-platform-kubeconfig":
+			fmt.Fprintf(w, `{"data":{"value":%q}}`, b64(adminKubeconfig))
+		case r.URL.Path == "/api/v1/namespaces/pc-platform/secrets/pc-platform-ca":
+			fmt.Fprintf(w, `{"data":{"tls.crt":%q}}`, b64(pemOf(wl)))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(seed.Close)
+
+	mustInsert(t, db, "adminPermission", pgdoc.M{"_id": "support-sub", "role": "SUPPORT"})
+	mustInsert(t, db, "adminPermission", pgdoc.M{"_id": "admin-sub", "role": "ADMIN"})
+	jobs := durablejobs.New(db)
+	if err := jobs.Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	store := platformlife.NewStore(db, textcrypt.New("test-key"))
+	if err := store.Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	in := &platformlife.Installation{Name: "lab", ServiceID: "svc-pve"}
+	if err := store.Create(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Mutate(ctx, run.ID, func(_ *platformlife.Run, in *platformlife.Installation, sec *platformlife.Secrets) error {
+		in.Status.Seed = &platformlife.SeedStatus{VMID: 120, APIServer: seed.URL, CACert: pemOf(seed)}
+		sec.SeedKubeconfig = &platformlife.SeedKubeconfig{Server: seed.URL, CA: pemOf(seed), Token: seedToken}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := admin.NewHandler(admin.NewRepo(db), nil, nil, nil, nil, nil, nil, nil, audit.NewService(audit.NewRepo(db), slog.Default()),
+		externalservice.NewService(externalservice.NewRepo(db), textcrypt.New("test-key")), "", "", "")
+	h.SetPlatform(store)
+	router := chi.NewRouter()
+	h.Routes(router)
+	get := func(sub string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/admin/platform/installations/"+in.ID+"/platform-kubeconfig", nil)
+		req = req.WithContext(httpx.WithRC(req.Context(), &httpx.RequestContext{Sub: sub}))
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		return w
+	}
+	rows := func() []pgdoc.M {
+		var events []pgdoc.M
+		if err := db.C("auditEvent").Find(ctx, pgdoc.M{"action": admin.ActionBreakGlass}, &events); err != nil {
+			t.Fatal(err)
+		}
+		return events
+	}
+
+	if w := get("support-sub"); w.Code != http.StatusForbidden || len(wlCalls) != 0 || len(rows()) != 0 {
+		t.Fatalf("SUPPORT: %d %s, platform cluster calls %v", w.Code, w.Body.String(), wlCalls)
+	}
+
+	w := get("admin-sub")
+	var a struct {
+		Data struct {
+			Kubeconfig string    `json:"kubeconfig"`
+			ExpiresAt  time.Time `json:"expiresAt"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &a); err != nil || w.Code != http.StatusOK || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("ADMIN: %d %q %s", w.Code, w.Header().Get("Cache-Control"), w.Body.String())
+	}
+	if left := time.Until(a.Data.ExpiresAt); left > time.Hour || left < 59*time.Minute {
+		t.Fatalf("expires in %s, want one hour", left)
+	}
+	if kc := a.Data.Kubeconfig; !strings.Contains(kc, "token: "+minted) || !strings.Contains(kc, wl.URL) ||
+		strings.Contains(w.Body.String(), adminToken) || strings.Contains(w.Body.String(), seedToken) {
+		t.Fatalf("the kubeconfig is not the break-glass account's on the platform cluster: %s", w.Body.String())
+	}
+	if last := wlCalls[len(wlCalls)-1]; last != "POST /api/v1/namespaces/kube-system/serviceaccounts/proxcloud-break-glass/token" {
+		t.Fatalf("the token is not the break-glass account's: %v", wlCalls)
+	}
+	events := rows()
+	raw, _ := json.Marshal(events)
+	if len(events) != 1 || !strings.Contains(string(raw), `"operation":"platform-kubeconfig"`) || !strings.Contains(string(raw), "admin-sub") ||
+		!strings.Contains(string(raw), in.ID) || !strings.Contains(string(raw), `"expiresAt":"`+a.Data.ExpiresAt.UTC().Format(time.RFC3339)+`"`) ||
+		strings.Contains(string(raw), minted) || strings.Contains(string(raw), adminToken) {
+		t.Fatalf("audit rows: %s", raw)
+	}
+
+	// A platform cluster that grants a day: 502, no kubeconfig, no new row.
+	mu.Lock()
+	life = 24 * time.Hour
+	mu.Unlock()
+	if w := get("admin-sub"); w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), platformlife.CodeWorkloadUnreachable) ||
+		strings.Contains(w.Body.String(), minted) || len(rows()) != 1 {
+		t.Fatalf("a 24 hour token: %d %s", w.Code, w.Body.String())
+	}
+	// No cluster on the seed: 409 no_cluster.
+	mu.Lock()
+	hasCluster = false
+	mu.Unlock()
+	if w := get("admin-sub"); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "no_cluster") || len(rows()) != 1 {
+		t.Fatalf("no cluster: %d %s", w.Code, w.Body.String())
+	}
+	// An audit entry that cannot be written: the token was asked for, and the kubeconfig still stays in.
+	mu.Lock()
+	life, hasCluster = time.Hour, true
+	mu.Unlock()
+	if _, err := db.Pool.Exec(ctx, `CREATE FUNCTION audit_test_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected audit failure'; END $$; CREATE TRIGGER audit_test_fail BEFORE INSERT ON "auditEvent" FOR EACH ROW EXECUTE FUNCTION audit_test_fail()`); err != nil {
+		t.Fatal(err)
+	}
+	if w := get("admin-sub"); w.Code < 500 || strings.Contains(w.Body.String(), minted) || strings.Contains(w.Body.String(), `"kubeconfig"`) || len(rows()) != 1 {
+		t.Fatalf("audit insert fails: %d %s", w.Code, w.Body.String())
 	}
 }

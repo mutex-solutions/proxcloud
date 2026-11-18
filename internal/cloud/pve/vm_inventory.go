@@ -2,8 +2,8 @@ package pve
 
 // VM inventory is a proof for ONE read/reconcile, using the provider's configured
 // credential only. Pool GET and cluster/resources both filter invisible VMs.
-// Positive members suffice for ordinary refreshes; omissions need a complete
-// namespace/ACL proof, never a grace period, root reader or Pool.Audit alone.
+// Positive members suffice for ordinary refreshes; an omission needs the VMID to
+// be free in the whole cluster, never a grace period, root reader or Pool.Audit alone.
 import (
 	"context"
 	"crypto/sha256"
@@ -230,8 +230,11 @@ func (v *vmInventory) row(id int) *ClusterResource {
 	return nil
 }
 
-// completeVMVisibility reads the FULL ACL tree only after self Sys.Audit on
-// /access. The all-permissions map omits NoAccess, so it cannot replace this.
+// completeVMVisibility proves that the token sees EVERY guest of the cluster. Only
+// the public IP release needs that (another guest's NIC can hold the address);
+// row retirement does not (vmGone). It reads the FULL ACL tree only after self
+// Sys.Audit on /access. The all-permissions map omits NoAccess, so it cannot
+// replace this. The documented grants have neither that nor an ACL on /vms.
 func (c *Client) completeVMVisibility(ctx context.Context) (string, error) {
 	if err := c.vmInventoryPermission(ctx, "/access", "Sys.Audit", false); err != nil {
 		return "", err
@@ -300,7 +303,7 @@ func (v *vmInventory) verify(ctx context.Context, typ string, cached, listed []c
 			return bad(cr.ExternalID, "listed VM UUID not proved", nil)
 		}
 	}
-	absent := []int{}
+	absent := map[int]string{} // VMID -> the SMBIOS UUID its cached rows agree on, "" when they do not
 	retiring := false
 	for i := range cached {
 		cr := &cached[i]
@@ -359,35 +362,27 @@ func (v *vmInventory) verify(ctx context.Context, typ string, cached, listed []c
 			retiring = true
 			continue
 		}
-		absent = append(absent, id)
+		if was, seen := absent[id]; seen && was != vmRowUUID(cr) {
+			absent[id] = ""
+		} else {
+			absent[id] = vmRowUUID(cr)
+		}
 	}
-	var before string
+	// Retirement needs no view of other pools. A changed identity is read from a
+	// VM the token sees; an omission is proved by the VMID being free in the whole
+	// cluster, which /cluster/nextid answers whatever this token may audit.
 	if retiring || len(absent) > 0 {
 		for _, node := range v.nodes {
 			if !v.online[node] {
 				return bad("", "absence cannot be proved while a node is offline", nil)
 			}
 		}
-		var err error
 		if err := v.completeNodes(ctx); err != nil {
 			return bad("", "complete online node membership required for retirement", err)
 		}
-		before, err = v.svc.C.completeVMVisibility(ctx)
-		if err != nil {
-			return bad("", "omission requires complete same-token VM/ACL authority (no automatic grant)", err)
-		}
-		for _, id := range absent {
-			if v.row(id) != nil {
-				return bad(strconv.Itoa(id), "VM exists outside the expected pool; owner transition needs operator reconciliation", nil)
-			}
-			// Even an authoritative page is bracketed by exact by-id absence on EVERY
-			// online node: an omitted/migrating config must not retire an old row.
-			for _, node := range v.nodes {
-				var cfg VMConfig
-				err := v.svc.C.inventoryRead(ctx, qemuPath(node, id)+"/config", url.Values{"current": {"1"}}, &cfg)
-				if !vmConfigAbsent(err, node, id) {
-					return bad(strconv.Itoa(id), "missing VM config is not positively absent", err)
-				}
+		for id, uuid := range absent {
+			if err := v.vmGone(ctx, typ, id, uuid); err != nil {
+				return err
 			}
 		}
 	}
@@ -419,13 +414,14 @@ func (v *vmInventory) verify(ctx context.Context, typ string, cached, listed []c
 			return bad(strconv.Itoa(id), "VM.Audit revoked during proof", err)
 		}
 	}
-	if before != "" {
+	if retiring || len(absent) > 0 {
 		if err := v.completeNodes(ctx); err != nil {
 			return bad("", "node membership changed during proof", err)
 		}
-		after, err := v.svc.C.completeVMVisibility(ctx)
-		if err != nil || after != before {
-			return bad("", "VM authority changed during proof", err)
+		for id, uuid := range absent {
+			if err := v.vmGone(ctx, typ, id, uuid); err != nil {
+				return err
+			}
 		}
 	}
 	v.verified = true
@@ -441,23 +437,35 @@ func sameVMPool(a, b *PoolInfo) bool {
 	slices.SortFunc(y, func(a, b PoolMember) int { return strings.Compare(a.ID, b.ID) })
 	return slices.Equal(x, y)
 }
-func vmConfigAbsent(err error, node string, id int) bool {
-	var ae *APIError
-	if !errors.As(err, &ae) {
-		return false
-	}
 
-	exact := fmt.Sprintf("Configuration file 'nodes/%s/qemu-server/%d.conf' does not exist", node, id)
-	if ae.Status == 500 {
-		if strings.TrimSpace(ae.Message) == exact {
-			return true
+// vmGone proves that the VM of a cached row is gone: no guest anywhere in the
+// cluster holds its VMID, or the guest that holds it is one the token reads and
+// has another SMBIOS UUID (Proxmox hands out the lowest free VMID, so a VM of
+// another project takes the number). A VMID held by a guest the token cannot
+// see keeps the row: a VM moved out of the project pool or hidden by an ACL is
+// still this portal's, and the token cannot tell it from a foreign guest.
+func (v *vmInventory) vmGone(ctx context.Context, typ string, id int, uuid string) error {
+	ext := strconv.Itoa(id)
+	if r := v.row(id); r != nil {
+		cfg, err := v.svc.inventoryCurrentConfig(ctx, r.Node, id)
+		if now := vmConfigUUID(cfg); err != nil || r.Type != "qemu" || uuid == "" || now == "" || now == uuid {
+			return vmInventoryError(typ, ext, "VM exists outside the expected pool; owner transition needs operator reconciliation", err)
 		}
-		if len(ae.Errors) == 1 && strings.TrimSpace(ae.Errors["vmid"]) == exact {
-			return true
-		}
+		return nil
 	}
-	// A masked parameter400 is only evidence AFTER complete authority was proved.
-	return ae.Status == 400 && len(ae.Errors) == 1 && ae.Errors["vmid"] == "could not find vmid '"+strconv.Itoa(id)+"'"
+	free, err := v.svc.C.VMIDFree(ctx, id)
+	if err != nil {
+		return vmInventoryError(typ, ext, "cannot read whether the VMID is free", err)
+	}
+	if free {
+		return nil
+	}
+	// Name what the token is missing: its project pool, or this one VMID.
+	cause := v.svc.C.vmInventoryPermission(ctx, "/pool/"+v.pool.PoolID, "VM.Audit", true)
+	if cause == nil {
+		cause = fmt.Errorf("configured token has no VM.Audit on /vms/%d, which is not a visible member of pool %s", id, v.pool.PoolID)
+	}
+	return vmInventoryError(typ, ext, "a guest this token cannot see holds the VMID", cause)
 }
 
 func (p *ServerSyncProvider) VerifyInventory(ctx context.Context, cached, listed []cloud.CloudResource) error {

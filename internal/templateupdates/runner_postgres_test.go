@@ -655,3 +655,32 @@ func TestPGDeferKeepsAttempts(t *testing.T) {
 	}
 	_ = db
 }
+
+// F48: the import a platform run made gets no automatic smoke test (it would clone beside the run's own build); the
+// reason is on the import, the smoke network is not even read, and no smoke job is queued.
+func TestPGAutoSmokeSkipsPlatformRunImports(t *testing.T) {
+	db, jobs := pgFixture(t)
+	ctx := context.Background()
+	s, req := pgService(t, db, jobs)
+	if err := db.C(ReceiptCollection).Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := s.EnqueueVM(ctx, req, PlatformRunActor+"pr-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AutoSmoke(ctx, rec.ID, func(context.Context, string, string) (SmokeNetwork, error) {
+		t.Fatal("the smoke network was read for a platform run's import")
+		return SmokeNetwork{}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := (PGReceipts{DB: db}).Load(ctx, rec.ID)
+	var queued int
+	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM durable_job WHERE kind=$1`, durablejobs.TemplateUpdateSmoke).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if got.Smoke == nil || got.Smoke.Code != "smoke_not_started" || got.Smoke.JobID != "" || !strings.Contains(got.Smoke.Message, "platform run") || queued != 0 {
+		t.Fatalf("smoke %+v, %d smoke jobs", got.Smoke, queued)
+	}
+}

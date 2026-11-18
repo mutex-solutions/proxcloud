@@ -68,6 +68,35 @@ Each domain registers its own `Routes()` under `/api/v1` (see `AppRouter` in
 | `streaming` | SSE real-time event stream (`/events/{projectId}`) |
 | `callbacks`, `payments`, `webhooks` | Inbound webhooks (public whitelist) |
 
+Deleting a project: `DELETE /api/v1/project/{id}/now` (and the operator's
+`DELETE /api/v1/admin/project/{id}/now`) only flags the project; the deletion job
+of the scheduler tears its cloud resources down and removes it. While the scheduler
+is off (`PROXCLOUD_JOBS_SCHEDULER_ENABLED`, and no debug triggers) the call answers
+`409` and changes nothing, instead of leaving the project `DELETE_IN_PROGRESS`.
+
+Networks on a Proxmox provider: `POST /api/v1/project/{id}/cloud` with
+`{type: NETWORK, data: {name, cidr?, enableDhcp?, snat?}}`. `snat` defaults to
+`true`, except in a `vlan` zone, where Proxmox does no DHCP and no SNAT: both
+flags default to `false` there, the answer says `dhcp: false` and `snat: false`,
+and `true` for either is a `400` (so are the actions `ADD_SUBNET` and `SET_SNAT`
+with `snat: true`). The `gateway` of such a network is the address the site's
+router holds.
+
+`enableDhcp` follows the zone as Proxmox has it, read at the create: it defaults
+to `true` only where the zone runs a DHCP server (a `simple` zone with
+`dhcp: dnsmasq`, which is how ProxCloud creates one unless its config says
+`"dhcp": false`). In every other zone (EVPN, VLAN, a `simple` zone without a
+DHCP server) it defaults to `false`, no DHCP range is written on the subnet, and
+`enableDhcp: true` is a `400` that says the zone has no DHCP server; servers
+there get a fixed address the platform assigns. The `dhcp` a network answers, at
+the create, after a subnet action and at every sync, is `true` only when its
+subnet has a DHCP range and its zone runs a DHCP server. Up to v0.8.0 it
+followed the zone's configured kind and the subnet alone, so a network in a
+`simple` zone made without DHCP, or in an EVPN zone, answered `dhcp: true`; a
+sync corrects such a row. The DHCP range those subnets still carry is left in
+place: it does nothing without a DHCP server in the zone, and removing it would
+take an SDN apply on a running site.
+
 Project public-network policy: `GET /api/v1/project/{id}/public-networks` lists
 the external (public) networks the project is allowed to use, and
 `PUT /api/v1/admin/project/{id}/public-networks` (operator console surface) sets
@@ -80,6 +109,41 @@ address from that network's pool, pinned by the VM firewall's ipfilter
 (`internal/platform/project/cloud_network_pve.go`). The network must be in the
 project's allow-list. Attaching again while the NIC is plugged answers 409 and
 leaves it alone; an address held by a NIC that never got plugged is plugged.
+
+Security group rules on a Proxmox provider: actions on
+`POST /api/v1/project/{id}/cloud/{resourceId}/action`, where the resource is a
+`SECURITY_GROUP` (`internal/platform/project/cloud_writes_pve.go`). A group is an
+allow list for inbound traffic. Nothing here is lab-verified on PVE 9.2 in this
+form; the tests run against a fake Proxmox.
+
+- `LIST_RULES`: the rules, from the cache row. Each has `id`, `direction`
+  (`ingress` or `egress`), `protocol`, `port_range` (`22` or `8000:8100`),
+  `remote_ip_prefix` (the source of an ingress rule, the destination of an egress
+  rule), `description` and `pos`. The `id` is
+  `<group>-<position>-<fingerprint of the rule's content>`: it names that rule at
+  that position and stops matching when the rule moves or changes.
+- `ADD_RULE`, data `direction` (`ingress`, the default, or `egress`), `protocol`
+  (`tcp`, `udp`, `sctp`, `icmp`, `gre`, `esp`, `ah`; absent or empty for any),
+  `portRangeMin` and `portRangeMax` (whole numbers from 1 to 65535, destination
+  ports; they need `tcp`, `udp` or `sctp`), `remoteIpPrefix` (a CIDR without host
+  bits, or one address; absent for anywhere), `description`. Every rule is an
+  allow rule. Any other key is a `400` that names it (`remoteGroupId`, `action`,
+  `log`, `priority` and the rest: the provider cannot honour them, and dropping
+  one would store a wider rule than asked), and so is a value that fails the
+  checks above. What only Proxmox refuses comes back as a `400` with its text.
+  An egress rule is stored with the CIDR as its destination and **restricts
+  nothing**, because every server's outbound policy is ACCEPT: the answer then
+  carries `result.warning` saying so.
+- `DELETE_RULE`, data `ruleId` (the `id` from `LIST_RULES`). Without `ruleId` the
+  answer is `400`; `pos` is no longer taken, because a position names whatever
+  rule sits there now. When no rule of the group has that id any more (a rule was
+  added or deleted since the list was read, or the id is of the shape
+  `<group>-<position>` that v0.8.0 listed) the answer is `409`, nothing is
+  deleted and the cache row is refreshed: list the rules again and repeat the
+  delete with the current id. The delete also sends Proxmox the digest of the
+  rule list it was checked against, so a change between the check and the delete
+  is refused by Proxmox and answered `409` too.
+- There is no rule update: `UPDATE_RULE` is a `400`. Delete and add.
 
 Proxmox connection test: `POST /api/v1/admin/service/proxmox/auth`
 (`admin:service:read`) tests a connection and stores nothing. The body takes
@@ -124,6 +188,7 @@ several findings puts one on each line of `message`. Rows after `connect` or
 | `mint-scope` | Only when it applies: the token holds `User.Modify` or `Permissions.Modify` on `/`, `/access` or `/access/groups` (it could create an API token for any user, `root@pam` included) or `Permissions.Modify` on `/pool` (it could write any role on every pool). The message says what to run | `warn` |
 | `store-reach` | Stored provider: tenant networks cannot reach the network stores | `warn` |
 | `boot-iso` | Stored provider: the Kubernetes bootstrap ISO store is usable | `warn` |
+| `csi-vmid` | No guest has VM id 9999, the id proxmox-csi names its volumes after (`vm-9999-pvc-<uuid>`). In use: the message says never to destroy that VM with "Destroy unreferenced disks owned by guest", and it is in `warnings` too. An id that could not be read is a `warn` row only | `warn` |
 | `version` | Proxmox VE 9.2 or later | `fail` |
 | `template-pool` | The pool `pc-templates` exists. When it does not, the first template import creates it (`Pool.Allocate` on `/pool`); `pveum pool add pc-templates` is only for a token without that privilege | `warn` |
 | `import-store` | Some storage takes `import` content. Stored provider with `importStorage`: that storage exists, takes it, and the token can delete files there | `warn` |
@@ -185,6 +250,90 @@ answers `409` with the reason in `errors.details`:
 | `disabled_by_operator` | An operator disabled the project; only an operator enables it. |
 | `scheduled_for_deletion` / `deletion_in_progress` / `deleted` | The project is on its way out. |
 | `not_enabled` | Any other case where the project is not ENABLED. |
+
+Managed Kubernetes status: a `KUBERNETES_CLUSTER` resource's `data.cluster` carries, next to `status`, two optional
+fields that say why a cluster is not there yet. Both are absent on a settled cluster, and on an install whose
+management-cluster RBAC predates them.
+
+```json
+{"cluster": {"status": "PROGRESSING",
+  "attention": {"code": "control_plane_stalled", "since": "2026-11-17T09:12:00Z"},
+  "node_groups": [{"name": "workers", "count": 2, "ready_replicas": 1, "phase": "ScalingUp",
+    "progress": {"code": "not_joined", "since": "2026-11-17T09:20:00Z", "machines": 1, "attention": true}}]}}
+```
+
+`progress.code` is one of `provider_access_refused`, `no_capacity`, `vm_create_failed`, `vm_create_retrying`,
+`waiting_control_plane`, `creating_vm`, `starting_vm`, `not_joined`, `node_not_ready`, `provisioning`;
+`attention.code` is `control_plane_stalled` or `provider_access_refused`. `attention: true` means no progress for a
+bounded time or an error that is not retried; it clears by itself. `status` is unchanged by either.
+`cluster.attention` carries control-plane and provider codes only. A worker that stalls is reported on
+`node_groups[].progress.attention` and leaves `cluster.attention` absent, so a client that asks "does this cluster
+need attention" reads both: `cluster.attention` is present, or any `node_groups[].progress.attention` is true.
+Both are evaluated at a provider sync, not when the resource is read: with the default 15-minute sync a flag can
+show up to one interval after its bound has passed. The codes, their
+texts and the bounds: [managed-k8s.md](managed-k8s.md#provisioning-status-reason-and-needs-attention).
+
+Managed Kubernetes placement: on a cluster whose chart is 0.1.13 or later, `node_groups[i].placement` (`{"pve1": 2,
+"pve3": 1}`) says how many replicas of the group each Proxmox node runs. It is decided by the server at create,
+`SET_NODE_GROUPS` and `UPGRADE`, and is never read from a request; neither is a node group's `imageId`, which is
+ignored from v0.8.0 (the image comes from the provider's version matrix and the group's `imageVariant`). The node
+names are the ones `image_id` already carried. Create, `SET_NODE_GROUPS` and `UPGRADE` can answer `409` when the new
+workers do not fit or the cluster's storage is on no node that holds the image, and `503` when Proxmox cannot be read:
+[managed-k8s.md](managed-k8s.md#9-how-a-cluster-lands-on-proxmox).
+A node group of `SET_NODE_GROUPS` has the shape of a node group at create: `rootVolumeGiB` may be left out when the
+Kubernetes provider has a default root disk size (`config.cluster.rootVolumeGiB`), and a new group then gets the
+larger of that default and the flavor's disk. A group that already runs keeps the root disk size it has when the
+field is left out. Without a provider default a group without it answers `400`, at create too.
+
+`GET /api/v1/admin/service/{id}/k8s-clusters/{clusterId}/machines` (`admin:service:read`) is the operator's detail,
+read live from the management cluster:
+
+```json
+{"proxmoxCluster": {"conditions": [{"type": "ProxmoxAvailable", "status": "True"}]},
+ "machines": [{"name": "pc-c-1-workers-pve2-x7k2p-9d4tq", "nodeGroup": "workers", "phase": "Provisioned",
+   "lastUpdated": "2026-11-17T09:20:00Z", "nodeRef": "", "vmid": 142, "proxmoxNode": "pve2",
+   "addresses": ["10.20.0.12"], "code": "not_joined", "attention": true, "failureMessage": "",
+   "conditions": [{"type": "NodeHealthy", "status": "Unknown", "reason": "NodeDoesNotExist",
+     "message": "Waiting for a Node with spec.providerID proxmox://142 to exist", "lastTransitionTime": "2026-11-17T09:20:00Z"}]}]}
+```
+
+`conditions` joins the Machine's and its ProxmoxMachine's. Messages have credentials cut out and are clipped to 400
+characters. `404` for a cluster that is not this provider's; `502` with "re-apply deploy/mgmt-cluster/rbac.yaml" when
+the service account may not read Machines.
+
+Publishing a node image on every node: `GET /api/v1/admin/template-updates/publish-all?serviceId=…&digest=sha256:…`
+(`admin:service:read`) reports one artifact's state on every node of a Proxmox provider, and
+`POST /api/v1/admin/template-updates/publish-all` with `{"serviceId","package","digest","confirmDigest"}`
+(`admin:service:manage`) advances it one step: it publishes what passed its smoke test and starts at most one import
+or smoke test.
+
+```json
+{"digest": "sha256:…", "kubernetesVersion": "1.35.10",
+ "nodes": [{"node": "pve1", "state": "published", "vmid": 9210},
+           {"node": "pve2", "state": "smoke_queued", "vmid": 9211},
+           {"node": "pve3", "state": "missing"},
+           {"node": "pve4", "state": "skipped", "code": "node_down", "message": "The node is not online"}],
+ "versionsLine": "\"1.35.10\": \"pve1=9210\"", "complete": false, "nodesMissing": [], "next": "wait",
+ "actions": ["published pve1/9210", "smoke test queued pve2/9211"]}
+```
+
+`complete` is false while a node is down (`code` `node_down`): its copy cannot be read and is not in `versionsLine`.
+`next` is `advance` (post again), `wait` (a job of the provider runs), `blocked` or `done`. `blocked` means a step
+failed on a node: the node's `message` says what to do. An advance never repeats a smoke test or an import
+(`smoke_failed`, `smoke_not_started`, `import_failed`), so posting again changes nothing until that is done. A
+`publish_failed` is this post's own refused publish, and the next post tries that publish again.
+
+Errors, each with a `code` in `details`: `409` `busy` (another advance of that provider runs), `digest_withdrawn`,
+`vm_updates_disabled`, `provider_missing`, `provider_disabled` or `provider_incomplete`; `400` `confirm_digest` (the
+POST without a package or with a `confirmDigest` that is not the digest; a malformed digest); `502` `pve_unreadable`
+(the provider's nodes, VMs or storage could not be read; nothing was changed); `503` `pve_unwired`. An advance that
+has to start an import can also answer what the import does, without a `code`: `429` (GitHub rate limit), `502`
+(GitHub), `409` (the integration is not configured) or `400` (the artifact is refused).
+
+When an advance has already published a node and then cannot start its next job, it answers `200` with the report,
+`actions`, and `"error": {"code", "message"}` (`rate_limited`, a lifecycle code, or `next_step_failed`), so what it
+did is shown and audited; `next` is then `advance`. The states and the rules:
+[template-updates.md](template-updates.md#publish-on-all-nodes).
 
 ### Platform setup — `/api/v1/admin/setup`
 
@@ -299,7 +448,7 @@ makes the step `todo`, and a step is `blocked` only when it cannot start.
   `warn` is `attention`, `fail` is `todo`); the nodes with an active `import`
   store; the published OS images; and the imported templates by lifecycle
   state. `zone`, `cidr-pool`, `frr`, `public-networks` and `store-reach` go to
-  `network`, `storage-profile`, `import-store` and `boot-iso` to `storage`,
+  `network`, `storage-profile`, `import-store`, `boot-iso` and `csi-vmid` to `storage`,
   every other row to `connect`. A row that asks what a database item asks
   takes that item's place and id: `zone` the item `zone`, `cidr-pool` the item `cidrPool`,
   `storage-profile` the item `defaultProfile`. A cluster that does not answer
@@ -335,6 +484,10 @@ release with their sha256, the Cluster API providers, the tenant charts, and
 every component with its cluster, wave, namespace, node group and chart
 (`repo`, `name`, `version`, `digest`). `sha256` is the hash of the file, the
 key a run records it by. It needs `admin:service:read` and changes nothing.
+With `?sha256=<hash>` it answers the BOM with that hash that the release
+carries, its own or the one of an earlier release from 0.8.0 on
+(`deploy/platform/previous/`), which a platform that release installed stays
+on; `404 bom_unsupported` when the release carries none with that hash.
 
 The file pins exact versions only. A digest is the chart's OCI manifest
 digest, or for an `https://` repository the `digest` of that version in its
@@ -383,17 +536,28 @@ are several, `errors.details.problems`.
   `PROXCLOUD_ENCRYPTION_DEFAULT_KEY` the route answers `409 no_encryption_key`.
   No route returns a secret: an installation shows `credentials.{capi,csi}.tokenId`.
 - `POST /installations/{id}/preflight`: read-only, not audited; `{ok, checks}`
-  with rows `flags`, `spec`, `network`, `isolation`, `tenant-network`, `credentials`,
+  with rows `flags`, `spec`, `network`, `isolation`, `tenant-network`, `tenant-path`, `csi-vmid`, `credentials`, `machines`,
   `privileges:capi`, `privileges:csi`, `privileges:kubemint`, `mint-scope`, `pool-fence`,
   `token-scope`, `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement` and
   `images`. A row's `status` is `ok`, `fail` or `warn`; `ok` in the answer is
-  false only when a row failed. `tenant-network` never fails. It reads the provider's default
+  false only when a row failed. `csi-vmid` never fails: it warns when a guest has VM id 9999
+  (see the connection test's row of that id). `tenant-network` never fails. It reads the provider's default
   zone in Proxmox: `warn` when that zone has DHCP, when it does not exist yet and is
-  configured as a `simple` zone (ProxCloud creates one with DHCP), or when the zones
+  configured as a `simple` zone without `"dhcp": false` (ProxCloud then creates it with DHCP), or when the zones
   could not be read; a tenant Kubernetes cluster create on a network of such a zone is
   refused with a `400`, except on a Kubernetes provider with shared workers
   (`cluster.shared`), which uses no tenant network. It is `ok` for a zone without
   DHCP, and absent when the provider names no zone.
+  `tenant-path` never fails either and is absent in the same case. It reads the layout (the default zone's kind,
+  the nodes it translates tenant traffic on, the nodes of the platform machines, and whether such a node holds the
+  platform gateway on the platform bridge) and is `warn` when a node that translates also hosts a platform machine
+  without routing the platform network, or when Proxmox could not be read. It opens no connection, so `ok` does not
+  prove that tenants reach the platform ([managed-services.md](managed-services.md#the-path-from-tenants-to-the-platform)).
+  `machines` never fails either, and is absent while the installation has no VM. It reads, with the CAPI
+  token, the VMs of the pools `proxcloud-seed` and `proxcloud-system` that carry the installation's tag:
+  `warn` with one line per VM that is stopped (start it in Proxmox, `qm start <vmid>`) or that has no
+  `onboot` (the next apply sets it, or `qm set <vmid> --onboot 1`) or that the token could not read (the
+  other VMs are still listed), or when the pools could not be read.
   `isolation` fails, naming the CIDRs to add to `blockedCidrs`, when
   the seed, the API VIP or the node range is outside the blocked and management
   networks, and when the cluster firewall's isolation rules are not the ones the
@@ -414,11 +578,16 @@ are several, `errors.details.problems`.
   when `capmox@pve!capi` or `csi@pve!csi` holds a privilege on `/pool`, `/storage`
   or `/vms`, and names the `pveum acl delete` command, or which row of
   `pveum acl list` is the one to remove. A row that cannot be read fails.
-- `GET /installations/{id}/plan`: the installed BOM against this release's
-  (`installed`, `target`, `changes`, `blocking`); a version change not listed in
-  `upgradeFrom` and the removal of a stateful component block, and an installed
-  BOM this release does not carry blocks with `bom_unsupported` (no release
-  upgrades between BOMs yet).
+- `GET /installations/{id}/plan`: what an apply does (`installed`, `target`,
+  `newer`, `changes`, `blocking`). `target` is the BOM the apply runs with: this
+  release's for a new installation, the installed one for an installed platform,
+  which stays on its BOM, so `changes` is empty. `newer` is this release's own
+  BOM (`release`, `sha256`) when the platform stays on the BOM of an earlier
+  release; absent otherwise. No release moves an installed platform to a newer
+  BOM yet. An installed BOM this release does not carry (its own and those of
+  earlier releases from 0.8.0 on; not one of a build of `main`) blocks with
+  `bom_unsupported`. A version change not listed in `upgradeFrom` and the removal
+  of a stateful component block; no plan produces either today.
 
 - `GET /installations/{id}?live=1`: the installation with `live`
   (`phase`, `components[] {name, cluster, sync, health}`, `error`, `code`),
@@ -433,7 +602,8 @@ are several, `errors.details.problems`.
   and its durable job (`platform.run/v1`, key `platform-run-<runId>`) are
   written in one transaction; `409 run_active` while another run of the
   installation is not finished, `409 bom_unsupported` when the installed BOM is
-  not one this release carries. Without the runner (it starts only when
+  not one this release carries. An apply on an installed platform runs with
+  the installed BOM (the run's `bom`), also when this release's own is another. Without the runner (it starts only when
   `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true` too) the route answers
   `409 platform_disabled`; the reads below still work. A plain remove is
   `{"kind":"remove"}`. `confirm` is optional, belongs to a remove only and asks
@@ -471,7 +641,26 @@ are several, `errors.details.problems`.
   and the expiry, never the token, and is written before the answer; `409
   no_seed` without a ready seed, `502` when the seed issues no token, `503`
   when the API has no audit service (no token is asked for). The answer
-  carries `Cache-Control: no-store`.
+  carries `Cache-Control: no-store`. The entry's `operation` is
+  `seed-kubeconfig`.
+- `GET /installations/{id}/platform-kubeconfig` (`admin:service:manage`,
+  although a GET): `{kubeconfig, expiresAt}`, a kubeconfig of the platform
+  cluster with a one-hour token of its service account
+  `kube-system/proxcloud-break-glass`. The route reads the cluster's admin
+  kubeconfig and CA from the seed, writes that account, a ClusterRole and a
+  Role in `argocd` with their bindings on the cluster (all named
+  `proxcloud-break-glass`; written again by each call), and asks the cluster
+  for the token. The admin kubeconfig is never returned. The token reads the
+  cluster without its Secrets and may forward a port in `argocd` and read
+  `argocd-initial-admin-secret` there; it changes nothing
+  ([managed-services.md](managed-services.md#8-credentials-and-the-seed-backup)
+  has the rules and what they do not limit). Nothing stores it. Audit entry,
+  order, `no-store` and `503` as for `seed-kubeconfig`, with `operation:
+  platform-kubeconfig`. `409 no_seed` without a ready seed; `409 no_cluster`
+  when the seed holds no admin kubeconfig or CA of the cluster yet; `502
+  seed_api_unreachable` when the seed does not answer; `502
+  workload_api_unreachable` when the cluster refuses a write or the token, or
+  grants the token for longer than the hour.
 - `POST /installations/{id}/seed-credential/rotate`: creates the service
   account's next token Secret (`proxcloud-portal-token-g<n+1>`), checks that
   its token is cluster-admin, stores it, then deletes the older token Secrets,

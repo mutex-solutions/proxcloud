@@ -179,7 +179,11 @@ feature off. The last lines of `install` (also with `--dry-run`) say what is on.
   store with `import` content: [template updates](../../docs/template-updates.md).
 - **`--scheduler`** starts the timed jobs ([jobs and scheduling](../../docs/jobs-scheduling.md)).
   Without it nothing runs on a timer: resources are synchronised only when an operator starts a
-  sync, and no new charge is started. With it, among others:
+  sync, and no new charge is started. **No project can be deleted without it**: the job that
+  tears a project's cloud resources down is one of the timed jobs, so "Delete now" (customer and
+  operator console) is refused with a `409` that names the scheduler, and nothing is changed. A
+  delete with the five-minute grace period is accepted and stays scheduled, cancellable, until the
+  scheduler runs; an organization cannot be deleted while it has a project. With it, among others:
   - resources and Proxmox state are synchronised every minute to every 15 minutes;
   - usage is charged every minute and every hour, at the rates of the enabled price plans;
   - the bills of the previous month are issued, cards are collected, unpaid profiles are
@@ -212,10 +216,11 @@ feature off. The last lines of `install` (also with `--dry-run`) say what is on.
   token secrets and presses Install. The steps, the stages of the job, every failure code, Remove and
   the limits of this stack are in [managed-services.md](../../docs/managed-services.md).
 
-  v0.8.0 is not released yet, so no released image reads `PROXCLOUD_PLATFORM_ENABLED` today. Not
-  verified: a platform built from this stack (the path has not run on a lab).
+  No release before v0.8.0 reads `PROXCLOUD_PLATFORM_ENABLED`. A platform was built from this stack
+  on the published images of v0.8.0 once, on a lab (2026-11-18); not on those of v0.8.1 (the other
+  lab runs used `dev-<sha>` builds of main, [managed-services.md](../../docs/managed-services.md#not-verified-on-a-lab-yet)).
 
-  **Testing before the release.** `--version dev-<sha>` and `upgrade dev-<sha>` take a build of main
+  **Testing ahead of a release.** `--version dev-<sha>` and `upgrade dev-<sha>` take a build of main
   (CI publishes the images `dev-<first 7 characters of the commit>` on every push to main that
   changes them); `<sha>` is 7 to 40 lower-case hex digits and no other tag is accepted. The script
   prints a warning each time: such a build is not a release, has no release notes and no tested

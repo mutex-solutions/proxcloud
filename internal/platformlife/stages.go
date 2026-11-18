@@ -94,7 +94,7 @@ func (x *acq) images(ctx context.Context) error {
 		return classify(CodeImageImportFailed, err)
 	}
 	opts := templateupdates.PlacementOptions(caps, sp.Storage.Import)
-	actor := "platform-run:" + x.run.ID
+	actor := templateupdates.PlatformRunActor + x.run.ID
 	items, templates, ours := []StageItem{}, map[string]int{}, []string{}
 	for _, w := range wants {
 		if !templateupdates.PlacementAllowed(opts, w.node, sp.Storage.Import, sp.Storage.Boot) {
@@ -184,7 +184,7 @@ func (x *acq) image(ctx context.Context, node string, img VMImage, rows []pve.Cl
 	var refusal *templateupdates.LifecycleError
 	switch {
 	case errors.Is(err, templateupdates.ErrBlocklisted):
-		return "", 0, permanent(CodeImageBlocked, "%s %s is on the template update blocklist: install a newer ProxCloud release.", img.Package, img.Digest)
+		return "", 0, permanent(CodeImageBlocked, "%s %s is on the template update blocklist: %s.", img.Package, img.Digest, blockedAdvice(x.in))
 	case errors.Is(err, templateupdates.ErrDuplicate):
 		return string(templateupdates.StepQueued), 0, nil
 	case errors.As(err, &refusal) || errors.Is(err, templateupdates.ErrRefused):

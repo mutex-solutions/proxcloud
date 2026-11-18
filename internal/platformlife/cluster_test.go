@@ -156,8 +156,21 @@ func TestApplyBuildsThePlatform(t *testing.T) {
 	p.seed.put(capiNS+"machinedeployments/pc-platform-kamaji-pve9", meta("pc-platform-kamaji-pve9",
 		map[string]any{"cluster.x-k8s.io/cluster-name": ClusterName, "proxcloud.io/node-group": "kamaji"}))
 	p.seed.put(capiNS+"machinedeployments/tenant-md", meta("tenant-md", map[string]any{"cluster.x-k8s.io/cluster-name": "other"}))
+	// The machines as CAPMOX leaves them, without onboot; one that has it already, and another installation's VM.
+	tags := "proxcloud;pc-platform;pc-platform-" + inID
+	p.pve.vms[201] = &fakeVM{system: true, running: true, cfg: map[string]any{"name": "pc-platform-cp-1", "tags": tags}}
+	p.pve.vms[202] = &fakeVM{system: true, running: true, cfg: map[string]any{"name": "pc-platform-kamaji-pve2-1", "tags": tags, "onboot": 1}}
+	p.pve.vms[203] = &fakeVM{system: true, running: true, cfg: map[string]any{"name": "pc-platform-cp-9", "tags": "proxcloud;pc-platform;pc-platform-other"}}
 	if end := p.until(30); end != "complete" {
 		t.Fatalf("end %s: %+v\n%s", end, p.stage(stageWorkloadPlatform), p.logs)
+	}
+	// Stage 7 ends by setting onboot on this installation's machines that lack it, and on no other VM: after a node
+	// reboot Proxmox starts only those (v0.8.0 set it on the seed alone).
+	if got := p.pve.vms[201].cfg["onboot"]; got != "1" {
+		t.Errorf("machine 201 has onboot %v after stage 7", got)
+	}
+	if p.pve.writeCount("POST /nodes/pve1/qemu/202/config") != 0 || p.pve.writeCount("POST /nodes/pve1/qemu/203/config") != 0 {
+		t.Errorf("a machine that has onboot, or another installation's VM, was written: %v", p.pve.writes)
 	}
 	run, in, _ := p.state.snapshot()
 	cur, _ := Current()
@@ -289,6 +302,80 @@ func TestWaveStallDeadline(t *testing.T) {
 	})
 	if end := p.once(); end != "fail:"+CodeComponentUnhealthy {
 		t.Fatalf("after the deadline: %s", end)
+	}
+}
+
+// A platform v0.8.0 installed, applied again on a build whose own BOM differs in every pin: the images, the
+// Applications, the providers and the recorded status all come from the 0.8.0 BOM, and the platform stays on it.
+func TestApplyStaysOnTheInstalledBOM(t *testing.T) {
+	old := newerBuild(t)
+	ref := BOMRef{Release: old.Release, SHA256: old.SHA256}
+	onOld := func(run *Run, in *Installation, _ *Secrets) { run.BOM, in.Status.BOM = ref, &ref }
+
+	e := imageEnv(t)
+	e.mutate(onOld)
+	e.once()
+	if len(e.imports.enqueued) != 4 {
+		t.Fatalf("imports %+v", e.imports.enqueued)
+	}
+	for _, req := range e.imports.enqueued {
+		if req.Digest != old.Seed.Image.Digest && req.Digest != old.Kubernetes.NodeImage.Digest {
+			t.Fatalf("an image that is not of the installed BOM: %+v", req)
+		}
+	}
+
+	p := newPlatform(t, RunApply)
+	p.mutate(onOld)
+	p.upTo(stageSeedPlatform)
+	if end := p.until(30); end != "complete" {
+		t.Fatalf("end %s: %+v\n%s", end, p.stage(stageWorkloadPlatform), p.logs)
+	}
+	run, in, _ := p.state.snapshot()
+	if run.State != RunSucceeded || in.Status.BOM == nil || *in.Status.BOM != ref || len(in.Status.Components) != len(old.Components) {
+		t.Fatalf("run %s, status %+v", run.State, in.Status)
+	}
+	for i, c := range old.Components {
+		if got := in.Status.Components[i]; got.Version != c.Chart.Version || got.Digest != c.Chart.Digest {
+			t.Errorf("component %s recorded as %+v, the installed BOM has %s", c.Name, got, c.Chart.Version)
+		}
+		app := p.seed.obj(appsPath + "pc-platform-" + c.Name)
+		if c.Name == "proxcloud-platform" || app == nil {
+			continue
+		}
+		if str(app, "metadata", "labels", "proxcloud.io/bom-release") != "0.8.0" || str(app, "spec", "source", "targetRevision") != c.Chart.Version {
+			t.Errorf("Application of %s is not from the installed BOM: %v", c.Name, app["metadata"])
+		}
+	}
+	cilium := comp(t, old.BOM, ClusterWorkload, "cilium")
+	if app := p.seed.obj(appsPath + "pc-platform-cilium"); str(app, "spec", "source", "targetRevision") != cilium.Chart.Version ||
+		str(app, "spec", "destination", "namespace") != cilium.Namespace {
+		t.Fatalf("cilium: %v", app)
+	}
+	if len(p.registers) != 2 || str(p.registers[0], "config", "argocd", "chartVersion") != old.TenantCharts.Kubernetes.Version {
+		t.Fatalf("providers registered: %d, the Kubernetes chart %s", len(p.registers), str(p.registers[0], "config", "argocd", "chartVersion"))
+	}
+}
+
+// Remove of a platform v0.8.0 installed reads the platform's volumes by the namespaces of the installed BOM.
+func TestRemoveReadsTheInstalledBOM(t *testing.T) {
+	old := newerBuild(t)
+	p := removal(t)
+	p.mutate(func(_ *Run, in *Installation, _ *Secrets) {
+		in.Status.BOM = &BOMRef{Release: old.Release, SHA256: old.SHA256}
+	})
+	p.once()
+	if _, in, _ := p.state.snapshot(); len(in.Status.Volumes) != 1 || in.Status.Volumes[0].Handle != "lab/pve1/local-lvm/vm-9999-pvc-etcd" {
+		t.Fatalf("volumes %+v: %+v", in.Status.Volumes, p.stage(StageRemoveCluster))
+	}
+	p.seed.mu.Lock()
+	for k := range p.seed.objs {
+		if strings.HasPrefix(k, capiNS+"machines/") {
+			delete(p.seed.objs, k)
+		}
+	}
+	p.seed.mu.Unlock()
+	if end := p.until(8); end != "complete" || !slices.Equal(p.pve.disks, []string{"vm-9999-pvc-tenant"}) {
+		t.Fatalf("end %s, volumes left %v", end, p.pve.disks)
 	}
 }
 
@@ -980,6 +1067,20 @@ func TestRemoveCluster(t *testing.T) {
 	if len(p.pve.writes) != 0 {
 		t.Fatalf("Proxmox written while machines are left: %v", p.pve.writes)
 	}
+	// CAPMOX deletes a ProxmoxMachine before its Machine goes: the VMID seen at the first look stays (F45).
+	p.seed.mu.Lock()
+	for k := range p.seed.objs {
+		if strings.Contains(k, "/proxmoxmachines/") {
+			delete(p.seed.objs, k)
+		}
+	}
+	p.seed.mu.Unlock()
+	if end := p.once(); end != "defer:waiting_remove_cluster" {
+		t.Fatalf("end %s", end)
+	}
+	if s := p.stage(StageRemoveCluster); !strings.Contains(s.Message, "pc-platform-kamaji-pve2-x (VM 132)") || item(s, "pc-platform-kamaji-pve2-x").Message != "VM 132" {
+		t.Fatalf("the VMID was lost with the ProxmoxMachine: %+v", s)
+	}
 	p.seed.mu.Lock()
 	for k := range p.seed.objs {
 		if strings.HasPrefix(k, capiNS+"machines/") {
@@ -1185,6 +1286,71 @@ func TestBreakGlassKubeconfig(t *testing.T) {
 	}
 }
 
+// The platform kubeconfig carries a one-hour TokenRequest token of the break-glass account on the platform cluster,
+// its API address and its CA, and never the admin kubeconfig's credential. The account reads no Secret but ArgoCD's
+// initial admin password and changes nothing but a port-forward. Nothing is stored, and nothing is written to the seed.
+func TestPlatformKubeconfig(t *testing.T) {
+	p := newPlatform(t, RunApply)
+	_, in, sec := p.state.snapshot()
+	before := string(p.state.in) + string(p.state.sec)
+	kc, expires, err := PlatformKubeconfig(context.Background(), in, sec)
+	if err != nil || len(p.wl.tokens) != 1 || p.wl.ttls[0] != 3600 || !strings.Contains(kc, "token: "+p.wl.tokens[0]) || !strings.Contains(kc, p.wl.url) ||
+		strings.Contains(kc, wlAdmin) || strings.Contains(kc, p.seed.url) || time.Until(expires) > time.Hour || time.Until(expires) < 59*time.Minute {
+		t.Fatalf("kubeconfig: %v, ttls %v, expires %v\n%s", err, p.wl.ttls, expires, kc)
+	}
+	if c, err := kamajik8s.New(kc); err != nil || c.Server() != p.wl.url {
+		t.Fatalf("the kubeconfig does not parse: %v", err)
+	}
+	rbac := "/apis/rbac.authorization.k8s.io/v1/"
+	if !slices.Equal(p.wl.writes, []string{
+		"PATCH /api/v1/namespaces/kube-system/serviceaccounts/proxcloud-break-glass",
+		"PATCH " + rbac + "clusterroles/proxcloud-break-glass", "PATCH " + rbac + "clusterrolebindings/proxcloud-break-glass",
+		"PATCH " + rbac + "namespaces/argocd/roles/proxcloud-break-glass", "PATCH " + rbac + "namespaces/argocd/rolebindings/proxcloud-break-glass",
+		"POST /api/v1/namespaces/kube-system/serviceaccounts/proxcloud-break-glass/token",
+	}) || len(p.seed.writes) != 0 || len(p.seed.tokens) != 0 || string(p.state.in)+string(p.state.sec) != before {
+		t.Fatalf("writes: platform cluster %v, seed %v", p.wl.writes, p.seed.writes)
+	}
+	// The rules: cluster-wide only reads, and no rule there names secrets or a wildcard that would hold them.
+	for _, rule := range p.wl.obj(rbac + "clusterroles/proxcloud-break-glass")["rules"].([]any) {
+		r := rule.(map[string]any)
+		groups, resources := fmt.Sprint(r["apiGroups"]), fmt.Sprint(r["resources"])
+		if fmt.Sprint(r["verbs"]) != "[get list watch]" || strings.Contains(groups, "*") || strings.Contains(groups, "bootstrap") ||
+			strings.Contains(resources, "secrets") || (strings.Contains(resources, "*") && slices.Contains(r["apiGroups"].([]any), any(""))) {
+			t.Fatalf("cluster-wide rule %v", r)
+		}
+	}
+	argo, _ := json.Marshal(p.wl.obj(rbac + "namespaces/argocd/roles/proxcloud-break-glass")["rules"])
+	if string(argo) != `[{"apiGroups":[""],"resources":["pods/portforward"],"verbs":["create"]},`+
+		`{"apiGroups":[""],"resourceNames":["argocd-initial-admin-secret"],"resources":["secrets"],"verbs":["get"]}]` {
+		t.Fatalf("the Role in argocd: %s", argo)
+	}
+	for _, b := range []string{rbac + "clusterrolebindings/proxcloud-break-glass", rbac + "namespaces/argocd/rolebindings/proxcloud-break-glass"} {
+		if got := p.wl.obj(b); str(got, "roleRef", "name") != "proxcloud-break-glass" || fmt.Sprint(got["subjects"]) != "[map[kind:ServiceAccount name:proxcloud-break-glass namespace:kube-system]]" {
+			t.Fatalf("%s: %v", b, got)
+		}
+	}
+
+	// A cluster that grants more than the hour: no kubeconfig.
+	p.wl.grant = 24 * time.Hour
+	if kc, _, err := PlatformKubeconfig(context.Background(), in, sec); !errors.Is(err, ErrWorkloadAPI) || kc != "" {
+		t.Fatalf("a 24 hour token was handed out: %v", err)
+	}
+	p.wl.grant = 0
+	// The platform cluster refuses: its error, told from the seed's, and without the admin credential in it.
+	p.wl.deny = []denial{{403, "forbidden"}}
+	if _, _, err := PlatformKubeconfig(context.Background(), in, sec); !errors.Is(err, ErrWorkloadAPI) || strings.Contains(fmt.Sprint(err), wlAdmin) {
+		t.Fatalf("a refusing platform cluster: %v", err)
+	}
+	// No cluster on the seed yet, and no seed.
+	p.seed.put(seedNS+"pc-platform/secrets/pc-platform-kubeconfig", map[string]any{"data": map[string]any{}})
+	if _, _, err := PlatformKubeconfig(context.Background(), in, sec); !errors.Is(err, ErrNoCluster) {
+		t.Fatalf("no admin kubeconfig on the seed: %v", err)
+	}
+	if _, _, err := PlatformKubeconfig(context.Background(), &Installation{}, nil); !errors.Is(err, ErrNoSeed) {
+		t.Fatalf("no seed: %v", err)
+	}
+}
+
 // The live read derives degraded from ArgoCD and stores nothing.
 func TestLive(t *testing.T) {
 	p := newPlatform(t, RunApply)
@@ -1227,10 +1393,20 @@ func TestLive(t *testing.T) {
 		!strings.Contains(got.Error, "'When the seed does not answer'") { // the section's real title in both guides
 		t.Fatalf("seed silent: %+v", got)
 	}
+	if !strings.Contains(got0(Live(context.Background(), &silent, sec)), "still says ready") {
+		t.Fatal("a ready record is named as such")
+	}
+	// A failed record is not called ready (F43).
+	silent.Status.Phase = PhaseFailed
+	if e := got0(Live(context.Background(), &silent, sec)); strings.Contains(e, "says ready") || !strings.Contains(e, "The record says failed.") {
+		t.Fatalf("failed record: %s", e)
+	}
 	if _, stored, _ := p.state.snapshot(); stored.Status.Phase != PhaseReady || p.seed.writeCount() != 0 {
 		t.Fatalf("stored phase %s, writes %v", stored.Status.Phase, p.seed.writes)
 	}
 }
+
+func got0(l LiveState) string { return l.Error }
 
 // An API server that has just started refuses a good credential for some seconds: a 401, a 403 with the RBAC
 // authorizer's list of roles it has not read yet (the seed's k3s restarted under disk load in a lab run, and stage 7's

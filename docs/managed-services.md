@@ -8,11 +8,12 @@ are in [ADR 0009](adr/0009-managed-services-platform-lifecycle.md); the routes a
 
 > ## Status
 >
-> **Nothing on this page is verified on a lab.** The code is on main and covered by unit tests,
+> **Most of this page is not verified on a lab.** The code is covered by unit tests,
 > renderer goldens, runner tests against a fake Proxmox and a fake Kubernetes API, and a mocked
-> console. No run of the managed path has finished against a real Proxmox VE cluster yet: see
-> [Not verified on a lab yet](#not-verified-on-a-lab-yet). It is off by default, and the release that
-> carries it (v0.8.0) is not cut: see [Not implemented yet](#not-implemented-yet).
+> console. The install finished on one lab Proxmox VE cluster, on builds of main; what was run
+> there and what was not is in [Not verified on a lab yet](#not-verified-on-a-lab-yet). It is off
+> by default. v0.8.0 is the first release that carries it; one install was made on its published
+> images (a lab, 2026-11-18), none on those of v0.8.1: see [Not implemented yet](#not-implemented-yet).
 
 Code: `internal/platformlife` (the installation model, the preflight, the runner and its stages, the
 renderers), `internal/platform/admin/platform.go` (the routes), `internal/cloud/pve/access.go` and
@@ -74,17 +75,204 @@ reading [section 3](#3-proxmox-identities): they share the pool `proxcloud-syste
 | An encryption key | `PROXCLOUD_ENCRYPTION_DEFAULT_KEY`. Without it the token secrets cannot be stored (`409 no_encryption_key`). The Compose install generates one. |
 | A Proxmox provider | Saved, with its connection checks passing (Platform setup, steps 1 and 2). One installation per Proxmox provider; the page shows the installation of the first one. |
 | A GitHub integration | System → Integrations. Template updates finds and downloads the two images through it. |
-| Permissions | `admin:service:read` to read the page, `admin:service:manage` for every button, the Check and the seed kubeconfig download included. |
+| Permissions | `admin:service:read` to read the page, `admin:service:manage` for every button, the Check and the two kubeconfig downloads included. |
 | A platform network | One bridge that exists on every node used, untagged (no VLAN), with a free IPv4 network from /8 to /29, a gateway and one to three DNS servers. It must not overlap the provider's tenant address pool (`cidrPool`), a sandbox network or a public network. |
 | Routes | The API (on Compose: the API container) reaches the Proxmox API, the seed address on 6443 and the cluster's API address on 6443. The seed and the cluster machines reach the Proxmox API URL you enter, `github.com` and `raw.githubusercontent.com` (at first boot the seed downloads the k3s binary from the first and the k3s install script from the second, both checked by sha256; GitHub redirects a release download to another host of its own, which must be reachable too and is not named in the BOM) and the registries of the BOM (`ghcr.io`, which serves every chart: ours and the third-party ones of the chart mirror, `ghcr.io/mutex-solutions/charts-mirror`; and the image registries those charts pull from). Tenant networks must reach the load balancer range and nothing else of the platform network. |
 | Storage | A boot store that takes VM disks on every node used; an ISO store that is local to each node and takes ISOs (default `local`); an import store with `import` content on every node an image goes to (default: the provider's `importStorage`). The import store must not be the boot store: the portal token holds `PVEDatastoreAdmin` on the import store, which reaches every disk on it ([section 10](#10-security-boundaries)). The API refuses settings that name the same store for both; the form says so before it saves when you type the same store in both fields. An empty import store takes the provider's `importStorage`, so it is refused too when that is the boot store. The import store of the settings and the provider's `importStorage` must be one store: the script of step 2 is written for the store of the settings, and the `privileges:kubemint` check reads the provider's ([when the provider's import store is the boot store](#when-the-providers-import-store-is-the-boot-store)). |
 | Capacity | The smallest machine is 2 cores, 4 GiB of memory and a 20 GiB disk. The smallest layout (seed, control plane, one machine per group) is five VMs. The review step adds up cores and memory per node; it does not read what is free. |
 | Root on one node | Once, to run the identities script. |
-| A tenant network zone without DHCP | Only for tenant Kubernetes clusters, not for the install or for databases: a cluster's nodes get fixed addresses, so its network must be in an EVPN or a VLAN zone. With a provider whose default zone (`config.network.defaultZone`) is a `simple` zone that ProxCloud created, which it does with DHCP, a cluster create on its networks answers `400 Worker nodes need a network without DHCP (an EVPN or VLAN zone)`. The Check reads the zone in Proxmox, warns (`tenant-network`) when it has DHCP, and the install goes on; change the provider's default zone before you offer clusters ([managed-k8s.md](managed-k8s.md)). Not affected: a Kubernetes provider with shared workers (`cluster.shared`), which uses no tenant network, and a `simple` zone an operator made without DHCP. |
+| A router for a VLAN tenant zone | Only when the provider's tenant zone is a `vlan` zone. Proxmox gives a VLAN no gateway, no DHCP and no SNAT: a tenant network there is a bare layer 2 segment, and ProxCloud writes and reports it so (`dhcp: false`, `snat: false`; asking for either is a `400`). The site's own router must hold the first address of each tenant subnet (the `gateway` the network shows; servers and cluster workers get it as their default route) on that VLAN, route it to the load balancer range and to whatever else tenants may reach, and keep tenants apart. Without it a worker on such a network never reaches its control plane and the cluster stays `PROGRESSING`. An EVPN zone needs none of this. |
+| A path from tenants to the platform network | Tenant cluster workers and database clients open TCP connections to the platform network. On a node that translates tenant traffic (a `simple` tenant zone, or an exit node of an EVPN zone) and also runs a platform machine, that connection is dropped unless the node itself routes the platform network. A one-node site with a `simple` tenant zone and the platform network on a VLAN behind the site's router is this case. The Check warns (`tenant-path`) and the install goes on: [The path from tenants to the platform](#the-path-from-tenants-to-the-platform). |
+| A tenant network zone without DHCP | Only for tenant Kubernetes clusters, not for the install or for databases: a cluster's nodes get fixed addresses, so its network must be in an EVPN or a VLAN zone, or in a `simple` zone without a DHCP server. With a provider whose default zone (`config.network.defaultZone`) is a `simple` zone that ProxCloud created with DHCP, which is its default, a cluster create on its networks answers `400 Worker nodes need a network without DHCP (an EVPN or VLAN zone, or a simple zone without a DHCP server)`. The Check reads the zone in Proxmox, warns (`tenant-network`) when it has DHCP, and the install goes on; change the provider's default zone before you offer clusters ([managed-k8s.md](managed-k8s.md)). Not affected: a Kubernetes provider with shared workers (`cluster.shared`), which uses no tenant network, and a `simple` zone without DHCP. Such a zone is made in one of two ways: by hand in Proxmox before the first tenant network (a zone that exists is used as it is), or by ProxCloud when the zone's config says so, `"zones": {"<id>": {"kind": "simple", "dhcp": false}}` (from v0.8.1; it applies to a zone that does not exist yet, and an existing zone is never changed). Networks of such a zone answer `dhcp: false` and get no DHCP range; servers, cluster nodes and load balancers there get addresses the platform assigns. The key is refused on a zone of another kind (`400`, naming the key). The setup wizard keeps a zone's other keys when you change its kind there, so take `"dhcp"` out of the zone's config (Cloud providers) before you change such a zone to VLAN or EVPN. The key is not verified on a lab. |
 | The datacenter firewall | On, with the provider's isolation rules written by a provider sync once the installation is saved: the Check verifies that tenant traffic to the seed, the API address and the node range is dropped. |
 
 The page also warns when the job scheduler is off: tenant clusters and databases then update their
-status only when a provider sync runs. It does not block an install.
+status only when a provider sync runs, and no project is deleted: "Delete now" is refused with a
+`409` that says so, and a delete with the grace period is accepted but stays scheduled until the
+scheduler runs ([Compose README](../deploy/compose/README.md#optional-features)). It does not
+block an install.
+
+The images a run imports (stage 2) are not smoke-tested automatically: the tests would clone beside
+the build. Start the smoke test of an image from Template updates when the run has ended, before you
+publish it ([template updates](template-updates.md)).
+
+### VM id 9999 and the CSI volumes
+
+proxmox-csi names every volume it creates `vm-9999-pvc-<uuid>`: 9999 is the plugin's default
+`controllerVmID`, and neither the platform cluster nor a tenant cluster changes it. The platform's own
+volumes carry these names (Kamaji etcd, the registry, every managed database), and so do the volumes
+of tenant Kubernetes clusters. No VM 9999 is needed for this, and ProxCloud creates none. But to
+Proxmox a disk named `vm-9999-…` belongs to VM 9999, whether that VM's config names the disk or not.
+
+When a guest of your own has the id 9999 (on the first production site it was the owner's template),
+the Check warns with the row `csi-vmid`, and so does **Test connection** on the provider's page. The
+install goes on: the platform works either way. What must never be done on such a site:
+
+- **Never destroy VM 9999 with "Destroy unreferenced disks owned by guest" ticked**
+  (`qm destroy 9999 --destroy-unreferenced-disks 1`). Proxmox then also destroys the disks with a
+  matching VM id on all enabled storages, which are the CSI volumes.
+- Before you remove or move VM 9999 for any other reason, read `qm config 9999`: it must name no
+  `vm-9999-pvc-` disk. A disk rescan (`qm disk rescan`) lists disks named after a VM as that VM's
+  unused disks, and a plain destroy removes the unused disks of the config too.
+
+The safe way is to leave VM 9999 as it is, and to give no new guest that id. This release does not change
+the id the plugin uses. ProxCloud asks Proxmox for the lowest free id when it creates a VM, so on a
+cluster with many guests, or with a datacenter `next-id` range that reaches 9999, a server of a tenant
+can get it. Its own delete of a VM sets `destroy-unreferenced-disks`, except for a VM with id 9999:
+that one is destroyed without the flag, so the CSI volumes stay.
+Not tried on a lab: the two commands above against a VM 9999 with CSI volumes present, and the two
+warnings against a real cluster (their tests use a fake Proxmox API). What the commands do is stated
+from the `qm` manual (`--destroy-unreferenced-disks`: "destroy additionally all disks not referenced in
+the config but with a matching VMID from all enabled storages"; `qm disk rescan`: "update disk sizes
+and unused disk images"). The warning was added after the production acceptance of v0.8.0 found the
+owner's template on that id.
+
+### The path from tenants to the platform
+
+Tenants open connections to the platform network: a tenant cluster's workers to their API address
+(port 6443 on an address of the load balancer range), a tenant's servers to a managed database. On
+one layout that path is closed for TCP although every range and firewall rule is right, and
+nothing but the Check row `tenant-path` says so before a tenant finds it. Found on the first
+production site (v0.8.0, 2026-11-18, one node): the control plane was ready in under a minute and
+no worker ever joined.
+
+**The rule.** A tenant's TCP connection to a platform address is dropped when both hold:
+
+1. a Proxmox node translates it (SNAT). In a `simple` zone that is the node the tenant's VM runs
+   on, for a network with outbound internet. In an EVPN zone it is an exit node. In a VLAN zone no
+   node translates: the site's router does.
+2. the translated packet enters the same node again through a bridge, because the platform machine
+   that owns the destination address runs on that node and the way from the node to the platform
+   network goes over something else (the site's router).
+
+The node's connection tracking for bridges then sees the returning packet as a second connection
+with the same reply as the first, and drops it. The Proxmox nftables firewall (`nftables: 1` in the
+host firewall options) turns that tracking on for every bridge of the node, with or without
+`firewall=1` on a NIC. A connection from the node itself or from the LAN passes; a tenant's TCP
+connection never does (by the source UDP is not dropped; not tested). On the production site the
+counters `insert_failed` and `drop` of `conntrack -S` grew by the same number with every attempt.
+For the older iptables firewall Proxmox's SDN writes a rule of its own for this case; whether a
+node on that firewall is free of the problem was not tested.
+
+| Tenant zone | The platform machine that owns the address is on | Result |
+|---|---|---|
+| `simple`, one node, platform network a VLAN behind the site's router | the same node | **broken** (seen on the production site) |
+| `simple`, several nodes | the tenant VM's node | **broken**. On another node it works, but the API address and a load balancer address move between the platform machines' nodes, so after a failover it breaks for other tenants |
+| EVPN with SNAT on an exit node | the exit node | broken by the same rule; on another node it works. Not tested |
+| VLAN zone, the site's router translates | any node | works: the node translates nothing (lab: workers joined on a VLAN zone) |
+| any zone, the platform network routed by the node itself (the node holds its gateway) | the same node | works: the packet never leaves the node. Not tested |
+
+The mechanism is stated from the kernel and Proxmox sources and fits the production counters and
+captures; it was not reproduced on a lab, and the hook that drops was not captured.
+
+**What you see when it is wrong.**
+
+- A tenant cluster's control plane becomes ready and its endpoint answers from your workstation.
+  The workers' VMs run and the node group stays at "The machine runs but has not joined the
+  cluster" (`not_joined`); after 15 minutes it needs attention.
+- On such a worker (console, or the guest agent), cloud-init's `kubeadm join` ended with a timeout
+  on the API address, `https://<address>:6443`. From a tenant server on the same node
+  `curl -k -m 5 https://<address>:6443/healthz` times out; the same command on the node answers.
+- A tenant server cannot open a managed database's port, while the database reads healthy.
+- On the node, `conntrack -S` shows `insert_failed` and `drop` growing during each attempt.
+
+**Workers that did not join must be replaced.** `kubeadm join` runs once, at the first boot. A
+worker that timed out stays "not joined" after the path is repaired. Replace it: the tenant
+reduces the node group's count by one and raises it again. A count below one is refused, so a
+group cannot go to zero and back: it is one such cycle per dead worker, and a group of one is
+raised by one first and reduced once the new worker is ready (this needs quota for one more
+worker). On the production site two dead workers of a group of two were replaced by 2 → 3 → 2,
+twice: both times the scale-down removed a machine without a node, never a ready worker. Which
+machine goes is Cluster API's choice ([managed-k8s.md](managed-k8s.md), scale-down); only that
+order was run.
+
+**What the Check reads.** The row `tenant-path` reads the provider's default zone in Proxmox (its
+kind, the nodes a `simple` zone is limited to, an EVPN zone's exit nodes; for a zone that does not
+exist yet, what the provider's config says), the nodes the settings place the platform's control
+plane and node groups on, and whether such a node routes the platform network itself: the platform
+bridge is a vnet of a `simple` zone with a subnet whose gateway is the platform gateway, or the
+node's saved network configuration holds the platform gateway on that bridge. It **warns** when a
+node that translates also hosts a platform machine and does not route the platform network, and
+when Proxmox could not be read. It never fails, because it opens no connection: an `ok` row is not
+proof that the path is open, and a warning stays after you added a node leg by hand (the row does
+not see runtime addresses). It also warns on a node that routes the platform VLAN on a VLAN
+interface of its own (the gateway on `vmbr0.140`, say): the row does not read that interface, and
+by the rule above that layout should work (not tested). A probe that opens the path from a VM is
+not in this release.
+
+**A new one-node site: let the node route the platform network.** Make the platform network a
+vnet of a `simple` SDN zone with one subnet whose gateway is the platform gateway and with SNAT
+ticked (Datacenter → SDN in Proxmox, then Apply), and enter the vnet as the platform bridge in
+step 1. SNAT is for the platform machines' own way out: the node translates what they send
+through its uplink, so the answers from the internet (image pulls during the install) come back
+to the node. Without SNAT the site's router must have the route below; a route on the ProxCloud
+host alone then leaves the platform machines without a return path from the internet and the
+install fails at its image pulls. Proxmox puts
+the gateway address on the node, so a tenant's packet is routed inside the node and is not
+translated on the way (the zone's SNAT rule only matches what leaves through the node's uplink).
+Consequences:
+
+- The platform sees a tenant's real address. A database's `allowedCidrs` then hold tenant subnets,
+  not the node's address ([managed-dbaas.md](managed-dbaas.md)).
+- Everything outside the node (the ProxCloud host, your workstation) needs a route "platform
+  network via the node's address", on the site's router or, with SNAT on the subnet, on the host
+  itself: without it the API container reaches neither the seed nor the cluster's API address,
+  and the run fails.
+- It is a layout for **one node only**: a vnet of a `simple` zone is a separate network on each
+  node, and the platform bridge must be one layer-2 segment
+  ([What no check reads](#what-no-check-reads)).
+
+ProxCloud does not create this network in this release. The layout is not run anywhere yet: not on
+a lab, not on a production site.
+
+**An existing site with the platform network on a VLAN: a leg of the node.** Give the node an
+address of its own on the platform bridge and send tenant traffic for the platform network out
+through it, so that the packet no longer passes the router and never enters the node a second
+time. The address must be on the bridge device itself: by the source a veth pair plugged into the
+bridge fails in the same way (not tested). The
+commands below were run by hand, as root, on the one production site, at runtime, and the path
+opened (a tenant server got an HTTP answer from the API address, `insert_failed` stopped growing,
+the node's own route was unchanged). They are **not lab-verified**. Replace the four values: the
+platform bridge (`plat140`), the platform network (`192.168.140.0/24`), a free address in it for
+the node (`192.168.140.2`) and the provider's tenant pool, `cidrPool` (`10.100.0.0/16`). `140` is
+a free routing table number, `1400` and `1401` free rule priorities.
+
+```sh
+# read first
+ip -br addr show plat140; ip rule; ip route show table 140; sysctl net.ipv4.conf.all.rp_filter
+arping -c 2 -I plat140 192.168.140.2        # expect no answer: the address is free
+# apply
+ip addr add 192.168.140.2/24 dev plat140 noprefixroute
+ip route add 192.168.140.0/24 dev plat140 src 192.168.140.2 table 140
+ip rule add pref 1400 from 10.100.0.0/16 to 192.168.140.0/24 lookup 140
+ip rule add pref 1401 from 192.168.140.2 to 192.168.140.0/24 lookup 140
+iptables -t nat -I POSTROUTING 1 -s 10.100.0.0/16 -d 192.168.140.0/24 -o plat140 -j SNAT --to-source 192.168.140.2
+# verify
+ip route get <a platform address>                  # unchanged: still through the router, the node's own path
+ip route get <a platform address> from <a tenant server's address> iif <its vnet>    # "dev plat140 table 140"
+conntrack -S | head -3                             # insert_failed no longer grows during the next line
+# from a tenant server: curl -k -m 5 https://<the cluster's API address>:6443/healthz   -> an HTTP answer
+# undo
+iptables -t nat -D POSTROUTING -s 10.100.0.0/16 -d 192.168.140.0/24 -o plat140 -j SNAT --to-source 192.168.140.2
+ip rule del pref 1401; ip rule del pref 1400
+ip route flush table 140
+ip addr del 192.168.140.2/24 dev plat140
+```
+
+- The rules select tenant sources only and the main routing table gets no route, so the node's
+  own traffic, the LAN and your other VMs keep their paths. If a line is lost, the path is closed
+  for tenants again and nothing else changes.
+- The platform now sees the leg's address as the source of every tenant: a database's
+  `allowedCidrs` must hold it (`192.168.140.2/32`), where they held the node's address before.
+- **It does not last.** The lines are lost at a reboot of the node, and whether they survive an
+  SDN Apply is not known: run the verify lines after each. A persistent form (a file of its own in
+  `/etc/network/interfaces.d/`) is not tested and therefore not given here.
+- On several nodes each node that hosts a platform machine needs its own leg and address. Not run.
+- Then replace the workers that did not join (above).
+
+For every other site (several nodes, tenants and platform machines on the same nodes) the layout
+without a node in the path is the VLAN tenant zone with your own router (the row above). Not
+decided and not tested: a connection-tracking zone for the platform bridge instead of the leg.
 
 ### What no check reads
 
@@ -119,7 +307,7 @@ before the first run:
   (lease 60 s, renew deadline 40 s, retry 5 s). Its client cuts every request at 10 seconds, so
   the address is kept when one try in those 40 seconds gets through in under 10: a stall of about
   half a minute is survived, an etcd whose every write takes over 10 seconds is not. The BOM of
-  this release names 0.1.12; chart 0.1.11 gave up after 10.
+  this release names 0.1.13, which keeps this; chart 0.1.11 gave up after 10.
 - **The MTU of the platform network.** Cilium tunnels pod traffic between the machines at the
   machines' MTU. When the bridge's real path MTU between two nodes is below 1500 (the bridge is
   itself carried by an overlay), set the settings' MTU to it.
@@ -287,9 +475,12 @@ the settings (`409 rev_conflict`: the page reads them again).
 | `spec` | The saved settings break a rule, for example an import store that is the boot store | Correct step 1 and save |
 | `network` | The platform network overlaps a tenant, sandbox or public network, a seed API source is a tenant network, the load balancer range is inside a blocked or management network, or a node did not report its networks | Correct the network in step 1 |
 | `isolation` | The seed, the API address or part of the node range is in no blocked or management network, or the cluster firewall's isolation rules are not the ones a sync writes | Add the CIDRs the message names to **Networks tenants must not reach** on the provider's page (`blockedCidrs`). The message lists the smallest ranges that are missing; one network that covers them does the same (`10.90.0.0/26` for a seed on `.5`, an API address on `.10` and nodes on `.20` to `.60`), as long as the load balancer range stays outside it. Then **Run a provider sync, then check again**: with the installation saved (step 1), the sync writes the provider's rules whether or not it has a project. Check that the datacenter firewall is on. Five messages name a cause no sync of a provider without a project repairs: `cidrPool … overlaps the management network …` (choose another `cidrPool`), `rules … are for another pool`, `rules … drop … to …, which this provider's cidrPool, blockedCidrs and sandboxCidrs do not`, `rules … have an ACCEPT …` or `have no ACCEPT …` and `rules … are not this provider's set …, and a project's rules for cidrPool … are in place` (another portal or provider shares the rules: give this provider its own `poolPrefix`; the provider's own older rules: delete them under Datacenter > Firewall and sync). ([More](#the-isolation-check-and-the-provider-sync)) |
-| `tenant-network` | Never. It reads the provider's default zone in Proxmox and **warns** when the zone has DHCP, when it does not exist yet and is configured as a `simple` zone (ProxCloud creates one with DHCP), or when the zones could not be read: a tenant Kubernetes cluster create on a network of such a zone is refused with a `400` (not on a Kubernetes provider with shared workers, `cluster.shared`, which uses no tenant network). The row is `ok` for a zone without DHCP and absent when the provider names no zone | Nothing for the install or for databases. Before tenants create clusters: give the provider an EVPN or a VLAN zone as its default zone (Cloud providers, `config.network.zones` and `defaultZone`) |
+| `tenant-network` | Never. It reads the provider's default zone in Proxmox and **warns** when the zone has DHCP, when it does not exist yet and is configured as a `simple` zone without `"dhcp": false` (ProxCloud then creates it with DHCP), or when the zones could not be read: a tenant Kubernetes cluster create on a network of such a zone is refused with a `400` (not on a Kubernetes provider with shared workers, `cluster.shared`, which uses no tenant network). The row is `ok` for a zone without DHCP and absent when the provider names no zone | Nothing for the install or for databases. Before tenants create clusters: give the provider an EVPN or a VLAN zone as its default zone, or a `simple` zone without DHCP (Cloud providers, `config.network.zones` and `defaultZone`; [Prerequisites](#2-prerequisites)) |
+| `tenant-path` | Never, and absent when the provider names no zone. It reads the layout and **warns** when a node that translates tenant traffic (a `simple` default zone: the node of the tenant's VM; an EVPN default zone: its exit nodes) also hosts a platform machine and does not route the platform network itself, or when Proxmox could not be read: a tenant's TCP connection to the platform network is then dropped on that node, tenant Kubernetes workers never join and tenants cannot reach managed databases. It opens no connection: `ok` is not proof, and a leg added on a node by hand is not seen | Nothing for the install. Before tenants create clusters or databases: one of the two layouts of [The path from tenants to the platform](#the-path-from-tenants-to-the-platform) |
+| `csi-vmid` | Never. It **warns** when a guest of the cluster has VM id 9999, the id proxmox-csi names its volumes after, or when that could not be read | Nothing for the install. Never destroy VM 9999 with "Destroy unreferenced disks owned by guest" ([VM id 9999 and the CSI volumes](#vm-id-9999-and-the-csi-volumes)) |
 | `credentials` | A token secret is not stored | Paste it in step 2 |
-| `privileges:capi`, `privileges:csi`, `privileges:kubemint` | The CAPI token, the CSI token or the portal token lacks a privilege on a path; the message names both | Run the script again. `privileges:kubemint` on `/storage/<store>`: that is the provider's `importStorage`; when the settings name another import store the script does not write that row ([what to do](#when-the-providers-import-store-is-the-boot-store)) |
+| `machines` | Never, and absent while the installation has no VM. It reads the installation's VMs with the CAPI token and **warns** with one line per VM that is stopped or that does not start when its node boots (`onboot` off) or that the token could not read (the others are still listed, and an apply still sets `onboot` on them), or when the pools could not be read | A stopped VM: start it in Proxmox, or `qm start <vmid>` as root on its node ([After a Proxmox node reboots](#after-a-proxmox-node-reboots)). `onboot` off: **Apply this release** sets it at the end of stage 7, or `qm set <vmid> --onboot 1` |
+| `privileges:capi`, `privileges:csi`, `privileges:kubemint` | The CAPI token, the CSI token or the portal token lacks a privilege on a path; the message names both | Run the script again. `privileges:kubemint` reads every path a tenant cluster's token gets a row on, not `/storage` and `/sdn/zones` alone: a line on `/storage/<store>` or `/sdn/zones/<zone>` means a row of the portal's own on that path hides the mint role, and the script adds the role next to each such row ([why, and what the row gives](proxmox-permissions.md#a-row-of-the-portals-own-on-a-store-or-a-zone)); until then a cluster create that uses the path answers `409`, and, as for every failed row, an install or apply run stops at its first stage (`preflight_failed`). A site that had such rows before v0.8.1 passed this row then and fails it after the upgrade: run the script again before the next run. A row the portal's user holds through a group is not found by the script; the same section gives the row to add. On the provider's `importStorage`, when the settings name another import store, the script does not write that row ([what to do](#when-the-providers-import-store-is-the-boot-store)) |
 | `mint-scope` | The portal token holds `User.Modify` or `Permissions.Modify` on `/`, `/access` or `/access/groups` (a stolen portal token can then create an API token for any user of the cluster, `root@pam` included) or `Permissions.Modify` on `/pool` (it can then write any role on every pool). A site set up before the group `proxcloud-kube` holds `ProxCloudKubeMint` on `/access/groups` and `/pool`. Or: `capmox@pve` or `csi@pve` is not in the group `proxcloud-kube`, and Proxmox refuses every token create or delete for it | Run the script again: it grants `ProxCloudKubeToken` on `/access/groups/proxcloud-kube`, puts both users in the group and removes the old rows ([the commands](proxmox-permissions.md#an-existing-site)). If it still fails on a privilege, another row grants it: `pveum acl list \| grep -F '<the portal user>'` on a node, then `pveum acl delete <path> --users <user> --roles <role>` (or `--tokens`) for a row on `/`, `/access`, `/access/groups` or `/pool` with a role other than `ProxCloudPlatform`. For a user outside the group the message gives the line: `pveum user modify <user> --groups proxcloud-kube --append 1` |
 | `token-scope` | `capmox@pve!capi` or `csi@pve!csi` holds a privilege on `/pool`, `/storage` or `/vms` as a whole, which reaches every tenant's VMs or disks. The script writes no such row; an older setup may have, and the script removes none | Run the `pveum acl delete` command the message gives, as root on one node, then check again. When the portal token cannot read the row (one on `/`, for example) the message gives `pveum acl list` to find it: the row to remove is one on the named path itself, or on a parent of it (`/` included) with propagate 1, with a role other than `NoAccess`. The list is not empty on a site the script set up, and its rows on the platform pools and stores and on `/` without propagate stay. When no listed row is such a row, remove none: the token was made without privilege separation and holds its user's rights (the users keep `/pool` and `/storage`): run `pveum user token modify <user> <token name> --privsep 1` (`capmox@pve capi`, `csi@pve csi`), then the script again. Leave the tokens' rows on the platform pools and on the boot and ISO stores |
 | `pool-fence` | The portal token holds a privilege on `proxcloud-system` or `proxcloud-seed`, or the CSI token on `proxcloud-seed` | Run the script again with the provider's token id: it writes the `NoAccess` rows on both pools, and a missing row is the usual cause (the portal token's `/pool` rows pass down to them). Only if the check still fails, remove the row granted to that user or token on `/pool/proxcloud-system` or `/pool/proxcloud-seed` itself. Do not remove its `/pool` rows: every tenant operation needs them |
@@ -297,7 +488,7 @@ the settings (`409 rev_conflict`: the page reads them again).
 | `boot-iso-grant` | `capmox@pve` may not upload and delete on the ISO store | Run the script again |
 | `boot-iso` | The ISO store is shared, takes no ISOs, or is not the only ISO store of the boot storage | Name a node-local ISO store |
 | `placement` | A node an image goes to lacks the import store with `import` content or the boot store | Change the nodes or the stores |
-| `images` | A BOM image is on the template update blocklist | Install a newer ProxCloud release |
+| `images` | A BOM image is on the template update blocklist | A new installation: install a newer ProxCloud release. An installed platform stays on its release and its images, and no release moves it to other images yet (see "No upgrade between BOMs"): the message says which case applies, and an apply that must import that image stays blocked |
 
 A check that cannot be read fails. A warning fails nothing: the page then says "No check failed" with the
 number of warnings and not "Every check passed", the answer's `ok` stays `true`, and a run's first stage
@@ -385,10 +576,72 @@ run; the saved installation is enough for it, no project or tenant network is ne
 
 ### Step 4: Review and install
 
-Shows the release and its components (`GET /platform/bom`), what is created (one seed VM, one
+Shows the release and its components (`GET /platform/bom`; for a platform that stays on the
+release that installed it, that release's: `GET /platform/bom?sha256=<installed>`), what is created (one seed VM, one
 control plane and the worker machines, the two providers), the cores and memory per node, and for an
 installed platform the plan (`GET …/plan`). **Install** (later **Apply this release**) starts a run
 (`POST …/runs {kind: apply}`). You can leave the page; the run goes on.
+
+### After the install
+
+A ready installation shows one card. Nothing on it is verified on a lab; the tests behind it use a
+fake seed and a fake cluster.
+
+**Endpoints.** Four addresses, all on the platform network:
+
+| Row | From | What answers there |
+|---|---|---|
+| Seed API | `status.seed.apiServer` | The seed's k3s, `https://<seed address>:6443`. The seed's firewall lets in only the seed API sources of the settings |
+| Platform cluster API | `status.clusters[0].endpoint` | The cluster's API, `https://<API address>:6443` (kube-vip) |
+| Load balancer range (MetalLB) | `spec.clusters[0].metallbRange` | The addresses of pool `services`: tenant database endpoints. Tenants reach them |
+| Node range | `spec.clusters[0].nodeRange` | The platform's machines |
+
+**Providers.** The two rows stage 10 registered, each with a link, and what a tenant cannot use
+yet. The page reads this from the provider rows (`GET /admin/service`):
+
+- *The Kubernetes provider offers no version.* The install registers it with an empty
+  `config.cluster.versions`, so every cluster create is refused with "this provider offers no
+  Kubernetes version yet". ProxCloud does not fill it in. Do two things: publish a Kubernetes node
+  image in **Template updates**, then enter the line it prints for the image
+  (`<version>=<node image id>`, [managed-k8s.md](managed-k8s.md)) on the provider's **Connection** tab. The row turns to "Offers Kubernetes <versions>" once one is set.
+- *Neither provider is attached to a project.* Both are created with
+  `attachToNewProjects: false`. On each provider's **Projects** tab, turn the policy on for new
+  projects and attach the existing ones. The card shows the policy only: whether an existing project
+  is attached it does not read.
+
+**Platform cluster access.** **Download platform kubeconfig** (`GET …/platform-kubeconfig`) saves
+`<name>-platform.kubeconfig`. It is described under
+[Credentials](#8-credentials-and-the-seed-backup): one hour, read access without Secrets, and the
+way into the cluster's ArgoCD.
+
+**Open ArgoCD.** There are two ArgoCD instances and v0.8.x gives neither an address: no Service of
+type LoadBalancer, no ingress, no URL (planned for v0.10.0, for the platform cluster's only). Both
+serve plain HTTP inside their cluster, so the way in is a port-forward from a machine that has
+`kubectl` and reaches the API address of the cluster. The card prints the commands with the
+installation's file names:
+
+| ArgoCD | What it holds | Kubeconfig | Local port |
+|---|---|---|---|
+| On the platform cluster | One Application per tenant cluster and tenant database | **Download platform kubeconfig** | 8080 |
+| On the seed | The platform's own components, the cluster itself included | **Download seed kubeconfig** | 8081 |
+
+```sh
+export KUBECONFIG=./<name>-platform.kubeconfig     # or ./<name>-seed.kubeconfig
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d; echo
+kubectl -n argocd port-forward svc/argocd-server 8080:80      # 8081:80 for the seed
+```
+
+The first command prints the password of user `admin`; the second runs until you stop it. Then open
+`http://localhost:8080` (or `:8081`). The Secret `argocd-initial-admin-secret` is the one ArgoCD
+writes at its first start; ProxCloud sets no password. If someone deleted it or changed the
+password in ArgoCD, the first command no longer gives a password that works, and ProxCloud cannot
+recover one. That the chart of this release (argo-cd 10.14.0) names the Service `argocd-server`
+with port 80 and writes that Secret is read from the chart's defaults, not seen on a lab.
+
+`admin` in an ArgoCD can deploy anything to the cluster it runs on, and the platform cluster's hosts
+every tenant control plane. Use it to look and to sync again. What you change by hand on a
+platform component, the next **Apply this release** writes back; a tenant Application is written
+again by the provider's next sync.
 
 ## 5. The stages of a run
 
@@ -402,7 +655,7 @@ One run per installation at a time. The page reads the run every 3 seconds.
 | 4 | Reach the seed (`seed-api`) | Waits until `https://<seed address>:6443/readyz` answers with a certificate of the CA made in stage 3. While it does not, the stage says whether the guest agent answers (`seed_not_booted`) or only the API does not (`seed_api_unreachable`). | 20 min |
 | 5 | Secure the seed (`seed-identity`) | Reads the token of the service account `proxcloud-system/proxcloud-portal` with a bootstrap token, checks that it is cluster-admin, stores it encrypted, deletes the bootstrap token and its RBAC, then ejects the CD (the drive stays, empty: Proxmox removes no drive from a protected VM) and deletes it. The seed counts as ready from the moment its credential is stored; the stage is done only when the running seed's config no longer names the CD (an eject Proxmox took but left pending does not count, and the CD's file is kept until then) and no store lists it. | 10 min |
 | 6 | Install the seed's components (`seed-platform`) | ArgoCD as a k3s HelmChart, the AppProject `proxcloud-platform` (BOM chart repositories only; the `default` project locked), then `cert-manager` and `capi` wave by wave. An Application counts when it is Synced and Healthy, compared against the chart version and values it has now, and its last sync operation ended `Succeeded`: ArgoCD shows Synced and Healthy from the resources alone while a hook of the sync still runs or fails. `capi` is done when, besides, the clusterctl inventory equals the BOM. The item of an Application names the resources and hooks its sync failed on, with their messages, and the stage's message repeats the first. Once an Application counts, its item has its state and no text: what ArgoCD still shows of an earlier attempt is left out. | 30 min |
-| 7 | Build the platform cluster (`cluster`) | The CAPI token's Secret and the Application `pc-platform` on the seed; MachineDeployments of nodes no longer in a group are deleted; then waits for the control plane, the admin kubeconfig and every Machine Running. Before it writes anything it reads each node template: a template with a Proxmox cloud-init drive on another slot than `ide0` is refused (`machine_failed`, with the `qm set` command that removes the drive), because CAPMOX puts its own on `ide0` and a machine with both starts from the wrong one. A template without the drive stays usable everywhere: CAPMOX brings its own, and the template-updates smoke test gives its test VM one when the template has none, so such a template can still be tested and published for tenants. A template whose config the portal token may not read is not checked: the stage goes on and shows an item `template-<vmid>` in state `not checked`. A template that passed has the same item in state `ok`; one that Proxmox no longer knows has none (CAPMOX reports it on the machine). The items list each machine with its VMID (`no VM` until CAPMOX has cloned it) and, while it is not Running, the step CAPMOX is at with its error (the reason and message of the ProxmoxMachine's condition `VirtualMachineProvisioned`). CAPMOX calls a VM provisioned once it runs and has its addresses; for a machine that then does not join (kubeadm, the API address, etcd) the item carries the reason and message of the Machine's own condition `Ready` after `Cluster API:`. The message of the waiting stage repeats, in this order, what the ProxmoxCluster reports, the KubeadmControlPlane's condition `Available` while it is not `True` (`Control plane:`), the machines' errors and, last, the state of the Application `pc-platform` while its sync is not done (not while it is only Progressing, which it is for as long as machines are built). On a **Retry** that finds a ProxmoxCluster still without a condition, the run updates an annotation on it (`proxcloud.io/retried-by`) once, so CAPMOX opens the Proxmox API again at once instead of at the end of its backoff of up to 17 minutes; the 10 minutes count from then. Steps CAPMOX tries again (`CloningFailed`, `PoweringOnFailed`) are waited for. `VMProvisionFailed` and `TaskFailed` end the stage: CAPMOX does not go on with such a machine. | 60 min |
+| 7 | Build the platform cluster (`cluster`) | The CAPI token's Secret and the Application `pc-platform` on the seed; MachineDeployments of nodes no longer in a group are deleted; then waits for the control plane, the admin kubeconfig and every Machine Running. Before it writes anything it reads each node template: a template with a Proxmox cloud-init drive on another slot than `ide0` is refused (`machine_failed`, with the `qm set` command that removes the drive), because CAPMOX puts its own on `ide0` and a machine with both starts from the wrong one. A template without the drive stays usable everywhere: CAPMOX brings its own, and the template-updates smoke test gives its test VM one when the template has none, so such a template can still be tested and published for tenants. A template whose config the portal token may not read is not checked: the stage goes on and shows an item `template-<vmid>` in state `not checked`. A template that passed has the same item in state `ok`; one that Proxmox no longer knows has none (CAPMOX reports it on the machine). The items list each machine with its VMID (`no VM` until CAPMOX has cloned it) and, while it is not Running, the step CAPMOX is at with its error (the reason and message of the ProxmoxMachine's condition `VirtualMachineProvisioned`). CAPMOX calls a VM provisioned once it runs and has its addresses; for a machine that then does not join (kubeadm, the API address, etcd) the item carries the reason and message of the Machine's own condition `Ready` after `Cluster API:`. The message of the waiting stage repeats, in this order, what the ProxmoxCluster reports, the KubeadmControlPlane's condition `Available` while it is not `True` (`Control plane:`), the machines' errors and, last, the state of the Application `pc-platform` while its sync is not done (not while it is only Progressing, which it is for as long as machines are built). On a **Retry** that finds a ProxmoxCluster still without a condition, the run updates an annotation on it (`proxcloud.io/retried-by`) once, so CAPMOX opens the Proxmox API again at once instead of at the end of its backoff of up to 17 minutes; the 10 minutes count from then. Steps CAPMOX tries again (`CloningFailed`, `PoweringOnFailed`) are waited for. `VMProvisionFailed` and `TaskFailed` end the stage: CAPMOX does not go on with such a machine. Once every machine is Running the stage sets `onboot` on each VM of the platform that lacks it, with the CAPI token, so that the machines start again with their node ([After a Proxmox node reboots](#after-a-proxmox-node-reboots)); a VM it could not set does not fail the stage, and the Check's `machines` row names it. | 60 min |
 | 8 | Reach the platform cluster (`workload-access`) | Creates the seed ArgoCD's service account on the cluster and a token for it (one year, renewed by any later apply when under 90 days are left), kept only in the seed's cluster Secret; writes the CSI token's Secret for proxmox-csi. | 10 min |
 | 9 | Install the platform components (`workload-platform`) | The cluster's components wave by wave, each wave only when the one before is Synced and Healthy with its sync `Succeeded` (as in stage 6). After the first wave (Cilium) every node must be Ready with its group label. The platform's own volumes are recorded for Remove at every look of the stage, so also when it fails inside `kamaji-etcd`'s wave. | 20 min per wave |
 | 10 | Create the two providers (`register`) | Creates the Kubernetes and Databases providers, or updates the ones this installation created before, with a kubeconfig of the cluster's `proxcloud-system/proxcloud` service account. | 5 min |
@@ -448,8 +701,22 @@ A Remove has three stages: Delete the platform cluster (`remove-cluster`, 45 min
   `failed`. A ready installation is shown as **Needs attention** (`degraded`, computed when the page
   loads, never stored) when the seed does not answer, lists no Application, or one is not Synced and
   Healthy.
-- If the API stops, the next start resumes the run. If the job runs out of its 20 attempts (a
-  crash during a run or a database error spends one; waits spend none), the run reads `failed` with `job_dead` and the stored phase stays
+- If the API stops, the next start resumes the run. An API that is stopped cleanly (`docker compose
+  restart api`, a pod that is terminated) cancels the run at the stop signal, before it drains its
+  requests, and gives the run's job back as soon as the call the stage has in flight returns: the
+  next start takes it at once and no attempt is spent. This holds only when that happens within the
+  container's stop grace period (10 seconds by default under Compose, after which Docker kills the
+  process); otherwise the stop is as a crash. The release was run once on a lab (2026-11-17, main
+  cb2f052): `docker compose restart api` 33 ms into stage 8 of an apply on a ready platform, which
+  had nothing new to write. The job was given back 24 ms after the stop signal, the new process
+  went on with stage 8 0.9 seconds after the signal, the run succeeded with attempts 1 of 20, and
+  nothing was created twice. Not run: a stop while a slow call is in flight, so how often the 10
+  seconds are exceeded is not measured, and a stop in stages 2, 3 and 9 of a real install. After a
+  crash, or when the release did not reach the database, the run resumes when the job's one-minute
+  lease has run out, so up to a minute later, and an attempt is spent (seen on a lab before the
+  release existed: a clean restart in stage 7 resumed by itself 61 seconds later, attempts 2 of 20,
+  and nothing was created twice). If the job runs out of its 20 attempts (a
+  crash during a run or a database error spends one; waits and a clean stop spend none), the run reads `failed` with `job_dead` and the stored phase stays
   `applying` or `removing` until **Retry** or **Remove** settles it; settings cannot be saved until
   then.
 
@@ -468,7 +735,7 @@ stage is still trying.
 | `credentials_missing` | 3 to 5, 7, 8, Remove | A token secret is not stored (the message names which) | Paste it in step 2, then **Retry** or **Remove again** |
 | `image_import_failed` | 2 | Proxmox could not be read; a node lacks the import or boot store; an import failed or was refused. Also: an import is finished but the VM at its VMID is not a template in `pc-templates` on its node (moved to another pool or node, or out of the portal token's view), so the stage can neither use it nor call it deleted; the message names the VM | Open Template updates to see the import, then **Retry**. If it keeps failing, install a newer release. For a template that was moved: put it back in `pc-templates` on its node, or delete it so that it is imported again, then **Retry** |
 | `image_import_stalled` | 2 | No import moved for an hour | Open Template updates to see the import, then **Retry**. If it keeps failing, install a newer release |
-| `image_blocked` | 2 | A BOM image is on the template update blocklist | Install a newer ProxCloud release |
+| `image_blocked` | 2 | A BOM image is on the template update blocklist | A new installation: install a newer ProxCloud release. An installed platform stays on its release and its images, and no release moves it to other images yet (see "No upgrade between BOMs"): the message says which case applies, and an apply that must import that image stays blocked |
 | `seed_clone_failed` | 3, Remove | The clone task failed or was refused; stage 2 recorded no seed template; the VM stays locked. Also, with nothing being cloned: Proxmox could not be read with the CAPI token while looking at the seed VM or the pool `proxcloud-seed` (unreachable, or the token is refused), in stage 3 on a ready seed or in `remove-cluster` and `remove-seed` | Fix the storage or the node the message names, **Retry**. For a read that failed: check that `capmox@pve!capi` still exists and the stored secret is current, then **Retry** or **Remove again** |
 | `seed_config_refused` | 3, Remove | Proxmox refused a config change, the read of the VM's config after it, the CD upload, a firewall rule or the start (the message carries Proxmox's own error); the CD could not be rendered or built (`The seed's CD could not be rendered` or `… built`: for example Proxmox reports the seed's `net0` without a MAC address); at Remove, the VM is locked or carries another installation's tag | Fix what Proxmox's error names: the bridge, the boot or ISO store, the node, or a right of `capmox@pve!capi` (then run the script again), and **Retry**; it builds a new seed VM. A CD that could not be rendered or built is a defect, not a setting: nothing was stored and no CD was uploaded, Retry will not pass, report the message. A VM with another installation's tag is not deleted: look at it in Proxmox |
 | `seed_not_booted` | 4 | The seed's guest agent did not answer in time: the VM did not boot, or its first boot failed (for example the k3s binary or its install script could not be downloaded, or one failed its checksum) | Open the seed VM's console in Proxmox. **Retry** builds a new seed |
@@ -485,7 +752,7 @@ stage is still trying.
 | `workload_api_unreachable` | 8 to 10, Remove | The cluster's API does not answer from the API's host, or its kubeconfig or CA on the seed is not usable, or it refused the admin kubeconfig or the request with a `401` or `403` at five looks on end (as for `seed_api_unreachable`) | Add a route from the ProxCloud host to the API address, **Retry**. At Remove: restore the route and **Remove again**, or tick the option for a cluster that does not answer |
 | `nodes_timeout` | 9 | Not every node is Ready with its group label after the first wave | **Retry** |
 | `provider_conflict` | 10 | A provider with the same name exists that is not this installation's, two rows carry its marker, or the provider validation refused the row | Correct or rename that provider under Cloud providers, **Retry** |
-| `bom_unsupported` | start, plan | The installed BOM is not the one this release carries | No release upgrades between BOMs ([Not implemented yet](#not-implemented-yet)). Go back to the ProxCloud release that installed the platform. Or, if no tenant cluster or database must be kept: delete them all (Remove refuses with `tenants_exist` otherwise), remove managed services, which deletes the platform cluster, and install again |
+| `bom_unsupported` | start, plan | The installed BOM is not one this release carries: its own, or that of an earlier release from 0.8.0 on. A platform installed by a build of `main` (`dev-<sha>`) gets this after an upgrade | No release upgrades between BOMs ([Not implemented yet](#not-implemented-yet)). Go back to the ProxCloud release that installed the platform. Or, if no tenant cluster or database must be kept: delete them all (Remove refuses with `tenants_exist` otherwise), remove managed services, which deletes the platform cluster, and install again |
 | `portal_changed` | any | ProxCloud was upgraded during the run and no longer carries the run's BOM. The stage the run stood at reads `failed` with this code | **Retry** |
 | `job_dead` | any | The run's job ran out of attempts | **Retry**, or **Remove again** |
 | `platform_disabled` | start | The switch, or template updates, is off | `--managed-services` |
@@ -598,8 +865,9 @@ and are not deleted by this; delete those clusters from the projects first where
 | Credential | Where it is | Rotation |
 |---|---|---|
 | `capmox@pve!capi`, `csi@pve!csi` | Encrypted in `platformSecret`; the first also in a Secret on the seed, the second in a Secret on the cluster | Create a new token secret in Proxmox (remove the token, run the script again), paste it in step 2, then **Apply this release**: stages 7 and 8 write the Secrets again. Not verified on a lab |
-| The seed credential (a service account token, cluster-admin on the seed) | Encrypted in `platformSecret` | **Replace the seed credential**: creates the next token Secret (`proxcloud-portal-token-g<n>`), checks it, stores it, then deletes the older ones, which ends their tokens. Refused during a run. If it stops halfway, press it again; the next apply also removes token Secrets nothing stores. The audit log gets one entry, `ROTATE_CREDENTIAL` on the installation, with the names of the token Secret before and after (`fromSecret`, `toSecret`) and never a token. A rotation that stopped after it had stored the new credential gets that entry with outcome `FAILURE`. The old token does not end at that instant: the seed's API server remembers a token it has checked for some seconds (measured on a lab: the old token still answered 6 to 7 seconds after the rotation had returned) |
-| The cluster's admin kubeconfig | On the seed only (Cluster API keeps it). A run reads it into memory | Not stored by ProxCloud |
+| The seed credential (a service account token, cluster-admin on the seed) | Encrypted in `platformSecret` | **Replace the seed credential**: creates the next token Secret (`proxcloud-portal-token-g<n>`), checks it, stores it, then deletes the older ones, which ends their tokens. Refused during a run. If it stops halfway, press it again; the next apply also removes token Secrets nothing stores. The audit log gets one entry, `ROTATE_CREDENTIAL` on the installation, with the names of the token Secret before and after (`fromSecret`, `toSecret`) and never a token. A rotation that stopped after it had stored the new credential gets that entry with outcome `FAILURE`. The old token does not end at that instant: the seed's API server remembers a token it has checked for some seconds (measured on a lab: the old token still answered 6 to 7 seconds after the rotation had returned). **A seed backup taken before a rotation is of no use after it**: the archive holds only the older token Secret, a seed restored from it refuses the stored credential, and ProxCloud cannot make a new one on a ready seed (the bootstrap token is gone). So run a backup by hand right after every rotation, as root on the seed's node: `vzdump <seed VMID> --storage <backup store> --mode snapshot --compress zstd` ([step 5](#when-the-seed-does-not-answer)). That archive holds the seed's secrets: read the warning under **Seed backup** below before you choose the store |
+| The cluster's admin kubeconfig | On the seed only (Cluster API keeps it). A run reads it into memory, and so does a platform kubeconfig download, which never hands it out | Not stored by ProxCloud |
+| Service account `kube-system/proxcloud-break-glass` on the cluster, with ClusterRole and ClusterRoleBinding `proxcloud-break-glass` and Role and RoleBinding `proxcloud-break-glass` in `argocd` | On the cluster. It has no token Secret; written by the first platform kubeconfig download and again by each one | Deleting the service account ends every token issued for it. The next download creates it again |
 | The seed ArgoCD's token for the cluster | In the seed's cluster Secret only; valid one year | Renewed by any apply when under 90 days are left. The page shows the expiry and warns under 30 days |
 | The providers' kubeconfig (service account `proxcloud` on the cluster) | In the two provider rows' encrypted secret | Written again by every apply |
 | The seed's CA key, k3s token, bootstrap token | On the CD until stage 5 deletes it; the CA key is never stored by ProxCloud, the bootstrap token expires after 3 hours | None |
@@ -617,25 +885,101 @@ kubeconfig downloaded before a rotation kept working after it). So rotating does
 file has leaked: it stays valid until its hour is over, and ProxCloud offers nothing that ends it
 earlier. Treat the file as a root credential for one hour.
 
+**Platform kubeconfig.** **Download platform kubeconfig** on the ready card
+(`GET …/platform-kubeconfig`) is the same for the platform cluster, with less in it. ProxCloud reads
+the cluster's admin kubeconfig from the seed into memory (a long-lived client certificate that Cluster
+API issues; it is never handed out), writes the service account
+`kube-system/proxcloud-break-glass` with its roles on the cluster, asks the cluster for a one-hour
+token of that account and wraps the token in a kubeconfig. If the cluster grants a longer life than
+the hour, nothing is handed out (`502`). Same permission, same audit entry (`BREAK_GLASS`, with
+`operation: platform-kubeconfig`; the seed's has `seed-kubeconfig`), same refusal without the audit
+log, same JSON answer.
+
+What the token may do:
+
+| Where | What | Why |
+|---|---|---|
+| The whole cluster (ClusterRole) | `get`, `list`, `watch` on namespaces, nodes, pods and their logs, services, endpoints, events, config maps, volumes and claims, service accounts, quotas, and on every resource of the API groups of workloads, networking, storage, CRDs, metrics, ArgoCD, Kamaji, Cluster API (without its bootstrap group), CloudNativePG, MetalLB, Cilium and cert-manager | The read steps of this guide and of [managed-k8s.md](managed-k8s.md): Applications, tenant control planes, machines, pods |
+| Namespace `argocd` (Role) | `create` on `pods/portforward`; `get` on the Secret `argocd-initial-admin-secret` | The two ArgoCD commands |
+
+It reads no other Secret (a tenant cluster's admin kubeconfig and the providers' token are Secrets),
+no join token of Cluster API's bootstrap group, and it changes, deletes and executes nothing. The
+repair steps of the guides that write (`kubectl patch application`, `kubectl delete secret`) are
+left out on purpose: they need the admin kubeconfig, which the seed kubeconfig reads
+(`kubectl -n pc-platform get secret pc-platform-kubeconfig -o jsonpath='{.data.value}' | base64 -d`).
+
+This is a limit on `kubectl`, not on the holder. The file opens the cluster's ArgoCD as `admin`, and
+ArgoCD's own service accounts can change everything on the cluster. So whoever holds the file can,
+through ArgoCD, do what a cluster admin can, for as long as the admin password is unchanged, which
+is longer than the hour. Keep the file like an admin credential. To end a token before its hour,
+delete the service account with the admin kubeconfig
+(`kubectl -n kube-system delete serviceaccount proxcloud-break-glass`); the ArgoCD password is
+changed in ArgoCD. Neither was run on a lab.
+
 **Seed backup.** The seed holds what cannot be rebuilt from ProxCloud's database: the Cluster API
 state of the cluster's machines and the cluster's CA and admin kubeconfig. Nothing backs it up for
 you, and the page cannot see whether a job exists. It prints this command for the ready seed; run it
 as root on one node with a backup store of your own:
 
 ```sh
-pvesh create /cluster/backup --vmid <seed VMID> --storage <backup store> --schedule daily --mode snapshot
+pvesh create /cluster/backup --vmid <seed VMID> --storage <backup store> --schedule daily --mode snapshot --compress zstd --prune-backups keep-daily=7
 ```
 
-The backup contains the seed's cluster-admin token and the secret of `capmox@pve!capi`. Choose a
-backup store that is not the boot, ISO or import store of the settings, and on which neither the
-portal token nor any `csi@pve` or `capmox@pve` token holds `Datastore.Allocate`. Check each with
-`pveum user token permissions <user> <token name> --path /storage/<backup store>`. Nothing in
-ProxCloud checks the store you choose. On a site whose only backup store is `local` while the ISO or
-import store is `local` too, the backup is within reach of those tokens: `capmox@pve!capi` holds
+`--compress zstd` and `--prune-backups keep-daily=7` are there because a job without them writes
+one uncompressed archive a day and removes none, on a store that has no retention of its own
+(measured on a lab, one `vzdump` by hand each time, for a seed that used 3.8 GiB of its 20 GiB
+disk: with `--mode snapshot` only, 2 minutes 17 seconds and a 5.73 GiB archive; with `--mode
+snapshot --compress zstd`, 1 minute 45 seconds and a 2.39 GiB archive; the seed stayed up both
+times). Change the seven days to your own rule. Not run on a lab: the scheduled job itself and
+`--prune-backups`.
+
+> **Warning: the archive holds the seed's secrets.** Every archive of the seed carries its
+> cluster-admin token and the token secret of `capmox@pve!capi`. The backup store must not be
+> world-readable, and it must not be a shared export that other tenants or VMs can mount. `vzdump`
+> does not protect the file: on the lab it wrote the archive with its default mode, 644, on an NFS
+> export open to a whole subnet, so every user of the nodes and every client of that export could
+> read it. Check the mode of the files and who can mount the store before the first backup, and
+> again after a backup by hand. Nothing in ProxCloud checks the store you choose.
+
+Choose a backup store that is not the boot, ISO or import store of the settings,
+and whose archives no API token other than your own (the operator's) can read. Proxmox lets a token
+read an archive when it holds `Datastore.Allocate` on the store, or `Datastore.AllocateSpace` on
+the store together with `VM.Backup` on the seed VM. So check both, as root on one node:
+
+```sh
+pveum user list                                  # every user
+pveum user token list <user>                     # every token of that user
+pveum user token permissions <user> <token name> --path /storage/<backup store>
+pveum user token permissions <user> <token name> --path /vms/<seed VMID>
+```
+
+Run the last two for every token of every user, the portal token and the `csi@pve` and
+`capmox@pve` tokens among them. They print the rights the token really has on that path, whatever
+gives them. Reading the ACL rows of the store instead (`pveum acl list`) misses some: a row on
+`/`, `/storage` or `/vms` with propagate 1 reaches the store or the seed, so does a row on
+`/pool/<pool>` when the store or the seed VM is a member of that pool, and a row that names a user
+or a group also holds for every token of that user (or of the group's members) made without
+privilege separation. The two permission commands were run on the lab for single tokens; going
+through every token of every user was not. On the lab the portal
+token held `Datastore.AllocateSpace` on the backup store, and only the `NoAccess` row on
+`proxcloud-seed` kept `VM.Backup` on the seed from it: do not remove that row. These checks cover API rights
+only: on a file store (a directory, NFS, CIFS) the archive is also a file, which every user of the
+nodes and every client of the export can read when the file's mode and the export allow it (on the
+lab: mode 644 on an NFS export open to a whole subnet). Nothing in ProxCloud checks the store you
+choose.
+
+On a Proxmox cluster shared with other portals or tools no store may fit: on the lab, tokens of
+another portal held `Datastore.Allocate` on every store that takes backups. Then take the store
+the fewest tokens reach, and count every token that can read it as a holder of the seed's
+credentials. On a site whose only backup store is `local` while the ISO or
+import store is `local` too, the backup is within reach of ProxCloud's own tokens: `capmox@pve!capi` holds
 `PVEDatastoreAdmin` on the ISO store and the portal token on the import store. That is the limit ADR
 0009 A2 accepts for this milestone.
 
-A restore from such a backup has not been run. Without a backup, a lost seed means Remove with the
+A restore from such a backup was run once on a lab (2026-11-17): the 2.39 GiB zstd archive above,
+restored over the seed it was taken from three minutes earlier, in 2 minutes 8 seconds. The
+sequence, what was seen and what was not run are in step 5 of
+[When the seed does not answer](#when-the-seed-does-not-answer). Without a backup, a lost seed means Remove with the
 option for a missing seed and a new install, which deletes the cluster's machines and volumes. The
 same holds for a seed whose VM runs but whose Kubernetes cannot be repaired
 ([When the seed does not answer](#when-the-seed-does-not-answer)).
@@ -672,7 +1016,8 @@ finish.
   the stored phase is `ready` (`?live=1` itself still reads the seed and carries `live.code`, with
   `live.phase: failed`). Nothing else changed. After the seed is repaired, **Retry** brings the
   installation back to `ready`; reloading the page does not.
-- **Download seed kubeconfig** and **Replace the seed credential** answer `502`.
+- **Download seed kubeconfig**, **Download platform kubeconfig** (it reaches the cluster through the
+  seed) and **Replace the seed credential** answer `502`.
 - **Remove managed services**: the seed VM exists, so the run asks Cluster API on it to delete the
   cluster, retries, and fails `seed_api_unreachable`. The option for a missing seed does not apply
   while the VM exists.
@@ -689,16 +1034,137 @@ finish.
    settings): `qm guest exec <vmid> -- systemctl is-active k3s`, `qm guest exec <vmid> -- journalctl -u k3s -n 50 --no-pager`
    and `qm guest exec <vmid> -- grep ' / ' /proc/mounts`.
 4. A root filesystem line that ends in `emergency_ro` (or reads `ro`) means ext4 found an error and
-   takes no more writes: k3s cannot start, and `mount -o remount,rw` does not clear it. This was seen
-   on a lab after one clean `qm reboot` of the seed; why the filesystem was inconsistent is not
-   known. Then, before anything else, keep the evidence and a way back: snapshot the seed's disk on
-   its store (on ZFS `zfs snapshot <pool>/vm-<vmid>-disk-0@before-fsck`). Shut the VM down
-   (`qm shutdown <vmid>`), check the root filesystem from the node (`e2fsck -f` on the first
-   partition of that disk; on ZFS `/dev/zvol/<pool>/vm-<vmid>-disk-0-part1`), start the VM, then
-   **Retry** when an apply was started meanwhile and the installation reads `failed`, or reload the
-   page until it reads the seed again when none was. **This repair has not been run on a lab.**
-5. If the seed cannot be repaired: restore the seed VM from your backup (also not run on a lab),
-   then **Apply this release**.
+   takes no more writes: k3s cannot start, and `mount -o remount,rw` does not clear it. The known
+   cause is the image: a seed built from an Ubuntu 26.04 image exported before 2026-11-16 has a
+   stale field in its ext4 superblock, and its root goes read-only at a reboot
+   ([template updates, known issue](template-updates.md#known-issue-ubuntu-2604-images-exported-before-the-orphan-file-fix)).
+   **Do not run a plain `e2fsck -f`, `-p` or `-y` on it**: before the field is zero the check
+   deletes the file in inode 12 and leaves the field, so the fault comes back. The repair is the one
+   of that section, on the Proxmox node, with the VM shut down. On ZFS the seed's partitions are
+   `/dev/zvol/<pool>/vm-<vmid>-disk-0-part1` (root) and `-part13` (`/boot`); both are ext4.
+   1. Test from the node (reads only; `AFFECTED` names a partition to repair):
+
+      ```sh
+      for d in /dev/zvol/<pool>/vm-<vmid>-disk-0-part1 /dev/zvol/<pool>/vm-<vmid>-disk-0-part13; do
+        f=$(dd if=$d bs=1 skip=1116 count=4 2>/dev/null | od -An -tx4 | tr -d ' ')
+        i=$(dd if=$d bs=1 skip=1664 count=4 2>/dev/null | od -An -tu4 | tr -d ' ')
+        if [ $((0x$f & 0x1000)) -eq 0 ] && [ "$i" != 0 ]; then echo "AFFECTED $d s_orphan_file_inum=$i"; else echo "ok $d"; fi
+      done
+      ```
+
+   2. Keep a way back: `zfs snapshot <pool>/vm-<vmid>-disk-0@before-repair`. Then
+      `qm shutdown <vmid>` and wait until `qm status <vmid>` reads `stopped`.
+   3. For each `AFFECTED` partition, these three commands in this order (why, and what each exit
+      status means: the linked section):
+
+      ```sh
+      D=/dev/zvol/<pool>/vm-<vmid>-disk-0-part1     # then again with -part13
+      e2fsck -E journal_only -p "$D"
+      printf 'ssv orphan_file_inum 0\nclose -a\n' > /tmp/orphan-fix.cmd
+      debugfs -w -f /tmp/orphan-fix.cmd "$D"
+      [ "$(dd if="$D" bs=1 skip=1664 count=4 2>/dev/null | od -An -tu4 | tr -d ' ')" = 0 ] && e2fsck -f -p "$D"
+      ```
+
+      If the last `e2fsck` does not run, or exits 4 or more, stop: do not start the VM.
+   4. Start the VM afterwards: `qm start <vmid>`. The seed's API answers again within about a
+      minute (`curl -k https://<seed address>:6443/readyz` reads `401`). Then **Retry** when an
+      apply or a Remove was started meanwhile and the installation reads `failed`, or reload the
+      page until it reads the seed again when none was. The snapshot goes with the seed's disk at a
+      Remove; delete it yourself (`zfs destroy <pool>/vm-<vmid>-disk-0@before-repair`) once the
+      seed has run for a while.
+
+   Run once on a lab, on 2026-11-17, on a seed on ZFS with e2fsprogs 1.47.2: both partitions were
+   affected, every step exited 0, the file in inode 12 was kept, the seed's API answered 41 seconds
+   after the start and all components read Synced and Healthy. Not run: a store other than ZFS
+   (the partition devices are then the store's: an LVM volume needs `kpartx -a` first), and a root
+   that reads `ro` for another reason, where the test prints `ok` and this repair does not apply.
+5. If the seed cannot be repaired: restore the seed VM from your backup, over the same VMID. Stage 3
+   sets protection on the seed, and Proxmox refuses a restore over a protected VM
+   (`unable to restore VM <vmid> - - protection mode enabled`), so the protection comes off first.
+
+   **Choose the archive first: it must be newer than the last replacement of the seed credential.**
+   **Replace the seed credential** makes a new token Secret on the seed, stores its token and deletes
+   the older Secrets. An archive from before holds only the older Secret, whose token ProxCloud no
+   longer stores: the restored seed answers the stored credential with `401`, **Apply this release**
+   fails `seed_api_unreachable` after five refusals, and nothing makes a new credential on a seed
+   that had become ready (stage 5 uses the bootstrap token only while no credential is stored, and
+   that token expired 3 hours after the seed was built). `qmrestore --force` has by then replaced
+   the disk of the old seed, and what is left is step 6. This is read from the code, not tried on a
+   lab. So compare the archive's time (`pvesm list <backup store> --vmid <vmid>`) with the last
+   `ROTATE_CREDENTIAL` entry of the installation in the audit log, whatever its outcome, and take
+   only an archive that is newer. The audit log misses a rotation made on a `dev-` build of main from
+   before pull request #288 (no release has that older behaviour): there the rotation is logged as
+   `CREATE` on the installation, not as `ROTATE_CREDENTIAL`. On an installation that ran such a
+   build, also compare the generation in `status.seed.tokenSecret`
+   (`proxcloud-portal-token-g<n>`) with the one the installation had when the archive was made.
+   The newest archives may hold the fault you restore for; when no
+   archive is both newer than that entry and sound, do not restore over the seed: step 6 applies.
+
+   As root on the seed's node:
+
+   ```sh
+   qm config <vmid> | grep -E '^(net0|protection):'    # keep the output: the MAC to compare with
+   cp /etc/pve/firewall/<vmid>.fw /root/<vmid>.fw.before-restore
+   qm shutdown <vmid>                                    # qm stop <vmid> when the guest does not answer: its disk is replaced
+   qm set <vmid> --protection 0
+   qmrestore <archive> <vmid> --force 1 --storage <boot store>
+   qm config <vmid> | grep -E '^(net0|protection):'
+   diff /root/<vmid>.fw.before-restore /etc/pve/firewall/<vmid>.fw \
+     || cp /root/<vmid>.fw.before-restore /etc/pve/firewall/<vmid>.fw    # missing or changed: put the saved one back
+   qm set <vmid> --protection 1                          # only when the config shows no "protection: 1"
+   pvesh get /pools/proxcloud-seed                       # the seed VM must still be a member
+   qm start <vmid>
+   ```
+
+   `<archive>` is the archive's file (`pvesm list <backup store> --vmid <vmid>` names the volume,
+   `pvesm path <volume>` prints its path); `<boot store>` is the boot store of the settings.
+   - **The same VMID, and never `--unique`.** The installation records the seed by its VMID, its
+     firewall file is `<vmid>.fw`, and the seed's network configuration and address go with the MAC
+     of `net0`. `--unique` gives `net0` a new MAC; another VMID is a VM ProxCloud does not know.
+   - **Check before the start**: `net0` carries the same MAC as before, the config reads
+     `protection: 1` (set it back if the archive did not carry it), and `/etc/pve/firewall/<vmid>.fw`
+     is there with policy DROP and a rule for 6443. If the file is missing or differs from the copy
+     saved before the restore, copy the saved one back
+     (`cp /root/<vmid>.fw.before-restore /etc/pve/firewall/<vmid>.fw`) before `qm start`: without it
+     the seed's API on 6443 is open to its network until an apply writes the rules again. An apply
+     does not set the protection again (stage 3 sets it when it attaches the first-boot CD only).
+     The VM must also still be a member of the seed pool (`proxcloud-seed`): the `NoAccess` rows
+     that keep the portal token and the `csi@pve` tokens from the seed and from its backups hold
+     through that membership. On the lab Proxmox kept it over `--force`; if it is gone, put the VM
+     back (`pveum pool modify proxcloud-seed --vms <vmid>`, not run on a lab) before the start.
+   - **One config line changes and is harmless**: `vmgenid`. Proxmox gives a restored VM a new
+     generation id, so a `diff` of the whole config before and after shows that line and no other.
+     k3s, ArgoCD and Cluster API came back with it.
+   - Then wait until `curl -k https://<seed address>:6443/readyz` reads `401`, and press
+     **Apply this release**.
+   - **Times to expect**, from the lab (a 20 GiB disk on ZFS on slow disks, the 2.39 GiB zstd
+     archive on NFS): `qm shutdown` 14 seconds, `qmrestore` 2 minutes 8 seconds, `401` 45 seconds
+     after `qm start`; the seed's API was away 3 minutes 32 seconds in all. The installation's live
+     view read all 14 components Synced and Healthy 41 seconds after the `401`, and the apply took
+     6 seconds. `qmrestore` also prints the rescan of every other store of the node; return code 0
+     is the signal.
+   - **What keeps working**: the platform cluster's API and the tenant clusters' APIs answered
+     throughout. A break-glass kubeconfig issued before the backup was made still works on the
+     restored seed until its hour is over (the same service account and signing key).
+   - **Afterwards** delete `/root/<vmid>.fw.before-restore`: nothing removes it. It holds no secret.
+
+   **Run once on a lab (2026-11-17, main cb2f052)**: a healthy seed restored over itself from an
+   archive made three minutes earlier (`vzdump --mode snapshot --compress zstd` by hand), with no
+   credential rotation and no machine change in between. Every step went as written above. The
+   restored VM kept its MAC and address, `protection: 1` (it came back from the archive, so the
+   `qm set --protection 1` was not needed), its firewall file (Proxmox wrote it from the archive,
+   equal to the saved copy, so the `cp` did not run) and its pool. The stored seed credential
+   worked, and Cluster API found its state equal to the cluster and wrote nothing: the four
+   Machines kept their resourceVersions, no machine was replaced, no VM was cloned or deleted. The
+   platform cluster and a tenant cluster with three workers were not touched (no pod restarted
+   there), and **Apply this release** then succeeded. Seen before the sequence existed: with the
+   VM shut down and still protected, `qmrestore … --force 1` ended with the message above and
+   changed nothing.
+
+   **Not run**: an archive older than a credential rotation (the `401` path above is read from the
+   code) or older than a machine change (Cluster API meeting machines it does not know, or missing
+   ones it does); `qm stop` on a guest that does not answer; `--unique`; a boot store other than
+   ZFS; an archive made by the scheduled backup job, with or without pruning.
 6. Without a backup the seed cannot be brought back: an apply never rebuilds a ready seed, because a
    new one would know nothing of the cluster's machines. What is left is the path of a lost seed:
    delete the tenant clusters and databases you can from their projects, delete the seed VM in
@@ -710,6 +1176,46 @@ finish.
 Reboot or shut down a seed through the guest (`qm reboot`, `qm shutdown`), not with `qm stop`, and
 put the backup job in place before you need it: it is the only way back that keeps the platform
 cluster.
+
+### After a Proxmox node reboots
+
+Proxmox starts, at boot, only the VMs that have `onboot`. Up to v0.8.0 only the seed had it: after a
+reboot of the node the platform cluster's machines stayed stopped until someone started them, and
+with them every tenant control plane and database. This was seen on a production site on v0.8.0.
+
+From v0.8.1 stage 7 of every install and of every **Apply this release** ends by setting `onboot`
+on each VM of the platform that lacks it (the VMs of the pools `proxcloud-seed` and
+`proxcloud-system` with the installation's tag), with the CAPI token, which holds
+`VM.Config.Options` there. No chart and no BOM changes for it. A site installed on v0.8.0 gets it
+at its first apply on v0.8.1; until then, and at any time, as root on the node:
+
+```
+qm set <vmid> --onboot 1
+```
+
+What this does not do, and what to do then:
+
+- **A machine Cluster API replaced** (a changed node group, a rollout) is a new VM without
+  `onboot` until the next apply. The Check's `machines` row names every such VM.
+- **A stopped machine is not started by ProxCloud.** The `machines` row names it with its node;
+  start it in Proxmox or with `qm start <vmid>`. Start the control plane machine before the
+  others if you start them by hand.
+- **No start order is set.** Proxmox takes `Sys.Modify` on `/` to change a VM's `startup` option,
+  and the CAPI token does not hold it (the role is not widened for this). Without an order Proxmox
+  starts the VMs one after another by VMID. To have the seed first, then the control plane, then
+  the rest, as root: `qm set <vmid> --startup order=1` on the seed, `order=2` on the control
+  plane machine, `order=3` on the others. A replaced machine loses it.
+- **Tenant clusters' machines** are not touched by this: their VMs are made by the platform's
+  CAPMOX in tenant pools and have no `onboot`. After a node reboot start them in Proxmox.
+
+Seen on a lab (2026-11-18, a platform installed by v0.8.0, then the build `dev-751a190` of main): the
+`machines` row warned for the four machines without `onboot`, the apply set it with the CAPI token,
+CAPMOX v0.9.2 had not taken it back 23 minutes later, and the row then read ok. Not verified on a
+lab: a stopped machine, a machine the token cannot read, an install on this release from the start,
+and a node reboot with `onboot` in place. The privileges (`VM.Config.Options` for `onboot`, and `Sys.Modify` on `/`
+besides for `startup`) are read from Proxmox VE's API code (qemu-server, `PVE/API2/Qemu.pm`), and the seed's own `onboot` has been set with the same
+token and role since the first install. That Proxmox starts VMs without a start order by VMID is from
+its documentation as remembered, and was not checked in its code or on a node.
 
 ## 9. Limits on the Compose install
 
@@ -727,8 +1233,9 @@ cluster.
   (`this provider offers no Kubernetes version yet`), before anything is reserved or a token is made,
   and an upgrade of an existing cluster is refused the same way (`version is not offered by this
   provider`).
-- **Tenant clusters need a default zone without DHCP** on the Proxmox provider (EVPN or VLAN). On a
-  default zone with DHCP (a `simple` zone that ProxCloud created) the Check warns
+- **Tenant clusters need a default zone without DHCP** on the Proxmox provider (EVPN, VLAN, or a
+  `simple` zone made without it: `"dhcp": false` in the zone's config, or made by hand). On a
+  default zone with DHCP (a `simple` zone that ProxCloud created by its default) the Check warns
   (`tenant-network`), the install still registers and publishes the Kubernetes provider, and a
   cluster create on that zone's networks is refused with a `400`, unless the provider uses shared
   workers (`cluster.shared`) ([Prerequisites](#2-prerequisites)).
@@ -802,9 +1309,9 @@ and ADR 0009, A2 and A8.
   Proxmox API without verifying its certificate; ArgoCD pulls charts by version, and their digests
   are compared in CI, not at pull time.
 
-## Known issue: no PostgreSQL database on this release's node image
+## Known issue: no PostgreSQL database on a node image built before 2026-11-16
 
-The BOM's node image (`ubuntu-2604-k8s-1.35.10`, built 2026-11-14) runs Ubuntu 26.04 with kernel
+The node image an earlier BOM named (`ubuntu-2604-k8s-1.35.10`, built 2026-11-14) runs Ubuntu 26.04 with kernel
 7.0.0-43. Ubuntu 26.04 sets `kernel.apparmor_restrict_unprivileged_unconfined=1`, and since kernel
 7.0.0-42 a container's processes then run under a stacked AppArmor label
 (`cri-containerd.apparmor.d//&unconfined`) to which containerd's own profile allows no signal: the
@@ -820,8 +1327,9 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 - **The fix in the image.** A node image built from this release on sets that sysctl to `0`, the
   value of Ubuntu 24.04, in `/etc/sysctl.d/90-proxcloud-apparmor-stack.conf`; containers stay
   confined by containerd's profile. The export's cold-boot check refuses a Kubernetes image without
-  it. **The BOM of this release still names the image without the fix**: a new image must be built
-  and published by CI, shown on a lab to bring a database up, and named by a later BOM. The setting
+  it. **The BOM of v0.8.0 names an image with the fix**
+  (`ubuntu-2604-k8s-1.35.10-20261116181221-72f0eaa3d0d4`; the file was read from the published
+  disk). A database that comes up on it is not recorded from a lab. The setting
   and the cold-boot check go away again when the image carries a containerd release with the
   stacked-label rules: pull request 14487 was merged to containerd's main branch on 2026-11-16 and is
   in no release yet; the backport for 2.3 is pull request 14590, still open.
@@ -838,8 +1346,9 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 
 ## Not implemented yet
 
-- **No released version.** The BOM is `0.8.0-dev`. `--managed-services` needs v0.8.0, which is not
-  tagged, so no released image reads `PROXCLOUD_PLATFORM_ENABLED`. For a test before the release,
+- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1` (`main` carries a `-dev` one between releases, now `0.9.0-dev`). `--managed-services` needs v0.8.0 or later: no
+  earlier released image reads `PROXCLOUD_PLATFORM_ENABLED`, and the images of v0.8.0 exist once
+  its tag's workflows have succeeded. For a test ahead of a release,
   `proxcloud-up.sh` takes a build of main as its version (`--version dev-<sha>`, `upgrade dev-<sha>`;
   CI publishes one per push to main) and prints that it is not for production
   ([deploy/compose/README.md](../deploy/compose/README.md)).
@@ -849,18 +1358,40 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
   and `kamaji-crds` as version `26.11.2-edge`, packaged from the upstream tag of that name. CI
   compares the digests; ArgoCD does not, so a version replaced in the mirror between two checks
   would be installed.
-- **No upgrade between BOMs.** A release carries one BOM. An apply on an installed platform runs
-  with the installed BOM, which must be the one the release carries: it repairs, applies changed
-  settings and renews the seed ArgoCD's token. After a ProxCloud upgrade that changes the BOM,
-  `POST …/runs` answers `409 bom_unsupported` and the plan is blocked, until a release carries the
-  previous BOMs. Provider (Cluster API) upgrades are refused as `capi_init_failed`.
+- **No upgrade between BOMs.** An installed platform stays on the BOM that installed it. A release
+  carries its own BOM and, from the release after v0.8.0 on, the BOM of each earlier release back
+  to `0.8.0` (`deploy/platform/previous/`, byte for byte the file of that release's tag). After a
+  ProxCloud upgrade the platform a release installed keeps working: the reads and the Check, an
+  apply (**Apply this release**) and Remove. The apply runs with the installed BOM and takes every
+  pin from it, the images, k3s, the charts and their digests, the Cluster API providers and the
+  charts the two providers name: it repairs, applies changed settings and renews the seed ArgoCD's
+  token, and it moves no component to the version of the newer release. Step 4 says so ("The
+  platform stays on release 0.8.0"), lists the contents of the installed release, and the plan
+  names the release the build would install as `newer`. Moving an installed platform to a newer
+  BOM is a later release. Provider (Cluster API) upgrades are refused as `capi_init_failed`.
+  - **Seen on a lab once** (2026-11-18): a platform installed by the released v0.8.0, then the
+    portal upgraded to the build `dev-751a190` of main. The plan had no change and named that
+    build's BOM as `newer`, the Check passed, **Apply this release** succeeded in 6.6 seconds,
+    `status.bom` stayed the 0.8.0 one and no Application of the seed was synced again. That
+    build's own BOM pinned the same versions as 0.8.0, so the lab does not show an apply that
+    keeps older pins while the build carries other ones, and the build was not the release
+    v0.8.1 itself. What tests show: the file under `previous/` has the sha256 that
+    a v0.8.0 platform records (`8eb87498…6600c6`), what the renderers of this build make of the
+    0.8.0 BOM is byte for byte what v0.8.0 rendered from it (the goldens of the tag), and a run on
+    fakes takes its images, Applications and provider bodies from the 0.8.0 BOM.
+  - The pins come from the installed BOM; the code that renders them is the running release's. A
+    release that changes a renderer changes what the next apply writes to an installed platform.
+    `TestRenderGoldenOfPreviousBOMs` shows such a change as a diff in review.
+  - A provider that the apply registers again gets the tenant chart versions of the installed
+    BOM, not those of the newer release.
   Two consequences to know before an install is finished on a build that is not a release:
   - The installed BOM is recorded by the sha256 of the BOM file as that build carries it, in
     stage 11 only. Any later change of the file, a digest filled in for an entry that said
-    `pending` or a comment, is another BOM. A platform installed on a `-dev` build is therefore
-    refused (`bom_unsupported`) by every later build whose BOM file differs: keep the build that
-    installed it, or Remove and install again. Finish an install you want to keep only on a build
-    whose BOM has no `pending` digest.
+    `pending` or a comment, is another BOM. Only the BOMs of releases are kept as previous ones. A
+    platform installed on a `-dev` build (a `dev-<sha>` build of `main`, `0.8.0-dev` or
+    `0.9.0-dev`) is therefore refused (`bom_unsupported`) by every later build whose BOM file
+    differs, a release included: keep the build that installed it, or Remove and install again.
+    Finish an install you want to keep only on a release.
   - An installation that never finished has no recorded BOM. **Retry** after a ProxCloud upgrade
     runs with the new build's BOM on whatever the failed run left on the seed and the cluster,
     without the comparison an installed platform gets. Nothing checks that step from one BOM to the
@@ -876,15 +1407,21 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
   change of that field the API accepts after a run succeeded. Nothing in the installer writes an installation record,
   and a site with an installer-built services cluster is not shown on the page.
 - **The cluster chart's fixes of 0.1.12 reach a new install only.** The BOM names
-  `proxmox-kamaji-cluster` 0.1.12, for the platform cluster and for new tenant clusters (whose
-  output did not change). A platform cluster built from the BOM that named 0.1.11 has a control
+  `proxmox-kamaji-cluster` 0.1.13, for the platform cluster (which it renders as 0.1.12 does) and
+  for new tenant clusters (whose node group replicas it places by free capacity,
+  [managed-k8s.md](managed-k8s.md#9-how-a-cluster-lands-on-proxmox)). A platform cluster built from the BOM that named 0.1.11 has a control
   plane node that registers the API address as its InternalIP (its kubelet has no `node-ip`;
   nothing failed on it with one control plane machine) and a kube-vip that gives up the API address
   when a lease renewal takes over 10 seconds. Chart 0.1.12 gives the kubelet the machine's own
   address and kube-vip a renew deadline of 40 seconds (several tries of at most 10 seconds each,
   see [What no check reads](#what-no-check-reads)). No release upgrades between BOMs: an apply on
-  the earlier platform is refused (`bom_unsupported`), and it gets 0.1.12 by Remove and a new
-  install.
+  the earlier platform is refused (`bom_unsupported`), and it gets the fixes by Remove and a new
+  install. The same holds for a platform built from the BOM that named 0.1.12 and
+  `proxcloud-platform` 0.1.1: its Kubernetes provider keeps `chartVersion` 0.1.12 (no placement by
+  free capacity) until the operator sets it to 0.1.13 on the provider's page, and its provider
+  service account cannot read Machines (no provisioning reason) until a Remove and a new install:
+  the `platform` Application keeps the ClusterRole of chart 0.1.1 (self-heal), so re-applying
+  `deploy/mgmt-cluster/rbac.yaml` there does not last.
 - **`layout: separate`** (one cluster for Kubernetes, one for databases) is refused by the API.
 - **No VLAN** on the platform network, and no IPv6.
 - **One control plane machine.** The settings take no control plane count.
@@ -898,9 +1435,10 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 ## Not verified on a lab yet
 
 The milestone run (M0) finished once on a lab Proxmox VE cluster: attempt 5, with one **Retry**, on
-the code before the changes it led to. Those changes have not run on a lab: a cluster's `401` and
-`403` tried again for five looks, the items of a Remove, and cluster chart 0.1.12 (`node-ip`,
-kube-vip's lease). The lab checks L0 to L11 of the design are not recorded as passed. Until they
+the code before the changes it led to. A later round (2026-11-17, main cb2f052) removed that
+platform and installed again in one run without a Retry, on cluster chart 0.1.13 and platform chart
+0.1.2; the Remove listed every deleted machine with its VMID. Not run on a lab: a cluster's `401`
+and `403` tried again for five looks. The lab checks L0 to L11 of the design are not recorded as passed. Until they
 are recorded here, treat every behaviour above as what the code and its tests say, not as
 observed, except the figures this guide marks as seen on a lab:
 
@@ -913,12 +1451,26 @@ observed, except the figures this guide marks as seen on a lab:
 | L4 | The first kubeadm join of the BOM's node image, group labels and taints, kube-vip. With it: that a machine cloned from a template with its cloud-init drive on `ide0` starts from CAPMOX's ISO (`qm config <vmid>` shows one cloud-init medium, on `ide0`; in the machine `grep 'Using data from' /var/log/cloud-init.log`), and the texts of CAPMOX's conditions as stage 7 shows them |
 | L5 | Placement of Kamaji and etcd on the `kamaji` group; the locked `default` project |
 | L6 | The seed ArgoCD reaching the cluster with its token; a public OCI chart pulled without credentials |
-| L7 | End to end: a tenant cluster and a tenant database, and the database egress fence. Run once, partly: the two project attaches, the placement of a database on the `dbaas` group and the first tenant network passed; no tenant cluster was created (no published node image, a `simple` default zone) and no database became healthy ([the node image's known issue](#known-issue-no-postgresql-database-on-this-releases-node-image)) |
-| L8 | Resume after an API restart in stages 2, 3, 7 and 9; cancel and Retry |
+| L7 | End to end: a tenant cluster and a tenant database, and the database egress fence. Run once, partly: the two project attaches, the placement of a database on the `dbaas` group and the first tenant network passed; no tenant cluster was created (no published node image, a `simple` default zone) and no database became healthy. A later round (2026-11-17, main cb2f052) created a tenant cluster on a network of a VLAN default zone, with a router for that VLAN set up outside the product: three workers were Ready 12 minutes after the create ([the node image's known issue](#known-issue-no-postgresql-database-on-a-node-image-built-before-2026-11-16)) |
+| L8 | Resume after an API restart in stages 2, 3, 7 and 9; cancel and Retry. Run once on 2026-11-17, on a ready platform only: an API restart in stage 7 of an apply that had nothing new to write resumed by itself (61 seconds later, before the job was released at a clean stop), and a cancel between the two waves of stage 6 followed by **Retry** passed. Run once more the same day with the clean-stop release in place: a restart 33 ms into stage 8 of such an apply was given back at once and went on 0.9 seconds after the stop signal, attempts 1 of 20, nothing created twice ([section 5](#5-the-stages-of-a-run)). Not run: a restart in stages 2, 3 and 9 of a real install, and a stop with a slow call in flight |
 | L9 | Failure drills: `seed_not_booted`, `machine_failed`, a removed grant, a template deleted by hand |
-| L10 | Seed reboot, the backup job and a restore, Remove, and Remove with the seed gone. One clean reboot was run and **failed**: the seed's root filesystem came up in ext4 `emergency_ro` and its API never answered again; the cause is not known ([When the seed does not answer](#when-the-seed-does-not-answer)). Remove from a failed stage 7 passed |
+| L10 | Seed reboot, the backup job and a restore, Remove, and Remove with the seed gone. One clean reboot was run and **failed**: the seed's root filesystem came up in ext4 `emergency_ro` and its API never answered again. The cause was the image's stale ext4 superblock field, and the documented repair brought the seed back on 2026-11-17 ([When the seed does not answer](#when-the-seed-does-not-answer)); on a seed built from the fixed image two clean reboots then passed (same address and MAC, the pinned CA still valid, all components Synced and Healthy). One `vzdump` by hand with `--mode snapshot` passed, and one with `--compress zstd` (2.39 GiB in 1 minute 45 seconds); the scheduled job was not created and `--prune-backups` was not run. The restore was first refused by Proxmox over the protected seed; with the sequence of [step 5](#when-the-seed-does-not-answer) it was run once on 2026-11-17 and passed: a healthy seed restored over itself from a three-minute-old archive, Cluster API wrote nothing, the tenant cluster was not touched. Not run: an archive older than a credential rotation or a machine change, `qm stop` on a dead guest, `--unique`, a boot store other than ZFS, an archive of the scheduled job. Remove of a ready platform and Remove from a failed stage 7 passed |
 | L11 | Seed credential rotation and the expiry of the break-glass kubeconfig. The rotation and that a break-glass kubeconfig outlives it were measured; the `401` after the hour was not |
 
-Also not run: the identities script on a site that already has the installer's tokens, a token
+Not run on a lab either, anything of [After the install](#after-the-install): the platform
+kubeconfig against a real cluster (that the token is granted for one hour, that the two roles admit
+exactly what the table says, that a `401` follows the hour), the two ArgoCD commands, and the name
+and port of the `argocd-server` Service and the Secret `argocd-initial-admin-secret` of chart
+argo-cd 10.14.0.
+
+Also not run: `onboot` set by stage 7 and a reboot of a node with it
+([After a Proxmox node reboots](#after-a-proxmox-node-reboots)), the `machines` row against a real
+cluster, a `simple` zone created from `"dhcp": false`, a tenant cluster or a load balancer on a
+network of a `simple` zone without DHCP, the identities script on a site that already has the installer's tokens, a token
 secret rotation, an install on a Proxmox cluster with a single node, and `--managed-services` on a
 Compose host against a published release.
+
+The row `tenant-path` and its guide ([The path from tenants to the platform](#the-path-from-tenants-to-the-platform))
+are not verified on a lab: the row's tests use a fake Proxmox API, the mechanism is stated from
+source and fits what the production site showed, the node leg was run by hand on that one site at
+runtime only, and the layout with a platform network routed by the node was run nowhere.

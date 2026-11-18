@@ -5,7 +5,7 @@
 // field the API's structs do not have. `?mock-platform=<preset>` in the URL starts the page in one state:
 // disabled | draft | isolation (the isolation check fails until a provider sync) | norunner (runs answer 409) |
 // running | waiting (stage 4 is trying again) | failed | dead (the run's job died: the stored phase stays applying) |
-// ready | degraded (one component out of sync) | simplezone (the check warns: no tenant cluster on a simple zone) | silent (the seed does not answer) | unread (the live read fails) | removing
+// ready | previous (ready, installed by the release before this one: the plan names a newer release) | degraded (one component out of sync) | simplezone (the check warns: no tenant cluster on a simple zone) | silent (the seed does not answer) | unread (the live read fails) | removing
 // (none: enabled, nothing saved).
 import { ApiError } from "@/lib/api"
 import { on } from "../router"
@@ -93,6 +93,8 @@ const bom = {
   ],
 }
 const bomRef = { release: bom.release, sha256: bom.sha256 }
+// The preset "previous": the release that installed the platform, which this one carries as a previous BOM.
+const previous = { ...bom, release: "0.6.0", sha256: "1e0d9c8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d" }
 
 const find = (id: string) => {
   if (!mockPlatform.enabled) throw fail(404, "platform_disabled", "Managed services are off on this site: set PROXCLOUD_PLATFORM_ENABLED=true")
@@ -187,7 +189,7 @@ function ready(in_: Doc) {
   const provider = (kind: string, label: string) => {
     let svc = db.services.find((s) => s.config?.platformInstallationId === in_.id && s.config?.provider === kind)
     if (!svc) {
-      svc = { id: db.nextId("svc"), name: `${in_.name} ${label}`, type: "CLOUD", status: "ACTIVE", config: { provider: kind, platformInstallationId: in_.id, attachToNewProjects: false } }
+      svc = { id: db.nextId("svc"), name: `${in_.name} ${label}`, type: "CLOUD", status: "ACTIVE", config: { provider: kind, platformInstallationId: in_.id, attachToNewProjects: false, ...(kind === "kamaji" ? { cluster: { versions: {} } } : {}) } }
       db.services.push(svc)
     }
     return svc.id as string
@@ -261,14 +263,20 @@ if (preset && preset !== "disabled") {
     tick(newRun(in_, "apply", Date.now() - 3.5 * STAGE_MS)).dead = true
     in_.status.seed = { vmid: 9100, node: "pve1", generation: 1, cdVolume: "local:iso/pc-seed-pi-00000001.iso" }
   }
-  if (["ready", "degraded", "silent", "unread", "removing"].includes(preset)) {
+  if (["ready", "previous", "degraded", "silent", "unread", "removing"].includes(preset)) {
     mockPlatform.applies = 1
     tick(newRun(in_, "apply", Date.now() - 3_600_000))
+    if (preset === "previous") in_.status.bom = { release: previous.release, sha256: previous.sha256 }
     if (preset === "removing") newRun(in_, "remove", Date.now() - 0.5 * STAGE_MS)
   }
 }
 
-on("GET /admin/platform/bom", () => ({ data: bom }))
+on("GET /admin/platform/bom", ({ query }) => {
+  const sha = query.get("sha256")
+  const found = [bom, previous].find((b) => !sha || b.sha256 === sha)
+  if (!found) throw fail(404, "bom_unsupported", "This release does not embed a BOM with that sha256.")
+  return { data: found }
+})
 
 on("GET /admin/platform/installations", () => {
   if (!mockPlatform.enabled) throw fail(404, "platform_disabled", "Managed services are off on this site: set PROXCLOUD_PLATFORM_ENABLED=true")
@@ -352,7 +360,9 @@ on("POST /admin/platform/installations/:id/preflight", ({ params }) => {
 
 on("GET /admin/platform/installations/:id/plan", ({ params }) => {
   const in_ = find(params.id)
-  return { data: { installed: in_.status.bom ?? null, target: bomRef, changes: [], blocking: [] } }
+  const installed = in_.status.bom ?? null
+  if (installed?.sha256 === previous.sha256) return { data: { installed, target: installed, newer: bomRef, changes: [], blocking: [] } }
+  return { data: { installed, target: bomRef, changes: [], blocking: [] } }
 })
 
 on("POST /admin/platform/installations/:id/runs", ({ params, opts }) => {
@@ -396,6 +406,16 @@ on("GET /admin/platform/installations/:id/seed-kubeconfig", ({ params }) => {
   const in_ = find(params.id)
   if (!in_.status.seed?.readyAt) throw fail(409, "no_seed", "the installation has no ready seed")
   const kubeconfig = `apiVersion: v1\nkind: Config\nclusters:\n- name: pc-seed\n  cluster:\n    server: ${in_.status.seed.apiServer}\nusers:\n- name: pc-seed\n  user:\n    token: mock-break-glass-token\n`
+  return { data: { kubeconfig, expiresAt: new Date(Date.now() + 3_600_000).toISOString() } }
+})
+
+// As the API: a token of the break-glass account on the platform cluster, never the admin kubeconfig the seed holds.
+on("GET /admin/platform/installations/:id/platform-kubeconfig", ({ params }) => {
+  const in_ = find(params.id)
+  if (!in_.status.seed?.readyAt) throw fail(409, "no_seed", "this installation has no ready seed")
+  const endpoint = in_.status.clusters?.[0]?.endpoint
+  if (!endpoint) throw fail(409, "no_cluster", "this installation has no platform cluster yet")
+  const kubeconfig = `apiVersion: v1\nkind: Config\nclusters:\n- name: pc-platform\n  cluster:\n    server: https://${endpoint}:6443\nusers:\n- name: pc-platform\n  user:\n    token: mock-platform-break-glass-token\n`
   return { data: { kubeconfig, expiresAt: new Date(Date.now() + 3_600_000).toISOString() } }
 })
 

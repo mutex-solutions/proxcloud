@@ -35,6 +35,11 @@ const (
 	// kind: every stage commits its intent and result through Checkpoint and waits through Defer. It has no cleanup
 	// pass (not in ClaimDeadKinds) and is never replayed: the Managed services page starts a new run instead.
 	PlatformRun = "platform.run/v1"
+	// KamajiRelease finishes one deleted tenant Kubernetes cluster: it waits for the delete cascade, then revokes the
+	// cluster's Proxmox token and releases what else it held (project.KamajiReleaseRunner). External-effect kind,
+	// queued when the delete is accepted. It waits through Defer, keeps no receipts (every step is idempotent) and is
+	// never replayed: the provider sync's sweep does the same work for a job that gave up.
+	KamajiRelease = "kamaji.release/v1"
 )
 
 var (
@@ -78,7 +83,7 @@ func known(kind string) bool { return kind == Billing || kind == Selftest || Ext
 // Worker refuses to register them.
 func External(kind string) bool {
 	return kind == TemplateUpdateVM || kind == ProviderAttach || kind == TemplateUpdateSmoke || kind == TemplateUpdateSandbox ||
-		kind == PlatformRun
+		kind == PlatformRun || kind == KamajiRelease
 }
 
 // ClaimDeadKinds are the kinds ClaimDead re-acquires for a cleanup: the template update runner's

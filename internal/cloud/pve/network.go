@@ -45,6 +45,10 @@ type ZoneConfig struct {
 	ExitNodes  []string // evpn: gateway/SNAT nodes
 	VRFVxlan   int      // evpn: vrf VNI
 	MTU        int      // evpn: usually 1450
+	// NoDHCP (simple; config.network.zones.<key>.dhcp: false): EnsureZone makes the zone without Proxmox's DHCP server,
+	// so its networks get platform-assigned addresses and can hold tenant clusters and load balancers. A zone that
+	// exists is never changed.
+	NoDHCP bool
 }
 
 // Type is the PVE zone type the zone becomes: an empty kind and "overlay" are EVPN (EnsureZone).
@@ -85,9 +89,11 @@ func (s *Service) EnsureZone(ctx context.Context, z ZoneConfig) error {
 	}
 	switch z.Kind {
 	case "simple":
-		return s.C.CreateSDNZone(ctx, z.Key, "simple", map[string]string{
-			"ipam": "pve", "dhcp": "dnsmasq",
-		})
+		params := map[string]string{"ipam": "pve"}
+		if !z.NoDHCP {
+			params["dhcp"] = "dnsmasq"
+		}
+		return s.C.CreateSDNZone(ctx, z.Key, "simple", params)
 	case "vlan":
 		if z.Bridge == "" {
 			return fmt.Errorf("pve zone %s: vlan zone needs a bridge", z.Key)
@@ -144,6 +150,22 @@ func (s *Service) EnsureZone(ctx context.Context, z ZoneConfig) error {
 	}
 }
 
+// ZoneDHCP reports whether Proxmox hands out addresses in the networks of z. The live zone decides, as it does for a
+// server's address (VnetStaticPoolFor): a subnet's dhcp-range does nothing in a zone without a DHCP server. A zone
+// EnsureZone has yet to make gets one when it is simple and not NoDHCP.
+func (s *Service) ZoneDHCP(ctx context.Context, z ZoneConfig) (bool, error) {
+	zones, err := s.C.ListSDNZones(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, existing := range zones {
+		if existing.Zone == z.Key {
+			return existing.DHCP != "", nil
+		}
+	}
+	return z.Kind == "simple" && !z.NoDHCP, nil
+}
+
 // CreateNetworkReq drives CreateNetwork. CIDR is required here (the platform
 // auto-carves before calling).
 type CreateNetworkReq struct {
@@ -152,7 +174,7 @@ type CreateNetworkReq struct {
 	Zone      ZoneConfig
 	CIDR      string
 	Gateway   string // "" → first host of the CIDR
-	DHCP      bool
+	DHCP      bool   // write a dhcp-range: only for a zone with a DHCP server (ZoneDHCP)
 	SNAT      bool
 }
 
@@ -232,8 +254,12 @@ func (s *Service) CreateNetwork(ctx context.Context, req CreateNetworkReq) (*Net
 	if gw == "" {
 		gw = firstHost(ipnet)
 	}
-	sub := SubnetOpts{CIDR: req.CIDR, Gateway: gw, SNAT: req.SNAT}
-	if req.DHCP {
+	// A VLAN zone is a bare layer 2 segment: Proxmox holds no gateway address there, runs no DHCP and does no SNAT, so
+	// neither is written. The gateway stays on the subnet as the address the site's router must hold: servers and
+	// cluster nodes get it as their default route.
+	routed := req.Zone.Kind != "vlan"
+	sub := SubnetOpts{CIDR: req.CIDR, Gateway: gw, SNAT: req.SNAT && routed}
+	if req.DHCP && routed {
 		start, end := dhcpRange(ipnet, gw)
 		sub.DHCPStart, sub.DHCPEnd = start, end
 	}
@@ -993,34 +1019,45 @@ func (s *Service) ApplyAndWait(ctx context.Context) error {
 	return s.C.WaitTask(ctx, upid)
 }
 
-// VnetStaticPool returns the address pool of a vnet whose zone has no DHCP (PVE offers DHCP on
-// simple zones only, so EVPN and VLAN zones): servers there get a fixed address over cloud-init,
+// VnetStaticPool returns the address pool of a vnet whose zone has no DHCP (EVPN and VLAN zones, and a
+// simple zone made without it): servers there get a fixed address over cloud-init,
 // allocated by the platform. ok=false means the zone's own DHCP hands out addresses.
 func (s *Service) VnetStaticPool(ctx context.Context, vnet string) (cidr, gateway, first, last string, ok bool, err error) {
 	return s.VnetStaticPoolFor(ctx, vnet, "")
 }
 
-// VnetStaticPoolFor is VnetStaticPool on one subnet of the vnet: the one with this CIDR or holding
-// this address ("" = the first).
-func (s *Service) VnetStaticPoolFor(ctx context.Context, vnet, within string) (cidr, gateway, first, last string, ok bool, err error) {
+// vnetZone is the live zone of a vnet (the zero zone when Proxmox lists neither).
+func (s *Service) vnetZone(ctx context.Context, vnet string) (SDNZone, error) {
 	vnets, err := s.C.ListSDNVnets(ctx)
 	if err != nil {
-		return "", "", "", "", false, err
-	}
-	zone := ""
-	for _, v := range vnets {
-		if v.Vnet == vnet {
-			zone = v.Zone
-		}
+		return SDNZone{}, err
 	}
 	zones, err := s.C.ListSDNZones(ctx)
 	if err != nil {
+		return SDNZone{}, err
+	}
+	for _, v := range vnets {
+		if v.Vnet != vnet {
+			continue
+		}
+		for _, z := range zones {
+			if z.Zone == v.Zone {
+				return z, nil
+			}
+		}
+	}
+	return SDNZone{}, nil
+}
+
+// VnetStaticPoolFor is VnetStaticPool on one subnet of the vnet: the one with this CIDR or holding
+// this address ("" = the first).
+func (s *Service) VnetStaticPoolFor(ctx context.Context, vnet, within string) (cidr, gateway, first, last string, ok bool, err error) {
+	zone, err := s.vnetZone(ctx, vnet)
+	if err != nil {
 		return "", "", "", "", false, err
 	}
-	for _, z := range zones {
-		if z.Zone == zone && z.DHCP != "" {
-			return "", "", "", "", false, nil
-		}
+	if zone.DHCP != "" {
+		return "", "", "", "", false, nil
 	}
 	subs, err := s.C.ListSDNSubnets(ctx, vnet)
 	if err != nil {
@@ -1055,25 +1092,34 @@ func (s *Service) VnetStaticPoolFor(ctx context.Context, vnet, within string) (c
 
 // VnetInUse reports whether any pool VM NIC sits on the vnet (delete guard).
 func (s *Service) VnetInUse(ctx context.Context, projectID, vnetID string) (bool, error) {
+	ids, err := s.VnetVMs(ctx, projectID, vnetID)
+	return len(ids) > 0, err
+}
+
+// VnetVMs lists the pool VMs with a NIC on the vnet, by vmid as a row's ExternalID has it. It refuses when a VM of
+// the project cannot be read: that one may sit on the vnet too.
+func (s *Service) VnetVMs(ctx context.Context, projectID, vnetID string) ([]string, error) {
 	vms, _, unread, err := s.poolVMs(ctx, projectID)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	if len(unread) > 0 {
-		return false, errUnreadVMs()
+		return nil, errUnreadVMs()
 	}
+	ids := []string{}
 	for _, vm := range vms {
 		cfg, err := s.C.GetVMConfig(ctx, vm.Node, vm.VMID)
 		if err != nil {
-			return false, err
+			return nil, err
 		}
-		for key := range cfg {
-			if strings.HasPrefix(key, "net") && strings.Contains(cfg.Str(key), "bridge="+vnetID) {
-				return true, nil
+		for _, key := range nicKeys(cfg) {
+			if nicBridge(cfg.Str(key)) == vnetID {
+				ids = append(ids, strconv.Itoa(vm.VMID))
+				break
 			}
 		}
 	}
-	return false, nil
+	return ids, nil
 }
 
 // --- NETWORK sync provider ---
@@ -1101,15 +1147,27 @@ func (p *NetworkSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, 
 	}
 	now := nowUTC()
 	var out []cloud.CloudResource
+	var zoneOf map[string]SDNZone // read once, at the project's first vnet
 	for _, v := range vnets {
 		pid, name, ok := aliasProject(v.Alias)
 		if !ok || pid != p.projectID {
 			continue
 		}
-		detail, err := p.subnetDetail(ctx, v.Vnet)
-		if err != nil {
-			return nil, err
+		if zoneOf == nil {
+			zones, err := p.svc.C.ListSDNZones(ctx)
+			if err != nil {
+				return nil, networkInventoryError("", "cannot list zones", err)
+			}
+			zoneOf = map[string]SDNZone{}
+			for _, z := range zones {
+				zoneOf[z.Zone] = z
+			}
 		}
+		subs, err := p.svc.C.ListSDNSubnets(ctx, v.Vnet)
+		if err != nil {
+			return nil, networkInventoryError(v.Vnet, "cannot read subnets", err)
+		}
+		detail := SubnetDetail(subs, zoneOf[v.Zone])
 		out = append(out, cloud.CloudResource{
 			ExternalID: v.Vnet,
 			ProjectID:  p.projectID,
@@ -1122,28 +1180,36 @@ func (p *NetworkSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, 
 	return out, nil
 }
 
-// subnetDetail reads a vnet's subnets into the data.network sub-shape. The top-level
-// cidr/gateway/snat describe the first subnet, subnetDetails all of them.
-func (p *NetworkSyncProvider) subnetDetail(ctx context.Context, vnet string) (map[string]any, error) {
-	subs, err := p.svc.C.ListSDNSubnets(ctx, vnet)
+// NetworkDetail reads a vnet's subnets and its zone into the data.network sub-shape (SubnetDetail).
+func (s *Service) NetworkDetail(ctx context.Context, vnet string) (map[string]any, error) {
+	zone, err := s.vnetZone(ctx, vnet)
 	if err != nil {
-		return nil, networkInventoryError(vnet, "cannot read subnets", err)
+		return nil, err
 	}
-	return SubnetDetail(subs), nil
+	subs, err := s.C.ListSDNSubnets(ctx, vnet)
+	if err != nil {
+		return nil, err
+	}
+	return SubnetDetail(subs, zone), nil
 }
 
-// SubnetDetail renders a vnet's subnets for data.network.
-func SubnetDetail(subs []SDNSubnet) map[string]any {
+// SubnetDetail renders a vnet's subnets for data.network: the top-level cidr/gateway/snat/dhcp describe the first
+// subnet, subnetDetails all of them. zone is the vnet's live zone, and it decides with the subnet. In a VLAN zone
+// Proxmox does no SNAT, and in a zone without a DHCP server it hands out no address, whatever the subnet says (one
+// written before CreateNetwork left the dhcp-range out there still carries it): the answer is false.
+func SubnetDetail(subs []SDNSubnet, zone SDNZone) map[string]any {
+	vlan := zone.Type == "vlan"
 	det := map[string]any{}
 	slices.SortFunc(subs, func(a, b SDNSubnet) int { return cmp.Compare(a.CIDR, b.CIDR) })
 	cidrs := make([]any, 0, len(subs))
 	rows := make([]any, 0, len(subs))
 	for i, sub := range subs {
 		cidrs = append(cidrs, sub.CIDR)
-		rows = append(rows, map[string]any{"cidr": sub.CIDR, "gateway": sub.Gateway, "snat": sub.SNAT == 1})
+		snat := !vlan && sub.SNAT == 1
+		rows = append(rows, map[string]any{"cidr": sub.CIDR, "gateway": sub.Gateway, "snat": snat})
 		if i == 0 {
 			det["cidr"], det["gateway"] = sub.CIDR, sub.Gateway
-			det["snat"], det["dhcp"] = sub.SNAT == 1, len(sub.DHCPRange) > 0
+			det["snat"], det["dhcp"] = snat, zone.DHCP != "" && len(sub.DHCPRange) > 0
 		}
 	}
 	det["subnets"], det["subnetDetails"] = cidrs, rows

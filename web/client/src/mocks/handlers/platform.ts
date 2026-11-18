@@ -62,6 +62,10 @@ on("GET /project/:pid/service", () => ({
     { id: "svc-proxmox-1", name: "ProxCloud Compute", type: "CLOUD", status: "ACTIVE" },
     { id: "svc-ceph-1", name: "ProxCloud S3", type: "CLOUD", status: "ACTIVE" },
     {
+      id: "svc-k8s-1", name: "ProxCloud Kubernetes", type: "CLOUD", status: "ACTIVE",
+      kubernetesVersions: ["1.37.2", "1.35.10"], kubernetesPlatformVersion: "0.1.13",
+    },
+    {
       id: "svc-sandbox-1", name: "ProxCloud Sandboxes", type: "CLOUD", status: "ACTIVE", sandboxE2B: true,
       sandboxTemplates: [{ name: "base", image: "registry.example.com/approved/base@sha256:" + "a".repeat(64), cpu: 2, memoryGiB: 2 }],
       sandboxLimits: { maxCpu: 8, maxMemoryGiB: 28, egressMbps: 100, maxTimeoutSeconds: 86400 },
@@ -124,14 +128,21 @@ on("POST /project-invites/invite", () => ({ data: {} }))
 // uiMenu + an admin Custom Menu item so /p/:pid/more/status-page renders the
 // embedded-iframe chrome in dev (same-origin docs page stands in for the
 // operator's status page; exercises {{project.id}} substitution).
-on("GET /init/:pid", () => ({
+// prj-staging is a site that serves less: no object storage and no volume snapshots, so its menu hides those
+// pages and their URLs answer "not available" (e2e/acceptance-defects.spec.ts).
+on("GET /init/:pid", ({ params }) => ({
   data: {
     ...uiMenu,
-    features: { "svc-proxmox-1": ["serverSnapshots", "volumeRetype"] },
+    features: {
+      "svc-proxmox-1": params.pid === "prj-staging"
+        ? ["serverSnapshots", "volumeRetype"]
+        : ["serverSnapshots", "volumeRetype", "volumeSnapshots", "subnets", "serverBackups", "serverRebuild"],
+    },
     menu: {
       ...uiMenu.menu,
       items: {
         ...uiMenu.menu.items,
+        ...(params.pid === "prj-staging" ? { "object-store": { enabled: false } } : {}),
         "status-page": {
           enabled: true,
           newMenuItem: true,

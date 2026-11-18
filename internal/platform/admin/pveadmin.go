@@ -191,6 +191,16 @@ func pveConnectionTest(ctx context.Context, cfg pve.Config, es *externalservice.
 			out.Warnings = append(out.Warnings, c.Message)
 		}
 	}
+	// Any provider: the volumes of tenant clusters carry the id too, with or without managed services. An id that
+	// could not be read is a row only, not a warning of every test.
+	if msg, free, known := cc.CSIVMIDCheck(ctx); free {
+		add("csi-vmid", checkOK, msg)
+	} else {
+		add("csi-vmid", checkWarn, msg)
+		if known {
+			out.Warnings = append(out.Warnings, msg)
+		}
+	}
 	var importFound []string // what is wrong with the import store; its row comes with the storage list below
 	if es != nil {
 		if es.PVEImportStorage() != "" {

@@ -16,7 +16,7 @@ func inventoryNetwork(id, owner, zone string, cidrs ...string) cloud.CloudResour
 		subs[i].CIDR = cidr
 	}
 	return cloud.CloudResource{ExternalID: id, ProjectID: owner, Type: cloud.TypeNetwork,
-		Data: NetworkData(id, "net", zone, SubnetDetail(subs))}
+		Data: NetworkData(id, "net", zone, SubnetDetail(subs, SDNZone{}))}
 }
 
 // Every response goes through the real PVE transport and configured credential.

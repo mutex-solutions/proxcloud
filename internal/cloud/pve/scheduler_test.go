@@ -111,3 +111,166 @@ func TestPickNodeSpreadGroup(t *testing.T) {
 		t.Fatal("strict spread must refuse when every node has a member")
 	}
 }
+
+func TestPickNodeIsStable(t *testing.T) {
+	nodes := []Node{{Node: "pve2", Status: "online", MaxCPU: 8, MaxMem: 32 << 30}, {Node: "pve1", Status: "online", MaxCPU: 8, MaxMem: 32 << 30}}
+	for i := 0; i < 20; i++ {
+		if got, _ := PickNode(nodes, nil, SchedReq{VCPUs: 1, RAMMb: 1024}); got != "pve1" {
+			t.Fatalf("equal nodes: got %q, want pve1 every time", got)
+		}
+	}
+	// Members counts like tagged spread members.
+	if got, _ := PickNode(nodes, nil, SchedReq{VCPUs: 1, RAMMb: 1024, Members: map[string]int{"pve1": 1}}); got != "pve2" {
+		t.Errorf("members: got %q, want the node with fewer", got)
+	}
+}
+
+func TestPlaceReplicas(t *testing.T) {
+	const gib = int64(1) << 30
+	node := func(name string, memGiB int64) Node {
+		return Node{Node: name, Status: "online", MaxCPU: 16, MaxMem: memGiB * gib}
+	}
+	store := func(avail ...int64) map[string]StorageNodeState {
+		out := map[string]StorageNodeState{}
+		for i, a := range avail {
+			out[[]string{"pve1", "pve2", "pve3"}[i]] = StorageNodeState{Active: true, Total: 1000 * gib, Avail: a * gib}
+		}
+		return out
+	}
+	three := []Node{node("pve1", 64), node("pve2", 64), node("pve3", 64)}
+	req := func(st map[string]StorageNodeState) SchedReq {
+		return SchedReq{VCPUs: 4, RAMMb: 8192, OvercommitCPU: 4, Storage: st, DiskBytes: 50 * gib, HeadroomPct: 10,
+			AllowedNodes: map[string]bool{"pve1": true, "pve2": true, "pve3": true}}
+	}
+	sum := func(m map[string]int) (n int) {
+		for _, v := range m {
+			n += v
+		}
+		return n
+	}
+
+	// Several nodes fit: the group is spread, not stacked on the emptiest.
+	got, vms, fit := PlaceReplicas(three, nil, req(store(900, 900, 900)), nil, 3, false)
+	if fit != 3 || got["pve1"] != 1 || got["pve2"] != 1 || got["pve3"] != 1 || len(vms) != 3 {
+		t.Errorf("spread: %v fit %d", got, fit)
+	}
+	// A node full of other VMs gets none: the even split would have given it a third.
+	full := []ClusterResource{{Type: "qemu", Node: "pve2", MaxCPU: 4, MaxMem: 60 * gib}}
+	got, _, fit = PlaceReplicas(three, full, req(store(900, 900, 900)), nil, 4, false)
+	if fit != 4 || got["pve2"] != 0 || got["pve1"] != 2 || got["pve3"] != 2 {
+		t.Errorf("full node: %v fit %d", got, fit)
+	}
+	// Memory fits everywhere, the node-local store of pve1 is full (inside its headroom).
+	got, _, fit = PlaceReplicas(three, nil, req(store(120, 900, 900)), nil, 2, false)
+	if fit != 2 || got["pve1"] != 0 {
+		t.Errorf("full store: %v fit %d", got, fit)
+	}
+	// Local stores: each pick takes its disk from its own node only. 200 GiB free, 100 kept as headroom: two disks each.
+	st := store(200, 200, 200)
+	got, _, fit = PlaceReplicas(three, nil, req(st), nil, 9, false)
+	if fit != 6 || got["pve1"] != 2 || got["pve2"] != 2 || got["pve3"] != 2 || st["pve1"].Avail != 100*gib {
+		t.Errorf("local stores: %v fit %d, pve1 has %d GiB left", got, fit, st["pve1"].Avail/gib)
+	}
+	// A shared store is one pool: the same 200 GiB hold two disks in all, not two per node.
+	got, _, fit = PlaceReplicas(three, nil, req(store(200, 200, 200)), nil, 9, true)
+	if fit != 2 || sum(got) != 2 {
+		t.Errorf("shared store: %v fit %d, want 2 in all", got, fit)
+	}
+	// Scale-up keeps what runs and places only the new ones, on the nodes with fewer.
+	got, _, fit = PlaceReplicas(three, nil, req(store(900, 900, 900)), map[string]int{"pve1": 3}, 2, false)
+	if fit != 2 || got["pve1"] != 3 || got["pve2"] != 1 || got["pve3"] != 1 {
+		t.Errorf("scale-up: %v fit %d", got, fit)
+	}
+	// Nothing fits: a refusal, and the placement is what it was.
+	got, _, fit = PlaceReplicas([]Node{node("pve1", 4)}, nil, req(store(900)), map[string]int{"pve1": 1}, 2, false)
+	if fit != 0 || got["pve1"] != 1 {
+		t.Errorf("no room: %v fit %d", got, fit)
+	}
+	// A node without the storage (no entry) is never picked.
+	got, _, fit = PlaceReplicas(three, nil, req(map[string]StorageNodeState{"pve3": {Active: true, Total: 1000 * gib, Avail: 900 * gib}}), nil, 2, false)
+	if fit != 2 || got["pve3"] != 2 {
+		t.Errorf("storage on one node: %v fit %d", got, fit)
+	}
+}
+
+func TestRemoveReplicas(t *testing.T) {
+	const gib = int64(1) << 30
+	for _, tc := range []struct {
+		name    string
+		have    map[string]int
+		n       int
+		unready map[string]int
+		freeMem map[string]int64
+		want    map[string]int
+	}{
+		{"the stuck machine goes first, not a healthy one", map[string]int{"pve1": 2, "pve2": 1}, 1, map[string]int{"pve2": 1}, nil, map[string]int{"pve1": 2, "pve2": 0}},
+		{"one stuck machine is one removal", map[string]int{"pve1": 2, "pve2": 2}, 2, map[string]int{"pve2": 1}, nil, map[string]int{"pve1": 1, "pve2": 1}},
+		{"the node with the most replicas", map[string]int{"pve1": 1, "pve2": 3}, 1, nil, nil, map[string]int{"pve1": 1, "pve2": 2}},
+		{"a node is emptied last", map[string]int{"pve1": 1, "pve2": 2, "pve3": 1}, 1, nil, map[string]int64{"pve1": 1 * gib}, map[string]int{"pve1": 1, "pve2": 1, "pve3": 1}},
+		{"equal counts: the node with the least free memory", map[string]int{"pve1": 2, "pve2": 2}, 1, nil, map[string]int64{"pve1": 40 * gib, "pve2": 4 * gib}, map[string]int{"pve1": 2, "pve2": 1}},
+		{"equal all round: by name", map[string]int{"pve2": 1, "pve1": 1}, 1, nil, nil, map[string]int{"pve1": 0, "pve2": 1}},
+		{"more than there is", map[string]int{"pve1": 1}, 3, nil, nil, map[string]int{"pve1": 0}},
+	} {
+		got := RemoveReplicas(tc.have, tc.n, tc.unready, tc.freeMem)
+		for node, want := range tc.want {
+			if got[node] != want {
+				t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+				break
+			}
+		}
+	}
+	have := map[string]int{"pve1": 2}
+	if RemoveReplicas(have, 1, nil, nil); have["pve1"] != 2 {
+		t.Error("RemoveReplicas changed its input")
+	}
+}
+
+// A token that may not audit a pool (NoAccess on the platform's own pools, another portal's VMs) gets a VM list
+// without those VMs. The node row still shows their memory in use, and that is what the scheduler must count.
+func TestPickNodeCountsMemoryOfHiddenVMs(t *testing.T) {
+	const gib = int64(1) << 30
+	// pve1 carries hidden VMs: 28 of 32 GiB in use, and no VM row at all. pve2 has one visible 8 GiB VM, stopped.
+	nodes := []Node{
+		{Node: "pve1", Status: "online", MaxCPU: 16, MaxMem: 32 * gib, Mem: 28 * gib},
+		{Node: "pve2", Status: "online", MaxCPU: 16, MaxMem: 32 * gib, Mem: 2 * gib},
+	}
+	vms := []ClusterResource{{Type: "qemu", Node: "pve2", VMID: 101, Status: "stopped", MaxCPU: 2, MaxMem: 8 * gib}}
+	req := SchedReq{VCPUs: 2, RAMMb: 8192}
+	if got, err := PickNode(nodes, vms, req); err != nil || got != "pve2" {
+		t.Errorf("got %q, %v; want pve2: pve1 looks empty in the VM list and is full", got, err)
+	}
+	if got, err := PickNode(nodes[:1], nil, req); err == nil {
+		t.Errorf("8 GiB placed on %q with 4 GiB free", got)
+	}
+	// A VM that does not run takes nothing of the node's used memory, so it comes on top of it.
+	used := CommittedMem(nodes, vms)
+	if used["pve1"] != 28*gib || used["pve2"] != 10*gib {
+		t.Errorf("committed: %v; want the node's use on pve1, and its use plus the stopped VM on pve2", used)
+	}
+	// Each pick comes on top of the node's use: the node cannot show a VM that does not exist yet.
+	// pve1 has room for none, pve2 for two (32 - 10 = 22 GiB).
+	placed, _, fit := PlaceReplicas(nodes, vms, req, nil, 5, false)
+	if fit != 2 || placed["pve1"] != 0 || placed["pve2"] != 2 {
+		t.Errorf("placed %v, %d fit; want 2 on pve2 and none on pve1", placed, fit)
+	}
+
+	// The clone exists and has not booted: it has a VMID now, and must still count in full. 20 GiB of hidden use
+	// and three 8 GiB workers leave a 32 GiB node no room for a fourth.
+	node := []Node{{Node: "pve1", Status: "online", MaxCPU: 16, MaxMem: 32 * gib, Mem: 20 * gib}}
+	workers := func(status string) []ClusterResource {
+		var out []ClusterResource
+		for i := 0; i < 3; i++ {
+			out = append(out, ClusterResource{Type: "qemu", Node: "pve1", VMID: 200 + i, Status: status, MaxCPU: 2, MaxMem: 8 * gib})
+		}
+		return out
+	}
+	if got, err := PickNode(node, workers("stopped"), req); err == nil {
+		t.Errorf("fourth worker placed on %q: 20 GiB in use and 24 GiB of workers that have not booted", got)
+	}
+	// The limit that stays: once they run and use 1 GiB each, the node reads 23 GiB in use, the larger figure is
+	// their 24 GiB, and the hidden 20 GiB is not counted.
+	node[0].Mem = 23 * gib
+	if used := CommittedMem(node, workers("running")); used["pve1"] != 24*gib {
+		t.Errorf("committed with running workers: %d GiB, want 24", used["pve1"]>>30)
+	}
+}

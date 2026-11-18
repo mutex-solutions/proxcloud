@@ -46,13 +46,49 @@ published digest), then imported as a **new** template VM in pool `pc-templates`
 `pc-ghcr-<os>-…`. Existing templates are never changed or removed: remove old ones yourself when no
 longer needed.
 
+## Publishing a version on all nodes
+
+On a site without shared storage every node needs its own copy of a Kubernetes node image: a cluster's workers are made
+only on a node that holds the image. **Publish on all nodes…** on a row of **VM templates** does the steps for every
+node of one provider.
+
+1. Choose **Publish on all nodes…**, pick the Proxmox provider and paste the digest to confirm, then **Start**.
+2. Keep the dialog open. It imports the version on one node, waits for its smoke test, publishes it, then goes to
+   the next node. Only one import or one smoke test of the provider runs at a time, so this takes a while. Closing the
+   dialog pauses; opening it again continues.
+3. The table shows each node: *Published*, *Importing*, *Smoke test running*, *Not imported, waits its turn*, or
+   why it stopped there.
+
+What it does not do:
+
+- A failed import or smoke test is not repeated. The row shows the reason; fix it and use **Import…** or
+  **Run smoke** yourself.
+- A node is skipped when it is offline, or when the provider's import storage or the default storage profile's
+  storage is not active on it.
+- When a publish is refused, or the next import cannot be started (for example GitHub rate-limits it), the dialog
+  stops and shows why. What it already published stays published and is in the audit log. **Try again** repeats it.
+- A node that is down is skipped, and the dialog warns before the version map line while one is: a copy on that node
+  cannot be read and is not in the line. Wait until the node is back before you copy the line.
+- Nothing is withdrawn, and the Kubernetes provider is not changed. Copy the **version map** line into the
+  Kubernetes provider's versions yourself.
+
+While the version does not cover every node the dialog warns above the line. A line with fewer nodes moves a
+cluster's workers off the missing nodes at its next node group change or upgrade, and the workers on a missing node
+are deleted at once. Copy the line early only when that is what you want.
+
 ## Known issue: Ubuntu 26.04 images exported before the fix
 
 The first Ubuntu 26.04 OS and Kubernetes node images have a filesystem defect: the root filesystem of a VM
 made from one can become read-only at a reboot. The affected versions are listed by digest in
 `docs/public-vm-sanitization.md` of the repository. Ubuntu 24.04 images are not affected.
 
-- Do not publish such a template to tenants. Import the re-exported image once it is listed here.
+- Do not publish such a template to tenants. The fixed images are published: for Ubuntu 26.04 the tag
+  `ubuntu-2604-os-20261116170652-72f0eaa3d0d4`, for Kubernetes nodes
+  `ubuntu-2604-k8s-1.35.10-20261116181221-72f0eaa3d0d4`,
+  `ubuntu-2604-k8s-1.36.6-20261116194043-72f0eaa3d0d4` and
+  `ubuntu-2604-k8s-1.37.2-20261116210716-72f0eaa3d0d4`.
+- Import the fixed tag, wait for its smoke test, publish it, then withdraw each affected digest you had
+  imported. Withdrawing changes no VM that already exists.
 - A VM already made from one: test and repair it as described in `docs/template-updates.md` of the
   repository (section *Known issue*).
 - Do not reboot a VM that already shows the ext4 error or a read-only root: shut it down and repair it first.
@@ -63,7 +99,10 @@ The **Imported templates** tab shows each imported template's state: *Staged*, *
 *Smoke failed* (with the reason), *Ready to publish*, *Published (default)*, *Published (older)* or
 *Withdrawn*.
 
-- **Smoke test** — starts by itself when an import finishes, or with **Run smoke**. It boots a
+- **Smoke test** — starts by itself when an import finishes, or with **Run smoke**. The images a
+  managed-services install imports are the exception: their test does not start by itself (it would
+  run beside the build), so press **Run smoke** before you publish one. The test VM does not upgrade
+  its packages, so the smoke network needs no route to a package mirror. It boots a
   throwaway copy of the template in pool `pc-templates` on the provider's smoke network, with fresh
   cloud-init (a one-time SSH key nobody keeps, no password), waits for the guest agent, checks that
   cloud-init finished and the disk grew (and, for a Kubernetes node image, that kubelet and containerd

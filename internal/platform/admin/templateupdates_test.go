@@ -43,6 +43,7 @@ func TestTemplateUpdatesPermissionGates(t *testing.T) {
 		{"GET", "/admin/template-updates/templates"}, {"GET", "/admin/template-updates/blocklist"},
 		{"POST", "/admin/template-updates/templates/x/smoke"}, {"POST", "/admin/template-updates/templates/x/publish"},
 		{"POST", "/admin/template-updates/templates/x/withdraw"},
+		{"GET", "/admin/template-updates/publish-all"}, {"POST", "/admin/template-updates/publish-all"},
 	}
 	for _, rt := range routes {
 		if w := tuDo(r, rt.method, rt.path, "{}", tenant); w.Code != http.StatusForbidden {
@@ -223,5 +224,39 @@ func TestTemplateUpdateReplayPermission(t *testing.T) {
 	}
 	if rbac.Matches(rolePermissions("BILLING_ADMIN"), templateUpdatesManagePerm) {
 		t.Fatal("BILLING_ADMIN must not replay template update jobs")
+	}
+}
+
+// Publish on all nodes: reading needs admin:service:read and advancing admin:service:manage (SUPPORT reads only); an
+// unconfirmed digest or an unknown body field is refused before any provider or GitHub call.
+func TestTemplateUpdatesPublishAllGates(t *testing.T) {
+	h := &Handler{adminIssuer: "operator-realm"}
+	called := false
+	h.SetTemplateUpdates(&templateupdates.Service{VMEnabled: true, Token: func(context.Context) (string, string, error) { called = true; return "ghp_x", "i", nil }})
+	r := tuRouter(h)
+	op := &httpx.RequestContext{SigV4KeyID: "pk"}
+	d := "sha256:" + strings.Repeat("a", 64)
+	for _, body := range []string{
+		`{"serviceId":"s","package":"proxcloud-vm-ubuntu-2604-k8s","digest":"` + d + `","confirmDigest":""}`,
+		`{"serviceId":"s","package":"","digest":"` + d + `","confirmDigest":"` + d + `"}`,
+		`{"serviceId":"s","package":"p","digest":"` + d + `","confirmDigest":"` + d + `","node":"pve1"}`,
+	} {
+		if w := tuDo(r, "POST", "/admin/template-updates/publish-all", body, op); w.Code != http.StatusBadRequest {
+			t.Errorf("%s: %d %s", body, w.Code, w.Body.String())
+		} else if strict := strings.Contains(body, `"node"`); !strict && !strings.Contains(w.Body.String(), `"code":"confirm_digest"`) {
+			// The same code the report read gives for a malformed digest (docs/api.md).
+			t.Errorf("%s: the refusal carries no code: %s", body, w.Body.String())
+		}
+	}
+	// Confirmed, but no provider is wired: refused, nothing called.
+	body := `{"serviceId":"s","package":"p","digest":"` + d + `","confirmDigest":"` + d + `"}`
+	if w := tuDo(r, "POST", "/admin/template-updates/publish-all", body, op); w.Code != http.StatusServiceUnavailable {
+		t.Errorf("unwired provider: %d %s", w.Code, w.Body.String())
+	}
+	if called {
+		t.Fatal("a refused publish-all reached GitHub")
+	}
+	if !rbac.Matches(rolePermissions("SUPPORT"), templateUpdatesReadPerm) || rbac.Matches(rolePermissions("SUPPORT"), templateUpdatesManagePerm) {
+		t.Fatal("SUPPORT must read the report but not advance it")
 	}
 }

@@ -38,7 +38,7 @@ func TestFencedAttachCleanupDefersNeverDestroyUnknown(t *testing.T) {
 			if node == "pve2" {
 				target = "103"
 			}
-			if e := s.AttachVolume(context.Background(), "p1", 900, "nas:900/vm-900-disk-0.raw", target); e == nil {
+			if _, e := s.AttachVolume(context.Background(), "p1", 900, "nas:900/vm-900-disk-0.raw", target); e == nil {
 				t.Fatal("unknown attach succeeded")
 			}
 			if deletes != 0 || m.pending == nil {

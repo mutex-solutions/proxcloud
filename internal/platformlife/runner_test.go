@@ -465,6 +465,45 @@ func TestLeaseThatCannotBeRenewedStopsTheRun(t *testing.T) {
 	}
 }
 
+// A process that stops during a run gives the job back at once and without an attempt (a Defer), so the next start
+// does not wait out the lease. When the heartbeat has found the lease lost by then, the runner does not ask the store
+// to give the job back at all.
+func TestCleanStopReleasesTheJob(t *testing.T) {
+	for name, lost := range map[string]bool{"lease held": false, "lease lost": true} {
+		e := newEnv(t, RunApply)
+		parent, stop := context.WithCancel(context.Background())
+		if lost {
+			e.r.Lease = 30 * time.Millisecond // the heartbeat renews every 10 ms
+		}
+		e.r.Preflight = func(ctx context.Context, _ *Installation) ([]Check, error) {
+			if lost {
+				e.jobs.mu.Lock()
+				e.jobs.lost = true
+				e.jobs.mu.Unlock()
+				<-ctx.Done() // the heartbeat's refused renewal ends the work
+			}
+			stop()
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		e.r.defaults()
+		e.r.perform(parent, e.job)
+		want, defers := "defer:shutdown", 1
+		if lost {
+			want, defers = "", 0
+		}
+		e.jobs.mu.Lock()
+		got := e.jobs.defers
+		e.jobs.mu.Unlock()
+		if end := e.jobs.last(); end != want || got != defers {
+			t.Fatalf("%s: end %q, want %q; %d calls of Defer, want %d", name, end, want, got, defers)
+		}
+		if run, in, _ := e.state.snapshot(); Terminal(run.State) || in.Status.Phase == PhaseFailed {
+			t.Fatalf("%s: run %s, phase %s", name, run.State, in.Status.Phase)
+		}
+	}
+}
+
 // A passed absolute deadline fails the stage with the code of its last observation (or <stage>_timeout).
 func TestDeadline(t *testing.T) {
 	e := newEnv(t, RunApply)
@@ -787,8 +826,17 @@ func TestImageFailures(t *testing.T) {
 
 	e = imageEnv(t)
 	e.imports.enqueueErr = templateupdates.ErrBlocklisted
-	if end := e.once(); end != "fail:"+CodeImageBlocked {
-		t.Fatalf("blocklisted: %s", end)
+	if end := e.once(); end != "fail:"+CodeImageBlocked || !strings.Contains(e.stage(StageImages).Message, "install a newer ProxCloud release") {
+		t.Fatalf("blocklisted: %s %q", end, e.stage(StageImages).Message)
+	}
+	// An installed platform keeps its BOM across upgrades: the message does not send the operator to a newer release.
+	e = imageEnv(t)
+	e.imports.enqueueErr = templateupdates.ErrBlocklisted
+	e.mutate(func(_ *Run, in *Installation, _ *Secrets) {
+		in.Status.BOM = &BOMRef{Release: cur.Release, SHA256: cur.SHA256}
+	})
+	if end := e.once(); end != "fail:"+CodeImageBlocked || !strings.Contains(e.stage(StageImages).Message, "stays on release "+cur.Release) {
+		t.Fatalf("blocklisted, installed: %s %q", end, e.stage(StageImages).Message)
 	}
 
 	// Only a refusal is permanent: a request or an artifact that fails validation, or no proof that a template is gone.

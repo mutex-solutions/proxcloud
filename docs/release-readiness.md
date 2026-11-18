@@ -1,24 +1,29 @@
 # Current support boundaries and first-release readiness
 
-Status snapshot: **2026-11-15**, preparing the stable release `v0.7.0` on top of `v0.6.0`
-(tag 2026-11-14). This is an evidence summary, not a release announcement or a production SLA.
+Status snapshot: **2026-11-18**, preparing the patch release `v0.8.1` on top of `v0.8.0`
+(tag 2026-11-17). This is an evidence summary, not a release announcement or a production SLA.
 `v0.4.0-rc.1` (tag 2026-11-11) was published as a non-latest prerelease, `v0.4.0` (tag 2026-11-12)
 as the first stable release, `v0.5.0` (tag 2026-11-13) as the second, the patches `v0.5.1` and `v0.5.2` and the
-stable `v0.6.0` (tags 2026-11-14), and `v0.7.0-rc.1` (tag 2026-11-15) as a non-latest prerelease. Pushing the `v0.7.0` tag
-publishes the stable images, app chart and GitHub Release. `v0.5.1` to `v0.7.0` have no breaking API change against
+stable `v0.6.0` (tags 2026-11-14), and `v0.7.0-rc.1` as a non-latest prerelease and the stable `v0.7.0` (tags 2026-11-15), and the stable `v0.8.0` (tag 2026-11-17). Pushing the `v0.8.1` tag
+publishes the stable images, app chart and GitHub Release. `v0.5.1` to `v0.8.1` have no breaking API change against
 `v0.5.0` (`v0.6.0` changes the VM image size contract; `v0.7.0` stops serving the management port job triggers with
-only the scheduler on and refuses a new problem in a Proxmox provider's network block on save; see the changelog);
+only the scheduler on and refuses a new problem in a Proxmox provider's network block on save; `v0.8.0` ignores a
+node group's `imageId`, answers a VLAN-zone tenant network without DHCP and SNAT, and changes the Proxmox grant
+that mints cluster tokens, which existing managed Kubernetes sites must migrate; `v0.8.1` deletes a security
+group rule by `ruleId` only, refuses rule fields it cannot store and `enableDhcp: true` in a zone without a DHCP
+server; see the changelog);
 `v0.5.0` contains breaking API changes against `v0.4.0`; see the [changelog](../CHANGELOG.md). This source change publishes
 nothing and performs no live acceptance; the [lab acceptance of Platform setup](#platform-setup-lab-acceptance)
-was run on `v0.7.0-rc.1` before it. Check GitHub's Releases/Actions pages before choosing a deployment
+was run on `v0.7.0-rc.1`, and the [managed services lab rounds](#managed-services-lab-rounds) on builds of
+`main` before `v0.8.0` and, for `v0.8.1`, on the released `v0.8.0` followed by a build of `main`. Check GitHub's Releases/Actions pages before choosing a deployment
 commit.
 
 ## What is available now
 
 - Source on `main`, public development container images on GHCR, the
-  `v0.4.0-rc.1` and `v0.7.0-rc.1` prereleases and the stable releases `v0.4.0`, `v0.5.0`, `v0.5.1`, `v0.5.2` and
-  `v0.6.0` (images and app charts `0.4.0-rc.1`, `0.7.0-rc.1`, `0.4.0`, `0.5.0`, `0.5.1`, `0.5.2` and `0.6.0`). The
-  app chart `0.7.0`, appVersion and installer BOM `v0.7.0` name the current stable release; its tag publishes those artifacts.
+  `v0.4.0-rc.1` and `v0.7.0-rc.1` prereleases and the stable releases `v0.4.0`, `v0.5.0`, `v0.5.1`, `v0.5.2`,
+  `v0.6.0`, `v0.7.0` and `v0.8.0` (images and app charts `0.4.0-rc.1`, `0.7.0-rc.1`, `0.4.0`, `0.5.0`, `0.5.1`, `0.5.2`, `0.6.0`, `0.7.0` and `0.8.0`). The
+  app chart `0.8.1`, appVersion and installer BOM `v0.8.1` and the platform BOM `0.8.1` name the current stable release; its tag publishes those artifacts.
   Verify they are pullable before using `images.build: false`; a source pin is not proof that a registry artifact exists.
 - The installer defaults to `images.build: true`, building the API and two
   consoles plus app chart from the checkout. A source/local-registry installation
@@ -89,6 +94,26 @@ seed ISO left on the store after a server is deleted (known, see [server seed sa
 This is one run on one lab, not a clean install from released artifacts (gate step 5 below), not an
 installer or Helm install, and not acceptance of `v0.7.0` itself.
 
+## Managed services lab rounds
+
+`v0.8.0` carries the managed-services platform (ADR 0009). Its lab record is kept in the operator guide, section
+[Not verified on a lab yet](managed-services.md#not-verified-on-a-lab-yet): the rounds ran on builds of `main`
+(the last on 2026-11-17, `cb2f052`), on one lab Proxmox VE cluster. In short, from that section: the install
+finished (the second time in one run without a Retry, on cluster chart 0.1.13 and platform chart 0.1.2), Remove
+of a ready platform and from a failed stage 7 passed, a tenant cluster on a VLAN zone had three workers Ready,
+two clean seed reboots passed on the fixed image, and one seed restore passed. The checks L0 to L11 of the design
+are not recorded as passed, no tenant database was recorded healthy, and nothing was run on the published
+artifacts of `v0.8.0` in those rounds: this is not acceptance of the release (gate step 5 below).
+
+For `v0.8.1` one more round ran on 2026-11-18. The lab portal was set to the released `v0.8.0` (its published
+images, through `proxcloud-up.sh upgrade v0.8.0`), a platform was installed from the 0.8.0 BOM in one run without
+a Retry, and the portal was then upgraded to the build `dev-751a190` of `main`, which is the code of `v0.8.1`
+without the release commit and the changelog. The platform stayed on the 0.8.0 BOM: the plan had no change, the
+Check was green with its two new rows, and **Apply this release** succeeded in 6.6 seconds without touching the
+seed's Applications. The fixes of `v0.8.1` were then run one by one; what passed and what was not run (volume
+attach, detach and rebuild among them) is in the changelog section of `v0.8.1`. Nothing was run on the published
+artifacts of `v0.8.1` itself.
+
 ## Intentional safety holds and operational defaults
 
 - **Managed sandbox saved lifecycle is held.** Pause, saved resume, paused
@@ -124,16 +149,17 @@ installer or Helm install, and not acceptance of `v0.7.0` itself.
 The owner decided on 2026-11-12 to release `v0.4.0` as stable, and on 2026-11-13
 that the next release is the stable `v0.5.0`, each with a narrowly scoped core and
 explicitly held features; neither need claim every managed service. Those decisions
-are not evidence of publication or installation. The releases `v0.5.1`, `v0.5.2` and `v0.6.0` (2026-11-14) and
-`v0.7.0` (2026-11-15) follow the same gate. For every release:
+are not evidence of publication or installation. The releases `v0.5.1`, `v0.5.2` and `v0.6.0` (2026-11-14),
+`v0.7.0` (2026-11-15), `v0.8.0` (2026-11-17) and `v0.8.1` follow the same gate. For every release:
 
 1. Review the exact release commit for the release and its supported core surface
    and explicit experimental/held features. The version is not published until
    its tag's workflows succeed.
 2. Verify app/chart/installer BOM alignment with that exact version. Keep managed
-   charts independent: `database-cluster` `0.5.1` and `proxmox-kamaji-cluster`
-   `0.1.12` (published and pinned by the platform BOM) need their
-   own tag/publication checks. Do not move existing provider
+   charts independent: `database-cluster` `0.5.1`, `proxmox-kamaji-cluster`
+   `0.1.13` and `proxcloud-platform` `0.1.2` (published and pinned by the platform BOM)
+   need their own tag/publication checks. A newer version of one of them needs its own tag
+   and then its digest in the platform BOM before an app release names it. Do not move existing provider
    pins or managed data as a consequence of the app release.
 3. Verify the release-policy tests on the selected commit. The Release job accepts
    strict stable/RC tags from the environment: RCs use
@@ -145,7 +171,7 @@ are not evidence of publication or installation. The releases `v0.5.1`, `v0.5.2`
    completion or a deployment. Keep the default `images.build: true` meanwhile.
 5. After publication, install the exact released chart/images with
    `images.build: false` on a clean evaluation site (not performed for `v0.4.0`,
-   and not yet performed for `v0.5.0` to `v0.7.0` when this was prepared; a portal-only Docker Compose
+   and not yet performed for `v0.5.0` to `v0.8.1` when this was prepared; a portal-only Docker Compose
    site is running `v0.5.2` on a homelab, and the [Platform setup lab acceptance](#platform-setup-lab-acceptance)
    used a Docker Compose install of `v0.7.0-rc.1`; neither is this acceptance). The installer
    accepts valid SemVer with **base version >= 0.4.0**, including prereleases; this local guard

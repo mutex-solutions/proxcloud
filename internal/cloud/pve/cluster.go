@@ -3,7 +3,9 @@ package pve
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -116,14 +118,49 @@ func (c *Client) NextID(ctx context.Context) (int, error) {
 
 // VMIDFree reports whether no guest in the cluster holds vmid. /cluster/nextid?vmid= reads the cluster's
 // whole guest list, so unlike /cluster/resources it also sees guests this token has no VM.Audit on; any
-// user may call it. PVE answers 400 "VM <id> already exists" for a held id; any other refusal is an error.
+// user may call it. PVE answers 400 "VM <id> already exists" for a held id and echoes a free id back.
+// Any other refusal, and any 2xx that does not carry that id (null, an empty body, another number), is an
+// error: callers delete on "free", so only the documented answer may count as one.
 func (c *Client) VMIDFree(ctx context.Context, vmid int) (bool, error) {
-	err := c.get(ctx, "/cluster/nextid", formVals{"vmid": strconv.Itoa(vmid)}.values(), nil)
+	var raw json.RawMessage
+	err := c.get(ctx, "/cluster/nextid", formVals{"vmid": strconv.Itoa(vmid)}.values(), &raw)
 	var ae *APIError
 	if errors.As(err, &ae) && ae.Status == http.StatusBadRequest && strings.Contains(ae.Errors["vmid"], "already exists") {
 		return false, nil
 	}
-	return err == nil, err
+	if err != nil {
+		return false, err
+	}
+	// PVE sends the id as a JSON string; a number is accepted too.
+	if got := strings.Trim(string(raw), `"`); got != strconv.Itoa(vmid) {
+		return false, fmt.Errorf("/cluster/nextid?vmid=%d answered %q, not the id", vmid, raw)
+	}
+	return true, nil
+}
+
+// CSIControllerVMID is proxmox-csi's default features.controllerVmID, which neither the platform cluster's plugin nor
+// a tenant cluster's changes. The plugin names every volume it creates vm-<id>-pvc-<uuid>, and to Proxmox a disk named
+// vm-<id>-… is VM <id>'s, whether a VM's config names it or not.
+const CSIControllerVMID = 9999
+
+// CSIVMIDCheck is the csi-vmid row of the connection test and of the managed-services preflight: whether a guest of
+// the cluster holds CSIControllerVMID. The row is ok when the id is known to be free and a warning otherwise; it never
+// fails, since the platform works either way and the danger is in what an operator may do to that guest later.
+func (c *Client) CSIVMIDCheck(ctx context.Context) (msg string, free, known bool) {
+	id := strconv.Itoa(CSIControllerVMID)
+	free, err := c.VMIDFree(ctx, CSIControllerVMID)
+	switch {
+	case err != nil:
+		return "Could not read whether VM id " + id + " is in use: " + err.Error() + ". proxmox-csi names its volumes vm-" + id +
+			"-pvc-<uuid>; if a guest has that id, never destroy it with \"Destroy unreferenced disks owned by guest\" (docs/managed-services.md).", false, false
+	case !free:
+		return "VM id " + id + " is in use on this cluster. proxmox-csi names every volume it creates vm-" + id + "-pvc-<uuid>: on a site with managed " +
+			"services or tenant Kubernetes, the platform's own (Kamaji etcd, the registry, managed databases) and the volumes of tenant clusters. " +
+			"To Proxmox these are disks of VM " + id +
+			". Never destroy VM " + id + " with \"Destroy unreferenced disks owned by guest\" ticked (qm destroy " + id +
+			" --destroy-unreferenced-disks 1): that removes these volumes with it. Keep the VM as it is, and read docs/managed-services.md before you remove or move it.", false, true
+	}
+	return "No guest has VM id " + id + ", the id proxmox-csi names its volumes after.", true, true
 }
 
 // ManagementBridges maps each bridge that carries a node's own IP — the node
@@ -165,6 +202,25 @@ func (c *Client) ManagementCIDRs(ctx context.Context) (cidrs []string, complete 
 		}
 	}
 	return cidrs, complete, nil
+}
+
+// IfaceAddress is the address node holds on iface in /nodes/{node}/network: empty when the node has no interface of
+// that name or the interface holds none. It reads the node's saved network configuration, so an address put on the
+// interface at runtime (ip addr add) is not seen.
+func (c *Client) IfaceAddress(ctx context.Context, node, iface string) (string, error) {
+	var ifaces []struct {
+		Iface   string `json:"iface"`
+		Address string `json:"address"`
+	}
+	if err := c.get(ctx, "/nodes/"+url.PathEscape(node)+"/network", nil, &ifaces); err != nil {
+		return "", err
+	}
+	for _, i := range ifaces {
+		if i.Iface == iface {
+			return i.Address, nil
+		}
+	}
+	return "", nil
 }
 
 // NodeAddresses lists every IPv4 address the nodes hold, as /32: the /cluster/status address and the address of every

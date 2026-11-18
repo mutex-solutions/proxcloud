@@ -32,7 +32,7 @@ Every project member has a role, shown and editable through **Set role** on the 
 | ADMIN | Manage resources and everyday settings |
 | MEMBER | Work with the project's cloud resources |
 
-New invitees arrive as a regular member. That lets them create and manage cloud resources, but **not** rename or delete the project, invite anyone else, or remove members — those stay with owners and admins. If your operator has enabled custom roles, you'll find them under **Organization → Roles**.
+New invitees arrive as a regular member. That lets them create and manage cloud resources, but **not** rename or delete the project, invite anyone else, or remove members — those stay with owners and admins. If your operator has enabled custom roles, you'll find them under **Organization → Roles**. A role's name starts with a letter and holds letters, digits and underscores only; it is stored in upper case (`BILLING_VIEWER`).
 
 ## Removing members
 

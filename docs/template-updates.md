@@ -238,7 +238,10 @@ succeeded | failed`.
   The description records the artifact reference, tag and disk sha256. A job that landed its final
   write on the pre-lifecycle version (publish-at-import tags) is accepted as finished when it resumes.
 - **Automatic smoke test**: when the job succeeds the runner queues the template's smoke test (§4).
-  Without a smoke network on the provider the import records `smoke_network_unset` instead.
+  Without a smoke network on the provider the import records `smoke_network_unset` instead. An import
+  a managed-services platform run made (requested by `platform-run:<run id>`) gets none: each test is a
+  full clone on the disks the run is building its seed and cluster on. The import records
+  `smoke_not_started`, and the test is started by hand from Template updates before a Publish.
 - Retries: 3 attempts with backoff; permanent failures (`digest_mismatch`, `pve_checksum_refused`,
   `pve_import_refused`, `pve_forbidden`, `ownership_lost`, `invalid_payload`, …) dead-letter at once.
 - **Dead jobs are cleaned up**: a job can die without running its cleanup (e.g. its last attempt's
@@ -317,7 +320,7 @@ withdrawn digests.
 ### Smoke test (`templateupdate.smoke/v1`)
 
 `POST /admin/template-updates/templates/{importId}/smoke` (`admin:service:manage`), and automatically
-after every successful import. A durable **external** job on the same fenced runner as imports
+after every successful import except those of a platform run (above). A durable **external** job on the same fenced runner as imports
 (lease renewal, `Checkpoint` before every PVE mutation, `Fail` with fixed codes, `ClaimDead` dead-job
 pass); a smoke already queued/running for the template is returned instead of a second one. Payload =
 exactly one template (service, node, template VMID, digest) plus the smoke network frozen at enqueue.
@@ -352,7 +355,11 @@ Steps (each PVE mutation right after a successful fence check; the template itse
    template's copied tags), `net0` on the smoke bridge/VLAN, `ipconfig0`, an **ephemeral ed25519
    SSH key** generated in memory for this attempt (only its SHA-256 fingerprint is recorded; the
    private key is never stored, logged or sent anywhere — nothing ever logs in with it), no password
-   (`cipassword` deleted) and no custom cloud-init snippets (`cicustom` deleted), `agent=1`. When the
+   (`cipassword` deleted) and no custom cloud-init snippets (`cicustom` deleted), `agent=1`, and
+   `ciupgrade=0`: the test VM does not upgrade its packages at first boot (Proxmox's default is on), so
+   the smoke network needs no route to a package mirror and the verdict is about the image as
+   published. The option exists since Proxmox VE 8.0, below the supported 9.2; a Proxmox that refuses
+   it gets the write without it and the record a warning. When the
    clone has **no Proxmox cloud-init drive**, the same write adds one on the template's disk storage,
    in the slot an import of that variant uses (`ide0` for a Kubernetes node image, `ide2` for an OS
    image): these settings reach the guest only through that drive, and without it cloud-init ends
@@ -364,14 +371,28 @@ Steps (each PVE mutation right after a successful fence check; the template itse
    must match the artifact (`debian-13` → `debian`/`13`, `ubuntu-2604` → `ubuntu`/`26.04`).
 6. **cloud-init done**: `guest-exec` of `/usr/bin/cloud-init status --format json` (output bounded to
    64 KiB, plain `cloud-init status` as fallback for older cloud-init), polled for up to 10 minutes:
-   `done` passes (`degraded done` passes with a warning), `error`/`disabled` fail.
+   `done` passes (`degraded done` passes with a warning), `error`/`disabled` fail. On a failure the
+   errors of `/run/cloud-init/result.json` are read through the agent before the test VM is destroyed
+   and added to the record's message (printable characters only, at most 300).
 7. **Root disk grew**: the `/` filesystem size from `guest-get-fsinfo` (fallback `df -B1` through the
    agent) must exceed the template's whole disk size — only cloud-init's growpart can make it so.
 8. Kubernetes node image only: `containerd` and `kubelet` present and `kubelet --version` =
    `Kubernetes v<artifact version>` (no join, no kubeadm).
 9. Record **PASS**/**FAIL** with a fixed reason code, `startedAt`/`finishedAt`, the observed values
    (OS name, cloud-init status, root fs bytes, kubelet version) — then **stop and destroy** the test
-   VM, and only then mark the receipt `finished` (`cleanedAt`).
+   VM, and only then mark the receipt `finished` (`cleanedAt`). A destroy task that ends with
+   warnings has removed the VM and may have kept a disk (ZFS: `dataset is busy`): the volumes the test
+   VM's config named are looked up on their store, freed again up to three times (at once, then twice
+   one minute apart), and what still stays is a warning on the record that names each volume and the
+   command (`pvesm free <volume>`). Only those exact volumes are freed, never another volume that
+   carries the same VMID, and none once a VM holds that VMID again. The names are saved on the record
+   before the destroy, so an attempt that finds the VM already gone (the destroy outlasted its wait,
+   or the API restarted) checks them too. Listing needs `Datastore.Audit` and freeing
+   `Datastore.Allocate` on the store. **The portal token as documented above holds only
+   `Datastore.AllocateSpace` there, so on such an install nothing is freed**: the first free is
+   refused, there is no retry, and the warning says so; remove the volume by hand, or grant the
+   token `Datastore.Allocate` on the template disk storage (in Proxmox that right opens every volume
+   on the store). Without `Datastore.Audit` nothing is checked unless the task itself warned.
 
 FAIL codes: `template_mismatch`, `digest_withdrawn`, `clone_failed`, `configure_failed`,
 `resize_failed`, `start_failed`, `agent_timeout`, `osinfo_failed`, `osinfo_mismatch`,
@@ -420,6 +441,85 @@ overwriting), then reads the tags back:
   `config` keys wholesale, so a single-key edit could not be made non-destructive).
 
 Idempotent: an already published template answers `unchanged: true` and writes nothing.
+
+### Publish on all nodes
+
+A site without shared storage needs its own copy of a Kubernetes node image on every node: workers are cloned only on
+the node that holds the template ([managed-k8s.md](managed-k8s.md#9-how-a-cluster-lands-on-proxmox)). **Publish on all
+nodes…** on a row of the **VM templates** tab brings one artifact digest to published on every node of one Proxmox
+provider. It works for any VM template; the versions line and the missing-node warning are for Kubernetes node images.
+
+- `GET /admin/template-updates/publish-all?serviceId=…&digest=sha256:…` (`admin:service:read`) is the report and
+  changes nothing.
+- `POST /admin/template-updates/publish-all` `{"serviceId","package","digest","confirmDigest"}`
+  (`admin:service:manage`, audited with what it did) is **one advance** and answers the same report. Two advances of
+  one provider never run at once (a PostgreSQL advisory lock; the second answers 409 `busy`).
+
+One advance, in this order:
+
+1. **Publish** every node whose latest smoke test passed, through the Publish above with all its gates. A refusal on
+   one node is reported for that node (`publish_failed` with the code) and the other nodes go on.
+2. **Start at most one job**, and only when no import and no smoke test of that provider is queued or running, of this
+   artifact or any other (several clones at once overload a small cluster):
+   - a smoke test of the first imported node that has none, on the provider's smoke network. A network that is unset
+     or refused for that node is recorded on the import, as the automatic smoke test does, and reported as
+     `smoke_not_started`; the next candidate is tried;
+   - else an import on the first node without a copy. It goes to the provider's `importStorage` and to the default
+     storage profile's storage for that node, and both must be active on the node (the rule of the import dialog).
+     When the import finishes the automatic smoke test starts by itself.
+
+Nothing runs in the background. The dialog reads the report every 15 s and advances again while `next` is `advance`;
+closing it pauses, and opening it again continues from the state on the provider. When a publish was refused, or an
+advance answered an error, the dialog stops and shows the reason; **Try again** repeats it.
+
+An advance that fails before it changed anything answers the error (for example 429 while GitHub rate-limits the
+import). One that already published a node in step 1 and then cannot start its job in step 2 answers 200 with the
+report and `error: {code, message}`: the publish is in `actions` and in the audit log, no job is started, and `next`
+is `advance`.
+
+| Node state | Meaning |
+|---|---|
+| `published` | The copy on this node is published |
+| `ready_to_publish` | Its smoke test passed; the next advance publishes it |
+| `publish_failed` | Publish refused (`code`: `template_changed_since_smoke`, `pve_tag_write_failed`, …) |
+| `smoke_running`, `smoke_queued` | A smoke test of the copy is queued or running (`smoke_queued`: this advance queued it) |
+| `staged` | Imported; waits its turn for a smoke test |
+| `smoke_not_started` | The smoke test could not be queued (`code`, e.g. `smoke_network_unset`). Fix the cause and run it from **Imported templates** |
+| `smoke_failed` | The smoke test failed (`code` as stored). Not repeated, however old the failure is and whatever caused it: run the copy's smoke test again from its row under **Imported templates** (`POST /admin/template-updates/templates/{importId}/smoke`). When it passes the node reads `ready_to_publish` and the next advance publishes it. The node's `message` ends with this hint |
+| `importing`, `import_queued` | An import is queued or running (`import_queued`: this advance queued it) |
+| `import_failed` | The import failed (`code` as stored). Not repeated: start it again with **Import…** |
+| `missing` | No copy; waits its turn for an import |
+| `present_unmanaged` | A template with this artifact's source tag that the portal did not import is on the node. Nothing is imported over it |
+| `skipped` | The node is not online (`code` `node_down`, also when it holds a copy that cannot be read while it is down), its storages are not active, the provider has no `importStorage`, the default profile names no storage for it, an earlier import blocks a new one, or the copy is tagged withdrawn (`message` says which) |
+
+The report also carries:
+
+- `versionsLine`: the `config.cluster.versions` entry of the published copies, newest per node (as after a Publish).
+  It is still display only: the operator copies it into the Kubernetes provider.
+- `nodesMissing`: nodes that publish a node image of another Kubernetes version and none of this one.
+- `complete`: every node is `published` or `skipped` for a reason other than being down, and `nodesMissing` is empty.
+  A node that is down is left out of `versionsLine` even when it holds a published copy, so the report is not
+  complete until it is back (or removed from the cluster). While it is false the dialog warns
+  before the line: a line that covers fewer nodes moves a cluster's workers off the missing nodes at its next node
+  group change or upgrade, and ArgoCD deletes the workers of a dropped node at once
+  ([managed-k8s.md](managed-k8s.md#9-how-a-cluster-lands-on-proxmox)).
+- `next`: `advance`, `wait` (a job of the provider is running), `blocked` or `done`. `blocked`: nothing runs and a
+  node is `smoke_failed`, `smoke_not_started`, `import_failed` or `publish_failed`. Each such node's `message` says
+  what to do. An advance never repeats a smoke test or an import, so for the first three posting again changes
+  nothing; `publish_failed` is the refusal of the publish that post just tried, and the next post tries it again
+  (the dialog does not post by itself while `blocked`). The dialog says
+  "Blocked" instead of "Nothing more to do". It keeps reading every 15 s and goes on by itself once the copy's own
+  smoke test has passed. Before, such a report read `done` with `complete: false` (seen on a lab: two copies with an
+  eight-hour-old failed smoke test stopped the action, and each had to be smoke-tested from its row). There is no
+  automatic retry. `done` with `complete: false` is left for what no step of the operator in this dialog changes: a
+  node that is down, a skipped node, a copy the portal did not import, a node that publishes another version.
+- `actions`: what this call did (`published pve2/9211`, `smoke test queued pve3/9212`, `import queued pve4`).
+- `error`: only on an advance that acted and then could not go on (above).
+
+It never withdraws or removes tags, never imports where a copy of the digest exists, never repeats a failed import or
+smoke test, never bypasses a publish gate, and never starts a second job of a provider. A node whose import or smoke
+test failed keeps whatever older copy it has published, and stays in the line with it. A withdrawn digest is refused
+(409 `digest_withdrawn`), and so is the whole action while `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED` is off.
 
 ### Withdraw
 
@@ -780,8 +880,8 @@ hand-over = first install: nothing to read.
 
 | Action | Permission | Built-in roles |
 |---|---|---|
-| See the page, discovery, placement, history, template states, blocklist | `admin:service:read` | SUPER_ADMIN, ADMIN, SUPPORT |
-| Start a VM import, run a smoke test, publish, withdraw | `admin:service:manage` | SUPER_ADMIN, ADMIN |
+| See the page, discovery, placement, history, template states, blocklist, the publish-on-all-nodes report | `admin:service:read` | SUPER_ADMIN, ADMIN, SUPPORT |
+| Start a VM import, run a smoke test, publish, publish on all nodes, withdraw | `admin:service:manage` | SUPER_ADMIN, ADMIN |
 | Start a sandbox mirror or rollback, delete a sandbox pin | `admin:service:manage` | SUPER_ADMIN, ADMIN |
 | Sandbox state, pin list (installer stage 55) | `admin:service:read` | SUPER_ADMIN, ADMIN, SUPPORT |
 | Save the GitHub integration | `admin:integration:manage` | SUPER_ADMIN, ADMIN |
@@ -816,14 +916,29 @@ in place and exited 4 (`UNEXPECTED INCONSISTENCY; RUN fsck MANUALLY`); on Ubuntu
 stops the boot in the initramfs shell. The offline repair below still applies after that, but the file that
 was in inode 12 is gone. Not measured on a real VM, and the image's fstab was not read.
 
-**Templates: do not repair in place.** Do not publish an affected template to tenants, and replace it by
-importing the re-exported image once one is published. A repair of the template disk was not tested, the
+**Templates: replace, do not repair in place.** The fixed images are published (exported 2026-11-16):
+`ubuntu-2604-os-20261116170652-72f0eaa3d0d4` in `proxcloud-vm-ubuntu-2604`, and `ubuntu-2604-k8s-1.35.10-20261116181221-72f0eaa3d0d4`,
+`ubuntu-2604-k8s-1.36.6-20261116194043-72f0eaa3d0d4` and
+`ubuntu-2604-k8s-1.37.2-20261116210716-72f0eaa3d0d4` in `proxcloud-vm-ubuntu-2604-k8s`
+(digests: the same section of public-vm-sanitization.md). Do not publish an affected template to tenants.
+For each affected template:
+
+1. Import the fixed tag and let its smoke test pass.
+2. Publish it. An OS template becomes what new servers get; for a Kubernetes node image put the version-map
+   line the row shows on the Kubernetes provider.
+3. Withdraw every affected digest you had imported (§4): it leaves the catalog on every provider and can
+   not be imported again. The template VM is kept; remove it yourself when no linked clone needs it.
+
+A withdraw changes no existing VM: every server and node cloned from an affected template still needs the
+test and the repair below. A repair of the template disk was not tested, the
 partition device nodes of a template zvol did not exist on the lab host, and a linked clone is made from the
 template's base snapshot, which a repair of the live disk does not change (PVE behaviour, not verified here).
 Until the template is replaced, repair each VM made from it before its second boot.
 
 **Test**, as root inside the guest (reads only). The same reads were checked against image files; the loop
-was not run inside a guest:
+was not run inside a guest. From the PVE host the same two reads work on the partitions of the VM's disk, also
+while the VM runs: replace the `findmnt` list by the partition devices, on ZFS
+`/dev/zvol/<pool>/vm-<id>-disk-0-part1 /dev/zvol/<pool>/vm-<id>-disk-0-part13` (run so on a lab on 2026-11-17):
 
 ```sh
 for d in $(findmnt -rn -t ext4 -o SOURCE | sort -u); do
@@ -854,11 +969,16 @@ debugfs -w -f /tmp/orphan-fix.cmd "$D"
 - `debugfs` exits 0 even when `ssv` failed, so the last line reads the field back and runs the full check
   only when it is 0. If `e2fsck -f -p` does not run, stop: the field is still set.
 - `e2fsck -f -p` exit status 0 or 1 is success (1: it corrected something); 4 or more is not.
-- Tested only on scratch image files with e2fsprogs 1.47.2, with a file in inode 12, in four states: clean,
+- Tested on scratch image files with e2fsprogs 1.47.2, with a file in inode 12, in four states: clean,
   journal not replayed, marked with errors, and both. Each time the field became 0 in the primary and the
   backup superblocks, the file kept its content and `e2fsck -fn` was clean afterwards.
-- **Not tested**: a real VM disk, a zvol, a journal left by a real kernel after the error (the scratch
-  journal was written with `debugfs`), e2fsprogs 1.47.0 for the journal and `close -a` steps, `/boot`.
+- Run once on a real VM on a lab, on 2026-11-17: the seed VM of a managed-services installation, on a zvol,
+  root (`-part1`, read-only after the error, its journal left by the guest's kernel) and `/boot` (`-part13`),
+  e2fsprogs 1.47.2. Every command exited 0, the file in inode 12 kept its content, and the VM booted with
+  both filesystems read-write.
+- **Not tested**: e2fsprogs 1.47.0 for the journal and `close -a` steps, a disk on a store other than ZFS,
+  the Kubernetes node image on a real VM.
+- **Start the VM afterwards** (`qm start <id>`); nothing does it for you.
 - **Do not** run the repair on a mounted filesystem: `debugfs -w` also rewrites group descriptors.
 - **Do not** run `e2fsck -y`/`-p` (other than `-E journal_only`) before the field is zero: on the scratch
   image it deleted the file in inode 12 and left the field in place. `tune2fs -O orphan_file` destroys that
@@ -866,6 +986,15 @@ debugfs -w -f /tmp/orphan-fix.cmd "$D"
 - There is no online repair. A root filesystem already read-only needs the offline path.
 
 ## 7. Open items
+
+- **Publish on all nodes is partly lab-verified** (2026-11-17, main cb2f052): two advances each published one node
+  whose smoke test had passed, the report and the versions line were right, and the smoke clone upgraded no package.
+  Not run on a lab: an import started by it, a smoke test started by it, and so its one-job-at-a-time rule (both
+  copies there carried a failed smoke test, which it does not repeat, and were smoke-tested from their rows, one
+  after the other by hand); the `blocked` answer; the dialog. Its tests run on PostgreSQL with a fake Proxmox. It has no background
+  driver: an operator who closes the dialog pauses it. It does not write `config.cluster.versions`. The one-job rule
+  reads the import and smoke receipts of the provider, so a job started by hand in the moment between the check and
+  the enqueue can still overlap; the provider's own smoke lock keeps two smoke tests apart in every case.
 
 - **Sandbox mirror not cluster-verified**: no sandbox cluster, Zot, GHCR or PAT was used. Verify on the
   lab: the Zot rule set (`mirror` creates `library/sandbox-x:tag`, cannot push an existing tag, cannot

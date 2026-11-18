@@ -4,6 +4,11 @@ node, so a group is pinned: each entry of machineImageId (<node>=<vmid>) gets it
 machineCount is split evenly across the entries, the first ones taking the remainder. The zone label comes
 from the same pin, which is why no cloud controller manager is needed for topology.
 
+machinePlacement (<node>: <replicas>, from chart 0.1.13) replaces the even split for a group that carries it: the
+portal decides it by the free memory, CPU and storage of each node and keeps it stable, so a re-render never moves
+a running worker. A node it does not name gets 0. A map whose sum is not machineCount, or that names a node without
+an image, fails the render instead of deleting workers. Without the key the split is the even one, unchanged.
+
 Machine and bootstrap templates are immutable in CAPI: their names carry a hash of their spec, so a changed
 flavor or image rolls the nodes instead of silently applying to new machines only.
 
@@ -26,6 +31,24 @@ VM.GuestAgent.Unrestricted, root in every guest of the pool. The Node joining is
 {{- $pins := splitList "," (required (printf "node group %s: machineImageId is required" $ng.name) $ng.machineImageId) }}
 {{- $n := len $pins }}
 {{- $count := int $ng.machineCount }}
+{{- $placement := $ng.machinePlacement | default dict }}
+{{- if $placement }}
+{{- $pinNodes := list }}
+{{- range $pin := $pins }}{{- $pinNodes = append $pinNodes (index (splitList "=" $pin) 0) }}{{- end }}
+{{- $sum := 0 }}
+{{- range $pnode, $pn := $placement }}
+{{- if not (has $pnode $pinNodes) }}
+{{- fail (printf "node group %s: machinePlacement names node %q, which machineImageId has no image on" $ng.name $pnode) }}
+{{- end }}
+{{- if lt (int $pn) 0 }}
+{{- fail (printf "node group %s: machinePlacement of node %q is negative" $ng.name $pnode) }}
+{{- end }}
+{{- $sum = add $sum (int $pn) }}
+{{- end }}
+{{- if ne (int $sum) $count }}
+{{- fail (printf "node group %s: machinePlacement places %d machines, machineCount is %d" $ng.name (int $sum) $count) }}
+{{- end }}
+{{- end }}
 {{- range $i, $pin := $pins }}
 {{- $kv := splitList "=" $pin }}
 {{- if ne (len $kv) 2 }}
@@ -35,6 +58,7 @@ VM.GuestAgent.Unrestricted, root in every guest of the pool. The Node joining is
 {{- $vmid := index $kv 1 }}
 {{- $replicas := div $count $n }}
 {{- if lt $i (mod $count $n) }}{{- $replicas = add1 $replicas }}{{- end }}
+{{- if $placement }}{{- $replicas = int (get $placement $node | default 0) }}{{- end }}
 {{- $base := printf "%s-%s-%s" $root.Release.Name $ng.name $node }}
 {{- $machine := dict "sourceNode" $node "templateID" (int $vmid) "allowedNodes" (list $node) "storage" $root.Values.proxmox.storage "format" "raw" "full" true "pool" $root.Values.proxmox.pool "checks" (dict "skipCloudInitStatus" true) "tags" $ng.machineTags "numSockets" 1 "numCores" (int $ng.machineCores) "memoryMiB" (int $ng.machineMemoryMiB) "disks" (dict "bootVolume" (dict "disk" "scsi0" "sizeGb" (int $ng.machineRootVolume.diskSize))) }}
 {{- $device := dict "name" "net0" "bridge" $net.bridge "model" "virtio" }}

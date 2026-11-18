@@ -245,6 +245,31 @@ on("POST /admin/template-updates/templates/:id/publish", ({ params, opts }) => {
   return { data: { complete: true, providers: [] } }
 })
 
+// Publish on all nodes: each POST moves the first unpublished node one step (import, smoke test, publish), one job at
+// a time like the server; the GET reads the same state.
+const publishAllSteps = ["missing", "importing", "smoke_running", "ready_to_publish", "published"]
+const publishAllState: Record<string, Record<string, number>> = {}
+function publishAllReport(serviceId: string, digest: string, act: boolean) {
+  const st = (publishAllState[`${serviceId}/${digest}`] ??= Object.fromEntries(templatePlacement.nodes.map((n: Doc) => [n.node, 0])))
+  const first = Object.keys(st).find((n) => st[n] < 4)
+  if (act && first) st[first]++
+  const nodes = Object.keys(st).map((node, i) => ({ node, state: publishAllSteps[st[node]], vmid: st[node] > 1 ? 9300 + i : undefined }))
+  const line = templateDiscovery.vm.find((l: Doc) => l.latest?.digest === digest)
+  const pub = nodes.filter((n) => n.state === "published")
+  return {
+    digest, kubernetesVersion: line?.kubernetesVersion, nodes, nodesMissing: [], complete: pub.length === nodes.length,
+    versionsLine: line?.kubernetesVersion && pub.length ? `"${line.kubernetesVersion}": "${pub.map((n) => `${n.node}=${n.vmid}`).join(",")}"` : undefined,
+    next: pub.length === nodes.length ? "done" : "advance",
+  }
+}
+on("GET /admin/template-updates/publish-all", ({ query }) => ({ data: publishAllReport(query.get("serviceId") ?? "", query.get("digest") ?? "", false) }))
+on("POST /admin/template-updates/publish-all", ({ opts }) => {
+  const b = (opts.body ?? {}) as Doc
+  if (!mockSetup.templateFlag) throw new ApiError(409, 409, "vm_updates_disabled")
+  if (b.confirmDigest !== b.digest) throw new ApiError(400, 400, "Confirm the exact digest to publish")
+  return { data: publishAllReport(b.serviceId, b.digest, true) }
+})
+
 // The no-provision save replaces the top-level config keys the body carries, like PUT /admin/service/{id}.
 on("PUT /admin/service/:id/update", ({ params, opts }) => {
   const svc = db.services.find((s) => s.id === params.id)

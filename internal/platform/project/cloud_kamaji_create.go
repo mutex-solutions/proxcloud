@@ -68,6 +68,18 @@ func (h *Handler) kamajiGroupFlavor(ctx context.Context, ng *kamaji.NodeGroup, p
 	return fl, nil
 }
 
+// kamajiRootGiB is the root disk of a group that names none: the size the group of that name already runs, else def.
+// A node group edit that leaves the field out must not change the machine spec, or every worker of the group is
+// replaced.
+func kamajiRootGiB(name string, prev []kamaji.NodeGroup, def int) int {
+	for _, p := range prev {
+		if p.Name == name && p.RootVolumeGiB > 0 {
+			return p.RootVolumeGiB
+		}
+	}
+	return def
+}
+
 // kamajiHydrateGroups fills what the client does not choose: VM size and tags from the flavor. Run on
 // create and on every node group change, because the values carry them. prev is what the cluster runs now.
 func (h *Handler) kamajiHydrateGroups(ctx context.Context, compute *externalservice.ExternalService, d kamaji.ClusterDefaults, clusterID string, groups, prev []kamaji.NodeGroup) error {
@@ -85,7 +97,7 @@ func (h *Handler) kamajiHydrateGroups(ctx context.Context, compute *externalserv
 		}
 		ng.Cores, ng.MemoryMiB = fl.VCPUs, fl.RAMMb
 		if ng.RootVolumeGiB == 0 {
-			ng.RootVolumeGiB = max(d.RootVolumeGiB, fl.DiskGb)
+			ng.RootVolumeGiB = kamajiRootGiB(ng.Name, prev, max(d.RootVolumeGiB, fl.DiskGb))
 		}
 		tags := []string{pve.TagManaged, pve.FlavorTag(fl.Slug), "pc-k8s-" + clusterID}
 		p := fl.StorageProfile
@@ -205,6 +217,15 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 	if storage == "" {
 		return sec, httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable, "The Proxmox provider has no storage profile for boot disks")
 	}
+	// Where each group's workers go, by what is free on the nodes that hold the image. Before anything is reserved
+	// or minted: a cluster that does not fit leaves nothing behind.
+	if kamaji.ChartHasPlacement(ks.Config().ChartVersion) {
+		if perr := kamajiPlaceCreate(d, spec, func() (*kamajiCapacity, *httpx.HTTPError) {
+			return h.kamajiSnapshot(ctx, ks, compute, storage)
+		}); perr != nil {
+			return sec, perr
+		}
+	}
 	gatewayCSI, err := h.kamajiGatewayCSI(ks.Config(), compute)
 	if err != nil {
 		return sec, err
@@ -228,7 +249,7 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 			return sec, upstreamErr(computeBackend, serr)
 		}
 		if !static {
-			return sec, httpx.BadRequest("Worker nodes need a network without DHCP (an EVPN or VLAN zone)")
+			return sec, httpx.BadRequest("Worker nodes need a network without DHCP (an EVPN or VLAN zone, or a simple zone without a DHCP server)")
 		}
 		_, ipnet, perr := net.ParseCIDR(cidr)
 		if perr != nil {
@@ -276,7 +297,7 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 			ISOStorage: compute.PVEBootISOStorage(), Zone: zone, Vnet: in.Bridge,
 		})
 		if terr != nil {
-			err = upstreamErr(computeBackend, terr)
+			err = kamajiMintErr(terr)
 			return sec, err
 		}
 		capiID, capiSecret = toks.CAPIID, toks.CAPISecret
@@ -354,45 +375,68 @@ func kamajiRWXShare(clusterID string) string { return "k8s-" + clusterID }
 
 // KamajiReleaseCluster runs after a cluster's delete cascade has finished, and after a failed create
 // (kamaji.OnClusterGone). An error keeps the marker, so the sweep retries: only a provider that is really gone
-// counts as nothing to release on. csi, when set, goes first: it revokes the cluster's gateway credential and deletes the
-// disks of its volumes (csigw.Store.ReleaseCluster).
+// counts as nothing to release on. The look at the pool goes first, and while it holds nothing is released. Then csi,
+// when set: it revokes the cluster's gateway credential and deletes the disks of its volumes
+// (csigw.Store.ReleaseCluster).
 func KamajiReleaseCluster(services serviceGetter, shares shareRowFinder, pveFor func(*externalservice.ExternalService) (*pve.Service, error), ips *PublicIPRepo, shared bool, csi func(ctx context.Context, clusterID string) error) func(ctx context.Context, computeID, projectID, clusterID string) error {
-	rest := kamajiReleaseInfra(services, shares, pveFor, ips, shared)
-	return func(ctx context.Context, computeID, projectID, clusterID string) error {
-		// A CSI step that fails (a disk in use, a provider that lost its gateway token) keeps the marker, but does not
-		// hold back the tokens, addresses and dataset: each part is safe to run again.
-		var csiErr error
-		if csi != nil {
-			csiErr = csi(ctx, clusterID)
-		}
-		return errors.Join(csiErr, rest(ctx, computeID, projectID, clusterID))
-	}
-}
-
-func kamajiReleaseInfra(services serviceGetter, shares shareRowFinder, pveFor func(*externalservice.ExternalService) (*pve.Service, error), ips *PublicIPRepo, shared bool) func(ctx context.Context, computeID, projectID, clusterID string) error {
 	return func(ctx context.Context, computeID, projectID, clusterID string) error {
 		es, err := services.Get(ctx, computeID)
 		if err != nil && !errors.Is(err, externalservice.ErrNotFound) {
 			return err
 		}
 		// sharedWorkers mints nothing, and its portal token may not touch tokens at all.
+		var ps *pve.Service
 		if err == nil && pveFor != nil && !shared {
-			ps, err := pveFor(es)
-			if err != nil {
+			if ps, err = pveFor(es); err != nil {
 				return err
 			}
-			if err := ps.C.RevokeClusterTokens(ctx, clusterID); err != nil {
+			// CAPMOX deletes the workers with the cluster's token. The caller saw the cluster's objects gone from the
+			// management cluster; a worker still in the pool (a finalizer removed by hand, a ClusterRole too old to
+			// list Machines) holds the release, and with it the addresses and disks that worker uses.
+			if err := kamajiWorkersGone(ctx, ps, projectID, clusterID); err != nil {
 				return err
 			}
 		}
-		if err := kamajiDeleteDataset(ctx, services, shares, projectID, clusterID); err != nil {
-			return err
+		// A CSI step that fails (a disk in use, a provider that lost its gateway token) keeps the marker, but does not
+		// hold back the tokens, addresses and dataset: each part is safe to run again.
+		var csiErr error
+		if csi != nil {
+			csiErr = csi(ctx, clusterID)
 		}
-		if ips != nil {
-			return ips.ReleaseServer(ctx, computeID, kamajiReservation(clusterID))
-		}
-		return nil
+		return errors.Join(csiErr, func() error {
+			if ps != nil {
+				if err := ps.C.RevokeClusterTokens(ctx, clusterID); err != nil {
+					return err
+				}
+			}
+			if err := kamajiDeleteDataset(ctx, services, shares, projectID, clusterID); err != nil {
+				return err
+			}
+			if ips != nil {
+				return ips.ReleaseServer(ctx, computeID, kamajiReservation(clusterID))
+			}
+			return nil
+		}())
 	}
+}
+
+// kamajiWorkersGone refuses while a VM of the cluster is left in the project's pool. CAPMOX names a VM after its
+// Machine, and the chart starts every Machine name with the cluster id. A VM on a node that is down has no name in
+// Proxmox's list after about five minutes and does not hold the release: it may be any VM of the tenant, a worker on
+// a dead node keeps its Machine, which holds the release before this is asked, and a failed create (AbandonCluster)
+// must release what it took whatever the nodes do.
+func kamajiWorkersGone(ctx context.Context, ps *pve.Service, projectID, clusterID string) error {
+	rows, err := ps.C.ClusterResources(ctx, "vm")
+	if err != nil {
+		return err
+	}
+	pool := ps.PoolFor(projectID)
+	for _, r := range rows {
+		if r.Pool == pool && strings.HasPrefix(r.Name, clusterID+"-") {
+			return fmt.Errorf("kamaji: cluster %s: VM %d in pool %s may still be a worker, its token stays", clusterID, r.VMID, pool)
+		}
+	}
+	return nil
 }
 
 type serviceGetter interface {
@@ -531,6 +575,21 @@ func classStorages(classes []kamaji.StorageClass) []string {
 		out = append(out, c.Storage)
 	}
 	return out
+}
+
+// kamajiMintRefused is what a tenant reads when Proxmox refuses the portal token the cluster token's rows
+// (docs/managed-k8s.md §5 names it). Proxmox's own words name the path and go to the operator alone.
+const kamajiMintRefused = "Could not mint the cluster's Proxmox tokens: the operator must fix a permission of the portal on Proxmox first. Nothing was created, and trying again does not help until then."
+
+// kamajiMintErr answers a failed pve.MintClusterTokens. A 403 is a grant the portal token lacks on one of the paths the
+// mint writes, most often a store or zone whose own ACL row hides the mint role its parent passes down: no retry
+// helps, so it is a 409 and not the 502 of a backend that is down. The managed-services Check reads the same paths
+// (pve.KubeMintPrivileges).
+func kamajiMintErr(err error) *httpx.HTTPError {
+	if pve.IsForbidden(err) {
+		return httpx.NewError(http.StatusConflict, http.StatusConflict, kamajiMintRefused).WithCause(fmt.Errorf("mint cluster tokens: %w", err))
+	}
+	return upstreamErr(computeBackend, err)
 }
 
 // kamajiCheckBootISO refuses a create whose workers' join tokens would sit on a shared store, or on a store the

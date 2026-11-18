@@ -5,7 +5,7 @@ package project
 import (
 	"context"
 	"errors"
-	"log/slog"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -35,14 +35,15 @@ func zoneErr(err error) error {
 	return upstreamErr("DNS server", err)
 }
 
-// upstreamErr logs why a backend failed and tells the tenant only that it did: the raw error names the backend's internal
-// address, which tenants must not learn.
+// upstreamErr tells the tenant only that a backend failed: the raw error names the backend's internal address, which
+// tenants must not learn. Why goes with the answer as its Cause: httpx.WriteError logs it against the request id
+// ("backend request failed"), and a refused create's audit event keeps it for the operator. A handler that answers
+// the error without httpx.WriteError calls httpx.LogCause itself (the admin CSI migration).
 func upstreamErr(what string, err error) *httpx.HTTPError {
 	if errors.Is(err, pve.ErrNotInProject) {
 		return httpx.NewError(http.StatusNotFound, http.StatusNotFound, "Server not found")
 	}
-	slog.Error("backend request failed", "backend", what, "err", err)
-	return httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, "The "+what+" is unavailable. Try again later.")
+	return httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, "The "+what+" is unavailable. Try again later.").WithCause(fmt.Errorf("%s: %w", what, err))
 }
 
 func (h *Handler) zoneCreate(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, req providers.CreateRequest) {

@@ -1,6 +1,6 @@
 # Quick start
 
-**Release prerequisite:** broker-free deployment targets the stable **v0.7.0**
+**Release prerequisite:** broker-free deployment targets the stable **v0.8.1**
 release, not the older Rabbit-dependent API. Its tag publishes the images and app
 chart; until you have verified them pullable, use the source installer's default
 `images.build: true` or build/load known compatible images for Helm. The image/chart
@@ -502,8 +502,8 @@ retain runbook](postgres-jobs-migration.md); do not let Helm/Argo prune the old 
 The portal only, on your own domain with TLS, on one Linux host: the API, both consoles, PostgreSQL, Keycloak in
 production mode and Traefik. Like [E](#e-install-on-kubernetes-with-helm) it creates no OS templates, Proxmox tokens
 or providers. Managed Kubernetes and databases are not included by default: the operator console can build them on
-your Proxmox VE cluster after `./proxcloud-up.sh install --managed-services` (v0.8.0 or later, which is not released
-yet, or a `dev-<sha>` build of main for a test; not verified on a lab), see [managed-services.md](managed-services.md). Sandboxes are not included. Operator guide (DNS per TLS mode,
+your Proxmox VE cluster after `./proxcloud-up.sh install --managed-services` (v0.8.0 or later, or a `dev-<sha>`
+build of main for a test; not verified on a lab against a published release), see [managed-services.md](managed-services.md). Sandboxes are not included. Operator guide (DNS per TLS mode,
 backup and restore, upgrade, security notes): [deploy/compose/README.md](../deploy/compose/README.md).
 
 **Before you start:** Docker Engine 20.10+ with the Compose plugin v2+, ports 80 and 443 free, and four DNS names
@@ -659,7 +659,7 @@ Versions are pinned in `installer/playbooks/group_vars/all/versions.yml`; every 
 | Network create answers 403, or Test connection lists missing `SDN.*` privileges, after an ACL was added by hand | A role on a child path (for example `/sdn/zones`) replaces what the parent grants that user or token | Grant `ProxCloudPlatform` on that same path too, then read the effective rights: `pveum user token permissions proxcloud@pve platform --path /sdn/zones` |
 | Stage 05 fails adding `nas-*`, or a node cannot mount it | The TrueNAS NFS share does not allow the PVE nodes, or squashes root | Allow the nodes' management subnet on each export in `nas.exports` and map root to root (PVE writes as root). Tenant shares are separate: [NAT and exports](cloud-integration.md#truenas-file-shares) |
 | Stage 55 stops on `sandbox.network.snat is required` or on the exit node | The sandbox needs its own egress address, placed on exactly one exit node over root SSH | Set `sandbox.network.snat` (or `node`), give the zone one exit node, put it in the inventory group `pve` |
-| Sandbox stages cannot pull `proxcloud-sandbox-proxy` or `proxcloud-sandbox-runtime` on an `images.build` site | Stage 35 builds only API/web/admin; sandbox stages default to the BOM release tag (`v0.7.0`), which exists only after its tag's image workflow succeeds. Public development images do not create release tags | Pin `sandbox.proxy.image` and `sandbox.runtime_image` to exact compatible images/digests your nodes can pull; verify the BOM tag is pullable before relying on it |
+| Sandbox stages cannot pull `proxcloud-sandbox-proxy` or `proxcloud-sandbox-runtime` on an `images.build` site | Stage 35 builds only API/web/admin; sandbox stages default to the BOM release tag (`v0.8.1`), which exists only after its tag's image workflow succeeds. Public development images do not create release tags | Pin `sandbox.proxy.image` and `sandbox.runtime_image` to exact compatible images/digests your nodes can pull; verify the BOM tag is pullable before relying on it |
 | Template build fails downloading the vendor image | No store with `import` content | Add `import` to a store's content, or set `templates.import_storage` |
 
 Still stuck: review the failed stage and migration gates before a verbose re-run, `make install INVENTORY=inventory/mysite ARGS=-v` (this can reconcile resources, not just read them),

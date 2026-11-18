@@ -157,15 +157,54 @@ export function seedCloudResources(): CloudResource[] {
   // externalId mirrors the real API (like volumes above): the cache row's
   // externalId IS the network id — subnet.network_id and router
   // external_gateway_info.network_id join against it.
+  // A row as v0.8.0 and v0.8.1 wrote it at create: the one subnet's cidr, gateway and snat, and no subnetDetails.
   const networkPrivate = res("NETWORK", "net-private", {
-    network: { id: "net-priv-1", name: "net-private", status: "ACTIVE", shared: false, "router:external": false, subnets: ["sub-priv-1"] },
+    network: {
+      id: "net-priv-1", name: "net-private", status: "ACTIVE", shared: false, "router:external": false, subnets: ["sub-priv-1"],
+      cidr: "10.0.0.0/24", gateway: "10.0.0.1", snat: true,
+    },
   }, { externalId: "net-priv-1" })
   const networkPublic = res("NETWORK", "public", {
     network: { id: "net-public-ext", name: "public", status: "ACTIVE", shared: true, "router:external": true, subnets: [] },
   }, { externalId: "net-public-ext" })
 
+  // Managed Kubernetes: one healthy cluster, and one whose provisioning stopped half-way: a worker
+  // that never joined, a machine the host had no room for, and a group still inside its bound.
+  const minutesAgo = (n: number) => new Date(Date.now() - n * 60000).toISOString()
+  const k8s = (id: string, name: string, c: Record<string, any>) =>
+    res("KUBERNETES_CLUSTER", name, {
+      cluster: {
+        id, name, version: "1.35.10", chart_version: "0.1.13", sync_status: "Synced", endpoint: "10.20.0.5:6443",
+        cp_status: "Ready", cp_replicas: 1, created_at: minutesAgo(90), storage_classes: ["proxmox-csi"], rwx: false, ...c,
+      },
+    }, { id: `res-${id}`, externalId: id, serviceId: "svc-k8s-1", region: "RegionOne" })
+  const group = (name: string, count: number, ready: number, progress?: Record<string, any>) => ({
+    name, flavor_id: "flv-medium", count, replicas: count, ready_replicas: ready, phase: ready >= count ? "Running" : "ScalingUp",
+    ...(progress ? { progress } : {}),
+  })
+
   return [
     ...servers,
+
+    // Three workers placed on three hosts: scaling to two empties one host.
+    k8s("pc-c-healthy", "prod", {
+      status: "READY",
+      node_groups: [{ ...group("workers", 3, 3), image_id: "pve1=9201,pve2=9202,pve3=9203", placement: { pve1: 1, pve2: 1, pve3: 1 } }],
+    }),
+    k8s("pc-c-stuck", "staging", {
+      status: "PROGRESSING",
+      node_groups: [
+        group("workers", 2, 1, { code: "not_joined", since: minutesAgo(42), machines: 1, attention: true }),
+        group("batch", 3, 0, { code: "no_capacity", since: minutesAgo(8), machines: 2, attention: true }),
+        group("build", 1, 0, { code: "creating_vm", since: minutesAgo(3), machines: 1, attention: false }),
+        group("edge", 1, 0, { code: "not_joined", since: minutesAgo(4), machines: 1, attention: false }),
+      ],
+    }),
+    k8s("pc-c-nocp", "sandbox", {
+      status: "PROGRESSING", endpoint: undefined, cp_status: "Provisioning", created_at: minutesAgo(25),
+      attention: { code: "control_plane_stalled", since: minutesAgo(25) },
+      node_groups: [group("workers", 1, 0, { code: "waiting_control_plane", since: minutesAgo(25), machines: 1, attention: false })],
+    }),
 
     res("SERVER_GROUP", "web-anti-affinity", {
       serverGroup: { name: "web-anti-affinity", policy: "anti-affinity", policies: ["anti-affinity"], members: [] },

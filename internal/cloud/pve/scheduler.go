@@ -5,6 +5,11 @@ package pve
 // (template/profile locality), free GPU slots, CPU capacity under the overcommit ceiling,
 // RAM for the flavor, free space on the profile's storage. Rank: most free RAM wins. One
 // node = degenerate correct.
+//
+// Memory per node is CommittedMem: the larger of the configured memory of the running VMs the token sees and the
+// node's own used memory, plus the VMs that do not run, so VMs the token may not audit (another pool with NoAccess,
+// another portal's) still take room.
+// CPU has no such second source: the vCPUs of VMs the token cannot audit are not counted.
 
 import (
 	"fmt"
@@ -37,26 +42,63 @@ type SchedReq struct {
 	SpreadPool   string
 	SpreadGroup  string
 	SpreadStrict bool
+	// Members adds to the spread count of a node: replicas of a group that are decided and have no VM yet, which no
+	// tag can show. With it the fewest-members rank works without a SpreadGroup.
+	Members map[string]int
 }
 
-// PickNode chooses the target node. vms is the cluster-wide qemu rows (ALL pools —
+// CommittedMem is the memory taken on each node. /cluster/resources leaves out every VM the token may not audit
+// (VM.Audit), so the sum of the rows alone reads a node that carries such VMs as free. The node row of /nodes
+// (Sys.Audit, which the token has) gives the memory really in use, hidden VMs included. Per node:
+//
+//	max(Σ configured memory of the running VMs, the node's used memory) + Σ configured memory of every other row
+//
+// A row that is not running takes nothing of the node's used memory yet, so it comes on top: a stopped VM, a clone
+// that has not booted, and the rows without a VMID (VMs that are decided and not made yet: pending workers, the
+// picks of PlaceReplicas). Templates and holders do not count.
+// ponytail: max, not a sum, for the running rows. A hidden VM is counted with what it uses now, not its configured
+// size, and not at all while the running visible VMs' configured sizes exceed the node's real use; and on a node
+// with hidden VMs a running visible VM that uses less than its size counts with what it uses. Exact needs the
+// hidden VMs' sizes, which this token cannot read.
+func CommittedMem(nodes []Node, vms []ClusterResource) map[string]int64 {
+	running, rest := map[string]int64{}, map[string]int64{}
+	for _, r := range vms {
+		if r.Type != "qemu" || r.Template == 1 || isHolder(r.Tags) {
+			continue
+		}
+		if r.Status == "running" {
+			running[r.Node] += r.MaxMem
+		} else {
+			rest[r.Node] += r.MaxMem
+		}
+	}
+	out := map[string]int64{}
+	for _, n := range nodes {
+		out[n.Node] = max(running[n.Node], n.Mem) + rest[n.Node]
+	}
+	return out
+}
+
+// PickNode chooses the target node. vms is the cluster-wide qemu rows (ALL pools the token may audit —
 // capacity is global); nodes the /nodes list.
 func PickNode(nodes []Node, vms []ClusterResource, req SchedReq) (string, error) {
 	oc := req.OvercommitCPU
 	if oc <= 0 {
 		oc = 4
 	}
-	// Committed resources per node: Σ cores and Σ mem of every non-template VM.
+	// Committed resources per node: Σ cores of every non-template VM, and CommittedMem.
 	// Stopped VMs still count — they can start any time and PVE reserves nothing.
 	usedCPU := map[string]float64{}
-	usedMem := map[string]int64{}
+	usedMem := CommittedMem(nodes, vms)
 	members := map[string]int{}
+	for node, n := range req.Members {
+		members[node] = n
+	}
 	for _, r := range vms {
 		if r.Type != "qemu" || r.Template == 1 || isHolder(r.Tags) {
 			continue
 		}
 		usedCPU[r.Node] += r.MaxCPU
-		usedMem[r.Node] += r.MaxMem
 		if req.SpreadGroup != "" && r.Pool == req.SpreadPool && TagValue(r.Tags, tagSpreadPref) == req.SpreadGroup {
 			members[r.Node]++
 		}
@@ -98,7 +140,73 @@ func PickNode(nodes []Node, vms []ClusterResource, req SchedReq) (string, error)
 		if mi, mj := members[cands[i].name], members[cands[j].name]; mi != mj {
 			return mi < mj
 		}
-		return cands[i].freeMem > cands[j].freeMem
+		if cands[i].freeMem != cands[j].freeMem {
+			return cands[i].freeMem > cands[j].freeMem
+		}
+		return cands[i].name < cands[j].name // equal nodes: the same pick every time
 	})
 	return cands[0].name, nil
+}
+
+// PlaceReplicas places add more replicas of one group, one PickNode at a time, on top of the have it already runs.
+// Each pick counts at once: it becomes a VM of req's size on that node and takes req.DiskBytes from the node's storage
+// (from every node's when the storage is shared, which is one pool seen from each node), so the next pick, and the
+// next group placed on the returned vms, sees it. req.Storage is updated in place. It returns the group's new
+// placement, the vms with the picks added, and how many of add fit; it stops at the first that does not.
+func PlaceReplicas(nodes []Node, vms []ClusterResource, req SchedReq, have map[string]int, add int, sharedStorage bool) (map[string]int, []ClusterResource, int) {
+	out := map[string]int{}
+	for node, n := range have {
+		out[node] = n
+	}
+	fit := 0
+	for ; fit < add; fit++ {
+		req.Members = out
+		node, err := PickNode(nodes, vms, req)
+		if err != nil {
+			break
+		}
+		out[node]++
+		vms = append(vms, ClusterResource{Type: "qemu", Node: node, MaxCPU: float64(req.VCPUs), MaxMem: req.RAMMb << 20})
+		for n, st := range req.Storage {
+			if n == node || sharedStorage {
+				st.Avail -= req.DiskBytes
+				req.Storage[n] = st
+			}
+		}
+	}
+	return out, vms, fit
+}
+
+// RemoveReplicas takes n replicas off a group's placement. Each one leaves the node whose MachineDeployment has the
+// most replicas that are not ready (a stuck machine goes before a healthy one), then the node with the most replicas
+// of the group (so a node is emptied last, and with it the volumes that live only there), then the one with the
+// least free memory, then by name. unready and freeMem may be nil: that criterion is then skipped.
+func RemoveReplicas(have map[string]int, n int, unready map[string]int, freeMem map[string]int64) map[string]int {
+	out, left := map[string]int{}, map[string]int{}
+	for node, c := range have {
+		out[node] = c
+		left[node] = unready[node]
+	}
+	for ; n > 0; n-- {
+		pick := ""
+		for node, c := range out {
+			if c <= 0 {
+				continue
+			}
+			better := pick == "" || left[node] > left[pick] ||
+				(left[node] == left[pick] && (c > out[pick] ||
+					(c == out[pick] && (freeMem[node] < freeMem[pick] || (freeMem[node] == freeMem[pick] && node < pick)))))
+			if better {
+				pick = node
+			}
+		}
+		if pick == "" {
+			break
+		}
+		out[pick]--
+		if left[pick] > 0 {
+			left[pick]--
+		}
+	}
+	return out
 }
