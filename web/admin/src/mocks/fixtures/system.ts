@@ -137,8 +137,8 @@ export const unpricedFlavorsByService: Record<string, Doc[]> = {
 export const proxmoxAuthResult: Doc = {
   version: "9.0.3",
   nodes: [
-    { node: "pve1", status: "online" },
-    { node: "pve2", status: "online" },
+    { node: "pve1", status: "online", maxmem: 128 * 2 ** 30, mem: 16 * 2 ** 30 }, // bytes in the node and in use
+    { node: "pve2", status: "online", maxmem: 128 * 2 ** 30, mem: 8 * 2 ** 30 },
   ],
   storages: [{ storage: "local-zfs", type: "zfspool" }],
   sdnZones: [{ zone: "overlay", type: "evpn" }],

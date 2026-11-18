@@ -1019,6 +1019,7 @@ func run() error {
 		return fmt.Errorf("template update sandbox store: %w", err)
 	}
 	adminH.SetTemplateUpdates(tuSvc)
+	adminH.SetJobsScheduler(cfg.Jobs.SchedulerEnabled) // before the platform runner starts: its preflight reads it
 	// The managed-services platform (docs/adr/0009): its installation routes only with PROXCLOUD_PLATFORM_ENABLED=true;
 	// its runner (applies and removes) only with PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED
 	// too, since stage 2 imports the platform images through Template updates. Without the runner POST …/runs answers
@@ -1040,7 +1041,7 @@ func run() error {
 			prRunner := &platformlife.Runner{
 				Jobs: jobStore, State: platformStore, Log: log, Preflight: adminH.PlatformPreflight, SkipRolloutGate: cfg.Jobs.PlatformSkipRolloutGate,
 				Imports:  platformlife.TemplateUpdates{Service: tuSvc},
-				Register: adminH.PlatformRegister, Disable: adminH.PlatformDisable,
+				Register: adminH.PlatformRegister, Disable: adminH.PlatformDisable, Attach: adminH.PlatformAttach,
 				SDNLock: sdnLock,
 				Provider: func(ctx context.Context, id string) (*externalservice.ExternalService, error) {
 					es, err := esSvc.Get(ctx, id)
@@ -1072,7 +1073,6 @@ func run() error {
 			log.Warn("managed services: platform runner ENABLED")
 		}
 	}
-	adminH.SetJobsScheduler(cfg.Jobs.SchedulerEnabled)
 	adminH.SetAPIBaseURL(cfg.Self.APIBaseURL)
 	adminH.SetSandboxCluster(func(es *externalservice.ExternalService) (admin.SandboxCluster, error) { return sandboxServiceFor(es) })
 	// The sandbox mirror runner always runs: with PROXCLOUD_TEMPLATE_UPDATES_SANDBOX_ENABLED off (CleanupOnly) it runs

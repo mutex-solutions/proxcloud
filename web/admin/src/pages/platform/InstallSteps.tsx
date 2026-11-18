@@ -14,14 +14,17 @@ import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Textarea } from "@/components/ui/textarea"
 import { apiFetch } from "@/lib/api"
+import { useAdminList } from "@/lib/hooks"
 import { cn } from "@/lib/utils"
 import { CheckRows, CopyBlock, ErrorNote, LINK, StepCard, errMsg, fetchText, useClusterInfo } from "@/pages/setup/common"
 import {
-  CAPI_TOKEN, CSI_TOKEN, GROUPS, PLATFORM_KEY, GROUP_USE, TOKEN_SECRET, checkAction, emptyForm, errCode, errProblems, formToSpec, isConflict, labProfile, specToForm, validate,
-  type BOM, type Check, type Form, type Installation, type MachineForm, type Plan, type Problem, type TenantProbe, type Upgrade,
+  CAPI_TOKEN, CSI_TOKEN, ENROLL_PREFIX, GROUPS, PLATFORM_KEY, GROUP_USE, PRESETS, TOKEN_SECRET, applyPreset, attachDefault, bomBuildsThree, checkAction, enrollProblem, emptyForm, errCode, errProblems, formToSpec, gib, isConflict, plannedMemory, specToForm, validate,
+  type BOM, type Check, type Form, type Installation, type MachineForm, type Plan, type Preset, type Problem, type SiteNode, type TenantProbe, type Upgrade,
 } from "./model"
+import { AttachChoice } from "./Tenants"
 
 const base = (id: string) => `/admin/platform/installations/${id}`
+const SITE_KEY = ["platform-site-changes"]
 
 // ── Step 1: Settings ──────────────────────────────────────────────────────────
 
@@ -98,6 +101,13 @@ function NodePicker({ id, group, nodes, value, onChange, problems, disabled }: {
   )
 }
 
+// The nodes of the provider with their memory in MiB, as the connection test reads it: free is what Proxmox reports as
+// not in use now (0 and 0 for a node that did not report it).
+function useSiteNodes(serviceId: string): SiteNode[] {
+  const cluster = useClusterInfo(serviceId)
+  return (cluster.data?.nodes ?? []).map((n) => ({ node: n.node, maxMiB: Math.floor((n.maxmem ?? 0) / 2 ** 20), freeMiB: Math.floor(Math.max(0, (n.maxmem ?? 0) - (n.mem ?? 0)) / 2 ** 20) }))
+}
+
 const H3 = ({ children }: { children: React.ReactNode }) => <h3 className="border-b pb-1 text-sm font-semibold">{children}</h3>
 
 // The page mounts this form anew (by key) when the stored settings changed, so it always starts from what is stored.
@@ -123,13 +133,34 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
   const all = validate(form)
   const problems = shown ? all : []
   const nodes = (cluster.data?.nodes ?? []).map((n) => n.node)
+  const siteNodes = useSiteNodes(serviceId)
+  // The release an install or apply runs with: the installed one for a platform that stays on it, else this ProxCloud's.
+  const bomSha = installation?.status.bom?.sha256 ?? ""
+  const bom = useQuery({ queryKey: ["platform-bom", bomSha], queryFn: () => apiFetch<BOM>(`/admin/platform/bom${bomSha ? `?sha256=${bomSha}` : ""}`), retry: false, staleTime: 300_000 })
+  const three = bomBuildsThree(bom.data)
+  const [preset, setPreset] = useState<Preset>("custom")
+  const [notes, setNotes] = useState<string[]>([])
+  const pick = (p: Preset) => {
+    const filled = applyPreset(p, form, { nodes: siteNodes, three })
+    setPreset(p)
+    setNotes(filled.notes)
+    setForm(filled.form)
+  }
+  // A control plane a run built with three machines stays three; a 3 that was saved and never applied goes back.
+  const wasThree = (installation?.status.clusters?.[0]?.controlPlaneReplicas ?? 1) > 1
+  // A new installation's attach choice defaults by whether the site already has projects (undefined: not counted).
+  const projectList = useAdminList("/admin/project", !installation)
+  const projects = projectList.data?.data?.length
+  const attach = form.attach || attachDefault(projects)
+  const spec = (prev?: Installation["spec"]) => formToSpec({ ...form, attach }, prev)
 
   const save = useMutation({
     mutationFn: () => installation
-      ? apiFetch<Installation>(base(installation.id), { method: "PUT", body: { name: form.name, spec: formToSpec(form, installation.spec), rev: installation.rev } })
-      : apiFetch<Installation>("/admin/platform/installations", { method: "POST", body: { name: form.name, serviceId, layout: "shared", spec: formToSpec(form) } }),
-    onSuccess: () => {
+      ? apiFetch<Installation>(base(installation.id), { method: "PUT", body: { name: form.name, spec: spec(installation.spec), rev: installation.rev } })
+      : apiFetch<Installation>("/admin/platform/installations", { method: "POST", body: { name: form.name, serviceId, layout: "shared", spec: spec() } }),
+    onSuccess: (saved) => {
       toast.success("Settings saved")
+      qc.setQueryData(SITE_KEY, saved.siteChanges ?? null)
       onDirty(false)
       onConflict(false)
       return qc.invalidateQueries({ queryKey: PLATFORM_KEY })
@@ -142,6 +173,9 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
     },
   })
   const refused = errProblems(save.error)
+  // What the last save changed on the provider, so that nobody has to (blocked networks, the tenant zone). Kept in
+  // the query cache, not in state: the page mounts this step anew after every save.
+  const site = useQuery<Installation["siteChanges"] | null>({ queryKey: SITE_KEY, queryFn: () => null, enabled: false, staleTime: Infinity }).data
 
   return (
     <StepCard n={1} title="Settings" description="What gets built and where. Saving keeps a draft: nothing is created on Proxmox until you press Install.">
@@ -155,6 +189,24 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
       <datalist id="pf-stores">{(cluster.data?.storages ?? []).map((s) => <option key={s.storage} value={s.storage} />)}</datalist>
       <datalist id="pf-bridges">{[...new Set((cluster.data?.bridges ?? []).filter((b) => !b.management).map((b) => b.iface))].map((b) => <option key={b} value={b} />)}</datalist>
 
+      <fieldset className="grid gap-2" aria-describedby="pf-preset-hint">
+        <legend className="mb-1.5 text-sm font-semibold">Start from</legend>
+        <div className="grid gap-2 sm:grid-cols-3">
+          {PRESETS.map((p) => (
+            <label key={p.id} className={cn("flex items-start gap-2 rounded-lg border p-3 text-sm", preset === p.id && "border-foreground")}>
+              <input type="radio" name="pf-preset" className="mt-1" checked={preset === p.id} disabled={fixed} onChange={() => pick(p.id)} />
+              <span><span className="font-medium">{p.title}</span><span className="block text-muted-foreground">{p.text}</span></span>
+            </label>
+          ))}
+        </div>
+        <p id="pf-preset-hint" className="text-xs text-muted-foreground">
+          {installed
+            ? "A preset is a start for a new installation. This platform is installed, and a preset would resize and replace its machines, so change the fields below one by one."
+            : "A choice fills in the nodes, counts and sizes below and nothing else. Every field stays yours to change, and what is saved is the fields, not the choice."}
+        </p>
+        {notes.length ? <ul aria-label="What the preset changed" className="list-disc pl-5 text-sm">{notes.map((n) => <li key={n}>{n}</li>)}</ul> : null}
+      </fieldset>
+
       <H3>Layout</H3>
       <div className="grid gap-4 sm:grid-cols-2">
         <Field id="name" label="Name" value={form.name} onChange={set("name")} disabled={fixed} problems={problems} placeholder="lab"
@@ -166,10 +218,12 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
         </fieldset>
       </div>
 
+      <H3>Tenants</H3>
+      <AttachChoice value={form.attach} projects={projects} disabled={!canManage} onChange={(attach) => setForm({ ...form, attach })} />
+
       <H3>Node groups</H3>
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm text-muted-foreground">Three groups of worker machines. The machines of a group are spread over the nodes you choose.</p>
-        <Button variant="outline" size="sm" disabled={!canManage} onClick={() => setForm(labProfile(form))}>Use the lab profile</Button>
+        <p className="text-sm text-muted-foreground">Three groups of worker machines. The machines of a group are spread over the nodes you choose. Counts, sizes and nodes can change later.</p>
       </div>
       {GROUPS.map((g) => {
         const gf = form.groups[g]
@@ -254,8 +308,24 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
       <H3>Control plane</H3>
       <div className="grid gap-4 sm:grid-cols-2">
         <Field id="cpNode" label="Control plane node" list="pf-nodes" value={form.cpNode} onChange={set("cpNode")} disabled={!canManage} problems={problems} placeholder="pve1"
-          hint="One machine runs the platform cluster's control plane." />
+          hint="Every control plane machine of the platform cluster runs on this node." />
         <Sizes id="cp" what="Control plane" value={form.cp} onChange={(m) => setForm({ ...form, cp: m })} problems={problems} disabled={!canManage} />
+        <div className="grid content-start gap-1.5 sm:col-span-2">
+          <Label htmlFor="cpReplicas">Control plane machines</Label>
+          <select id="cpReplicas" className="h-9 w-40 rounded-md border bg-background px-2 text-sm" value={form.cpReplicas} disabled={!canManage} aria-describedby="cpReplicas-hint"
+            onChange={(e) => setForm({ ...form, cpReplicas: e.target.value })}>
+            <option value="1" disabled={wasThree}>1</option>
+            <option value="3" disabled={!three && form.cpReplicas !== "3"}>3, on this one node</option>
+          </select>
+          <p id="cpReplicas-hint" className="text-xs text-muted-foreground">
+            This is the platform cluster's own control plane, not a tenant's. Three machines keep its API up when one of their VMs is lost or replaced during an update.
+            They share one Proxmox node and one store, so they do not survive the loss of that node or of its disk, and three etcd members write more to that store than one.
+            The node needs memory for one machine more than the count: an update makes the new machine before it removes an old one, and a machine that does not fit is refused for good.
+            From 1 to 3 can be done later, with Apply; once an apply has built three, back to 1 cannot. Machines on several nodes are not built in this release. Not verified on a lab.
+            {bom.data && !three ? " This release builds one: three need a release whose cluster chart is 0.1.14 or newer." : ""}
+            {wasThree ? " A run built this platform with three, so it stays at three." : ""}
+          </p>
+        </div>
       </div>
 
       <H3>Storage</H3>
@@ -289,6 +359,19 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
           </AlertDescription>
         </Alert>
       ) : null}
+      {site ? (
+        <Alert role="status">
+          <AlertTitle>The save also changed the provider</AlertTitle>
+          <AlertDescription>
+            <ul className="list-disc pl-5">
+              {site.blockedCidrs?.length ? <li>Added to its blocked networks, so that tenants cannot reach the seed, the API address and the node range: <span className="font-mono">{site.blockedCidrs.join(", ")}</span>. The next provider sync writes the firewall rules (step 3 has the button).</li> : null}
+              {site.blockedCidrsRemoved?.length ? <li>Taken off its blocked networks, because the settings no longer need them (an earlier save had added them): <span className="font-mono">{site.blockedCidrsRemoved.join(", ")}</span>. If a provider sync already wrote firewall rules for them, the next sync rewrites the rules on a provider with a project; on one without, the Check row <span className="font-mono">isolation</span> names the rules to delete by hand.</li> : null}
+              {site.zoneWithoutDhcp ? <li>The default tenant zone <span className="font-mono">{site.zoneWithoutDhcp}</span> does not exist in Proxmox yet and is now set to be created without DHCP, which tenant Kubernetes clusters need.</li> : null}
+              {site.problem ? <li>{site.problem}</li> : null}
+            </ul>
+          </AlertDescription>
+        </Alert>
+      ) : null}
       <div className="flex flex-wrap items-center gap-3">
         <Button
           disabled={!canManage || save.isPending || !serviceId || locked}
@@ -309,67 +392,94 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
 
 export function IdentitiesStep({ installation, tokenId, canManage }: { installation: Installation; tokenId?: string; canManage: boolean }) {
   const qc = useQueryClient()
-  const { boot, iso, import: imp } = installation.spec.storage
-  const qs = new URLSearchParams({ managedServices: "true", bootStorage: boot, isoStorage: iso })
+  const { boot, iso } = installation.spec.storage
+  const held = { capi: !!installation.credentials?.capi, csi: !!installation.credentials?.csi }
+  const qs = new URLSearchParams({ installation: installation.id })
   if (tokenId) qs.set("tokenId", tokenId)
-  if (imp) qs.set("importStorage", imp)
+  // The command is made for this installation's stores and for the secrets already stored: both are part of the key.
   const script = useQuery({
-    queryKey: ["platform-script", qs.toString()],
+    queryKey: ["platform-script", qs.toString(), boot, iso, installation.spec.storage.import, held.capi, held.csi],
     queryFn: () => fetchText(`/admin/setup/proxmox-script?${qs}`),
     placeholderData: keepPreviousData,
     retry: false,
   })
-  // The secrets live in these two inputs only until they are sent: no answer carries them and nothing reads them back.
+  // The secrets live in these inputs only until they are sent: no answer carries them and nothing reads them back.
+  const [line, setLine] = useState("")
   const [capi, setCapi] = useState("")
   const [csi, setCsi] = useState("")
+  const lineProblem = line.trim() ? enrollProblem(line, installation.id) : null
   const bad = (v: string) => v.trim() !== "" && !TOKEN_SECRET.test(v.trim())
   const save = useMutation({
-    mutationFn: () => apiFetch(`${base(installation.id)}/credentials`, {
-      method: "PUT",
-      body: {
-        ...(capi.trim() ? { capi: { tokenId: CAPI_TOKEN, secret: capi.trim() } } : {}),
-        ...(csi.trim() ? { csi: { tokenId: CSI_TOKEN, secret: csi.trim() } } : {}),
-      },
-    }),
+    mutationFn: (body: Record<string, unknown>) => apiFetch(`${base(installation.id)}/credentials`, { method: "PUT", body }),
     onSuccess: () => {
+      setLine("")
       setCapi("")
       setCsi("")
       toast.success("Token secrets stored")
       return qc.invalidateQueries({ queryKey: PLATFORM_KEY })
     },
   })
-  const secret = (id: string, token: string, value: string, set: (v: string) => void, stored: boolean) => (
+  const secret = (id: string, token: string, value: string, set: (v: string) => void) => (
     <div className="grid content-start gap-1.5">
       <Label htmlFor={id}>Secret of <span className="font-mono">{token}</span></Label>
       <Input id={id} type="password" className="font-mono" autoComplete="new-password" data-1p-ignore data-lpignore="true" spellCheck={false} value={value} onChange={(e) => set(e.target.value)} disabled={!canManage}
         placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" aria-invalid={bad(value) || undefined} aria-describedby={`${id}-state`} />
       <p id={`${id}-state`} className="text-xs text-muted-foreground">
-        {bad(value) ? <span className="text-destructive">Not a Proxmox token secret: it looks like xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx. </span> : null}
-        {stored ? "Stored. It is never shown again; paste a new one to replace it." : "Not stored yet."}
+        {bad(value) ? <span className="text-destructive">Not a Proxmox token secret: it looks like xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.</span> : null}
       </p>
     </div>
   )
   return (
-    <StepCard n={2} title="Proxmox identities" description="Done by hand: ProxCloud holds no root password for Proxmox and asks for none.">
+    <StepCard n={2} title="Proxmox identities" description="One command as root on one node: ProxCloud holds no root password for Proxmox and asks for none.">
       <p className="text-sm text-muted-foreground">
-        Run this as root on one node. It adds two users with one token each (<code>{CAPI_TOKEN}</code> builds the machines,{" "}
+        Paste this into a root shell on one node. It adds two users with one token each (<code>{CAPI_TOKEN}</code> builds the machines,{" "}
         <code>{CSI_TOKEN}</code> manages their volumes), the pool <code>proxcloud-seed</code> and their permissions, and can be run again.
         It is made for the boot store <code>{boot}</code> and the ISO store <code>{iso}</code>: after changing either in step 1, run it again.
-        It prints each token secret once. GPU permissions stay with the script of Platform setup.
+        It prints no secret. Its last line starts with <code>{ENROLL_PREFIX}</code> and carries the secrets of the tokens it made: paste that line below.
+        When one of the two tokens exists already and is not this installation's, the command stops before it changes anything and prints
+        the command that removes the token, for you to run once you know nothing else uses it. GPU permissions stay with the script of Platform setup.
       </p>
       {script.isLoading ? <Skeleton className="h-40" /> : null}
-      <ErrorNote title="The script could not be generated" error={script.error} />
-      {script.data && !script.error ? <CopyBlock text={script.data} label="identities script" /> : null}
-      <div className="grid gap-4 sm:grid-cols-2">
-        {secret("capi-secret", CAPI_TOKEN, capi, setCapi, !!installation.credentials?.capi)}
-        {secret("csi-secret", CSI_TOKEN, csi, setCsi, !!installation.credentials?.csi)}
+      <ErrorNote title="The command could not be generated" error={script.error} />
+      {script.data && !script.error ? <CopyBlock text={script.data} label="root command" /> : null}
+      <ul aria-label="Stored token secrets" className="text-sm">
+        {([[CAPI_TOKEN, held.capi], [CSI_TOKEN, held.csi]] as const).map(([token, stored]) => (
+          <li key={token}><span className="font-mono">{token}</span>: {stored ? "stored. It is never shown again." : "not stored yet."}</li>
+        ))}
+      </ul>
+      <div className="grid gap-1.5">
+        <Label htmlFor="enroll-line">The PC-ENROLL line the command printed</Label>
+        <Input id="enroll-line" type="password" className="font-mono" autoComplete="new-password" data-1p-ignore data-lpignore="true" spellCheck={false} value={line}
+          onChange={(e) => setLine(e.target.value)} disabled={!canManage} placeholder={`${ENROLL_PREFIX}…`} aria-invalid={!!lineProblem || undefined} aria-describedby="enroll-line-state" />
+        <p id="enroll-line-state" className="text-xs text-muted-foreground">
+          {lineProblem ? <span className="text-destructive">{lineProblem}</span> : "The line is a password: it is sent once and not kept on this page."}
+        </p>
       </div>
       <ErrorNote title="The secrets were not stored" error={save.error} />
       <div>
-        <Button disabled={!canManage || save.isPending || (!capi.trim() && !csi.trim()) || bad(capi) || bad(csi)} onClick={() => save.mutate()}>
+        <Button disabled={!canManage || save.isPending || !line.trim() || !!lineProblem} onClick={() => save.mutate({ enroll: line.replace(/\s+/g, "") })}>
           {save.isPending ? "Storing…" : "Store the secrets"}
         </Button>
       </div>
+      <details className="text-sm">
+        <summary className="cursor-pointer text-muted-foreground">Enter the two secrets by hand instead</summary>
+        <div className="mt-3 grid gap-3">
+          <p className="text-muted-foreground">For a token made another way (<code>pveum user token add</code> prints its secret once).</p>
+          <div className="grid gap-4 sm:grid-cols-2">
+            {secret("capi-secret", CAPI_TOKEN, capi, setCapi)}
+            {secret("csi-secret", CSI_TOKEN, csi, setCsi)}
+          </div>
+          <div>
+            <Button variant="outline" disabled={!canManage || save.isPending || (!capi.trim() && !csi.trim()) || bad(capi) || bad(csi)}
+              onClick={() => save.mutate({
+                ...(capi.trim() ? { capi: { tokenId: CAPI_TOKEN, secret: capi.trim() } } : {}),
+                ...(csi.trim() ? { csi: { tokenId: CSI_TOKEN, secret: csi.trim() } } : {}),
+              })}>
+              Store these secrets
+            </Button>
+          </div>
+        </div>
+      </details>
     </StepCard>
   )
 }
@@ -604,17 +714,11 @@ export function ReviewStep({ installation, canManage, dirty, onInstall, onUpgrad
   const s = installation.spec
   const c = s.clusters[0]
   const workers = c.nodeGroups.reduce((n, g) => n + g.count, 0)
-  // Cores and memory per Proxmox node: the seed, the control plane, and each group's machines spread over its nodes.
-  const load: Record<string, { cores: number; mem: number }> = {}
-  const add = (node: string, cores: number, mem: number) => {
-    load[node] = { cores: (load[node]?.cores ?? 0) + cores, mem: (load[node]?.mem ?? 0) + mem }
-  }
-  add(s.seed.node, s.seed.cores, s.seed.memoryMiB)
-  add(c.controlPlane.node, c.controlPlane.cores, c.controlPlane.memoryMiB)
-  for (const g of c.nodeGroups) g.nodes.forEach((n, i) => {
-    const count = Math.floor(g.count / g.nodes.length) + (i < g.count % g.nodes.length ? 1 : 0)
-    add(n, count * g.cores, count * g.memoryMiB)
-  })
+  const controlPlanes = c.controlPlane.replicas ?? 1
+  // Cores and memory per Proxmox node: the seed, the control plane machines, and each group's machines spread over
+  // its nodes; and the same with the spare machines of a rolling update.
+  const load = plannedMemory(specToForm(installation.name, s))
+  const siteNodes = useSiteNodes(installation.serviceId)
   const blocking = plan.data?.blocking ?? []
   const installed = !!installation.status.bom
   return (
@@ -649,18 +753,32 @@ export function ReviewStep({ installation, canManage, dirty, onInstall, onUpgrad
         <h3 className="font-semibold">What is created</h3>
         <ul className="list-disc pl-5">
           <li>1 seed VM on {s.seed.node}, in the pool <code>{s.seed.pool || "proxcloud-seed"}</code>;</li>
-          <li>1 control plane and {workers} worker machines in the pool <code>proxcloud-system</code>;</li>
+          <li>{controlPlanes === 1 ? "1 control plane machine" : `${controlPlanes} control plane machines on ${c.controlPlane.node}`} and {workers} worker machines in the pool <code>proxcloud-system</code>;</li>
           <li>the providers “{installation.name} Kubernetes” and “{installation.name} Databases”, held back from new projects until you attach them.</li>
         </ul>
       </div>
       <div className="grid gap-1 text-sm">
         <h3 className="font-semibold">What it takes on each node</h3>
         <ul aria-label="Cores and memory per node" className="list-disc pl-5">
-          {Object.entries(load).sort().map(([node, l]) => (
-            <li key={node}><span className="font-mono">{node}</span>: {l.cores} cores and {l.mem / 1024} GiB of memory</li>
-          ))}
+          {Object.entries(load).sort().map(([node, l]) => {
+            const at = siteNodes.find((n) => n.node === node)
+            const read = !!at && at.maxMiB > 0
+            return (
+              <li key={node}>
+                <span className="font-mono">{node}</span>: {l.cores} cores and {gib(l.run)} of memory; {gib(l.need)} with the one more machine an update of the control plane makes, {gib(l.spare)} with one more of each group as well.{" "}
+                {!read ? "The node's memory was not read." : installed ? `The node has ${gib(at.maxMiB)}, ${gib(at.freeMiB)} of it free now, with this platform's machines running.`
+                  : `The node has ${gib(at.freeMiB)} free of ${gib(at.maxMiB)}.`}
+                {read && !installed && l.need > at.freeMiB ? <span className="font-medium text-destructive"> That is not enough.</span>
+                  : read && !installed && l.spare > at.freeMiB ? " That holds the install; a later change that replaces a group's machines needs the larger figure." : null}
+              </li>
+            )
+          })}
         </ul>
-        <p className="text-muted-foreground">Compare it with the free memory of each node in Proxmox: this page does not read it.</p>
+        <p className="text-muted-foreground">
+          Free is what Proxmox reports as not in use now. The Check's row <span className="font-mono">capacity</span> decides: it counts the configured memory of every VM
+          and container on the node, running or not, as the machines are counted when they are cloned. A rolling update makes one spare machine for the control plane and one for
+          each group on each of its nodes before it removes the old ones. The row fails without room for the control plane's, and warns without room for the groups'.
+        </p>
       </div>
       {!installed ? (
         <p className="text-sm text-muted-foreground">

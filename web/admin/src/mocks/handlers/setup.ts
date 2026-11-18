@@ -5,7 +5,7 @@
 import { ApiError } from "@/lib/api"
 import { on } from "../router"
 import { db } from "../db"
-import { mockPlatform } from "./platform"
+import { mockPlatform, publishAllState } from "./platform"
 import {
   detectedStorages, importedTemplates, proposedProfiles, seedFlavors, seedPricePlan, seedQuota, setupChecks, templateDiscovery, templatePlacement,
 } from "../fixtures/setup"
@@ -159,8 +159,12 @@ on("GET /admin/setup/proxmox-script", ({ query }) => {
   const m = /^([A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z][A-Za-z0-9._-]*)!([A-Za-z][A-Za-z0-9._-]*)$/.exec(tokenId)
   const bad = !m ? "tokenId must be user@realm!name, of letters, digits, dot, dash and underscore"
     : store && !/^[A-Za-z][A-Za-z0-9._-]*$/.test(store) ? "importStorage must be a storage id: a letter, then letters, digits, dot, dash and underscore" : ""
-  const managed = ["true", "1"].includes(query.get("managedServices") ?? "")
-  const boot = query.get("bootStorage") ?? "", iso = query.get("isoStorage") || "local"
+  // installation=<id>: the root command of that installation (pve.EnrollScript), for its own stores.
+  const enroll = mockPlatform.installations.find((i) => i.id === query.get("installation"))
+  if (query.get("installation") && !enroll) return { data: new Response(JSON.stringify({ errors: { code: 404, message: "installation not found" } }), { status: 404 }) }
+  const held = mockPlatform.secrets[enroll?.id ?? ""] ?? {}
+  const managed = !!enroll || ["true", "1"].includes(query.get("managedServices") ?? "")
+  const boot = enroll?.spec.storage.boot ?? query.get("bootStorage") ?? "", iso = enroll?.spec.storage.iso ?? (query.get("isoStorage") || "local")
   const badManaged = managed && !/^[A-Za-z][A-Za-z0-9._-]*$/.test(boot) ? "bootStorage must be a storage id: a letter, then letters, digits, dot, dash and underscore" : ""
   if (bad || badManaged) return { data: new Response(JSON.stringify({ errors: { code: 400, message: bad || badManaged } }), { status: 400 }) }
   const grants = ["'/' 'ProxCloudPlatform' 0", "'/nodes' 'PVEAuditor' 1", "'/pool' 'ProxCloudPlatform' 1", "'/pool/proxcloud-system' 'NoAccess' 1",
@@ -186,7 +190,13 @@ on("GET /admin/setup/proxmox-script", ({ query }) => {
       "pveum role add 'ProxCloudCAPI' 2>/dev/null || true", "pveum role add 'ProxCloudCSI' 2>/dev/null || true", "pveum role add 'ProxCloudKubeMint' 2>/dev/null || true",
       "pveum pool add 'proxcloud-seed' --comment 'ProxCloud seed' 2>/dev/null || true",
       "pveum user add 'capmox@pve' 2>/dev/null || true", "pveum user add 'csi@pve' 2>/dev/null || true",
-      "pveum user token add 'capmox@pve' 'capi' --privsep 1", "pveum user token add 'csi@pve' 'csi' --privsep 1",
+      ...(enroll ? [
+        `PC_INSTALL='${enroll.id}'`, `PC_MARK='proxcloud:${enroll.id}'`,
+        ...(held.capi ? [] : [`[ "$PC_CAPI" != foreign ] || { echo 'STOP: the token capmox@pve!capi exists on this cluster and was not made for this ProxCloud installation (${enroll.id}).'; exit 1; }`]),
+        ...(held.csi ? [] : [`[ "$PC_CSI" != foreign ] || { echo 'STOP: the token csi@pve!csi exists on this cluster and was not made for this ProxCloud installation (${enroll.id}).'; exit 1; }`]),
+        `PC_CAPI_SECRET=$(pc_token 'capmox@pve' 'capi' "$PC_CAPI")`, `PC_CSI_SECRET=$(pc_token 'csi@pve' 'csi' "$PC_CSI")`,
+        `printf 'PC-ENROLL:%s\\n' "$(printf '1:%s:%s:%s:%s' "$PC_INSTALL" "$(date +%s)" "$PC_CAPI_SECRET" "$PC_CSI_SECRET" | base64 -w0)"`,
+      ] : ["pveum user token add 'capmox@pve' 'capi' --privsep 1", "pveum user token add 'csi@pve' 'csi' --privsep 1"]),
       `pveum acl modify '/storage/${boot}' --tokens 'capmox@pve!capi' --roles 'ProxCloudCAPI'`,
       `pveum acl modify '/storage/${iso}' --tokens 'capmox@pve!capi' --roles 'PVEDatastoreAdmin'`,
       "pveum user token permissions 'capmox@pve' 'capi'", "pveum user token permissions 'csi@pve' 'csi'",
@@ -248,7 +258,6 @@ on("POST /admin/template-updates/templates/:id/publish", ({ params, opts }) => {
 // Publish on all nodes: each POST moves the first unpublished node one step (import, smoke test, publish), one job at
 // a time like the server; the GET reads the same state.
 const publishAllSteps = ["missing", "importing", "smoke_running", "ready_to_publish", "published"]
-const publishAllState: Record<string, Record<string, number>> = {}
 function publishAllReport(serviceId: string, digest: string, act: boolean) {
   const st = (publishAllState[`${serviceId}/${digest}`] ??= Object.fromEntries(templatePlacement.nodes.map((n: Doc) => [n.node, 0])))
   const first = Object.keys(st).find((n) => st[n] < 4)

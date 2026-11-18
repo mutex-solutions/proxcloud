@@ -19,6 +19,7 @@ import (
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/templateupdates"
 )
 
 const (
@@ -162,7 +163,8 @@ func (x *acq) renderInput() RenderInput {
 		PVEAPIURL: sp.PVEAPIURL, BootStorage: sp.Storage.Boot, SeedAddress: sp.Seed.Address, SSHKeys: sp.Seed.SSHKeys, Templates: templates, WorkerMTU: mtu,
 		Network: RenderNetwork{Bridge: sp.Network.Bridge, VLAN: sp.Network.VLAN, Gateway: sp.Network.Gateway, Prefix: prefix.Bits(), DNS: sp.Network.DNS, MTU: sp.Network.MTU},
 		Cluster: RenderCluster{Endpoint: c.Endpoint, NodeRange: []string{c.NodeRange}, MetalLBRange: c.MetalLBRange,
-			ControlPlane: RenderMachine{Node: c.ControlPlane.Node, Cores: c.ControlPlane.Cores, MemoryMiB: c.ControlPlane.MemoryMiB, DiskGiB: c.ControlPlane.DiskGiB}}}
+			ControlPlane:         RenderMachine{Node: c.ControlPlane.Node, Cores: c.ControlPlane.Cores, MemoryMiB: c.ControlPlane.MemoryMiB, DiskGiB: c.ControlPlane.DiskGiB},
+			ControlPlaneReplicas: c.ControlPlane.Count()}}
 	for _, g := range c.NodeGroups {
 		in.Cluster.NodeGroups = append(in.Cluster.NodeGroups, RenderNodeGroup{Name: g.Name, Nodes: g.Nodes, Count: g.Count, Cores: g.Cores, MemoryMiB: g.MemoryMiB, DiskGiB: g.DiskGiB})
 	}
@@ -732,8 +734,12 @@ func (x *acq) cluster(ctx context.Context) error {
 	// The status names the cluster before anything builds it, so a Remove after a failed run knows to delete it.
 	want := ClusterStatus{Name: ClusterName, Namespace: ClusterName, Endpoint: c.Endpoint, KubernetesVersion: x.bom.Kubernetes.Version,
 		KubeconfigSecret: kubeconfigSecret, ManagedBy: "application", Templates: in.Templates}
+	if n := c.ControlPlane.Count(); n > 1 {
+		want.ControlPlaneReplicas = n // before the sync: a control plane half way to three is one of three
+	}
 	if cur := x.in.Status.Clusters; len(cur) == 1 {
 		want.ArgoCDTokenExpiresAt = cur[0].ArgoCDTokenExpiresAt
+		want.ControlPlaneReplicas = max(want.ControlPlaneReplicas, cur[0].ControlPlaneReplicas)
 	}
 	if !reflect.DeepEqual(x.in.Status.Clusters, []ClusterStatus{want}) {
 		if err := x.save(ctx, func(_ *Run, in *Installation, _ *Secrets) { in.Status.Clusters = []ClusterStatus{want} }); err != nil {
@@ -922,7 +928,7 @@ func (x *acq) cluster(ctx context.Context) error {
 	if err != nil {
 		return classify(CodeSeedAPIUnreachable, err)
 	}
-	total := 1
+	total := c.ControlPlane.Count()
 	for _, g := range c.NodeGroups {
 		total += g.Count
 	}
@@ -1307,6 +1313,24 @@ func (x *acq) register(ctx context.Context) error {
 		return err
 	}
 	var ids ProviderIDs
+	var items []StageItem
+	// A node image is offered only where it is published; a cluster that cannot be read offers none in this run. A
+	// version is offered once (status.kubernetesOffered): an apply does not add again one the operator removed.
+	version := StageItem{ID: "kubernetes-version", State: "warn"}
+	offered := slices.Contains(x.in.Status.KubernetesOffered, x.bom.Kubernetes.Version)
+	if offered {
+		version.State, version.Message = "done", fmt.Sprintf("Kubernetes %s was offered before; a run offers a version once, so the provider's versions are left as they are. "+
+			"POST …/kubernetes-version offers it again when the provider no longer names it.", x.bom.Kubernetes.Version)
+	} else if rows, err := x.portal.ClusterResources(ctx, "vm"); err != nil {
+		version.Message = "Proxmox did not list its templates, so no Kubernetes version was offered in this run: " + clip(err.Error())
+	} else if line, missing := NodeImageLine(x.bom, x.in, rows); line == "" {
+		version.Message = fmt.Sprintf("Kubernetes %s is not offered to tenants: no node image of it is published on %s. Publish it from the Ready card.",
+			x.bom.Kubernetes.Version, NodesText(missing))
+	} else {
+		in.NodeImageLine, offered = line, true
+		version.State, version.Message = "done", fmt.Sprintf("Kubernetes %s is published on %s and is offered unless the provider already names that version.", x.bom.Kubernetes.Version, line)
+	}
+	items = append(items, version)
 	k8s, db := ProviderBodies(x.bom, in, kubeconfig)
 	for _, p := range []struct {
 		body map[string]any
@@ -1320,7 +1344,40 @@ func (x *acq) register(ctx context.Context) error {
 		}
 		*p.id = id
 	}
-	return x.record(ctx, func(_ *Run, in *Installation, _ *Secrets) { in.Status.Providers = &ids })
+	// The attach choice is applied once, when it differs from the one applied last: an apply must not attach again
+	// projects the operator detached since, or turn a policy back on. It is recorded only when both providers took it:
+	// until then the next apply applies it to both again, the one that took it included.
+	choice, applied := x.in.Spec.Tenants.AttachChoice(), x.in.Status.TenantsAttach
+	if x.r.Attach != nil && choice != (Tenants{Attach: applied}).AttachChoice() {
+		actor := x.run.RequestedBy
+		if actor == "" {
+			actor = templateupdates.PlatformRunActor + x.run.ID
+		}
+		all := true
+		for _, id := range []string{ids.Kubernetes, ids.Database} {
+			done, note, err := x.r.Attach(ctx, x.in.ID, id, choice, actor)
+			if err != nil { // the providers are registered: an attach problem is a warning, never a failed install
+				done, note = false, "The attach choice was not applied: "+clip(err.Error())+" The next apply tries again."
+			}
+			it := StageItem{ID: "attach:" + id, State: "done", Message: note}
+			if !done { // the next apply tries again
+				it.State, all = "warn", false
+			}
+			items = append(items, it)
+		}
+		if all {
+			applied = choice
+		}
+	}
+	if err := x.saveStage(ctx, func(s *Stage) { s.Items = items }); err != nil {
+		return err
+	}
+	return x.record(ctx, func(_ *Run, in *Installation, _ *Secrets) {
+		in.Status.Providers, in.Status.TenantsAttach = &ids, applied
+		if v := x.bom.Kubernetes.Version; offered && !slices.Contains(in.Status.KubernetesOffered, v) {
+			in.Status.KubernetesOffered = append(in.Status.KubernetesOffered, v)
+		}
+	})
 }
 
 // done is stage 11: what was applied, and the BOM it came from. An upgrade ends here: only now, with every stage
@@ -1361,7 +1418,9 @@ func DisableProvider(row map[string]any) bool {
 }
 
 // providerOwned are the config keys stage 10 rewrites on a row it adopts. Everything else is written when the row is
-// created and is the operator's from then on: its name, its status, the node image versions, the attach policy.
+// created and is the operator's from then on: its name, its status, the node image versions, the attach policy. Two
+// things a run still does there: it adds a Kubernetes version the row does not name (OfferVersion), and it applies a
+// changed spec.tenants.attach (Runner.Attach).
 var providerOwned = [][]string{{"argocd"}, {"namespacePlacement"}, {"cluster", "pveApiUrl"},
 	{"database", "egressFence"}, {"database", "lbAddressPool"}, {"database", "storageClasses"},
 	{"database", "engines", "postgresql", "replicas"}} // [1] again when the dbaas group drops below three PVE nodes
@@ -1407,6 +1466,12 @@ func AdoptProvider(rows []map[string]any, body map[string]any) (map[string]any, 
 			at = next
 		}
 		at[path[len(path)-1]] = v
+	}
+	offered, _ := dig(body, "config", "cluster", "versions").(map[string]any)
+	for version, line := range offered {
+		if l, ok := line.(string); ok {
+			OfferVersion(found, version, l)
+		}
 	}
 	return found, nil
 }

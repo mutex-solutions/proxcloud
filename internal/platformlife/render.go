@@ -36,6 +36,9 @@ type RenderInput struct {
 	Cluster     RenderCluster
 	Templates   map[string]int // the node image's template VMID per PVE node (stage 2)
 	WorkerMTU   int            // the tenant vnets' MTU: the Kubernetes provider's workerMtu (0 = the guest default)
+	// NodeImageLine is the Kubernetes provider's versions value for the BOM's Kubernetes version (NodeImageLine);
+	// "" = no node image is published on every node, and the provider is registered with no version of the run's.
+	NodeImageLine string
 }
 
 // RenderNetwork is the platform network the seed and the workload VMs share. VLAN tags every NIC on Bridge (0 = none).
@@ -53,7 +56,9 @@ type RenderCluster struct {
 	NodeRange    []string // first-last ranges CAPI IPAM gives the VMs
 	MetalLBRange string   // first-last, pool services
 	ControlPlane RenderMachine
-	NodeGroups   []RenderNodeGroup
+	// ControlPlaneReplicas is the number of control plane machines, all on ControlPlane.Node; 0 and 1 are one machine.
+	ControlPlaneReplicas int
+	NodeGroups           []RenderNodeGroup
 }
 
 // RenderMachine is the size of a VM and its PVE node.
@@ -143,8 +148,8 @@ func ClusterChartVersion(b *BOM) string {
 	return ""
 }
 
-// ClusterValues are the proxmox-kamaji-cluster values of the workload cluster: controlPlane.kind kubeadm, one control
-// plane VM, the node groups in pool proxcloud-system, each group labelled and every group but system tainted.
+// ClusterValues are the proxmox-kamaji-cluster values of the workload cluster: controlPlane.kind kubeadm, its control
+// plane VMs on one node, the node groups in pool proxcloud-system, each group labelled and every group but system tainted.
 func ClusterValues(b *BOM, in RenderInput) (map[string]any, error) {
 	pins := func(nodes []string) (string, error) {
 		out := make([]string, 0, len(nodes))
@@ -198,16 +203,25 @@ func ClusterValues(b *BOM, in RenderInput) (map[string]any, error) {
 		}
 		network["vlan"] = in.Network.VLAN
 	}
+	kubeadm := map[string]any{
+		"endpoint": in.Cluster.Endpoint, "kubeVipImage": b.Images.KubeVip, "machineImageId": cpPin,
+		"machineCores": cp.Cores, "machineMemoryMiB": cp.MemoryMiB, "machineRootVolume": map[string]any{"diskSize": cp.DiskGiB},
+		"machineTags": machineTags(in.ID),
+	}
+	// As the tag: the key is written only for more than one machine, so a platform with one renders as before under
+	// every BOM, and an older chart, which would build one machine and say nothing, is refused.
+	if n := in.Cluster.ControlPlaneReplicas; n > 1 {
+		if v := ClusterChartVersion(b); !kamaji.ChartHasControlPlaneReplicas(v) {
+			return nil, fmt.Errorf("platform: the BOM of release %s names cluster chart %s, which builds one control plane machine: %d need chart %s or newer", b.Release, v, n, kamaji.ControlPlaneReplicasChartVersion)
+		}
+		kubeadm["replicas"] = n
+	}
 	return map[string]any{
 		"kubernetesVersion":          b.Kubernetes.Version,
 		"cloudCredentialsSecretName": PVECredentialsSecretName,
 		// The installer's services cluster ranges (services-cluster.yml.j2).
 		"clusterNetwork": map[string]any{"pods": "10.244.0.0/16", "services": "10.96.0.0/16"},
-		"controlPlane": map[string]any{"kind": "kubeadm", "kubeadm": map[string]any{
-			"endpoint": in.Cluster.Endpoint, "kubeVipImage": b.Images.KubeVip, "machineImageId": cpPin,
-			"machineCores": cp.Cores, "machineMemoryMiB": cp.MemoryMiB, "machineRootVolume": map[string]any{"diskSize": cp.DiskGiB},
-			"machineTags": machineTags(in.ID),
-		}},
+		"controlPlane":   map[string]any{"kind": "kubeadm", "kubeadm": kubeadm},
 		"proxmox": map[string]any{
 			"region": in.Region, "pool": "proxcloud-system", "storage": in.BootStorage,
 			"network": network,
@@ -566,7 +580,8 @@ func CSIConfigSecret(b *BOM, in RenderInput, csi PVEToken) (map[string]any, erro
 }
 
 // ProviderBodies are the POST /admin/service bodies stage 10 registers, stage 60's loop with the design's changes
-// (§4.2): the BOM's tenant charts, no node image versions yet, namespace placement on the group, the database egress
+// (§4.2): the BOM's tenant charts, the BOM's Kubernetes version when its node image is published (in.NodeImageLine;
+// none otherwise), namespace placement on the group, the database egress
 // fence, no backup store, PostgreSQL replicas 3 only with three dbaas nodes, held back from new projects, and the
 // marker that adopts a row at the next run. kubeconfig is the workload's proxcloud service account (provider secret).
 func ProviderBodies(b *BOM, in RenderInput, kubeconfig string) (kubernetes, database map[string]any) {
@@ -586,6 +601,10 @@ func ProviderBodies(b *BOM, in RenderInput, kubeconfig string) (kubernetes, data
 	if len(dbNodes) >= 3 {
 		replicas = []any{1, 3}
 	}
+	versions := map[string]any{}
+	if in.NodeImageLine != "" {
+		versions[b.Kubernetes.Version] = in.NodeImageLine
+	}
 	kubernetes = map[string]any{
 		"name": in.Name + " Kubernetes", "type": "CLOUD", "status": "PUBLIC",
 		"config": map[string]any{
@@ -593,7 +612,7 @@ func ProviderBodies(b *BOM, in RenderInput, kubeconfig string) (kubernetes, data
 			"services": map[string]any{"kubernetes": map[string]any{in.Region: true}},
 			"argocd":   argo("proxcloud-k8s", b.TenantCharts.Kubernetes),
 			"cluster": map[string]any{
-				"dataStoreName": defaultDatastore, "versions": map[string]any{}, "rootVolumeGiB": 30,
+				"dataStoreName": defaultDatastore, "versions": versions, "rootVolumeGiB": 30,
 				"workerMtu": in.WorkerMTU, "rwxGiB": 0, "pveApiUrl": in.PVEAPIURL,
 			},
 			"namespacePlacement":     placementValues("kamaji"),

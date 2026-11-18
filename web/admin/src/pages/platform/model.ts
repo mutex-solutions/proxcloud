@@ -4,7 +4,8 @@
 // also checks what only it can read (the provider's networks), so this copy only saves a round trip.
 import { ApiError } from "@/lib/api"
 
-export type Machine = { node: string; cores: number; memoryMiB: number; diskGiB: number }
+// replicas: the control plane's machines, 1 or 3, all on node; a spec without it means 1.
+export type Machine = { node: string; replicas?: number; cores: number; memoryMiB: number; diskGiB: number }
 export type NodeGroup = { name: string; nodes: string[]; count: number; cores: number; memoryMiB: number; diskGiB: number }
 export type Spec = {
   pveApiUrl: string
@@ -14,7 +15,18 @@ export type Spec = {
   seed: { mode?: string; pool?: string; node: string; address: string; cores: number; memoryMiB: number; diskGiB: number; sshKeys?: string[]; apiSources: string[] }
   clusters: { name?: string; roles?: string[]; endpoint: string; nodeRange: string; metallbRange: string; controlPlane: Machine; nodeGroups: NodeGroup[] }[]
   nodeImage?: { mode?: string; templates?: Record<string, number> }
+  // Who gets the two providers; a spec without it means "none". Applied by a run when it differs from status.tenantsAttach.
+  tenants?: { attach?: Attach }
 }
+export type Attach = "all" | "new" | "none"
+export const ATTACH_LABEL: Record<Attach, string> = {
+  all: "All projects: the ones that exist and every new one",
+  new: "New projects only",
+  none: "None: I attach the providers later",
+}
+// The choice a new installation starts with. A site with projects is live with tenants (so is one whose projects
+// could not be counted): nothing changes for them unless the operator says so.
+export const attachDefault = (projects?: number): Attach => (projects === 0 ? "all" : "new")
 export type Installation = {
   id: string
   name: string
@@ -25,13 +37,18 @@ export type Installation = {
     phase: string
     bom?: { release: string; sha256: string }
     seed?: { vmid?: number; node?: string; apiServer?: string; cdVolume?: string; tokenSecret?: string; readyAt?: string }
-    clusters?: { name: string; endpoint?: string; kubernetesVersion?: string; argocdTokenExpiresAt?: string }[]
+    // controlPlaneReplicas: the count above one a run handed to the cluster; absent means one
+    clusters?: { name: string; endpoint?: string; kubernetesVersion?: string; argocdTokenExpiresAt?: string; controlPlaneReplicas?: number }[]
     components?: { name: string; cluster: string; version: string }[]
     providers?: { kubernetes?: string; database?: string }
+    tenantsAttach?: Attach // the choice the last run applied
   }
+  schedulerNote?: string // set while the job scheduler is off: what tenants miss and the command that turns it on
   lastRunId?: string
   rev: number
   credentials: { capi?: { tokenId: string }; csi?: { tokenId: string } }
+  // In the answer of a save only: what the save wrote into the provider's network settings.
+  siteChanges?: { blockedCidrs?: string[]; blockedCidrsRemoved?: string[]; zoneWithoutDhcp?: string; problem?: string }
   live?: { phase: string; components: { name: string; cluster: string; sync: string; health: string }[]; error?: string; code?: string }
 }
 export type Check = { id: string; status: "ok" | "warn" | "fail"; message: string }
@@ -107,8 +124,9 @@ export type Form = {
   networkMode: "bridge" | "routed"; bridge: string; vlan: string; prefix: string; gateway: string; dns: string; mtu: string
   seedNode: string; seedAddress: string; seed: MachineForm; sshKeys: string; apiSources: string
   endpoint: string; nodeRange: string; metallbRange: string
-  cpNode: string; cp: MachineForm
+  cpNode: string; cpReplicas: string; cp: MachineForm
   groups: Record<string, GroupForm>
+  attach: Attach | "" // "": not chosen yet; the settings step shows the default for the site
 }
 
 const group = (cores: string, mem: string): GroupForm => ({ nodes: [], count: "1", cores, memoryGiB: mem, diskGiB: "40" })
@@ -117,16 +135,93 @@ export const emptyForm: Form = {
   networkMode: "bridge", bridge: "", vlan: "", prefix: "", gateway: "", dns: "", mtu: "",
   seedNode: "", seedAddress: "", seed: { cores: "2", memoryGiB: "6", diskGiB: "30" }, sshKeys: "", apiSources: "",
   endpoint: "", nodeRange: "", metallbRange: "",
-  cpNode: "", cp: { cores: "2", memoryGiB: "4", diskGiB: "30" },
+  cpNode: "", cpReplicas: "1", cp: { cores: "2", memoryGiB: "4", diskGiB: "30" },
   groups: { system: group("4", "8"), kamaji: group("4", "8"), dbaas: group("4", "8") },
+  attach: "",
 }
 
-// The lab profile of design §8.3: the smallest machines the API takes, one per group.
-export function labProfile(f: Form): Form {
-  const small = (g: GroupForm): GroupForm => ({ ...g, count: String(Math.max(1, g.nodes.length)), cores: "2", memoryGiB: "4" })
-  return { ...f, seed: { ...f.seed, cores: "2", memoryGiB: "4" }, cp: { ...f.cp, cores: "2", memoryGiB: "4" },
-    groups: Object.fromEntries(GROUPS.map((g) => [g, small(f.groups[g])])) }
+// ── Presets (internal/platformlife/preset.go holds the same figures for the API's "preset") ────────────────────────
+
+// The first cluster chart that builds more than one control plane machine (kamaji.ControlPlaneReplicasChartVersion).
+const REPLICAS_CHART = [0, 1, 14]
+// Whether the release an install runs with can build three control plane machines: its cluster chart is new enough.
+export function bomBuildsThree(bom?: BOM): boolean {
+  const v = bom?.components.find((c) => c.cluster === "seed" && c.name === "pc-platform")?.chart.version ?? ""
+  const p = v.replace(/^v/, "").split(/[-+]/)[0].split(".").map(Number)
+  if (p.length !== 3 || p.some(Number.isNaN)) return false
+  for (let i = 0; i < 3; i++) if (p[i] !== REPLICAS_CHART[i]) return p[i] > REPLICAS_CHART[i]
+  return true
 }
+
+export type Preset = "homelab" | "standard" | "custom"
+export const PRESETS: { id: Preset; title: string; text: string }[] = [
+  { id: "homelab", title: "Homelab", text: "One Proxmox node or a small site. One control plane machine, one small machine per group, everything on one node. On a site with one node the platform network is one that node routes." },
+  { id: "standard", title: "Standard", text: "Three control plane machines on one node when that node has the memory, two machines per group, spread over two nodes when the site has several." },
+  { id: "custom", title: "Custom", text: "Nothing is filled in: every count, size and node is yours to set." },
+]
+// What a preset reads of the site: its nodes with their memory in MiB as Proxmox reports it (0 when not read), and
+// whether the release can build three control plane machines.
+export type SiteNode = { node: string; maxMiB: number; freeMiB: number }
+export type Site = { nodes: SiteNode[]; three: boolean }
+
+// A preset fills counts, sizes and nodes into the form and leaves every address, name and store alone; each field
+// stays editable afterwards. It is for a new installation: the page does not offer it on an installed platform, where
+// it would resize and replace every machine. notes say what it could not do as its name promises.
+export function applyPreset(preset: Preset, f: Form, site: Site): { form: Form; notes: string[] } {
+  if (preset === "custom") return { form: f, notes: [] }
+  const notes: string[] = []
+  const names = site.nodes.map((n) => n.node)
+  const seedNode = f.seedNode.trim() || names[0] || ""
+  const home = preset === "homelab"
+  const size = home ? { cores: "2", memoryGiB: "4" } : { cores: "4", memoryGiB: "8" }
+  const others = names.filter((n) => n !== seedNode)
+  const groups = Object.fromEntries(GROUPS.map((g, i) => {
+    // Standard on several nodes: two nodes per group, each group starting one node further, so no node carries all.
+    const all = [seedNode, ...others].filter(Boolean)
+    const nodes = home || all.length < 2 ? all.slice(0, 1) : [all[i % all.length], all[(i + 1) % all.length]]
+    return [g, { ...f.groups[g], ...size, nodes, count: home ? "1" : "2" }]
+  }))
+  let form: Form = {
+    ...f, seedNode, cpNode: seedNode, cpReplicas: home ? "1" : "3",
+    seed: { ...f.seed, cores: "2", memoryGiB: home ? "4" : "6" }, cp: { ...f.cp, cores: "2", memoryGiB: "4" }, groups,
+  }
+  if (!home) {
+    const node = site.nodes.find((n) => n.node === seedNode)
+    const need = plannedMemory(form)[seedNode]?.need ?? 0
+    if (!site.three) {
+      form = { ...form, cpReplicas: "1" }
+      notes.push("One control plane machine, not three: the release this install runs with builds one. Three come with a release whose cluster chart is 0.1.14 or newer.")
+    } else if (node && node.maxMiB > 0 && need > node.freeMiB) {
+      form = { ...form, cpReplicas: "1" }
+      notes.push(`One control plane machine, not three: with three, ${seedNode} would need ${gib(need)} of memory and has ${gib(node.freeMiB)} free.`)
+    }
+  }
+  // One node and no bridge named yet: the network the node routes (the tenant path on one node).
+  if (home && names.length === 1 && !f.bridge.trim()) form = { ...form, networkMode: "routed", bridge: "pcplat0", vlan: "" }
+  return { form, notes }
+}
+
+// The memory in MiB the form places on each node, as the Check's capacity row counts it (Installation.PlannedMemoryMiB):
+// `run` is what the machines take; `need` adds the one more machine a rolling update of the control plane makes, which
+// the row fails on; `spare` adds one more machine of each group on each of its nodes as well, which the row warns on.
+// cores are those of the machines that run.
+export function plannedMemory(f: Form): Record<string, { cores: number; run: number; need: number; spare: number }> {
+  const out: Record<string, { cores: number; run: number; need: number; spare: number }> = {}
+  const add = (node: string, n: number, m: MachineForm, controlPlane = false, group = false) => {
+    const cores = num(m.cores) || 0, mem = (num(m.memoryGiB) || 0) * 1024
+    if (!node.trim()) return
+    const at = (out[node.trim()] ??= { cores: 0, run: 0, need: 0, spare: 0 })
+    at.cores += n * cores; at.run += n * mem; at.need += (n + (controlPlane ? 1 : 0)) * mem; at.spare += (n + (controlPlane || group ? 1 : 0)) * mem
+  }
+  add(f.seedNode, 1, f.seed)
+  add(f.cpNode, num(f.cpReplicas) || 1, f.cp, true)
+  for (const g of GROUPS) {
+    const gf = f.groups[g], count = num(gf.count) || 0
+    gf.nodes.forEach((n, i) => add(n, Math.floor(count / gf.nodes.length) + (i < count % gf.nodes.length ? 1 : 0), gf, false, true))
+  }
+  return out
+}
+export const gib = (mib: number) => `${Number.isInteger(mib / 1024) ? mib / 1024 : (mib / 1024).toFixed(1)} GiB`
 
 const words = (s: string) => s.split(/[\s,]+/).filter(Boolean)
 const lines = (s: string) => s.split("\n").map((l) => l.trim()).filter(Boolean)
@@ -151,9 +246,12 @@ export function formToSpec(f: Form, prev?: Spec): Spec {
     clusters: [{
       ...prev?.clusters?.[0],
       endpoint: f.endpoint.trim(), nodeRange: f.nodeRange.trim(), metallbRange: f.metallbRange.trim(),
-      controlPlane: { node: f.cpNode.trim(), ...machine(f.cp) },
+      // The count is sent only above one: a spec stored before the field stays as it is, and the API reads none as one.
+      controlPlane: { node: f.cpNode.trim(), ...(f.cpReplicas === "3" ? { replicas: 3 } : {}), ...machine(f.cp) },
       nodeGroups: GROUPS.map((name) => ({ name, nodes: f.groups[name].nodes, count: num(f.groups[name].count), ...machine(f.groups[name]) })),
     }],
+    // "none" is what a spec without the key means: one stored before the choice existed stays as it is.
+    ...(f.attach && (f.attach !== "none" || prev?.tenants) ? { tenants: { attach: f.attach } } : {}),
   }
 }
 
@@ -170,8 +268,9 @@ export function specToForm(name: string, s: Spec): Form {
     seedNode: s.seed?.node ?? "", seedAddress: s.seed?.address ?? "", seed: s.seed ? machineForm(s.seed) : emptyForm.seed,
     sshKeys: (s.seed?.sshKeys ?? []).join("\n"), apiSources: (s.seed?.apiSources ?? []).join(", "),
     endpoint: c?.endpoint ?? "", nodeRange: c?.nodeRange ?? "", metallbRange: c?.metallbRange ?? "",
-    cpNode: c?.controlPlane?.node ?? "", cp: c?.controlPlane ? machineForm(c.controlPlane) : emptyForm.cp,
+    cpNode: c?.controlPlane?.node ?? "", cpReplicas: String(c?.controlPlane?.replicas ?? 1), cp: c?.controlPlane ? machineForm(c.controlPlane) : emptyForm.cp,
     groups,
+    attach: s.tenants?.attach ?? "none",
   }
 }
 
@@ -183,6 +282,26 @@ const STORAGE = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/
 const BRIDGE = /^[A-Za-z][A-Za-z0-9_.-]{0,14}$/
 const VNET = /^[a-z][a-z0-9]{0,7}$/ // a Proxmox SDN vnet id
 export const TOKEN_SECRET = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+
+// The line the root command of step 2 prints: PC-ENROLL: plus base64 of "1:<installation>:<unix time>:<capi secret>:<csi secret>"
+// (internal/platformlife/enroll.go; a token the command kept has an empty field). enrollProblem checks a pasted line
+// before it is sent and says what is wrong with it, without quoting it; null when it can be sent. The API checks again,
+// and alone knows whether the line was stored before.
+export const ENROLL_PREFIX = "PC-ENROLL:"
+export function enrollProblem(pasted: string, installationId: string): string | null {
+  const line = pasted.replace(/\s+/g, "") // a terminal may wrap the line
+  const whole = "This is not the PC-ENROLL line the command prints: copy the whole line, from PC-ENROLL: to its end."
+  if (!line.startsWith(ENROLL_PREFIX)) return whole
+  let f: string[]
+  try {
+    f = atob(line.slice(ENROLL_PREFIX.length)).split(":")
+  } catch {
+    return whole
+  }
+  if (f.length !== 5 || f[0] !== "1" || !/^[1-9][0-9]*$/.test(f[2]) || (!f[3] && !f[4]) || [f[3], f[4]].some((v) => v && !TOKEN_SECRET.test(v))) return whole
+  if (f[1] !== installationId) return "This PC-ENROLL line is of another installation: run the command shown here, for this installation."
+  return null
+}
 
 // An IPv4 address as a number, or NaN.
 export function ip4(s: string): number {
@@ -244,7 +363,8 @@ export function validate(f: Form): Problem[] {
   }
   nodeOK("cpNode", "Control plane node", f.cpNode)
   machineOK("cp-cores", "Control plane", f.cp)
-  let machines = 2, surge = 0 // the control plane and its rolling surge
+  if (!["1", "3"].includes(f.cpReplicas)) bad("cpReplicas", "Control plane machines: 1 or 3.")
+  let machines = (num(f.cpReplicas) || 1) + 1, surge = 0 // the control plane machines and the one more a rolling update makes
   for (const g of GROUPS) {
     const gf = f.groups[g]
     const count = num(gf.count)
@@ -296,9 +416,9 @@ export function validate(f: Form): Problem[] {
 
 // ── What the operator does ────────────────────────────────────────────────────
 
-const RERUN = "Run the identities script again (step 2), then press Check."
+const RERUN = "Run the root command of step 2 again, then press Check."
 // The field is "Networks tenants must not reach" on the provider's page; the Check step links there and has the sync button.
-const BLOCKED = "Add the networks named in the message, or one network that covers them, to “Networks tenants must not reach” on the provider's page under Cloud providers"
+const BLOCKED = "Press Save settings in step 1: the save adds the installation's own addresses to the provider's blocked networks (or add the networks named in the message, or one network that covers them, to “Networks tenants must not reach” on the provider's page under Cloud providers)"
 const ISOLATION = `${BLOCKED}. Then press Check in step 3: its isolation row runs the provider sync that writes the rules. Check too that the datacenter firewall is on.`
 
 // One row of the preflight (POST …/preflight) → what fixes it.
@@ -308,7 +428,9 @@ const CHECK_ACTION: Record<string, string> = {
   network: "Correct the platform network in step 1 and save.",
   bridge: "Name a bridge or vnet that exists on every node the settings use, or change the nodes, in step 1. For a routed network, name a vnet Proxmox does not have yet.",
   isolation: `${BLOCKED}, then run a provider sync: for a provider with a saved installation it writes the rules, with or without a project. Check too that the datacenter firewall is on. No sync helps when the message says that the tenant address pool overlaps a management network (choose another pool on the provider's page), or that the rules in place are for another pool, drop a network this provider does not name, accept other sandbox endpoints than this provider's, or are not this provider's set while a project's rules for the pool are in place (another ProxCloud or provider on this Proxmox cluster uses the same pool prefix: give this provider its own; if the rules are this provider's own older ones, delete them in Proxmox under Datacenter, Firewall, then sync).`,
-  credentials: "Paste both token secrets in step 2.",
+  credentials: "Run the root command of step 2 on a node and paste the PC-ENROLL line it prints.",
+  "boot-store": "Name a store that exists and takes disk images as the boot store in step 1, or run the command of the message as root on a node. A warning about other VMs' disks does not stop the install: the message says what a store of its own for the platform avoids, and the command that adds one.",
+  "pve-api-rule": "Nothing to do before the install: Install and every Apply write this cluster firewall rule. On an installed platform, press Apply.",
   privileges: RERUN,
   "mint-scope": "Either the portal token can create API tokens for every user of the Proxmox cluster, root@pam included, or write any role on every pool (an older setup granted that on /access/groups and /pool), or capmox@pve or csi@pve is not in the group proxcloud-kube, so Proxmox refuses their tokens. The message says which. Run the identities script again (step 2) as root on one Proxmox node: it moves the grant to the group, puts both users in it and removes the old rows. If its last lines say NOT FINISHED, run it for each token it names. Then press Check.",
   "pool-fence": "A token reaches a platform pool it must not, usually because its NoAccess row there is missing. Run the identities script again (step 2), then press Check. Only if it still fails, remove the permission granted to that token on the pool itself in Proxmox (Datacenter, Permissions). Do not remove its permissions on /pool.",
@@ -317,6 +439,7 @@ const CHECK_ACTION: Record<string, string> = {
   "boot-iso-grant": RERUN,
   "boot-iso": "Name a store that is local to each node and takes ISO files as the ISO store in step 1.",
   placement: "Every node used needs the import store and the boot store. Change the nodes or the stores in step 1.",
+  capacity: "A node has less memory than the settings place on it, counted with the one more machine an update of the control plane makes. In step 1 use smaller or fewer machines, one control plane machine in place of three, or other nodes; or free memory on the node in Proxmox (a stopped VM counts with its configured memory). Then save and press Check.",
   images: "A platform image is blocked. For a new installation, install a newer ProxCloud release. An installed platform stays on its release's images: no release changes them yet.",
 }
 export const checkAction = (id: string) => CHECK_ACTION[id.split(":")[0]] ?? "Read the message, correct it, then press Check."
@@ -351,7 +474,7 @@ const CODE_ACTION: Record<string, string> = {
   machine_delete_stuck: "Delete the VM named in the message in Proxmox, then start Remove again.",
   tenants_exist: "Tenant clusters or databases still run on the platform. Delete them, then start Remove again.",
   volume_delete_failed: `Check ${CSI_TOKEN} and the storage named in the message, then start Remove again.`,
-  credentials_missing: "Paste both token secrets in step 2, then Retry.",
+  credentials_missing: "Run the root command of step 2 and paste the PC-ENROLL line it prints, then Retry.",
   stage_unavailable: "This release cannot run this stage for this installation.",
   platform_disabled: "Turn managed services on with ./proxcloud-up.sh install --managed-services.",
   portal_changed: RETRY,

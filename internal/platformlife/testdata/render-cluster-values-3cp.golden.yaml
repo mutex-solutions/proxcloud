@@ -1,0 +1,81 @@
+cloudCredentialsSecretName: pc-platform-pve
+clusterNetwork:
+  pods: 10.244.0.0/16
+  services: 10.96.0.0/16
+controlPlane:
+  kind: kubeadm
+  kubeadm:
+    endpoint: 192.0.2.10
+    kubeVipImage: ghcr.io/kube-vip/kube-vip:v0.8.9@sha256:717b8bef2758c10042d64ae7949201ef7f243d928fce265b04e488e844bf9528
+    machineCores: 2
+    machineImageId: pve1=9100
+    machineMemoryMiB: 4096
+    machineRootVolume:
+      diskSize: 30
+    machineTags:
+      - proxcloud
+      - pc-platform
+      - pc-platform-pi-0123abcd
+    replicas: 3
+kubernetesVersion: 1.35.10
+nodeGroups:
+  - machineCores: 2
+    machineCount: 3
+    machineImageId: pve1=9100,pve2=9101
+    machineLabels:
+      node-restriction.kubernetes.io/proxcloud-node-group: system
+    machineMemoryMiB: 4096
+    machineRootVolume:
+      diskSize: 30
+    machineTags:
+      - proxcloud
+      - pc-platform
+      - pc-platform-pi-0123abcd
+    name: system
+  - machineCores: 2
+    machineCount: 1
+    machineImageId: pve2=9101
+    machineLabels:
+      node-restriction.kubernetes.io/proxcloud-node-group: kamaji
+    machineMemoryMiB: 4096
+    machineRootVolume:
+      diskSize: 30
+    machineTags:
+      - proxcloud
+      - pc-platform
+      - pc-platform-pi-0123abcd
+    name: kamaji
+    taints:
+      - effect: NoSchedule
+        key: proxcloud.io/node-group
+        value: kamaji
+  - machineCores: 2
+    machineCount: 3
+    machineImageId: pve1=9100,pve2=9101,pve3=9102
+    machineLabels:
+      node-restriction.kubernetes.io/proxcloud-node-group: dbaas
+    machineMemoryMiB: 4096
+    machineRootVolume:
+      diskSize: 30
+    machineTags:
+      - proxcloud
+      - pc-platform
+      - pc-platform-pi-0123abcd
+    name: dbaas
+    taints:
+      - effect: NoSchedule
+        key: proxcloud.io/node-group
+        value: dbaas
+proxmox:
+  network:
+    addresses:
+      - 192.0.2.20-192.0.2.39
+    bridge: vmbr1
+    dnsServers:
+      - 192.0.2.53
+    gateway: 192.0.2.1
+    mtu: 0
+    prefix: 24
+  pool: proxcloud-system
+  region: az1
+  storage: local-zfs

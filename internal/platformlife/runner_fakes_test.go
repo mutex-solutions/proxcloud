@@ -211,30 +211,32 @@ type fakeVM struct {
 // fakePVE is one node (pve1) with the seed pool, an ISO store "local" and the template 9100. It records every
 // request that is not a GET, with the token it came with.
 type fakePVE struct {
-	mu        sync.Mutex
-	t         *testing.T
-	next      int
-	vms       map[int]*fakeVM
-	iso       []string // file names on local
-	tasks     map[string]string
-	rules     []pve.FirewallRule
-	writes    []string
-	failOnce  map[string]string // "METHOD path" → an error body answered once with 500
-	keepISO   int               // deletes of an ISO that answer OK but leave the file
-	agent     bool
-	noMAC     bool           // a NIC set without a MAC address stays without one
-	pendCD    bool           // a config write to a running VM ends OK but stays pending
-	macs      int            // MAC addresses given so far
-	cloneBusy bool           // a qmclone task is listed as running
-	poolLag   int            // pool reads that answer without members: a clone that joins its pool after them
-	onWrite   func(w string) // called with every recorded request
-	cloneTags string
-	uploads   [][]byte
-	disks     []string               // volumes on local-lvm (the names after "local-lvm:")
-	writers   []string               // the token id of each recorded request, parallel to writes
-	templates []pve.ClusterResource  // /cluster/resources?type=vm
-	tmplCfg   map[int]map[string]any // the config of node templates, on any node (none: Proxmox knows no such VM)
-	tmplDeny  map[int]bool           // node templates whose config the token may not read
+	mu           sync.Mutex
+	t            *testing.T
+	next         int
+	vms          map[int]*fakeVM
+	iso          []string // file names on local
+	tasks        map[string]string
+	rules        []pve.FirewallRule
+	clusterRules []pve.FirewallRule // /cluster/firewall/rules, top first
+	writes       []string
+	failOnce     map[string]string // "METHOD path" → an error body answered once with 500
+	keepISO      int               // deletes of an ISO that answer OK but leave the file
+	agent        bool
+	noMAC        bool           // a NIC set without a MAC address stays without one
+	pendCD       bool           // a config write to a running VM ends OK but stays pending
+	macs         int            // MAC addresses given so far
+	cloneBusy    bool           // a qmclone task is listed as running
+	poolLag      int            // pool reads that answer without members: a clone that joins its pool after them
+	onWrite      func(w string) // called with every recorded request
+	cloneTags    string
+	uploads      [][]byte
+	disks        []string               // volumes on local-lvm (the names after "local-lvm:")
+	writers      []string               // the token id of each recorded request, parallel to writes
+	templates    []pve.ClusterResource  // /cluster/resources?type=vm
+	noVMList     bool                   // /cluster/resources?type=vm answers 500
+	tmplCfg      map[int]map[string]any // the config of node templates, on any node (none: Proxmox knows no such VM)
+	tmplDeny     map[int]bool           // node templates whose config the token may not read
 	// SDN: zones, vnets and each vnet's subnets. A created object is "new" until PUT /cluster/sdn applies it; as
 	// Proxmox is understood to do, a list names that state only when asked with pending=1, and the node lists a vnet
 	// among its bridges only once it is applied.
@@ -436,6 +438,19 @@ func (f *fakePVE) serve(w http.ResponseWriter, r *http.Request) {
 		name := strings.TrimPrefix(path, "/nodes/pve1/storage/local-lvm/content/")
 		f.disks = slices.DeleteFunc(f.disks, func(n string) bool { return n == name })
 		data(f.upid("imgdel", 0))
+	case path == "/cluster/firewall/rules" && r.Method == http.MethodGet:
+		for i := range f.clusterRules {
+			f.clusterRules[i].Pos, f.clusterRules[i].Digest = i, "d"
+		}
+		data(f.clusterRules)
+	case path == "/cluster/firewall/rules": // Proxmox puts a new rule on top
+		f.clusterRules = append([]pve.FirewallRule{{Type: r.PostForm.Get("type"), Action: r.PostForm.Get("action"), Proto: r.PostForm.Get("proto"),
+			Source: r.PostForm.Get("source"), Dest: r.PostForm.Get("dest"), DPort: r.PostForm.Get("dport"), Comment: r.PostForm.Get("comment"), Enable: 1}}, f.clusterRules...)
+		data(nil)
+	case strings.HasPrefix(path, "/cluster/firewall/rules/") && r.Method == http.MethodDelete:
+		pos, _ := strconv.Atoi(strings.TrimPrefix(path, "/cluster/firewall/rules/"))
+		f.clusterRules = slices.Delete(f.clusterRules, pos, pos+1)
+		data(nil)
 	case path == "/cluster/nextid":
 		if v := r.Form.Get("vmid"); v != "" {
 			id, _ := strconv.Atoi(v)
@@ -463,6 +478,9 @@ func (f *fakePVE) serve(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		data(rows)
+	case path == "/cluster/resources" && f.noVMList:
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"errors":{"type":"cluster not ready"}}`)
 	case path == "/cluster/resources":
 		data(f.templates)
 	case path == "/nodes":

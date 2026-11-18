@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"github.com/mutex-solutions/proxcloud/internal/platformlife"
 	"net/http"
 	"testing"
 
@@ -75,6 +76,26 @@ func TestBulkAttachPreviewNotAudited(t *testing.T) {
 	for _, p := range []string{"/api/v1/admin/service/s/bulk-attach", "/api/v1/admin/service/s/bulk-attach/r/cancel", "/api/v1/admin/service/s/bulk-attach/r/retry"} {
 		if auditSkip(p) {
 			t.Fatalf("%s skipped", p)
+		}
+	}
+}
+
+// Saving spec.tenants.attach "all" makes the next run attach both providers to every project, so it needs the key the
+// bulk attach by hand needs; every other choice needs the service key alone.
+func TestInstallationAttachAllNeedsTheProjectKey(t *testing.T) {
+	spec := func(attach string) platformlife.Spec {
+		return platformlife.Spec{Tenants: platformlife.Tenants{Attach: attach}}
+	}
+	serviceOnly := []string{"admin:service:*"}
+	if missingPerm(serviceOnly, installationPerms(spec(platformlife.AttachAll))) != projectUpdatePerm {
+		t.Fatal("attach all must need admin:project:update")
+	}
+	if missingPerm(rolePermissions("ADMIN"), installationPerms(spec(platformlife.AttachAll))) != "" {
+		t.Fatal("ADMIN holds both keys")
+	}
+	for _, attach := range []string{"", platformlife.AttachNew, platformlife.AttachNone} {
+		if missingPerm(serviceOnly, installationPerms(spec(attach))) != "" {
+			t.Fatalf("attach %q must not need the project key", attach)
 		}
 	}
 }
