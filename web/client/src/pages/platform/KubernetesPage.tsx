@@ -160,13 +160,17 @@ const PROGRESS_TEXT: Record<string, string> = {
   waiting_control_plane: "Waiting for the control plane.",
   creating_vm: "Creating the virtual machine.",
   starting_vm: "Starting the virtual machine.",
-  not_joined:
-    "The machine runs but has not joined the cluster. Check that the cluster's network has a router or gateway and reaches the cluster endpoint, then reduce the count by one and raise it again.",
+  not_joined: "The machine runs but has not joined the cluster yet.",
   node_not_ready: "The node joined but is not Ready. Check it with kubectl.",
   provisioning: "Preparing the machine.",
   control_plane_stalled: "The control plane is taking longer than expected. Wait, delete and recreate, or contact the operator.",
 }
-const progressText = (code?: string) => PROGRESS_TEXT[code ?? ""] ?? PROGRESS_TEXT.provisioning
+// After its bound a machine that has not joined will not join: kubeadm runs once. The cause is not read (the code is
+// the Machine's phase), so the text names the likely one: the endpoint, on a path the tenant can neither see nor repair.
+const NOT_JOINED_ATTENTION =
+  "The machine runs but has not joined the cluster: most likely it could not reach the cluster's endpoint. Contact the operator, who can check the path from your network to the endpoint. A machine that failed to join does not try again: once the cause is repaired, reduce the count by one and raise it again. A group of one cannot go to zero: raise it by one, wait until the new machine is ready, then reduce it by one."
+const progressText = (p?: Progress) =>
+  p?.code === "not_joined" && p.attention ? NOT_JOINED_ATTENTION : (PROGRESS_TEXT[p?.code ?? ""] ?? PROGRESS_TEXT.provisioning)
 function sinceText(since?: string): string {
   const t = since ? Date.parse(since) : NaN
   if (Number.isNaN(t)) return ""
@@ -834,11 +838,14 @@ function ClusterFormDialog({
 }) {
   const [name, setName] = useState("")
   // Derived, not effect-reset: switching location swaps the curated list, and a stale pick
-  // that is no longer offered falls back to the newest offered version.
+  // that is no longer offered falls back to the default.
+  // The default is the LOWEST offered version (the list is newest first). A provider record lists its versions and
+  // marks none as the default, and the newest one offered may never have run on the site; the lowest is the one a site
+  // has had longest. High availability is the tenant's choice, so it is off until asked for.
   const [versionSel, setVersionSel] = useState("")
-  const version = versions.includes(versionSel) ? versionSel : versions[0] ?? ""
+  const version = versions.includes(versionSel) ? versionSel : versions[versions.length - 1] ?? ""
   const variants = variantsForVersion(version)
-  const [ha, setHa] = useState(true)
+  const [ha, setHa] = useState(false)
   const [groups, setGroups] = useState<NodeGroupRow[]>([{ ...emptyGroup }])
   const [addons, setAddons] = useState<Record<string, boolean>>(defaultAddons)
   const gatewayAvailable = gatewayFabricChartSupported(platformVersion) && gatewayFabricKubernetesSupported(version)
@@ -958,7 +965,7 @@ function ClusterFormDialog({
               <Label className="text-sm font-medium">High availability</Label>
               <div className="text-xs text-muted-foreground">3 control-plane replicas instead of 1.</div>
             </div>
-            <Switch checked={ha} onCheckedChange={setHa} />
+            <Switch checked={ha} onCheckedChange={setHa} aria-label="High availability" />
           </div>
 
           <NodeGroupsEditor groups={groups} setGroups={setGroups} flavors={flavors} variants={variants} />
@@ -1247,7 +1254,7 @@ function ClusterDetail({
       {
         label: "Control plane",
         detail: cpAttention
-          ? `${progressText(cpAttention.code)} (${sinceText(cpAttention.since)})`
+          ? `${progressText(cpAttention)} (${sinceText(cpAttention.since)})`
           : endpointUp ? "API server is up" : "starting the hosted API server (~2 min)",
         done: endpointUp && !cpAttention,
         attention: !!cpAttention,
@@ -1261,7 +1268,7 @@ function ClusterDetail({
       const settled = phase === "Running" && ready >= desired && !p
       // With a reason from the sync, say it; a sync that cannot read the machines keeps the old line.
       const why = p
-        ? `${(p.machines ?? 0) > 1 ? `${p.machines} machines: ` : ""}${progressText(p.code)} (${sinceText(p.since)})`
+        ? `${(p.machines ?? 0) > 1 ? `${p.machines} machines: ` : ""}${progressText(p)} (${sinceText(p.since)})`
         : "building VMs, joining the cluster"
       steps.push({
         label: `Node group “${(g.name as string) || "?"}”`,
@@ -1568,7 +1575,7 @@ function ClusterDetail({
                         {groupProgress(g) ? (
                           <span className="flex flex-col items-start gap-1">
                             {groupProgress(g)?.attention ? <AttentionBadge /> : null}
-                            <span className="text-muted-foreground">{progressText(groupProgress(g)?.code)}</span>
+                            <span className="text-muted-foreground">{progressText(groupProgress(g))}</span>
                           </span>
                         ) : (
                           "—"

@@ -26,6 +26,7 @@ import {
   useProjectQuota, useUIMenu,
 } from "@/lib/hooks"
 import type { FlavorCategory, ImageGrouping } from "@/lib/hooks"
+import { projectImages as ownProjectImages } from "./serverFields"
 import { gpuCapacityViolations, gpuFromFlavor, serverQuotaViolations, volumeBatchQuotaViolations } from "@/lib/quota"
 import type { CloudResource, Location } from "@/lib/types"
 import { isObjectProvider } from "@/lib/types"
@@ -182,13 +183,7 @@ export default function CreateServerPage() {
   const flavorSections = useMemo(() => buildFlavorSections(bootableFlavors, flavorCats.data ?? []), [bootableFlavors, flavorCats.data])
   // The project's own images (made from a server) are cloned by their template id.
   const { data: ownImages } = useCloudList(pid, "IMAGE")
-  const projectImages = useMemo<TemplateImage[]>(
-    () =>
-      (ownImages ?? [])
-        .filter((r) => r.externalId)
-        .map((r) => ({ ...(r.data?.image as Record<string, unknown>), id: r.externalId }) as TemplateImage),
-    [ownImages],
-  )
+  const projectImages = useMemo<TemplateImage[]>(() => ownProjectImages(ownImages), [ownImages])
   const allImages = useMemo<TemplateImage[]>(() => [...(images.data ?? []), ...projectImages], [images.data, projectImages])
   // Curated groups only hold the catalog, so the project's images get a section of their own.
   const imageSections = useMemo(() => {

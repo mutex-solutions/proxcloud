@@ -536,7 +536,7 @@ are several, `errors.details.problems`.
   `PROXCLOUD_ENCRYPTION_DEFAULT_KEY` the route answers `409 no_encryption_key`.
   No route returns a secret: an installation shows `credentials.{capi,csi}.tokenId`.
 - `POST /installations/{id}/preflight`: read-only, not audited; `{ok, checks}`
-  with rows `flags`, `spec`, `network`, `isolation`, `tenant-network`, `csi-vmid`, `credentials`, `machines`,
+  with rows `flags`, `spec`, `network`, `isolation`, `tenant-network`, `tenant-path`, `csi-vmid`, `credentials`, `machines`,
   `privileges:capi`, `privileges:csi`, `privileges:kubemint`, `mint-scope`, `pool-fence`,
   `token-scope`, `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement` and
   `images`. A row's `status` is `ok`, `fail` or `warn`; `ok` in the answer is
@@ -548,6 +548,11 @@ are several, `errors.details.problems`.
   refused with a `400`, except on a Kubernetes provider with shared workers
   (`cluster.shared`), which uses no tenant network. It is `ok` for a zone without
   DHCP, and absent when the provider names no zone.
+  `tenant-path` never fails either and is absent in the same case. It reads the layout (the default zone's kind,
+  the nodes it translates tenant traffic on, the nodes of the platform machines, and whether such a node holds the
+  platform gateway on the platform bridge) and is `warn` when a node that translates also hosts a platform machine
+  without routing the platform network, or when Proxmox could not be read. It opens no connection, so `ok` does not
+  prove that tenants reach the platform ([managed-services.md](managed-services.md#the-path-from-tenants-to-the-platform)).
   `machines` never fails either, and is absent while the installation has no VM. It reads, with the CAPI
   token, the VMs of the pools `proxcloud-seed` and `proxcloud-system` that carry the installation's tag:
   `warn` with one line per VM that is stopped (start it in Proxmox, `qm start <vmid>`) or that has no

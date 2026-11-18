@@ -121,6 +121,17 @@ func (e *ExternalService) PowerDNSService() (*powerdns.Service, error) {
 }
 
 // TrueNASService builds the share service. The caller closes its client.
+// TrueNASMountHost is the address clients mount a share from: config.mountHost, or the API's host.
+func (e *ExternalService) TrueNASMountHost() string {
+	if host := str(e.Config["mountHost"]); host != "" {
+		return host
+	}
+	if u, err := url.Parse(str(e.Config["apiUrl"])); err == nil {
+		return u.Hostname()
+	}
+	return ""
+}
+
 func (e *ExternalService) TrueNASService() (*truenas.Service, error) {
 	insecure, _ := e.Config["insecureTls"].(bool)
 	c, err := truenas.New(truenas.Config{
@@ -134,12 +145,7 @@ func (e *ExternalService) TrueNASService() (*truenas.Service, error) {
 	if parent == "" {
 		return nil, fmt.Errorf("truenas: parentDataset is required")
 	}
-	host := str(e.Config["mountHost"])
-	if host == "" {
-		if u, err := url.Parse(str(e.Config["apiUrl"])); err == nil {
-			host = u.Hostname()
-		}
-	}
+	host := e.TrueNASMountHost()
 	snat, err := ParseSNATSources(e.Config["snatSources"])
 	if err != nil {
 		return nil, err

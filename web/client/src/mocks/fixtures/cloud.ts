@@ -157,8 +157,12 @@ export function seedCloudResources(): CloudResource[] {
   // externalId mirrors the real API (like volumes above): the cache row's
   // externalId IS the network id — subnet.network_id and router
   // external_gateway_info.network_id join against it.
+  // A row as v0.8.0 and v0.8.1 wrote it at create: the one subnet's cidr, gateway and snat, and no subnetDetails.
   const networkPrivate = res("NETWORK", "net-private", {
-    network: { id: "net-priv-1", name: "net-private", status: "ACTIVE", shared: false, "router:external": false, subnets: ["sub-priv-1"] },
+    network: {
+      id: "net-priv-1", name: "net-private", status: "ACTIVE", shared: false, "router:external": false, subnets: ["sub-priv-1"],
+      cidr: "10.0.0.0/24", gateway: "10.0.0.1", snat: true,
+    },
   }, { externalId: "net-priv-1" })
   const networkPublic = res("NETWORK", "public", {
     network: { id: "net-public-ext", name: "public", status: "ACTIVE", shared: true, "router:external": true, subnets: [] },
@@ -193,6 +197,7 @@ export function seedCloudResources(): CloudResource[] {
         group("workers", 2, 1, { code: "not_joined", since: minutesAgo(42), machines: 1, attention: true }),
         group("batch", 3, 0, { code: "no_capacity", since: minutesAgo(8), machines: 2, attention: true }),
         group("build", 1, 0, { code: "creating_vm", since: minutesAgo(3), machines: 1, attention: false }),
+        group("edge", 1, 0, { code: "not_joined", since: minutesAgo(4), machines: 1, attention: false }),
       ],
     }),
     k8s("pc-c-nocp", "sandbox", {

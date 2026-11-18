@@ -115,6 +115,9 @@ on("POST /project/:pid/cloud/action", ({ opts }) => {
     case "PUBLIC_IMAGES": return ok(publicImages)
     case "LIST_VOLUME_TYPES": return ok(volumeTypes)
     case "LIST_TYPES": return ok(volumeTypes)
+    // The file server sits where this project's networks cannot reach it.
+    case "LIST_SHARE_WARNINGS":
+      return ok(["Servers on this project's private networks cannot reach the file server 192.0.2.100: it is on a network this site keeps tenant networks out of. A share made here can be mounted only from a server with a public IP that has a route to it. Ask your operator."])
     default:
       console.warn(`[mock] unknown collection action ${action}`)
       return ok([])
@@ -197,6 +200,12 @@ on("POST /project/:pid/cloud/:resourceId/action", ({ params, opts }) => {
     case "REBUILD": setServerStatus("ACTIVE"); return ok()
     case "SET_PASSWORD": case "RENAME": return ok()
     case "REMOTECONTROL": return ok({ url: "about:blank" })
+    case "SERIAL_CONSOLE": return ok({ url: "ws://localhost:5273/mock-serial" })
+    // A cloud image: the display is the serial port. A spec restarts the server by setting __mockServerUptime.
+    case "GET_CONSOLE_STATE":
+      return ok({ status: "running", serialDisplay: true, uptime: (globalThis as { __mockServerUptime?: number }).__mockServerUptime ?? 86_400 })
+    case "LIST_BACKUPS": return ok([])
+    case "CREATE_BACKUP": return ok({ id: "nas-backup:backup/vzdump-qemu-101-mock.vma.zst" })
     case "ATTACH": case "DETACH": return ok()
     case "ATTACH_PORT": case "DETACH_PORT": return ok()
     case "LIST_SECURITY_GROUPS": return ok(db.cloud.filter((x) => x.type === "SECURITY_GROUP"))

@@ -50,4 +50,5 @@ Security groups are enforced by the Proxmox VE cluster firewall, which is switch
 
 A network can hold several subnets (**Subnets** tab), and a server picks one at create. All networks and
 subnets of a project route to each other without a router to set up; other projects cannot reach them. Each
-subnet has its own outbound internet switch.
+subnet has its own outbound internet switch. The **Servers** tab of a network lists the servers with an interface
+on it; it cannot be read while a host of the project's servers is down.

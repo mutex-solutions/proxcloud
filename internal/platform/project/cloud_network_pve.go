@@ -193,6 +193,8 @@ func (h *Handler) pveCreateNetwork(w http.ResponseWriter, r *http.Request, u *us
 		Data: pve.NetworkData(result.Vnet, name, zone.Key, map[string]any{
 			"cidr": result.CIDR, "gateway": result.Gateway, "snat": snat, "dhcp": dhcp,
 			"subnets": []any{result.CIDR},
+			// The Subnets tab reads this. The sync writes it too (pve.SubnetDetail), but a site may run without one.
+			"subnetDetails": []any{map[string]any{"cidr": result.CIDR, "gateway": result.Gateway, "snat": snat}},
 		}),
 		CreatedAt: &now, UpdatedAt: &now,
 		Info: &cloud.Info{CreatedAt: &now, UpdatedAt: &now},
@@ -582,6 +584,32 @@ func (h *Handler) pvePublicNetworkAction(w http.ResponseWriter, r *http.Request,
 // pveSubnetAction handles ADD_SUBNET / REMOVE_SUBNET / SET_SNAT on a NETWORK: a vnet holds several
 // subnets. Routing between them, and between the project's networks, needs nothing of a tenant: the
 // zone's VRF is the router, and the project's isolation ACCEPT covers all its subnets.
+// pveNetworkServers answers GET_SERVERS on a NETWORK: the project's SERVER rows whose VM has a NIC on the vnet. The
+// VMs' configs say that, as for the delete guard: a row holds a server's addresses, not the network of each NIC.
+func (h *Handler) pveNetworkServers(w http.ResponseWriter, r *http.Request, proj *Project, es *externalservice.ExternalService, cr *cloud.CloudResource, action string) bool {
+	if cr.Type != cloud.TypeNetwork || action != "GET_SERVERS" {
+		return false
+	}
+	ctx := r.Context()
+	ps, ok := h.pveService(w, es)
+	if !ok {
+		return true
+	}
+	ids, err := ps.VnetVMs(ctx, proj.ID, cr.ExternalID)
+	if err != nil {
+		h.fail(w, pveVolumeErr(err))
+		return true
+	}
+	rows, err := h.cloud.FindByServiceProjectAndType(ctx, es.ID, proj.ID, cloud.TypeServer)
+	if err != nil {
+		h.fail(w, err)
+		return true
+	}
+	rows = slices.DeleteFunc(rows, func(row cloud.CloudResource) bool { return !slices.Contains(ids, row.ExternalID) })
+	httpx.OK(w, map[string]any{"result": rows})
+	return true
+}
+
 func (h *Handler) pveSubnetAction(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, cr *cloud.CloudResource, action string, data map[string]any) bool {
 	if cr.Type != cloud.TypeNetwork || (action != "ADD_SUBNET" && action != "REMOVE_SUBNET" && action != "SET_SNAT") {
 		return false

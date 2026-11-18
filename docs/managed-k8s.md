@@ -166,50 +166,90 @@ sequenceDiagram
 ### Deletion and orphan finalization
 
 Delete removes the Application; the resources finalizer makes ArgoCD cascade the
-delete through everything the chart rendered. Cleanup of the per-cluster
-secrets and, when the project's last cluster is gone, the `pc-*` namespace is
-**sync-driven**: `syncjob.sweepKamajiOrphans` runs once per sync cycle as a
-service-level sweep, after the cascade completes. It scans the management cluster
-itself, so it also reaps leftovers of projects whose ProxCloud record is already
-gone. A secret younger than the 30-minute grace window is never touched. Project
-teardown also removes the `pc-*` namespace of a project that never had a cluster,
-once nothing is pending and no Application of the project is left.
+delete through everything the chart rendered. The delete answers `202` before
+that cascade has run. What must outlive the cascade is released after it: the
+cluster's Proxmox token `capmox@pve!<clusterId>` (and a `csi@pve!<clusterId>`
+an older cluster may hold), its addresses, its RWX dataset, its per-cluster
+Secrets and, when the project's last cluster is gone, the `pc-*` namespace. The
+delete itself cannot do that: CAPMOX deletes the workers with that token.
 
-**How long a deleted cluster's Proxmox token lives.** The same sweep revokes the
-cluster's `capmox@pve!<clusterId>` token (and a `csi@pve!<clusterId>` an older
-cluster may hold), frees its addresses and deletes its RWX dataset. The delete
-itself cannot: CAPMOX deletes the workers with that token, the cascade runs in
-ArgoCD after the delete has answered `202`, and the portal sees it finished only
-when a sweep looks (no Application, no TenantControlPlane, no MachineDeployment).
-The 30 minutes are counted from the cluster's **creation** (its marker Secret),
-not from the delete: a sweep that finds a marker with no Application cannot tell
-a finished delete from a create that has not applied its Application yet, and
-would revoke the token of a cluster being made. So:
+Two things do the release, with the same checks and the same steps:
 
-- **With the job scheduler** (a provider sync every 15 minutes): the token of a
-  cluster older than 30 minutes is revoked at the first sync after its cascade
-  finished, so up to 15 minutes after that. A cluster deleted in its first 30
-  minutes keeps its token until the first sync after the marker is 30 minutes
-  old.
-- **Without the scheduler** (the Compose install's default): nothing revokes
-  the token until an operator starts a provider sync
-  (`POST /api/v1/admin/job/external-service/sync`), and
-  for a cluster deleted in its first 30 minutes a sync after that age. Start
-  one after a cluster delete.
+1. **The release job** (`kamaji.release/v1`, `project.KamajiReleaseRunner`). The
+   delete, and a project teardown, queue one durable job per cluster
+   ([durable-jobs.md](durable-jobs.md)). Its runner is part of the API process
+   and runs with or without the job scheduler. Its first look at the cluster
+   comes within about 5 seconds of the delete (the runner's poll), the next
+   ones 15 seconds apart and then at growing intervals, a quarter of the job's
+   age, at most every 5 minutes. It releases the cluster at the first look that
+   finds the cascade over. After 24 hours without that it gives up: the job
+   is `dead` with `cascade_not_finished` in `GET /api/v1/admin/durable-jobs`, and
+   the sweep is what is left. A dead release job is not replayed (`409`).
+2. **The sweep** (`syncjob.sweepKamajiOrphans`), the backstop: once per provider
+   sync, for every marker Secret of the provider on the management cluster. It
+   also reaps leftovers of projects whose ProxCloud record is already gone, and
+   of a create that died halfway. It never touches a marker younger than 30
+   minutes, counted from the cluster's **creation**: a sweep that finds a marker
+   with no Application cannot tell a finished delete from a create that has not
+   applied its Application yet. The job has no such wait, because a delete is
+   accepted only for a cluster whose Application was applied.
 
-Until then the token is listed in Proxmox with its ACL rows (`ProxCloudCAPI` on
-the project pool, the boot store, the vnet and `/nodes`). Its secret lives only
-in a Secret of the cluster's namespace on the management cluster, which the
-cascade deletes, so what is left is a credential nobody holds, not one in use.
-Seen on a lab (2026-11-17, no scheduler): a token still listed 3 minutes after
-the delete was revoked one second after an operator's sync; the token of a
-cluster deleted 22 minutes after its creation survived two syncs and went at
-the first one after the marker was 30 minutes old. Proxmox stops honouring the
+**When the cascade counts as over.** All of: no Application, no
+TenantControlPlane, no MachineDeployment and no Machine of the cluster on the
+management cluster, and no VM whose name starts with `<clusterId>-` in the
+project's pool on Proxmox (CAPMOX names a VM after its Machine). While any of
+these is left, or the management cluster or Proxmox does not answer, nothing
+of the cluster is released (the look at the pool comes before every release
+step, the CSI one included) and the job looks again later (`cascade_running`
+or `release_failed` as the job's last result; the reason is in the API log,
+line `kamaji: release of a deleted cluster, will retry`). On a management
+cluster whose ClusterRole is older than the Machines grant
+([Provisioning status](#provisioning-status-reason-and-needs-attention), "RBAC") the
+Machines cannot be listed; the other checks decide there.
+
+A node that is down does not hold a release. A VM on it has no name in
+Proxmox's list after about five minutes, so the look at the pool cannot tell a
+worker from any other VM of the project, and it does not try: a worker on a
+dead node keeps its Machine, and the Machine holds the release. The one case
+this leaves open is a management cluster with the older ClusterRole and a
+worker on a node that is down for more than those minutes: the token is
+revoked while that VM exists, CAPMOX cannot delete it afterwards, and an
+operator removes the VM and the stuck Machine by hand. Apply
+`deploy/mgmt-cluster/rbac.yaml` to close it.
+
+A create that fails runs the same release at once (`AbandonCluster`), with the
+same look at the pool, for the token it had just minted and the addresses it
+had reserved.
+
+**How long a deleted cluster's Proxmox token lives.** With the release job: until
+the first look after the cascade, so seconds to a few minutes after the last
+worker is gone, on every install. A lab delete on 2026-11-17 had its worker VM
+gone 45 seconds after the delete; in a job's first minute the looks are about
+15 seconds apart. **This timing is not verified on a lab**:
+the job is covered by tests with a fake management cluster and a fake Proxmox
+on PostgreSQL. Should the job not have run (an API from before v0.8.2, a job
+that could not be queued, a job that gave up), the sweep's timing applies: with
+the scheduler the first provider sync after the cascade and after the marker's
+30 minutes; without the scheduler (the Compose install's default) not until an
+operator starts a provider sync
+(`POST /api/v1/admin/job/external-service/sync`). That older timing was seen on
+a lab (2026-11-17, v0.8.0, no scheduler): a token still listed 3 minutes after
+the delete went one second after an operator's sync, and the token of a cluster
+deleted 22 minutes after its creation survived two syncs.
+
+Until the release the token is listed in Proxmox with its ACL rows
+(`ProxCloudCAPI` on the project pool, the boot store, the vnet and `/nodes`).
+Its secret lives only in a Secret of the cluster's namespace on the management
+cluster, which the cascade deletes, so what is left is a credential nobody
+holds, not one in use. Proxmox stops honouring the
 token's ACL rows at the revoke, but leaves their lines in `/etc/pve/user.cfg`
 until that file is next written; until then every `pveum`, `qm` and `pvesh`
 call on a node prints `user config - ignore invalid acl token
 'capmox@pve!<clusterId>'`, once per row. It is harmless, and `pveum acl list`
 shows the rows gone at once.
+
+Project teardown also removes the `pc-*` namespace of a project that never had a
+cluster, once nothing is pending and no Application of the project is left.
 
 ```sh
 # namespaces ProxCloud owns, with what's left inside them
@@ -258,7 +298,7 @@ paths and never reaches a tenant. The first match in this order wins:
 | `waiting_control_plane` | Phase Pending and the control plane is not Ready | Waiting for the control plane. | never |
 | `creating_vm` | Reason `Cloning`, `WaitingForDiskReconciliation`, `WaitingForStaticIPAllocation`, `WaitingForBootstrapDataReconciliation`, or no ProxmoxMachine condition yet | Creating the virtual machine. | by bound |
 | `starting_vm` | Reason `WaitingForVMPowerUp`, `WaitingForCloudInit`, `WaitingForBootstrapReady`, `WaitingForClusterAPIMachineAddresses` | Starting the virtual machine. | by bound |
-| `not_joined` | Phase Provisioned, or `NodeHealthy` with reason `NodeDoesNotExist` | The machine runs but has not joined the cluster. Check that the cluster's network has a router or gateway and reaches the cluster endpoint, then reduce the count by one and raise it again. | 15 min |
+| `not_joined` | Phase Provisioned, or `NodeHealthy` with reason `NodeDoesNotExist` | Inside the bound: "The machine runs but has not joined the cluster yet." With attention: "The machine runs but has not joined the cluster: most likely it could not reach the cluster's endpoint. Contact the operator, who can check the path from your network to the endpoint. A machine that failed to join does not try again: once the cause is repaired, reduce the count by one and raise it again. A group of one cannot go to zero: raise it by one, wait until the new machine is ready, then reduce it by one." Nothing reads the machine's join error, so the cause is the likely one, not a finding. The tenant cannot see or repair that path, so the text no longer asks them to check it ([Reaching the platform](#9-how-a-cluster-lands-on-proxmox)) | 15 min |
 | `provisioning` | Anything else, and a machine that Cluster API has not made yet | Preparing the machine. | by bound |
 | `control_plane_stalled` | No endpoint, or the control plane has no status or is `Provisioning`, 15 min after the create | The control plane is taking longer than expected. Wait, delete and recreate, or contact the operator. | n/a |
 
@@ -456,6 +496,17 @@ What it does not do:
 
 **Reaching the platform.** Workers sit on a tenant vnet with no route to the management network. The API-server
 endpoint is an address on the services subnet, which tenants reach over their normal egress: MetalLB.
+That egress is not enough on every layout. When a Proxmox node translates the worker's traffic (SNAT: in a
+`simple` zone the worker's own node, in an EVPN zone an exit node) and the platform machine that holds the endpoint
+address runs on that same node, the worker's TCP connection is dropped on the node unless the node itself routes the
+platform network: a one-node site with a `simple` tenant zone and the platform network on a VLAN behind the site's
+router is this case (found on the first production site, v0.8.0). The workers then run, stay `not_joined`, and
+cloud-init's `kubeadm join` has timed out on `https://<endpoint>:6443`. kubeadm runs once: after the path is
+repaired such workers must be replaced (the tenant reduces the node group's count by one and raises it again, once per worker; a group cannot go to zero, so a group of one is raised first). The rule, its
+table, the Check row `tenant-path` that warns of the layout, and the two supported layouts (a platform network routed
+by the node on a new one-node site; a leg of the node on an existing one, run by hand on one production site and
+not lab-verified) are in [managed-services.md](managed-services.md#the-path-from-tenants-to-the-platform). Nothing
+in the product opens the path as a test, and the worker's join error is not shown in the console yet.
 In an EVPN zone that egress is the zone's (Proxmox holds the gateway and does the SNAT). In a **VLAN zone**
 Proxmox holds no gateway and does no DHCP or SNAT: the network is a bare VLAN (the API writes and answers
 `dhcp: false`, `snat: false`), and the site must provide a router that holds the subnet's first address (the

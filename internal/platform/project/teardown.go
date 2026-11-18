@@ -147,6 +147,7 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 				sweep = append(sweep, *res)
 				continue
 			}
+			h.kamajiQueueRelease(ctx, res.ServiceID, p.ID, res.ExternalID)
 			if aerr := h.cloud.DeleteAndArchive(ctx, res, now); aerr != nil {
 				slog.Error("teardown: archive kamaji cluster row", "project", p.ID, "cluster", res.ExternalID, "err", aerr)
 				sweep = append(sweep, *res)

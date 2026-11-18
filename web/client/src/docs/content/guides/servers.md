@@ -18,6 +18,8 @@ A server's page exposes the lifecycle controls:
 - **Stop / Start** — power the server off and on. A stopped server keeps its disks and network attachments.
 - From **More actions**: **Rename**, **Resize** (move to another flavor), **Console (VNC)** for a browser console, and **Delete**.
 
+The console page has two tabs. **Serial** is a text terminal on the server's serial port, and **Graphical (VNC)** is its screen. A server made from a cloud image shows its screen on the serial port, so the page opens on **Serial** for it and the graphical tab only shows one line saying so. A serial port replays nothing: press **Enter** to get the login prompt. Logging in there needs a password (**More actions → Set password**); a key pair alone is for SSH. When the server is stopped or started again, an open serial session ends: the page says **Disconnected** within about ten seconds and offers **Reconnect**.
+
 Actions the cloud behind your project can't perform are not shown; on Proxmox there is no rescue action. With password login the password is set on the image's default account. The server's **Network** tab lists the addresses the guest reports.
 
 When you're done with a machine, **delete** it so it stops consuming compute and accruing charges. The boot disk goes with the server, and so do all of its backups. Its data volumes are kept, detached and still billed, unless you tick **Also delete this server's volumes** in the delete dialog. Copy off anything you want to keep first.
@@ -51,7 +53,8 @@ default user (`debian`, `ubuntu`, ...).
 ## Rebuild
 
 Replaces the boot disk with a fresh copy of an image, losing everything on it. The server keeps its addresses,
-firewall and data volumes. Delete its snapshots first.
+firewall and data volumes. Delete its snapshots first. The dialog offers the same images as **Create server**: the
+public ones and, under **Your images**, the project's own.
 
 ## When a host fails
 
@@ -70,14 +73,17 @@ disks, so nothing is copied.
 ## Backups
 
 When the operator has set up a backup store, the **Backups** tab creates full backups of the server and restores one,
-which replaces the disks. Backups survive a disk or node failure, but they are deleted with the server: to keep a
-server's state beyond that, create an image.
+which replaces the disks. **Create backup** asks before it starts: a backup can take minutes, the server keeps
+running, and it takes no other action until the backup is done. Backups survive a disk or node failure, but they
+are deleted with the server: to keep a server's state beyond that, create an image.
 
 ## Snapshots
 
 The **Snapshots** tab saves the state of the server's disks and rolls back to it, losing what was written
 since. It protects against mistakes, not against disk or node failure. Local ZFS rolls back to the newest
 snapshot only: delete newer ones first. A server with a disk on capacity storage cannot be snapshotted.
+Right after a rollback the server is busy for some seconds. Deleting a snapshot then waits for it, up to about half a
+minute, before it answers that the server is busy.
 
 **Images** on the same page are something else: a full copy of the server's disk, to create new servers from.
 

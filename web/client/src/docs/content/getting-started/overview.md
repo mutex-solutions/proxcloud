@@ -17,7 +17,7 @@ Everything the portal manages falls into a handful of groups. The table below is
 | Group | Where in the sidebar | What it's for |
 |-------|----------------------|---------------|
 | Compute | Servers, Key pairs, Images | Run virtual machines, keep your SSH key pairs, and use or save machine images |
-| Storage | Volumes, Object storage, S3 access keys, File shares, DNS | Add disks to your servers, keep S3 buckets and the keys that reach them, NFS/SMB file shares, and DNS zones (Snapshots appears only on clouds with volume snapshots) |
+| Storage | Volumes, Object storage, S3 access keys, File shares, DNS | Add disks to your servers, keep S3 buckets and the keys that reach them, NFS/SMB file shares, and DNS zones (Snapshots appears only on clouds with volume snapshots). A page your project's location does not serve is left out of the menu, and its address says so instead of opening. The **Create share** dialog warns when your servers' private networks cannot reach the file server |
 | Network | Networks, Load balancers, Security groups | Build private networks, spread traffic over servers, and firewall traffic |
 | Platform | Kubernetes, Databases, Sandboxes | Managed Kubernetes and database clusters, and short-lived sandboxes for running code (with E2B API keys), when your operator offers them |
 | Billing | Savings plans, Promotional credits, Funds, Cards, Billing history | Deposits, payment cards, committed-use discounts, invoices, and past bills |

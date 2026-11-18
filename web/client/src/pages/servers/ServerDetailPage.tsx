@@ -30,7 +30,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+  Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
@@ -42,7 +42,7 @@ import { useCloudFeatures, useCloudList, useCloudResource, useCloudScope, usePro
 import type { CloudResource } from "@/lib/types"
 import { ServerProtection } from "./ServerProtection"
 import { ServerDeleteVolumes } from "./ServersPage"
-import { serverFlavor, serverIPs, serverName, serverStatus } from "./serverFields"
+import { projectImages, serverFlavor, serverIPs, serverName, serverStatus } from "./serverFields"
 
 const ACTION_LABELS: Record<string, string> = {
   START: "Start", STOP: "Stop", SOFTREBOOT: "Reboot", RESIZE: "Resize", RENAME: "Rename", REBUILD: "Rebuild",
@@ -164,6 +164,8 @@ export function ServerDetailPage() {
     enabled: !!pid && !!scope && dialog === "rebuild",
     select: (d) => d?.result ?? [],
   })
+  // Rebuild offers what Create offers: the public catalog and the project's own images.
+  const ownImages = projectImages(useCloudList(pid, "IMAGE").data).filter((im) => !!im.id)
 
   if (isLoading || !server) {
     return (
@@ -546,6 +548,16 @@ export function ServerDetailPage() {
                       {String(im.name ?? im.id)}
                     </SelectItem>
                   ))}
+                {ownImages.length > 0 && (
+                  <SelectGroup>
+                    <SelectLabel>Your images</SelectLabel>
+                    {ownImages.map((im) => (
+                      <SelectItem key={String(im.id)} value={String(im.id)}>
+                        {String(im.name ?? im.id)}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                )}
               </SelectContent>
             </Select>
           )}
@@ -1177,7 +1189,7 @@ function BackupsTab({ pid, resourceId, scope }: { pid: string; resourceId: strin
   return (
     <div className="grid gap-4">
       <div className="flex flex-wrap items-center gap-3">
-        <Button size="sm" disabled={run.isPending} onClick={() => run.mutate({ action: "CREATE_BACKUP" })}>
+        <Button size="sm" disabled={run.isPending} onClick={() => setPending({ action: "CREATE_BACKUP", id: "" })}>
           <Archive className="size-4" /> {run.isPending && !pending ? "Backing up…" : "Create backup"}
         </Button>
         <p className="text-sm text-muted-foreground">A backup can take minutes. It is deleted with the server; to keep a server's state longer, create an image.</p>
@@ -1230,19 +1242,35 @@ function BackupsTab({ pid, resourceId, scope }: { pid: string; resourceId: strin
       <Dialog open={!!pending} onOpenChange={(o) => !o && !run.isPending && setPending(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{pending?.action === "RESTORE_BACKUP" ? "Restore server" : "Delete backup"}</DialogTitle>
+            <DialogTitle>
+              {pending?.action === "CREATE_BACKUP" ? "Create backup" : pending?.action === "RESTORE_BACKUP" ? "Restore server" : "Delete backup"}
+            </DialogTitle>
             <DialogDescription>
-              {pending?.action === "RESTORE_BACKUP"
-                ? "The server stops, and its disks and settings are replaced with this backup. Everything written since is lost, and so are its snapshots. A running server restarts."
-                : "Delete this backup? This cannot be undone."}
+              {pending?.action === "CREATE_BACKUP"
+                ? "Back up this server now? The server keeps running. A backup can take minutes, and the server takes no other action until it is done."
+                : pending?.action === "RESTORE_BACKUP"
+                  ? "The server stops, and its disks and settings are replaced with this backup. Everything written since is lost, and so are its snapshots. A running server restarts."
+                  : "Delete this backup? This cannot be undone."}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button variant="outline" disabled={run.isPending} onClick={() => setPending(null)}>
               Cancel
             </Button>
-            <Button variant="destructive" disabled={run.isPending} onClick={() => pending && run.mutate(pending)}>
-              {run.isPending ? "Working…" : pending?.action === "RESTORE_BACKUP" ? "Restore" : "Delete"}
+            <Button
+              variant={pending?.action === "CREATE_BACKUP" ? "default" : "destructive"}
+              disabled={run.isPending}
+              onClick={() => {
+                if (!pending) return
+                run.mutate(pending)
+                // A backup runs for minutes: the dialog closes and the button above shows it running.
+                if (pending.action === "CREATE_BACKUP") {
+                  toast.info("Backup started")
+                  setPending(null)
+                }
+              }}
+            >
+              {run.isPending ? "Working…" : pending?.action === "CREATE_BACKUP" ? "Create backup" : pending?.action === "RESTORE_BACKUP" ? "Restore" : "Delete"}
             </Button>
           </DialogFooter>
         </DialogContent>

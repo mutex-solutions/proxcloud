@@ -59,7 +59,14 @@ func (h *Handler) pveBackupAction(w http.ResponseWriter, r *http.Request, u *use
 			h.fail(w, upstreamErr(computeBackend, cerr))
 			return true
 		}
-		err = ps.CreateServerBackup(ctx, proj.ID, cr.ExternalID, store, caps[store], es.PVEStorageHeadroomPct())
+		if err = ps.CreateServerBackup(ctx, proj.ID, cr.ExternalID, store, caps[store], es.PVEStorageHeadroomPct()); err == nil {
+			// The answer names the new archive: vzdump reports no volid, and the newest of this server's is the one.
+			if backups, lerr := ps.ListServerBackups(ctx, proj.ID, cr.ExternalID, store); lerr != nil {
+				slog.Error("backup: read the new archive's id", "project", proj.ID, "server", cr.ExternalID, "err", lerr)
+			} else if len(backups) > 0 {
+				id = backups[0].ID
+			}
+		}
 	case "RESTORE_BACKUP":
 		archivedAt, err = ps.RestoreServerBackup(ctx, proj.ID, cr.ExternalID, store, id, h.pveRestoreGuard(proj, es, cr))
 	case "DELETE_BACKUP":

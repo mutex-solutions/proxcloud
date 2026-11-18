@@ -204,6 +204,25 @@ func (c *Client) ManagementCIDRs(ctx context.Context) (cidrs []string, complete 
 	return cidrs, complete, nil
 }
 
+// IfaceAddress is the address node holds on iface in /nodes/{node}/network: empty when the node has no interface of
+// that name or the interface holds none. It reads the node's saved network configuration, so an address put on the
+// interface at runtime (ip addr add) is not seen.
+func (c *Client) IfaceAddress(ctx context.Context, node, iface string) (string, error) {
+	var ifaces []struct {
+		Iface   string `json:"iface"`
+		Address string `json:"address"`
+	}
+	if err := c.get(ctx, "/nodes/"+url.PathEscape(node)+"/network", nil, &ifaces); err != nil {
+		return "", err
+	}
+	for _, i := range ifaces {
+		if i.Iface == iface {
+			return i.Address, nil
+		}
+	}
+	return "", nil
+}
+
 // NodeAddresses lists every IPv4 address the nodes hold, as /32: the /cluster/status address and the address of every
 // interface in /nodes/{node}/network (uplinks, bonds and VLANs too, not only bridges with a gateway). What a node
 // cannot answer for is left out and complete comes back false, as in ManagementCIDRs.

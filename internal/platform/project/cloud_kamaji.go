@@ -129,6 +129,7 @@ func (h *Handler) kamajiDelete(ctx context.Context, es *externalservice.External
 	if err := ks.DeleteCluster(ctx, proj.ID, cr.ExternalID); err != nil {
 		return err
 	}
+	h.kamajiQueueRelease(context.WithoutCancel(ctx), es.ID, proj.ID, cr.ExternalID)
 	return h.cloud.DeleteAndArchive(ctx, cr, time.Now().UTC())
 }
 
