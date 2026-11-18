@@ -25,6 +25,9 @@ test("a stuck cluster says why per node group and what the tenant can do", async
   await expect(workers).toContainText("1/2 nodes ready")
   await expect(workers).toContainText("Needs attention: Node group “workers”")
   await expect(workers).toContainText("The machine runs but has not joined the cluster")
+  // Past its bound the tenant is sent to the operator, not to a network check they cannot make.
+  await expect(workers).toContainText("Contact the operator, who can check the path from your network to the endpoint")
+  await expect(workers).not.toContainText("has a router or gateway")
   await expect(workers).toContainText(/since 4\d min/)
   // Two machines the host had no room for.
   const batch = page.getByRole("listitem").filter({ hasText: "Node group “batch”" })

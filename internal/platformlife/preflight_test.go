@@ -28,6 +28,7 @@ type preflightPVE struct {
 	// seed's pool instead.
 	machines map[int][2]string
 	seed     int
+	extra    map[string]string // further paths, and other answers for the ones above; "!" answers 403
 }
 
 func (f *preflightPVE) client(t *testing.T, url, token string) *pve.Client {
@@ -82,6 +83,9 @@ func (f *preflightPVE) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	data["/pools/"+pve.SeedPool] = `{"members":[` + strings.Join(members[true], ",") + `]}`
 	data["/pools/"+pve.SystemPool] = `{"members":[` + strings.Join(members[false], ",") + `]}`
+	for k, v := range f.extra {
+		data[k] = v
+	}
 	path := strings.TrimPrefix(r.URL.Path, "/api2/json")
 	if path == "/cluster/nextid" && f.vm9999 {
 		w.WriteHeader(http.StatusBadRequest)

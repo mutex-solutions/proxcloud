@@ -11,7 +11,8 @@ A new cluster reads **Pending**, then **Progressing**, then **Ready**. While it 
 | Waiting for the control plane. | The workers start once the control plane is up. | Wait. |
 | Preparing the machine. / Creating the virtual machine. / Starting the virtual machine. | The normal steps. With many nodes on slow disks this takes a while. | Wait. |
 | Creating the virtual machine failed; retrying automatically. | A step failed and is tried again. | Wait. |
-| The machine runs but has not joined the cluster. | The server is up, and its node never registered. Most often the cluster's network has no router or gateway, or it cannot reach the cluster endpoint. | Check the network, then reduce the group's count by one and raise it again. |
+| The machine runs but has not joined the cluster yet. | The server is up and its node has not registered. In the first minutes this is a normal step. | Wait. |
+| The machine runs but has not joined the cluster: it could not reach the cluster's endpoint. | After 15 minutes with **Needs attention**: the server did not reach the cluster's endpoint and does not try again. The path between your network and the endpoint is the operator's; you cannot check it. | Contact the operator. Once the path is repaired, reduce the group's count by one and raise it again: that replaces the server. |
 | The node joined but is not Ready. | The node registered and reports not Ready. | Check it with `kubectl describe node`. |
 | The host has no free capacity for this machine, and it is not retried. | The host that should run the server is full. | Reduce the count or pick a smaller flavor. To retry, reduce the count by one and raise it again. |
 | Creating the virtual machine failed and is not retried. | The platform gave up on this server. | Reduce the count by one and raise it again, or delete and recreate the cluster. |
