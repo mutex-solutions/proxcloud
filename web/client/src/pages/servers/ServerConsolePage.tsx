@@ -11,6 +11,7 @@
 //     copy and paste are native. This is the one to use for command work.
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Link, useParams } from "react-router-dom"
+import { useQuery } from "@tanstack/react-query"
 import RFB from "@novnc/novnc"
 import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
@@ -41,18 +42,51 @@ async function fetchConsoleURL(pid: string, resourceId: string, cloud: Scope, ac
   return { url, password: res?.result?.password }
 }
 
+// What the page cannot learn from a console socket (GET_CONSOLE_STATE): whether the server's display is its serial
+// port, and whether the server still runs and since when.
+type ConsoleInfo = { status?: string; uptime?: number; serialDisplay?: boolean }
+
+function fetchConsoleInfo(pid: string, resourceId: string, cloud: Scope) {
+  return apiFetch<{ result?: ConsoleInfo }>(`/project/${pid}/cloud/${resourceId}/action`, {
+    method: "POST",
+    body: { action: "GET_CONSOLE_STATE" },
+    cloud,
+  }).then((r) => r?.result ?? {})
+}
+
+// A session opened before the server was stopped or started again is dead, and its socket does not always say so:
+// on a production site it stayed open and the page kept showing "Connected". So the page asks the server itself.
+// sessionAgeMs is how long ago the session connected; the margin covers the two clocks and the request.
+function consoleSessionEnded(info: ConsoleInfo, sessionAgeMs: number): boolean {
+  if (info.status === "stopped") return true
+  return typeof info.uptime === "number" && info.uptime * 1000 < sessionAgeMs - 10_000
+}
+
 export default function ServerConsolePage() {
   const pid = useProjectId()
   const { resourceId = "" } = useParams()
   const scope = useCloudScope(pid)
   const { data: server } = useCloudResource(pid, resourceId)
-  const [tab, setTab] = useState("vnc")
+  // The tab the user picked, or none yet: then the page opens on the console that shows something.
+  const [picked, setPicked] = useState<string | null>(null)
 
   // useCloudScope builds a fresh object every render, so the console effects depend on these
   // primitives instead — depending on the object reconnects the socket on EVERY render.
   const serviceId = scope?.serviceId
   const region = scope?.region
   const ready = Boolean(pid && resourceId && serviceId && region)
+
+  // A cloud image shows its display on the serial port (vga serial0): the graphical console then shows one line, so
+  // the page opens on Serial. Nothing connects until the answer is in; a failed read opens Graphical as before.
+  const info = useQuery({
+    queryKey: ["console-state", pid, resourceId, serviceId, region],
+    queryFn: () => fetchConsoleInfo(pid, resourceId, { serviceId: serviceId!, region: region! }),
+    enabled: ready,
+    retry: false,
+    staleTime: Infinity,
+  })
+  const serialDisplay = info.data?.serialDisplay === true
+  const tab = picked ?? (info.isPending ? "" : serialDisplay ? "serial" : "vnc")
 
   const name = (server?.data?.server?.name as string) ?? server?.name ?? resourceId
 
@@ -70,7 +104,7 @@ export default function ServerConsolePage() {
         </div>
       </div>
 
-      <Tabs value={tab} onValueChange={setTab}>
+      <Tabs value={tab} onValueChange={setPicked}>
         <TabsList>
           <TabsTrigger value="vnc">Graphical (VNC)</TabsTrigger>
           <TabsTrigger value="serial">Serial</TabsTrigger>
@@ -78,6 +112,11 @@ export default function ServerConsolePage() {
 
         {/* Mount-gated so only the visible console holds a socket open. */}
         <TabsContent value="vnc" className="mt-3">
+          {ready && tab === "vnc" && serialDisplay ? (
+            <p className="mb-3 rounded-lg border p-3 text-sm text-muted-foreground" data-testid="serial-display-hint">
+              This server shows its display on the serial port, so this console only says that. Use the Serial tab.
+            </p>
+          ) : null}
           {ready && tab === "vnc" ? (
             <VncConsole pid={pid} resourceId={resourceId} cloud={{ serviceId: serviceId!, region: region! }} />
           ) : null}
@@ -320,6 +359,7 @@ function SerialConsole({ pid, resourceId, cloud }: { pid: string; resourceId: st
     let term: Terminal | null = null
     let observer: ResizeObserver | null = null
     let keepAlive: ReturnType<typeof setInterval> | undefined
+    let watch: ReturnType<typeof setInterval> | undefined
     setState("connecting")
     setMessage("")
 
@@ -407,6 +447,20 @@ function SerialConsole({ pid, resourceId, cloud }: { pid: string; resourceId: st
             bytes = bytes.slice(2)
             setState("connected")
             sendSize()
+            // A serial port replays nothing: the screen stays empty until the guest prints again.
+            term.write("\x1b[2mConnected. Press Enter to see the login prompt.\x1b[0m\r\n")
+            const connectedAt = Date.now()
+            watch = setInterval(() => {
+              void fetchConsoleInfo(pid, resourceId, { serviceId, region })
+                .then((info) => {
+                  if (cancelled || !consoleSessionEnded(info, Date.now() - connectedAt)) return
+                  clearInterval(watch)
+                  setState("disconnected")
+                  setMessage("The server was stopped or restarted, so this session has ended.")
+                  ws?.close()
+                })
+                .catch(() => undefined) // a failed read says nothing about the session
+            }, 10_000)
           }
           term.write(bytes)
         }
@@ -416,6 +470,7 @@ function SerialConsole({ pid, resourceId, cloud }: { pid: string; resourceId: st
           setMessage("Serial console connection failed. Is the serial console enabled for this region?")
         }
         ws.onclose = () => {
+          clearInterval(watch)
           if (cancelled) return
           setState((s) => (s === "error" ? s : "disconnected"))
           setMessage((m) => m || "Serial session ended.")
@@ -432,6 +487,7 @@ function SerialConsole({ pid, resourceId, cloud }: { pid: string; resourceId: st
       cancelled = true
       observer?.disconnect()
       clearInterval(keepAlive)
+      clearInterval(watch)
       try {
         ws?.close()
       } catch {

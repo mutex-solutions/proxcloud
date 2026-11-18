@@ -834,11 +834,14 @@ function ClusterFormDialog({
 }) {
   const [name, setName] = useState("")
   // Derived, not effect-reset: switching location swaps the curated list, and a stale pick
-  // that is no longer offered falls back to the newest offered version.
+  // that is no longer offered falls back to the default.
+  // The default is the LOWEST offered version (the list is newest first). A provider record lists its versions and
+  // marks none as the default, and the newest one offered may never have run on the site; the lowest is the one a site
+  // has had longest. High availability is the tenant's choice, so it is off until asked for.
   const [versionSel, setVersionSel] = useState("")
-  const version = versions.includes(versionSel) ? versionSel : versions[0] ?? ""
+  const version = versions.includes(versionSel) ? versionSel : versions[versions.length - 1] ?? ""
   const variants = variantsForVersion(version)
-  const [ha, setHa] = useState(true)
+  const [ha, setHa] = useState(false)
   const [groups, setGroups] = useState<NodeGroupRow[]>([{ ...emptyGroup }])
   const [addons, setAddons] = useState<Record<string, boolean>>(defaultAddons)
   const gatewayAvailable = gatewayFabricChartSupported(platformVersion) && gatewayFabricKubernetesSupported(version)
@@ -958,7 +961,7 @@ function ClusterFormDialog({
               <Label className="text-sm font-medium">High availability</Label>
               <div className="text-xs text-muted-foreground">3 control-plane replicas instead of 1.</div>
             </div>
-            <Switch checked={ha} onCheckedChange={setHa} />
+            <Switch checked={ha} onCheckedChange={setHa} aria-label="High availability" />
           </div>
 
           <NodeGroupsEditor groups={groups} setGroups={setGroups} flavors={flavors} variants={variants} />

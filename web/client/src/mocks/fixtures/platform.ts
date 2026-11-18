@@ -103,6 +103,14 @@ export const locations: Location[] = [
     provider: "sandbox",
     serviceName: "ProxCloud Sandboxes",
   },
+  {
+    serviceId: "svc-nas-1",
+    region: "RegionOne",
+    displayName: "Hanoi File Shares",
+    resourceTypes: ["SHARE"],
+    provider: "truenas",
+    serviceName: "ProxCloud File Shares",
+  },
 ]
 
 // Sidebar service gating — keys are service slugs (AppShell.tsx).
@@ -117,6 +125,9 @@ export const uiMenu = {
       network: { enabled: true },
       database: { enabled: true },
       sandbox: { enabled: true },
+      kubernetes: { enabled: true },
+      dns: { enabled: true },
+      shares: { enabled: true },
     },
   },
 }

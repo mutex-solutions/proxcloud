@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { cn } from "@/lib/utils"
 import { apiFetch } from "@/lib/api"
 import { useProjectId } from "@/lib/hooks"
 import { useOrg } from "./MembersPage"
@@ -101,6 +102,8 @@ export default function RolesPage() {
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<OrgRole | null>(null)
   const [name, setName] = useState("")
+  // The server's rule (org.validateRoleName), on the name as it stores it: upper case.
+  const nameValid = /^[A-Z][A-Z0-9_]*$/.test(name.trim().toUpperCase())
   const [description, setDescription] = useState("")
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [deleting, setDeleting] = useState<OrgRole | null>(null)
@@ -291,8 +294,13 @@ export default function RolesPage() {
                   autoComplete="off"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="billing-viewer"
+                  placeholder="BILLING_VIEWER"
+                  aria-invalid={!!name.trim() && !nameValid}
+                  aria-describedby="role-name-rule"
                 />
+                <p id="role-name-rule" className={cn("mt-1.5 text-xs", name.trim() && !nameValid ? "text-destructive" : "text-muted-foreground")}>
+                  Starts with a letter; letters, digits and underscores only. It is stored in upper case.
+                </p>
               </div>
             ) : null}
             <div>
@@ -344,7 +352,7 @@ export default function RolesPage() {
             </Button>
             <Button
               onClick={() => save.mutate()}
-              disabled={(!editing && !name.trim()) || save.isPending}
+              disabled={(!editing && !nameValid) || save.isPending}
             >
               {save.isPending ? "Saving…" : editing ? "Save role" : "Create role"}
             </Button>
