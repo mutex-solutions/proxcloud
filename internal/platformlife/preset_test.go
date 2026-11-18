@@ -300,7 +300,7 @@ func bomWithClusterChart(t *testing.T, version string) *BOM {
 }
 
 // Three control plane machines under this release's BOM with the cluster chart that builds them (0.1.14, the chart in
-// this tree; the BOM pins it at the release): the values as a golden, and through the chart one KubeadmControlPlane of
+// this tree and the one the BOM pins): the values as a golden, and through the chart one KubeadmControlPlane of
 // three replicas on the one pinned template. No previous BOM has such a golden: three are refused there.
 func TestRenderGoldenThreeControlPlanes(t *testing.T) {
 	b := bomWithClusterChart(t, "0.1.14")
@@ -465,8 +465,8 @@ func TestPreflightCapacity(t *testing.T) {
 }
 
 // From 1 to 3 on a built platform is an apply that adds machines: the cluster stage writes the count into the cluster
-// chart's values and waits until three control plane machines run, not one. Under this release's BOM as it is pinned
-// today (cluster chart 0.1.13) the same apply stops with the reason, and nothing is written.
+// chart's values and waits until three control plane machines run, not one. Under a BOM whose cluster chart builds one
+// (0.1.13 and older; this release's pins 0.1.14) the same apply stops with the reason, and nothing is written.
 func TestClusterStageWaitsForThreeControlPlanes(t *testing.T) {
 	three := func(_ *Run, in *Installation, _ *Secrets) { in.Spec.Clusters[0].ControlPlane.Replicas = 3 }
 	if !chartBuildsReplicas(t) {

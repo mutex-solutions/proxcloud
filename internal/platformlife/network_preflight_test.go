@@ -108,8 +108,8 @@ func TestPreflightNetworkModes(t *testing.T) {
 	want("routed, the name taken", rows["bridge"], CheckFail, "this installation did not make")
 }
 
-// kamajiChartTagsNICs: the embedded BOM's cluster chart reads proxmox.network.vlan. False until the BOM pins chart
-// 0.1.14; the spec row then refuses a tag, and this test follows the pin.
+// kamajiChartTagsNICs: the embedded BOM's cluster chart reads proxmox.network.vlan. True since the BOM pins chart
+// 0.1.14; under an older pin the spec row refuses a tag, and this test follows the pin.
 func kamajiChartTagsNICs(t *testing.T) bool {
 	t.Helper()
 	_, err := ClusterValues(embedded(t), func() RenderInput { in := renderInput(); in.Network.VLAN = 2; return in }())

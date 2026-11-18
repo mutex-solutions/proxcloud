@@ -30,7 +30,7 @@ A worker runs `kubeadm join` once, at its first boot. When that fails the VM kee
 - A cluster made on an older chart gets the health check when you **Bump** it onto 0.1.14 or later, and it then acts at once on machines already past the timeout.
 - The provider's two keys are the setting of every cluster on chart 0.1.14 or later: ProxCloud writes them into a cluster at every change it makes to that cluster, over what the cluster had. After you change them, **Apply settings** on a cluster's row (shown when the cluster is already on the provider's chart) writes them to that cluster now. There is no per-cluster setting.
 
-None of this was run on a lab yet. Cluster chart 0.1.14 and platform chart 0.1.3 (which lets the portal delete a Machine and read the health checks) are not published at the time of writing: until the provider's chart version is 0.1.14 no cluster has a health check, and on a managed-services platform Replace answers that the service account cannot delete Machines.
+None of this was run on a lab yet. Cluster chart 0.1.14 and platform chart 0.1.3 (which lets the portal delete a Machine and read the health checks) come with a managed-services platform installed from this release. Until the provider's chart version is 0.1.14 no cluster has a health check, and on a managed-services platform installed from an earlier release Replace answers that the service account cannot delete Machines, until the platform is upgraded to this release.
 
 | Code | Usual cause | What to do |
 |---|---|---|
@@ -45,7 +45,7 @@ Needs attention clears by itself when the cluster recovers; nothing is deleted o
 
 ## If the dialog says the service account cannot read Machines
 
-The provider's ClusterRole on the management cluster predates this view. On an installer-built site re-apply `deploy/mgmt-cluster/rbac.yaml`. A platform installed by **Managed services** from this release has the access (platform chart `proxcloud-platform` 0.1.2); one installed from an earlier release keeps the old ClusterRole (its `platform` Application reverts a hand-applied one) until Remove and a new install. Until then tenants see the status as before, without reasons.
+The provider's ClusterRole on the management cluster predates this view. On an installer-built site re-apply `deploy/mgmt-cluster/rbac.yaml`. A platform installed by **Managed services** from release 0.8.0 or later has the access (platform chart `proxcloud-platform` 0.1.2 or later); one installed from an earlier release keeps the old ClusterRole (its `platform` Application reverts a hand-applied one) until Remove and a new install. Until then tenants see the status as before, without reasons.
 
 ## Worker firewall
 

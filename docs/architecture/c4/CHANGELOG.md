@@ -4,6 +4,22 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-19: the platform BOM pins cluster chart 0.1.14 and platform chart 0.1.3
+
+**What changed:** no component, container or relation. `deploy/platform/platform-bom.yaml` names
+`proxmox-kamaji-cluster` 0.1.14 (`sha256:71455927...`) for `pc-platform` and `tenantCharts.kubernetes`, and
+`proxcloud-platform` 0.1.3 (`sha256:e6873498...`) for `capi`, `capi-tenant` and `platform`, both with the digest
+ghcr.io serves. Each of the four components has `upgradeFrom` with the version it replaces, so the classifier
+("Platform installations") allows the move from the BOMs of 0.8.0, 0.8.1 and 0.8.2.
+
+**Why:** both charts were published from their tags; the control plane count, the VLAN tag, the node groups'
+MachineHealthCheck and the `delete` on Machines reach a platform only through the BOM.
+
+**Diagrams:** none changed. `c2-containers.md`: the row of chart `proxmox-kamaji-cluster` says which version is
+published and pinned.
+
+**Not verified:** on a lab.
+
 ## 2026-11-19: project invitations can be listed and revoked
 
 **What changed:** C3, component "Project invites": responsibility extended. The inviter and a project admin list

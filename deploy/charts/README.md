@@ -51,7 +51,7 @@ Four charts live here:
   the portal writes from each node's free memory, CPU and storage; a group without the key is
   split evenly as before, so an existing cluster renders the same objects until its node groups
   change. A map whose sum is not `machineCount`, or that names a node without an image, fails the
-  render. 0.1.14 (not published) reads `machineHealthCheck`: with `nodeStartupTimeoutSeconds` above
+  render. 0.1.14 reads `machineHealthCheck`: with `nodeStartupTimeoutSeconds` above
   0, one `MachineHealthCheck` per node group of two or more machines replaces a worker that
   registered no Node in that time, while at most `maxUnhealthy` machines of the group (a number,
   capped at the group's count minus one) are not healthy. The default is 0: no object, and the
@@ -83,10 +83,10 @@ pullable; see [release readiness](../../docs/release-readiness.md).
 
 For `database-cluster`, `proxmox-kamaji-cluster` and `proxcloud-platform`, bump `version:` in `Chart.yaml`
 in the PR that changes the chart, merge, then have a maintainer deliberately cut
-the matching tag. The current source versions are database `0.5.1` (published and pinned by
-the platform BOM), Kubernetes `0.1.14` and platform `0.1.3` (neither published: the BOM still
-pins `0.1.13` and `0.1.2`, which are, and stays on them until the tags are cut; Kubernetes
-`0.1.14` adds the node groups' MachineHealthCheck and the VLAN tag; platform `0.1.3` adds `delete`
+the matching tag. The current source versions are database `0.5.1`, Kubernetes `0.1.14` and
+platform `0.1.3`, all three published and pinned by the platform BOM (Kubernetes
+`0.1.14` adds the node groups' MachineHealthCheck, the VLAN tag and the control plane count of the
+platform cluster; platform `0.1.3` adds `delete`
 on Machines and read access to MachineHealthChecks for the provider's service account);
 they are independent of the app's `0.8.2`. Publishing is idempotent — an
 already-published version is skipped, so a reused version does not update an old

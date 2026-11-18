@@ -63,12 +63,10 @@ published. App publication tags are narrower (stable/RC, no build metadata), sin
 images use the raw tag and Docker tags cannot contain `+`.
 
 Managed charts use their own metadata versions and reject a mismatching tag.
-`database-cluster` `0.5.1`, `proxmox-kamaji-cluster` `0.1.13` (placement by free capacity) and
-`proxcloud-platform` `0.1.2` (read access to Machines), all three published from their own tags
-and pinned by digest in the platform BOM (the source is at `proxmox-kamaji-cluster` `0.1.14`, the
-MachineHealthCheck of a node group and the VLAN tag of the platform network, and
-`proxcloud-platform` `0.1.3`, replacing a Machine: neither is tagged, and neither is pinned until
-its tag is cut), need separate
+`database-cluster` `0.5.1`, `proxmox-kamaji-cluster` `0.1.14` (the MachineHealthCheck of a node
+group, the VLAN tag of the platform network and the platform cluster's control plane count) and
+`proxcloud-platform` `0.1.3` (replacing a Machine), all three published from their own tags
+and pinned by digest in the platform BOM, need separate
 publication checks/tags; the app tag does not publish them or move existing
 provider pins or managed data. Re-publishing an already existing chart version is
 skipped; it does not replace old contents. See the
@@ -359,6 +357,15 @@ What a release must do when it changes a pin, before its tag:
 3. Read the plan the release gives a platform of each earlier release: on a
    build of the release commit, `GET …/plan` of such an installation, or
    `PlanFor` in a test.
+
+The pairs of the BOM on `main` today (0.8.0, 0.8.1 and 0.8.2 to it): the BOMs
+differ in the release line, in `tenantCharts.kubernetes` and in the four
+components of the product's own charts, `pc-platform` 0.1.13 to 0.1.14 and
+`capi`, `capi-tenant` and `platform` 0.1.2 to 0.1.3. Each of the four lists the
+old version in `upgradeFrom`: `TestUpgradeRollsNoMachine` compares all three
+pairs and passes, and platform chart 0.1.3 differs from 0.1.2 in the provider's
+ClusterRole alone. So the classifier allows all three pairs, and only `-dev`
+refuses them until the release commit. None of these moves was run on a lab.
 
 Not checked: that a chart of `proxcloud-platform` whose version changes is safe
 to sync over the old one (its templates are RBAC, AppProjects, a MetalLB pool
