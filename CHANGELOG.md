@@ -85,6 +85,18 @@ None of the entries below is verified on a lab yet: each one says so, and what i
   (`LIST_SHARE_WARNINGS`). A serial console session ends on the page when its server was stopped or restarted
   (`GET_CONSOLE_STATE`, asked every 10 s). Not verified on a lab: the API tests use a fake Proxmox, the console was
   run against its mock app ([docs/cloud-integration.md](docs/cloud-integration.md)).
+- **The platform kubeconfig's port-forward is no longer refused on its first request** (lab finding H1). The
+  break-glass Role in `argocd` allowed only `create` on `pods/portforward`. The API server authorizes a WebSocket
+  port-forward, which `kubectl` tries first since 1.31, as `get`: `kubectl` 1.35 was refused (one 403 in the
+  cluster's audit trail per port-forward), fell back to SPDY without a word and worked; a client without that
+  fallback would have been refused. The Role now allows `get` and `create`. The route writes the Role at every
+  call, so an installed platform cluster gets the rule with the next download of the kubeconfig. The seed
+  kubeconfig is cluster-admin and was not affected. The refusal and the fallback were seen on the lab
+  (2026-11-18, `kubectl` 1.35.10); the fix is not verified on a lab: the test pins the Role's rules on a fake
+  cluster ([docs/managed-services.md](docs/managed-services.md#after-the-install)). The guide of the cluster
+  release job now says that only a failed look (`release_failed`) writes the line `kamaji: release of a deleted
+  cluster, will retry`; a look that finds the cascade still running (`cascade_running`) logs nothing
+  ([docs/managed-k8s.md](docs/managed-k8s.md#deletion-and-orphan-finalization)).
 
 ## [0.8.1] - 2026-11-18
 

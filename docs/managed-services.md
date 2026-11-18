@@ -900,7 +900,7 @@ What the token may do:
 | Where | What | Why |
 |---|---|---|
 | The whole cluster (ClusterRole) | `get`, `list`, `watch` on namespaces, nodes, pods and their logs, services, endpoints, events, config maps, volumes and claims, service accounts, quotas, and on every resource of the API groups of workloads, networking, storage, CRDs, metrics, ArgoCD, Kamaji, Cluster API (without its bootstrap group), CloudNativePG, MetalLB, Cilium and cert-manager | The read steps of this guide and of [managed-k8s.md](managed-k8s.md): Applications, tenant control planes, machines, pods |
-| Namespace `argocd` (Role) | `create` on `pods/portforward`; `get` on the Secret `argocd-initial-admin-secret` | The two ArgoCD commands |
+| Namespace `argocd` (Role) | `get` and `create` on `pods/portforward` (a WebSocket port-forward is authorized as `get`, a SPDY one as `create`); `get` on the Secret `argocd-initial-admin-secret` | The two ArgoCD commands. The Service and the pods that `kubectl port-forward svc/…` looks up first are read through the ClusterRole |
 
 It reads no other Secret (a tenant cluster's admin kubeconfig and the providers' token are Secrets),
 no join token of Cluster API's bootstrap group, and it changes, deletes and executes nothing. The
