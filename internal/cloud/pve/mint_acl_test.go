@@ -146,6 +146,10 @@ func TestMintWithAnOwnRowOnTheBootStore(t *testing.T) {
 		own("/storage/tank", "PVEAuditor", "user", portal, 0),
 		// A zone whose rows do not propagate: its vnets still inherit from /sdn/zones, and must after the script too.
 		own("/sdn/zones/lan", PlatformRole, "user", portal, 0), own("/sdn/zones/lan", PlatformRole, "token", DefaultPlatformTokenID, 0),
+		// A vnet: a mint writes there. A bridge of localnetwork and a VLAN below a vnet: no mint does, so the script
+		// must not put Permissions.Modify there.
+		own("/sdn/zones/pc/v7", "PVEAuditor", "user", portal, 0),
+		own("/sdn/zones/localnetwork/vmbr0", "PVEAuditor", "user", portal, 0), own("/sdn/zones/pc/v7/100", "PVEAuditor", "user", portal, 0),
 	)
 	srv := httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(srv.Close)
@@ -217,6 +221,7 @@ func TestMintWithAnOwnRowOnTheBootStore(t *testing.T) {
 	if want := []string{
 		"/sdn/zones/lan --tokens proxcloud@pve!platform --roles ProxCloudKubeMint --propagate 0",
 		"/sdn/zones/lan --users proxcloud@pve --roles ProxCloudKubeMint --propagate 0",
+		"/sdn/zones/pc/v7 --users proxcloud@pve --roles ProxCloudKubeMint --propagate 0",
 		"/storage/nvme-u2 --tokens proxcloud@pve!platform --roles ProxCloudKubeMint --propagate 1",
 		"/storage/nvme-u2 --users proxcloud@pve --roles ProxCloudKubeMint --propagate 1",
 		"/storage/tank --users proxcloud@pve --roles ProxCloudKubeMint --propagate 0",

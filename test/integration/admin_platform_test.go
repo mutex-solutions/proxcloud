@@ -70,6 +70,11 @@ func TestAdminPlatformInstallations(t *testing.T) {
 		mu.Lock()
 		auths = append(auths, r.Header.Get("Authorization"))
 		mu.Unlock()
+		// Every token holds nothing anywhere: the privilege rows name each path they read.
+		if strings.HasSuffix(r.URL.Path, "/access/permissions") {
+			fmt.Fprintf(w, `{"data":{%q:{}}}`, r.URL.Query().Get("path"))
+			return
+		}
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{"errors":{"fake":"nothing here"}}`))
 	}))
@@ -77,7 +82,8 @@ func TestAdminPlatformInstallations(t *testing.T) {
 	enc := textcrypt.New("test-key")
 	mustInsert(t, db, "externalService", pgdoc.M{"_id": "svc-pve", "name": "lab", "type": "CLOUD", "status": "PUBLIC", "config": pgdoc.M{
 		"provider": "proxmox", "region": "lab", "apiUrl": fakePVE.URL, "tokenId": "proxcloud@pve!platform", "importStorage": "nas-templates",
-		"network": pgdoc.M{"cidrPool": "10.100.0.0/16", "blockedCidrs": []string{"10.200.200.0/25"}}},
+		"storageProfiles": pgdoc.M{"fast": pgdoc.M{"storages": pgdoc.M{"*": "nvme-u2"}}, "archive": pgdoc.M{"bootDisk": false, "storages": pgdoc.M{"*": "truenas"}}},
+		"network":         pgdoc.M{"cidrPool": "10.100.0.0/16", "blockedCidrs": []string{"10.200.200.0/25"}}},
 		"secret": pgdoc.M{"tokenSecret": enc.Encrypt(portalToken)}})
 	mustInsert(t, db, "adminPermission", pgdoc.M{"_id": "support-sub", "role": "SUPPORT"})
 	mustInsert(t, db, "adminPermission", pgdoc.M{"_id": "admin-sub", "role": "ADMIN"})
@@ -171,6 +177,26 @@ func TestAdminPlatformInstallations(t *testing.T) {
 	_ = json.Unmarshal(call("admin-sub", http.MethodPost, one+"/preflight", "", http.StatusOK).Data, &pf)
 	if pf.OK || len(pf.Checks) == 0 {
 		t.Fatalf("preflight against a refusing PVE: %+v", pf)
+	}
+	// The mint role is read on the provider's own stores and zones, not on /storage alone: a boot store with a row of
+	// the portal's own reads complete on the parent (production, 2026-11-17). A capacity store gets no cluster row.
+	mintRows := 0
+	for _, c := range pf.Checks {
+		if c.ID != "privileges:kubemint" {
+			continue
+		}
+		mintRows++
+		for _, path := range []string{" on /storage/nvme-u2 ", " on /storage/nas-templates ", " on /sdn/zones/localnetwork "} {
+			if !strings.Contains(c.Message, path) {
+				t.Errorf("privileges:kubemint does not read%s: %s", path, c.Message)
+			}
+		}
+		if strings.Contains(c.Message, "truenas") || !strings.Contains(c.Message, pve.KubeMintShadowed) {
+			t.Errorf("privileges:kubemint: %s", c.Message)
+		}
+	}
+	if mintRows != 1 {
+		t.Errorf("%d privileges:kubemint rows", mintRows)
 	}
 	mu.Lock()
 	sent := strings.Join(auths, "\n")

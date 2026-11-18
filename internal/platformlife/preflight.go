@@ -203,8 +203,7 @@ func (p Preflight) Run(ctx context.Context) []Check {
 	}
 	row("credentials", creds, "Both platform tokens are stored.")
 
-	// note follows the remedy of a line whose path it is true of (shadowed).
-	privs := func(id string, c *pve.Client, who string, checks []pve.PrivCheck, shadowed func(line string) bool, note string) {
+	privs := func(id string, c *pve.Client, who string, checks []pve.PrivCheck) {
 		if c == nil {
 			return
 		}
@@ -213,22 +212,21 @@ func (p Preflight) Run(ctx context.Context) []Check {
 			row(id, readErr("the permissions of "+who, err), "")
 			return
 		}
-		for i, line := range missing {
-			missing[i] = who + " lacks " + line + " (run the managed-services script again: GET /api/v1/admin/setup/proxmox-script?managedServices=true&bootStorage=" + s.Storage.Boot + ", or step 2 of the Managed services page)"
-			if shadowed != nil && shadowed(line) {
-				missing[i] += ". " + note
-			}
+		for i := range missing {
+			missing[i] = who + " lacks " + missing[i] + " (run the managed-services script again: GET /api/v1/admin/setup/proxmox-script?managedServices=true&bootStorage=" + s.Storage.Boot + ", or step 2 of the Managed services page)"
 		}
 		row(id, missing, who+" holds what it needs.")
 	}
-	privs("privileges:capi", p.CAPI, pve.CAPITokenID, pve.CAPIPrivileges(s.Storage.Boot, s.Storage.ISO), nil, "")
-	privs("privileges:csi", p.CSI, pve.CSITokenID, pve.CSIPrivileges(s.Storage.Boot), nil, "")
+	privs("privileges:capi", p.CAPI, pve.CAPITokenID, pve.CAPIPrivileges(s.Storage.Boot, s.Storage.ISO))
+	privs("privileges:csi", p.CSI, pve.CSITokenID, pve.CSIPrivileges(s.Storage.Boot))
 	// The paths a mint writes, not their parents alone: a store or zone with a row of its own reads complete on the
 	// parent and refuses the cluster token's row (production, 2026-11-17: every tenant cluster create failed on it).
-	privs("privileges:kubemint", p.Portal.C, "the portal token", pve.KubeMintPrivileges(p.MintStores, p.MintZones), func(line string) bool {
-		_, path, _ := strings.Cut(line, " on ")
-		return strings.HasPrefix(path, "/storage/") || strings.HasPrefix(path, "/sdn/zones/")
-	}, pve.KubeMintShadowed)
+	privs("privileges:kubemint", p.Portal.C, "the portal token", pve.KubeMintPrivileges(p.MintStores, p.MintZones))
+	// Once for the row, when a line names a single store or zone: why the parent's grant does not reach it, and which
+	// of these lines the script does not fix.
+	if c := &out[len(out)-1]; c.ID == "privileges:kubemint" && c.Status == CheckFail && (strings.Contains(c.Message, " on /storage/") || strings.Contains(c.Message, " on /sdn/zones/")) {
+		c.Message += "\n" + pve.KubeMintShadowed
+	}
 
 	// The mint grant reaches the users of pve.KubeMintGroup alone. On /access/groups itself (where sites set up before
 	// the group hold it) PVE lets the token create an API token for every user of the cluster, root@pam included.

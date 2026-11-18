@@ -363,11 +363,13 @@ func KubeMintPrivileges(stores, zones []string) []PrivCheck {
 	return checks
 }
 
-// KubeMintShadowed is what the Check adds to a missing mint privilege on a single store or zone: why the parent's
-// grant does not reach it, and what the script does about it.
-const KubeMintShadowed = "A tenant cluster's token gets its ACL row on this path, and a cluster create that needs it is refused (409) until this is fixed. " +
-	"The cause is an ACL row of the portal's user or token on this very path: in Proxmox it replaces the " + KubeMintRole + " role the parent path passes down. " +
-	"The script finds every such row and writes " + KubeMintRole + " next to it, for the user or token that holds the row."
+// KubeMintShadowed is what the Check adds, once, to a privileges:kubemint row that names a single store or zone: why
+// the parent's grant does not reach it, what the script does about it, and what it does not.
+const KubeMintShadowed = "On /storage/<store> and /sdn/zones/<zone>: a tenant cluster's token gets its ACL row on that path, and a cluster create that needs it is refused (409) until this is fixed. " +
+	"The cause is an ACL row of the portal's user or token on that very path: in Proxmox it replaces the " + KubeMintRole + " role the parent path passes down. " +
+	"The script finds every such row and writes " + KubeMintRole + " next to it, for the user or token that holds the row. " +
+	"It does not find a row the portal's user holds through a group, and does not write the provider's import store when the settings name another: " +
+	"if a line stays after the script ran, see docs/proxmox-permissions.md (\"A row of the portal's own on a store or a zone\") and docs/managed-services.md."
 
 // KubeMintForbidden is what the portal token must hold nowhere, per ACL path (HeldPrivileges): User.Modify on
 // /access/groups reaches every user of the cluster, and Permissions.Modify on any of the three lets the token write

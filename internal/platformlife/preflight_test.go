@@ -255,7 +255,13 @@ func TestPreflight(t *testing.T) {
 			t.Errorf("%s: want a failure naming %q, got %+v", id, want, c)
 		}
 	}
-	// A single store reads apart from /storage, and its line says why the grant on /storage does not reach it.
+	// A single store reads apart from /storage, and the row says, once, why the grant on /storage does not reach it.
+	// Two such lines, to see that it is once.
+	delete(f.perms[pve.DefaultPlatformTokenID], "/storage/nvme-u2")
+	if m := checkMap(pf.Run(ctx))["privileges:kubemint"].Message; strings.Count(m, pve.KubeMintShadowed) != 1 || strings.Count(m, " lacks ") != 2 {
+		t.Errorf("privileges:kubemint with two stores of their own: %s", m)
+	}
+	f.perms[pve.DefaultPlatformTokenID]["/storage/nvme-u2"] = pve.ManagedRoles[2].Privs
 	if m := got["privileges:kubemint"].Message; !strings.Contains(m, pve.KubeMintShadowed) || strings.Contains(m, "on /storage (") {
 		t.Errorf("privileges:kubemint does not explain the store's own row: %s", m)
 	}

@@ -47,16 +47,18 @@ func ManagedSetupScript(tokenID string, gpu bool, importStorage, bootStorage, is
 }
 
 // kubeMintShadowRows is the Perl that reads `pveum acl list` as JSON and prints, for the portal user ($ARGV[0]) and
-// token ($ARGV[1]), one line "--users|--tokens <id> <propagate> <path>" per path below /storage or /sdn/zones where
-// that principal holds a row of its own with another role: there the row replaces the mint role the parent passes
-// down (KubeMintPrivileges). propagate is 1 when any of those rows propagates, since only such a row reaches the
+// token ($ARGV[1]), one line "--users|--tokens <id> <propagate> <path>" per store (/storage/<store>), zone
+// (/sdn/zones/<zone>) and vnet (/sdn/zones/<zone>/<vnet>) where that principal holds a row of its own with another
+// role: there the row replaces the mint role the parent passes down (KubeMintPrivileges). Those are the paths a mint
+// writes or their parents (MintClusterTokens); a bridge of localnetwork (/sdn/zones/localnetwork/<bridge>) and anything
+// deeper get no row from a mint, so none here: the role is Permissions.Modify. propagate is 1 when any of those rows propagates, since only such a row reaches the
 // paths below it, where the mint role must then follow; a mint row that propagated from a path whose other rows do
 // not would itself replace what the paths below inherit. Installer stage 10 has the same rule ("Repeat the mint role").
 const kubeMintShadowRows = `my ($u, $t) = @ARGV; my %p; ` +
 	`for (@{ decode_json(join "", <STDIN>) }) { ` +
 	`next if $_->{roleid} eq "` + KubeMintRole + `"; ` +
 	`my $f = $_->{type} eq "user" && $_->{ugid} eq $u ? "--users" : $_->{type} eq "token" && $_->{ugid} eq $t ? "--tokens" : next; ` +
-	`next unless $_->{path} =~ m{^/storage/[^/]+$|^/sdn/zones/.}; ` +
+	`next unless $_->{path} =~ m{^/storage/[^/]+$|^/sdn/zones/[^/]+$} || ($_->{path} =~ m{^/sdn/zones/([^/]+)/[^/]+$} && $1 ne "localnetwork"); ` +
 	`$p{"$f $_->{ugid}"}{$_->{path}} ||= $_->{propagate} ? 1 : 0 } ` +
 	`for my $k (sort keys %p) { print "$k $p{$k}{$_} $_\n" for sort keys %{ $p{$k} } }`
 
@@ -147,7 +149,7 @@ func setupScript(tokenID string, gpu bool, importStorage string, managed []Manag
 				}
 			}
 		}
-		line("# a row of this user or token on a single store or zone replaces what /storage and /sdn/zones pass down there, the")
+		line("# a row of this user or token on a single store, zone or vnet replaces what /storage and /sdn/zones pass down there, the")
 		line("# mint role too, and a tenant cluster on that store is then refused. The mint role is written next to each such row,")
 		line("# for the one that holds the row (a row for the other would replace what that one inherits), propagated as the row is")
 		line(`PC_SHADOW=$(pveum acl list --output-format json | perl -MJSON::PP -e %s "$PC_USER" "$PC_TOKEN")`, q(kubeMintShadowRows))
