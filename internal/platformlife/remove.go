@@ -117,16 +117,8 @@ func (x *acq) removeCluster(ctx context.Context) error {
 	}
 	// The workload answers: its volumes are read again, against the BOM that named its namespaces (the installed
 	// one, else this release's). Otherwise the recorded ones stand.
-	var bom *BOM
-	if cur, err := Current(); err == nil {
-		bom = cur.BOM
-	}
-	if ref := x.in.Status.BOM; ref != nil {
-		if b, ok := embeddedBOM(ref.SHA256); ok {
-			bom = b
-		}
-	}
-	if wl != nil && bom != nil {
+	bom, err := bomOf(x.in)
+	if wl != nil && err == nil {
 		if vols, err := platformVolumes(ctx, bom, wl); err == nil && !slices.Equal(vols, x.in.Status.Volumes) {
 			if err := x.record(ctx, func(_ *Run, in *Installation, _ *Secrets) { in.Status.Volumes = vols }); err != nil {
 				return err

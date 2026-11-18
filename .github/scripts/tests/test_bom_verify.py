@@ -260,6 +260,17 @@ class BomVerifyTest(unittest.TestCase):
             self.assertNotIn("0.0.0+", item["version"], item["ref"])
             self.assertRegex(item["ref"].rpartition(":")[2], r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$", item["ref"])
 
+    def test_the_previous_boms_parse_and_are_releases(self):
+        previous = sorted((ROOT / "deploy/platform/previous").glob("*.yaml"))
+        self.assertTrue(previous)
+        for path in previous:
+            release, items = bv.parse_bom(path.read_text(encoding="utf-8"))
+            self.assertEqual(release + ".yaml", path.name)
+            self.assertNotIn("-dev", release)
+            self.assertGreaterEqual(len(items), 20)
+            for item in items:
+                self.assertRegex(item["digest"], r"^(sha256:)?[0-9a-f]{64}$", item["ref"])
+
 
 if __name__ == "__main__":
     unittest.main()

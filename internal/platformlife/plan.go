@@ -1,7 +1,7 @@
 package platformlife
 
-// plan.go — GET …/plan (design §7): a read-only diff of the installed BOM against the one this release embeds, with the
-// reasons an upgrade would be refused. The live reason (an Application not Healthy) comes with the live read.
+// plan.go — GET …/plan (design §7): a read-only diff of the installed BOM against the one an apply runs with, with the
+// reasons it would be refused. The live reason (an Application not Healthy) comes with the live read.
 
 import (
 	"fmt"
@@ -20,40 +20,37 @@ type PlanChange struct {
 
 // Plan is the answer of GET …/plan.
 type Plan struct {
-	Installed *BOMRef      `json:"installed"` // nil: nothing installed yet
-	Target    BOMRef       `json:"target"`
+	Installed *BOMRef      `json:"installed"`       // nil: nothing installed yet
+	Target    BOMRef       `json:"target"`          // the BOM an apply runs with
+	Newer     *BOMRef      `json:"newer,omitempty"` // this build's own BOM, when the installed platform stays on a previous one
 	Changes   []PlanChange `json:"changes"`
 	Blocking  []string     `json:"blocking"`
 }
 
-// embeddedBOM finds an embedded BOM by sha256. Only the current one is embedded today.
-// ponytail: one BOM; the previous ones of this and the last minor (deploy/platform/previous/) join here with the first
-// release that changes the BOM.
-func embeddedBOM(sha string) (*BOM, bool) {
-	cur, err := Current()
-	if err != nil || cur.SHA256 != sha {
-		return nil, false
-	}
-	return cur.BOM, true
-}
-
-// PlanFor diffs the installed BOM (nil for a new installation) against the current one. An installed BOM this build
-// does not embed blocks with bom_unsupported: a release embeds one BOM and none upgrades between BOMs yet.
+// PlanFor is what an apply does to an installation (installed nil: a new one, which gets the current BOM). An
+// installed platform stays on its BOM: target is the installed one and nothing changes version, and when this build's
+// own BOM is another one, newer names it. No release moves an installed platform to a newer BOM yet. An installed BOM
+// this build does not embed (Lookup) blocks with bom_unsupported.
 func PlanFor(installed *BOMRef) (Plan, error) {
-	cur, err := Current()
+	to, err := Current()
 	if err != nil {
 		return Plan{}, err
 	}
-	p := Plan{Installed: installed, Target: BOMRef{Release: cur.Release, SHA256: cur.SHA256}, Changes: []PlanChange{}, Blocking: []string{}}
+	p := Plan{Installed: installed, Target: BOMRef{Release: to.Release, SHA256: to.SHA256}, Changes: []PlanChange{}, Blocking: []string{}}
 	var from *BOM
 	if installed != nil {
-		var ok bool
-		if from, ok = embeddedBOM(installed.SHA256); !ok {
-			p.Blocking = append(p.Blocking, fmt.Sprintf("%s: the installed BOM %s is not the one this release embeds, and no release upgrades between BOMs yet; run the ProxCloud release that installed the platform, or delete every tenant cluster and database, then remove managed services and install again", CodeBOMUnsupported, installed.Release))
+		b, ok := Lookup(installed.SHA256)
+		if !ok {
+			p.Blocking = append(p.Blocking, fmt.Sprintf("%s: the installed BOM %s is not one this release embeds, and no release upgrades between BOMs yet; run the ProxCloud release that installed the platform, or delete every tenant cluster and database, then remove managed services and install again", CodeBOMUnsupported, installed.Release))
 			return p, nil
 		}
+		if b.SHA256 != to.SHA256 {
+			newer := p.Target
+			p.Newer, p.Target = &newer, BOMRef{Release: b.Release, SHA256: b.SHA256}
+		}
+		from, to = b.BOM, b
 	}
-	p.Changes = Diff(from, cur.BOM)
+	p.Changes = Diff(from, to.BOM)
 	for _, c := range p.Changes {
 		if c.Blocking != "" {
 			p.Blocking = append(p.Blocking, c.Cluster+"/"+c.Name+": "+c.Blocking)

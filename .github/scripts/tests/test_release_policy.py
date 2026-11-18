@@ -186,6 +186,10 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(gate["permissions"], {"contents": "read"})
         step = next(s for s in gate["steps"] if s.get("run") == "python3 .github/scripts/bom_verify.py --release")
         self.assertEqual(step["if"], "github.ref_type == 'tag'")
+        # The BOMs of earlier releases, which the images embed for the platforms those releases installed.
+        previous = next(s for s in gate["steps"] if "deploy/platform/previous/*.yaml" in s.get("run", ""))
+        self.assertEqual(previous["if"], "github.ref_type == 'tag'")
+        self.assertIn('bom_verify.py --release --bom "$bom"', previous["run"])
         self.assertIn("bom-verify", jobs["build"]["needs"])
         self.assertEqual(jobs["release"]["needs"], "build")
         self.assertNotIn("secrets.", str(gate))

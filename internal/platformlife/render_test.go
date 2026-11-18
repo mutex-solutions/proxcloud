@@ -141,19 +141,37 @@ func yamlDoc(t *testing.T, v any) []byte {
 // Every renderer's output for the fixture and the embedded BOM, so a change to a renderer or to the BOM shows up as a
 // diff to review. `go test ./internal/platformlife -run TestRenderGolden -update` rewrites them.
 func TestRenderGolden(t *testing.T) {
-	r := renderAll(t, embedded(t), renderInput())
-	golden(t, "render-cluster-values.golden.yaml", yamlDoc(t, r.cluster))
-	golden(t, "render-seed-argocd.golden.yaml", yamlDoc(t, map[string]any{"helmChart": r.helmChart, "projects": r.projects, "applications": r.apps}))
-	golden(t, "render-secrets.golden.yaml", yamlDoc(t, []any{r.pveSecret, r.csiSecret}))
-	golden(t, "render-providers.golden.yaml", yamlDoc(t, map[string]any{"kubernetes": r.k8sBody, "database": r.dbBd}))
-	for name, content := range r.seed {
-		golden(t, filepath.Join("seed-cd", name+".golden"), []byte(content))
-	}
+	renderGolden(t, "", embedded(t))
 	manifest, err := BootstrapManifest(plantSeed.BootstrapToken, plantBoot.Now.Add(SeedBootstrapTTL))
 	if err != nil {
 		t.Fatal(err)
 	}
 	golden(t, "seed-bootstrap-manifest.golden.json", []byte(manifest))
+}
+
+// The same for each previous BOM, under testdata/previous/<release>/: what an apply renders for a platform that
+// release installed. The pins come from the previous BOM; the renderers are this build's, so a change to a renderer
+// that would change an installed platform at its next apply shows up here.
+func TestRenderGoldenOfPreviousBOMs(t *testing.T) {
+	prev, err := Previous()
+	if err != nil || len(prev) == 0 {
+		t.Fatalf("previous BOMs: %d, %v", len(prev), err)
+	}
+	for _, b := range prev {
+		renderGolden(t, filepath.Join("previous", b.Release), b.BOM)
+	}
+}
+
+func renderGolden(t *testing.T, dir string, b *BOM) {
+	t.Helper()
+	r := renderAll(t, b, renderInput())
+	golden(t, filepath.Join(dir, "render-cluster-values.golden.yaml"), yamlDoc(t, r.cluster))
+	golden(t, filepath.Join(dir, "render-seed-argocd.golden.yaml"), yamlDoc(t, map[string]any{"helmChart": r.helmChart, "projects": r.projects, "applications": r.apps}))
+	golden(t, filepath.Join(dir, "render-secrets.golden.yaml"), yamlDoc(t, []any{r.pveSecret, r.csiSecret}))
+	golden(t, filepath.Join(dir, "render-providers.golden.yaml"), yamlDoc(t, map[string]any{"kubernetes": r.k8sBody, "database": r.dbBd}))
+	for name, content := range r.seed {
+		golden(t, filepath.Join(dir, "seed-cd", name+".golden"), []byte(content))
+	}
 }
 
 // Each credential appears only where design §5 puts it: the CAPI token in the seed's pc-platform-pve, the CSI token in

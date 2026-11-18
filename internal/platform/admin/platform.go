@@ -72,6 +72,15 @@ func (h *Handler) platformBOM(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, serviceReadPerm) {
 		return
 	}
+	if sha := r.URL.Query().Get("sha256"); sha != "" {
+		bom, ok := platformlife.Lookup(sha)
+		if !ok {
+			platformErr(w, http.StatusNotFound, platformlife.CodeBOMUnsupported, "This release does not embed a BOM with that sha256.", nil)
+			return
+		}
+		httpx.OK(w, bom)
+		return
+	}
 	bom, err := platformlife.Current()
 	if httpx.WriteError(w, err) {
 		return

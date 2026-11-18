@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"regexp"
 	"slices"
 	"strings"
@@ -312,3 +313,66 @@ var Current = sync.OnceValues(func() (Embedded, error) {
 	}
 	return Embedded{SHA256: hex.EncodeToString(sum[:]), BOM: b}, err
 })
+
+// Previous are the BOMs of earlier releases this build embeds next to its own (deploy/platform/previous/): a platform
+// one of them installed keeps its applies, which render from that BOM and not from the current one. None is a "-dev"
+// BOM, so a platform installed by a build of main is not among them. bom_test.go keeps them valid, unchanged and
+// limited to the releases it lists.
+var Previous = sync.OnceValues(func() ([]Embedded, error) {
+	files, err := fs.Glob(deploy.PreviousBOMs, "platform/previous/*.yaml")
+	if err != nil {
+		return nil, err
+	}
+	var out []Embedded
+	for _, f := range files {
+		raw, err := deploy.PreviousBOMs.ReadFile(f)
+		if err != nil {
+			return nil, err
+		}
+		b, err := Parse(raw)
+		if err == nil {
+			err = b.Validate()
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", f, err)
+		}
+		sum := sha256.Sum256(raw)
+		out = append(out, Embedded{SHA256: hex.EncodeToString(sum[:]), BOM: b})
+	}
+	return out, nil
+})
+
+// Lookup finds a BOM this build embeds by the sha256 of its file: the current one or a previous one.
+func Lookup(sha string) (Embedded, bool) {
+	if cur, err := Current(); err == nil && cur.SHA256 == sha {
+		return cur, true
+	}
+	prev, _ := Previous()
+	for _, b := range prev {
+		if b.SHA256 == sha {
+			return b, true
+		}
+	}
+	return Embedded{}, false
+}
+
+// bomOf is the BOM an installation's images, charts and namespaces come from: the installed one when this build embeds
+// it, else the current one (a new installation, or one whose apply is refused with bom_unsupported).
+func bomOf(in *Installation) (*BOM, error) {
+	if ref := in.Status.BOM; ref != nil {
+		if b, ok := Lookup(ref.SHA256); ok {
+			return b.BOM, nil
+		}
+	}
+	cur, err := Current()
+	return cur.BOM, err
+}
+
+// blockedAdvice ends the message about a BOM image on the template update blocklist. A newer release brings other
+// images only to an installation that has no recorded BOM yet: an installed platform keeps its BOM across upgrades.
+func blockedAdvice(in *Installation) string {
+	if ref := in.Status.BOM; ref != nil {
+		return "the platform stays on release " + ref.Release + " and its images, and no ProxCloud release moves an installed platform to other images yet"
+	}
+	return "install a newer ProxCloud release"
+}
