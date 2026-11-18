@@ -554,7 +554,8 @@ are several, `errors.details.problems`.
 - `GET|POST /installations`: list; create `{name, serviceId, provisionedBy?,
   layout?, preset?, spec}` in phase `draft`. `preset` (`homelab`, `standard` or `custom`; also on the PUT) fills what
   `spec` leaves out before the checks and is not stored: sizes, counts, the three node groups, the control plane's
-  node (the seed's) and its count, and for `homelab` on one node with no bridge named a `routed` network on the vnet
+  node (the seed's) and its count (`standard`: 3 where the installation's release builds three, else 1), and for
+  `homelab` with every machine of the spec on one node and no bridge named a `routed` network on the vnet
   `pcplat0` ([the table](managed-services.md#presets-and-the-control-plane-count)). An unknown preset is a
   `400 invalid_installation`. `spec` has `pveApiUrl`, `storage {boot,
   iso, import}` (import defaults to the provider's `importStorage`), `network
@@ -581,8 +582,11 @@ are several, `errors.details.problems`.
   always; once a run succeeded also `provisionedBy` (but a stored `installer`
   may become `portal`), `layout`, `name`,
   `spec.network`, the seed's mode, pool, node and address, and the cluster's
-  name, endpoint and node groups. A control plane count that goes down on an installed platform (3 to 1) is the same
-  `409 fixed_fields`, with the reason as its message; from 1 to 3 is saved. A draft can be corrected; no route deletes
+  name, endpoint and node groups. A control plane count below the one a run built (`status.clusters[].controlPlaneReplicas`,
+  written by stage 7 before it hands a count above one to the cluster; absent means one) is the same
+  `409 fixed_fields`, with the reason as its message: 3 to 1. From 1 to 3 is saved, and a 3 no run built goes back to
+  1. A count above one on an installation whose BOM names a cluster chart older than 0.1.14 is a
+  `400 invalid_installation`; `controlPlane.nodes` equal to `[node]` is accepted and not stored. A draft can be corrected; no route deletes
   one.
 - `PUT /installations/{id}/credentials`: `{capi: {tokenId, secret}, csi:
   {tokenId, secret}}`, either or both, write-only. The ids must be
@@ -605,8 +609,8 @@ are several, `errors.details.problems`.
   DHCP, and absent when the provider names no zone.
   `capacity` is absent while the CAPI token is not stored. It fails before the first install when a node's memory,
   less the configured memory of the other VMs and containers on it as the CAPI token lists them, is smaller than what
-  the settings place there with one spare machine for the control plane and one per group and node; on an installed
-  platform, and when the nodes could not be read, it is `warn`.
+  the settings place there with one spare machine for the control plane. It is `warn` when that fits and one spare
+  machine per group and node on top does not, on an installed platform, and when the nodes could not be read.
   `bridge` fails when a node the settings use has no bridge or vnet of that name, or (mode `routed`) when a vnet of
   that name exists and is not the installation's; on an installed platform the same finding is `warn`.
   `tenant-path` never fails either and is absent in the same case. It reads the layout (the default zone's kind,

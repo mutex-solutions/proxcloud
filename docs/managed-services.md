@@ -80,7 +80,7 @@ reading [section 3](#3-proxmox-identities): they share the pool `proxcloud-syste
 | A platform network | A free IPv4 network from /8 to /29, a gateway and one to three DNS servers. It must not overlap the provider's tenant address pool (`cidrPool`), a sandbox network or a public network. Either an existing bridge on every node used, with an optional VLAN tag on the machines' NICs (mode `bridge`), or, on a one-node site, a network ProxCloud makes and the node routes (mode `routed`): [The platform network: bridge, VLAN tag or routed](#the-platform-network-bridge-vlan-tag-or-routed). |
 | Routes | The API (on Compose: the API container) reaches the Proxmox API, the seed address on 6443 and the cluster's API address on 6443. The seed and the cluster machines reach the Proxmox API URL you enter, `github.com` and `raw.githubusercontent.com` (at first boot the seed downloads the k3s binary from the first and the k3s install script from the second, both checked by sha256; GitHub redirects a release download to another host of its own, which must be reachable too and is not named in the BOM) and the registries of the BOM (`ghcr.io`, which serves every chart: ours and the third-party ones of the chart mirror, `ghcr.io/mutex-solutions/charts-mirror`; and the image registries those charts pull from). Tenant networks must reach the load balancer range and nothing else of the platform network. |
 | Storage | A boot store that takes VM disks on every node used; an ISO store that is local to each node and takes ISOs (default `local`); an import store with `import` content on every node an image goes to (default: the provider's `importStorage`). The import store must not be the boot store: the portal token holds `PVEDatastoreAdmin` on the import store, which reaches every disk on it ([section 10](#10-security-boundaries)). The API refuses settings that name the same store for both; the form says so before it saves when you type the same store in both fields. An empty import store takes the provider's `importStorage`, so it is refused too when that is the boot store. The import store of the settings and the provider's `importStorage` must be one store: the script of step 2 is written for the store of the settings, and the `privileges:kubemint` check reads the provider's ([when the provider's import store is the boot store](#when-the-providers-import-store-is-the-boot-store)). |
-| Capacity | The smallest machine is 2 cores, 4 GiB of memory and a 20 GiB disk. The smallest layout (seed, control plane, one machine per group) is five VMs. The review step adds up cores and memory per node, with the spare machines of an update, next to the memory Proxmox reports as free on that node; the Check row `capacity` counts as the machines are counted when they are cloned ([Presets and the control plane count](#presets-and-the-control-plane-count)). |
+| Capacity | The smallest machine is 2 cores, 4 GiB of memory and a 20 GiB disk. The smallest layout (seed, control plane, one machine per group) is five VMs. The review step adds up cores and memory per node, with the one more machine an update of the control plane makes and with one more of each group, next to the memory Proxmox reports as free on that node; the Check row `capacity` counts as the machines are counted when they are cloned ([Presets and the control plane count](#presets-and-the-control-plane-count)). |
 | Root on one node | Once, to run the identities script. |
 | A router for a VLAN tenant zone | Only when the provider's tenant zone is a `vlan` zone. Proxmox gives a VLAN no gateway, no DHCP and no SNAT: a tenant network there is a bare layer 2 segment, and ProxCloud writes and reports it so (`dhcp: false`, `snat: false`; asking for either is a `400`). The site's own router must hold the first address of each tenant subnet (the `gateway` the network shows; servers and cluster workers get it as their default route) on that VLAN, route it to the load balancer range and to whatever else tenants may reach, and keep tenants apart. Without it a worker on such a network never reaches its control plane and the cluster stays `PROGRESSING`. An EVPN zone needs none of this. |
 | A path from tenants to the platform network | Tenant cluster workers and database clients open TCP connections to the platform network. On a node that translates tenant traffic (a `simple` tenant zone, or an exit node of an EVPN zone) and also runs a platform machine, that connection is dropped unless the node itself routes the platform network. A one-node site with a `simple` tenant zone and the platform network on a VLAN behind the site's router is this case; a platform network of mode `routed` is not. The Check warns (`tenant-path`) and the install goes on, and **Test the tenant path** opens the path from a tenant network once the platform is installed: [The path from tenants to the platform](#the-path-from-tenants-to-the-platform). |
@@ -637,7 +637,7 @@ Saving keeps a draft (`POST` or `PUT /installations`). Nothing is created on Pro
 | API address | The cluster's API endpoint, held by kube-vip on a control plane machine. |
 | Node range | `first-last`: the addresses Cluster API gives the machines. It must hold every machine, one more for the control plane's rolling update (so 2 addresses for one control plane machine, 4 for three), and one more per group and node. |
 | Load balancer range | `first-last`: the MetalLB pool tenants reach (tenant cluster APIs, database addresses). It must be outside the provider's blocked networks and the nodes' management networks. |
-| Control plane | Node, size and the number of machines: 1 (the default) or 3, all on that one node. From 1 to 3 can be saved on an installed platform; from 3 to 1 is refused. Three need a platform release whose cluster chart is 0.1.14 or newer: the Check row `spec` says so when it is older. |
+| Control plane | Node, size and the number of machines: 1 (the default) or 3, all on that one node. From 1 to 3 can be saved on an installed platform; once a run has built three, 3 to 1 is refused. Three need a platform release whose cluster chart is 0.1.14 or newer: on an older one the save refuses 3 (`400`), and the field says why. |
 | Node groups | Exactly `system`, `kamaji` and `dbaas`. For each: 1 to 16 nodes, a count of at least one machine per chosen node (at most 64), and a size. One MachineDeployment is made per group and node. |
 
 The gateway, the seed address, the API address, the node range and the load balancer range must not
@@ -657,10 +657,12 @@ the settings (`409 rev_conflict`: the page reads them again).
 
 **Presets.** "Start from" at the top of step 1 fills the form. A preset is not stored: the saved
 settings name every node, count and size, and an apply never asks which preset they came from.
+A preset is a start for a new installation: on an installed platform the page does not offer it,
+because it would change every machine's size and so replace every machine.
 
 | Preset | Control plane | Seed | Node groups | Platform network |
 |---|---|---|---|---|
-| **Homelab** | 1 machine, 2 cores, 4 GiB | 2 cores, 4 GiB | one machine per group, 2 cores, 4 GiB, everything on the seed's node | On a site with one node, and only while no bridge is named: `routed`, vnet `pcplat0` ([why](#the-path-from-tenants-to-the-platform)). Otherwise unchanged |
+| **Homelab** | 1 machine, 2 cores, 4 GiB | 2 cores, 4 GiB | one machine per group, 2 cores, 4 GiB, everything on the seed's node | While no bridge is named: `routed`, vnet `pcplat0` ([why](#the-path-from-tenants-to-the-platform)), in the page on a site with one node, through the API when every machine of the spec is on one node (the API does not count the site's nodes). Otherwise unchanged |
 | **Standard** | 3 machines on one node, 2 cores, 4 GiB each; 1 when the release builds one, or when the page reads less free memory on the node than three need | 2 cores, 6 GiB | two machines per group, 4 cores, 8 GiB; on a site with several nodes each group on two nodes | unchanged |
 | **Custom** | nothing is filled in | | | |
 
@@ -671,8 +673,9 @@ plane, 40 GiB for a group machine).
 The API takes the same choice as `preset` (`homelab`, `standard`, `custom`) next to `spec` on a
 create or an update. It fills only what the spec leaves out: a value the caller gives always stays,
 a node nobody names is the seed's, and the answer carries the whole spec. `standard` through the API
-always asks for three control plane machines; the Check row `capacity` then says whether the node
-has room, and `spec` whether the release builds them.
+asks for three control plane machines where the installation's release builds them and for one
+where it does not; it does not read the node's memory, so the Check row `capacity` then says
+whether the node has room.
 
 **How many control plane machines.** The count is the platform cluster's own control plane, not a
 tenant's and not the seed. One is the default.
@@ -699,16 +702,26 @@ times to the one store. On a store where a single write can take seconds (the gu
 machine before it removes an old one. CAPMOX refuses a clone when the node's memory, less the
 configured memory of every VM and container on it, running or not, is smaller than the machine
 asks for, and it never tries that machine again. A node that holds exactly its machines therefore
-installs and then fails its first update for good. The Check row `capacity` counts the machines
-and those spares, and fails before the first install when a node has no room.
+installs and then fails its first update for good. The Check row `capacity` fails before the first
+install when a node has no room for its machines and the control plane's one more. A node group's
+update makes one more machine of the group on each of its nodes as well; the row counts those too
+and only **warns** when they do not fit. An upgrade of this release replaces no machine (it stops
+with `unexpected_rollout` if it would), so that room is needed when you change a group's size or
+image, not at the install. Homelab therefore passes the row on a node with 24 GiB that can be
+reserved (five machines of 4 GiB and the control plane's spare), with a warning below 36 GiB.
 
 **Changing the count.** From 1 to 3 on an installed platform: set it in step 1, save, and press
 **Apply this release**. The run adds two machines and replaces none (the count is not part of the
 machine template), and its stage 7 waits until all three run. Do not combine it with an upgrade:
-an upgrade run that finds a changed control plane stops with `unexpected_rollout`. From 3 to 1 is
+an upgrade run that finds a changed control plane stops with `unexpected_rollout`. A 3 that was
+saved and not applied goes back to 1: the rule reads what a run built, not what is saved. Stage 7
+records the count in the installation's status (`status.clusters[].controlPlaneReplicas`) just
+before it hands three to the cluster, also when that run then fails; from then on 3 to 1 is
 refused (`409 fixed_fields`): Cluster API would take two etcd members out one after the other, with
-two members left one slow or lost member stops etcd, and no lab has run that step. A platform with
-three goes back to one only by Remove and a new install.
+two members left one slow or lost member stops etcd, and no lab has run that step. A platform a
+run built with three goes back to one only by Remove and a new install. On a platform whose
+release builds one machine, 3 is refused at the save (`400 invalid_installation`), so it cannot be
+stored where every apply would then fail.
 
 **Where the sandbox service will go.** The install is to offer two placements for the sandbox
 service once it ships: `shared`, a node group of this platform cluster (the homelab choice), and
@@ -731,7 +744,11 @@ a default for it: Homelab `shared`, Standard `separate`.
    for three.
 4. A node with room for the count and not for count + 1: the `capacity` row fails before the
    install; with the row ignored on a scratch cluster, a control plane rollout whose surge machine
-   gets `VMProvisionFailed`, to confirm what the row is there to prevent.
+   gets `VMProvisionFailed`, to confirm what the row is there to prevent. A node with room for the
+   machines and not for a group's spare: the row warns, the install passes, and a change of that
+   group's size shows what happens to the refused machine (whether worker repair replaces it).
+7. From 1 to 3 where the apply fails after stage 7 recorded three (for example a node without room
+   for the new machines): what the operator can do, since 3 to 1 is then refused.
 5. The `capacity` row's count against CAPMOX's own (`cannot reserve ... of memory on node ...`) on
    a node with stopped VMs, containers and templates.
 6. Out of this release, for the one that spreads the control plane: one template on a shared
@@ -756,7 +773,7 @@ a default for it: Homelab `shared`, Standard `separate`.
 | `tenant-network` | Never. It reads the provider's default zone in Proxmox and **warns** when the zone has DHCP, when it does not exist yet and is configured as a `simple` zone without `"dhcp": false` (ProxCloud then creates it with DHCP), or when the zones could not be read: a tenant Kubernetes cluster create on a network of such a zone is refused with a `400` (not on a Kubernetes provider with shared workers, `cluster.shared`, which uses no tenant network). The row is `ok` for a zone without DHCP and absent when the provider names no zone | Nothing for the install or for databases. Before tenants create clusters: give the provider an EVPN or a VLAN zone as its default zone, or a `simple` zone without DHCP (Cloud providers, `config.network.zones` and `defaultZone`; [Prerequisites](#2-prerequisites)) |
 | `tenant-path` | Never, and absent when the provider names no zone. It reads the layout and **warns** when a node that translates tenant traffic (a `simple` default zone: the node of the tenant's VM; an EVPN default zone: its exit nodes) also hosts a platform machine and does not route the platform network itself, or when Proxmox could not be read: a tenant's TCP connection to the platform network is then dropped on that node, tenant Kubernetes workers never join and tenants cannot reach managed databases. It opens no connection: `ok` is not proof, and a leg added on a node by hand is not seen. It is `ok` for a platform network of mode `routed`. **Test the tenant path** below the rows opens the path on an installed platform | Nothing for the install. Before tenants create clusters or databases: one of the two layouts of [The path from tenants to the platform](#the-path-from-tenants-to-the-platform) |
 | `csi-vmid` | Never. It **warns** when a guest of the cluster has VM id 9999, the id proxmox-csi names its volumes after, or when that could not be read | Nothing for the install. Never destroy VM 9999 with "Destroy unreferenced disks owned by guest" ([VM id 9999 and the CSI volumes](#vm-id-9999-and-the-csi-volumes)) |
-| `capacity` | Before the first install, when a node has less memory than the settings place on it; absent while the CAPI token is not stored. It reads the nodes and their VMs with the CAPI token and counts as CAPMOX counts before each clone: the node's memory less the configured memory of every VM that is not a template and every container on it, running or not (this installation's own machines are part of the plan and are not counted twice). Against that it puts the seed, the control plane machines plus one, and each group's machines on the node plus one: the extra ones are what a rolling update makes before it removes an old machine. On an installed platform the same finding **warns**, and so does a node whose memory could not be read. A VM the CAPI token cannot see is not counted, so `ok` is the scheduler's answer, not a promise that the node has the memory free | Smaller or fewer machines, one control plane machine in place of three, other nodes, or free memory on the node (a stopped VM counts with its configured memory). Then save and check again |
+| `capacity` | Before the first install, when a node has less memory than the settings place on it; absent while the CAPI token is not stored. It reads the nodes and their VMs with the CAPI token and counts as CAPMOX counts before each clone: the node's memory less the configured memory of every VM that is not a template and every container on it, running or not (this installation's own machines are part of the plan and are not counted twice). Against that it puts the seed, the control plane machines plus one, and each group's machines on the node: the one more is what a rolling update of the control plane makes before it removes an old machine. A node that holds those and not one more machine of each group on it as well **warns** and does not stop the install. On an installed platform every finding **warns**, and so does a node whose memory could not be read. A VM the CAPI token cannot see is not counted, so `ok` is the scheduler's answer, not a promise that the node has the memory free | Smaller or fewer machines, one control plane machine in place of three, other nodes, or free memory on the node (a stopped VM counts with its configured memory). Then save and check again |
 | `credentials` | A token secret is not stored | Paste it in step 2 |
 | `machines` | Never, and absent while the installation has no VM. It reads the installation's VMs with the CAPI token and **warns** with one line per VM that is stopped or that does not start when its node boots (`onboot` off) or that the token could not read (the others are still listed, and an apply still sets `onboot` on them), or when the pools could not be read | A stopped VM: start it in Proxmox, or `qm start <vmid>` as root on its node ([After a Proxmox node reboots](#after-a-proxmox-node-reboots)). `onboot` off: **Apply this release** sets it at the end of stage 7, or `qm set <vmid> --onboot 1` |
 | `privileges:capi`, `privileges:csi`, `privileges:kubemint` | The CAPI token, the CSI token or the portal token lacks a privilege on a path; the message names both. For a VLAN tag or a routed network `privileges:capi` also reads `SDN.Use` on the path of the machines' NIC (`/sdn/zones/localnetwork/<bridge>/<tag>`, `/sdn/zones/pcplat/<vnet>`) | Run the script again. `privileges:kubemint` reads every path a tenant cluster's token gets a row on, not `/storage` and `/sdn/zones` alone: a line on `/storage/<store>` or `/sdn/zones/<zone>` means a row of the portal's own on that path hides the mint role, and the script adds the role next to each such row ([why, and what the row gives](proxmox-permissions.md#a-row-of-the-portals-own-on-a-store-or-a-zone)); until then a cluster create that uses the path answers `409`, and, as for every failed row, an install or apply run stops at its first stage (`preflight_failed`). A site that had such rows before v0.8.1 passed this row then and fails it after the upgrade: run the script again before the next run. A row the portal's user holds through a group is not found by the script; the same section gives the row to add. On the provider's `importStorage`, when the settings name another import store, the script does not write that row ([what to do](#when-the-providers-import-store-is-the-boot-store)) |
@@ -1922,8 +1939,8 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
   [The path from tenants to the platform](#the-path-from-tenants-to-the-platform), by hand.
 - **Control plane machines on one node only.** The count is 1 or 3, and all three are on one
   Proxmox node and one store. Machines on several nodes (`controlPlane.nodes`) are refused, and so is
-  going from 3 back to 1 on an installed platform. Three need cluster chart 0.1.14, which this
-  build's BOM does not name yet: until it does, the Check and the run refuse 3.
+  going from 3 back to 1 once a run has built three. Three need cluster chart 0.1.14, which this
+  build's BOM does not name yet: until it does, the save, the Check and the run refuse 3.
 - **kube-vip's lease values are those of one machine** (60, 40 and 5 seconds) also with three.
   They are chart values (`controlPlane.kubeadm.vipLease`); what suits three members on one store
   was not measured.
