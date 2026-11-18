@@ -1024,7 +1024,7 @@ func run() error {
 		if cfg.Jobs.TemplateUpdatesVM {
 			adminH.SetPlatformRuns(jobStore)
 			prRunner := &platformlife.Runner{
-				Jobs: jobStore, State: platformStore, Log: log, Preflight: adminH.PlatformPreflight,
+				Jobs: jobStore, State: platformStore, Log: log, Preflight: adminH.PlatformPreflight, SkipRolloutGate: cfg.Jobs.PlatformSkipRolloutGate,
 				Imports:  platformlife.TemplateUpdates{Service: tuSvc},
 				Register: adminH.PlatformRegister, Disable: adminH.PlatformDisable,
 				Provider: func(ctx context.Context, id string) (*externalservice.ExternalService, error) {

@@ -513,6 +513,64 @@ func TestPlatformRunOnAPreviousBOM(t *testing.T) {
 	}
 	call(http.MethodGet, "/admin/platform/bom?sha256="+strings.Repeat("1", 64), "", http.StatusNotFound)
 	call(http.MethodPost, dev+"/runs", `{"kind":"remove"}`, http.StatusAccepted)
+
+	// The move to this build's BOM. A development BOM (main's) is no target: the plan says so and the run is refused
+	// with the same reasons. Another BOM than this build's is not a target at all.
+	up := installed("svc-pve-3", "0.8.0", sha080)
+	id := strings.TrimPrefix(up, "/admin/platform/installations/")
+	apply := fmt.Sprintf(`{"kind":"apply","targetBom":%q,"confirm":"upgrade lab to 0.9.0"}`, cur.SHA256)
+	if strings.HasSuffix(cur.Release, "-dev") {
+		upgrade, _ := call(http.MethodGet, up+"/plan", "", http.StatusOK)["data"].(map[string]any)["upgrade"].(map[string]any)
+		if upgrade["allowed"] != false || !strings.Contains(fmt.Sprint(upgrade["blocking"]), "development BOM") {
+			t.Fatalf("the plan of a move to a development BOM: %v", upgrade)
+		}
+		if a := fmt.Sprint(call(http.MethodPost, up+"/runs", apply, http.StatusConflict)); !strings.Contains(a, platformlife.CodeUpgradeRefused) || !strings.Contains(a, "development BOM") {
+			t.Fatalf("an upgrade to a development BOM: %v", a)
+		}
+	}
+	call(http.MethodGet, up+"/plan?target="+strings.Repeat("3", 64), "", http.StatusBadRequest)
+	call(http.MethodPost, up+"/runs", fmt.Sprintf(`{"kind":"apply","targetBom":%q}`, strings.Repeat("3", 64)), http.StatusBadRequest)
+
+	// The same build as a release: 0.8.0 and main differ in the release line alone, so the move is allowed. It wants
+	// the typed confirmation, records the target on the installation and where it comes from on the run.
+	release := cur.Release
+	cur.Release = "0.9.0"
+	defer func() { cur.Release = release }()
+	upgrade, _ := call(http.MethodGet, up+"/plan?target="+cur.SHA256, "", http.StatusOK)["data"].(map[string]any)["upgrade"].(map[string]any)
+	if upgrade["allowed"] != true || upgrade["confirm"] != "upgrade lab to 0.9.0" || len(upgrade["changes"].([]any)) != 1 {
+		t.Fatalf("the plan of the move: %v", upgrade)
+	}
+	call(http.MethodPost, up+"/runs", fmt.Sprintf(`{"kind":"apply","targetBom":%q}`, cur.SHA256), http.StatusBadRequest)
+	from, to := platformlife.BOMRef{Release: "0.8.0", SHA256: sha080}, platformlife.BOMRef{Release: "0.9.0", SHA256: cur.SHA256}
+	fail := func(runID any) {
+		t.Helper()
+		if err := store.Mutate(ctx, runID.(string), func(r *platformlife.Run, in *platformlife.Installation, _ *platformlife.Secrets) error {
+			r.State, in.Status.Phase = platformlife.RunFailed, platformlife.PhaseFailed
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data = call(http.MethodPost, up+"/runs", apply, http.StatusAccepted)["data"].(map[string]any)
+	run, _ := store.Run(ctx, data["runId"].(string))
+	in, _ := store.Get(ctx, id)
+	if run.BOM != to || run.FromBOM == nil || *run.FromBOM != from || !run.Confirmed || in.Status.TargetBOM == nil || *in.Status.TargetBOM != to || *in.Status.BOM != from {
+		t.Fatalf("the upgrade's run %+v, status %+v", run, in.Status)
+	}
+	// It failed. Retry is an apply without a target: it continues to the target. The way back is refused.
+	fail(data["runId"])
+	data = call(http.MethodPost, up+"/runs", `{"kind":"apply"}`, http.StatusAccepted)["data"].(map[string]any)
+	if run, _ := store.Run(ctx, data["runId"].(string)); run.BOM != to || run.FromBOM == nil || *run.FromBOM != from {
+		t.Fatalf("Retry of a failed upgrade runs with %+v", run)
+	}
+	fail(data["runId"])
+	if a := fmt.Sprint(call(http.MethodPost, up+"/runs", fmt.Sprintf(`{"kind":"apply","targetBom":%q}`, sha080), http.StatusConflict)); !strings.Contains(a, platformlife.CodeUpgradeRefused) {
+		t.Fatalf("back to the installed BOM: %v", a)
+	}
+	plan = call(http.MethodGet, up+"/plan", "", http.StatusOK)["data"].(map[string]any)
+	if target, _ := plan["target"].(map[string]any); target["sha256"] != cur.SHA256 || plan["upgrade"].(map[string]any)["inProgress"] != true {
+		t.Fatalf("the plan of a started upgrade: %v", plan)
+	}
 }
 
 // TestPlatformRunMutate: the runner's write seals the secrets, deletes a secrets document left empty, and keeps the
@@ -532,7 +590,7 @@ func TestPlatformRunMutate(t *testing.T) {
 	if err := store.Create(ctx, in); err != nil {
 		t.Fatal(err)
 	}
-	run, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "")
+	run, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -588,13 +646,13 @@ func TestPlatformRunMutate(t *testing.T) {
 		t.Fatalf("stored %+v, raw %v", got.Status.Seed, raw)
 	}
 	// The typed confirmation belongs to a remove and must name the installation.
-	if _, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "remove lab"); !errors.Is(err, platformlife.ErrBadConfirm) {
+	if _, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "remove lab", ""); !errors.Is(err, platformlife.ErrBadConfirm) {
 		t.Fatalf("confirm on an apply: %v", err)
 	}
-	if _, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunRemove, "admin-sub", "remove other"); !errors.Is(err, platformlife.ErrBadConfirm) {
+	if _, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunRemove, "admin-sub", "remove other", ""); !errors.Is(err, platformlife.ErrBadConfirm) {
 		t.Fatalf("a wrong confirmation: %v", err)
 	}
-	if r, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunRemove, "admin-sub", "remove lab"); err != nil || !r.Confirmed {
+	if r, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunRemove, "admin-sub", "remove lab", ""); err != nil || !r.Confirmed {
 		t.Fatalf("confirmed remove: %+v %v", r, err)
 	}
 }
@@ -785,7 +843,7 @@ func TestPlatformClusterKubeconfig(t *testing.T) {
 	if err := store.Create(ctx, in); err != nil {
 		t.Fatal(err)
 	}
-	run, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "")
+	run, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

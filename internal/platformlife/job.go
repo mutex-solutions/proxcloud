@@ -31,10 +31,11 @@ const JobAttempts = 20
 
 var (
 	ErrBadKind      = errors.New("kind must be apply or remove")
-	ErrBadConfirm   = errors.New(`confirm must be "remove <installation name>", and only a remove takes it`)
+	ErrBadConfirm   = errors.New(`confirm must be "remove <installation name>" on a remove, or "upgrade <installation name> to <release>" on an apply that starts an upgrade (targetBom); no other run takes one`)
+	ErrBadTarget    = errors.New("targetBom must be the sha256 of this build's own BOM (GET /admin/platform/bom), or of the target of the upgrade in progress: a platform moves to no other BOM, and only an apply takes one")
 	ErrRunNotFound  = errors.New("no run with that id")
 	ErrRunFinished  = errors.New("this run has finished")
-	ErrBOMNotHere   = errors.New(CodeBOMUnsupported + ": the installed BOM is not one this release embeds, and no release upgrades between BOMs yet; run the ProxCloud release that installed the platform, or delete every tenant cluster and database, then remove managed services and install again")
+	ErrBOMNotHere   = errors.New(CodeBOMUnsupported + ": the installed BOM, or the target of its unfinished upgrade, is not one this release embeds, so it can neither apply nor upgrade the platform; run the ProxCloud release that installed the platform, or delete every tenant cluster and database, then remove managed services and install again")
 	errInvalidInput = errors.New("platform run: invalid job payload")
 )
 
@@ -61,9 +62,12 @@ func stageIDs(kind string) []string {
 // StartRun records a run of kind and enqueues its job (key platform-run-<runId>) in one transaction under the
 // installation's run lock: ErrRunActive while another run is unfinished. A run whose job died is finished first, as
 // failed/job_dead. An apply targets the installed BOM (the current one or a previous one this build embeds), or this
-// release's for a new installation. confirm is the typed confirmation of a Remove ("remove <name>", or empty): see
+// release's for a new installation. targetBOM (the sha256 of this build's BOM) makes an apply an upgrade: it is
+// accepted only when move allows it (UpgradeRefused otherwise) and confirm is "upgrade <name> to <release>"; the
+// installation then records the target, and every later apply continues to it without a target or a confirmation
+// until one succeeds. confirm is otherwise the typed confirmation of a Remove ("remove <name>", or empty): see
 // Run.Confirmed.
-func (s *Store) StartRun(ctx context.Context, jobs *durablejobs.Store, installationID, kind, actor, confirm string) (*Run, error) {
+func (s *Store) StartRun(ctx context.Context, jobs *durablejobs.Store, installationID, kind, actor, confirm, targetBOM string) (*Run, error) {
 	if kind != RunApply && kind != RunRemove {
 		return nil, ErrBadKind
 	}
@@ -91,7 +95,10 @@ func (s *Store) StartRun(ctx context.Context, jobs *durablejobs.Store, installat
 		} else if !found {
 			return ErrNotFound
 		}
-		if confirm != "" && (kind != RunRemove || confirm != "remove "+in.Name) {
+		if kind == RunRemove && targetBOM != "" {
+			return ErrBadTarget
+		}
+		if kind == RunRemove && confirm != "" && confirm != "remove "+in.Name {
 			return ErrBadConfirm
 		}
 		run.Confirmed = confirm != ""
@@ -104,11 +111,10 @@ func (s *Store) StartRun(ctx context.Context, jobs *durablejobs.Store, installat
 				return ErrRunActive
 			}
 		}
-		if kind == RunApply && in.Status.BOM != nil {
-			if _, ok := Lookup(in.Status.BOM.SHA256); !ok {
-				return ErrBOMNotHere
+		if kind == RunApply {
+			if err := startApply(run, &in, targetBOM, confirm); err != nil {
+				return err
 			}
-			run.BOM = *in.Status.BOM
 		}
 		raw, _ := json.Marshal(Payload{Version: 1, RunID: run.ID, InstallationID: installationID})
 		if run.JobID, err = jobs.EnqueueTx(tc, durablejobs.PlatformRun, "platform-run-"+run.ID, raw, JobAttempts); err != nil {
@@ -128,6 +134,25 @@ func (s *Store) StartRun(ctx context.Context, jobs *durablejobs.Store, installat
 		return nil, err
 	}
 	return run, nil
+}
+
+// startApply gives an apply its BOM (move). An upgrade, started or continued, also records where the platform comes
+// from on the run and where it goes on the installation: from then on status.targetBom decides every apply.
+func startApply(run *Run, in *Installation, targetBOM, confirm string) error {
+	to, up, err := move(in, targetBOM)
+	switch {
+	case err != nil:
+		return err
+	case up != nil && !up.Allowed:
+		return &UpgradeRefused{Reasons: up.Blocking}
+	case up == nil && confirm != "", up != nil && confirm != up.Confirm: // "" while an upgrade is in progress
+		return ErrBadConfirm
+	}
+	if run.BOM = refOf(to); up != nil {
+		from, target := *in.Status.BOM, run.BOM
+		run.FromBOM, in.Status.TargetBOM = &from, &target
+	}
+	return nil
 }
 
 // settleDead ends a run whose job is dead (its attempts ran out on crashes) as failed/job_dead, with the installation

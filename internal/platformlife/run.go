@@ -73,6 +73,12 @@ const (
 	// CodeSeedLost: a seed that became ready is gone or no longer ours. It is never rebuilt automatically, because a
 	// new, empty seed would orphan the workload's Cluster API state.
 	CodeSeedLost = "seed_lost"
+	// CodeUpgradeRefused: an apply names a target BOM this release does not move the platform to (the 409 of a run).
+	CodeUpgradeRefused = "upgrade_refused"
+	// CodeUnexpectedRollout: on an upgrade run the cluster chart of the target BOM would replace machines.
+	CodeUnexpectedRollout = "unexpected_rollout"
+	// CodeTenantsUnhealthy: on an upgrade run a tenant that was healthy before a wave is not healthy after it.
+	CodeTenantsUnhealthy = "tenants_unhealthy"
 )
 
 // Stage ids of an apply (design §4.2) and of a remove (§4.6).
@@ -98,15 +104,18 @@ func TimeoutCode(stage string) string { return strings.ReplaceAll(stage, "-", "_
 
 // Run is one document of collection platformRun.
 type Run struct {
-	ID              string `json:"id"`
-	InstallationID  string `json:"installationId"`
-	Kind            string `json:"kind"`
-	BOM             BOMRef `json:"bom"` // frozen at creation
-	JobID           string `json:"jobId,omitempty"`
-	RequestedBy     string `json:"requestedBy"`
-	CancelRequested bool   `json:"cancelRequested,omitempty"`
+	ID             string `json:"id"`
+	InstallationID string `json:"installationId"`
+	Kind           string `json:"kind"`
+	BOM            BOMRef `json:"bom"` // frozen at creation
+	// FromBOM is set on an upgrade run: the installed BOM it moves the platform from. BOM is then the target.
+	FromBOM         *BOMRef `json:"fromBom,omitempty"`
+	JobID           string  `json:"jobId,omitempty"`
+	RequestedBy     string  `json:"requestedBy"`
+	CancelRequested bool    `json:"cancelRequested,omitempty"`
 	// Confirmed: the operator typed "remove <name>" when starting a Remove. It lets the run go on where it cannot
-	// observe: the seed VM is gone, or the workload cluster does not answer whether tenants still run on it.
+	// observe: the seed VM is gone, or the workload cluster does not answer whether tenants still run on it. On an apply
+	// it records the typed "upgrade <name> to <release>" of the run that started an upgrade.
 	Confirmed  bool       `json:"confirmed,omitempty"`
 	State      string     `json:"state"`
 	Code       string     `json:"code,omitempty"`
@@ -157,6 +166,9 @@ type StageReceipt struct {
 	Resynced []string `json:"resynced,omitempty"`
 	// CAPMOXWokenAt is when this run made CAPMOX look at a ProxmoxCluster an earlier run had left without a condition.
 	CAPMOXWokenAt *time.Time `json:"capmoxWokenAt,omitempty"`
+	// RolloutChecked: this upgrade run compared the cluster chart of the target BOM with the live cluster before its
+	// sync and found no machine to replace (rolloutGate).
+	RolloutChecked bool `json:"rolloutChecked,omitempty"`
 }
 
 // Terminal reports a run state that will not change any more.
