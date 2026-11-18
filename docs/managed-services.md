@@ -13,7 +13,7 @@ are in [ADR 0009](adr/0009-managed-services-platform-lifecycle.md); the routes a
 > console. The install finished on one lab Proxmox VE cluster, on builds of main; what was run
 > there and what was not is in [Not verified on a lab yet](#not-verified-on-a-lab-yet). It is off
 > by default. v0.8.0 is the first release that carries it; one install was made on its published
-> images (a lab, 2026-11-18), none on those of v0.8.1: see [Not implemented yet](#not-implemented-yet).
+> images (a lab, 2026-11-18), none on those of v0.8.1 or v0.8.2: see [Not implemented yet](#not-implemented-yet).
 
 Code: `internal/platformlife` (the installation model, the preflight, the runner and its stages, the
 renderers), `internal/platform/admin/platform.go` (the routes), `internal/cloud/pve/access.go` and
@@ -584,8 +584,11 @@ installed platform the plan (`GET …/plan`). **Install** (later **Apply this re
 
 ### After the install
 
-A ready installation shows one card. Nothing on it is verified on a lab; the tests behind it use a
-fake seed and a fake cluster.
+A ready installation shows one card. What it shows was read on a lab once (2026-11-18, the build
+`dev-03bc9f3` of main on a platform installed by v0.8.0), at the API and with `kubectl` 1.35.10: the
+four addresses and the two provider rows against the installation, the platform kubeconfig and the
+two ArgoCD commands on both clusters. The page itself was not opened in a browser on the lab, and
+the row "Offers no Kubernetes version yet" was not seen (the lab's provider offers one).
 
 **Endpoints.** Four addresses, all on the platform network:
 
@@ -635,8 +638,10 @@ The first command prints the password of user `admin`; the second runs until you
 `http://localhost:8080` (or `:8081`). The Secret `argocd-initial-admin-secret` is the one ArgoCD
 writes at its first start; ProxCloud sets no password. If someone deleted it or changed the
 password in ArgoCD, the first command no longer gives a password that works, and ProxCloud cannot
-recover one. That the chart of this release (argo-cd 10.14.0) names the Service `argocd-server`
-with port 80 and writes that Secret is read from the chart's defaults, not seen on a lab.
+recover one. Seen on a lab (2026-11-18), on the platform cluster and on the seed: the chart of this release
+(argo-cd 10.14.0) names the Service `argocd-server` with ports 80 and 443 and writes that Secret,
+the first command gave a password of 16 characters, and with the second `http://localhost:8080/`
+answered `200` (ArgoCD v3.6.1). No login to either ArgoCD was made.
 
 `admin` in an ArgoCD can deploy anything to the cluster it runs on, and the platform cluster's hosts
 every tenant control plane. Use it to look and to sync again. What you change by hand on a
@@ -1346,7 +1351,7 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 
 ## Not implemented yet
 
-- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1` (`main` carries a `-dev` one between releases, now `0.9.0-dev`). `--managed-services` needs v0.8.0 or later: no
+- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2` (`main` carries a `-dev` one between releases). `--managed-services` needs v0.8.0 or later: no
   earlier released image reads `PROXCLOUD_PLATFORM_ENABLED`, and the images of v0.8.0 exist once
   its tag's workflows have succeeded. For a test ahead of a release,
   `proxcloud-up.sh` takes a build of main as its version (`--version dev-<sha>`, `upgrade dev-<sha>`;
@@ -1375,7 +1380,10 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
     `status.bom` stayed the 0.8.0 one and no Application of the seed was synced again. That
     build's own BOM pinned the same versions as 0.8.0, so the lab does not show an apply that
     keeps older pins while the build carries other ones, and the build was not the release
-    v0.8.1 itself. What tests show: the file under `previous/` has the sha256 that
+    v0.8.1 itself. The same platform was read the same day on the build `dev-03bc9f3` of main,
+    which carries the BOMs of 0.8.0 and 0.8.1 as previous ones: the plan had no change, named
+    that build's own BOM as `newer` (not 0.8.1), `status.bom` stayed the 0.8.0 one and both
+    previous BOMs were answered by their hash; no apply was run there. What tests show: the file under `previous/` has the sha256 that
     a v0.8.0 platform records (`8eb87498…6600c6`), what the renderers of this build make of the
     0.8.0 BOM is byte for byte what v0.8.0 rendered from it (the goldens of the tag), and a run on
     fakes takes its images, Applications and provider bodies from the 0.8.0 BOM.
@@ -1457,11 +1465,21 @@ observed, except the figures this guide marks as seen on a lab:
 | L10 | Seed reboot, the backup job and a restore, Remove, and Remove with the seed gone. One clean reboot was run and **failed**: the seed's root filesystem came up in ext4 `emergency_ro` and its API never answered again. The cause was the image's stale ext4 superblock field, and the documented repair brought the seed back on 2026-11-17 ([When the seed does not answer](#when-the-seed-does-not-answer)); on a seed built from the fixed image two clean reboots then passed (same address and MAC, the pinned CA still valid, all components Synced and Healthy). One `vzdump` by hand with `--mode snapshot` passed, and one with `--compress zstd` (2.39 GiB in 1 minute 45 seconds); the scheduled job was not created and `--prune-backups` was not run. The restore was first refused by Proxmox over the protected seed; with the sequence of [step 5](#when-the-seed-does-not-answer) it was run once on 2026-11-17 and passed: a healthy seed restored over itself from a three-minute-old archive, Cluster API wrote nothing, the tenant cluster was not touched. Not run: an archive older than a credential rotation or a machine change, `qm stop` on a dead guest, `--unique`, a boot store other than ZFS, an archive of the scheduled job. Remove of a ready platform and Remove from a failed stage 7 passed |
 | L11 | Seed credential rotation and the expiry of the break-glass kubeconfig. The rotation and that a break-glass kubeconfig outlives it were measured; the `401` after the hour was not |
 
-Not run on a lab either, anything of [After the install](#after-the-install): the platform
-kubeconfig against a real cluster (that the token is granted for one hour, that the two roles admit
-exactly what the table says, that a `401` follows the hour), the two ArgoCD commands, and the name
-and port of the `argocd-server` Service and the Secret `argocd-initial-admin-secret` of chart
-argo-cd 10.14.0.
+[After the install](#after-the-install) was run on a lab once (2026-11-18, the build `dev-03bc9f3`
+of main, `kubectl` 1.35.10), at the API and with `kubectl`: the platform kubeconfig against the
+real cluster (a token of `kube-system/proxcloud-break-glass` whose claims give it one hour, no
+client certificate), the audit row `BREAK_GLASS` with `operation: platform-kubeconfig` and no
+token in it, `403` for a tenant and `401` without a token, what the token may do (the reads of the
+table; refused on spot checks: Secrets in any namespace, `argocd-secret`, `pods/exec`, a delete, a
+patch of an Application, Cluster API's bootstrap group, a port-forward outside `argocd`), the two
+ArgoCD commands on the platform cluster and on the seed, and the name and ports of the
+`argocd-server` Service and the Secret `argocd-initial-admin-secret` of chart argo-cd 10.14.0.
+On that build the Role allowed only `create` on `pods/portforward`: `kubectl` was refused on its
+first request (a WebSocket `GET`) and fell back to SPDY without a word. The Role has `get` and
+`create` since; that a port-forward now opens on its first request is not run on a lab. Also not
+run: the `401` after the hour, the card in a browser, a user with the support role, the `409`,
+`502` and `503` answers of the route, the row "Offers no Kubernetes version yet", and a login to
+either ArgoCD.
 
 Also not run: `onboot` set by stage 7 and a reboot of a node with it
 ([After a Proxmox node reboots](#after-a-proxmox-node-reboots)), the `machines` row against a real
@@ -1471,6 +1489,12 @@ secret rotation, an install on a Proxmox cluster with a single node, and `--mana
 Compose host against a published release.
 
 The row `tenant-path` and its guide ([The path from tenants to the platform](#the-path-from-tenants-to-the-platform))
-are not verified on a lab: the row's tests use a fake Proxmox API, the mechanism is stated from
+were run on a lab in part (2026-11-18, the build `dev-03bc9f3` of main): the row read `ok` for a
+VLAN default zone and warned for a `simple` default zone, with the texts of the code, and a warning
+did not fail the Check. That is a read of the configuration; no path was measured (on that lab the
+platform gateway is on a router, so the warning was the layout's, not a seen drop). Not run on a
+lab: the two other `ok` cases (the node routes the platform network; the platform's machines are
+on other nodes), an EVPN zone, the warning for a Proxmox that could not be read, and the row
+against a path that is in fact closed. The mechanism is stated from
 source and fits what the production site showed, the node leg was run by hand on that one site at
 runtime only, and the layout with a platform network routed by the node was run nowhere.
