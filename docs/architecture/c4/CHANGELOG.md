@@ -4,6 +4,71 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-19: project invitations can be listed and revoked
+
+**What changed:** C3, component "Project invites": responsibility extended. The inviter and a project admin list
+and revoke pending invitations (`GET /project-invites/project/{projectId}`,
+`DELETE /project-invites/project/{projectId}/{inviteId}`); the answer carries the link, and says whether a mail
+was handed to a gateway. No new component, container or relation.
+
+**Why:** in the production acceptance of v0.8.0 an invitation answered 202 and nothing else was visible, and a
+site without SMTP sent no mail (#339).
+
+**Diagrams:** none changed. `c3-components.md`: the row "Project invites".
+
+**Not verified:** on a lab.
+
+## 2026-11-19: presets and the platform cluster's control plane count
+
+**What changed:** `c3-components.md`, "Platform installations": the spec's control plane is 1 or 3 machines on one
+node; a create or update may name a preset (`preset.go`), which is expanded and not stored; the preflight gains
+the `capacity` row (`capacity.go`); the status of a cluster records the control plane count a run built, which the
+update's shrink rule reads. "Platform BOM and renderers": `ClusterValues` writes the control plane's replica count
+only above one and only for a cluster chart that reads it. `proxmox-kamaji-cluster` 0.1.14 reads
+`controlPlane.kubeadm.replicas` and `controlPlane.kubeadm.vipLease`. No new component, container or relation.
+
+**Why:** on the first production install the operator sized every machine by hand and compared totals with
+Proxmox by hand; design P1 asks for presets and a control plane count of the platform cluster (#341).
+
+**Diagrams:** none changed. `c3-components.md`: the rows "Platform installations" and "Platform BOM and
+renderers".
+
+**Not verified:** on a lab. Chart 0.1.14 is not published, and until the BOM pins it three machines are refused.
+
+## 2026-11-19: the register stage offers a Kubernetes version and applies the attach choice
+
+**What changed:** C3e, "Platform runs" (`c3-components.md`): the register stage also offers the BOM's Kubernetes
+version when its node image is published and the provider does not name that version, once per version
+(`status.kubernetesOffered`; `internal/platformlife/tenants.go`; route `POST …/kubernetes-version` in
+`internal/platform/admin/platformtenants.go`), and applies a changed `spec.tenants.attach` once through
+`PlatformAttach` (attach policy, and for `all` a `providerattach` run, audited). No new component and no new edge:
+`platformlife` already called the admin handler (`PlatformRegister`), and the admin handler already used
+`providerattach` and Template updates' reads.
+
+**Why:** after a green install every tenant cluster create was refused: the Kubernetes provider was registered
+with no version and neither provider was attached to a project (design decision 51, #342).
+
+**Diagrams:** none changed. `c3-components.md`: the row "Platform runs".
+
+**Not verified:** on a lab.
+
+## 2026-11-19: the installation writes site prerequisites; the Proxmox API firewall rule
+
+**What changed:** "Platform installations" gains a responsibility: a save of an installation writes into its
+provider's `config.network` (`internal/platform/admin/platform_site.go`): the installation's addresses into
+`blockedCidrs` (recorded in `platformBlockedCidrs`, so that a later save takes off the ones no longer needed and
+no other), and `"dhcp": false` on a default simple tenant zone that Proxmox does not have. The platform tokens
+also arrive as one pasted line of the root command (`pve.EnrollScript`, `platformlife.ParseEnrollLine`,
+`Store.SaveEnrollment`). The preflight has rows `boot-store` and `pve-api-rule`. "Platform runs" gains one write
+with the portal token: the cluster firewall rule for the Proxmox API (`internal/platformlife/apiaccess.go`,
+`(*pve.Service).EnsureAPIAccess`), written in stage 3 and at every apply, deleted by Remove.
+
+**Why:** the hand steps of the first production install (design P3, decisions 14 to 17, #340).
+
+**Diagrams:** none changed. `c3-components.md`: the rows "Platform installations" and "Platform runs".
+
+**Not verified:** on a lab.
+
 ## 2026-11-18: the platform run makes SDN objects; a test of the tenant path
 
 **What changed:** `internal/platformlife` gains two responsibilities. (1) For a platform network of mode `routed`
