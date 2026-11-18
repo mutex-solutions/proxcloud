@@ -12,8 +12,8 @@ are in [ADR 0009](adr/0009-managed-services-platform-lifecycle.md); the routes a
 > renderer goldens, runner tests against a fake Proxmox and a fake Kubernetes API, and a mocked
 > console. The install finished on one lab Proxmox VE cluster, on builds of main; what was run
 > there and what was not is in [Not verified on a lab yet](#not-verified-on-a-lab-yet). It is off
-> by default. v0.8.0 is the first release that carries it; no run was made on its published
-> images: see [Not implemented yet](#not-implemented-yet).
+> by default. v0.8.0 is the first release that carries it; one install was made on its published
+> images (a lab, 2026-11-18), none on those of v0.8.1: see [Not implemented yet](#not-implemented-yet).
 
 Code: `internal/platformlife` (the installation model, the preflight, the runner and its stages, the
 renderers), `internal/platform/admin/platform.go` (the routes), `internal/cloud/pve/access.go` and
@@ -965,9 +965,11 @@ What this does not do, and what to do then:
 - **Tenant clusters' machines** are not touched by this: their VMs are made by the platform's
   CAPMOX in tenant pools and have no `onboot`. After a node reboot start them in Proxmox.
 
-Not verified on a lab: none of this section was run on a lab. In particular it is not known
-whether CAPMOX v0.9.2 rewrites or keeps a VM option it did not set (`onboot`), and no node was
-rebooted with it in place. The privileges (`VM.Config.Options` for `onboot`, and `Sys.Modify` on `/`
+Seen on a lab (2026-11-18, a platform installed by v0.8.0, then the build `dev-751a190` of main): the
+`machines` row warned for the four machines without `onboot`, the apply set it with the CAPI token,
+CAPMOX v0.9.2 had not taken it back 23 minutes later, and the row then read ok. Not verified on a
+lab: a stopped machine, a machine the token cannot read, an install on this release from the start,
+and a node reboot with `onboot` in place. The privileges (`VM.Config.Options` for `onboot`, and `Sys.Modify` on `/`
 besides for `startup`) are read from Proxmox VE's API code (qemu-server, `PVE/API2/Qemu.pm`), and the seed's own `onboot` has been set with the same
 token and role since the first install. That Proxmox starts VMs without a start order by VMID is from
 its documentation as remembered, and was not checked in its code or on a node.
@@ -1101,7 +1103,7 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 
 ## Not implemented yet
 
-- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0` (`main` carries `0.9.0-dev`). `--managed-services` needs v0.8.0 or later: no
+- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1` (`main` carries a `-dev` one between releases). `--managed-services` needs v0.8.0 or later: no
   earlier released image reads `PROXCLOUD_PLATFORM_ENABLED`, and the images of v0.8.0 exist once
   its tag's workflows have succeeded. For a test ahead of a release,
   `proxcloud-up.sh` takes a build of main as its version (`--version dev-<sha>`, `upgrade dev-<sha>`;
@@ -1124,8 +1126,13 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
   platform stays on release 0.8.0"), lists the contents of the installed release, and the plan
   names the release the build would install as `newer`. Moving an installed platform to a newer
   BOM is a later release. Provider (Cluster API) upgrades are refused as `capi_init_failed`.
-  - **Not verified on a lab.** No apply was run with a build that carries a previous BOM against a
-    platform that v0.8.0 installed. What tests show: the file under `previous/` has the sha256 that
+  - **Seen on a lab once** (2026-11-18): a platform installed by the released v0.8.0, then the
+    portal upgraded to the build `dev-751a190` of main. The plan had no change and named that
+    build's BOM as `newer`, the Check passed, **Apply this release** succeeded in 6.6 seconds,
+    `status.bom` stayed the 0.8.0 one and no Application of the seed was synced again. That
+    build's own BOM pinned the same versions as 0.8.0, so the lab does not show an apply that
+    keeps older pins while the build carries other ones, and the build was not the release
+    v0.8.1 itself. What tests show: the file under `previous/` has the sha256 that
     a v0.8.0 platform records (`8eb87498…6600c6`), what the renderers of this build make of the
     0.8.0 BOM is byte for byte what v0.8.0 rendered from it (the goldens of the tag), and a run on
     fakes takes its images, Applications and provider bodies from the 0.8.0 BOM.
