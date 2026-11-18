@@ -843,7 +843,7 @@ func TestPlatformClusterKubeconfig(t *testing.T) {
 	if err := store.Create(ctx, in); err != nil {
 		t.Fatal(err)
 	}
-	run, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "")
+	run, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

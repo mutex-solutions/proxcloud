@@ -234,7 +234,7 @@ func TestMove(t *testing.T) {
 	if _, _, err := move(in, old.SHA256); !errors.As(err, &refused) || !strings.Contains(err.Error(), "does not go back") {
 		t.Fatalf("back to the installed BOM: %v", err)
 	}
-	if p, err := PlanFor(in, ""); err != nil || p.Target != target || p.Upgrade == nil || !p.Upgrade.InProgress || len(p.Blocking) != 0 {
+	if p, err := PlanFor(in, ""); err != nil || p.Target != target || p.Upgrade == nil || !p.Upgrade.InProgress || p.Replacement != nil || len(p.Blocking) != 0 {
 		t.Fatalf("the plan of a started upgrade: %+v %v", p, err)
 	}
 
@@ -246,9 +246,20 @@ func TestMove(t *testing.T) {
 	if _, up, err := move(in, cur.SHA256); err != nil || !up.Allowed || up.InProgress || up.Confirm == "" {
 		t.Fatalf("a later release over an unfinished target it may replace: %+v %v", up, err)
 	}
+	// The plan carries both: the unfinished move, which an apply without a target continues, and the move to this
+	// build's BOM in its place, with the phrase that starts it.
+	if p, err := PlanFor(in, ""); err != nil || p.Target != midRef || p.Upgrade == nil || !p.Upgrade.InProgress || p.Upgrade.To != midRef ||
+		p.Replacement == nil || !p.Replacement.Allowed || p.Replacement.InProgress || p.Replacement.To != target || p.Replacement.Confirm != "upgrade lab to 0.9.0" {
+		t.Fatalf("the plan over an unfinished target of an earlier build: %+v %v", p, err)
+	}
 	comp(t, cur.BOM, ClusterWorkload, "cilium").Chart.Version = "1.18.17"
 	if _, up, err := move(in, cur.SHA256); err != nil || up.Allowed || len(up.Blocking) != 2 || !strings.HasPrefix(up.Blocking[1], "from the unfinished target 0.8.0: workload/cilium") {
 		t.Fatalf("a later release that may not replace the target: %+v %v", up, err)
+	}
+	// Going on to a target already started is never refused, whatever the classifier says of the pair now.
+	in.Status.TargetBOM = &target
+	if _, up, err := move(in, ""); err != nil || !up.Allowed || !up.InProgress || len(up.Blocking) != 0 {
+		t.Fatalf("Retry of a started upgrade the classifier would refuse now: %+v %v", up, err)
 	}
 }
 

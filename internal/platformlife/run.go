@@ -169,10 +169,6 @@ type StageReceipt struct {
 	// RolloutChecked: this upgrade run compared the cluster chart of the target BOM with the live cluster before its
 	// sync and found no machine to replace (rolloutGate).
 	RolloutChecked bool `json:"rolloutChecked,omitempty"`
-	// TenantsDownBefore are the tenants that were not healthy when this upgrade run reached the workload's waves
-	// (TenantsRead: the list was taken, also when it is empty). They do not hold the run.
-	TenantsRead       bool     `json:"tenantsRead,omitempty"`
-	TenantsDownBefore []string `json:"tenantsDownBefore,omitempty"`
 }
 
 // Terminal reports a run state that will not change any more.

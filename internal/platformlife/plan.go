@@ -58,6 +58,9 @@ type Plan struct {
 	Blocking  []string     `json:"blocking"`
 	// Upgrade is the move to this build's BOM (or to ?target=), or the one in progress. nil: there is none to make.
 	Upgrade *Upgrade `json:"upgrade,omitempty"`
+	// Replacement is set next to an Upgrade in progress whose target is not this build's BOM: the move to this build's
+	// BOM in its place (the way out when the unfinished target cannot be reached). An apply that names its To starts it.
+	Replacement *Upgrade `json:"replacement,omitempty"`
 }
 
 // UpgradeRefused is the 409 of an apply that names a target this release does not move the platform to.
@@ -72,7 +75,8 @@ func refOf(b Embedded) BOMRef { return BOMRef{Release: b.Release, SHA256: b.SHA2
 // PlanFor is what an apply does to in. A new installation gets this build's BOM. An installed platform stays on its
 // BOM unless the apply names a target: Target is the installed BOM, Newer this build's when it is another one, and
 // Upgrade the plan of the move to it (or to target, the sha256 of a BOM this build embeds). While an upgrade is in
-// progress Target is its target: no apply goes back. An installed BOM this build does not embed blocks with
+// progress Target is its target and Upgrade that move: no apply goes back. When that target is the BOM of an earlier
+// build, Replacement is the move to this build's. An installed BOM this build does not embed blocks with
 // bom_unsupported.
 func PlanFor(in *Installation, target string) (Plan, error) {
 	cur, err := Current()
@@ -110,6 +114,11 @@ func PlanFor(in *Installation, target string) (Plan, error) {
 	}
 	if _, p.Upgrade, err = move(in, target); err != nil {
 		return p, err
+	}
+	if pending := in.Status.TargetBOM; target == "" && pending != nil && pending.SHA256 != cur.SHA256 && in.Status.BOM.SHA256 != cur.SHA256 {
+		if _, p.Replacement, err = move(in, cur.SHA256); err != nil {
+			return p, err
+		}
 	}
 	return p, nil
 }

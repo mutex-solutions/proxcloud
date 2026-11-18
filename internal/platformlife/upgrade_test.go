@@ -250,8 +250,8 @@ func TestUpgradeRefusesAMachineRollout(t *testing.T) {
 		resources []any
 		want      string
 	}{
-		"a new machine template":   {[]any{kcp, res("ProxmoxMachineTemplate", "pc-platform-cp-pve1-ffffffff", "OutOfSync", false)}, "ProxmoxMachineTemplate pc-platform-cp-pve1-ffffffff is new"},
-		"a new bootstrap template": {[]any{kcp, res("KubeadmConfigTemplate", "pc-platform-system-pve1-ffffffff", "OutOfSync", false)}, "KubeadmConfigTemplate pc-platform-system-pve1-ffffffff is new"},
+		"a new machine template":   {[]any{kcp, res("ProxmoxMachineTemplate", "pc-platform-cp-pve1-ffffffff", "OutOfSync", false)}, "ProxmoxMachineTemplate pc-platform-cp-pve1-ffffffff is new or would change"},
+		"a new bootstrap template": {[]any{kcp, res("KubeadmConfigTemplate", "pc-platform-system-pve1-ffffffff", "OutOfSync", false)}, "KubeadmConfigTemplate pc-platform-system-pve1-ffffffff is new or would change"},
 		"a changed control plane":  {[]any{res("KubeadmControlPlane", "pc-platform-cp", "OutOfSync", false)}, "KubeadmControlPlane pc-platform-cp would change"},
 		"an old template to prune": {[]any{kcp, res("ProxmoxMachineTemplate", "pc-platform-cp-pve1-00000000", "OutOfSync", true), res("MachineDeployment", "pc-platform-system-pve1", "OutOfSync", false)}, ""},
 	} {
@@ -303,6 +303,17 @@ func TestUpgradeRefusesAMachineRollout(t *testing.T) {
 		t.Fatalf("end %s", end)
 	}
 
+	// A comparison of the new source that lists no control plane (empty, or not complete yet) says nothing either: the
+	// run waits, and the Application stays without automated sync.
+	p, _, _ = upgrading(t)
+	p.seed.resources[ClusterName] = []any{}
+	if end := p.until(30); end != "defer:waiting_cluster" || !strings.Contains(p.stage(stageCluster).Message, "Waiting for ArgoCD to compare") {
+		t.Fatalf("an empty comparison: %s: %+v", end, p.stage(stageCluster))
+	}
+	if app := p.seed.obj(appsPath + ClusterName); dig(app, "spec", "syncPolicy", "automated") != nil {
+		t.Fatalf("the Application syncs by itself after an empty comparison: %v", app["spec"])
+	}
+
 	// A run that stays on its BOM makes no such check.
 	q := newPlatform(t, RunApply)
 	q.seed.resources[ClusterName] = []any{res("KubeadmControlPlane", "pc-platform-cp", "OutOfSync", false)}
@@ -316,6 +327,8 @@ func TestUpgradeRefusesAMachineRollout(t *testing.T) {
 // Application never prunes, so it may stay OutOfSync for good: the last sync being of the current source is enough.
 func TestUpgradeWaitsForTheClusterChartSync(t *testing.T) {
 	p, _, to := upgrading(t)
+	p.seed.resources[ClusterName] = []any{map[string]any{"kind": "KubeadmControlPlane", "name": "pc-platform-cp", "status": "Synced"},
+		map[string]any{"kind": "MachineDeployment", "name": "pc-platform-system-pve1", "status": "OutOfSync"}}
 	p.seed.pruneOnly = map[string]string{ClusterName: "0.1.13"} // OutOfSync, and the last sync was of the old chart
 	if end := p.until(30); end != "defer:waiting_cluster" || !strings.Contains(p.stage(stageCluster).Message, "Waiting for ArgoCD to sync pc-platform at chart proxmox-kamaji-cluster 0.1.14") {
 		t.Fatalf("end %s: %+v", end, p.stage(stageCluster))
@@ -329,6 +342,27 @@ func TestUpgradeWaitsForTheClusterChartSync(t *testing.T) {
 	}
 	if _, in, _ := p.state.snapshot(); *in.Status.BOM != to {
 		t.Fatalf("status %+v", in.Status)
+	}
+}
+
+// A site that once changed a machine size keeps the old machine templates: pc-platform never prunes, so it is
+// OutOfSync for them alone. A cluster chart that renders every object unchanged then gives ArgoCD nothing to sync, and
+// automated sync without prune starts none: the last sync stays the old chart's for good. Stage 7 must not wait for a
+// sync that never comes. With anything else out of sync it does wait (TestUpgradeWaitsForTheClusterChartSync).
+func TestUpgradePassesWhenOnlyPruningIsLeft(t *testing.T) {
+	res := func(kind, name, status string, prune bool) map[string]any {
+		return map[string]any{"kind": kind, "name": name, "status": status, "requiresPruning": prune}
+	}
+	left := []any{res("KubeadmControlPlane", "pc-platform-cp", "Synced", false), res("Cluster", ClusterName, "Synced", false),
+		res("ProxmoxMachineTemplate", "pc-platform-cp-pve1-00000000", "OutOfSync", true)}
+	p, _, to := upgrading(t)
+	p.seed.resources[ClusterName] = left
+	p.seed.pruneOnly = map[string]string{ClusterName: "0.1.13"} // OutOfSync, and no sync of the new chart ever starts
+	if end := p.until(30); end != "complete" {
+		t.Fatalf("end %s: %+v", end, p.stage(stageCluster))
+	}
+	if _, in, _ := p.state.snapshot(); *in.Status.BOM != to || version(in, ClusterSeed, ClusterName) != "0.1.14" || slices.Contains(p.seed.syncs, ClusterName) {
+		t.Fatalf("status %+v, syncs started %v", in.Status, p.seed.syncs)
 	}
 }
 
@@ -352,8 +386,8 @@ func TestUpgradeWaitsForTenants(t *testing.T) {
 	if end := p.until(30); end != "defer:waiting_workload_platform" || p.stage(stageWorkloadPlatform).Code != CodeComponentUnhealthy {
 		t.Fatalf("end %s: %+v", end, p.stage(stageWorkloadPlatform))
 	}
-	if r := p.receipt(stageWorkloadPlatform); !r.TenantsRead || !slices.Equal(r.TenantsDownBefore, []string{"Application db-broken (Degraded)"}) {
-		t.Fatalf("the tenants down before the waves: %+v", r)
+	if _, in, _ := p.state.snapshot(); in.Status.TenantsDownBefore == nil || !slices.Equal(*in.Status.TenantsDownBefore, []string{"Application db-broken (Degraded)"}) {
+		t.Fatalf("the tenants down before the waves: %+v", in.Status)
 	}
 	tenant("db-1", "Degraded")
 	tcp("NotReady")
@@ -361,10 +395,32 @@ func TestUpgradeWaitsForTenants(t *testing.T) {
 		!strings.Contains(p.stage(stageWorkloadPlatform).Message, "2 of 3 tenant objects") || !strings.Contains(p.stage(stageWorkloadPlatform).Message, "TenantControlPlane t-1/k1 (NotReady)") {
 		t.Fatalf("end %s: %+v", end, p.stage(stageWorkloadPlatform))
 	}
+	// The wait runs out and the run fails. Retry still waits for the tenant the wave broke: the note of who was down
+	// before is the upgrade's, and is not taken again with db-1 already Degraded.
+	delete(p.seed.unsynced, "pc-platform-capi-tenant")
+	p.mutate(func(run *Run, _ *Installation, _ *Secrets) {
+		for i := range run.Stages {
+			if past := time.Now().Add(-time.Second); run.Stages[i].ID == stageWorkloadPlatform {
+				run.Stages[i].Deadline = &past
+			}
+		}
+	})
+	if end := p.once(); end != "fail:"+CodeTenantsUnhealthy {
+		t.Fatalf("after the deadline: %s", end)
+	}
+	p.start(t, "", "")
+	if end := p.until(30); end != "defer:waiting_workload_platform" || p.stage(stageWorkloadPlatform).Code != CodeTenantsUnhealthy {
+		t.Fatalf("Retry with the tenant still down: %s: %+v", end, p.stage(stageWorkloadPlatform))
+	}
+	if _, in, _ := p.state.snapshot(); in.Status.BOM == nil || in.Status.TargetBOM == nil || !slices.Equal(*in.Status.TenantsDownBefore, []string{"Application db-broken (Degraded)"}) {
+		t.Fatalf("Retry took the note again: %+v", in.Status)
+	}
 	tenant("db-1", "Healthy")
 	tcp("Ready")
-	delete(p.seed.unsynced, "pc-platform-capi-tenant")
 	if end := p.until(30); end != "complete" {
 		t.Fatalf("end %s: %+v", end, p.stage(stageWorkloadPlatform))
+	}
+	if _, in, _ := p.state.snapshot(); in.Status.TargetBOM != nil || in.Status.TenantsDownBefore != nil {
+		t.Fatalf("the finished upgrade keeps its note: %+v", in.Status)
 	}
 }

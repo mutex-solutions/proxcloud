@@ -246,6 +246,25 @@ func lastSyncIsCurrent(app map[string]any) bool {
 		reflect.DeepEqual(source, dig(app, "status", "operationState", "syncResult", "source"))
 }
 
+// onlyPruneLeft: ArgoCD has compared the cluster with the source the Application has now, and all that is out of sync
+// is what it would prune. Automated sync without prune starts no sync for that alone (ArgoCD's controller skips it:
+// "need to prune extra resources only but automated prune is disabled"), so a sync result of the new source never
+// comes, and none is needed: every object the chart renders is on the cluster as rendered. Read from ArgoCD's
+// controller source, not seen on a lab.
+func onlyPruneLeft(app map[string]any) bool {
+	source := dig(app, "spec", "source")
+	resources, _ := dig(app, "status", "resources").([]any)
+	if source == nil || len(resources) == 0 || app["operation"] != nil || !reflect.DeepEqual(source, dig(app, "status", "sync", "comparedTo", "source")) {
+		return false
+	}
+	for _, r := range resources {
+		if m, _ := r.(map[string]any); str(m, "status") != "Synced" && m["requiresPruning"] != true {
+			return false
+		}
+	}
+	return true
+}
+
 // syncFailures are the resources and hooks the Application's last sync attempt failed on, each with its message.
 func syncFailures(app map[string]any) []string {
 	var out []string
@@ -537,7 +556,7 @@ func (x *acq) rolloutGate(ctx context.Context, seed *kamajik8s.Client, a appOf) 
 				rolls = append(rolls, "KubeadmControlPlane "+str(m, "name")+" would change")
 			}
 		case (kind == "ProxmoxMachineTemplate" || kind == "KubeadmConfigTemplate") && !synced && m["requiresPruning"] != true:
-			rolls = append(rolls, kind+" "+str(m, "name")+" is new")
+			rolls = append(rolls, kind+" "+str(m, "name")+" is new or would change")
 		}
 	}
 	// The comparison must be of the source the Application has now, and list the control plane: an empty or an old
@@ -583,10 +602,12 @@ func tenantsDown(ctx context.Context, wl *kamajik8s.Client) (down []string, tota
 	return down, len(apps) + len(tcps), nil
 }
 
-// tenantGate holds an upgrade run after a wave of the workload until every tenant that was healthy when the run
-// reached the waves is healthy again (tenantsDown). The tenants that were down before are noted once in the stage's
-// receipt and do not hold the run: an upgrade must not wait for a customer's broken database. It compares names with
-// their state, so a tenant that was Progressing and is Degraded now holds the run too.
+// tenantGate holds an upgrade run after a wave of the workload until every tenant that was healthy when the upgrade
+// first reached the waves is healthy again (tenantsDown). The tenants that were down before are noted once, on the
+// installation next to the target (status.tenantsDownBefore, cleared in stage 11), and do not hold the run: an upgrade
+// must not wait for a customer's broken database. The note is the upgrade's, not the run's: a Retry after a wave broke
+// a tenant must still wait for it, and would not if it read the tenants again. It compares names with their state, so
+// a tenant that was Progressing and is Degraded now holds the run too.
 func (x *acq) tenantGate(ctx context.Context, wl *kamajik8s.Client, baseline bool) error {
 	if x.from == nil {
 		return nil
@@ -596,12 +617,16 @@ func (x *acq) tenantGate(ctx context.Context, wl *kamajik8s.Client, baseline boo
 		return err
 	}
 	if baseline {
-		if x.receipt().TenantsRead {
+		if x.in.Status.TenantsDownBefore != nil {
 			return nil
 		}
-		return x.recordReceipt(ctx, func(r *StageReceipt, _ *Installation, _ *Secrets) { r.TenantsRead, r.TenantsDownBefore = true, down })
+		down = append([]string{}, down...) // never nil: an empty note is a note
+		return x.record(ctx, func(_ *Run, in *Installation, _ *Secrets) { in.Status.TenantsDownBefore = &down })
 	}
-	before := x.receipt().TenantsDownBefore
+	var before []string
+	if b := x.in.Status.TenantsDownBefore; b != nil {
+		before = *b
+	}
 	down = slices.DeleteFunc(down, func(d string) bool { return slices.Contains(before, d) })
 	if len(down) > 0 {
 		return waiting(CodeTenantsUnhealthy, "%d of %d tenant objects that were healthy before this wave are not healthy: %s.", len(down), total, clip(strings.Join(down, ", ")))
@@ -736,9 +761,10 @@ func (x *acq) cluster(ctx context.Context) error {
 	note, appNote := "", ""
 	if live, err := seed.GetApplication(ctx, argoNamespace, apps[i].name()); err != nil {
 		return classify(CodeComponentUnhealthy, err)
-	} else if state, detail, ok := appState(live); x.from != nil && !ok && !lastSyncIsCurrent(live) {
+	} else if state, detail, ok := appState(live); x.from != nil && !ok && !lastSyncIsCurrent(live) && !onlyPruneLeft(live) {
 		// An upgrade run waits for the sync of the target's chart: the machines are Running all along, so nothing below
-		// would wait for it, and the component would be recorded as moved while ArgoCD still syncs or has failed.
+		// would wait for it, and the component would be recorded as moved while ArgoCD still syncs or has failed. A
+		// chart that renders every object as it is has nothing to sync (onlyPruneLeft): there is no sync to wait for.
 		if _, err := x.resync(ctx, seed, apps[i], live, false, CodeComponentUnhealthy, detail); err != nil {
 			return err
 		}
@@ -1298,7 +1324,7 @@ func (x *acq) register(ctx context.Context) error {
 }
 
 // done is stage 11: what was applied, and the BOM it came from. An upgrade ends here: only now, with every stage
-// passed, does status.bom name the target, and status.targetBom is cleared.
+// passed, does status.bom name the target, and status.targetBom and status.tenantsDownBefore are cleared.
 func (x *acq) done(ctx context.Context) error {
 	return x.save(ctx, func(run *Run, in *Installation, _ *Secrets) {
 		now := time.Now().UTC()
@@ -1308,7 +1334,7 @@ func (x *acq) done(ctx context.Context) error {
 				Digest: c.Chart.Digest, AppliedAt: &now, Managed: true})
 		}
 		ref := run.BOM
-		in.Status.BOM, in.Status.TargetBOM = &ref, nil
+		in.Status.BOM, in.Status.TargetBOM, in.Status.TenantsDownBefore = &ref, nil, nil
 	})
 }
 

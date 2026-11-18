@@ -118,12 +118,16 @@ type Status struct {
 	// TargetBOM is the BOM an upgrade is moving the platform to: set when its first run starts, cleared by the run that
 	// succeeds (which sets BOM to it). While it is set BOM still names the BOM the platform left, Components say per
 	// component what has moved, and every apply continues to it.
-	TargetBOM  *BOMRef           `json:"targetBom,omitempty"`
-	Seed       *SeedStatus       `json:"seed,omitempty"`
-	Clusters   []ClusterStatus   `json:"clusters,omitempty"`
-	Components []ComponentStatus `json:"components,omitempty"`
-	Volumes    []Volume          `json:"volumes,omitempty"`
-	Providers  *ProviderIDs      `json:"providers,omitempty"`
+	TargetBOM *BOMRef `json:"targetBom,omitempty"`
+	// TenantsDownBefore are the tenants that were not healthy when the upgrade first reached the workload's waves
+	// (non-nil, also when empty: the list was taken). They do not hold its runs; every other tenant does, in every run
+	// of the upgrade, a Retry included. Cleared with TargetBOM.
+	TenantsDownBefore *[]string         `json:"tenantsDownBefore,omitempty"`
+	Seed              *SeedStatus       `json:"seed,omitempty"`
+	Clusters          []ClusterStatus   `json:"clusters,omitempty"`
+	Components        []ComponentStatus `json:"components,omitempty"`
+	Volumes           []Volume          `json:"volumes,omitempty"`
+	Providers         *ProviderIDs      `json:"providers,omitempty"`
 }
 
 // BOMRef names an embedded BOM by release and file sha256.

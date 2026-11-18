@@ -10,8 +10,11 @@ import (
 )
 
 // machineFacts renders the cluster chart with a values golden and answers what decides whether Cluster API replaces
-// a machine: the KubeadmControlPlane's spec, the names of the machine and bootstrap templates (each carries a hash of
-// its spec), and every MachineDeployment's machine template.
+// a machine, and whether the run's check before the sync (rolloutGate) lets the chart through: the whole
+// KubeadmControlPlane and every machine and bootstrap template as rendered, metadata included (the check fails on any
+// of them that ArgoCD does not report Synced, a label or an annotation too), and every MachineDeployment's machine
+// template. It must stay at least as strict as rolloutGate: a pair that passes here and fails there leaves every
+// upgraded platform with an unfinished upgrade.
 func machineFacts(t *testing.T, helm, chart, values string) map[string]any {
 	t.Helper()
 	out, err := exec.Command(helm, "template", ClusterName, chart, "-n", ClusterName, "-f", values).CombinedOutput()
@@ -26,16 +29,15 @@ func machineFacts(t *testing.T, helm, chart, values string) map[string]any {
 		spec, _ := o["spec"].(map[string]any)
 		switch kind {
 		case "KubeadmControlPlane":
-			facts[kind+" "+name] = spec
+			facts[kind+" "+name] = o
 		case "MachineDeployment":
 			facts[kind+" "+name] = spec["template"]
 		case "ProxmoxMachineTemplate", "KubeadmConfigTemplate":
 			templates = append(templates, kind+" "+name)
+			facts[kind+" "+name] = o
 		}
 	}
-	slices.Sort(templates)
-	facts["templates"] = templates
-	if len(templates) == 0 || len(facts) < 3 {
+	if len(templates) == 0 || len(facts) < len(templates)+2 {
 		t.Fatalf("%s renders no control plane, machine deployment or template", chart)
 	}
 	return facts
@@ -91,7 +93,7 @@ func TestUpgradeRollsNoMachine(t *testing.T) {
 		checked++
 		got := machineFacts(t, helm, clusterChart(t, helm, comp(t, b.BOM, ClusterSeed, ClusterName).Chart), filepath.Join("testdata", "previous", b.Release, "render-cluster-values.golden.yaml"))
 		if !reflect.DeepEqual(got, want) {
-			t.Errorf("an upgrade from %s to %s would replace machines: the cluster chart renders another control plane, machine template or bootstrap template.\n"+
+			t.Errorf("an upgrade from %s to %s would replace machines, or fail the run's rollout check: the cluster chart renders another control plane, machine template or bootstrap template (metadata included).\n"+
 				"%s: %v\n%s: %v", b.Release, cur.Release, b.Release, got, cur.Release, want)
 		}
 	}
