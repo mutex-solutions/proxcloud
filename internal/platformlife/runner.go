@@ -317,10 +317,11 @@ func (x *acq) execute(ctx context.Context) end {
 	}
 	if run.Kind == RunApply {
 		b, ok := Lookup(run.BOM.SHA256)
-		if x.bom = b.BOM; !ok {
+		if !ok {
 			return x.finish(ctx, RunFailed, CodePortalChanged, "ProxCloud was upgraded during the run and no longer embeds its BOM "+
 				run.BOM.Release+": Retry starts a new run.")
 		}
+		x.bom = b.BOM
 	}
 	es, err := x.r.Provider(ctx, in.ServiceID)
 	if err != nil {

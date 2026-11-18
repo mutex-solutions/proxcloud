@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -317,7 +316,8 @@ var Current = sync.OnceValues(func() (Embedded, error) {
 
 // Previous are the BOMs of earlier releases this build embeds next to its own (deploy/platform/previous/): a platform
 // one of them installed keeps its applies, which render from that BOM and not from the current one. None is a "-dev"
-// BOM, so a platform installed by a build of main is not among them. bom_test.go keeps them valid and unchanged.
+// BOM, so a platform installed by a build of main is not among them. bom_test.go keeps them valid, unchanged and
+// limited to the releases it lists.
 var Previous = sync.OnceValues(func() ([]Embedded, error) {
 	files, err := fs.Glob(deploy.PreviousBOMs, "platform/previous/*.yaml")
 	if err != nil {
@@ -332,9 +332,6 @@ var Previous = sync.OnceValues(func() ([]Embedded, error) {
 		b, err := Parse(raw)
 		if err == nil {
 			err = b.Validate()
-		}
-		if err == nil && (strings.HasSuffix(b.Release, "-dev") || path.Base(f) != b.Release+".yaml") {
-			err = fmt.Errorf("release %q: a previous BOM is a release's, in the file <release>.yaml", b.Release)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", f, err)
@@ -369,4 +366,13 @@ func bomOf(in *Installation) (*BOM, error) {
 	}
 	cur, err := Current()
 	return cur.BOM, err
+}
+
+// blockedAdvice ends the message about a BOM image on the template update blocklist. A newer release brings other
+// images only to an installation that has no recorded BOM yet: an installed platform keeps its BOM across upgrades.
+func blockedAdvice(in *Installation) string {
+	if ref := in.Status.BOM; ref != nil {
+		return "the platform stays on release " + ref.Release + " and its images, and no ProxCloud release moves an installed platform to other images yet"
+	}
+	return "install a newer ProxCloud release"
 }

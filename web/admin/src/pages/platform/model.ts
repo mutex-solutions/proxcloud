@@ -284,7 +284,7 @@ const CHECK_ACTION: Record<string, string> = {
   "boot-iso-grant": RERUN,
   "boot-iso": "Name a store that is local to each node and takes ISO files as the ISO store in step 1.",
   placement: "Every node used needs the import store and the boot store. Change the nodes or the stores in step 1.",
-  images: "A platform image is blocked. Install a newer ProxCloud release.",
+  images: "A platform image is blocked. For a new installation, install a newer ProxCloud release. An installed platform stays on its release's images: no release changes them yet.",
 }
 export const checkAction = (id: string) => CHECK_ACTION[id.split(":")[0]] ?? "Read the message, correct it, then press Check."
 
@@ -295,7 +295,7 @@ const CODE_ACTION: Record<string, string> = {
   isolation_not_enforced: ISOLATION,
   image_import_failed: "Open Template updates to see the import, then Retry. If it keeps failing, install a newer ProxCloud release.",
   image_import_stalled: "Open Template updates to see the import, then Retry. If it keeps failing, install a newer ProxCloud release.",
-  image_blocked: "This image is blocked. Install a newer ProxCloud release.",
+  image_blocked: "This image is blocked. For a new installation, install a newer ProxCloud release. An installed platform stays on its release's images: no release changes them yet.",
   seed_clone_failed: "Fix the storage or the node named in the message, then Retry.",
   seed_config_refused: "The message carries the error from Proxmox: fix the bridge, the store, the node or the token right it names, then Retry. If the message says the seed's CD could not be rendered or built, Retry will not pass: report the message.",
   seed_not_booted: "Open the seed VM's console in Proxmox. Retry builds a new seed when this one never became ready.",

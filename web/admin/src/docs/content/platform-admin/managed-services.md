@@ -94,7 +94,7 @@ The failed stage shows a code, a message and what to do.
 |---|---|
 | `preflight_failed` | Open the failed checks of the stage. Run the script again or correct the settings, then **Check**. |
 | `isolation_not_enforced` | Add the networks named in the message to **Networks tenants must not reach** on the provider's page under **Cloud providers**. Then press **Check**: its isolation row links to that page and has the button **Run a provider sync, then check again**. Check too that the datacenter firewall is on. |
-| `image_import_failed`, `image_import_stalled`, `image_blocked` | Open **Template updates** to see the import. A blocked image needs a newer ProxCloud release. |
+| `image_import_failed`, `image_import_stalled`, `image_blocked` | Open **Template updates** to see the import. A blocked image needs a newer ProxCloud release on a new installation; an installed platform stays on its release's images, and no release changes them yet. |
 | `seed_clone_failed` | Fix the storage or the node named in the message, then **Retry**. |
 | `seed_config_refused` | The message carries Proxmox's own error: fix the bridge, the store, the node or the token right it names, then **Retry**. A CD that could not be rendered or built is a defect: report the message. |
 | `seed_not_booted` | Open the seed VM's console in Proxmox. **Retry** builds a new seed. |

@@ -339,7 +339,7 @@ func (p Preflight) Run(ctx context.Context) []Check {
 				if b, err := p.Blocked(ctx, im.d); err != nil {
 					blocked = append(blocked, readErr("the template update blocklist", err)...)
 				} else if b {
-					blocked = append(blocked, im.what+" "+im.d+" is on the blocklist: install a newer ProxCloud release")
+					blocked = append(blocked, im.what+" "+im.d+" is on the blocklist: "+blockedAdvice(p.Installation))
 				}
 			}
 		}

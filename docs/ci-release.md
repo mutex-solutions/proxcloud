@@ -237,9 +237,10 @@ What holds the procedure:
   from 0.8.0 on, other than the one the current BOM names, without its file. It
   reads the changelog, not the tags: a release without a changelog section is
   not seen.
-- `TestPreviousBOMsAreUnchanged` compares each file with its recorded hash, and
-  `platformlife.Previous` refuses a `-dev` BOM and a file whose name is not its
-  release.
+- `TestPreviousBOMsAreUnchanged` compares each file with its recorded hash and
+  fails on a release it has no hash for, a `-dev` one included. The script test
+  `test_the_previous_boms_parse_and_are_releases` checks that no previous BOM is
+  a `-dev` one and that each file is named after its release.
 - `bom-verify.yml` (pull requests that touch `deploy/platform/**`, weekly) and
   the `bom-verify` job of `docker.yml` on a `v*` tag run `bom_verify.py
   --release --bom` on each previous BOM: an apply on an installed platform pulls
