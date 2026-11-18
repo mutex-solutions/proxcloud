@@ -106,6 +106,7 @@ Seed-file twin of the form: `deploy/seed/external-service-dev.json`
 | DNS zone | `config.cluster.dnsZone` | Optional. API FQDN = `<clusterId>.<zone>`. Cluster ids (`pc-c-<8hex>`) never change, and a cluster made before this format keeps the id it has; nothing reads the prefix. |
 | Version → image matrix | `config.cluster.versions` | Curated map `k8s version → node image id`: the only versions offered to customers. Textarea grammar: `1.35.4=<image-id>` per line. |
 | Image variants | `config.cluster.imageVariants` | Alternative node-image builds of the same version, e.g. a GPU build. Grammar: `1.35.4@nvidia=<image-id>`. |
+| Worker firewall for new clusters | `config.cluster.workerFirewall` | Optional, API only, default `false`. `true`: every new cluster's workers go behind the Proxmox VM firewall. **Not verified on a lab**; see [Worker firewall](#worker-firewall). |
 | RWX dataset size | `config.cluster.rwxGiB` | Optional, API or installer (`services.kamaji.rwx_gib`). See [section 9](#9-how-a-cluster-lands-on-proxmox). |
 | Block volumes for tenants | — | Through the CSI gateway only, with no credential in the tenant ([section 9](#9-how-a-cluster-lands-on-proxmox)). `csiSharedStores` and `pveCsiUrl` were removed: the API answers 400 to a `cluster` block that still has one, and the form drops them on save. |
 | Flavors allowlist | `config.cluster.flavors` | Flavor ids offered for node groups. Empty = no restriction. |
@@ -725,6 +726,177 @@ isolation between every tenant behind that NAT (see "TrueNAS file shares" in `cl
 drop tenant traffic to the nodes' management network, so a NAS with only an address there cannot be mounted at all:
 `mountHost` must be an address tenants can reach.
 Full-tier sites (ceph-csi CephFS) are not built yet.
+
+### Worker firewall
+
+**Status: code and tests only. Nothing in this section was run on a lab or on a site.** The lab tests that decide it
+are listed at the end. Until they pass, leave `config.cluster.workerFirewall` off and protect clusters one at a time.
+
+Without it a worker VM has no Proxmox firewall: CAPMOX clones it with a NIC that carries no `firewall=1` and no
+`<vmid>.fw` exists. Every port of a worker (kubelet, NodePorts) is open to the project's networks and a worker can
+send with any address of its vnet. Only the cluster isolation rules stand between it and other tenants.
+
+With it a worker gets what a server gets (`pve/firewallsvc.go` `SecureVM`), adapted (`pve/workerfw.go`):
+
+| Setting on the worker VM | Value | Why |
+|---|---|---|
+| VM firewall `enable`, NIC `firewall` | `1`, `1` on every NIC | PVE filters a NIC only with both, and with the datacenter firewall on |
+| `policy_in` | `DROP` | default-deny inbound; the security group below opens what is needed |
+| `policy_out` | `ACCEPT` | egress stays open, as for servers: a worker opens every connection to its control plane itself |
+| `macfilter` | `1` | a worker sends with its NIC's MAC only. MetalLB layer 2 answers ARP with that MAC, so it passes |
+| `ipfilter`, set `ipfilter-net0` | `1`; the cluster's 16 worker and 8 MetalLB addresses | see "IP filter" below |
+| `dhcp` | `0` | CAPMOX gives static addresses |
+| VM rules | one reference to the cluster's security group | nothing else is added, nothing a template brought is removed |
+
+**The cluster's security group.** One ordinary security group of the project per cluster, display name
+`k8s-<clusterId>`, made by the portal. It is also the switch: a cluster whose group exists is protected. Tenants see
+it under Network → Security groups and on the cluster page, and may change its rules; removing a rule the cluster
+needs breaks the cluster. A group that exists is never rewritten. What a tenant cannot do with it:
+
+- create a group whose name starts with `k8s-` (400);
+- delete the group of a cluster the project has (409; it goes with the cluster);
+- attach a group named `k8s-…` to a server, by the attach action or at create (409): the cluster's release and
+  **Remove the worker firewall** delete the group, and the server would lose those openings;
+- attach any group to a worker row, or detach the cluster's group from it (409 *This server is a worker node of a
+  Kubernetes cluster…*): another group would open the worker, or stay behind on a VM that CAPMOX replaces.
+
+**A group named `k8s-…` from before 0.9.0.** The names were free in 0.8.x. Such a group is a cluster's only when the
+rest of its name is the id of a Kubernetes cluster the same project has; the sync and the delete refusal look at
+nothing else. So a tenant's `k8s-ingress` switches nothing on, keeps its rules and its servers, can be detached and
+deleted, and can no longer be attached to another server (the 409 above goes by the name alone). A group a tenant
+attached to a worker row under 0.8.x can be detached from it. If a tenant's old group has exactly the name
+`k8s-<id of one of their clusters>`, it is that cluster's group: the first sync after the upgrade puts the firewall
+on that cluster's workers with the tenant's rules. A cluster id ends in eight random hex digits, so this needs a
+tenant who named a group after their cluster on purpose; look for such groups before the upgrade if in doubt.
+
+What the group holds when it is made. Every rule is an inbound ACCEPT. "Workers" is the cluster's 16 reserved worker
+addresses as the fewest CIDRs; "pool" is the Proxmox provider's `network.cidrPool`, of which the isolation rules
+already drop every other tenant's part.
+
+| # | Protocol, port | Source | Destination | For | Read from |
+|---|---|---|---|---|---|
+| 1 | UDP 8472 | workers | | Cilium VXLAN: all pod-to-pod traffic between nodes | chart `addons.yaml`: `routingMode: tunnel`, `tunnelProtocol: vxlan`; Cilium's default VXLAN port |
+| 2 | TCP 4240 | workers | | Cilium health checks between nodes | Cilium system requirements (`cilium-health`) |
+| 3 | ICMP | workers | | Cilium health pings | same |
+| 4 | TCP 10250 | workers | | kubelet: `logs`, `exec` and metrics arrive from the konnectivity agent or metrics-server on another worker | see "Control plane" below |
+| 5 | TCP 7946, UDP 7946 | workers | | MetalLB speakers' memberlist | MetalLB layer 2 (`speaker`), chart: MetalLB in every cluster |
+| 6 | any | any | the 8 MetalLB addresses | LoadBalancer Services | chart: pool `tenant` = `proxmox.metallb.addresses` |
+| 7 | TCP and UDP 30000 to 32767 | pool | | NodePort Services and `healthCheckNodePort`, from the project's own networks | Kubernetes default `--service-node-port-range` |
+
+Not opened: the kubelet (10250) from anything but the cluster's workers, SSH, and every other port. A tenant who runs
+a `hostNetwork` service that other nodes or servers must reach (a node exporter on 9100, for example) adds a rule for
+it. Rules 1 to 5 are the same ports the sandbox workers' firewall opens between workers (`pve/sandboxfw.go`), which
+runs on a lab with the same chart; rules 6 and 7 are new here.
+
+**Control plane.** Nothing is opened from the control plane, because it never opens a connection to a worker. A
+tenant control plane is Kamaji pods on the platform cluster. The kubelet and kube-proxy connect to the API address
+(6443), and the konnectivity agent on each worker dials the konnectivity server (8132) and keeps that connection: the
+API server's calls to kubelets, pods and webhooks come back through it. All of that is egress from the worker, which
+is open, and PVE's firewall is stateful, so replies need no rule. The agent that carries a call may sit on another
+worker than the kubelet it calls, which is rule 4. This is read from the sandbox pass (`sandboxfw.go`: "exec and logs
+ride konnectivity, so nothing comes in for them") and Kamaji's defaults, not measured on a tenant cluster.
+
+**IP filter.** `proxmox-firewall` applies the set to ARP as well as IP: a frame leaves only when its source address
+(or ARP sender address) is in the set, and an ARP request comes in only when the address it asks for is in the set.
+MetalLB layer 2 makes whichever worker holds a Service answer ARP for that Service's address, so **the cluster's
+MetalLB addresses must be in every worker's set, or LoadBalancer Services stop answering.** They are: the set is the
+cluster's whole reservation (`k8s:<clusterId>` in the address store), 16 worker addresses and 8 MetalLB addresses. So
+a worker can send as another worker of its own cluster, or as one of its MetalLB addresses, and as nothing else on
+the vnet (one exception: a tenant who attaches a public network to a worker row has `ipfilter-net0` rewritten by that
+action, `cloud_network_pve.go`, until the next sync puts the cluster's set back). It is not pinned to its own /32 as a server is: the portal does not hand a worker its address (CAPMOX's
+address pool does), and the Node object, which names it, is the tenant's to write. Pod traffic is not affected: with
+VXLAN the outer source is the node address and traffic leaving the cluster is masqueraded to it.
+
+**How the firewall gets onto a worker.** CAPMOX has no field for the NIC flag: the function that builds a machine's
+NIC string takes model, bridge, MAC, MTU and VLAN tag and has no `firewall` parameter (read in its source,
+`internal/service/vmservice/utils.go`; it rewrites `net0` only while the machine is being cloned and is not running).
+So the chart cannot ask for it and no chart change is part of this. The portal writes it after the clone, as it does for sandbox workers:
+
+1. The provider sync (every 15 minutes, `syncjob` → `project.ReconcileWorkerFirewalls`) looks for security groups
+   named `k8s-<clusterId>` whose project has that cluster and, for each, at the project pool's VMs tagged
+   `pc-k8s-<clusterId>`.
+2. A worker that is **running** is brought in: IP filter set, group reference, options, and last `firewall=1` on the
+   NIC. Until that flag is on PVE applies none of the rest, so a running worker is never filtered by half a firewall.
+   A worker that is not running yet is left for the next pass, because CAPMOX rewrites `net0` until the first start.
+3. A cluster without reserved addresses in the store is skipped: an empty filter would cut every worker off.
+
+**The window.** A new or replaced worker therefore runs without the firewall from its first boot until the next
+provider sync: up to 15 minutes, as open as every worker is today. It cannot be closed from the chart (no CAPMOX
+field) and the portal is not told when CAPMOX starts a VM. A provider sync started by hand closes it at once.
+
+**New clusters** (`config.cluster.workerFirewall: true` on the Kubernetes provider): the create makes the group
+before the Application, and the sync brings each worker in as above. Not with `sharedWorkers`. Set it through the API
+like `rwxGiB` (the form keeps keys it has no field for).
+
+**Existing clusters are never changed by an upgrade or a sync.** The operator protects one cluster at a time:
+**System → Cloud providers → the Kubernetes provider → Managed clusters → Firewall → Protect this cluster's workers**,
+or
+
+```sh
+curl -s -X POST -H "$AUTH" "$API/admin/service/<kubernetesProviderId>/k8s-clusters/<clusterId>/worker-firewall"
+curl -s        -H "$AUTH" "$API/admin/service/<kubernetesProviderId>/k8s-clusters/<clusterId>/worker-firewall"   # state, writes nothing
+curl -s -X DELETE -H "$AUTH" "$API/admin/service/<kubernetesProviderId>/k8s-clusters/<clusterId>/worker-firewall" # take it off
+```
+
+Protect does this, in order:
+
+1. Refuses, having written nothing, when the datacenter firewall is off, when the cluster has no reserved addresses in
+   the store, when a MetalLB address in the cluster's values is not one of them, or when any Node reports an
+   `InternalIP` that is not one of the reserved worker addresses (the filter would cut that node off).
+2. Makes the group, then writes the firewall on every running worker.
+3. Waits 15 seconds for the nodes' firewall to load, then watches for up to 40 seconds that every Node that was Ready
+   renews its Lease in `kube-node-lease` (a kubelet does every 10 seconds; the node controller reads the same Lease to
+   call a node Ready).
+4. If a write failed or a Lease did not move, it switches the VM firewall off on every worker (`enable=0`, which
+   stops all filtering), deletes the group and answers 409 with what happened. The request takes up to a minute.
+
+**A Protect that is cut short.** The request runs for 55 seconds plus the Proxmox calls. A proxy in front of the API
+with a shorter timeout (60 seconds is a common default) answers an error while the action goes on to its end: open
+the dialog again, or `GET` the state, to see how it ended. If the API process itself stops during the watch, nothing
+finishes it: the group and the firewall stay, unverified, and no later sync or Protect takes them off (a second
+Protect sees a protected cluster and never goes back). The same holds when the way back in step 4 failed; the 409
+says so. In both cases look at the nodes, and use **Remove the worker firewall** if one is not Ready.
+
+Protect, Remove and the sync's pass run one at a time (a lock in the API process), so a sync cannot write on a worker
+while a Protect is going back. With more than one API replica that lock does not reach the other replicas; the
+Docker Compose install runs one.
+
+**Remove** switches the VM firewall off on every worker (`enable=0`), takes the group reference off each and deletes
+the group. It refuses with 409, having written nothing, when a worker VM is on a Proxmox node that is down (its
+firewall cannot be written, and it would come back dropping everything with a reference to a group that is gone:
+remove the firewall when the node is back or the worker has been replaced), and when another server of the project
+references the group (possible only for a group from before 0.9.0; detach it there first). A write that fails
+part-way leaves the group, so the cluster stays protected and the next sync puts the firewall back on every worker:
+run Remove again.
+
+What the watch proves and what it does not: it proves each worker still reaches its API server with its own address
+through the filter, which is what keeps a Node Ready. It does not prove traffic between pods on different nodes or to
+LoadBalancer addresses; check a workload after protecting, and use **Remove the worker firewall** if something is
+wrong. On a cluster that is already protected, Protect only brings in workers that are not yet behind the firewall
+and never takes the firewall off the others.
+
+**Delete.** The cluster's release deletes the group after the workers are gone. A group that a server of the project
+still references is left to the tenant as an ordinary group. A group delete that Proxmox refuses does not hold back
+the cluster's token and addresses: those are released, and the release is run again for the group.
+
+**Lab tests owed** (two or more nodes, PVE 9.2 with `proxmox-firewall`; none was run):
+
+1. Protect a running cluster with a workload under a `curl` loop from another pod and from outside: seconds lost while
+   `firewall=1` is set on a live NIC and while the firewall first loads, with connections that were open before.
+2. From a second VM on the tenant network: kubelet port 10250 of a worker is closed; a NodePort and a LoadBalancer
+   address answer.
+3. A worker cannot send with an address outside the cluster's reservation (`arping`/`hping` with a spoofed source).
+4. A LoadBalancer Service keeps answering after its address moves to another worker (drain the announcing node).
+5. `kubectl logs`, `exec`, `top` (metrics-server) and an admission webhook on another node than its caller work.
+6. Replace a worker (scale down by one and up): the new VM gets the firewall at the next sync and the cluster stays
+   Ready; measure the window.
+7. `workerFirewall: true`, new cluster: it reaches Ready with every add-on, and the group exists before the first VM.
+8. Does CAPMOX keep `firewall=1` on `net0` over its own reconciles of a running machine, and how long does the
+   node's firewall take to pick up a new VM firewall (the 15 seconds above are a guess)?
+9. Remove: traffic that was dropped passes again at once.
+10. What PVE answers to the delete of a security group that a VM's firewall still references, and what
+    `proxmox-firewall` does with a reference to a group that is gone. The code avoids both (it refuses the attach and
+    checks before it deletes); the answer says how bad a miss would be.
 
 **A create that fails.** Quota is checked first, so a create over it takes nothing. The marker secret is written before the create takes anything else. A failure releases the addresses, tokens and dataset at once, and if that release fails too (NAS or PVE down), the marker stays and the sweep retries it after the grace window. A release only reaches the NAS named by the cluster's share row, so a broken NAS holding nothing of the cluster blocks nothing. The exception is a cluster on a shared worker pool: its addresses are on every export of the project, so they stay reserved until the NAS takes them off.
 

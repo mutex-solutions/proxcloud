@@ -67,6 +67,7 @@ type Job struct {
 	shareAccess   func(ctx context.Context, projectID string) error
 	staleSeeds    func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error
 	loadBalancers func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error
+	workerFW      func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error
 	csiVolumes    func(region, projectID string, es *externalservice.ExternalService) providers.Provider
 	now           func() time.Time
 	log           *slog.Logger
@@ -177,6 +178,13 @@ func (j *Job) WithLoadBalancers(f func(ctx context.Context, ps *pve.Service, es 
 	return j
 }
 
+// WithWorkerFirewalls wires the pass that keeps the workers of protected Kubernetes clusters behind the VM firewall
+// (project.Handler.ReconcileWorkerFirewalls; nil = none).
+func (j *Job) WithWorkerFirewalls(f func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error) *Job {
+	j.workerFW = f
+	return j
+}
+
 // Run syncs every ENABLED project's CLOUD-service resources. Returns the total SERVER+PORT
 // resources synced. Per-project / per-service failures are logged and skipped.
 func (j *Job) Run(ctx context.Context) (int, error) {
@@ -232,6 +240,11 @@ func (j *Job) detectProxmoxCapabilities(ctx context.Context) {
 			continue
 		}
 		j.reconcileProviderIsolation(ctx, ps, es)
+		if j.workerFW != nil {
+			if err := j.workerFW(ctx, ps, es); err != nil {
+				j.log.Error("syncjob: kubernetes worker firewalls", "serviceId", es.ID, "err", err)
+			}
+		}
 		if err := j.reconcileSandboxWorkers(ctx, ps, es); err != nil {
 			j.log.Error("syncjob: sandbox workers", "serviceId", es.ID, "err", err)
 		}

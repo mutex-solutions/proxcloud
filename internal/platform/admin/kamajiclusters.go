@@ -233,3 +233,37 @@ func (h *Handler) kamajiClusterMachines(w http.ResponseWriter, r *http.Request) 
 	}
 	httpx.OK(w, out)
 }
+
+// WorkerFirewall reads (GET), puts on (POST) or takes off (DELETE) the VM firewall of one cluster's workers
+// (project.Handler.ClusterWorkerFirewall, ProtectClusterWorkers, UnprotectClusterWorkers).
+type WorkerFirewall func(ctx context.Context, ks *kamaji.Service, clusterID, method string) (any, error)
+
+// SetWorkerFirewall wires kamajiClusterWorkerFirewall (nil = 501).
+func (h *Handler) SetWorkerFirewall(f WorkerFirewall) { h.workerFirewall = f }
+
+// kamajiClusterWorkerFirewall is the operator's switch for the Proxmox VM firewall of ONE cluster's workers
+// (docs/managed-k8s.md, "Worker firewall"). GET reports and writes nothing (ADMIN_SERVICE_READ). POST is "Protect this
+// cluster's workers": it answers after it has watched the nodes, up to a minute. DELETE removes the firewall and the
+// cluster's security group. Both ADMIN_SERVICE_MANAGE.
+func (h *Handler) kamajiClusterWorkerFirewall(w http.ResponseWriter, r *http.Request) {
+	perm := externalServiceManagePerm
+	if r.Method == http.MethodGet {
+		perm = "admin:service:read"
+	}
+	if !h.require(w, r, perm) {
+		return
+	}
+	_, ks, ok := h.kamajiService(w, r)
+	if !ok {
+		return
+	}
+	if h.workerFirewall == nil {
+		httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented, "the worker firewall is not configured"))
+		return
+	}
+	rep, err := h.workerFirewall(r.Context(), ks, chi.URLParam(r, "clusterId"), r.Method)
+	if writeClusterErr(w, err) {
+		return
+	}
+	httpx.OK(w, rep)
+}

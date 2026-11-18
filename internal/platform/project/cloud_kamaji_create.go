@@ -283,6 +283,18 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 		in.LBAddresses = append(in.LBAddresses, ip+"/32") // MetalLB takes no bare address
 	}
 	spec.Infra = in
+	// The workers' security group goes first: the provider sync puts each worker behind it once CAPMOX has started
+	// it. A failed create deletes it with the rest (KamajiReleaseCluster).
+	if d.WorkerFirewall && d.Shared == nil {
+		wf := pve.WorkerFirewall{ProjectID: proj.ID, ClusterID: spec.ID, Workers: in.Addresses, CIDRPool: compute.PVENetworkConfig().CIDRPool}
+		for _, lb := range in.LBAddresses {
+			wf.LoadBalancers = append(wf.LoadBalancers, strings.TrimSuffix(lb, "/32"))
+		}
+		if _, werr := ps.EnsureWorkerGroup(ctx, wf); werr != nil {
+			err = upstreamErr(computeBackend, werr)
+			return sec, err
+		}
+	}
 
 	apiURL := d.PVEAPIURL
 	if apiURL == "" {
@@ -403,7 +415,13 @@ func KamajiReleaseCluster(services serviceGetter, shares shareRowFinder, pveFor 
 		if csi != nil {
 			csiErr = csi(ctx, clusterID)
 		}
-		return errors.Join(csiErr, func() error {
+		// The workers are gone (kamajiWorkersGone), so they no longer reference their security group. Like the CSI
+		// step, a group that cannot be deleted keeps the marker and holds nothing else back.
+		var groupErr error
+		if ps != nil {
+			groupErr = ps.DeleteWorkerGroup(ctx, projectID, clusterID)
+		}
+		return errors.Join(csiErr, groupErr, func() error {
 			if ps != nil {
 				if err := ps.C.RevokeClusterTokens(ctx, clusterID); err != nil {
 					return err

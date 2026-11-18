@@ -90,6 +90,9 @@ func (s *Service) CreateServer(ctx context.Context, req CreateServerReq) (*cloud
 	ctx, cancel := context.WithTimeout(ctx, createTimeout)
 	defer cancel()
 	pool := s.PoolFor(req.ProjectID)
+	if err := s.refuseWorkerGroups(ctx, req.ProjectID, req.SecurityGroups); err != nil {
+		return nil, err
+	}
 
 	// vmid: NextID is racy by design — retry a fresh id on "already exists".
 	var vmid int

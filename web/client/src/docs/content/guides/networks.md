@@ -30,6 +30,8 @@ To spread inbound traffic across several servers behind one address, use a [load
 
 **Network → Security groups** are the firewalls around your servers. Each group is a list of rules that allow **inbound** traffic: a protocol, a destination port or port range, and the source address range. Attach one or more groups to a server; inbound traffic that no rule allows is dropped, and replies to connections the server opened need no rule. Every project starts with a default group. A common first rule is allowing SSH (port 22) from your own address.
 
+A group named `k8s-<cluster id>` belongs to a Kubernetes cluster and firewalls its nodes ([Kubernetes](/docs/guides/kubernetes), "Firewall around the nodes"). You may change its rules; you cannot delete it or attach it to a server, and you cannot attach your own groups to a cluster's nodes.
+
 What a security group does not do:
 
 - **It does not filter outbound traffic.** A server may open any outbound connection. The API accepts a rule with direction `egress` and the console lists it as such, but it restricts nothing; the API's answer says so.
