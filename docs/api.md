@@ -75,12 +75,27 @@ is off (`PROXCLOUD_JOBS_SCHEDULER_ENABLED`, and no debug triggers) the call answ
 `409` and changes nothing, instead of leaving the project `DELETE_IN_PROGRESS`.
 
 Networks on a Proxmox provider: `POST /api/v1/project/{id}/cloud` with
-`{type: NETWORK, data: {name, cidr?, enableDhcp?, snat?}}`. Both flags default to
-`true`, except in a `vlan` zone, where Proxmox does no DHCP and no SNAT: they
-default to `false`, the answer says `dhcp: false` and `snat: false`, and `true`
-for either is a `400` (so are the actions `ADD_SUBNET` and `SET_SNAT` with
-`snat: true`). The `gateway` of such a network is the address the site's router
-holds.
+`{type: NETWORK, data: {name, cidr?, enableDhcp?, snat?}}`. `snat` defaults to
+`true`, except in a `vlan` zone, where Proxmox does no DHCP and no SNAT: both
+flags default to `false` there, the answer says `dhcp: false` and `snat: false`,
+and `true` for either is a `400` (so are the actions `ADD_SUBNET` and `SET_SNAT`
+with `snat: true`). The `gateway` of such a network is the address the site's
+router holds.
+
+`enableDhcp` follows the zone as Proxmox has it, read at the create: it defaults
+to `true` only where the zone runs a DHCP server (a `simple` zone with
+`dhcp: dnsmasq`, which is how ProxCloud creates one unless its config says
+`"dhcp": false`). In every other zone (EVPN, VLAN, a `simple` zone without a
+DHCP server) it defaults to `false`, no DHCP range is written on the subnet, and
+`enableDhcp: true` is a `400` that says the zone has no DHCP server; servers
+there get a fixed address the platform assigns. The `dhcp` a network answers, at
+the create, after a subnet action and at every sync, is `true` only when its
+subnet has a DHCP range and its zone runs a DHCP server. Up to v0.8.0 it
+followed the zone's configured kind and the subnet alone, so a network in a
+`simple` zone made without DHCP, or in an EVPN zone, answered `dhcp: true`; a
+sync corrects such a row. The DHCP range those subnets still carry is left in
+place: it does nothing without a DHCP server in the zone, and removing it would
+take an SDN apply on a running site.
 
 Project public-network policy: `GET /api/v1/project/{id}/public-networks` lists
 the external (public) networks the project is allowed to use, and
@@ -94,6 +109,41 @@ address from that network's pool, pinned by the VM firewall's ipfilter
 (`internal/platform/project/cloud_network_pve.go`). The network must be in the
 project's allow-list. Attaching again while the NIC is plugged answers 409 and
 leaves it alone; an address held by a NIC that never got plugged is plugged.
+
+Security group rules on a Proxmox provider: actions on
+`POST /api/v1/project/{id}/cloud/{resourceId}/action`, where the resource is a
+`SECURITY_GROUP` (`internal/platform/project/cloud_writes_pve.go`). A group is an
+allow list for inbound traffic. Nothing here is lab-verified on PVE 9.2 in this
+form; the tests run against a fake Proxmox.
+
+- `LIST_RULES`: the rules, from the cache row. Each has `id`, `direction`
+  (`ingress` or `egress`), `protocol`, `port_range` (`22` or `8000:8100`),
+  `remote_ip_prefix` (the source of an ingress rule, the destination of an egress
+  rule), `description` and `pos`. The `id` is
+  `<group>-<position>-<fingerprint of the rule's content>`: it names that rule at
+  that position and stops matching when the rule moves or changes.
+- `ADD_RULE`, data `direction` (`ingress`, the default, or `egress`), `protocol`
+  (`tcp`, `udp`, `sctp`, `icmp`, `gre`, `esp`, `ah`; absent or empty for any),
+  `portRangeMin` and `portRangeMax` (whole numbers from 1 to 65535, destination
+  ports; they need `tcp`, `udp` or `sctp`), `remoteIpPrefix` (a CIDR without host
+  bits, or one address; absent for anywhere), `description`. Every rule is an
+  allow rule. Any other key is a `400` that names it (`remoteGroupId`, `action`,
+  `log`, `priority` and the rest: the provider cannot honour them, and dropping
+  one would store a wider rule than asked), and so is a value that fails the
+  checks above. What only Proxmox refuses comes back as a `400` with its text.
+  An egress rule is stored with the CIDR as its destination and **restricts
+  nothing**, because every server's outbound policy is ACCEPT: the answer then
+  carries `result.warning` saying so.
+- `DELETE_RULE`, data `ruleId` (the `id` from `LIST_RULES`). Without `ruleId` the
+  answer is `400`; `pos` is no longer taken, because a position names whatever
+  rule sits there now. When no rule of the group has that id any more (a rule was
+  added or deleted since the list was read, or the id is of the shape
+  `<group>-<position>` that v0.8.0 listed) the answer is `409`, nothing is
+  deleted and the cache row is refreshed: list the rules again and repeat the
+  delete with the current id. The delete also sends Proxmox the digest of the
+  rule list it was checked against, so a change between the check and the delete
+  is refused by Proxmox and answered `409` too.
+- There is no rule update: `UPDATE_RULE` is a `400`. Delete and add.
 
 Proxmox connection test: `POST /api/v1/admin/service/proxmox/auth`
 (`admin:service:read`) tests a connection and stores nothing. The body takes
@@ -138,6 +188,7 @@ several findings puts one on each line of `message`. Rows after `connect` or
 | `mint-scope` | Only when it applies: the token holds `User.Modify` or `Permissions.Modify` on `/`, `/access` or `/access/groups` (it could create an API token for any user, `root@pam` included) or `Permissions.Modify` on `/pool` (it could write any role on every pool). The message says what to run | `warn` |
 | `store-reach` | Stored provider: tenant networks cannot reach the network stores | `warn` |
 | `boot-iso` | Stored provider: the Kubernetes bootstrap ISO store is usable | `warn` |
+| `csi-vmid` | No guest has VM id 9999, the id proxmox-csi names its volumes after (`vm-9999-pvc-<uuid>`). In use: the message says never to destroy that VM with "Destroy unreferenced disks owned by guest", and it is in `warnings` too. An id that could not be read is a `warn` row only | `warn` |
 | `version` | Proxmox VE 9.2 or later | `fail` |
 | `template-pool` | The pool `pc-templates` exists. When it does not, the first template import creates it (`Pool.Allocate` on `/pool`); `pveum pool add pc-templates` is only for a token without that privilege | `warn` |
 | `import-store` | Some storage takes `import` content. Stored provider with `importStorage`: that storage exists, takes it, and the token can delete files there | `warn` |
@@ -397,7 +448,7 @@ makes the step `todo`, and a step is `blocked` only when it cannot start.
   `warn` is `attention`, `fail` is `todo`); the nodes with an active `import`
   store; the published OS images; and the imported templates by lifecycle
   state. `zone`, `cidr-pool`, `frr`, `public-networks` and `store-reach` go to
-  `network`, `storage-profile`, `import-store` and `boot-iso` to `storage`,
+  `network`, `storage-profile`, `import-store`, `boot-iso` and `csi-vmid` to `storage`,
   every other row to `connect`. A row that asks what a database item asks
   takes that item's place and id: `zone` the item `zone`, `cidr-pool` the item `cidrPool`,
   `storage-profile` the item `defaultProfile`. A cluster that does not answer
@@ -485,17 +536,23 @@ are several, `errors.details.problems`.
   `PROXCLOUD_ENCRYPTION_DEFAULT_KEY` the route answers `409 no_encryption_key`.
   No route returns a secret: an installation shows `credentials.{capi,csi}.tokenId`.
 - `POST /installations/{id}/preflight`: read-only, not audited; `{ok, checks}`
-  with rows `flags`, `spec`, `network`, `isolation`, `tenant-network`, `credentials`,
+  with rows `flags`, `spec`, `network`, `isolation`, `tenant-network`, `csi-vmid`, `credentials`, `machines`,
   `privileges:capi`, `privileges:csi`, `privileges:kubemint`, `mint-scope`, `pool-fence`,
   `token-scope`, `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement` and
   `images`. A row's `status` is `ok`, `fail` or `warn`; `ok` in the answer is
-  false only when a row failed. `tenant-network` never fails. It reads the provider's default
+  false only when a row failed. `csi-vmid` never fails: it warns when a guest has VM id 9999
+  (see the connection test's row of that id). `tenant-network` never fails. It reads the provider's default
   zone in Proxmox: `warn` when that zone has DHCP, when it does not exist yet and is
-  configured as a `simple` zone (ProxCloud creates one with DHCP), or when the zones
+  configured as a `simple` zone without `"dhcp": false` (ProxCloud then creates it with DHCP), or when the zones
   could not be read; a tenant Kubernetes cluster create on a network of such a zone is
   refused with a `400`, except on a Kubernetes provider with shared workers
   (`cluster.shared`), which uses no tenant network. It is `ok` for a zone without
   DHCP, and absent when the provider names no zone.
+  `machines` never fails either, and is absent while the installation has no VM. It reads, with the CAPI
+  token, the VMs of the pools `proxcloud-seed` and `proxcloud-system` that carry the installation's tag:
+  `warn` with one line per VM that is stopped (start it in Proxmox, `qm start <vmid>`) or that has no
+  `onboot` (the next apply sets it, or `qm set <vmid> --onboot 1`) or that the token could not read (the
+  other VMs are still listed), or when the pools could not be read.
   `isolation` fails, naming the CIDRs to add to `blockedCidrs`, when
   the seed, the API VIP or the node range is outside the blocked and management
   networks, and when the cluster firewall's isolation rules are not the ones the

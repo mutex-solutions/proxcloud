@@ -24,7 +24,8 @@ const (
 )
 
 // Check is one row of the preflight. The ids are part of the API (docs/api.md): flags, spec, network, isolation,
-// tenant-network (a warning or ok, never a failure; absent when the provider names no zone), credentials, privileges:capi, privileges:csi, privileges:kubemint, mint-scope, pool-fence, token-scope, iso-store-visibility,
+// tenant-network (a warning or ok, never a failure; absent when the provider names no zone), csi-vmid (a warning or ok, never a failure), credentials,
+// machines (a warning or ok, never a failure; absent while the installation has no VM), privileges:capi, privileges:csi, privileges:kubemint, mint-scope, pool-fence, token-scope, iso-store-visibility,
 // boot-iso-grant, boot-iso, placement, images. A run's first stage fails preflight_failed with the failed rows as its items, or
 // isolation_not_enforced when isolation is the only one.
 type Check struct {
@@ -38,7 +39,8 @@ type Preflight struct {
 	Installation      *Installation
 	Site              Site
 	Allow             []string     // the provider's sandbox endpoints (es.PVESandboxEndpoints), part of the isolation rules
-	ProviderImport    string       // the provider's importStorage, whose own ACL row needs the mint role too (pve.ManagedACLs)
+	MintStores        []string     // the stores a tenant cluster's token gets a row on (MintScopeOf)
+	MintZones         []string     // the zones of the tenants' networks (MintScopeOf)
 	Portal            *pve.Service // the portal token
 	ProviderDisabled  bool         // the provider's status is DISABLED: a provider sync skips it, so none writes its isolation rules
 	CAPI, CSI         *pve.Client  // the platform tokens; nil when not stored
@@ -60,9 +62,30 @@ func SiteOf(es *externalservice.ExternalService) Site {
 		site.Public = append(site.Public, p.CIDR)
 	}
 	if z, ok := n.Zones[n.DefaultZone]; ok {
-		site.DefaultZone, site.DefaultZoneKind = n.DefaultZone, z.Type()
+		site.DefaultZone, site.DefaultZoneKind, site.DefaultZoneNoDHCP = n.DefaultZone, z.Type(), z.NoDHCP
 	}
 	return site
+}
+
+// MintScopeOf names what pve.KubeMintPrivileges reads on a Proxmox provider beside the parents: the store of every
+// storage profile that can hold a boot disk, on every node (a tenant cluster boots from one of them, by the node its
+// image is on: kamajiStorage), the ISO store, the import store, and every zone the provider names. Sorted, each once.
+func MintScopeOf(es *externalservice.ExternalService) (stores, zones []string) {
+	stores = []string{es.PVEBootISOStorage(), es.PVEImportStorage()}
+	for _, p := range es.PVEStorageProfiles() {
+		if p.BootDisk() {
+			for _, s := range p.Storages {
+				stores = append(stores, s)
+			}
+		}
+	}
+	for z := range es.PVENetworkConfig().Zones {
+		zones = append(zones, z)
+	}
+	slices.Sort(stores)
+	slices.Sort(zones)
+	stores = slices.DeleteFunc(slices.Compact(stores), func(s string) bool { return s == "" })
+	return stores, zones
 }
 
 // TokenClient is the provider's PVE connection with tok in place of the portal token (as PVECSIGatewayConfig does).
@@ -148,11 +171,12 @@ func (p Preflight) Run(ctx context.Context) []Check {
 	// A warning, never a failure: the platform installs and databases run on any zone. But a tenant cluster's nodes get
 	// fixed addresses, and a cluster create on a network whose zone has DHCP is refused. The create reads the live
 	// zone (pve.VnetStaticPoolFor) and an existing zone is never changed (pve.EnsureZone), so this row reads it too;
-	// a zone not made yet gets DHCP when its kind is simple. Said here so the operator reads it before a tenant does.
+	// a zone not made yet gets DHCP when its kind is simple and its config does not say dhcp: false (pve.ZoneDHCP).
+	// Said here so the operator reads it before a tenant does.
 	if site.DefaultZone != "" {
 		const remedy = " A tenant Kubernetes cluster needs a network without DHCP, so a cluster create on a network of this zone is refused " +
-			"(400, \"Worker nodes need a network without DHCP\") until the default zone is an EVPN or a VLAN zone (config.network.zones and defaultZone, " +
-			"under Cloud providers). A Kubernetes provider with shared workers (cluster.shared) uses no tenant network and is not affected. " +
+			"(400, \"Worker nodes need a network without DHCP\") until the default zone is an EVPN or a VLAN zone, or a simple zone without DHCP " +
+			"(config.network.zones and defaultZone, under Cloud providers; \"dhcp\": false on a simple zone that does not exist yet makes it without). A Kubernetes provider with shared workers (cluster.shared) uses no tenant network and is not affected. " +
 			"The install and managed databases do not need it."
 		zones, err := p.Portal.C.ListSDNZones(ctx)
 		i := slices.IndexFunc(zones, func(z pve.SDNZone) bool { return z.Zone == site.DefaultZone })
@@ -162,14 +186,21 @@ func (p Preflight) Run(ctx context.Context) []Check {
 				site.DefaultZone + " has DHCP is not known: " + err.Error() + "." + remedy})
 		case i >= 0 && zones[i].DHCP != "":
 			out = append(out, Check{ID: "tenant-network", Status: CheckWarn, Message: "The provider's default zone " + site.DefaultZone + " has DHCP in Proxmox." + remedy})
-		case i < 0 && site.DefaultZoneKind == "simple":
+		case i < 0 && site.DefaultZoneKind == "simple" && !site.DefaultZoneNoDHCP:
 			out = append(out, Check{ID: "tenant-network", Status: CheckWarn, Message: "The provider's default zone " + site.DefaultZone +
-				" is a simple zone that does not exist yet, and ProxCloud creates a simple zone with DHCP." + remedy})
+				" is a simple zone that does not exist yet, and ProxCloud creates a simple zone with DHCP unless its config says \"dhcp\": false." + remedy})
 		case i >= 0:
 			row("tenant-network", nil, "The provider's default zone "+site.DefaultZone+" has no DHCP in Proxmox: a tenant cluster can use its networks.")
 		default:
 			row("tenant-network", nil, "The provider's default zone "+site.DefaultZone+" ("+site.DefaultZoneKind+") does not exist yet and is created without DHCP: a tenant cluster can use its networks.")
 		}
+	}
+
+	// A warning, never a failure: see pve.CSIVMIDCheck.
+	if msg, free, _ := p.Portal.C.CSIVMIDCheck(ctx); free {
+		row("csi-vmid", nil, msg)
+	} else {
+		out = append(out, Check{ID: "csi-vmid", Status: CheckWarn, Message: msg})
 	}
 
 	var creds []string
@@ -180,6 +211,34 @@ func (p Preflight) Run(ctx context.Context) []Check {
 		creds = append(creds, "The token "+pve.CSITokenID+" is not stored: paste its secret (PUT …/credentials).")
 	}
 	row("credentials", creds, "Both platform tokens are stored.")
+
+	// A warning, never a failure, and absent before the first machine exists: after a node reboot Proxmox starts only
+	// the VMs with onboot, and a stopped machine is started in Proxmox, not by a run.
+	if p.CAPI != nil {
+		vms, err := platformVMs(ctx, p.CAPI, in.ID)
+		var bad []string
+		for _, vm := range vms {
+			if vm.err != nil {
+				bad = append(bad, fmt.Sprintf("VM %d on %s could not be read with %s, so whether it runs and starts when its node boots is not known: %v", vm.vmid, vm.node, pve.CAPITokenID, vm.err))
+				continue
+			}
+			if !vm.running {
+				bad = append(bad, fmt.Sprintf("VM %d (%s) on %s is stopped: start it in Proxmox, or as root on %s: qm start %d", vm.vmid, vm.name, vm.node, vm.node, vm.vmid))
+			}
+			if !vm.onboot {
+				bad = append(bad, fmt.Sprintf("VM %d (%s) on %s does not start when its node boots (onboot is off): the next Apply sets it, or as root on %s: qm set %d --onboot 1",
+					vm.vmid, vm.name, vm.node, vm.node, vm.vmid))
+			}
+		}
+		switch {
+		case err != nil:
+			out = append(out, Check{ID: "machines", Status: CheckWarn, Message: "Could not read the platform's VMs with " + pve.CAPITokenID + ", so whether they run is not known: " + err.Error()})
+		case len(bad) > 0:
+			out = append(out, Check{ID: "machines", Status: CheckWarn, Message: strings.Join(bad, "\n")})
+		case len(vms) > 0:
+			row("machines", nil, fmt.Sprintf("The platform's %d VMs run and start when their node boots.", len(vms)))
+		}
+	}
 
 	privs := func(id string, c *pve.Client, who string, checks []pve.PrivCheck) {
 		if c == nil {
@@ -197,7 +256,14 @@ func (p Preflight) Run(ctx context.Context) []Check {
 	}
 	privs("privileges:capi", p.CAPI, pve.CAPITokenID, pve.CAPIPrivileges(s.Storage.Boot, s.Storage.ISO))
 	privs("privileges:csi", p.CSI, pve.CSITokenID, pve.CSIPrivileges(s.Storage.Boot))
-	privs("privileges:kubemint", p.Portal.C, "the portal token", pve.KubeMintPrivileges(p.ProviderImport))
+	// The paths a mint writes, not their parents alone: a store or zone with a row of its own reads complete on the
+	// parent and refuses the cluster token's row (production, 2026-11-17: every tenant cluster create failed on it).
+	privs("privileges:kubemint", p.Portal.C, "the portal token", pve.KubeMintPrivileges(p.MintStores, p.MintZones))
+	// Once for the row, when a line names a single store or zone: why the parent's grant does not reach it, and which
+	// of these lines the script does not fix.
+	if c := &out[len(out)-1]; c.ID == "privileges:kubemint" && c.Status == CheckFail && (strings.Contains(c.Message, " on /storage/") || strings.Contains(c.Message, " on /sdn/zones/")) {
+		c.Message += "\n" + pve.KubeMintShadowed
+	}
 
 	// The mint grant reaches the users of pve.KubeMintGroup alone. On /access/groups itself (where sites set up before
 	// the group hold it) PVE lets the token create an API token for every user of the cluster, root@pam included.

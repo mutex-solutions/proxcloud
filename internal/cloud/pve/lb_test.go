@@ -195,7 +195,7 @@ func TestApplianceIsNoTarget(t *testing.T) {
 	if _, err := s.CreateImage(ctx, "p1", "102", "img"); !errors.As(err, &ce) {
 		t.Errorf("CreateImage: %v", err)
 	}
-	if err := s.AttachVolume(ctx, "p1", 101, "local-zfs:vm-101-disk-1", "102"); !errors.As(err, &ce) {
+	if _, err := s.AttachVolume(ctx, "p1", 101, "local-zfs:vm-101-disk-1", "102"); !errors.As(err, &ce) {
 		t.Errorf("AttachVolume: %v", err)
 	}
 	if len(writes) != 0 {

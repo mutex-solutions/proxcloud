@@ -156,8 +156,21 @@ func TestApplyBuildsThePlatform(t *testing.T) {
 	p.seed.put(capiNS+"machinedeployments/pc-platform-kamaji-pve9", meta("pc-platform-kamaji-pve9",
 		map[string]any{"cluster.x-k8s.io/cluster-name": ClusterName, "proxcloud.io/node-group": "kamaji"}))
 	p.seed.put(capiNS+"machinedeployments/tenant-md", meta("tenant-md", map[string]any{"cluster.x-k8s.io/cluster-name": "other"}))
+	// The machines as CAPMOX leaves them, without onboot; one that has it already, and another installation's VM.
+	tags := "proxcloud;pc-platform;pc-platform-" + inID
+	p.pve.vms[201] = &fakeVM{system: true, running: true, cfg: map[string]any{"name": "pc-platform-cp-1", "tags": tags}}
+	p.pve.vms[202] = &fakeVM{system: true, running: true, cfg: map[string]any{"name": "pc-platform-kamaji-pve2-1", "tags": tags, "onboot": 1}}
+	p.pve.vms[203] = &fakeVM{system: true, running: true, cfg: map[string]any{"name": "pc-platform-cp-9", "tags": "proxcloud;pc-platform;pc-platform-other"}}
 	if end := p.until(30); end != "complete" {
 		t.Fatalf("end %s: %+v\n%s", end, p.stage(stageWorkloadPlatform), p.logs)
+	}
+	// Stage 7 ends by setting onboot on this installation's machines that lack it, and on no other VM: after a node
+	// reboot Proxmox starts only those (v0.8.0 set it on the seed alone).
+	if got := p.pve.vms[201].cfg["onboot"]; got != "1" {
+		t.Errorf("machine 201 has onboot %v after stage 7", got)
+	}
+	if p.pve.writeCount("POST /nodes/pve1/qemu/202/config") != 0 || p.pve.writeCount("POST /nodes/pve1/qemu/203/config") != 0 {
+		t.Errorf("a machine that has onboot, or another installation's VM, was written: %v", p.pve.writes)
 	}
 	run, in, _ := p.state.snapshot()
 	cur, _ := Current()

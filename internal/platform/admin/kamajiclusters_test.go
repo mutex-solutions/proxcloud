@@ -1,7 +1,10 @@
 package admin
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,6 +28,37 @@ func TestWriteClusterErr(t *testing.T) {
 		if got := writeClusterErr(rec, tc.err); got != tc.wrote || rec.Code != tc.status {
 			t.Errorf("%v: wrote=%v status=%d, want %v %d", tc.err, got, rec.Code, tc.wrote, tc.status)
 		}
+	}
+}
+
+// A CSI migration that stops on a backend answers its report and the error, and logs why: the answer does not go
+// through httpx.WriteError, and nothing else records the cause.
+func TestWriteReportErrLogsTheCause(t *testing.T) {
+	var logged bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logged, nil)))
+	defer slog.SetDefault(old)
+
+	cause := errors.New("tenant cluster: Delete https://10.0.0.7:6443/api/v1/namespaces/csi-proxmox/secrets/x: i/o timeout")
+	err := httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, "The tenant cluster is unavailable. Try again later.").WithCause(cause)
+	rec := httptest.NewRecorder()
+	rec.Header().Set(httpx.RequestIDHeader, "req-9")
+	if !writeReportErr(rec, map[string]any{"switched": true}, err) {
+		t.Fatal("an error with a report was not answered")
+	}
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), `"switched":true`) || strings.Contains(rec.Body.String(), "10.0.0.7") {
+		t.Errorf("answered %d %s", rec.Code, rec.Body.String())
+	}
+	var line map[string]any
+	if err := json.Unmarshal(logged.Bytes(), &line); err != nil {
+		t.Fatalf("the log is not one JSON line: %q", logged.String())
+	}
+	if line["msg"] != "backend request failed" || line["err"] != cause.Error() || line["reqid"] != "req-9" {
+		t.Errorf("the log line: %v", line)
+	}
+	// Without a report, or with a plain error, the usual answer is written by the caller.
+	if writeReportErr(httptest.NewRecorder(), nil, err) || writeReportErr(httptest.NewRecorder(), 1, errors.New("x")) || writeReportErr(httptest.NewRecorder(), 1, nil) {
+		t.Error("answered what writeClusterErr answers")
 	}
 }
 

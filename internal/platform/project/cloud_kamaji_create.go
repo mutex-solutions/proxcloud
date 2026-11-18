@@ -249,7 +249,7 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 			return sec, upstreamErr(computeBackend, serr)
 		}
 		if !static {
-			return sec, httpx.BadRequest("Worker nodes need a network without DHCP (an EVPN or VLAN zone)")
+			return sec, httpx.BadRequest("Worker nodes need a network without DHCP (an EVPN or VLAN zone, or a simple zone without a DHCP server)")
 		}
 		_, ipnet, perr := net.ParseCIDR(cidr)
 		if perr != nil {
@@ -297,7 +297,7 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 			ISOStorage: compute.PVEBootISOStorage(), Zone: zone, Vnet: in.Bridge,
 		})
 		if terr != nil {
-			err = upstreamErr(computeBackend, terr)
+			err = kamajiMintErr(terr)
 			return sec, err
 		}
 		capiID, capiSecret = toks.CAPIID, toks.CAPISecret
@@ -552,6 +552,21 @@ func classStorages(classes []kamaji.StorageClass) []string {
 		out = append(out, c.Storage)
 	}
 	return out
+}
+
+// kamajiMintRefused is what a tenant reads when Proxmox refuses the portal token the cluster token's rows
+// (docs/managed-k8s.md §5 names it). Proxmox's own words name the path and go to the operator alone.
+const kamajiMintRefused = "Could not mint the cluster's Proxmox tokens: the operator must fix a permission of the portal on Proxmox first. Nothing was created, and trying again does not help until then."
+
+// kamajiMintErr answers a failed pve.MintClusterTokens. A 403 is a grant the portal token lacks on one of the paths the
+// mint writes, most often a store or zone whose own ACL row hides the mint role its parent passes down: no retry
+// helps, so it is a 409 and not the 502 of a backend that is down. The managed-services Check reads the same paths
+// (pve.KubeMintPrivileges).
+func kamajiMintErr(err error) *httpx.HTTPError {
+	if pve.IsForbidden(err) {
+		return httpx.NewError(http.StatusConflict, http.StatusConflict, kamajiMintRefused).WithCause(fmt.Errorf("mint cluster tokens: %w", err))
+	}
+	return upstreamErr(computeBackend, err)
 }
 
 // kamajiCheckBootISO refuses a create whose workers' join tokens would sit on a shared store, or on a store the

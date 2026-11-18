@@ -79,6 +79,11 @@ func (h *Handler) pveSnapshotAction(w http.ResponseWriter, r *http.Request, u *u
 		return true
 	}
 	h.pveRefreshServerRow(ctx, ps, proj, cr)
+	if action == "ROLLBACK_SNAPSHOT" {
+		// The snapshot's config is back, devices too (RollbackServerSnapshot): the disks and sizes the rows hold may no
+		// longer be the server's.
+		h.ReconcileVolumeRows(ctx, ps, es, proj)
+	}
 	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
 	httpx.OK(w, map[string]any{"result": map[string]any{"name": name}})
 	return true

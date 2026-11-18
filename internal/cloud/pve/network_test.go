@@ -173,7 +173,7 @@ func TestCreateNetworkVLANZoneWritesNoDHCPNoSNAT(t *testing.T) {
 func TestNetworkSyncProviderFiltersByAlias(t *testing.T) {
 	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
 		"GET /api2/json/cluster/sdn/zones": func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, `{"data":[{"zone":"overlay","type":"evpn"}]}`)
+			fmt.Fprint(w, `{"data":[{"zone":"overlay","type":"simple","dhcp":"dnsmasq"}]}`)
 		},
 		"GET /api2/json/cluster/sdn/vnets": func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"data":[
@@ -782,32 +782,95 @@ func TestTeardownProjectNetworks(t *testing.T) {
 }
 
 // F49: a subnet written with SNAT and a DHCP range before VLAN zones stopped getting them is still answered as what
-// Proxmox does there: neither. The same subnet in a routed zone keeps both.
+// Proxmox does there: neither. The same subnet in a simple zone with DHCP keeps both.
+// F2: and in a zone without a DHCP server (a simple zone made without one, an EVPN zone) the range does nothing, so
+// the sync answers dhcp false there, which also corrects a row written dhcp true before the create read the zone.
 func TestNetworkSyncProviderAnswersVLANZoneWithoutDHCPAndSNAT(t *testing.T) {
 	routes := map[string]func(http.ResponseWriter, *http.Request){
 		"GET /api2/json/cluster/sdn/zones": func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, `{"data":[{"zone":"pcm1","type":"vlan"},{"zone":"pcm0","type":"simple"}]}`)
+			fmt.Fprint(w, `{"data":[{"zone":"pcm1","type":"vlan"},{"zone":"pcm0","type":"simple","dhcp":"dnsmasq"},{"zone":"pc","type":"simple"},{"zone":"ev","type":"evpn"}]}`)
 		},
 		"GET /api2/json/cluster/sdn/vnets": func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, `{"data":[{"vnet":"vlan1","zone":"pcm1","alias":"st:p1:old"},{"vnet":"simp1","zone":"pcm0","alias":"st:p1:web"}]}`)
+			fmt.Fprint(w, `{"data":[{"vnet":"vlan1","zone":"pcm1","alias":"st:p1:old"},{"vnet":"simp1","zone":"pcm0","alias":"st:p1:web"},
+				{"vnet":"nodhcp1","zone":"pc","alias":"st:p1:k8s"},{"vnet":"evpn1","zone":"ev","alias":"st:p1:ev"}]}`)
 		},
 	}
-	for _, vnet := range []string{"vlan1", "simp1"} {
+	for _, vnet := range []string{"vlan1", "simp1", "nodhcp1", "evpn1"} {
 		routes["GET /api2/json/cluster/sdn/vnets/"+vnet+"/subnets"] = func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"data":[{"cidr":"10.121.0.0/24","gateway":"10.121.0.1","snat":1,"dhcp-range":[{"start-address":"10.121.0.10","end-address":"10.121.0.254"}]}]}`)
 		}
 	}
 	_, c := fakePVE(t, routes)
 	rs, err := (&Service{C: c, ServiceID: "svc", PoolPrefix: "pc-"}).NetworkSyncProvider("pve", "p1").List(context.Background())
-	if err != nil || len(rs) != 2 {
+	if err != nil || len(rs) != 4 {
 		t.Fatalf("rows %+v, err %v", rs, err)
 	}
 	for _, r := range rs {
 		n := r.Data["network"].(map[string]any)
 		row := n["subnetDetails"].([]any)[0].(map[string]any)
-		want := r.ExternalID != "vlan1"
-		if n["snat"] != want || n["dhcp"] != want || row["snat"] != want || n["gateway"] != "10.121.0.1" {
+		snat, dhcp := r.ExternalID != "vlan1", r.ExternalID == "simp1"
+		if n["snat"] != snat || n["dhcp"] != dhcp || row["snat"] != snat || n["gateway"] != "10.121.0.1" {
 			t.Fatalf("%s: network %v", r.ExternalID, n)
+		}
+	}
+}
+
+// F2: the live zone says whether Proxmox hands out addresses; a zone not made yet gets what EnsureZone gives it.
+func TestZoneDHCP(t *testing.T) {
+	var created url.Values
+	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/cluster/sdn/zones": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":[{"zone":"pc","type":"simple"},{"zone":"pcm0","type":"simple","dhcp":"dnsmasq"}]}`)
+		},
+		"POST /api2/json/cluster/sdn/zones": func(w http.ResponseWriter, r *http.Request) {
+			r.ParseForm()
+			created = r.PostForm
+			fmt.Fprint(w, `{"data":null}`)
+		},
+	})
+	srv := &Service{C: c}
+	for _, tt := range []struct {
+		z    ZoneConfig
+		want bool
+	}{
+		{ZoneConfig{Key: "pc", Kind: "simple"}, false},                // made by hand without DHCP: the config's kind does not say
+		{ZoneConfig{Key: "pcm0", Kind: "simple", NoDHCP: true}, true}, // an existing zone is never changed
+		{ZoneConfig{Key: "new", Kind: "simple"}, true},
+		{ZoneConfig{Key: "new", Kind: "simple", NoDHCP: true}, false},
+		{ZoneConfig{Key: "new", Kind: "evpn"}, false},
+		{ZoneConfig{Key: "new", Kind: "vlan"}, false},
+	} {
+		if got, err := srv.ZoneDHCP(context.Background(), tt.z); err != nil || got != tt.want {
+			t.Errorf("%+v: %v, %v; want %v", tt.z, got, err, tt.want)
+		}
+	}
+	// EnsureZone and ZoneDHCP agree on a zone not made yet.
+	for noDHCP, want := range map[bool]string{false: "dnsmasq", true: ""} {
+		created = nil
+		if err := srv.EnsureZone(context.Background(), ZoneConfig{Key: "new", Kind: "simple", NoDHCP: noDHCP}); err != nil {
+			t.Fatal(err)
+		}
+		if created.Get("type") != "simple" || created.Get("ipam") != "pve" || created.Get("dhcp") != want {
+			t.Errorf("NoDHCP %v: zone form %v", noDHCP, created)
+		}
+	}
+}
+
+// The detail a create and a subnet action write is the sync's: one derivation, from the subnet and the live zone.
+func TestNetworkDetailReadsTheLiveZone(t *testing.T) {
+	for zone, want := range map[string]bool{`{"zone":"pc","type":"simple"}`: false, `{"zone":"pc","type":"simple","dhcp":"dnsmasq"}`: true} {
+		_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
+			"GET /api2/json/cluster/sdn/zones": func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"data":[`+zone+`]}`) },
+			"GET /api2/json/cluster/sdn/vnets": func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprint(w, `{"data":[{"vnet":"v1","zone":"pc","alias":"st:p1:web"}]}`)
+			},
+			"GET /api2/json/cluster/sdn/vnets/v1/subnets": func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprint(w, `{"data":[{"cidr":"10.100.0.0/24","gateway":"10.100.0.1","snat":1,"dhcp-range":[{"start-address":"10.100.0.10","end-address":"10.100.0.254"}]}]}`)
+			},
+		})
+		n, err := (&Service{C: c}).NetworkDetail(context.Background(), "v1")
+		if err != nil || n["dhcp"] != want || n["snat"] != true || len(n["subnetDetails"].([]any)) != 1 {
+			t.Errorf("%s: %v, %v", zone, n, err)
 		}
 	}
 }

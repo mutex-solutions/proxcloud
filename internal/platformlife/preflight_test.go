@@ -23,6 +23,11 @@ type preflightPVE struct {
 	outside string // a service user that is not in the group proxcloud-kube: PVE refuses to show it to the portal token
 	vnets   string // the cluster's vnets, [] when empty
 	zones   string // the cluster's SDN zones, [] when empty; "!" answers 403
+	vm9999  bool   // a guest holds the id proxmox-csi names its volumes after
+	// machines are the VMs of pool proxcloud-system, VMID → {config JSON, status}; the one with VMID seed is in the
+	// seed's pool instead.
+	machines map[int][2]string
+	seed     int
 }
 
 func (f *preflightPVE) client(t *testing.T, url, token string) *pve.Client {
@@ -69,7 +74,21 @@ func (f *preflightPVE) serve(w http.ResponseWriter, r *http.Request) {
 	if f.zones != "" {
 		data["/cluster/sdn/zones"] = f.zones
 	}
+	members := map[bool][]string{}
+	for id, m := range f.machines {
+		members[id == f.seed] = append(members[id == f.seed], fmt.Sprintf(`{"id":"qemu/%d","type":"qemu","vmid":%d,"node":"pve1"}`, id, id))
+		data[fmt.Sprintf("/nodes/pve1/qemu/%d/config", id)] = m[0]
+		data[fmt.Sprintf("/nodes/pve1/qemu/%d/status/current", id)] = `{"status":"` + m[1] + `"}`
+	}
+	data["/pools/"+pve.SeedPool] = `{"members":[` + strings.Join(members[true], ",") + `]}`
+	data["/pools/"+pve.SystemPool] = `{"members":[` + strings.Join(members[false], ",") + `]}`
 	path := strings.TrimPrefix(r.URL.Path, "/api2/json")
+	if path == "/cluster/nextid" && f.vm9999 {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"data":null,"errors":{"vmid":"VM 9999 already exists"}}`)
+		return
+	}
+	data["/cluster/nextid"] = `"` + r.URL.Query().Get("vmid") + `"`
 	body, ok := data[path]
 	if path == "/access/permissions" {
 		p := r.URL.Query().Get("path")
@@ -121,14 +140,15 @@ func TestPreflight(t *testing.T) {
 	f := &preflightPVE{perms: map[string]map[string][]string{
 		pve.CAPITokenID:            capi,
 		pve.CSITokenID:             grant(pve.CSIPrivileges(s.Boot)),
-		pve.DefaultPlatformTokenID: grant(pve.KubeMintPrivileges("nas-templates")),
+		pve.DefaultPlatformTokenID: grant(pve.KubeMintPrivileges([]string{"nas-templates", "nvme-u2"}, []string{"pc"})),
 	}}
 	srv := httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(srv.Close)
 	pf := Preflight{
 		Installation:      in,
 		Site:              Site{CIDRPool: "10.100.0.0/16", Blocked: []string{"10.200.200.0/25"}},
-		ProviderImport:    "nas-templates",
+		MintStores:        []string{"nas-templates", "nvme-u2"},
+		MintZones:         []string{"pc"},
 		Portal:            &pve.Service{C: f.client(t, srv.URL, pve.DefaultPlatformTokenID), ServiceID: "svc-pve"},
 		CAPI:              f.client(t, srv.URL, pve.CAPITokenID),
 		CSI:               f.client(t, srv.URL, pve.CSITokenID),
@@ -140,15 +160,55 @@ func TestPreflight(t *testing.T) {
 	if !OK(checks) {
 		t.Fatalf("a set-up site: %+v", checks)
 	}
-	if got := len(checks); got != 16 {
-		t.Errorf("%d rows, want 16: %+v", got, checks)
+	if got := len(checks); got != 17 {
+		t.Errorf("%d rows, want 17: %+v", got, checks)
 	}
+	if c := checkMap(checks)["csi-vmid"]; c.Status != CheckOK {
+		t.Errorf("VM id 9999 free: %+v", c)
+	}
+	// The owner's own template on VM id 9999 (production acceptance, A2): the CSI volumes are named as its disks. A
+	// warning that says what must never be done, and the preflight still passes.
+	f.vm9999 = true
+	held := pf.Run(ctx)
+	if c := checkMap(held)["csi-vmid"]; c.Status != CheckWarn || !strings.Contains(c.Message, "vm-9999-pvc-") ||
+		!strings.Contains(c.Message, "Never destroy VM 9999") || !strings.Contains(c.Message, "--destroy-unreferenced-disks 1") || !OK(held) {
+		t.Errorf("VM id 9999 in use: %+v ok=%v", c, OK(held))
+	}
+	f.vm9999 = false
 	if c := checkMap(checks)["isolation"]; !strings.Contains(c.Message, "first tenant network") {
 		t.Errorf("no tenant network yet: %+v", c)
 	}
 	if len(f.writes) != 0 {
 		t.Fatalf("the preflight wrote to PVE: %v", f.writes)
 	}
+	// The machines row: absent above (no VM yet). After a node reboot the machines without onboot are stopped: a
+	// warning that names each with what to do, and the preflight still passes. Another installation's VM is not ours.
+	tags := `"tags":"proxcloud;pc-platform;pc-platform-` + in.ID + `"`
+	f.seed = 106
+	f.machines = map[int][2]string{
+		106: {`{"name":"pc-platform-seed","onboot":1,` + tags + `}`, "stopped"},
+		107: {`{"name":"pc-platform-cp-1",` + tags + `}`, "stopped"},
+		108: {`{"name":"pc-platform-kamaji-1","onboot":1,` + tags + `}`, "running"},
+		109: {`{"name":"other","tags":"pc-platform-other"}`, "stopped"},
+	}
+	down := pf.Run(ctx)
+	if c := checkMap(down)["machines"]; c.Status != CheckWarn || !OK(down) || !strings.Contains(c.Message, "VM 107 (pc-platform-cp-1) on pve1 is stopped") ||
+		!strings.Contains(c.Message, "qm start 107") || !strings.Contains(c.Message, "qm set 107 --onboot 1") || strings.Contains(c.Message, "108") || strings.Contains(c.Message, "109") ||
+		!strings.Contains(c.Message, "VM 106 (pc-platform-seed) on pve1 is stopped") || strings.Contains(c.Message, "qm set 106") {
+		t.Errorf("a stopped machine without onboot, and the stopped seed in its own pool: %+v ok=%v", c, OK(down))
+	}
+	f.machines[106] = [2]string{`{"name":"pc-platform-seed","onboot":1,` + tags + `}`, "running"}
+	f.machines[107] = [2]string{`{"name":"pc-platform-cp-1","onboot":1,` + tags + `}`, "running"}
+	if c := checkMap(pf.Run(ctx))["machines"]; c.Status != CheckOK || !strings.Contains(c.Message, "3 VMs") {
+		t.Errorf("every machine runs and has onboot: %+v", c)
+	}
+	// One VM that cannot be read is named and does not hide the others (the apply still sets onboot on those).
+	f.machines[107] = [2]string{"!", "running"}
+	f.machines[108] = [2]string{`{"name":"pc-platform-kamaji-1",` + tags + `}`, "running"}
+	if c := checkMap(pf.Run(ctx))["machines"]; c.Status != CheckWarn || !strings.Contains(c.Message, "VM 107 on pve1 could not be read") || !strings.Contains(c.Message, "qm set 108 --onboot 1") {
+		t.Errorf("a machine that cannot be read: %+v", c)
+	}
+	f.machines, f.seed = nil, 0
 	// A simple default zone: tenant clusters cannot be created on it. A warning, and the preflight still passes.
 	pf.Site.DefaultZone, pf.Site.DefaultZoneKind = "pcm0", "simple"
 	warned := pf.Run(ctx)
@@ -158,6 +218,12 @@ func TestPreflight(t *testing.T) {
 	if c := checkMap(warned)["tenant-network"]; !strings.Contains(c.Message, "cluster.shared") || strings.Contains(c.Message, "every cluster create") {
 		t.Errorf("the warning must name the shared-workers exception and not claim every create: %+v", c)
 	}
+	// "dhcp": false in the zone's config: ProxCloud makes it without DHCP, so nothing to warn about.
+	pf.Site.DefaultZoneNoDHCP = true
+	if c := checkMap(pf.Run(ctx))["tenant-network"]; c.Status != CheckOK || !strings.Contains(c.Message, "created without DHCP") {
+		t.Errorf("a simple default zone configured without DHCP, not made yet: %+v", c)
+	}
+	pf.Site.DefaultZoneNoDHCP = false
 	// The create reads the live zone's dhcp field, and an existing zone is never changed: so does the row.
 	f.zones = `[{"zone":"pcm0","type":"simple"}]`
 	if c := checkMap(pf.Run(ctx))["tenant-network"]; c.Status != CheckOK {
@@ -268,6 +334,16 @@ func TestPreflight(t *testing.T) {
 			t.Errorf("%s: want a failure naming %q, got %+v", id, want, c)
 		}
 	}
+	// A single store reads apart from /storage, and the row says, once, why the grant on /storage does not reach it.
+	// Two such lines, to see that it is once.
+	delete(f.perms[pve.DefaultPlatformTokenID], "/storage/nvme-u2")
+	if m := checkMap(pf.Run(ctx))["privileges:kubemint"].Message; strings.Count(m, pve.KubeMintShadowed) != 1 || strings.Count(m, " lacks ") != 2 {
+		t.Errorf("privileges:kubemint with two stores of their own: %s", m)
+	}
+	f.perms[pve.DefaultPlatformTokenID]["/storage/nvme-u2"] = pve.ManagedRoles[2].Privs
+	if m := got["privileges:kubemint"].Message; !strings.Contains(m, pve.KubeMintShadowed) || strings.Contains(m, "on /storage (") {
+		t.Errorf("privileges:kubemint does not explain the store's own row: %s", m)
+	}
 	// The script's address as the API serves it: /api/v1 and the boot store, without which it answers 400.
 	if m := got["privileges:kubemint"].Message; !strings.Contains(m, "GET /api/v1/admin/setup/proxmox-script?managedServices=true&bootStorage="+s.Boot+",") {
 		t.Errorf("privileges:kubemint does not say where the script is: %s", m)
@@ -294,6 +370,26 @@ func TestPreflight(t *testing.T) {
 	}
 }
 
+// MintScopeOf: the stores of every profile a boot disk may sit on, on every node, with the ISO and import stores, and
+// the provider's zones. A capacity profile holds no boot disk, so no cluster token gets a row on its store.
+func TestMintScopeOf(t *testing.T) {
+	es := &externalservice.ExternalService{Config: map[string]any{
+		"importStorage": "nas-templates",
+		"storageProfiles": map[string]any{
+			"fast":    map[string]any{"storages": map[string]any{"*": "nvme-u2", "pve2": "nvme"}},
+			"archive": map[string]any{"bootDisk": false, "storages": map[string]any{"*": "truenas"}},
+		},
+		"network": map[string]any{"zones": map[string]any{"pc": map[string]any{}, "lan": map[string]any{"kind": "simple"}}},
+	}}
+	stores, zones := MintScopeOf(es)
+	if want := []string{"local", "nas-templates", "nvme", "nvme-u2"}; !slices.Equal(stores, want) {
+		t.Errorf("stores %v, want %v", stores, want)
+	}
+	if want := []string{"lan", "pc"}; !slices.Equal(zones, want) {
+		t.Errorf("zones %v, want %v", zones, want)
+	}
+}
+
 // SiteOf carries the kind of the zone tenant networks are made in: the tenant-network row reads it.
 func TestSiteOfDefaultZone(t *testing.T) {
 	es := func(network map[string]any) *externalservice.ExternalService {
@@ -304,6 +400,9 @@ func TestSiteOfDefaultZone(t *testing.T) {
 	}
 	if s := SiteOf(es(map[string]any{"defaultZone": "overlay", "zones": map[string]any{"overlay": map[string]any{}, "s": map[string]any{"kind": "simple"}}})); s.DefaultZoneKind != "evpn" {
 		t.Errorf("a default zone without a kind is EVPN: %+v", s)
+	}
+	if s := SiteOf(es(map[string]any{"zones": map[string]any{"pc": map[string]any{"kind": "simple", "dhcp": false}}})); !s.DefaultZoneNoDHCP {
+		t.Errorf("a simple zone with dhcp false: %+v", s)
 	}
 	if s := SiteOf(es(nil)); s.DefaultZone != "" || s.DefaultZoneKind != "" {
 		t.Errorf("no zone: %+v", s)
