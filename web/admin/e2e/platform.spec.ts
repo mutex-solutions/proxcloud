@@ -197,7 +197,7 @@ test("from an empty form to a failed run, then Retry and Cancel", async ({ page 
   expect(await page.content()).not.toContain(CAPI_SECRET)
 
   await page.getByRole("button", { name: "Check again" }).click()
-  await expect(page.getByRole("status").filter({ hasText: "Every check passed." })).toBeVisible()
+  await expect(page.getByRole("status").filter({ hasText: "No check failed. 1 warning does not stop the install" })).toBeVisible() // the scheduler row: the mock runs without it
 
   // Review, then Install: the first run of the mock fails at the seed's API.
   await expect(page.getByText("1 control plane and 3 worker machines in the pool")).toBeVisible()
@@ -292,12 +292,15 @@ test("the ready card: endpoints, the providers' gap, the platform kubeconfig and
   const providers = page.getByRole("list", { name: "Providers" })
   const k8s = providers.getByRole("listitem").filter({ hasText: "lab Kubernetes" })
   await expect(k8s).toContainText("Offers no Kubernetes version yet, so no tenant can create a cluster.")
-  await expect(k8s.getByRole("link", { name: "Publish a Kubernetes node image" })).toHaveAttribute("href", "/system/template-updates")
-  await expect(k8s.getByRole("link", { name: "enter its version on the provider's Connection tab" })).toHaveAttribute("href", /\/system\/cloud-providers\/svc-/)
-  await expect(k8s.getByRole("link", { name: "Attach it on the provider's Projects tab" })).toHaveAttribute("href", /\/system\/cloud-providers\/svc-/)
+  await expect(k8s).toContainText("The install imported the node image of Kubernetes v1.33.4 and did not publish it for tenants")
+  await expect(k8s.getByRole("link", { name: "Or do each step in Template updates" })).toHaveAttribute("href", "/system/template-updates")
+  await expect(k8s.getByRole("link", { name: "attach it on the provider's Projects tab" })).toHaveAttribute("href", /\/system\/cloud-providers\/svc-/)
   const dbs = providers.getByRole("listitem").filter({ hasText: "lab Databases" })
-  await expect(dbs).toContainText("New projects do not get this provider")
+  await expect(dbs).toContainText("New projects do not get this provider, and the install attached it to no project")
   await expect(dbs).not.toContainText("Kubernetes version")
+  // One row says what tenants miss without the job scheduler, with the command; nothing turns it on from here.
+  await expect(page.getByLabel("Job scheduler", { exact: true })).toContainText("a tenant cannot delete a project")
+  await expect(page.getByLabel("Job scheduler", { exact: true })).toContainText("./proxcloud-up.sh install --scheduler")
 
   // ArgoCD has no address: the exact commands, one pair for each cluster, each with its own kubeconfig file and port.
   await expect(page.getByLabel("platform ArgoCD commands", { exact: true })).toHaveText(
@@ -332,6 +335,69 @@ test("the ready card stops warning once the Kubernetes provider has a version an
   await expect(k8s).toContainText("New projects get this provider.")
   await expect(k8s).not.toContainText("no Kubernetes version")
   await expect(page.getByRole("list", { name: "Providers" }).getByRole("listitem").filter({ hasText: "lab Databases" })).toContainText("New projects do not get this provider")
+})
+
+// A green install is usable with one button: the node image the install imported is smoke-tested and published on
+// each node, and only then is its Kubernetes version added to the provider. Until then the card names each node.
+test("the ready card publishes the install's node image and offers its Kubernetes version", async ({ page }) => {
+  await open(page, "ready")
+  await recordCalls(page)
+  const k8s = page.getByRole("list", { name: "Providers" }).getByRole("listitem").filter({ hasText: "lab Kubernetes" })
+  const nodes = k8s.getByRole("list", { name: "Node image per node" })
+  await expect(nodes.getByRole("listitem").filter({ hasText: "pve1" })).toContainText("Not imported, waits its turn")
+  await expect(nodes.getByRole("listitem").filter({ hasText: "pve2" })).toContainText("Not imported, waits its turn")
+  // Asked before anything is published, the API offers nothing and names the nodes.
+  const refused = await page.evaluate(async (paths) => {
+    const { dispatch } = await import(/* @vite-ignore */ paths.router)
+    const { mockPlatform } = await import(/* @vite-ignore */ paths.state)
+    return dispatch(`/admin/platform/installations/${mockPlatform.installations[0].id}/kubernetes-version`, { method: "POST", body: {} })
+      .then(() => "ok", (e: { status: number; details?: { code?: string; missingNodes?: string[] } }) => `${e.status} ${e.details?.code} ${e.details?.missingNodes}`)
+  }, MOCK)
+  expect(refused).toBe("409 node_image_unpublished pve1,pve2")
+
+  await k8s.getByRole("button", { name: "Test, publish and offer Kubernetes v1.33.4" }).click()
+  await expect(k8s).toContainText("Offers Kubernetes v1.33.4.", { timeout: 20_000 })
+  await expect(page.getByText("Tenants can now create clusters with Kubernetes v1.33.4")).toBeVisible()
+  await expect(k8s).not.toContainText("no Kubernetes version")
+  const advances = await calls(page, "POST", "/admin/template-updates/publish-all")
+  expect(advances.length).toBeGreaterThan(0)
+  expect(await calls(page, "POST", /\/kubernetes-version$/)).toHaveLength(1)
+})
+
+// The choice of who gets the two providers: preselected by whether the site has projects, sent with the settings,
+// applied by the run, and shown on the card as pending when it was changed after the install.
+test("the settings choose who gets the providers, and a run applies the choice", async ({ page }) => {
+  test.setTimeout(90_000)
+  await open(page)
+  await recordCalls(page)
+  // The mock site has projects: it is live with tenants, so nothing changes for the projects that exist.
+  await expect(page.getByRole("radio", { name: /^New projects only/ })).toBeChecked()
+  await expect(page.getByText(/so “New projects only” is preselected/)).toBeVisible()
+  await fillSettings(page)
+  await page.getByRole("radio", { name: /^All projects/ }).check()
+  await page.getByRole("button", { name: "Save draft" }).click()
+  await expect(page.getByText("Settings saved")).toBeVisible()
+  const [created] = await calls(page, "POST", "/admin/platform/installations")
+  expect((created.body as { spec: { tenants?: { attach?: string } } }).spec.tenants).toEqual({ attach: "all" })
+  await expect(page.getByRole("radio", { name: /^All projects/ })).toBeChecked()
+
+  // A stored installation without the key means none, and a save that leaves it alone does not add it.
+  await open(page, "ready")
+  await recordCalls(page)
+  await expect(page.getByRole("radio", { name: /^None: I attach the providers later/ })).toBeChecked()
+  const providers = page.getByRole("list", { name: "Providers" })
+  await expect(providers.getByRole("listitem").filter({ hasText: "lab Databases" })).toContainText("New projects do not get this provider")
+  await page.getByRole("radio", { name: /^New projects only/ }).check()
+  await page.getByRole("button", { name: "Save settings" }).click()
+  await expect(page.getByText("Settings saved")).toBeVisible()
+  const [saved] = await calls(page, "PUT", /\/admin\/platform\/installations\/pi-[0-9a-f]+$/)
+  expect((saved.body as { spec: { tenants?: { attach?: string } } }).spec.tenants).toEqual({ attach: "new" })
+  await expect(page.getByText("That is not applied yet: press “Apply this release” below.")).toBeVisible()
+
+  await page.getByRole("button", { name: "Apply this release" }).click()
+  await expect(providers.getByRole("listitem").filter({ hasText: "lab Databases" })).toContainText("New projects get this provider.", { timeout: 40_000 })
+  await expect(providers.getByRole("listitem").filter({ hasText: "lab Kubernetes" })).toContainText("New projects get this provider.")
+  await expect(page.getByText("That is not applied yet")).toHaveCount(0)
 })
 
 test("Remove asks for the typed name and sends the confirmation only for the forced path", async ({ page }) => {
@@ -536,7 +602,7 @@ test("a failed isolation check names the field, links to the provider and runs t
   await expect(todo.getByRole("link", { name: "Open the provider's page" })).toHaveAttribute("href", "/system/cloud-providers/svc-proxmox-01")
   await expectAccessible(page)
   await todo.getByRole("button", { name: "Run a provider sync, then check again" }).click()
-  await expect(page.getByRole("status").filter({ hasText: "Every check passed." })).toBeVisible()
+  await expect(page.getByRole("status").filter({ hasText: "No check failed. 1 warning does not stop the install" })).toBeVisible() // the scheduler row: the mock runs without it
   expect(await calls(page, "POST", "/admin/job/external-service/sync")).toHaveLength(1)
   expect(await calls(page, "POST", /\/preflight$/)).toHaveLength(2)
 })
@@ -544,8 +610,11 @@ test("a failed isolation check names the field, links to the provider and runs t
 test("a warning of the check does not read as a pass and does not stop the install", async ({ page }) => {
   await open(page, "simplezone")
   await page.getByRole("button", { name: "Check", exact: true }).click()
-  await expect(page.getByRole("status").filter({ hasText: "No check failed. 1 warning does not stop the install" })).toBeVisible()
+  await expect(page.getByRole("status").filter({ hasText: "No check failed. 2 warnings do not stop the install" })).toBeVisible()
   await expect(page.getByRole("list", { name: "Connection checks" })).toContainText("a cluster create on a network of this zone is refused")
+  // The other warning: what tenants miss while the job scheduler is off, with the command that turns it on.
+  await expect(page.getByRole("list", { name: "Connection checks" })).toContainText("a tenant cannot delete a project")
+  await expect(page.getByRole("list", { name: "Connection checks" })).toContainText("./proxcloud-up.sh install --scheduler")
   await expect(page.getByRole("list", { name: "What to do for each failed check" })).toHaveCount(0)
   await expect(page.getByRole("button", { name: "Install", exact: true })).toBeEnabled()
 })

@@ -5,7 +5,7 @@
 import { ApiError } from "@/lib/api"
 import { on } from "../router"
 import { db } from "../db"
-import { mockPlatform } from "./platform"
+import { mockPlatform, publishAllState } from "./platform"
 import {
   detectedStorages, importedTemplates, proposedProfiles, seedFlavors, seedPricePlan, seedQuota, setupChecks, templateDiscovery, templatePlacement,
 } from "../fixtures/setup"
@@ -258,7 +258,6 @@ on("POST /admin/template-updates/templates/:id/publish", ({ params, opts }) => {
 // Publish on all nodes: each POST moves the first unpublished node one step (import, smoke test, publish), one job at
 // a time like the server; the GET reads the same state.
 const publishAllSteps = ["missing", "importing", "smoke_running", "ready_to_publish", "published"]
-const publishAllState: Record<string, Record<string, number>> = {}
 function publishAllReport(serviceId: string, digest: string, act: boolean) {
   const st = (publishAllState[`${serviceId}/${digest}`] ??= Object.fromEntries(templatePlacement.nodes.map((n: Doc) => [n.node, 0])))
   const first = Object.keys(st).find((n) => st[n] < 4)

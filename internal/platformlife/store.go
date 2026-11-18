@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
@@ -179,6 +180,19 @@ func (s *Store) Update(ctx context.Context, id string, rev int64, change func(ol
 		return nil
 	})
 	return before, after, err
+}
+
+// MarkKubernetesOffered adds version to status.kubernetesOffered. The caller holds the installation's run lock
+// ("platform-run:"+id) in a transaction, as a run's writes do; like them it leaves rev alone.
+func (s *Store) MarkKubernetesOffered(ctx context.Context, id, version string) error {
+	var in Installation
+	found, err := s.installations().GetForUpdate(ctx, id, &in)
+	if err != nil || !found || slices.Contains(in.Status.KubernetesOffered, version) {
+		return err
+	}
+	in.Status.KubernetesOffered = append(in.Status.KubernetesOffered, version)
+	_, err = s.installations().Replace(ctx, id, &in)
+	return err
 }
 
 // SaveCredentials replaces the CAPI and the CSI token of an installation; a nil one is kept. Nothing is stored

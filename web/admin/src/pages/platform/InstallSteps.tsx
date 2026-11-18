@@ -14,12 +14,14 @@ import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Textarea } from "@/components/ui/textarea"
 import { apiFetch } from "@/lib/api"
+import { useAdminList } from "@/lib/hooks"
 import { cn } from "@/lib/utils"
 import { CheckRows, CopyBlock, ErrorNote, LINK, StepCard, errMsg, fetchText, useClusterInfo } from "@/pages/setup/common"
 import {
-  CAPI_TOKEN, CSI_TOKEN, ENROLL_PREFIX, GROUPS, PLATFORM_KEY, GROUP_USE, TOKEN_SECRET, checkAction, enrollProblem, emptyForm, errCode, errProblems, formToSpec, isConflict, labProfile, specToForm, validate,
+  CAPI_TOKEN, CSI_TOKEN, ENROLL_PREFIX, GROUPS, PLATFORM_KEY, GROUP_USE, TOKEN_SECRET, attachDefault, checkAction, enrollProblem, emptyForm, errCode, errProblems, formToSpec, isConflict, labProfile, specToForm, validate,
   type BOM, type Check, type Form, type Installation, type MachineForm, type Plan, type Problem, type TenantProbe, type Upgrade,
 } from "./model"
+import { AttachChoice } from "./Tenants"
 
 const base = (id: string) => `/admin/platform/installations/${id}`
 const SITE_KEY = ["platform-site-changes"]
@@ -124,11 +126,16 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
   const all = validate(form)
   const problems = shown ? all : []
   const nodes = (cluster.data?.nodes ?? []).map((n) => n.node)
+  // A new installation's attach choice defaults by whether the site already has projects (undefined: not counted).
+  const projectList = useAdminList("/admin/project", !installation)
+  const projects = projectList.data?.data?.length
+  const attach = form.attach || attachDefault(projects)
+  const spec = (prev?: Installation["spec"]) => formToSpec({ ...form, attach }, prev)
 
   const save = useMutation({
     mutationFn: () => installation
-      ? apiFetch<Installation>(base(installation.id), { method: "PUT", body: { name: form.name, spec: formToSpec(form, installation.spec), rev: installation.rev } })
-      : apiFetch<Installation>("/admin/platform/installations", { method: "POST", body: { name: form.name, serviceId, layout: "shared", spec: formToSpec(form) } }),
+      ? apiFetch<Installation>(base(installation.id), { method: "PUT", body: { name: form.name, spec: spec(installation.spec), rev: installation.rev } })
+      : apiFetch<Installation>("/admin/platform/installations", { method: "POST", body: { name: form.name, serviceId, layout: "shared", spec: spec() } }),
     onSuccess: (saved) => {
       toast.success("Settings saved")
       qc.setQueryData(SITE_KEY, saved.siteChanges ?? null)
@@ -170,6 +177,9 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
           <label className="flex items-center gap-2 text-sm text-muted-foreground"><input type="radio" name="pf-layout" disabled /> Separate clusters (in a later release)</label>
         </fieldset>
       </div>
+
+      <H3>Tenants</H3>
+      <AttachChoice value={form.attach} projects={projects} disabled={!canManage} onChange={(attach) => setForm({ ...form, attach })} />
 
       <H3>Node groups</H3>
       <div className="flex flex-wrap items-center justify-between gap-3">

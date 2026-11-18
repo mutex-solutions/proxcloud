@@ -20,6 +20,8 @@ package admin
 //	                                                      reads, and opens its ArgoCD                        (service:manage)
 //	POST /admin/platform/installations/{id}/seed-credential/rotate  a new stored seed credential; refused
 //	                                                      during a run                                       (service:manage)
+//	POST /admin/platform/installations/{id}/kubernetes-version  offer the BOM's Kubernetes version to tenants
+//	                                                      once its node image is published (platformtenants.go) (service:manage)
 //
 // The installation routes answer 404 platform_disabled unless PROXCLOUD_PLATFORM_ENABLED is on (SetPlatform); a run
 // also needs the runner (SetPlatformRuns, with PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED), else 409 platform_disabled. No
@@ -78,6 +80,7 @@ func (h *Handler) routePlatform(r chi.Router) {
 	r.Get("/platform/installations/{id}/seed-kubeconfig", h.platformSeedKubeconfig)
 	r.Get("/platform/installations/{id}/platform-kubeconfig", h.platformClusterKubeconfig)
 	r.Post("/platform/installations/{id}/seed-credential/rotate", h.platformSeedRotate)
+	r.Post("/platform/installations/{id}/kubernetes-version", h.platformOfferVersion)
 }
 
 func (h *Handler) platformBOM(w http.ResponseWriter, r *http.Request) {
@@ -183,6 +186,8 @@ type installationView struct {
 	} `json:"credentials"`
 	// Live is set with ?live=1 only: read from the seed at request time, never stored.
 	Live *platformlife.LiveState `json:"live,omitempty"`
+	// SchedulerNote is platformlife.SchedulerOffNote while the job scheduler is off, else absent.
+	SchedulerNote string `json:"schedulerNote,omitempty"`
 	// SiteChanges is in the answer of a save only: what the save wrote into the provider's network config.
 	SiteChanges *siteChanges `json:"siteChanges,omitempty"`
 }
@@ -193,6 +198,9 @@ type tokenView struct {
 
 func (h *Handler) platformView(r *http.Request, in *platformlife.Installation) (*installationView, error) {
 	v := &installationView{Installation: in}
+	if !h.jobsScheduler {
+		v.SchedulerNote = platformlife.SchedulerOffNote
+	}
 	sec, err := h.platform.Secrets(r.Context(), in.ID)
 	if err != nil || sec == nil {
 		return v, err
@@ -298,12 +306,32 @@ func (h *Handler) checked(r *http.Request, in *platformlife.Installation) error 
 	return nil
 }
 
+// installationPerms are the permissions a create or an update of an installation with this spec needs beyond
+// externalServiceManagePerm. tenants.attach "all" makes the next run attach both providers to every project, which by
+// hand needs projectUpdatePerm too (providerattach.go): the spec must not be a way around that key.
+func installationPerms(spec platformlife.Spec) []string {
+	if spec.Tenants.AttachChoice() == platformlife.AttachAll {
+		return []string{projectUpdatePerm}
+	}
+	return nil
+}
+
+// installationGate checks installationPerms; false = the 403 went out.
+func (h *Handler) installationGate(w http.ResponseWriter, r *http.Request, spec platformlife.Spec) bool {
+	_, granted, _ := h.adminContext(r)
+	if missing := missingPerm(granted, installationPerms(spec)); missing != "" {
+		httpx.WriteError(w, httpx.Forbidden("Attaching the providers to all projects (spec.tenants.attach: all) needs the permission: "+missing))
+		return false
+	}
+	return true
+}
+
 func (h *Handler) platformCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.platformGate(w, r, externalServiceManagePerm) {
 		return
 	}
 	var req installationRequest
-	if !decodeStrictLimited(w, r, &req, 64<<10) {
+	if !decodeStrictLimited(w, r, &req, 64<<10) || !h.installationGate(w, r, req.Spec) {
 		return
 	}
 	if h.esSvc == nil {
@@ -323,7 +351,7 @@ func (h *Handler) platformUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req installationRequest
-	if !decodeStrictLimited(w, r, &req, 64<<10) {
+	if !decodeStrictLimited(w, r, &req, 64<<10) || !h.installationGate(w, r, req.Spec) {
 		return
 	}
 	before, after, err := h.platform.Update(r.Context(), chi.URLParam(r, "id"), req.Rev, func(old platformlife.Installation) (*platformlife.Installation, error) {
@@ -569,7 +597,7 @@ func (h *Handler) PlatformPreflight(ctx context.Context, in *platformlife.Instal
 	}
 	pf := platformlife.Preflight{Installation: in, Site: platformlife.SiteOf(es), Allow: es.PVESandboxEndpoints(),
 		Portal: portal, ProviderDisabled: es.IsDisabled(),
-		TemplateUpdatesVM: h.templateUpdates != nil && h.templateUpdates.VMEnabled}
+		TemplateUpdatesVM: h.templateUpdates != nil && h.templateUpdates.VMEnabled, SchedulerOff: !h.jobsScheduler}
 	pf.MintStores, pf.MintZones = platformlife.MintScopeOf(es)
 	if pf.CAPI, err = platformlife.TokenClient(es, sec.CAPI); err != nil {
 		return nil, err

@@ -80,6 +80,11 @@ type Runner struct {
 	// provider rows DISABLED (Remove). The admin handler implements both.
 	Register func(ctx context.Context, body map[string]any) (string, error)
 	Disable  func(ctx context.Context, installationID string) error
+	// Attach applies an attach choice (AttachAll, AttachNew, AttachNone) to one provider of the installation: the
+	// attach policy, and for AttachAll a bulk attach of every project. done=false with a note when it could not be
+	// applied yet (the provider is disabled); the register stage then tries again at the next apply. Nil: no choice is
+	// applied. The admin handler implements it.
+	Attach func(ctx context.Context, installationID, serviceID, choice, actor string) (done bool, note string, err error)
 	// SDNLock takes the site's SDN apply lock (the one a tenant network change takes) for the routed platform network;
 	// acquired=false when another change holds it. Nil in tests: no lock.
 	SDNLock func(ctx context.Context) (release func(), acquired bool, err error)
