@@ -166,50 +166,90 @@ sequenceDiagram
 ### Deletion and orphan finalization
 
 Delete removes the Application; the resources finalizer makes ArgoCD cascade the
-delete through everything the chart rendered. Cleanup of the per-cluster
-secrets and, when the project's last cluster is gone, the `pc-*` namespace is
-**sync-driven**: `syncjob.sweepKamajiOrphans` runs once per sync cycle as a
-service-level sweep, after the cascade completes. It scans the management cluster
-itself, so it also reaps leftovers of projects whose ProxCloud record is already
-gone. A secret younger than the 30-minute grace window is never touched. Project
-teardown also removes the `pc-*` namespace of a project that never had a cluster,
-once nothing is pending and no Application of the project is left.
+delete through everything the chart rendered. The delete answers `202` before
+that cascade has run. What must outlive the cascade is released after it: the
+cluster's Proxmox token `capmox@pve!<clusterId>` (and a `csi@pve!<clusterId>`
+an older cluster may hold), its addresses, its RWX dataset, its per-cluster
+Secrets and, when the project's last cluster is gone, the `pc-*` namespace. The
+delete itself cannot do that: CAPMOX deletes the workers with that token.
 
-**How long a deleted cluster's Proxmox token lives.** The same sweep revokes the
-cluster's `capmox@pve!<clusterId>` token (and a `csi@pve!<clusterId>` an older
-cluster may hold), frees its addresses and deletes its RWX dataset. The delete
-itself cannot: CAPMOX deletes the workers with that token, the cascade runs in
-ArgoCD after the delete has answered `202`, and the portal sees it finished only
-when a sweep looks (no Application, no TenantControlPlane, no MachineDeployment).
-The 30 minutes are counted from the cluster's **creation** (its marker Secret),
-not from the delete: a sweep that finds a marker with no Application cannot tell
-a finished delete from a create that has not applied its Application yet, and
-would revoke the token of a cluster being made. So:
+Two things do the release, with the same checks and the same steps:
 
-- **With the job scheduler** (a provider sync every 15 minutes): the token of a
-  cluster older than 30 minutes is revoked at the first sync after its cascade
-  finished, so up to 15 minutes after that. A cluster deleted in its first 30
-  minutes keeps its token until the first sync after the marker is 30 minutes
-  old.
-- **Without the scheduler** (the Compose install's default): nothing revokes
-  the token until an operator starts a provider sync
-  (`POST /api/v1/admin/job/external-service/sync`), and
-  for a cluster deleted in its first 30 minutes a sync after that age. Start
-  one after a cluster delete.
+1. **The release job** (`kamaji.release/v1`, `project.KamajiReleaseRunner`). The
+   delete, and a project teardown, queue one durable job per cluster
+   ([durable-jobs.md](durable-jobs.md)). Its runner is part of the API process
+   and runs with or without the job scheduler. Its first look at the cluster
+   comes within about 5 seconds of the delete (the runner's poll), the next
+   ones 15 seconds apart and then at growing intervals, a quarter of the job's
+   age, at most every 5 minutes. It releases the cluster at the first look that
+   finds the cascade over. After 24 hours without that it gives up: the job
+   is `dead` with `cascade_not_finished` in `GET /api/v1/admin/durable-jobs`, and
+   the sweep is what is left. A dead release job is not replayed (`409`).
+2. **The sweep** (`syncjob.sweepKamajiOrphans`), the backstop: once per provider
+   sync, for every marker Secret of the provider on the management cluster. It
+   also reaps leftovers of projects whose ProxCloud record is already gone, and
+   of a create that died halfway. It never touches a marker younger than 30
+   minutes, counted from the cluster's **creation**: a sweep that finds a marker
+   with no Application cannot tell a finished delete from a create that has not
+   applied its Application yet. The job has no such wait, because a delete is
+   accepted only for a cluster whose Application was applied.
 
-Until then the token is listed in Proxmox with its ACL rows (`ProxCloudCAPI` on
-the project pool, the boot store, the vnet and `/nodes`). Its secret lives only
-in a Secret of the cluster's namespace on the management cluster, which the
-cascade deletes, so what is left is a credential nobody holds, not one in use.
-Seen on a lab (2026-11-17, no scheduler): a token still listed 3 minutes after
-the delete was revoked one second after an operator's sync; the token of a
-cluster deleted 22 minutes after its creation survived two syncs and went at
-the first one after the marker was 30 minutes old. Proxmox stops honouring the
+**When the cascade counts as over.** All of: no Application, no
+TenantControlPlane, no MachineDeployment and no Machine of the cluster on the
+management cluster, and no VM whose name starts with `<clusterId>-` in the
+project's pool on Proxmox (CAPMOX names a VM after its Machine). While any of
+these is left, or the management cluster or Proxmox does not answer, nothing
+of the cluster is released (the look at the pool comes before every release
+step, the CSI one included) and the job looks again later (`cascade_running`
+or `release_failed` as the job's last result; the reason is in the API log,
+line `kamaji: release of a deleted cluster, will retry`). On a management
+cluster whose ClusterRole is older than the Machines grant
+([Provisioning status](#provisioning-status-reason-and-needs-attention), "RBAC") the
+Machines cannot be listed; the other checks decide there.
+
+A node that is down does not hold a release. A VM on it has no name in
+Proxmox's list after about five minutes, so the look at the pool cannot tell a
+worker from any other VM of the project, and it does not try: a worker on a
+dead node keeps its Machine, and the Machine holds the release. The one case
+this leaves open is a management cluster with the older ClusterRole and a
+worker on a node that is down for more than those minutes: the token is
+revoked while that VM exists, CAPMOX cannot delete it afterwards, and an
+operator removes the VM and the stuck Machine by hand. Apply
+`deploy/mgmt-cluster/rbac.yaml` to close it.
+
+A create that fails runs the same release at once (`AbandonCluster`), with the
+same look at the pool, for the token it had just minted and the addresses it
+had reserved.
+
+**How long a deleted cluster's Proxmox token lives.** With the release job: until
+the first look after the cascade, so seconds to a few minutes after the last
+worker is gone, on every install. A lab delete on 2026-11-17 had its worker VM
+gone 45 seconds after the delete; in a job's first minute the looks are about
+15 seconds apart. **This timing is not verified on a lab**:
+the job is covered by tests with a fake management cluster and a fake Proxmox
+on PostgreSQL. Should the job not have run (an API from before v0.8.2, a job
+that could not be queued, a job that gave up), the sweep's timing applies: with
+the scheduler the first provider sync after the cascade and after the marker's
+30 minutes; without the scheduler (the Compose install's default) not until an
+operator starts a provider sync
+(`POST /api/v1/admin/job/external-service/sync`). That older timing was seen on
+a lab (2026-11-17, v0.8.0, no scheduler): a token still listed 3 minutes after
+the delete went one second after an operator's sync, and the token of a cluster
+deleted 22 minutes after its creation survived two syncs.
+
+Until the release the token is listed in Proxmox with its ACL rows
+(`ProxCloudCAPI` on the project pool, the boot store, the vnet and `/nodes`).
+Its secret lives only in a Secret of the cluster's namespace on the management
+cluster, which the cascade deletes, so what is left is a credential nobody
+holds, not one in use. Proxmox stops honouring the
 token's ACL rows at the revoke, but leaves their lines in `/etc/pve/user.cfg`
 until that file is next written; until then every `pveum`, `qm` and `pvesh`
 call on a node prints `user config - ignore invalid acl token
 'capmox@pve!<clusterId>'`, once per row. It is harmless, and `pveum acl list`
 shows the rows gone at once.
+
+Project teardown also removes the `pc-*` namespace of a project that never had a
+cluster, once nothing is pending and no Application of the project is left.
 
 ```sh
 # namespaces ProxCloud owns, with what's left inside them

@@ -1308,3 +1308,148 @@ func TestCreateRefusedWithoutVersions(t *testing.T) {
 		t.Fatalf("something was written: %v %v", api.apps, api.secrets)
 	}
 }
+
+// The release job's step (F57): one deleted cluster is released as soon as its cascade is over, inside the grace
+// window too, and never while anything of it may still need its token.
+func TestFinalizeCluster(t *testing.T) {
+	ctx := context.Background()
+	setup := func(t *testing.T) (*fakeAPI, *Service, ClusterSpec, *[]string) {
+		api := newFakeAPI()
+		svc := NewWithAPI(api, testCfg(), "svc-1")
+		spec := testSpec()
+		released := &[]string{}
+		svc.OnClusterGone(func(_ context.Context, compute, project, cluster string) error {
+			*released = append(*released, compute+"/"+project+"/"+cluster)
+			return nil
+		})
+		if _, err := svc.CreateCluster(ctx, spec, ClusterSecrets{Cloud: map[string]string{"token": "t"}, ComputeServiceID: "cs1"}); err != nil {
+			t.Fatal(err)
+		}
+		// A cluster deleted in its first minutes: the sweep would wait for the marker to be 30 minutes old.
+		api.secretObjs["pc-p1/"+MarkerSecretName(spec.ID)]["metadata"].(map[string]any)["creationTimestamp"] = time.Now().UTC().Format(time.RFC3339)
+		return api, svc, spec, released
+	}
+	waits := func(t *testing.T, api *fakeAPI, svc *Service, spec ClusterSpec, released *[]string) {
+		t.Helper()
+		done, err := svc.FinalizeCluster(ctx, "p1", spec.ID)
+		if done || err != nil || len(*released) != 0 {
+			t.Fatalf("done %v, err %v, released %v: want a wait and no release", done, err, *released)
+		}
+		if _, ok := api.secrets["pc-p1/"+MarkerSecretName(spec.ID)]; !ok {
+			t.Fatal("the marker is gone before the release")
+		}
+	}
+
+	t.Run("cascade running", func(t *testing.T) {
+		api, svc, spec, released := setup(t)
+		// Not deleted at all: the job never takes over the sweep's judgement of a live cluster.
+		waits(t, api, svc, spec, released)
+		app := api.apps["argocd/"+spec.ID]
+		app["metadata"].(map[string]any)["deletionTimestamp"] = time.Now().UTC().Format(time.RFC3339)
+		waits(t, api, svc, spec, released)
+		delete(api.apps, "argocd/"+spec.ID)
+		api.tcps["pc-p1/"+ControlPlaneName(spec.ID)] = map[string]any{"metadata": map[string]any{"name": ControlPlaneName(spec.ID)}}
+		waits(t, api, svc, spec, released)
+		delete(api.tcps, "pc-p1/"+ControlPlaneName(spec.ID))
+		api.mds = []map[string]any{{"metadata": map[string]any{"name": spec.ID + "-workers-pve1", "labels": map[string]any{labelClusterName: spec.ID}}}}
+		waits(t, api, svc, spec, released)
+		// The MachineDeployment is gone, a Machine is not: CAPMOX is still deleting its VM with the token.
+		api.mds = nil
+		api.crs = map[string][]map[string]any{"machines": {{"metadata": map[string]any{"name": spec.ID + "-workers-pve1-abcde"}}}}
+		waits(t, api, svc, spec, released)
+	})
+
+	t.Run("cascade finished", func(t *testing.T) {
+		api, svc, spec, released := setup(t)
+		if err := svc.DeleteCluster(ctx, "p1", spec.ID); err != nil {
+			t.Fatal(err)
+		}
+		done, err := svc.FinalizeCluster(ctx, "p1", spec.ID)
+		if !done || err != nil {
+			t.Fatalf("done %v, err %v", done, err)
+		}
+		if len(*released) != 1 || (*released)[0] != "cs1/p1/"+spec.ID {
+			t.Fatalf("released = %v", *released)
+		}
+		if len(api.secrets) != 0 {
+			t.Fatalf("secrets left: %v", api.secrets)
+		}
+		// The sweep, or a second job, finds nothing: done, and no second release.
+		if done, err := svc.FinalizeCluster(ctx, "p1", spec.ID); !done || err != nil || len(*released) != 1 {
+			t.Fatalf("already released: done %v, err %v, released %v", done, err, *released)
+		}
+	})
+
+	t.Run("management cluster down", func(t *testing.T) {
+		api, svc, spec, released := setup(t)
+		if err := svc.DeleteCluster(ctx, "p1", spec.ID); err != nil {
+			t.Fatal(err)
+		}
+		// Machines cannot be read: nothing says the workers are gone.
+		api.crsErr = errors.New("dial tcp: connection refused")
+		done, err := svc.FinalizeCluster(ctx, "p1", spec.ID)
+		if done || err == nil || len(*released) != 0 {
+			t.Fatalf("done %v, err %v, released %v: want an error and no release", done, err, *released)
+		}
+		// A ClusterRole from before the Machines grant is not that: the release decides by its look at the pool.
+		api.crsErr = &kamajik8s.APIError{Status: 403}
+		if done, err := svc.FinalizeCluster(ctx, "p1", spec.ID); !done || err != nil || len(*released) != 1 {
+			t.Fatalf("403 on machines: done %v, err %v, released %v", done, err, *released)
+		}
+	})
+
+	t.Run("release fails", func(t *testing.T) {
+		api, svc, spec, _ := setup(t)
+		svc.OnClusterGone(func(context.Context, string, string, string) error { return errors.New("a worker VM is left") })
+		if err := svc.DeleteCluster(ctx, "p1", spec.ID); err != nil {
+			t.Fatal(err)
+		}
+		if done, err := svc.FinalizeCluster(ctx, "p1", spec.ID); done || err == nil {
+			t.Fatalf("done %v, err %v", done, err)
+		}
+		if _, ok := api.secrets["pc-p1/"+MarkerSecretName(spec.ID)]; !ok {
+			t.Fatal("a failed release must keep the marker for the next try")
+		}
+	})
+
+	// Another cluster of the project, being created (a marker, no Application yet), is not this job's to judge, and
+	// it keeps the namespace.
+	t.Run("other cluster mid-create", func(t *testing.T) {
+		api, svc, spec, released := setup(t)
+		if err := svc.RecordCluster(ctx, "p1", "pc-c-other001", "cs1"); err != nil {
+			t.Fatal(err)
+		}
+		if err := svc.DeleteCluster(ctx, "p1", spec.ID); err != nil {
+			t.Fatal(err)
+		}
+		if done, err := svc.FinalizeCluster(ctx, "p1", spec.ID); !done || err != nil {
+			t.Fatalf("done %v, err %v", done, err)
+		}
+		if len(*released) != 1 || (*released)[0] != "cs1/p1/"+spec.ID {
+			t.Fatalf("released = %v", *released)
+		}
+		if _, ok := api.secrets["pc-p1/"+MarkerSecretName("pc-c-other001")]; !ok {
+			t.Fatal("the other cluster lost its marker")
+		}
+		if _, ok := api.namespaces["pc-p1"]; !ok {
+			t.Fatal("the namespace of a cluster being created was removed")
+		}
+	})
+	// A release takes time (disks, a dataset). A create of the same project that writes its marker meanwhile is not
+	// in the list the job read, and must keep its namespace.
+	t.Run("a create during the release", func(t *testing.T) {
+		api, svc, spec, _ := setup(t)
+		svc.OnClusterGone(func(context.Context, string, string, string) error {
+			return svc.RecordCluster(ctx, "p1", "pc-c-other001", "cs1")
+		})
+		if err := svc.DeleteCluster(ctx, "p1", spec.ID); err != nil {
+			t.Fatal(err)
+		}
+		if done, err := svc.FinalizeCluster(ctx, "p1", spec.ID); !done || err != nil {
+			t.Fatalf("done %v, err %v", done, err)
+		}
+		if _, ok := api.namespaces["pc-p1"]; !ok {
+			t.Fatal("the namespace of a cluster being created was removed")
+		}
+	})
+}

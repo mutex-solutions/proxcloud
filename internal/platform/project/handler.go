@@ -73,6 +73,10 @@ type Handler struct {
 	// client from the provider's kubeconfig). Set via SetKamaji (nil = kamaji provisioning +
 	// cluster writes are unavailable).
 	kamajiFor func(es *externalservice.ExternalService) (*kamaji.Service, error)
+	// kamajiReleaseJobs queues a deleted cluster's release (cloud_kamaji_release.go). nil: the sync's sweep alone.
+	kamajiReleaseJobs interface {
+		Enqueue(ctx context.Context, kind, key string, payload []byte, maxAttempts int) (string, error)
+	}
 	// dbaasFor builds the Managed-Database service for a dbaas provider (DB-cluster client from
 	// the provider's kubeconfig). Set via SetDbaas (nil = dbaas provisioning + database writes
 	// are unavailable).
