@@ -83,6 +83,12 @@ func newPlatform(t *testing.T, kind string) *platform {
 			p.wl.mu.Unlock()
 		}
 	}
+	// What ArgoCD's comparison lists of the cluster chart: nothing differs from the live cluster.
+	p.seed.resources = map[string][]any{ClusterName: {
+		map[string]any{"kind": "KubeadmControlPlane", "name": "pc-platform-cp", "status": "Synced"},
+		map[string]any{"kind": "ProxmoxMachineTemplate", "name": "pc-platform-cp-pve1-0a1b2c3d", "status": "Synced"},
+		map[string]any{"kind": "KubeadmConfigTemplate", "name": "pc-platform-system-pve1-0a1b2c3d", "status": "Synced"},
+	}}
 	p.seed.put("/apis/apps/v1/namespaces/argocd/deployments/argocd-repo-server", map[string]any{"status": map[string]any{"availableReplicas": 1}})
 	kc, err := kamajik8s.BuildKubeconfig("wl", p.wl.url, []byte(p.wl.caPEM()), wlAdmin)
 	if err != nil {

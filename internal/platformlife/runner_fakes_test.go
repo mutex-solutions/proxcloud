@@ -551,13 +551,19 @@ type fakeSeed struct {
 	objs     map[string]map[string]any
 	extra    map[string]bool // more tokens that are the service account's (rotated ones)
 	unsynced map[string]bool // Applications ArgoCD does not sync
-	syncs    []string        // Applications a sync operation was started on
-	lastOp   map[string]any  // the operation of the last one
-	onSync   func(name string)
-	writes   []string // every request of the service account that is not a GET or an access review
-	tokens   []string // TokenRequest tokens, with ttls the seconds each was asked for
-	ttls     []float64
-	uids     int
+	// resources is what ArgoCD's comparison lists per Application (status.resources). pruneOnly are Applications that
+	// stay OutOfSync after a sync that succeeded (they never prune): "current" = the last sync was of the source the
+	// Application has, anything else = it was of an earlier one. applied is every Application apply, <name>@<revision>.
+	resources map[string][]any
+	pruneOnly map[string]string
+	applied   []string
+	syncs     []string       // Applications a sync operation was started on
+	lastOp    map[string]any // the operation of the last one
+	onSync    func(name string)
+	writes    []string // every request of the service account that is not a GET or an access review
+	tokens    []string // TokenRequest tokens, with ttls the seconds each was asked for
+	ttls      []float64
+	uids      int
 }
 
 // denial is an error answer of the API server.
@@ -877,9 +883,24 @@ func (f *fakeSeed) object(w http.ResponseWriter, r *http.Request) {
 			f.extra[token] = true
 			body["data"] = map[string]any{"token": base64.StdEncoding.EncodeToString([]byte(token))}
 		}
+		if body["kind"] == "Application" {
+			f.applied = append(f.applied, name+"@"+str(body, "spec", "source", "targetRevision"))
+		}
 		if body["kind"] == "Application" && !f.unsynced[name] {
-			body["status"] = map[string]any{"health": map[string]any{"status": "Healthy"}, "operationState": map[string]any{"phase": "Succeeded"},
-				"sync": map[string]any{"status": "Synced", "comparedTo": map[string]any{"source": dig(body, "spec", "source")}}}
+			source := dig(body, "spec", "source")
+			status := map[string]any{"health": map[string]any{"status": "Healthy"}, "operationState": map[string]any{"phase": "Succeeded"},
+				"sync": map[string]any{"status": "Synced", "comparedTo": map[string]any{"source": source}}}
+			if res, ok := f.resources[name]; ok {
+				status["resources"] = res
+			}
+			if last, ok := f.pruneOnly[name]; ok && dig(body, "spec", "syncPolicy", "automated") != nil {
+				status["sync"].(map[string]any)["status"] = "OutOfSync"
+				if last != "current" {
+					source = map[string]any{"targetRevision": last}
+				}
+				status["operationState"] = map[string]any{"phase": "Succeeded", "syncResult": map[string]any{"source": source}}
+			}
+			body["status"] = status
 		}
 		f.objs[path] = body
 		answer(body)

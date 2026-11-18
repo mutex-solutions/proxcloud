@@ -113,8 +113,12 @@ type NodeImage struct {
 
 // Status is what runs recorded. Sync and health are read live, never stored.
 type Status struct {
-	Phase      string            `json:"phase"`
-	BOM        *BOMRef           `json:"bom,omitempty"` // the BOM of the last successful apply; nil = never succeeded
+	Phase string  `json:"phase"`
+	BOM   *BOMRef `json:"bom,omitempty"` // the BOM of the last successful apply; nil = never succeeded
+	// TargetBOM is the BOM an upgrade is moving the platform to: set when its first run starts, cleared by the run that
+	// succeeds (which sets BOM to it). While it is set BOM still names the BOM the platform left, Components say per
+	// component what has moved, and every apply continues to it.
+	TargetBOM  *BOMRef           `json:"targetBom,omitempty"`
 	Seed       *SeedStatus       `json:"seed,omitempty"`
 	Clusters   []ClusterStatus   `json:"clusters,omitempty"`
 	Components []ComponentStatus `json:"components,omitempty"`

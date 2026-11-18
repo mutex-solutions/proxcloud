@@ -229,6 +229,9 @@ services:
       PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED: ${TEMPLATE_UPDATES_VM_ENABLED:-false}
       PROXCLOUD_JOBS_SCHEDULER_ENABLED: ${JOBS_SCHEDULER_ENABLED:-false}
       PROXCLOUD_PLATFORM_ENABLED: ${PLATFORM_ENABLED:-false}
+      # Off: an upgrade run of the platform checks for a machine rollout before the cluster chart syncs
+      # (docs/managed-services.md, "Upgrade between BOMs").
+      PROXCLOUD_PLATFORM_SKIP_ROLLOUT_GATE: ${PLATFORM_SKIP_ROLLOUT_GATE:-false}
       # The sandbox flag and the debug triggers flag stay at their defaults (off). Only the debug
       # triggers flag mounts the unauthenticated job triggers (POST /debug/...) on the management
       # port 8081, the scheduler does not: from the first release after v0.6.0, and
