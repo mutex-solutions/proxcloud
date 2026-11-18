@@ -24,7 +24,7 @@ const (
 	CheckFail = "fail"
 )
 
-// Check is one row of the preflight. The ids are part of the API (docs/api.md): flags, spec, network, bridge (a failure before the
+// Check is one row of the preflight. The ids are part of the API (docs/api.md): flags, scheduler (a warning, present only while the job scheduler is off), spec, network, bridge (a failure before the
 // first install, a warning after it), isolation,
 // tenant-network and tenant-path (a warning or ok, never a failure; absent when the provider names no zone), csi-vmid (a warning or ok, never a failure), credentials,
 // machines (a warning or ok, never a failure; absent while the installation has no VM), privileges:capi, privileges:csi, privileges:kubemint, mint-scope, pool-fence, token-scope, iso-store-visibility,
@@ -48,6 +48,8 @@ type Preflight struct {
 	CAPI, CSI         *pve.Client  // the platform tokens; nil when not stored
 	TemplateUpdatesVM bool         // PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED
 	GitHub            bool         // a GitHub integration is saved
+	// SchedulerOff: the job scheduler does not run (PROXCLOUD_JOBS_SCHEDULER_ENABLED): row scheduler, a warning.
+	SchedulerOff bool
 	// Blocked reports a digest on the template update blocklist (templateupdates.Receipts.Blocked).
 	Blocked func(ctx context.Context, digest string) (bool, error)
 }
@@ -129,6 +131,9 @@ func (p Preflight) Run(ctx context.Context) []Check {
 		flags = append(flags, "No GitHub integration is saved: Template updates finds the platform images through it.")
 	}
 	row("flags", flags, "Managed services and VM template updates are on, and a GitHub integration is saved.")
+	if p.SchedulerOff { // the operator's call (it starts charging), so never a failure
+		out = append(out, Check{ID: "scheduler", Status: CheckWarn, Message: SchedulerOffNote})
+	}
 
 	var spec []string
 	if err := in.Validate(); err != nil {

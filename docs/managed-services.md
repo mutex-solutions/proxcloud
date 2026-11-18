@@ -36,8 +36,11 @@ With the switch on, the console builds one **platform** on a Proxmox VE cluster:
   itself, from the chart `proxmox-kamaji-cluster` in `controlPlane.kind: kubeadm` mode). On the
   platform cluster: `cilium`, `cert-manager`, `metallb`, `argocd`, `cnpg`, `proxmox-csi`,
   `capi-tenant`, `kamaji-crds`, `kamaji-etcd`, `kamaji` and `platform`;
-- two providers, `<name> Kubernetes` (`kamaji`) and `<name> Databases` (`dbaas`), registered with
-  `attachToNewProjects: false`, so no project gets them until an operator attaches them.
+- two providers, `<name> Kubernetes` (`kamaji`) and `<name> Databases` (`dbaas`). Who gets them is a
+  setting (`spec.tenants.attach`, from v0.9.0): every project, new projects only, or none. An
+  installation saved before v0.9.0 has no such setting and means none, as before:
+  `attachToNewProjects: false` and no project attached. The Kubernetes provider offers the BOM's
+  Kubernetes version once its node image is published ([what a tenant can use](#what-a-tenant-can-use-after-the-install)).
 
 The work is done by a durable job of the API (`platform.run/v1`). It holds a lease, writes its
 intent before every effect on Proxmox or Kubernetes and the result after it, and each stage first
@@ -86,11 +89,25 @@ reading [section 3](#3-proxmox-identities): they share the pool `proxcloud-syste
 | A tenant network zone without DHCP | Only for tenant Kubernetes clusters, not for the install or for databases: a cluster's nodes get fixed addresses, so its network must be in an EVPN or a VLAN zone, or in a `simple` zone without a DHCP server. With a provider whose default zone (`config.network.defaultZone`) is a `simple` zone that ProxCloud created with DHCP, which is its default, a cluster create on its networks answers `400 Worker nodes need a network without DHCP (an EVPN or VLAN zone, or a simple zone without a DHCP server)`. The Check reads the zone in Proxmox, warns (`tenant-network`) when it has DHCP, and the install goes on; change the provider's default zone before you offer clusters ([managed-k8s.md](managed-k8s.md)). Not affected: a Kubernetes provider with shared workers (`cluster.shared`), which uses no tenant network, and a `simple` zone without DHCP. Such a zone is made in one of two ways: by hand in Proxmox before the first tenant network (a zone that exists is used as it is), or by ProxCloud when the zone's config says so, `"zones": {"<id>": {"kind": "simple", "dhcp": false}}` (from v0.8.1; it applies to a zone that does not exist yet, and an existing zone is never changed). Networks of such a zone answer `dhcp: false` and get no DHCP range; servers, cluster nodes and load balancers there get addresses the platform assigns. The key is refused on a zone of another kind (`400`, naming the key). The setup wizard keeps a zone's other keys when you change its kind there, so take `"dhcp"` out of the zone's config (Cloud providers) before you change such a zone to VLAN or EVPN. The key is not verified on a lab. |
 | The datacenter firewall | On, with the provider's isolation rules written by a provider sync once the installation is saved: the Check verifies that tenant traffic to the seed, the API address and the node range is dropped. |
 
-The page also warns when the job scheduler is off: tenant clusters and databases then update their
-status only when a provider sync runs, and no project is deleted: "Delete now" is refused with a
-`409` that says so, and a delete with the grace period is accepted but stays scheduled until the
-scheduler runs ([Compose README](../deploy/compose/README.md#optional-features)). It does not
-block an install.
+The page also warns when the job scheduler is off, in three places with one text: **Before you
+start**, the Check (row `scheduler`, a warning, absent while the scheduler runs) and the ready card.
+With it off:
+
+- no project is deleted: "Delete now" is refused with a `409` that says so, and a delete with the
+  grace period is accepted but stays scheduled until the scheduler runs;
+- the state of tenant clusters, databases and servers is refreshed only when an operator runs a
+  provider sync;
+- no usage is charged and no bill is made.
+
+It does not block an install, and nothing on this page turns it on, because it also starts charging
+usage on a timer: set prices first. The command, on the ProxCloud host of a Compose install
+([Compose README](../deploy/compose/README.md#optional-features)):
+
+```sh
+./proxcloud-up.sh install --scheduler
+```
+
+On another kind of install, set `PROXCLOUD_JOBS_SCHEDULER_ENABLED=true` for the API.
 
 The images a run imports (stage 2) are not smoke-tested automatically: the tests would clone beside
 the build. Start the smoke test of an image from Template updates when the run has ended, before you
@@ -637,6 +654,7 @@ Saving keeps a draft (`POST` or `PUT /installations`). Nothing is created on Pro
 | Load balancer range | `first-last`: the MetalLB pool tenants reach (tenant cluster APIs, database addresses). It must be outside the provider's blocked networks and the nodes' management networks. |
 | Control plane | One machine: node and size. |
 | Node groups | Exactly `system`, `kamaji` and `dbaas`. For each: 1 to 16 nodes, a count of at least one machine per chosen node (at most 64), and a size. One MachineDeployment is made per group and node. **Use the lab profile** sets 2 cores and 4 GiB everywhere. |
+| Tenants: who gets managed Kubernetes and databases | `spec.tenants.attach`: `all` (the projects that exist and every new one), `new` (new projects only) or `none` (you attach the providers later). The form preselects `new` on a site that has projects, so that nothing changes for tenants who are already there, and `all` on a site with none; when the projects cannot be counted it preselects `new`. Can change after the install. [What a run does with it](#what-a-tenant-can-use-after-the-install). |
 
 The gateway, the seed address, the API address, the node range and the load balancer range must not
 share an address. The page checks these rules before saving; the API checks them again and adds what
@@ -797,17 +815,86 @@ the row "Offers no Kubernetes version yet" was not seen (the lab's provider offe
 | Node range | `spec.clusters[0].nodeRange` | The platform's machines |
 
 **Providers.** The two rows stage 10 registered, each with a link, and what a tenant cannot use
-yet. The page reads this from the provider rows (`GET /admin/service`):
+yet. The page reads this from the provider rows (`GET /admin/service`) and the installation. The
+next section says what each line means and what its button does.
 
-- *The Kubernetes provider offers no version.* The install registers it with an empty
-  `config.cluster.versions`, so every cluster create is refused with "this provider offers no
-  Kubernetes version yet". ProxCloud does not fill it in. Do two things: publish a Kubernetes node
-  image in **Template updates**, then enter the line it prints for the image
-  (`<version>=<node image id>`, [managed-k8s.md](managed-k8s.md)) on the provider's **Connection** tab. The row turns to "Offers Kubernetes <versions>" once one is set.
-- *Neither provider is attached to a project.* Both are created with
-  `attachToNewProjects: false`. On each provider's **Projects** tab, turn the policy on for new
-  projects and attach the existing ones. The card shows the policy only: whether an existing project
-  is attached it does not read.
+#### What a tenant can use after the install
+
+A green install was not usable by a tenant up to v0.8.2: the Kubernetes provider offered no
+version, so every cluster create was refused with "this provider offers no Kubernetes version yet",
+and neither provider was attached to a project. On the first production install an operator typed
+the version into the provider and attached both providers by hand. From v0.9.0 the install does
+both, as far as it safely can. None of it is verified on a lab.
+
+**The Kubernetes version.** A tenant cluster's workers are clones of a node image template, one per
+Proxmox node, which the provider names per version in `config.cluster.versions`
+(`"1.35.10": "pve1=9212,pve2=9213"`, [managed-k8s.md](managed-k8s.md)). The install imports the
+BOM's node image on every node the platform cluster uses (stage 2), but it does not publish it:
+Template updates publishes only a copy whose smoke test passed, and a run's imports are not
+smoke-tested, because the tests would clone beside the build. That gate is kept. So:
+
+- Stage 10 of every apply, and `POST …/kubernetes-version`, read the templates of the Proxmox
+  cluster. When a node image of the BOM's Kubernetes version is **published on every node the
+  platform cluster uses**, they add that version to the provider with the line Template updates shows
+  for it (the newest published copy per node, including nodes the platform does not use). The
+  stage's item `kubernetes-version` says what it found.
+- A version the provider already names is yours. It is never overwritten and never removed, whatever
+  it names, and other versions stay as they are. To change the line of a version you set, edit it on
+  the provider's **Connection** tab.
+- While no copy is published, the ready card says so under the Kubernetes provider, lists each node
+  with the state of its copy (not imported, imported and waiting, smoke test running or failed and
+  why, published), and offers one button, **Test, publish and offer Kubernetes <version>**. It runs
+  [Publish on all nodes](template-updates.md) for the BOM's image, one smoke test or import at a
+  time, on every node of the provider, and then calls `POST …/kubernetes-version`. Keep the page
+  open: leaving it pauses, and the button goes on from where it stopped. It stops at the first step
+  that fails and shows that node's message. A failed smoke test is not repeated by the button: run
+  it again from the copy's row in Template updates.
+- The smoke test needs the provider's smoke-test network (`config.templateSmoke`,
+  [template-updates.md](template-updates.md)). Without one the node's line reads "Smoke test not
+  started" with the reason; set the network on the Proxmox provider and press the button again.
+- The version is written once the platform's own nodes publish the image. On a Proxmox cluster with
+  more nodes, a copy published later on another node is not added to a version the provider already
+  names: copy the line from **Publish on all nodes** into the provider, or let the card's button
+  finish before it offers (it does: it offers only after the last node).
+
+**The attachment.** `spec.tenants.attach` is applied by stage 10 through the paths an operator uses
+by hand, and each change is in the audit log with the admin who started the run as its author and
+the installation in its metadata:
+
+| Choice | The attach policy of both providers | Projects that exist |
+|---|---|---|
+| `all` | on (`config.attachToNewProjects: true`) | One bulk attach per provider with scope "all" ([cloud-integration.md](cloud-integration.md)): audit action `BULK_ATTACH`. Its progress and its failed projects are on the provider's **Projects** tab. A run does not wait for it |
+| `new` | on | untouched |
+| `none`, or no setting | off | untouched |
+
+A choice is applied **once**: stage 10 acts only when the setting differs from the one it applied
+last (`status.tenantsAttach`). So an apply never attaches again a project you detached, and never
+turns back on a policy you turned off; to have a run act again, change the setting. A run never
+detaches a project: `none` after `all` turns the policy off and leaves every project attached. An
+installation from before v0.9.0 has no setting, and its providers stay exactly as they are. When a
+provider is disabled, or a bulk attach of more than 5000 projects would be needed, the stage's item
+`attach:<provider id>` says so as a warning, the run still ends ready, and the next apply tries
+again. The card says which choice the settings hold and whether it is applied yet.
+
+**The job scheduler.** One line under the providers says what tenants miss while it is off, with the
+command ([Prerequisites](#2-prerequisites)).
+
+**What a first tenant still needs.** With a project attached to both providers and a version
+offered, the customer console's cluster form needs a name and a flavor. The rest has defaults:
+
+- *Network.* A cluster's nodes need a network of the project without DHCP. The form preselects the
+  project's network when exactly one can hold the nodes, offers **Create a network for this
+  cluster** when the project has none (the network the Networks page makes with its defaults), and
+  shows networks with DHCP as not selectable. When every network of the project has DHCP it says
+  that a new one would be the same and sends the tenant to the operator: the zone is yours to change
+  (the Check row `tenant-network`).
+- *Not fixed by this release:* a flavor must exist in the catalog and fit the project's quota (the
+  form disables the ones that do not); a price rule for clusters must exist or usage is billed as
+  zero; the worker root disk is the provider's `rootVolumeGiB` (30); on a Compose install a tenant
+  cluster has no block volumes ([section 9](#9-limits-on-the-compose-install)); the path from the
+  tenant network to the platform's load balancer range must be open
+  ([the path from tenants to the platform](#the-path-from-tenants-to-the-platform)); nothing
+  publishes a Service of type LoadBalancer outside the tenant network.
 
 **Platform cluster access.** **Download platform kubeconfig** (`GET …/platform-kubeconfig`) saves
 `<name>-platform.kubeconfig`. It is described under
@@ -860,7 +947,7 @@ One run per installation at a time. The page reads the run every 3 seconds.
 | 7 | Build the platform cluster (`cluster`) | The CAPI token's Secret and the Application `pc-platform` on the seed; MachineDeployments of nodes no longer in a group are deleted; then waits for the control plane, the admin kubeconfig and every Machine Running. Before it writes anything it reads each node template: a template with a Proxmox cloud-init drive on another slot than `ide0` is refused (`machine_failed`, with the `qm set` command that removes the drive), because CAPMOX puts its own on `ide0` and a machine with both starts from the wrong one. A template without the drive stays usable everywhere: CAPMOX brings its own, and the template-updates smoke test gives its test VM one when the template has none, so such a template can still be tested and published for tenants. A template whose config the portal token may not read is not checked: the stage goes on and shows an item `template-<vmid>` in state `not checked`. A template that passed has the same item in state `ok`; one that Proxmox no longer knows has none (CAPMOX reports it on the machine). The items list each machine with its VMID (`no VM` until CAPMOX has cloned it) and, while it is not Running, the step CAPMOX is at with its error (the reason and message of the ProxmoxMachine's condition `VirtualMachineProvisioned`). CAPMOX calls a VM provisioned once it runs and has its addresses; for a machine that then does not join (kubeadm, the API address, etcd) the item carries the reason and message of the Machine's own condition `Ready` after `Cluster API:`. The message of the waiting stage repeats, in this order, what the ProxmoxCluster reports, the KubeadmControlPlane's condition `Available` while it is not `True` (`Control plane:`), the machines' errors and, last, the state of the Application `pc-platform` while its sync is not done (not while it is only Progressing, which it is for as long as machines are built). On a **Retry** that finds a ProxmoxCluster still without a condition, the run updates an annotation on it (`proxcloud.io/retried-by`) once, so CAPMOX opens the Proxmox API again at once instead of at the end of its backoff of up to 17 minutes; the 10 minutes count from then. Steps CAPMOX tries again (`CloningFailed`, `PoweringOnFailed`) are waited for. `VMProvisionFailed` and `TaskFailed` end the stage: CAPMOX does not go on with such a machine. Once every machine is Running the stage sets `onboot` on each VM of the platform that lacks it, with the CAPI token, so that the machines start again with their node ([After a Proxmox node reboots](#after-a-proxmox-node-reboots)); a VM it could not set does not fail the stage, and the Check's `machines` row names it. | 60 min |
 | 8 | Reach the platform cluster (`workload-access`) | Creates the seed ArgoCD's service account on the cluster and a token for it (one year, renewed by any later apply when under 90 days are left), kept only in the seed's cluster Secret; writes the CSI token's Secret for proxmox-csi. | 10 min |
 | 9 | Install the platform components (`workload-platform`) | The cluster's components wave by wave, each wave only when the one before is Synced and Healthy with its sync `Succeeded` (as in stage 6). After the first wave (Cilium) every node must be Ready with its group label. The platform's own volumes are recorded for Remove at every look of the stage, so also when it fails inside `kamaji-etcd`'s wave. | 20 min per wave |
-| 10 | Create the two providers (`register`) | Creates the Kubernetes and Databases providers, or updates the ones this installation created before, with a kubeconfig of the cluster's `proxcloud-system/proxcloud` service account. | 5 min |
+| 10 | Create the two providers (`register`) | Creates the Kubernetes and Databases providers, or updates the ones this installation created before, with a kubeconfig of the cluster's `proxcloud-system/proxcloud` service account. Offers the BOM's Kubernetes version when its node image is published on the platform's nodes, and applies a changed `spec.tenants.attach` ([what a tenant can use](#what-a-tenant-can-use-after-the-install)). | 5 min |
 | 11 | Finish (`done`) | Records the components and the BOM as installed. The phase becomes `ready`. | 5 min |
 
 An upgrade (an apply that moves the platform to this release's BOM) is the same eleven stages with the
@@ -1462,9 +1549,11 @@ its documentation as remembered, and was not checked in its code or on a node.
   egress fence on (`egressFence: true`), which allows no object store.
 - **Database replicas.** PostgreSQL 17 and 18; three replicas are offered only when the `dbaas`
   group spans three or more Proxmox nodes, otherwise one.
-- **No node image for tenants yet.** The Kubernetes provider is registered with no versions. Publish
-  a Kubernetes node image in Template updates and enter its version on the provider before tenants
-  can create a cluster. Until then every cluster create is refused with a `400` that says so
+- **No node image for tenants until it is published.** The install imports the node image and does
+  not publish it, so the Kubernetes provider is registered with no version until the ready card's
+  button, or you in Template updates, published it
+  ([what a tenant can use](#what-a-tenant-can-use-after-the-install)). Until then every cluster
+  create is refused with a `400` that says so
   (`this provider offers no Kubernetes version yet`), before anything is reserved or a token is made,
   and an upgrade of an existing cluster is refused the same way (`version is not offered by this
   provider`).
@@ -1850,6 +1939,10 @@ own list ([What the upgrade still owes a lab](#what-the-upgrade-still-owes-a-lab
 
 | Check | What it would show |
 |---|---|
+| U1 (v0.9.0) | A green install is usable: on a fresh install the ready card's button smoke-tests and publishes the node image on the platform's nodes and the Kubernetes provider then offers the BOM's version; a tenant of an attached project creates a cluster with a name and a flavor. Shows whether a node image template that already serves the platform's own machines passes the smoke test unchanged, and how long the test takes beside a running platform |
+| U2 (v0.9.0) | An apply after U1 leaves a version line the operator edited as it is, and offers nothing twice |
+| U3 (v0.9.0) | `spec.tenants.attach`: `all` on a site with projects attaches each one (Kubernetes and databases in the tenant menu) and the audit log names the run's author; `new` attaches a project created afterwards and no earlier one; an apply after a hand detach does not attach again |
+| U4 (v0.9.0) | The customer console's cluster form on a project without a network: **Create a network for this cluster** makes one the cluster create accepts, in a `simple` zone without DHCP |
 | L0 | The API container routes to the platform network |
 | L1 | The script, the checks and the mint drill ([proxmox-permissions.md](proxmox-permissions.md#the-mint-grant-in-m1)) |
 | L2 | The seed: its CA, the bootstrap token, the CD gone after stage 5, cloud-init off |

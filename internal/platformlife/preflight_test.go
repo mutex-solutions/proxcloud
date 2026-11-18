@@ -167,6 +167,12 @@ func TestPreflight(t *testing.T) {
 	if got := len(checks); got != 18 {
 		t.Errorf("%d rows, want 18: %+v", got, checks)
 	}
+	// The scheduler is the operator's call: a warning with the command while it is off, no row while it is on.
+	pf.SchedulerOff = true
+	if c := checkMap(pf.Run(ctx))["scheduler"]; c.Status != CheckWarn || !strings.Contains(c.Message, "--scheduler") || !strings.Contains(c.Message, "delete a project") {
+		t.Errorf("scheduler off: %+v", c)
+	}
+	pf.SchedulerOff = false
 	if c := checkMap(checks)["csi-vmid"]; c.Status != CheckOK {
 		t.Errorf("VM id 9999 free: %+v", c)
 	}

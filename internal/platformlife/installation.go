@@ -43,6 +43,7 @@ type Spec struct {
 	Seed      SeedSpec      `json:"seed"`
 	Clusters  []ClusterSpec `json:"clusters"`
 	NodeImage NodeImage     `json:"nodeImage"`
+	Tenants   Tenants       `json:"tenants,omitzero"`
 }
 
 // Storage: boot holds every platform disk and is the std StorageClass; iso is the node-local store of bootstrap ISOs;
@@ -134,6 +135,9 @@ type Status struct {
 	Components        []ComponentStatus `json:"components,omitempty"`
 	Volumes           []Volume          `json:"volumes,omitempty"`
 	Providers         *ProviderIDs      `json:"providers,omitempty"`
+	// TenantsAttach is the spec.tenants.attach the register stage applied last ("" = none was): a run acts on the
+	// choice only when it differs, so an apply never undoes what the operator changed on a provider since.
+	TenantsAttach string `json:"tenantsAttach,omitempty"`
 }
 
 // BOMRef names an embedded BOM by release and file sha256.
@@ -318,6 +322,12 @@ func (in *Installation) Validate() error {
 	// store from the provider, and the preflight checks the mint role on the provider's store: the message names it.
 	if s.Storage.Import != "" && s.Storage.Import == s.Storage.Boot {
 		bad("spec.storage.import %q is the boot store: use another store with import content, the one the provider's importStorage names (an empty spec.storage.import takes it)", s.Storage.Import)
+	}
+
+	switch s.Tenants.Attach {
+	case "", AttachAll, AttachNew, AttachNone:
+	default:
+		bad("spec.tenants.attach %q is not all, new or none", s.Tenants.Attach)
 	}
 
 	n := s.Network

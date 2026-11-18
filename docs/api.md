@@ -559,8 +559,13 @@ are several, `errors.details.problems`.
   `bridge` only, and only with a BOM whose cluster chart is 0.1.14 or newer), `seed {mode, pool, node, address,
   cores, memoryMiB, diskGiB, sshKeys[], apiSources[]}`, one cluster `{name,
   roles, endpoint, nodeRange, metallbRange, controlPlane, nodeGroups[]}` with
-  exactly the groups `system`, `kamaji` and `dbaas`, and `nodeImage {mode,
-  templates}`. A spec that breaks a rule, or overlaps the provider's
+  exactly the groups `system`, `kamaji` and `dbaas`, `nodeImage {mode,
+  templates}`, and from v0.9.0 the optional `tenants {attach}`: who gets the two providers, `all` (the projects that
+  exist and every new one), `new` (new projects only) or `none`. A spec without it means `none`, as before v0.9.0,
+  and stays valid. Stage 10 of a run applies a choice once, when it differs from `status.tenantsAttach` (the one
+  applied last): the attach policy of both providers, and for `all` one bulk attach of every project per provider.
+  An installation is answered with `schedulerNote` while the job scheduler is off: the text of the Check row
+  `scheduler`. A spec that breaks a rule, or overlaps the provider's
   `cidrPool`, `sandboxCidrs` or public networks, or puts the MetalLB range in
   `blockedCidrs`, is a `400 invalid_installation`; so is a `storage.import`
   equal to `storage.boot` (the portal token's role on the import store would
@@ -582,7 +587,8 @@ are several, `errors.details.problems`.
   `PROXCLOUD_ENCRYPTION_DEFAULT_KEY` the route answers `409 no_encryption_key`.
   No route returns a secret: an installation shows `credentials.{capi,csi}.tokenId`.
 - `POST /installations/{id}/preflight`: read-only, not audited; `{ok, checks}`
-  with rows `flags`, `spec`, `network`, `bridge`, `isolation`, `tenant-network`, `tenant-path`, `csi-vmid`, `credentials`, `machines`,
+  with rows `flags`, `scheduler` (a `warn` that says what tenants miss and the command that turns the job scheduler
+  on; absent while it runs), `spec`, `network`, `bridge`, `isolation`, `tenant-network`, `tenant-path`, `csi-vmid`, `credentials`, `machines`,
   `privileges:capi`, `privileges:csi`, `privileges:kubemint`, `mint-scope`, `pool-fence`,
   `token-scope`, `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement` and
   `images`. A row's `status` is `ok`, `fail` or `warn`; `ok` in the answer is
@@ -786,6 +792,17 @@ are several, `errors.details.problems`.
   credential was stored writes the same entry with `outcome: FAILURE` and both
   names (older token Secrets may still be on the seed); a `502` that stored
   nothing, and every refusal, writes none.
+- `POST /installations/{id}/kubernetes-version` (v0.9.0; no body): offers the Kubernetes version of the installed BOM
+  on the installation's Kubernetes provider. It reads the templates of the Proxmox cluster, publishes nothing and
+  overwrites nothing. When a node image of that version is published on every node the platform cluster uses, the
+  answer is `{version, line, offered, serviceId, versions}`: `line` is the value written to
+  `config.cluster.versions[version]` (the newest published copy per node, `pve1=9212,pve2=9213`), `offered` is false
+  when the provider already names that version (its line is kept, whatever it is), `versions` is the provider's map
+  afterwards. `409 node_image_unpublished` with `details.version` and `details.missingNodes` when a node lacks a
+  published copy; `409 no_provider` before the first install; `409 bom_unsupported` when this release does not carry
+  the installed BOM; `502 pve_unreadable` when Proxmox did not list its templates. Stage 10 of every apply does the
+  same. A change is in the audit log with the provider's versions before and after. Not verified on a lab
+  ([managed-services.md](managed-services.md#what-a-tenant-can-use-after-the-install)).
 
 An apply runs `validate`, `images`, `seed-vm`, `seed-api`, `seed-identity`,
 `seed-platform`, `cluster`, `workload-access`, `workload-platform`, `register`

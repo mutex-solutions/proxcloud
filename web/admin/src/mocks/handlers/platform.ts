@@ -29,6 +29,10 @@ const SERVICE = "svc-proxmox-01"
 
 const preset = typeof window === "undefined" ? "" : (new URLSearchParams(window.location.search).get("mock-platform") ?? "")
 
+// "Publish on all nodes" per "<provider>/<digest>": the step each node is at (handlers/setup.ts moves it). It lives
+// here because this module is loaded first and reads it when a run registers the providers.
+export const publishAllState: Record<string, Record<string, number>> = {}
+
 export const mockPlatform = {
   enabled: preset !== "disabled",
   installations: [] as Doc[],
@@ -65,6 +69,7 @@ const INSTALLATION: Shape = {
     clusters: [{ name: true, roles: true, endpoint: true, nodeRange: true, metallbRange: true, controlPlane: MACHINE,
       nodeGroups: [{ name: true, nodes: true, count: true, cores: true, memoryMiB: true, diskGiB: true }] }],
     nodeImage: { mode: true, templates: true },
+    tenants: { attach: true },
   },
 }
 const TOKEN: Shape = { tokenId: true, secret: true }
@@ -99,6 +104,8 @@ const bomRef = { release: bom.release, sha256: bom.sha256 }
 // The preset "previous": the release that installed the platform, which this one carries as a previous BOM.
 const previous = { ...bom, release: "0.6.0", sha256: "1e0d9c8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d" }
 
+const SCHEDULER_NOTE = "The job scheduler is off. Until it is on, a tenant cannot delete a project, the state of clusters, databases and servers is refreshed only when an operator runs a provider sync, and no usage is charged or billed. Turn it on where ProxCloud is installed: ./proxcloud-up.sh install --scheduler on a Compose install, PROXCLOUD_JOBS_SCHEDULER_ENABLED=true for the API elsewhere. It starts charging usage on a timer, so set the prices first."
+
 const find = (id: string) => {
   if (!mockPlatform.enabled) throw fail(404, "platform_disabled", "Managed services are off on this site: set PROXCLOUD_PLATFORM_ENABLED=true")
   const in_ = mockPlatform.installations.find((i) => i.id === id)
@@ -107,7 +114,8 @@ const find = (id: string) => {
 }
 const view = (in_: Doc) => {
   const sec = mockPlatform.secrets[in_.id] ?? {}
-  return { ...in_, credentials: { ...(sec.capi ? { capi: { tokenId: "capmox@pve!capi" } } : {}), ...(sec.csi ? { csi: { tokenId: "csi@pve!csi" } } : {}) } }
+  // The mock API runs without the job scheduler, like a plain Compose install.
+  return { ...in_, schedulerNote: SCHEDULER_NOTE, credentials: { ...(sec.capi ? { capi: { tokenId: "capmox@pve!capi" } } : {}), ...(sec.csi ? { csi: { tokenId: "csi@pve!csi" } } : {}) } }
 }
 const activeRun = (id: string) => mockPlatform.runs.find((r) => r.installationId === id && !TERMINAL.includes(tick(r).state))
 
@@ -202,12 +210,38 @@ function ready(in_: Doc) {
     return svc.id as string
   }
   seedStatus(in_)
+  const k8s = provider("kamaji", "Kubernetes"), dbs = provider("dbaas", "Databases")
+  // Stage 10: a changed attach choice is applied once, and the BOM's version is offered where its image is published.
+  const choice = in_.spec.tenants?.attach ?? "none"
+  if (choice !== (in_.status.tenantsAttach ?? "none")) {
+    for (const s of db.services) if (s.id === k8s || s.id === dbs) s.config.attachToNewProjects = choice !== "none"
+    in_.status.tenantsAttach = choice
+  }
+  offerVersion(in_, k8s)
   Object.assign(in_.status, {
     phase: "ready", bom: bomRef,
     clusters: [{ name: "pc-platform", namespace: "pc-platform", endpoint: in_.spec.clusters[0].endpoint, kubernetesVersion: bom.kubernetes.version, argocdTokenExpiresAt: new Date(Date.now() + 365 * 86_400_000).toISOString() }],
     components: bom.components.map((c) => ({ name: c.name, cluster: c.cluster, version: c.chart.version, managed: true })),
-    providers: { kubernetes: provider("kamaji", "Kubernetes"), database: provider("dbaas", "Databases") },
+    providers: { kubernetes: k8s, database: dbs },
   })
+}
+
+// offerVersion is platformlife.NodeImageLine and OfferVersion over the mock's publish-all state: the BOM's version is
+// added to the Kubernetes provider when every node publishes the node image, and never over a version the row names.
+function offerVersion(in_: Doc, serviceId: string) {
+  const st = publishAllState[`${in_.serviceId}/${bom.kubernetes.nodeImage.digest}`] ?? {}
+  const nodes = Object.keys(st)
+  const missing = nodes.length ? nodes.filter((n) => st[n] < 4) : [in_.spec.clusters[0].controlPlane.node]
+  const line = nodes.map((n, i) => `${n}=${9300 + i}`).join(",")
+  const svc = db.services.find((s) => s.id === serviceId)!
+  let versions = (svc.config.cluster?.versions ?? {}) as Doc
+  const offered = !missing.length && !(bom.kubernetes.version in versions)
+  if (offered) {
+    // A new list and a new row, as an API answer is: the page compares what it reads with what it has.
+    versions = { ...versions, [bom.kubernetes.version]: line }
+    db.services = db.services.map((s) => (s === svc ? { ...s, config: { ...s.config, cluster: { ...s.config.cluster, versions } } } : s))
+  }
+  return { version: bom.kubernetes.version, line, missing, offered, versions }
 }
 
 function checks(in_: Doc): Doc[] {
@@ -217,6 +251,7 @@ function checks(in_: Doc): Doc[] {
   const row = (id: string, ok: boolean, done: string, todo: string) => ({ id, status: ok ? "ok" : "fail", message: ok ? done : todo })
   return [
     row("flags", true, "Managed services and VM template updates are on, and a GitHub integration is saved.", ""),
+    { id: "scheduler", status: "warn", message: SCHEDULER_NOTE },
     row("spec", true, "The installation is complete and consistent.", ""),
     row("network", true, "The platform network is apart from every tenant, sandbox and public network, and tenants can reach the MetalLB range.", ""),
     row("isolation", preset !== "isolation" || mockPlatform.synced, "The platform addresses are blocked networks; the cluster firewall rules are written by the next provider sync (with this installation saved it needs no project), or with the first tenant network.",
@@ -359,6 +394,18 @@ on("PUT /admin/platform/installations/:id/credentials", ({ params, opts }) => {
   if (b.capi) sec.capi = true
   if (b.csi) sec.csi = true
   return { data: view(in_) } // the answer names the stored token ids, never a secret
+})
+
+on("POST /admin/platform/installations/:id/kubernetes-version", ({ params }) => {
+  const in_ = find(params.id)
+  const id = in_.status.providers?.kubernetes
+  if (!id || !in_.status.bom) throw fail(409, "no_provider", "This installation has no Kubernetes provider yet: install it first.")
+  const r = offerVersion(in_, id)
+  if (r.missing.length) {
+    throw fail(409, "node_image_unpublished", `No node image of Kubernetes ${r.version} is published on ${r.missing.join(", ")}. Publish ${bom.kubernetes.nodeImage.tag} there (Template updates, Publish on all nodes), then offer the version again.`,
+      { version: r.version, missingNodes: r.missing })
+  }
+  return { data: { version: r.version, line: r.line, offered: r.offered, serviceId: id, versions: r.versions } }
 })
 
 on("POST /admin/platform/installations/:id/preflight", ({ params }) => {

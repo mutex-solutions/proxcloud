@@ -14,7 +14,18 @@ export type Spec = {
   seed: { mode?: string; pool?: string; node: string; address: string; cores: number; memoryMiB: number; diskGiB: number; sshKeys?: string[]; apiSources: string[] }
   clusters: { name?: string; roles?: string[]; endpoint: string; nodeRange: string; metallbRange: string; controlPlane: Machine; nodeGroups: NodeGroup[] }[]
   nodeImage?: { mode?: string; templates?: Record<string, number> }
+  // Who gets the two providers; a spec without it means "none". Applied by a run when it differs from status.tenantsAttach.
+  tenants?: { attach?: Attach }
 }
+export type Attach = "all" | "new" | "none"
+export const ATTACH_LABEL: Record<Attach, string> = {
+  all: "All projects: the ones that exist and every new one",
+  new: "New projects only",
+  none: "None: I attach the providers later",
+}
+// The choice a new installation starts with. A site with projects is live with tenants (so is one whose projects
+// could not be counted): nothing changes for them unless the operator says so.
+export const attachDefault = (projects?: number): Attach => (projects === 0 ? "all" : "new")
 export type Installation = {
   id: string
   name: string
@@ -28,7 +39,9 @@ export type Installation = {
     clusters?: { name: string; endpoint?: string; kubernetesVersion?: string; argocdTokenExpiresAt?: string }[]
     components?: { name: string; cluster: string; version: string }[]
     providers?: { kubernetes?: string; database?: string }
+    tenantsAttach?: Attach // the choice the last run applied
   }
+  schedulerNote?: string // set while the job scheduler is off: what tenants miss and the command that turns it on
   lastRunId?: string
   rev: number
   credentials: { capi?: { tokenId: string }; csi?: { tokenId: string } }
@@ -109,6 +122,7 @@ export type Form = {
   endpoint: string; nodeRange: string; metallbRange: string
   cpNode: string; cp: MachineForm
   groups: Record<string, GroupForm>
+  attach: Attach | "" // "": not chosen yet; the settings step shows the default for the site
 }
 
 const group = (cores: string, mem: string): GroupForm => ({ nodes: [], count: "1", cores, memoryGiB: mem, diskGiB: "40" })
@@ -119,6 +133,7 @@ export const emptyForm: Form = {
   endpoint: "", nodeRange: "", metallbRange: "",
   cpNode: "", cp: { cores: "2", memoryGiB: "4", diskGiB: "30" },
   groups: { system: group("4", "8"), kamaji: group("4", "8"), dbaas: group("4", "8") },
+  attach: "",
 }
 
 // The lab profile of design §8.3: the smallest machines the API takes, one per group.
@@ -154,6 +169,8 @@ export function formToSpec(f: Form, prev?: Spec): Spec {
       controlPlane: { node: f.cpNode.trim(), ...machine(f.cp) },
       nodeGroups: GROUPS.map((name) => ({ name, nodes: f.groups[name].nodes, count: num(f.groups[name].count), ...machine(f.groups[name]) })),
     }],
+    // "none" is what a spec without the key means: one stored before the choice existed stays as it is.
+    ...(f.attach && (f.attach !== "none" || prev?.tenants) ? { tenants: { attach: f.attach } } : {}),
   }
 }
 
@@ -172,6 +189,7 @@ export function specToForm(name: string, s: Spec): Form {
     endpoint: c?.endpoint ?? "", nodeRange: c?.nodeRange ?? "", metallbRange: c?.metallbRange ?? "",
     cpNode: c?.controlPlane?.node ?? "", cp: c?.controlPlane ? machineForm(c.controlPlane) : emptyForm.cp,
     groups,
+    attach: s.tenants?.attach ?? "none",
   }
 }
 

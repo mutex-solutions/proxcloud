@@ -383,6 +383,13 @@ func versionsMapValue(rows []pve.ClusterResource, p VMPayload) string {
 	return strings.Join(parts, ",")
 }
 
+// KubernetesVersionsValue is the kamaji provider's config.cluster.versions value for the node images of one OS and
+// Kubernetes version that are published in rows, the newest per node ("" = none is published): the line "Publish on
+// all nodes" shows for copying, for a caller that has no import of the line at hand.
+func KubernetesVersionsValue(rows []pve.ClusterResource, os, version string) string {
+	return versionsMapValue(rows, VMPayload{OS: os, Variant: "kubernetes", KubernetesVersion: version})
+}
+
 // SmokeHistory lists recent smoke receipts (the page's Jobs tab).
 func (s *Service) SmokeHistory(ctx context.Context) ([]SmokeReceipt, error) {
 	return s.Smokes.Recent(ctx, 50)

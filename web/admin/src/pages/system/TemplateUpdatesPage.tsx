@@ -575,7 +575,7 @@ export type PublishAllReport = {
   // An advance that acted and then could not start its next job.
   error?: { code: string; message: string }
 }
-const NODE_STATE: Record<string, { label: string; variant: "default" | "secondary" | "outline" | "destructive" }> = {
+export const NODE_STATE: Record<string, { label: string; variant: "default" | "secondary" | "outline" | "destructive" }> = {
   published: { label: "Published", variant: "default" },
   ready_to_publish: { label: "Smoke test passed", variant: "secondary" },
   publish_failed: { label: "Publish refused", variant: "destructive" },

@@ -19,6 +19,7 @@ import (
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/templateupdates"
 )
 
 const (
@@ -1307,6 +1308,19 @@ func (x *acq) register(ctx context.Context) error {
 		return err
 	}
 	var ids ProviderIDs
+	var items []StageItem
+	// A node image is offered only where it is published; a cluster that cannot be read offers none in this run.
+	version := StageItem{ID: "kubernetes-version", State: "warn"}
+	if rows, err := x.portal.ClusterResources(ctx, "vm"); err != nil {
+		version.Message = "Proxmox did not list its templates, so no Kubernetes version was offered in this run: " + clip(err.Error())
+	} else if line, missing := NodeImageLine(x.bom, x.in, rows); line == "" {
+		version.Message = fmt.Sprintf("Kubernetes %s is not offered to tenants: no node image of it is published on %s. Publish it from the Ready card.",
+			x.bom.Kubernetes.Version, strings.Join(missing, ", "))
+	} else {
+		in.NodeImageLine = line
+		version.State, version.Message = "done", fmt.Sprintf("Kubernetes %s is published on %s and is offered unless the provider already names that version.", x.bom.Kubernetes.Version, line)
+	}
+	items = append(items, version)
 	k8s, db := ProviderBodies(x.bom, in, kubeconfig)
 	for _, p := range []struct {
 		body map[string]any
@@ -1320,7 +1334,36 @@ func (x *acq) register(ctx context.Context) error {
 		}
 		*p.id = id
 	}
-	return x.record(ctx, func(_ *Run, in *Installation, _ *Secrets) { in.Status.Providers = &ids })
+	// The attach choice is applied once, when it differs from the one applied last: an apply must not attach again
+	// projects the operator detached since, or turn a policy back on.
+	choice, applied := x.in.Spec.Tenants.AttachChoice(), x.in.Status.TenantsAttach
+	if x.r.Attach != nil && choice != (Tenants{Attach: applied}).AttachChoice() {
+		actor := x.run.RequestedBy
+		if actor == "" {
+			actor = templateupdates.PlatformRunActor + x.run.ID
+		}
+		all := true
+		for _, id := range []string{ids.Kubernetes, ids.Database} {
+			done, note, err := x.r.Attach(ctx, x.in.ID, id, choice, actor)
+			if err != nil {
+				return err
+			}
+			it := StageItem{ID: "attach:" + id, State: "done", Message: note}
+			if !done { // the next apply tries again
+				it.State, all = "warn", false
+			}
+			items = append(items, it)
+		}
+		if all {
+			applied = choice
+		}
+	}
+	if err := x.saveStage(ctx, func(s *Stage) { s.Items = items }); err != nil {
+		return err
+	}
+	return x.record(ctx, func(_ *Run, in *Installation, _ *Secrets) {
+		in.Status.Providers, in.Status.TenantsAttach = &ids, applied
+	})
 }
 
 // done is stage 11: what was applied, and the BOM it came from. An upgrade ends here: only now, with every stage
@@ -1361,7 +1404,9 @@ func DisableProvider(row map[string]any) bool {
 }
 
 // providerOwned are the config keys stage 10 rewrites on a row it adopts. Everything else is written when the row is
-// created and is the operator's from then on: its name, its status, the node image versions, the attach policy.
+// created and is the operator's from then on: its name, its status, the node image versions, the attach policy. Two
+// things a run still does there: it adds a Kubernetes version the row does not name (OfferVersion), and it applies a
+// changed spec.tenants.attach (Runner.Attach).
 var providerOwned = [][]string{{"argocd"}, {"namespacePlacement"}, {"cluster", "pveApiUrl"},
 	{"database", "egressFence"}, {"database", "lbAddressPool"}, {"database", "storageClasses"},
 	{"database", "engines", "postgresql", "replicas"}} // [1] again when the dbaas group drops below three PVE nodes
@@ -1407,6 +1452,12 @@ func AdoptProvider(rows []map[string]any, body map[string]any) (map[string]any, 
 			at = next
 		}
 		at[path[len(path)-1]] = v
+	}
+	offered, _ := dig(body, "config", "cluster", "versions").(map[string]any)
+	for version, line := range offered {
+		if l, ok := line.(string); ok {
+			OfferVersion(found, version, l)
+		}
 	}
 	return found, nil
 }

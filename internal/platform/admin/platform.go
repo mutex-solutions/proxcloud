@@ -20,6 +20,8 @@ package admin
 //	                                                      reads, and opens its ArgoCD                        (service:manage)
 //	POST /admin/platform/installations/{id}/seed-credential/rotate  a new stored seed credential; refused
 //	                                                      during a run                                       (service:manage)
+//	POST /admin/platform/installations/{id}/kubernetes-version  offer the BOM's Kubernetes version to tenants
+//	                                                      once its node image is published (platformtenants.go) (service:manage)
 //
 // The installation routes answer 404 platform_disabled unless PROXCLOUD_PLATFORM_ENABLED is on (SetPlatform); a run
 // also needs the runner (SetPlatformRuns, with PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED), else 409 platform_disabled. No
@@ -78,6 +80,7 @@ func (h *Handler) routePlatform(r chi.Router) {
 	r.Get("/platform/installations/{id}/seed-kubeconfig", h.platformSeedKubeconfig)
 	r.Get("/platform/installations/{id}/platform-kubeconfig", h.platformClusterKubeconfig)
 	r.Post("/platform/installations/{id}/seed-credential/rotate", h.platformSeedRotate)
+	r.Post("/platform/installations/{id}/kubernetes-version", h.platformOfferVersion)
 }
 
 func (h *Handler) platformBOM(w http.ResponseWriter, r *http.Request) {
@@ -183,6 +186,8 @@ type installationView struct {
 	} `json:"credentials"`
 	// Live is set with ?live=1 only: read from the seed at request time, never stored.
 	Live *platformlife.LiveState `json:"live,omitempty"`
+	// SchedulerNote is platformlife.SchedulerOffNote while the job scheduler is off, else absent.
+	SchedulerNote string `json:"schedulerNote,omitempty"`
 }
 
 type tokenView struct {
@@ -191,6 +196,9 @@ type tokenView struct {
 
 func (h *Handler) platformView(r *http.Request, in *platformlife.Installation) (*installationView, error) {
 	v := &installationView{Installation: in}
+	if !h.jobsScheduler {
+		v.SchedulerNote = platformlife.SchedulerOffNote
+	}
 	sec, err := h.platform.Secrets(r.Context(), in.ID)
 	if err != nil || sec == nil {
 		return v, err
@@ -513,7 +521,7 @@ func (h *Handler) PlatformPreflight(ctx context.Context, in *platformlife.Instal
 	}
 	pf := platformlife.Preflight{Installation: in, Site: platformlife.SiteOf(es), Allow: es.PVESandboxEndpoints(),
 		Portal: portal, ProviderDisabled: es.IsDisabled(),
-		TemplateUpdatesVM: h.templateUpdates != nil && h.templateUpdates.VMEnabled}
+		TemplateUpdatesVM: h.templateUpdates != nil && h.templateUpdates.VMEnabled, SchedulerOff: !h.jobsScheduler}
 	pf.MintStores, pf.MintZones = platformlife.MintScopeOf(es)
 	if pf.CAPI, err = platformlife.TokenClient(es, sec.CAPI); err != nil {
 		return nil, err
