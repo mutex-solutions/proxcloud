@@ -27,6 +27,11 @@ type: application
 # engineVersion→image maps live in templates/_helpers.tpl and are ops-updatable
 # per chart release (bump images -> bump version -> re-pin).
 #
+# 0.5.2 sets enablePDB: false on a CloudNativePG Cluster of one instance
+# (postgresql, and the backend of ferretdb): its budget blocks every drain of
+# the node. More instances are unchanged. Source metadata bump, not publication
+# or provider re-pinning: an existing database takes it by a chart bump.
+#
 # 0.5.1 updates PostgreSQL 15–18 to same-major patch targets only. Source
 # metadata bump, not publication or provider re-pinning; see
 # docs/managed-postgresql-version-baseline.md for evidence and release gates.
@@ -52,4 +57,4 @@ type: application
 #     actually stamp (valkey.io/cluster, opensearch.org/*); the valkey ACL users get
 #     explicit permissions; the mysql CR carries a backup image; every object name
 #     derived from a customer identifier maps '_' to '-'.
-version: 0.5.1
+version: 0.5.2

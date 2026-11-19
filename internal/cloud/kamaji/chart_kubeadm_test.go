@@ -1,6 +1,7 @@
 package kamaji
 
 import (
+	"fmt"
 	"os"
 	"reflect"
 	"regexp"
@@ -347,6 +348,59 @@ func TestChartKubeadmReplicas(t *testing.T) {
 	for _, want := range []string{`{name: vip_leaseduration, value: "15"}`, `{name: vip_renewdeadline, value: "10"}`, `{name: vip_retryperiod, value: "2"}`} {
 		if !strings.Contains(vip, want) {
 			t.Errorf("kube-vip lacks %s:\n%s", want, vip)
+		}
+	}
+}
+
+// nodeGroups[].kubernetesVersions and deleteFirstOn (chart 0.1.15) reach the MachineDeployment of the node they name
+// and nothing else: the other node of the group, the other groups and the control plane keep the cluster's version
+// and Cluster API's own rollout, and every machine and bootstrap template keeps its name, so the keys alone replace
+// no machine. The field path is that of the MachineDeployment v1beta2 CRD of Cluster API v1.14.4.
+func TestChartNodeGroupVersionAndDeleteFirst(t *testing.T) {
+	render := func(set func(system map[string]any)) map[string]map[string]any {
+		var values map[string]any
+		if err := yaml.Unmarshal([]byte(kubeadmTestValues), &values); err != nil {
+			t.Fatal(err)
+		}
+		set(values["nodeGroups"].([]any)[0].(map[string]any))
+		raw, err := gatewayRenderRawChart(t, "pc-platform", values)
+		if err != nil {
+			t.Fatalf("render: %v\n%s", err, raw)
+		}
+		out := map[string]map[string]any{}
+		for _, d := range gatewayChartDocuments(t, raw) {
+			out[fmt.Sprint(d["kind"], " ", dig(d, "metadata", "name"))] = d
+		}
+		return out
+	}
+	plain := render(func(map[string]any) {})
+	keyed := render(func(system map[string]any) {
+		system["kubernetesVersions"] = map[string]any{"pve2": "1.35.11"}
+		system["deleteFirstOn"] = []any{"pve2"}
+	})
+	if len(plain) != len(keyed) {
+		t.Fatalf("%d objects without the keys, %d with them", len(plain), len(keyed))
+	}
+	for name, d := range keyed {
+		p, ok := plain[name]
+		if !ok {
+			t.Fatalf("%s is rendered only with the keys: a template was renamed", name)
+		}
+		switch {
+		case name == "MachineDeployment pc-platform-system-pve2":
+			if dig(d, "spec", "template", "spec", "version") != "v1.35.11" ||
+				fmt.Sprint(dig(d, "spec", "rollout")) != "map[strategy:map[rollingUpdate:map[maxSurge:0 maxUnavailable:1] type:RollingUpdate]]" {
+				t.Errorf("%s: %v", name, d["spec"])
+			}
+		case d["kind"] == "MachineDeployment":
+			if dig(d, "spec", "template", "spec", "version") != "v1.35.10" || dig(d, "spec", "rollout") != nil {
+				t.Errorf("%s moved with the keys of another node: %v", name, d["spec"])
+			}
+			fallthrough
+		default:
+			if !reflect.DeepEqual(d, p) {
+				t.Errorf("%s changed with the keys", name)
+			}
 		}
 	}
 }

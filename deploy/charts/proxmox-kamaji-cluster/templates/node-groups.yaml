@@ -27,6 +27,14 @@ machine of a group is unhealthy the cause is the site's (image, route to the end
 way, and nothing is replaced. So a group of one gets no MachineHealthCheck. values.yaml states what the guard does
 not do. ArgoCD is told to leave the object out of the Application's health: its own health is "as many healthy as
 expected", which is false while any machine is still starting.
+
+kubernetesVersions (<node>: <version>, from chart 0.1.15) gives the MachineDeployment of that node another Kubernetes
+version than the cluster's, and deleteFirstOn (a list of nodes, from chart 0.1.15) makes the MachineDeployments of
+those nodes replace a machine by deleting it first (maxSurge 0, maxUnavailable 1) where the node has no room for one
+more. Both are for the platform cluster, whose upgrade run moves one MachineDeployment at a time; both are read for the
+MachineDeployment only and are in no machine or bootstrap template, so neither changes a template's name. Without
+them the render is that of 0.1.14: the cluster's version, and Cluster API's own rollout (one more machine first, none
+unavailable).
 */ -}}
 {{- $root := . }}
 {{- $net := .Values.proxmox.network }}
@@ -122,6 +130,14 @@ metadata:
 spec:
   clusterName: {{ $root.Release.Name }}
   replicas: {{ $replicas }}
+  {{- if has $node ($ng.deleteFirstOn | default list) }}
+  rollout:
+    strategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxSurge: 0
+        maxUnavailable: 1
+  {{- end }}
   selector:
     matchLabels:
       cluster.x-k8s.io/cluster-name: {{ $root.Release.Name }}
@@ -137,7 +153,7 @@ spec:
         {{- end }}
     spec:
       clusterName: {{ $root.Release.Name }}
-      version: {{ printf "v%s" ($root.Values.kubernetesVersion | trimPrefix "v") | quote }}
+      version: {{ printf "v%s" (get ($ng.kubernetesVersions | default dict) $node | default $root.Values.kubernetesVersion | toString | trimPrefix "v") | quote }}
       bootstrap:
         configRef:
           apiGroup: bootstrap.cluster.x-k8s.io
