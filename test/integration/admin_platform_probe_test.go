@@ -23,6 +23,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platformlife"
+	"github.com/mutex-solutions/proxcloud/internal/templateupdates"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 	"github.com/mutex-solutions/proxcloud/pkg/textcrypt"
 )
@@ -83,6 +84,12 @@ func TestPlatformTenantPathProbeRoutes(t *testing.T) {
 	h := admin.NewHandler(admin.NewRepo(db), nil, nil, nil, nil, nil, nil, nil, audit.NewService(audit.NewRepo(db), slog.Default()),
 		externalservice.NewService(externalservice.NewRepo(db), enc), "", "", "")
 	h.SetPlatform(store)
+	// Template updates with no import yet: the receipts say which templates are this portal's.
+	receipts := templateupdates.PGReceipts{DB: db}
+	if err := receipts.Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	h.SetTemplateUpdates(&templateupdates.Service{Receipts: receipts, DB: db})
 	h.SetProxmox(func(es *externalservice.ExternalService) (*pve.Service, error) {
 		c, err := pve.New(es.PVEConfig())
 		return &pve.Service{C: c, ServiceID: es.ID}, err
@@ -125,12 +132,20 @@ func TestPlatformTenantPathProbeRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	call("admin-sub", http.MethodPost, `{"node":"pve9"}`, http.StatusConflict, "invalid_node")
+	// The one published Ubuntu template on pve1 is in the pool, but nothing says this portal imported it: it may be
+	// another party's on a shared cluster, and is not cloned. With the import's receipt it is this provider's.
+	call("admin-sub", http.MethodPost, `{"node":"pve1"}`, http.StatusConflict, "no_os_template")
+	now := time.Now().UTC()
+	if err := receipts.Save(ctx, &templateupdates.Receipt{ID: "import-1", Kind: "vm", VMID: 9200, CreatedAt: now, UpdatedAt: now,
+		Payload: templateupdates.VMPayload{ServiceID: in.ServiceID, Node: "pve1"}}); err != nil {
+		t.Fatal(err)
+	}
 	if len(writes) != 0 {
 		t.Fatalf("a refused start wrote to Proxmox: %v", writes)
 	}
 
 	// A start: 202 with the probe as running; it then ends by itself.
-	if p := call("admin-sub", http.MethodPost, `{"node":"pve1"}`, http.StatusAccepted, ""); p.State != platformlife.ProbeRunning || p.Node != "pve1" || p.Template != 9200 || p.RequestedBy == "" {
+	if p := call("admin-sub", http.MethodPost, `{"node":"pve1"}`, http.StatusAccepted, ""); p.State != platformlife.ProbeRunning || p.Node != "pve1" || p.Image != "ubuntu-2604" || p.Template != 9200 || p.RequestedBy == "" {
 		t.Fatalf("the started probe: %+v", p)
 	}
 	var p platformlife.TenantProbe
