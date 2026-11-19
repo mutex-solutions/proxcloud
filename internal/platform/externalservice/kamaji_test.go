@@ -130,6 +130,10 @@ func TestKamajiClusterProblems(t *testing.T) {
 		{"nodeStartupTimeoutSeconds", float64(30), true},
 		{"nodeStartupTimeoutSeconds", float64(-5), true},
 		{"nodeStartupTimeoutSeconds", float64(MinNodeStartupTimeoutSeconds - 1), true},
+		// The floor as literals: lowering the constant must fail here.
+		{"nodeStartupTimeoutSeconds", float64(600), true},
+		{"nodeStartupTimeoutSeconds", float64(899), true},
+		{"nodeStartupTimeoutSeconds", float64(900), false},
 		{"nodeStartupTimeoutSeconds", float64(MaxNodeStartupTimeoutSeconds + 1), true},
 		{"nodeStartupTimeoutSeconds", float64(1800.5), true},
 		{"nodeStartupTimeoutSeconds", "15m", true},
