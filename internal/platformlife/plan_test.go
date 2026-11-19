@@ -1,12 +1,17 @@
 package platformlife
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 )
 
 // installed is an installation named lab whose last apply was of ref (nil: never applied).
@@ -284,5 +289,63 @@ func TestAReleaseCandidateIsATarget(t *testing.T) {
 	_, up, err := move(installed(&ref), cur.SHA256)
 	if err != nil || !up.Allowed || len(up.Blocking) != 0 || up.Confirm != "upgrade lab to 0.9.0-rc.1" {
 		t.Fatalf("%+v %v", up, err)
+	}
+}
+
+// A platform installed before the rule existed (0.8.x): the plan of an apply and the plan of the upgrade both list the
+// cluster firewall rule the run writes in stage 3 (production upgrade of 2026-11-19: the run wrote it, the plan did
+// not name it). With the rule in place, or unreadable, the plan is the BOMs' alone; nothing is listed before an install.
+func TestPlanListsTheAPIRuleARunWrites(t *testing.T) {
+	old := nextRelease(t, nil)
+	ref := refOf(old)
+	in := validInstallation(t)
+	in.ID, in.Status.BOM = "pi-1", &ref
+	f := &preflightPVE{}
+	srv := httptest.NewServer(http.HandlerFunc(f.serve))
+	t.Cleanup(srv.Close)
+	portal := &pve.Service{C: f.client(t, srv.URL, pve.DefaultPlatformTokenID)}
+	ctx := context.Background()
+	plan := func(in *Installation) Plan {
+		t.Helper()
+		p, err := PlanFor(in, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.ListAPIAccess(ctx, in, portal)
+		return p
+	}
+
+	p := plan(in)
+	if len(p.Changes) != 1 || p.Changes[0].Name != "pve-api-rule" || p.Changes[0].Class != ClassSite || p.Changes[0].Stage != StageSeedVM ||
+		!strings.Contains(p.Changes[0].To, pve.APIAccessComment(in.ID)) || len(p.Blocking) != 0 {
+		t.Fatalf("the apply's plan: %+v", p.Changes)
+	}
+	if p.Upgrade == nil || !p.Upgrade.Allowed || len(p.Upgrade.Changes) != 2 || p.Upgrade.Changes[1] != p.Changes[0] {
+		t.Fatalf("the upgrade's plan: %+v", p.Upgrade)
+	}
+	p.Upgrade.To.SHA256 = "" // of this build's BOM file, which is not the pair's
+	raw, err := json.MarshalIndent(p.Upgrade, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	golden(t, filepath.Join("upgrade", "0.8.1-to-0.9.0-release-only-no-api-rule", "plan.golden.json"), append(raw, '\n'))
+
+	fresh := *in
+	fresh.Status.BOM = nil
+	if p := plan(&fresh); slices.ContainsFunc(p.Changes, func(c PlanChange) bool { return c.Name == "pve-api-rule" }) {
+		t.Errorf("before the install: %+v", p.Changes)
+	}
+	f.extra = map[string]string{"/cluster/firewall/rules": "!"}
+	if p := plan(in); len(p.Changes) != 0 || len(p.Upgrade.Changes) != 1 {
+		t.Errorf("rules that cannot be read: %+v", p)
+	}
+	src, dest, port := in.APIAccess()
+	b, _ := json.Marshal([]pve.FirewallRule{pve.APIAccessRule(in.ID, src, dest, port)})
+	f.extra["/cluster/firewall/rules"] = string(b)
+	if p := plan(in); len(p.Changes) != 0 || len(p.Upgrade.Changes) != 1 {
+		t.Errorf("the rule in place: %+v", p)
+	}
+	if len(f.writes) != 0 {
+		t.Errorf("the plan wrote: %v", f.writes)
 	}
 }

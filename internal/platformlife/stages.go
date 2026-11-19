@@ -863,7 +863,7 @@ func (x *acq) removeSecrets(ctx context.Context) error {
 	return x.save(ctx, func(run *Run, in *Installation, sec *Secrets) {
 		*sec = Secrets{ID: sec.ID}
 		in.Status = Status{Phase: in.Status.Phase, Providers: in.Status.Providers} // the rows stay, DISABLED
-		run.Stages[x.si].Items = []StageItem{{ID: "secrets", State: "deleted", Message: "The stored secrets of both tokens, the seed's credential and tokens, and the recorded status. " +
+		run.Stages[x.si].Items = []StageItem{{ID: "secrets", State: "deleted", Message: "The stored secrets of both tokens, the seed's credential and tokens, the recorded status and the last tenant path test. " +
 			"The tokens themselves still exist in Proxmox, and the provider rows stay, disabled."}}
 	})
 }

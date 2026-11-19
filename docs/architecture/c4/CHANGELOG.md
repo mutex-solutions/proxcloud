@@ -13,6 +13,20 @@ and rules: [README.md](README.md#maintenance-rule).
 
 **Why:** `proxcloud-up.sh upgrade` pulls every image of `compose.yaml`, so the moving tag restarted PostgreSQL and
 Keycloak during a portal upgrade on a production site (upgrade to 0.9.0).
+## 2026-11-19: the plan names the API firewall rule, the boot-store row marks leftover volumes, the tenant path test ends with a Remove
+
+**What changed:** no component, container or relation. "Platform installations": `GET …/plan` of an installed
+platform reads the cluster firewall with the portal token and lists the entry `pve-api-rule` (class `site`, stage
+`seed-vm`) in the apply's and the upgrade's changes while Proxmox does not hold the rule (`Plan.ListAPIAccess` in
+`internal/platformlife/apiaccess.go`); the Check row `boot-store` says "VM ids" and asks `/cluster/nextid` for each
+id it names, to mark one that no guest holds as a leftover volume. "Platform runs": the `platformTenantProbe`
+document is deleted when a Remove wipes the recorded status (`Store.Mutate`) and when an install starts
+(`Store.StartRun`). No new Proxmox permission: the portal token already reads the cluster firewall rules, and any
+token may call `/cluster/nextid`.
+
+**Why:** the production upgrade to v0.9.0 wrote a firewall rule its plan had not named (a platform installed by
+0.8.x never had the rule), and lab round 3 of v0.9.0 found the row naming a VM that does not exist (R3-1) and a
+freshly installed platform answering the removed one's tenant path verdict (R3-2).
 
 **Diagrams:** none changed.
 
