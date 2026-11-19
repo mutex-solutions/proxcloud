@@ -6,7 +6,7 @@ the `v0.4.0-rc.1` prerelease (tag 2026-11-11, images and app chart `0.4.0-rc.1`)
 and the first stable release `v0.4.0` (tag 2026-11-12, images and app chart
 `0.4.0`), then the stable `v0.5.0` (tag 2026-11-13), the patches `v0.5.1` and `v0.5.2` and the stable `v0.6.0` (tags 2026-11-14),
 the `v0.7.0-rc.1` prerelease and the stable `v0.7.0` (tags 2026-11-15), the stable `v0.8.0` (tag 2026-11-17) and the patches `v0.8.1` and `v0.8.2` (tags 2026-11-18), and the release candidates
-`v0.9.0-rc.1` and `v0.9.0-rc.2`, prereleases (tags 2026-11-19; [Release candidates](#release-candidates)). The next tag is the stable `v0.9.0`; pushing it runs the app image/chart publication and GitHub Release
+`v0.9.0-rc.1` and `v0.9.0-rc.2`, prereleases, and the stable `v0.9.0` (tags 2026-11-19; [Release candidates](#release-candidates)). Pushing the next tag runs the app image/chart publication and GitHub Release
 creation.
 This source change does none of those operations, and installation from released
 artifacts and later controlled PVE template canaries remain separate steps. Read
@@ -311,9 +311,10 @@ be tagged until the next release commit dropped `-dev`: the commit of the candid
 `0.9.0-dev` again and added `deploy/platform/previous/0.9.0-rc.2.yaml`, so `main` could not
 be tagged until the next release commit dropped `-dev`: the release commit of `v0.9.0` sets
 the release to `0.9.0` (checked on 2026-11-19 on that commit: `--release` prints
-`all pins match`, on the BOM and on the five previous BOMs), and the pull request after
-the `v0.9.0` tag sets it back to a `-dev` release and adds
-`deploy/platform/previous/0.9.0.yaml`. The gate does not
+`all pins match`, on the BOM and on the five previous BOMs). The pull request after that
+tag set the BOM on `main` to `0.10.0-dev` and added
+`deploy/platform/previous/0.9.0.yaml`, so `main` cannot be tagged until the next release
+commit drops `-dev`. The gate does not
 compare the BOM's release with the tag
 (below): a commit whose BOM has no `-dev` passes this part for any tag.
 
@@ -384,7 +385,11 @@ images of `v0.9.0-rc.2` on 2026-11-19, in bridge mode, and removed one
 BOM differs from that of `0.9.0-rc.2` in the `release` line alone. Neither chart of the
 product changed since its tag (the two `git diff` commands above print nothing on the
 release commit). The app chart, the installer pin and `DEFAULT_VERSION` move with it, as
-at every stable release.
+at every stable release. Its tag is on the commit `ed82439a`; the `docker` run of the tag
+succeeded, the `helm` run failed once at `helm push` on a registry error and succeeded on
+a rerun of the failed job, and the GitHub Release is the latest (read on 2026-11-19). The
+pull request after it added `deploy/platform/previous/0.9.0.yaml` and set the BOM on
+`main` to `0.10.0-dev`.
 
 Not verified: anything on the published images of `v0.9.0`, and the move of a platform
 from a candidate's BOM to that of `0.9.0`.
@@ -442,7 +447,7 @@ that no later build carries, so its platform is refused after an upgrade
 been removed yet; when one is, the platforms of that release are refused again,
 so it needs a release note.
 
-The previous BOMs are `0.8.0`, `0.8.1`, `0.8.2`, `0.9.0-rc.1` and `0.9.0-rc.2`. `0.8.0` was added by hand from its tag
+The previous BOMs are `0.8.0`, `0.8.1`, `0.8.2`, `0.9.0-rc.1`, `0.9.0-rc.2` and `0.9.0`. `0.8.0` was added by hand from its tag
 (sha256 `8eb874987d3bbaf55f309295ee241ec320c0cf9e0805b3bd1812ef908b6600c6`, the
 value a platform installed by v0.8.0 records). `0.8.1` is the first one the
 procedure above added (sha256
@@ -484,9 +489,18 @@ and differ from the 0.9.0-rc.1 ones in the release label only.
 `bom_verify.py --release` printed `all pins match` on the five previous BOMs on
 2026-11-19.
 
+`0.9.0` has the pins of the two candidates (sha256
+`ca7140045f0bf3951b66a371b22a683ab54ec063ccf9b73562285f4238aa442d`). It was
+copied from the tag `v0.9.0` (`ed82439a`), after the tag existed:
+`git show v0.9.0:deploy/platform/platform-bom.yaml | sha256sum` gives that
+hash. Its goldens equal the current goldens at the tag, file for file (`cmp`),
+and differ from the 0.9.0-rc.2 ones in the release label only.
+`bom_verify.py --release` printed `all pins match` on the six previous BOMs on
+2026-11-19.
+
 Not verified: an apply on a platform that `v0.8.1` or `v0.8.2`
 installed, an install by `v0.8.1` or `v0.8.2`, and an apply on a platform that
-is on the BOM `0.9.0-rc.1` or `0.9.0-rc.2`, installed by the candidate or moved to it.
+is on the BOM `0.9.0-rc.1`, `0.9.0-rc.2` or `0.9.0`, installed by that build or moved to it.
 One apply with a
 previous BOM was run on a lab (2026-11-18, a platform installed by the released
 `v0.8.0`, on the build `dev-751a190` of `main`): it succeeded and `status.bom`
@@ -554,15 +568,15 @@ What a release must do when it changes a pin, before its tag:
    build of the release commit, `GET …/plan` of such an installation, or
    `PlanFor` in a test.
 
-The pairs of the BOM of the release `v0.9.0` (0.8.0, 0.8.1, 0.8.2, 0.9.0-rc.1 and 0.9.0-rc.2 to
+The pairs of the BOM on `main` today (0.8.0, 0.8.1, 0.8.2, 0.9.0-rc.1, 0.9.0-rc.2 and 0.9.0 to
 it). From the three 0.8.x BOMs, the BOMs
 differ in the release line, in `tenantCharts.kubernetes` and in the four
 components of the product's own charts, `pc-platform` 0.1.13 to 0.1.14 and
 `capi`, `capi-tenant` and `platform` 0.1.2 to 0.1.3. Each of the four lists the
 old version in `upgradeFrom`, and platform chart 0.1.3 differs from 0.1.2 in the provider's
-ClusterRole alone. From 0.9.0-rc.1 and from 0.9.0-rc.2 the BOMs differ in the release line alone.
-`TestUpgradeRollsNoMachine` compares all five pairs and passes. So the
-classifier allows all five pairs, and only `-dev` refused them on `main`. On the release
+ClusterRole alone. From 0.9.0-rc.1, 0.9.0-rc.2 and 0.9.0 the BOMs differ in the release line alone.
+`TestUpgradeRollsNoMachine` compares all six pairs and passes. So the
+classifier allows all six pairs, and only `-dev` refuses them on `main`. On the release
 commit of `v0.9.0` the plan from each of the three 0.8.x BOMs is allowed with six changes
 and no refusal, and the plan from each candidate's BOM with one change, the release,
 record only. On the
