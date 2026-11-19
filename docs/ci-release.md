@@ -530,7 +530,10 @@ is allowed, with six changes and no refusal. None of these moves was run on a la
 
 Not checked: that a chart of `proxcloud-platform` whose version changes is safe
 to sync over the old one (its templates are RBAC, AppProjects, a MetalLB pool
-and the clusterctl hook; review the diff). Nothing here has run on a lab.
+and the clusterctl hook; review the diff). A chart version that changes its hook alone is recorded
+as moved without the hook running: ArgoCD syncs only an Application whose rendered objects differ,
+and a hook is not among them (seen on the lab on 2026-11-19). Such a version must also change a
+rendered object, or the run must learn to ask for the sync.
 
 ### Upgrade drill builds
 

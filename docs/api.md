@@ -841,7 +841,9 @@ are several, `errors.details.problems`.
   not one this release carries. An apply on an installed platform runs with
   the installed BOM (the run's `bom`), also when this release's own is another.
   `targetBom` makes an apply an upgrade. It is the sha256 of this release's own
-  BOM (`400 invalid_target` for any other value, and on a remove), and `confirm`
+  BOM (`400 invalid_target` for any other value, and on a remove; `409
+  bom_installed` when it is the BOM the platform is on and no upgrade is in
+  progress: there is nothing to upgrade, whatever `confirm` says), and `confirm`
   must then be the plan's `upgrade.confirm`, `upgrade <installation name> to
   <release>` (`400 invalid_confirmation`). A move the plan does not allow is
   `409 upgrade_refused` with `details.reasons`, the plan's `upgrade.blocking`.

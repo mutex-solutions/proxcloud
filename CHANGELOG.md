@@ -252,6 +252,17 @@ with cluster chart 0.1.13 and platform chart 0.1.2, until an operator upgrades i
 
 ### Fixed
 
+- **Managed services, four small findings of the second lab round of 0.9.0-rc.1.** The upgrade plan's `impact`
+  texts and the guide no longer say that ArgoCD syncs every chart that moves and runs the clusterctl hook again:
+  the Application moves to the new chart version, and ArgoCD syncs objects, and runs a hook, only where the new
+  chart renders something differently (on the lab one Application of four was synced and no hook ran). A stage
+  that applies waves shows `step 3 of 4, wave 2` where it showed `wave 3 of 4`: the wave is now the BOM's number,
+  the one the plan and the guide name. An apply whose `targetBom` is the BOM the platform is already on answers
+  `409 bom_installed` in place of `400 invalid_confirmation` with a text about `confirm`. The join log of a
+  worker that did not join no longer ends with SSH host key art: the filter looked for it at the start of a
+  line, and every line of a real log begins with a time stamp, so it never matched (cloud-init's `ci-info`
+  tables are dropped the same way). Not verified on a lab.
+
 - **The two consoles' images run on NGINX 1.30.7.** The base `nginx:1.30.6-alpine` carried five fixable HIGH findings
   in the nginx package (CVE-2026-113425, CVE-2026-121810, CVE-2026-123007, CVE-2026-123633, CVE-2026-123634; fixed in
   `1.30.7-r0`), which failed the image scans of `main` and of every pull request that scans a console. `web/Dockerfile`

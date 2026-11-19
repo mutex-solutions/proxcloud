@@ -161,6 +161,8 @@ func platformStoreErr(w http.ResponseWriter, err error) bool {
 		platformErr(w, http.StatusConflict, platformlife.CodeBOMUnsupported, err.Error(), nil)
 	case errors.Is(err, platformlife.ErrBadTarget):
 		platformErr(w, http.StatusBadRequest, "invalid_target", err.Error(), nil)
+	case errors.Is(err, platformlife.ErrSameBOM):
+		platformErr(w, http.StatusConflict, "bom_installed", err.Error(), nil)
 	case errors.As(err, &refused):
 		platformErr(w, http.StatusConflict, platformlife.CodeUpgradeRefused, err.Error(), map[string]any{"reasons": refused.Reasons})
 	default:

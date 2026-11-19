@@ -1935,9 +1935,17 @@ lists every difference. The upgrade is allowed when every difference is one of t
 |---|---|---|
 | `release` | record only | Nothing is synced. The record and the label `proxcloud.io/bom-release` of the platform's objects name the new release |
 | `tenantCharts.kubernetes`, `tenantCharts.database` | record only | Stage 10 writes the chart on the two providers. New tenant clusters and databases get it; an existing one keeps its chart until its own chart upgrade |
-| seed `capi`, platform cluster `capi-tenant` (chart `proxcloud-platform`) | chart | ArgoCD syncs the chart and runs its clusterctl hook, which finds every provider at its version and changes nothing |
-| platform cluster `platform` (chart `proxcloud-platform`) | chart | ArgoCD syncs provider RBAC, tenant AppProjects and the MetalLB pool |
-| seed `pc-platform` (chart `proxmox-kamaji-cluster`) | chart | ArgoCD syncs the platform cluster's Cluster API objects, after the check that no machine is replaced (below) |
+| seed `capi`, platform cluster `capi-tenant` (chart `proxcloud-platform`) | chart | The Application moves to the new chart version. ArgoCD syncs, and runs the clusterctl hook again, only when the new chart renders an object differently; the hook then finds every provider at its version and changes nothing |
+| platform cluster `platform` (chart `proxcloud-platform`) | chart | The Application moves to the new chart version. ArgoCD syncs what the new chart renders differently of provider RBAC, tenant AppProjects and the MetalLB pool |
+| seed `pc-platform` (chart `proxmox-kamaji-cluster`) | chart | The Application moves to the new chart version. ArgoCD syncs the Cluster API objects of the platform cluster that the new chart renders differently, after the check that no machine is replaced (below) |
+
+"Moves" means that the Application's target is the new chart version and ArgoCD has compared the
+cluster with it. ArgoCD starts a sync only for an Application that is out of sync, and a hook is
+not part of the comparison: a chart version that renders the same objects as the one before is
+recorded as moved with no sync and no hook run. In ArgoCD such an Application is Synced against
+the new version while its last sync and its history still name the old one; that is the upgrade
+having landed, not a failure. Seen on the lab on 2026-11-19 (0.8.0 to 0.9.0-rc.1): of the four
+chart moves only `platform` was synced, and no clusterctl hook ran.
 
 A chart of the product moves only to a version whose BOM entry lists the installed version in
 `upgradeFrom`: the release checked that pair ([ci-release.md](ci-release.md#what-a-release-checks-about-its-bom-pairs)).
@@ -1996,8 +2004,10 @@ The eleven stages of an apply, rendered from the target BOM:
 - **Stages 1 to 5** find the images and the seed as they are: both BOMs name the same images.
 - **Stage 6** applies the seed's ArgoCD HelmChart again (the same chart version, the new release
   label), then the seed's waves. `capi` at its new version passes when ArgoCD reports it Synced and
-  Healthy against the new version with its sync `Succeeded`, and the clusterctl inventory equals
-  the BOM.
+  Healthy against the new version, with the sync it started for it (if the render differs)
+  `Succeeded`, and the clusterctl inventory equals the BOM. The stage shows where it stands as
+  `step 2 of 2, wave 2`: the step counts the waves the stage has, the wave is the BOM's number,
+  the one the plan shows.
 - **Stage 7** makes the rollout check before it lets the cluster chart sync. The names of the
   machine and bootstrap templates carry a hash of their spec, so a chart that renders another
   template makes a new one and Cluster API replaces every machine that used the old one; a changed

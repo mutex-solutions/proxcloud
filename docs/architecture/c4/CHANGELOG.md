@@ -4,6 +4,22 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-19: texts of the upgrade plan, the wave message, `bom_installed`, the join log filter
+
+**What changed:** no component, container or relation. "Platform installations": the plan's impact texts say that
+ArgoCD syncs, and runs a hook, only where the new chart renders an object differently; a stage's progress reads
+`step N of M, wave W` with the BOM's wave number; an apply that names the installed BOM as `targetBom` is refused
+with `409 bom_installed`. The join log readout of a worker (`internal/platform/admin/kamajimachines.go`) drops the
+SSH host key output and cloud-init's tables also behind the time stamp every line of a real log begins with.
+
+**Why:** findings R2-1, R2-2, R2-3 and G2F-4 of the second lab round of 0.9.0-rc.1: three of four chart moves were
+not synced and no hook ran, the plan and the run numbered waves differently, the wrong target was answered as a
+wrong confirmation, and the key art filter never matched.
+
+**Diagrams:** none changed.
+
+**Not verified:** on a lab.
+
 ## 2026-11-19: the platform BOM pins cluster chart 0.1.14 and platform chart 0.1.3
 
 **What changed:** no component, container or relation. `deploy/platform/platform-bom.yaml` names
