@@ -514,7 +514,8 @@ function TenantPathTest({ installation, canManage }: { installation: Installatio
       <p className="text-muted-foreground">
         The checks above read the configuration. This test opens a connection: it makes a small network in the tenant zone and a small VM on the
         chosen node, connects from it to what listens in the load balancer range, and removes both again. It costs one VM clone and two SDN applies,
-        takes a few minutes, and needs a tenant cluster or database to connect to and a published Ubuntu or Debian template on the node.
+        takes a few minutes, and needs a tenant cluster or database to connect to and, published on the node, an Ubuntu or Debian image that Template
+        updates imported for this provider. The VM is cloned as a tenant's server is, never from a template someone else put on the cluster.
       </p>
       <div className="flex flex-wrap items-end gap-3">
         <div className="grid gap-1.5">
@@ -533,7 +534,7 @@ function TenantPathTest({ installation, canManage }: { installation: Installatio
         <div className="grid gap-1.5" role="status">
           <p>
             <span className="mr-2 font-mono text-xs text-muted-foreground">{p.state}</span>
-            {running ? `Running on ${p.node}: ${p.step || "starting"}.` : p.message}
+            {running ? `Running on ${p.node}${p.image ? `, from the image ${p.image}` : ""}: ${p.step || "starting"}.` : p.message}
           </p>
           {!running && p.targets?.length ? (
             <ul aria-label="Connections of the last test" className="list-disc pl-5 text-muted-foreground">
@@ -547,6 +548,9 @@ function TenantPathTest({ installation, canManage }: { installation: Installatio
           ) : null}
           {p.left?.length ? (
             <Alert variant="destructive"><AlertTitle>The cleanup left something behind</AlertTitle><AlertDescription><ul className="list-disc pl-5">{p.left.map((l) => <li key={l}>{l}</li>)}</ul></AlertDescription></Alert>
+          ) : null}
+          {!running && p.notes?.length ? (
+            <ul aria-label="What Proxmox may keep" className="list-disc pl-5 text-muted-foreground">{p.notes.map((n) => <li key={n}>{n}</li>)}</ul>
           ) : null}
         </div>
       ) : null}

@@ -234,12 +234,20 @@ every node). What it does, with the portal token:
    the end of `cidrPool`, with SNAT, as a tenant's network with outbound internet has it (in a
    VLAN zone Proxmox writes no SNAT, as for tenants).
 3. On the node you choose (the control plane's node when you choose none; it must host a platform
-   machine) it clones a published Ubuntu or Debian template of the catalog into the pool
-   `pc-templates` as `pc-probe-<installation id>`, puts it on that network (with a fixed address,
-   or by DHCP where the zone has a DHCP server, as a tenant's server gets its address) and
-   starts it. Without such a template on that node it stops before step 2
-   (`409 no_os_template`): publish one under Template updates. With the scheduler off nothing is
-   published by itself.
+   machine) it clones an Ubuntu or Debian image into the pool `pc-templates` as
+   `pc-probe-<installation id>`, puts it on that network with a fixed address (the one after the
+   gateway, over cloud-init) and starts it. The image is resolved as a tenant's server create
+   resolves one, in the provider's catalog, from the copy on that node, and it must be this
+   portal's own: a template that Template updates imported for this provider, or one the
+   provider's `config.templates` names with its VM id. Ubuntu before Debian, then the newest
+   version. A published template in `pc-templates` that is neither is never cloned: on a Proxmox
+   cluster that several portals share it can be another party's. The clone's disk goes to the
+   store a tenant server's disk goes to on that node (the provider's default storage profile;
+   without one, the template's own store). Without such an image on that node the test stops
+   before step 2 (`409 no_os_template`, which names the published templates it did not take):
+   import and publish one under Template updates. With the scheduler off nothing is published by
+   itself. The answer of the start and the result name the image, its template, the node and the
+   store (`image`, `template`, `node`, `storage`).
 4. Through the guest agent it opens one TCP connection to each target (at most 8) and one to the
    platform cluster's own API address, each with a 5 second limit.
 5. It stops and destroys the VM, deletes the network and applies SDN: after a pass, after a
@@ -250,7 +258,12 @@ every node). What it does, with the portal token:
    cleanup destroys a VM only when it has the test's name, is in `pc-templates`, is no template
    and carries the tag `pc-probe`; a VM with the name and without the tag (a clone cut off before
    it was tagged, or not the test's at all) is listed and left, and the next test does not start
-   until you removed it.
+   until you removed it. In a zone with a DHCP server Proxmox gives the VM's NIC an address of
+   the range by itself, which the test does not use, and may keep that mapping on the node after
+   the VM is gone (a line in `/etc/dnsmasq.d/<zone>/ethers` and in
+   `/var/lib/misc/dnsmasq.<zone>.leases`). ProxCloud can neither read nor remove those files, so
+   the result names them (`notes`) with what to delete; they do no harm while no other network
+   uses that /28.
 
 The result, read with `GET` on the same path:
 
@@ -267,9 +280,20 @@ is refused during a run of the installation (`409 run_active`), while another te
 (`409 probe_running`), before the first install (`409 not_installed`: nothing listens yet), and
 when the provider's default zone is a VLAN zone (`409 vlan_zone`: no node translates there, and a
 test network would need its own VLAN and gateway on your router; test from a tenant's server).
-**Not verified on a lab:** the test's tests use a fake Proxmox API. Its first lab run is the
-reproduction of the production finding (`run-1` lab test "reproduce": expected `failed` from the
-node that holds the address with a `simple` tenant zone, `passed` from another node).
+**Not verified on a lab:** no lab run of the test has ended with a verdict. Its one lab run
+(2026-11-19, a `simple` zone with DHCP) ended `error`: the test then took the first published
+Ubuntu template in slug order, which was a template of 2026-11-06 that this portal had not
+imported, cloned it onto that template's own store, and waited for an address from the zone's
+DHCP that never came (the guest agent answered, the NIC had no IPv4 address, and the zone's
+dnsmasq logged no request; why was not determined, the VM is gone). Since then the test takes
+only an image of this portal's own, clones it to the provider's disk store and gives the VM a
+fixed address, so it no longer depends on a DHCP answer. That is covered by tests against a fake
+Proxmox API and was not run on a lab; the lab test that would show it: with the simple zone as
+the default zone and a tenant cluster running, start the test on a node that also holds a
+template this portal did not import, and expect `image` to name the imported one and the state
+`passed` or `failed`, not `error`. Its first lab verdict is to be the reproduction of the
+production finding (`run-1` lab test "reproduce": expected `failed` from the node that holds the
+address with a `simple` tenant zone, `passed` from another node).
 
 **A new one-node site: let the node route the platform network.** Choose **Routed by the node**
 in step 1 (`spec.network.mode: routed`) and ProxCloud makes the network at the install:

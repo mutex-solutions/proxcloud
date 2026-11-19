@@ -764,16 +764,23 @@ are several, `errors.details.problems`.
   probe in state `running`; `GET` on the same path (`admin:service:read`) answers the installation's last probe
   (`404 no_probe` before the first). The one check that writes to Proxmox, so it is audited like every installation
   write and never part of the preflight: a throwaway network in the provider's default tenant zone (a free /28 from
-  the end of `cidrPool`, with SNAT), a throwaway VM `pc-probe-<id>` cloned from a published Ubuntu or Debian template
-  on `node` (default: the control plane's node; it must host a platform machine) into `pc-templates`, TCP connections
+  the end of `cidrPool`, with SNAT), a throwaway VM `pc-probe-<id>` cloned from an Ubuntu or Debian image
+  on `node` (default: the control plane's node; it must host a platform machine) into `pc-templates`, with a fixed
+  address in every zone. The image is resolved in the provider's catalog as a tenant's server create resolves one, and
+  only one of this portal's own is taken: a template that Template updates imported for this provider, or one that
+  `config.templates` names with its VM id; the clone's disk goes to the store of the provider's default storage
+  profile on that node. TCP connections
   through the guest agent, then both removed, on every path, with an 8 minute limit. A probe still `running` 12 minutes
   after its start was cut off by an API restart: `GET` answers it as `error` with what it may have left, and a new
   start is taken. Refused with `409` and a code
   before anything is created: `not_installed`, `no_tenant_zone`, `vlan_zone` (the default zone is a VLAN zone: no node translates there),
   `invalid_node`, `probe_running`, `run_active`,
-  `no_os_template` (none on that node), `no_target` (from the ProxCloud host nothing answers on port 6443 or 5432 of
-  the first 32 addresses of the load balancer range; when a 6443 answers, 5432 listeners are not targets). The probe: `{id, state, node, template, requestedBy,
-  startedAt, finishedAt, step, vmid, vnet, source, targets[], message, left[]}`. `state` is `running`, `passed`
+  `no_os_template` (no such image on that node; the message names the published templates that are not this portal's), `no_target` (from the ProxCloud host nothing answers on port 6443 or 5432 of
+  the first 32 addresses of the load balancer range; when a 6443 answers, 5432 listeners are not targets). The probe: `{id, state, node, image, template, storage, requestedBy,
+  startedAt, finishedAt, step, vmid, vnet, source, targets[], message, left[], notes[]}`. `image` is the catalog
+  image the VM is cloned from, `template` its template on `node`, `storage` the store the clone's disk goes to
+  (absent: the template's own); the `202` answer carries them already. `notes[]` is what Proxmox may keep by itself
+  and the cleanup cannot remove: the DHCP mapping of the test VM's NIC in a zone with a DHCP server. `state` is `running`, `passed`
   (every target opened or was refused, and the platform's own API address did not answer), `failed` (a target the
   host opens gave no answer from the tenant network, or the platform's API address answered) or `error` (the test
   could not be done: nothing is known). `targets[]` are `{address, port, expect: open|closed, result:

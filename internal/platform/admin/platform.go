@@ -49,6 +49,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/durablejobs"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platformlife"
+	"github.com/mutex-solutions/proxcloud/internal/templateupdates"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
@@ -580,7 +581,16 @@ func (h *Handler) platformTenantProbeStart(w http.ResponseWriter, r *http.Reques
 		httpx.WriteError(w, httpx.BadRequest("Proxmox connection failed: "+err.Error()))
 		return
 	}
-	prober := &platformlife.TenantProber{Portal: portal, Net: es.PVENetworkConfig(), SDNLock: h.platformSDNLock, Load: h.platform.Probe, Save: h.platform.SaveProbe}
+	imported, err := h.importedTemplates(ctx, es.ID)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	// The image and the store are a tenant server create's: the provider's catalog, and its default storage profile.
+	prober := &platformlife.TenantProber{Portal: portal, Net: es.PVENetworkConfig(), SDNLock: h.platformSDNLock, Load: h.platform.Probe, Save: h.platform.SaveProbe,
+		Catalog: es.PVEImageCatalog, Imported: imported,
+		DiskStore: func(node string) string {
+			return es.PVEStorageProfiles()[es.PVEDefaultStorageProfile()].StorageFor(node)
+		}}
 	p, err := prober.Start(ctx, in, req.Node, adminActor(r))
 	var refused *platformlife.ProbeRefused
 	if errors.As(err, &refused) {
@@ -595,6 +605,25 @@ func (h *Handler) platformTenantProbeStart(w http.ResponseWriter, r *http.Reques
 	started.Targets = slices.Clone(p.Targets) // Run writes each target's result
 	go prober.Run(context.WithoutCancel(ctx), p)
 	httpx.Raw(w, http.StatusAccepted, httpx.Response[platformlife.TenantProbe]{Data: &started})
+}
+
+// importedTemplates answers whether a template is one that Template updates imported for this provider: its import
+// receipt names the provider, the node and the VM id, and the template was not deleted since. nil without Template
+// updates. The tenant path test clones only such a template, or one the provider's config pins.
+// ponytail: reads the newest 500 receipts of all providers; a query by provider when a site has more imports than that.
+func (h *Handler) importedTemplates(ctx context.Context, serviceID string) (func(node string, vmid int) bool, error) {
+	if h.templateUpdates == nil {
+		return nil, nil
+	}
+	recs, err := h.templateUpdates.Receipts.Recent(ctx, 500)
+	if err != nil {
+		return nil, err
+	}
+	return func(node string, vmid int) bool {
+		return slices.ContainsFunc(recs, func(r templateupdates.Receipt) bool {
+			return r.VMID == vmid && r.VMID != 0 && r.Payload.Node == node && r.Payload.ServiceID == serviceID && !r.TemplateGone
+		})
+	}, nil
 }
 
 // PlatformPreflight runs the read-only checks of an installation against its provider; a run's first stage calls it.

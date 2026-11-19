@@ -32,6 +32,7 @@ type probeEnv struct {
 	exec            []string
 	snat, vnetAlias string
 	dhcpRange       bool
+	cloneStore      string // the storage the clone was asked onto
 }
 
 func newProbeEnv(t *testing.T) *probeEnv {
@@ -56,8 +57,11 @@ func newProbeEnv(t *testing.T) *probeEnv {
 	e.x = &TenantProber{Portal: &pve.Service{C: c, ServiceID: "svc-pve"}, Poll: time.Millisecond,
 		Net: externalservice.PVENetwork{DefaultZone: "pcm0", CIDRPool: "10.100.0.0/16", Isolation: pve.IsolationShared,
 			Zones: map[string]pve.ZoneConfig{"pcm0": {Key: "pcm0", Kind: "simple", NoDHCP: true}}},
-		Load: func(context.Context, string) (*TenantProbe, error) { return e.saved, nil },
-		Save: func(_ context.Context, p *TenantProbe) error { c := *p; e.saved = &c; return nil },
+		// Template 9200 is one this portal imported; a tenant server's disk goes to the store "tank".
+		Imported:  func(node string, vmid int) bool { return node == "pve1" && vmid == 9200 },
+		DiskStore: func(string) string { return "tank" },
+		Load:      func(context.Context, string) (*TenantProbe, error) { return e.saved, nil },
+		Save:      func(_ context.Context, p *TenantProbe) error { c := *p; e.saved = &c; return nil },
 		Dial: func(_ context.Context, address string) error {
 			if slices.Contains(e.listen, address) {
 				return nil
@@ -106,9 +110,13 @@ func TestTenantProbePasses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.State != ProbePassed || p.Node != "pve1" || p.Template != 9200 || p.VMID != 120 || p.FinishedAt == nil || len(p.Left) != 0 ||
+	if p.State != ProbePassed || p.Node != "pve1" || p.Template != 9200 || p.VMID != 120 || p.FinishedAt == nil || len(p.Left) != 0 || len(p.Notes) != 0 ||
 		!strings.Contains(p.Message, "The path is open") || !strings.Contains(p.Message, "10.200.200.200:6443") {
 		t.Fatalf("probe %+v", p)
+	}
+	// The result names the image, its template and the node, and the clone went to the provider's disk store.
+	if p.Image != "ubuntu-2604" || p.Storage != "tank" || e.cloneStore != "tank" || !strings.Contains(p.Message, "a clone of the image ubuntu-2604 (template 9200) on pve1") {
+		t.Errorf("image %q, storage %q, cloned onto %q: %s", p.Image, p.Storage, e.cloneStore, p.Message)
 	}
 	want := []ProbeTarget{{"10.200.200.200", 6443, "open", "open"}, {"10.200.200.20", 6443, "closed", "none"}}
 	if !slices.Equal(p.Targets, want) {
@@ -127,11 +135,12 @@ func TestTenantProbePasses(t *testing.T) {
 	e.nothingLeft("pass")
 }
 
-// In a zone with a DHCP server the test network gets a range and the VM asks for its address, as a tenant's does.
+// In a zone with a DHCP server the test network gets a range, as a tenant's does, but the VM does not ask for its
+// address: it gets the fixed one over cloud-init, so the test does not depend on a DHCP answer (lab round of
+// 2026-11-19: no address in a DHCP zone, no verdict). What Proxmox may keep of the NIC's DHCP mapping is listed.
 func TestTenantProbeInADHCPZone(t *testing.T) {
 	e := newProbeEnv(t)
 	e.pve.zones = []pve.SDNZone{{Zone: "pcm0", Type: "simple", DHCP: "dnsmasq"}}
-	e.guestAddr = "10.100.255.245"
 	var ipconfig string
 	e.pve.onWrite = func(string) {
 		if vm := e.pve.vms[120]; vm != nil && vm.cfg["ipconfig0"] != nil {
@@ -139,10 +148,64 @@ func TestTenantProbeInADHCPZone(t *testing.T) {
 		}
 	}
 	p, err := e.run("pve1")
-	if err != nil || p.State != ProbePassed || p.Source != "10.100.255.245" || ipconfig != "ip=dhcp" || !e.dhcpRange {
+	if err != nil || p.State != ProbePassed || p.Source != "10.100.255.242" || ipconfig != "ip=10.100.255.242/28,gw=10.100.255.241" || !e.dhcpRange {
 		t.Fatalf("probe %+v, ipconfig0 %q, dhcp range %v: %v", p, ipconfig, e.dhcpRange, err)
 	}
+	if len(p.Notes) != 1 || !strings.Contains(p.Notes[0], "/etc/dnsmasq.d/pcm0/ethers") || !strings.Contains(p.Notes[0], "10.100.255.240/28") || !strings.Contains(p.Notes[0], "on pve1") || len(p.Left) != 0 {
+		t.Errorf("the DHCP mapping Proxmox may keep: notes %q, left %q", p.Notes, p.Left)
+	}
 	e.nothingLeft("dhcp")
+}
+
+// The image is one of this portal's own, chosen as a tenant's server create resolves it; a published template that
+// someone else put in the pool is never cloned (lab round of 2026-11-19, Q1: the first Ubuntu slug won, a template of
+// another party on a shared cluster).
+func TestTenantProbeImage(t *testing.T) {
+	foreign := pve.ClusterResource{Type: "qemu", Node: "pve1", VMID: 9150, Name: "pc-ubuntu-2404", Template: 1, Pool: pve.TemplatePool,
+		Tags: "pc-img-ubuntu-2404;pc-public;pc-v-202611061924;proxcloud"}
+	e := newProbeEnv(t)
+	e.pve.templates = append([]pve.ClusterResource{foreign}, e.pve.templates...)
+	started, err := e.x.Start(context.Background(), e.in, "pve1", "ops")
+	if err != nil || started.Image != "ubuntu-2604" || started.Template != 9200 || started.Node != "pve1" || !strings.Contains(started.Message, "image ubuntu-2604 (template 9200)") {
+		t.Fatalf("the started probe does not name this portal's image: %+v %v", started, err)
+	}
+	e.saved = nil
+	if p, err := e.run("pve1"); err != nil || p.State != ProbePassed || e.pve.writeCount("POST /nodes/pve1/qemu/9150/clone") != 0 || e.pve.writeCount("POST /nodes/pve1/qemu/9200/clone") != 1 {
+		t.Errorf("probe %+v, writes %v", p, e.pve.writes)
+	}
+	// Only the other party's template is there: refused with its name, before any write.
+	e = newProbeEnv(t)
+	e.pve.templates = []pve.ClusterResource{foreign}
+	var refused *ProbeRefused
+	if _, err := e.run("pve1"); !errors.As(err, &refused) || refused.Code != "no_os_template" || !strings.Contains(refused.Message, "ubuntu-2404 (VM 9150)") ||
+		!strings.Contains(refused.Message, "Template updates") || e.pve.writeCount("") != 0 {
+		t.Errorf("only a template that is not this portal's: %v, writes %v", err, e.pve.writes)
+	}
+	// A template the provider's config pins by VM id is the operator's choice, and counts.
+	e = newProbeEnv(t)
+	e.pve.templates, e.x.Imported = []pve.ClusterResource{foreign}, nil
+	e.x.Catalog = (&externalservice.ExternalService{Config: map[string]any{"templates": map[string]any{"ubuntu-2404": map[string]any{"vmid": float64(9150), "node": "pve1"}}}}).PVEImageCatalog
+	if p, err := e.x.Start(context.Background(), e.in, "pve1", "ops"); err != nil || p.Template != 9150 || p.Image != "ubuntu-2404" {
+		t.Errorf("a pinned template: %+v %v", p, err)
+	}
+
+	// The order among this portal's own: Ubuntu before Debian, then the newest version; a copy on another node is none.
+	tpl := func(slug string, copies map[string]int) externalservice.PVETemplate {
+		return externalservice.PVETemplate{Slug: slug, OSDistro: strings.Split(slug, "-")[0], Copies: copies}
+	}
+	rows := []pve.ClusterResource{{Node: "pve1", VMID: 1, Tags: "pc-v-202611010000"}, {Node: "pve1", VMID: 2, Tags: "pc-v-202611160000"}, {Node: "pve1", VMID: 3, Tags: "pc-v-202612010000"}}
+	catalog := []externalservice.PVETemplate{tpl("debian-13", map[string]int{"pve1": 3}), tpl("ubuntu-2404", map[string]int{"pve1": 1}), tpl("ubuntu-2604", map[string]int{"pve1": 2, "pve2": 9}),
+		tpl("rocky-9", map[string]int{"pve1": 4})}
+	all := func(string, int) bool { return true }
+	if slug, id, _ := probeImage(catalog, rows, "pve1", all); slug != "ubuntu-2604" || id != 2 {
+		t.Errorf("newest Ubuntu: %s %d", slug, id)
+	}
+	if slug, id, _ := probeImage(catalog, rows, "pve1", func(_ string, id int) bool { return id == 3 }); slug != "debian-13" || id != 3 {
+		t.Errorf("Debian when no Ubuntu is this portal's: %s %d", slug, id)
+	}
+	if slug, id, others := probeImage(catalog, rows, "pve2", nil); slug != "" || id != 0 || !slices.Equal(others, []string{"ubuntu-2604 (VM 9)"}) {
+		t.Errorf("no receipt at all: %s %d %v", slug, id, others)
+	}
 }
 
 // The closed path (production, 2026-11-18): the ProxCloud host opens the address, the tenant network does not.
@@ -341,7 +404,7 @@ func TestTenantProbeCleansUpAfterAFailure(t *testing.T) {
 	}{
 		"the clone fails": {func(e *probeEnv) {
 			e.pve.failOnce["POST /nodes/pve1/qemu/9200/clone"] = `{"errors":{"storage":"no space left"}}`
-		}, "clone of template 9200 on pve1"},
+		}, "clone of the image ubuntu-2604 (template 9200) on pve1"},
 		"the config is refused": {func(e *probeEnv) {
 			e.pve.failOnce["POST /nodes/pve1/qemu/120/config"] = `{"errors":{"net0":"permission denied"}}`
 		}, "configuration of VM 120"},
@@ -411,6 +474,7 @@ func (f *fakePVE) probeRoutes(w http.ResponseWriter, r *http.Request, path strin
 		rows = slices.DeleteFunc(rows, func(r pve.ClusterResource) bool { return r.Template != 1 && f.vms[r.VMID] == nil })
 		data(rows)
 	case path == "/nodes/pve1/qemu/9200/clone":
+		e.cloneStore = r.Form.Get("storage")
 		id, _ := strconv.Atoi(r.Form.Get("newid"))
 		f.vms[id] = &fakeVM{cfg: map[string]any{"name": r.Form.Get("name"), "scsi0": fmt.Sprintf("local-lvm:vm-%d-disk-0,size=6G", id)}}
 		data(f.upid("qmclone", 9200))

@@ -6,7 +6,9 @@ package platformlife
 //  1. From the ProxCloud host, find what listens in the load balancer range (a tenant cluster's API on 6443, a managed
 //     database on 5432). Nothing listening, no probe: there is no target, and nothing is created.
 //  2. Make a throwaway network in the provider's default tenant zone, with SNAT, as a tenant's network with outbound
-//     internet is; clone a throwaway VM from a published OS template on the chosen node and put it there.
+//     internet is; clone a throwaway VM on the chosen node and put it there. The image is one of this portal's own, as
+//     a tenant's server create resolves it (probeImage), cloned to the store a tenant's server disk goes to, and the
+//     VM gets a fixed address over cloud-init, in every zone.
 //  3. Through the guest agent, open one TCP connection from that VM to each listener, and one to the platform's own
 //     API address, which tenants must NOT reach (the isolation rules).
 //  4. Destroy the VM and the network, on every path, and at the start of the next probe whatever a crash left.
@@ -55,7 +57,9 @@ type TenantProbe struct {
 	ID          string        `json:"id"`
 	State       string        `json:"state"`
 	Node        string        `json:"node"`
-	Template    int           `json:"template,omitempty"` // the OS template the VM is cloned from
+	Image       string        `json:"image,omitempty"`    // the catalog image the VM is cloned from (its slug)
+	Template    int           `json:"template,omitempty"` // that image's template on Node
+	Storage     string        `json:"storage,omitempty"`  // the store the clone's disk goes to; absent: the template's own
 	RequestedBy string        `json:"requestedBy,omitempty"`
 	StartedAt   time.Time     `json:"startedAt"`
 	FinishedAt  *time.Time    `json:"finishedAt,omitempty"`
@@ -67,6 +71,9 @@ type TenantProbe struct {
 	Message     string        `json:"message"`
 	// Left is what the cleanup could not remove, with what to do by hand. Empty when nothing is left.
 	Left []string `json:"left,omitempty"`
+	// Notes is what Proxmox may keep by itself, which the cleanup can neither see nor remove: the DHCP mapping of the
+	// test VM's NIC in a zone with a DHCP server.
+	Notes []string `json:"notes,omitempty"`
 }
 
 // CutOff reports a probe recorded as running for longer than a probe can run: its process died (an API restart), and
@@ -126,6 +133,14 @@ type TenantProber struct {
 	// Dial opens one TCP connection from the ProxCloud host; a net.Dialer with a 2 second timeout when nil.
 	Dial func(ctx context.Context, address string) error
 	Poll time.Duration // between two looks at the guest agent; 3 seconds when zero
+	// Catalog is the provider's image catalog over what the cluster has (ExternalService.PVEImageCatalog): the list a
+	// tenant's server create resolves its image in. The discovered templates alone when nil.
+	Catalog func(found []pve.DiscoveredTemplate) []externalservice.PVETemplate
+	// Imported reports a template that Template updates imported for this provider (it has the receipt). nil: none.
+	Imported func(node string, vmid int) bool
+	// DiskStore is the store a tenant server's disk goes to on a node: the provider's default storage profile there.
+	// "" or nil: the template's own store, as a server create without a profile.
+	DiskStore func(node string) string
 	// Deadline is the test's limit, from the first write to the verdict; probeDeadline when zero (tests shorten it).
 	Deadline time.Duration
 }
@@ -146,6 +161,9 @@ func (x *TenantProber) defaults() {
 	if x.Deadline <= 0 {
 		x.Deadline = probeDeadline
 	}
+	if x.Catalog == nil {
+		x.Catalog = (&externalservice.ExternalService{}).PVEImageCatalog
+	}
 }
 
 // PlatformNodes are the nodes the settings place the control plane and the node groups on, sorted, each once.
@@ -160,17 +178,42 @@ func (in *Installation) PlatformNodes() []string {
 	return slices.DeleteFunc(slices.Compact(slices.Sorted(slices.Values(out))), func(s string) bool { return s == "" })
 }
 
-// probeTemplate is a published Ubuntu or Debian template with a copy on node (0 when the catalog has none there):
-// the probe needs bash, timeout and the guest agent, which those images carry.
-func probeTemplate(rows []pve.ClusterResource, node string) int {
-	for _, prefix := range []string{"ubuntu", "debian"} {
-		for _, t := range pve.DiscoverTemplates(rows) {
-			if c, ok := t.Copies[node]; ok && strings.HasPrefix(t.Slug, prefix) {
-				return c.VMID
-			}
+// probeImage is the image the test VM is cloned from on node, and its template there ("" and 0 when there is none):
+// an Ubuntu or Debian image of the provider's catalog, with a copy on node, that is this portal's own. Own is what
+// Template updates imported for this provider, or what the provider's config.templates pins by VM id (an entry
+// without per-node copies). A published template in the pool that is neither may be another party's on a shared
+// Proxmox cluster, and is never cloned: others lists those, for the refusal. The probe needs bash, timeout and the
+// guest agent, which those images carry. Ubuntu before Debian, then the newest version, as the catalog ranks copies.
+func probeImage(catalog []externalservice.PVETemplate, rows []pve.ClusterResource, node string, imported func(string, int) bool) (slug string, vmid int, others []string) {
+	version := map[int]string{}
+	for _, r := range rows {
+		if r.Node == node {
+			version[r.VMID] = pve.TagValue(r.Tags, pve.TagTemplateVersion)
 		}
 	}
-	return 0
+	rank := func(t externalservice.PVETemplate) int {
+		return slices.IndexFunc([]string{"ubuntu", "debian"}, func(d string) bool {
+			return strings.EqualFold(t.OSDistro, d) || strings.HasPrefix(t.Slug, d)
+		})
+	}
+	var best *externalservice.PVETemplate
+	for i, t := range catalog {
+		id := t.OnNode(node)
+		if id == 0 || rank(t) < 0 {
+			continue
+		}
+		if pinned := len(t.Copies) == 0; !pinned && (imported == nil || !imported(node, id)) {
+			others = append(others, fmt.Sprintf("%s (VM %d)", t.Slug, id))
+			continue
+		}
+		if best == nil || rank(t) < rank(*best) || (rank(t) == rank(*best) && version[id] > version[best.OnNode(node)]) {
+			best = &catalog[i]
+		}
+	}
+	if best == nil {
+		return "", 0, others
+	}
+	return best.Slug, best.OnNode(node), nil
 }
 
 // Start checks that a probe can run and has a target, records it as running and returns; Run does the work. Every
@@ -214,9 +257,17 @@ func (x *TenantProber) Start(ctx context.Context, in *Installation, node, actor 
 	if err != nil {
 		return nil, err
 	}
-	tmpl := probeTemplate(rows, node)
+	image, tmpl, others := probeImage(x.Catalog(pve.DiscoverTemplates(rows)), rows, node, x.Imported)
 	if tmpl == 0 {
-		return nil, refuse("no_os_template", "No published Ubuntu or Debian OS template is on %s, so there is nothing to clone the test VM from. Publish one on that node under Template updates (with the scheduler off nothing is published by itself), then test again.", node)
+		msg := fmt.Sprintf("No Ubuntu or Debian image of this portal is published on %s, so there is nothing to clone the test VM from. The test clones as a tenant's server create does, and only from an image that Template updates imported for this provider or that the provider's config.templates names with its VM id.", node)
+		if len(others) > 0 {
+			msg += " Published on " + node + " but not this portal's, so not used: " + strings.Join(others, ", ") + "."
+		}
+		return nil, refuse("no_os_template", "%s Import and publish one on that node under Template updates (with the scheduler off nothing is published by itself), then test again.", msg)
+	}
+	var store string
+	if x.DiskStore != nil {
+		store = x.DiskStore(node)
 	}
 	targets := x.listeners(ctx, in)
 	if !slices.ContainsFunc(targets, func(t ProbeTarget) bool { return t.Expect == "open" }) {
@@ -224,8 +275,8 @@ func (x *TenantProber) Start(ctx context.Context, in *Installation, node, actor 
 		return nil, refuse("no_target", "From the ProxCloud host nothing answers in the load balancer range %s on port 6443 or 5432 (the first %d addresses were tried): no tenant cluster or managed database exists yet, or the host itself has no route to the range. The test needs something that listens: create a database or a cluster, then test again. Nothing was created.",
 			c.MetalLBRange, probeHosts)
 	}
-	p := &TenantProbe{ID: in.ID, State: ProbeRunning, Node: node, Template: tmpl, RequestedBy: actor, StartedAt: time.Now().UTC(), Step: "starting",
-		Targets: targets, Message: "The test is running."}
+	p := &TenantProbe{ID: in.ID, State: ProbeRunning, Node: node, Image: image, Template: tmpl, Storage: store, RequestedBy: actor, StartedAt: time.Now().UTC(), Step: "starting",
+		Targets: targets, Message: fmt.Sprintf("The test is running on %s. Its VM is a clone of the image %s (template %d).", node, image, tmpl)}
 	return p, x.Save(ctx, p)
 }
 
@@ -300,6 +351,7 @@ func (x *TenantProber) Run(ctx context.Context, p *TenantProbe) {
 		}
 	} else {
 		p.State, p.Message = verdict(p)
+		p.Message += fmt.Sprintf(" The test VM was a clone of the image %s (template %d) on %s.", p.Image, p.Template, p.Node)
 	}
 	if len(p.Left) > 0 {
 		p.Message += " The cleanup left something behind: see below."
@@ -427,13 +479,12 @@ func (x *TenantProber) test(ctx context.Context, p *TenantProbe) error {
 	if err != nil || err2 != nil {
 		return fmt.Errorf("the test network %s has no usable range", netw.CIDR)
 	}
-	// Without a DHCP server the VM gets the address after the gateway; with one, what the server gives it.
+	// The VM gets the address after the gateway, over cloud-init, also where the zone has a DHCP server: the test is of
+	// the path, and must not depend on a DHCP answer. On the lab round of 2026-11-19 the VM asked a zone's DHCP, got no
+	// address in the four minutes that were left, and the test ended without a verdict.
 	p.Vnet = netw.Vnet
-	ipconfig := "ip=dhcp"
-	if !dhcp {
-		p.Source = gw.Next().String()
-		ipconfig = fmt.Sprintf("ip=%s/%d,gw=%s", p.Source, prefix.Bits(), netw.Gateway)
-	}
+	p.Source = gw.Next().String()
+	ipconfig := fmt.Sprintf("ip=%s/%d,gw=%s", p.Source, prefix.Bits(), netw.Gateway)
 
 	if err := x.step(ctx, p, "cloning the test VM"); err != nil {
 		return err
@@ -452,8 +503,8 @@ func (x *TenantProber) test(ctx context.Context, p *TenantProbe) error {
 		}
 		return c.WaitTask(ctx, up)
 	}
-	if err := wait(c.CloneVM(ctx, p.Node, p.Template, pve.CloneOpts{NewID: vmid, Name: ProbeVMName(p.ID), Pool: pve.TemplatePool, Full: true})); err != nil {
-		return fmt.Errorf("clone of template %d on %s: %w", p.Template, p.Node, err)
+	if err := wait(c.CloneVM(ctx, p.Node, p.Template, pve.CloneOpts{NewID: vmid, Name: ProbeVMName(p.ID), Pool: pve.TemplatePool, Storage: p.Storage, Full: true})); err != nil {
+		return fmt.Errorf("clone of the image %s (template %d) on %s: %w", p.Image, p.Template, p.Node, err)
 	}
 	cfg, err := c.GetVMConfig(ctx, p.Node, vmid)
 	if err != nil {
@@ -470,6 +521,13 @@ func (x *TenantProber) test(ctx context.Context, p *TenantProbe) error {
 	if err := wait(c.SetVMConfig(ctx, p.Node, vmid, params, "cipassword", "cicustom")); err != nil {
 		return fmt.Errorf("configuration of VM %d: %w", vmid, err)
 	}
+	if dhcp {
+		// Proxmox gives a NIC in a zone with a DHCP server an address of the range by itself and writes it for the
+		// zone's dnsmasq. The lab round found the line still there after the VM was destroyed and the vnet deleted.
+		zone := x.Net.Zones[x.Net.DefaultZone].Key
+		p.Notes = []string{fmt.Sprintf("Proxmox gave the test VM's NIC an address of the zone's DHCP range (the test does not use it) and may keep that mapping on %s after the VM is gone: a line with an address in %s in /etc/dnsmasq.d/%s/ethers and in /var/lib/misc/dnsmasq.%s.leases. "+
+			"ProxCloud cannot read or remove those files. They do no harm while no other network uses %s; to remove them, delete those lines as root on %s.", p.Node, netw.CIDR, zone, zone, netw.CIDR, p.Node)}
+	}
 	if err := wait(c.StartVM(ctx, p.Node, vmid)); err != nil {
 		return fmt.Errorf("start of VM %d: %w", vmid, err)
 	}
@@ -479,15 +537,14 @@ func (x *TenantProber) test(ctx context.Context, p *TenantProbe) error {
 	for {
 		if c.AgentPing(ctx, p.Node, vmid) == nil {
 			if _, out, _, err := c.GuestRun(ctx, p.Node, vmid, 20*time.Second, "ip", "-4", "-o", "addr", "show"); err == nil {
-				if a := addressIn(out, prefix); a != "" && (dhcp || a == p.Source) {
-					p.Source = a
+				if addressIn(out, prefix) == p.Source {
 					break
 				}
 			}
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("the guest agent of VM %d did not answer with an address in %s: %w", vmid, netw.CIDR, ctx.Err())
+			return fmt.Errorf("the guest agent of VM %d did not answer with the address %s: %w", vmid, p.Source, ctx.Err())
 		case <-time.After(x.Poll):
 		}
 	}
