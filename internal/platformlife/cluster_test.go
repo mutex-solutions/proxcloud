@@ -1495,7 +1495,9 @@ func TestAnAPIServerThatStartsIsTriedAgain(t *testing.T) {
 	p.only(stageCluster)
 	p.seed.deny = []denial{{403, rbac}, {403, rbac}}
 	p.once()
-	p.mutate(func(run *Run, _ *Installation, _ *Secrets) { run.Stages[6].Retries = stageRetries })
+	p.mutate(func(run *Run, _ *Installation, _ *Secrets) {
+		run.Stages[slices.Index(stageIDs(RunApply), stageCluster)].Retries = stageRetries
+	})
 	if end, s := p.once(), p.stage(stageCluster); end != "fail:"+CodeSeedAPIUnreachable || s.State != StageFailed || !strings.Contains(s.Message, "Gave up after 40 retries") ||
 		!strings.Contains(s.Message, "RBAC: ") {
 		t.Fatalf("the fortieth: end %s %+v", end, s)

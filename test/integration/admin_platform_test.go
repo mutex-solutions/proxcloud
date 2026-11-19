@@ -771,7 +771,7 @@ func TestPlatformProbeEndsWithThePlatform(t *testing.T) {
 	// run starts a run of kind and ends it; wipe is what the Remove's last stage does to the status.
 	run := func(kind string, wipe bool) {
 		t.Helper()
-		r, err := store.StartRun(ctx, jobs, in.ID, kind, "admin-sub", "", "")
+		r, err := store.StartRun(ctx, jobs, in.ID, kind, "admin-sub", "", "", platformlife.SeedBackup{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -818,7 +818,7 @@ func TestPlatformRunMutate(t *testing.T) {
 	if err := store.Create(ctx, in); err != nil {
 		t.Fatal(err)
 	}
-	run, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "", "")
+	run, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "", "", platformlife.SeedBackup{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -874,13 +874,13 @@ func TestPlatformRunMutate(t *testing.T) {
 		t.Fatalf("stored %+v, raw %v", got.Status.Seed, raw)
 	}
 	// The typed confirmation belongs to a remove and must name the installation.
-	if _, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "remove lab", ""); !errors.Is(err, platformlife.ErrBadConfirm) {
+	if _, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "remove lab", "", platformlife.SeedBackup{}); !errors.Is(err, platformlife.ErrBadConfirm) {
 		t.Fatalf("confirm on an apply: %v", err)
 	}
-	if _, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunRemove, "admin-sub", "remove other", ""); !errors.Is(err, platformlife.ErrBadConfirm) {
+	if _, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunRemove, "admin-sub", "remove other", "", platformlife.SeedBackup{}); !errors.Is(err, platformlife.ErrBadConfirm) {
 		t.Fatalf("a wrong confirmation: %v", err)
 	}
-	if r, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunRemove, "admin-sub", "remove lab", ""); err != nil || !r.Confirmed {
+	if r, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunRemove, "admin-sub", "remove lab", "", platformlife.SeedBackup{}); err != nil || !r.Confirmed {
 		t.Fatalf("confirmed remove: %+v %v", r, err)
 	}
 }
@@ -1071,7 +1071,7 @@ func TestPlatformClusterKubeconfig(t *testing.T) {
 	if err := store.Create(ctx, in); err != nil {
 		t.Fatal(err)
 	}
-	run, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "", "")
+	run, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "", "", platformlife.SeedBackup{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1158,5 +1158,152 @@ func TestPlatformClusterKubeconfig(t *testing.T) {
 	}
 	if w := get("admin-sub"); w.Code < 500 || strings.Contains(w.Body.String(), minted) || strings.Contains(w.Body.String(), `"kubeconfig"`) || len(rows()) != 1 {
 		t.Fatalf("audit insert fails: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// An upgrade that replaces the seed's k3s needs a backup of the seed VM: the plan carries the seed-backup row and
+// blocks with seed_backup_missing while the portal sees none younger than 24 hours, the apply answers the same 409,
+// and both pass with a fresh archive on a store the portal reads, or with the operator's seedBackupTaken, which the
+// run records.
+func TestPlatformUpgradeNeedsASeedBackup(t *testing.T) {
+	ctx := context.Background()
+	db := freshPG(t)
+	enc := textcrypt.New("test-key")
+	jobs := durablejobs.New(db)
+	if err := jobs.Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	store := platformlife.NewStore(db, enc)
+	if err := store.Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	archive := int64(0) // ctime of the one archive of VM 120 on store pbs; 0: none
+	fakePVE := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.URL.Path {
+		case "/api2/json/nodes/pve1/storage":
+			fmt.Fprint(w, `{"data":[{"storage":"local-lvm","content":"images"},{"storage":"pbs","content":"backup"},{"storage":"nas","content":"backup,iso"}]}`)
+		case "/api2/json/nodes/pve1/storage/pbs/content":
+			if archive == 0 {
+				fmt.Fprint(w, `{"data":[]}`)
+				return
+			}
+			fmt.Fprintf(w, `{"data":[{"volid":"pbs:backup/vm/120/2026","content":"backup","vmid":120,"ctime":%d}]}`, archive)
+		case "/api2/json/nodes/pve1/storage/nas/content":
+			w.WriteHeader(http.StatusForbidden)
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(fakePVE.Close)
+	for _, id := range []string{"svc-pve", "svc-pve-2"} { // a provider has one installation
+		mustInsert(t, db, "externalService", pgdoc.M{"_id": id, "name": id, "type": "CLOUD", "status": "PUBLIC",
+			"config": pgdoc.M{"provider": "proxmox", "region": "lab", "apiUrl": fakePVE.URL, "tokenId": "proxcloud@pve!platform"},
+			"secret": pgdoc.M{"tokenSecret": enc.Encrypt(portalToken)}})
+	}
+	mustInsert(t, db, "adminPermission", pgdoc.M{"_id": "admin-sub", "role": "ADMIN"})
+	h := admin.NewHandler(admin.NewRepo(db), nil, nil, nil, nil, nil, nil, nil, audit.NewService(audit.NewRepo(db), slog.Default()),
+		externalservice.NewService(externalservice.NewRepo(db), enc), "", "", "")
+	h.SetPlatform(store)
+	h.SetDurableJobs(jobs, nil, func(*durablejobs.Job) error { return nil })
+	h.SetPlatformRuns(jobs)
+	h.SetProxmox(func(es *externalservice.ExternalService) (*pve.Service, error) {
+		c, err := pve.New(es.PVEConfig())
+		return &pve.Service{C: c, ServiceID: es.ID}, err
+	})
+	router := chi.NewRouter()
+	h.Routes(router)
+	call := func(method, path, body string, want int) map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req = req.WithContext(httpx.WithRC(req.Context(), &httpx.RequestContext{Sub: "admin-sub"}))
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != want {
+			t.Fatalf("%s %s: %d %s, want %d", method, path, w.Code, w.Body.String(), want)
+		}
+		var out map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		return out
+	}
+
+	// This build as a release whose BOM is the newest previous one with a newer k3s: the only kind of pair that
+	// replaces the seed's k3s (no BOM on main names another k3s yet).
+	cur, err := platformlife.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev, err := platformlife.Previous()
+	if err != nil || len(prev) == 0 {
+		t.Fatalf("no previous BOM: %v", err)
+	}
+	old := prev[0]
+	saved := *cur.BOM
+	defer func() { *cur.BOM = saved }()
+	*cur.BOM = *old.BOM
+	cur.Release = "0.99.0"
+	cur.Seed.K3s.Version = "v1.35.11+k3s1"
+	installed := func(service string) string {
+		t.Helper()
+		in := &platformlife.Installation{Name: "lab", ServiceID: service}
+		if err := store.Create(ctx, in); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.C(platformlife.InstallationCollection).SetByID(ctx, in.ID, pgdoc.M{"status": pgdoc.M{"phase": "ready",
+			"bom": pgdoc.M{"release": old.Release, "sha256": old.SHA256}, "seed": pgdoc.M{"vmid": 120, "node": "pve1"}}}, nil); err != nil {
+			t.Fatal(err)
+		}
+		return "/admin/platform/installations/" + in.ID
+	}
+	const sentence = "seed_backup_missing: no backup of seed VM 120 younger than 24 hours is visible to the portal. Take one (vzdump 120), or confirm that you took one the portal cannot see."
+	apply := func(more string) string {
+		return fmt.Sprintf(`{"kind":"apply","targetBom":%q,"confirm":"upgrade lab to 0.99.0"%s}`, cur.SHA256, more)
+	}
+	upgradeOf := func(path string) map[string]any {
+		t.Helper()
+		u, _ := call(http.MethodGet, path+"/plan", "", http.StatusOK)["data"].(map[string]any)["upgrade"].(map[string]any)
+		return u
+	}
+
+	// No archive: the plan blocks and says which store it could not read; the apply is refused with the same sentence.
+	one := installed("svc-pve")
+	u := upgradeOf(one)
+	row, _ := u["seedBackup"].(map[string]any)
+	if u["allowed"] != true || fmt.Sprint(u["blocking"]) != "["+sentence+"]" || row["status"] != "warn" || !strings.Contains(fmt.Sprint(row["message"]), "could not read the backups of nas") {
+		t.Fatalf("the plan without a backup: %v", u)
+	}
+	a := call(http.MethodPost, one+"/runs", apply(""), http.StatusConflict)
+	if errs, _ := a["errors"].(map[string]any); errs["message"] != sentence || fmt.Sprint(errs["details"]) != "map[code:seed_backup_missing]" {
+		t.Fatalf("the apply without a backup: %v", a)
+	}
+	// An archive of two days ago is none.
+	mu.Lock()
+	archive = time.Now().Add(-48 * time.Hour).Unix()
+	mu.Unlock()
+	call(http.MethodPost, one+"/runs", apply(""), http.StatusConflict)
+	// The operator's word starts it, and the run records it.
+	data := call(http.MethodPost, one+"/runs", apply(`,"seedBackupTaken":true`), http.StatusAccepted)["data"].(map[string]any)
+	if run, err := store.Run(ctx, data["runId"].(string)); err != nil || !run.SeedBackupTaken {
+		t.Fatalf("the run of an apply with seedBackupTaken: %+v %v", run, err)
+	}
+	// Started: the plan asks for nothing more.
+	if u := upgradeOf(one); u["inProgress"] != true || u["seedBackup"] != nil || len(u["blocking"].([]any)) != 0 {
+		t.Fatalf("the plan of the started upgrade: %v", u)
+	}
+
+	// A fresh archive on a store the portal reads: the plan is clear and the apply starts without the operator's word.
+	mu.Lock()
+	archive = time.Now().Add(-time.Hour).Unix()
+	mu.Unlock()
+	two := installed("svc-pve-2")
+	u = upgradeOf(two)
+	if row, _ := u["seedBackup"].(map[string]any); len(u["blocking"].([]any)) != 0 || row["status"] != "ok" || !strings.Contains(fmt.Sprint(row["message"]), "on store pbs") {
+		t.Fatalf("the plan with a fresh backup: %v", u)
+	}
+	data = call(http.MethodPost, two+"/runs", apply(""), http.StatusAccepted)["data"].(map[string]any)
+	if run, err := store.Run(ctx, data["runId"].(string)); err != nil || run.SeedBackupTaken || run.FromBOM == nil {
+		t.Fatalf("the run of an apply with a backup the portal saw: %+v %v", run, err)
 	}
 }

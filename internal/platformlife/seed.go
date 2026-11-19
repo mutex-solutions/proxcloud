@@ -174,8 +174,8 @@ func SeedUserData(b *BOM, in RenderInput, boot SeedBoot) (string, error) {
 	file := func(path, content, mode string) any {
 		return map[string]any{"path": path, "content": content, "permissions": mode, "owner": "root:root"}
 	}
-	q := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 	k := b.Seed.K3s
+	fetch := k3sFetch(k, "/usr/local/bin/k3s")
 	raw, err := jsonText(map[string]any{
 		"write_files": []any{
 			file("/var/lib/rancher/k3s/server/tls/server-ca.crt", boot.Secrets.CACert, "0644"),
@@ -187,11 +187,9 @@ func SeedUserData(b *BOM, in RenderInput, boot SeedBoot) (string, error) {
 		// its checksum never starts, and the seed never answers (stage 4 times out, Retry rebuilds it).
 		"runcmd": []any{
 			"set -eu",
-			"curl -fsSL --retry 5 -o /usr/local/bin/k3s " + q(k.Binary.URL),
+			fetch[0], fetch[1], fetch[2],
 			"curl -fsSL --retry 5 -o /run/proxcloud/install.sh " + q(k.InstallScript.URL),
-			"printf '%s  %s\\n' " + q(k.Binary.SHA256) + " /usr/local/bin/k3s " + q(k.InstallScript.SHA256) +
-				" /run/proxcloud/install.sh | sha256sum -c -",
-			"chmod 0755 /usr/local/bin/k3s",
+			"printf '%s  %s\\n' " + q(k.InstallScript.SHA256) + " /run/proxcloud/install.sh | sha256sum -c -",
 			"INSTALL_K3S_SKIP_DOWNLOAD=true INSTALL_K3S_VERSION=" + q(k.Version) + " sh /run/proxcloud/install.sh",
 			"timeout 600 sh -c 'until k3s kubectl get --raw /readyz >/dev/null 2>&1; do sleep 5; done'",
 			"k3s kubectl apply -f /run/proxcloud/bootstrap.yaml",
@@ -203,6 +201,19 @@ func SeedUserData(b *BOM, in RenderInput, boot SeedBoot) (string, error) {
 		return "", err
 	}
 	return "#cloud-config\n" + raw, nil
+}
+
+// q quotes s for sh.
+func q(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// k3sFetch are the sh lines that bring the BOM's k3s binary to path: the download, its sha256 check and the mode. The
+// first boot (SeedUserData) and the upgrade Job (SeedK3sJob) both run exactly these, under set -eu.
+func k3sFetch(k K3s, path string) [3]string {
+	return [3]string{
+		"curl -fsSL --retry 5 -o " + path + " " + q(k.Binary.URL),
+		"printf '%s  %s\\n' " + q(k.Binary.SHA256) + " " + path + " | sha256sum -c -",
+		"chmod 0755 " + path,
+	}
 }
 
 // SeedFiles are the NoCloud files of a generation's CD, through the tenant seed's renderers: meta-data with the

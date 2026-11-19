@@ -388,6 +388,7 @@ var stageDefs = map[string]stageDef{
 	StageSeedVM:           {30 * time.Minute, (*acq).seedVM},
 	StageSeedAPI:          {20 * time.Minute, (*acq).seedAPI},
 	StageSeedIdentity:     {10 * time.Minute, (*acq).seedIdentity},
+	stageSeedK3s:          {20 * time.Minute, (*acq).seedK3s},
 	stageSeedPlatform:     {30 * time.Minute, (*acq).seedPlatform},
 	stageCluster:          {60 * time.Minute, (*acq).cluster},
 	stageWorkloadAccess:   {10 * time.Minute, (*acq).workloadAccess},
@@ -425,7 +426,11 @@ func (x *acq) stage(ctx context.Context) (end, bool) {
 		if code == "" {
 			code = TimeoutCode(s.ID)
 		}
-		return x.finish(ctx, RunFailed, code, "The stage did not finish before its deadline. "+s.Message), true
+		msg := "The stage did not finish before its deadline. " + s.Message
+		if s.ID == stageSeedK3s { // whatever the last look waited for, the operator needs the same next step
+			code, msg = TimeoutCode(s.ID), msg+seedK3sTimeout
+		}
+		return x.finish(ctx, RunFailed, code, msg), true
 	}
 	err := def.run(x, ctx)
 	state := StageDone

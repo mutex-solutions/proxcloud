@@ -3,9 +3,10 @@
   "runcmd": [
     "set -eu",
     "curl -fsSL --retry 5 -o /usr/local/bin/k3s 'https://github.com/k3s-io/k3s/releases/download/v1.35.10%2Bk3s1/k3s'",
-    "curl -fsSL --retry 5 -o /run/proxcloud/install.sh 'https://raw.githubusercontent.com/k3s-io/k3s/v1.35.10%2Bk3s1/install.sh'",
-    "printf '%s  %s\\n' '5cd49f0faca5b2ea4355d4761e7b1445b8aa05cd50e612fd9c370551db49e5e2' /usr/local/bin/k3s '8598e002e61d658fed7b7542fc6d2c66d8da6eae69e088830105d2ee1ffb6d91' /run/proxcloud/install.sh | sha256sum -c -",
+    "printf '%s  %s\\n' '5cd49f0faca5b2ea4355d4761e7b1445b8aa05cd50e612fd9c370551db49e5e2' /usr/local/bin/k3s | sha256sum -c -",
     "chmod 0755 /usr/local/bin/k3s",
+    "curl -fsSL --retry 5 -o /run/proxcloud/install.sh 'https://raw.githubusercontent.com/k3s-io/k3s/v1.35.10%2Bk3s1/install.sh'",
+    "printf '%s  %s\\n' '8598e002e61d658fed7b7542fc6d2c66d8da6eae69e088830105d2ee1ffb6d91' /run/proxcloud/install.sh | sha256sum -c -",
     "INSTALL_K3S_SKIP_DOWNLOAD=true INSTALL_K3S_VERSION='v1.35.10+k3s1' sh /run/proxcloud/install.sh",
     "timeout 600 sh -c 'until k3s kubectl get --raw /readyz >/dev/null 2>&1; do sleep 5; done'",
     "k3s kubectl apply -f /run/proxcloud/bootstrap.yaml",

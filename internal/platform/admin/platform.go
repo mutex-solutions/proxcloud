@@ -130,6 +130,7 @@ func platformErr(w http.ResponseWriter, status int, code, msg string, details ma
 func platformStoreErr(w http.ResponseWriter, err error) bool {
 	var inv *invalidInstallation
 	var refused *platformlife.UpgradeRefused
+	var noBackup *platformlife.SeedBackupMissing
 	switch {
 	case err == nil:
 		return false
@@ -163,6 +164,8 @@ func platformStoreErr(w http.ResponseWriter, err error) bool {
 		platformErr(w, http.StatusBadRequest, "invalid_target", err.Error(), nil)
 	case errors.Is(err, platformlife.ErrSameBOM):
 		platformErr(w, http.StatusConflict, "bom_installed", err.Error(), nil)
+	case errors.As(err, &noBackup):
+		platformErr(w, http.StatusConflict, platformlife.CodeSeedBackupMissing, err.Error(), nil)
 	case errors.As(err, &refused):
 		platformErr(w, http.StatusConflict, platformlife.CodeUpgradeRefused, err.Error(), map[string]any{"reasons": refused.Reasons})
 	default:
@@ -701,6 +704,10 @@ func (h *Handler) platformPlan(w http.ResponseWriter, r *http.Request) {
 		if es, _ := h.esSvc.Get(r.Context(), in.ServiceID); es != nil {
 			if portal, err := h.pveFor(es); err == nil {
 				plan.ListAPIAccess(r.Context(), in, portal)
+				// A move that replaces the seed's k3s needs a backup of the seed VM, or the operator's word for one.
+				plan.NeedSeedBackup(in, func() platformlife.Check {
+					return platformlife.SeedBackupCheck(r.Context(), portal.C, in, time.Now())
+				})
 			}
 		}
 	}
@@ -723,13 +730,33 @@ func (h *Handler) platformRunStart(w http.ResponseWriter, r *http.Request) {
 		// TargetBOM makes an apply an upgrade: the sha256 of this build's BOM, which the platform is moved to (GET …/plan
 		// says whether it is allowed and what to type). Without it an apply stays on the installed BOM.
 		TargetBOM string `json:"targetBom"`
+		// SeedBackupTaken: the operator took a backup of the seed VM that the portal cannot see. It answers the 409
+		// seed_backup_missing of an upgrade that replaces the seed's k3s, and is recorded on the run and in the audit entry.
+		SeedBackupTaken bool `json:"seedBackupTaken"`
 	}
 	if !decodeStrictLimited(w, r, &req, 1<<10) {
 		return
 	}
-	run, err := h.platform.StartRun(r.Context(), h.platformJobs, chi.URLParam(r, "id"), req.Kind, adminActor(r), req.Confirm, req.TargetBOM)
+	backup := platformlife.SeedBackup{Taken: req.SeedBackupTaken}
+	// The read of Proxmox is here, the decision in StartRun: only for an apply that would start such an upgrade (a
+	// Retry names no target), and not when the operator already answers for the backup.
+	if req.Kind == platformlife.RunApply && req.TargetBOM != "" && !backup.Taken && h.esSvc != nil && h.pveFor != nil {
+		if in, err := h.platform.Get(r.Context(), chi.URLParam(r, "id")); err == nil && in.Status.Seed != nil {
+			if plan, err := platformlife.PlanFor(in, req.TargetBOM); err == nil && plan.Upgrade.MovesSeed() && !plan.Upgrade.InProgress {
+				if es, _ := h.esSvc.Get(r.Context(), in.ServiceID); es != nil {
+					if portal, err := h.pveFor(es); err == nil {
+						backup.Seen = platformlife.SeedBackupCheck(r.Context(), portal.C, in, time.Now()).Status == platformlife.CheckOK
+					}
+				}
+			}
+		}
+	}
+	run, err := h.platform.StartRun(r.Context(), h.platformJobs, chi.URLParam(r, "id"), req.Kind, adminActor(r), req.Confirm, req.TargetBOM, backup)
 	if platformStoreErr(w, err) {
 		return
+	}
+	if run.SeedBackupTaken {
+		audit.RecordSnapshots(r.Context(), map[string]any{"seedBackupTaken": false}, map[string]any{"seedBackupTaken": true})
 	}
 	httpx.Raw(w, http.StatusAccepted, httpx.Response[map[string]string]{Data: &map[string]string{"runId": run.ID}})
 }

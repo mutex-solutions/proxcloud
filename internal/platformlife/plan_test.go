@@ -128,6 +128,7 @@ func TestUpgradePlanGolden(t *testing.T) {
 	}{
 		{"0.9.0-release-only", nil, true},
 		{"0.9.0-own-charts", ownCharts, true},
+		{"0.9.0-seed-k3s", newerK3s("v1.35.11+k3s1"), true},
 		{"0.9.0-third-party-chart", func(b *BOM) {
 			ownCharts(b)
 			comp(t, b, ClusterWorkload, "cilium").Chart.Version = "1.18.17"

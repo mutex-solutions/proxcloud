@@ -544,7 +544,7 @@ func TestPortalChanged(t *testing.T) {
 	started := time.Now().Add(-time.Minute)
 	e.mutate(func(run *Run, _ *Installation, _ *Secrets) {
 		run.BOM.SHA256, run.State = strings.Repeat("0", 64), RunWaiting
-		run.Stages[6] = Stage{ID: stageCluster, State: StageWaiting, StartedAt: &started, Code: CodeControlPlaneTimeout, Message: "0 of 4 machines are Running"}
+		run.Stages[7] = Stage{ID: stageCluster, State: StageWaiting, StartedAt: &started, Code: CodeControlPlaneTimeout, Message: "0 of 4 machines are Running"}
 	})
 	if end := e.once(); end != "fail:"+CodePortalChanged {
 		t.Fatalf("end %s", end)
@@ -1011,6 +1011,7 @@ func TestApplyRunsStagesOneToFive(t *testing.T) {
 		}
 		return sec.BootstrapToken
 	})
+	seed.node(cur.Seed.K3s.Version, true)
 	e.mutate(func(_ *Run, in *Installation, _ *Secrets) { in.Spec.Seed.Address = "127.0.0.1" })
 	e.r.SeedPort = seed.url[strings.LastIndex(seed.url, ":")+1:]
 	end := ""
@@ -1028,9 +1029,13 @@ func TestApplyRunsStagesOneToFive(t *testing.T) {
 			t.Fatalf("stage %d %s: %+v", i+1, s.ID, s)
 		}
 	}
-	if run.Stages[5].State != StageWaiting || run.Stages[5].Code != CodeComponentUnhealthy || sec.SeedKubeconfig == nil ||
+	// A run that stays on its BOM replaces no k3s: the stage records what the seed's node reports and is skipped.
+	if k := run.Stages[5]; k.ID != stageSeedK3s || k.State != StageSkipped || in.Status.Seed.K3sVersion != cur.Seed.K3s.Version {
+		t.Fatalf("stage seed-k3s of a plain apply: %+v, recorded %q", k, in.Status.Seed.K3sVersion)
+	}
+	if run.Stages[6].State != StageWaiting || run.Stages[6].Code != CodeComponentUnhealthy || sec.SeedKubeconfig == nil ||
 		sec.BootstrapToken != "" || len(e.pve.iso) != 0 || in.Status.Seed.ReadyAt == nil || e.stage(StageSeedVM).Retries != 1 {
-		t.Fatalf("run %+v, seed %+v", run.Stages[5], in.Status.Seed)
+		t.Fatalf("run %+v, seed %+v", run.Stages[6], in.Status.Seed)
 	}
 	caKey := strings.Split(strings.TrimSpace(fromCD("EC PRIVATE KEY")), "\n")
 	if len(caKey) < 3 || boot == "" || sec.K3sToken == "" {
