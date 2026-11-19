@@ -1975,8 +1975,9 @@ no machine replaced, no pod restarted. On the candidate `v0.9.0-rc.2` the same l
 `409 bom_installed` and the plan that lists and blocks a control plane that does not fit. One
 upgrade has run on a production site (2026-11-19: a single-node site with one tenant cluster and
 one database, 0.8.0 to 0.9.0): one run of 68.6 seconds, nothing rolled, no tenant request failed
-in 149 looks. Nothing else in this section has run on a lab or on a production site. It says what the code and its
-tests do; [the lab tests it still owes](#what-the-upgrade-still-owes-a-lab) are listed at its end.
+in 149 looks. Nothing else in this section has run on a lab or on a production site. It says what
+the code and its tests do; [the lab tests it still owes](#what-the-upgrade-still-owes-a-lab) are
+listed at its end.
 
 A ProxCloud upgrade does not change an installed platform. The platform stays on the BOM that
 installed it, and **Apply this release** keeps running with that BOM. Moving the platform to the BOM
