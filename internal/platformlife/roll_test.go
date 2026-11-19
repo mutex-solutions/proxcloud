@@ -534,6 +534,41 @@ func TestRollRetryAndPause(t *testing.T) {
 	}
 }
 
+// A rebuilt node image of the same version: a machine cloned from the old template is not at the target, whatever its
+// version and its owner's counts say.
+func TestRollTellsAMachineByItsTemplate(t *testing.T) {
+	p, _ := rolling(t)
+	p.once()
+	p.machine("pc-platform-cp", "1.35.11")
+	const path = "/apis/infrastructure.cluster.x-k8s.io/v1alpha2/namespaces/pc-platform/proxmoxmachines/pc-platform-cp-infra"
+	pm := p.seed.obj(path)
+	pm["spec"].(map[string]any)["templateID"] = 9101
+	p.seed.put(path, pm)
+	if end := p.once(); end != "defer:waiting_cluster" || p.rollStep() != 1 {
+		t.Fatalf("a machine of the old template: %s, step %d", end, p.rollStep())
+	}
+	pm["spec"].(map[string]any)["templateID"] = 9201
+	p.seed.put(path, pm)
+	if end := p.once(); end != "defer:waiting_cluster" || p.rollStep() != 2 {
+		t.Fatalf("a machine of the new template: %s, step %d: %+v", end, p.rollStep(), p.stage(stageCluster))
+	}
+}
+
+// A record that says every unit is replaced while the Application does not carry the run's render (a hand edit, or a
+// run to another BOM than the roll's) ends the run with nothing applied and nothing recorded: the version in the
+// record would otherwise be rolled out by the next apply, which runs no gate.
+func TestRollRefusesARecordAheadOfTheCluster(t *testing.T) {
+	p, _ := rolling(t)
+	p.once()
+	before := p.rendered()
+	p.mutate(func(_ *Run, in *Installation, _ *Secrets) { in.Status.Clusters[0].Roll.Step = 5 })
+	end, st := p.once(), p.stage(stageCluster)
+	_, in, _ := p.state.snapshot()
+	if end != "fail:"+CodeUnexpectedRollout || !strings.Contains(st.Message, "step 5 of 4") || p.rendered() != before || in.Status.Clusters[0].KubernetesVersion != "1.35.10" {
+		t.Fatalf("a record ahead of the cluster: %s %+v, rendered %s, record %+v", end, st, p.rendered(), in.Status.Clusters[0])
+	}
+}
+
 // The gate inside a roll: at step 1 the control plane and its template may differ, a template of another unit may
 // not (a machine size edited together with the upgrade); nothing of the step is synced then.
 func TestRollRefusesAChangeOutsideItsStep(t *testing.T) {

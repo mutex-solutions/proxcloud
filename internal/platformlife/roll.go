@@ -535,15 +535,30 @@ func (x *acq) roll(ctx context.Context, seed *kamajik8s.Client, templates []Stag
 		if st.Step < 1 {
 			return permanent(CodeComponentUnhealthy, "The installation's record names step %d of a roll, which no run writes. Nothing was applied: the record was changed by hand.", st.Step)
 		}
-		if st.Step > len(units) {
-			break
-		}
-		u := units[st.Step-1]
 		apps, err := x.apps(ClusterSeed) // rendered at this step
 		if err != nil {
 			return err
 		}
 		a := apps[slices.IndexFunc(apps, func(a appOf) bool { return a.c.Name == ClusterName })]
+		if st.Step > len(units) {
+			// Every unit is recorded as replaced, so nothing is applied any more: the Application must carry this run's
+			// render already. It does not after a hand edit of the record, after settings changed since, and on a run that
+			// moves to another BOM than the one the roll was made for. Recording that BOM's version here would let the
+			// next apply, which runs no gate, replace every machine at once.
+			live, err := seed.GetApplication(ctx, argoNamespace, a.name())
+			if err != nil {
+				return classify(CodeComponentUnhealthy, err)
+			}
+			if st.Step > len(units)+1 || live == nil || !sameJSON(dig(live, "spec", "source"), dig(a.obj, "spec", "source")) {
+				return permanent(CodeUnexpectedRollout, "The installation's record says every unit of the platform cluster is replaced (step %d of %d), and Application %s "+
+					"does not carry what this run renders for release %s. Nothing was applied and every machine runs as before. If this run moves to another release than "+
+					"the one the replacement was made for, finish that upgrade first (an apply without a target), then start this one. If the installation's machine "+
+					"sizes, nodes or node groups were changed since, put them back and Retry. Otherwise the record was changed by hand.",
+					st.Step, len(units), a.name(), x.bom.Release)
+			}
+			break
+		}
+		u := units[st.Step-1]
 		if err := x.rollApply(ctx, seed, a, st, u); err != nil {
 			return err
 		}
@@ -691,8 +706,19 @@ func (x *acq) unitState(ctx context.Context, seed *kamajik8s.Client, units []rol
 		counts += fmt.Sprintf(", %d %s", n, strings.TrimSuffix(f, "Replicas"))
 	}
 	conds := map[string]map[string]any{}
+	cloned := map[string]int{} // ProxmoxMachine -> the template it was cloned from, where CAPMOX names it
 	for _, pm := range infra {
 		conds[str(pm, "metadata", "name")] = cond(pm, vmProvisioned)
+		if id, ok := dig(pm, "spec", "templateID").(float64); ok {
+			cloned[str(pm, "metadata", "name")] = int(id)
+		}
+	}
+	// A rebuilt image of the same version leaves spec.version as it was: only the template tells a new machine from
+	// an old one, and the owner's counts alone can still name the old machines for a moment after it saw the change.
+	templates := x.renderInput().Templates
+	nodeOf := map[string]string{}
+	for _, u := range units {
+		nodeOf[u.Name] = u.Node
 	}
 	unitOf := func(m map[string]any) string {
 		labels, _ := dig(m, "metadata", "labels").(map[string]any)
@@ -710,6 +736,9 @@ func (x *acq) unitState(ctx context.Context, seed *kamajik8s.Client, units []rol
 	for _, m := range machines {
 		name, phase, unit := str(m, "metadata", "name"), str(m, "status", "phase"), unitOf(m)
 		at := strings.TrimPrefix(str(m, "spec", "version"), "v") == target
+		if from, want := cloned[str(m, "spec", "infrastructureRef", "name")], templates[nodeOf[unit]]; from > 0 && want > 0 && from != want {
+			at = false
+		}
 		deleting := dig(m, "metadata", "deletionTimestamp") != nil
 		c := conds[str(m, "spec", "infrastructureRef", "name")]
 		var step string
