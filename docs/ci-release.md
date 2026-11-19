@@ -6,7 +6,7 @@ the `v0.4.0-rc.1` prerelease (tag 2026-11-11, images and app chart `0.4.0-rc.1`)
 and the first stable release `v0.4.0` (tag 2026-11-12, images and app chart
 `0.4.0`), then the stable `v0.5.0` (tag 2026-11-13), the patches `v0.5.1` and `v0.5.2` and the stable `v0.6.0` (tags 2026-11-14),
 the `v0.7.0-rc.1` prerelease and the stable `v0.7.0` (tags 2026-11-15), the stable `v0.8.0` (tag 2026-11-17) and the patches `v0.8.1` and `v0.8.2` (tags 2026-11-18), and the release candidates
-`v0.9.0-rc.1` and `v0.9.0-rc.2`, prereleases (tags 2026-11-19; [Release candidates](#release-candidates)). Pushing the next tag runs the app image/chart publication and GitHub Release
+`v0.9.0-rc.1` and `v0.9.0-rc.2`, prereleases (tags 2026-11-19; [Release candidates](#release-candidates)). The next tag is the stable `v0.9.0`; pushing it runs the app image/chart publication and GitHub Release
 creation.
 This source change does none of those operations, and installation from released
 artifacts and later controlled PVE template canaries remain separate steps. Read
@@ -158,7 +158,7 @@ The configured destination for app Helm publication is
 `0.4.0` stable charts).
 On an app release tag, the workflow sets chart version to the tag without `v` and
 appVersion to the full tag, matching the image tags. The release contract is app
-chart `0.8.2`, appVersion/image tag and installer BOM `v0.8.2`, platform BOM `release: 0.8.2`, and the same tag as
+chart `0.9.0`, appVersion/image tag and installer BOM `v0.9.0`, platform BOM `release: 0.9.0`, and the same tag as
 `DEFAULT_VERSION` of the Docker Compose install (`deploy/compose/proxcloud-up.sh`).
 Keep `images.build: true` until the exact chart and images are published and
 verified; use `false` explicitly for released-artifact evaluation after that.
@@ -308,8 +308,12 @@ be tagged until the next release commit dropped `-dev`: the commit of the candid
 `v0.9.0-rc.2` sets the release to `0.9.0-rc.2` (checked on 2026-11-19 on that commit:
 `--release` prints `all pins match`, on the BOM and on the previous BOMs `0.8.0`, `0.8.1`,
 `0.8.2` and `0.9.0-rc.1`). The pull request after that tag set the BOM on `main` to
-`0.9.0-dev` again and added `deploy/platform/previous/0.9.0-rc.2.yaml`, so `main` cannot
-be tagged until the next release commit drops `-dev`. The gate does not
+`0.9.0-dev` again and added `deploy/platform/previous/0.9.0-rc.2.yaml`, so `main` could not
+be tagged until the next release commit dropped `-dev`: the release commit of `v0.9.0` sets
+the release to `0.9.0` (checked on 2026-11-19 on that commit: `--release` prints
+`all pins match`, on the BOM and on the five previous BOMs), and the pull request after
+the `v0.9.0` tag sets it back to a `-dev` release and adds
+`deploy/platform/previous/0.9.0.yaml`. The gate does not
 compare the BOM's release with the tag
 (below): a commit whose BOM has no `-dev` passes this part for any tag.
 
@@ -372,10 +376,18 @@ and `git diff proxcloud-platform-v0.1.3 -- deploy/charts/proxcloud-platform` pri
 so the BOM needs no new chart version. Its tag is on the commit `8906fa93`; the `docker`
 and `helm` runs of the tag succeeded and the GitHub Release is a prerelease, with `v0.8.2`
 still the latest (read on 2026-11-19). The pull request after it added
-`deploy/platform/previous/0.9.0-rc.2.yaml`.
+`deploy/platform/previous/0.9.0-rc.2.yaml`. A lab installed a platform from the published
+images of `v0.9.0-rc.2` on 2026-11-19, in bridge mode, and removed one
+([managed-services.md](managed-services.md#not-verified-on-a-lab-yet)).
 
-Not verified: an install from a candidate's published images, and anything on the images
-of `v0.9.0-rc.2`.
+`v0.9.0` is the release the two candidates were cut for: the same pins once more, and its
+BOM differs from that of `0.9.0-rc.2` in the `release` line alone. Neither chart of the
+product changed since its tag (the two `git diff` commands above print nothing on the
+release commit). The app chart, the installer pin and `DEFAULT_VERSION` move with it, as
+at every stable release.
+
+Not verified: anything on the published images of `v0.9.0`, and the move of a platform
+from a candidate's BOM to that of `0.9.0`.
 
 ## Previous BOMs
 
@@ -542,7 +554,7 @@ What a release must do when it changes a pin, before its tag:
    build of the release commit, `GET …/plan` of such an installation, or
    `PlanFor` in a test.
 
-The pairs of the BOM on `main` today (0.8.0, 0.8.1, 0.8.2, 0.9.0-rc.1 and 0.9.0-rc.2 to
+The pairs of the BOM of the release `v0.9.0` (0.8.0, 0.8.1, 0.8.2, 0.9.0-rc.1 and 0.9.0-rc.2 to
 it). From the three 0.8.x BOMs, the BOMs
 differ in the release line, in `tenantCharts.kubernetes` and in the four
 components of the product's own charts, `pc-platform` 0.1.13 to 0.1.14 and
@@ -550,7 +562,10 @@ components of the product's own charts, `pc-platform` 0.1.13 to 0.1.14 and
 old version in `upgradeFrom`, and platform chart 0.1.3 differs from 0.1.2 in the provider's
 ClusterRole alone. From 0.9.0-rc.1 and from 0.9.0-rc.2 the BOMs differ in the release line alone.
 `TestUpgradeRollsNoMachine` compares all five pairs and passes. So the
-classifier allows all five pairs, and only `-dev` refuses them on `main`. On the
+classifier allows all five pairs, and only `-dev` refused them on `main`. On the release
+commit of `v0.9.0` the plan from each of the three 0.8.x BOMs is allowed with six changes
+and no refusal, and the plan from each candidate's BOM with one change, the release,
+record only. On the
 commits of the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` the plan of each of the three
 0.8.x BOMs is allowed, with six changes and no refusal; on that of `v0.9.0-rc.2` the plan
 from 0.9.0-rc.1 is allowed with one change, the release, record only. One of these moves

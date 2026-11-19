@@ -7,11 +7,148 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-None of the entries below is verified on a lab yet: each one says so. The chart changes among them are
-published: the tag `proxmox-kamaji-cluster-v0.1.14` was cut once, for the health check, the VLAN tag and the
-control plane count together, and `proxcloud-platform-v0.1.3` with it, and the platform BOM pins both by digest
-(the entry under Changed). A new install on this BOM has them. A platform installed by 0.8.x stays on its BOM,
-with cluster chart 0.1.13 and platform chart 0.1.2, until an operator upgrades it.
+## [0.9.0] - 2026-11-19
+
+The release after `v0.8.2`. An installed managed-services platform can be upgraded in place, a new install is
+easier to size and to place on a network and is usable by a tenant as soon as it is green, and tenant Kubernetes
+workers can be repaired and put behind a firewall. It was prepared by two release candidates, `v0.9.0-rc.1` and
+`v0.9.0-rc.2`, whose sections below record the lab rounds; everything they held is in this section. The entries
+under Added, Changed and Fixed were written before or between those rounds: where one says "Not verified on a
+lab", the two lists below are the current state.
+
+The platform BOM of this release is `0.9.0`. It pins what `0.9.0-rc.1` and `0.9.0-rc.2` pin, cluster chart
+0.1.14 and platform chart 0.1.3, both published from their tags (`proxmox-kamaji-cluster-v0.1.14`,
+`proxcloud-platform-v0.1.3`): the three BOMs differ in the `release` line alone. A new install on this BOM has
+both charts. A platform installed by 0.8.x stays on its BOM, with cluster chart 0.1.13 and platform chart 0.1.2,
+until an operator upgrades it. The release carries the BOMs of `0.8.0`, `0.8.1`, `0.8.2`, `0.9.0-rc.1` and
+`0.9.0-rc.2` for the platforms those builds installed.
+
+Upgrading from `v0.8.2`. From an older release, read the sections in between as well: their steps still apply.
+
+- **Portal first.** On the Docker Compose host check out the tag and run `./proxcloud-up.sh upgrade v0.9.0`
+  (`deploy/compose/README.md`, "Upgrade"). The script takes its backup first.
+- **Let one provider sync run** (every 15 minutes; without the scheduler `POST
+  /api/v1/admin/job/external-service/sync`) before a planned Proxmox node reboot. It sets `onboot` on the
+  Kubernetes node templates this portal imported and on the running workers of its tenant clusters, where it is
+  missing. It does not cover a template the portal did not import or a stopped worker
+  (`docs/managed-services.md`, "After a Proxmox node reboots").
+- **An installed platform stays on its BOM** and keeps working. Moving it to `0.9.0` is a separate run the
+  operator starts in step 4 of Managed services, and it can wait. Until then three control plane machines and a
+  VLAN tag are refused on that platform and Replace answers 502.
+- **The platform upgrade has run on a lab without tenants only**: once, from the BOM `0.8.0` to `0.9.0-rc.1`, on
+  a platform with no tenant cluster and no database. It has not run on a platform with tenants and not to the
+  BOM `0.9.0` itself. **Take the seed backup first** (`vzdump` of the seed VM and a dump of the portal database;
+  `docs/managed-services.md`, "Credentials and the seed backup"), check that tenant clusters and databases are
+  healthy, and change no machine size or count in the same step. A restore after a failed upgrade has not been
+  run on a lab.
+- **The plan from a 0.8.x BOM** lists six changes and refuses nothing: the release and `tenantCharts.kubernetes`
+  as record only, and the four charts of the product (`pc-platform` 0.1.13 to 0.1.14; `capi`, `capi-tenant` and
+  `platform` 0.1.2 to 0.1.3). No machine is replaced (`TestUpgradeRollsNoMachine` compares all five previous
+  BOMs with this one and passes). From `0.9.0-rc.1` or `0.9.0-rc.2` the plan lists one change, the release,
+  record only; not run on a lab.
+- **Tenant clusters made before the upgrade** stay on cluster chart 0.1.13 and get no health check until their
+  own chart bump.
+- **Kubernetes provider settings:** `nodeStartupTimeoutSeconds` must be `0` or 900 to 86400; a stored value
+  outside that is read as the default, and the provider's page says so.
+- **Scripts:** a security group name that starts with `k8s-` is refused at create (400); the installed BOM as
+  `targetBom` answers `409 bom_installed` (it was `400 invalid_confirmation`); a preset other than `custom` on
+  an installed platform answers `409 fixed_fields`; `spec.sandbox` is refused.
+- **A platform installed from a `dev-<sha>` build of `main`** is still refused (`bom_unsupported`).
+- The app chart is `0.9.0` with appVersion `v0.9.0`, and `pc_versions.proxcloud` and `DEFAULT_VERSION` of
+  `proxcloud-up.sh` name `v0.9.0`.
+
+
+Verified on a lab. Three rounds on 2026-11-19, on one lab Proxmox VE cluster. Nothing was run on the published
+images of `v0.9.0` itself. The code of `v0.9.0-rc.2` is the code of this release without one fix to the sandbox
+template build.
+
+Round 3, on the published images of `v0.9.0-rc.2`:
+
+- **Fresh install in bridge mode.** One run of 40 minutes 5 seconds, no Retry and no failed stage. The platform
+  was on the BOM `0.9.0-rc.2` with charts `0.1.14` and `0.1.3`, all five VMs had `onboot`, the plan showed no
+  change and the Check passed with 25 rows.
+- **Remove.** 54.2 seconds, no retry, and nothing left on Proxmox. The Proxmox API firewall rule was written by
+  the install and deleted by Remove.
+- **`409 bom_installed`.** Three requests that named the installed BOM as the target got this answer.
+- **Control plane growth.** The plan listed 1 to 3 as a change and blocked it with the node's numbers, and the
+  Check row `capacity` failed. After the count was put back the plan was empty.
+- **`onboot` on old templates and workers.** The first provider sync wrote it on six node templates of this
+  portal, withdrawn imports among them, and touched no other template. A second sync wrote nothing. A worker
+  cloned from such a template had `onboot`, and the sync wrote nothing on workers that had it.
+- **A tenant cluster of two workers.** Both nodes were Ready on chart `0.1.14`. The node group of two had its
+  health check object, with a guard of 1 and a timeout of 1800 seconds.
+- **LoadBalancer.** A Service of type LoadBalancer answered from both workers.
+- **Database.** A managed database was ready and was reached from a tenant pod, with the tenant network as the
+  allowed source, in a VLAN zone.
+- **Tenant path test `passed`.** On a `simple` zone, from a node that does not hold the platform's addresses.
+- **Deletes.** The cluster, the database and the network were deleted. The cluster's Proxmox token was released
+  by the job and the quota went back to 0.
+
+Round 2, on the published images of `v0.9.0-rc.1`, over a platform that `v0.8.0` installed:
+
+- **The upgrade from `0.8.0` to `0.9.0-rc.1`, on a lab without tenants.** One run, no retry, 72.8 seconds. The
+  plan showed six changes and nothing blocking. The lab had no tenant cluster and no database.
+- **Nothing rolled.** The same four machines, nodes and boot ids, the same QEMU processes, and no Proxmox task.
+  No pod restarted: 47 on the platform cluster, 16 on the seed. The platform API answered at each of 238 looks,
+  one every 2 seconds.
+- **What ArgoCD did.** It synced one Application of fourteen, `platform`. The three other chart moves were
+  compared and found in sync, and no clusterctl hook ran. A second apply took 5 seconds and changed nothing.
+- **Refusals.** Seven requests with a wrong confirmation or a wrong target were refused, and none started a run.
+- **Chart `0.1.14` on a new tenant cluster.** A worker was Ready 9 minutes after the create. A node group of one
+  gets no health check, by design; a group of two got one, with its guard.
+- **Replace.** On the last Ready worker it asked for a confirmation, then made a new machine whose node was
+  Ready 7 minutes 21 seconds later. The group had no node for about 6.7 minutes.
+- **The health check, all workers failed.** On a cluster whose two workers could not join, it replaced nothing,
+  as its guard says.
+- **Worker firewall, one worker.** From a second tenant machine, the kubelet, SSH and port 4240 were closed
+  afterwards, and NodePort and LoadBalancer stayed open. The node stayed Ready. Two of about 6000 one-second
+  requests failed in 52 minutes, none at the change.
+- **Provider settings check and join error.** The refusals and their texts, and `kubeadm`'s own error in the
+  join log, with no token in it.
+- **Tenant path test `failed`.** A full run on a `simple` zone gave the predicted verdict for the node that
+  holds the platform's addresses, and cleaned up.
+
+Round 1, on a build of `main`, over the same platform:
+
+- **Volumes.** A volume keeps its row through attach, detach and rebuild, and the quota is right.
+- **Worker firewall, one worker.** The Proxmox rules were written in the right order, the node stayed Ready, and
+  Remove and the cluster delete cleaned up.
+- **Replace.** Its refusals on a `0.8.0` platform, and "needs attention" after its time limit.
+- **One root command.** The Check rows, the firewall rule and the refusals. The command was not run on a node.
+- **Presets, network modes.** Only the refusals, the `capacity` row and the cleanup.
+- **Usable after install, invitations, rule edit.** At the API only, and in part.
+
+Not verified on a lab:
+
+- **This release itself.** Not run: its published images, its tag's workflows, and the upgrade of a platform to
+  the BOM `0.9.0`, from a `0.8.x` BOM or from a candidate's. The step from a candidate's BOM was planned as one
+  record-only change and never run.
+- **The upgrade with tenants.** No upgrade has run on a platform that has a tenant cluster or a database. Not
+  seen: the wait for tenants in stage 9, a tenant that is unhealthy (`tenants_unhealthy`), the `platform`
+  chart's sync beside live tenant control planes, and an existing cluster staying on chart `0.1.13`.
+- **A failed upgrade or install.** Not run: a failed stage and Retry, a restore, and the refusal of a chart that
+  would replace a machine (`unexpected_rollout`). The seed's backup was not taken before the lab upgrade.
+- **The upgrade from other starts.** Not run: the portal's own step from `v0.8.2` (the lab's portal came from a
+  build of `main` and the candidates), and a platform on the BOM of `0.8.1` or `0.8.2`.
+- **The one root command on a fresh token set.** Not run: the command to its end and the `PC-ENROLL` line. On
+  the lab the two token ids already existed, and the command stopped as designed. The lab install stored
+  existing token secrets through the credentials step.
+- **The Homelab preset as an install.** Only its save was seen. The lab's nodes have no room for it.
+- **`routed` mode and a VLAN tag.** Not run: an install in `routed` mode, its Remove, and a VLAN tag on the
+  platform network.
+- **A replacement by the health check.** No worker was broken. The lab showed only the guard refusing when both
+  workers of a group were unhealthy. Also not seen: Replace of a machine that has no node.
+- **`onboot` beyond what is listed.** Not run: the sync on a running worker that has no `onboot`, a node
+  template freshly imported by this release and its clone, and a Proxmox node reboot.
+- **The tenant path test, both verdicts on one install.** `failed` and `passed` were seen on two different
+  installs.
+- **Three control plane machines.** Not built: on a new install or by an apply.
+- **Worker firewall.** Not run: two workers, a new or replaced worker, and `workerFirewall: true` on the
+  provider.
+- **The consoles.** Every round ran at the API. No page of either console was opened, step 4 of Managed services
+  included.
+- **Earlier releases.** Everything `v0.8.0`, `v0.8.1` and `v0.8.2` say is not verified still holds, except what
+  is listed as verified here.
 
 ### Added
 
@@ -226,6 +363,11 @@ with cluster chart 0.1.13 and platform chart 0.1.2, until an operator upgrades i
   (`bom_unsupported`) while the file is carried. Its pins are those of `0.9.0-rc.1`, so
   `TestUpgradeRollsNoMachine` compares five previous BOMs with the BOM on `main`: three of 0.8.x and the two
   candidates. No apply on such a platform was run on a lab.
+- **The platform BOM's release is `0.9.0`** (`deploy/platform/platform-bom.yaml`), with the pins of
+  `0.9.0-rc.2`: the two BOMs differ in the `release` line alone, and neither chart of the product changed since
+  its tag. The release gate passes on it and on the five previous BOMs. The app chart, `pc_versions.proxcloud`
+  and `DEFAULT_VERSION` of `proxcloud-up.sh` move to `0.9.0` / `v0.9.0`. `deploy/platform/previous/0.9.0.yaml`
+  is added by the change after the tag.
 - **The body of a GitHub Release is `docs/releases/vX.Y.Z.md`, written for a reader, when the tag has that file.**
   The Release pages of `v0.8.0` to `v0.8.2` showed their changelog section, whose wrapped lines a Release body
   renders as line breaks and which has no headings. The release job (`docker.yml`) now takes the file, refuses an
@@ -395,13 +537,58 @@ Proxmox API.
   could not fetch instead of leaving a later "no installation candidate". A build that succeeds installs the
   same packages as before.
 
+### Known issues
+
+- **The upgrade is not shown for a site with tenants.** See Upgrade and Not verified. It affects a production
+  platform on a `0.8.x` BOM. Take the seed backup first, or leave the platform on its BOM, where it keeps
+  working.
+- **The root command stops when the platform's token ids are taken.** The platform's two Proxmox tokens have
+  fixed ids, `capmox@pve!capi` and `csi@pve!csi`. On a Proxmox cluster where one of them already exists for
+  something else, the command stops before it changes anything and prints the command that removes the token. It
+  affects a new install on such a site. The only way forward it offers is to remove that token, which breaks
+  whatever else uses it. See "The root command of an installation" (`docs/managed-services.md`).
+- **Workers do not join when the node that holds the platform's addresses also translates tenant traffic.** On a
+  `simple` tenant zone, tenant connections to the platform network are dropped on the Proxmox node that both
+  translates tenant traffic and runs the platform's machines. The path test reads `failed` from that node and
+  `passed` from another. The network of an installed platform is fixed, so `routed` mode helps a new one-node
+  install only. Read the Check row `tenant-path`, run the test, and use one of the two layouts that work
+  (`docs/managed-services.md`).
+- **A chart version that changes only its hook does not run the hook.** ArgoCD syncs an Application only when a
+  rendered object differs. No chart of this release is such a version. It affects a later release, which must
+  also change a rendered object. See "What a release checks about its BOM pairs" (`docs/ci-release.md`).
+- **The Check row `boot-store` can name a VM that does not exist.** The row counts the owners of volumes on the
+  store, so a leftover volume is listed under the id of a VM that is gone. It affects the row's text only.
+- **The stored result of the tenant path test outlives Remove.** After a Remove and a new install, the page
+  shows the verdict of the last test of the old platform until a new test runs. Run the test again after an
+  install.
+- **Deleting a tenant cluster logs one failed request on Proxmox.** The portal asks Proxmox to delete a
+  `csi@pve` token that was never made, and Proxmox answers `500`. The delete still succeeds and nothing is left
+  behind. It is noise in the Proxmox log; the cause is not found yet.
+- **A tenant cluster's token gets `403` on a few status reads.** Seen on `GET /cluster/status` and on a VM's
+  current status, at clone start and at delete. The machines came up and no effect was seen.
+- **A health check replaces nothing when every worker of a group fails.** That is its guard. The machines stay,
+  show "not joined" with "needs attention", and are counted in the tenant's quota. It affects a tenant whose
+  workers cannot reach the platform. Repair the cause, then use Replace or delete the cluster.
+- **Replace on a node group of one leaves the group without a node.** The old machine goes first: on the lab the
+  group had no node for about 6.7 minutes. It affects a tenant with one worker. Raise the group's count by one
+  first when the workload cannot wait.
+- **A standalone volume can lose its name at create.** A volume created without a server can answer `200` with
+  no `id` when Proxmox is slow, and is then named after its disk at the next provider sync. It affects a tenant
+  who creates such a volume. Nothing is lost but the name; not fixed.
+- **The `pve-api-rule` row can read `ok` while the rule matches nothing.** This happens on a site whose router
+  translates the platform network on the way to the Proxmox node. It affects installs on such a site. Add a rule
+  for the translated address: see the guide (`docs/managed-services.md`).
+- **Seed ISOs of servers created before `v0.8.0` are never swept.** When such a server is deleted, its seed ISO
+  stays on the seed store and holds the server's user data. It affects a site with such servers. Clean it up by
+  hand with the commands in the release notes of v0.8.2.
+
 ## [0.9.0-rc.2] - 2026-11-19
 
 The second release candidate of 0.9.0, published as a prerelease and never as `latest`. It is not the release:
 `v0.8.2` stays the current stable release, and the chart, the installer and the Compose default still name it. It
 is `v0.9.0-rc.1` plus the three fixes for what the second lab round found, and it exists so that a lab can run a
-fresh install, and the upgrade again, on a build that holds them. Its content is the [Unreleased] section above,
-which the release 0.9.0 will turn into its own section; nothing is repeated here. Not for a production site.
+fresh install, and the upgrade again, on a build that holds them. Its content is the section of 0.9.0 above;
+nothing is repeated here. Not for a production site.
 
 ### Changed
 
@@ -421,8 +608,8 @@ which the release 0.9.0 will turn into its own section; nothing is repeated here
 
 ### Fixed
 
-The three entries are in the [Unreleased] section, under Fixed; each is covered by tests and none was run on a
-lab.
+The three entries are in the section of 0.9.0, under Fixed; each is covered by tests, and none had been run on
+a lab when this candidate was cut.
 
 - Tenant workers of a site upgraded from 0.8.x start with their Proxmox node: the provider sync sets `onboot` on
   the portal's Kubernetes node templates and on its running tenant workers where it is missing.
@@ -478,7 +665,7 @@ ran before the three fixes above. Nothing was run on this candidate's own images
 - The tenant path test's verdict `passed`, `routed` mode and a VLAN tag.
 - A fresh install from a candidate, with a preset, the one root command run on a node, or three control plane
   machines; an apply of three control plane machines.
-- Everything the [Unreleased] section and the sections of 0.8.0 to 0.8.2 say is not verified, except what is
+- Everything the section of 0.9.0 said then and the sections of 0.8.0 to 0.8.2 say is not verified, except what is
   listed as verified here.
 
 ## [0.9.0-rc.1] - 2026-11-19
@@ -487,7 +674,7 @@ A release candidate of 0.9.0, published as a prerelease and never as `latest`. I
 stays the current stable release, and the chart, the installer and the Compose default still name it. The
 candidate exists for one reason. The platform upgrade between BOMs takes only a release BOM as its target,
 never a `-dev` one, so a lab cannot drill the upgrade from 0.8.0 on a build of `main`. Its content is the
-[Unreleased] section above, which the release 0.9.0 will turn into its own section; nothing is repeated here.
+section of 0.9.0 above; nothing is repeated here.
 Not for a production site.
 
 ### Changed
@@ -543,7 +730,7 @@ Fixed above: none of those was run on a lab.
   VLAN tag.
 - Chart 0.1.14 on a cluster: the health check, Replace, and the worker firewall on two workers.
 - The tag's workflows: no candidate carried a `docs/releases/` file or a previous BOM before.
-- Everything the [Unreleased] section and the sections of 0.8.0 to 0.8.2 say is not verified.
+- Everything the section of 0.9.0 said then and the sections of 0.8.0 to 0.8.2 say is not verified.
 
 ## [0.8.2] - 2026-11-18
 
