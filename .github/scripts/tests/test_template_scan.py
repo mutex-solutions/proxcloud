@@ -125,6 +125,11 @@ class TemplateTests(unittest.TestCase):
         self.assertIn("build.sh: FAILED: base (exit 7); NOT BUILT: codex node\n", done.stderr)
         done = self.run_builder(("node", "browser"), "browser")
         self.assertIn("build.sh: FAILED: browser (exit 7); NOT BUILT: none\n", done.stderr)
+        # A template that built is not named as failed when the run ends on a later error.
+        done = self.run_builder(("node", "bogus"), "none")
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("unknown template bogus", done.stderr)
+        self.assertNotIn("FAILED", done.stderr)
 
     def test_builder_reports_nothing_when_every_target_builds(self):
         done = self.run_builder(SCAN.NAMES, "none")
