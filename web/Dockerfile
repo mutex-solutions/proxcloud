@@ -7,7 +7,7 @@ RUN npm ci
 COPY ${APP}/ ./
 RUN npm run build
 
-FROM nginx:1.30.6-alpine
+FROM nginx:1.30.7-alpine
 # Refresh the distro-patched XSLT library (CVE-2026-87636/CVE-2026-9947);
 # a fresh base pull alone may still carry the earlier Alpine package revision.
 RUN apk upgrade --no-cache libxslt
