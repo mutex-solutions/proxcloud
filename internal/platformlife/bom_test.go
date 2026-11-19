@@ -179,6 +179,11 @@ func TestValidate(t *testing.T) {
 			comp(t, b, "workload", "argocd").Chart.Repo = "oci://ghcr.io/argoproj/argo-helm"
 		}, []string{"neither a bare OCI"}},
 		{"schema 2", func(_ *testing.T, b *BOM) { b.SchemaVersion = 2 }, []string{"schemaVersion 2"}},
+		{"a release candidate is a release: no pending digest", func(_ *testing.T, b *BOM) {
+			b.Release = "0.9.0-rc.1"
+			b.TenantCharts.Kubernetes.Digest = "pending"
+		}, []string{"tenantCharts.kubernetes: digest pending is allowed only in a -dev release"}},
+		{"a release candidate with everything pinned", func(_ *testing.T, b *BOM) { b.Release = "0.9.0-rc.1" }, nil},
 		{"a release with v", func(_ *testing.T, b *BOM) { b.Release = "v0.7.0-dev" }, []string{"no v prefix"}},
 	}
 	for _, tc := range cases {
@@ -411,14 +416,16 @@ func TestPreviousBOMsAreUnchanged(t *testing.T) {
 
 // Every release from v0.8.0 on (the first with a platform) that CHANGELOG.md lists has its BOM under
 // deploy/platform/previous/, except the release this BOM is: the change that follows a release adds the file
-// (docs/ci-release.md, "Previous BOMs"). Without it the next release would refuse the platforms of that one.
+// (docs/ci-release.md, "Previous BOMs"). Without it the next release would refuse the platforms of that one. A release
+// candidate (X.Y.Z-rc.N) counts: its BOM is a release BOM, a platform can be moved to it, and only this file lets the
+// builds after it apply that platform.
 func TestEveryReleaseHasItsPreviousBOM(t *testing.T) {
 	changelog, err := os.ReadFile("../../CHANGELOG.md")
 	if err != nil {
 		t.Fatal(err)
 	}
 	cur, _ := Current()
-	releases := regexp.MustCompile(`(?m)^## \[(\d+)\.(\d+)\.(\d+)\]`).FindAllStringSubmatch(string(changelog), -1)
+	releases := regexp.MustCompile(`(?m)^## \[(\d+)\.(\d+)\.(\d+(?:-rc\.\d+)?)\]`).FindAllStringSubmatch(string(changelog), -1)
 	if len(releases) == 0 {
 		t.Fatal("CHANGELOG.md lists no release")
 	}
