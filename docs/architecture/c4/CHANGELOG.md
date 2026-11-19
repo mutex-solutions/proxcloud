@@ -4,6 +4,30 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-19: templates and VMs get a graphical display; the serial port stays
+
+**What changed:** components "Template updates" and "PVE client": a new template is made with `vga: std` instead of
+`vga: serial0` (`Executor.importDisk`, `pve.ImportImage`; also `images/build.py` and `images/vm_export/coldboot.py`);
+`serial0: socket` stays. Component "Sync job": `templateupdates.StartNodeTemplatesAtBoot` is now
+`templateupdates.SyncImportedTemplates` and also writes `vga: std` on a held, not withdrawn template of either
+variant whose display is a serial port; `syncProxmoxService` calls the new `pve.Service.ShowGraphicalDisplay`, which
+does the same on the **stopped** VMs and the templates in the project's pool (not a locked VM, not a Kubernetes
+worker, never a running VM). Component "PVE client": `Client.StartVM`, the one start of the portal, first calls
+`Client.ShowGraphicalIfStopped`: status read, write only on a stopped VM without a lock, and a `revert` if the values
+in effect still show the serial port afterwards. Component "Project API": `GET_CONSOLE_STATE` reads `vga` from the
+values in effect (`GetVMConfigCurrent`). Component "Platform runs": unchanged, stage 7 does not write `vga`.
+
+**Why:** the Proxmox web UI opened every VM of the product on the serial terminal, an empty page until a key is
+pressed. The owner wants the usual graphical console by default, with the serial terminal still selectable. Clones
+copy the display from their template, so the templates and the VMs that exist need the write too. Proxmox cannot
+apply `vga` to a running VM and keeps it as a pending change, and the strict readers (`inventoryCurrentConfig`,
+`holderCurrentConfig`) refuse a VM with any pending change: a write on running VMs would have stopped the project
+sync and the volume and server operations. So the write is made only where it lands at once, and a running server
+gets it on the portal's own start. Workers and platform machines are started by CAPMOX, not by the portal: they
+change when they are replaced by clones of a new template.
+
+**Diagrams:** none changed. `c3-components.md`: the Sync job row names the two passes.
+
 ## 2026-11-19: Template updates can delete a withdrawn template
 
 **What changed:** component "Template updates": `templateupdates.Service.Delete` behind

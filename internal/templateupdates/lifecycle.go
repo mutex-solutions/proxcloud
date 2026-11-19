@@ -284,32 +284,44 @@ func importTemplateBy(ctx context.Context, pv templateReader, name, digest, node
 	return cfg, nil
 }
 
-// StartNodeTemplatesAtBoot sets onboot on every Kubernetes node template of the provider that one of recs holds
-// (Receipt.Holds: an import of this portal that finished and still names its template), that is not withdrawn and
-// that lacks it. A withdrawn template (pc-tu-withdrawn) is kept for forensics and is neither read nor written: no new
-// node group gets it, and a worker that a cluster still pinned to it clones is covered by the sync's worker pass
-// (pve.Service.StartWorkersAtBoot). Import
-// writes the option since v0.9.0 (Executor.importDisk); this is the same write for a template imported before, so
-// that the machines cloned from it from now on start with their Proxmox node. It is the provider sync's pass. A
-// template no receipt holds (built by the image pipeline, the site's own, another portal's) is neither read nor
-// written. The write follows importTemplate's proof and carries the digest it read, as a tag write does, and takes
-// VM.Config.Options on /pool/pc-templates, which the import and the tag writes already use.
-func StartNodeTemplatesAtBoot(ctx context.Context, pv LifecyclePVE, recs []Receipt, serviceID string) error {
+// SyncImportedTemplates is the provider sync's pass over the templates of the provider that one of recs holds
+// (Receipt.Holds: an import of this portal that finished and still names its template) and that are not withdrawn.
+// It writes what an import of today writes (Executor.importDisk) on a template imported before, so that the machines
+// cloned from it from now on have it too:
+//   - vga std where the display is a serial port (every import before v0.10.0), on OS and Kubernetes templates: the
+//     Proxmox console then opens on the graphical display, and serial0 stays for the serial terminal;
+//   - onboot on a Kubernetes node template that lacks it (an import before v0.9.0), so that its clones start with
+//     their Proxmox node.
+//
+// A withdrawn template (pc-tu-withdrawn) is kept for forensics and is neither read nor written: no new node group or
+// server gets it, and a VM cloned from it before is covered by the sync's passes over the VMs
+// (pve.Service.StartWorkersAtBoot; pve.Service.ShowGraphicalDisplay for a stopped server) and by the portal's start
+// (pve.Client.StartVM). A template is never running, so vga lands at once and no change stays pending. A template no receipt holds (built by the image
+// pipeline, the site's own, another portal's) is neither read nor written. The write follows importTemplate's proof
+// and carries the digest it read, as a tag write does, and takes VM.Config.Options (onboot) and VM.Config.HWType
+// (vga) on /pool/pc-templates, which the import already uses.
+func SyncImportedTemplates(ctx context.Context, pv LifecyclePVE, recs []Receipt, serviceID string) error {
 	rows, err := pv.ClusterResources(ctx, "vm")
 	if err != nil {
 		return err
 	}
 	var errs []error
 	for _, row := range rows {
-		i := slices.IndexFunc(recs, func(r Receipt) bool {
-			return r.Payload.Variant == "kubernetes" && r.Payload.ServiceID == serviceID && r.Holds(row)
-		})
+		i := slices.IndexFunc(recs, func(r Receipt) bool { return r.Payload.ServiceID == serviceID && r.Holds(row) })
 		if i < 0 || row.NodeDown || hasTagValue(row.Tags, pve.TagTemplateWithdrawn) {
 			continue
 		}
 		cfg, err := importTemplate(ctx, pv, recs[i].Payload, row.Node, row.VMID)
-		if err == nil && cfg.Int("onboot") != 1 {
-			params := map[string]string{"onboot": "1"}
+		params := map[string]string{}
+		if err == nil {
+			if recs[i].Payload.Variant == "kubernetes" && cfg.Int("onboot") != 1 {
+				params["onboot"] = "1"
+			}
+			if pve.SerialDisplay(cfg) {
+				params["vga"] = "std"
+			}
+		}
+		if len(params) > 0 {
 			if d := cfg.Str("digest"); d != "" {
 				params["digest"] = d
 			}
@@ -319,7 +331,7 @@ func StartNodeTemplatesAtBoot(ctx context.Context, pv LifecyclePVE, recs []Recei
 			}
 		}
 		if err != nil {
-			errs = append(errs, fmt.Errorf("node template %d on %s: start at boot: %w", row.VMID, row.Node, err))
+			errs = append(errs, fmt.Errorf("template %d on %s: start at boot and display: %w", row.VMID, row.Node, err))
 		}
 	}
 	return errors.Join(errs...)

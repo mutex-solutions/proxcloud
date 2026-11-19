@@ -1847,7 +1847,7 @@ holds on `pc-templates` and on the tenant pools):
   clone until its first start.
 
 Both write only what lacks the option, so a sync that finds nothing to do writes nothing. A failed
-write is logged (`kubernetes node templates start at boot`, `kubernetes workers start at boot`) and
+write is logged (`imported templates start at boot and display`, `kubernetes workers start at boot`) and
 tried again at the next sync. After an upgrade from v0.8.x, wait for one sync before a planned node
 reboot, or check with `qm config <vmid> | grep onboot`.
 

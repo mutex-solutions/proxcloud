@@ -2,9 +2,12 @@ package pve
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 func qemuPath(node string, vmid int) string {
@@ -172,8 +175,51 @@ func (c *Client) vmPower(ctx context.Context, node string, vmid int, verb string
 	return c.postTask(ctx, qemuPath(node, vmid)+"/status/"+verb, form)
 }
 
+// StartVM is the one start of the portal: every server, load balancer, smoke, probe and seed VM it starts goes
+// through it. A VM that still has the serial display of a template from before v0.10.0 gets vga std first, while it
+// is stopped, so the start boots it with the graphical display (ShowGraphicalIfStopped). That write never holds a
+// start back: a failure is logged and the VM starts as it is.
 func (c *Client) StartVM(ctx context.Context, node string, vmid int) (UPID, error) {
+	if err := c.ShowGraphicalIfStopped(ctx, node, vmid); err != nil {
+		slog.Warn("pve: graphical display not set before the start", "node", node, "vmid", vmid, "err", err)
+	}
 	return c.vmPower(ctx, node, vmid, "start", nil)
+}
+
+// SerialDisplay reports a VM whose display is a serial port (vga serial0): what every template had before v0.10.0,
+// and every clone of one. The Proxmox console of such a VM opens on the serial terminal.
+func SerialDisplay(cfg VMConfig) bool { return strings.HasPrefix(cfg.Str("vga"), "serial") }
+
+// ShowGraphicalIfStopped sets vga std on a VM or template whose display is a serial port, only when it is stopped and
+// has no lock; serial0 is not touched. Proxmox cannot change vga on a running VM: the write would stay a pending
+// change until the next stop and start, and the inventory and the fenced writes refuse a VM that has one
+// (inventoryCurrentConfig, holderCurrentConfig). So a running VM is never written. The status is read right before
+// the write; should the VM be started by someone else in between, the values in effect still show the serial port
+// after the write, and the pending change is taken back (revert) and reported.
+func (c *Client) ShowGraphicalIfStopped(ctx context.Context, node string, vmid int) error {
+	cfg, err := c.GetVMConfig(ctx, node, vmid)
+	if err != nil || cfg.Str("lock") != "" || !SerialDisplay(cfg) {
+		return err
+	}
+	st, err := c.GetVMStatus(ctx, node, vmid)
+	if err != nil || st.Status != "stopped" {
+		return err
+	}
+	set := func(params map[string]string) error {
+		up, err := c.SetVMConfig(ctx, node, vmid, params)
+		if err != nil {
+			return err
+		}
+		return c.WaitTask(ctx, up)
+	}
+	if err := set(map[string]string{"vga": "std"}); err != nil {
+		return err
+	}
+	cur, err := c.GetVMConfigCurrent(ctx, node, vmid)
+	if err == nil && SerialDisplay(cur) {
+		err = errors.Join(errors.New("the VM was started during the write; the pending vga is taken back"), set(map[string]string{"revert": "vga"}))
+	}
+	return err
 }
 
 // ShutdownVM is the graceful ACPI shutdown. timeoutSeconds>0 forces stop after the
