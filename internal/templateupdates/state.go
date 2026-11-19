@@ -167,6 +167,7 @@ type TemplateState struct {
 	ServiceID   string          `json:"serviceId"`
 	Node        string          `json:"node"`
 	VMID        int             `json:"vmid,omitempty"`
+	Name        string          `json:"templateName"` // the template VM's name in Proxmox
 	State       string          `json:"state"`
 	Smoke       *SmokeSummary   `json:"smoke,omitempty"`
 	Withdrawal  *BlockedDigest  `json:"withdrawal,omitempty"`
@@ -185,6 +186,8 @@ type TemplateActions struct {
 	Smoke    bool `json:"smoke"`
 	Publish  bool `json:"publish"`
 	Withdraw bool `json:"withdraw"`
+	// Delete: a withdrawn template (its digest blocklisted, this copy tagged) can be destroyed (Service.Delete).
+	Delete bool `json:"delete"`
 	// LastPublished: withdrawing leaves some provider without a published version of the line
 	// (force + the slug needed); LastOnProviders names them.
 	LastPublished   bool     `json:"lastPublished"`
@@ -222,7 +225,7 @@ func (s *Service) States(ctx context.Context, rows map[string]ProviderRows) ([]T
 func (s *Service) stateOf(ctx context.Context, rec Receipt, rows map[string]ProviderRows, blockedSet map[string]BlockedDigest) TemplateState {
 	p := rec.Payload
 	st := TemplateState{ID: rec.ID, Package: p.Package, Tag: p.Tag, Digest: p.Digest, OS: p.OS, Variant: p.Variant, K8sVersion: p.KubernetesVersion,
-		Build: p.BuildVersion, Slug: slugOf(p), ServiceID: p.ServiceID, Node: p.Node, VMID: rec.VMID, Smoke: rec.Smoke,
+		Build: p.BuildVersion, Slug: slugOf(p), ServiceID: p.ServiceID, Node: p.Node, VMID: rec.VMID, Name: TemplateName(p), Smoke: rec.Smoke,
 		ImportStep: rec.Step, ImportedAt: rec.CreatedAt, RequestedBy: rec.RequestedBy}
 	if b, ok := blockedSet[p.Digest]; ok {
 		b := b
@@ -317,6 +320,7 @@ func (s *Service) stateOf(ctx context.Context, rec Receipt, rows map[string]Prov
 		Smoke:    !blocked && !tagged && !smokeRunning && s.VMEnabled,
 		Publish:  !blocked && !tagged && !published && rec.Smoke != nil && rec.Smoke.Result == SmokePass && s.VMEnabled,
 		Withdraw: !done && s.VMEnabled,
+		Delete:   done && s.VMEnabled,
 	}
 	if !done {
 		// The guards Withdraw evaluates, across every provider holding a copy of the artifact.

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Template updates: delete a withdrawn template.** A withdrawn template stayed in Proxmox until someone ran
+  `qm destroy` on the node. The Imported templates table now has **Delete** on withdrawn rows
+  (`DELETE /admin/template-updates/templates/{importId}`, `admin:service:manage`, audited). It destroys the
+  template with the disks its configuration names, never with "destroy unreferenced disks", and frees the import
+  receipt. It is refused, with the reason, while a Kubernetes cluster's node group or a provider's version map
+  still names the template, a linked clone uses its disk, or a smoke test or its import is running. The digest
+  stays blocked. No new Proxmox privilege. Not run on a lab yet
+  ([template-updates.md](docs/template-updates.md#delete-a-withdrawn-template)).
+
 ### Changed
 
 - **The Proxmox console of a VM made by ProxCloud opens on the graphical display.** Templates were made with

@@ -134,7 +134,8 @@ service/node/digest, so it never exceeds the 256-byte key limit; a retry after a
 instead of resetting its progress.
 
 A receipt whose template was deleted since stops blocking only through `Service.MarkTemplateGone`
-(no route yet; the managed-services job calls it). It reads the receipt's own provider and marks the
+(the managed-services job calls it, and so does [Delete](#delete-a-withdrawn-template) of a withdrawn
+template). It reads the receipt's own provider and marks the
 receipt `templateGone` only when no guest in the cluster holds the receipt's VMID any more, or the VM
 that does is visible to the portal token, has a name, sits on a node that is up and carries neither
 the template's name nor its `pc-src-` tag (the VMID was reused), or the VM there is another
@@ -314,7 +315,7 @@ Code: [`lifecycle.go`](../internal/templateupdates/lifecycle.go) (publish, withd
 | Ready to publish | the latest smoke of this template passed |
 | Published (default) | published, and the newest published version of its line on its node (what new VMs get) |
 | Published (older) | published, a newer published version exists (kept; serves as fallback) |
-| Withdrawn | digest blocklisted **and this copy** tagged `pc-tu-withdrawn`: out of every catalog; the template VM is kept |
+| Withdrawn | digest blocklisted **and this copy** tagged `pc-tu-withdrawn`: out of every catalog; the template VM is kept until an operator deletes it ([Delete](#delete-a-withdrawn-template)) |
 | Withdraw incomplete | digest blocklisted but **this copy** is not tagged withdrawn yet (its provider was unreachable or the tag write failed); Withdraw stays enabled and finishes it |
 
 `GET /admin/template-updates/templates` (`admin:service:read`) lists the newest 200 imports with their
@@ -550,7 +551,8 @@ action was started from). Under the per-digest lock:
 3. On each provider, **every copy** of the artifact (finished imports of that digest, any node) gets
    `pc-tu-withdrawn` (+ `pc-tu-import`), and loses `pc-public`, `pc-tu-k8s-public`, `pc-tu-staged` and
    `pc-img-<os>` (so no installer selector picks it either). The template VMs are **kept** for
-   forensics, never deleted.
+   forensics: a withdraw never deletes one. An operator removes a withdrawn template with
+   [Delete](#delete-a-withdrawn-template).
 4. The result lists each provider: `withdrawn` (every copy there tagged), `incomplete` (a tag write
    failed, or a copy's node is down), `unreachable` (the provider or its cluster could not be read —
    **nothing** was changed there) or `provider_missing` (the provider was deleted). `complete` is false
@@ -597,9 +599,60 @@ full clones and are never touched.
 **Blocklisted digests** are shown as *withdrawn* in discovery (the newest artifact row) and refused
 by import (409), smoke (409, and FAIL `digest_withdrawn` if already queued) and publish (409).
 
+### Delete a withdrawn template
+
+`DELETE /admin/template-updates/templates/{importId}` (`admin:service:manage`, no body; audited with the
+VMID). It destroys **one** template, the copy of that import receipt, and frees the receipt. Before it
+there was no way but `qm destroy` on the node. `Service.Delete` in
+[`lifecycle.go`](../internal/templateupdates/lifecycle.go), under the per-digest lock; every condition is
+read again at each call, and each refusal is a 409 with its own `errors.details.code`:
+
+| Code | Refused while |
+|---|---|
+| `not_withdrawn` | the digest is not on the blocklist, or the template lacks `pc-tu-withdrawn` or `pc-tu-import` (staged, published, or a withdraw that is incomplete) |
+| `template_published` | the template carries `pc-public` or `pc-tu-k8s-public` (put back by hand) |
+| `template_mismatch` | the VM at the receipt's node and VMID is in `pc-templates` but is not this import's template: not a template, another name, or no `pc-src-` tag of the digest (`importTemplate`, the proof publish and withdraw use) |
+| `template_present` | a guest holds the VMID outside `pc-templates` or outside the token's view: it may still be the template, moved |
+| `job_running` | the import job of the receipt is pending or running |
+| `smoke_running` | the latest smoke test of this template has no result and its job is not dead |
+| `linked_clones` | a volume on a storage the template's disks are on is a linked clone of one of them (`details.vmids`) |
+| `template_in_use` | something still clones from it (`details.users` names each) |
+
+- **Linked clones** are read from `GET /nodes/{node}/storage/{storage}/content` of each storage the
+  template's config names a `base-<vmid>-` volume on: a row of another VM whose `volid` or `parent` names
+  `base-<vmid>-` (ZFS, RBD and directory stores put the base in the clone's volume id,
+  `base-9200-disk-0/vm-105-disk-0`).
+  It is what Proxmox's own check before a destroy reads, and Proxmox makes that check again in the destroy
+  task. The portal makes full clones only, so a site that clones through the portal alone has none.
+- **Still cloned from** (`Handler.templateUsers`), for the template's node and VMID on its Proxmox
+  provider: a version or an image variant of a Kubernetes provider (`config.cluster.versions`,
+  `imageVariants`) whose `proxmoxServiceId` is that provider or is empty; a node group of a cluster of
+  such a provider, by the image the provider sync cached from the cluster's live values
+  (`cluster.node_groups[].image_id`); a managed-services platform on that provider whose node image is
+  that template. A node group keeps the image it was created or last upgraded with when the provider's map
+  moves on, so a cluster pinned to a withdrawn image keeps cloning its new workers from it: the refusal
+  names the cluster and the group. Upgrade the cluster or recreate the group on another image first. A
+  read error refuses the delete.
+- **The destroy** is `DELETE /nodes/{node}/qemu/{vmid}?purge=1` (`pve.Client.DeleteVMConfigDisks`): the VM,
+  the disks its config names (unused ones included), and its entries in backup jobs, replication and HA.
+  It never sends `destroy-unreferenced-disks`, which every other delete of the portal sends: a volume that
+  only carries the VMID in its name on some storage is not this template's to remove.
+- **Then the receipt is freed** by `Service.MarkTemplateGone`, on its proof (no guest holds the VMID any
+  more). The row shows `template_missing`. The digest **stays on the blocklist**: the artifact is not
+  imported again; what is free again is the receipt's node for the duplicate check and the VMID.
+- **Idempotent**: a receipt already freed answers `unchanged: true`. A template that is already gone
+  (destroyed by hand, or by a delete whose receipt write failed) is not destroyed again: its receipt is
+  freed on the same proof and the answer is `unchanged: true`. This also holds for a VMID that another
+  VM took since.
+- **Privilege**: the destroy takes `VM.Allocate` on the VM, which the portal token holds through
+  `ProxCloudPlatform` on `/pool` (`pve.PlatformPrivileges`), as for the smoke test's own VM; the storage
+  listing takes `Datastore.Audit`, in the same role on `/storage`. No privilege is added.
+
+Not run on a lab: see [Open items](#7-open-items).
+
 ### Audit
 
-Smoke, publish and withdraw are audited by the admin audit middleware (resource type
+Smoke, publish, withdraw and delete are audited by the admin audit middleware (resource type
 `TEMPLATE_UPDATES`, the actor from the token) with a snapshot: action, import id, digest, line slug,
 provider, changed VMIDs, the smoke job publish relied on, and the withdraw reason / force / remaining
 published VMIDs. Refused requests are not audited as successes.
@@ -885,7 +938,7 @@ hand-over = first install: nothing to read.
 | Action | Permission | Built-in roles |
 |---|---|---|
 | See the page, discovery, placement, history, template states, blocklist, the publish-on-all-nodes report | `admin:service:read` | SUPER_ADMIN, ADMIN, SUPPORT |
-| Start a VM import, run a smoke test, publish, publish on all nodes, withdraw | `admin:service:manage` | SUPER_ADMIN, ADMIN |
+| Start a VM import, run a smoke test, publish, publish on all nodes, withdraw, delete a withdrawn template | `admin:service:manage` | SUPER_ADMIN, ADMIN |
 | Start a sandbox mirror or rollback, delete a sandbox pin | `admin:service:manage` | SUPER_ADMIN, ADMIN |
 | Sandbox state, pin list (installer stage 55) | `admin:service:read` | SUPER_ADMIN, ADMIN, SUPPORT |
 | Save the GitHub integration | `admin:integration:manage` | SUPER_ADMIN, ADMIN |
@@ -896,7 +949,8 @@ Proxmox rights of the portal token for the smoke test, on `/pool/pc-templates` (
 **`VM.GuestAgent.Unrestricted`** (guest-exec: `cloud-init status`, `df`, `kubelet --version`; without it
 the smoke ends FAIL `guest_exec_forbidden`); `Datastore.AllocateSpace` on the template disk storage;
 `SDN.Use` on the smoke bridge's zone (`/sdn/zones/localnetwork/<bridge>` for a plain bridge on PVE 8+).
-Publish/withdraw need `VM.Config.Options` (tags) only. An existing site whose `ProxCloudPlatform` role
+Publish/withdraw need `VM.Config.Options` (tags) only. Delete of a withdrawn template needs `VM.Allocate`
+(the destroy) and `Datastore.Audit` on the template's disk storage (the linked-clone read), both already in the role. An existing site whose `ProxCloudPlatform` role
 predates `VM.GuestAgent.Unrestricted` adds it as described in
 [proxmox-permissions.md](proxmox-permissions.md#proxcloudplatform) (`pveum role modify ProxCloudPlatform
 --append 1 --privs "VM.GuestAgent.Unrestricted …"`); the smoke network's bridge needs `SDN.Use` as for
@@ -991,6 +1045,15 @@ debugfs -w -f /tmp/orphan-fix.cmd "$D"
 
 ## 7. Open items
 
+- **Delete of a withdrawn template is not lab-verified.** Its tests run on PostgreSQL with a fake Proxmox. A
+  lab must show: the destroy of a withdrawn template with the portal token (`VM.Allocate` through `/pool`),
+  its base disks and cloud-init drive gone from the storage and no other volume removed; the `linked_clones`
+  refusal on the site's storage type, for a linked clone made by hand (the `parent` field is read as Proxmox
+  9 documents it, and LVM-thin reports none: there Proxmox does not tie a clone to its base either); the
+  `template_in_use` refusal for a cluster whose node group still carries the image. A cluster whose cached
+  `node_groups` the sync has not written yet (created within the last sync interval, or a provider whose
+  sync fails) is not seen by that check, and the template's `pc-tu-withdrawn` tag is not read again between
+  the last check and the destroy call.
 - **Publish on all nodes is partly lab-verified** (2026-11-17, main cb2f052): two advances each published one node
   whose smoke test had passed, the report and the versions line were right, and the smoke clone upgraded no package.
   Not run on a lab: an import started by it, a smoke test started by it, and so its one-job-at-a-time rule (both

@@ -27,6 +27,20 @@ gets it on the portal's own start. Workers and platform machines are started by 
 change when they are replaced by clones of a new template.
 
 **Diagrams:** none changed. `c3-components.md`: the Sync job row names the two passes.
+## 2026-11-19: Template updates can delete a withdrawn template
+
+**What changed:** component "Template updates": `templateupdates.Service.Delete` behind
+`DELETE /admin/template-updates/templates/{id}` destroys a withdrawn template of the portal's own import and frees
+its receipt through `MarkTemplateGone`. It reads, besides Proxmox, the Kubernetes providers' version maps and the
+cached node groups of their clusters (`admin.Handler.templateUsers`), and the managed-services installations.
+Component "PVE client": `DeleteVMConfigDisks` (a destroy with `purge=1` and without
+`destroy-unreferenced-disks`), and `StorageContent.Parent`. No container, relation or boundary changed, and no
+Proxmox permission: the destroy takes `VM.Allocate`, which `ProxCloudPlatform` holds on `/pool`.
+
+**Why:** withdrawn templates could only be removed with `qm destroy` on the node (owner request for v0.10.0; the
+production site holds four).
+
+**Diagrams:** none changed.
 
 ## 2026-11-19: the sync leaves withdrawn node templates alone; a cluster release deletes a CSI token only when one exists
 

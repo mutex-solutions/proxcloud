@@ -124,6 +124,11 @@ The **Imported templates** tab shows each imported template's state: *Staged*, *
   no copy, you confirm that too. If a provider cannot be reached, its copy shows **Withdraw incomplete**:
   use **Finish withdraw** once it is back. For a Kubernetes node image the result gives the version-map
   line to put on the Kubernetes provider (it names images by VMID). Running servers are never affected.
+- **Delete** — on a withdrawn row, removes the template from Proxmox with its disks. The dialog names the
+  VM and asks you to confirm; it cannot be undone, and the digest stays blocked. It is refused, with the
+  reason, while a Kubernetes cluster's node group or a provider's version map still names the template
+  (new workers would be cloned from it: upgrade the cluster or change the map first), while a linked clone
+  uses its disk, or while a smoke test of it is running.
 - If the template is changed in Proxmox after its smoke test passed, run the smoke test again before
   publishing.
 
