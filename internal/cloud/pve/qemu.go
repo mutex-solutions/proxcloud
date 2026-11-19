@@ -124,6 +124,14 @@ func (c *Client) DeleteVM(ctx context.Context, node string, vmid int) (UPID, err
 	return c.deleteTask(ctx, qemuPath(node, vmid), form.values())
 }
 
+// DeleteVMConfigDisks destroys a VM with the disks its config names (unused ones included) and nothing else: it sends
+// purge=1 (out of backup jobs, replication and HA) and never destroy-unreferenced-disks, so a volume that only
+// carries the VM's id on some storage stays. Proxmox itself refuses a template whose base disk a linked clone uses.
+// It takes VM.Allocate on the VM, which the portal's role holds on /pool.
+func (c *Client) DeleteVMConfigDisks(ctx context.Context, node string, vmid int) (UPID, error) {
+	return c.deleteTask(ctx, qemuPath(node, vmid), formVals{"purge": "1"}.values())
+}
+
 // VMStatus is GET /nodes/{node}/qemu/{vmid}/status/current.
 type VMStatus struct {
 	Status    string  `json:"status"`    // "running" | "stopped"

@@ -4,6 +4,21 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-19: Template updates can delete a withdrawn template
+
+**What changed:** component "Template updates": `templateupdates.Service.Delete` behind
+`DELETE /admin/template-updates/templates/{id}` destroys a withdrawn template of the portal's own import and frees
+its receipt through `MarkTemplateGone`. It reads, besides Proxmox, the Kubernetes providers' version maps and the
+cached node groups of their clusters (`admin.Handler.templateUsers`), and the managed-services installations.
+Component "PVE client": `DeleteVMConfigDisks` (a destroy with `purge=1` and without
+`destroy-unreferenced-disks`), and `StorageContent.Parent`. No container, relation or boundary changed, and no
+Proxmox permission: the destroy takes `VM.Allocate`, which `ProxCloudPlatform` holds on `/pool`.
+
+**Why:** withdrawn templates could only be removed with `qm destroy` on the node (owner request for v0.10.0; the
+production site holds four).
+
+**Diagrams:** none changed.
+
 ## 2026-11-19: the sync leaves withdrawn node templates alone; a cluster release deletes a CSI token only when one exists
 
 **What changed:** component "Sync job": `templateupdates.StartNodeTemplatesAtBoot` skips a node template tagged

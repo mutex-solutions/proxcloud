@@ -1,7 +1,7 @@
 package admin
 
 // templatelifecycle.go — the lifecycle of imported templates (docs/template-updates.md, "Lifecycle"):
-// state listing, smoke test, publish, withdraw. Every PVE-mutating action is gated by
+// state listing, smoke test, publish, withdraw, delete of a withdrawn template. Every PVE-mutating action is gated by
 // PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED (the service refuses with 409 when off) and by
 // admin:service:manage; each successful action is audited by the admin audit middleware with a
 // before/after snapshot (digest, VMIDs, reason, actor).
@@ -10,12 +10,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
@@ -261,5 +265,102 @@ func (h *Handler) templateUpdatesWithdraw(w http.ResponseWriter, r *http.Request
 		"digest": res.Digest, "slug": res.Slug, "serviceId": res.ServiceID, "reason": strings.TrimSpace(req.Reason), "force": req.Force,
 		"confirmNodeLoss": req.ConfirmNodeLoss, "changedVmids": res.Changed, "remainingPublished": res.Remaining, "complete": res.Complete,
 		"providers": res.Providers})
+	httpx.OK(w, res)
+}
+
+// templateUsers names what still clones from template vmid on node of Proxmox provider serviceID
+// (templateupdates.TemplateUsers): a version or image variant of a Kubernetes provider on that Proxmox provider, a
+// node group of one of its clusters (the image the provider sync cached from the cluster's live values: a group keeps
+// its image when the provider's map moves on), and the node image of a managed-services platform. A Kubernetes
+// provider that names no Proxmox provider counts for every one. A read error refuses the delete.
+func (h *Handler) templateUsers(ctx context.Context, serviceID, node string, vmid int) ([]string, error) {
+	names := func(image any) bool {
+		s, _ := image.(string)
+		return kamaji.ImageTemplates(s)[node] == vmid
+	}
+	services, err := h.esSvc.ListByType(ctx, externalservice.TypeCloud)
+	if err != nil {
+		return nil, err
+	}
+	out := []string{}
+	for i := range services {
+		es := &services[i]
+		if !es.IsKamaji() {
+			continue
+		}
+		d := es.KamajiConfig().Defaults
+		if d.ProxmoxServiceID != "" && d.ProxmoxServiceID != serviceID {
+			continue
+		}
+		for version, image := range d.Versions {
+			if names(image) {
+				out = append(out, fmt.Sprintf("Kubernetes provider %q, version %s", es.Name, version))
+			}
+		}
+		for variant, byVersion := range d.ImageVariants {
+			for version, image := range byVersion {
+				if names(image) {
+					out = append(out, fmt.Sprintf("Kubernetes provider %q, image variant %s of version %s", es.Name, variant, version))
+				}
+			}
+		}
+		if h.cloud == nil {
+			continue
+		}
+		clusters, err := h.cloud.FindByServiceAndType(ctx, es.ID, cloud.TypeKubernetesCluster)
+		if err != nil {
+			return nil, err
+		}
+		for _, cr := range clusters {
+			cl, _ := cr.Data["cluster"].(map[string]any)
+			groups, _ := cl["node_groups"].([]any)
+			for _, raw := range groups {
+				if g, _ := raw.(map[string]any); names(g["image_id"]) {
+					out = append(out, fmt.Sprintf("cluster %s of project %s, node group %v", cr.ExternalID, cr.ProjectID, g["name"]))
+				}
+			}
+		}
+	}
+	if h.platform != nil {
+		installs, err := h.platform.List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, in := range installs {
+			used := in.Spec.NodeImage.Templates[node] == vmid
+			for _, c := range in.Status.Clusters {
+				used = used || c.Templates[node] == vmid
+			}
+			if in.ServiceID == serviceID && used {
+				out = append(out, fmt.Sprintf("managed-services platform %q", in.Name))
+			}
+		}
+	}
+	slices.Sort(out)
+	return out, nil
+}
+
+func (h *Handler) templateUpdatesDelete(w http.ResponseWriter, r *http.Request) {
+	if !h.require(w, r, templateUpdatesManagePerm) || !h.templateUpdatesReady(w) {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	svc, err := h.importService(r.Context(), id)
+	if err != nil {
+		templateUpdatesErr(w, err)
+		return
+	}
+	_, ps, err := h.lifecyclePVE(r.Context(), svc)
+	if err != nil {
+		templateUpdatesErr(w, err)
+		return
+	}
+	res, err := h.templateUpdates.Delete(r.Context(), ps.C, h.templateUsers, id)
+	if err != nil {
+		templateUpdatesErr(w, err)
+		return
+	}
+	audit.RecordSnapshots(r.Context(), map[string]any{"deleted": false}, map[string]any{"deleted": true, "action": "delete", "importId": id,
+		"digest": res.Digest, "slug": res.Slug, "serviceId": res.ServiceID, "deletedVmids": res.Changed, "unchanged": res.Unchanged})
 	httpx.OK(w, res)
 }
