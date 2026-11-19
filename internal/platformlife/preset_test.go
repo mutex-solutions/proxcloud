@@ -380,6 +380,81 @@ func TestPlannedMemory(t *testing.T) {
 	}
 }
 
+// Lab round 2, G2F-2: on an installed platform a control plane count above the one a run built is a change of the
+// plan, and where the node has no room for it the capacity row fails and the plan blocks, with the numbers. What a run
+// already placed only warns and blocks nothing, however full the node is.
+func TestControlPlaneGrowth(t *testing.T) {
+	const gi = 1 << 30
+	cur, err := Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Seed 4, three groups of one = 16 GiB on pve1, and the control plane's machines and one more, 4 GiB each.
+	run := func(built, asked, nodeGiB int) (Plan, Check, []string) {
+		t.Helper()
+		in := validInstallation(t)
+		in.ID = "pi-0a1b2c3d"
+		for i := range in.Spec.Clusters[0].NodeGroups {
+			in.Spec.Clusters[0].NodeGroups[i].Nodes = []string{"pve1"}
+		}
+		in.Spec.Clusters[0].ControlPlane.Replicas = asked
+		in.Status = Status{BOM: &BOMRef{Release: cur.Release, SHA256: cur.SHA256}, Clusters: []ClusterStatus{{Name: ClusterName}}}
+		if built > 1 {
+			in.Status.Clusters[0].ControlPlaneReplicas = built
+		}
+		f := &preflightPVE{extra: map[string]string{"/nodes": `[{"node":"pve1","status":"online","maxmem":` + strconv.Itoa(nodeGiB*gi) + `}]`, "/cluster/resources": `[]`}}
+		srv := httptest.NewServer(http.HandlerFunc(f.serve))
+		defer srv.Close()
+		pf := Preflight{Installation: in, CAPI: f.client(t, srv.URL, pve.CAPITokenID)}
+		plan, err := PlanFor(in, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plan, pf.capacity(context.Background()), pf.GrowthBlocking(context.Background())
+	}
+
+	// 1 -> 3 with room for four (32 GiB): listed, not blocked. The groups' spares do not fit, which stays a warning.
+	plan, row, blocking := run(1, 3, 32)
+	if len(plan.Changes) != 1 || len(plan.Blocking) != 0 || len(blocking) != 0 || row.Status != CheckWarn {
+		t.Fatalf("1 -> 3 that fits: plan %+v, row %+v, blocking %v", plan, row, blocking)
+	}
+	if c := plan.Changes[0]; c.Cluster != ClusterName || c.Name != "controlPlane.replicas" || c.From != "1" || c.To != "3" || c.Stage != stageCluster ||
+		c.Impact != "The apply adds 2 control plane machines on node pve1." || c.Blocking != "" {
+		t.Fatalf("the change of 1 -> 3: %+v", c)
+	}
+	// 1 -> 3 with room for three and not four: listed, and blocked with the numbers.
+	plan, row, blocking = run(1, 3, 31)
+	if len(plan.Changes) != 1 || plan.Changes[0].To != "3" || row.Status != CheckFail || len(blocking) != 1 || blocking[0] != row.Message {
+		t.Fatalf("1 -> 3 that does not fit: plan %+v, row %+v, blocking %v", plan, row, blocking)
+	}
+	for _, part := range []string{"Node pve1: the settings place 32 GiB of memory there, and 31 GiB can be reserved (31 GiB in the node, less 0 GiB configured",
+		"The settings take the control plane of pc-platform from 1 to 3 machines there"} {
+		if !strings.Contains(row.Message, part) {
+			t.Errorf("no %q in the failed row: %s", part, row.Message)
+		}
+	}
+	// Unchanged and over capacity (three run, or one runs, on a node that lost its room): a warning, no change, no block.
+	for _, n := range []int{1, 3} {
+		plan, row, blocking = run(n, n, 16)
+		if len(plan.Changes) != 0 || len(plan.Blocking) != 0 || len(blocking) != 0 || row.Status != CheckWarn || strings.Contains(row.Message, "from 1 to 3") {
+			t.Fatalf("%d of %d over capacity: plan %+v, row %+v, blocking %v", n, n, plan, row, blocking)
+		}
+	}
+	// A 1 saved over a 3 that a run built is refused at the save (ControlPlaneShrink); a record that has it is no growth.
+	if plan, _, blocking = run(3, 1, 16); len(plan.Changes) != 0 || len(blocking) != 0 {
+		t.Fatalf("3 built, 1 asked: plan %+v, blocking %v", plan, blocking)
+	}
+	// A new installation lists its components, not a count, and no token means no read.
+	in := validInstallation(t)
+	in.Spec.Clusters[0].ControlPlane.Replicas = 3
+	if plan, err := PlanFor(in, ""); err != nil || len(plan.Changes) != len(cur.Components) {
+		t.Fatalf("a new installation with three: %+v %v", plan, err)
+	}
+	if b := (Preflight{Installation: in}).GrowthBlocking(context.Background()); b != nil {
+		t.Fatalf("without the CAPI token: %v", b)
+	}
+}
+
 // The capacity row counts as CAPMOX does before a clone: the node's memory less the configured memory of every VM and
 // container on it that is not a template, running or not, and not this installation's own. Three control plane
 // machines need room for four. Before the first install a node without room fails; after it, and when the nodes

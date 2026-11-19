@@ -92,6 +92,12 @@ func TestStartApply(t *testing.T) {
 	if err := startApply(&Run{}, in, "", "upgrade lab to 0.9.0"); !errors.Is(err, ErrBadConfirm) {
 		t.Fatalf("a confirmation without a target: %v", err)
 	}
+	// Lab round 2, finding R2-3: the installed BOM as the target is named as such, whatever the confirmation.
+	for _, confirm := range []string{"", "upgrade lab to 0.9.0"} {
+		if err := startApply(&Run{}, in, old.SHA256, confirm); !errors.Is(err, ErrSameBOM) || in.Status.TargetBOM != nil {
+			t.Fatalf("the installed BOM as targetBom, confirm %q: %v", confirm, err)
+		}
+	}
 	if err := startApply(run, in, cur.SHA256, "upgrade lab to 0.9.0"); err != nil || run.BOM != refOf(cur) || run.FromBOM == nil || *run.FromBOM != ref ||
 		in.Status.TargetBOM == nil || *in.Status.TargetBOM != refOf(cur) || *in.Status.BOM != ref {
 		t.Fatalf("the upgrade's first run: %+v, status %+v, %v", run, in.Status, err)

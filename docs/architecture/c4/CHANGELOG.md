@@ -18,6 +18,32 @@ and workers without it, and its tenant workers stayed stopped after a node reboo
 finding G2F-1).
 
 **Diagrams:** none changed. `c3-components.md`: the Sync job row names `startAtBoot`.
+## 2026-11-19: texts of the upgrade plan, the wave message, `bom_installed`, the join log filter
+
+**What changed:** no component, container or relation. "Platform installations": the plan's impact texts say that
+ArgoCD syncs, and runs a hook, only where the new chart renders an object differently; a stage's progress reads
+`step N of M, wave W` with the BOM's wave number; an apply that names the installed BOM as `targetBom` is refused
+with `409 bom_installed`. The join log readout of a worker (`internal/platform/admin/kamajimachines.go`) drops the
+SSH host key output and cloud-init's tables also behind the time stamp every line of a real log begins with.
+
+**Why:** findings R2-1, R2-2, R2-3 and G2F-4 of the second lab round of 0.9.0-rc.1: three of four chart moves were
+not synced and no hook ran, the plan and the run numbered waves differently, the wrong target was answered as a
+wrong confirmation, and the key art filter never matched.
+
+**Diagrams:** none changed.
+## 2026-11-19: a larger control plane is a change of the plan, and blocks where it does not fit
+
+**What changed:** no component, container or relation. C3, "Platform installations": the plan of an installed
+platform (`plan.go`) lists a control plane count above the one a run built (`status.clusters[].controlPlaneReplicas`)
+as a change; the `capacity` row (`capacity.go`) fails on an installed platform for that growth when its node has no
+room, and still warns for what a run placed; `GET …/plan` reads the nodes with the CAPI token when the plan has such
+a change and puts the failed row in `blocking`.
+
+**Why:** lab round 2 of v0.9.0-rc.1, finding G2F-2: 3 saved over 1 on a node without room was accepted, the Check
+stayed ok with a warning and the plan showed no change and nothing blocking, so the apply would have met a machine
+CAPMOX refuses for good. The plan compared BOMs only, and the row made every finding a warning once installed.
+
+**Diagrams:** none changed. `c3-components.md`: the row "Platform installations".
 
 **Not verified:** on a lab.
 

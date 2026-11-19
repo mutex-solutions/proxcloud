@@ -241,7 +241,7 @@ func TestWaveGating(t *testing.T) {
 		t.Fatalf("volumes recorded while wave 1 is pending: %+v", in.Status.Volumes)
 	}
 	s := p.stage(stageWorkloadPlatform)
-	if s.Code != CodeComponentUnhealthy || s.Progress != "wave 1 of 4" || len(s.Items) != 1 || s.Items[0].ID != "pc-platform-cilium" ||
+	if s.Code != CodeComponentUnhealthy || s.Progress != "step 1 of 4, wave 0" || len(s.Items) != 1 || s.Items[0].ID != "pc-platform-cilium" ||
 		p.seed.obj(appsPath+"pc-platform-cilium") == nil || p.seed.obj(appsPath+"pc-platform-cert-manager") != nil {
 		t.Fatalf("wave 1 not Synced: %+v", s)
 	}
@@ -278,7 +278,7 @@ func TestWaveStallDeadline(t *testing.T) {
 	p := newPlatform(t, RunApply)
 	p.only(stageWorkloadPlatform)
 	p.seed.unsynced["pc-platform-cert-manager"] = true
-	if end := p.once(); end != "defer:waiting_workload_platform" || p.stage(stageWorkloadPlatform).Progress != "wave 2 of 4" {
+	if end := p.once(); end != "defer:waiting_workload_platform" || p.stage(stageWorkloadPlatform).Progress != "step 2 of 4, wave 1" {
 		t.Fatalf("end %s: %+v", end, p.stage(stageWorkloadPlatform))
 	}
 	first := p.stage(stageWorkloadPlatform)
@@ -287,7 +287,7 @@ func TestWaveStallDeadline(t *testing.T) {
 			t.Fatalf("end %s", end)
 		}
 	}
-	if s := p.stage(stageWorkloadPlatform); !s.Deadline.Equal(*first.Deadline) || !s.LastProgressAt.Equal(*first.LastProgressAt) || s.Progress != "wave 2 of 4" {
+	if s := p.stage(stageWorkloadPlatform); !s.Deadline.Equal(*first.Deadline) || !s.LastProgressAt.Equal(*first.LastProgressAt) || s.Progress != "step 2 of 4, wave 1" {
 		t.Fatalf("the deadline moved while wave 2 is stuck: %v -> %v (%s)", first.Deadline, s.Deadline, s.Progress)
 	}
 	// Wave 1 pending again shows in the items and leaves the progress and the deadline where they were.
@@ -296,7 +296,7 @@ func TestWaveStallDeadline(t *testing.T) {
 	if end := p.once(); end != "defer:waiting_workload_platform" {
 		t.Fatalf("end %s", end)
 	}
-	if s := p.stage(stageWorkloadPlatform); !s.Deadline.Equal(*first.Deadline) || s.Progress != "wave 2 of 4" || len(s.Items) != 1 || s.Items[0].State != "OutOfSync/Degraded" {
+	if s := p.stage(stageWorkloadPlatform); !s.Deadline.Equal(*first.Deadline) || s.Progress != "step 2 of 4, wave 1" || len(s.Items) != 1 || s.Items[0].State != "OutOfSync/Degraded" {
 		t.Fatalf("wave 1 pending again: %+v", s)
 	}
 	p.mutate(func(run *Run, _ *Installation, _ *Secrets) {
@@ -396,7 +396,7 @@ func TestNodeWaitFollowsTheLowestWave(t *testing.T) {
 	p.only(stageWorkloadPlatform)
 	p.wl.objs["/api/v1/nodes/pc-platform-dbaas-pve3"]["status"] = map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "False"}}}
 	if end := p.once(); end != "defer:waiting_workload_platform" || p.stage(stageWorkloadPlatform).Code != CodeNodesTimeout ||
-		p.stage(stageWorkloadPlatform).Progress != "wave 1 of 4" || p.seed.obj(appsPath+"pc-platform-cert-manager") != nil {
+		p.stage(stageWorkloadPlatform).Progress != "step 1 of 4, wave 0" || p.seed.obj(appsPath+"pc-platform-cert-manager") != nil {
 		t.Fatalf("end %s: %+v", end, p.stage(stageWorkloadPlatform))
 	}
 }

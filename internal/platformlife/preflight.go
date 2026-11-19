@@ -28,7 +28,7 @@ const (
 // Check is one row of the preflight. The ids are part of the API (docs/api.md): flags, scheduler (a warning, present only while the job scheduler is off), spec, network, bridge (a failure before the
 // first install, a warning after it), isolation,
 // tenant-network and tenant-path (a warning or ok, never a failure; absent when the provider names no zone), csi-vmid (a warning or ok, never a failure), credentials,
-// machines (a warning or ok, never a failure; absent while the installation has no VM), capacity (a failure before the first install, a warning after it or when it cannot be read; absent while the CAPI token is not stored), privileges:capi, privileges:csi, privileges:kubemint, mint-scope, pool-fence, token-scope, iso-store-visibility,
+// machines (a warning or ok, never a failure; absent while the installation has no VM), capacity (a failure before the first install; after it a warning, and a failure only where the settings make a control plane larger than the one a run built and it does not fit; a warning when it cannot be read; absent while the CAPI token is not stored), privileges:capi, privileges:csi, privileges:kubemint, mint-scope, pool-fence, token-scope, iso-store-visibility,
 // boot-iso-grant, boot-iso, placement, boot-store (a failure when the store is missing or takes no disk image, a warning
 // when it holds other VMs' disks), pve-api-rule (a warning or ok, never a failure), images. A run's first stage fails preflight_failed with the failed rows as its items, or
 // isolation_not_enforced when isolation is the only one.
