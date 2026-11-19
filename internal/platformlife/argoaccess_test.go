@@ -1,10 +1,15 @@
 package platformlife
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 )
 
 var testArgo = &ArgoCDAccess{Address: "10.200.200.210", Sources: []string{"192.168.33.0/24", "10.8.0.0/24"}}
@@ -202,6 +207,30 @@ func TestArgoCDAddressRecorded(t *testing.T) {
 		t.Fatalf("the Application does not carry the address: %v", dig(app, "spec", "source", "helm", "valuesObject"))
 	}
 
+	// Other networks, the Service still holds the address and the Application is not synced yet: the record keeps the
+	// networks that are in force, so the plan keeps its row if the run ends here.
+	p = newPlatform(t, RunApply)
+	p.only(stageWorkloadPlatform)
+	p.mutate(func(_ *Run, in *Installation, _ *Secrets) {
+		in.Spec.Access.ArgoCD = &ArgoCDAccess{Address: testArgo.Address, Sources: []string{"10.8.0.0/24"}}
+		in.Status.ArgoCDURL, in.Status.ArgoCDSources = testArgo.URL(), testArgo.Sources
+	})
+	p.wl.put(argoServicePath, argoService(testArgo.Address))
+	p.seed.unsynced["pc-platform-argocd"] = true
+	if end := p.once(); end != "defer:waiting_workload_platform" || p.stage(stageWorkloadPlatform).Code != CodeComponentUnhealthy {
+		t.Fatalf("not synced: %s %+v", end, p.stage(stageWorkloadPlatform))
+	}
+	if _, in, _ := p.state.snapshot(); !slices.Equal(in.Status.ArgoCDSources, testArgo.Sources) {
+		t.Fatalf("networks recorded before the sync: %v", in.Status.ArgoCDSources)
+	}
+	delete(p.seed.unsynced, "pc-platform-argocd")
+	if end := p.until(10); end != "complete" {
+		t.Fatalf("end %s: %+v", end, p.stage(stageWorkloadPlatform))
+	}
+	if _, in, _ := p.state.snapshot(); !slices.Equal(in.Status.ArgoCDSources, []string{"10.8.0.0/24"}) {
+		t.Fatalf("networks after the sync: %v", in.Status.ArgoCDSources)
+	}
+
 	p = newPlatform(t, RunApply)
 	p.only(stageWorkloadPlatform)
 	p.mutate(func(_ *Run, in *Installation, _ *Secrets) {
@@ -243,5 +272,22 @@ func TestArgoCDAccessCheck(t *testing.T) {
 	in.Spec.Access.ArgoCD.Address = "10.200.200.50"
 	if c, _ := in.argoAccessCheck(nodes, false); c.Status != CheckFail || !strings.Contains(c.Message, "outside spec.clusters[0].metallbRange") {
 		t.Fatalf("an address Validate refuses: %+v", c)
+	}
+}
+
+// The row through Preflight.Run on a bridge-mode site, whose nodes' addresses no other row reads: an operator network
+// that is the node's own address warns, though it contains the network address of no management network.
+func TestArgoCDAccessCheckReadsNodeAddresses(t *testing.T) {
+	in := validInstallation(t)
+	for i := range in.Spec.Clusters[0].NodeGroups {
+		in.Spec.Clusters[0].NodeGroups[i].Nodes = []string{"pve1"}
+	}
+	in.Spec.Access.ArgoCD = &ArgoCDAccess{Address: "10.200.200.210", Sources: []string{"192.0.2.11/32"}}
+	f := &preflightPVE{}
+	srv := httptest.NewServer(http.HandlerFunc(f.serve))
+	t.Cleanup(srv.Close)
+	pf := Preflight{Installation: in, Site: Site{CIDRPool: "10.100.0.0/16"}, Portal: &pve.Service{C: f.client(t, srv.URL, pve.DefaultPlatformTokenID)}}
+	if c := checkMap(pf.Run(context.Background()))["argocd-access"]; c.Status != CheckWarn || !strings.Contains(c.Message, "192.0.2.11 (in 192.0.2.11/32)") {
+		t.Fatalf("the node's own address as an operator network: %+v", c)
 	}
 }

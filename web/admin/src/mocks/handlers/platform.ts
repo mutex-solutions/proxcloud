@@ -242,8 +242,8 @@ function ready(in_: Doc) {
   })
   // Stage 9 records where the platform cluster's ArgoCD answers, and clears it with the block.
   const argo = in_.spec.access?.argocd
-  if (argo) in_.status.argocdUrl = `https://${argo.address}`
-  else delete in_.status.argocdUrl
+  if (argo) Object.assign(in_.status, { argocdUrl: `https://${argo.address}`, argocdSources: argo.sources })
+  else { delete in_.status.argocdUrl; delete in_.status.argocdSources }
 }
 
 // The capacity row (internal/platformlife/capacity.go), with the nodes' free memory in place of the scheduler's count:
@@ -534,7 +534,8 @@ on("GET /admin/platform/installations/:id/plan", ({ params }) => {
   }
   // The settings against what a run built: the address of the platform cluster's ArgoCD (PlanFor, argoAccessChange).
   const argo = in_.spec.access?.argocd, from = in_.status.argocdUrl ?? "", to = argo ? `https://${argo.address}` : ""
-  const changes = installed && from !== to ? [{ cluster: "pc-platform", name: "access.argocd", from, to, class: "chart", stage: "workload-platform",
+  const built = (in_.status.argocdSources ?? []).join(), want = (argo?.sources ?? []).join()
+  const changes = installed && (from !== to || (argo && built !== want)) ? [{ cluster: "pc-platform", name: "access.argocd", from, to, class: "chart", stage: "workload-platform",
     impact: "The platform cluster's ArgoCD restarts: tenant clusters and databases keep running, their status in the consoles is stale for the restart. " +
       (argo ? `MetalLB announces ${argo.address} on the platform network. Only ${argo.sources.join(", ")} are let in. The certificate is self-signed (ArgoCD's own): the browser warns once.`
         : "MetalLB no longer announces the address and ArgoCD answers inside the cluster only, over plain HTTP, as before the address was set.") }] : []

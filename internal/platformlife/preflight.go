@@ -229,8 +229,14 @@ func (p Preflight) Run(ctx context.Context) []Check {
 		out = append(out, p.tenantPath(ctx, site, zones, err))
 	}
 
-	if c, has := in.argoAccessCheck(append(slices.Clone(site.Mgmt), site.NodeAddrs...), unread != nil); has {
-		out = append(out, c)
+	if in.Spec.Access.ArgoCD != nil {
+		// Every address the nodes hold, on every layout: the management networks alone do not name a node's address
+		// (a /32 operator network of the node itself is inside none of their network addresses), nor its leg on the
+		// platform bridge.
+		addrs, all, aerr := p.Portal.C.NodeAddresses(ctx)
+		if c, has := in.argoAccessCheck(addrs, aerr != nil || !all); has {
+			out = append(out, c)
+		}
 	}
 
 	// A warning, never a failure: see pve.CSIVMIDCheck.
@@ -800,8 +806,8 @@ func (p Preflight) tenantPath(ctx context.Context, site Site, zones []pve.SDNZon
 }
 
 // argoAccessCheck is the row argocd-access, present while spec.access.argocd is set: a failure on what Validate
-// refuses of the block, a warning when a source range contains an address of a Proxmox node (nodeAddrs, as CIDRs or
-// addresses with a prefix length) or when those were not read, ok otherwise. Where tenant traffic leaves under the
+// refuses of the block, a warning when a source range contains an address of a Proxmox node (nodeAddrs, each as a
+// /32: pve.NodeAddresses) or when those were not read, ok otherwise. Where tenant traffic leaves under the
 // node's address (SNAT), a tenant VM arrives from that address, and a source range cannot tell it from an operator.
 func (in *Installation) argoAccessCheck(nodeAddrs []string, unread bool) (Check, bool) {
 	a := in.Spec.Access.ArgoCD

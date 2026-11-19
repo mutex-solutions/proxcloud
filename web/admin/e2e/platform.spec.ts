@@ -351,17 +351,18 @@ test("the platform ArgoCD gets an address: the settings, the plan, the link afte
   // The apply records the address (set here: the mock has no apply of a settings change). The card links to it, says
   // how to sign in, and shows no password; the seed's ArgoCD keeps its port-forward.
   // The next save reads it.
-  await mock(page, `mockPlatform.installations[0].status.argocdUrl = "https://10.90.0.150"`)
+  // The networks on the card are the ones that run applied, not the ones saved since.
+  await mock(page, `Object.assign(mockPlatform.installations[0].status, { argocdUrl: "https://10.90.0.150", argocdSources: ["192.0.2.0/24", "198.51.100.7/32"] })`)
   await sources.fill("192.0.2.0/24")
   await page.getByRole("button", { name: "Save settings" }).click()
   const link = page.getByRole("link", { name: "Open the platform ArgoCD" })
   await expect(link).toHaveAttribute("href", "https://10.90.0.150")
-  await expect(page.getByText("from 192.0.2.0/24 only. The certificate is ArgoCD's own and self-signed")).toBeVisible()
+  await expect(page.getByText("from 192.0.2.0/24, 198.51.100.7/32 only. The certificate is ArgoCD's own and self-signed")).toBeVisible()
   await expect(page.getByLabel("platform ArgoCD password command", { exact: true })).toHaveText(
     "export KUBECONFIG=./lab-platform.kubeconfig\nkubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d; echo")
   await expect(page.getByText("What you change in ArgoCD by hand is undone by its next sync")).toBeVisible()
   await expect(page.getByLabel("seed ArgoCD commands", { exact: true })).toContainText("port-forward svc/argocd-server 8081:80")
-  await expect(page.getByRole("listitem").filter({ hasText: "access.argocd" })).toHaveCount(0)
+  await expect(page.getByRole("listitem").filter({ hasText: "access.argocd" })).toContainText("Only 192.0.2.0/24 are let in")
   await expectAccessible(page)
   // Both fields emptied: the block is cleared, and the plan says the address goes.
   await address.fill("")

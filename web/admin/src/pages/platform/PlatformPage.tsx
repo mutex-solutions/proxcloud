@@ -485,7 +485,7 @@ function Ready({ installation, live, loading, error, canManage, providers }: {
           <>
             <p>
               On the platform cluster: <a className="font-mono underline" href={argoUrl} target="_blank" rel="noreferrer" aria-label="Open the platform ArgoCD">{argoUrl}</a>,
-              from {(argo?.sources ?? []).join(", ") || "the operator networks"} only. The certificate is ArgoCD's own and self-signed, so the browser warns once:
+              from {(installation.status.argocdSources ?? []).join(", ") || "the operator networks"} only. The certificate is ArgoCD's own and self-signed, so the browser warns once:
               an IP address gets no publicly trusted certificate.
             </p>
             <p>

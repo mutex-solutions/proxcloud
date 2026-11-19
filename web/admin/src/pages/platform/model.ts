@@ -46,6 +46,7 @@ export type Installation = {
     providers?: { kubernetes?: string; database?: string }
     tenantsAttach?: Attach // the choice the last run applied
     argocdUrl?: string // where the platform cluster's ArgoCD answers, once a run saw its Service hold the address
+    argocdSources?: string[] // the networks let in there, as the last run applied them (not the saved settings)
   }
   schedulerNote?: string // set while the job scheduler is off: what tenants miss and the command that turns it on
   lastRunId?: string

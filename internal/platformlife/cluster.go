@@ -1336,6 +1336,9 @@ func (x *acq) argoAddress(ctx context.Context, wl *kamajik8s.Client, passed bool
 		return classify(CodeWorkloadUnreachable, err)
 	}
 	if holds(svc) {
+		if !passed { // the address is there; the networks let in are the rendered ones only once the wave is Synced
+			return nil
+		}
 		return set(a.URL(), slices.Clone(a.Sources))
 	}
 	if !passed && (str(svc, "spec", "type") != "LoadBalancer" || str(svc, "metadata", "annotations", argoAddressAnnotation) != a.Address) {
