@@ -29,8 +29,10 @@ const (
 // PlanChange is one difference: a component (Cluster and Name), a top-level pin (Name only), or a control plane the
 // settings make larger than the one a run built (Cluster is the platform cluster's name, Name controlPlane.replicas,
 // From and To the counts, with Stage and Impact), or the cluster firewall rule a run writes because Proxmox does not
-// hold it (Name pve-api-rule, class site: Plan.ListAPIAccess). From "" is an install, To "" a removal. Class and Wave
-// are set in an upgrade plan only, Stage and Impact there, on a count and on the rule.
+// hold it (Name pve-api-rule, class site: Plan.ListAPIAccess), or the address of the platform cluster's ArgoCD (Name
+// access.argocd, class chart: From and To the URLs). From "" is an install, To "" a removal. Class and Wave
+// are set in an upgrade plan only (Class also on the address), Stage and Impact there, on a count, on the rule and on
+// the address.
 type PlanChange struct {
 	Cluster  string `json:"cluster,omitempty"`
 	Name     string `json:"name"`
@@ -129,8 +131,9 @@ func refOf(b Embedded) BOMRef { return BOMRef{Release: b.Release, SHA256: b.SHA2
 // Upgrade the plan of the move to it (or to target, the sha256 of a BOM this build embeds). While an upgrade is in
 // progress Target is its target and Upgrade that move: no apply goes back. When that target is the BOM of an earlier
 // build, Replacement is the move to this build's. An installed BOM this build does not embed blocks with
-// bom_unsupported. Changes of an installed platform are the control plane counts above what a run built; whether the
-// new machines fit needs a read of Proxmox, which the route adds to Blocking (Preflight.GrowthBlocking).
+// bom_unsupported. Changes of an installed platform are the control plane counts above what a run built (whether the
+// new machines fit needs a read of Proxmox, which the route adds to Blocking: Preflight.GrowthBlocking) and the
+// address of the platform cluster's ArgoCD where the settings differ from what a run built (argoAccessChange).
 func PlanFor(in *Installation, target string) (Plan, error) {
 	cur, err := Current()
 	if err != nil {
@@ -152,6 +155,9 @@ func PlanFor(in *Installation, target string) (Plan, error) {
 			p.Changes = append(p.Changes, PlanChange{Cluster: in.Status.Clusters[i].Name, Name: "controlPlane.replicas", From: strconv.Itoa(from), To: strconv.Itoa(to),
 				Stage: stageCluster, Impact: fmt.Sprintf("The apply adds %d control plane machines on node %s.", to-from, c.ControlPlane.Node)})
 		}
+	}
+	if c := in.argoAccessChange(); c != nil {
+		p.Changes = append(p.Changes, *c)
 	}
 	if _, ok := Lookup(in.Status.BOM.SHA256); !ok {
 		p.Blocking = append(p.Blocking, ErrBOMNotHere.Error())
@@ -181,6 +187,36 @@ func PlanFor(in *Installation, target string) (Plan, error) {
 		}
 	}
 	return p, nil
+}
+
+// argoAccessChange is the plan row access.argocd of an installed platform: spec.access.argocd against what a run built
+// (status.argocdUrl and status.argocdSources). nil when they agree.
+func (in *Installation) argoAccessChange() *PlanChange {
+	a, st := in.Spec.Access.ArgoCD, in.Status
+	c := &PlanChange{Name: "access.argocd", From: st.ArgoCDURL, Class: ClassChart, Stage: stageWorkloadPlatform}
+	if len(in.Status.Clusters) > 0 {
+		c.Cluster = in.Status.Clusters[0].Name
+	}
+	const restart = "The platform cluster's ArgoCD restarts: tenant clusters and databases keep running, their status in the consoles is stale for the restart. "
+	built := st.ArgoCDURL != "" || len(st.ArgoCDSources) > 0 // a run rendered the block, with or without getting the address
+	switch {
+	case a == nil && !built:
+		return nil
+	case a == nil:
+		c.Impact = restart + "MetalLB no longer announces the address and ArgoCD answers inside the cluster only, over plain HTTP, as before the address was set."
+	case st.ArgoCDURL == a.URL() && slices.Equal(st.ArgoCDSources, a.Sources):
+		return nil
+	default:
+		c.To = a.URL()
+		c.Impact = fmt.Sprintf("MetalLB announces %s on the platform network. Only %s are let in. The certificate is self-signed (ArgoCD's own): the browser warns once. "+
+			"No password is set or shown: sign in as admin with the password read through the platform kubeconfig.", a.Address, strings.Join(a.Sources, ", "))
+		if !built {
+			c.Impact = restart + c.Impact + " If the address is taken the run fails with " + CodeArgoCDAddressUnavailable + " and the platform keeps serving."
+		} else {
+			c.Impact = "ArgoCD does not restart. " + c.Impact
+		}
+	}
+	return c
 }
 
 // move decides the BOM an apply of in runs with. target is the sha256 the apply names ("" = none): without one an

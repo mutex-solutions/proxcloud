@@ -1,0 +1,9 @@
+configs.params: null
+server:
+  service:
+    annotations:
+      metallb.io/loadBalancerIPs: 10.200.200.210
+    loadBalancerSourceRanges:
+      - 192.168.33.0/24
+      - 10.8.0.0/24
+    type: LoadBalancer

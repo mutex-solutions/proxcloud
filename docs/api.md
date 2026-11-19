@@ -656,6 +656,16 @@ are several, `errors.details.problems`.
   A create or a PUT whose spec says `all` also needs `admin:project:update` (`403` otherwise), as the bulk attach
   does. `status.kubernetesOffered` lists the Kubernetes versions that were offered on the Kubernetes provider: a run
   offers a version once.
+  The optional `access {argocd {address, sources[]}}` gives the platform cluster's ArgoCD (never the seed's) an
+  address: `address` is one IPv4 inside the cluster's `metallbRange`, `sources` 1 to 16 IPv4 CIDRs, none `/0`; both or
+  neither (`400 invalid_installation` names the field). It is not a fixed field: a PUT may set, change or leave it
+  out on an installed platform (a spec without it clears it), and the next apply renders it: the Service
+  `argocd/argocd-server` as a MetalLB `LoadBalancer` with that address and those source ranges, served over HTTPS
+  with ArgoCD's self-signed certificate. Stage 9 writes `status.argocdUrl` (`https://<address>`) and
+  `status.argocdSources` once the Service holds the address, and clears both when the block is gone;
+  `argocdSources` without `argocdUrl` means a run rendered the block and MetalLB did not give the address
+  (`argocd_address_unavailable`). No route returns an ArgoCD credential
+  ([managed-services.md](managed-services.md#an-address-for-the-platform-clusters-argocd)).
   An installation is answered with `schedulerNote` while the job scheduler is off: the text of the Check row
   `scheduler`. A spec that breaks a rule, or overlaps the provider's
   `cidrPool`, `sandboxCidrs` or public networks, or puts the MetalLB range in
@@ -715,7 +725,10 @@ are several, `errors.details.problems`.
   on; absent while it runs), `spec`, `network`, `bridge`, `isolation`, `tenant-network`, `tenant-path`, `csi-vmid`, `credentials`, `machines`, `capacity`,
   `privileges:capi`, `privileges:csi`, `privileges:kubemint`, `mint-scope`, `pool-fence`,
   `token-scope`, `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement`, `boot-store`,
-  `pve-api-rule`, `seed-backup` and `images`. `seed-backup` is present once the installation has a seed VM and never
+  `pve-api-rule`, `seed-backup`, `argocd-access` and `images`. `argocd-access` is present while the spec has
+  `access.argocd`: `fail` on an address or sources the spec check refuses, `warn` when a source range contains the
+  address of a Proxmox node (where tenant traffic leaves under that address, tenants then reach the ArgoCD login
+  page) or the nodes' networks could not be read, `ok` otherwise. `seed-backup` is present once the installation has a seed VM and never
   fails: `ok` when a store of the seed's node that the portal token can read holds a `vzdump` archive of the seed VM
   younger than 24 hours (the message names its time and store), `warn` when none is seen, with the newest older one
   and the stores whose backups the token could not read. `boot-store` fails when Proxmox has no storage of
@@ -814,7 +827,11 @@ are several, `errors.details.problems`.
   and when the node has no room for them `blocking` holds the message of the
   Check row `capacity`, with the numbers. The route reads the nodes with the CAPI
   token for that case alone; when they cannot be read nothing is added, and stage
-  1 of the apply, which runs the same row, decides (`preflight_failed`). It also holds
+  1 of the apply, which runs the same row, decides (`preflight_failed`). It holds
+  `{cluster: "pc-platform", name: "access.argocd", from, to, class: "chart", stage: "workload-platform", impact}`
+  when `spec.access.argocd` differs from what a run built (`status.argocdUrl`, `status.argocdSources`): `from` and
+  `to` are the URLs (`to` empty: the address is removed; both equal: only the sources change), and `impact` says
+  whether ArgoCD restarts, the address MetalLB announces and the networks let in. It also holds
   `{name: "pve-api-rule", to, class: "site", stage: "seed-vm", impact}` while the cluster firewall of
   Proxmox does not hold the rule `proxcloud:pve-api:<installation>` as the settings name it (a platform
   installed by 0.8.x, or a rule deleted or changed by hand): the run writes that one rule in stage 3.
@@ -943,6 +960,9 @@ are several, `errors.details.problems`.
   `vm-<vmid>`, `cds`, `secrets`). A stage keeps its items when it is done.
   On a run that replaces machines stage 7 has `progress` `step n of m`, one item per machine with its unit and
   where it stands, and the receipt field `rollChecked` (the last step whose comparison was read).
+  Stage 9 fails with `argocd_address_unavailable` when the spec names an ArgoCD address and MetalLB did not give it
+  to the platform cluster's `argocd-server` Service before the wave's deadline; the message names the Service that
+  holds it when one does.
   An upgrade run has `fromBom`; its codes `unexpected_rollout`, `capacity_short` and `rollout_stalled` (stage 7) and
   `tenants_unhealthy` (stage 9) are in
   [managed-services.md](managed-services.md#upgrade-between-boms).

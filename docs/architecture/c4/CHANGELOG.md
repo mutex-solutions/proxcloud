@@ -4,6 +4,27 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-20: the platform cluster's ArgoCD can be given an address (opt-in)
+
+**What changed:** no component or container. Component "Platform installations": `Spec.Access.ArgoCD`
+(`{address, sources[]}`, not a fixed field), `Status.ArgoCDURL` and `Status.ArgoCDSources`, the plan row
+`access.argocd` (`argoAccessChange`) and the Check row `argocd-access` (`argoAccessCheck`). Component "Platform
+runs": `componentPart` renders the block into the values of the Application `pc-platform-argocd` (Service type
+`LoadBalancer`, the MetalLB address annotation, `loadBalancerSourceRanges`, `server.insecure` left out); stage
+`workload-platform` reads the Service `argocd/argocd-server` on the platform cluster after the component's wave
+(`argoAddress`), records the URL, and waits then fails with `argocd_address_unavailable` when MetalLB gave no
+address. New relation, present only when the operator sets the block: an operator's browser reaches the platform
+cluster's ArgoCD over HTTPS at a MetalLB address, from the named networks. The seed's ArgoCD gets none.
+
+**Why:** the only way into that ArgoCD was a port-forward with a one-hour kubeconfig. The seed's is left out
+because its admin controls Cluster API and every machine. No credential is stored or returned: the sign-in stays
+ArgoCD's own `admin`, read through the existing break-glass route.
+
+**Diagrams:** `c3-components.md`: rows "Platform installations" and "Platform runs". No box or arrow changed in
+`c1-context.md` or `c2-containers.md`: the relation is optional and off by default.
+
+**Not verified:** on a lab; whether the platform cluster enforces the source ranges is the open point.
+
 ## 2026-11-20: an upgrade run replaces the platform cluster's machines, one unit at a time
 
 **What changed:** component "Platform runs": new file `internal/platformlife/roll.go`. Stage `cluster` of an upgrade

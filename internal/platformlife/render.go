@@ -41,6 +41,8 @@ type RenderInput struct {
 	// NodeImageLine is the Kubernetes provider's versions value for the BOM's Kubernetes version (NodeImageLine);
 	// "" = no node image is published on every node, and the provider is registered with no version of the run's.
 	NodeImageLine string
+	// ArgoCD is spec.access.argocd: the address of the platform cluster's ArgoCD (nil = none).
+	ArgoCD *ArgoCDAccess
 }
 
 // RenderNetwork is the platform network the seed and the workload VMs share. VLAN tags every NIC on Bridge (0 = none).
@@ -128,12 +130,15 @@ const (
 	GroupTaintKey = "proxcloud.io/node-group"
 	GroupSystem   = "system"
 	// ManagedBy marks every object the renderers write.
-	ManagedBy        = "proxcloud-platform"
-	argoNamespace    = "argocd"
-	argoProject      = "proxcloud-platform"
-	inCluster        = "https://kubernetes.default.svc"
-	csiNamespace     = "csi-proxmox"
-	defaultDatastore = "default"
+	ManagedBy     = "proxcloud-platform"
+	argoNamespace = "argocd"
+	argoServer    = "argocd-server" // the Service of chart argo-cd under release name argocd
+	// argoAddressAnnotation asks MetalLB for one address of its pool; a Service that asks for a taken one stays pending.
+	argoAddressAnnotation = "metallb.io/loadBalancerIPs"
+	argoProject           = "proxcloud-platform"
+	inCluster             = "https://kubernetes.default.svc"
+	csiNamespace          = "csi-proxmox"
+	defaultDatastore      = "default"
 )
 
 // WorkloadServer is the workload cluster's API as the seed ArgoCD's cluster Secret names it, and every workload
@@ -516,12 +521,26 @@ func componentPart(b *BOM, c Component, in RenderInput) (part, error) {
 		if err != nil {
 			return part{}, err
 		}
-		return part{values: map[string]any{
+		v := map[string]any{
 			"dex": map[string]any{"enabled": false}, "notifications": map[string]any{"enabled": false},
 			"applicationSet": map[string]any{"replicas": 0}, // the chart has no applicationSet.enabled
 			// cm: the health of what the tenant Applications render, which the providers read their status from.
 			"configs": map[string]any{"params": map[string]any{"server.insecure": true}, "cm": health},
-		}, pin: group}, nil
+		}
+		// With an address (spec.access.argocd) the Service is MetalLB's, for the operator networks only, and
+		// argocd-server serves HTTPS with the certificate it generates: server.insecure is left out, not set false.
+		// The three keys are those of chart argo-cd 10.14.0 (server.service.type, .annotations,
+		// .loadBalancerSourceRanges); the annotation is MetalLB's request for one address.
+		if a := in.ArgoCD; a != nil {
+			sources := make([]any, len(a.Sources))
+			for i, src := range a.Sources {
+				sources[i] = src
+			}
+			v["configs"] = map[string]any{"cm": health}
+			v["server"] = map[string]any{"service": map[string]any{"type": "LoadBalancer",
+				"annotations": map[string]any{argoAddressAnnotation: a.Address}, "loadBalancerSourceRanges": sources}}
+		}
+		return part{values: v, pin: group}, nil
 	case "workload/cnpg":
 		return part{pin: group}, nil
 	case "workload/proxmox-csi":

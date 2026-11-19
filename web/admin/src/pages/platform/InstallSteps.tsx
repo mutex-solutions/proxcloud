@@ -221,6 +221,19 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
       <H3>Tenants</H3>
       <AttachChoice value={form.attach} projects={projects} disabled={!canManage} onChange={(attach) => setForm({ ...form, attach })} />
 
+      <H3>Access</H3>
+      <p className="text-sm text-muted-foreground">
+        Optional, and it can be set, changed or cleared later. With both fields filled, the ArgoCD of the platform cluster (every tenant cluster and
+        database) answers at https://&lt;address&gt; after the next apply, with a self-signed certificate. Its admin can change everything on that cluster.
+        The seed's ArgoCD never gets an address.
+      </p>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field id="argoAddress" label="ArgoCD address (optional)" value={form.argoAddress} onChange={set("argoAddress")} disabled={!canManage} problems={problems} placeholder="10.90.0.150"
+          hint="One free address of the load balancer range. Tenants' load balancers draw from the same range." />
+        <Field id="argoSources" label="Operator networks" value={form.argoSources} onChange={set("argoSources")} disabled={!canManage} problems={problems} placeholder="192.0.2.0/24"
+          hint="Only these networks are let in, separated by commas. Where tenant traffic leaves under a Proxmox node's address (SNAT), a network that contains that address lets every tenant VM reach the login page: the Check warns." />
+      </div>
+
       <H3>Node groups</H3>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm text-muted-foreground">Three groups of worker machines. The machines of a group are spread over the nodes you choose. Counts, sizes and nodes can change later.</p>
@@ -882,6 +895,7 @@ export function ReviewStep({ installation, canManage, dirty, onInstall, onUpgrad
               {plan.data.changes.map((ch) => (
                 <li key={(ch.cluster ?? "") + ch.name}>
                   <span className="font-mono">{ch.name}</span>: {ch.from || "new"} → {ch.to || "removed"}{ch.blocking ? ` (blocked: ${ch.blocking})` : ""}
+                  {ch.impact ? <span className="block text-muted-foreground">{ch.impact}</span> : null}
                 </li>
               ))}
             </ul>

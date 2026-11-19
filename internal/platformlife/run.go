@@ -96,6 +96,9 @@ const (
 	CodeSeedNotUpgraded   = "seed_not_upgraded"  // the seed's k3s is not at the target yet: "Seed and node image" comes first
 	// CodeRolloutStalled: no machine of the unit a roll stands at moved for rollStall.
 	CodeRolloutStalled = "rollout_stalled"
+	// CodeArgoCDAddressUnavailable: the Service of the platform cluster's ArgoCD asked MetalLB for the address of
+	// spec.access.argocd and was not given it before stage 9's deadline.
+	CodeArgoCDAddressUnavailable = "argocd_address_unavailable"
 	// CodeBadPart: POST …/runs names a part that is neither "seed" nor empty (400).
 	CodeBadPart = "bad_part"
 )

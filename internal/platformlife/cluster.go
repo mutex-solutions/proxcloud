@@ -159,7 +159,7 @@ func (x *acq) renderInput() RenderInput {
 			mtu = z.MTU
 		}
 	}
-	in := RenderInput{ID: x.in.ID, Name: x.in.Name, Region: region, RegionName: str(x.es.Config, "regions", region, "displayName"),
+	in := RenderInput{ArgoCD: sp.Access.ArgoCD, ID: x.in.ID, Name: x.in.Name, Region: region, RegionName: str(x.es.Config, "regions", region, "displayName"),
 		PVEAPIURL: sp.PVEAPIURL, BootStorage: sp.Storage.Boot, SeedAddress: sp.Seed.Address, SSHKeys: sp.Seed.SSHKeys, Templates: templates, WorkerMTU: mtu,
 		Network: RenderNetwork{Bridge: sp.Network.Bridge, VLAN: sp.Network.VLAN, Gateway: sp.Network.Gateway, Prefix: prefix.Bits(), DNS: sp.Network.DNS, MTU: sp.Network.MTU},
 		Cluster: RenderCluster{Endpoint: c.Endpoint, NodeRange: []string{c.NodeRange}, MetalLBRange: c.MetalLBRange,
@@ -1247,9 +1247,12 @@ func (x *acq) workloadPlatform(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	stateful, first := -1, apps[0].c.Wave // the CNI's wave is the lowest, wherever the BOM lists it
+	stateful, first, argo := -1, apps[0].c.Wave, -1 // the CNI's wave is the lowest, wherever the BOM lists it
 	for _, a := range apps {
 		first = min(first, a.c.Wave)
+		if a.c.Name == argoNamespace {
+			argo = a.c.Wave
+		}
 		if a.c.Stateful {
 			stateful = max(stateful, a.c.Wave)
 		}
@@ -1266,9 +1269,14 @@ func (x *acq) workloadPlatform(ctx context.Context) error {
 	if err := x.tenantGate(ctx, wl, true); err != nil {
 		return err
 	}
-	return x.waves(ctx, seed, wl, apps, waveStall, func(wave int) error {
+	err = x.waves(ctx, seed, wl, apps, waveStall, func(wave int) error {
 		if wave == first {
 			if err := x.nodes(ctx, wl); err != nil {
+				return err
+			}
+		}
+		if wave == argo {
+			if err := x.argoAddress(ctx, wl, true); err != nil {
 				return err
 			}
 		}
@@ -1287,6 +1295,66 @@ func (x *acq) workloadPlatform(ctx context.Context) error {
 		}
 		return x.record(ctx, func(_ *Run, in *Installation, _ *Secrets) { in.Status.Volumes = vols })
 	})
+	// ArgoCD calls a LoadBalancer Service without an address Progressing, so a wave that waits may wait for the
+	// address: then the stage says so, and fails with that code at its deadline.
+	var se *stageErr
+	if errors.As(err, &se) && se.kind == kindWait && se.code == CodeComponentUnhealthy && x.in.Spec.Access.ArgoCD != nil {
+		if aerr := x.argoAddress(ctx, wl, false); aerr != nil {
+			return aerr
+		}
+	}
+	return err
+}
+
+// argoAddress records where the platform cluster's ArgoCD answers (spec.access.argocd): status.argocdUrl once the
+// Service argocd-server holds the address, nothing when the block is absent. A Service that asked for the address and
+// has none waits with argocd_address_unavailable, naming the Service that holds it when one does. passed: the
+// component's wave is Synced and Healthy; before that a Service that was not synced yet is the wave's own wait, and a
+// cleared block still has its address.
+func (x *acq) argoAddress(ctx context.Context, wl *kamajik8s.Client, passed bool) error {
+	a, st := x.in.Spec.Access.ArgoCD, &x.in.Status
+	set := func(url string, sources []string) error {
+		if st.ArgoCDURL == url && slices.Equal(st.ArgoCDSources, sources) {
+			return nil
+		}
+		return x.record(ctx, func(_ *Run, in *Installation, _ *Secrets) {
+			in.Status.ArgoCDURL, in.Status.ArgoCDSources = url, sources
+		})
+	}
+	if a == nil {
+		if !passed {
+			return nil
+		}
+		return set("", nil)
+	}
+	holds := func(svc map[string]any) bool {
+		ingress, _ := dig(svc, "status", "loadBalancer", "ingress").([]any)
+		return slices.ContainsFunc(ingress, func(i any) bool { m, _ := i.(map[string]any); return str(m, "ip") == a.Address })
+	}
+	svc, err := wl.GetService(ctx, argoNamespace, argoServer)
+	if err != nil {
+		return classify(CodeWorkloadUnreachable, err)
+	}
+	if holds(svc) {
+		return set(a.URL(), slices.Clone(a.Sources))
+	}
+	if !passed && (str(svc, "spec", "type") != "LoadBalancer" || str(svc, "metadata", "annotations", argoAddressAnnotation) != a.Address) {
+		return nil
+	}
+	holder := "no Service of the platform cluster holds it, so it is outside MetalLB's pool or MetalLB is not answering"
+	if all, err := wl.ListServicesAllNamespaces(ctx); err == nil { // best effort: the refusal stands without the name
+		for _, o := range all {
+			if holds(o) {
+				holder = "Service " + str(o, "metadata", "namespace") + "/" + str(o, "metadata", "name") + " holds it"
+			}
+		}
+	}
+	// Sources without a URL: the block was rendered and the address not given, which the plan of a later clear needs.
+	if err := set("", slices.Clone(a.Sources)); err != nil {
+		return err
+	}
+	return waiting(CodeArgoCDAddressUnavailable, "%s was not given to the platform's ArgoCD: %s. Pick a free address of the load balancer range (%s), "+
+		"save and apply again. The platform keeps serving: ArgoCD answers inside the cluster.", a.Address, holder, x.in.Spec.Clusters[0].MetalLBRange)
 }
 
 // nodes waits until every node of the workload is Ready and each group has its count of nodes carrying its label.

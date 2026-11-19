@@ -50,7 +50,27 @@ type Spec struct {
 	// builds it yet, so Validate refuses the block; a spec without it means "no sandbox service" and keeps meaning that,
 	// which makes the later release an addition for every stored record.
 	Sandbox *SandboxSpec `json:"sandbox,omitempty"`
+	// Access is what the operator opens to named networks. Not fixed: it may be set, changed and cleared on an
+	// installed platform, and the next apply makes it so.
+	Access Access `json:"access,omitzero"`
 }
+
+// Access holds the addresses the platform answers at beyond its API. ArgoCD nil = none: the platform cluster's ArgoCD
+// then stays a ClusterIP Service with plain HTTP, as every release before this field rendered it.
+type Access struct {
+	ArgoCD *ArgoCDAccess `json:"argocd,omitempty"`
+}
+
+// ArgoCDAccess gives the platform cluster's ArgoCD (tenant clusters and databases) an address: an IPv4 of the
+// cluster's MetalLB range, answered over HTTPS with ArgoCD's own self-signed certificate, for Sources only (CIDRs).
+// The seed's ArgoCD never gets one: its admin controls Cluster API and every machine.
+type ArgoCDAccess struct {
+	Address string   `json:"address"`
+	Sources []string `json:"sources"`
+}
+
+// URL is where the block makes ArgoCD answer.
+func (a *ArgoCDAccess) URL() string { return "https://" + a.Address }
 
 // SandboxSpec is the placement of the sandbox service (see Spec.Sandbox).
 type SandboxSpec struct {
@@ -162,6 +182,12 @@ type Status struct {
 	// provider (or found there). A run offers a version once: one the operator removed from the provider since is not
 	// added again by an apply, only by the route.
 	KubernetesOffered []string `json:"kubernetesOffered,omitempty"`
+	// ArgoCDURL is where the platform cluster's ArgoCD answers, written by stage 9 once the Service argocd-server holds
+	// the address of spec.access.argocd, with ArgoCDSources the networks let in then; both cleared by the apply that
+	// finds the block cleared. The plan compares the block with them. Sources without a URL: a run rendered the block
+	// and MetalLB did not give the address (argocd_address_unavailable).
+	ArgoCDURL     string   `json:"argocdUrl,omitempty"`
+	ArgoCDSources []string `json:"argocdSources,omitempty"`
 }
 
 // BOMRef names an embedded BOM by release and file sha256.
@@ -317,6 +343,9 @@ func (in *Installation) Normalize() {
 	}
 	if s.NodeImage.Mode == "" {
 		s.NodeImage.Mode = ImageBOM
+	}
+	if a := s.Access.ArgoCD; a != nil && a.Address == "" && len(a.Sources) == 0 {
+		s.Access.ArgoCD = nil // an empty block says what no block says
 	}
 	for i := range s.Clusters {
 		if s.Clusters[i].Name == "" {
@@ -524,6 +553,21 @@ func (in *Installation) Validate() error {
 		}
 		if nodesOK && lbsOK && nodes.overlaps(lbs) {
 			bad("%s.nodeRange and metallbRange overlap", f)
+		}
+		if a := s.Access.ArgoCD; a != nil && ci == 0 {
+			if addr, err := netip.ParseAddr(a.Address); err != nil || !addr.Is4() {
+				bad("spec.access.argocd.address %q is not an IPv4 address (set address and sources together, or leave the block out)", a.Address)
+			} else if lbsOK && !lbs.contains(addr) {
+				bad("spec.access.argocd.address %s is outside %s.metallbRange %s: MetalLB announces only addresses of that range", addr, f, c.MetalLBRange)
+			}
+			if len(a.Sources) == 0 || len(a.Sources) > maxAPISources {
+				bad("spec.access.argocd.sources: one to %d CIDRs, the networks the operators come from (set address and sources together, or leave the block out)", maxAPISources)
+			}
+			for _, src := range a.Sources {
+				if p, err := netip.ParsePrefix(src); err != nil || !p.Addr().Is4() || p.Bits() == 0 {
+					bad("spec.access.argocd.sources %q is not an IPv4 CIDR narrower than /0", src)
+				}
+			}
 		}
 
 		cp := c.ControlPlane
