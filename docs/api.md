@@ -767,7 +767,8 @@ are several, `errors.details.problems`.
   the end of `cidrPool`, with SNAT), a throwaway VM `pc-probe-<id>` cloned from an Ubuntu or Debian image
   on `node` (default: the control plane's node; it must host a platform machine) into `pc-templates`, with a fixed
   address in every zone. The image is resolved in the provider's catalog as a tenant's server create resolves one, and
-  only one of this portal's own is taken: a template that Template updates imported for this provider, or one that
+  only one of this portal's own is taken: a template that Template updates imported for this provider (a finished import whose
+  template at that node and VM id still has the import's name and source digest), or one that
   `config.templates` names with its VM id; the clone's disk goes to the store of the provider's default storage
   profile on that node. TCP connections
   through the guest agent, then both removed, on every path, with an 8 minute limit. A probe still `running` 12 minutes

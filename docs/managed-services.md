@@ -239,14 +239,24 @@ every node). What it does, with the portal token:
    gateway, over cloud-init) and starts it. The image is resolved as a tenant's server create
    resolves one, in the provider's catalog, from the copy on that node, and it must be this
    portal's own: a template that Template updates imported for this provider, or one the
-   provider's `config.templates` names with its VM id. Ubuntu before Debian, then the newest
-   version. A published template in `pc-templates` that is neither is never cloned: on a Proxmox
+   provider's `config.templates` names with its VM id. An import counts only when it finished
+   and the template now at its node and VM id still has the import's name and source digest
+   (the tag `pc-src-…`): Proxmox gives the VM id of a failed import, or of a template deleted by
+   hand, to the next VM. Ubuntu before Debian, then the newest build (the `pc-v-` stamp,
+   compared across images: a later build of Ubuntu 24.04 is taken before an earlier build of
+   26.04). A published template in `pc-templates` that is neither is never cloned: on a Proxmox
    cluster that several portals share it can be another party's. The clone's disk goes to the
    store a tenant server's disk goes to on that node (the provider's default storage profile;
    without one, the template's own store). Without such an image on that node the test stops
    before step 2 (`409 no_os_template`, which names the published templates it did not take):
    import and publish one under Template updates. With the scheduler off nothing is published by
-   itself. The answer of the start and the result name the image, its template, the node and the
+   itself. A site whose published images were all built outside Template updates (tagged by the
+   image pipeline) gets this refusal until it imports one. Naming a template in
+   `config.templates` with its VM id and node also satisfies the test, but it is not a setting
+   of the test only: such an entry replaces the discovered image of that slug in the tenant
+   catalog, with its copies on other nodes, so on a site with several nodes every tenant server
+   of that image is then created from that one template on that one node. Prefer the import; pin
+   only on a site with one node, or where that is what you want for tenants as well. The answer of the start and the result name the image, its template, the node and the
    store (`image`, `template`, `node`, `storage`).
 4. Through the guest agent it opens one TCP connection to each target (at most 8) and one to the
    platform cluster's own API address, each with a 5 second limit.
@@ -772,7 +782,10 @@ release** applies them.
 
 The control plane's node is fixed because every control plane machine is on it: another node means
 each of them made anew on that node, which no lab has run. To move it, remove the installation and
-install again. A group's nodes are not fixed. A node you add gets machines of the group. A node you
+install again. An installation on which a build of main before this rule saved another control
+plane node, without applying it, cannot be put back through the API either, and its next apply
+would build the control plane on the saved node: put the node back before you upgrade, or the
+stored record needs a correction by hand. A group's nodes are not fixed. A node you add gets machines of the group. A node you
 take away loses its machines of the group at the next apply: a volume on a store that is local to
 that node stays there, and a pod that uses it does not start on another node. The API cannot refuse
 that safely, because it does not record on which nodes a run built machines; it changes a group's

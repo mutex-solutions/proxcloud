@@ -707,7 +707,7 @@ func (p Preflight) tenantPath(ctx context.Context, site Site, zones []pve.SDNZon
 	}
 	if kind == "vlan" {
 		limit = reads + "\"Test the tenant path\" does not run in a VLAN zone (409 vlan_zone): a test network would need its own VLAN and gateway on your router, which ProxCloud cannot make. " +
-			"Open a connection from a tenant's server instead, once a tenant cluster exists: curl -k -m 5 https://<a tenant cluster's API address>:6443/healthz"
+			"Open a connection from a tenant's server instead, once a tenant cluster exists: curl -k -m 5 https://<a tenant cluster's API address>:6443/healthz."
 	}
 	zone := "The provider's default zone " + site.DefaultZone
 	var how string

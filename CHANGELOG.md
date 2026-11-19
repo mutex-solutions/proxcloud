@@ -251,13 +251,17 @@ Proxmox API.
   was an older template on an NFS store, the VM got no address from the zone's DHCP, and the test ended `error`
   without a verdict. The image is now resolved in the provider's catalog as a tenant's server create resolves
   one, from a template that Template updates imported for the provider or that `config.templates` names with its
-  VM id (Ubuntu before Debian, the newest version); the clone goes to the store of the provider's default
-  storage profile; and the VM gets a fixed address over cloud-init in every zone. The `202` answer and the result
+  VM id (Ubuntu before Debian, the newest build); the clone goes to the store of the provider's default
+  storage profile; and the VM gets a fixed address over cloud-init in every zone. An import counts only when it
+  finished and the template at its node and VM id still has the import's name and source digest, because
+  Proxmox reuses the VM id of a failed import or of a deleted template. A site whose images were all built
+  outside Template updates gets `409 no_os_template` until it imports one (a `config.templates` pin works too,
+  but it also changes the tenant catalog: see the guide). The `202` answer and the result
   name the image, its template, the node and the store (`image`, `template`, `node`, `storage`), and
   `409 no_os_template` names the published templates it did not take. Why the lab VM got no address was not
   determined (the VM is gone): the test no longer depends on it. New in the result: `notes`, what Proxmox may
   keep by itself, the DHCP mapping of the test VM's NIC in a zone with a DHCP server, with the files to clean.
-- **Managed services: the Check row `boot-store` lists running VMs of the pool `pc-templates`.** Every member of
+- **Managed services: the Check row `boot-store` lists VMs of the pool `pc-templates` that are no template.** Every member of
   that pool was skipped as the product's own, so VMs an operator had in the pool were not named among the disks
   the CSI token reaches. Only the pool's templates are left out now.
 - **Managed services: the Check row `tenant-path` of a VLAN tenant zone no longer points at a test that the zone
