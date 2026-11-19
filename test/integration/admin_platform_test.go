@@ -80,6 +80,17 @@ func TestAdminPlatformInstallations(t *testing.T) {
 			fmt.Fprintf(w, `{"data":{%q:{}}}`, r.URL.Query().Get("path"))
 			return
 		}
+		// The CAPI token reads the nodes' memory and the VMs for the plan of a larger control plane: 8 GiB each, no VM.
+		if strings.Contains(r.Header.Get("Authorization"), "capmox@pve!capi") {
+			switch r.URL.Path {
+			case "/api2/json/nodes":
+				fmt.Fprint(w, `{"data":[{"node":"pve1","status":"online","maxmem":8589934592},{"node":"pve2","status":"online","maxmem":8589934592},{"node":"pve3","status":"online","maxmem":8589934592}]}`)
+				return
+			case "/api2/json/cluster/resources":
+				fmt.Fprint(w, `{"data":[]}`)
+				return
+			}
+		}
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{"errors":{"fake":"nothing here"}}`))
 	}))
@@ -300,6 +311,16 @@ func TestAdminPlatformInstallations(t *testing.T) {
 	}
 	call("admin-sub", http.MethodPut, one, replicas(1, 4), http.StatusOK)
 	call("admin-sub", http.MethodPut, one, replicas(3, 5), http.StatusOK)
+	// The plan of that 3 on a platform whose run built one (lab round 2, G2F-2): the count is a change, and the nodes
+	// of 8 GiB have no room for it, so the plan blocks with the numbers.
+	if _, err := db.C(platformlife.InstallationCollection).SetByID(ctx, in.ID, pgdoc.M{"status": pgdoc.M{"phase": "ready",
+		"bom": pgdoc.M{"release": "0.7.0-dev", "sha256": "x"}, "clusters": []pgdoc.M{{"name": platformlife.ClusterName}}}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if a := string(call("admin-sub", http.MethodGet, one+"/plan", "", http.StatusOK).Data); !strings.Contains(a, `"name":"controlPlane.replicas","from":"1","to":"3"`) ||
+		!strings.Contains(a, "the settings place") || !strings.Contains(a, "from 1 to 3 machines there") {
+		t.Fatalf("the plan of 1 to 3 without room: %s", a)
+	}
 	// A run handed three to the cluster (stage 7 records it before the sync): from here 3 to 1 is refused.
 	if _, err := db.C(platformlife.InstallationCollection).SetByID(ctx, in.ID, pgdoc.M{"status": pgdoc.M{"phase": "ready",
 		"bom": pgdoc.M{"release": "0.7.0-dev", "sha256": "x"}, "clusters": []pgdoc.M{{"name": platformlife.ClusterName, "controlPlaneReplicas": 3}}}}, nil); err != nil {

@@ -58,8 +58,10 @@ func (in *Installation) PlannedMemoryMiB() (need, spare map[string]int) {
 
 // capacity is the capacity row. Before the first install a node without room for the machines and the control
 // plane's one more fails: the install would stop at a machine CAPMOX refuses, or build a control plane whose first
-// update does. A node that holds those and not the groups' spare machines warns. After the install the row only
-// warns: the machines run, and the row must not stop the apply that repairs them. A read that fails is a warning too.
+// update does. A node that holds those and not the groups' spare machines warns. After the install the row warns for
+// what a run already placed: the machines run, and the row must not stop the apply that repairs them. It fails for a
+// control plane the settings make larger than the one a run built (controlPlaneGrowth) on a node without the room:
+// those machines are not placed yet, and the apply would stop at one CAPMOX refuses. A read that fails is a warning.
 func (p Preflight) capacity(ctx context.Context) Check {
 	in := p.Installation
 	warn := func(msg string) Check { return Check{ID: "capacity", Status: CheckWarn, Message: msg} }
@@ -80,7 +82,14 @@ func (p Preflight) capacity(ctx context.Context) Check {
 		}
 	}
 	planned, spare := in.PlannedMemoryMiB()
+	grows := map[string]string{} // node -> the control plane that grows there
+	for i, c := range in.Spec.Clusters {
+		if from, to := in.controlPlaneGrowth(i); to > 0 {
+			grows[c.ControlPlane.Node] = fmt.Sprintf(" The settings take the control plane of %s from %d to %d machines there: an apply stops at this row until they fit.", in.Status.Clusters[i].Name, from, to)
+		}
+	}
 	var short, tight, unknown, fits []string
+	grown := false // a node is short where a control plane grows
 	for _, node := range slices.Sorted(maps.Keys(planned)) {
 		i := slices.IndexFunc(nodes, func(n pve.Node) bool { return n.Node == node })
 		if i < 0 || nodes[i].MaxMem == 0 {
@@ -90,7 +99,8 @@ func (p Preflight) capacity(ctx context.Context) Check {
 		room := max(nodes[i].MaxMem-taken[node], 0) >> 20
 		if int64(planned[node]) > room {
 			short = append(short, fmt.Sprintf("Node %s: the settings place %s of memory there, and %s can be reserved (%s in the node, less %s configured for the other VMs and containers on it).",
-				node, gib(planned[node]), gib(int(room)), gib(int(nodes[i].MaxMem>>20)), gib(int(taken[node]>>20))))
+				node, gib(planned[node]), gib(int(room)), gib(int(nodes[i].MaxMem>>20)), gib(int(taken[node]>>20)))+grows[node])
+			grown = grown || grows[node] != ""
 			continue
 		}
 		if int64(planned[node]+spare[node]) > room {
@@ -111,10 +121,23 @@ func (p Preflight) capacity(ctx context.Context) Check {
 	}
 	msg := strings.Join(append(append(short, tight...), unknown...), "\n") + "\nA machine that does not fit is refused and not tried again, at the install or at the first update of the control plane. " +
 		"Use smaller or fewer machines, fewer control plane machines, another node, or free memory on the node (a stopped VM counts with its configured memory)." + how
-	if in.Installed() {
+	if in.Installed() && !grown {
 		return warn(msg)
 	}
 	return Check{ID: "capacity", Status: CheckFail, Message: msg}
+}
+
+// GrowthBlocking is why an apply of an installed platform cannot add the machines its plan lists: the capacity row's
+// message when it fails, which after an install it does only for growth. nil when they fit, when the nodes cannot be
+// read or without the CAPI token: stage 1 of the apply runs the same row and decides.
+func (p Preflight) GrowthBlocking(ctx context.Context) []string {
+	if p.CAPI == nil {
+		return nil
+	}
+	if c := p.capacity(ctx); c.Status == CheckFail {
+		return []string{c.Message}
+	}
+	return nil
 }
 
 // gib writes MiB as GiB, with one decimal when it is not whole.

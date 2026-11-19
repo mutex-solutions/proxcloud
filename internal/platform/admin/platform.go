@@ -686,6 +686,14 @@ func (h *Handler) platformPlan(w http.ResponseWriter, r *http.Request) {
 	if platformStoreErr(w, err) {
 		return
 	}
+	// An installed platform's change adds machines: the capacity row says whether they fit, as stage 1 of the apply will.
+	if in.Installed() && len(plan.Changes) > 0 && h.esSvc != nil {
+		es, _ := h.esSvc.Get(r.Context(), in.ServiceID)
+		if sec, _ := h.platform.Secrets(r.Context(), in.ID); es != nil && sec != nil {
+			capi, _ := platformlife.TokenClient(es, sec.CAPI)
+			plan.Blocking = append(plan.Blocking, platformlife.Preflight{Installation: in, CAPI: capi}.GrowthBlocking(r.Context())...)
+		}
+	}
 	httpx.OK(w, plan)
 }
 
