@@ -298,3 +298,41 @@ func TestHeldPrivileges(t *testing.T) {
 		t.Errorf("a narrowed site: %q, %v; want nothing", got, err)
 	}
 }
+
+// A cluster made since the CSI gateway has no csi@pve token: the release lists the user's tokens and sends no delete
+// that PVE must answer with a 500. A token that is listed is deleted, a delete PVE refuses fails the release, and a
+// list that fails proves nothing, so the delete is sent.
+func TestRevokeClusterCSITokenOnlyWhenMinted(t *testing.T) {
+	list, listStatus, delStatus := `[{"tokenid":"gateway"}]`, http.StatusOK, http.StatusOK
+	var sent []string
+	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/access/users/csi@pve/token": func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(listStatus)
+			fmt.Fprintf(w, `{"data":%s}`, list)
+		},
+		"DELETE /api2/json/access/users/capmox@pve/token/pc-c-1": func(w http.ResponseWriter, r *http.Request) {
+			sent = append(sent, "capmox")
+			fmt.Fprint(w, `{"data":null}`)
+		},
+		"DELETE /api2/json/access/users/csi@pve/token/pc-c-1": func(w http.ResponseWriter, r *http.Request) {
+			sent = append(sent, "csi")
+			w.WriteHeader(delStatus)
+			fmt.Fprint(w, `{"data":null}`)
+		},
+	})
+	if err := c.RevokeClusterTokens(context.Background(), "pc-c-1"); err != nil || strings.Join(sent, ",") != "capmox" {
+		t.Fatalf("never minted: err %v, deletes sent %v, want the CAPI token alone", err, sent)
+	}
+	sent, list = nil, `[{"tokenid":"gateway"},{"tokenid":"pc-c-1"}]`
+	if err := c.RevokeClusterCSIToken(context.Background(), "pc-c-1"); err != nil || strings.Join(sent, ",") != "csi" {
+		t.Fatalf("minted by an earlier release: err %v, deletes sent %v", err, sent)
+	}
+	delStatus = http.StatusForbidden
+	if err := c.RevokeClusterCSIToken(context.Background(), "pc-c-1"); err == nil {
+		t.Fatal("a token that exists and cannot be deleted must fail the revoke")
+	}
+	sent, listStatus, delStatus = nil, http.StatusForbidden, http.StatusOK
+	if err := c.RevokeClusterCSIToken(context.Background(), "pc-c-1"); err != nil || strings.Join(sent, ",") != "csi" {
+		t.Fatalf("list refused: err %v, deletes sent %v, want the delete sent", err, sent)
+	}
+}

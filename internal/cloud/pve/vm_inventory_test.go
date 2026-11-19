@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"strings"
 	"testing"
@@ -13,7 +14,8 @@ import (
 
 // Explicit successful proof fixture: legacy tests formerly provided only a VM
 // page and thereby accidentally modeled a filtered/opaque inventory as a census.
-func fakeVMInventoryService(t *testing.T, page []ClusterResource, configs map[int]VMConfig) (*Service, []ClusterResource) {
+// overrides replace or add routes.
+func fakeVMInventoryService(t *testing.T, page []ClusterResource, configs map[int]VMConfig, overrides ...fakeRoutes) (*Service, []ClusterResource) {
 	t.Helper()
 	members := []PoolMember{}
 	for i := range page {
@@ -64,6 +66,9 @@ func fakeVMInventoryService(t *testing.T, page []ClusterResource, configs map[in
 		routes[path+"/pending"] = say(`{"data":[]}`)
 		routes[path+"/snapshot"] = say(`{"data":[]}`)
 		routes[path+"/status/current"] = say(`{"data":{"status":"running","qmpstatus":"running"}}`)
+	}
+	for _, o := range overrides {
+		maps.Copy(routes, o)
 	}
 	_, c := fakePVE(t, routes)
 	return &Service{C: c, ServiceID: "svc", PoolPrefix: "pc-"}, page

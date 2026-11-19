@@ -3,6 +3,7 @@ package templateupdates
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -324,17 +325,24 @@ func (f *atBootPVE) GetVMConfig(_ context.Context, _ string, vmid int) (pve.VMCo
 }
 
 func (f *atBootPVE) SetVMConfig(_ context.Context, node string, vmid int, params map[string]string, _ ...string) (pve.UPID, error) {
-	f.writes = append(f.writes, fmt.Sprintf("%s/%d onboot=%s digest=%s", node, vmid, params["onboot"], params["digest"]))
-	f.cfgs[vmid]["onboot"] = float64(1) // as the API's JSON reads
+	f.writes = append(f.writes, fmt.Sprintf("%s/%d onboot=%s vga=%s digest=%s", node, vmid, params["onboot"], params["vga"], params["digest"]))
+	if params["onboot"] != "" {
+		f.cfgs[vmid]["onboot"] = float64(1) // as the API's JSON reads
+	}
+	if params["vga"] != "" {
+		f.cfgs[vmid]["vga"] = params["vga"]
+	}
 	return "", nil
 }
 
 func (f *atBootPVE) WaitTask(context.Context, pve.UPID) error { return nil }
 
 // The sync sets onboot on a Kubernetes node template that an import of this portal for this provider holds and that
-// lacks it (one imported before v0.9.0), once. An OS template, a template of another provider or of nobody's receipt
-// (the site's own, another portal's, a pipeline build) and a VM that took a deleted template's id are not written.
-func TestStartNodeTemplatesAtBoot(t *testing.T) {
+// lacks it (one imported before v0.9.0), and vga std on a template of either variant whose display is a serial port
+// (one imported before v0.10.0), once and in one write. An OS template gets no onboot. A template of another provider
+// or of nobody's receipt (the site's own, another portal's, a pipeline build), a withdrawn import and a VM that took
+// a deleted template's id are not written.
+func TestSyncImportedTemplates(t *testing.T) {
 	k8s, osP := k8sPayload(), osPayload()
 	other := k8sPayload()
 	other.ServiceID = "svc2"
@@ -343,10 +351,12 @@ func TestStartNodeTemplatesAtBoot(t *testing.T) {
 		return pve.ClusterResource{Type: "qemu", VMID: vmid, Node: p.Node, Template: 1, Pool: pve.TemplatePool, Name: TemplateName(p), Tags: publishedTags(TemplateTags(p), p)}
 	}
 	cfg := func(r pve.ClusterResource) pve.VMConfig {
-		return pve.VMConfig{"name": r.Name, "tags": r.Tags, "template": 1, "digest": "d" + fmt.Sprint(r.VMID)}
+		return pve.VMConfig{"name": r.Name, "tags": r.Tags, "template": 1, "digest": "d" + fmt.Sprint(r.VMID), "vga": "serial0", "serial0": "socket"}
 	}
 	foreign := tpl(9216, k8s) // the same artifact imported by another portal: no receipt here
-	fake := &atBootPVE{rows: []pve.ClusterResource{tpl(9212, k8s), tpl(9213, osP), tpl(9214, other), foreign,
+	withdrawn := tpl(9217, k8s)
+	withdrawn.Tags = withdrawnTags(withdrawn.Tags) // this portal's import, withdrawn: kept as it is
+	fake := &atBootPVE{rows: []pve.ClusterResource{tpl(9212, k8s), tpl(9213, osP), tpl(9214, other), foreign, withdrawn,
 		{Type: "qemu", VMID: 9215, Node: "pve1", Pool: "pc-p1", Name: "web", Tags: "proxcloud"}}, cfgs: map[int]pve.VMConfig{}}
 	for _, r := range fake.rows {
 		fake.cfgs[r.VMID] = cfg(r)
@@ -357,18 +367,23 @@ func TestStartNodeTemplatesAtBoot(t *testing.T) {
 		{ID: "c", VMID: 9214, Step: StepSucceeded, Payload: other},
 		{ID: "d", VMID: 9215, Step: StepSucceeded, Payload: k8s}, // its template was deleted, the id is a tenant's server now
 		{ID: "e", VMID: 9216, Step: StepFailed, Payload: k8s},    // an import that failed after it took an id
+		{ID: "f", VMID: 9217, Step: StepSucceeded, Payload: k8s},
 	}
 	for pass := 1; pass <= 2; pass++ {
-		if err := StartNodeTemplatesAtBoot(context.Background(), fake, recs, "svc"); err != nil {
+		if err := SyncImportedTemplates(context.Background(), fake, recs, "svc"); err != nil {
 			t.Fatal(err)
 		}
-		if len(fake.writes) != 1 || fake.writes[0] != "pve1/9212 onboot=1 digest=d9212" {
-			t.Fatalf("pass %d wrote %v, want onboot on 9212 alone, once", pass, fake.writes)
+		want := []string{"pve1/9212 onboot=1 vga=std digest=d9212", "pve1/9213 onboot= vga=std digest=d9213"}
+		if !slices.Equal(fake.writes, want) {
+			t.Fatalf("pass %d wrote %v, want %v, once", pass, fake.writes, want)
 		}
 	}
+	if fake.cfgs[9212]["serial0"] != "socket" || fake.cfgs[9217]["vga"] != "serial0" {
+		t.Fatalf("the serial port must stay and a withdrawn template is not written: %v %v", fake.cfgs[9212], fake.cfgs[9217])
+	}
 	// The template changed between the list and the read (renamed by hand): no proof, no write.
-	fake.writes, fake.cfgs[9212] = nil, pve.VMConfig{"name": "mine", "tags": fake.rows[0].Tags, "template": 1}
-	if err := StartNodeTemplatesAtBoot(context.Background(), fake, recs, "svc"); err == nil || len(fake.writes) != 0 {
+	fake.writes, fake.cfgs[9212] = nil, pve.VMConfig{"name": "mine", "tags": fake.rows[0].Tags, "template": 1, "vga": "serial0"}
+	if err := SyncImportedTemplates(context.Background(), fake, recs, "svc"); err == nil || len(fake.writes) != 0 {
 		t.Fatalf("a template that is no longer the import's: err %v, wrote %v", err, fake.writes)
 	}
 }

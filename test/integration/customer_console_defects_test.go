@@ -74,7 +74,13 @@ func (f *consolePVE) service(t *testing.T) *pve.Service {
 		case path == "/nodes/pve1/qemu/101/status/current", path == "/nodes/pve1/qemu/102/status/current":
 			data(w, map[string]any{"status": "running", "qmpstatus": "running", "name": "web", "uptime": 30})
 		case path == "/nodes/pve1/qemu/101/config":
-			data(w, map[string]any{"name": "web", "scsi0": "z:vm-101-disk-0,size=8G", "net0": "virtio=AA:BB:CC:00:00:01,bridge=v1,firewall=1", "vga": "serial0", "serial0": "socket"})
+			// Running on a serial display, with a vga std an operator set by hand pending: only current=1 answers the
+			// display in effect. The portal itself never writes vga on a running VM.
+			vga := "std"
+			if r.URL.Query().Get("current") == "1" {
+				vga = "serial0"
+			}
+			data(w, map[string]any{"name": "web", "scsi0": "z:vm-101-disk-0,size=8G", "net0": "virtio=AA:BB:CC:00:00:01,bridge=v1,firewall=1", "vga": vga, "serial0": "socket"})
 		case path == "/nodes/pve1/qemu/102/config":
 			data(w, map[string]any{"name": "db", "scsi0": "z:vm-102-disk-0,size=8G", "net0": "virtio=AA:BB:CC:00:00:02,bridge=v10,firewall=1"})
 		case strings.Contains(path, "/tasks/") && strings.HasSuffix(path, "/status"):
@@ -348,7 +354,7 @@ func TestCustomerConsoleAcceptanceDefects(t *testing.T) {
 	})
 
 	// D13 and the console's first tab: the page asks what its socket cannot tell it. VM 101 shows its display on the
-	// serial port (vga serial0), VM 102 does not.
+	// serial port (vga serial0, with vga std pending until its next stop and start), VM 102 does not.
 	t.Run("GET_CONSOLE_STATE says where the display is and since when the server runs", func(t *testing.T) {
 		_, ids, call := consoleSite(t, &consolePVE{}, pgdoc.M{})
 		for vmid, serial := range map[string]bool{"101": true, "102": false} {
