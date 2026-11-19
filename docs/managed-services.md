@@ -13,7 +13,8 @@ are in [ADR 0009](adr/0009-managed-services-platform-lifecycle.md); the routes a
 > console. The install finished on one lab Proxmox VE cluster, on builds of main; what was run
 > there and what was not is in [Not verified on a lab yet](#not-verified-on-a-lab-yet). It is off
 > by default. v0.8.0 is the first release that carries it; one install was made on its published
-> images (a lab, 2026-11-18), none on those of v0.8.1 or v0.8.2: see [Not implemented yet](#not-implemented-yet).
+> images (a lab, 2026-11-18) and one on those of the candidate v0.9.0-rc.2 (the same lab,
+> 2026-11-19), none on those of v0.8.1, v0.8.2 or v0.9.0: see [Not implemented yet](#not-implemented-yet).
 
 Code: `internal/platformlife` (the installation model, the preflight, the runner and its stages, the
 renderers), `internal/platform/admin/platform.go` (the routes), `internal/cloud/pve/access.go` and
@@ -1954,8 +1955,10 @@ and ADR 0009, A2 and A8.
 
 One upgrade has run on a lab (2026-11-19, from the BOM of 0.8.0 to that of the candidate
 `v0.9.0-rc.1`, on a platform without a tenant cluster or a database): one run of 72.8 seconds,
-no machine replaced, no pod restarted. Nothing else in this section has run on a lab, and nothing
-on a production site. It says what the code and its
+no machine replaced, no pod restarted. On the candidate `v0.9.0-rc.2` the same lab saw the answer
+`409 bom_installed` and the plan that lists and blocks a control plane that does not fit. Nothing
+else in this section has run on a lab, and nothing on a production site. No upgrade has run on a
+platform that has a tenant cluster or a database. It says what the code and its
 tests do; [the lab tests it still owes](#what-the-upgrade-still-owes-a-lab) are listed at its end.
 
 A ProxCloud upgrade does not change an installed platform. The platform stays on the BOM that
@@ -1993,10 +1996,10 @@ charts list the installed version in `upgradeFrom`, and the release's check foun
 0.1.14 renders the platform cluster's control plane and templates as 0.1.13 did, so no machine is
 replaced. After the upgrade the platform can go from 1 to 3 control plane machines, Replace works,
 and new tenant clusters get the health check. A build of `main`, whose BOM is a `-dev` one,
-refuses the move for that reason alone; the release candidates `v0.9.0-rc.1` and `v0.9.0-rc.2`
-allow it, for a lab ([ci-release.md](ci-release.md#release-candidates)). From the BOM of 0.8.0 to
+refuses the move for that reason alone; the release `v0.9.0` allows it, as its candidates
+`v0.9.0-rc.1` and `v0.9.0-rc.2` did for a lab ([ci-release.md](ci-release.md#release-candidates)). From the BOM of 0.8.0 to
 that of `v0.9.0-rc.1` it was run on a lab without tenants (2026-11-19): six changes, and no machine
-replaced. Not run on a lab: the move from 0.8.1 or 0.8.2, the move to `0.9.0-rc.2`, three control
+replaced. Not run on a lab: the move from 0.8.1 or 0.8.2, the move to `0.9.0-rc.2` or to `0.9.0`, three control
 plane machines, and the health check on a cluster made before the upgrade.
 
 Every other difference refuses the whole upgrade, each with its own line in the plan and in the
@@ -2177,7 +2180,7 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 
 ## Not implemented yet
 
-- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2` (`main` carries a `-dev` one between releases, now `0.9.0-dev`; the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` carry `0.9.0-rc.1` and `0.9.0-rc.2`, release BOMs for a lab; `main` keeps both as previous BOMs). `--managed-services` needs v0.8.0 or later: no
+- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2`, that of v0.9.0 is `0.9.0` (`main` carries a `-dev` one between releases; the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` carry `0.9.0-rc.1` and `0.9.0-rc.2`, release BOMs for a lab; v0.9.0 keeps both as previous BOMs). `--managed-services` needs v0.8.0 or later: no
   earlier released image reads `PROXCLOUD_PLATFORM_ENABLED`, and the images of v0.8.0 exist once
   its tag's workflows have succeeded. For a test ahead of a release,
   `proxcloud-up.sh` takes a build of main as its version (`--version dev-<sha>`, `upgrade dev-<sha>`;
