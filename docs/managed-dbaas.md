@@ -329,6 +329,13 @@ registers its database provider with it, and an upgrade to this BOM writes it on
 existing database takes the change with `bump-chart`, once the provider pins
 0.5.2 or later; until then it keeps its budget.
 
+An upgrade of a managed-services platform that replaces the platform cluster's machines checks
+this before it starts: its plan lists every PodDisruptionBudget on the platform cluster that
+allows no disruption (`drain_blocked`, with namespace and name), and the replacement is refused
+until none is left. For a database that is the bump above
+([managed-services.md](managed-services.md#the-platform-clusters-machines)). The database is then
+down while its machine is replaced; take a backup of it first.
+
 ## Connection secrets (contract, pinned by TestConnectionSecretContract)
 
 | Engine | Secret | Exposed account |

@@ -859,6 +859,16 @@ are several, `errors.details.problems`.
   - `confirm` is the phrase a run that starts the upgrade must carry, present
     when it is allowed and not started. `inProgress` is true once a run toward
     `to` has started and none has succeeded (`status.targetBom`).
+  - `parts`, on a move that replaces the platform cluster's machines (entries of kind `machines`): its two actions,
+    `[{id: "seed"|"platform", done, allowed, confirm, blocking[]}]`. `allowed`, `confirm` and `blocking` of the
+    upgrade are then those of the platform part, the apply without a `part`. The seed part's phrase is `upgrade
+    <name> to <release>`; the platform part's is `upgrade <name> to <release> and replace its machines`, present
+    until the roll has begun (`status.clusters[0].roll`), also while `inProgress`. For such a move the route reads
+    the site and adds to the platform part's `blocking` every pre-check that fails, each `<code>: <message with its
+    fix>`: `node_image_missing`, `capacity_short`, `drain_blocked`, `platform_unhealthy`; `seed_not_upgraded` needs
+    no read. `changes` then begin with the entry `roll` (there is no way back), and carry one entry `roll/<unit>` per
+    unit (kind `machines`: what stops while it is replaced) and one `roll-vm/<unit>` (kind `site`: the VM cloned and
+    the VM deleted), with the decision "one more machine first" or "deleted first" of this read.
   - `seedBackup` is the preflight row `seed-backup`, read for this request, on a move that has a `seed` entry and
     has not started. While it is not `ok`, `blocking` also carries `seed_backup_missing: no backup of seed VM <vmid>
     younger than 24 hours is visible to the portal. Take one (vzdump <vmid>), or confirm that you took one the portal
@@ -873,7 +883,7 @@ are several, `errors.details.problems`.
   whether its API does not answer or refuses the stored credential, with the
   seed's address, VMID and node. The stored phase stays `ready`: a seed that
   went down shows only here.
-- `POST /installations/{id}/runs` `{kind: apply|remove, confirm, targetBom, seedBackupTaken}`: `202 {runId}`. A run
+- `POST /installations/{id}/runs` `{kind: apply|remove, confirm, targetBom, seedBackupTaken, part}`: `202 {runId}`. A run
   and its durable job (`platform.run/v1`, key `platform-run-<runId>`) are
   written in one transaction; `409 run_active` while another run of the
   installation is not finished, `409 bom_unsupported` when the installed BOM is
@@ -891,6 +901,15 @@ are several, `errors.details.problems`.
   sentence. `seedBackupTaken: true` says the operator took a backup the portal cannot see: the run starts without
   the read, and records it (`seedBackupTaken` on the run, and a change line in the audit entry of the request). It
   is ignored on every other run; a Retry of a started upgrade needs neither.
+  `part: "seed"` makes the apply the first of the two actions of an upgrade that replaces machines (the plan's
+  `parts`): its run has the stages `validate` to `seed-platform` only, ends succeeded with `status.targetBom` still
+  set, and has `part: "seed"`. Any other value, and `seed` on an apply that is no such upgrade, is `400 bad_part`.
+  Without `part` such an apply is the platform part. While its roll has not begun the route makes the plan's read
+  again and answers `409` with the first failed pre-check's code (`node_image_missing`, `capacity_short`,
+  `drain_blocked`, `platform_unhealthy`) and all of them in `details.reasons`, before it looks at `confirm`; a
+  reason of the plan itself (`seed_not_upgraded`) is `409 upgrade_refused`. `confirm` must then be the platform
+  part's phrase, whether the apply starts the upgrade (`targetBom`) or continues it (none). The run carries the
+  units replaced delete-first as `deleteFirst`. Once the roll has begun an apply takes neither.
   The run's `bom` is the target and `fromBom` the installed BOM; the installation
   records the target as `status.targetBom`. From then until a run succeeds,
   every apply (Retry) continues to that target without `targetBom` or `confirm`,
@@ -922,7 +941,9 @@ are several, `errors.details.problems`.
   machines of stage 7, and in a remove what was deleted, left or not checked
   (`tenants`, one item per machine, `cluster`, `volume-<name>`, `volumes`,
   `vm-<vmid>`, `cds`, `secrets`). A stage keeps its items when it is done.
-  An upgrade run has `fromBom`; its codes `unexpected_rollout` (stage 7) and
+  On a run that replaces machines stage 7 has `progress` `step n of m`, one item per machine with its unit and
+  where it stands, and the receipt field `rollChecked` (the last step whose comparison was read).
+  An upgrade run has `fromBom`; its codes `unexpected_rollout`, `capacity_short` and `rollout_stalled` (stage 7) and
   `tenants_unhealthy` (stage 9) are in
   [managed-services.md](managed-services.md#upgrade-between-boms).
   A Kubernetes `401` or `403` from the seed or the platform cluster is counted

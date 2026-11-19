@@ -132,7 +132,13 @@ The failed stage shows a code, a message and what to do.
 | `seed_k3s_refused` | The seed runs another k3s than the upgrade can start from. Nothing was changed; the message names both versions. |
 | `seed_k3s_timeout` | The platform cluster and your tenants keep running. If the seed answers again, **Retry**. While the stage is still trying there is nothing to do. If it failed and the seed does not answer, the message names the command that puts the previous k3s back on the seed. |
 | `upgrade_refused` | The upgrade to this ProxCloud's platform release is not possible: step 4 lists why. The platform stays on its release and **Apply this release** keeps working. |
-| `unexpected_rollout` | An upgrade would replace machines of the platform cluster. Nothing was synced. If you changed machine sizes or node groups together with the upgrade, put them back and **Retry**; otherwise install the ProxCloud release that corrects it: step 4 then shows **Upgrade to release X instead**. |
+| `node_image_missing` | A node the platform cluster uses has no template of the new release's node image. Nothing was changed. Run **Seed and node image** in step 4 first. |
+| `seed_not_upgraded` | The seed's k3s is not at the new release's version yet. Run **Seed and node image** first. |
+| `capacity_short` | A node has no room for the one more machine a replacement makes first. Nothing was changed; the message has the numbers. Free memory or disk space on that node (a stopped VM counts with its configured memory), then **Retry** or read the plan again. |
+| `drain_blocked` | A PodDisruptionBudget on the platform cluster allows no disruption, so a machine could never be emptied. Nothing was changed. For a database, bump its chart to 0.5.2 or newer; for anything else give it a second replica or delete the budget. |
+| `platform_unhealthy` | A machine of the platform cluster does not run, or a component is not healthy. The replacement of machines starts only on a healthy platform. Repair it with **Apply this release**, then read the plan again. |
+| `rollout_stalled` | No machine moved for 30 minutes. The message names the machine and, when a pod cannot be moved, the pod. What runs keeps serving. Correct the cause, then **Resume**. |
+| `unexpected_rollout` | An upgrade would replace machines of the platform cluster that it is not there to replace. Nothing of that step was synced. If you changed machine sizes or node groups together with the upgrade, put them back and **Retry**; otherwise install the ProxCloud release that corrects it: step 4 then shows **Upgrade to release X instead**. |
 | `tenants_unhealthy` | During an upgrade a tenant cluster or database that was healthy before is not. Look at the one the message names. **Retry** waits for it again: the upgrade goes on only when it is healthy or deleted. |
 | `bom_unsupported` | The platform was installed by a ProxCloud whose platform release this one does not carry (a development build, or a release from before 0.8.0), and a platform moves only between releases this ProxCloud carries. Go back to the ProxCloud that installed it. Or, if no tenant cluster or database must be kept, delete them all, then remove managed services and install again: **Remove** deletes the platform cluster. |
 | `credentials_missing` | Run the root command of step 2 and paste the `PC-ENROLL` line it prints, then **Retry**, or **Remove again** for a removal. |
@@ -166,10 +172,32 @@ Then:
 After a ProxCloud upgrade, step 4 compares the installed platform release with the one this ProxCloud carries and shows one of three things. None of it has run on a lab yet.
 
 - **Upgrade to release X**, with a table of what differs and what the run does for each entry. This release moves a platform when the two releases differ in ProxCloud's own charts or in the seed's k3s. Tenant clusters and databases keep running. The button asks you to type `upgrade <name> to <release>`. Take a backup of the seed VM and a dump of the portal database first, and do not change machine sizes or node groups in the same step.
-- **The platform stays on release Y**, with the reasons. A release that changes the Kubernetes version, an image, a Cluster API provider or a third-party chart cannot be moved to yet. Nothing is wrong with the platform, and **Apply this release** keeps working.
+- **Kubernetes upgrade to release X**, when the release carries another Kubernetes version or node image: see the next section.
+- **The platform stays on release Y**, with the reasons. A release that changes the seed image, a Cluster API provider or a third-party chart cannot be moved to yet. Nothing is wrong with the platform, and **Apply this release** keeps working.
 - **The upgrade to release X has not finished**: a run toward it started and did not succeed. **Retry** and **Apply this release** both continue to release X. Nothing goes back to release Y, which the record names until a run has succeeded. When release X belongs to an earlier ProxCloud than the one installed now, a second box, **Upgrade to release Z instead**, offers the move to this ProxCloud's release in its place: use it when the upgrade to X cannot finish.
 
 When the new release carries a newer k3s, the table has a row `seed.k3s` and three rows for what the run writes on the seed VM. The run replaces k3s on the seed and restarts it (stage 5a, "Upgrade the seed's k3s"). The seed is away for about a minute: meanwhile no machine is repaired or replaced and no run goes on, while the platform cluster, tenant clusters and databases keep serving. This upgrade starts only with a backup of the seed VM from the last 24 hours. Step 4 shows whether ProxCloud sees one; if it cannot read your backup store, tick **I took a backup of seed VM … that the portal cannot see**. No released platform carries a newer k3s yet, so this has not run on a lab.
+
+### A release with a newer Kubernetes
+
+Such an upgrade replaces every machine of the platform cluster with a new one. **There is no way back once the new control plane machine has joined**: nothing restores the old machines or the old version, and the page says so first. None of it has run on a lab, and the times below are expectations, not measurements.
+
+It takes two actions, each with its own button:
+
+1. **Seed and node image** imports the new node image on every node, moves the seed's k3s when the release names another, and moves the seed's own components. It replaces no machine and touches no tenant cluster or database. You type `upgrade <name> to <release>`.
+2. **Replace the machines** does the rest. You type `upgrade <name> to <release> and replace its machines`. It is offered only when the first action is done, every node has room for one more control plane machine, no PodDisruptionBudget blocks a machine from being emptied, and every machine and component is healthy; the page lists what it waits for, with what to do.
+
+The table under the buttons lists the units in the order they are replaced, the control plane first, then one node group and node at a time, and says for each what stops meanwhile:
+
+- **Control plane, one machine:** the platform cluster's API does not answer for an expected one to a few minutes. Meanwhile nothing on the platform can be created, changed or repaired, and the consoles show old status. Running tenant clusters and databases are expected to keep answering.
+- **system:** the platform's operators restart.
+- **kamaji, one machine:** every tenant cluster's API is away while it is replaced. Tenant workloads keep running.
+- **dbaas:** every database with one instance on the machine is down while it moves. Take a backup of each database first: if its volume does not follow, the backup is all there is.
+- **A unit marked "old machine deleted first"** has no room on its node for one more machine: everything on it is away for the whole replacement, and stays away if the new machine fails, until a retry succeeds.
+
+Your other VMs on the nodes are never touched: only the platform's own machines are replaced.
+
+While machines are replaced the run shows each machine and where it stands. **Pause** stops between two units (the machine being replaced is finished first) and **Resume** goes on; a paused platform with new and old machines is a supported state. No released platform carries a newer Kubernetes yet.
 
 The run has the same stages as an install. It adds a check before the platform cluster's chart is synced (it fails with `unexpected_rollout` instead of replacing machines) and, between the steps of stage 9, a wait until the tenants that were healthy before are healthy again (`tenants_unhealthy` while they are not). The operator guide (docs/managed-services.md, "Upgrade between BOMs") has the details and what to do when an upgrade cannot finish.
 

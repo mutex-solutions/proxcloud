@@ -522,6 +522,9 @@ func (x *acq) roll(ctx context.Context, seed *kamajik8s.Client, templates []Stag
 		}); err != nil {
 			return err
 		}
+	}
+	// A run that continues a roll starts the stall timer at its first look, in place of the stage's hour.
+	if !strings.HasPrefix(x.run.Stages[x.si].Progress, "step ") {
 		if err := x.progress(ctx, nil); err != nil {
 			return err
 		}
