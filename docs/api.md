@@ -707,10 +707,13 @@ are several, `errors.details.problems`.
   `token-scope`, `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement`, `boot-store`,
   `pve-api-rule` and `images`. `boot-store` fails when Proxmox has no storage of
   the boot store's name or it takes no disk images, and warns when the store also
-  holds disks of VMs that are not the platform's (listed with the CSI token, once both tokens are stored).
+  holds disks of VMs that are not the platform's (listed with the CSI token, once both tokens are stored; of the
+  pool `pc-templates` only the templates are left out, a VM of that pool that is no template is listed).
   `pve-api-rule` never fails: `ok` before the first install and when the cluster
   firewall holds the installation's rule (comment `proxcloud:pve-api:<id>`), `warn`
-  when an installed platform's rule is missing. A row's `status` is `ok`, `fail` or `warn`; `ok` in the answer is
+  when an installed platform's rule is missing. It reads the rule, not the traffic: the rule's sources are the
+  platform machines' addresses as the node sees them, and the message says that a site whose router translates
+  them needs a rule for the translated address. A row's `status` is `ok`, `fail` or `warn`; `ok` in the answer is
   false only when a row failed. `csi-vmid` never fails: it warns when a guest has VM id 9999
   (see the connection test's row of that id). `tenant-network` never fails. It reads the provider's default
   zone in Proxmox: `warn` when that zone has DHCP, when it does not exist yet and is
@@ -729,7 +732,8 @@ are several, `errors.details.problems`.
   the nodes it translates tenant traffic on, the nodes of the platform machines, and whether such a node holds the
   platform gateway on the platform bridge) and is `warn` when a node that translates also hosts a platform machine
   without routing the platform network, or when Proxmox could not be read; `ok` for mode `routed`. It opens no
-  connection, so `ok` does not prove that tenants reach the platform; `…/tenant-path-probe` below does ([managed-services.md](managed-services.md#the-path-from-tenants-to-the-platform)).
+  connection, so `ok` does not prove that tenants reach the platform; `…/tenant-path-probe` below does, and for a VLAN default
+  zone, where that probe is refused, the row names the check from a tenant's server ([managed-services.md](managed-services.md#the-path-from-tenants-to-the-platform)).
   `machines` never fails either, and is absent while the installation has no VM. It reads, with the CAPI
   token, the VMs of the pools `proxcloud-seed` and `proxcloud-system` that carry the installation's tag:
   `warn` with one line per VM that is stopped (start it in Proxmox, `qm start <vmid>`) or that has no
