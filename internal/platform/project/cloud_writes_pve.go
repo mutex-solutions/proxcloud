@@ -1031,8 +1031,8 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 	case "GET_CONSOLE_STATE":
 		// What the console page cannot learn from its socket. serialDisplay: the VM's display is its serial port (vga
 		// serial0, as templates made before v0.10.0 have it), so the graphical console shows one line and the serial one
-		// is the console. Read from the values in effect: the sync's vga std is pending on a VM until its next stop and
-		// start, and until then its display is still the serial port.
+		// is the console. Read from the values in effect: the portal writes vga only on a stopped VM, but an operator's qm
+		// set on a running one is pending until its next stop and start, and until then its display is the serial port.
 		// status and uptime: a session opened before the VM was stopped or started again is dead, and on production the
 		// socket of such a session stayed open (D13 of the acceptance).
 		vm, verr := ps.ResolveVM(ctx, proj.ID, cr.ExternalID)

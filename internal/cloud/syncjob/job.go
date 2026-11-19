@@ -197,7 +197,8 @@ func (j *Job) WithNodeTemplates(f func(ctx context.Context, ps *pve.Service, es 
 // startAtBoot makes the machines of tenant Kubernetes clusters start with their Proxmox node: onboot on the node
 // templates this portal imported, which every new clone copies, and on the running workers of the clusters this
 // portal has (docs/managed-services.md, "After a Proxmox node reboots"). Both write only what lacks it. The template
-// pass also moves a template with a serial display to a graphical one (docs/template-updates.md).
+// pass also moves a template with a serial display to a graphical one (docs/template-updates.md); a template does not
+// run, so that write lands at once.
 func (j *Job) startAtBoot(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) {
 	if j.nodeTemplates != nil {
 		if err := j.nodeTemplates(ctx, ps, es); err != nil {

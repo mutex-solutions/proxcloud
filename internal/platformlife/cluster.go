@@ -958,7 +958,6 @@ type platformVM struct {
 	node, name      string
 	vmid            int
 	running, onboot bool
-	serialDisplay   bool // vga is a serial port: a clone of a template from before v0.10.0
 	err             error
 }
 
@@ -990,7 +989,7 @@ func platformVMs(ctx context.Context, capi *pve.Client, id string) ([]platformVM
 				out = append(out, platformVM{node: m.Node, name: cfg.Str("name"), vmid: m.VMID, err: err})
 				continue
 			}
-			out = append(out, platformVM{node: m.Node, name: cfg.Str("name"), vmid: m.VMID, running: st.Status == "running", onboot: cfg.Int("onboot") == 1, serialDisplay: pve.SerialDisplay(cfg)})
+			out = append(out, platformVM{node: m.Node, name: cfg.Str("name"), vmid: m.VMID, running: st.Status == "running", onboot: cfg.Int("onboot") == 1})
 		}
 	}
 	slices.SortFunc(out, func(a, b platformVM) int { return a.vmid - b.vmid })
@@ -1003,11 +1002,6 @@ func platformVMs(ctx context.Context, capi *pve.Client, id string) ([]platformVM
 // VM.Config.Options on both pools. No start order: Proxmox takes Sys.Modify on / for the startup option, which the
 // token does not hold (docs/managed-services.md has the command). A machine that cannot be set does not fail the
 // stage: the platform is built, and the Check's machines row names it.
-//
-// The same write sets vga std on a machine whose display is a serial port (the seed and the machines cloned from a
-// template of before v0.10.0), so that its Proxmox console opens on the graphical display; serial0 stays. A running
-// machine is not restarted: Proxmox keeps the change as pending until its next stop and start. The CAPI token holds
-// VM.Config.HWType on both pools.
 func (x *acq) startAtBoot(ctx context.Context) error {
 	vms, err := platformVMs(ctx, x.capi, x.in.ID)
 	if err != nil {
@@ -1019,25 +1013,18 @@ func (x *acq) startAtBoot(ctx context.Context) error {
 			x.r.Log.Warn("platform: start at boot not checked", "installation", x.in.ID, "vmid", vm.vmid, "err", vm.err)
 			continue
 		}
-		params := map[string]string{}
-		if !vm.onboot {
-			params["onboot"] = "1"
-		}
-		if vm.serialDisplay {
-			params["vga"] = "std"
-		}
-		if len(params) == 0 {
+		if vm.onboot {
 			continue
 		}
 		if err := x.check(ctx); err != nil {
 			return err
 		}
-		up, err := x.capi.SetVMConfig(ctx, vm.node, vm.vmid, params)
+		up, err := x.capi.SetVMConfig(ctx, vm.node, vm.vmid, map[string]string{"onboot": "1"})
 		if res := x.capi.WaitTaskBounded(ctx, up, taskBudget); err == nil && res.Outcome != pve.TaskSucceeded {
 			err = fmt.Errorf("task %s: %s %v", up, res.ExitStatus, res.Err)
 		}
 		if err != nil {
-			x.r.Log.Warn("platform: start at boot or display not set", "installation", x.in.ID, "vmid", vm.vmid, "err", err)
+			x.r.Log.Warn("platform: start at boot not set", "installation", x.in.ID, "vmid", vm.vmid, "err", err)
 		}
 	}
 	return nil

@@ -14,13 +14,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ("starting serial terminal on interface serial0", an empty page until a key is pressed). A new template now has
   `vga: std` and keeps `serial0: socket`: the graphical console is the default and the serial terminal is still
   there (Console → xterm.js, `qm terminal`). The portal's own console page works as before, on both tabs.
-- **Existing templates and VMs are moved by the portal**, with what `qm set <vmid> --vga std` writes: the templates
-  a Template updates import of this portal holds (not a withdrawn one) and the VMs in the pools of its projects at
-  the services sync, the platform's machines and seed at the end of stage 7 of the next apply. No new Proxmox
-  privilege. **No VM is restarted**: on a running VM Proxmox shows the change as pending and applies it at the
-  next stop and start; until then its console is the serial one. A template built by `images/build.py`, or any
-  template this portal did not import, is not written: run the command on it. See
-  [docs/template-updates.md](docs/template-updates.md#console-display).
+- **Existing templates and stopped servers are moved by the portal at the next services sync; a running server at
+  its next start from the portal.** The write is what `qm set <vmid> --vga std` writes. No new Proxmox privilege.
+  - At once: the templates a Template updates import of this portal holds (not a withdrawn one), and the stopped
+    servers and imported images in the pools of its projects.
+  - At the next start from the portal: a running server. Stop then Start, or an action that stops and starts it
+    (resize, rebuild, restore, rollback), sets `vga: std` while the server is stopped. A Reboot does not.
+  - Not written by the portal: Kubernetes workers and the platform's machines and seed. They change when their node
+    group or the platform is rolled to a template that has `vga: std`.
+  - **The portal never writes `vga` on a running VM and never leaves a pending change.** Proxmox cannot apply `vga`
+    to a running VM, and the portal's inventory and volume and server operations refuse a VM with a pending change.
+  - By hand: `qm set <vmid> --vga std`, then stop and start the VM, in one go: between the two the VM has a pending
+    change and its project's sync and operations on it are refused.
+  - What a guest shows on its graphical console and on its serial terminal depends on the guest's own kernel
+    arguments; this was not measured.
+  - A template built by `images/build.py`, or any template this portal did not import, is not written: run the
+    command on it. See [docs/template-updates.md](docs/template-updates.md#console-display).
 
 ## [0.9.1] - 2026-11-19
 

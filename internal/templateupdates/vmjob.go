@@ -667,7 +667,8 @@ func (x *Executor) createAndImport(ctx context.Context, jobID string, p VMPayloa
 		return permanent("ownership_lost", "the created VM does not carry this job's ownership tag")
 	}
 	// The pipeline template shape (images/build.py, pve.ImportImage), without a NIC. vga std: the Proxmox console opens
-	// on the graphical display (tty1); serial0 stays for the serial terminal and for what the guest prints on ttyS0.
+	// on the graphical display; serial0 stays for the serial terminal. What a guest prints on tty1 and on ttyS0 is its
+	// own kernel command line, which this repository does not set and did not measure.
 	if err := x.guard(ctx, f); err != nil {
 		return err
 	}

@@ -293,7 +293,8 @@ func importTemplateBy(ctx context.Context, pv templateReader, name, digest, node
 //
 // A withdrawn template (pc-tu-withdrawn) is kept for forensics and is neither read nor written: no new node group or
 // server gets it, and a VM cloned from it before is covered by the sync's passes over the VMs
-// (pve.Service.StartWorkersAtBoot, pve.Service.ShowGraphicalDisplay). A template no receipt holds (built by the image
+// (pve.Service.StartWorkersAtBoot; pve.Service.ShowGraphicalDisplay for a stopped server) and by the portal's start
+// (pve.Client.StartVM). A template is never running, so vga lands at once and no change stays pending. A template no receipt holds (built by the image
 // pipeline, the site's own, another portal's) is neither read nor written. The write follows importTemplate's proof
 // and carries the digest it read, as a tag write does, and takes VM.Config.Options (onboot) and VM.Config.HWType
 // (vga) on /pool/pc-templates, which the import already uses.

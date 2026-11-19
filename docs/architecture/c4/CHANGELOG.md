@@ -11,15 +11,20 @@ and rules: [README.md](README.md#maintenance-rule).
 `serial0: socket` stays. Component "Sync job": `templateupdates.StartNodeTemplatesAtBoot` is now
 `templateupdates.SyncImportedTemplates` and also writes `vga: std` on a held, not withdrawn template of either
 variant whose display is a serial port; `syncProxmoxService` calls the new `pve.Service.ShowGraphicalDisplay`, which
-does the same on the VMs and templates in the project's pool (not a locked VM, not a worker that is not running).
-Component "Platform runs": the end of stage 7 (`startAtBoot`) writes it on the installation's machines and seed with
-the CAPI token. Component "Project API": `GET_CONSOLE_STATE` reads `vga` from the values in effect
-(`GetVMConfigCurrent`).
+does the same on the **stopped** VMs and the templates in the project's pool (not a locked VM, not a Kubernetes
+worker, never a running VM). Component "PVE client": `Client.StartVM`, the one start of the portal, first calls
+`Client.ShowGraphicalIfStopped`: status read, write only on a stopped VM without a lock, and a `revert` if the values
+in effect still show the serial port afterwards. Component "Project API": `GET_CONSOLE_STATE` reads `vga` from the
+values in effect (`GetVMConfigCurrent`). Component "Platform runs": unchanged, stage 7 does not write `vga`.
 
 **Why:** the Proxmox web UI opened every VM of the product on the serial terminal, an empty page until a key is
 pressed. The owner wants the usual graphical console by default, with the serial terminal still selectable. Clones
-copy the display from their template, so the templates and the VMs that exist need the write too. No VM is restarted:
-Proxmox keeps the change as pending on a running VM, which is why the console state reads the values in effect.
+copy the display from their template, so the templates and the VMs that exist need the write too. Proxmox cannot
+apply `vga` to a running VM and keeps it as a pending change, and the strict readers (`inventoryCurrentConfig`,
+`holderCurrentConfig`) refuse a VM with any pending change: a write on running VMs would have stopped the project
+sync and the volume and server operations. So the write is made only where it lands at once, and a running server
+gets it on the portal's own start. Workers and platform machines are started by CAPMOX, not by the portal: they
+change when they are replaced by clones of a new template.
 
 **Diagrams:** none changed. `c3-components.md`: the Sync job row names the two passes.
 
