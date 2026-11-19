@@ -8,7 +8,11 @@ USER root
 # /root/.cache/virtualenv is the upstream image's virtualenv seed cache, not installed software: it holds
 # an unpacked pip 26.2.1 whose vendored SBOM lists old certifi/msgpack/urllib3/setuptools. virtualenv
 # rebuilds it on demand from its bundled wheels, so drop it rather than ship the stale copy.
-RUN apt-get update && apt-get upgrade -y \
+# The upstream image is built with its apt sources pointed at azure.archive.ubuntu.com and keeps them. That
+# name resolves to one address, and apt does not connect again to an address that timed out, so its own
+# retries cannot help there. archive.ubuntu.com is the same archive behind many addresses, which apt tries in turn.
+RUN sed -i 's|//azure\.archive\.ubuntu\.com/|//archive.ubuntu.com/|' /etc/apt/sources.list.d/ubuntu.sources \
+ && apt-get update && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends sudo python3-pip \
  && rm -rf /var/lib/apt/lists/* \
  && pip install --no-cache-dir --break-system-packages playwright==1.64.1 \
