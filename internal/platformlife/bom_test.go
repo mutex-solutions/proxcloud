@@ -385,9 +385,10 @@ func TestBOMImagesArePublished(t *testing.T) {
 // is the sha256 of deploy/platform/platform-bom.yaml at the tag v0.8.0 (git show v0.8.0:deploy/platform/platform-bom.yaml
 // | sha256sum), which is what a platform installed by v0.8.0 recorded in status.bom. The same holds for each later one.
 var previousSHA256 = map[string]string{
-	"0.8.0": "8eb874987d3bbaf55f309295ee241ec320c0cf9e0805b3bd1812ef908b6600c6",
-	"0.8.1": "a635bd88d3c39baf5519344088a6fed8dad8cb2b3c2d324655753e8ec55719b3",
-	"0.8.2": "a10baf0bef4f33ebff26cb87315259a6cf886c8ffe00b79dc24e2bed4ed6540b",
+	"0.8.0":      "8eb874987d3bbaf55f309295ee241ec320c0cf9e0805b3bd1812ef908b6600c6",
+	"0.8.1":      "a635bd88d3c39baf5519344088a6fed8dad8cb2b3c2d324655753e8ec55719b3",
+	"0.8.2":      "a10baf0bef4f33ebff26cb87315259a6cf886c8ffe00b79dc24e2bed4ed6540b",
+	"0.9.0-rc.1": "731ffb6217aefd5dcca55085d8de47f60968afa37ec951830b6d3eb50bc75af8",
 }
 
 // A previous BOM is the file of its tag, byte for byte: an installed platform names it by this sha256, so a changed

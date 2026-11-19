@@ -5,8 +5,8 @@ already been published. As of **2026-11-19**, GHCR has public development images
 the `v0.4.0-rc.1` prerelease (tag 2026-11-11, images and app chart `0.4.0-rc.1`)
 and the first stable release `v0.4.0` (tag 2026-11-12, images and app chart
 `0.4.0`), then the stable `v0.5.0` (tag 2026-11-13), the patches `v0.5.1` and `v0.5.2` and the stable `v0.6.0` (tags 2026-11-14),
-the `v0.7.0-rc.1` prerelease and the stable `v0.7.0` (tags 2026-11-15), the stable `v0.8.0` (tag 2026-11-17) and the patches `v0.8.1` and `v0.8.2` (tags 2026-11-18). The next tag is the release candidate
-`v0.9.0-rc.1`, a prerelease ([Release candidates](#release-candidates)); pushing it runs the app image/chart publication and GitHub Release
+the `v0.7.0-rc.1` prerelease and the stable `v0.7.0` (tags 2026-11-15), the stable `v0.8.0` (tag 2026-11-17) and the patches `v0.8.1` and `v0.8.2` (tags 2026-11-18), and the release candidate
+`v0.9.0-rc.1`, a prerelease (tag 2026-11-19; [Release candidates](#release-candidates)). Pushing the next tag runs the app image/chart publication and GitHub Release
 creation.
 This source change does none of those operations, and installation from released
 artifacts and later controlled PVE template canaries remain separate steps. Read
@@ -299,12 +299,14 @@ commit dropped `-dev`: the release commit of `v0.8.2` sets it to `0.8.2` (checke
 2026-11-18 on that commit: `--release` prints `all pins match`, on the BOM and on the
 previous BOMs `0.8.0` and `0.8.1`). The pull request after that release commit set the
 BOM on `main` to `0.9.0-dev` again and added `deploy/platform/previous/0.8.2.yaml`, so
-`main` cannot be tagged until the next release commit drops `-dev`. The gate does not
-compare the BOM's release with the tag
-(below): a commit whose BOM has no `-dev` passes this part for any tag. The commit of the
+`main` could not be tagged until the next release commit dropped `-dev`: the commit of the
 candidate `v0.9.0-rc.1` sets the release to `0.9.0-rc.1` (checked on 2026-11-19 on that
 commit: `--release` prints `all pins match`, on the BOM and on the previous BOMs `0.8.0`,
-`0.8.1` and `0.8.2`).
+`0.8.1` and `0.8.2`). The pull request after that tag set the BOM on `main` to
+`0.9.0-dev` again and added `deploy/platform/previous/0.9.0-rc.1.yaml`, so `main` cannot
+be tagged until the next release commit drops `-dev`. The gate does not
+compare the BOM's release with the tag
+(below): a commit whose BOM has no `-dev` passes this part for any tag.
 
 Not verified:
 
@@ -350,8 +352,13 @@ from it to the BOM of the release is one more upgrade run. `Previous` takes any 
 whose BOM validates as a release, and `TestEveryReleaseHasItsPreviousBOM` reads
 `## [X.Y.Z-rc.N]` sections too, so the pull request fails its tests without the file.
 
-Not verified: a tag on such a commit. `v0.4.0-rc.1` and `v0.7.0-rc.1` had no platform BOM
-gate, no previous BOM and no release notes file.
+`v0.9.0-rc.1` is the first candidate cut this way (`v0.4.0-rc.1` and `v0.7.0-rc.1` had no
+platform BOM gate, no previous BOM and no release notes file). Its tag is on the commit
+`eee7b3dc`; the `docker` and `helm` runs of the tag succeeded and the GitHub Release is a
+prerelease, with `v0.8.2` still the latest (read on 2026-11-19). The pull request after
+it added `deploy/platform/previous/0.9.0-rc.1.yaml` ([Previous BOMs](#previous-boms)).
+
+Not verified: an install or an upgrade from the candidate's published images.
 
 ## Previous BOMs
 
@@ -406,7 +413,7 @@ that no later build carries, so its platform is refused after an upgrade
 been removed yet; when one is, the platforms of that release are refused again,
 so it needs a release note.
 
-The previous BOMs are `0.8.0`, `0.8.1` and `0.8.2`. `0.8.0` was added by hand from its tag
+The previous BOMs are `0.8.0`, `0.8.1`, `0.8.2` and `0.9.0-rc.1`. `0.8.0` was added by hand from its tag
 (sha256 `8eb874987d3bbaf55f309295ee241ec320c0cf9e0805b3bd1812ef908b6600c6`, the
 value a platform installed by v0.8.0 records). `0.8.1` is the first one the
 procedure above added (sha256
@@ -424,12 +431,24 @@ gives the hash above (checked on 2026-11-18).
 copied from the release commit of `v0.8.2` (`ed4b94ec`), which the tag is put
 on, before the tag existed, and its goldens equal those of that commit and
 differ from the 0.8.1 ones in the release label only. `bom_verify.py --release`
-printed `all pins match` on the three previous BOMs on 2026-11-18.
+printed `all pins match` on the three previous BOMs on 2026-11-18. The tag
+`v0.8.2` is on that commit: `git show v0.8.2:deploy/platform/platform-bom.yaml | sha256sum`
+gives the hash above (checked on 2026-11-19).
 
-Not verified: that the tag `v0.8.2` is on that commit (compare
-`git show v0.8.2:deploy/platform/platform-bom.yaml | sha256sum` with the hash
-above once the tag exists), an apply on a platform that `v0.8.1` or `v0.8.2`
-installed, and an install by `v0.8.1` or `v0.8.2`.
+`0.9.0-rc.1` is the first previous BOM of a release candidate, and the first
+whose pins differ from those of `0.8.0`: cluster chart 0.1.14 and platform
+chart 0.1.3 (sha256
+`731ffb6217aefd5dcca55085d8de47f60968afa37ec951830b6d3eb50bc75af8`). It was
+copied from the tag `v0.9.0-rc.1` (`eee7b3dc`), after the tag existed:
+`git show v0.9.0-rc.1:deploy/platform/platform-bom.yaml | sha256sum` gives that
+hash. Its goldens equal the current goldens at the tag, file for file (`cmp`),
+and differ from the 0.8.2 ones in the release label and in the versions of the
+two charts. `bom_verify.py --release` printed `all pins match` on the four
+previous BOMs on 2026-11-19.
+
+Not verified: an apply on a platform that `v0.8.1` or `v0.8.2`
+installed, an install by `v0.8.1` or `v0.8.2`, and an apply on a platform that
+is on the BOM `0.9.0-rc.1`, installed by the candidate or moved to it.
 One apply with a
 previous BOM was run on a lab (2026-11-18, a platform installed by the released
 `v0.8.0`, on the build `dev-751a190` of `main`): it succeeded and `status.bom`
@@ -497,15 +516,17 @@ What a release must do when it changes a pin, before its tag:
    build of the release commit, `GET …/plan` of such an installation, or
    `PlanFor` in a test.
 
-The pairs of the BOM on `main` today (0.8.0, 0.8.1 and 0.8.2 to it): the BOMs
+The pairs of the BOM on `main` today (0.8.0, 0.8.1, 0.8.2 and 0.9.0-rc.1 to
+it). From the three 0.8.x BOMs, the BOMs
 differ in the release line, in `tenantCharts.kubernetes` and in the four
 components of the product's own charts, `pc-platform` 0.1.13 to 0.1.14 and
 `capi`, `capi-tenant` and `platform` 0.1.2 to 0.1.3. Each of the four lists the
-old version in `upgradeFrom`: `TestUpgradeRollsNoMachine` compares all three
-pairs and passes, and platform chart 0.1.3 differs from 0.1.2 in the provider's
-ClusterRole alone. So the classifier allows all three pairs, and only `-dev`
-refused them until the commit of the candidate `v0.9.0-rc.1`: on it the plan of each of the
-three is allowed, with six changes and no refusal. None of these moves was run on a lab.
+old version in `upgradeFrom`, and platform chart 0.1.3 differs from 0.1.2 in the provider's
+ClusterRole alone. From 0.9.0-rc.1 the BOMs differ in the release line alone.
+`TestUpgradeRollsNoMachine` compares all four pairs and passes. So the
+classifier allows all four pairs, and only `-dev` refuses them on `main`. On the
+commit of the candidate `v0.9.0-rc.1` the plan of each of the three 0.8.x BOMs
+is allowed, with six changes and no refusal. None of these moves was run on a lab.
 
 Not checked: that a chart of `proxcloud-platform` whose version changes is safe
 to sync over the old one (its templates are RBAC, AppProjects, a MetalLB pool
