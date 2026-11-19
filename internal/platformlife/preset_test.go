@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 )
 
@@ -280,8 +281,11 @@ func TestClusterValuesControlPlaneReplicas(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, p := range prev {
-		if _, err := kubeadm(p.BOM, 3); err == nil {
-			t.Errorf("the BOM of release %s (chart %s) must refuse 3 control plane machines", p.Release, ClusterChartVersion(p.BOM))
+		// A previous BOM answers by its own cluster chart: the ones from before 0.1.14 build one machine.
+		chart := ClusterChartVersion(p.BOM)
+		_, err := kubeadm(p.BOM, 3)
+		if builds := kamaji.ChartHasControlPlaneReplicas(chart); builds == (err != nil) {
+			t.Errorf("the BOM of release %s (chart %s): builds three = %v, but kubeadm(3) answered %v", p.Release, chart, builds, err)
 		}
 	}
 }
