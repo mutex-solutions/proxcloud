@@ -255,6 +255,14 @@ on("POST /admin/template-updates/templates/:id/publish", ({ params, opts }) => {
   return { data: { complete: true, providers: [] } }
 })
 
+on("DELETE /admin/template-updates/templates/:id", ({ params }) => {
+  const i = templates.findIndex((x: Doc) => x.id === params.id)
+  if (i < 0) throw new ApiError(404, 404, "No template import with that id")
+  if (!templates[i].actions.delete) throw new ApiError(409, 409, "Only a withdrawn template can be deleted: withdraw it first")
+  templates.splice(i, 1)
+  return { data: { action: "delete", changed: [], complete: true } }
+})
+
 // Publish on all nodes: each POST moves the first unpublished node one step (import, smoke test, publish), one job at
 // a time like the server; the GET reads the same state.
 const publishAllSteps = ["missing", "importing", "smoke_running", "ready_to_publish", "published"]

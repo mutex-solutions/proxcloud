@@ -484,3 +484,34 @@ func (s *Service) StartWorkersAtBoot(ctx context.Context, owns func(ctx context.
 	}
 	return errors.Join(errs...)
 }
+
+// ShowGraphicalDisplay is the provider sync's pass that sets vga std on the stopped VMs and the templates in the
+// project's pool whose display is a serial port: servers and imported images made before v0.10.0. The Proxmox console
+// then opens on the graphical display; serial0 is not touched, so the serial terminal stays. The pool of a project of
+// this portal is the ownership test every write on a server uses (ResolveVM): a VM in another pool is not read.
+//
+// A running VM is never written: Proxmox cannot change vga on it and would keep a pending change, which stops the
+// project's inventory and every fenced write on that VM (Client.ShowGraphicalIfStopped). It gets the display when the
+// portal starts it the next time (Client.StartVM). A Kubernetes worker is not written either, running or not: CAPMOX
+// owns its config and its start, and it changes when its node group is rolled to a template that has vga std. A VM
+// with a lock is left for a later pass. The write takes VM.Config.HWType, which the portal's role holds on the tenant
+// pools.
+// ponytail: every sync sets it again on a stopped VM an operator put back on a serial display by hand; a tag to opt a
+// VM out when a site asks for one.
+func (s *Service) ShowGraphicalDisplay(ctx context.Context, projectID string) error {
+	vms, err := s.C.ClusterResources(ctx, "vm")
+	if err != nil {
+		return err
+	}
+	pool := s.PoolFor(projectID)
+	var errs []error
+	for _, vm := range vms {
+		if vm.Type != "qemu" || vm.Pool != pool || vm.NodeDown || vm.Lock != "" || vm.Status != "stopped" || IsWorkerVM(vm.Tags) {
+			continue
+		}
+		if err := s.C.ShowGraphicalIfStopped(ctx, vm.Node, vm.VMID); err != nil {
+			errs = append(errs, fmt.Errorf("pve graphical display: VM %d (%s): %w", vm.VMID, vm.Name, err))
+		}
+	}
+	return errors.Join(errs...)
+}

@@ -250,7 +250,7 @@ func (s *Service) ImportImage(ctx context.Context, projectID string, req ImageIm
 	// The same shape as a pipeline template (images/build.py), without the NIC: every server gets its own on create.
 	up, err = s.C.SetVMConfig(ctx, req.Node, vmid, map[string]string{
 		"ostype": "l26", "cores": "2", "memory": "2048", "cpu": "host", "agent": "1",
-		"scsihw": "virtio-scsi-single", "serial0": "socket", "vga": "serial0", "tags": TagManaged, "boot": "order=scsi0",
+		"scsihw": "virtio-scsi-single", "serial0": "socket", "vga": "std", "tags": TagManaged, "boot": "order=scsi0",
 		"scsi0": fmt.Sprintf("%s:0,discard=on,import-from=%s", req.DiskStorage, volid),
 		"ide2":  req.DiskStorage + ":cloudinit",
 	})

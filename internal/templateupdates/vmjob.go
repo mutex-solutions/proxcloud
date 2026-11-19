@@ -666,13 +666,15 @@ func (x *Executor) createAndImport(ctx context.Context, jobID string, p VMPayloa
 	if !exists || !own {
 		return permanent("ownership_lost", "the created VM does not carry this job's ownership tag")
 	}
-	// The pipeline template shape (images/build.py, pve.ImportImage), without a NIC.
+	// The pipeline template shape (images/build.py, pve.ImportImage), without a NIC. vga std: the Proxmox console opens
+	// on the graphical display; serial0 stays for the serial terminal. What a guest prints on tty1 and on ttyS0 is its
+	// own kernel command line, which this repository does not set and did not measure.
 	if err := x.guard(ctx, f); err != nil {
 		return err
 	}
 	cfg := map[string]string{
 		"ostype": "l26", "cores": "2", "memory": "2048", "cpu": "host", "agent": "1",
-		"scsihw": "virtio-scsi-single", "serial0": "socket", "vga": "serial0", "boot": "order=scsi0",
+		"scsihw": "virtio-scsi-single", "serial0": "socket", "vga": "std", "boot": "order=scsi0",
 		"tags":           pve.TagManaged + ";" + OwnerTag(jobID),
 		"scsi0":          fmt.Sprintf("%s:0,discard=on,import-from=%s", p.DiskStorage, upload),
 		CloudInitSlot(p): p.DiskStorage + ":cloudinit",

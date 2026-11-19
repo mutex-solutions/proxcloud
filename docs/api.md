@@ -418,6 +418,15 @@ name is the name of its server in the project, and `node_groups[].progress.machi
 machines that need attention. [managed-k8s.md](managed-k8s.md#a-worker-that-does-not-join) has the
 limits.
 
+Deleting a withdrawn template: `DELETE /api/v1/admin/template-updates/templates/{importId}` (`admin:service:manage`,
+no body) destroys the template VM of that import with the disks its config names and frees the import receipt. It
+answers `{"action":"delete","changed":[<vmid>],"complete":true}`, or `"unchanged": true` when the template was already
+gone. A 409 carries `errors.details.code`: `not_withdrawn`, `template_published`, `template_mismatch`,
+`template_present`, `job_running`, `smoke_running`, `linked_clones` (`details.vmids`) or `template_in_use`
+(`details.users`: the clusters' node groups and provider versions that still name it); the message says the same in
+plain words. `GET …/templates` offers it per row as `actions.delete` and gives the VM's name as `templateName`.
+[template-updates.md](template-updates.md#delete-a-withdrawn-template).
+
 Publishing a node image on every node: `GET /api/v1/admin/template-updates/publish-all?serviceId=…&digest=sha256:…`
 (`admin:service:read`) reports one artifact's state on every node of a Proxmox provider, and
 `POST /api/v1/admin/template-updates/publish-all` with `{"serviceId","package","digest","confirmDigest"}`
