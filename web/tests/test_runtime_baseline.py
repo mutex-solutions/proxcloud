@@ -13,7 +13,7 @@ class RuntimeBaselineTests(unittest.TestCase):
     def test_exact_builder_and_runtime_tags(self):
         dockerfile = (ROOT / "web/Dockerfile").read_text(encoding="utf-8")
         self.assertEqual(re.findall(r"^FROM (.+)$", dockerfile, re.MULTILINE), [
-            "node:24.22.2-alpine AS build", "nginx:1.30.6-alpine",
+            "node:24.22.2-alpine AS build", "nginx:1.30.7-alpine",
         ])
         self.assertIn("ARG APP\n", dockerfile)
         self.assertIn("COPY ${APP}/package.json ${APP}/package-lock.json ./", dockerfile)
