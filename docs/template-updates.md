@@ -134,7 +134,8 @@ service/node/digest, so it never exceeds the 256-byte key limit; a retry after a
 instead of resetting its progress.
 
 A receipt whose template was deleted since stops blocking only through `Service.MarkTemplateGone`
-(no route yet; the managed-services job calls it). It reads the receipt's own provider and marks the
+(the managed-services job calls it, and so does [Delete](#delete-a-withdrawn-template) of a withdrawn
+template). It reads the receipt's own provider and marks the
 receipt `templateGone` only when no guest in the cluster holds the receipt's VMID any more, or the VM
 that does is visible to the portal token, has a name, sits on a node that is up and carries neither
 the template's name nor its `pc-src-` tag (the VMID was reused), or the VM there is another
@@ -232,7 +233,8 @@ succeeded | failed`.
   OS image, on `ide0` for a Kubernetes node image, see below; a Kubernetes node image also gets
   `onboot: 1`, which every clone copies, so workers and platform machines made from it start again
   with their Proxmox node; a node image imported before v0.9.0 gets it at the next provider sync:
-  [managed-services.md](managed-services.md#after-a-proxmox-node-reboots)), named
+  [managed-services.md](managed-services.md#after-a-proxmox-node-reboots); display `vga: std` with
+  `serial0: socket` from v0.10.0, see [Console display](#console-display)), named
   `pc-ghcr-<os>-<os|k8s-x-y-z>-<build>` (never `pc-<os>-…`, which `build.py` would treat as its own
   failed build) and tagged **staged**: `proxcloud;pc-src-<12hex>;pc-tu-import;pc-tu-staged`
   (+ `pc-tu-k8s;pc-k8sver-<x-y-z>` for a Kubernetes node image). No job ownership tag and **no catalog
@@ -313,7 +315,7 @@ Code: [`lifecycle.go`](../internal/templateupdates/lifecycle.go) (publish, withd
 | Ready to publish | the latest smoke of this template passed |
 | Published (default) | published, and the newest published version of its line on its node (what new VMs get) |
 | Published (older) | published, a newer published version exists (kept; serves as fallback) |
-| Withdrawn | digest blocklisted **and this copy** tagged `pc-tu-withdrawn`: out of every catalog; the template VM is kept |
+| Withdrawn | digest blocklisted **and this copy** tagged `pc-tu-withdrawn`: out of every catalog; the template VM is kept until an operator deletes it ([Delete](#delete-a-withdrawn-template)) |
 | Withdraw incomplete | digest blocklisted but **this copy** is not tagged withdrawn yet (its provider was unreachable or the tag write failed); Withdraw stays enabled and finishes it |
 
 `GET /admin/template-updates/templates` (`admin:service:read`) lists the newest 200 imports with their
@@ -549,7 +551,8 @@ action was started from). Under the per-digest lock:
 3. On each provider, **every copy** of the artifact (finished imports of that digest, any node) gets
    `pc-tu-withdrawn` (+ `pc-tu-import`), and loses `pc-public`, `pc-tu-k8s-public`, `pc-tu-staged` and
    `pc-img-<os>` (so no installer selector picks it either). The template VMs are **kept** for
-   forensics, never deleted.
+   forensics: a withdraw never deletes one. An operator removes a withdrawn template with
+   [Delete](#delete-a-withdrawn-template).
 4. The result lists each provider: `withdrawn` (every copy there tagged), `incomplete` (a tag write
    failed, or a copy's node is down), `unreachable` (the provider or its cluster could not be read —
    **nothing** was changed there) or `provider_missing` (the provider was deleted). `complete` is false
@@ -596,9 +599,60 @@ full clones and are never touched.
 **Blocklisted digests** are shown as *withdrawn* in discovery (the newest artifact row) and refused
 by import (409), smoke (409, and FAIL `digest_withdrawn` if already queued) and publish (409).
 
+### Delete a withdrawn template
+
+`DELETE /admin/template-updates/templates/{importId}` (`admin:service:manage`, no body; audited with the
+VMID). It destroys **one** template, the copy of that import receipt, and frees the receipt. Before it
+there was no way but `qm destroy` on the node. `Service.Delete` in
+[`lifecycle.go`](../internal/templateupdates/lifecycle.go), under the per-digest lock; every condition is
+read again at each call, and each refusal is a 409 with its own `errors.details.code`:
+
+| Code | Refused while |
+|---|---|
+| `not_withdrawn` | the digest is not on the blocklist, or the template lacks `pc-tu-withdrawn` or `pc-tu-import` (staged, published, or a withdraw that is incomplete) |
+| `template_published` | the template carries `pc-public` or `pc-tu-k8s-public` (put back by hand) |
+| `template_mismatch` | the VM at the receipt's node and VMID is in `pc-templates` but is not this import's template: not a template, another name, or no `pc-src-` tag of the digest (`importTemplate`, the proof publish and withdraw use) |
+| `template_present` | a guest holds the VMID outside `pc-templates` or outside the token's view: it may still be the template, moved |
+| `job_running` | the import job of the receipt is pending or running |
+| `smoke_running` | the latest smoke test of this template has no result and its job is not dead |
+| `linked_clones` | a volume on a storage the template's disks are on is a linked clone of one of them (`details.vmids`) |
+| `template_in_use` | something still clones from it (`details.users` names each) |
+
+- **Linked clones** are read from `GET /nodes/{node}/storage/{storage}/content` of each storage the
+  template's config names a `base-<vmid>-` volume on: a row of another VM whose `volid` or `parent` names
+  `base-<vmid>-` (ZFS, RBD and directory stores put the base in the clone's volume id,
+  `base-9200-disk-0/vm-105-disk-0`).
+  It is what Proxmox's own check before a destroy reads, and Proxmox makes that check again in the destroy
+  task. The portal makes full clones only, so a site that clones through the portal alone has none.
+- **Still cloned from** (`Handler.templateUsers`), for the template's node and VMID on its Proxmox
+  provider: a version or an image variant of a Kubernetes provider (`config.cluster.versions`,
+  `imageVariants`) whose `proxmoxServiceId` is that provider or is empty; a node group of a cluster of
+  such a provider, by the image the provider sync cached from the cluster's live values
+  (`cluster.node_groups[].image_id`); a managed-services platform on that provider whose node image is
+  that template. A node group keeps the image it was created or last upgraded with when the provider's map
+  moves on, so a cluster pinned to a withdrawn image keeps cloning its new workers from it: the refusal
+  names the cluster and the group. Upgrade the cluster or recreate the group on another image first. A
+  read error refuses the delete.
+- **The destroy** is `DELETE /nodes/{node}/qemu/{vmid}?purge=1` (`pve.Client.DeleteVMConfigDisks`): the VM,
+  the disks its config names (unused ones included), and its entries in backup jobs, replication and HA.
+  It never sends `destroy-unreferenced-disks`, which every other delete of the portal sends: a volume that
+  only carries the VMID in its name on some storage is not this template's to remove.
+- **Then the receipt is freed** by `Service.MarkTemplateGone`, on its proof (no guest holds the VMID any
+  more). The row shows `template_missing`. The digest **stays on the blocklist**: the artifact is not
+  imported again; what is free again is the receipt's node for the duplicate check and the VMID.
+- **Idempotent**: a receipt already freed answers `unchanged: true`. A template that is already gone
+  (destroyed by hand, or by a delete whose receipt write failed) is not destroyed again: its receipt is
+  freed on the same proof and the answer is `unchanged: true`. This also holds for a VMID that another
+  VM took since.
+- **Privilege**: the destroy takes `VM.Allocate` on the VM, which the portal token holds through
+  `ProxCloudPlatform` on `/pool` (`pve.PlatformPrivileges`), as for the smoke test's own VM; the storage
+  listing takes `Datastore.Audit`, in the same role on `/storage`. No privilege is added.
+
+Not run on a lab: see [Open items](#7-open-items).
+
 ### Audit
 
-Smoke, publish and withdraw are audited by the admin audit middleware (resource type
+Smoke, publish, withdraw and delete are audited by the admin audit middleware (resource type
 `TEMPLATE_UPDATES`, the actor from the token) with a snapshot: action, import id, digest, line slug,
 provider, changed VMIDs, the smoke job publish relied on, and the withdraw reason / force / remaining
 published VMIDs. Refused requests are not audited as successes.
@@ -884,7 +938,7 @@ hand-over = first install: nothing to read.
 | Action | Permission | Built-in roles |
 |---|---|---|
 | See the page, discovery, placement, history, template states, blocklist, the publish-on-all-nodes report | `admin:service:read` | SUPER_ADMIN, ADMIN, SUPPORT |
-| Start a VM import, run a smoke test, publish, publish on all nodes, withdraw | `admin:service:manage` | SUPER_ADMIN, ADMIN |
+| Start a VM import, run a smoke test, publish, publish on all nodes, withdraw, delete a withdrawn template | `admin:service:manage` | SUPER_ADMIN, ADMIN |
 | Start a sandbox mirror or rollback, delete a sandbox pin | `admin:service:manage` | SUPER_ADMIN, ADMIN |
 | Sandbox state, pin list (installer stage 55) | `admin:service:read` | SUPER_ADMIN, ADMIN, SUPPORT |
 | Save the GitHub integration | `admin:integration:manage` | SUPER_ADMIN, ADMIN |
@@ -895,7 +949,8 @@ Proxmox rights of the portal token for the smoke test, on `/pool/pc-templates` (
 **`VM.GuestAgent.Unrestricted`** (guest-exec: `cloud-init status`, `df`, `kubelet --version`; without it
 the smoke ends FAIL `guest_exec_forbidden`); `Datastore.AllocateSpace` on the template disk storage;
 `SDN.Use` on the smoke bridge's zone (`/sdn/zones/localnetwork/<bridge>` for a plain bridge on PVE 8+).
-Publish/withdraw need `VM.Config.Options` (tags) only. An existing site whose `ProxCloudPlatform` role
+Publish/withdraw need `VM.Config.Options` (tags) only. Delete of a withdrawn template needs `VM.Allocate`
+(the destroy) and `Datastore.Audit` on the template's disk storage (the linked-clone read), both already in the role. An existing site whose `ProxCloudPlatform` role
 predates `VM.GuestAgent.Unrestricted` adds it as described in
 [proxmox-permissions.md](proxmox-permissions.md#proxcloudplatform) (`pveum role modify ProxCloudPlatform
 --append 1 --privs "VM.GuestAgent.Unrestricted …"`); the smoke network's bridge needs `SDN.Use` as for
@@ -990,6 +1045,15 @@ debugfs -w -f /tmp/orphan-fix.cmd "$D"
 
 ## 7. Open items
 
+- **Delete of a withdrawn template is not lab-verified.** Its tests run on PostgreSQL with a fake Proxmox. A
+  lab must show: the destroy of a withdrawn template with the portal token (`VM.Allocate` through `/pool`),
+  its base disks and cloud-init drive gone from the storage and no other volume removed; the `linked_clones`
+  refusal on the site's storage type, for a linked clone made by hand (the `parent` field is read as Proxmox
+  9 documents it, and LVM-thin reports none: there Proxmox does not tie a clone to its base either); the
+  `template_in_use` refusal for a cluster whose node group still carries the image. A cluster whose cached
+  `node_groups` the sync has not written yet (created within the last sync interval, or a provider whose
+  sync fails) is not seen by that check, and the template's `pc-tu-withdrawn` tag is not read again between
+  the last check and the destroy call.
 - **Publish on all nodes is partly lab-verified** (2026-11-17, main cb2f052): two advances each published one node
   whose smoke test had passed, the report and the versions line were right, and the smoke clone upgraded no package.
   Not run on a lab: an import started by it, a smoke test started by it, and so its one-job-at-a-time rule (both
@@ -1047,3 +1111,77 @@ debugfs -w -f /tmp/orphan-fix.cmd "$D"
 - Concurrent pipeline builds: `build.py` names its test VM `smoke-…` and never touches
   `pc-tu-smoke-…` VMs; a smoke test never touches pipeline VMs. Both use the lowest free VMID ≥ 9200 —
   a race is retried on "already exists".
+
+## Console display
+
+Up to v0.9.1 every template was made with `serial0: socket` and `vga: serial0`, and every clone
+copied it (tenant servers, Kubernetes workers, the platform's machines and its seed). The display
+of such a VM is its serial port, so the Proxmox web UI opens its console on the serial terminal
+("starting serial terminal on interface serial0", an empty page until a key is pressed).
+
+From v0.10.0 a template is made with `vga: std` and keeps `serial0: socket`
+(`templateupdates.Executor.importDisk`, `pve.ImportImage`, `images/build.py`, and the cold-boot
+clones of `images/vm_export/coldboot.py`):
+
+- The **Console** button of the Proxmox web UI opens the graphical console (noVNC). The serial
+  terminal is still there: **Console → xterm.js**, or `qm terminal <vmid>` on the node.
+- The portal's own console page is the same page as before. **Graphical** goes through `vncproxy`,
+  **Serial** through `termproxy`, which needs the serial port and not the display. The page opens
+  on Serial when the display in effect is a serial port and on Graphical otherwise
+  ([cloud-integration.md](cloud-integration.md), "Console state").
+- In the guest, **not measured**: what the graphical console (tty1) and the serial terminal (ttyS0)
+  each show is decided by the guest's kernel command line and its getty units. No build file of
+  this repository sets a `console=` argument, a GRUB terminal or a serial getty (`images/`, the
+  Packer scripts), so the vendors' own settings apply, and nobody read them from the published
+  images or booted one for this release. Expected, not proven: the Ubuntu and Debian cloud images
+  print the boot and give a login prompt on both. For a Kubernetes node image (an image-builder
+  installer build) there is not even an expectation for the serial terminal. If a guest prints
+  only on the serial port, its graphical console stays mostly empty and its serial terminal works
+  as before.
+- Nothing the portal reads from a guest goes through the display: the join log of a worker is read
+  through the guest agent, and cloud-init's own logs are files in the guest.
+
+**Templates and VMs from before v0.10.0.** Proxmox cannot change `vga` on a running VM: it keeps
+the write as a **pending** change until the VM's next stop and start. The portal's VM inventory
+and its fenced writes (volume attach, detach, resize, server resize and delete) refuse a VM that
+has any pending change, so a pending `vga` would stop the project's sync and those operations.
+**The portal therefore writes `vga` only where it lands at once, and never leaves a pending
+change.** What it writes is what `qm set <vmid> --vga std` writes, where `vga` is a serial port;
+`serial0` is not touched. No new Proxmox privilege (`VM.Config.HWType`, which `ProxCloudPlatform`
+holds on `/pool`).
+
+| What | When it changes | Ownership test |
+|---|---|---|
+| Templates of Template updates (OS and Kubernetes) | **at once**: the next services sync, per provider. A template does not run | an import of this portal for this provider still holds the template (the receipt: node, VM id, name, source digest). A **withdrawn** import (`pc-tu-withdrawn`) is neither read nor written |
+| Stopped tenant servers, images a tenant imported | **at once**: the next services sync, per project | the VM is in the pool of a project of this portal, is stopped, has no lock and is not a Kubernetes worker |
+| Running tenant servers | **at the next start from the portal**: Stop then Start, or any action of the portal that stops and starts the server (resize, rebuild, restore of a backup, rollback of a snapshot of a running server). The portal sets `vga: std` while the server is stopped, then starts it | the same pool test; the portal's start reads the VM's status first and writes only a stopped VM without a lock |
+| Kubernetes workers (tenant clusters) | **when their node group is rolled** to a template that has `vga: std`: the new clones inherit it. The portal never writes a worker, running or stopped, and does not start workers (CAPMOX does) | none: not written |
+| The platform's machines and the seed | **when they are replaced** by clones of a template that has `vga: std` (a platform upgrade that rolls the machines). **Apply this release** does not write `vga` on a running machine. The seed is the one the platform starts itself: when an install starts a stopped seed that still has a serial display, the same start sets `vga: std` first (CAPI token, `VM.Config.HWType` on the platform's pools) | the platform's own seed lookup; stopped and without a lock |
+
+- A **Reboot** from the portal (soft or hard) and a reboot from inside the guest do not change
+  the display: the VM is not stopped and started by the portal, and the portal does not write a
+  running VM.
+- The sync writes once per VM: a later sync finds `vga: std` and writes nothing. A failed write
+  is logged (`imported templates start at boot and display`, `graphical display`) and tried again
+  at the next sync. A failed write before a start is logged (`graphical display not set before
+  the start`) and the VM starts as it is.
+- Should someone start a VM in Proxmox between the portal's status read and its write, the write
+  is pending: the portal sees that the values in effect still show the serial port, takes the
+  change back (`revert`) and tries again at the next sync or start.
+- **By hand**, for a running server, a worker or a platform machine that should change now:
+  `qm set <vmid> --vga std` on its node, then **stop and start** the VM (`qm shutdown <vmid>`,
+  `qm start <vmid>`; a reboot is not enough). Between the `qm set` and the stop, the VM has a
+  pending change: its project's sync and the volume and server operations on it are refused until
+  the VM has been stopped and started (or the change taken back with `qm set <vmid> --revert vga`).
+  Do the three steps together. Drain a Kubernetes worker first.
+- Not covered by the sync: a template no receipt of this portal holds (built by
+  `images/build.py`, the site's own, another portal's) and a withdrawn template. Run
+  `qm set <vmid> --vga std` on those; a template is stopped, so it lands at once.
+- The sync sets `vga: std` again on a stopped VM in a tenant pool that someone put back on a
+  serial display by hand, and so does a start from the portal. There is no setting to keep one VM
+  on it.
+- The write changes the template's configuration digest. A **staged** template from before v0.10.0
+  that passed its smoke test and is not published yet is refused at Publish after the sync
+  (`template_changed_since_smoke`): run the smoke test again, then publish. A published template is
+  not affected.
+- Tested against a fake Proxmox API that models pending changes; not yet run on a lab.

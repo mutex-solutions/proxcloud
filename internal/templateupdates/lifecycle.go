@@ -22,9 +22,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -282,32 +284,44 @@ func importTemplateBy(ctx context.Context, pv templateReader, name, digest, node
 	return cfg, nil
 }
 
-// StartNodeTemplatesAtBoot sets onboot on every Kubernetes node template of the provider that one of recs holds
-// (Receipt.Holds: an import of this portal that finished and still names its template), that is not withdrawn and
-// that lacks it. A withdrawn template (pc-tu-withdrawn) is kept for forensics and is neither read nor written: no new
-// node group gets it, and a worker that a cluster still pinned to it clones is covered by the sync's worker pass
-// (pve.Service.StartWorkersAtBoot). Import
-// writes the option since v0.9.0 (Executor.importDisk); this is the same write for a template imported before, so
-// that the machines cloned from it from now on start with their Proxmox node. It is the provider sync's pass. A
-// template no receipt holds (built by the image pipeline, the site's own, another portal's) is neither read nor
-// written. The write follows importTemplate's proof and carries the digest it read, as a tag write does, and takes
-// VM.Config.Options on /pool/pc-templates, which the import and the tag writes already use.
-func StartNodeTemplatesAtBoot(ctx context.Context, pv LifecyclePVE, recs []Receipt, serviceID string) error {
+// SyncImportedTemplates is the provider sync's pass over the templates of the provider that one of recs holds
+// (Receipt.Holds: an import of this portal that finished and still names its template) and that are not withdrawn.
+// It writes what an import of today writes (Executor.importDisk) on a template imported before, so that the machines
+// cloned from it from now on have it too:
+//   - vga std where the display is a serial port (every import before v0.10.0), on OS and Kubernetes templates: the
+//     Proxmox console then opens on the graphical display, and serial0 stays for the serial terminal;
+//   - onboot on a Kubernetes node template that lacks it (an import before v0.9.0), so that its clones start with
+//     their Proxmox node.
+//
+// A withdrawn template (pc-tu-withdrawn) is kept for forensics and is neither read nor written: no new node group or
+// server gets it, and a VM cloned from it before is covered by the sync's passes over the VMs
+// (pve.Service.StartWorkersAtBoot; pve.Service.ShowGraphicalDisplay for a stopped server) and by the portal's start
+// (pve.Client.StartVM). A template is never running, so vga lands at once and no change stays pending. A template no receipt holds (built by the image
+// pipeline, the site's own, another portal's) is neither read nor written. The write follows importTemplate's proof
+// and carries the digest it read, as a tag write does, and takes VM.Config.Options (onboot) and VM.Config.HWType
+// (vga) on /pool/pc-templates, which the import already uses.
+func SyncImportedTemplates(ctx context.Context, pv LifecyclePVE, recs []Receipt, serviceID string) error {
 	rows, err := pv.ClusterResources(ctx, "vm")
 	if err != nil {
 		return err
 	}
 	var errs []error
 	for _, row := range rows {
-		i := slices.IndexFunc(recs, func(r Receipt) bool {
-			return r.Payload.Variant == "kubernetes" && r.Payload.ServiceID == serviceID && r.Holds(row)
-		})
+		i := slices.IndexFunc(recs, func(r Receipt) bool { return r.Payload.ServiceID == serviceID && r.Holds(row) })
 		if i < 0 || row.NodeDown || hasTagValue(row.Tags, pve.TagTemplateWithdrawn) {
 			continue
 		}
 		cfg, err := importTemplate(ctx, pv, recs[i].Payload, row.Node, row.VMID)
-		if err == nil && cfg.Int("onboot") != 1 {
-			params := map[string]string{"onboot": "1"}
+		params := map[string]string{}
+		if err == nil {
+			if recs[i].Payload.Variant == "kubernetes" && cfg.Int("onboot") != 1 {
+				params["onboot"] = "1"
+			}
+			if pve.SerialDisplay(cfg) {
+				params["vga"] = "std"
+			}
+		}
+		if len(params) > 0 {
 			if d := cfg.Str("digest"); d != "" {
 				params["digest"] = d
 			}
@@ -317,7 +331,7 @@ func StartNodeTemplatesAtBoot(ctx context.Context, pv LifecyclePVE, recs []Recei
 			}
 		}
 		if err != nil {
-			errs = append(errs, fmt.Errorf("node template %d on %s: start at boot: %w", row.VMID, row.Node, err))
+			errs = append(errs, fmt.Errorf("template %d on %s: start at boot and display: %w", row.VMID, row.Node, err))
 		}
 	}
 	return errors.Join(errs...)
@@ -614,6 +628,164 @@ func siblingHolds(row pve.ClusterResource, rec Receipt, others []Receipt) bool {
 		}
 	}
 	return false
+}
+
+// DeletePVE is what Delete uses of *pve.Client beyond the lifecycle reads.
+type DeletePVE interface {
+	LifecyclePVE
+	StorageContents(ctx context.Context, node, storage, content string, vmid int) ([]pve.StorageContent, error)
+	DeleteVMConfigDisks(ctx context.Context, node string, vmid int) (pve.UPID, error)
+}
+
+// TemplateUsers names what still clones from the template vmid on node of a Proxmox provider: the node groups of
+// Kubernetes clusters and the version maps of Kubernetes providers (the admin handler reads them).
+type TemplateUsers func(ctx context.Context, serviceID, node string, vmid int) ([]string, error)
+
+// linkedClones lists the VM ids whose disks are linked clones of the template's base disks: the storage content rows
+// of the storages the template's config names whose volume id or parent names base-<vmid>-, which is what Proxmox's
+// own check before a destroy reads. A site that makes full clones only has none.
+func linkedClones(ctx context.Context, pv DeletePVE, node string, vmid int, cfg pve.VMConfig) ([]int, error) {
+	base := fmt.Sprintf("base-%d-", vmid)
+	storages := map[string]bool{}
+	for k := range cfg {
+		vol, _, _ := strings.Cut(cfg.Str(k), ",")
+		if storage, name, ok := strings.Cut(vol, ":"); ok && strings.Contains(name, base) {
+			storages[storage] = true
+		}
+	}
+	seen := map[int]bool{}
+	for storage := range storages {
+		items, err := pv.StorageContents(ctx, node, storage, "images", 0)
+		if err != nil {
+			return nil, err
+		}
+		for _, it := range items {
+			if it.VMID != vmid && (strings.Contains(it.VolID, base) || strings.Contains(it.Parent, base)) {
+				seen[it.VMID] = true
+			}
+		}
+	}
+	return slices.Sorted(maps.Keys(seen)), nil
+}
+
+// Delete destroys a withdrawn template of this portal's own import and frees its receipt, so that the artifact's VM
+// id and node are free again. Every condition is read from Proxmox and the store right before the destroy, and each
+// refusal has its own code:
+//
+//   - not_withdrawn: the digest is not on the blocklist, or the template lacks pc-tu-withdrawn or pc-tu-import;
+//   - template_published: it still carries pc-public or pc-tu-k8s-public (a withdraw that is not finished);
+//   - template_mismatch / template_present: the VM at the receipt's id is not this import's template (importTemplate,
+//     the proof publish and withdraw use: a template in pool pc-templates on the receipt's node, with the import's
+//     name and source tag), or it sits outside what the token sees;
+//   - job_running / smoke_running: the import's job or a smoke test of this template has not ended;
+//   - linked_clones: a linked clone still uses a base disk (linkedClones);
+//   - template_in_use: a cluster's node group or a provider's version map still names it (users).
+//
+// The destroy is DeleteVMConfigDisks: the disks the config names, never "destroy unreferenced disks". The receipt is
+// then freed by MarkTemplateGone, on its proof that no guest holds the id. A template that is already gone (deleted
+// by hand, or by a Delete whose receipt write failed) is freed the same way and answers Unchanged.
+func (s *Service) Delete(ctx context.Context, pv DeletePVE, users TemplateUsers, id string) (*LifecycleResult, error) {
+	if !s.VMEnabled {
+		return nil, errVMDisabled
+	}
+	rec, err := s.importReceipt(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	p := rec.Payload
+	out := &LifecycleResult{ID: id, Action: "delete", Digest: p.Digest, Slug: slugOf(p), ServiceID: p.ServiceID, Changed: []int{}, Complete: true}
+	if rec.TemplateGone {
+		out.Unchanged = true
+		return out, nil
+	}
+	release, err := s.lockDigest(ctx, p.Digest)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	if b, err := s.Receipts.Blocked(ctx, p.Digest); err != nil {
+		return nil, err
+	} else if b == nil {
+		return nil, lcErr(http.StatusConflict, "not_withdrawn", "Only a withdrawn template can be deleted: withdraw it first")
+	}
+	if state, _ := s.JobState(ctx, id); state == "pending" || state == "running" {
+		return nil, lcErr(http.StatusConflict, "job_running", "The import job of this template has not ended; try again when it has")
+	}
+	smoke, err := s.Smokes.Latest(ctx, p.ServiceID, p.Node, rec.VMID, p.Digest)
+	if err != nil {
+		return nil, err
+	}
+	if smoke != nil && smoke.Result == "" {
+		if state, _ := s.JobState(ctx, smoke.ID); state != "dead" {
+			return nil, lcErr(http.StatusConflict, "smoke_running", "A smoke test of this template is still running; try again when it has ended")
+		}
+	}
+	gone := func() error {
+		return s.MarkTemplateGone(ctx, func(context.Context, string) (LifecyclePVE, error) { return pv, nil }, id)
+	}
+	cfg, err := importTemplate(ctx, pv, p, p.Node, rec.VMID)
+	var le *LifecycleError
+	if errors.As(err, &le) && (le.Code == "template_missing" || le.Code == "template_mismatch") {
+		// Nothing of this import is at that id any more: nothing to destroy, the receipt is freed on proof. A VM that
+		// may still be the template (renamed, moved out of the pool) is refused: template_mismatch as it was read,
+		// template_present for one out of view.
+		if gerr := gone(); gerr != nil {
+			if le.Code == "template_mismatch" {
+				return nil, err
+			}
+			return nil, gerr
+		}
+		out.Unchanged = true
+		return out, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	tags := cfg.Str("tags")
+	switch {
+	case !hasTagValue(tags, pve.TagTemplateWithdrawn) || !hasTagValue(tags, TagImport):
+		return nil, lcErr(http.StatusConflict, "not_withdrawn", fmt.Sprintf("Template %d on %s is not tagged withdrawn (%s and %s): finish the withdraw first", rec.VMID, p.Node, pve.TagTemplateWithdrawn, TagImport))
+	case hasTagValue(tags, pve.TagTemplatePub) || hasTagValue(tags, TagK8sPublished):
+		return nil, lcErr(http.StatusConflict, "template_published", fmt.Sprintf("Template %d on %s still carries a published tag: finish the withdraw first", rec.VMID, p.Node))
+	}
+	clones, err := linkedClones(ctx, pv, p.Node, rec.VMID, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if len(clones) > 0 {
+		e := lcErr(http.StatusConflict, "linked_clones", fmt.Sprintf("Template %d on %s is the base disk of linked clones (VM %s): delete or fully clone them first", rec.VMID, p.Node, joinInts(clones)))
+		e.Details = map[string]any{"vmids": clones}
+		return nil, e
+	}
+	names, err := users(ctx, p.ServiceID, p.Node, rec.VMID)
+	if err != nil {
+		return nil, err
+	}
+	if len(names) > 0 {
+		e := lcErr(http.StatusConflict, "template_in_use", fmt.Sprintf("Template %d on %s is still named by: %s. New workers would be cloned from it: move them to another image first", rec.VMID, p.Node, strings.Join(names, "; ")))
+		e.Details = map[string]any{"users": names}
+		return nil, e
+	}
+	up, err := pv.DeleteVMConfigDisks(ctx, p.Node, rec.VMID)
+	if err == nil {
+		err = pv.WaitTask(ctx, up)
+	}
+	if err != nil && !pve.IsNotFound(err) {
+		return nil, err
+	}
+	out.Changed = append(out.Changed, rec.VMID)
+	if err := gone(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func joinInts(ids []int) string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = strconv.Itoa(id)
+	}
+	return strings.Join(out, ", ")
 }
 
 // lockDigest serializes lifecycle actions on one artifact across API replicas.

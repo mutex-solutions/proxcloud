@@ -520,7 +520,7 @@ def create_clone(api, cfg, sdir, state, suffix, address, public):
     mark("tagged")
     net = "virtio,bridge=%s%s" % (cfg["bridge"], ",tag=%d" % cfg["vlan"] if cfg["vlan"] else "")
     config = write(ostype="l26", cores=2, memory=4096, cpu="host", agent=1, scsihw="virtio-scsi-single",
-                   serial0="socket", vga="serial0", boot="order=scsi0", net0=net,
+                   serial0="socket", vga="std", boot="order=scsi0", net0=net,
                    scsi0="%s:0,discard=on,import-from=%s" % (cfg["storage"], volid(cfg)),
                    ide2="%s:cloudinit" % cfg["storage"])
     # The import must have the artifact's own virtual size; the grow below then proves it can still grow.

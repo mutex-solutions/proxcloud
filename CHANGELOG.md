@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Template updates: delete a withdrawn template.** A withdrawn template stayed in Proxmox until someone ran
+  `qm destroy` on the node. The Imported templates table now has **Delete** on withdrawn rows
+  (`DELETE /admin/template-updates/templates/{importId}`, `admin:service:manage`, audited). It destroys the
+  template with the disks its configuration names, never with "destroy unreferenced disks", and frees the import
+  receipt. It is refused, with the reason, while a Kubernetes cluster's node group or a provider's version map
+  still names the template, a linked clone uses its disk, or a smoke test or its import is running. The digest
+  stays blocked. No new Proxmox privilege. Not run on a lab yet
+  ([template-updates.md](docs/template-updates.md#delete-a-withdrawn-template)).
+
+### Changed
+
+- **The Proxmox console of a VM made by ProxCloud opens on the graphical display.** Templates were made with
+  `vga: serial0`, so the Proxmox web UI opened every server, worker and platform machine on the serial terminal
+  ("starting serial terminal on interface serial0", an empty page until a key is pressed). A new template now has
+  `vga: std` and keeps `serial0: socket`: the graphical console is the default and the serial terminal is still
+  there (Console → xterm.js, `qm terminal`). The portal's own console page works as before, on both tabs.
+- **Existing templates and stopped servers are moved by the portal at the next services sync; a running server at
+  its next start from the portal.** The write is what `qm set <vmid> --vga std` writes. No new Proxmox privilege.
+  - At once: the templates a Template updates import of this portal holds (not a withdrawn one), and the stopped
+    servers and imported images in the pools of its projects.
+  - At the next start from the portal: a running server. Stop then Start, or an action that stops and starts it
+    (resize, rebuild, restore, rollback), sets `vga: std` while the server is stopped. A Reboot does not.
+  - Not written by the portal: Kubernetes workers and the platform's machines and seed. They change when their node
+    group or the platform is rolled to a template that has `vga: std`.
+  - **The portal never writes `vga` on a running VM and never leaves a pending change.** Proxmox cannot apply `vga`
+    to a running VM, and the portal's inventory and volume and server operations refuse a VM with a pending change.
+  - By hand: `qm set <vmid> --vga std`, then stop and start the VM, in one go: between the two the VM has a pending
+    change and its project's sync and operations on it are refused.
+  - What a guest shows on its graphical console and on its serial terminal depends on the guest's own kernel
+    arguments; this was not measured.
+  - A template built by `images/build.py`, or any template this portal did not import, is not written: run the
+    command on it. See [docs/template-updates.md](docs/template-updates.md#console-display).
+- **The platform BOM on `main` is `0.10.0-dev` again, and the build carries the BOM of `0.9.1`**
+  (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.9.1.yaml`). The `v0.9.1` release commit left
+  the BOM at `0.9.1`, and the release gate refuses only `-dev`. A platform installed by `v0.9.1`, or moved to its
+  BOM by an upgrade, stays on it under a later build and is not refused (`bom_unsupported`) while the file is
+  carried. Its pins are those of `0.9.0`, so `TestUpgradeRollsNoMachine` compares seven previous BOMs with the
+  BOM on `main`: three of 0.8.x, the two candidates, `0.9.0` and `0.9.1`. No apply on such a platform was run on
+  a lab by this change.
+
 ## [0.9.1] - 2026-11-19
 
 A patch release on top of `v0.9.0`. It adds no feature: it fixes what the first production upgrade to `v0.9.0`

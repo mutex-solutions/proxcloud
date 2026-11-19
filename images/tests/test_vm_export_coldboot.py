@@ -370,7 +370,7 @@ class HappyPathTests(ColdBootCase):
         self.assertEqual(set(writes[0]), {"digest", "tags"})
         self.assertEqual(writes[0]["tags"], "proxcloud;pc-artifact-test;%s;pc-export-run-%s" % (TAG, run))
         self.assertEqual({k: writes[1][k] for k in ("scsihw", "serial0", "vga", "boot", "net0", "ide2", "scsi0")},
-                         {"scsihw": "virtio-scsi-single", "serial0": "socket", "vga": "serial0", "boot": "order=scsi0",
+                         {"scsihw": "virtio-scsi-single", "serial0": "socket", "vga": "std", "boot": "order=scsi0",
                           "net0": "virtio,bridge=vmbr0,tag=242", "ide2": STORAGE + ":cloudinit",
                           "scsi0": "%s:0,discard=on,import-from=%s:import/%s" % (STORAGE, STORAGE, result["import_volume"])})
         self.assertFalse({"bios", "efidisk0", "tpmstate0", "cipassword"} & set().union(*writes))

@@ -1025,7 +1025,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		return templateupdates.StartNodeTemplatesAtBoot(ctx, ps.C, recs, es.ID)
+		return templateupdates.SyncImportedTemplates(ctx, ps.C, recs, es.ID)
 	})
 	adminH.SetJobsScheduler(cfg.Jobs.SchedulerEnabled) // before the platform runner starts: its preflight reads it
 	// The managed-services platform (docs/adr/0009): its installation routes only with PROXCLOUD_PLATFORM_ENABLED=true;
