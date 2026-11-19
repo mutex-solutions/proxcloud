@@ -20,7 +20,7 @@
 # internal/platformlife/bom_test.go keeps installer/playbooks/group_vars/all/versions.yml,
 # pc_defaults.services.k8s_version and the values of stage 40's ArgoCD and cert-manager equal to this file.
 schemaVersion: 1
-release: 0.10.0-dev                # "-dev" on main between releases; at a stable tag deploy/charts/proxcloud appVersion without "v" (a candidate keeps the chart of the last stable release)
+release: 0.9.1                     # "-dev" on main between releases; at a stable tag deploy/charts/proxcloud appVersion without "v" (a candidate keeps the chart of the last stable release)
 kubernetes:
   version: 1.35.10
   nodeImage: {package: proxcloud-vm-ubuntu-2604-k8s, tag: ubuntu-2604-k8s-1.35.10-20261116181221-72f0eaa3d0d4, digest: "sha256:62de43787103a74e433203fbbf9bd85806011e673371591397bd30bedda03ea9"}
