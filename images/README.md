@@ -24,7 +24,7 @@ build.py build --os debian-13 --node pve1 --storage nas-templates --import-stora
 
 | Step | What happens |
 |---|---|
-| Base | The vendor image is downloaded to the store with `import` content, once per upstream checksum. A fresh, stopped base VM is created with a cloud-init drive, a serial console and the agent flag. Its imported `scsi0` is grown to at least **5 GiB** and read back before template conversion or first boot; larger vendor disks are not shrunk. |
+| Base | The vendor image is downloaded to the store with `import` content, once per upstream checksum. A fresh, stopped base VM is created with a cloud-init drive, a graphical display (`vga: std`), a serial port (`serial0`) and the agent flag. Its imported `scsi0` is grown to at least **5 GiB** and read back before template conversion or first boot; larger vendor disks are not shrunk. |
 | Packer | `packer/template.pkr.hcl` clones the base, runs `scripts/base.sh` and `scripts/cleanup.sh`, and converts the clone to a template. |
 | Smoke test | A clone boots on the same bridge/access VLAN as the build, and the guest agent must report the address cloud-init configured. The clone is then destroyed. |
 | Publish | Only after smoke success is the build NIC (`net0`) removed, then public tags applied. Failed cleanup cannot publish; tenant/server create supplies its own NIC. |
