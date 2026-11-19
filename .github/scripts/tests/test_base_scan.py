@@ -206,5 +206,12 @@ class BaseTests(unittest.TestCase):
                 scan.assert_not_called()
 
 
+    def test_builder_line_reference_points_at_the_cpu_code_interpreter_build(self):
+        # A line number in the inventory goes stale without notice when build.sh grows above it.
+        where = next(spec[3] for spec in SCAN.TARGETS if spec[0] == "template-cpu-python")[1]
+        path, line = where.split(":")
+        text = (SCRIPT.parents[2] / path).read_text(encoding="utf-8").splitlines()[int(line) - 1]
+        self.assertTrue(text.strip().startswith("code-interpreter) build code-interpreter "), text)
+
 if __name__ == "__main__":
     unittest.main()

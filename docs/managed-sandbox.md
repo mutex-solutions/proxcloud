@@ -1596,7 +1596,9 @@ SDK ──POST /e2b/sandboxes {templateID: mcp-gateway, mcp: {...}}──► por
   exist as Docker images are not offered; an unknown name fails the create.
 - **The template** (`deploy/templates/mcp-gateway`, built by `build.sh` and the `sandbox-templates` workflow, which
   now also runs on changes under `cmd/mcp-gateway/`): the base template, the gateway binary, the npm servers under
-  `/opt/mcp/npm` and the Python ones as uv tools under `/opt/mcp/bin`. The servers run on a Node 22 of their own
+  `/opt/mcp/npm` and the Python ones as uv tools under `/opt/mcp/bin`. The npm servers and all their dependencies are
+  installed with `npm ci` from `package.json` and `package-lock.json` in that directory (since 0.9.0; before, only the
+  servers were pinned and a build could take a newer transitive dependency). The servers run on a Node 22 of their own
   (`/opt/mcp/node`, first on the servers' PATH): the base image's Node 20.9 cannot run `brave`, `firecrawl` or `mongodb`
   (found on the lab, below); the sandbox user's `node` stays the base's. The build fails unless every package server
   starts and answers MCP `initialize` and `tools/list` (`mcp-gateway pull`, with placeholder values), not only when a

@@ -31,7 +31,7 @@ TARGETS = (
     ("proxy-distroless", "gcr.io/distroless/static-debian12:nonroot", "upstream runtime", ("deploy/sandbox-proxy.Dockerfile:14",)),
     ("import-distroless", "gcr.io/distroless/static:nonroot", "upstream runtime", ("deploy/sandbox-import.Dockerfile:11",)),
     ("template-e2b-base", "docker.io/e2bdev/base@sha256:8aebbf5e7d1209ebdc4bbc5999624556c2d9eebe91b9fded756ff2d688367065", "upstream runtime", ("deploy/templates/base/Dockerfile:3",)),
-    ("template-cpu-python", "docker.io/library/python@sha256:bcaf104ef2827b827bdd0b8b351742783fc050296e1dc150113e6ec869e652d0", "upstream runtime", ("deploy/templates/code-interpreter/Dockerfile:6-7; CPU default", "deploy/templates/build.sh:43")),
+    ("template-cpu-python", "docker.io/library/python@sha256:bcaf104ef2827b827bdd0b8b351742783fc050296e1dc150113e6ec869e652d0", "upstream runtime", ("deploy/templates/code-interpreter/Dockerfile:6-7; CPU default", "deploy/templates/build.sh:56")),
     ("template-node", "docker.io/library/node@sha256:6b9d4ea31e614e29f364bf75758458731eb1e105b80c99667438dd6b3fe262e0", "upstream runtime", ("deploy/templates/node/Dockerfile:2",)),
     ("template-desktop-ubuntu", "docker.io/library/ubuntu@sha256:8a2321a92b438238f93b4346fff61bc4259c99fdd4d9b52ee86f153fee0c344f", "upstream runtime", ("deploy/templates/desktop/Dockerfile:5",)),
     ("template-playwright-python", "mcr.microsoft.com/playwright/python@sha256:7d030ac0638b279ecc72493f8b6706fecef80a893679a23b02f912905c4915c0", "upstream runtime", ("deploy/templates/browser/Dockerfile:4",)),
