@@ -950,6 +950,8 @@ test("Custom fills nothing, and a release that builds one control plane machine 
   // Installed: a preset would resize and replace every machine, so none is offered.
   for (const name of [/^Homelab/, /^Standard/, /^Custom/]) await expect(page.getByRole("radio", { name })).toBeDisabled()
   await expect(page.getByText("A preset is a start for a new installation.")).toBeVisible()
+  // The control plane's node is fixed with the install (the API answers 409 fixed_fields): another node is every machine anew.
+  await expect(page.getByLabel("Control plane node", { exact: true })).toBeDisabled()
   // The API refuses three for this platform at the save, for a client that sends it anyway.
   const answer = await page.evaluate(async (paths) => {
     const { dispatch } = await import(/* @vite-ignore */ paths.router)

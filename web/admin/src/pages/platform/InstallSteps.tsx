@@ -181,8 +181,8 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
     <StepCard n={1} title="Settings" description="What gets built and where. Saving keeps a draft: nothing is created on Proxmox until you press Install.">
       {installed ? (
         <p className="text-sm text-muted-foreground">
-          The name, the network, the seed's node and address and the API address were fixed by the first successful install. To change
-          them, remove the installation and install again.
+          The name, the network, the seed's node and address, the API address and the control plane's node were fixed by the first
+          successful install. To change them, remove the installation and install again.
         </p>
       ) : null}
       <datalist id="pf-nodes">{nodes.map((n) => <option key={n} value={n} />)}</datalist>
@@ -307,7 +307,7 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
 
       <H3>Control plane</H3>
       <div className="grid gap-4 sm:grid-cols-2">
-        <Field id="cpNode" label="Control plane node" list="pf-nodes" value={form.cpNode} onChange={set("cpNode")} disabled={!canManage} problems={problems} placeholder="pve1"
+        <Field id="cpNode" label="Control plane node" list="pf-nodes" value={form.cpNode} onChange={set("cpNode")} disabled={fixed} problems={problems} placeholder="pve1"
           hint="Every control plane machine of the platform cluster runs on this node." />
         <Sizes id="cp" what="Control plane" value={form.cp} onChange={(m) => setForm({ ...form, cp: m })} problems={problems} disabled={!canManage} />
         <div className="grid content-start gap-1.5 sm:col-span-2">
@@ -514,7 +514,8 @@ function TenantPathTest({ installation, canManage }: { installation: Installatio
       <p className="text-muted-foreground">
         The checks above read the configuration. This test opens a connection: it makes a small network in the tenant zone and a small VM on the
         chosen node, connects from it to what listens in the load balancer range, and removes both again. It costs one VM clone and two SDN applies,
-        takes a few minutes, and needs a tenant cluster or database to connect to and a published Ubuntu or Debian template on the node.
+        takes a few minutes, and needs a tenant cluster or database to connect to and, published on the node, an Ubuntu or Debian image that Template
+        updates imported for this provider. The VM is cloned as a tenant's server is, never from a template someone else put on the cluster.
       </p>
       <div className="flex flex-wrap items-end gap-3">
         <div className="grid gap-1.5">
@@ -533,7 +534,7 @@ function TenantPathTest({ installation, canManage }: { installation: Installatio
         <div className="grid gap-1.5" role="status">
           <p>
             <span className="mr-2 font-mono text-xs text-muted-foreground">{p.state}</span>
-            {running ? `Running on ${p.node}: ${p.step || "starting"}.` : p.message}
+            {running ? `Running on ${p.node}${p.image ? `, from the image ${p.image}` : ""}: ${p.step || "starting"}.` : p.message}
           </p>
           {!running && p.targets?.length ? (
             <ul aria-label="Connections of the last test" className="list-disc pl-5 text-muted-foreground">
@@ -547,6 +548,9 @@ function TenantPathTest({ installation, canManage }: { installation: Installatio
           ) : null}
           {p.left?.length ? (
             <Alert variant="destructive"><AlertTitle>The cleanup left something behind</AlertTitle><AlertDescription><ul className="list-disc pl-5">{p.left.map((l) => <li key={l}>{l}</li>)}</ul></AlertDescription></Alert>
+          ) : null}
+          {!running && p.notes?.length ? (
+            <ul aria-label="What Proxmox may keep" className="list-disc pl-5 text-muted-foreground">{p.notes.map((n) => <li key={n}>{n}</li>)}</ul>
           ) : null}
         </div>
       ) : null}

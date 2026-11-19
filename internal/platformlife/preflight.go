@@ -465,7 +465,8 @@ const enrollRemedy = "run the root command of step 2 on a node and paste the PC-
 // whole boot store, and its secret is readable inside the platform cluster, so whoever reads it there reaches every
 // disk on the store (docs/proxmox-permissions.md). The disks are listed with that token, the only one that sees them
 // all: the portal token sees a disk only through its VM. Not counted: this installation's machines, the templates of
-// the template pool (pve.TemplatePool), and CSI volumes (vm-<id>-pvc-*).
+// the template pool (pve.TemplatePool), and CSI volumes (vm-<id>-pvc-*). A VM of that pool that is no template is
+// counted like any other; that includes the VM of a template smoke test or of a tenant path test while it runs.
 func (p Preflight) bootStore(ctx context.Context, defs []pve.StorageDef, defsErr error) Check {
 	in := p.Installation
 	boot := in.Spec.Storage.Boot
@@ -494,8 +495,12 @@ func (p Preflight) bootStore(ctx context.Context, defs []pve.StorageDef, defsErr
 		own[vm.vmid] = true
 	}
 	if pool, err := p.Portal.C.GetPool(ctx, pve.TemplatePool); err == nil && pool != nil {
+		// Only the templates: a VM that runs in the template pool (a clone that kept its template's pool, a VM put
+		// there by hand) is as much another VM's disk as one outside it.
 		for _, m := range pool.Members {
-			own[m.VMID] = true
+			if m.Template == 1 {
+				own[m.VMID] = true
+			}
 		}
 	}
 	nodes := []string{in.Spec.Seed.Node}
@@ -550,17 +555,21 @@ func (p Preflight) apiRule(ctx context.Context) Check {
 	if on, err := p.Portal.C.DatacenterFirewallEnabled(ctx); err == nil && !on {
 		off = " The datacenter firewall is off, so no rule is enforced now; the rule is for the day it is turned on."
 	}
+	// The row reads the rule, not the traffic: where a router translates the platform network on its way to the node,
+	// the rule is in place and matches nothing (lab round of 2026-11-19: every call arrived from the router's address).
+	const matches = " The rule matches the addresses of the seed and the platform machines as the node sees them. Where a router between the platform network and the node translates that traffic (NAT), " +
+		"the node sees the router's address and this rule matches nothing: add a rule of your own for the translated address (Datacenter, Firewall). This row reads the rule, not whether traffic matches it."
 	switch {
 	case err != nil:
 		return Check{ID: "pve-api-rule", Status: CheckWarn, Message: "Could not read the cluster firewall rules, so whether the platform network may reach the Proxmox API is not known: " + err.Error() +
 			". The install and every apply write the rule (" + rule + ")."}
 	case has:
-		return Check{ID: "pve-api-rule", Status: CheckOK, Message: "The cluster firewall lets the seed and the node range reach the Proxmox API (" + rule + ")." + off}
+		return Check{ID: "pve-api-rule", Status: CheckOK, Message: "The cluster firewall lets the seed and the node range reach the Proxmox API (" + rule + ")." + matches + off}
 	case !in.Installed():
-		return Check{ID: "pve-api-rule", Status: CheckOK, Message: "Install writes the cluster firewall rule that lets the seed and the node range reach the Proxmox API (" + rule + "), before the seed is made. Nothing to do by hand." + off}
+		return Check{ID: "pve-api-rule", Status: CheckOK, Message: "Install writes the cluster firewall rule that lets the seed and the node range reach the Proxmox API (" + rule + "), before the seed is made. Nothing to do by hand." + matches + off}
 	}
 	return Check{ID: "pve-api-rule", Status: CheckWarn, Message: "The cluster firewall rule that lets the seed and the node range reach the Proxmox API is missing or was changed (" + rule +
-		"): the platform's machines may not reach Proxmox. Press Apply: it writes the rule again." + off}
+		"): the platform's machines may not reach Proxmox. Press Apply: it writes the rule again." + matches + off}
 }
 
 // nicPath is the ACL path Proxmox checks SDN.Use on when a NIC is put on the platform network, where that is not
@@ -660,8 +669,10 @@ const tenantPathGuide = `docs/managed-services.md, "The path from tenants to the
 // platform bridge (a vnet of a simple zone with that gateway on a subnet, or the node's own interface). It opens no
 // connection, so it cannot prove the path, and it does not see an address added on a node at runtime.
 func (p Preflight) tenantPath(ctx context.Context, site Site, zones []pve.SDNZone, zonesErr error) Check {
-	const limit = " This row reads the configuration only: it opens no connection, and it does not see an address or a rule added on a node by hand. " +
-		"\"Test the tenant path\" opens one from a tenant network, once the platform is installed (POST …/tenant-path-probe)."
+	const reads = " This row reads the configuration only: it opens no connection, and it does not see an address or a rule added on a node by hand. "
+	// What opens a connection. In a VLAN zone the test is refused (tenantprobe.go, vlan_zone), so the row names what
+	// applies there instead of a button that answers 409.
+	limit := reads + "\"Test the tenant path\" opens one from a tenant network, once the platform is installed (POST …/tenant-path-probe)."
 	n := p.Installation.Spec.Network
 	ok := func(msg string) Check { return Check{ID: "tenant-path", Status: CheckOK, Message: msg + limit} }
 	unknown := func(what string, err error) Check {
@@ -693,6 +704,10 @@ func (p Preflight) tenantPath(ctx context.Context, site Site, zones []pve.SDNZon
 	var only []string // simple: the nodes the zone is limited to; none = every node
 	if i := slices.IndexFunc(zones, func(z pve.SDNZone) bool { return z.Zone == site.DefaultZone }); i >= 0 {
 		kind, only, exit = zones[i].Type, nodeList(zones[i].Nodes), nodeList(zones[i].ExitNodes)
+	}
+	if kind == "vlan" {
+		limit = reads + "\"Test the tenant path\" does not run in a VLAN zone (409 vlan_zone): a test network would need its own VLAN and gateway on your router, which ProxCloud cannot make. " +
+			"Open a connection from a tenant's server instead, once a tenant cluster exists: curl -k -m 5 https://<a tenant cluster's API address>:6443/healthz."
 	}
 	zone := "The provider's default zone " + site.DefaultZone
 	var how string

@@ -111,6 +111,7 @@ func TestAdminPlatformInstallations(t *testing.T) {
 	type answer struct {
 		Data   json.RawMessage `json:"data"`
 		Errors struct {
+			Message string         `json:"message"`
 			Details map[string]any `json:"details"`
 		} `json:"errors"`
 	}
@@ -241,6 +242,18 @@ func TestAdminPlatformInstallations(t *testing.T) {
 		t.Fatal("the preflight did not use the stored platform tokens")
 	}
 
+	// An installation saved before v0.9.0 has no controlPlane.replicas: the answer names it (1), as docs/api.md says.
+	var old map[string]any
+	if found, err := db.C(platformlife.InstallationCollection).Get(ctx, in.ID, &old); err != nil || !found {
+		t.Fatal(found, err)
+	}
+	delete(old["spec"].(map[string]any)["clusters"].([]any)[0].(map[string]any)["controlPlane"].(map[string]any), "replicas")
+	if err := db.C(platformlife.InstallationCollection).Upsert(ctx, in.ID, old); err != nil {
+		t.Fatal(err)
+	}
+	if a := call("support-sub", http.MethodGet, one, "", http.StatusOK); !strings.Contains(string(a.Data), `"replicas":1`) {
+		t.Fatalf("a stored spec without the count is not answered with it: %s", a.Data)
+	}
 	// Update: a stale rev, a run in progress and, once installed, a fixed field are refused; a size change is not.
 	call("support-sub", http.MethodPut, one, platformBody("10.200.200.1", 4, 1), http.StatusForbidden)
 	if a := call("admin-sub", http.MethodPut, one, platformBody("10.200.200.1", 4, 1), http.StatusOK); !strings.Contains(string(a.Data), `"rev":2`) {
@@ -301,10 +314,50 @@ func TestAdminPlatformInstallations(t *testing.T) {
 		t.Fatalf("3 to a body without the count: %+v", a)
 	}
 	call("admin-sub", http.MethodPut, one, replicas(3, 6), http.StatusOK)
+	// A preset on an installed platform is refused, whatever the spec leaves out, and nothing is stored (lab round of
+	// 2026-11-19, P1: it was a 200 that moved the control plane and resized every group).
+	specOf := func() string {
+		var v struct{ Spec json.RawMessage }
+		_ = json.Unmarshal(call("admin-sub", http.MethodGet, one, "", http.StatusOK).Data, &v)
+		return string(v.Spec)
+	}
+	noMachines := func(preset string, rev int64) string {
+		var b map[string]any
+		_ = json.Unmarshal([]byte(platformBody("10.200.200.1", 6, rev)), &b)
+		cl := b["spec"].(map[string]any)["clusters"].([]any)[0].(map[string]any)
+		delete(cl, "controlPlane")
+		delete(cl, "nodeGroups")
+		if preset != "" {
+			b["preset"] = preset
+		}
+		out, _ := json.Marshal(b)
+		return string(out)
+	}
+	stored := specOf()
+	for _, body := range []string{noMachines("standard", 7), strings.Replace(platformBody("10.200.200.1", 6, 7), `"name":"lab"`, `"name":"lab","preset":"homelab"`, 1)} {
+		if a := call("admin-sub", http.MethodPut, one, body, http.StatusConflict); code(a) != "fixed_fields" || !strings.Contains(a.Errors.Message, "A preset fills") {
+			t.Fatalf("a preset on an installed platform: %+v", a)
+		}
+	}
+	if now := specOf(); now != stored {
+		t.Fatalf("a refused preset changed the stored spec:\n%s\n%s", stored, now)
+	}
+	// custom fills nothing and stays accepted; a spec without controlPlane and nodeGroups keeps the stored machines
+	// (three control plane machines on pve1, one machine of 2 cores per group), never a default.
+	call("admin-sub", http.MethodPut, one, noMachines("custom", 7), http.StatusOK)
+	if now := specOf(); now != stored {
+		t.Fatalf("a spec without machines did not keep the stored ones:\n%s\n%s", stored, now)
+	}
+	// The control plane's node is fixed once installed: another node is every control plane machine made anew.
+	if a := call("admin-sub", http.MethodPut, one, strings.Replace(replicas(3, 8), `"controlPlane":{"replicas":3,"cores":2,"diskGiB":30,"memoryMiB":4096,"node":"pve1"`,
+		`"controlPlane":{"replicas":3,"cores":2,"diskGiB":30,"memoryMiB":4096,"node":"pve2"`, 1), http.StatusConflict); code(a) != "fixed_fields" ||
+		!strings.Contains(strings.Join(anyStrings(a.Errors.Details["problems"]), ","), "spec.clusters[0].controlPlane.node") {
+		t.Fatalf("the control plane node after install: %+v", a)
+	}
 	if err := store.SaveRun(ctx, &platformlife.Run{ID: "pr-1", InstallationID: in.ID, Kind: platformlife.RunApply, State: platformlife.RunRunning}); err != nil {
 		t.Fatal(err)
 	}
-	if a := call("admin-sub", http.MethodPut, one, platformBody("10.200.200.1", 8, 7), http.StatusConflict); code(a) != "run_active" {
+	if a := call("admin-sub", http.MethodPut, one, platformBody("10.200.200.1", 8, 8), http.StatusConflict); code(a) != "run_active" {
 		t.Fatalf("during a run: %+v", a)
 	}
 
@@ -326,12 +379,12 @@ func TestAdminPlatformInstallations(t *testing.T) {
 		if err := db.C("auditEvent").Find(ctx, pgdoc.M{"resourceType": "PLATFORM_INSTALLATION"}, &events); err != nil {
 			t.Fatal(err)
 		}
-		if len(events) >= 9 || time.Now().After(deadline) {
+		if len(events) >= 10 || time.Now().After(deadline) {
 			break
 		}
 	}
-	if len(events) != 9 { // two creates (the second from a preset), credentials, six updates; the preflight and every refusal are not audited
-		t.Fatalf("%d audit events, want 7: %v", len(events), events)
+	if len(events) != 10 { // two creates (the second from a preset), credentials, seven updates; the preflight and every refusal are not audited
+		t.Fatalf("%d audit events, want 10: %v", len(events), events)
 	}
 	dump, _ := json.Marshal(map[string]any{"responses": bodies, "stored": raw, "audit": events})
 	for _, s := range []string{plantedCAPI, plantedCSI, portalToken} {

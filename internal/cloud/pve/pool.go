@@ -18,6 +18,8 @@ type PoolMember struct {
 	VMID    int    `json:"vmid"`
 	Node    string `json:"node"`
 	Storage string `json:"storage"`
+	// Template is 1 for a VM template. A pool also holds what was cloned into it or moved there by hand.
+	Template int `json:"template"`
 }
 
 // PoolInfo is GET /pools/{poolid}.

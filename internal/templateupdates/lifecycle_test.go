@@ -254,3 +254,43 @@ func TestTemplateGoneNeedsProof(t *testing.T) {
 		}
 	}
 }
+
+// A receipt holds a cluster row only when its import finished and the row is that import's template: the VM id of a
+// failed import, or of a template deleted by hand, goes to the next VM, which can be another portal's.
+func TestReceiptHolds(t *testing.T) {
+	p := VMPayload{ServiceID: "svc", Node: "pve3", Digest: "sha256:0123456789abcdef", OS: "ubuntu-2604", Variant: "os", BuildVersion: "202611161812"}
+	row := pve.ClusterResource{Type: "qemu", Node: "pve3", VMID: 9216, Template: 1, Pool: pve.TemplatePool, Name: TemplateName(p),
+		Tags: "pc-img-ubuntu-2604;pc-public;pc-src-0123456789ab"}
+	rec := Receipt{VMID: 9216, Step: StepSucceeded, Payload: p}
+	if !rec.Holds(row) {
+		t.Fatal("a finished import does not hold its template")
+	}
+	templated := rec
+	templated.Step = StepTemplated
+	if !templated.Holds(row) {
+		t.Error("a templated import does not hold its template")
+	}
+	for name, change := range map[string]func(r *Receipt, row *pve.ClusterResource){
+		"failed":        func(r *Receipt, _ *pve.ClusterResource) { r.Step = StepFailed },
+		"creating":      func(r *Receipt, _ *pve.ClusterResource) { r.Step = StepCreating },
+		"imported":      func(r *Receipt, _ *pve.ClusterResource) { r.Step = StepImported },
+		"no step":       func(r *Receipt, _ *pve.ClusterResource) { r.Step = "" },
+		"template gone": func(r *Receipt, _ *pve.ClusterResource) { r.TemplateGone = true },
+		"no vmid":       func(r *Receipt, row *pve.ClusterResource) { r.VMID, row.VMID = 0, 0 },
+		"other vmid":    func(_ *Receipt, row *pve.ClusterResource) { row.VMID = 9217 },
+		"other node":    func(_ *Receipt, row *pve.ClusterResource) { row.Node = "pve1" },
+		"other name":    func(_ *Receipt, row *pve.ClusterResource) { row.Name = "pc-ghcr-ubuntu-2404-os-202611010000" },
+		"other digest": func(_ *Receipt, row *pve.ClusterResource) {
+			row.Tags = "pc-img-ubuntu-2604;pc-public;pc-src-ffffffffffff"
+		},
+		"other pool":      func(_ *Receipt, row *pve.ClusterResource) { row.Pool = "" },
+		"no template":     func(_ *Receipt, row *pve.ClusterResource) { row.Template = 0 },
+		"no digest (old)": func(r *Receipt, _ *pve.ClusterResource) { r.Payload.Digest = "" },
+	} {
+		r, w := rec, row
+		change(&r, &w)
+		if r.Holds(w) {
+			t.Errorf("%s: the receipt holds the row", name)
+		}
+	}
+}
