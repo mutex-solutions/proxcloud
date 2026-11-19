@@ -56,7 +56,7 @@ func stageIDs(kind string) []string {
 	if kind == RunRemove {
 		return []string{StageRemoveCluster, StageRemoveSeed, StageRemoveSecrets}
 	}
-	return []string{StageValidate, StageImages, StageSeedVM, StageSeedAPI, StageSeedIdentity, stageSeedPlatform, stageCluster,
+	return []string{StageValidate, StageImages, StageSeedVM, StageSeedAPI, StageSeedIdentity, stageSeedK3s, stageSeedPlatform, stageCluster,
 		stageWorkloadAccess, stageWorkloadPlatform, stageRegister, stageDone}
 }
 
@@ -66,9 +66,10 @@ func stageIDs(kind string) []string {
 // release's for a new installation. targetBOM (the sha256 of this build's BOM) makes an apply an upgrade: it is
 // accepted only when move allows it (UpgradeRefused otherwise) and confirm is "upgrade <name> to <release>"; the
 // installation then records the target, and every later apply continues to it without a target or a confirmation
-// until one succeeds. confirm is otherwise the typed confirmation of a Remove ("remove <name>", or empty): see
+// until one succeeds. An upgrade that replaces the seed's k3s starts only with backup (SeedBackupMissing otherwise):
+// the route reads Proxmox, the store decides. confirm is otherwise the typed confirmation of a Remove ("remove <name>", or empty): see
 // Run.Confirmed.
-func (s *Store) StartRun(ctx context.Context, jobs *durablejobs.Store, installationID, kind, actor, confirm, targetBOM string) (*Run, error) {
+func (s *Store) StartRun(ctx context.Context, jobs *durablejobs.Store, installationID, kind, actor, confirm, targetBOM string, backup SeedBackup) (*Run, error) {
 	if kind != RunApply && kind != RunRemove {
 		return nil, ErrBadKind
 	}
@@ -113,7 +114,7 @@ func (s *Store) StartRun(ctx context.Context, jobs *durablejobs.Store, installat
 			}
 		}
 		if kind == RunApply {
-			if err := startApply(run, &in, targetBOM, confirm); err != nil {
+			if err := startApply(run, &in, targetBOM, confirm, backup); err != nil {
 				return err
 			}
 		}
@@ -144,9 +145,14 @@ func (s *Store) StartRun(ctx context.Context, jobs *durablejobs.Store, installat
 	return run, nil
 }
 
+// SeedBackup is what an apply knows of a backup of the seed VM: Seen, the portal read one younger than SeedBackupAge
+// from Proxmox (the seed-backup row is ok); Taken, the operator says one exists that the portal cannot see.
+type SeedBackup struct{ Seen, Taken bool }
+
 // startApply gives an apply its BOM (move). An upgrade, started or continued, also records where the platform comes
-// from on the run and where it goes on the installation: from then on status.targetBom decides every apply.
-func startApply(run *Run, in *Installation, targetBOM, confirm string) error {
+// from on the run and where it goes on the installation: from then on status.targetBom decides every apply. An
+// upgrade that replaces the seed's k3s starts only with a backup of the seed; a Retry of a started one asks for none.
+func startApply(run *Run, in *Installation, targetBOM, confirm string, backup SeedBackup) error {
 	to, up, err := move(in, targetBOM)
 	switch {
 	case err != nil:
@@ -157,7 +163,10 @@ func startApply(run *Run, in *Installation, targetBOM, confirm string) error {
 		return ErrSameBOM
 	case up == nil && confirm != "", up != nil && confirm != up.Confirm: // "" while an upgrade is in progress
 		return ErrBadConfirm
+	case up.MovesSeed() && !up.InProgress && !backup.Seen && !backup.Taken && in.Status.Seed != nil:
+		return &SeedBackupMissing{VMID: in.Status.Seed.VMID}
 	}
+	run.SeedBackupTaken = up.MovesSeed() && !up.InProgress && backup.Taken
 	if run.BOM = refOf(to); up != nil {
 		from, target := *in.Status.BOM, run.BOM
 		run.FromBOM, in.Status.TargetBOM = &from, &target

@@ -272,3 +272,25 @@ func TestChartBackupAndRestore(t *testing.T) {
 		t.Errorf("ScheduledBackup = %v", sched)
 	}
 }
+
+// A CloudNativePG Cluster of one instance carries no disruption budget (chart 0.5.2): its budget allows no eviction,
+// so a drain of its node would wait without limit. With more instances the budget stays (the key is absent).
+func TestChartSingleInstanceHasNoPDB(t *testing.T) {
+	for _, engine := range []string{EnginePostgreSQL, EngineFerretDB} {
+		for instances, want := range map[int]any{1: false, 3: nil} {
+			found := false
+			for _, d := range renderChart(t, BuildValues(testConfig(), chartSpec(engine, instances))) {
+				if d["kind"] != "Cluster" {
+					continue
+				}
+				found = true
+				if got := d["spec"].(map[string]any)["enablePDB"]; got != want {
+					t.Errorf("%s with %d instances: enablePDB %v, want %v", engine, instances, got, want)
+				}
+			}
+			if !found {
+				t.Fatalf("%s: no CloudNativePG Cluster rendered", engine)
+			}
+		}
+	}
+}

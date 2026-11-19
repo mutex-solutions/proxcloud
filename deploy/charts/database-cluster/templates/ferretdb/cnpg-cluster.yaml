@@ -25,6 +25,13 @@ metadata:
     {{- end }}
 spec:
   instances: {{ int .Values.instances }}
+  {{- if eq (int .Values.instances) 1 }}
+  # One instance: CloudNativePG's PodDisruptionBudget allows no disruption, so a
+  # drain of its node (a node replaced by an upgrade or a repair) would wait
+  # without limit. Without the budget the drain evicts the pod and the database
+  # restarts on another node of the group. More instances keep their budget.
+  enablePDB: false
+  {{- end }}
   imageName: {{ include "database-cluster.ferretdbPostgresImage" . }}
   # The postgres user in the FerretDB image is uid/gid 999 (it is built on the
   # official postgres image), NOT the 26/26 CNPG assumes for its OWN images.

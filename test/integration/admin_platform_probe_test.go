@@ -208,7 +208,7 @@ func TestPlatformTenantPathProbeRoutes(t *testing.T) {
 	call("admin-sub", http.MethodPost, `{}`, http.StatusConflict, "probe_running")
 
 	// During a run of the installation nothing else writes to its Proxmox.
-	if _, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "", ""); err != nil {
+	if _, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "", "", platformlife.SeedBackup{}); err != nil {
 		t.Fatal(err)
 	}
 	call("admin-sub", http.MethodPost, `{}`, http.StatusConflict, "run_active")

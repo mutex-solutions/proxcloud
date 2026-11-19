@@ -483,6 +483,28 @@ test("an upgrade the plan allows: the changes, the typed confirmation, the run a
   await expect(page.getByRole("heading", { name: /Upgrade to release|has not finished|stays on release/ })).toHaveCount(0)
 })
 
+test("an upgrade that replaces the seed's k3s: the plan says what is away and written, and asks for a backup of the seed", async ({ page }) => {
+  await open(page, "upgradek3s")
+  await recordCalls(page)
+  const plan = page.getByRole("table", { name: /What differs between release 0\.6\.0 and release 0\.7\.0/ })
+  await expect(plan.getByRole("row", { name: /seed\.k3s v1\.35\.10\+k3s1 v1\.35\.11\+k3s1 seed \(stage seed-k3s\).*The seed's API is away for about a minute.*the databases keep serving/ })).toBeVisible()
+  await expect(plan.getByRole("row", { name: /seed-etcd-snapshot .*pre-upgrade-v1\.35\.10-k3s1.* site \(stage seed-k3s\)/ })).toBeVisible()
+  await expect(plan.getByRole("row", { name: /seed-k3s-binary .*k3s\.prev/ })).toBeVisible()
+  await expect(page.getByText(/Seed backup \(needed before this upgrade\):.*No backup of seed VM 9100 younger than 24 hours/)).toBeVisible()
+  const start = page.getByRole("button", { name: "Upgrade to release 0.7.0" })
+  await expect(start).toBeDisabled()
+  await expectAccessible(page)
+  await page.getByLabel("I took a backup of seed VM 9100 that the portal cannot see").check()
+  await start.click()
+  const dialog = page.getByRole("dialog", { name: /Upgrade “lab” to release 0\.7\.0/ })
+  await dialog.getByLabel(/to confirm/).fill("upgrade lab to 0.7.0")
+  await dialog.getByRole("button", { name: "Upgrade", exact: true }).click()
+  await expect(page.getByText(/This run upgrades the platform from release 0\.6\.0 to release 0\.7\.0/)).toBeVisible()
+  await expect(page.locator('[data-stage="seed-k3s"]')).toContainText("5a. Upgrade the seed's k3s")
+  await expect(page.locator('[data-stage="seed-platform"]')).toContainText("6. Install the seed's components")
+  expect((await calls(page, "POST", /\/runs$/)).map((c) => c.body)).toEqual([{ kind: "apply", targetBom: expect.stringMatching(/^[0-9a-f]{64}$/), confirm: "upgrade lab to 0.7.0", seedBackupTaken: true }])
+})
+
 test("an upgrade that finished in another session: the refusal bom_installed reads as a plain message", async ({ page }) => {
   await open(page, "upgrade")
   await page.getByRole("button", { name: "Upgrade to release 0.7.0" }).click()

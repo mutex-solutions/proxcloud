@@ -102,3 +102,24 @@ func TestUpgradeRollsNoMachine(t *testing.T) {
 	// allowed.
 	t.Logf("%d of %d previous BOMs compared", checked, len(prev))
 }
+
+// The cluster chart in this tree, when it is a version ahead of the one this build's BOM pins (bumped in a pull
+// request, tagged and pinned after it), renders the same machines as the pinned one from the same values: the pin
+// that follows starts no rollout on a platform, and the run's rollout check lets it through.
+func TestChartInTreeRollsNoMachine(t *testing.T) {
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatal("helm is required in CI, or this test proves nothing")
+		}
+		t.Skip("helm not installed")
+	}
+	const local, values = "../../deploy/charts/proxmox-kamaji-cluster", "testdata/render-cluster-values.golden.yaml"
+	pinned := clusterChart(t, helm, comp(t, embedded(t), ClusterSeed, ClusterName).Chart)
+	if pinned == local {
+		t.Skip("the BOM pins the chart in this tree")
+	}
+	if got, want := machineFacts(t, helm, local, values), machineFacts(t, helm, pinned, values); !reflect.DeepEqual(got, want) {
+		t.Errorf("the chart in this tree renders another control plane, machine template or bootstrap template than the pinned one.\nin tree: %v\npinned: %v", got, want)
+	}
+}

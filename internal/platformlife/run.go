@@ -79,6 +79,13 @@ const (
 	CodeUnexpectedRollout = "unexpected_rollout"
 	// CodeTenantsUnhealthy: on an upgrade run a tenant that was healthy before a wave is not healthy after it.
 	CodeTenantsUnhealthy = "tenants_unhealthy"
+	// CodeSeedK3sFailed: the k3s upgrade Job on the seed failed (before k3s was replaced: its script stops at the first
+	// failure). CodeSeedK3sRefused: the seed's node reports a k3s the run does not move to the BOM's from.
+	CodeSeedK3sFailed  = "seed_k3s_failed"
+	CodeSeedK3sRefused = "seed_k3s_refused"
+	// CodeSeedBackupMissing: an apply would start an upgrade that replaces the seed's k3s, and neither the portal saw a
+	// backup of the seed VM nor did the operator say one was taken (the 409 of a run; a line of the plan).
+	CodeSeedBackupMissing = "seed_backup_missing"
 )
 
 // Stage ids of an apply (design §4.2) and of a remove (§4.6).
@@ -91,6 +98,7 @@ const (
 	StageRemoveCluster    = "remove-cluster"
 	StageRemoveSeed       = "remove-seed"
 	StageRemoveSecrets    = "remove-secrets"
+	stageSeedK3s          = "seed-k3s"
 	stageSeedPlatform     = "seed-platform"
 	stageCluster          = "cluster"
 	stageWorkloadAccess   = "workload-access"
@@ -116,14 +124,17 @@ type Run struct {
 	// Confirmed: the operator typed "remove <name>" when starting a Remove. It lets the run go on where it cannot
 	// observe: the seed VM is gone, or the workload cluster does not answer whether tenants still run on it. On an apply
 	// it records the typed "upgrade <name> to <release>" of the run that started an upgrade.
-	Confirmed  bool       `json:"confirmed,omitempty"`
-	State      string     `json:"state"`
-	Code       string     `json:"code,omitempty"`
-	Message    string     `json:"message,omitempty"`
-	Stages     []Stage    `json:"stages,omitempty"`
-	CreatedAt  time.Time  `json:"createdAt"`
-	StartedAt  *time.Time `json:"startedAt,omitempty"`
-	FinishedAt *time.Time `json:"finishedAt,omitempty"`
+	Confirmed bool `json:"confirmed,omitempty"`
+	// SeedBackupTaken: the apply that started an upgrade which replaces the seed's k3s said a backup of the seed VM was
+	// taken that the portal could not see (seedBackupTaken).
+	SeedBackupTaken bool       `json:"seedBackupTaken,omitempty"`
+	State           string     `json:"state"`
+	Code            string     `json:"code,omitempty"`
+	Message         string     `json:"message,omitempty"`
+	Stages          []Stage    `json:"stages,omitempty"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	StartedAt       *time.Time `json:"startedAt,omitempty"`
+	FinishedAt      *time.Time `json:"finishedAt,omitempty"`
 }
 
 // Stage is one stage of a run. Deadline is absolute, so a restart does not reset it.

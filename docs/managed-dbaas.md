@@ -319,6 +319,14 @@ Databases keep their chart pin when the provider's `chartVersion` moves. Operato
 (all) or `POST .../db-clusters/{clusterId}/bump-chart` (one) re-pins onto the provider's
 current version.
 
+From chart 0.5.2 a PostgreSQL (or FerretDB) database of one instance has no PodDisruptionBudget
+(`enablePDB: false` on its CloudNativePG Cluster). With the budget, a drain of the database's node
+waited without limit, because the budget of a single instance allows no eviction; that blocks
+every replacement of the node. Without it the drain evicts the pod and the database restarts on
+another node of the group: it is down for that restart. Databases of more than one instance keep
+their budget. An existing database takes the change with `bump-chart`, once the provider pins
+0.5.2 or later; until then it keeps its budget.
+
 ## Connection secrets (contract, pinned by TestConnectionSecretContract)
 
 | Engine | Secret | Exposed account |

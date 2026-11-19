@@ -61,6 +61,13 @@ Four charts live here:
   `tag=<n>` on the NIC. Without the value the render is what 0.1.13 gave, so an existing cluster
   keeps its machine templates. The portal writes it only for a platform network with a VLAN tag
   ([managed-services.md](../../docs/managed-services.md#the-platform-network-bridge-vlan-tag-or-routed)).
+  0.1.15 reads two optional keys of a node group, both for the platform cluster's upgrade run and
+  both on the `MachineDeployment` only (no machine or bootstrap template changes its name):
+  `kubernetesVersions` (`<node>: <version>`) gives the MachineDeployment of that node another
+  Kubernetes version than the cluster's, and `deleteFirstOn` (a list of nodes) renders
+  `rollout.strategy.rollingUpdate` with `maxSurge: 0` and `maxUnavailable: 1` for those nodes, so
+  a machine is deleted before its replacement is cloned where a node has no room for one more.
+  Without the keys the render is what 0.1.14 gave. No release writes them yet.
 
 ## Publishing
 
@@ -83,8 +90,11 @@ pullable; see [release readiness](../../docs/release-readiness.md).
 
 For `database-cluster`, `proxmox-kamaji-cluster` and `proxcloud-platform`, bump `version:` in `Chart.yaml`
 in the PR that changes the chart, merge, then have a maintainer deliberately cut
-the matching tag. The current source versions are database `0.5.1`, Kubernetes `0.1.14` and
-platform `0.1.3`, all three published and pinned by the platform BOM (Kubernetes
+the matching tag. The current source versions are database `0.5.2`, Kubernetes `0.1.15` and
+platform `0.1.3`. Database `0.5.2` (no disruption budget for a PostgreSQL of one instance) and
+Kubernetes `0.1.15` (a version and a delete-first rollout per node of a node group) are source
+versions only: not tagged, and the platform BOM still pins `0.5.1` and `0.1.14`, which with platform
+`0.1.3` are published and pinned by the platform BOM (Kubernetes
 `0.1.14` adds the node groups' MachineHealthCheck, the VLAN tag and the control plane count of the
 platform cluster; platform `0.1.3` adds `delete`
 on Machines and read access to MachineHealthChecks for the provider's service account);

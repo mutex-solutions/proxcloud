@@ -88,12 +88,15 @@ export type Plan = {
 }
 export type PlanChange = {
   cluster?: string; name: string; from?: string; to?: string; blocking?: string
-  class?: "chart" | "record only" | "refused" | "site"; stage?: string; wave?: number; impact?: string
+  class?: "chart" | "record only" | "refused" | "site" | "seed"; stage?: string; wave?: number; impact?: string
 }
 export type Upgrade = {
   from: BOMRef; to: BOMRef; allowed: boolean; inProgress?: boolean
   confirm?: string // what to type to start it
   changes: PlanChange[]; blocking: string[]
+  // The seed-backup row, on a move that replaces the seed's k3s and has not started. When it is not ok, blocking
+  // carries seed_backup_missing, which the operator answers with seedBackupTaken on the apply.
+  seedBackup?: Check
 }
 
 // The react-query key every read of this page starts with: one invalidation re-reads them all.
@@ -432,6 +435,7 @@ const CHECK_ACTION: Record<string, string> = {
   isolation: `${BLOCKED}, then run a provider sync: for a provider with a saved installation it writes the rules, with or without a project. Check too that the datacenter firewall is on. No sync helps when the message says that the tenant address pool overlaps a management network (choose another pool on the provider's page), or that the rules in place are for another pool, drop a network this provider does not name, accept other sandbox endpoints than this provider's, or are not this provider's set while a project's rules for the pool are in place (another ProxCloud or provider on this Proxmox cluster uses the same pool prefix: give this provider its own; if the rules are this provider's own older ones, delete them in Proxmox under Datacenter, Firewall, then sync).`,
   credentials: "Run the root command of step 2 on a node and paste the PC-ENROLL line it prints.",
   "boot-store": "Name a store that exists and takes disk images as the boot store in step 1, or run the command of the message as root on a node. A warning about other VMs' disks does not stop the install: the message says what a store of its own for the platform avoids, and the command that adds one.",
+  "seed-backup": "Back the seed VM up in Proxmox (vzdump). An upgrade that replaces the seed's k3s asks for a backup from the last 24 hours; one on a store ProxCloud cannot read is confirmed with a box in step 4.",
   "pve-api-rule": "Nothing to do before the install: Install and every Apply write this cluster firewall rule. On an installed platform, press Apply.",
   privileges: RERUN,
   "mint-scope": "Either the portal token can create API tokens for every user of the Proxmox cluster, root@pam included, or write any role on every pool (an older setup granted that on /access/groups and /pool), or capmox@pve or csi@pve is not in the group proxcloud-kube, so Proxmox refuses their tokens. The message says which. Run the identities script again (step 2) as root on one Proxmox node: it moves the grant to the group, puts both users in it and removes the old rows. If its last lines say NOT FINISHED, run it for each token it names. Then press Check.",
@@ -472,6 +476,10 @@ const CODE_ACTION: Record<string, string> = {
   upgrade_refused: "This ProxCloud cannot move the platform to its own platform release: step 4 lists why. The platform stays on its release, and Apply this release keeps working.",
   unexpected_rollout: "The upgrade would replace machines of the platform cluster, so nothing of it was synced. If machine sizes, nodes or node groups were changed together with the upgrade, put them back, save, then Retry. Otherwise install the ProxCloud release that corrects it: step 4 then offers the upgrade to that release in place of this one.",
   tenants_unhealthy: "A tenant cluster or database that was healthy before the upgrade is not. Look at the one the message names. Retry goes on from the same step and waits for it again: the upgrade does not go on until it is healthy or deleted.",
+  seed_backup_missing: "The upgrade replaces k3s on the seed VM, and ProxCloud sees no backup of that VM from the last 24 hours. Take one (vzdump), or tick the box in step 4 if you took one on a store ProxCloud cannot read, then start the upgrade again.",
+  seed_k3s_failed: "The seed runs its k3s as before. The message ends with the last lines of the upgrade: a download that failed means the seed cannot reach the release's k3s address. Correct it, then Retry.",
+  seed_k3s_refused: "The seed runs another k3s than this upgrade can start from, and nothing was changed. The message names both versions.",
+  seed_k3s_timeout: "The platform cluster and the tenants keep running. While the stage is still trying there is nothing to do. If it failed and the seed's API stays away, the message names the command that puts the previous k3s back. Then Retry.",
   provider_conflict: "A provider row of this installation was refused. Read the message, correct that provider under Cloud providers, then Retry.",
   machine_delete_stuck: "Delete the VM named in the message in Proxmox, then start Remove again.",
   tenants_exist: "Tenant clusters or databases still run on the platform. Delete them, then start Remove again.",
@@ -491,12 +499,20 @@ export function codeAction(code: string, kind: Run["kind"] = "apply") {
   return kind === "remove" ? action.replace(/\bRetry\b/g, "Remove again") : action
 }
 
+// The guide, the failure codes and the messages number an apply's stages 1 to 11. The k3s stage came later, between
+// 5 and 6: it is 5a, so every other stage keeps its number.
+export function stageNumbers(stages: Stage[]): string[] {
+  let n = 0
+  return stages.map((s) => (s.id === "seed-k3s" ? `${n}a` : String(++n)))
+}
+
 export const STAGE_TITLE: Record<string, string> = {
   validate: "Check the settings and Proxmox",
   images: "Import the two images",
   "seed-vm": "Create the seed VM",
   "seed-api": "Reach the seed",
   "seed-identity": "Secure the seed",
+  "seed-k3s": "Upgrade the seed's k3s",
   "seed-platform": "Install the seed's components",
   cluster: "Build the platform cluster",
   "workload-access": "Reach the platform cluster",

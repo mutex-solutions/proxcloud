@@ -618,13 +618,16 @@ const short = (digest?: string) => (digest ? digest.replace(/^sha256:/, "").slic
 // what it does, refused with each reason, or started and not finished. Starting it asks for the typed confirmation.
 // With `replaces` it is the move offered in place of an unfinished upgrade toward that release.
 function UpgradePlan({ installation, upgrade, replaces, canManage, dirty, pending, onUpgrade }: {
-  installation: Installation; upgrade: Upgrade; replaces?: string; canManage: boolean; dirty: boolean; pending: boolean; onUpgrade: (targetBom: string, confirm: string) => void
+  installation: Installation; upgrade: Upgrade; replaces?: string; canManage: boolean; dirty: boolean; pending: boolean; onUpgrade: (targetBom: string, confirm: string, seedBackupTaken: boolean) => void
 }) {
   const id = replaces ? "pf-upgrade-instead" : "pf-upgrade"
   const [asking, setAsking] = useState(false)
   const [typed, setTyped] = useState("")
   const { from, to } = upgrade
   const offered = upgrade.allowed && !upgrade.inProgress
+  // The one reason the operator can answer: no backup of the seed VM that ProxCloud can see.
+  const needsBackup = offered && upgrade.blocking.some((b) => b.startsWith("seed_backup_missing"))
+  const [backupTaken, setBackupTaken] = useState(false)
   return (
     <section aria-labelledby={id} className="grid gap-2 rounded-md border p-3 text-sm">
       <h3 id={id} className="font-semibold">
@@ -676,9 +679,20 @@ function UpgradePlan({ installation, upgrade, replaces, canManage, dirty, pendin
           </table>
         </div>
       ) : null}
+      {offered && upgrade.seedBackup ? (
+        <div className="grid gap-2">
+          <p><span className="font-semibold">Seed backup{upgrade.seedBackup.status === "ok" ? "" : " (needed before this upgrade)"}:</span> {upgrade.seedBackup.message}</p>
+          {needsBackup ? (
+            <div className="flex items-start gap-2">
+              <Checkbox id={id + "-backup"} checked={backupTaken} disabled={!canManage} onCheckedChange={(v) => setBackupTaken(v === true)} className="mt-0.5" />
+              <Label htmlFor={id + "-backup"} className="leading-snug font-normal">I took a backup of seed VM {installation.status?.seed?.vmid} that the portal cannot see</Label>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       {offered ? (
         <div className="flex flex-wrap items-center gap-3">
-          <Button variant="outline" disabled={!canManage || pending || dirty} onClick={() => { setTyped(""); setAsking(true) }}>Upgrade to release {to.release}</Button>
+          <Button variant="outline" disabled={!canManage || pending || dirty || (needsBackup && !backupTaken)} onClick={() => { setTyped(""); setAsking(true) }}>Upgrade to release {to.release}</Button>
           <Link to="/docs/platform-admin/managed-services" className={LINK}>What an upgrade does</Link>
         </div>
       ) : null}
@@ -698,7 +712,7 @@ function UpgradePlan({ installation, upgrade, replaces, canManage, dirty, pendin
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setAsking(false)}>Not now</Button>
-            <Button disabled={typed !== upgrade.confirm || pending} onClick={() => { setAsking(false); onUpgrade(to.sha256, typed) }}>{pending ? "Starting…" : "Upgrade"}</Button>
+            <Button disabled={typed !== upgrade.confirm || pending} onClick={() => { setAsking(false); onUpgrade(to.sha256, typed, needsBackup && backupTaken) }}>{pending ? "Starting…" : "Upgrade"}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -707,7 +721,7 @@ function UpgradePlan({ installation, upgrade, replaces, canManage, dirty, pendin
 }
 
 export function ReviewStep({ installation, canManage, dirty, onInstall, onUpgrade, installing, error }: {
-  installation: Installation; canManage: boolean; dirty: boolean; onInstall: () => void; onUpgrade: (targetBom: string, confirm: string) => void; installing: boolean; error: unknown
+  installation: Installation; canManage: boolean; dirty: boolean; onInstall: () => void; onUpgrade: (targetBom: string, confirm: string, seedBackupTaken: boolean) => void; installing: boolean; error: unknown
 }) {
   // Keyed on the last run too: a run changes what is installed, and the API leaves `rev` alone then.
   const plan = useQuery({ queryKey: [...PLATFORM_KEY, "plan", installation.id, installation.rev, installation.lastRunId], queryFn: () => apiFetch<Plan>(`${base(installation.id)}/plan`), retry: false })

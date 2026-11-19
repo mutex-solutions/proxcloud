@@ -905,12 +905,24 @@ func (e *env) seedAt(vmid, gen int, seed *fakeSeed, running bool) {
 	ca := ""
 	if seed != nil {
 		server, ca = seed.url, seed.caPEM()
+		cur, _ := Current()
+		seed.node(cur.Seed.K3s.Version, true)
 	}
 	e.mutate(func(_ *Run, in *Installation, sec *Secrets) {
 		in.Status.Seed = &SeedStatus{VMID: vmid, Node: "pve1", Generation: gen, APIServer: server, CACert: ca,
 			CDVolume: "local:iso/" + SeedCDName("pi-0a1b2c3d", gen)}
 		sec.BootstrapToken, sec.K3sToken = runBoot, runK3s
 	})
+}
+
+// node is the seed's one node as its kubelet reports it.
+func (f *fakeSeed) node(k3s string, ready bool) {
+	status := "False"
+	if ready {
+		status = "True"
+	}
+	f.put("/api/v1/nodes/pc-seed", map[string]any{"metadata": map[string]any{"name": "pc-seed"}, "status": map[string]any{
+		"nodeInfo": map[string]any{"kubeletVersion": k3s}, "conditions": []any{map[string]any{"type": "Ready", "status": status}}}})
 }
 
 // put stores obj at its URL path (tests seed what a controller would have made).

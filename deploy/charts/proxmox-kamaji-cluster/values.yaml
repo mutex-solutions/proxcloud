@@ -133,6 +133,14 @@ nodeGroups:
     # -- <pve node>: <replicas>. Written by the portal (placement by free capacity); its sum must be machineCount and
     # every node must have an entry in machineImageId. Without it machineCount is split evenly over the entries.
     # machinePlacement: {pve1: 1}
+    # -- <pve node>: <Kubernetes version> (from chart 0.1.15). The MachineDeployment of that node runs this version
+    # instead of kubernetesVersion. Written by the platform's upgrade run, which moves one MachineDeployment at a time;
+    # a tenant cluster does not carry it.
+    # kubernetesVersions: {pve1: "1.35.10"}
+    # -- PVE nodes whose MachineDeployment replaces a machine by deleting it first (maxSurge 0, maxUnavailable 1; from
+    # chart 0.1.15): for a node without the memory for one more machine. The group is short of that machine until the
+    # new one has joined. Without it Cluster API adds the new machine first and none is unavailable.
+    # deleteFirstOn: [pve1]
     # nodeLabels: {key: value}            # the kubelet sets these itself: a node can claim any of them
     # machineLabels: {node-restriction.kubernetes.io/key: value}  # CAPI sets these on the Node; the kubelet cannot
     # taints: [{key: k, value: v, effect: NoSchedule}]

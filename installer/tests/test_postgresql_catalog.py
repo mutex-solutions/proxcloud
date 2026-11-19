@@ -82,7 +82,7 @@ class PostgreSQLCatalogTests(unittest.TestCase):
 
     def test_new_provider_chart_pin_still_comes_from_checkout_metadata(self):
         chart = yaml.safe_load((ROOT / "deploy/charts/database-cluster/Chart.yaml").read_text(encoding="utf-8"))
-        self.assertEqual(chart["version"], "0.5.1")
+        self.assertEqual(chart["version"], "0.5.2")
         self.assertEqual(self.provider["config"]["argocd"]["chartName"], "database-cluster")
         self.assertEqual(self.provider["config"]["argocd"]["chartVersion"], "{{ pc_chart_database }}")
         computed = yaml.safe_load((ROOT / "installer/playbooks/group_vars/all/computed.yml").read_text(encoding="utf-8"))
