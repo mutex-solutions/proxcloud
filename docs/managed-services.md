@@ -2017,8 +2017,10 @@ The eleven stages of an apply, rendered from the target BOM:
   `ProxmoxMachineTemplate` or `KubeadmConfigTemplate` that is not Synced (and is not one ArgoCD
   would only prune, an old template), or a `KubeadmControlPlane` that is not Synced, fails the run
   with `unexpected_rollout`. Nothing was synced then. Otherwise the stage applies the Application
-  as always, automated, waits until the last sync is of the new version, and goes on as in any apply.
-  There is no sync to wait for when the new chart renders every object as it is and the Application
+  as always, automated, waits until ArgoCD reports it Synced and Healthy against the new version or
+  its last sync is of the new version, and goes on as in any apply. A new chart that renders every
+  object as it is leaves the Application Synced with no sync at all (seen on the lab on 2026-11-19).
+  There is also no sync to wait for when the new chart renders every object as it is and the Application
   is out of sync only for what it would prune (the machine templates of an earlier size: it never
   prunes them): ArgoCD starts no sync for that, so the stage passes when the comparison is of the
   new version and nothing but such objects is out of sync. That ArgoCD starts no sync then is read
