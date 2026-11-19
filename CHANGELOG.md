@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The platform BOM on `main` is `0.10.0-dev` again, and the build carries the BOM of `0.9.1`**
+  (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.9.1.yaml`). The `v0.9.1` release commit left
+  the BOM at `0.9.1`, and the release gate refuses only `-dev`. A platform installed by `v0.9.1`, or moved to its
+  BOM by an upgrade, stays on it under a later build and is not refused (`bom_unsupported`) while the file is
+  carried. Its pins are those of `0.9.0`, so `TestUpgradeRollsNoMachine` compares seven previous BOMs with the
+  BOM on `main`: three of 0.8.x, the two candidates, `0.9.0` and `0.9.1`. No apply on such a platform was run on
+  a lab by this change.
+
 ## [0.9.1] - 2026-11-19
 
 A patch release on top of `v0.9.0`. It adds no feature: it fixes what the first production upgrade to `v0.9.0`
