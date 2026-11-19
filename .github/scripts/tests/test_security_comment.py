@@ -51,6 +51,17 @@ class CommentTests(unittest.TestCase):
         self.fixture(source="c" * 40)
         self.assertIn("INVALID evidence", self.render())
 
+    def test_targets_the_change_detection_skipped_are_named_not_missing(self):
+        self.fixture("api")
+        body = self.render(not_run="web-client,template-images,api,../x,unknown")
+        self.assertIn("| web-client | N/A | N/A | N/A | N/A | ➖ Not scanned in this run", body)
+        self.assertEqual(body.count("| template/"), body.count("➖ Not scanned") - 1)
+        self.assertIn("| api | 0 | 0", body)  # a report that exists is shown, whatever the list says
+        self.assertIn("| filesystem | N/A | N/A | N/A | N/A | ⚠️ Missing / incomplete |", body)  # not listed: still missing
+        self.assertIn("| base/go-builder | N/A | N/A | N/A | N/A | ⚠️ Missing", body)
+        self.assertIn("Coverage: 1/32 targets · 12 not scanned in this run", body)
+        self.assertNotIn("not scanned in this run", self.render())
+
     def test_all_outputs_and_nested_template_paths(self):
         for name in (*R.PRODUCTS, *("template/" + n for n in R.TEMPLATES), *("base/" + n for n in R.BASES)):
             self.fixture(name)
