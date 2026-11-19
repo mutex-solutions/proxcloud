@@ -232,7 +232,8 @@ succeeded | failed`.
   OS image, on `ide0` for a Kubernetes node image, see below; a Kubernetes node image also gets
   `onboot: 1`, which every clone copies, so workers and platform machines made from it start again
   with their Proxmox node; a node image imported before v0.9.0 gets it at the next provider sync:
-  [managed-services.md](managed-services.md#after-a-proxmox-node-reboots)), named
+  [managed-services.md](managed-services.md#after-a-proxmox-node-reboots); display `vga: std` with
+  `serial0: socket` from v0.10.0, see [Console display](#console-display)), named
   `pc-ghcr-<os>-<os|k8s-x-y-z>-<build>` (never `pc-<os>-…`, which `build.py` would treat as its own
   failed build) and tagged **staged**: `proxcloud;pc-src-<12hex>;pc-tu-import;pc-tu-staged`
   (+ `pc-tu-k8s;pc-k8sver-<x-y-z>` for a Kubernetes node image). No job ownership tag and **no catalog
@@ -1047,3 +1048,54 @@ debugfs -w -f /tmp/orphan-fix.cmd "$D"
 - Concurrent pipeline builds: `build.py` names its test VM `smoke-…` and never touches
   `pc-tu-smoke-…` VMs; a smoke test never touches pipeline VMs. Both use the lowest free VMID ≥ 9200 —
   a race is retried on "already exists".
+
+## Console display
+
+Up to v0.9.1 every template was made with `serial0: socket` and `vga: serial0`, and every clone
+copied it (tenant servers, Kubernetes workers, the platform's machines and its seed). The display
+of such a VM is its serial port, so the Proxmox web UI opens its console on the serial terminal
+("starting serial terminal on interface serial0", an empty page until a key is pressed).
+
+From v0.10.0 a template is made with `vga: std` and keeps `serial0: socket`
+(`templateupdates.Executor.importDisk`, `pve.ImportImage`, `images/build.py`, and the cold-boot
+clones of `images/vm_export/coldboot.py`):
+
+- The **Console** button of the Proxmox web UI opens the graphical console (noVNC). The serial
+  terminal is still there: **Console → xterm.js**, or `qm terminal <vmid>` on the node.
+- The portal's own console page is the same page as before. **Graphical** goes through `vncproxy`,
+  **Serial** through `termproxy`, which needs the serial port and not the display. The page opens
+  on Serial when the display in effect is a serial port and on Graphical otherwise
+  ([cloud-integration.md](cloud-integration.md), "Console state").
+- In the guest, the published OS images are the vendors' cloud images, and this repository changes
+  no kernel argument of them. Ubuntu's boot with `console=tty1 console=ttyS0` and Debian's
+  genericcloud with `console=tty0 console=ttyS0,115200`: the kernel and systemd print on both, the
+  last one (the serial port) is `/dev/console`, so cloud-init's output still goes to the serial
+  port, and there is a login prompt on both. This is read from the vendors' images, not measured
+  on a lab for this release. A Kubernetes node image is an installer build (image-builder) and the
+  build sets no `console=` argument: its graphical console has the kernel messages and a login
+  prompt; what its serial terminal shows was not measured.
+- Nothing the portal reads from a guest goes through the display: the join log of a worker is read
+  through the guest agent, and cloud-init's own logs are files in the guest.
+
+**Templates and VMs from before v0.10.0.** The portal moves them itself, with its own tokens and
+no new Proxmox privilege (`VM.Config.HWType`, which `ProxCloudPlatform` holds on `/pool` and
+`ProxCloudCAPI` on the platform's pools). What it writes is what `qm set <vmid> --vga std` writes,
+where `vga` is a serial port, and nothing else; `serial0` is not touched:
+
+| What | When | Ownership test |
+|---|---|---|
+| Templates of Template updates (OS and Kubernetes) | the services sync, per provider | an import of this portal for this provider still holds the template (the receipt: node, VM id, name, source digest). A **withdrawn** import (`pc-tu-withdrawn`) is neither read nor written |
+| Tenant servers, tenant Kubernetes workers, images a tenant imported | the services sync, per project | the VM is in the pool of a project of this portal. A VM with a lock is left for the next sync, and so is a worker that is not running (CAPMOX still writes a new clone until its first start) |
+| The platform's machines and the seed | the end of stage 7 of an install or of **Apply this release** | a member of `proxcloud-seed` or `proxcloud-system` with the installation's tag |
+
+- **No VM is stopped or started.** `vga` cannot be changed on a running VM: Proxmox keeps the
+  change as **pending** (red in the VM's Hardware tab, `qm pending <vmid>`) and applies it at the
+  VM's next stop and start. A reboot from inside the guest does not apply it. Until then the VM's
+  console is the serial one, in Proxmox and in the portal.
+- The pass writes once per VM: a later sync reads the pending value and writes nothing. A failed
+  write is logged (`imported templates start at boot and display`, `graphical display`) and tried
+  again at the next sync.
+- Not covered: a template no receipt of this portal holds (built by `images/build.py`, the site's
+  own, another portal's) and a withdrawn template. Run `qm set <vmid> --vga std` on those.
+- The sync sets `vga: std` again on a VM in a tenant pool that someone put back on a serial
+  display by hand. There is no setting to keep one VM on it.

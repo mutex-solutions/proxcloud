@@ -4,6 +4,25 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-19: templates and VMs get a graphical display; the serial port stays
+
+**What changed:** components "Template updates" and "PVE client": a new template is made with `vga: std` instead of
+`vga: serial0` (`Executor.importDisk`, `pve.ImportImage`; also `images/build.py` and `images/vm_export/coldboot.py`);
+`serial0: socket` stays. Component "Sync job": `templateupdates.StartNodeTemplatesAtBoot` is now
+`templateupdates.SyncImportedTemplates` and also writes `vga: std` on a held, not withdrawn template of either
+variant whose display is a serial port; `syncProxmoxService` calls the new `pve.Service.ShowGraphicalDisplay`, which
+does the same on the VMs and templates in the project's pool (not a locked VM, not a worker that is not running).
+Component "Platform runs": the end of stage 7 (`startAtBoot`) writes it on the installation's machines and seed with
+the CAPI token. Component "Project API": `GET_CONSOLE_STATE` reads `vga` from the values in effect
+(`GetVMConfigCurrent`).
+
+**Why:** the Proxmox web UI opened every VM of the product on the serial terminal, an empty page until a key is
+pressed. The owner wants the usual graphical console by default, with the serial terminal still selectable. Clones
+copy the display from their template, so the templates and the VMs that exist need the write too. No VM is restarted:
+Proxmox keeps the change as pending on a running VM, which is why the console state reads the values in effect.
+
+**Diagrams:** none changed. `c3-components.md`: the Sync job row names the two passes.
+
 ## 2026-11-19: the sync leaves withdrawn node templates alone; a cluster release deletes a CSI token only when one exists
 
 **What changed:** component "Sync job": `templateupdates.StartNodeTemplatesAtBoot` skips a node template tagged

@@ -492,8 +492,10 @@ the same key. `network-config` is rendered from `ipconfigN` and is absent for pl
   node (`qm` tasks and `/var/lock/qemu-server/lock-<vmid>.conf` right after a rollback). With Proxmox's own wait the
   delete now waits up to about 30 s and then answers 409 busy as before. Tested against a fake Proxmox API only.
 - **Console state** (`GET_CONSOLE_STATE` on a SERVER, v0.8.2): `{status, uptime, serialDisplay}` from the VM's
-  status and config. `serialDisplay` is true when `vga` is a serial port, as cloud images and imported images have
-  it: the console page then opens on its Serial tab. The page also asks every 10 s while a serial session is open
+  status and config. `serialDisplay` is true when `vga` is a serial port in the values in effect (`current=1`, so a
+  pending `vga: std` does not count before the VM's next stop and start), as every VM made from a template of before
+  v0.10.0 has it ([template-updates.md](template-updates.md#console-display)): the console page then opens on its
+  Serial tab. The page also asks every 10 s while a serial session is open
   and ends the session when the VM is stopped or has been up for less time than the session: on the same
   acceptance the socket of a session stayed open after the server restarted. Why the socket did not close was not
   found (the proxy closes the browser's side when Proxmox closes its side); not tried on a lab.

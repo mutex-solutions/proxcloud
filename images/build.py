@@ -204,7 +204,7 @@ def create_base(pve, a, img, name):
     try:
         pve.wait(a.node, pve.call(
             "POST", "/nodes/%s/qemu/%s/config" % (a.node, vmid), name=name, ostype="l26", cores=2, memory=2048,
-            cpu="host", agent=1, scsihw="virtio-scsi-single", serial0="socket", vga="serial0", net0=net, tags="proxcloud;pc-base",
+            cpu="host", agent=1, scsihw="virtio-scsi-single", serial0="socket", vga="std", net0=net, tags="proxcloud;pc-base",
             scsi0="%s:0,discard=on,import-from=%s" % (a.storage, volume), ide2="%s:cloudinit" % a.storage, boot="order=scsi0",
         ))
         ensure_build_disk(pve, a, vmid, name)

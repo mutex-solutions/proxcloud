@@ -1030,7 +1030,9 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 
 	case "GET_CONSOLE_STATE":
 		// What the console page cannot learn from its socket. serialDisplay: the VM's display is its serial port (vga
-		// serial0, as cloud images have it), so the graphical console shows one line and the serial one is the console.
+		// serial0, as templates made before v0.10.0 have it), so the graphical console shows one line and the serial one
+		// is the console. Read from the values in effect: the sync's vga std is pending on a VM until its next stop and
+		// start, and until then its display is still the serial port.
 		// status and uptime: a session opened before the VM was stopped or started again is dead, and on production the
 		// socket of such a session stayed open (D13 of the acceptance).
 		vm, verr := ps.ResolveVM(ctx, proj.ID, cr.ExternalID)
@@ -1039,13 +1041,13 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 			return true
 		}
 		st, serr := ps.C.GetVMStatus(ctx, vm.Node, vm.VMID)
-		cfg, cerr := ps.C.GetVMConfig(ctx, vm.Node, vm.VMID)
+		cfg, cerr := ps.C.GetVMConfigCurrent(ctx, vm.Node, vm.VMID)
 		if serr != nil || cerr != nil {
 			h.fail(w, pveVolumeErr(errors.Join(serr, cerr)))
 			return true
 		}
 		httpx.OK(w, map[string]any{"result": map[string]any{
-			"status": vm.Status, "uptime": st.Uptime, "serialDisplay": strings.HasPrefix(cfg.Str("vga"), "serial"),
+			"status": vm.Status, "uptime": st.Uptime, "serialDisplay": pve.SerialDisplay(cfg),
 		}})
 		return true
 

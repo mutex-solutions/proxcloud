@@ -164,7 +164,7 @@ func TestApplyBuildsThePlatform(t *testing.T) {
 	p.seed.put(capiNS+"machinedeployments/tenant-md", meta("tenant-md", map[string]any{"cluster.x-k8s.io/cluster-name": "other"}))
 	// The machines as CAPMOX leaves them, without onboot; one that has it already, and another installation's VM.
 	tags := "proxcloud;pc-platform;pc-platform-" + inID
-	p.pve.vms[201] = &fakeVM{system: true, running: true, cfg: map[string]any{"name": "pc-platform-cp-1", "tags": tags}}
+	p.pve.vms[201] = &fakeVM{system: true, running: true, cfg: map[string]any{"name": "pc-platform-cp-1", "tags": tags, "vga": "serial0", "serial0": "socket"}}
 	p.pve.vms[202] = &fakeVM{system: true, running: true, cfg: map[string]any{"name": "pc-platform-kamaji-pve2-1", "tags": tags, "onboot": 1}}
 	p.pve.vms[203] = &fakeVM{system: true, running: true, cfg: map[string]any{"name": "pc-platform-cp-9", "tags": "proxcloud;pc-platform;pc-platform-other"}}
 	if end := p.until(30); end != "complete" {
@@ -174,6 +174,10 @@ func TestApplyBuildsThePlatform(t *testing.T) {
 	// reboot Proxmox starts only those (v0.8.0 set it on the seed alone).
 	if got := p.pve.vms[201].cfg["onboot"]; got != "1" {
 		t.Errorf("machine 201 has onboot %v after stage 7", got)
+	}
+	// The same write moves a machine cloned from a template of before v0.10.0 to a graphical display; serial0 stays.
+	if cfg := p.pve.vms[201].cfg; cfg["vga"] != "std" || cfg["serial0"] != "socket" {
+		t.Errorf("machine 201 has vga %v serial0 %v after stage 7", cfg["vga"], cfg["serial0"])
 	}
 	if p.pve.writeCount("POST /nodes/pve1/qemu/202/config") != 0 || p.pve.writeCount("POST /nodes/pve1/qemu/203/config") != 0 {
 		t.Errorf("a machine that has onboot, or another installation's VM, was written: %v", p.pve.writes)

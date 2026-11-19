@@ -187,8 +187,8 @@ func (j *Job) WithWorkerFirewalls(f func(ctx context.Context, ps *pve.Service, e
 	return j
 }
 
-// WithNodeTemplates wires the pass that sets onboot on the Kubernetes node templates Template updates imported for a
-// provider (templateupdates.StartNodeTemplatesAtBoot; nil = none).
+// WithNodeTemplates wires the pass over the templates Template updates imported for a provider: onboot on the
+// Kubernetes node templates, a graphical display on all of them (templateupdates.SyncImportedTemplates; nil = none).
 func (j *Job) WithNodeTemplates(f func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error) *Job {
 	j.nodeTemplates = f
 	return j
@@ -196,11 +196,12 @@ func (j *Job) WithNodeTemplates(f func(ctx context.Context, ps *pve.Service, es 
 
 // startAtBoot makes the machines of tenant Kubernetes clusters start with their Proxmox node: onboot on the node
 // templates this portal imported, which every new clone copies, and on the running workers of the clusters this
-// portal has (docs/managed-services.md, "After a Proxmox node reboots"). Both write only what lacks it.
+// portal has (docs/managed-services.md, "After a Proxmox node reboots"). Both write only what lacks it. The template
+// pass also moves a template with a serial display to a graphical one (docs/template-updates.md).
 func (j *Job) startAtBoot(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) {
 	if j.nodeTemplates != nil {
 		if err := j.nodeTemplates(ctx, ps, es); err != nil {
-			j.log.Warn("syncjob: kubernetes node templates start at boot", "serviceId", es.ID, "err", err)
+			j.log.Warn("syncjob: imported templates start at boot and display", "serviceId", es.ID, "err", err)
 		}
 	}
 	err := ps.StartWorkersAtBoot(ctx, func(ctx context.Context, projectID, clusterID string) (bool, error) {
@@ -470,6 +471,9 @@ func (j *Job) syncProxmoxService(ctx context.Context, p *project.Project, es *ex
 		}
 	}
 	j.reconcileIsolation(ctx, ps, p, es)
+	if err := ps.ShowGraphicalDisplay(ctx, p.ID); err != nil {
+		j.log.Warn("syncjob: graphical display, retrying on the next sync", "project", p.ID, "serviceId", es.ID, "err", err)
+	}
 	if _, err := ps.RemoveBlankVMs(ctx, p.ID); err != nil {
 		j.log.Warn("syncjob: remove blank VMs, retrying on the next sync", "project", p.ID, "serviceId", es.ID, "err", err)
 	}

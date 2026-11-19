@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The Proxmox console of a VM made by ProxCloud opens on the graphical display.** Templates were made with
+  `vga: serial0`, so the Proxmox web UI opened every server, worker and platform machine on the serial terminal
+  ("starting serial terminal on interface serial0", an empty page until a key is pressed). A new template now has
+  `vga: std` and keeps `serial0: socket`: the graphical console is the default and the serial terminal is still
+  there (Console → xterm.js, `qm terminal`). The portal's own console page works as before, on both tabs.
+- **Existing templates and VMs are moved by the portal**, with what `qm set <vmid> --vga std` writes: the templates
+  a Template updates import of this portal holds (not a withdrawn one) and the VMs in the pools of its projects at
+  the services sync, the platform's machines and seed at the end of stage 7 of the next apply. No new Proxmox
+  privilege. **No VM is restarted**: on a running VM Proxmox shows the change as pending and applies it at the
+  next stop and start; until then its console is the serial one. A template built by `images/build.py`, or any
+  template this portal did not import, is not written: run the command on it. See
+  [docs/template-updates.md](docs/template-updates.md#console-display).
+
 ## [0.9.1] - 2026-11-19
 
 A patch release on top of `v0.9.0`. It adds no feature: it fixes what the first production upgrade to `v0.9.0`

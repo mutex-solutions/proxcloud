@@ -484,3 +484,43 @@ func (s *Service) StartWorkersAtBoot(ctx context.Context, owns func(ctx context.
 	}
 	return errors.Join(errs...)
 }
+
+// SerialDisplay reports a VM whose display is a serial port (vga serial0): what every template had before v0.10.0,
+// and every clone of one. The Proxmox console of such a VM opens on the serial terminal.
+func SerialDisplay(cfg VMConfig) bool { return strings.HasPrefix(cfg.Str("vga"), "serial") }
+
+// ShowGraphicalDisplay is the provider sync's pass that sets vga std on every VM and template in the project's pool
+// whose display is a serial port: the servers, the workers and the imported images made before v0.10.0. The Proxmox
+// console then opens on the graphical display; serial0 is not touched, so the serial terminal stays. The pool of a
+// project of this portal is the ownership test every write on a server uses (ResolveVM): a VM in another pool is not
+// read. A VM with a lock (a clone, a backup, a migration under way) and a worker that is not running (CAPMOX still
+// writes a new clone's config until its first start) are left for a later pass. Nothing is stopped or started: on a
+// running VM Proxmox keeps the change as pending and applies it at the next stop and start, and GetVMConfig answers
+// the pending value, so the pass writes once. The write takes VM.Config.HWType, which the portal's role holds on the
+// tenant pools.
+// ponytail: every sync sets it again on a VM an operator put back on a serial display by hand; a tag to opt a VM out
+// when a site asks for one.
+func (s *Service) ShowGraphicalDisplay(ctx context.Context, projectID string) error {
+	vms, err := s.C.ClusterResources(ctx, "vm")
+	if err != nil {
+		return err
+	}
+	pool := s.PoolFor(projectID)
+	var errs []error
+	for _, vm := range vms {
+		if vm.Type != "qemu" || vm.Pool != pool || vm.NodeDown || vm.Lock != "" || IsWorkerVM(vm.Tags) && vm.Status != "running" {
+			continue
+		}
+		cfg, err := s.C.GetVMConfig(ctx, vm.Node, vm.VMID)
+		if err == nil && cfg.Str("lock") == "" && SerialDisplay(cfg) {
+			var up UPID
+			if up, err = s.C.SetVMConfig(ctx, vm.Node, vm.VMID, map[string]string{"vga": "std"}); err == nil {
+				err = s.C.WaitTask(ctx, up)
+			}
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("pve graphical display: VM %d (%s): %w", vm.VMID, vm.Name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
