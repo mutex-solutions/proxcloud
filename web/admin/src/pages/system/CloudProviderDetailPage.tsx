@@ -1655,6 +1655,11 @@ export default function CloudProviderDetailPage() {
           succeeds.
         </p>
       ) : null}
+      {p.configNotes?.length ? (
+        <ul aria-label="Notes on this provider's settings" className="mb-4 space-y-1 rounded-lg border border-amber-500/50 bg-amber-500/5 p-3 text-sm">
+          {p.configNotes.map((n) => <li key={n} className="break-words">{n}</li>)}
+        </ul>
+      ) : null}
       <Tabs defaultValue="connection">
         <div className="-mx-1 overflow-x-auto px-1 pb-1">
           <TabsList className="w-max">

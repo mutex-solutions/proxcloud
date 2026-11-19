@@ -102,16 +102,95 @@ func TestKamajiConfigWorkerRepair(t *testing.T) {
 		cluster        map[string]any
 		timeout, guard int
 	}{
-		"absent":         {map[string]any{}, kamaji.DefaultNodeStartupTimeoutSeconds, 0},
-		"off":            {map[string]any{"nodeStartupTimeoutSeconds": float64(0)}, 0, 0},
-		"set":            {map[string]any{"nodeStartupTimeoutSeconds": float64(900), "repairMaxUnhealthy": float64(2)}, 900, 2},
-		"from ansible":   {map[string]any{"nodeStartupTimeoutSeconds": "2700"}, 2700, 0},
-		"negative = off": {map[string]any{"nodeStartupTimeoutSeconds": float64(-1)}, 0, 0},
+		"absent":       {map[string]any{}, kamaji.DefaultNodeStartupTimeoutSeconds, 0},
+		"off":          {map[string]any{"nodeStartupTimeoutSeconds": float64(0)}, 0, 0},
+		"set":          {map[string]any{"nodeStartupTimeoutSeconds": float64(900), "repairMaxUnhealthy": float64(2)}, 900, 2},
+		"from ansible": {map[string]any{"nodeStartupTimeoutSeconds": "2700"}, 2700, 0},
+		// Values the save refuses, stored before it did: the default, never the value as sent.
+		"negative":        {map[string]any{"nodeStartupTimeoutSeconds": float64(-5)}, kamaji.DefaultNodeStartupTimeoutSeconds, 0},
+		"under the floor": {map[string]any{"nodeStartupTimeoutSeconds": float64(30)}, kamaji.DefaultNodeStartupTimeoutSeconds, 0},
+		"not a number":    {map[string]any{"nodeStartupTimeoutSeconds": "15m", "repairMaxUnhealthy": "40%"}, kamaji.DefaultNodeStartupTimeoutSeconds, 0},
+		"guard of 0":      {map[string]any{"repairMaxUnhealthy": float64(0)}, kamaji.DefaultNodeStartupTimeoutSeconds, 0},
 	} {
 		d := (&ExternalService{Config: map[string]any{"cluster": tc.cluster}}).KamajiConfig().Defaults
 		if d.NodeStartupTimeoutSeconds != tc.timeout || d.RepairMaxUnhealthy != tc.guard {
 			t.Errorf("%s: timeout %d guard %d", name, d.NodeStartupTimeoutSeconds, d.RepairMaxUnhealthy)
 		}
+	}
+}
+
+// The four values the lab round's provider save answered 200 to (30, -5, "40%", "yes") are named with their field, and
+// so is every other value that is not of the key's type or range. What is valid is not named.
+func TestKamajiClusterProblems(t *testing.T) {
+	for _, tc := range []struct {
+		key   string
+		value any
+		bad   bool
+	}{
+		{"nodeStartupTimeoutSeconds", float64(30), true},
+		{"nodeStartupTimeoutSeconds", float64(-5), true},
+		{"nodeStartupTimeoutSeconds", float64(MinNodeStartupTimeoutSeconds - 1), true},
+		{"nodeStartupTimeoutSeconds", float64(MaxNodeStartupTimeoutSeconds + 1), true},
+		{"nodeStartupTimeoutSeconds", float64(1800.5), true},
+		{"nodeStartupTimeoutSeconds", "15m", true},
+		{"nodeStartupTimeoutSeconds", true, true},
+		{"nodeStartupTimeoutSeconds", nil, true},
+		{"nodeStartupTimeoutSeconds", float64(0), false},
+		{"nodeStartupTimeoutSeconds", float64(MinNodeStartupTimeoutSeconds), false},
+		{"nodeStartupTimeoutSeconds", float64(1800), false},
+		{"nodeStartupTimeoutSeconds", "2700", false},
+		{"repairMaxUnhealthy", "40%", true},
+		{"repairMaxUnhealthy", float64(0), true},
+		{"repairMaxUnhealthy", float64(-1), true},
+		{"repairMaxUnhealthy", float64(1.5), true},
+		{"repairMaxUnhealthy", float64(1), false},
+		{"repairMaxUnhealthy", "2", false},
+		{"workerFirewall", "yes", true},
+		{"workerFirewall", "true", true},
+		{"workerFirewall", float64(1), true},
+		{"workerFirewall", nil, true},
+		{"workerFirewall", true, false},
+		{"workerFirewall", false, false},
+	} {
+		got := KamajiClusterProblems(map[string]any{"cluster": map[string]any{tc.key: tc.value}})
+		if tc.bad && (len(got) != 1 || !strings.HasPrefix(got[0], "config.cluster."+tc.key+" must be ")) {
+			t.Errorf("%s = %#v: %q", tc.key, tc.value, got)
+		}
+		if !tc.bad && len(got) != 0 {
+			t.Errorf("%s = %#v is valid: %q", tc.key, tc.value, got)
+		}
+	}
+	if got := KamajiClusterProblems(map[string]any{"cluster": map[string]any{"dnsZone": "k8s.example"}}); len(got) != 0 {
+		t.Errorf("absent keys: %q", got)
+	}
+	// "yes" never turns the firewall on.
+	if (&ExternalService{Config: map[string]any{"cluster": map[string]any{"workerFirewall": "yes"}}}).KamajiConfig().Defaults.WorkerFirewall {
+		t.Error(`workerFirewall "yes" read as on`)
+	}
+}
+
+// The notes of a stored config: a value that is not valid, and repair keys on a chart that renders no health check.
+func TestKamajiConfigNotes(t *testing.T) {
+	cfg := func(chart string, cluster map[string]any) map[string]any {
+		return map[string]any{"argocd": map[string]any{"chartVersion": chart}, "cluster": cluster}
+	}
+	if got := KamajiConfigNotes(cfg("0.1.13", map[string]any{})); len(got) != 0 {
+		t.Errorf("no key set: %q", got)
+	}
+	if got := KamajiConfigNotes(cfg("0.1.14", map[string]any{"nodeStartupTimeoutSeconds": float64(1800), "repairMaxUnhealthy": float64(1), "workerFirewall": true})); len(got) != 0 {
+		t.Errorf("valid on 0.1.14: %q", got)
+	}
+	got := KamajiConfigNotes(cfg("0.1.13", map[string]any{"nodeStartupTimeoutSeconds": float64(1800)}))
+	if len(got) != 1 || !strings.Contains(got[0], "have no effect on cluster chart 0.1.13") || !strings.Contains(got[0], "0.1.14 or later") {
+		t.Errorf("old chart: %q", got)
+	}
+	// The worker firewall needs no chart: no note for it.
+	if got := KamajiConfigNotes(cfg("0.1.13", map[string]any{"workerFirewall": true})); len(got) != 0 {
+		t.Errorf("firewall on an old chart: %q", got)
+	}
+	got = KamajiConfigNotes(cfg("0.1.14", map[string]any{"nodeStartupTimeoutSeconds": float64(30), "workerFirewall": "yes"}))
+	if len(got) != 2 || !strings.Contains(got[0], "Stored value ignored") || !strings.Contains(got[0], "nodeStartupTimeoutSeconds") || !strings.Contains(got[1], "workerFirewall") {
+		t.Errorf("stored invalid: %q", got)
 	}
 }
 

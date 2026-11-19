@@ -37,6 +37,8 @@ package externalservice
 // compute service (plan D4) — so a project must be attached to both.
 
 import (
+	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -120,18 +122,21 @@ func (e *ExternalService) KamajiConfig() kamaji.Config {
 			PVEAPIURL:      str(cl["pveApiUrl"]),
 			DNSServers:     strList(cl["dnsServers"]),
 			NodeGroupMTU:   intOf(cl["workerMtu"]),
-			WorkerFirewall: cl["workerFirewall"] == true,
+			WorkerFirewall: cl["workerFirewall"] == true, // anything but a boolean true is off (KamajiClusterProblems names it)
 
 			ProxmoxServiceID: str(cl["proxmoxServiceId"]),
 		},
 		NamespacePlacement: namespacePlacement(e.Config),
 	}
 	// The automatic replacement of a worker that never joined: on by default, 0 turns it off.
+	// A stored value the save would refuse today (KamajiClusterProblems) reads as the default: 1800 s, a guard of 1.
 	cfg.Defaults.NodeStartupTimeoutSeconds = kamaji.DefaultNodeStartupTimeoutSeconds
-	if v, ok := cl["nodeStartupTimeoutSeconds"]; ok {
-		cfg.Defaults.NodeStartupTimeoutSeconds = max(intOf(v), 0)
+	if n, ok := wholeNumber(cl["nodeStartupTimeoutSeconds"]); ok && validNodeStartupTimeout(n) {
+		cfg.Defaults.NodeStartupTimeoutSeconds = n
 	}
-	cfg.Defaults.RepairMaxUnhealthy = intOf(cl["repairMaxUnhealthy"])
+	if n, ok := wholeNumber(cl["repairMaxUnhealthy"]); ok && n >= 1 {
+		cfg.Defaults.RepairMaxUnhealthy = n
+	}
 	if sw, ok := cl["sharedWorkers"].(map[string]any); ok && str(sw["bridge"]) != "" {
 		sec := e.secretMap()
 		cfg.Defaults.Shared = &kamaji.SharedWorkers{
@@ -145,6 +150,86 @@ func (e *ExternalService) KamajiConfig() kamaji.Config {
 		cfg.ArgoNamespace = "argocd"
 	}
 	return cfg
+}
+
+// The bounds of config.cluster.nodeStartupTimeoutSeconds. Cluster API deletes a worker that has no Node this long
+// after the newest of its creation and its VM being ready, so the value must cover the longer of one clone and one
+// first boot with its join. The floor is the 15 minutes the status sync itself gives a running machine to join before
+// it asks for attention (kamaji boundDefault); the slowest create-to-provisioned of a worker seen on the lab (nested,
+// loaded, 2026-11-19) was 5 min 23 s. Not measured on real slow storage: a site whose clones take longer than the
+// floor needs more than the floor. Above a day the repair is as good as off, and 0 says that.
+const (
+	MinNodeStartupTimeoutSeconds = 900
+	MaxNodeStartupTimeoutSeconds = 86400
+)
+
+func validNodeStartupTimeout(n int) bool {
+	return n == 0 || (n >= MinNodeStartupTimeoutSeconds && n <= MaxNodeStartupTimeoutSeconds)
+}
+
+// wholeNumber reads a config value that must be a whole number: a JSON number without a fraction, or its digits as a
+// string (Ansible's "{{ x | int }}"). "40%", 1.5, true and null are not one.
+func wholeNumber(v any) (int, bool) {
+	switch n := v.(type) {
+	case string:
+		i, err := strconv.Atoi(strings.TrimSpace(n))
+		return i, err == nil && i > -1e9 && i < 1e9
+	case float64:
+		return int(n), n == math.Trunc(n) && n > -1e9 && n < 1e9
+	case int:
+		return n, true
+	case int32:
+		return int(n), true
+	case int64:
+		return int(n), n > -1e9 && n < 1e9
+	}
+	return 0, false
+}
+
+// KamajiClusterProblems names, one sentence each, the values of a kamaji provider's cluster block that the worker
+// repair and the worker firewall cannot use. The save refuses a block that has one; a block stored before the check
+// is read with the default in its place (KamajiConfig), and KamajiConfigNotes says so on the provider.
+func KamajiClusterProblems(cfg map[string]any) []string {
+	cl, _ := cfg["cluster"].(map[string]any)
+	var out []string
+	if v, ok := cl["nodeStartupTimeoutSeconds"]; ok {
+		if n, whole := wholeNumber(v); !whole || !validNodeStartupTimeout(n) {
+			out = append(out, fmt.Sprintf("config.cluster.nodeStartupTimeoutSeconds must be 0 (no automatic replacement) or a whole number of seconds "+
+				"from %d to %d: Cluster API deletes a worker that has no node after this time, and under %d minutes it would delete machines that are still being cloned or are booting",
+				MinNodeStartupTimeoutSeconds, MaxNodeStartupTimeoutSeconds, MinNodeStartupTimeoutSeconds/60))
+		}
+	}
+	if v, ok := cl["repairMaxUnhealthy"]; ok {
+		if n, whole := wholeNumber(v); !whole || n < 1 {
+			out = append(out, "config.cluster.repairMaxUnhealthy must be a whole number of machines, 1 or more, not a percentage: "+
+				"Cluster API rounds a percentage down, to 0 for a small node group, and nothing would be replaced")
+		}
+	}
+	if v, ok := cl["workerFirewall"]; ok {
+		if _, isBool := v.(bool); !isBool {
+			out = append(out, "config.cluster.workerFirewall must be true or false (a JSON boolean): any other value means off")
+		}
+	}
+	return out
+}
+
+// KamajiConfigNotes is what an operator should know about a stored kamaji config that the config itself does not
+// say: a value read as its default because it is not valid, and repair keys that do nothing on the provider's chart.
+func KamajiConfigNotes(cfg map[string]any) []string {
+	var out []string
+	for _, p := range KamajiClusterProblems(cfg) {
+		out = append(out, "Stored value ignored, the default applies (1800 s, 1 machine, firewall off) until it is corrected: "+p)
+	}
+	cl, _ := cfg["cluster"].(map[string]any)
+	argo, _ := cfg["argocd"].(map[string]any)
+	_, timeout := cl["nodeStartupTimeoutSeconds"]
+	_, guard := cl["repairMaxUnhealthy"]
+	if v := str(argo["chartVersion"]); (timeout || guard) && v != "" && !kamaji.ChartHasMachineHealthCheck(v) {
+		out = append(out, fmt.Sprintf("config.cluster.nodeStartupTimeoutSeconds and repairMaxUnhealthy are stored but have no effect on cluster chart %s: "+
+			"a cluster gets its health check once it is on chart %s or later (config.argocd.chartVersion for new clusters, the chart bump for an existing one)",
+			v, kamaji.MachineHealthCheckChartVersion))
+	}
+	return out
 }
 
 // intOf reads a config number, which round-trips through JSON as float64. Ansible's "{{ x | int }}" sends a string, so the
