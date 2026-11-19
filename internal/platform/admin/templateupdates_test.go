@@ -42,7 +42,7 @@ func TestTemplateUpdatesPermissionGates(t *testing.T) {
 		{"POST", "/admin/template-updates/sandbox/rollback"}, {"GET", "/admin/template-updates/sandbox/state"}, {"GET", "/admin/template-updates/sandbox/pins"},
 		{"GET", "/admin/template-updates/templates"}, {"GET", "/admin/template-updates/blocklist"},
 		{"POST", "/admin/template-updates/templates/x/smoke"}, {"POST", "/admin/template-updates/templates/x/publish"},
-		{"POST", "/admin/template-updates/templates/x/withdraw"},
+		{"POST", "/admin/template-updates/templates/x/withdraw"}, {"DELETE", "/admin/template-updates/templates/x"},
 		{"GET", "/admin/template-updates/publish-all"}, {"POST", "/admin/template-updates/publish-all"},
 	}
 	for _, rt := range routes {

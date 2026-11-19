@@ -99,6 +99,7 @@ export type TemplateState = {
   serviceId: string
   node: string
   vmid?: number
+  templateName?: string
   state: string
   smoke?: SmokeSummary
   withdrawal?: Withdrawal
@@ -106,7 +107,7 @@ export type TemplateState = {
   requestedBy: string
   publishedOnLine: number
   versionsMapLine?: string
-  actions: { smoke: boolean; publish: boolean; withdraw: boolean; lastPublished: boolean; lastOnProviders?: string[]; nodesLosingLast?: string[] }
+  actions: { smoke: boolean; publish: boolean; withdraw: boolean; delete?: boolean; lastPublished: boolean; lastOnProviders?: string[]; nodesLosingLast?: string[] }
   warnings?: string[]
 }
 type SmokeReceipt = {
@@ -195,7 +196,7 @@ export default function TemplateUpdatesPage() {
     refetchInterval: (q) => (q.state.data?.items?.some((t) => t.state === "smoke_running" || t.state === "importing") ? 5000 : false),
   })
   const [target, setTarget] = useState<VMLine | null>(null)
-  const [action, setAction] = useState<{ kind: "smoke" | "publish" | "withdraw"; t: TemplateState } | null>(null)
+  const [action, setAction] = useState<{ kind: "smoke" | "publish" | "withdraw" | "delete"; t: TemplateState } | null>(null)
   const sbxEnabled = !!status.data?.sandboxMirrorEnabled
   const sbx = useQuery({
     queryKey: ["tu-sandbox"],
@@ -1071,7 +1072,7 @@ export const STATE: Record<string, { label: string; variant: "default" | "second
 }
 
 function ImportedTab({ data, loading, canManage, onAction }: {
-  data?: Templates; loading: boolean; canManage: boolean; onAction: (kind: "smoke" | "publish" | "withdraw", t: TemplateState) => void
+  data?: Templates; loading: boolean; canManage: boolean; onAction: (kind: "smoke" | "publish" | "withdraw" | "delete", t: TemplateState) => void
 }) {
   const enabled = !!data?.vmUpdatesEnabled
   const why = !enabled ? "Not enabled on this site (PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED)" : !canManage ? "Needs admin:service:manage" : undefined
@@ -1082,7 +1083,7 @@ function ImportedTab({ data, loading, canManage, onAction }: {
           Lifecycle: <b>Staged</b> (hidden) → automatic <b>smoke test</b> → <b>Publish</b> (only after the smoke test passed) → the newest
           published version is the default for new servers; older versions stay. <b>Withdraw</b> takes a bad version out of the catalog (the
           previous published one takes over) on every provider that has a copy, keeps the templates for inspection and blocks its digest for good.
-          <b>Withdraw incomplete</b> means a copy could not be changed yet (provider unreachable): withdraw it again to finish. Running servers are never affected.
+          A withdrawn template stays in Proxmox until you <b>Delete</b> it here. <b>Withdraw incomplete</b> means a copy could not be changed yet (provider unreachable): withdraw it again to finish. Running servers are never affected.
         </p>
         <Table>
           <TableHeader>
@@ -1151,6 +1152,7 @@ function ImportedTab({ data, loading, canManage, onAction }: {
                       <Button size="sm" variant="outline" disabled={!canManage || !t.actions.smoke} title={why} onClick={() => onAction("smoke", t)}>Run smoke</Button>
                       <Button size="sm" disabled={!canManage || !t.actions.publish} title={why ?? (!t.actions.publish ? "Publish needs a passing smoke test of this template" : undefined)} onClick={() => onAction("publish", t)}>Publish</Button>
                       <Button size="sm" variant="destructive" disabled={!canManage || !t.actions.withdraw} title={why} onClick={() => onAction("withdraw", t)}>{t.state === "withdraw_incomplete" ? "Finish withdraw…" : "Withdraw…"}</Button>
+                      {t.actions.delete && <Button size="sm" variant="destructive" disabled={!canManage} title={why} onClick={() => onAction("delete", t)}>Delete…</Button>}
                     </TableCell>
                   </TableRow>
                 )
@@ -1166,7 +1168,7 @@ function ImportedTab({ data, loading, canManage, onAction }: {
 type ProviderOutcome = { serviceId: string; status: string; changed: number[]; remaining: number[]; nodesLosingLast?: string[]; versionsMapLine?: string; warnings?: string[] }
 type LifecycleResult = { complete?: boolean; warnings?: string[]; providers?: ProviderOutcome[]; unchanged?: boolean }
 
-function LifecycleDialog({ kind, t, onClose, onDone }: { kind: "smoke" | "publish" | "withdraw"; t: TemplateState; onClose: () => void; onDone: () => void }) {
+function LifecycleDialog({ kind, t, onClose, onDone }: { kind: "smoke" | "publish" | "withdraw" | "delete"; t: TemplateState; onClose: () => void; onDone: () => void }) {
   const [confirm, setConfirm] = useState("")
   const [reason, setReason] = useState("")
   const [force, setForce] = useState(false)
@@ -1177,6 +1179,7 @@ function LifecycleDialog({ kind, t, onClose, onDone }: { kind: "smoke" | "publis
   const nodeLoss = kind === "withdraw" ? t.actions.nodesLosingLast ?? [] : []
   const run = useMutation({
     mutationFn: () => {
+      if (kind === "delete") return apiFetch<LifecycleResult>(`${BASE}/templates/${encodeURIComponent(t.id)}`, { method: "DELETE" })
       const path = `${BASE}/templates/${encodeURIComponent(t.id)}/${kind}`
       if (kind === "smoke") return apiFetch<LifecycleResult>(path, { method: "POST" })
       if (kind === "publish") return apiFetch<LifecycleResult>(path, { method: "POST", body: { confirmDigest: confirm.trim() } })
@@ -1193,16 +1196,17 @@ function LifecycleDialog({ kind, t, onClose, onDone }: { kind: "smoke" | "publis
         setResult(r ?? {})
         return
       }
-      toast.success(kind === "smoke" ? "Smoke test queued" : "Published")
+      toast.success(kind === "smoke" ? "Smoke test queued" : kind === "publish" ? "Published" : r?.unchanged ? "The template was already gone" : "Template deleted")
       onDone()
     },
-    onError: (e) => toast.error(e instanceof ApiError || e instanceof Error ? e.message : String(e)),
+    // A refused delete stays in the dialog: its message names what still uses the template.
+    onError: (e) => { if (kind !== "delete") toast.error(e instanceof ApiError || e instanceof Error ? e.message : String(e)) },
   })
-  const digestOK = kind === "smoke" || confirm.trim() === t.digest
+  const digestOK = kind === "smoke" || kind === "delete" || confirm.trim() === t.digest
   const reasonOK = kind !== "withdraw" || (reason.trim().length >= 8 && reason.trim().length <= 500)
   const lastOK = !last || (force && confirmLast.trim() === t.slug)
   const nodeLossOK = nodeLoss.length === 0 || confirmNodeLoss
-  const title = kind === "smoke" ? "Run the smoke test" : kind === "publish" ? "Publish" : t.state === "withdraw_incomplete" ? "Finish the withdraw" : "Withdraw"
+  const title = kind === "smoke" ? "Run the smoke test" : kind === "publish" ? "Publish" : kind === "delete" ? "Delete template" : t.state === "withdraw_incomplete" ? "Finish the withdraw" : "Withdraw"
   if (result) {
     return (
       <Dialog open onOpenChange={(o) => !o && onDone()}>
@@ -1256,6 +1260,7 @@ function LifecycleDialog({ kind, t, onClose, onDone }: { kind: "smoke" | "publis
               : `Adds pc-public: the newest published ${t.slug} version on ${t.node} becomes the default for new servers. Older versions stay. Running servers are not affected.`)}
             {kind === "withdraw" && `Removes this artifact from the catalog on every provider that has a copy (the previous published ${t.slug} version takes over), keeps the template VMs for inspection, and blocks its digest so it can never be imported or published again. Running servers are not affected.`}
             {kind === "withdraw" && t.variant === "kubernetes" && " The Kubernetes provider's version map names template VMIDs explicitly: the result gives the line to put there instead."}
+            {kind === "delete" && `Destroys template VM ${t.vmid} (${t.templateName ?? t.tag}) on ${t.node} in Proxmox, with the disks its configuration names. This cannot be undone. The digest stays blocked. It is refused while a Kubernetes cluster's node group or a provider's version map still names the template, or a linked clone uses its disk.`}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3 text-sm">
@@ -1296,7 +1301,13 @@ function LifecycleDialog({ kind, t, onClose, onDone }: { kind: "smoke" | "publis
               </AlertDescription>
             </Alert>
           )}
-          {kind !== "smoke" && (
+          {kind === "delete" && run.error && (
+            <Alert variant="destructive">
+              <AlertTitle>Not deleted</AlertTitle>
+              <AlertDescription>{run.error.message}</AlertDescription>
+            </Alert>
+          )}
+          {kind !== "smoke" && kind !== "delete" && (
             <div className="space-y-1">
               <Label htmlFor="tu-lc-confirm">Type or paste the exact digest to confirm</Label>
               <Input id="tu-lc-confirm" className="font-mono text-xs" placeholder={t.digest} value={confirm} onChange={(e) => setConfirm(e.target.value)} />
@@ -1305,7 +1316,7 @@ function LifecycleDialog({ kind, t, onClose, onDone }: { kind: "smoke" | "publis
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button variant={kind === "withdraw" ? "destructive" : "default"} disabled={!digestOK || !reasonOK || !lastOK || !nodeLossOK || run.isPending} onClick={() => run.mutate()}>
+          <Button variant={kind === "withdraw" || kind === "delete" ? "destructive" : "default"} disabled={!digestOK || !reasonOK || !lastOK || !nodeLossOK || run.isPending} onClick={() => run.mutate()}>
             {run.isPending ? "Working…" : title}
           </Button>
         </DialogFooter>
