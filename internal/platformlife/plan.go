@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -20,8 +21,10 @@ const (
 	ClassRefused    = "refused"     // this release does not make the change: the whole upgrade is refused
 )
 
-// PlanChange is one difference: a component (Cluster and Name) or a top-level pin (Name only). From "" is an install,
-// To "" a removal. Class, Stage, Wave and Impact are set in an upgrade plan only.
+// PlanChange is one difference: a component (Cluster and Name), a top-level pin (Name only), or a control plane the
+// settings make larger than the one a run built (Cluster is the platform cluster's name, Name controlPlane.replicas,
+// From and To the counts, with Stage and Impact). From "" is an install, To "" a removal. Class and Wave are set in an
+// upgrade plan only, Stage and Impact there and on a count.
 type PlanChange struct {
 	Cluster  string `json:"cluster,omitempty"`
 	Name     string `json:"name"`
@@ -54,7 +57,7 @@ type Plan struct {
 	Installed *BOMRef      `json:"installed"`       // nil: nothing installed yet
 	Target    BOMRef       `json:"target"`          // the BOM an apply without a target runs with
 	Newer     *BOMRef      `json:"newer,omitempty"` // this build's own BOM, when the installed platform is on another one
-	Changes   []PlanChange `json:"changes"`         // what an apply without a target changes: every component of a new installation, nothing of an installed one
+	Changes   []PlanChange `json:"changes"`         // what an apply without a target changes: every component of a new installation; of an installed one, a control plane count above the one a run built
 	Blocking  []string     `json:"blocking"`
 	// Upgrade is the move to this build's BOM (or to ?target=), or the one in progress. nil: there is none to make.
 	Upgrade *Upgrade `json:"upgrade,omitempty"`
@@ -77,7 +80,8 @@ func refOf(b Embedded) BOMRef { return BOMRef{Release: b.Release, SHA256: b.SHA2
 // Upgrade the plan of the move to it (or to target, the sha256 of a BOM this build embeds). While an upgrade is in
 // progress Target is its target and Upgrade that move: no apply goes back. When that target is the BOM of an earlier
 // build, Replacement is the move to this build's. An installed BOM this build does not embed blocks with
-// bom_unsupported.
+// bom_unsupported. Changes of an installed platform are the control plane counts above what a run built; whether the
+// new machines fit needs a read of Proxmox, which the route adds to Blocking (Preflight.GrowthBlocking).
 func PlanFor(in *Installation, target string) (Plan, error) {
 	cur, err := Current()
 	if err != nil {
@@ -92,6 +96,13 @@ func PlanFor(in *Installation, target string) (Plan, error) {
 			p.Changes = append(p.Changes, PlanChange{Cluster: c.Cluster, Name: c.Name, To: c.Chart.Version})
 		}
 		return p, nil
+	}
+	// The settings of an installed platform against what a run built: the BOMs say nothing about the machines.
+	for i, c := range in.Spec.Clusters {
+		if from, to := in.controlPlaneGrowth(i); to > 0 {
+			p.Changes = append(p.Changes, PlanChange{Cluster: in.Status.Clusters[i].Name, Name: "controlPlane.replicas", From: strconv.Itoa(from), To: strconv.Itoa(to),
+				Stage: stageCluster, Impact: fmt.Sprintf("The apply adds %d control plane machines on node %s.", to-from, c.ControlPlane.Node)})
+		}
 	}
 	if _, ok := Lookup(in.Status.BOM.SHA256); !ok {
 		p.Blocking = append(p.Blocking, ErrBOMNotHere.Error())

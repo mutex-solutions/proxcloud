@@ -799,6 +799,20 @@ func ControlPlaneShrink(old, next *Installation) string {
 	return ""
 }
 
+// controlPlaneGrowth is, for cluster i of an installed platform whose settings ask for more control plane machines than
+// a run built, both counts; 0, 0 otherwise. Built is what ControlPlaneShrink reads. The plan lists it as a change and
+// the capacity row fails on it: those machines are not placed yet.
+func (in *Installation) controlPlaneGrowth(i int) (from, to int) {
+	if !in.Installed() || i >= len(in.Status.Clusters) || i >= len(in.Spec.Clusters) {
+		return 0, 0
+	}
+	from, to = max(in.Status.Clusters[i].ControlPlaneReplicas, 1), in.Spec.Clusters[i].ControlPlane.Count()
+	if to <= from {
+		return 0, 0
+	}
+	return from, to
+}
+
 // BuildsThree reports whether the cluster chart of the installation's BOM (the installed one, else this release's)
 // builds more than one control plane machine.
 func (in *Installation) BuildsThree() bool {
