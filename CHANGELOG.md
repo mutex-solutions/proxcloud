@@ -283,6 +283,41 @@ Proxmox API.
   row still reads the rule only, and now says that such a site needs a rule for the translated address
   ([guide](docs/managed-services.md#when-a-router-translates-the-platform-network)). Nothing else changed.
 
+- **Managed Kubernetes: the provider save checks the worker repair and worker firewall settings.** A lab round on
+  the build of main (2026-11-19, finding Q2) saved `nodeStartupTimeoutSeconds: 30`, `-5`,
+  `repairMaxUnhealthy: "40%"` and `workerFirewall: "yes"` with 200. Read as sent, 30 s deletes every machine that
+  is still cloning, in a loop, on cluster chart 0.1.14; `-5` turned the repair off; `"40%"` became 1; `"yes"`
+  meant off. A create (the install's register stage included) and an update that carries the `cluster` block now
+  answer 400 with the field and the reason: `config.cluster.nodeStartupTimeoutSeconds` is `0` or a whole number
+  from 900 to 86400, `repairMaxUnhealthy` a whole number of 1 or more, `workerFirewall` a boolean. 900 s is the
+  15 minutes the status sync gives a running machine to join before it asks for attention; the slowest worker of
+  that lab was provisioned 5 min 23 s after its create. A value stored before the check is read as the default
+  (1800 s, 1, off), and the provider's answer and page say so in `configNotes`; they also say when the two
+  repair keys are set and the provider's chart is older than 0.1.14, where they have no effect. Not verified on
+  a lab ([docs/managed-k8s.md](docs/managed-k8s.md), section 2).
+- **Operator console: the join error of a worker shows kubeadm's error.** On the node image of the platform BOM
+  cloud-init writes the SSH host keys after the failed join, so the last 40 lines of its log were key art and
+  the cause was not on the screen (the same lab round, finding Q3). `joinError.logTail` is now an excerpt: from
+  the start of the last `kubeadm join` to the end of the log, without the host key output and cloud-init's
+  `ci-info` tables; when that is over 40 lines or 6000 bytes, the first line, the lines that name an error and
+  the last eight, with a line for each gap. Credentials are masked as before. Tested on a log built to the
+  shape the lab reported, not on a recorded one. Not verified on a lab.
+- **The `mcp-gateway` sandbox template installs its npm MCP servers from a committed lockfile.** The image named
+  the eleven servers at exact versions but had no lock, so every build took the newest release of each transitive
+  dependency. In `security-scan` run 44327069354 the registry listed `@supabase/storage-js` 2.119.1 (a dependency
+  of `desktop-commander`) and answered 404 for its tarball, which npm does not retry: the build failed.
+  `deploy/templates/mcp-gateway/package.json` and `package-lock.json` are now in the repository and the image
+  runs `npm ci`. The lock is the one inside the published image `20261116-c8b3364` (the digest in
+  `images.yaml`), so the image gets the packages it had (`storage-js` 2.119.0): a build on a workstation installed the
+  same 1726 packages at the same versions as the published image, and every package server answered the
+  build's MCP check. npm retries network errors and 5xx answers twice by default; the build now asks for five.
+  To change a server, edit `package.json` and regenerate the lock (the command is in the Dockerfile). Not run
+  in CI or on a lab yet.
+- **A failed sandbox template build says which template failed.** `deploy/templates/build.sh` stops at the first
+  template that fails, and the `security-scan` report listed that one and every template after it together as
+  `missing`. The script now ends with `build.sh: FAILED: <name> (exit <n>); NOT BUILT: <names>` in the build
+  log, and `template-status.json` and the job log name `failed` and `not_built` apart (`missing` is unchanged).
+  The exit status and the failing gate are the same as before.
 - **The `desktop` sandbox template build no longer fails when Launchpad is briefly unavailable.** The image takes
   Firefox ESR from `ppa:mozillateam/ppa`, and one HTTP 503 from Launchpad (its API during `add-apt-repository`,
   the PPA index, or the package download) failed the build; in the `security-scan` workflow that stopped the

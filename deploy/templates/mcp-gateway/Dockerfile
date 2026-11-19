@@ -28,33 +28,16 @@ COPY --from=node /usr/local/bin/node /opt/mcp/node/bin/node
 # brave and exa's mcp-handler peer) and basic-ftp (mongodb-mcp-server -> ... -> get-uri ^5) to fixed releases.
 # --install-strategy=shallow is the layout `-g` uses: each server at lib/node_modules/<name> with its own dependency
 # tree, and only the servers' own bins in lib/node_modules/.bin, which /opt/mcp/npm/bin links to (the gateway's PATH).
+# package.json and package-lock.json are committed next to this file and installed with `npm ci`, so every build gets
+# the same tree, transitive dependencies included: `npm install` without a lock took the newest release of each one
+# and failed when the registry listed a version whose tarball it did not serve (404, which npm does not retry). To
+# change a server or an override: edit package.json, then in this directory run, with the npm of the base (11.21.2),
+#   npm install --package-lock-only --install-strategy=shallow --omit=dev --ignore-scripts
+# and commit both files. --fetch-retries=5 (npm's default is 2, 10 s to 60 s apart) is for network errors and 5xx.
+COPY mcp-gateway/package.json mcp-gateway/package-lock.json /opt/mcp/npm/lib/
 RUN <<'EOF'
 set -eu
-mkdir -p /opt/mcp/npm/lib
-cat > /opt/mcp/npm/lib/package.json <<'JSON'
-{
-  "name": "proxcloud-mcp-servers",
-  "private": true,
-  "dependencies": {
-    "@modelcontextprotocol/server-filesystem": "2.2.0",
-    "@modelcontextprotocol/server-memory": "2.1.0",
-    "@modelcontextprotocol/server-sequential-thinking": "2.1.1",
-    "@wonderwhy-er/desktop-commander": "0.3.1",
-    "@notionhq/notion-mcp-server": "2.6.1",
-    "@brave/brave-search-mcp-server": "2.1.4",
-    "exa-mcp-server": "3.4.3",
-    "firecrawl-mcp": "3.38.0",
-    "tavily-mcp": "0.2.22",
-    "mongodb-mcp-server": "3.2.2",
-    "server-perplexity-ask": "0.1.3"
-  },
-  "overrides": {
-    "@modelcontextprotocol/sdk": "1.32.2",
-    "basic-ftp": "6.2.6"
-  }
-}
-JSON
-npm install --prefix /opt/mcp/npm/lib --install-strategy=shallow --omit=dev --no-audit --no-fund
+npm ci --prefix /opt/mcp/npm/lib --install-strategy=shallow --omit=dev --no-audit --no-fund --fetch-retries=5
 npm cache clean --force
 ln -s lib/node_modules/.bin /opt/mcp/npm/bin
 # Fail unless every installed copy has the overridden version (and each package is present at all).

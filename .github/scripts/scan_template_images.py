@@ -87,6 +87,14 @@ def scan_image(root, name, ref, deadline):
     return status
 
 
+def split_missing(missing, build_rc):
+    """(failed, not_built): build.sh builds NAMES in order and stops at the first failure."""
+    ordered = [name for name in NAMES if name in missing]
+    if not ordered or not build_rc or build_rc < 0:
+        return None, []  # the builder succeeded, or was killed: no single target is known to have failed
+    return ordered[0], ordered[1:]
+
+
 def main():
     root = Path.cwd().resolve()
     try:
@@ -155,9 +163,13 @@ def main():
                 build.stdout.close()
     missing = sorted(set(expected) - statuses.keys())
     final = 2 if errors or missing or 2 in statuses.values() else (1 if 1 in statuses.values() else 0)
+    failed, not_built = split_missing(missing, build_rc)
     summary = {"status": final, "build_returncode": build_rc, "targets": statuses,
-               "missing": missing, "errors": errors}
+               "missing": missing, "failed": failed, "not_built": not_built, "errors": errors}
     (result / "template-status.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    if failed:
+        print(f"::error::Template build FAILED: {failed} (see build.log in the artifact); "
+              f"NOT BUILT because the builder stopped there: {', '.join(not_built) or 'none'}", flush=True)
     print(json.dumps(summary, sort_keys=True), flush=True)
     return final
 

@@ -1,4 +1,5 @@
 """Data-only base toolchain guards, not compiler/native or CVE acceptance."""
+import json
 import pathlib
 import re
 import unittest
@@ -39,6 +40,33 @@ class BaseToolchainTests(unittest.TestCase):
         self.assertIn("--only-binary=:all: --no-deps --upgrade", self.base)
         self.assertIn("apt-get update && apt-get upgrade -y", self.base)
         self.assertIn("RUN proxcloud-setup-user\nWORKDIR /home/user", self.base)
+
+    def test_mcp_servers_install_from_the_committed_lock(self):
+        directory = ROOT / "deploy/templates/mcp-gateway"
+        manifest = json.loads((directory / "package.json").read_text())
+        lock = json.loads((directory / "package-lock.json").read_text())
+        self.assertEqual(lock["lockfileVersion"], 3)
+        # The lock is the one of this package.json: same exact pins, every server and override resolved.
+        self.assertEqual(lock["packages"][""]["dependencies"], manifest["dependencies"])
+        for name, version in manifest["dependencies"].items():
+            self.assertRegex(version, r"^\d+\.\d+\.\d+$")
+            self.assertEqual(lock["packages"]["node_modules/" + name]["version"], version)
+        for name, version in manifest["overrides"].items():
+            found = [entry["version"] for path, entry in lock["packages"].items()
+                     if path.endswith("node_modules/" + name)]
+            self.assertTrue(found)
+            self.assertEqual(set(found), {version})
+        for path, entry in lock["packages"].items():
+            if path and not entry.get("inBundle"):  # a bundled package ships inside its parent's tarball
+                self.assertTrue(entry["resolved"].startswith("https://registry.npmjs.org/"), path)
+                self.assertTrue(entry["integrity"].startswith("sha512-"), path)
+        self.assertIn("COPY mcp-gateway/package.json mcp-gateway/package-lock.json /opt/mcp/npm/lib/\n", self.mcp)
+        self.assertIn("\nnpm ci --prefix /opt/mcp/npm/lib --install-strategy=shallow --omit=dev ", self.mcp)
+        self.assertNotIn("npm install --prefix", self.mcp)
+        # The build's own check of the overrides names the same versions.
+        self.assertIn('const want = { "@modelcontextprotocol/sdk": "%s", "basic-ftp": "%s" };'
+                      % (manifest["overrides"]["@modelcontextprotocol/sdk"], manifest["overrides"]["basic-ftp"]),
+                      self.mcp)
 
 
 if __name__ == "__main__":

@@ -228,6 +228,61 @@ func TestKamajiRemovedKeysRefused(t *testing.T) {
 	}
 }
 
+// The worker repair and worker firewall keys of a kamaji cluster block are checked on create (the install's register
+// stage creates through the same function) and on an update that carries the block: the four values of the lab round
+// (finding Q2) are a 400 that names the field. An update without the block passes whatever is stored, and the answer
+// then says which stored value is ignored.
+func TestKamajiClusterSettingsValidatedOnSave(t *testing.T) {
+	h := &Handler{}
+	ctx := httpx.WithRC(t.Context(), &httpx.RequestContext{SigV4KeyID: "pk-test"})
+	put := func(doc pgdoc.M, body string) *httpx.HTTPError {
+		return h.applyServiceConnectionBody(httptest.NewRequest(http.MethodPut, "/service/k", strings.NewReader(body)), doc)
+	}
+	stored := func(cluster map[string]any) pgdoc.M {
+		return pgdoc.M{"config": pgdoc.M{"provider": "kamaji", "argocd": map[string]any{"chartVersion": "0.1.14"}, "cluster": cluster}}
+	}
+	for cluster, want := range map[string]string{
+		`{"nodeStartupTimeoutSeconds":30}`: "config.cluster.nodeStartupTimeoutSeconds must be 0",
+		`{"nodeStartupTimeoutSeconds":-5}`: "config.cluster.nodeStartupTimeoutSeconds must be 0",
+		`{"repairMaxUnhealthy":"40%"}`:     "config.cluster.repairMaxUnhealthy must be a whole number",
+		`{"workerFirewall":"yes"}`:         "config.cluster.workerFirewall must be true or false",
+	} {
+		rec := httptest.NewRecorder()
+		h.externalServiceCreate(rec, httptest.NewRequest(http.MethodPost, "/service",
+			strings.NewReader(`{"name":"k","config":{"provider":"kamaji","cluster":`+cluster+`}}`)).WithContext(ctx))
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("create %s: %d %s", cluster, rec.Code, rec.Body.String())
+		}
+		if herr := put(stored(map[string]any{}), `{"config":{"cluster":`+cluster+`}}`); herr == nil || herr.Status != http.StatusBadRequest || !strings.Contains(herr.Msg, want) {
+			t.Errorf("update %s: %#v", cluster, herr)
+		}
+	}
+	if herr := put(stored(map[string]any{}), `{"config":{"cluster":{"nodeStartupTimeoutSeconds":1800,"repairMaxUnhealthy":1,"workerFirewall":true}}}`); herr != nil {
+		t.Fatalf("valid values: %#v", herr)
+	}
+	if herr := put(stored(map[string]any{}), `{"config":{"cluster":{"nodeStartupTimeoutSeconds":0}}}`); herr != nil {
+		t.Fatalf("0 turns the repair off: %#v", herr)
+	}
+	if herr := put(pgdoc.M{"config": pgdoc.M{"provider": "proxmox"}}, `{"config":{"cluster":{"workerFirewall":"yes"}}}`); herr != nil {
+		t.Fatalf("another provider kind: %#v", herr)
+	}
+	// Stored before the check: the row is not locked, and its answer names the value.
+	doc := stored(map[string]any{"nodeStartupTimeoutSeconds": float64(30)})
+	if herr := put(doc, `{"config":{"argocd":{"chartVersion":"0.1.13"}}}`); herr != nil {
+		t.Fatalf("update without a cluster block: %#v", herr)
+	}
+	shapeExternalService(doc)
+	notes, _ := doc["configNotes"].([]string)
+	if len(notes) != 2 || !strings.Contains(notes[0], "Stored value ignored") || !strings.Contains(notes[1], "no effect on cluster chart 0.1.13") {
+		t.Errorf("notes of a stored invalid value on an old chart: %q", notes)
+	}
+	// Never stored, and absent when there is nothing to say.
+	doc = pgdoc.M{"configNotes": []string{"sent by a client"}, "config": pgdoc.M{"provider": "kamaji", "cluster": map[string]any{}}}
+	if shapeExternalService(doc); doc["configNotes"] != nil {
+		t.Errorf("notes of a clean config: %v", doc["configNotes"])
+	}
+}
+
 // A Proxmox network block is checked on create and on an update that carries one. An update without a network block
 // passes even when the stored one would now be refused, so a block saved before the check does not lock the row.
 func TestPVENetworkValidatedOnSave(t *testing.T) {

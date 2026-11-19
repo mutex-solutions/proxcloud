@@ -60,6 +60,9 @@ export type CloudProvider = {
   status?: string
   // The last project that could not be provisioned on this provider; a success clears it.
   provisionError?: { projectId?: string; message?: string; at?: string }
+  // What a Kubernetes provider's stored config does not say by itself: a value read as its default because it is not
+  // valid, repair keys on a chart that renders no health check. Computed by the API at each read.
+  configNotes?: string[]
   config?: {
     apiUrl?: string
     provider?: string

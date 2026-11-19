@@ -100,6 +100,18 @@ func kamajiRemovedKeysErr(cfg map[string]any) *httpx.HTTPError {
 		"and send it again (docs/managed-k8s.md)")
 }
 
+// kamajiClusterErr refuses a kamaji cluster block whose worker repair or worker firewall value cannot be used: read as
+// sent, a 30 second startup timeout deletes machines that are still cloning, and "yes" for the firewall means off.
+func kamajiClusterErr(cfg map[string]any) *httpx.HTTPError {
+	if cfg["provider"] != "kamaji" {
+		return nil
+	}
+	if problems := externalservice.KamajiClusterProblems(cfg); len(problems) > 0 {
+		return httpx.BadRequest(strings.Join(problems, ". "))
+	}
+	return nil
+}
+
 // externalServiceCreate persists the operator-supplied doc (secret encrypted). Only a PUBLIC ceph-s3 row is checked
 // live (checkPublicCeph); others are exercised by the detail page's Test connection and the live provider reads.
 func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) {
@@ -152,6 +164,9 @@ func (h *Handler) createExternalService(ctx context.Context, body map[string]any
 		}
 	}
 	if herr := kamajiRemovedKeysErr(cfg); herr != nil {
+		return nil, herr
+	}
+	if herr := kamajiClusterErr(cfg); herr != nil {
 		return nil, herr
 	}
 	if cfg["provider"] == "proxmox" {
@@ -312,6 +327,9 @@ func (h *Handler) applyServiceConnectionBody(req *http.Request, doc pgdoc.M) *ht
 		}
 		if _, ok := c["cluster"]; ok { // the body's cluster block replaced the stored one
 			if herr := kamajiRemovedKeysErr(cfg); herr != nil {
+				return herr
+			}
+			if herr := kamajiClusterErr(cfg); herr != nil {
 				return herr
 			}
 		}
