@@ -375,6 +375,92 @@ Proxmox API.
   could not fetch instead of leaving a later "no installation candidate". A build that succeeds installs the
   same packages as before.
 
+## [0.9.0-rc.2] - 2026-11-19
+
+The second release candidate of 0.9.0, published as a prerelease and never as `latest`. It is not the release:
+`v0.8.2` stays the current stable release, and the chart, the installer and the Compose default still name it. It
+is `v0.9.0-rc.1` plus the three fixes for what the second lab round found, and it exists so that a lab can run a
+fresh install, and the upgrade again, on a build that holds them. Its content is the [Unreleased] section above,
+which the release 0.9.0 will turn into its own section; nothing is repeated here. Not for a production site.
+
+### Changed
+
+- **The platform BOM's release is `0.9.0-rc.2`** (`deploy/platform/platform-bom.yaml`), with the pins of
+  `0.9.0-rc.1` (cluster chart 0.1.14, platform chart 0.1.3): the two BOMs differ in the `release` line alone, and
+  neither chart of the product changed since its tag. The release gate passes on it and on the previous BOMs
+  0.8.0, 0.8.1, 0.8.2 and 0.9.0-rc.1. The plan from each of the three 0.8.x BOMs to it is allowed, with six
+  changes and no refusal, as it was to `0.9.0-rc.1`; the plan from `0.9.0-rc.1` is allowed with one change, the
+  release, record only. `TestUpgradeRollsNoMachine` compares all four pairs and passes.
+- **A platform on the BOM `0.9.0-rc.1` is applied by this build as it is** (it carries
+  `deploy/platform/previous/0.9.0-rc.1.yaml`) and can be moved to `0.9.0-rc.2` by one upgrade run. A platform
+  moved to `0.9.0-rc.2` is accepted by later builds only while they carry `deploy/platform/previous/0.9.0-rc.2.yaml`,
+  which the change after the tag adds: keep such a platform on a lab.
+- The app chart (`0.8.2`), `pc_versions.proxcloud` and `DEFAULT_VERSION` of `proxcloud-up.sh` do not move. The
+  tag's workflows publish the five images as `v0.9.0-rc.2` and the app chart as `0.9.0-rc.2` with that appVersion.
+  Run the candidate with `./proxcloud-up.sh upgrade v0.9.0-rc.2`, or `--version v0.9.0-rc.2` on a new install.
+
+### Fixed
+
+The three entries are in the [Unreleased] section, under Fixed; each is covered by tests and none was run on a
+lab.
+
+- Tenant workers of a site upgraded from 0.8.x start with their Proxmox node: the provider sync sets `onboot` on
+  the portal's Kubernetes node templates and on its running tenant workers where it is missing.
+- A larger control plane that does not fit is listed in the plan and blocked (the Check row `capacity` fails for
+  the machines not built yet), in place of a warning and a plan with no change.
+- The upgrade plan's texts no longer say that ArgoCD syncs every chart that moves; a stage's progress reads
+  `step N of M, wave W`; the installed BOM as `targetBom` answers `409 bom_installed`; the join log of a worker
+  that did not join drops SSH host key art.
+
+### Verified on a lab
+
+The second lab round, on 2026-11-19, with the published images of `v0.9.0-rc.1` on one lab Proxmox VE cluster,
+over a platform that `v0.8.0` installed. The lab had no tenant cluster and no database during the upgrade. It
+ran before the three fixes above. Nothing was run on this candidate's own images.
+
+- The upgrade between BOMs, 0.8.0 to 0.9.0-rc.1: one run, no retry, 72.8 seconds. The plan showed six changes,
+  allowed, nothing blocking. Nothing rolled: the same four Machines, nodes and boot ids, the same QEMU
+  processes, no Proxmox task, no pod restarted (47 on the platform cluster, 16 on the seed), and the platform
+  API answered 200 at each of 238 looks, one every 2 seconds. ArgoCD synced one Application of fourteen
+  (`platform`); the three other chart moves were compared and found in sync, and no clusterctl hook ran. A
+  second apply took 5 seconds and changed nothing. The seven wrong confirmations and targets were refused.
+- Chart 0.1.14 on a new tenant cluster: a worker Ready 9 minutes after the create; no health check for a node
+  group of one, by design; one for a group of two, with its guard.
+- Replace on the last Ready worker: `409 last_ready_node` without confirm, then a new machine with its node
+  Ready 7 minutes 21 seconds after the confirm. The group had no node for about 6.7 minutes.
+- The health check on a cluster whose two workers could not join: it replaced nothing, as its guard says for
+  "all failed". A replacement by the health check was not seen.
+- The worker firewall on one worker, with saved measurements: from a second tenant machine the kubelet, SSH and
+  port 4240 were closed afterwards, NodePort and LoadBalancer stayed open, and the node stayed Ready. Two of
+  about 6000 one-second requests failed in 52 minutes, none at the change.
+- The provider settings check (the refusals and their texts) and the join error excerpt on real `kubeadm`
+  output, with no token in it.
+- The tenant path test on a `simple` zone: a full run with a verdict, `failed`, the predicted one for the node
+  that holds the platform's addresses, and its cleanup. `passed` was not seen.
+- Three control plane machines: the save was accepted on a node without room and the plan showed no change.
+  That is the second fix above; nothing was applied.
+
+### Not verified
+
+- This candidate itself: its images, its three fixes, the plan and the upgrade from `0.9.0-rc.1` or from a 0.8.x
+  BOM to `0.9.0-rc.2`.
+- The upgrade with a tenant cluster or a database on the platform: the wait for tenants in stage 9,
+  `tenants_unhealthy`, the `platform` chart's sync beside live tenant control planes, and an existing cluster
+  staying on chart 0.1.13.
+- A failed stage of an upgrade, Retry, a restore, and the refusing half of the rollout check
+  (`unexpected_rollout`). The seed's `vzdump` was not taken before the lab upgrade.
+- The portal's own step from `v0.8.2`: the lab's portal came from a build of `main`. An upgrade from the BOM of
+  0.8.1 or 0.8.2. The console's step 4: the upgrade was run at the API.
+- A replacement by the health check, Replace of a machine that has no node, and `onboot` on a freshly imported
+  node template and its clone.
+- The worker firewall with two workers, on a new or replaced worker, and with `workerFirewall: true` on the
+  provider.
+- The tenant path test's verdict `passed`, `routed` mode and a VLAN tag.
+- A fresh install from a candidate, with a preset, the one root command run on a node, or three control plane
+  machines; an apply of three control plane machines.
+- Everything the [Unreleased] section and the sections of 0.8.0 to 0.8.2 say is not verified, except what is
+  listed as verified here.
+
 ## [0.9.0-rc.1] - 2026-11-19
 
 A release candidate of 0.9.0, published as a prerelease and never as `latest`. It is not the release: `v0.8.2`
