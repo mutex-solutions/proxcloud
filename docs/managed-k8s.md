@@ -106,13 +106,34 @@ Seed-file twin of the form: `deploy/seed/external-service-dev.json`
 | DNS zone | `config.cluster.dnsZone` | Optional. API FQDN = `<clusterId>.<zone>`. Cluster ids (`pc-c-<8hex>`) never change, and a cluster made before this format keeps the id it has; nothing reads the prefix. |
 | Version → image matrix | `config.cluster.versions` | Curated map `k8s version → node image id`: the only versions offered to customers. Textarea grammar: `1.35.4=<image-id>` per line. |
 | Image variants | `config.cluster.imageVariants` | Alternative node-image builds of the same version, e.g. a GPU build. Grammar: `1.35.4@nvidia=<image-id>`. |
-| Worker firewall for new clusters | `config.cluster.workerFirewall` | Optional, API only, default `false`. `true`: every new cluster's workers go behind the Proxmox VM firewall. **Not verified on a lab**; see [Worker firewall](#worker-firewall). |
+| Worker firewall for new clusters | `config.cluster.workerFirewall` | Optional, API only, default `false`. A JSON boolean: the save answers 400 to any other value. `true`: every new cluster's workers go behind the Proxmox VM firewall. **Not verified on a lab**; see [Worker firewall](#worker-firewall). |
 | RWX dataset size | `config.cluster.rwxGiB` | Optional, API or installer (`services.kamaji.rwx_gib`). See [section 9](#9-how-a-cluster-lands-on-proxmox). |
 | Block volumes for tenants | — | Through the CSI gateway only, with no credential in the tenant ([section 9](#9-how-a-cluster-lands-on-proxmox)). `csiSharedStores` and `pveCsiUrl` were removed: the API answers 400 to a `cluster` block that still has one, and the form drops them on save. |
 | Flavors allowlist | `config.cluster.flavors` | Flavor ids offered for node groups. Empty = no restriction. |
-| Node startup timeout | `config.cluster.nodeStartupTimeoutSeconds` | API only (the form keeps the key). Seconds a worker may run without a Node before Cluster API replaces it; absent = 1800, `0` = never. Read by cluster chart 0.1.14 and later. See [A worker that does not join](#a-worker-that-does-not-join). |
-| Repair guard | `config.cluster.repairMaxUnhealthy` | API only. Machines of a node group that may be without a Node while one is still replaced; absent = 1. A number, never a percentage. |
+| Node startup timeout | `config.cluster.nodeStartupTimeoutSeconds` | API only (the form keeps the key). Seconds a worker may run without a Node before Cluster API replaces it; absent = 1800, `0` = never. `0` or a whole number from 900 to 86400: the save answers 400 to anything else ([Values the save refuses](#values-the-save-refuses)). Read by cluster chart 0.1.14 and later. See [A worker that does not join](#a-worker-that-does-not-join). |
+| Repair guard | `config.cluster.repairMaxUnhealthy` | API only. Machines of a node group that may be without a Node while one is still replaced; absent = 1. A whole number of 1 or more, never a percentage: the save answers 400 to anything else. |
 | Namespace placement | `config.namespacePlacement` | Optional, API only: `{nodeSelector, tolerations}`. A `pc-*` namespace gets the `scheduler.alpha.kubernetes.io/node-selector` and `…/defaultTolerations` annotations and the label `proxcloud.io/platform-role: kamaji`, so the API server puts new tenant control-plane pods there on that node group. They are stamped when the namespace is next ensured: a project's first attach to the provider, or a new cluster create. Nothing in the sync ensures a namespace again, so a project attached before the key was set keeps its namespace as it is until then, and pods already running are not moved. Needs the `PodNodeSelector` and `PodTolerationRestriction` admission plugins on the management cluster's API server; without them the annotations do nothing. Absent: nothing is stamped. A selector that is not label keys and values, or a toleration the API server would refuse, is refused when the provider is built: the API server checks the annotation on every pod create, so it would refuse every pod there. |
+
+### Values the save refuses
+
+A create of a Kubernetes provider (the managed-services install registers its provider through the same check) and
+an update that sends the `cluster` block answer `400` with the field and the reason when one of these three keys has
+a value that cannot be used. **Not verified on a lab**: the tests run on the handlers.
+
+| Key | Accepted | Why |
+|---|---|---|
+| `nodeStartupTimeoutSeconds` | `0`, or a whole number from 900 to 86400 (digits in a string are read as the number) | Cluster API deletes a worker with no Node this long after the newest of its creation and its VM being ready. The floor of 900 s is the 15 minutes the status sync gives a running machine to join before it asks for attention, so the repair never deletes a machine the product still calls "joining". On the lab of 2026-11-19 (nested, loaded) the slowest worker was provisioned 5 min 23 s after its create. Nothing was measured on slow real storage: where one clone takes longer than 15 minutes, set more than the floor, or `0`. Above a day use `0`. |
+| `repairMaxUnhealthy` | a whole number, 1 or more | A percentage is rounded down by Cluster API: 40 % of one or two machines is 0, and nothing is replaced. |
+| `workerFirewall` | `true` or `false` | Any other value (`"yes"`, `1`) reads as off while the operator believes new clusters are protected. |
+
+A lab round saved `30`, `-5`, `"40%"` and `"yes"` with 200 before this check existed. A value like these that is
+already stored does not break anything that reads the provider: it is read as the default (1800 s, a guard of 1,
+firewall off), and an update that does not send the `cluster` block still passes. The provider's answer
+(`GET /admin/service/{id}`, the list, and every save) then carries `configNotes`, a list of sentences that the
+provider's page shows above its tabs: one per stored value that is ignored, and one when
+`nodeStartupTimeoutSeconds` or `repairMaxUnhealthy` is set while `config.argocd.chartVersion` is older than 0.1.14.
+On such a chart the two keys have no effect: they are stored, and a cluster gets its health check once it is on
+chart 0.1.14 or later. `workerFirewall` needs no chart. `configNotes` is computed at each read and never stored.
 
 **Changing a setting later.** The installer's `services.kamaji.*` keys take effect only when stage 60 first registers the provider: it skips a provider
 whose name already exists, so a re-run neither applies a changed key nor overwrites one set by hand. On an existing site use the
@@ -442,8 +463,18 @@ none, permission `admin:service:manage`). The portal deletes that Machine and Cl
 
 **3. The join error, for the operator.** For each machine in `not_joined` past its bound (at most five per
 request), the operator's Machines view reads two files of the worker through the Proxmox guest agent and shows
-them under the machine: the `errors` of `/run/cloud-init/result.json` and the last 40 lines (at most 6000 bytes) of
-`/var/log/cloud-init-output.log`, where kubeadm's own error is.
+them under the machine: the `errors` of `/run/cloud-init/result.json` and an excerpt of
+`/var/log/cloud-init-output.log` (at most 6000 bytes).
+
+- The excerpt starts at the last `kubeadm join` (the command, or kubeadm's `[preflight] Running pre-flight checks`)
+  and runs to the end of the log, so it holds kubeadm's error and cloud-init's own failure lines. The SSH host key
+  output (`Generating public/private … key pair` to the end of the key's art, and the `SSH HOST KEY` blocks) and
+  cloud-init's `ci-info:` tables are left out: on the node image of the platform BOM cloud-init writes the host
+  keys after the failed join, and on the lab of 2026-11-19 the last 40 lines of the log were key art alone. When
+  the excerpt is over 40 lines or 6000 bytes it keeps the first line of the join, the last eight lines and,
+  between them, the latest lines that name an error, with `[... N lines left out ...]` for each gap; of a line
+  over 1000 bytes it keeps the end. A log with no join in it is answered the same way from its start. **Tested on
+  a log built to the shape the lab reported, not on a recorded log, and not verified on a lab.**
 
 - It is read live at each request and never stored. Before it leaves the API the text loses kubeadm's bootstrap
   token (`abcdef.0123456789abcdef`, also after `--token` and `token:`), the CA hash (`sha256:<64 hex>`), any

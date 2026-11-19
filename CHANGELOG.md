@@ -230,6 +230,25 @@ with cluster chart 0.1.13 and platform chart 0.1.2, until an operator upgrades i
 
 ### Fixed
 
+- **Managed Kubernetes: the provider save checks the worker repair and worker firewall settings.** A lab round on
+  the build of main (2026-11-19, finding Q2) saved `nodeStartupTimeoutSeconds: 30`, `-5`,
+  `repairMaxUnhealthy: "40%"` and `workerFirewall: "yes"` with 200. Read as sent, 30 s deletes every machine that
+  is still cloning, in a loop, on cluster chart 0.1.14; `-5` turned the repair off; `"40%"` became 1; `"yes"`
+  meant off. A create (the install's register stage included) and an update that carries the `cluster` block now
+  answer 400 with the field and the reason: `config.cluster.nodeStartupTimeoutSeconds` is `0` or a whole number
+  from 900 to 86400, `repairMaxUnhealthy` a whole number of 1 or more, `workerFirewall` a boolean. 900 s is the
+  15 minutes the status sync gives a running machine to join before it asks for attention; the slowest worker of
+  that lab was provisioned 5 min 23 s after its create. A value stored before the check is read as the default
+  (1800 s, 1, off), and the provider's answer and page say so in `configNotes`; they also say when the two
+  repair keys are set and the provider's chart is older than 0.1.14, where they have no effect. Not verified on
+  a lab ([docs/managed-k8s.md](docs/managed-k8s.md), section 2).
+- **Operator console: the join error of a worker shows kubeadm's error.** On the node image of the platform BOM
+  cloud-init writes the SSH host keys after the failed join, so the last 40 lines of its log were key art and
+  the cause was not on the screen (the same lab round, finding Q3). `joinError.logTail` is now an excerpt: from
+  the start of the last `kubeadm join` to the end of the log, without the host key output and cloud-init's
+  `ci-info` tables; when that is over 40 lines or 6000 bytes, the first line, the lines that name an error and
+  the last eight, with a line for each gap. Credentials are masked as before. Tested on a log built to the
+  shape the lab reported, not on a recorded one. Not verified on a lab.
 - **The `desktop` sandbox template build no longer fails when Launchpad is briefly unavailable.** The image takes
   Firefox ESR from `ppa:mozillateam/ppa`, and one HTTP 503 from Launchpad (its API during `add-apt-repository`,
   the PPA index, or the package download) failed the build; in the `security-scan` workflow that stopped the
