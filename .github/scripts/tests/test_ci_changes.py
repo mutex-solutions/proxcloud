@@ -117,6 +117,13 @@ class ClassifyTests(unittest.TestCase):
                      "deploy/mgmt-cluster/argocd-health.yaml", "deploy/Dockerfile"):
             self.assertEqual(run(path)["images"], ["proxcloud-api"], path)
         self.assertEqual(run("deploy/sandbox-runtime.Dockerfile")["scan"], ["filesystem", "sandbox-runtime"])
+        # A <Dockerfile>.dockerignore replaces the root .dockerignore for that image only.
+        for path, image in (("deploy/Dockerfile.dockerignore", "api"), ("web/Dockerfile.dockerignore", "web-client"),
+                            ("deploy/sandbox-proxy.Dockerfile.dockerignore", "sandbox-proxy"),
+                            ("deploy/sandbox-runtime.Dockerfile.dockerignore", "sandbox-runtime"),
+                            ("deploy/sandbox-import.Dockerfile.dockerignore", "sandbox-import")):
+            self.assertIn(image, run(path)["scan"], path)
+            self.assertIn("base_images", run(path)["jobs"], path)
         self.assertIn("base_images", run("deploy/sandbox-proxy.Dockerfile")["jobs"])
 
     def test_installer_and_vm_images_have_their_own_tests(self):
@@ -132,7 +139,11 @@ class ClassifyTests(unittest.TestCase):
                 self.assertFull(run("docs/install.md", path))
 
     def test_unknown_area_runs_everything(self):
-        for path in ("newdir/file.go", "Makefile", ".dockerignore", "docker-compose.yml", ".gitignore", "tasks/todo.md.bak"):
+        # Under docs/ only Markdown is documentation: `go test ./...` compiles docs/**/*.go and the
+        # filesystem scan reads every lockfile of the tree.
+        for path in ("newdir/file.go", "Makefile", ".dockerignore", "docker-compose.yml", ".gitignore", "tasks/todo.md.bak",
+                     "docs/x/x.go", "docs/package-lock.json", "docs/requirements.txt", "docs/go.sum", "docs/go.mod",
+                     "docs/diagram.png", "docs/README", "newdir/README.md", "LICENSE.txt", ".editorconfig"):
             with self.subTest(path=path):
                 got = run("docs/install.md", path)
                 self.assertFull(got)
@@ -164,14 +175,48 @@ class ClassifyTests(unittest.TestCase):
             self.assertTrue((ROOT / dockerfile).is_file(), dockerfile)
             self.assertTrue((ROOT / context).is_dir(), context)
 
+    def test_dockerfile_copy_sources_select_their_image(self):
+        # RULES repeats the COPY sources of each Dockerfile by hand. When a Dockerfile starts to copy another
+        # path, a later pull request that only edits that path must still build and scan the image.
+        seen = 0
+        for name, (dockerfile, context, app, _) in ci.IMAGES.items():
+            self.assertIn(name, run(dockerfile)["scan"], dockerfile)
+            text = (ROOT / dockerfile).read_text(encoding="utf-8").replace("\\\n", " ")
+            self.assertNotRegex(text, r"(?m)^\s*RUN\b.*--mount=type=bind(?!\S*from=)", f"{dockerfile}: a bind mount of the context is an input this test does not read")
+            for words in re.findall(r"(?mi)^\s*(?:COPY|ADD)\s+(.+)$", text):
+                words = words.split()
+                if any(word.startswith("--from=") for word in words) or any(word.startswith("<<") for word in words):
+                    continue  # another stage, or an inline file
+                for source in [word for word in words if not word.startswith("--")][:-1]:
+                    source = source.replace("${APP}", app).replace("$APP", app)
+                    self.assertNotRegex(source, r"[$*?\[]", f"{dockerfile}: COPY {source} cannot be resolved by this test")
+                    path = os.path.normpath(os.path.join(context, source))
+                    self.assertTrue((ROOT / path).exists(), f"{dockerfile}: COPY {source}")
+                    probe = path + "/new-file" if (ROOT / path).is_dir() else path
+                    self.assertIn(name, run(probe)["scan"],
+                                  f"{dockerfile} copies {path}, but a change to {probe} does not select {name}: add it to RULES")
+                    seen += 1
+        self.assertGreaterEqual(seen, 25)
+
+    def test_no_tracked_symlink(self):
+        # A link shows a file under a second path that the diff never lists (docs/ linked into a console).
+        if not shutil.which("git") or not (ROOT / ".git").exists():
+            self.skipTest("needs the Git checkout")
+        staged = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-s"], check=True, capture_output=True, text=True).stdout
+        self.assertEqual([line for line in staged.splitlines() if line.startswith("120000")], [])
+
+    # Advisory, and not run by the `changes` job of security-scan.yml (CI_CHANGES_DETECT): a new unknown path
+    # already runs everything there. The `installer` job runs it, so the path gets a row or is put on this list.
+    @unittest.skipIf(os.environ.get("CI_CHANGES_DETECT"), "the change detection treats unknown paths as a full run")
     def test_every_tracked_file_is_in_a_known_area_or_on_the_reviewed_unknown_list(self):
         if not shutil.which("git") or not (ROOT / ".git").exists():
             self.skipTest("needs the Git checkout")
         tracked = subprocess.run(["git", "-C", str(ROOT), "ls-files"], check=True, capture_output=True, text=True).stdout.splitlines()
         unknown = {p for p in tracked if not any(pattern.match(p) for _, pattern, _ in ci.RULES)}
-        # Unknown runs everything. A new top-level directory lands here until it gets a row in RULES.
         self.assertEqual(unknown, {".codegraph/.gitignore", ".dockerignore", ".env.example", ".gitattributes",
-                                   ".githooks/pre-commit", ".gitignore", "Makefile", "docker-compose.yml"})
+                                   ".githooks/pre-commit", ".gitignore", "Makefile", "docker-compose.yml"},
+                         "a tracked path is in no row of RULES in ci_changes.py (or a listed one is gone). A pull request "
+                         "that changes such a path runs every job. Give it a row in RULES, or add it to this list.")
 
     def test_docs_read_by_go_tests_run_go_test(self):
         # A Go test opens a document through a relative path literal ("../../docs/x.md"); prose comments never
@@ -312,6 +357,28 @@ class GateTests(unittest.TestCase):
             self.assertIn("change detection did not succeed", lines[0])
         self.assertFalse(ci.gate({job: {"result": "skipped", "outputs": {}} for job in self.JOBS})[0])
         self.assertFalse(ci.gate({"changes": {"result": "success", "outputs": {}}, "scan": {"result": "skipped"}})[0])
+
+    def test_needed_job_without_a_usable_output_blocks(self):
+        skipped = {job: {"result": "skipped", "outputs": {}} for job in self.JOBS}
+        # `changes` succeeded and gave a reason, but not the outputs the needed jobs are judged by.
+        ok, lines = ci.gate({"changes": {"result": "success", "outputs": {"reason": "r"}}, **skipped})
+        self.assertFalse(ok)
+        self.assertEqual("\n".join(lines).count("no usable output"), 3)
+        # A job added to `needs` without an output of `changes`: blocked skipped, and blocked green too.
+        for result in ("skipped", "success"):
+            needs = self.needs(("docs/install.md",), ("skipped",) * 3)
+            needs["new-scan"] = {"result": result, "outputs": {}}
+            ok, lines = ci.gate(needs)
+            self.assertFalse(ok, result)
+            self.assertIn("no usable output `new_scan`", "\n".join(lines))
+        for key, value in (("scan", ""), ("scan", "yes"), ("scan", "{}"), ("scan", "[1"), ("template_images", ""),
+                           ("template_images", "True"), ("base_images", "0"), ("base_images", None)):
+            needs = self.needs(("docs/install.md",), ("skipped",) * 3)
+            needs["changes"]["outputs"][key] = value
+            self.assertFalse(ci.gate(needs)[0], (key, value))
+        needs = self.needs(("docs/install.md",), ("skipped",) * 3)
+        del needs["changes"]["outputs"]["base_images"]
+        self.assertFalse(ci.gate(needs)[0])
 
     def test_gate_command_exit_codes(self):
         script = str(ROOT / ".github/scripts/ci_changes.py")

@@ -11,7 +11,8 @@ name: security-scan
 # run scan everything. A pull request scans the targets its changed files can affect (job `changes`,
 # .github/scripts/ci_changes.py); the required check security-gate fails on any failed or cancelled
 # scan, and passes over a skipped one only when `changes` succeeded and said its inputs are unchanged.
-# The daily run is what finds a new CVE in a target that no pull request touches.
+# The daily run is what finds a new CVE in a target that no pull request touches. A full scan of main
+# that fails blocks no pull request and no tag: job full-scan-issue opens (or comments on) one issue.
 on:
   pull_request:
     branches: [main]
@@ -27,7 +28,9 @@ permissions:
 concurrency:
   # A scheduled or manual run never cancels, or is cancelled by, the run of a push to main.
   group: security-scan-${{ github.event.pull_request.number || format('{0}-{1}', github.event_name, github.ref) }}
-  cancel-in-progress: true
+  # Only a pull request cancels its older run. A full scan of main always finishes: a second merge
+  # waits for it (and a third replaces the waiting second, whose commit it contains).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -63,7 +66,9 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          python3 -m unittest discover -s .github/scripts/tests -p test_ci_changes.py
+          # CI_CHANGES_DETECT skips the one advisory test (the reviewed list of paths in no area): a new
+          # such path runs everything here, and the installer job of test.yml asks for a row or a list entry.
+          CI_CHANGES_DETECT=1 python3 -m unittest discover -s .github/scripts/tests -p test_ci_changes.py
           python3 .github/scripts/ci_changes.py detect | tee -a "$GITHUB_OUTPUT"
 
   scan:
@@ -367,6 +372,37 @@ jobs:
         env:
           NEEDS: ${{ toJSON(needs) }}
         run: python3 .github/scripts/ci_changes.py gate
+
+  # A full scan of main (push, schedule, manual run) that fails is not on any pull request: say so in an
+  # issue. One open issue at a time; later failures comment on it. A person closes it.
+  full-scan-issue:
+    name: full-scan-issue
+    if: always() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.security-gate.result == 'failure'
+    needs: security-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    # No checkout: this write-token job runs no file of the repository.
+    steps:
+      - name: Open or update the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TITLE: "security-scan: the full scan of main fails"
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          body="The full scan of \`main\` failed: ${RUN_URL} (event \`${GITHUB_EVENT_NAME}\`, commit ${GITHUB_SHA})."
+          number="$(gh issue list --state open --search "in:title \"${TITLE}\"" --json number --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$TITLE" --body "$body
+
+          Pull requests scan only the targets they change (docs/ci-release.md, \"What runs when\"), so this failure is on no pull request and blocks none. The job summary of \`security-gate\` in that run names the failed scan. Close this issue when a full scan of \`main\` is green again; later failures are added here as comments."
+          fi
 
   render-comment:
     name: security-summary
