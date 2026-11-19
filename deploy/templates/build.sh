@@ -8,6 +8,8 @@ cd "$(dirname "$0")"
 REGISTRY=${REGISTRY:-ghcr.io/mutex-solutions}
 TAG=${TAG:-dev}
 PUSH=${PUSH:-0}
+# Seconds between two attempts of one failed image build (see build()).
+RETRY_PAUSE=${RETRY_PAUSE:-60}
 # e2b-dev/code-interpreter (Apache-2.0): the Jupyter server and E2B's FastAPI server on :49999.
 CI_UPSTREAM=https://github.com/e2b-dev/code-interpreter.git#c49b78602c29e44d07e196604de515dfa6b12744
 DESKTOP_UPSTREAM=https://github.com/e2b-dev/desktop.git#91f23acaab7312e847596acc44e6f7763f56917f
@@ -30,12 +32,21 @@ report() {
 trap report EXIT
 
 build() { # name dockerfile-dir extra-args...
-  local name=$1 dir=$2 ref meta
+  local name=$1 dir=$2 ref meta rc try=1
   shift 2
   cur=$name
   ref="$REGISTRY/sandbox-$name:$TAG"
   meta=$(mktemp)
-  docker buildx build --platform linux/amd64 $out --metadata-file "$meta" -f "$dir/Dockerfile" -t "$ref" "$@" . >&2
+  # A package mirror or registry that does not answer fails a build that is otherwise right, so a failed build
+  # is tried again, twice at most, after a pause. Each attempt is a new build of the failed step, with new name
+  # lookups and connections. The third failure ends the run with the status of that build, as before.
+  until docker buildx build --platform linux/amd64 $out --metadata-file "$meta" -f "$dir/Dockerfile" -t "$ref" "$@" . >&2; do
+    rc=$?
+    [ "$try" -lt 3 ] || exit "$rc"
+    echo "build.sh: $name failed (exit $rc), attempt $try of 3; next attempt in ${RETRY_PAUSE}s" >&2
+    sleep "$RETRY_PAUSE"
+    try=$((try + 1))
+  done
   if [ "$PUSH" = 1 ]; then
     local digest
     digest=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["containerimage.digest"])' "$meta")

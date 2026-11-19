@@ -252,6 +252,19 @@ with cluster chart 0.1.13 and platform chart 0.1.2, until an operator upgrades i
 
 ### Fixed
 
+- **A sandbox template build no longer fails on a package mirror that does not answer.** The `browser` template
+  is built on Microsoft's Playwright image, which keeps its apt sources on `azure.archive.ubuntu.com`. That name
+  resolved to one address, the address stopped answering, and apt does not connect again to an address that timed
+  out, so its three retries ended within seven seconds: `apt-get upgrade` failed, the template builder stopped at
+  `browser`, and the required `template-images` job of `security-scan` failed on `main` on a network fault. Two
+  changes. The `browser` image now takes the same Ubuntu archive from `archive.ubuntu.com`, which has many
+  addresses that apt tries in turn; the suites, the packages and `apt-get upgrade` are the same.
+  `deploy/templates/build.sh` now tries a failed image build again, twice at most, 60 seconds apart
+  (`RETRY_PAUSE`), for every template, in the scan and in the publishing workflow; a build that fails three times
+  ends the run with the same status and the same `FAILED: ...; NOT BUILT: ...` line as before. Covered by the
+  builder tests; the `browser` image itself was not rebuilt on a workstation, the pull request's own
+  `template-images` run builds it.
+
 - **Managed Kubernetes: tenant workers of a site upgraded from 0.8.x start with their Proxmox node.** `onboot` was
   written on a Kubernetes node image only at its import, so a node template imported before v0.9.0 had none, and
   neither had the workers cloned from it, before or after the upgrade: after a node reboot they stayed stopped (lab

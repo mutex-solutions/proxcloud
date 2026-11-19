@@ -103,14 +103,16 @@ class TemplateTests(unittest.TestCase):
         self.assertEqual(SCAN.split_missing(missing, None), (None, []))
         self.assertEqual(SCAN.split_missing(missing, -9), (None, []))
 
-    def run_builder(self, names, fail):
-        """build.sh with a stub docker on PATH that fails for one image name."""
+    def run_builder(self, names, fail, times=99):
+        """build.sh with a stub docker on PATH that fails the first `times` builds of one image name."""
         with tempfile.TemporaryDirectory() as directory:
             stub = Path(directory) / "docker"
-            stub.write_text('#!/bin/sh\ncase " $* " in *"/sandbox-$FAIL:"*) exit 7;; esac\n', encoding="utf-8")
+            stub.write_text('#!/bin/sh\ncase " $* " in *"/sandbox-$FAIL:"*) ;; *) exit 0;; esac\n'
+                            'n=$(($(cat "$0.n" 2>/dev/null || echo 0) + 1)); echo "$n" > "$0.n"\n'
+                            'echo "stub: build $n of $FAIL" >&2; [ "$n" -gt "$TIMES" ] || exit 7\n', encoding="utf-8")
             stub.chmod(0o755)
-            env = dict(os.environ, PATH=directory + os.pathsep + os.environ["PATH"], FAIL=fail,
-                       PUSH="0", REGISTRY="security-scan.local", TAG=SHA)
+            env = dict(os.environ, PATH=directory + os.pathsep + os.environ["PATH"], FAIL=fail, TIMES=str(times),
+                       PUSH="0", REGISTRY="security-scan.local", TAG=SHA, RETRY_PAUSE="0")
             return subprocess.run([str(BUILD), *names], env=env, capture_output=True, text=True, timeout=60)
 
     def test_builder_names_the_failed_target_and_those_not_built(self):
@@ -130,6 +132,20 @@ class TemplateTests(unittest.TestCase):
         self.assertEqual(done.returncode, 2)
         self.assertIn("unknown template bogus", done.stderr)
         self.assertNotIn("FAILED", done.stderr)
+
+    def test_builder_tries_a_failed_build_three_times_and_no_more(self):
+        done = self.run_builder(("node", "browser", "desktop"), "browser", times=2)
+        self.assertEqual(done.returncode, 0)
+        self.assertEqual([line.split()[0] for line in done.stdout.splitlines()], ["node", "browser", "desktop"])
+        self.assertEqual(done.stderr.count("stub: build"), 3)
+        self.assertIn("build.sh: browser failed (exit 7), attempt 2 of 3; next attempt in 0s\n", done.stderr)
+        self.assertNotIn("FAILED", done.stderr)
+        # A build that keeps failing is not tried a fourth time, and ends the run as it did before.
+        done = self.run_builder(("node", "browser", "desktop"), "browser")
+        self.assertEqual(done.returncode, 7)
+        self.assertEqual(done.stderr.count("stub: build"), 3)
+        self.assertNotIn("attempt 3 of 3", done.stderr)
+        self.assertTrue(done.stderr.endswith("build.sh: FAILED: browser (exit 7); NOT BUILT: desktop\n"))
 
     def test_builder_reports_nothing_when_every_target_builds(self):
         done = self.run_builder(SCAN.NAMES, "none")
