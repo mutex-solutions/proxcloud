@@ -696,6 +696,14 @@ func (h *Handler) platformPlan(w http.ResponseWriter, r *http.Request) {
 			plan.Blocking = append(plan.Blocking, platformlife.Preflight{Installation: in, CAPI: capi}.GrowthBlocking(r.Context())...)
 		}
 	}
+	// What the run writes on the site and no BOM names: the cluster firewall rule, when Proxmox does not hold it.
+	if in.Installed() && h.esSvc != nil && h.pveFor != nil {
+		if es, _ := h.esSvc.Get(r.Context(), in.ServiceID); es != nil {
+			if portal, err := h.pveFor(es); err == nil {
+				plan.ListAPIAccess(r.Context(), in, portal)
+			}
+		}
+	}
 	httpx.OK(w, plan)
 }
 

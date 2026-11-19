@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -24,6 +25,7 @@ type preflightPVE struct {
 	vnets   string // the cluster's vnets, [] when empty
 	zones   string // the cluster's SDN zones, [] when empty; "!" answers 403
 	vm9999  bool   // a guest holds the id proxmox-csi names its volumes after
+	held    []int  // ids a guest holds, as /cluster/nextid answers
 	// machines are the VMs of pool proxcloud-system, VMID → {config JSON, status}; the one with VMID seed is in the
 	// seed's pool instead.
 	machines map[int][2]string
@@ -89,9 +91,9 @@ func (f *preflightPVE) serve(w http.ResponseWriter, r *http.Request) {
 		data[k] = v
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/api2/json")
-	if path == "/cluster/nextid" && f.vm9999 {
+	if id, _ := strconv.Atoi(r.URL.Query().Get("vmid")); path == "/cluster/nextid" && (f.vm9999 || slices.Contains(f.held, id)) {
 		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprint(w, `{"data":null,"errors":{"vmid":"VM 9999 already exists"}}`)
+		fmt.Fprintf(w, `{"data":null,"errors":{"vmid":"VM %d already exists"}}`, max(id, 9999))
 		return
 	}
 	data["/cluster/nextid"] = `"` + r.URL.Query().Get("vmid") + `"`
@@ -436,7 +438,7 @@ func TestPreflightBootStoreAndAPIRule(t *testing.T) {
 		in.Spec.Clusters[0].NodeGroups[i].Nodes = []string{"pve1"}
 	}
 	tags := `"tags":"pc-platform-` + in.ID + `"`
-	f := &preflightPVE{seed: 106, machines: map[int][2]string{106: {`{"name":"seed","onboot":1,` + tags + `}`, "running"}}, extra: map[string]string{
+	f := &preflightPVE{seed: 106, held: []int{101, 110}, machines: map[int][2]string{106: {`{"name":"seed","onboot":1,` + tags + `}`, "running"}}, extra: map[string]string{
 		"/pools/" + pve.TemplatePool: `{"members":[{"id":"qemu/9100","type":"qemu","vmid":9100,"node":"pve1","template":1},{"id":"qemu/110","type":"qemu","vmid":110,"node":"pve1"}]}`,
 		"/nodes/pve1/storage/local-lvm/content": `[{"volid":"local-lvm:vm-106-disk-0","vmid":106},{"volid":"local-lvm:base-9100-disk-0","vmid":9100},
 			{"volid":"local-lvm:vm-9999-pvc-1f","vmid":9999}]`,
@@ -454,14 +456,15 @@ func TestPreflightBootStoreAndAPIRule(t *testing.T) {
 	}
 	f.extra["/nodes/pve1/storage/local-lvm/content"] = `[{"volid":"local-lvm:vm-106-disk-0","vmid":106},{"volid":"local-lvm:vm-101-disk-0","vmid":101},
 		{"volid":"local-lvm:vm-101-disk-1","vmid":101},{"volid":"local-lvm:vm-300-disk-0","vmid":300}]`
-	if c := row("boot-store"); c.Status != CheckWarn || !strings.Contains(c.Message, "2 other VMs (VM 101, 300)") || !strings.Contains(c.Message, "Datastore.Allocate") ||
+	// The ids are the volumes' names: 300 has disks on the store and no guest (a deleted VM's volume, lab round 3, R3-1).
+	if c := row("boot-store"); c.Status != CheckWarn || !strings.Contains(c.Message, "2 other VM ids (101, 300 (no VM has this id: a leftover volume))") || !strings.Contains(c.Message, "Datastore.Allocate") ||
 		!strings.Contains(c.Message, "pvesm add zfspool") {
 		t.Errorf("foreign disks: %+v", c)
 	}
 	// A VM in the template pool that is no template (a clone that kept its template's pool, a VM put there by hand) is
 	// another VM's disk like any other; the pool's templates are not (lab round of 2026-11-19, P2).
 	f.extra["/nodes/pve1/storage/local-lvm/content"] = `[{"volid":"local-lvm:base-9100-disk-0","vmid":9100},{"volid":"local-lvm:vm-110-disk-0","vmid":110}]`
-	if c := row("boot-store"); c.Status != CheckWarn || !strings.Contains(c.Message, "1 other VMs (VM 110)") {
+	if c := row("boot-store"); c.Status != CheckWarn || !strings.Contains(c.Message, "1 other VM ids (110)") {
 		t.Errorf("a VM in the template pool that is no template: %+v", c)
 	}
 	f.extra["/nodes/pve1/storage/local-lvm/content"] = "!"

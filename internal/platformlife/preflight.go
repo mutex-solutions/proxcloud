@@ -527,12 +527,18 @@ func (p Preflight) bootStore(ctx context.Context, defs []pve.StorageDef, defsErr
 		c.Message += " It holds no disk of a VM that is not the platform's."
 		return c
 	}
+	// The ids are the volumes' names (vm-<id>-*), not guests: a volume outlives a VM that was deleted without it.
+	// /cluster/nextid answers for every guest of the cluster, also one no token here may read (VMIDFree); an id that
+	// cannot be asked is left unmarked.
 	ids := make([]string, len(foreign))
 	for i, id := range foreign {
 		ids[i] = strconv.Itoa(id)
+		if free, err := p.Portal.C.VMIDFree(ctx, id); err == nil && free {
+			ids[i] += " (no VM has this id: a leftover volume)"
+		}
 	}
 	c.Status = CheckWarn
-	c.Message += " It also holds disks of " + strconv.Itoa(len(foreign)) + " other VMs (VM " + strings.Join(ids, ", ") + "): tenant servers, or VMs of your own. " +
+	c.Message += " It also holds disks of " + strconv.Itoa(len(foreign)) + " other VM ids (" + strings.Join(ids, ", ") + "): tenant servers, VMs of your own, or volumes a deleted VM left. " +
 		pve.CSITokenID + " holds Datastore.Allocate on the whole store and its secret is readable inside the platform cluster, so whoever reads it there can read and delete those disks. " +
 		"A store of its own for the platform avoids that; on ZFS, as root on the node: zfs create <pool>/pcplat && pvesm add zfspool pcplat --pool <pool>/pcplat --content images,rootdir --sparse 1; " +
 		"then name it as the boot store in step 1 and run the root command of step 2 again. The install works without it."
