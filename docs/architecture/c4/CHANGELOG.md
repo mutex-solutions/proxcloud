@@ -4,6 +4,23 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-19: the provider sync sets onboot on node templates and tenant workers
+
+**What changed:** component "Sync job": each cycle, per Proxmox provider, `Job.startAtBoot` sets `onboot` where it
+is missing on the Kubernetes node templates that a Template updates receipt of this portal holds
+(`templateupdates.StartNodeTemplatesAtBoot`, wired in `cmd/api/main.go` by `WithNodeTemplates`) and on the running
+worker VMs of the tenant clusters this portal has (`pve.StartWorkersAtBoot`: a VM in a project's pool with the tag
+`pc-k8s-<cluster>` of a cluster row of that project). No container, component, relation or boundary changed, and
+no Proxmox permission: the portal's token already holds `VM.Config.Options` on `pc-templates` and the tenant pools.
+
+**Why:** `onboot` was written on a node template only at its import, so a site upgraded from 0.8.x kept templates
+and workers without it, and its tenant workers stayed stopped after a node reboot (lab round 2 of v0.9.0-rc.1,
+finding G2F-1).
+
+**Diagrams:** none changed. `c3-components.md`: the Sync job row names `startAtBoot`.
+
+**Not verified:** on a lab.
+
 ## 2026-11-19: the platform BOM pins cluster chart 0.1.14 and platform chart 0.1.3
 
 **What changed:** no component, container or relation. `deploy/platform/platform-bom.yaml` names

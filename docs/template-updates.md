@@ -231,7 +231,8 @@ succeeded | failed`.
   (`images/build.py`, `pve.ImportImage`; no NIC, cloud-init drive on the disk storage: on `ide2` for an
   OS image, on `ide0` for a Kubernetes node image, see below; a Kubernetes node image also gets
   `onboot: 1`, which every clone copies, so workers and platform machines made from it start again
-  with their Proxmox node: [managed-services.md](managed-services.md#after-a-proxmox-node-reboots)), named
+  with their Proxmox node; a node image imported before v0.9.0 gets it at the next provider sync:
+  [managed-services.md](managed-services.md#after-a-proxmox-node-reboots)), named
   `pc-ghcr-<os>-<os|k8s-x-y-z>-<build>` (never `pc-<os>-…`, which `build.py` would treat as its own
   failed build) and tagged **staged**: `proxcloud;pc-src-<12hex>;pc-tu-import;pc-tu-staged`
   (+ `pc-tu-k8s;pc-k8sver-<x-y-z>` for a Kubernetes node image). No job ownership tag and **no catalog

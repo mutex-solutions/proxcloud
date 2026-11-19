@@ -299,3 +299,47 @@ func TestWorkerNames(t *testing.T) {
 		t.Fatal("a worker is a VM with a pc-k8s-<cluster> tag")
 	}
 }
+
+// The sync sets onboot on a running worker of a cluster the portal has, once. A stopped worker (CAPMOX still writes
+// it), a worker that has it, a server, and a VM that carries a worker tag in a pool or for a cluster that is not the
+// portal's are not written.
+func TestStartWorkersAtBoot(t *testing.T) {
+	ctx := context.Background()
+	fake, s := newSandboxFake(t)
+	tag := "proxcloud;pc-flavor-s2-medium;" + WorkerTagPrefix + "c1"
+	lacks := fake.addVM(201, "c1-default-pve1-abc", "pc-p1")
+	lacks.tags = tag
+	has := fake.addVM(202, "c1-default-pve1-def", "pc-p1")
+	has.tags, has.cfg["onboot"] = tag, 1
+	stopped := fake.addVM(203, "c1-default-pve1-ghi", "pc-p1")
+	stopped.tags, stopped.status = tag, "stopped"
+	fake.addVM(204, "web", "pc-p1").tags = "proxcloud"
+	fake.addVM(205, "c1-default-pve1-xyz", "pc-p2").tags = tag                              // another project's pool
+	fake.addVM(206, "c9-default-pve1-xyz", "pc-p1").tags = WorkerTagPrefix + "c9"           // a cluster the project does not have
+	fake.addVM(207, "c1-default-pve1-own", "site").tags = tag                               // not a pool of this provider's projects
+	fake.addVM(208, "pc-ghcr-ubuntu-2604-k8s", TemplatePool).tags = "pc-k8s;pc-k8s-1-35-10" // a node image: its tags read like a worker's
+	asked := 0
+	owns := func(_ context.Context, projectID, clusterID string) (bool, error) {
+		asked++
+		return projectID == "p1" && clusterID == "c1", nil
+	}
+	for pass := 1; pass <= 2; pass++ {
+		fake.writes = nil
+		if err := s.StartWorkersAtBoot(ctx, owns); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"POST /nodes/pve1/qemu/201/config"}
+		if pass == 2 {
+			want = nil
+		}
+		if !slices.Equal(fake.writes, want) {
+			t.Fatalf("pass %d wrote %v, want %v", pass, fake.writes, want)
+		}
+	}
+	if lacks.cfg.Int("onboot") != 1 || stopped.cfg.Int("onboot") != 0 {
+		t.Fatalf("onboot: running %v, stopped %v", lacks.cfg["onboot"], stopped.cfg["onboot"])
+	}
+	if asked != 2*4 { // p1/c1, p2/c1, p1/c9 and the template pool's version tag: once per pass, not once per VM
+		t.Fatalf("owns asked %d times", asked)
+	}
+}

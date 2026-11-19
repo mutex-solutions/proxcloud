@@ -1019,6 +1019,14 @@ func run() error {
 		return fmt.Errorf("template update sandbox store: %w", err)
 	}
 	adminH.SetTemplateUpdates(tuSvc)
+	// ponytail: reads the newest 500 receipts at each sync; a query by provider and variant when a site has more.
+	syncJob.WithNodeTemplates(func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error {
+		recs, err := tuSvc.Receipts.Recent(ctx, 500)
+		if err != nil {
+			return err
+		}
+		return templateupdates.StartNodeTemplatesAtBoot(ctx, ps.C, recs, es.ID)
+	})
 	adminH.SetJobsScheduler(cfg.Jobs.SchedulerEnabled) // before the platform runner starts: its preflight reads it
 	// The managed-services platform (docs/adr/0009): its installation routes only with PROXCLOUD_PLATFORM_ENABLED=true;
 	// its runner (applies and removes) only with PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED
