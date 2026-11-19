@@ -624,12 +624,14 @@ provider (`internal/platformlife`, collection `platformInstallation`, one per
 are several, `errors.details.problems`.
 
 - `GET|POST /installations`: list; create `{name, serviceId, provisionedBy?,
-  layout?, preset?, spec}` in phase `draft`. `preset` (`homelab`, `standard` or `custom`; also on the PUT) fills what
+  layout?, preset?, spec}` in phase `draft`. `preset` (`homelab`, `standard` or `custom`; also on the PUT of an
+  installation that is not installed yet) fills what
   `spec` leaves out before the checks and is not stored: sizes, counts, the three node groups, the control plane's
   node (the seed's) and its count (`standard`: 3 where the installation's release builds three, else 1), and for
   `homelab` with every machine of the spec on one node and no bridge named a `routed` network on the vnet
   `pcplat0` ([the table](managed-services.md#presets-and-the-control-plane-count)). An unknown preset is a
-  `400 invalid_installation`. `spec` has `pveApiUrl`, `storage {boot,
+  `400 invalid_installation`. On an installed platform a preset other than `custom` is a `409 fixed_fields`
+  (below). `spec` has `pveApiUrl`, `storage {boot,
   iso, import}` (import defaults to the provider's `importStorage`), `network
   {mode, bridge, vlan, prefix, gateway, dns[], mtu}` (`mode`: `bridge`, also what a spec without it means, or
   `routed`, where `bridge` names a vnet the install makes and every machine is on one node; `vlan`: 1 to 4094, mode
@@ -662,7 +664,12 @@ are several, `errors.details.problems`.
   always; once a run succeeded also `provisionedBy` (but a stored `installer`
   may become `portal`), `layout`, `name`,
   `spec.network`, the seed's mode, pool, node and address, and the cluster's
-  name, endpoint and node groups. A control plane count below the one a run built (`status.clusters[].controlPlaneReplicas`,
+  name, endpoint, `controlPlane.node` and node groups (their names: a group's `nodes`, count and size can change).
+  Once a run succeeded a `preset` other than `custom` is the same `409 fixed_fields` (`problems`: `preset`), with
+  every spec, and nothing is stored: a preset fills a draft. On such a platform a spec that leaves out
+  `clusters`, a cluster's `controlPlane` or its `nodeGroups` keeps the stored ones (missing means keep, never
+  a default); a `controlPlane` or a group that is sent is taken as sent and checked whole.
+  A control plane count below the one a run built (`status.clusters[].controlPlaneReplicas`,
   written by stage 7 before it hands a count above one to the cluster; absent means one) is the same
   `409 fixed_fields`, with the reason as its message: 3 to 1. From 1 to 3 is saved, and a 3 no run built goes back to
   1. A count above one on an installation whose BOM names a cluster chart older than 0.1.14 is a
@@ -700,10 +707,13 @@ are several, `errors.details.problems`.
   `token-scope`, `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement`, `boot-store`,
   `pve-api-rule` and `images`. `boot-store` fails when Proxmox has no storage of
   the boot store's name or it takes no disk images, and warns when the store also
-  holds disks of VMs that are not the platform's (listed with the CSI token, once both tokens are stored).
+  holds disks of VMs that are not the platform's (listed with the CSI token, once both tokens are stored; of the
+  pool `pc-templates` only the templates are left out, a VM of that pool that is no template is listed).
   `pve-api-rule` never fails: `ok` before the first install and when the cluster
   firewall holds the installation's rule (comment `proxcloud:pve-api:<id>`), `warn`
-  when an installed platform's rule is missing. A row's `status` is `ok`, `fail` or `warn`; `ok` in the answer is
+  when an installed platform's rule is missing. It reads the rule, not the traffic: the rule's sources are the
+  platform machines' addresses as the node sees them, and the message says that a site whose router translates
+  them needs a rule for the translated address. A row's `status` is `ok`, `fail` or `warn`; `ok` in the answer is
   false only when a row failed. `csi-vmid` never fails: it warns when a guest has VM id 9999
   (see the connection test's row of that id). `tenant-network` never fails. It reads the provider's default
   zone in Proxmox: `warn` when that zone has DHCP, when it does not exist yet and is
@@ -722,7 +732,8 @@ are several, `errors.details.problems`.
   the nodes it translates tenant traffic on, the nodes of the platform machines, and whether such a node holds the
   platform gateway on the platform bridge) and is `warn` when a node that translates also hosts a platform machine
   without routing the platform network, or when Proxmox could not be read; `ok` for mode `routed`. It opens no
-  connection, so `ok` does not prove that tenants reach the platform; `…/tenant-path-probe` below does ([managed-services.md](managed-services.md#the-path-from-tenants-to-the-platform)).
+  connection, so `ok` does not prove that tenants reach the platform; `…/tenant-path-probe` below does, and for a VLAN default
+  zone, where that probe is refused, the row names the check from a tenant's server ([managed-services.md](managed-services.md#the-path-from-tenants-to-the-platform)).
   `machines` never fails either, and is absent while the installation has no VM. It reads, with the CAPI
   token, the VMs of the pools `proxcloud-seed` and `proxcloud-system` that carry the installation's tag:
   `warn` with one line per VM that is stopped (start it in Proxmox, `qm start <vmid>`) or that has no
@@ -753,16 +764,24 @@ are several, `errors.details.problems`.
   probe in state `running`; `GET` on the same path (`admin:service:read`) answers the installation's last probe
   (`404 no_probe` before the first). The one check that writes to Proxmox, so it is audited like every installation
   write and never part of the preflight: a throwaway network in the provider's default tenant zone (a free /28 from
-  the end of `cidrPool`, with SNAT), a throwaway VM `pc-probe-<id>` cloned from a published Ubuntu or Debian template
-  on `node` (default: the control plane's node; it must host a platform machine) into `pc-templates`, TCP connections
+  the end of `cidrPool`, with SNAT), a throwaway VM `pc-probe-<id>` cloned from an Ubuntu or Debian image
+  on `node` (default: the control plane's node; it must host a platform machine) into `pc-templates`, with a fixed
+  address in every zone. The image is resolved in the provider's catalog as a tenant's server create resolves one, and
+  only one of this portal's own is taken: a template that Template updates imported for this provider (a finished import whose
+  template at that node and VM id still has the import's name and source digest), or one that
+  `config.templates` names with its VM id; the clone's disk goes to the store of the provider's default storage
+  profile on that node. TCP connections
   through the guest agent, then both removed, on every path, with an 8 minute limit. A probe still `running` 12 minutes
   after its start was cut off by an API restart: `GET` answers it as `error` with what it may have left, and a new
   start is taken. Refused with `409` and a code
   before anything is created: `not_installed`, `no_tenant_zone`, `vlan_zone` (the default zone is a VLAN zone: no node translates there),
   `invalid_node`, `probe_running`, `run_active`,
-  `no_os_template` (none on that node), `no_target` (from the ProxCloud host nothing answers on port 6443 or 5432 of
-  the first 32 addresses of the load balancer range; when a 6443 answers, 5432 listeners are not targets). The probe: `{id, state, node, template, requestedBy,
-  startedAt, finishedAt, step, vmid, vnet, source, targets[], message, left[]}`. `state` is `running`, `passed`
+  `no_os_template` (no such image on that node; the message names the published templates that are not this portal's), `no_target` (from the ProxCloud host nothing answers on port 6443 or 5432 of
+  the first 32 addresses of the load balancer range; when a 6443 answers, 5432 listeners are not targets). The probe: `{id, state, node, image, template, storage, requestedBy,
+  startedAt, finishedAt, step, vmid, vnet, source, targets[], message, left[], notes[]}`. `image` is the catalog
+  image the VM is cloned from, `template` its template on `node`, `storage` the store the clone's disk goes to
+  (absent: the template's own); the `202` answer carries them already. `notes[]` is what Proxmox may keep by itself
+  and the cleanup cannot remove: the DHCP mapping of the test VM's NIC in a zone with a DHCP server. `state` is `running`, `passed`
   (every target opened or was refused, and the platform's own API address did not answer), `failed` (a target the
   host opens gave no answer from the tenant network, or the platform's API address answered) or `error` (the test
   could not be done: nothing is known). `targets[]` are `{address, port, expect: open|closed, result:

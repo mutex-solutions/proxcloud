@@ -437,7 +437,7 @@ func TestPreflightBootStoreAndAPIRule(t *testing.T) {
 	}
 	tags := `"tags":"pc-platform-` + in.ID + `"`
 	f := &preflightPVE{seed: 106, machines: map[int][2]string{106: {`{"name":"seed","onboot":1,` + tags + `}`, "running"}}, extra: map[string]string{
-		"/pools/" + pve.TemplatePool: `{"members":[{"id":"qemu/9100","type":"qemu","vmid":9100,"node":"pve1"}]}`,
+		"/pools/" + pve.TemplatePool: `{"members":[{"id":"qemu/9100","type":"qemu","vmid":9100,"node":"pve1","template":1},{"id":"qemu/110","type":"qemu","vmid":110,"node":"pve1"}]}`,
 		"/nodes/pve1/storage/local-lvm/content": `[{"volid":"local-lvm:vm-106-disk-0","vmid":106},{"volid":"local-lvm:base-9100-disk-0","vmid":9100},
 			{"volid":"local-lvm:vm-9999-pvc-1f","vmid":9999}]`,
 	}}
@@ -457,6 +457,12 @@ func TestPreflightBootStoreAndAPIRule(t *testing.T) {
 	if c := row("boot-store"); c.Status != CheckWarn || !strings.Contains(c.Message, "2 other VMs (VM 101, 300)") || !strings.Contains(c.Message, "Datastore.Allocate") ||
 		!strings.Contains(c.Message, "pvesm add zfspool") {
 		t.Errorf("foreign disks: %+v", c)
+	}
+	// A VM in the template pool that is no template (a clone that kept its template's pool, a VM put there by hand) is
+	// another VM's disk like any other; the pool's templates are not (lab round of 2026-11-19, P2).
+	f.extra["/nodes/pve1/storage/local-lvm/content"] = `[{"volid":"local-lvm:base-9100-disk-0","vmid":9100},{"volid":"local-lvm:vm-110-disk-0","vmid":110}]`
+	if c := row("boot-store"); c.Status != CheckWarn || !strings.Contains(c.Message, "1 other VMs (VM 110)") {
+		t.Errorf("a VM in the template pool that is no template: %+v", c)
 	}
 	f.extra["/nodes/pve1/storage/local-lvm/content"] = "!"
 	if c := row("boot-store"); c.Status != CheckWarn || !strings.Contains(c.Message, "could not be listed") {
@@ -492,7 +498,8 @@ func TestPreflightBootStoreAndAPIRule(t *testing.T) {
 	b, _ := json.Marshal([]pve.FirewallRule{pve.APIAccessRule(in.ID, src, dest, port)})
 	f.extra["/cluster/firewall/rules"] = string(b)
 	f.extra["/cluster/firewall/options"] = `{"enable":0}`
-	if c := row("pve-api-rule"); c.Status != CheckOK || !strings.Contains(c.Message, "lets the seed and the node range reach") || !strings.Contains(c.Message, "datacenter firewall is off") {
+	if c := row("pve-api-rule"); c.Status != CheckOK || !strings.Contains(c.Message, "lets the seed and the node range reach") || !strings.Contains(c.Message, "datacenter firewall is off") ||
+		!strings.Contains(c.Message, "as the node sees them") || !strings.Contains(c.Message, "translates that traffic") {
 		t.Errorf("rule present: %+v", c)
 	}
 	if len(f.writes) != 0 {

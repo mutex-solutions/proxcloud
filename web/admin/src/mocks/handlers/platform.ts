@@ -498,7 +498,7 @@ on("POST /admin/platform/installations/:id/tenant-path-probe", ({ params, opts }
   if (!in_.status.bom) throw fail(409, "not_installed", "The platform is not installed yet, so nothing listens on the platform network and the path cannot be tested. Install first; until then the Check row tenant-path reads the layout.")
   const c = in_.spec.clusters[0]
   const lb = String(c.metallbRange).split("-")[0]
-  const probe = { id: in_.id, state: "running", node: b.node || c.controlPlane.node, template: 9200, startedAt: now(), step: "cloning the test VM", reads: 0,
+  const probe = { id: in_.id, state: "running", node: b.node || c.controlPlane.node, image: "ubuntu-2604", template: 9200, startedAt: now(), step: "cloning the test VM", reads: 0,
     targets: [{ address: lb, port: 6443, expect: "open" }, { address: c.endpoint, port: 6443, expect: "closed" }], message: "The test is running." }
   mockPlatform.probes[in_.id] = probe
   return { data: { ...probe } }
