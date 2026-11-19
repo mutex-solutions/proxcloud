@@ -4,6 +4,33 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-20: an upgrade run replaces the seed's k3s in place (stage seed-k3s)
+
+**What changed:** component "Platform runs": an apply has one more stage, `seed-k3s`, between `seed-identity` and
+`seed-platform` (`internal/platformlife/seedk3s.go`). On every run it reads the seed's node and records its k3s
+version; on an upgrade run whose BOM names a newer k3s it creates one privileged Job on the seed that saves an etcd
+snapshot, downloads the BOM's k3s binary, checks its sha256, swaps the binary and restarts k3s, then waits until the
+node reports the new version and deletes the Job. The download and checksum lines are shared with the seed's first
+boot (`k3sFetch`, used by `SeedUserData` and `SeedK3sJob`). Component "Platform installations": the classifier
+(`Classify`) allows a `seed.k3s` change that is a patch, a k3s build or one minor up (class `seed`, plus three
+`site` rows for what the stage writes on the seed) and refuses the rest; the preflight has a row `seed-backup`
+(`SeedBackupCheck`: `vzdump` archives of the seed VM on the stores of its node, read with the portal token); the plan
+and `StartRun` refuse such an upgrade with `seed_backup_missing` unless the row is ok or the request carries
+`seedBackupTaken`. The Proxmox read is in the route (`admin/platform.go`), not in the store's transaction. Charts:
+`proxmox-kamaji-cluster` 0.1.15 reads `nodeGroups[].kubernetesVersions` and `deleteFirstOn` (MachineDeployment
+only), `database-cluster` 0.5.2 sets `enablePDB: false` on a CloudNativePG Cluster of one instance; neither is
+tagged or pinned by the BOM.
+
+**Why:** a platform could not follow a release whose BOM names a newer k3s: the pin was refused, and the seed is never
+rebuilt. The portal has no shell on the seed, only its API, so the change is made by a Job there; it reuses the
+clusterctl image the BOM already pins and the seed already holds, so no new image, download source or BOM field is
+needed. The backup is asked for because the seed holds the Cluster API state of every platform machine and nothing in
+the product restores it. The two chart changes are what the machine roll of the next change needs; they ship first
+because a chart is tagged and pinned only after its change is merged.
+
+**Diagrams:** none changed: no container, relation or boundary moved. `c3-components.md`: the Platform runs row names
+the stage and its file.
+
 ## 2026-11-19: templates and VMs get a graphical display; the serial port stays
 
 **What changed:** components "Template updates" and "PVE client": a new template is made with `vga: std` instead of

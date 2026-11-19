@@ -1252,6 +1252,7 @@ One run per installation at a time. The page reads the run every 3 seconds.
 | 3 | Create the seed VM (`seed-vm`) | Takes a free VMID, clones the seed template into `proxcloud-seed` with the CAPI token, sets size and network (the template has no network device: Proxmox gives the new one its MAC address, and the CD's network config names that address), generates the seed's k3s server CA and tokens, uploads a NoCloud CD (`pcplat-<id>-…`) to the ISO store, puts it in place of the template's cloud-init drive and protects the VM, turns on the VM firewall (policy DROP; 6443, and 22 when SSH keys are set, from the API sources only) and starts the VM. | 30 min |
 | 4 | Reach the seed (`seed-api`) | Waits until `https://<seed address>:6443/readyz` answers with a certificate of the CA made in stage 3. While it does not, the stage says whether the guest agent answers (`seed_not_booted`) or only the API does not (`seed_api_unreachable`). | 20 min |
 | 5 | Secure the seed (`seed-identity`) | Reads the token of the service account `proxcloud-system/proxcloud-portal` with a bootstrap token, checks that it is cluster-admin, stores it encrypted, deletes the bootstrap token and its RBAC, then ejects the CD (the drive stays, empty: Proxmox removes no drive from a protected VM) and deletes it. The seed counts as ready from the moment its credential is stored; the stage is done only when the running seed's config no longer names the CD (an eject Proxmox took but left pending does not count, and the CD's file is kept until then) and no store lists it. | 10 min |
+| 5a | Upgrade the seed's k3s (`seed-k3s`) | Reads the seed's node and records the k3s it runs (`status.seed.k3sVersion`). Skipped on every run but an upgrade whose BOM names a newer k3s: then a privileged Job on the seed replaces the k3s binary and restarts k3s ([Upgrade between BOMs](#the-seeds-k3s)). It is 5a so that stages 6 to 11 keep the numbers this guide, the codes and the messages use. | 20 min |
 | 6 | Install the seed's components (`seed-platform`) | ArgoCD as a k3s HelmChart, the AppProject `proxcloud-platform` (BOM chart repositories only; the `default` project locked), then `cert-manager` and `capi` wave by wave. An Application counts when it is Synced and Healthy, compared against the chart version and values it has now, and its last sync operation ended `Succeeded`: ArgoCD shows Synced and Healthy from the resources alone while a hook of the sync still runs or fails. `capi` is done when, besides, the clusterctl inventory equals the BOM. The item of an Application names the resources and hooks its sync failed on, with their messages, and the stage's message repeats the first. Once an Application counts, its item has its state and no text: what ArgoCD still shows of an earlier attempt is left out. | 30 min |
 | 7 | Build the platform cluster (`cluster`) | The CAPI token's Secret and the Application `pc-platform` on the seed; MachineDeployments of nodes no longer in a group are deleted; then waits for the control plane, the admin kubeconfig and every Machine Running. Before it writes anything it reads each node template: a template with a Proxmox cloud-init drive on another slot than `ide0` is refused (`machine_failed`, with the `qm set` command that removes the drive), because CAPMOX puts its own on `ide0` and a machine with both starts from the wrong one. A template without the drive stays usable everywhere: CAPMOX brings its own, and the template-updates smoke test gives its test VM one when the template has none, so such a template can still be tested and published for tenants. A template whose config the portal token may not read is not checked: the stage goes on and shows an item `template-<vmid>` in state `not checked`. A template that passed has the same item in state `ok`; one that Proxmox no longer knows has none (CAPMOX reports it on the machine). The items list each machine with its VMID (`no VM` until CAPMOX has cloned it) and, while it is not Running, the step CAPMOX is at with its error (the reason and message of the ProxmoxMachine's condition `VirtualMachineProvisioned`). CAPMOX calls a VM provisioned once it runs and has its addresses; for a machine that then does not join (kubeadm, the API address, etcd) the item carries the reason and message of the Machine's own condition `Ready` after `Cluster API:`. The message of the waiting stage repeats, in this order, what the ProxmoxCluster reports, the KubeadmControlPlane's condition `Available` while it is not `True` (`Control plane:`), the machines' errors and, last, the state of the Application `pc-platform` while its sync is not done (not while it is only Progressing, which it is for as long as machines are built). On a **Retry** that finds a ProxmoxCluster still without a condition, the run updates an annotation on it (`proxcloud.io/retried-by`) once, so CAPMOX opens the Proxmox API again at once instead of at the end of its backoff of up to 17 minutes; the 10 minutes count from then. Steps CAPMOX tries again (`CloningFailed`, `PoweringOnFailed`) are waited for. `VMProvisionFailed` and `TaskFailed` end the stage: CAPMOX does not go on with such a machine. Once every machine is Running the stage sets `onboot` on each VM of the platform that lacks it, with the CAPI token, so that the machines start again with their node ([After a Proxmox node reboots](#after-a-proxmox-node-reboots)); a VM it could not set does not fail the stage, and the Check's `machines` row names it. | 60 min |
 | 8 | Reach the platform cluster (`workload-access`) | Creates the seed ArgoCD's service account on the cluster and a token for it (one year, renewed by any later apply when under 90 days are left), kept only in the seed's cluster Secret; writes the CSI token's Secret for proxmox-csi. | 10 min |
@@ -1259,8 +1260,8 @@ One run per installation at a time. The page reads the run every 3 seconds.
 | 10 | Create the two providers (`register`) | Creates the Kubernetes and Databases providers, or updates the ones this installation created before, with a kubeconfig of the cluster's `proxcloud-system/proxcloud` service account. Offers the BOM's Kubernetes version when its node image is published on the platform's nodes, and applies a changed `spec.tenants.attach` ([what a tenant can use](#what-a-tenant-can-use-after-the-install)). | 5 min |
 | 11 | Finish (`done`) | Records the components and the BOM as installed. The phase becomes `ready`. | 5 min |
 
-An upgrade (an apply that moves the platform to this release's BOM) is the same eleven stages with the
-target BOM, two more waits and one more check: [Upgrade between BOMs](#upgrade-between-boms).
+An upgrade (an apply that moves the platform to this release's BOM) is the same stages with the
+target BOM, two more waits and one more check, and stage 5a when the BOM names a newer k3s: [Upgrade between BOMs](#upgrade-between-boms).
 
 A Remove has three stages: Delete the platform cluster (`remove-cluster`, 45 min), Delete the seed
 (`remove-seed`, 30 min), Forget the stored secrets (`remove-secrets`, 5 min).
@@ -1345,6 +1346,10 @@ stage is still trying.
 | `seed_tls_mismatch` | 4 | The server on the seed address presents a certificate of another CA | Another machine holds that address. Correct the seed address, **Retry** |
 | `seed_identity_lost` | 4, 5, later | The run holds no credential for the seed; the seed refused the bootstrap token at five looks on end (it expires 3 hours after the seed was built); the seed did not report the service account as cluster-admin to the end of stage 5's time limit | **Retry**. It builds the seed again when it never became ready |
 | `seed_cd_not_deleted` | 5, Remove | The CD could not be ejected or deleted, or Proxmox still lists it; or Proxmox took the eject but left it pending on the running seed (the message says so) | The CAPI token cannot delete on the ISO store: run the script again, **Retry**. For a pending eject: `qm pending <vmid>` on the seed's node shows it; stopping and starting the seed VM applies it, then **Retry** |
+| `seed_backup_missing` | start, plan | An apply would start an upgrade that replaces the seed's k3s, and the portal sees no `vzdump` archive of the seed VM younger than 24 hours on a store of the seed's node it can read (row `seed-backup` of the check). `409`, no run was made | Take a backup of the seed VM, or, if you took one on a store the portal token cannot read, tick "I took a backup of seed VM … that the portal cannot see" in step 4 (`seedBackupTaken` by API), then start the upgrade again |
+| `seed_k3s_failed` | 5a | An upgrade run only. The Job that replaces k3s failed: the etcd snapshot, the download (the seed must reach the BOM's k3s URL, as at its first boot), the sha256 check or a later line. Its script stops at the first failure, so a failure before the last two lines leaves k3s as it was. The message ends with the Job's last output; the Job is deleted | Correct what the message names (most often the seed's way out to the download address), **Retry**: it makes a new Job |
+| `seed_k3s_refused` | 5a | An upgrade run only. The seed's node reports a k3s that is newer than the BOM's or more than one minor older: the record and the site disagree. Nothing was changed | The message names both versions. A seed that was changed by hand is not moved by a run |
+| `seed_k3s_timeout` | 5a | An upgrade run only. The stage did not end in 20 minutes: the Job did not start or end, the node did not report the new version, or the seed's API did not come back after the restart. The platform cluster and every tenant keep serving; nothing is reconciled while the seed's API is away | If the seed's API answers: **Retry**. If it does not and `/usr/local/bin/k3s.prev` exists on the seed, put the previous binary back over SSH with a key of `spec.seed.sshKeys`: `mv /usr/local/bin/k3s.prev /usr/local/bin/k3s && systemctl restart k3s`, then **Retry**. This step was not tried on a lab |
 | `seed_lost` | 3, Remove | A seed that had become ready is gone, or the VM at its VMID is no longer this installation's. It is not rebuilt: a new, empty seed would have no record of the cluster's machines | Remove with the option for a missing seed, then install again ([Remove](#remove)) |
 | `component_unhealthy` | 6 to 9 | An Application is not Synced and Healthy in time (the message names it and its condition); or something could not be rendered or applied, in stage 7 the Application `pc-platform` | Download the seed kubeconfig to look closer, then **Retry**. ArgoCD does not sync an Application again by itself once its retries are spent; the run starts the sync of one whose last sync ended `Failed` or `Error`, once per run, so no manual sync is needed after the cause is fixed. When that sync ends `Failed` or `Error` too, the stage fails at once with what the sync failed on (the hook or resource and its message) instead of waiting for its time limit; **Retry** starts the sync once more. ArgoCD takes about 40 minutes to spend the ten retries of one sync, longer than the time limit of stage 6 or of a wave, so the stage does not wait for that either: once one sync has failed four times (about 8 minutes of ArgoCD's backoff), the last time in this run, and ArgoCD shows the hook or resource it failed on, the stage fails with that text while ArgoCD still tries. After a **Retry** the same sync gets one more attempt before the stage fails on it again |
 | `capi_init_failed` | 6, 9 | clusterctl did not install the providers of the BOM; or a provider is installed at another version than the BOM names (provider upgrades are not in this release) | The same |
@@ -1998,10 +2003,15 @@ lists every difference. The upgrade is allowed when every difference is one of t
 | seed `capi`, platform cluster `capi-tenant` (chart `proxcloud-platform`) | chart | The Application moves to the new chart version. ArgoCD syncs, and runs the clusterctl hook again, only when the new chart renders an object differently; the hook then finds every provider at its version and changes nothing |
 | platform cluster `platform` (chart `proxcloud-platform`) | chart | The Application moves to the new chart version. ArgoCD syncs what the new chart renders differently of provider RBAC, tenant AppProjects and the MetalLB pool |
 | seed `pc-platform` (chart `proxmox-kamaji-cluster`) | chart | The Application moves to the new chart version. ArgoCD syncs the Cluster API objects of the platform cluster that the new chart renders differently, after the check that no machine is replaced (below) |
+| `seed.k3s`, to a version that is newer by a patch, by a k3s build (`+k3s2` after `+k3s1`) or by exactly one minor | seed | Stage 5a replaces the k3s binary on the running seed VM and restarts k3s ([The seed's k3s](#the-seeds-k3s)). With it the plan lists three rows of kind `site`, what the stage writes on the seed: the Job, the etcd snapshot and the binary |
 
 One more row can be in the plan that is not a difference of the two BOMs: `pve-api-rule`, kind
 `site`, when the cluster firewall does not hold the rule for the Proxmox API
 ([step 4](#step-4-review-and-install)). It never refuses an upgrade.
+
+No BOM of a release names another k3s than `v1.35.10+k3s1` yet, so no upgrade between released
+BOMs has the `seed.k3s` row: the first one arrives with a later release's BOM. The row and its
+stage have run in tests only, against a fake seed.
 
 "Moves" means that the Application's target is the new chart version and ArgoCD has compared the
 cluster with it. ArgoCD starts a sync only for an Application that is out of sync, and a hook is
@@ -2037,7 +2047,9 @@ Every other difference refuses the whole upgrade, each with its own line in the 
 | `kubernetes.version` | Every machine of the platform cluster is replaced: the Kubernetes upgrade of a later release |
 | `kubernetes.nodeImage` | A new node image replaces every machine |
 | `seed.image` | Only a rebuilt seed would boot it, and a ready seed is never rebuilt |
-| `seed.k3s` (version or a checksum) | No stage upgrades k3s on a running seed |
+| `seed.k3s` to an older version | "k3s never goes back" |
+| `seed.k3s` more than one minor ahead | "one minor at a time: go through 1.<n+1> first" |
+| `seed.k3s` at the same version with another sha256 or URL | A published k3s version does not change |
 | `images.kubeVip` | It is in the control plane's machine spec: the control plane machine would be replaced |
 | `images.clusterctl`, `capi.seed.*`, `capi.workload.*` | The Cluster API providers are upgraded (`clusterctl upgrade`) only by a later release |
 | A third-party chart: `argocd`, `cert-manager`, `cilium`, `metallb`, `cnpg`, `proxmox-csi`, `kamaji-crds`, `kamaji`, `kamaji-etcd` | Not in this release. Each restarts something tenants use (the CNI, the load balancer speaker, every database's operator, every tenant control plane's datastore), and none of those restarts has been measured |
@@ -2049,11 +2061,68 @@ So a release that changes a machine or bootstrap template (a NIC option on the m
 a kubelet argument) reaches new installs only, and an installed platform stays on its BOM until a
 release rolls machines. The release notes of such a release must say so.
 
+### The seed's k3s
+
+An upgrade whose BOM names a newer k3s replaces it in place, in stage 5a, on the seed VM that
+runs. The seed is not rebuilt and its disk is not touched.
+
+**What is away.** The seed's API, for about a minute while k3s restarts (not measured on a lab).
+What stops meanwhile is reconciliation only: Cluster API replaces or repairs no machine, the
+seed's ArgoCD syncs none of the platform's own components, and no platform run goes on. The
+platform cluster, every tenant cluster, the tenant API servers and the databases keep serving:
+they do not need the seed to run ([When the seed does not answer](#when-the-seed-does-not-answer)).
+ArgoCD and Cluster API on the seed keep their state, which is in the seed's etcd on its disk; the
+pods on the seed keep running through a k3s restart (k3s's own documentation). k3s rewrites the
+add-ons it bundles (CoreDNS, metrics-server) at a version change; traefik, servicelb and
+local-storage are disabled on the seed.
+
+**What the stage does.** ProxCloud has no shell on the seed, so the stage makes one Job there,
+`proxcloud-system/k3s-upgrade-<version>`, privileged and in the host's namespaces, with the BOM's
+own clusterctl image (already on the seed; no other image or download source is added). The Job
+runs these lines on the host and stops at the first one that fails:
+
+```
+k3s etcd-snapshot save --name pre-upgrade-<old version>
+curl -fsSL --retry 5 -o /usr/local/bin/k3s.new <the BOM's k3s binary URL>
+printf '%s  %s\n' <the BOM's sha256> /usr/local/bin/k3s.new | sha256sum -c -
+chmod 0755 /usr/local/bin/k3s.new
+cp -p /usr/local/bin/k3s /usr/local/bin/k3s.prev
+mv -f /usr/local/bin/k3s.new /usr/local/bin/k3s
+systemctl restart k3s
+```
+
+The download, checksum and mode lines are the ones of the seed's first boot. The install script is
+**not** run again: the systemd unit and `/etc/rancher/k3s/config.yaml` stay as installed, which is
+k3s's documented manual upgrade (the binary and a restart). A snapshot, download or checksum that
+fails ends the Job before the binary is touched (`seed_k3s_failed`). The stage is done when the
+Job has ended, the seed's node reports the new version and is Ready; it then records the version
+and deletes the Job. Stage 6 follows unchanged and is the check that ArgoCD and Cluster API kept
+their state: ArgoCD's repo server available, every Application Synced and Healthy, the clusterctl
+inventory equal to the BOM.
+
+**What stays on the seed.** The etcd snapshot under `/var/lib/rancher/k3s/server/db/snapshots`
+(k3s's own retention applies) and the previous binary as `/usr/local/bin/k3s.prev`. The plan lists
+both, and the Job, before the run starts.
+
+**No way back in the product.** Nothing restores the snapshot or puts the old binary back. If the
+seed's API does not come back, the failure code `seed_k3s_timeout` names the command that does the
+second by hand; it has not been tried on a lab.
+
+**The seed backup.** Such an upgrade starts only with a backup of the seed VM. The check's row
+`seed-backup` (step 3) is `ok` when a store of the seed's node holds a `vzdump` archive of the seed
+VM younger than 24 hours, and names its time and store. It reads with the portal token: a store
+that token cannot read (a Proxmox Backup Server it has no row on, a store of another node) counts
+as "none seen", and the row says which stores it could not read. Without an `ok` row, step 4 shows
+the reason `seed_backup_missing` and a box, "I took a backup of seed VM … that the portal cannot
+see"; ticking it lets the upgrade start, and the run and the audit log record that it was ticked.
+The row is a warning, never a failure: a plain apply does not need the backup.
+
 ### Before you start
 
 - Take a backup of the seed VM (`vzdump`, [Credentials and the seed backup](#8-credentials-and-the-seed-backup))
   and a dump of the portal database. The seed holds the Cluster API state of every machine of the
-  platform cluster. Restoring both after a failed upgrade has not been tried.
+  platform cluster. Restoring both after a failed upgrade has not been tried. An upgrade that
+  replaces the seed's k3s asks for the seed backup before it starts ([The seed's k3s](#the-seeds-k3s)).
 - Do not change machine sizes, nodes or node groups in the same step: apply such a change before
   the upgrade or after it. Together with the upgrade it is refused in stage 7 (`unexpected_rollout`).
 - Every tenant cluster and database keeps running. Tenants that are unhealthy before the upgrade
@@ -2064,13 +2133,16 @@ release rolls machines. The release notes of such a release must say so.
 Step 4 shows **Upgrade to release X** with the table of changes when the upgrade is allowed, and
 the reasons when it is not. The button asks for the phrase `upgrade <installation name> to
 <release>`. By API: `POST …/runs {"kind":"apply","targetBom":"<sha256 of this release's BOM>",
-"confirm":"upgrade <name> to <release>"}` ([api.md](api.md)).
+"confirm":"upgrade <name> to <release>"}` ([api.md](api.md)), with `"seedBackupTaken":true` for
+the ticked seed backup box.
 
 ### What the run does
 
-The eleven stages of an apply, rendered from the target BOM:
+The stages of an apply, rendered from the target BOM:
 
 - **Stages 1 to 5** find the images and the seed as they are: both BOMs name the same images.
+- **Stage 5a** replaces the seed's k3s when the target BOM names a newer one
+  ([The seed's k3s](#the-seeds-k3s)); otherwise it only records the version the seed runs.
 - **Stage 6** applies the seed's ArgoCD HelmChart again (the same chart version, the new release
   label), then the seed's waves. `capi` at its new version passes when ArgoCD reports it Synced and
   Healthy against the new version, with the sync it started for it (if the render differs)
@@ -2169,6 +2241,9 @@ drill build must carry the BOM of the build before it
 | U4 Failure and Retry: a drill build with a wrong chart digest for `platform`, so workload wave 3 fails; then the corrected build | No Application goes back to the old revision; with the corrected build step 4 shows **Upgrade to release Z instead**, and the later build's BOM is accepted over the unfinished target |
 | U5 The tenant wait: stop a tenant control plane's pod during stage 9 | The run waits with `tenants_unhealthy` and goes on when it is Ready. Then let the wait run out (the run fails) and Retry with the tenant still down: the new run waits again |
 | U6 Restore: after U4's failure, restore the seed's `vzdump` and the portal database dump | Whether that returns the platform to the BOM it left |
+| U7 The seed's k3s: a drill build whose BOM differs in `seed.k3s` alone, on a platform with one tenant cluster and one database under a write loop, the tenant API and the database probed once a second | That the run ends succeeded; the gap of the seed's API in seconds; no gap on the tenant API or the database; the node at the target version; the etcd snapshot file on the seed; every Application of the seed Synced and Healthy and the clusterctl inventory unchanged afterwards; no Machine replaced. Also whether the Job's end is recorded once the kubelet is back (it restarts the k3s that runs it), and that the clusterctl image's `nsenter` enters the host as the Job asks |
+| U8 The seed's k3s, failing: a throwaway build with a wrong sha256 for the binary, then the corrected build | `seed_k3s_failed` with k3s untouched (`k3s --version` on the seed, no `k3s.prev`), and Retry with the corrected build passes |
+| U9 The seed backup: start U7 without a backup, then with one | The `409 seed_backup_missing` and the box in step 4; whether the `seed-backup` row sees an archive on the site's own kind of backup store (a directory store, a Proxmox Backup Server) with the portal token |
 
 ## Known issue: no PostgreSQL database on a node image built before 2026-11-16
 
@@ -2439,3 +2514,14 @@ from a tenant vnet, Remove), the VLAN tag (the seed's NIC, the machines' NICs wi
 the privilege on the tag's path, a bridge that is not VLAN-aware), the rows `bridge` and
 `privileges:capi` against a real cluster, **Test the tenant path** (every step of it), and the
 persistent form of the node leg.
+
+The k3s upgrade of the seed is not verified on a lab either ([The seed's k3s](#the-seeds-k3s)):
+no released BOM names a newer k3s, so it has run against a fake seed only. Open, and listed as
+U7 to U9 in [What the upgrade still owes a lab](#what-the-upgrade-still-owes-a-lab): that a Job
+which restarts the k3s it runs under ends and is reported as ended once the kubelet is back; that
+`nsenter` of the clusterctl image enters the seed's host namespaces as the Job asks (the image has
+the applet with these flags; that was read from the image, not run on a seed); how long the
+seed's API is away; that the seed reaches the k3s download address (nothing checks it before the
+Job, as nothing does before the first boot); what k3s does to its bundled CoreDNS and
+metrics-server at the version change; the hand step that puts `k3s.prev` back; and whether the
+`seed-backup` row sees the archives of a site's own backup store with the portal token.

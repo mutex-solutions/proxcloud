@@ -715,7 +715,10 @@ are several, `errors.details.problems`.
   on; absent while it runs), `spec`, `network`, `bridge`, `isolation`, `tenant-network`, `tenant-path`, `csi-vmid`, `credentials`, `machines`, `capacity`,
   `privileges:capi`, `privileges:csi`, `privileges:kubemint`, `mint-scope`, `pool-fence`,
   `token-scope`, `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement`, `boot-store`,
-  `pve-api-rule` and `images`. `boot-store` fails when Proxmox has no storage of
+  `pve-api-rule`, `seed-backup` and `images`. `seed-backup` is present once the installation has a seed VM and never
+  fails: `ok` when a store of the seed's node that the portal token can read holds a `vzdump` archive of the seed VM
+  younger than 24 hours (the message names its time and store), `warn` when none is seen, with the newest older one
+  and the stores whose backups the token could not read. `boot-store` fails when Proxmox has no storage of
   the boot store's name or it takes no disk images, and warns when the store also
   holds disks of VMs that are not the platform's (listed with the CSI token, once both tokens are stored; of the
   pool `pc-templates` only the templates are left out, a VM of that pool that is no template is listed).
@@ -828,12 +831,15 @@ are several, `errors.details.problems`.
   `upgrade` is that move and `replacement`, of the same shape, is the move to
   this release's BOM in its place (with its own `allowed`, `blocking` and
   `confirm`); it is absent otherwise.
-  `upgrade` is `{from, to, allowed, inProgress, confirm, changes, blocking}`:
+  `upgrade` is `{from, to, allowed, inProgress, confirm, changes, blocking, seedBackup}`:
   - `changes[]` lists every difference of the two BOMs:
     `{cluster, name, from, to, class, stage, wave, impact, blocking}`. `class` is
     `chart` (the run syncs a new chart version in `stage`, at `wave`),
-    `record only` (nothing of the platform is synced for it), `refused`, or `site` (the entry
-    `pve-api-rule` above: a write on the Proxmox site that is no difference of the BOMs).
+    `record only` (nothing of the platform is synced for it), `refused`, `seed` (the entry `seed.k3s`, from and to a
+    k3s version: stage `seed-k3s` replaces k3s on the running seed VM), or `site` (a write on the site outside the
+    platform's clusters: the entry `pve-api-rule` above, which is no difference of the BOMs, and next to a `seed`
+    entry the three things that stage writes on the seed: `seed-k3s-job`, `seed-etcd-snapshot`, `seed-k3s-binary`,
+    each with what and where in `to`).
     `impact` says what the change restarts or rolls; a refused change has
     `blocking`, its reason, instead.
   - `allowed` is false when one change is refused or the target is a `-dev` BOM,
@@ -841,14 +847,22 @@ are several, `errors.details.problems`.
     BOMs differ in `release`, `tenantCharts` and the versions of the product's
     own charts (`proxcloud-platform` as `capi`, `capi-tenant` and `platform`;
     `proxmox-kamaji-cluster` as `pc-platform`), each new version listing the old
-    one in `upgradeFrom`. Everything else is refused: `kubernetes.version`,
-    `kubernetes.nodeImage`, `seed.image`, `seed.k3s`, `images.kubeVip`,
+    one in `upgradeFrom`, and in `seed.k3s` when the target's version is newer by
+    a patch, by a k3s build (`+k3sN`) or by exactly one minor. `seed.k3s` is
+    refused when the target is older ("k3s never goes back"), more than one minor
+    ahead ("one minor at a time: go through 1.<n+1> first"), or the same version
+    with another sha256 or URL. Everything else is refused: `kubernetes.version`,
+    `kubernetes.nodeImage`, `seed.image`, `images.kubeVip`,
     `images.clusterctl`, every `capi.*` provider, every third-party chart, and a
     component that is added, removed or changed in anything but its chart
     version.
   - `confirm` is the phrase a run that starts the upgrade must carry, present
     when it is allowed and not started. `inProgress` is true once a run toward
     `to` has started and none has succeeded (`status.targetBom`).
+  - `seedBackup` is the preflight row `seed-backup`, read for this request, on a move that has a `seed` entry and
+    has not started. While it is not `ok`, `blocking` also carries `seed_backup_missing: no backup of seed VM <vmid>
+    younger than 24 hours is visible to the portal. Take one (vzdump <vmid>), or confirm that you took one the portal
+    cannot see.` This one line leaves `allowed` and `confirm` as they are: the run answers it with `seedBackupTaken`.
 
 - `GET /installations/{id}?live=1`: the installation with `live`
   (`phase`, `components[] {name, cluster, sync, health}`, `error`, `code`),
@@ -859,7 +873,7 @@ are several, `errors.details.problems`.
   whether its API does not answer or refuses the stored credential, with the
   seed's address, VMID and node. The stored phase stays `ready`: a seed that
   went down shows only here.
-- `POST /installations/{id}/runs` `{kind: apply|remove, confirm, targetBom}`: `202 {runId}`. A run
+- `POST /installations/{id}/runs` `{kind: apply|remove, confirm, targetBom, seedBackupTaken}`: `202 {runId}`. A run
   and its durable job (`platform.run/v1`, key `platform-run-<runId>`) are
   written in one transaction; `409 run_active` while another run of the
   installation is not finished, `409 bom_unsupported` when the installed BOM is
@@ -872,6 +886,11 @@ are several, `errors.details.problems`.
   must then be the plan's `upgrade.confirm`, `upgrade <installation name> to
   <release>` (`400 invalid_confirmation`). A move the plan does not allow is
   `409 upgrade_refused` with `details.reasons`, the plan's `upgrade.blocking`.
+  A move that replaces the seed's k3s (a `seed` entry in the plan) starts only with a backup of the seed VM: the
+  route reads the `seed-backup` row, and unless it is `ok` the answer is `409 seed_backup_missing` with the plan's
+  sentence. `seedBackupTaken: true` says the operator took a backup the portal cannot see: the run starts without
+  the read, and records it (`seedBackupTaken` on the run, and a change line in the audit entry of the request). It
+  is ignored on every other run; a Retry of a started upgrade needs neither.
   The run's `bom` is the target and `fromBom` the installed BOM; the installation
   records the target as `status.targetBom`. From then until a run succeeds,
   every apply (Retry) continues to that target without `targetBom` or `confirm`,

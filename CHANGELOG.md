@@ -18,6 +18,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stays blocked. No new Proxmox privilege. Not run on a lab yet
   ([template-updates.md](docs/template-updates.md#delete-a-withdrawn-template)).
 
+- **Managed services: an upgrade can replace the seed's k3s.** A platform could not move to a release whose BOM
+  names a newer k3s. An upgrade run now has a stage `seed-k3s` (5a, "Upgrade the seed's k3s") that replaces the k3s
+  binary on the running seed VM and restarts k3s, through a Job on the seed that runs the first boot's own download
+  and sha256 check. The plan says what is away (the seed's API, about a minute: no machine is repaired or replaced
+  and no run goes on; the platform cluster, tenant clusters and databases keep serving) and lists what the run
+  writes on the seed: the Job, an etcd snapshot `pre-upgrade-<version>` and the previous binary as
+  `/usr/local/bin/k3s.prev`. k3s moves by a patch, a k3s build or one minor, never back. New failure codes
+  `seed_k3s_failed`, `seed_k3s_refused`, `seed_k3s_timeout`. The Kubernetes version, the node image and kube-vip
+  stay refused. **No released BOM names a newer k3s yet**, so no upgrade between releases does this today; it has
+  run in tests against a fake seed only, not on a lab
+  ([managed-services.md](docs/managed-services.md#the-seeds-k3s)).
+- **Managed services: a seed backup check, and an upgrade of the seed's k3s asks for one.** The check has a row
+  `seed-backup`: ok when a store of the seed's node holds a `vzdump` archive of the seed VM younger than 24 hours,
+  a warning otherwise (never a failure). An upgrade that replaces the seed's k3s is refused with
+  `409 seed_backup_missing` until the row is ok or the operator ticks "I took a backup of seed VM … that the portal
+  cannot see" (`seedBackupTaken` on `POST …/runs`, recorded on the run and in the audit log). The row reads with the
+  portal token, which may not see every backup store.
+- **Chart sources `proxmox-kamaji-cluster` 0.1.15 and `database-cluster` 0.5.2, not tagged and not pinned.** 0.1.15
+  reads two optional keys of a node group, `kubernetesVersions` (`<node>: <version>`) and `deleteFirstOn` (a list of
+  nodes: `maxSurge 0`, `maxUnavailable 1`), on the MachineDeployment only; without them it renders what 0.1.14
+  rendered, so no machine is replaced. 0.5.2 sets `enablePDB: false` on a PostgreSQL or FerretDB database of one
+  instance, whose budget blocked every drain of its node; the database then restarts when its node is drained.
+  Existing databases keep their chart until `bump-chart` ([managed-dbaas.md](docs/managed-dbaas.md#chart-pin--platform-update)).
+  The platform BOM still pins 0.1.14 and 0.5.1.
+
 ### Changed
 
 - **The Proxmox console of a VM made by ProxCloud opens on the graphical display.** Templates were made with
