@@ -6,7 +6,7 @@ the `v0.4.0-rc.1` prerelease (tag 2026-11-11, images and app chart `0.4.0-rc.1`)
 and the first stable release `v0.4.0` (tag 2026-11-12, images and app chart
 `0.4.0`), then the stable `v0.5.0` (tag 2026-11-13), the patches `v0.5.1` and `v0.5.2` and the stable `v0.6.0` (tags 2026-11-14),
 the `v0.7.0-rc.1` prerelease and the stable `v0.7.0` (tags 2026-11-15), the stable `v0.8.0` (tag 2026-11-17) and the patches `v0.8.1` and `v0.8.2` (tags 2026-11-18), and the release candidate
-`v0.9.0-rc.1`, a prerelease (tag 2026-11-19; [Release candidates](#release-candidates)). Pushing the next tag runs the app image/chart publication and GitHub Release
+`v0.9.0-rc.1`, a prerelease (tag 2026-11-19; [Release candidates](#release-candidates)). The next tag is the second candidate, `v0.9.0-rc.2`; pushing it runs the app image/chart publication and GitHub Release
 creation.
 This source change does none of those operations, and installation from released
 artifacts and later controlled PVE template canaries remain separate steps. Read
@@ -303,8 +303,11 @@ BOM on `main` to `0.9.0-dev` again and added `deploy/platform/previous/0.8.2.yam
 candidate `v0.9.0-rc.1` sets the release to `0.9.0-rc.1` (checked on 2026-11-19 on that
 commit: `--release` prints `all pins match`, on the BOM and on the previous BOMs `0.8.0`,
 `0.8.1` and `0.8.2`). The pull request after that tag set the BOM on `main` to
-`0.9.0-dev` again and added `deploy/platform/previous/0.9.0-rc.1.yaml`, so `main` cannot
-be tagged until the next release commit drops `-dev`. The gate does not
+`0.9.0-dev` again and added `deploy/platform/previous/0.9.0-rc.1.yaml`, so `main` could not
+be tagged until the next release commit dropped `-dev`: the commit of the candidate
+`v0.9.0-rc.2` sets the release to `0.9.0-rc.2` (checked on 2026-11-19 on that commit:
+`--release` prints `all pins match`, on the BOM and on the previous BOMs `0.8.0`, `0.8.1`,
+`0.8.2` and `0.9.0-rc.1`). The gate does not
 compare the BOM's release with the tag
 (below): a commit whose BOM has no `-dev` passes this part for any tag.
 
@@ -357,8 +360,18 @@ platform BOM gate, no previous BOM and no release notes file). Its tag is on the
 `eee7b3dc`; the `docker` and `helm` runs of the tag succeeded and the GitHub Release is a
 prerelease, with `v0.8.2` still the latest (read on 2026-11-19). The pull request after
 it added `deploy/platform/previous/0.9.0-rc.1.yaml` ([Previous BOMs](#previous-boms)).
+A lab moved a platform from the BOM `0.8.0` to that of the candidate with its published
+images on 2026-11-19 ([managed-services.md](managed-services.md#upgrade-between-boms)).
 
-Not verified: an install or an upgrade from the candidate's published images.
+`v0.9.0-rc.2` is the second: the same pins, the `release` line alone differs, and its
+commit holds the three fixes for what that lab round found. Neither chart of the product
+changed since its tag (`git diff proxmox-kamaji-cluster-v0.1.14 -- deploy/charts/proxmox-kamaji-cluster`
+and `git diff proxcloud-platform-v0.1.3 -- deploy/charts/proxcloud-platform` print nothing),
+so the BOM needs no new chart version. The pull request after its tag adds
+`deploy/platform/previous/0.9.0-rc.2.yaml`.
+
+Not verified: an install from a candidate's published images, and anything on the images
+of `v0.9.0-rc.2`.
 
 ## Previous BOMs
 
@@ -516,7 +529,7 @@ What a release must do when it changes a pin, before its tag:
    build of the release commit, `GET …/plan` of such an installation, or
    `PlanFor` in a test.
 
-The pairs of the BOM on `main` today (0.8.0, 0.8.1, 0.8.2 and 0.9.0-rc.1 to
+The pairs of the BOM of the candidate `v0.9.0-rc.2` (0.8.0, 0.8.1, 0.8.2 and 0.9.0-rc.1 to
 it). From the three 0.8.x BOMs, the BOMs
 differ in the release line, in `tenantCharts.kubernetes` and in the four
 components of the product's own charts, `pc-platform` 0.1.13 to 0.1.14 and
@@ -525,8 +538,11 @@ old version in `upgradeFrom`, and platform chart 0.1.3 differs from 0.1.2 in the
 ClusterRole alone. From 0.9.0-rc.1 the BOMs differ in the release line alone.
 `TestUpgradeRollsNoMachine` compares all four pairs and passes. So the
 classifier allows all four pairs, and only `-dev` refuses them on `main`. On the
-commit of the candidate `v0.9.0-rc.1` the plan of each of the three 0.8.x BOMs
-is allowed, with six changes and no refusal. None of these moves was run on a lab.
+commits of the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` the plan of each of the three
+0.8.x BOMs is allowed, with six changes and no refusal; on that of `v0.9.0-rc.2` the plan
+from 0.9.0-rc.1 is allowed with one change, the release, record only. One of these moves
+was run on a lab: 0.8.0 to 0.9.0-rc.1, on 2026-11-19, on a platform without tenants (72.8
+seconds, no machine replaced). The others were not.
 
 Not checked: that a chart of `proxcloud-platform` whose version changes is safe
 to sync over the old one (its templates are RBAC, AppProjects, a MetalLB pool
@@ -890,7 +906,7 @@ file (`docker.yml`, job `release`, step "Assemble release notes"). Without the
 file the step prints a warning and falls back to the `## [X.Y.Z]` section of
 `CHANGELOG.md`, as every release up to `v0.8.2` did; the script test below fails
 when a changelog section of a release from `0.8.0` on has no file, so only an rc tag
-without a file takes that path (`v0.9.0-rc.1` has one). An empty file, or one over 120000 characters, fails
+without a file takes that path (`v0.9.0-rc.1` and `v0.9.0-rc.2` have one). An empty file, or one over 120000 characters, fails
 the step, and no Release is created. GitHub's generated commit and pull request
 list (`--generate-notes`) follows the body either way.
 
