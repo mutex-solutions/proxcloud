@@ -252,6 +252,14 @@ with cluster chart 0.1.13 and platform chart 0.1.2, until an operator upgrades i
 
 ### Fixed
 
+- **Managed services: a larger control plane that does not fit is no longer accepted in silence.** On an
+  installed platform, 3 control plane machines saved over 1 on a node without room for them left the Check ok
+  with a warning and a plan with no change and nothing blocking (lab round 2 of v0.9.0-rc.1). The plan now lists
+  the count as a change (`controlPlane.replicas`, 1 to 3), the Check row `capacity` fails for the machines that
+  are not built yet, with the node's numbers, `GET …/plan` carries that message in `blocking` (step 4 switches
+  **Apply this release** off), and an apply stops at its first stage. What a run already placed still only
+  warns: a healthy platform on a full node keeps passing the Check. Not verified on a lab.
+
 - **The two consoles' images run on NGINX 1.30.7.** The base `nginx:1.30.6-alpine` carried five fixable HIGH findings
   in the nginx package (CVE-2026-113425, CVE-2026-121810, CVE-2026-123007, CVE-2026-123633, CVE-2026-123634; fixed in
   `1.30.7-r0`), which failed the image scans of `main` and of every pull request that scans a console. `web/Dockerfile`

@@ -727,6 +727,9 @@ are several, `errors.details.problems`.
   less the configured memory of the other VMs and containers on it as the CAPI token lists them, is smaller than what
   the settings place there with one spare machine for the control plane. It is `warn` when that fits and one spare
   machine per group and node on top does not, on an installed platform, and when the nodes could not be read.
+  On an installed platform it fails in one case: the settings ask for more control plane machines than a run built
+  (`status.clusters[].controlPlaneReplicas`, absent means one) and their node has no room for them. The message
+  names the node, the memory the settings place there, what can be reserved, and both counts.
   `bridge` fails when a node the settings use has no bridge or vnet of that name, or (mode `routed`) when a vnet of
   that name exists and is not the installation's; on an installed platform the same finding is `warn`.
   `tenant-path` never fails either and is absent in the same case. It reads the layout (the default zone's kind,
@@ -792,8 +795,14 @@ are several, `errors.details.problems`.
   (`installed`, `target`, `newer`, `changes`, `blocking`, `upgrade`). `target` is
   the BOM an apply without `targetBom` runs with: this release's for a new
   installation (`changes` then lists every component), the installed one for an
-  installed platform (`changes` is empty), and the target of an upgrade that has
-  started. `newer` is this release's own BOM (`release`, `sha256`) when the
+  installed platform, and the target of an upgrade that has started. On an
+  installed platform `changes` is empty unless the saved settings ask for more
+  control plane machines than a run built: then it holds
+  `{cluster: "pc-platform", name: "controlPlane.replicas", from: "1", to: "3", stage: "cluster", impact}`,
+  and when the node has no room for them `blocking` holds the message of the
+  Check row `capacity`, with the numbers. The route reads the nodes with the CAPI
+  token for that case alone; when they cannot be read nothing is added, and stage
+  1 of the apply, which runs the same row, decides (`preflight_failed`). `newer` is this release's own BOM (`release`, `sha256`) when the
   installed platform is on another one. An installed BOM this release does not
   carry (its own and those of earlier releases from 0.8.0 on; not one of a build
   of `main`) blocks with `bom_unsupported`.

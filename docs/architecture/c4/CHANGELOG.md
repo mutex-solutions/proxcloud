@@ -4,6 +4,22 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-19: a larger control plane is a change of the plan, and blocks where it does not fit
+
+**What changed:** no component, container or relation. C3, "Platform installations": the plan of an installed
+platform (`plan.go`) lists a control plane count above the one a run built (`status.clusters[].controlPlaneReplicas`)
+as a change; the `capacity` row (`capacity.go`) fails on an installed platform for that growth when its node has no
+room, and still warns for what a run placed; `GET …/plan` reads the nodes with the CAPI token when the plan has such
+a change and puts the failed row in `blocking`.
+
+**Why:** lab round 2 of v0.9.0-rc.1, finding G2F-2: 3 saved over 1 on a node without room was accepted, the Check
+stayed ok with a warning and the plan showed no change and nothing blocking, so the apply would have met a machine
+CAPMOX refuses for good. The plan compared BOMs only, and the row made every finding a warning once installed.
+
+**Diagrams:** none changed. `c3-components.md`: the row "Platform installations".
+
+**Not verified:** on a lab.
+
 ## 2026-11-19: the platform BOM pins cluster chart 0.1.14 and platform chart 0.1.3
 
 **What changed:** no component, container or relation. `deploy/platform/platform-bom.yaml` names
