@@ -219,6 +219,13 @@ with cluster chart 0.1.13 and platform chart 0.1.2, until an operator upgrades i
   and is not refused (`bom_unsupported`) while the file is carried. It is the first previous BOM with cluster
   chart 0.1.14 and platform chart 0.1.3: `TestUpgradeRollsNoMachine` now compares four previous BOMs. No apply
   on such a platform was run on a lab.
+- **The platform BOM on `main` is `0.9.0-dev` again after the second candidate, and the build carries the BOM of
+  `0.9.0-rc.2`** (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.9.0-rc.2.yaml`). The commit of
+  `v0.9.0-rc.2` left the BOM at `0.9.0-rc.2`, and the release gate refuses only `-dev`. A platform that is on that
+  BOM, installed by `v0.9.0-rc.2` or moved to it by an upgrade, stays on it under a later build and is not refused
+  (`bom_unsupported`) while the file is carried. Its pins are those of `0.9.0-rc.1`, so
+  `TestUpgradeRollsNoMachine` compares five previous BOMs with the BOM on `main`: three of 0.8.x and the two
+  candidates. No apply on such a platform was run on a lab.
 - **The body of a GitHub Release is `docs/releases/vX.Y.Z.md`, written for a reader, when the tag has that file.**
   The Release pages of `v0.8.0` to `v0.8.2` showed their changelog section, whose wrapped lines a Release body
   renders as line breaks and which has no headings. The release job (`docker.yml`) now takes the file, refuses an
