@@ -154,6 +154,20 @@ with cluster chart 0.1.13 and platform chart 0.1.2, until an operator upgrades i
 
 ### Changed
 
+- **CI: a pull request runs only the jobs its changed files can affect.** `test.yml`, `docker.yml` and
+  `security-scan.yml` start with a job `changes` (`.github/scripts/ci_changes.py`) that maps the changed files to
+  jobs: a documentation-only pull request runs the naming gate and nothing else, a Go change skips the consoles, a
+  console change skips the Go tests and images, and the fifteen-minute scan of the eleven sandbox templates runs
+  only for `deploy/templates/**`, `cmd/mcp-gateway/**`, `go.mod`/`go.sum` and `.github/**`. A file in no known
+  area (under `docs/`, anything that is not Markdown), a change under `.github/`, and every push to `main`, tag,
+  schedule or manual run still run everything; a new path in no area also fails one test of the `installer` job
+  until it is given a row or listed. The required check `security-gate` reports a skipped scan as not applicable
+  only when the change detection succeeded and said, in a readable output, that it did not ask for it; a failed
+  or cancelled scan, a failed detection, or a job without such an output blocks. Because pull requests no longer
+  rescan everything, `security-scan.yml` now also runs in full every day on `main`, a full scan of `main` is no
+  longer cancelled by the next merge, and one that fails opens or updates an issue. It still blocks no pull
+  request and no release tag.
+  [docs/ci-release.md](docs/ci-release.md), "What runs when".
 - **The platform BOM pins cluster chart `proxmox-kamaji-cluster` 0.1.14 and platform chart `proxcloud-platform`
   0.1.3**, both published from their tags, by the digest ghcr.io serves: 0.1.14 for the platform cluster
   (`pc-platform`) and for `tenantCharts.kubernetes`, 0.1.3 for `capi`, `capi-tenant` and `platform`.
