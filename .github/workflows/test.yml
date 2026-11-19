@@ -1,8 +1,10 @@
 name: test
 
-# Go unit tests (always) + the build-tagged integration tests (testcontainers spins
+# Go unit tests + the build-tagged integration tests (testcontainers spins
 # up a throwaway PostgreSQL; ubuntu-latest runners ship Docker). Runs on push to main
 # and on PRs so a regression gates before the image/chart release tags are cut.
+# A push to main runs every job. A pull request runs the jobs its changed files can affect
+# (job `changes`, .github/scripts/ci_changes.py; docs/ci-release.md, "What runs when").
 on:
   push:
     branches:
@@ -15,7 +17,30 @@ permissions:
   contents: read
 
 jobs:
+  # Which jobs this event runs. If this job fails, every job below runs.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      go_test: ${{ steps.classify.outputs.go_test }}
+      installer: ${{ steps.classify.outputs.installer }}
+      spa_smoke: ${{ steps.classify.outputs.spa_smoke }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: python3 .github/scripts/ci_changes.py detect | tee -a "$GITHUB_OUTPUT"
+
   go-test:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.go_test == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -50,12 +75,14 @@ jobs:
 
   # tsc and vite build stay green on a bundle that renders a white page, so open the real build.
   spa-smoke:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.spa_smoke != '[]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        app: [client, admin]
+        app: ${{ fromJSON(needs.changes.outputs.spa_smoke || '["client","admin"]') }}
     defaults:
       run:
         working-directory: web/${{ matrix.app }}
@@ -75,6 +102,8 @@ jobs:
   # Fails on any old-brand string in file contents or file names. The pattern uses
   # character classes so this file never matches itself.
   installer:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.installer == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -94,6 +123,7 @@ jobs:
           .venv/bin/python ../web/tests/test_runtime_baseline.py
           .venv/bin/python ../.github/scripts/tests/test_release_policy.py
           .venv/bin/python ../.github/scripts/tests/test_release_notes.py
+          .venv/bin/python ../.github/scripts/tests/test_ci_changes.py
           .venv/bin/python ../deploy/tests/test_clusterctl_image.py
           ANSIBLE_CONFIG=ansible.cfg .venv/bin/ansible-playbook -i inventory/example/hosts.yml -e pc_site_dir=/tmp/site -e pc_node=x --syntax-check \
             playbooks/site.yml playbooks/46-rustfs-upgrade.yml playbooks/70-add-node.yml playbooks/71-remove-node.yml
@@ -103,6 +133,7 @@ jobs:
           python3 -m unittest discover -s images/tests -v
           ! grep -nE '^\s*(pull_request|pull_request_target|issue_comment|workflow_run):' .github/workflows/vm-templates.yml .github/workflows/k8s-node-templates.yml
 
+  # Reads every file of the repository, documentation included: always runs (about 10 seconds).
   rebrand-gate:
     runs-on: ubuntu-latest
     env:

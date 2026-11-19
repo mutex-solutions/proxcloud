@@ -107,7 +107,7 @@ class Evidence:
         return json.loads(self.read(relative, True), object_pairs_hook=unique)
 
 
-def render(reports_dir, source_sha, run_url, scan_result, template_result, gate_result, now=None, base_result="skipped"):
+def render(reports_dir, source_sha, run_url, scan_result, template_result, gate_result, now=None, base_result="skipped", not_run=""):
     if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
         raise ValueError("invalid source SHA")
     if not re.fullmatch(r"https://github\.com/[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+/actions/runs/[0-9]+", run_url) or any(p in (".", "..") for p in urlsplit(run_url).path.split("/")):
@@ -121,6 +121,9 @@ def render(reports_dir, source_sha, run_url, scan_result, template_result, gate_
               "tracked": f"⏳ tracked, no fix (until {review})",
               "report-only": "📄 report-only (raw base)"}
     evidence, rows, findings = Evidence(reports_dir), [], {}
+    # Artifacts the change detection did not ask for on this pull request (ci_changes.py, output not_run).
+    # Only fixed names count, and a report that is present is always shown, whatever this list says.
+    not_run = set(not_run.split(",")) & {*PRODUCTS, "template-images", "base-images"}
     targets = ([(n, n, "") for n in PRODUCTS]
                + [("template/" + n, "template-images", "templates/" + n + "/") for n in TEMPLATES]
                + [("base/" + n, "base-images", "bases/" + n + "/") for n in BASES])
@@ -164,6 +167,9 @@ def render(reports_dir, source_sha, run_url, scan_result, template_result, gate_
                 state += "; OS EOL (report-only)" if raw_base else "; OS EOL"
             rows.append(f"| {target} | {critical} | {high} | {fixed} / {len(local) - fixed} | {kinds.count('vex')} | {state} |")
         except FileNotFoundError:
+            if artifact in not_run:
+                rows.append(f"| {target} | N/A | N/A | N/A | N/A | ➖ Not scanned in this run: inputs unchanged in this pull request |")
+                continue
             rows.append(f"| {target} | N/A | N/A | N/A | N/A | ⚠️ Missing / incomplete |")
         except (OSError, ValueError, TypeError, OverflowError, RecursionError):
             rows.append(f"| {target} | N/A | N/A | N/A | N/A | ⚠️ INVALID evidence |")
@@ -176,6 +182,9 @@ def render(reports_dir, source_sha, run_url, scan_result, template_result, gate_
                 for key, vuln in ordered if vuln["kind"] == "vex"]
     ordered = [kv for kv in ordered if kv[1]["kind"] != "vex"]
     valid = sum("N/A" not in row for row in rows)
+    unchanged = sum("➖ Not scanned" in row for row in rows)
+    partial = (f" · {unchanged} not scanned in this run (inputs unchanged; the daily run and every push to main scan all 32)"
+               if unchanged else "")
     repo_url = run_url.split("/actions/runs/")[0]
     status = "✅ Required gate accepted" if gate_result == "success" else "⛔ BLOCKED / INCOMPLETE"
     unfixed = (f"HIGH/CRITICAL without any fixed version are **tracked** (shown and counted here, not blocking) until {review} (UTC); from that date they block again until re-reviewed."
@@ -185,7 +194,7 @@ def render(reports_dir, source_sha, run_url, scan_result, template_result, gate_
            if today < OWNER_VEX.expires else
            f"The owner-approved VEX for {OWNER_VEX.vulnerability} expired on {vex_expiry} and is no longer applied.")
     lines = ["<!-- proxcloud-security-scan-v1 -->", "## 🛡️ Security scan · " + status, "",
-             f"**🔴 Critical: {critical} · 🟠 High: {len(findings) - critical} · Coverage: {valid}/32 targets**",
+             f"**🔴 Critical: {critical} · 🟠 High: {len(findings) - critical} · Coverage: {valid}/32 targets{partial}**",
              f"⛔ Blocking: {counts['blocking']} · ⏳ Tracked (no fix): {counts['tracked']} · 📄 Raw-base report-only: {counts['report-only']} · ✅ Owner-approved VEX (expires {vex_expiry}): {counts['vex']}", "",
              f"Source: [`{source_sha[:12]}`]({repo_url}/commit/{source_sha}) · [Workflow run & full JSON reports]({run_url})",
              f"Jobs: scan **{scan_result}** · templates **{template_result}** · upstream bases **{base_result}** · required gate **{gate_result}**", "",
@@ -222,6 +231,7 @@ def main(argv=None):
         parser.add_argument("--" + name, required=True)
     for name in ("scan-result", "template-result", "gate-result", "base-result"):
         parser.add_argument("--" + name, required=True, choices=STATES)
+    parser.add_argument("--not-run", default="")
     args = vars(parser.parse_args(argv))
     output = args.pop("output")
     Path(output).write_text(render(**args), encoding="utf-8")

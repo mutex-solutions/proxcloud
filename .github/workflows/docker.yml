@@ -4,7 +4,8 @@ name: docker
 #   push to main   -> tag `dev-<short-sha>` (only when image sources changed; a
 #                     docs/README/CHANGELOG/chart-only push is skipped)
 #   push a git tag -> that tag name (e.g. v1.2.3) — always builds
-#   pull request   -> build only, no push — always builds
+#   pull request   -> build only, no push — only the images whose sources the pull request
+#                     changes (.github/scripts/ci_changes.py; docs/ci-release.md, "What runs when")
 #   manual run     -> build + push from any branch (Actions ▸ docker ▸ Run workflow):
 #                     tag `dev-<short-sha>`, or `dev-<image_tag>` if a suffix is given.
 #                     Use it to deploy a PR branch to the test environment.
@@ -44,19 +45,28 @@ on:
 
 jobs:
   # Gate: on a push to main, only rebuild when image-relevant sources changed — a
-  # docs / README / CHANGELOG / chart-only push skips the build. Tags and PRs always
-  # build (this output is ignored for them). Fail-safe: builds when the diff can't be
-  # computed.
+  # docs / README / CHANGELOG / chart-only push skips the build (output `build`, ignored for
+  # tags, PRs and manual runs). Fail-safe: builds when the diff can't be computed.
+  # Output `images` is the build matrix: every image, except on a pull request, where it holds
+  # the images whose sources the pull request changes (all of them when in doubt).
   changes:
     runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
       build: ${{ steps.filter.outputs.build }}
+      images: ${{ steps.classify.outputs.images }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      - id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: python3 .github/scripts/ci_changes.py detect | tee -a "$GITHUB_OUTPUT"
       - id: filter
         run: |
           set -euo pipefail
@@ -98,9 +108,9 @@ jobs:
 
   build:
     needs: [changes, bom-verify]
-    # Tags (release), PRs, and manual runs always build; a push to main builds only when the
-    # gate saw image-relevant changes.
-    if: github.ref_type == 'tag' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || needs.changes.outputs.build == 'true'
+    # Tags (release) and manual runs always build every image; a push to main builds only when the
+    # gate saw image-relevant changes; a pull request builds the images it can affect (none: skipped).
+    if: (github.ref_type == 'tag' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || needs.changes.outputs.build == 'true') && needs.changes.outputs.images != '[]'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -108,29 +118,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - image: proxcloud-api
-            dockerfile: deploy/Dockerfile
-            context: .
-            build-args: ""
-          - image: proxcloud-web
-            dockerfile: web/Dockerfile
-            context: web
-            build-args: APP=client
-          - image: proxcloud-admin
-            dockerfile: web/Dockerfile
-            context: web
-            build-args: APP=admin
-          # Runs in the sandbox cluster, whose nodes reach the internet and not the mgmt registry: always from here.
-          - image: proxcloud-sandbox-proxy
-            dockerfile: deploy/sandbox-proxy.Dockerfile
-            context: .
-            build-args: ""
-          # envd + sandbox-init, installed on every sandbox node by node-setup's init container (SB5).
-          - image: proxcloud-sandbox-runtime
-            dockerfile: deploy/sandbox-runtime.Dockerfile
-            context: .
-            build-args: ""
+        # image, dockerfile, context, build-args per image: IMAGES in .github/scripts/ci_changes.py.
+        # proxcloud-sandbox-proxy runs in the sandbox cluster, whose nodes reach the internet and not the
+        # mgmt registry: always from here. proxcloud-sandbox-runtime is envd + sandbox-init, installed on
+        # every sandbox node by node-setup's init container (SB5).
+        include: ${{ fromJSON(needs.changes.outputs.images) }}
     steps:
       - uses: actions/checkout@v7
 

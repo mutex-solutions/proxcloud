@@ -16,9 +16,9 @@ artifacts and later controlled PVE template canaries remain separate steps. Read
 
 | Workflow | Triggers | Effect / runner |
 |---|---|---|
-| `test.yml` | PRs targeting `main`; pushes to `main` | Hosted Go unit/integration tests, both SPA build/smoke tests, installer syntax/tests, credential-free Packer validation and offline image-pipeline tests, naming gates. Not triggered by release tags. |
-| `security-scan.yml` | PRs targeting `main`; pushes to `main` | Exact-head Trivy 0.76.2 scans of lockfiles, six local product images, eleven non-GPU template outputs, thirteen raw upstream bases (report-only) and a nondefault controlled-base prototype; required `security-gate` job and a PR summary comment. Nothing is pushed. Not triggered by release tags. |
-| `docker.yml` | PRs to `main`, `main` pushes, `v*` tags, manual dispatch | Job `bom-verify` runs first; on a tag it is the [platform BOM release gate](#platform-bom-verification-and-release-gate) and the builds wait for it. PRs build five images without pushing. Image-relevant `main` pushes publish `dev-<7-char-sha>`; docs/chart-only changes can skip. Tags publish exact image tags; manual dispatch pushes `dev-<sha>` or `dev-<suffix>`. Hosted runner. |
+| `test.yml` | PRs targeting `main` (only the jobs the changed files can affect: [What runs when](#what-runs-when)); pushes to `main` | Hosted Go unit/integration tests, both SPA build/smoke tests, installer syntax/tests, credential-free Packer validation and offline image-pipeline tests, naming gates. Not triggered by release tags. |
+| `security-scan.yml` | PRs targeting `main` (only the scans the changed files can affect: [What runs when](#what-runs-when)); pushes to `main`; daily schedule; manual dispatch | Exact-head Trivy 0.76.2 scans of lockfiles, six local product images, eleven non-GPU template outputs, thirteen raw upstream bases (report-only) and a nondefault controlled-base prototype; required `security-gate` job and a PR summary comment. Nothing is pushed. Not triggered by release tags. |
+| `docker.yml` | PRs to `main`, `main` pushes, `v*` tags, manual dispatch | Job `bom-verify` runs first; on a tag it is the [platform BOM release gate](#platform-bom-verification-and-release-gate) and the builds wait for it. PRs build, without pushing, those of the five images whose sources they change; the rest of this cell describes a full run: PRs build five images without pushing. Image-relevant `main` pushes publish `dev-<7-char-sha>`; docs/chart-only changes can skip. Tags publish exact image tags; manual dispatch pushes `dev-<sha>` or `dev-<suffix>`. Hosted runner. |
 | `helm.yml` | Chart-path PRs to `main`; app or managed-chart tags | PR lint/render only. App `v*` publishes `proxcloud`; `database-cluster-v*`, `proxmox-kamaji-cluster-v*` and `proxcloud-platform-v*` publish their independent charts. Hosted runner; no publication on ordinary merge. |
 | `charts-mirror.yml` | PRs to `main` that touch the mirror manifest, the BOM, the script or its tests; `charts-mirror-v*` tags | PR runs the script's tests and a dry run with a read-only token: every third-party chart of the BOM is fetched, verified against its pin and packaged, nothing is pushed. A tag on a commit of `main` pushes each chart version that [the chart mirror](#chart-mirror) definitely does not serve yet to `ghcr.io/mutex-solutions/charts-mirror`, does not push over a served version, and records the digests. That is a rule of the script, not of the registry; see [limits of the gate](#limits-of-the-gate). Hosted runner. |
 | `bom-verify.yml` | PRs to `main` that touch `deploy/platform/**` or the script; weekly schedule; manual dispatch | Compares every pin of the platform BOM, and of each [previous BOM](#previous-boms), with its registry by anonymous pull. Read-only token, no secret, nothing is pushed. Hosted runner. |
@@ -33,6 +33,92 @@ artifacts and later controlled PVE template canaries remain separate steps. Read
 The source of truth is [.github/workflows](../.github/workflows/). Image-relevant
 path filters and per-job conditions matter: a green skipped Docker workflow does
 not prove new images were pushed for that commit.
+
+## What runs when
+
+A pull request runs the jobs its changed files can affect. A push to `main`, a tag, the schedule
+and a manual run are unchanged: they run everything (for `docker.yml` on `main`, everything the
+existing image-source filter of its `changes` job lets through).
+
+Each of `test.yml`, `docker.yml` and `security-scan.yml` starts with a job `changes`. It runs
+`.github/scripts/ci_changes.py detect`, which lists the files between the point where the pull
+request left its base branch and its head (`git diff --name-only --no-renames`, so a moved file
+counts under both names and a deleted file under its own) and matches them against the table
+`RULES` of that script. The table below is that table.
+
+| Area (changed files) | `test.yml` | `docker.yml` (build, no push) | `security-scan.yml` |
+|---|---|---|---|
+| Documentation: `docs/**`, root `*.md`, `LICENSE` | `rebrand-gate` | none | none |
+| Documentation a test reads: `CHANGELOG.md` | `go-test`, `installer`, `rebrand-gate` | none | none |
+| `docs/releases/**` | `installer`, `rebrand-gate` | none | none |
+| `docs/proxmox-permissions.md`, `docs/vm-artifact-publishing.md`, `docs/billing.md` | `go-test`, `rebrand-gate` | none | none |
+| Go: `cmd/**`, `internal/**`, `pkg/**` | `go-test`, `installer` | api, sandbox-proxy, sandbox-runtime | filesystem, api, sandbox-proxy, sandbox-runtime (and sandbox-import for `cmd/sandbox-import/**`, `internal/sandboximport/**`; `template-images` for `cmd/mcp-gateway/**`) |
+| `go.mod`, `go.sum` | `go-test`, `installer` | api, sandbox-proxy, sandbox-runtime | filesystem, the four Go images, `template-images` |
+| `test/**` | `go-test`, `installer` | none | filesystem |
+| `deploy/**` (charts, Compose, cluster manifests, clusterctl, ...) | `go-test`, `installer` | none | filesystem |
+| of which `deploy/seed/**`, `deploy/platform/**`, `deploy/embed.go`, the two `argocd-health.yaml`, `deploy/Dockerfile` | the same | api | also api (`base-images` for the Dockerfile) |
+| of which `deploy/sandbox-*.Dockerfile` | the same | that image | also that image and `base-images` |
+| of which `deploy/templates/**` except `images.yaml` | the same | none | also `template-images`, controlled-base-prototype, `base-images` |
+| of which `deploy/templates/images.yaml` | the same | none | also `base-images` |
+| `installer/**` | `go-test`, `installer` | none | filesystem |
+| `images/**` | `installer` | none | filesystem |
+| `web/client/**` (its bundled Markdown under `src/docs/content` included) | `spa-smoke (client)` | web | filesystem, web-client |
+| `web/admin/**` (the same) | `spa-smoke (admin)` | admin | filesystem, web-admin |
+| other `web/**` (`Dockerfile`, `nginx.conf`, entrypoint, `web/tests`) | `installer` | web, admin | filesystem, web-client, web-admin (`base-images` for the Dockerfile) |
+| `.github/**` (workflows, scripts, their tests) | everything | everything | everything |
+| anything else (root `Makefile`, `.dockerignore`, `docker-compose.yml`, a new top-level directory) | everything | everything | everything |
+
+Rules behind the table:
+
+- **Unknown means everything.** A file that matches no row, an empty diff, a diff that cannot be
+  computed, and any event that is not a pull request run every job. The output `reason` of
+  `changes` says which of these applied.
+- **Tests read across directories**, so the test jobs are wider than the image jobs: Go tests
+  render the charts under `deploy/`, read installer playbooks and three documents; the script
+  tests of the `installer` job read Go sources, Dockerfiles, workflows, `CHANGELOG.md` and
+  `docs/releases/`. A test that starts reading another document must add it to `RULES`:
+  `test_ci_changes.py` finds such a read in the Go tests and fails until the row exists.
+- **`rebrand-gate` always runs**: it reads every file, documentation included, in about 10 seconds.
+  `bom-verify` of `docker.yml` always runs too (off a tag: its unit tests, 5 seconds).
+- **`template-images`** builds and scans the eleven sandbox templates in about 15 minutes. On a
+  pull request it runs for `deploy/templates/**` (not `images.yaml`, which only holds published
+  digests), `cmd/mcp-gateway/**`, `go.mod`/`go.sum` (the gateway template compiles with them)
+  and `.github/**` (the scanner, its policy, the Trivy pin and the workflow live there).
+
+To see what a branch would run: `git diff --name-only --no-renames origin/main...HEAD | python3 .github/scripts/ci_changes.py classify`.
+
+### The required check when jobs are skipped
+
+The ruleset `require-security-gate` requires one check, `security-gate`, on a branch that is up
+to date with `main`. The job runs on every pull request (`if: always()`), so the check is never
+left waiting. It hands its whole `needs` context to `ci_changes.py gate`:
+
+| State of a needed job | Verdict |
+|---|---|
+| `success` | passes |
+| `failure` or `cancelled` | blocks, whatever `changes` said |
+| `skipped`, and `changes` succeeded and did not ask for the job | passes as **not applicable**; the job summary and the pull request comment name every target that was not scanned |
+| `skipped`, but `changes` asked for the job | blocks |
+| `changes` itself failed, was cancelled, or gave no output | blocks: no scan runs and no skip is trusted |
+
+A documentation-only pull request therefore gets a green `security-gate` whose summary says that
+nothing was scanned, and the comment `security-summary` writes shows `Coverage: 0/32 targets ·
+32 not scanned in this run`. `test.yml` has no aggregate job and no required check; when its
+`changes` job fails, its three gated jobs run.
+
+### What still scans everything
+
+Before this split, every pull request rescanned all 32 targets with that hour's vulnerability
+database, so a new CVE in a sandbox template showed up on the next pull request of anyone. Now:
+
+- every push to `main` runs the full `security-scan.yml` (unchanged);
+- `security-scan.yml` runs in full **every day at 02:23 UTC** on `main` (`schedule`) and on
+  demand (`workflow_dispatch`). This run is the one that finds a new CVE in a target nobody
+  touched. GitHub mails a failed scheduled run to the last person who edited the schedule; it
+  opens no issue and blocks no pull request, so someone has to read it.
+- `sandbox-templates.yml` rebuilds and republishes the templates weekly, but it does not scan
+  them; and `security-scan.yml` scans images built from the source at that commit, not the
+  digests published in `deploy/templates/images.yaml`.
 
 ## Container images and chart versions
 
