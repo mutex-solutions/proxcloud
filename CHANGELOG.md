@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The operator's provider page counts the clusters behind the provider's chart.** The card "Managed clusters"
+  already listed each cluster's chart version and offered Bump; it now says how many are behind. The tenant
+  console already shows "Platform update available" on such a cluster. `docs/managed-k8s.md` says where both
+  read it, and that the cluster's row in the tenant API carries its own version only.
+- **`docs/proxmox-permissions.md` says who gets `403` on `GET /cluster/status` and why no privilege is added.** It
+  is CAPMOX's client library reading the cluster's name with the cluster's token; the answer is ignored by
+  design and nothing degrades.
 - **The Docker Compose install pins PostgreSQL to a minor release** (`postgres:17.12-alpine` in
   `deploy/compose/compose.yaml`, up to 0.9.0 the moving tag `17-alpine`). `proxcloud-up.sh upgrade` pulls every
   image of the file, so a newer `17-alpine` recreated PostgreSQL, and Keycloak with it, during a portal upgrade
@@ -39,6 +46,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The provider sync no longer writes `onboot` on withdrawn Kubernetes node templates.** The pass of v0.9.0 set
+  it on every node template an import receipt of the portal holds, withdrawn imports included. A withdrawn
+  template is kept as it was for forensics and no new node group gets it, so the pass now skips a template tagged
+  `pc-tu-withdrawn` without reading it (`templateupdates.StartNodeTemplatesAtBoot`). A cluster created on such a
+  template before the withdraw still clones from it, and Proxmox copies `onboot` at the clone, so such a worker
+  has none until the sync's worker pass sets it, at the next sync (`docs/managed-services.md`, "After a Proxmox
+  node reboots"). Not verified on a lab.
+- **Deleting a tenant cluster no longer asks Proxmox to delete a `csi@pve` token that was never made.** No cluster
+  made since the CSI gateway has one, and Proxmox answered the delete with a `500` in its log. The release now
+  lists the tokens of `csi@pve` and sends the delete only when the cluster's id is among them. A token that exists
+  and cannot be deleted still fails the release, and when the list cannot be read the delete is sent as before
+  (`pve.RevokeClusterCSIToken`). Not verified on a lab.
 - **Admin console: the refusal `409 bom_installed` reads as a plain message.** When an upgrade had finished in
   another session and Upgrade was pressed on a page that still showed the plan, the page showed the API's own
   text about `targetBom`. It now says that the platform is already on this release and that no run was started.

@@ -139,6 +139,8 @@ func TestKubernetesDeleteReleasesTheTokenWithoutASync(t *testing.T) {
 			fmt.Fprint(w, `{"data":[{"type":"qemu","vmid":125,"node":"pve1","name":"web","pool":"pc-p1","status":"running"}]}`)
 		case r.Method == http.MethodGet && path == "/cluster/firewall/groups": // the release looks for the workers' security group
 			fmt.Fprint(w, `{"data":[]}`)
+		case r.Method == http.MethodGet && path == "/access/users/csi@pve/token": // no token of this cluster: no delete for one
+			fmt.Fprint(w, `{"data":[{"tokenid":"gateway"}]}`)
 		case r.Method == http.MethodDelete && strings.Contains(path, "/token/"):
 			revoked = append(revoked, path)
 			fmt.Fprint(w, `{"data":null}`)
@@ -287,8 +289,8 @@ func TestKubernetesDeleteReleasesTheTokenWithoutASync(t *testing.T) {
 		t.Fatalf("cascade finished: %s %s", state, code)
 	}
 	mu.Lock()
-	if len(revoked) != 2 || !strings.HasSuffix(revoked[0], "/access/users/capmox@pve/token/pc-c-a") {
-		t.Fatalf("revoked = %v, want the cluster's token (and the csi@pve one an older cluster may hold)", revoked)
+	if len(revoked) != 1 || !strings.HasSuffix(revoked[0], "/access/users/capmox@pve/token/pc-c-a") {
+		t.Fatalf("revoked = %v, want the cluster's token alone: csi@pve lists no token of this cluster, so no delete is sent for one", revoked)
 	}
 	mu.Unlock()
 	if len(kube.markers) != 0 {
@@ -299,7 +301,7 @@ func TestKubernetesDeleteReleasesTheTokenWithoutASync(t *testing.T) {
 	if _, err := jobs.Enqueue(ctx, durablejobs.KamajiRelease, "k8s/pc-c-b", []byte(`{"serviceId":"k8s","projectId":"p1","clusterId":"pc-c-b"}`), 20); err != nil {
 		t.Fatal(err)
 	}
-	if state, _ := look("pc-c-b"); state != "succeeded" || revokes() != 2 {
+	if state, _ := look("pc-c-b"); state != "succeeded" || revokes() != 1 {
 		t.Fatalf("already released: %s, %d tokens revoked", state, revokes())
 	}
 
@@ -307,7 +309,7 @@ func TestKubernetesDeleteReleasesTheTokenWithoutASync(t *testing.T) {
 	if _, err := jobs.Enqueue(ctx, durablejobs.KamajiRelease, "k8s/pc-c-e", []byte(`{"serviceId":"removed","projectId":"p1","clusterId":"pc-c-e"}`), 20); err != nil {
 		t.Fatal(err)
 	}
-	if state, _ := look("pc-c-e"); state != "succeeded" || revokes() != 2 {
+	if state, _ := look("pc-c-e"); state != "succeeded" || revokes() != 1 {
 		t.Fatalf("provider removed: %s, %d tokens revoked", state, revokes())
 	}
 
@@ -361,6 +363,8 @@ func TestFailedCreateReleasesWithANodeDown(t *testing.T) {
 			fmt.Fprintf(w, `{"data":[{"type":"qemu","vmid":130,"node":"pve2","pool":"pc-%s","status":"unknown"}]}`, f.projectID)
 		case r.Method == http.MethodGet && path == "/cluster/firewall/groups": // the release looks for the workers' security group
 			fmt.Fprint(w, `{"data":[]}`)
+		case r.Method == http.MethodGet && path == "/access/users/csi@pve/token": // a cluster from before the CSI gateway
+			fmt.Fprint(w, `{"data":[{"tokenid":"gateway"},{"tokenid":"pc-c-a"}]}`)
 		case r.Method == http.MethodDelete && strings.Contains(path, "/token/"):
 			revoked = append(revoked, path)
 			fmt.Fprint(w, `{"data":null}`)
@@ -380,7 +384,7 @@ func TestFailedCreateReleasesWithANodeDown(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(revoked) != 2 || !strings.HasSuffix(revoked[0], "/access/users/capmox@pve/token/pc-c-a") {
-		t.Fatalf("revoked = %v, want the cluster's tokens", revoked)
+		t.Fatalf("revoked = %v, want the cluster's tokens: csi@pve lists one for it, as for a cluster from before the CSI gateway", revoked)
 	}
 	if n := f.clusterRows(t, "vmbrw"); n != 0 || len(kube.markers) != 0 {
 		t.Fatalf("%d address rows and %d markers left", n, len(kube.markers))

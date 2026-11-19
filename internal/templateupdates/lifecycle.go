@@ -283,7 +283,10 @@ func importTemplateBy(ctx context.Context, pv templateReader, name, digest, node
 }
 
 // StartNodeTemplatesAtBoot sets onboot on every Kubernetes node template of the provider that one of recs holds
-// (Receipt.Holds: an import of this portal that finished and still names its template) and that lacks it. Import
+// (Receipt.Holds: an import of this portal that finished and still names its template), that is not withdrawn and
+// that lacks it. A withdrawn template (pc-tu-withdrawn) is kept for forensics and is neither read nor written: no new
+// node group gets it, and a worker that a cluster still pinned to it clones is covered by the sync's worker pass
+// (pve.Service.StartWorkersAtBoot). Import
 // writes the option since v0.9.0 (Executor.importDisk); this is the same write for a template imported before, so
 // that the machines cloned from it from now on start with their Proxmox node. It is the provider sync's pass. A
 // template no receipt holds (built by the image pipeline, the site's own, another portal's) is neither read nor
@@ -299,7 +302,7 @@ func StartNodeTemplatesAtBoot(ctx context.Context, pv LifecyclePVE, recs []Recei
 		i := slices.IndexFunc(recs, func(r Receipt) bool {
 			return r.Payload.Variant == "kubernetes" && r.Payload.ServiceID == serviceID && r.Holds(row)
 		})
-		if i < 0 || row.NodeDown {
+		if i < 0 || row.NodeDown || hasTagValue(row.Tags, pve.TagTemplateWithdrawn) {
 			continue
 		}
 		cfg, err := importTemplate(ctx, pv, recs[i].Payload, row.Node, row.VMID)
