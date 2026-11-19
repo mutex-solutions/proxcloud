@@ -498,7 +498,7 @@ type MachineDetail struct {
 // JoinError is cloud-init's own account of a worker that did not join, read through the guest agent and masked.
 type JoinError struct {
 	Errors    []string `json:"errors"`              // the errors of /run/cloud-init/result.json
-	LogTail   string   `json:"logTail,omitempty"`   // the end of /var/log/cloud-init-output.log
+	LogTail   string   `json:"logTail,omitempty"`   // the join and its error, of /var/log/cloud-init-output.log
 	ReadError string   `json:"readError,omitempty"` // why nothing could be read
 }
 

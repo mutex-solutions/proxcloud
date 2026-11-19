@@ -397,8 +397,9 @@ the service account may not read Machines.
 
 `joinError` is present only for a machine with `code` `not_joined` and `attention` true, on at most five machines
 of one answer: what cloud-init in the worker says, read at this request through the Proxmox guest agent
-(`errors` of `/run/cloud-init/result.json`, `logTail` the last 40 lines of `/var/log/cloud-init-output.log`) and
-never stored. kubeadm bootstrap tokens, CA hashes, certificate keys and other credentials are replaced by
+(`errors` of `/run/cloud-init/result.json`; `logTail` an excerpt of `/var/log/cloud-init-output.log`: from the last
+`kubeadm join` to the end, without the SSH host key output, at most 6000 bytes, with `[... N lines left out ...]`
+where a long join was shortened) and never stored. kubeadm bootstrap tokens, CA hashes, certificate keys and other credentials are replaced by
 `[MASKED]` or `[REDACTED]`. The read permission is enough for it: a caller with `admin:service:read` makes the portal
 read these two files in the worker. `readError` instead says in general words why nothing could be read. `healthChecks` are
 the node groups' MachineHealthChecks (cluster chart 0.1.14 and later), `[]` when there is none or the service

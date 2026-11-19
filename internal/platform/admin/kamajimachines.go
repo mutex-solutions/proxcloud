@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"regexp"
@@ -26,9 +27,17 @@ import (
 const (
 	cloudInitResultPath = "/run/cloud-init/result.json"
 	cloudInitOutputPath = "/var/log/cloud-init-output.log"
-	// joinLogTailBytes and joinLogTailLines bound what of the log is answered: the end, where kubeadm's error is.
+	// joinLogReadBytes bounds what of the log is looked at; joinLogTailBytes and joinLogTailLines what is answered.
+	joinLogReadBytes = 256 << 10
 	joinLogTailBytes = 6000
 	joinLogTailLines = 40
+	// joinLogLineBytes is the most of one line that is answered: its end.
+	joinLogLineBytes = 1000
+	// joinLogEndLines of the answer are always the log's last lines: cloud-init's own summary of the failure.
+	joinLogEndLines = 8
+	// joinNoiseBlockLines bounds one dropped block (a host key with its art is 17 lines): a block whose end is not
+	// found does not take the rest of the log with it.
+	joinNoiseBlockLines = 24
 	// joinErrorMachines bounds the guest reads of one request: two calls to Proxmox per machine.
 	// ponytail: the first five machines only; a page per machine if a cluster ever has more that did not join.
 	joinErrorMachines = 5
@@ -60,8 +69,113 @@ func maskJoinText(text string) string {
 	return machineText(text)
 }
 
-// joinError reads cloud-init's result and the end of its output log with read, and masks both. A file that cannot be
-// read is left out; when neither can, ReadError says why in words that name no internal address.
+// What cloud-init prints around the join that says nothing about it. On the node image of the platform BOM (Ubuntu
+// 26.04) the SSH host keys are generated and printed AFTER the user scripts, so the end of the log is 40 lines of
+// key art and kubeadm's error is above it (lab round of 2026-11-19, finding Q3).
+var (
+	joinNoiseStart = regexp.MustCompile(`^(Generating public/private \S+ key pair|-----BEGIN SSH HOST KEY (FINGERPRINTS|KEYS)-----)`)
+	joinNoiseEnd   = regexp.MustCompile(`^(\+-+\[SHA256\]-+\+|-----END SSH HOST KEY (FINGERPRINTS|KEYS)-----)`)
+	// joinStart is where the last join begins: kubeadm's first line, or the command as a shell trace prints it.
+	joinStart = regexp.MustCompile(`\[preflight\] Running pre-flight checks|kubeadm join`)
+	// joinTelling marks the lines that say what went wrong, kubeadm's and cloud-init's.
+	joinTelling = regexp.MustCompile(`(?i)error|fail|fatal|couldn't|could not|cannot|unable|timed? ?out|refused|denied|unreachable|no route|not found|invalid|expired|x509|warning`)
+)
+
+// joinLogExcerpt is the part of a worker's cloud-init output log that says why the join failed, masked: from the
+// start of the last kubeadm join to the end of the log, without the SSH host key output and cloud-init's tables.
+// When that is more than joinLogTailLines or joinLogTailBytes, the first line of the join, the last joinLogEndLines
+// and, between them, the lines that name an error (the latest first, while they fit) are kept, with a line that
+// counts each gap. A log without a join is answered the same way from its start. Never more than joinLogTailLines
+// plus the gap lines, nor joinLogTailBytes.
+func joinLogExcerpt(log string) string {
+	if len(log) > joinLogReadBytes {
+		// The first line (or, in a log of one line, the first word) is cut in two: a half token would not match the
+		// masks, and half a rune is not text.
+		log = cutToBytes(log, joinLogReadBytes)
+	}
+	var kept []string
+	noise := 0 // lines of a noise block still to drop
+	for _, line := range strings.Split(log, "\n") {
+		line = strings.TrimRight(line, "\r")
+		switch {
+		case noise > 0:
+			if noise--; joinNoiseEnd.MatchString(line) {
+				noise = 0
+			}
+		case joinNoiseStart.MatchString(line):
+			noise = joinNoiseBlockLines
+		case !strings.HasPrefix(line, "ci-info: "):
+			kept = append(kept, line)
+		}
+	}
+	// Masked as one text (a PEM block spans lines), then cut into lines again.
+	lines := strings.Split(strings.Trim(maskJoinText(strings.Join(kept, "\n")), "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if joinStart.MatchString(lines[i]) {
+			// The shell trace of the command and kubeadm's first line belong together.
+			for i > 0 && joinStart.MatchString(lines[i-1]) {
+				i--
+			}
+			lines = lines[i:]
+			break
+		}
+	}
+	size := 0
+	for i, line := range lines {
+		if len(line) > joinLogLineBytes { // the cause is at the end of a kubeadm error line
+			lines[i] = cutToBytes(line, joinLogLineBytes)
+		}
+		size += len(lines[i]) + 1
+	}
+	if len(lines) > joinLogTailLines || size > joinLogTailBytes {
+		const gapLine = "[... %d lines left out ...]"
+		keep := map[int]bool{0: true}
+		size = len(lines[0]) + 1
+		for i := max(len(lines)-joinLogEndLines, 1); i < len(lines); i++ {
+			keep[i] = true
+			size += len(lines[i]) + 1
+		}
+		for i := len(lines) - joinLogEndLines - 1; i > 0 && len(keep) < joinLogTailLines; i-- {
+			if n := len(lines[i]) + 1 + len(gapLine) + 8; joinTelling.MatchString(lines[i]) && size+n <= joinLogTailBytes {
+				keep[i] = true
+				size += n
+			}
+		}
+		var out []string
+		last := -1
+		for i, line := range lines {
+			if !keep[i] {
+				continue
+			}
+			if gap := i - last - 1; gap > 0 {
+				out = append(out, fmt.Sprintf(gapLine, gap))
+			}
+			out, last = append(out, line), i
+		}
+		lines = out
+	}
+	text := strings.Join(lines, "\n")
+	if len(text) > joinLogTailBytes { // only when the first and the last lines alone are too long
+		text = cutToBytes(text, joinLogTailBytes)
+	}
+	return text
+}
+
+// cutToBytes keeps the last n bytes of text, from the next line start on (or, in one long line, the next word): the
+// text is already masked or about to be, and half a token would not match the masks; half a rune is not text.
+func cutToBytes(text string, n int) string {
+	text = text[len(text)-n:]
+	if i := strings.IndexByte(text, '\n'); i >= 0 {
+		text = text[i+1:]
+	} else {
+		text = text[strings.IndexAny(text, " \t")+1:]
+	}
+	return strings.ToValidUTF8(text, "")
+}
+
+// joinError reads cloud-init's result and its output log with read, and masks both; of the log it answers
+// joinLogExcerpt. A file that cannot be read is left out; when neither can, ReadError says why in words that name no
+// internal address.
 func joinError(ctx context.Context, read func(ctx context.Context, path string) (string, error)) *kamaji.JoinError {
 	out := &kamaji.JoinError{Errors: []string{}}
 	result, resultErr := read(ctx, cloudInitResultPath)
@@ -79,22 +193,7 @@ func joinError(ctx context.Context, read func(ctx context.Context, path string) 
 	}
 	log, logErr := read(ctx, cloudInitOutputPath)
 	if logErr == nil {
-		if len(log) > joinLogTailBytes {
-			// The first line (or, in a log of one line, the first word) is cut in two: a half token would not match the
-			// masks, and half a rune is not text.
-			log = log[len(log)-joinLogTailBytes:]
-			if i := strings.IndexByte(log, '\n'); i >= 0 {
-				log = log[i+1:]
-			} else {
-				log = log[strings.IndexAny(log, " \t")+1:]
-			}
-			log = strings.ToValidUTF8(log, "")
-		}
-		lines := strings.Split(strings.TrimRight(maskJoinText(log), "\n"), "\n")
-		if len(lines) > joinLogTailLines {
-			lines = lines[len(lines)-joinLogTailLines:]
-		}
-		out.LogTail = strings.Join(lines, "\n")
+		out.LogTail = joinLogExcerpt(log)
 	}
 	if resultErr != nil && logErr != nil {
 		var ae *pve.APIError

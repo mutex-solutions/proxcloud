@@ -95,6 +95,15 @@ test("a machine that did not join shows the guest's join error, and the repair s
   await expect(repair.getByRole("listitem").filter({ hasText: "batch" })).toContainText("so nothing is replaced: find the cause, then replace the machines here")
 })
 
+test("the provider page shows the API's notes on its settings", async ({ page }) => {
+  const note = "config.cluster.nodeStartupTimeoutSeconds and repairMaxUnhealthy are stored but have no effect on cluster chart 0.1.13"
+  await page.goto("/system/cloud-providers")
+  await expect(page.getByRole("button", { name: "Add provider" })).toBeVisible()
+  await recordCalls(page, { "GET /admin/service/svc-k8s-01": { ...svc, configNotes: [note] }, "GET /admin/service/svc-k8s-01/k8s-clusters": clusters })
+  await navigate(page, "/system/cloud-providers/svc-k8s-01")
+  await expect(page.getByRole("list", { name: "Notes on this provider's settings" })).toContainText(note)
+})
+
 test("a cluster without a health check says that nothing is replaced by itself", async ({ page }) => {
   await open(page, { ...machines, healthChecks: [] })
   await expect(page.getByRole("dialog").getByText("Automatic repair").locator("..")).toContainText("No node group of this cluster has a health check")
