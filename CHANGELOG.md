@@ -35,15 +35,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `409 seed_backup_missing` until the row is ok or the operator ticks "I took a backup of seed VM … that the portal
   cannot see" (`seedBackupTaken` on `POST …/runs`, recorded on the run and in the audit log). The row reads with the
   portal token, which may not see every backup store.
-- **Chart sources `proxmox-kamaji-cluster` 0.1.15 and `database-cluster` 0.5.2, not tagged and not pinned.** 0.1.15
+- **Charts `proxmox-kamaji-cluster` 0.1.15 and `database-cluster` 0.5.2**, published from their tags and pinned by
+  the platform BOM (the entry under Changed). 0.1.15
   reads two optional keys of a node group, `kubernetesVersions` (`<node>: <version>`) and `deleteFirstOn` (a list of
   nodes: `maxSurge 0`, `maxUnavailable 1`), on the MachineDeployment only; without them it renders what 0.1.14
   rendered, so no machine is replaced. 0.5.2 sets `enablePDB: false` on a PostgreSQL or FerretDB database of one
   instance, whose budget blocked every drain of its node; the database then restarts when its node is drained.
   Existing databases keep their chart until `bump-chart` ([managed-dbaas.md](docs/managed-dbaas.md#chart-pin--platform-update)).
-  The platform BOM still pins 0.1.14 and 0.5.1.
 
 ### Changed
+
+- **The platform BOM pins cluster chart `proxmox-kamaji-cluster` 0.1.15 and database chart `database-cluster`
+  0.5.2**, both published from their tags (`proxmox-kamaji-cluster-v0.1.15`, `database-cluster-v0.5.2`), by the
+  digest ghcr.io serves: 0.1.15 for the platform cluster (`pc-platform`) and for `tenantCharts.kubernetes`, 0.5.2
+  for `tenantCharts.database`.
+  - A new install on this BOM registers its Kubernetes provider with chart 0.1.15 and its database provider with
+    chart 0.5.2: a new database of one instance has no disruption budget. An upgrade run writes both on the
+    providers (`record only` in the plan); an existing tenant cluster or database keeps its chart until its own
+    bump.
+  - `pc-platform` lists 0.1.13 and 0.1.14 in `upgradeFrom`, so a platform on any BOM from 0.8.0 to 0.9.1 may move
+    to this one in one run. 0.1.13 stays in the list because a build accepts only its own BOM as the target: without
+    it a 0.8.x platform would have to install a 0.9 release first. The release check (`TestUpgradeRollsNoMachine`)
+    renders the chart each of the seven previous BOMs pins with the values that release rendered, and chart 0.1.15
+    with this build's values, and finds the same control plane, machine templates and bootstrap templates: the
+    move replaces no machine. No run writes the two new keys of 0.1.15 yet.
+  - A platform is not changed by the upgrade of ProxCloud: it stays on its BOM until an operator starts the
+    upgrade. A build of `main` (`0.10.0-dev`) stays refused as a target. Not run on a lab.
 
 - **The Proxmox console of a VM made by ProxCloud opens on the graphical display.** Templates were made with
   `vga: serial0`, so the Proxmox web UI opened every server, worker and platform machine on the serial terminal

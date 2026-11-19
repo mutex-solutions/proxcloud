@@ -685,14 +685,14 @@ func TestPlatformRunOnAPreviousBOM(t *testing.T) {
 	call(http.MethodPost, up+"/runs", fmt.Sprintf(`{"kind":"apply","targetBom":%q}`, strings.Repeat("3", 64)), http.StatusBadRequest)
 
 	// The same build as a release: 0.8.0 and main differ in the release line and the product's own charts, each of which
-	// lists the installed version in upgradeFrom, so the move is allowed: the release, tenantCharts.kubernetes, and the
+	// lists the installed version in upgradeFrom, so the move is allowed: the release, both tenantCharts, and the
 	// charts of capi, pc-platform, capi-tenant and platform. It wants the typed confirmation, records the target on
 	// the installation and where it comes from on the run.
 	release := cur.Release
 	cur.Release = "0.9.0"
 	defer func() { cur.Release = release }()
 	upgrade, _ := call(http.MethodGet, up+"/plan?target="+cur.SHA256, "", http.StatusOK)["data"].(map[string]any)["upgrade"].(map[string]any)
-	if upgrade["allowed"] != true || upgrade["confirm"] != "upgrade lab to 0.9.0" || len(upgrade["changes"].([]any)) != 6 || len(upgrade["blocking"].([]any)) != 0 {
+	if upgrade["allowed"] != true || upgrade["confirm"] != "upgrade lab to 0.9.0" || len(upgrade["changes"].([]any)) != 7 || len(upgrade["blocking"].([]any)) != 0 {
 		t.Fatalf("the plan of the move: %v", upgrade)
 	}
 	call(http.MethodPost, up+"/runs", fmt.Sprintf(`{"kind":"apply","targetBom":%q}`, cur.SHA256), http.StatusBadRequest)

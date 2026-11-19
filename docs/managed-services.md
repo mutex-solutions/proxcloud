@@ -448,7 +448,7 @@ router must carry and route the VLAN, which no check reads.
 
 - It needs cluster chart `proxmox-kamaji-cluster` 0.1.14 or newer, the first that reads the tag.
   The platform's BOM names the chart: with an older one the Check row `spec` fails and says so,
-  and nothing is rendered untagged. The BOM of this build names 0.1.14, so a new install can
+  and nothing is rendered untagged. The BOM of this build names 0.1.15, so a new install can
   tag. An installation on an earlier BOM (0.8.x, chart 0.1.13) is refused a tag; its network is
   fixed anyway.
 - For a tagged NIC Proxmox checks `SDN.Use` on `/sdn/zones/localnetwork/<bridge>/<tag>` (on
@@ -556,7 +556,7 @@ before the first run:
   (lease 60 s, renew deadline 40 s, retry 5 s). Its client cuts every request at 10 seconds, so
   the address is kept when one try in those 40 seconds gets through in under 10: a stall of about
   half a minute is survived, an etcd whose every write takes over 10 seconds is not. The BOM of
-  this release names 0.1.14, which keeps this; chart 0.1.11 gave up after 10.
+  this release names 0.1.15, which keeps this; chart 0.1.11 gave up after 10.
 - **The MTU of the platform network.** Cilium tunnels pod traffic between the machines at the
   machines' MTU. When the bridge's real path MTU between two nodes is below 1500 (the bridge is
   itself carried by an overlay), set the settings' MTU to it.
@@ -2027,13 +2027,15 @@ A chart of the product moves only to a version whose BOM entry lists the install
 `upgradeFrom`: the release checked that pair ([ci-release.md](ci-release.md#what-a-release-checks-about-its-bom-pairs)).
 
 From the BOM of 0.8.0, 0.8.1 or 0.8.2 to this one, the plan has every row of the table and no
-other: `pc-platform` from cluster chart 0.1.13 to 0.1.14, `capi`, `capi-tenant` and `platform` from
-platform chart 0.1.2 to 0.1.3, `tenantCharts.kubernetes` to 0.1.14, and the release. All four
+other: `pc-platform` from cluster chart 0.1.13 to 0.1.15, `capi`, `capi-tenant` and `platform` from
+platform chart 0.1.2 to 0.1.3, `tenantCharts.kubernetes` to 0.1.15, `tenantCharts.database` to 0.5.2,
+and the release. All four
 charts list the installed version in `upgradeFrom`, and the release's check found that chart
-0.1.14 renders the platform cluster's control plane and templates as 0.1.13 did, so no machine is
+0.1.15 renders the platform cluster's control plane and templates as 0.1.13 and 0.1.14 did, so no machine is
 replaced. After the upgrade the platform can go from 1 to 3 control plane machines, Replace works,
-and new tenant clusters get the health check. A build of `main`, whose BOM is a `-dev` one,
-refuses the move for that reason alone; the releases `v0.9.0` and `v0.9.1` allow it, as the candidates
+and new tenant clusters get the health check. From the BOM of 0.9.0, of one of its candidates or of 0.9.1 the plan has four changes:
+`pc-platform` from 0.1.14 to 0.1.15, the two tenant charts and the release. A build of `main`, whose BOM is a `-dev` one,
+refuses the move for that reason alone; the releases `v0.9.0` and `v0.9.1` allowed the move to their BOM (chart 0.1.14), as the candidates
 `v0.9.0-rc.1` and `v0.9.0-rc.2` did for a lab ([ci-release.md](ci-release.md#release-candidates)). From the BOM of 0.8.0 to
 that of `v0.9.0-rc.1` it was run on a lab without tenants (2026-11-19): six changes, and no machine
 replaced. Not run on a lab: the move from 0.8.1 or 0.8.2, the move to `0.9.0-rc.2`, to `0.9.0` or to `0.9.1`, three control
@@ -2351,8 +2353,8 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
   change of that field the API accepts after a run succeeded. Nothing in the installer writes an installation record,
   and a site with an installer-built services cluster is not shown on the page.
 - **The cluster chart's fixes of 0.1.12 reach a new install only.** The BOM names
-  `proxmox-kamaji-cluster` 0.1.14, for the platform cluster (which, with one control plane machine
-  and no VLAN tag, it renders as 0.1.12 and 0.1.13 do) and
+  `proxmox-kamaji-cluster` 0.1.15, for the platform cluster (which, with one control plane machine
+  and no VLAN tag, it renders as 0.1.12, 0.1.13 and 0.1.14 do) and
   for new tenant clusters (whose node group replicas it places by free capacity,
   [managed-k8s.md](managed-k8s.md#9-how-a-cluster-lands-on-proxmox)). A platform cluster built from the BOM that named 0.1.11 has a control
   plane node that registers the API address as its InternalIP (its kubelet has no `node-ip`;
@@ -2373,14 +2375,14 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
   ([Presets and the control plane count](#presets-and-the-control-plane-count)); no release builds
   either yet.
 - **No IPv6** on the platform network, and one platform network per installation. A VLAN tag needs
-  a BOM that names cluster chart 0.1.14, as this build's does, and the network is fixed after the
+  a BOM that names cluster chart 0.1.14 or newer, as this build's does, and the network is fixed after the
   first install: a platform installed without a tag never gets one
   ([the three forms](#the-platform-network-bridge-vlan-tag-or-routed)).
 - **No automated node leg** for an existing VLAN site: the commands are in
   [The path from tenants to the platform](#the-path-from-tenants-to-the-platform), by hand.
 - **Control plane machines on one node only.** The count is 1 or 3, and all three are on one
   Proxmox node and one store. Machines on several nodes (`controlPlane.nodes`) are refused, and so is
-  going from 3 back to 1 once a run has built three. Three need cluster chart 0.1.14, which this
+  going from 3 back to 1 once a run has built three. Three need cluster chart 0.1.14 or newer, which this
   build's BOM names. On an installation of an earlier BOM (0.8.x) the save, the Check and the run
   refuse 3 until the platform is upgraded to this release's BOM.
 - **kube-vip's lease values are those of one machine** (60, 40 and 5 seconds) also with three.

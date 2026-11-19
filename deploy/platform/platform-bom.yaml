@@ -37,8 +37,8 @@ capi:
   seed:     {core: "cluster-api:v1.14.4", bootstrap: "kubeadm:v1.14.4", controlPlane: "kubeadm:v1.14.4", infrastructure: "proxmox:v0.9.2", ipam: "in-cluster:v1.1.1"}
   workload: {core: "cluster-api:v1.14.4", bootstrap: "kubeadm:v1.14.4", controlPlane: "kamaji:v0.22.0", infrastructure: "proxmox:v0.9.2", ipam: "in-cluster:v1.1.1", addon: "helm:v0.6.4"}
 tenantCharts:                      # what the providers pin for new tenant clusters and databases
-  kubernetes: {repo: ghcr.io/mutex-solutions/charts, name: proxmox-kamaji-cluster, version: 0.1.14, digest: "sha256:71455927121c8c157cb439c1ad976ab8ab818761b0b9ee4f53e00a448801f0cd"}
-  database:   {repo: ghcr.io/mutex-solutions/charts, name: database-cluster, version: 0.5.1, digest: "sha256:44e34154ce4b734ea511ea6eb9a05fea937428c4ad229b5d2c9270994bde5aa6"}
+  kubernetes: {repo: ghcr.io/mutex-solutions/charts, name: proxmox-kamaji-cluster, version: 0.1.15, digest: "sha256:c4ab5bcb28ed95581b045d83844d2bd5f9e629b126abb6589f782086b9b2e0a9"}
+  database:   {repo: ghcr.io/mutex-solutions/charts, name: database-cluster, version: 0.5.2, digest: "sha256:8cd4be2e57f0b548767fe8fcb802240e78d23258b78c556031d8cb63c94a939c"}
 # Per component: cluster seed | workload; wave: applied and health-gated in ascending order per cluster (also the
 # upgrade order); install: application (default) | helmchart (the seed's ArgoCD only, the bootstrap exception);
 # group: the workload node group its pods go to ("" = system, "all" = a DaemonSet everywhere); stateful: prune off,
@@ -73,8 +73,8 @@ components:
     cluster: seed
     wave: 3
     namespace: pc-platform
-    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxmox-kamaji-cluster, version: 0.1.14, digest: "sha256:71455927121c8c157cb439c1ad976ab8ab818761b0b9ee4f53e00a448801f0cd"}
-    upgradeFrom: ["0.1.13"]
+    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxmox-kamaji-cluster, version: 0.1.15, digest: "sha256:c4ab5bcb28ed95581b045d83844d2bd5f9e629b126abb6589f782086b9b2e0a9"}
+    upgradeFrom: ["0.1.13", "0.1.14"]
     stateful: true
   - name: cilium
     cluster: workload
