@@ -20,6 +20,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/durablejobs"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
@@ -50,8 +51,10 @@ type fakePVEAPI struct {
 	nextPID   int
 	// knobs
 	ciStatus      string
-	failTagWrites bool // a config write carrying tags answers 500 (unreachable/changed)
-	down          bool // the whole API answers 503 (cluster unreachable)
+	failTagWrites bool     // a config write carrying tags answers 500 (unreachable/changed)
+	content       []any    // what every storage's content listing answers
+	destroys      []string // the query of every VM destroy
+	down          bool     // the whole API answers 503 (cluster unreachable)
 }
 
 func newFakePVEAPI() *fakePVEAPI {
@@ -99,6 +102,17 @@ func (f *fakePVEAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		write(map[string]any{"poolid": pool, "members": members})
+		return
+	case path == "/cluster/nextid":
+		if _, held := f.vms[atoi(r.Form.Get("vmid"))]; held {
+			w.WriteHeader(400)
+			_, _ = w.Write([]byte(`{"data":null,"errors":{"vmid":"VM ` + r.Form.Get("vmid") + ` already exists"}}`))
+			return
+		}
+		write(r.Form.Get("vmid"))
+		return
+	case strings.Contains(path, "/storage/") && strings.HasSuffix(path, "/content"):
+		write(append([]any{}, f.content...))
 		return
 	case path == "/cluster/status":
 		write([]any{map[string]any{"type": "cluster", "quorate": 1}, map[string]any{"type": "node", "name": "pve1", "ip": "192.0.2.11"},
@@ -198,6 +212,7 @@ func (f *fakePVEAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		write(map[string]any{"status": map[bool]string{true: "running", false: "stopped"}[vm.running]})
 	case rest == "" && r.Method == http.MethodDelete:
 		mut("destroy")
+		f.destroys = append(f.destroys, r.URL.RawQuery)
 		delete(f.vms, vmid)
 		write(f.upid(node, "qmdestroy", vmid))
 	case strings.HasPrefix(rest, "/agent/"):
@@ -233,6 +248,8 @@ func (f *fakePVEAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)
 	}
 }
+
+func atoi(s string) int { n, _ := strconv.Atoi(s); return n }
 
 func (f *fakePVEAPI) mutationsOf(vmid int) []string {
 	f.mu.Lock()
@@ -336,7 +353,7 @@ func newTLFixture(t *testing.T, vmEnabled bool) *tlFixture {
 	auditSvc := audit.NewService(audit.NewRepo(db), slog.Default())
 	svc := &templateupdates.Service{Token: func(context.Context) (string, string, error) { return "", "", nil }, Jobs: jobs, DB: db,
 		Receipts: rec, Smokes: smokes, VMEnabled: vmEnabled}
-	h := admin.NewHandler(admin.NewRepo(db), nil, nil, nil, nil, nil, nil, nil, auditSvc, esSvc, "", tlIss, tlCid)
+	h := admin.NewHandler(admin.NewRepo(db), nil, nil, nil, nil, nil, cloud.NewRepo(db), nil, auditSvc, esSvc, "", tlIss, tlCid)
 	h.SetProxmox(func(es *externalservice.ExternalService) (*pve.Service, error) {
 		if es.ID == "svc-pve2" {
 			return &pve.Service{C: c2, ServiceID: "svc-pve2"}, nil
@@ -797,6 +814,9 @@ func TestTemplateLifecycleFeatureFlagOff(t *testing.T) {
 			t.Fatalf("%s with the flag off: %d %s", c.path, w.Code, w.Body)
 		}
 	}
+	if w := f.do("admin-sub", "DELETE", base, nil); w.Code != 409 || errCode(w) != "vm_updates_disabled" {
+		t.Fatalf("delete with the flag off: %d %s", w.Code, w.Body)
+	}
 	f.pv.mu.Lock()
 	muts := append([]string(nil), f.pv.mutations...)
 	f.pv.mu.Unlock()
@@ -1120,5 +1140,187 @@ func TestTemplateWithdrawK8sGivesVersionsLine(t *testing.T) {
 	if len(res.Data.Providers) != 1 || res.Data.Providers[0].VersionsMapLine != `"1.35.10": "pve1=9210"` ||
 		!strings.Contains(strings.Join(res.Data.Warnings, " "), "names template VMIDs explicitly") {
 		t.Fatalf("k8s withdraw result: %+v", res.Data)
+	}
+}
+
+// Delete of a withdrawn template: refused, each with its own code, while it is not withdrawn, still named by a
+// Kubernetes provider's version map or by a cluster's node group, the base of a linked clone, under a smoke test or an
+// import job, tagged published again, or out of the pool; then destroyed with the disks of its config only, its
+// receipt freed, audited, and idempotent. A template deleted by hand is freed the same way.
+func TestTemplateDeleteWithdrawn(t *testing.T) {
+	ctx := context.Background()
+	f := newTLFixture(t, true)
+	p := templateupdates.VMPayload{Version: 1, Package: "proxcloud-vm-ubuntu-2604-k8s", Tag: "ubuntu-2604-k8s-1.35.10-20261112010203-cccccccccccc",
+		Digest: "sha256:" + strings.Repeat("f", 64), DiskDigest: "sha256:" + strings.Repeat("e", 64), DiskBytes: 4096, VirtualSizeBytes: 20 << 30,
+		OS: "ubuntu-2604", Variant: "kubernetes", KubernetesVersion: "1.35.10", BuildVersion: "20261112010203", ServiceID: "svc-pve", Node: "pve1",
+		ImportStorage: "nas-import", DiskStorage: "local-zfs"}
+	id := f.addImport(t, p, 9500)
+	path := "/admin/template-updates/templates/" + id
+	refused := func(what, code string, in ...string) {
+		t.Helper()
+		w := f.do("admin-sub", "DELETE", path, nil)
+		if w.Code != 409 || errCode(w) != code {
+			t.Fatalf("%s: %d %s, want 409 %s", what, w.Code, w.Body, code)
+		}
+		for _, s := range in {
+			if !strings.Contains(w.Body.String(), s) {
+				t.Fatalf("%s: the refusal does not name %q: %s", what, s, w.Body)
+			}
+		}
+		if m := f.pv.mutationsOf(9500); len(m) != 0 && m[len(m)-1] == "destroy 9500" {
+			t.Fatalf("%s: the template was destroyed", what)
+		}
+	}
+	setTags := func(tags string) {
+		f.pv.mu.Lock()
+		f.pv.vms[9500].cfg["tags"] = tags
+		f.pv.mu.Unlock()
+	}
+	refused("staged", "not_withdrawn")
+	if w := f.do("admin-sub", "POST", path+"/withdraw", map[string]any{"reason": "kubelet crash loop on boot", "confirmDigest": p.Digest}); w.Code != 200 {
+		t.Fatalf("withdraw: %d %s", w.Code, w.Body)
+	}
+	if acts := f.state(t, id)["actions"].(map[string]any); acts["delete"] != true || acts["withdraw"] == true {
+		t.Fatalf("actions of a withdrawn template: %v", acts)
+	}
+	if w := f.do("support-sub", "DELETE", path, nil); w.Code != 403 {
+		t.Fatalf("delete without admin:service:manage: %d %s", w.Code, w.Body)
+	}
+	withdrawn := f.pv.tags(9500)
+
+	// A Kubernetes provider on this Proxmox provider still offers a version from it.
+	es := f.db.C("externalService")
+	if _, err := es.InsertOne(ctx, pgdoc.M{"_id": "svc-k8s", "name": "Lab Kubernetes", "type": "CLOUD", "status": "PUBLIC",
+		"config": pgdoc.M{"provider": "kamaji", "cluster": pgdoc.M{"proxmoxServiceId": "svc-pve", "versions": pgdoc.M{"1.35.10": "pve1=9500,pve2=9501"}}}}); err != nil {
+		t.Fatal(err)
+	}
+	refused("provider version", "template_in_use", "Lab Kubernetes", "1.35.10")
+	if _, err := es.SetByID(ctx, "svc-k8s", pgdoc.M{"config.cluster.versions": pgdoc.M{"1.35.10": "pve1=9210"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	// The provider moved on, a cluster's node group did not: its workers are still cloned from 9500.
+	if _, err := f.db.C("cloudResource").InsertOne(ctx, pgdoc.M{"_id": "cr1", "projectId": "p1", "serviceId": "svc-k8s", "externalId": "k8s-abc", "type": cloud.TypeKubernetesCluster,
+		"data": pgdoc.M{"cluster": pgdoc.M{"node_groups": []any{pgdoc.M{"name": "workers", "image_id": "pve1=9500"}}}}}); err != nil {
+		t.Fatal(err)
+	}
+	refused("cluster node group", "template_in_use", "k8s-abc", "workers")
+	if _, err := f.db.C("cloudResource").SetByID(ctx, "cr1", pgdoc.M{"data.cluster.node_groups": []any{pgdoc.M{"name": "workers", "image_id": "pve1=9210"}}}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	f.pv.mu.Lock()
+	f.pv.content = []any{map[string]any{"volid": "local-zfs:base-9500-disk-0", "vmid": 9500},
+		map[string]any{"volid": "local-zfs:base-9500-disk-0/vm-105-disk-0", "vmid": 105, "parent": "base-9500-disk-0@__base__"},
+		map[string]any{"volid": "local-zfs:vm-106-disk-0", "vmid": 106}}
+	f.pv.mu.Unlock()
+	refused("linked clone", "linked_clones", "105")
+	f.pv.mu.Lock()
+	f.pv.content = f.pv.content[:1]
+	f.pv.mu.Unlock()
+
+	now := time.Now().UTC().Add(time.Second)
+	smoke := &templateupdates.SmokeReceipt{ID: uuid.NewString(), ImportID: id, CreatedAt: now, Payload: templateupdates.SmokePayload{Version: 1, ImportID: id,
+		Digest: p.Digest, ServiceID: p.ServiceID, Node: p.Node, TemplateVMID: 9500}}
+	if err := f.svc.Smokes.SaveSmoke(ctx, smoke); err != nil {
+		t.Fatal(err)
+	}
+	refused("smoke running", "smoke_running")
+	smoke.Step, smoke.Result, smoke.FinishedAt, smoke.Cleaned = templateupdates.SmokeFinished, templateupdates.SmokeFail, &now, true
+	if err := f.svc.Smokes.SaveSmoke(ctx, smoke); err != nil {
+		t.Fatal(err)
+	}
+
+	setTags(withdrawn + ";pc-tu-k8s-public")
+	refused("published again by hand", "template_published")
+	setTags(strings.ReplaceAll(withdrawn, "pc-tu-withdrawn", "pc-tu-staged"))
+	refused("withdrawn tag removed by hand", "not_withdrawn")
+	setTags(withdrawn)
+	f.pv.mu.Lock()
+	f.pv.vms[9500].cfg["pool"] = "pc-tenant1"
+	f.pv.mu.Unlock()
+	refused("moved out of pc-templates", "template_present")
+	f.pv.mu.Lock()
+	f.pv.vms[9500].cfg["pool"] = pve.TemplatePool
+	f.pv.vms[9500].cfg["name"] = "kept-by-the-site"
+	f.pv.mu.Unlock()
+	refused("renamed", "template_mismatch")
+	f.pv.mu.Lock()
+	f.pv.vms[9500].cfg["name"] = templateupdates.TemplateName(p)
+	f.pv.mu.Unlock()
+
+	w := f.do("admin-sub", "DELETE", path, nil)
+	var res struct {
+		Data templateupdates.LifecycleResult `json:"data"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &res)
+	if w.Code != 200 || len(res.Data.Changed) != 1 || res.Data.Changed[0] != 9500 || res.Data.Unchanged {
+		t.Fatalf("delete: %d %s", w.Code, w.Body)
+	}
+	f.pv.mu.Lock()
+	_, still := f.pv.vms[9500]
+	destroys := append([]string(nil), f.pv.destroys...)
+	f.pv.mu.Unlock()
+	if still || len(destroys) != 1 || destroys[0] != "purge=1" {
+		t.Fatalf("destroy: VM still there %v, sent %v, want purge=1 alone (never destroy-unreferenced-disks)", still, destroys)
+	}
+	if r, _ := f.svc.Receipts.Load(ctx, id); r == nil || !r.TemplateGone {
+		t.Fatalf("receipt not freed: %+v", r)
+	}
+	if st := f.state(t, id); st["state"] != templateupdates.StateTemplateMissing {
+		t.Fatalf("state after delete: %v", st["state"])
+	}
+	if w := f.do("admin-sub", "DELETE", path, nil); w.Code != 200 || !strings.Contains(w.Body.String(), `"unchanged":true`) {
+		t.Fatalf("repeated delete: %d %s", w.Code, w.Body)
+	}
+	if m := f.pv.mutationsOf(9210); len(m) != 0 {
+		t.Fatalf("another template mutated: %v", m)
+	}
+	audited := false
+	for deadline := time.Now().Add(5 * time.Second); !audited && time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		evs, err := f.audit.QueryAll(ctx, audit.Filter{ResourceType: "TEMPLATE_UPDATES"}, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, ev := range evs {
+			for _, c := range ev.Changes {
+				audited = audited || c.Field == "action" && c.NewValue == "delete" && ev.Outcome == audit.OutcomeSuccess
+			}
+		}
+	}
+	if !audited {
+		t.Fatal("no audit row of the delete")
+	}
+
+	// A withdrawn template somebody destroyed in Proxmox: nothing to destroy, the receipt is freed.
+	p2 := tlPayload("debian-12", "20261111000000", "7")
+	id2 := f.addImport(t, p2, 9400)
+	if w := f.do("admin-sub", "POST", "/admin/template-updates/templates/"+id2+"/withdraw", map[string]any{"reason": "kernel regression on our hardware", "confirmDigest": p2.Digest}); w.Code != 200 {
+		t.Fatalf("withdraw: %d %s", w.Code, w.Body)
+	}
+	f.pv.mu.Lock()
+	delete(f.pv.vms, 9400)
+	f.pv.mu.Unlock()
+	if w := f.do("admin-sub", "DELETE", "/admin/template-updates/templates/"+id2, nil); w.Code != 200 || !strings.Contains(w.Body.String(), `"unchanged":true`) {
+		t.Fatalf("delete of a template already gone: %d %s", w.Code, w.Body)
+	}
+	if r, _ := f.svc.Receipts.Load(ctx, id2); r == nil || !r.TemplateGone || len(f.pv.mutationsOf(9400)) != 1 {
+		t.Fatalf("receipt of a template already gone: %+v, mutations %v", r, f.pv.mutationsOf(9400))
+	}
+
+	// An import whose job has not ended (its last step is still to come).
+	p3 := tlPayload("debian-12", "20261112000000", "8")
+	raw, _ := json.Marshal(p3)
+	job, err := f.jobs.Enqueue(ctx, durablejobs.TemplateUpdateVM, "tu-vm-delete-test", raw, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.Receipts.Save(ctx, &templateupdates.Receipt{ID: job, Kind: "vm", Payload: p3, CreatedAt: now, UpdatedAt: now, Step: templateupdates.StepTemplated, VMID: 9401}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.Receipts.Block(ctx, templateupdates.BlockedDigest{Digest: p3.Digest, Reason: "withdrawn while importing", At: now}); err != nil {
+		t.Fatal(err)
+	}
+	if w := f.do("admin-sub", "DELETE", "/admin/template-updates/templates/"+job, nil); w.Code != 409 || errCode(w) != "job_running" {
+		t.Fatalf("delete under a running import job: %d %s", w.Code, w.Body)
 	}
 }
