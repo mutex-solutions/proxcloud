@@ -1229,17 +1229,13 @@ func TestPlatformUpgradeNeedsASeedBackup(t *testing.T) {
 		return out
 	}
 
-	// This build as a release whose BOM is the newest previous one with a newer k3s: the only kind of pair that
+	// This build as a release whose BOM is that of 0.8.0 with a newer k3s: the only kind of pair that
 	// replaces the seed's k3s (no BOM on main names another k3s yet).
 	cur, err := platformlife.Current()
 	if err != nil {
 		t.Fatal(err)
 	}
-	prev, err := platformlife.Previous()
-	if err != nil || len(prev) == 0 {
-		t.Fatalf("no previous BOM: %v", err)
-	}
-	old := prev[0]
+	old := bom080(t)
 	saved := *cur.BOM
 	defer func() { *cur.BOM = saved }()
 	*cur.BOM = *old.BOM
@@ -1360,17 +1356,13 @@ func TestPlatformUpgradeThatReplacesMachines(t *testing.T) {
 		return fmt.Sprint(d["code"])
 	}
 
-	// This build as a release whose BOM is the newest previous one with the next Kubernetes patch, its node image and a
+	// This build as a release whose BOM is that of 0.8.0 with the next Kubernetes patch, its node image and a
 	// cluster chart that can order a rollout: no BOM on main names another Kubernetes yet.
 	cur, err := platformlife.Current()
 	if err != nil {
 		t.Fatal(err)
 	}
-	prev, err := platformlife.Previous()
-	if err != nil || len(prev) == 0 {
-		t.Fatalf("no previous BOM: %v", err)
-	}
-	old := prev[0]
+	old := bom080(t)
 	saved := *cur.BOM
 	defer func() { *cur.BOM = saved }()
 	*cur.BOM = *old.BOM
@@ -1430,4 +1422,21 @@ func TestPlatformUpgradeThatReplacesMachines(t *testing.T) {
 	if err != nil || run.Part != platformlife.PartSeed || len(run.Stages) != 7 || run.Stages[6].ID != "seed-platform" {
 		t.Fatalf("the seed part's run: %+v %v", run, err)
 	}
+}
+
+// bom080 is the previous BOM of 0.8.0, by its release: the files under previous/ are read in the order of their names,
+// and 0.10.0-rc.1 sorts before 0.8.0.
+func bom080(t *testing.T) platformlife.Embedded {
+	t.Helper()
+	prev, err := platformlife.Previous()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range prev {
+		if b.Release == "0.8.0" {
+			return b
+		}
+	}
+	t.Fatal("this build does not embed the 0.8.0 BOM")
+	return platformlife.Embedded{}
 }

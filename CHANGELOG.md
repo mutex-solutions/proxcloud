@@ -122,6 +122,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   BOM on `main`: three of 0.8.x, the two candidates, `0.9.0` and `0.9.1`. No apply on such a platform was run on
   a lab by this change.
 
+- **The platform BOM on `main` is `0.10.0-dev` again, and the build carries the BOM of `0.10.0-rc.1`**
+  (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.10.0-rc.1.yaml`). The commit of the candidate
+  `v0.10.0-rc.1` left the BOM at `0.10.0-rc.1`, and the release gate refuses only `-dev`. A platform installed by
+  the candidate, or moved to its BOM by an upgrade, stays on it under a later build and is not refused
+  (`bom_unsupported`) while the file is carried. Its pins are those of `main`, so the plan from it has one change,
+  the release, and `TestUpgradeRollsNoMachine` compares eight previous BOMs with the BOM on `main`: three of 0.8.x,
+  the two candidates of 0.9.0, `0.9.0`, `0.9.1` and `0.10.0-rc.1`. Four tests took the first file under `previous/`
+  for the oldest BOM; `0.10.0-rc.1` sorts before `0.8.0`, so they name `0.8.0` now. No apply on such a platform was
+  run on a lab by this change.
+
 ### Fixed
 
 - **Managed services: an old archive of another VM no longer counts as the seed's backup.** Proxmox gives a freed VMID
