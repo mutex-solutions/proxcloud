@@ -7,21 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- **The provider sync no longer writes `onboot` on withdrawn Kubernetes node templates.** The pass of v0.9.0 set
-  it on every node template an import receipt of the portal holds, withdrawn imports included. A withdrawn
-  template is kept as it was for forensics and no new node group gets it, so the pass now skips a template tagged
-  `pc-tu-withdrawn` without reading it (`templateupdates.StartNodeTemplatesAtBoot`). A cluster created on such a
-  template before the withdraw still clones from it, and Proxmox copies `onboot` at the clone, so such a worker
-  has none until the sync's worker pass sets it, at the next sync (`docs/managed-services.md`, "After a Proxmox
-  node reboots"). Not verified on a lab.
-- **Deleting a tenant cluster no longer asks Proxmox to delete a `csi@pve` token that was never made.** No cluster
-  made since the CSI gateway has one, and Proxmox answered the delete with a `500` in its log. The release now
-  lists the tokens of `csi@pve` and sends the delete only when the cluster's id is among them. A token that exists
-  and cannot be deleted still fails the release, and when the list cannot be read the delete is sent as before
-  (`pve.RevokeClusterCSIToken`). Not verified on a lab.
-
 ### Changed
 
 - **The operator's provider page counts the clusters behind the provider's chart.** The card "Managed clusters"
@@ -42,6 +27,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The provider sync no longer writes `onboot` on withdrawn Kubernetes node templates.** The pass of v0.9.0 set
+  it on every node template an import receipt of the portal holds, withdrawn imports included. A withdrawn
+  template is kept as it was for forensics and no new node group gets it, so the pass now skips a template tagged
+  `pc-tu-withdrawn` without reading it (`templateupdates.StartNodeTemplatesAtBoot`). A cluster created on such a
+  template before the withdraw still clones from it, and Proxmox copies `onboot` at the clone, so such a worker
+  has none until the sync's worker pass sets it, at the next sync (`docs/managed-services.md`, "After a Proxmox
+  node reboots"). Not verified on a lab.
+- **Deleting a tenant cluster no longer asks Proxmox to delete a `csi@pve` token that was never made.** No cluster
+  made since the CSI gateway has one, and Proxmox answered the delete with a `500` in its log. The release now
+  lists the tokens of `csi@pve` and sends the delete only when the cluster's id is among them. A token that exists
+  and cannot be deleted still fails the release, and when the list cannot be read the delete is sent as before
+  (`pve.RevokeClusterCSIToken`). Not verified on a lab.
 - **The plan of an installed platform names the cluster firewall rule a run writes.** On a platform installed by
   0.8.x the rule `proxcloud:pve-api:<installation>` does not exist, and an apply or an upgrade run writes it in
   stage 3 (`seed-vm`) while the plan listed no such change (production upgrade of 2026-11-19: six changes in the
