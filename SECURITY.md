@@ -40,6 +40,7 @@ published artifacts are pullable before relying on them.
 | `v0.5.0`, `v0.5.1`, `v0.5.2`, `v0.6.0`, `v0.7.0`, `v0.8.0`, `v0.8.1`, `v0.8.2` | Older stable releases; no stated backport support; upgrade to `v0.9.1` |
 | `v0.4.0` | Older stable release; no stated backport support; upgrade to `v0.9.1` (breaking API changes since `v0.4.0`, see the changelog) |
 | `v0.4.0-rc.1`, `v0.7.0-rc.1`, `v0.9.0-rc.1`, `v0.9.0-rc.2` | Superseded prereleases; upgrade to `v0.9.1` |
+| `v0.10.0-rc.1` | Release candidate of `v0.10.0`, for a lab; not for production and not supported; use `v0.9.1` |
 | Older / untagged downstream builds | No stated backport support; report the exact commit |
 
 Every tag from `v0.4.0-rc.1` to `v0.6.0` mounts the unauthenticated job triggers

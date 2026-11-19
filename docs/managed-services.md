@@ -2128,7 +2128,7 @@ charts list the installed version in `upgradeFrom`, and the release's check foun
 replaced. After the upgrade the platform can go from 1 to 3 control plane machines, Replace works,
 and new tenant clusters get the health check. From the BOM of 0.9.0, of one of its candidates or of 0.9.1 the plan has four changes:
 `pc-platform` from 0.1.14 to 0.1.15, the two tenant charts and the release. A build of `main`, whose BOM is a `-dev` one,
-refuses the move for that reason alone; the releases `v0.9.0` and `v0.9.1` allowed the move to their BOM (chart 0.1.14), as the candidates
+refuses the move for that reason alone; the candidate `v0.10.0-rc.1` allows it, for a lab (its BOM is `0.10.0-rc.1`; not run on a lab); the releases `v0.9.0` and `v0.9.1` allowed the move to their BOM (chart 0.1.14), as the candidates
 `v0.9.0-rc.1` and `v0.9.0-rc.2` did for a lab ([ci-release.md](ci-release.md#release-candidates)). From the BOM of 0.8.0 to
 that of `v0.9.0-rc.1` it was run on a lab without tenants (2026-11-19): six changes, and no machine
 replaced. Not run on a lab: the move from 0.8.1 or 0.8.2, the move to `0.9.0-rc.2`, to `0.9.0` or to `0.9.1`, three control
@@ -2516,7 +2516,7 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 
 ## Not implemented yet
 
-- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2`, that of v0.9.0 is `0.9.0`, that of v0.9.1 is `0.9.1` (`main` carries a `-dev` one between releases, now `0.10.0-dev`; the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` carry `0.9.0-rc.1` and `0.9.0-rc.2`, release BOMs for a lab; v0.9.0 keeps both as previous BOMs, v0.9.1 keeps those and that of v0.9.0, and `main` keeps that of v0.9.1 too). `--managed-services` needs v0.8.0 or later: no
+- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2`, that of v0.9.0 is `0.9.0`, that of v0.9.1 is `0.9.1` (`main` carries a `-dev` one between releases, now `0.10.0-dev`; the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` carry `0.9.0-rc.1` and `0.9.0-rc.2`, release BOMs for a lab, and the candidate `v0.10.0-rc.1` carries `0.10.0-rc.1`; v0.9.0 keeps both as previous BOMs, v0.9.1 keeps those and that of v0.9.0, and `main` keeps that of v0.9.1 too). `--managed-services` needs v0.8.0 or later: no
   earlier released image reads `PROXCLOUD_PLATFORM_ENABLED`, and the images of v0.8.0 exist once
   its tag's workflows have succeeded. For a test ahead of a release,
   `proxcloud-up.sh` takes a build of main as its version (`--version dev-<sha>`, `upgrade dev-<sha>`;
