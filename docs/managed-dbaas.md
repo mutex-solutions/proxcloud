@@ -324,7 +324,9 @@ From chart 0.5.2 a PostgreSQL (or FerretDB) database of one instance has no PodD
 waited without limit, because the budget of a single instance allows no eviction; that blocks
 every replacement of the node. Without it the drain evicts the pod and the database restarts on
 another node of the group: it is down for that restart. Databases of more than one instance keep
-their budget. An existing database takes the change with `bump-chart`, once the provider pins
+their budget. The platform BOM pins 0.5.2: a managed-services platform installed from this release
+registers its database provider with it, and an upgrade to this BOM writes it on the provider. An
+existing database takes the change with `bump-chart`, once the provider pins
 0.5.2 or later; until then it keeps its budget.
 
 ## Connection secrets (contract, pinned by TestConnectionSecretContract)

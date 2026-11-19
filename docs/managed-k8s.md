@@ -693,8 +693,8 @@ What it does not do:
 - **Existing clusters are untouched** until an operator sets the provider's `chartVersion` to 0.1.13 and bumps each
   cluster (**Bump** on the provider page, or the tenant's *Apply platform update*). A cluster on an older chart gets
   no `machinePlacement` and no check, exactly as before. After the bump its render is the same until its node groups
-  change. The platform BOM pins chart 0.1.14, which keeps the placement of 0.1.13: a managed-services platform
-  installed from this release registers its Kubernetes provider with `chartVersion` 0.1.14, and an installer-built
+  change. The platform BOM pins chart 0.1.15, which keeps the placement of 0.1.13: a managed-services platform
+  installed from this release registers its Kubernetes provider with `chartVersion` 0.1.15, and an installer-built
   site registers the chart's source version. A platform installed from an earlier BOM keeps the `chartVersion` it
   was registered with until the operator sets it on the provider, or until an upgrade to this release's BOM writes
   the new one (an apply on a platform of a BOM this build does not carry is refused, `bom_unsupported`).

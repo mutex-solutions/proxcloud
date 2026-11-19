@@ -4,6 +4,24 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-20: the platform BOM pins cluster chart 0.1.15 and database chart 0.5.2
+
+**What changed:** no component, container or relation. `deploy/platform/platform-bom.yaml` names
+`proxmox-kamaji-cluster` 0.1.15 (`sha256:c4ab5bcb...`) for `pc-platform` and `tenantCharts.kubernetes`, and
+`database-cluster` 0.5.2 (`sha256:8cd4be2e...`) for `tenantCharts.database`, both with the digest ghcr.io serves.
+`pc-platform` has `upgradeFrom` 0.1.13 and 0.1.14, so the classifier ("Platform installations") allows the move from
+every previous BOM, 0.8.0 to 0.9.1.
+
+**Why:** both charts were published from their tags; the per-node Kubernetes version and delete-first rollout of a
+node group, and a database of one instance without a disruption budget, reach a platform only through the BOM.
+0.1.13 stays in `upgradeFrom` because a build takes only its own BOM as a target: a 0.8.x platform would otherwise
+have no move to this BOM.
+
+**Diagrams:** none changed. `c2-containers.md`: the row of chart `proxmox-kamaji-cluster` says which version is
+published and pinned.
+
+**Not verified:** on a lab.
+
 ## 2026-11-20: an upgrade run replaces the seed's k3s in place (stage seed-k3s)
 
 **What changed:** component "Platform runs": an apply has one more stage, `seed-k3s`, between `seed-identity` and

@@ -181,7 +181,7 @@ applications:
               region: az1
               storage: local-zfs
         repoURL: ghcr.io/mutex-solutions/charts
-        targetRevision: 0.1.14
+        targetRevision: 0.1.15
       syncPolicy:
         automated:
           prune: false
