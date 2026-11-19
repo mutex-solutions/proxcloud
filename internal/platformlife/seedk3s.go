@@ -24,6 +24,10 @@ const seedK3sTimeout = " The platform cluster and every tenant keep serving; not
 	"over SSH with a key of spec.seed.sshKeys: `mv /usr/local/bin/k3s.prev /usr/local/bin/k3s && systemctl restart k3s` (this step was not tried on " +
 	"a lab). Retry then runs the stage again."
 
+// seedK3sStale is how long after the Job's end the seed's node may still report the old k3s before the stage takes
+// the upgrade as undone.
+const seedK3sStale = 5 * time.Minute
+
 func k3sJobName(version string) string {
 	return "k3s-upgrade-" + strings.ReplaceAll(slug(version), ".", "-")
 }
@@ -140,6 +144,12 @@ func (x *acq) seedK3s(ctx context.Context) error {
 		return permanent(CodeSeedK3sRefused, "The seed's node reports k3s %s and the BOM names %s: %s. The record and the site disagree; nothing was changed.",
 			live, target, why)
 	}
+	// The plan lists the seed row, and the start asks for the backup, only when the two BOMs name another k3s. A seed
+	// behind a BOM that does not move k3s was changed by hand: the run does not move it.
+	if x.from.Seed.K3s.Version == target {
+		return permanent(CodeSeedK3sRefused, "The seed's node reports k3s %s and both BOMs name %s: this upgrade does not replace k3s. The record and the site disagree; nothing was changed.",
+			live, target)
+	}
 	switch {
 	case job == nil:
 		if err := x.check(ctx); err != nil {
@@ -165,6 +175,16 @@ func (x *acq) seedK3s(ctx context.Context) error {
 		return permanent(CodeSeedK3sFailed, "The k3s upgrade Job failed before k3s was replaced: %s. The seed runs k3s %s as before. Retry runs it again.",
 			tail, live)
 	case count("succeeded"):
+		// The kubelet reports its version within seconds of its start. A Job that ended long ago on a seed that still
+		// reports the old k3s means the previous binary was put back (the hand step): the Job goes, so that Retry
+		// makes a new one instead of waiting on this one for ever.
+		if done, err := time.Parse(time.RFC3339, str(job, "status", "completionTime")); err == nil && time.Since(done) > seedK3sStale {
+			if err := drop(); err != nil {
+				return err
+			}
+			return permanent(CodeSeedK3sFailed, "The k3s upgrade Job ended %s ago and the seed's node still reports k3s %s: the previous binary is in place. The Job was deleted. Retry runs it again.",
+				time.Since(done).Round(time.Minute), live)
+		}
 		return waiting(TimeoutCode(stageSeedK3s), "The Job %s/%s ended and k3s was restarted; the seed's node still reports k3s %s.", ns, name, live)
 	}
 	return waiting(TimeoutCode(stageSeedK3s), "The Job %s/%s runs; the seed's node reports k3s %s.", ns, name, live)

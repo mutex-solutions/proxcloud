@@ -225,6 +225,37 @@ func TestSeedK3sUpgradeFails(t *testing.T) {
 		!strings.Contains(s.Message, "v1.35.11+k3s1") || p.seed.obj(job) != nil {
 		t.Fatalf("a seed two minors behind: end %s %+v", end, s)
 	}
+
+	// The Job ended long ago and the node still reports the old k3s (the previous binary was put back by hand): the
+	// Job goes and the run ends, so that Retry makes a new one.
+	p, job = k3sUpgrade(t)
+	p.once()
+	p.seed.mu.Lock()
+	p.seed.objs[job]["status"] = map[string]any{"succeeded": 1, "completionTime": time.Now().Add(-2 * seedK3sStale).UTC().Format(time.RFC3339)}
+	p.seed.mu.Unlock()
+	if end, s := p.once(), p.stage(stageSeedK3s); end != "fail:"+CodeSeedK3sFailed || !strings.Contains(s.Message, "previous binary is in place") || p.seed.obj(job) != nil {
+		t.Fatalf("a Job that ended on a seed still at the old k3s: end %s %+v", end, s)
+	}
+}
+
+// A seed behind a k3s that both BOMs name is not moved: the plan listed no seed row and asked for no backup.
+func TestSeedK3sNotInThePlanIsRefused(t *testing.T) {
+	old := nextRelease(t, nil)
+	cur, _ := Current()
+	from := refOf(old)
+	p := newPlatform(t, RunApply)
+	p.mutate(func(run *Run, in *Installation, _ *Secrets) { run.BOM, in.Status.BOM = from, &from })
+	p.upTo(stageSeedK3s)
+	if end := p.until(30); end != "complete" {
+		t.Fatalf("the installing run: %s", end)
+	}
+	p.start(t, cur.SHA256, "upgrade lab to 0.9.0")
+	p.atK3s()
+	p.seed.node("v1.35.9+k3s1", true)
+	if end, s := p.once(), p.stage(stageSeedK3s); end != "fail:"+CodeSeedK3sRefused || !strings.Contains(s.Message, "does not replace k3s") ||
+		p.seed.obj(k3sJobs+k3sJobName(cur.Seed.K3s.Version)) != nil {
+		t.Fatalf("a seed behind an unchanged pin: end %s %+v", end, s)
+	}
 }
 
 // An upgrade that replaces the seed's k3s starts only with a backup of the seed: seen by the portal, or taken by the
