@@ -274,3 +274,15 @@ func TestADevelopmentBOMIsNoTarget(t *testing.T) {
 		t.Fatalf("%+v %v", up, err)
 	}
 }
+
+// A release candidate's BOM is a release BOM, so it is a target: the build after it embeds it as a previous BOM
+// (TestEveryReleaseHasItsPreviousBOM), and the candidate is how a lab drills the upgrade before the release.
+func TestAReleaseCandidateIsATarget(t *testing.T) {
+	old := nextRelease(t, func(b *BOM) { ownCharts(b); b.Release = "0.9.0-rc.1" })
+	cur, _ := Current()
+	ref := refOf(old)
+	_, up, err := move(installed(&ref), cur.SHA256)
+	if err != nil || !up.Allowed || len(up.Blocking) != 0 || up.Confirm != "upgrade lab to 0.9.0-rc.1" {
+		t.Fatalf("%+v %v", up, err)
+	}
+}

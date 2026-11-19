@@ -1,12 +1,12 @@
 # CI, template builds and release operations
 
 This page describes the checked-in workflows, not a guarantee that a release has
-already been published. As of **2026-11-18**, GHCR has public development images,
+already been published. As of **2026-11-19**, GHCR has public development images,
 the `v0.4.0-rc.1` prerelease (tag 2026-11-11, images and app chart `0.4.0-rc.1`)
 and the first stable release `v0.4.0` (tag 2026-11-12, images and app chart
 `0.4.0`), then the stable `v0.5.0` (tag 2026-11-13), the patches `v0.5.1` and `v0.5.2` and the stable `v0.6.0` (tags 2026-11-14),
-the `v0.7.0-rc.1` prerelease and the stable `v0.7.0` (tags 2026-11-15), the stable `v0.8.0` (tag 2026-11-17) and the patch `v0.8.1` (tag 2026-11-18). The next release is the patch
-`v0.8.2`; pushing its tag runs the app image/chart publication and GitHub Release
+the `v0.7.0-rc.1` prerelease and the stable `v0.7.0` (tags 2026-11-15), the stable `v0.8.0` (tag 2026-11-17) and the patches `v0.8.1` and `v0.8.2` (tags 2026-11-18). The next tag is the release candidate
+`v0.9.0-rc.1`, a prerelease ([Release candidates](#release-candidates)); pushing it runs the app image/chart publication and GitHub Release
 creation.
 This source change does none of those operations, and installation from released
 artifacts and later controlled PVE template canaries remain separate steps. Read
@@ -301,7 +301,10 @@ previous BOMs `0.8.0` and `0.8.1`). The pull request after that release commit s
 BOM on `main` to `0.9.0-dev` again and added `deploy/platform/previous/0.8.2.yaml`, so
 `main` cannot be tagged until the next release commit drops `-dev`. The gate does not
 compare the BOM's release with the tag
-(below): a commit whose BOM has no `-dev` passes this part for any tag.
+(below): a commit whose BOM has no `-dev` passes this part for any tag. The commit of the
+candidate `v0.9.0-rc.1` sets the release to `0.9.0-rc.1` (checked on 2026-11-19 on that
+commit: `--release` prints `all pins match`, on the BOM and on the previous BOMs `0.8.0`,
+`0.8.1` and `0.8.2`).
 
 Not verified:
 
@@ -319,6 +322,37 @@ Not verified:
 - Whether a pinned version is still the wanted one. The check proves a pin is
   still served, not that it is current.
 
+## Release candidates
+
+A candidate `vX.Y.Z-rc.N` is a prerelease for a lab, not the stable release. Its first
+use is the upgrade between BOMs, which takes only a release BOM as its target: a build of
+`main` cannot drill it ([Upgrade drill builds](#upgrade-drill-builds)). What its commit
+changes, and what it leaves:
+
+| Item | At a candidate | Why |
+|---|---|---|
+| `release:` of the platform BOM | `X.Y.Z-rc.N` | A `-dev` BOM fails the release gate and is refused as an upgrade target. `-rc.N` is a release to both: `Validate` and `bom_verify.py` ask only whether the release ends in `-dev`, and a release takes no `pending` digest and no `0.0.0+` version |
+| Renderer goldens | Regenerated (`-update`) | They carry the release label. The goldens of the previous BOMs do not change |
+| App chart `version` and `appVersion`, `pc_versions.proxcloud`, `DEFAULT_VERSION` | Stay on the stable release | `test_chart_images_and_installer_pin_exact_same_stable_release` wants a pin whose policy is `--latest`. The workflows take the image tag, the chart version and the appVersion from the tag, not from these files |
+| "Current stable release" in README, SECURITY and the guides | Unchanged | A candidate is not the stable release |
+| `CHANGELOG.md` | `[Unreleased]` stays; a short `## [X.Y.Z-rc.N]` section is added | The release turns `[Unreleased]` into its section. `test_release_notes.py` wants a changelog section for every file under `docs/releases/` |
+| `docs/releases/vX.Y.Z-rc.N.md` | Added, short | It is the body of the prerelease. Without it the body is the changelog section |
+
+The tag publishes the five images as `vX.Y.Z-rc.N` and the app chart as `X.Y.Z-rc.N`, and
+creates the GitHub Release with `--prerelease --latest=false`
+(`GITHUB_REF_NAME=vX.Y.Z-rc.N python3 .github/scripts/release_policy.py` prints the flags).
+
+After the tag, the pull request that sets the BOM on `main` back to `-dev` keeps the
+candidate's BOM as a previous BOM, exactly as after a release
+([Previous BOMs](#previous-boms), with `X.Y.Z-rc.N` as the name). A platform that a lab
+moved to the candidate's BOM is applied by later builds only while they carry that file;
+from it to the BOM of the release is one more upgrade run. `Previous` takes any name
+whose BOM validates as a release, and `TestEveryReleaseHasItsPreviousBOM` reads
+`## [X.Y.Z-rc.N]` sections too, so the pull request fails its tests without the file.
+
+Not verified: a tag on such a commit. `v0.4.0-rc.1` and `v0.7.0-rc.1` had no platform BOM
+gate, no previous BOM and no release notes file.
+
 ## Previous BOMs
 
 A platform records the BOM that installed it by the sha256 of the BOM file, and
@@ -331,7 +365,7 @@ refuses every apply on the platforms that release installed
 than the one before it, so this holds for a patch release that changes no pin
 too.
 
-After each release tag `vX.Y.Z`, in the pull request that sets the BOM on `main`
+After each release tag `vX.Y.Z` (and each candidate tag, [Release candidates](#release-candidates)), in the pull request that sets the BOM on `main`
 back to `-dev`:
 
 1. Copy the BOM of the tag, byte for byte:
@@ -350,7 +384,7 @@ back to `-dev`:
 What holds the procedure:
 
 - `TestEveryReleaseHasItsPreviousBOM` fails when `CHANGELOG.md` lists a release
-  from 0.8.0 on, other than the one the current BOM names, without its file. It
+  or a release candidate from 0.8.0 on, other than the one the current BOM names, without its file. It
   reads the changelog, not the tags: a release without a changelog section is
   not seen.
 - `TestPreviousBOMsAreUnchanged` compares each file with its recorded hash and
@@ -470,7 +504,8 @@ components of the product's own charts, `pc-platform` 0.1.13 to 0.1.14 and
 old version in `upgradeFrom`: `TestUpgradeRollsNoMachine` compares all three
 pairs and passes, and platform chart 0.1.3 differs from 0.1.2 in the provider's
 ClusterRole alone. So the classifier allows all three pairs, and only `-dev`
-refuses them until the release commit. None of these moves was run on a lab.
+refused them until the commit of the candidate `v0.9.0-rc.1`: on it the plan of each of the
+three is allowed, with six changes and no refusal. None of these moves was run on a lab.
 
 Not checked: that a chart of `proxcloud-platform` whose version changes is safe
 to sync over the old one (its templates are RBAC, AppProjects, a MetalLB pool
@@ -482,7 +517,8 @@ A lab drill of an upgrade needs two builds whose BOMs form an allowed pair, and
 the second must carry the first's BOM. Development BOMs do not work for either
 side: a platform installed by a `-dev` build is on a BOM no other build carries
 (`bom_unsupported`), and a `-dev` BOM is refused as a target. So a drill build
-is made like a release, on a throwaway branch that is never merged:
+is a release candidate cut from `main` ([Release candidates](#release-candidates)), or, for a
+BOM change that `main` does not have, a build made like a release on a throwaway branch that is never merged:
 
 1. Install the lab platform from a release (v0.8.0, v0.8.1 or v0.8.2), or from the
    drill build before this one.
@@ -829,8 +865,8 @@ The body of a GitHub Release is `docs/releases/vX.Y.Z.md` when the tag has that
 file (`docker.yml`, job `release`, step "Assemble release notes"). Without the
 file the step prints a warning and falls back to the `## [X.Y.Z]` section of
 `CHANGELOG.md`, as every release up to `v0.8.2` did; the script test below fails
-when a changelog section from `0.8.0` on has no file, so only an rc tag takes
-that path. An empty file, or one over 120000 characters, fails
+when a changelog section of a release from `0.8.0` on has no file, so only an rc tag
+without a file takes that path (`v0.9.0-rc.1` has one). An empty file, or one over 120000 characters, fails
 the step, and no Release is created. GitHub's generated commit and pull request
 list (`--generate-notes`) follows the body either way.
 

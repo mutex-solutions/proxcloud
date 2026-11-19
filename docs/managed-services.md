@@ -1948,8 +1948,9 @@ platform chart 0.1.2 to 0.1.3, `tenantCharts.kubernetes` to 0.1.14, and the rele
 charts list the installed version in `upgradeFrom`, and the release's check found that chart
 0.1.14 renders the platform cluster's control plane and templates as 0.1.13 did, so no machine is
 replaced. After the upgrade the platform can go from 1 to 3 control plane machines, Replace works,
-and new tenant clusters get the health check. Until a release commit drops `-dev` from this BOM,
-the plan refuses the move for that reason alone. None of this was run on a lab.
+and new tenant clusters get the health check. A build of `main`, whose BOM is a `-dev` one,
+refuses the move for that reason alone; the release candidate `v0.9.0-rc.1` allows it, for a
+lab ([ci-release.md](ci-release.md#release-candidates)). None of this was run on a lab.
 
 Every other difference refuses the whole upgrade, each with its own line in the plan and in the
 `409 upgrade_refused` of a run. All lines begin with "not supported by this release":
@@ -2123,7 +2124,7 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 
 ## Not implemented yet
 
-- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2` (`main` carries a `-dev` one between releases, now `0.9.0-dev`). `--managed-services` needs v0.8.0 or later: no
+- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2` (`main` carries a `-dev` one between releases; the candidate `v0.9.0-rc.1` carries `0.9.0-rc.1`, a release BOM for a lab). `--managed-services` needs v0.8.0 or later: no
   earlier released image reads `PROXCLOUD_PLATFORM_ENABLED`, and the images of v0.8.0 exist once
   its tag's workflows have succeeded. For a test ahead of a release,
   `proxcloud-up.sh` takes a build of main as its version (`--version dev-<sha>`, `upgrade dev-<sha>`;

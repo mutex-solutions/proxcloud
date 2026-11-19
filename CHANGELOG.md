@@ -336,6 +336,70 @@ Proxmox API.
   could not fetch instead of leaving a later "no installation candidate". A build that succeeds installs the
   same packages as before.
 
+## [0.9.0-rc.1] - 2026-11-19
+
+A release candidate of 0.9.0, published as a prerelease and never as `latest`. It is not the release: `v0.8.2`
+stays the current stable release, and the chart, the installer and the Compose default still name it. The
+candidate exists for one reason. The platform upgrade between BOMs takes only a release BOM as its target,
+never a `-dev` one, so a lab cannot drill the upgrade from 0.8.0 on a build of `main`. Its content is the
+[Unreleased] section above, which the release 0.9.0 will turn into its own section; nothing is repeated here.
+Not for a production site.
+
+### Changed
+
+- **The platform BOM's release is `0.9.0-rc.1`** (`deploy/platform/platform-bom.yaml`), with the pins `main` had
+  (cluster chart 0.1.14, platform chart 0.1.3). It is a release BOM: no `pending` digest and no `0.0.0+` version,
+  and the release gate passes on it and on the previous BOMs 0.8.0, 0.8.1 and 0.8.2. The plan from each of
+  those three to it is allowed, with six changes (the release and `tenantCharts.kubernetes` as record only, the
+  four charts of the product) and no refusal, and `TestUpgradeRollsNoMachine` compares all three pairs and
+  passes.
+- **A platform moved to the candidate's BOM stays on it** until an operator upgrades it again. The builds after
+  the candidate (`main`, a later candidate, 0.9.0) accept that platform only while they carry
+  `deploy/platform/previous/0.9.0-rc.1.yaml`, which the change after the tag adds. From the candidate's BOM to
+  that of 0.9.0 is one more upgrade run, allowed when the two differ in the release line and the product's own
+  charts alone. A release that drops the file refuses the platform (`bom_unsupported`): keep such a platform on
+  a lab.
+- **`TestEveryReleaseHasItsPreviousBOM` counts a release candidate** (`## [X.Y.Z-rc.N]`), so the build after
+  this one fails its tests without the candidate's BOM.
+- The app chart (`0.8.2`), `pc_versions.proxcloud` and `DEFAULT_VERSION` of `proxcloud-up.sh` do not move: the
+  release contract test keeps them on a stable release. The tag's workflows publish the five images as
+  `v0.9.0-rc.1` and the app chart as `0.9.0-rc.1` with that appVersion. Run the candidate with
+  `./proxcloud-up.sh upgrade v0.9.0-rc.1`, or `--version v0.9.0-rc.1` on a new install.
+
+### Verified on a lab
+
+One lab round, on 2026-11-19, on the build `dev-68a15e8` of `main` over a platform that v0.8.0 installed. It ran
+before the five managed-services fixes, the provider settings check and the join error excerpt listed under
+Fixed above: none of those was run on a lab.
+
+- Volume rows through attach, detach and rebuild, and the quota: verified.
+- The upgrade between BOMs: not verified. Only the refusal of a `-dev` target and the plan's block were seen.
+  The candidate is for this.
+- The worker firewall, on one worker: the Proxmox writes and their order, the node Ready throughout, Remove and
+  the release. Which ports were closed and open afterwards was read but not saved.
+- Replace: its refusals on a 0.8.0 platform (`409 last_ready_node`, 502 with the chart reason), "needs
+  attention" after its bound, and the read of the guest. No working Replace and no health check: both need
+  chart 0.1.14.
+- The one root command: the Check rows, the cluster firewall rule written and marked, the refusals and the
+  command's text. The command was not run on a node, and the rule matched nothing on that lab (its router
+  translates the platform network).
+- Presets and the control plane count: the refusals and the `capacity` row. No preset install, no three control
+  planes.
+- Network modes and the tenant path test: the refusals and the cleanup. The test gave no verdict; no routed
+  mode and no VLAN tag.
+- "Usable after install", invitations, rule edit and the other console items: at the API only, and in part.
+  No console page was opened.
+
+### Not verified
+
+- The upgrade from 0.8.0, 0.8.1 or 0.8.2 to this BOM, a second upgrade from this BOM, and a failed upgrade's
+  Retry and restore ([docs/managed-services.md](docs/managed-services.md), "What the upgrade still owes a lab").
+- A fresh install from the candidate's images, with a preset, three control plane machines, routed mode or a
+  VLAN tag.
+- Chart 0.1.14 on a cluster: the health check, Replace, and the worker firewall on two workers.
+- The tag's workflows: no candidate carried a `docs/releases/` file or a previous BOM before.
+- Everything the [Unreleased] section and the sections of 0.8.0 to 0.8.2 say is not verified.
+
 ## [0.8.2] - 2026-11-18
 
 A patch release on top of `v0.8.1`. It adds no feature of its own size: it tells an operator about the
