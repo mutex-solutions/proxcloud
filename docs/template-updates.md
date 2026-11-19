@@ -1180,4 +1180,8 @@ holds on `/pool`).
 - The sync sets `vga: std` again on a stopped VM in a tenant pool that someone put back on a
   serial display by hand, and so does a start from the portal. There is no setting to keep one VM
   on it.
+- The write changes the template's configuration digest. A **staged** template from before v0.10.0
+  that passed its smoke test and is not published yet is refused at Publish after the sync
+  (`template_changed_since_smoke`): run the smoke test again, then publish. A published template is
+  not affected.
 - Tested against a fake Proxmox API that models pending changes; not yet run on a lab.

@@ -74,7 +74,8 @@ func (f *consolePVE) service(t *testing.T) *pve.Service {
 		case path == "/nodes/pve1/qemu/101/status/current", path == "/nodes/pve1/qemu/102/status/current":
 			data(w, map[string]any{"status": "running", "qmpstatus": "running", "name": "web", "uptime": 30})
 		case path == "/nodes/pve1/qemu/101/config":
-			// Running on a serial display, with the sync's vga std pending: only current=1 answers the display in effect.
+			// Running on a serial display, with a vga std an operator set by hand pending: only current=1 answers the
+			// display in effect. The portal itself never writes vga on a running VM.
 			vga := "std"
 			if r.URL.Query().Get("current") == "1" {
 				vga = "serial0"

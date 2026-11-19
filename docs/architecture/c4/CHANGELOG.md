@@ -27,6 +27,7 @@ gets it on the portal's own start. Workers and platform machines are started by 
 change when they are replaced by clones of a new template.
 
 **Diagrams:** none changed. `c3-components.md`: the Sync job row names the two passes.
+
 ## 2026-11-19: Template updates can delete a withdrawn template
 
 **What changed:** component "Template updates": `templateupdates.Service.Delete` behind
