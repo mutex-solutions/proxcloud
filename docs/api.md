@@ -802,7 +802,13 @@ are several, `errors.details.problems`.
   and when the node has no room for them `blocking` holds the message of the
   Check row `capacity`, with the numbers. The route reads the nodes with the CAPI
   token for that case alone; when they cannot be read nothing is added, and stage
-  1 of the apply, which runs the same row, decides (`preflight_failed`). `newer` is this release's own BOM (`release`, `sha256`) when the
+  1 of the apply, which runs the same row, decides (`preflight_failed`). It also holds
+  `{name: "pve-api-rule", to, class: "site", stage: "seed-vm", impact}` while the cluster firewall of
+  Proxmox does not hold the rule `proxcloud:pve-api:<installation>` as the settings name it (a platform
+  installed by 0.8.x, or a rule deleted or changed by hand): the run writes that one rule in stage 3.
+  The route reads the cluster firewall rules with the portal token for it; when they cannot be read the
+  entry is left out, and it never blocks. The same entry is added to `upgrade.changes` and
+  `replacement.changes`. `newer` is this release's own BOM (`release`, `sha256`) when the
   installed platform is on another one. An installed BOM this release does not
   carry (its own and those of earlier releases from 0.8.0 on; not one of a build
   of `main`) blocks with `bom_unsupported`.
@@ -817,7 +823,8 @@ are several, `errors.details.problems`.
   - `changes[]` lists every difference of the two BOMs:
     `{cluster, name, from, to, class, stage, wave, impact, blocking}`. `class` is
     `chart` (the run syncs a new chart version in `stage`, at `wave`),
-    `record only` (nothing of the platform is synced for it) or `refused`.
+    `record only` (nothing of the platform is synced for it), `refused`, or `site` (the entry
+    `pve-api-rule` above: a write on the Proxmox site that is no difference of the BOMs).
     `impact` says what the change restarts or rolls; a refused change has
     `blocking`, its reason, instead.
   - `allowed` is false when one change is refused or the target is a `-dev` BOM,
