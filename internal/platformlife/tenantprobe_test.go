@@ -58,7 +58,7 @@ func newProbeEnv(t *testing.T) *probeEnv {
 		Net: externalservice.PVENetwork{DefaultZone: "pcm0", CIDRPool: "10.100.0.0/16", Isolation: pve.IsolationShared,
 			Zones: map[string]pve.ZoneConfig{"pcm0": {Key: "pcm0", Kind: "simple", NoDHCP: true}}},
 		// Template 9200 is one this portal imported; a tenant server's disk goes to the store "tank".
-		Imported:  func(node string, vmid int) bool { return node == "pve1" && vmid == 9200 },
+		Imported:  func(r pve.ClusterResource) bool { return r.Node == "pve1" && r.VMID == 9200 },
 		DiskStore: func(string) string { return "tank" },
 		Load:      func(context.Context, string) (*TenantProbe, error) { return e.saved, nil },
 		Save:      func(_ context.Context, p *TenantProbe) error { c := *p; e.saved = &c; return nil },
@@ -189,18 +189,18 @@ func TestTenantProbeImage(t *testing.T) {
 		t.Errorf("a pinned template: %+v %v", p, err)
 	}
 
-	// The order among this portal's own: Ubuntu before Debian, then the newest version; a copy on another node is none.
+	// The order among this portal's own: Ubuntu before Debian, then the newest build; a copy on another node is none.
 	tpl := func(slug string, copies map[string]int) externalservice.PVETemplate {
 		return externalservice.PVETemplate{Slug: slug, OSDistro: strings.Split(slug, "-")[0], Copies: copies}
 	}
 	rows := []pve.ClusterResource{{Node: "pve1", VMID: 1, Tags: "pc-v-202611010000"}, {Node: "pve1", VMID: 2, Tags: "pc-v-202611160000"}, {Node: "pve1", VMID: 3, Tags: "pc-v-202612010000"}}
 	catalog := []externalservice.PVETemplate{tpl("debian-13", map[string]int{"pve1": 3}), tpl("ubuntu-2404", map[string]int{"pve1": 1}), tpl("ubuntu-2604", map[string]int{"pve1": 2, "pve2": 9}),
 		tpl("rocky-9", map[string]int{"pve1": 4})}
-	all := func(string, int) bool { return true }
+	all := func(pve.ClusterResource) bool { return true }
 	if slug, id, _ := probeImage(catalog, rows, "pve1", all); slug != "ubuntu-2604" || id != 2 {
 		t.Errorf("newest Ubuntu: %s %d", slug, id)
 	}
-	if slug, id, _ := probeImage(catalog, rows, "pve1", func(_ string, id int) bool { return id == 3 }); slug != "debian-13" || id != 3 {
+	if slug, id, _ := probeImage(catalog, rows, "pve1", func(r pve.ClusterResource) bool { return r.Node == "pve1" && r.VMID == 3 }); slug != "debian-13" || id != 3 {
 		t.Errorf("Debian when no Ubuntu is this portal's: %s %d", slug, id)
 	}
 	if slug, id, others := probeImage(catalog, rows, "pve2", nil); slug != "" || id != 0 || !slices.Equal(others, []string{"ubuntu-2604 (VM 9)"}) {

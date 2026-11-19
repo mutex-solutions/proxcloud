@@ -607,11 +607,12 @@ func (h *Handler) platformTenantProbeStart(w http.ResponseWriter, r *http.Reques
 	httpx.Raw(w, http.StatusAccepted, httpx.Response[platformlife.TenantProbe]{Data: &started})
 }
 
-// importedTemplates answers whether a template is one that Template updates imported for this provider: its import
-// receipt names the provider, the node and the VM id, and the template was not deleted since. nil without Template
-// updates. The tenant path test clones only such a template, or one the provider's config pins.
+// importedTemplates answers whether a cluster row is a template that Template updates imported for this provider: a
+// receipt of this provider whose import finished holds it (Receipt.Holds: node, VM id, name and source digest, not
+// deleted since). nil without Template updates. The tenant path test clones only such a template, or one the
+// provider's config pins.
 // ponytail: reads the newest 500 receipts of all providers; a query by provider when a site has more imports than that.
-func (h *Handler) importedTemplates(ctx context.Context, serviceID string) (func(node string, vmid int) bool, error) {
+func (h *Handler) importedTemplates(ctx context.Context, serviceID string) (func(row pve.ClusterResource) bool, error) {
 	if h.templateUpdates == nil {
 		return nil, nil
 	}
@@ -619,9 +620,9 @@ func (h *Handler) importedTemplates(ctx context.Context, serviceID string) (func
 	if err != nil {
 		return nil, err
 	}
-	return func(node string, vmid int) bool {
+	return func(row pve.ClusterResource) bool {
 		return slices.ContainsFunc(recs, func(r templateupdates.Receipt) bool {
-			return r.VMID == vmid && r.VMID != 0 && r.Payload.Node == node && r.Payload.ServiceID == serviceID && !r.TemplateGone
+			return r.Payload.ServiceID == serviceID && r.Holds(row)
 		})
 	}, nil
 }

@@ -136,8 +136,9 @@ type TenantProber struct {
 	// Catalog is the provider's image catalog over what the cluster has (ExternalService.PVEImageCatalog): the list a
 	// tenant's server create resolves its image in. The discovered templates alone when nil.
 	Catalog func(found []pve.DiscoveredTemplate) []externalservice.PVETemplate
-	// Imported reports a template that Template updates imported for this provider (it has the receipt). nil: none.
-	Imported func(node string, vmid int) bool
+	// Imported reports a cluster row that is a template Template updates imported for this provider: a finished
+	// import's receipt names its node, VM id, name and source digest. nil: none.
+	Imported func(row pve.ClusterResource) bool
 	// DiskStore is the store a tenant server's disk goes to on a node: the provider's default storage profile there.
 	// "" or nil: the template's own store, as a server create without a profile.
 	DiskStore func(node string) string
@@ -183,12 +184,13 @@ func (in *Installation) PlatformNodes() []string {
 // Template updates imported for this provider, or what the provider's config.templates pins by VM id (an entry
 // without per-node copies). A published template in the pool that is neither may be another party's on a shared
 // Proxmox cluster, and is never cloned: others lists those, for the refusal. The probe needs bash, timeout and the
-// guest agent, which those images carry. Ubuntu before Debian, then the newest version, as the catalog ranks copies.
-func probeImage(catalog []externalservice.PVETemplate, rows []pve.ClusterResource, node string, imported func(string, int) bool) (slug string, vmid int, others []string) {
-	version := map[int]string{}
+// guest agent, which those images carry. Ubuntu before Debian, then the newest build (the pc-v- stamp, compared across
+// slugs: a later build of an older release wins over an earlier build of a newer one).
+func probeImage(catalog []externalservice.PVETemplate, rows []pve.ClusterResource, node string, imported func(pve.ClusterResource) bool) (slug string, vmid int, others []string) {
+	version, row := map[int]string{}, map[int]pve.ClusterResource{}
 	for _, r := range rows {
 		if r.Node == node {
-			version[r.VMID] = pve.TagValue(r.Tags, pve.TagTemplateVersion)
+			version[r.VMID], row[r.VMID] = pve.TagValue(r.Tags, pve.TagTemplateVersion), r
 		}
 	}
 	rank := func(t externalservice.PVETemplate) int {
@@ -202,7 +204,7 @@ func probeImage(catalog []externalservice.PVETemplate, rows []pve.ClusterResourc
 		if id == 0 || rank(t) < 0 {
 			continue
 		}
-		if pinned := len(t.Copies) == 0; !pinned && (imported == nil || !imported(node, id)) {
+		if pinned := len(t.Copies) == 0; !pinned && (imported == nil || !imported(row[id])) {
 			others = append(others, fmt.Sprintf("%s (VM %d)", t.Slug, id))
 			continue
 		}
@@ -525,7 +527,7 @@ func (x *TenantProber) test(ctx context.Context, p *TenantProbe) error {
 		// Proxmox gives a NIC in a zone with a DHCP server an address of the range by itself and writes it for the
 		// zone's dnsmasq. The lab round found the line still there after the VM was destroyed and the vnet deleted.
 		zone := x.Net.Zones[x.Net.DefaultZone].Key
-		p.Notes = []string{fmt.Sprintf("Proxmox gave the test VM's NIC an address of the zone's DHCP range (the test does not use it) and may keep that mapping on %s after the VM is gone: a line with an address in %s in /etc/dnsmasq.d/%s/ethers and in /var/lib/misc/dnsmasq.%s.leases. "+
+		p.Notes = []string{fmt.Sprintf("Proxmox gives the test VM's NIC an address of the zone's DHCP range (the test does not use it) and may keep that mapping on %s after the VM is gone: a line with an address in %s in /etc/dnsmasq.d/%s/ethers and in /var/lib/misc/dnsmasq.%s.leases. "+
 			"ProxCloud cannot read or remove those files. They do no harm while no other network uses %s; to remove them, delete those lines as root on %s.", p.Node, netw.CIDR, zone, zone, netw.CIDR, p.Node)}
 	}
 	if err := wait(c.StartVM(ctx, p.Node, vmid)); err != nil {

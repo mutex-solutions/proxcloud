@@ -218,6 +218,17 @@ func copyOf(r pve.ClusterResource, p VMPayload) bool {
 		hasTagValue(r.Tags, TagSource+digestPrefix(p.Digest))
 }
 
+// Holds reports whether a cluster row is the template this receipt's import finished and still names: the import
+// reached its template, the template was not deleted since, and the row at the receipt's node and VM id is a copy of
+// its artifact (copyOf). A VM id alone proves nothing: an import that failed after it took an id, or a template
+// deleted by hand, leaves a receipt whose id Proxmox gives to the next VM, which may be another portal's.
+func (rec Receipt) Holds(row pve.ClusterResource) bool {
+	p := rec.Payload
+	return !rec.TemplateGone && (rec.Step == StepSucceeded || rec.Step == StepTemplated) &&
+		rec.VMID != 0 && rec.VMID == row.VMID && p.Node == row.Node &&
+		len(strings.TrimPrefix(p.Digest, "sha256:")) >= 12 && copyOf(row, p)
+}
+
 // ── PVE access ────────────────────────────────────────────────────────────────────────────────
 
 // LifecyclePVE is the subset of *pve.Client Publish/Withdraw/state use.

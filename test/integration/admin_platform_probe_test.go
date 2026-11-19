@@ -36,6 +36,9 @@ func TestPlatformTenantPathProbeRoutes(t *testing.T) {
 	ctx := context.Background()
 	db := freshPG(t)
 	var writes []string
+	// The template at VM id 9200 on pve1, as Template updates names and tags a published import of that digest.
+	const digest = "sha256:0123456789abcdef0123456789abcdef"
+	tplName, tplTags := "pc-ghcr-ubuntu-2604-os-202611161812", "pc-img-ubuntu-2604;pc-public;pc-v-202611161812;pc-tu-import;pc-src-0123456789ab;proxcloud"
 	fakePVE := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/api2/json")
 		switch {
@@ -45,7 +48,7 @@ func TestPlatformTenantPathProbeRoutes(t *testing.T) {
 			fmt.Fprint(w, `{"data":[]}`)
 			return
 		case path == "/cluster/resources":
-			fmt.Fprintf(w, `{"data":[{"type":"qemu","node":"pve1","vmid":9200,"name":"pc-ubuntu-2604","template":1,"pool":%q,"tags":"pc-img-ubuntu-2604;pc-public;pc-v-202611161812;proxcloud"}]}`, pve.TemplatePool)
+			fmt.Fprintf(w, `{"data":[{"type":"qemu","node":"pve1","vmid":9200,"name":%q,"template":1,"pool":%q,"tags":%q}]}`, tplName, pve.TemplatePool, tplTags)
 			return
 		}
 		// Everything else fails: a started probe ends as an error at its first step, having made nothing.
@@ -133,13 +136,45 @@ func TestPlatformTenantPathProbeRoutes(t *testing.T) {
 	}
 	call("admin-sub", http.MethodPost, `{"node":"pve9"}`, http.StatusConflict, "invalid_node")
 	// The one published Ubuntu template on pve1 is in the pool, but nothing says this portal imported it: it may be
-	// another party's on a shared cluster, and is not cloned. With the import's receipt it is this provider's.
+	// another party's on a shared cluster, and is not cloned. With the receipt of this provider's finished import of
+	// exactly that template it is this provider's.
 	call("admin-sub", http.MethodPost, `{"node":"pve1"}`, http.StatusConflict, "no_os_template")
 	now := time.Now().UTC()
-	if err := receipts.Save(ctx, &templateupdates.Receipt{ID: "import-1", Kind: "vm", VMID: 9200, CreatedAt: now, UpdatedAt: now,
-		Payload: templateupdates.VMPayload{ServiceID: in.ServiceID, Node: "pve1"}}); err != nil {
-		t.Fatal(err)
+	receipt := func(change func(*templateupdates.Receipt)) {
+		t.Helper()
+		rec := &templateupdates.Receipt{ID: "import-1", Kind: "vm", VMID: 9200, CreatedAt: now, UpdatedAt: now, Step: templateupdates.StepSucceeded,
+			Payload: templateupdates.VMPayload{ServiceID: in.ServiceID, Node: "pve1", Digest: digest, OS: "ubuntu-2604", Variant: "os", BuildVersion: "202611161812"}}
+		if change != nil {
+			change(rec)
+		}
+		if err := receipts.Save(ctx, rec); err != nil {
+			t.Fatal(err)
+		}
 	}
+	// A receipt that names the VM id proves nothing by itself: Proxmox gives the id of a failed import, or of a
+	// template deleted by hand, to the next VM, which on a shared cluster can be another portal's template.
+	for name, change := range map[string]func(*templateupdates.Receipt){
+		"an import that failed after it took the id":  func(r *templateupdates.Receipt) { r.Step = templateupdates.StepFailed },
+		"an import that has no template yet":          func(r *templateupdates.Receipt) { r.Step = templateupdates.StepCreating },
+		"another provider's import":                   func(r *templateupdates.Receipt) { r.Payload.ServiceID = "svc-other" },
+		"an import whose template was deleted":        func(r *templateupdates.Receipt) { r.TemplateGone = true },
+		"an import on another node":                   func(r *templateupdates.Receipt) { r.Payload.Node = "pve2" },
+		"the id reused by a template of another name": func(r *templateupdates.Receipt) { r.Payload.BuildVersion = "202610010000" },
+		"the id reused by another artifact":           func(r *templateupdates.Receipt) { r.Payload.Digest = "sha256:ffffffffffffffffffffffffffffffff" },
+	} {
+		receipt(change)
+		if w := len(writes); w != 0 {
+			t.Fatalf("%s: wrote to Proxmox: %v", name, writes)
+		}
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"node":"pve1"}`))
+		req = req.WithContext(httpx.WithRC(req.Context(), &httpx.RequestContext{Sub: "admin-sub"}))
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "no_os_template") || !strings.Contains(w.Body.String(), "ubuntu-2604 (VM 9200)") {
+			t.Errorf("%s counted as this portal's template: %d %s", name, w.Code, w.Body.String())
+		}
+	}
+	receipt(nil)
 	if len(writes) != 0 {
 		t.Fatalf("a refused start wrote to Proxmox: %v", writes)
 	}
