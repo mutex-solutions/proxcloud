@@ -245,6 +245,7 @@ type acq struct {
 	hidden       []string // secrets this acquisition read from a cluster: no message may carry them
 	bom          *BOM
 	from         *BOM // on an upgrade run, the BOM the platform is moved from
+	rolls        bool // the move from from to bom replaces the platform cluster's machines (roll.go)
 	portal, capi *pve.Client
 	si           int // the stage being run
 }
@@ -342,6 +343,7 @@ func (x *acq) execute(ctx context.Context) end {
 					run.FromBOM.Release+" the platform is moved from: Retry starts a new run.")
 			}
 			x.from = f.BOM
+			x.rolls = hasMachines(Classify(x.from, x.bom))
 		}
 	}
 	es, err := x.r.Provider(ctx, in.ServiceID)

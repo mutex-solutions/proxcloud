@@ -131,6 +131,7 @@ func platformStoreErr(w http.ResponseWriter, err error) bool {
 	var inv *invalidInstallation
 	var refused *platformlife.UpgradeRefused
 	var noBackup *platformlife.SeedBackupMissing
+	var noRoll *platformlife.RollRefused
 	switch {
 	case err == nil:
 		return false
@@ -152,6 +153,10 @@ func platformStoreErr(w http.ResponseWriter, err error) bool {
 		platformErr(w, http.StatusConflict, "no_seed", err.Error(), nil)
 	case errors.Is(err, platformlife.ErrNoCluster):
 		platformErr(w, http.StatusConflict, "no_cluster", err.Error(), nil)
+	case errors.Is(err, platformlife.ErrBadPart):
+		platformErr(w, http.StatusBadRequest, platformlife.CodeBadPart, err.Error(), nil)
+	case errors.As(err, &noRoll):
+		platformErr(w, http.StatusConflict, noRoll.Code, err.Error(), map[string]any{"reasons": noRoll.Reasons})
 	case errors.Is(err, platformlife.ErrBadKind):
 		platformErr(w, http.StatusBadRequest, "invalid_kind", err.Error(), nil)
 	case errors.Is(err, platformlife.ErrRunNotFound):
@@ -708,6 +713,9 @@ func (h *Handler) platformPlan(w http.ResponseWriter, r *http.Request) {
 		// A move that replaces the seed's k3s needs a backup of the seed VM, or the operator's word for one. Without a
 		// Proxmox connection none is seen, as the run start decides too.
 		plan.NeedSeedBackup(in, func() platformlife.Check { return h.seedBackup(r.Context(), in, portal) })
+		// A move that replaces the platform cluster's machines: whether the node image is on every node, where one more
+		// machine has room, what blocks a drain and whether the platform is healthy, as stage 1 of the run reads it again.
+		plan.NeedRoll(in, func(to platformlife.BOMRef) platformlife.RollRead { return h.rollRead(r.Context(), in, portal, to) })
 	}
 	httpx.OK(w, plan)
 }
@@ -727,6 +735,30 @@ func (h *Handler) platformPortal(ctx context.Context, in *platformlife.Installat
 		return nil
 	}
 	return portal
+}
+
+// rollRead makes the pre-checks of the platform part of a move to the BOM to that replaces machines, for the plan and
+// the run start. Whatever cannot be opened fails the checks that need it.
+func (h *Handler) rollRead(ctx context.Context, in *platformlife.Installation, portal *pve.Service, to platformlife.BOMRef) platformlife.RollRead {
+	bom, ok := platformlife.Lookup(to.SHA256)
+	if !ok {
+		return platformlife.RollRead{}
+	}
+	var site platformlife.RollSite
+	if portal != nil {
+		site.Portal = portal.C
+	}
+	if h.templateUpdates != nil {
+		site.Imports = platformlife.TemplateUpdates{Service: h.templateUpdates}
+	}
+	sec, _ := h.platform.Secrets(ctx, in.ID)
+	if h.esSvc != nil && sec != nil {
+		if es, _ := h.esSvc.Get(ctx, in.ServiceID); es != nil {
+			site.CAPI, _ = platformlife.TokenClient(es, sec.CAPI)
+		}
+	}
+	site.Seed, site.Workload = platformlife.RollClients(ctx, in, sec)
+	return platformlife.ReadRoll(ctx, in, bom.BOM, site)
 }
 
 // seedBackup is the seed-backup row for the plan and the run start: a warning without a Proxmox connection.
@@ -757,21 +789,38 @@ func (h *Handler) platformRunStart(w http.ResponseWriter, r *http.Request) {
 		// SeedBackupTaken: the operator took a backup of the seed VM that the portal cannot see. It answers the 409
 		// seed_backup_missing of an upgrade that replaces the seed's k3s, and is recorded on the run and in the audit entry.
 		SeedBackupTaken bool `json:"seedBackupTaken"`
+		// Part "seed" makes the apply the first of the two parts of an upgrade that replaces the platform cluster's
+		// machines (GET …/plan lists the parts): the node image, the seed's k3s and the seed's charts, no tenant touched.
+		// Without it such an apply is the platform part, which replaces the machines.
+		Part string `json:"part"`
 	}
 	if !decodeStrictLimited(w, r, &req, 1<<10) {
 		return
 	}
+	if req.Part != "" && req.Part != platformlife.PartSeed {
+		platformStoreErr(w, platformlife.ErrBadPart)
+		return
+	}
 	backup := platformlife.SeedBackup{Taken: req.SeedBackupTaken}
+	var roll platformlife.RollRead
 	// The read of Proxmox is here, the decision in StartRun: only for an apply that would start such an upgrade (a
 	// Retry names no target), and not when the operator already answers for the backup.
-	if req.Kind == platformlife.RunApply && req.TargetBOM != "" && !backup.Taken {
-		if in, err := h.platform.Get(r.Context(), chi.URLParam(r, "id")); err == nil && in.Status.Seed != nil {
-			if plan, err := platformlife.PlanFor(in, req.TargetBOM); err == nil && plan.Upgrade.MovesSeed() && !plan.Upgrade.InProgress {
-				backup.Seen = h.seedBackup(r.Context(), in, h.platformPortal(r.Context(), in)).Status == platformlife.CheckOK
+	if req.Kind == platformlife.RunApply {
+		if in, err := h.platform.Get(r.Context(), chi.URLParam(r, "id")); err == nil && in.Installed() {
+			plan, err := platformlife.PlanFor(in, req.TargetBOM)
+			if up := plan.Upgrade; err == nil && up != nil {
+				portal := h.platformPortal(r.Context(), in)
+				if req.TargetBOM != "" && !backup.Taken && in.Status.Seed != nil && up.MovesSeed() && !up.InProgress {
+					backup.Seen = h.seedBackup(r.Context(), in, portal).Status == platformlife.CheckOK
+				}
+				// The platform part that begins the replacement of the machines: the plan's read again, which StartRun decides on.
+				if req.Part == "" && up.Allowed && up.NeedsRollRead(in) && (req.TargetBOM != "" || up.InProgress) {
+					roll = h.rollRead(r.Context(), in, portal, up.To)
+				}
 			}
 		}
 	}
-	run, err := h.platform.StartRun(r.Context(), h.platformJobs, chi.URLParam(r, "id"), req.Kind, adminActor(r), req.Confirm, req.TargetBOM, backup)
+	run, err := h.platform.StartRun(r.Context(), h.platformJobs, chi.URLParam(r, "id"), req.Kind, adminActor(r), req.Confirm, req.TargetBOM, req.Part, backup, roll)
 	if platformStoreErr(w, err) {
 		return
 	}

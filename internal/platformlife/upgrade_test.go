@@ -33,10 +33,10 @@ func (p *platform) start(t *testing.T, target, confirm string) {
 	p.mutate(func(run *Run, in *Installation, _ *Secrets) {
 		cur, _ := Current()
 		*run = Run{ID: run.ID, InstallationID: in.ID, Kind: RunApply, State: RunQueued, BOM: refOf(cur)}
-		for _, id := range stageIDs(RunApply) {
+		for _, id := range stageIDs(RunApply, p.part) {
 			run.Stages = append(run.Stages, Stage{ID: id, State: StagePending})
 		}
-		if err = startApply(run, in, target, confirm, SeedBackup{Taken: true}); err == nil {
+		if err = startApply(run, in, target, confirm, p.part, SeedBackup{Taken: true}, RollRead{Read: true, DeleteFirst: p.first}); err == nil {
 			in.Status.Phase = PhaseApplying
 		}
 	})
@@ -81,37 +81,37 @@ func TestStartApply(t *testing.T) {
 	cur, _ := Current()
 	ref := refOf(old)
 	in, run := installed(&ref), &Run{}
-	if err := startApply(run, in, "", "", SeedBackup{}); err != nil || run.BOM != ref || run.FromBOM != nil || in.Status.TargetBOM != nil {
+	if err := startApply(run, in, "", "", "", SeedBackup{}, RollRead{}); err != nil || run.BOM != ref || run.FromBOM != nil || in.Status.TargetBOM != nil {
 		t.Fatalf("an apply without a target stays on the installed BOM: %+v %v", run, err)
 	}
 	for _, confirm := range []string{"", "upgrade lab", "remove lab"} {
-		if err := startApply(&Run{}, in, cur.SHA256, confirm, SeedBackup{}); !errors.Is(err, ErrBadConfirm) || in.Status.TargetBOM != nil {
+		if err := startApply(&Run{}, in, cur.SHA256, confirm, "", SeedBackup{}, RollRead{}); !errors.Is(err, ErrBadConfirm) || in.Status.TargetBOM != nil {
 			t.Fatalf("confirm %q: %v", confirm, err)
 		}
 	}
-	if err := startApply(&Run{}, in, "", "upgrade lab to 0.9.0", SeedBackup{}); !errors.Is(err, ErrBadConfirm) {
+	if err := startApply(&Run{}, in, "", "upgrade lab to 0.9.0", "", SeedBackup{}, RollRead{}); !errors.Is(err, ErrBadConfirm) {
 		t.Fatalf("a confirmation without a target: %v", err)
 	}
 	// Lab round 2, finding R2-3: the installed BOM as the target is named as such, whatever the confirmation.
 	for _, confirm := range []string{"", "upgrade lab to 0.9.0"} {
-		if err := startApply(&Run{}, in, old.SHA256, confirm, SeedBackup{}); !errors.Is(err, ErrSameBOM) || in.Status.TargetBOM != nil {
+		if err := startApply(&Run{}, in, old.SHA256, confirm, "", SeedBackup{}, RollRead{}); !errors.Is(err, ErrSameBOM) || in.Status.TargetBOM != nil {
 			t.Fatalf("the installed BOM as targetBom, confirm %q: %v", confirm, err)
 		}
 	}
-	if err := startApply(run, in, cur.SHA256, "upgrade lab to 0.9.0", SeedBackup{}); err != nil || run.BOM != refOf(cur) || run.FromBOM == nil || *run.FromBOM != ref ||
+	if err := startApply(run, in, cur.SHA256, "upgrade lab to 0.9.0", "", SeedBackup{}, RollRead{}); err != nil || run.BOM != refOf(cur) || run.FromBOM == nil || *run.FromBOM != ref ||
 		in.Status.TargetBOM == nil || *in.Status.TargetBOM != refOf(cur) || *in.Status.BOM != ref {
 		t.Fatalf("the upgrade's first run: %+v, status %+v, %v", run, in.Status, err)
 	}
 	// Retry: no target, no confirmation, the same target.
 	retry := &Run{}
-	if err := startApply(retry, in, "", "", SeedBackup{}); err != nil || retry.BOM != refOf(cur) || *retry.FromBOM != ref {
+	if err := startApply(retry, in, "", "", "", SeedBackup{}, RollRead{}); err != nil || retry.BOM != refOf(cur) || *retry.FromBOM != ref {
 		t.Fatalf("Retry: %+v %v", retry, err)
 	}
 
 	comp(t, cur.BOM, ClusterWorkload, "cilium").Chart.Version = "1.18.17"
 	var refused *UpgradeRefused
 	in = installed(&ref)
-	if err := startApply(&Run{}, in, cur.SHA256, "upgrade lab to 0.9.0", SeedBackup{}); !errors.As(err, &refused) || len(refused.Reasons) != 1 ||
+	if err := startApply(&Run{}, in, cur.SHA256, "upgrade lab to 0.9.0", "", SeedBackup{}, RollRead{}); !errors.As(err, &refused) || len(refused.Reasons) != 1 ||
 		!strings.HasPrefix(err.Error(), CodeUpgradeRefused+": workload/cilium: "+later) || in.Status.TargetBOM != nil {
 		t.Fatalf("a third-party chart next to the own ones: %v", err)
 	}

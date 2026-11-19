@@ -1,0 +1,138 @@
+{
+  "from": {
+    "release": "0.8.1",
+    "sha256": "a635bd88d3c39baf5519344088a6fed8dad8cb2b3c2d324655753e8ec55719b3"
+  },
+  "to": {
+    "release": "0.9.0",
+    "sha256": ""
+  },
+  "allowed": true,
+  "confirm": "upgrade lab to 0.9.0 and replace its machines",
+  "changes": [
+    {
+      "name": "roll",
+      "class": "machines",
+      "stage": "cluster",
+      "impact": "There is no way back once the new control plane machine has joined the platform cluster: the run restores nothing and has no rollback, and neither Cancel nor Remove brings the old machines or the old Kubernetes version back. A step that fails leaves the machines that still run serving, and Retry goes on at that step. Tenant backups are the only net for a database whose volume does not follow it to the new machine."
+    },
+    {
+      "name": "release",
+      "from": "0.8.1",
+      "to": "0.9.0",
+      "class": "record only",
+      "impact": "Nothing is synced for it: the platform's record and the labels of its objects name the new release."
+    },
+    {
+      "name": "kubernetes.version",
+      "from": "1.35.10",
+      "to": "1.35.11",
+      "class": "machines",
+      "stage": "cluster",
+      "impact": "Every machine of the platform cluster is replaced by Cluster API, the control plane first, then one node group and node at a time. The rows roll/… say per unit what stops serving meanwhile."
+    },
+    {
+      "name": "kubernetes.nodeImage",
+      "from": "proxcloud-vm-ubuntu-2604-k8s:ubuntu-2604-k8s-1.35.10-20261116181221-72f0eaa3d0d4@sha256:62de43787103a74e433203fbbf9bd85806011e673371591397bd30bedda03ea9",
+      "to": "proxcloud-vm-ubuntu-2604-k8s:ubuntu-2604-k8s-1.35.11-20270101000000-000000000000@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "class": "machines",
+      "stage": "cluster",
+      "impact": "Every machine of the platform cluster is replaced by Cluster API, the control plane first, then one node group and node at a time. The rows roll/… say per unit what stops serving meanwhile."
+    },
+    {
+      "cluster": "seed",
+      "name": "pc-platform",
+      "from": "0.1.13",
+      "to": "0.1.15",
+      "class": "chart",
+      "stage": "cluster",
+      "wave": 3,
+      "impact": "The Application moves to the new chart version with the first step of the roll (rows roll/…)."
+    },
+    {
+      "cluster": "pc-platform",
+      "name": "roll/controlPlane",
+      "from": "1.35.10",
+      "to": "1.35.11",
+      "class": "machines",
+      "stage": "cluster",
+      "impact": "The 3 control plane machines are replaced one at a time, one more machine first. No gap of the platform cluster's API is expected: the other machines keep etcd and the API address. Not measured on a lab yet."
+    },
+    {
+      "cluster": "pc-platform",
+      "name": "roll/system@pve1",
+      "from": "1.35.10",
+      "to": "1.35.11",
+      "class": "machines",
+      "stage": "cluster",
+      "impact": "The platform's operators (ArgoCD, Cluster API for tenants, CloudNativePG, MetalLB, cert-manager) restart on the new machine. A MetalLB address may move to another node (seconds). Tenant API servers, tenant workloads and databases keep running. Not measured on a lab yet."
+    },
+    {
+      "cluster": "pc-platform",
+      "name": "roll/kamaji@pve2",
+      "from": "1.35.10",
+      "to": "1.35.11",
+      "class": "machines",
+      "stage": "cluster",
+      "impact": "The one kamaji machine is replaced: ALL tenant API servers are away while their pods restart on the new machine, and kamaji-etcd moves with its disk. Tenant workloads keep running; nothing in a tenant cluster can be created or changed meanwhile. Not measured on a lab yet."
+    },
+    {
+      "cluster": "pc-platform",
+      "name": "roll/dbaas@pve3",
+      "from": "1.35.10",
+      "to": "1.35.11",
+      "class": "machines",
+      "stage": "cluster",
+      "impact": "Every database with one instance on this machine is down while its pod moves to the new machine and its disk is attached there. A database with three instances fails over. The platform cluster holds 0 databases with one instance. Node pve3 has no room for one more machine of this group, so the old machine is deleted BEFORE the new one exists: everything on it is away for the whole clone and join, and stays away if the new machine fails to join, until a Retry succeeds. Not measured on a lab yet."
+    },
+    {
+      "cluster": "pc-platform",
+      "name": "roll-vm/controlPlane",
+      "to": "3 new VM on pve1 cloned from template 9201, 3 old VM deleted with its boot disk (one more VM than today exists on the node while a machine is replaced)",
+      "class": "site",
+      "stage": "cluster",
+      "impact": "Cluster API clones the new VM and deletes the old one with its boot disk. Volumes of proxmox-csi are separate disks and are kept. Only VMs that carry this installation's tag (pc-platform-pi-0a1b2c3d) are deleted: no other VM on the node is touched."
+    },
+    {
+      "cluster": "pc-platform",
+      "name": "roll-vm/system@pve1",
+      "to": "1 new VM on pve1 cloned from template 9201, 1 old VM deleted with its boot disk (one more VM than today exists on the node while a machine is replaced)",
+      "class": "site",
+      "stage": "cluster",
+      "impact": "Cluster API clones the new VM and deletes the old one with its boot disk. Volumes of proxmox-csi are separate disks and are kept. Only VMs that carry this installation's tag (pc-platform-pi-0a1b2c3d) are deleted: no other VM on the node is touched."
+    },
+    {
+      "cluster": "pc-platform",
+      "name": "roll-vm/kamaji@pve2",
+      "to": "1 new VM on pve2 cloned from template 9202, 1 old VM deleted with its boot disk (one more VM than today exists on the node while a machine is replaced)",
+      "class": "site",
+      "stage": "cluster",
+      "impact": "Cluster API clones the new VM and deletes the old one with its boot disk. Volumes of proxmox-csi are separate disks and are kept. Only VMs that carry this installation's tag (pc-platform-pi-0a1b2c3d) are deleted: no other VM on the node is touched."
+    },
+    {
+      "cluster": "pc-platform",
+      "name": "roll-vm/dbaas@pve3",
+      "to": "1 new VM on pve3 cloned from template 9203, 1 old VM deleted with its boot disk (the old VM is deleted first)",
+      "class": "site",
+      "stage": "cluster",
+      "impact": "Cluster API clones the new VM and deletes the old one with its boot disk. Volumes of proxmox-csi are separate disks and are kept. Only VMs that carry this installation's tag (pc-platform-pi-0a1b2c3d) are deleted: no other VM on the node is touched."
+    }
+  ],
+  "blocking": [],
+  "parts": [
+    {
+      "id": "seed",
+      "done": false,
+      "allowed": true,
+      "confirm": "upgrade lab to 0.9.0",
+      "blocking": []
+    },
+    {
+      "id": "platform",
+      "done": false,
+      "allowed": true,
+      "confirm": "upgrade lab to 0.9.0 and replace its machines",
+      "blocking": []
+    }
+  ]
+}

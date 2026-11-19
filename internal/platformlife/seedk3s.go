@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -197,6 +198,11 @@ const SeedBackupAge = 24 * time.Hour
 // younger than SeedBackupAge, with its time and store; a warning otherwise, never a failure (an apply does not need
 // one; an upgrade that replaces the seed's k3s does, or the operator's word: SeedBackupMissing). It reads with the
 // portal token, which may not see the store the operator backs up to: the row then says which stores it could not read.
+//
+// An archive counts only when it is of this seed VM, not of an earlier VM that had the same VMID (Proxmox gives a freed
+// VMID to the next VM, and a store keeps the old archives): it must have been made after the seed became ready (the
+// record's readyAt; without one, the creation time in the VM's config), and its notes, when it has any, must name the
+// seed VM (vzdump's default notes are the guest's name).
 func SeedBackupCheck(ctx context.Context, portal *pve.Client, in *Installation, now time.Time) Check {
 	st := in.Status.Seed
 	warn := func(format string, a ...any) Check {
@@ -207,9 +213,20 @@ func SeedBackupCheck(ctx context.Context, portal *pve.Client, in *Installation, 
 	if err != nil {
 		return warn("the stores of node %s could not be read (%s).", st.Node, clip(err.Error()))
 	}
+	var since int64 // archives made before this are of another VM
+	if st.ReadyAt != nil {
+		since = st.ReadyAt.Unix()
+	} else if cfg, err := portal.GetVMConfig(ctx, st.Node, st.VMID); err == nil {
+		if _, ct, ok := strings.Cut(cfg.Str("meta"), "ctime="); ok {
+			ct, _, _ = strings.Cut(ct, ",")
+			since, _ = strconv.ParseInt(ct, 10, 64)
+		}
+	}
+	name := SeedVMName(in.ID, st.Generation)
 	var newest pve.StorageContent
 	var on string
 	var seen, unread []string
+	foreign := 0
 	for _, s := range stores {
 		if !slices.Contains(strings.Split(s.Content, ","), "backup") {
 			continue
@@ -221,7 +238,11 @@ func SeedBackupCheck(ctx context.Context, portal *pve.Client, in *Installation, 
 		}
 		seen = append(seen, s.Storage)
 		for _, r := range rows {
-			if r.VMID == st.VMID && r.CTime > newest.CTime {
+			switch {
+			case r.VMID != st.VMID:
+			case r.CTime < since || (strings.TrimSpace(r.Notes) != "" && !strings.Contains(r.Notes, name)):
+				foreign++
+			case r.CTime > newest.CTime:
 				newest, on = r, s.Storage
 			}
 		}
@@ -230,6 +251,10 @@ func SeedBackupCheck(ctx context.Context, portal *pve.Client, in *Installation, 
 	note := ""
 	if len(unread) > 0 {
 		note = " The portal token could not read the backups of " + strings.Join(unread, ", ") + "."
+	}
+	if foreign > 0 {
+		note += fmt.Sprintf(" %d archives of VMID %d were not counted: they were made before this seed VM became ready, or their notes name another VM than %s "+
+			"(an earlier VM had the same VMID).", foreign, st.VMID, name)
 	}
 	switch {
 	case on != "" && now.Sub(taken) < SeedBackupAge:

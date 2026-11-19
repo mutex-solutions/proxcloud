@@ -168,6 +168,18 @@ func (x *acq) renderInput() RenderInput {
 	for _, g := range c.NodeGroups {
 		in.Cluster.NodeGroups = append(in.Cluster.NodeGroups, RenderNodeGroup{Name: g.Name, Nodes: g.Nodes, Count: g.Count, Cores: g.Cores, MemoryMiB: g.MemoryMiB, DiskGiB: g.DiskGiB})
 	}
+	// A move that replaces machines renders from the recorded step, in every stage: 0 until stage 7 begins the roll
+	// (everything as it runs), and never lower than a step a run has reached.
+	if x.rolls {
+		r := &Roll{FromVersion: x.from.Kubernetes.Version, FromKubeVip: x.from.Images.KubeVip}
+		if len(x.in.Status.Clusters) > 0 {
+			r.FromTemplates = x.in.Status.Clusters[0].Templates
+		}
+		if st := rollOf(x.in); st != nil {
+			r.Step, r.DeleteFirst = st.Step, st.DeleteFirst
+		}
+		in.Cluster.Roll = r
+	}
 	return in
 }
 
@@ -522,9 +534,24 @@ func sameJSON(a, b any) bool {
 // (TestUpgradeRollsNoMachine), and the classifier refuses a version the check did not pass. This is the same check on
 // the real cluster, which also sees an installation whose machine sizes were edited together with the upgrade.
 // Not verified on a lab: Runner.SkipRolloutGate turns it off.
-func (x *acq) rolloutGate(ctx context.Context, seed *kamajik8s.Client, a appOf) error {
-	if x.from == nil || x.r.SkipRolloutGate || x.receipt().RolloutChecked {
+//
+// On a roll (step above 0) the same read lets through what the step is there to change and nothing else: at step 1
+// the KubeadmControlPlane and the control plane's machine template, at a later step the templates of that step's
+// MachineDeployment (unit). A template of another unit that is new, or a control plane that would change after its
+// step, is a machine size, node or group edited together with the upgrade: unexpected_rollout, with the step not synced.
+func (x *acq) rolloutGate(ctx context.Context, seed *kamajik8s.Client, a appOf, step int, unit rollUnit) error {
+	if rc := x.receipt(); x.from == nil || x.r.SkipRolloutGate || (step == 0 && rc.RolloutChecked) || (step > 0 && rc.RollChecked >= step) {
 		return nil
+	}
+	own := func(kind, name string) bool { // what this step replaces
+		base := name[:max(strings.LastIndex(name, "-"), 0)] // a template's name ends in a hash of its spec
+		switch {
+		case step == 1:
+			return kind == "KubeadmControlPlane" || (kind == "ProxmoxMachineTemplate" && base == ClusterName+"-cp-"+unit.Node)
+		case step > 1:
+			return kind != "KubeadmControlPlane" && base == unit.Owner
+		}
+		return false
 	}
 	live, err := seed.GetApplication(ctx, argoNamespace, a.name())
 	if err != nil {
@@ -557,10 +584,10 @@ func (x *acq) rolloutGate(ctx context.Context, seed *kamajik8s.Client, a appOf) 
 		kind, synced := str(m, "kind"), str(m, "status") == "Synced"
 		switch {
 		case kind == "KubeadmControlPlane":
-			if controlPlane = true; !synced {
+			if controlPlane = true; !synced && !own(kind, str(m, "name")) {
 				rolls = append(rolls, "KubeadmControlPlane "+str(m, "name")+" would change")
 			}
-		case (kind == "ProxmoxMachineTemplate" || kind == "KubeadmConfigTemplate") && !synced && m["requiresPruning"] != true:
+		case (kind == "ProxmoxMachineTemplate" || kind == "KubeadmConfigTemplate") && !synced && m["requiresPruning"] != true && !own(kind, str(m, "name")):
 			rolls = append(rolls, kind+" "+str(m, "name")+" is new or would change")
 		}
 	}
@@ -571,6 +598,13 @@ func (x *acq) rolloutGate(ctx context.Context, seed *kamajik8s.Client, a appOf) 
 		return waiting(CodeComponentUnhealthy, "Waiting for ArgoCD to compare the platform cluster with chart %s %s before anything of it is synced. %s",
 			a.c.Chart.Name, a.c.Chart.Version, clip(detail))
 	}
+	if len(rolls) > 0 && step > 0 {
+		slices.Sort(rolls)
+		return permanent(CodeUnexpectedRollout, "Step %d of the roll replaces %s, and its render would also replace other machines of the platform cluster: %s. Nothing of "+
+			"this step was synced and every machine runs as before; Application %s is left without automated sync. If the installation's machine sizes, nodes or "+
+			"node groups were changed together with the upgrade, put them back and Retry: a roll changes the Kubernetes version and the node image, nothing else.",
+			step, unit.Name, clip(strings.Join(rolls, "; ")), a.name())
+	}
 	if len(rolls) > 0 {
 		slices.Sort(rolls)
 		return permanent(CodeUnexpectedRollout, "Chart %s %s would replace machines of the platform cluster: %s. Nothing of it was synced and the cluster runs as before; "+
@@ -578,7 +612,13 @@ func (x *acq) rolloutGate(ctx context.Context, seed *kamajik8s.Client, a appOf) 
 			"were changed together with the upgrade, put them back and Retry. Otherwise the release is at fault: install the ProxCloud release that corrects it and "+
 			"start the upgrade to its BOM.", a.c.Chart.Name, a.c.Chart.Version, clip(strings.Join(rolls, "; ")), a.name())
 	}
-	return x.recordReceipt(ctx, func(r *StageReceipt, _ *Installation, _ *Secrets) { r.RolloutChecked = true })
+	return x.recordReceipt(ctx, func(r *StageReceipt, _ *Installation, _ *Secrets) {
+		if step > 0 {
+			r.RollChecked = step
+		} else {
+			r.RolloutChecked = true
+		}
+	})
 }
 
 // tenantsDown are the tenants on the workload that are not healthy, and how many there are in all: the Applications
@@ -743,6 +783,10 @@ func (x *acq) cluster(ctx context.Context) error {
 	if cur := x.in.Status.Clusters; len(cur) == 1 {
 		want.ArgoCDTokenExpiresAt = cur[0].ArgoCDTokenExpiresAt
 		want.ControlPlaneReplicas = max(want.ControlPlaneReplicas, cur[0].ControlPlaneReplicas)
+		if want.Roll = cur[0].Roll; x.rolls {
+			// The record keeps the version and the templates the unreached units run until the last unit is done (roll).
+			want.KubernetesVersion, want.Templates = cur[0].KubernetesVersion, cur[0].Templates
+		}
 	}
 	if !reflect.DeepEqual(x.in.Status.Clusters, []ClusterStatus{want}) {
 		if err := x.save(ctx, func(_ *Run, in *Installation, _ *Secrets) { in.Status.Clusters = []ClusterStatus{want} }); err != nil {
@@ -757,7 +801,10 @@ func (x *acq) cluster(ctx context.Context) error {
 	if err := seed.ApplyCore(ctx, "secrets", PVECredentialsSecret(x.bom, in, PVEToken{ID: x.sec.CAPI.TokenID, Secret: x.sec.CAPI.Secret})); err != nil {
 		return classify(CodeSeedAPIUnreachable, err)
 	}
-	if err := x.rolloutGate(ctx, seed, apps[i]); err != nil {
+	if x.rolls {
+		return x.roll(ctx, seed, templates)
+	}
+	if err := x.rolloutGate(ctx, seed, apps[i], 0, rollUnit{}); err != nil {
 		return err
 	}
 	if err := seed.ApplyApplication(ctx, apps[i].obj); err != nil {
@@ -1248,7 +1295,7 @@ func (x *acq) nodes(ctx context.Context, wl *kamajik8s.Client) error {
 	if err != nil {
 		return classify(CodeWorkloadUnreachable, err)
 	}
-	ready, total := map[string]int{}, 1
+	ready, total := map[string]int{}, x.in.Spec.Clusters[0].ControlPlane.Count()
 	for _, n := range nodes {
 		if condition(n, "Ready") == "True" {
 			ready[str(n, "metadata", "labels", GroupLabel)]++
@@ -1384,7 +1431,8 @@ func (x *acq) register(ctx context.Context) error {
 }
 
 // done is stage 11: what was applied, and the BOM it came from. An upgrade ends here: only now, with every stage
-// passed, does status.bom name the target, and status.targetBom and status.tenantsDownBefore are cleared.
+// passed, does status.bom name the target, and status.targetBom, status.tenantsDownBefore and the cluster's roll
+// record are cleared.
 func (x *acq) done(ctx context.Context) error {
 	return x.save(ctx, func(run *Run, in *Installation, _ *Secrets) {
 		now := time.Now().UTC()
@@ -1395,6 +1443,9 @@ func (x *acq) done(ctx context.Context) error {
 		}
 		ref := run.BOM
 		in.Status.BOM, in.Status.TargetBOM, in.Status.TenantsDownBefore = &ref, nil, nil
+		for i := range in.Status.Clusters {
+			in.Status.Clusters[i].Roll = nil
+		}
 	})
 }
 

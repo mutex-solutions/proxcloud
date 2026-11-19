@@ -6,11 +6,13 @@ package platformlife
 // bodies stage 10 registers. Values go inline and secrets are referenced by name: no Application carries a secret.
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"maps"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -59,6 +61,41 @@ type RenderCluster struct {
 	// ControlPlaneReplicas is the number of control plane machines, all on ControlPlane.Node; 0 and 1 are one machine.
 	ControlPlaneReplicas int
 	NodeGroups           []RenderNodeGroup
+	// Roll orders the replacement of the machines on an upgrade that changes the Kubernetes version or the node image.
+	// nil: every machine at the BOM's version and at Templates, as on every other run.
+	Roll *Roll
+}
+
+// Roll is one step of a roll. The units up to Step (rollOrder; 1 is the control plane) render at the BOM's Kubernetes
+// version, kube-vip and Templates; every later unit at FromVersion and FromTemplates, with FromKubeVip for the control
+// plane. Step 0 renders everything as it was. DeleteFirst are the units ("group/node") whose MachineDeployment
+// deletes a machine before it makes the new one.
+type Roll struct {
+	Step                     int
+	FromVersion, FromKubeVip string
+	FromTemplates            map[string]int
+	DeleteFirst              []string
+}
+
+// rollOrder is the order a roll replaces the MachineDeployments in, as "group/node": the groups system, kamaji, dbaas,
+// then the others by name; inside a group its nodes by name. The control plane comes before all of them.
+func rollOrder(groups map[string][]string) []string {
+	names := slices.SortedFunc(maps.Keys(groups), func(a, b string) int {
+		rank := func(n string) int {
+			if i := slices.Index(NodeGroupNames, n); i >= 0 {
+				return i
+			}
+			return len(NodeGroupNames)
+		}
+		return cmp.Or(rank(a)-rank(b), strings.Compare(a, b))
+	})
+	var out []string
+	for _, g := range names {
+		for _, n := range slices.Sorted(slices.Values(groups[g])) {
+			out = append(out, g+"/"+n)
+		}
+	}
+	return out
 }
 
 // RenderMachine is the size of a VM and its PVE node.
@@ -151,10 +188,33 @@ func ClusterChartVersion(b *BOM) string {
 // ClusterValues are the proxmox-kamaji-cluster values of the workload cluster: controlPlane.kind kubeadm, its control
 // plane VMs on one node, the node groups in pool proxcloud-system, each group labelled and every group but system tainted.
 func ClusterValues(b *BOM, in RenderInput) (map[string]any, error) {
-	pins := func(nodes []string) (string, error) {
+	roll := in.Cluster.Roll
+	var order []string // the units of a roll after the control plane, "group/node"
+	if roll != nil {
+		if v := ClusterChartVersion(b); !kamaji.ChartHasRollOrder(v) {
+			return nil, fmt.Errorf("platform: the BOM of release %s names cluster chart %s, which cannot order a rollout: it needs chart %s or newer", b.Release, v, kamaji.RollOrderChartVersion)
+		}
+		by := map[string][]string{}
+		for _, g := range in.Cluster.NodeGroups {
+			by[g.Name] = g.Nodes
+		}
+		order = rollOrder(by)
+	}
+	// reached: the unit renders at the BOM's version and template. Without a roll every unit does.
+	reached := func(unit string) bool {
+		return roll == nil || (unit == "" && roll.Step >= 1) || (unit != "" && slices.Index(order, unit)+2 <= roll.Step)
+	}
+	pins := func(group string, nodes []string) (string, error) {
 		out := make([]string, 0, len(nodes))
 		for _, n := range nodes {
-			vmid, ok := in.Templates[n]
+			unit, from := "", in.Templates
+			if group != "" {
+				unit = group + "/" + n
+			}
+			if !reached(unit) {
+				from = roll.FromTemplates
+			}
+			vmid, ok := from[n]
 			if !ok {
 				return "", fmt.Errorf("platform: no node image template on %s", n)
 			}
@@ -163,15 +223,28 @@ func ClusterValues(b *BOM, in RenderInput) (map[string]any, error) {
 		return strings.Join(out, ","), nil
 	}
 	cp := in.Cluster.ControlPlane
-	cpPin, err := pins([]string{cp.Node})
+	cpPin, err := pins("", []string{cp.Node})
 	if err != nil {
 		return nil, err
 	}
+	version, kubeVip := b.Kubernetes.Version, b.Images.KubeVip
+	if !reached("") {
+		version, kubeVip = roll.FromVersion, roll.FromKubeVip
+	}
 	groups := []any{}
 	for _, g := range in.Cluster.NodeGroups {
-		pin, err := pins(g.Nodes)
+		pin, err := pins(g.Name, g.Nodes)
 		if err != nil {
 			return nil, err
+		}
+		old, first := map[string]any{}, []any{}
+		for _, n := range g.Nodes {
+			if !reached(g.Name+"/"+n) && roll.FromVersion != version {
+				old[n] = roll.FromVersion
+			}
+			if roll != nil && slices.Contains(roll.DeleteFirst, g.Name+"/"+n) {
+				first = append(first, n)
+			}
 		}
 		ng := map[string]any{
 			"name": g.Name, "machineImageId": pin, "machineCount": g.Count,
@@ -180,6 +253,13 @@ func ClusterValues(b *BOM, in RenderInput) (map[string]any, error) {
 		}
 		if t := groupTaint(g.Name); t != nil {
 			ng["taints"] = t
+		}
+		// Written only when there is something to say, so a render without a roll is the one it always was.
+		if len(old) > 0 {
+			ng["kubernetesVersions"] = old
+		}
+		if len(first) > 0 {
+			ng["deleteFirstOn"] = first
 		}
 		groups = append(groups, ng)
 	}
@@ -204,7 +284,7 @@ func ClusterValues(b *BOM, in RenderInput) (map[string]any, error) {
 		network["vlan"] = in.Network.VLAN
 	}
 	kubeadm := map[string]any{
-		"endpoint": in.Cluster.Endpoint, "kubeVipImage": b.Images.KubeVip, "machineImageId": cpPin,
+		"endpoint": in.Cluster.Endpoint, "kubeVipImage": kubeVip, "machineImageId": cpPin,
 		"machineCores": cp.Cores, "machineMemoryMiB": cp.MemoryMiB, "machineRootVolume": map[string]any{"diskSize": cp.DiskGiB},
 		"machineTags": machineTags(in.ID),
 	}
@@ -217,7 +297,7 @@ func ClusterValues(b *BOM, in RenderInput) (map[string]any, error) {
 		kubeadm["replicas"] = n
 	}
 	return map[string]any{
-		"kubernetesVersion":          b.Kubernetes.Version,
+		"kubernetesVersion":          version,
 		"cloudCredentialsSecretName": PVECredentialsSecretName,
 		// The installer's services cluster ranges (services-cluster.yml.j2).
 		"clusterNetwork": map[string]any{"pods": "10.244.0.0/16", "services": "10.96.0.0/16"},
