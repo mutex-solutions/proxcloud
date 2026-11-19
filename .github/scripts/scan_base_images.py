@@ -26,7 +26,7 @@ import time
 TARGETS = (
     ("go-builder", "docker.io/library/golang:1.27.4-alpine", "builder", ("deploy/Dockerfile:6", "deploy/sandbox-proxy.Dockerfile:5", "deploy/sandbox-import.Dockerfile:4", "deploy/sandbox-runtime.Dockerfile:6,14", "deploy/templates/mcp-gateway/Dockerfile:9")),
     ("web-builder", "docker.io/library/node:24.22.2-alpine", "builder", ("web/Dockerfile:2; APP=client|admin",)),
-    ("web-runtime", "docker.io/library/nginx:1.30.6-alpine", "upstream runtime", ("web/Dockerfile:10; APP=client|admin",)),
+    ("web-runtime", "docker.io/library/nginx:1.30.7-alpine", "upstream runtime", ("web/Dockerfile:10; APP=client|admin",)),
     ("alpine-runtime-donor", "docker.io/library/alpine:3.24.4", "upstream runtime/donor", ("deploy/Dockerfile:19", "deploy/sandbox-runtime.Dockerfile:26")),
     ("proxy-distroless", "gcr.io/distroless/static-debian12:nonroot", "upstream runtime", ("deploy/sandbox-proxy.Dockerfile:14",)),
     ("import-distroless", "gcr.io/distroless/static:nonroot", "upstream runtime", ("deploy/sandbox-import.Dockerfile:11",)),

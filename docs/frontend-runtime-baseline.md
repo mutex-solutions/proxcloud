@@ -3,7 +3,7 @@
 ## Bounded selection
 
 The shared [frontend Dockerfile](../web/Dockerfile) selects Node **24.22.2-alpine**
-for the builder and NGINX stable **1.30.6-alpine** for the final static server.
+for the builder and NGINX stable **1.30.7-alpine** for the final static server.
 Both client/admin builds use it. The [SPA test workflow](../.github/workflows/test.yml)
 selects exact Node `24.22.2`; its prior floating `24` choice did not identify a patch.
 This removes an end-of-support Node 20 builder and the older NGINX 1.27 series from
@@ -29,7 +29,7 @@ Public registry index metadata was read without pulling or running image layers:
 | Candidate image | Observed index digest |
 | --- | --- |
 | `node:24.22.2-alpine` | `sha256:a34ab6d7f6f4813f4d0c5469d74685604b962fbdbf5793a7bc7b4998ecb867c8` |
-| `nginx:1.30.6-alpine` | `sha256:583b7f2fce1cdb8da5ad5c39ebd3c33b98b87d493190e548bdee1fa8c619c311` |
+| `nginx:1.30.7-alpine` | `sha256:bef154735288bc38d99fac41ae63730684bcc661503673a04a0f9bc526ba8598` |
 
 The Dockerfile still uses exact version tags, not digest references. Metadata
 availability is not image contents, Alpine native-module compatibility or a
