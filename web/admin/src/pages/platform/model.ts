@@ -55,7 +55,9 @@ export type Check = { id: string; status: "ok" | "warn" | "fail"; message: strin
 // The last "Test the tenant path" of an installation (GET or POST …/tenant-path-probe; internal/platformlife/tenantprobe.go).
 export type TenantProbe = {
   id: string; state: "running" | "passed" | "failed" | "error"; node: string; step?: string; startedAt: string; finishedAt?: string
+  image?: string; template?: number; storage?: string // what the test VM is cloned from, and the store its disk goes to
   vmid?: number; source?: string; message: string; left?: string[]
+  notes?: string[] // what Proxmox may keep by itself, which the cleanup cannot remove
   targets?: { address: string; port: number; expect: "open" | "closed"; result?: "open" | "refused" | "none" }[]
 }
 export type StageItem = { id: string; state: string; message?: string }

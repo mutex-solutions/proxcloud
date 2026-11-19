@@ -66,7 +66,7 @@ func TestPreflightTenantPath(t *testing.T) {
 		{name: "a simple zone that does not exist yet", site: simpleSite, zones: "[]", status: CheckWarn, wants: "from pve1"},
 		// The lab: the node translates nothing, the site's router does.
 		{name: "VLAN tenant zone", site: Site{DefaultZone: "lan", DefaultZoneKind: "vlan"},
-			zones: "[" + lan + "]", vnets: platVlan, bridge: "plat140", status: CheckOK, wants: "no Proxmox node that translates"},
+			zones: "[" + lan + "]", vnets: platVlan, bridge: "plat140", status: CheckOK, wants: "no Proxmox node that translates|does not run in a VLAN zone (409 vlan_zone)|:6443/healthz"},
 		// Several nodes: it breaks only where a platform machine shares a node with what translates.
 		{name: "simple zone on other nodes than the platform machines", site: simpleSite,
 			zones: `[{"zone":"pcm0","type":"simple","nodes":"pve2,pve3"}]`, status: CheckOK, wants: "platform machines are on other nodes (pve1)"},
@@ -121,6 +121,10 @@ func TestPreflightTenantPath(t *testing.T) {
 			if !strings.Contains(c.Message, w) {
 				t.Errorf("%s: no %q in: %s", tc.name, w, c.Message)
 			}
+		}
+		// A row never points at a test that the same zone refuses (lab round of 2026-11-19, Q4).
+		if vlan := strings.Contains(tc.name, "VLAN tenant zone"); vlan == strings.Contains(c.Message, "opens one from a tenant network") && !strings.Contains(c.Message, "is not known") {
+			t.Errorf("%s: the row names the wrong way to open a connection: %s", tc.name, c.Message)
 		}
 		// It cannot prove the path, and says so in every state.
 		if !strings.Contains(c.Message, "reads the configuration only") && !strings.Contains(c.Message, "is not known") {

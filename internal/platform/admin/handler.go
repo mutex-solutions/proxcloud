@@ -1075,6 +1075,14 @@ func shapeExternalService(d pgdoc.M) {
 		delete(d, "_id")
 	}
 	delete(d, "secret")
+	// Computed at each read, never stored: what a kamaji config does not say by itself (a stored value that is not
+	// valid and reads as its default, repair keys on a chart that does not render them).
+	delete(d, "configNotes")
+	if cfg, _ := d["config"].(map[string]any); cfg["provider"] == "kamaji" {
+		if notes := externalservice.KamajiConfigNotes(cfg); len(notes) > 0 {
+			d["configNotes"] = notes
+		}
+	}
 }
 
 // serviceByID handles the external-service view (ADMIN_SERVICE_READ): the external service,

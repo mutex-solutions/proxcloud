@@ -49,6 +49,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/durablejobs"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platformlife"
+	"github.com/mutex-solutions/proxcloud/internal/templateupdates"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
@@ -198,6 +199,9 @@ type tokenView struct {
 }
 
 func (h *Handler) platformView(r *http.Request, in *platformlife.Installation) (*installationView, error) {
+	// Answered as a save would store it: an installation saved before v0.9.0 has no controlPlane.replicas, which
+	// means 1, and the answer names it (docs/api.md). The stored document is not written.
+	in.Normalize()
 	v := &installationView{Installation: in}
 	if !h.jobsScheduler {
 		v.SchedulerNote = platformlife.SchedulerOffNote
@@ -261,7 +265,9 @@ func (h *Handler) platformGet(w http.ResponseWriter, r *http.Request) {
 
 // installationRequest is the body of a create and of an update. serviceId, provisionedBy and layout may be left out of
 // an update; rev is the one the update read. preset (homelab, standard or custom) fills what the spec leaves out
-// (platformlife.ApplyPreset) before the checks and is not stored: the answer carries the whole spec.
+// (platformlife.ApplyPreset) before the checks and is not stored: the answer carries the whole spec. On an installed
+// platform a preset other than custom is refused (409 fixed_fields) and what the spec leaves out of its machines keeps
+// the stored values (platformlife.KeepMachines).
 type installationRequest struct {
 	Name          string            `json:"name"`
 	Preset        string            `json:"preset"`
@@ -375,6 +381,16 @@ func (h *Handler) platformUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		if h.esSvc == nil {
 			return nil, serviceNotFoundErr(next.ServiceID)
+		}
+		if old.Installed() {
+			// A preset fills a draft. On a platform that runs it would put its own node, sizes and counts where the
+			// spec names none, and the next apply would replace every machine.
+			if req.Preset != "" && req.Preset != platformlife.PresetCustom {
+				why := "A preset fills the settings of a platform that is not installed yet. This platform is installed: leave preset out and send the settings to change. " +
+					"A spec that names no control plane or no node groups keeps the stored ones."
+				return nil, &invalidInstallation{status: http.StatusConflict, code: "fixed_fields", msg: why, problems: []string{"preset"}}
+			}
+			platformlife.KeepMachines(&old.Spec, &next.Spec)
 		}
 		if err := h.checked(r, &next, req.Preset); err != nil {
 			return nil, err
@@ -565,7 +581,16 @@ func (h *Handler) platformTenantProbeStart(w http.ResponseWriter, r *http.Reques
 		httpx.WriteError(w, httpx.BadRequest("Proxmox connection failed: "+err.Error()))
 		return
 	}
-	prober := &platformlife.TenantProber{Portal: portal, Net: es.PVENetworkConfig(), SDNLock: h.platformSDNLock, Load: h.platform.Probe, Save: h.platform.SaveProbe}
+	imported, err := h.importedTemplates(ctx, es.ID)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	// The image and the store are a tenant server create's: the provider's catalog, and its default storage profile.
+	prober := &platformlife.TenantProber{Portal: portal, Net: es.PVENetworkConfig(), SDNLock: h.platformSDNLock, Load: h.platform.Probe, Save: h.platform.SaveProbe,
+		Catalog: es.PVEImageCatalog, Imported: imported,
+		DiskStore: func(node string) string {
+			return es.PVEStorageProfiles()[es.PVEDefaultStorageProfile()].StorageFor(node)
+		}}
 	p, err := prober.Start(ctx, in, req.Node, adminActor(r))
 	var refused *platformlife.ProbeRefused
 	if errors.As(err, &refused) {
@@ -580,6 +605,26 @@ func (h *Handler) platformTenantProbeStart(w http.ResponseWriter, r *http.Reques
 	started.Targets = slices.Clone(p.Targets) // Run writes each target's result
 	go prober.Run(context.WithoutCancel(ctx), p)
 	httpx.Raw(w, http.StatusAccepted, httpx.Response[platformlife.TenantProbe]{Data: &started})
+}
+
+// importedTemplates answers whether a cluster row is a template that Template updates imported for this provider: a
+// receipt of this provider whose import finished holds it (Receipt.Holds: node, VM id, name and source digest, not
+// deleted since). nil without Template updates. The tenant path test clones only such a template, or one the
+// provider's config pins.
+// ponytail: reads the newest 500 receipts of all providers; a query by provider when a site has more imports than that.
+func (h *Handler) importedTemplates(ctx context.Context, serviceID string) (func(row pve.ClusterResource) bool, error) {
+	if h.templateUpdates == nil {
+		return nil, nil
+	}
+	recs, err := h.templateUpdates.Receipts.Recent(ctx, 500)
+	if err != nil {
+		return nil, err
+	}
+	return func(row pve.ClusterResource) bool {
+		return slices.ContainsFunc(recs, func(r templateupdates.Receipt) bool {
+			return r.Payload.ServiceID == serviceID && r.Holds(row)
+		})
+	}, nil
 }
 
 // PlatformPreflight runs the read-only checks of an installation against its provider; a run's first stage calls it.

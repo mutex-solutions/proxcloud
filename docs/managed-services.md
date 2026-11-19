@@ -88,7 +88,7 @@ reading [section 3](#3-proxmox-identities): they share the pool `proxcloud-syste
 | A router for a VLAN tenant zone | Only when the provider's tenant zone is a `vlan` zone. Proxmox gives a VLAN no gateway, no DHCP and no SNAT: a tenant network there is a bare layer 2 segment, and ProxCloud writes and reports it so (`dhcp: false`, `snat: false`; asking for either is a `400`). The site's own router must hold the first address of each tenant subnet (the `gateway` the network shows; servers and cluster workers get it as their default route) on that VLAN, route it to the load balancer range and to whatever else tenants may reach, and keep tenants apart. Without it a worker on such a network never reaches its control plane and the cluster stays `PROGRESSING`. An EVPN zone needs none of this. |
 | A path from tenants to the platform network | Tenant cluster workers and database clients open TCP connections to the platform network. On a node that translates tenant traffic (a `simple` tenant zone, or an exit node of an EVPN zone) and also runs a platform machine, that connection is dropped unless the node itself routes the platform network. A one-node site with a `simple` tenant zone and the platform network on a VLAN behind the site's router is this case; a platform network of mode `routed` is not. The Check warns (`tenant-path`) and the install goes on, and **Test the tenant path** opens the path from a tenant network once the platform is installed: [The path from tenants to the platform](#the-path-from-tenants-to-the-platform). |
 | A tenant network zone without DHCP | Only for tenant Kubernetes clusters, not for the install or for databases: a cluster's nodes get fixed addresses, so its network must be in an EVPN or a VLAN zone, or in a `simple` zone without a DHCP server. With a provider whose default zone (`config.network.defaultZone`) is a `simple` zone that ProxCloud created with DHCP, which is its default, a cluster create on its networks answers `400 Worker nodes need a network without DHCP (an EVPN or VLAN zone, or a simple zone without a DHCP server)`. The Check reads the zone in Proxmox, warns (`tenant-network`) when it has DHCP, and the install goes on; change the provider's default zone before you offer clusters ([managed-k8s.md](managed-k8s.md)). Not affected: a Kubernetes provider with shared workers (`cluster.shared`), which uses no tenant network, and a `simple` zone without DHCP. Such a zone is made in one of two ways: by hand in Proxmox before the first tenant network (a zone that exists is used as it is), or by ProxCloud when the zone's config says so, `"zones": {"<id>": {"kind": "simple", "dhcp": false}}` (from v0.8.1; it applies to a zone that does not exist yet, and an existing zone is never changed). Networks of such a zone answer `dhcp: false` and get no DHCP range; servers, cluster nodes and load balancers there get addresses the platform assigns. The key is refused on a zone of another kind (`400`, naming the key). The setup wizard keeps a zone's other keys when you change its kind there, so take `"dhcp"` out of the zone's config (Cloud providers) before you change such a zone to VLAN or EVPN. The key is not verified on a lab. |
-| The datacenter firewall | On, with the provider's isolation rules written by a provider sync once the installation is saved: the Check verifies that tenant traffic to the seed, the API address and the node range is dropped. Saving the settings adds those addresses to the provider's blocked networks. With the firewall on, a node drops what does not come from its own network, so the seed and the platform machines need a rule to reach the Proxmox API: the install writes it (`pve-api-rule`). |
+| The datacenter firewall | On, with the provider's isolation rules written by a provider sync once the installation is saved: the Check verifies that tenant traffic to the seed, the API address and the node range is dropped. Saving the settings adds those addresses to the provider's blocked networks. With the firewall on, a node drops what does not come from its own network, so the seed and the platform machines need a rule to reach the Proxmox API: the install writes it (`pve-api-rule`). The rule names the platform machines' own addresses: [a site whose router translates them](#when-a-router-translates-the-platform-network) needs a rule of its own. |
 
 The page also warns when the job scheduler is off, in three places with one text: **Before you
 start**, the Check (row `scheduler`, a warning, absent while the scheduler runs) and the ready card.
@@ -234,12 +234,30 @@ every node). What it does, with the portal token:
    the end of `cidrPool`, with SNAT, as a tenant's network with outbound internet has it (in a
    VLAN zone Proxmox writes no SNAT, as for tenants).
 3. On the node you choose (the control plane's node when you choose none; it must host a platform
-   machine) it clones a published Ubuntu or Debian template of the catalog into the pool
-   `pc-templates` as `pc-probe-<installation id>`, puts it on that network (with a fixed address,
-   or by DHCP where the zone has a DHCP server, as a tenant's server gets its address) and
-   starts it. Without such a template on that node it stops before step 2
-   (`409 no_os_template`): publish one under Template updates. With the scheduler off nothing is
-   published by itself.
+   machine) it clones an Ubuntu or Debian image into the pool `pc-templates` as
+   `pc-probe-<installation id>`, puts it on that network with a fixed address (the one after the
+   gateway, over cloud-init) and starts it. The image is resolved as a tenant's server create
+   resolves one, in the provider's catalog, from the copy on that node, and it must be this
+   portal's own: a template that Template updates imported for this provider, or one the
+   provider's `config.templates` names with its VM id. An import counts only when it finished
+   and the template now at its node and VM id still has the import's name and source digest
+   (the tag `pc-src-…`): Proxmox gives the VM id of a failed import, or of a template deleted by
+   hand, to the next VM. Ubuntu before Debian, then the newest build (the `pc-v-` stamp,
+   compared across images: a later build of Ubuntu 24.04 is taken before an earlier build of
+   26.04). A published template in `pc-templates` that is neither is never cloned: on a Proxmox
+   cluster that several portals share it can be another party's. The clone's disk goes to the
+   store a tenant server's disk goes to on that node (the provider's default storage profile;
+   without one, the template's own store). Without such an image on that node the test stops
+   before step 2 (`409 no_os_template`, which names the published templates it did not take):
+   import and publish one under Template updates. With the scheduler off nothing is published by
+   itself. A site whose published images were all built outside Template updates (tagged by the
+   image pipeline) gets this refusal until it imports one. Naming a template in
+   `config.templates` with its VM id and node also satisfies the test, but it is not a setting
+   of the test only: such an entry replaces the discovered image of that slug in the tenant
+   catalog, with its copies on other nodes, so on a site with several nodes every tenant server
+   of that image is then created from that one template on that one node. Prefer the import; pin
+   only on a site with one node, or where that is what you want for tenants as well. The answer of the start and the result name the image, its template, the node and the
+   store (`image`, `template`, `node`, `storage`).
 4. Through the guest agent it opens one TCP connection to each target (at most 8) and one to the
    platform cluster's own API address, each with a 5 second limit.
 5. It stops and destroys the VM, deletes the network and applies SDN: after a pass, after a
@@ -250,7 +268,12 @@ every node). What it does, with the portal token:
    cleanup destroys a VM only when it has the test's name, is in `pc-templates`, is no template
    and carries the tag `pc-probe`; a VM with the name and without the tag (a clone cut off before
    it was tagged, or not the test's at all) is listed and left, and the next test does not start
-   until you removed it.
+   until you removed it. In a zone with a DHCP server Proxmox gives the VM's NIC an address of
+   the range by itself, which the test does not use, and may keep that mapping on the node after
+   the VM is gone (a line in `/etc/dnsmasq.d/<zone>/ethers` and in
+   `/var/lib/misc/dnsmasq.<zone>.leases`). ProxCloud can neither read nor remove those files, so
+   the result names them (`notes`) with what to delete; they do no harm while no other network
+   uses that /28.
 
 The result, read with `GET` on the same path:
 
@@ -267,9 +290,20 @@ is refused during a run of the installation (`409 run_active`), while another te
 (`409 probe_running`), before the first install (`409 not_installed`: nothing listens yet), and
 when the provider's default zone is a VLAN zone (`409 vlan_zone`: no node translates there, and a
 test network would need its own VLAN and gateway on your router; test from a tenant's server).
-**Not verified on a lab:** the test's tests use a fake Proxmox API. Its first lab run is the
-reproduction of the production finding (`run-1` lab test "reproduce": expected `failed` from the
-node that holds the address with a `simple` tenant zone, `passed` from another node).
+**Not verified on a lab:** no lab run of the test has ended with a verdict. Its one lab run
+(2026-11-19, a `simple` zone with DHCP) ended `error`: the test then took the first published
+Ubuntu template in slug order, which was a template of 2026-11-06 that this portal had not
+imported, cloned it onto that template's own store, and waited for an address from the zone's
+DHCP that never came (the guest agent answered, the NIC had no IPv4 address, and the zone's
+dnsmasq logged no request; why was not determined, the VM is gone). Since then the test takes
+only an image of this portal's own, clones it to the provider's disk store and gives the VM a
+fixed address, so it no longer depends on a DHCP answer. That is covered by tests against a fake
+Proxmox API and was not run on a lab; the lab test that would show it: with the simple zone as
+the default zone and a tenant cluster running, start the test on a node that also holds a
+template this portal did not import, and expect `image` to name the imported one and the state
+`passed` or `failed`, not `error`. Its first lab verdict is to be the reproduction of the
+production finding (`run-1` lab test "reproduce": expected `failed` from the node that holds the
+address with a `simple` tenant zone, `passed` from another node).
 
 **A new one-node site: let the node route the platform network.** Choose **Routed by the node**
 in step 1 (`spec.network.mode: routed`) and ProxCloud makes the network at the install:
@@ -742,12 +776,46 @@ only it can read (overlap with `cidrPool`, sandbox and public networks, and that
 a tenant network).
 
 Fixed after the first successful install (`409 fixed_fields`): the name, the network, the seed's node
-and address, the API address and the set of node groups. Sizes, counts, the nodes of a group, the
-ranges, the stores, the SSH keys and the API sources can change; **Apply this release** applies them.
+and address, the API address, the control plane's node and the set of node groups. Sizes, counts, the
+nodes of a group, the ranges, the stores, the SSH keys and the API sources can change; **Apply this
+release** applies them.
+
+The control plane's node is fixed because every control plane machine is on it: another node means
+each of them made anew on that node, which no lab has run. To move it, remove the installation and
+install again. An installation on which a build of main before this rule saved another control
+plane node, without applying it, cannot be put back through the API either, and its next apply
+would build the control plane on the saved node: put the node back before you upgrade, or the
+stored record needs a correction by hand. A group's nodes are not fixed. A node you add gets machines of the group. A node you
+take away loses its machines of the group at the next apply: a volume on a store that is local to
+that node stays there, and a pod that uses it does not start on another node. The API cannot refuse
+that safely, because it does not record on which nodes a run built machines; it changes a group's
+nodes only when the request names them. Not run on a lab.
 The provider of an installation never changes. No route deletes a draft.
 
 A save is refused during a run (`409 run_active`), and when someone else saved since the page read
 the settings (`409 rev_conflict`: the page reads them again).
+
+### When a router translates the platform network
+
+The cluster firewall rule the install writes (`proxcloud:pve-api:<installation id>`) accepts TCP to
+the Proxmox API port from the seed's address and the node range, to the API host of the settings.
+It matches a packet only when the node sees those addresses as the source. That holds when the
+platform network reaches the node untranslated: the node routes it (mode `routed`), or your router
+forwards it without NAT.
+
+When the router between the platform network and the node translates that traffic (masquerade or
+SNAT toward the nodes' network), the node sees the router's address. The rule is then in place and
+matches nothing, and the Check row `pve-api-rule` still reads `ok`: it reads the rule, not the
+traffic. With the datacenter firewall on, add a rule of your own for the translated address
+(Datacenter, Firewall, Add: direction in, action ACCEPT, protocol tcp, destination port the API
+port, source the router's address on the nodes' network), or stop translating that path. ProxCloud
+does not write or check that rule. A router's address inside the nodes' own network is usually
+accepted already, because Proxmox's default management set is that network (read in Proxmox's
+documentation, not tried).
+
+Found on a lab on 2026-11-19, where a router masquerades the platform network: the rule was
+written, the row read `ok`, and every call arrived from the router's address. Whether the rule
+takes effect on an untranslated path with a firewall that drops was not run on a lab.
 
 ### Presets and the control plane count
 
@@ -767,7 +835,12 @@ has always started from. Disk sizes are left as they are (30 GiB for the seed an
 plane, 40 GiB for a group machine).
 
 The API takes the same choice as `preset` (`homelab`, `standard`, `custom`) next to `spec` on a
-create or an update. It fills only what the spec leaves out: a value the caller gives always stays,
+create, or on an update of an installation that is not installed yet. On an installed platform the
+API refuses `homelab` and `standard` (`409 fixed_fields`), as the page switches them off, and a
+spec that leaves out the control plane or the node groups keeps the stored ones: nothing is filled
+from a preset or a default on a platform that runs. Up to this fix the API took a preset there and
+put its node, sizes and counts where the spec named none (found on a lab on 2026-11-19; the fix is
+covered by tests, not run on a lab). On a draft a preset fills only what the spec leaves out: a value the caller gives always stays,
 a node nobody names is the seed's, and the answer carries the whole spec. `standard` through the API
 asks for three control plane machines where the installation's release builds them and for one
 where it does not; it does not read the node's memory, so the Check row `capacity` then says
@@ -869,7 +942,7 @@ line (`PC-ENROLL:…`) into the page and press **Store the secrets**
 | `network` | The platform network overlaps a tenant, sandbox or public network, a seed API source is a tenant network, the load balancer range is inside a blocked or management network, or a node did not report its networks | Correct the network in step 1 |
 | `isolation` | The seed, the API address or part of the node range is in no blocked or management network, or the cluster firewall's isolation rules are not the ones a sync writes | Press **Save settings** in step 1: the save adds the CIDRs the message names to the provider's blocked networks. By hand: add them to **Networks tenants must not reach** on the provider's page (`blockedCidrs`). The message lists the smallest ranges that are missing; one network that covers them does the same (`10.90.0.0/26` for a seed on `.5`, an API address on `.10` and nodes on `.20` to `.60`), as long as the load balancer range stays outside it. Then **Run a provider sync, then check again**: with the installation saved (step 1), the sync writes the provider's rules whether or not it has a project. Check that the datacenter firewall is on. Five messages name a cause no sync of a provider without a project repairs: `cidrPool … overlaps the management network …` (choose another `cidrPool`), `rules … are for another pool`, `rules … drop … to …, which this provider's cidrPool, blockedCidrs and sandboxCidrs do not`, `rules … have an ACCEPT …` or `have no ACCEPT …` and `rules … are not this provider's set …, and a project's rules for cidrPool … are in place` (another portal or provider shares the rules: give this provider its own `poolPrefix`; the provider's own older rules: delete them under Datacenter > Firewall and sync). ([More](#the-isolation-check-and-the-provider-sync)) |
 | `tenant-network` | Never. It reads the provider's default zone in Proxmox and **warns** when the zone has DHCP, when it does not exist yet and is configured as a `simple` zone without `"dhcp": false` (ProxCloud then creates it with DHCP), or when the zones could not be read: a tenant Kubernetes cluster create on a network of such a zone is refused with a `400` (not on a Kubernetes provider with shared workers, `cluster.shared`, which uses no tenant network). The row is `ok` for a zone without DHCP and absent when the provider names no zone | Nothing for the install or for databases. Before tenants create clusters: give the provider an EVPN or a VLAN zone as its default zone, or a `simple` zone without DHCP (Cloud providers, `config.network.zones` and `defaultZone`; [Prerequisites](#2-prerequisites)) |
-| `tenant-path` | Never, and absent when the provider names no zone. It reads the layout and **warns** when a node that translates tenant traffic (a `simple` default zone: the node of the tenant's VM; an EVPN default zone: its exit nodes) also hosts a platform machine and does not route the platform network itself, or when Proxmox could not be read: a tenant's TCP connection to the platform network is then dropped on that node, tenant Kubernetes workers never join and tenants cannot reach managed databases. It opens no connection: `ok` is not proof, and a leg added on a node by hand is not seen. It is `ok` for a platform network of mode `routed`. **Test the tenant path** below the rows opens the path on an installed platform | Nothing for the install. Before tenants create clusters or databases: one of the two layouts of [The path from tenants to the platform](#the-path-from-tenants-to-the-platform) |
+| `tenant-path` | Never, and absent when the provider names no zone. It reads the layout and **warns** when a node that translates tenant traffic (a `simple` default zone: the node of the tenant's VM; an EVPN default zone: its exit nodes) also hosts a platform machine and does not route the platform network itself, or when Proxmox could not be read: a tenant's TCP connection to the platform network is then dropped on that node, tenant Kubernetes workers never join and tenants cannot reach managed databases. It opens no connection: `ok` is not proof, and a leg added on a node by hand is not seen. It is `ok` for a platform network of mode `routed`. **Test the tenant path** below the rows opens the path on an installed platform. For a VLAN default zone that test is refused (`409 vlan_zone`), so the row names what to do instead: `curl -k -m 5 https://<a tenant cluster's API address>:6443/healthz` from a tenant's server | Nothing for the install. Before tenants create clusters or databases: one of the two layouts of [The path from tenants to the platform](#the-path-from-tenants-to-the-platform) |
 | `csi-vmid` | Never. It **warns** when a guest of the cluster has VM id 9999, the id proxmox-csi names its volumes after, or when that could not be read | Nothing for the install. Never destroy VM 9999 with "Destroy unreferenced disks owned by guest" ([VM id 9999 and the CSI volumes](#vm-id-9999-and-the-csi-volumes)) |
 | `capacity` | Before the first install, when a node has less memory than the settings place on it; absent while the CAPI token is not stored. It reads the nodes and their VMs with the CAPI token and counts as CAPMOX counts before each clone: the node's memory less the configured memory of every VM that is not a template and every container on it, running or not (this installation's own machines are part of the plan and are not counted twice). Against that it puts the seed, the control plane machines plus one, and each group's machines on the node: the one more is what a rolling update of the control plane makes before it removes an old machine. A node that holds those and not one more machine of each group on it as well **warns** and does not stop the install. On an installed platform every finding **warns**, and so does a node whose memory could not be read. A VM the CAPI token cannot see is not counted, so `ok` is the scheduler's answer, not a promise that the node has the memory free | Smaller or fewer machines, one control plane machine in place of three, other nodes, or free memory on the node (a stopped VM counts with its configured memory). Then save and check again |
 | `credentials` | A token secret is not stored | Run the root command of step 2 on a node and paste the `PC-ENROLL` line it prints |
@@ -882,8 +955,8 @@ line (`PC-ENROLL:…`) into the page and press **Store the secrets**
 | `boot-iso-grant` | `capmox@pve` may not upload and delete on the ISO store | Run the script again |
 | `boot-iso` | The ISO store is shared, takes no ISOs, or is not the only ISO store of the boot storage | Name a node-local ISO store |
 | `placement` | A node an image goes to lacks the import store with `import` content or the boot store | Change the nodes or the stores |
-| `boot-store` | Proxmox has no storage of the boot store's name, or it takes no disk images. It **warns** when the store also holds disks of VMs that are not the platform's (tenant servers, or VMs of your own), or when its content could not be listed: `csi@pve!csi` holds `Datastore.Allocate` on the whole boot store and its secret is readable inside the platform cluster ([section 10](#10-security-boundaries)). The disks are listed with the CSI token, the only one that sees them all, and the platform's own machines are told apart with the CAPI token, so before both tokens are stored the row says the disks are not read yet. Not counted: the installation's own machines, the templates of the pool `pc-templates`, CSI volumes (`vm-<id>-pvc-*`) | A missing store: name an existing one in step 1 (`pvesm status`). No disk images: `pvesm set <store> --content <its content>,images`, which the message spells out. The warning: a store of its own for the platform, on ZFS `zfs create <pool>/pcplat && pvesm add zfspool pcplat --pool <pool>/pcplat --content images,rootdir --sparse 1`, then name it in step 1 and run the root command of step 2 again. The install works without it |
-| `pve-api-rule` | Never. `ok` before the first install (the install writes the rule) and when the rule is in place; it **warns** on an installed platform whose rule is missing, changed or disabled, or when the cluster firewall rules could not be read. The message spells the rule out and says when the datacenter firewall is off | Nothing before the install. Installed: **Apply this release** writes the rule again |
+| `boot-store` | Proxmox has no storage of the boot store's name, or it takes no disk images. It **warns** when the store also holds disks of VMs that are not the platform's (tenant servers, or VMs of your own), or when its content could not be listed: `csi@pve!csi` holds `Datastore.Allocate` on the whole boot store and its secret is readable inside the platform cluster ([section 10](#10-security-boundaries)). The disks are listed with the CSI token, the only one that sees them all, and the platform's own machines are told apart with the CAPI token, so before both tokens are stored the row says the disks are not read yet. Not counted: the installation's own machines, the templates of the pool `pc-templates`, CSI volumes (`vm-<id>-pvc-*`). A VM of that pool that is no template is counted like any other VM: a clone that kept its template's pool, a VM put there by hand, and the VM of a template smoke test or of a tenant path test while it runs (up to this fix every member of the pool was skipped, so such VMs were not listed; found on a lab on 2026-11-19, the fix is not run on a lab) | A missing store: name an existing one in step 1 (`pvesm status`). No disk images: `pvesm set <store> --content <its content>,images`, which the message spells out. The warning: a store of its own for the platform, on ZFS `zfs create <pool>/pcplat && pvesm add zfspool pcplat --pool <pool>/pcplat --content images,rootdir --sparse 1`, then name it in step 1 and run the root command of step 2 again. The install works without it |
+| `pve-api-rule` | Never. `ok` before the first install (the install writes the rule) and when the rule is in place; it **warns** on an installed platform whose rule is missing, changed or disabled, or when the cluster firewall rules could not be read. The message spells the rule out and says when the datacenter firewall is off. The row reads the rule, not the traffic: the rule's sources are the addresses of the seed and the platform machines as the node sees them, so on a site whose router translates the platform network on the way to the node (NAT) the row is `ok` while the rule matches nothing ([what to add](#when-a-router-translates-the-platform-network)) | Nothing before the install. Installed: **Apply this release** writes the rule again |
 | `images` | A BOM image is on the template update blocklist | A new installation: install a newer ProxCloud release. An installed platform stays on its release and its images, and no release moves it to other images yet (see [Upgrade between BOMs](#upgrade-between-boms): a BOM with other images is refused): the message says which case applies, and an apply that must import that image stays blocked |
 
 A check that cannot be read fails. A warning fails nothing: the page then says "No check failed" with the
