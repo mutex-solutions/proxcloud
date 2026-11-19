@@ -245,6 +245,12 @@ with cluster chart 0.1.13 and platform chart 0.1.2, until an operator upgrades i
 
 ### Fixed
 
+- **The two consoles' images run on NGINX 1.30.7.** The base `nginx:1.30.6-alpine` carried five fixable HIGH findings
+  in the nginx package (CVE-2026-113425, CVE-2026-121810, CVE-2026-123007, CVE-2026-123633, CVE-2026-123634; fixed in
+  `1.30.7-r0`), which failed the image scans of `main` and of every pull request that scans a console. `web/Dockerfile`
+  now builds on `nginx:1.30.7-alpine`. A patch release of the same stable line: no configuration change. Not verified on
+  a lab.
+
 A lab round of 2026-11-19 ran this build over a platform that v0.8.0 installed. The five entries that follow fix
 what it found in managed services. None of the fixes was run on a lab: each is covered by tests against a fake
 Proxmox API.
