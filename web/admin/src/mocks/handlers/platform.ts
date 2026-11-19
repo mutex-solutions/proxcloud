@@ -8,6 +8,7 @@
 // ready | previous (ready, installed by the release before this one: the plan names a newer release and why this one does not move the platform to it) |
 // upgrade (the same, and the move is allowed: the plan lists it, the run wants the typed confirmation) |
 // upgradek3s (the same, and the move also replaces the seed's k3s: the plan blocks with seed_backup_missing until the apply says seedBackupTaken) |
+// upgradek8s (the same, and the move names the next Kubernetes patch: the plan has two parts, the platform part blocked by node_image_missing until the seed part has run) |
 // replace (the same, with an unfinished upgrade toward the release of an earlier ProxCloud: the plan also offers the move to this one's in its place) |
 // onenode (nothing saved, and the provider has one node, pve1, with 32 GiB of which 24 are free: the presets on a small site) |
 // onechart (nothing saved, and this release's cluster chart builds one control plane machine) | degraded (one component out of sync) | simplezone (the check warns: no tenant cluster on a simple zone) | silent (the seed does not answer) | unread (the live read fails) | removing
@@ -192,7 +193,11 @@ function tick(run: Doc): Doc {
     } else {
       end("succeeded", "ready")
       ready(in_)
-      if (run.fromBom) { // an upgrade ends here: the record moves to the target
+      if (run.part === "seed") { // the node image is on the nodes; the record and the target stay for the platform part
+        in_.seedPartDone = true
+        in_.status.bom = run.fromBom
+      }
+      else if (run.fromBom) { // an upgrade ends here: the record moves to the target
         in_.status.bom = run.bom
         delete in_.status.targetBom
       }
@@ -349,10 +354,10 @@ if (preset && !["disabled", "onenode", "onechart"].includes(preset)) {
     tick(newRun(in_, "apply", Date.now() - 3.5 * STAGE_MS)).dead = true
     in_.status.seed = { vmid: 9100, node: "pve1", generation: 1, cdVolume: "local:iso/pc-seed-pi-00000001.iso" }
   }
-  if (["ready", "previous", "upgrade", "upgradek3s", "replace", "degraded", "silent", "unread", "removing"].includes(preset)) {
+  if (["ready", "previous", "upgrade", "upgradek3s", "upgradek8s", "replace", "degraded", "silent", "unread", "removing"].includes(preset)) {
     mockPlatform.applies = 1
     tick(newRun(in_, "apply", Date.now() - 3_600_000))
-    if (["previous", "upgrade", "upgradek3s", "replace"].includes(preset)) in_.status.bom = { release: previous.release, sha256: previous.sha256 }
+    if (["previous", "upgrade", "upgradek3s", "upgradek8s", "replace"].includes(preset)) in_.status.bom = { release: previous.release, sha256: previous.sha256 }
     if (preset === "replace") in_.status.targetBom = { release: "0.6.5", sha256: "5".repeat(64) }
     if (preset === "removing") newRun(in_, "remove", Date.now() - 0.5 * STAGE_MS)
   }
@@ -534,7 +539,7 @@ function upgradePlan(in_: Doc, replace = false) {
   const release = { name: "release", from: previous.release, to: bom.release, class: "record only", impact: "Nothing is synced for it: the platform's record and the labels of its objects name the new release." }
   const chart = { cluster: "workload", name: "platform", from: "0.1.2", to: "0.1.3", class: "chart", stage: "workload-platform", wave: 3, impact: "The Application moves to the new chart version. ArgoCD syncs only the objects the new chart renders differently, and starts no sync when there is none. No pod of a tenant restarts." }
   const cilium = { cluster: "workload", name: "cilium", from: "1.18.15", to: "1.18.16", class: "refused", blocking: "not supported by this release: a third-party chart is upgraded only by a later release (this one moves the product's own charts)" }
-  const refused = preset !== "upgrade" && preset !== "upgradek3s" && preset !== "replace"
+  const refused = preset !== "upgrade" && preset !== "upgradek3s" && preset !== "upgradek8s" && preset !== "replace"
   // What platformlife.Classify lists for a newer seed.k3s, and the route's seed-backup row with its blocking line.
   const k3s = preset !== "upgradek3s" ? [] : [
     { name: "seed.k3s", from: "v1.35.10+k3s1", to: "v1.35.11+k3s1", class: "seed", stage: "seed-k3s", impact: "The k3s binary on the seed VM is replaced and k3s is restarted. The seed's API is away for about a minute. Meanwhile only reconciliation stops: Cluster API replaces or repairs no machine, the seed's ArgoCD syncs none of the platform's own components, and no platform run goes on. The platform cluster, every tenant cluster, the tenant API servers and the databases keep serving. ArgoCD and Cluster API on the seed keep their state: etcd on the seed's disk is not touched." },
@@ -545,6 +550,32 @@ function upgradePlan(in_: Doc, replace = false) {
   const vmid = in_.status.seed?.vmid
   const noBackup = `seed_backup_missing: no backup of seed VM ${vmid} younger than 24 hours is visible to the portal. Take one (vzdump ${vmid}), or confirm that you took one the portal cannot see.`
   const inProgress = !!in_.status.targetBom && !replace
+  if (preset === "upgradek8s") { // platformlife.setParts and rollRows, with the route's read (NeedRoll)
+    const phrase = `upgrade ${in_.name} to ${bom.release}`
+    const missing = `node_image_missing: node pve1 has no template of node image ubuntu-2604-k8s-1.35.11-20270101000000-000000000000; run "Seed and node image" first`
+    const done = !!in_.seedPartDone
+    const unit = (name: string, impact: string) => ({ cluster: "pc-platform", name: "roll/" + name, from: "1.35.10", to: "1.35.11", class: "machines", stage: "cluster", impact: impact + " Not measured on a lab yet." })
+    const vm = (name: string, how: string) => ({ cluster: "pc-platform", name: "roll-vm/" + name, class: "site", stage: "cluster", to: `1 new VM on pve1 cloned from ${done ? "template 9201" : "the template of node image ubuntu-2604-k8s-1.35.11-20270101000000-000000000000"}, 1 old VM deleted with its boot disk (${how})`, impact: "Cluster API clones the new VM and deletes the old one with its boot disk. Volumes of proxmox-csi are separate disks and are kept. Only VMs that carry this installation's tag are deleted: no other VM on the node is touched." })
+    const surge = "one more VM than today exists on the node while a machine is replaced"
+    return {
+      from: { release: previous.release, sha256: previous.sha256 }, to: bomRef, allowed: done, ...(inProgress ? { inProgress } : {}), ...(done ? { confirm: phrase + " and replace its machines" } : {}),
+      blocking: done ? [] : [missing],
+      parts: [
+        { id: "seed", done, allowed: true, ...(inProgress ? {} : { confirm: phrase }), blocking: [] },
+        { id: "platform", done: false, allowed: done, ...(done ? { confirm: phrase + " and replace its machines" } : {}), blocking: done ? [] : [missing] },
+      ],
+      changes: [
+        { name: "roll", class: "machines", stage: "cluster", impact: "There is no way back once the new control plane machine has joined the platform cluster: the run restores nothing and has no rollback, and neither Cancel nor Remove brings the old machines or the old Kubernetes version back. A step that fails leaves the machines that still run serving, and Retry goes on at that step. Tenant backups are the only net for a database whose volume does not follow it to the new machine." },
+        release,
+        { name: "kubernetes.version", from: "1.35.10", to: "1.35.11", class: "machines", stage: "cluster", impact: "Every machine of the platform cluster is replaced by Cluster API, the control plane first, then one node group and node at a time. The rows roll/… say per unit what stops serving meanwhile." },
+        unit("controlPlane", "The one control plane machine is replaced: a second machine is cloned and joins, then the old one is removed. From the removal of the old etcd member until the new machine holds the API address (the kube-vip lease, up to 60 seconds) the platform cluster's API does not answer: expected one to a few minutes."),
+        unit("system@pve1", "The platform's operators restart on the new machine. A MetalLB address may move to another node (seconds)."),
+        unit("kamaji@pve1", "The one kamaji machine is replaced: ALL tenant API servers are away while their pods restart on the new machine, and kamaji-etcd moves with its disk."),
+        unit("dbaas@pve1", "Every database with one instance on this machine is down while its pod moves to the new machine and its disk is attached there. Node pve1 has no room for one more machine of this group, so the old machine is deleted BEFORE the new one exists."),
+        vm("controlPlane", surge), vm("system@pve1", surge), vm("kamaji@pve1", surge), vm("dbaas@pve1", "the old VM is deleted first"),
+      ],
+    }
+  }
   return {
     from: { release: previous.release, sha256: previous.sha256 }, to: inProgress ? in_.status.targetBom : bomRef, allowed: !refused, ...(inProgress ? { inProgress } : {}),
     ...(refused || inProgress ? {} : { confirm: `upgrade ${in_.name} to ${bom.release}` }),
@@ -558,15 +589,21 @@ on("POST /admin/platform/installations/:id/runs", ({ params, opts }) => {
   const in_ = find(params.id)
   if (preset === "norunner") throw fail(409, "platform_disabled", "Runs need the platform runner: set PROXCLOUD_PLATFORM_ENABLED=true and PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED=true")
   const b = (opts.body ?? {}) as Doc
-  strict(b, { kind: true, confirm: true, targetBom: true, seedBackupTaken: true })
+  strict(b, { kind: true, confirm: true, targetBom: true, seedBackupTaken: true, part: true })
+  if (b.part !== undefined && b.part !== "seed") throw fail(400, "bad_part", 'bad_part: part must be "seed" or empty')
   if (b.kind !== "apply" && b.kind !== "remove") throw fail(400, "invalid_kind", "kind is apply or remove")
   // An apply that names this release as its target is an upgrade: allowed as the plan says, with the plan's phrase.
-  const up = b.kind === "apply" && b.targetBom && in_.status.bom?.sha256 === previous.sha256 && (!in_.status.targetBom || stale(in_)) ? upgradePlan(in_, stale(in_)) : null
+  // The platform part of an upgrade that replaces machines continues a started upgrade and still takes its phrase.
+  const continues = preset === "upgradek8s" && b.kind === "apply" && !b.targetBom && !!in_.status.targetBom && !in_.rollBegun
+  const up: Doc | null = (b.kind === "apply" && b.targetBom && in_.status.bom?.sha256 === previous.sha256 && (!in_.status.targetBom || stale(in_))) || continues ? upgradePlan(in_, stale(in_)) : null
+  const chosen = up?.parts?.find((p: Doc) => p.id === (b.part ?? "platform"))
+  if (up && chosen) Object.assign(up, { allowed: chosen.allowed, confirm: chosen.confirm, blocking: chosen.blocking })
+  if (up && chosen && !chosen.allowed && chosen.blocking[0]?.startsWith("node_image_missing")) throw fail(409, "node_image_missing", chosen.blocking[0], { reasons: chosen.blocking })
   if (b.targetBom && (b.kind !== "apply" || b.targetBom !== bom.sha256)) throw fail(400, "invalid_target", "targetBom must be the sha256 of this build's own BOM")
   // ErrSameBOM in internal/platformlife/job.go: the platform is on the target already.
   if (b.targetBom && in_.status.bom?.sha256 === bom.sha256) throw fail(409, "bom_installed", "targetBom is the BOM the platform is on: there is nothing to upgrade. An apply of the installed BOM takes neither targetBom nor confirm")
   if (up && !up.allowed) throw fail(409, "upgrade_refused", `upgrade_refused: ${up.blocking.join("; ")}`, { reasons: up.blocking })
-  if (up ? b.confirm !== up.confirm : b.confirm && (b.kind !== "remove" || b.confirm !== `remove ${in_.name}`)) throw fail(400, "invalid_confirmation", `confirm must be "remove ${in_.name}" on a remove, or the plan's phrase on an upgrade`)
+  if (up ? (b.confirm ?? "") !== (up.confirm ?? "") : b.confirm && (b.kind !== "remove" || b.confirm !== `remove ${in_.name}`)) throw fail(400, "invalid_confirmation", `confirm must be "remove ${in_.name}" on a remove, or the plan's phrase on an upgrade`)
   if (up?.seedBackup && !b.seedBackupTaken) throw fail(409, "seed_backup_missing", up.blocking[0])
   settleDead(in_) // a run whose job died is finished first
   if (activeRun(in_.id)) throw fail(409, "run_active", "a run of this installation is not finished")
@@ -575,6 +612,10 @@ on("POST /admin/platform/installations/:id/runs", ({ params, opts }) => {
   // until the run has succeeded (tick).
   if (up) in_.status.targetBom = bomRef
   if (b.kind === "apply" && in_.status.targetBom) run.fromBom = in_.status.bom
+  if (b.part === "seed") { // the seed part stops after the seed's components
+    run.part = "seed"
+    run.stages = run.stages.slice(0, APPLY.indexOf("seed-platform") + 1)
+  } else if (up?.parts) in_.rollBegun = true
   return { data: { runId: run.id } }
 })
 

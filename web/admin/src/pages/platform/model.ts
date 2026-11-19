@@ -69,6 +69,7 @@ export type Run = {
   id: string; kind: "apply" | "remove"; state: string; code?: string; message?: string; stages?: Stage[]
   requestedBy?: string; createdAt: string; startedAt?: string; finishedAt?: string
   bom?: BOMRef; fromBom?: BOMRef // fromBom: the run is an upgrade from that release to bom
+  part?: "seed" // the run is the seed part of an upgrade that replaces machines: it stops after the seed's components
 }
 export type BOMRef = { release: string; sha256: string }
 export type BOM = {
@@ -88,7 +89,7 @@ export type Plan = {
 }
 export type PlanChange = {
   cluster?: string; name: string; from?: string; to?: string; blocking?: string
-  class?: "chart" | "record only" | "refused" | "site" | "seed"; stage?: string; wave?: number; impact?: string
+  class?: "chart" | "record only" | "refused" | "site" | "seed" | "machines"; stage?: string; wave?: number; impact?: string
 }
 export type Upgrade = {
   from: BOMRef; to: BOMRef; allowed: boolean; inProgress?: boolean
@@ -97,7 +98,15 @@ export type Upgrade = {
   // The seed-backup row, on a move that replaces the seed's k3s and has not started. When it is not ok, blocking
   // carries seed_backup_missing, which the operator answers with seedBackupTaken on the apply.
   seedBackup?: Check
+  // On a move that replaces the platform cluster's machines: its two actions, "seed" then "platform". allowed, confirm
+  // and blocking above are then those of the platform part. The rows named roll and roll/<unit> say what the
+  // replacement does per unit, roll-vm/<unit> what it makes and deletes on the Proxmox site.
+  parts?: UpgradePart[]
 }
+export type UpgradePart = { id: "seed" | "platform"; done: boolean; allowed: boolean; confirm?: string; blocking: string[] }
+
+// A run that replaces the platform cluster's machines stands in its roll: stage 7 counts the units as "step n of m".
+export const rolling = (run: Run) => !!run.stages?.some((s) => s.id === "cluster" && s.state !== "done" && s.state !== "pending" && s.progress?.startsWith("step "))
 
 // The react-query key every read of this page starts with: one invalidation re-reads them all.
 export const PLATFORM_KEY = ["platform"]
@@ -474,7 +483,13 @@ const CODE_ACTION: Record<string, string> = {
   workload_api_unreachable: "Add a route from the ProxCloud host to the API address, then Retry. When the message says the cluster's API refuses the credential: it does so for some seconds after it starts; if the run failed on it, Retry.",
   bom_unsupported: "The platform was installed by a ProxCloud whose platform release this one does not carry (a development build, or a release from before 0.8.0), and a platform moves only between releases this ProxCloud carries. Go back to the ProxCloud that installed it. Or, if no tenant cluster or database must be kept, delete them all, then remove managed services and install again: Remove deletes the platform cluster.",
   upgrade_refused: "This ProxCloud cannot move the platform to its own platform release: step 4 lists why. The platform stays on its release, and Apply this release keeps working.",
-  unexpected_rollout: "The upgrade would replace machines of the platform cluster, so nothing of it was synced. If machine sizes, nodes or node groups were changed together with the upgrade, put them back, save, then Retry. Otherwise install the ProxCloud release that corrects it: step 4 then offers the upgrade to that release in place of this one.",
+  unexpected_rollout: "The upgrade would replace machines of the platform cluster that it is not there to replace, so nothing of that step was synced. If machine sizes, nodes or node groups were changed together with the upgrade, put them back, save, then Retry. Otherwise install the ProxCloud release that corrects it: step 4 then offers the upgrade to that release in place of this one.",
+  node_image_missing: "A node the platform cluster uses holds no template of the release's node image. Run “Seed and node image” in step 4 first: it imports the image on every node and replaces no machine.",
+  capacity_short: "A node has no room for the one more machine a replacement makes first. Nothing was changed. Free memory or space on the node the message names (a stopped VM counts with its configured memory), then read the plan again or Retry.",
+  drain_blocked: "A PodDisruptionBudget on the platform cluster allows no disruption, so the machine its pod is on could never be drained. Nothing was changed. For a database, bump its chart to 0.5.2 or newer (the databases guide has the step); for anything else give it a second replica or delete the budget. Then read the plan again.",
+  platform_unhealthy: "The replacement of the machines starts only on a platform whose machines all run and whose components are all Healthy. Nothing was changed. Repair what the message names (Apply this release, then Retry), then read the plan again.",
+  seed_not_upgraded: "The seed's k3s is not at the release's version yet. Run “Seed and node image” in step 4 first.",
+  rollout_stalled: "No machine of the unit moved for 30 minutes. The message names the machine and, when a pod cannot be evicted, the pod. The machines that run keep serving. Correct the cause (for a pod held by a PodDisruptionBudget: give it a second replica or remove the budget), then Resume: the run goes on at the same unit.",
   tenants_unhealthy: "A tenant cluster or database that was healthy before the upgrade is not. Look at the one the message names. Retry goes on from the same step and waits for it again: the upgrade does not go on until it is healthy or deleted.",
   seed_backup_missing: "The upgrade replaces k3s on the seed VM, and ProxCloud sees no backup of that VM from the last 24 hours. Take one (vzdump), or tick the box in step 4 if you took one on a store ProxCloud cannot read, then start the upgrade again.",
   seed_k3s_failed: "The seed runs its k3s as before. The message ends with the last lines of the upgrade: a download that failed means the seed cannot reach the release's k3s address. Correct it, then Retry.",

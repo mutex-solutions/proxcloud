@@ -505,6 +505,45 @@ test("an upgrade that replaces the seed's k3s: the plan says what is away and wr
   expect((await calls(page, "POST", /\/runs$/)).map((c) => c.body)).toEqual([{ kind: "apply", targetBom: expect.stringMatching(/^[0-9a-f]{64}$/), confirm: "upgrade lab to 0.7.0", seedBackupTaken: true }])
 })
 
+test("an upgrade that replaces the platform cluster's machines: two actions, what stops per unit, and the longer phrase", async ({ page }) => {
+  await open(page, "upgradek8s")
+  await recordCalls(page)
+  await expect(page.getByRole("heading", { name: "Kubernetes upgrade to release 0.7.0" })).toBeVisible()
+  await expect(page.getByRole("note")).toContainText("There is no way back once the new control plane machine has joined")
+  const actions = page.getByRole("list", { name: "The two actions of the Kubernetes upgrade" })
+  await expect(actions.locator('[data-part="platform"]')).toContainText('node_image_missing: node pve1 has no template of node image')
+  await expect(actions.getByRole("button", { name: "Replace the machines" })).toBeDisabled()
+  const units = page.getByRole("table", { name: /The machines the upgrade replaces, in order/ })
+  await expect(units.getByRole("row", { name: /1\. controlPlane 1\.35\.10 1\.35\.11 one more machine first .*the platform cluster's API does not answer.*Not measured on a lab yet/ })).toBeVisible()
+  await expect(units.getByRole("row", { name: /4\. dbaas@pve1 .* old machine deleted first .*deleted BEFORE the new one exists/ })).toBeVisible()
+  await expect(page.getByRole("button", { name: /^Upgrade to release/ })).toHaveCount(0)
+  await expectAccessible(page)
+  await shot(page, "upgrade-k8s")
+  // The seed part: the plain phrase, a run that stops after the seed's components.
+  await actions.getByRole("button", { name: "Seed and node image" }).click()
+  let dialog = page.getByRole("dialog", { name: /Upgrade “lab” to release 0\.7\.0/ })
+  await dialog.getByLabel(/to confirm/).fill("upgrade lab to 0.7.0")
+  await dialog.getByRole("button", { name: "Upgrade", exact: true }).click()
+  await expect(page.getByText(/It is the first of two actions/)).toBeVisible()
+  await expect(page.locator('[data-stage="cluster"]')).toHaveCount(0)
+  await expect(headerState(page)).toHaveAttribute("data-platform-state", "ready", { timeout: 30_000 })
+  // Done: the platform part is offered, with the phrase that names the machines.
+  await expect(actions.locator('[data-part="seed"]')).toContainText("Seed and node image (done)")
+  await actions.getByRole("button", { name: "Replace the machines" }).click()
+  dialog = page.getByRole("dialog", { name: /Upgrade “lab” to release 0\.7\.0/ })
+  await expect(dialog).toContainText("There is no way back")
+  const go = dialog.getByRole("button", { name: "Upgrade", exact: true })
+  await dialog.getByLabel(/to confirm/).fill("upgrade lab to 0.7.0")
+  await expect(go).toBeDisabled()
+  await dialog.getByLabel(/to confirm/).fill("upgrade lab to 0.7.0 and replace its machines")
+  await go.click()
+  await expect(page.locator('[data-stage="cluster"]')).toBeVisible()
+  expect((await calls(page, "POST", /\/runs$/)).map((c) => c.body)).toEqual([
+    { kind: "apply", targetBom: expect.stringMatching(/^[0-9a-f]{64}$/), confirm: "upgrade lab to 0.7.0", part: "seed" },
+    { kind: "apply", confirm: "upgrade lab to 0.7.0 and replace its machines" },
+  ])
+})
+
 test("an upgrade that finished in another session: the refusal bom_installed reads as a plain message", async ({ page }) => {
   await open(page, "upgrade")
   await page.getByRole("button", { name: "Upgrade to release 0.7.0" }).click()
