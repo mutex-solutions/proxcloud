@@ -117,6 +117,13 @@ func (s *Store) StartRun(ctx context.Context, jobs *durablejobs.Store, installat
 				return err
 			}
 		}
+		// An install starts without a tenant path test: the stored one is about a platform that was removed (Mutate
+		// deletes it with the status; one left by an earlier release, or saved by a test that outlived the Remove, goes here).
+		if kind == RunApply && !in.Installed() {
+			if _, err := s.probes().DeleteByID(tc, installationID); err != nil {
+				return err
+			}
+		}
 		raw, _ := json.Marshal(Payload{Version: 1, RunID: run.ID, InstallationID: installationID})
 		if run.JobID, err = jobs.EnqueueTx(tc, durablejobs.PlatformRun, "platform-run-"+run.ID, raw, JobAttempts); err != nil {
 			return err
@@ -274,7 +281,8 @@ func (s *Store) Load(ctx context.Context, runID string) (*Run, *Installation, *S
 }
 
 // Mutate re-reads a run, its installation and secrets under the installation's run lock, applies fn and writes all
-// three back (the secrets sealed; a document left with no secret is deleted). The runner calls it inside Checkpoint,
+// three back (the secrets sealed; a document left with no secret is deleted, and the tenant path test once a Remove
+// has wiped the status). The runner calls it inside Checkpoint,
 // so the write commits only while its job's lease holds.
 func (s *Store) Mutate(ctx context.Context, runID string, fn func(*Run, *Installation, *Secrets) error) error {
 	return s.DB.WithTx(ctx, func(tc context.Context) error {
@@ -302,6 +310,12 @@ func (s *Store) Mutate(ctx context.Context, runID string, fn func(*Run, *Install
 		in.UpdatedAt = time.Now().UTC()
 		if _, err := s.installations().Replace(tc, in.ID, in); err != nil {
 			return err
+		}
+		// A Remove that has wiped the status (removeSecrets): the last tenant path test was about the platform that is gone.
+		if run.Kind == RunRemove && !in.Installed() {
+			if _, err := s.probes().DeleteByID(tc, in.ID); err != nil {
+				return err
+			}
 		}
 		if sec.CAPI == nil && sec.CSI == nil && sec.K3sToken == "" && sec.SeedKubeconfig == nil && sec.BootstrapToken == "" {
 			_, err := s.secrets().DeleteByID(tc, in.ID)

@@ -72,6 +72,34 @@ func (x *acq) ensureAPIAccess(ctx context.Context) error {
 		pve.APIAccessComment(x.in.ID), port, strings.Join(sources, ", "), to)})
 }
 
+// ListAPIAccess adds the rule to the plan of an installed platform when the cluster firewall does not hold it as
+// APIAccess names it: the next apply writes it in stage 3 (ensureAPIAccess), and so does an upgrade run, so both lists
+// name it. A platform installed before v0.9.0 never had the rule. Nothing is added when the rule is in place, when the
+// settings name no source, or when the rules cannot be read (the Check row pve-api-rule says so, and the run decides).
+func (p *Plan) ListAPIAccess(ctx context.Context, in *Installation, portal *pve.Service) {
+	sources, dest, port := in.APIAccess()
+	if !in.Installed() || len(sources) == 0 {
+		return
+	}
+	if has, err := portal.HasAPIAccess(ctx, in.ID, sources, dest, port); err != nil || has {
+		return
+	}
+	to := dest
+	if to == "" {
+		to = "the nodes"
+	}
+	ch := PlanChange{Name: "pve-api-rule", To: "ACCEPT tcp " + port + " from " + strings.Join(sources, ", ") + " to " + to + ", comment " + pve.APIAccessComment(in.ID),
+		Class: ClassSite, Stage: StageSeedVM,
+		Impact: "The run writes one rule into the cluster firewall of Proxmox: ACCEPT from the platform's addresses (the seed and the node range) to the port of the Proxmox API. " +
+			"A rule with the same comment that differs is replaced by it. Nothing else in the firewall is touched, and no machine or pod restarts."}
+	p.Changes = append(p.Changes, ch)
+	for _, up := range []*Upgrade{p.Upgrade, p.Replacement} {
+		if up != nil {
+			up.Changes = append(up.Changes, ch)
+		}
+	}
+}
+
 // removeAPIAccess deletes the rule and answers the item a Remove shows (nil when there was none).
 func (x *acq) removeAPIAccess(ctx context.Context) (*StageItem, error) {
 	n, err := (&pve.Service{C: x.portal}).RemoveAPIAccess(ctx, x.in.ID)

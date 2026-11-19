@@ -84,7 +84,7 @@ func (s *Store) Probe(ctx context.Context, id string) (*TenantProbe, error) {
 	return &p, nil
 }
 
-// SaveProbe replaces the installation's tenant path test.
+// SaveProbe replaces the installation's tenant path test. Mutate deletes it when a Remove wipes the status, StartRun when an install starts.
 func (s *Store) SaveProbe(ctx context.Context, p *TenantProbe) error {
 	return s.probes().Upsert(ctx, p.ID, p)
 }

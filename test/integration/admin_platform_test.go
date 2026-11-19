@@ -728,6 +728,79 @@ func TestPlatformRunOnAPreviousBOM(t *testing.T) {
 	}
 }
 
+// TestPlatformProbeEndsWithThePlatform: the stored tenant path test stays over an apply of an installed platform, is
+// deleted when a Remove wipes the status, and an install starts without one (a verdict saved after the Remove, or left
+// by a release that kept it; lab round 3 of v0.9.0, R3-2: a fresh platform answered the removed one's verdict).
+func TestPlatformProbeEndsWithThePlatform(t *testing.T) {
+	ctx := context.Background()
+	db := freshPG(t)
+	jobs := durablejobs.New(db)
+	if err := jobs.Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	store := platformlife.NewStore(db, textcrypt.New("test-key"))
+	if err := store.Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cur, err := platformlife.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := &platformlife.Installation{Name: "lab", ServiceID: "svc-pve"}
+	if err := store.Create(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.C(platformlife.InstallationCollection).SetByID(ctx, in.ID, pgdoc.M{"status": pgdoc.M{"phase": "ready",
+		"bom": pgdoc.M{"release": cur.Release, "sha256": cur.SHA256}}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	save := func() {
+		t.Helper()
+		if err := store.SaveProbe(ctx, &platformlife.TenantProbe{ID: in.ID, State: platformlife.ProbeFailed, Node: "pve1"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stored := func() bool {
+		t.Helper()
+		p, err := store.Probe(ctx, in.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p != nil
+	}
+	// run starts a run of kind and ends it; wipe is what the Remove's last stage does to the status.
+	run := func(kind string, wipe bool) {
+		t.Helper()
+		r, err := store.StartRun(ctx, jobs, in.ID, kind, "admin-sub", "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Mutate(ctx, r.ID, func(r *platformlife.Run, in *platformlife.Installation, _ *platformlife.Secrets) error {
+			r.State = platformlife.RunSucceeded
+			if wipe {
+				in.Status = platformlife.Status{Phase: platformlife.PhaseRemoved}
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save()
+	if run(platformlife.RunApply, false); !stored() {
+		t.Fatal("an apply of an installed platform deleted its tenant path test")
+	}
+	if run(platformlife.RunRemove, false); !stored() {
+		t.Fatal("a Remove that has not wiped the status deleted the tenant path test")
+	}
+	if run(platformlife.RunRemove, true); stored() {
+		t.Fatal("the tenant path test outlives the Remove")
+	}
+	save() // a test that was still running saved its verdict after the Remove
+	if run(platformlife.RunApply, false); stored() {
+		t.Fatal("an install starts with the removed platform's tenant path test")
+	}
+}
+
 // TestPlatformRunMutate: the runner's write seals the secrets, deletes a secrets document left empty, and keeps the
 // run and the installation together.
 func TestPlatformRunMutate(t *testing.T) {
