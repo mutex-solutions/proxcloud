@@ -2180,7 +2180,7 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 
 ## Not implemented yet
 
-- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2`, that of v0.9.0 is `0.9.0` (`main` carries a `-dev` one between releases; the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` carry `0.9.0-rc.1` and `0.9.0-rc.2`, release BOMs for a lab; v0.9.0 keeps both as previous BOMs). `--managed-services` needs v0.8.0 or later: no
+- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2`, that of v0.9.0 is `0.9.0` (`main` carries a `-dev` one between releases, now `0.10.0-dev`; the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` carry `0.9.0-rc.1` and `0.9.0-rc.2`, release BOMs for a lab; v0.9.0 keeps both as previous BOMs, and `main` keeps that of v0.9.0 too). `--managed-services` needs v0.8.0 or later: no
   earlier released image reads `PROXCLOUD_PLATFORM_ENABLED`, and the images of v0.8.0 exist once
   its tag's workflows have succeeded. For a test ahead of a release,
   `proxcloud-up.sh` takes a build of main as its version (`--version dev-<sha>`, `upgrade dev-<sha>`;
@@ -2228,8 +2228,8 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
   - The installed BOM is recorded by the sha256 of the BOM file as that build carries it, in
     stage 11 only. Any later change of the file, a digest filled in for an entry that said
     `pending` or a comment, is another BOM. Only the BOMs of releases are kept as previous ones. A
-    platform installed on a `-dev` build (a `dev-<sha>` build of `main`, `0.8.0-dev` or
-    `0.9.0-dev`) is therefore refused (`bom_unsupported`) by every later build whose BOM file
+    platform installed on a `-dev` build (a `dev-<sha>` build of `main`, `0.8.0-dev`,
+    `0.9.0-dev` or `0.10.0-dev`) is therefore refused (`bom_unsupported`) by every later build whose BOM file
     differs, a release included: keep the build that installed it, or Remove and install again.
     Finish an install you want to keep only on a release.
   - An installation that never finished has no recorded BOM. **Retry** after a ProxCloud upgrade
