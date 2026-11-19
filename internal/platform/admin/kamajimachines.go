@@ -73,6 +73,9 @@ func maskJoinText(text string) string {
 // 26.04) the SSH host keys are generated and printed AFTER the user scripts, so the end of the log is 40 lines of
 // key art and kubeadm's error is above it (lab round of 2026-11-19, finding Q3).
 var (
+	// joinLineStamp is the "[2026-11-19 04:44:29] " every line of the log begins with on a real worker: the
+	// noise below is matched after it (finding G2F-4: anchored at the line start, nothing matched on a real log).
+	joinLineStamp  = regexp.MustCompile(`^\[\d{4}-\d\d-\d\d[ T][\d:.,]+\] `)
 	joinNoiseStart = regexp.MustCompile(`^(Generating public/private \S+ key pair|-----BEGIN SSH HOST KEY (FINGERPRINTS|KEYS)-----)`)
 	joinNoiseEnd   = regexp.MustCompile(`^(\+-+\[SHA256\]-+\+|-----END SSH HOST KEY (FINGERPRINTS|KEYS)-----)`)
 	// joinStart is where the last join begins: kubeadm's first line, or the command as a shell trace prints it.
@@ -97,14 +100,15 @@ func joinLogExcerpt(log string) string {
 	noise := 0 // lines of a noise block still to drop
 	for _, line := range strings.Split(log, "\n") {
 		line = strings.TrimRight(line, "\r")
+		bare := joinLineStamp.ReplaceAllString(line, "")
 		switch {
 		case noise > 0:
-			if noise--; joinNoiseEnd.MatchString(line) {
+			if noise--; joinNoiseEnd.MatchString(bare) {
 				noise = 0
 			}
-		case joinNoiseStart.MatchString(line):
+		case joinNoiseStart.MatchString(bare):
 			noise = joinNoiseBlockLines
-		case !strings.HasPrefix(line, "ci-info: "):
+		case !strings.HasPrefix(bare, "ci-info: "):
 			kept = append(kept, line)
 		}
 	}

@@ -143,6 +143,27 @@ ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHostKeyOfTheWorkerThatDidNotJoin0123456789 
 `
 }
 
+// Finding G2F-4: on a real worker every line of the log begins with "[date time] " (the shape of the lab's answer of
+// 2026-11-19), and the host key output and cloud-init's tables must go all the same.
+func TestJoinLogExcerptSkipsHostKeysBehindLineStamps(t *testing.T) {
+	var log strings.Builder
+	for _, line := range strings.Split(strings.TrimRight(workerLog(""), "\n"), "\n") {
+		log.WriteString("[2026-11-19 04:44:29] " + line + "\n")
+	}
+	got := joinLogExcerpt(log.String())
+	for _, want := range []string{"[2026-11-19 04:44:29] [preflight] Running pre-flight checks", "couldn't validate the identity of the API Server",
+		"Failed to run module scripts_user"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%q is not in the excerpt:\n%s", want, got)
+		}
+	}
+	for _, noise := range []string{"randomart", "Generating public/private", "SHA256", "o+*=o", "SSH HOST KEY", "ssh-ed25519", "ci-info", "| "} {
+		if strings.Contains(got, noise) {
+			t.Errorf("%q is still in the excerpt:\n%s", noise, got)
+		}
+	}
+}
+
 // Finding Q3: the end of the log is key art, and the operator must still read kubeadm's error. The old tail of 40
 // lines answered the key art alone.
 func TestJoinLogExcerptSkipsHostKeys(t *testing.T) {

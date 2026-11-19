@@ -379,7 +379,9 @@ func (x *acq) waves(ctx context.Context, seed, target *kamajik8s.Client, apps []
 	order = slices.Compact(order)
 	var items []StageItem
 	seen := 0 // the wave the stored progress names
-	_, _ = fmt.Sscanf(x.run.Stages[x.si].Progress, "wave %d", &seen)
+	if n, _ := fmt.Sscanf(x.run.Stages[x.si].Progress, "step %d", &seen); n == 0 {
+		_, _ = fmt.Sscanf(x.run.Stages[x.si].Progress, "wave %d", &seen) // a run stored before the BOM's wave was named
+	}
 	for i, w := range order {
 		if err := x.check(ctx); err != nil {
 			return err
@@ -431,7 +433,8 @@ func (x *acq) waves(ctx context.Context, seed, target *kamajik8s.Client, apps []
 			}
 			items = append(items, StageItem{ID: a.name(), State: state, Message: clip(detail)})
 		}
-		progress := fmt.Sprintf("wave %d of %d", i+1, len(order))
+		// The step counts the waves present; the wave is the BOM's number, the one the plan and the guide name.
+		progress := fmt.Sprintf("step %d of %d, wave %d", i+1, len(order), w)
 		// Written where the run stands: a new wave, the stored one, or an earlier one that is pending again.
 		if reached := i+1 > seen; reached || ((len(pending) > 0 || i+1 == seen) && !slices.Equal(x.run.Stages[x.si].Items, items)) {
 			if err := x.saveStage(ctx, func(s *Stage) {

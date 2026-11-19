@@ -32,7 +32,7 @@
       "class": "chart",
       "stage": "seed-platform",
       "wave": 2,
-      "impact": "ArgoCD syncs the chart and runs its clusterctl hook again, which finds every provider at its version and changes nothing. No pod of a tenant restarts."
+      "impact": "The Application moves to the new chart version. ArgoCD syncs, and runs the chart's clusterctl hook again, only when the new chart renders an object differently; the hook then finds every provider at its version and changes nothing. No pod of a tenant restarts."
     },
     {
       "cluster": "seed",
@@ -42,7 +42,7 @@
       "class": "chart",
       "stage": "cluster",
       "wave": 3,
-      "impact": "ArgoCD syncs the platform cluster's Cluster API objects. Before the sync the run checks that no machine or bootstrap template is new and that the control plane is unchanged, and fails with unexpected_rollout otherwise: no machine is replaced."
+      "impact": "The Application moves to the new chart version. ArgoCD syncs only the Cluster API objects of the platform cluster that the new chart renders differently. Before any sync the run checks that no machine or bootstrap template is new and that the control plane is unchanged, and fails with unexpected_rollout otherwise: no machine is replaced."
     },
     {
       "cluster": "workload",
@@ -52,7 +52,7 @@
       "class": "chart",
       "stage": "workload-platform",
       "wave": 2,
-      "impact": "ArgoCD syncs the chart and runs its clusterctl hook again, which finds every provider at its version and changes nothing. No pod of a tenant restarts."
+      "impact": "The Application moves to the new chart version. ArgoCD syncs, and runs the chart's clusterctl hook again, only when the new chart renders an object differently; the hook then finds every provider at its version and changes nothing. No pod of a tenant restarts."
     },
     {
       "cluster": "workload",
@@ -62,7 +62,7 @@
       "class": "chart",
       "stage": "workload-platform",
       "wave": 3,
-      "impact": "ArgoCD syncs the chart's objects. No pod of a tenant restarts."
+      "impact": "The Application moves to the new chart version. ArgoCD syncs only the objects the new chart renders differently, and starts no sync when there is none. No pod of a tenant restarts."
     }
   ],
   "blocking": []

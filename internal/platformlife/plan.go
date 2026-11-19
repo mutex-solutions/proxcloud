@@ -295,17 +295,20 @@ func Classify(from, to *BOM) []PlanChange {
 		default:
 			wave := t.Wave
 			c := PlanChange{Cluster: t.Cluster, Name: t.Name, From: f.Chart.Version, To: t.Chart.Version, Class: ClassChart, Stage: stageSeedPlatform, Wave: &wave,
-				Impact: "ArgoCD syncs the chart's objects. No pod of a tenant restarts."}
+				Impact: "The Application moves to the new chart version. ArgoCD syncs only the objects the new chart renders differently, and starts no sync when " +
+					"there is none. No pod of a tenant restarts."}
 			switch {
 			case t.Cluster == ClusterSeed && t.Name == ClusterName:
 				c.Stage = stageCluster
-				c.Impact = "ArgoCD syncs the platform cluster's Cluster API objects. Before the sync the run checks that no machine or bootstrap template is new " +
+				c.Impact = "The Application moves to the new chart version. ArgoCD syncs only the Cluster API objects of the platform cluster that the new chart " +
+					"renders differently. Before any sync the run checks that no machine or bootstrap template is new " +
 					"and that the control plane is unchanged, and fails with " + CodeUnexpectedRollout + " otherwise: no machine is replaced."
 			case t.Cluster == ClusterWorkload:
 				c.Stage = stageWorkloadPlatform
 			}
 			if _, hook := clusterctlProviders(to, *t); hook {
-				c.Impact = "ArgoCD syncs the chart and runs its clusterctl hook again, which finds every provider at its version and changes nothing. No pod of a tenant restarts."
+				c.Impact = "The Application moves to the new chart version. ArgoCD syncs, and runs the chart's clusterctl hook again, only when the new chart renders " +
+					"an object differently; the hook then finds every provider at its version and changes nothing. No pod of a tenant restarts."
 			}
 			out = append(out, c)
 		}

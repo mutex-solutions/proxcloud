@@ -33,6 +33,7 @@ var (
 	ErrBadKind      = errors.New("kind must be apply or remove")
 	ErrBadConfirm   = errors.New(`confirm must be "remove <installation name>" on a remove, or "upgrade <installation name> to <release>" on an apply that starts an upgrade (targetBom); no other run takes one`)
 	ErrBadTarget    = errors.New("targetBom must be the sha256 of this build's own BOM (GET /admin/platform/bom), or of the target of the upgrade in progress: a platform moves to no other BOM, and only an apply takes one")
+	ErrSameBOM      = errors.New("targetBom is the BOM the platform is on: there is nothing to upgrade. An apply of the installed BOM takes neither targetBom nor confirm")
 	ErrRunNotFound  = errors.New("no run with that id")
 	ErrRunFinished  = errors.New("this run has finished")
 	ErrBOMNotHere   = errors.New(CodeBOMUnsupported + ": the installed BOM, or the target of its unfinished upgrade, is not one this release embeds, so it can neither apply nor upgrade the platform; run the ProxCloud release that installed the platform, or delete every tenant cluster and database, then remove managed services and install again")
@@ -145,6 +146,8 @@ func startApply(run *Run, in *Installation, targetBOM, confirm string) error {
 		return err
 	case up != nil && !up.Allowed:
 		return &UpgradeRefused{Reasons: up.Blocking}
+	case up == nil && targetBOM != "" && in.Status.BOM != nil: // before the confirmation: the phrase may be right, the target is not
+		return ErrSameBOM
 	case up == nil && confirm != "", up != nil && confirm != up.Confirm: // "" while an upgrade is in progress
 		return ErrBadConfirm
 	}

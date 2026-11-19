@@ -252,6 +252,17 @@ with cluster chart 0.1.13 and platform chart 0.1.2, until an operator upgrades i
 
 ### Fixed
 
+- **Managed services, four small findings of the second lab round of 0.9.0-rc.1.** The upgrade plan's `impact`
+  texts and the guide no longer say that ArgoCD syncs every chart that moves and runs the clusterctl hook again:
+  the Application moves to the new chart version, and ArgoCD syncs objects, and runs a hook, only where the new
+  chart renders something differently (on the lab one Application of four was synced and no hook ran). A stage
+  that applies waves shows `step 3 of 4, wave 2` where it showed `wave 3 of 4`: the wave is now the BOM's number,
+  the one the plan and the guide name. An apply whose `targetBom` is the BOM the platform is already on answers
+  `409 bom_installed` in place of `400 invalid_confirmation` with a text about `confirm`. The join log of a
+  worker that did not join no longer ends with SSH host key art: the filter looked for it at the start of a
+  line, and every line of a real log begins with a time stamp, so it never matched (cloud-init's `ci-info`
+  tables are dropped the same way). Not verified on a lab.
+
 - **Managed services: a larger control plane that does not fit is no longer accepted in silence.** On an
   installed platform, 3 control plane machines saved over 1 on a node without room for them left the Check ok
   with a warning and a plan with no change and nothing blocking (lab round 2 of v0.9.0-rc.1). The plan now lists
