@@ -134,8 +134,22 @@ func (c *Client) RevokeClusterTokens(ctx context.Context, clusterID string) erro
 }
 
 // RevokeClusterCSIToken deletes the cluster's csi@pve!<id> token alone: a cluster moved onto the CSI gateway keeps its
-// CAPI token. A token already gone counts as revoked.
+// CAPI token. A token already gone counts as revoked. No cluster made since the CSI gateway has one, and PVE answers
+// the delete of a token that was never made with a 500 in its log, so the user's tokens are listed first and nothing
+// is sent when the list answers without it. A list that fails proves nothing: the delete is sent as before.
 func (c *Client) RevokeClusterCSIToken(ctx context.Context, clusterID string) error {
+	var have []struct {
+		TokenID string `json:"tokenid"`
+	}
+	if err := c.get(ctx, "/access/users/"+url.PathEscape(csiUser)+"/token", nil, &have); err == nil {
+		minted := false
+		for _, t := range have {
+			minted = minted || t.TokenID == clusterID
+		}
+		if !minted {
+			return nil
+		}
+	}
 	return c.DeleteAPIToken(ctx, csiUser, clusterID)
 }
 

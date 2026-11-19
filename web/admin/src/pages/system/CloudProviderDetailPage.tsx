@@ -423,7 +423,9 @@ function KamajiClustersCard({ id }: { id: string }) {
       </CardHeader>
       <CardContent className="grid gap-3">
         <p className="text-sm text-muted-foreground">
-          Provider pin: <span className="font-mono">{pin || "—"}</span>. Re-pinning re-renders the
+          Provider pin: <span className="font-mono">{pin || "—"}</span>.{" "}
+          {pin && clusters.length > 0 ? `${behind.length} of ${clusters.length} cluster(s) behind the pin. ` : null}
+          Re-pinning re-renders the
           chart for that cluster — platform components restart with a rolling update, and when the
           node template changed between chart versions the nodes rotate too (surge-first).
           Customers can also apply this themselves from the cluster page. The provider's worker repair setting

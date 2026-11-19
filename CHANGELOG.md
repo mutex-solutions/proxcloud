@@ -7,8 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-19
+
+A patch release on top of `v0.9.0`. It adds no feature: it fixes what the first production upgrade to `v0.9.0`
+and the last lab round of `v0.9.0` found.
+
+- **A provider sync no longer writes on withdrawn node templates.** The `onboot` pass of `v0.9.0` also wrote on
+  Kubernetes node templates whose import was withdrawn. It now leaves them alone (Fixed).
+- **The plan lists the Proxmox API firewall rule a run writes.** On a platform installed by 0.8.x the run wrote
+  the rule while the plan did not name it (Fixed).
+- **The stored result of the tenant path test ends with Remove**, and the Check row `boot-store` no longer calls
+  a leftover volume a VM (Fixed).
+- **Deleting a tenant cluster no longer sends a token delete that must fail** (Fixed).
+- **PostgreSQL is pinned to a minor release**, in the Docker Compose install and in the app chart, so that a
+  portal upgrade restarts the database only when a release says so (Changed).
+
+The platform BOM of this release is `0.9.1`. It pins what `0.9.0` pins, cluster chart 0.1.14 and platform chart
+0.1.3: the `release` line alone differs, and neither chart changed since its tag
+(`proxmox-kamaji-cluster-v0.1.14`, `proxcloud-platform-v0.1.3`). The release carries the BOMs of `0.8.0`,
+`0.8.1`, `0.8.2`, `0.9.0-rc.1`, `0.9.0-rc.2` and `0.9.0` for the platforms those builds installed.
+
+Upgrading from `v0.9.0`. From an older release, read the section of `v0.9.0` as well: its steps still apply.
+
+- **Portal first.** On the Docker Compose host check out the tag and run `./proxcloud-up.sh upgrade v0.9.1`
+  (`deploy/compose/README.md`, "Upgrade"). The script takes its backup first. The PostgreSQL line of
+  `compose.yaml` changes in this release (`17-alpine` to `17.12-alpine`), so expect this upgrade to recreate
+  the PostgreSQL container, and Keycloak with it, one more time; the volumes stay. Later upgrades restart the
+  database only when that line changes. Not run on a lab.
+- **A Helm install** restarts the portal's database once at the `helm upgrade`: the CloudNativePG image name
+  changes from `18` to `18.6`. Not run on a lab.
+- **An installed platform stays on its BOM** and keeps working. From `0.9.0` the move to `0.9.1` is one change
+  in the plan, the release, record only: nothing is synced for it, and it can wait. From a 0.8.x BOM the plan is
+  that of `v0.9.0`, six changes and no refusal, and it now also lists the entry `pve-api-rule` while the cluster
+  firewall rule is missing. `TestUpgradeRollsNoMachine` compares all six previous BOMs with this one and passes.
+  No move to `0.9.1` was run on a lab.
+- **Then let one provider sync run** (every 15 minutes; without the scheduler `POST
+  /api/v1/admin/job/external-service/sync`). It writes `onboot: 1` on the Kubernetes node templates that an
+  import of this portal still holds, staged or published, and on the running workers of its tenant clusters,
+  where the option is missing. It skips a withdrawn import (tag `pc-tu-withdrawn`), which it neither reads nor
+  writes, a template the portal did not import, a worker that is not running, and everything that has the
+  option already. An `onboot` that a sync of `v0.9.0` wrote on a withdrawn template stays: nothing takes it
+  back (`docs/managed-services.md`, "After a Proxmox node reboots").
+- The app chart is `0.9.1` with appVersion `v0.9.1`, and `pc_versions.proxcloud` and `DEFAULT_VERSION` of
+  `proxcloud-up.sh` name `v0.9.1`.
+
+Verified on a lab: nothing. No fix of this release has run on a lab yet, and nothing was run on its published
+images. What `v0.9.0` verified is in its section and in `docs/releases/v0.9.0.md`. One site run stands behind two
+of the entries: on 2026-11-19 a production site with one tenant cluster and one database moved its platform from
+the BOM `0.8.0` to `0.9.0`, on the published images of `v0.9.0` (one run of 68.6 seconds, no retry, nothing
+rolled, no tenant request failed in 149 looks). That run wrote the firewall rule the plan had not listed, and the
+portal upgrade before it recreated PostgreSQL and Keycloak. It is a site run of `v0.9.0`, not a lab run of this
+release.
+
+Not verified on a lab:
+
+- **This release itself:** its published images, its tag's workflows, and the move of a platform to the BOM
+  `0.9.1` from any previous BOM, the record-only step from `0.9.0` included.
+- **The plan entry `pve-api-rule`** on a platform that has no rule, and the run after it.
+- **The `boot-store` row** on a store that holds a leftover volume.
+- **`404 no_probe`** from the tenant path test after a Remove and after a new install.
+- **A tenant cluster delete** without the failing `csi@pve` token delete in the Proxmox log.
+- **The provider sync on a site with a withdrawn node template**, and a worker cloned from one.
+- **A Compose upgrade** from `v0.9.0` to this release, and a later one that keeps the container ids of
+  PostgreSQL and Keycloak; the `helm upgrade` with the new CloudNativePG image name.
+- **The operator console:** the message for `409 bom_installed` and the count on the card "Managed clusters".
+- **The button on the ready card that tests and publishes the node image and offers the version.** The notes of
+  `v0.9.0` dropped it from their list without a run: it was never pressed on a lab.
+- Everything `v0.9.0` and the releases before it say is not verified still holds
+  (`docs/releases/v0.9.0.md`, "Not verified").
+
+The entries below were written when each change merged. Where one says the BOM on `main` is `0.10.0-dev`, that
+was the state at that merge: this release's BOM is `0.9.1`, and the release after it sets `main` back to a `-dev`
+one.
+
 ### Changed
 
+- **The operator's provider page counts the clusters behind the provider's chart.** The card "Managed clusters"
+  already listed each cluster's chart version and offered Bump; it now says how many are behind. The tenant
+  console already shows "Platform update available" on such a cluster. `docs/managed-k8s.md` says where both
+  read it, and that the cluster's row in the tenant API carries its own version only.
+- **`docs/proxmox-permissions.md` says who gets `403` on `GET /cluster/status` and why no privilege is added.** It
+  is CAPMOX's client library reading the cluster's name with the cluster's token; the answer is ignored by
+  design and nothing degrades.
 - **The Docker Compose install pins PostgreSQL to a minor release** (`postgres:17.12-alpine` in
   `deploy/compose/compose.yaml`, up to 0.9.0 the moving tag `17-alpine`). `proxcloud-up.sh upgrade` pulls every
   image of the file, so a newer `17-alpine` recreated PostgreSQL, and Keycloak with it, during a portal upgrade
@@ -36,9 +116,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carried. Its pins are those of the two candidates, so `TestUpgradeRollsNoMachine` compares six previous BOMs
   with the BOM on `main`: three of 0.8.x, the two candidates and `0.9.0`. No apply on such a platform was run on
   a lab by this change.
+- **The platform BOM's release is `0.9.1`** (`deploy/platform/platform-bom.yaml`), with the pins of `0.9.0`: the
+  two BOMs differ in the `release` line alone, and neither chart of the product changed since its tag. The
+  release gate passes on it and on the six previous BOMs. The app chart, `pc_versions.proxcloud` and
+  `DEFAULT_VERSION` of `proxcloud-up.sh` move to `0.9.1` / `v0.9.1`. `deploy/platform/previous/0.9.1.yaml` is
+  added by the change after the tag.
 
 ### Fixed
 
+- **The provider sync no longer writes `onboot` on withdrawn Kubernetes node templates.** The pass of v0.9.0 set
+  it on every node template an import receipt of the portal holds, withdrawn imports included. A withdrawn
+  template is kept as it was for forensics and no new node group gets it, so the pass now skips a template tagged
+  `pc-tu-withdrawn` without reading it (`templateupdates.StartNodeTemplatesAtBoot`). A cluster created on such a
+  template before the withdraw still clones from it, and Proxmox copies `onboot` at the clone, so such a worker
+  has none until the sync's worker pass sets it, at the next sync (`docs/managed-services.md`, "After a Proxmox
+  node reboots"). Not verified on a lab.
+- **Deleting a tenant cluster no longer asks Proxmox to delete a `csi@pve` token that was never made.** No cluster
+  made since the CSI gateway has one, and Proxmox answered the delete with a `500` in its log. The release now
+  lists the tokens of `csi@pve` and sends the delete only when the cluster's id is among them. A token that exists
+  and cannot be deleted still fails the release, and when the list cannot be read the delete is sent as before
+  (`pve.RevokeClusterCSIToken`). Not verified on a lab.
 - **Admin console: the refusal `409 bom_installed` reads as a plain message.** When an upgrade had finished in
   another session and Upgrade was pressed on a page that still showed the plan, the page showed the API's own
   text about `targetBom`. It now says that the platform is already on this release and that no run was started.
@@ -64,6 +161,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the old verdict, taken with other machines holding the addresses (lab round 3 of v0.9.0, R3-2). The Remove run
   now deletes it when it wipes the recorded status, and the start of an install deletes one that was saved after
   that. Not run on a lab.
+
+### Known issues
+
+Three known issues of `v0.9.0` are fixed here: the `boot-store` row that named a VM that does not exist, the
+stored result of the tenant path test that outlived Remove, and the failed token delete at a cluster delete. The
+`403` on `GET /cluster/status` is by design and now documented (`docs/proxmox-permissions.md`). The others
+remain as the section of `v0.9.0` states them:
+
+- **The root command stops when the platform's token ids are taken.** The ids `capmox@pve!capi` and
+  `csi@pve!csi` are fixed. It affects a new install on a Proxmox cluster where one of them exists for something
+  else ("The root command of an installation", `docs/managed-services.md`).
+- **A chart version that changes only its hook does not run the hook.** No chart of this release is such a
+  version ("What a release checks about its BOM pairs", `docs/ci-release.md`).
+- **Workers do not join when the node that holds the platform's addresses also translates tenant traffic**, on a
+  `simple` tenant zone. Read the Check row `tenant-path` and use one of the two layouts that work
+  (`docs/managed-services.md`).
+- **The platform upgrade has not run on a lab that has tenants.** It ran once on a production site with one
+  tenant cluster and one database (above). Take the seed backup first.
+- A health check replaces nothing when every worker of a group fails; Replace on a node group of one leaves the
+  group without a node; a standalone volume can lose its name at create; the `pve-api-rule` row can read `ok`
+  while the rule matches nothing behind a translating router; seed ISOs of servers created before `v0.8.0` are
+  never swept.
 
 ## [0.9.0] - 2026-11-19
 

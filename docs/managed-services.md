@@ -14,7 +14,7 @@ are in [ADR 0009](adr/0009-managed-services-platform-lifecycle.md); the routes a
 > there and what was not is in [Not verified on a lab yet](#not-verified-on-a-lab-yet). It is off
 > by default. v0.8.0 is the first release that carries it; one install was made on its published
 > images (a lab, 2026-11-18) and one on those of the candidate v0.9.0-rc.2 (the same lab,
-> 2026-11-19), none on those of v0.8.1, v0.8.2 or v0.9.0: see [Not implemented yet](#not-implemented-yet).
+> 2026-11-19), none on those of v0.8.1, v0.8.2, v0.9.0 or v0.9.1: see [Not implemented yet](#not-implemented-yet).
 
 Code: `internal/platformlife` (the installation model, the preflight, the runner and its stages, the
 renderers), `internal/platform/admin/platform.go` (the routes), `internal/cloud/pve/access.go` and
@@ -1837,7 +1837,10 @@ holds on `pc-templates` and on the tenant pools):
 
 - **Node templates:** `onboot: 1` on every Kubernetes node template that a Template updates import
   of this portal for this provider still holds (the import's receipt: node, VM id, name and source
-  digest; staged, published or withdrawn). Clones made after that have it.
+  digest), staged or published. Clones made after that have it. A **withdrawn** import (tag
+  `pc-tu-withdrawn`) is neither read nor written: no new node group gets it. A cluster created on
+  it before the withdraw keeps cloning from it (scale up, Replace, a health check's replacement),
+  and such a worker has no `onboot` until the worker pass below sets it at the next sync.
 - **Workers:** `onboot: 1` on every running worker VM of a tenant cluster of this portal that lacks
   it: a VM in a project's pool with the tag `pc-k8s-<cluster id>`, where that project has that
   cluster. A worker that is not running is left for a later sync, because CAPMOX still writes a new
@@ -2018,11 +2021,13 @@ charts list the installed version in `upgradeFrom`, and the release's check foun
 0.1.14 renders the platform cluster's control plane and templates as 0.1.13 did, so no machine is
 replaced. After the upgrade the platform can go from 1 to 3 control plane machines, Replace works,
 and new tenant clusters get the health check. A build of `main`, whose BOM is a `-dev` one,
-refuses the move for that reason alone; the release `v0.9.0` allows it, as its candidates
+refuses the move for that reason alone; the releases `v0.9.0` and `v0.9.1` allow it, as the candidates
 `v0.9.0-rc.1` and `v0.9.0-rc.2` did for a lab ([ci-release.md](ci-release.md#release-candidates)). From the BOM of 0.8.0 to
 that of `v0.9.0-rc.1` it was run on a lab without tenants (2026-11-19): six changes, and no machine
-replaced. Not run on a lab: the move from 0.8.1 or 0.8.2, the move to `0.9.0-rc.2` or to `0.9.0`, three control
-plane machines, and the health check on a cluster made before the upgrade.
+replaced. Not run on a lab: the move from 0.8.1 or 0.8.2, the move to `0.9.0-rc.2`, to `0.9.0` or to `0.9.1`, three control
+plane machines, and the health check on a cluster made before the upgrade. From the BOM of 0.9.0, or of
+one of its candidates, to that of `0.9.1` the BOMs differ in the release line alone: the plan lists one
+change, record only, and nothing is synced for it; not run on a lab either.
 
 Every other difference refuses the whole upgrade, each with its own line in the plan and in the
 `409 upgrade_refused` of a run. All lines begin with "not supported by this release":
@@ -2202,7 +2207,7 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 
 ## Not implemented yet
 
-- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2`, that of v0.9.0 is `0.9.0` (`main` carries a `-dev` one between releases, now `0.10.0-dev`; the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` carry `0.9.0-rc.1` and `0.9.0-rc.2`, release BOMs for a lab; v0.9.0 keeps both as previous BOMs, and `main` keeps that of v0.9.0 too). `--managed-services` needs v0.8.0 or later: no
+- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2`, that of v0.9.0 is `0.9.0`, that of v0.9.1 is `0.9.1` (`main` carries a `-dev` one between releases; the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` carry `0.9.0-rc.1` and `0.9.0-rc.2`, release BOMs for a lab; v0.9.0 keeps both as previous BOMs, and v0.9.1 keeps those and that of v0.9.0). `--managed-services` needs v0.8.0 or later: no
   earlier released image reads `PROXCLOUD_PLATFORM_ENABLED`, and the images of v0.8.0 exist once
   its tag's workflows have succeeded. For a test ahead of a release,
   `proxcloud-up.sh` takes a build of main as its version (`--version dev-<sha>`, `upgrade dev-<sha>`;

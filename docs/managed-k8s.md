@@ -186,6 +186,15 @@ sequenceDiagram
   **Bump** / **Bump all** on the provider page. The admin Bump was run on Proxmox
   (0.1.5 to 0.1.6 on the lab: ArgoCD synced the new pin, the workers stayed); the
   customer's *Apply platform update* has not been.
+- **A cluster behind the provider's chart** is shown where the move is offered, and nowhere else. The tenant
+  console compares the cluster's `chart_version` with the provider's `kubernetesPlatformVersion` (the project's
+  services list, `GET /api/v1/project/{id}/service`) and shows "Platform update available" with both versions on the cluster's
+  page. The operator's provider page lists `chartVersion` per cluster next to `providerChartVersion`
+  (`GET /api/v1/admin/service/{id}/k8s-clusters`) and counts the clusters behind. The cluster's own row in the
+  tenant API carries `chart_version` only: a script reads the provider's version from the services list. Neither
+  place says what a newer chart adds; for 0.1.13 to 0.1.14 that is the automatic replacement of a worker that
+  does not join ("A worker that does not join" below), while Replace and the worker firewall work on any chart
+  version. Nothing moves a cluster by itself: a platform upgrade changes the provider's version only.
 
 ### Deletion and orphan finalization
 
@@ -551,7 +560,7 @@ kubectl get application <cluster-id> -n argocd -o jsonpath='{.status.health}{"\n
 |---|---|
 | Create answers `409 Could not mint the cluster's Proxmox tokens: the operator must fix a permission of the portal on Proxmox first. Nothing was created, and trying again does not help until then.` | Proxmox refused the portal token an ACL row for the cluster's token (a 403). The tenant's message names no path on purpose. The path is in Proxmox's own words, `Permission check failed (<path>, <privileges>)`, in two places: the operator's **Audit** page, on the `CLOUD_RESOURCE_CREATE` event with outcome `FAILURE` (`internalReason`), and the API log line `backend request failed` with the same request id as the answer's `X-Request-Id`. The usual cause is an ACL row of the portal's own on that store or zone, which hides the mint role its parent passes down: run the managed-services script again, then the Check ([proxmox-permissions.md](proxmox-permissions.md#a-row-of-the-portals-own-on-a-store-or-a-zone)). Until v0.8.0 this was a `502 The compute backend is unavailable` with no audit event. |
 | Create answers `502 The compute backend is unavailable. Try again later.` | Proxmox did not answer, or failed for another reason than a permission. The reason is in the same two places. |
-| Machines stuck, CAPMOX logs `not authorized to access endpoint` | PVE refused the cluster's token. The PVE access log (`/var/log/pveproxy/access.log`) names the call. `GET /cluster/status` answering 403 is normal and ignored. A refused clone is checked against the template's NICs too. |
+| Machines stuck, CAPMOX logs `not authorized to access endpoint` | PVE refused the cluster's token. The PVE access log (`/var/log/pveproxy/access.log`) names the call. `GET /cluster/status` answering 403 is normal and ignored ([proxmox-permissions.md](proxmox-permissions.md#managed-kubernetes)). A refused clone is checked against the template's NICs too. |
 | `error waiting for agent` for a few minutes | Normal while the clone boots. |
 | Tenant `LoadBalancer` Service `<pending>` for up to 15 minutes after create | The MetalLB pool arrives by ClusterResourceSet, which retries until the chart's CRDs and MetalLB's webhook answer, with CAPI's growing backoff between tries: on the lab it applied 8 minutes after the cluster was Available. The Application reads `Progressing` until then; the portal shows the cluster READY once the control plane, every node group and the sync are done and the ClusterResourceSet is the one part left, for up to 30 minutes after create. A cluster still `PROGRESSING` past that: `kubectl get clusterresourceset -n pc-<projectId>` and its `ResourcesApplied` condition. |
 | Application `OutOfSync` / `SyncFailed` | `argocd app get <cluster-id>` sync error. "not permitted in project proxcloud-k8s" → the chart needs a cluster-scoped resource; add exactly that group/kind to `deploy/mgmt-cluster/appproject.yaml`. Chart pull errors → registry or pin problem (§1.4). |

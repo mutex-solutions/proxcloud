@@ -218,7 +218,7 @@ feature off. The last lines of `install` (also with `--dry-run`) say what is on.
 
   No release before v0.8.0 reads `PROXCLOUD_PLATFORM_ENABLED`. A platform was built from this stack
   on the published images of v0.8.0 once, on a lab (2026-11-18), and on those of the candidate
-  v0.9.0-rc.2 once (the same lab, 2026-11-19); not on those of v0.8.1, v0.8.2 or v0.9.0 (the other
+  v0.9.0-rc.2 once (the same lab, 2026-11-19); not on those of v0.8.1, v0.8.2, v0.9.0 or v0.9.1 (the other
   lab runs used `dev-<sha>` builds of main, [managed-services.md](../../docs/managed-services.md#not-verified-on-a-lab-yet)).
 
   **Testing ahead of a release.** `--version dev-<sha>` and `upgrade dev-<sha>` take a build of main
