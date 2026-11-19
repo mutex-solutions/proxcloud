@@ -16,6 +16,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`docs/proxmox-permissions.md` says who gets `403` on `GET /cluster/status` and why no privilege is added.** It
   is CAPMOX's client library reading the cluster's name with the cluster's token; the answer is ignored by
   design and nothing degrades.
+- **The Docker Compose install pins PostgreSQL to a minor release** (`postgres:17.12-alpine` in
+  `deploy/compose/compose.yaml`, up to 0.9.0 the moving tag `17-alpine`). `proxcloud-up.sh upgrade` pulls every
+  image of the file, so a newer `17-alpine` recreated PostgreSQL, and Keycloak with it, during a portal upgrade
+  (seen on a production site at the upgrade to 0.9.0). The database now restarts only when a release changes that
+  line; Dependabot proposes the next minor (`.github/dependabot.yml`, `docker-compose`). The tag is a version
+  without a digest, as Traefik and Keycloak are pinned: a rebuild of `17.12-alpine` by its publisher would still
+  be pulled. The app chart's CloudNativePG image is pinned the same way (`cnpg.imageName`
+  `ghcr.io/cloudnative-pg/postgresql:18.6`, before `18`; both named the same image on 2026-11-19). On an
+  installed chart the changed image name makes the operator restart the portal's database once at the next
+  `helm upgrade`. Not run on a lab: an upgrade of a Compose install from 0.9.0, and that `helm upgrade`. Left as
+  they are: the bundled Bitnami PostgreSQL and RabbitMQ subcharts (off by default; `values.yaml` says why),
+  `haproxy:3.0-alpine` of the tenant chart `database-cluster`, and the `postgres:17-alpine` of the development
+  `docker-compose.yml` and of the integration tests.
+- **CI: `rebrand-gate` installs nothing.** It searched with ripgrep installed by `apt-get`, and failed twice on
+  an Ubuntu mirror error. It now searches the tracked files with `git grep` (`-P` for the previous-backend
+  terms), which the runner has. The `go-test` job runs `gofmt -l .` and fails on any file it lists: nothing
+  checked the format. With the Go of CI and of the images (1.27.4) `main` is formatted; gofmt of Go 1.26 lists
+  `internal/platform/project/quota_usage.go`, because the two format a return of two composite literals
+  differently, so format with the Go that CI uses.
 
 - **The platform BOM on `main` is `0.10.0-dev`, and the build carries the BOM of `0.9.0`**
   (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.9.0.yaml`). The `v0.9.0` release commit left
@@ -39,6 +58,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lists the tokens of `csi@pve` and sends the delete only when the cluster's id is among them. A token that exists
   and cannot be deleted still fails the release, and when the list cannot be read the delete is sent as before
   (`pve.RevokeClusterCSIToken`). Not verified on a lab.
+- **Admin console: the refusal `409 bom_installed` reads as a plain message.** When an upgrade had finished in
+  another session and Upgrade was pressed on a page that still showed the plan, the page showed the API's own
+  text about `targetBom`. It now says that the platform is already on this release and that no run was started.
+  The console's mock API answers `bom_installed` as the API does and carries the plan's current impact text.
+- **`docs/managed-services.md` names the one upgrade that ran on a production site** (2026-11-19, a single-node
+  site with one tenant cluster and one database, 0.8.0 to 0.9.0) where it said that none had run with tenants or
+  on a production site.
 - **The plan of an installed platform names the cluster firewall rule a run writes.** On a platform installed by
   0.8.x the rule `proxcloud:pve-api:<installation>` does not exist, and an apply or an upgrade run writes it in
   stage 3 (`seed-vm`) while the plan listed no such change (production upgrade of 2026-11-19: six changes in the
