@@ -323,9 +323,12 @@ function useKubeconfig(installation: Installation, which: "seed" | "platform") {
   })
 }
 
-// The two commands that open one ArgoCD: no release before v0.10.0 gives either an address of its own.
-const argoCommands = (file: string, port: number) =>
-  `export KUBECONFIG=./${file}\nkubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d; echo\nkubectl -n argocd port-forward svc/argocd-server ${port}:80`
+// The commands that open one ArgoCD through a port-forward: the password of admin, then the forward. tls: the ArgoCD
+// has an address (spec.access.argocd, the platform cluster's only), so it serves HTTPS inside the cluster too.
+const argoPassword = (file: string) =>
+  `export KUBECONFIG=./${file}\nkubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d; echo`
+const argoCommands = (file: string, port: number, tls = false) =>
+  `${argoPassword(file)}\nkubectl -n argocd port-forward svc/argocd-server ${port}:${tls ? 443 : 80}`
 
 type ProviderRow = { id: string; name: string; config?: Record<string, any> }
 
@@ -385,6 +388,7 @@ function Ready({ installation, live, loading, error, canManage, providers }: {
   ]
   const download = useKubeconfig(installation, "platform")
   const expires = installation.status.clusters?.[0]?.argocdTokenExpiresAt
+  const argo = installation.spec.access?.argocd, argoUrl = installation.status.argocdUrl
   const days = expires ? Math.floor((new Date(expires).getTime() - Date.now()) / 86_400_000) : undefined
   const vmid = installation.status.seed?.vmid
   const choice = installation.spec.tenants?.attach ?? "none"
@@ -473,11 +477,36 @@ function Ready({ installation, live, loading, error, canManage, providers }: {
       <div className="grid min-w-0 gap-2 text-sm">
         <h3 className="font-semibold">Open ArgoCD</h3>
         <p>
-          There are two, and this release gives neither an address. Each opens through a port-forward, from a machine with kubectl that reaches
-          the API address above. The first command prints the password of user <span className="font-mono">admin</span>; the second runs until you stop it.
+          There are two. The one on the platform cluster holds every tenant cluster and database; it gets an address when you set one under Access
+          in step 1 and apply. The one on the seed holds the platform's own components and never gets an address: its admin controls Cluster API and
+          every machine. Without an address an ArgoCD opens through a port-forward, from a machine with kubectl that reaches the API address above.
         </p>
-        <p>On the platform cluster, the ArgoCD that holds every tenant cluster and database. Use the platform kubeconfig, then open <span className="font-mono">http://localhost:8080</span>:</p>
-        <CopyBlock text={argoCommands(kubeconfigFile(installation, "platform"), 8080)} label="platform ArgoCD commands" />
+        {argoUrl ? (
+          <>
+            <p>
+              On the platform cluster: <a className="font-mono underline" href={argoUrl} target="_blank" rel="noreferrer" aria-label="Open the platform ArgoCD">{argoUrl}</a>,
+              from {(installation.status.argocdSources ?? []).join(", ") || "the operator networks"} only. The certificate is ArgoCD's own and self-signed, so the browser warns once:
+              an IP address gets no publicly trusted certificate.
+            </p>
+            <p>
+              Sign in as <span className="font-mono">admin</span>. ProxCloud creates no ArgoCD account and shows no password: read it with the platform kubeconfig
+              (one hour, written to the audit log):
+            </p>
+            <CopyBlock text={argoPassword(kubeconfigFile(installation, "platform"))} label="platform ArgoCD password command" />
+            <p className="text-muted-foreground">
+              What you change in ArgoCD by hand is undone by its next sync: the platform's Applications heal themselves. For an everyday look that changes
+              nothing, use the component list above.
+            </p>
+          </>
+        ) : (
+          <>
+            <p>
+              On the platform cluster{argo ? `, until an apply has given it ${argo.address} (after that apply it serves HTTPS, so the forward goes to port 443)` : ""}. Use the platform kubeconfig; the first
+              command prints the password of user <span className="font-mono">admin</span>, the second runs until you stop it. Then open <span className="font-mono">{argo ? "https" : "http"}://localhost:8080</span>:
+            </p>
+            <CopyBlock text={argoCommands(kubeconfigFile(installation, "platform"), 8080, !!argo)} label="platform ArgoCD commands" />
+          </>
+        )}
         <p>On the seed, the ArgoCD that holds the platform's own components. Use the seed kubeconfig from “Seed access and removal” below, then open <span className="font-mono">http://localhost:8081</span>:</p>
         <CopyBlock text={argoCommands(kubeconfigFile(installation, "seed"), 8081)} label="seed ArgoCD commands" />
         <p className="text-muted-foreground">

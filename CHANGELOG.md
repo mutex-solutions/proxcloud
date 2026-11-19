@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Managed services: the platform cluster's ArgoCD can have an address with TLS.** Opt-in, off by default: under
+  **Access** in step 1 name one address of the load balancer range and the operator networks
+  (`spec.access.argocd {address, sources[]}`), save and apply. The ArgoCD that holds every tenant cluster and
+  database then answers at `https://<address>` for those networks only, with ArgoCD's own self-signed certificate
+  (the browser warns once), and the ready card shows the link (`status.argocdUrl`). The block can be set, changed and
+  cleared on an installed platform; the plan lists it (`access.argocd`) with what it restarts. The seed's ArgoCD
+  never gets an address. No ArgoCD account is created and no password is stored, shown or returned: sign in as
+  `admin` with the password read through the one-hour platform kubeconfig. New Check row `argocd-access`, which
+  warns when an operator network contains a Proxmox node's address (where tenant traffic leaves under that address,
+  tenants then reach the login page); new failure `argocd_address_unavailable` when MetalLB does not give the
+  address (it names the Service that holds it), with the platform still serving. A platform that does not set the
+  block is rendered exactly as before. **Not verified on a lab**: whether the platform cluster enforces the operator
+  networks is the open point, so do not set it on a production site yet. A domain with a trusted certificate is not
+  built ([managed-services.md](docs/managed-services.md#an-address-for-the-platform-clusters-argocd)).
+
 - **Managed services: an upgrade can replace the platform cluster's machines for a newer Kubernetes.** A release
   whose BOM names a newer Kubernetes version (a patch, or one minor), or a rebuilt node image, was refused. It is now
   two actions in step 4: **Seed and node image** (`part: "seed"` on `POST …/runs`: the node image on every node, the

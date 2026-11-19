@@ -774,6 +774,7 @@ Saving keeps a draft (`POST` or `PUT /installations`). Nothing is created on Pro
 | Control plane | Node, size and the number of machines: 1 (the default) or 3, all on that one node. From 1 to 3 can be saved on an installed platform; once a run has built three, 3 to 1 is refused. Three need a platform release whose cluster chart is 0.1.14 or newer, which this release's is: on an installation of an older one (0.8.x, until it is upgraded) the save refuses 3 (`400`), and the field says why. |
 | Node groups | Exactly `system`, `kamaji` and `dbaas`. For each: 1 to 16 nodes, a count of at least one machine per chosen node (at most 64), and a size. One MachineDeployment is made per group and node. |
 | Tenants: who gets managed Kubernetes and databases | `spec.tenants.attach`: `all` (the projects that exist and every new one), `new` (new projects only) or `none` (you attach the providers later). The form preselects `new` on a site that has projects, so that nothing changes for tenants who are already there, and `all` on a site with none; when the projects cannot be counted it preselects `new`. Can change after the install. [What a run does with it](#what-a-tenant-can-use-after-the-install). |
+| Access: ArgoCD address and operator networks (optional) | `spec.access.argocd` `{address, sources[]}`: both or neither. The address is one IPv4 inside the load balancer range, the sources 1 to 16 IPv4 networks, never `/0`. With them the platform cluster's ArgoCD answers at `https://<address>` for those networks after the next apply. Can be set, changed and cleared after the install. [What it does and who can reach it](#an-address-for-the-platform-clusters-argocd). |
 
 The gateway, the seed address, the API address, the node range and the load balancer range must not
 share an address. The page checks these rules before saving; the API checks them again and adds what
@@ -782,8 +783,8 @@ a tenant network).
 
 Fixed after the first successful install (`409 fixed_fields`): the name, the network, the seed's node
 and address, the API address, the control plane's node and the set of node groups. Sizes, counts, the
-nodes of a group, the ranges, the stores, the SSH keys and the API sources can change; **Apply this
-release** applies them.
+nodes of a group, the ranges, the stores, the SSH keys, the API sources and the ArgoCD address with
+its operator networks can change; **Apply this release** applies them.
 
 The control plane's node is fixed because every control plane machine is on it: another node means
 each of them made anew on that node, which no lab has run. To move it, remove the installation and
@@ -974,6 +975,7 @@ line (`PC-ENROLL:…`) into the page and press **Store the secrets**
 | `placement` | A node an image goes to lacks the import store with `import` content or the boot store | Change the nodes or the stores |
 | `boot-store` | Proxmox has no storage of the boot store's name, or it takes no disk images. It **warns** when the store also holds disks of VM ids that are not the platform's (tenant servers, VMs of your own, or volumes a deleted VM left), or when its content could not be listed: `csi@pve!csi` holds `Datastore.Allocate` on the whole boot store and its secret is readable inside the platform cluster ([section 10](#10-security-boundaries)). The disks are listed with the CSI token, the only one that sees them all, and the platform's own machines are told apart with the CAPI token, so before both tokens are stored the row says the disks are not read yet. The ids it names are those in the volumes' names (`vm-<id>-*`), not guests: an id that no VM or container of the cluster holds (asked with `GET /cluster/nextid?vmid=<id>`, which answers for every guest whatever the token may read) is named with "no VM has this id: a leftover volume", and such a volume can be deleted by hand once you know whose it was (found on a lab on 2026-11-19: `vm-129-cloudinit` read as "VM 129"; the mark is not run on a lab). Not counted: the installation's own machines, the templates of the pool `pc-templates`, CSI volumes (`vm-<id>-pvc-*`). A VM of that pool that is no template is counted like any other VM: a clone that kept its template's pool, a VM put there by hand, and the VM of a template smoke test or of a tenant path test while it runs (up to this fix every member of the pool was skipped, so such VMs were not listed; found on a lab on 2026-11-19, the fix is not run on a lab) | A missing store: name an existing one in step 1 (`pvesm status`). No disk images: `pvesm set <store> --content <its content>,images`, which the message spells out. The warning: a store of its own for the platform, on ZFS `zfs create <pool>/pcplat && pvesm add zfspool pcplat --pool <pool>/pcplat --content images,rootdir --sparse 1`, then name it in step 1 and run the root command of step 2 again. The install works without it |
 | `seed-backup` | Never. Present once the installation has a seed VM. `ok` when a store of the seed's node holds a `vzdump` archive of the seed VM younger than 24 hours, with its time and store; it **warns** when none is seen, with the newest older one and the stores whose backups the portal token could not read. An upgrade that replaces the seed's k3s asks for it ([The seed's k3s](#the-seeds-k3s)) | Back the seed VM up. A backup on a store the portal token cannot read stays a warning |
+| `argocd-access` | Present while the settings name an ArgoCD address. It **fails** on an address outside the load balancer range or on operator networks the settings refuse (the `spec` row says the same). It **warns** when an operator network contains the address of a Proxmox node, with the address and the network, and when the nodes' networks could not be read. `ok` otherwise, with the address and the networks | Name operator networks no node is in, or clear both fields. On a site where tenant traffic leaves under the node's address (SNAT) a tenant VM arrives from that address, so a network that contains it lets every tenant reach the ArgoCD login page ([who can reach it](#an-address-for-the-platform-clusters-argocd)) |
 | `pve-api-rule` | Never. `ok` before the first install (the install writes the rule) and when the rule is in place; it **warns** on an installed platform whose rule is missing, changed or disabled, or when the cluster firewall rules could not be read. The message spells the rule out and says when the datacenter firewall is off. The row reads the rule, not the traffic: the rule's sources are the addresses of the seed and the platform machines as the node sees them, so on a site whose router translates the platform network on the way to the node (NAT) the row is `ok` while the rule matches nothing ([what to add](#when-a-router-translates-the-platform-network)) | Nothing before the install. Installed: **Apply this release** writes the rule again, and so does an upgrade run; the plan of step 4 lists the rule while it is missing (`pve-api-rule`, kind `site`) |
 | `images` | A BOM image is on the template update blocklist | A new installation: install a newer ProxCloud release. An installed platform stays on its release and its images, and no release moves it to other images yet (see [Upgrade between BOMs](#upgrade-between-boms): a BOM with other images is refused): the message says which case applies, and an apply that must import that image stays blocked |
 
@@ -1215,11 +1217,12 @@ offered, the customer console's cluster form needs a name and a flavor. The rest
 [Credentials](#8-credentials-and-the-seed-backup): one hour, read access without Secrets, and the
 way into the cluster's ArgoCD.
 
-**Open ArgoCD.** There are two ArgoCD instances and v0.8.x gives neither an address: no Service of
-type LoadBalancer, no ingress, no URL (planned for v0.10.0, for the platform cluster's only). Both
-serve plain HTTP inside their cluster, so the way in is a port-forward from a machine that has
-`kubectl` and reaches the API address of the cluster. The card prints the commands with the
-installation's file names:
+**Open ArgoCD.** There are two ArgoCD instances and neither has an address by default: no Service
+of type LoadBalancer, no ingress, no URL. The platform cluster's can be given one
+([An address for the platform cluster's ArgoCD](#an-address-for-the-platform-clusters-argocd)); the
+seed's never gets one. Without an address both serve plain HTTP inside their cluster, so the way in
+is a port-forward from a machine that has `kubectl` and reaches the API address of the cluster. The
+card prints the commands with the installation's file names:
 
 | ArgoCD | What it holds | Kubeconfig | Local port |
 |---|---|---|---|
@@ -1245,6 +1248,72 @@ answered `200` (ArgoCD v3.6.1). No login to either ArgoCD was made.
 every tenant control plane. Use it to look and to sync again. What you change by hand on a
 platform component, the next **Apply this release** writes back; a tenant Application is written
 again by the provider's next sync.
+
+#### An address for the platform cluster's ArgoCD
+
+Off by default. A platform whose settings never name an address is rendered exactly as before this
+feature: the same Application values, no change at the upgrade to this build.
+
+Fill **ArgoCD address** and **Operator networks** under Access in step 1 (`spec.access.argocd`
+`{address, sources[]}`), save, and press **Apply this release**. The plan lists the row
+`access.argocd` with what it does. The apply then:
+
+- makes the Service `argocd/argocd-server` on the platform cluster a `LoadBalancer` that asks
+  MetalLB for that one address (`metallb.io/loadBalancerIPs`) and lets in only the operator networks
+  (`loadBalancerSourceRanges`);
+- leaves `server.insecure` out, so `argocd-server` serves HTTPS on port 443 with the self-signed
+  certificate it generates (port 80 redirects). The browser warns once. There is no certificate
+  authority of ProxCloud's and no cert-manager Certificate: an IP address gets no publicly trusted
+  certificate either way. A domain with an ACME certificate is not built;
+- restarts the platform cluster's ArgoCD (the change of `server.insecure` restarts its pods). Tenant
+  clusters and databases keep running; their status in the consoles is stale for the restart. A
+  later change of the address or of the networks alone restarts nothing;
+- records `status.argocdUrl` once the Service holds the address. The ready card then shows the link.
+
+**Which ArgoCD.** The platform cluster's only: the one with an Application per tenant cluster and
+database. The seed's ArgoCD gets no address, by decision: its admin controls Cluster API and with it
+every machine of the platform, and the seed has no load balancer. It stays behind the seed
+kubeconfig and the port-forward above.
+
+**Signing in.** With ArgoCD's own `admin` account. ProxCloud creates no ArgoCD account, stores no
+ArgoCD password, puts none in any API answer and has no route that reveals one. Read the password as
+before, with the one-hour platform kubeconfig (an audited download) and the first command of the
+block above. Nothing rotates that password: it is the one ArgoCD wrote at its first start.
+
+**What admin there means.** `admin` on this ArgoCD can deploy anything to the cluster that hosts
+every tenant control plane and database: it is cluster-admin there in effect. Use it to look and to
+sync again. What you change in ArgoCD by hand is undone by the next sync, because the Applications
+heal themselves; a tenant Application is written again by its provider. For an everyday look that
+changes nothing, the ready card's component list (`GET …/installations/{id}?live=1`) is enough.
+
+**Who can reach the address.** The address is in the MetalLB pool, which tenants reach by design
+(their cluster APIs and databases are there). Only `loadBalancerSourceRanges` stands between a
+tenant VM and the ArgoCD login page. Two limits follow:
+
+- On a site where tenant traffic leaves under a Proxmox node's address (SNAT, the routed and simple
+  zone layouts), a tenant VM arrives from the node's address. An operator network that contains that
+  address lets every tenant in, and a source range cannot tell the two apart. The Check row
+  `argocd-access` warns when an operator network contains a node's address. On such a site name
+  networks no node is in (a VPN range, a jump host as `/32`), or leave the address out.
+- That the platform cluster enforces the source ranges (kube-proxy and Cilium as the BOM configures
+  them) is **not verified on a lab**. Until it is, treat the address as reachable from the whole
+  platform network and from tenants, and do not set it on a production site.
+
+**When the address is taken.** The pool is the tenants' pool, so the address may be held by a tenant
+load balancer. MetalLB then gives the Service none, stage 9 waits and, at its deadline (20 minutes
+in the wave), the run fails with `argocd_address_unavailable`; the message names the Service that
+holds the address when one does. The platform keeps serving, and ArgoCD answers inside the cluster,
+over HTTPS now: forward to port 443 (`port-forward svc/argocd-server 8080:443`, then
+`https://localhost:8080`). Put a free address in the settings, or clear both fields, save and
+**Retry**.
+
+**Clearing it.** Empty both fields, save, apply: the Service is a `ClusterIP` again, MetalLB no
+longer announces the address, ArgoCD restarts and serves plain HTTP inside the cluster as before,
+and `status.argocdUrl` is cleared.
+
+Seen in tests only (rendered values against chart argo-cd 10.14.0's own value keys, the run against
+a fake cluster). On a lab nothing of this has run: see
+[Not verified on a lab yet](#not-verified-on-a-lab-yet).
 
 ## 5. The stages of a run
 
@@ -1372,6 +1441,7 @@ stage is still trying.
 | `drain_blocked` | start, plan, 1 | The same part: a PodDisruptionBudget on the platform cluster allows no disruption (`status.disruptionsAllowed` 0 with pods), so Cluster API's drain of the machine its pod is on would wait without end; the message names each as namespace/name. Also when the platform cluster's API could not be read | For a database: bump its chart to 0.5.2 or newer ([managed-dbaas.md](managed-dbaas.md#chart-pin--platform-update)), which sets no budget for one instance. For anything else: a second replica, or delete the budget. Then read the plan again |
 | `platform_unhealthy` | start, plan, 1 | The same part: a Machine of the platform cluster is not Running, the count of Machines differs from the settings, a component's Application is not Healthy, or the seed could not be read. Unhealthy tenants do not block | Repair it (**Apply this release**, **Retry**), then read the plan again |
 | `rollout_stalled` | 7 | A run that replaces machines: the items of the unit the roll stands at did not change for 30 minutes. The message has the machine's state and, for a machine that cannot be drained, Cluster API's text with the pod that blocks. The machines that run keep serving | Correct the cause, then **Resume** (Retry): the run goes on at the same unit and renders no unit back |
+| `argocd_address_unavailable` | 9 | The settings name an ArgoCD address, and MetalLB did not give it to the Service `argocd/argocd-server` of the platform cluster before the wave's deadline: another Service holds it (the message names it), or it is not in MetalLB's pool. The platform keeps serving; ArgoCD answers inside the cluster | Put a free address of the load balancer range under Access in step 1, or clear both fields; save, then **Retry** |
 | `bad_part` | start | `part` on `POST …/runs` is neither `seed` nor empty, or `seed` on an apply that is not an upgrade which replaces machines (`400`) | Send the part the plan lists |
 | `unexpected_rollout` | 7 | An upgrade run only. The cluster chart of the target BOM would create a machine or bootstrap template, or change the control plane: Cluster API would replace machines. On a run that replaces machines: the render of the step would also replace machines outside the step's own unit. Nothing of the cluster (of that step) was synced; the Application `pc-platform` is left at the new chart version without automated sync. Also on such a run: the record says every unit is replaced, and the Application does not carry what the run renders (the run moves to another release than the one the machines were replaced for, the settings changed since, or the record was edited); nothing was applied | If machine sizes, nodes or node groups were changed in the settings together with the upgrade, put them back, save, **Retry**. A run to another release than the one the machines were replaced for: finish that upgrade first (**Retry**, an apply without a target), then start the new one. Otherwise the release is at fault: see [Upgrade between BOMs](#upgrade-between-boms), "When the upgrade cannot finish" |
 | `tenants_unhealthy` | 9 | An upgrade run only. After a wave, a tenant cluster or database that was healthy when the run reached stage 9 is not: its Application on the platform cluster's ArgoCD is not Healthy, or its TenantControlPlane is not Ready. The message names them. The stage waits for them up to the wave's 20 minutes | Look at the tenant the message names. **Retry** goes on from the same wave and waits for it again: the list of tenants that were down before is taken once per upgrade (`status.tenantsDownBefore`), not per run, so a tenant a wave broke holds every run until it is healthy or deleted |
@@ -1498,6 +1568,7 @@ and are not deleted by this; delete those clusters from the projects first where
 | Service account `kube-system/proxcloud-break-glass` on the cluster, with ClusterRole and ClusterRoleBinding `proxcloud-break-glass` and Role and RoleBinding `proxcloud-break-glass` in `argocd` | On the cluster. It has no token Secret; written by the first platform kubeconfig download and again by each one | Deleting the service account ends every token issued for it. The next download creates it again |
 | The seed ArgoCD's token for the cluster | In the seed's cluster Secret only; valid one year | Renewed by any apply when under 90 days are left. The page shows the expiry and warns under 30 days |
 | The providers' kubeconfig (service account `proxcloud` on the cluster) | In the two provider rows' encrypted secret | Written again by every apply |
+| The platform cluster ArgoCD's `admin` password | On the cluster only, in the Secret `argocd-initial-admin-secret` ArgoCD wrote at its first start. ProxCloud never reads it into the portal, stores nothing for the ArgoCD address and creates no ArgoCD account; you read it with the platform kubeconfig | None by ProxCloud. Changing it in ArgoCD is yours to do and to keep |
 | The seed's CA key, k3s token, bootstrap token | On the CD until stage 5 deletes it; the CA key is never stored by ProxCloud, the bootstrap token expires after 3 hours | None |
 
 **Break-glass kubeconfig.** **Download seed kubeconfig** (`GET …/seed-kubeconfig`) asks the seed for
@@ -1963,6 +2034,15 @@ and ADR 0009, A2 and A8.
   own namespace, DNS and the API server.
 - Both ArgoCDs have their `default` project locked; the seed's project may source only the BOM's
   chart repositories.
+- The platform cluster's ArgoCD has an address only when the settings name one
+  (`spec.access.argocd`), and then for the named operator networks only, by
+  `loadBalancerSourceRanges` on a MetalLB Service in the pool tenants reach. Its `admin` is in effect
+  cluster-admin on the cluster that hosts every tenant control plane; the password is ArgoCD's
+  initial secret and nothing rotates it. Where tenant traffic leaves under a node's address, an
+  operator network that contains that address admits every tenant to the login page (the Check row
+  `argocd-access` warns). That the source ranges are enforced on the platform cluster is not
+  verified on a lab. The seed's ArgoCD never has an address
+  ([An address for the platform cluster's ArgoCD](#an-address-for-the-platform-clusters-argocd)).
 - The portal token creates and deletes API tokens for `capmox@pve` and `csi@pve` only
   (`ProxCloudKubeToken`, `User.Modify` on `/access/groups/proxcloud-kube`). A site set up before
   that group holds the grant on `/access/groups`, where the lab measured that the portal token can
@@ -2553,6 +2633,17 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 - **No per-namespace RBAC for the providers' service account** on the shared cluster.
 
 ## Not verified on a lab yet
+
+**The address of the platform cluster's ArgoCD** (`spec.access.argocd`) has run in tests only. A
+lab must show, and the feature is not for production before it has: set the block on an installed
+platform and apply, and the link opens over HTTPS from an operator address with a certificate
+warning; it is refused from a tenant VM and from an address outside the operator networks (this is
+the gate: whether kube-proxy and Cilium on the platform cluster enforce `loadBalancerSourceRanges`);
+the sign-in works with the password read through the platform kubeconfig; tenant cluster and
+database status in the consoles is correct afterwards; an address already held by a tenant load
+balancer gives `argocd_address_unavailable` and the platform keeps serving; clearing the block
+removes the address; a platform that never sets the block shows no change of any Application after
+the upgrade to this build. On the single-node site with SNAT: the Check row `argocd-access` warns.
 
 Of the prerequisites of v0.9.0 nothing was run on a Proxmox node; the tests run the root command
 against a `pveum` that records its arguments, and the firewall rule against a fake Proxmox API. To

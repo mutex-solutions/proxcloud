@@ -323,6 +323,55 @@ test("the ready card: endpoints, the providers' gap, the platform kubeconfig and
 
 // The providers are read again when a run ends (it registers them), and a provider row the operator completed before
 // (a version, the attach policy) is adopted as it is: the card then has nothing to warn about.
+test("the platform ArgoCD gets an address: the settings, the plan, the link after the apply, and the clear", async ({ page }) => {
+  await open(page, "ready")
+  await recordCalls(page)
+  const address = page.getByLabel("ArgoCD address (optional)", { exact: true }), sources = page.getByLabel("Operator networks", { exact: true })
+  const sent = async () => (await calls(page, "PUT", /\/installations\/pi-/)).map((c) => c.body.spec.access?.argocd ?? null)
+  // One of the two, an address outside the load balancer range, and everyone: refused in the form.
+  await address.fill("10.90.0.150")
+  await page.getByRole("button", { name: "Save settings" }).click() // refused in the form: problems show from the first Save
+  await expect(page.getByText("Operator networks: 1 to 16 IPv4 networks such as 192.0.2.0/24, never 0.0.0.0/0").first()).toBeVisible()
+  await sources.fill("0.0.0.0/0")
+  await expect(page.getByText("Operator networks: 1 to 16 IPv4 networks").first()).toBeVisible()
+  await sources.fill("192.0.2.0/24, 198.51.100.7/32")
+  await expect(page.getByText("Operator networks: 1 to 16 IPv4 networks")).toHaveCount(0)
+  await address.fill("10.90.0.99")
+  await expect(page.getByText("ArgoCD address: one free IPv4 address inside the load balancer range").first()).toBeVisible()
+  expect(await sent()).toEqual([])
+  await address.fill("10.90.0.150")
+  await page.getByRole("button", { name: "Save settings" }).click()
+  await expect.poll(sent).toEqual([{ address: "10.90.0.150", sources: ["192.0.2.0/24", "198.51.100.7/32"] }])
+  // Saved and not applied: the plan lists it with what it does, and the card still shows the port-forward (to 443 after the apply).
+  const row = page.getByRole("listitem").filter({ hasText: "access.argocd" })
+  await expect(row).toContainText("new → https://10.90.0.150")
+  await expect(row).toContainText("Only 192.0.2.0/24, 198.51.100.7/32 are let in")
+  await expect(page.getByRole("link", { name: "Open the platform ArgoCD" })).toHaveCount(0)
+  await expect(page.getByLabel("platform ArgoCD commands", { exact: true })).toContainText("port-forward svc/argocd-server 8080:443")
+  // The apply records the address (set here: the mock has no apply of a settings change). The card links to it, says
+  // how to sign in, and shows no password; the seed's ArgoCD keeps its port-forward.
+  // The next save reads it.
+  // The networks on the card are the ones that run applied, not the ones saved since.
+  await mock(page, `Object.assign(mockPlatform.installations[0].status, { argocdUrl: "https://10.90.0.150", argocdSources: ["192.0.2.0/24", "198.51.100.7/32"] })`)
+  await sources.fill("192.0.2.0/24")
+  await page.getByRole("button", { name: "Save settings" }).click()
+  const link = page.getByRole("link", { name: "Open the platform ArgoCD" })
+  await expect(link).toHaveAttribute("href", "https://10.90.0.150")
+  await expect(page.getByText("from 192.0.2.0/24, 198.51.100.7/32 only. The certificate is ArgoCD's own and self-signed")).toBeVisible()
+  await expect(page.getByLabel("platform ArgoCD password command", { exact: true })).toHaveText(
+    "export KUBECONFIG=./lab-platform.kubeconfig\nkubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d; echo")
+  await expect(page.getByText("What you change in ArgoCD by hand is undone by its next sync")).toBeVisible()
+  await expect(page.getByLabel("seed ArgoCD commands", { exact: true })).toContainText("port-forward svc/argocd-server 8081:80")
+  await expect(page.getByRole("listitem").filter({ hasText: "access.argocd" })).toContainText("Only 192.0.2.0/24 are let in")
+  await expectAccessible(page)
+  // Both fields emptied: the block is cleared, and the plan says the address goes.
+  await address.fill("")
+  await sources.fill("")
+  await page.getByRole("button", { name: "Save settings" }).click()
+  await expect.poll(sent).toEqual([{ address: "10.90.0.150", sources: ["192.0.2.0/24", "198.51.100.7/32"] }, { address: "10.90.0.150", sources: ["192.0.2.0/24"] }, null])
+  await expect(page.getByRole("listitem").filter({ hasText: "access.argocd" })).toContainText("https://10.90.0.150 → removed")
+})
+
 test("the ready card stops warning once the Kubernetes provider has a version and is attached", async ({ page }) => {
   test.setTimeout(60_000)
   await open(page, "running")

@@ -75,6 +75,7 @@ const INSTALLATION: Shape = {
       nodeGroups: [{ name: true, nodes: true, count: true, cores: true, memoryMiB: true, diskGiB: true }] }],
     nodeImage: { mode: true, templates: true },
     tenants: { attach: true },
+    access: { argocd: { address: true, sources: true } },
   },
 }
 const TOKEN: Shape = { tokenId: true, secret: true }
@@ -239,6 +240,10 @@ function ready(in_: Doc) {
     components: bom.components.map((c) => ({ name: c.name, cluster: c.cluster, version: c.chart.version, managed: true })),
     providers: { kubernetes: k8s, database: dbs },
   })
+  // Stage 9 records where the platform cluster's ArgoCD answers, and clears it with the block.
+  const argo = in_.spec.access?.argocd
+  if (argo) Object.assign(in_.status, { argocdUrl: `https://${argo.address}`, argocdSources: argo.sources })
+  else { delete in_.status.argocdUrl; delete in_.status.argocdSources }
 }
 
 // The capacity row (internal/platformlife/capacity.go), with the nodes' free memory in place of the scheduler's count:
@@ -527,7 +532,14 @@ on("GET /admin/platform/installations/:id/plan", ({ params }) => {
     const pending = in_.status.targetBom
     return { data: { installed, target: pending ?? installed, newer: bomRef, changes: [], blocking: [], upgrade: upgradePlan(in_), ...(stale(in_) ? { replacement: upgradePlan(in_, true) } : {}) } }
   }
-  return { data: { installed, target: bomRef, changes: [], blocking: [] } }
+  // The settings against what a run built: the address of the platform cluster's ArgoCD (PlanFor, argoAccessChange).
+  const argo = in_.spec.access?.argocd, from = in_.status.argocdUrl ?? "", to = argo ? `https://${argo.address}` : ""
+  const built = (in_.status.argocdSources ?? []).join(), want = (argo?.sources ?? []).join()
+  const changes = installed && (from !== to || (argo && built !== want)) ? [{ cluster: "pc-platform", name: "access.argocd", from, to, class: "chart", stage: "workload-platform",
+    impact: "The platform cluster's ArgoCD restarts: tenant clusters and databases keep running, their status in the consoles is stale for the restart. " +
+      (argo ? `MetalLB announces ${argo.address} on the platform network. Only ${argo.sources.join(", ")} are let in. The certificate is self-signed (ArgoCD's own): the browser warns once.`
+        : "MetalLB no longer announces the address and ArgoCD answers inside the cluster only, over plain HTTP, as before the address was set.") }] : []
+  return { data: { installed, target: bomRef, changes, blocking: [] } }
 })
 
 // The plan of the move from the previous release to this one, as platformlife.Classify answers it: the preset

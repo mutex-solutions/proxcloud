@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -30,7 +31,7 @@ const (
 // first install, a warning after it), isolation,
 // tenant-network and tenant-path (a warning or ok, never a failure; absent when the provider names no zone), csi-vmid (a warning or ok, never a failure), credentials,
 // machines (a warning or ok, never a failure; absent while the installation has no VM), capacity (a failure before the first install; after it a warning, and a failure only where the settings make a control plane larger than the one a run built and it does not fit; a warning when it cannot be read; absent while the CAPI token is not stored), privileges:capi, privileges:csi, privileges:kubemint, mint-scope, pool-fence, token-scope, iso-store-visibility,
-// boot-iso-grant, boot-iso, placement, boot-store (a failure when the store is missing or takes no disk image, a warning
+// boot-iso-grant, boot-iso, placement, argocd-access (present while spec.access.argocd is set: a failure on an address or networks Validate refuses, a warning when the operator networks contain a Proxmox node's address), boot-store (a failure when the store is missing or takes no disk image, a warning
 // when it holds other VMs' disks), pve-api-rule (a warning or ok, never a failure), seed-backup (a warning or ok, never a failure; present once the installation has a seed VM), images. A run's first stage fails preflight_failed with the failed rows as its items, or
 // isolation_not_enforced when isolation is the only one.
 type Check struct {
@@ -226,6 +227,16 @@ func (p Preflight) Run(ctx context.Context) []Check {
 			row("tenant-network", nil, "The provider's default zone "+site.DefaultZone+" ("+site.DefaultZoneKind+") does not exist yet and is created without DHCP: a tenant cluster can use its networks.")
 		}
 		out = append(out, p.tenantPath(ctx, site, zones, err))
+	}
+
+	if in.Spec.Access.ArgoCD != nil {
+		// Every address the nodes hold, on every layout: the management networks alone do not name a node's address
+		// (a /32 operator network of the node itself is inside none of their network addresses), nor its leg on the
+		// platform bridge.
+		addrs, all, aerr := p.Portal.C.NodeAddresses(ctx)
+		if c, has := in.argoAccessCheck(addrs, aerr != nil || !all); has {
+			out = append(out, c)
+		}
 	}
 
 	// A warning, never a failure: see pve.CSIVMIDCheck.
@@ -792,4 +803,53 @@ func (p Preflight) tenantPath(ctx context.Context, site Site, zones []pve.SDNZon
 		"The install and the platform's own machines are not affected.\n" +
 		"Two layouts are supported. A new one-node site: make the platform network one the node routes (a vnet of a simple zone whose subnet has the platform gateway). " +
 		"An existing site: give the node a leg on the platform bridge, by hand as root. Both, with what to check first, are in " + tenantPathGuide + "." + limit}
+}
+
+// argoAccessCheck is the row argocd-access, present while spec.access.argocd is set: a failure on what Validate
+// refuses of the block, a warning when a source range contains an address of a Proxmox node (nodeAddrs, each as a
+// /32: pve.NodeAddresses) or when those were not read, ok otherwise. Where tenant traffic leaves under the
+// node's address (SNAT), a tenant VM arrives from that address, and a source range cannot tell it from an operator.
+func (in *Installation) argoAccessCheck(nodeAddrs []string, unread bool) (Check, bool) {
+	a := in.Spec.Access.ArgoCD
+	if a == nil {
+		return Check{}, false
+	}
+	c := Check{ID: "argocd-access", Status: CheckOK}
+	if err := in.Validate(); err != nil {
+		var bad []string
+		for _, line := range strings.Split(err.Error(), "\n") {
+			if strings.Contains(line, "spec.access.argocd") {
+				bad = append(bad, line)
+			}
+		}
+		if len(bad) > 0 {
+			c.Status, c.Message = CheckFail, strings.Join(bad, "\n")
+			return c, true
+		}
+	}
+	what := "The platform cluster's ArgoCD answers at " + a.URL() + " for " + strings.Join(a.Sources, ", ") +
+		" only, with a self-signed certificate, after the next apply."
+	var inside []string
+	for _, n := range nodeAddrs {
+		p, err := netip.ParsePrefix(strings.TrimSpace(n))
+		if err != nil {
+			continue
+		}
+		for _, src := range a.Sources {
+			if sp, err := netip.ParsePrefix(src); err == nil && sp.Contains(p.Addr()) && !slices.Contains(inside, p.Addr().String()+" (in "+src+")") {
+				inside = append(inside, p.Addr().String()+" (in "+src+")")
+			}
+		}
+	}
+	switch {
+	case len(inside) > 0:
+		c.Status, c.Message = CheckWarn, what+" The operator networks contain the address of a Proxmox node: "+strings.Join(inside, ", ")+
+			". On a site where tenant traffic leaves under the node's address (SNAT), every tenant VM then reaches the ArgoCD login page: "+
+			"a source range cannot tell tenants from operators there. Name networks no node is in, or leave the address out."
+	case unread:
+		c.Status, c.Message = CheckWarn, what+" The Proxmox nodes' networks could not be read, so whether the operator networks contain a node's address is not known."
+	default:
+		c.Message = what + " No Proxmox node's address is inside the operator networks."
+	}
+	return c, true
 }

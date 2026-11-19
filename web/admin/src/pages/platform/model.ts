@@ -17,6 +17,9 @@ export type Spec = {
   nodeImage?: { mode?: string; templates?: Record<string, number> }
   // Who gets the two providers; a spec without it means "none". Applied by a run when it differs from status.tenantsAttach.
   tenants?: { attach?: Attach }
+  // Optional: the address the platform cluster's ArgoCD answers at over HTTPS, and the networks let in. May be set,
+  // changed and cleared on an installed platform; the next apply makes it so.
+  access?: { argocd?: { address: string; sources: string[] } }
 }
 export type Attach = "all" | "new" | "none"
 export const ATTACH_LABEL: Record<Attach, string> = {
@@ -42,6 +45,8 @@ export type Installation = {
     components?: { name: string; cluster: string; version: string }[]
     providers?: { kubernetes?: string; database?: string }
     tenantsAttach?: Attach // the choice the last run applied
+    argocdUrl?: string // where the platform cluster's ArgoCD answers, once a run saw its Service hold the address
+    argocdSources?: string[] // the networks let in there, as the last run applied them (not the saved settings)
   }
   schedulerNote?: string // set while the job scheduler is off: what tenants miss and the command that turns it on
   lastRunId?: string
@@ -141,6 +146,7 @@ export type Form = {
   cpNode: string; cpReplicas: string; cp: MachineForm
   groups: Record<string, GroupForm>
   attach: Attach | "" // "": not chosen yet; the settings step shows the default for the site
+  argoAddress: string; argoSources: string // both empty: the platform cluster's ArgoCD gets no address
 }
 
 const group = (cores: string, mem: string): GroupForm => ({ nodes: [], count: "1", cores, memoryGiB: mem, diskGiB: "40" })
@@ -151,7 +157,7 @@ export const emptyForm: Form = {
   endpoint: "", nodeRange: "", metallbRange: "",
   cpNode: "", cpReplicas: "1", cp: { cores: "2", memoryGiB: "4", diskGiB: "30" },
   groups: { system: group("4", "8"), kamaji: group("4", "8"), dbaas: group("4", "8") },
-  attach: "",
+  attach: "", argoAddress: "", argoSources: "",
 }
 
 // ── Presets (internal/platformlife/preset.go holds the same figures for the API's "preset") ────────────────────────
@@ -266,6 +272,8 @@ export function formToSpec(f: Form, prev?: Spec): Spec {
     }],
     // "none" is what a spec without the key means: one stored before the choice existed stays as it is.
     ...(f.attach && (f.attach !== "none" || prev?.tenants) ? { tenants: { attach: f.attach } } : {}),
+    // Both empty clears the block (JSON drops the key), also one a stored spec had.
+    access: f.argoAddress.trim() || words(f.argoSources).length ? { argocd: { address: f.argoAddress.trim(), sources: words(f.argoSources) } } : undefined,
   }
 }
 
@@ -285,6 +293,7 @@ export function specToForm(name: string, s: Spec): Form {
     cpNode: c?.controlPlane?.node ?? "", cpReplicas: String(c?.controlPlane?.replicas ?? 1), cp: c?.controlPlane ? machineForm(c.controlPlane) : emptyForm.cp,
     groups,
     attach: s.tenants?.attach ?? "none",
+    argoAddress: s.access?.argocd?.address ?? "", argoSources: (s.access?.argocd?.sources ?? []).join(", "),
   }
 }
 
@@ -425,6 +434,14 @@ export function validate(f: Form): Problem[] {
   if (nodes && nodes.last - nodes.first + 1 < machines + surge) {
     bad("nodeRange", `Node range: it holds ${nodes.last - nodes.first + 1} addresses; ${machines} machines and ${surge} spare for updates need ${machines + surge}.`)
   }
+  const argoSources = words(f.argoSources)
+  if (f.argoAddress.trim() || argoSources.length) {
+    const a = ip4(f.argoAddress)
+    if (Number.isNaN(a) || (lbs && (a < lbs.first || a > lbs.last))) bad("argoAddress", "ArgoCD address: one free IPv4 address inside the load balancer range, or empty together with the operator networks.")
+    if (argoSources.length < 1 || argoSources.length > 16 || argoSources.some((c) => !cidr4(c) || cidr4(c)!.bits === 0)) {
+      bad("argoSources", "Operator networks: 1 to 16 IPv4 networks such as 192.0.2.0/24, never 0.0.0.0/0, or empty together with the address.")
+    }
+  }
   return out
 }
 
@@ -484,6 +501,8 @@ const CODE_ACTION: Record<string, string> = {
   bom_unsupported: "The platform was installed by a ProxCloud whose platform release this one does not carry (a development build, or a release from before 0.8.0), and a platform moves only between releases this ProxCloud carries. Go back to the ProxCloud that installed it. Or, if no tenant cluster or database must be kept, delete them all, then remove managed services and install again: Remove deletes the platform cluster.",
   upgrade_refused: "This ProxCloud cannot move the platform to its own platform release: step 4 lists why. The platform stays on its release, and Apply this release keeps working.",
   unexpected_rollout: "The upgrade would replace machines of the platform cluster that it is not there to replace, so nothing of that step was synced. If machine sizes, nodes or node groups were changed together with the upgrade, put them back, save, then Retry. Otherwise install the ProxCloud release that corrects it: step 4 then offers the upgrade to that release in place of this one.",
+  argocd_address_unavailable: "MetalLB did not give the platform cluster's ArgoCD the address of the settings; the message names the Service that holds it when one does. The platform keeps serving. Put a free address of the load balancer range under Access in step 1 (or clear both fields), save, then Retry.",
+  "argocd-access": "Under Access in step 1, name operator networks that no Proxmox node is in, or clear both fields. On a site where tenant traffic leaves under the node's address, a tenant VM reaches the ArgoCD login page from a network that contains that address.",
   node_image_missing: "A node the platform cluster uses holds no template of the release's node image. Run “Seed and node image” in step 4 first: it imports the image on every node and replaces no machine.",
   capacity_short: "A node has no room for the one more machine a replacement makes first. Nothing was changed. Free memory or space on the node the message names (a stopped VM counts with its configured memory), then read the plan again or Retry.",
   drain_blocked: "A PodDisruptionBudget on the platform cluster allows no disruption, so the machine its pod is on could never be drained. Nothing was changed. For a database, bump its chart to 0.5.2 or newer (the databases guide has the step); for anything else give it a second replica or delete the budget. Then read the plan again.",

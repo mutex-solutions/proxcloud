@@ -763,6 +763,11 @@ func (c *Client) ListPodsAllNamespaces(ctx context.Context, labelSelector string
 	return c.list(ctx, "/api/v1/pods", labelSelector)
 }
 
+// ListServicesAllNamespaces lists the Services of every namespace.
+func (c *Client) ListServicesAllNamespaces(ctx context.Context) ([]map[string]any, error) {
+	return c.list(ctx, "/api/v1/services", "")
+}
+
 // ListNodes lists the cluster's nodes.
 func (c *Client) ListNodes(ctx context.Context) ([]map[string]any, error) {
 	return c.list(ctx, "/api/v1/nodes", "")
