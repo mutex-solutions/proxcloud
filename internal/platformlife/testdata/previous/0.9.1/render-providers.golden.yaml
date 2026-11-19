@@ -1,0 +1,83 @@
+database:
+  config:
+    argocd:
+      chartName: database-cluster
+      chartRepo: ghcr.io/mutex-solutions/charts
+      chartVersion: 0.5.1
+      namespace: argocd
+      project: proxcloud-dbaas
+    attachToNewProjects: false
+    database:
+      egressFence: true
+      engines:
+        postgresql:
+          default: "18"
+          replicas:
+            - 1
+            - 3
+          versions:
+            - "17"
+            - "18"
+      lbAddressPool: services
+      storageClasses:
+        - std
+    namespacePlacement:
+      nodeSelector:
+        node-restriction.kubernetes.io/proxcloud-node-group: dbaas
+      tolerations:
+        - effect: NoSchedule
+          key: proxcloud.io/node-group
+          operator: Equal
+          value: dbaas
+    platformInstallationId: pi-0123abcd
+    provider: dbaas
+    region: az1
+    regions:
+      az1:
+        displayName: Zone 1
+    services:
+      database:
+        az1: true
+  name: Lab Databases
+  secret:
+    kubeconfig: PLANT-provider-kubeconfig-0003
+  status: PUBLIC
+  type: CLOUD
+kubernetes:
+  config:
+    argocd:
+      chartName: proxmox-kamaji-cluster
+      chartRepo: ghcr.io/mutex-solutions/charts
+      chartVersion: 0.1.14
+      namespace: argocd
+      project: proxcloud-k8s
+    attachToNewProjects: false
+    cluster:
+      dataStoreName: default
+      pveApiUrl: https://192.0.2.11:8006
+      rootVolumeGiB: 30
+      rwxGiB: 0
+      versions: {}
+      workerMtu: 1450
+    namespacePlacement:
+      nodeSelector:
+        node-restriction.kubernetes.io/proxcloud-node-group: kamaji
+      tolerations:
+        - effect: NoSchedule
+          key: proxcloud.io/node-group
+          operator: Equal
+          value: kamaji
+    platformInstallationId: pi-0123abcd
+    provider: kamaji
+    region: az1
+    regions:
+      az1:
+        displayName: Zone 1
+    services:
+      kubernetes:
+        az1: true
+  name: Lab Kubernetes
+  secret:
+    kubeconfig: PLANT-provider-kubeconfig-0003
+  status: PUBLIC
+  type: CLOUD
