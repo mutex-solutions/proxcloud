@@ -1805,8 +1805,9 @@ boot: tenant workers, platform machines, and the replacement of either, with no 
 
 **Templates and workers from before v0.9.0.** A node image imported by v0.8.x has no `onboot`, and
 neither has a worker cloned from it. The services sync (every 15 minutes; on demand
-`POST /api/v1/admin/job/external-service/sync` on the operator API) closes both, per Proxmox provider, with the portal's token and no new Proxmox privilege (`VM.Config.Options`,
-which its role holds on `pc-templates` and on the tenant pools):
+`POST /api/v1/admin/job/external-service/sync` on the operator API) closes both, per Proxmox
+provider, with the portal's token and no new Proxmox privilege (`VM.Config.Options`, which its role
+holds on `pc-templates` and on the tenant pools):
 
 - **Node templates:** `onboot: 1` on every Kubernetes node template that a Template updates import
   of this portal for this provider still holds (the import's receipt: node, VM id, name and source

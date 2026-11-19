@@ -259,9 +259,10 @@ with cluster chart 0.1.13 and platform chart 0.1.2, until an operator upgrades i
   a Template updates import of this portal holds and on the running worker VMs of this portal's tenant clusters,
   where it is missing, and writes nothing else. No new Proxmox privilege (`VM.Config.Options`, which the portal's
   role holds on `pc-templates` and the tenant pools). **Upgrade note**: the first provider sync after the upgrade
-  (every 15 minutes, or `POST /api/v1/admin/job/external-service/sync`) writes it; wait for one before a planned node reboot. Not
-  covered: a node template built by `images/build.py` or not imported by this portal (`qm set <vmid> --onboot 1`
-  on the node), the workers of a `sharedWorkers` provider, and a worker that is stopped. See
+  (every 15 minutes, or `POST /api/v1/admin/job/external-service/sync`) writes it; wait for one before a planned
+  node reboot. Not covered: a node template built by `images/build.py` or not imported by this portal
+  (`qm set <vmid> --onboot 1` on the node), the workers of a `sharedWorkers` provider, and a worker that is
+  stopped. See
   [docs/managed-services.md](docs/managed-services.md#after-a-proxmox-node-reboots). Not verified on a lab.
 - **The two consoles' images run on NGINX 1.30.7.** The base `nginx:1.30.6-alpine` carried five fixable HIGH findings
   in the nginx package (CVE-2026-113425, CVE-2026-121810, CVE-2026-123007, CVE-2026-123633, CVE-2026-123634; fixed in
