@@ -531,7 +531,7 @@ on("GET /admin/platform/installations/:id/plan", ({ params }) => {
 const stale = (in_: Doc) => !!in_.status.targetBom && in_.status.targetBom.sha256 !== bom.sha256
 function upgradePlan(in_: Doc, replace = false) {
   const release = { name: "release", from: previous.release, to: bom.release, class: "record only", impact: "Nothing is synced for it: the platform's record and the labels of its objects name the new release." }
-  const chart = { cluster: "workload", name: "platform", from: "0.1.2", to: "0.1.3", class: "chart", stage: "workload-platform", wave: 3, impact: "ArgoCD syncs the chart's objects. No pod of a tenant restarts." }
+  const chart = { cluster: "workload", name: "platform", from: "0.1.2", to: "0.1.3", class: "chart", stage: "workload-platform", wave: 3, impact: "The Application moves to the new chart version. ArgoCD syncs only the objects the new chart renders differently, and starts no sync when there is none. No pod of a tenant restarts." }
   const cilium = { cluster: "workload", name: "cilium", from: "1.18.15", to: "1.18.16", class: "refused", blocking: "not supported by this release: a third-party chart is upgraded only by a later release (this one moves the product's own charts)" }
   const refused = preset !== "upgrade" && preset !== "replace"
   const inProgress = !!in_.status.targetBom && !replace
@@ -550,8 +550,10 @@ on("POST /admin/platform/installations/:id/runs", ({ params, opts }) => {
   strict(b, { kind: true, confirm: true, targetBom: true })
   if (b.kind !== "apply" && b.kind !== "remove") throw fail(400, "invalid_kind", "kind is apply or remove")
   // An apply that names this release as its target is an upgrade: allowed as the plan says, with the plan's phrase.
-  const up = b.kind === "apply" && b.targetBom && (!in_.status.targetBom || stale(in_)) ? upgradePlan(in_, stale(in_)) : null
+  const up = b.kind === "apply" && b.targetBom && in_.status.bom?.sha256 === previous.sha256 && (!in_.status.targetBom || stale(in_)) ? upgradePlan(in_, stale(in_)) : null
   if (b.targetBom && (b.kind !== "apply" || b.targetBom !== bom.sha256)) throw fail(400, "invalid_target", "targetBom must be the sha256 of this build's own BOM")
+  // ErrSameBOM in internal/platformlife/job.go: the platform is on the target already.
+  if (b.targetBom && in_.status.bom?.sha256 === bom.sha256) throw fail(409, "bom_installed", "targetBom is the BOM the platform is on: there is nothing to upgrade. An apply of the installed BOM takes neither targetBom nor confirm")
   if (up && !up.allowed) throw fail(409, "upgrade_refused", `upgrade_refused: ${up.blocking.join("; ")}`, { reasons: up.blocking })
   if (up ? b.confirm !== up.confirm : b.confirm && (b.kind !== "remove" || b.confirm !== `remove ${in_.name}`)) throw fail(400, "invalid_confirmation", `confirm must be "remove ${in_.name}" on a remove, or the plan's phrase on an upgrade`)
   settleDead(in_) // a run whose job died is finished first

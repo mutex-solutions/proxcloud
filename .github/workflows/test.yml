@@ -52,6 +52,8 @@ jobs:
       - uses: azure/setup-helm@v5
         with:
           version: v3.21.4
+      - name: gofmt
+        run: test -z "$(gofmt -l . | tee /dev/stderr)"
       - name: Unit tests (including required offline chart renders)
         env:
           CI: "1"
@@ -133,18 +135,17 @@ jobs:
           python3 -m unittest discover -s images/tests -v
           ! grep -nE '^\s*(pull_request|pull_request_target|issue_comment|workflow_run):' .github/workflows/vm-templates.yml .github/workflows/k8s-node-templates.yml
 
-  # Reads every file of the repository, documentation included: always runs (about 10 seconds).
+  # Reads every tracked file of the repository, documentation included: always runs (about 10 seconds).
+  # It searches with git grep, which the runner has: no package is installed, so no package mirror can fail it.
   rebrand-gate:
     runs-on: ubuntu-latest
     env:
       REBRAND_PATTERN: 's[t]ratos|m[e]nlo|o[s]ie|a[c]vile|kamaji-s[y]sadmin'
     steps:
       - uses: actions/checkout@v7
-      - name: Install ripgrep
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
       - name: Check for old-brand strings
         run: |
-          if rg -i -n --hidden --no-heading "$REBRAND_PATTERN" -g '!.git/'; then
+          if git grep -I -i -n -E "$REBRAND_PATTERN"; then
             echo "::error::old-brand strings found"; exit 1
           fi
           if git ls-files | grep -iE "$REBRAND_PATTERN"; then
@@ -160,11 +161,11 @@ jobs:
         env:
           LEGACY_BACKEND_PATTERN: '\b(o[p]enstack|k[e]ystone|n[o]va\b|n[e]utron|g[l]ance|c[i]nder|s[w]ift|o[c]tavia|h[e]at\b|g[n]occhi|c[e]ilometer|b[a]rbican|m[a]nila|m[a]gnum|d[e]signate\b|k[o]lla|v[h]i\b|g[o]phercloud)|(?-i:\bO[S]_(AUTH_URL|REGION_NAME|USERNAME|PASSWORD|USER_DOMAIN_NAME|PROJECT_NAME|PROJECT_DOMAIN_NAME|APPLICATION_CREDENTIAL))'
         run: |
-          if rg -i -n --hidden --no-heading -e "$LEGACY_BACKEND_PATTERN" -g '!.git/' \
-               -g '!docs/architecture/c4/CHANGELOG.md' -g '!internal/platform/billing/countries.json' \
-               -g '!deploy/sandbox-cluster/agent-sandbox/**' .; then
+          if git grep -I -i -n -P -e "$LEGACY_BACKEND_PATTERN" -- . \
+               ':!docs/architecture/c4/CHANGELOG.md' ':!internal/platform/billing/countries.json' \
+               ':!deploy/sandbox-cluster/agent-sandbox'; then
             echo "::error::previous-backend terms found"; exit 1
           fi
-          if git ls-files | rg -i -e "$LEGACY_BACKEND_PATTERN"; then
+          if git ls-files | grep -i -P -e "$LEGACY_BACKEND_PATTERN"; then
             echo "::error::previous-backend file names found"; exit 1
           fi

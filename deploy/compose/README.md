@@ -17,7 +17,7 @@ the stack, creates the first operator and prints the URLs.
 | Customer console | `ghcr.io/mutex-solutions/proxcloud-web` | |
 | Operator console | `ghcr.io/mutex-solutions/proxcloud-admin` | |
 | Keycloak | `quay.io/keycloak/keycloak:26.8.2` | Production mode, behind Traefik. Realm `clients` for customers, `master` for operators |
-| PostgreSQL | `postgres:17-alpine` | Databases `proxcloud` and `keycloak` |
+| PostgreSQL | `postgres:17.12-alpine` | Databases `proxcloud` and `keycloak` |
 | keycloak-config, seed | one-shot | Realm settings (the same the Helm chart derives) and the first-run documents |
 
 The three ProxCloud images run at one release tag: the pinned release of this checkout, unless
@@ -333,9 +333,10 @@ To go back to the previous release, restore the backup the upgrade took, with it
 3. Follow [Restore](#restore) with `backups/proxcloud-<UTC time>.sql.gz` of the same backup. Its
    last step, `install`, starts the previous release.
 
-Traefik and Keycloak are pinned to a version in `compose.yaml`, PostgreSQL to its major version
-(`17-alpine` follows the minor releases); they move with the checkout. A new PostgreSQL major
-version needs a dump and restore, not just a new image.
+Traefik, Keycloak and PostgreSQL are pinned to a version in `compose.yaml` (PostgreSQL to its minor
+release, `17.12-alpine`); they move with the checkout, so an upgrade restarts the database only when
+the release changes that line. A new PostgreSQL major version needs a dump and restore, not just a
+new image.
 
 ### Uninstall
 

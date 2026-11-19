@@ -28,6 +28,19 @@ updates:
       react:
         patterns: ["react", "react-dom", "@types/react", "@types/react-dom"]
 
+  # Docker Compose install: PostgreSQL alone. It is pinned to a minor release so that an upgrade does not
+  # restart the database unasked; a new major needs a dump and restore. Traefik, Keycloak and its config CLI
+  # move by hand, together with the chart (deploy/tests/test_compose_production.py compares them).
+  - package-ecosystem: "docker-compose"
+    directory: "/deploy/compose"
+    schedule:
+      interval: "weekly"
+    allow:
+      - dependency-name: "postgres"
+    ignore:
+      - dependency-name: "postgres"
+        update-types: ["version-update:semver-major"]
+
   # GitHub Actions workflows
   - package-ecosystem: "github-actions"
     directory: "/"
