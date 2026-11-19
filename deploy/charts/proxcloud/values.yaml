@@ -351,7 +351,7 @@ cnpg:
   # Derives a db-read-url at <cluster>-ro with the same credentials. Jobs/billing stay on -rw.
   # With api.existingSecret, put the optional db-read-url in that Secret yourself instead.
   statusReadReplica: false
-  imageName: ghcr.io/cloudnative-pg/postgresql:18
+  imageName: ghcr.io/cloudnative-pg/postgresql:18.6
   storage:
     size: 10Gi
     storageClass: ""   # "" = cluster default StorageClass

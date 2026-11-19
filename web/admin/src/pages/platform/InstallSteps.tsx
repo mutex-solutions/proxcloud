@@ -816,7 +816,12 @@ export function ReviewStep({ installation, canManage, dirty, onInstall, onUpgrad
           <AlertDescription><ul className="list-disc pl-5">{blocking.map((b) => <li key={b}>{b}</li>)}</ul></AlertDescription>
         </Alert>
       ) : null}
-      <ErrorNote title="The run did not start" error={error} />
+      {errCode(error) === "bom_installed" ? ( // the upgrade finished after this page read the plan (another session's run)
+        <Alert>
+          <AlertTitle>The platform is already on this release</AlertTitle>
+          <AlertDescription>There is nothing to upgrade, and no run was started.</AlertDescription>
+        </Alert>
+      ) : <ErrorNote title="The run did not start" error={error} />}
       <div className="flex flex-wrap items-center gap-3">
         <Button disabled={!canManage || installing || dirty || blocking.length > 0} onClick={onInstall}>
           {installing ? "Starting…" : installed ? "Apply this release" : "Install"}

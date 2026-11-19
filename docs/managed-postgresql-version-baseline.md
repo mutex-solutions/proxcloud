@@ -68,8 +68,8 @@ Publishing and verifying that chart is a separate release gate.
   also stays on major `17`; changing its tag to `18` would not establish
   cross-major physical backup compatibility.
 - The portal datastore is separate. Its [CNPG values](<../deploy/charts/proxcloud/values.yaml#L343-L352>)
-  still use the moving major tag `ghcr.io/cloudnative-pg/postgresql:18`.
-  This patch does **not** establish that portal image's minor, build, digest,
+  name the minor `ghcr.io/cloudnative-pg/postgresql:18.6` (up to 0.9.0 the moving major tag `18`).
+  This patch does **not** establish that portal image's build, digest,
   deployed version, or patch status. Optional portal CNPG/Keycloak dependencies
   and all non-PostgreSQL DBaaS images/operators are untouched.
 - No SQL/major-upgrade feature or action code changes. PostgreSQL 17 to 18 is

@@ -483,6 +483,18 @@ test("an upgrade the plan allows: the changes, the typed confirmation, the run a
   await expect(page.getByRole("heading", { name: /Upgrade to release|has not finished|stays on release/ })).toHaveCount(0)
 })
 
+test("an upgrade that finished in another session: the refusal bom_installed reads as a plain message", async ({ page }) => {
+  await open(page, "upgrade")
+  await page.getByRole("button", { name: "Upgrade to release 0.7.0" }).click()
+  const dialog = page.getByRole("dialog", { name: /Upgrade “lab” to release 0\.7\.0/ })
+  await dialog.getByLabel(/to confirm/).fill("upgrade lab to 0.7.0")
+  await mock(page, "const b = (await dispatch('/admin/platform/bom', {})).data; mockPlatform.installations[0].status.bom = { release: b.release, sha256: b.sha256 }")
+  await dialog.getByRole("button", { name: "Upgrade", exact: true }).click()
+  await expect(page.getByRole("alert").filter({ hasText: "The platform is already on this release" })).toContainText("no run was started")
+  await expect(page.getByText(/targetBom|The run did not start/)).toHaveCount(0)
+  await expect(page.getByRole("heading", { name: /Upgrade to release/ })).toHaveCount(0) // the page read the plan again
+})
+
 test("an unfinished upgrade toward an earlier ProxCloud's release: the review offers the move to this one's in its place", async ({ page }) => {
   await open(page, "replace")
   await recordCalls(page)

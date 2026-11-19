@@ -92,7 +92,7 @@ services:
     secrets: [cf-token]
 
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17.12-alpine
     restart: unless-stopped
     logging: *logging
     environment:

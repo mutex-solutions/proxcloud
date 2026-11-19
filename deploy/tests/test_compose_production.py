@@ -213,7 +213,7 @@ class ComposeFileTests(unittest.TestCase):
                     self.assertRegex(image, r":v?\d+[\w.-]*$")
                     self.assertNotIn("latest", image)
         self.assertEqual({i for i in images if "/proxcloud-" not in i}, {
-            "traefik:v3.7.18", "postgres:17-alpine", "quay.io/keycloak/keycloak:26.8.2",
+            "traefik:v3.7.18", "postgres:17.12-alpine", "quay.io/keycloak/keycloak:26.8.2",
             "docker.io/adorsys/keycloak-config-cli:6.5.1-26.5.5"})
 
     def test_no_default_credentials(self):

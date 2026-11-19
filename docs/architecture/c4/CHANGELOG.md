@@ -4,6 +4,15 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-19: PostgreSQL image pinned to a minor release in the Compose install and the app chart
+
+**What changed:** no component, container or relation. Container "PostgreSQL": the Compose install names
+`postgres:17.12-alpine` (before `17-alpine`) and the app chart's CloudNativePG cluster
+`ghcr.io/cloudnative-pg/postgresql:18.6` (before `18`). Admin console, "Platform installations": the refusal
+`bom_installed` is shown as a plain message.
+
+**Why:** `proxcloud-up.sh upgrade` pulls every image of `compose.yaml`, so the moving tag restarted PostgreSQL and
+Keycloak during a portal upgrade on a production site (upgrade to 0.9.0).
 ## 2026-11-19: the plan names the API firewall rule, the boot-store row marks leftover volumes, the tenant path test ends with a Remove
 
 **What changed:** no component, container or relation. "Platform installations": `GET …/plan` of an installed
