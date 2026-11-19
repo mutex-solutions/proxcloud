@@ -333,7 +333,8 @@ func (f *atBootPVE) WaitTask(context.Context, pve.UPID) error { return nil }
 
 // The sync sets onboot on a Kubernetes node template that an import of this portal for this provider holds and that
 // lacks it (one imported before v0.9.0), once. An OS template, a template of another provider or of nobody's receipt
-// (the site's own, another portal's, a pipeline build) and a VM that took a deleted template's id are not written.
+// (the site's own, another portal's, a pipeline build), a withdrawn import and a VM that took a deleted template's id
+// are not written.
 func TestStartNodeTemplatesAtBoot(t *testing.T) {
 	k8s, osP := k8sPayload(), osPayload()
 	other := k8sPayload()
@@ -346,7 +347,9 @@ func TestStartNodeTemplatesAtBoot(t *testing.T) {
 		return pve.VMConfig{"name": r.Name, "tags": r.Tags, "template": 1, "digest": "d" + fmt.Sprint(r.VMID)}
 	}
 	foreign := tpl(9216, k8s) // the same artifact imported by another portal: no receipt here
-	fake := &atBootPVE{rows: []pve.ClusterResource{tpl(9212, k8s), tpl(9213, osP), tpl(9214, other), foreign,
+	withdrawn := tpl(9217, k8s)
+	withdrawn.Tags = withdrawnTags(withdrawn.Tags) // this portal's import, withdrawn: kept as it is
+	fake := &atBootPVE{rows: []pve.ClusterResource{tpl(9212, k8s), tpl(9213, osP), tpl(9214, other), foreign, withdrawn,
 		{Type: "qemu", VMID: 9215, Node: "pve1", Pool: "pc-p1", Name: "web", Tags: "proxcloud"}}, cfgs: map[int]pve.VMConfig{}}
 	for _, r := range fake.rows {
 		fake.cfgs[r.VMID] = cfg(r)
@@ -357,6 +360,7 @@ func TestStartNodeTemplatesAtBoot(t *testing.T) {
 		{ID: "c", VMID: 9214, Step: StepSucceeded, Payload: other},
 		{ID: "d", VMID: 9215, Step: StepSucceeded, Payload: k8s}, // its template was deleted, the id is a tenant's server now
 		{ID: "e", VMID: 9216, Step: StepFailed, Payload: k8s},    // an import that failed after it took an id
+		{ID: "f", VMID: 9217, Step: StepSucceeded, Payload: k8s},
 	}
 	for pass := 1; pass <= 2; pass++ {
 		if err := StartNodeTemplatesAtBoot(context.Background(), fake, recs, "svc"); err != nil {

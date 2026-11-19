@@ -1821,7 +1821,10 @@ holds on `pc-templates` and on the tenant pools):
 
 - **Node templates:** `onboot: 1` on every Kubernetes node template that a Template updates import
   of this portal for this provider still holds (the import's receipt: node, VM id, name and source
-  digest; staged, published or withdrawn). Clones made after that have it.
+  digest), staged or published. Clones made after that have it. A **withdrawn** import (tag
+  `pc-tu-withdrawn`) is neither read nor written: no new node group gets it. A cluster created on
+  it before the withdraw keeps cloning from it (scale up, Replace, a health check's replacement),
+  and such a worker has no `onboot` until the worker pass below sets it at the next sync.
 - **Workers:** `onboot: 1` on every running worker VM of a tenant cluster of this portal that lacks
   it: a VM in a project's pool with the tag `pc-k8s-<cluster id>`, where that project has that
   cluster. A worker that is not running is left for a later sync, because CAPMOX still writes a new

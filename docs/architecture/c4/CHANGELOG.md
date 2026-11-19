@@ -4,6 +4,22 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-19: the sync leaves withdrawn node templates alone; a cluster release deletes a CSI token only when one exists
+
+**What changed:** component "Sync job": `templateupdates.StartNodeTemplatesAtBoot` skips a node template tagged
+`pc-tu-withdrawn`, without reading its config. Component "PVE client": `RevokeClusterCSIToken` (the cluster
+release through `RevokeClusterTokens`, and the CSI migration) reads `GET /access/users/csi@pve/token` and sends
+the `DELETE` of `csi@pve!<cluster id>` only when the list names it; when the list cannot be read the delete is
+sent as before. No container, component, relation or boundary changed, and no Proxmox permission: the list takes
+what the delete takes.
+
+**Why:** the pass wrote `onboot` on withdrawn imports, which are kept for forensics and which the operator of the
+production site had been told would not be touched; that write stopped the site's sync. And every delete of a
+tenant cluster left a `500` in the Proxmox log for a token that was never minted (audit of lab round 3 of v0.9.0,
+A-1).
+
+**Diagrams:** none changed. `c3-components.md`: the Sync job row says which templates.
+
 ## 2026-11-19: the provider sync sets onboot on node templates and tenant workers
 
 **What changed:** component "Sync job": each cycle, per Proxmox provider, `Job.startAtBoot` sets `onboot` where it
