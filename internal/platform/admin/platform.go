@@ -699,19 +699,43 @@ func (h *Handler) platformPlan(w http.ResponseWriter, r *http.Request) {
 			plan.Blocking = append(plan.Blocking, platformlife.Preflight{Installation: in, CAPI: capi}.GrowthBlocking(r.Context())...)
 		}
 	}
-	// What the run writes on the site and no BOM names: the cluster firewall rule, when Proxmox does not hold it.
-	if in.Installed() && h.esSvc != nil && h.pveFor != nil {
-		if es, _ := h.esSvc.Get(r.Context(), in.ServiceID); es != nil {
-			if portal, err := h.pveFor(es); err == nil {
-				plan.ListAPIAccess(r.Context(), in, portal)
-				// A move that replaces the seed's k3s needs a backup of the seed VM, or the operator's word for one.
-				plan.NeedSeedBackup(in, func() platformlife.Check {
-					return platformlife.SeedBackupCheck(r.Context(), portal.C, in, time.Now())
-				})
-			}
+	if in.Installed() {
+		portal := h.platformPortal(r.Context(), in)
+		// What the run writes on the site and no BOM names: the cluster firewall rule, when Proxmox does not hold it.
+		if portal != nil {
+			plan.ListAPIAccess(r.Context(), in, portal)
 		}
+		// A move that replaces the seed's k3s needs a backup of the seed VM, or the operator's word for one. Without a
+		// Proxmox connection none is seen, as the run start decides too.
+		plan.NeedSeedBackup(in, func() platformlife.Check { return h.seedBackup(r.Context(), in, portal) })
 	}
 	httpx.OK(w, plan)
+}
+
+// platformPortal is the installation's Proxmox with the portal token; nil when the provider or its connection is
+// not there.
+func (h *Handler) platformPortal(ctx context.Context, in *platformlife.Installation) *pve.Service {
+	if h.esSvc == nil || h.pveFor == nil {
+		return nil
+	}
+	es, _ := h.esSvc.Get(ctx, in.ServiceID)
+	if es == nil {
+		return nil
+	}
+	portal, err := h.pveFor(es)
+	if err != nil {
+		return nil
+	}
+	return portal
+}
+
+// seedBackup is the seed-backup row for the plan and the run start: a warning without a Proxmox connection.
+func (h *Handler) seedBackup(ctx context.Context, in *platformlife.Installation, portal *pve.Service) platformlife.Check {
+	if portal == nil {
+		return platformlife.Check{ID: "seed-backup", Status: platformlife.CheckWarn,
+			Message: "The installation's Proxmox provider could not be opened, so no backup of the seed VM was looked for."}
+	}
+	return platformlife.SeedBackupCheck(ctx, portal.C, in, time.Now())
 }
 
 // platformRunStart starts an apply or a remove: 202 with the run's id, 409 run_active while another run is unfinished.
@@ -740,14 +764,10 @@ func (h *Handler) platformRunStart(w http.ResponseWriter, r *http.Request) {
 	backup := platformlife.SeedBackup{Taken: req.SeedBackupTaken}
 	// The read of Proxmox is here, the decision in StartRun: only for an apply that would start such an upgrade (a
 	// Retry names no target), and not when the operator already answers for the backup.
-	if req.Kind == platformlife.RunApply && req.TargetBOM != "" && !backup.Taken && h.esSvc != nil && h.pveFor != nil {
+	if req.Kind == platformlife.RunApply && req.TargetBOM != "" && !backup.Taken {
 		if in, err := h.platform.Get(r.Context(), chi.URLParam(r, "id")); err == nil && in.Status.Seed != nil {
 			if plan, err := platformlife.PlanFor(in, req.TargetBOM); err == nil && plan.Upgrade.MovesSeed() && !plan.Upgrade.InProgress {
-				if es, _ := h.esSvc.Get(r.Context(), in.ServiceID); es != nil {
-					if portal, err := h.pveFor(es); err == nil {
-						backup.Seen = platformlife.SeedBackupCheck(r.Context(), portal.C, in, time.Now()).Status == platformlife.CheckOK
-					}
-				}
+				backup.Seen = h.seedBackup(r.Context(), in, h.platformPortal(r.Context(), in)).Status == platformlife.CheckOK
 			}
 		}
 	}

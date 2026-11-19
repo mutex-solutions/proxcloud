@@ -516,7 +516,7 @@ func TestPlatformRunStartCancelAndReplay(t *testing.T) {
 	data := call(http.MethodPost, runs, `{"kind":"apply"}`, http.StatusAccepted)["data"].(map[string]any)
 	runID, _ := data["runId"].(string)
 	run, err := store.Run(ctx, runID)
-	if err != nil || run == nil || run.State != platformlife.RunQueued || len(run.Stages) != 11 || run.RequestedBy != "admin-sub" {
+	if err != nil || run == nil || run.State != platformlife.RunQueued || len(run.Stages) != 12 || run.RequestedBy != "admin-sub" {
 		t.Fatalf("run %+v %v", run, err)
 	}
 	job, err := jobs.Get(ctx, run.JobID)
