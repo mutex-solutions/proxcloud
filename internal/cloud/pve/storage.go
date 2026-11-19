@@ -58,8 +58,9 @@ type StorageContent struct {
 	Size    int64  `json:"size"`
 	Used    int64  `json:"used"`
 	VMID    int    `json:"vmid"`
-	CTime   int64  `json:"ctime"` // backups: when it was taken
-	Notes   string `json:"notes"` // backups: vzdump's notes-template, rendered
+	Parent  string `json:"parent"` // a linked clone's base volume ("base-9200-disk-0@__base__", a backing file path)
+	CTime   int64  `json:"ctime"`  // backups: when it was taken
+	Notes   string `json:"notes"`  // backups: vzdump's notes-template, rendered
 }
 
 // StorageContents lists a storage's content, optionally filtered by content type

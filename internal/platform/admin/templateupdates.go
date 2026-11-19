@@ -13,6 +13,7 @@ package admin
 //	POST /admin/template-updates/templates/{id}/smoke     run the smoke test (admin:service:manage)
 //	POST /admin/template-updates/templates/{id}/publish   publish after a PASS smoke (admin:service:manage)
 //	POST /admin/template-updates/templates/{id}/withdraw  withdraw + blocklist the digest (admin:service:manage)
+//	DELETE /admin/template-updates/templates/{id}         destroy a withdrawn template, free its receipt (admin:service:manage)
 //	GET  /admin/template-updates/publish-all  one digest's state on every node of a provider (admin:service:read)
 //	POST /admin/template-updates/publish-all  advance it one step (admin:service:manage; templatepublishall.go)
 //	POST /admin/template-updates/sandbox     sandbox mirror + prepull switch, rollback, state, pins
@@ -65,6 +66,7 @@ func (h *Handler) routeTemplateUpdates(r chi.Router) {
 	r.Post("/template-updates/templates/{id}/smoke", h.templateUpdatesSmoke)
 	r.Post("/template-updates/templates/{id}/publish", h.templateUpdatesPublish)
 	r.Post("/template-updates/templates/{id}/withdraw", h.templateUpdatesWithdraw)
+	r.Delete("/template-updates/templates/{id}", h.templateUpdatesDelete)
 	r.Get("/template-updates/publish-all", h.templateUpdatesPublishAllGet)
 	r.Post("/template-updates/publish-all", h.templateUpdatesPublishAll)
 }
