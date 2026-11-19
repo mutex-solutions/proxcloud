@@ -106,12 +106,14 @@ func TestControlPlaneShrink(t *testing.T) {
 // A count above one is a problem of the save, not only of the Check, where the installation's BOM names a chart that
 // builds one machine: a saved 3 would fail every apply and upgrade of that platform.
 func TestControlPlaneCountProblems(t *testing.T) {
-	prev, err := Previous()
-	if err != nil || len(prev) == 0 {
-		t.Fatalf("previous BOMs: %d, %v", len(prev), err)
+	// The BOM of 0.8.0, by name: the first file under previous/ is no longer the oldest release (0.10.0-rc.1 sorts
+	// before 0.8.0), and its chart builds three.
+	old080, ok := Lookup(previousSHA256["0.8.0"])
+	if !ok {
+		t.Fatal("this build does not embed the 0.8.0 BOM")
 	}
 	in := validInstallation(t)
-	in.Status.BOM = &BOMRef{Release: prev[0].Release, SHA256: prev[0].SHA256}
+	in.Status.BOM = &BOMRef{Release: old080.Release, SHA256: old080.SHA256}
 	if got := in.ControlPlaneCountProblems(); got != nil || in.BuildsThree() {
 		t.Errorf("one machine on a previous BOM: %v, builds three %t", got, in.BuildsThree())
 	}
@@ -532,13 +534,15 @@ func TestPreflightCapacity(t *testing.T) {
 	want("a node that reports nothing", run(three, `[{"node":"pve1","status":"offline"}]`, others)["capacity"], CheckWarn, "Node pve1 did not report its memory")
 
 	// Under a BOM whose chart builds one machine, three are a failed spec row.
-	prev, err := Previous()
-	if err != nil || len(prev) == 0 {
-		t.Fatalf("previous BOMs: %d, %v", len(prev), err)
+	// The BOM of 0.8.0, by name: the first file under previous/ is no longer the oldest release (0.10.0-rc.1 sorts
+	// before 0.8.0), and its chart builds three.
+	old080, ok := Lookup(previousSHA256["0.8.0"])
+	if !ok {
+		t.Fatal("this build does not embed the 0.8.0 BOM")
 	}
 	old := func(in *Installation) {
 		three(in)
-		in.Status.BOM = &BOMRef{Release: prev[0].Release, SHA256: prev[0].SHA256}
+		in.Status.BOM = &BOMRef{Release: old080.Release, SHA256: old080.SHA256}
 	}
 	want("three on a previous BOM", run(old, node(56), others)["spec"], CheckFail, "3 control plane machines", "which builds one", "0.1.14")
 }
