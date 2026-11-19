@@ -23,6 +23,7 @@ const (
 	ClassRefused    = "refused"     // this release does not make the change: the whole upgrade is refused
 	ClassSite       = "site"        // the run writes it on the Proxmox site, outside the platform's clusters
 	ClassSeed       = "seed"        // the run replaces k3s on the running seed VM (stage seed-k3s)
+	ClassMachines   = "machines"    // the run replaces machines of the platform cluster, one unit at a time (stage cluster, roll.go)
 )
 
 // PlanChange is one difference: a component (Cluster and Name), a top-level pin (Name only), or a control plane the
@@ -59,6 +60,9 @@ type Upgrade struct {
 	// not started. When it is not ok, Blocking carries seed_backup_missing: the one reason the operator can answer
 	// (seedBackupTaken on the apply), so Allowed and Confirm stay as the BOMs decide them.
 	SeedBackup *Check `json:"seedBackup,omitempty"`
+	// Parts are set on a move that replaces the platform cluster's machines: its two operator actions, "seed" then
+	// "platform". Allowed, Confirm and Blocking above are then those of the platform part (the apply without a part).
+	Parts []UpgradePart `json:"parts,omitempty"`
 }
 
 // MovesSeed reports a move that replaces the seed's k3s.
@@ -88,7 +92,11 @@ func (p *Plan) NeedSeedBackup(in *Installation, read func() Check) {
 			row = &c
 		}
 		if u.SeedBackup = row; row.Status != CheckOK {
-			u.Blocking = append(u.Blocking, (&SeedBackupMissing{VMID: in.Status.Seed.VMID}).Error())
+			missing := (&SeedBackupMissing{VMID: in.Status.Seed.VMID}).Error()
+			u.Blocking = append(u.Blocking, missing)
+			for i := range u.Parts { // either part starts the upgrade
+				u.Parts[i].Blocking = append(u.Parts[i].Blocking, missing)
+			}
 		}
 	}
 }
@@ -227,6 +235,10 @@ func move(in *Installation, target string) (run Embedded, up *Upgrade, err error
 			u.Blocking = append(u.Blocking, strings.TrimPrefix(c.Cluster+"/", "/")+c.Name+": "+c.Blocking)
 		}
 	}
+	machines := hasMachines(u.Changes)
+	if machines && in.Spec.NodeImage.Mode != ImageBOM {
+		u.Blocking = append(u.Blocking, "kubernetes.nodeImage: "+later+"this installation names its own node templates; the roll needs the BOM's image")
+	}
 	switch {
 	case pending != nil && pending.SHA256 == to.SHA256:
 		// The build that started it allowed it, and going on is the only way: nothing refuses a Retry.
@@ -245,6 +257,9 @@ func move(in *Installation, target string) (run Embedded, up *Upgrade, err error
 	}
 	if u.Allowed = len(u.Blocking) == 0; u.Allowed && !u.InProgress {
 		u.Confirm = "upgrade " + in.Name + " to " + to.Release
+	}
+	if machines && len(in.Spec.Clusters) > 0 {
+		u.setParts(in, from.BOM, to.BOM)
 	}
 	return to, u, nil
 }
@@ -291,8 +306,10 @@ func slug(v string) string { return strings.ReplaceAll(v, "+", "-") }
 // of our own repository (proxcloud-platform as capi, capi-tenant and platform; proxmox-kamaji-cluster as pc-platform)
 // at a version whose entry lists the old one in upgradeFrom; and in the seed's k3s, by a patch, a k3s build or one
 // minor up (class seed, with what the run writes on the seed as class site). Everything else is refused with its
-// reason: the Kubernetes version, the node and seed images, kube-vip, clusterctl and the providers, every third-party
-// chart, and a component that is added, removed or changed in anything but its chart version.
+// reason: the seed image, clusterctl and the providers, every third-party chart, and a component that is added,
+// removed or changed in anything but its chart version. The Kubernetes version (never back, at most one minor up), the
+// node image and, together with a new node image, kube-vip are class machines when the target's cluster chart can
+// order a rollout: the run then replaces every machine of the platform cluster (roll.go).
 func Classify(from, to *BOM) []PlanChange {
 	out := []PlanChange{}
 	pin := func(name, f, t, class, text string) {
@@ -312,10 +329,29 @@ func Classify(from, to *BOM) []PlanChange {
 	}
 	pin("release", from.Release, to.Release, ClassRecordOnly,
 		"Nothing is synced for it: the platform's record and the labels of its objects name the new release.")
-	pin("kubernetes.version", from.Kubernetes.Version, to.Kubernetes.Version, ClassRefused,
-		"needs the Kubernetes upgrade of a later release (every machine of the platform cluster is replaced)")
-	pin("kubernetes.nodeImage", image(from.Kubernetes.NodeImage), image(to.Kubernetes.NodeImage), ClassRefused,
-		"a new node image replaces every machine of the platform cluster, which needs the Kubernetes upgrade of a later release")
+	// The three pins in every machine's spec. A new node image replaces every machine of the platform cluster, and so
+	// does a new Kubernetes version (which always comes with its image: BOM.Validate ties the image's tag to the
+	// version). The run orders it (roll.go), which needs the cluster chart that can hold a MachineDeployment back.
+	const rolls = "Every machine of the platform cluster is replaced by Cluster API, the control plane first, then one node group and node at a time. " +
+		"The rows roll/… say per unit what stops serving meanwhile."
+	newImage := image(from.Kubernetes.NodeImage) != image(to.Kubernetes.NodeImage)
+	machines := func(name, f, t, refusal string) {
+		chartV := ClusterChartVersion(to)
+		switch {
+		case refusal != "":
+			pin(name, f, t, ClassRefused, refusal)
+		case !kamaji.ChartHasRollOrder(chartV):
+			pin(name, f, t, ClassRefused, fmt.Sprintf("the BOM names cluster chart %s, which cannot order a rollout (it needs %s or newer)", chartV, kamaji.RollOrderChartVersion))
+		case f != t:
+			out = append(out, PlanChange{Name: name, From: f, To: t, Class: ClassMachines, Stage: stageCluster, Impact: rolls})
+		}
+	}
+	step := ""
+	if from.Kubernetes.Version != to.Kubernetes.Version {
+		step = k8sStep(from.Kubernetes.Version, to.Kubernetes.Version)
+	}
+	machines("kubernetes.version", from.Kubernetes.Version, to.Kubernetes.Version, step)
+	machines("kubernetes.nodeImage", image(from.Kubernetes.NodeImage), image(to.Kubernetes.NodeImage), "")
 	pin("seed.image", image(from.Seed.Image), image(to.Seed.Image), ClassRefused,
 		"only a rebuilt seed would boot it, and a ready seed is never rebuilt")
 	switch fk, tk := from.Seed.K3s, to.Seed.K3s; {
@@ -340,8 +376,11 @@ func Classify(from, to *BOM) []PlanChange {
 			out = append(out, PlanChange{Name: w[0], To: w[1], Class: ClassSite, Stage: stageSeedK3s, Impact: w[2]})
 		}
 	}
-	pin("images.kubeVip", from.Images.KubeVip, to.Images.KubeVip, ClassRefused,
-		"kube-vip is in the control plane's machine spec, so the control plane machine would be replaced; it needs the Kubernetes upgrade of a later release")
+	kubeVipAlone := ""
+	if !newImage {
+		kubeVipAlone = "kube-vip is in the control plane's machine spec, so the control plane machine would be replaced; kube-vip moves only together with a new node image, when the control plane is replaced anyway"
+	}
+	machines("images.kubeVip", from.Images.KubeVip, to.Images.KubeVip, kubeVipAlone)
 	pin("images.clusterctl", from.Images.Clusterctl, to.Images.Clusterctl, ClassRefused,
 		"the Cluster API providers are upgraded (clusterctl upgrade) only by a later release")
 	for _, side := range []struct {

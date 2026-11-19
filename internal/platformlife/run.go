@@ -86,7 +86,23 @@ const (
 	// CodeSeedBackupMissing: an apply would start an upgrade that replaces the seed's k3s, and neither the portal saw a
 	// backup of the seed VM nor did the operator say one was taken (the 409 of a run; a line of the plan).
 	CodeSeedBackupMissing = "seed_backup_missing"
+	// The roll of the platform cluster's machines (roll.go). The first five refuse the platform part of an upgrade before
+	// anything is changed (a line of the plan, the 409 of a run, stage 1 of the run); capacity_short also ends a step
+	// whose node lost its room since the plan was read, with nothing of that step applied.
+	CodeNodeImageMissing  = "node_image_missing" // a node the cluster uses holds no template of the target node image
+	CodeCapacityShort     = "capacity_short"     // no room for the one more machine a unit's replacement makes first
+	CodeDrainBlocked      = "drain_blocked"      // a PodDisruptionBudget allows no disruption: Cluster API's drain would wait for ever
+	CodePlatformUnhealthy = "platform_unhealthy" // a Machine not Running or a platform component not Healthy before the start
+	CodeSeedNotUpgraded   = "seed_not_upgraded"  // the seed's k3s is not at the target yet: "Seed and node image" comes first
+	// CodeRolloutStalled: no machine of the unit a roll stands at moved for rollStall.
+	CodeRolloutStalled = "rollout_stalled"
+	// CodeBadPart: POST …/runs names a part that is neither "seed" nor empty (400).
+	CodeBadPart = "bad_part"
 )
+
+// PartSeed is the part of an upgrade that imports the node image, moves the seed's k3s and the seed's own charts and
+// touches no tenant (Run.Part). "" is the whole apply: for a move that replaces machines, the platform part.
+const PartSeed = "seed"
 
 // Stage ids of an apply (design §4.2) and of a remove (§4.6).
 const (
@@ -127,14 +143,20 @@ type Run struct {
 	Confirmed bool `json:"confirmed,omitempty"`
 	// SeedBackupTaken: the apply that started an upgrade which replaces the seed's k3s said a backup of the seed VM was
 	// taken that the portal could not see (seedBackupTaken).
-	SeedBackupTaken bool       `json:"seedBackupTaken,omitempty"`
-	State           string     `json:"state"`
-	Code            string     `json:"code,omitempty"`
-	Message         string     `json:"message,omitempty"`
-	Stages          []Stage    `json:"stages,omitempty"`
-	CreatedAt       time.Time  `json:"createdAt"`
-	StartedAt       *time.Time `json:"startedAt,omitempty"`
-	FinishedAt      *time.Time `json:"finishedAt,omitempty"`
+	SeedBackupTaken bool `json:"seedBackupTaken,omitempty"`
+	// Part is "seed" on a run that stops after the seed's own charts (stageIDs); "" on every other run.
+	Part string `json:"part,omitempty"`
+	// DeleteFirst are the units ("group/node") the plan this run was confirmed with replaces by deleting the machine
+	// first, because their node had no room for one more. Stage 7 freezes it in status.clusters[0].roll when it
+	// begins the roll; a run that continues a begun roll carries none.
+	DeleteFirst []string   `json:"deleteFirst,omitempty"`
+	State       string     `json:"state"`
+	Code        string     `json:"code,omitempty"`
+	Message     string     `json:"message,omitempty"`
+	Stages      []Stage    `json:"stages,omitempty"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	StartedAt   *time.Time `json:"startedAt,omitempty"`
+	FinishedAt  *time.Time `json:"finishedAt,omitempty"`
 }
 
 // Stage is one stage of a run. Deadline is absolute, so a restart does not reset it.
@@ -180,6 +202,9 @@ type StageReceipt struct {
 	// RolloutChecked: this upgrade run compared the cluster chart of the target BOM with the live cluster before its
 	// sync and found no machine to replace (rolloutGate).
 	RolloutChecked bool `json:"rolloutChecked,omitempty"`
+	// RollChecked is the highest step of a roll whose comparison this run read before the step's sync and found
+	// nothing out of sync beyond the step's own unit (rolloutGate with a step).
+	RollChecked int `json:"rollChecked,omitempty"`
 }
 
 // Terminal reports a run state that will not change any more.

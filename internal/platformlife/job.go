@@ -31,7 +31,8 @@ const JobAttempts = 20
 
 var (
 	ErrBadKind      = errors.New("kind must be apply or remove")
-	ErrBadConfirm   = errors.New(`confirm must be "remove <installation name>" on a remove, or "upgrade <installation name> to <release>" on an apply that starts an upgrade (targetBom); no other run takes one`)
+	ErrBadConfirm   = errors.New(`confirm must be "remove <installation name>" on a remove; "upgrade <installation name> to <release>" on an apply that starts an upgrade (targetBom); or "upgrade <installation name> to <release> and replace its machines" on the apply that begins the replacement of the platform cluster's machines, whether it starts the upgrade or continues it (GET …/plan names the phrase of each part); no other run takes one`)
+	ErrBadPart      = errors.New(CodeBadPart + `: part must be "seed" or empty, and only an apply of an upgrade that replaces the platform cluster's machines takes "seed" (GET …/plan lists the parts)`)
 	ErrBadTarget    = errors.New("targetBom must be the sha256 of this build's own BOM (GET /admin/platform/bom), or of the target of the upgrade in progress: a platform moves to no other BOM, and only an apply takes one")
 	ErrSameBOM      = errors.New("targetBom is the BOM the platform is on: there is nothing to upgrade. An apply of the installed BOM takes neither targetBom nor confirm")
 	ErrRunNotFound  = errors.New("no run with that id")
@@ -51,10 +52,15 @@ func DecodePayload(raw []byte) (Payload, error) {
 	return p, nil
 }
 
-// stageIDs are the stages a run of kind goes through, in order.
-func stageIDs(kind string) []string {
+// stageIDs are the stages a run of kind goes through, in order. Part seed of an upgrade ends after the seed's own
+// charts: the node image is on every node, the seed's k3s and charts have moved, and nothing of the platform cluster
+// was touched. Stage done does not run, so status.targetBom stays for the platform part.
+func stageIDs(kind, part string) []string {
 	if kind == RunRemove {
 		return []string{StageRemoveCluster, StageRemoveSeed, StageRemoveSecrets}
+	}
+	if part == PartSeed {
+		return []string{StageValidate, StageImages, StageSeedVM, StageSeedAPI, StageSeedIdentity, stageSeedK3s, stageSeedPlatform}
 	}
 	return []string{StageValidate, StageImages, StageSeedVM, StageSeedAPI, StageSeedIdentity, stageSeedK3s, stageSeedPlatform, stageCluster,
 		stageWorkloadAccess, stageWorkloadPlatform, stageRegister, stageDone}
@@ -69,9 +75,16 @@ func stageIDs(kind string) []string {
 // until one succeeds. An upgrade that replaces the seed's k3s starts only with backup (SeedBackupMissing otherwise):
 // the route reads Proxmox, the store decides. confirm is otherwise the typed confirmation of a Remove ("remove <name>", or empty): see
 // Run.Confirmed.
-func (s *Store) StartRun(ctx context.Context, jobs *durablejobs.Store, installationID, kind, actor, confirm, targetBOM string, backup SeedBackup) (*Run, error) {
+//
+// part "seed" makes an apply the seed part of an upgrade that replaces the platform cluster's machines; without it
+// such an apply is the platform part, which begins the roll only with roll (what the route read of the site: RollRead)
+// free of blocking reasons, and with the longer phrase.
+func (s *Store) StartRun(ctx context.Context, jobs *durablejobs.Store, installationID, kind, actor, confirm, targetBOM, part string, backup SeedBackup, roll RollRead) (*Run, error) {
 	if kind != RunApply && kind != RunRemove {
 		return nil, ErrBadKind
+	}
+	if part != "" && (part != PartSeed || kind != RunApply) {
+		return nil, ErrBadPart
 	}
 	cur, err := Current()
 	if err != nil {
@@ -84,7 +97,7 @@ func (s *Store) StartRun(ctx context.Context, jobs *durablejobs.Store, installat
 	now := time.Now().UTC()
 	run := &Run{ID: "pr-" + hex.EncodeToString(b[:]), InstallationID: installationID, Kind: kind, RequestedBy: actor, State: RunQueued,
 		BOM: BOMRef{Release: cur.Release, SHA256: cur.SHA256}, CreatedAt: now}
-	for _, id := range stageIDs(kind) {
+	for _, id := range stageIDs(kind, part) {
 		run.Stages = append(run.Stages, Stage{ID: id, State: StagePending})
 	}
 	err = s.DB.WithTx(ctx, func(tc context.Context) error {
@@ -114,7 +127,7 @@ func (s *Store) StartRun(ctx context.Context, jobs *durablejobs.Store, installat
 			}
 		}
 		if kind == RunApply {
-			if err := startApply(run, &in, targetBOM, confirm, backup); err != nil {
+			if err := startApply(run, &in, targetBOM, confirm, part, backup, roll); err != nil {
 				return err
 			}
 		}
@@ -152,21 +165,36 @@ type SeedBackup struct{ Seen, Taken bool }
 // startApply gives an apply its BOM (move). An upgrade, started or continued, also records where the platform comes
 // from on the run and where it goes on the installation: from then on status.targetBom decides every apply. An
 // upgrade that replaces the seed's k3s starts only with a backup of the seed; a Retry of a started one asks for none.
-func startApply(run *Run, in *Installation, targetBOM, confirm string, backup SeedBackup) error {
+//
+// A move that replaces machines has two parts (UpgradePart). Part seed is refused on every other apply. The platform
+// part that begins the roll needs the site's read without a blocking reason, and takes the plan's surge or
+// delete-first decision with it (Run.DeleteFirst), so the run does what the operator confirmed.
+func startApply(run *Run, in *Installation, targetBOM, confirm, part string, backup SeedBackup, roll RollRead) error {
 	to, up, err := move(in, targetBOM)
+	allowed, blocking, phrase := up.part(part)
+	begins := part == "" && up.NeedsRollRead(in)
 	switch {
 	case err != nil:
 		return err
-	case up != nil && !up.Allowed:
-		return &UpgradeRefused{Reasons: up.Blocking}
+	case part == PartSeed && (up == nil || len(up.Parts) == 0):
+		return ErrBadPart
+	case up != nil && !allowed:
+		return &UpgradeRefused{Reasons: blocking}
 	case up == nil && targetBOM != "" && in.Status.BOM != nil: // before the confirmation: the phrase may be right, the target is not
 		return ErrSameBOM
-	case up == nil && confirm != "", up != nil && confirm != up.Confirm: // "" while an upgrade is in progress
+	case begins && !roll.Read:
+		return rollRefused([]string{CodePlatformUnhealthy + ": the site could not be read before the replacement of the machines: the installation's Proxmox provider did not open; read the plan again"})
+	case begins && len(roll.Blocking) > 0:
+		return rollRefused(roll.Blocking)
+	case up == nil && confirm != "", up != nil && confirm != phrase: // "" once nothing is left to confirm
 		return ErrBadConfirm
 	case up.MovesSeed() && !up.InProgress && !backup.Seen && !backup.Taken && in.Status.Seed != nil:
 		return &SeedBackupMissing{VMID: in.Status.Seed.VMID}
 	}
 	run.SeedBackupTaken = up.MovesSeed() && !up.InProgress && backup.Taken
+	if run.Part = part; begins {
+		run.DeleteFirst = roll.DeleteFirst
+	}
 	if run.BOM = refOf(to); up != nil {
 		from, target := *in.Status.BOM, run.BOM
 		run.FromBOM, in.Status.TargetBOM = &from, &target

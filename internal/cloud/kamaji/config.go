@@ -59,6 +59,15 @@ const VLANChartVersion = "0.1.14"
 // ChartHasVLAN reports whether chart version v tags the machines' NIC with proxmox.network.vlan.
 func ChartHasVLAN(v string) bool { return chartAtLeast(v, VLANChartVersion) }
 
+// RollOrderChartVersion is the first cluster chart that reads a node group's kubernetesVersions and deleteFirstOn: what
+// the platform's upgrade run orders the replacement of the platform cluster's machines with, one MachineDeployment at
+// a time. An older chart ignores both keys and would replace every machine at once.
+const RollOrderChartVersion = "0.1.15"
+
+// ChartHasRollOrder reports whether chart version v can hold a MachineDeployment at another Kubernetes version than
+// the cluster's.
+func ChartHasRollOrder(v string) bool { return chartAtLeast(v, RollOrderChartVersion) }
+
 // ControlPlaneReplicasChartVersion is the first cluster chart that reads controlPlane.kubeadm.replicas. An older chart
 // writes one control plane machine whatever the value says.
 const ControlPlaneReplicasChartVersion = "0.1.14"

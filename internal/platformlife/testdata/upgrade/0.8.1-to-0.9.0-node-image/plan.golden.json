@@ -21,7 +21,7 @@
       "from": "proxcloud-vm-ubuntu-2604-k8s:ubuntu-2604-k8s-1.35.10-20261116181221-72f0eaa3d0d4@sha256:62de43787103a74e433203fbbf9bd85806011e673371591397bd30bedda03ea9",
       "to": "proxcloud-vm-ubuntu-2604-k8s:ubuntu-2604-k8s-1.35.10-20270101000000-000000000000@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
       "class": "refused",
-      "blocking": "not supported by this release: a new node image replaces every machine of the platform cluster, which needs the Kubernetes upgrade of a later release"
+      "blocking": "not supported by this release: the BOM names cluster chart 0.1.14, which cannot order a rollout (it needs 0.1.15 or newer)"
     },
     {
       "name": "tenantCharts.kubernetes",
@@ -72,6 +72,6 @@
     }
   ],
   "blocking": [
-    "kubernetes.nodeImage: not supported by this release: a new node image replaces every machine of the platform cluster, which needs the Kubernetes upgrade of a later release"
+    "kubernetes.nodeImage: not supported by this release: the BOM names cluster chart 0.1.14, which cannot order a rollout (it needs 0.1.15 or newer)"
   ]
 }

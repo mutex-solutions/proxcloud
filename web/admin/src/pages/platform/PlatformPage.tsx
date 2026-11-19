@@ -23,7 +23,7 @@ import { hasPermission } from "@/lib/permissions"
 import { cn } from "@/lib/utils"
 import { CopyBlock, ErrorNote, LINK, errMsg, setupStatusQuery } from "@/pages/setup/common"
 import { CheckStep, IdentitiesStep, ReviewStep, SettingsStep } from "./InstallSteps"
-import { ATTACH_LABEL, PLATFORM_KEY, STAGE_TITLE, codeAction, errCode, isConflict, runActive, stageNumbers, type Installation, type Run, type Stage } from "./model"
+import { ATTACH_LABEL, PLATFORM_KEY, STAGE_TITLE, codeAction, errCode, isConflict, rolling, runActive, stageNumbers, type Installation, type Run, type Stage } from "./model"
 import { KubernetesVersion } from "./Tenants"
 
 const POLL_MS = 3000
@@ -246,6 +246,8 @@ function RunCard({ run, installation, canManage, dirty, focus, onRetry, retrying
   const seedCD = run.code === "job_dead" && installation.status.seed?.cdVolume
   // The run's own failure repeats its failed stage's; show it only when no stage carries it (job_dead, a cancel).
   const stageFailed = run.stages?.some((s) => s.state === "failed" && s.code === run.code)
+  // While the platform cluster's machines are replaced a cancel is a pause: the next apply goes on at the same unit.
+  const roll = rolling(run)
   return (
     <Section
       title={RUN_TITLE[run.kind]}
@@ -256,7 +258,9 @@ function RunCard({ run, installation, canManage, dirty, focus, onRetry, retrying
       {run.fromBom && run.bom ? (
         <p className="text-sm">
           This run upgrades the platform from release <span className="font-mono">{run.fromBom.release}</span> to release <span className="font-mono">{run.bom.release}</span>.
-          The record names release {run.fromBom.release} until the last stage is done{ended ? `; Retry continues to release ${run.bom.release}` : ""}.
+          {run.part === "seed"
+            ? " It is the first of two actions: it imports the node image and moves the seed, and replaces no machine. The record names release " + run.fromBom.release + " until the second action, Platform cluster in step 4, has succeeded."
+            : ` The record names release ${run.fromBom.release} until the last stage is done${ended ? `; ${roll ? "Resume" : "Retry"} continues to release ${run.bom.release}` : ""}.`}
         </p>
       ) : null}
       {active ? <p className="text-sm text-muted-foreground">This page reads the run every few seconds. You can leave it: the run goes on.</p> : null}
@@ -269,7 +273,8 @@ function RunCard({ run, installation, canManage, dirty, focus, onRetry, retrying
           code={run.code}
           message={run.message ?? (run.state !== "cancelled" ? undefined
             : remove ? "The removal was cancelled. What it had already deleted stays deleted; the stages above show how far it came."
-              : "The run was cancelled. Nothing was deleted.")}
+              : roll ? "The replacement of the machines is paused. A machine that was being replaced is finished by Cluster API on its own; the units not reached run the old Kubernetes version, which is a supported state. Resume goes on at the next unit."
+                : "The run was cancelled. Nothing was deleted.")}
         />
       ) : null}
       {seedCD ? <p className="text-sm">The seed's start-up disc is still on <span className="font-mono">{seedCD}</span>. Retry or Remove deletes it.</p> : null}
@@ -285,12 +290,12 @@ function RunCard({ run, installation, canManage, dirty, focus, onRetry, retrying
         {active ? (
           <>
             <Button variant="outline" disabled={!canManage || cancel.isPending || run.state === "cancelling"} onClick={() => cancel.mutate()}>
-              {run.state === "cancelling" ? "Cancelling…" : "Cancel the run"}
+              {run.state === "cancelling" ? (roll ? "Pausing…" : "Cancelling…") : roll ? "Pause" : "Cancel the run"}
             </Button>
-            <span className="text-sm text-muted-foreground">A cancel usually takes effect within about 15 seconds, and up to 5 minutes while a stage pauses after repeated errors; a task Proxmox has started finishes first.</span>
+            <span className="text-sm text-muted-foreground">{roll ? "Pause stops the run between two looks: the machine being replaced is finished by Cluster API, and no further unit starts until Resume. Nothing goes back to the old version. " : ""}A cancel usually takes effect within about 15 seconds, and up to 5 minutes while a stage pauses after repeated errors; a task Proxmox has started finishes first.</span>
           </>
         ) : null}
-        {ended && !remove ? <Button disabled={!canManage || retrying || dirty} onClick={onRetry}>{retrying ? "Starting…" : "Retry"}</Button> : null}
+        {ended && !remove ? <Button disabled={!canManage || retrying || dirty} onClick={onRetry}>{retrying ? "Starting…" : roll ? "Resume" : "Retry"}</Button> : null}
         {ended && !remove && dirty ? <span className="text-sm text-muted-foreground">Save the settings first: Retry runs with what is saved.</span> : null}
         {ended && remove ? <Button variant="destructive" disabled={!canManage} onClick={onRemove}>Remove again</Button> : null}
       </div>
@@ -655,7 +660,7 @@ export default function PlatformPage() {
   const liveState = phase === "ready" ? live.data?.live : undefined
 
   const start = useMutation({
-    mutationFn: (body: { kind: "apply" | "remove"; confirm?: string; targetBom?: string; seedBackupTaken?: boolean }) => apiFetch<{ runId: string }>(`${base(stored!.id)}/runs`, { method: "POST", body }),
+    mutationFn: (body: { kind: "apply" | "remove"; confirm?: string; targetBom?: string; seedBackupTaken?: boolean; part?: "seed" }) => apiFetch<{ runId: string }>(`${base(stored!.id)}/runs`, { method: "POST", body }),
     onSuccess: (r) => {
       setRemoving(false)
       setStarted(r.runId)
@@ -712,7 +717,7 @@ export default function PlatformPage() {
               <>
                 <IdentitiesStep installation={stored} tokenId={provider?.config?.tokenId} canManage={canManage} />
                 <CheckStep installation={stored} canManage={canManage} dirty={dirty} />
-                <ReviewStep installation={stored} canManage={canManage} dirty={dirty} onInstall={apply} onUpgrade={(targetBom, confirm, seedBackupTaken) => start.mutate({ kind: "apply", targetBom, confirm, ...(seedBackupTaken ? { seedBackupTaken } : {}) })} installing={start.isPending} error={showRun ? null : startError} />
+                <ReviewStep installation={stored} canManage={canManage} dirty={dirty} onInstall={apply} onUpgrade={(targetBom, confirm, seedBackupTaken, part) => start.mutate({ kind: "apply", ...(targetBom ? { targetBom } : {}), ...(confirm ? { confirm } : {}), ...(seedBackupTaken ? { seedBackupTaken } : {}), ...(part ? { part } : {}) })} installing={start.isPending} error={showRun ? null : startError} />
               </>
             ) : (
               <p className="text-sm text-muted-foreground">Steps 2 to 4 (Proxmox identities, Check, Review and install) open once the settings are saved.</p>

@@ -879,9 +879,12 @@ asks for, and it never tries that machine again. A node that holds exactly its m
 installs and then fails its first update for good. The Check row `capacity` fails before the first
 install when a node has no room for its machines and the control plane's one more. A node group's
 update makes one more machine of the group on each of its nodes as well; the row counts those too
-and only **warns** when they do not fit. An upgrade of this release replaces no machine (it stops
-with `unexpected_rollout` if it would), so that room is needed when you change a group's size or
-image, not at the install. Homelab therefore passes the row on a node with 24 GiB that can be
+and only **warns** when they do not fit. An upgrade that replaces the machines takes one unit at a
+time and decides per unit, when its plan is read, whether the node has room for one more machine
+of that unit or the machine is deleted first
+([The platform cluster's machines](#the-platform-clusters-machines)); every other upgrade replaces
+no machine (it stops with `unexpected_rollout` if it would). So the sum of all spares is never
+needed at once, and not at the install. Homelab therefore passes the row on a node with 24 GiB that can be
 reserved (five machines of 4 GiB and the control plane's spare), with a warning below 36 GiB.
 
 **Changing the count.** From 1 to 3 on an installed platform: set it in step 1, save, and press
@@ -1363,7 +1366,14 @@ stage is still trying.
 | `provider_conflict` | 10 | A provider with the same name exists that is not this installation's, two rows carry its marker, or the provider validation refused the row | Correct or rename that provider under Cloud providers, **Retry** |
 | `bom_unsupported` | start, plan | The installed BOM is not one this release carries: its own, or that of an earlier release from 0.8.0 on. A platform installed by a build of `main` (`dev-<sha>`) gets this after an upgrade | A platform moves only between BOMs a release carries ([Upgrade between BOMs](#upgrade-between-boms)). Go back to the ProxCloud release that installed the platform. Or, if no tenant cluster or database must be kept: delete them all (Remove refuses with `tenants_exist` otherwise), remove managed services, which deletes the platform cluster, and install again |
 | `upgrade_refused` | start | An apply names this release's BOM as its target (`targetBom`) and the two BOMs differ in something this release does not move, or the target is a `-dev` BOM. `409`, no run is made; `details.reasons` has one line per entry, the same lines as the plan | Nothing is wrong with the platform: it stays on its BOM, and **Apply this release** keeps working. The move needs a later release ([Upgrade between BOMs](#upgrade-between-boms)) |
-| `unexpected_rollout` | 7 | An upgrade run only. The cluster chart of the target BOM would create a machine or bootstrap template, or change the control plane: Cluster API would replace machines. Nothing of the cluster was synced; the Application `pc-platform` is left at the new chart version without automated sync | If machine sizes, nodes or node groups were changed in the settings together with the upgrade, put them back, save, **Retry**. Otherwise the release is at fault: see [Upgrade between BOMs](#upgrade-between-boms), "When the upgrade cannot finish" |
+| `node_image_missing` | start, plan, 1 | The platform part of an upgrade that replaces machines, before its roll has begun: a node the cluster uses holds no template of the target BOM's node image (no finished import of this provider, node and digest whose template is still in `pc-templates`), or that could not be read. Nothing was changed | Run **Seed and node image** in step 4: it imports the image on every node. Then read the plan again |
+| `seed_not_upgraded` | start, plan | The same part: the target BOM names another k3s and the seed's recorded k3s is not it yet | Run **Seed and node image** first |
+| `capacity_short` | start, plan, 1, 7 | The control plane's node has no room for the one more machine its replacement makes first (memory by the count of the Check row `capacity`, own machines included, and one more full disk on the boot store), or that could not be read; the message has the numbers. In stage 7: the node of the step's unit had room when the plan was read and has none now. Nothing of that step was applied, every machine runs as before | Free memory or space on the node (a stopped VM counts with its configured memory), then read the plan again, or **Retry**. A control plane is never replaced by deleting its machine first |
+| `drain_blocked` | start, plan, 1 | The same part: a PodDisruptionBudget on the platform cluster allows no disruption (`status.disruptionsAllowed` 0 with pods), so Cluster API's drain of the machine its pod is on would wait without end; the message names each as namespace/name. Also when the platform cluster's API could not be read | For a database: bump its chart to 0.5.2 or newer ([managed-dbaas.md](managed-dbaas.md#chart-pin--platform-update)), which sets no budget for one instance. For anything else: a second replica, or delete the budget. Then read the plan again |
+| `platform_unhealthy` | start, plan, 1 | The same part: a Machine of the platform cluster is not Running, the count of Machines differs from the settings, a component's Application is not Healthy, or the seed could not be read. Unhealthy tenants do not block | Repair it (**Apply this release**, **Retry**), then read the plan again |
+| `rollout_stalled` | 7 | A run that replaces machines: the items of the unit the roll stands at did not change for 30 minutes. The message has the machine's state and, for a machine that cannot be drained, Cluster API's text with the pod that blocks. The machines that run keep serving | Correct the cause, then **Resume** (Retry): the run goes on at the same unit and renders no unit back |
+| `bad_part` | start | `part` on `POST …/runs` is neither `seed` nor empty, or `seed` on an apply that is not an upgrade which replaces machines (`400`) | Send the part the plan lists |
+| `unexpected_rollout` | 7 | An upgrade run only. The cluster chart of the target BOM would create a machine or bootstrap template, or change the control plane: Cluster API would replace machines. On a run that replaces machines: the render of the step would also replace machines outside the step's own unit. Nothing of the cluster (of that step) was synced; the Application `pc-platform` is left at the new chart version without automated sync. Also on such a run: the record says every unit is replaced, and the Application does not carry what the run renders (the run moves to another release than the one the machines were replaced for, the settings changed since, or the record was edited); nothing was applied | If machine sizes, nodes or node groups were changed in the settings together with the upgrade, put them back, save, **Retry**. A run to another release than the one the machines were replaced for: finish that upgrade first (**Retry**, an apply without a target), then start the new one. Otherwise the release is at fault: see [Upgrade between BOMs](#upgrade-between-boms), "When the upgrade cannot finish" |
 | `tenants_unhealthy` | 9 | An upgrade run only. After a wave, a tenant cluster or database that was healthy when the run reached stage 9 is not: its Application on the platform cluster's ArgoCD is not Healthy, or its TenantControlPlane is not Ready. The message names them. The stage waits for them up to the wave's 20 minutes | Look at the tenant the message names. **Retry** goes on from the same wave and waits for it again: the list of tenants that were down before is taken once per upgrade (`status.tenantsDownBefore`), not per run, so a tenant a wave broke holds every run until it is healthy or deleted |
 | `portal_changed` | any | ProxCloud was upgraded during the run and no longer carries the run's BOM. The stage the run stood at reads `failed` with this code | **Retry** |
 | `job_dead` | any | The run's job ran out of attempts | **Retry**, or **Remove again** |
@@ -2004,16 +2014,19 @@ lists every difference. The upgrade is allowed when every difference is one of t
 | `tenantCharts.kubernetes`, `tenantCharts.database` | record only | Stage 10 writes the chart on the two providers. New tenant clusters and databases get it; an existing one keeps its chart until its own chart upgrade |
 | seed `capi`, platform cluster `capi-tenant` (chart `proxcloud-platform`) | chart | The Application moves to the new chart version. ArgoCD syncs, and runs the clusterctl hook again, only when the new chart renders an object differently; the hook then finds every provider at its version and changes nothing |
 | platform cluster `platform` (chart `proxcloud-platform`) | chart | The Application moves to the new chart version. ArgoCD syncs what the new chart renders differently of provider RBAC, tenant AppProjects and the MetalLB pool |
-| seed `pc-platform` (chart `proxmox-kamaji-cluster`) | chart | The Application moves to the new chart version. ArgoCD syncs the Cluster API objects of the platform cluster that the new chart renders differently, after the check that no machine is replaced (below) |
+| seed `pc-platform` (chart `proxmox-kamaji-cluster`) | chart | The Application moves to the new chart version. ArgoCD syncs the Cluster API objects of the platform cluster that the new chart renders differently, after the check that no machine is replaced (below). On a move that replaces machines it moves with the first step of the roll |
+| `kubernetes.version` (the same, a newer patch or exactly one minor up), `kubernetes.nodeImage`, and `images.kubeVip` together with a new node image, when the target's cluster chart is 0.1.15 or newer and the installation uses the BOM's node image | machines | Cluster API replaces every machine of the platform cluster, ordered by the run ([The platform cluster's machines](#the-platform-clusters-machines)). The plan then begins with the line that there is no way back and has one row `roll/<unit>` per unit with what stops meanwhile, and one row `roll-vm/<unit>` of kind `site` with what is made and deleted on Proxmox |
 | `seed.k3s`, to a version that is newer by a patch, by a k3s build (`+k3s2` after `+k3s1`) or by exactly one minor | seed | Stage 5a replaces the k3s binary on the running seed VM and restarts k3s ([The seed's k3s](#the-seeds-k3s)). With it the plan lists three rows of kind `site`, what the stage writes on the seed: the Job, the etcd snapshot and the binary |
 
 One more row can be in the plan that is not a difference of the two BOMs: `pve-api-rule`, kind
 `site`, when the cluster firewall does not hold the rule for the Proxmox API
 ([step 4](#step-4-review-and-install)). It never refuses an upgrade.
 
-No BOM of a release names another k3s than `v1.35.10+k3s1` yet, so no upgrade between released
-BOMs has the `seed.k3s` row: the first one arrives with a later release's BOM. The row and its
-stage have run in tests only, against a fake seed.
+No BOM of a release names another k3s than `v1.35.10+k3s1` or another Kubernetes than 1.35.10
+yet, so no upgrade between released BOMs has the `seed.k3s` row or a `machines` row: the first one
+arrives with a later release's BOM. The rows and their stages have run in tests only, against a
+fake seed. A Kubernetes minor step has no BOM that could carry it at all while third-party charts
+and the Cluster API providers are refused: the rule allows it, nothing ships it.
 
 "Moves" means that the Application's target is the new chart version and ArgoCD has compared the
 cluster with it. ArgoCD starts a sync only for an Application that is out of sync, and a hook is
@@ -2048,22 +2061,25 @@ Every other difference refuses the whole upgrade, each with its own line in the 
 
 | Entry | Why it is refused |
 |---|---|
-| `kubernetes.version` | Every machine of the platform cluster is replaced: the Kubernetes upgrade of a later release |
-| `kubernetes.nodeImage` | A new node image replaces every machine |
+| `kubernetes.version` to an older version | "Kubernetes never goes back" |
+| `kubernetes.version` more than one minor ahead | "one minor at a time: go through 1.<n+1> first" |
+| `kubernetes.version`, `kubernetes.nodeImage` or `images.kubeVip` when the target's cluster chart is older than 0.1.15 | "the BOM names cluster chart X, which cannot order a rollout" |
+| `kubernetes.nodeImage` on an installation with `nodeImage.mode: templates` | "this installation names its own node templates; the roll needs the BOM's image" |
 | `seed.image` | Only a rebuilt seed would boot it, and a ready seed is never rebuilt |
 | `seed.k3s` to an older version | "k3s never goes back" |
 | `seed.k3s` more than one minor ahead | "one minor at a time: go through 1.<n+1> first" |
 | `seed.k3s` at the same version with another sha256 or URL | A published k3s version does not change |
-| `images.kubeVip` | It is in the control plane's machine spec: the control plane machine would be replaced |
+| `images.kubeVip` without a new node image | It is in the control plane's machine spec: the control plane machine would be replaced. kube-vip moves only together with a new node image, when the control plane is replaced anyway |
 | `images.clusterctl`, `capi.seed.*`, `capi.workload.*` | The Cluster API providers are upgraded (`clusterctl upgrade`) only by a later release |
 | A third-party chart: `argocd`, `cert-manager`, `cilium`, `metallb`, `cnpg`, `proxmox-csi`, `kamaji-crds`, `kamaji`, `kamaji-etcd` | Not in this release. Each restarts something tenants use (the CNI, the load balancer speaker, every database's operator, every tenant control plane's datastore), and none of those restarts has been measured |
 | A chart of the product at a version that does not list the installed one in `upgradeFrom`, or the same version with another digest | The release did not check that move |
 | A component added or removed, or changed in its wave, install mode, namespace, node group, chart source or values | A run moves only a chart version |
 | The target's `release` ends in `-dev` | No later build carries a development BOM, so the platform could afterwards be applied by that one build alone |
 
-So a release that changes a machine or bootstrap template (a NIC option on the machines, kube-vip,
-a kubelet argument) reaches new installs only, and an installed platform stays on its BOM until a
-release rolls machines. The release notes of such a release must say so.
+So a release whose cluster chart changes a machine or bootstrap template by itself (a NIC option
+on the machines, a kubelet argument) still reaches new installs only: the roll replaces machines
+for a new Kubernetes version or node image, and its check refuses any other template change next
+to it. The release notes of such a release must say so.
 
 ### The seed's k3s
 
@@ -2116,13 +2132,128 @@ second by hand; it has not been tried on a lab.
 `seed-backup` (step 3) is `ok` when a store of the seed's node holds a `vzdump` archive of the seed
 VM younger than 24 hours, and names its time and store. It reads with the portal token: a store
 that token cannot read (a Proxmox Backup Server it has no row on, a store of another node) counts
-as "none seen", and the row says which stores it could not read. Without an `ok` row, step 4 shows
+as "none seen", and the row says which stores it could not read. An archive counts only when it is
+of this seed VM: made after the seed became ready (the record's `status.seed.readyAt`; without one,
+the creation time in the VM's config), and, when it has notes, with the seed VM's name in them
+(vzdump's default notes are the guest's name). Proxmox gives a freed VMID to the next VM and a
+store keeps the old archives, so a year-old archive of an earlier VM with the seed's VMID is not
+the seed's backup; the row says how many such archives it left out. Without an `ok` row, step 4 shows
 the reason `seed_backup_missing` and a box, "I took a backup of seed VM … that the portal cannot
 see"; ticking it lets the upgrade start, and the run and the audit log record that it was ticked.
 The row is a warning, never a failure: a plain apply does not need the backup.
 
+### The platform cluster's machines
+
+**Nothing in this section has run on a lab.** It says what the code and its tests do; every
+duration is an expectation read from the manifests and marked "not measured" in the plan.
+
+An upgrade whose BOM names another Kubernetes version, or another node image of the same version,
+replaces every machine of the platform cluster. Cluster API replaces them (a new VM cloned from the
+new image's template, the old one drained and deleted); the run orders it: the control plane first,
+then one node group on one node at a time (`system`, `kamaji`, `dbaas`, then other groups by name;
+inside a group its nodes by name). Nothing is upgraded in place.
+
+**There is no way back.** Once the new control plane machine has joined, etcd has moved on and
+kubeadm has no downgrade. The run restores nothing and has no rollback; Cancel, Retry and Remove do
+not bring the old machines or the old version back. A step that fails leaves the machines that
+still run serving, and Retry goes on at that step. If a database's volume does not follow its pod
+to the new machine, the database stays down and the tenant's backups are the only net: take them
+before you press the second button. Between "the new etcd member joined" and "the old member
+removed" the two members need each other; a failure there is not repaired by the run.
+
+**Two actions, in this order** (the plan's `parts`):
+
+1. **Seed and node image** (`part: "seed"`). Stages 1 to 6 and no other: stage 2 imports the
+   target's node image on every node the cluster uses, stage 5a moves the seed's k3s when the BOM
+   names another, stage 6 moves the seed's own charts. No machine is replaced and no tenant is
+   touched. The run ends succeeded with `status.targetBom` still set: the upgrade has started and
+   the record names the BOM the platform left. Phrase: `upgrade <name> to <release>`, and the seed
+   backup rule of [The seed's k3s](#the-seeds-k3s) when k3s moves.
+2. **Platform cluster** (no `part`). The whole run, with the roll in stage 7. Phrase: `upgrade
+   <name> to <release> and replace its machines`, asked of the run that begins the roll whether it
+   starts the upgrade or continues it. Once the roll has begun every apply goes on without a phrase.
+
+The second action is refused, in the plan, at `POST …/runs` (409) and again in stage 1 of the run,
+until every pre-check passes: `node_image_missing` (a template of the target image on every node
+used, which is how "the image is on the site" is known before any machine is touched),
+`seed_not_upgraded`, `capacity_short`, `drain_blocked`, `platform_unhealthy`
+([Failure codes](#6-failure-codes) has the fix of each). Tenants that are unhealthy before the
+start do not block.
+
+**One more machine first, or the old one deleted first.** A unit is replaced one machine at a time.
+The control plane always gets one more machine first (a control plane of one cannot delete its only
+etcd member first); a node without room for it refuses the upgrade (`capacity_short`). A node group
+gets one more machine first where its node has room for one machine of that group; units go one at
+a time, so one spare is needed at a time, never the sum the Check row `capacity` warns about. Where
+the node has no room the unit is replaced **delete-first**: the old machine is deleted before the
+new one exists. The plan says which, per unit; the run does what the plan it was confirmed with
+said (`status.clusters[0].roll.deleteFirst`), and counts the node again before each step that needs
+room: short now is `capacity_short` with nothing of the step applied.
+
+**What stops, per unit** (the plan's `roll/<unit>` rows carry these sentences; none is measured):
+
+| Unit | What stops while it is replaced |
+|---|---|
+| Control plane, one machine | A second machine is cloned and joins, then the old one is removed. From the removal of the old etcd member until the new machine holds the API address (the kube-vip lease, up to 60 seconds) the platform cluster's API does not answer: expected one to a few minutes. Meanwhile nothing on the platform can be created, changed, repaired or failed over: no tenant cluster or database operation, no restart of a failed tenant API server pod, no database failover, no ArgoCD sync, stale status in the consoles. Running tenant API servers, tenant workloads and databases are expected to keep answering: they are pods on the node groups, not on the control plane. Whether tenant API servers answer through the gap is for the lab to measure |
+| Control plane, three machines | No API gap expected |
+| `system` | The platform's operators restart; a MetalLB address may move to another node (seconds) |
+| `kamaji`, one machine | **All tenant API servers are away** while their pods restart on the new machine, and kamaji-etcd moves with its disk. Tenant workloads keep running |
+| `dbaas` | Every database with one instance on the machine is down while its pod moves and its disk is attached to the new machine; the plan counts them. Volumes are Proxmox disks on the node's store: the new machine is on the same Proxmox node, so the disk can follow |
+| Any unit that is delete-first | Everything on the machine is away for the whole clone and join, and stays away if the new machine fails to join, until a Retry succeeds |
+
+**What the run writes on the site** (rows `roll-vm/<unit>`, kind `site`): per machine one new VM
+cloned on the unit's node from the target image's template, and the old VM deleted with its boot
+disk. Volumes of proxmox-csi are separate disks and are kept. Only VMs that carry the
+installation's tag (`pc-platform-<id>`) are deleted: no other VM on the node is touched.
+
+**Stage 7 on such a run.** The order is made by the values the cluster chart is rendered with
+(chart 0.1.15: a node group's `kubernetesVersions` and `deleteFirstOn`), not by pausing objects on
+the cluster, which ArgoCD would put back. Step 1 renders the control plane at the target and every
+group at the old version and template; each later step moves one MachineDeployment. Per step:
+
+1. The stage records the step (`status.clusters[0].roll.step`) **before** it applies anything. The
+   step is only ever raised, and every apply renders from it, so a Retry never puts a replaced unit
+   back on the old version.
+2. The rollout check reads ArgoCD's comparison of the step's render before anything of it syncs:
+   at step 1 the KubeadmControlPlane and the control plane's machine template may differ, at a later
+   step the templates of that step's MachineDeployment, and old templates to prune always. Anything
+   else that is not Synced fails `unexpected_rollout` (a machine size edited together with the
+   upgrade), with the step not synced.
+3. The Application is applied and the stage waits until ArgoCD has synced exactly that render.
+4. The unit is done when its owner (the KubeadmControlPlane or the MachineDeployment) has seen its
+   last change and counts as many replicas, up-to-date, ready and available as it asks for, every
+   Machine of the unit is at the target version, cloned from the target image's template and
+   Running, and the unit has no Machine more. The
+   stage's items name each machine with its VM, its unit and where it stands (not replaced yet,
+   being cloned, cloned and joining, joined, old machine being removed with Cluster API's text and
+   the pod that blocks a drain).
+5. Then every node must be Ready with its group's label, and every tenant that was healthy before
+   the first step healthy again (`tenants_unhealthy` while not), before the next unit starts. The
+   wait is between two units, not between two machines of one MachineDeployment.
+
+During the control plane's step the platform cluster's API may not answer: that is waited for
+(`workload_api_unreachable` on the waiting stage), not counted as an error. The stage fails with
+`rollout_stalled` when no machine of the unit moved for 30 minutes. `status.clusters[0]
+.kubernetesVersion` and `.templates` name the old version and templates until the last unit is
+done.
+
+**Pause and Resume.** Cancel is honoured between two looks and is called **Pause** on the page
+while machines are replaced; a machine in flight is finished by Cluster API on its own. **Resume**
+(Retry) goes on at the unit the record names. A paused cluster with the control plane at the new
+version and node groups at the old one is a supported state (a kubelet may be up to three minors
+older than the API server). There is no drain timeout: it would delete a machine under a running
+database.
+
+**Known gaps.** A MachineHealthCheck that replaces a machine of a unit not reached yet clones from
+the old template; if Template updates has deleted that template since, the machine fails
+(`machine_failed`). Keep the old node template until the upgrade has finished. A record edited by
+hand on the seed can disagree with the stored step; the stage then waits or fails with a message
+and does not guess.
+
 ### Before you start
 
+- Before an upgrade that replaces machines: a dump or backup of every tenant database, the seed
+  backup, and an announcement of what stops per unit (the plan's table).
 - Take a backup of the seed VM (`vzdump`, [Credentials and the seed backup](#8-credentials-and-the-seed-backup))
   and a dump of the portal database. The seed holds the Cluster API state of every machine of the
   platform cluster. Restoring both after a failed upgrade has not been tried. An upgrade that
@@ -2133,6 +2264,11 @@ The row is a warning, never a failure: a plain apply does not need the backup.
   do not stop it.
 
 ### Starting it
+
+An upgrade that replaces the platform cluster's machines shows the card **Kubernetes upgrade to
+release X** instead, with two actions and a button each
+([The platform cluster's machines](#the-platform-clusters-machines)); by API the first is the same
+`POST …/runs` with `"part":"seed"`, the second one without `part` and with the longer phrase.
 
 Step 4 shows **Upgrade to release X** with the table of changes when the upgrade is allowed, and
 the reasons when it is not. The button asks for the phrase `upgrade <installation name> to
@@ -2170,6 +2306,8 @@ The stages of an apply, rendered from the target BOM:
   prunes them): ArgoCD starts no sync for that, so the stage passes when the comparison is of the
   new version and nothing but such objects is out of sync. That ArgoCD starts no sync then is read
   from its source, not seen on a lab.
+  On a run that replaces machines the stage takes the roll instead, one unit per step, with this
+  check per step ([The platform cluster's machines](#the-platform-clusters-machines)).
 - **Stage 8** is unchanged.
 - **Stage 9** notes which tenants are unhealthy before its first wave (once per upgrade, in
   `status.tenantsDownBefore`; a Retry keeps the note), then applies the waves. After
@@ -2187,6 +2325,8 @@ The stages of an apply, rendered from the target BOM:
 | `status.bom` | The BOM the platform left: "last fully applied" | The target |
 | `status.targetBom` | The target, from the start of the first run | Absent |
 | `status.tenantsDownBefore` | From the first time a run reaches stage 9: the tenants that were not healthy then | Absent |
+| `status.clusters[0].roll` | On an upgrade that replaces machines, from the moment stage 7 begins the roll: `step` (the unit being replaced, counted from 1, the control plane; one more than the number of units when all are done) and `deleteFirst` | Absent |
+| `status.clusters[0].kubernetesVersion`, `.templates` | The old version and templates until the last unit is done | The target's |
 | `status.components[]` | Each component at the version it runs: it moves when its wave (stage 7 for `pc-platform`) has passed | Every component at the target's version |
 | The run's `bom`, `fromBom` | The target, and the BOM the platform left | The same |
 
@@ -2228,7 +2368,10 @@ for a cluster chart that provably changes no template (compare `kubectl -n pc-pl
 proxmoxmachinetemplates,kubeadmconfigtemplates` with `helm template` of the new chart), the API's
 environment variable `PROXCLOUD_PLATFORM_SKIP_ROLLOUT_GATE=true` (`PLATFORM_SKIP_ROLLOUT_GATE` in
 the Compose `.env`) turns it off. With it off a chart that does change a template replaces every
-machine of the platform cluster at once, control plane and all node groups together.
+machine of the platform cluster at once, control plane and all node groups together. On a run that
+replaces machines the switch turns off the check of every step too: the order of the units is
+kept (it is in the rendered values), but a machine size edited together with the upgrade is then
+rolled with its step and not refused.
 
 ### What the upgrade still owes a lab
 
@@ -2247,6 +2390,13 @@ drill build must carry the BOM of the build before it
 | U6 Restore: after U4's failure, restore the seed's `vzdump` and the portal database dump | Whether that returns the platform to the BOM it left |
 | U7 The seed's k3s: a drill build whose BOM differs in `seed.k3s` alone, on a platform with one tenant cluster and one database under a write loop, the tenant API and the database probed once a second | That the run ends succeeded; the gap of the seed's API in seconds; no gap on the tenant API or the database; the node at the target version; the etcd snapshot file on the seed; every Application of the seed Synced and Healthy and the clusterctl inventory unchanged afterwards; no Machine replaced. Also whether the Job's end is recorded once the kubelet is back (it restarts the k3s that runs it), and that the clusterctl image's `nsenter` enters the host as the Job asks |
 | U8 The seed's k3s, failing: a throwaway build with a wrong sha256 for the binary, then the corrected build | `seed_k3s_failed` with k3s untouched (`k3s --version` on the seed, no `k3s.prev`), and Retry with the corrected build passes |
+| U10 The roll, homelab shape (one node, one control plane machine): drill builds whose BOM names the next Kubernetes patch with a node image built for it; a tenant cluster serving a pod behind a LoadBalancer and a database under a write loop; probes once a second on the platform API, the tenant API and the database | That **Seed and node image** imports the template and that the platform part is blocked before it and allowed after; that the roll completes; the measured gap per unit (platform API; tenant API during the control plane's step and during the kamaji step; database during the dbaas step), to replace "not measured" in the plan and in this guide; every volume attached to the new machine; the owner's other VMs untouched (`qm list` before and after) |
+| U11 Pause after the control plane, Resume an hour later | That the mixed-version cluster serves and the run goes on at the next unit |
+| U12 The roll's refusals: a PodDisruptionBudget with no allowed disruption (before the start, and added mid-roll); memory too short for the control plane's one more machine, and for a group's | `drain_blocked` in the plan; `rollout_stalled` with the pod named; `capacity_short` with nothing changed; a delete-first unit with its gap |
+| U13 A surge machine that fails to join, then Retry | `machine_failed` with the old machine still serving, and Retry continues at the same unit |
+| U14 A machine size edited together with the upgrade; a chart-only upgrade | `unexpected_rollout` at the step, nothing of it synced; the chart-only upgrade still replaces nothing |
+| U15 Three control plane machines | No API gap; that the kube-vip hand-over needs no change of the lease values |
+| U16 A minor step, on a lab only, if a drill BOM for it can be built | Whether the roll holds across a minor; the version skew during a pause |
 | U9 The seed backup: start U7 without a backup, then with one | The `409 seed_backup_missing` and the box in step 4; whether the `seed-backup` row sees an archive on the site's own kind of backup store (a directory store, a Proxmox Backup Server) with the portal token |
 
 ## Known issue: no PostgreSQL database on a node image built before 2026-11-16

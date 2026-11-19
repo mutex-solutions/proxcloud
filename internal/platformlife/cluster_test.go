@@ -38,6 +38,8 @@ func meta(name string, labels map[string]any) map[string]any {
 type platform struct {
 	*env
 	seed, wl  *fakeSeed
+	part      string   // the part the next start names
+	first     []string // the units the next start's plan replaces by deleting the machine first
 	registers []map[string]any
 	disabled  int
 	conflict  error
@@ -1496,7 +1498,7 @@ func TestAnAPIServerThatStartsIsTriedAgain(t *testing.T) {
 	p.seed.deny = []denial{{403, rbac}, {403, rbac}}
 	p.once()
 	p.mutate(func(run *Run, _ *Installation, _ *Secrets) {
-		run.Stages[slices.Index(stageIDs(RunApply), stageCluster)].Retries = stageRetries
+		run.Stages[slices.Index(stageIDs(RunApply, ""), stageCluster)].Retries = stageRetries
 	})
 	if end, s := p.once(), p.stage(stageCluster); end != "fail:"+CodeSeedAPIUnreachable || s.State != StageFailed || !strings.Contains(s.Message, "Gave up after 40 retries") ||
 		!strings.Contains(s.Message, "RBAC: ") {

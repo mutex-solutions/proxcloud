@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Managed services: an upgrade can replace the platform cluster's machines for a newer Kubernetes.** A release
+  whose BOM names a newer Kubernetes version (a patch, or one minor), or a rebuilt node image, was refused. It is now
+  two actions in step 4: **Seed and node image** (`part: "seed"` on `POST …/runs`: the node image on every node, the
+  seed's k3s and charts, no tenant touched) and **Replace the machines**, with its own typed phrase. Cluster API
+  replaces every machine, and the run orders it: the control plane first, then one node group and node at a time,
+  with the tenants waited for between units. The plan says first that there is no way back once the new control
+  plane machine has joined, then per unit what stops serving meanwhile and what is cloned and deleted on Proxmox. A
+  node without room for one more machine of a group gets that unit delete-first, and the plan says so; a control
+  plane node without room refuses the upgrade. New refusals, each with its fix: `node_image_missing`,
+  `seed_not_upgraded`, `capacity_short`, `drain_blocked`, `platform_unhealthy`; in the run `rollout_stalled`; `400
+  bad_part`. Cancel and Retry are Pause and Resume while machines are replaced. **This release's BOM changes neither
+  Kubernetes nor k3s, so no upgrade between released BOMs does this yet**; it has run in tests against a fake seed
+  only, never on a lab, and every duration in the plan is marked "not measured". A minor step has no BOM that could
+  carry it while third-party charts are refused
+  ([managed-services.md](docs/managed-services.md#the-platform-clusters-machines)).
+
 - **Template updates: delete a withdrawn template.** A withdrawn template stayed in Proxmox until someone ran
   `qm destroy` on the node. The Imported templates table now has **Delete** on withdrawn rows
   (`DELETE /admin/template-updates/templates/{importId}`, `admin:service:manage`, audited). It destroys the
@@ -90,6 +106,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carried. Its pins are those of `0.9.0`, so `TestUpgradeRollsNoMachine` compares seven previous BOMs with the
   BOM on `main`: three of 0.8.x, the two candidates, `0.9.0` and `0.9.1`. No apply on such a platform was run on
   a lab by this change.
+
+### Fixed
+
+- **Managed services: an old archive of another VM no longer counts as the seed's backup.** Proxmox gives a freed VMID
+  to the next VM and a backup store keeps the old archives, so the `seed-backup` row could be satisfied by a year-old
+  archive of an earlier VM that had the seed's VMID. An archive now counts only when it was made after the seed became
+  ready and, when it has notes, the notes name the seed VM; the row says how many archives it left out.
+- **Managed services: an apply no longer rewrites the seed VM's firewall options when they are as wanted.** Stage 3
+  sent the same options at every run, which changed the VM's firewall file while the plan listed nothing for the
+  site. It now reads them first and writes only a difference.
+- **Managed services: the node wait counts every control plane machine.** With a control plane of three the wait for
+  the nodes (stage 9) expected one control plane node and could not end.
 
 ## [0.9.1] - 2026-11-19
 

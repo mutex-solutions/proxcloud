@@ -132,7 +132,7 @@ func k3sUpgrade(t *testing.T) (p *platform, job string) {
 // atK3s makes the run stand at stage seed-k3s (start marks every stage before the seed's platform done).
 func (p *platform) atK3s() {
 	p.mutate(func(run *Run, _ *Installation, _ *Secrets) {
-		run.Stages[slices.Index(stageIDs(RunApply), stageSeedK3s)] = Stage{ID: stageSeedK3s, State: StagePending}
+		run.Stages[slices.Index(stageIDs(RunApply, ""), stageSeedK3s)] = Stage{ID: stageSeedK3s, State: StagePending}
 	})
 }
 
@@ -212,7 +212,7 @@ func TestSeedK3sUpgradeFails(t *testing.T) {
 	p.once()
 	p.mutate(func(run *Run, _ *Installation, _ *Secrets) {
 		past := time.Now().Add(-time.Minute)
-		run.Stages[slices.Index(stageIDs(RunApply), stageSeedK3s)].Deadline = &past
+		run.Stages[slices.Index(stageIDs(RunApply, ""), stageSeedK3s)].Deadline = &past
 	})
 	if end, s := p.once(), p.stage(stageSeedK3s); end != "fail:seed_k3s_timeout" || !strings.Contains(s.Message, "does not answer") ||
 		!strings.Contains(s.Message, "keep serving") || !strings.Contains(s.Message, "mv /usr/local/bin/k3s.prev /usr/local/bin/k3s && systemctl restart k3s") {
@@ -267,19 +267,19 @@ func TestStartApplyNeedsASeedBackup(t *testing.T) {
 	in := installed(&ref)
 	in.Status.Seed = &SeedStatus{VMID: 120, Node: "pve1"}
 	var missing *SeedBackupMissing
-	if err := startApply(&Run{}, in, cur.SHA256, "upgrade lab to 0.9.0", SeedBackup{}); !errors.As(err, &missing) || in.Status.TargetBOM != nil ||
+	if err := startApply(&Run{}, in, cur.SHA256, "upgrade lab to 0.9.0", "", SeedBackup{}, RollRead{}); !errors.As(err, &missing) || in.Status.TargetBOM != nil ||
 		err.Error() != "seed_backup_missing: no backup of seed VM 120 younger than 24 hours is visible to the portal. Take one (vzdump 120), or confirm that you took one the portal cannot see." {
 		t.Fatalf("without a backup: %v", err)
 	}
 	seen, taken, retry := &Run{}, &Run{}, &Run{}
-	if err := startApply(seen, in, cur.SHA256, "upgrade lab to 0.9.0", SeedBackup{Seen: true}); err != nil || seen.SeedBackupTaken {
+	if err := startApply(seen, in, cur.SHA256, "upgrade lab to 0.9.0", "", SeedBackup{Seen: true}, RollRead{}); err != nil || seen.SeedBackupTaken {
 		t.Fatalf("a backup the portal saw: %+v %v", seen, err)
 	}
-	if err := startApply(retry, in, "", "", SeedBackup{}); err != nil || retry.SeedBackupTaken {
+	if err := startApply(retry, in, "", "", "", SeedBackup{}, RollRead{}); err != nil || retry.SeedBackupTaken {
 		t.Fatalf("Retry: %+v %v", retry, err)
 	}
 	in.Status.TargetBOM = nil
-	if err := startApply(taken, in, cur.SHA256, "upgrade lab to 0.9.0", SeedBackup{Taken: true}); err != nil || !taken.SeedBackupTaken {
+	if err := startApply(taken, in, cur.SHA256, "upgrade lab to 0.9.0", "", SeedBackup{Taken: true}, RollRead{}); err != nil || !taken.SeedBackupTaken {
 		t.Fatalf("a backup the operator took: %+v %v", taken, err)
 	}
 	// The plan says the same before the run, and nothing once the upgrade has started.

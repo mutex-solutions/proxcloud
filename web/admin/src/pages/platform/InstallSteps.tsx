@@ -19,7 +19,7 @@ import { cn } from "@/lib/utils"
 import { CheckRows, CopyBlock, ErrorNote, LINK, StepCard, errMsg, fetchText, useClusterInfo } from "@/pages/setup/common"
 import {
   CAPI_TOKEN, CSI_TOKEN, ENROLL_PREFIX, GROUPS, PLATFORM_KEY, GROUP_USE, PRESETS, TOKEN_SECRET, applyPreset, attachDefault, bomBuildsThree, checkAction, enrollProblem, emptyForm, errCode, errProblems, formToSpec, gib, isConflict, plannedMemory, specToForm, validate,
-  type BOM, type Check, type Form, type Installation, type MachineForm, type Plan, type Preset, type Problem, type SiteNode, type TenantProbe, type Upgrade,
+  type BOM, type Check, type Form, type Installation, type MachineForm, type Plan, type Preset, type Problem, type SiteNode, type TenantProbe, type Upgrade, type UpgradePart,
 } from "./model"
 import { AttachChoice } from "./Tenants"
 
@@ -617,23 +617,91 @@ const short = (digest?: string) => (digest ? digest.replace(/^sha256:/, "").slic
 // The move of an installed platform to this ProxCloud's release, as the plan gives it: allowed with every change and
 // what it does, refused with each reason, or started and not finished. Starting it asks for the typed confirmation.
 // With `replaces` it is the move offered in place of an unfinished upgrade toward that release.
+// Starts an apply of an upgrade: targetBom "" continues the one in progress; part "seed" is the first of the two
+// actions of an upgrade that replaces machines.
+export type UpgradeStart = (targetBom: string, confirm: string, seedBackupTaken: boolean, part?: "" | "seed") => void
+
 function UpgradePlan({ installation, upgrade, replaces, canManage, dirty, pending, onUpgrade }: {
-  installation: Installation; upgrade: Upgrade; replaces?: string; canManage: boolean; dirty: boolean; pending: boolean; onUpgrade: (targetBom: string, confirm: string, seedBackupTaken: boolean) => void
+  installation: Installation; upgrade: Upgrade; replaces?: string; canManage: boolean; dirty: boolean; pending: boolean; onUpgrade: UpgradeStart
 }) {
   const id = replaces ? "pf-upgrade-instead" : "pf-upgrade"
-  const [asking, setAsking] = useState(false)
+  // What is being confirmed: the part ("" = the whole apply, or the platform part) and its phrase. null: nothing.
+  const [asking, setAsking] = useState<{ part: "" | "seed"; confirm: string } | null>(null)
   const [typed, setTyped] = useState("")
   const { from, to } = upgrade
+  const parts = upgrade.parts ?? []
+  const twoPart = parts.length > 0 // the move replaces the platform cluster's machines: two actions, not one button
   const offered = upgrade.allowed && !upgrade.inProgress
   // The one reason the operator can answer: no backup of the seed VM that ProxCloud can see.
-  const needsBackup = offered && upgrade.blocking.some((b) => b.startsWith("seed_backup_missing"))
+  const SEED_BACKUP = "seed_backup_missing"
+  const needsBackup = !upgrade.inProgress && [...upgrade.blocking, ...parts.flatMap((p) => p.blocking)].some((b) => b.startsWith(SEED_BACKUP)) && (offered || twoPart)
   const [backupTaken, setBackupTaken] = useState(false)
+  // An upgrade in progress is continued without a target: the record names it.
+  const start = (part: "" | "seed", confirm: string) => onUpgrade(upgrade.inProgress ? "" : to.sha256, confirm, needsBackup && backupTaken, part)
+  const noWayBack = upgrade.changes.find((c) => c.name === "roll")?.impact
+  const units = upgrade.changes.filter((c) => c.name.startsWith("roll/"))
+  const deleteFirst = (unit: string) => !!upgrade.changes.find((c) => c.name === "roll-vm/" + unit.slice(5))?.to?.includes("deleted first")
+  const changes = twoPart ? upgrade.changes.filter((c) => c.name !== "roll" && !c.name.startsWith("roll/")) : upgrade.changes
+  const partRow = (p: UpgradePart, n: number) => {
+    const seed = p.id === "seed"
+    const reasons = p.blocking.filter((b) => !b.startsWith(SEED_BACKUP))
+    const label = seed ? "Seed and node image" : "Platform cluster"
+    return (
+      <li key={p.id} className="grid gap-1.5 rounded-md border p-2" data-part={p.id}>
+        <p>
+          <span className="font-semibold">{n}. {label}{p.done ? " (done)" : ""}.</span>{" "}
+          {seed
+            ? "Imports the release's node image on every node the platform cluster uses, replaces k3s on the seed when the release names another, and moves the seed's own components. It replaces no machine and touches no tenant cluster or database."
+            : "Replaces every machine of the platform cluster with one of the new Kubernetes version: the control plane first, then one node group and node at a time, as the table below says. Everything else of the release moves in the same run."}
+        </p>
+        {reasons.length ? (
+          <ul aria-label={`What ${label} waits for`} className="list-disc pl-5">{reasons.map((b) => <li key={b}>{b}</li>)}</ul>
+        ) : null}
+        {p.done ? null : (
+          <div>
+            <Button variant="outline" disabled={!canManage || pending || dirty || !p.allowed || (needsBackup && !backupTaken)}
+              onClick={() => { if (p.confirm) { setTyped(""); setAsking({ part: seed ? "seed" : "", confirm: p.confirm }) } else start(seed ? "seed" : "", "") }}>
+              {seed ? "Seed and node image" : p.confirm || !upgrade.inProgress ? "Replace the machines" : "Resume the replacement"}
+            </Button>
+          </div>
+        )}
+      </li>
+    )
+  }
   return (
     <section aria-labelledby={id} className="grid gap-2 rounded-md border p-3 text-sm">
       <h3 id={id} className="font-semibold">
-        {upgrade.inProgress ? `The upgrade to release ${to.release} has not finished` : offered ? `Upgrade to release ${to.release}${replaces ? " instead" : ""}` : replaces ? `Release ${to.release} cannot take the place of the unfinished upgrade` : `The platform stays on release ${from.release}`}
+        {twoPart ? `Kubernetes upgrade to release ${to.release}` : upgrade.inProgress ? `The upgrade to release ${to.release} has not finished` : offered ? `Upgrade to release ${to.release}${replaces ? " instead" : ""}` : replaces ? `Release ${to.release} cannot take the place of the unfinished upgrade` : `The platform stays on release ${from.release}`}
       </h3>
-      {upgrade.inProgress ? (
+      {twoPart ? (
+        <>
+          {noWayBack ? <p role="note" className="font-semibold">{noWayBack}</p> : null}
+          <p>
+            Release <span className="font-mono">{to.release}</span> names another Kubernetes version or node image than the platform cluster runs, so its machines are replaced.
+            It takes two actions, in this order.{upgrade.inProgress ? ` The upgrade has started: the record names release ${from.release} until the second action has succeeded, and nothing goes back to it.` : ` Apply this release does not upgrade: it runs with the installed release ${from.release}.`}
+          </p>
+          <ol aria-label="The two actions of the Kubernetes upgrade" className="grid gap-2">{parts.map((p, i) => partRow(p, i + 1))}</ol>
+          {units.length ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <caption className="sr-only">The machines the upgrade replaces, in order, and what stops meanwhile</caption>
+                <thead><tr className="border-b"><th scope="col" className="py-1 pr-3">Unit</th><th scope="col" className="pr-3">From</th><th scope="col" className="pr-3">To</th><th scope="col" className="pr-3">How</th><th scope="col">What stops meanwhile</th></tr></thead>
+                <tbody>
+                  {units.map((u, i) => (
+                    <tr key={u.name} className="border-b align-top last:border-0">
+                      <td className="py-1 pr-3 font-mono">{i + 1}. {u.name.slice(5)}</td>
+                      <td className="pr-3 font-mono break-all">{u.from}</td>
+                      <td className="pr-3 font-mono break-all">{u.to}</td>
+                      <td className="pr-3">{deleteFirst(u.name) ? "old machine deleted first" : "one more machine first"}</td>
+                      <td>{u.impact}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </>
+      ) : upgrade.inProgress ? (
         <p>
           A run toward release <span className="font-mono">{to.release}</span> started and has not succeeded yet. Apply this release continues to it. Nothing goes back
           to release <span className="font-mono">{from.release}</span>, which the record names until a run has succeeded.
@@ -660,13 +728,13 @@ function UpgradePlan({ installation, upgrade, replaces, canManage, dirty, pendin
           <ul aria-label="Why the upgrade is refused" className="list-disc pl-5">{upgrade.blocking.map((b) => <li key={b}>{b}</li>)}</ul>
         </>
       )}
-      {upgrade.changes.length ? (
+      {changes.length ? (
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs">
             <caption className="sr-only">What differs between release {from.release} and release {to.release}</caption>
             <thead><tr className="border-b"><th scope="col" className="py-1 pr-3">Entry</th><th scope="col" className="pr-3">From</th><th scope="col" className="pr-3">To</th><th scope="col" className="pr-3">Kind</th><th scope="col">What the run does</th></tr></thead>
             <tbody>
-              {upgrade.changes.map((ch) => (
+              {changes.map((ch) => (
                 <tr key={(ch.cluster ?? "") + ch.name} className="border-b align-top last:border-0">
                   <td className="py-1 pr-3 font-mono">{ch.cluster ? `${ch.cluster === "seed" ? "seed" : "platform cluster"}: ` : ""}{ch.name}</td>
                   <td className="pr-3 font-mono break-all">{ch.from || "–"}</td>
@@ -679,7 +747,7 @@ function UpgradePlan({ installation, upgrade, replaces, canManage, dirty, pendin
           </table>
         </div>
       ) : null}
-      {offered && upgrade.seedBackup ? (
+      {(offered || twoPart) && upgrade.seedBackup ? (
         <div className="grid gap-2">
           <p><span className="font-semibold">Seed backup{upgrade.seedBackup.status === "ok" ? "" : " (needed before this upgrade)"}:</span> {upgrade.seedBackup.message}</p>
           {needsBackup ? (
@@ -690,29 +758,31 @@ function UpgradePlan({ installation, upgrade, replaces, canManage, dirty, pendin
           ) : null}
         </div>
       ) : null}
-      {offered ? (
+      {offered && !twoPart ? (
         <div className="flex flex-wrap items-center gap-3">
-          <Button variant="outline" disabled={!canManage || pending || dirty || (needsBackup && !backupTaken)} onClick={() => { setTyped(""); setAsking(true) }}>Upgrade to release {to.release}</Button>
+          <Button variant="outline" disabled={!canManage || pending || dirty || (needsBackup && !backupTaken)} onClick={() => { setTyped(""); setAsking({ part: "", confirm: upgrade.confirm ?? "" }) }}>Upgrade to release {to.release}</Button>
           <Link to="/docs/platform-admin/managed-services" className={LINK}>What an upgrade does</Link>
         </div>
       ) : null}
-      <Dialog open={asking} onOpenChange={(o) => !o && setAsking(false)}>
+      {twoPart ? <Link to="/docs/platform-admin/managed-services" className={LINK}>What a Kubernetes upgrade does, and what it cannot undo</Link> : null}
+      <Dialog open={!!asking} onOpenChange={(o) => !o && setAsking(null)}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Upgrade “{installation.name}” to release {to.release}</DialogTitle>
             <DialogDescription>
+              {twoPart && asking?.part === "" && noWayBack ? noWayBack + " " : ""}
               The run applies the changes of the plan in the order of its stages and waits after each step until the platform's components and the tenants that
               were healthy before are healthy again. If it fails, Retry continues to release {to.release}: the platform does not go back to release {from.release}.
               Take a backup of the seed VM and a dump of the portal database first; the guide's section “Credentials and the seed backup” has the commands.
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-1.5">
-            <Label htmlFor={id + "-confirm"}>Type <span className="font-mono">{upgrade.confirm}</span> to confirm</Label>
+            <Label htmlFor={id + "-confirm"}>Type <span className="font-mono">{asking?.confirm}</span> to confirm</Label>
             <Input id={id + "-confirm"} className="font-mono" autoComplete="off" value={typed} onChange={(e) => setTyped(e.target.value)} />
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setAsking(false)}>Not now</Button>
-            <Button disabled={typed !== upgrade.confirm || pending} onClick={() => { setAsking(false); onUpgrade(to.sha256, typed, needsBackup && backupTaken) }}>{pending ? "Starting…" : "Upgrade"}</Button>
+            <Button variant="outline" onClick={() => setAsking(null)}>Not now</Button>
+            <Button disabled={!asking || typed !== asking.confirm || pending} onClick={() => { const a = asking!; setAsking(null); start(a.part, typed) }}>{pending ? "Starting…" : "Upgrade"}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -721,7 +791,7 @@ function UpgradePlan({ installation, upgrade, replaces, canManage, dirty, pendin
 }
 
 export function ReviewStep({ installation, canManage, dirty, onInstall, onUpgrade, installing, error }: {
-  installation: Installation; canManage: boolean; dirty: boolean; onInstall: () => void; onUpgrade: (targetBom: string, confirm: string, seedBackupTaken: boolean) => void; installing: boolean; error: unknown
+  installation: Installation; canManage: boolean; dirty: boolean; onInstall: () => void; onUpgrade: UpgradeStart; installing: boolean; error: unknown
 }) {
   // Keyed on the last run too: a run changes what is installed, and the API leaves `rev` alone then.
   const plan = useQuery({ queryKey: [...PLATFORM_KEY, "plan", installation.id, installation.rev, installation.lastRunId], queryFn: () => apiFetch<Plan>(`${base(installation.id)}/plan`), retry: false })

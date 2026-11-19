@@ -205,7 +205,8 @@ type fakeVM struct {
 	pending map[string]any // config values Proxmox took but has not applied (fakePVE.pendCD)
 	running bool
 	pooled  bool
-	system  bool // a member of proxcloud-system
+	system  bool           // a member of proxcloud-system
+	fw      map[string]any // the VM firewall's options as last written
 }
 
 // fakePVE is one node (pve1) with the seed pool, an ISO store "local" and the template 9100. It records every
@@ -245,6 +246,7 @@ type fakePVE struct {
 	subnets map[string][]pve.SDNSubnet
 	probe   *probeEnv // the tenant path test's routes (tenantprobe_test.go)
 	keepVM  bool      // a VM delete is refused
+	maxMem  int64     // every node's memory in bytes (0: the nodes report none)
 }
 
 // sdn answers the /cluster/sdn routes and the node's network lists; false when path is not one.
@@ -483,8 +485,10 @@ func (f *fakePVE) serve(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"errors":{"type":"cluster not ready"}}`)
 	case path == "/cluster/resources":
 		data(f.templates)
+	case strings.HasPrefix(path, "/nodes/pve") && strings.HasSuffix(path, "/storage"):
+		data([]map[string]any{{"storage": "local-lvm", "content": "images", "avail": int64(500) << 30}})
 	case path == "/nodes":
-		data([]map[string]any{{"node": "pve1", "status": "online"}, {"node": "pve2", "status": "online"}, {"node": "pve3", "status": "online"}})
+		data([]map[string]any{{"node": "pve1", "status": "online", "maxmem": f.maxMem}, {"node": "pve2", "status": "online", "maxmem": f.maxMem}, {"node": "pve3", "status": "online", "maxmem": f.maxMem}})
 	case path == "/nodes/pve1/tasks":
 		if f.cloneBusy {
 			data([]map[string]any{{"upid": "UPID:pve1:1:1:1:qmclone:9100:x:", "type": "qmclone"}})
@@ -577,7 +581,10 @@ func (f *fakePVE) serve(w http.ResponseWriter, r *http.Request) {
 			delete(f.vms, id)
 			data(f.upid("qmdestroy", id))
 		case "PUT firewall/options":
+			vm.fw = map[string]any{"enable": 1, "policy_in": r.PostForm.Get("policy_in")}
 			data(nil)
+		case "GET firewall/options":
+			data(vm.fw)
 		case "GET firewall/rules":
 			for i := range f.rules {
 				f.rules[i].Pos, f.rules[i].Digest = i, "d"
@@ -828,7 +835,7 @@ func newEnv(t *testing.T, kind string) *env {
 	in := validInstallation(t)
 	in.ID, in.Status.Phase = "pi-0a1b2c3d", PhaseApplying
 	run := &Run{ID: "pr-1", InstallationID: in.ID, Kind: kind, State: RunQueued, BOM: BOMRef{Release: cur.Release, SHA256: cur.SHA256}}
-	for _, id := range stageIDs(kind) {
+	for _, id := range stageIDs(kind, "") {
 		run.Stages = append(run.Stages, Stage{ID: id, State: StagePending})
 	}
 	sec := &Secrets{ID: in.ID, CAPI: &TokenCredential{TokenID: pve.CAPITokenID, Secret: runCAPI}, CSI: &TokenCredential{TokenID: pve.CSITokenID, Secret: runCSI}}

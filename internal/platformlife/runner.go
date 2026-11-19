@@ -91,7 +91,9 @@ type Runner struct {
 	Log     *slog.Logger
 	// SkipRolloutGate turns off the check an upgrade run makes before it lets the cluster chart of the target BOM sync
 	// (rolloutGate; PROXCLOUD_PLATFORM_SKIP_ROLLOUT_GATE). The check reads ArgoCD's comparison and has not run on a
-	// lab: the switch is for a site where ArgoCD reports it otherwise than the check expects.
+	// lab: the switch is for a site where ArgoCD reports it otherwise than the check expects. On a run that replaces
+	// machines it turns off the check of every step as well: the order of the units stays (it is rendered), and a
+	// template changed outside the step is then rolled with it.
 	SkipRolloutGate bool
 	Poll            time.Duration
 	Lease           time.Duration // one minute when zero, renewed every third
@@ -245,6 +247,7 @@ type acq struct {
 	hidden       []string // secrets this acquisition read from a cluster: no message may carry them
 	bom          *BOM
 	from         *BOM // on an upgrade run, the BOM the platform is moved from
+	rolls        bool // the move from from to bom replaces the platform cluster's machines (roll.go)
 	portal, capi *pve.Client
 	si           int // the stage being run
 }
@@ -342,6 +345,7 @@ func (x *acq) execute(ctx context.Context) end {
 					run.FromBOM.Release+" the platform is moved from: Retry starts a new run.")
 			}
 			x.from = f.BOM
+			x.rolls = hasMachines(Classify(x.from, x.bom))
 		}
 	}
 	es, err := x.r.Provider(ctx, in.ServiceID)

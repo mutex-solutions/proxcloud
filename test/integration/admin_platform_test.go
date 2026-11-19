@@ -771,7 +771,7 @@ func TestPlatformProbeEndsWithThePlatform(t *testing.T) {
 	// run starts a run of kind and ends it; wipe is what the Remove's last stage does to the status.
 	run := func(kind string, wipe bool) {
 		t.Helper()
-		r, err := store.StartRun(ctx, jobs, in.ID, kind, "admin-sub", "", "", platformlife.SeedBackup{})
+		r, err := store.StartRun(ctx, jobs, in.ID, kind, "admin-sub", "", "", "", platformlife.SeedBackup{}, platformlife.RollRead{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -818,7 +818,7 @@ func TestPlatformRunMutate(t *testing.T) {
 	if err := store.Create(ctx, in); err != nil {
 		t.Fatal(err)
 	}
-	run, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "", "", platformlife.SeedBackup{})
+	run, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "", "", "", platformlife.SeedBackup{}, platformlife.RollRead{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -874,13 +874,13 @@ func TestPlatformRunMutate(t *testing.T) {
 		t.Fatalf("stored %+v, raw %v", got.Status.Seed, raw)
 	}
 	// The typed confirmation belongs to a remove and must name the installation.
-	if _, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "remove lab", "", platformlife.SeedBackup{}); !errors.Is(err, platformlife.ErrBadConfirm) {
+	if _, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "remove lab", "", "", platformlife.SeedBackup{}, platformlife.RollRead{}); !errors.Is(err, platformlife.ErrBadConfirm) {
 		t.Fatalf("confirm on an apply: %v", err)
 	}
-	if _, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunRemove, "admin-sub", "remove other", "", platformlife.SeedBackup{}); !errors.Is(err, platformlife.ErrBadConfirm) {
+	if _, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunRemove, "admin-sub", "remove other", "", "", platformlife.SeedBackup{}, platformlife.RollRead{}); !errors.Is(err, platformlife.ErrBadConfirm) {
 		t.Fatalf("a wrong confirmation: %v", err)
 	}
-	if r, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunRemove, "admin-sub", "remove lab", "", platformlife.SeedBackup{}); err != nil || !r.Confirmed {
+	if r, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunRemove, "admin-sub", "remove lab", "", "", platformlife.SeedBackup{}, platformlife.RollRead{}); err != nil || !r.Confirmed {
 		t.Fatalf("confirmed remove: %+v %v", r, err)
 	}
 }
@@ -1071,7 +1071,7 @@ func TestPlatformClusterKubeconfig(t *testing.T) {
 	if err := store.Create(ctx, in); err != nil {
 		t.Fatal(err)
 	}
-	run, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "", "", platformlife.SeedBackup{})
+	run, err := store.StartRun(ctx, jobs, in.ID, platformlife.RunApply, "admin-sub", "", "", "", platformlife.SeedBackup{}, platformlife.RollRead{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1305,5 +1305,129 @@ func TestPlatformUpgradeNeedsASeedBackup(t *testing.T) {
 	data = call(http.MethodPost, two+"/runs", apply(""), http.StatusAccepted)["data"].(map[string]any)
 	if run, err := store.Run(ctx, data["runId"].(string)); err != nil || run.SeedBackupTaken || run.FromBOM == nil {
 		t.Fatalf("the run of an apply with a backup the portal saw: %+v %v", run, err)
+	}
+}
+
+// An upgrade that replaces the platform cluster's machines has two parts. The plan lists them with their phrases and
+// blocks the platform part with the pre-checks the site fails; POST …/runs refuses an unknown part (400 bad_part), the
+// platform part with the first failed pre-check's code (409), a wrong phrase (400), and starts the seed part, whose
+// run stops after the seed's own charts.
+func TestPlatformUpgradeThatReplacesMachines(t *testing.T) {
+	ctx := context.Background()
+	db := freshPG(t)
+	enc := textcrypt.New("test-key")
+	jobs := durablejobs.New(db)
+	if err := jobs.Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	store := platformlife.NewStore(db, enc)
+	if err := store.Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	fakePVE := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"data":[]}`) }))
+	t.Cleanup(fakePVE.Close)
+	mustInsert(t, db, "externalService", pgdoc.M{"_id": "svc-pve", "name": "svc-pve", "type": "CLOUD", "status": "PUBLIC",
+		"config": pgdoc.M{"provider": "proxmox", "region": "lab", "apiUrl": fakePVE.URL, "tokenId": "proxcloud@pve!platform"},
+		"secret": pgdoc.M{"tokenSecret": enc.Encrypt(portalToken)}})
+	mustInsert(t, db, "adminPermission", pgdoc.M{"_id": "admin-sub", "role": "ADMIN"})
+	h := admin.NewHandler(admin.NewRepo(db), nil, nil, nil, nil, nil, nil, nil, audit.NewService(audit.NewRepo(db), slog.Default()),
+		externalservice.NewService(externalservice.NewRepo(db), enc), "", "", "")
+	h.SetPlatform(store)
+	h.SetDurableJobs(jobs, nil, func(*durablejobs.Job) error { return nil })
+	h.SetPlatformRuns(jobs)
+	h.SetProxmox(func(es *externalservice.ExternalService) (*pve.Service, error) {
+		c, err := pve.New(es.PVEConfig())
+		return &pve.Service{C: c, ServiceID: es.ID}, err
+	})
+	router := chi.NewRouter()
+	h.Routes(router)
+	call := func(method, path, body string, want int) map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req = req.WithContext(httpx.WithRC(req.Context(), &httpx.RequestContext{Sub: "admin-sub"}))
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != want {
+			t.Fatalf("%s %s: %d %s, want %d", method, path, w.Code, w.Body.String(), want)
+		}
+		var out map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		return out
+	}
+	code := func(a map[string]any) string {
+		errs, _ := a["errors"].(map[string]any)
+		d, _ := errs["details"].(map[string]any)
+		return fmt.Sprint(d["code"])
+	}
+
+	// This build as a release whose BOM is the newest previous one with the next Kubernetes patch, its node image and a
+	// cluster chart that can order a rollout: no BOM on main names another Kubernetes yet.
+	cur, err := platformlife.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev, err := platformlife.Previous()
+	if err != nil || len(prev) == 0 {
+		t.Fatalf("no previous BOM: %v", err)
+	}
+	old := prev[0]
+	saved := *cur.BOM
+	defer func() { *cur.BOM = saved }()
+	*cur.BOM = *old.BOM
+	cur.Release, cur.Components = "0.99.0", slices.Clone(old.Components)
+	cur.Kubernetes.Version = "1.35.11"
+	cur.Kubernetes.NodeImage.Tag, cur.Kubernetes.NodeImage.Digest = "ubuntu-2604-k8s-1.35.11-20270101000000-000000000000", "sha256:"+strings.Repeat("e", 64)
+	for i := range cur.Components {
+		if c := &cur.Components[i]; c.Chart.Name == "proxmox-kamaji-cluster" {
+			c.UpgradeFrom = []string{c.Chart.Version}
+			c.Chart.Version, c.Chart.Digest = "0.1.15", "sha256:"+strings.Repeat("d", 64)
+		}
+	}
+	in := &platformlife.Installation{Name: "lab", ServiceID: "svc-pve"}
+	if err := store.Create(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	machine := pgdoc.M{"node": "pve1", "cores": 2, "memoryMiB": 4096, "diskGiB": 30}
+	group := func(name string) pgdoc.M {
+		return pgdoc.M{"name": name, "nodes": []string{"pve1"}, "count": 1, "cores": 2, "memoryMiB": 4096, "diskGiB": 30}
+	}
+	if _, err := db.C(platformlife.InstallationCollection).SetByID(ctx, in.ID, pgdoc.M{
+		"spec": pgdoc.M{"nodeImage": pgdoc.M{"mode": "bom"}, "storage": pgdoc.M{"boot": "local-lvm"},
+			"clusters": []pgdoc.M{{"controlPlane": machine, "nodeGroups": []pgdoc.M{group("system"), group("kamaji"), group("dbaas")}}}},
+		"status": pgdoc.M{"phase": "ready", "bom": pgdoc.M{"release": old.Release, "sha256": old.SHA256}, "seed": pgdoc.M{"vmid": 120, "node": "pve1"},
+			"clusters": []pgdoc.M{{"name": "pc-platform", "kubernetesVersion": old.Kubernetes.Version, "templates": pgdoc.M{"pve1": 9101}}}}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	path := "/admin/platform/installations/" + in.ID
+	apply := func(confirm, part string) string {
+		return fmt.Sprintf(`{"kind":"apply","targetBom":%q,"confirm":%q,"part":%q}`, cur.SHA256, confirm, part)
+	}
+
+	u, _ := call(http.MethodGet, path+"/plan", "", http.StatusOK)["data"].(map[string]any)["upgrade"].(map[string]any)
+	parts, _ := u["parts"].([]any)
+	if len(parts) != 2 {
+		t.Fatalf("the plan has no parts: %v", u)
+	}
+	seed, platform := parts[0].(map[string]any), parts[1].(map[string]any)
+	blocking := fmt.Sprint(platform["blocking"])
+	if seed["allowed"] != true || seed["confirm"] != "upgrade lab to 0.99.0" || platform["allowed"] != false || u["allowed"] != false ||
+		!strings.Contains(blocking, "node_image_missing: ") || !strings.Contains(blocking, "drain_blocked: ") || !strings.Contains(blocking, "capacity_short: ") ||
+		u["changes"].([]any)[0].(map[string]any)["name"] != "roll" {
+		t.Fatalf("the plan: seed %v, platform %v", seed, platform)
+	}
+	if a := call(http.MethodPost, path+"/runs", apply("upgrade lab to 0.99.0", "platform"), http.StatusBadRequest); code(a) != platformlife.CodeBadPart {
+		t.Fatalf("an unknown part: %v", a)
+	}
+	// The platform part: the plan's read again, refused with the first pre-check's code before the phrase is looked at.
+	if a := call(http.MethodPost, path+"/runs", apply("upgrade lab to 0.99.0 and replace its machines", ""), http.StatusConflict); code(a) != platformlife.CodeNodeImageMissing {
+		t.Fatalf("the platform part on a site without the image: %v", a)
+	}
+	if a := call(http.MethodPost, path+"/runs", apply("upgrade lab to 0.99.0 and replace its machines", "seed"), http.StatusBadRequest); code(a) != "invalid_confirmation" {
+		t.Fatalf("the seed part with the platform part's phrase: %v", a)
+	}
+	data := call(http.MethodPost, path+"/runs", apply("upgrade lab to 0.99.0", "seed"), http.StatusAccepted)["data"].(map[string]any)
+	run, err := store.Run(ctx, data["runId"].(string))
+	if err != nil || run.Part != platformlife.PartSeed || len(run.Stages) != 7 || run.Stages[6].ID != "seed-platform" {
+		t.Fatalf("the seed part's run: %+v %v", run, err)
 	}
 }

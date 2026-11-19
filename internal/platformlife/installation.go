@@ -197,6 +197,20 @@ type ClusterStatus struct {
 	ControlPlaneReplicas int            `json:"controlPlaneReplicas,omitempty"`
 	Templates            map[string]int `json:"templates,omitempty"`
 	ArgoCDTokenExpiresAt *time.Time     `json:"argocdTokenExpiresAt,omitempty"`
+	// Roll is set while an upgrade replaces the cluster's machines: from the moment stage 7 begins the roll until the
+	// run that succeeds (stage 11 clears it with status.targetBom). While it is set KubernetesVersion and Templates
+	// still name what the unreached units run, until the last unit is done.
+	Roll *RollStatus `json:"roll,omitempty"`
+}
+
+// RollStatus is how far the roll of a cluster's machines has come. Step is the unit being replaced, counted from 1 in
+// the order of rollUnits (1 is the control plane); one more than the number of units when all are done. It is written
+// before the step's Application is applied and only ever raised: an apply renders from it and never from a read of the
+// cluster, so a misread cannot put a replaced unit back on the old version. DeleteFirst are the units ("group/node")
+// replaced by deleting the machine first, as the plan the operator confirmed said.
+type RollStatus struct {
+	Step        int      `json:"step"`
+	DeleteFirst []string `json:"deleteFirst,omitempty"`
 }
 
 // ComponentStatus is one component as last applied.

@@ -47,7 +47,7 @@ func (x *acq) validate(ctx context.Context) error {
 	}
 	switch {
 	case len(bad) == 0:
-		return nil
+		return x.rollChecks(ctx)
 	case len(bad) == 1 && bad[0].ID == "isolation":
 		return permanent(CodeIsolationNotEnforced, "%s", clip(bad[0].Message))
 	}
@@ -561,8 +561,12 @@ func (x *acq) firewall(ctx context.Context, node string, vmid int) error {
 	if err := x.check(ctx); err != nil {
 		return err
 	}
-	if err := x.capi.SetVMFirewallOptions(ctx, node, vmid, map[string]string{"enable": "1", "policy_in": "DROP"}); err != nil {
-		return classify(CodeSeedConfigRefused, err)
+	// Written only when it differs: a PUT of the same options rewrites the VM's firewall file, which a run whose plan
+	// lists nothing for the site must not do. An options read that fails is no reason to skip the write.
+	if opts, err := x.capi.GetVMFirewallOptions(ctx, node, vmid); err != nil || fmt.Sprint(opts["enable"]) != "1" || fmt.Sprint(opts["policy_in"]) != "DROP" {
+		if err := x.capi.SetVMFirewallOptions(ctx, node, vmid, map[string]string{"enable": "1", "policy_in": "DROP"}); err != nil {
+			return classify(CodeSeedConfigRefused, err)
+		}
 	}
 	ports := []string{"6443"}
 	if len(x.in.Spec.Seed.SSHKeys) > 0 {

@@ -4,6 +4,36 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-20: an upgrade run replaces the platform cluster's machines, one unit at a time
+
+**What changed:** component "Platform runs": new file `internal/platformlife/roll.go`. Stage `cluster` of an upgrade
+run whose BOM pair has a `machines` entry takes `(*acq).roll` instead of the single apply: per step it records the
+step on the installation (`status.clusters[0].roll`, only ever raised), runs `rolloutGate` with the step (only the
+step's own unit may be out of sync), applies the Application `pc-platform` rendered at that step, waits for ArgoCD's
+sync of that source, then for the unit's owner and Machines (read on the seed), the nodes and the tenants (read on
+the platform cluster). The order is in the rendered values (`RenderCluster.Roll`, chart keys `kubernetesVersions` and
+`deleteFirstOn` of `proxmox-kamaji-cluster` 0.1.15), never a patch of a live object. A run may carry `part: "seed"`
+(`stageIDs(kind, part)`): the stages up to `seed-platform` only. Stage `validate` ends with the roll's pre-checks
+(`ReadRoll`). Stage `seed-vm` writes the seed VM's firewall options only when they differ. Component "Platform
+installations": `Classify` has class `machines` for `kubernetes.version` (never back, at most one minor up),
+`kubernetes.nodeImage` and, with a new node image, `images.kubeVip`; an upgrade plan has `parts` (seed, platform)
+with a phrase each and the rows `roll`, `roll/<unit>`, `roll-vm/<unit>`; `capacity.go` shares one memory read between
+the Check row and the roll (`readMemory`, `rollRoom`: one spare at a time, surge or delete-first per unit). The
+`seed-backup` row counts an archive only when it is of this seed VM. Relation added: the admin handler reads the
+platform cluster's API (PodDisruptionBudgets, CloudNativePG clusters) and the seed's Machines and Applications for
+`GET …/plan` and `POST …/runs` of such an upgrade (`rollRead`), as the runner already did in its stages.
+
+**Why:** a BOM that names another Kubernetes version or node image was refused, so an installed platform could never
+follow one. The step is stored and not read from the cluster because a misread must never render a replaced unit
+back to the old version. Two parts because the image must be on every node, proven by a read of Proxmox, before the
+operator confirms the replacement.
+
+**Diagrams:** `c3-components.md`: rows "Platform installations" and "Platform runs". No box or arrow changed in
+`c1-context.md` or `c2-containers.md`.
+
+**Not verified:** on a lab. No BOM on main names another Kubernetes version, so no upgrade between released BOMs
+takes this path.
+
 ## 2026-11-20: the platform BOM pins cluster chart 0.1.15 and database chart 0.5.2
 
 **What changed:** no component, container or relation. `deploy/platform/platform-bom.yaml` names
