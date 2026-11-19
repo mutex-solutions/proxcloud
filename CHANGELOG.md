@@ -68,7 +68,8 @@ with cluster chart 0.1.13 and platform chart 0.1.2, until an operator upgrades i
   (`POST …/installations/{id}/tenant-path-probe`) that opens a TCP connection from a throwaway VM on a throwaway
   tenant network to what listens in the load balancer range, on the node you choose, and removes both again. It
   costs one VM clone and two SDN applies and never runs with Check. It needs a tenant cluster or database to
-  connect to and a published Ubuntu or Debian template on that node. Not verified on a lab.
+  connect to and, published on that node, an Ubuntu or Debian image that Template updates imported for the
+  provider (see Fixed). Not verified on a lab.
 - **Cluster chart `proxmox-kamaji-cluster` 0.1.14:** a `MachineHealthCheck` per node group of two or more
   machines (`machineHealthCheck.nodeStartupTimeoutSeconds`, `0` by default: none is rendered) and
   `proxmox.network.vlan`. Without the values the render is what 0.1.13 gave. Published (tag
@@ -229,6 +230,44 @@ with cluster chart 0.1.13 and platform chart 0.1.2, until an operator upgrades i
   verified on a lab.
 
 ### Fixed
+
+A lab round of 2026-11-19 ran this build over a platform that v0.8.0 installed. The five entries that follow fix
+what it found in managed services. None of the fixes was run on a lab: each is covered by tests against a fake
+Proxmox API.
+
+- **Managed services: the API no longer takes a preset on an installed platform.** A `PUT` of an installation
+  with `preset: standard` and a spec without `controlPlane` and `nodeGroups` answered `200` and rewrote the
+  stored machines: the control plane's node, and every group's size and count. The next **Apply this release**
+  would have replaced every machine. The page already switched the presets off there; the API did not look. Now
+  a preset other than `custom` on an installed platform is a `409 fixed_fields`, and a spec that leaves out the
+  clusters, a cluster's `controlPlane` or its `nodeGroups` keeps the stored ones: missing means keep, never a
+  default. `controlPlane.node` is fixed after the first install as well (`409 fixed_fields`; the page disables
+  the field): every control plane machine is on that node, so another node is each of them made anew, which no
+  lab has run. A group's nodes stay changeable. `GET` of an installation saved before v0.9.0 now names
+  `controlPlane.replicas` (1), as the API reference said it did.
+- **Managed services: "Test the tenant path" clones only an image of this portal's own, and no longer waits for
+  DHCP.** The test took the first published Ubuntu template in slug order and cloned it onto that template's
+  own store. On a Proxmox cluster that several portals share that can be another party's template; on the lab it
+  was an older template on an NFS store, the VM got no address from the zone's DHCP, and the test ended `error`
+  without a verdict. The image is now resolved in the provider's catalog as a tenant's server create resolves
+  one, from a template that Template updates imported for the provider or that `config.templates` names with its
+  VM id (Ubuntu before Debian, the newest version); the clone goes to the store of the provider's default
+  storage profile; and the VM gets a fixed address over cloud-init in every zone. The `202` answer and the result
+  name the image, its template, the node and the store (`image`, `template`, `node`, `storage`), and
+  `409 no_os_template` names the published templates it did not take. Why the lab VM got no address was not
+  determined (the VM is gone): the test no longer depends on it. New in the result: `notes`, what Proxmox may
+  keep by itself, the DHCP mapping of the test VM's NIC in a zone with a DHCP server, with the files to clean.
+- **Managed services: the Check row `boot-store` lists running VMs of the pool `pc-templates`.** Every member of
+  that pool was skipped as the product's own, so VMs an operator had in the pool were not named among the disks
+  the CSI token reaches. Only the pool's templates are left out now.
+- **Managed services: the Check row `tenant-path` of a VLAN tenant zone no longer points at a test that the zone
+  refuses.** It ended with "Test the tenant path", which answers `409 vlan_zone` there; it now names the check
+  from a tenant's server.
+- **Managed services: the Check row `pve-api-rule` and the guide say what the rule matches.** The rule's sources
+  are the addresses of the seed and the platform machines as the node sees them. On a site whose router
+  translates the platform network on the way to the node the row read `ok` while the rule matched nothing; the
+  row still reads the rule only, and now says that such a site needs a rule for the translated address
+  ([guide](docs/managed-services.md#when-a-router-translates-the-platform-network)). Nothing else changed.
 
 - **The `desktop` sandbox template build no longer fails when Launchpad is briefly unavailable.** The image takes
   Firefox ESR from `ppa:mozillateam/ppa`, and one HTTP 503 from Launchpad (its API during `add-apt-repository`,
