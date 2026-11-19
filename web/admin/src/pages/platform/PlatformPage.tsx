@@ -23,7 +23,7 @@ import { hasPermission } from "@/lib/permissions"
 import { cn } from "@/lib/utils"
 import { CopyBlock, ErrorNote, LINK, errMsg, setupStatusQuery } from "@/pages/setup/common"
 import { CheckStep, IdentitiesStep, ReviewStep, SettingsStep } from "./InstallSteps"
-import { ATTACH_LABEL, PLATFORM_KEY, STAGE_TITLE, codeAction, errCode, isConflict, runActive, type Installation, type Run, type Stage } from "./model"
+import { ATTACH_LABEL, PLATFORM_KEY, STAGE_TITLE, codeAction, errCode, isConflict, runActive, stageNumbers, type Installation, type Run, type Stage } from "./model"
 import { KubernetesVersion } from "./Tenants"
 
 const POLL_MS = 3000
@@ -181,10 +181,11 @@ function announcement(run?: Run): string {
   const i = stages.findIndex((s) => s.state === "running" || s.state === "waiting")
   if (i < 0) return `${RUN_TITLE[run.kind]}: ${(STATE[run.state]?.label ?? run.state).toLowerCase()}.`
   const s = stages[i]
-  return `Stage ${i + 1} of ${stages.length}: ${STAGE_TITLE[s.id] ?? s.id}, ${s.state === "waiting" ? "trying again" : "running"}.`
+  const numbers = stageNumbers(stages)
+  return `Stage ${numbers[i]} of ${numbers.filter((n) => !n.endsWith("a")).length}: ${STAGE_TITLE[s.id] ?? s.id}, ${s.state === "waiting" ? "trying again" : "running"}.`
 }
 
-function StageRow({ stage, n, kind }: { stage: Stage; n: number; kind: Run["kind"] }) {
+function StageRow({ stage, n, kind }: { stage: Stage; n: string; kind: Run["kind"] }) {
   const times = [
     stage.startedAt ? `started ${clock(stage.startedAt)}` : "",
     stage.finishedAt ? `finished ${clock(stage.finishedAt)}` : stage.deadline ? `must finish by ${clock(stage.deadline)}` : "",
@@ -260,7 +261,7 @@ function RunCard({ run, installation, canManage, dirty, focus, onRetry, retrying
       ) : null}
       {active ? <p className="text-sm text-muted-foreground">This page reads the run every few seconds. You can leave it: the run goes on.</p> : null}
       <ol aria-label="Stages">
-        {(run.stages ?? []).map((s, i) => <StageRow key={s.id} stage={s} n={i + 1} kind={run.kind} />)}
+        {(run.stages ?? []).map((s, i, all) => <StageRow key={s.id} stage={s} n={stageNumbers(all)[i]} kind={run.kind} />)}
       </ol>
       {ended && !stageFailed ? (
         <Failure
@@ -654,7 +655,7 @@ export default function PlatformPage() {
   const liveState = phase === "ready" ? live.data?.live : undefined
 
   const start = useMutation({
-    mutationFn: (body: { kind: "apply" | "remove"; confirm?: string; targetBom?: string }) => apiFetch<{ runId: string }>(`${base(stored!.id)}/runs`, { method: "POST", body }),
+    mutationFn: (body: { kind: "apply" | "remove"; confirm?: string; targetBom?: string; seedBackupTaken?: boolean }) => apiFetch<{ runId: string }>(`${base(stored!.id)}/runs`, { method: "POST", body }),
     onSuccess: (r) => {
       setRemoving(false)
       setStarted(r.runId)
@@ -711,7 +712,7 @@ export default function PlatformPage() {
               <>
                 <IdentitiesStep installation={stored} tokenId={provider?.config?.tokenId} canManage={canManage} />
                 <CheckStep installation={stored} canManage={canManage} dirty={dirty} />
-                <ReviewStep installation={stored} canManage={canManage} dirty={dirty} onInstall={apply} onUpgrade={(targetBom, confirm) => start.mutate({ kind: "apply", targetBom, confirm })} installing={start.isPending} error={showRun ? null : startError} />
+                <ReviewStep installation={stored} canManage={canManage} dirty={dirty} onInstall={apply} onUpgrade={(targetBom, confirm, seedBackupTaken) => start.mutate({ kind: "apply", targetBom, confirm, ...(seedBackupTaken ? { seedBackupTaken } : {}) })} installing={start.isPending} error={showRun ? null : startError} />
               </>
             ) : (
               <p className="text-sm text-muted-foreground">Steps 2 to 4 (Proxmox identities, Check, Review and install) open once the settings are saved.</p>
