@@ -252,6 +252,19 @@ with cluster chart 0.1.13 and platform chart 0.1.2, until an operator upgrades i
 
 ### Fixed
 
+- **Managed Kubernetes: tenant workers of a site upgraded from 0.8.x start with their Proxmox node.** `onboot` was
+  written on a Kubernetes node image only at its import, so a node template imported before v0.9.0 had none, and
+  neither had the workers cloned from it, before or after the upgrade: after a node reboot they stayed stopped (lab
+  round 2 of v0.9.0-rc.1, finding G2F-1). The provider sync now sets `onboot` on the Kubernetes node templates that
+  a Template updates import of this portal holds and on the running worker VMs of this portal's tenant clusters,
+  where it is missing, and writes nothing else. No new Proxmox privilege (`VM.Config.Options`, which the portal's
+  role holds on `pc-templates` and the tenant pools). **Upgrade note**: the first provider sync after the upgrade
+  (every 15 minutes, or `POST /api/v1/admin/job/external-service/sync`) writes it; wait for one before a planned
+  node reboot. Not covered: a node template built by `images/build.py` or not imported by this portal
+  (`qm set <vmid> --onboot 1` on the node), the workers of a `sharedWorkers` provider, and a worker that is
+  stopped. See
+  [docs/managed-services.md](docs/managed-services.md#after-a-proxmox-node-reboots). Not verified on a lab.
+
 - **Managed services, four small findings of the second lab round of 0.9.0-rc.1.** The upgrade plan's `impact`
   texts and the guide no longer say that ArgoCD syncs every chart that moves and runs the clusterctl hook again:
   the Application moves to the new chart version, and ArgoCD syncs objects, and runs a hook, only where the new

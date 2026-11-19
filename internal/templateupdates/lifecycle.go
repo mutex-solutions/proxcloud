@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -279,6 +280,44 @@ func importTemplateBy(ctx context.Context, pv templateReader, name, digest, node
 		return nil, lcErr(http.StatusConflict, "template_mismatch", fmt.Sprintf("VM %d on %s is not this import's template (name, template flag or source tag differ)", vmid, node))
 	}
 	return cfg, nil
+}
+
+// StartNodeTemplatesAtBoot sets onboot on every Kubernetes node template of the provider that one of recs holds
+// (Receipt.Holds: an import of this portal that finished and still names its template) and that lacks it. Import
+// writes the option since v0.9.0 (Executor.importDisk); this is the same write for a template imported before, so
+// that the machines cloned from it from now on start with their Proxmox node. It is the provider sync's pass. A
+// template no receipt holds (built by the image pipeline, the site's own, another portal's) is neither read nor
+// written. The write follows importTemplate's proof and carries the digest it read, as a tag write does, and takes
+// VM.Config.Options on /pool/pc-templates, which the import and the tag writes already use.
+func StartNodeTemplatesAtBoot(ctx context.Context, pv LifecyclePVE, recs []Receipt, serviceID string) error {
+	rows, err := pv.ClusterResources(ctx, "vm")
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, row := range rows {
+		i := slices.IndexFunc(recs, func(r Receipt) bool {
+			return r.Payload.Variant == "kubernetes" && r.Payload.ServiceID == serviceID && r.Holds(row)
+		})
+		if i < 0 || row.NodeDown {
+			continue
+		}
+		cfg, err := importTemplate(ctx, pv, recs[i].Payload, row.Node, row.VMID)
+		if err == nil && cfg.Int("onboot") != 1 {
+			params := map[string]string{"onboot": "1"}
+			if d := cfg.Str("digest"); d != "" {
+				params["digest"] = d
+			}
+			var up pve.UPID
+			if up, err = pv.SetVMConfig(ctx, row.Node, row.VMID, params); err == nil {
+				err = pv.WaitTask(ctx, up)
+			}
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("node template %d on %s: start at boot: %w", row.VMID, row.Node, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // setTags writes tags with the config digest just read (a concurrent config change makes PVE

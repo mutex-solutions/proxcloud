@@ -1,6 +1,8 @@
 package templateupdates
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -292,5 +294,81 @@ func TestReceiptHolds(t *testing.T) {
 		if r.Holds(w) {
 			t.Errorf("%s: the receipt holds the row", name)
 		}
+	}
+}
+
+// atBootPVE is the Proxmox the start-at-boot pass sees: cluster rows, pool pc-templates and one config per VM id.
+type atBootPVE struct {
+	LifecyclePVE
+	rows   []pve.ClusterResource
+	cfgs   map[int]pve.VMConfig
+	writes []string
+}
+
+func (f *atBootPVE) ClusterResources(context.Context, string) ([]pve.ClusterResource, error) {
+	return f.rows, nil
+}
+
+func (f *atBootPVE) GetPool(context.Context, string) (*pve.PoolInfo, error) {
+	pool := &pve.PoolInfo{}
+	for _, r := range f.rows {
+		if r.Pool == pve.TemplatePool {
+			pool.Members = append(pool.Members, pve.PoolMember{Type: r.Type, VMID: r.VMID, Node: r.Node})
+		}
+	}
+	return pool, nil
+}
+
+func (f *atBootPVE) GetVMConfig(_ context.Context, _ string, vmid int) (pve.VMConfig, error) {
+	return f.cfgs[vmid], nil
+}
+
+func (f *atBootPVE) SetVMConfig(_ context.Context, node string, vmid int, params map[string]string, _ ...string) (pve.UPID, error) {
+	f.writes = append(f.writes, fmt.Sprintf("%s/%d onboot=%s digest=%s", node, vmid, params["onboot"], params["digest"]))
+	f.cfgs[vmid]["onboot"] = float64(1) // as the API's JSON reads
+	return "", nil
+}
+
+func (f *atBootPVE) WaitTask(context.Context, pve.UPID) error { return nil }
+
+// The sync sets onboot on a Kubernetes node template that an import of this portal for this provider holds and that
+// lacks it (one imported before v0.9.0), once. An OS template, a template of another provider or of nobody's receipt
+// (the site's own, another portal's, a pipeline build) and a VM that took a deleted template's id are not written.
+func TestStartNodeTemplatesAtBoot(t *testing.T) {
+	k8s, osP := k8sPayload(), osPayload()
+	other := k8sPayload()
+	other.ServiceID = "svc2"
+	other.Digest = dg('7')
+	tpl := func(vmid int, p VMPayload) pve.ClusterResource {
+		return pve.ClusterResource{Type: "qemu", VMID: vmid, Node: p.Node, Template: 1, Pool: pve.TemplatePool, Name: TemplateName(p), Tags: publishedTags(TemplateTags(p), p)}
+	}
+	cfg := func(r pve.ClusterResource) pve.VMConfig {
+		return pve.VMConfig{"name": r.Name, "tags": r.Tags, "template": 1, "digest": "d" + fmt.Sprint(r.VMID)}
+	}
+	foreign := tpl(9216, k8s) // the same artifact imported by another portal: no receipt here
+	fake := &atBootPVE{rows: []pve.ClusterResource{tpl(9212, k8s), tpl(9213, osP), tpl(9214, other), foreign,
+		{Type: "qemu", VMID: 9215, Node: "pve1", Pool: "pc-p1", Name: "web", Tags: "proxcloud"}}, cfgs: map[int]pve.VMConfig{}}
+	for _, r := range fake.rows {
+		fake.cfgs[r.VMID] = cfg(r)
+	}
+	recs := []Receipt{
+		{ID: "a", VMID: 9212, Step: StepSucceeded, Payload: k8s},
+		{ID: "b", VMID: 9213, Step: StepSucceeded, Payload: osP},
+		{ID: "c", VMID: 9214, Step: StepSucceeded, Payload: other},
+		{ID: "d", VMID: 9215, Step: StepSucceeded, Payload: k8s}, // its template was deleted, the id is a tenant's server now
+		{ID: "e", VMID: 9216, Step: StepFailed, Payload: k8s},    // an import that failed after it took an id
+	}
+	for pass := 1; pass <= 2; pass++ {
+		if err := StartNodeTemplatesAtBoot(context.Background(), fake, recs, "svc"); err != nil {
+			t.Fatal(err)
+		}
+		if len(fake.writes) != 1 || fake.writes[0] != "pve1/9212 onboot=1 digest=d9212" {
+			t.Fatalf("pass %d wrote %v, want onboot on 9212 alone, once", pass, fake.writes)
+		}
+	}
+	// The template changed between the list and the read (renamed by hand): no proof, no write.
+	fake.writes, fake.cfgs[9212] = nil, pve.VMConfig{"name": "mine", "tags": fake.rows[0].Tags, "template": 1}
+	if err := StartNodeTemplatesAtBoot(context.Background(), fake, recs, "svc"); err == nil || len(fake.writes) != 0 {
+		t.Fatalf("a template that is no longer the import's: err %v, wrote %v", err, fake.writes)
 	}
 }

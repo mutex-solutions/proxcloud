@@ -431,3 +431,56 @@ func (s *Service) ReconcileWorkerFirewalls(ctx context.Context, addrsOf func(ctx
 	}
 	return errors.Join(errs...)
 }
+
+// StartWorkersAtBoot is the provider sync's pass that sets onboot on every running worker VM of a tenant cluster that
+// lacks it, so that the worker starts again with its Proxmox node. A worker copies the option from its node template
+// and CAPMOX has no field for it, so a worker cloned from a template that did not carry it yet (one imported before
+// v0.9.0) has none. A worker is a VM in a project's pool with the tag pc-k8s-<cluster>, and owns says whether that
+// project has that cluster: a VM that only carries such a tag (the site's own, another portal's) is not written. A
+// worker that is not running is left for a later pass, as the firewall pass leaves it: CAPMOX still writes a new
+// clone's config until its first start. The write takes VM.Config.Options, which the portal's role holds on the
+// tenant pools.
+func (s *Service) StartWorkersAtBoot(ctx context.Context, owns func(ctx context.Context, projectID, clusterID string) (bool, error)) error {
+	vms, err := s.C.ClusterResources(ctx, "vm")
+	if err != nil {
+		return err
+	}
+	var errs []error
+	known := map[string]bool{} // project/cluster: one question per cluster
+	for _, vm := range vms {
+		pid, inProject := strings.CutPrefix(vm.Pool, s.PoolPrefix)
+		if vm.Type != "qemu" || vm.Template != 0 || vm.Status != "running" || !inProject || pid == "" {
+			continue
+		}
+		own := false
+		for _, tag := range strings.Split(vm.Tags, ";") {
+			id, ok := strings.CutPrefix(tag, WorkerTagPrefix)
+			if !ok || id == "" {
+				continue
+			}
+			held, asked := known[pid+"/"+id]
+			if !asked {
+				if held, err = owns(ctx, pid, id); err != nil {
+					errs = append(errs, err)
+					continue
+				}
+				known[pid+"/"+id] = held
+			}
+			own = own || held
+		}
+		if !own {
+			continue
+		}
+		cfg, err := s.C.GetVMConfig(ctx, vm.Node, vm.VMID)
+		if err == nil && cfg.Int("onboot") != 1 {
+			var up UPID
+			if up, err = s.C.SetVMConfig(ctx, vm.Node, vm.VMID, map[string]string{"onboot": "1"}); err == nil {
+				err = s.C.WaitTask(ctx, up)
+			}
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("pve worker start at boot: VM %d (%s): %w", vm.VMID, vm.Name, err))
+		}
+	}
+	return errors.Join(errs...)
+}

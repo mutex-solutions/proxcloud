@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
@@ -68,6 +69,7 @@ type Job struct {
 	staleSeeds    func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error
 	loadBalancers func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error
 	workerFW      func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error
+	nodeTemplates func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error
 	csiVolumes    func(region, projectID string, es *externalservice.ExternalService) providers.Provider
 	now           func() time.Time
 	log           *slog.Logger
@@ -185,6 +187,31 @@ func (j *Job) WithWorkerFirewalls(f func(ctx context.Context, ps *pve.Service, e
 	return j
 }
 
+// WithNodeTemplates wires the pass that sets onboot on the Kubernetes node templates Template updates imported for a
+// provider (templateupdates.StartNodeTemplatesAtBoot; nil = none).
+func (j *Job) WithNodeTemplates(f func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error) *Job {
+	j.nodeTemplates = f
+	return j
+}
+
+// startAtBoot makes the machines of tenant Kubernetes clusters start with their Proxmox node: onboot on the node
+// templates this portal imported, which every new clone copies, and on the running workers of the clusters this
+// portal has (docs/managed-services.md, "After a Proxmox node reboots"). Both write only what lacks it.
+func (j *Job) startAtBoot(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) {
+	if j.nodeTemplates != nil {
+		if err := j.nodeTemplates(ctx, ps, es); err != nil {
+			j.log.Warn("syncjob: kubernetes node templates start at boot", "serviceId", es.ID, "err", err)
+		}
+	}
+	err := ps.StartWorkersAtBoot(ctx, func(ctx context.Context, projectID, clusterID string) (bool, error) {
+		clusters, err := j.cloud.FindByProjectAndType(ctx, projectID, cloud.TypeKubernetesCluster)
+		return slices.ContainsFunc(clusters, func(c cloud.CloudResource) bool { return c.ExternalID == clusterID }), err
+	})
+	if err != nil {
+		j.log.Warn("syncjob: kubernetes workers start at boot", "serviceId", es.ID, "err", err)
+	}
+}
+
 // Run syncs every ENABLED project's CLOUD-service resources. Returns the total SERVER+PORT
 // resources synced. Per-project / per-service failures are logged and skipped.
 func (j *Job) Run(ctx context.Context) (int, error) {
@@ -245,6 +272,7 @@ func (j *Job) detectProxmoxCapabilities(ctx context.Context) {
 				j.log.Error("syncjob: kubernetes worker firewalls", "serviceId", es.ID, "err", err)
 			}
 		}
+		j.startAtBoot(ctx, ps, es)
 		if err := j.reconcileSandboxWorkers(ctx, ps, es); err != nil {
 			j.log.Error("syncjob: sandbox workers", "serviceId", es.ID, "err", err)
 		}

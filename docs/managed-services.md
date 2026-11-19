@@ -1801,8 +1801,8 @@ What this does not do, and what to do then:
   the rest, as root: `qm set <vmid> --startup order=1` on the seed, `order=2` on the control
   plane machine, `order=3` on the others. A replaced machine loses it.
 - **Tenant clusters' machines** are not touched by this: their VMs are made by the platform's
-  CAPMOX in tenant pools. They have `onboot` only when their node image template has it (next
-  paragraph); the others must be started in Proxmox after a node reboot.
+  CAPMOX in tenant pools. They take `onboot` from their node image template, and the provider sync
+  sets it on the running workers that lack it (next paragraphs).
 
 **Start at boot from the template.** From v0.9.0 a Kubernetes node image that **Template updates**
 imports gets `onboot: 1` on the template itself. A Proxmox clone copies every option of its source
@@ -1810,13 +1810,37 @@ except the disks, MACs and snapshot fields it rewrites, and CAPMOX v0.9.2 has no
 and writes it nowhere (both read in code: `PVE/API2/Qemu.pm` on Proxmox VE 9.2, CAPMOX's
 `internal/service/vmservice`). So every machine cloned from such a template has it from its first
 boot: tenant workers, platform machines, and the replacement of either, with no call per VM. Stage
-7's pass above stays as the backstop for machines made from older templates. What it does not
-cover:
+7's pass above stays as the backstop for machines made from older templates.
 
-- A template imported before v0.9.0, or built by the installer's image pipeline
-  (`images/build.py`), has no `onboot`; machines cloned from it get none. To add it, as root on the
-  node: `qm set <template vmid> --onboot 1`. Machines that exist already keep what they have
-  (`qm set <vmid> --onboot 1` on each, or for platform machines the next apply).
+**Templates and workers from before v0.9.0.** A node image imported by v0.8.x has no `onboot`, and
+neither has a worker cloned from it. The services sync (every 15 minutes; on demand
+`POST /api/v1/admin/job/external-service/sync` on the operator API) closes both, per Proxmox
+provider, with the portal's token and no new Proxmox privilege (`VM.Config.Options`, which its role
+holds on `pc-templates` and on the tenant pools):
+
+- **Node templates:** `onboot: 1` on every Kubernetes node template that a Template updates import
+  of this portal for this provider still holds (the import's receipt: node, VM id, name and source
+  digest; staged, published or withdrawn). Clones made after that have it.
+- **Workers:** `onboot: 1` on every running worker VM of a tenant cluster of this portal that lacks
+  it: a VM in a project's pool with the tag `pc-k8s-<cluster id>`, where that project has that
+  cluster. A worker that is not running is left for a later sync, because CAPMOX still writes a new
+  clone until its first start.
+
+Both write only what lacks the option, so a sync that finds nothing to do writes nothing. A failed
+write is logged (`kubernetes node templates start at boot`, `kubernetes workers start at boot`) and
+tried again at the next sync. After an upgrade from v0.8.x, wait for one sync before a planned node
+reboot, or check with `qm config <vmid> | grep onboot`.
+
+What this does not cover:
+
+- A template built by the installer's image pipeline (`images/build.py`), or any template no
+  import receipt of this portal holds (the site's own, another portal's), is never written. To add
+  it, as root on the node: `qm set <template vmid> --onboot 1`. Workers cloned from it are still
+  covered by the sync's worker pass.
+- Workers of a provider with `sharedWorkers` are not in a project's pool and are not written: they
+  have `onboot` only from their template, or by `qm set <vmid> --onboot 1`.
+- A portal whose scheduler is off runs no sync on its own: call the route above once after the
+  upgrade. A sync of one project alone does not run these passes.
 - A tenant worker that is stopped stays stopped until its node boots: nothing starts it.
 - **Not tried on a lab:** that a clone made by CAPMOX carries the option, that Proxmox accepts
   `onboot` on a template, and that it skips a template when it starts the VMs of a booting node

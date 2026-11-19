@@ -414,8 +414,10 @@ Proxmox node and a new join.
   machine is replaced again after every timeout. The operator's Machines view shows the count of healthy machines
   per group, and young machines in a group that never settles are that loop.
 - It checks no Node condition: a node that joined and went NotReady, and a node whose Proxmox host reboots, are
-  never replaced by it (start at boot is the tool for a reboot). A Machine whose Node object was deleted is
-  replaced; that is Cluster API's own rule for every MachineHealthCheck.
+  never replaced by it (start at boot is the tool for a reboot: a worker has `onboot` from its node template, and
+  the provider sync sets it on the node templates this portal imported and on the running workers that lack it,
+  see [After a Proxmox node reboots](managed-services.md#after-a-proxmox-node-reboots)). A Machine whose Node
+  object was deleted is replaced; that is Cluster API's own rule for every MachineHealthCheck.
 - New clusters get the block when the provider's `chartVersion` is 0.1.14 or later. An existing cluster gets it
   when it is moved onto such a chart (**Bump** on the provider's page, or the tenant's platform update); **it acts
   at once on a machine that is already past the timeout**, within the guard. A cluster on an older chart renders
