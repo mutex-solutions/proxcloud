@@ -19,12 +19,14 @@ const (
 	ClassChart      = "chart"       // the run syncs a new chart revision
 	ClassRecordOnly = "record only" // nothing of the platform is synced for it: the record and labels, or what new tenants get
 	ClassRefused    = "refused"     // this release does not make the change: the whole upgrade is refused
+	ClassSite       = "site"        // the run writes it on the Proxmox site, outside the platform's clusters
 )
 
 // PlanChange is one difference: a component (Cluster and Name), a top-level pin (Name only), or a control plane the
 // settings make larger than the one a run built (Cluster is the platform cluster's name, Name controlPlane.replicas,
-// From and To the counts, with Stage and Impact). From "" is an install, To "" a removal. Class and Wave are set in an
-// upgrade plan only, Stage and Impact there and on a count.
+// From and To the counts, with Stage and Impact), or the cluster firewall rule a run writes because Proxmox does not
+// hold it (Name pve-api-rule, class site: Plan.ListAPIAccess). From "" is an install, To "" a removal. Class and Wave
+// are set in an upgrade plan only, Stage and Impact there, on a count and on the rule.
 type PlanChange struct {
 	Cluster  string `json:"cluster,omitempty"`
 	Name     string `json:"name"`

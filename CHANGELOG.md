@@ -40,6 +40,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the BOM on `main`: three of 0.8.x, the two candidates and `0.9.0`. No apply on such a platform was run on
   a lab by this change.
 
+### Fixed
+
+- **The plan of an installed platform names the cluster firewall rule a run writes.** On a platform installed by
+  0.8.x the rule `proxcloud:pve-api:<installation>` does not exist, and an apply or an upgrade run writes it in
+  stage 3 (`seed-vm`) while the plan listed no such change (production upgrade of 2026-11-19: six changes in the
+  plan, the rule not among them). `GET …/plan` now reads the cluster firewall and, while the rule is missing or
+  differs from the settings, lists the entry `pve-api-rule` (kind `site`, stage `seed-vm`) in the apply's changes
+  and in the upgrade's, with the rule spelled out and what the run does: one `ACCEPT` rule for the platform's
+  addresses to the Proxmox API port, nothing else in the firewall touched. It never blocks; with the rule in place,
+  or when the firewall cannot be read, the plan is as before. Not seen on a lab.
+- **The Check row `boot-store` no longer calls a leftover volume a VM.** It listed the ids in the volumes' names
+  as "other VMs", so an orphan `vm-129-cloudinit` read as "VM 129" where no guest 129 exists (lab round 3 of
+  v0.9.0, R3-1). The row now says "disks of N other VM ids" and marks an id that no guest of the cluster holds
+  (`/cluster/nextid?vmid=`, which answers whatever the token may read) as "no VM has this id: a leftover volume".
+  Not run on a lab.
+- **The stored tenant path test ends with the platform it tested.** The result (`GET …/tenant-path-probe`) was one
+  document per installation that nothing deleted, so after a Remove and a new install the fresh platform answered
+  the old verdict, taken with other machines holding the addresses (lab round 3 of v0.9.0, R3-2). The Remove run
+  now deletes it when it wipes the recorded status, and the start of an install deletes one that was saved after
+  that. Not run on a lab.
+
 ## [0.9.0] - 2026-11-19
 
 The release after `v0.8.2`. An installed managed-services platform can be upgraded in place, a new install is

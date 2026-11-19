@@ -88,7 +88,7 @@ export type Plan = {
 }
 export type PlanChange = {
   cluster?: string; name: string; from?: string; to?: string; blocking?: string
-  class?: "chart" | "record only" | "refused"; stage?: string; wave?: number; impact?: string
+  class?: "chart" | "record only" | "refused" | "site"; stage?: string; wave?: number; impact?: string
 }
 export type Upgrade = {
   from: BOMRef; to: BOMRef; allowed: boolean; inProgress?: boolean
