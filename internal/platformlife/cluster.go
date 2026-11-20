@@ -6,8 +6,10 @@ package platformlife
 // kubeconfig, the argocd-manager token and the providers' token are held in memory only.
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -17,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/templateupdates"
@@ -562,11 +565,10 @@ func (x *acq) rolloutGate(ctx context.Context, seed *kamajik8s.Client, a appOf, 
 	if live == nil || (sameJSON(dig(live, "spec", "source"), dig(a.obj, "spec", "source")) && dig(live, "spec", "syncPolicy", "automated") != nil) {
 		return nil
 	}
-	held := maps.Clone(a.obj)
-	spec := maps.Clone(held["spec"].(map[string]any))
-	policy := maps.Clone(spec["syncPolicy"].(map[string]any))
-	delete(policy, "automated")
-	spec["syncPolicy"], held["spec"] = policy, spec
+	held, err := gateRender(a, live)
+	if err != nil {
+		return permanent(CodeComponentUnhealthy, "The Application of the platform cluster could not be rendered for the comparison: %s", clip(err.Error()))
+	}
 	if err := x.check(ctx); err != nil {
 		return err
 	}
@@ -619,6 +621,44 @@ func (x *acq) rolloutGate(ctx context.Context, seed *kamajik8s.Client, a appOf, 
 			r.RolloutChecked = true
 		}
 	})
+}
+
+// gateRender is the Application rolloutGate lets ArgoCD compare before anything syncs: a's, without automated sync, and
+// with the cluster chart's nodeDeletionTimeoutSeconds (chart 0.1.16 and later) as the live Application has it: when
+// live is of a chart before 0.1.16, or renders no timeout, the comparison renders none either. That value is on the
+// KubeadmControlPlane and on every MachineDeployment, and Cluster API puts it on the Machines in place: no machine is
+// replaced for it (Cluster API v1.14.4: the control plane's syncMachines and matchesMachineSpec, the MachineSet's
+// syncMachines, mdutil.MachineTemplateDeepCopyRolloutFields; the chart's templates cite the lines). ArgoCD's
+// comparison says only Synced or OutOfSync per object, so with the value new in the render, a control plane that
+// would be replaced could not be told from one that only gets the timeout. Rendered as live has it, the comparison is
+// the strict one it always was, and what the caller applies next differs from what was compared in that one value:
+// TestNodeDeletionTimeoutChangesNoMachine holds the chart to it.
+func gateRender(a appOf, live map[string]any) (map[string]any, error) {
+	raw, err := json.Marshal(a.obj)
+	if err != nil {
+		return nil, err
+	}
+	var held map[string]any
+	if err := json.Unmarshal(raw, &held); err != nil {
+		return nil, err
+	}
+	policy, _ := dig(held, "spec", "syncPolicy").(map[string]any)
+	delete(policy, "automated")
+	liveSeconds, set := dig(live, "spec", "source", "helm", "valuesObject", "nodeDeletionTimeoutSeconds").(float64)
+	liveHas := kamaji.ChartHasNodeDeletionTimeout(str(live, "spec", "source", "targetRevision")) && (!set || liveSeconds >= 0)
+	if kamaji.ChartHasNodeDeletionTimeout(a.c.Chart.Version) && !liveHas {
+		helm, _ := dig(held, "spec", "source", "helm").(map[string]any)
+		if helm == nil {
+			return nil, errors.New("the Application has no helm source")
+		}
+		values, _ := helm["valuesObject"].(map[string]any)
+		if values == nil {
+			values = map[string]any{}
+			helm["valuesObject"] = values
+		}
+		values["nodeDeletionTimeoutSeconds"] = kamaji.NodeDeletionTimeoutUnset
+	}
+	return held, nil
 }
 
 // tenantsDown are the tenants on the workload that are not healthy, and how many there are in all: the Applications
@@ -1271,7 +1311,7 @@ func (x *acq) workloadPlatform(ctx context.Context) error {
 	}
 	err = x.waves(ctx, seed, wl, apps, waveStall, func(wave int) error {
 		if wave == first {
-			if err := x.nodes(ctx, wl); err != nil {
+			if err := x.nodes(ctx, seed, wl); err != nil {
 				return err
 			}
 		}
@@ -1360,28 +1400,181 @@ func (x *acq) argoAddress(ctx context.Context, wl *kamajik8s.Client, passed bool
 		"save and apply again. The platform keeps serving: ArgoCD answers inside the cluster.", a.Address, holder, x.in.Spec.Clusters[0].MetalLBRange)
 }
 
+// Cluster API writes these on every Node it joins for a Machine (v1.14 api/core/v1beta2: ClusterNameAnnotation,
+// MachineAnnotation).
+const (
+	nodeClusterAnnotation = "cluster.x-k8s.io/cluster-name"
+	nodeMachineAnnotation = "cluster.x-k8s.io/machine"
+)
+
+// orphanNodes are the Nodes of the platform cluster that are not Ready and that no Machine owns: Cluster API joined
+// the Node for a Machine of this cluster (its annotations), that Machine is gone, and no Machine or ProxmoxMachine
+// names the Node by status.nodeRef, by the provider id of its VM or by its own name (a machine that is still joining
+// has no nodeRef yet, and CAPMOX names the Node after the Machine). Such a Node is what Cluster API leaves when it
+// gives up deleting it (spec.deletion.nodeDeletionTimeoutSeconds, 10 s by default): with one control plane machine
+// that moment falls into the API gap the same deletion opens. Nothing else removes a Node here: the platform cluster
+// has no cloud controller manager. An empty Machine list proves nothing and owns every Node.
+func orphanNodes(nodes, machines, infra []map[string]any) (orphans []map[string]any) {
+	if len(machines) == 0 {
+		return nil
+	}
+	names, refs, ids := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	for _, m := range machines {
+		names[str(m, "metadata", "name")] = true
+		refs[str(m, "status", "nodeRef", "name")] = true
+		ids[str(m, "spec", "providerID")] = true
+	}
+	for _, pm := range infra {
+		ids[str(pm, "spec", "providerID")] = true
+	}
+	for _, n := range nodes {
+		name, a := str(n, "metadata", "name"), func(k string) string { return str(n, "metadata", "annotations", k) }
+		id := str(n, "spec", "providerID")
+		if condition(n, "Ready") == "True" || a(nodeClusterAnnotation) != ClusterName || a(nodeMachineAnnotation) == "" ||
+			names[a(nodeMachineAnnotation)] || names[name] || refs[name] || (id != "" && ids[id]) {
+			continue
+		}
+		orphans = append(orphans, n)
+	}
+	return orphans
+}
+
+// NodesCheck is the Check row nodes of an installed platform: ok when every node of the platform cluster is Ready, a
+// warning (never a failure: a run must be able to start and repair) that names each node that is not, and says of a
+// Node no Machine owns (orphanNodes) that the next apply deletes the Node object. nil when the seed or the platform
+// cluster cannot be read: other rows and the run say that.
+func NodesCheck(ctx context.Context, seed, wl *kamajik8s.Client) *Check {
+	if seed == nil || wl == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	nodes, err := wl.ListNodes(ctx)
+	if err != nil || len(nodes) == 0 {
+		return nil
+	}
+	var unready []map[string]any
+	for _, n := range nodes {
+		if condition(n, "Ready") != "True" {
+			unready = append(unready, n)
+		}
+	}
+	if len(unready) == 0 {
+		return &Check{ID: "nodes", Status: CheckOK, Message: fmt.Sprintf("The platform cluster's %d nodes are Ready.", len(nodes))}
+	}
+	machines, err := seed.ListCRs(ctx, capiGroup, capiVersion, "machines", ClusterName, clusterSelector)
+	if err != nil {
+		return nil
+	}
+	infra, err := seed.ListCRs(ctx, infraGroup, infraVersion, "proxmoxmachines", ClusterName, "")
+	if err != nil {
+		return nil
+	}
+	orphans := orphanNodes(unready, machines, infra)
+	var lines []string
+	for _, n := range unready {
+		name, ready := str(n, "metadata", "name"), cmp.Or(condition(n, "Ready"), "not reported")
+		if slices.ContainsFunc(orphans, func(o map[string]any) bool { return str(o, "metadata", "name") == name }) {
+			lines = append(lines, fmt.Sprintf("Node %s is not Ready (%s) and no Machine owns it: Cluster API removed its machine %s and left the Node object, "+
+				"which holds back DaemonSet rollouts and the replacement of the cluster's machines. The next Apply deletes the Node object, a Retry too.",
+				name, ready, str(n, "metadata", "annotations", nodeMachineAnnotation)))
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("Node %s is not Ready (%s).", name, ready))
+	}
+	slices.Sort(lines)
+	return &Check{ID: "nodes", Status: CheckWarn, Message: strings.Join(lines, "\n")}
+}
+
+// nodeNames lists nodes by name, each with what its Ready condition says.
+func nodeNames(nodes []map[string]any) string {
+	out := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		out = append(out, str(n, "metadata", "name")+" (Ready "+cmp.Or(condition(n, "Ready"), "not reported")+")")
+	}
+	slices.Sort(out)
+	return strings.Join(out, ", ")
+}
+
 // nodes waits until every node of the workload is Ready and each group has its count of nodes carrying its label.
-func (x *acq) nodes(ctx context.Context, wl *kamajik8s.Client) error {
+// A Node that is not Ready and that no Machine owns (orphanNodes) is deleted first, through the platform cluster's API
+// with the admin kubeconfig Cluster API keeps on the seed and only while its uid is the one that was read: the count
+// could never come true with it, and a run that stood in this wait gets out with one Retry. The stage's items and
+// its message name every Node deleted. A wait names the nodes it waits for.
+func (x *acq) nodes(ctx context.Context, seed, wl *kamajik8s.Client) error {
 	nodes, err := wl.ListNodes(ctx)
 	if err != nil {
 		return classify(CodeWorkloadUnreachable, err)
+	}
+	var unready []map[string]any
+	for _, n := range nodes {
+		if condition(n, "Ready") != "True" {
+			unready = append(unready, n)
+		}
+	}
+	ownerless := ""
+	if len(unready) > 0 { // the seed is read only when a node is not Ready
+		machines, _, infra, err := x.machines(ctx, seed)
+		if err != nil {
+			return err
+		}
+		if orphans := orphanNodes(unready, machines, infra); len(orphans) > 0 {
+			if err := x.check(ctx); err != nil {
+				return err
+			}
+			items := slices.Clone(x.run.Stages[x.si].Items)
+			var gone []string
+			for _, n := range orphans {
+				name := str(n, "metadata", "name")
+				if err := wl.DeleteNode(ctx, name, str(n, "metadata", "uid")); err != nil {
+					return classify(CodeWorkloadUnreachable, err)
+				}
+				gone = append(gone, name)
+				item := StageItem{ID: "node/" + name, State: "deleted", Message: clip(fmt.Sprintf("Node %s was not Ready (%s) and no Machine owned it: Cluster API "+
+					"joined it for Machine %s, which is gone, and gave up deleting the Node. The run deleted the Node object.", name,
+					cmp.Or(condition(n, "Ready"), "not reported"), str(n, "metadata", "annotations", nodeMachineAnnotation)))}
+				items = append(slices.DeleteFunc(items, func(i StageItem) bool { return i.ID == item.ID }), item)
+			}
+			x.r.Log.Info("platform run: deleted nodes no machine owns", "run", x.runID, "nodes", strings.Join(gone, ","))
+			if err := x.saveStage(ctx, func(s *Stage) { s.Items = items }); err != nil {
+				return err
+			}
+			return waiting(CodeNodesTimeout, "Deleted %d Node no Machine owned (%s): left by a machine Cluster API removed while the platform cluster's API "+
+				"did not answer. The nodes are counted again at the next look.", len(gone), strings.Join(gone, ", "))
+		}
+		// Not Ready and not deleted: say which have no Machine by nodeRef, so the reader sees what the run will not touch.
+		refs := map[string]bool{}
+		for _, m := range machines {
+			refs[str(m, "status", "nodeRef", "name")] = true
+		}
+		var names []string
+		for _, n := range unready {
+			if name := str(n, "metadata", "name"); !refs[name] {
+				names = append(names, name)
+			}
+		}
+		if len(names) > 0 {
+			ownerless = " No Machine names " + strings.Join(names, ", ") + " as its node yet."
+		}
 	}
 	ready, total := map[string]int{}, x.in.Spec.Clusters[0].ControlPlane.Count()
 	for _, n := range nodes {
 		if condition(n, "Ready") == "True" {
 			ready[str(n, "metadata", "labels", GroupLabel)]++
-		} else {
-			ready["not ready"]++
 		}
 	}
 	for _, g := range x.in.Spec.Clusters[0].NodeGroups {
 		total += g.Count
 		if ready[g.Name] != g.Count {
-			return waiting(CodeNodesTimeout, "%d of %d nodes of group %s are Ready with the label %s.", ready[g.Name], g.Count, g.Name, GroupLabel)
+			return waiting(CodeNodesTimeout, "%d of %d nodes of group %s are Ready with the label %s. Not Ready: %s.%s", ready[g.Name], g.Count, g.Name, GroupLabel,
+				cmp.Or(nodeNames(unready), "none"), ownerless)
 		}
 	}
-	if ready["not ready"] > 0 || len(nodes) != total {
-		return waiting(CodeNodesTimeout, "%d nodes exist, %d of them not Ready; the cluster has %d.", len(nodes), ready["not ready"], total)
+	switch {
+	case len(unready) > 0:
+		return waiting(CodeNodesTimeout, "%d nodes exist, %d of them not Ready: %s; the cluster has %d.%s", len(nodes), len(unready), nodeNames(unready), total, ownerless)
+	case len(nodes) != total:
+		return waiting(CodeNodesTimeout, "%d nodes exist and the cluster has %d machines: %s.", len(nodes), total, nodeNames(nodes))
 	}
 	return nil
 }

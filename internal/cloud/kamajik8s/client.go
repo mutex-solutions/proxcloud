@@ -773,6 +773,20 @@ func (c *Client) ListNodes(ctx context.Context) ([]map[string]any, error) {
 	return c.list(ctx, "/api/v1/nodes", "")
 }
 
+// DeleteNode deletes the Node name while its uid is still uid: a Node that was replaced under the same name since it
+// was read is left alone (409). Absent = success.
+func (c *Client) DeleteNode(ctx context.Context, name, uid string) error {
+	if uid == "" {
+		return errors.New("delete node requires UID")
+	}
+	_, err := c.do(ctx, http.MethodDelete, "/api/v1/nodes/"+url.PathEscape(name), nil, map[string]any{"apiVersion": "v1", "kind": "DeleteOptions", "preconditions": map[string]any{"uid": uid}}, "")
+	var ae *APIError
+	if errors.As(err, &ae) && ae.Status == 404 {
+		return nil
+	}
+	return err
+}
+
 // SetNodeTaints replaces a Node's taints, guarded by the resourceVersion it was read at (409 if it changed since).
 func (c *Client) SetNodeTaints(ctx context.Context, name, resourceVersion string, taints []any) error {
 	if taints == nil {

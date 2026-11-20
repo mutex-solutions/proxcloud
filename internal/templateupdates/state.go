@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -231,11 +232,20 @@ func (s *Service) stateOf(ctx context.Context, rec Receipt, rows map[string]Prov
 		b := b
 		st.Withdrawal = &b
 	}
+	// missing is a receipt whose template is gone. Proxmox gives a freed VMID to the next guest, often the next import
+	// on that node: the row then names no VMID, so the list never shows one VMID for two templates.
+	missing := func() TemplateState {
+		st.State = StateTemplateMissing
+		if slices.ContainsFunc(rows[p.ServiceID].Rows, func(r pve.ClusterResource) bool { return r.VMID == rec.VMID }) {
+			st.Warnings = append(st.Warnings, fmt.Sprintf("its template had VMID %d, which another guest holds now", rec.VMID))
+			st.VMID = 0
+		}
+		return st
+	}
 	switch {
 	case rec.TemplateGone:
 		// Its VMID may now hold a re-import of the same artifact: never shown as that template.
-		st.State = StateTemplateMissing
-		return st
+		return missing()
 	case rec.Step == StepFailed:
 		st.State = StateImportFailed
 		return st
@@ -263,8 +273,7 @@ func (s *Service) stateOf(ctx context.Context, rec Receipt, rows map[string]Prov
 		}
 	}
 	if row == nil {
-		st.State = StateTemplateMissing
-		return st
+		return missing()
 	}
 	if row.NodeDown {
 		st.State = StateProviderUnreadable

@@ -54,6 +54,9 @@ type Upgrade struct {
 	// InProgress: a run toward To has started and has not succeeded yet (status.targetBom). Every apply continues to
 	// To, without a new confirmation.
 	InProgress bool `json:"inProgress,omitempty"`
+	// Carried is set with InProgress when To took the place of the unfinished target of an earlier build (move,
+	// carries): the BOM the upgrade was started for. The next apply records To as the target.
+	Carried *BOMRef `json:"carried,omitempty"`
 	// Confirm is what the operator types to start it ("" when it is not allowed or already in progress).
 	Confirm  string       `json:"confirm,omitempty"`
 	Changes  []PlanChange `json:"changes"`
@@ -183,7 +186,9 @@ func PlanFor(in *Installation, target string) (Plan, error) {
 	if _, p.Upgrade, err = move(in, target); err != nil {
 		return p, err
 	}
-	if pending := in.Status.TargetBOM; target == "" && pending != nil && pending.SHA256 != cur.SHA256 && in.Status.BOM.SHA256 != cur.SHA256 {
+	// Not when this build's BOM already took the unfinished target's place (Upgrade.Carried): that is the same move.
+	if pending := in.Status.TargetBOM; target == "" && pending != nil && pending.SHA256 != cur.SHA256 && in.Status.BOM.SHA256 != cur.SHA256 &&
+		(p.Upgrade == nil || p.Upgrade.Carried == nil) {
 		if _, p.Replacement, err = move(in, cur.SHA256); err != nil {
 			return p, err
 		}
@@ -228,6 +233,19 @@ func (in *Installation) argoAccessChange() *PlanChange {
 // A platform moves only to this build's own BOM. After a run toward a target has started, an apply goes to that target
 // (Retry), or to this build's BOM when a later release replaces a target that cannot be reached: then both the
 // installed BOM and the unfinished target must be allowed to move to it, because each component stands at one of the two.
+//
+// While the platform cluster's machines are being replaced (status.clusters[0].roll at a step that still names a
+// unit), a later build whose BOM replaces no machine and no k3s against the unfinished target (carries) takes the
+// target's place by itself: an apply without a target, and one that names this build's BOM, continue under this
+// build's BOM as the upgrade in progress (Upgrade.Carried names the target it replaced), with nothing to confirm, and
+// the installation's target becomes this build's. The roll's step is kept: the units already replaced render as they
+// are (same version, same node image), the units not reached render with this build's cluster chart. That is how a
+// site whose roll stands at a defect of the target's own chart or of the build that started it gets out with a Retry
+// from the corrected build. A later build that would replace machines or the seed's k3s again is not a target while
+// the roll runs: an apply without a target goes on to the unfinished target, and one that names the build's BOM is
+// refused. Before the roll has begun, and once its last unit is recorded (only the record is left to write, and the
+// Application must carry exactly the render the roll was made with), nothing is carried: an apply without a target
+// goes on to the unfinished target, and this build's BOM takes its place only when named and confirmed.
 func move(in *Installation, target string) (run Embedded, up *Upgrade, err error) {
 	cur, err := Current()
 	if err != nil {
@@ -245,6 +263,14 @@ func move(in *Installation, target string) (run Embedded, up *Upgrade, err error
 	}
 	pending := in.Status.TargetBOM
 	want := target
+	// In a roll that still has a unit to replace, a build whose BOM differs from the unfinished target only in the
+	// product's own charts and the release line takes the target's place (carries).
+	carried := false
+	if roll := rollOf(in); roll != nil && len(in.Spec.Clusters) > 0 && roll.Step <= len(rollUnits(in.Spec.Clusters[0])) && pending != nil && pending.SHA256 != cur.SHA256 && (target == "" || target == cur.SHA256) {
+		if mid, ok := Lookup(pending.SHA256); ok && carries(from, mid, cur) {
+			want, carried = cur.SHA256, true
+		}
+	}
 	switch {
 	case want == "" && pending != nil:
 		want = pending.SHA256
@@ -278,14 +304,33 @@ func move(in *Installation, target string) (run Embedded, up *Upgrade, err error
 		u.Blocking = append(u.Blocking, "kubernetes.nodeImage: "+later+"this installation names its own node templates; the roll needs the BOM's image")
 	}
 	switch {
-	case pending != nil && pending.SHA256 == to.SHA256:
+	case pending != nil && (pending.SHA256 == to.SHA256 || carried):
 		// The build that started it allowed it, and going on is the only way: nothing refuses a Retry.
 		u.InProgress, u.Blocking = true, []string{}
+		if carried {
+			u.Carried = pending
+		}
 	case pending != nil:
 		mid, ok := Lookup(pending.SHA256)
 		if !ok {
 			u.Blocking = append(u.Blocking, fmt.Sprintf("the unfinished upgrade's target %s is not a BOM this build embeds", pending.Release))
 			break
+		}
+		// A roll that has begun was ordered for one Kubernetes version and node image: the record names one step and
+		// one target, so a BOM that replaces machines again cannot take the unfinished target's place.
+		if roll := rollOf(in); roll != nil {
+			var again []string
+			for _, c := range Classify(mid.BOM, to.BOM) {
+				if c.Class == ClassMachines || c.Class == ClassSeed {
+					again = append(again, c.Name)
+				}
+			}
+			if len(again) > 0 {
+				u.Blocking = append(u.Blocking, fmt.Sprintf("the replacement of the platform cluster's machines for release %s has begun (step %d) and release %s "+
+					"changes %s again: the machines already replaced would be replaced a second time. Finish the upgrade to %s first: an apply without a target "+
+					"(Retry) goes on with it, and this build embeds its BOM. Then start the upgrade to %s",
+					pending.Release, roll.Step, to.Release, strings.Join(again, ", "), pending.Release, to.Release))
+			}
 		}
 		for _, c := range Classify(mid.BOM, to.BOM) {
 			if c.Blocking != "" {
@@ -300,6 +345,31 @@ func move(in *Installation, target string) (run Embedded, up *Upgrade, err error
 		u.setParts(in, from.BOM, to.BOM)
 	}
 	return to, u, nil
+}
+
+// carries reports that this build's BOM cur takes the place of the unfinished target mid of an upgrade from from: the
+// two name the same Kubernetes version, node image, kube-vip, k3s, seed image, providers and third-party charts, and
+// differ only in what a run moves without replacing a machine (the release line, the tenant charts, the product's own
+// charts at a version that lists the other in upgradeFrom), and the installed BOM may move to cur as well, because
+// each component stands at one of the two. Then nothing a run of the unfinished upgrade has reached is rendered
+// otherwise under cur: the seed's k3s, the node image's templates and the roll's step keep their meaning, and the
+// units the roll has not reached render with cur's cluster chart. A development BOM is never a target, so it carries
+// nothing.
+func carries(from, mid, cur Embedded) bool {
+	if strings.HasSuffix(cur.Release, "-dev") {
+		return false
+	}
+	for _, c := range Classify(from.BOM, cur.BOM) {
+		if c.Blocking != "" {
+			return false
+		}
+	}
+	for _, c := range Classify(mid.BOM, cur.BOM) {
+		if c.Blocking != "" || (c.Class != ClassRecordOnly && c.Class != ClassChart) {
+			return false
+		}
+	}
+	return true
 }
 
 // later ends the reason of every change this release does not make.

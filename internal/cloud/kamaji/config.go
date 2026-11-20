@@ -69,6 +69,20 @@ const RollOrderChartVersion = "0.1.15"
 // the cluster's.
 func ChartHasRollOrder(v string) bool { return chartAtLeast(v, RollOrderChartVersion) }
 
+// NodeDeletionTimeoutChartVersion is the first cluster chart that reads nodeDeletionTimeoutSeconds: how long Cluster
+// API keeps trying to delete the Node of a Machine it removes, on the KubeadmControlPlane's and on every
+// MachineDeployment's machine template. Cluster API changes it on the Machines in place; no machine is replaced for it.
+const NodeDeletionTimeoutChartVersion = "0.1.16"
+
+// ChartHasNodeDeletionTimeout reports whether chart version v renders nodeDeletionTimeoutSeconds.
+func ChartHasNodeDeletionTimeout(v string) bool {
+	return chartAtLeast(v, NodeDeletionTimeoutChartVersion)
+}
+
+// NodeDeletionTimeoutUnset is the value of nodeDeletionTimeoutSeconds that makes the chart render no timeout at all:
+// the objects of the chart before NodeDeletionTimeoutChartVersion.
+const NodeDeletionTimeoutUnset = -1
+
 // ControlPlaneReplicasChartVersion is the first cluster chart that reads controlPlane.kubeadm.replicas. An older chart
 // writes one control plane machine whatever the value says.
 const ControlPlaneReplicasChartVersion = "0.1.14"

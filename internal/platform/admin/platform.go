@@ -666,6 +666,9 @@ func (h *Handler) PlatformPreflight(ctx context.Context, in *platformlife.Instal
 		Portal: portal, ProviderDisabled: es.IsDisabled(),
 		TemplateUpdatesVM: h.templateUpdates != nil && h.templateUpdates.VMEnabled, SchedulerOff: !h.jobsScheduler}
 	pf.MintStores, pf.MintZones = platformlife.MintScopeOf(es)
+	if in.Status.Seed != nil && len(in.Status.Clusters) > 0 {
+		pf.Seed, pf.Workload = platformlife.RollClients(ctx, in, sec)
+	}
 	if pf.CAPI, err = platformlife.TokenClient(es, sec.CAPI); err != nil {
 		return nil, err
 	}

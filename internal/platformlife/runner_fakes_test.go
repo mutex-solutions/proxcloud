@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -85,7 +86,13 @@ func (f *fakeJobs) end(s string) error {
 func (f *fakeJobs) Complete(context.Context, *durablejobs.Job, func(context.Context) error) error {
 	return f.end("complete")
 }
+
+// Fail and Defer refuse what the real store refuses (durablejobs.ValidCode): a code the store would not take must
+// fail a test here, not a lab drill.
 func (f *fakeJobs) Fail(_ context.Context, _ *durablejobs.Job, _ time.Duration, permanent bool, code string) error {
+	if !durablejobs.ValidCode(code) {
+		return errors.New("invalid failure")
+	}
 	if !permanent {
 		return f.end("retry:" + code)
 	}
@@ -95,6 +102,9 @@ func (f *fakeJobs) Defer(_ context.Context, _ *durablejobs.Job, _ time.Duration,
 	f.mu.Lock()
 	f.defers++
 	f.mu.Unlock()
+	if !durablejobs.ValidCode(code) {
+		return errors.New("invalid deferral")
+	}
 	return f.end("defer:" + code)
 }
 func (f *fakeJobs) last() string {
@@ -160,6 +170,8 @@ type fakeImports struct {
 	enqueued   []templateupdates.VMRequest
 	enqueueErr error
 	markErr    error
+	tries      map[string]int
+	lastCode   map[string]string
 }
 
 func (f *fakeImports) ByKey(_ context.Context, svc, node, digest string) ([]templateupdates.Receipt, error) {
@@ -176,6 +188,9 @@ func (f *fakeImports) JobState(_ context.Context, id string) (string, error) {
 		return "dead", nil
 	}
 	return "pending", nil
+}
+func (f *fakeImports) JobTries(_ context.Context, id string) (int, string) {
+	return f.tries[id], f.lastCode[id]
 }
 func (f *fakeImports) EnqueueVM(_ context.Context, req templateupdates.VMRequest, actor string) (*templateupdates.Receipt, error) {
 	if f.enqueueErr != nil {
@@ -772,6 +787,13 @@ func (f *fakeSeed) serve(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews" && kind == "sa":
 		fmt.Fprintf(w, `{"status":{"allowed":%t}}`, f.saAllowed)
 	case r.Method == http.MethodDelete && kind == "sa":
+		var opts map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&opts)
+		if uid := str(opts, "preconditions", "uid"); uid != "" && uid != str(f.objs[r.URL.Path], "metadata", "uid") { // as the API server
+			w.WriteHeader(http.StatusConflict)
+			fmt.Fprint(w, `{"message":"the UID in the precondition does not match the UID in record"}`)
+			return
+		}
 		f.writes = append(f.writes, "DELETE "+r.URL.Path)
 		delete(f.objs, r.URL.Path)
 		fmt.Fprint(w, `{}`)

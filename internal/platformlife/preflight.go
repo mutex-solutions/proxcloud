@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/templateupdates"
@@ -30,7 +31,7 @@ const (
 // Check is one row of the preflight. The ids are part of the API (docs/api.md): flags, scheduler (a warning, present only while the job scheduler is off), spec, network, bridge (a failure before the
 // first install, a warning after it), isolation,
 // tenant-network and tenant-path (a warning or ok, never a failure; absent when the provider names no zone), csi-vmid (a warning or ok, never a failure), credentials,
-// machines (a warning or ok, never a failure; absent while the installation has no VM), capacity (a failure before the first install; after it a warning, and a failure only where the settings make a control plane larger than the one a run built and it does not fit; a warning when it cannot be read; absent while the CAPI token is not stored), privileges:capi, privileges:csi, privileges:kubemint, mint-scope, pool-fence, token-scope, iso-store-visibility,
+// machines (a warning or ok, never a failure; absent while the installation has no VM), nodes (a warning or ok, never a failure; absent while the platform cluster cannot be read), capacity (a failure before the first install; after it a warning, and a failure only where the settings make a control plane larger than the one a run built and it does not fit; a warning when it cannot be read; absent while the CAPI token is not stored), privileges:capi, privileges:csi, privileges:kubemint, mint-scope, pool-fence, token-scope, iso-store-visibility,
 // boot-iso-grant, boot-iso, placement, argocd-access (present while spec.access.argocd is set: a failure on an address or networks Validate refuses, a warning when the operator networks contain a Proxmox node's address), boot-store (a failure when the store is missing or takes no disk image, a warning
 // when it holds other VMs' disks), pve-api-rule (a warning or ok, never a failure), seed-backup (a warning or ok, never a failure; present once the installation has a seed VM), images. A run's first stage fails preflight_failed with the failed rows as its items, or
 // isolation_not_enforced when isolation is the only one.
@@ -54,6 +55,8 @@ type Preflight struct {
 	GitHub            bool         // a GitHub integration is saved
 	// SchedulerOff: the job scheduler does not run (PROXCLOUD_JOBS_SCHEDULER_ENABLED): row scheduler, a warning.
 	SchedulerOff bool
+	// Seed and Workload are the seed's and the platform cluster's API (RollClients) for row nodes; nil = no row.
+	Seed, Workload *kamajik8s.Client
 	// Blocked reports a digest on the template update blocklist (templateupdates.Receipts.Blocked).
 	Blocked func(ctx context.Context, digest string) (bool, error)
 }
@@ -281,6 +284,10 @@ func (p Preflight) Run(ctx context.Context) []Check {
 		case len(vms) > 0:
 			row("machines", nil, fmt.Sprintf("The platform's %d VMs run and start when their node boots.", len(vms)))
 		}
+	}
+
+	if c := NodesCheck(ctx, p.Seed, p.Workload); c != nil {
+		out = append(out, *c)
 	}
 
 	if p.CAPI != nil {

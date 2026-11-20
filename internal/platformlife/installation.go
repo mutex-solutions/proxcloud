@@ -199,15 +199,18 @@ type BOMRef struct {
 
 // SeedStatus is the seed as the job built it. CACert is the certificate only; its key is never stored.
 type SeedStatus struct {
-	VMID        int        `json:"vmid,omitempty"`
-	Node        string     `json:"node,omitempty"`
-	Generation  int        `json:"generation,omitempty"`
-	APIServer   string     `json:"apiServer,omitempty"`
-	CACert      string     `json:"caCert,omitempty"`
-	CDVolume    string     `json:"cdVolume,omitempty"`    // "" once deleted
-	TokenSecret string     `json:"tokenSecret,omitempty"` // the name of the live SA token Secret, not its value
-	K3sVersion  string     `json:"k3sVersion,omitempty"`
-	ReadyAt     *time.Time `json:"readyAt,omitempty"`
+	VMID        int    `json:"vmid,omitempty"`
+	Node        string `json:"node,omitempty"`
+	Generation  int    `json:"generation,omitempty"`
+	APIServer   string `json:"apiServer,omitempty"`
+	CACert      string `json:"caCert,omitempty"`
+	CDVolume    string `json:"cdVolume,omitempty"`    // "" once deleted
+	TokenSecret string `json:"tokenSecret,omitempty"` // the name of the live SA token Secret, not its value
+	K3sVersion  string `json:"k3sVersion,omitempty"`
+	// PreUpgradeSnapshot is the path on the seed of the etcd snapshot the newest k3s upgrade Job saved before it
+	// replaced the binary (stage seed-k3s): what the way back across a minor restores.
+	PreUpgradeSnapshot string     `json:"preUpgradeSnapshot,omitempty"`
+	ReadyAt            *time.Time `json:"readyAt,omitempty"`
 }
 
 // ClusterStatus is one workload cluster as the job built it. KubeconfigSecret is a Secret name on the seed.

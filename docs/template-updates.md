@@ -150,7 +150,10 @@ moved out of `pc-templates`, or a token that lost its pool rights), or a templat
 renamed or migrated changes nothing. Such a template keeps blocking a re-import on the receipt's node
 until the operator deletes it in Proxmox (the next call then frees the receipt) or puts it back (its
 node, name and pool). A marked receipt then counts as failed for the duplicate check and shows
-`template_missing` on the page.
+`template_missing` on the page. A `template_missing` row names no VMID once another guest holds
+the one its template had (Proxmox gives a freed VMID to the next guest, often the next import on
+that node), with a warning that says which VMID it was: the list never shows one VMID for two
+templates.
 
 ### Download path
 

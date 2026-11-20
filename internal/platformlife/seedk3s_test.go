@@ -188,11 +188,25 @@ func TestSeedK3sUpgrade(t *testing.T) {
 	if end := p.once(); end != "defer:waiting_seed_k3s" {
 		t.Fatalf("before the Job's end is known: %s", end)
 	}
+	// k3s lists the snapshot the Job saved, beside a scheduled one and an older one of an earlier upgrade.
+	for name, at := range map[string]string{"etcd-snapshot-pc-seed-1795150000": "2026-11-20T06:00:00Z", "pre-upgrade-v1.35.9-k3s1-pc-seed-1790000000": "2026-10-01T07:00:00Z",
+		"pre-upgrade-v1.35.10-k3s1-pc-seed-1795158582": "2026-11-20T07:09:42Z"} {
+		p.seed.put("/apis/k3s.cattle.io/v1/etcdsnapshotfiles/"+name, map[string]any{"metadata": map[string]any{"name": name},
+			"spec":   map[string]any{"snapshotName": name, "location": "file://" + k3sSnapshots + "/" + name},
+			"status": map[string]any{"creationTime": at, "size": "11743264", "readyToUse": true}})
+	}
 	p.ended(job, "succeeded")
 	if end := p.until(30); end != "complete" {
 		t.Fatalf("end %s: %+v", end, p.stage(stageSeedK3s))
 	}
+	// The snapshot's real name is on the run and on the installation; the Job, the only other place, is gone.
+	const snapshot = k3sSnapshots + "/pre-upgrade-v1.35.10-k3s1-pc-seed-1795158582"
 	_, in, _ := p.state.snapshot()
+	if st := p.stage(stageSeedK3s); in.Status.Seed.PreUpgradeSnapshot != snapshot || !strings.Contains(st.Message, snapshot) || !slices.ContainsFunc(st.Items, func(i StageItem) bool {
+		return i.ID == "etcd-snapshot" && i.State == "saved" && strings.Contains(i.Message, snapshot)
+	}) {
+		t.Fatalf("the snapshot's name: record %q, stage %+v", in.Status.Seed.PreUpgradeSnapshot, st)
+	}
 	if in.Status.Seed.K3sVersion != "v1.35.11+k3s1" || p.seed.obj(job) != nil || p.stage(stageSeedK3s).State != StageDone ||
 		p.stage(stageSeedPlatform).State != StageDone || in.Status.BOM.SHA256 != cur.SHA256 {
 		t.Fatalf("after the upgrade: seed %+v, job %v, stage %+v", in.Status.Seed, p.seed.obj(job), p.stage(stageSeedK3s))

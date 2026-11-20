@@ -722,7 +722,7 @@ are several, `errors.details.problems`.
   changes nothing. No answer quotes the line.
 - `POST /installations/{id}/preflight`: read-only, not audited; `{ok, checks}`
   with rows `flags`, `scheduler` (a `warn` that says what tenants miss and the command that turns the job scheduler
-  on; absent while it runs), `spec`, `network`, `bridge`, `isolation`, `tenant-network`, `tenant-path`, `csi-vmid`, `credentials`, `machines`, `capacity`,
+  on; absent while it runs), `spec`, `network`, `bridge`, `isolation`, `tenant-network`, `tenant-path`, `csi-vmid`, `credentials`, `machines`, `nodes`, `capacity`,
   `privileges:capi`, `privileges:csi`, `privileges:kubemint`, `mint-scope`, `pool-fence`,
   `token-scope`, `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement`, `boot-store`,
   `pve-api-rule`, `seed-backup`, `argocd-access` and `images`. `argocd-access` is present while the spec has
@@ -768,6 +768,9 @@ are several, `errors.details.problems`.
   without routing the platform network, or when Proxmox could not be read; `ok` for mode `routed`. It opens no
   connection, so `ok` does not prove that tenants reach the platform; `…/tenant-path-probe` below does, and for a VLAN default
   zone, where that probe is refused, the row names the check from a tenant's server ([managed-services.md](managed-services.md#the-path-from-tenants-to-the-platform)).
+  `nodes` never fails: `ok` when every node of the platform cluster is Ready, `warn` with one line per node that
+  is not, and for a Node that no Machine owns (Cluster API removed its machine and left the Node object) the line
+  says that the next apply deletes it. Absent while the seed or the platform cluster cannot be read.
   `machines` never fails either, and is absent while the installation has no VM. It reads, with the CAPI
   token, the VMs of the pools `proxcloud-seed` and `proxcloud-system` that carry the installation's tag:
   `warn` with one line per VM that is stopped (start it in Proxmox, `qm start <vmid>`) or that has no
@@ -881,7 +884,12 @@ are several, `errors.details.problems`.
     version.
   - `confirm` is the phrase a run that starts the upgrade must carry, present
     when it is allowed and not started. `inProgress` is true once a run toward
-    `to` has started and none has succeeded (`status.targetBom`).
+    `to` has started and none has succeeded (`status.targetBom`). `carried` (`release`, `sha256`) is present with
+    `inProgress` when `to` is this release's BOM and took the place of the unfinished target of an earlier
+    release, which it names: while the platform cluster's machines are being replaced, a later release whose BOM
+    names the same Kubernetes version, node image, kube-vip and k3s continues the upgrade by itself, and the next
+    apply records `to` as `status.targetBom`
+    ([managed-services.md](managed-services.md#failure-retry-cancel-and-remove)).
   - `parts`, on a move that replaces the platform cluster's machines (entries of kind `machines`): its two actions,
     `[{id: "seed"|"platform", done, allowed, confirm, blocking[]}]`. `allowed`, `confirm` and `blocking` of the
     upgrade are then those of the platform part, the apply without a `part`. The seed part's phrase is `upgrade

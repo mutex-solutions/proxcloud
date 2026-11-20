@@ -716,7 +716,7 @@ func TestNodesCountsEveryControlPlaneMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := x.nodes(context.Background(), wl); err != nil {
+	if err := x.nodes(context.Background(), seed, wl); err != nil {
 		t.Fatalf("six nodes of a control plane of three and three groups: %v", err)
 	}
 }
