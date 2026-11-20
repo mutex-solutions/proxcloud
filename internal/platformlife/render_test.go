@@ -725,7 +725,7 @@ func TestSeedUserDataParses(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(ud), &cc); err != nil {
 		t.Fatal(err)
 	}
-	if len(cc.WriteFiles) != 4 || cc.Runcmd[0] != "set -eu" || cc.Runcmd[len(cc.Runcmd)-1] != "touch /etc/cloud/cloud-init.disabled" {
+	if len(cc.WriteFiles) != 5 || cc.Runcmd[0] != "set -eu" || cc.Runcmd[len(cc.Runcmd)-1] != "touch /etc/cloud/cloud-init.disabled" {
 		t.Fatalf("write_files %d, runcmd %q", len(cc.WriteFiles), cc.Runcmd)
 	}
 	for _, f := range cc.WriteFiles {
@@ -734,6 +734,12 @@ func TestSeedUserDataParses(t *testing.T) {
 			if err := yaml.Unmarshal([]byte(f.Content), &v); err != nil {
 				t.Errorf("%s: %v", f.Path, err)
 			}
+		}
+		if f.Path == k3sLeaderElectFile { // no secret; the upgrade Job writes the same bytes (TestSeedK3sJobOnAHost)
+			if f.Content != k3sLeaderElect+"\n" || f.Permissions != "0644" {
+				t.Errorf("%s: mode %s, content %q", f.Path, f.Permissions, f.Content)
+			}
+			continue
 		}
 		if strings.HasSuffix(f.Path, ".key") || strings.HasSuffix(f.Path, ".yaml") {
 			if f.Permissions != "0600" {

@@ -4,6 +4,21 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-20: the seed's k3s without leader election, and the way back across a minor
+
+**What changed:** no component or container. Component "Platform runs": `SeedUserData` writes one more file at a
+seed's first boot, the k3s config drop-in `/etc/rancher/k3s/config.yaml.d/10-proxcloud-leader-elect.yaml`
+(`leader-elect=false` for kube-controller-manager, kube-scheduler and k3s's cloud-controller-manager), and the Job of
+stage `seed-k3s` (`SeedK3sJob`) writes the same file after the checksum and before it replaces the binary. Component
+"Platform installations": the classifier lists it as one more `site` row, `seed-k3s-config`, and the row
+`seed-k3s-binary` and the message of `seed_k3s_timeout` give the way back by hand (`seedK3sWayBack`): the previous
+binary within a minor, and k3s's rollback with the etcd snapshot the Job saved across one.
+
+**Why:** a seed is one k3s server, and a lease missed under disk load ended k3s on a lab seed; v0.10.1 is the first
+move of the seed across a k3s minor, where the previous binary alone is no way back.
+
+**Diagrams:** none.
+
 ## 2026-11-20: the platform BOM names k3s v1.36.6+k3s1 and Kubernetes 1.36.6
 
 **What changed:** no component or container, and no code of one. The BOM's `seed.k3s`, `kubernetes.version` and

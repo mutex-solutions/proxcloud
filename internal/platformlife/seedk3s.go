@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -20,11 +21,49 @@ import (
 // k3sSnapshots is where k3s keeps the snapshots of its embedded etcd.
 const k3sSnapshots = "/var/lib/rancher/k3s/server/db/snapshots"
 
+// k3sLeaderElectFile is the k3s config drop-in that turns leader election off in kube-controller-manager,
+// kube-scheduler and k3s's cloud-controller-manager. A seed is one k3s server, and k3s turns their election off by
+// itself only for a datastore without it (sqlite), not for the embedded etcd of cluster-init: each then exits, and
+// k3s with it, when a slow disk makes it miss its lease, although no other server could ever take it. k3s loads
+// config.yaml.d/*.yaml after config.yaml; a key that ends in "+" is appended to the value before it, so an argument
+// set by hand in config.yaml stays. k3s's own controllers keep their lease: no argument turns that one off.
+const k3sLeaderElectFile = "/etc/rancher/k3s/config.yaml.d/10-proxcloud-leader-elect.yaml"
+
+// k3sLeaderElect is the content of k3sLeaderElectFile: JSON, as config.yaml is, on one line (the Job writes it with
+// one printf).
+const k3sLeaderElect = `{"kube-controller-manager-arg+":["leader-elect=false"],"kube-scheduler-arg+":["leader-elect=false"],"kube-cloud-controller-manager-arg+":["leader-elect=false"]}`
+
+// seedK3sWayBack is the step by hand that puts the previous k3s back on a seed whose API does not come back after
+// stage seed-k3s replaced the binary. Within a minor that is the previous binary. Across a minor k3s's rollback
+// document (docs/upgrades/roll-back.md, embedded etcd) asks for the datastore of the old minor too: k3s-killall.sh,
+// the old binary without a start, the snapshot restored with --cluster-reset, then the start. The snapshot is the one
+// the Job saved first. Its name ends in the node's name and the time of the save, which the run cannot read while the
+// seed's API is away, so the command takes the newest file of the Job's name, and stops before it touches anything
+// when there is none (--cluster-reset with an empty path would reset etcd without restoring).
+func seedK3sWayBack(from, to *BOM) string {
+	const back = "mv /usr/local/bin/k3s.prev /usr/local/bin/k3s"
+	if from != nil && to != nil {
+		f, ferr := k3sVersion(from.Seed.K3s.Version)
+		t, terr := k3sVersion(to.Seed.K3s.Version)
+		if ferr == nil && terr == nil && f[1] != t[1] {
+			snap := k3sSnapshots + "/" + k3sSnapshotName(from.Seed.K3s.Version)
+			return "`S=\"$(ls -t " + snap + "-* | head -n 1)\" && test -n \"$S\" && k3s-killall.sh && " + back +
+				" && k3s server --cluster-reset --cluster-reset-restore-path=\"$S\" && systemctl start k3s`. This move crosses a k3s minor, so the " +
+				"previous binary alone is not enough (k3s: without the datastore of the old minor there is no way back). The command restores the etcd " +
+				"snapshot the Job saved before it replaced the binary, " + snap + "-<node>-<time> (the newest such file), and stops before it changes " +
+				"anything when there is none. k3s-killall.sh also stops the pods on the seed; what was written on the seed after the snapshot is lost; " +
+				"`k3s server --cluster-reset` ends by itself with a line that asks for a start without the flag"
+		}
+	}
+	return "`" + back + " && systemctl restart k3s`"
+}
+
 // seedK3sTimeout ends the message of a seed-k3s stage that ran out of time.
-const seedK3sTimeout = " The platform cluster and every tenant keep serving; nothing is reconciled (machines, the platform's own components, runs) " +
-	"until the seed's API answers. If it does not come back and the binary was replaced (/usr/local/bin/k3s.prev exists), put the previous one back " +
-	"over SSH with a key of spec.seed.sshKeys: `mv /usr/local/bin/k3s.prev /usr/local/bin/k3s && systemctl restart k3s` (this step was not tried on " +
-	"a lab). Retry then runs the stage again."
+func seedK3sTimeout(from, to *BOM) string {
+	return " The platform cluster and every tenant keep serving; nothing is reconciled (machines, the platform's own components, runs) " +
+		"until the seed's API answers. If it does not come back and the binary was replaced (/usr/local/bin/k3s.prev exists), put the previous one back " +
+		"over SSH with a key of spec.seed.sshKeys: " + seedK3sWayBack(from, to) + " (this step was not tried on a lab). Retry then runs the stage again."
+}
 
 // seedK3sStale is how long after the Job's end the seed's node may still report the old k3s before the stage takes
 // the upgrade as undone.
@@ -38,8 +77,11 @@ func k3sSnapshotName(from string) string { return "pre-upgrade-" + slug(from) }
 
 // SeedK3sJob is the Job that moves the seed from k3s version from to the BOM's: in the host's namespaces (hostPID,
 // privileged, nsenter into pid 1) it saves an etcd snapshot, downloads the binary beside the running one, checks its
-// sha256, keeps the running binary as k3s.prev, moves the new one in and restarts k3s. sh -eu ends the script at the
-// first failure, so a failed snapshot, download or checksum leaves k3s as it was. The image is the BOM's clusterctl
+// sha256, writes the config drop-in k3sLeaderElectFile, keeps the running binary as k3s.prev, moves the new one in and
+// restarts k3s. sh -eu ends the script at the first failure, so a failed snapshot, download, checksum or config write
+// leaves k3s as it was. The drop-in is written after the checksum and before the binary is touched: a failure after it
+// leaves the file, which the running k3s does not read and the next start of either binary takes as intended. It is
+// written beside its place and moved in, so no start of k3s finds half a file (k3s loads *.yaml and *.yml only). The image is the BOM's clusterctl
 // image: alpine, whose busybox has nsenter with these flags, and already on the seed (the capi hook pulled it). The
 // Job holds no secret: the URL and the sum are public.
 func SeedK3sJob(b *BOM, from string) map[string]any {
@@ -48,6 +90,9 @@ func SeedK3sJob(b *BOM, from string) map[string]any {
 	script := strings.Join([]string{
 		"k3s etcd-snapshot save --name " + q(k3sSnapshotName(from)),
 		fetch[0], fetch[1], fetch[2],
+		"mkdir -p " + path.Dir(k3sLeaderElectFile),
+		"printf '%s\\n' " + q(k3sLeaderElect) + " > " + k3sLeaderElectFile + ".new",
+		"mv -f " + k3sLeaderElectFile + ".new " + k3sLeaderElectFile,
 		"cp -p " + bin + " " + bin + ".prev",
 		"mv -f " + bin + ".new " + bin,
 		"systemctl restart k3s",
@@ -160,7 +205,8 @@ func (x *acq) seedK3s(ctx context.Context) error {
 		if err := seed.ApplyCR(ctx, "batch", "v1", "jobs", SeedK3sJob(x.bom, live)); err != nil {
 			return classify(CodeSeedK3sFailed, err)
 		}
-		return waiting(TimeoutCode(stageSeedK3s), "The Job %s/%s was created: it saves an etcd snapshot, downloads k3s %s, checks it and restarts k3s.", ns, name, target)
+		return waiting(TimeoutCode(stageSeedK3s), "The Job %s/%s was created: it saves an etcd snapshot (%s/%s-<node>-<time>), downloads k3s %s, checks it, writes %s and restarts k3s.",
+			ns, name, k3sSnapshots, k3sSnapshotName(live), target, k3sLeaderElectFile)
 	case count("failed"):
 		tail := "the Job's pod left no message"
 		if pods, err := seed.ListPods(ctx, ns, "job-name="+name); err == nil && len(pods) > 0 {

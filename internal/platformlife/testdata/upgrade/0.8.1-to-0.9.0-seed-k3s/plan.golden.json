@@ -37,14 +37,21 @@
       "to": "/var/lib/rancher/k3s/server/db/snapshots/pre-upgrade-v1.35.10-k3s1-\u003cnode\u003e-\u003ctime\u003e",
       "class": "site",
       "stage": "seed-k3s",
-      "impact": "The Job first saves a snapshot of the seed's etcd (k3s etcd-snapshot save). It is kept: k3s's own snapshot retention applies."
+      "impact": "The Job first saves a snapshot of the seed's etcd (k3s etcd-snapshot save). It is kept: k3s prunes no snapshot saved on demand."
+    },
+    {
+      "name": "seed-k3s-config",
+      "to": "/etc/rancher/k3s/config.yaml.d/10-proxcloud-leader-elect.yaml",
+      "class": "site",
+      "stage": "seed-k3s",
+      "impact": "Before it replaces the binary the Job writes this k3s config drop-in: leader-elect=false for kube-controller-manager, kube-scheduler and k3s's cloud-controller-manager, which a seed of one server does not need and which ended k3s when a slow disk made one miss its lease. It takes effect with the restart. /etc/rancher/k3s/config.yaml stays as installed. To undo it by hand: delete the file and restart k3s."
     },
     {
       "name": "seed-k3s-binary",
       "to": "/usr/local/bin/k3s, the previous binary kept as /usr/local/bin/k3s.prev",
       "class": "site",
       "stage": "seed-k3s",
-      "impact": "The binary is replaced only after the download passed its sha256. The install script is not run again: the unit and /etc/rancher/k3s/config.yaml stay."
+      "impact": "The binary is replaced only after the download passed its sha256. The install script is not run again: the unit stays. The way back if the seed's API does not return, by hand over SSH: `mv /usr/local/bin/k3s.prev /usr/local/bin/k3s \u0026\u0026 systemctl restart k3s`. Not tried on a lab."
     }
   ],
   "blocking": []

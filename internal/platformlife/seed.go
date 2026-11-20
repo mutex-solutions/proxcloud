@@ -149,7 +149,8 @@ type SeedBoot struct {
 	Now        time.Time // the bootstrap token expires SeedBootstrapTTL later
 }
 
-// SeedUserData is the seed's cloud-config (design §4.3): the server CA before k3s first starts, k3s's config, the
+// SeedUserData is the seed's cloud-config (design §4.3): the server CA before k3s first starts, k3s's config and its
+// drop-in without leader election (k3sLeaderElectFile), the
 // bootstrap manifest on tmpfs, then k3s from the BOM checked by sha256, one apply of the manifest, and cloud-init turned
 // off, so a later boot keeps the network it wrote and nothing reapplies the manifest. The CA key, the k3s token and the
 // bootstrap token are the only secrets in it (§5).
@@ -181,6 +182,7 @@ func SeedUserData(b *BOM, in RenderInput, boot SeedBoot) (string, error) {
 			file("/var/lib/rancher/k3s/server/tls/server-ca.crt", boot.Secrets.CACert, "0644"),
 			file("/var/lib/rancher/k3s/server/tls/server-ca.key", boot.Secrets.CAKey, "0600"),
 			file("/etc/rancher/k3s/config.yaml", k3sConfig, "0600"),
+			file(k3sLeaderElectFile, k3sLeaderElect+"\n", "0644"),
 			file("/run/proxcloud/bootstrap.yaml", manifest, "0600"),
 		},
 		// cloud-init writes these lines into one sh script: set -eu stops it at the first failure, so a k3s that fails
