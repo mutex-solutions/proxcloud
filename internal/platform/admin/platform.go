@@ -303,8 +303,9 @@ func (h *Handler) siteDefaults(r *http.Request, in *platformlife.Installation, b
 	return ch
 }
 
-// checked fills in from preset, normalizes it and checks it on its own and against its provider's networks.
-func (h *Handler) checked(r *http.Request, in *platformlife.Installation, preset string) error {
+// checked fills in from preset, normalizes it and checks it on its own and against its provider's networks. stored is
+// the spec an update replaces (nil on a create): what it already holds is not refused by a rule that came later.
+func (h *Handler) checked(r *http.Request, in *platformlife.Installation, preset string, stored *platformlife.Spec) error {
 	if err := platformlife.ApplyPreset(preset, &in.Spec, in.BuildsThree()); err != nil {
 		return &invalidInstallation{status: http.StatusBadRequest, code: "invalid_installation", msg: "The installation is not valid", problems: []string{err.Error()}}
 	}
@@ -321,6 +322,7 @@ func (h *Handler) checked(r *http.Request, in *platformlife.Installation, preset
 	if err := in.Validate(); err != nil {
 		problems = strings.Split(err.Error(), "\n")
 	}
+	problems = append(problems, in.ArgoSourceProblems(stored)...)
 	problems = append(problems, in.ControlPlaneCountProblems()...)
 	problems = append(problems, in.SiteProblems(platformlife.SiteOf(es))...)
 	if len(problems) > 0 {
@@ -363,7 +365,7 @@ func (h *Handler) platformCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	in := &platformlife.Installation{Name: req.Name, ServiceID: req.ServiceID, ProvisionedBy: req.ProvisionedBy, Layout: req.Layout,
 		Spec: req.Spec, CreatedBy: adminActor(r)}
-	if platformStoreErr(w, h.checked(r, in, req.Preset)) || platformStoreErr(w, h.platform.Create(r.Context(), in)) {
+	if platformStoreErr(w, h.checked(r, in, req.Preset, nil)) || platformStoreErr(w, h.platform.Create(r.Context(), in)) {
 		return
 	}
 	httpx.OK(w, &installationView{Installation: in, SiteChanges: h.siteDefaults(r, in, asSnapshot(in))})
@@ -402,7 +404,7 @@ func (h *Handler) platformUpdate(w http.ResponseWriter, r *http.Request) {
 			}
 			platformlife.KeepMachines(&old.Spec, &next.Spec)
 		}
-		if err := h.checked(r, &next, req.Preset); err != nil {
+		if err := h.checked(r, &next, req.Preset, &old.Spec); err != nil {
 			return nil, err
 		}
 		if why := platformlife.ControlPlaneShrink(&old, &next); why != "" {

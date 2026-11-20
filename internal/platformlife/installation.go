@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 )
@@ -360,6 +361,25 @@ func (in *Installation) Normalize() {
 			cp.Nodes = nil // says what node says: not stored
 		}
 	}
+}
+
+// ArgoSourceProblems names an entry of spec.access.argocd.sources that Kubernetes 1.36 refuses in the ArgoCD Service's
+// loadBalancerSourceRanges (cloud.StrictCIDRs): a save refuses it. An entry stored already has passes, because the API
+// server keeps a value the Service holds and the stored spec is never rewritten; the argocd-access row warns about it.
+// It is not part of Validate, which also reads stored specs: a platform installed before the rule must still plan.
+func (in *Installation) ArgoSourceProblems(stored *Spec) []string {
+	a := in.Spec.Access.ArgoCD
+	if a == nil {
+		return nil
+	}
+	var had []string
+	if stored != nil && stored.Access.ArgoCD != nil {
+		had = stored.Access.ArgoCD.Sources
+	}
+	if err := cloud.StrictCIDRs(a.Sources, had); err != nil {
+		return []string{"spec.access.argocd.sources: " + err.Error()}
+	}
+	return nil
 }
 
 // Validate checks an installation on its own, without the site: every rule of design §8.3 to §8.5 that needs nothing

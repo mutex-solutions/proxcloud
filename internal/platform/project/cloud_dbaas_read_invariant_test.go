@@ -256,3 +256,29 @@ func TestDbaasReadInvariantSetAndCreateKeep400AndRepairIsNotGlobal(t *testing.T)
 		t.Fatal("unrelated repair was blocked or reader policy silently changed", w.Code)
 	}
 }
+
+// SET_ALLOWED_CIDRS against the database's live values (a fake that keeps the Application as the API server would):
+// a new entry with host bits is a 400 before anything is applied, and a database stored with such an entry before the
+// rule takes its own list back, alone or with one more network, without the entry being rewritten.
+func TestDbaasSetAllowedCIDRsFollowsKubernetes136(t *testing.T) {
+	h, a, p, es, cr := readInvariantFixture(dbaas.EnginePostgreSQL, float64(3), false)
+	set := func(cidrs ...any) *httptest.ResponseRecorder {
+		return callReadInvariantAction(t, h, p, es, cr, "SET_ALLOWED_CIDRS", map[string]any{"allowedCidrs": cidrs})
+	}
+	if w := set("192.0.2.0/24", "192.168.0.5/24"); w.Code != 400 || a.applies != 0 || !strings.Contains(w.Body.String(), "allowedCidrs: 192.168.0.5/24 has host bits set: use 192.168.0.0/24") {
+		t.Fatalf("a new entry with host bits: %d %s, %d applies", w.Code, w.Body, a.applies)
+	}
+	readInvariantValues(a.app)["network"].(map[string]any)["allowedCidrs"] = []any{"192.168.0.5/24"} // stored before the rule
+	if w := set("192.168.0.5/24"); w.Code != 200 {
+		t.Fatalf("the stored list sent back: %d %s", w.Code, w.Body)
+	}
+	if w := set("192.168.0.5/24", "198.51.100.0/24"); w.Code != 200 {
+		t.Fatalf("the stored list with one more network: %d %s", w.Code, w.Body)
+	}
+	if got := readInvariantValues(a.app)["network"].(map[string]any)["allowedCidrs"].([]any); len(got) != 2 || got[0] != "192.168.0.5/24" || got[1] != "198.51.100.0/24" {
+		t.Fatalf("applied list: %v", got)
+	}
+	if w := set("192.168.0.5/24", "198.51.100.9/24"); w.Code != 400 {
+		t.Fatalf("a second entry with host bits beside the stored one: %d %s", w.Code, w.Body)
+	}
+}

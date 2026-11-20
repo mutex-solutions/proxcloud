@@ -744,15 +744,18 @@ func (h *Handler) dbaasAction(w http.ResponseWriter, r *http.Request, proj *Proj
 		return true
 
 	case "SET_ALLOWED_CIDRS":
-		cidrs, err := dbaasCIDRs(data["allowedCidrs"])
-		if err != nil {
+		if _, err := dbaasCIDRsStrings(data["allowedCidrs"]); err != nil { // the shape, before the database is read
 			h.fail(w, httpx.BadRequest(err.Error()))
 			return true
 		}
-		err = ds.PatchDatabaseValues(r.Context(), cr.ExternalID, func(values map[string]any) error {
+		err := ds.PatchDatabaseValues(r.Context(), cr.ExternalID, func(values map[string]any) error {
 			network, _ := values["network"].(map[string]any)
 			if network == nil {
 				return fmt.Errorf("dbaas: database %s: values carry no network block", cr.ExternalID)
+			}
+			cidrs, err := dbaasCIDRs(data["allowedCidrs"], network["allowedCidrs"])
+			if err != nil {
+				return httpx.BadRequest(err.Error())
 			}
 			network["allowedCidrs"] = cidrs
 			return nil
@@ -1095,15 +1098,17 @@ func dbaasCIDRsStrings(v any) ([]string, error) {
 	return out, nil
 }
 
-// dbaasCIDRs is the []any twin for values patches (SET_ALLOWED_CIDRS), with syntax validation.
-func dbaasCIDRs(v any) ([]any, error) {
+// dbaasCIDRs is the []any twin for values patches (SET_ALLOWED_CIDRS), checked as the create checks them
+// (cloud.StrictCIDRs). stored is the list the database has now: an entry of it may stay as it is, because Kubernetes
+// keeps accepting a value the Service already holds, so a list sent back with one more entry is not refused for an old one.
+func dbaasCIDRs(v, stored any) ([]any, error) {
 	list, err := dbaasCIDRsStrings(v)
 	if err != nil {
 		return nil, err
 	}
-	spec := dbaas.DatabaseSpec{AllowedCIDRs: list}
-	if err := dbaasValidateCIDRs(spec.AllowedCIDRs); err != nil {
-		return nil, err
+	had, _ := dbaasCIDRsStrings(stored)
+	if err := cloud.StrictCIDRs(list, had); err != nil {
+		return nil, fmt.Errorf("allowedCidrs: %w", err)
 	}
 	out := make([]any, 0, len(list))
 	for _, s := range list {

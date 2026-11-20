@@ -71,15 +71,31 @@ func TestDbaasSpecFromData(t *testing.T) {
 }
 
 func TestDbaasCIDRs(t *testing.T) {
-	out, err := dbaasCIDRs([]any{"10.0.0.0/8", ""})
+	out, err := dbaasCIDRs([]any{"10.0.0.0/8", ""}, nil)
 	if err != nil || len(out) != 1 || out[0] != "10.0.0.0/8" {
 		t.Fatalf("out=%v err=%v", out, err)
 	}
-	if _, err := dbaasCIDRs([]any{"10.0.0.1"}); err == nil {
+	if _, err := dbaasCIDRs([]any{"10.0.0.1"}, nil); err == nil {
 		t.Fatal("bare IP must be rejected")
 	}
-	if _, err := dbaasCIDRs("10.0.0.0/8"); err == nil {
+	if _, err := dbaasCIDRs("10.0.0.0/8", nil); err == nil {
 		t.Fatal("non-array must be rejected")
+	}
+	// SET_ALLOWED_CIDRS on Kubernetes 1.36: a new entry with host bits is refused with the form to write; the list
+	// the database already has may come back as it is, alone or beside a new canonical entry (the API server keeps a
+	// value the Service holds), and is stored unchanged.
+	if _, err := dbaasCIDRs([]any{"192.168.0.5/24"}, []any{"10.0.0.0/8"}); err == nil || err.Error() != "allowedCidrs: 192.168.0.5/24 has host bits set: use 192.168.0.0/24" {
+		t.Fatalf("a new entry with host bits: %v", err)
+	}
+	stored := []any{"192.168.0.5/24"}
+	if out, err := dbaasCIDRs([]any{"192.168.0.5/24"}, stored); err != nil || len(out) != 1 || out[0] != "192.168.0.5/24" {
+		t.Fatalf("the stored list sent back: %v %v", out, err)
+	}
+	if out, err := dbaasCIDRs([]any{"192.168.0.5/24", "10.0.0.0/8"}, stored); err != nil || len(out) != 2 {
+		t.Fatalf("the stored list with one more entry: %v %v", out, err)
+	}
+	if _, err := dbaasCIDRs([]any{"192.168.0.5/24", "10.1.2.3/8"}, stored); err == nil {
+		t.Fatal("a second entry with host bits passed beside the stored one")
 	}
 }
 

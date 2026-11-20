@@ -12,12 +12,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"net"
 	"regexp"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 )
 
@@ -288,10 +288,9 @@ func (s DatabaseSpec) Validate(c Config) error {
 	if s.StorageClass != "" && (CapacityClass(s.StorageClass) || !slices.Contains(c.StorageClasses, s.StorageClass)) {
 		return fmt.Errorf("database: storage class %q is not offered by this provider", s.StorageClass)
 	}
-	for _, cidr := range s.AllowedCIDRs {
-		if _, _, err := net.ParseCIDR(cidr); err != nil {
-			return fmt.Errorf("database: allowed CIDR %q: %w", cidr, err)
-		}
+	// The list becomes the Service's loadBalancerSourceRanges, where Kubernetes 1.36 refuses a CIDR with host bits.
+	if err := cloud.StrictCIDRs(s.AllowedCIDRs, nil); err != nil {
+		return fmt.Errorf("database: allowedCidrs: %w", err)
 	}
 	return nil
 }

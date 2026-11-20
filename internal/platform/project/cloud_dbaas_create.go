@@ -9,7 +9,6 @@ package project
 import (
 	"context"
 	"fmt"
-	"net"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/dbaas"
@@ -38,14 +37,4 @@ func (h *Handler) dbaasSourceForRestore(ctx context.Context, proj *Project, spec
 		return cr, nil
 	}
 	return nil, fmt.Errorf("source database %q is not in this project", spec.RestoreFrom.SourceID)
-}
-
-// dbaasValidateCIDRs is pure input validation for loadBalancerSourceRanges.
-func dbaasValidateCIDRs(cidrs []string) error {
-	for _, c := range cidrs {
-		if _, _, err := net.ParseCIDR(c); err != nil {
-			return fmt.Errorf("invalid CIDR %q", c)
-		}
-	}
-	return nil
 }

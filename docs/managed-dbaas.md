@@ -54,7 +54,9 @@ What a site must do, one of:
   a filter against the outside only: a database is then reachable, at the network level, by every
   tenant of the installation, and its password and TLS are the boundary.
 
-ProxCloud does not check which of the two a site runs, and accepts any `allowedCidrs`. The routed
+ProxCloud does not check which of the two a site runs, and accepts any `allowedCidrs` that are
+networks in canonical form: an entry with host bits (`192.168.0.5/24`) is refused with the form to
+write, because Kubernetes 1.36 refuses it on the Service; an entry a database already has stays. The routed
 setup was not run on a lab.
 
 A database's replicas spread across `topology.kubernetes.io/zone` as a **hard** anti-affinity

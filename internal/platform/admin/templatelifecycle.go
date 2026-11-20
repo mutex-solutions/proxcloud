@@ -261,6 +261,9 @@ func (h *Handler) templateUpdatesWithdraw(w http.ResponseWriter, r *http.Request
 		templateUpdatesErr(w, err)
 		return
 	}
+	if res.NoOp { // the repeat of a withdraw that is complete: no tag changed, the blocklist kept its first entry
+		audit.NoEvent(r.Context())
+	}
 	audit.RecordSnapshots(r.Context(), map[string]any{"withdrawn": false}, map[string]any{"withdrawn": true, "action": "withdraw", "importId": id,
 		"digest": res.Digest, "slug": res.Slug, "serviceId": res.ServiceID, "reason": strings.TrimSpace(req.Reason), "force": req.Force,
 		"confirmNodeLoss": req.ConfirmNodeLoss, "changedVmids": res.Changed, "remainingPublished": res.Remaining, "complete": res.Complete,
@@ -360,7 +363,11 @@ func (h *Handler) templateUpdatesDelete(w http.ResponseWriter, r *http.Request) 
 		templateUpdatesErr(w, err)
 		return
 	}
-	// A Delete that found the template already gone deleted nothing: the row says so (deleted stays false).
+	// A Delete of a receipt that was already freed wrote nothing: no row. One that found the template destroyed by hand
+	// freed the receipt and deleted nothing: its row says so (deleted stays false).
+	if res.NoOp {
+		audit.NoEvent(r.Context())
+	}
 	audit.RecordSnapshots(r.Context(), map[string]any{"deleted": false}, map[string]any{"deleted": !res.Unchanged, "action": "delete", "importId": id,
 		"digest": res.Digest, "slug": res.Slug, "serviceId": res.ServiceID, "deletedVmids": res.Changed, "unchanged": res.Unchanged})
 	httpx.OK(w, res)

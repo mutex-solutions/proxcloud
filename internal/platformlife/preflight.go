@@ -810,7 +810,7 @@ func (p Preflight) tenantPath(ctx context.Context, site Site, zones []pve.SDNZon
 
 // argoAccessCheck is the row argocd-access, present while spec.access.argocd is set: a failure on what Validate
 // refuses of the block, a warning when a source range contains an address of a Proxmox node (nodeAddrs, each as a
-// /32: pve.NodeAddresses) or when those were not read, ok otherwise. Where tenant traffic leaves under the
+// /32: pve.NodeAddresses), when those were not read or when a stored source has host bits (ArgoSourceProblems), ok otherwise. Where tenant traffic leaves under the
 // node's address (SNAT), a tenant VM arrives from that address, and a source range cannot tell it from an operator.
 func (in *Installation) argoAccessCheck(nodeAddrs []string, unread bool) (Check, bool) {
 	a := in.Spec.Access.ArgoCD
@@ -853,6 +853,11 @@ func (in *Installation) argoAccessCheck(nodeAddrs []string, unread bool) (Check,
 		c.Status, c.Message = CheckWarn, what+" The Proxmox nodes' networks could not be read, so whether the operator networks contain a node's address is not known."
 	default:
 		c.Message = what + " No Proxmox node's address is inside the operator networks."
+	}
+	// A stored entry the save refuses today (ArgoSourceProblems): kept as it is, and said here.
+	if p := in.ArgoSourceProblems(nil); len(p) > 0 {
+		c.Status, c.Message = CheckWarn, c.Message+" "+p[0]+". Kubernetes 1.36 refuses such a value when the ArgoCD Service is created or its list changes, "+
+			"and keeps it on a Service that already holds it: save the settings with the network written that way."
 	}
 	return c, true
 }
