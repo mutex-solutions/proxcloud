@@ -397,6 +397,7 @@ spec:
         proxcloud.io/node-group: workers
     spec:
       clusterName: pc-c-abcd1234
+      deletion: {nodeDeletionTimeoutSeconds: 1800}
       version: "v1.35.10"
       bootstrap:
         configRef:

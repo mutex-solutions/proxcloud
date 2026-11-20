@@ -35,6 +35,15 @@ more. Both are for the platform cluster, whose upgrade run moves one MachineDepl
 MachineDeployment only and are in no machine or bootstrap template, so neither changes a template's name. Without
 them the render is that of 0.1.14: the cluster's version, and Cluster API's own rollout (one more machine first, none
 unavailable).
+
+nodeDeletionTimeoutSeconds (from chart 0.1.16) is template.spec.deletion.nodeDeletionTimeoutSeconds of every
+MachineDeployment (MachineDeployment v1beta2, Cluster API v1.14.4 api/core/v1beta2/machine_types.go:490 and 531): how
+long Cluster API keeps trying to delete the Node of a Machine it removes, counted from the start of the Machine's
+deletion, the drain included; its own default is 10 seconds, after which the Node stays in the cluster with no Machine.
+control-plane-kubeadm.yaml has the reason for the value. Cluster API copies it to the MachineSets and the Machines in
+place and leaves it out of the rollout decision (core/reconcilers/machineset/machineset_controller.go:654-673,
+core/reconcilers/machinedeployment/mdutil/util.go:416-442), and it is in no machine or bootstrap template: no machine
+is replaced for it. A negative value renders nothing, which is the render of 0.1.15.
 */ -}}
 {{- $root := . }}
 {{- $net := .Values.proxmox.network }}
@@ -153,6 +162,9 @@ spec:
         {{- end }}
     spec:
       clusterName: {{ $root.Release.Name }}
+      {{- if ge (int $root.Values.nodeDeletionTimeoutSeconds) 0 }}
+      deletion: {nodeDeletionTimeoutSeconds: {{ int $root.Values.nodeDeletionTimeoutSeconds }}}
+      {{- end }}
       version: {{ printf "v%s" (get ($ng.kubernetesVersions | default dict) $node | default $root.Values.kubernetesVersion | toString | trimPrefix "v") | quote }}
       bootstrap:
         configRef:
