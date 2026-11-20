@@ -729,9 +729,13 @@ are several, `errors.details.problems`.
   `access.argocd`: `fail` on an address or sources the spec check refuses, `warn` when a source range contains the
   address of a Proxmox node (where tenant traffic leaves under that address, tenants then reach the ArgoCD login
   page) or the nodes' networks could not be read, `ok` otherwise. `seed-backup` is present once the installation has a seed VM and never
-  fails: `ok` when a store of the seed's node that the portal token can read holds a `vzdump` archive of the seed VM
-  younger than 24 hours (the message names its time and store), `warn` when none is seen, with the newest older one
-  and the stores whose backups the token could not read. `boot-store` fails when Proxmox has no storage of
+  fails: `ok` with the archive's time and store when the portal sees a `vzdump` archive of the seed VM younger than
+  24 hours. Proxmox lists a VM's backups only to a token with `VM.Backup` on that VM or `Datastore.Allocate` on the
+  store (a `200` without them otherwise), and the portal token is fenced off the seed VM, so the portal sees them on the
+  provider's import store (portal token) and on the platform's ISO store (`capmox@pve!capi`) alone. For any other
+  backup store of the seed's node the message says that the portal cannot see backups of the seed VM there and what
+  to check in Proxmox; the row is then `ok`, and `warn` while an upgrade that replaces the seed's k3s waits to be
+  started. `warn` also when every backup store was read and none holds an archive younger than 24 hours. `boot-store` fails when Proxmox has no storage of
   the boot store's name or it takes no disk images, and warns when the store also
   holds disks of VMs that are not the platform's (listed with the CSI token, once both tokens are stored; of the
   pool `pc-templates` only the templates are left out, a VM of that pool that is no template is listed).
@@ -887,9 +891,11 @@ are several, `errors.details.problems`.
     unit (kind `machines`: what stops while it is replaced) and one `roll-vm/<unit>` (kind `site`: the VM cloned and
     the VM deleted), with the decision "one more machine first" or "deleted first" of this read.
   - `seedBackup` is the preflight row `seed-backup`, read for this request, on a move that has a `seed` entry and
-    has not started. While it is not `ok`, `blocking` also carries `seed_backup_missing: no backup of seed VM <vmid>
-    younger than 24 hours is visible to the portal. Take one (vzdump <vmid>), or confirm that you took one the portal
-    cannot see.` This one line leaves `allowed` and `confirm` as they are: the run answers it with `seedBackupTaken`.
+    has not started: `ok` when an archive was seen, `warn` otherwise (also where the portal cannot see the seed's
+    backups, which is most sites). While it is not `ok`, `blocking` also carries `seed_backup_missing: the portal
+    saw no backup of seed VM <id> younger than 24 hours, and on most stores it cannot see one (the seed-backup row
+    says where). Check in Proxmox that there is an archive of this seed VM, made after the seed VM was created and
+    younger than 24 hours (vzdump <id> makes one), then confirm it (seedBackupTaken).` This one line leaves `allowed` and `confirm` as they are: the run answers it with `seedBackupTaken`.
 
 - `GET /installations/{id}?live=1`: the installation with `live`
   (`phase`, `components[] {name, cluster, sync, health}`, `error`, `code`),
@@ -915,7 +921,9 @@ are several, `errors.details.problems`.
   `409 upgrade_refused` with `details.reasons`, the plan's `upgrade.blocking`.
   A move that replaces the seed's k3s (a `seed` entry in the plan) starts only with a backup of the seed VM: the
   route reads the `seed-backup` row, and unless it is `ok` the answer is `409 seed_backup_missing` with the plan's
-  sentence. `seedBackupTaken: true` says the operator took a backup the portal cannot see: the run starts without
+  sentence. `seedBackupTaken: true` says the operator checked in Proxmox that an archive of this seed VM exists, made after
+  the seed VM was created and younger than 24 hours (the usual answer: the portal cannot see the seed's backups on
+  most stores): the run starts without
   the read, and records it (`seedBackupTaken` on the run, and a change line in the audit entry of the request). It
   is ignored on every other run; a Retry of a started upgrade needs neither.
   `part: "seed"` makes the apply the first of the two actions of an upgrade that replaces machines (the plan's

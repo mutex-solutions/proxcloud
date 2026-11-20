@@ -4,6 +4,23 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-20: the seed-backup row reads with two tokens and says what it cannot see
+
+**What changed:** no component or container. Component "Platform installations": `SeedBackupCheck` takes the portal
+client and the CAPI token's client (`capmox@pve!capi`, when stored) and reads `GET /access/permissions` next to each
+store listing: a store counts as read only where a token holds `Datastore.Allocate` on it, or
+`Datastore.AllocateSpace` with `VM.Backup` on the seed VM. For the other backup stores the row says that the portal
+cannot see the seed's backups; it warns only while a move that replaces the seed's k3s waits to be started (the
+preflight asks `PlanFor`; the plan and `POST …/runs` always). `SeedBackupMissing` names what the operator checks.
+New test package `internal/cloud/pve/pvetest`: a fake Proxmox that leaves backups out of a listing as Proxmox does.
+Component "Template updates": `Withdraw` takes the `TemplateUsers` reader Delete already used, for its warning.
+
+**Why:** Proxmox answers a backup listing with `200` and without the archives the token may not read, and the portal
+token is fenced off the seed VM, so the row reported "none" on every site (lab round of v0.10.0-rc.1). No Proxmox
+privilege is added and no ACL changes.
+
+**Diagrams:** none: the portal already calls Proxmox with both tokens.
+
 ## 2026-11-20: the platform cluster's ArgoCD can be given an address (opt-in)
 
 **What changed:** no component or container. Component "Platform installations": `Spec.Access.ArgoCD`

@@ -766,7 +766,7 @@ function UpgradePlan({ installation, upgrade, replaces, canManage, dirty, pendin
           {needsBackup ? (
             <div className="flex items-start gap-2">
               <Checkbox id={id + "-backup"} checked={backupTaken} disabled={!canManage} onCheckedChange={(v) => setBackupTaken(v === true)} className="mt-0.5" />
-              <Label htmlFor={id + "-backup"} className="leading-snug font-normal">I took a backup of seed VM {installation.status?.seed?.vmid} that the portal cannot see</Label>
+              <Label htmlFor={id + "-backup"} className="leading-snug font-normal">I checked in Proxmox: seed VM {installation.status?.seed?.vmid} has a backup made after it was created and younger than 24 hours</Label>
             </div>
           ) : null}
         </div>

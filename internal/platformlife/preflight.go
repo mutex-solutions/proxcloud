@@ -444,7 +444,10 @@ func (p Preflight) Run(ctx context.Context) []Check {
 	}
 	out = append(out, p.bootStore(ctx, defs, defsErr), p.apiRule(ctx))
 	if st := in.Status.Seed; st != nil && st.VMID != 0 && st.Node != "" {
-		out = append(out, SeedBackupCheck(ctx, p.Portal.C, in, time.Now()))
+		// A warning only while a move that replaces the seed's k3s waits to be started: no other change needs the backup.
+		plan, _ := PlanFor(in, "")
+		needed := slices.ContainsFunc([]*Upgrade{plan.Upgrade, plan.Replacement}, func(u *Upgrade) bool { return u.MovesSeed() && !u.InProgress })
+		out = append(out, SeedBackupCheck(ctx, p.Portal.C, p.CAPI, in, time.Now(), needed))
 	}
 
 	if p.Blocked != nil {

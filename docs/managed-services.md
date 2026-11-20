@@ -974,7 +974,7 @@ line (`PC-ENROLL:…`) into the page and press **Store the secrets**
 | `boot-iso` | The ISO store is shared, takes no ISOs, or is not the only ISO store of the boot storage | Name a node-local ISO store |
 | `placement` | A node an image goes to lacks the import store with `import` content or the boot store | Change the nodes or the stores |
 | `boot-store` | Proxmox has no storage of the boot store's name, or it takes no disk images. It **warns** when the store also holds disks of VM ids that are not the platform's (tenant servers, VMs of your own, or volumes a deleted VM left), or when its content could not be listed: `csi@pve!csi` holds `Datastore.Allocate` on the whole boot store and its secret is readable inside the platform cluster ([section 10](#10-security-boundaries)). The disks are listed with the CSI token, the only one that sees them all, and the platform's own machines are told apart with the CAPI token, so before both tokens are stored the row says the disks are not read yet. The ids it names are those in the volumes' names (`vm-<id>-*`), not guests: an id that no VM or container of the cluster holds (asked with `GET /cluster/nextid?vmid=<id>`, which answers for every guest whatever the token may read) is named with "no VM has this id: a leftover volume", and such a volume can be deleted by hand once you know whose it was (found on a lab on 2026-11-19: `vm-129-cloudinit` read as "VM 129"; the mark is not run on a lab). Not counted: the installation's own machines, the templates of the pool `pc-templates`, CSI volumes (`vm-<id>-pvc-*`). A VM of that pool that is no template is counted like any other VM: a clone that kept its template's pool, a VM put there by hand, and the VM of a template smoke test or of a tenant path test while it runs (up to this fix every member of the pool was skipped, so such VMs were not listed; found on a lab on 2026-11-19, the fix is not run on a lab) | A missing store: name an existing one in step 1 (`pvesm status`). No disk images: `pvesm set <store> --content <its content>,images`, which the message spells out. The warning: a store of its own for the platform, on ZFS `zfs create <pool>/pcplat && pvesm add zfspool pcplat --pool <pool>/pcplat --content images,rootdir --sparse 1`, then name it in step 1 and run the root command of step 2 again. The install works without it |
-| `seed-backup` | Never. Present once the installation has a seed VM. `ok` when a store of the seed's node holds a `vzdump` archive of the seed VM younger than 24 hours, with its time and store; it **warns** when none is seen, with the newest older one and the stores whose backups the portal token could not read. An upgrade that replaces the seed's k3s asks for it ([The seed's k3s](#the-seeds-k3s)) | Back the seed VM up. A backup on a store the portal token cannot read stays a warning |
+| `seed-backup` | Never. Present once the installation has a seed VM. `ok` with the archive's time and store when the portal sees a `vzdump` archive of the seed VM younger than 24 hours. On most stores it cannot see one: Proxmox lists a VM's backups only to a token that holds `VM.Backup` on that VM or `Datastore.Allocate` on the store, and answers the others with a shorter list, not an error; the portal token is kept off the seed VM on purpose. The portal therefore sees the seed's archives on the provider's import store (with its own token) and on the platform's ISO store (with `capmox@pve!capi`) only. For every other backup store the row says that the portal **cannot see** backups of the seed VM there, never that none exist, and names what to look for in Proxmox; it is then `ok` (for information), and a **warning** while an upgrade that replaces the seed's k3s waits to be started. It also **warns** when it could read every backup store of the node and none holds an archive younger than 24 hours ([The seed's k3s](#the-seeds-k3s)) | Back the seed VM up. Where the portal cannot see the archive, look for it in Proxmox, and confirm it when you start such an upgrade |
 | `argocd-access` | Present while the settings name an ArgoCD address. It **fails** on an address outside the load balancer range or on operator networks the settings refuse (the `spec` row says the same). It **warns** when an operator network contains the address of a Proxmox node, with the address and the network, and when the nodes' networks could not be read. `ok` otherwise, with the address and the networks | Name operator networks no node is in, or clear both fields. On a site where tenant traffic leaves under the node's address (SNAT) a tenant VM arrives from that address, so a network that contains it lets every tenant reach the ArgoCD login page ([who can reach it](#an-address-for-the-platform-clusters-argocd)) |
 | `pve-api-rule` | Never. `ok` before the first install (the install writes the rule) and when the rule is in place; it **warns** on an installed platform whose rule is missing, changed or disabled, or when the cluster firewall rules could not be read. The message spells the rule out and says when the datacenter firewall is off. The row reads the rule, not the traffic: the rule's sources are the addresses of the seed and the platform machines as the node sees them, so on a site whose router translates the platform network on the way to the node (NAT) the row is `ok` while the rule matches nothing ([what to add](#when-a-router-translates-the-platform-network)) | Nothing before the install. Installed: **Apply this release** writes the rule again, and so does an upgrade run; the plan of step 4 lists the rule while it is missing (`pve-api-rule`, kind `site`) |
 | `images` | A BOM image is on the template update blocklist | A new installation: install a newer ProxCloud release. An installed platform stays on its release and its images, and no release moves it to other images yet (see [Upgrade between BOMs](#upgrade-between-boms): a BOM with other images is refused): the message says which case applies, and an apply that must import that image stays blocked |
@@ -1296,8 +1296,12 @@ tenant VM and the ArgoCD login page. Two limits follow:
   `argocd-access` warns when an operator network contains a node's address. On such a site name
   networks no node is in (a VPN range, a jump host as `/32`), or leave the address out.
 - That the platform cluster enforces the source ranges (kube-proxy and Cilium as the BOM configures
-  them) is **not verified on a lab**. Until it is, treat the address as reachable from the whole
-  platform network and from tenants, and do not set it on a production site.
+  them) was seen on a lab (2026-11-20, v0.10.0-rc.1) for one layout: bridge mode, a VLAN tenant
+  zone, no SNAT. With one operator address as the only source, the address answered that host and
+  timed out for two Proxmox nodes, for the gateway host on the platform network and for a tenant VM
+  that reached a tenant cluster's API at another address of the same pool in the same second. On a
+  site where tenant traffic leaves under a node's address (the Check row warns there) this is
+  **not verified on a lab**: do not set the address on such a production site.
 
 **When the address is taken.** The pool is the tenants' pool, so the address may be held by a tenant
 load balancer. MetalLB then gives the Service none, stage 9 waits and, at its deadline (20 minutes
@@ -1311,9 +1315,13 @@ over HTTPS now: forward to port 443 (`port-forward svc/argocd-server 8080:443`, 
 longer announces the address, ArgoCD restarts and serves plain HTTP inside the cluster as before,
 and `status.argocdUrl` is cleared.
 
-Seen in tests only (rendered values against chart argo-cd 10.14.0's own value keys, the run against
-a fake cluster). On a lab nothing of this has run: see
-[Not verified on a lab yet](#not-verified-on-a-lab-yet).
+Run once on a lab (2026-11-20, v0.10.0-rc.1, an installed platform with two tenant servers and no
+tenant cluster or database at the apply): the two spec refusals at save, the Check row warning and ok, the plan row, the apply (2
+minutes 1 second; the address answered 63 seconds after the start), HTTPS with ArgoCD's self-signed
+certificate from the operator address, the refusals above, the status fields, and clearing (1
+minute 10 seconds; the Service was a `ClusterIP` again and nobody announced the address). Not run
+on a lab: the sign-in, an address a tenant load balancer holds (`argocd_address_unavailable`), and a
+site with SNAT ([Not verified on a lab yet](#not-verified-on-a-lab-yet)).
 
 ## 5. The stages of a run
 
@@ -1420,7 +1428,7 @@ stage is still trying.
 | `seed_tls_mismatch` | 4 | The server on the seed address presents a certificate of another CA | Another machine holds that address. Correct the seed address, **Retry** |
 | `seed_identity_lost` | 4, 5, later | The run holds no credential for the seed; the seed refused the bootstrap token at five looks on end (it expires 3 hours after the seed was built); the seed did not report the service account as cluster-admin to the end of stage 5's time limit | **Retry**. It builds the seed again when it never became ready |
 | `seed_cd_not_deleted` | 5, Remove | The CD could not be ejected or deleted, or Proxmox still lists it; or Proxmox took the eject but left it pending on the running seed (the message says so) | The CAPI token cannot delete on the ISO store: run the script again, **Retry**. For a pending eject: `qm pending <vmid>` on the seed's node shows it; stopping and starting the seed VM applies it, then **Retry** |
-| `seed_backup_missing` | start, plan | An apply would start an upgrade that replaces the seed's k3s, and the portal sees no `vzdump` archive of the seed VM younger than 24 hours on a store of the seed's node it can read (row `seed-backup` of the check). `409`, no run was made | Take a backup of the seed VM, or, if you took one on a store the portal token cannot read, tick "I took a backup of seed VM … that the portal cannot see" in step 4 (`seedBackupTaken` by API), then start the upgrade again |
+| `seed_backup_missing` | start, plan | An apply would start an upgrade that replaces the seed's k3s, and the portal saw no `vzdump` archive of the seed VM younger than 24 hours. On most sites it cannot see one: Proxmox shows the portal's tokens the seed's backups on the import store and the platform's ISO store only (row `seed-backup` of the check names the stores it cannot see into). `409`, no run was made | Check in Proxmox that there is an archive of **this** seed VM (its VMID, and the seed VM's name in the notes when it has notes), made after the seed VM was created and younger than 24 hours; take one if there is none (`vzdump <seed VMID>`). Then tick "I checked in Proxmox: seed VM … has a backup made after it was created and younger than 24 hours" in step 4 (`seedBackupTaken` by API) and start the upgrade again |
 | `seed_k3s_failed` | 5a | An upgrade run only. The Job that replaces k3s failed: the etcd snapshot, the download (the seed must reach the BOM's k3s URL, as at its first boot), the sha256 check or a later line. Its script stops at the first failure, so a failure before the last two lines leaves k3s as it was. The message ends with the Job's last output; the Job is deleted. Also when the Job ended more than five minutes ago and the seed's node still reports the old k3s (the previous binary was put back by hand): the Job is deleted | Correct what the message names (most often the seed's way out to the download address), **Retry**: it makes a new Job |
 | `seed_k3s_refused` | 5a | An upgrade run only. The seed's node reports a k3s that is newer than the BOM's or more than one minor older, or an older k3s than the one both BOMs name (the plan listed no `seed.k3s` row, so the run does not replace k3s): the record and the site disagree. Nothing was changed | The message names both versions. A seed that was changed by hand is not moved by a run |
 | `seed_k3s_timeout` | 5a | An upgrade run only. The stage did not end in 20 minutes: the Job did not start or end, the node did not report the new version, or the seed's API did not come back after the restart. The platform cluster and every tenant keep serving; nothing is reconciled while the seed's API is away | If the seed's API answers: **Retry**. If it does not and `/usr/local/bin/k3s.prev` exists on the seed, put the previous binary back over SSH with a key of `spec.seed.sshKeys`: `mv /usr/local/bin/k3s.prev /usr/local/bin/k3s && systemctl restart k3s`, then **Retry**. This step was not tried on a lab |
@@ -2040,8 +2048,8 @@ and ADR 0009, A2 and A8.
   cluster-admin on the cluster that hosts every tenant control plane; the password is ArgoCD's
   initial secret and nothing rotates it. Where tenant traffic leaves under a node's address, an
   operator network that contains that address admits every tenant to the login page (the Check row
-  `argocd-access` warns). That the source ranges are enforced on the platform cluster is not
-  verified on a lab. The seed's ArgoCD never has an address
+  `argocd-access` warns). That the source ranges are enforced on the platform cluster was seen on a
+  lab for a layout without SNAT only. The seed's ArgoCD never has an address
   ([An address for the platform cluster's ArgoCD](#an-address-for-the-platform-clusters-argocd)).
 - The portal token creates and deletes API tokens for `capmox@pve` and `csi@pve` only
   (`ProxCloudKubeToken`, `User.Modify` on `/access/groups/proxcloud-kube`). A site set up before
@@ -2075,7 +2083,9 @@ no machine replaced, no pod restarted. On the candidate `v0.9.0-rc.2` the same l
 `409 bom_installed` and the plan that lists and blocks a control plane that does not fit. One
 upgrade has run on a production site (2026-11-19: a single-node site with one tenant cluster and
 one database, 0.8.0 to 0.9.0): one run of 68.6 seconds, nothing rolled, no tenant request failed
-in 149 looks. Nothing else in this section has run on a lab or on a production site. It says what
+in 149 looks. A third ran on the lab on 2026-11-20, from the BOM of 0.9.1 to that of the candidate
+`v0.10.0-rc.1`, with one tenant server and no tenant cluster or database: four changes, one run of
+22.8 seconds, no machine replaced, no VM restarted. Nothing else in this section has run on a lab or on a production site. It says what
 the code and its tests do; [the lab tests it still owes](#what-the-upgrade-still-owes-a-lab) are
 listed at its end.
 
@@ -2128,7 +2138,7 @@ charts list the installed version in `upgradeFrom`, and the release's check foun
 replaced. After the upgrade the platform can go from 1 to 3 control plane machines, Replace works,
 and new tenant clusters get the health check. From the BOM of 0.9.0, of one of its candidates or of 0.9.1 the plan has four changes:
 `pc-platform` from 0.1.14 to 0.1.15, the two tenant charts and the release. A build of `main`, whose BOM is a `-dev` one,
-refuses the move for that reason alone; the candidate `v0.10.0-rc.1` allows it, for a lab (its BOM is `0.10.0-rc.1`; not run on a lab); the releases `v0.9.0` and `v0.9.1` allowed the move to their BOM (chart 0.1.14), as the candidates
+refuses the move for that reason alone; the candidate `v0.10.0-rc.1` allows it, for a lab (its BOM is `0.10.0-rc.1`; run there from 0.9.1 on 2026-11-20, without a tenant cluster or database); the releases `v0.9.0` and `v0.9.1` allowed the move to their BOM (chart 0.1.14), as the candidates
 `v0.9.0-rc.1` and `v0.9.0-rc.2` did for a lab ([ci-release.md](ci-release.md#release-candidates)). From the BOM of 0.8.0 to
 that of `v0.9.0-rc.1` it was run on a lab without tenants (2026-11-19): six changes, and no machine
 replaced. Not run on a lab: the move from 0.8.1 or 0.8.2, the move to `0.9.0-rc.2`, to `0.9.0` or to `0.9.1`, three control
@@ -2208,19 +2218,49 @@ both, and the Job, before the run starts.
 seed's API does not come back, the failure code `seed_k3s_timeout` names the command that does the
 second by hand; it has not been tried on a lab.
 
-**The seed backup.** Such an upgrade starts only with a backup of the seed VM. The check's row
-`seed-backup` (step 3) is `ok` when a store of the seed's node holds a `vzdump` archive of the seed
-VM younger than 24 hours, and names its time and store. It reads with the portal token: a store
-that token cannot read (a Proxmox Backup Server it has no row on, a store of another node) counts
-as "none seen", and the row says which stores it could not read. An archive counts only when it is
-of this seed VM: made after the seed became ready (the record's `status.seed.readyAt`; without one,
-the creation time in the VM's config), and, when it has notes, with the seed VM's name in them
-(vzdump's default notes are the guest's name). Proxmox gives a freed VMID to the next VM and a
-store keeps the old archives, so a year-old archive of an earlier VM with the seed's VMID is not
-the seed's backup; the row says how many such archives it left out. Without an `ok` row, step 4 shows
-the reason `seed_backup_missing` and a box, "I took a backup of seed VM … that the portal cannot
-see"; ticking it lets the upgrade start, and the run and the audit log record that it was ticked.
-The row is a warning, never a failure: a plain apply does not need the backup.
+**The seed backup.** Such an upgrade starts only with a backup of the seed VM, and on most sites
+you confirm it yourself: step 4 shows the reason `seed_backup_missing` and a box, "I checked in
+Proxmox: seed VM … has a backup made after it was created and younger than 24 hours". Ticking it
+lets the upgrade start, and the run and the audit log record that it was ticked. Before you tick
+it, look in Proxmox (the seed VM's **Backup** tab, or the backup store's content) for an archive
+
+- of **this** seed VM: its VMID, and, when the archive has notes, the seed VM's name in them
+  (vzdump's default notes are the guest's name). Proxmox gives a freed VMID to the next VM and a
+  store keeps the old archives, so a year-old archive of an earlier VM with the seed's VMID is not
+  the seed's backup;
+- made **after the seed VM was created** (the row names the time the seed became ready, when the
+  record has it);
+- **younger than 24 hours**.
+
+The portal cannot do this for you on most stores. Proxmox lists a VM's backups only to a token that
+holds `VM.Backup` on that VM or `Datastore.Allocate` on the store; to any other token it answers
+with a list that leaves them out, not with an error. The portal token is kept off the seed VM on
+purpose (the `NoAccess` row on the seed's pool, Check row `pool-fence`), and no token of the product
+is given `VM.Backup` on it. So the check's row `seed-backup` (step 3) reads with the two tokens the
+portal holds and sees the seed's archives where one of them manages the store: on the provider's
+import store (the portal token) and on the platform's ISO store (`capmox@pve!capi`). An archive it
+sees there, of this seed VM and younger than 24 hours, makes the row `ok` with its time and store,
+and the upgrade then starts without the box. For every other backup store the row says that the
+portal cannot see backups of the seed VM there: this is no sign that a backup is missing. The row
+warns only while such an upgrade waits to be started, or when it could read every backup store of
+the node and found no archive younger than 24 hours; it never fails, as a plain apply does not need
+the backup. Neither of those two stores is where the seed's backup belongs
+([Credentials and the seed backup](#8-credentials-and-the-seed-backup)), so expect to tick the box.
+
+Seen on a lab (2026-11-20, v0.10.0-rc.1): with today's archive of the seed on the site's backup
+store, the row of that build read "the stores read (…) hold none"; Proxmox had answered the portal
+token with an empty list. The row described here is the correction; it has run in tests against a
+fake Proxmox that filters the list as Proxmox does, not on a lab.
+
+**Take the backup some minutes before you start.** On a busy node or a slow disk a snapshot backup
+of the seed stalls the seed's disk for seconds; the seed's k3s then exits and systemd starts it
+again, and the seed's API is away for about a minute (seen on the same lab, twice: during the
+seed's own `vzdump`, and during an apply with no backup running). A run
+that meets the restart retries its stage and goes on; that lab's run passed after two retries. The
+same `vzdump` also left the etcd of another control plane VM on that node unhealthy until the
+backup ended. So take the backup in a quiet hour, let it end, wait until the seed's API answers
+again, and then start the upgrade: not the backup and the click in the same minute. On a one-node
+site every VM shares the disk the backup reads.
 
 ### The platform cluster's machines
 
@@ -2335,7 +2375,9 @@ and does not guess.
 - Before an upgrade that replaces machines: a dump or backup of every tenant database, the seed
   backup, and an announcement of what stops per unit (the plan's table).
 - Take a backup of the seed VM (`vzdump`, [Credentials and the seed backup](#8-credentials-and-the-seed-backup))
-  and a dump of the portal database. The seed holds the Cluster API state of every machine of the
+  and a dump of the portal database. Take the seed backup some minutes before you start the upgrade
+  and let it end first: on a busy node or a slow disk the backup can make the seed's k3s restart
+  ([The seed's k3s](#the-seeds-k3s)); a run that meets the restart retries. The seed holds the Cluster API state of every machine of the
   platform cluster. Restoring both after a failed upgrade has not been tried. An upgrade that
   replaces the seed's k3s asks for the seed backup before it starts ([The seed's k3s](#the-seeds-k3s)).
 - Do not change machine sizes, nodes or node groups in the same step: apply such a change before
@@ -2354,7 +2396,7 @@ Step 4 shows **Upgrade to release X** with the table of changes when the upgrade
 the reasons when it is not. The button asks for the phrase `upgrade <installation name> to
 <release>`. By API: `POST …/runs {"kind":"apply","targetBom":"<sha256 of this release's BOM>",
 "confirm":"upgrade <name> to <release>"}` ([api.md](api.md)), with `"seedBackupTaken":true` for
-the ticked seed backup box.
+the ticked seed backup box (what to check before ticking it: [The seed's k3s](#the-seeds-k3s)).
 
 ### What the run does
 
@@ -2477,7 +2519,7 @@ drill build must carry the BOM of the build before it
 | U14 A machine size edited together with the upgrade; a chart-only upgrade | `unexpected_rollout` at the step, nothing of it synced; the chart-only upgrade still replaces nothing |
 | U15 Three control plane machines | No API gap; that the kube-vip hand-over needs no change of the lease values |
 | U16 A minor step, on a lab only, if a drill BOM for it can be built | Whether the roll holds across a minor; the version skew during a pause |
-| U9 The seed backup: start U7 without a backup, then with one | The `409 seed_backup_missing` and the box in step 4; whether the `seed-backup` row sees an archive on the site's own kind of backup store (a directory store, a Proxmox Backup Server) with the portal token |
+| U9 The seed backup: start U7 without ticking the box, then with it; a backup on the import store or on the platform's ISO store | The `409 seed_backup_missing`, its sentence and the box in step 4; the `seed-backup` row saying "cannot see" for an archive on the site's own backup store (a directory store, a Proxmox Backup Server) and turning `ok` for one on the import or the ISO store; an old archive of an earlier VM with the seed's VMID not counting |
 
 ## Known issue: no PostgreSQL database on a node image built before 2026-11-16
 
@@ -2634,16 +2676,17 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 
 ## Not verified on a lab yet
 
-**The address of the platform cluster's ArgoCD** (`spec.access.argocd`) has run in tests only. A
-lab must show, and the feature is not for production before it has: set the block on an installed
-platform and apply, and the link opens over HTTPS from an operator address with a certificate
-warning; it is refused from a tenant VM and from an address outside the operator networks (this is
-the gate: whether kube-proxy and Cilium on the platform cluster enforce `loadBalancerSourceRanges`);
-the sign-in works with the password read through the platform kubeconfig; tenant cluster and
-database status in the consoles is correct afterwards; an address already held by a tenant load
-balancer gives `argocd_address_unavailable` and the platform keeps serving; clearing the block
-removes the address; a platform that never sets the block shows no change of any Application after
-the upgrade to this build. On the single-node site with SNAT: the Check row `argocd-access` warns.
+**The address of the platform cluster's ArgoCD** (`spec.access.argocd`) was run once on a lab
+(2026-11-20, v0.10.0-rc.1; bridge mode, a VLAN tenant zone, no SNAT): set on an installed platform
+and applied, HTTPS from the operator address with a certificate warning, no answer for a tenant VM,
+two Proxmox nodes and the gateway host of the platform network, and cleared again
+([An address for the platform cluster's ArgoCD](#an-address-for-the-platform-clusters-argocd)).
+A lab must still show: the sign-in with the password read through the platform kubeconfig; an
+address already held by a tenant load balancer giving `argocd_address_unavailable` with the
+platform still serving; tenant cluster and database status in the consoles across the restart of
+ArgoCD with tenants on the platform; and a site where tenant traffic leaves under a node's address
+(SNAT: the single-node and the routed layouts), where the Check row `argocd-access` warns and the
+source ranges cannot tell a tenant from the node. For such a site the feature is not for production.
 
 Of the prerequisites of v0.9.0 nothing was run on a Proxmox node; the tests run the root command
 against a `pveum` that records its arguments, and the firewall rule against a fake Proxmox API. To
@@ -2769,4 +2812,6 @@ the applet with these flags; that was read from the image, not run on a seed); h
 seed's API is away; that the seed reaches the k3s download address (nothing checks it before the
 Job, as nothing does before the first boot); what k3s does to its bundled CoreDNS and
 metrics-server at the version change; the hand step that puts `k3s.prev` back; and whether the
-`seed-backup` row sees the archives of a site's own backup store with the portal token.
+corrected `seed-backup` row reads on a real site (the row of v0.10.0-rc.1 was seen on a lab on
+2026-11-20 to report "hold none" for a store that held today's archive; the correction and the
+`409 seed_backup_missing` have run in tests only).

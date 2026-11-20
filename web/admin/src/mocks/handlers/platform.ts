@@ -560,7 +560,7 @@ function upgradePlan(in_: Doc, replace = false) {
     { name: "seed-k3s-binary", to: "/usr/local/bin/k3s, the previous binary kept as /usr/local/bin/k3s.prev", class: "site", stage: "seed-k3s", impact: "The binary is replaced only after the download passed its sha256. The install script is not run again: the unit and /etc/rancher/k3s/config.yaml stay." },
   ]
   const vmid = in_.status.seed?.vmid
-  const noBackup = `seed_backup_missing: no backup of seed VM ${vmid} younger than 24 hours is visible to the portal. Take one (vzdump ${vmid}), or confirm that you took one the portal cannot see.`
+  const noBackup = `seed_backup_missing: the portal saw no backup of seed VM ${vmid} younger than 24 hours, and on most stores it cannot see one (the seed-backup row says where). Check in Proxmox that there is an archive of this seed VM, made after the seed VM was created and younger than 24 hours (vzdump ${vmid} makes one), then confirm it (seedBackupTaken).`
   const inProgress = !!in_.status.targetBom && !replace
   if (preset === "upgradek8s") { // platformlife.setParts and rollRows, with the route's read (NeedRoll)
     const phrase = `upgrade ${in_.name} to ${bom.release}`
@@ -593,7 +593,7 @@ function upgradePlan(in_: Doc, replace = false) {
     ...(refused || inProgress ? {} : { confirm: `upgrade ${in_.name} to ${bom.release}` }),
     changes: refused ? [release, chart, cilium] : [release, ...k3s, chart],
     blocking: refused ? [`workload/cilium: ${cilium.blocking}`] : k3s.length && !inProgress ? [noBackup] : [],
-    ...(k3s.length && !inProgress ? { seedBackup: { id: "seed-backup", status: "warn", message: `No backup of seed VM ${vmid} younger than 24 hours is visible to the portal: the stores read (local) hold none. The seed holds the Cluster API state of the platform cluster: back it up (vzdump ${vmid}) before an upgrade that replaces its k3s.` } } : {}),
+    ...(k3s.length && !inProgress ? { seedBackup: { id: "seed-backup", status: "warn", message: `The portal cannot see backups of seed VM ${vmid} on store nas-backup of node pve1, so whether one exists there is not known to it. Proxmox lists a backup only to a token that may back up its VM (VM.Backup) or that manages the store (Datastore.Allocate), and by design the portal's tokens hold neither for the seed VM there: this is no sign that a backup is missing. It can see them on store local and sees none there. Before an upgrade that replaces the seed's k3s, check in Proxmox that there is an archive of this seed VM (VMID ${vmid}), made after this seed VM was created and younger than 24 hours (vzdump ${vmid} makes one), then confirm it when you start the upgrade.` } } : {}),
   }
 }
 

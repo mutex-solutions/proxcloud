@@ -585,10 +585,15 @@ so it cannot be published to tenant clusters. A version published **before this 
 template stays published: correct the template as above (the publish does not need to be repeated).
 
 **Kubernetes node images.** The kamaji provider's `config.cluster.versions` names template VMIDs
-explicitly, so withdrawing does **not** stop new workers from cloning a withdrawn image. The result
-carries, per provider, a warning and the replacement line (`"1.35.10": "pve1=9210"` — the newest
-other published image of that version per node), or a warning that none is left (remove the version
-from the map or publish another image first). The portal does not edit the map itself.
+explicitly, so withdrawing does **not** stop new workers from cloning a withdrawn image that
+something still names. The result carries, per provider, the map line without the withdrawn copies
+(`"1.35.10": "pve1=9210"` — the newest other published image of that version per node). It warns
+only when something still names a withdrawn copy by its VMID (a Kubernetes provider's version or
+image variant, a cluster's node group, a managed-services platform: what
+[Delete](#delete-a-withdrawn-template) refuses with `template_in_use`), and says who; when no other
+image of the version is left, the warning says to remove the version from the map or publish
+another image first. A provider whose map already names the other images gets no warning. The
+portal does not edit the map itself.
 
 `pve.DiscoverTemplates` skips any template carrying `pc-tu-withdrawn`, even if someone puts
 `pc-public` back by hand, and falls back to the previous published version (newest `pc-v-` wins).
@@ -1045,14 +1050,20 @@ debugfs -w -f /tmp/orphan-fix.cmd "$D"
 
 ## 7. Open items
 
-- **Delete of a withdrawn template is not lab-verified.** Its tests run on PostgreSQL with a fake Proxmox. A
-  lab must show: the destroy of a withdrawn template with the portal token (`VM.Allocate` through `/pool`),
-  its base disks and cloud-init drive gone from the storage and no other volume removed; the `linked_clones`
-  refusal on the site's storage type, for a linked clone made by hand (the `parent` field is read as Proxmox
-  9 documents it, and LVM-thin reports none: there Proxmox does not tie a clone to its base either); the
-  `template_in_use` refusal for a cluster whose node group still carries the image. A cluster whose cached
+- **Delete of a withdrawn template was run once on a lab** (2026-11-20, v0.10.0-rc.1, a node image on ZFS that
+  no cluster used and that had no cloud-init drive): the `not_withdrawn` refusal for a staged and two published
+  templates; the `template_in_use` refusal while a Kubernetes provider's version named it; the destroy with the
+  portal token (`VM.Allocate` through `/pool`), after which the VM and its one base disk were gone, no other
+  volume was removed and the VMID was free; the receipt freed; the audit row; and the repeat answering
+  `unchanged`. **Not run on a lab:** `linked_clones` (for a linked clone made by hand, on the site's storage type:
+  the `parent` field is read as Proxmox 9 documents it, and LVM-thin reports none: there Proxmox does not tie a
+  clone to its base either), `template_published`, `template_mismatch`, `template_present`, `job_running`,
+  `smoke_running`, `template_in_use` for a cluster whose node group still carries the image, and a template with
+  a cloud-init drive. Seen in that run: the linked-clone read is a storage listing with the portal token, and
+  Proxmox leaves out the volumes that token may not see, so a linked clone that belongs to a VM outside the
+  portal's pools is not in it; Proxmox's own check in the destroy is then the only guard. A cluster whose cached
   `node_groups` the sync has not written yet (created within the last sync interval, or a provider whose
-  sync fails) is not seen by that check, and the template's `pc-tu-withdrawn` tag is not read again between
+  sync fails) is not seen by the in-use check, and the template's `pc-tu-withdrawn` tag is not read again between
   the last check and the destroy call.
 - **Publish on all nodes is partly lab-verified** (2026-11-17, main cb2f052): two advances each published one node
   whose smoke test had passed, the report and the versions line were right, and the smoke clone upgraded no package.
@@ -1184,4 +1195,13 @@ holds on `/pool`).
   that passed its smoke test and is not published yet is refused at Publish after the sync
   (`template_changed_since_smoke`): run the smoke test again, then publish. A published template is
   not affected.
-- Tested against a fake Proxmox API that models pending changes; not yet run on a lab.
+- Run once on a lab (2026-11-20, v0.10.0-rc.1, Ubuntu 26.04 guests on a three-node site): the first sync wrote
+  the six staged and published templates of the portal and no withdrawn or foreign one; the next two syncs wrote
+  nothing; no running VM had a pending change after any of them; the project sync and a volume create, attach
+  and detach worked on a running server from before the upgrade; a stopped server was written at the sync and
+  came up with `vga: std` at its start from the portal; a server created from a template the sync had not yet
+  reached came up with `vga: std`; both tabs of the portal's console answered (a login prompt on the graphical
+  one and on the serial one); a new Kubernetes worker inherited the display from its template. **Not run on a
+  lab:** the Console button of the Proxmox web UI, a Stop then Start of a server that still has a serial display
+  with no sync in between, the graphical console of a Kubernetes worker, Debian guests, a Reboot, and the revert
+  after a start race. The tests use a fake Proxmox API that models pending changes.

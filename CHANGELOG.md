@@ -76,6 +76,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Guides: what the lab round of v0.10.0-rc.1 showed, and what it did not.** The graphical console, Delete of a
+  withdrawn template, the ArgoCD address and the move from the BOM of 0.9.1 were run on a lab on 2026-11-20; the
+  guides name what was seen and what is still not run (among them: every part of the seed's k3s upgrade and of the
+  replacement of the platform cluster's machines, the ArgoCD address on a site with SNAT). New note: take the seed
+  backup some minutes before an upgrade, as on a busy node or a slow disk a backup of the seed can make its k3s
+  restart (a run that meets the restart retries)
+  ([managed-services.md](docs/managed-services.md#the-seeds-k3s), [template-updates.md](docs/template-updates.md#7-open-items)).
+
 - **The platform BOM pins cluster chart `proxmox-kamaji-cluster` 0.1.15 and database chart `database-cluster`
   0.5.2**, both published from their tags (`proxmox-kamaji-cluster-v0.1.15`, `database-cluster-v0.5.2`), by the
   digest ghcr.io serves: 0.1.15 for the platform cluster (`pc-platform`) and for `tenantCharts.kubernetes`, 0.5.2
@@ -134,6 +142,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Managed services: the `seed-backup` row no longer says that no backup exists when it cannot see one.** Found on
+  the lab round of v0.10.0-rc.1: with today's archive of the seed VM on the site's backup store the row read "the
+  stores read (…) hold none". Proxmox lists a VM's backups only to a token with `VM.Backup` on that VM or
+  `Datastore.Allocate` on the store, and answers `200` with a list without them otherwise; the portal token is fenced off
+  the seed VM by design, so on a site set up by the product's own command the row could never be ok, and an upgrade
+  that replaces the seed's k3s could only start with the override. No privilege is added and the fence is as it was.
+  The row now reads with the portal token and with `capmox@pve!capi`, counts a store as read only where one of them
+  holds what the listing needs (the import store, the platform's ISO store), and for every other backup store says
+  that the portal cannot see backups of the seed VM there and what to check in Proxmox. It is then `ok` (for
+  information) and a warning only while such an upgrade waits to be started. `409 seed_backup_missing` and the box
+  in step 4 now say what the operator confirms: an archive of this seed VM, made after the seed VM was created,
+  younger than 24 hours (`seedBackupTaken` is the usual answer). The corrected row has run in tests against a fake
+  Proxmox that filters the list as Proxmox does, not on a lab
+  ([managed-services.md](docs/managed-services.md#the-seeds-k3s),
+  [proxmox-permissions.md](docs/proxmox-permissions.md#what-the-fence-hides-from-the-portal-the-seeds-backups)).
+- **Template updates: a withdraw of a Kubernetes node image warns only when something still names a withdrawn
+  copy.** It always said that the provider's version map names the withdrawn VMIDs and to "replace that entry",
+  also when the map already was the line it printed. The warning now comes only for copies a provider's version, a
+  cluster's node group or a platform still names, and says who.
+- **Template updates: a Delete that deleted nothing no longer writes `deleted` false → true in the audit log.** The
+  repeat of a Delete, and a Delete of a template already gone from Proxmox, answer `unchanged`; their audit row now
+  keeps `deleted` false.
 - **Managed services: an old archive of another VM no longer counts as the seed's backup.** Proxmox gives a freed VMID
   to the next VM and a backup store keeps the old archives, so the `seed-backup` row could be satisfied by a year-old
   archive of an earlier VM that had the seed's VMID. An archive now counts only when it was made after the seed became

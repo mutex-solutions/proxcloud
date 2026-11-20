@@ -73,12 +73,14 @@ func (u *Upgrade) MovesSeed() bool {
 }
 
 // SeedBackupMissing is the 409 seed_backup_missing of an apply that starts an upgrade which replaces the seed's k3s:
-// the portal saw no backup of the seed VM younger than SeedBackupAge, and the apply does not say one was taken.
+// the portal saw no backup of the seed VM younger than SeedBackupAge, and the apply does not say one was taken. On
+// most sites the portal cannot see one (SeedBackupCheck), so the operator's word is the usual answer: the sentence
+// says what to check first.
 type SeedBackupMissing struct{ VMID int }
 
 func (e *SeedBackupMissing) Error() string {
-	return fmt.Sprintf(CodeSeedBackupMissing+": no backup of seed VM %d younger than 24 hours is visible to the portal. "+
-		"Take one (vzdump %d), or confirm that you took one the portal cannot see.", e.VMID, e.VMID)
+	return fmt.Sprintf(CodeSeedBackupMissing+": the portal saw no backup of seed VM %d younger than 24 hours, and on most stores it cannot see one (the seed-backup row says where). "+
+		"Check in Proxmox that there is an archive of this seed VM, made after the seed VM was created and younger than 24 hours (vzdump %d makes one), then confirm it (seedBackupTaken).", e.VMID, e.VMID)
 }
 
 // NeedSeedBackup adds the seed-backup row to the moves of p that replace the seed's k3s and have not started, and

@@ -1103,8 +1103,10 @@ func (f *tlFixture) recordPass(t *testing.T, importID string, p templateupdates.
 	}
 }
 
-// S4: withdrawing a Kubernetes node image warns that the kamaji version map names VMIDs explicitly
-// and gives the replacement config.cluster.versions line (here: the pipeline template left).
+// S4: withdrawing a Kubernetes node image gives the config.cluster.versions line without the withdrawn copies (here:
+// the pipeline template left), and warns only while something still names a withdrawn copy by its VMID: a provider
+// whose map already names the others gets no warning (the v0.10.0-rc.1 lab round was told to "replace that entry"
+// with the line the provider already had).
 func TestTemplateWithdrawK8sGivesVersionsLine(t *testing.T) {
 	f := newTLFixture(t, true)
 	p := templateupdates.VMPayload{Version: 1, Package: "proxcloud-vm-ubuntu-2604-k8s", Tag: "ubuntu-2604-k8s-1.35.10-20261112010203-cccccccccccc",
@@ -1129,17 +1131,37 @@ func TestTemplateWithdrawK8sGivesVersionsLine(t *testing.T) {
 	if st := f.state(t, id); st["versionsMapLine"] != `"1.35.10": "pve1=9500"` {
 		t.Fatalf("versions line while published: %v", st["versionsMapLine"])
 	}
-	w := f.do("admin-sub", "POST", "/admin/template-updates/templates/"+id+"/withdraw", map[string]any{"reason": "kubelet crash loop on boot", "confirmDigest": p.Digest})
-	if w.Code != 200 {
-		t.Fatalf("withdraw: %d %s", w.Code, w.Body)
+	es := f.db.C("externalService")
+	if _, err := es.InsertOne(context.Background(), pgdoc.M{"_id": "svc-k8s", "name": "Lab Kubernetes", "type": "CLOUD", "status": "PUBLIC",
+		"config": pgdoc.M{"provider": "kamaji", "cluster": pgdoc.M{"proxmoxServiceId": "svc-pve", "versions": pgdoc.M{"1.35.10": "pve1=9210"}}}}); err != nil {
+		t.Fatal(err)
 	}
-	var res struct {
-		Data templateupdates.LifecycleResult `json:"data"`
+	withdraw := func() templateupdates.LifecycleResult {
+		t.Helper()
+		w := f.do("admin-sub", "POST", "/admin/template-updates/templates/"+id+"/withdraw", map[string]any{"reason": "kubelet crash loop on boot", "confirmDigest": p.Digest})
+		if w.Code != 200 {
+			t.Fatalf("withdraw: %d %s", w.Code, w.Body)
+		}
+		var res struct {
+			Data templateupdates.LifecycleResult `json:"data"`
+		}
+		_ = json.Unmarshal(w.Body.Bytes(), &res)
+		if len(res.Data.Providers) != 1 || res.Data.Providers[0].VersionsMapLine != `"1.35.10": "pve1=9210"` {
+			t.Fatalf("k8s withdraw result: %+v", res.Data)
+		}
+		return res.Data
 	}
-	_ = json.Unmarshal(w.Body.Bytes(), &res)
-	if len(res.Data.Providers) != 1 || res.Data.Providers[0].VersionsMapLine != `"1.35.10": "pve1=9210"` ||
-		!strings.Contains(strings.Join(res.Data.Warnings, " "), "names template VMIDs explicitly") {
-		t.Fatalf("k8s withdraw result: %+v", res.Data)
+	// The provider's map names the remaining template alone: nothing to warn about.
+	if res := withdraw(); len(res.Warnings) != 0 || len(res.Providers[0].Warnings) != 0 {
+		t.Fatalf("a withdraw nothing names warned: %+v", res)
+	}
+	// The map names the withdrawn copy: the same action says so, and who.
+	if _, err := es.SetByID(context.Background(), "svc-k8s", pgdoc.M{"config.cluster.versions": pgdoc.M{"1.35.10": "pve1=9500"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if res := withdraw(); !strings.Contains(strings.Join(res.Warnings, " "), `cloned from pve1=9500 (Kubernetes provider "Lab Kubernetes", version 1.35.10), which is still named by its VMID`) ||
+		!strings.Contains(strings.Join(res.Warnings, " "), `is "1.35.10": "pve1=9210"`) {
+		t.Fatalf("a withdraw of a copy the provider's map names: %+v", res)
 	}
 }
 
@@ -1289,6 +1311,28 @@ func TestTemplateDeleteWithdrawn(t *testing.T) {
 	}
 	if !audited {
 		t.Fatal("no audit row of the delete")
+	}
+	// One template was deleted, so one row says deleted false -> true: the repeat's row (unchanged) does not.
+	deletes, said := 0, 0
+	for deadline := time.Now().Add(5 * time.Second); deletes < 2 && time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		evs, err := f.audit.QueryAll(ctx, audit.Filter{ResourceType: "TEMPLATE_UPDATES"}, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		deletes, said = 0, 0
+		for _, ev := range evs {
+			for _, c := range ev.Changes {
+				if c.Field == "action" && c.NewValue == "delete" {
+					deletes++
+				}
+				if c.Field == "deleted" {
+					said++
+				}
+			}
+		}
+	}
+	if deletes != 2 || said != 1 {
+		t.Fatalf("%d audit rows of a Delete, %d of them say a template was deleted: want 2 and 1 (the repeat deleted nothing)", deletes, said)
 	}
 
 	// A withdrawn template somebody destroyed in Proxmox: nothing to destroy, the receipt is freed.

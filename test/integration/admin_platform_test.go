@@ -23,6 +23,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/pve/pvetest"
 	"github.com/mutex-solutions/proxcloud/internal/durablejobs"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/admin"
@@ -1162,9 +1163,11 @@ func TestPlatformClusterKubeconfig(t *testing.T) {
 }
 
 // An upgrade that replaces the seed's k3s needs a backup of the seed VM: the plan carries the seed-backup row and
-// blocks with seed_backup_missing while the portal sees none younger than 24 hours, the apply answers the same 409,
-// and both pass with a fresh archive on a store the portal reads, or with the operator's seedBackupTaken, which the
-// run records.
+// blocks with seed_backup_missing while the portal sees none younger than 24 hours, and the apply answers the same 409.
+// The fake Proxmox lists a VM's backups as the real one does: only to a token that may read them. With the product's
+// grants the portal token is shown none of the seed's, so the row says that it cannot see them (not that none exist),
+// today's archive changes nothing, and the operator's seedBackupTaken starts the upgrade, which the run records.
+// Where the token manages the store, a fresh archive is seen and the apply starts without the operator's word.
 func TestPlatformUpgradeNeedsASeedBackup(t *testing.T) {
 	ctx := context.Background()
 	db := freshPG(t)
@@ -1177,28 +1180,16 @@ func TestPlatformUpgradeNeedsASeedBackup(t *testing.T) {
 	if err := store.Ensure(ctx); err != nil {
 		t.Fatal(err)
 	}
-	var mu sync.Mutex
-	archive := int64(0) // ctime of the one archive of VM 120 on store pbs; 0: none
-	fakePVE := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		defer mu.Unlock()
-		switch r.URL.Path {
-		case "/api2/json/nodes/pve1/storage":
-			fmt.Fprint(w, `{"data":[{"storage":"local-lvm","content":"images"},{"storage":"pbs","content":"backup"},{"storage":"nas","content":"backup,iso"}]}`)
-		case "/api2/json/nodes/pve1/storage/pbs/content":
-			if archive == 0 {
-				fmt.Fprint(w, `{"data":[]}`)
-				return
-			}
-			fmt.Fprintf(w, `{"data":[{"volid":"pbs:backup/vm/120/2026","content":"backup","vmid":120,"ctime":%d}]}`, archive)
-		case "/api2/json/nodes/pve1/storage/nas/content":
-			w.WriteHeader(http.StatusForbidden)
-		default:
-			w.WriteHeader(http.StatusInternalServerError)
-		}
-	}))
+	site := &pvetest.BackupSite{ACL: pvetest.ProductACL("proxcloud@pve!platform", pve.CAPITokenID, 120, "local-lvm", "local", "", "pbs", "nas"),
+		Stores: map[string]string{"local-lvm": "images", "local": "iso,vztmpl", "pbs": "backup", "nas": "backup,iso"}}
+	archive := func(age time.Duration) { // the one archive of VM 120 on store pbs
+		site.Mu.Lock()
+		defer site.Mu.Unlock()
+		site.Backups = map[string][]pvetest.Backup{"pbs": {{VMID: 120, CTime: time.Now().Add(-age).Unix()}}}
+	}
+	fakePVE := httptest.NewServer(site)
 	t.Cleanup(fakePVE.Close)
-	for _, id := range []string{"svc-pve", "svc-pve-2"} { // a provider has one installation
+	for _, id := range []string{"svc-pve", "svc-pve-2", "svc-pve-3"} { // a provider has one installation
 		mustInsert(t, db, "externalService", pgdoc.M{"_id": id, "name": id, "type": "CLOUD", "status": "PUBLIC",
 			"config": pgdoc.M{"provider": "proxmox", "region": "lab", "apiUrl": fakePVE.URL, "tokenId": "proxcloud@pve!platform"},
 			"secret": pgdoc.M{"tokenSecret": enc.Encrypt(portalToken)}})
@@ -1253,7 +1244,7 @@ func TestPlatformUpgradeNeedsASeedBackup(t *testing.T) {
 		}
 		return "/admin/platform/installations/" + in.ID
 	}
-	const sentence = "seed_backup_missing: no backup of seed VM 120 younger than 24 hours is visible to the portal. Take one (vzdump 120), or confirm that you took one the portal cannot see."
+	const sentence = "seed_backup_missing: the portal saw no backup of seed VM 120 younger than 24 hours, and on most stores it cannot see one (the seed-backup row says where). Check in Proxmox that there is an archive of this seed VM, made after the seed VM was created and younger than 24 hours (vzdump 120 makes one), then confirm it (seedBackupTaken)."
 	apply := func(more string) string {
 		return fmt.Sprintf(`{"kind":"apply","targetBom":%q,"confirm":"upgrade lab to 0.99.0"%s}`, cur.SHA256, more)
 	}
@@ -1263,22 +1254,25 @@ func TestPlatformUpgradeNeedsASeedBackup(t *testing.T) {
 		return u
 	}
 
-	// No archive: the plan blocks and says which store it could not read; the apply is refused with the same sentence.
+	// No archive: the plan blocks and says where the portal cannot see; the apply is refused with the same sentence.
 	one := installed("svc-pve")
-	u := upgradeOf(one)
-	row, _ := u["seedBackup"].(map[string]any)
-	if u["allowed"] != true || fmt.Sprint(u["blocking"]) != "["+sentence+"]" || row["status"] != "warn" || !strings.Contains(fmt.Sprint(row["message"]), "could not read the backups of nas") {
-		t.Fatalf("the plan without a backup: %v", u)
+	blind := func(what string) {
+		t.Helper()
+		u := upgradeOf(one)
+		row, _ := u["seedBackup"].(map[string]any)
+		if msg := fmt.Sprint(row["message"]); u["allowed"] != true || fmt.Sprint(u["blocking"]) != "["+sentence+"]" || row["status"] != "warn" ||
+			!strings.Contains(msg, "The portal cannot see backups of seed VM 120 on stores nas, pbs of node pve1") || strings.Contains(msg, "hold none") {
+			t.Fatalf("the plan %s: %v", what, u)
+		}
+		a := call(http.MethodPost, one+"/runs", apply(""), http.StatusConflict)
+		if errs, _ := a["errors"].(map[string]any); errs["message"] != sentence || fmt.Sprint(errs["details"]) != "map[code:seed_backup_missing]" {
+			t.Fatalf("the apply %s: %v", what, a)
+		}
 	}
-	a := call(http.MethodPost, one+"/runs", apply(""), http.StatusConflict)
-	if errs, _ := a["errors"].(map[string]any); errs["message"] != sentence || fmt.Sprint(errs["details"]) != "map[code:seed_backup_missing]" {
-		t.Fatalf("the apply without a backup: %v", a)
-	}
-	// An archive of two days ago is none.
-	mu.Lock()
-	archive = time.Now().Add(-48 * time.Hour).Unix()
-	mu.Unlock()
-	call(http.MethodPost, one+"/runs", apply(""), http.StatusConflict)
+	blind("without a backup")
+	// Today's archive on a store whose backups of the seed Proxmox does not show the portal token: the same answer.
+	archive(time.Hour)
+	blind("with an archive Proxmox does not list to the portal token")
 	// The operator's word starts it, and the run records it.
 	data := call(http.MethodPost, one+"/runs", apply(`,"seedBackupTaken":true`), http.StatusAccepted)["data"].(map[string]any)
 	if run, err := store.Run(ctx, data["runId"].(string)); err != nil || !run.SeedBackupTaken {
@@ -1289,12 +1283,20 @@ func TestPlatformUpgradeNeedsASeedBackup(t *testing.T) {
 		t.Fatalf("the plan of the started upgrade: %v", u)
 	}
 
-	// A fresh archive on a store the portal reads: the plan is clear and the apply starts without the operator's word.
-	mu.Lock()
-	archive = time.Now().Add(-time.Hour).Unix()
-	mu.Unlock()
+	// The portal token manages the store (as on the import store): an archive of two days ago is none, a fresh one
+	// is seen, the plan is clear and the apply starts without the operator's word.
+	site.Mu.Lock()
+	site.ACL["proxcloud@pve!platform"]["/storage/pbs"] = []string{"Datastore.Allocate", "Datastore.AllocateSpace", "Datastore.Audit"}
+	site.Mu.Unlock()
+	archive(48 * time.Hour)
+	three := installed("svc-pve-3")
+	if row, _ := upgradeOf(three)["seedBackup"].(map[string]any); row["status"] != "warn" || !strings.Contains(fmt.Sprint(row["message"]), "The newest it sees, on store pbs, is of ") {
+		t.Fatalf("the plan with an old backup: %v", row)
+	}
+	call(http.MethodPost, three+"/runs", apply(""), http.StatusConflict)
+	archive(time.Hour)
 	two := installed("svc-pve-2")
-	u = upgradeOf(two)
+	u := upgradeOf(two)
 	if row, _ := u["seedBackup"].(map[string]any); len(u["blocking"].([]any)) != 0 || row["status"] != "ok" || !strings.Contains(fmt.Sprint(row["message"]), "on store pbs") {
 		t.Fatalf("the plan with a fresh backup: %v", u)
 	}
