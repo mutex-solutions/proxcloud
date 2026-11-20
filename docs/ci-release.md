@@ -807,7 +807,7 @@ pairs and passes, `TestCertManagerMoveRenders` pulls both cert-manager versions 
 passes, and `TestPreviousBOMsMoveAsTheirPinsDiffer` holds each allowed pair to its split (2026-11-21). A development BOM carries nothing:
 on a build of `main`, an installation that stands in the replacement of its machines toward 0.10.1-rc.1,
 0.10.1-rc.2 or 0.10.1 goes on to that target with a Retry, by the kept file, with nothing to confirm
-(`TestRollTowardAKeptCandidateGoesOn`). Only `-dev` refuses the twelve pairs on `main`.
+(`TestRollTowardAKeptCandidateGoesOn`). Only `-dev` refuses the three allowed pairs on `main`.
 
 The pairs of the BOM of the release `v0.10.1` (the ten below and 0.10.1-rc.2 to it). It has the pins of the
 candidate `v0.10.1-rc.2`, so the pair from 0.10.1-rc.2 differs in the release line alone: `PlanFor` gives one change,
