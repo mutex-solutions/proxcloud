@@ -37,6 +37,10 @@ func (p *platform) deletes() []string {
 // run deletes the Node no Machine owns, names it, and goes on to the next unit.
 func TestRollDeletesTheNodeOfAReplacedControlPlaneMachine(t *testing.T) {
 	p, _ := rolling(t)
+	var audited []string
+	p.r.OnNodeDeleted = func(in *Installation, node, why, actor string) {
+		audited = append(audited, in.ID+" "+node+" "+actor+" "+why)
+	}
 	p.once()
 	p.machine("pc-platform-cp", "1.35.11")
 	const ghost = "/api/v1/nodes/pc-platform-cp-lhcn7"
@@ -60,8 +64,20 @@ func TestRollDeletesTheNodeOfAReplacedControlPlaneMachine(t *testing.T) {
 	for _, owner := range []string{"pc-platform-system-pve1", "pc-platform-kamaji-pve2", "pc-platform-dbaas-pve3"} {
 		p.machine(owner, "1.35.11")
 	}
-	if end := p.until(30); end != "complete" || len(p.deletes()) != 1 {
+	// The item stays on the stage through every later write of its items (the drill's run had lost it at the next
+	// look), and the deletion has its audit entry, by the run.
+	named := func() bool {
+		return slices.ContainsFunc(p.stage(stageCluster).Items, func(i StageItem) bool { return i.ID == "node/pc-platform-cp-lhcn7" && i.State == "deleted" })
+	}
+	if p.once(); !named() {
+		t.Fatalf("after the next look: %+v", p.stage(stageCluster))
+	}
+	if end := p.until(30); end != "complete" || len(p.deletes()) != 1 || !named() {
 		t.Fatalf("end %s, deletes %v: %+v", end, p.deletes(), p.stage(stageCluster))
+	}
+	run, in, _ := p.state.snapshot()
+	if len(audited) != 1 || !strings.HasPrefix(audited[0], in.ID+" pc-platform-cp-lhcn7 "+templateupdates.PlatformRunActor+run.ID+" Node pc-platform-cp-lhcn7 was not Ready") {
+		t.Fatalf("audit entries: %q", audited)
 	}
 }
 

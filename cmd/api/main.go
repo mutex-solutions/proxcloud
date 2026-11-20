@@ -1072,6 +1072,15 @@ func run() error {
 					}
 					auditSvc.LogAsync(ev)
 				},
+				// A Node object of the platform cluster the run deleted: the only delete a run makes there by itself.
+				OnNodeDeleted: func(in *platformlife.Installation, node, why, actor string) {
+					ev := audit.SystemEvent()
+					ev.Actor.ID, ev.Actor.DisplayName = actor, actor
+					ev.Action, ev.ResourceType, ev.ResourceID, ev.ResourceDisplayName = audit.ActionDelete, "PLATFORM_INSTALLATION", in.ID, in.Name
+					ev.Outcome = audit.OutcomeSuccess
+					ev.Changes = []audit.PropertyChange{{Field: "node", OldValue: node}, {Field: "reason", NewValue: why}}
+					auditSvc.LogAsync(ev)
+				},
 			}
 			prCtx, stopPR := context.WithCancel(ctx)
 			prDone := make(chan struct{})

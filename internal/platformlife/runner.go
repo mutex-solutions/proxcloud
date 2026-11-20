@@ -76,6 +76,9 @@ type Runner struct {
 	Imports   Imports
 	// OnImport records the audit entry of an image import the run enqueued (the admin handler's entry).
 	OnImport func(rec *templateupdates.Receipt, actor string)
+	// OnNodeDeleted records the audit entry of a Node object of the platform cluster a run deleted because no Machine
+	// owned it (nodes); why is the text of the run's item.
+	OnNodeDeleted func(in *Installation, node, why, actor string)
 	// Register creates or adopts one provider row of the installation from a stage 10 body and answers its id
 	// (ErrProviderConflict when a row that is not the installation's is in the way). Disable sets the installation's
 	// provider rows DISABLED (Remove). The admin handler implements both.
