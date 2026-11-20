@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The chart mirror's manifest names cert-manager v1.21.3** (`deploy/platform/charts-mirror.yaml`, upstream
+  https://charts.jetstack.io, index digest `sha256:9ec67938b2981d8b333af61b3fcf53e26b4f6f5deb7ccda3de4ea116bb373a17`,
+  which is the sha256 of the downloaded `.tgz`). The BOM still pins v1.20.2: the next `charts-mirror-v<n>` tag
+  publishes v1.21.3, and a later change pins its mirror digest. `test_charts_mirror.py` now lets the manifest be
+  ahead of the BOM for a chart the BOM takes from the mirror (the BOM's version or a greater MAJOR.MINOR.PATCH; an
+  older one, or the same three numbers with another suffix, fails), so a new version can be published before the
+  BOM names it. v1.20.2 stays published: the mirror run only pushes, and older BOMs pin it. docs/ci-release.md, "A
+  new version of a mirrored chart", gives the order: manifest pull request, tag, pin pull request.
+
 - **The platform BOM on `main` is `0.11.0-dev` again, and the build carries the BOM of `0.10.1`**
   (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.10.1.yaml`, sha256
   `aec05ea60e6bfd12d73bab3d45a6a2aae8a3f62f3a41d3f43737aa8ef1d74e3b`). The `v0.10.1` release commit left the BOM at

@@ -43,6 +43,14 @@ def tgz(name, version, extra=None, mtime=0, app=None, tail=""):
     return buf.getvalue()
 
 
+def mirror_version_ok(manifest, bom):
+    """The manifest version of a chart the BOM takes from the mirror is the BOM's, or a greater MAJOR.MINOR.PATCH
+    (compared as numbers, a leading "v" ignored). With the same three numbers the whole version must be equal, so no
+    order of pre-release suffixes is assumed."""
+    core = lambda v: tuple(map(int, re.match(r"v?(\d+)\.(\d+)\.(\d+)", v).groups()))
+    return manifest == bom or core(manifest) > core(bom)
+
+
 def sha(data):
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
@@ -205,14 +213,36 @@ class ManifestTest(unittest.TestCase):
             with self.assertRaises(cm.MirrorError):
                 cm.parse_manifest(text)
 
-    def test_manifest_equals_the_bom(self):
-        """Every third-party chart of the BOM is in the manifest with the same pin, and nothing else is.
+    def test_manifest_follows_the_bom(self):
+        """Every third-party chart of the BOM is in the manifest, and nothing else is.
 
         A BOM chart from an upstream repository must be a manifest entry with that repo, version and digest; one at a
         moving 0.0.0+ version must be a git entry. A BOM chart already taken from the mirror must be a manifest entry
-        of that name and version (its BOM digest is the mirror's manifest digest, which this file cannot know)."""
-        entries = {e["name"]: e for e in cm.parse_manifest((ROOT / cm.MANIFEST).read_text())}
-        bom = (ROOT / bv.BOM).read_text()
+        of that name at the BOM's version or a newer one (its BOM digest is the mirror's manifest digest, which this
+        file cannot know): a new version is published from the manifest before the BOM pins it, never the reverse."""
+        self.manifest_follows_the_bom(self.manifest(), (ROOT / bv.BOM).read_text())
+
+    def test_a_mirrored_chart_may_be_ahead_of_the_bom_not_behind(self):
+        for manifest, bom, ok in (("v1.21.3", "v1.20.2", True), ("v1.20.2", "v1.20.2", True), ("v2.0.0", "v1.20.2", True),
+                                  ("v1.20.10", "v1.20.9", True), ("26.11.3-edge", "26.11.2-edge", True),
+                                  ("v1.20.1", "v1.20.2", False), ("v1.19.9", "v1.20.2", False),
+                                  ("v1.20.9", "v1.20.10", False), ("26.11.2-rc.1", "26.11.2-edge", False)):
+            self.assertEqual(mirror_version_ok(manifest, bom), ok, (manifest, bom))
+        entries, bom = self.manifest(), (ROOT / bv.BOM).read_text()
+        pinned = re.search(r"\{repo: %s, name: cert-manager, version: %s," % (re.escape(cm.MIRROR), bv._V), bom).group(1)
+        for version, ok in ((pinned, True), ("v99.0.0", True), ("v1.0.0", False), (pinned + "-rc.1", False)):
+            entries["cert-manager"] = dict(entries["cert-manager"], version=version)
+            if ok:
+                self.manifest_follows_the_bom(entries, bom)
+            else:
+                with self.assertRaises(AssertionError, msg=version):
+                    self.manifest_follows_the_bom(entries, bom)
+
+    @staticmethod
+    def manifest():
+        return {e["name"]: e for e in cm.parse_manifest((ROOT / cm.MANIFEST).read_text())}
+
+    def manifest_follows_the_bom(self, entries, bom):
         used = set()
         charts = re.findall(r"\{repo: %s, name: %s, version: %s, digest: %s\}" % ((bv._V,) * 4), bom)
         self.assertTrue(charts)
@@ -223,7 +253,8 @@ class ManifestTest(unittest.TestCase):
             entry = entries[name]
             used.add(name)
             if repo == cm.MIRROR:
-                self.assertEqual(version, entry["version"], name)
+                self.assertTrue(mirror_version_ok(entry["version"], version),
+                                "%s: the manifest has %s, older than the BOM's %s" % (name, entry["version"], version))
             elif version.startswith("0.0.0+"):
                 self.assertEqual((entry["kind"], digest), ("git", "pending"), name)
             else:

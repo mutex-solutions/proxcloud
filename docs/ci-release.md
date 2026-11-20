@@ -905,11 +905,14 @@ workflow publishes there; the registry does not enforce that rule (see
 packages are public, and the BOM takes every third-party chart from the mirror.
 
 `deploy/platform/charts-mirror.yaml` lists every third-party chart of the BOM
-with its source. A test (`test_charts_mirror.py`) keeps it equal to the BOM:
-the same charts and versions, and no chart the BOM does not use. The manifest's
-digests are those of the upstream sources; the BOM holds the mirror's manifest
-digests, which the test does not compare (`bom-verify` checks them against the
-registry).
+with its source. A test (`test_charts_mirror.py`) keeps it in step with the
+BOM: the same charts, and no chart the BOM does not use. For a chart the BOM
+takes from the mirror the manifest's version is the BOM's or a newer one
+(MAJOR.MINOR.PATCH compared as numbers; with the same three numbers the whole
+version must be equal), so that a new version is published before the BOM pins
+it; an older one fails. The manifest's digests are those of the upstream
+sources; the BOM holds the mirror's manifest digests, which the test does not
+compare (`bom-verify` checks them against the registry).
 [`charts_mirror.py`](../.github/scripts/charts_mirror.py) (standard library,
 `helm` and `git`) handles each entry by its kind:
 
@@ -1029,8 +1032,10 @@ Order of use:
    `charts-mirror-digests-<sha>` artifact, `charts-mirror.json`), each compared
    with an anonymous manifest `HEAD` before it was written. `bom-verify` checks
    them like our own OCI charts; `bom_verify.py` did not change. A next mirror
-   tag (a new chart version) needs the same follow-up, and the same change must
-   move what the tests tie to the BOM, or `test.yml` and `bom-verify.yml` fail:
+   tag (a new chart version, see
+   [a new version of a mirrored chart](#a-new-version-of-a-mirrored-chart))
+   needs the same follow-up, and the same change must move what the tests tie
+   to the BOM, or `test.yml` and `bom-verify.yml` fail:
    - `TestBOMMatchesStage40` (`internal/platformlife/bom_test.go`) requires
      `spec.chart` of `installer/playbooks/templates/argocd-helmchart.yml.j2`
      to be `oci://<BOM repo>/argo-cd`, and `repoURL` of the cert-manager
@@ -1095,6 +1100,45 @@ test) and with `SIGKILL` of a local dry run after three verified charts; a
 kill during a real push, and on a runner, was not tried. The run can be repeated
 (re-run the job, or a next tag): what is served with the same content is
 skipped and its digest is printed again.
+
+### A new version of a mirrored chart
+
+A chart the BOM already takes from the mirror moves in three steps, in this
+order (the first one: cert-manager v1.20.2 to v1.21.3):
+
+1. **Manifest pull request.** Change the chart's entry in
+   `deploy/platform/charts-mirror.yaml`: the new version and its upstream
+   digest. For an `https` entry that is the `digest` of the version in the
+   repository's `index.yaml`; download the `.tgz` from the same repository and
+   check that its sha256 is that value before writing it. The BOM is not
+   changed: the test allows the manifest to be ahead of the BOM. The pull
+   request's dry run fetches the new version, checks its digest and reports it
+   as not published yet.
+2. **Tag.** After the merge an owner tags the merge commit on `main`
+   `charts-mirror-v<n>`, the next free number. The run pushes the new version
+   only (every other entry is served with the same content and skipped) and
+   records its manifest digest in the job summary and in the artifact
+   `charts-mirror-digests-<sha>` (`charts-mirror.json`, kept 90 days). Package
+   visibility on GHCR is a setting of the package, not of a version, so a new
+   version of a package that is already public needs no owner step; the pin
+   pull request's anonymous `bom-verify` shows whether it is readable.
+3. **Pin pull request.** Take the manifest digest from the run's record,
+   confirm it with an anonymous
+   `helm pull oci://ghcr.io/mutex-solutions/charts-mirror/<chart> --version <version>`
+   (Helm prints `Digest:`), and write version and digest into every BOM entry
+   of that chart, with `upgradeFrom` where an upgrade is meant to move it, and
+   whatever the tests tie to the BOM (step 4 of the order of use above).
+   `bom-verify` compares the digest with the registry. The manifest and the BOM
+   are then equal again.
+
+The old version stays published. The script only pulls and pushes, the
+workflow has no step that deletes a package version, and a version that
+leaves the manifest is simply no longer fetched. Sites on an older BOM still
+pull it, and the BOMs kept under `deploy/platform/previous/` pin it, which
+`bom-verify` checks. Its source and upstream digest stay in the history of
+the manifest (the commit the earlier tag points at). A version is removed from
+GHCR only by hand, in the package settings; nothing in this repository does
+it.
 
 ### Limits of the gate
 

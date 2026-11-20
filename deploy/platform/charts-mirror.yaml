@@ -25,14 +25,17 @@
 # by "edge"), has no "+" (Helm stores "+" as "_" in an OCI tag), and makes the chart's default image the pinned one,
 # because the chart falls back to appVersion when image.tag is unset.
 #
-# .github/scripts/tests/test_charts_mirror.py keeps this file equal to platform-bom.yaml: the same third-party charts
-# and versions (and digests, for a chart the BOM takes from upstream; the BOM takes all of them from the mirror, whose
-# manifest digests are in the BOM and not here), and nothing the BOM does not use. `licence` must be one that allows redistribution
+# .github/scripts/tests/test_charts_mirror.py keeps this file in step with platform-bom.yaml: the same third-party
+# charts, and nothing the BOM does not use. A chart the BOM takes from upstream has the same version and digest here.
+# A chart the BOM takes from the mirror (all of them; their manifest digests are in the BOM and not here) has the
+# BOM's version or a newer one here: a new version is published from this file before a later change pins it in the
+# BOM (docs/ci-release.md, "A new version of a mirrored chart"); an older one fails. A version that leaves this file
+# stays published: no run deletes one, and older BOMs pin it. `licence` must be one that allows redistribution
 # (Apache-2.0 or MIT); it is the licence of the upstream repository, read by a person, not by the script.
 schemaVersion: 1
 charts:
   - {name: argo-cd, version: 10.14.0, repo: ghcr.io/argoproj/argo-helm, digest: "sha256:09ca0a888b05bdf4c21a7c812dd7612156f63eb2a9fde0434ddb3ee095599a85", licence: Apache-2.0}
-  - {name: cert-manager, version: v1.20.2, repo: "https://charts.jetstack.io", digest: "sha256:d2a50bd44a09d838c2576a8f3dfca1524597c7393cf8d82ab3ec8a465b9eeb79", licence: Apache-2.0}
+  - {name: cert-manager, version: v1.21.3, repo: "https://charts.jetstack.io", digest: "sha256:9ec67938b2981d8b333af61b3fcf53e26b4f6f5deb7ccda3de4ea116bb373a17", licence: Apache-2.0}
   - {name: cilium, version: 1.18.16, repo: "https://helm.cilium.io", digest: "sha256:a28a48ef4c5250684317ebeb8f55b7de422235a86eef3530b6288b4f23fd4dd5", licence: Apache-2.0}
   - {name: metallb, version: 0.16.2, repo: "https://metallb.github.io/metallb", digest: "sha256:96667a810bdf9b9d1e6d320af16a4e66c63ba56301bc21005e645cd7a1c298a4", licence: Apache-2.0}
   - {name: cloudnative-pg, version: 0.29.1, repo: "https://cloudnative-pg.github.io/charts", digest: "sha256:b53d3991fe84bcf38767e7702cae78666265427a127a26fff168ab4207d2b1df", licence: Apache-2.0}
