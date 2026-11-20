@@ -6,7 +6,7 @@ the `v0.4.0-rc.1` prerelease (tag 2026-11-11, images and app chart `0.4.0-rc.1`)
 and the first stable release `v0.4.0` (tag 2026-11-12, images and app chart
 `0.4.0`), then the stable `v0.5.0` (tag 2026-11-13), the patches `v0.5.1` and `v0.5.2` and the stable `v0.6.0` (tags 2026-11-14),
 the `v0.7.0-rc.1` prerelease and the stable `v0.7.0` (tags 2026-11-15), the stable `v0.8.0` (tag 2026-11-17) and the patches `v0.8.1` and `v0.8.2` (tags 2026-11-18), and the release candidates
-`v0.9.0-rc.1` and `v0.9.0-rc.2`, prereleases, the stable `v0.9.0` and the patch `v0.9.1` (tags 2026-11-19; [Release candidates](#release-candidates)), and the first candidate of `v0.10.0`, `v0.10.0-rc.1`, a prerelease, and the stable `v0.10.0` (tags 2026-11-20). Pushing the next tag runs the app image/chart publication and GitHub Release
+`v0.9.0-rc.1` and `v0.9.0-rc.2`, prereleases, the stable `v0.9.0` and the patch `v0.9.1` (tags 2026-11-19; [Release candidates](#release-candidates)), and the first candidate of `v0.10.0`, `v0.10.0-rc.1`, a prerelease, and the stable `v0.10.0` (tags 2026-11-20). The next tag is the first candidate of `v0.10.1`, `v0.10.1-rc.1`; pushing it runs the app image/chart publication and GitHub Release
 creation.
 This source change does none of those operations, and installation from released
 artifacts and later controlled PVE template canaries remain separate steps. Read
@@ -325,8 +325,10 @@ to `0.10.0-dev` again and added `deploy/platform/previous/0.10.0-rc.1.yaml`, so 
 be tagged until the next release commit dropped `-dev`: the release commit of `v0.10.0` sets the
 release to `0.10.0` (checked on 2026-11-20 on that commit: `--release` prints `all pins match`, on
 the BOM and on the eight previous BOMs). The pull request after that tag set the BOM on `main`
-to `0.11.0-dev` and added `deploy/platform/previous/0.10.0.yaml`, so `main` cannot be tagged
-until the next release commit drops `-dev`. The gate does not
+to `0.11.0-dev` and added `deploy/platform/previous/0.10.0.yaml`, so `main` could not be tagged
+until the next release commit dropped `-dev`: the commit of the candidate `v0.10.1-rc.1` sets the
+release to `0.10.1-rc.1` (checked on 2026-11-20 on that commit: `--release` prints `all pins match`,
+on the BOM and on the nine previous BOMs). The gate does not
 compare the BOM's release with the tag
 (below): a commit whose BOM has no `-dev` passes this part for any tag.
 
@@ -441,6 +443,20 @@ has not run on a lab. Its tag is on the commit `8797f8ac`; the `docker` and `hel
 succeeded on the first attempt, and the GitHub Release is the latest (read on 2026-11-20). The
 pull request after it added `deploy/platform/previous/0.10.0.yaml` and set the BOM on `main` to
 `0.11.0-dev`.
+
+`v0.10.1-rc.1` is the first candidate of `v0.10.1`, cut from `main` as the patch `v0.9.1` was: its
+commit takes the BOM from `0.11.0-dev` to `0.10.1-rc.1`, with the pins `main` had. It is the first
+release BOM that names another k3s and another Kubernetes than the ones before it: k3s
+`v1.36.6+k3s1`, Kubernetes 1.36.6 and its node image, one minor up from every previous BOM, so
+every upgrade to it replaces the seed's k3s and every machine of the platform cluster, in two
+parts ([managed-services.md](managed-services.md#upgrade-to-kubernetes-1366)). No chart of the
+product changed since its tag (the three `git diff` commands above print nothing on its commit),
+so the BOM needs no new chart version, and no third-party chart or provider moves: cert-manager
+v1.20.2 and Cilium 1.18.16 are then outside the Kubernetes versions their own documents list,
+accepted as "to be proven by the lab drill". The app chart, the installer pin and
+`DEFAULT_VERSION` stay on `v0.10.0`, and the installer's k3s and Kubernetes pins stay at 1.35.10.
+The pull request after its tag adds `deploy/platform/previous/0.10.1-rc.1.yaml`. Nothing of it
+has run on a lab: the candidate exists for the drill of that upgrade.
 
 Not verified on a lab: anything on the published images of `v0.9.0` or `v0.9.1`, the move
 of a platform from a candidate's BOM to that of `0.9.0`, and any move to that of `0.9.1`.
@@ -675,16 +691,16 @@ What a release must do when it changes a pin, before its tag:
    build of the release commit, `GET …/plan` of such an installation, or
    `PlanFor` in a test.
 
-The pairs of the BOM on `main` today (0.8.0, 0.8.1, 0.8.2, 0.9.0-rc.1, 0.9.0-rc.2, 0.9.0, 0.9.1, 0.10.0-rc.1 and 0.10.0 to
+The pairs of the BOM of the candidate `v0.10.1-rc.1` (0.8.0, 0.8.1, 0.8.2, 0.9.0-rc.1, 0.9.0-rc.2, 0.9.0, 0.9.1, 0.10.0-rc.1 and 0.10.0 to
 it). All nine differ from it in the seed's k3s (`v1.35.10+k3s1` to `v1.36.6+k3s1`), in the Kubernetes version (1.35.10 to
 1.36.6) and in its node image, each one minor up: every pair replaces the seed's k3s and every machine of the platform
 cluster, and `TestUpgradeRollsNoMachine` compares all nine at step 0 of the roll and passes (2026-11-20; cluster chart
-0.1.13 and 0.1.14 pulled from the registry). With the release set to one without `-dev`, `PlanFor` on an installation of
+0.1.13 and 0.1.14 pulled from the registry). On the candidate's commit, `PlanFor` on an installation of
 one control plane machine and one machine per group gives, from each of the nine: allowed, no refusal, two parts (`seed`
 with the phrase `upgrade <name> to <release>`, `platform` blocked by `seed_not_upgraded` until the seed's k3s has moved
-and then with `upgrade <name> to <release> and replace its machines`), `seed.k3s` with three `site` rows, two `machines`
-rows, four `roll/<unit>` and four `roll-vm/<unit>` rows; 16 changes from 0.10.0-rc.1 and 0.10.0, 19 from 0.9.0, 0.9.1 and
-the candidates of 0.9.0, 22 from the three 0.8.x BOMs. None of these moves was run anywhere. The differences next to
+and then with `upgrade <name> to <release> and replace its machines`), the row `roll`, `seed.k3s` with four `site` rows, two `machines`
+rows, four `roll/<unit>` and four `roll-vm/<unit>` rows; 17 changes from 0.10.0-rc.1 and 0.10.0, 20 from 0.9.0, 0.9.1 and
+the candidates of 0.9.0, 23 from the three 0.8.x BOMs (read again on 2026-11-20). None of these moves was run anywhere. The differences next to
 those three entries are the ones the BOM of 0.10.0 had. From the three 0.8.x BOMs, the BOMs
 differ in the release line, in `tenantCharts.kubernetes` and `tenantCharts.database` and in the four
 components of the product's own charts, `pc-platform` 0.1.13 to 0.1.15 and
@@ -694,7 +710,7 @@ ClusterRole alone. From 0.9.0-rc.1, 0.9.0-rc.2, 0.9.0 and 0.9.1 the BOMs differ 
 two tenant charts and in `pc-platform`, 0.1.14 to 0.1.15. `pc-platform` lists both 0.1.13 and 0.1.14 in
 `upgradeFrom`: a build takes only its own BOM as a target, so dropping 0.1.13 would leave a 0.8.x platform
 no move without a 0.9 release in between. From 0.10.0-rc.1 and 0.10.0 the BOMs differ in the release line alone.
-So the classifier allows all nine pairs, and only `-dev` refuses them on `main`. On the release commit of `v0.10.0` the plan from each
+So the classifier allows all nine pairs. On the release commit of `v0.10.0` the plan from each
 of the three 0.8.x BOMs is allowed with seven changes and no refusal, the plan from 0.9.0, 0.9.1
 and each candidate of 0.9.0 with four changes, and the plan from 0.10.0-rc.1 with one change, the
 release, record only (`Classify` on the eight pairs, 2026-11-20). No move to 0.10.0 was run
@@ -1079,7 +1095,7 @@ file (`docker.yml`, job `release`, step "Assemble release notes"). Without the
 file the step prints a warning and falls back to the `## [X.Y.Z]` section of
 `CHANGELOG.md`, as every release up to `v0.8.2` did; the script test below fails
 when a changelog section of a release from `0.8.0` on has no file, so only an rc tag
-without a file takes that path (`v0.9.0-rc.1`, `v0.9.0-rc.2` and `v0.10.0-rc.1` have one). An empty file, or one over 120000 characters, fails
+without a file takes that path (`v0.9.0-rc.1`, `v0.9.0-rc.2`, `v0.10.0-rc.1` and `v0.10.1-rc.1` have one). An empty file, or one over 120000 characters, fails
 the step, and no Release is created. GitHub's generated commit and pull request
 list (`--generate-notes`) follows the body either way.
 
