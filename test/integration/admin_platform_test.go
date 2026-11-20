@@ -685,14 +685,30 @@ func TestPlatformRunOnAPreviousBOM(t *testing.T) {
 	call(http.MethodGet, up+"/plan?target="+strings.Repeat("3", 64), "", http.StatusBadRequest)
 	call(http.MethodPost, up+"/runs", fmt.Sprintf(`{"kind":"apply","targetBom":%q}`, strings.Repeat("3", 64)), http.StatusBadRequest)
 
-	// The same build as a release: 0.8.0 and main differ in the release line and the product's own charts, each of which
-	// lists the installed version in upgradeFrom, so the move is allowed: the release, both tenantCharts, and the
-	// charts of capi, pc-platform, capi-tenant and platform. It wants the typed confirmation, records the target on
-	// the installation and where it comes from on the run.
-	release := cur.Release
+	// The same build as a release. Main's BOM names another k3s and another Kubernetes than 0.8.0, so the move from
+	// 0.8.0 has the seed.k3s row and the machines rows. This installation is bare (no settings, no seed, no cluster),
+	// which no platform a release installed is: the rows are read here, the two parts and their runs are
+	// TestPlatformUpgradeNeedsASeedBackup's and the test of the parts.
+	saved := *cur.BOM
+	defer func() { *cur.BOM = saved }()
 	cur.Release = "0.9.0"
-	defer func() { cur.Release = release }()
 	upgrade, _ := call(http.MethodGet, up+"/plan?target="+cur.SHA256, "", http.StatusOK)["data"].(map[string]any)["upgrade"].(map[string]any)
+	classes := map[string]any{}
+	for _, c := range upgrade["changes"].([]any) {
+		classes[fmt.Sprint(c.(map[string]any)["name"])] = c.(map[string]any)["class"]
+	}
+	if classes["seed.k3s"] != platformlife.ClassSeed || classes["kubernetes.version"] != platformlife.ClassMachines || classes["kubernetes.nodeImage"] != platformlife.ClassMachines {
+		t.Fatalf("the plan of the move from 0.8.0 to main's BOM: %v", upgrade)
+	}
+
+	// The rest is the move that replaces nothing, which main's BOM was until it named Kubernetes 1.36: this build with
+	// the k3s and the Kubernetes of 0.8.0. 0.8.0 and it differ in the release line and the product's own charts, each
+	// of which lists the installed version in upgradeFrom, so the move is allowed: the release, both tenantCharts, and
+	// the charts of capi, pc-platform, capi-tenant and platform. It wants the typed confirmation, records the target
+	// on the installation and where it comes from on the run.
+	old := bom080(t)
+	cur.Kubernetes, cur.Seed.K3s = old.Kubernetes, old.Seed.K3s
+	upgrade, _ = call(http.MethodGet, up+"/plan?target="+cur.SHA256, "", http.StatusOK)["data"].(map[string]any)["upgrade"].(map[string]any)
 	if upgrade["allowed"] != true || upgrade["confirm"] != "upgrade lab to 0.9.0" || len(upgrade["changes"].([]any)) != 7 || len(upgrade["blocking"].([]any)) != 0 {
 		t.Fatalf("the plan of the move: %v", upgrade)
 	}

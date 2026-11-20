@@ -118,7 +118,7 @@ applications:
                   - proxcloud
                   - pc-platform
                   - pc-platform-pi-0123abcd
-            kubernetesVersion: 1.35.10
+            kubernetesVersion: 1.36.6
             nodeGroups:
               - machineCores: 2
                 machineCount: 3

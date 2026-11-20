@@ -4,6 +4,20 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-20: the platform BOM names k3s v1.36.6+k3s1 and Kubernetes 1.36.6
+
+**What changed:** no component or container, and no code of one. The BOM's `seed.k3s`, `kubernetes.version` and
+`kubernetes.nodeImage` move one minor up, so "Platform runs" takes, for the first time on a released BOM, the paths
+it has had since v0.10.0: stage 5a (the seed's k3s) and the roll of the platform cluster's machines in stage 7. The
+installer's `pc_versions.k3s` and `pc_defaults.services.k8s_version` stay at 1.35.10; the test that tied them to the
+BOM lets them be one minor behind. The pair check `TestUpgradeRollsNoMachine` compares a pair that replaces machines
+at step 0 of the roll.
+
+**Why:** v0.10.1 moves installed platforms to Kubernetes 1.36. The installer path is left out: its `make upgrade`
+has none of the run's gates and was not studied for 1.36.
+
+**Diagrams:** none.
+
 ## 2026-11-20: the seed-backup row reads with two tokens and says what it cannot see
 
 **What changed:** no component or container. Component "Platform installations": `SeedBackupCheck` takes the portal

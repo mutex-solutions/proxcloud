@@ -70,6 +70,13 @@ func clusterChart(t *testing.T, helm string, c Chart) string {
 // BOM, so a renderer change is caught here as well as a chart change. A pair that fails must not be allowed: the new
 // chart version must not list the old one in upgradeFrom, and the platform then stays on its BOM until a release
 // rolls machines.
+//
+// A pair that replaces machines by design (class machines: another Kubernetes version or node image) is held to the
+// same comparison at the point where it must hold: this build's chart with the values a run renders before the roll
+// begins (step 0: the previous BOM's version, kube-vip and templates) renders exactly what the previous release
+// rendered. The run applies the new chart version with step 1 and its gate lets only that step's unit differ, so a
+// chart or renderer that changed any other machine object would fail every such upgrade at step 1 with
+// unexpected_rollout. The steps after 0 are TestRollRendersOneUnitAtATime's.
 func TestUpgradeRollsNoMachine(t *testing.T) {
 	helm, err := exec.LookPath("helm")
 	if err != nil {
@@ -83,14 +90,34 @@ func TestUpgradeRollsNoMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := machineFacts(t, helm, clusterChart(t, helm, comp(t, cur, ClusterSeed, ClusterName).Chart), "testdata/render-cluster-values.golden.yaml")
-	checked := 0
+	chart := clusterChart(t, helm, comp(t, cur, ClusterSeed, ClusterName).Chart)
+	plain := machineFacts(t, helm, chart, "testdata/render-cluster-values.golden.yaml")
+	checked, rolled := 0, 0
 	for _, b := range prev {
-		if slices.ContainsFunc(Classify(b.BOM, cur), func(c PlanChange) bool { return c.Blocking != "" }) {
+		changes := Classify(b.BOM, cur)
+		if slices.ContainsFunc(changes, func(c PlanChange) bool { return c.Blocking != "" }) {
 			t.Logf("%s: no upgrade from it to %s, so nothing to compare", b.Release, cur.Release)
 			continue
 		}
 		checked++
+		want := plain
+		if hasMachines(changes) {
+			rolled++
+			in := renderInput() // the input of both goldens
+			in.Cluster.Roll = &Roll{FromVersion: b.Kubernetes.Version, FromKubeVip: b.Images.KubeVip, FromTemplates: in.Templates}
+			v, err := ClusterValues(cur, in)
+			if err != nil {
+				t.Fatalf("%s: step 0 of the roll to %s: %v", b.Release, cur.Release, err)
+			}
+			values := filepath.Join(t.TempDir(), "step0.yaml")
+			if err := os.WriteFile(values, yamlDoc(t, v), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			want = machineFacts(t, helm, chart, values)
+			if reflect.DeepEqual(want, plain) {
+				t.Errorf("%s to %s is class machines, and step 0 renders the machines of the target: the roll would order nothing", b.Release, cur.Release)
+			}
+		}
 		got := machineFacts(t, helm, clusterChart(t, helm, comp(t, b.BOM, ClusterSeed, ClusterName).Chart), filepath.Join("testdata", "previous", b.Release, "render-cluster-values.golden.yaml"))
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("an upgrade from %s to %s would replace machines, or fail the run's rollout check: the cluster chart renders another control plane, machine template or bootstrap template (metadata included).\n"+
@@ -100,7 +127,7 @@ func TestUpgradeRollsNoMachine(t *testing.T) {
 	// Today every previous BOM differs from main's in the release line and the product's own charts. When a BOM change
 	// refuses them all, the check has nothing left to say, which is correct; it must not go unnoticed while pairs are
 	// allowed.
-	t.Logf("%d of %d previous BOMs compared", checked, len(prev))
+	t.Logf("%d of %d previous BOMs compared, %d of them at step 0 of a roll", checked, len(prev), rolled)
 }
 
 // The cluster chart in this tree, when it is a version ahead of the one this build's BOM pins (bumped in a pull

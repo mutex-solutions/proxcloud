@@ -1,5 +1,9 @@
 # Release BOM: `make upgrade` moves the platform to whatever is pinned here.
-# Every key the platform BOM also pins must equal deploy/platform/platform-bom.yaml (internal/platformlife/bom_test.go).
+# Every key the platform BOM also pins must equal deploy/platform/platform-bom.yaml (internal/platformlife/bom_test.go),
+# but k3s here and services.k8s_version in defaults.yml: they may stay one minor behind the BOM and are never ahead of
+# it. Both stay at 1.35.10 while the BOM names 1.36.6: `make upgrade` reinstalls k3s in place on every server of the
+# management cluster (which runs Traefik) and lets Cluster API roll the services and sandbox clusters, with none of the
+# gates of the console's upgrade, so this path moves a minor in a release of its own.
 pc_versions:
   k3s: v1.35.10+k3s1
   argocd_chart: 10.14.0        # argo-cd; stage 40 from oci://ghcr.io/mutex-solutions/charts-mirror, stage 50 from upstream
