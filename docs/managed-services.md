@@ -14,7 +14,7 @@ are in [ADR 0009](adr/0009-managed-services-platform-lifecycle.md); the routes a
 > there and what was not is in [Not verified on a lab yet](#not-verified-on-a-lab-yet). It is off
 > by default. v0.8.0 is the first release that carries it; one install was made on its published
 > images (a lab, 2026-11-18) and one on those of the candidate v0.9.0-rc.2 (the same lab,
-> 2026-11-19), none on those of v0.8.1, v0.8.2, v0.9.0, v0.9.1 or v0.10.0: see [Not implemented yet](#not-implemented-yet).
+> 2026-11-19), none on those of v0.8.1, v0.8.2, v0.9.0, v0.9.1, v0.10.0 or v0.10.1: see [Not implemented yet](#not-implemented-yet).
 
 Code: `internal/platformlife` (the installation model, the preflight, the runner and its stages, the
 renderers), `internal/platform/admin/platform.go` (the routes), `internal/cloud/pve/access.go` and
@@ -2193,22 +2193,25 @@ for a site. The candidate `v0.10.1-rc.2` carries the corrections and cluster cha
 BOM, `0.10.1-rc.2`. Its drill on the same lab (2026-11-20, on the platform the first drill had left
 after the control plane's unit) got out with one Retry, replaced the units `system`, `kamaji` and
 `dbaas` with one more machine first, was paused once and resumed, and ended with every machine on
-1.36.6 and no Node left behind. Everything else is what the plan, the code and its tests say, and
-is **not measured**: a unit replaced delete-first, stages 8 to 11 as figures, a control plane of
+1.36.6 and no Node left behind. The release `v0.10.1` has the BOM `0.10.1`, with the pins of
+`0.10.1-rc.2`; its code differs from that candidate's in the wait for the tenants between two
+units, corrected after the second drill and not run on a lab. Everything else is what the plan,
+the code and its tests say, and is **not measured**: a unit replaced delete-first, stages 8 to 11 as figures, a control plane of
 three, a site with one Proxmox node, and the wait for the tenants between two units as corrected
 after that drill ([The platform cluster's machines](#the-platform-clusters-machines), point 5).
 
 **What the BOM changes.** `kubernetes.version` 1.35.10 to 1.36.6, `kubernetes.nodeImage` to the
 image built for 1.36.6 (`ubuntu-2604-k8s-1.36.6-20261116194043-72f0eaa3d0d4`, from the same source
 commit and the same build chain as the 1.35.10 image it replaces), and `seed.k3s` `v1.35.10+k3s1` to
-`v1.36.6+k3s1`. Next to them the BOM `0.10.1-rc.2` names cluster chart 0.1.16 (for the platform
+`v1.36.6+k3s1`. Next to them the BOMs `0.10.1-rc.2` and `0.10.1` name cluster chart 0.1.16 (for the platform
 cluster and for new tenant clusters), which sets the node deletion timeout and replaces no machine
 for it. Nothing else: no Cluster API provider, no clusterctl image, no kube-vip, no seed image.
 
-**The plan, from every earlier BOM.** Nine of the ten BOMs this build carries name 1.35.10 and
-`v1.35.10+k3s1`, so each is one minor from the target and the move is allowed from each (the tenth,
-`0.10.1-rc.1`, names 1.36.6 already: from it the plan has three rows, the release, the tenant
-chart and `pc-platform` 0.1.15 to 0.1.16, and replaces nothing). The plan
+**The plan, from every earlier BOM.** Nine of the eleven BOMs this release carries name 1.35.10
+and `v1.35.10+k3s1`, so each is one minor from the target and the move is allowed from each. The
+other two name 1.36.6 already and replace nothing: from `0.10.1-rc.1` the plan has three rows, the
+release, the tenant chart and `pc-platform` 0.1.15 to 0.1.16; from `0.10.1-rc.2` one, the release,
+record only. The plan
 has, in this order: the row `roll` (there is no way back); `release`; `kubernetes.version` and
 `kubernetes.nodeImage`, kind `machines`; `seed.k3s`, kind `seed`, with its four `site` rows
 (`seed-k3s-job`: Job `proxcloud-system/k3s-upgrade-v1-36-6-k3s1`; `seed-etcd-snapshot`:
@@ -2870,7 +2873,7 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 
 ## Not implemented yet
 
-- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2`, that of v0.9.0 is `0.9.0`, that of v0.9.1 is `0.9.1`, that of v0.10.0 is `0.10.0` (`main` carries a `-dev` one between releases, now `0.11.0-dev`; the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` carry `0.9.0-rc.1` and `0.9.0-rc.2`, release BOMs for a lab, and the candidates `v0.10.0-rc.1`, `v0.10.1-rc.1` and `v0.10.1-rc.2` carry `0.10.0-rc.1`, `0.10.1-rc.1` and `0.10.1-rc.2`; v0.9.0 keeps both as previous BOMs, v0.9.1 keeps those and that of v0.9.0, v0.10.0 keeps that of v0.9.1 and that of the candidate `v0.10.0-rc.1` too, and `main` keeps that of v0.10.0 and those of the candidates `v0.10.1-rc.1` and `v0.10.1-rc.2` as well). `--managed-services` needs v0.8.0 or later: no
+- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2`, that of v0.9.0 is `0.9.0`, that of v0.9.1 is `0.9.1`, that of v0.10.0 is `0.10.0`, that of v0.10.1 is `0.10.1` (`main` carries a `-dev` one between releases; the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` carry `0.9.0-rc.1` and `0.9.0-rc.2`, release BOMs for a lab, and the candidates `v0.10.0-rc.1`, `v0.10.1-rc.1` and `v0.10.1-rc.2` carry `0.10.0-rc.1`, `0.10.1-rc.1` and `0.10.1-rc.2`; v0.9.0 keeps both as previous BOMs, v0.9.1 keeps those and that of v0.9.0, v0.10.0 keeps that of v0.9.1 and that of the candidate `v0.10.0-rc.1` too, and v0.10.1 keeps that of v0.10.0 and those of the candidates `v0.10.1-rc.1` and `v0.10.1-rc.2` as well). `--managed-services` needs v0.8.0 or later: no
   earlier released image reads `PROXCLOUD_PLATFORM_ENABLED`, and the images of v0.8.0 exist once
   its tag's workflows have succeeded. For a test ahead of a release,
   `proxcloud-up.sh` takes a build of main as its version (`--version dev-<sha>`, `upgrade dev-<sha>`;
