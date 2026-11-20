@@ -6,7 +6,7 @@ the `v0.4.0-rc.1` prerelease (tag 2026-11-11, images and app chart `0.4.0-rc.1`)
 and the first stable release `v0.4.0` (tag 2026-11-12, images and app chart
 `0.4.0`), then the stable `v0.5.0` (tag 2026-11-13), the patches `v0.5.1` and `v0.5.2` and the stable `v0.6.0` (tags 2026-11-14),
 the `v0.7.0-rc.1` prerelease and the stable `v0.7.0` (tags 2026-11-15), the stable `v0.8.0` (tag 2026-11-17) and the patches `v0.8.1` and `v0.8.2` (tags 2026-11-18), and the release candidates
-`v0.9.0-rc.1` and `v0.9.0-rc.2`, prereleases, the stable `v0.9.0` and the patch `v0.9.1` (tags 2026-11-19; [Release candidates](#release-candidates)), and the first candidate of `v0.10.0`, `v0.10.0-rc.1`, a prerelease, and the stable `v0.10.0` (tags 2026-11-20). The next tag is the first candidate of `v0.10.1`, `v0.10.1-rc.1`; pushing it runs the app image/chart publication and GitHub Release
+`v0.9.0-rc.1` and `v0.9.0-rc.2`, prereleases, the stable `v0.9.0` and the patch `v0.9.1` (tags 2026-11-19; [Release candidates](#release-candidates)), and the first candidate of `v0.10.0`, `v0.10.0-rc.1`, a prerelease, the stable `v0.10.0` and the first candidate of `v0.10.1`, `v0.10.1-rc.1`, a prerelease (tags 2026-11-20). Pushing the next tag runs the app image/chart publication and GitHub Release
 creation.
 This source change does none of those operations, and installation from released
 artifacts and later controlled PVE template canaries remain separate steps. Read
@@ -328,7 +328,9 @@ the BOM and on the eight previous BOMs). The pull request after that tag set the
 to `0.11.0-dev` and added `deploy/platform/previous/0.10.0.yaml`, so `main` could not be tagged
 until the next release commit dropped `-dev`: the commit of the candidate `v0.10.1-rc.1` sets the
 release to `0.10.1-rc.1` (checked on 2026-11-20 on that commit: `--release` prints `all pins match`,
-on the BOM and on the nine previous BOMs). The gate does not
+on the BOM and on the nine previous BOMs). The pull request after that tag set the BOM on `main`
+to `0.11.0-dev` again and added `deploy/platform/previous/0.10.1-rc.1.yaml`, so `main` cannot be
+tagged until the next release commit drops `-dev`. The gate does not
 compare the BOM's release with the tag
 (below): a commit whose BOM has no `-dev` passes this part for any tag.
 
@@ -455,7 +457,10 @@ so the BOM needs no new chart version, and no third-party chart or provider move
 v1.20.2 and Cilium 1.18.16 are then outside the Kubernetes versions their own documents list,
 accepted as "to be proven by the lab drill". The app chart, the installer pin and
 `DEFAULT_VERSION` stay on `v0.10.0`, and the installer's k3s and Kubernetes pins stay at 1.35.10.
-The pull request after its tag adds `deploy/platform/previous/0.10.1-rc.1.yaml`. Nothing of it
+Its tag is on the commit `dd14e17c`; the `docker` and `helm` runs of the tag succeeded on the first
+attempt, and the GitHub Release is a prerelease while the latest stays `v0.10.0` (read on
+2026-11-20). The pull request after it added `deploy/platform/previous/0.10.1-rc.1.yaml` and set
+the BOM on `main` back to `0.11.0-dev`, with the pins of the candidate. Nothing of it
 has run on a lab: the candidate exists for the drill of that upgrade.
 
 Not verified on a lab: anything on the published images of `v0.9.0` or `v0.9.1`, the move
@@ -518,7 +523,7 @@ that no later build carries, so its platform is refused after an upgrade
 been removed yet; when one is, the platforms of that release are refused again,
 so it needs a release note.
 
-The previous BOMs are `0.8.0`, `0.8.1`, `0.8.2`, `0.9.0-rc.1`, `0.9.0-rc.2`, `0.9.0`, `0.9.1`, `0.10.0-rc.1` and `0.10.0`. `0.8.0` was added by hand from its tag
+The previous BOMs are `0.8.0`, `0.8.1`, `0.8.2`, `0.9.0-rc.1`, `0.9.0-rc.2`, `0.9.0`, `0.9.1`, `0.10.0-rc.1`, `0.10.0` and `0.10.1-rc.1`. `0.8.0` was added by hand from its tag
 (sha256 `8eb874987d3bbaf55f309295ee241ec320c0cf9e0805b3bd1812ef908b6600c6`, the
 value a platform installed by v0.8.0 records). `0.8.1` is the first one the
 procedure above added (sha256
@@ -599,9 +604,20 @@ and differ from the 0.10.0-rc.1 ones in the release label only.
 `bom_verify.py --release` printed `all pins match` on the nine previous BOMs on
 2026-11-20. It sorts before `0.8.0` too.
 
+`0.10.1-rc.1` is the first previous BOM with other Kubernetes pins than the ones
+before it: k3s `v1.36.6+k3s1`, Kubernetes 1.36.6 and its node image (sha256
+`3065954af13509552321c91c693a07e45bfa767344f39a9c0b890d27297b0621`). It was
+copied from the tag `v0.10.1-rc.1` (`dd14e17c`), after the tag existed:
+`git show v0.10.1-rc.1:deploy/platform/platform-bom.yaml | sha256sum` gives that
+hash. Its goldens equal the current goldens at the tag, file for file (`cmp`).
+`bom_verify.py --release` printed `all pins match` on the ten previous BOMs on
+2026-11-20. It sorts before `0.8.0` too. It keeps cert-manager v1.20.2 and
+Cilium 1.18.16 on Kubernetes 1.36, outside the versions their own documents
+list: accepted as "to be proven by the lab drill", and not proven yet.
+
 Not verified: an apply on a platform that `v0.8.1` or `v0.8.2`
 installed, an install by `v0.8.1` or `v0.8.2`, and an apply on a platform that
-is on the BOM `0.9.0-rc.1`, `0.9.0-rc.2`, `0.9.0`, `0.9.1`, `0.10.0-rc.1` or `0.10.0`, installed by that build or moved to it.
+is on the BOM `0.9.0-rc.1`, `0.9.0-rc.2`, `0.9.0`, `0.9.1`, `0.10.0-rc.1`, `0.10.0` or `0.10.1-rc.1`, installed by that build or moved to it.
 One apply with a
 previous BOM was run on a lab (2026-11-18, a platform installed by the released
 `v0.8.0`, on the build `dev-751a190` of `main`): it succeeded and `status.bom`
@@ -691,7 +707,15 @@ What a release must do when it changes a pin, before its tag:
    build of the release commit, `GET …/plan` of such an installation, or
    `PlanFor` in a test.
 
-The pairs of the BOM of the candidate `v0.10.1-rc.1` (0.8.0, 0.8.1, 0.8.2, 0.9.0-rc.1, 0.9.0-rc.2, 0.9.0, 0.9.1, 0.10.0-rc.1 and 0.10.0 to
+The pairs of the BOM on `main` today (0.8.0, 0.8.1, 0.8.2, 0.9.0-rc.1, 0.9.0-rc.2, 0.9.0, 0.9.1, 0.10.0-rc.1, 0.10.0 and
+0.10.1-rc.1 to it). `main` has the pins of the candidate `v0.10.1-rc.1`, so the pair from 0.10.1-rc.1 differs in the
+release line alone: `Classify` gives one change, the release, record only, with no seed part and no machine replaced.
+The nine older pairs are the ones the candidate had, and each of them carries the move to Kubernetes 1.36.6 below.
+`TestUpgradeRollsNoMachine` compares all ten and passes, nine of them at step 0 of a roll, and
+`TestPreviousBOMsMoveAsTheirPinsDiffer` holds each pair to that split: no seed or machines row without another k3s or
+Kubernetes pin, and no such pin without its row (2026-11-20). Only `-dev` refuses the ten pairs on `main`.
+
+The pairs of the BOM of the candidate `v0.10.1-rc.1` (the nine before it to
 it). All nine differ from it in the seed's k3s (`v1.35.10+k3s1` to `v1.36.6+k3s1`), in the Kubernetes version (1.35.10 to
 1.36.6) and in its node image, each one minor up: every pair replaces the seed's k3s and every machine of the platform
 cluster, and `TestUpgradeRollsNoMachine` compares all nine at step 0 of the roll and passes (2026-11-20; cluster chart

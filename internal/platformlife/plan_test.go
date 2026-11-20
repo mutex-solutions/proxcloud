@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -78,6 +79,35 @@ func TestPlanForAPreviousBOM(t *testing.T) {
 	// Only this build's BOM is a target.
 	if _, err := PlanFor(installed(&ref), previousSHA256["0.8.1"]); !errors.Is(err, ErrBadTarget) {
 		t.Errorf("a previous BOM as target: %v", err)
+	}
+}
+
+// Every previous BOM against this build's: a pair plans the seed's k3s and a replacement of machines exactly when its
+// k3s or Kubernetes pins differ. A previous BOM with this build's pins (a candidate main still equals) is the release
+// line alone, record only; one with older pins that planned no roll would move the record and leave the cluster behind.
+func TestPreviousBOMsMoveAsTheirPinsDiffer(t *testing.T) {
+	cur := embedded(t)
+	prev, err := Previous()
+	if err != nil || len(prev) != len(previousSHA256) {
+		t.Fatalf("previous BOMs: %d of %d, %v", len(prev), len(previousSHA256), err)
+	}
+	for _, b := range prev {
+		changes := Classify(b.BOM, cur)
+		if slices.ContainsFunc(changes, func(c PlanChange) bool { return c.Blocking != "" }) {
+			continue // refused as a whole: nothing is planned
+		}
+		k3s := slices.ContainsFunc(changes, func(c PlanChange) bool { return c.Class == ClassSeed })
+		if want := b.Seed.K3s.Version != cur.Seed.K3s.Version; k3s != want {
+			t.Errorf("%s to %s: a seed k3s row = %v, the k3s pins differ = %v", b.Release, cur.Release, k3s, want)
+		}
+		if want := b.Kubernetes.Version != cur.Kubernetes.Version || b.Kubernetes.NodeImage != cur.Kubernetes.NodeImage; hasMachines(changes) != want {
+			t.Errorf("%s to %s: machines rows = %v, the Kubernetes pins differ = %v", b.Release, cur.Release, hasMachines(changes), want)
+		}
+		same := *b.BOM
+		same.Release = cur.Release
+		if reflect.DeepEqual(&same, cur) && (len(changes) != 1 || changes[0].Name != "release" || changes[0].Class != ClassRecordOnly) {
+			t.Errorf("%s to %s differ in the release line alone, and the plan is %+v", b.Release, cur.Release, changes)
+		}
 	}
 }
 
