@@ -100,11 +100,11 @@ pullable; see [release readiness](../../docs/release-readiness.md).
 For `database-cluster`, `proxmox-kamaji-cluster` and `proxcloud-platform`, bump `version:` in `Chart.yaml`
 in the PR that changes the chart, merge, then have a maintainer deliberately cut
 the matching tag. The current source versions are database `0.5.2`, Kubernetes `0.1.16` and
-platform `0.1.3`. Database `0.5.2` and platform `0.1.3` are published and pinned by the platform
-BOM; Kubernetes `0.1.16` (the node deletion timeout) is in the source only until its tag is cut,
-and the BOM pins the published `0.1.15` until then (database `0.5.2`: no
-disruption budget for a PostgreSQL of one instance; Kubernetes `0.1.15`: a version and a
-delete-first rollout per node of a node group, on top of the node groups' MachineHealthCheck, the
+platform `0.1.3`. All three are published and pinned by the platform
+BOM (database `0.5.2`: no
+disruption budget for a PostgreSQL of one instance; Kubernetes `0.1.16`: the node deletion
+timeout of the control plane's and the node groups' machines, on top of the version and the
+delete-first rollout per node of a node group of `0.1.15`, on top of the node groups' MachineHealthCheck, the
 VLAN tag and the control plane count of the platform cluster of `0.1.14`; platform `0.1.3`: `delete`
 on Machines and read access to MachineHealthChecks for the provider's service account);
 they are independent of the app's `0.10.0`. Publishing is idempotent — an

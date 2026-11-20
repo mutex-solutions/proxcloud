@@ -22,7 +22,7 @@
 # may stay one minor behind this file and are never ahead of it. They are at 1.35.10 while this file names 1.36.6 (the
 # installer path takes a minor step in a release of its own), and the kubectl in images.clusterctl follows them.
 schemaVersion: 1
-release: 0.11.0-dev                # "-dev" on main between releases; at a stable tag deploy/charts/proxcloud appVersion without "v" (a candidate keeps the chart of the last stable release)
+release: 0.10.1-rc.2               # "-dev" on main between releases; at a stable tag deploy/charts/proxcloud appVersion without "v" (a candidate keeps the chart of the last stable release)
 kubernetes:
   version: 1.36.6
   nodeImage: {package: proxcloud-vm-ubuntu-2604-k8s, tag: ubuntu-2604-k8s-1.36.6-20261116194043-72f0eaa3d0d4, digest: "sha256:53740d320b09de54fc3bae4a4ed68068a3ca9c7a45cf97e632dc771f5a3d738a"}
@@ -39,7 +39,7 @@ capi:
   seed:     {core: "cluster-api:v1.14.4", bootstrap: "kubeadm:v1.14.4", controlPlane: "kubeadm:v1.14.4", infrastructure: "proxmox:v0.9.2", ipam: "in-cluster:v1.1.1"}
   workload: {core: "cluster-api:v1.14.4", bootstrap: "kubeadm:v1.14.4", controlPlane: "kamaji:v0.22.0", infrastructure: "proxmox:v0.9.2", ipam: "in-cluster:v1.1.1", addon: "helm:v0.6.4"}
 tenantCharts:                      # what the providers pin for new tenant clusters and databases
-  kubernetes: {repo: ghcr.io/mutex-solutions/charts, name: proxmox-kamaji-cluster, version: 0.1.15, digest: "sha256:c4ab5bcb28ed95581b045d83844d2bd5f9e629b126abb6589f782086b9b2e0a9"}
+  kubernetes: {repo: ghcr.io/mutex-solutions/charts, name: proxmox-kamaji-cluster, version: 0.1.16, digest: "sha256:2a58fa81b5a96fd7b23c76b06418af5a477586f151ec8e9eab1bad1536e6f000"}
   database:   {repo: ghcr.io/mutex-solutions/charts, name: database-cluster, version: 0.5.2, digest: "sha256:8cd4be2e57f0b548767fe8fcb802240e78d23258b78c556031d8cb63c94a939c"}
 # Per component: cluster seed | workload; wave: applied and health-gated in ascending order per cluster (also the
 # upgrade order); install: application (default) | helmchart (the seed's ArgoCD only, the bootstrap exception);
@@ -75,8 +75,8 @@ components:
     cluster: seed
     wave: 3
     namespace: pc-platform
-    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxmox-kamaji-cluster, version: 0.1.15, digest: "sha256:c4ab5bcb28ed95581b045d83844d2bd5f9e629b126abb6589f782086b9b2e0a9"}
-    upgradeFrom: ["0.1.13", "0.1.14"]
+    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxmox-kamaji-cluster, version: 0.1.16, digest: "sha256:2a58fa81b5a96fd7b23c76b06418af5a477586f151ec8e9eab1bad1536e6f000"}
+    upgradeFrom: ["0.1.13", "0.1.14", "0.1.15"]
     stateful: true
   - name: cilium
     cluster: workload

@@ -4,6 +4,17 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-20: the platform BOM pins cluster chart 0.1.16
+
+**What changed:** no component, container or relation. The platform BOM (release `0.10.1-rc.2`) pins Helm chart
+`proxmox-kamaji-cluster` 0.1.16 for the platform cluster and for new tenant clusters, with `upgradeFrom` 0.1.13,
+0.1.14 and 0.1.15; `c2-containers.md` says which cluster chart version is published and pinned.
+
+**Why:** the chart with the node deletion timeout is published from its tag, and the second candidate of `v0.10.1`
+needs it in its BOM so that a platform whose machines are being replaced gets it with a Retry.
+
+**Diagrams:** none.
+
 ## 2026-11-20: a Node no Machine owns, an upgrade carried under a later BOM, codes with digits
 
 **What changed:** no component or container. Component "Platform runs": the wait for the platform cluster's nodes

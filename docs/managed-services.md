@@ -448,7 +448,7 @@ router must carry and route the VLAN, which no check reads.
 
 - It needs cluster chart `proxmox-kamaji-cluster` 0.1.14 or newer, the first that reads the tag.
   The platform's BOM names the chart: with an older one the Check row `spec` fails and says so,
-  and nothing is rendered untagged. The BOM of this build names 0.1.15, so a new install can
+  and nothing is rendered untagged. The BOM of this build names 0.1.16, so a new install can
   tag. An installation on an earlier BOM (0.8.x, chart 0.1.13) is refused a tag; its network is
   fixed anyway.
 - For a tagged NIC Proxmox checks `SDN.Use` on `/sdn/zones/localnetwork/<bridge>/<tag>` (on
@@ -556,7 +556,7 @@ before the first run:
   (lease 60 s, renew deadline 40 s, retry 5 s). Its client cuts every request at 10 seconds, so
   the address is kept when one try in those 40 seconds gets through in under 10: a stall of about
   half a minute is survived, an etcd whose every write takes over 10 seconds is not. The BOM of
-  this release names 0.1.15, which keeps this; chart 0.1.11 gave up after 10.
+  this release names 0.1.16, which keeps this; chart 0.1.11 gave up after 10.
 - **The MTU of the platform network.** Cilium tunnels pod traffic between the machines at the
   machines' MTU. When the bridge's real path MTU between two nodes is below 1500 (the bridge is
   itself carried by an overlay), set the settings' MTU to it.
@@ -2190,27 +2190,33 @@ node count that could not come true (`nodes_timeout`; corrected since, see
 [The platform cluster's machines](#the-platform-clusters-machines)). The figures marked "one lab's
 sample" below are that drill's: one run on one lab, not a promise for a site. Everything else is
 what the plan, the code and its tests say, and is **not measured**: the units `system`, `kamaji` and
-`dbaas`, stages 8 to 11, and a control plane of three.
+`dbaas`, stages 8 to 11, and a control plane of three. The candidate `v0.10.1-rc.2` carries the
+corrections and cluster chart 0.1.16 in its BOM, `0.10.1-rc.2`; nothing of it has run on a lab.
 
 **What the BOM changes.** `kubernetes.version` 1.35.10 to 1.36.6, `kubernetes.nodeImage` to the
 image built for 1.36.6 (`ubuntu-2604-k8s-1.36.6-20261116194043-72f0eaa3d0d4`, from the same source
 commit and the same build chain as the 1.35.10 image it replaces), and `seed.k3s` `v1.35.10+k3s1` to
-`v1.36.6+k3s1`. Nothing else: no chart, no Cluster API provider, no clusterctl image, no kube-vip,
-no seed image.
+`v1.36.6+k3s1`. Next to them the BOM `0.10.1-rc.2` names cluster chart 0.1.16 (for the platform
+cluster and for new tenant clusters), which sets the node deletion timeout and replaces no machine
+for it. Nothing else: no Cluster API provider, no clusterctl image, no kube-vip, no seed image.
 
-**The plan, from every earlier BOM.** All nine BOMs this build carries name 1.35.10 and
-`v1.35.10+k3s1`, so each is one minor from the target and the move is allowed from each. The plan
+**The plan, from every earlier BOM.** Nine of the ten BOMs this build carries name 1.35.10 and
+`v1.35.10+k3s1`, so each is one minor from the target and the move is allowed from each (the tenth,
+`0.10.1-rc.1`, names 1.36.6 already: from it the plan has three rows, the release, the tenant
+chart and `pc-platform` 0.1.15 to 0.1.16, and replaces nothing). The plan
 has, in this order: the row `roll` (there is no way back); `release`; `kubernetes.version` and
 `kubernetes.nodeImage`, kind `machines`; `seed.k3s`, kind `seed`, with its four `site` rows
 (`seed-k3s-job`: Job `proxcloud-system/k3s-upgrade-v1-36-6-k3s1`; `seed-etcd-snapshot`:
 `pre-upgrade-v1.35.10-k3s1-<node>-<time>`; `seed-k3s-config`: the drop-in without leader election;
 `seed-k3s-binary`, with the way back by hand across the minor); the chart rows of the starting BOM;
 one row `roll/<unit>` per unit and one row `roll-vm/<unit>` per unit with a machine. With the control
-plane and one machine each of `system`, `kamaji` and `dbaas` that is 17 rows from 0.10.0 or
-0.10.0-rc.1 (no chart row), 20 from 0.9.0, 0.9.1 or a candidate of 0.9.0 (the two tenant charts and
-`pc-platform` 0.1.14 to 0.1.15), and 23 from 0.8.0, 0.8.1 or 0.8.2 (the two tenant charts,
-`pc-platform` 0.1.13 to 0.1.15, and `capi`, `capi-tenant` and `platform` 0.1.2 to 0.1.3). From a
-BOM before 0.10.0 the cluster chart moves "with the first step of the roll": the release's check
+plane and one machine each of `system`, `kamaji` and `dbaas` that is 19 rows from 0.10.0 or
+0.10.0-rc.1 (`tenantCharts.kubernetes` and `pc-platform` 0.1.15 to 0.1.16), 20 from 0.9.0, 0.9.1 or
+a candidate of 0.9.0 (the two tenant charts and
+`pc-platform` 0.1.14 to 0.1.16), and 23 from 0.8.0, 0.8.1 or 0.8.2 (the two tenant charts,
+`pc-platform` 0.1.13 to 0.1.16, and `capi`, `capi-tenant` and `platform` 0.1.2 to 0.1.3). (The
+candidate `v0.10.1-rc.1`, whose BOM kept cluster chart 0.1.15, had 17 rows from 0.10.0.) From
+each of the nine the cluster chart moves "with the first step of the roll": the release's check
 renders the new chart with the old version and templates and finds the machines unchanged
 ([ci-release.md](ci-release.md#what-a-release-checks-about-its-bom-pairs)). The plan has two parts.
 `seed`: phrase `upgrade <name> to <release>`. `platform`: blocked with `seed_not_upgraded` until the
@@ -2783,7 +2789,7 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 
 ## Not implemented yet
 
-- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2`, that of v0.9.0 is `0.9.0`, that of v0.9.1 is `0.9.1`, that of v0.10.0 is `0.10.0` (`main` carries a `-dev` one between releases, now `0.11.0-dev`; the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` carry `0.9.0-rc.1` and `0.9.0-rc.2`, release BOMs for a lab, and the candidates `v0.10.0-rc.1` and `v0.10.1-rc.1` carry `0.10.0-rc.1` and `0.10.1-rc.1`; v0.9.0 keeps both as previous BOMs, v0.9.1 keeps those and that of v0.9.0, v0.10.0 keeps that of v0.9.1 and that of the candidate `v0.10.0-rc.1` too, and `main` keeps that of v0.10.0 and that of the candidate `v0.10.1-rc.1` as well). `--managed-services` needs v0.8.0 or later: no
+- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2`, that of v0.9.0 is `0.9.0`, that of v0.9.1 is `0.9.1`, that of v0.10.0 is `0.10.0` (`main` carries a `-dev` one between releases, now `0.11.0-dev`; the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` carry `0.9.0-rc.1` and `0.9.0-rc.2`, release BOMs for a lab, and the candidates `v0.10.0-rc.1`, `v0.10.1-rc.1` and `v0.10.1-rc.2` carry `0.10.0-rc.1`, `0.10.1-rc.1` and `0.10.1-rc.2`; v0.9.0 keeps both as previous BOMs, v0.9.1 keeps those and that of v0.9.0, v0.10.0 keeps that of v0.9.1 and that of the candidate `v0.10.0-rc.1` too, and `main` keeps that of v0.10.0 and that of the candidate `v0.10.1-rc.1` as well). `--managed-services` needs v0.8.0 or later: no
   earlier released image reads `PROXCLOUD_PLATFORM_ENABLED`, and the images of v0.8.0 exist once
   its tag's workflows have succeeded. For a test ahead of a release,
   `proxcloud-up.sh` takes a build of main as its version (`--version dev-<sha>`, `upgrade dev-<sha>`;
@@ -2850,8 +2856,8 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
   change of that field the API accepts after a run succeeded. Nothing in the installer writes an installation record,
   and a site with an installer-built services cluster is not shown on the page.
 - **The cluster chart's fixes of 0.1.12 reach a new install only.** The BOM names
-  `proxmox-kamaji-cluster` 0.1.15, for the platform cluster (which, with one control plane machine
-  and no VLAN tag, it renders as 0.1.12, 0.1.13 and 0.1.14 do) and
+  `proxmox-kamaji-cluster` 0.1.16, for the platform cluster (which, with one control plane machine
+  and no VLAN tag, it renders as 0.1.12 to 0.1.15 do, but for the node deletion timeout) and
   for new tenant clusters (whose node group replicas it places by free capacity,
   [managed-k8s.md](managed-k8s.md#9-how-a-cluster-lands-on-proxmox)). A platform cluster built from the BOM that named 0.1.11 has a control
   plane node that registers the API address as its InternalIP (its kubelet has no `node-ip`;
