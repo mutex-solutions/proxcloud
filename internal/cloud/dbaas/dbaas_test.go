@@ -828,6 +828,51 @@ func TestSyncProviderList(t *testing.T) {
 	}
 }
 
+// The drill of 0.10.1-rc.2: a database was created while the one database node had no CPU left, and stood at
+// PROGRESSING without a word for twelve minutes. The row now carries the scheduler's reason while a pod of the
+// database cannot be placed: of this database only, and not once it is ready.
+func TestSyncProviderSaysWhyADatabaseIsNotScheduled(t *testing.T) {
+	api := newFakeAPI()
+	s := NewWithAPI(api, testConfig(), "svc-dbaas")
+	ctx := context.Background()
+	spec := testSpec(EnginePostgreSQL, "17")
+	if _, err := s.CreateDatabase(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	app := api.apps[key("argocd", spec.ID)]
+	app["status"] = map[string]any{"health": map[string]any{"status": "Progressing"}, "sync": map[string]any{"status": "Synced"}}
+	pod := func(name, phase, reason, msg string) {
+		api.pods[key("pc-db-p1", name)] = map[string]any{"metadata": map[string]any{"name": name, "namespace": "pc-db-p1"},
+			"status": map[string]any{"phase": phase, "conditions": []any{map[string]any{"type": "PodScheduled", "status": "False", "reason": reason, "message": msg}}}}
+	}
+	message := func() any {
+		rows, err := s.SyncProvider("RegionOne", "p1").List(ctx)
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("rows %v, %v", rows, err)
+		}
+		return rows[0].Data["database"].(map[string]any)["status_message"]
+	}
+	if got := message(); got != nil {
+		t.Fatalf("no pod yet: %v", got)
+	}
+	// Another database's pod in the same namespace, whose id starts with this one's, is not this database's.
+	pod(spec.ID+"0-1-initdb", "Pending", "Unschedulable", "0/4 nodes are available: 4 Insufficient memory.")
+	if got := message(); got != nil {
+		t.Fatalf("another database's pod: %v", got)
+	}
+	pod(spec.ID+"-1-initdb", "Pending", "Unschedulable",
+		"0/4 nodes are available: 1 Insufficient cpu, 3 node(s) didn't match Pod's node affinity/selector. preemption: 0/4 nodes are available: 4 Preemption is not helpful for scheduling.")
+	got, _ := message().(string)
+	if !strings.Contains(got, "pod "+spec.ID+"-1-initdb cannot be scheduled (0/4 nodes are available: 1 Insufficient cpu, 3 node(s) didn't match Pod's node affinity/selector.)") ||
+		strings.Contains(got, "preemption") {
+		t.Fatalf("status_message = %q", got)
+	}
+	app["status"] = map[string]any{"health": map[string]any{"status": "Healthy"}, "sync": map[string]any{"status": "Synced"}}
+	if got := message(); got != nil {
+		t.Fatalf("a ready database: %v", got)
+	}
+}
+
 // TestConnectionSecretContract pins the per-engine secret tuple — the chart templates are the
 // other half of this contract; a rename on either side must fail here.
 func TestConnectionSecretContract(t *testing.T) {

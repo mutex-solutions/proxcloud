@@ -434,7 +434,8 @@ func (x *acq) waves(ctx context.Context, seed, target *kamajik8s.Client, apps []
 				msg, err := x.resync(ctx, seed, a, live, hook, appCode, detail)
 				if err != nil { // the item first: it names what the sync failed on
 					items = append(items, StageItem{ID: a.name(), State: state, Message: clip(detail)})
-					if serr := x.saveStage(ctx, func(s *Stage) { s.Items = items }); serr != nil {
+					all := append(deletedNodes(x.run.Stages[x.si].Items), items...)
+					if serr := x.saveStage(ctx, func(s *Stage) { s.Items = all }); serr != nil {
 						return serr
 					}
 					return err
@@ -451,7 +452,9 @@ func (x *acq) waves(ctx context.Context, seed, target *kamajik8s.Client, apps []
 		// The step counts the waves present; the wave is the BOM's number, the one the plan and the guide name.
 		progress := fmt.Sprintf("step %d of %d, wave %d", i+1, len(order), w)
 		// Written where the run stands: a new wave, the stored one, or an earlier one that is pending again.
-		if reached := i+1 > seen; reached || ((len(pending) > 0 || i+1 == seen) && !slices.Equal(x.run.Stages[x.si].Items, items)) {
+		// The Nodes the run deleted (nodes, called between two waves) stay on the stage whatever is written after.
+		all := append(deletedNodes(x.run.Stages[x.si].Items), items...)
+		if reached := i+1 > seen; reached || ((len(pending) > 0 || i+1 == seen) && !slices.Equal(x.run.Stages[x.si].Items, all)) {
 			if err := x.saveStage(ctx, func(s *Stage) {
 				if reached {
 					if s.Progress = progress; stall > 0 {
@@ -460,7 +463,7 @@ func (x *acq) waves(ctx context.Context, seed, target *kamajik8s.Client, apps []
 						s.LastProgressAt, s.Deadline = &now, &d
 					}
 				}
-				s.Items = items
+				s.Items = all
 			}); err != nil {
 				return err
 			}
@@ -661,10 +664,21 @@ func gateRender(a appOf, live map[string]any) (map[string]any, error) {
 	return held, nil
 }
 
-// tenantsDown are the tenants on the workload that are not healthy, and how many there are in all: the Applications
-// of tenant clusters and databases on the workload's ArgoCD that are not Healthy (what the providers show as a
-// tenant's state), and the TenantControlPlanes whose control plane is not Ready.
-func tenantsDown(ctx context.Context, wl *kamajik8s.Client) (down []string, total int, err error) {
+// tenantsDown is what the tenants run on and is not there, and how many things were read in all. The drill of
+// 0.10.1-rc.2 showed what may not be asked alone: the health ArgoCD shows for a tenant's Application and the status of
+// a TenantControlPlane are written by controllers, and a drain that evicts the tenant's pods evicts those controllers
+// with them (Kamaji runs beside the control planes), so both went on saying Healthy and Ready for five minutes while
+// the only tenant API server was away. Read as well, and written by the platform cluster's own controller manager
+// and kubelets, which a unit of the roll does not take away with the tenants:
+//   - every Deployment in the namespaces of the Kamaji and CloudNativePG operators (operators): an operator that is
+//     not available has stopped writing the status the first two reads rely on;
+//   - per TenantControlPlane the Deployment Kamaji runs it as (same namespace and name): its available replicas
+//     against its replicas, with its change observed;
+//   - per CloudNativePG Cluster its instance pods that are Ready, against spec.instances.
+//
+// ponytail: a Deployment's status is the controller manager's. One that stopped while every node still reads Ready
+// would leave it stale; the caller counts the nodes first, and the pods' own conditions are the upgrade path.
+func tenantsDown(ctx context.Context, wl *kamajik8s.Client, operators []string) (down []string, total int, err error) {
 	apps, err := wl.ListApplications(ctx, argoNamespace, tenantSelector)
 	if err != nil && !kamajik8s.NotFound(err) {
 		return nil, 0, classify(CodeWorkloadUnreachable, err)
@@ -674,30 +688,129 @@ func tenantsDown(ctx context.Context, wl *kamajik8s.Client) (down []string, tota
 			down = append(down, "Application "+str(a, "metadata", "name")+" ("+h+")")
 		}
 	}
+	list, err := wl.ListCRsAllNamespaces(ctx, "apps", "v1", "deployments", "")
+	if err != nil {
+		return nil, 0, classify(CodeWorkloadUnreachable, err)
+	}
+	deployments := map[string]map[string]any{}
+	for _, d := range list {
+		key := str(d, "metadata", "namespace") + "/" + str(d, "metadata", "name")
+		deployments[key] = d
+		if slices.Contains(operators, str(d, "metadata", "namespace")) {
+			total++
+			if why := unavailable(d); why != "" {
+				down = append(down, "Operator "+key+" ("+why+")")
+			}
+		}
+	}
 	tcps, err := wl.ListCRsAllNamespaces(ctx, "kamaji.clastix.io", "v1alpha1", "tenantcontrolplanes", "")
 	if err != nil && !kamajik8s.NotFound(err) {
 		return nil, 0, classify(CodeWorkloadUnreachable, err)
 	}
 	for _, t := range tcps {
+		key := str(t, "metadata", "namespace") + "/" + str(t, "metadata", "name")
 		if s := str(t, "status", "kubernetesResources", "version", "status"); s != "Ready" {
-			down = append(down, "TenantControlPlane "+str(t, "metadata", "namespace")+"/"+str(t, "metadata", "name")+" ("+s+")")
+			down = append(down, "TenantControlPlane "+key+" ("+s+")")
+		}
+		if why := unavailable(deployments[key]); why != "" {
+			down = append(down, "Deployment "+key+" ("+why+")")
+		}
+	}
+	dbs, err := wl.ListCRsAllNamespaces(ctx, "postgresql.cnpg.io", "v1", "clusters", "")
+	if err != nil && !kamajik8s.NotFound(err) {
+		return nil, 0, classify(CodeWorkloadUnreachable, err)
+	}
+	if len(dbs) > 0 {
+		pods, err := wl.ListPodsAllNamespaces(ctx, "cnpg.io/cluster")
+		if err != nil {
+			return nil, 0, classify(CodeWorkloadUnreachable, err)
+		}
+		ready := map[string]int{}
+		for _, p := range pods {
+			labels, _ := dig(p, "metadata", "labels").(map[string]any)
+			role, _ := labels["cnpg.io/podRole"].(string)
+			// Instance pods only: not the initdb and join Jobs' pods, not a pooler's, not one that is being deleted.
+			if labels["cnpg.io/jobRole"] != nil || (role != "" && role != "instance") || dig(p, "metadata", "deletionTimestamp") != nil || condition(p, "Ready") != "True" {
+				continue
+			}
+			name, _ := labels["cnpg.io/cluster"].(string)
+			ready[str(p, "metadata", "namespace")+"/"+name]++
+		}
+		for _, d := range dbs {
+			key := str(d, "metadata", "namespace") + "/" + str(d, "metadata", "name")
+			if want, _ := dig(d, "spec", "instances").(float64); ready[key] < int(want) {
+				down = append(down, fmt.Sprintf("Database %s (%d of %d instances Ready)", key, ready[key], int(want)))
+			}
 		}
 	}
 	slices.Sort(down)
-	return down, len(apps) + len(tcps), nil
+	return down, total + len(apps) + 2*len(tcps) + len(dbs), nil
 }
 
-// tenantGate holds an upgrade run after a wave of the workload until every tenant that was healthy when the upgrade
-// first reached the waves is healthy again (tenantsDown). The tenants that were down before are noted once, on the
-// installation next to the target (status.tenantsDownBefore, cleared in stage 11), and do not hold the run: an upgrade
-// must not wait for a customer's broken database. The note is the upgrade's, not the run's: a Retry after a wave broke
-// a tenant must still wait for it, and would not if it read the tenants again. It compares names with their state, so
-// a tenant that was Progressing and is Degraded now holds the run too.
+// unavailable says why a Deployment does not serve ("" when it does): it is absent, the controller manager has not
+// seen its last change, or fewer of its replicas are available than it asks for.
+func unavailable(d map[string]any) string {
+	if d == nil {
+		return "no Deployment"
+	}
+	want := 1.0 // the API server's default
+	if n, ok := dig(d, "spec", "replicas").(float64); ok {
+		want = n
+	}
+	gen, _ := dig(d, "metadata", "generation").(float64)
+	seen, _ := dig(d, "status", "observedGeneration").(float64)
+	have, _ := dig(d, "status", "availableReplicas").(float64)
+	switch {
+	case seen < gen:
+		return "its last change is not observed yet"
+	case have < want:
+		return fmt.Sprintf("%d of %d replicas available", int(have), int(want))
+	}
+	return ""
+}
+
+// downBefore reports whether d (an entry of tenantsDown) is of a tenant the note says was down before the upgrade.
+// An Application and a TenantControlPlane are compared with their state, so one that was Progressing and is Degraded
+// now holds the run. A Deployment and a Database carry counts, which move: they are compared by name, and also go
+// with their tenant's own entry (the TenantControlPlane of the same name, the Application named as the database), so
+// a note taken by a release that did not read them yet still covers the same tenants.
+func downBefore(before []string, d string) bool {
+	if slices.Contains(before, d) {
+		return true
+	}
+	kind, rest, _ := strings.Cut(d, " ")
+	name, _, _ := strings.Cut(rest, " (")
+	noted := func(prefix string) bool {
+		return slices.ContainsFunc(before, func(b string) bool { return strings.HasPrefix(b, prefix+" (") })
+	}
+	switch kind {
+	case "Operator":
+		return noted("Operator " + name)
+	case "Deployment":
+		return noted("Deployment "+name) || noted("TenantControlPlane "+name)
+	case "Database":
+		return noted("Database "+name) || noted("Application "+name[strings.LastIndex(name, "/")+1:])
+	}
+	return false
+}
+
+// tenantGate holds an upgrade run after a wave of the workload, and between two units of a roll, until everything the
+// tenants run on that was there when the upgrade first reached the workload is there again (tenantsDown). What was
+// down before is noted once, on the installation next to the target (status.tenantsDownBefore, cleared in stage 11),
+// and does not hold the run: an upgrade must not wait for a customer's broken database. The note is the upgrade's, not
+// the run's: a Retry after a wave broke a tenant must still wait for it, and would not if it read the tenants again.
+// The wait ends with the stage's deadline, under tenants_unhealthy and with the names still down.
 func (x *acq) tenantGate(ctx context.Context, wl *kamajik8s.Client, baseline bool) error {
 	if x.from == nil {
 		return nil
 	}
-	down, total, err := tenantsDown(ctx, wl)
+	var operators []string
+	for _, c := range x.bom.Components {
+		if c.Cluster == ClusterWorkload && (c.Name == "kamaji" || c.Name == "cnpg") {
+			operators = append(operators, c.Namespace)
+		}
+	}
+	down, total, err := tenantsDown(ctx, wl, operators)
 	if err != nil {
 		return err
 	}
@@ -712,9 +825,10 @@ func (x *acq) tenantGate(ctx context.Context, wl *kamajik8s.Client, baseline boo
 	if b := x.in.Status.TenantsDownBefore; b != nil {
 		before = *b
 	}
-	down = slices.DeleteFunc(down, func(d string) bool { return slices.Contains(before, d) })
+	down = slices.DeleteFunc(down, func(d string) bool { return downBefore(before, d) })
 	if len(down) > 0 {
-		return waiting(CodeTenantsUnhealthy, "%d of %d tenant objects that were healthy before this wave are not healthy: %s.", len(down), total, clip(strings.Join(down, ", ")))
+		return waiting(CodeTenantsUnhealthy, "Waiting for the tenants: %d of the %d things read that they run on are not there, and were before the upgrade: %s. "+
+			"The run goes on by itself when they are back.", len(down), total, clip(strings.Join(down, ", ")))
 	}
 	return nil
 }
@@ -1534,6 +1648,9 @@ func (x *acq) nodes(ctx context.Context, seed, wl *kamajik8s.Client) error {
 					"joined it for Machine %s, which is gone, and gave up deleting the Node. The run deleted the Node object.", name,
 					cmp.Or(condition(n, "Ready"), "not reported"), str(n, "metadata", "annotations", nodeMachineAnnotation)))}
 				items = append(slices.DeleteFunc(items, func(i StageItem) bool { return i.ID == item.ID }), item)
+				if x.r.OnNodeDeleted != nil {
+					x.r.OnNodeDeleted(x.in, name, item.Message, templateupdates.PlatformRunActor+x.run.ID)
+				}
 			}
 			x.r.Log.Info("platform run: deleted nodes no machine owns", "run", x.runID, "nodes", strings.Join(gone, ","))
 			if err := x.saveStage(ctx, func(s *Stage) { s.Items = items }); err != nil {

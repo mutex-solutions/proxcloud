@@ -566,7 +566,9 @@ func (x *acq) roll(ctx context.Context, seed *kamajik8s.Client, templates []Stag
 		if err != nil {
 			return err
 		}
-		if items = append(slices.Clone(templates), items...); !slices.Equal(items, x.run.Stages[x.si].Items) {
+		// With the Nodes the run deleted (nodes): a look that rebuilt the list used to drop them, and the run then held
+		// no trace of the deletion.
+		if items = append(append(slices.Clone(templates), items...), deletedNodes(x.run.Stages[x.si].Items)...); !slices.Equal(items, x.run.Stages[x.si].Items) {
 			if err := x.progress(ctx, items); err != nil {
 				return err
 			}
@@ -613,6 +615,17 @@ func (x *acq) roll(ctx context.Context, seed *kamajik8s.Client, templates []Stag
 		}
 	}
 	return x.startAtBoot(ctx)
+}
+
+// deletedNodes are the items of the Nodes a run deleted (nodes), which every later write of the stage's items keeps.
+func deletedNodes(items []StageItem) []StageItem {
+	var out []StageItem
+	for _, i := range items {
+		if strings.HasPrefix(i.ID, "node/") && i.State == "deleted" {
+			out = append(out, i)
+		}
+	}
+	return out
 }
 
 // progress writes the stage's items (nil: leave them) and starts the stall timer again.

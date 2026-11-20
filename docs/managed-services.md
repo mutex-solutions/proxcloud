@@ -1452,7 +1452,7 @@ stage is still trying.
 | `argocd_address_unavailable` | 9 | The settings name an ArgoCD address, and MetalLB did not give it to the Service `argocd/argocd-server` of the platform cluster before the wave's deadline: another Service holds it (the message names it), or it is not in MetalLB's pool. The platform keeps serving; ArgoCD answers inside the cluster | Put a free address of the load balancer range under Access in step 1, or clear both fields; save, then **Retry** |
 | `bad_part` | start | `part` on `POST …/runs` is neither `seed` nor empty, or `seed` on an apply that is not an upgrade which replaces machines (`400`) | Send the part the plan lists |
 | `unexpected_rollout` | 7 | An upgrade run only. The cluster chart of the target BOM would create a machine or bootstrap template, or change the control plane: Cluster API would replace machines. On a run that replaces machines: the render of the step would also replace machines outside the step's own unit. Nothing of the cluster (of that step) was synced; the Application `pc-platform` is left at the new chart version without automated sync. Also on such a run: the record says every unit is replaced, and the Application does not carry what the run renders (the run moves to another release than the one the machines were replaced for, the settings changed since, or the record was edited); nothing was applied | If machine sizes, nodes or node groups were changed in the settings together with the upgrade, put them back, save, **Retry**. A run to another release than the one the machines were replaced for: finish that upgrade first (**Retry**, an apply without a target), then start the new one. Otherwise the release is at fault: see [Upgrade between BOMs](#upgrade-between-boms), "When the upgrade cannot finish" |
-| `tenants_unhealthy` | 9 | An upgrade run only. After a wave, a tenant cluster or database that was healthy when the run reached stage 9 is not: its Application on the platform cluster's ArgoCD is not Healthy, or its TenantControlPlane is not Ready. The message names them. The stage waits for them up to the wave's 20 minutes | Look at the tenant the message names. **Retry** goes on from the same wave and waits for it again: the list of tenants that were down before is taken once per upgrade (`status.tenantsDownBefore`), not per run, so a tenant a wave broke holds every run until it is healthy or deleted |
+| `tenants_unhealthy` | 7, 9 | An upgrade run only. After a wave of stage 9, and between two units of a replacement of machines in stage 7, something the tenants run on that was there when the upgrade first reached the platform cluster is not: a tenant control plane's Deployment has fewer available replicas than it asks for, a database has fewer Ready instance pods than `spec.instances`, a Deployment of the Kamaji or CloudNativePG operator is not available, a tenant's Application on the platform cluster's ArgoCD is not Healthy, or a TenantControlPlane is not Ready. The message names each. The stage waits for them up to the wave's 20 minutes (stage 9) or the unit's 30 minutes (stage 7) | Look at the tenant the message names. **Retry** goes on from the same wave and waits for it again: the list of tenants that were down before is taken once per upgrade (`status.tenantsDownBefore`), not per run, so a tenant a wave broke holds every run until it is healthy or deleted |
 | `portal_changed` | any | ProxCloud was upgraded during the run and no longer carries the run's BOM. The stage the run stood at reads `failed` with this code | **Retry** |
 | `job_dead` | any | The run's job ran out of attempts | **Retry**, or **Remove again** |
 | `platform_disabled` | start | The switch, or template updates, is off | `--managed-services` |
@@ -2188,10 +2188,15 @@ write loop) ran part "seed" to the end and the control plane's unit of part "pla
 there: the old control plane machine's Node object stayed in the cluster and the run waited for a
 node count that could not come true (`nodes_timeout`; corrected since, see
 [The platform cluster's machines](#the-platform-clusters-machines)). The figures marked "one lab's
-sample" below are that drill's: one run on one lab, not a promise for a site. Everything else is
-what the plan, the code and its tests say, and is **not measured**: the units `system`, `kamaji` and
-`dbaas`, stages 8 to 11, and a control plane of three. The candidate `v0.10.1-rc.2` carries the
-corrections and cluster chart 0.1.16 in its BOM, `0.10.1-rc.2`; nothing of it has run on a lab.
+sample" below are that drill's and those of the second one: one run each on one lab, not a promise
+for a site. The candidate `v0.10.1-rc.2` carries the corrections and cluster chart 0.1.16 in its
+BOM, `0.10.1-rc.2`. Its drill on the same lab (2026-11-20, on the platform the first drill had left
+after the control plane's unit) got out with one Retry, replaced the units `system`, `kamaji` and
+`dbaas` with one more machine first, was paused once and resumed, and ended with every machine on
+1.36.6 and no Node left behind. Everything else is what the plan, the code and its tests say, and
+is **not measured**: a unit replaced delete-first, stages 8 to 11 as figures, a control plane of
+three, a site with one Proxmox node, and the wait for the tenants between two units as corrected
+after that drill ([The platform cluster's machines](#the-platform-clusters-machines), point 5).
 
 **What the BOM changes.** `kubernetes.version` 1.35.10 to 1.36.6, `kubernetes.nodeImage` to the
 image built for 1.36.6 (`ubuntu-2604-k8s-1.36.6-20261116194043-72f0eaa3d0d4`, from the same source
@@ -2234,14 +2239,47 @@ have the detail.
 | Part "seed", stage 5a | Saves an etcd snapshot on the seed, writes the k3s config drop-in that turns leader election off in three components, replaces the k3s binary, restarts k3s. k3s moves its bundled containerd from 2.2 to 2.3 with it | The seed's API. Reconciliation only: no machine is repaired, the seed's ArgoCD syncs nothing, no platform run goes on. The platform cluster, tenant clusters, tenant API servers and databases keep serving | The stage took 2 minutes 1 second and the seed's API was away for 43 seconds (one lab's sample, 2026-11-20) |
 | Part "seed", stage 6 | The seed's charts are compared again, now on k3s 1.36 | Nothing | Not measured |
 | Part "platform", step 1: control plane (one machine) | A second machine is cloned from the 1.36.6 template and joins; the old one is removed. etcd moves from 3.6.6 to 3.6.8 with the machine | The platform cluster's API, from the removal of the old etcd member until the new machine holds the API address: no tenant cluster or database operation, no repair, no failover, stale status in the consoles. Running tenant API servers, workloads and databases keep answering. **On a node whose disk the control plane shares with the clone, the API can be away during the clone too, before anything has joined** | Clone 6 minutes 5 seconds; the platform API away for up to 2 minutes 21 seconds during the clone on the control plane's own node (kube-vip let the address go, the API server restarted), then for 65 seconds at the hand-over, from the removal of the old etcd member until the new machine held the address (the kube-vip lease is 60 seconds); about 11 minutes for the whole unit. Tenant API: single looks failed, 13 seconds at most. Database: no failed look, no failed insert (one lab's sample, 2026-11-20) |
-| Step 2: `system` | The machine is replaced | The platform's operators (ArgoCD, Cluster API for tenants, CloudNativePG, MetalLB, cert-manager) while they restart on the new machine; a MetalLB address may move | Not measured |
-| Step 3: `kamaji` (one machine) | The machine is replaced; kamaji-etcd's disk follows | **Every tenant API server.** Tenant workloads keep running | Not measured |
-| Step 4: `dbaas` | The machine is replaced; each database's disk follows | **Every database with one instance** on the machine | Not measured |
+| Step 2: `system` | The machine is replaced | The platform's operators (ArgoCD, Cluster API for tenants, CloudNativePG, MetalLB's controller, cert-manager, the CSI controller, CoreDNS) while they start on the new machine and pull their images; a MetalLB address may move | The operators were away for 3 to 5 minutes; the service addresses moved to another node in seconds, with no failed look at the platform API, a tenant API or the database. 8 minutes 50 seconds for the whole unit (one lab's sample, 2026-11-20) |
+| Step 3: `kamaji` (one machine) | The machine is replaced; kamaji-etcd's disk follows | **Every tenant API server.** Tenant workloads keep running | **Tenant API servers away for 6 minutes 54 seconds.** During the unit's clone, on the node that also holds the control plane, single looks at the platform API and the tenant API failed for up to 10 seconds. Clone 6 minutes 7 seconds; 10 minutes 21 seconds for the whole unit (one lab's sample, 2026-11-20) |
+| Step 4: `dbaas` | The machine is replaced; each database's disk follows | **Every database with one instance** on the machine | **The database away for 4 minutes 8 seconds**: a writer that inserted every 2 seconds failed 53 times and lost no row. 11 minutes 20 seconds for the whole unit (one lab's sample, 2026-11-20) |
 | Stages 8 to 11 | The platform cluster's charts are compared on 1.36, the providers are written, the record moves | Nothing | Not measured |
+
+The figures are from two drills on one lab of three Proxmox nodes with one machine per unit
+(`v0.10.1-rc.1` for the seed and the control plane, `v0.10.1-rc.2` for the three node groups), every
+unit replaced with one more machine first. Another site's disks and image pulls give other figures:
+announce more than these.
+
+**Why the two stateful gaps are minutes, not seconds (known issue).** A new machine counts as Ready,
+and Cluster API drains the old one, before the CSI node plugin of the new node has registered: the
+plugin's pod is still pulling its image. The volume of kamaji-etcd, and of each database, is detached
+from the old machine and then cannot be attached to the new one ("AttachVolume.Attach failed ...
+CSINode ... does not contain driver", 8 or 9 times on the lab, 1.5 to 2.5 minutes of each gap); the
+tenant API server meanwhile restarts with a growing back-off until kamaji-etcd answers. Nothing in
+this release shortens it: the lever is `minReadySeconds` on the MachineDeployments, a change of the
+cluster chart that needs a drill of its own.
+
+**A clone is felt on the node that holds the control plane.** With one control plane machine, a
+clone on its Proxmox node, sharing its disk, can stall the platform API: for up to 88 seconds
+during the control plane's own clone on the lab (2 minutes 21 seconds together with a second stall),
+for single looks of up to 10 seconds during the `kamaji` unit's clone on the same node, and for up
+to 52 seconds on a tenant API during a Template updates smoke test there. Choose a quiet hour for
+all three.
 
 A unit on a node without room for one more machine is replaced delete-first: everything on it is
 away for the whole clone and join (not measured). After step 1's new machine has joined etcd there
 is no way back.
+
+**The VM ids of the replaced machines are used again.** Proxmox gives a new machine the lowest free
+id, so a new machine takes the id an old machine freed, possibly on another node and for another
+unit (on the lab: 103 was the control plane on one node and became the `system` machine on another).
+A backup job, a firewall rule or a note of yours that names a platform machine by its VM id points
+at another machine after the roll: look at them before and after.
+
+**The old machine templates stay on the seed.** After a roll the `ProxmoxMachineTemplate` objects of
+the old version are still in namespace `pc-platform` on the seed, next to the new ones: the
+Application `pc-platform` never prunes. Nothing refers to them and they hold no VM; they are
+harmless and may stay. (The Proxmox templates of the old node image are another matter: Template
+updates lists them, and they are yours to withdraw once no tenant cluster uses the old version.)
 
 **The old machine's Node object.** Cluster API deletes a Machine's Node last, after the drain and
 after the VM is gone, and gives up once the Machine has been in deletion for longer than
@@ -2258,18 +2296,33 @@ that is not Ready and that no Machine owns: Cluster API joined it for a Machine 
 `status.nodeRef`, by its own name or by the provider id of its VM. The delete goes through the
 platform cluster's API with the admin kubeconfig Cluster API keeps on the seed (no Proxmox call, no
 new privilege) and only while the Node's uid is the one that was read. The stage's items name each
-Node deleted (`node/<name>`), and the Check row `nodes` warns about one before a run starts. The
+Node deleted (`node/<name>`, state `deleted`) and keep the item until the run ends, whatever the
+stage writes afterwards, and the audit log has one entry per Node (action `DELETE` on the
+installation, by the run, with the Node's name and the reason). The Check row `nodes` warns about
+one before a run starts. **A site that stands there after the control plane's unit** (the lab did,
+on `v0.10.1-rc.1`: installation `failed`, `roll.step` 1, five Nodes) **gets out with one Retry** on
+a release from `0.10.1-rc.2` on: the lab's Retry carried the unfinished roll to the new BOM, put
+the timeout on the machines without replacing one, deleted the Node 41 seconds after the request
+and stored step 2 after 62 seconds, with nothing to confirm and nothing done by hand. The
 kube-vip lease stays at 60, 40 and 5 seconds: a shorter one would move the address sooner, but a
 changed lease replaces every control plane machine (it is in the static pod), and a single control
 plane loses its own address whenever its etcd is slow for longer than the renew deadline, which is
 what the lab's disk did during the clone.
 
 **Tenants keep their version.** No tenant cluster and no database is upgraded: a tenant cluster
-stays on the Kubernetes version and the chart it has. Stage 10 adds 1.36.6, with the new node
-image, to the versions the Kubernetes provider offers, next to the ones it has: a tenant can pick
-it for a new cluster afterwards. Kamaji 26.11.2-edge takes tenant versions up to 1.37.0 by its
-code; its document lists tenants up to 1.35 only. No tenant cluster at 1.36.6 has been created
-anywhere.
+stays on the Kubernetes version and the chart it has. Stage 10 adds 1.36.6 to the versions the
+Kubernetes provider offers, next to the ones it has, **only once the 1.36.6 node image is published
+on every node the provider uses**, and the run publishes nothing: the image it imported in stage 2
+is `staged`, and a run's import is never smoke-tested by itself. Until then stage 10 ends with the
+item `kubernetes-version` in state `warn` ("Kubernetes 1.36.6 is not offered to tenants: no node
+image of it is published on ...") and a tenant's create at 1.36.6 is refused with `400` ("version
+"1.36.6" is not offered by this provider"). To offer it: open **Template updates**, start the smoke
+test of the new image on each node and publish it (the Ready card's button does all nodes; it needs
+the provider's smoke network, and took 4.5 to 5.7 minutes per node on the lab), then **Apply this
+release** once more, or wait for the provider's next sync: [What a tenant can use after the
+install](#what-a-tenant-can-use-after-the-install) has the steps. Kamaji 26.11.2-edge takes tenant
+versions up to 1.37.0 by its code; its document lists tenants up to 1.35 only. On the lab a tenant
+cluster at 1.36.6 was created after the publish and was READY in 7 minutes 20 seconds.
 
 **Two charts are outside their documented Kubernetes versions on 1.36.** The upgrade moves no
 third-party chart, so both stay at their pin:
@@ -2522,7 +2575,8 @@ new one exists. The plan says which, per unit; the run does what the plan it was
 said (`status.clusters[0].roll.deleteFirst`), and counts the node again before each step that needs
 room: short now is `capacity_short` with nothing of the step applied.
 
-**What stops, per unit** (the plan's `roll/<unit>` rows carry these sentences; none is measured):
+**What stops, per unit** (the plan's `roll/<unit>` rows carry these sentences; the table in
+[Upgrade to Kubernetes 1.36.6](#upgrade-to-kubernetes-1366) has what one lab measured):
 
 | Unit | What stops while it is replaced |
 |---|---|
@@ -2559,9 +2613,21 @@ group at the old version and template; each later step moves one MachineDeployme
    stage's items name each machine with its VM, its unit and where it stands (not replaced yet,
    being cloned, cloned and joining, joined, old machine being removed with Cluster API's text and
    the pod that blocks a drain).
-5. Then every node must be Ready with its group's label, and every tenant that was healthy before
-   the first step healthy again (`tenants_unhealthy` while not), before the next unit starts. The
-   wait is between two units, not between two machines of one MachineDeployment.
+5. Then every node must be Ready with its group's label, and everything the tenants run on that
+   was there before the first step must be there again (`tenants_unhealthy` while not), before the
+   next unit's step is stored. The wait reads what the platform cluster's controller manager and
+   kubelets write, which a unit does not take away together with the tenants: per tenant control
+   plane the Deployment Kamaji runs it as (available replicas against replicas, its last change
+   observed), per database its instance pods that are Ready against `spec.instances`, and every
+   Deployment in the namespaces of the Kamaji and CloudNativePG operators. The health ArgoCD shows
+   for a tenant's Application and the TenantControlPlane's own status are read as well, but are not
+   enough alone: they are written by controllers the same drain evicts. On the drill of
+   `v0.10.1-rc.2` they still said Healthy and Ready 76 seconds after the `kamaji` machine was
+   drained, the next unit began, and its clone ran while the only tenant API server was away for
+   another 5 minutes 38 seconds. What was down before the first step is noted once
+   (`status.tenantsDownBefore`) and not waited for. The wait ends with the unit's 30 minutes; the
+   message names what is still away. It is between two units, not between two machines of one
+   MachineDeployment. This corrected wait has run on test doubles only, not on a lab.
 
 During the control plane's step the platform cluster's API may not answer: that is waited for
 (`workload_api_unreachable` on the waiting stage), not counted as an error. The stage fails with
@@ -2570,11 +2636,22 @@ During the control plane's step the platform cluster's API may not answer: that 
 done.
 
 **Pause and Resume.** Cancel is honoured between two looks and is called **Pause** on the page
-while machines are replaced; a machine in flight is finished by Cluster API on its own. **Resume**
-(Retry) goes on at the unit the record names. A paused cluster with the control plane at the new
-version and node groups at the old one is a supported state (a kubelet may be up to three minors
-older than the API server). There is no drain timeout: it would delete a machine under a running
-database.
+while machines are replaced; a machine in flight is finished by Cluster API on its own, so a Pause
+that is to stop before the next unit must be asked for before that unit's clone starts: once the
+step is stored the run compares, syncs and clones within a minute. **Resume** (Retry) goes on at
+the unit the record names and puts no replaced unit back. A paused cluster with the control plane
+at the new version and node groups at the old one is a supported state (a kubelet may be up to
+three minors older than the API server). There is no drain timeout: it would delete a machine
+under a running database.
+
+On the lab a Pause asked for right after the `system` unit ended the run as `cancelled` in 15
+seconds, with nothing of the next unit applied and no clone started. The installation then reads
+`failed` with `roll.step` 3 and the old `kubernetesVersion`, the plan allows the platform part
+with nothing to confirm, and the Check is `ok`. Such a Pause falls into the wait for ArgoCD's
+comparison of the next step, so the seed's Application `pc-platform` is left **OutOfSync and
+without automated sync** until the Resume: while paused, ArgoCD neither applies the next step nor
+puts back a hand edit of the cluster's objects. The mixed cluster served through the pause without
+a failed look, and the Resume switched the automated sync back on at once and went on at step 3.
 
 **Known gaps.** A MachineHealthCheck that replaces a machine of a unit not reached yet clones from
 the old template; if Template updates has deleted that template since, the machine fails
@@ -2645,11 +2722,15 @@ The stages of an apply, rendered from the target BOM:
   check per step ([The platform cluster's machines](#the-platform-clusters-machines)).
 - **Stage 8** is unchanged.
 - **Stage 9** notes which tenants are unhealthy before its first wave (once per upgrade, in
-  `status.tenantsDownBefore`; a Retry keeps the note), then applies the waves. After
+  `status.tenantsDownBefore`; a Retry keeps the note; a run that replaces machines takes it in
+  stage 7, before its first step), then applies the waves. After
   each wave it waits until every component of the wave is Synced and Healthy against the new
-  version, and until every tenant that was healthy at the start is healthy again: the tenant
-  Applications on the platform cluster's ArgoCD must be Healthy and every TenantControlPlane Ready
-  (`tenants_unhealthy` while not).
+  version, and until everything the tenants run on that was there at the start is there again
+  (`tenants_unhealthy` while not): every tenant control plane's Deployment with its replicas
+  available, every database with its instance pods Ready, the Deployments of the Kamaji and
+  CloudNativePG operators available, the tenant Applications on the platform cluster's ArgoCD
+  Healthy and every TenantControlPlane Ready. It is the same wait as between two units of a roll
+  ([The platform cluster's machines](#the-platform-clusters-machines), point 5).
 - **Stage 10** writes the tenant charts of the target BOM on the two providers.
 - **Stage 11** records every component and sets `status.bom` to the target.
 
@@ -2659,7 +2740,7 @@ The stages of an apply, rendered from the target BOM:
 |---|---|---|
 | `status.bom` | The BOM the platform left: "last fully applied" | The target |
 | `status.targetBom` | The target, from the start of the first run | Absent |
-| `status.tenantsDownBefore` | From the first time a run reaches stage 9: the tenants that were not healthy then | Absent |
+| `status.tenantsDownBefore` | From the first time a run reaches stage 9, or stage 7 on a run that replaces machines: what the tenants run on that was not there then, one text per object (`Deployment <namespace>/<name> (0 of 1 replicas available)`, `Database <namespace>/<name> (0 of 1 instances Ready)`, `Application <name> (Degraded)`, `TenantControlPlane <namespace>/<name> (NotReady)`, `Operator <namespace>/<name> (...)`) | Absent |
 | `status.clusters[0].roll` | On an upgrade that replaces machines, from the moment stage 7 begins the roll: `step` (the unit being replaced, counted from 1, the control plane; one more than the number of units when all are done) and `deleteFirst` | Absent |
 | `status.clusters[0].kubernetesVersion`, `.templates` | The old version and templates until the last unit is done | The target's |
 | `status.components[]` | Each component at the version it runs: it moves when its wave (stage 7 for `pc-platform`) has passed | Every component at the target's version |

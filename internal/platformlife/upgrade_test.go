@@ -388,6 +388,8 @@ func TestUpgradeWaitsForTenants(t *testing.T) {
 	tenant("db-broken", "Degraded")
 	tenant("db-1", "Healthy")
 	tcp("Ready")
+	p.wl.put("/apis/apps/v1/deployments/t-1.k1", map[string]any{"metadata": map[string]any{"namespace": "t-1", "name": "k1", "generation": 1},
+		"spec": map[string]any{"replicas": 2}, "status": map[string]any{"observedGeneration": 1, "availableReplicas": 2}})
 	p.seed.unsynced["pc-platform-capi-tenant"] = true // holds the run after the workload's wave 1 and 2
 	if end := p.until(30); end != "defer:waiting_workload_platform" || p.stage(stageWorkloadPlatform).Code != CodeComponentUnhealthy {
 		t.Fatalf("end %s: %+v", end, p.stage(stageWorkloadPlatform))
@@ -398,7 +400,7 @@ func TestUpgradeWaitsForTenants(t *testing.T) {
 	tenant("db-1", "Degraded")
 	tcp("NotReady")
 	if end := p.once(); end != "defer:waiting_workload_platform" || p.stage(stageWorkloadPlatform).Code != CodeTenantsUnhealthy ||
-		!strings.Contains(p.stage(stageWorkloadPlatform).Message, "2 of 3 tenant objects") || !strings.Contains(p.stage(stageWorkloadPlatform).Message, "TenantControlPlane t-1/k1 (NotReady)") {
+		!strings.Contains(p.stage(stageWorkloadPlatform).Message, "2 of the 4 things") || !strings.Contains(p.stage(stageWorkloadPlatform).Message, "TenantControlPlane t-1/k1 (NotReady)") {
 		t.Fatalf("end %s: %+v", end, p.stage(stageWorkloadPlatform))
 	}
 	// The wait runs out and the run fails. Retry still waits for the tenant the wave broke: the note of who was down

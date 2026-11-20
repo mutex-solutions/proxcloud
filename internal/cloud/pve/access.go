@@ -40,7 +40,22 @@ func (c *Client) CreateAPIToken(ctx context.Context, userid, tokenName string) (
 }
 
 // DeleteAPIToken revokes a token. Absent token is not an error (idempotent revoke).
+//
+// The token's own ACL rows go first. PVE stops honouring a deleted token's rows at once, but leaves the lines in
+// user.cfg until the file is written again, warns "ignore invalid acl token" at every pveum and pvesh call meanwhile,
+// and no longer lists them, so they can only be removed while the token exists. Only rows whose ugid is exactly this
+// token are touched. It needs no new privilege: each row is on a path the caller wrote it on when it minted the
+// token, and the list shows the caller the rows it may modify. A row that cannot be read or removed does not hold
+// the revocation: the token is deleted all the same, and nothing could remove the row afterwards anyway.
 func (c *Client) DeleteAPIToken(ctx context.Context, userid, tokenName string) error {
+	token := userid + "!" + tokenName
+	if acls, err := c.ListACL(ctx); err == nil {
+		for _, a := range acls {
+			if a.Type == "token" && a.UGID == token {
+				_ = c.SetACL(ctx, a.Path, a.RoleID, []string{token}, true)
+			}
+		}
+	}
 	path := "/access/users/" + url.PathEscape(userid) + "/token/" + url.PathEscape(tokenName)
 	err := c.delete(ctx, path, nil, nil)
 	if err != nil && (IsNotFound(err) || isTokenAbsent(err)) {
@@ -127,8 +142,7 @@ func (c *Client) MintClusterTokens(ctx context.Context, clusterID string, sc Clu
 	return t, nil
 }
 
-// RevokeClusterTokens deletes the tokens. PVE stops honouring a deleted token's ACL entries at once and drops
-// them from user.cfg at the next write of that file; until then `pveum` warns "ignore invalid acl token".
+// RevokeClusterTokens deletes the tokens, each after its own ACL rows (DeleteAPIToken).
 func (c *Client) RevokeClusterTokens(ctx context.Context, clusterID string) error {
 	return errors.Join(c.DeleteAPIToken(ctx, capiUser, clusterID), c.RevokeClusterCSIToken(ctx, clusterID))
 }

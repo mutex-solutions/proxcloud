@@ -4,6 +4,28 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-21: the wait for the tenants reads Deployments and pods; a token's ACL rows go with it
+
+**What changed:** no component, container or relation. Component "Platform runs": `tenantsDown`, the read behind
+`tenantGate` (between two units of a roll in stage 7, after every wave of stage 9), also reads on the platform
+cluster every Deployment (`apps/v1`, through `ListCRsAllNamespaces`), the CloudNativePG `Cluster` objects and the
+pods labelled `cnpg.io/cluster`: per TenantControlPlane the Deployment of the same namespace and name, per database
+its Ready instance pods against `spec.instances`, and the Deployments in the namespaces of the BOM's components
+`kamaji` and `cnpg`. `downBefore` compares with `status.tenantsDownBefore`. A Node the run deleted stays an item of
+its stage (`deletedNodes`) and is reported through the new hook `Runner.OnNodeDeleted`, which `cmd/api` turns into
+an audit entry. Component "Proxmox client": `DeleteAPIToken` lists the ACL and removes the rows of exactly that
+token (`PUT /access/acl`, `delete=1`) before it deletes the token. Component "Managed databases": the sync provider
+reads the project namespace's pods for a database that is not ready and puts the scheduler's reason for a pod it
+cannot place into the cached row (`database.status_message`); the tenant console shows it.
+
+**Why:** the second lab drill of `v0.10.1` (candidate rc.2). The wait between two units read only what ArgoCD and
+the Kamaji operator write; the drain of the `kamaji` machine evicted the operator together with the tenant's
+control plane, both kept saying Healthy and Ready, and the next unit began while the only tenant API server was
+away. The run's stored record lost the item of the Node it had deleted, a released cluster token left dead `acl:`
+lines in `user.cfg`, and a database without room on its nodes read PROGRESSING without a reason.
+
+**Diagrams:** none.
+
 ## 2026-11-20: the platform BOM pins cluster chart 0.1.16
 
 **What changed:** no component, container or relation. The platform BOM (release `0.10.1-rc.2`) pins Helm chart
