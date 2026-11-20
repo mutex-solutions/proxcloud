@@ -199,7 +199,7 @@ are not evidence of publication or installation. The releases `v0.5.1`, `v0.5.2`
    its tag's workflows succeed.
 2. Verify app/chart/installer BOM alignment with that exact version. Keep managed
    charts independent: `database-cluster` `0.5.2`, `proxmox-kamaji-cluster`
-   `0.1.15` and `proxcloud-platform` `0.1.3` (published and pinned by the platform BOM)
+   `0.1.16` and `proxcloud-platform` `0.1.3` (published and pinned by the platform BOM)
    need their own tag/publication checks. A newer version of one of them needs its own tag
    and then its digest in the platform BOM before an app release names it. Do not move existing provider
    pins or managed data as a consequence of the app release.

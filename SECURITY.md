@@ -35,7 +35,8 @@ published artifacts are pullable before relying on them.
 | Version / source | Status |
 |------------------|--------|
 | `v0.10.0` | Current stable release; report issues against it; fixes land on `main` for a later release; no SLA |
-| `v0.10.1-rc.1` | Release candidate of `v0.10.1`, for a lab; not for production and not supported; use `v0.10.0` |
+| `v0.10.1-rc.2` | Release candidate of `v0.10.1`, for a lab; not for production and not supported; use `v0.10.0` |
+| `v0.10.1-rc.1` | Earlier release candidate of `v0.10.1`, replaced by `v0.10.1-rc.2`; not supported |
 | Current `main` | Development fixes; no stable support/SLA promise |
 | `v0.9.1` | Previous stable release; no stated backport support; upgrade to `v0.10.0` (see the changelog) |
 | `v0.5.0`, `v0.5.1`, `v0.5.2`, `v0.6.0`, `v0.7.0`, `v0.8.0`, `v0.8.1`, `v0.8.2`, `v0.9.0` | Older stable releases; no stated backport support; upgrade to `v0.10.0` |

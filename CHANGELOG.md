@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Findings of the lab drill of `v0.10.1-rc.1` (2026-11-20: the first real move of a seed's k3s across a minor and the
 first real replacement of a platform cluster's machine). Part "seed" passed; part "platform" stopped after the
-control plane's unit. The chart change needs the tag `proxmox-kamaji-cluster-v0.1.16` and the BOM pin that follows
-it; the BOM of `main` still pins 0.1.15.
+control plane's unit. The corrected chart is published from the tag `proxmox-kamaji-cluster-v0.1.16`, and the BOM
+of the candidate `0.10.1-rc.2` pins it (below).
 
 ### Fixed
 
@@ -185,6 +185,101 @@ it; the BOM of `main` still pins 0.1.15.
   `TestUpgradeRollsNoMachine` compares nine previous BOMs with the BOM on `main`: three of 0.8.x, the two
   candidates of 0.9.0, `0.9.0`, `0.9.1`, `0.10.0-rc.1` and `0.10.0`. No apply on such a platform was run on a lab
   by this change.
+
+## [0.10.1-rc.2] - 2026-11-20
+
+The second release candidate of 0.10.1, published as a prerelease and never as `latest`. It is not the release:
+`v0.10.0` stays the current stable release, and the chart, the installer and the Compose default still name it. It
+holds what is under Unreleased above: the corrections of the lab drill of `v0.10.1-rc.1` (#402) next to what that
+candidate held (#397, #398, #399). It exists so that the lab that stands in the middle of that drill can go on, and
+so that the whole replacement can be run on the corrected code: nothing of it had run on a lab when it was tagged.
+The entries above are not repeated here. Not for a production site.
+
+### Changed
+
+- **The platform BOM's release is `0.10.1-rc.2`, and it pins cluster chart `proxmox-kamaji-cluster` 0.1.16**
+  (`deploy/platform/platform-bom.yaml`), for `pc-platform` and for `tenantCharts.kubernetes`, at
+  `sha256:2a58fa81b5a96fd7b23c76b06418af5a477586f151ec8e9eab1bad1536e6f000` (read from the registry manifest, by
+  `helm show chart` and by `bom_verify.py`). The chart was published from the tag `proxmox-kamaji-cluster-v0.1.16`;
+  `git diff proxmox-kamaji-cluster-v0.1.16 -- deploy/charts/proxmox-kamaji-cluster`,
+  `git diff database-cluster-v0.5.2 -- deploy/charts/database-cluster` and
+  `git diff proxcloud-platform-v0.1.3 -- deploy/charts/proxcloud-platform` print nothing, so no chart tag is owed.
+  Nothing else of the BOM moves against `0.10.1-rc.1`: the same k3s, Kubernetes version, node image, providers and
+  third-party charts. It is a release BOM, and the release gate passes on it and on the ten previous BOMs.
+- **`upgradeFrom` of `pc-platform` is `0.1.13`, `0.1.14`, `0.1.15`**, so every previous BOM reaches it: 0.1.13 is
+  the chart of the three 0.8.x BOMs, 0.1.14 that of 0.9.0, 0.9.1 and the candidates of 0.9.0, 0.1.15 that of
+  0.10.0-rc.1, 0.10.0 and 0.10.1-rc.1. `TestUpgradeRollsNoMachine` passes with the pin on all ten pairs, nine of
+  them at step 0 of a roll: chart 0.1.16 with this build's values and the chart each previous BOM pins render the
+  same machines.
+- **What rc.1's drill showed** (one lab, 2026-11-20; three Proxmox nodes on one shared disk, one control plane
+  machine, one tenant cluster and one database under a write loop of one insert every 2 seconds). Part "seed"
+  passed with the tenants live: 43 min 20 s, of which 41 min were the node image import on three nodes; the k3s
+  stage took 2 min 1 s; the seed's API was away 43 s; the seed came back at `v1.36.6+k3s1` with containerd 2.3.7,
+  the same node and boot; the database port and the write loop had no failure, the platform API 12 failed looks of
+  1535 and the tenant API 7 of 1526, all in the minutes of the image uploads and imports. Part "platform" stopped
+  after the control plane's unit: Cluster API gave up deleting the old machine's Node after its default 10 seconds,
+  inside the 65 seconds in which the API address moves to the new machine (the kube-vip lease is 60), and the run
+  waited for a node count that could not come true (`nodes_timeout`, and again at Retry).
+- **What rc.2 changes** (#402, in detail under Unreleased): cluster chart 0.1.16 sets
+  `nodeDeletionTimeoutSeconds` to 1800 on the control plane's and every node group's machines, with no machine
+  replaced for it; the run deletes a Node that is not Ready and that no Machine owns, so a site that stands in that
+  wait gets out with one Retry; a replacement of the machines that has begun continues under a later BOM that
+  differs in own charts and the release only; stage `seed-k3s` can defer and record its failure (codes with a
+  digit); the etcd snapshot's real name is recorded; an import that is tried again says so; the Check has a row
+  `nodes`; Template updates lists no VMID twice; the guide carries the drill's figures.
+- **An installation in the middle of the replacement toward `0.10.1-rc.1` continues under this BOM.** With
+  `status.bom` 0.10.0, `targetBom` 0.10.1-rc.1 and `roll.step` 1 to 4, `PlanFor` without a target gives the move to
+  0.10.1-rc.2 as the upgrade in progress: `carried` 0.10.1-rc.1, allowed, nothing to confirm, nothing blocking,
+  part `seed` done, part `platform` allowed, 19 changes. A Retry runs with the BOM 0.10.1-rc.2, records it as
+  `status.targetBom` and keeps the step. An installation whose seed part is done and whose replacement has not
+  begun goes on to 0.10.1-rc.1 with an apply without a target; the plan offers 0.10.1-rc.2 as `replacement`, with
+  the phrase `upgrade <name> to 0.10.1-rc.2 and replace its machines`.
+- **The plan from each previous BOM is allowed, with no refusal** (`PlanFor`, one control plane machine and one
+  machine per group). From 0.10.0 and 0.10.0-rc.1, 19 changes in two parts: the 17 of `0.10.1-rc.1`,
+  `tenantCharts.kubernetes` 0.1.15 to 0.1.16, record only, and `pc-platform` 0.1.15 to 0.1.16 (class chart, stage
+  `cluster`, wave 3, with the first step of the roll). From 0.9.0, 0.9.1 and the candidates of 0.9.0, 20, with the
+  cluster chart from 0.1.14. From the three 0.8.x BOMs, 23, with the cluster chart from 0.1.13. From 0.10.1-rc.1,
+  three, with no part and no machine replaced: the release and the tenant chart, record only, and `pc-platform`
+  0.1.15 to 0.1.16, phrase `upgrade <name> to 0.10.1-rc.2`.
+- **A candidate moves nothing a final moves.** The app chart, the installer pin and `DEFAULT_VERSION` stay on
+  `v0.10.0`; the installer's k3s and Kubernetes pins stay at 1.35.10.
+
+### Verified on a lab
+
+Nothing of this candidate. What the audit of the drill of `v0.10.1-rc.1` confirmed, on that candidate's images and
+BOM, one run on one lab:
+
+- Part "seed": the run from 06:28:16 to 07:11:40 UTC (43 min 20 s), seven stages, no retry; the seed node at
+  `v1.36.6+k3s1` with the same uid and boot id, containerd 2.3.7; the pre-upgrade etcd snapshot as an object
+  (11,743,264 bytes, ready to use; the file itself was not seen); the config file without leader election by the
+  saved pod spec and by its effect (the three components' leases not renewed after the restart; the file and
+  `k3s.prev` were not seen); the seed's API away 43 s in the k3s stage, and 39 s once, unplanned, during the image
+  import; failed looks: platform API 12 of 1535, tenant API 7 of 1526, database port 0 of 1569.
+- Part "platform", the control plane's unit only: one clone (6 min 5 s), the new member added to etcd and the old
+  one removed, the old VM destroyed; platform API not answering for 88 s and 54 s during the clone, 22 s after the
+  join and 65 s at the hand-over (29 failed looks between the etcd join and the end of the hand-over); tenant API
+  longest 13.4 s; database port 0 failed looks of 1558; the write loop without a failed insert and the marker row
+  unchanged; the Cilium agent Ready with no restart on the one 1.36.6 node.
+- The state it left: control plane at 1.36.6, the three node groups at 1.35.10, the old control plane machine's
+  Node still listed (not Ready, ten stale pods), and it serves.
+- The findings, each confirmed real: the Node left behind (blocker; the 65 seconds are the chart's own lease, not
+  the lab's disk), the seed stage's codes refused by the job store (major), the clone of the control plane's
+  surge machine taking a single control plane away before the join (major for a one-node site), and five minor
+  ones (the import's load on a shared disk, the hidden import tries, the snapshot's name, the Check with a
+  machineless node, the guide's `nodes_timeout` row).
+
+### Not verified
+
+- Anything of this candidate: its images and its tag's workflows do not exist before the tag, and none of #402
+  ran against a real cluster.
+- Units 2 to 4 of the replacement (`system`, `kamaji`, `dbaas`) and every gap of theirs.
+- The whole replacement on the corrected code, and the Retry that takes a stuck installation on under this BOM.
+- Pause between two units and Resume.
+- The seed's way back with the snapshot restore.
+- A new tenant cluster at 1.36.6.
+- cert-manager issuing a certificate on 1.36, on the seed or on the platform cluster.
+- A one-node site, and a site with SNAT.
+- The moves from the BOMs other than 0.10.0 (plans read, not run).
 
 ## [0.10.1-rc.1] - 2026-11-20
 
