@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **An upgrade may move cert-manager, the first third-party chart it moves.** On the seed and on the platform
+  cluster the cert-manager entry moves as a chart of the product does: only to a version whose BOM entry lists the
+  installed one in `upgradeFrom` (the release read upstream's upgrade notes for that pair and compared the render,
+  `TestCertManagerMoveRenders`), as class `chart` in its wave, and only in an upgrade that changes no k3s, Kubernetes
+  version or node image. Next to such a change each cert-manager row is refused with a sentence that says to finish
+  an upgrade to a release with this one's Kubernetes version, k3s and node image first, with that release's build.
+  The seed's charts sync after its k3s and the platform cluster's after the roll, so in one run the old chart would
+  meet the new Kubernetes first. The run's gate is the wave's: the Application Synced and Healthy with its sync, and
+  the chart's `startupapicheck` hook in it, Succeeded. No machine is replaced, nothing is written on Proxmox and no
+  seed backup is asked for; there is no way back, and the plan names upstream's advice to back up the cert-manager
+  resources first. Every other third-party chart stays refused, also when its entry lists `upgradeFrom`. This BOM
+  pins no new cert-manager yet: the pin follows once the chart mirror serves v1.21.3. Tested against fakes and
+  renders only; not run on a lab.
+- **Preflight row `certificates`**: `ok` when cert-manager's controller, cainjector and webhook Deployments are
+  available on the seed and on the platform cluster and every Certificate there is Ready, a warning that names each
+  one that is not. It never fails and no run waits on it, so a Certificate broken before an upgrade does not hold
+  the run ([api.md](docs/api.md)).
+
 ### Changed
 
 - **The chart mirror's manifest names cert-manager v1.21.3** (`deploy/platform/charts-mirror.yaml`, upstream

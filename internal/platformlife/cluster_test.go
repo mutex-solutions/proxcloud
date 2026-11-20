@@ -1570,3 +1570,55 @@ func TestFinishedApplicationItemHasNoOldFailure(t *testing.T) {
 		t.Fatalf("end %s, item %+v", end, it)
 	}
 }
+
+// The Check row certificates: ok while cert-manager's three Deployments are Available and every Certificate is Ready on
+// both clusters; a warning that names each one that is not (a Certificate broken before a move must not hold a run, so
+// never a failure); absent without both clusters.
+func TestCertificatesCheck(t *testing.T) {
+	p := newPlatform(t, RunApply)
+	run, in, sec := p.state.snapshot()
+	x := &acq{run: run, in: in, sec: sec}
+	seed, _ := x.seed()
+	wl, err := x.workload(context.Background(), seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployment := func(name string, available int) map[string]any {
+		return map[string]any{"metadata": map[string]any{"namespace": "cert-manager", "name": name, "generation": 1}, "spec": map[string]any{"replicas": 1},
+			"status": map[string]any{"observedGeneration": 1, "availableReplicas": available}}
+	}
+	certificate := func(ns, name string, ready map[string]any) map[string]any {
+		ready["type"] = "Ready"
+		return map[string]any{"metadata": map[string]any{"namespace": ns, "name": name}, "status": map[string]any{"conditions": []any{ready}}}
+	}
+	const certs = "/apis/cert-manager.io/v1/certificates/"
+	for _, f := range []*fakeSeed{p.seed, p.wl} {
+		for _, d := range []string{"cert-manager", "cert-manager-cainjector", "cert-manager-webhook"} {
+			f.put("/apis/apps/v1/namespaces/cert-manager/deployments/"+d, deployment(d, 1))
+		}
+	}
+	p.seed.put(certs+"capi-system.capi-serving-cert", certificate("capi-system", "capi-serving-cert", map[string]any{"status": "True"}))
+	p.wl.put(certs+"kamaji-system.kamaji-serving-cert", certificate("kamaji-system", "kamaji-serving-cert", map[string]any{"status": "True"}))
+	want := "cert-manager's Deployments are Available on the seed and on the platform cluster, and their 2 Certificates are Ready."
+	if c := CertificatesCheck(context.Background(), seed, wl); c == nil || c.Status != CheckOK || c.Message != want {
+		t.Fatalf("all well: %+v", c)
+	}
+	p.wl.put("/apis/apps/v1/namespaces/cert-manager/deployments/cert-manager-webhook", deployment("cert-manager-webhook", 0))
+	p.wl.put(certs+"kamaji-system.kamaji-serving-cert", certificate("kamaji-system", "kamaji-serving-cert",
+		map[string]any{"status": "False", "reason": "DoesNotExist", "message": "Issuing certificate as Secret does not exist"}))
+	p.seed.put(certs+"capi-system.capi-serving-cert", certificate("capi-system", "capi-serving-cert", map[string]any{"status": "Unknown"}))
+	c := CertificatesCheck(context.Background(), seed, wl)
+	for _, line := range []string{
+		"On the platform cluster, Deployment cert-manager/cert-manager-webhook is not Available (0 of 1 replicas available).",
+		"On the platform cluster, Certificate kamaji-system/kamaji-serving-cert is not Ready (DoesNotExist: Issuing certificate as Secret does not exist).",
+		"On the seed, Certificate capi-system/capi-serving-cert is not Ready (Ready Unknown).",
+		"No run waits on this row.",
+	} {
+		if c == nil || c.Status != CheckWarn || !strings.Contains(c.Message, line) {
+			t.Fatalf("want %q in %+v", line, c)
+		}
+	}
+	if CertificatesCheck(context.Background(), nil, wl) != nil || CertificatesCheck(context.Background(), seed, nil) != nil {
+		t.Fatal("a row without a cluster to read")
+	}
+}

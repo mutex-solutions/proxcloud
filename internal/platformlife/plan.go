@@ -348,13 +348,14 @@ func move(in *Installation, target string) (run Embedded, up *Upgrade, err error
 }
 
 // carries reports that this build's BOM cur takes the place of the unfinished target mid of an upgrade from from: the
-// two name the same Kubernetes version, node image, kube-vip, k3s, seed image, providers and third-party charts, and
-// differ only in what a run moves without replacing a machine (the release line, the tenant charts, the product's own
-// charts at a version that lists the other in upgradeFrom), and the installed BOM may move to cur as well, because
-// each component stands at one of the two. Then nothing a run of the unfinished upgrade has reached is rendered
-// otherwise under cur: the seed's k3s, the node image's templates and the roll's step keep their meaning, and the
-// units the roll has not reached render with cur's cluster chart. A development BOM is never a target, so it carries
-// nothing.
+// two name the same Kubernetes version, node image, kube-vip, k3s, seed image, providers and third-party charts but
+// cert-manager, and differ only in what a run moves without replacing a machine (the release line, the tenant charts,
+// the product's own charts and cert-manager at a version that lists the other in upgradeFrom), and the installed BOM
+// may move to cur as well, because each component stands at one of the two. A cur that moves cert-manager carries no
+// unfinished roll or k3s move: the move from the installed BOM then has machines or seed rows, and Classify's pair gate
+// refuses cert-manager's. Then nothing a run of the unfinished upgrade has reached is rendered otherwise under cur: the
+// seed's k3s, the node image's templates and the roll's step keep their meaning, and the units the roll has not reached
+// render with cur's cluster chart. A development BOM is never a target, so it carries nothing.
 func carries(from, mid, cur Embedded) bool {
 	if strings.HasSuffix(cur.Release, "-dev") {
 		return false
@@ -374,6 +375,25 @@ func carries(from, mid, cur Embedded) bool {
 
 // later ends the reason of every change this release does not make.
 const later = "not supported by this release: "
+
+// thirdPartyMove reports a third-party component an upgrade may move by its chart version, under the rules of the
+// product's own charts (a version whose entry lists the installed one in upgradeFrom: the release read that pair's
+// upgrade notes and compared the render, TestCertManagerMoveRenders) and only in a pair with no seed or machines row.
+// cert-manager alone, by its component and its chart name: the case before it in Classify holds repo, chart name,
+// values, wave and namespace equal to the installed entry.
+func thirdPartyMove(c *Component) bool {
+	return c.Name == "cert-manager" && c.Chart.Name == "cert-manager"
+}
+
+// certManagerImpact is the impact of a cert-manager row.
+const certManagerImpact = "cert-manager moves to the new chart version. ArgoCD applies its CRDs in place (v1 stays the only version) and removes what " +
+	"the new chart no longer renders. Each of the controller, cainjector and webhook Deployments starts its new pod and removes the old one only " +
+	"when the new one is Ready; the three roll together. After the sync the chart's startupapicheck Job checks the webhook with a dry-run " +
+	"Certificate, and the wave waits for it. Certificates and their Secrets stay; the move is not expected to issue any again (not measured on " +
+	"a lab yet). The webhooks of Cluster API and Kamaji keep their certificates. No pod of a tenant restarts, no machine is replaced and nothing " +
+	"is written on Proxmox, so no seed backup is needed. There is no way back: a platform does not go back to a BOM, and cert-manager documents no " +
+	"downgrade; its upgrade guide advises a backup of the cert-manager resources first (kubectl get certificates,issuers,clusterissuers -A -o yaml " +
+	"on the seed and on the platform cluster)."
 
 // k3sVersion splits "v1.35.10+k3s1" into major, minor, patch and the k3s build.
 func k3sVersion(v string) (n [4]int, err error) {
@@ -412,9 +432,10 @@ func slug(v string) string { return strings.ReplaceAll(v, "+", "-") }
 // Classify lists every difference between two BOMs for a move from from to to, each with its class. This release moves
 // a platform only when the BOMs differ in the product's own charts: the release line, the tenant charts, and the charts
 // of our own repository (proxcloud-platform as capi, capi-tenant and platform; proxmox-kamaji-cluster as pc-platform)
-// at a version whose entry lists the old one in upgradeFrom; and in the seed's k3s, by a patch, a k3s build or one
-// minor up (class seed, with what the run writes on the seed as class site). Everything else is refused with its
-// reason: the seed image, clusterctl and the providers, every third-party chart, and a component that is added,
+// at a version whose entry lists the old one in upgradeFrom; in cert-manager (thirdPartyMove) by the same rule, but
+// only in a pair that changes no k3s, Kubernetes version or node image; and in the seed's k3s, by a patch, a k3s build
+// or one minor up (class seed, with what the run writes on the seed as class site). Everything else is refused with its
+// reason: the seed image, clusterctl and the providers, every other third-party chart, and a component that is added,
 // removed or changed in anything but its chart version. The Kubernetes version (never back, at most one minor up), the
 // node image and, together with a new node image, kube-vip are class machines when the target's cluster chart can
 // order a rollout: the run then replaces every machine of the platform cluster (roll.go).
@@ -523,6 +544,7 @@ func Classify(from, to *BOM) []PlanChange {
 	refuse := func(c *Component, fromV, toV, why string) {
 		out = append(out, PlanChange{Cluster: c.Cluster, Name: c.Name, From: fromV, To: toV, Class: ClassRefused, Blocking: later + why})
 	}
+	var thirdParty []int // the rows of thirdPartyMove components, which the pair gate below may refuse
 	for i := range to.Components {
 		t := &to.Components[i]
 		f := find(from, t.Cluster, t.Name)
@@ -533,9 +555,9 @@ func Classify(from, to *BOM) []PlanChange {
 			f.Chart.Repo != t.Chart.Repo || f.Chart.Name != t.Chart.Name || !reflect.DeepEqual(f.Values, t.Values):
 			refuse(t, f.Chart.Version, t.Chart.Version, "the component's wave, install mode, namespace, node group, chart source or values changed, and a run moves only a chart version")
 		case f.Chart.Version == t.Chart.Version && f.Chart.Digest == t.Chart.Digest:
-		case !ownPackage(t.Chart.Repo):
+		case !ownPackage(t.Chart.Repo) && !thirdPartyMove(t):
 			refuse(t, f.Chart.Version+"@"+f.Chart.Digest, t.Chart.Version+"@"+t.Chart.Digest,
-				"a third-party chart is upgraded only by a later release (this one moves the product's own charts)")
+				"a third-party chart is upgraded only by a later release (this one moves the product's own charts and cert-manager)")
 		case f.Chart.Version == t.Chart.Version:
 			refuse(t, f.Chart.Digest, t.Chart.Digest, "the same chart version with another digest: a published chart version does not change")
 		case !slices.Contains(t.UpgradeFrom, f.Chart.Version):
@@ -558,8 +580,29 @@ func Classify(from, to *BOM) []PlanChange {
 				c.Impact = "The Application moves to the new chart version. ArgoCD syncs, and runs the chart's clusterctl hook again, only when the new chart renders " +
 					"an object differently; the hook then finds every provider at its version and changes nothing. No pod of a tenant restarts."
 			}
+			if !ownPackage(t.Chart.Repo) {
+				c.Impact = certManagerImpact
+				thirdParty = append(thirdParty, len(out))
+			}
 			out = append(out, c)
 		}
+	}
+	// A third-party chart moves in a release of its own: the seed's charts sync after its k3s (stage 5a), the platform
+	// cluster's after the roll, so in one run the old chart would meet the new Kubernetes first.
+	var also []string
+	for _, c := range out {
+		if c.Class == ClassSeed || c.Class == ClassMachines {
+			also = append(also, c.Name)
+		}
+	}
+	for _, i := range thirdParty {
+		if len(also) == 0 {
+			break
+		}
+		out[i] = PlanChange{Cluster: out[i].Cluster, Name: out[i].Name, From: out[i].From, To: out[i].To, Class: ClassRefused, Blocking: later +
+			"a third-party chart moves only in an upgrade that changes no k3s, Kubernetes version or node image, and this one also changes " +
+			strings.Join(also, ", ") + ". First finish an upgrade to a release with this one's Kubernetes version (" + to.Kubernetes.Version +
+			"), k3s (" + to.Seed.K3s.Version + ") and node image (" + to.Kubernetes.NodeImage.Tag + "), with that release's build, then start this one"}
 	}
 	for i := range from.Components {
 		if f := &from.Components[i]; find(to, f.Cluster, f.Name) == nil {
