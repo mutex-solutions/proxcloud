@@ -65,6 +65,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The platform BOM on `main` is `0.11.0-dev` again, and the build carries the BOM of `0.10.1-rc.1`**
+  (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.10.1-rc.1.yaml`). The commit of the candidate
+  `v0.10.1-rc.1` left the BOM at `0.10.1-rc.1`, and the release gate refuses only `-dev`. A platform installed by the
+  candidate, or moved to its BOM by an upgrade, stays on it under a later build and is not refused
+  (`bom_unsupported`) while the file is carried. Its pins are those of `main`, so the plan from it has one change, the
+  release, record only: no seed part and no machine replaced. The nine older previous BOMs still carry the move to
+  k3s `v1.36.6+k3s1` and Kubernetes 1.36.6 in two parts; `TestUpgradeRollsNoMachine` compares ten previous BOMs with
+  the BOM on `main`, nine of them at step 0 of a roll, and `TestPreviousBOMsMoveAsTheirPinsDiffer` holds every pair
+  to that split. The kept BOM has cert-manager v1.20.2 and Cilium 1.18.16 on Kubernetes 1.36, outside the versions
+  their own documents list: accepted as "to be proven by the lab drill", which has not run. No apply on such a
+  platform was run on a lab by this change.
 - **The platform BOM names k3s `v1.36.6+k3s1` and Kubernetes 1.36.6** (`deploy/platform/platform-bom.yaml`:
   `seed.k3s`, `kubernetes.version`, `kubernetes.nodeImage`; the node image is
   `ubuntu-2604-k8s-1.36.6-20261116194043-72f0eaa3d0d4`, from the same source commit as the 1.35.10 image). It is the
