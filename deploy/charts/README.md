@@ -67,8 +67,16 @@ Four charts live here:
   Kubernetes version than the cluster's, and `deleteFirstOn` (a list of nodes) renders
   `rollout.strategy.rollingUpdate` with `maxSurge: 0` and `maxUnavailable: 1` for those nodes, so
   a machine is deleted before its replacement is cloned where a node has no room for one more.
-  Without the keys the render is what 0.1.14 gave. Published and pinned by the platform BOM; no
-  release writes the keys yet.
+  Without the keys the render is what 0.1.14 gave. Published and pinned by the platform BOM.
+  0.1.16 reads `nodeDeletionTimeoutSeconds` (default 1800) and renders it as
+  `deletion.nodeDeletionTimeoutSeconds` of the `KubeadmControlPlane`'s machine template (kubeadm
+  mode) and of every `MachineDeployment`'s: how long Cluster API keeps trying to delete the Node of
+  a Machine it removes, counted from the start of the Machine's deletion. Cluster API's default of
+  10 seconds left the Node of a replaced control plane machine in the cluster for good when the
+  control plane has one machine (the delete falls into the gap in which the address moves). Cluster
+  API puts the value on the machines in place and no machine or bootstrap template changes its
+  name: no machine is replaced for it. A negative value renders nothing, which is the render of
+  0.1.15 ([managed-services.md](../../docs/managed-services.md#the-platform-clusters-machines)).
 
 ## Publishing
 
@@ -91,8 +99,10 @@ pullable; see [release readiness](../../docs/release-readiness.md).
 
 For `database-cluster`, `proxmox-kamaji-cluster` and `proxcloud-platform`, bump `version:` in `Chart.yaml`
 in the PR that changes the chart, merge, then have a maintainer deliberately cut
-the matching tag. The current source versions are database `0.5.2`, Kubernetes `0.1.15` and
-platform `0.1.3`, all three published and pinned by the platform BOM (database `0.5.2`: no
+the matching tag. The current source versions are database `0.5.2`, Kubernetes `0.1.16` and
+platform `0.1.3`. Database `0.5.2` and platform `0.1.3` are published and pinned by the platform
+BOM; Kubernetes `0.1.16` (the node deletion timeout) is in the source only until its tag is cut,
+and the BOM pins the published `0.1.15` until then (database `0.5.2`: no
 disruption budget for a PostgreSQL of one instance; Kubernetes `0.1.15`: a version and a
 delete-first rollout per node of a node group, on top of the node groups' MachineHealthCheck, the
 VLAN tag and the control plane count of the platform cluster of `0.1.14`; platform `0.1.3`: `delete`

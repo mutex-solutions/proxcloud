@@ -1439,7 +1439,7 @@ stage is still trying.
 | `capmox_auth_failed` | 7 | Proxmox refuses the CAPI token when CAPMOX uses it (a condition of the ProxmoxCluster or a ProxmoxMachine says so); or CAPMOX has set no condition on the ProxmoxCluster for 10 minutes, which is how a Proxmox API URL the seed cannot reach and a refused token both show, because CAPMOX opens the API before it writes anything | Check the Proxmox API URL as the platform network reaches it ([What no check reads](#what-no-check-reads)), paste the secret again, **Retry**. The Retry makes CAPMOX try at once (it updates the ProxmoxCluster), so a fix shows within its 10 minutes. CAPMOX's log on the seed says which it is: `kubectl -n capmox-system logs deploy/capmox-controller-manager` |
 | `control_plane_timeout` | 7 | Not every machine is Running or the control plane is not initialized in 60 minutes. The items and the message carry the step each machine is at and CAPMOX's last error | **Retry**; the time limit starts again. Look at the machines with the seed kubeconfig |
 | `workload_api_unreachable` | 8 to 10, Remove | The cluster's API does not answer from the API's host, or its kubeconfig or CA on the seed is not usable, or it refused the admin kubeconfig or the request with a `401` or `403` at five looks on end (as for `seed_api_unreachable`) | Add a route from the ProxCloud host to the API address, **Retry**. At Remove: restore the route and **Remove again**, or tick the option for a cluster that does not answer |
-| `nodes_timeout` | 9 | Not every node is Ready with its group label after the first wave | **Retry** |
+| `nodes_timeout` | 7, 9 | Not every node is Ready with its group label, or the cluster has another number of nodes than machines: after the first wave of stage 9, and in stage 7 between two units of a replacement of the machines ([The platform cluster's machines](#the-platform-clusters-machines)). The message names every node that is not Ready, and all of them when only the count is off | **Retry**. A Node that is not Ready and that no Machine owns (Cluster API removed its machine and gave up deleting the Node object) is deleted by the run at its next look, and the stage's items name it (`node/<name>`, state `deleted`): a run that stood in this wait on 0.10.1-rc.1 gets out with one Retry. A node that a Machine owns is never deleted: look at that machine with the seed kubeconfig |
 | `provider_conflict` | 10 | A provider with the same name exists that is not this installation's, two rows carry its marker, or the provider validation refused the row | Correct or rename that provider under Cloud providers, **Retry** |
 | `bom_unsupported` | start, plan | The installed BOM is not one this release carries: its own, or that of an earlier release from 0.8.0 on. A platform installed by a build of `main` (`dev-<sha>`) gets this after an upgrade | A platform moves only between BOMs a release carries ([Upgrade between BOMs](#upgrade-between-boms)). Go back to the ProxCloud release that installed the platform. Or, if no tenant cluster or database must be kept: delete them all (Remove refuses with `tenants_exist` otherwise), remove managed services, which deletes the platform cluster, and install again |
 | `upgrade_refused` | start | An apply names this release's BOM as its target (`targetBom`) and the two BOMs differ in something this release does not move, or the target is a `-dev` BOM. `409`, no run is made; `details.reasons` has one line per entry, the same lines as the plan | Nothing is wrong with the platform: it stays on its BOM, and **Apply this release** keeps working. The move needs a later release ([Upgrade between BOMs](#upgrade-between-boms)) |
@@ -2181,11 +2181,16 @@ to it. The release notes of such a release must say so.
 
 ### Upgrade to Kubernetes 1.36.6
 
-**Not run on a lab or on a site.** This is what the plan, the code and its tests say an upgrade to
-the BOM with k3s `v1.36.6+k3s1` and Kubernetes 1.36.6 does. Every duration below is an expectation
-and is **not measured**; the lab drill of the release is what replaces them. The candidate
-`v0.10.1-rc.1` is the first release that carries this BOM, as `0.10.1-rc.1`, for that drill
-([ci-release.md](ci-release.md#release-candidates)).
+**Run in part on one lab, on no site.** The candidate `v0.10.1-rc.1` was the first release with
+this BOM ([ci-release.md](ci-release.md#release-candidates)). Its drill on 2026-11-20 (three Proxmox
+nodes on one shared lab disk, one control plane machine, one tenant cluster and one database under a
+write loop) ran part "seed" to the end and the control plane's unit of part "platform", and stopped
+there: the old control plane machine's Node object stayed in the cluster and the run waited for a
+node count that could not come true (`nodes_timeout`; corrected since, see
+[The platform cluster's machines](#the-platform-clusters-machines)). The figures marked "one lab's
+sample" below are that drill's: one run on one lab, not a promise for a site. Everything else is
+what the plan, the code and its tests say, and is **not measured**: the units `system`, `kamaji` and
+`dbaas`, stages 8 to 11, and a control plane of three.
 
 **What the BOM changes.** `kubernetes.version` 1.35.10 to 1.36.6, `kubernetes.nodeImage` to the
 image built for 1.36.6 (`ubuntu-2604-k8s-1.36.6-20261116194043-72f0eaa3d0d4`, from the same source
@@ -2219,10 +2224,10 @@ have the detail.
 
 | Step | What the run does | What stops serving | How long |
 |---|---|---|---|
-| Part "seed", stage 2 | Imports the 1.36.6 node image as a template on every Proxmox node the cluster uses (a download of about 2.4 GiB) | Nothing | Not measured |
-| Part "seed", stage 5a | Saves an etcd snapshot on the seed, writes the k3s config drop-in that turns leader election off in three components, replaces the k3s binary, restarts k3s. k3s moves its bundled containerd from 2.2 to 2.3 with it | The seed's API. Reconciliation only: no machine is repaired, the seed's ArgoCD syncs nothing, no platform run goes on. The platform cluster, tenant clusters, tenant API servers and databases keep serving | Expected about a minute. Not measured |
+| Part "seed", stage 2 | Imports the 1.36.6 node image as a template on every Proxmox node the cluster uses (a download of about 2.4 GiB), one node after another: the file is uploaded through the Proxmox API node, written to the import store, and imported into the node's boot store | Nothing by design. On a slow disk, or one the seed or the control plane shares with the import, the upload and the disk import can stall the etcd of the seed and of the platform cluster's control plane for seconds: the lab saw the seed's k3s restart once (39 s without its API), the platform API fail for up to 30 s, and single tenant API looks time out, all inside the minutes of an upload or import; the database port never failed. Choose a quiet hour | 11 to 19 minutes per node, 41 minutes for three nodes; the 19 include two uploads Proxmox answered with an error, which the import tried again by itself (the stage's item says which try runs) (one lab's sample, 2026-11-20) |
+| Part "seed", stage 5a | Saves an etcd snapshot on the seed, writes the k3s config drop-in that turns leader election off in three components, replaces the k3s binary, restarts k3s. k3s moves its bundled containerd from 2.2 to 2.3 with it | The seed's API. Reconciliation only: no machine is repaired, the seed's ArgoCD syncs nothing, no platform run goes on. The platform cluster, tenant clusters, tenant API servers and databases keep serving | The stage took 2 minutes 1 second and the seed's API was away for 43 seconds (one lab's sample, 2026-11-20) |
 | Part "seed", stage 6 | The seed's charts are compared again, now on k3s 1.36 | Nothing | Not measured |
-| Part "platform", step 1: control plane (one machine) | A second machine is cloned from the 1.36.6 template and joins; the old one is removed. etcd moves from 3.6.6 to 3.6.8 with the machine | The platform cluster's API, from the removal of the old etcd member until the new machine holds the API address: no tenant cluster or database operation, no repair, no failover, stale status in the consoles. Running tenant API servers, workloads and databases are expected to keep answering | Expected one to a few minutes. Not measured |
+| Part "platform", step 1: control plane (one machine) | A second machine is cloned from the 1.36.6 template and joins; the old one is removed. etcd moves from 3.6.6 to 3.6.8 with the machine | The platform cluster's API, from the removal of the old etcd member until the new machine holds the API address: no tenant cluster or database operation, no repair, no failover, stale status in the consoles. Running tenant API servers, workloads and databases keep answering. **On a node whose disk the control plane shares with the clone, the API can be away during the clone too, before anything has joined** | Clone 6 minutes 5 seconds; the platform API away for up to 2 minutes 21 seconds during the clone on the control plane's own node (kube-vip let the address go, the API server restarted), then for 65 seconds at the hand-over, from the removal of the old etcd member until the new machine held the address (the kube-vip lease is 60 seconds); about 11 minutes for the whole unit. Tenant API: single looks failed, 13 seconds at most. Database: no failed look, no failed insert (one lab's sample, 2026-11-20) |
 | Step 2: `system` | The machine is replaced | The platform's operators (ArgoCD, Cluster API for tenants, CloudNativePG, MetalLB, cert-manager) while they restart on the new machine; a MetalLB address may move | Not measured |
 | Step 3: `kamaji` (one machine) | The machine is replaced; kamaji-etcd's disk follows | **Every tenant API server.** Tenant workloads keep running | Not measured |
 | Step 4: `dbaas` | The machine is replaced; each database's disk follows | **Every database with one instance** on the machine | Not measured |
@@ -2231,6 +2236,27 @@ have the detail.
 A unit on a node without room for one more machine is replaced delete-first: everything on it is
 away for the whole clone and join (not measured). After step 1's new machine has joined etcd there
 is no way back.
+
+**The old machine's Node object.** Cluster API deletes a Machine's Node last, after the drain and
+after the VM is gone, and gives up once the Machine has been in deletion for longer than
+`nodeDeletionTimeoutSeconds`: 10 seconds by Cluster API's default, which the drain alone uses up.
+With one control plane machine the delete falls into the gap in which the address moves, so on
+cluster chart 0.1.15 the Node of the old control plane machine always stayed, NotReady, with no
+Machine: five Nodes for four machines, the DaemonSets' rollouts held by a pod that could never be
+ready, and a run that ended in `nodes_timeout` at every Retry. Two things correct it. Cluster chart
+0.1.16 sets the timeout to 1800 seconds on the control plane and on every node group (Cluster API
+puts it on the machines in place; no machine is replaced for it), so the delete is tried again
+until the API answers. And the run, in the wait between two units and in stage 9, deletes a Node
+that is not Ready and that no Machine owns: Cluster API joined it for a Machine of this cluster
+(its annotations), that Machine is gone, and no Machine or ProxmoxMachine names the Node by
+`status.nodeRef`, by its own name or by the provider id of its VM. The delete goes through the
+platform cluster's API with the admin kubeconfig Cluster API keeps on the seed (no Proxmox call, no
+new privilege) and only while the Node's uid is the one that was read. The stage's items name each
+Node deleted (`node/<name>`), and the Check row `nodes` warns about one before a run starts. The
+kube-vip lease stays at 60, 40 and 5 seconds: a shorter one would move the address sooner, but a
+changed lease replaces every control plane machine (it is in the static pod), and a single control
+plane loses its own address whenever its etcd is slow for longer than the renew deadline, which is
+what the lab's disk did during the clone.
 
 **Tenants keep their version.** No tenant cluster and no database is upgraded: a tenant cluster
 stays on the Kubernetes version and the chart it has. Stage 10 adds 1.36.6, with the new node
@@ -2289,7 +2315,8 @@ for kubectl and not for 1.37.
 An upgrade whose BOM names a newer k3s replaces it in place, in stage 5a, on the seed VM that
 runs. The seed is not rebuilt and its disk is not touched.
 
-**What is away.** The seed's API, for about a minute while k3s restarts (not measured on a lab).
+**What is away.** The seed's API, while k3s restarts: 43 seconds on one lab on 2026-11-20 (one lab's
+sample).
 What stops meanwhile is reconciliation only: Cluster API replaces or repairs no machine, the
 seed's ArgoCD syncs none of the platform's own components, and no platform run goes on. The
 platform cluster, every tenant cluster, the tenant API servers and the databases keep serving:
@@ -2326,8 +2353,12 @@ k3s's documented manual upgrade (the binary and a restart). A snapshot, download
 drop-in write that fails ends the Job before the binary is touched (`seed_k3s_failed`). The drop-in
 is written after the checksum and before the binary: if a later line fails, the file stays, the
 running k3s does not read it, and the next start of either binary takes it as intended. The stage is done when the
-Job has ended, the seed's node reports the new version and is Ready; it then records the version
-and deletes the Job. Stage 6 follows unchanged and is the check that ArgoCD and Cluster API kept
+Job has ended, the seed's node reports the new version and is Ready; it then records the version,
+and the snapshot the Job saved by its real name (k3s adds the node's name and a time to
+`pre-upgrade-<old version>`): the path on the seed is `status.seed.preUpgradeSnapshot`, and the
+finished stage carries it in its message and in the item `etcd-snapshot`, with the size and the
+command that deletes it once the upgrade has held (k3s prunes no snapshot saved on demand). Then it
+deletes the Job, whose log was the only other place with the name. Stage 6 follows unchanged and is the check that ArgoCD and Cluster API kept
 their state: ArgoCD's repo server available, every Application Synced and Healthy, the clusterctl
 inventory equal to the BOM.
 
@@ -2660,6 +2691,24 @@ phrase (the plan's `replacement`; by API the same `POST …/runs` with `targetBo
 for any upgrade). **Apply this release** and **Retry** still continue to release X and fail at the
 same check; only the second box leaves it. Until the corrected release is installed the platform
 cannot be applied.
+
+**A later release while the machines are being replaced.** Once the replacement has begun
+(`status.clusters[0].roll`) and a unit is still to be replaced, a ProxCloud release whose BOM names
+the same Kubernetes version, node image, kube-vip and k3s as the unfinished target, and differs
+only in the product's own charts and the release, takes the target's place by itself: **Retry**
+(an apply without `targetBom`, or one that names the new BOM) goes on under the new BOM with
+nothing to confirm, `status.targetBom` becomes the new BOM, and the plan shows one upgrade in
+progress whose `upgrade.carried` names the target it replaced. The step is kept. The units already
+replaced render as they are, the units not reached render with the new cluster chart, and nothing
+is rendered back. This is the way out for a site whose replacement stands at a defect of the
+release that started it: install the corrected release, press Retry. It needs what any target
+needs: the new chart lists both the installed version and the unfinished target's in `upgradeFrom`.
+A later release that names another Kubernetes version, node image or k3s again is not taken while
+the replacement runs: Retry goes on to the unfinished target (the newer ProxCloud embeds its BOM),
+and an apply that names the new BOM is `409 upgrade_refused` with "the replacement of the platform
+cluster's machines for release X has begun (step N) and release Z changes … again"; finish first,
+then start the next upgrade. Before the replacement has begun, and after its last unit, nothing is
+carried and the two boxes above apply.
 
 The check reads what ArgoCD reports and has not run against a real ArgoCD. If on a site it fails
 for a cluster chart that provably changes no template (compare `kubectl -n pc-platform get

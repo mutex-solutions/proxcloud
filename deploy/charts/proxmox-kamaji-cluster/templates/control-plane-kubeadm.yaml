@@ -26,6 +26,23 @@ kept when one try in those 40 seconds gets through in under 10 (a lab measured o
 not through an etcd whose every write takes longer. The same machine takes its own lease again at once
 after a restart; another machine (a rollout) waits up to 60 seconds for a holder that did not release it.
 
+That wait is why machineTemplate.spec.deletion.nodeDeletionTimeoutSeconds is set (nodeDeletionTimeoutSeconds, from
+chart 0.1.16; KubeadmControlPlane v1beta2, Cluster API v1.14.4 api/controlplane/kubeadm/v1beta2/
+kubeadm_control_plane_types.go:521 and 562). Cluster API deletes a Machine's Node last, after the drain and after the
+VM is gone, tries for 10 seconds at a time and gives up for good once the Machine has been in deletion for longer than
+the timeout (core/reconcilers/machine/machine_controller.go:660-677; the Machine's default is 10). With one control
+plane machine the VM that is stopped held the address, so the API answers again only when the new machine has taken
+the lease: a lab measured 65 seconds without the API from the removal of the old etcd member, and 2 minutes 47 seconds
+from the start of the deletion (the drain counts). The Node of the old machine then stays in the cluster, NotReady,
+with no Machine. 1800 seconds cover a drain of half an hour, which is as long as an upgrade run waits for a machine
+before it fails; it is not 0 (no limit) because a Machine of a cluster whose API never answers again would then never
+be removed. The value is copied to the Machines in place, also to one already in deletion, and is not part of the
+rollout decision (controlplane/kubeadm/reconcilers/kubeadmcontrolplane/kubeadmcontrolplane_controller.go:876-892,
+controlplane/kubeadm/pkg/filters.go:122-178): no machine is replaced for it. The lease is not shortened instead: a
+changed lease value is in the kube-vip static pod, so it replaces every control plane machine, and a short lease drops
+the address of a single control plane whenever its etcd is slow for longer than the renew deadline, which the 60, 40
+and 5 are there to ride out.
+
 The kubelet's node-ip is the machine's own address, which only the machine knows (CAPMOX's cloud-init metadata has the
 instance id and the hostname, no address): the prepare script writes it over __NODE_IP__ in kubeadm's configuration
 before kubeadm runs. Without it the node registers the kube-vip address as its InternalIP.
@@ -79,6 +96,9 @@ spec:
   machineTemplate:
     spec:
       infrastructureRef: {apiGroup: infrastructure.cluster.x-k8s.io, kind: ProxmoxMachineTemplate, name: {{ $mtName }}}
+      {{- if ge (int .Values.nodeDeletionTimeoutSeconds) 0 }}
+      deletion: {nodeDeletionTimeoutSeconds: {{ int .Values.nodeDeletionTimeoutSeconds }}}
+      {{- end }}
   kubeadmConfigSpec:
     clusterConfiguration:
       apiServer:

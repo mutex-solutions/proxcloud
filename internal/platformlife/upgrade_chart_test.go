@@ -17,7 +17,10 @@ import (
 // upgraded platform with an unfinished upgrade.
 func machineFacts(t *testing.T, helm, chart, values string) map[string]any {
 	t.Helper()
-	out, err := exec.Command(helm, "template", ClusterName, chart, "-n", ClusterName, "-f", values).CombinedOutput()
+	// Without nodeDeletionTimeoutSeconds (chart 0.1.16; an older chart does not read the value): the check before the
+	// sync compares without it as long as the live Application renders none (gateRender), and
+	// TestNodeDeletionTimeoutChangesNoMachine shows that the value changes nothing else.
+	out, err := exec.Command(helm, "template", ClusterName, chart, "-n", ClusterName, "-f", values, "--set", "nodeDeletionTimeoutSeconds=-1").CombinedOutput()
 	if err != nil {
 		t.Fatalf("helm template %s -f %s: %v\n%s", chart, values, err, out)
 	}
@@ -148,5 +151,57 @@ func TestChartInTreeRollsNoMachine(t *testing.T) {
 	}
 	if got, want := machineFacts(t, helm, local, values), machineFacts(t, helm, pinned, values); !reflect.DeepEqual(got, want) {
 		t.Errorf("the chart in this tree renders another control plane, machine template or bootstrap template than the pinned one.\nin tree: %v\npinned: %v", got, want)
+	}
+}
+
+// nodeDeletionTimeoutSeconds (chart 0.1.16) is the one thing the run's check before the sync does not compare while
+// the live Application renders none (gateRender), so the chart is held to what that relies on: the value is
+// machineTemplate.spec.deletion of the KubeadmControlPlane and template.spec.deletion of every MachineDeployment and
+// nothing else. Taken out of the default render, every object is the one a negative value renders, which
+// TestChartInTreeRollsNoMachine and TestUpgradeRollsNoMachine compare with the charts before it. Cluster API copies
+// that field to the Machines in place and leaves it out of its rollout decision (the chart's templates cite v1.14.4).
+func TestNodeDeletionTimeoutChangesNoMachine(t *testing.T) {
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatal("helm is required in CI, or this test proves nothing")
+		}
+		t.Skip("helm not installed")
+	}
+	render := func(set ...string) []map[string]any {
+		args := append([]string{"template", ClusterName, "../../deploy/charts/proxmox-kamaji-cluster", "-n", ClusterName, "-f", "testdata/render-cluster-values.golden.yaml"}, set...)
+		out, err := exec.Command(helm, args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("helm %v: %v\n%s", args, err, out)
+		}
+		return yamlObjects(t, out)
+	}
+	with, without := render(), render("--set", "nodeDeletionTimeoutSeconds=-1")
+	if len(with) != len(without) {
+		t.Fatalf("%d objects with the timeout, %d without", len(with), len(without))
+	}
+	want := map[string]any{"nodeDeletionTimeoutSeconds": 1800}
+	found := map[string]int{}
+	for i, o := range with {
+		var spec map[string]any
+		switch o["kind"] {
+		case "KubeadmControlPlane":
+			spec, _ = dig(o, "spec", "machineTemplate", "spec").(map[string]any)
+		case "MachineDeployment":
+			spec, _ = dig(o, "spec", "template", "spec").(map[string]any)
+		}
+		if spec != nil {
+			if !sameJSON(spec["deletion"], want) {
+				t.Errorf("%v %s: deletion %v, want %v", o["kind"], str(o, "metadata", "name"), spec["deletion"], want)
+			}
+			delete(spec, "deletion")
+			found[o["kind"].(string)]++
+		}
+		if !sameJSON(o, without[i]) {
+			t.Errorf("%v %s differs in more than the node deletion timeout:\nwith:    %s\nwithout: %s", o["kind"], str(o, "metadata", "name"), jsonOf(o), jsonOf(without[i]))
+		}
+	}
+	if found["KubeadmControlPlane"] != 1 || found["MachineDeployment"] < 3 {
+		t.Fatalf("the render has %v", found)
 	}
 }

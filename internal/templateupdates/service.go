@@ -561,5 +561,18 @@ func (s *Service) JobState(ctx context.Context, id string) (string, error) {
 	return j.State, nil
 }
 
+// JobTries reads how often the durable job of a receipt was started and the code its last failed try ended with (0
+// and "" when the row is gone). The code is a fixed classification; the provider's text is in the API log.
+func (s *Service) JobTries(ctx context.Context, id string) (attempts int, lastCode string) {
+	if s.Jobs == nil {
+		return 0, ""
+	}
+	j, err := s.Jobs.Get(ctx, id)
+	if err != nil {
+		return 0, ""
+	}
+	return j.Attempts, j.LastError
+}
+
 // History returns the newest receipts.
 func (s *Service) History(ctx context.Context) ([]Receipt, error) { return s.Receipts.Recent(ctx, 50) }

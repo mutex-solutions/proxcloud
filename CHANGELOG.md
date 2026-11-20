@@ -7,7 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Findings of the lab drill of `v0.10.1-rc.1` (2026-11-20: the first real move of a seed's k3s across a minor and the
+first real replacement of a platform cluster's machine). Part "seed" passed; part "platform" stopped after the
+control plane's unit. The chart change needs the tag `proxmox-kamaji-cluster-v0.1.16` and the BOM pin that follows
+it; the BOM of `main` still pins 0.1.15.
+
 ### Fixed
+
+- **A platform with one control plane machine got no further than the control plane's unit of a replacement of its
+  machines.** Cluster API deletes a Machine's Node object last and gives up once the Machine has been in deletion for
+  longer than `nodeDeletionTimeoutSeconds`, 10 seconds by its default, which the drain alone uses up; with one
+  control plane machine the delete also falls into the gap in which the API address moves to the new machine (65
+  seconds on the lab; the kube-vip lease is 60). The Node of the old machine stayed, NotReady, with no Machine; the
+  run's wait between two units counted five Nodes for four machines and ended in `nodes_timeout` after 30 minutes,
+  and so did every Retry. Both sides are corrected:
+  - **Cluster chart `proxmox-kamaji-cluster` 0.1.16** reads `nodeDeletionTimeoutSeconds` (default 1800) and renders
+    `deletion.nodeDeletionTimeoutSeconds` on the `KubeadmControlPlane`'s machine template and on every
+    `MachineDeployment`'s (the v1beta2 paths of Cluster API v1.14.4), so the delete is tried again until the API
+    answers. 1800 and not 0 (no limit): a Machine of a cluster whose API never answers again would otherwise never
+    be removed. Cluster API copies the value to the machines in place, also to one already in deletion, and leaves it
+    out of its rollout decision: no machine is replaced for it, and no machine or bootstrap template changes its
+    name. The run's check before a sync (`unexpected_rollout`) compares without the value as long as the live
+    Application renders none, because ArgoCD reports only Synced or OutOfSync per object; a render test holds the
+    chart to "this value and nothing else" (`TestNodeDeletionTimeoutChangesNoMachine`), and the release check of the
+    BOM pairs (`TestUpgradeRollsNoMachine`) passes unchanged. A negative value renders nothing, the render of 0.1.15.
+    The kube-vip lease stays at 60, 40 and 5 seconds: a changed lease replaces every control plane machine, and a
+    shorter one drops a single control plane's own address whenever its etcd is slow.
+  - **The run deletes a Node no Machine owns.** In the wait between two units and in stage 9, a Node of the platform
+    cluster that is not Ready, that Cluster API joined for a Machine of this cluster which is gone, and that no
+    Machine or ProxmoxMachine names by `status.nodeRef`, by its own name or by its VM's provider id, is deleted
+    through the platform cluster's API (the admin kubeconfig Cluster API keeps on the seed; no Proxmox call and no
+    new privilege), only while its uid is the one that was read. The stage's item `node/<name>` and its message name
+    it. A Node that a Machine owns is never deleted. **A site that stood in this wait gets out with one Retry.**
+    `nodes_timeout` now names every node that is not Ready, or all of them when only the count is off.
+- **An upgrade whose machines are being replaced continues under a later release's BOM.** After a run toward a
+  target has started, an apply without a target went on to that target, and a later release's BOM could take its
+  place only when named and confirmed. Now, while the
+  replacement has begun and a unit is still to be replaced, a later release whose BOM names the same Kubernetes
+  version, node image, kube-vip and k3s as the unfinished target (only the product's own charts and the release
+  differ, and the installed BOM may move to it too) takes the target's place by itself: Retry goes on under it with
+  nothing to confirm, `status.targetBom` becomes the new BOM, the step is kept, the units already replaced render as
+  they are and the rest with the new cluster chart. The plan's `upgrade.carried` names the target it replaced. A
+  later BOM that changes the Kubernetes version, node image or k3s again is not taken while the replacement runs:
+  Retry goes on to the unfinished target, and naming the new BOM is `409 upgrade_refused` with the reason. Before
+  the replacement has begun and after its last unit nothing changes.
+- **Stage `seed-k3s` can give its job back and record its failure.** The job store took only `a-z` and `_` in a
+  classification code, and the stage's codes carry a digit (`waiting_seed_k3s`, `seed_k3s_failed`,
+  `seed_k3s_refused`, `seed_k3s_timeout`): the stage could not defer, so it looked once a minute where it means to
+  look every 15 seconds and spent one of the job's attempts per look, and a failed or refused k3s upgrade could not
+  be recorded under its own code. The store's rule (`durablejobs.ValidCode`) now allows digits after a first letter;
+  nothing read more into a code than equality. One test passes every code a stage can end or wait with through that
+  rule, read from the source so a new code cannot be left out, and the test double of the job store refuses what
+  the real one refuses.
+- **The seed's etcd snapshot is recorded by its real name.** The Job of stage `seed-k3s` saves
+  `pre-upgrade-<old version>-<node>-<time>` and was deleted with the only log that named it. The stage now reads
+  k3s's own list (`ETCDSnapshotFile`) before it drops the Job and keeps the path in `status.seed.preUpgradeSnapshot`,
+  in the finished stage's message and in the item `etcd-snapshot`, with the command that deletes it later.
+- **An import that is tried again says so.** The `images` stage's item showed `uploading` for as long as the
+  import's job needed, also through tries that Proxmox answered with an error. It now says which try runs and the
+  code the one before ended with.
+- **The Check has a row `nodes`.** It warns, by name, about a node of the platform cluster that is not Ready, and
+  says of a Node no Machine owns that the next apply deletes it. Never a failure, so the run that repairs it can
+  start. The Check was `ok` with such a Node in the cluster.
+- **Template updates lists no VMID twice.** A template that was deleted leaves its receipt as a `template_missing`
+  row; when a new import got the freed VMID, the page showed that VMID for both. The old row now names no VMID once
+  another guest holds it, with a warning that says which one it was.
+
+### Changed
+
+- **The guide gives the figures of the `v0.10.1-rc.1` drill**, each marked as one lab's sample: the node image
+  import 11 to 19 minutes per node and able to stall etcd for seconds on a shared disk; the seed's API away for 43
+  seconds in stage 5a; for the control plane's unit a clone of 6 minutes 5 seconds, the platform API away for up to
+  2 minutes 21 seconds during the clone on the control plane's own node and for 65 seconds at the hand-over, a
+  tenant API look failing for 13 seconds at most and the database not at all. `nodes_timeout` is listed for stage 7
+  as well, with what Retry does now. Not shown on a lab yet: the units `system`, `kamaji` and `dbaas`, the Retry out
+  of the leftover Node on a real cluster, and the continuation under a later BOM.
 
 - **A network with host bits is refused where it ends in a Kubernetes field.** Kubernetes 1.36 refuses a new or
   changed CIDR with host bits (`192.168.0.5/24`), a leading zero or an IPv4-mapped IPv6 address in

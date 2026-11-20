@@ -4,6 +4,28 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-20: a Node no Machine owns, an upgrade carried under a later BOM, codes with digits
+
+**What changed:** no component or container. Component "Platform runs": the wait for the platform cluster's nodes
+(`acq.nodes`, used between two units of a roll and in stage 9) deletes a Node that is not Ready and that no Machine
+owns (`orphanNodes`; `kamajik8s.Client.DeleteNode` with a uid precondition, through the platform cluster's API), and
+`NodesCheck` gives the preflight a row `nodes` (the admin handler opens the two clusters with `RollClients`).
+`move` lets this build's BOM take the place of the unfinished target while a roll still has a unit to replace, when
+the two differ only in the product's own charts and the release (`carries`; `Upgrade.Carried`). `rolloutGate` lets
+ArgoCD compare a render that carries the cluster chart's `nodeDeletionTimeoutSeconds` as the live Application has it
+(`gateRender`). Stage `seed-k3s` records the etcd snapshot's path (`status.seed.preUpgradeSnapshot`), stage `images`
+reads a job's tries (`Imports.JobTries`). Component "Durable jobs": `ValidCode` is the exported rule of a
+classification code and allows digits. Helm chart `proxmox-kamaji-cluster` 0.1.16 renders
+`deletion.nodeDeletionTimeoutSeconds` on the control plane and on every MachineDeployment. "Template updates": a
+`template_missing` row names no VMID another guest holds.
+
+**Why:** the lab drill of `v0.10.1-rc.1`: with one control plane machine Cluster API left the old machine's Node
+behind (its 10 seconds for the delete end inside the hand-over of the API address) and the run waited for a node
+count that could not come true; the seed stage's codes carry a digit the job store refused; a site that stands in
+the middle of a roll needs the corrected chart without starting over.
+
+**Diagrams:** none.
+
 ## 2026-11-20: one CIDR rule for values that end in a Kubernetes field; quiet audit rows; the server row's identity
 
 **What changed:** no component or container. A shared rule, `cloud.StrictCIDRs` (`internal/cloud/cidr.go`), is used

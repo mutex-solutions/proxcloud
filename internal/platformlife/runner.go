@@ -45,6 +45,7 @@ type RunState interface {
 type Imports interface {
 	ByKey(ctx context.Context, serviceID, node, digest string) ([]templateupdates.Receipt, error)
 	JobState(ctx context.Context, id string) (string, error)
+	JobTries(ctx context.Context, id string) (attempts int, lastCode string)
 	EnqueueVM(ctx context.Context, req templateupdates.VMRequest, actor string) (*templateupdates.Receipt, error)
 	MarkTemplateGone(ctx context.Context, pvFor templateupdates.PVEResolver, id string) error
 }
@@ -250,6 +251,8 @@ type acq struct {
 	rolls        bool // the move from from to bom replaces the platform cluster's machines (roll.go)
 	portal, capi *pve.Client
 	si           int // the stage being run
+	// doneNote is what the stage being run leaves as its message when it ends done (a finished stage has none otherwise).
+	doneNote string
 }
 
 var (
@@ -444,8 +447,9 @@ func (x *acq) stage(ctx context.Context) (end, bool) {
 	if err == nil {
 		err = x.saveStage(ctx, func(s *Stage) {
 			fin := time.Now().UTC()
-			s.State, s.FinishedAt, s.Code, s.Message, s.Refused = state, &fin, "", "", 0
+			s.State, s.FinishedAt, s.Code, s.Message, s.Refused = state, &fin, "", x.doneNote, 0
 		})
+		x.doneNote = ""
 	}
 	if err != nil {
 		return x.ended(ctx, err), true

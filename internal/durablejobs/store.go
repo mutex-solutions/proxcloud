@@ -143,7 +143,7 @@ func (s *Store) ClaimDead(ctx context.Context, id string, ttl time.Duration) (*J
 // Fail ends an external-kind acquisition with a FIXED classification code (never a provider
 // error string): permanent → dead now; otherwise pending again after delay (bounded by attempts).
 func (s *Store) Fail(ctx context.Context, j *Job, delay time.Duration, permanent bool, code string) error {
-	if delay < 0 || delay > time.Hour || !failCodeRE(code) {
+	if delay < 0 || delay > time.Hour || !ValidCode(code) {
 		return errors.New("invalid failure")
 	}
 	return s.db.WithTx(ctx, func(tc context.Context) error {
@@ -169,7 +169,7 @@ func (s *Store) Fail(ctx context.Context, j *Job, delay time.Duration, permanent
 // that is a failure of the job, so only a crash re-claim spends an attempt. Fenced like Fail; code
 // is a fixed classification.
 func (s *Store) Defer(ctx context.Context, j *Job, delay time.Duration, code string) error {
-	if delay < 0 || delay > time.Hour || !failCodeRE(code) || !External(j.Kind) {
+	if delay < 0 || delay > time.Hour || !ValidCode(code) || !External(j.Kind) {
 		return errors.New("invalid deferral")
 	}
 	return s.db.WithTx(ctx, func(tc context.Context) error {
@@ -187,12 +187,16 @@ func (s *Store) Defer(ctx context.Context, j *Job, delay time.Duration, code str
 	})
 }
 
-func failCodeRE(code string) bool {
-	if code == "" || len(code) > 64 {
+// ValidCode is the rule of every classification code Fail and Defer store in last_error: 1 to 64 characters of a-z,
+// 0-9 and "_", starting with a letter. It keeps provider text and free-form messages out of the column; nothing reads
+// more into a code than equality. Digits are allowed because a code is built from names that carry them (the platform
+// run's stage seed-k3s: waiting_seed_k3s, seed_k3s_failed); a caller's test passes its codes through this function.
+func ValidCode(code string) bool {
+	if code == "" || len(code) > 64 || code[0] < 'a' || code[0] > 'z' {
 		return false
 	}
 	for _, c := range code {
-		if !(c >= 'a' && c <= 'z' || c == '_') {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_') {
 			return false
 		}
 	}

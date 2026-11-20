@@ -579,7 +579,7 @@ func (x *acq) roll(ctx context.Context, seed *kamajik8s.Client, templates []Stag
 		}
 		// ponytail: the tenants are waited for between two units, not between two machines of one MachineDeployment
 		// (Cluster API waits for the new node only). minReadySeconds on the MachineDeployment is the upgrade path.
-		if err := apiAway(x.nodes(ctx, wl)); err != nil {
+		if err := apiAway(x.nodes(ctx, seed, wl)); err != nil {
 			return err
 		}
 		if err := apiAway(x.tenantGate(ctx, wl, false)); err != nil {

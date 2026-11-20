@@ -6,6 +6,15 @@
 # -- Kubernetes version of the control plane and the workers, without the leading v.
 kubernetesVersion: "1.35.10"
 
+# -- Seconds Cluster API keeps trying to delete the Node object of a Machine it removes, counted from the moment the
+# Machine is marked for deletion (from chart 0.1.16; on the KubeadmControlPlane's machine template in kubeadm mode and
+# on every MachineDeployment's). Cluster API's own default is 10. With one control plane machine the try falls into the
+# gap in which the address moves to the new machine (about a minute: the kube-vip lease), and the drain before it
+# counts too, so 10 seconds leave the Node behind for good. 0 = try without limit: then a Machine whose cluster's API
+# never answers again is never removed. A negative value renders no timeout (the objects of chart 0.1.15). Cluster API
+# changes the value on the Machines in place: no machine is replaced for it.
+nodeDeletionTimeoutSeconds: 1800
+
 # -- Secret with url, token and secret: the per-cluster PVE token CAPMOX runs under. Management side only.
 cloudCredentialsSecretName: example-cloud-config
 

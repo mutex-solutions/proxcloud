@@ -5,6 +5,7 @@ package platformlife
 // then acts, so a stage resumed after a crash, a lost lease or a Defer continues from what exists.
 
 import (
+	"cmp"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -173,6 +174,11 @@ func (x *acq) image(ctx context.Context, node string, img VMImage, rows []pve.Cl
 				return "", 0, permanent(CodeImageImportFailed, "The import of %s on %s failed: %s %s", img.Tag, node, rec.Code, clip(rec.Message))
 			}
 		default:
+			// An import that is tried again shows it: the step alone stands still for as long as the tries take.
+			if n, code := x.r.Imports.JobTries(ctx, rec.ID); n > 1 {
+				*note = fmt.Sprintf("Try %d of the import; the one before ended with %s. The API log has what Proxmox answered (\"template update attempt failed\").",
+					n, cmp.Or(code, "no recorded code"))
+			}
 			return string(rec.Step), 0, nil
 		}
 	}

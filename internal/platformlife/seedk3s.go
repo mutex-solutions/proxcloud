@@ -6,6 +6,7 @@ package platformlife
 // upgrade is the binary and a restart. Never run on a lab: docs/managed-services.md lists what a lab must show.
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"maps"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 )
 
@@ -185,6 +187,10 @@ func (x *acq) seedK3s(ctx context.Context) error {
 		case !count("succeeded") && !count("failed"):
 			return waiting(TimeoutCode(stageSeedK3s), "The seed runs k3s %s; the Job %s/%s has not reported its end yet.", target, ns, name)
 		}
+		// Before the Job goes: its log is the only other place that names the snapshot it saved.
+		if err := x.noteSnapshot(ctx, seed); err != nil {
+			return err
+		}
 		return drop()
 	}
 	if why := k3sStep(live, target); why != "" {
@@ -236,6 +242,39 @@ func (x *acq) seedK3s(ctx context.Context) error {
 		return waiting(TimeoutCode(stageSeedK3s), "The Job %s/%s ended and k3s was restarted; the seed's node still reports k3s %s.", ns, name, live)
 	}
 	return waiting(TimeoutCode(stageSeedK3s), "The Job %s/%s runs; the seed's node reports k3s %s.", ns, name, live)
+}
+
+// noteSnapshot records the etcd snapshot the upgrade Job saved, by its real name: on the installation
+// (status.seed.preUpgradeSnapshot, the file's path on the seed), as an item of the stage and as the finished stage's
+// message. k3s lists every snapshot as an ETCDSnapshotFile object; the Job's is the newest whose name begins with
+// "pre-upgrade-". The way back (seedK3sWayBack) and a later `k3s etcd-snapshot delete` need the name, and the Job with
+// its log is deleted next. A list that cannot be read does not hold the stage: the item then says so.
+func (x *acq) noteSnapshot(ctx context.Context, seed *kamajik8s.Client) error {
+	item := StageItem{ID: "etcd-snapshot", State: "unknown", Message: "The snapshot the Job saved could not be read from the seed; it is the newest file " +
+		k3sSnapshots + "/pre-upgrade-* on the seed."}
+	path := ""
+	if files, err := seed.ListCRsAllNamespaces(ctx, "k3s.cattle.io", "v1", "etcdsnapshotfiles", ""); err == nil {
+		newest := ""
+		for _, f := range files {
+			name, at := str(f, "spec", "snapshotName"), cmp.Or(str(f, "status", "creationTime"), str(f, "metadata", "creationTimestamp"))
+			if !strings.HasPrefix(name, "pre-upgrade-") || at < newest {
+				continue
+			}
+			newest, path = at, cmp.Or(strings.TrimPrefix(str(f, "spec", "location"), "file://"), k3sSnapshots+"/"+name)
+			item = StageItem{ID: "etcd-snapshot", State: "saved", Message: clip(fmt.Sprintf("%s on the seed, saved %s before k3s was replaced (%s bytes). "+
+				"k3s prunes no snapshot saved on demand: delete it with `k3s etcd-snapshot delete %s` once the upgrade has held.", path, at, cmp.Or(str(f, "status", "size"), "?"), name))}
+		}
+	}
+	x.doneNote = "etcd snapshot: " + item.Message
+	if err := x.saveStage(ctx, func(s *Stage) {
+		s.Items = append(slices.DeleteFunc(s.Items, func(i StageItem) bool { return i.ID == item.ID }), item)
+	}); err != nil {
+		return err
+	}
+	if path == "" || x.in.Status.Seed.PreUpgradeSnapshot == path {
+		return nil
+	}
+	return x.record(ctx, func(_ *Run, in *Installation, _ *Secrets) { in.Status.Seed.PreUpgradeSnapshot = path })
 }
 
 // SeedBackupAge is how old the newest backup of the seed VM may be for an upgrade that replaces the seed's k3s.
