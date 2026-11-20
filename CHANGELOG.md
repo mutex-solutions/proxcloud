@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Findings of the second lab drill of `v0.10.1` (candidate `v0.10.1-rc.2`, 2026-11-20 and 21): one Retry got the
+platform the first drill had left out of its wait, the units `system`, `kamaji` and `dbaas` were replaced, and the
+platform cluster ended on Kubernetes 1.36.6. No chart changes with these corrections.
+
+### Fixed
+
+- **The wait for the tenants between two units of a replacement of machines did not hold after the `kamaji`
+  unit.** It read the health ArgoCD shows for a tenant's Application and the status of the TenantControlPlane, both
+  written by controllers the unit's drain evicts together with the tenant's control plane (Kamaji runs on the same
+  machine). On the drill they still said Healthy and Ready 76 seconds after the drain; the run stored the next step
+  and cloned the `dbaas` unit's machine while the only tenant API server was away for another 5 minutes 38 seconds.
+  The wait (`tenants_unhealthy`, stage 7 between two units and stage 9 after every wave: one function) now also
+  reads what the platform cluster's controller manager and kubelets write: per tenant control plane the Deployment
+  Kamaji runs it as (available replicas against replicas, its last change observed; a missing Deployment counts as
+  away), per database its instance pods that are Ready against `spec.instances` (not the Cluster's own status, which
+  the CloudNativePG operator writes), and every Deployment in the namespaces of the Kamaji and CloudNativePG
+  operators. The message names each object that is away, the stage's deadline ends the wait under the same code,
+  and a Retry waits again. What was away before the upgrade is still noted once (`status.tenantsDownBefore`) and
+  not waited for: a Deployment and a database by name, since their counts move, and also when a note taken by an
+  earlier release names only the tenant's TenantControlPlane or Application. Tests hold a tenant control plane and
+  a database whose status and Application stay Ready and Healthy while the Deployment has no available replica and
+  the pod is gone, as on the lab. Not run on a lab.
+- **A run keeps the item of a Node it deleted, and the deletion is in the audit log.** The item `node/<name>`
+  (state `deleted`) was dropped by the next write of the stage's items, in the roll and in stage 9, so the stored
+  run of the drill no longer said that it had deleted a Node; one log line was the only trace. The item now stays
+  until the run ends, and each deletion writes an audit entry: `DELETE` on the installation, by the run, with the
+  Node's name and the reason.
+- **Releasing a tenant cluster's Proxmox token removes the token's ACL rows first.** Proxmox keeps the rows of a
+  deleted token as dead `acl:` lines in `user.cfg` until the file is next written and warns at every `pveum`, `qm`
+  and `pvesh` call ("ignore invalid acl token"): six lines stayed on the lab. Every token delete
+  (`DeleteAPIToken`: the cluster token and an older cluster's CSI token) now lists the ACL and removes the rows
+  whose principal is exactly that token, then deletes the token. No new privilege: the rows are on the paths the
+  portal token wrote them on at the mint. A row that cannot be read or removed does not hold the revoke. Lines an
+  earlier release left go at the next `pveum` change. Tested against a model of Proxmox that keeps a deleted token's
+  rows; not run on a cluster.
+- **A database that waits for room says so.** A create is accepted when no database node has the CPU or memory
+  for it, and the database then read PROGRESSING without a reason (12 minutes on the lab, until another database
+  was deleted). While a pod of the database cannot be scheduled, its row carries the scheduler's sentence in
+  `database.status_message` ("Waiting for room on the database nodes: pod ... cannot be scheduled (0/4 nodes are
+  available: 1 Insufficient cpu, ...)"), and the tenant's database page shows it under the status. The create is
+  still not refused: nothing counts the room beforehand.
+
+### Changed
+
+- **The guide gives the figures of both drills of `v0.10.1`**, as one lab's sample: the platform API away for 88
+  seconds during the control plane's clone and 65 seconds at the hand-over; the operators away for 3 to 5 minutes
+  in the `system` unit, with the service addresses moving in seconds; every tenant API server away for 6 minutes
+  54 seconds in the `kamaji` unit; the database away for 4 minutes 8 seconds in the `dbaas` unit. It says why the
+  two stateful gaps are minutes (the CSI node plugin of a new node registers after the node is Ready and the old
+  machine is drained: a known issue, not shortened by this release), that a clone on the control plane's node is
+  felt, that stage 10 offers the new Kubernetes version to tenants only after the operator has smoke-tested and
+  published the node image in Template updates, that the old `ProxmoxMachineTemplate` objects stay on the seed
+  (harmless), that the VM ids of replaced machines are used again, possibly on another node, what a Pause leaves
+  (the Application `pc-platform` without automated sync until Resume) and that one Retry gets a platform out that
+  stood after the control plane's unit on `v0.10.1-rc.1`.
+
 Findings of the lab drill of `v0.10.1-rc.1` (2026-11-20: the first real move of a seed's k3s across a minor and the
 first real replacement of a platform cluster's machine). Part "seed" passed; part "platform" stopped after the
 control plane's unit. The corrected chart is published from the tag `proxmox-kamaji-cluster-v0.1.16`, and the BOM

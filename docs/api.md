@@ -977,12 +977,14 @@ are several, `errors.details.problems`.
   (`tenants`, one item per machine, `cluster`, `volume-<name>`, `volumes`,
   `vm-<vmid>`, `cds`, `secrets`). A stage keeps its items when it is done.
   On a run that replaces machines stage 7 has `progress` `step n of m`, one item per machine with its unit and
-  where it stands, and the receipt field `rollChecked` (the last step whose comparison was read).
+  where it stands, and the receipt field `rollChecked` (the last step whose comparison was read). A Node object
+  the run deleted because no Machine owned it is the item `node/<name>` with state `deleted`, kept until the run
+  ends; the audit log has an entry for it.
   Stage 9 fails with `argocd_address_unavailable` when the spec names an ArgoCD address and MetalLB did not give it
   to the platform cluster's `argocd-server` Service before the wave's deadline; the message names the Service that
   holds it when one does.
   An upgrade run has `fromBom`; its codes `unexpected_rollout`, `capacity_short` and `rollout_stalled` (stage 7) and
-  `tenants_unhealthy` (stage 9) are in
+  `tenants_unhealthy` (stage 9, and stage 7 between two units of a replacement of machines) are in
   [managed-services.md](managed-services.md#upgrade-between-boms).
   A Kubernetes `401` or `403` from the seed or the platform cluster is counted
   in `retries` and tried again, because an API server answers so while it

@@ -284,12 +284,12 @@ Until the release the token is listed in Proxmox with its ACL rows
 (`ProxCloudCAPI` on the project pool, the boot store, the vnet and `/nodes`).
 Its secret lives only in a Secret of the cluster's namespace on the management
 cluster, which the cascade deletes, so what is left is a credential nobody
-holds, not one in use. Proxmox stops honouring the
-token's ACL rows at the revoke, but leaves their lines in `/etc/pve/user.cfg`
-until that file is next written; until then every `pveum`, `qm` and `pvesh`
-call on a node prints `user config - ignore invalid acl token
-'capmox@pve!<clusterId>'`, once per row. It is harmless, and `pveum acl list`
-shows the rows gone at once.
+holds, not one in use. The revoke removes the token's own ACL rows before the
+token. A token deleted by a release up to v0.10.1-rc.2 left their lines in
+`/etc/pve/user.cfg` until that file was next written; until then every `pveum`,
+`qm` and `pvesh` call on a node prints `user config - ignore invalid acl token
+'capmox@pve!<clusterId>'`, once per row. It is harmless, and any `pveum` change
+drops the lines ([proxmox-permissions.md](proxmox-permissions.md)).
 
 Project teardown also removes the `pc-*` namespace of a project that never had a
 cluster, once nothing is pending and no Application of the project is left.

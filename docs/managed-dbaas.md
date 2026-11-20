@@ -359,6 +359,14 @@ Application CR is readable by anyone with argocd read).
 - **Endpoint stuck pending** — `kubectl -n pc-<project> get svc <id>-lb`; empty
   `EXTERNAL-IP` → MetalLB (events on the Service; an exhausted or misnamed
   `config.database.lbAddressPool` parks the Service `<pending>`).
+- **Database stays PROGRESSING with "Waiting for room on the database nodes"** — a pod of the
+  database cannot be scheduled: no database node has the CPU or memory its size asks for
+  (requests equal limits, at least 1 CPU). A create is not refused for it; the database's row
+  carries the scheduler's sentence in `database.status_message` (the tenant's database page
+  shows it under the status), for example `0/4 nodes are available: 1 Insufficient cpu, ...`.
+  The pod starts by itself once room is free: delete or shrink another database, or add a
+  machine to the group. The field is absent while every pod has a node and once the database
+  is READY. Nothing counts the room before a create.
 - **Replica pod Pending** — the zone anti-affinity is a hard rule; fewer zones than
   `instances` leaves the surplus pod unschedulable. Add a zone, lower the replica count or set
   `config.database.scheduling.zoneKey` to a key the nodes do vary on.
