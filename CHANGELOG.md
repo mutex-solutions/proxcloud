@@ -436,7 +436,7 @@ of the candidate `0.10.1-rc.2` pins it (below).
 
 The second release candidate of 0.10.1, published as a prerelease and never as `latest`. It is not the release:
 `v0.10.0` stays the current stable release, and the chart, the installer and the Compose default still name it. It
-holds what is under Unreleased above: the corrections of the lab drill of `v0.10.1-rc.1` (#402) next to what that
+holds what is under 0.10.1 above: the corrections of the lab drill of `v0.10.1-rc.1` (#402) next to what that
 candidate held (#397, #398, #399). It exists so that the lab that stands in the middle of that drill can go on, and
 so that the whole replacement can be run on the corrected code: nothing of it had run on a lab when it was tagged.
 The entries above are not repeated here. Not for a production site.
@@ -466,7 +466,7 @@ The entries above are not repeated here. Not for a production site.
   after the control plane's unit: Cluster API gave up deleting the old machine's Node after its default 10 seconds,
   inside the 65 seconds in which the API address moves to the new machine (the kube-vip lease is 60), and the run
   waited for a node count that could not come true (`nodes_timeout`, and again at Retry).
-- **What rc.2 changes** (#402, in detail under Unreleased): cluster chart 0.1.16 sets
+- **What rc.2 changes** (#402, in detail under 0.10.1): cluster chart 0.1.16 sets
   `nodeDeletionTimeoutSeconds` to 1800 on the control plane's and every node group's machines, with no machine
   replaced for it; the run deletes a Node that is not Ready and that no Machine owns, so a site that stands in that
   wait gets out with one Retry; a replacement of the machines that has begun continues under a later BOM that
@@ -531,7 +531,7 @@ BOM, one run on one lab:
 
 The first release candidate of 0.10.1, published as a prerelease and never as `latest`. It is not the release:
 `v0.10.0` stays the current stable release, and the chart, the installer and the Compose default still name it. It
-holds what is under Unreleased above (#397, #398, #399), and it exists so that a lab can run the first upgrade that
+holds what is under 0.10.1 above (#397, #398, #399), and it exists so that a lab can run the first upgrade that
 moves Kubernetes: nothing of it had run on a lab when it was tagged. The entries above are not repeated here. Not
 for a production site.
 
