@@ -2106,6 +2106,7 @@ lists every difference. The upgrade is allowed when every difference is one of t
 | platform cluster `platform` (chart `proxcloud-platform`) | chart | The Application moves to the new chart version. ArgoCD syncs what the new chart renders differently of provider RBAC, tenant AppProjects and the MetalLB pool |
 | seed `pc-platform` (chart `proxmox-kamaji-cluster`) | chart | The Application moves to the new chart version. ArgoCD syncs the Cluster API objects of the platform cluster that the new chart renders differently, after the check that no machine is replaced (below). On a move that replaces machines it moves with the first step of the roll |
 | `kubernetes.version` (the same, a newer patch or exactly one minor up), `kubernetes.nodeImage`, and `images.kubeVip` together with a new node image, when the target's cluster chart is 0.1.15 or newer and the installation uses the BOM's node image | machines | Cluster API replaces every machine of the platform cluster, ordered by the run ([The platform cluster's machines](#the-platform-clusters-machines)). The plan then begins with the line that there is no way back and has one row `roll/<unit>` per unit with what stops meanwhile, and one row `roll-vm/<unit>` of kind `site` with what is made and deleted on Proxmox |
+| seed and platform cluster `cert-manager` (chart `cert-manager` of the chart mirror), in an upgrade with no `seed.k3s` and no `machines` row | chart | The Application moves to the new chart version in the component's wave (1 on both clusters). ArgoCD applies the CRDs in place (the chart renders them with `crds.enabled: true`; `v1` stays the only version) and removes what the new chart no longer renders. The controller, cainjector and webhook Deployments roll together, each keeping its old pod until the new one is Ready. The wave waits for the Application to be Synced and Healthy and for its sync to have Succeeded, which includes the chart's `startupapicheck` Job (a dry-run Certificate against the webhook). Certificates and their Secrets stay. No machine is replaced, nothing is written on Proxmox and no seed backup is asked for. See [A cert-manager move](#a-cert-manager-move) |
 | `seed.k3s`, to a version that is newer by a patch, by a k3s build (`+k3s2` after `+k3s1`) or by exactly one minor | seed | Stage 5a replaces the k3s binary on the running seed VM and restarts k3s ([The seed's k3s](#the-seeds-k3s)). With it the plan lists four rows of kind `site`, what the stage writes on the seed: the Job, the etcd snapshot, the k3s config drop-in without leader election and the binary (its row gives the way back by hand) |
 
 One more row can be in the plan that is not a difference of the two BOMs: `pve-api-rule`, kind
@@ -2130,8 +2131,44 @@ the new version while its last sync and its history still name the old one; that
 having landed, not a failure. Seen on the lab on 2026-11-19 (0.8.0 to 0.9.0-rc.1): of the four
 chart moves only `platform` was synced, and no clusterctl hook ran.
 
-A chart of the product moves only to a version whose BOM entry lists the installed version in
-`upgradeFrom`: the release checked that pair ([ci-release.md](ci-release.md#what-a-release-checks-about-its-bom-pairs)).
+A chart of the product, and cert-manager, moves only to a version whose BOM entry lists the installed
+version in `upgradeFrom`: the release checked that pair ([ci-release.md](ci-release.md#what-a-release-checks-about-its-bom-pairs);
+for cert-manager the release read upstream's upgrade notes for that pair and compared the render,
+`TestCertManagerMoveRenders`).
+
+#### A cert-manager move
+
+cert-manager is the one third-party chart an upgrade moves, on the seed and on the platform cluster,
+and only in an upgrade that changes no k3s, Kubernetes version or node image. The seed's charts sync
+in stage 6, after the seed's k3s (stage 5a), and the platform cluster's in stage 9, after the roll: in
+one run the old chart would meet the new Kubernetes first. A release that moves cert-manager next to
+such a change refuses the upgrade with one line per cert-manager row: "not supported by this release:
+a third-party chart moves only in an upgrade that changes no k3s, Kubernetes version or node image,
+and this one also changes …. First finish an upgrade to a release with this one's Kubernetes version
+(…), k3s (…) and node image (…), with that release's build, then start this one". Upgrade with the
+build of that release first (its BOM is the target an apply of that build offers), then with this one.
+
+There is no way back: a platform does not go back to a BOM it left, and cert-manager documents no
+downgrade. Its upgrade guide advises a backup of the cert-manager resources first; on the seed and on
+the platform cluster:
+
+```sh
+kubectl get certificates,issuers,clusterissuers -A -o yaml > cert-manager-backup.yaml
+```
+
+Read the preflight row `certificates` before and after ([api.md](api.md)): it is `ok` when the three
+cert-manager Deployments are available on both clusters and every Certificate is Ready, and a warning
+that names each one that is not. It never fails and no run waits on it, so a Certificate that was not
+Ready before the upgrade (an Issuer removed by hand) does not hold the run; fix it on its own. A
+Certificate that is not Ready keeps the certificate its Secret holds until a new one is issued. The run's
+own gate is the wave: if the chart's `startupapicheck` fails, the sync fails; the run starts it once
+more, and when that one fails too the stage fails `component_unhealthy` with what the sync failed on.
+Retry walks the waves again; cert-manager is recorded at its new version (`status.components`) only
+after its wave passed.
+
+Tested against a fake seed and a fake platform cluster only: the run's ArgoCD sync, the server-side
+apply of the CRDs, the `startupapicheck` Job and the rolling update are ArgoCD's and Kubernetes', and
+have not run on a lab. Whether a move issues any Certificate again is not measured.
 
 The rest of this subsection is the record of the moves to the BOM of 0.10.0 and the ones before
 it, none of which replaced a machine. The plan to the BOM with Kubernetes 1.36.6 holds the same
@@ -2169,7 +2206,9 @@ Every other difference refuses the whole upgrade, each with its own line in the 
 | `seed.k3s` at the same version with another sha256 or URL | A published k3s version does not change |
 | `images.kubeVip` without a new node image | It is in the control plane's machine spec: the control plane machine would be replaced. kube-vip moves only together with a new node image, when the control plane is replaced anyway |
 | `images.clusterctl`, `capi.seed.*`, `capi.workload.*` | The Cluster API providers are upgraded (`clusterctl upgrade`) only by a later release |
-| A third-party chart: `argocd`, `cert-manager`, `cilium`, `metallb`, `cnpg`, `proxmox-csi`, `kamaji-crds`, `kamaji`, `kamaji-etcd` | Not in this release. Each restarts something tenants use (the CNI, the load balancer speaker, every database's operator, every tenant control plane's datastore), and none of those restarts has been measured |
+| A third-party chart but cert-manager: `argocd`, `cilium`, `metallb`, `cnpg`, `proxmox-csi`, `kamaji-crds`, `kamaji`, `kamaji-etcd`, even when its entry has `upgradeFrom` | Not in this release. Each restarts something tenants use (the CNI, the load balancer speaker, every database's operator, every tenant control plane's datastore), and none of those restarts has been measured |
+| `cert-manager` in an upgrade that also has a `seed.k3s` or `machines` row | "a third-party chart moves only in an upgrade that changes no k3s, Kubernetes version or node image" ([A cert-manager move](#a-cert-manager-move)) |
+| `cert-manager` at a version that does not list the installed one in `upgradeFrom`, or the same version with another digest | As for a chart of the product |
 | A chart of the product at a version that does not list the installed one in `upgradeFrom`, or the same version with another digest | The release did not check that move |
 | A component added or removed, or changed in its wave, install mode, namespace, node group, chart source or values | A run moves only a chart version |
 | The target's `release` ends in `-dev` | No later build carries a development BOM, so the platform could afterwards be applied by that one build alone |

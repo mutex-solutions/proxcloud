@@ -691,7 +691,8 @@ pair is a previous BOM under `deploy/platform/previous/` and the BOM of the
 commit. `platformlife.Classify` decides per pair whether the move is allowed:
 the release line, the tenant charts and the versions of the product's own
 charts may differ, and so may the seed's k3s and the Kubernetes version with
-its node image, each by a patch or by one minor up. `go test
+its node image, each by a patch or by one minor up; and cert-manager's version,
+in a pair that changes no k3s, Kubernetes version or node image. `go test
 ./internal/platformlife` holds the rest:
 
 - **`upgradeFrom` is a statement the release makes.** A component of the
@@ -728,10 +729,22 @@ its node image, each by a patch or by one minor up. `go test
   test also fails when step 0 already renders the target's machines. The steps
   after 0 are `TestRollRendersOneUnitAtATime`'s. The comparison of a pair that
   replaces no machine is unchanged.
+- **A cert-manager move was read (`TestCertManagerMoveRenders`).** Every
+  cert-manager row a pair allows must be a move listed in `certManagerReads`
+  (`upgrade_chart_test.go`), where the release records what it read in
+  upstream's upgrade notes for that pair. The test pulls both chart versions
+  (from the chart mirror by the BOM's digest; a version no BOM pins yet from
+  upstream by its index digest), renders each with the values a run gives the
+  seed's and the platform cluster's Application at the BOM's Kubernetes
+  version, requires every CRD at the one version `v1`, served and stored, and
+  the objects the new chart stops and starts rendering to be exactly the ones
+  listed. List the old version in cert-manager's `upgradeFrom` only with such
+  an entry.
 - **The plan as the operator reads it (`TestUpgradePlanGolden`).** Goldens under
   `testdata/upgrade/0.8.1-to-<case>/plan.golden.json`: 0.8.1 to a next release
   with the own charts bumped (allowed), with a third-party chart or a node image
-  bumped next to them (refused). They are fixtures, built from the 0.8.1 BOM, and
+  bumped next to them (refused), with cert-manager alone (allowed) and with
+  cert-manager next to a k3s or a node image move (refused). They are fixtures, built from the 0.8.1 BOM, and
   do not move with the BOM on `main`. `TestClassifyRefuses` has one case per kind
   of refused entry.
 - **A `-dev` BOM is never a target.** The BOM on `main` is refused as a target
@@ -753,10 +766,14 @@ What a release must do when it changes a pin, before its tag:
    `TestBOMMatchesInstallerVersions` lets them stay up to one minor behind the
    BOM and never ahead of it (the kubectl in the clusterctl image follows the
    second one and is supported one minor from the API server).
-3. Any other pin (an image, a provider, a third-party chart): every platform of
+3. cert-manager: read upstream's upgrade notes for the pair (one minor at a
+   time), add the move to `certManagerReads`, and list the old version in
+   `upgradeFrom` of both entries. A release that also moves k3s, Kubernetes or
+   the node image refuses it: move cert-manager in a release of its own.
+4. Any other pin (an image, a provider, another third-party chart): every platform of
    an earlier release is refused the move. Say so in the release notes; the
    platforms keep working on their BOM.
-4. Read the plan the release gives a platform of each earlier release: on a
+5. Read the plan the release gives a platform of each earlier release: on a
    build of the release commit, `GET …/plan` of such an installation, or
    `PlanFor` in a test.
 

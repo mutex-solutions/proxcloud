@@ -49,7 +49,7 @@
       "from": "1.18.16@sha256:d588295d0f5c6475f140a05da585a5749f992a63493b008ed89535c7f33e2533",
       "to": "1.18.17@sha256:d588295d0f5c6475f140a05da585a5749f992a63493b008ed89535c7f33e2533",
       "class": "refused",
-      "blocking": "not supported by this release: a third-party chart is upgraded only by a later release (this one moves the product's own charts)"
+      "blocking": "not supported by this release: a third-party chart is upgraded only by a later release (this one moves the product's own charts and cert-manager)"
     },
     {
       "cluster": "workload",
@@ -73,6 +73,6 @@
     }
   ],
   "blocking": [
-    "workload/cilium: not supported by this release: a third-party chart is upgraded only by a later release (this one moves the product's own charts)"
+    "workload/cilium: not supported by this release: a third-party chart is upgraded only by a later release (this one moves the product's own charts and cert-manager)"
   ]
 }

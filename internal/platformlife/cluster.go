@@ -1600,6 +1600,63 @@ func NodesCheck(ctx context.Context, seed, wl *kamajik8s.Client) *Check {
 	return &Check{ID: "nodes", Status: CheckWarn, Message: strings.Join(lines, "\n")}
 }
 
+// CertificatesCheck is the Check row certificates of an installed platform, the view before and after a move of
+// cert-manager: ok when the controller, cainjector and webhook Deployments of cert-manager are Available on the seed and
+// on the platform cluster and every Certificate there is Ready; otherwise a warning that names each one that is not.
+// Never a failure, and no run waits on it: a Certificate that is not Ready keeps the certificate in its Secret, and one
+// broken before an upgrade (an Issuer the operator removed) must not hold the platform. The run's own gate of a
+// cert-manager move is its wave: the Application Healthy and its sync, with the chart's startupapicheck, Succeeded.
+// nil when the seed or the platform cluster cannot be read: other rows and the run say that.
+func CertificatesCheck(ctx context.Context, seed, wl *kamajik8s.Client) *Check {
+	if seed == nil || wl == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var lines []string
+	n := 0
+	for _, side := range []struct {
+		name string
+		c    *kamajik8s.Client
+	}{{"the seed", seed}, {"the platform cluster", wl}} {
+		// cert-manager's namespace in both BOM entries, which a run does not change (Classify).
+		deps, err := side.c.ListCRs(ctx, "apps", "v1", "deployments", "cert-manager", "")
+		if err != nil {
+			return nil
+		}
+		for _, name := range []string{"cert-manager", "cert-manager-cainjector", "cert-manager-webhook"} {
+			i := slices.IndexFunc(deps, func(d map[string]any) bool { return str(d, "metadata", "name") == name })
+			var d map[string]any
+			if i >= 0 {
+				d = deps[i]
+			}
+			if why := unavailable(d); why != "" {
+				lines = append(lines, fmt.Sprintf("On %s, Deployment cert-manager/%s is not Available (%s).", side.name, name, why))
+			}
+		}
+		certs, err := side.c.ListCRsAllNamespaces(ctx, "cert-manager.io", "v1", "certificates", "")
+		if err != nil {
+			return nil
+		}
+		n += len(certs)
+		for _, c := range certs {
+			if condition(c, "Ready") == "True" {
+				continue
+			}
+			ready := cond(c, "Ready")
+			lines = append(lines, fmt.Sprintf("On %s, Certificate %s/%s is not Ready (%s).", side.name, str(c, "metadata", "namespace"), str(c, "metadata", "name"),
+				cmp.Or(strings.Trim(str(ready, "reason")+": "+str(ready, "message"), ": "), "Ready "+cmp.Or(str(ready, "status"), "not reported"))))
+		}
+	}
+	if len(lines) == 0 {
+		return &Check{ID: "certificates", Status: CheckOK, Message: fmt.Sprintf("cert-manager's Deployments are Available on the seed and on the platform cluster, "+
+			"and their %d Certificates are Ready.", n)}
+	}
+	slices.Sort(lines)
+	return &Check{ID: "certificates", Status: CheckWarn, Message: strings.Join(lines, "\n") + "\nA Certificate that is not Ready keeps the certificate its Secret " +
+		"holds until a new one is issued: read why with kubectl describe certificate, and fix it before an upgrade that moves cert-manager. No run waits on this row."}
+}
+
 // nodeNames lists nodes by name, each with what its Ready condition says.
 func nodeNames(nodes []map[string]any) string {
 	out := make([]string, 0, len(nodes))

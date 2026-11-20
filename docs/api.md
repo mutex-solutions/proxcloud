@@ -722,7 +722,7 @@ are several, `errors.details.problems`.
   changes nothing. No answer quotes the line.
 - `POST /installations/{id}/preflight`: read-only, not audited; `{ok, checks}`
   with rows `flags`, `scheduler` (a `warn` that says what tenants miss and the command that turns the job scheduler
-  on; absent while it runs), `spec`, `network`, `bridge`, `isolation`, `tenant-network`, `tenant-path`, `csi-vmid`, `credentials`, `machines`, `nodes`, `capacity`,
+  on; absent while it runs), `spec`, `network`, `bridge`, `isolation`, `tenant-network`, `tenant-path`, `csi-vmid`, `credentials`, `machines`, `nodes`, `certificates`, `capacity`,
   `privileges:capi`, `privileges:csi`, `privileges:kubemint`, `mint-scope`, `pool-fence`,
   `token-scope`, `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement`, `boot-store`,
   `pve-api-rule`, `seed-backup`, `argocd-access` and `images`. `argocd-access` is present while the spec has
@@ -771,6 +771,12 @@ are several, `errors.details.problems`.
   `nodes` never fails: `ok` when every node of the platform cluster is Ready, `warn` with one line per node that
   is not, and for a Node that no Machine owns (Cluster API removed its machine and left the Node object) the line
   says that the next apply deletes it. Absent while the seed or the platform cluster cannot be read.
+  `certificates` never fails either and is absent in the same case: `ok` when the Deployments `cert-manager`,
+  `cert-manager-cainjector` and `cert-manager-webhook` in namespace `cert-manager` are available on the seed and on
+  the platform cluster and every `certificates.cert-manager.io` there has condition `Ready=True`; `warn` with one line
+  per Deployment or Certificate that is not (the Certificate's reason and message). It is the view before and after an
+  upgrade that moves cert-manager: no run waits on it, so a Certificate that was not Ready before the upgrade does not
+  hold it, and a Certificate that is not Ready keeps the certificate its Secret holds until a new one is issued.
   `machines` never fails either, and is absent while the installation has no VM. It reads, with the CAPI
   token, the VMs of the pools `proxcloud-seed` and `proxcloud-system` that carry the installation's tag:
   `warn` with one line per VM that is stopped (start it in Proxmox, `qm start <vmid>`) or that has no

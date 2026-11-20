@@ -1,0 +1,42 @@
+{
+  "from": {
+    "release": "0.8.1",
+    "sha256": "a635bd88d3c39baf5519344088a6fed8dad8cb2b3c2d324655753e8ec55719b3"
+  },
+  "to": {
+    "release": "0.9.0",
+    "sha256": ""
+  },
+  "allowed": true,
+  "confirm": "upgrade lab to 0.9.0",
+  "changes": [
+    {
+      "name": "release",
+      "from": "0.8.1",
+      "to": "0.9.0",
+      "class": "record only",
+      "impact": "Nothing is synced for it: the platform's record and the labels of its objects name the new release."
+    },
+    {
+      "cluster": "seed",
+      "name": "cert-manager",
+      "from": "v1.20.2",
+      "to": "v1.21.3",
+      "class": "chart",
+      "stage": "seed-platform",
+      "wave": 1,
+      "impact": "cert-manager moves to the new chart version. ArgoCD applies its CRDs in place (v1 stays the only version) and removes what the new chart no longer renders. Each of the controller, cainjector and webhook Deployments starts its new pod and removes the old one only when the new one is Ready; the three roll together. After the sync the chart's startupapicheck Job checks the webhook with a dry-run Certificate, and the wave waits for it. Certificates and their Secrets stay; the move is not expected to issue any again (not measured on a lab yet). The webhooks of Cluster API and Kamaji keep their certificates. No pod of a tenant restarts, no machine is replaced and nothing is written on Proxmox, so no seed backup is needed. There is no way back: a platform does not go back to a BOM, and cert-manager documents no downgrade; its upgrade guide advises a backup of the cert-manager resources first (kubectl get certificates,issuers,clusterissuers -A -o yaml on the seed and on the platform cluster)."
+    },
+    {
+      "cluster": "workload",
+      "name": "cert-manager",
+      "from": "v1.20.2",
+      "to": "v1.21.3",
+      "class": "chart",
+      "stage": "workload-platform",
+      "wave": 1,
+      "impact": "cert-manager moves to the new chart version. ArgoCD applies its CRDs in place (v1 stays the only version) and removes what the new chart no longer renders. Each of the controller, cainjector and webhook Deployments starts its new pod and removes the old one only when the new one is Ready; the three roll together. After the sync the chart's startupapicheck Job checks the webhook with a dry-run Certificate, and the wave waits for it. Certificates and their Secrets stay; the move is not expected to issue any again (not measured on a lab yet). The webhooks of Cluster API and Kamaji keep their certificates. No pod of a tenant restarts, no machine is replaced and nothing is written on Proxmox, so no seed backup is needed. There is no way back: a platform does not go back to a BOM, and cert-manager documents no downgrade; its upgrade guide advises a backup of the cert-manager resources first (kubectl get certificates,issuers,clusterissuers -A -o yaml on the seed and on the platform cluster)."
+    }
+  ],
+  "blocking": []
+}
