@@ -235,6 +235,54 @@ func TestMoveCarriesARollUnderALaterBOM(t *testing.T) {
 	}
 }
 
+// The same with the files this build carries: an installation on 0.10.0 that stands after the first unit of the
+// replacement toward a kept candidate with this build's Kubernetes pins (0.10.1-rc.1, the lab's state after the first
+// drill, or 0.10.1-rc.2 after a Retry on that candidate). A Retry is never refused. Under a release BOM the candidate
+// is carried to it; under the development BOM of main, which carries nothing, the Retry goes on to the candidate
+// itself, which it can only do while the candidate's file is kept.
+func TestRollTowardAKeptCandidateGoesOn(t *testing.T) {
+	cur, err := Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev, err := Previous()
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(prev, func(b Embedded) bool { return b.Release == "0.10.0" })
+	if i < 0 {
+		t.Fatal("no previous BOM 0.10.0")
+	}
+	from, seen := refOf(prev[i]), 0
+	dev := strings.HasSuffix(cur.Release, "-dev")
+	_, site, _ := newPlatform(t, RunApply).state.snapshot()
+	for _, mid := range prev {
+		if mid.Kubernetes != cur.Kubernetes || mid.Seed.K3s.Version != cur.Seed.K3s.Version {
+			continue
+		}
+		seen++
+		midRef := refOf(mid)
+		in := installed(&from)
+		in.Spec = site.Spec
+		in.Spec.NodeImage.Mode = ImageBOM
+		in.Status.TargetBOM = &midRef
+		in.Status.Clusters = []ClusterStatus{{Name: ClusterName, Roll: &RollStatus{Step: 1}}}
+		to, up, err := move(in, "")
+		if err != nil || !up.Allowed || !up.InProgress || up.Confirm != "" || len(up.Blocking) != 0 {
+			t.Fatalf("0.10.0 in a roll toward %s: to %s, allowed %v, in progress %v, blocking %v, %v", mid.Release, to.Release, up != nil && up.Allowed, up != nil && up.InProgress, up, err)
+		}
+		if dev && (to.SHA256 != mid.SHA256 || up.Carried != nil) {
+			t.Errorf("0.10.0 in a roll toward %s under %s: to %s, carried %v, want the candidate itself", mid.Release, cur.Release, to.Release, up.Carried)
+		}
+		if !dev && (to.SHA256 != cur.SHA256 || up.Carried == nil || *up.Carried != midRef) {
+			t.Errorf("0.10.0 in a roll toward %s under %s: to %s, carried %v, want carried to this build's", mid.Release, cur.Release, to.Release, up.Carried)
+		}
+	}
+	if cur.Kubernetes.Version == "1.36.6" && seen < 2 {
+		t.Errorf("%d kept candidates with this build's Kubernetes pins, want 0.10.1-rc.1 and 0.10.1-rc.2", seen)
+	}
+}
+
 // The same on a run: the roll stands after its first unit when the corrected build arrives. The Retry keeps the step,
 // renders the units it has not reached with the new chart and the unit it has passed as it is, lets ArgoCD compare
 // without the node deletion timeout the live Application does not have yet, applies with it, and ends on this
