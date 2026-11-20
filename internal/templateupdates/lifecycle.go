@@ -897,7 +897,10 @@ func (s PGReceipts) FinishedByDigest(ctx context.Context, digest string) ([]Rece
 // version of the line needs Force + ConfirmLast (the slug); a node left without one needs
 // ConfirmNodeLoss. A provider whose cluster cannot be read changes nothing and is reported
 // (Complete=false): the page shows "Withdraw incomplete" and the same action finishes it.
-func (s *Service) Withdraw(ctx context.Context, pvFor PVEResolver, id string, req WithdrawRequest, actor string) (*LifecycleResult, error) {
+//
+// A Kubernetes node image: the result warns only about withdrawn copies that users says something still names by
+// VMID (a provider's version map, a cluster's node group, a platform), since those keep cloning them.
+func (s *Service) Withdraw(ctx context.Context, pvFor PVEResolver, users TemplateUsers, id string, req WithdrawRequest, actor string) (*LifecycleResult, error) {
 	if !s.VMEnabled {
 		return nil, errVMDisabled
 	}
@@ -1031,15 +1034,33 @@ func (s *Service) Withdraw(ctx context.Context, pvFor PVEResolver, id string, re
 			after := withoutCopies(pr.rows, p)
 			v := versionsMapValue(after, p)
 			pr.out.VersionsMapLine = fmt.Sprintf("%q: %q", p.KubernetesVersion, v)
-			ids := []string{}
+			// A withdraw does not stop what names a withdrawn copy by its VMID from cloning it. The warning is for the
+			// copies something still names (users), and says who: not for a provider whose map already names the others.
+			ids, unread := []string{}, users == nil
 			for _, c := range pr.plan.copies {
-				ids = append(ids, fmt.Sprintf("%s=%d", c.Node, c.VMID))
+				if unread {
+					ids = append(ids, fmt.Sprintf("%s=%d", c.Node, c.VMID))
+					continue
+				}
+				who, err := users(ctx, pr.out.ServiceID, c.Node, c.VMID)
+				if err != nil {
+					unread, ids = true, []string{fmt.Sprintf("%s=%d", c.Node, c.VMID)}
+				} else if len(who) > 0 {
+					ids = append(ids, fmt.Sprintf("%s=%d (%s)", c.Node, c.VMID, strings.Join(who, "; ")))
+				}
 			}
-			msg := fmt.Sprintf("Kubernetes %s: the Kubernetes provider's config.cluster.versions names template VMIDs explicitly, so withdrawing does not stop new workers from being cloned from %s; replace that entry with %s", p.KubernetesVersion, strings.Join(ids, ","), pr.out.VersionsMapLine)
+			msg := fmt.Sprintf("Kubernetes %s: withdrawing does not stop new workers from being cloned from %s, which is still named by its VMID; the config.cluster.versions entry of a Kubernetes provider without the withdrawn copies is %s",
+				p.KubernetesVersion, strings.Join(ids, ", "), pr.out.VersionsMapLine)
 			if v == "" {
-				msg = fmt.Sprintf("Kubernetes %s: no other published node image of this version is left on this provider; the version map still names %s — remove that version or publish another image before new workers are created", p.KubernetesVersion, strings.Join(ids, ","))
+				msg = fmt.Sprintf("Kubernetes %s: no other published node image of this version is left on this provider, and %s is still named by its VMID: remove that version from the Kubernetes provider or publish another image before new workers are created",
+					p.KubernetesVersion, strings.Join(ids, ", "))
 			}
-			pr.out.Warnings = append(pr.out.Warnings, msg)
+			if unread {
+				msg = fmt.Sprintf("Kubernetes %s: what still names the withdrawn copies (%s) by their VMID could not be read; ", p.KubernetesVersion, strings.Join(ids, ", ")) + msg
+			}
+			if len(ids) > 0 {
+				pr.out.Warnings = append(pr.out.Warnings, msg)
+			}
 		}
 		if pr.out.Status != "withdrawn" {
 			out.Complete = false

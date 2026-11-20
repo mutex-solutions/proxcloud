@@ -761,13 +761,22 @@ func (h *Handler) rollRead(ctx context.Context, in *platformlife.Installation, p
 	return platformlife.ReadRoll(ctx, in, bom.BOM, site)
 }
 
-// seedBackup is the seed-backup row for the plan and the run start: a warning without a Proxmox connection.
+// seedBackup is the seed-backup row for the plan and the run start, where a move needs the backup: a warning unless
+// an archive was seen, and a warning without a Proxmox connection. It reads with the portal token and, when it is
+// stored, with the platform's CAPI token: each sees the seed's archives on other stores (platformlife.SeedBackupCheck).
 func (h *Handler) seedBackup(ctx context.Context, in *platformlife.Installation, portal *pve.Service) platformlife.Check {
 	if portal == nil {
 		return platformlife.Check{ID: "seed-backup", Status: platformlife.CheckWarn,
-			Message: "The installation's Proxmox provider could not be opened, so no backup of the seed VM was looked for."}
+			Message: "The installation's Proxmox provider could not be opened, so no backup of the seed VM was looked for. " + platformlife.SeedBackupToCheck(in)}
 	}
-	return platformlife.SeedBackupCheck(ctx, portal.C, in, time.Now())
+	var capi *pve.Client
+	if h.esSvc != nil {
+		es, _ := h.esSvc.Get(ctx, in.ServiceID)
+		if sec, _ := h.platform.Secrets(ctx, in.ID); es != nil && sec != nil {
+			capi, _ = platformlife.TokenClient(es, sec.CAPI)
+		}
+	}
+	return platformlife.SeedBackupCheck(ctx, portal.C, capi, in, time.Now(), true)
 }
 
 // platformRunStart starts an apply or a remove: 202 with the run's id, 409 run_active while another run is unfinished.

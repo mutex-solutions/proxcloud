@@ -256,7 +256,7 @@ func (h *Handler) templateUpdatesWithdraw(w http.ResponseWriter, r *http.Request
 		templateUpdatesErr(w, err)
 		return
 	}
-	res, err := h.templateUpdates.Withdraw(r.Context(), h.withdrawResolve, id, req, h.actor(r))
+	res, err := h.templateUpdates.Withdraw(r.Context(), h.withdrawResolve, h.templateUsers, id, req, h.actor(r))
 	if err != nil {
 		templateUpdatesErr(w, err)
 		return
@@ -360,7 +360,8 @@ func (h *Handler) templateUpdatesDelete(w http.ResponseWriter, r *http.Request) 
 		templateUpdatesErr(w, err)
 		return
 	}
-	audit.RecordSnapshots(r.Context(), map[string]any{"deleted": false}, map[string]any{"deleted": true, "action": "delete", "importId": id,
+	// A Delete that found the template already gone deleted nothing: the row says so (deleted stays false).
+	audit.RecordSnapshots(r.Context(), map[string]any{"deleted": false}, map[string]any{"deleted": !res.Unchanged, "action": "delete", "importId": id,
 		"digest": res.Digest, "slug": res.Slug, "serviceId": res.ServiceID, "deletedVmids": res.Changed, "unchanged": res.Unchanged})
 	httpx.OK(w, res)
 }

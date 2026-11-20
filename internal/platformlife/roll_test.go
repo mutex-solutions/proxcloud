@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -17,6 +16,7 @@ import (
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/pve/pvetest"
 	"github.com/mutex-solutions/proxcloud/internal/templateupdates"
 )
 
@@ -721,42 +721,112 @@ func TestNodesCountsEveryControlPlaneMachine(t *testing.T) {
 	}
 }
 
-// An archive of the seed's VMID counts only when it is of this seed: made after the seed became ready, and not noted
-// with another VM's name. A store may hold year-old archives of an earlier VM that had the same VMID.
+// An archive of the seed's VMID counts only when it is of this seed: made after the seed became ready (or, on a
+// record without readyAt, after the VM was created: read with the CAPI token, the portal's may not read the seed VM),
+// and not noted with another VM's name. A store may hold year-old archives of an earlier VM that had the same VMID.
 func TestSeedBackupIsOfThisSeed(t *testing.T) {
 	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
 	ready := now.Add(-30 * 24 * time.Hour)
-	var rows []map[string]any
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var data any = rows
-		if strings.HasSuffix(r.URL.Path, "/storage") {
-			data = []map[string]any{{"storage": "nas", "content": "backup"}}
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
-	}))
+	const portalID, capiID = "proxcloud@pve!platform", pve.CAPITokenID
+	// The archives are on the import store, the one store whose backups of the seed the portal token is shown.
+	site := &pvetest.BackupSite{ACL: pvetest.ProductACL(portalID, capiID, 106, "local-zfs", "local", "nas"),
+		Stores: map[string]string{"nas": "backup,import", "local-zfs": "images", "local": "iso,vztmpl"}, VMCTime: map[int]int64{106: ready.Unix()}}
+	srv := httptest.NewServer(site)
 	defer srv.Close()
-	c, err := pve.New(pve.Config{APIURL: srv.URL, TokenID: "proxcloud@pve!platform", Secret: "s"})
+	portal, capi := tokenClient(t, srv.URL, portalID), tokenClient(t, srv.URL, capiID)
+	at := func(d time.Duration, notes string) pvetest.Backup {
+		return pvetest.Backup{VMID: 106, CTime: now.Add(d).Unix(), Notes: notes}
+	}
+	const day = 24 * time.Hour
+	for _, readyAt := range []*time.Time{&ready, nil} {
+		in := &Installation{ID: "pi-0a1b2c3d", Status: Status{Seed: &SeedStatus{VMID: 106, Node: "pve1", Generation: 1, ReadyAt: readyAt}}}
+		for name, c := range map[string]struct {
+			rows []pvetest.Backup
+			want string
+		}{
+			"an earlier VM of the same VMID": {[]pvetest.Backup{at(-365*day, "old-vm"), at(-366*day, "")}, CheckWarn},
+			"another VM's name, made today":  {[]pvetest.Backup{at(-time.Hour, "some-other-vm")}, CheckWarn},
+			"this seed, by its name":         {[]pvetest.Backup{at(-time.Hour, SeedVMName("pi-0a1b2c3d", 1))}, CheckOK},
+			"this seed, without notes":       {[]pvetest.Backup{at(-365*day, "old-vm"), at(-time.Hour, "")}, CheckOK},
+		} {
+			site.Backups = map[string][]pvetest.Backup{"nas": c.rows}
+			got := SeedBackupCheck(context.Background(), portal, capi, in, now, false)
+			if got.Status != c.want || (name == "an earlier VM of the same VMID" && !strings.Contains(got.Message, "the stores read (nas) hold none. 2 archives of VMID 106 were not counted")) {
+				t.Errorf("%s (readyAt %v): %+v", name, readyAt != nil, got)
+			}
+		}
+	}
+}
+
+func tokenClient(t *testing.T, url, tokenID string) *pve.Client {
+	t.Helper()
+	c, err := pve.New(pve.Config{APIURL: url, TokenID: tokenID, Secret: "s"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	in := &Installation{ID: "pi-0a1b2c3d", Status: Status{Seed: &SeedStatus{VMID: 106, Node: "pve1", Generation: 1, ReadyAt: &ready}}}
-	row := func(at time.Time, notes string) map[string]any {
-		return map[string]any{"volid": "nas:backup/vzdump-qemu-106-" + at.Format("2006_01_02") + ".vma.zst", "vmid": 106, "ctime": at.Unix(), "notes": notes}
-	}
-	for name, c2 := range map[string]struct {
-		rows []map[string]any
-		want string
-	}{
-		"an earlier VM of the same VMID": {[]map[string]any{row(now.Add(-365*24*time.Hour), "old-vm"), row(now.Add(-366*24*time.Hour), "")}, CheckWarn},
-		"another VM's name, made today":  {[]map[string]any{row(now.Add(-time.Hour), "some-other-vm")}, CheckWarn},
-		"this seed, by its name":         {[]map[string]any{row(now.Add(-time.Hour), SeedVMName("pi-0a1b2c3d", 1))}, CheckOK},
-		"this seed, without notes":       {[]map[string]any{row(now.Add(-365*24*time.Hour), "old-vm"), row(now.Add(-time.Hour), "")}, CheckOK},
-	} {
-		rows = c2.rows
-		got := SeedBackupCheck(context.Background(), c, in, now)
-		if got.Status != c2.want || (name == "an earlier VM of the same VMID" && !strings.Contains(got.Message, "2 archives of VMID 106 were not counted")) {
-			t.Errorf("%s: %+v", name, got)
+	return c
+}
+
+// The seed-backup row says only what the tokens can read. Proxmox leaves a VM's backups out of a store's listing for
+// a token without VM.Backup on that VM or Datastore.Allocate on the store, and answers 200: with the product's own
+// grants the portal token is fenced off the seed VM, so an empty listing of the site's backup store says nothing.
+// The v0.10.0-rc.1 lab round read "the stores read (cephfs, local, nas-backup) hold none" with today's archive on
+// nas-backup.
+func TestSeedBackupRowClaimsOnlyWhatItCanRead(t *testing.T) {
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	ready := now.Add(-30 * 24 * time.Hour)
+	const portalID, capiID = "proxcloud@pve!platform", pve.CAPITokenID
+	fresh := []pvetest.Backup{{VMID: 102, CTime: now.Add(-time.Hour).Unix()}}
+	in := &Installation{ID: "pi-0a1b2c3d", Status: Status{Seed: &SeedStatus{VMID: 102, Node: "pve1", Generation: 1, ReadyAt: &ready}}}
+	stores := map[string]string{"cephfs": "backup,iso", "local": "backup,iso,vztmpl", "nas-backup": "backup", "local-zfs": "images,rootdir"}
+	check := func(site *pvetest.BackupSite, withCAPI, needed bool) Check {
+		t.Helper()
+		srv := httptest.NewServer(site)
+		defer srv.Close()
+		var capi *pve.Client
+		if withCAPI {
+			capi = tokenClient(t, srv.URL, capiID)
 		}
+		return SeedBackupCheck(context.Background(), tokenClient(t, srv.URL, portalID), capi, in, now, needed)
+	}
+	lab := func(backups map[string][]pvetest.Backup) *pvetest.BackupSite {
+		return &pvetest.BackupSite{ACL: pvetest.ProductACL(portalID, capiID, 102, "local-zfs", "local", "", "cephfs", "nas-backup"), Stores: stores, Backups: backups}
+	}
+
+	// The lab's case: today's archive on a store where no token of the product may read the seed's backups.
+	got := check(lab(map[string][]pvetest.Backup{"nas-backup": fresh}), true, false)
+	if got.Status != CheckOK || strings.Contains(got.Message, "hold none") ||
+		!strings.Contains(got.Message, "The portal cannot see backups of seed VM 102 on stores cephfs, nas-backup of node pve1") ||
+		!strings.Contains(got.Message, "It can see them on store local and sees none there.") ||
+		!strings.Contains(got.Message, "an archive of this seed VM ("+SeedVMName(in.ID, 1)+", VMID 102), made after this seed VM was created (2026-10-21 12:00 UTC) and younger than 24 hours") {
+		t.Fatalf("the Check with an archive no token is shown: %+v", got)
+	}
+	// The same read where a move needs the backup: a warning, which the plan and the run start take for "not seen".
+	if got := check(lab(map[string][]pvetest.Backup{"nas-backup": fresh}), true, true); got.Status != CheckWarn || !strings.Contains(got.Message, "cannot see backups of seed VM 102") {
+		t.Fatalf("the plan's row with an archive no token is shown: %+v", got)
+	}
+	// On the ISO store the CAPI token manages the store, so Proxmox shows it the archive: seen, by that token alone.
+	if got := check(lab(map[string][]pvetest.Backup{"local": fresh}), true, true); got.Status != CheckOK || !strings.Contains(got.Message, "was backed up 2026-11-20 11:00 UTC on store local") {
+		t.Fatalf("an archive on the ISO store, read with the CAPI token: %+v", got)
+	}
+	if got := check(lab(map[string][]pvetest.Backup{"local": fresh}), false, true); got.Status != CheckWarn || !strings.Contains(got.Message, "on stores cephfs, local, nas-backup") {
+		t.Fatalf("an archive on the ISO store without the CAPI token: %+v", got)
+	}
+	// On the import store the portal token manages the store: seen, and an empty listing there is a fact.
+	imp := func(backups map[string][]pvetest.Backup) *pvetest.BackupSite {
+		return &pvetest.BackupSite{ACL: pvetest.ProductACL(portalID, capiID, 102, "local-zfs", "local", "nas-backup"),
+			Stores: map[string]string{"local": "backup,iso", "nas-backup": "backup,import", "local-zfs": "images"}, Backups: backups}
+	}
+	if got := check(imp(map[string][]pvetest.Backup{"nas-backup": fresh}), true, true); got.Status != CheckOK || !strings.Contains(got.Message, "on store nas-backup") {
+		t.Fatalf("an archive on the import store: %+v", got)
+	}
+	if got := check(imp(nil), true, false); got.Status != CheckWarn || !strings.Contains(got.Message, "the stores read (local, nas-backup) hold none.") {
+		t.Fatalf("no archive on a site whose backup stores are all read: %+v", got)
+	}
+	old := []pvetest.Backup{{VMID: 102, CTime: now.Add(-48 * time.Hour).Unix()}}
+	if got := check(imp(map[string][]pvetest.Backup{"nas-backup": old}), true, false); got.Status != CheckWarn ||
+		!strings.Contains(got.Message, "every store that takes backups was read (local, nas-backup). The newest it sees, on store nas-backup, is of 2026-11-18 12:00 UTC.") {
+		t.Fatalf("an old archive on a site whose backup stores are all read: %+v", got)
 	}
 }
 

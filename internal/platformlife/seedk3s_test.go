@@ -268,7 +268,7 @@ func TestStartApplyNeedsASeedBackup(t *testing.T) {
 	in.Status.Seed = &SeedStatus{VMID: 120, Node: "pve1"}
 	var missing *SeedBackupMissing
 	if err := startApply(&Run{}, in, cur.SHA256, "upgrade lab to 0.9.0", "", SeedBackup{}, RollRead{}); !errors.As(err, &missing) || in.Status.TargetBOM != nil ||
-		err.Error() != "seed_backup_missing: no backup of seed VM 120 younger than 24 hours is visible to the portal. Take one (vzdump 120), or confirm that you took one the portal cannot see." {
+		err.Error() != "seed_backup_missing: the portal saw no backup of seed VM 120 younger than 24 hours, and on most stores it cannot see one (the seed-backup row says where). Check in Proxmox that there is an archive of this seed VM, made after the seed VM was created and younger than 24 hours (vzdump 120 makes one), then confirm it (seedBackupTaken)." {
 		t.Fatalf("without a backup: %v", err)
 	}
 	seen, taken, retry := &Run{}, &Run{}, &Run{}

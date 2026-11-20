@@ -8,6 +8,7 @@ package platformlife
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -194,63 +195,92 @@ func (x *acq) seedK3s(ctx context.Context) error {
 // SeedBackupAge is how old the newest backup of the seed VM may be for an upgrade that replaces the seed's k3s.
 const SeedBackupAge = 24 * time.Hour
 
-// SeedBackupCheck is the seed-backup row: ok when a store of the seed's node holds a vzdump archive of the seed VM
-// younger than SeedBackupAge, with its time and store; a warning otherwise, never a failure (an apply does not need
-// one; an upgrade that replaces the seed's k3s does, or the operator's word: SeedBackupMissing). It reads with the
-// portal token, which may not see the store the operator backs up to: the row then says which stores it could not read.
+// SeedBackupCheck is the seed-backup row: ok with the archive's time and store when a store of the seed's node shows
+// a vzdump archive of the seed VM younger than SeedBackupAge; never a failure (an apply does not need a backup; an
+// upgrade that replaces the seed's k3s does, or the operator's word: SeedBackupMissing).
+//
+// Proxmox lists a backup only to a token that may read it (PVE::Storage::check_volume_access: Datastore.Allocate on
+// the store, or Datastore.AllocateSpace on the store with VM.Backup on the VM), and answers 200 with the rest of the
+// list otherwise. The portal token is fenced off the seed VM (NoAccess on its pool) and holds Datastore.Allocate on
+// the import store alone; capi (pve.CAPITokenID, nil when not stored) holds no VM.Backup and Datastore.Allocate on the
+// ISO store alone. So both read, each store counts as read only when a token holds what its listing needs, and for
+// the others the row says that the portal cannot see the seed's backups there: never that none exist. needed says a
+// pending change needs the backup (the plan and the start of an upgrade that replaces the seed's k3s): the row is then
+// a warning unless an archive was seen, and callers take ok for "seen". Without it (the Check) a store the portal
+// cannot see into is no warning: the row is ok and says what the portal cannot know.
 //
 // An archive counts only when it is of this seed VM, not of an earlier VM that had the same VMID (Proxmox gives a freed
 // VMID to the next VM, and a store keeps the old archives): it must have been made after the seed became ready (the
 // record's readyAt; without one, the creation time in the VM's config), and its notes, when it has any, must name the
 // seed VM (vzdump's default notes are the guest's name).
-func SeedBackupCheck(ctx context.Context, portal *pve.Client, in *Installation, now time.Time) Check {
+func SeedBackupCheck(ctx context.Context, portal, capi *pve.Client, in *Installation, now time.Time, needed bool) Check {
 	st := in.Status.Seed
+	name := SeedVMName(in.ID, st.Generation)
+	advice := fmt.Sprintf(" The seed holds the Cluster API state of the platform cluster: back it up (vzdump %d) before an upgrade that replaces its k3s.", st.VMID)
 	warn := func(format string, a ...any) Check {
 		return Check{ID: "seed-backup", Status: CheckWarn, Message: fmt.Sprintf("No backup of seed VM %d younger than 24 hours is visible to the portal: ", st.VMID) +
-			fmt.Sprintf(format, a...) + fmt.Sprintf(" The seed holds the Cluster API state of the platform cluster: back it up (vzdump %d) before an upgrade that replaces its k3s.", st.VMID)}
-	}
-	stores, err := portal.NodeStorages(ctx, st.Node)
-	if err != nil {
-		return warn("the stores of node %s could not be read (%s).", st.Node, clip(err.Error()))
+			fmt.Sprintf(format, a...) + advice}
 	}
 	var since int64 // archives made before this are of another VM
 	if st.ReadyAt != nil {
 		since = st.ReadyAt.Unix()
-	} else if cfg, err := portal.GetVMConfig(ctx, st.Node, st.VMID); err == nil {
-		if _, ct, ok := strings.Cut(cfg.Str("meta"), "ctime="); ok {
-			ct, _, _ = strings.Cut(ct, ",")
-			since, _ = strconv.ParseInt(ct, 10, 64)
-		}
 	}
-	name := SeedVMName(in.ID, st.Generation)
 	var newest pve.StorageContent
 	var on string
-	var seen, unread []string
+	var listErr error
+	sure := map[string]bool{} // backup store of the node -> a token holds what listing the seed's archives needs
 	foreign := 0
-	for _, s := range stores {
-		if !slices.Contains(strings.Split(s.Content, ","), "backup") {
+	for _, c := range []*pve.Client{capi, portal} {
+		if c == nil {
 			continue
 		}
-		rows, err := portal.StorageContents(ctx, st.Node, s.Storage, "backup", st.VMID)
-		if err != nil {
-			unread = append(unread, s.Storage)
-			continue
-		}
-		seen = append(seen, s.Storage)
-		for _, r := range rows {
-			switch {
-			case r.VMID != st.VMID:
-			case r.CTime < since || (strings.TrimSpace(r.Notes) != "" && !strings.Contains(r.Notes, name)):
-				foreign++
-			case r.CTime > newest.CTime:
-				newest, on = r, s.Storage
+		if since == 0 { // the portal token may not read the seed VM's config
+			if cfg, err := c.GetVMConfig(ctx, st.Node, st.VMID); err == nil {
+				if _, ct, ok := strings.Cut(cfg.Str("meta"), "ctime="); ok {
+					ct, _, _ = strings.Cut(ct, ",")
+					since, _ = strconv.ParseInt(ct, 10, 64)
+				}
 			}
+		}
+		stores, err := c.NodeStorages(ctx, st.Node)
+		if err != nil {
+			listErr = err
+			continue
+		}
+		vm, _ := c.Permissions(ctx, fmt.Sprintf("/vms/%d", st.VMID))
+		for _, s := range stores {
+			if !slices.Contains(strings.Split(s.Content, ","), "backup") {
+				continue
+			}
+			rows, err := c.StorageContents(ctx, st.Node, s.Storage, "backup", st.VMID)
+			p, _ := c.Permissions(ctx, "/storage/"+s.Storage)
+			sure[s.Storage] = sure[s.Storage] || (err == nil && (p["Datastore.Allocate"] || (p["Datastore.AllocateSpace"] && vm["VM.Backup"])))
+			if err != nil {
+				continue
+			}
+			for _, r := range rows {
+				switch {
+				case r.VMID != st.VMID:
+				case r.CTime < since || (strings.TrimSpace(r.Notes) != "" && !strings.Contains(r.Notes, name)):
+					foreign++
+				case r.CTime > newest.CTime:
+					newest, on = r, s.Storage
+				}
+			}
+		}
+	}
+	var read, blind []string
+	for _, s := range slices.Sorted(maps.Keys(sure)) {
+		if sure[s] {
+			read = append(read, s)
+		} else {
+			blind = append(blind, s)
 		}
 	}
 	taken := time.Unix(newest.CTime, 0).UTC()
 	note := ""
-	if len(unread) > 0 {
-		note = " The portal token could not read the backups of " + strings.Join(unread, ", ") + "."
+	if on != "" {
+		note = fmt.Sprintf(" The newest it sees, on store %s, is of %s.", on, taken.Format("2006-01-02 15:04 UTC"))
 	}
 	if foreign > 0 {
 		note += fmt.Sprintf(" %d archives of VMID %d were not counted: they were made before this seed VM became ready, or their notes name another VM than %s "+
@@ -259,10 +289,43 @@ func SeedBackupCheck(ctx context.Context, portal *pve.Client, in *Installation, 
 	switch {
 	case on != "" && now.Sub(taken) < SeedBackupAge:
 		return Check{ID: "seed-backup", Status: CheckOK, Message: fmt.Sprintf("Seed VM %d was backed up %s on store %s (%s).", st.VMID, taken.Format("2006-01-02 15:04 UTC"), on, newest.VolID)}
+	case len(sure) == 0 && listErr != nil:
+		return warn("the stores of node %s could not be read (%s).", st.Node, clip(listErr.Error()))
+	case len(sure) == 0:
+		return warn("node %s shows the portal no store that takes backups.", st.Node)
+	case len(blind) > 0:
+		c := Check{ID: "seed-backup", Status: CheckOK, Message: fmt.Sprintf("The portal cannot see backups of seed VM %d on %s of node %s, so whether one exists there is not known to it. "+
+			"Proxmox lists a backup only to a token that may back up its VM (VM.Backup) or that manages the store (Datastore.Allocate), and by design the portal's tokens hold neither for the seed VM there: "+
+			"this is no sign that a backup is missing.", st.VMID, storesText(blind), st.Node)}
+		if len(read) > 0 && on == "" {
+			c.Message += fmt.Sprintf(" It can see them on %s and sees none there.", storesText(read))
+		}
+		c.Message += note + " " + SeedBackupToCheck(in)
+		if needed {
+			c.Status = CheckWarn
+		}
+		return c
 	case on != "":
-		return warn("the newest, on store %s, is of %s.%s", on, taken.Format("2006-01-02 15:04 UTC"), note)
-	case len(seen) == 0 && len(unread) == 0:
-		return warn("node %s shows the portal token no store that takes backups.", st.Node)
+		return warn("every store that takes backups was read (%s).%s", strings.Join(read, ", "), note)
 	}
-	return warn("the stores read (%s) hold none.%s", strings.Join(seen, ", "), note)
+	return warn("the stores read (%s) hold none.%s", strings.Join(read, ", "), note)
+}
+
+func storesText(s []string) string {
+	if len(s) == 1 {
+		return "store " + s[0]
+	}
+	return "stores " + strings.Join(s, ", ")
+}
+
+// SeedBackupToCheck says what the operator looks for in Proxmox before answering for a backup of the seed VM
+// (seedBackupTaken): the portal cannot see the seed's archives on most stores.
+func SeedBackupToCheck(in *Installation) string {
+	st := in.Status.Seed
+	made := "after this seed VM was created"
+	if st.ReadyAt != nil {
+		made += " (" + st.ReadyAt.UTC().Format("2006-01-02 15:04 UTC") + ")"
+	}
+	return fmt.Sprintf("Before an upgrade that replaces the seed's k3s, check in Proxmox that there is an archive of this seed VM (%s, VMID %d), made %s and younger than 24 hours "+
+		"(vzdump %d makes one), then confirm it when you start the upgrade.", SeedVMName(in.ID, st.Generation), st.VMID, made, st.VMID)
 }

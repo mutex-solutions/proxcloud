@@ -473,6 +473,23 @@ store made for another installation, for a provider's earlier `importStorage` or
 holds a role (refused when it is `bootStorage` or `importStorage`); M1 gives the platform one boot store, so that is a
 change of its own. Lab check L1 measures it.
 
+### What the fence hides from the portal: the seed's backups
+
+Proxmox lists a backup to a token only when the token may read it: `Datastore.Allocate` on the store, or
+`Datastore.AllocateSpace` on the store together with `VM.Backup` on the VM the archive is of. A token that holds
+neither still gets `200` for the store's content: the list simply leaves those archives out
+(`PVE::Storage::check_volume_access`, run for every row of the listing). The `NoAccess` row on `proxcloud-seed` takes
+`VM.Backup` on the seed VM from the portal token, `ProxCloudCAPI` and `ProxCloudCSI` do not carry it, and no
+privilege is added for this. So the product's tokens see a backup of the seed VM in two places only, each because the
+token manages the store: `/storage/<importStorage>` (`PVEDatastoreAdmin`, the portal token) and the platform's ISO
+store (`PVEDatastoreAdmin`, `capmox@pve!capi`). The Check row `seed-backup` reads with both and, for every other
+backup store, says that the portal cannot see backups of the seed VM there; it never reports "none" for a store whose
+listing Proxmox may have filtered. An upgrade that replaces the seed's k3s therefore asks the operator to confirm the
+backup ([managed-services.md](managed-services.md#the-seeds-k3s)). Seen on a PVE 9.2 lab on 2026-11-20: the portal
+token got `{"data":[]}` for a store that held an archive of the seed made minutes before. Do not grant `VM.Backup`
+on the seed's pool to make the row green: with `Datastore.AllocateSpace` on a store it lets the token restore the
+seed's archive, which holds the seed's cluster-admin token and the `capmox@pve!capi` secret.
+
 ### An existing site
 
 Stage 10 only adds rows. On a site installed before these rows, `make upgrade` adds the narrow rows and leaves the broad ones: `capmox@pve!capi` keeps `ProxCloudCAPI` on `/pool`, and `csi@pve!csi` keeps `ProxCloudCSI` on `/pool` and `/storage`. The new rows grant nothing the old ones did not, so nothing breaks and nothing narrows until an operator removes the old token rows, after stage 10 has run with this release (the last `delete` only when every StorageClass of the services cluster is on `services.storage`, as the installer makes it):
