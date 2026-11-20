@@ -17,19 +17,21 @@
 # - CI compares every pin with what the registry serves (.github/scripts/bom_verify.py, docs/ci-release.md); on a
 #   `v*` tag it also refuses `-dev`, `pending` and `0.0.0+` before any image is built.
 #
-# internal/platformlife/bom_test.go keeps installer/playbooks/group_vars/all/versions.yml,
-# pc_defaults.services.k8s_version and the values of stage 40's ArgoCD and cert-manager equal to this file.
+# internal/platformlife/bom_test.go keeps installer/playbooks/group_vars/all/versions.yml and the values of stage 40's
+# ArgoCD and cert-manager equal to this file, but the installer's k3s and pc_defaults.services.k8s_version: those two
+# may stay one minor behind this file and are never ahead of it. They are at 1.35.10 while this file names 1.36.6 (the
+# installer path takes a minor step in a release of its own), and the kubectl in images.clusterctl follows them.
 schemaVersion: 1
 release: 0.11.0-dev                # "-dev" on main between releases; at a stable tag deploy/charts/proxcloud appVersion without "v" (a candidate keeps the chart of the last stable release)
 kubernetes:
-  version: 1.35.10
-  nodeImage: {package: proxcloud-vm-ubuntu-2604-k8s, tag: ubuntu-2604-k8s-1.35.10-20261116181221-72f0eaa3d0d4, digest: "sha256:62de43787103a74e433203fbbf9bd85806011e673371591397bd30bedda03ea9"}
+  version: 1.36.6
+  nodeImage: {package: proxcloud-vm-ubuntu-2604-k8s, tag: ubuntu-2604-k8s-1.36.6-20261116194043-72f0eaa3d0d4, digest: "sha256:53740d320b09de54fc3bae4a4ed68068a3ca9c7a45cf97e632dc771f5a3d738a"}
 seed:
   image: {package: proxcloud-vm-ubuntu-2604, tag: ubuntu-2604-os-20261116170652-72f0eaa3d0d4, digest: "sha256:d598846a2422cc84b9334972493a26f3fa62144e0324a062f306db8d5d6ea8db"}
   k3s:
-    version: v1.35.10+k3s1
-    binary: {url: "https://github.com/k3s-io/k3s/releases/download/v1.35.10%2Bk3s1/k3s", sha256: 5cd49f0faca5b2ea4355d4761e7b1445b8aa05cd50e612fd9c370551db49e5e2}
-    installScript: {url: "https://raw.githubusercontent.com/k3s-io/k3s/v1.35.10%2Bk3s1/install.sh", sha256: 8598e002e61d658fed7b7542fc6d2c66d8da6eae69e088830105d2ee1ffb6d91}
+    version: v1.36.6+k3s1
+    binary: {url: "https://github.com/k3s-io/k3s/releases/download/v1.36.6%2Bk3s1/k3s", sha256: 66ceb8e67edfa547195135d74783bfadc2ecc04a91059e90ae5f70a3dbc98c15}
+    installScript: {url: "https://raw.githubusercontent.com/k3s-io/k3s/v1.36.6%2Bk3s1/install.sh", sha256: 46177d4c99440b4c0311b67233823a8e8a2fc09693f6c89af1a7161e152fbfad}
 images:
   kubeVip: "ghcr.io/kube-vip/kube-vip:v0.8.9@sha256:717b8bef2758c10042d64ae7949201ef7f243d928fce265b04e488e844bf9528"
   clusterctl: "ghcr.io/mutex-solutions/proxcloud-clusterctl:v1.14.4-1@sha256:4658fe52b66e5e402f0ae9d8db6e7e89378055fea584799fa14788fecc3e2c96"   # carries the provider YAMLs of capi.*

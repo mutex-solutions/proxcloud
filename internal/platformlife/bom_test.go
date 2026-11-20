@@ -16,6 +16,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/mutex-solutions/proxcloud/deploy"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 )
 
 func embedded(t *testing.T) *BOM {
@@ -155,7 +156,7 @@ func TestValidate(t *testing.T) {
 		{"an image without tag", func(_ *testing.T, b *BOM) { b.Images.KubeVip = "ghcr.io/kube-vip/kube-vip@" + sha }, []string{"not <repo>:<tag>@<digest>"}},
 		{"an image at latest", func(_ *testing.T, b *BOM) { b.Images.KubeVip = "ghcr.io/kube-vip/kube-vip:latest@" + sha }, []string{"images.kubeVip tag"}},
 		{"a pending VM image", func(_ *testing.T, b *BOM) { b.Seed.Image.Digest = "pending" }, []string{"seed.image: digest"}},
-		{"a node image of another version", func(_ *testing.T, b *BOM) { b.Kubernetes.Version = "1.36.6" }, []string{"is not a 1.36.6 node image"}},
+		{"a node image of another version", func(_ *testing.T, b *BOM) { b.Kubernetes.Version = "1.36.7" }, []string{"is not a 1.36.7 node image"}},
 		{"k3s downloads of another version", func(_ *testing.T, b *BOM) { b.Seed.K3s.Version = "v1.35.11+k3s1" },
 			[]string{"seed.k3s.binary: url", "seed.k3s.installScript: url"}},
 		{"a k3s sha256 that is a digest", func(_ *testing.T, b *BOM) { b.Seed.K3s.Binary.SHA256 = sha }, []string{"seed.k3s.binary: sha256"}},
@@ -226,7 +227,12 @@ func readYAML(t *testing.T, path string, out any) {
 }
 
 // The installer pins the same versions (installer/playbooks/group_vars/all/versions.yml and pc_defaults), for every
-// component both name. barman_plugin is not compared: backups are not in the BOM until M2.
+// component both name, but k3s and Kubernetes: those two may stay one minor behind the BOM and are never ahead of it.
+// `make upgrade` reinstalls k3s in place on a multi-server management cluster that runs Traefik and lets plain Cluster
+// API roll the services and sandbox clusters, with none of the upgrade's gates, so the installer path takes a minor
+// step in a release of its own. The kubectl in the clusterctl image follows pc_defaults.services.k8s_version
+// (deploy/tests/test_clusterctl_image.py) and is supported one minor from the API server, which is the bound here.
+// barman_plugin is not compared: backups are not in the BOM until M2.
 func TestBOMMatchesInstallerVersions(t *testing.T) {
 	b := embedded(t)
 	var vf struct {
@@ -255,7 +261,6 @@ func TestBOMMatchesInstallerVersions(t *testing.T) {
 	}
 
 	for _, p := range []struct{ key, field, bom string }{
-		{"k3s", "seed.k3s.version", b.Seed.K3s.Version},
 		{"argocd_chart", "seed argocd", chart(ClusterSeed, "argocd")},
 		{"argocd_chart", "workload argocd", chart(ClusterWorkload, "argocd")},
 		{"cert_manager_chart", "seed cert-manager", chart(ClusterSeed, "cert-manager")},
@@ -284,9 +289,46 @@ func TestBOMMatchesInstallerVersions(t *testing.T) {
 			t.Errorf("versions.yml %s = %s, BOM %s = %q", p.key, got, p.field, p.bom)
 		}
 	}
-	if b.Kubernetes.Version != df.D.Services.K8sVersion {
-		t.Errorf("pc_defaults.services.k8s_version = %s, BOM kubernetes.version = %s", df.D.Services.K8sVersion, b.Kubernetes.Version)
+	if why := installerBehind(fmt.Sprint(vf.V["k3s"]), b.Seed.K3s.Version); why != "" {
+		t.Errorf("versions.yml k3s = %v, BOM seed.k3s.version = %s: %s", vf.V["k3s"], b.Seed.K3s.Version, why)
 	}
+	if why := installerBehind(df.D.Services.K8sVersion, b.Kubernetes.Version); why != "" {
+		t.Errorf("pc_defaults.services.k8s_version = %s, BOM kubernetes.version = %s: %s", df.D.Services.K8sVersion, b.Kubernetes.Version, why)
+	}
+	for _, c := range []struct{ installer, bom, want string }{
+		{"1.36.6", "1.36.6", ""}, {"1.35.10", "1.36.6", ""}, {"v1.35.10+k3s1", "v1.36.6+k3s1", ""}, {"1.36.5", "1.36.6", ""},
+		{"1.36.7", "1.36.6", "newer than the BOM"}, {"v1.36.6+k3s2", "v1.36.6+k3s1", "newer than the BOM"}, {"1.37.0", "1.36.6", "newer than the BOM"},
+		{"1.34.9", "1.36.6", "more than one minor behind the BOM"}, {"0.36.6", "1.36.6", "more than one minor behind the BOM"}, {"", "1.36.6", "not a version"},
+	} {
+		if got := installerBehind(c.installer, c.bom); (got == "") != (c.want == "") || !strings.Contains(got, c.want) {
+			t.Errorf("installer %q against BOM %q: %q, want %q", c.installer, c.bom, got, c.want)
+		}
+	}
+}
+
+// installerBehind is why an installer pin of k3s or Kubernetes does not fit the BOM's ("" when it does): it is the
+// BOM's version or an older one, at most one minor back.
+func installerBehind(installer, bom string) string {
+	parse := func(v string) ([]int, error) {
+		core, build, _ := strings.Cut(v, "+k3s")
+		major, minor, patch, err := kamaji.ParseVersion(core)
+		n, _ := strconv.Atoi(build)
+		return []int{major, minor, patch, n}, err
+	}
+	i, err := parse(installer)
+	if err != nil {
+		return "not a version: " + err.Error()
+	}
+	b, err := parse(bom)
+	switch {
+	case err != nil:
+		return "not a version: " + err.Error()
+	case slices.Compare(i, b) > 0:
+		return "newer than the BOM"
+	case i[0] != b[0] || i[1] < b[1]-1:
+		return "more than one minor behind the BOM"
+	}
+	return ""
 }
 
 // stage40 renders a stage 40 template with the installer's versions: the templates only substitute pc_ver keys.

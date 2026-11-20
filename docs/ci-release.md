@@ -604,8 +604,10 @@ An installed platform can be moved from the BOM of an earlier release to this
 one's ([managed-services.md](managed-services.md#upgrade-between-boms)). A BOM
 pair is a previous BOM under `deploy/platform/previous/` and the BOM of the
 commit. `platformlife.Classify` decides per pair whether the move is allowed:
-only the release line, the tenant charts and the versions of the product's own
-charts may differ. `go test ./internal/platformlife` holds the rest:
+the release line, the tenant charts and the versions of the product's own
+charts may differ, and so may the seed's k3s and the Kubernetes version with
+its node image, each by a patch or by one minor up. `go test
+./internal/platformlife` holds the rest:
 
 - **`upgradeFrom` is a statement the release makes.** A component of the
   product's own charts whose version changes is moved only when its BOM entry
@@ -630,6 +632,17 @@ charts may differ. `go test ./internal/platformlife` holds the rest:
   chart version that is not the one in the tree is pulled from the registry
   (`helm pull`): the test needs `helm` and, for such a pair, the network; in CI
   it fails without them, elsewhere it is skipped.
+  A pair that replaces machines by design (class `machines`: another Kubernetes
+  version or node image) is compared where the comparison must hold: this
+  build's chart is rendered with the values a run renders before the roll
+  begins (step 0: the previous BOM's Kubernetes version, kube-vip and
+  templates) and must equal what the previous release rendered. The run applies
+  the new chart version with step 1 of the roll, whose check lets only that
+  step's unit differ, so a chart or renderer that changed any other machine
+  object would fail every such upgrade at step 1 (`unexpected_rollout`). The
+  test also fails when step 0 already renders the target's machines. The steps
+  after 0 are `TestRollRendersOneUnitAtATime`'s. The comparison of a pair that
+  replaces no machine is unchanged.
 - **The plan as the operator reads it (`TestUpgradePlanGolden`).** Goldens under
   `testdata/upgrade/0.8.1-to-<case>/plan.golden.json`: 0.8.1 to a next release
   with the own charts bumped (allowed), with a third-party chart or a node image
@@ -646,15 +659,33 @@ What a release must do when it changes a pin, before its tag:
    above. A chart that changes a machine or bootstrap template must not list the
    old version: the release notes then say that installed platforms stay on
    their BOM.
-2. Any other pin (an image, k3s, a provider, a third-party chart, the Kubernetes
-   version): every platform of an earlier release is refused the move. Say so in
-   the release notes; the platforms keep working on their BOM.
-3. Read the plan the release gives a platform of each earlier release: on a
+2. The seed's k3s, the Kubernetes version or the node image: the move is allowed
+   by a patch or one minor up and replaces the seed's k3s binary or every
+   machine of the platform cluster. The release notes say what stops serving at
+   each step, which pinned pieces do not list the new Kubernetes version in
+   their own documents, and which starting BOMs were drilled. The installer's
+   `pc_versions.k3s` and `pc_defaults.services.k8s_version` need not follow:
+   `TestBOMMatchesInstallerVersions` lets them stay up to one minor behind the
+   BOM and never ahead of it (the kubectl in the clusterctl image follows the
+   second one and is supported one minor from the API server).
+3. Any other pin (an image, a provider, a third-party chart): every platform of
+   an earlier release is refused the move. Say so in the release notes; the
+   platforms keep working on their BOM.
+4. Read the plan the release gives a platform of each earlier release: on a
    build of the release commit, `GET …/plan` of such an installation, or
    `PlanFor` in a test.
 
 The pairs of the BOM on `main` today (0.8.0, 0.8.1, 0.8.2, 0.9.0-rc.1, 0.9.0-rc.2, 0.9.0, 0.9.1, 0.10.0-rc.1 and 0.10.0 to
-it). From the three 0.8.x BOMs, the BOMs
+it). All nine differ from it in the seed's k3s (`v1.35.10+k3s1` to `v1.36.6+k3s1`), in the Kubernetes version (1.35.10 to
+1.36.6) and in its node image, each one minor up: every pair replaces the seed's k3s and every machine of the platform
+cluster, and `TestUpgradeRollsNoMachine` compares all nine at step 0 of the roll and passes (2026-11-20; cluster chart
+0.1.13 and 0.1.14 pulled from the registry). With the release set to one without `-dev`, `PlanFor` on an installation of
+one control plane machine and one machine per group gives, from each of the nine: allowed, no refusal, two parts (`seed`
+with the phrase `upgrade <name> to <release>`, `platform` blocked by `seed_not_upgraded` until the seed's k3s has moved
+and then with `upgrade <name> to <release> and replace its machines`), `seed.k3s` with three `site` rows, two `machines`
+rows, four `roll/<unit>` and four `roll-vm/<unit>` rows; 16 changes from 0.10.0-rc.1 and 0.10.0, 19 from 0.9.0, 0.9.1 and
+the candidates of 0.9.0, 22 from the three 0.8.x BOMs. None of these moves was run anywhere. The differences next to
+those three entries are the ones the BOM of 0.10.0 had. From the three 0.8.x BOMs, the BOMs
 differ in the release line, in `tenantCharts.kubernetes` and `tenantCharts.database` and in the four
 components of the product's own charts, `pc-platform` 0.1.13 to 0.1.15 and
 `capi`, `capi-tenant` and `platform` 0.1.2 to 0.1.3. Each of the four lists the
@@ -663,8 +694,7 @@ ClusterRole alone. From 0.9.0-rc.1, 0.9.0-rc.2, 0.9.0 and 0.9.1 the BOMs differ 
 two tenant charts and in `pc-platform`, 0.1.14 to 0.1.15. `pc-platform` lists both 0.1.13 and 0.1.14 in
 `upgradeFrom`: a build takes only its own BOM as a target, so dropping 0.1.13 would leave a 0.8.x platform
 no move without a 0.9 release in between. From 0.10.0-rc.1 and 0.10.0 the BOMs differ in the release line alone.
-`TestUpgradeRollsNoMachine` compares all nine pairs and passes. So the
-classifier allows all nine pairs, and only `-dev` refuses them on `main`. On the release commit of `v0.10.0` the plan from each
+So the classifier allows all nine pairs, and only `-dev` refuses them on `main`. On the release commit of `v0.10.0` the plan from each
 of the three 0.8.x BOMs is allowed with seven changes and no refusal, the plan from 0.9.0, 0.9.1
 and each candidate of 0.9.0 with four changes, and the plan from 0.10.0-rc.1 with one change, the
 release, record only (`Classify` on the eight pairs, 2026-11-20). No move to 0.10.0 was run

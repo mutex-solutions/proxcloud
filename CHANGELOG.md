@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The platform BOM names k3s `v1.36.6+k3s1` and Kubernetes 1.36.6** (`deploy/platform/platform-bom.yaml`:
+  `seed.k3s`, `kubernetes.version`, `kubernetes.nodeImage`; the node image is
+  `ubuntu-2604-k8s-1.36.6-20261116194043-72f0eaa3d0d4`, from the same source commit as the 1.35.10 image). It is the
+  first BOM that names another k3s or Kubernetes than the ones before it, so an upgrade to it from any earlier BOM
+  replaces the k3s binary on the seed and then every machine of the platform cluster, in two parts with their own
+  phrases; the upgrade code of v0.10.0 is unchanged. Nothing else moves: no chart, no Cluster API provider, no
+  clusterctl image. **No such upgrade has run on a lab or on a site**: the guide's new section "Upgrade to
+  Kubernetes 1.36.6" says what each step does and what stops serving, with every duration marked not measured.
+  Known cautions, to be proven by the lab drill of the release:
+  - **cert-manager v1.20.2** lists Kubernetes 1.32 to 1.35 (new with this BOM; 1.21 is the first that lists 1.36)
+    and **Cilium 1.18.16** lists 1.30 to 1.33 (already outside its list on 1.35.10). No source says either breaks
+    on 1.36; neither was run on it. An upgrade cannot move a third-party chart in this release.
+  - **Kubernetes 1.36 refuses a new address or CIDR that is not canonical** (leading zeros, host bits as in
+    `192.168.0.5/24`) in built-in fields, among them the `loadBalancerSourceRanges` the product writes from
+    `allowedCidrs` and the ArgoCD address sources. Stored values keep working (KEP-4858); a new or changed one makes
+    its Application fail to sync. The product does not check the form yet.
+  - **Tenant clusters and databases keep their version.** After the upgrade the Kubernetes provider also offers
+    1.36.6 for new tenant clusters; none was created at that version anywhere.
+  - **The installer path stays on k3s `v1.35.10+k3s1` and Kubernetes 1.35.10** (`versions.yml`,
+    `services.k8s_version`), and with it the kubectl in the clusterctl image, one minor behind the API server.
+    `TestBOMMatchesInstallerVersions` now lets these two pins be up to one minor behind the BOM and never ahead.
+  - The hand step of `seed_k3s_timeout` (put `k3s.prev` back) is not enough across a minor: k3s's rollback also
+    needs the etcd snapshot the stage saved. The message does not say so yet.
+  `TestUpgradeRollsNoMachine` compares a pair that replaces machines by design at step 0 of the roll (this build's
+  chart with the previous BOM's version and templates must render what the previous release rendered); a pair that
+  replaces none is compared as before. All nine previous BOMs pass, and the plan from each is allowed (read with
+  `PlanFor`: 16, 19 or 22 rows). Only the move from 0.10.0 will be drilled.
 - **The platform BOM on `main` is `0.11.0-dev`, and the build carries the BOM of `0.10.0`**
   (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.10.0.yaml`). The `v0.10.0` release commit left
   the BOM at `0.10.0`, and the release gate refuses only `-dev`. A platform installed by `v0.10.0`, or moved to its

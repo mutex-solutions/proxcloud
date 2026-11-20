@@ -2112,11 +2112,15 @@ One more row can be in the plan that is not a difference of the two BOMs: `pve-a
 `site`, when the cluster firewall does not hold the rule for the Proxmox API
 ([step 4](#step-4-review-and-install)). It never refuses an upgrade.
 
-No BOM of a release names another k3s than `v1.35.10+k3s1` or another Kubernetes than 1.35.10
-yet, so no upgrade between released BOMs has the `seed.k3s` row or a `machines` row: the first one
-arrives with a later release's BOM. The rows and their stages have run in tests only, against a
-fake seed. A Kubernetes minor step has no BOM that could carry it at all while third-party charts
-and the Cluster API providers are refused: the rule allows it, nothing ships it.
+The BOM after 0.10.0 is the first that names another k3s and another Kubernetes: k3s
+`v1.36.6+k3s1` and Kubernetes 1.36.6 with its node image, one minor up from the `v1.35.10+k3s1` and
+1.35.10 of every BOM before it. So every upgrade to it has the `seed.k3s` row, the `machines` rows
+and the two parts, from whichever earlier BOM it starts
+([Upgrade to Kubernetes 1.36.6](#upgrade-to-kubernetes-1366)). Until that BOM no upgrade between
+released BOMs had either row. The rows and their stages have run in tests only, against a fake seed
+and a fake Cluster API: **no such upgrade has run on a lab or on a site.** No third-party chart and
+no Cluster API provider moves with it; two of the charts are then outside the Kubernetes versions
+their own documents list.
 
 "Moves" means that the Application's target is the new chart version and ArgoCD has compared the
 cluster with it. ArgoCD starts a sync only for an Application that is out of sync, and a hook is
@@ -2129,7 +2133,11 @@ chart moves only `platform` was synced, and no clusterctl hook ran.
 A chart of the product moves only to a version whose BOM entry lists the installed version in
 `upgradeFrom`: the release checked that pair ([ci-release.md](ci-release.md#what-a-release-checks-about-its-bom-pairs)).
 
-From the BOM of 0.8.0, 0.8.1 or 0.8.2 to this one, the plan has every row of the table and no
+The rest of this subsection is the record of the moves to the BOM of 0.10.0 and the ones before
+it, none of which replaced a machine. The plan to the BOM with Kubernetes 1.36.6 holds the same
+rows and, in addition, the ones of [Upgrade to Kubernetes 1.36.6](#upgrade-to-kubernetes-1366).
+
+From the BOM of 0.8.0, 0.8.1 or 0.8.2 to that of 0.10.0, the plan has these rows and no
 other: `pc-platform` from cluster chart 0.1.13 to 0.1.15, `capi`, `capi-tenant` and `platform` from
 platform chart 0.1.2 to 0.1.3, `tenantCharts.kubernetes` to 0.1.15, `tenantCharts.database` to 0.5.2,
 and the release. All four
@@ -2171,6 +2179,99 @@ on the machines, a kubelet argument) still reaches new installs only: the roll r
 for a new Kubernetes version or node image, and its check refuses any other template change next
 to it. The release notes of such a release must say so.
 
+### Upgrade to Kubernetes 1.36.6
+
+**Not run on a lab or on a site.** This is what the plan, the code and its tests say an upgrade to
+the BOM with k3s `v1.36.6+k3s1` and Kubernetes 1.36.6 does. Every duration below is an expectation
+and is **not measured**; the lab drill of the release is what replaces them.
+
+**What the BOM changes.** `kubernetes.version` 1.35.10 to 1.36.6, `kubernetes.nodeImage` to the
+image built for 1.36.6 (`ubuntu-2604-k8s-1.36.6-20261116194043-72f0eaa3d0d4`, from the same source
+commit and the same build chain as the 1.35.10 image it replaces), and `seed.k3s` `v1.35.10+k3s1` to
+`v1.36.6+k3s1`. Nothing else: no chart, no Cluster API provider, no clusterctl image, no kube-vip,
+no seed image.
+
+**The plan, from every earlier BOM.** All nine BOMs this build carries name 1.35.10 and
+`v1.35.10+k3s1`, so each is one minor from the target and the move is allowed from each. The plan
+has, in this order: the row `roll` (there is no way back); `release`; `kubernetes.version` and
+`kubernetes.nodeImage`, kind `machines`; `seed.k3s`, kind `seed`, with its three `site` rows
+(`seed-k3s-job`: Job `proxcloud-system/k3s-upgrade-v1-36-6-k3s1`; `seed-etcd-snapshot`:
+`pre-upgrade-v1.35.10-k3s1-<node>-<time>`; `seed-k3s-binary`); the chart rows of the starting BOM;
+one row `roll/<unit>` per unit and one row `roll-vm/<unit>` per unit with a machine. With the control
+plane and one machine each of `system`, `kamaji` and `dbaas` that is 16 rows from 0.10.0 or
+0.10.0-rc.1 (no chart row), 19 from 0.9.0, 0.9.1 or a candidate of 0.9.0 (the two tenant charts and
+`pc-platform` 0.1.14 to 0.1.15), and 22 from 0.8.0, 0.8.1 or 0.8.2 (the two tenant charts,
+`pc-platform` 0.1.13 to 0.1.15, and `capi`, `capi-tenant` and `platform` 0.1.2 to 0.1.3). From a
+BOM before 0.10.0 the cluster chart moves "with the first step of the roll": the release's check
+renders the new chart with the old version and templates and finds the machines unchanged
+([ci-release.md](ci-release.md#what-a-release-checks-about-its-bom-pairs)). The plan has two parts.
+`seed`: phrase `upgrade <name> to <release>`. `platform`: blocked with `seed_not_upgraded` until the
+seed's k3s is at `v1.36.6+k3s1`, then phrase `upgrade <name> to <release> and replace its machines`.
+Only the move from 0.10.0 is drilled on a lab; the plans from the eight other BOMs were read
+(`PlanFor`), not run.
+
+**What it does and what stops, step by step.** The sentences are the plan's; the sections
+[The seed's k3s](#the-seeds-k3s) and [The platform cluster's machines](#the-platform-clusters-machines)
+have the detail.
+
+| Step | What the run does | What stops serving | How long |
+|---|---|---|---|
+| Part "seed", stage 2 | Imports the 1.36.6 node image as a template on every Proxmox node the cluster uses (a download of about 2.4 GiB) | Nothing | Not measured |
+| Part "seed", stage 5a | Saves an etcd snapshot on the seed, replaces the k3s binary, restarts k3s. k3s moves its bundled containerd from 2.2 to 2.3 with it | The seed's API. Reconciliation only: no machine is repaired, the seed's ArgoCD syncs nothing, no platform run goes on. The platform cluster, tenant clusters, tenant API servers and databases keep serving | Expected about a minute. Not measured |
+| Part "seed", stage 6 | The seed's charts are compared again, now on k3s 1.36 | Nothing | Not measured |
+| Part "platform", step 1: control plane (one machine) | A second machine is cloned from the 1.36.6 template and joins; the old one is removed. etcd moves from 3.6.6 to 3.6.8 with the machine | The platform cluster's API, from the removal of the old etcd member until the new machine holds the API address: no tenant cluster or database operation, no repair, no failover, stale status in the consoles. Running tenant API servers, workloads and databases are expected to keep answering | Expected one to a few minutes. Not measured |
+| Step 2: `system` | The machine is replaced | The platform's operators (ArgoCD, Cluster API for tenants, CloudNativePG, MetalLB, cert-manager) while they restart on the new machine; a MetalLB address may move | Not measured |
+| Step 3: `kamaji` (one machine) | The machine is replaced; kamaji-etcd's disk follows | **Every tenant API server.** Tenant workloads keep running | Not measured |
+| Step 4: `dbaas` | The machine is replaced; each database's disk follows | **Every database with one instance** on the machine | Not measured |
+| Stages 8 to 11 | The platform cluster's charts are compared on 1.36, the providers are written, the record moves | Nothing | Not measured |
+
+A unit on a node without room for one more machine is replaced delete-first: everything on it is
+away for the whole clone and join (not measured). After step 1's new machine has joined etcd there
+is no way back.
+
+**Tenants keep their version.** No tenant cluster and no database is upgraded: a tenant cluster
+stays on the Kubernetes version and the chart it has. Stage 10 adds 1.36.6, with the new node
+image, to the versions the Kubernetes provider offers, next to the ones it has: a tenant can pick
+it for a new cluster afterwards. Kamaji 26.11.2-edge takes tenant versions up to 1.37.0 by its
+code; its document lists tenants up to 1.35 only. No tenant cluster at 1.36.6 has been created
+anywhere.
+
+**Two charts are outside their documented Kubernetes versions on 1.36.** The upgrade moves no
+third-party chart, so both stay at their pin:
+
+- **cert-manager v1.20.2** (seed and platform cluster): its release table lists Kubernetes 1.32 to
+  1.35. The first cert-manager that lists 1.36 is 1.21. This is new with this BOM.
+- **Cilium 1.18.16** (the platform cluster's CNI): its compatibility page lists 1.30 to 1.33, and
+  says that other versions depend on Kubernetes' own compatibility. It was outside the list on
+  1.35.10 already; 1.36 is one minor further. The first Cilium that lists 1.36 is 1.20.
+
+No source says either breaks on 1.36, and neither was run on 1.36. Both are accepted as "to be
+proven by the lab drill": cert-manager issuing a certificate on the seed and on the platform
+cluster after their moves, Cilium agents Ready on every new node with traffic between nodes. If one
+of them fails there, stop before the next part or unit: the charts cannot be moved by an upgrade in
+this release. Argo CD 3.6, Cluster API v1.14 (as management and as workload cluster) and
+CloudNativePG 1.30 list 1.36. The Proxmox provider, the in-cluster IPAM provider, the Helm addon
+provider, the Kamaji control plane provider, Kamaji, kamaji-etcd, MetalLB, proxmox-csi and kube-vip
+state no Kubernetes version for their pin.
+
+**Kubernetes 1.36 refuses a non-canonical address or CIDR in a new value.** From 1.36 the API
+server validates addresses strictly by default (`StrictIPCIDRValidation`): an address with leading
+zeros, or a CIDR with host bits set (`192.168.0.5/24` in place of `192.168.0.0/24`), is refused in
+a built-in field. The product writes operator and tenant CIDRs into
+`Service.spec.loadBalancerSourceRanges` on the platform cluster: a database's and a tenant
+cluster's `allowedCidrs`, and the sources of the platform cluster's ArgoCD address. A value that is
+already stored keeps working, on any later update of its object too (KEP-4858, ratcheting); only a
+new or changed value, or an object that is created again, is refused, and its Application then
+fails to sync. Before the platform part, read those lists for such values and correct them through
+the product; it is a precaution, the roll itself breaks none.
+
+**The installer path stays on 1.35.10.** `installer/playbooks/group_vars/all/versions.yml` keeps
+k3s `v1.35.10+k3s1` and `services.k8s_version` 1.35.10: `make upgrade` would move a management
+cluster of several servers, which runs Traefik, in place and without any of this upgrade's gates,
+and nothing of that path was studied for 1.36. The kubectl in the clusterctl image therefore stays
+1.35.10, one minor behind the 1.36 API servers it talks to, which is inside Kubernetes' skew rule
+for kubectl and not for 1.37.
+
 ### The seed's k3s
 
 An upgrade whose BOM names a newer k3s replaces it in place, in stage 5a, on the seed VM that
@@ -2184,7 +2285,10 @@ they do not need the seed to run ([When the seed does not answer](#when-the-seed
 ArgoCD and Cluster API on the seed keep their state, which is in the seed's etcd on its disk; the
 pods on the seed keep running through a k3s restart (k3s's own documentation). k3s rewrites the
 add-ons it bundles (CoreDNS, metrics-server) at a version change; traefik, servicelb and
-local-storage are disabled on the seed.
+local-storage are disabled on the seed. From `v1.35.10+k3s1` to `v1.36.6+k3s1` the bundled CoreDNS,
+metrics-server, etcd and Flannel are the same versions and containerd moves from 2.2.10 to 2.3.7
+(k3s's release notes); whether the pods on the seed keep their restart counts across that containerd
+step is not measured.
 
 **What the stage does.** ProxCloud has no shell on the seed, so the stage makes one Job there,
 `proxcloud-system/k3s-upgrade-<version>`, privileged and in the host's namespaces, with the BOM's
@@ -2216,7 +2320,11 @@ both, and the Job, before the run starts.
 
 **No way back in the product.** Nothing restores the snapshot or puts the old binary back. If the
 seed's API does not come back, the failure code `seed_k3s_timeout` names the command that does the
-second by hand; it has not been tried on a lab.
+second by hand; it has not been tried on a lab. That command is enough for a patch step only. For a
+minor step, as `v1.35.10+k3s1` to `v1.36.6+k3s1`, k3s's own rollback document says the datastore
+must be restored too: the old binary alone does not bring a seed back whose etcd the new version
+has written. The snapshot the Job saved is the one to restore; the message and this guide do not
+give that sequence yet, and it has not been tried.
 
 **The seed backup.** Such an upgrade starts only with a backup of the seed VM, and on most sites
 you confirm it yourself: step 4 shows the reason `seed_backup_missing` and a box, "I checked in
@@ -2402,7 +2510,8 @@ the ticked seed backup box (what to check before ticking it: [The seed's k3s](#t
 
 The stages of an apply, rendered from the target BOM:
 
-- **Stages 1 to 5** find the images and the seed as they are: both BOMs name the same images.
+- **Stages 1 to 5** find the images and the seed as they are when both BOMs name the same images.
+  When the target names another node image, stage 2 imports it on every node the cluster uses.
 - **Stage 5a** replaces the seed's k3s when the target BOM names a newer one
   ([The seed's k3s](#the-seeds-k3s)); otherwise it only records the version the seed runs.
 - **Stage 6** applies the seed's ArgoCD HelmChart again (the same chart version, the new release
@@ -2518,7 +2627,7 @@ drill build must carry the BOM of the build before it
 | U13 A surge machine that fails to join, then Retry | `machine_failed` with the old machine still serving, and Retry continues at the same unit |
 | U14 A machine size edited together with the upgrade; a chart-only upgrade | `unexpected_rollout` at the step, nothing of it synced; the chart-only upgrade still replaces nothing |
 | U15 Three control plane machines | No API gap; that the kube-vip hand-over needs no change of the lease values |
-| U16 A minor step, on a lab only, if a drill BOM for it can be built | Whether the roll holds across a minor; the version skew during a pause |
+| U16 A minor step: the BOM with k3s `v1.36.6+k3s1` and Kubernetes 1.36.6 is the first that carries one, so the drill of its candidate from the BOM of 0.10.0 is U7, U10 and U16 in one ([Upgrade to Kubernetes 1.36.6](#upgrade-to-kubernetes-1366)) | Whether the seed's k3s and the roll hold across a minor; every gap of that section's table, to replace "not measured"; the seed's pods across the containerd step; cert-manager v1.20.2 and Cilium 1.18.16 on 1.36; the Proxmox, IPAM, addon and Kamaji providers reconciling on 1.36; a new tenant cluster at 1.35.10 and one at 1.36.6, and a new database, on the 1.36 platform; a CIDR with host bits in `allowedCidrs` refused by the API server; the version skew during a pause; the way back of stage 5a with the snapshot restore, tried once on purpose |
 | U9 The seed backup: start U7 without ticking the box, then with it; a backup on the import store or on the platform's ISO store | The `409 seed_backup_missing`, its sentence and the box in step 4; the `seed-backup` row saying "cannot see" for an archive on the site's own backup store (a directory store, a Proxmox Backup Server) and turning `ok` for one on the import or the ISO store; an old archive of an earlier VM with the seed's VMID not counting |
 
 ## Known issue: no PostgreSQL database on a node image built before 2026-11-16
