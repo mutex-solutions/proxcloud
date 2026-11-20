@@ -2,6 +2,8 @@ package dbaas
 
 import (
 	"context"
+	"slices"
+	"strings"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 )
@@ -34,6 +36,7 @@ func (p *DatabaseSyncProvider) List(ctx context.Context) ([]cloud.CloudResource,
 		return nil, err
 	}
 	ns := NamespaceFor(p.projectID)
+	var pods []map[string]any // the namespace's, read when the first database is not ready
 	out := make([]cloud.CloudResource, 0, len(apps))
 	for _, app := range apps {
 		id := digStr(app, "metadata", "name")
@@ -57,15 +60,58 @@ func (p *DatabaseSyncProvider) List(ctx context.Context) ([]cloud.CloudResource,
 		if EffectiveReadEndpoint(engine, values["instances"], dig(values, "network", "readEndpoint")) {
 			readerHost = s.readHost(ctx, ns, id, engine, host)
 		}
+		data := databaseDataWithHost(app, host, readerHost)
+		// A database that is not ready says why when the reason is one nobody can see from outside: a pod of it that
+		// the scheduler cannot place (no database node has the CPU or memory left). Without it the row read
+		// PROGRESSING for as long as the room was missing.
+		if d, _ := data["database"].(map[string]any); d["status"] != "READY" {
+			if pods == nil {
+				pods, _ = s.api.ListPods(ctx, ns, "") // best effort, once per project
+				pods = append([]map[string]any{}, pods...)
+			}
+			if msg := unschedulable(pods, PodNamePrefixFor(engine, id)); msg != "" {
+				d["status_message"] = msg
+			}
+		}
 		out = append(out, cloud.CloudResource{
 			Type:       cloud.TypeDatabaseCluster,
 			ExternalID: id,
 			Region:     p.region,
 			ProjectID:  p.projectID,
-			Data:       databaseDataWithHost(app, host, readerHost),
+			Data:       data,
 		})
 	}
 	return out, nil
+}
+
+// unschedulable is the scheduler's word on the first pod named prefix-… that it cannot place ("" when every pod of
+// the database has a node): "0/4 nodes are available: 1 Insufficient cpu, …", without the preemption part.
+// ponytail: the text is the scheduler's, node counts included, and nothing checks the room before a create; a
+// capacity check at create (as the Kubernetes provider has) is the upgrade path.
+func unschedulable(pods []map[string]any, prefix string) string {
+	names, found := []string{}, map[string]string{}
+	for _, pod := range pods {
+		name := digStr(pod, "metadata", "name")
+		if !strings.HasPrefix(name, prefix+"-") || digStr(pod, "status", "phase") != "Pending" {
+			continue
+		}
+		conds, _ := dig(pod, "status", "conditions").([]any)
+		for _, c := range conds {
+			if c, _ := c.(map[string]any); digStr(c, "type") == "PodScheduled" && digStr(c, "status") == "False" && digStr(c, "reason") == "Unschedulable" {
+				msg, _, _ := strings.Cut(digStr(c, "message"), " preemption:")
+				if len(msg) > 300 {
+					msg = msg[:300]
+				}
+				names, found[name] = append(names, name), msg
+			}
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	slices.Sort(names)
+	return "Waiting for room on the database nodes: pod " + names[0] + " cannot be scheduled (" + strings.TrimSpace(found[names[0]]) + "). " +
+		"It starts by itself when room is free; a smaller size, or deleting a database that is not needed, frees it."
 }
 
 // databaseData maps an Application → the cached `data` payload (no endpoint enrichment — the

@@ -1179,6 +1179,12 @@ function DatabaseDetail({
           </div>
         </div>
 
+        {typeof d.status_message === "string" && d.status_message !== "" && (
+          <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm" role="status">
+            {d.status_message}
+          </div>
+        )}
+
         {busy && (
           <div className="flex items-center gap-2 rounded-xl border bg-card p-4">
             <Loader2 className="size-4 animate-spin text-muted-foreground" />
