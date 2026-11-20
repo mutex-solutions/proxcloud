@@ -252,10 +252,10 @@ func TestMoveCarriesARollUnderALaterBOM(t *testing.T) {
 }
 
 // The same with the files this build carries: an installation on 0.10.0 that stands after the first unit of the
-// replacement toward a kept candidate with this build's Kubernetes pins (0.10.1-rc.1, the lab's state after the first
-// drill, or 0.10.1-rc.2 after a Retry on that candidate). A Retry is never refused. Under a release BOM the candidate
-// is carried to it; under the development BOM of main, which carries nothing, the Retry goes on to the candidate
-// itself, which it can only do while the candidate's file is kept.
+// replacement toward a kept BOM with this build's Kubernetes pins (0.10.1-rc.1, the lab's state after the first
+// drill, 0.10.1-rc.2 after a Retry on that candidate, or 0.10.1 after a Retry on the release). A Retry is never
+// refused. Under a release BOM the kept one is carried to it; under the development BOM of main, which carries
+// nothing, the Retry goes on to the kept one itself, which it can only do while its file is kept.
 func TestRollTowardAKeptCandidateGoesOn(t *testing.T) {
 	cur, err := Current()
 	if err != nil {
@@ -288,14 +288,14 @@ func TestRollTowardAKeptCandidateGoesOn(t *testing.T) {
 			t.Fatalf("0.10.0 in a roll toward %s: to %s, allowed %v, in progress %v, blocking %v, %v", mid.Release, to.Release, up != nil && up.Allowed, up != nil && up.InProgress, up, err)
 		}
 		if dev && (to.SHA256 != mid.SHA256 || up.Carried != nil) {
-			t.Errorf("0.10.0 in a roll toward %s under %s: to %s, carried %v, want the candidate itself", mid.Release, cur.Release, to.Release, up.Carried)
+			t.Errorf("0.10.0 in a roll toward %s under %s: to %s, carried %v, want %s itself", mid.Release, cur.Release, to.Release, up.Carried, mid.Release)
 		}
 		if !dev && (to.SHA256 != cur.SHA256 || up.Carried == nil || *up.Carried != midRef) {
 			t.Errorf("0.10.0 in a roll toward %s under %s: to %s, carried %v, want carried to this build's", mid.Release, cur.Release, to.Release, up.Carried)
 		}
 	}
-	if cur.Kubernetes.Version == "1.36.6" && seen < 2 {
-		t.Errorf("%d kept candidates with this build's Kubernetes pins, want 0.10.1-rc.1 and 0.10.1-rc.2", seen)
+	if cur.Kubernetes.Version == "1.36.6" && seen < 3 {
+		t.Errorf("%d kept BOMs with this build's Kubernetes pins, want 0.10.1-rc.1, 0.10.1-rc.2 and 0.10.1", seen)
 	}
 }
 
