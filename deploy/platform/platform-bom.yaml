@@ -45,7 +45,9 @@ tenantCharts:                      # what the providers pin for new tenant clust
 # upgrade order); install: application (default) | helmchart (the seed's ArgoCD only, the bootstrap exception);
 # group: the workload node group its pods go to ("" = system, "all" = a DaemonSet everywhere); stateful: prune off,
 # never deleted by a run; upgradeFrom: the versions this entry may replace in place (none = fresh install only;
-# for pc-platform only a version TestUpgradeRollsNoMachine passed, internal/platformlife/upgrade_chart_test.go);
+# for pc-platform only a version TestUpgradeRollsNoMachine passed, internal/platformlife/upgrade_chart_test.go;
+# of the third-party charts only cert-manager's is read, and only for a move listed in certManagerReads there,
+# TestCertManagerMoveRenders; another third-party chart is refused whatever it lists);
 # values: Helm values the component always gets.
 components:
   - name: argocd
