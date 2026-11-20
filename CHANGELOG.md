@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The platform BOM on `main` is `0.11.0-dev`, and the build carries the BOM of `0.10.0`**
+  (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.10.0.yaml`). The `v0.10.0` release commit left
+  the BOM at `0.10.0`, and the release gate refuses only `-dev`. A platform installed by `v0.10.0`, or moved to its
+  BOM by an upgrade, stays on it under a later build and is not refused (`bom_unsupported`) while the file is
+  carried. Its pins are those of `main`, so the plan from it has one change, the release, and
+  `TestUpgradeRollsNoMachine` compares nine previous BOMs with the BOM on `main`: three of 0.8.x, the two
+  candidates of 0.9.0, `0.9.0`, `0.9.1`, `0.10.0-rc.1` and `0.10.0`. No apply on such a platform was run on a lab
+  by this change.
+
 ## [0.10.0] - 2026-11-20
 
 The release after `v0.9.1`. The Proxmox console of a VM made by ProxCloud opens on the graphical display, a
