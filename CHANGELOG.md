@@ -48,6 +48,7 @@ platform cluster ended on Kubernetes 1.36.6. No chart changes with these correct
   `database.status_message` ("Waiting for room on the database nodes: pod ... cannot be scheduled (0/4 nodes are
   available: 1 Insufficient cpu, ...)"), and the tenant's database page shows it under the status. The create is
   still not refused: nothing counts the room beforehand.
+- Refresh `libxml2` in both console images (CVE-2026-86144, fixed in Alpine's 2.13.9-r3).
 
 ### Changed
 
