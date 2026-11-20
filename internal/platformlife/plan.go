@@ -407,9 +407,14 @@ func Classify(from, to *BOM) []PlanChange {
 			{"seed-k3s-job", "Job " + SeedPortalNamespace + "/" + k3sJobName(tk.Version) + " on the seed",
 				"A privileged Job on the seed downloads the binary, checks its sha256 and restarts k3s. The run deletes the Job after it has read its result."},
 			{"seed-etcd-snapshot", k3sSnapshots + "/" + k3sSnapshotName(fk.Version) + "-<node>-<time>",
-				"The Job first saves a snapshot of the seed's etcd (k3s etcd-snapshot save). It is kept: k3s's own snapshot retention applies."},
+				"The Job first saves a snapshot of the seed's etcd (k3s etcd-snapshot save). It is kept: k3s prunes no snapshot saved on demand."},
+			{"seed-k3s-config", k3sLeaderElectFile,
+				"Before it replaces the binary the Job writes this k3s config drop-in: leader-elect=false for kube-controller-manager, kube-scheduler and " +
+					"k3s's cloud-controller-manager, which a seed of one server does not need and which ended k3s when a slow disk made one miss its lease. " +
+					"It takes effect with the restart. /etc/rancher/k3s/config.yaml stays as installed. To undo it by hand: delete the file and restart k3s."},
 			{"seed-k3s-binary", "/usr/local/bin/k3s, the previous binary kept as /usr/local/bin/k3s.prev",
-				"The binary is replaced only after the download passed its sha256. The install script is not run again: the unit and /etc/rancher/k3s/config.yaml stay."},
+				"The binary is replaced only after the download passed its sha256. The install script is not run again: the unit stays. " +
+					"The way back if the seed's API does not return, by hand over SSH: " + seedK3sWayBack(from, to) + ". Not tried on a lab."},
 		} {
 			out = append(out, PlanChange{Name: w[0], To: w[1], Class: ClassSite, Stage: stageSeedK3s, Impact: w[2]})
 		}

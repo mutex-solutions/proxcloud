@@ -1431,7 +1431,7 @@ stage is still trying.
 | `seed_backup_missing` | start, plan | An apply would start an upgrade that replaces the seed's k3s, and the portal saw no `vzdump` archive of the seed VM younger than 24 hours. On most sites it cannot see one: Proxmox shows the portal's tokens the seed's backups on the import store and the platform's ISO store only (row `seed-backup` of the check names the stores it cannot see into). `409`, no run was made | Check in Proxmox that there is an archive of **this** seed VM (its VMID, and the seed VM's name in the notes when it has notes), made after the seed VM was created and younger than 24 hours; take one if there is none (`vzdump <seed VMID>`). Then tick "I checked in Proxmox: seed VM … has a backup made after it was created and younger than 24 hours" in step 4 (`seedBackupTaken` by API) and start the upgrade again |
 | `seed_k3s_failed` | 5a | An upgrade run only. The Job that replaces k3s failed: the etcd snapshot, the download (the seed must reach the BOM's k3s URL, as at its first boot), the sha256 check or a later line. Its script stops at the first failure, so a failure before the last two lines leaves k3s as it was. The message ends with the Job's last output; the Job is deleted. Also when the Job ended more than five minutes ago and the seed's node still reports the old k3s (the previous binary was put back by hand): the Job is deleted | Correct what the message names (most often the seed's way out to the download address), **Retry**: it makes a new Job |
 | `seed_k3s_refused` | 5a | An upgrade run only. The seed's node reports a k3s that is newer than the BOM's or more than one minor older, or an older k3s than the one both BOMs name (the plan listed no `seed.k3s` row, so the run does not replace k3s): the record and the site disagree. Nothing was changed | The message names both versions. A seed that was changed by hand is not moved by a run |
-| `seed_k3s_timeout` | 5a | An upgrade run only. The stage did not end in 20 minutes: the Job did not start or end, the node did not report the new version, or the seed's API did not come back after the restart. The platform cluster and every tenant keep serving; nothing is reconciled while the seed's API is away | If the seed's API answers: **Retry**. If it does not and `/usr/local/bin/k3s.prev` exists on the seed, put the previous binary back over SSH with a key of `spec.seed.sshKeys`: `mv /usr/local/bin/k3s.prev /usr/local/bin/k3s && systemctl restart k3s`, then **Retry**. This step was not tried on a lab |
+| `seed_k3s_timeout` | 5a | An upgrade run only. The stage did not end in 20 minutes: the Job did not start or end, the node did not report the new version, or the seed's API did not come back after the restart. The platform cluster and every tenant keep serving; nothing is reconciled while the seed's API is away | If the seed's API answers: **Retry**. If it does not and `/usr/local/bin/k3s.prev` exists on the seed, put the previous k3s back over SSH with a key of `spec.seed.sshKeys`, with the command the message gives, then **Retry**. For a patch step it is `mv /usr/local/bin/k3s.prev /usr/local/bin/k3s && systemctl restart k3s`. For a minor step (as 1.35 to 1.36) it also restores the etcd snapshot the Job saved: stop k3s and the pods (`k3s-killall.sh`), put `k3s.prev` back, `k3s server --cluster-reset --cluster-reset-restore-path=<the snapshot>`, `systemctl start k3s` ([The seed's k3s](#the-seeds-k3s) has the whole command). Neither was tried on a lab |
 | `seed_lost` | 3, Remove | A seed that had become ready is gone, or the VM at its VMID is no longer this installation's. It is not rebuilt: a new, empty seed would have no record of the cluster's machines | Remove with the option for a missing seed, then install again ([Remove](#remove)) |
 | `component_unhealthy` | 6 to 9 | An Application is not Synced and Healthy in time (the message names it and its condition); or something could not be rendered or applied, in stage 7 the Application `pc-platform` | Download the seed kubeconfig to look closer, then **Retry**. ArgoCD does not sync an Application again by itself once its retries are spent; the run starts the sync of one whose last sync ended `Failed` or `Error`, once per run, so no manual sync is needed after the cause is fixed. When that sync ends `Failed` or `Error` too, the stage fails at once with what the sync failed on (the hook or resource and its message) instead of waiting for its time limit; **Retry** starts the sync once more. ArgoCD takes about 40 minutes to spend the ten retries of one sync, longer than the time limit of stage 6 or of a wave, so the stage does not wait for that either: once one sync has failed four times (about 8 minutes of ArgoCD's backoff), the last time in this run, and ArgoCD shows the hook or resource it failed on, the stage fails with that text while ArgoCD still tries. After a **Retry** the same sync gets one more attempt before the stage fails on it again |
 | `capi_init_failed` | 6, 9 | clusterctl did not install the providers of the BOM; or a provider is installed at another version than the BOM names (provider upgrades are not in this release) | The same |
@@ -2106,7 +2106,7 @@ lists every difference. The upgrade is allowed when every difference is one of t
 | platform cluster `platform` (chart `proxcloud-platform`) | chart | The Application moves to the new chart version. ArgoCD syncs what the new chart renders differently of provider RBAC, tenant AppProjects and the MetalLB pool |
 | seed `pc-platform` (chart `proxmox-kamaji-cluster`) | chart | The Application moves to the new chart version. ArgoCD syncs the Cluster API objects of the platform cluster that the new chart renders differently, after the check that no machine is replaced (below). On a move that replaces machines it moves with the first step of the roll |
 | `kubernetes.version` (the same, a newer patch or exactly one minor up), `kubernetes.nodeImage`, and `images.kubeVip` together with a new node image, when the target's cluster chart is 0.1.15 or newer and the installation uses the BOM's node image | machines | Cluster API replaces every machine of the platform cluster, ordered by the run ([The platform cluster's machines](#the-platform-clusters-machines)). The plan then begins with the line that there is no way back and has one row `roll/<unit>` per unit with what stops meanwhile, and one row `roll-vm/<unit>` of kind `site` with what is made and deleted on Proxmox |
-| `seed.k3s`, to a version that is newer by a patch, by a k3s build (`+k3s2` after `+k3s1`) or by exactly one minor | seed | Stage 5a replaces the k3s binary on the running seed VM and restarts k3s ([The seed's k3s](#the-seeds-k3s)). With it the plan lists three rows of kind `site`, what the stage writes on the seed: the Job, the etcd snapshot and the binary |
+| `seed.k3s`, to a version that is newer by a patch, by a k3s build (`+k3s2` after `+k3s1`) or by exactly one minor | seed | Stage 5a replaces the k3s binary on the running seed VM and restarts k3s ([The seed's k3s](#the-seeds-k3s)). With it the plan lists four rows of kind `site`, what the stage writes on the seed: the Job, the etcd snapshot, the k3s config drop-in without leader election and the binary (its row gives the way back by hand) |
 
 One more row can be in the plan that is not a difference of the two BOMs: `pve-api-rule`, kind
 `site`, when the cluster firewall does not hold the rule for the Proxmox API
@@ -2194,13 +2194,14 @@ no seed image.
 **The plan, from every earlier BOM.** All nine BOMs this build carries name 1.35.10 and
 `v1.35.10+k3s1`, so each is one minor from the target and the move is allowed from each. The plan
 has, in this order: the row `roll` (there is no way back); `release`; `kubernetes.version` and
-`kubernetes.nodeImage`, kind `machines`; `seed.k3s`, kind `seed`, with its three `site` rows
+`kubernetes.nodeImage`, kind `machines`; `seed.k3s`, kind `seed`, with its four `site` rows
 (`seed-k3s-job`: Job `proxcloud-system/k3s-upgrade-v1-36-6-k3s1`; `seed-etcd-snapshot`:
-`pre-upgrade-v1.35.10-k3s1-<node>-<time>`; `seed-k3s-binary`); the chart rows of the starting BOM;
+`pre-upgrade-v1.35.10-k3s1-<node>-<time>`; `seed-k3s-config`: the drop-in without leader election;
+`seed-k3s-binary`, with the way back by hand across the minor); the chart rows of the starting BOM;
 one row `roll/<unit>` per unit and one row `roll-vm/<unit>` per unit with a machine. With the control
-plane and one machine each of `system`, `kamaji` and `dbaas` that is 16 rows from 0.10.0 or
-0.10.0-rc.1 (no chart row), 19 from 0.9.0, 0.9.1 or a candidate of 0.9.0 (the two tenant charts and
-`pc-platform` 0.1.14 to 0.1.15), and 22 from 0.8.0, 0.8.1 or 0.8.2 (the two tenant charts,
+plane and one machine each of `system`, `kamaji` and `dbaas` that is 17 rows from 0.10.0 or
+0.10.0-rc.1 (no chart row), 20 from 0.9.0, 0.9.1 or a candidate of 0.9.0 (the two tenant charts and
+`pc-platform` 0.1.14 to 0.1.15), and 23 from 0.8.0, 0.8.1 or 0.8.2 (the two tenant charts,
 `pc-platform` 0.1.13 to 0.1.15, and `capi`, `capi-tenant` and `platform` 0.1.2 to 0.1.3). From a
 BOM before 0.10.0 the cluster chart moves "with the first step of the roll": the release's check
 renders the new chart with the old version and templates and finds the machines unchanged
@@ -2217,7 +2218,7 @@ have the detail.
 | Step | What the run does | What stops serving | How long |
 |---|---|---|---|
 | Part "seed", stage 2 | Imports the 1.36.6 node image as a template on every Proxmox node the cluster uses (a download of about 2.4 GiB) | Nothing | Not measured |
-| Part "seed", stage 5a | Saves an etcd snapshot on the seed, replaces the k3s binary, restarts k3s. k3s moves its bundled containerd from 2.2 to 2.3 with it | The seed's API. Reconciliation only: no machine is repaired, the seed's ArgoCD syncs nothing, no platform run goes on. The platform cluster, tenant clusters, tenant API servers and databases keep serving | Expected about a minute. Not measured |
+| Part "seed", stage 5a | Saves an etcd snapshot on the seed, writes the k3s config drop-in that turns leader election off in three components, replaces the k3s binary, restarts k3s. k3s moves its bundled containerd from 2.2 to 2.3 with it | The seed's API. Reconciliation only: no machine is repaired, the seed's ArgoCD syncs nothing, no platform run goes on. The platform cluster, tenant clusters, tenant API servers and databases keep serving | Expected about a minute. Not measured |
 | Part "seed", stage 6 | The seed's charts are compared again, now on k3s 1.36 | Nothing | Not measured |
 | Part "platform", step 1: control plane (one machine) | A second machine is cloned from the 1.36.6 template and joins; the old one is removed. etcd moves from 3.6.6 to 3.6.8 with the machine | The platform cluster's API, from the removal of the old etcd member until the new machine holds the API address: no tenant cluster or database operation, no repair, no failover, stale status in the consoles. Running tenant API servers, workloads and databases are expected to keep answering | Expected one to a few minutes. Not measured |
 | Step 2: `system` | The machine is replaced | The platform's operators (ArgoCD, Cluster API for tenants, CloudNativePG, MetalLB, cert-manager) while they restart on the new machine; a MetalLB address may move | Not measured |
@@ -2300,6 +2301,9 @@ k3s etcd-snapshot save --name pre-upgrade-<old version>
 curl -fsSL --retry 5 -o /usr/local/bin/k3s.new <the BOM's k3s binary URL>
 printf '%s  %s\n' <the BOM's sha256> /usr/local/bin/k3s.new | sha256sum -c -
 chmod 0755 /usr/local/bin/k3s.new
+mkdir -p /etc/rancher/k3s/config.yaml.d
+printf '%s\n' '<the drop-in, one line>' > /etc/rancher/k3s/config.yaml.d/10-proxcloud-leader-elect.yaml.new
+mv -f /etc/rancher/k3s/config.yaml.d/10-proxcloud-leader-elect.yaml.new /etc/rancher/k3s/config.yaml.d/10-proxcloud-leader-elect.yaml
 cp -p /usr/local/bin/k3s /usr/local/bin/k3s.prev
 mv -f /usr/local/bin/k3s.new /usr/local/bin/k3s
 systemctl restart k3s
@@ -2307,24 +2311,76 @@ systemctl restart k3s
 
 The download, checksum and mode lines are the ones of the seed's first boot. The install script is
 **not** run again: the systemd unit and `/etc/rancher/k3s/config.yaml` stay as installed, which is
-k3s's documented manual upgrade (the binary and a restart). A snapshot, download or checksum that
-fails ends the Job before the binary is touched (`seed_k3s_failed`). The stage is done when the
+k3s's documented manual upgrade (the binary and a restart). A snapshot, download, checksum or
+drop-in write that fails ends the Job before the binary is touched (`seed_k3s_failed`). The drop-in
+is written after the checksum and before the binary: if a later line fails, the file stays, the
+running k3s does not read it, and the next start of either binary takes it as intended. The stage is done when the
 Job has ended, the seed's node reports the new version and is Ready; it then records the version
 and deletes the Job. Stage 6 follows unchanged and is the check that ArgoCD and Cluster API kept
 their state: ArgoCD's repo server available, every Application Synced and Healthy, the clusterctl
 inventory equal to the BOM.
 
+**No leader election on the seed.** The drop-in
+`/etc/rancher/k3s/config.yaml.d/10-proxcloud-leader-elect.yaml` holds one line:
+
+```
+{"kube-controller-manager-arg+":["leader-elect=false"],"kube-scheduler-arg+":["leader-elect=false"],"kube-cloud-controller-manager-arg+":["leader-elect=false"]}
+```
+
+A seed is one k3s server. With its embedded etcd, k3s still runs kube-controller-manager,
+kube-scheduler and its cloud-controller-manager under a leader lease (it turns that off by itself
+only for sqlite: `pkg/cluster/cluster.go` line 222 and `pkg/daemons/control/server.go` lines 135,
+168 and 379 at `v1.36.6+k3s1`). A component that cannot renew its lease in time exits, and k3s with
+it: that was seen on a lab seed during a backup and during a heavy apply, although no second server
+exists that could take the lease. With `leader-elect=false` each of the three starts its
+controllers at once and holds no lease, so a slow disk cannot end it that way. k3s reads
+`config.yaml.d/*.yaml` after `config.yaml`, in alphabetical order, and a key that ends in `+` is
+appended to the value before it (k3s's "Configuration File" document; `pkg/configfilearg/parser.go`
+lines 226 to 292, the same in `v1.35.10+k3s1`), so an argument you set yourself in `config.yaml`
+stays, and `config.yaml` is not rewritten. A new seed gets the same file at its first boot; an
+existing seed gets it from the Job of the first upgrade that replaces its k3s, and it takes effect
+with that restart. Limits: k3s's own controllers (`pkg/server/server.go`, `leader.RunOrDie`) keep
+their lease and no argument turns it off, so this removes the exits that were seen, not every
+possible one; a second k3s server must never join a seed that has this file; none of it has run on
+a lab. To undo it by hand: delete the file and `systemctl restart k3s`.
+
 **What stays on the seed.** The etcd snapshot under `/var/lib/rancher/k3s/server/db/snapshots`
-(k3s's own retention applies) and the previous binary as `/usr/local/bin/k3s.prev`. The plan lists
-both, and the Job, before the run starts.
+(k3s prunes no snapshot saved on demand: delete old ones with `k3s etcd-snapshot delete`), the
+drop-in and the previous binary as `/usr/local/bin/k3s.prev`. The plan lists them, and the Job,
+before the run starts.
 
 **No way back in the product.** Nothing restores the snapshot or puts the old binary back. If the
-seed's API does not come back, the failure code `seed_k3s_timeout` names the command that does the
-second by hand; it has not been tried on a lab. That command is enough for a patch step only. For a
-minor step, as `v1.35.10+k3s1` to `v1.36.6+k3s1`, k3s's own rollback document says the datastore
-must be restored too: the old binary alone does not bring a seed back whose etcd the new version
-has written. The snapshot the Job saved is the one to restore; the message and this guide do not
-give that sequence yet, and it has not been tried.
+seed's API does not come back, the failure code `seed_k3s_timeout` and the plan's row `seed-k3s-binary` give the command that
+does it by hand, over SSH with a key of `spec.seed.sshKeys`. Neither form has been tried on a lab.
+
+- **A patch step** (the minor stays): `mv /usr/local/bin/k3s.prev /usr/local/bin/k3s && systemctl restart k3s`.
+- **A minor step**, as `v1.35.10+k3s1` to `v1.36.6+k3s1`: the old binary alone is not enough. k3s's
+  rollback document ("Rolling Back K3s", embedded etcd) says "If you cannot restore the database,
+  you cannot roll back to a previous minor version", and gives this order: stop k3s and its pods
+  with `k3s-killall.sh`, put the old binary back without starting it, restore the snapshot with
+  `k3s server --cluster-reset --cluster-reset-restore-path=<snapshot>`, start k3s. The snapshot is
+  the one the Job saved before it touched the binary:
+  `/var/lib/rancher/k3s/server/db/snapshots/pre-upgrade-<old version>-<node>-<time>` (the plan's row
+  `seed-etcd-snapshot` and the stage's first message name it; the time is the second of the save,
+  which the run cannot read once the seed's API is away, so the command takes the newest file of
+  that name). In one line, as the message gives it for `v1.35.10+k3s1`:
+
+  ```
+  S="$(ls -t /var/lib/rancher/k3s/server/db/snapshots/pre-upgrade-v1.35.10-k3s1-* | head -n 1)" && test -n "$S" && k3s-killall.sh && mv /usr/local/bin/k3s.prev /usr/local/bin/k3s && k3s server --cluster-reset --cluster-reset-restore-path="$S" && systemctl start k3s
+  ```
+
+  It stops before it changes anything when no such snapshot exists (`--cluster-reset` with an empty
+  path would reset etcd without restoring it). `k3s server --cluster-reset` ends by itself with
+  "Managed etcd cluster membership has been reset, restart without --cluster-reset flag now".
+  `k3s-killall.sh` stops every pod on the seed; they start again with k3s. What was written on the
+  seed after the snapshot is lost: that is the run's own progress since the Job began, and nothing
+  of the platform cluster or a tenant. The restored etcd still holds the upgrade Job as it was while
+  it ran; what k3s makes of it is not known (expected: its pod is found gone, the Job fails, the
+  stage reports `seed_k3s_failed` and deletes it), so after the restore look at the run before
+  **Retry**. The embedded etcd is 3.6.14 in both k3s versions, so the restore crosses no etcd
+  version. The drop-in without leader election stays; k3s 1.35 reads it the same way.
+
+If neither brings the seed back, the backup of the seed VM is the last net ([Credentials and the seed backup](#8-credentials-and-the-seed-backup)).
 
 **The seed backup.** Such an upgrade starts only with a backup of the seed VM, and on most sites
 you confirm it yourself: step 4 shows the reason `seed_backup_missing` and a box, "I checked in
@@ -2619,7 +2675,7 @@ drill build must carry the BOM of the build before it
 | U4 Failure and Retry: a drill build with a wrong chart digest for `platform`, so workload wave 3 fails; then the corrected build | No Application goes back to the old revision; with the corrected build step 4 shows **Upgrade to release Z instead**, and the later build's BOM is accepted over the unfinished target |
 | U5 The tenant wait: stop a tenant control plane's pod during stage 9 | The run waits with `tenants_unhealthy` and goes on when it is Ready. Then let the wait run out (the run fails) and Retry with the tenant still down: the new run waits again |
 | U6 Restore: after U4's failure, restore the seed's `vzdump` and the portal database dump | Whether that returns the platform to the BOM it left |
-| U7 The seed's k3s: a drill build whose BOM differs in `seed.k3s` alone, on a platform with one tenant cluster and one database under a write loop, the tenant API and the database probed once a second | That the run ends succeeded; the gap of the seed's API in seconds; no gap on the tenant API or the database; the node at the target version; the etcd snapshot file on the seed; every Application of the seed Synced and Healthy and the clusterctl inventory unchanged afterwards; no Machine replaced. Also whether the Job's end is recorded once the kubelet is back (it restarts the k3s that runs it), and that the clusterctl image's `nsenter` enters the host as the Job asks |
+| U7 The seed's k3s: a drill build whose BOM differs in `seed.k3s` alone, on a platform with one tenant cluster and one database under a write loop, the tenant API and the database probed once a second | That the run ends succeeded; the gap of the seed's API in seconds; no gap on the tenant API or the database; the node at the target version; the etcd snapshot file on the seed; the drop-in `10-proxcloud-leader-elect.yaml` on the seed and `--leader-elect=false` in k3s's log lines "Running kube-controller-manager", "Running kube-scheduler" and "Running cloud-controller-manager"; no exit of k3s during the rest of the run; every Application of the seed Synced and Healthy and the clusterctl inventory unchanged afterwards; no Machine replaced. Also whether the Job's end is recorded once the kubelet is back (it restarts the k3s that runs it), and that the clusterctl image's `nsenter` enters the host as the Job asks |
 | U8 The seed's k3s, failing: a throwaway build with a wrong sha256 for the binary, then the corrected build | `seed_k3s_failed` with k3s untouched (`k3s --version` on the seed, no `k3s.prev`), and Retry with the corrected build passes |
 | U10 The roll, homelab shape (one node, one control plane machine): drill builds whose BOM names the next Kubernetes patch with a node image built for it; a tenant cluster serving a pod behind a LoadBalancer and a database under a write loop; probes once a second on the platform API, the tenant API and the database | That **Seed and node image** imports the template and that the platform part is blocked before it and allowed after; that the roll completes; the measured gap per unit (platform API; tenant API during the control plane's step and during the kamaji step; database during the dbaas step), to replace "not measured" in the plan and in this guide; every volume attached to the new machine; the owner's other VMs untouched (`qm list` before and after) |
 | U11 Pause after the control plane, Resume an hour later | That the mixed-version cluster serves and the run goes on at the next unit |
@@ -2627,7 +2683,7 @@ drill build must carry the BOM of the build before it
 | U13 A surge machine that fails to join, then Retry | `machine_failed` with the old machine still serving, and Retry continues at the same unit |
 | U14 A machine size edited together with the upgrade; a chart-only upgrade | `unexpected_rollout` at the step, nothing of it synced; the chart-only upgrade still replaces nothing |
 | U15 Three control plane machines | No API gap; that the kube-vip hand-over needs no change of the lease values |
-| U16 A minor step: the BOM with k3s `v1.36.6+k3s1` and Kubernetes 1.36.6 is the first that carries one, so the drill of its candidate from the BOM of 0.10.0 is U7, U10 and U16 in one ([Upgrade to Kubernetes 1.36.6](#upgrade-to-kubernetes-1366)) | Whether the seed's k3s and the roll hold across a minor; every gap of that section's table, to replace "not measured"; the seed's pods across the containerd step; cert-manager v1.20.2 and Cilium 1.18.16 on 1.36; the Proxmox, IPAM, addon and Kamaji providers reconciling on 1.36; a new tenant cluster at 1.35.10 and one at 1.36.6, and a new database, on the 1.36 platform; a CIDR with host bits in `allowedCidrs` refused by the API server; the version skew during a pause; the way back of stage 5a with the snapshot restore, tried once on purpose |
+| U16 A minor step: the BOM with k3s `v1.36.6+k3s1` and Kubernetes 1.36.6 is the first that carries one, so the drill of its candidate from the BOM of 0.10.0 is U7, U10 and U16 in one ([Upgrade to Kubernetes 1.36.6](#upgrade-to-kubernetes-1366)) | Whether the seed's k3s and the roll hold across a minor; every gap of that section's table, to replace "not measured"; the seed's pods across the containerd step; cert-manager v1.20.2 and Cilium 1.18.16 on 1.36; the Proxmox, IPAM, addon and Kamaji providers reconciling on 1.36; a new tenant cluster at 1.35.10 and one at 1.36.6, and a new database, on the 1.36 platform; a CIDR with host bits in `allowedCidrs` refused by the API server; the version skew during a pause; the way back of stage 5a with the snapshot restore, tried once on purpose with the command of the message (on a clone of the seed, or after the round): that the seed answers again on 1.35.10, what the upgrade Job's object does after the restore, and that **Retry** then moves the seed again |
 | U9 The seed backup: start U7 without ticking the box, then with it; a backup on the import store or on the platform's ISO store | The `409 seed_backup_missing`, its sentence and the box in step 4; the `seed-backup` row saying "cannot see" for an archive on the site's own backup store (a directory store, a Proxmox Backup Server) and turning `ok` for one on the import or the ISO store; an old archive of an earlier VM with the seed's VMID not counting |
 
 ## Known issue: no PostgreSQL database on a node image built before 2026-11-16
@@ -2920,7 +2976,9 @@ which restarts the k3s it runs under ends and is reported as ended once the kube
 the applet with these flags; that was read from the image, not run on a seed); how long the
 seed's API is away; that the seed reaches the k3s download address (nothing checks it before the
 Job, as nothing does before the first boot); what k3s does to its bundled CoreDNS and
-metrics-server at the version change; the hand step that puts `k3s.prev` back; and whether the
+metrics-server at the version change; the hand step that puts `k3s.prev` back, and across a minor the snapshot restore with it; that the
+three components run without leader election after the Job's restart and after a first boot, and
+that k3s then no longer exits under disk load; and whether the
 corrected `seed-backup` row reads on a real site (the row of v0.10.0-rc.1 was seen on a lab on
 2026-11-20 to report "hold none" for a store that held today's archive; the correction and the
 `409 seed_backup_missing` have run in tests only).

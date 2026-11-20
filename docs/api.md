@@ -859,7 +859,8 @@ are several, `errors.details.problems`.
     `record only` (nothing of the platform is synced for it), `refused`, `seed` (the entry `seed.k3s`, from and to a
     k3s version: stage `seed-k3s` replaces k3s on the running seed VM), or `site` (a write on the site outside the
     platform's clusters: the entry `pve-api-rule` above, which is no difference of the BOMs, and next to a `seed`
-    entry the three things that stage writes on the seed: `seed-k3s-job`, `seed-etcd-snapshot`, `seed-k3s-binary`,
+    entry the four things that stage writes on the seed: `seed-k3s-job`, `seed-etcd-snapshot`, `seed-k3s-config`
+    (the k3s config drop-in without leader election), `seed-k3s-binary` (its `impact` gives the way back by hand),
     each with what and where in `to`).
     `impact` says what the change restarts or rolls; a refused change has
     `blocking`, its reason, instead.

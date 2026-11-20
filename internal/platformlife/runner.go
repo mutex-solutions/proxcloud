@@ -432,7 +432,7 @@ func (x *acq) stage(ctx context.Context) (end, bool) {
 		}
 		msg := "The stage did not finish before its deadline. " + s.Message
 		if s.ID == stageSeedK3s { // whatever the last look waited for, the operator needs the same next step
-			code, msg = TimeoutCode(s.ID), msg+seedK3sTimeout
+			code, msg = TimeoutCode(s.ID), msg+seedK3sTimeout(x.from, x.bom)
 		}
 		return x.finish(ctx, RunFailed, code, msg), true
 	}

@@ -1,12 +1,19 @@
 package platformlife
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // newerK3s makes the target BOM's k3s another version, with the downloads of that version.
@@ -20,7 +27,7 @@ func newerK3s(version string) func(*BOM) {
 }
 
 // The step rule of the seed's k3s, from 0.8.1's v1.35.10+k3s1: a patch, a k3s build and one minor up are moved by the
-// run (class seed, with the three things it writes on the seed); back, two minors and a changed published version
+// run (class seed, with the four things it writes on the seed); back, two minors and a changed published version
 // refuse the upgrade, each with its own sentence.
 func TestK3sStepRule(t *testing.T) {
 	for version, refusal := range map[string]string{
@@ -59,9 +66,16 @@ func TestK3sStepRule(t *testing.T) {
 				}
 			}
 			if c.Class != ClassSeed || c.Stage != stageSeedK3s || c.From != "v1.35.10+k3s1" || c.To != version || c.Blocking != "" ||
-				!strings.Contains(c.Impact, "tenant cluster") || !up.Allowed || !up.MovesSeed() || len(site) != 3 ||
-				!strings.Contains(site[0], k3sJobName(version)) || !strings.Contains(site[1], "pre-upgrade-v1.35.10-k3s1") || !strings.Contains(site[2], "k3s.prev") {
+				!strings.Contains(c.Impact, "tenant cluster") || !up.Allowed || !up.MovesSeed() || len(site) != 4 ||
+				!strings.Contains(site[0], k3sJobName(version)) || !strings.Contains(site[1], "pre-upgrade-v1.35.10-k3s1") || site[2] != k3sLeaderElectFile ||
+				!strings.Contains(site[3], "k3s.prev") {
 				t.Fatalf("%+v, site %v, upgrade %+v", c, site, up)
+			}
+			// The binary's row carries the way back: across a minor it is the snapshot restore, within one the binary alone.
+			back := changes[slices.IndexFunc(changes, func(w PlanChange) bool { return w.Name == "seed-k3s-binary" })].Impact
+			if minor := version == "v1.36.0+k3s1"; strings.Contains(back, "--cluster-reset-restore-path") != minor ||
+				strings.Contains(back, "mv /usr/local/bin/k3s.prev /usr/local/bin/k3s && systemctl restart k3s") == minor {
+				t.Fatalf("the way back of %s: %s", version, back)
 			}
 		})
 	}
@@ -98,7 +112,8 @@ func TestSeedK3sJobSharesTheFirstBootLines(t *testing.T) {
 		return strings.Contains(l, b.Seed.K3s.Binary.SHA256) && strings.HasSuffix(l, "| sha256sum -c -")
 	})
 	mv := slices.Index(lines, "mv -f /usr/local/bin/k3s.new /usr/local/bin/k3s")
-	if shared != 3 || lines[0] != "k3s etcd-snapshot save --name 'pre-upgrade-v1.35.9-k3s1'" || sum < 0 || mv < sum ||
+	conf := slices.IndexFunc(lines, func(l string) bool { return strings.HasSuffix(l, " "+k3sLeaderElectFile) })
+	if shared != 3 || lines[0] != "k3s etcd-snapshot save --name 'pre-upgrade-v1.35.9-k3s1'" || sum < 0 || conf < sum || mv < conf ||
 		lines[mv-1] != "cp -p /usr/local/bin/k3s /usr/local/bin/k3s.prev" || lines[len(lines)-1] != "systemctl restart k3s" {
 		t.Fatalf("%d shared lines of:\n%s", shared, strings.Join(lines, "\n"))
 	}
@@ -299,3 +314,152 @@ func TestStartApplyNeedsASeedBackup(t *testing.T) {
 }
 
 func jsonOf(v any) string { b, _ := json.Marshal(v); return string(b) }
+
+// fakeHost runs sh lines the product gives for the seed's host (the Job's script, the step by hand) with the real sh
+// -eu, coreutils and sha256sum on a directory that stands for the seed's root. k3s, curl, systemctl and
+// k3s-killall.sh are stubs that write their arguments to the returned log; curl writes "new k3s" where -o says, and a
+// stub named in fail exits 1. It shows what the shell does with the lines (quoting, order, where a failure stops
+// them), nothing of what k3s does with the files.
+func fakeHost(t *testing.T, script string, fail ...string) (root, log string) {
+	t.Helper()
+	root = t.TempDir()
+	return root, hostRun(t, root, script, fail...)
+}
+
+func hostRun(t *testing.T, root, script string, fail ...string) string {
+	t.Helper()
+	stubs := filepath.Join(root, "stubs")
+	for _, d := range []string{stubs, filepath.Join(root, "usr/local/bin"), filepath.Join(root, "etc/rancher/k3s"), filepath.Join(root, k3sSnapshots)} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logFile := filepath.Join(root, "log")
+	for _, name := range []string{"k3s", "curl", "systemctl", "k3s-killall.sh"} {
+		body := "#!/bin/sh\necho " + name + " \"$@\" >> " + logFile + "\n"
+		switch {
+		case slices.Contains(fail, name):
+			body += "exit 1\n"
+		case name == "curl":
+			body += "while [ $# -gt 1 ]; do [ \"$1\" = -o ] && printf 'new k3s' > \"$2\"; shift; done\n"
+		}
+		if err := os.WriteFile(filepath.Join(stubs, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, dir := range []string{"/usr/local/bin", "/etc/rancher", "/var/lib/rancher"} {
+		script = strings.ReplaceAll(script, dir, root+dir)
+	}
+	cmd := exec.Command("sh", "-euc", script)
+	cmd.Env = []string{"PATH=" + stubs + ":" + os.Getenv("PATH")}
+	out, err := cmd.CombinedOutput()
+	b, _ := os.ReadFile(logFile)
+	if err != nil {
+		return string(b) + "exit: " + err.Error() + " " + string(out)
+	}
+	return string(b)
+}
+
+// The Job's script on a host: it writes the drop-in the first boot writes (the same bytes, which parse to the three
+// keys k3s appends), a second run changes nothing, and each failure stops it where the stage's message says: a wrong
+// sum before the drop-in and the binary, and a failure at the binary step with the drop-in whole and no restart.
+func TestSeedK3sJobOnAHost(t *testing.T) {
+	b := *embedded(t)
+	b.Seed.K3s.Binary.SHA256 = fmt.Sprintf("%x", sha256.Sum256([]byte("new k3s")))
+	script := func(b *BOM) string {
+		c := dig(SeedK3sJob(b, "v1.35.10+k3s1"), "spec", "template", "spec", "containers").([]any)[0].(map[string]any)["command"].([]any)
+		return c[len(c)-1].(string)
+	}
+	read := func(root, path string) string { d, _ := os.ReadFile(filepath.Join(root, path)); return string(d) }
+	const bin = "/usr/local/bin/k3s"
+
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "usr/local/bin"), 0o755)
+	os.WriteFile(filepath.Join(root, bin), []byte("old k3s"), 0o755)
+	for range 2 {
+		log := hostRun(t, root, script(&b))
+		os.Remove(filepath.Join(root, "log"))
+		var conf map[string][]string
+		if err := yaml.Unmarshal([]byte(read(root, k3sLeaderElectFile)), &conf); err != nil {
+			t.Fatal(err)
+		}
+		off := []string{"leader-elect=false"}
+		if !strings.HasPrefix(log, "k3s etcd-snapshot save --name pre-upgrade-v1.35.10-k3s1\ncurl ") || !strings.HasSuffix(log, "\nsystemctl restart k3s\n") ||
+			read(root, k3sLeaderElectFile) != k3sLeaderElect+"\n" || read(root, k3sLeaderElectFile+".new") != "" || len(conf) != 3 ||
+			!slices.Equal(conf["kube-controller-manager-arg+"], off) || !slices.Equal(conf["kube-scheduler-arg+"], off) ||
+			!slices.Equal(conf["kube-cloud-controller-manager-arg+"], off) || read(root, bin) != "new k3s" || read(root, bin+".prev") == "" {
+			t.Fatalf("log:\n%s\ndrop-in %q, conf %v, binary %q", log, read(root, k3sLeaderElectFile), conf, read(root, bin))
+		}
+	}
+
+	// A wrong sum: nothing of k3s's is written.
+	wrong := b
+	wrong.Seed.K3s.Binary.SHA256 = strings.Repeat("7", 64)
+	root = t.TempDir()
+	os.MkdirAll(filepath.Join(root, "usr/local/bin"), 0o755)
+	os.WriteFile(filepath.Join(root, bin), []byte("old k3s"), 0o755)
+	if log := hostRun(t, root, script(&wrong)); !strings.Contains(log, "exit: ") || strings.Contains(log, "systemctl") ||
+		read(root, bin) != "old k3s" || read(root, bin+".prev") != "" || read(root, k3sLeaderElectFile) != "" {
+		t.Fatalf("a wrong sum:\n%s\nbinary %q, drop-in %q", log, read(root, bin), read(root, k3sLeaderElectFile))
+	}
+	// A failed snapshot: the same, and no download.
+	root, log := fakeHost(t, script(&b), "k3s")
+	if !strings.Contains(log, "exit: ") || strings.Contains(log, "curl") || read(root, k3sLeaderElectFile) != "" {
+		t.Fatalf("a failed snapshot:\n%s", log)
+	}
+	// The binary step fails (here: no running binary to keep): the drop-in is there, whole, and k3s is not restarted.
+	// That is the one failure that leaves something behind; the running k3s does not read it.
+	root, log = fakeHost(t, script(&b))
+	if !strings.Contains(log, "exit: ") || strings.Contains(log, "systemctl") || read(root, k3sLeaderElectFile) != k3sLeaderElect+"\n" ||
+		read(root, bin) != "" {
+		t.Fatalf("a failed binary step:\n%s\ndrop-in %q", log, read(root, k3sLeaderElectFile))
+	}
+}
+
+// The step by hand of seed_k3s_timeout. Within a minor it is the previous binary. Across one it is k3s's rollback for
+// embedded etcd, run here by a real sh: with two snapshots of the Job's name the newest is restored, after
+// k3s-killall.sh and the binary, before the start; with none the command stops before it changes anything.
+func TestSeedK3sWayBack(t *testing.T) {
+	at := func(v string) *BOM { b := *embedded(t); newerK3s(v)(&b); return &b }
+	from := at("v1.35.10+k3s1")
+	patch := seedK3sTimeout(from, at("v1.35.11+k3s1"))
+	if !strings.Contains(patch, "`mv /usr/local/bin/k3s.prev /usr/local/bin/k3s && systemctl restart k3s`") || strings.Contains(patch, "cluster-reset") ||
+		seedK3sTimeout(nil, from) != patch {
+		t.Fatalf("a patch step: %s", patch)
+	}
+	msg := seedK3sTimeout(from, at("v1.36.6+k3s1"))
+	if !strings.Contains(msg, "keep serving") || !strings.Contains(msg, k3sSnapshots+"/pre-upgrade-v1.35.10-k3s1-<node>-<time>") || strings.Contains(msg, "systemctl restart") {
+		t.Fatalf("a minor step: %s", msg)
+	}
+	_, cmd, _ := strings.Cut(msg, "`")
+	cmd, _, _ = strings.Cut(cmd, "`")
+
+	root := t.TempDir()
+	prev := filepath.Join(root, "usr/local/bin/k3s.prev")
+	place := func() {
+		os.MkdirAll(filepath.Dir(prev), 0o755)
+		os.WriteFile(prev, []byte("old k3s"), 0o755)
+		os.WriteFile(filepath.Join(root, "usr/local/bin/k3s"), []byte("new k3s"), 0o755)
+	}
+	place()
+	if log := hostRun(t, root, cmd); !strings.Contains(log, "exit: ") || strings.Contains(log, "k3s-killall.sh") || strings.Contains(log, "k3s server") {
+		t.Fatalf("without a snapshot:\n%s", log)
+	}
+	if d, _ := os.ReadFile(prev); string(d) != "old k3s" {
+		t.Fatalf("without a snapshot the binary was moved")
+	}
+	os.Remove(filepath.Join(root, "log"))
+	snaps := filepath.Join(root, k3sSnapshots)
+	older, newest := filepath.Join(snaps, "pre-upgrade-v1.35.10-k3s1-seed-1700000000"), filepath.Join(snaps, "pre-upgrade-v1.35.10-k3s1-seed-1700000900")
+	for _, f := range []string{older, newest, filepath.Join(snaps, "etcd-snapshot-seed-1700009999")} {
+		os.WriteFile(f, nil, 0o600)
+	}
+	os.Chtimes(older, time.Now().Add(-time.Hour), time.Now().Add(-time.Hour))
+	want := "k3s-killall.sh\nk3s server --cluster-reset --cluster-reset-restore-path=" + newest + "\nsystemctl start k3s\n"
+	if log := hostRun(t, root, cmd); log != want {
+		t.Fatalf("the way back ran:\n%s\nwant:\n%s", log, want)
+	}
+	if d, _ := os.ReadFile(filepath.Join(root, "usr/local/bin/k3s")); string(d) != "old k3s" {
+		t.Fatalf("the binary after the way back: %q", d)
+	}
+}

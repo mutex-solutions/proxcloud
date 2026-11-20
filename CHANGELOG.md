@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The seed's k3s runs kube-controller-manager, kube-scheduler and its cloud-controller-manager without leader
+  election.** A seed is one k3s server with embedded etcd, for which k3s keeps the three under a leader lease; on a
+  lab seed a lease missed under disk load (a backup, a heavy apply) ended the component and k3s with it, although no
+  other server could take the lease. The k3s config drop-in
+  `/etc/rancher/k3s/config.yaml.d/10-proxcloud-leader-elect.yaml` (`leader-elect=false` through
+  `kube-controller-manager-arg+`, `kube-scheduler-arg+`, `kube-cloud-controller-manager-arg+`) is written at a new
+  seed's first boot, and on an existing seed by the Job of stage 5a, after the checksum and before the binary is
+  replaced; it takes effect with that stage's restart. The plan has one more `site` row, `seed-k3s-config`.
+  `/etc/rancher/k3s/config.yaml` is not rewritten, and the keys append, so an argument set by hand stays. Limits:
+  k3s's own controllers keep their lease (no argument turns it off); an existing seed gets the file only from an
+  upgrade that replaces its k3s; **not run on a lab**: the drill of this release must show the file, the three
+  components with `--leader-elect=false` and no exit of k3s during the roll.
+- **The way back of stage 5a across a k3s minor names the snapshot restore.** k3s does not go back a minor without
+  the datastore of the old minor. When the move crosses a minor, the message of `seed_k3s_timeout` and the plan's
+  row `seed-k3s-binary` now give k3s's whole rollback for embedded etcd in one command: `k3s-killall.sh`, put
+  `k3s.prev` back, `k3s server --cluster-reset --cluster-reset-restore-path=` with the newest
+  `/var/lib/rancher/k3s/server/db/snapshots/pre-upgrade-<old version>-<node>-<time>` (the snapshot the Job saved; the
+  command stops before it changes anything when there is none), `systemctl start k3s`. A patch step keeps the short
+  command. The stage's first message names the snapshot too. Text only: the product still restores nothing by itself,
+  and **neither command was tried on a lab**. The plan's row `seed-etcd-snapshot` no longer says that k3s's retention
+  applies: k3s prunes no snapshot saved on demand.
+
 ### Changed
 
 - **The platform BOM names k3s `v1.36.6+k3s1` and Kubernetes 1.36.6** (`deploy/platform/platform-bom.yaml`:
@@ -31,11 +55,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `services.k8s_version`), and with it the kubectl in the clusterctl image, one minor behind the API server.
     `TestBOMMatchesInstallerVersions` now lets these two pins be up to one minor behind the BOM and never ahead.
   - The hand step of `seed_k3s_timeout` (put `k3s.prev` back) is not enough across a minor: k3s's rollback also
-    needs the etcd snapshot the stage saved. The message does not say so yet.
+    needs the etcd snapshot the stage saved. The message and the plan give the whole command (see Fixed).
   `TestUpgradeRollsNoMachine` compares a pair that replaces machines by design at step 0 of the roll (this build's
   chart with the previous BOM's version and templates must render what the previous release rendered); a pair that
   replaces none is compared as before. All nine previous BOMs pass, and the plan from each is allowed (read with
-  `PlanFor`: 16, 19 or 22 rows). Only the move from 0.10.0 will be drilled.
+  `PlanFor`: 17, 20 or 23 rows with the drop-in's row below). Only the move from 0.10.0 will be drilled.
 - **The platform BOM on `main` is `0.11.0-dev`, and the build carries the BOM of `0.10.0`**
   (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.10.0.yaml`). The `v0.10.0` release commit left
   the BOM at `0.10.0`, and the release gate refuses only `-dev`. A platform installed by `v0.10.0`, or moved to its
