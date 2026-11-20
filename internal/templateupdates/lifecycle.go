@@ -1055,8 +1055,13 @@ func (s *Service) Withdraw(ctx context.Context, pvFor PVEResolver, users Templat
 				msg = fmt.Sprintf("Kubernetes %s: no other published node image of this version is left on this provider, and %s is still named by its VMID: remove that version from the Kubernetes provider or publish another image before new workers are created",
 					p.KubernetesVersion, strings.Join(ids, ", "))
 			}
-			if unread {
-				msg = fmt.Sprintf("Kubernetes %s: what still names the withdrawn copies (%s) by their VMID could not be read; ", p.KubernetesVersion, strings.Join(ids, ", ")) + msg
+			if unread { // not known: the warning must not say that a copy is still named
+				msg = fmt.Sprintf("Kubernetes %s: what still names the withdrawn copies (%s) by their VMID could not be read, and withdrawing does not stop new workers from being cloned from a copy that is still named; the config.cluster.versions entry of a Kubernetes provider without the withdrawn copies is %s",
+					p.KubernetesVersion, strings.Join(ids, ", "), pr.out.VersionsMapLine)
+				if v == "" {
+					msg = fmt.Sprintf("Kubernetes %s: what still names the withdrawn copies (%s) by their VMID could not be read, and no other published node image of this version is left on this provider: if a Kubernetes provider still names the version, remove it there or publish another image before new workers are created",
+						p.KubernetesVersion, strings.Join(ids, ", "))
+				}
 			}
 			if len(ids) > 0 {
 				pr.out.Warnings = append(pr.out.Warnings, msg)

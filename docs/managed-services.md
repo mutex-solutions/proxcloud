@@ -1315,7 +1315,7 @@ over HTTPS now: forward to port 443 (`port-forward svc/argocd-server 8080:443`, 
 longer announces the address, ArgoCD restarts and serves plain HTTP inside the cluster as before,
 and `status.argocdUrl` is cleared.
 
-Run once on a lab (2026-11-20, v0.10.0-rc.1, an installed platform with one tenant server and no
+Run once on a lab (2026-11-20, v0.10.0-rc.1, an installed platform with two tenant servers and no
 tenant cluster or database at the apply): the two spec refusals at save, the Check row warning and ok, the plan row, the apply (2
 minutes 1 second; the address answered 63 seconds after the start), HTTPS with ArgoCD's self-signed
 certificate from the operator address, the refusals above, the status fields, and clearing (1

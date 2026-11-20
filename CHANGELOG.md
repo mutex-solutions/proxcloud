@@ -145,7 +145,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Managed services: the `seed-backup` row no longer says that no backup exists when it cannot see one.** Found on
   the lab round of v0.10.0-rc.1: with today's archive of the seed VM on the site's backup store the row read "the
   stores read (…) hold none". Proxmox lists a VM's backups only to a token with `VM.Backup` on that VM or
-  `Datastore.Allocate` on the store, and answers `200` with an empty list otherwise; the portal token is fenced off
+  `Datastore.Allocate` on the store, and answers `200` with a list without them otherwise; the portal token is fenced off
   the seed VM by design, so on a site set up by the product's own command the row could never be ok, and an upgrade
   that replaces the seed's k3s could only start with the override. No privilege is added and the fence is as it was.
   The row now reads with the portal token and with `capmox@pve!capi`, counts a store as read only where one of them

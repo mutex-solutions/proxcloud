@@ -731,7 +731,7 @@ are several, `errors.details.problems`.
   page) or the nodes' networks could not be read, `ok` otherwise. `seed-backup` is present once the installation has a seed VM and never
   fails: `ok` with the archive's time and store when the portal sees a `vzdump` archive of the seed VM younger than
   24 hours. Proxmox lists a VM's backups only to a token with `VM.Backup` on that VM or `Datastore.Allocate` on the
-  store (an empty `200` otherwise), and the portal token is fenced off the seed VM, so the portal sees them on the
+  store (a `200` without them otherwise), and the portal token is fenced off the seed VM, so the portal sees them on the
   provider's import store (portal token) and on the platform's ISO store (`capmox@pve!capi`) alone. For any other
   backup store of the seed's node the message says that the portal cannot see backups of the seed VM there and what
   to check in Proxmox; the row is then `ok`, and `warn` while an upgrade that replaces the seed's k3s waits to be
