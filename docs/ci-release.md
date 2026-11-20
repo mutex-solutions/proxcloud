@@ -6,7 +6,7 @@ the `v0.4.0-rc.1` prerelease (tag 2026-11-11, images and app chart `0.4.0-rc.1`)
 and the first stable release `v0.4.0` (tag 2026-11-12, images and app chart
 `0.4.0`), then the stable `v0.5.0` (tag 2026-11-13), the patches `v0.5.1` and `v0.5.2` and the stable `v0.6.0` (tags 2026-11-14),
 the `v0.7.0-rc.1` prerelease and the stable `v0.7.0` (tags 2026-11-15), the stable `v0.8.0` (tag 2026-11-17) and the patches `v0.8.1` and `v0.8.2` (tags 2026-11-18), and the release candidates
-`v0.9.0-rc.1` and `v0.9.0-rc.2`, prereleases, the stable `v0.9.0` and the patch `v0.9.1` (tags 2026-11-19; [Release candidates](#release-candidates)), and the first candidate of `v0.10.0`, `v0.10.0-rc.1`, a prerelease (tag 2026-11-20). Pushing the next tag runs the app image/chart publication and GitHub Release
+`v0.9.0-rc.1` and `v0.9.0-rc.2`, prereleases, the stable `v0.9.0` and the patch `v0.9.1` (tags 2026-11-19; [Release candidates](#release-candidates)), and the first candidate of `v0.10.0`, `v0.10.0-rc.1`, a prerelease (tag 2026-11-20). The next tag is the stable `v0.10.0`; pushing it runs the app image/chart publication and GitHub Release
 creation.
 This source change does none of those operations, and installation from released
 artifacts and later controlled PVE template canaries remain separate steps. Read
@@ -158,7 +158,7 @@ The configured destination for app Helm publication is
 `0.4.0` stable charts).
 On an app release tag, the workflow sets chart version to the tag without `v` and
 appVersion to the full tag, matching the image tags. The release contract is app
-chart `0.9.1`, appVersion/image tag and installer BOM `v0.9.1`, platform BOM `release: 0.9.1`, and the same tag as
+chart `0.10.0`, appVersion/image tag and installer BOM `v0.10.0`, platform BOM `release: 0.10.0`, and the same tag as
 `DEFAULT_VERSION` of the Docker Compose install (`deploy/compose/proxcloud-up.sh`).
 Keep `images.build: true` until the exact chart and images are published and
 verified; use `false` explicitly for released-artifact evaluation after that.
@@ -321,8 +321,11 @@ and added `deploy/platform/previous/0.9.1.yaml`, so `main` could not be tagged u
 release commit dropped `-dev`: the commit of the candidate `v0.10.0-rc.1` sets the release to
 `0.10.0-rc.1` (checked on 2026-11-20 on that commit: `--release` prints `all pins match`, on
 the BOM and on the seven previous BOMs). The pull request after that tag set the BOM on `main`
-to `0.10.0-dev` again and added `deploy/platform/previous/0.10.0-rc.1.yaml`, so `main` cannot
-be tagged until the next release commit drops `-dev`. The gate does not
+to `0.10.0-dev` again and added `deploy/platform/previous/0.10.0-rc.1.yaml`, so `main` could not
+be tagged until the next release commit dropped `-dev`: the release commit of `v0.10.0` sets the
+release to `0.10.0` (checked on 2026-11-20 on that commit: `--release` prints `all pins match`, on
+the BOM and on the eight previous BOMs), and the pull request after the `v0.10.0` tag sets it back
+to a `-dev` release and adds `deploy/platform/previous/0.10.0.yaml`. The gate does not
 compare the BOM's release with the tag
 (below): a commit whose BOM has no `-dev` passes this part for any tag.
 
@@ -421,14 +424,26 @@ platform cluster. The app chart, the installer pin and `DEFAULT_VERSION` stay on
 tag is on the commit `12492cb2`; the `docker` and `helm` runs of the tag succeeded on the first
 attempt, and the GitHub Release is a prerelease, with `v0.9.1` still the latest (read on
 2026-11-20). The pull request after it added `deploy/platform/previous/0.10.0-rc.1.yaml` and set
-the BOM on `main` back to `0.10.0-dev`. Nothing of it has run on a lab: the candidate exists for
-that round.
+the BOM on `main` back to `0.10.0-dev`. The lab round of 2026-11-20 ran on its published images
+([managed-services.md](managed-services.md#upgrade-between-boms)).
+
+`v0.10.0` is the release that candidate prepared, cut from `main`: its release commit takes the
+BOM from `0.10.0-dev` to `0.10.0`, with the pins of `0.10.0-rc.1` and the `release` line alone
+different. No chart of the product changed since its tag (the three `git diff` commands above
+print nothing on the release commit), so the BOM needs no new chart version. The BOM still names
+k3s `v1.35.10+k3s1` (no newer patch of 1.35 existed on 2026-11-20), Kubernetes 1.35.10 and the
+node image of `0.9.1`: no upgrade to it replaces the seed's k3s or a machine of the platform
+cluster. The app chart, the installer pin and `DEFAULT_VERSION` move to `0.10.0` / `v0.10.0`. The
+code differs from the candidate's in one change, the fixes for what the lab round found (the
+`seed-backup` row, the withdraw warning, the audit row of a Delete that deleted nothing), which
+has not run on a lab.
 
 Not verified on a lab: anything on the published images of `v0.9.0` or `v0.9.1`, the move
 of a platform from a candidate's BOM to that of `0.9.0`, and any move to that of `0.9.1`.
 One production site moved its platform from the BOM of 0.8.0 to that of `0.9.0` on the
 published images of `v0.9.0`
-([managed-services.md](managed-services.md#upgrade-between-boms)).
+([managed-services.md](managed-services.md#upgrade-between-boms)). Not verified either:
+anything on the published images of `v0.10.0`, and any move to the BOM `0.10.0`.
 
 ## Previous BOMs
 
@@ -625,7 +640,7 @@ What a release must do when it changes a pin, before its tag:
    build of the release commit, `GET …/plan` of such an installation, or
    `PlanFor` in a test.
 
-The pairs of the BOM on `main` today (0.8.0, 0.8.1, 0.8.2, 0.9.0-rc.1, 0.9.0-rc.2, 0.9.0, 0.9.1 and 0.10.0-rc.1 to
+The pairs of the BOM of the release `v0.10.0` (0.8.0, 0.8.1, 0.8.2, 0.9.0-rc.1, 0.9.0-rc.2, 0.9.0, 0.9.1 and 0.10.0-rc.1 to
 it). From the three 0.8.x BOMs, the BOMs
 differ in the release line, in `tenantCharts.kubernetes` and `tenantCharts.database` and in the four
 components of the product's own charts, `pc-platform` 0.1.13 to 0.1.15 and
@@ -636,11 +651,16 @@ two tenant charts and in `pc-platform`, 0.1.14 to 0.1.15. `pc-platform` lists bo
 `upgradeFrom`: a build takes only its own BOM as a target, so dropping 0.1.13 would leave a 0.8.x platform
 no move without a 0.9 release in between. From 0.10.0-rc.1 the BOMs differ in the release line alone.
 `TestUpgradeRollsNoMachine` compares all eight pairs and passes. So the
-classifier allows all eight pairs, and only `-dev` refuses them on `main`. On the commit of the candidate `v0.10.0-rc.1` the plan from each
+classifier allows all eight pairs, and only `-dev` refused them on `main`. On the release commit of `v0.10.0` the plan from each
+of the three 0.8.x BOMs is allowed with seven changes and no refusal, the plan from 0.9.0, 0.9.1
+and each candidate of 0.9.0 with four changes, and the plan from 0.10.0-rc.1 with one change, the
+release, record only (`Classify` on the eight pairs, 2026-11-20). No move to 0.10.0 was run
+anywhere. On the commit of the candidate `v0.10.0-rc.1` the plan from each
 of the three 0.8.x BOMs is allowed with seven changes and no refusal, and the plan from 0.9.0,
 0.9.1 and each candidate of 0.9.0 with four changes: the release and the two tenant charts, record
 only, and `pc-platform` 0.1.14 to 0.1.15, class chart, stage `cluster` (`PlanFor` on the seven
-pairs, 2026-11-20). None of these moves was run anywhere. On the release
+pairs, 2026-11-20). One of these moves was run on a lab: 0.9.1 to 0.10.0-rc.1, on 2026-11-20
+(22.8 seconds, no machine replaced). On the release
 commit of `v0.9.1` the plan from each of the three 0.8.x BOMs is allowed with six changes
 and no refusal, and the plan from 0.9.0 and from each candidate's BOM with one change, the
 release, record only (`Classify` on the six pairs, 2026-11-19). On the release

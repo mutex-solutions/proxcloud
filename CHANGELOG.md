@@ -7,6 +7,117 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-20
+
+The release after `v0.9.1`. The Proxmox console of a VM made by ProxCloud opens on the graphical display, a
+withdrawn template can be deleted from the admin console, the platform cluster's ArgoCD can be given an address,
+and an upgrade run can replace the seed's k3s and the platform cluster's machines. The last two ship dark: this
+release's BOM moves neither k3s nor Kubernetes, so no upgrade to it runs them. It was prepared by one release
+candidate, `v0.10.0-rc.1`, whose section below is kept; everything it held is in this section. The entries under
+Added, Changed and Fixed were written when each change merged, most of them before the lab round: where one says
+"Not run on a lab" or "Not verified on a lab", the two lists below are the current state.
+
+- **The graphical console is the default in the Proxmox web UI.** New templates have `vga: std` and keep `serial0:
+  socket`. The templates of this portal and its stopped servers change at the next services sync; a running server
+  at its next Stop then Start from the portal; a Kubernetes worker only when its node group is rolled. A Reboot
+  does not change it (Changed).
+- **Delete of a withdrawn template** from the admin console, without `qm destroy` on the node (Added).
+- **The platform cluster's ArgoCD can be given an address**, with ArgoCD's self-signed certificate, for the
+  operator networks only (Added).
+- **The upgrade machinery for the seed's k3s and for replacing the platform cluster's machines** (Added). Both
+  ship dark, see the BOM below.
+- **Thirteen dependency updates** (the section of 0.10.0-rc.1 lists them).
+
+The platform BOM of this release is `0.10.0`. It pins what the candidate `0.10.0-rc.1` pins: cluster chart 0.1.15
+and database chart 0.5.2, both published from their tags (`proxmox-kamaji-cluster-v0.1.15`,
+`database-cluster-v0.5.2`), and platform chart 0.1.3; the two BOMs differ in the `release` line alone. Against
+`0.9.1` the two tenant charts and the chart of the platform cluster move, and nothing else: the BOM keeps k3s
+`v1.35.10+k3s1` (no newer patch of 1.35 exists) and Kubernetes 1.35.10 with its node image. So an upgrade to
+`0.10.0` moves charts only: it does not run the stage `seed-k3s`, does not ask for a seed backup, and replaces no
+machine. The release carries the BOMs of `0.8.0`, `0.8.1`, `0.8.2`, `0.9.0-rc.1`, `0.9.0-rc.2`, `0.9.0`, `0.9.1`
+and `0.10.0-rc.1` for the platforms those builds installed.
+
+Upgrading from `v0.9.1`. From an older release, read the sections of `v0.9.1` and `v0.9.0` as well: their steps
+still apply.
+
+- **Portal first.** On the Docker Compose host check out the tag and run `./proxcloud-up.sh upgrade v0.10.0`
+  (`deploy/compose/README.md`, "Upgrade"). The script takes its backup first. `compose.yaml` did not change since
+  `v0.9.1`: PostgreSQL and Keycloak keep their containers (seen on the lab at the upgrade to the candidate).
+- **Then the platform**, in step 4 of System → Managed services. It stays on its BOM and keeps working until an
+  operator starts the move. From `0.9.1`, `0.9.0` or a candidate of 0.9.0 the plan lists four changes and refuses
+  nothing: the release, `tenantCharts.kubernetes` (0.1.14 to 0.1.15) and `tenantCharts.database` (0.5.1 to 0.5.2),
+  all three record only, and `pc-platform` 0.1.14 to 0.1.15 (class chart, stage `cluster`, wave 3). Nothing is
+  rolled, and no seed backup is needed for this BOM. From a 0.8.x BOM, seven changes: the same four, with the
+  cluster chart from 0.1.13, and `capi`, `capi-tenant` and `platform` from 0.1.2 to 0.1.3. From `0.10.0-rc.1`, one
+  change, the release, record only. `TestUpgradeRollsNoMachine` compares all eight previous BOMs with this one and
+  passes. The confirmation is `upgrade <name> to 0.10.0`.
+- **Then let one services sync run** (every 15 minutes; without the scheduler `POST
+  /api/v1/admin/job/external-service/sync`). It writes `vga: std` on the templates that a Template updates import
+  of this portal holds (not on a withdrawn one) and on the stopped servers and imported images in the pools of its
+  projects. A second sync writes nothing. A running server changes at its next Stop then Start from the portal, or
+  at an action that stops and starts it; a Reboot does not change it. Kubernetes workers, the platform's machines
+  and the seed are never written: they change when their node group or the platform is rolled.
+- **Tenant clusters and databases made before the upgrade** keep their chart until their own chart update. A new
+  database of one instance has no disruption budget and restarts when its node is drained.
+- **The ArgoCD address:** leave it unset on a site where tenant traffic leaves under a Proxmox node's address
+  (SNAT); the Check row `argocd-access` warns there.
+- **A platform installed from a `dev-<sha>` build of `main`** is still refused (`bom_unsupported`).
+- The app chart is `0.10.0` with appVersion `v0.10.0`, and `pc_versions.proxcloud` and `DEFAULT_VERSION` of
+  `proxcloud-up.sh` name `v0.10.0`.
+
+Verified on a lab. One round on 2026-11-20, on one lab Proxmox VE cluster of three nodes, on the published images
+of the candidate `v0.10.0-rc.1`, checked afterwards by a read-only audit. Nothing was run on the published images
+of `v0.10.0` itself. The code of this release is the code of the candidate plus one change, the fixes for what the
+round found (under Fixed: the `seed-backup` row that says what it cannot see, the withdraw warning, the audit row
+of a Delete that deleted nothing; with them the guides' statements about the round). That change has not run on a
+lab.
+
+- **The candidate's images and the portal upgrade.** A Compose upgrade from `v0.9.1`, with the PostgreSQL and
+  Keycloak containers kept.
+- **The move from the BOM `0.9.1` to `0.10.0-rc.1`**, on a three-node platform in bridge mode: 23 seconds, no
+  retry, no machine replaced, no write on Proxmox, the seed's firewall file untouched, the platform API answering
+  throughout. One tenant server was present; no tenant cluster and no database.
+- **The graphical console.** Six templates of the portal changed at the first sync, and later syncs wrote nothing.
+  Withdrawn templates and templates the portal did not import were untouched. No running VM had a pending change.
+  A stopped server was changed at a sync and started with `vga: std`. A new server and a new worker had `vga:
+  std`. Both tabs of the portal's console page showed a login prompt on Ubuntu 26.04 servers. Volume attach and
+  detach worked on an old running server.
+- **Delete of a withdrawn template.** The refusals `not_withdrawn` and `template_in_use`; one destroy, with only
+  the template's base disk gone; the receipt reading `template_missing`; a second Delete answering `unchanged`.
+- **The ArgoCD address.** An address from the pool; `400` for an address outside it and for `/0`; the row
+  `argocd-access` as a warning and as ok; HTTPS with the self-signed certificate from the operator address; no
+  answer from the Proxmox nodes, from the gateway host and from a tenant VM, on a layout without SNAT; clearing
+  back to ClusterIP.
+- **The machine replacement stays dark.** No roll was offered, and its phrase and `part` were refused.
+- **A tenant cluster on chart 0.1.15**, created and deleted.
+
+Not verified on a lab:
+
+- **This release itself:** its published images, its tag's workflows, and the move of a platform to the BOM
+  `0.10.0` from any previous BOM, the record-only step from `0.10.0-rc.1` included.
+- **The fixes merged after the candidate:** the corrected `seed-backup` row on a real Proxmox (the rule by which
+  Proxmox hides the archives is modelled by a test fake), the withdraw warning that names who still uses a copy,
+  and the audit row of a Delete that deleted nothing.
+- **The seed's k3s upgrade, entirely:** stage 5a, `seed_backup_missing` and its override, an old archive of
+  another VM. The `seed-backup` row turning ok was not seen: the row of the candidate could not.
+- **The replacement of the platform cluster's machines**, and any move of k3s or Kubernetes.
+- **An upgrade with a tenant cluster or a database on the platform.**
+- **A database on chart 0.5.2** and the drain of its node; **three control plane machines.**
+- **The graphical console:** the Console button of the Proxmox web UI (the display was read through the portal's
+  console page and from the VM's configuration), the graphical console of a worker and of a Debian guest, the
+  revert after a start race, and Stop then Start of a server that still has the serial display, without a sync
+  between.
+- **Delete of a withdrawn template:** `linked_clones`, `template_published`, `template_mismatch`,
+  `template_present`, `job_running`, `smoke_running`, a node group pinned to the image, and a template with a
+  cloud-init drive (the deleted one had none).
+- **The ArgoCD address:** the sign-in, `argocd_address_unavailable`, and a site with SNAT.
+- **`routed` mode and a one-node site.**
+- Everything the sections of 0.9.1 and 0.9.0 say is not verified still holds, except what is listed as verified
+  here.
+
+Where an entry below says the BOM on `main` is `0.10.0-dev`, that was the state at that merge: this release's BOM
+is `0.10.0`, and the change after its tag sets `main` back to a `-dev` one.
+
 ### Added
 
 - **Managed services: the platform cluster's ArgoCD can have an address with TLS.** Opt-in, off by default: under
@@ -140,6 +251,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for the oldest BOM; `0.10.0-rc.1` sorts before `0.8.0`, so they name `0.8.0` now. No apply on such a platform was
   run on a lab by this change.
 
+- **The platform BOM's release is `0.10.0`** (`deploy/platform/platform-bom.yaml`), with the pins of
+  `0.10.0-rc.1`: the two BOMs differ in the `release` line alone, and no chart of the product changed since its
+  tag (`proxmox-kamaji-cluster-v0.1.15`, `database-cluster-v0.5.2`, `proxcloud-platform-v0.1.3`), so no chart tag
+  is needed. It names k3s `v1.35.10+k3s1`, Kubernetes 1.35.10 and the node image that `0.9.1` names. The release
+  gate passes on it and on the eight previous BOMs. The app chart, `pc_versions.proxcloud` and `DEFAULT_VERSION`
+  of `proxcloud-up.sh` move to `0.10.0` / `v0.10.0`. `deploy/platform/previous/0.10.0.yaml` is added by the change
+  after the tag.
+
 ### Fixed
 
 - **Managed services: the `seed-backup` row no longer says that no backup exists when it cannot see one.** Found on
@@ -174,13 +293,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Managed services: the node wait counts every control plane machine.** With a control plane of three the wait for
   the nodes (stage 9) expected one control plane node and could not end.
 
+### Known issues
+
+- **A snapshot backup of the seed can restart its k3s.** On a busy node or a slow disk the backup stalls the
+  seed's disk for seconds; the seed's single k3s server then loses its leader election, exits and is started again
+  by systemd, and the seed's API is away for about a minute. Seen on the lab twice: during the seed's own
+  `vzdump`, and during an apply with no backup running (that run retried its stage and passed). The same `vzdump`
+  also left the etcd of another control plane VM on that node unhealthy until the backup ended. Take the backup in
+  a quiet hour, some minutes before a run, and wait until the seed's API answers again ("The seed's k3s",
+  `docs/managed-services.md`). Not fixed in this release.
+- **Seed ISOs of deleted servers stay on the seed store until they are cleaned.** Without the optional complete
+  inventory reader the portal keeps the first-boot CD of a deleted server, which holds the server's user data, and
+  warns "seed cleanup pending" in the API log at every sync. It affects every site without that reader ("Optional
+  complete inventory reader", `docs/server-seed-safety.md`).
+- **The `seed-backup` row cannot see a backup on most stores.** The portal token is kept off the seed VM on
+  purpose, and Proxmox leaves the seed's archives out of its list. The row now says so; in the candidate it said
+  that the stores hold none. An upgrade that replaces the seed's k3s will then be started with the box "I took a
+  backup". No upgrade to this release's BOM asks for it.
+- **The upgrade of the seed's k3s and the replacement of the platform cluster's machines have never run on a real
+  seed or cluster:** tests against a fake seed only, and no released BOM starts them. Run the first release whose
+  BOM does on a lab first.
+- **The ArgoCD address is reachable by tenants** on a site where tenant traffic leaves under a Proxmox node's
+  address that an operator network contains; the Check row `argocd-access` warns. Leave the address unset there.
+- **A Reboot from the portal does not change the display of a running server:** Proxmox cannot change `vga` on a
+  running VM. Stop then Start does.
+- **The root command stops when the platform's token ids are taken.** The ids `capmox@pve!capi` and `csi@pve!csi`
+  are fixed. It affects a new install on a Proxmox cluster where one of them exists for something else ("The root
+  command of an installation", `docs/managed-services.md`).
+- The known issues of 0.9.1 that still hold: a chart version that changes only its hook does not run the hook;
+  workers do not join when the node that holds the platform's addresses also translates tenant traffic; the
+  platform upgrade is not shown on a lab with tenants; the health check's guard; Replace on a node group of one; a
+  standalone volume that loses its name; the `pve-api-rule` row behind a translating router; seed ISOs of servers
+  created before 0.8.0.
+
 ## [0.10.0-rc.1] - 2026-11-20
 
 The first release candidate of 0.10.0, published as a prerelease and never as `latest`. It is not the release:
 `v0.9.1` stays the current stable release, and the chart, the installer and the Compose default still name it. It
-holds everything 0.10.0 is planned to bring since 0.9.1, and it exists so that a lab can run it: nothing of it has
-run on a lab. Its content is the [Unreleased] section above, which the release 0.10.0 will turn into its own
-section; nothing is repeated here. Not for a production site.
+holds everything 0.10.0 brings since 0.9.1 except the fixes for what its lab round found, and it exists so that a
+lab can run it: nothing of it had run on a lab when it was tagged. Its content is the section of 0.10.0 above;
+nothing is repeated here. Not for a production site.
 
 ### Changed
 
@@ -216,9 +368,9 @@ section; nothing is repeated here. Not for a production site.
 
 ### Verified on a lab
 
-Nothing. Nothing of 0.10.0 has run on a lab, and nothing was run on this candidate's images, which do not exist
-before the tag. Every entry of the [Unreleased] section is covered by tests only. The candidate exists to run the
-lab round.
+Nothing, when the candidate was tagged: nothing of 0.10.0 had run on a lab, and the candidate's images do not exist
+before the tag. The lab round ran on them afterwards; what it showed is in the section of 0.10.0. The list below
+is the state at the tag.
 
 ### Not verified
 
@@ -249,7 +401,8 @@ lab round.
   afterwards; `argocd_address_unavailable` for an address a tenant load balancer holds; clearing the block; no
   change of any Application on a platform that never sets the block; the `argocd-access` warning on a single node
   that translates tenant traffic.
-- The three entries under Fixed in the [Unreleased] section, a tenant cluster on chart 0.1.15, and a drain of a
+- The three entries under Fixed that the candidate held (the old archive of another VM, the seed's firewall
+  options, the node wait), a tenant cluster on chart 0.1.15, and a drain of a
   node that holds a one-instance database on chart 0.5.2.
 - Everything the sections of 0.9.1 and 0.9.0 say is not verified.
 
