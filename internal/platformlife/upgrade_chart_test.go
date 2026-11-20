@@ -1,11 +1,14 @@
 package platformlife
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -204,4 +207,165 @@ func TestNodeDeletionTimeoutChangesNoMachine(t *testing.T) {
 	if found["KubeadmControlPlane"] != 1 || found["MachineDeployment"] < 3 {
 		t.Fatalf("the render has %v", found)
 	}
+}
+
+// certManagerReads are the cert-manager moves a release read: upstream's upgrade notes for the pair, and the render of
+// TestCertManagerMoveRenders. removed and added are what the new chart stops and starts rendering with the run's values
+// (ArgoCD prunes the removed: cert-manager is not stateful). A BOM pair whose cert-manager row is class chart must be
+// one of them.
+var certManagerReads = []certManagerRead{
+	// website content/docs/releases/upgrading/upgrading-1.20-1.21.md lines 8-19: the chart no longer creates the
+	// controller's tokenrequest Role and RoleBinding. Its other two items (Challenge and Order verbs of
+	// cert-manager-edit, the removed ServiceMonitor and PodMonitor values) touch nothing the product sets or uses.
+	{"v1.20.2", "v1.21.3", []string{"rbac.authorization.k8s.io/v1 Role cert-manager/cert-manager-tokenrequest",
+		"rbac.authorization.k8s.io/v1 RoleBinding cert-manager/cert-manager-tokenrequest"}, nil},
+}
+
+type certManagerRead struct {
+	from, to       string
+	removed, added []string
+}
+
+// certManagerUpstream is the index digest (the sha256 of the archive) of a version no BOM pins yet: the test takes it
+// from upstream, where the chart mirror takes it (deploy/platform/charts-mirror.yaml), until a BOM pins it from the mirror.
+var certManagerUpstream = map[string]string{"v1.21.3": "sha256:9ec67938b2981d8b333af61b3fcf53e26b4f6f5deb7ccda3de4ea116bb373a17"}
+
+// The check a release makes of a cert-manager move, as TestUpgradeRollsNoMachine does of the cluster chart: every
+// cert-manager row a BOM pair allows is a move the release read (certManagerReads), and each read move renders with the
+// values a run gives the seed's and the platform cluster's Application at the BOM's Kubernetes version (the chart's
+// values schema and kubeVersion pass), keeps every CRD at the one version v1, served and stored, and stops and starts
+// rendering exactly the objects the release named. Render only: ArgoCD's server-side apply of the CRDs, the
+// startupapicheck Job and the rolling update are what the lab drill shows.
+func TestCertManagerMoveRenders(t *testing.T) {
+	cur := embedded(t)
+	prev, err := Previous()
+	if err != nil {
+		t.Fatal(err)
+	}
+	boms := []*BOM{cur}
+	for _, b := range prev {
+		boms = append(boms, b.BOM)
+		for _, c := range Classify(b.BOM, cur) {
+			if c.Name == "cert-manager" && c.Class == ClassChart && !slices.ContainsFunc(certManagerReads, func(m certManagerRead) bool { return m.from == c.From && m.to == c.To }) {
+				t.Errorf("%s to %s moves %s/cert-manager from %s to %s, which no release read: add the move to certManagerReads", b.Release, cur.Release, c.Cluster, c.From, c.To)
+			}
+		}
+	}
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatal("helm is required in CI, or this test proves nothing")
+		}
+		t.Skip("helm not installed")
+	}
+	apps, err := Applications(cur, renderInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var values []string // one file per cert-manager Application: the seed's and the platform cluster's
+	for _, a := range apps {
+		if str(a, "spec", "source", "chart") == "cert-manager" {
+			f := filepath.Join(t.TempDir(), str(a, "metadata", "name")+".yaml")
+			if err := os.WriteFile(f, yamlDoc(t, dig(a, "spec", "source", "helm", "valuesObject")), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			values = append(values, f)
+		}
+	}
+	if len(values) != 2 {
+		t.Fatalf("%d cert-manager Applications, want the seed's and the platform cluster's", len(values))
+	}
+	for _, m := range certManagerReads {
+		from, to := certManagerChart(t, helm, boms, m.from), certManagerChart(t, helm, boms, m.to)
+		for _, v := range values {
+			old, now := certManagerRender(t, helm, from, v, cur.Kubernetes.Version), certManagerRender(t, helm, to, v, cur.Kubernetes.Version)
+			var removed, added []string
+			for k := range old {
+				if now[k] == nil {
+					removed = append(removed, k)
+				}
+			}
+			for k := range now {
+				if old[k] == nil {
+					added = append(added, k)
+				}
+			}
+			slices.Sort(removed)
+			slices.Sort(added)
+			if !slices.Equal(removed, m.removed) || !slices.Equal(added, m.added) {
+				t.Errorf("%s to %s with %s: removed %q, added %q; the release read removed %q, added %q", m.from, m.to, filepath.Base(v), removed, added, m.removed, m.added)
+			}
+		}
+	}
+}
+
+// certManagerChart is the archive of cert-manager at version: from the chart mirror as a BOM pins it (the digest Helm
+// prints equal to the pin), else from upstream with its index digest in certManagerUpstream.
+func certManagerChart(t *testing.T, helm string, boms []*BOM, version string) string {
+	t.Helper()
+	dir := t.TempDir()
+	pull := func(args ...string) string {
+		out, err := exec.Command(helm, append([]string{"pull", "-d", dir, "--version", version}, args...)...).CombinedOutput()
+		if err != nil {
+			if os.Getenv("CI") != "" {
+				t.Fatalf("helm pull cert-manager %s: %v\n%s", version, err, out)
+			}
+			t.Skipf("cert-manager %s could not be pulled: %v", version, err)
+		}
+		return string(out)
+	}
+	tgz := filepath.Join(dir, "cert-manager-"+version+".tgz")
+	for _, b := range boms {
+		for _, c := range b.Components {
+			if c.Name == "cert-manager" && c.Chart.Version == version {
+				if out := pull("oci://" + c.Chart.Repo + "/" + c.Chart.Name); !strings.Contains(out, "Digest: "+c.Chart.Digest) {
+					t.Fatalf("cert-manager %s: the release %s pins %s, and the registry answered:\n%s", version, b.Release, c.Chart.Digest, out)
+				}
+				return tgz
+			}
+		}
+	}
+	digest, ok := certManagerUpstream[version]
+	if !ok {
+		t.Fatalf("no BOM pins cert-manager %s, and certManagerUpstream names no digest for it", version)
+	}
+	pull("cert-manager", "--repo", "https://charts.jetstack.io")
+	raw, err := os.ReadFile(tgz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum := sha256.Sum256(raw); "sha256:"+hex.EncodeToString(sum[:]) != digest {
+		t.Fatalf("cert-manager %s from upstream is not the archive of index digest %s", version, digest)
+	}
+	return tgz
+}
+
+// certManagerRender renders chart with values at Kubernetes version kube, by object (objectKey), and fails on a CRD
+// that is not at the one version v1, served and stored.
+func certManagerRender(t *testing.T, helm, chart, values, kube string) map[string]map[string]any {
+	t.Helper()
+	out, err := exec.Command(helm, "template", "cert-manager", chart, "-n", "cert-manager", "-f", values, "--kube-version", kube).CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template %s -f %s --kube-version %s: %v\n%s", filepath.Base(chart), filepath.Base(values), kube, err, out)
+	}
+	objs, crds := map[string]map[string]any{}, 0
+	for _, o := range yamlObjects(t, out) {
+		objs[objectKey(o)] = o
+		if o["kind"] != "CustomResourceDefinition" {
+			continue
+		}
+		crds++
+		versions, _ := dig(o, "spec", "versions").([]any)
+		var v map[string]any
+		if len(versions) == 1 {
+			v, _ = versions[0].(map[string]any)
+		}
+		if v["name"] != "v1" || v["served"] != true || v["storage"] != true {
+			t.Errorf("%s: CRD %s has versions %v, want v1 alone, served and stored", filepath.Base(chart), str(o, "metadata", "name"), versions)
+		}
+	}
+	if crds == 0 {
+		t.Fatalf("%s renders no CRD with %s: crds.enabled is gone from the values", filepath.Base(chart), filepath.Base(values))
+	}
+	return objs
 }

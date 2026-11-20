@@ -4,6 +4,25 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-21: an upgrade may move cert-manager
+
+**What changed:** no component, container or relation. Component "Platform installations": `Classify` lets the
+cert-manager entries of the BOM (component and chart name `cert-manager`, `thirdPartyMove`) move by their chart
+version under the rules of the product's own charts (a version that lists the installed one in `upgradeFrom`, the
+same version with another digest refused), as class `chart` in their wave; a BOM pair that also has a `seed` or
+`machines` row turns each such row into a refused one. Every other third-party chart stays refused, with or without
+`upgradeFrom`. The preflight gets the row `certificates` (`CertificatesCheck`): the Deployments `cert-manager`,
+`cert-manager-cainjector` and `cert-manager-webhook` and every `certificates.cert-manager.io` on the seed and the
+platform cluster, a warning or ok, never a failure. No run stage changes: the wave's gate (Synced, Healthy, the sync
+with the chart's `startupapicheck` hook Succeeded) is the gate of the move.
+
+**Why:** cert-manager v1.20 reaches end of life with 1.22, and 1.21 is the newest minor that supports both the
+platform's Kubernetes 1.36 and the installer's 1.35. Its move restarts nothing tenants use; the other third-party
+charts restart the CNI, the load balancer speaker, the database operator or the tenant datastores, and stay out. The
+pin itself comes in its own change, after the chart mirror serves v1.21.3.
+
+**Diagrams:** none.
+
 ## 2026-11-21: the wait for the tenants reads Deployments and pods; a token's ACL rows go with it
 
 **What changed:** no component, container or relation. Component "Platform runs": `tenantsDown`, the read behind

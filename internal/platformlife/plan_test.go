@@ -147,9 +147,20 @@ func ownCharts(b *BOM) {
 	b.TenantCharts.Kubernetes.Version, b.TenantCharts.Kubernetes.Digest = "0.1.14", "sha256:"+strings.Repeat("d", 64)
 }
 
-// The plan of 0.8.1 to a next release, as the operator reads it before starting: own charts alone are accepted, a
-// third-party chart or a node image next to them refuses the whole move. `go test ./internal/platformlife -run
-// TestUpgradePlanGolden -update` rewrites the files.
+// newerCertManager moves both cert-manager entries as a release that read the upgrade notes and compared the render
+// does: the next minor, listing the installed version in upgradeFrom (synthetic: no BOM pins v1.21.3 yet).
+func newerCertManager(b *BOM) {
+	for i := range b.Components {
+		if c := &b.Components[i]; c.Name == "cert-manager" {
+			c.Chart.Version, c.Chart.Digest, c.UpgradeFrom = "v1.21.3", "sha256:"+strings.Repeat("f", 64), []string{"v1.20.2"}
+		}
+	}
+}
+
+// The plan of 0.8.1 to a next release, as the operator reads it before starting: own charts alone are accepted, and
+// cert-manager alone; another third-party chart or a node image next to them refuses the whole move, and so does a
+// k3s or node image move next to cert-manager's. `go test ./internal/platformlife -run TestUpgradePlanGolden -update`
+// rewrites the files.
 func TestUpgradePlanGolden(t *testing.T) {
 	for _, c := range []struct {
 		name    string
@@ -167,11 +178,20 @@ func TestUpgradePlanGolden(t *testing.T) {
 			ownCharts(b)
 			b.Kubernetes.NodeImage.Tag, b.Kubernetes.NodeImage.Digest = "ubuntu-2604-k8s-1.35.10-20270101000000-000000000000", "sha256:"+strings.Repeat("e", 64)
 		}, false},
+		{"0.9.0-cert-manager", newerCertManager, true},
+		{"0.9.0-cert-manager-with-k3s", func(b *BOM) { newerK3s("v1.35.11+k3s1")(b); newerCertManager(b) }, false},
+		{"0.9.0-cert-manager-with-node-image", func(b *BOM) { // a rebuilt image of the same version, on the chart that can order the roll
+			newerK8s(b)
+			b.Kubernetes.Version, b.Kubernetes.NodeImage.Tag = "1.35.10", "ubuntu-2604-k8s-1.35.10-20270101000000-000000000000"
+			newerCertManager(b)
+		}, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			old := nextRelease(t, c.edit)
 			ref := refOf(old)
-			p, err := PlanFor(installed(&ref), "")
+			in := installed(&ref)
+			in.Spec.NodeImage.Mode = ImageBOM // a roll takes the BOM's image
+			p, err := PlanFor(in, "")
 			if err != nil || p.Upgrade == nil || p.Upgrade.Allowed != c.allowed || p.Target != ref || len(p.Changes) != 0 {
 				t.Fatalf("plan %+v upgrade %+v: %v", p, p.Upgrade, err)
 			}
@@ -202,6 +222,20 @@ func TestClassifyRefuses(t *testing.T) {
 		"seed/argocd":                func(b *BOM) { comp(t, b, ClusterSeed, "argocd").Chart.Version = "10.14.1" },
 		"workload/cnpg":              func(b *BOM) { comp(t, b, ClusterWorkload, "cnpg").Chart.Digest = "sha256:" + strings.Repeat("e", 64) },
 		"workload/kamaji-etcd":       func(b *BOM) { comp(t, b, ClusterWorkload, "kamaji-etcd").Chart.Version = "0.18.2" },
+		// upgradeFrom does not let a third-party chart move: only the allow-list does (thirdPartyMove).
+		"workload/cilium": func(b *BOM) {
+			c := comp(t, b, ClusterWorkload, "cilium")
+			c.Chart.Version, c.UpgradeFrom = "1.18.17", []string{"1.18.16"}
+		},
+		// cert-manager moves under the rules of an own chart: a published version does not change, and the release
+		// lists each version it checked.
+		"seed/cert-manager": func(b *BOM) {
+			comp(t, b, ClusterSeed, "cert-manager").Chart.Digest = "sha256:" + strings.Repeat("e", 64)
+		},
+		"workload/cert-manager": func(b *BOM) {
+			c := comp(t, b, ClusterWorkload, "cert-manager")
+			c.Chart.Version, c.Chart.Digest, c.UpgradeFrom = "v1.21.3", "sha256:"+strings.Repeat("f", 64), []string{"v1.20.3"}
+		},
 		// An own chart at a version the release did not list, moved to another wave, or with other values.
 		"seed/pc-platform": func(b *BOM) { comp(t, b, ClusterSeed, ClusterName).Chart.Version = "0.1.14" },
 		"workload/capi-tenant": func(b *BOM) {
@@ -235,6 +269,40 @@ func TestClassifyRefuses(t *testing.T) {
 			_, up, err := move(installed(&ref), cur.SHA256)
 			if err != nil || up.Allowed || up.Confirm != "" || len(up.Blocking) != 1 || !strings.HasPrefix(up.Blocking[0], name+": "+later) {
 				t.Fatalf("move: %+v, %v", up, err)
+			}
+		})
+	}
+}
+
+// The allow-list is cert-manager's component name and chart name together: an entry with only one of the two, moved
+// as cert-manager may move, is refused as any other third-party chart.
+func TestOnlyCertManagerMoves(t *testing.T) {
+	for name, rename := range map[string]func(*Component){
+		"another component name": func(c *Component) { c.Name = "issuers" },
+		"another chart name":     func(c *Component) { c.Chart.Name = "cert-manager-fork" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			old := nextRelease(t, newerCertManager)
+			cur, _ := Current()
+			from := *old.BOM
+			from.Components = slices.Clone(old.Components)
+			for _, b := range []*BOM{&from, cur.BOM} {
+				for i := range b.Components {
+					if c := &b.Components[i]; c.Cluster == ClusterWorkload && c.Name == "cert-manager" {
+						rename(c)
+					}
+				}
+			}
+			classes := map[string]string{}
+			for _, c := range Classify(&from, cur.BOM) {
+				classes[c.Cluster+"/"+c.Name] = c.Class + " " + c.Blocking
+			}
+			if classes["seed/cert-manager"] != ClassChart+" " {
+				t.Errorf("seed/cert-manager: %q", classes["seed/cert-manager"])
+			}
+			renamed := classes["workload/issuers"] + classes["workload/cert-manager"]
+			if !strings.HasPrefix(renamed, ClassRefused+" "+later+"a third-party chart is upgraded only by a later release") {
+				t.Errorf("the renamed entry: %q", renamed)
 			}
 		})
 	}
