@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The platform BOM on `main` is `0.11.0-dev` again, and the build carries the BOM of `0.10.1`**
+  (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.10.1.yaml`, sha256
+  `aec05ea60e6bfd12d73bab3d45a6a2aae8a3f62f3a41d3f43737aa8ef1d74e3b`). The `v0.10.1` release commit left the BOM at
+  `0.10.1`, and the release gate refuses only `-dev`. A platform installed by `v0.10.1`, moved to its BOM, or standing
+  in the replacement of its machines with that BOM as its target (what a Retry on the release's build records) is not
+  refused (`bom_unsupported`) under a later build while the file is carried. Its pins are those of `main`, so the plan
+  from it has one change, the release, record only. `TestUpgradeRollsNoMachine` compares twelve previous BOMs with the
+  BOM on `main`, nine of them at step 0 of a roll, and `TestRollTowardAKeptCandidateGoesOn` now also takes an
+  installation on `0.10.0` in a replacement toward `0.10.1` on to `0.10.1` with a Retry, nothing to confirm. No apply
+  on such a platform was run on a lab by this change.
+
 ## [0.10.1] - 2026-11-21
 
 The release after `v0.10.0`, and the first whose BOM moves Kubernetes: the seed's k3s from `v1.35.10+k3s1` to
