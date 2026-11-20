@@ -58,6 +58,16 @@ func TestSpecValidate(t *testing.T) {
 	if err := bad.Validate(d); err == nil {
 		t.Error("no node groups: want error")
 	}
+	// The allow-list ends in loadBalancerSourceRanges of the API server's Service: Kubernetes 1.36 refuses host bits.
+	bad = testSpec()
+	bad.AllowedCIDRs = []string{"10.0.0.0/8", "192.168.0.5/24"}
+	if err := bad.ValidateCreate(d); err == nil || !strings.Contains(err.Error(), "allowedCidrs: 192.168.0.5/24 has host bits set: use 192.168.0.0/24") {
+		t.Errorf("cidr with host bits: %v", err)
+	}
+	bad.AllowedCIDRs = []string{"office"}
+	if err := bad.ValidateCreate(d); err == nil || !strings.Contains(err.Error(), "is not a CIDR") {
+		t.Errorf("not a cidr: %v", err)
+	}
 	bad = testSpec()
 	bad.NodeGroups[1].Autoscale = true
 	if err := bad.Validate(d); err == nil || !strings.Contains(err.Error(), "autoscaling") {

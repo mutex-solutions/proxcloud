@@ -1458,3 +1458,83 @@ func bom080(t *testing.T) platformlife.Embedded {
 	t.Fatal("this build does not embed the 0.8.0 BOM")
 	return platformlife.Embedded{}
 }
+
+// spec.access.argocd.sources become loadBalancerSourceRanges of the ArgoCD Service, where Kubernetes 1.36 refuses a new
+// CIDR with host bits and keeps one the Service holds. The save follows it: a create or an update that brings such a
+// source is a 400 that names the form to write; a spec stored with one before the rule can still be saved, with the
+// list as it is or with one more network, and is not rewritten.
+func TestPlatformArgoSourcesWithHostBits(t *testing.T) {
+	ctx := context.Background()
+	db := freshPG(t)
+	fakePVE := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"errors":{"fake":"nothing here"}}`))
+	}))
+	t.Cleanup(fakePVE.Close)
+	enc := textcrypt.New("test-key")
+	mustInsert(t, db, "externalService", pgdoc.M{"_id": "svc-pve", "name": "lab", "type": "CLOUD", "status": "PUBLIC", "config": pgdoc.M{
+		"provider": "proxmox", "region": "lab", "apiUrl": fakePVE.URL, "tokenId": "proxcloud@pve!platform", "importStorage": "nas-templates",
+		"network": pgdoc.M{"cidrPool": "10.100.0.0/16", "blockedCidrs": []string{"10.200.200.0/25"}}},
+		"secret": pgdoc.M{"tokenSecret": enc.Encrypt(portalToken)}})
+	mustInsert(t, db, "adminPermission", pgdoc.M{"_id": "admin-sub", "role": "ADMIN"})
+	store := platformlife.NewStore(db, enc)
+	if err := store.Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	h := admin.NewHandler(admin.NewRepo(db), nil, nil, nil, nil, nil, nil, nil, audit.NewService(audit.NewRepo(db), slog.Default()),
+		externalservice.NewService(externalservice.NewRepo(db), enc), "", "", "")
+	h.SetPlatform(store)
+	router := chi.NewRouter()
+	h.Routes(router)
+	body := func(rev int64, sources ...string) string {
+		var m map[string]any
+		_ = json.Unmarshal([]byte(platformBody("10.200.200.1", 2, rev)), &m)
+		m["spec"].(map[string]any)["access"] = map[string]any{"argocd": map[string]any{"address": "10.200.200.210", "sources": sources}}
+		b, _ := json.Marshal(m)
+		return string(b)
+	}
+	call := func(method, path, body string, want int) string {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req = req.WithContext(httpx.WithRC(req.Context(), &httpx.RequestContext{Sub: "admin-sub"}))
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != want {
+			t.Fatalf("%s %s: %d %s, want %d", method, path, w.Code, w.Body.String(), want)
+		}
+		return w.Body.String()
+	}
+	base := "/admin/platform/installations"
+	const refusal = "spec.access.argocd.sources: 192.168.33.5/24 has host bits set: use 192.168.33.0/24"
+	if got := call(http.MethodPost, base, body(0, "192.168.33.5/24"), http.StatusBadRequest); !strings.Contains(got, refusal) {
+		t.Fatalf("create with host bits: %s", got)
+	}
+	var created struct {
+		Data platformlife.Installation `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(call(http.MethodPost, base, body(0, "192.168.33.0/24"), http.StatusOK)), &created); err != nil || created.Data.ID == "" {
+		t.Fatalf("create: %v %+v", err, created)
+	}
+	one := base + "/" + created.Data.ID
+	if got := call(http.MethodPut, one, body(1, "192.168.33.0/24", "10.8.0.9/24"), http.StatusBadRequest); !strings.Contains(got, "10.8.0.9/24 has host bits set: use 10.8.0.0/24") {
+		t.Fatalf("update that adds host bits: %s", got)
+	}
+
+	// Stored before the rule.
+	var old map[string]any
+	if found, err := db.C(platformlife.InstallationCollection).Get(ctx, created.Data.ID, &old); err != nil || !found {
+		t.Fatal(found, err)
+	}
+	old["spec"].(map[string]any)["access"].(map[string]any)["argocd"].(map[string]any)["sources"] = []any{"192.168.33.5/24"}
+	if err := db.C(platformlife.InstallationCollection).Upsert(ctx, created.Data.ID, old); err != nil {
+		t.Fatal(err)
+	}
+	call(http.MethodPut, one, body(1, "192.168.33.5/24"), http.StatusOK)                // the list as it is
+	call(http.MethodPut, one, body(2, "192.168.33.5/24", "10.8.0.0/24"), http.StatusOK) // and one more network
+	if got := call(http.MethodPut, one, body(3, "192.168.33.5/24", "10.9.0.9/24"), http.StatusBadRequest); !strings.Contains(got, "use 10.9.0.0/24") {
+		t.Fatalf("a second source with host bits beside the stored one: %s", got)
+	}
+	if got := call(http.MethodGet, one, "", http.StatusOK); !strings.Contains(got, `"sources":["192.168.33.5/24","10.8.0.0/24"]`) {
+		t.Fatalf("the stored source was rewritten: %s", got)
+	}
+}

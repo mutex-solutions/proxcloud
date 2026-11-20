@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A network with host bits is refused where it ends in a Kubernetes field.** Kubernetes 1.36 refuses a new or
+  changed CIDR with host bits (`192.168.0.5/24`), a leading zero or an IPv4-mapped IPv6 address in
+  `loadBalancerSourceRanges`, and keeps one the Service already holds (KEP-4858). The product took such values and
+  the object then failed on the platform cluster. Now a 400 names the entry and the form to write
+  (`192.168.0.5/24 has host bits set: use 192.168.0.0/24`) at each input: a database's `allowedCidrs` on create and on
+  `SET_ALLOWED_CIDRS`, a tenant cluster's `allowedCidrs` on create (it was not checked at all: any text passed), a
+  Kubernetes provider's `config.cluster.allowedCidrs` on create and on an update that carries the cluster block, and
+  an installation's `spec.access.argocd.sources` on create and update. One rule for all four
+  (`cloud.StrictCIDRs`). **Stored values are not rewritten and do not lock their object**: an update that sends the
+  list a database, a provider or an installation already has, with or without more canonical entries, passes; only an
+  entry that is new must be canonical. Where an operator sees them: the Check row `argocd-access` warns about a
+  stored source with host bits, and a Kubernetes provider's `configNotes` name a stored default. A new tenant
+  cluster that takes a stored provider default gets the entry without its host bits, the same range, since the
+  Service is new and 1.36 would refuse the stored spelling. Not changed: `spec.seed.apiSources` (a Proxmox firewall
+  rule, no Kubernetes field), and a stored `allowedCidrs` of a database has no warning of its own (the list is shown
+  as stored). **Not run against a Kubernetes 1.36 API server**: the tests pin the product's rule, which follows the
+  three refusals of `apimachinery/pkg/util/validation/ip.go` at v1.36.0; the drill of this release must show a
+  database and a tenant cluster with an allow-list created on the 1.36 platform, and an old stored value still
+  syncing.
+- **A Withdraw or a Delete of a template that changes nothing writes no audit row.** The repeat of a Withdraw that is
+  complete (no tag to change, the digest already on the blocklist) wrote a row `withdrawn false -> true`, and a second
+  Delete of a freed receipt wrote a row `DELETE` with `unchanged true`. Both answer as before (`unchanged: true`) and
+  leave no row. A call that answers `unchanged` and still wrote something keeps its row: a first Withdraw that finds
+  no tag to change (it blocklists the digest), and a Delete that finds the template destroyed by hand (it frees the
+  receipt; `deleted` stays false).
+- **A server's row keeps `pveUUID` after an action.** The row is read again from Proxmox after every action on a
+  server (Stop, Start, a snapshot, a NIC change) and on every look at it, and that read replaced the whole row: the
+  VM's smbios uuid and, for a VM without a creation stamp, its `identity`, which only the sync reads, were gone until
+  the next sync wrote them back. In between a sampled sync could not use its sample for the VM, and a VMID that
+  changed hands could not be told from the old VM by its uuid. Both keys now stay through the refresh. Seen on a site
+  on v0.10.0 after Stop then Start; the display write that v0.10.0 added to Start is not the cause (it changes the
+  VM's config digest, which the row does not hold).
 - **The seed's k3s runs kube-controller-manager, kube-scheduler and its cloud-controller-manager without leader
   election.** A seed is one k3s server with embedded etcd, for which k3s keeps the three under a leader lease; on a
   lab seed a lease missed under disk load (a backup, a heavy apply) ended the component and k3s with it, although no
@@ -48,7 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Kubernetes 1.36 refuses a new address or CIDR that is not canonical** (leading zeros, host bits as in
     `192.168.0.5/24`) in built-in fields, among them the `loadBalancerSourceRanges` the product writes from
     `allowedCidrs` and the ArgoCD address sources. Stored values keep working (KEP-4858); a new or changed one makes
-    its Application fail to sync. The product does not check the form yet.
+    its Application fail to sync. The product refuses such a value at its inputs (under Fixed above).
   - **Tenant clusters and databases keep their version.** After the upgrade the Kubernetes provider also offers
     1.36.6 for new tenant clusters; none was created at that version anywhere.
   - **The installer path stays on k3s `v1.35.10+k3s1` and Kubernetes 1.35.10** (`versions.yml`,

@@ -1205,6 +1205,10 @@ func TestTemplateDeleteWithdrawn(t *testing.T) {
 	if acts := f.state(t, id)["actions"].(map[string]any); acts["delete"] != true || acts["withdraw"] == true {
 		t.Fatalf("actions of a withdrawn template: %v", acts)
 	}
+	// The same withdraw again changes nothing (no tag, and the blocklist keeps its first entry): no audit row (I2-1).
+	if w := f.do("admin-sub", "POST", path+"/withdraw", map[string]any{"reason": "the same withdraw, sent again", "confirmDigest": p.Digest}); w.Code != 200 || !strings.Contains(w.Body.String(), `"unchanged":true`) {
+		t.Fatalf("withdraw again: %d %s", w.Code, w.Body)
+	}
 	if w := f.do("support-sub", "DELETE", path, nil); w.Code != 403 {
 		t.Fatalf("delete without admin:service:manage: %d %s", w.Code, w.Body)
 	}
@@ -1312,29 +1316,6 @@ func TestTemplateDeleteWithdrawn(t *testing.T) {
 	if !audited {
 		t.Fatal("no audit row of the delete")
 	}
-	// One template was deleted, so one row says deleted false -> true: the repeat's row (unchanged) does not.
-	deletes, said := 0, 0
-	for deadline := time.Now().Add(5 * time.Second); deletes < 2 && time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
-		evs, err := f.audit.QueryAll(ctx, audit.Filter{ResourceType: "TEMPLATE_UPDATES"}, 100)
-		if err != nil {
-			t.Fatal(err)
-		}
-		deletes, said = 0, 0
-		for _, ev := range evs {
-			for _, c := range ev.Changes {
-				if c.Field == "action" && c.NewValue == "delete" {
-					deletes++
-				}
-				if c.Field == "deleted" {
-					said++
-				}
-			}
-		}
-	}
-	if deletes != 2 || said != 1 {
-		t.Fatalf("%d audit rows of a Delete, %d of them say a template was deleted: want 2 and 1 (the repeat deleted nothing)", deletes, said)
-	}
-
 	// A withdrawn template somebody destroyed in Proxmox: nothing to destroy, the receipt is freed.
 	p2 := tlPayload("debian-12", "20261111000000", "7")
 	id2 := f.addImport(t, p2, 9400)
@@ -1349,6 +1330,39 @@ func TestTemplateDeleteWithdrawn(t *testing.T) {
 	}
 	if r, _ := f.svc.Receipts.Load(ctx, id2); r == nil || !r.TemplateGone || len(f.pv.mutationsOf(9400)) != 1 {
 		t.Fatalf("receipt of a template already gone: %+v, mutations %v", r, f.pv.mutationsOf(9400))
+	}
+	// The audit trail of all of the above. A row for each call that wrote something: two withdraws, the Delete that
+	// destroyed 9500 (deleted false -> true) and the Delete that freed the receipt of 9400 (it destroyed nothing:
+	// deleted stays false). None for the repeated withdraw and the repeated Delete, which wrote nothing (I1-3, I2-1).
+	// Rows are written after the answer, in the background: the last one expected is waited for, then a moment more
+	// for one that should not come.
+	rows := func() (withdraws, deletes, said int) {
+		evs, err := f.audit.QueryAll(ctx, audit.Filter{ResourceType: "TEMPLATE_UPDATES"}, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, ev := range evs {
+			for _, c := range ev.Changes {
+				switch {
+				case c.Field == "action" && c.NewValue == "withdraw":
+					withdraws++
+				case c.Field == "action" && c.NewValue == "delete":
+					deletes++
+				case c.Field == "deleted":
+					said++
+				}
+			}
+		}
+		return
+	}
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if w, d, _ := rows(); w >= 2 && d >= 2 {
+			break
+		}
+	}
+	time.Sleep(500 * time.Millisecond)
+	if w, d, said := rows(); w != 2 || d != 2 || said != 1 {
+		t.Fatalf("audit rows: %d withdraws, %d deletes, %d of them saying a template was deleted: want 2, 2 and 1 (a repeat that wrote nothing has no row)", w, d, said)
 	}
 
 	// An import whose job has not ended (its last step is still to come).

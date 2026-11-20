@@ -193,6 +193,22 @@ func vmConfigUUID(cfg VMConfig) string {
 	}
 	return ""
 }
+
+// KeepRowIdentity copies into fresh, a SERVER row's data built by ServerData, what only the sync reads from the VM's
+// config and stored already holds: the VM's smbios uuid, and the identity taken from `meta` for a VM without a stamp
+// tag. A refresh of the row after an action (or a look at the server) used to drop both until the next full sync:
+// in between, a VMID that changed hands was not told from the old VM (Superseded needs both uuids) and a sampled sync
+// could not use its sample for the row.
+func KeepRowIdentity(stored, fresh map[string]any) {
+	for _, k := range []string{vmUUIDKey, dataIdentity} {
+		if v, had := stored[k]; had {
+			if _, has := fresh[k]; !has {
+				fresh[k] = v
+			}
+		}
+	}
+}
+
 func vmRowUUID(cr *cloud.CloudResource) string {
 	d := cr.Data
 	if cr.Type == cloud.TypeVolume {

@@ -207,6 +207,7 @@ type ctxKeyDiff struct{}
 type snapshotHolder struct {
 	before, after map[string]any
 	set           bool
+	noEvent       bool
 }
 
 // WithSnapshotCapture returns a context carrying a fresh snapshot holder + the holder (the caller —
@@ -226,6 +227,17 @@ func RecordSnapshots(ctx context.Context, before, after map[string]any) {
 	}
 	h.before, h.after, h.set = before, after, true
 }
+
+// NoEvent is called by a mutation handler that found nothing to change and wrote nothing (the repeat of a request that
+// was already carried out): the middleware then writes no event, so the trail holds what changed and nothing else.
+func NoEvent(ctx context.Context) {
+	if h, _ := ctx.Value(ctxKeyDiff{}).(*snapshotHolder); h != nil {
+		h.noEvent = true
+	}
+}
+
+// Skipped reports whether the handler called NoEvent.
+func (h *snapshotHolder) Skipped() bool { return h != nil && h.noEvent }
 
 // Changes returns the computed diff (nil when nothing was recorded or nothing changed).
 func (h *snapshotHolder) Changes() []PropertyChange {

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 )
 
@@ -428,6 +429,11 @@ func (s ClusterSpec) Validate(d ClusterDefaults) error {
 		if _, ok := ClusterAddons[name]; !ok {
 			return fmt.Errorf("cluster: unknown add-on %q", name)
 		}
+	}
+	// The list becomes loadBalancerSourceRanges of the Service Kamaji makes for the API server on the platform cluster,
+	// where Kubernetes 1.36 refuses a CIDR with host bits: the cluster would never get its endpoint.
+	if err := cloud.StrictCIDRs(s.AllowedCIDRs, nil); err != nil {
+		return fmt.Errorf("cluster: allowedCidrs: %w", err)
 	}
 	seen := map[string]bool{}
 	for _, ng := range s.NodeGroups {

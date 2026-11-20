@@ -218,3 +218,42 @@ func TestKamajiRemovedKeys(t *testing.T) {
 		}
 	}
 }
+
+// config.cluster.allowedCidrs is the allow-list of a new cluster's API endpoint when the tenant names none. The save
+// refuses a new entry Kubernetes 1.36 would refuse and passes what the stored block already has; a stored entry with
+// host bits is named on the provider, never rewritten, and read without its host bits for a cluster about to be made.
+func TestKamajiAllowedCIDRs(t *testing.T) {
+	block := func(c ...any) map[string]any { return map[string]any{"cluster": map[string]any{"allowedCidrs": c}} }
+	if err := KamajiAllowedCIDRsErr(block("10.0.0.0/8"), nil); err != nil {
+		t.Errorf("canonical: %v", err)
+	}
+	err := KamajiAllowedCIDRsErr(block("10.0.0.0/8", "192.168.0.5/24"), nil)
+	if err == nil || err.Error() != "config.cluster.allowedCidrs: 192.168.0.5/24 has host bits set: use 192.168.0.0/24" {
+		t.Errorf("host bits on a create: %v", err)
+	}
+	stored := block("192.168.0.5/24")["cluster"]
+	if err := KamajiAllowedCIDRsErr(block("192.168.0.5/24", "10.0.0.0/8"), stored); err != nil {
+		t.Errorf("the stored entry beside a new one: %v", err)
+	}
+	if err := KamajiAllowedCIDRsErr(block("192.168.0.5/24", "10.1.2.3/8"), stored); err == nil {
+		t.Error("a new entry with host bits passed beside the stored one")
+	}
+	if err := KamajiAllowedCIDRsErr(map[string]any{}, nil); err != nil {
+		t.Errorf("no block: %v", err)
+	}
+
+	cfg := block("192.168.0.5/24", "10.0.0.0/8")
+	notes := KamajiConfigNotes(cfg)
+	if len(notes) != 1 || !strings.Contains(notes[0], "192.168.0.5/24 has host bits set: use 192.168.0.0/24") || !strings.Contains(notes[0], "Correct the stored value") {
+		t.Errorf("note of a stored entry with host bits: %q", notes)
+	}
+	if got := kamajiDefaultCIDRs(cfg["cluster"].(map[string]any)); len(got) != 2 || got[0] != "192.168.0.0/24" || got[1] != "10.0.0.0/8" {
+		t.Errorf("read for a new cluster: %v", got)
+	}
+	if stored := cfg["cluster"].(map[string]any)["allowedCidrs"].([]any); stored[0] != "192.168.0.5/24" {
+		t.Errorf("the stored value was rewritten: %v", stored)
+	}
+	if notes := KamajiConfigNotes(block("10.0.0.0/8")); len(notes) != 0 {
+		t.Errorf("notes of a canonical list: %q", notes)
+	}
+}

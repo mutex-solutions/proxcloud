@@ -728,7 +728,8 @@ are several, `errors.details.problems`.
   `pve-api-rule`, `seed-backup`, `argocd-access` and `images`. `argocd-access` is present while the spec has
   `access.argocd`: `fail` on an address or sources the spec check refuses, `warn` when a source range contains the
   address of a Proxmox node (where tenant traffic leaves under that address, tenants then reach the ArgoCD login
-  page) or the nodes' networks could not be read, `ok` otherwise. `seed-backup` is present once the installation has a seed VM and never
+  page), the nodes' networks could not be read or a stored source has host bits (a save refuses a new one: Kubernetes
+  1.36 does), `ok` otherwise. `seed-backup` is present once the installation has a seed VM and never
   fails: `ok` with the archive's time and store when the portal sees a `vzdump` archive of the seed VM younger than
   24 hours. Proxmox lists a VM's backups only to a token with `VM.Backup` on that VM or `Datastore.Allocate` on the
   store (a `200` without them otherwise), and the portal token is fenced off the seed VM, so the portal sees them on the

@@ -445,6 +445,10 @@ type LifecycleResult struct {
 	ServiceID string `json:"serviceId"`
 	Changed   []int  `json:"changed"`             // VMIDs whose tags changed
 	Unchanged bool   `json:"unchanged,omitempty"` // idempotent repeat: nothing to do
+	// NoOp: the call wrote nothing at all, on Proxmox or in the portal's records, so it gets no audit row. Narrower
+	// than Unchanged: a first Withdraw that finds no tag to change still blocklists the digest, and a Delete of a
+	// template somebody destroyed by hand still frees the receipt.
+	NoOp      bool   `json:"-"`
 	Smoke     string `json:"smokeJob,omitempty"`  // the PASS smoke a publish relied on
 	Remaining []int  `json:"remaining,omitempty"` // withdraw: published VMIDs left on the line (all providers)
 	// Providers is the withdraw outcome per Proxmox provider holding a copy of the artifact.
@@ -695,7 +699,7 @@ func (s *Service) Delete(ctx context.Context, pv DeletePVE, users TemplateUsers,
 	p := rec.Payload
 	out := &LifecycleResult{ID: id, Action: "delete", Digest: p.Digest, Slug: slugOf(p), ServiceID: p.ServiceID, Changed: []int{}, Complete: true}
 	if rec.TemplateGone {
-		out.Unchanged = true
+		out.Unchanged, out.NoOp = true, true
 		return out, nil
 	}
 	release, err := s.lockDigest(ctx, p.Digest)
@@ -988,6 +992,10 @@ func (s *Service) Withdraw(ctx context.Context, pvFor PVEResolver, users Templat
 			Message: fmt.Sprintf("Node(s) %s keep no published version of %s after this withdraw: new VMs placed there cannot be created from it until another version is published there. Confirm to continue", strings.Join(nodeLoss, ", "), slug),
 			Details: map[string]any{"slug": slug, "nodes": nodeLoss}}
 	}
+	was, err := s.Receipts.Blocked(ctx, p.Digest) // under the digest lock: nil = this call is the withdrawal
+	if err != nil {
+		return nil, err
+	}
 	if _, err := s.Receipts.Block(ctx, BlockedDigest{Digest: p.Digest, Package: p.Package, Tag: p.Tag, Reason: req.Reason, Actor: actor,
 		At: time.Now().UTC(), ServiceID: p.ServiceID, Node: p.Node, VMID: rec.VMID, ImportID: rec.ID}); err != nil {
 		return nil, err
@@ -1080,5 +1088,6 @@ func (s *Service) Withdraw(ctx context.Context, pvFor PVEResolver, users Templat
 		}
 	}
 	out.Unchanged = len(out.Changed) == 0 && out.Complete
+	out.NoOp = out.Unchanged && was != nil
 	return out, nil
 }

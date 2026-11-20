@@ -269,6 +269,21 @@ func TestArgoCDAccessCheck(t *testing.T) {
 		!strings.Contains(c.Message, "SNAT") || strings.Contains(c.Message, "192.0.2.11") {
 		t.Fatalf("a node inside the operator network: %+v", c)
 	}
+	// A source stored with host bits before the save refused it: Validate still takes the spec (the platform must
+	// plan and upgrade), the row warns with the form to write, and the node warning stays beside it.
+	in.Spec.Access.ArgoCD.Sources = []string{"10.8.0.5/24"}
+	if err := in.Validate(); err != nil {
+		t.Fatalf("a stored source with host bits fails Validate: %v", err)
+	}
+	if c, _ := in.argoAccessCheck(nodes, false); c.Status != CheckWarn || !strings.Contains(c.Message, "10.8.0.5/24 has host bits set: use 10.8.0.0/24") ||
+		!strings.Contains(c.Message, "Kubernetes 1.36") {
+		t.Fatalf("a stored source with host bits: %+v", c)
+	}
+	in.Spec.Access.ArgoCD.Sources = []string{"192.168.33.5/24"}
+	if c, _ := in.argoAccessCheck(nodes, false); c.Status != CheckWarn || !strings.Contains(c.Message, "SNAT") || !strings.Contains(c.Message, "use 192.168.33.0/24") {
+		t.Fatalf("host bits and a node inside: %+v", c)
+	}
+	in.Spec.Access.ArgoCD.Sources = []string{"192.168.33.0/24"}
 	in.Spec.Access.ArgoCD.Address = "10.200.200.50"
 	if c, _ := in.argoAccessCheck(nodes, false); c.Status != CheckFail || !strings.Contains(c.Message, "outside spec.clusters[0].metallbRange") {
 		t.Fatalf("an address Validate refuses: %+v", c)
@@ -289,5 +304,30 @@ func TestArgoCDAccessCheckReadsNodeAddresses(t *testing.T) {
 	pf := Preflight{Installation: in, Site: Site{CIDRPool: "10.100.0.0/16"}, Portal: &pve.Service{C: f.client(t, srv.URL, pve.DefaultPlatformTokenID)}}
 	if c := checkMap(pf.Run(context.Background()))["argocd-access"]; c.Status != CheckWarn || !strings.Contains(c.Message, "192.0.2.11 (in 192.0.2.11/32)") {
 		t.Fatalf("the node's own address as an operator network: %+v", c)
+	}
+}
+
+// The save's rule for spec.access.argocd.sources: a new entry with host bits is refused with the form to write, an
+// entry the stored spec already has passes, alone or beside a new canonical one.
+func TestArgoSourceProblems(t *testing.T) {
+	in := validInstallation(t)
+	if p := in.ArgoSourceProblems(nil); p != nil {
+		t.Fatalf("without the block: %v", p)
+	}
+	in.Spec.Access.ArgoCD = &ArgoCDAccess{Address: "10.200.200.210", Sources: []string{"10.8.0.0/24", "192.168.33.5/24"}}
+	if p := in.ArgoSourceProblems(nil); len(p) != 1 || p[0] != "spec.access.argocd.sources: 192.168.33.5/24 has host bits set: use 192.168.33.0/24" {
+		t.Fatalf("a create with host bits: %v", p)
+	}
+	stored := &Spec{}
+	if p := in.ArgoSourceProblems(stored); len(p) != 1 {
+		t.Fatalf("a stored spec without the block: %v", p)
+	}
+	stored.Access.ArgoCD = &ArgoCDAccess{Address: "10.200.200.210", Sources: []string{"192.168.33.5/24"}}
+	if p := in.ArgoSourceProblems(stored); p != nil {
+		t.Fatalf("the stored entry beside a new canonical one: %v", p)
+	}
+	in.Spec.Access.ArgoCD.Sources = append(in.Spec.Access.ArgoCD.Sources, "10.9.0.1/24")
+	if p := in.ArgoSourceProblems(stored); len(p) != 1 || !strings.Contains(p[0], "use 10.9.0.0/24") {
+		t.Fatalf("a new entry with host bits beside the stored one: %v", p)
 	}
 }

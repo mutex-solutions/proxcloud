@@ -42,6 +42,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 )
 
@@ -118,7 +119,7 @@ func (e *ExternalService) KamajiConfig() kamaji.Config {
 			Flavors:        flavors,
 			RootVolumeGiB:  intOf(cl["rootVolumeGiB"]),
 			RWXGiB:         intOf(cl["rwxGiB"]),
-			AllowedCIDRs:   strList(cl["allowedCidrs"]),
+			AllowedCIDRs:   kamajiDefaultCIDRs(cl),
 			PVEAPIURL:      str(cl["pveApiUrl"]),
 			DNSServers:     strList(cl["dnsServers"]),
 			NodeGroupMTU:   intOf(cl["workerMtu"]),
@@ -213,6 +214,30 @@ func KamajiClusterProblems(cfg map[string]any) []string {
 	return out
 }
 
+// KamajiAllowedCIDRsErr refuses a cluster block whose allowedCidrs, the allow-list a new cluster's API endpoint gets
+// when the tenant names none, holds an entry Kubernetes 1.36 refuses in loadBalancerSourceRanges (cloud.StrictCIDRs).
+// An entry the stored block already has passes, so a save that leaves the list alone is never refused for it;
+// KamajiConfigNotes names it on the provider.
+func KamajiAllowedCIDRsErr(cfg map[string]any, storedCluster any) error {
+	cl, _ := cfg["cluster"].(map[string]any)
+	old, _ := storedCluster.(map[string]any)
+	if err := cloud.StrictCIDRs(strList(cl["allowedCidrs"]), strList(old["allowedCidrs"])); err != nil {
+		return fmt.Errorf("config.cluster.allowedCidrs: %w", err)
+	}
+	return nil
+}
+
+// kamajiDefaultCIDRs reads config.cluster.allowedCidrs for a cluster about to be made. A stored entry with host bits
+// is read as its network: the same range to Kubernetes before 1.36, and the only spelling 1.36 takes on the new
+// Service. The stored value is not rewritten, and clusters that exist keep the list in their own values.
+func kamajiDefaultCIDRs(cl map[string]any) []string {
+	out := strList(cl["allowedCidrs"])
+	for i, c := range out {
+		out[i] = cloud.CanonicalCIDR(c)
+	}
+	return out
+}
+
 // KamajiConfigNotes is what an operator should know about a stored kamaji config that the config itself does not
 // say: a value read as its default because it is not valid, and repair keys that do nothing on the provider's chart.
 func KamajiConfigNotes(cfg map[string]any) []string {
@@ -221,6 +246,11 @@ func KamajiConfigNotes(cfg map[string]any) []string {
 		out = append(out, "Stored value ignored, the default applies (1800 s, 1 machine, firewall off) until it is corrected: "+p)
 	}
 	cl, _ := cfg["cluster"].(map[string]any)
+	if err := cloud.StrictCIDRs(strList(cl["allowedCidrs"]), nil); err != nil {
+		out = append(out, "config.cluster.allowedCidrs: "+err.Error()+". Kubernetes 1.36 refuses such a value on a new Service. "+
+			"A new cluster that takes this default gets the entry without its host bits (one that is not a CIDR at all is passed on and leaves the cluster without an API endpoint); "+
+			"clusters that exist keep their list. Correct the stored value")
+	}
 	argo, _ := cfg["argocd"].(map[string]any)
 	_, timeout := cl["nodeStartupTimeoutSeconds"]
 	_, guard := cl["repairMaxUnhealthy"]

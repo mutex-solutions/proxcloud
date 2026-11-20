@@ -1092,13 +1092,16 @@ func (h *Handler) pveServerEvents(ctx context.Context, es *externalservice.Exter
 	return out
 }
 
-// pveRefreshServerRow re-reads live VM state into the cached row (best-effort).
+// pveRefreshServerRow re-reads live VM state into the cached row (best-effort). What the row holds of the VM's
+// identity stays (pve.KeepRowIdentity): this read does not ask for it.
 func (h *Handler) pveRefreshServerRow(ctx context.Context, ps *pve.Service, proj *Project, cr *cloud.CloudResource) {
 	vm, err := ps.ResolveVM(ctx, proj.ID, cr.ExternalID)
 	if err != nil || vm == nil || vm.NodeDown { // a down node's row has nothing to refresh from
 		return
 	}
+	stored := cr.Data
 	cr.Data = pve.ServerData(*vm, ps.ServerAddresses(ctx, *vm), nil)
+	pve.KeepRowIdentity(stored, cr.Data)
 	ps.StampProtection(ctx, *vm, cr.Data)
 	ps.StampSnapshots(ctx, *vm, cr.Data)
 	if saved, err := h.cloud.Insert(ctx, cr); err == nil {

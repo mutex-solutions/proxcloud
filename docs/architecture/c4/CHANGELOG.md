@@ -4,6 +4,24 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-20: one CIDR rule for values that end in a Kubernetes field; quiet audit rows; the server row's identity
+
+**What changed:** no component or container. A shared rule, `cloud.StrictCIDRs` (`internal/cloud/cidr.go`), is used
+by the inputs whose CIDRs become `loadBalancerSourceRanges` on the platform cluster: "Managed databases"
+(`DatabaseSpec.Validate`, `SET_ALLOWED_CIDRS`), "Managed Kubernetes" (`ClusterSpec.Validate`), "External services"
+(`KamajiAllowedCIDRsErr` on a provider save, a note in `KamajiConfigNotes`, the default read without host bits for a
+new cluster) and "Platform installations" (`Installation.ArgoSourceProblems` at the save, a warning in the Check row
+`argocd-access`). Each takes what is stored as it is and refuses a new entry that is not canonical. The admin audit
+middleware writes no event for a handler that called `audit.NoEvent`; the template Withdraw and Delete handlers call
+it for a repeat that wrote nothing (`LifecycleResult.NoOp`). The refresh of a SERVER row after an action keeps the
+keys only the sync reads (`pve.KeepRowIdentity`).
+
+**Why:** Kubernetes 1.36, the version of the v0.10.1 BOM, refuses a new CIDR with host bits in a built-in field and
+keeps a stored one; the product accepted them. The two other changes are findings of the v0.10.0 lab round and of the
+first site on v0.10.0.
+
+**Diagrams:** none.
+
 ## 2026-11-20: the seed's k3s without leader election, and the way back across a minor
 
 **What changed:** no component or container. Component "Platform runs": `SeedUserData` writes one more file at a

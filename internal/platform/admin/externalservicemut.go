@@ -102,12 +102,17 @@ func kamajiRemovedKeysErr(cfg map[string]any) *httpx.HTTPError {
 
 // kamajiClusterErr refuses a kamaji cluster block whose worker repair or worker firewall value cannot be used: read as
 // sent, a 30 second startup timeout deletes machines that are still cloning, and "yes" for the firewall means off.
-func kamajiClusterErr(cfg map[string]any) *httpx.HTTPError {
+// It also refuses a new allowedCidrs entry Kubernetes 1.36 would refuse (storedCluster: the block being replaced, nil
+// on a create).
+func kamajiClusterErr(cfg map[string]any, storedCluster any) *httpx.HTTPError {
 	if cfg["provider"] != "kamaji" {
 		return nil
 	}
 	if problems := externalservice.KamajiClusterProblems(cfg); len(problems) > 0 {
 		return httpx.BadRequest(strings.Join(problems, ". "))
+	}
+	if err := externalservice.KamajiAllowedCIDRsErr(cfg, storedCluster); err != nil {
+		return httpx.BadRequest(err.Error())
 	}
 	return nil
 }
@@ -166,7 +171,7 @@ func (h *Handler) createExternalService(ctx context.Context, body map[string]any
 	if herr := kamajiRemovedKeysErr(cfg); herr != nil {
 		return nil, herr
 	}
-	if herr := kamajiClusterErr(cfg); herr != nil {
+	if herr := kamajiClusterErr(cfg, nil); herr != nil {
 		return nil, herr
 	}
 	if cfg["provider"] == "proxmox" {
@@ -321,7 +326,7 @@ func (h *Handler) applyServiceConnectionBody(req *http.Request, doc pgdoc.M) *ht
 			return httpx.BadRequest(err.Error())
 		}
 		cfg := ensureConfig(doc)
-		storedNetwork := cfg["network"]
+		storedNetwork, storedCluster := cfg["network"], cfg["cluster"]
 		for k, v := range c {
 			cfg[k] = v
 		}
@@ -329,7 +334,7 @@ func (h *Handler) applyServiceConnectionBody(req *http.Request, doc pgdoc.M) *ht
 			if herr := kamajiRemovedKeysErr(cfg); herr != nil {
 				return herr
 			}
-			if herr := kamajiClusterErr(cfg); herr != nil {
+			if herr := kamajiClusterErr(cfg, storedCluster); herr != nil {
 				return herr
 			}
 		}

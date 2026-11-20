@@ -321,6 +321,9 @@ func TestSpecValidate(t *testing.T) {
 	s = testSpec(EnginePostgreSQL, "17")
 	s.AllowedCIDRs = []string{"nope"}
 	cases["bad cidr"] = s
+	s = testSpec(EnginePostgreSQL, "17")
+	s.AllowedCIDRs = []string{"10.1.0.7/24"} // Kubernetes 1.36 refuses it in loadBalancerSourceRanges
+	cases["cidr with host bits"] = s
 	s = testSpec(EngineValkey, "9")
 	cases["beta without ack"] = s
 	s = testSpec(EnginePostgreSQL, "17")
@@ -1195,5 +1198,15 @@ func TestSpecValidateLimitText(t *testing.T) {
 	}
 	if got := LimitText("maxStorageGiB", 0, 500); got != "maxStorageGiB must be a whole number from 0 to 500" {
 		t.Fatalf("minimum 0, maximum 500: %s", got)
+	}
+}
+
+// The create names the form to write for an allow-list entry with host bits (Kubernetes 1.36 refuses the entry in
+// the Service's loadBalancerSourceRanges).
+func TestValidateNamesTheCanonicalCIDR(t *testing.T) {
+	s := testSpec(EnginePostgreSQL, "17")
+	s.AllowedCIDRs = []string{"10.1.0.0/24", "192.168.0.5/24"}
+	if err := s.Validate(testConfig()); err == nil || !strings.Contains(err.Error(), "allowedCidrs: 192.168.0.5/24 has host bits set: use 192.168.0.0/24") {
+		t.Fatalf("got %v", err)
 	}
 }

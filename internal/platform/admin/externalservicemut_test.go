@@ -266,6 +266,27 @@ func TestKamajiClusterSettingsValidatedOnSave(t *testing.T) {
 	if herr := put(pgdoc.M{"config": pgdoc.M{"provider": "proxmox"}}, `{"config":{"cluster":{"workerFirewall":"yes"}}}`); herr != nil {
 		t.Fatalf("another provider kind: %#v", herr)
 	}
+	// allowedCidrs, the default allow-list of new clusters' API endpoints: Kubernetes 1.36 refuses a new entry with
+	// host bits. A block that carries the entry it already had is saved (with or without one more entry), and the
+	// answer names the stored entry.
+	hostBits := "config.cluster.allowedCidrs: 192.168.0.5/24 has host bits set: use 192.168.0.0/24"
+	rec := httptest.NewRecorder()
+	h.externalServiceCreate(rec, httptest.NewRequest(http.MethodPost, "/service",
+		strings.NewReader(`{"name":"k","config":{"provider":"kamaji","cluster":{"allowedCidrs":["192.168.0.5/24"]}}}`)).WithContext(ctx))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), hostBits) {
+		t.Errorf("create with host bits: %d %s", rec.Code, rec.Body.String())
+	}
+	if herr := put(stored(map[string]any{"allowedCidrs": []any{"10.0.0.0/8"}}), `{"config":{"cluster":{"allowedCidrs":["10.0.0.0/8","192.168.0.5/24"]}}}`); herr == nil || herr.Status != http.StatusBadRequest || herr.Msg != hostBits {
+		t.Errorf("update that adds host bits: %#v", herr)
+	}
+	old := stored(map[string]any{"allowedCidrs": []any{"192.168.0.5/24"}})
+	if herr := put(old, `{"config":{"cluster":{"allowedCidrs":["192.168.0.5/24","10.0.0.0/8"],"workerFirewall":true}}}`); herr != nil {
+		t.Fatalf("update that keeps the stored entry: %#v", herr)
+	}
+	shapeExternalService(old)
+	if notes, _ := old["configNotes"].([]string); len(notes) != 1 || !strings.Contains(notes[0], "192.168.0.5/24 has host bits set") {
+		t.Errorf("notes of a stored entry with host bits: %q", notes)
+	}
 	// Stored before the check: the row is not locked, and its answer names the value.
 	doc := stored(map[string]any{"nodeStartupTimeoutSeconds": float64(30)})
 	if herr := put(doc, `{"config":{"argocd":{"chartVersion":"0.1.13"}}}`); herr != nil {
