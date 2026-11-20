@@ -4,11 +4,13 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -111,6 +113,70 @@ func (k *cascadeKube) ListApplications(context.Context, string, string) ([]map[s
 }
 func (k *cascadeKube) GetNamespace(context.Context, string) (map[string]any, error) { return nil, nil }
 
+// tokenACL is the ACL of a fake Proxmox, kept as PVE keeps it: the rows of a deleted token stay in user.cfg (dead:
+// PVE lists them nowhere and warns about each at every CLI call) until the file is written again. The lab's release
+// of 2026-11-21 left six such lines of the last tenant cluster token deleted.
+type tokenACL struct {
+	rows []pve.ACLEntry
+	gone []string // the tokens deleted
+}
+
+// clusterACL is what a mint leaves for the tenant cluster tokens ids, next to rows that are not theirs.
+func clusterACL(ids ...string) *tokenACL {
+	a := &tokenACL{rows: []pve.ACLEntry{
+		{Path: "/pool", RoleID: "ProxCloudPlatform", Type: "token", UGID: pve.DefaultPlatformTokenID, Propagate: 1},
+		{Path: "/storage/local", RoleID: "PVEDatastoreAdmin", Type: "user", UGID: "capmox@pve"},
+	}}
+	for _, id := range ids {
+		for _, path := range []string{"/pool/pc-p1", "/storage/local-zfs", "/pool/pc-templates", "/nodes", "/sdn/zones/localnetwork", "/storage/local"} {
+			a.rows = append(a.rows, pve.ACLEntry{Path: path, RoleID: "ProxCloudCAPI", Type: "token", UGID: "capmox@pve!" + id, Propagate: 1})
+		}
+	}
+	return a
+}
+
+func (a *tokenACL) of(token string) (n int) {
+	for _, r := range a.rows {
+		if r.UGID == token {
+			n++
+		}
+	}
+	return n
+}
+
+// serve answers the ACL list, a row's removal and a token's delete; false for any other request.
+func (a *tokenACL) serve(w http.ResponseWriter, r *http.Request, path string) bool {
+	dead := func(row pve.ACLEntry) bool { return row.Type == "token" && slices.Contains(a.gone, row.UGID) }
+	switch {
+	case r.Method == http.MethodGet && path == "/access/acl":
+		rows := []pve.ACLEntry{}
+		for _, row := range a.rows {
+			if !dead(row) {
+				rows = append(rows, row)
+			}
+		}
+		b, _ := json.Marshal(map[string]any{"data": rows})
+		_, _ = w.Write(b)
+	case r.Method == http.MethodPut && path == "/access/acl":
+		_ = r.ParseForm()
+		a.rows = slices.DeleteFunc(a.rows, dead) // a write of user.cfg drops the dead rows
+		if r.Form.Get("delete") == "1" {
+			a.rows = slices.DeleteFunc(a.rows, func(row pve.ACLEntry) bool {
+				return row.Path == r.Form.Get("path") && row.RoleID == r.Form.Get("roles") && row.UGID == r.Form.Get("tokens")
+			})
+		}
+		fmt.Fprint(w, `{"data":null}`)
+	case r.Method == http.MethodDelete && strings.Contains(path, "/token/"):
+		seg := strings.Split(path, "/") // /access/users/<user>/token/<name>
+		a.rows = slices.DeleteFunc(a.rows, dead)
+		a.gone = append(a.gone, seg[3]+"!"+seg[5])
+		fmt.Fprint(w, `{"data":null}`)
+	default:
+		return false
+	}
+	return true
+}
+
 // Lab finding F57 (2026-11-17, a host without the job scheduler): a deleted tenant cluster's token capmox@pve!<id> and
 // its ACL rows stayed in Proxmox until an operator started a provider sync, and for a cluster deleted in its first 30
 // minutes until a sync after that age. The delete now queues a durable job that needs no scheduler: it waits for the
@@ -126,11 +192,17 @@ func TestKubernetesDeleteReleasesTheTokenWithoutASync(t *testing.T) {
 	var mu sync.Mutex
 	var revoked []string
 	workerLeft := false
+	acl := clusterACL("pc-c-a", "pc-c-ab") // pc-c-ab: another cluster's token, whose name starts with this one's
+	rowsBefore := len(acl.rows)
 	proxmox := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 		path := strings.TrimPrefix(r.URL.Path, "/api2/json")
+		if r.Method == http.MethodDelete && strings.Contains(path, "/token/") {
+			revoked = append(revoked, path)
+		}
 		switch {
+		case acl.serve(w, r, path):
 		case r.Method == http.MethodGet && path == "/cluster/resources" && r.URL.Query().Get("type") == "node":
 			fmt.Fprint(w, `{"data":[{"type":"node","node":"pve1","status":"online"}]}`)
 		case r.Method == http.MethodGet && path == "/cluster/resources" && workerLeft:
@@ -141,9 +213,6 @@ func TestKubernetesDeleteReleasesTheTokenWithoutASync(t *testing.T) {
 			fmt.Fprint(w, `{"data":[]}`)
 		case r.Method == http.MethodGet && path == "/access/users/csi@pve/token": // no token of this cluster: no delete for one
 			fmt.Fprint(w, `{"data":[{"tokenid":"gateway"}]}`)
-		case r.Method == http.MethodDelete && strings.Contains(path, "/token/"):
-			revoked = append(revoked, path)
-			fmt.Fprint(w, `{"data":null}`)
 		default:
 			t.Errorf("the fake Proxmox has no answer for %s %s", r.Method, path)
 			http.Error(w, "no fake", http.StatusNotImplemented)
@@ -292,6 +361,11 @@ func TestKubernetesDeleteReleasesTheTokenWithoutASync(t *testing.T) {
 	if len(revoked) != 1 || !strings.HasSuffix(revoked[0], "/access/users/capmox@pve/token/pc-c-a") {
 		t.Fatalf("revoked = %v, want the cluster's token alone: csi@pve lists no token of this cluster, so no delete is sent for one", revoked)
 	}
+	// The token's six rows went before the token did: none is left as a dead line of user.cfg, and no other row went.
+	if acl.of("capmox@pve!pc-c-a") != 0 || acl.of("capmox@pve!pc-c-ab") != 6 || len(acl.rows) != rowsBefore-6 {
+		t.Fatalf("after the release: %d rows of the deleted token, %d of the other cluster's, %d of %d in all",
+			acl.of("capmox@pve!pc-c-a"), acl.of("capmox@pve!pc-c-ab"), len(acl.rows), rowsBefore)
+	}
 	mu.Unlock()
 	if len(kube.markers) != 0 {
 		t.Fatal("the marker is left")
@@ -354,9 +428,14 @@ func TestFailedCreateReleasesWithANodeDown(t *testing.T) {
 	f := newShareAccessFixture(t)
 	f.reserve(t, "vmbrw", "10.89.0.99", "pc-c-a")
 	var revoked []string
+	acl := clusterACL("pc-c-a")
 	proxmox := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/api2/json")
+		if r.Method == http.MethodDelete && strings.Contains(path, "/token/") {
+			revoked = append(revoked, path)
+		}
 		switch {
+		case acl.serve(w, r, path):
 		case r.Method == http.MethodGet && path == "/cluster/resources" && r.URL.Query().Get("type") == "node":
 			fmt.Fprint(w, `{"data":[{"type":"node","node":"pve1","status":"online"},{"type":"node","node":"pve2","status":"offline"}]}`)
 		case r.Method == http.MethodGet && path == "/cluster/resources":
@@ -365,9 +444,6 @@ func TestFailedCreateReleasesWithANodeDown(t *testing.T) {
 			fmt.Fprint(w, `{"data":[]}`)
 		case r.Method == http.MethodGet && path == "/access/users/csi@pve/token": // a cluster from before the CSI gateway
 			fmt.Fprint(w, `{"data":[{"tokenid":"gateway"},{"tokenid":"pc-c-a"}]}`)
-		case r.Method == http.MethodDelete && strings.Contains(path, "/token/"):
-			revoked = append(revoked, path)
-			fmt.Fprint(w, `{"data":null}`)
 		default:
 			t.Errorf("the fake Proxmox has no answer for %s %s", r.Method, path)
 			http.Error(w, "no fake", http.StatusNotImplemented)
@@ -385,6 +461,9 @@ func TestFailedCreateReleasesWithANodeDown(t *testing.T) {
 	}
 	if len(revoked) != 2 || !strings.HasSuffix(revoked[0], "/access/users/capmox@pve/token/pc-c-a") {
 		t.Fatalf("revoked = %v, want the cluster's tokens: csi@pve lists one for it, as for a cluster from before the CSI gateway", revoked)
+	}
+	if acl.of("capmox@pve!pc-c-a") != 0 || len(acl.rows) != 2 {
+		t.Fatalf("rows left after the release: %+v", acl.rows)
 	}
 	if n := f.clusterRows(t, "vmbrw"); n != 0 || len(kube.markers) != 0 {
 		t.Fatalf("%d address rows and %d markers left", n, len(kube.markers))

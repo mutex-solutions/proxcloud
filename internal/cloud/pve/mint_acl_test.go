@@ -22,6 +22,33 @@ type mintPVE struct {
 	acl    []ACLEntry
 	roles  map[string][]string
 	tokens []string // the tokens created and not deleted
+	gone   []string // the tokens deleted
+}
+
+// dead are the rows of deleted tokens. PVE keeps them as "acl:" lines of user.cfg until the file is written again,
+// ignores them with a warning at every read ("ignore invalid acl token"), and lists them nowhere (lab, 2026-11-21:
+// six lines of the last tenant cluster token deleted).
+func (f *mintPVE) dead() []ACLEntry {
+	var out []ACLEntry
+	for _, a := range f.acl {
+		if a.Type == "token" && slices.Contains(f.gone, a.UGID) {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// mayModify is PVE::RPCEnvironment::check_perm_modify for caller on path.
+func (f *mintPVE) mayModify(caller, p string) (ok bool, need string) {
+	have := f.privs(caller, p)
+	need = "Permissions.Modify"
+	switch {
+	case strings.HasPrefix(p, "/storage/"):
+		need += "|Datastore.Allocate"
+	case strings.HasPrefix(p, "/pool/"):
+		need += "|Pool.Allocate"
+	}
+	return slices.ContainsFunc(strings.Split(need, "|"), func(n string) bool { return have[n] }), need
 }
 
 func newMintPVE(extra ...ACLEntry) *mintPVE {
@@ -51,6 +78,11 @@ func (f *mintPVE) grant(path, role string, propagate bool, user, token string) {
 			f.set(ACLEntry{Path: path, RoleID: role, Type: kind, UGID: id, Propagate: map[bool]int{true: 1}[propagate]})
 		}
 	}
+}
+
+// rewrite is what every write of user.cfg does to the rows of tokens deleted before it: they are dropped.
+func (f *mintPVE) rewrite() {
+	f.acl = slices.DeleteFunc(f.acl, func(a ACLEntry) bool { return a.Type == "token" && slices.Contains(f.gone, a.UGID) })
 }
 
 // set writes one row as PUT /access/acl does: the same path, principal and role is one row.
@@ -94,35 +126,47 @@ func (f *mintPVE) serve(w http.ResponseWriter, r *http.Request) {
 		p := r.Form.Get("path")
 		b, _ := json.Marshal(map[string]any{"data": map[string]any{p: f.privs(caller, p)}})
 		_, _ = w.Write(b)
+	case r.Method == http.MethodGet && path == "/access/acl":
+		// PVE::API2::ACL read_acl: the rows on the paths the caller may modify (it holds no Sys.Audit on /access).
+		rows := []ACLEntry{}
+		for _, a := range f.acl {
+			if ok, _ := f.mayModify(caller, a.Path); ok && !slices.Contains(f.gone, a.UGID) {
+				rows = append(rows, a)
+			}
+		}
+		b, _ := json.Marshal(map[string]any{"data": rows})
+		_, _ = w.Write(b)
 	case r.Method == http.MethodPost && strings.Contains(path, "/token/"):
 		seg := strings.Split(path, "/") // /access/users/<user>/token/<name>
 		id := seg[3] + "!" + seg[5]
+		f.rewrite()
 		f.tokens = append(f.tokens, id)
 		fmt.Fprintf(w, `{"data":{"full-tokenid":%q,"value":"secret"}}`, id)
 	case r.Method == http.MethodDelete && strings.Contains(path, "/token/"):
 		seg := strings.Split(path, "/")
 		id := seg[3] + "!" + seg[5]
+		f.rewrite()
 		f.tokens = slices.DeleteFunc(f.tokens, func(t string) bool { return t == id })
-		f.acl = slices.DeleteFunc(f.acl, func(a ACLEntry) bool { return a.UGID == id })
+		f.gone = append(f.gone, id) // its rows stay in the file
 		fmt.Fprint(w, `{"data":null}`)
 	case r.Method == http.MethodPut && path == "/access/acl":
-		p, have := r.Form.Get("path"), f.privs(caller, r.Form.Get("path"))
-		need := "Permissions.Modify"
-		switch {
-		case strings.HasPrefix(p, "/storage/"):
-			need += "|Datastore.Allocate"
-		case strings.HasPrefix(p, "/pool/"):
-			need += "|Pool.Allocate"
-		}
-		if !slices.ContainsFunc(strings.Split(need, "|"), func(n string) bool { return have[n] }) {
+		p := r.Form.Get("path")
+		ok, need := f.mayModify(caller, p)
+		if !ok {
 			// PVE's refusal is the status line: "403 Permission check failed (<path>, <privileges>)".
 			conn, _, _ := w.(http.Hijacker).Hijack()
 			fmt.Fprintf(conn, "HTTP/1.1 403 Permission check failed (%s, %s)\r\nContent-Length: 13\r\nConnection: close\r\n\r\n{\"data\":null}", p, need)
 			_ = conn.Close()
 			return
 		}
+		f.rewrite()
 		for _, tok := range strings.Split(r.Form.Get("tokens"), ",") {
-			f.set(ACLEntry{Path: p, RoleID: r.Form.Get("roles"), Type: "token", UGID: tok, Propagate: 1})
+			row := ACLEntry{Path: p, RoleID: r.Form.Get("roles"), Type: "token", UGID: tok, Propagate: 1}
+			if r.Form.Get("delete") == "1" {
+				f.acl = slices.DeleteFunc(f.acl, func(a ACLEntry) bool { return a.Path == row.Path && a.UGID == row.UGID && a.RoleID == row.RoleID })
+				continue
+			}
+			f.set(row)
 		}
 		fmt.Fprint(w, `{"data":null}`)
 	default:
@@ -249,4 +293,54 @@ func sorted(s []string) []string {
 	s = slices.Clone(s)
 	slices.Sort(s)
 	return s
+}
+
+// The drill of 0.10.1-rc.2: the release of a tenant cluster deleted its token and left the token's six rows as dead
+// "acl:" lines of user.cfg, which Proxmox then warned about at every CLI call. The rows go before the token does:
+// those of exactly this token, with the privileges the portal token mints with, and nobody else's.
+func TestRevokeRemovesTheTokensOwnRows(t *testing.T) {
+	f := newMintPVE()
+	srv := httptest.NewServer(http.HandlerFunc(f.serve))
+	t.Cleanup(srv.Close)
+	c, err := New(Config{APIURL: srv.URL, TokenID: DefaultPlatformTokenID, Secret: "s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	scope := ClusterTokenScope{Pool: "pc-p1", TemplatePool: TemplatePool, BootStorage: "local-lvm", ISOStorage: "local", Zone: "pc", Vnet: "v1"}
+	for _, id := range []string{"pc-c-1", "pc-c-10"} { // one name is the start of the other
+		if _, err := c.MintClusterTokens(ctx, id, scope); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows := func(token string) (n int) {
+		for _, a := range f.acl {
+			if a.UGID == token {
+				n++
+			}
+		}
+		return n
+	}
+	before, other := len(f.acl), rows("capmox@pve!pc-c-10")
+	if rows("capmox@pve!pc-c-1") != 7 || other != 7 {
+		t.Fatalf("the mint wrote %d and %d rows", rows("capmox@pve!pc-c-1"), other)
+	}
+	if err := c.RevokeClusterTokens(ctx, "pc-c-1"); err != nil {
+		t.Fatal(err)
+	}
+	if dead := f.dead(); len(dead) != 0 || slices.Contains(f.tokens, "capmox@pve!pc-c-1") {
+		t.Fatalf("rows of the deleted token left in user.cfg: %+v, tokens %v", dead, f.tokens)
+	}
+	if len(f.acl) != before-7 || rows("capmox@pve!pc-c-10") != other || !slices.Contains(f.tokens, "capmox@pve!pc-c-10") {
+		t.Fatalf("the revoke touched other rows: %d rows of %d, %d of the other token", len(f.acl), before, rows("capmox@pve!pc-c-10"))
+	}
+	// The fake keeps a deleted token's rows as Proxmox does: a token deleted without the tidy-up leaves them.
+	path := "/access/users/capmox@pve/token/pc-c-10"
+	if err := c.delete(ctx, path, nil, nil); err != nil || len(f.dead()) != 7 {
+		t.Fatalf("a bare delete: %v, dead rows %d", err, len(f.dead()))
+	}
+	// A second revoke of a token that is gone is still a success, and sends no row removal for rows it cannot see.
+	if err := c.RevokeClusterTokens(ctx, "pc-c-1"); err != nil {
+		t.Fatal(err)
+	}
 }
