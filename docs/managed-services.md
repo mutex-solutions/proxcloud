@@ -2183,7 +2183,9 @@ to it. The release notes of such a release must say so.
 
 **Not run on a lab or on a site.** This is what the plan, the code and its tests say an upgrade to
 the BOM with k3s `v1.36.6+k3s1` and Kubernetes 1.36.6 does. Every duration below is an expectation
-and is **not measured**; the lab drill of the release is what replaces them.
+and is **not measured**; the lab drill of the release is what replaces them. The candidate
+`v0.10.1-rc.1` is the first release that carries this BOM, as `0.10.1-rc.1`, for that drill
+([ci-release.md](ci-release.md#release-candidates)).
 
 **What the BOM changes.** `kubernetes.version` 1.35.10 to 1.36.6, `kubernetes.nodeImage` to the
 image built for 1.36.6 (`ubuntu-2604-k8s-1.36.6-20261116194043-72f0eaa3d0d4`, from the same source
@@ -2732,7 +2734,7 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 
 ## Not implemented yet
 
-- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2`, that of v0.9.0 is `0.9.0`, that of v0.9.1 is `0.9.1`, that of v0.10.0 is `0.10.0` (`main` carries a `-dev` one between releases, now `0.11.0-dev`; the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` carry `0.9.0-rc.1` and `0.9.0-rc.2`, release BOMs for a lab, and the candidate `v0.10.0-rc.1` carries `0.10.0-rc.1`; v0.9.0 keeps both as previous BOMs, v0.9.1 keeps those and that of v0.9.0, v0.10.0 keeps that of v0.9.1 and that of the candidate `v0.10.0-rc.1` too, and `main` keeps that of v0.10.0 as well). `--managed-services` needs v0.8.0 or later: no
+- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2`, that of v0.9.0 is `0.9.0`, that of v0.9.1 is `0.9.1`, that of v0.10.0 is `0.10.0` (`main` carries a `-dev` one between releases, now `0.11.0-dev`; the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` carry `0.9.0-rc.1` and `0.9.0-rc.2`, release BOMs for a lab, and the candidates `v0.10.0-rc.1` and `v0.10.1-rc.1` carry `0.10.0-rc.1` and `0.10.1-rc.1`; v0.9.0 keeps both as previous BOMs, v0.9.1 keeps those and that of v0.9.0, v0.10.0 keeps that of v0.9.1 and that of the candidate `v0.10.0-rc.1` too, and `main` keeps that of v0.10.0 as well). `--managed-services` needs v0.8.0 or later: no
   earlier released image reads `PROXCLOUD_PLATFORM_ENABLED`, and the images of v0.8.0 exist once
   its tag's workflows have succeeded. For a test ahead of a release,
   `proxcloud-up.sh` takes a build of main as its version (`--version dev-<sha>`, `upgrade dev-<sha>`;

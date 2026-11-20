@@ -101,6 +101,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   candidates of 0.9.0, `0.9.0`, `0.9.1`, `0.10.0-rc.1` and `0.10.0`. No apply on such a platform was run on a lab
   by this change.
 
+## [0.10.1-rc.1] - 2026-11-20
+
+The first release candidate of 0.10.1, published as a prerelease and never as `latest`. It is not the release:
+`v0.10.0` stays the current stable release, and the chart, the installer and the Compose default still name it. It
+holds what is under Unreleased above (#397, #398, #399), and it exists so that a lab can run the first upgrade that
+moves Kubernetes: nothing of it had run on a lab when it was tagged. The entries above are not repeated here. Not
+for a production site.
+
+### Changed
+
+- **The platform BOM's release is `0.10.1-rc.1`** (`deploy/platform/platform-bom.yaml`), with the pins `main` had.
+  No chart of the product changed since its tag
+  (`git diff proxmox-kamaji-cluster-v0.1.15 -- deploy/charts/proxmox-kamaji-cluster`,
+  `git diff database-cluster-v0.5.2 -- deploy/charts/database-cluster` and
+  `git diff proxcloud-platform-v0.1.3 -- deploy/charts/proxcloud-platform` print nothing), so no chart tag is
+  needed. It is a release BOM: no `pending` digest and no `0.0.0+` version, and the release gate passes on it and
+  on the nine previous BOMs.
+- **It is the first release BOM that moves Kubernetes.** Against `0.10.0`: the seed's k3s `v1.35.10+k3s1` to
+  `v1.36.6+k3s1`, the platform cluster 1.35.10 to 1.36.6, and the node image to
+  `ubuntu-2604-k8s-1.36.6-20261116194043-72f0eaa3d0d4`. No chart, no Cluster API provider and no other image
+  moves. A candidate moves nothing a final moves: the app chart, the installer pin and `DEFAULT_VERSION` stay on
+  `v0.10.0`; the installer's k3s and Kubernetes pins stay at 1.35.10.
+- **The upgrade is two operator actions.** "Seed and node image" (phrase `upgrade <name> to 0.10.1-rc.1`) imports
+  the node image on every node, saves an etcd snapshot on the seed, writes the config file without leader election,
+  replaces the k3s binary and restarts k3s: the seed's API is away (expected about a minute), reconciliation
+  stops, the platform cluster and every tenant keep serving. It needs a backup of the seed VM:
+  `409 seed_backup_missing` until the portal sees one younger than 24 hours or the operator confirms one
+  (`seedBackupTaken`; on most stores the portal cannot see it). "Platform cluster" (phrase
+  `upgrade <name> to 0.10.1-rc.1 and replace its machines`, blocked with `seed_not_upgraded` until the first is done) replaces the
+  control plane machine, then `system`, `kamaji` and `dbaas`: the platform cluster's API is away during the
+  control plane's replacement, every tenant API server while a group of one `kamaji` machine is replaced, every
+  one-instance database on a `dbaas` machine while it is replaced. No duration was measured.
+- **The way back.** The seed's k3s: by hand, the command of `seed_k3s_timeout` (`k3s-killall.sh`, `k3s.prev` back,
+  `k3s server --cluster-reset --cluster-reset-restore-path=` with the snapshot the run saved,
+  `systemctl start k3s`), then the backup of the seed VM. The machine replacement has none once the new control plane machine has
+  joined etcd.
+- **The plan from each previous BOM is allowed, with no refusal**, in two parts (`PlanFor`, one control plane
+  machine and one machine per group). From 0.10.0 and 0.10.0-rc.1, 17 changes: the row `roll`; the release, record
+  only; `kubernetes.version` and `kubernetes.nodeImage`, class machines, stage `cluster`; `seed.k3s`, class seed,
+  stage `seed-k3s`, with its four `site` rows (`seed-k3s-job`, `seed-etcd-snapshot`, `seed-k3s-config`,
+  `seed-k3s-binary`); four `roll/<unit>` rows, class machines, and four `roll-vm/<unit>` rows, class site, stage
+  `cluster`. From 0.9.0, 0.9.1 and the candidates of 0.9.0, 20: those, the two tenant charts, record only, and
+  `pc-platform` 0.1.14 to 0.1.15 (class chart, stage `cluster`, wave 3, with the first step of the roll). From
+  the three 0.8.x BOMs, 23: those with the cluster chart from 0.1.13, and `capi` (stage `seed-platform`, wave 2),
+  `capi-tenant` and `platform` (stage `workload-platform`, waves 2 and 3) from 0.1.2 to 0.1.3. Only the move from
+  0.10.0 is drilled.
+- **Two components are outside their own support matrix on Kubernetes 1.36**, accepted as "to be proven by the lab
+  drill": cert-manager v1.20.2 (lists 1.32 to 1.35) and Cilium 1.18.16 (lists 1.30 to 1.33). An upgrade moves no
+  third-party chart in this release.
+- **Tenant clusters and databases are not moved.** Each tenant cluster stays on its own version (1.35.10).
+
+### Verified on a lab
+
+Nothing. The candidate exists for the drill.
+
+### Not verified
+
+- Both parts of the upgrade, entirely, on a lab and on a site with tenants: "Seed and node image" (the import,
+  the snapshot, the config file, the binary, the seed API gap, the seed's Applications on k3s 1.36) and "Platform
+  cluster" (every unit, every gap, Pause and Resume, delete-first, a failed join, three control plane machines).
+- The way back of the seed with the snapshot restore.
+- cert-manager v1.20.2 and Cilium 1.18.16 on Kubernetes 1.36, and every component that states no version.
+- Tenant clusters and databases on the moved platform: existing ones at 1.35.10, a new cluster at 1.35.10 and at
+  1.36.6, a new database; the CIDR rule against a 1.36 API server.
+- The moves from the eight BOMs other than 0.10.0 (plans read, not run).
+- The candidate's images and its tag's workflows: they do not exist before the tag.
+
 ## [0.10.0] - 2026-11-20
 
 The release after `v0.9.1`. The Proxmox console of a VM made by ProxCloud opens on the graphical display, a
