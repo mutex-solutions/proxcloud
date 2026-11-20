@@ -73,6 +73,22 @@ cert-manager stays for TLS/ingress and the CSI gateway. k3s's bundled Traefik an
 ServiceLB serve the portal on the management host's ports 80 and 443. MetalLB and
 the services cluster arrive with split mode.
 
+**cert-manager v1.20.2 to v1.21.3** (`cert_manager_chart`, the platform BOM's pin).
+1.21 lists Kubernetes 1.33 to 1.36, so the installer's 1.35.10 is inside it, and none
+of upstream's three 1.20 to 1.21 breaking items touches what the installer sets (the
+values are `crds.enabled: true` only). **No drill covers this path.**
+
+- Stage 40, the management cluster: `make upgrade` re-applies the cert-manager
+  Application with the new version, and ArgoCD upgrades it in place, CRDs included.
+  The stage's wait (`rollout status deploy/cert-manager-webhook`) can pass on the old
+  Deployment before ArgoCD has synced; read the Application (`k3s kubectl -n argocd
+  get application cert-manager`) for Synced and Healthy at v1.21.3.
+- Stage 50, the services cluster (split mode): `make upgrade` does not run it, so
+  cert-manager moves there at the next `make install` (`helm upgrade --install`
+  from charts.jetstack.io, in place). Besides the product, plugin-barman-cloud uses
+  it there (two Certificates and an Issuer, `cert-manager.io/v1`); none of the
+  breaking items touches them.
+
 ## Options
 
 [`installer/playbooks/group_vars/all/defaults.yml`](../installer/playbooks/group_vars/all/defaults.yml) documents every option; [`versions.yml`](../installer/playbooks/group_vars/all/versions.yml) pins every version. Override them under `proxcloud:` in the site's `group_vars`; the two are deep-merged. The ones most sites touch:

@@ -4,6 +4,20 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-21: the BOM pins cert-manager v1.21.3
+
+**What changed:** no component, container or relation. The platform BOM pins cert-manager v1.21.3 from the chart
+mirror on the seed and on the platform cluster, with `upgradeFrom: ["v1.20.2"]`, and the installer's
+`cert_manager_chart` follows (stage 40 on the management cluster, stage 50 on the services cluster). Component
+"Platform installations" is unchanged: `Classify` now plans the move from the BOMs on Kubernetes 1.36.6 and refuses
+it from those on 1.35.10 by the pair gate of the entry below. `images.clusterctl` is unchanged; its unused
+`cert-manager` entry trails the pin until the next rebuild.
+
+**Why:** v1.21.3 lists Kubernetes 1.33 to 1.36, where v1.20.2 lists up to 1.35, and 1.20 reaches end of life with
+1.22.
+
+**Diagrams:** none.
+
 ## 2026-11-21: an upgrade may move cert-manager
 
 **What changed:** no component, container or relation. Component "Platform installations": `Classify` lets the

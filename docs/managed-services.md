@@ -2123,6 +2123,17 @@ and a fake Cluster API: **no such upgrade has run on a lab or on a site.** No th
 no Cluster API provider moves with it; two of the charts are then outside the Kubernetes versions
 their own documents list.
 
+The BOM after 0.10.1 moves cert-manager from v1.20.2 to v1.21.3 on the seed and on the platform
+cluster (both entries list v1.20.2 in `upgradeFrom`), and nothing else: v1.21.3 lists Kubernetes
+1.33 to 1.36. From the BOM of 0.10.1 or of 0.10.1-rc.2 the plan has three rows: the release
+(record only) and `cert-manager` on the seed and on the platform cluster (chart, wave 1), with no
+seed, machines or site row. From 0.10.1-rc.1 it also has `pc-platform` 0.1.15 to 0.1.16 and
+`tenantCharts.kubernetes`, as the move to 0.10.1 had. From every BOM on Kubernetes 1.35.10 (0.8.0 to
+0.10.0 and their candidates) the upgrade is refused: it would move k3s and Kubernetes too, and both
+cert-manager rows carry the sentence of [A cert-manager move](#a-cert-manager-move). Such a platform
+upgrades to 0.10.1 with the `v0.10.1` build first, both parts, then with this one. The plans are
+`TestPreviousBOMsMoveCertManager`'s; no such move has run on a lab.
+
 "Moves" means that the Application's target is the new chart version and ArgoCD has compared the
 cluster with it. ArgoCD starts a sync only for an Application that is out of sync, and a hook is
 not part of the comparison: a chart version that renders the same objects as the one before is
@@ -2366,11 +2377,14 @@ install](#what-a-tenant-can-use-after-the-install) has the steps. Kamaji 26.11.2
 versions up to 1.37.0 by its code; its document lists tenants up to 1.35 only. On the lab a tenant
 cluster at 1.36.6 was created after the publish and was READY in 7 minutes 20 seconds.
 
-**Two charts are outside their documented Kubernetes versions on 1.36.** The upgrade moves no
-third-party chart, so both stay at their pin:
+**Two charts are outside their documented Kubernetes versions on 1.36.** The upgrade to 1.36.6
+moves no third-party chart, so both stay at their pin:
 
 - **cert-manager v1.20.2** (seed and platform cluster): its release table lists Kubernetes 1.32 to
-  1.35. The first cert-manager that lists 1.36 is 1.21. This is new with this BOM.
+  1.35. The first cert-manager that lists 1.36 is 1.21. This is new with the BOM of 0.10.1.
+  **Closed by the BOM after 0.10.1**, which moves it to v1.21.3 (lists 1.33 to 1.36) in an upgrade
+  of its own, after the one to 1.36.6 ([What this release moves](#what-this-release-moves-and-what-it-refuses)).
+  A platform stays outside until it has made that move.
 - **Cilium 1.18.16** (the platform cluster's CNI): its compatibility page lists 1.30 to 1.33, and
   says that other versions depend on Kubernetes' own compatibility. It was outside the list on
   1.35.10 already; 1.36 is one minor further. The first Cilium that lists 1.36 is 1.20.
@@ -2378,8 +2392,9 @@ third-party chart, so both stay at their pin:
 No source says either breaks on 1.36, and neither was run on 1.36. Both are accepted as "to be
 proven by the lab drill": cert-manager issuing a certificate on the seed and on the platform
 cluster after their moves, Cilium agents Ready on every new node with traffic between nodes. If one
-of them fails there, stop before the next part or unit: the charts cannot be moved by an upgrade in
-this release. Argo CD 3.6, Cluster API v1.14 (as management and as workload cluster) and
+of them fails there, stop before the next part or unit: an upgrade to 1.36.6 cannot move either
+chart (Cilium moves in no upgrade, cert-manager only in one that changes no k3s, Kubernetes version
+or node image). Argo CD 3.6, Cluster API v1.14 (as management and as workload cluster) and
 CloudNativePG 1.30 list 1.36. The Proxmox provider, the in-cluster IPAM provider, the Helm addon
 provider, the Kamaji control plane provider, Kamaji, kamaji-etcd, MetalLB, proxmox-csi and kube-vip
 state no Kubernetes version for their pin.

@@ -108,7 +108,7 @@ func TestValidate(t *testing.T) {
 		{"a release with everything pinned", func(t *testing.T, b *BOM) {
 			b.Release = "0.7.0"
 			// A pre-release version and a v-prefixed one are exact versions, in a release too.
-			if k, c := comp(t, b, "workload", "kamaji").Chart.Version, comp(t, b, "workload", "cert-manager").Chart.Version; k != "26.11.2-edge" || c != "v1.20.2" {
+			if k, c := comp(t, b, "workload", "kamaji").Chart.Version, comp(t, b, "workload", "cert-manager").Chart.Version; k != "26.11.2-edge" || c != "v1.21.3" {
 				t.Fatalf("kamaji %s, cert-manager %s", k, c)
 			}
 			b.Images.Clusterctl = strings.Replace(b.Images.Clusterctl, "@pending", "@"+sha, 1)
