@@ -75,6 +75,19 @@ of the candidate `0.10.1-rc.2` pins it (below).
 
 ### Changed
 
+- **The platform BOM on `main` is `0.11.0-dev` again, and the build carries the BOM of `0.10.1-rc.2`**
+  (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.10.1-rc.2.yaml`, sha256
+  `14acba7b0d7ae05bda488066eb2f1699f73139bc78ae44df824a758e587d17bd`). The commit of the candidate `v0.10.1-rc.2`
+  left the BOM at `0.10.1-rc.2`, and the release gate refuses only `-dev`. A platform installed by the candidate,
+  moved to its BOM, or standing in the replacement of its machines with that BOM as its target (what a Retry on the
+  candidate's build records) is not refused (`bom_unsupported`) under a later build while the file is carried. Its
+  pins are those of `main`, so the plan from it has one change, the release, record only. From `0.10.1-rc.1` the plan
+  has three (the release, the tenant chart and `pc-platform` 0.1.15 to 0.1.16), and the nine older previous BOMs
+  still carry the move to k3s `v1.36.6+k3s1` and Kubernetes 1.36.6 in two parts. `TestUpgradeRollsNoMachine`
+  compares eleven previous BOMs with the BOM on `main`, nine of them at step 0 of a roll. A development BOM carries
+  no unfinished replacement, so on a build of `main` an installation on `0.10.0` after the first unit of a
+  replacement toward `0.10.1-rc.1` or `0.10.1-rc.2` goes on to that candidate with a Retry, nothing to confirm
+  (`TestRollTowardAKeptCandidateGoesOn`). No apply on such a platform was run on a lab by this change.
 - **The guide gives the figures of the `v0.10.1-rc.1` drill**, each marked as one lab's sample: the node image
   import 11 to 19 minutes per node and able to stall etcd for seconds on a shared disk; the seed's API away for 43
   seconds in stage 5a; for the control plane's unit a clone of 6 minutes 5 seconds, the platform API away for up to
