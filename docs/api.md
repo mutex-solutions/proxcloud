@@ -410,6 +410,20 @@ answers `404`.
 {"clusterId": "pc-c-0a1b2c3d", "chartVersion": "0.1.17", "image": "ghcr.io/mutex-solutions/proxcloud-api:v0.11.0"}
 ```
 
+`GET` on the same path (`admin:service:read`) reads the cluster's load balancer: when its controller's credential
+was minted and last used, and the cluster's balancer row (`balancerId`, and in `balancer` its status, appliances and
+each Service's address and state; absent before the first Service). `data` is `null` when the cluster has no
+controller, or when it is a cluster of another Kubernetes provider. The tenant has the same as the cluster action
+`GET_LOAD_BALANCER` on `POST /api/v1/project/{pid}/cloud/{id}/action` (`{"result": ...}`, `null` without a
+controller). The cluster's mode is in the list: `loadBalancer` (`default`, `class-only`, absent without a controller)
+per cluster of `GET /api/v1/admin/service/{id}/k8s-clusters`, and `load_balancer` in the tenant's cluster row.
+
+```json
+{"controllerSince": "2026-11-20T08:00:00Z", "controllerLastSeen": "2026-11-21T09:41:00Z", "balancerId": "6a5f…",
+ "balancer": {"status": "ACTIVE", "ha": true, "appliances": [{"serverId": "311", "node": "pve2", "holdsVip": true, "state": "up"}],
+  "cluster": {"id": "pc-c-0a1b2c3d", "services": [{"uid": "…", "namespace": "shop", "name": "web", "vip": "203.0.113.21", "state": "ready"}]}}}
+```
+
 `GET /api/v1/admin/service/{id}/k8s-clusters/{clusterId}/machines` (`admin:service:read`) is the operator's detail,
 read live from the management cluster:
 

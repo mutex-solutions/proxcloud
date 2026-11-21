@@ -82,8 +82,9 @@ Four charts live here:
   `proxcloud-api` image, the admin kubeconfig and the gateway Secret) with an egress NetworkPolicy,
   and with `default: true` MetalLB serves only class `proxcloud.io/internal`. NGINX Gateway Fabric's
   Service class is never set. Without the block the render is what 0.1.16 gave, so an existing
-  cluster bumped to it changes nothing ([managed-k8s.md](../../docs/managed-k8s.md)). The BOM still
-  pins 0.1.16: no new cluster gets 0.1.17 until it moves.
+  cluster bumped to it changes nothing ([managed-k8s.md](../../docs/managed-k8s.md)). Published from
+  its tag; the platform BOM pins it for new tenant clusters (`tenantCharts.kubernetes`), while the platform
+  cluster (`pc-platform`) stays on 0.1.16.
 
 ## Publishing
 
@@ -106,10 +107,11 @@ pullable; see [release readiness](../../docs/release-readiness.md).
 
 For `database-cluster`, `proxmox-kamaji-cluster` and `proxcloud-platform`, bump `version:` in `Chart.yaml`
 in the PR that changes the chart, merge, then have a maintainer deliberately cut
-the matching tag. The current source versions are database `0.5.2`, Kubernetes `0.1.16` and
+the matching tag. The current source versions are database `0.5.2`, Kubernetes `0.1.17` and
 platform `0.1.3`. All three are published and pinned by the platform
 BOM (database `0.5.2`: no
-disruption budget for a PostgreSQL of one instance; Kubernetes `0.1.16`: the node deletion
+disruption budget for a PostgreSQL of one instance; Kubernetes `0.1.17` for new tenant clusters: the load
+balancer controller, and `0.1.16` for the platform cluster: the node deletion
 timeout of the control plane's and the node groups' machines, on top of the version and the
 delete-first rollout per node of a node group of `0.1.15`, on top of the node groups' MachineHealthCheck, the
 VLAN tag and the control plane count of the platform cluster of `0.1.14`; platform `0.1.3`: `delete`

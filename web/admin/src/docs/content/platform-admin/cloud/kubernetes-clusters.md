@@ -30,7 +30,7 @@ A worker runs `kubeadm join` once, at its first boot. When that fails the VM kee
 - A cluster made on an older chart gets the health check when you **Bump** it onto 0.1.14 or later, and it then acts at once on machines already past the timeout.
 - The provider's two keys are the setting of every cluster on chart 0.1.14 or later: ProxCloud writes them into a cluster at every change it makes to that cluster, over what the cluster had. After you change them, **Apply settings** on a cluster's row (shown when the cluster is already on the provider's chart) writes them to that cluster now. There is no per-cluster setting.
 
-None of this was run on a lab yet. Cluster chart 0.1.14 or later (this release pins 0.1.16) and platform chart 0.1.3 (which lets the portal delete a Machine and read the health checks) come with a managed-services platform installed from this release. Until the provider's chart version is 0.1.14 no cluster has a health check, and on a managed-services platform installed from an earlier release Replace answers that the service account cannot delete Machines, until the platform is upgraded to this release.
+None of this was run on a lab yet. Cluster chart 0.1.14 or later (this release pins 0.1.17 for new clusters) and platform chart 0.1.3 (which lets the portal delete a Machine and read the health checks) come with a managed-services platform installed from this release. Until the provider's chart version is 0.1.14 no cluster has a health check, and on a managed-services platform installed from an earlier release Replace answers that the service account cannot delete Machines, until the platform is upgraded to this release.
 
 | Code | Usual cause | What to do |
 |---|---|---|
@@ -94,3 +94,19 @@ Things to know:
 - **A template that is gone.** A node whose template was removed gets no new worker even while **Kubernetes versions** still names it; when no node holds the image the request is refused with *no node still holds this version's image*. Correct the versions line.
 - **One storage name per cluster.** A node where the cluster's worker storage is not active gets no worker.
 - **Local volumes are not followed.** A tenant who scales a group below the number of nodes it runs on is warned in the console; ProxCloud does not read PersistentVolumes.
+
+## Load balancer
+
+**Not verified on a lab yet.** A Service of type `LoadBalancer` in a tenant cluster can get a public address of the platform's load balancer: two appliance VMs per cluster, built with the cluster's first such Service and kept until the cluster is deleted, one public address per Service. The tenant pays both.
+
+On the provider's **Connection** tab, **Load balancer public network** and **Load balancer flavor id** set `config.cluster.loadBalancer`: a public network of the workers' Proxmox provider (a plain bridge with a gateway, not an SDN vnet) and an active flavor for the appliances. Both or neither; the save checks them. Empty: every cluster keeps MetalLB only.
+
+A **new** cluster gets the load balancer controller in default mode when every gate holds: the portal has the gateway URL and the controller image (`PROXCLOUD_LB_CONTROLLER_IMAGE`), the provider pins cluster chart 0.1.17 or later, the workers are the project's own, and the provider's public network is allowed for the project. A Service without a class then gets a public address, and MetalLB serves class `proxcloud.io/internal`. Otherwise the cluster is made as before and the API log names the gate.
+
+The **Load balancer** column of the clusters list shows each cluster's mode: Default, Class only or MetalLB only. The **Load balancer** button opens the cluster's view: when its controller last called the gateway, the balancer's status, its appliances and its Services with their addresses.
+
+- **Enable load balancer controller** gives an **existing** cluster the controller in class-only mode: only Services of class `proxcloud.io/lb` get a public address, and no MetalLB address moves. The cluster is pinned to the provider's chart version in the same apply, as a bump does. A gate that does not hold is refused with its name.
+- On a cluster that has a controller the button **Rotate the controller's credential** mints a new one (the old token stops at once) and gives the cluster the portal's controller image. The mode stays.
+
+The tenant's cluster page says which Services get a public address, what it costs, and that NGINX Gateway Fabric takes one public address per Gateway in default mode. The full rules are in `docs/managed-k8s.md`, "Load balancers of a cluster's Services".
+

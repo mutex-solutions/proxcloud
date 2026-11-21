@@ -71,3 +71,18 @@ With it, inbound traffic to a node is dropped unless a rule of that group allows
 - A node that was just added or replaced gets the firewall within about 15 minutes.
 
 A cluster page without that line has no firewall around its nodes: every port of a node is reachable from your project's own networks, and from nowhere else.
+
+## Load balancer addresses
+
+A Service of type `LoadBalancer` gets an address. Which kind depends on the cluster, and the cluster page says it under **Load balancer**:
+
+- **Public address (default)**: on a site that offers the platform's load balancer, a cluster created since v0.11.0 gives each such Service a public address. A Service with `loadBalancerClass: proxcloud.io/internal` gets a private address of the cluster's network instead.
+- **Public address on request (class only)**: a cluster created earlier, after your operator enabled the load balancer for it. Services keep their private addresses; a Service with `loadBalancerClass: proxcloud.io/lb` gets a public one. A Service's class cannot change: to move one, delete it and create it again. It gets a new address.
+- **Private addresses only**: the cluster has no platform load balancer. Each Service gets one of 8 addresses of the cluster's network.
+
+What a public address costs: the cluster's first Service with one builds its load balancer, two small VMs billed as servers with their disks, kept until the cluster is deleted. Each Service then takes one public address, billed and counted in your quota. With **NGINX Gateway Fabric** on a cluster with public addresses, each Gateway makes its own Service, so each Gateway takes a public address.
+
+The cluster page shows the load balancer once it exists: its two VMs and which one holds the addresses, each Service with its address, its ports, how many workers answer it and its state, and when the cluster last reported to the platform. **Open the load balancer** shows the same on the load balancer's own page, which you cannot edit or delete: the cluster's Services make it.
+
+The address shows in `kubectl get service` once it is ready, and `kubectl describe service` lists Events: a Service the platform refuses says why there, for example `UDPNotSupported` (only TCP ports are balanced), `QuotaExceeded` (no public address left in your quota) or `TooManySourceRanges`. Idle connections are closed after an hour. A Service deleted gives its address back at once.
+
