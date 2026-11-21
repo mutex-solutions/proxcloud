@@ -68,7 +68,20 @@ type loadBalancer struct {
 	VIPs       []string      `json:"vips,omitempty"` // public addresses, owned by the balancer (LBAddressOwner)
 	Appliances []lbAppliance `json:"appliances,omitempty"`
 	Replacing  string        `json:"replacing,omitempty"` // when REPLACE_APPLIANCES started, RFC 3339
+	// Cluster: the balancer of a Kubernetes cluster's Services (cloud_lb_cluster_pve.go). Its spec is the platform's,
+	// built from the state the cluster's controller sends; the tenant cannot change or delete it.
+	Cluster *lbCluster `json:"cluster,omitempty"`
 	pve.LBSpec
+	// settled is the last pair apply's word that no appliance holds a VIP the row no longer lists.
+	settled bool
+}
+
+// lbRender is the HAProxy config of the balancer: a cluster's gets the cluster's idle timeout (C5).
+func lbRender(lb *loadBalancer) string {
+	if lb.Cluster != nil {
+		return pve.RenderClusterHAProxy(lb.LBSpec, lb.VIPs)
+	}
+	return pve.RenderHAProxyOn(lb.LBSpec, lb.VIPs)
 }
 
 // lbOfRow refuses a row with no id: an untagged VM's tag reads "" too, so such a row would match every one of them,
@@ -336,6 +349,12 @@ func (h *Handler) ReconcileLoadBalancers(ctx context.Context, _ *pve.Service, es
 		return err
 	}
 	for i := range rows {
+		// A cluster's balancer converges from its cluster's state, which checks the project itself. In the background:
+		// a pass may build an appliance (up to lbBuildTimeout), which must not hold up the rest of the sync.
+		if lb, err := lbOfRow(&rows[i]); err == nil && lb.Cluster != nil && h.lbGW != nil {
+			go h.lbClusterConverge(context.WithoutCancel(ctx), lb.Cluster.ID)
+			continue
+		}
 		proj, err := h.svc.GetProjectByID(ctx, rows[i].ProjectID)
 		if err != nil {
 			slog.Warn("load balancer: reconcile project", "project", rows[i].ProjectID, "err", err)
@@ -444,9 +463,9 @@ func (h *Handler) pveLBApply(ctx context.Context, es *externalservice.ExternalSe
 	if err != nil {
 		return lbStatusError, err
 	}
-	before := fmt.Sprintf("%+v", *lb)
+	before, _ := json.Marshal(lb)
 	err = h.lbApplyLocked(ctx, es, proj, cr, lb)
-	if fmt.Sprintf("%+v", *lb) != before {
+	if after, _ := json.Marshal(lb); string(after) != string(before) {
 		if serr := h.lbSave(ctx, cr, lb); serr != nil && err == nil {
 			err = serr
 		}
@@ -543,6 +562,10 @@ func (h *Handler) pveLoadBalancerAction(w http.ResponseWriter, r *http.Request, 
 	ctx := r.Context()
 	switch action {
 	case "UPDATE_CONFIG":
+		if herr := lbClusterGuard(cr); herr != nil {
+			h.fail(w, herr)
+			return true
+		}
 		if herr := h.pveLBUpdateConfig(ctx, es, proj, cr, data); herr != nil {
 			h.fail(w, herr)
 			return true
@@ -795,6 +818,8 @@ func (h *Handler) pveApplianceGuard(ctx context.Context, es *externalservice.Ext
 	serverID := ""
 	server := (*cloud.CloudResource)(nil)
 	switch cr.Type {
+	case cloud.TypeLoadBalancer:
+		return lbClusterGuard(cr)
 	case cloud.TypeServer:
 		serverID, server = cr.ExternalID, cr
 	case cloud.TypeVolume:

@@ -45,7 +45,11 @@ install (default) is idempotent: it asks only for what is missing, keeps the sec
                                on Proxmox (the platform job); off by default. Implies --template-updates
                                (the job imports the node images). Needs ProxCloud v0.8.0 or later,
                                or a dev-<sha> build
-  --no-template-updates, --no-scheduler, --no-managed-services
+  --cluster-gateway <address>  serve the gateway of the managed clusters' controllers (block volumes and load
+                               balancers) on <address>:8444, an IPv4 address of this host the platform
+                               cluster's nodes reach; published there only, with a certificate the API makes
+                               itself. Off by default. Needs ProxCloud v0.11.0 or later, or a dev-<sha> build
+  --no-template-updates, --no-scheduler, --no-managed-services, --no-cluster-gateway
                                turn one off again. Without its flag an option keeps the value in .env
 
 Common:
@@ -123,6 +127,15 @@ warn_dev_version() { # VERSION
   fi
 }
 is_project() { [[ "$1" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; }
+is_ipv4() { # four numbers of 0-255, no leading zero, not 0.0.0.0: Docker publishes on that address only
+  local IFS=. part n=0
+  [[ "$1" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] && [ "$1" != 0.0.0.0 ] || return 1
+  for part in $1; do
+    [[ "$part" =~ ^(0|[1-9][0-9]*)$ ]] && [ "$part" -le 255 ] || return 1
+    n=$((n + 1))
+  done
+  [ "$n" = 4 ]
+}
 is_bool() { [ "$1" = true ] || [ "$1" = false ]; }
 
 # Up to v0.6.0 the API also mounts its unauthenticated job triggers (POST /debug/...) on the
@@ -146,6 +159,15 @@ check_managed_release() { # VERSION
     || die "managed services need ProxCloud v0.8.0 or later: the API of $1 has no platform API. Use a later release, or turn managed services off (install --no-managed-services)"
 }
 
+# The gateway listener of the clusters' controllers, with a certificate the API makes itself (PROXCLOUD_CSI_GATEWAY_SELF_SIGNED),
+# arrives in v0.11.0: an older API ignores the switch and fails to start without the certificate files. A dev build is
+# allowed, as for managed services.
+check_cluster_gateway_release() { # VERSION
+  ! is_dev_version "$1" || return 0
+  [ "$(printf '%s\n' v0.11.0 "${1%%-*}" | sort -V | head -n 1)" = v0.11.0 ] \
+    || die "--cluster-gateway needs ProxCloud v0.11.0 or later: the API of $1 cannot make its gateway certificate. Use a later release, or install --no-cluster-gateway"
+}
+
 # ---- docker ----
 # docker compose for this project. Compose lets the calling shell's environment win over .env, so
 # every name .env sets (and six more that would change the model) is dropped from it first: an
@@ -155,7 +177,7 @@ check_managed_release() { # VERSION
 # PULL_VERSION is the one deliberate override (upgrade pulls before it writes .env).
 compose() {
   local drop=(-u COMPOSE_FILE -u COMPOSE_ENV_FILES -u ACME_CA_SERVER -u TEMPLATE_UPDATES_VM_ENABLED
-    -u JOBS_SCHEDULER_ENABLED -u PLATFORM_ENABLED) key
+    -u JOBS_SCHEDULER_ENABLED -u PLATFORM_ENABLED -u CLUSTER_GATEWAY_ADDRESS) key
   while IFS= read -r key; do
     drop+=(-u "$key")
   done < <(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$ENV_FILE")
@@ -388,6 +410,9 @@ cmd_install() {
   TEMPLATE_UPDATES="$(first "$F_TEMPLATE_UPDATES" "$(env_get TEMPLATE_UPDATES_VM_ENABLED)" false)"
   SCHEDULER="$(first "$F_SCHEDULER" "$(env_get JOBS_SCHEDULER_ENABLED)" false)"
   MANAGED="$(first "$F_MANAGED" "$(env_get PLATFORM_ENABLED)" false)"
+  # The gateway: an address sets it, --no-cluster-gateway ("off") clears it, nothing keeps .env's.
+  CLUSTER_GATEWAY="$(first "$F_CLUSTER_GATEWAY" "$(env_get CLUSTER_GATEWAY_ADDRESS)")"
+  [ "$CLUSTER_GATEWAY" != off ] || CLUSTER_GATEWAY=""
 
   ACME_EMAIL="$(first "$F_ACME_EMAIL" "${PROXCLOUD_ACME_EMAIL:-}" "$(env_get ACME_EMAIL)")"
   case "$TLS_MODE" in
@@ -444,6 +469,10 @@ cmd_install() {
     [ "$F_TEMPLATE_UPDATES" != false ] \
       || die "managed services need template updates (the platform job imports the node images): pass --no-managed-services as well, or drop --no-template-updates"
     TEMPLATE_UPDATES=true
+  fi
+  if [ -n "$CLUSTER_GATEWAY" ]; then
+    is_ipv4 "$CLUSTER_GATEWAY" || die "invalid --cluster-gateway '$CLUSTER_GATEWAY' (an IPv4 address of this host, for example 10.20.0.5)"
+    check_cluster_gateway_release "$VERSION"
   fi
   # An install that completed (its operator exists) changes release with "upgrade": backup, then pull.
   if [ -n "$recorded_operator" ] && [ -n "$previous_version" ] && [ "$VERSION" != "$previous_version" ]; then
@@ -519,6 +548,15 @@ EOF
   env_set TEMPLATE_UPDATES_VM_ENABLED "$TEMPLATE_UPDATES"
   env_set JOBS_SCHEDULER_ENABLED "$SCHEDULER"
   env_set PLATFORM_ENABLED "$MANAGED"
+  # The gateway's publish, environment and certificate volume are one more Compose file; COMPOSE_FILE in .env
+  # names the model's files, so every command of this script and a plain "docker compose" here agree.
+  if [ -n "$CLUSTER_GATEWAY" ]; then
+    env_set CLUSTER_GATEWAY_ADDRESS "$CLUSTER_GATEWAY"
+    env_set COMPOSE_FILE compose.yaml:compose.cluster-gateway.yaml
+  else
+    env_del CLUSTER_GATEWAY_ADDRESS
+    env_set COMPOSE_FILE compose.yaml
+  fi
 
   # Secrets: generated once, never regenerated, never printed.
   for key in $SECRET_KEYS; do
@@ -563,6 +601,11 @@ EOF
     echo "  Managed services  on (--no-managed-services turns them off; template updates stay on)"
   else
     echo "  Managed services  off (--managed-services turns them on)"
+  fi
+  if [ -n "$CLUSTER_GATEWAY" ]; then
+    echo "  Cluster gateway   on: https://$CLUSTER_GATEWAY:8444 for the platform cluster's nodes (--no-cluster-gateway turns it off)"
+  else
+    echo "  Cluster gateway   off (--cluster-gateway <address> turns it on)"
   fi
   cat <<EOF
 
@@ -651,7 +694,7 @@ esac
 DRY_RUN=0 ASSUME_YES=0 PURGE=0 POSITIONAL=""
 F_DOMAIN="" F_APP_HOST="" F_ADMIN_HOST="" F_API_HOST="" F_AUTH_HOST="" F_TLS="" F_ACME_EMAIL=""
 F_CF_TOKEN_FILE="" F_OPERATOR_EMAIL="" F_VERSION="" F_HTTP_PORT="" F_HTTPS_PORT="" F_PROJECT=""
-F_TEMPLATE_UPDATES="" F_SCHEDULER="" F_MANAGED=""
+F_TEMPLATE_UPDATES="" F_SCHEDULER="" F_MANAGED="" F_CLUSTER_GATEWAY=""
 PROJECT="" URL_PORT="" TLS_MODE="" PULL_VERSION="" INSTALL_OPTIONS=""
 
 while [ $# -gt 0 ]; do
@@ -667,6 +710,7 @@ while [ $# -gt 0 ]; do
     --no-scheduler) F_SCHEDULER=false; INSTALL_OPTIONS="$INSTALL_OPTIONS $1"; shift; continue ;;
     --managed-services) F_MANAGED=true; INSTALL_OPTIONS="$INSTALL_OPTIONS $1"; shift; continue ;;
     --no-managed-services) F_MANAGED=false; INSTALL_OPTIONS="$INSTALL_OPTIONS $1"; shift; continue ;;
+    --no-cluster-gateway) F_CLUSTER_GATEWAY=off; INSTALL_OPTIONS="$INSTALL_OPTIONS $1"; shift; continue ;;
     --*=*) set -- "${1%%=*}" "${1#*=}" "${@:2}"; continue ;;
     --*) [ $# -ge 2 ] || die "$1 needs a value" ;;
     *)
@@ -687,6 +731,7 @@ while [ $# -gt 0 ]; do
     --http-port) F_HTTP_PORT=$2 ;;
     --https-port) F_HTTPS_PORT=$2 ;;
     --project-name) F_PROJECT=$2 ;;
+    --cluster-gateway) F_CLUSTER_GATEWAY=$2 ;;
     *) die "unknown option '$1' (see --help)" ;;
   esac
   INSTALL_OPTIONS="$INSTALL_OPTIONS $1"

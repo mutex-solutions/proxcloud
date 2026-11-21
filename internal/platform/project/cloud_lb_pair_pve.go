@@ -191,6 +191,11 @@ func (h *Handler) lbBuildAppliance(ctx context.Context, u *user.User, proj *Proj
 		"networkIds":  []any{lb.NetworkRef},
 		"spreadGroup": "lb-" + lb.ID,
 	}, ap); err != nil {
+		if ap.left != nil { // a VM the failed build could not remove: no pair has a use for it
+			if derr := h.lbDestroyVM(ctx, es, proj, strconv.Itoa(ap.left.VMID)); derr != nil {
+				slog.Error("load balancer: remove an appliance whose build failed", "lb", lb.ID, "vm", ap.left.VMID, "err", derr)
+			}
+		}
 		return nil, err
 	}
 	return app, nil
@@ -334,10 +339,14 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		}
 		running = append(running, a)
 	}
-	// A member whose server left drops out of the config but stays in the row, marked, for the tenant.
+	// A member whose server left drops out of the config but stays in the row, marked, for the tenant. A cluster's
+	// worker is checked against the cluster's addresses before it gets here (cloud_lb_cluster_pve.go).
 	for i := range lb.Pools {
 		for j := range lb.Pools[i].Members {
 			m := &lb.Pools[i].Members[j]
+			if m.Node {
+				continue
+			}
 			addr, _, aerr := h.lbMemberAddress(ctx, es, proj, lb, pool, vms, m.ServerID, m.Stamp)
 			if aerr != nil {
 				return aerr
@@ -348,7 +357,7 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			}
 		}
 	}
-	haproxy := pve.RenderHAProxyOn(lb.LBSpec, lb.VIPs)
+	haproxy := lbRender(lb)
 	hhash := lbHash(haproxy)
 	pn := pveAllowedPublicNetwork(es, proj, lb.PublicNetworkID)
 	var refused error
@@ -411,6 +420,14 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			}
 		}
 	}
+	// Settled: every appliance that still exists runs the current keepalived and has dropped every VIP it no longer
+	// serves from its set, so an address the row gave up may go back to the pool.
+	lb.settled = refused == nil
+	for i := range lb.Appliances {
+		if a := &lb.Appliances[i]; a.State != lbAppGone && !keepalivedCurrent[a] {
+			lb.settled = false
+		}
+	}
 	vip := ""
 	if len(lb.VIPs) > 0 {
 		vip = lb.VIPs[0]
@@ -426,6 +443,9 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			continue
 		}
 		a.Role, a.HoldsVIP = st.State, st.HoldsVIP
+		if vip == "" { // a cluster's pair before its first Service, or after its last: the master holds the placeholder
+			a.HoldsVIP = st.State == "MASTER"
+		}
 		switch {
 		case !st.HAProxy:
 			a.State, a.Reason = lbAppDown, "HAProxy is not running"

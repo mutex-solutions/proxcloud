@@ -57,7 +57,7 @@ what is there.
 | Root on Proxmox | Once, by hand, for the identities script. ProxCloud stores no root credential | Held by the installer for the whole install |
 | Management cluster | The seed VM, built by the job | The mgmt k3s cluster the installer builds |
 | Node images | The BOM's two images, imported through [template updates](template-updates.md) | Templates you build first (`images/k8s-node-template.sh`) |
-| Tenant block volumes (proxmox-csi) | None on Compose: the API has no CSI gateway listener there | Through the CSI gateway |
+| Tenant block volumes (proxmox-csi) | None on Compose: the compute provider holds no gateway token, also when the gateway listener is on (`--cluster-gateway`) | Through the CSI gateway |
 | Database backups | None: the database provider is registered without a backup store | To the installer's object store |
 | Sandboxes | No | Yes ([managed-sandbox.md](managed-sandbox.md)) |
 | Lab evidence | None yet | See [install.md](install.md) and [managed-k8s.md](managed-k8s.md) for what ran |
@@ -1977,10 +1977,17 @@ its documentation as remembered, and was not checked in its code or on a node.
 
 ## 9. Limits on the Compose install
 
-- **No block volumes for tenant Kubernetes clusters.** They come through the CSI gateway, a listener
-  of the API that the Compose stack does not run. The script therefore writes no rows for a gateway
-  token. Tenant clusters get no proxmox-csi StorageClass; the Kubernetes provider is registered with
-  `rwxGiB: 0`, so no NAS dataset either.
+- **No block volumes for tenant Kubernetes clusters.** They come through the CSI gateway with a gateway token
+  on the compute provider, and the Compose path writes no rows for one. Tenant clusters get no proxmox-csi
+  StorageClass, also with the gateway listener on; the Kubernetes provider is registered with `rwxGiB: 0`, so no
+  NAS dataset either.
+- **The gateway listener is opt-in.** `proxcloud-up.sh install --cluster-gateway <address>` (v0.11.0 or later)
+  serves the listener of the clusters' controllers on `<address>:8444` only, with an ECDSA key and a
+  self-signed certificate for the address that the API makes on its first start, in its own volume
+  ([compose README](../deploy/compose/README.md#optional-features)). It is for the load balancer controller of
+  v0.11.0, which a later change of the release adds. **A new route:** the platform cluster's nodes, on the platform
+  network, must reach the portal host on `<address>:8444`; without it no controller reaches the gateway, and nothing
+  else breaks.
 - **No database backups.** The Databases provider is registered without a backup store, and with the
   egress fence on (`egressFence: true`), which allows no object store.
 - **Database replicas.** PostgreSQL 17 and 18; three replicas are offered only when the `dbaas`

@@ -153,6 +153,15 @@ func (e *ExternalService) KamajiConfig() kamaji.Config {
 	return cfg
 }
 
+// KamajiLoadBalancer is config.cluster.loadBalancer: the public network and the flavor of a cluster's load balancer,
+// both on the compute provider of the workers. ok is false when the block is absent or incomplete: no cluster gets one.
+func (e *ExternalService) KamajiLoadBalancer() (publicNetworkID, flavorID string, ok bool) {
+	cl, _ := e.Config["cluster"].(map[string]any)
+	lb, _ := cl["loadBalancer"].(map[string]any)
+	publicNetworkID, flavorID = str(lb["publicNetworkId"]), str(lb["flavorId"])
+	return publicNetworkID, flavorID, publicNetworkID != "" && flavorID != ""
+}
+
 // The bounds of config.cluster.nodeStartupTimeoutSeconds. Cluster API deletes a worker that has no Node this long
 // after the newest of its creation and its VM being ready, so the value must cover the longer of one clone and one
 // first boot with its join. The floor is the 15 minutes the status sync itself gives a running machine to join before
@@ -211,6 +220,13 @@ func KamajiClusterProblems(cfg map[string]any) []string {
 			out = append(out, "config.cluster.workerFirewall must be true or false (a JSON boolean): any other value means off")
 		}
 	}
+	if v, ok := cl["loadBalancer"]; ok && v != nil {
+		lb, isMap := v.(map[string]any)
+		if !isMap || str(lb["publicNetworkId"]) == "" || str(lb["flavorId"]) == "" || len(lb) != 2 {
+			out = append(out, "config.cluster.loadBalancer must be {\"publicNetworkId\": ..., \"flavorId\": ...}, both set: "+
+				"a public network of the compute provider and a flavor for the two appliances of each cluster's balancer")
+		}
+	}
 	return out
 }
 
@@ -243,7 +259,7 @@ func kamajiDefaultCIDRs(cl map[string]any) []string {
 func KamajiConfigNotes(cfg map[string]any) []string {
 	var out []string
 	for _, p := range KamajiClusterProblems(cfg) {
-		out = append(out, "Stored value ignored, the default applies (1800 s, 1 machine, firewall off) until it is corrected: "+p)
+		out = append(out, "Stored value ignored, the default applies (1800 s, 1 machine, firewall off, no load balancer) until it is corrected: "+p)
 	}
 	cl, _ := cfg["cluster"].(map[string]any)
 	if err := cloud.StrictCIDRs(strList(cl["allowedCidrs"]), nil); err != nil {

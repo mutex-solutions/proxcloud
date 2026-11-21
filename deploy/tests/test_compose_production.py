@@ -162,6 +162,8 @@ LATER = ("--version", "v0.6.1")
 # The first release with the platform API, the one the script runs with managed services on
 # (test_managed_services_need_v0_8_0_or_later).
 PLATFORM = ("--version", "v0.8.0")
+# The first release whose API makes the cluster gateway's certificate (test_cluster_gateway_*).
+GATEWAY = ("--version", "v0.11.0")
 
 
 class GeneratedFromChartTests(unittest.TestCase):
@@ -246,6 +248,12 @@ class ComposeFileTests(unittest.TestCase):
         # processes of the Docker host (ReadmeTests).
         self.assertEqual(len(re.findall(r"(?m)^\s+ports:$", self.text)), 1)
         self.assertIn('traefik.http.services.api.loadbalancer.server.port: "8080"', self.text)
+
+    def test_the_cluster_gateway_file_publishes_on_its_address_only(self):
+        text = (COMPOSE / "compose.cluster-gateway.yaml").read_text()
+        self.assertEqual(re.findall(r"(?m)^\s+- \"(.+)\"$", text), ["${CLUSTER_GATEWAY_ADDRESS:?run ./proxcloud-up.sh}:8444:8444"])
+        self.assertNotIn("8081", text)  # never the management port
+        self.assertIn('PROXCLOUD_CSI_GATEWAY_SELF_SIGNED: "true"', text)
 
 
 class ReadmeTests(unittest.TestCase):
@@ -398,6 +406,64 @@ class ScriptDryRunTests(unittest.TestCase):
         self.assertEqual(services["admin"]["labels"]["traefik.http.routers.admin.rule"], "Host(`admin.cloud.example.com`)")
         for name, service in services.items():
             self.assertEqual(service["logging"]["options"]["max-size"], "10m", name)
+        # Without --cluster-gateway the API publishes nothing and serves no gateway.
+        self.assertNotIn("ports", services["api"])
+        self.assertNotIn("PROXCLOUD_CSI_GATEWAY_ADDR", api)
+        self.assertEqual(values["COMPOSE_FILE"], "compose.yaml")
+
+    def test_cluster_gateway_publishes_on_its_address_and_is_kept_until_turned_off(self):
+        install = Install(self)
+        result = install.install(*BASE, "--tls", "internal", *GATEWAY, "--cluster-gateway", "192.0.2.7")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        values = read_env(install.dir)
+        self.assertEqual((values["CLUSTER_GATEWAY_ADDRESS"], values["COMPOSE_FILE"]),
+                         ("192.0.2.7", "compose.yaml:compose.cluster-gateway.yaml"))
+        self.assertRegex(result.stdout, r"Cluster gateway +on: https://192\.0\.2\.7:8444")
+        model = self.compose_model(install, "internal")
+        if model is not None:
+            api = model["services"]["api"]
+            self.assertEqual([(p["host_ip"], p["published"], p["target"]) for p in api["ports"]], [("192.0.2.7", "8444", 8444)])
+            env = api["environment"]
+            self.assertEqual((env["PROXCLOUD_CSI_GATEWAY_ADDR"], env["PROXCLOUD_CSI_GATEWAY_URL"], env["PROXCLOUD_CSI_GATEWAY_SELF_SIGNED"]),
+                             (":8444", "https://192.0.2.7:8444", "true"))
+            self.assertEqual([(v["type"], v["target"]) for v in api["volumes"]], [("volume", "/var/lib/proxcloud/gateway")])
+            self.assertEqual(sorted((p["published"], p["target"]) for p in model["services"]["traefik-internal"]["ports"]),
+                             [("443", 443), ("80", 80)])
+        install.adopt()
+        again = install.install(*BASE, "--tls", "internal", *GATEWAY)
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(read_env(install.dir)["CLUSTER_GATEWAY_ADDRESS"], "192.0.2.7")  # kept without the flag
+        install.adopt()
+        off = install.install(*BASE, "--tls", "internal", *GATEWAY, "--no-cluster-gateway")
+        self.assertEqual(off.returncode, 0, off.stderr)
+        values = read_env(install.dir)
+        self.assertNotIn("CLUSTER_GATEWAY_ADDRESS", values)
+        self.assertEqual(values["COMPOSE_FILE"], "compose.yaml")
+        self.assertRegex(off.stdout, r"Cluster gateway +off")
+        model = self.compose_model(install, "internal")
+        if model is not None:
+            self.assertNotIn("ports", model["services"]["api"])
+
+    def test_cluster_gateway_needs_an_ipv4_address_and_v0_11_0(self):
+        for bad in ("0.0.0.0", "256.1.1.1", "10.0.0.01", "gw.example.com", "2001:db8::1", "10.0.0"):
+            with self.subTest(address=bad):
+                result = Install(self).install(*BASE, "--tls", "internal", *GATEWAY, "--cluster-gateway", bad)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("invalid --cluster-gateway", result.stderr)
+        old = Install(self).install(*BASE, "--tls", "internal", "--version", "v0.10.2", "--cluster-gateway", "192.0.2.7")
+        self.assertNotEqual(old.returncode, 0)
+        self.assertIn("--cluster-gateway needs ProxCloud v0.11.0 or later", old.stderr)
+        for version in ("v0.11.0-rc.1", "v0.12.0", "dev-0123abc"):
+            with self.subTest(version=version):
+                result = Install(self).install(*BASE, "--tls", "internal", "--version", version, "--cluster-gateway", "192.0.2.7")
+                self.assertEqual(result.returncode, 0, result.stderr)
+        install = Install(self)
+        self.assertEqual(install.install(*BASE, "--tls", "internal", *GATEWAY).returncode, 0)
+        install.adopt()
+        for command in ("status", "upgrade", "backup"):
+            refused = install.run(command, "--cluster-gateway", "192.0.2.7", "--dry-run")
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("%s does not take --cluster-gateway" % command, refused.stderr)
 
     def test_rerun_keeps_secrets_and_applies_changed_settings(self):
         install = Install(self)

@@ -76,7 +76,9 @@ class APIRuntimeContractTests(unittest.TestCase):
             ["apk", "upgrade", "--no-cache", "&&", "apk", "add", "--no-cache",
              "bash", "ca-certificates", "postgresql18-client"],
             ["mkdir", "-p", "/opt/proxcloud/api"],
-            ["adduser", "-S", "-D", "-H", "-u", "10001", "-G", "root", "proxcloud"],
+            # The mount point of the Compose gateway volume, owned by the API's user, so a new volume is writable.
+            ["adduser", "-S", "-D", "-H", "-u", "10001", "-G", "root", "proxcloud",
+             "&&", "install", "-d", "-o", "10001", "-g", "0", "-m", "700", "/var/lib/proxcloud/gateway"],
         ])
         self.assertNotIn("useradd", " ".join(runs))
 

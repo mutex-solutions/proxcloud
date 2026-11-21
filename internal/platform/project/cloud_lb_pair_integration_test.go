@@ -30,12 +30,15 @@ import (
 // state read from vrrp[vmid].
 type pairWire struct {
 	t     *testing.T
+	tag   string // the appliances' balancer tag, pc-lb-abc when empty
+	gone  bool   // no VM is listed any more
 	mu    sync.Mutex
 	log   []string
 	rules map[string][]pve.FirewallRule
 	sets  map[string][]string
 	vrrp  map[string]string
 	runs  map[int]string
+	files []string // the HAProxy configs written, in order
 }
 
 func (f *pairWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -44,9 +47,17 @@ func (f *pairWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	write := func(v any) { _ = json.NewEncoder(w).Encode(map[string]any{"data": v}) }
 	if r.URL.Path == "/api2/json/cluster/resources" {
+		tag := f.tag
+		if tag == "" {
+			tag = "pc-lb-abc"
+		}
+		if f.gone {
+			write([]map[string]any{})
+			return
+		}
 		write([]map[string]any{
-			{"id": "qemu/301", "type": "qemu", "vmid": 301, "node": "n1", "pool": "pc-p1", "status": "running", "tags": "proxcloud;pc-lb-abc"},
-			{"id": "qemu/302", "type": "qemu", "vmid": 302, "node": "n2", "pool": "pc-p1", "status": "running", "tags": "proxcloud;pc-lb-abc"},
+			{"id": "qemu/301", "type": "qemu", "vmid": 301, "node": "n1", "pool": "pc-p1", "status": "running", "tags": "proxcloud;" + tag},
+			{"id": "qemu/302", "type": "qemu", "vmid": 302, "node": "n2", "pool": "pc-p1", "status": "running", "tags": "proxcloud;" + tag},
 		})
 		return
 	}
@@ -89,6 +100,9 @@ func (f *pairWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.log = append(f.log, vm+" ipset "+r.Form.Get("cidr"))
 		write(nil)
 	case "POST agent/file-write":
+		if strings.HasSuffix(r.Form.Get("file"), "haproxy.cfg.new") {
+			f.files = append(f.files, r.Form.Get("content"))
+		}
 		f.log = append(f.log, vm+" write "+r.Form.Get("file"))
 		write(nil)
 	case "POST agent/exec":
@@ -109,8 +123,21 @@ func (f *pairWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		pid, _ := strconv.Atoi(r.Form.Get("pid"))
 		write(map[string]any{"exited": 1, "exitcode": 0, "out-data": f.runs[pid]})
 	default:
-		f.t.Errorf("reached PVE: %s %s", r.Method, r.URL.Path)
-		w.WriteHeader(http.StatusNotImplemented)
+		switch {
+		case r.Method == http.MethodDelete && strings.HasPrefix(rest, "firewall/rules/"):
+			pos, _ := strconv.Atoi(strings.TrimPrefix(rest, "firewall/rules/"))
+			f.rules[vm] = slices.Delete(f.rules[vm], pos, pos+1)
+			f.log = append(f.log, vm+" rule delete")
+			write(nil)
+		case r.Method == http.MethodDelete && strings.HasPrefix(rest, "firewall/ipset/ipfilter-net1/"):
+			cidr := strings.TrimPrefix(rest, "firewall/ipset/ipfilter-net1/")
+			f.sets[vm] = slices.DeleteFunc(f.sets[vm], func(c string) bool { return strings.TrimSuffix(c, "/32") == cidr })
+			f.log = append(f.log, vm+" ipset delete "+cidr)
+			write(nil)
+		default:
+			f.t.Errorf("reached PVE: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotImplemented)
+		}
 	}
 }
 

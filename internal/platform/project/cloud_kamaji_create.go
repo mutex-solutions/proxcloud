@@ -505,7 +505,9 @@ func kamajiDeleteDataset(ctx context.Context, services serviceGetter, shares sha
 
 // KamajiFactory builds the kamaji service with its infrastructure release wired in; the API and the sync
 // job's orphan sweep use the same one.
-func KamajiFactory(esSvc *externalservice.Service, shares shareRowFinder, pveFor func(*externalservice.ExternalService) (*pve.Service, error), ips *PublicIPRepo, csi *CSIGateway) func(*externalservice.ExternalService) (*kamaji.Service, error) {
+// lb, when set, releases the cluster's load balancer (Handler.LBReleaseCluster) alongside the rest: its parts are its
+// own, so a step of one never holds back the other, and both run again until each succeeds.
+func KamajiFactory(esSvc *externalservice.Service, shares shareRowFinder, pveFor func(*externalservice.ExternalService) (*pve.Service, error), ips *PublicIPRepo, csi *CSIGateway, lb func(ctx context.Context, computeID, projectID, clusterID string) error) func(*externalservice.ExternalService) (*kamaji.Service, error) {
 	var release func(ctx context.Context, clusterID string) error
 	if csi != nil {
 		release = func(ctx context.Context, clusterID string) error {
@@ -518,7 +520,14 @@ func KamajiFactory(esSvc *externalservice.Service, shares shareRowFinder, pveFor
 		if err != nil {
 			return nil, err
 		}
-		ks.OnClusterGone(KamajiReleaseCluster(esSvc, shares, pveFor, ips, cfg.Defaults.Shared != nil, release))
+		gone := KamajiReleaseCluster(esSvc, shares, pveFor, ips, cfg.Defaults.Shared != nil, release)
+		if lb != nil {
+			infra := gone
+			gone = func(ctx context.Context, computeID, projectID, clusterID string) error {
+				return errors.Join(lb(ctx, computeID, projectID, clusterID), infra(ctx, computeID, projectID, clusterID))
+			}
+		}
+		ks.OnClusterGone(gone)
 		if cfg.Defaults.Shared == nil && pveFor != nil {
 			ks.OnClusterLive(KamajiPinBootISO(esSvc, pveFor))
 		}

@@ -207,8 +207,8 @@ feature off. The last lines of `install` (also with `--dry-run`) say what is on.
   managed services are on. It needs ProxCloud v0.8.0 or later, the first release with the platform
   API: `install` and `upgrade` refuse an older one with it. The API container must reach the
   platform network (the seed and the platform cluster's API address, port 6443) besides the Proxmox
-  API. On this stack the platform has no tenant block volumes (no CSI gateway listener) and no
-  database backups; the Managed services page lists both under **What this release does not do**
+  API. On this stack the platform has no tenant block volumes (no gateway token on the compute
+  provider, with or without `--cluster-gateway`) and no database backups; the Managed services page lists both under **What this release does not do**
   once the platform is ready.
 
   The switch creates nothing on Proxmox. It makes the console's Managed services page work; the
@@ -261,6 +261,20 @@ What the scheduler needs on this one host, and what it adds:
 Not verified on a Compose install: a full billing month with the scheduler on, what the bill and
 reminder jobs do while no SMTP integration exists, and how charging catches up after the host
 was down.
+
+- **`--cluster-gateway <address>`** serves the gateway listener of the managed clusters' controllers:
+  the call of a cluster's load balancer controller (`PUT /lb/v1/state`), and the CSI gateway. It is
+  for v0.11.0's load balancers of tenant clusters, whose controller comes with a later change of the
+  release; block volumes stay off on this stack, as no gateway token is registered. `<address>` is
+  an IPv4 address of this host that the platform cluster's nodes reach; the script refuses anything
+  else, `0.0.0.0` included. It writes `CLUSTER_GATEWAY_ADDRESS` and adds
+  `compose.cluster-gateway.yaml` to `COMPOSE_FILE` in `.env`: the API listens on 8444, Docker
+  publishes it on `<address>:8444` and nowhere else, and on its first start the API writes an ECDSA
+  key and a self-signed certificate for the address (ten years) to the volume `gateway`, which the
+  clusters then trust. Keep that volume: a new certificate means a new gateway Secret for every
+  cluster. Backups of the database do not hold it; `uninstall` keeps it, `--purge` deletes it.
+  `--no-cluster-gateway` turns the listener off. It needs ProxCloud v0.11.0 or later (or a `dev-<sha>`
+  build): an older API cannot make the certificate. Not run on a lab.
 
 ## Operate
 
@@ -399,6 +413,8 @@ Written by the script; change them by re-running `install` with flags.
 | `TEMPLATE_UPDATES_VM_ENABLED` | `true` or `false`: VM template updates (`--template-updates`, `--no-template-updates`) |
 | `JOBS_SCHEDULER_ENABLED` | `true` or `false`: the job scheduler (`--scheduler`, `--no-scheduler`) |
 | `PLATFORM_ENABLED` | `true` or `false`: managed services (`--managed-services`, `--no-managed-services`) |
+| `CLUSTER_GATEWAY_ADDRESS` | The address of the gateway listener (`--cluster-gateway`); absent when it is off |
+| `COMPOSE_FILE` | `compose.yaml`, plus `compose.cluster-gateway.yaml` with the gateway listener |
 | `PG_PASSWORD`, `KEYCLOAK_DB_PASSWORD`, `KC_ADMIN_PASSWORD`, `SSO_CLIENT_SECRET`, `ENCRYPTION_KEY` | Generated secrets. The two database passwords only take effect when the database is first created |
 
 ## Troubleshooting

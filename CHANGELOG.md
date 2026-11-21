@@ -22,6 +22,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that is an SDN vnet is refused for a pair. Existing balancers are not changed: their install line, readiness
   check, config and firewall rules stay as they are. Measured on the lab spike: 3.1 to 3.5 s lost for a dead
   appliance, under 1 s for a stopped one. Not run on a lab with a public network, across nodes, or with a node lost.
+- **The gateway accepts a Kubernetes cluster's load balancer state** (`PUT /lb/v1/state` on the gateway listener,
+  `internal/cloud/lbgw`, `internal/platform/project/cloud_lb_cluster_pve.go`; docs/managed-k8s.md). A cluster's load
+  balancer controller presents its own credential (`lb@proxcloud!<clusterId>`, stored as a SHA-256, one call for its
+  own cluster, minting again rotates it) and sends the cluster's Services of type LoadBalancer and its nodes. The
+  portal checks each Service (TCP and IPv4 only, a node port in range, source ranges that fit a firewall rule), keeps
+  as members only the cluster's own worker addresses, stores the state and converges in the background: one pair per
+  cluster, built with the first Service and kept until the cluster is deleted; one public address per Service (a
+  `floatingIps` of the quota each), listeners on that address only, pools in mode tcp on the node port, an HTTP check
+  on `healthCheckNodePort` for policy Local, an idle timeout of one hour. A Service removed gives its address back as
+  soon as no appliance holds it, with no day of grace. A suspended or deleting project changes nothing. A tenant's
+  edit or delete of the cluster's balancer answers 409. The cluster's release revokes the credential first, then
+  removes the pair, its addresses and the row, without the controller. The Kubernetes provider names the public
+  network and flavor in `config.cluster.loadBalancer`, checked on save. Nothing calls the gateway yet: the controller
+  comes with a later change. Not run on a lab.
+- **Docker Compose can serve the gateway listener** (`proxcloud-up.sh install --cluster-gateway <address>`,
+  `deploy/compose/compose.cluster-gateway.yaml`): published on `<address>:8444` only, with an ECDSA key and a
+  self-signed certificate the API makes on its first start (`PROXCLOUD_CSI_GATEWAY_SELF_SIGNED`) in a volume of its
+  own. Opt-in, v0.11.0 or later. Block volumes stay off on Compose: no gateway token is registered there.
 - **Health checks, PROXY v2 and allowed sources on every load balancer**: per pool an HTTP check on a path and port
   (`healthCheck`) and `proxyProtocol`; per listener `sourceRanges` (IPv4, at most 512 characters), written as the
   source of the listener's firewall rule. Listener rules hold at most 15 ports each, Proxmox's limit, and the writer
@@ -29,6 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A load balancer appliance whose build failed no longer stays behind**: a VM the failed build could not remove
+  is destroyed before the next try (pair create, replace, a cluster's pair).
 - **The VM inventory no longer treats an address owned by a load balancer as an orphan**: such a row (no VM lists
   it) would have stopped the project's floating IP reconcile, so its address was never billed and no other address
   change of the project reached its rows (`orphanIPs`, `ReleaseIfUnchanged`). **A pair's traffic is counted once**:

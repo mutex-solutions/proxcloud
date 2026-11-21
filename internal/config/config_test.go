@@ -77,3 +77,32 @@ func TestDurableJobBounds(t *testing.T) {
 		t.Fatal("invalid duration ignored")
 	}
 }
+
+// A self-signed gateway certificate: its CA is the certificate unless one is named, and it needs the URL (its host is
+// the certificate's) and the two file paths.
+func TestCSIGatewaySelfSigned(t *testing.T) {
+	t.Setenv("PROXCLOUD_CONFIG_FILE", t.TempDir()+"/absent")
+	t.Setenv("PROXCLOUD_DB_URL", "postgres://primary/db")
+	t.Setenv("PROXCLOUD_JOBS_RABBIT_FANOUT", "")
+	t.Setenv("PROXCLOUD_CSI_GATEWAY_ADDR", ":8444")
+	t.Setenv("PROXCLOUD_CSI_GATEWAY_TLS_CERT", "/var/lib/proxcloud/gateway/tls.crt")
+	t.Setenv("PROXCLOUD_CSI_GATEWAY_TLS_KEY", "/var/lib/proxcloud/gateway/tls.key")
+	t.Setenv("PROXCLOUD_CSI_GATEWAY_URL", "https://192.0.2.7:8444")
+	t.Setenv("PROXCLOUD_CSI_GATEWAY_CA_FILE", "")
+	t.Setenv("PROXCLOUD_CSI_GATEWAY_SELF_SIGNED", "true")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Validate(); err != nil || !c.CSIGateway.SelfSigned || c.CSIGateway.CAFile != "/var/lib/proxcloud/gateway/tls.crt" {
+		t.Fatalf("%v %+v", err, c.CSIGateway)
+	}
+	c.CSIGateway.URL = ""
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "PROXCLOUD_CSI_GATEWAY_SELF_SIGNED") {
+		t.Fatalf("self-signed without a URL: %v", err)
+	}
+	t.Setenv("PROXCLOUD_CSI_GATEWAY_SELF_SIGNED", "")
+	if c, _ := Load(); c.CSIGateway.SelfSigned || c.CSIGateway.CAFile != "" {
+		t.Fatalf("off by default: %+v", c.CSIGateway)
+	}
+}

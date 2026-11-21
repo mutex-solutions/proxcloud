@@ -48,6 +48,9 @@ type LBMember struct {
 	Stamp    string `json:"stamp,omitempty"`
 	// Missing: the server left the project or the network, so the config leaves it out.
 	Missing bool `json:"missing,omitempty"`
+	// Node: a worker of a Kubernetes cluster, named by its Address alone (no server). Only the platform sets it, from
+	// the cluster's own worker addresses; Validate clears it on a tenant's spec.
+	Node bool `json:"node,omitempty"`
 }
 
 // LBPool is a set of members one or more listeners forward to.
@@ -76,6 +79,9 @@ type LBListener struct {
 	// SourceRanges are the IPv4 networks the port admits (empty = any). They become the source of the listener's
 	// firewall rule, so a refused client never reaches HAProxy.
 	SourceRanges []string `json:"sourceRanges,omitempty"`
+	// VIP is the one address the listener binds, a Kubernetes Service's own (empty: every address of the balancer).
+	// Only the platform sets it; Validate clears it on a tenant's spec.
+	VIP string `json:"vip,omitempty"`
 }
 
 // LBSpec is what a tenant configures.
@@ -174,7 +180,7 @@ func (s *LBSpec) Validate() string {
 				return fmt.Sprintf("Pool %s lists server %s port %d twice", p.Name, m.ServerID, m.Port)
 			}
 			seen[key] = true
-			m.Address, m.Stamp, m.Missing = "", "", false // the platform's to fill in
+			m.Address, m.Stamp, m.Missing, m.Node = "", "", false, false // the platform's to fill in
 		}
 	}
 	ports := map[int]bool{}
@@ -191,6 +197,7 @@ func (s *LBSpec) Validate() string {
 		}
 	}
 	for i := range s.Listeners {
+		s.Listeners[i].VIP = ""
 		ranges, msg := lbSourceRanges(s.Listeners[i].SourceRanges)
 		if msg != "" {
 			return fmt.Sprintf("Listener on port %d: %s", s.Listeners[i].Port, msg)
@@ -199,6 +206,9 @@ func (s *LBSpec) Validate() string {
 	}
 	return ""
 }
+
+// LBSourceRanges is lbSourceRanges for a caller outside the package: the gateway checks a Service's list with it.
+func LBSourceRanges(in []string) ([]string, string) { return lbSourceRanges(in) }
 
 // lbSourceRanges checks a listener's source list and returns it in the form the firewall rule gets: IPv4 networks,
 // host bits cleared, sorted, no repeats. Proxmox takes at most fwMaxAddrs characters in a rule's source.
@@ -237,12 +247,23 @@ const haproxyGlobal = `global
 defaults
   log global
   timeout connect 5s
-  timeout client 60s
-  timeout server 60s
+`
+
+// haproxyTimeouts follows haproxyGlobal: how long a connection may stay idle (C5). A tenant's own balancer keeps
+// 60 s; a Kubernetes cluster's gets an hour, as the MetalLB address it replaces has no idle timeout at all, and a
+// database, websocket or gRPC connection would otherwise be cut after a minute.
+const haproxyTimeouts = `  timeout client %[1]s
+  timeout server %[1]s
   default-server inter 3s fall 2 rise 2
 `
 
-func lbServerName(m LBMember) string { return "m" + m.ServerID + "p" + strconv.Itoa(m.Port) }
+// lbServerName is a member's name in the config: its server and port, or a worker's address and port.
+func lbServerName(m LBMember) string {
+	if m.Node {
+		return "n" + m.Address + "p" + strconv.Itoa(m.Port)
+	}
+	return "m" + m.ServerID + "p" + strconv.Itoa(m.Port)
+}
 
 // RenderHAProxy renders the config of a single appliance: every listener binds its port on any address.
 func RenderHAProxy(s LBSpec) string { return RenderHAProxyOn(s, nil) }
@@ -251,7 +272,13 @@ func RenderHAProxy(s LBSpec) string { return RenderHAProxyOn(s, nil) }
 // pair does: the standby binds addresses it does not hold (ip_nonlocal_bind), so a switch needs no reload. It works
 // from a stored row, so it trusts nothing a validation would have caught: a value off the lists or an unparsable
 // address is left out.
-func RenderHAProxyOn(s LBSpec, vips []string) string {
+func RenderHAProxyOn(s LBSpec, vips []string) string { return renderHAProxy(s, vips, "60s") }
+
+// RenderClusterHAProxy renders the config of a Kubernetes cluster's balancer: each listener binds its Service's own
+// address, and connections may stay idle for an hour.
+func RenderClusterHAProxy(s LBSpec, vips []string) string { return renderHAProxy(s, vips, "1h") }
+
+func renderHAProxy(s LBSpec, vips []string, idle string) string {
 	var binds []string
 	for _, v := range vips {
 		if a, err := netip.ParseAddr(v); err == nil && a.Is4() {
@@ -263,6 +290,7 @@ func RenderHAProxyOn(s LBSpec, vips []string) string {
 	}
 	var b strings.Builder
 	b.WriteString(haproxyGlobal)
+	fmt.Fprintf(&b, haproxyTimeouts, idle)
 	mode := func(p LBPool) string {
 		if slices.Contains(lbProtocols, p.Protocol) {
 			return p.Protocol
@@ -279,10 +307,18 @@ func RenderHAProxyOn(s LBSpec, vips []string) string {
 		if !ok || l.Port < 1 || l.Port > 65535 {
 			continue
 		}
+		on, name := binds, fmt.Sprintf("l%d", l.Port)
+		if l.VIP != "" { // one Service's address: two Services may share a port
+			a, err := netip.ParseAddr(l.VIP)
+			if err != nil || !a.Is4() {
+				continue
+			}
+			on, name = []string{a.String()}, fmt.Sprintf("l%s_%d", a, l.Port)
+		}
 		listeners++
 		m := mode(s.Pools[i])
-		fmt.Fprintf(&b, "\nfrontend l%d\n", l.Port)
-		for _, a := range binds {
+		fmt.Fprintf(&b, "\nfrontend %s\n", name)
+		for _, a := range on {
 			fmt.Fprintf(&b, "  bind %s:%d\n", a, l.Port)
 		}
 		fmt.Fprintf(&b, "  mode %s\n  default_backend p%d\n", m, i)
@@ -317,7 +353,7 @@ func RenderHAProxyOn(s LBSpec, vips []string) string {
 		}
 		for _, m := range p.Members {
 			addr, err := netip.ParseAddr(m.Address)
-			if m.Missing || err != nil || !addr.Is4() || m.Port < 1 || m.Port > 65535 || !lbServerIDRe.MatchString(m.ServerID) {
+			if m.Missing || err != nil || !addr.Is4() || m.Port < 1 || m.Port > 65535 || (!m.Node && !lbServerIDRe.MatchString(m.ServerID)) {
 				continue
 			}
 			w := m.Weight
@@ -455,20 +491,9 @@ const (
 
 // LBListenerRules is the firewall a balancer's listeners need: one rule per (address, source list), its ports in
 // lists of at most fwMaxPorts. Without vips (a single appliance) the rules name no destination and hold one port
-// each, as they always have.
+// each, as they always have. A listener with its own VIP opens its port on that address only, so a Service's source
+// list never opens another Service's address.
 func LBListenerRules(listeners []LBListener, vips []string) []FirewallRule {
-	bySource := map[string][]int{}
-	for _, l := range listeners {
-		if l.Port < 1 || l.Port > 65535 {
-			continue
-		}
-		ranges, msg := lbSourceRanges(l.SourceRanges)
-		if msg != "" {
-			continue // a stored row a validation never saw: nothing is opened for it
-		}
-		src := strings.Join(ranges, ",")
-		bySource[src] = append(bySource[src], l.Port)
-	}
 	// A single appliance keeps one rule per port, the rules it has had since the first release, so an existing
 	// balancer's firewall writes stay what they were (C13); it has at most lbMaxListeners of them.
 	dests, size := []string{""}, 1
@@ -480,10 +505,35 @@ func LBListenerRules(listeners []LBListener, vips []string) []FirewallRule {
 			}
 		}
 	}
+	bySource := map[string]map[string][]int{} // dest -> source list -> ports
+	for _, l := range listeners {
+		if l.Port < 1 || l.Port > 65535 {
+			continue
+		}
+		ranges, msg := lbSourceRanges(l.SourceRanges)
+		if msg != "" {
+			continue // a stored row a validation never saw: nothing is opened for it
+		}
+		on := dests
+		if l.VIP != "" {
+			a, err := netip.ParseAddr(l.VIP)
+			if err != nil || !a.Is4() || !slices.Contains(dests, a.String()) {
+				continue
+			}
+			on = []string{a.String()}
+		}
+		src := strings.Join(ranges, ",")
+		for _, dest := range on {
+			if bySource[dest] == nil {
+				bySource[dest] = map[string][]int{}
+			}
+			bySource[dest][src] = append(bySource[dest][src], l.Port)
+		}
+	}
 	var out []FirewallRule
 	for _, dest := range dests {
-		for _, src := range slices.Sorted(maps.Keys(bySource)) {
-			ports := slices.Clone(bySource[src])
+		for _, src := range slices.Sorted(maps.Keys(bySource[dest])) {
+			ports := slices.Clone(bySource[dest][src])
 			slices.Sort(ports)
 			for chunk := range slices.Chunk(ports, size) {
 				nums := make([]string, len(chunk))
@@ -561,6 +611,7 @@ func (s *Service) SetLBRules(ctx context.Context, node string, vmid int, want []
 type LBMemberHealth struct {
 	Pool     string `json:"pool"`
 	ServerID string `json:"serverId"`
+	Address  string `json:"address,omitempty"` // a cluster's worker
 	Port     int    `json:"port"`
 	Status   string `json:"status"` // UP, DOWN, ... as HAProxy says; "" = not in the running config
 }
@@ -602,8 +653,12 @@ func ParseHAProxyStat(out string, spec LBSpec) ([]LBMemberHealth, error) {
 	health := []LBMemberHealth{}
 	for i, p := range spec.Pools {
 		for _, m := range p.Members {
+			addr := ""
+			if m.Node {
+				addr = m.Address
+			}
 			health = append(health, LBMemberHealth{
-				Pool: p.Name, ServerID: m.ServerID, Port: m.Port,
+				Pool: p.Name, ServerID: m.ServerID, Address: addr, Port: m.Port,
 				Status: status["p"+strconv.Itoa(i)+"/"+lbServerName(m)],
 			})
 		}

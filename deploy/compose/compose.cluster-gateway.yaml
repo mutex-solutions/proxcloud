@@ -1,0 +1,20 @@
+# The gateway listener of the managed clusters' controllers (proxmox-csi and the load balancer controller), opt-in:
+# "proxcloud-up.sh install --cluster-gateway <address>" adds this file to the model through COMPOSE_FILE in .env.
+# It is published on that address only, which the platform cluster's nodes must reach; nothing else needs to.
+# The API makes its own key and self-signed certificate for the address on its first start, in the gateway volume,
+# and the clusters trust that certificate: keep the volume (backup and uninstall without --purge keep it).
+services:
+  api:
+    environment:
+      PROXCLOUD_CSI_GATEWAY_ADDR: ":8444"
+      PROXCLOUD_CSI_GATEWAY_URL: https://${CLUSTER_GATEWAY_ADDRESS:?run ./proxcloud-up.sh}:8444
+      PROXCLOUD_CSI_GATEWAY_SELF_SIGNED: "true"
+      PROXCLOUD_CSI_GATEWAY_TLS_CERT: /var/lib/proxcloud/gateway/tls.crt
+      PROXCLOUD_CSI_GATEWAY_TLS_KEY: /var/lib/proxcloud/gateway/tls.key
+    ports:
+      - "${CLUSTER_GATEWAY_ADDRESS:?run ./proxcloud-up.sh}:8444:8444"
+    volumes:
+      - gateway:/var/lib/proxcloud/gateway
+
+volumes:
+  gateway:
