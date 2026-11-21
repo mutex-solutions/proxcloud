@@ -837,6 +837,50 @@ first. Existing clusters keep the tenant-side controller until an operator moves
 A PersistentVolume on a node-local store (`zfspool`, `lvmthin`) carries its PVE node as its zone, so its pod runs only on
 workers of that node; on a shared store (NFS, RBD) it follows the pod to any worker.
 
+**Load balancers of a cluster's Services: the gateway side.** The same listener serves one more call, for a cluster's
+load balancer controller. The controller and its chart come with a later change of v0.11.0: until then nothing calls it
+and no cluster holds the credential. `PUT /lb/v1/state` (`internal/cloud/lbgw`, `cmd/api` sends `/lb/v1/` there and every
+other path to the CSI gateway, unchanged) takes `Authorization: PVEAPIToken=lb@proxcloud!<clusterId>=<secret>`, the
+header `ProxCloud-LB-Protocol: 1` and a body of at most 64 KiB: the Services of type LoadBalancer the controller owns
+(uid, ports with protocol, port and node port, `externalTrafficPolicy`, `healthCheckNodePort`,
+`loadBalancerSourceRanges`, the PROXY annotation, the IP families) and the nodes' InternalIPs. Nothing in it names a
+project, network or VM. The credential (`lbGatewayCredential`, `_id` = the cluster id: project, compute and Kubernetes
+provider, the cluster's network; only the secret's SHA-256; last seen written at most once a minute) allows this one
+call for its own cluster, and minting it again rotates it.
+
+- Each Service is checked on its own, and a refused one gets a reason the controller turns into an Event: any port that
+  is not TCP refuses the whole Service (`UDPNotSupported`), IPv6 or dual stack (`IPFamilyNotSupported`), node port 0,
+  a node port outside 30000-32767 or policy Local without a health port (`NoNodePort`), source ranges that do not fit
+  one firewall rule of 512 characters (`TooManySourceRanges`; `0.0.0.0/0` means any), more than 50 Services or 20 ports
+  (`TooLarge`). A node whose address is not one of the cluster's 16 worker addresses (the 8 MetalLB addresses of the
+  reservation included) is answered `NotAWorker` and never becomes a member.
+- The answer is the state as it is: per Service `ready` with its address, `building`, or `refused`. Nothing is built in
+  the request: the state is stored (`lbGatewayState`) and a converge starts (lock `lbc-<clusterId>`; the provider sync
+  runs it too). A project that is suspended or being deleted is refused with 409 `ProjectNotEnabled` and nothing
+  changes; its state is applied after the resume. A controller older than the gateway takes is answered
+  `ControllerTooOld`, which says to bump the cluster. Refusals are audit events (`LB_GATEWAY` / `DENY`), once per change.
+- The cluster's balancer is one load balancer row, always a pair, built with the first Service from the Kubernetes
+  provider's `config.cluster.loadBalancer` (`publicNetworkId`, `flavorId`; checked on save: an active flavor, and a
+  public network of the workers' compute provider with a gateway, on a plain bridge). It stays until the cluster is
+  deleted, also with no Service left. Each Service gets one public address (owner `lb:<id>`, one `floatingIps` of the
+  quota each, `QuotaExceeded` over it), one listener per (address, port) bound to that address only, and one pool per
+  port in mode tcp of the accepted workers on the node port: a TCP check for policy Cluster, an HTTP check on
+  `healthCheckNodePort` for Local, PROXY v2 when annotated. Idle connections are cut after an hour (a tenant's own
+  balancer keeps 60 s): MetalLB, which the product balancer replaces, has no idle timeout. The config stays within
+  45 KiB: the newest Service that does not fit is refused `TooLarge`. A repeated PUT takes no second address.
+- A Service gone from the state loses its listeners at once, and its address once no appliance holds it any more. The
+  approved design kept an unreferenced address for a day; there is no grace here, because the state is always the
+  cluster's whole list, and an address is not kept across a Service's delete and create.
+- A tenant's change or delete of the row answers 409 (its Services make it); `REPLACE_APPLIANCES` and the health read
+  work as on any pair, and project teardown deletes it. When the cluster is released (`kamaji.OnClusterGone`, with or
+  without a controller), the credential is revoked first, then the appliances, the addresses with their `FLOATING_IP`
+  rows, the row and the state go.
+- On Docker Compose the listener is opt-in, with a certificate the API makes itself
+  (`proxcloud-up.sh install --cluster-gateway <address>`, [managed-services.md](managed-services.md#9-limits-on-the-compose-install)).
+
+Not run on a lab: any of it (no controller calls it yet). Tested against Postgres and a fake Proxmox
+(`TestLBClusterStateConverges`).
+
 **Moving a cluster onto the CSI gateway.** A cluster made by an earlier release with `csiSharedStores` keeps the
 tenant-side controller and its `csi@pve!<id>` token until an operator moves it, one cluster at a time:
 

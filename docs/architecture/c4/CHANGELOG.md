@@ -4,6 +4,22 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-21: the gateway accepts a cluster's load balancer state
+
+**What changed:** the gateway listener of the API (C2, the CSI gateway row) serves a second call, `PUT /lb/v1/state`
+(`internal/cloud/lbgw`), for a tenant cluster's load balancer controller with a per-cluster credential
+`lb@proxcloud!<clusterId>` (collection `lbGatewayCredential`, SHA-256 only). The portal stores the state
+(`lbGatewayState`) and converges the cluster's balancer, a pair of the container "Load balancers", in the background
+(`cloud_lb_cluster_pve.go`): one address per Service, listeners bound to it, members only from the cluster's worker
+addresses. The cluster's release (`kamaji.OnClusterGone`) revokes the credential first and deletes the pair. Docker
+Compose can run the listener (`--cluster-gateway`), published on one host address, with a certificate the API makes
+itself. No new container: the caller, the controller next to each cluster's control plane, comes with a later change.
+
+**Why:** v0.11.0 plan, PR 2 (`run-1/v0110-lb-plan.md`, corrections C3, C5, C6, C11, C12, C14): the portal side of
+cluster load balancers, so that a Service of type LoadBalancer can get a public address of the product's balancer.
+
+**Diagrams:** none (the C2 rows' text only).
+
 ## 2026-11-21: a load balancer on an appliance pair
 
 **What changed:** container "Load balancers" (C2) runs a new balancer on two appliance VMs instead of one, with
