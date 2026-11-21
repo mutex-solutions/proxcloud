@@ -204,9 +204,39 @@ export function seedCloudResources(): CloudResource[] {
       },
     }),
 
+    // The balancer of prod's Services (a cluster in default mode): two Services with an address each, one refused.
+    // Made and changed by the cluster, so its page shows the Services and offers no edit or delete.
+    res("LOAD_BALANCER", "k8s-5e1f0a2b3c4d", {
+      loadbalancer: {
+        id: "5e1f0a2b3c4d", name: "k8s-5e1f0a2b3c4d", status: "ACTIVE", ha: true, networkId: "v1", publicNetworkId: "vmbr1",
+        publicIp: "203.0.113.21", vips: ["203.0.113.21", "203.0.113.22"],
+        appliances: [
+          { serverId: "311", node: "pve2", privateIp: "10.20.0.41", role: "MASTER", holdsVip: true, state: "up" },
+          { serverId: "312", node: "pve3", privateIp: "10.20.0.42", role: "BACKUP", state: "up" },
+        ],
+        cluster: {
+          id: "pc-c-healthy",
+          services: [
+            { uid: "u-web", namespace: "shop", name: "web", vip: "203.0.113.21", state: "ready" },
+            { uid: "u-gw", namespace: "nginx-gateway", name: "public-gateway-nginx", vip: "203.0.113.22", state: "ready" },
+            { uid: "u-dns", namespace: "infra", name: "dns", state: "refused", reason: "UDPNotSupported", message: "Port 53/UDP: only TCP ports are balanced" },
+          ],
+        },
+        listeners: [
+          { port: 443, pool: "s0-0", vip: "203.0.113.21" },
+          { port: 80, pool: "s1-0", vip: "203.0.113.22" },
+        ],
+        pools: [
+          { name: "s0-0", protocol: "tcp", algorithm: "roundrobin", members: ["10.20.0.11", "10.20.0.12", "10.20.0.13"].map((a) => ({ serverId: "", node: true, address: a, port: 31443, weight: 1 })) },
+          { name: "s1-0", protocol: "tcp", algorithm: "roundrobin", healthCheck: { type: "http", port: 32100, path: "/" },
+            members: ["10.20.0.11", "10.20.0.12", "10.20.0.13"].map((a) => ({ serverId: "", node: true, address: a, port: 30080, weight: 1 })) },
+        ],
+      },
+    }),
+
     // Three workers placed on three hosts: scaling to two empties one host.
     k8s("pc-c-healthy", "prod", {
-      status: "READY",
+      status: "READY", load_balancer: "default", addons: { metricsServer: true, nginxGatewayFabric: true },
       node_groups: [{ ...group("workers", 3, 3), image_id: "pve1=9201,pve2=9202,pve3=9203", placement: { pve1: 1, pve2: 1, pve3: 1 } }],
     }),
     k8s("pc-c-stuck", "staging", {

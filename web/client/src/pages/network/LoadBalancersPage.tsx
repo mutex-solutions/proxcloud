@@ -19,25 +19,97 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { apiFetch, type CloudScope } from "@/lib/api"
 import { timeAgo } from "@/lib/format"
 import { useCloudList, useCloudScope, useProjectId } from "@/lib/hooks"
 import type { CloudResource } from "@/lib/types"
 
-interface Member { serverId: string; port: number; weight?: number; address?: string; missing?: boolean }
+// node: a worker of a Kubernetes cluster, named by its address alone.
+interface Member { serverId: string; port: number; weight?: number; address?: string; missing?: boolean; node?: boolean }
 interface HealthCheck { type: string; port?: number; path?: string }
 interface Pool { name: string; protocol: string; algorithm: string; members: Member[]; healthCheck?: HealthCheck | null; proxyProtocol?: boolean }
-interface Listener { port: number; pool: string; sourceRanges?: string[] | null }
+// vip: the one address a cluster Service's listener binds.
+interface Listener { port: number; pool: string; sourceRanges?: string[] | null; vip?: string }
 // One VM of a load balancer with high availability, as the last apply saw it.
 interface Appliance { serverId: string; node?: string; privateIp?: string; role?: string; holdsVip?: boolean; state?: string; reason?: string }
-interface LB {
+// A Kubernetes Service on a cluster's balancer, as the cluster's controller last sent it.
+interface ClusterService { uid: string; namespace?: string; name?: string; vip?: string; state: string; reason?: string; message?: string }
+export interface LB {
   id: string; name: string; status: string; statusMessage?: string; serverId?: string; networkId: string
   publicIp?: string; privateIp?: string; listeners?: Listener[] | null; pools?: Pool[] | null
   ha?: boolean; appliances?: Appliance[] | null; replacing?: string
+  // The balancer of a Kubernetes cluster's Services: made and changed by the cluster, deleted with it.
+  cluster?: { id: string; services?: ClusterService[] | null }
 }
-interface Health { pool: string; serverId: string; port: number; status: string }
+export interface Health { pool: string; serverId: string; address?: string; port: number; status: string }
 
 const lbOf = (r: CloudResource) => (r.data?.loadbalancer ?? {}) as LB
+
+// The appliances of a pair: where each runs and which one holds the addresses, and what one node means for them.
+export function ApplianceList({ appliances }: { appliances: Appliance[] }) {
+  const nodes = new Set(appliances.map((a) => a.node).filter(Boolean))
+  return (
+    <>
+      {!appliances.length && <p className="text-muted-foreground">The two appliances are being built.</p>}
+      {appliances.map((a) => (
+        <div key={a.serverId} className="flex flex-wrap items-center gap-3">
+          <span className="font-mono">VM {a.serverId}</span>
+          <span className="text-muted-foreground">node {a.node || "—"}</span>
+          <StatusBadge status={a.state ?? "unknown"} />
+          {a.holdsVip ? <span className="font-medium">holds the address</span> : <span className="text-muted-foreground">standby</span>}
+          {a.reason && <span className="text-muted-foreground">{a.reason}</span>}
+        </div>
+      ))}
+      {appliances.length > 1 && nodes.size === 1 && (
+        <p className="text-muted-foreground" data-testid="lb-one-node">
+          Both appliances run on node {[...nodes][0]}: the load balancer survives an appliance failure, not the loss of the node.
+        </p>
+      )}
+    </>
+  )
+}
+
+// A cluster balancer's Services: each one's address, its ports and how many of the cluster's workers answer its health
+// check (with externalTrafficPolicy Local, only the workers that run one of its pods).
+export function ClusterServices({ lb, health }: { lb: LB; health?: Health[] }) {
+  const services = lb.cluster?.services ?? []
+  if (!services.length) return <p className="text-sm text-muted-foreground">No Service of type LoadBalancer is on this load balancer.</p>
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow className="hover:bg-transparent">
+          <TableHead>Service</TableHead>
+          <TableHead>Address</TableHead>
+          <TableHead>Ports</TableHead>
+          <TableHead>Workers</TableHead>
+          <TableHead>State</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {services.map((s) => {
+          const listeners = (lb.listeners ?? []).filter((l) => s.vip && l.vip === s.vip)
+          const members = listeners.flatMap((l) => ((lb.pools ?? []).find((p) => p.name === l.pool)?.members ?? []).map((m) => ({ ...m, pool: l.pool })))
+          const workers = [...new Set(members.map((m) => m.address))]
+          const up = workers.filter((a) => members.some((m) => m.address === a &&
+            health?.find((h) => h.pool === m.pool && h.address === m.address && h.port === m.port)?.status?.startsWith("UP"))).length
+          return (
+            <TableRow key={s.uid}>
+              <TableCell className="font-mono text-xs">{s.namespace}/{s.name}</TableCell>
+              <TableCell className="font-mono text-sm">{s.vip || "—"}</TableCell>
+              <TableCell className="text-sm">{listeners.map((l) => l.port).join(", ") || "—"}</TableCell>
+              <TableCell className="text-sm">{!workers.length ? "—" : health ? `${up} of ${workers.length} up` : `${workers.length}`}</TableCell>
+              <TableCell className="max-w-sm whitespace-normal text-sm">
+                <StatusBadge status={s.state} />
+                {s.reason && <span className="ml-2 text-muted-foreground">{s.reason}: {s.message}</span>}
+              </TableCell>
+            </TableRow>
+          )
+        })}
+      </TableBody>
+    </Table>
+  )
+}
 const BUSY = new Set(["BUILD"])
 
 function serverName(s: CloudResource) {
@@ -75,9 +147,12 @@ export default function LoadBalancersPage() {
       accessorFn: (r) => lbOf(r).name,
       header: sortableHeader("Name"),
       cell: ({ row, getValue }) => (
-        <Link className="inline-block py-1 font-medium hover:underline" to={`/p/${pid}/load-balancers/${row.original.id}`} onClick={(e) => e.stopPropagation()}>
-          {getValue()}
-        </Link>
+        <>
+          <Link className="inline-block py-1 font-medium hover:underline" to={`/p/${pid}/load-balancers/${row.original.id}`} onClick={(e) => e.stopPropagation()}>
+            {getValue()}
+          </Link>
+          {lbOf(row.original).cluster && <span className="ml-2 text-xs text-muted-foreground">Kubernetes cluster {lbOf(row.original).cluster?.id}</span>}
+        </>
       ),
     },
     { id: "status", accessorFn: (r) => lbOf(r).status, header: sortableHeader("Status"), cell: ({ getValue }) => <StatusBadge status={getValue()} /> },
@@ -326,8 +401,9 @@ export function LoadBalancerDetailPage() {
     onError: (e: Error) => toast.error(e.message),
   })
   const appliances = lb?.appliances ?? []
-  const nodes = new Set(appliances.map((a) => a.node).filter(Boolean))
   const replacing = !!lb?.replacing
+  // A cluster's balancer: its Services make it and the cluster's delete removes it, so nothing here edits it.
+  const managed = lb?.cluster
   const statusOf = (pool: string, m: Member) =>
     health.data?.find((h) => h.pool === pool && h.serverId === m.serverId && h.port === m.port)?.status
   const ready = !!lb?.privateIp
@@ -341,7 +417,7 @@ export function LoadBalancerDetailPage() {
         actions={
           <>
             <Button variant="outline" size="sm" onClick={() => navigate(`/p/${pid}/load-balancers`)}><ArrowLeft className="size-4" /> All</Button>
-            <Button variant="outline" size="sm" onClick={() => setConfirmDelete(true)}><Trash2 className="size-4" /> Delete</Button>
+            {!managed && <Button variant="outline" size="sm" onClick={() => setConfirmDelete(true)}><Trash2 className="size-4" /> Delete</Button>}
           </>
         }
       />
@@ -363,26 +439,29 @@ export function LoadBalancerDetailPage() {
               </Button>
             </CardHeader>
             <CardContent className="grid gap-2 text-sm">
-              {!appliances.length && <p className="text-muted-foreground">The two appliances are being built.</p>}
-              {appliances.map((a) => (
-                <div key={a.serverId} className="flex flex-wrap items-center gap-3">
-                  <span className="font-mono">VM {a.serverId}</span>
-                  <span className="text-muted-foreground">node {a.node || "—"}</span>
-                  <StatusBadge status={a.state ?? "unknown"} />
-                  {a.holdsVip ? <span className="font-medium">holds the address</span> : <span className="text-muted-foreground">standby</span>}
-                  {a.reason && <span className="text-muted-foreground">{a.reason}</span>}
-                </div>
-              ))}
-              {appliances.length > 1 && nodes.size === 1 && (
-                <p className="text-muted-foreground" data-testid="lb-one-node">
-                  Both appliances run on node {[...nodes][0]}: the load balancer survives an appliance failure, not the loss of the node.
-                </p>
-              )}
+              <ApplianceList appliances={appliances} />
               {replacing && <p data-testid="lb-replacing">Replacing the appliances, one at a time, the standby first. The address keeps answering; open connections are cut at the switch.</p>}
             </CardContent>
           </Card>
         )}
 
+        {managed && (
+          <Card data-testid="lb-cluster">
+            <CardHeader>
+              <CardTitle className="text-base">Services of Kubernetes cluster {managed.id}</CardTitle>
+            </CardHeader>
+            <CardContent className="grid gap-3 text-sm">
+              <p className="text-muted-foreground">
+                The Services of type LoadBalancer of{" "}
+                <Link className="font-medium text-foreground hover:underline" to={`/p/${pid}/kubernetes/${managed.id}`}>cluster {managed.id}</Link>{" "}
+                make this load balancer: change them, not this page. It is deleted with the cluster.
+              </p>
+              <ClusterServices lb={lb} health={health.data} />
+            </CardContent>
+          </Card>
+        )}
+
+        {!managed && <>
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle className="text-base">Pools</CardTitle>
@@ -508,6 +587,7 @@ export function LoadBalancerDetailPage() {
           </Button>
           <p className="text-sm text-muted-foreground">Security groups of the servers behind it must let the load balancer in. The default group does.</p>
         </div>
+        </>}
       </div>
 
       <Dialog open={confirmReplace} onOpenChange={setConfirmReplace}>
