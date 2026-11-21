@@ -63,6 +63,9 @@ class APIRuntimeContractTests(unittest.TestCase):
             ("COPY", "deploy/dbaas-cluster/argocd-health.yaml ./deploy/dbaas-cluster/"),
             ("RUN", 'CGO_ENABLED=0 GOOS=linux go build -trimpath '
              '-ldflags="-s -w" -o /out/proxcloud-api ./cmd/api'),
+            # The managed clusters' load balancer controller, the same way: a second binary, no image of its own.
+            ("RUN", 'CGO_ENABLED=0 GOOS=linux go build -trimpath '
+             '-ldflags="-s -w" -o /out/lb-controller ./cmd/lb-controller'),
         ])
 
     def test_runtime_is_exact_alpine_release(self):
@@ -87,6 +90,7 @@ class APIRuntimeContractTests(unittest.TestCase):
         self.assertEqual(non_runs, [
             ("FROM", "alpine:3.24.4"),
             ("COPY", "--from=build /out/proxcloud-api /usr/local/bin/proxcloud-api"),
+            ("COPY", "--from=build /out/lb-controller /usr/local/bin/lb-controller"),
             ("USER", "10001"),
             ("EXPOSE", "8080 8081"),
             ("ENTRYPOINT", '["/usr/local/bin/proxcloud-api"]'),

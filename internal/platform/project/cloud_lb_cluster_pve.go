@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/lbgw"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
@@ -587,4 +588,100 @@ func (h *Handler) lbDropState(ctx context.Context, clusterID string) error {
 		return nil
 	}
 	return h.lbGW.DeleteState(ctx, clusterID)
+}
+
+// The load balancer controller of a cluster (cmd/lb-controller, chart proxmox-kamaji-cluster from 0.1.17): what a cluster
+// needs for one, the credential it presents, and the operator's "Enable load balancer controller" for an existing cluster.
+
+// kamajiLBGate names the first thing that keeps a cluster of the Kubernetes provider k8s, with its workers on compute in
+// proj, from a load balancer controller; "" when every gate holds: this portal holds the gateway's store, a gateway URL
+// and the controller image, the provider pins a chart that renders the controller, the workers are the project's own,
+// and the provider names a load balancer whose public network the project may use.
+func (h *Handler) kamajiLBGate(cfg kamaji.Config, k8s, compute *externalservice.ExternalService, proj *Project) string {
+	switch {
+	case h.lbGW == nil:
+		return "the portal keeps no load balancer gateway store"
+	case h.csiGW == nil || h.csiGW.Endpoint.URL == "":
+		return "the portal has no gateway URL (PROXCLOUD_CSI_GATEWAY_URL)"
+	case cfg.LBControllerImage == "":
+		return "the portal has no controller image (PROXCLOUD_LB_CONTROLLER_IMAGE)"
+	case cfg.Defaults.Shared != nil:
+		return "the provider runs sharedWorkers: the controller needs the project's own workers"
+	case !kamaji.ChartHasLBController(cfg.ChartVersion):
+		return fmt.Sprintf("the provider pins cluster chart %s; the controller needs %s or later", cfg.ChartVersion, kamaji.LBControllerChartVersion)
+	}
+	netID, _, ok := k8s.KamajiLoadBalancer()
+	if !ok {
+		return "the Kubernetes provider offers no load balancer (config.cluster.loadBalancer)"
+	}
+	if pveAllowedPublicNetwork(compute, proj, netID) == nil {
+		return "public network " + netID + " is not available to the project"
+	}
+	return ""
+}
+
+// lbControllerSecret mints the cluster's credential (minting again replaces it: a rotation) and returns the data of the
+// controller's Secret: the token it presents and the gateway's CA. The secret is in nothing else.
+func (h *Handler) lbControllerSecret(ctx context.Context, cred lbgw.Credential) (map[string]string, error) {
+	tokenID, secret, err := h.lbGW.MintCredential(ctx, cred)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]string{"token": tokenID + "=" + secret, "ca.crt": h.csiGW.Endpoint.CA}, nil
+}
+
+// EnableClusterLB gives one existing cluster of the kamaji provider es its load balancer controller in class-only mode:
+// Services of class proxcloud.io/lb get the product balancer, MetalLB keeps every Service without a class and its
+// address. The chart is pinned to the provider's version (as SwitchCSIGateway, with the same transition check). Again
+// on a cluster that has one: a new credential (the old one stops at once) and the portal's image, the mode unchanged.
+// Refused, naming the gate, for sharedWorkers or a site that cannot serve.
+func (h *Handler) EnableClusterLB(ctx context.Context, es *externalservice.ExternalService, ks *kamaji.Service, clusterID string) (any, error) {
+	ctx = context.WithoutCancel(ctx)
+	cfg := ks.Config()
+	info, err := ks.ClusterNetwork(ctx, clusterID)
+	if err != nil {
+		return nil, httpx.NotFound(err.Error())
+	}
+	conflict := func(msg string) error { return httpx.NewError(http.StatusConflict, http.StatusConflict, msg) }
+	proj, err := h.svc.GetProjectByID(ctx, info.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	if proj.Deleting() {
+		return nil, conflict("The cluster's project is being deleted")
+	}
+	compute, err := h.kamajiCompute(ctx, proj, cfg.Defaults)
+	if err != nil {
+		return nil, err
+	}
+	if gate := h.kamajiLBGate(cfg, es, compute, proj); gate != "" {
+		return nil, conflict("No load balancer controller: " + gate)
+	}
+	if info.Pool != compute.PoolFor(proj.ID) {
+		return nil, conflict("No load balancer controller: cluster " + clusterID + " has its workers in " + info.Pool + ", not the project's pool")
+	}
+	nets, err := h.cloud.FindByProjectAndType(ctx, proj.ID, cloud.TypeNetwork)
+	if err != nil {
+		return nil, err
+	}
+	netRef := ""
+	for i := range nets {
+		if n, _ := nets[i].Data["network"].(map[string]any); nets[i].ServiceID == compute.ID && info.Bridge != "" && strAny(n["vnet"]) == info.Bridge {
+			netRef = nets[i].ExternalID
+			break
+		}
+	}
+	if netRef == "" {
+		return nil, conflict("No load balancer controller: the cluster's network " + info.Bridge + " is not a network of the project")
+	}
+	secret, err := h.lbControllerSecret(ctx, lbgw.Credential{ID: clusterID, ProjectID: proj.ID, ComputeServiceID: compute.ID,
+		KubernetesServiceID: es.ID, NetworkID: netRef, Vnet: info.Bridge})
+	if err != nil {
+		return nil, err
+	}
+	lb := kamaji.LBController{Image: cfg.LBControllerImage, GatewayURL: h.csiGW.Endpoint.URL}
+	if err := ks.EnableLBController(ctx, proj.ID, clusterID, cfg.ChartVersion, lb, secret); err != nil {
+		return nil, upstreamErr("Kubernetes backend", err)
+	}
+	return map[string]any{"clusterId": clusterID, "chartVersion": cfg.ChartVersion, "image": cfg.LBControllerImage}, nil
 }

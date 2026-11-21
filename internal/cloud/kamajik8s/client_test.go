@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -491,5 +492,29 @@ func TestClientFollowsNoRedirect(t *testing.T) {
 	}
 	if _, err := c.ListNodes(context.Background()); !errors.As(err, &ae) || ae.Status != http.StatusFound || hits != 2 {
 		t.Fatalf("ListNodes = %v, hits %d", err, hits)
+	}
+}
+
+// The load balancer controller's two writes: a merge patch on the Service (its finalizer) and on its status subresource.
+func TestPatchService(t *testing.T) {
+	var got []string
+	c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		got = append(got, r.Method+" "+r.URL.Path+" "+r.Header.Get("Content-Type")+" "+string(body))
+		_, _ = w.Write([]byte(`{}`))
+	})
+	ctx := context.Background()
+	if err := c.PatchService(ctx, "web", "a b", map[string]any{"metadata": map[string]any{"finalizers": []string{"x"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.PatchServiceStatus(ctx, "web", "a", map[string]any{"status": map[string]any{}}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		`PATCH /api/v1/namespaces/web/services/a b application/merge-patch+json {"metadata":{"finalizers":["x"]}}`,
+		`PATCH /api/v1/namespaces/web/services/a/status application/merge-patch+json {"status":{}}`,
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("requests:\n%s", strings.Join(got, "\n"))
 	}
 }

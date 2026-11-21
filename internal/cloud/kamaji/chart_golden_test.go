@@ -2,6 +2,7 @@ package kamaji
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -49,6 +50,10 @@ func TestChartGolden(t *testing.T) {
 		{"tenant-csi-gateway", "pc-c-abcd1234", "pc-p1", "proxmox:\n  csi:\n    gateway:\n      secretName: " +
 			CSIGatewaySecretName("pc-c-abcd1234") + "\n      kubeconfigSecretName: " + AdminKubeconfigSecretName("pc-c-abcd1234") + "\n"},
 		{"tenant-gateway-fabric", "pc-c-abcd1234", "pc-p1", "addons:\n  nginxGatewayFabric: {enabled: true}\n"},
+		// The load balancer controller (0.1.17) in default mode, with Gateway Fabric, whose Service class stays as it is,
+		// and in class-only mode, where MetalLB's values are those of the tenant case.
+		{"tenant-lb-default", "pc-c-abcd1234", "pc-p1", lbGoldenValues(true) + "addons:\n  nginxGatewayFabric: {enabled: true}\n"},
+		{"tenant-lb-class-only", "pc-c-abcd1234", "pc-p1", lbGoldenValues(false)},
 		{"kubeadm", "pc-platform", "pc-platform", kubeadmTestValues},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -71,6 +76,13 @@ func TestChartGolden(t *testing.T) {
 			}
 		})
 	}
+}
+
+// lbGoldenValues is the loadBalancer block the portal writes for cluster pc-c-abcd1234 (LBValues), as YAML.
+func lbGoldenValues(def bool) string {
+	b, _ := json.Marshal(LBValues("pc-c-abcd1234",
+		LBController{Image: "ghcr.io/mutex-solutions/proxcloud-api:v0.11.0", GatewayURL: "https://192.0.2.7:8444", Default: def}))
+	return "loadBalancer: " + string(b) + "\n" // JSON is YAML
 }
 
 // elideGatewayAPIFiles puts a digest line in place of each pinned upstream Gateway API file the chart embeds verbatim

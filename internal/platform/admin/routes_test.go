@@ -33,6 +33,18 @@ func TestProjectGPUUsageRoute(t *testing.T) {
 	}
 }
 
+// "Enable load balancer controller" for one cluster: POST only.
+func TestKamajiLoadBalancerRoute(t *testing.T) {
+	router := chi.NewRouter()
+	(&Handler{}).Routes(router)
+	if !router.Match(chi.NewRouteContext(), http.MethodPost, "/admin/service/svc-1/k8s-clusters/pc-c-1/load-balancer") {
+		t.Fatal("POST /admin/service/{id}/k8s-clusters/{clusterId}/load-balancer route is not registered")
+	}
+	if router.Match(chi.NewRouteContext(), http.MethodGet, "/admin/service/svc-1/k8s-clusters/pc-c-1/load-balancer") {
+		t.Fatal("GET matched")
+	}
+}
+
 func TestKamajiCSIGatewayRoute(t *testing.T) {
 	router := chi.NewRouter()
 	(&Handler{}).Routes(router)

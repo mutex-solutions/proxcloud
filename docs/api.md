@@ -397,6 +397,19 @@ nodes; it is false on every `GET` and on a `POST` to a cluster that was already 
  "verified": true, "workers": [{"vmid": 141, "name": "pc-c-0a1b2c3d-workers-pve1-abcde-1", "node": "pve1", "status": "running", "secured": true}]}
 ```
 
+`POST /api/v1/admin/service/{id}/k8s-clusters/{clusterId}/load-balancer` (`admin:service:manage`) is "Enable load
+balancer controller" for one existing cluster ([managed-k8s.md](managed-k8s.md); not verified on a lab): class-only
+mode (Services of class `proxcloud.io/lb`), the chart pinned to the provider's version (0.1.17 or later), a credential
+minted and its Secret written. Again on the same cluster it rotates the credential and sets the portal's controller
+image, keeping the mode. A gate that does not hold answers `409` and names it (no gateway URL or controller image,
+`sharedWorkers`, a chart too old, no `config.cluster.loadBalancer`, a public network the project may not use, workers
+outside the project's pool, a network that is not the project's); a cluster that is not found or is being deleted
+answers `404`.
+
+```json
+{"clusterId": "pc-c-0a1b2c3d", "chartVersion": "0.1.17", "image": "ghcr.io/mutex-solutions/proxcloud-api:v0.11.0"}
+```
+
 `GET /api/v1/admin/service/{id}/k8s-clusters/{clusterId}/machines` (`admin:service:read`) is the operator's detail,
 read live from the management cluster:
 

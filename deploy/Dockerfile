@@ -18,6 +18,9 @@ COPY deploy/platform ./deploy/platform
 COPY deploy/mgmt-cluster/argocd-health.yaml ./deploy/mgmt-cluster/
 COPY deploy/dbaas-cluster/argocd-health.yaml ./deploy/dbaas-cluster/
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/proxcloud-api ./cmd/api
+# The load balancer controller of the managed clusters (cmd/lb-controller): a second binary of this image, so it has no
+# image, tag or workflow of its own and runs the portal's version. The cluster chart starts it by its command.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/lb-controller ./cmd/lb-controller
 
 # CGO_ENABLED=0 keeps the Go binary independent of the runtime's libc. This
 # changes the API container only, not database/server major versions or data.
@@ -33,6 +36,7 @@ RUN apk upgrade --no-cache \
 RUN mkdir -p /opt/proxcloud/api
 
 COPY --from=build /out/proxcloud-api /usr/local/bin/proxcloud-api
+COPY --from=build /out/lb-controller /usr/local/bin/lb-controller
 
 # Non-root. /var/lib/proxcloud/gateway is where the Compose stack mounts the gateway volume, in which the API makes its own
 # gateway certificate (--cluster-gateway): a new named volume takes the owner of the image's directory.

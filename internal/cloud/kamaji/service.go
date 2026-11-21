@@ -81,6 +81,9 @@ type ClusterSecrets struct {
 	// CSIGateway is the data of the controller's Secret on the services cluster (CSIGatewaySecretName): its config
 	// and the gateway's CA. Empty: no controller there.
 	CSIGateway map[string]string
+	// LBGateway is the data of the load balancer controller's Secret (LBGatewaySecretName): token and ca.crt. Empty: no
+	// controller.
+	LBGateway map[string]string
 	// ComputeServiceID names the proxmox provider hosting the workers; the reaper needs it.
 	ComputeServiceID string
 }
@@ -107,6 +110,9 @@ func NewWithAPI(api K8sAPI, cfg Config, serviceID string) *Service {
 
 // Config exposes the provider config (read-only use: version catalog, chart pin).
 func (s *Service) Config() Config { return s.cfg }
+
+// ServiceID is the id of the Kubernetes provider this Service drives.
+func (s *Service) ServiceID() string { return s.serviceID }
 
 // EnsureProjectNamespace creates/labels the project's namespace on the management cluster —
 // the kamaji bootstrap leg (BootstrapKamajiOnto). With a NamespacePlacement it also pins the namespace's pods (the
@@ -157,6 +163,11 @@ func (s *Service) CreateCluster(ctx context.Context, spec ClusterSpec, sec Clust
 			return nil, fmt.Errorf("kamaji: apply csi gateway secret: %w", err)
 		}
 	}
+	if len(sec.LBGateway) > 0 {
+		if err := s.api.ApplySecret(ctx, ns, LBGatewaySecretName(spec.ID), sec.LBGateway, labels, nil); err != nil {
+			return nil, fmt.Errorf("kamaji: apply load balancer gateway secret: %w", err)
+		}
+	}
 	if err := s.api.ApplySecret(ctx, ns, MarkerSecretName(spec.ID), nil, labels,
 		map[string]string{annotationComputeService: sec.ComputeServiceID}); err != nil {
 		return nil, fmt.Errorf("kamaji: apply marker secret: %w", err)
@@ -192,7 +203,7 @@ func (s *Service) AbandonCluster(ctx context.Context, projectID, clusterID, comp
 		}
 	}
 	ns := NamespaceFor(projectID)
-	for _, name := range []string{CSISecretName(clusterID), CSIGatewaySecretName(clusterID), CloudSecretName(clusterID), MarkerSecretName(clusterID)} {
+	for _, name := range []string{CSISecretName(clusterID), CSIGatewaySecretName(clusterID), LBGatewaySecretName(clusterID), CloudSecretName(clusterID), MarkerSecretName(clusterID)} {
 		if err := s.api.DeleteSecret(ctx, ns, name); err != nil {
 			return err
 		}
@@ -385,6 +396,11 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 		}
 		if err := s.api.DeleteSecret(ctx, ns, CSIGatewaySecretName(cid)); err != nil {
 			errs = append(errs, fmt.Errorf("cluster %s: delete csi gateway secret: %w", cid, err))
+			pending++
+			continue
+		}
+		if err := s.api.DeleteSecret(ctx, ns, LBGatewaySecretName(cid)); err != nil {
+			errs = append(errs, fmt.Errorf("cluster %s: delete load balancer gateway secret: %w", cid, err))
 			pending++
 			continue
 		}
@@ -698,7 +714,9 @@ func (s *Service) UnreadyReplicas(ctx context.Context, projectID, clusterID stri
 // SetChartVersion re-pins the cluster's Application onto a chart version (the "platform
 // update"). ArgoCD re-renders the SAME desired state with the new chart — which may roll the
 // CCM or, when the machine-template output changes between chart versions, the nodes
-// (surge-first per the chart's rollout strategy).
+// (surge-first per the chart's rollout strategy). A cluster with a load balancer controller gets the portal's
+// controller image with it (Config.LBControllerImage): the bump is when an operator or the tenant moves a cluster onto
+// the portal's versions, and nothing else re-pins it (C12).
 func (s *Service) SetChartVersion(ctx context.Context, clusterID, version string) error {
 	if version == "" {
 		return fmt.Errorf("kamaji: chart version is required")
@@ -712,6 +730,49 @@ func (s *Service) SetChartVersion(ctx context.Context, clusterID, version string
 			return err
 		}
 		src["targetRevision"] = version
+		if lb, _ := dig(app, "spec", "source", "helm", "valuesObject", "loadBalancer").(map[string]any); digStr(lb, "secretName") != "" && s.cfg.LBControllerImage != "" {
+			lb["image"] = s.cfg.LBControllerImage
+		}
+		return nil
+	})
+}
+
+// EnableLBController gives an existing cluster its load balancer controller, or a new credential (rotation), in one
+// Application apply: the controller's Secret (lbSecret: token and ca.crt) first, then the chart pinned to chartVersion
+// with the loadBalancer block. The mode a cluster already has is kept; a cluster without the block gets lb.Default,
+// which the operator's action passes as false (class-only): MetalLB's class never changes on a cluster.
+func (s *Service) EnableLBController(ctx context.Context, projectID, clusterID, chartVersion string, lb LBController, lbSecret map[string]string) error {
+	if !ChartHasLBController(chartVersion) {
+		return fmt.Errorf("kamaji: chart %s has no load balancer controller, %s or later is needed", chartVersion, LBControllerChartVersion)
+	}
+	app, err := s.api.GetApplication(ctx, s.cfg.ArgoNamespace, clusterID)
+	if err != nil {
+		return err
+	}
+	if app == nil || !managedBy(app) || digStr(app, "metadata", "labels", LabelProject) != projectID {
+		return fmt.Errorf("kamaji: cluster %s not found", clusterID)
+	}
+	if err := validateAddonChartTransition(app, chartVersion); err != nil {
+		return err
+	}
+	labels := map[string]string{LabelProject: projectID, LabelService: s.serviceID, LabelManagedBy: ManagedByValue}
+	if err := s.api.ApplySecret(ctx, NamespaceFor(projectID), LBGatewaySecretName(clusterID), lbSecret, labels, nil); err != nil {
+		return fmt.Errorf("kamaji: apply load balancer gateway secret: %w", err)
+	}
+	return s.PatchClusterApp(ctx, clusterID, func(app map[string]any) error {
+		src, _ := dig(app, "spec", "source").(map[string]any)
+		values, _ := dig(app, "spec", "source", "helm", "valuesObject").(map[string]any)
+		if src == nil || values == nil {
+			return fmt.Errorf("kamaji: cluster %s: application carries no values", clusterID)
+		}
+		if err := validateAddonChartTransition(app, chartVersion); err != nil {
+			return err
+		}
+		if cur, ok := values["loadBalancer"].(map[string]any); ok {
+			lb.Default = cur["default"] == true
+		}
+		src["targetRevision"] = chartVersion
+		values["loadBalancer"] = LBValues(clusterID, lb)
 		return nil
 	})
 }

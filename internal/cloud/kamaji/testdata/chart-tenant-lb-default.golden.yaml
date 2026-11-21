@@ -1,0 +1,518 @@
+---
+# Source: proxmox-kamaji-cluster/templates/lb-controller.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pc-c-abcd1234-lb-controller
+  labels:
+    proxcloud.io/cluster-id: pc-c-abcd1234
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: proxcloud-lb-controller
+      proxcloud.io/cluster-id: pc-c-abcd1234
+  # Nothing calls it; it calls DNS, the tenant API servers of its namespace and the gateway.
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+          podSelector: {matchLabels: {k8s-app: kube-dns}}
+      ports:
+        - {port: 53, protocol: UDP}
+        - {port: 53, protocol: TCP}
+    # The Kamaji control planes of this namespace (the project's clusters), on the API server's port. The admin kubeconfig
+    # is this cluster's only.
+    - to:
+        - podSelector: {}
+      ports:
+        - {port: 6443, protocol: TCP}
+    - ports:
+        - {port: 8444, protocol: TCP}
+      to:
+        - ipBlock: {cidr: 192.0.2.7/32}
+---
+# Source: proxmox-kamaji-cluster/templates/addons.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pc-c-abcd1234-metallb-config
+type: addons.cluster.x-k8s.io/resource-set
+stringData:
+  metallb.yaml: |
+    apiVersion: metallb.io/v1beta1
+    kind: IPAddressPool
+    metadata:
+      name: tenant
+      namespace: metallb-system
+    spec:
+      addresses: ["192.0.2.216-192.0.2.231"]
+    ---
+    apiVersion: metallb.io/v1beta1
+    kind: L2Advertisement
+    metadata:
+      name: tenant
+      namespace: metallb-system
+    spec:
+      ipAddressPools: [tenant]
+---
+# Source: proxmox-kamaji-cluster/templates/gateway-api.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pc-c-abcd1234-gateway-api-backendtlspolicies
+  annotations:
+    # Schema lifecycle is independent of toggling the controller; never prune CRDs with live routes.
+    argocd.argoproj.io/sync-options: Prune=false
+type: addons.cluster.x-k8s.io/resource-set
+stringData:
+  gateway-api.yaml: |
+    # gateway.networking.k8s.io_backendtlspolicies.yaml sha256:d9824b82db284bdea67d2eb0297952be51e0e7a394f02daef0d6f3fefa5d01c0
+---
+# Source: proxmox-kamaji-cluster/templates/gateway-api.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pc-c-abcd1234-gateway-api-gatewayclasses
+  annotations:
+    # Schema lifecycle is independent of toggling the controller; never prune CRDs with live routes.
+    argocd.argoproj.io/sync-options: Prune=false
+type: addons.cluster.x-k8s.io/resource-set
+stringData:
+  gateway-api.yaml: |
+    # gateway.networking.k8s.io_gatewayclasses.yaml sha256:d32070cb6930273a07c5ca183135712b1918cc140c6d9b6cef441cdf0e562345
+---
+# Source: proxmox-kamaji-cluster/templates/gateway-api.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pc-c-abcd1234-gateway-api-gateways
+  annotations:
+    # Schema lifecycle is independent of toggling the controller; never prune CRDs with live routes.
+    argocd.argoproj.io/sync-options: Prune=false
+type: addons.cluster.x-k8s.io/resource-set
+stringData:
+  gateway-api.yaml: |
+    # gateway.networking.k8s.io_gateways.yaml sha256:905c89d8fefaab9088bf9d0a8d47ebd7ec4e653a914d4bfaa575a7716f07a828
+---
+# Source: proxmox-kamaji-cluster/templates/gateway-api.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pc-c-abcd1234-gateway-api-grpcroutes
+  annotations:
+    # Schema lifecycle is independent of toggling the controller; never prune CRDs with live routes.
+    argocd.argoproj.io/sync-options: Prune=false
+type: addons.cluster.x-k8s.io/resource-set
+stringData:
+  gateway-api.yaml: |
+    # gateway.networking.k8s.io_grpcroutes.yaml sha256:a96b307008290c194ad346f9bb9346dd560c12e4d4e7dfbdbe7d2fb5e812d62e
+---
+# Source: proxmox-kamaji-cluster/templates/gateway-api.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pc-c-abcd1234-gateway-api-httproutes
+  annotations:
+    # Schema lifecycle is independent of toggling the controller; never prune CRDs with live routes.
+    argocd.argoproj.io/sync-options: Prune=false
+type: addons.cluster.x-k8s.io/resource-set
+stringData:
+  gateway-api.yaml: |
+    # gateway.networking.k8s.io_httproutes.yaml sha256:a89d17ff5ed060fa0eac015524f9252bb291f616412c13ac8cb952ed9c25c5ad
+---
+# Source: proxmox-kamaji-cluster/templates/gateway-api.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pc-c-abcd1234-gateway-api-listenersets
+  annotations:
+    # Schema lifecycle is independent of toggling the controller; never prune CRDs with live routes.
+    argocd.argoproj.io/sync-options: Prune=false
+type: addons.cluster.x-k8s.io/resource-set
+stringData:
+  gateway-api.yaml: |
+    # gateway.networking.k8s.io_listenersets.yaml sha256:b81f1771dcd96dfb3bb500e07dafef79a2aa58c4a9b4b366d54ca29e8ecccb5e
+---
+# Source: proxmox-kamaji-cluster/templates/gateway-api.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pc-c-abcd1234-gateway-api-referencegrants
+  annotations:
+    # Schema lifecycle is independent of toggling the controller; never prune CRDs with live routes.
+    argocd.argoproj.io/sync-options: Prune=false
+type: addons.cluster.x-k8s.io/resource-set
+stringData:
+  gateway-api.yaml: |
+    # gateway.networking.k8s.io_referencegrants.yaml sha256:ff8db85aaacc91fb4096975afb5782540572bf2f04842a258094cd7f50c7f38a
+---
+# Source: proxmox-kamaji-cluster/templates/gateway-api.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pc-c-abcd1234-gateway-api-tcproutes
+  annotations:
+    # Schema lifecycle is independent of toggling the controller; never prune CRDs with live routes.
+    argocd.argoproj.io/sync-options: Prune=false
+type: addons.cluster.x-k8s.io/resource-set
+stringData:
+  gateway-api.yaml: |
+    # gateway.networking.k8s.io_tcproutes.yaml sha256:5d2891484c870865e9ae61402b412a8b81eea381fbb71fdc56406e533c9643f1
+---
+# Source: proxmox-kamaji-cluster/templates/gateway-api.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pc-c-abcd1234-gateway-api-tlsroutes
+  annotations:
+    # Schema lifecycle is independent of toggling the controller; never prune CRDs with live routes.
+    argocd.argoproj.io/sync-options: Prune=false
+type: addons.cluster.x-k8s.io/resource-set
+stringData:
+  gateway-api.yaml: |
+    # gateway.networking.k8s.io_tlsroutes.yaml sha256:b9277b755ee0f33dd245d3497ba842922ff2e2efe5070b0911e58d072d55ed9c
+---
+# Source: proxmox-kamaji-cluster/templates/gateway-api.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pc-c-abcd1234-gateway-api-udproutes
+  annotations:
+    # Schema lifecycle is independent of toggling the controller; never prune CRDs with live routes.
+    argocd.argoproj.io/sync-options: Prune=false
+type: addons.cluster.x-k8s.io/resource-set
+stringData:
+  gateway-api.yaml: |
+    # gateway.networking.k8s.io_udproutes.yaml sha256:a552a9aa3726367c392000a45d13e6ba07985117a5e6826364640bedfeb5e922
+---
+# Source: proxmox-kamaji-cluster/templates/gateway-api.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pc-c-abcd1234-gateway-api-vap-safeupgrades
+  annotations:
+    # Schema lifecycle is independent of toggling the controller; never prune CRDs with live routes.
+    argocd.argoproj.io/sync-options: Prune=false
+type: addons.cluster.x-k8s.io/resource-set
+stringData:
+  gateway-api.yaml: |
+    # gateway.networking.k8s.io_vap_safeupgrades.yaml sha256:66b1d7b2c392c0e4dd4b2950e2af62811f8288a65e50708e2b3d26d4433af84c
+---
+# Source: proxmox-kamaji-cluster/templates/lb-controller.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pc-c-abcd1234-lb-controller
+  labels:
+    app.kubernetes.io/name: proxcloud-lb-controller
+    proxcloud.io/cluster-id: pc-c-abcd1234
+spec:
+  replicas: 1
+  # One controller at a time: two would PUT the same state, Recreate skips the overlap.
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: proxcloud-lb-controller
+      proxcloud.io/cluster-id: pc-c-abcd1234
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: proxcloud-lb-controller
+        proxcloud.io/cluster-id: pc-c-abcd1234
+    spec:
+      # Nothing here talks to the services cluster's own API.
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532}
+      containers:
+        - name: lb-controller
+          image: "ghcr.io/mutex-solutions/proxcloud-api:v0.11.0"
+          command: ["/usr/local/bin/lb-controller"]
+          args: ["--gateway-url=https://192.0.2.7:8444", "--default=true",
+                 "--kubeconfig=/etc/tenant/kubeconfig", "--gateway-dir=/etc/lb-gateway"]
+          securityContext: {"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true,"seccompProfile":{"type":"RuntimeDefault"}}
+          resources: {requests: {cpu: 10m, memory: 32Mi}}
+          volumeMounts:
+            - {name: gateway, mountPath: /etc/lb-gateway, readOnly: true}
+            - {name: tenant, mountPath: /etc/tenant, readOnly: true}
+      volumes:
+        - name: gateway
+          secret:
+            secretName: pc-c-abcd1234-lb-gateway
+            items: [{key: token, path: token}, {key: ca.crt, path: ca.crt}]
+        - name: tenant
+          secret:
+            secretName: pc-c-abcd1234-kamaji-cp-admin-kubeconfig
+            # The control plane's in-cluster address; admin.conf names the LoadBalancer, which the API allowlist guards.
+            items: [{key: admin.svc, path: kubeconfig}]
+---
+# Source: proxmox-kamaji-cluster/templates/cluster.yaml
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: Cluster
+metadata:
+  name: pc-c-abcd1234
+  labels:
+    proxcloud.io/cluster-id: pc-c-abcd1234
+spec:
+  clusterNetwork:
+    pods:
+      cidrBlocks: ["10.244.0.0/16"]
+    services:
+      cidrBlocks: ["10.96.0.0/12"]
+  controlPlaneRef:
+    apiGroup: controlplane.cluster.x-k8s.io
+    kind: KamajiControlPlane
+    name: pc-c-abcd1234-kamaji-cp
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: ProxmoxCluster
+    name: pc-c-abcd1234
+---
+# Source: proxmox-kamaji-cluster/templates/addons.yaml
+apiVersion: addons.cluster.x-k8s.io/v1beta2
+kind: ClusterResourceSet
+metadata:
+  name: pc-c-abcd1234-tenant-config
+spec:
+  clusterSelector:
+    matchLabels:
+      proxcloud.io/cluster-id: pc-c-abcd1234
+  strategy: Reconcile
+  resources:
+    - {kind: Secret, name: pc-c-abcd1234-metallb-config}
+    - {kind: Secret, name: example-csi-config}
+---
+# Source: proxmox-kamaji-cluster/templates/gateway-api.yaml
+apiVersion: addons.cluster.x-k8s.io/v1beta2
+kind: ClusterResourceSet
+metadata:
+  name: pc-c-abcd1234-gateway-api
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  clusterSelector:
+    matchLabels:
+      proxcloud.io/cluster-id: pc-c-abcd1234
+  strategy: Reconcile
+  resources:
+    - kind: Secret
+      name: pc-c-abcd1234-gateway-api-backendtlspolicies
+    - kind: Secret
+      name: pc-c-abcd1234-gateway-api-gatewayclasses
+    - kind: Secret
+      name: pc-c-abcd1234-gateway-api-gateways
+    - kind: Secret
+      name: pc-c-abcd1234-gateway-api-grpcroutes
+    - kind: Secret
+      name: pc-c-abcd1234-gateway-api-httproutes
+    - kind: Secret
+      name: pc-c-abcd1234-gateway-api-listenersets
+    - kind: Secret
+      name: pc-c-abcd1234-gateway-api-referencegrants
+    - kind: Secret
+      name: pc-c-abcd1234-gateway-api-tcproutes
+    - kind: Secret
+      name: pc-c-abcd1234-gateway-api-tlsroutes
+    - kind: Secret
+      name: pc-c-abcd1234-gateway-api-udproutes
+    - kind: Secret
+      name: pc-c-abcd1234-gateway-api-vap-safeupgrades
+---
+# Source: proxmox-kamaji-cluster/templates/addons.yaml
+apiVersion: addons.cluster.x-k8s.io/v1alpha1
+kind: HelmChartProxy
+metadata:
+  name: pc-c-abcd1234-cilium
+spec:
+  clusterSelector:
+    matchLabels:
+      proxcloud.io/cluster-id: pc-c-abcd1234
+  repoURL: https://helm.cilium.io
+  chartName: cilium
+  version: "1.18.16"
+  namespace: kube-system
+  releaseName: cilium
+  options:
+    wait: false
+    timeout: 10m
+    install:
+      createNamespace: true
+  valuesTemplate: "{\"bandwidthManager\":{\"enabled\":false},\"cni\":{\"customConf\":false},\"hubble\":{\"enabled\":false},\"ipam\":{\"mode\":\"kubernetes\"},\"kubeProxyReplacement\":false,\"operator\":{\"replicas\":1},\"routingMode\":\"tunnel\",\"tunnelProtocol\":\"vxlan\"}"
+---
+# Source: proxmox-kamaji-cluster/templates/addons.yaml
+apiVersion: addons.cluster.x-k8s.io/v1alpha1
+kind: HelmChartProxy
+metadata:
+  name: pc-c-abcd1234-proxmoxcsi
+spec:
+  clusterSelector:
+    matchLabels:
+      proxcloud.io/cluster-id: pc-c-abcd1234
+  repoURL: oci://ghcr.io/sergelogvinov/charts
+  chartName: proxmox-csi-plugin
+  version: "0.5.15"
+  namespace: csi-proxmox
+  releaseName: proxmoxcsi
+  options:
+    wait: false
+    timeout: 10m
+    install:
+      createNamespace: true
+  valuesTemplate: "{\"existingConfigSecret\":\"proxmox-csi-plugin\",\"node\":{\"tolerations\":[{\"operator\":\"Exists\"}]},\"replicaCount\":1,\"storageClass\":[{\"annotations\":{\"storageclass.kubernetes.io/is-default-class\":\"true\"},\"fstype\":\"ext4\",\"name\":\"std\",\"reclaimPolicy\":\"Delete\",\"storage\":\"local-zfs\"}]}"
+---
+# Source: proxmox-kamaji-cluster/templates/addons.yaml
+apiVersion: addons.cluster.x-k8s.io/v1alpha1
+kind: HelmChartProxy
+metadata:
+  name: pc-c-abcd1234-metallb
+spec:
+  clusterSelector:
+    matchLabels:
+      proxcloud.io/cluster-id: pc-c-abcd1234
+  repoURL: https://metallb.github.io/metallb
+  chartName: metallb
+  version: "0.16.2"
+  namespace: metallb-system
+  releaseName: metallb
+  options:
+    wait: false
+    timeout: 10m
+    install:
+      createNamespace: true
+  valuesTemplate: "{\"frrk8s\":{\"enabled\":false},\"loadBalancerClass\":\"proxcloud.io/internal\",\"speaker\":{\"frr\":{\"enabled\":false}}}"
+---
+# Source: proxmox-kamaji-cluster/templates/addons.yaml
+apiVersion: addons.cluster.x-k8s.io/v1alpha1
+kind: HelmChartProxy
+metadata:
+  name: pc-c-abcd1234-metricsserver
+spec:
+  clusterSelector:
+    matchLabels:
+      proxcloud.io/cluster-id: pc-c-abcd1234
+  repoURL: https://kubernetes-sigs.github.io/metrics-server
+  chartName: metrics-server
+  version: "3.13.0"
+  namespace: kube-system
+  releaseName: metricsserver
+  options:
+    wait: false
+    timeout: 10m
+    install:
+      createNamespace: true
+  valuesTemplate: "{\"args\":[\"--kubelet-insecure-tls\"]}"
+---
+# Source: proxmox-kamaji-cluster/templates/addons.yaml
+apiVersion: addons.cluster.x-k8s.io/v1alpha1
+kind: HelmChartProxy
+metadata:
+  name: pc-c-abcd1234-nginxgatewayfabric
+spec:
+  clusterSelector:
+    matchLabels:
+      proxcloud.io/cluster-id: pc-c-abcd1234
+  repoURL: oci://ghcr.io/nginx/charts
+  chartName: nginx-gateway-fabric
+  version: "2.8.1"
+  namespace: nginx-gateway
+  releaseName: nginxgatewayfabric
+  options:
+    wait: true
+    timeout: 10m
+    install:
+      createNamespace: true
+  valuesTemplate: "{\"gateways\":[],\"nginx\":{\"service\":{\"externalTrafficPolicy\":\"Local\",\"type\":\"LoadBalancer\"}},\"nginxGateway\":{\"gatewayClassName\":\"nginx\",\"gatewayControllerName\":\"gateway.nginx.org/nginx-gateway-controller\",\"productTelemetry\":{\"enable\":false}}}"
+---
+# Source: proxmox-kamaji-cluster/templates/cluster.yaml
+apiVersion: controlplane.cluster.x-k8s.io/v1alpha2
+kind: KamajiControlPlane
+metadata:
+  name: pc-c-abcd1234-kamaji-cp
+spec:
+  dataStoreName: default
+  replicas: 1
+  version: "v1.35.10"
+  admissionControllers: ["CertificateApproval","CertificateSigning","CertificateSubjectRestriction","DefaultIngressClass","DefaultStorageClass","DefaultTolerationSeconds","LimitRanger","MutatingAdmissionWebhook","NamespaceLifecycle","NodeRestriction","PersistentVolumeClaimResize","Priority","ResourceQuota","RuntimeClass","ServiceAccount","StorageObjectInUseProtection","TaintNodesByCondition","ValidatingAdmissionWebhook"]
+  addons:
+    coreDNS: {}
+    kubeProxy: {}
+    konnectivity: {}
+  kubelet:
+    cgroupfs: systemd
+    preferredAddressTypes: [InternalIP, Hostname]
+  network:
+    serviceType: LoadBalancer
+---
+# Source: proxmox-kamaji-cluster/templates/node-groups.yaml
+apiVersion: bootstrap.cluster.x-k8s.io/v1beta2
+kind: KubeadmConfigTemplate
+metadata:
+  name: pc-c-abcd1234-workers-pve1-c89b099b
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  template:
+    spec: {"joinConfiguration":{"nodeRegistration":{"kubeletExtraArgs":[{"name":"provider-id","value":"proxmox://'{{ ds.meta_data.instance_id }}'"},{"name":"node-labels","value":"proxcloud.io/node-group=workers,topology.kubernetes.io/region=example,topology.kubernetes.io/zone=pve1"}],"name":"{{ local_hostname }}"}}}
+---
+# Source: proxmox-kamaji-cluster/templates/node-groups.yaml
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: MachineDeployment
+metadata:
+  name: pc-c-abcd1234-workers-pve1
+  labels:
+    cluster.x-k8s.io/cluster-name: pc-c-abcd1234
+    proxcloud.io/node-group: workers
+spec:
+  clusterName: pc-c-abcd1234
+  replicas: 1
+  selector:
+    matchLabels:
+      cluster.x-k8s.io/cluster-name: pc-c-abcd1234
+      proxcloud.io/machine-deployment: pc-c-abcd1234-workers-pve1
+  template:
+    metadata:
+      labels:
+        cluster.x-k8s.io/cluster-name: pc-c-abcd1234
+        proxcloud.io/machine-deployment: pc-c-abcd1234-workers-pve1
+        proxcloud.io/node-group: workers
+    spec:
+      clusterName: pc-c-abcd1234
+      deletion: {nodeDeletionTimeoutSeconds: 1800}
+      version: "v1.35.10"
+      bootstrap:
+        configRef:
+          apiGroup: bootstrap.cluster.x-k8s.io
+          kind: KubeadmConfigTemplate
+          name: pc-c-abcd1234-workers-pve1-c89b099b
+      infrastructureRef:
+        apiGroup: infrastructure.cluster.x-k8s.io
+        kind: ProxmoxMachineTemplate
+        name: pc-c-abcd1234-workers-pve1-3abab8d8
+---
+# Source: proxmox-kamaji-cluster/templates/cluster.yaml
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha2
+kind: ProxmoxCluster
+metadata:
+  name: pc-c-abcd1234
+spec:
+  # The control plane is Kamaji's: CAPMOX must not wait for or check an endpoint of its own.
+  externalManagedControlPlane: true
+  credentialsRef:
+    name: example-cloud-config
+    namespace: pc-p1
+  ipv4Config:
+    addresses: ["192.0.2.200-192.0.2.215"]
+    gateway: 192.0.2.1
+    prefix: 24
+  dnsServers: ["192.0.2.53"]
+---
+# Source: proxmox-kamaji-cluster/templates/node-groups.yaml
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha2
+kind: ProxmoxMachineTemplate
+metadata:
+  name: pc-c-abcd1234-workers-pve1-3abab8d8
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  template:
+    spec: {"allowedNodes":["pve1"],"checks":{"skipCloudInitStatus":true},"disks":{"bootVolume":{"disk":"scsi0","sizeGb":30}},"format":"raw","full":true,"memoryMiB":2048,"network":{"networkDevices":[{"bridge":"vexample","model":"virtio","name":"net0"}]},"numCores":2,"numSockets":1,"pool":"pc-example","sourceNode":"pve1","storage":"local-zfs","tags":["proxcloud"],"templateID":9210}

@@ -264,8 +264,10 @@ was down.
 
 - **`--cluster-gateway <address>`** serves the gateway listener of the managed clusters' controllers:
   the call of a cluster's load balancer controller (`PUT /lb/v1/state`), and the CSI gateway. It is
-  for v0.11.0's load balancers of tenant clusters, whose controller comes with a later change of the
-  release; block volumes stay off on this stack, as no gateway token is registered. `<address>` is
+  for v0.11.0's load balancers of tenant clusters, whose controller (cluster chart 0.1.17) runs this
+  API's own image: the file sets `PROXCLOUD_LB_CONTROLLER_IMAGE` to
+  `ghcr.io/mutex-solutions/proxcloud-api:<installed version>`. Block volumes stay off on this stack,
+  as no gateway token is registered. `<address>` is
   an IPv4 address of this host that the platform cluster's nodes reach; the script refuses anything
   else, `0.0.0.0` included. It writes `CLUSTER_GATEWAY_ADDRESS` and adds
   `compose.cluster-gateway.yaml` to `COMPOSE_FILE` in `.env`: the API listens on 8444, Docker

@@ -87,6 +87,8 @@ type Handler struct {
 	csiMigrate CSIMigrator
 	// workerFirewall reads and switches a cluster's worker firewall (nil → 501).
 	workerFirewall WorkerFirewall
+	// lbEnable gives a cluster its load balancer controller in class-only mode (nil → 501).
+	lbEnable LBEnabler
 	// pveFlavors is the Proxmox flavor catalog (nil in tests → the surface 503s).
 	pveFlavors *pveflavor.Repo
 	pay        *billing.PayService // bill record-payment (nil → 501)

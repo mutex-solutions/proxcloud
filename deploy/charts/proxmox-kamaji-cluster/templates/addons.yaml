@@ -31,7 +31,14 @@ replicas (the chart's top-level replicaCount; it has no controller.replicaCount)
 {{- end }}
 {{- $speaker := dict "frr" (dict "enabled" false) }}
 {{- with .Values.proxmox.metallb.speakerTolerations }}{{- $_ := set $speaker "tolerations" . }}{{- end }}
-{{- $proxies = append $proxies (dict "key" "metallb" "ns" "metallb-system" "values" (dict "speaker" $speaker "frrk8s" (dict "enabled" false))) }}
+{{- $metallb := dict "speaker" $speaker "frrk8s" (dict "enabled" false) }}
+{{- /* With the product load balancer as the default (lb-controller.yaml, loadBalancer.default, new clusters only), MetalLB
+serves only class proxcloud.io/internal: a private address of the tenant network on request. A Service's class cannot
+change, so this is never turned on for an existing cluster: its MetalLB Services keep their addresses (class-only mode).
+NGINX Gateway Fabric's Service class is left as it is in both modes. */ -}}
+{{- $lb := .Values.loadBalancer | default dict }}
+{{- if and $lb.secretName $lb.default }}{{- $_ := set $metallb "loadBalancerClass" "proxcloud.io/internal" }}{{- end }}
+{{- $proxies = append $proxies (dict "key" "metallb" "ns" "metallb-system" "values" $metallb) }}
 {{- with .Values.proxmox.rwx }}{{- if .server }}
 {{- $nfsClass := dict "create" true "name" .storageClassName "reclaimPolicy" "Delete" "volumeBindingMode" "Immediate" "parameters" (dict "server" .server "share" .share "mountPermissions" "0777") "mountOptions" (list "nfsvers=4.1") }}
 {{- if not $classes }}{{- $_ := set $nfsClass "annotations" (dict "storageclass.kubernetes.io/is-default-class" "true") }}{{- end }}

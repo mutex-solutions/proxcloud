@@ -838,8 +838,8 @@ A PersistentVolume on a node-local store (`zfspool`, `lvmthin`) carries its PVE 
 workers of that node; on a shared store (NFS, RBD) it follows the pod to any worker.
 
 **Load balancers of a cluster's Services: the gateway side.** The same listener serves one more call, for a cluster's
-load balancer controller. The controller and its chart come with a later change of v0.11.0: until then nothing calls it
-and no cluster holds the credential. `PUT /lb/v1/state` (`internal/cloud/lbgw`, `cmd/api` sends `/lb/v1/` there and every
+load balancer controller (below; chart 0.1.17, which no BOM pins yet, so no cluster holds the credential until one
+does or an operator enables the controller). `PUT /lb/v1/state` (`internal/cloud/lbgw`, `cmd/api` sends `/lb/v1/` there and every
 other path to the CSI gateway, unchanged) takes `Authorization: PVEAPIToken=lb@proxcloud!<clusterId>=<secret>`, the
 header `ProxCloud-LB-Protocol: 1` and a body of at most 64 KiB: the Services of type LoadBalancer the controller owns
 (uid, ports with protocol, port and node port, `externalTrafficPolicy`, `healthCheckNodePort`,
@@ -878,8 +878,71 @@ call for its own cluster, and minting it again rotates it.
 - On Docker Compose the listener is opt-in, with a certificate the API makes itself
   (`proxcloud-up.sh install --cluster-gateway <address>`, [managed-services.md](managed-services.md#9-limits-on-the-compose-install)).
 
-Not run on a lab: any of it (no controller calls it yet). Tested against Postgres and a fake Proxmox
-(`TestLBClusterStateConverges`).
+Not run on a lab: any of it. Tested against Postgres and a fake Proxmox (`TestLBClusterStateConverges`).
+
+**Load balancers of a cluster's Services: the controller.** Each cluster that has one runs its load balancer
+controller (`cmd/lb-controller`) on the services cluster next to its control plane, as the proxmox-csi controller:
+Deployment `<cluster>-lb-controller` in `pc-<project>` (cluster chart 0.1.17, `templates/lb-controller.yaml`), one
+replica, the CSI controller's security context, no service account token. It reads the tenant API through the Kamaji
+admin kubeconfig (`admin.svc`, the in-cluster address, so the cluster's API allowlist does not apply) and calls the
+gateway with the token of `<cluster>-lb-gateway`, a Secret the portal writes next to the Application (token and the
+gateway's CA; the Application names it and never carries it). Its NetworkPolicy lets it reach DNS, the control planes
+of its namespace on 6443 and the gateway's address and port (any address when the gateway URL names a host), nothing
+else: it reads objects the tenant writes from inside the cluster that also holds kamaji-etcd. The binary is the
+second one of the `proxcloud-api` image: no image, tag or workflow of its own.
+
+- Every 10 s it lists every Service and Node and PUTs the whole state: a poll, not a watch, so a PUT never comes from a
+  half-filled cache (a watch when a cluster has hundreds of Services). It owns a Service of type LoadBalancer of class
+  `proxcloud.io/lb`, and in default mode also one without a class; never `proxcloud.io/internal` or another class.
+  Nodes labelled `node.kubernetes.io/exclude-from-external-load-balancers` and nodes being deleted are left out; the
+  balancer's health check decides whether a node serves. The oldest Service is sent first, so a full balancer refuses
+  the newest.
+- An owned Service gets the finalizer `proxcloud.io/load-balancer` before it is first sent. A Service deleted, turned
+  into another type or of another class keeps it until a PUT without it is accepted, then loses it (and its address in
+  the status); while the gateway cannot be reached it stays `Terminating`, as with any cloud controller.
+- `status.loadBalancer.ingress` gets the address once the portal has one, `ipMode: Proxy` with the annotation
+  `proxcloud.io/lb-proxy-protocol: "true"` (in-cluster clients then go through the balancer too) and `VIP` otherwise.
+- The answers become Events on the Service, one per change: `EnsuringLoadBalancer`, `EnsuredLoadBalancer` with the
+  address, and a Warning with the gateway's reason (`UDPNotSupported`, `NoNodePort`, `TooManySourceRanges`,
+  `IPFamilyNotSupported`, `QuotaExceeded`, `PublicNetworkUnavailable`, `TooLarge`; for the whole request
+  `ControllerTooOld`, `ProjectNotEnabled`). `spec.loadBalancerIP` is ignored with a Warning `LoadBalancerIPIgnored`.
+- It sends `ProxCloud-LB-Protocol: 1`; a portal that needs a newer controller answers `ControllerTooOld`, and a chart
+  bump gives the cluster the portal's image.
+
+Modes. A **new** cluster gets the controller in **default** mode when every gate holds: this portal has the gateway's
+store, a gateway URL (`PROXCLOUD_CSI_GATEWAY_URL`) and the controller image (`PROXCLOUD_LB_CONTROLLER_IMAGE`, the API's
+own image: Compose sets it with `--cluster-gateway`, the installer chart with `api.csiGateway`), the Kubernetes
+provider pins chart 0.1.17 or later, the workers are the project's own (not `sharedWorkers`), and the provider's
+`config.cluster.loadBalancer` names a public network the project may use. Then MetalLB starts with
+`loadBalancerClass: proxcloud.io/internal` (a private address of the tenant network on request) and a Service without
+a class gets a public address of the product balancer. NGINX Gateway Fabric's data-plane Service has no class, so in
+default mode each Gateway takes a public address, the first one building the pair. When a gate does not hold the
+cluster is made as before (MetalLB alone) and the API log says which. An **existing** cluster keeps MetalLB as its
+default: the operator's action below adds the controller in **class-only** mode, where only class `proxcloud.io/lb`
+gets the product balancer and no MetalLB address moves (a Service's class cannot change while it is a LoadBalancer, so
+moving a Service is a delete and a create, with a new address). Switching an existing cluster to default mode is not
+offered, and nothing ever sets NGINX Gateway Fabric's class.
+
+```sh
+# Enable load balancer controller (class-only) on one existing cluster; again = a new credential and the portal's image
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "$API/api/v1/admin/service/<kubernetesProviderId>/k8s-clusters/<clusterId>/load-balancer"
+```
+
+It pins the cluster to the provider's chart version in one Application apply (refused below 0.1.17, and with the
+transition check of a chart bump), mints the credential and writes the Secret. Run again on a cluster that has a
+controller it mints a new credential (the old token stops at once; the running controller reads the new one when the
+Secret volume is updated) and sets the portal's image, keeping the cluster's mode. A gate that does not hold answers
+`409` and names it. The image is set at create, at this action and at a chart bump (`bump-chart`, **Apply platform
+update**), never by the provider sync: a portal upgrade restarts no controller, and a cluster on an older controller
+keeps working while `/lb/v1` stays compatible. A cluster with a controller is never moved below chart 0.1.17. The
+cluster's release revokes the credential (gateway side, above) and deletes the Secret with the cluster's others.
+
+Ships dark in v0.11.0 until the BOM pins chart 0.1.17. Not run on a lab. Tested: the reconcile against a fake tenant
+API and the gateway client against a TLS server (`cmd/lb-controller`), the chart's renders (goldens for default mode,
+class-only and off), the values, the Secret, the enable action and the bump (`internal/cloud/kamaji`), and the enable
+action against Postgres with a fake management cluster, the token passing the real gateway handler
+(`TestLBControllerEnable`). Not tested: the create path's mint end to end (its gates are, `TestKamajiLBGate`).
 
 **Moving a cluster onto the CSI gateway.** A cluster made by an earlier release with `csiSharedStores` keeps the
 tenant-side controller and its `csi@pve!<id>` token until an operator moves it, one cluster at a time:

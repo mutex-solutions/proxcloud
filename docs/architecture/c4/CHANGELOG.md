@@ -4,6 +4,25 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-21: the load balancer controller of managed clusters
+
+**What changed:** a new process on the services cluster, one per tenant cluster that has it: the load balancer
+controller (`cmd/lb-controller`), a second binary of the `proxcloud-api` image, deployed by cluster chart 0.1.17
+(`templates/lb-controller.yaml`) next to the cluster's control plane, as the proxmox-csi controller is. It reads the
+tenant API through the Kamaji admin kubeconfig and is the caller of the gateway's `PUT /lb/v1/state` (C2 row) with the
+cluster's credential from a Secret the portal writes (`<id>-lb-gateway`); its egress NetworkPolicy allows DNS, the
+control planes of its namespace and the gateway only. The portal mints the credential at a cluster's create when every
+gate holds (default mode: MetalLB serves only `proxcloud.io/internal`) and through the operator's "Enable load balancer
+controller" for an existing cluster (class-only, `internal/platform/admin` → `project.Handler.EnableClusterLB` →
+`kamaji.Service.EnableLBController`). The controller's image is `PROXCLOUD_LB_CONTROLLER_IMAGE`, written at create,
+enable and chart bump, never by the sync. No new container image; the BOM still pins chart 0.1.16, so it ships dark.
+
+**Why:** v0.11.0 plan, PR 3 (`run-1/v0110-lb-plan.md`, corrections C4, C11, C12): a Service of type LoadBalancer in a
+tenant cluster gets a public address of the product's balancer, with no portal credential in the tenant and no
+portal call into a tenant API its allowlist may shut.
+
+**Diagrams:** none (the C2 gateway row, the C3 "Managed K8s create on Proxmox" row and the C4.2a table's text).
+
 ## 2026-11-21: the gateway accepts a cluster's load balancer state
 
 **What changed:** the gateway listener of the API (C2, the CSI gateway row) serves a second call, `PUT /lb/v1/state`

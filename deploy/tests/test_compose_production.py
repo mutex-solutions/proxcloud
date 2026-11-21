@@ -254,6 +254,8 @@ class ComposeFileTests(unittest.TestCase):
         self.assertEqual(re.findall(r"(?m)^\s+- \"(.+)\"$", text), ["${CLUSTER_GATEWAY_ADDRESS:?run ./proxcloud-up.sh}:8444:8444"])
         self.assertNotIn("8081", text)  # never the management port
         self.assertIn('PROXCLOUD_CSI_GATEWAY_SELF_SIGNED: "true"', text)
+        # The load balancer controllers run the API's own image, at the installed version.
+        self.assertIn("PROXCLOUD_LB_CONTROLLER_IMAGE: ghcr.io/mutex-solutions/proxcloud-api:${PROXCLOUD_VERSION:?run ./proxcloud-up.sh}", text)
 
 
 class ReadmeTests(unittest.TestCase):
@@ -426,6 +428,7 @@ class ScriptDryRunTests(unittest.TestCase):
             env = api["environment"]
             self.assertEqual((env["PROXCLOUD_CSI_GATEWAY_ADDR"], env["PROXCLOUD_CSI_GATEWAY_URL"], env["PROXCLOUD_CSI_GATEWAY_SELF_SIGNED"]),
                              (":8444", "https://192.0.2.7:8444", "true"))
+            self.assertRegex(env["PROXCLOUD_LB_CONTROLLER_IMAGE"], r"^ghcr\.io/mutex-solutions/proxcloud-api:v\d+\.\d+\.\d+")
             self.assertEqual([(v["type"], v["target"]) for v in api["volumes"]], [("volume", "/var/lib/proxcloud/gateway")])
             self.assertEqual(sorted((p["published"], p["target"]) for p in model["services"]["traefik-internal"]["ports"]),
                              [("443", 443), ("80", 80)])

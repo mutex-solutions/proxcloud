@@ -61,6 +61,9 @@ func BuildValues(cfg Config, spec ClusterSpec) map[string]any {
 		"cloudCredentialsSecretName": CloudSecretName(spec.ID),
 	}
 	values["proxmox"] = infraValues(d, spec)
+	if lb := spec.Infra.LoadBalancer; lb != nil {
+		values["loadBalancer"] = LBValues(spec.ID, *lb)
+	}
 	if oidc := OIDCValues(spec.OIDC); oidc != nil {
 		values["oidc"] = oidc
 	}
@@ -120,6 +123,18 @@ func infraValues(d ClusterDefaults, spec ClusterSpec) map[string]any {
 		out["rwx"] = map[string]any{"server": in.RWXServer, "share": in.RWXShare}
 	}
 	return out
+}
+
+// LBValues renders the chart's loadBalancer block (from LBControllerChartVersion). The credential stays out: the block
+// names the Secret the create path or EnableLBController writes.
+func LBValues(clusterID string, lb LBController) map[string]any {
+	return map[string]any{
+		"secretName":           LBGatewaySecretName(clusterID),
+		"kubeconfigSecretName": AdminKubeconfigSecretName(clusterID),
+		"image":                lb.Image,
+		"gatewayURL":           lb.GatewayURL,
+		"default":              lb.Default,
+	}
 }
 
 func anySlice(in []string) []any {
