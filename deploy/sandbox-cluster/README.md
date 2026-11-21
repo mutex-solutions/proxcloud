@@ -11,7 +11,7 @@ Design, lab measurements and the threat model: [`docs/managed-sandbox.md`](../..
 | File | What it does |
 |---|---|
 | `cilium-node-config.yaml` | Cilium socket LB limited to the host namespace on this cluster's nodes. A no-op while the chart runs Cilium without kube-proxy replacement; it keeps gVisor DNS working if that ever changes |
-| `node-setup.yaml` | DaemonSet: installs gVisor (`runsc`, platform `systrap`, `allow-suid` unless `RUNSC_ALLOW_SUID=false` so `sudo` works in sandboxes; security effect in docs/managed-sandbox.md §1.4) on every node; refuses a node with IPv6 |
+| `node-setup.yaml` | DaemonSet: installs gVisor (`runsc` from the release's package file, pinned by version and SHA256; platform `systrap`, `allow-suid` unless `RUNSC_ALLOW_SUID=false` so `sudo` works in sandboxes; security effect in docs/managed-sandbox.md §1.4) on every node; refuses a node with IPv6 |
 | `telemetry.yaml` | SB10: narrowly scoped nodes/stats collector identity, hostNetwork non-root collector with only public kubelet serving chain; dedicated ConfigMap samples and portal read role. No nodes/proxy. Apply before node-setup |
 | `rotation-rbac.example.yaml` | Optional separate management credential for exact named worker MachineDeployments; rotation defaults off. Do not bulk-apply this example |
 | `runtimeclass.yaml` | RuntimeClass `gvisor` |

@@ -2,9 +2,16 @@
 # node. Runs the script below in the host's namespaces (nsenter into PID 1), idempotently, then idles.
 # A config change restarts containerd once; running containers survive that (shim v2).
 #
-# Why a DaemonSet and not a node image: the cluster chart's node images (image-builder) ship a
-# containerd `gvisor` runtime handler and the conf.d import, but no runsc binary. Measured on the lab:
-# 49 s per node, and it survives a hard reset (docs/managed-sandbox.md §0.1, §0.7).
+# Why a DaemonSet and not a node image: the cluster chart's node images (image-builder v0.1.55, containerd 2.3.2, on
+# Ubuntu 24.04 and 26.04) ship the conf.d import (`imports = ["/etc/containerd/conf.d/*.toml"]`, config version 3) but
+# neither runsc nor a `gvisor` handler (image-builder's containerd_gvisor_runtime is off): this file writes both.
+# Measured on the lab: 49 s per node, and it survives a hard reset (docs/managed-sandbox.md §0.1, §0.7).
+#
+# runsc: the gVisor release's own package from its versioned pool path, checked against RUNSC_SHA256. Not the apt
+# suite `release`: it lists the newest release only, so a pinned version drops out of it with the next weekly
+# release and a new node can no longer install it. The pool file stays (20261102.0's is still served). RUNSC_SHA256
+# is the SHA256 the suite's signed Packages index gave for that file: the amd64 package, which carries runsc and
+# containerd-shim-runsc-v1.
 #
 # systrap: needs no /dev/kvm inside the worker, which a nested or cloud VM may not have. Size the
 # smallest sandbox at 1 vCPU: under systrap the sentry spends the pod's own CFS quota (§0.2).
@@ -25,7 +32,7 @@
 # node-restriction.kubernetes.io/proxcloud-prepull-runtime=v1 to eligible nodes.
 # Remove that label before downgrading the runtime. No rollout is performed by this file edit.
 # Not here yet: the NVIDIA toolkit + nvproxy branch for GPU nodes (SB9).
-# ponytail: setup runs once per pod start; bumping RUNSC_VERSION = edit + rollout restart.
+# ponytail: setup runs once per pod start; bumping runsc = RUNSC_VERSION and RUNSC_SHA256 together + rollout restart.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -49,11 +56,14 @@ data:
     fi
     before=$(cat /etc/containerd/conf.d/*.toml /etc/containerd/runsc.toml 2>/dev/null | sha256sum || true)
     if [ "$(dpkg-query -W -f='${Version}' runsc 2>/dev/null || true)" != "$RUNSC_VERSION" ]; then
-      curl -fsSL https://gvisor.dev/archive.key | gpg --batch --yes --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
-      echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" \
-        > /etc/apt/sources.list.d/gvisor.list
-      apt-get update -qq
-      apt-get install -y -qq --allow-downgrades "runsc=$RUNSC_VERSION"
+      deb=$(mktemp)
+      trap 'rm -f "$deb"' EXIT
+      curl -fsSL -o "$deb" "https://storage.googleapis.com/gvisor/releases/pool/$RUNSC_VERSION/binary-amd64/runsc.deb"
+      echo "$RUNSC_SHA256  $deb" | sha256sum -c -
+      # confold: keep our runsc.toml (the package ships an example as a conffile); it is rewritten below anyway.
+      dpkg -i --force-confdef --force-confold "$deb"
+      # The apt source of earlier versions would let an upgrade move runsc off the pin.
+      rm -f /etc/apt/sources.list.d/gvisor.list /usr/share/keyrings/gvisor-archive-keyring.gpg
     fi
     mkdir -p /etc/containerd/conf.d
     cat > /etc/containerd/conf.d/10-gvisor.toml <<'T'
@@ -121,15 +131,16 @@ spec:
         env:
         - name: NODE_NAME
           valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
-        - {name: RUNSC_VERSION, value: "20261102.0"}
+        - {name: RUNSC_VERSION, value: "20261116.0"}
+        - {name: RUNSC_SHA256, value: "495796a56d811a43ea218bd0af3d89ea471df1cbd684edcb21c4a00356caeb1e"}
         - {name: RUNSC_PLATFORM, value: systrap}
         - {name: RUNSC_ALLOW_SUID, value: "true"}   # sudo in sandboxes; see setup.sh. Installer: sandbox.allow_suid
         command: [sh, -c]
         args:
         - |
           set -e
-          nsenter -t 1 -m -u -i -n -p -- env RUNSC_VERSION="$RUNSC_VERSION" RUNSC_PLATFORM="$RUNSC_PLATFORM" \
-            RUNSC_ALLOW_SUID="$RUNSC_ALLOW_SUID" bash -c "$(cat /setup/setup.sh)"
+          nsenter -t 1 -m -u -i -n -p -- env RUNSC_VERSION="$RUNSC_VERSION" RUNSC_SHA256="$RUNSC_SHA256" \
+            RUNSC_PLATFORM="$RUNSC_PLATFORM" RUNSC_ALLOW_SUID="$RUNSC_ALLOW_SUID" bash -c "$(cat /setup/setup.sh)"
           # Static CNI guard runs on the host, before any customer container starts.
           # tc is host iproute2; update the token/config without letting Cilium own/rewrite the chain.
           nsenter -t 1 -m -u -i -n -p -- bash -c 'command -v tc >/dev/null || (apt-get update -qq && apt-get install -y -qq iproute2)'

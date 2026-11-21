@@ -59,7 +59,7 @@ the EE Cilium guardrail, then packets from inside the sandbox.
 | CNI and LB | Cilium 1.18.16 and MetalLB 0.16.2 from the chart (`kubeProxyReplacement: false`, kube-proxy from Kamaji) |
 | CSI, NAS | none: `storageClasses: []`, no RWX dataset, no CSI token |
 | CAPMOX token | `capmox@pve!sbx0`, minted by hand (§0.4) |
-| gVisor | `runsc` 20261102.0 from the gVisor apt repo, platform `systrap`, installed by a `node-setup` DaemonSet |
+| gVisor | `runsc` 20261102.0 from the gVisor apt repo, platform `systrap`, installed by a `node-setup` DaemonSet (now 20261116.0 from its pinned package file, §1.1) |
 | agent-sandbox | v1.0.9 `sandbox-with-extensions.yaml`, the EE vendored copy (upstream file plus a three-line header, upstream sha256 `4bf9ee5558e9a663…`), server-side apply |
 | Guardrail | EE `network-policy.yaml`, label `proxcloud.io/tenant=true`, plus a port 25 deny |
 
@@ -197,7 +197,7 @@ into one, and were refused secrets. `kubectl auth can-i create pods/exec` answer
 | NVIDIA toolkit and nvproxy branch | left out | The lab has no GPU (SB9). |
 | Labels `…/tenant`, namespaces `…-system`, SA name | `proxcloud.io/tenant`, `sandbox-system`, `proxcloud-system/proxcloud` | Rebrand only. |
 | Guardrail without a port 25 rule | second `egressDeny` entry: `0.0.0.0/0` TCP 25 | Plan D13. Verified: 25 dropped, 587 open. |
-| Node image | the stock image-builder image already ships a `gvisor` runtime handler and `imports = ["/etc/containerd/conf.d/*.toml"]`, and no `runsc` | Same as EE's images, so `node-setup` works unchanged. No node image variant is needed for CPU nodes. |
+| Node image | the stock image-builder image (v0.1.55, containerd 2.3.2, Ubuntu 24.04 and 26.04) ships `imports = ["/etc/containerd/conf.d/*.toml"]` (config version 3) and neither a `gvisor` runtime handler (image-builder's `containerd_gvisor_runtime` is off) nor `runsc` | `node-setup` writes the handler in its drop-in `conf.d/10-gvisor.toml` and installs runsc, so no node image variant is needed for CPU nodes. |
 | CAPMOX writes the bootstrap ISO to the shared ISO store | the cluster token sees only the node-local `local` dir store, so the ISO goes there | See §0.6. |
 
 ### 0.6 Open questions answered
@@ -317,12 +317,23 @@ Other consequences:
 | Vnet | stage 55 | `sandbox.network.vnet` in an existing EVPN zone, subnet with SNAT and no DHCP, alias `proxcloud-sandbox` (no `st:` alias, so no project owns it) |
 | Cluster | stage 55, `templates/sandbox-cluster.yml.j2` | an ArgoCD Application `pc-sandbox` of `proxmox-kamaji-cluster` at this checkout's chart version (0.1.8), namespace `pc-sandbox`, no project label: no portal sync lists it. No CSI, no StorageClass, no NAS dataset. Node group `sandbox` for sandboxes; with a sandbox domain also `sandbox-system` for sandbox-proxy (§4.5) |
 | Release gate: NodeRestriction | stage 55 | the chart's `admissionControllers` include it; stage 55 reads the `KamajiControlPlane` and stops if it is missing |
-| Runtime, guardrail, identity | `deploy/sandbox-cluster/` (README has the order) | `cilium-node-config.yaml`, `node-setup.yaml` (runsc 20261102.0, systrap), `runtimeclass.yaml`, agent-sandbox v1.0.9 vendored, `network-policy.yaml` (private ranges and TCP 25 denied), `rbac.yaml` (`proxcloud-system/proxcloud`, no Secret access) |
+| Runtime, guardrail, identity | `deploy/sandbox-cluster/` (README has the order) | `cilium-node-config.yaml`, `node-setup.yaml` (runsc 20261116.0 from the release's package file, pinned by SHA256; systrap), `runtimeclass.yaml`, agent-sandbox v1.0.9 vendored, `network-policy.yaml` (private ranges and TCP 25 denied), `rbac.yaml` (`proxcloud-system/proxcloud`, no Secret access) |
 | Release gate: IPv4 only | `node-setup.yaml`, `check-ipv4-only.sh`, stage 55 | node-setup refuses a host with a global IPv6 address or an IPv6 default route; the check wants Cilium `enable-ipv6=false`, no IPv6 node address or pod CIDR, and node-setup Ready everywhere. Stage 55 stops before agent-sandbox and the guardrail when it fails |
 | Layer 0: isolation drops | `internal/cloud/pve/network.go`, provider `network.sandboxCidrs` (stage 60 writes it) | section 1.2 |
 
 Not in SB2a: the per-NIC VM firewall with `ipfilter` and the `unsecured` taint (SB2b), a dedicated SNAT address
 (SB2b), the `sandbox-system` node group, `sandbox-proxy` and TLS (SB4, §4.5), the envd runtime image (SB5).
+
+gVisor on a node: `node-setup` downloads the release's own package
+`https://storage.googleapis.com/gvisor/releases/pool/<RUNSC_VERSION>/binary-amd64/runsc.deb` (runsc and
+containerd-shim-runsc-v1), checks it against `RUNSC_SHA256` and installs it with `dpkg -i`, only when the installed
+version differs. It no longer uses the apt suite `release`: that suite lists the newest release only, so a pinned
+version drops out with the next weekly release and a new node cannot install it (20261102.0 did so). The versioned
+pool file stays. The `gvisor` handler comes from node-setup's drop-in `/etc/containerd/conf.d/10-gvisor.toml`, not
+from the node image. To move to another release, take the `SHA256` of its pool file from the suite's index
+`dists/release/main/binary-amd64/Packages` (its `Release` file is signed with `https://gvisor.dev/archive.key`),
+check it against the downloaded file, set `RUNSC_VERSION` and `RUNSC_SHA256` together (and the pins in
+`deploy/tests/test_sandbox_node_setup.py`) and restart the DaemonSet.
 
 ### 1.2 Layer 0: the sandbox network in the isolation rules
 
