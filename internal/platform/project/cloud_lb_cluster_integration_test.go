@@ -218,6 +218,38 @@ func TestLBClusterStateConverges(t *testing.T) {
 		t.Fatalf("answer over the quota: %+v", ans.Services)
 	}
 
+	// Another project's cluster naming c1's workers: none is a member of its own balancer, and c1's balancer is
+	// untouched by its converge (everything comes from the credential, never from the request).
+	if _, err := db.C("project").InsertOne(ctx, pgdoc.M{"_id": "p2", "name": "p2", "status": StatusEnabled, "services": []any{}}); err != nil {
+		t.Fatal(err)
+	}
+	other := lbgw.Credential{ID: "c3", ProjectID: "p2", ComputeServiceID: "svc", KubernetesServiceID: "k8s", NetworkID: "net-2", Vnet: "v2"}
+	if _, _, err := store.MintCredential(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	vipsBefore := slices.Clone(read().VIPs)
+	ans, err = h.LBClusterState(ctx, &other, nil, nodes)
+	if err != nil || len(ans.Nodes) != len(nodes) {
+		t.Fatalf("another project's cluster: %+v %v", ans, err)
+	}
+	for _, n := range ans.Nodes {
+		if n.Reason != lbgw.ReasonNotAWorker {
+			t.Fatalf("another project's cluster accepted %s: %+v", n.Address, n)
+		}
+	}
+	if st, _ := store.State(ctx, "c3"); st == nil || len(st.Nodes) != 0 {
+		t.Fatalf("another project's cluster stored nodes: %+v", st)
+	}
+	if err := h.lbClusterPass(ctx, "c3"); err != nil {
+		t.Fatal(err)
+	}
+	if got := read().VIPs; !slices.Equal(got, vipsBefore) || len(owned()) != 2 {
+		t.Fatalf("c3's converge changed c1's balancer: %v -> %v, owned %v", vipsBefore, got, owned())
+	}
+	if cr, _ := h.cloud.FindByServiceIDAndExternalID(ctx, "svc", lbClusterExternalID("c3")); cr != nil {
+		t.Fatal("a cluster with no Service got a balancer row")
+	}
+
 	// A suspended project, and one being deleted: refused, and nothing stored.
 	before, _ := store.State(ctx, "c1")
 	for _, status := range []string{StatusDisabled, StatusScheduledForDeletion} {
