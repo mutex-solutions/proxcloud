@@ -44,6 +44,15 @@ control-plane-kubeadm.yaml has the reason for the value. Cluster API copies it t
 place and leaves it out of the rollout decision (core/reconcilers/machineset/machineset_controller.go:654-673,
 core/reconcilers/machinedeployment/mdutil/util.go:416-442), and it is in no machine or bootstrap template: no machine
 is replaced for it. A negative value renders nothing, which is the render of 0.1.15.
+
+pool, addresses and dnsServers (from chart 0.1.18) give one node group a Proxmox pool, an address range and DNS servers
+of its own: the platform's sandbox group, whose VMs the sync fences by their pool and whose range is a sandbox network
+of the isolation rules. pool replaces proxmox.pool in the group's machine template. addresses renders an
+InClusterIPPool <release>-<group> (the network's prefix and gateway) and points net0 at it with defaultIPv4 false, so a
+machine takes one address from the group's range and none from the cluster's (CAPMOX v0.9.2 claims the cluster pool
+only for a device with defaultIPv4, and defaults it to true only when no device sets it). dnsServers goes on net0 and
+replaces the cluster's for that group. Each key is part of the group's machine template: setting it replaces the
+group's machines. A group without them renders what 0.1.17 rendered, template names included.
 */ -}}
 {{- $root := . }}
 {{- $net := .Values.proxmox.network }}
@@ -94,10 +103,15 @@ is replaced for it. A negative value renders nothing, which is the render of 0.1
 {{- if lt $i (mod $count $n) }}{{- $replicas = add1 $replicas }}{{- end }}
 {{- if $placement }}{{- $replicas = int (get $placement $node | default 0) }}{{- end }}
 {{- $base := printf "%s-%s-%s" $root.Release.Name $ng.name $node }}
-{{- $machine := dict "sourceNode" $node "templateID" (int $vmid) "allowedNodes" (list $node) "storage" $root.Values.proxmox.storage "format" "raw" "full" true "pool" $root.Values.proxmox.pool "checks" (dict "skipCloudInitStatus" true) "tags" $ng.machineTags "numSockets" 1 "numCores" (int $ng.machineCores) "memoryMiB" (int $ng.machineMemoryMiB) "disks" (dict "bootVolume" (dict "disk" "scsi0" "sizeGb" (int $ng.machineRootVolume.diskSize))) }}
+{{- $machine := dict "sourceNode" $node "templateID" (int $vmid) "allowedNodes" (list $node) "storage" $root.Values.proxmox.storage "format" "raw" "full" true "pool" ($ng.pool | default $root.Values.proxmox.pool) "checks" (dict "skipCloudInitStatus" true) "tags" $ng.machineTags "numSockets" 1 "numCores" (int $ng.machineCores) "memoryMiB" (int $ng.machineMemoryMiB) "disks" (dict "bootVolume" (dict "disk" "scsi0" "sizeGb" (int $ng.machineRootVolume.diskSize))) }}
 {{- $device := dict "name" "net0" "bridge" $net.bridge "model" "virtio" }}
 {{- if $net.mtu }}{{- $_ := set $device "linkMtu" (int $net.mtu) }}{{- $_ := set $device "mtu" 1 }}{{- end }}
 {{- if $net.vlan }}{{- $_ := set $device "vlan" (int $net.vlan) }}{{- end }}
+{{- if $ng.addresses }}
+{{- $_ := set $device "defaultIPv4" false }}
+{{- $_ := set $device "ipPoolRef" (list (dict "apiGroup" "ipam.cluster.x-k8s.io" "kind" "InClusterIPPool" "name" (printf "%s-%s" $root.Release.Name $ng.name))) }}
+{{- end }}
+{{- with $ng.dnsServers }}{{- $_ := set $device "dnsServers" . }}{{- end }}
 {{- $_ := set $machine "network" (dict "networkDevices" (list $device)) }}
 {{- $mtName := printf "%s-%s" $base (toJson $machine | sha256sum | trunc 8) }}
 {{- $labels := dict "proxcloud.io/node-group" $ng.name "topology.kubernetes.io/region" $root.Values.proxmox.region "topology.kubernetes.io/zone" $node }}
@@ -175,6 +189,20 @@ spec:
         apiGroup: infrastructure.cluster.x-k8s.io
         kind: ProxmoxMachineTemplate
         name: {{ $mtName }}
+{{- end }}
+{{- with $ng.addresses }}
+---
+apiVersion: ipam.cluster.x-k8s.io/v1alpha2
+kind: InClusterIPPool
+metadata:
+  name: {{ printf "%s-%s" $root.Release.Name $ng.name }}
+  labels:
+    cluster.x-k8s.io/cluster-name: {{ $root.Release.Name }}
+    proxcloud.io/node-group: {{ $ng.name }}
+spec:
+  addresses: {{ toJson . }}
+  prefix: {{ int $net.prefix }}
+  gateway: {{ $net.gateway }}
 {{- end }}
 {{- $guard := 0 }}
 {{- if gt (int $startup) 0 }}{{- $guard = min (int $mhc.maxUnhealthy) (sub $count 1) }}{{- end }}
