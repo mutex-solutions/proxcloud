@@ -4,6 +4,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
@@ -96,5 +97,45 @@ func TestComposeListenerWithoutTokenGetsNoStorageClass(t *testing.T) {
 	}
 	if classes := kamajiTenantClasses(gateway, kamaji.ClusterDefaults{}, []kamaji.StorageClass{{Name: "local", Storage: "local-lvm"}}); len(classes) != 0 {
 		t.Fatalf("classes %v", classes)
+	}
+}
+
+// A cluster gets the load balancer controller only when every gate holds, and the first one that does not is named:
+// that text is what the operator's "Enable load balancer controller" answers, and a create without one is as before.
+func TestKamajiLBGate(t *testing.T) {
+	k8s := &externalservice.ExternalService{ID: "k8s", Config: map[string]any{"cluster": map[string]any{
+		"loadBalancer": map[string]any{"publicNetworkId": "vmbr1", "flavorId": "lb-small"}}}}
+	noLB := &externalservice.ExternalService{ID: "k8s-off", Config: map[string]any{"cluster": map[string]any{}}}
+	compute := &externalservice.ExternalService{ID: "pve", Config: map[string]any{"network": map[string]any{"publicNetworks": []any{
+		map[string]any{"id": "vmbr1", "cidr": "203.0.113.0/24", "gateway": "203.0.113.1", "ranges": []any{"203.0.113.10-203.0.113.20"}}}}}}
+	gw := &CSIGateway{Endpoint: csigw.Endpoint{URL: "https://192.0.2.7:8444", CA: "CA"}}
+	cfg := func(chart, image string, d kamaji.ClusterDefaults) kamaji.Config {
+		return kamaji.Config{ChartVersion: chart, LBControllerImage: image, Defaults: d}
+	}
+	ok := cfg("0.1.17", "ghcr.io/mutex-solutions/proxcloud-api:v0.11.0", kamaji.ClusterDefaults{})
+	for name, tc := range map[string]struct {
+		h    *Handler
+		cfg  kamaji.Config
+		k8s  *externalservice.ExternalService
+		proj *Project
+		want string // a part of the reason; "" = every gate holds
+	}{
+		"every gate":       {&Handler{lbGW: &lbgw.Store{}, csiGW: gw}, ok, k8s, &Project{ID: "p1"}, ""},
+		"project allows":   {&Handler{lbGW: &lbgw.Store{}, csiGW: gw}, ok, k8s, &Project{ID: "p1", PublicNetworkIds: []string{"vmbr1"}}, ""},
+		"no store":         {&Handler{csiGW: gw}, ok, k8s, &Project{ID: "p1"}, "store"},
+		"no gateway URL":   {&Handler{lbGW: &lbgw.Store{}, csiGW: &CSIGateway{}}, ok, k8s, &Project{ID: "p1"}, "PROXCLOUD_CSI_GATEWAY_URL"},
+		"no image":         {&Handler{lbGW: &lbgw.Store{}, csiGW: gw}, cfg("0.1.17", "", kamaji.ClusterDefaults{}), k8s, &Project{ID: "p1"}, "PROXCLOUD_LB_CONTROLLER_IMAGE"},
+		"shared workers":   {&Handler{lbGW: &lbgw.Store{}, csiGW: gw}, cfg("0.1.17", "i", kamaji.ClusterDefaults{Shared: &kamaji.SharedWorkers{Pool: "p"}}), k8s, &Project{ID: "p1"}, "sharedWorkers"},
+		"chart 0.1.16":     {&Handler{lbGW: &lbgw.Store{}, csiGW: gw}, cfg("0.1.16", "i", kamaji.ClusterDefaults{}), k8s, &Project{ID: "p1"}, "0.1.17 or later"},
+		"no provider lb":   {&Handler{lbGW: &lbgw.Store{}, csiGW: gw}, ok, noLB, &Project{ID: "p1"}, "config.cluster.loadBalancer"},
+		"network refused":  {&Handler{lbGW: &lbgw.Store{}, csiGW: gw}, ok, k8s, &Project{ID: "p1", PublicNetworkIds: []string{}}, "vmbr1 is not available"},
+		"drill chart tag":  {&Handler{lbGW: &lbgw.Store{}, csiGW: gw}, cfg("0.1.17-lb.1", "i", kamaji.ClusterDefaults{}), k8s, &Project{ID: "p1"}, ""},
+		"malformed pin":    {&Handler{lbGW: &lbgw.Store{}, csiGW: gw}, cfg("latest", "i", kamaji.ClusterDefaults{}), k8s, &Project{ID: "p1"}, "or later"},
+		"no CSI component": {&Handler{lbGW: &lbgw.Store{}, csiGW: nil}, ok, k8s, &Project{ID: "p1"}, "PROXCLOUD_CSI_GATEWAY_URL"},
+	} {
+		got := tc.h.kamajiLBGate(tc.cfg, tc.k8s, compute, tc.proj)
+		if (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {
+			t.Errorf("%s: gate = %q, want %q", name, got, tc.want)
+		}
 	}
 }

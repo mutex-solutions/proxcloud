@@ -4,6 +4,7 @@ package project
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -16,12 +17,15 @@ import (
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/csigw"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/lbgw"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/lock"
 	"github.com/mutex-solutions/proxcloud/internal/platform/pveflavor"
+	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 	"github.com/mutex-solutions/proxcloud/pkg/textcrypt"
 )
 
@@ -327,5 +331,190 @@ func TestLBClusterStateConverges(t *testing.T) {
 	// The worker reservation is the cluster release's, not the balancer's: it is untouched.
 	if rows, _ := h.publicIPs.ForServer(ctx, "svc", kamajiReservation("c1")); len(rows) != kamajiWorkerAddrs+kamajiLBAddrs {
 		t.Fatalf("reservation: %d rows", len(rows))
+	}
+}
+
+// lbKube is a management cluster holding one tenant cluster's Application and the Secrets written next to it.
+type lbKube struct {
+	kamaji.K8sAPI
+	apps    map[string]map[string]any
+	secrets map[string]map[string]string
+}
+
+func (k *lbKube) GetApplication(_ context.Context, _, name string) (map[string]any, error) {
+	app, ok := k.apps[name]
+	if !ok {
+		return nil, nil
+	}
+	b, _ := json.Marshal(app) // a copy, as an API answer is
+	var out map[string]any
+	_ = json.Unmarshal(b, &out)
+	return out, nil
+}
+
+func (k *lbKube) ApplyApplication(_ context.Context, app map[string]any) error {
+	b, _ := json.Marshal(app)
+	var stored map[string]any
+	_ = json.Unmarshal(b, &stored)
+	k.apps[stored["metadata"].(map[string]any)["name"].(string)] = stored
+	return nil
+}
+
+func (k *lbKube) ApplySecret(_ context.Context, ns, name string, data map[string]string, _, _ map[string]string) error {
+	k.secrets[ns+"/"+name] = data
+	return nil
+}
+
+type lbNoPortal struct{}
+
+func (lbNoPortal) LBClusterState(context.Context, *lbgw.Credential, []lbgw.Service, []lbgw.Node) (*lbgw.Answer, error) {
+	return &lbgw.Answer{Services: []lbgw.ServiceStatus{}}, nil
+}
+
+// "Enable load balancer controller" on an existing cluster, against Postgres: the credential names the cluster's own
+// project, providers and network; its Secret's token passes the gateway; the cluster goes class-only on chart 0.1.17
+// with nothing else changed; again rotates (the old token stops) and keeps the mode; a missing gate is named.
+func TestLBControllerEnable(t *testing.T) {
+	ctx := context.Background()
+	pgc, err := tcpostgres.Run(ctx, "postgres:17-alpine", tcpostgres.WithDatabase("lb"), tcpostgres.WithUsername("u"), tcpostgres.WithPassword("p"), tcpostgres.BasicWaitStrategies())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = testcontainers.TerminateContainer(pgc) }()
+	dsn, _ := pgc.ConnectionString(ctx, "sslmode=disable")
+	db, err := pgdoc.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(ctx)
+	for coll, docs := range map[string][]pgdoc.M{
+		"externalService": {
+			{"_id": "pve", "type": "CLOUD", "config": pgdoc.M{"provider": "proxmox", "network": pgdoc.M{"publicNetworks": []any{
+				pgdoc.M{"id": "vmbr1", "cidr": "203.0.113.0/24", "gateway": "203.0.113.1", "ranges": []any{"203.0.113.10-203.0.113.20"}}}}}},
+			{"_id": "k8s", "type": "CLOUD", "config": pgdoc.M{"provider": "kamaji", "argocd": pgdoc.M{"chartVersion": "0.1.17"},
+				"cluster": pgdoc.M{"loadBalancer": pgdoc.M{"publicNetworkId": "vmbr1", "flavorId": "lb-small"}}}},
+			{"_id": "k8s-off", "type": "CLOUD", "config": pgdoc.M{"provider": "kamaji", "argocd": pgdoc.M{"chartVersion": "0.1.17"}}},
+		},
+		"project": {{"_id": "p1", "name": "p1", "status": StatusEnabled, "services": []any{
+			pgdoc.M{"serviceId": "pve", "provider": "proxmox", "pool": "pc-p1"}, pgdoc.M{"serviceId": "k8s", "provider": "kamaji"}}}},
+		"cloudResource": {{"_id": "net1", "serviceId": "pve", "projectId": "p1", "type": cloud.TypeNetwork, "externalId": "net-ext",
+			"data": pgdoc.M{"network": pgdoc.M{"vnet": "v1", "zone": "pc"}}}},
+	} {
+		for _, d := range docs {
+			if _, err := db.C(coll).InsertOne(ctx, d); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	store := lbgw.NewStore(db)
+	esSvc := externalservice.NewService(externalservice.NewRepo(db), textcrypt.New("k"))
+	h := &Handler{svc: NewService(NewRepo(db), nil, nil, nil, nil), cloud: cloud.NewRepo(db), esSvc: esSvc, lbGW: store,
+		csiGW: &CSIGateway{Endpoint: csigw.Endpoint{URL: "https://192.0.2.7:8444", CA: "CA"}}}
+	values := pgdoc.M{"kubernetesVersion": "1.35.10",
+		"proxmox": pgdoc.M{"pool": "pc-p1", "network": pgdoc.M{"bridge": "v1", "addresses": []any{"10.0.0.250"}},
+			"metallb": pgdoc.M{"addresses": []any{"10.0.0.240/32"}}}}
+	kube := &lbKube{secrets: map[string]map[string]string{}, apps: map[string]map[string]any{"pc-c-1": {
+		"metadata": map[string]any{"name": "pc-c-1", "namespace": "argocd", "labels": map[string]any{
+			kamaji.LabelProject: "p1", kamaji.LabelService: "k8s", kamaji.LabelManagedBy: kamaji.ManagedByValue}},
+		"spec": map[string]any{"project": "proxcloud-k8s", "destination": map[string]any{"server": "https://kubernetes.default.svc"},
+			"source": map[string]any{"targetRevision": "0.1.16", "helm": map[string]any{"valuesObject": values}}},
+	}}}
+	kamajiFor := func(id, image string) (*externalservice.ExternalService, *kamaji.Service) {
+		es, err := esSvc.Get(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := es.KamajiConfig()
+		cfg.LBControllerImage = image
+		return es, kamaji.NewWithAPI(kube, cfg, id)
+	}
+	gateway := &lbgw.Handler{Reg: store, Portal: lbNoPortal{}}
+	put := func(token string) int {
+		r := httptest.NewRequest(http.MethodPut, lbgw.StatePath, strings.NewReader(`{"services":[],"nodes":[]}`))
+		r.Header.Set("Authorization", "PVEAPIToken="+token)
+		r.Header.Set(lbgw.ProtocolHeader, "1")
+		w := httptest.NewRecorder()
+		gateway.ServeHTTP(w, r)
+		return w.Code
+	}
+	lbValues := func() map[string]any {
+		v, _ := kube.apps["pc-c-1"]["spec"].(map[string]any)["source"].(map[string]any)["helm"].(map[string]any)["valuesObject"].(map[string]any)
+		lb, _ := v["loadBalancer"].(map[string]any)
+		return lb
+	}
+	secretKey := "pc-p1/" + kamaji.LBGatewaySecretName("pc-c-1")
+
+	es, ks := kamajiFor("k8s", "ghcr.io/mutex-solutions/proxcloud-api:v0.11.0")
+	if _, err := h.EnableClusterLB(ctx, es, ks, "pc-c-1"); err != nil {
+		t.Fatal(err)
+	}
+	first := kube.secrets[secretKey]
+	if !strings.HasPrefix(first["token"], "lb@proxcloud!pc-c-1=") || first["ca.crt"] != "CA" {
+		t.Fatalf("secret = %v", first)
+	}
+	cred, err := store.Credential(ctx, "pc-c-1")
+	if err != nil || cred == nil {
+		t.Fatalf("credential %v %v", cred, err)
+	}
+	if cred.ProjectID != "p1" || cred.ComputeServiceID != "pve" || cred.KubernetesServiceID != "k8s" || cred.NetworkID != "net-ext" || cred.Vnet != "v1" {
+		t.Fatalf("credential = %+v", cred)
+	}
+	if code := put(first["token"]); code != http.StatusOK {
+		t.Fatalf("the Secret's token: %d", code)
+	}
+	if rev := kube.apps["pc-c-1"]["spec"].(map[string]any)["source"].(map[string]any)["targetRevision"]; rev != "0.1.17" {
+		t.Fatalf("targetRevision = %v", rev)
+	}
+	lb := lbValues()
+	if lb["default"] != false || lb["image"] != "ghcr.io/mutex-solutions/proxcloud-api:v0.11.0" || lb["gatewayURL"] != "https://192.0.2.7:8444" ||
+		lb["secretName"] != kamaji.LBGatewaySecretName("pc-c-1") {
+		t.Fatalf("loadBalancer = %v", lb)
+	}
+	if raw, _ := json.Marshal(kube.apps); strings.Contains(string(raw), strings.SplitN(first["token"], "=", 2)[1]) {
+		t.Fatal("the Application carries the secret")
+	}
+
+	// Again, on a cluster in default mode with a newer portal: a new token, the old one refused, the mode kept.
+	lbValues()["default"] = true
+	es, ks = kamajiFor("k8s", "ghcr.io/mutex-solutions/proxcloud-api:v0.11.1")
+	if _, err := h.EnableClusterLB(ctx, es, ks, "pc-c-1"); err != nil {
+		t.Fatal(err)
+	}
+	second := kube.secrets[secretKey]
+	if second["token"] == first["token"] {
+		t.Fatal("a second enable kept the token")
+	}
+	if put(first["token"]) != http.StatusUnauthorized || put(second["token"]) != http.StatusOK {
+		t.Fatal("rotation: the old token must stop and the new one pass")
+	}
+	if lb := lbValues(); lb["default"] != true || lb["image"] != "ghcr.io/mutex-solutions/proxcloud-api:v0.11.1" {
+		t.Fatalf("rotation: %v", lb)
+	}
+
+	// A gate that does not hold is named and changes nothing.
+	refused := func(id, image, want string) {
+		t.Helper()
+		es, ks := kamajiFor(id, image)
+		_, err := h.EnableClusterLB(ctx, es, ks, "pc-c-1")
+		var he *httpx.HTTPError
+		if !errors.As(err, &he) || he.Status != http.StatusConflict || !strings.Contains(he.Msg, want) {
+			t.Fatalf("%s: %v", want, err)
+		}
+		if kube.secrets[secretKey]["token"] != second["token"] {
+			t.Fatalf("%s: a refused enable changed the Secret", want)
+		}
+	}
+	refused("k8s", "", "PROXCLOUD_LB_CONTROLLER_IMAGE")
+	kube.apps["pc-c-1"]["metadata"].(map[string]any)["labels"].(map[string]any)[kamaji.LabelService] = "k8s-off"
+	refused("k8s-off", "img", "config.cluster.loadBalancer")
+	kube.apps["pc-c-1"]["metadata"].(map[string]any)["labels"].(map[string]any)[kamaji.LabelService] = "k8s"
+	live := kube.apps["pc-c-1"]["spec"].(map[string]any)["source"].(map[string]any)["helm"].(map[string]any)["valuesObject"].(map[string]any)
+	live["proxmox"].(map[string]any)["network"].(map[string]any)["bridge"] = "v9"
+	refused("k8s", "img", "not a network of the project")
+	live["proxmox"].(map[string]any)["pool"] = "shared"
+	refused("k8s", "img", "not the project's pool")
+	es, ks = kamajiFor("k8s", "img")
+	if _, err := h.EnableClusterLB(ctx, es, ks, "pc-c-nothere"); err == nil {
+		t.Fatal("an unknown cluster is an error")
 	}
 }

@@ -36,6 +36,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removes the pair, its addresses and the row, without the controller. The Kubernetes provider names the public
   network and flavor in `config.cluster.loadBalancer`, checked on save. Nothing calls the gateway yet: the controller
   comes with a later change. Not run on a lab.
+- **A load balancer controller for managed Kubernetes clusters** (`cmd/lb-controller`, cluster chart
+  `proxmox-kamaji-cluster` **0.1.17**; docs/managed-k8s.md). One per cluster, on the platform cluster next to its
+  control plane: every 10 s it sends the cluster's Services of type LoadBalancer and its nodes to the gateway with the
+  cluster's own credential, holds each Service with the finalizer `proxcloud.io/load-balancer`, writes its address in
+  `status.loadBalancer` (`ipMode: Proxy` with PROXY v2) and reports refusals (UDP, no node port, source ranges, quota)
+  as Events, one per change. It is a second binary of the `proxcloud-api` image, with no image of its own, and its
+  NetworkPolicy lets it reach DNS, its namespace's control planes and the gateway only. A new cluster gets it in
+  default mode when every gate holds (a gateway URL, `PROXCLOUD_LB_CONTROLLER_IMAGE`, chart 0.1.17, the project's own
+  workers, the provider's `config.cluster.loadBalancer` on a public network the project may use): Services without a
+  class get a public address and MetalLB serves only class `proxcloud.io/internal`. An existing cluster keeps MetalLB
+  as its default; **Enable load balancer controller** (`POST /api/v1/admin/service/{id}/k8s-clusters/{clusterId}/load-balancer`)
+  adds the controller in class-only mode (class `proxcloud.io/lb`), and again rotates the credential. NGINX Gateway
+  Fabric's Service class is never changed. The controller's image is set at create, enable and chart bump, never by the
+  sync. Compose sets the image with `--cluster-gateway`, the installer chart with `api.csiGateway`. Ships dark: the BOM
+  still pins cluster chart 0.1.16. Not run on a lab.
 - **Docker Compose can serve the gateway listener** (`proxcloud-up.sh install --cluster-gateway <address>`,
   `deploy/compose/compose.cluster-gateway.yaml`): published on `<address>:8444` only, with an ECDSA key and a
   self-signed certificate the API makes on its first start (`PROXCLOUD_CSI_GATEWAY_SELF_SIGNED`) in a volume of its

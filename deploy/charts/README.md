@@ -77,6 +77,13 @@ Four charts live here:
   API puts the value on the machines in place and no machine or bootstrap template changes its
   name: no machine is replaced for it. A negative value renders nothing, which is the render of
   0.1.15 ([managed-services.md](../../docs/managed-services.md#the-platform-clusters-machines)).
+  0.1.17 reads `loadBalancer` (kamaji mode only): with `secretName` it renders the cluster's load
+  balancer controller next to its control plane (`templates/lb-controller.yaml`, the portal's
+  `proxcloud-api` image, the admin kubeconfig and the gateway Secret) with an egress NetworkPolicy,
+  and with `default: true` MetalLB serves only class `proxcloud.io/internal`. NGINX Gateway Fabric's
+  Service class is never set. Without the block the render is what 0.1.16 gave, so an existing
+  cluster bumped to it changes nothing ([managed-k8s.md](../../docs/managed-k8s.md)). The BOM still
+  pins 0.1.16: no new cluster gets 0.1.17 until it moves.
 
 ## Publishing
 
