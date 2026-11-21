@@ -72,7 +72,9 @@ func TestKamajiLoadBalancerSettingCheckedOnSave(t *testing.T) {
 		return map[string]any{"name": "k8s", "type": "CLOUD", "config": map[string]any{"provider": "kamaji",
 			"cluster": map[string]any{"proxmoxServiceId": "pve1", "loadBalancer": lb}}}
 	}
-	lb := func(network, flavor string) map[string]any { return map[string]any{"publicNetworkId": network, "flavorId": flavor} }
+	lb := func(network, flavor string) map[string]any {
+		return map[string]any{"publicNetworkId": network, "flavorId": flavor}
+	}
 	for name, tc := range map[string]struct {
 		lb   any
 		want string
