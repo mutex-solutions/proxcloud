@@ -80,6 +80,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it) would have stopped the project's floating IP reconcile, so its address was never billed and no other address
   change of the project reached its rows (`orphanIPs`, `ReleaseIfUnchanged`). **A pair's traffic is counted once**:
   one counter per (appliance, balancer) on the appliance's public NIC, never one per address.
+- **A new sandbox node installs gVisor again** (`deploy/sandbox-cluster/node-setup.yaml`, docs/managed-sandbox.md
+  §1.1). The installer's `node-setup` DaemonSet asked the gVisor apt suite `release` for runsc 20261102.0, which the
+  suite no longer lists (it carries the newest release only), so the install failed on every new node. It now
+  downloads the release's own package from its versioned pool path, checks its SHA256 and installs it with
+  `dpkg -i`: runsc **20261116.0** (the newest release), `RUNSC_SHA256` `495796a5…caeb1e`, both set together. It
+  removes the apt source earlier versions wrote. Nodes keep the IPv6 refusal, the drop-in containerd config and
+  stage 55's edits of the runtime image and `RUNSC_ALLOW_SUID`. The docs no longer say the node image ships the
+  `gvisor` handler: the drop-in writes it. Not run on a lab.
 
 ### Changed
 

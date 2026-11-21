@@ -1,6 +1,6 @@
 # gvisor: every tenant sandbox runs here (runsc, installed by node-setup.yaml). The portal sets
-# runtimeClassName itself (internal/cloud/sandbox). The node image already ships the `gvisor` handler
-# name in containerd's config imports; node-setup writes the handler's runsc options.
+# runtimeClassName itself (internal/cloud/sandbox). The node image ships only the conf.d import in
+# containerd's config; node-setup writes the `gvisor` handler there (conf.d/10-gvisor.toml) and its runsc options.
 # The `nvidia` class for the GPU device plugin comes with GPU nodes (SB9).
 apiVersion: node.k8s.io/v1
 kind: RuntimeClass
