@@ -102,7 +102,7 @@ func TestLBReplacing(t *testing.T) {
 	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
 	for mark, want := range map[string]bool{
 		"": false, "garbage": false,
-		now.Add(-time.Minute).Format(time.RFC3339):                  true,
+		now.Add(-time.Minute).Format(time.RFC3339):                   true,
 		now.Add(-lbReplaceMaxFor - time.Second).Format(time.RFC3339): false, // a portal that died mid-replace
 	} {
 		if got := lbReplacing(&loadBalancer{Replacing: mark}, now); got != want {

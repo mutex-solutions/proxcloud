@@ -90,10 +90,12 @@ func TestLBSpecValidateHealthAndSources(t *testing.T) {
 		many = append(many, fmt.Sprintf("198.51.%d.0/24", 100+i))
 	}
 	for name, breakIt := range map[string]func(*LBSpec){
-		"check type":       func(s *LBSpec) { s.Pools[0].HealthCheck = &LBHealthCheck{Type: "udp"} },
-		"check port":       func(s *LBSpec) { s.Pools[0].HealthCheck = &LBHealthCheck{Type: "tcp", Port: 70000} },
-		"tcp with a path":  func(s *LBSpec) { s.Pools[0].HealthCheck = &LBHealthCheck{Type: "tcp", Path: "/"} },
-		"path injection":   func(s *LBSpec) { s.Pools[0].HealthCheck = &LBHealthCheck{Type: "http", Path: "/x\n  server evil 1.1.1.1:1"} },
+		"check type":      func(s *LBSpec) { s.Pools[0].HealthCheck = &LBHealthCheck{Type: "udp"} },
+		"check port":      func(s *LBSpec) { s.Pools[0].HealthCheck = &LBHealthCheck{Type: "tcp", Port: 70000} },
+		"tcp with a path": func(s *LBSpec) { s.Pools[0].HealthCheck = &LBHealthCheck{Type: "tcp", Path: "/"} },
+		"path injection": func(s *LBSpec) {
+			s.Pools[0].HealthCheck = &LBHealthCheck{Type: "http", Path: "/x\n  server evil 1.1.1.1:1"}
+		},
 		"path with space":  func(s *LBSpec) { s.Pools[0].HealthCheck = &LBHealthCheck{Type: "http", Path: "/a b"} },
 		"ipv6 source":      func(s *LBSpec) { s.Listeners[0].SourceRanges = []string{"2001:db8::/32"} },
 		"any as a range":   func(s *LBSpec) { s.Listeners[0].SourceRanges = []string{"0.0.0.0/0"} },
