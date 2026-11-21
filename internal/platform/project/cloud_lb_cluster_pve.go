@@ -286,6 +286,8 @@ func (h *Handler) lbClusterPass(ctx context.Context, clusterID string) error {
 		if _, err := h.cloud.Insert(ctx, row); err != nil {
 			return err
 		}
+	} else if lb, err := lbOfRow(row); err != nil || lb.Cluster == nil || lb.Cluster.ID != clusterID {
+		return fmt.Errorf("load balancer row %s is not cluster %s's", ext, clusterID)
 	}
 	if err := h.lbClusterBuild(ctx, es, proj, ext); err != nil {
 		slog.Warn("load balancer: cluster appliance", "cluster", clusterID, "err", err)
@@ -321,10 +323,14 @@ func (h *Handler) lbClusterBuild(ctx context.Context, es *externalservice.Extern
 			})
 			return errors.Join(berr, err)
 		}
+		prefix := lb.PrivatePrefix // the appliance's network, read during its build
 		if _, err := h.lbEdit(ctx, es, ext, func(lb *loadBalancer) {
 			lb.Appliances = append(lb.Appliances, *app)
 			lb.Cluster.BuildFailedAt, lb.StatusMessage = "", ""
 			lbPairLegacyFields(lb)
+			if lb.PrivatePrefix == 0 {
+				lb.PrivatePrefix = prefix
+			}
 		}); err != nil {
 			// The row went meanwhile: the new VM is nobody's.
 			if derr := h.lbDestroyVM(ctx, es, proj, app.ServerID); derr != nil {
