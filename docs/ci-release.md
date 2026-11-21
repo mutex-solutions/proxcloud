@@ -6,7 +6,7 @@ the `v0.4.0-rc.1` prerelease (tag 2026-11-11, images and app chart `0.4.0-rc.1`)
 and the first stable release `v0.4.0` (tag 2026-11-12, images and app chart
 `0.4.0`), then the stable `v0.5.0` (tag 2026-11-13), the patches `v0.5.1` and `v0.5.2` and the stable `v0.6.0` (tags 2026-11-14),
 the `v0.7.0-rc.1` prerelease and the stable `v0.7.0` (tags 2026-11-15), the stable `v0.8.0` (tag 2026-11-17) and the patches `v0.8.1` and `v0.8.2` (tags 2026-11-18), and the release candidates
-`v0.9.0-rc.1` and `v0.9.0-rc.2`, prereleases, the stable `v0.9.0` and the patch `v0.9.1` (tags 2026-11-19; [Release candidates](#release-candidates)), and the first candidate of `v0.10.0`, `v0.10.0-rc.1`, a prerelease, the stable `v0.10.0` and the two candidates of `v0.10.1`, `v0.10.1-rc.1` and `v0.10.1-rc.2`, prereleases (tags 2026-11-20), and the stable `v0.10.1` (tag 2026-11-21). Pushing the next tag runs the app image/chart publication and GitHub Release
+`v0.9.0-rc.1` and `v0.9.0-rc.2`, prereleases, the stable `v0.9.0` and the patch `v0.9.1` (tags 2026-11-19; [Release candidates](#release-candidates)), and the first candidate of `v0.10.0`, `v0.10.0-rc.1`, a prerelease, the stable `v0.10.0` and the two candidates of `v0.10.1`, `v0.10.1-rc.1` and `v0.10.1-rc.2`, prereleases (tags 2026-11-20), and the stable `v0.10.1` (tag 2026-11-21). The next tag is the first candidate of `v0.10.2`, `v0.10.2-rc.1`; pushing it runs the app image/chart publication and GitHub Release
 creation.
 This source change does none of those operations, and installation from released
 artifacts and later controlled PVE template canaries remain separate steps. Read
@@ -338,7 +338,9 @@ so `main` could not be tagged until the next release commit dropped `-dev`: the 
 `v0.10.1` sets the release to `0.10.1` (checked on 2026-11-21 on that commit: `--release` prints
 `all pins match`, on the BOM and on the eleven previous BOMs). The pull request after that tag
 set the BOM on `main` to `0.11.0-dev` again and added `deploy/platform/previous/0.10.1.yaml`, so
-`main` cannot be tagged until the next release commit drops `-dev`. The gate does not
+`main` could not be tagged until the next release commit dropped `-dev`: the commit of the candidate
+`v0.10.2-rc.1` sets the release to `0.10.2-rc.1` (checked on 2026-11-21 on that commit: `--release`
+prints `all pins match`, on the BOM and on the twelve previous BOMs). The gate does not
 compare the BOM's release with the tag
 (below): a commit whose BOM has no `-dev` passes this part for any tag.
 
@@ -508,6 +510,22 @@ not run on a lab. Its tag is on the commit `7cb4bee0`; the `docker` and `helm` r
 succeeded on the first attempt, and the GitHub Release is the latest (read on 2026-11-21). The
 pull request after it added `deploy/platform/previous/0.10.1.yaml` and set the BOM on `main` back
 to `0.11.0-dev`, with the pins of the release.
+
+`v0.10.2-rc.1` is the first candidate of `v0.10.2`, cut from `main` as the patch `v0.9.1` was: its
+commit takes the BOM from `0.11.0-dev` to `0.10.2-rc.1`, with the pins `main` had. They are those of
+`0.10.1` but cert-manager, v1.21.3 on the seed and on the platform cluster with `upgradeFrom:
+["v1.20.2"]`, the digest the `charts-mirror-v2` run pushed
+([managed-services.md](managed-services.md#what-this-release-moves-and-what-it-refuses)). It is the
+first release BOM that moves a third-party chart, in an upgrade that replaces no machine and
+writes nothing on Proxmox, and the first that carries no unfinished replacement of the machines
+(the move from 0.10.0 also has machines rows, so the pair gate refuses cert-manager's). No chart of
+the product changed since its tag (the three `git diff` commands above print nothing on its
+commit), so the BOM needs no new chart version. The installer's `cert_manager_chart` is v1.21.3 on
+its commit too (stage 40 moves at `make upgrade`, stage 50 at the next `make install`; no drill
+covers that path). The app chart, the installer's ProxCloud pin and `DEFAULT_VERSION` stay on
+`v0.10.1`, and the installer's k3s and Kubernetes pins stay at 1.35.10. The pull request after its
+tag adds `deploy/platform/previous/0.10.2-rc.1.yaml`. Nothing of it has run on a lab: the candidate
+exists for the drill of that upgrade.
 
 Not verified on a lab: anything on the published images of `v0.9.0` or `v0.9.1`, the move
 of a platform from a candidate's BOM to that of `0.9.0`, and any move to that of `0.9.1`.
@@ -795,7 +813,17 @@ What a release must do when it changes a pin, before its tag:
    build of the release commit, `GET …/plan` of such an installation, or
    `PlanFor` in a test.
 
-The pairs of the BOM on `main` today (the eleven below and 0.10.1 to it). `main` has the pins of the release
+The pairs of the BOM of the candidate `v0.10.2-rc.1` (the twelve previous BOMs to it). It has the pins `main`
+had, below, with the release `0.10.2-rc.1` in place of `0.11.0-dev`, so `Classify` gives the same answers, and
+`PlanFor` gives them as plans (2026-11-21, on the candidate's commit): from 0.10.1 and 0.10.1-rc.2 three changes,
+allowed, no part, phrase `upgrade <name> to 0.10.2-rc.1`; from 0.10.1-rc.1 five; from the nine BOMs on Kubernetes
+1.35.10 21 (0.10.0, 0.10.0-rc.1), 22 (0.9.0, 0.9.1 and the candidates of 0.9.0) or 25 (the three 0.8.x BOMs),
+refused by the pair gate on both cert-manager rows. A release BOM that moves cert-manager carries no unfinished
+target: an installation on 0.10.0 that stands in the replacement of its machines toward 0.10.1-rc.1, 0.10.1-rc.2 or
+0.10.1 goes on to that target with a Retry, by the kept file, and the plan offers 0.10.2-rc.1 as `replacement`,
+refused by the pair gate (`TestRollTowardAKeptCandidateGoesOn`). No move to 0.10.2-rc.1 was run anywhere.
+
+The pairs of the BOM on `main` before the candidate (the eleven below and 0.10.1 to it). `main` had the pins of the release
 `v0.10.1` but cert-manager, v1.21.3 on both entries with `upgradeFrom: ["v1.20.2"]` (the chart mirror's
 `charts-mirror-v2` run, digest `sha256:0f159f17f9ed152737a96aa113f042c43ce1b28061660d14aef7d5c6c2a88600`). So
 `Classify` gives, with no seed part and no machine replaced: from 0.10.1 and 0.10.1-rc.2 three changes, the release
@@ -1296,7 +1324,7 @@ file (`docker.yml`, job `release`, step "Assemble release notes"). Without the
 file the step prints a warning and falls back to the `## [X.Y.Z]` section of
 `CHANGELOG.md`, as every release up to `v0.8.2` did; the script test below fails
 when a changelog section of a release from `0.8.0` on has no file, so only an rc tag
-without a file takes that path (`v0.9.0-rc.1`, `v0.9.0-rc.2`, `v0.10.0-rc.1`, `v0.10.1-rc.1` and `v0.10.1-rc.2` have one). An empty file, or one over 120000 characters, fails
+without a file takes that path (`v0.9.0-rc.1`, `v0.9.0-rc.2`, `v0.10.0-rc.1`, `v0.10.1-rc.1`, `v0.10.1-rc.2` and `v0.10.2-rc.1` have one). An empty file, or one over 120000 characters, fails
 the step, and no Release is created. GitHub's generated commit and pull request
 list (`--generate-notes`) follows the body either way.
 
