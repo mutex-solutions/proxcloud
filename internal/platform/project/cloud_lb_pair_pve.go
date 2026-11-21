@@ -504,7 +504,10 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 	if refused != nil {
 		lb.Status, lb.StatusMessage = lbStatusError, refused.Error()
 	}
-	if lb.Status == lbStatusActive || lb.Status == lbStatusDegraded {
+	// The row's hash says that an appliance serves this config (a cluster's Services are ready by it). The status
+	// alone does not: both appliances holding the address is DEGRADED whatever they run.
+	serves := slices.ContainsFunc(lb.Appliances, func(a lbAppliance) bool { return a.State == lbAppUp })
+	if serves && (lb.Status == lbStatusActive || lb.Status == lbStatusDegraded) {
 		lb.AppliedHash = hhash
 	}
 	return nil

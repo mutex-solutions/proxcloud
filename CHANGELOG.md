@@ -89,7 +89,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     pushes again. keepalived's apply wants keepalived running after the change;
   - a recorded hash is checked on every pass: each appliance is asked whether HAProxy listens on every bind of its
     config. One that does not is not `up` (the pair is `DEGRADED` or `DOWN`, a single appliance `DOWN`, with the
-    reason) and is pushed again in that pass;
+    reason) and is pushed again in that pass. A pair's own hash, by which a cluster's Services are called ready,
+    is recorded only when an appliance is `up` with the config: two appliances that both hold the address read
+    `DEGRADED` whatever they run;
   - `GET_HEALTH` says so too: a member the stored config holds and the running HAProxy does not has status
     `NOT LOADED` (it was `""`, which reads as nothing wrong), and the answer carries `notLoaded` and `message`.
 

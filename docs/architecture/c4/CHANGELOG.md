@@ -14,8 +14,9 @@ HAProxy (`lbServingFn`); keepalived must run after its change; files the guest a
 (`lbReadyScript`). `ReadVRRPState` and the new `HAProxyServing` report whether HAProxy listens on every bind of its
 config, and `LBHealth` the listeners and members the running HAProxy does not hold. In `internal/platform/project`
 the converge (`lbApplyLocked`, `lbApplyPair`) asks every appliance with a recorded hash what it runs and pushes again
-where a service is stopped or runs another config; `lbPairStatus` names the cause and its remedy; `lbTakeOut` and
-`lbPutIn` state the row's status again during a replace.
+where a service is stopped or runs another config, and records the pair's own hash only when an appliance is up with
+the config; `lbPairStatus` names the cause and its remedy; `lbTakeOut` and `lbPutIn` state the row's status again
+during a replace.
 
 **Why:** the drill of v0.11.0-rc.1 (findings N2-2, N2-5, N2-6, N2-7): a pair refused every connection for 458 s after
 Replace appliances while its row read `ACTIVE`, because the first config push met the haproxy package's own first

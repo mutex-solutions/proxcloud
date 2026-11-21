@@ -231,3 +231,38 @@ func TestLBReplaceRestatesTheRow(t *testing.T) {
 		t.Fatalf("with the new appliance booting: %s %q", lb.Status, lb.StatusMessage)
 	}
 }
+
+// The row's own hash is what a cluster's Services are called ready by, so it follows an appliance that serves the
+// config, not the status alone: two appliances that both hold the address read DEGRADED whatever they run.
+func TestLBPairRowHashNeedsAnApplianceThatServes(t *testing.T) {
+	ctx := context.Background()
+	h, f, es, lb := lbApplyFixture(t)
+	proj, cr := &Project{ID: "p1"}, &cloud.CloudResource{}
+	if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil {
+		t.Fatal(err)
+	}
+	served := lb.AppliedHash
+	if lb.Status != lbStatusActive || served == "" {
+		t.Fatalf("first apply: %s %q", lb.Status, served)
+	}
+	// A change neither appliance can take yet, while they cannot hear each other and both hold the address.
+	lb.Listeners = append(lb.Listeners, pve.LBListener{Port: 81, Pool: "web"})
+	for _, vm := range []string{"301", "302"} {
+		f.set(vm, func(g *lbGuest) { g.role, g.holds, g.aptRunning = "MASTER", true, true })
+	}
+	if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil {
+		t.Fatal(err)
+	}
+	if lb.Status != lbStatusDegraded || lb.AppliedHash != served {
+		t.Fatalf("no appliance serves the new config: %s %q, row hash moved: %v", lb.Status, lb.StatusMessage, lb.AppliedHash != served)
+	}
+	for _, vm := range []string{"301", "302"} {
+		f.set(vm, func(g *lbGuest) { g.aptRunning = false })
+	}
+	if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil {
+		t.Fatal(err)
+	}
+	if lb.AppliedHash == served || lb.AppliedHash != lbHash(lbRender(lb)) {
+		t.Fatalf("once it is served: %s %q", lb.Status, lb.AppliedHash)
+	}
+}
