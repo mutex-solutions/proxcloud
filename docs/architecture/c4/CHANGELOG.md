@@ -4,7 +4,7 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
-## 2026-11-21: sandbox-netguard reads per-node Cilium config
+## 2026-11-21: sandbox-netguard reads per-node Cilium config (#422)
 
 **What changed:** no new component or container. `sandbox-netguard -install` (node-setup on every sandbox node) now
 reads, besides `kube-system/cilium-config`, the `CiliumNodeConfig` list of `kube-system` and its own Node's labels,
