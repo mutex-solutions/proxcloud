@@ -16,11 +16,11 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 )
 
-// The keepalived config of a load balancer pair must pass `keepalived -t` as Debian 13 (2.3.3) and Ubuntu 26.04
+// The configs of a load balancer pair must pass `haproxy -c` and `keepalived -t` as Debian 13 (2.3.3) and Ubuntu 26.04
 // (2.3.4) ship it, with no VIP, one and fifty (spike S1: an instance with every VIP excluded, or a rule without a
 // preference, fails there). The container has one interface: the tenant side is eth0 and the public side lo; -t
 // checks the syntax and the values, not the wiring.
-func TestKeepalivedConfigPassesKeepalivedT(t *testing.T) {
+func TestLBPairConfigsPassTheirChecks(t *testing.T) {
 	for _, image := range []string{"debian:trixie", "ubuntu:26.04"} {
 		t.Run(image, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
@@ -45,7 +45,7 @@ func TestKeepalivedConfigPassesKeepalivedT(t *testing.T) {
 				}
 				return out.String()
 			}
-			run("apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq keepalived >/dev/null")
+			run("apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq keepalived haproxy >/dev/null")
 			t.Log(run("keepalived --version 2>&1 | head -1"))
 			// The scripts keepalived runs must exist, or -t disables the track script and fails.
 			run("printf '#!/bin/sh\\n' > /usr/local/sbin/proxcloud-lb-check && printf '#!/bin/sh\\n' > /usr/local/sbin/proxcloud-lb-notify && chmod 0755 /usr/local/sbin/proxcloud-lb-*")
@@ -58,6 +58,20 @@ func TestKeepalivedConfigPassesKeepalivedT(t *testing.T) {
 			if code, _, err := c.Exec(ctx, []string{"keepalived", "-t", "-f", "/tmp/bad.conf"}); err != nil || code == 0 {
 				t.Fatalf("keepalived -t took a rule with no preference: exit %d %v", code, err)
 			}
+			// And the HAProxy config both appliances run, with the pair's binds, an HTTP check on its own port and PROXY v2.
+			spec := pve.LBSpec{
+				Listeners: []pve.LBListener{{Port: 80, Pool: "web"}, {Port: 5432, Pool: "db"}},
+				Pools: []pve.LBPool{
+					{Name: "web", Protocol: "http", Algorithm: "roundrobin", HealthCheck: &pve.LBHealthCheck{Type: "http", Port: 10256, Path: "/healthz"},
+						Members: []pve.LBMember{{ServerID: "101", Port: 8080, Weight: 1, Address: "10.0.0.11"}}},
+					{Name: "db", Protocol: "tcp", Algorithm: "leastconn", ProxyProtocol: true,
+						Members: []pve.LBMember{{ServerID: "104", Port: 5432, Weight: 1, Address: "10.0.0.14"}}},
+				},
+			}
+			if err := c.CopyToContainer(ctx, []byte(pve.RenderHAProxyOn(spec, []string{"203.0.113.10", "203.0.113.11"})), "/tmp/h.cfg", 0o644); err != nil {
+				t.Fatal(err)
+			}
+			run("mkdir -p /run/haproxy && haproxy -c -f /tmp/h.cfg")
 			for _, n := range []int{0, 1, 50} {
 				var vips []string
 				for i := range n {
