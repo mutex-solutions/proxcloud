@@ -260,7 +260,8 @@ func TestMoveCarriesARollUnderALaterBOM(t *testing.T) {
 // one itself, which it can only do while its file is kept. 0.10.2-rc.1 has these pins too and is taken the same way,
 // although no build records it as the target of such a replacement: the move from 0.10.0 to it is refused by the pair
 // gate. Under 0.10.2 it is not carried either, although the two BOMs differ in the release line alone: the move from
-// 0.10.0 to 0.10.2 is refused by the same gate.
+// 0.10.0 to 0.10.2 is refused by the same gate. 0.10.2 itself has these pins too and is taken the same way, for the
+// same reason.
 func TestRollTowardAKeptCandidateGoesOn(t *testing.T) {
 	cur, err := Current()
 	if err != nil {
