@@ -172,6 +172,28 @@ empty. `LIST_SHARE_WARNINGS` on a TrueNAS service is the same question for file
 shares; the console shows its answer on the file shares page and in the create
 dialog, and leaves Create enabled.
 
+Load balancers on a Proxmox service (`type: LOAD_BALANCER`; [cloud-integration.md](cloud-integration.md#load-balancers-haproxy-appliance)):
+
+- **Create** `POST /api/v1/project/{id}/cloud`, data `name`, `networkId`, `publicNetworkId`, `flavorId`, `ha`
+  (boolean, **default true**: two appliances sharing the address; `false`: one VM, as before v0.11.0). With `ha`
+  the public network must not be an SDN vnet (`400`), and the quota is checked for two servers of the flavor and
+  one public address before anything is built.
+- **Row** `data.loadbalancer`: as before, plus for a pair `ha: true`, `vips` (its public addresses; `publicIp` is
+  the first), `appliances` (each `serverId`, `node`, `privateIp`, `role` as keepalived last said it, `holdsVip`,
+  `state`: `up`, `down`, `building` or `gone`, and `reason` when not up) and `replacing` (when a replace started,
+  absent when none runs). `status` is `BUILD`, `ACTIVE`, `DEGRADED` (one appliance answers, or both hold the
+  address; `statusMessage` says which), `DOWN` or `ERROR`.
+- **`UPDATE_CONFIG`** takes, on top of listeners, pools and members: per pool `healthCheck` (`type` `tcp` or
+  `http`, `port` 1 to 65535 or absent for the member's port, `path` for `http`, starting with `/` and with no
+  space) and `proxyProtocol` (boolean, PROXY v2 to the members); per listener `sourceRanges`, IPv4 networks or
+  addresses, at most 512 characters together (`400` past that), absent or empty for any address. Both kinds of
+  balancer take them.
+- **`REPLACE_APPLIANCES`** (a pair only; `409` on a single VM, while it is still being created, or while a replace
+  runs): answers the row with `replacing` set and rebuilds the appliances one at a time, the standby first. A
+  delete answers `409` while it runs. Refused while the project is suspended, like any change.
+- **`GET_HEALTH`** answers `result` (each member's state as HAProxy sees it; for a pair, the appliance holding the
+  address) and, for a pair, `appliances` as just read.
+
 Project invitations (`/api/v1/project-invites`, customer realm):
 
 | Call | Who | Answer |
