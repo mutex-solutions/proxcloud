@@ -26,6 +26,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ApiError, apiFetch } from "@/lib/api"
+import { timeAgo } from "@/lib/format"
 import { useAdminGet } from "@/lib/hooks"
 import { parseSNATSources, SNAT_SOURCES_HELP, type CloudProvider } from "./CloudProvidersPage"
 import { ProviderProjectsTab } from "./ProviderProjectsTab"
@@ -376,13 +377,14 @@ function KamajiClustersCard({ id }: { id: string }) {
   const qc = useQueryClient()
   const q = useAdminGet<{
     providerChartVersion?: string
-    clusters?: { id: string; name?: string; projectId?: string; chartVersion?: string }[]
+    clusters?: KamajiCluster[]
   }>(`/admin/service/${id}/k8s-clusters`)
   const pin = q.data?.providerChartVersion ?? ""
   const clusters = q.data?.clusters ?? []
   const behind = clusters.filter((c) => pin && c.chartVersion !== pin)
   const [machinesOf, setMachinesOf] = useState<{ id: string; name?: string } | null>(null)
   const [firewallOf, setFirewallOf] = useState<{ id: string; name?: string } | null>(null)
+  const [lbOf, setLbOf] = useState<KamajiCluster | null>(null)
   const invalidate = () => void qc.invalidateQueries({ queryKey: ["admin-get", `/admin/service/${id}/k8s-clusters`] })
 
   const bumpOne = useMutation({
@@ -438,14 +440,15 @@ function KamajiClustersCard({ id }: { id: string }) {
               <TableHead>Cluster</TableHead>
               <TableHead>Project</TableHead>
               <TableHead>Chart version</TableHead>
+              <TableHead>Load balancer</TableHead>
               <TableHead />
             </TableRow>
           </TableHeader>
           <TableBody>
             {q.isLoading ? (
-              <TableRow><TableCell colSpan={4} className="text-center text-sm text-muted-foreground">Loading…</TableCell></TableRow>
+              <TableRow><TableCell colSpan={5} className="text-center text-sm text-muted-foreground">Loading…</TableCell></TableRow>
             ) : clusters.length === 0 ? (
-              <TableRow><TableCell colSpan={4} className="text-center text-sm text-muted-foreground">No managed clusters.</TableCell></TableRow>
+              <TableRow><TableCell colSpan={5} className="text-center text-sm text-muted-foreground">No managed clusters.</TableCell></TableRow>
             ) : (
               clusters.map((c) => (
                 <TableRow key={c.id}>
@@ -458,9 +461,11 @@ function KamajiClustersCard({ id }: { id: string }) {
                     {c.chartVersion || "—"}
                     {pin && c.chartVersion === pin ? <span className="ml-2 text-xs text-muted-foreground">current</span> : null}
                   </TableCell>
+                  <TableCell className="text-sm">{LB_MODES[c.loadBalancer ?? ""] ?? c.loadBalancer}</TableCell>
                   <TableCell className="space-x-2 text-right">
                     <Button size="sm" variant="ghost" onClick={() => setMachinesOf(c)}>Machines</Button>
                     <Button size="sm" variant="ghost" onClick={() => setFirewallOf(c)}>Firewall</Button>
+                    <Button size="sm" variant="ghost" aria-label={`Load balancer of ${c.name || c.id}`} onClick={() => setLbOf(c)}>Load balancer</Button>
                     {pin && c.chartVersion !== pin ? (
                       <Button size="sm" variant="outline" onClick={() => bumpOne.mutate(c.id)} disabled={bumpOne.isPending}>
                         Bump to {pin}
@@ -479,7 +484,124 @@ function KamajiClustersCard({ id }: { id: string }) {
       </CardContent>
       {machinesOf && <ClusterMachinesDialog serviceId={id} cluster={machinesOf} onClose={() => setMachinesOf(null)} />}
       {firewallOf && <WorkerFirewallDialog serviceId={id} cluster={firewallOf} onClose={() => setFirewallOf(null)} />}
+      {lbOf && <ClusterLoadBalancerDialog serviceId={id} cluster={lbOf} pin={pin} onClose={() => setLbOf(null)} onChanged={invalidate} />}
     </Card>
+  )
+}
+
+type KamajiCluster = { id: string; name?: string; projectId?: string; chartVersion?: string; loadBalancer?: string }
+// A cluster's load balancer mode, read off its values: which Services of type LoadBalancer get the product balancer.
+const LB_MODES: Record<string, string> = { "": "MetalLB only", default: "Default", "class-only": "Class only" }
+
+type ClusterLBView = {
+  controllerSince?: string; controllerLastSeen?: string; balancerId?: string
+  balancer?: {
+    status?: string; statusMessage?: string
+    appliances?: { serverId: string; node?: string; role?: string; holdsVip?: boolean; state?: string }[]
+    cluster?: { services?: { uid: string; namespace?: string; name?: string; vip?: string; state: string; reason?: string; message?: string }[] }
+  }
+} | null
+
+// ClusterLoadBalancerDialog — one cluster's load balancer: its mode, when the controller last called the gateway, the
+// balancer its Services built, and "Enable load balancer controller" (class-only; again = a new credential).
+function ClusterLoadBalancerDialog({ serviceId, cluster, pin, onClose, onChanged }: {
+  serviceId: string; cluster: KamajiCluster; pin: string; onClose: () => void; onChanged: () => void
+}) {
+  const qc = useQueryClient()
+  const path = `/admin/service/${serviceId}/k8s-clusters/${cluster.id}/load-balancer`
+  const q = useAdminGet<ClusterLBView>(path)
+  const mode = cluster.loadBalancer ?? ""
+  const enable = useMutation({
+    mutationFn: () => apiFetch(path, { method: "POST" }),
+    onSuccess: () => {
+      toast.success(mode ? "A new credential was minted: the old token stops now" : "The load balancer controller is being added, class-only")
+      void qc.invalidateQueries({ queryKey: ["admin-get", path] })
+      onChanged()
+      onClose()
+    },
+  })
+  const v = q.data
+  const lb = v?.balancer
+  const services = lb?.cluster?.services ?? []
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Load balancer of {cluster.name || cluster.id}</DialogTitle>
+          <DialogDescription>
+            {mode === "default"
+              ? "Default mode: a Service of type LoadBalancer without a class gets a public address of the product balancer; MetalLB serves class proxcloud.io/internal."
+              : mode === "class-only"
+                ? "Class-only mode: Services of class proxcloud.io/lb get a public address of the product balancer; MetalLB keeps every Service without a class and its address."
+                : "No controller: MetalLB gives every Service of type LoadBalancer a private address of the cluster's network."}
+          </DialogDescription>
+        </DialogHeader>
+        {q.isLoading ? (
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        ) : q.isError ? (
+          <p role="alert" className="text-sm text-destructive">{(q.error as Error).message}</p>
+        ) : (
+          <div className="grid gap-4 text-sm">
+            {v && (
+              <p data-testid="lb-controller-seen">
+                {v.controllerLastSeen
+                  ? `The controller last called the gateway ${timeAgo(v.controllerLastSeen)}.`
+                  : "The controller has not called the gateway yet."}
+                {v.controllerSince ? ` Credential minted ${timeAgo(v.controllerSince)}.` : ""}
+              </p>
+            )}
+            {lb ? (
+              <div className="grid gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium">Balancer</span>
+                  <StatusBadge status={lb.status} />
+                  {lb.statusMessage && <span className="text-muted-foreground">{lb.statusMessage}</span>}
+                </div>
+                {(lb.appliances ?? []).map((a) => (
+                  <div key={a.serverId} className="text-muted-foreground">
+                    VM <span className="font-mono">{a.serverId}</span> on node {a.node || "—"}, {a.state ?? "unknown"}
+                    {a.holdsVip ? ", holds the addresses" : ", standby"}
+                  </div>
+                ))}
+                <Table>
+                  <TableHeader>
+                    <TableRow className="hover:bg-transparent">
+                      <TableHead>Service</TableHead>
+                      <TableHead>Address</TableHead>
+                      <TableHead>State</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {services.length === 0 ? (
+                      <TableRow><TableCell colSpan={3} className="text-center text-muted-foreground">No Service on the balancer.</TableCell></TableRow>
+                    ) : services.map((s) => (
+                      <TableRow key={s.uid}>
+                        <TableCell className="font-mono text-xs">{s.namespace}/{s.name}</TableCell>
+                        <TableCell className="font-mono text-xs">{s.vip || "—"}</TableCell>
+                        <TableCell className="whitespace-normal">{s.state}{s.reason ? ` (${s.reason}: ${s.message})` : ""}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            ) : v ? (
+              <p className="text-muted-foreground">No balancer yet: the cluster's first Service with a public address builds it.</p>
+            ) : null}
+            <Note>
+              {mode
+                ? <>Run again to mint a new credential: the old token stops at once, the controller reads the new one from its Secret, and the cluster gets the portal's controller image. The mode stays.</>
+                : <>Adds the controller in class-only mode: Services of class <code>proxcloud.io/lb</code> get a public address, and no MetalLB address moves. The cluster is pinned to the provider's chart <span className="font-mono">{pin || "—"}</span> (0.1.17 or later) in the same apply, which re-renders its chart as a bump does. Refused, with the reason, when the site cannot serve the cluster: no gateway URL or controller image, shared workers, no load balancer on the provider, or a public network the project may not use.</>}
+            </Note>
+            {enable.isError && <p role="alert" className="text-destructive">{(enable.error as Error).message}</p>}
+            <div className="flex justify-end">
+              <Button size="sm" onClick={() => enable.mutate()} disabled={enable.isPending}>
+                {enable.isPending ? "Working…" : mode ? "Rotate the controller's credential" : "Enable load balancer controller"}
+              </Button>
+            </div>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
   )
 }
 

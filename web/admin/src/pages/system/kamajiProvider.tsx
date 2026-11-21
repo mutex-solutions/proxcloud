@@ -28,6 +28,9 @@ export type KamajiFormState = {
   pveApiUrl: string // the PVE API as CAPMOX on the services cluster reaches it
   removedKeys: string[] // stored config.cluster keys that no longer exist; a save drops them
   workerMtu: string // worker NIC MTU on a tenant vnet
+  // config.cluster.loadBalancer: the public network and flavor of each cluster's load balancer; both empty = none.
+  lbPublicNetworkId: string
+  lbFlavorId: string
   clusterExtra: Record<string, unknown> // stored config.cluster keys this form does not edit
 }
 
@@ -49,6 +52,8 @@ export const emptyKamajiForm: KamajiFormState = {
   pveApiUrl: "",
   removedKeys: [],
   workerMtu: "1450",
+  lbPublicNetworkId: "",
+  lbFlavorId: "",
   clusterExtra: {},
 }
 
@@ -57,7 +62,7 @@ export const emptyKamajiForm: KamajiFormState = {
 const REMOVED_CLUSTER_KEYS = ["csiSharedStores", "pveCsiUrl"]
 
 // The config.cluster keys the form owns; anything else survives a save untouched.
-const CLUSTER_FORM_KEYS = ["dataStoreName", "dnsZone", "rootVolumeGiB", "allowedCidrs", "flavors", "versions", "imageVariants", "pveApiUrl", "workerMtu", ...REMOVED_CLUSTER_KEYS]
+const CLUSTER_FORM_KEYS = ["dataStoreName", "dnsZone", "rootVolumeGiB", "allowedCidrs", "flavors", "versions", "imageVariants", "pveApiUrl", "workerMtu", "loadBalancer", ...REMOVED_CLUSTER_KEYS]
 
 // splitLines is the shared reader for the one-per-line textarea fields.
 const splitLines = (s: string) => s.split("\n").map((v) => v.trim()).filter(Boolean)
@@ -116,7 +121,9 @@ export const kamajiFormValid = (f: KamajiFormState, requireKubeconfig = true) =>
     required.every((v) => v.trim() !== "") &&
     Number(f.rootVolumeGiB) >= 1 &&
     parsed !== null &&
-    Object.keys(parsed.versions).length > 0
+    Object.keys(parsed.versions).length > 0 &&
+    // A load balancer needs both, or neither is set.
+    !f.lbPublicNetworkId.trim() === !f.lbFlavorId.trim()
   )
 }
 
@@ -141,6 +148,8 @@ export function kamajiConfigBlocks(f: KamajiFormState) {
       ...(splitCsv(f.allowedCidrs).length ? { allowedCidrs: splitCsv(f.allowedCidrs) } : {}),
       // Omitted entirely when empty — an absent key means "offer all flavors".
       ...(splitLines(f.flavors).length ? { flavors: splitLines(f.flavors) } : {}),
+      // Absent = no cluster of this provider gets the product load balancer; the API checks the pair on save.
+      ...(f.lbPublicNetworkId.trim() ? { loadBalancer: { publicNetworkId: f.lbPublicNetworkId.trim(), flavorId: f.lbFlavorId.trim() } } : {}),
       versions: parseVersions(f.versions)?.versions ?? {},
       // Sent complete on every save (the update route replaces whole blocks) — including the
       // empty {} so deleting the last variant line actually removes the stored variants.
@@ -203,6 +212,8 @@ export function kamajiFormFromService(svc: {
     pveApiUrl: String(cluster.pveApiUrl ?? ""),
     removedKeys: REMOVED_CLUSTER_KEYS.filter((k) => k in cluster),
     workerMtu: cluster.workerMtu ? String(cluster.workerMtu) : "",
+    lbPublicNetworkId: String(cluster.loadBalancer?.publicNetworkId ?? ""),
+    lbFlavorId: String(cluster.loadBalancer?.flavorId ?? ""),
     clusterExtra: Object.fromEntries(Object.entries(cluster).filter(([k]) => !CLUSTER_FORM_KEYS.includes(k))),
   }
 }
@@ -318,6 +329,26 @@ export function KamajiProviderForm({
         <p className="text-xs text-muted-foreground">
           Flavor <em>ids</em> from the Proxmox flavor catalog, not display names. Only these are
           offered for worker pools; empty = every flavor.
+        </p>
+      </div>
+      <div className="grid gap-2">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div className="grid gap-2">
+            <Label htmlFor="km-lb-net">Load balancer public network (optional)</Label>
+            <Input id="km-lb-net" className="font-mono" value={form.lbPublicNetworkId} onChange={(e) => setForm({ ...form, lbPublicNetworkId: e.target.value })} placeholder="vmbr1" />
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="km-lb-flavor">Load balancer flavor id</Label>
+            <Input id="km-lb-flavor" className="font-mono" value={form.lbFlavorId} onChange={(e) => setForm({ ...form, lbFlavorId: e.target.value })} placeholder="lb-small" />
+          </div>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          <code>config.cluster.loadBalancer</code>: a Service of type LoadBalancer gets a public address of this public
+          network (a plain bridge with a gateway, on the workers' Proxmox provider), on two appliance VMs of this flavor per
+          cluster, billed to the tenant. Both or neither; empty = MetalLB only. New clusters get it by default when the
+          portal also has the gateway URL and controller image and the chart is 0.1.17 or later; an existing cluster gets it
+          class-only from its Load balancer button below.
+          {!form.lbPublicNetworkId.trim() !== !form.lbFlavorId.trim() ? <span className="text-destructive"> Set both, or clear both.</span> : null}
         </p>
       </div>
       <div className="grid gap-2">
