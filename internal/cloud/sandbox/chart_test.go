@@ -41,7 +41,7 @@ func renderSandboxChart(t *testing.T, mode string, set ...string) string {
 	args := append([]string{"template", "sandbox", sandboxChart, "-n", "sandbox-system", "-f", sandboxChart + "/examples/values-" + mode + ".yaml"}, set...)
 	var stderr bytes.Buffer
 	cmd := exec.Command(helm, args...)
-	cmd.Stderr = &stderr // the files/agent-sandbox link makes Helm print a line there
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("helm %v: %v\n%s", args, err, stderr.String())
@@ -129,15 +129,15 @@ func TestSandboxChartGolden(t *testing.T) {
 // guardrail (with no extraDeny), the warming deny-all, the RuntimeClass handler, the telemetry collector and the
 // vendored agent-sandbox. The installer path and the platform path then install and fence the same way.
 func TestSandboxChartEqualsTheInstallerFiles(t *testing.T) {
-	scl := map[string][]map[string]any{}
+	inst := map[string][]map[string]any{}
 	for _, f := range []string{"node-setup.yaml", "network-policy.yaml", "runtimeclass.yaml", "telemetry.yaml"} {
-		scl[f] = readSCL(t, f)
+		inst[f] = readSCL(t, f)
 	}
 	for _, mode := range []string{"shared", "separate"} {
 		docs := yamlDocs(t, renderSandboxChart(t, mode, "--set", "guardrail.extraDeny=null"))
 
 		cm := find(t, docs, "ConfigMap", "node-setup")["data"].(map[string]any)["setup.sh"]
-		if want := find(t, scl["node-setup.yaml"], "ConfigMap", "node-setup")["data"].(map[string]any)["setup.sh"]; cm != want {
+		if want := find(t, inst["node-setup.yaml"], "ConfigMap", "node-setup")["data"].(map[string]any)["setup.sh"]; cm != want {
 			t.Errorf("%s: node-setup's setup.sh differs from deploy/sandbox-cluster/node-setup.yaml", mode)
 		}
 		container := func(ds map[string]any, name string) map[string]any {
@@ -152,7 +152,7 @@ func TestSandboxChartEqualsTheInstallerFiles(t *testing.T) {
 			t.Fatalf("no container %s", name)
 			return nil
 		}
-		gotDS, wantDS := find(t, docs, "DaemonSet", "node-setup"), find(t, scl["node-setup.yaml"], "DaemonSet", "node-setup")
+		gotDS, wantDS := find(t, docs, "DaemonSet", "node-setup"), find(t, inst["node-setup.yaml"], "DaemonSet", "node-setup")
 		for _, k := range []string{"env", "command", "args", "volumeMounts", "securityContext", "readinessProbe"} {
 			if g, w := container(gotDS, "setup")[k], container(wantDS, "setup")[k]; !reflect.DeepEqual(g, w) {
 				t.Errorf("%s: node-setup container %s\n got %v\nwant %v", mode, k, g, w)
@@ -166,18 +166,18 @@ func TestSandboxChartEqualsTheInstallerFiles(t *testing.T) {
 			}
 		}
 		for _, n := range []string{"sandbox-tenant-egress", "sandbox-tenant-ingress"} {
-			if g, w := find(t, docs, "CiliumClusterwideNetworkPolicy", n)["spec"], find(t, scl["network-policy.yaml"], "CiliumClusterwideNetworkPolicy", n)["spec"]; !reflect.DeepEqual(g, w) {
+			if g, w := find(t, docs, "CiliumClusterwideNetworkPolicy", n)["spec"], find(t, inst["network-policy.yaml"], "CiliumClusterwideNetworkPolicy", n)["spec"]; !reflect.DeepEqual(g, w) {
 				t.Errorf("%s: %s differs from deploy/sandbox-cluster/network-policy.yaml\n got %v\nwant %v", mode, n, g, w)
 			}
 		}
-		if g, w := find(t, docs, "CiliumNetworkPolicy", "sandbox-warming-deny-all")["spec"], find(t, scl["network-policy.yaml"], "CiliumNetworkPolicy", "sandbox-warming-deny-all")["spec"]; !reflect.DeepEqual(g, w) {
+		if g, w := find(t, docs, "CiliumNetworkPolicy", "sandbox-warming-deny-all")["spec"], find(t, inst["network-policy.yaml"], "CiliumNetworkPolicy", "sandbox-warming-deny-all")["spec"]; !reflect.DeepEqual(g, w) {
 			t.Errorf("%s: sandbox-warming-deny-all differs", mode)
 		}
-		if g, w := find(t, docs, "RuntimeClass", "gvisor")["handler"], find(t, scl["runtimeclass.yaml"], "RuntimeClass", "gvisor")["handler"]; g != w {
+		if g, w := find(t, docs, "RuntimeClass", "gvisor")["handler"], find(t, inst["runtimeclass.yaml"], "RuntimeClass", "gvisor")["handler"]; g != w {
 			t.Errorf("%s: RuntimeClass handler %v, want %v", mode, g, w)
 		}
 		gotT := find(t, docs, "DaemonSet", "sandbox-telemetry")["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
-		wantT := find(t, scl["telemetry.yaml"], "DaemonSet", "sandbox-telemetry")["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+		wantT := find(t, inst["telemetry.yaml"], "DaemonSet", "sandbox-telemetry")["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
 		for _, k := range []string{"volumes", "hostNetwork", "serviceAccountName", "tolerations"} {
 			if !reflect.DeepEqual(gotT[k], wantT[k]) {
 				t.Errorf("%s: telemetry pod %s differs", mode, k)
@@ -188,6 +188,13 @@ func TestSandboxChartEqualsTheInstallerFiles(t *testing.T) {
 			if !reflect.DeepEqual(gc[k], wc[k]) {
 				t.Errorf("%s: telemetry container %s differs", mode, k)
 			}
+		}
+	}
+	for _, f := range []string{"sandbox-with-extensions.yaml", "LICENSE"} {
+		a, errA := os.ReadFile(scl + "agent-sandbox/" + f)
+		b, errB := os.ReadFile(sandboxChart + "/files/agent-sandbox/" + f)
+		if errA != nil || errB != nil || !bytes.Equal(a, b) {
+			t.Errorf("the chart's files/agent-sandbox/%s is not a copy of deploy/sandbox-cluster/agent-sandbox/%s (%v, %v)", f, f, errA, errB)
 		}
 	}
 	vendored := readSCL(t, "agent-sandbox/sandbox-with-extensions.yaml")

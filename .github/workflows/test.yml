@@ -164,7 +164,7 @@ jobs:
         run: |
           if git grep -I -i -n -P -e "$LEGACY_BACKEND_PATTERN" -- . \
                ':!docs/architecture/c4/CHANGELOG.md' ':!internal/platform/billing/countries.json' \
-               ':!deploy/sandbox-cluster/agent-sandbox'; then
+               ':!deploy/sandbox-cluster/agent-sandbox' ':!deploy/charts/proxcloud-sandbox/files/agent-sandbox'; then
             echo "::error::previous-backend terms found"; exit 1
           fi
           if git ls-files | grep -i -P -e "$LEGACY_BACKEND_PATTERN"; then
