@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { ColumnDef } from "@tanstack/react-table"
 import { toast } from "sonner"
-import { ArrowLeft, Plus, RefreshCw, Scale, Trash2, TriangleAlert } from "lucide-react"
+import { ArrowLeft, Plus, RefreshCcw, RefreshCw, Scale, Trash2, TriangleAlert } from "lucide-react"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { DataTable, sortableHeader } from "@/components/data-table"
 import { EmptyState } from "@/components/empty-state"
@@ -11,23 +11,29 @@ import { StatusBadge } from "@/components/status-badge"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Switch } from "@/components/ui/switch"
 import { apiFetch, type CloudScope } from "@/lib/api"
 import { timeAgo } from "@/lib/format"
 import { useCloudList, useCloudScope, useProjectId } from "@/lib/hooks"
 import type { CloudResource } from "@/lib/types"
 
 interface Member { serverId: string; port: number; weight?: number; address?: string; missing?: boolean }
-interface Pool { name: string; protocol: string; algorithm: string; members: Member[] }
-interface Listener { port: number; pool: string }
+interface HealthCheck { type: string; port?: number; path?: string }
+interface Pool { name: string; protocol: string; algorithm: string; members: Member[]; healthCheck?: HealthCheck | null; proxyProtocol?: boolean }
+interface Listener { port: number; pool: string; sourceRanges?: string[] | null }
+// One VM of a load balancer with high availability, as the last apply saw it.
+interface Appliance { serverId: string; node?: string; privateIp?: string; role?: string; holdsVip?: boolean; state?: string; reason?: string }
 interface LB {
   id: string; name: string; status: string; statusMessage?: string; serverId?: string; networkId: string
   publicIp?: string; privateIp?: string; listeners?: Listener[] | null; pools?: Pool[] | null
+  ha?: boolean; appliances?: Appliance[] | null; replacing?: string
 }
 interface Health { pool: string; serverId: string; port: number; status: string }
 
@@ -77,6 +83,7 @@ export default function LoadBalancersPage() {
     { id: "status", accessorFn: (r) => lbOf(r).status, header: sortableHeader("Status"), cell: ({ getValue }) => <StatusBadge status={getValue()} /> },
     { id: "ip", accessorFn: (r) => lbOf(r).publicIp ?? "", header: "Public address", cell: ({ getValue }) => <span className="font-mono text-sm">{getValue() || "—"}</span> },
     { id: "listeners", accessorFn: (r) => (lbOf(r).listeners ?? []).map((l) => l.port).join(", "), header: "Listeners", cell: ({ getValue }) => <span className="text-sm text-muted-foreground">{getValue() || "None"}</span> },
+    { id: "ha", accessorFn: (r) => (lbOf(r).ha ? "Two appliances" : "One VM"), header: "Runs on", cell: ({ getValue }) => <span className="text-sm text-muted-foreground">{getValue()}</span> },
     { id: "created", accessorFn: (r) => r.createdAt ?? "", header: sortableHeader("Created"), cell: ({ getValue }) => <span className="text-sm text-muted-foreground">{timeAgo(getValue())}</span> },
   ], [pid])
 
@@ -153,10 +160,11 @@ function CreateDialog({ open, onOpenChange, pid, scope, onCreated }: {
   const [networkId, setNetworkId] = useState("")
   const [publicNetworkId, setPublicNetworkId] = useState("")
   const [flavorId, setFlavorId] = useState("")
+  const [ha, setHa] = useState(true)
   const create = useMutation({
     mutationFn: () => apiFetch<CloudResource>(`/project/${pid}/cloud`, {
       method: "POST", cloud: scope,
-      body: { type: "LOAD_BALANCER", data: { name, networkId, publicNetworkId, flavorId } },
+      body: { type: "LOAD_BALANCER", data: { name, networkId, publicNetworkId, flavorId, ha } },
     }),
     onSuccess: (r) => {
       toast.success(`Load balancer "${name}" is being created`)
@@ -173,7 +181,7 @@ function CreateDialog({ open, onOpenChange, pid, scope, onCreated }: {
         <DialogHeader>
           <DialogTitle>Create load balancer</DialogTitle>
           <DialogDescription>
-            It runs on its own small VM, billed like any server with its disk and public address, and counted in your quota.
+            It runs on its own small VMs, billed like any server with its disk, plus its public address, and counted in your quota.
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-4 py-2">
@@ -211,6 +219,17 @@ function CreateDialog({ open, onOpenChange, pid, scope, onCreated }: {
               </SelectContent>
             </Select>
           </div>
+          <div className="flex items-start justify-between gap-4 rounded-md border p-3">
+            <div className="grid gap-1">
+              <Label htmlFor="lb-ha">High availability</Label>
+              <p className="text-xs text-muted-foreground" data-testid="lb-ha-cost">
+                {ha
+                  ? "Two appliance VMs share the address: when one fails, the other takes over within seconds. Both are billed as servers of this size, with their disks."
+                  : "One appliance VM, billed as a server of this size with its disk. When it fails, the address is down until it is back."}
+              </p>
+            </div>
+            <Switch id="lb-ha" checked={ha} onCheckedChange={setHa} />
+          </div>
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
@@ -233,7 +252,10 @@ export function LoadBalancerDetailPage() {
     queryKey: ["cloud-resource", pid, resourceId],
     queryFn: () => apiFetch<CloudResource>(`/project/${pid}/cloud/${resourceId}`, { cloud: scope }),
     enabled: !!scope,
-    refetchInterval: (q) => (BUSY.has(lbOf((q.state.data ?? {}) as CloudResource).status) ? 10000 : false),
+    refetchInterval: (q) => {
+      const cur = lbOf((q.state.data ?? {}) as CloudResource)
+      return BUSY.has(cur.status) ? 10000 : cur.ha ? 15000 : false
+    },
   })
   const lb = row.data ? lbOf(row.data) : undefined
   const health = useQuery({
@@ -253,6 +275,7 @@ export function LoadBalancerDetailPage() {
   const [pools, setPools] = useState<Pool[]>([])
   const [dirty, setDirty] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [confirmReplace, setConfirmReplace] = useState(false)
   useEffect(() => {
     if (lb && !dirty) {
       setListeners(lb.listeners ?? [])
@@ -263,9 +286,19 @@ export function LoadBalancerDetailPage() {
   const setPool = (i: number, patch: Partial<Pool>) => edit(() => setPools(pools.map((p, j) => (j === i ? { ...p, ...patch } : p))))
   const setMember = (i: number, k: number, patch: Partial<Member>) =>
     setPool(i, { members: pools[i].members.map((m, j) => (j === k ? { ...m, ...patch } : m)) })
+  // A TCP check on the member's own port is the default, sent as no check at all.
+  const setCheck = (i: number, patch: Partial<HealthCheck>) => {
+    const next: HealthCheck = { ...(pools[i].healthCheck ?? { type: "tcp" }), ...patch }
+    if (next.type !== "http") delete next.path
+    if (!next.port) delete next.port
+    setPool(i, { healthCheck: next.type === "tcp" && !next.port ? null : next })
+  }
 
   const save = useMutation({
-    mutationFn: () => action<CloudResource>(pid, resourceId, scope, "UPDATE_CONFIG", { listeners, pools }),
+    mutationFn: () => action<CloudResource>(pid, resourceId, scope, "UPDATE_CONFIG", {
+      listeners: listeners.map((l) => ({ ...l, sourceRanges: (l.sourceRanges ?? []).filter(Boolean) })),
+      pools,
+    }),
     onSuccess: () => {
       toast.success("Configuration saved")
       setDirty(false)
@@ -283,6 +316,18 @@ export function LoadBalancerDetailPage() {
     },
     onError: (e: Error) => toast.error(e.message),
   })
+  const replace = useMutation({
+    mutationFn: () => action<CloudResource>(pid, resourceId, scope, "REPLACE_APPLIANCES"),
+    onSuccess: () => {
+      toast.success("Replacing the appliances, the standby first")
+      setConfirmReplace(false)
+      void qc.invalidateQueries({ queryKey: ["cloud-resource", pid, resourceId] })
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+  const appliances = lb?.appliances ?? []
+  const nodes = new Set(appliances.map((a) => a.node).filter(Boolean))
+  const replacing = !!lb?.replacing
   const statusOf = (pool: string, m: Member) =>
     health.data?.find((h) => h.pool === pool && h.serverId === m.serverId && h.port === m.port)?.status
   const ready = !!lb?.privateIp
@@ -292,7 +337,7 @@ export function LoadBalancerDetailPage() {
       <PageHeader
         title={lb?.name ?? "Load balancer"}
         eyebrow="Load balancer"
-        description={lb?.publicIp ? `Public address ${lb.publicIp}, private address ${lb.privateIp}` : undefined}
+        description={lb?.publicIp ? (lb.ha ? `Public address ${lb.publicIp}, on two appliances` : `Public address ${lb.publicIp}, private address ${lb.privateIp}`) : undefined}
         actions={
           <>
             <Button variant="outline" size="sm" onClick={() => navigate(`/p/${pid}/load-balancers`)}><ArrowLeft className="size-4" /> All</Button>
@@ -305,9 +350,38 @@ export function LoadBalancerDetailPage() {
           <CardContent className="flex flex-wrap items-center gap-3 pt-6 text-sm">
             <StatusBadge status={lb?.status} />
             {lb?.status === "BUILD" && <span className="text-muted-foreground">Its VM is booting and installing HAProxy, usually a few minutes.</span>}
-            {lb?.statusMessage && <span className="text-muted-foreground">{lb.statusMessage}</span>}
+            {lb?.statusMessage && <span className="text-muted-foreground" data-testid="lb-status-message">{lb.statusMessage}</span>}
           </CardContent>
         </Card>
+
+        {lb?.ha && (
+          <Card data-testid="lb-appliances">
+            <CardHeader className="flex flex-row items-center justify-between">
+              <CardTitle className="text-base">Appliances</CardTitle>
+              <Button variant="outline" size="sm" disabled={replacing || lb.status === "BUILD"} onClick={() => setConfirmReplace(true)}>
+                <RefreshCcw className="size-4" /> Replace appliances
+              </Button>
+            </CardHeader>
+            <CardContent className="grid gap-2 text-sm">
+              {!appliances.length && <p className="text-muted-foreground">The two appliances are being built.</p>}
+              {appliances.map((a) => (
+                <div key={a.serverId} className="flex flex-wrap items-center gap-3">
+                  <span className="font-mono">VM {a.serverId}</span>
+                  <span className="text-muted-foreground">node {a.node || "—"}</span>
+                  <StatusBadge status={a.state ?? "unknown"} />
+                  {a.holdsVip ? <span className="font-medium">holds the address</span> : <span className="text-muted-foreground">standby</span>}
+                  {a.reason && <span className="text-muted-foreground">{a.reason}</span>}
+                </div>
+              ))}
+              {appliances.length > 1 && nodes.size === 1 && (
+                <p className="text-muted-foreground" data-testid="lb-one-node">
+                  Both appliances run on node {[...nodes][0]}: the load balancer survives an appliance failure, not the loss of the node.
+                </p>
+              )}
+              {replacing && <p data-testid="lb-replacing">Replacing the appliances, one at a time, the standby first. The address keeps answering; open connections are cut at the switch.</p>}
+            </CardContent>
+          </Card>
+        )}
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
@@ -349,6 +423,27 @@ export function LoadBalancerDetailPage() {
                       </SelectContent>
                     </Select>
                   </div>
+                  <div className="grid gap-1">
+                    <Label>Health check</Label>
+                    <Select value={p.healthCheck?.type ?? "tcp"} onValueChange={(v) => setCheck(i, { type: v })}>
+                      <SelectTrigger className="w-40" aria-label="Health check"><SelectValue /></SelectTrigger>
+                      <SelectContent><SelectItem value="tcp">TCP connection</SelectItem><SelectItem value="http">HTTP GET</SelectItem></SelectContent>
+                    </Select>
+                  </div>
+                  {p.healthCheck?.type === "http" && (
+                    <div className="grid gap-1">
+                      <Label htmlFor={`check-path-${i}`}>Path</Label>
+                      <Input id={`check-path-${i}`} className="w-36" placeholder="/" value={p.healthCheck.path ?? ""} onChange={(e) => setCheck(i, { path: e.target.value })} />
+                    </div>
+                  )}
+                  <div className="grid gap-1">
+                    <Label htmlFor={`check-port-${i}`}>Check port</Label>
+                    <Input id={`check-port-${i}`} className="w-28" type="number" placeholder="member's" value={p.healthCheck?.port ?? ""} onChange={(e) => setCheck(i, { port: Number(e.target.value) || undefined })} />
+                  </div>
+                  <label className="flex items-center gap-2 pb-2 text-sm">
+                    <Checkbox checked={!!p.proxyProtocol} onCheckedChange={(v) => setPool(i, { proxyProtocol: v === true })} aria-label="PROXY protocol" />
+                    PROXY protocol v2
+                  </label>
                   <Button variant="ghost" size="sm" onClick={() => edit(() => {
                     setPools(pools.filter((_, j) => j !== i))
                     setListeners(listeners.filter((l) => l.pool !== p.name))
@@ -397,6 +492,10 @@ export function LoadBalancerDetailPage() {
                   <SelectTrigger className="w-44" aria-label="Pool"><SelectValue /></SelectTrigger>
                   <SelectContent>{pools.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}</SelectContent>
                 </Select>
+                <span className="text-sm text-muted-foreground">from</span>
+                <Input className="w-72" aria-label="Allowed sources" placeholder="Any address, or networks such as 203.0.113.0/24"
+                  value={(l.sourceRanges ?? []).join(", ")}
+                  onChange={(e) => edit(() => setListeners(listeners.map((x, j) => (j === i ? { ...x, sourceRanges: e.target.value.split(/[\s,]+/) } : x))))} />
                 <Button variant="ghost" size="sm" onClick={() => edit(() => setListeners(listeners.filter((_, j) => j !== i)))}>Remove</Button>
               </div>
             ))}
@@ -411,12 +510,27 @@ export function LoadBalancerDetailPage() {
         </div>
       </div>
 
+      <Dialog open={confirmReplace} onOpenChange={setConfirmReplace}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Replace appliances</DialogTitle>
+            <DialogDescription>
+              Each appliance of "{lb?.name}" is built again from the current image, the standby first. Traffic switches once, in about a second, and open connections are cut then. The new VMs are billed as the old ones were.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmReplace(false)}>Cancel</Button>
+            <Button onClick={() => replace.mutate()} disabled={replace.isPending}>{replace.isPending ? "Starting…" : "Replace appliances"}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Delete load balancer</DialogTitle>
             <DialogDescription>
-              Delete "{lb?.name}"? Its VM goes and its public address returns to the pool. The servers behind it stay.
+              Delete "{lb?.name}"? {lb?.ha ? "Its two VMs go" : "Its VM goes"} and its public address returns to the pool. The servers behind it stay.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
