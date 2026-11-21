@@ -257,7 +257,8 @@ func TestMoveCarriesARollUnderALaterBOM(t *testing.T) {
 // refused. Under a release BOM that moves no third-party chart the kept one is carried to it; under the development
 // BOM of main, which carries nothing, and under a release BOM that moves cert-manager (the move from 0.10.0 also
 // replaces machines, so the pair gate refuses cert-manager's rows), the Retry goes on to the kept one itself, which it
-// can only do while its file is kept.
+// can only do while its file is kept. 0.10.2-rc.1 has these pins too and is taken the same way, although no build
+// records it as the target of such a replacement: the move from 0.10.0 to it is refused by the pair gate.
 func TestRollTowardAKeptCandidateGoesOn(t *testing.T) {
 	cur, err := Current()
 	if err != nil {
