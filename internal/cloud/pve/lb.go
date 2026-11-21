@@ -454,7 +454,8 @@ const (
 )
 
 // LBListenerRules is the firewall a balancer's listeners need: one rule per (address, source list), its ports in
-// lists of at most fwMaxPorts. Without vips (a single appliance) the rules name no destination, as they always have.
+// lists of at most fwMaxPorts. Without vips (a single appliance) the rules name no destination and hold one port
+// each, as they always have.
 func LBListenerRules(listeners []LBListener, vips []string) []FirewallRule {
 	bySource := map[string][]int{}
 	for _, l := range listeners {
@@ -468,9 +469,11 @@ func LBListenerRules(listeners []LBListener, vips []string) []FirewallRule {
 		src := strings.Join(ranges, ",")
 		bySource[src] = append(bySource[src], l.Port)
 	}
-	dests := []string{""}
+	// A single appliance keeps one rule per port, the rules it has had since the first release, so an existing
+	// balancer's firewall writes stay what they were (C13); it has at most lbMaxListeners of them.
+	dests, size := []string{""}, 1
 	if len(vips) > 0 {
-		dests = nil
+		dests, size = nil, fwMaxPorts
 		for _, v := range vips {
 			if a, err := netip.ParseAddr(v); err == nil && a.Is4() {
 				dests = append(dests, a.String())
@@ -482,7 +485,7 @@ func LBListenerRules(listeners []LBListener, vips []string) []FirewallRule {
 		for _, src := range slices.Sorted(maps.Keys(bySource)) {
 			ports := slices.Clone(bySource[src])
 			slices.Sort(ports)
-			for chunk := range slices.Chunk(ports, fwMaxPorts) {
+			for chunk := range slices.Chunk(ports, size) {
 				nums := make([]string, len(chunk))
 				for i, p := range chunk {
 					nums[i] = strconv.Itoa(p)

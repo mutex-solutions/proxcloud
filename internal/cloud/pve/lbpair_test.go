@@ -351,6 +351,44 @@ func TestSetIPFilterEntriesKeepsServedAddresses(t *testing.T) {
 	}
 }
 
+// C13: a single appliance's listener rules are written as before the pair. SetVMInboundPorts is the writer of
+// origin/main, unchanged; from the same rules, SetLBRules with no VIPs must leave the same rules with as many writes.
+func TestSetLBRulesSingleApplianceAsBefore(t *testing.T) {
+	ctx := context.Background()
+	start := []FirewallRule{
+		{Type: "in", Action: "ACCEPT", Proto: "tcp", DPort: "80", Comment: lbListenerComment},
+		{Type: "in", Action: "ACCEPT", Proto: "tcp", DPort: "8080", Comment: lbListenerComment},
+	}
+	key := func(rs []FirewallRule) []string {
+		var out []string
+		for _, r := range rs {
+			r.Pos = 0
+			out = append(out, lbRuleKey(r))
+		}
+		slices.Sort(out)
+		return out
+	}
+	for _, ports := range [][]int{{80, 443, 5432}, {80}, nil} {
+		before := &fwFake{rules: map[int][]FirewallRule{1: slices.Clone(start)}, sets: map[int]map[string][]string{}}
+		after := &fwFake{rules: map[int][]FirewallRule{1: slices.Clone(start)}, sets: map[int]map[string][]string{}}
+		wBefore, wAfter := 0, 0
+		before.onWrite, after.onWrite = func() { wBefore++ }, func() { wAfter++ }
+		if err := fwService(t, before).SetVMInboundPorts(ctx, "n1", 1, ports); err != nil {
+			t.Fatal(err)
+		}
+		var ls []LBListener
+		for _, p := range ports {
+			ls = append(ls, LBListener{Port: p, Pool: "p"})
+		}
+		if err := fwService(t, after).SetLBRules(ctx, "n1", 1, LBListenerRules(ls, nil)); err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(key(before.rules[1]), key(after.rules[1])) || wBefore != wAfter {
+			t.Errorf("ports %v: before the pair %v (%d writes), now %v (%d writes)", ports, key(before.rules[1]), wBefore, key(after.rules[1]), wAfter)
+		}
+	}
+}
+
 // C6: 50 listener ports with two source lists on two VIPs fit Proxmox's limits as rules of at most 15 ports; the
 // writer adds before it deletes and leaves every rule it did not write.
 func TestSetLBRulesWithinFirewallLimits(t *testing.T) {
