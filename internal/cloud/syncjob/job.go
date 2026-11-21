@@ -255,18 +255,28 @@ func (j *Job) detectProxmoxCapabilities(ctx context.Context) {
 		if _, err := j.services.DetectPVECapabilities(ctx, es, ps.C); err != nil {
 			j.log.Warn("syncjob: pve capability detection", "serviceId", es.ID, "err", err)
 		}
-		if j.staleSeeds != nil && !inventoryFailed(ctx, es.ID, "") {
+		// A project whose inventory could not be proved in this run (inventoryFailed) holds back only what deletes on
+		// the word of a list: its own rows and what follows them (syncProxmoxService), and of the provider's passes
+		// the seed sweep (a seed whose SERVER row is gone) and the sandbox pass's sweep (firewall generations no
+		// worker it lists refers to).
+		untrusted := inventoryFailed(ctx, es.ID, "")
+		if j.staleSeeds != nil && !untrusted {
 			if err := j.staleSeeds(ctx, ps, es); err != nil {
 				j.log.Warn("syncjob: drop stale seeds", "serviceId", es.ID, "err", err)
 			}
 		}
-		if j.loadBalancers != nil && !inventoryFailed(ctx, es.ID, "") {
+		// The passes from here on run whatever a project's inventory said. None reads the rows a failed proof kept:
+		// each asks Proxmox itself and acts on the portal's own records (the balancer rows, the address allocations,
+		// the provider's settings, the clusters), and none removes anything because a VM is missing from a list. They
+		// repair and add. The load balancer pass starts a stopped appliance and loads a config again: in the
+		// v0.11.0-rc.1 drill a stopped appliance made its project untrusted, which stopped this pass, the one that
+		// starts it, and with it the provider isolation, worker firewalls, start at boot and sandbox fence of every
+		// tenant of the provider (N2-1). A tenant's change and a cluster's controller run the same apply at any time
+		// without asking this sync.
+		if j.loadBalancers != nil {
 			if err := j.loadBalancers(ctx, ps, es); err != nil {
 				j.log.Warn("syncjob: load balancers", "serviceId", es.ID, "err", err)
 			}
-		}
-		if inventoryFailed(ctx, es.ID, "") {
-			continue
 		}
 		j.reconcileProviderIsolation(ctx, ps, es)
 		if j.workerFW != nil {
@@ -275,7 +285,7 @@ func (j *Job) detectProxmoxCapabilities(ctx context.Context) {
 			}
 		}
 		j.startAtBoot(ctx, ps, es)
-		if err := j.reconcileSandboxWorkers(ctx, ps, es); err != nil {
+		if err := j.reconcileSandboxWorkers(ctx, ps, es, !untrusted); err != nil {
 			j.log.Error("syncjob: sandbox workers", "serviceId", es.ID, "err", err)
 		}
 	}
@@ -444,8 +454,11 @@ func (j *Job) syncProxmoxService(ctx context.Context, p *project.Project, es *ex
 	if j.csiVolumes != nil {
 		provs = append(provs, j.csiVolumes(region, p.ID, es))
 	}
+	// The proof is one project's (pve.vmInventory: its pool, its VMs), so a failure stops this project's types that
+	// follow and its isolation and cleanup below, and no other project's: each proves its own inventory before any
+	// write. Asking for the provider here stopped every project synced after the failed one, at every run.
 	for _, prov := range provs {
-		if inventoryFailed(ctx, es.ID, p.ID) {
+		if inventoryFailed(ctx, "", p.ID) {
 			break
 		}
 		st, err := providers.Reconcile(ctx, prov, j.cloud, es.ID, now)
@@ -460,7 +473,7 @@ func (j *Job) syncProxmoxService(ctx context.Context, p *project.Project, es *ex
 		}
 		count += st.Created + st.Updated
 	}
-	if inventoryFailed(ctx, es.ID, p.ID) {
+	if inventoryFailed(ctx, "", p.ID) {
 		return count // do not rewrite isolation or run cleanup from an untrusted read
 	}
 	if err := serverProvider.ReconcileVerifiedProtection(ctx); err != nil {

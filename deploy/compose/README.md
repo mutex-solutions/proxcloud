@@ -276,7 +276,13 @@ was down.
   clusters then trust. Keep that volume: a new certificate means a new gateway Secret for every
   cluster. Backups of the database do not hold it; `uninstall` keeps it, `--purge` deletes it.
   `--no-cluster-gateway` turns the listener off. It needs ProxCloud v0.11.0 or later (or a `dev-<sha>`
-  build): an older API cannot make the certificate. Not run on a lab.
+  build): an older API cannot make the certificate. Run on one lab (v0.11.0-rc.1, six switches): on an
+  existing install the command takes about 14 s and recreates only the API container; nothing else
+  listens on 8444 than `<address>:8444`; the certificate is ECDSA P-256 with the address as its SAN,
+  valid ten years from one hour back, its key mode 600; a call without a credential or with a wrong one
+  is answered 401 on the load balancer path and on the CSI paths; the platform cluster's nodes reached
+  it over the same L2 with no route added; `--no-cluster-gateway` removes the listener and the two
+  `.env` entries and keeps the volume.
 
 ## Operate
 

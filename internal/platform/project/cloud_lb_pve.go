@@ -352,7 +352,7 @@ func (h *Handler) ReconcileLoadBalancers(ctx context.Context, _ *pve.Service, es
 		// A cluster's balancer converges from its cluster's state, which checks the project itself. In the background:
 		// a pass may build an appliance (up to lbBuildTimeout), which must not hold up the rest of the sync.
 		if lb, err := lbOfRow(&rows[i]); err == nil && lb.Cluster != nil && h.lbGW != nil {
-			go h.lbClusterConverge(context.WithoutCancel(ctx), lb.Cluster.ID)
+			go h.lbClusterConverge(context.WithoutCancel(ctx), lb.Cluster.ID, true)
 			continue
 		}
 		proj, err := h.svc.GetProjectByID(ctx, rows[i].ProjectID)
@@ -383,6 +383,21 @@ func lbVMs(ctx context.Context, ps *pve.Service) (map[string]pve.ClusterResource
 		}
 	}
 	return out, nil
+}
+
+// lbVMUnseen says that an appliance missing from the VM list is not known to be gone: a guest the platform's token
+// does not see still holds its VMID (the token lost sight of the pool, or the VM was moved out of it), or Proxmox
+// did not say. Only a free VMID proves a VM gone, as for a SERVER row (docs/vm-inventory-safety.md): the list is
+// filtered by what the token may see, and a pass that read a filtered list as an absence would tell the tenant to
+// delete, or to replace, a balancer that is serving. The services sync runs this pass whether or not it could prove
+// the project's inventory, so the pass proves its one absence itself.
+func lbVMUnseen(ctx context.Context, ps *pve.Service, serverID string) bool {
+	id, err := strconv.Atoi(serverID)
+	if err != nil {
+		return false
+	}
+	free, err := ps.C.VMIDFree(ctx, id)
+	return err != nil || !free
 }
 
 // lbMemberAddress returns the address of a member's server if it may serve this balancer, "" if not.
@@ -486,6 +501,10 @@ func (h *Handler) lbApplyLocked(ctx context.Context, es *externalservice.Externa
 		return err // nothing is known, so nothing changes
 	}
 	vm, listed := vms[lb.ServerID]
+	if lb.ServerID != "" && !listed && lbVMUnseen(ctx, ps, lb.ServerID) {
+		lb.Status, lb.StatusMessage = lbStatusDown, "The platform cannot see the load balancer's VM, and changes nothing until it can."
+		return nil
+	}
 	if lb.ServerID == "" || !listed || vm.Pool != ps.PoolFor(proj.ID) || (!vm.NodeDown && pve.LBOfTags(vm.Tags) != lb.ID) {
 		if lb.ServerID != "" || lbStuck(cr) { // no server yet: the create is still on it
 			lb.Status, lb.StatusMessage = lbStatusError, "The load balancer's VM is gone. Delete this load balancer and create it again."

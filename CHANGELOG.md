@@ -74,6 +74,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The services sync keeps running when a load balancer's appliance is down** (`internal/cloud/pve/vm_inventory_data.go`,
+  `syncprovider.go`, `write.go`, `internal/cloud/syncjob/job.go`). The drill of `0.11.0-rc.1` stopped the master
+  appliance of a pair and the sync started it again in 1 of 6 tries. The sync had read the pair's public address from
+  the master's guest agent into its SERVER row. A stopped VM has no agent, so the address counted as lost, the
+  project's inventory as unproved, and the sync left out its load balancer pass, the one that starts a stopped
+  appliance; the row went on saying `ACTIVE`, "MASTER up". The same skip left out the isolation rules, worker
+  firewalls, start at boot and sandbox pass of every tenant of the provider, and the sync of every project after the
+  failed one, for as long as the VM stayed down. Now:
+  - an appliance's SERVER row holds the address the platform configured and nothing its guest reports; a row that
+    holds a balancer's address is put right by the next sync, whatever state the VM is in;
+  - a VM that Proxmox reports stopped or paused is known to have no agent: its row goes back to its configured
+    addresses, as after a stop through the portal, and its project is synced. This holds for any server, not only an
+    appliance: a tenant's VM that had reported a container bridge and was then shut down from inside kept its project
+    unsynced until it was started. A running VM whose agent does not answer keeps its addresses, as before;
+  - a project whose inventory cannot be proved holds back its own rows, isolation and cleanup, the provider's seed
+    sweep and the sandbox pass's sweep of old firewall generations, and nothing else. The other projects, the load
+    balancer pass, the provider's isolation rules, worker firewalls, start at boot and the fencing of sandbox workers
+    run ([docs/vm-inventory-safety.md](docs/vm-inventory-safety.md#what-an-unproved-inventory-holds-back));
+  - the load balancer pass, which now runs in every sync, proves the one absence it acts on: an appliance missing
+    from the VM list is gone only when its VMID is free in the cluster. One the platform's token cannot see is
+    `down`, "the platform cannot see its VM", and the row no longer says "The load balancer's VM is gone. Delete
+    this load balancer" or "Replace appliances" for a VM that is only out of sight.
+  Tested against Postgres and a fake Proxmox that stops and pauses VMs and whose stopped VMs have no agent
+  (`TestSyncRepairsAStoppedApplianceWhateverElseIsUnknown`, `TestVMInventoryApplianceRowNeverHoldsTheBalancersAddress`,
+  `TestVMInventoryStoppedVMIsKnownToHaveNoAgent`, `TestLBApplianceOutOfSightIsNotGone`). Not run on a lab.
+- **An API restart no longer holds a cluster's load balancer for 20 minutes** (`internal/platform/lock/shedlock.go`,
+  `internal/platform/project/cloud_lb_cluster_pve.go`). The converge of a cluster's balancer took its lock for the
+  longest a pass can take, and on the drill an API restarted in the middle of one left the lock held: for 24.7
+  minutes every state the controller sent was stored and none applied, so a deleted Service kept its address. The
+  lock now lasts one minute and its holder extends it while it works (`ShedLock.Hold`); a holder that died loses it a
+  minute later. A pair also refuses a third appliance, should two passes ever build at once.
+- **A controller's unchanged state starts no pass over the balancer** (`cloud_lb_cluster_pve.go`). Every PUT, one
+  every 10 seconds per cluster, ran a full pass: about 16 Proxmox calls with two guest commands, 96 calls a minute per
+  cluster on the drill. A PUT now starts a pass when the state changed, when the balancer is not settled (building,
+  `DEGRADED`, an address to give back), or when the last look at a settled balancer is a minute old; it is answered
+  with each Service's state as before. An appliance stopped behind a settled balancer is therefore started again
+  within about 70 seconds, where the drill measured 2 to 6; the other appliance takes the address in seconds either
+  way.
+- **A refused load balancer credential says whose and why** (`internal/cloud/lbgw/gateway.go`). The log line of a
+  refused credential named neither the cluster nor the reason, and no audit event was written, where the guide said
+  refusals were audited. The line now carries the cluster the header claimed and `malformed`, `unknown cluster`,
+  `revoked` or `wrong secret`; a revoked credential and a wrong secret for a cluster that has one are `LB_GATEWAY` /
+  `DENY` audit events of its project, at most one per cluster and reason a minute. The caller still gets the same
+  401, and the secret is in neither.
 - **A load balancer's config is recorded only when its appliance serves it** (`internal/cloud/pve/lb.go`,
   `lbpair.go`, `internal/platform/project/cloud_lb_pve.go`, `cloud_lb_pair_pve.go`). The drill of `0.11.0-rc.1`
   replaced a pair's appliances and the address refused every connection for 458 seconds while the row read

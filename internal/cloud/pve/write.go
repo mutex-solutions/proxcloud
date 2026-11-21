@@ -382,7 +382,8 @@ func (s *Service) ResolveVM(ctx context.Context, projectID, externalID string) (
 
 // ServerAddresses is the VM's addresses in the API shape: what the guest agent reports, or
 // failing that (stopped, still booting, no agent) the static ipconfigN of its config. An
-// address on ipconfig1+ is a public-NIC address, the rest are private.
+// address on ipconfig1+ is a public-NIC address, the rest are private. A load balancer's
+// appliance is never asked: a pair's public addresses are the balancer's (vmInventory.addresses).
 func (s *Service) ServerAddresses(ctx context.Context, r ClusterResource) map[string]any {
 	cfg, err := s.C.GetVMConfig(ctx, r.Node, r.VMID)
 	if err != nil {
@@ -399,7 +400,7 @@ func (s *Service) ServerAddresses(ctx context.Context, r ClusterResource) map[st
 		public[addr] = key != "net0"
 	}
 	var addrs []any
-	if r.Status == "running" {
+	if r.Status == "running" && LBOfTags(r.Tags) == "" {
 		if ifaces, err := s.C.AgentNetworkInterfaces(ctx, r.Node, r.VMID); err == nil {
 			if private, ok := AgentAddresses(ifaces)["private"].([]any); ok {
 				addrs = private

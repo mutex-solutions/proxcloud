@@ -43,7 +43,8 @@ func (g *lbGuest) serving() bool { return g.haproxy && g.loaded == g.file }
 type pairWire struct {
 	t      *testing.T
 	tag    string // the appliances' balancer tag, pc-lb-abc when empty
-	gone   bool   // no VM is listed any more
+	gone   bool   // no VM is listed any more, and their VMIDs are free
+	unseen bool   // no VM is listed, and their VMIDs are held: the token lost sight of them
 	mu     sync.Mutex
 	log    []string
 	rules  map[string][]pve.FirewallRule
@@ -52,6 +53,9 @@ type pairWire struct {
 	runs   map[int]lbRun
 	files  []string // the HAProxy configs written, in order
 	reads  int      // state reads
+	pages  int      // reads of the cluster's VM list: one per apply
+	// gate, while set, holds every read of the VM list until it is closed: an apply in the middle of its work.
+	gate chan struct{}
 }
 
 type lbRun struct {
@@ -162,7 +166,13 @@ func (f *pairWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		tag = "pc-lb-abc"
 	}
 	if r.URL.Path == "/api2/json/cluster/resources" {
-		if f.gone {
+		f.pages++
+		if gate := f.gate; gate != nil {
+			f.mu.Unlock()
+			<-gate
+			f.mu.Lock()
+		}
+		if f.gone || f.unseen {
 			write([]map[string]any{})
 			return
 		}
@@ -179,6 +189,15 @@ func (f *pairWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		write(out)
+		return
+	}
+	if r.URL.Path == "/api2/json/cluster/nextid" { // PVE answers from every guest of the cluster, seen or not
+		if id := r.Form.Get("vmid"); f.guests[id] != nil && !f.gone {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"errors": map[string]string{"vmid": "VM " + id + " already exists"}})
+		} else {
+			write(id)
+		}
 		return
 	}
 	p := strings.Split(strings.TrimPrefix(r.URL.Path, "/api2/json/nodes/"), "/") // n, qemu, vmid, ...
