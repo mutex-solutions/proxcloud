@@ -12,7 +12,8 @@ enters a SERVER row, and a VM that Proxmox reports stopped or paused counts as k
 (`ServerSyncProvider.List`). `internal/cloud/syncjob`: a project's unproved inventory holds back that project's own
 sync and the two provider passes that delete on a list (the seed sweep, the sandbox pass's sweep); the other
 projects, the load balancer pass, provider isolation, worker firewalls, start at boot and the sandbox fence run
-(`detectProxmoxCapabilities`, `syncProxmoxService`, `reconcileSandboxWorkers`). `internal/platform/lock`:
+(`detectProxmoxCapabilities`, `syncProxmoxService`, `reconcileSandboxWorkers`), and the load balancer pass calls an
+appliance gone only when its VMID is free in the cluster (`lbVMUnseen`). `internal/platform/lock`:
 `ShedLock.Hold`, a lock taken for a lease and extended while its holder works. `internal/platform/project`: the
 cluster converge takes `lbc-<clusterId>` with it (one minute, was 20), a controller's PUT starts a pass only when
 the state changed, the balancer is not settled or the last look is a minute old (`lbPassDue`), and a cluster's pair

@@ -55,8 +55,12 @@ controller runs the same apply at any time without asking the sync. Until v0.11.
 stopped the sync of every project after it and all of these passes, at every run: one stopped appliance froze the
 isolation rules and worker firewalls of every tenant of the provider.
 
-A load balancer pass that runs while the token really has lost sight of VMs marks a member it cannot see `missing`
-and takes it out of the config until it is seen again; it deletes nothing, and the row keeps the member.
+The load balancer pass acts on one absence, an appliance missing from the VM list, and proves it itself the way a
+row's retirement is proved below: the appliance is gone only when its VMID is free in the whole cluster. One the
+token merely cannot see reads `down`, "the platform cannot see its VM" (a single appliance: `DOWN`, "The platform
+cannot see the load balancer's VM, and changes nothing until it can"), nothing is pushed to it, and the row never
+says to delete or replace a balancer for it. A member's server the pass cannot see is marked `missing` and left out
+of the config until it is seen again, as on a tenant's own change in that state; the row keeps the member.
 
 ## Proving real retirement
 

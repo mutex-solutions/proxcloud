@@ -91,10 +91,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - a project whose inventory cannot be proved holds back its own rows, isolation and cleanup, the provider's seed
     sweep and the sandbox pass's sweep of old firewall generations, and nothing else. The other projects, the load
     balancer pass, the provider's isolation rules, worker firewalls, start at boot and the fencing of sandbox workers
-    run ([docs/vm-inventory-safety.md](docs/vm-inventory-safety.md#what-an-unproved-inventory-holds-back)).
+    run ([docs/vm-inventory-safety.md](docs/vm-inventory-safety.md#what-an-unproved-inventory-holds-back));
+  - the load balancer pass, which now runs in every sync, proves the one absence it acts on: an appliance missing
+    from the VM list is gone only when its VMID is free in the cluster. One the platform's token cannot see is
+    `down`, "the platform cannot see its VM", and the row no longer says "The load balancer's VM is gone. Delete
+    this load balancer" or "Replace appliances" for a VM that is only out of sight.
   Tested against Postgres and a fake Proxmox that stops and pauses VMs and whose stopped VMs have no agent
   (`TestSyncRepairsAStoppedApplianceWhateverElseIsUnknown`, `TestVMInventoryApplianceRowNeverHoldsTheBalancersAddress`,
-  `TestVMInventoryStoppedVMIsKnownToHaveNoAgent`). Not run on a lab.
+  `TestVMInventoryStoppedVMIsKnownToHaveNoAgent`, `TestLBApplianceOutOfSightIsNotGone`). Not run on a lab.
 - **An API restart no longer holds a cluster's load balancer for 20 minutes** (`internal/platform/lock/shedlock.go`,
   `internal/platform/project/cloud_lb_cluster_pve.go`). The converge of a cluster's balancer took its lock for the
   longest a pass can take, and on the drill an API restarted in the middle of one left the lock held: for 24.7

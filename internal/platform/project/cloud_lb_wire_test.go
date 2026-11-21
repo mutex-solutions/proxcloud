@@ -43,7 +43,8 @@ func (g *lbGuest) serving() bool { return g.haproxy && g.loaded == g.file }
 type pairWire struct {
 	t      *testing.T
 	tag    string // the appliances' balancer tag, pc-lb-abc when empty
-	gone   bool   // no VM is listed any more
+	gone   bool   // no VM is listed any more, and their VMIDs are free
+	unseen bool   // no VM is listed, and their VMIDs are held: the token lost sight of them
 	mu     sync.Mutex
 	log    []string
 	rules  map[string][]pve.FirewallRule
@@ -171,7 +172,7 @@ func (f *pairWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			<-gate
 			f.mu.Lock()
 		}
-		if f.gone {
+		if f.gone || f.unseen {
 			write([]map[string]any{})
 			return
 		}
@@ -188,6 +189,15 @@ func (f *pairWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		write(out)
+		return
+	}
+	if r.URL.Path == "/api2/json/cluster/nextid" { // PVE answers from every guest of the cluster, seen or not
+		if id := r.Form.Get("vmid"); f.guests[id] != nil && !f.gone {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"errors": map[string]string{"vmid": "VM " + id + " already exists"}})
+		} else {
+			write(id)
+		}
 		return
 	}
 	p := strings.Split(strings.TrimPrefix(r.URL.Path, "/api2/json/nodes/"), "/") // n, qemu, vmid, ...

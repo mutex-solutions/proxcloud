@@ -266,3 +266,67 @@ func TestLBPairRowHashNeedsAnApplianceThatServes(t *testing.T) {
 		t.Fatalf("once it is served: %s %q", lb.Status, lb.AppliedHash)
 	}
 }
+
+// The services sync runs the load balancer pass whether or not it could prove a project's inventory (drill N2-1: a
+// stopped appliance made the inventory unproved, and the skipped pass was the one that starts it). The VM list is
+// filtered by what the token may see, so the pass proves the one absence it acts on itself: an appliance missing from
+// the list is gone only when its VMID is free. One that is merely out of sight is not called gone: the row does not
+// tell the tenant to delete or replace a balancer that may be serving, and a cluster's pair does not count as
+// settled, which is what gives a removed Service's address back to the pool.
+func TestLBApplianceOutOfSightIsNotGone(t *testing.T) {
+	ctx := context.Background()
+	h, f, es, lb := lbApplyFixture(t)
+	proj, cr := &Project{ID: "p1"}, &cloud.CloudResource{}
+	if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil || lb.Status != lbStatusActive || !lb.settled {
+		t.Fatalf("a whole pair: %s %q settled %v, %v", lb.Status, lb.StatusMessage, lb.settled, err)
+	}
+	writes := len(f.log)
+	f.mu.Lock()
+	f.unseen = true
+	f.mu.Unlock()
+	if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range lb.Appliances {
+		if a.State != lbAppDown || a.Reason != "the platform cannot see its VM" {
+			t.Fatalf("appliance %s out of sight: %s %q", a.ServerID, a.State, a.Reason)
+		}
+	}
+	if lb.Status != lbStatusDown || lb.settled || strings.Contains(lb.StatusMessage, "gone") || strings.Contains(lb.StatusMessage, "Replace") || len(f.log) != writes {
+		t.Fatalf("a pair out of sight: %s %q settled %v, wrote %v", lb.Status, lb.StatusMessage, lb.settled, f.log[writes:])
+	}
+	// The VMs really are gone: their numbers are free, and the row says so, as before.
+	f.mu.Lock()
+	f.unseen, f.gone = false, true
+	f.mu.Unlock()
+	if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil {
+		t.Fatal(err)
+	}
+	if lb.Status != lbStatusError || !strings.Contains(lb.StatusMessage, "Both appliances are gone") {
+		t.Fatalf("a pair that is gone: %s %q", lb.Status, lb.StatusMessage)
+	}
+
+	// A single appliance: the same proof.
+	h, f, es, _ = lbApplyFixture(t)
+	f.mu.Lock()
+	delete(f.guests, "302")
+	f.unseen = true
+	f.mu.Unlock()
+	single := &loadBalancer{ID: "abc", Name: "web", Status: lbStatusActive, NetworkID: "v1", PublicNetworkID: "vmbr1", ServerID: "301",
+		PrivateIP: "10.0.0.31", PublicIP: "203.0.113.10", AppliedHash: "x"}
+	if err := h.lbApplyLocked(ctx, es, proj, cr, single); err != nil {
+		t.Fatal(err)
+	}
+	if single.Status != lbStatusDown || strings.Contains(single.StatusMessage, "Delete") || single.AppliedHash != "x" || len(f.log) != 0 {
+		t.Fatalf("a single appliance out of sight: %s %q, wrote %v", single.Status, single.StatusMessage, f.log)
+	}
+	f.mu.Lock()
+	f.unseen, f.gone = false, true
+	f.mu.Unlock()
+	if err := h.lbApplyLocked(ctx, es, proj, cr, single); err != nil {
+		t.Fatal(err)
+	}
+	if single.Status != lbStatusError || !strings.Contains(single.StatusMessage, "is gone. Delete this load balancer") {
+		t.Fatalf("a single appliance that is gone: %s %q", single.Status, single.StatusMessage)
+	}
+}

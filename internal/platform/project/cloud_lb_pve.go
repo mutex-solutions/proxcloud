@@ -385,6 +385,21 @@ func lbVMs(ctx context.Context, ps *pve.Service) (map[string]pve.ClusterResource
 	return out, nil
 }
 
+// lbVMUnseen says that an appliance missing from the VM list is not known to be gone: a guest the platform's token
+// does not see still holds its VMID (the token lost sight of the pool, or the VM was moved out of it), or Proxmox
+// did not say. Only a free VMID proves a VM gone, as for a SERVER row (docs/vm-inventory-safety.md): the list is
+// filtered by what the token may see, and a pass that read a filtered list as an absence would tell the tenant to
+// delete, or to replace, a balancer that is serving. The services sync runs this pass whether or not it could prove
+// the project's inventory, so the pass proves its one absence itself.
+func lbVMUnseen(ctx context.Context, ps *pve.Service, serverID string) bool {
+	id, err := strconv.Atoi(serverID)
+	if err != nil {
+		return false
+	}
+	free, err := ps.C.VMIDFree(ctx, id)
+	return err != nil || !free
+}
+
 // lbMemberAddress returns the address of a member's server if it may serve this balancer, "" if not.
 // stamp "" accepts any VM, and is what a new member passes. It also returns the VM's current stamp.
 func (h *Handler) lbMemberAddress(ctx context.Context, es *externalservice.ExternalService, proj *Project, lb *loadBalancer, pool string, vms map[string]pve.ClusterResource, serverID, stamp string) (string, string, error) {
@@ -486,6 +501,10 @@ func (h *Handler) lbApplyLocked(ctx context.Context, es *externalservice.Externa
 		return err // nothing is known, so nothing changes
 	}
 	vm, listed := vms[lb.ServerID]
+	if lb.ServerID != "" && !listed && lbVMUnseen(ctx, ps, lb.ServerID) {
+		lb.Status, lb.StatusMessage = lbStatusDown, "The platform cannot see the load balancer's VM, and changes nothing until it can."
+		return nil
+	}
 	if lb.ServerID == "" || !listed || vm.Pool != ps.PoolFor(proj.ID) || (!vm.NodeDown && pve.LBOfTags(vm.Tags) != lb.ID) {
 		if lb.ServerID != "" || lbStuck(cr) { // no server yet: the create is still on it
 			lb.Status, lb.StatusMessage = lbStatusError, "The load balancer's VM is gone. Delete this load balancer and create it again."

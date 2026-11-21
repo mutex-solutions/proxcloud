@@ -305,6 +305,9 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		a.Reason = ""
 		vm, listed := vms[a.ServerID]
 		switch {
+		case !listed && lbVMUnseen(ctx, ps, a.ServerID):
+			a.State, a.Reason = lbAppDown, "the platform cannot see its VM"
+			continue
 		case !listed || vm.Pool != pool || (!vm.NodeDown && pve.LBOfTags(vm.Tags) != lb.ID):
 			a.State, a.Role, a.HoldsVIP, a.Reason = lbAppGone, "", false, "its VM is gone"
 			continue
