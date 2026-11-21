@@ -1,6 +1,6 @@
 # deploy/charts — every Helm chart this repo ships
 
-Four charts live here:
+Five charts live here:
 
 - **`proxcloud`** — the application chart: the ProxCloud API, the customer and operator
   consoles, a CloudNativePG `Cluster` and optionally Keycloak. No RabbitMQ is
@@ -86,11 +86,26 @@ Four charts live here:
   its tag; the platform BOM pins it for new tenant clusters (`tenantCharts.kubernetes`), while the platform
   cluster (`pc-platform`) stays on 0.1.16.
 
+- **`proxcloud-sandbox`**: the sandbox runtime of the managed platform, 0.1.0. `mode: shared` runs it on a
+  node group `sandbox` of the platform cluster, `mode: separate` on the platform-owned sandbox cluster, where cluster
+  chart 0.1.18's `addons.sandbox` installs it. It carries `deploy/sandbox-cluster`'s node-setup, telemetry, guardrail,
+  agent-sandbox (a copy of the vendored file) and sandbox-proxy, with placement by mode, the RuntimeClass `gvisor`
+  with `scheduling`, a CiliumNodeConfig, the portal's two identities and the admission policies that narrow them in
+  shared mode. Bare defaults do not render (`proxy.address`, `proxy.domain`); `examples/values-{shared,separate}.yaml`
+  do. `internal/cloud/sandbox/chart_test.go` pins both renders and keeps what it shares with `deploy/sandbox-cluster`
+  equal; `test/policy` runs its policies through the API server's CEL. Not pinned by the platform BOM yet.
+
+  0.1.18 of `proxmox-kamaji-cluster` reads three optional keys of a node group: `pool` (its Proxmox pool instead of
+  `proxmox.pool`), `addresses` (its own ranges: an `InClusterIPPool` `<release>-<group>` with the network's prefix and
+  gateway, and `net0` on it with `defaultIPv4: false`) and `dnsServers` (on `net0`), each part of the group's machine
+  template; and `addons.sandbox` (the sandbox chart in mode separate, through CAAPH). Without them the render is what
+  0.1.17 gave.
+
 ## Publishing
 
 `.github/workflows/helm.yml` gives each chart its own tag-driven release, because their
 lifecycles are independent (a customer database pins a chart version; the app releases on its
-own cadence). All four go to `oci://ghcr.io/mutex-solutions/charts`.
+own cadence). All five go to `oci://ghcr.io/mutex-solutions/charts`.
 
 | chart | release tag | version source |
 |---|---|---|
@@ -98,6 +113,7 @@ own cadence). All four go to `oci://ghcr.io/mutex-solutions/charts`.
 | `database-cluster` | `database-cluster-vX.Y.Z` | `Chart.yaml` — the tag must match or the job fails |
 | `proxmox-kamaji-cluster` | `proxmox-kamaji-cluster-vX.Y.Z` | `Chart.yaml` — the tag must match or the job fails |
 | `proxcloud-platform` | `proxcloud-platform-vX.Y.Z` | `Chart.yaml` — the tag must match or the job fails |
+| `proxcloud-sandbox` | `proxcloud-sandbox-vX.Y.Z` | `Chart.yaml` — the tag must match or the job fails |
 
 The app chart/BOM selects the stable release `v0.10.2` (after the first stable
 `v0.4.0`); its tag publishes the app chart and images. Local
@@ -107,8 +123,8 @@ pullable; see [release readiness](../../docs/release-readiness.md).
 
 For `database-cluster`, `proxmox-kamaji-cluster` and `proxcloud-platform`, bump `version:` in `Chart.yaml`
 in the PR that changes the chart, merge, then have a maintainer deliberately cut
-the matching tag. The current source versions are database `0.5.2`, Kubernetes `0.1.17` and
-platform `0.1.3`. All three are published and pinned by the platform
+the matching tag. The current source versions are database `0.5.2`, Kubernetes `0.1.18` (not published yet), platform
+`0.1.3` and sandbox `0.1.0` (not published yet). All three are published and pinned by the platform
 BOM (database `0.5.2`: no
 disruption budget for a PostgreSQL of one instance; Kubernetes `0.1.17` for new tenant clusters: the load
 balancer controller, and `0.1.16` for the platform cluster: the node deletion

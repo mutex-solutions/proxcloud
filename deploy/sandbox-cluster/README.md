@@ -6,6 +6,10 @@ these; they set up the runtime, the guardrail and the identity the portal's `san
 (the same split as `deploy/mgmt-cluster/` and `deploy/dbaas-cluster/`). Installer stage 55 applies them
 (`installer/playbooks/55-sandbox-cluster.yml`); by hand, the order is below.
 
+The managed platform installs the same runtime from chart `deploy/charts/proxcloud-sandbox` (mode shared or
+separate); its tests keep node-setup, the guardrail, telemetry and agent-sandbox equal to the files here, so a change
+here goes into the chart in the same PR.
+
 Design, lab measurements and the threat model: [`docs/managed-sandbox.md`](../../docs/managed-sandbox.md).
 
 | File | What it does |
